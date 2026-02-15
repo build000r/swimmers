@@ -1,27 +1,24 @@
 // State detector — classifies terminal state as idle, busy, or error
 // Uses OSC 133 shell integration sequences when available, falls back to regex
 
+const ERROR_LINGER_MS = 4000; // error state auto-clears after 4s
+
 class StateDetector {
   constructor() {
     this.state = 'idle';
     this.currentCommand = null;
     this._promptPattern = /[$%>#]\s*$/;
+    this._errorTimer = null;
     this._errorPatterns = [
       /command not found/i,
       /^Error:/m,
       /Permission denied/i,
       /No such file or directory/i,
-      /fatal:/i,
       /ENOENT/,
       /EACCES/,
       /segmentation fault/i,
-      /killed/i,
-      /abort/i,
       /panic:/i,
       /Traceback \(most recent call last\)/i,
-      /SyntaxError:/,
-      /TypeError:/,
-      /ReferenceError:/,
     ];
     this._onStateChange = null;
   }
@@ -48,6 +45,7 @@ class StateDetector {
     // Prompt shown (A) → idle
     const promptMatch = str.match(/\x1b\]133;A/);
     if (promptMatch) {
+      this._clearErrorTimer();
       this._setState('idle', null);
       return;
     }
@@ -55,6 +53,7 @@ class StateDetector {
     // Command starting (C) with command name
     const cmdMatch = str.match(/\x1b\]133;C;cmd=([^\x07]*)\x07/);
     if (cmdMatch) {
+      this._clearErrorTimer();
       this._setState('busy', cmdMatch[1].trim());
       return;
     }
@@ -63,13 +62,33 @@ class StateDetector {
     for (const pattern of this._errorPatterns) {
       if (pattern.test(str)) {
         this._setState('error', this.currentCommand);
+        this._scheduleErrorClear();
         return;
       }
     }
 
     // Fallback: regex prompt detection (for shells without OSC 133)
-    if (this.state === 'busy' && this._promptPattern.test(str)) {
+    // Recovers from both busy AND error states when a new prompt appears
+    if (this.state !== 'idle' && this._promptPattern.test(str)) {
+      this._clearErrorTimer();
       this._setState('idle', null);
+    }
+  }
+
+  _scheduleErrorClear() {
+    this._clearErrorTimer();
+    this._errorTimer = setTimeout(() => {
+      this._errorTimer = null;
+      if (this.state === 'error') {
+        this._setState('idle', null);
+      }
+    }, ERROR_LINGER_MS);
+  }
+
+  _clearErrorTimer() {
+    if (this._errorTimer) {
+      clearTimeout(this._errorTimer);
+      this._errorTimer = null;
     }
   }
 
