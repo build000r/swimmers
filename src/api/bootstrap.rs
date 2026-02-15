@@ -1,10 +1,11 @@
 use axum::extract::State;
 use axum::http::HeaderMap;
 use axum::routing::get;
-use axum::{Json, Router};
+use axum::{Extension, Json, Router};
 use std::sync::Arc;
 
 use crate::api::AppState;
+use crate::auth::{AuthInfo, AuthScope};
 use crate::config::AuthMode;
 use crate::types::BootstrapResponse;
 
@@ -23,9 +24,11 @@ fn delete_mode_to_wire(mode: &crate::config::SessionDeleteMode) -> String {
 }
 
 async fn bootstrap(
+    Extension(auth): Extension<AuthInfo>,
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
-) -> Json<BootstrapResponse> {
+) -> Result<Json<BootstrapResponse>, axum::response::Response> {
+    auth.require_scope(AuthScope::SessionsRead)?;
     let sessions = state.supervisor.bootstrap().await;
 
     // Derive the realtime WebSocket URL from the request Host header.
@@ -37,7 +40,7 @@ async fn bootstrap(
 
     let config = &state.config;
 
-    Json(BootstrapResponse {
+    Ok(Json(BootstrapResponse {
         server_time: chrono::Utc::now(),
         auth_mode: auth_mode_to_wire(&config.auth_mode),
         realtime_url,
@@ -48,7 +51,7 @@ async fn bootstrap(
         session_delete_mode: delete_mode_to_wire(&config.session_delete_mode),
         legacy_parity_locked: true,
         sessions,
-    })
+    }))
 }
 
 pub fn routes() -> Router<Arc<AppState>> {

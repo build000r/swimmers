@@ -109,6 +109,10 @@ pub struct SessionStatePayload {
     pub previous_state: SessionState,
     pub current_command: Option<String>,
     pub transport_health: TransportHealth,
+    /// Reason for session exit: "process_exit", "startup_missing_tmux", or null
+    /// for normal state transitions.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exit_reason: Option<String>,
     pub at: DateTime<Utc>,
 }
 

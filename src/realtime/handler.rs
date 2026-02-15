@@ -6,7 +6,7 @@
 //! terminal output, per-session control events, and thought updates.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
@@ -28,6 +28,9 @@ use crate::types::{
 
 /// Global client ID counter for assigning unique IDs to output subscriptions.
 static NEXT_CLIENT_ID: AtomicU64 = AtomicU64::new(1);
+
+/// Global connected-client counter for the connected_clients metric gauge.
+static CONNECTED_CLIENTS_COUNT: AtomicUsize = AtomicUsize::new(0);
 
 fn allocate_client_id() -> ClientId {
     NEXT_CLIENT_ID.fetch_add(1, Ordering::Relaxed)
@@ -91,6 +94,8 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
     let mut output_subs: HashMap<String, SessionSub> = HashMap::new();
 
     tracing::info!("realtime client connected");
+    let client_count = CONNECTED_CLIENTS_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
+    crate::metrics::set_connected_clients(client_count);
 
     loop {
         // Build a future that resolves when any subscribed session has output
@@ -102,6 +107,7 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
             msg = ws_stream.next() => {
                 match msg {
                     Some(Ok(Message::Binary(data))) => {
+                        crate::metrics::increment_frames_received();
                         handle_binary_frame(&data, &state, &mut ws_sink).await;
                     }
                     Some(Ok(Message::Text(text))) => {
@@ -180,12 +186,14 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
                 match event {
                     PollEvent::Output { session_id, frame } => {
                         let binary = codec::encode_output_frame(&session_id, frame.seq, &frame.data);
+                        crate::metrics::increment_frames_sent();
                         if ws_sink.send(Message::Binary(binary.into())).await.is_err() {
                             tracing::warn!("failed to send output frame to client");
                             break;
                         }
                     }
                     PollEvent::Overloaded { session_id } => {
+                        crate::metrics::increment_overload(&session_id);
                         // Only emit overload when the session still exists.
                         if state.supervisor.get_session(&session_id).await.is_some() {
                             let event = ControlEvent {
@@ -223,6 +231,9 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
             }
         }
     }
+
+    let client_count = CONNECTED_CLIENTS_COUNT.fetch_sub(1, Ordering::Relaxed) - 1;
+    crate::metrics::set_connected_clients(client_count);
 
     // On disconnect, send Unsubscribe commands to each session actor so
     // it can clean up the subscriber entry.
@@ -282,6 +293,7 @@ async fn handle_binary_frame(
     state: &Arc<AppState>,
     ws_sink: &mut (impl SinkExt<Message, Error = axum::Error> + Unpin),
 ) {
+    let dispatch_start = std::time::Instant::now();
     match codec::decode_input_frame(data) {
         Ok((session_id, input_bytes)) => {
             let handle = match state.supervisor.get_session(&session_id).await {
@@ -310,6 +322,10 @@ async fn handle_binary_frame(
                     None,
                 )
                 .await;
+            } else {
+                let elapsed = dispatch_start.elapsed();
+                crate::metrics::record_dispatch_latency(&session_id, elapsed);
+                crate::metrics::record_keystroke_echo(&session_id, elapsed);
             }
         }
         Err(e) => {
@@ -470,6 +486,7 @@ async fn handle_subscribe(
             replay_window_start_seq,
             latest_seq,
         })) => {
+            crate::metrics::increment_replay_truncation(&session_id);
             let event = ControlEvent {
                 event: "replay_truncated".to_string(),
                 session_id: session_id.clone(),

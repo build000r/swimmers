@@ -2,11 +2,12 @@ use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::routing::{delete, get, post};
-use axum::{Json, Router};
+use axum::{Extension, Json, Router};
 use std::sync::Arc;
 use tokio::sync::oneshot;
 
 use crate::api::AppState;
+use crate::auth::{AuthInfo, AuthScope};
 use crate::session::actor::SessionCommand;
 use crate::types::{
     CreateSessionRequest, CreateSessionResponse, ErrorResponse, SessionListResponse,
@@ -17,15 +18,19 @@ use crate::types::{
 // GET /v1/sessions
 // ---------------------------------------------------------------------------
 
-async fn list_sessions(State(state): State<Arc<AppState>>) -> Json<SessionListResponse> {
+async fn list_sessions(
+    Extension(auth): Extension<AuthInfo>,
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<SessionListResponse>, axum::response::Response> {
+    auth.require_scope(AuthScope::SessionsRead)?;
     let sessions = state.supervisor.list_sessions().await;
     // The version counter is not tracked by the supervisor itself; we use 0
     // as a placeholder. A proper monotonic version can be added to the
     // supervisor later if clients need ETag-style cache validation.
-    Json(SessionListResponse {
+    Ok(Json(SessionListResponse {
         sessions,
         version: 0,
-    })
+    }))
 }
 
 // ---------------------------------------------------------------------------
@@ -33,9 +38,13 @@ async fn list_sessions(State(state): State<Arc<AppState>>) -> Json<SessionListRe
 // ---------------------------------------------------------------------------
 
 async fn create_session(
+    Extension(auth): Extension<AuthInfo>,
     State(state): State<Arc<AppState>>,
     Json(body): Json<CreateSessionRequest>,
 ) -> impl IntoResponse {
+    if let Err(resp) = auth.require_scope(AuthScope::SessionsWrite) {
+        return resp;
+    }
     match state.supervisor.create_session(body.name).await {
         Ok(session) => (
             StatusCode::CREATED,
@@ -81,9 +90,13 @@ async fn create_session(
 // ---------------------------------------------------------------------------
 
 async fn delete_session(
+    Extension(auth): Extension<AuthInfo>,
     State(state): State<Arc<AppState>>,
     Path(session_id): Path<String>,
 ) -> impl IntoResponse {
+    if let Err(resp) = auth.require_scope(AuthScope::SessionsWrite) {
+        return resp;
+    }
     match state.supervisor.delete_session(&session_id).await {
         Ok(()) => (StatusCode::OK, Json(serde_json::json!({ "ok": true }))).into_response(),
         Err(e) => {
@@ -123,9 +136,13 @@ async fn delete_session(
 // ---------------------------------------------------------------------------
 
 async fn dismiss_attention(
+    Extension(auth): Extension<AuthInfo>,
     State(state): State<Arc<AppState>>,
     Path(session_id): Path<String>,
 ) -> impl IntoResponse {
+    if let Err(resp) = auth.require_scope(AuthScope::SessionsWrite) {
+        return resp;
+    }
     let handle = match state.supervisor.get_session(&session_id).await {
         Some(h) => h,
         None => {
@@ -166,9 +183,13 @@ async fn dismiss_attention(
 // ---------------------------------------------------------------------------
 
 async fn get_snapshot(
+    Extension(auth): Extension<AuthInfo>,
     State(state): State<Arc<AppState>>,
     Path(session_id): Path<String>,
 ) -> impl IntoResponse {
+    if let Err(resp) = auth.require_scope(AuthScope::SessionsRead) {
+        return resp;
+    }
     let handle = match state.supervisor.get_session(&session_id).await {
         Some(h) => h,
         None => {

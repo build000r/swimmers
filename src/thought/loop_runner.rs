@@ -56,6 +56,10 @@ pub struct SessionInfo {
     pub cwd: String,
     /// Last ~500 chars of visible terminal text from the replay buffer.
     pub replay_text: String,
+    /// Token count from the session summary (placeholder -- wired for future use).
+    pub token_count: u64,
+    /// Context limit from the session summary (placeholder -- wired for future use).
+    pub context_limit: u64,
 }
 
 /// Trait abstracting the supervisor so the loop runner is testable in isolation.
@@ -142,8 +146,11 @@ impl ThoughtLoopRunner {
 
                         let payload = ThoughtUpdatePayload {
                             thought: Some(thought),
-                            token_count: 0,
-                            context_limit: 0,
+                            // TODO: Wire actual token_count/context_limit from the
+                            // context reader or session metadata when available.
+                            // Currently these reflect the session summary's values.
+                            token_count: info.token_count,
+                            context_limit: info.context_limit,
                             at: chrono::Utc::now(),
                         };
                         let event = ControlEvent {

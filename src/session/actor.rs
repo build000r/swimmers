@@ -13,8 +13,8 @@ use crate::scroll::guard::ScrollGuard;
 use crate::session::replay_ring::ReplayRing;
 use crate::state::detector::StateDetector;
 use crate::types::{
-    ControlEvent, SessionState, SessionStatePayload, SessionSummary, TerminalSnapshot,
-    TransportHealth,
+    ControlEvent, SessionState, SessionStatePayload, SessionSummary, SessionTitlePayload,
+    TerminalSnapshot, TransportHealth,
 };
 
 // ---------------------------------------------------------------------------
@@ -248,14 +248,40 @@ impl SessionActor {
             pty_read_loop(session_id_for_reader, reader, pty_tx);
         });
 
+        let mut pty_closed = false;
+
         loop {
             // Compute the next timer deadline from both StateDetector and ScrollGuard.
             let next_timer = self.next_timer_deadline();
 
             tokio::select! {
                 // --- PTY output ---
-                Some(raw) = pty_rx.recv() => {
-                    self.handle_pty_output(raw).await;
+                result = pty_rx.recv(), if !pty_closed => {
+                    match result {
+                        Some(raw) => {
+                            self.handle_pty_output(raw).await;
+                        }
+                        None => {
+                            info!(session_id = %self.session_id, "PTY channel closed (process exit)");
+                            pty_closed = true;
+                            // Emit session_state with exit_reason = "process_exit"
+                            let prev = self.state_detector.state();
+                            let payload = SessionStatePayload {
+                                state: SessionState::Exited,
+                                previous_state: prev,
+                                current_command: self.state_detector.current_command(),
+                                transport_health: TransportHealth::Healthy,
+                                exit_reason: Some("process_exit".to_string()),
+                                at: Utc::now(),
+                            };
+                            let event = ControlEvent {
+                                event: "session_state".to_string(),
+                                session_id: self.session_id.clone(),
+                                payload: serde_json::to_value(&payload).unwrap_or_default(),
+                            };
+                            let _ = self.event_tx.send(event);
+                        }
+                    }
                 }
 
                 // --- Inbound commands ---
@@ -398,6 +424,9 @@ impl SessionActor {
     /// ScrollGuard returns zero or more chunks (it may buffer for coalescing,
     /// flush a previous buffer alongside new data, or pass through directly).
     async fn handle_pty_output(&mut self, raw: Vec<u8>) {
+        // Detect OSC title sequences in raw output before processing.
+        self.detect_and_emit_title(&raw);
+
         let chunks = self.scroll_guard.process(&raw);
 
         for chunk in chunks {
@@ -417,12 +446,65 @@ impl SessionActor {
 
             // Broadcast to all subscribers.
             self.broadcast(frame).await;
+
+            // Report aggregate queue depth across subscribers.
+            let total_depth: usize = self
+                .subscribers
+                .values()
+                .map(|tx| tx.max_capacity() - tx.capacity())
+                .sum();
+            crate::metrics::record_queue_depth(&self.session_id, total_depth);
+        }
+    }
+
+    /// Detect OSC 0 or OSC 2 title sequences in raw PTY output and emit a
+    /// `session_title` ControlEvent when found.
+    ///
+    /// OSC 0: `\x1b]0;title\x07` -- set window title + icon name
+    /// OSC 2: `\x1b]2;title\x07` -- set window title
+    fn detect_and_emit_title(&self, raw: &[u8]) {
+        let text = String::from_utf8_lossy(raw);
+        // Match OSC 0 or 2: ESC ] (0|2) ; <title> BEL
+        // Use a simple search approach rather than regex for performance.
+        for prefix in &["\x1b]0;", "\x1b]2;"] {
+            let mut search_from = 0;
+            while let Some(start) = text[search_from..].find(prefix) {
+                let title_start = search_from + start + prefix.len();
+                if let Some(end_offset) = text[title_start..].find('\x07') {
+                    let title = &text[title_start..title_start + end_offset];
+                    if !title.is_empty() {
+                        let payload = SessionTitlePayload {
+                            title: title.to_string(),
+                            at: Utc::now(),
+                        };
+                        let event = ControlEvent {
+                            event: "session_title".to_string(),
+                            session_id: self.session_id.clone(),
+                            payload: serde_json::to_value(&payload).unwrap_or_default(),
+                        };
+                        let _ = self.event_tx.send(event);
+                    }
+                    search_from = title_start + end_offset + 1;
+                } else {
+                    break;
+                }
+            }
         }
     }
 
     /// Compare state before and after a detector operation. If the state changed,
     /// emit a `session_state` ControlEvent through the per-session broadcast channel.
     fn maybe_emit_state_change(&self, previous_state: SessionState) {
+        self.maybe_emit_state_change_with_exit_reason(previous_state, None);
+    }
+
+    /// Emit a `session_state` ControlEvent if the state changed, optionally
+    /// including an `exit_reason` for terminal exit events.
+    fn maybe_emit_state_change_with_exit_reason(
+        &self,
+        previous_state: SessionState,
+        exit_reason: Option<String>,
+    ) {
         let (current_state, current_command) = self.state_detector.get_state();
         if current_state != previous_state {
             let payload = SessionStatePayload {
@@ -430,6 +512,7 @@ impl SessionActor {
                 previous_state,
                 current_command,
                 transport_health: TransportHealth::Healthy,
+                exit_reason,
                 at: Utc::now(),
             };
             let event = ControlEvent {
@@ -456,6 +539,7 @@ impl SessionActor {
                         client_id,
                         "subscriber channel full (SESSION_OVERLOADED), dropping client"
                     );
+                    crate::metrics::increment_overload(&self.session_id);
                     to_remove.push(client_id);
                 }
                 Err(mpsc::error::TrySendError::Closed(_)) => {

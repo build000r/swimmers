@@ -11,7 +11,10 @@ use crate::config::Config;
 use crate::persistence::file_store::{FileStore, PersistedSession};
 use crate::session::actor::{ActorHandle, SessionCommand};
 use crate::thought::loop_runner::{SessionInfo, SessionProvider};
-use crate::types::{ControlEvent, SessionSummary, TerminalSnapshot};
+use crate::types::{
+    ControlEvent, SessionState, SessionStatePayload, SessionSummary, TerminalSnapshot,
+    TransportHealth,
+};
 
 // ---------------------------------------------------------------------------
 // Lifecycle events broadcast to all listeners
@@ -204,11 +207,34 @@ impl SessionSupervisor {
         }
 
         // Remove stale sessions that were upgraded to live.
+        // Emit session_state with exit_reason="startup_missing_tmux" for remaining stale sessions.
         {
             let mut stale = self.stale_sessions.write().await;
             stale.retain(|s| !discovered_tmux_names.contains(&s.tmux_name));
             if !stale.is_empty() {
                 debug!(remaining_stale = stale.len(), "stale sessions after discovery");
+                for s in stale.iter() {
+                    let payload = SessionStatePayload {
+                        state: SessionState::Exited,
+                        previous_state: s.state,
+                        current_command: s.current_command.clone(),
+                        transport_health: TransportHealth::Disconnected,
+                        exit_reason: Some("startup_missing_tmux".to_string()),
+                        at: Utc::now(),
+                    };
+                    let event = ControlEvent {
+                        event: "session_state".to_string(),
+                        session_id: s.session_id.clone(),
+                        payload: serde_json::to_value(&payload).unwrap_or_default(),
+                    };
+                    let _ = self.lifecycle_tx.send(LifecycleEvent::Created {
+                        session_id: s.session_id.clone(),
+                        summary: s.clone(),
+                        reason: "startup_missing_tmux".into(),
+                    });
+                    // Also broadcast the session_state event for clients already connected.
+                    let _ = self.thought_tx.send(event);
+                }
             }
         }
 
@@ -216,6 +242,7 @@ impl SessionSupervisor {
         self.next_name_counter.fetch_max(highest_numeric, Ordering::SeqCst);
 
         let sessions = self.sessions.read().await;
+        crate::metrics::set_active_sessions(sessions.len());
         info!(count = sessions.len(), "tmux session discovery complete");
 
         // Persist the current session registry.
@@ -252,6 +279,8 @@ impl SessionSupervisor {
 
         let mut sessions = self.sessions.write().await;
         sessions.insert(session_id.clone(), handle);
+        crate::metrics::set_active_sessions(sessions.len());
+        drop(sessions);
 
         let summary = self.build_placeholder_summary(&session_id, &tmux_name);
 
@@ -273,9 +302,11 @@ impl SessionSupervisor {
     pub async fn delete_session(self: &Arc<Self>, session_id: &str) -> anyhow::Result<()> {
         let handle = {
             let mut sessions = self.sessions.write().await;
-            sessions
+            let handle = sessions
                 .remove(session_id)
-                .ok_or_else(|| anyhow::anyhow!("session not found: {}", session_id))?
+                .ok_or_else(|| anyhow::anyhow!("session not found: {}", session_id))?;
+            crate::metrics::set_active_sessions(sessions.len());
+            handle
         };
 
         info!(session_id = %session_id, "deleting session");
@@ -414,6 +445,8 @@ impl SessionSupervisor {
                     tool: summary.tool,
                     cwd: summary.cwd,
                     replay_text,
+                    token_count: summary.token_count,
+                    context_limit: summary.context_limit,
                 });
             }
         }

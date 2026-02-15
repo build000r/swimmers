@@ -1,6 +1,7 @@
 mod api;
 mod auth;
 mod config;
+mod metrics;
 mod persistence;
 mod realtime;
 mod scroll;
@@ -29,6 +30,9 @@ async fn main() {
             EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
         )
         .init();
+
+    // Initialize Prometheus metrics exporter
+    let prom_handle = metrics::init_metrics();
 
     let config = Config::from_env();
     let port = config.port;
@@ -80,9 +84,9 @@ async fn main() {
     // Build router
     let app = Router::new()
         .merge(api::api_router(config.clone()))
-        .nest("/v1/realtime", realtime::handler::ws_router())
         .fallback_service(ServeDir::new("dist").append_index_html_on_directories(true))
-        .with_state(state);
+        .with_state(state)
+        .merge(metrics::endpoint::metrics_router(prom_handle));
 
     let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{port}"))
         .await

@@ -7,6 +7,7 @@ use std::sync::Arc;
 
 use crate::auth;
 use crate::config::Config;
+use crate::realtime;
 use crate::session::supervisor::SessionSupervisor;
 
 pub struct AppState {
@@ -20,6 +21,7 @@ pub fn api_router(config: Arc<Config>) -> Router<Arc<AppState>> {
     Router::new()
         .merge(bootstrap::routes())
         .merge(sessions::routes())
+        .nest("/v1/realtime", realtime::handler::ws_router())
         .layer(middleware::from_fn(move |request, next| {
             auth::auth_middleware(config_for_middleware.clone(), request, next)
         }))

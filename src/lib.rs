@@ -1,5 +1,6 @@
 pub mod auth;
 pub mod config;
+pub mod metrics;
 pub mod persistence;
 pub mod scroll;
 pub mod session;
