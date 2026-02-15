@@ -120,9 +120,13 @@ class TerminalWrapper {
       this.ws.send(frame);
     });
 
-    // Refit on window/viewport resize
+    // Refit on window/viewport resize (debounced to avoid layout thrashing
+    // during keyboard show/hide, address bar toggle, orientation change)
     this._resizeHandler = () => {
-      if (this.fitAddon) this.fitAddon.fit();
+      clearTimeout(this._resizeTimer);
+      this._resizeTimer = setTimeout(() => {
+        if (this.fitAddon) this.fitAddon.fit();
+      }, 150);
     };
     window.addEventListener('resize', this._resizeHandler);
     if (window.visualViewport) {
@@ -141,6 +145,7 @@ class TerminalWrapper {
       this.ws = null;
     }
     if (this._resizeHandler) {
+      clearTimeout(this._resizeTimer);
       window.removeEventListener('resize', this._resizeHandler);
       if (window.visualViewport) {
         window.visualViewport.removeEventListener('resize', this._resizeHandler);

@@ -18,6 +18,8 @@
 html, body {
   height: 100%;
   overflow: hidden;
+  overscroll-behavior: none;
+  touch-action: manipulation;
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, sans-serif;
   background: #0a0a0a;
   color: #fff;
@@ -33,15 +35,16 @@ html, body {
   flex-direction: column;
   transform: translateX(100%);
   transition: transform 0.25s ease;
-  will-change: transform;
 }
 
 .view.active {
   transform: translateX(0);
+  will-change: transform;
 }
 
 .view.slide-left {
   transform: translateX(-100%);
+  will-change: transform;
 }
 
 /* Header */
@@ -169,20 +172,22 @@ html, body {
 #terminal-container {
   flex: 1;
   width: 100%;
-  height: 100%;
   min-height: 0; /* important: allow flex child to shrink */
   background: #1a1a2e;
   padding: 5px;
   padding-bottom: max(5px, var(--safe-bottom));
   overflow: hidden;
+  touch-action: none;
 }
 
 #terminal-container .xterm {
-  height: calc(100% - 10px);
+  height: 100%;
 }
 
 #terminal-container .xterm-viewport {
   overflow-y: auto;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
 }
 
 /* Field scenery */
