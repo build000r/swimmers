@@ -12,7 +12,6 @@ use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::time::Duration;
 
-use tokio::process::Command;
 use tokio::sync::broadcast;
 use tracing::{debug, error, info};
 
@@ -27,7 +26,7 @@ use crate::types::{ControlEvent, SessionState, ThoughtUpdatePayload};
 
 const SUMMARY_HISTORY_CAP: usize = 10;
 const CODEX_TIMEOUT: Duration = Duration::from_secs(15);
-const TERMINAL_CONTEXT_CHARS: usize = 500;
+const TERMINAL_CONTEXT_CHARS: usize = 800;
 
 // ---------------------------------------------------------------------------
 // Per-session thought state
@@ -131,26 +130,36 @@ impl ThoughtLoopRunner {
                         }
                     }
 
-                    let thought = if state.context_reader.is_some() {
+                    // Returns (thought_text, token_count_from_reader)
+                    let result = if state.context_reader.is_some() {
                         handle_context_aware(info, state).await
                     } else {
                         handle_terminal_fallback(info, state).await
+                            .map(|t| (t, 0u64))
                     };
 
-                    if let Some(thought) = thought {
+                    if let Some((thought, snapshot_tokens)) = result {
                         state.summary_history.push(thought.clone());
                         if state.summary_history.len() > SUMMARY_HISTORY_CAP {
                             let start = state.summary_history.len() - SUMMARY_HISTORY_CAP;
                             state.summary_history = state.summary_history.split_off(start);
                         }
 
+                        // Use token data from context reader when available,
+                        // fall back to session summary values.
+                        let token_count = if snapshot_tokens > 0 {
+                            snapshot_tokens
+                        } else {
+                            info.token_count
+                        };
+                        let context_limit = crate::types::context_limit_for_tool(
+                            info.tool.as_deref(),
+                        );
+
                         let payload = ThoughtUpdatePayload {
                             thought: Some(thought),
-                            // TODO: Wire actual token_count/context_limit from the
-                            // context reader or session metadata when available.
-                            // Currently these reflect the session summary's values.
-                            token_count: info.token_count,
-                            context_limit: info.context_limit,
+                            token_count,
+                            context_limit,
                             at: chrono::Utc::now(),
                         };
                         let event = ControlEvent {
@@ -172,10 +181,11 @@ impl ThoughtLoopRunner {
 // Context-aware path
 // ---------------------------------------------------------------------------
 
+/// Returns `(thought_text, token_count)` from the context reader.
 async fn handle_context_aware(
     info: &SessionInfo,
     state: &mut SessionThoughtState,
-) -> Option<String> {
+) -> Option<(String, u64)> {
     // ContextReader::read is blocking I/O — run on the blocking pool.
     // We need to get ownership briefly; take it out, run, put it back.
     let mut reader_box = state.context_reader.take()?;
@@ -202,6 +212,7 @@ async fn handle_context_aware(
         }
     };
 
+    let token_count = snapshot.token_count;
     let prompt = build_context_prompt(&snapshot, info.state, &state.summary_history);
 
     let task_preview = snapshot
@@ -215,21 +226,21 @@ async fn handle_context_aware(
         session_id = %info.session_id,
         state = ?info.state,
         task = %task_preview,
-        "calling codex (context-aware)"
+        "calling llm (context-aware)"
     );
 
-    match call_codex(&prompt).await {
+    match call_llm(&prompt).await {
         Ok(thought) => {
             if thought.is_empty() {
-                debug!(session_id = %info.session_id, "codex returned empty");
+                debug!(session_id = %info.session_id, "llm returned empty");
                 None
             } else {
-                info!(session_id = %info.session_id, thought = %thought, "codex returned");
-                Some(thought)
+                info!(session_id = %info.session_id, thought = %thought, "llm returned");
+                Some((thought, token_count))
             }
         }
         Err(e) => {
-            error!(session_id = %info.session_id, error = %e, "codex error");
+            error!(session_id = %info.session_id, error = %e, "llm error");
             None
         }
     }
@@ -276,21 +287,21 @@ async fn handle_terminal_fallback(
         session_id = %info.session_id,
         state = ?info.state,
         context_len = context.len(),
-        "calling codex (terminal-fallback)"
+        "calling llm (terminal-fallback)"
     );
 
-    match call_codex(&prompt).await {
+    match call_llm(&prompt).await {
         Ok(thought) => {
             if thought.is_empty() {
-                debug!(session_id = %info.session_id, "codex returned empty");
+                debug!(session_id = %info.session_id, "llm returned empty");
                 None
             } else {
-                info!(session_id = %info.session_id, thought = %thought, "codex returned");
+                info!(session_id = %info.session_id, thought = %thought, "llm returned");
                 Some(thought)
             }
         }
         Err(e) => {
-            error!(session_id = %info.session_id, error = %e, "codex error");
+            error!(session_id = %info.session_id, error = %e, "llm error");
             None
         }
     }
@@ -307,71 +318,61 @@ fn build_context_prompt(
 ) -> String {
     let mut parts: Vec<String> = Vec::new();
 
-    parts.push("You are observing a coding agent's work session.".to_string());
-    parts.push(format!("Agent state: {}", state_label(state)));
-    parts.push(String::new());
+    parts.push("You are a status reporter for a coding agent session.".to_string());
+    parts.push(format!("State: {}", state_label(state)));
 
     if let Some(ref task) = snapshot.user_task {
-        parts.push("User's request:".to_string());
-        parts.push(format!("\"{task}\""));
-        parts.push(String::new());
+        parts.push(format!("Task: {task}"));
     }
 
     if !summary_history.is_empty() {
         let recent: Vec<&String> = summary_history
             .iter()
             .rev()
-            .take(5)
+            .take(3)
             .collect::<Vec<_>>()
             .into_iter()
             .rev()
             .collect();
-        parts.push("Previous observations (oldest to newest):".to_string());
+        parts.push("Recent status:".to_string());
         for s in recent {
-            parts.push(format!("- {s}"));
+            parts.push(format!("  {s}"));
         }
-        parts.push(String::new());
     }
 
     if !snapshot.recent_actions.is_empty() {
-        parts.push("Recent agent actions:".to_string());
+        parts.push("Actions:".to_string());
         for a in &snapshot.recent_actions {
             if a.tool == "said" {
                 parts.push(format!(
-                    "- Said: \"{}\"",
+                    "  said: {}",
                     a.detail.as_deref().unwrap_or("")
                 ));
             } else {
                 let detail_part = a
                     .detail
                     .as_ref()
-                    .map(|d| format!(" ({d})"))
+                    .map(|d| format!(": {d}"))
                     .unwrap_or_default();
-                parts.push(format!("- Used tool: {}{detail_part}", a.tool));
+                parts.push(format!("  {}{detail_part}", a.tool));
             }
         }
-        parts.push(String::new());
     }
 
     if let Some(ref ct) = snapshot.current_tool {
         let detail_part = ct
             .detail
             .as_ref()
-            .map(|d| format!(" — {d}"))
+            .map(|d| format!(": {d}"))
             .unwrap_or_default();
-        parts.push(format!("Right now: {}{detail_part}", ct.tool));
-        parts.push(String::new());
+        parts.push(format!("Now: {}{detail_part}", ct.tool));
     }
 
-    parts.push("---".to_string());
-    parts.push("Summarize what the agent is working on RIGHT NOW in 3-8 words.".to_string());
-    parts.push(
-        "Be specific about the task, not the tool. No quotes, no preamble.".to_string(),
-    );
-    parts.push(
-        "Examples: \"fixing auth token refresh\", \"reading test files for context\", \"writing new API endpoint\""
-            .to_string(),
-    );
+    parts.push(String::new());
+    parts.push("Write a 1-line status (max 60 chars). Explain the PURPOSE and WHY, not the tool or command.".to_string());
+    parts.push("Good: \"adding JWT refresh to prevent session timeouts\" or \"3 test failures — user_routes returns wrong status code\" or \"understanding DB schema before adding migrations\"".to_string());
+    parts.push("Bad: \"running tests\" or \"editing files\" or \"using Read tool\" or \"working on code\"".to_string());
+    parts.push("Reply with ONLY the status line, nothing else.".to_string());
 
     parts.join("\n")
 }
@@ -381,90 +382,140 @@ fn build_terminal_prompt(
     state: SessionState,
     prev_context: Option<&str>,
 ) -> String {
-    let is_first = prev_context.is_none();
+    // Strip ANSI from the context we send to the LLM so it sees clean text.
+    let clean = strip_ansi(context);
+    let clean_prev = prev_context.map(strip_ansi);
 
-    let context_block = if is_first {
-        format!("Full terminal output:\n{context}")
-    } else {
-        let prev = prev_context.unwrap();
-        // Try to find overlap with the last 200 chars of the previous context.
+    let context_block = if let Some(ref prev) = clean_prev {
+        // Try to find new output since last check.
         let tail: String = prev.chars().rev().take(200).collect::<Vec<_>>().into_iter().rev().collect();
-        let overlap = context.find(&tail);
-        match overlap {
+        match clean.find(&tail) {
             Some(idx) => {
-                let delta = &context[idx + tail.len()..];
-                let delta = delta.trim();
+                let delta = clean[idx + tail.len()..].trim();
                 if !delta.is_empty() {
-                    format!("New output since last check:\n{delta}")
+                    format!("New output:\n{delta}")
                 } else {
-                    let tail_200: String = context
-                        .chars()
-                        .rev()
-                        .take(200)
-                        .collect::<Vec<_>>()
-                        .into_iter()
-                        .rev()
-                        .collect();
-                    format!("Terminal output (unchanged):\n{tail_200}")
+                    format!("Screen:\n{}", clean.chars().rev().take(300).collect::<Vec<_>>().into_iter().rev().collect::<String>())
                 }
             }
-            None => {
-                // No overlap found — just send the whole context.
-                format!("Full terminal output:\n{context}")
-            }
+            None => format!("Screen:\n{clean}"),
         }
+    } else {
+        format!("Screen:\n{clean}")
     };
 
     format!(
-        "You are monitoring a terminal session.\n\
+        "Terminal session status reporter.\n\
          State: {}\n\
-         {context_block}\n\
-         ---\n\
-         Identify what TASK is happening right now. Respond with ONLY 3-8 words. No quotes, no preamble.\n\
-         Focus on the task/goal, not the tool or command.\n\
-         Examples: \"fixing auth token refresh\", \"adding dark mode toggle\", \"debugging failing test suite\", \"waiting for user input\", \"idle at shell prompt\"",
+         {context_block}\n\n\
+         Write a 1-line status (max 60 chars). Infer the PURPOSE behind what's on screen — WHY is this happening, not WHAT command is running.\n\
+         Good: \"verifying auth fix — 2 tests still failing in user_routes\" or \"rebasing feature branch, resolving 3 merge conflicts\" or \"idle, waiting for next task\"\n\
+         Bad: \"running cargo test\" or \"editing a file\" or \"using command line tools\" or \"git operations\"\n\
+         Reply with ONLY the status line, nothing else.",
         state_label(state)
     )
 }
 
 // ---------------------------------------------------------------------------
-// Codex CLI invocation
+// OpenRouter LLM call
 // ---------------------------------------------------------------------------
 
-async fn call_codex(prompt: &str) -> Result<String, String> {
-    let result = tokio::time::timeout(
-        CODEX_TIMEOUT,
-        Command::new("codex")
-            .args([
-                "-m",
-                "codex-mini-latest",
-                "exec",
-                "-c",
-                "model_reasoning_effort=\"low\"",
-                "--ephemeral",
-                prompt,
-            ])
-            .output(),
-    )
-    .await;
+/// Lazily-initialized shared HTTP client for thought generation.
+fn http_client() -> &'static reqwest::Client {
+    use std::sync::OnceLock;
+    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+    CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .timeout(CODEX_TIMEOUT)
+            .build()
+            .expect("failed to build reqwest client")
+    })
+}
 
-    match result {
-        Err(_) => Err("codex timed out".to_string()),
-        Ok(Err(e)) => Err(format!("codex exec failed: {e}")),
-        Ok(Ok(output)) => {
-            if !output.status.success() {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                let preview: String = stderr.chars().take(200).collect();
-                Err(format!(
-                    "codex exited with {}: {preview}",
-                    output.status
-                ))
-            } else {
-                let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                Ok(stdout)
+/// Models to try, in order. Falls back through the list on failure.
+fn thought_models() -> Vec<String> {
+    let mut models = Vec::new();
+    for key in [
+        "THRONGTERM_THOUGHT_MODEL",
+        "THRONGTERM_THOUGHT_MODEL_2",
+        "THRONGTERM_THOUGHT_MODEL_3",
+    ] {
+        if let Ok(m) = std::env::var(key) {
+            if !m.is_empty() {
+                models.push(m);
             }
         }
     }
+    if models.is_empty() {
+        models.push("openrouter/aurora-alpha".to_string());
+    }
+    models
+}
+
+async fn call_llm(prompt: &str) -> Result<String, String> {
+    let api_key = std::env::var("OPENROUTER_API_KEY")
+        .map_err(|_| "OPENROUTER_API_KEY not set".to_string())?;
+
+    let models = thought_models();
+    let mut last_err = String::new();
+
+    for model in &models {
+        match call_openrouter(prompt, model, &api_key).await {
+            Ok(content) if !content.is_empty() => return Ok(content),
+            Ok(_) => {
+                last_err = format!("{model} returned empty");
+                debug!(model = %model, "empty response, trying next model");
+            }
+            Err(e) => {
+                last_err = format!("{model}: {e}");
+                debug!(model = %model, error = %e, "model failed, trying next");
+            }
+        }
+    }
+
+    Err(format!("all models failed, last: {last_err}"))
+}
+
+async fn call_openrouter(
+    prompt: &str,
+    model: &str,
+    api_key: &str,
+) -> Result<String, String> {
+    let body = serde_json::json!({
+        "model": model,
+        "max_tokens": 80,
+        "messages": [
+            { "role": "user", "content": prompt }
+        ]
+    });
+
+    let resp = http_client()
+        .post("https://openrouter.ai/api/v1/chat/completions")
+        .header("Authorization", format!("Bearer {api_key}"))
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("request failed: {e}"))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        let preview: String = text.chars().take(500).collect();
+        return Err(format!("{status}: {preview}"));
+    }
+
+    let json: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| format!("json parse failed: {e}"))?;
+
+    let content = json["choices"][0]["message"]["content"]
+        .as_str()
+        .unwrap_or("")
+        .trim()
+        .to_string();
+
+    Ok(content)
 }
 
 // ---------------------------------------------------------------------------
@@ -481,9 +532,51 @@ fn state_label(state: SessionState) -> &'static str {
     }
 }
 
+/// Strip ANSI escape sequences so hashing compares visible content only.
+fn strip_ansi(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' {
+            // CSI sequence: ESC [ ... final byte
+            if chars.peek() == Some(&'[') {
+                chars.next();
+                while let Some(&next) = chars.peek() {
+                    chars.next();
+                    if next.is_ascii_alphabetic() || next == '~' {
+                        break;
+                    }
+                }
+            // OSC sequence: ESC ] ... ST(ESC \) or BEL
+            } else if chars.peek() == Some(&']') {
+                chars.next();
+                while let Some(&next) = chars.peek() {
+                    chars.next();
+                    if next == '\x07' {
+                        break;
+                    }
+                    if next == '\x1b' && chars.peek() == Some(&'\\') {
+                        chars.next();
+                        break;
+                    }
+                }
+            } else {
+                // Other ESC sequence — skip next char
+                chars.next();
+            }
+        } else if c.is_control() && c != '\n' && c != '\t' {
+            // Skip other control chars (cursor blink, etc.)
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
 fn hash_string(s: &str) -> u64 {
+    let stripped = strip_ansi(s);
     let mut hasher = DefaultHasher::new();
-    s.hash(&mut hasher);
+    stripped.hash(&mut hasher);
     hasher.finish()
 }
 
@@ -506,11 +599,12 @@ mod tests {
             user_task: Some("fix the login bug".to_string()),
             recent_actions: vec![],
             current_tool: None,
+            token_count: 0,
         };
         let prompt = build_context_prompt(&snapshot, SessionState::Busy, &[]);
         assert!(prompt.contains("fix the login bug"));
-        assert!(prompt.contains("Agent state: busy"));
-        assert!(prompt.contains("3-8 words"));
+        assert!(prompt.contains("State: busy"));
+        assert!(prompt.contains("status"));
     }
 
     #[test]
@@ -531,11 +625,12 @@ mod tests {
                 tool: "Edit".to_string(),
                 detail: Some("config.rs".to_string()),
             }),
+            token_count: 0,
         };
         let prompt = build_context_prompt(&snapshot, SessionState::Busy, &[]);
-        assert!(prompt.contains("Used tool: Read (main.rs)"));
-        assert!(prompt.contains("Said: \"I will fix this\""));
-        assert!(prompt.contains("Right now: Edit — config.rs"));
+        assert!(prompt.contains("Read: main.rs"));
+        assert!(prompt.contains("said: I will fix this"));
+        assert!(prompt.contains("Now: Edit: config.rs"));
     }
 
     #[test]
@@ -544,21 +639,22 @@ mod tests {
             user_task: None,
             recent_actions: vec![],
             current_tool: None,
+            token_count: 0,
         };
         let history = vec![
             "reading config files".to_string(),
             "writing new endpoint".to_string(),
         ];
         let prompt = build_context_prompt(&snapshot, SessionState::Idle, &history);
-        assert!(prompt.contains("Previous observations"));
-        assert!(prompt.contains("- reading config files"));
-        assert!(prompt.contains("- writing new endpoint"));
+        assert!(prompt.contains("Recent status:"));
+        assert!(prompt.contains("reading config files"));
+        assert!(prompt.contains("writing new endpoint"));
     }
 
     #[test]
     fn terminal_prompt_first_time() {
         let prompt = build_terminal_prompt("$ ls\nfoo bar", SessionState::Idle, None);
-        assert!(prompt.contains("Full terminal output:"));
+        assert!(prompt.contains("Screen:"));
         assert!(prompt.contains("$ ls\nfoo bar"));
         assert!(prompt.contains("State: idle"));
     }
@@ -568,8 +664,8 @@ mod tests {
         let prev = "$ ls\nfoo bar";
         let current = "$ ls\nfoo bar\n$ echo hello\nhello";
         let prompt = build_terminal_prompt(current, SessionState::Busy, Some(prev));
-        // Should detect new output
-        assert!(prompt.contains("terminal") || prompt.contains("Terminal"));
+        assert!(prompt.contains("State: busy"));
+        assert!(prompt.contains("status"));
     }
 
     #[test]
