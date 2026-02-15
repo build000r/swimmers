@@ -257,7 +257,7 @@ function ThrongletEntity({ session, onTap, onDragToBottom }: ThrongletProps) {
             />
           </div>
         )}
-        {activityText && (
+        {activityText && !showBubble && (
           <div class="thronglet-activity">{activityText}</div>
         )}
       </div>

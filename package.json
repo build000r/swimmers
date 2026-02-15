@@ -9,9 +9,9 @@
     "postinstall": "chmod +x node_modules/node-pty/prebuilds/darwin-arm64/spawn-helper 2>/dev/null; true",
     "test": "vitest run",
     "test:watch": "vitest",
-    "lint": "eslint server/ public/js/",
-    "format": "prettier --write 'server/**/*.js' 'public/js/**/*.js'",
-    "format:check": "prettier --check 'server/**/*.js' 'public/js/**/*.js'"
+    "lint": "eslint server/",
+    "format": "prettier --write 'server/**/*.js'",
+    "format:check": "prettier --check 'server/**/*.js'"
   },
   "dependencies": {
     "express": "^4.21.0",

@@ -13,7 +13,7 @@ const manager = new SessionManager();
 const PORT = process.env.PORT || 3210;
 
 // Serve static files
-app.use(express.static(path.join(__dirname, '..', 'public')));
+app.use(express.static(path.join(__dirname, '..', 'dist')));
 app.use(express.json());
 
 // REST API

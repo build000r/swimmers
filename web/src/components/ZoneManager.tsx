@@ -3,7 +3,7 @@ import type { SessionSummary } from "@/types";
 import { TerminalWorkspace } from "@/components/TerminalWorkspace";
 import { useTerminalCache } from "@/hooks/useTerminalCache";
 import { useSwipeBack } from "@/hooks/useGestures";
-import { terminalCacheTtlMs } from "@/app";
+import { terminalCacheTtlMs, zoneLayout } from "@/app";
 import type { CachedTerminal } from "@/hooks/useTerminalCache";
 import type { ReplayTruncatedPayload, SessionOverloadedPayload } from "@/types";
 import { realtime } from "@/app";
@@ -214,6 +214,7 @@ export function ZoneManager({
   useEffect(() => {
     const dualZone = mainZone && bottomZone;
     const singleZone = (mainZone || bottomZone) && !dualZone;
+    zoneLayout.value = dualZone ? "dual" : "single";
     if (dualZone) {
       onStopPolling();
     } else if (singleZone) {

@@ -24,5 +24,5 @@ export default defineConfig({
     outDir: resolve(__dirname, "../dist"),
     emptyOutDir: true,
   },
-  publicDir: resolve(__dirname, "../public"),
+  publicDir: resolve(__dirname, "public"),
 });
