@@ -2,8 +2,8 @@
 //!
 //! Multiplexes binary terminal I/O frames and JSON control messages over a
 //! single WebSocket connection. Uses `tokio::select!` to concurrently read
-//! from the client, forward supervisor lifecycle events, and deliver
-//! per-session terminal output.
+//! from the client, forward supervisor lifecycle events, deliver per-session
+//! terminal output, per-session control events, and thought updates.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -53,11 +53,15 @@ pub async fn ws_upgrade(
 struct SessionSub {
     client_id: ClientId,
     output_rx: mpsc::Receiver<OutputFrame>,
+    /// Per-session control event receiver (session_state, session_title).
+    event_rx: broadcast::Receiver<ControlEvent>,
 }
 
 enum PollEvent {
     Output { session_id: String, frame: OutputFrame },
     Overloaded { session_id: String },
+    /// A per-session control event (session_state, session_title).
+    SessionEvent(ControlEvent),
 }
 
 /// Main WebSocket connection loop.
@@ -70,6 +74,8 @@ enum PollEvent {
 /// 3. Forward broadcast LifecycleEvents from the supervisor to the client
 ///    as JSON ControlEvents.
 /// 4. Forward per-session terminal output to the client as binary frames.
+/// 5. Forward per-session control events (session_state) to the client.
+/// 6. Forward thought_update events from the thought loop to the client.
 async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
     let (mut ws_sink, mut ws_stream) = socket.split();
 
@@ -77,13 +83,18 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
     let mut lifecycle_rx: broadcast::Receiver<LifecycleEvent> =
         state.supervisor.subscribe_events();
 
+    // Subscribe to thought_update events from the thought loop.
+    let mut thought_rx: broadcast::Receiver<ControlEvent> =
+        state.supervisor.subscribe_thought_events();
+
     // Track per-session output subscriptions: session_id -> sub state.
     let mut output_subs: HashMap<String, SessionSub> = HashMap::new();
 
     tracing::info!("realtime client connected");
 
     loop {
-        // Build a future that resolves when any subscribed session has output.
+        // Build a future that resolves when any subscribed session has output
+        // or a per-session control event.
         let output_fut = poll_output_subs(&mut output_subs);
 
         tokio::select! {
@@ -143,7 +154,28 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
                 }
             }
 
-            // --- Per-session terminal output ---
+            // --- Thought update events from the thought loop ---
+            event = thought_rx.recv() => {
+                match event {
+                    Ok(thought_event) => {
+                        let json = serde_json::to_string(&thought_event)
+                            .expect("ControlEvent must serialize");
+                        if ws_sink.send(Message::Text(json.into())).await.is_err() {
+                            tracing::warn!("failed to send thought_update event to client");
+                            break;
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Lagged(n)) => {
+                        tracing::warn!("realtime client lagged by {n} thought events");
+                    }
+                    Err(broadcast::error::RecvError::Closed) => {
+                        tracing::info!("thought broadcast closed");
+                        // Don't break -- thought loop stopping is not fatal.
+                    }
+                }
+            }
+
+            // --- Per-session terminal output and control events ---
             Some(event) = output_fut => {
                 match event {
                     PollEvent::Output { session_id, frame } => {
@@ -177,6 +209,14 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
                                 tracing::warn!("failed to send session_overloaded event");
                                 break;
                             }
+                        }
+                    }
+                    PollEvent::SessionEvent(control_event) => {
+                        let json = serde_json::to_string(&control_event)
+                            .expect("ControlEvent must serialize");
+                        if ws_sink.send(Message::Text(json.into())).await.is_err() {
+                            tracing::warn!("failed to send session event to client");
+                            break;
                         }
                     }
                 }
@@ -385,6 +425,9 @@ async fn handle_subscribe(
         state.config.outbound_queue_bound,
     );
 
+    // Subscribe to per-session control events (session_state, session_title).
+    let event_rx = handle.subscribe_events();
+
     // Send the Subscribe command to the session actor. The actor handles
     // replay internally and sends replayed frames through the channel.
     let (ack_tx, ack_rx) = oneshot::channel();
@@ -415,6 +458,7 @@ async fn handle_subscribe(
         SessionSub {
             client_id,
             output_rx: client_rx,
+            event_rx,
         },
     );
 
@@ -568,7 +612,8 @@ async fn handle_dismiss(
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// Poll all per-session output receivers and return the first ready frame.
+/// Poll all per-session output receivers and event receivers.
+/// Returns the first ready frame, overload notification, or session event.
 ///
 /// Returns `None` (via `pending`) if there are no active subscriptions, which
 /// causes the `tokio::select!` branch to be disabled.
@@ -584,6 +629,7 @@ async fn poll_output_subs(
     let keys: Vec<String> = subs.keys().cloned().collect();
     for key in &keys {
         if let Some(sub) = subs.get_mut(key) {
+            // Check for terminal output first.
             match sub.output_rx.try_recv() {
                 Ok(frame) => {
                     return Some(PollEvent::Output {
@@ -598,7 +644,22 @@ async fn poll_output_subs(
                         session_id: key.clone(),
                     });
                 }
-                Err(mpsc::error::TryRecvError::Empty) => continue,
+                Err(mpsc::error::TryRecvError::Empty) => {}
+            }
+
+            // Check for per-session control events.
+            match sub.event_rx.try_recv() {
+                Ok(event) => {
+                    return Some(PollEvent::SessionEvent(event));
+                }
+                Err(broadcast::error::TryRecvError::Lagged(n)) => {
+                    tracing::warn!("[session {key}] lagged by {n} session events");
+                    // Continue -- lost events are not critical.
+                }
+                Err(broadcast::error::TryRecvError::Closed) => {
+                    // Actor shut down -- the output channel will also close soon.
+                }
+                Err(broadcast::error::TryRecvError::Empty) => {}
             }
         }
     }

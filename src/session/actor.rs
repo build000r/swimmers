@@ -5,14 +5,17 @@ use std::time::Instant;
 
 use chrono::Utc;
 use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{broadcast, mpsc, oneshot};
 use tracing::{debug, error, info, warn};
 
 use crate::config::Config;
 use crate::scroll::guard::ScrollGuard;
 use crate::session::replay_ring::ReplayRing;
 use crate::state::detector::StateDetector;
-use crate::types::{SessionSummary, TerminalSnapshot, TransportHealth};
+use crate::types::{
+    ControlEvent, SessionState, SessionStatePayload, SessionSummary, TerminalSnapshot,
+    TransportHealth,
+};
 
 // ---------------------------------------------------------------------------
 // Public command enum -- sent to the actor over its mpsc channel
@@ -83,6 +86,9 @@ pub struct ActorHandle {
     pub session_id: String,
     pub tmux_name: String,
     pub cmd_tx: mpsc::Sender<SessionCommand>,
+    /// Per-session broadcast channel for ControlEvents (session_state, session_title).
+    /// Multiple WS clients can subscribe to the same session's events.
+    event_tx: broadcast::Sender<ControlEvent>,
 }
 
 impl ActorHandle {
@@ -91,6 +97,11 @@ impl ActorHandle {
         cmd: SessionCommand,
     ) -> Result<(), mpsc::error::SendError<SessionCommand>> {
         self.cmd_tx.send(cmd).await
+    }
+
+    /// Subscribe to this session's control events (state changes, title updates).
+    pub fn subscribe_events(&self) -> broadcast::Receiver<ControlEvent> {
+        self.event_tx.subscribe()
     }
 }
 
@@ -118,6 +129,9 @@ pub struct SessionActor {
 
     // Inbound command channel
     cmd_rx: mpsc::Receiver<SessionCommand>,
+
+    // Per-session event broadcast for ControlEvents (session_state changes).
+    event_tx: broadcast::Sender<ControlEvent>,
 
     // Cols/rows for summary reporting
     cols: u16,
@@ -179,6 +193,7 @@ impl SessionActor {
             .map_err(|e| anyhow::anyhow!("failed to take PTY writer: {}", e))?;
 
         let (cmd_tx, cmd_rx) = mpsc::channel::<SessionCommand>(256);
+        let (event_tx, _) = broadcast::channel::<ControlEvent>(64);
 
         let replay_ring = ReplayRing::new(config.replay_buffer_size);
 
@@ -193,6 +208,7 @@ impl SessionActor {
             replay_ring,
             subscribers: HashMap::new(),
             cmd_rx,
+            event_tx: event_tx.clone(),
             cols: 80,
             rows: 24,
         };
@@ -204,6 +220,7 @@ impl SessionActor {
             session_id,
             tmux_name,
             cmd_tx,
+            event_tx,
         };
 
         Ok(handle)
@@ -264,7 +281,9 @@ impl SessionActor {
                             }
                         }
                         SessionCommand::DismissAttention => {
+                            let state_before = self.state_detector.state();
                             self.state_detector.dismiss_attention();
+                            self.maybe_emit_state_change(state_before);
                         }
                         SessionCommand::Subscribe {
                             client_id,
@@ -349,12 +368,21 @@ impl SessionActor {
 
     /// Fire any expired timers and process the results.
     async fn fire_timers(&mut self) {
+        // Snapshot state before timers for change detection.
+        let state_before = self.state_detector.state();
+
         // Check state detector timers (error auto-clear, idle -> attention).
         self.state_detector.check_timers(Instant::now());
 
+        // Emit state change event if timers caused a transition.
+        self.maybe_emit_state_change(state_before);
+
         // Flush any coalesced scroll guard data.
         if let Some(flushed) = self.scroll_guard.flush() {
+            let state_before = self.state_detector.state();
             self.state_detector.process_output(&flushed);
+            self.maybe_emit_state_change(state_before);
+
             let seq = self.replay_ring.push(&flushed);
             let frame = OutputFrame {
                 seq,
@@ -373,8 +401,14 @@ impl SessionActor {
         let chunks = self.scroll_guard.process(&raw);
 
         for chunk in chunks {
+            // Snapshot state before processing for change detection.
+            let state_before = self.state_detector.state();
+
             // Feed the state detector with each chunk.
             self.state_detector.process_output(&chunk);
+
+            // Emit state change event if processing caused a transition.
+            self.maybe_emit_state_change(state_before);
 
             // Store in the replay ring and get the sequence number.
             let seq = self.replay_ring.push(&chunk);
@@ -383,6 +417,28 @@ impl SessionActor {
 
             // Broadcast to all subscribers.
             self.broadcast(frame).await;
+        }
+    }
+
+    /// Compare state before and after a detector operation. If the state changed,
+    /// emit a `session_state` ControlEvent through the per-session broadcast channel.
+    fn maybe_emit_state_change(&self, previous_state: SessionState) {
+        let (current_state, current_command) = self.state_detector.get_state();
+        if current_state != previous_state {
+            let payload = SessionStatePayload {
+                state: current_state,
+                previous_state,
+                current_command,
+                transport_health: TransportHealth::Healthy,
+                at: Utc::now(),
+            };
+            let event = ControlEvent {
+                event: "session_state".to_string(),
+                session_id: self.session_id.clone(),
+                payload: serde_json::to_value(&payload).unwrap_or_default(),
+            };
+            // If no receivers, send returns Err -- that's fine, nobody is listening.
+            let _ = self.event_tx.send(event);
         }
     }
 

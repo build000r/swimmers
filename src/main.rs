@@ -1,5 +1,7 @@
 mod api;
+mod auth;
 mod config;
+mod persistence;
 mod realtime;
 mod scroll;
 mod session;
@@ -15,7 +17,9 @@ use tracing_subscriber::EnvFilter;
 
 use api::AppState;
 use config::Config;
-use session::supervisor::SessionSupervisor;
+use persistence::file_store::FileStore;
+use session::supervisor::{SessionSupervisor, SupervisorProvider};
+use thought::loop_runner::ThoughtLoopRunner;
 
 #[tokio::main]
 async fn main() {
@@ -33,7 +37,19 @@ async fn main() {
     // Create session supervisor (new() returns Arc<Self>)
     let supervisor = SessionSupervisor::new(config.clone());
 
-    // Auto-discover existing tmux sessions
+    // Initialize persistence store.
+    match FileStore::new("./data/throngterm/").await {
+        Ok(store) => {
+            supervisor.init_persistence(store).await;
+            tracing::info!("persistence store initialized");
+        }
+        Err(e) => {
+            tracing::error!("failed to initialize persistence store: {e}");
+            // Continue without persistence -- the server still works.
+        }
+    }
+
+    // Auto-discover existing tmux sessions (upgrades stale sessions).
     {
         let supervisor = supervisor.clone();
         tokio::spawn(async move {
@@ -44,10 +60,16 @@ async fn main() {
         });
     }
 
+    // Start periodic persistence checkpoint (every 30s).
+    supervisor.spawn_persistence_checkpoint();
+
     // Start thought generation loop.
-    // TODO: Wire up SessionProvider impl for SessionSupervisor and call
-    // ThoughtLoopRunner::new(config.thought_tick_ms, event_tx).spawn(provider)
-    // once the broadcast channel integration is finalized.
+    {
+        let thought_tx = supervisor.thought_event_sender();
+        let provider = Arc::new(SupervisorProvider::new(supervisor.clone()));
+        let runner = ThoughtLoopRunner::new(config.thought_tick_ms, thought_tx);
+        runner.spawn(provider);
+    }
 
     // Build app state
     let state = Arc::new(AppState {
@@ -57,7 +79,7 @@ async fn main() {
 
     // Build router
     let app = Router::new()
-        .merge(api::api_router())
+        .merge(api::api_router(config.clone()))
         .nest("/v1/realtime", realtime::handler::ws_router())
         .fallback_service(ServeDir::new("dist").append_index_html_on_directories(true))
         .with_state(state);
