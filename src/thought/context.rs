@@ -20,6 +20,9 @@ pub struct ContextSnapshot {
     pub user_task: Option<String>,
     pub recent_actions: Vec<AgentAction>,
     pub current_tool: Option<AgentAction>,
+    /// Most recent `input_tokens` from assistant message usage data.
+    /// This approximates current context window utilization.
+    pub token_count: u64,
 }
 
 /// A single action observed from the agent's JSONL log.
@@ -91,6 +94,8 @@ pub struct ClaudeCodeReader {
     recent_actions: Vec<AgentAction>,
     current_tool: Option<AgentAction>,
     bootstrapped: bool,
+    /// Most recent input_tokens from assistant message usage.
+    token_count: u64,
 }
 
 impl ClaudeCodeReader {
@@ -103,6 +108,7 @@ impl ClaudeCodeReader {
             recent_actions: Vec::new(),
             current_tool: None,
             bootstrapped: false,
+            token_count: 0,
         }
     }
 
@@ -164,10 +170,16 @@ impl ClaudeCodeReader {
                 }
             }
 
-            // Assistant message -> tool uses and text
+            // Assistant message -> tool uses, text, and token usage
             if entry_type == "assistant" {
                 if let Some(msg) = msg {
                     if msg.get("role").and_then(Value::as_str) == Some("assistant") {
+                        // Extract input_tokens from usage data
+                        if let Some(usage) = msg.get("usage") {
+                            if let Some(input_tokens) = usage.get("input_tokens").and_then(Value::as_u64) {
+                                self.token_count = input_tokens;
+                            }
+                        }
                         if let Some(blocks) = msg.get("content").and_then(Value::as_array) {
                             for block in blocks {
                                 let block_type =
@@ -267,6 +279,7 @@ impl ContextReader for ClaudeCodeReader {
             user_task: self.user_task.clone(),
             recent_actions: last_n(&self.recent_actions, 5),
             current_tool: self.current_tool.clone(),
+            token_count: self.token_count,
         })
     }
 }
@@ -285,6 +298,7 @@ pub struct CodexReader {
     recent_actions: Vec<AgentAction>,
     current_tool: Option<AgentAction>,
     bootstrapped: bool,
+    token_count: u64,
 }
 
 impl CodexReader {
@@ -297,6 +311,7 @@ impl CodexReader {
             recent_actions: Vec::new(),
             current_tool: None,
             bootstrapped: false,
+            token_count: 0,
         }
     }
 
@@ -400,6 +415,15 @@ impl CodexReader {
                     let trimmed = msg.trim();
                     if !trimmed.is_empty() {
                         self.user_task = Some(truncate(trimmed, 300));
+                    }
+                }
+            }
+
+            // response with usage data -> token tracking
+            if entry_type == "response" {
+                if let Some(usage) = payload.get("usage") {
+                    if let Some(input_tokens) = usage.get("input_tokens").and_then(Value::as_u64) {
+                        self.token_count = input_tokens;
                     }
                 }
             }
@@ -524,6 +548,7 @@ impl ContextReader for CodexReader {
             user_task: self.user_task.clone(),
             recent_actions: last_n(&self.recent_actions, 5),
             current_tool: self.current_tool.clone(),
+            token_count: self.token_count,
         })
     }
 }
