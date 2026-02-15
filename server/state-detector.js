@@ -143,7 +143,8 @@ class StateDetector {
       this._scheduleAttention(this.currentCommand);
     }
     // Cancel attention timer if leaving idle for anything other than attention
-    if (prev === 'idle' && newState !== 'attention') {
+    // (idle → idle re-detections must NOT cancel the timer)
+    if (prev === 'idle' && newState !== 'attention' && newState !== 'idle') {
       this._clearAttentionTimer();
     }
 
