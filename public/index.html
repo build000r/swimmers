@@ -27,12 +27,25 @@
 
   <!-- Terminal View -->
   <div id="terminal-view" class="view">
-    <header class="header terminal-header">
-      <button id="back-btn" class="back-btn" aria-label="Back">&larr;</button>
-      <span id="terminal-title" class="terminal-title" title="Tap to copy"></span>
-      <span id="terminal-state-dot" class="state-dot idle"></span>
-    </header>
-    <div id="terminal-container"></div>
+    <div id="zone-main" class="terminal-zone" style="display:none">
+      <header class="zone-header">
+        <img class="zone-sprite" src="/assets/idle.png" alt="Close">
+        <span class="zone-name"></span>
+        <span class="zone-title"></span>
+        <span class="zone-dot state-dot idle"></span>
+      </header>
+      <div class="zone-terminal"></div>
+    </div>
+    <div id="zone-divider" style="display:none"></div>
+    <div id="zone-bottom" class="terminal-zone" style="display:none">
+      <header class="zone-header">
+        <img class="zone-sprite" src="/assets/idle.png" alt="Close">
+        <span class="zone-name"></span>
+        <span class="zone-title"></span>
+        <span class="zone-dot state-dot idle"></span>
+      </header>
+      <div class="zone-terminal"></div>
+    </div>
   </div>
 
   <script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.min.js"></script>
