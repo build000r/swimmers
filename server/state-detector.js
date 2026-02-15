@@ -63,12 +63,14 @@ class StateDetector {
       if (pattern.test(str)) {
         this._setState('error', this.currentCommand);
         this._scheduleErrorClear();
-        return;
+        break;
       }
     }
 
     // Fallback: regex prompt detection (for shells without OSC 133)
-    // Recovers from both busy AND error states when a new prompt appears
+    // Recovers from busy AND error states when a new prompt appears.
+    // Runs even after error detection — if a prompt is at the end of
+    // the same chunk, the command is done and shell is ready.
     if (this.state !== 'idle' && this._promptPattern.test(str)) {
       this._clearErrorTimer();
       this._setState('idle', null);
