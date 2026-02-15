@@ -62,8 +62,11 @@ export function TerminalWorkspace({
   const hostElRef = useRef<HTMLDivElement | null>(null);
   const resizeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const seqRef = useRef<number>(0);
+  const snapshotReadyRef = useRef(false);
+  const pendingFramesRef = useRef<TerminalOutputFrame[]>([]);
   const [title, setTitle] = useState(`tmux a -t ${session.tmux_name}`);
   const [titleCopied, setTitleCopied] = useState(false);
+  const [rushingOff, setRushingOff] = useState(false);
   const initDoneRef = useRef(false);
 
   // ---- Terminal init / restore ----
@@ -80,11 +83,15 @@ export function TerminalWorkspace({
     let hostEl: HTMLDivElement;
 
     if (cached) {
-      // Restore from cache
+      // Restore from cache — terminal already has content, no snapshot needed
       term = cached.term;
       fitAddon = cached.fitAddon;
       hostEl = cached.hostEl;
+      snapshotReadyRef.current = true;
       container.appendChild(hostEl);
+      // Re-subscribe in case WebSocket reconnected since cache
+      realtime.subscribeSession(session.session_id, seqRef.current);
+      realtime.sendResize(session.session_id, term.cols, term.rows);
       fitAddon.fit();
       term.focus();
     } else {
@@ -139,6 +146,34 @@ export function TerminalWorkspace({
       // Send initial resize
       realtime.sendResize(session.session_id, term.cols, term.rows);
 
+      // Fetch snapshot so existing terminal content shows immediately.
+      // Output frames are buffered until the snapshot loads to prevent garbled display.
+      fetchSnapshot(session.session_id)
+        .then((snapshot) => {
+          if (snapshot.screen_text) {
+            term.write(snapshot.screen_text);
+          }
+          seqRef.current = snapshot.latest_seq;
+          snapshotReadyRef.current = true;
+          // Flush any frames that arrived while the snapshot was loading
+          for (const frame of pendingFramesRef.current) {
+            if (frame.seq > seqRef.current) {
+              seqRef.current = frame.seq;
+              term.write(frame.data);
+            }
+          }
+          pendingFramesRef.current = [];
+        })
+        .catch(() => {
+          // Snapshot unavailable — flush buffered frames and accept live output
+          snapshotReadyRef.current = true;
+          for (const frame of pendingFramesRef.current) {
+            seqRef.current = frame.seq;
+            term.write(frame.data);
+          }
+          pendingFramesRef.current = [];
+        });
+
       // Focus after layout settles
       setTimeout(() => {
         fitAddon.fit();
@@ -154,6 +189,13 @@ export function TerminalWorkspace({
 
     const handleOutput = (frame: TerminalOutputFrame) => {
       if (frame.sessionId !== session.session_id) return;
+      if (!snapshotReadyRef.current) {
+        // Buffer frames until snapshot loads to prevent garbled display
+        pendingFramesRef.current.push(frame);
+        return;
+      }
+      // Skip frames already covered by the snapshot
+      if (frame.seq <= seqRef.current) return;
       seqRef.current = frame.seq;
       term.write(frame.data);
     };
@@ -239,6 +281,26 @@ export function TerminalWorkspace({
     return () => observer.disconnect();
   }, []);
 
+  // ---- Auto-close on session exit ----
+
+  useEffect(() => {
+    if (session.state === "exited") {
+      // Brief delay so the user sees the sad state, then close
+      const timer = setTimeout(() => {
+        onSessionExit(session.session_id);
+      }, 600);
+      return () => clearTimeout(timer);
+    }
+  }, [session.state, session.session_id, onSessionExit]);
+
+  // ---- Close with rush-off animation ----
+
+  const handleClose = useCallback(() => {
+    if (rushingOff) return;
+    setRushingOff(true);
+    setTimeout(() => onClose(), 400);
+  }, [rushingOff, onClose]);
+
   // ---- Title copy handler ----
 
   const handleTitleClick = useCallback(() => {
@@ -261,12 +323,12 @@ export function TerminalWorkspace({
       }}
     >
       {/* Zone header */}
-      <header class="zone-header">
+      <header class={`zone-header ${rushingOff ? "rushing-off" : ""}`}>
         <img
           class="zone-sprite"
-          src={spriteForState(session.state)}
+          src={rushingOff ? "/assets/sad.png" : spriteForState(session.state)}
           alt="Close"
-          onClick={onClose}
+          onClick={handleClose}
         />
         <span class="zone-name">{repoName(session.cwd)}</span>
         <span class="zone-title" onClick={handleTitleClick}>

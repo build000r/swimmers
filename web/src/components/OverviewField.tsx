@@ -50,10 +50,12 @@ function ThrongletEntity({ session, onTap, onDragToBottom }: ThrongletProps) {
   const wanderRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const isDraggingRef = useRef(false);
   const longPressedRef = useRef(false);
+  const exitingRef = useRef(false);
 
   // Wander randomly every 3s
   useEffect(() => {
     wanderRef.current = setInterval(() => {
+      if (exitingRef.current) return;
       const maxX = window.innerWidth - 80;
       const maxY = window.innerHeight - 120;
       posRef.current.x = Math.max(
@@ -74,6 +76,23 @@ function ThrongletEntity({ session, onTap, onDragToBottom }: ThrongletProps) {
       if (wanderRef.current) clearInterval(wanderRef.current);
     };
   }, []);
+
+  // Walk off screen when session exits
+  useEffect(() => {
+    if (session.state !== "exited" || exitingRef.current) return;
+    exitingRef.current = true;
+    if (wanderRef.current) {
+      clearInterval(wanderRef.current);
+      wanderRef.current = null;
+    }
+    // Walk toward the nearest horizontal edge
+    const midX = window.innerWidth / 2;
+    const targetX = posRef.current.x < midX ? -120 : window.innerWidth + 40;
+    posRef.current.x = targetX;
+    if (elRef.current) {
+      elRef.current.style.left = targetX + "px";
+    }
+  }, [session.state]);
 
   // Long-press haptic on the thronglet itself
   const longPressTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -167,7 +186,7 @@ function ThrongletEntity({ session, onTap, onDragToBottom }: ThrongletProps) {
     showBubble = true;
   }
 
-  const showGauge = session.token_count > 0 && session.tool !== null;
+  const showGauge = session.token_count > 0;
   const gaugeRatio = session.context_limit
     ? Math.min(session.token_count / session.context_limit, 1)
     : 0;
