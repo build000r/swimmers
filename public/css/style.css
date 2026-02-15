@@ -47,72 +47,62 @@ html, body {
   will-change: transform;
 }
 
-/* Header */
-.header {
+/* Zone layout */
+.terminal-zone {
+  display: flex;
+  flex-direction: column;
+  min-height: 120px;
+  overflow: hidden;
+}
+
+.zone-header {
   background: var(--header-bg);
-  height: calc(var(--header-height) + var(--safe-top));
-  padding-top: var(--safe-top);
+  height: var(--header-height);
   padding-left: max(16px, var(--safe-left));
   padding-right: max(16px, var(--safe-right));
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  gap: 8px;
   flex-shrink: 0;
   z-index: 10;
 }
 
-.header h1 {
-  font-size: 20px;
-  font-weight: 700;
-  letter-spacing: -0.5px;
+#zone-main .zone-header {
+  height: calc(var(--header-height) + var(--safe-top));
+  padding-top: var(--safe-top);
 }
 
-.add-btn {
-  width: 44px;
-  height: 44px;
-  border: none;
-  background: rgba(255,255,255,0.15);
-  color: #fff;
-  font-size: 28px;
-  border-radius: 12px;
+.zone-sprite {
+  width: 32px;
+  height: 32px;
+  object-fit: contain;
+  image-rendering: pixelated;
+  image-rendering: crisp-edges;
   cursor: pointer;
-  display: flex;
-  align-items: center;
-  justify-content: center;
   -webkit-tap-highlight-color: transparent;
+  flex-shrink: 0;
 }
 
-.add-btn:active {
-  background: rgba(255,255,255,0.3);
-}
-
-/* Terminal header */
-.terminal-header {
-  gap: 12px;
-  justify-content: flex-start;
-}
-
-.back-btn {
-  width: 44px;
-  height: 44px;
-  border: none;
-  background: none;
-  color: #fff;
-  font-size: 24px;
-  cursor: pointer;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  -webkit-tap-highlight-color: transparent;
-}
-
-.terminal-title {
-  font-size: 16px;
+.zone-name {
+  font-size: 14px;
   font-weight: 600;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.zone-title {
+  font-family: Menlo, Monaco, 'Courier New', monospace;
+  font-size: 12px;
+  font-weight: 400;
   flex: 1;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  opacity: 0.5;
+  cursor: pointer;
+  text-align: right;
+  -webkit-user-select: all;
+  user-select: all;
 }
 
 .state-dot {
@@ -126,6 +116,7 @@ html, body {
 .state-dot.idle { background: #4FC08D; }
 .state-dot.busy { background: #F5A623; animation: pulse 1s ease infinite; }
 .state-dot.error { background: #E74C3C; animation: pulse 0.5s ease infinite; }
+.state-dot.attention { background: #5BC0EB; animation: pulse 0.8s ease infinite; }
 
 @keyframes pulse {
   0%, 100% { opacity: 1; }
@@ -138,7 +129,11 @@ html, body {
   background: linear-gradient(180deg, #A8D86E 0%, var(--grass-green) 30%, var(--grass-dark) 100%);
   position: relative;
   overflow: hidden;
+  padding-top: var(--safe-top);
   padding-bottom: var(--safe-bottom);
+  -webkit-touch-callout: none;
+  -webkit-user-select: none;
+  user-select: none;
 }
 
 #thronglets-container {
@@ -168,11 +163,11 @@ html, body {
   display: none;
 }
 
-/* Terminal container — must have explicit dimensions for xterm.js FitAddon */
-#terminal-container {
+/* Zone terminal container */
+.zone-terminal {
   flex: 1;
   width: 100%;
-  min-height: 0; /* important: allow flex child to shrink */
+  min-height: 0;
   background: #1a1a2e;
   padding: 5px;
   padding-bottom: max(5px, var(--safe-bottom));
@@ -180,14 +175,67 @@ html, body {
   touch-action: none;
 }
 
-#terminal-container .xterm {
+.zone-terminal .xterm {
   height: 100%;
 }
 
-#terminal-container .xterm-viewport {
+.zone-terminal .xterm-viewport {
   overflow-y: auto;
   overscroll-behavior: contain;
   -webkit-overflow-scrolling: touch;
+}
+
+/* Divider */
+#zone-divider {
+  height: 4px;
+  background: #0d1117;
+  cursor: ns-resize;
+  flex-shrink: 0;
+  z-index: 10;
+}
+
+#zone-divider:hover,
+#zone-divider.dragging {
+  background: #4FC08D;
+}
+
+/* Drag and drop */
+.thronglet.dragging {
+  opacity: 0.3;
+}
+
+.drag-ghost {
+  position: fixed;
+  pointer-events: none;
+  z-index: 9999;
+  opacity: 0.7;
+}
+
+.drop-zone-hint {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  height: 40%;
+  border: 2px dashed #4FC08D;
+  border-radius: 8px;
+  background: rgba(79, 192, 141, 0.1);
+  z-index: 3;
+  animation: drop-pulse 1s ease infinite;
+  pointer-events: none;
+}
+
+@keyframes drop-pulse {
+  0%, 100% { opacity: 0.6; }
+  50% { opacity: 1; }
+}
+
+/* Mobile: single zone only */
+@media (max-width: 768px) {
+  #zone-divider,
+  #zone-bottom {
+    display: none !important;
+  }
 }
 
 /* Field scenery */
@@ -240,6 +288,18 @@ html, body {
   padding: 1px 6px;
   border-radius: 4px;
   white-space: nowrap;
+}
+
+.thronglet-tool {
+  font-size: 9px;
+  font-weight: 700;
+  color: #fff;
+  background: rgba(22, 33, 62, 0.85);
+  padding: 1px 5px;
+  border-radius: 3px;
+  white-space: nowrap;
+  margin-bottom: 2px;
+  letter-spacing: 0.3px;
 }
 
 .thronglet-activity {
@@ -298,6 +358,35 @@ html, body {
   animation: shake 0.4s ease-in-out infinite;
 }
 
+.thronglet.attention .thronglet-sprite {
+  animation: attention-hop 1s ease-in-out infinite;
+}
+
+.thronglet.attention::before {
+  content: '';
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 90px;
+  height: 90px;
+  transform: translate(-50%, -55%);
+  border-radius: 50%;
+  border: 3px solid #5BC0EB;
+  animation: attention-glow 1.5s ease-in-out infinite;
+  pointer-events: none;
+}
+
+.thronglet.attention .thought-bubble {
+  background: #5BC0EB;
+  color: white;
+  font-weight: 700;
+  font-size: 14px;
+}
+
+.thronglet.attention .thought-bubble::after {
+  border-top-color: #5BC0EB;
+}
+
 @keyframes idle-bounce {
   0%, 100% { transform: translateY(0); }
   50% { transform: translateY(-6px); }
@@ -312,4 +401,16 @@ html, body {
   0%, 100% { transform: translateX(0); }
   25% { transform: translateX(-3px); }
   75% { transform: translateX(3px); }
+}
+
+@keyframes attention-hop {
+  0%, 100% { transform: translateY(0); }
+  30% { transform: translateY(-14px); }
+  50% { transform: translateY(-2px); }
+  70% { transform: translateY(-10px); }
+}
+
+@keyframes attention-glow {
+  0%, 100% { opacity: 0.3; box-shadow: 0 0 8px rgba(91,192,235,0.3); }
+  50% { opacity: 1; box-shadow: 0 0 20px rgba(91,192,235,0.6); }
 }

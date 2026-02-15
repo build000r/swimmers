@@ -1,6 +1,7 @@
 const pty = require('node-pty');
 const { execSync } = require('child_process');
 const StateDetector = require('./state-detector');
+const ScrollGuard = require('./scroll-guard');
 
 const REPLAY_BUFFER_SIZE = 4096;
 
@@ -34,9 +35,10 @@ class Session {
       this.pty = pty.spawn('tmux', ['attach-session', '-t', tmuxName], ptyOpts);
     }
 
-    this.pty.onData((data) => {
-      this.detector.processOutput(data);
-
+    // ScrollGuard coalesces rapid full-screen redraws from tmux
+    // (triggered by scroll in another attached client) to prevent
+    // visual garbage in xterm.js.
+    this.scrollGuard = new ScrollGuard((data) => {
       const buf = Buffer.from(data);
       this.replayBuffer = Buffer.concat([this.replayBuffer, buf]);
       if (this.replayBuffer.length > REPLAY_BUFFER_SIZE) {
@@ -49,6 +51,13 @@ class Session {
         const frame = Buffer.concat([Buffer.from([0x30]), buf]);
         this.attachedWs.send(frame);
       }
+    });
+
+    this.pty.onData((data) => {
+      // State detector always sees all output (unfiltered)
+      this.detector.processOutput(data);
+      // ScrollGuard decides what reaches the client
+      this.scrollGuard.process(data);
     });
 
     this.detector.onStateChange((info) => {
@@ -101,12 +110,17 @@ class Session {
       const payload = data.slice(1);
 
       if (cmd === 0x30) {
-        if (!this._exited) this.pty.write(payload.toString());
+        if (!this._exited) {
+          this.scrollGuard.notifyInput();
+          this.pty.write(payload.toString());
+        }
       } else if (cmd === 0x01) {
         try {
           const { cols, rows } = JSON.parse(payload.toString());
           this.pty.resize(cols, rows);
         } catch (e) {}
+      } else if (cmd === 0x04) {
+        this.detector.dismissAttention();
       }
     });
 
@@ -129,6 +143,7 @@ class Session {
 
   destroy() {
     this.detach();
+    this.scrollGuard.destroy();
     try {
       // Detach from tmux cleanly (don't kill the tmux session)
       this.pty.write('\x02d'); // Ctrl-B d = tmux detach
@@ -144,6 +159,7 @@ class Session {
       name: this.name,
       state: this.detector.state,
       currentCommand: this.detector.currentCommand,
+      cwd: process.env.HOME,
     };
   }
 }
@@ -153,6 +169,24 @@ class SessionManager {
     this.sessions = new Map(); // id → Session (PTY-backed connections to tmux)
   }
 
+  // Map process names to CLI tool display names
+  static CLI_TOOLS = {
+    claude: 'Claude Code',
+    codex: 'Codex',
+    amp: 'Amp',
+    opencode: 'OpenCode',
+    aider: 'Aider',
+    goose: 'Goose',
+    cline: 'Cline',
+    cursor: 'Cursor',
+  };
+
+  _detectTool(processName) {
+    if (!processName) return null;
+    const lower = processName.toLowerCase();
+    return SessionManager.CLI_TOOLS[lower] || null;
+  }
+
   // Discover real tmux sessions from the system
   _getTmuxSessions() {
     try {
@@ -160,12 +194,18 @@ class SessionManager {
       delete execEnv.TMUX;
       delete execEnv.TMUX_PANE;
       const out = execSync(
-        'tmux list-sessions -F "#{session_name}\t#{session_windows}\t#{session_attached}"',
+        'tmux list-sessions -F "#{session_name}\t#{session_windows}\t#{session_attached}\t#{pane_current_path}\t#{pane_current_command}"',
         { encoding: 'utf-8', timeout: 3000, env: execEnv }
       );
       return out.trim().split('\n').filter(Boolean).map((line) => {
-        const [name, windows, attached] = line.split('\t');
-        return { name, windows: parseInt(windows, 10), attached: parseInt(attached, 10) };
+        const [name, windows, attached, cwd, paneCmd] = line.split('\t');
+        return {
+          name,
+          windows: parseInt(windows, 10),
+          attached: parseInt(attached, 10),
+          cwd: cwd || process.env.HOME,
+          tool: this._detectTool(paneCmd),
+        };
       });
     } catch (e) {
       return [];
@@ -188,6 +228,8 @@ class SessionManager {
         state: ptySession ? ptySession.detector.state : 'idle',
         currentCommand: ptySession ? ptySession.detector.currentCommand : null,
         connected: !!ptySession, // do we have a PTY bridge for this?
+        cwd: ts.cwd,
+        tool: ts.tool,
       };
     });
   }
@@ -223,17 +265,20 @@ class SessionManager {
     return this.sessions.get(id) || this._findByTmuxName(id);
   }
 
-  // Create a brand new tmux session
-  createSession(name) {
+  // Create a brand new tmux session with incrementing numeric name
+  createSession() {
     const tmuxSessions = this._getTmuxSessions();
     const existingNames = new Set(tmuxSessions.map((s) => s.name));
 
-    // Generate a unique name if not provided or if it conflicts
-    let tmuxName = name;
-    if (!tmuxName || existingNames.has(tmuxName)) {
-      let counter = tmuxSessions.length + 1;
-      while (existingNames.has(`session-${counter}`)) counter++;
-      tmuxName = `session-${counter}`;
+    // Find highest numeric session name and increment
+    let maxNum = 0;
+    for (const s of tmuxSessions) {
+      const n = parseInt(s.name, 10);
+      if (!isNaN(n) && n > maxNum) maxNum = n;
+    }
+    let tmuxName = String(maxNum + 1);
+    while (existingNames.has(tmuxName)) {
+      tmuxName = String(parseInt(tmuxName, 10) + 1);
     }
 
     return this.connectSession(tmuxName);
