@@ -9,16 +9,13 @@ class StateDetector {
     this.currentCommand = null;
     this._promptPattern = /[$%>#]\s*$/;
     this._errorTimer = null;
+    // Only match patterns that unambiguously indicate a real shell error,
+    // not strings that might appear in file contents or tool output
     this._errorPatterns = [
       /command not found/i,
-      /^Error:/m,
       /Permission denied/i,
-      /No such file or directory/i,
-      /ENOENT/,
-      /EACCES/,
       /segmentation fault/i,
       /panic:/i,
-      /Traceback \(most recent call last\)/i,
     ];
     this._onStateChange = null;
   }
@@ -37,11 +34,22 @@ class StateDetector {
     ].join('; ');
   }
 
+  // Strip ANSI/CSI/OSC escape sequences to get visible text for pattern matching.
+  // OSC 133 sequences are checked separately against raw output first.
+  _stripAnsi(str) {
+    return str
+      .replace(/\x1b\[[0-9;]*[A-Za-z]/g, '')   // CSI sequences (colors, cursor)
+      .replace(/\x1b\][^\x07]*\x07/g, '')       // OSC sequences
+      .replace(/\x1b[()][0-9A-B]/g, '')          // charset switches
+      .replace(/\x1b[>=<]/g, '')                 // mode sets
+      .replace(/[\x00-\x08\x0e-\x1f]/g, '');    // control chars (keep \t \n \r)
+  }
+
   // Process raw PTY output, detect state transitions
   processOutput(data) {
     const str = typeof data === 'string' ? data : data.toString('utf-8');
 
-    // Check for OSC 133 sequences
+    // Check for OSC 133 sequences in raw output
     // Prompt shown (A) → idle
     const promptMatch = str.match(/\x1b\]133;A/);
     if (promptMatch) {
@@ -58,9 +66,12 @@ class StateDetector {
       return;
     }
 
-    // Check for error patterns in output
+    // Strip escape sequences for heuristic pattern matching
+    const visible = this._stripAnsi(str);
+
+    // Check for error patterns against visible text
     for (const pattern of this._errorPatterns) {
-      if (pattern.test(str)) {
+      if (pattern.test(visible)) {
         this._setState('error', this.currentCommand);
         this._scheduleErrorClear();
         break;
@@ -69,9 +80,8 @@ class StateDetector {
 
     // Fallback: regex prompt detection (for shells without OSC 133)
     // Recovers from busy AND error states when a new prompt appears.
-    // Runs even after error detection — if a prompt is at the end of
-    // the same chunk, the command is done and shell is ready.
-    if (this.state !== 'idle' && this._promptPattern.test(str)) {
+    // Checked against visible text so tmux escape sequences don't mask the prompt.
+    if (this.state !== 'idle' && this._promptPattern.test(visible)) {
       this._clearErrorTimer();
       this._setState('idle', null);
     }
