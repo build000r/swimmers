@@ -28,12 +28,15 @@ pub enum AuthScope {
     StreamWrite,
 }
 
-/// All operator scopes (a valid token currently receives all of these).
+/// All operator scopes — granted to operator tokens and local-trust mode.
 pub const OPERATOR_SCOPES: &[AuthScope] = &[
     AuthScope::SessionsRead,
     AuthScope::SessionsWrite,
     AuthScope::StreamWrite,
 ];
+
+/// Observer scopes — read-only access (no session mutation, no terminal input).
+pub const OBSERVER_SCOPES: &[AuthScope] = &[AuthScope::SessionsRead];
 
 // ---------------------------------------------------------------------------
 // AuthInfo — inserted as a request extension
@@ -118,18 +121,32 @@ pub async fn auth_middleware(config: Arc<Config>, mut request: Request, next: Ne
         AuthMode::Token => {
             let token = extract_bearer_token(&request);
 
-            match (&config.auth_token, token) {
-                (Some(expected), Some(provided)) if provided == expected.as_str() => {
-                    // Valid operator token — grant all scopes.
-                    request
-                        .extensions_mut()
-                        .insert(AuthInfo::new(OPERATOR_SCOPES.to_vec()));
-                    next.run(request).await
+            match token {
+                Some(provided) => {
+                    // Check operator token first, then observer token.
+                    if config
+                        .auth_token
+                        .as_deref()
+                        .map_or(false, |expected| provided == expected)
+                    {
+                        request
+                            .extensions_mut()
+                            .insert(AuthInfo::new(OPERATOR_SCOPES.to_vec()));
+                        next.run(request).await
+                    } else if config
+                        .observer_token
+                        .as_deref()
+                        .map_or(false, |expected| provided == expected)
+                    {
+                        request
+                            .extensions_mut()
+                            .insert(AuthInfo::new(OBSERVER_SCOPES.to_vec()));
+                        next.run(request).await
+                    } else {
+                        not_authenticated_response()
+                    }
                 }
-                _ => {
-                    // Missing, invalid, or no auth_token configured in token mode.
-                    not_authenticated_response()
-                }
+                None => not_authenticated_response(),
             }
         }
     }
@@ -170,7 +187,7 @@ mod tests {
 
     #[test]
     fn extract_bearer_works() {
-        use axum::http::{HeaderMap, HeaderValue};
+        use axum::http::HeaderValue;
 
         // Build a minimal request with an Authorization header.
         let mut request = Request::builder()
@@ -193,6 +210,14 @@ mod tests {
             .unwrap();
 
         assert_eq!(extract_bearer_token(&request), None);
+    }
+
+    #[test]
+    fn observer_has_read_only_scope() {
+        let info = AuthInfo::new(OBSERVER_SCOPES.to_vec());
+        assert!(info.has_scope(AuthScope::SessionsRead));
+        assert!(!info.has_scope(AuthScope::SessionsWrite));
+        assert!(!info.has_scope(AuthScope::StreamWrite));
     }
 
     #[test]

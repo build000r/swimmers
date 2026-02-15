@@ -214,6 +214,10 @@ impl SessionSupervisor {
             if !stale.is_empty() {
                 debug!(remaining_stale = stale.len(), "stale sessions after discovery");
                 for s in stale.iter() {
+                    // Broadcast session_state with exit_reason for already-connected
+                    // clients. Do NOT emit LifecycleEvent::Created for stale sessions
+                    // — they are already present in bootstrap payloads from persistence
+                    // and emitting Created would confuse client state machines.
                     let payload = SessionStatePayload {
                         state: SessionState::Exited,
                         previous_state: s.state,
@@ -227,12 +231,6 @@ impl SessionSupervisor {
                         session_id: s.session_id.clone(),
                         payload: serde_json::to_value(&payload).unwrap_or_default(),
                     };
-                    let _ = self.lifecycle_tx.send(LifecycleEvent::Created {
-                        session_id: s.session_id.clone(),
-                        summary: s.clone(),
-                        reason: "startup_missing_tmux".into(),
-                    });
-                    // Also broadcast the session_state event for clients already connected.
                     let _ = self.thought_tx.send(event);
                 }
             }

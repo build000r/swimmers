@@ -19,6 +19,7 @@ pub struct Config {
     pub port: u16,
     pub auth_mode: AuthMode,
     pub auth_token: Option<String>,
+    pub observer_token: Option<String>,
     pub thought_tick_ms: u64,
     pub thoughts_enabled_default: bool,
     pub terminal_cache_ttl_ms: u64,
@@ -35,6 +36,7 @@ impl Default for Config {
             port: 3210,
             auth_mode: AuthMode::LocalTrust,
             auth_token: None,
+            observer_token: None,
             thought_tick_ms: 15000,
             thoughts_enabled_default: true,
             terminal_cache_ttl_ms: 300_000,
@@ -63,6 +65,11 @@ impl Config {
         if let Ok(token) = std::env::var("AUTH_TOKEN") {
             if !token.is_empty() {
                 config.auth_token = Some(token);
+            }
+        }
+        if let Ok(token) = std::env::var("OBSERVER_TOKEN") {
+            if !token.is_empty() {
+                config.observer_token = Some(token);
             }
         }
         config
