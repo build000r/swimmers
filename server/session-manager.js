@@ -13,26 +13,25 @@ class Session {
     this.replayBuffer = Buffer.alloc(0);
     this.attachedWs = null;
 
+    // Clean env: unset TMUX/TMUX_PANE so tmux commands work even if
+    // the server itself is running inside a tmux session
+    const env = { ...process.env, TERM: 'xterm-256color' };
+    delete env.TMUX;
+    delete env.TMUX_PANE;
+
+    const ptyOpts = {
+      name: 'xterm-256color',
+      cols: 80,
+      rows: 24,
+      cwd: process.env.HOME,
+      env,
+    };
+
     // Spawn a PTY that attaches to the tmux session
-    // Use -CC for control mode? No — just plain attach so xterm.js renders it
     if (isNew) {
-      // Create new tmux session inside the PTY
-      this.pty = pty.spawn('tmux', ['new-session', '-s', tmuxName], {
-        name: 'xterm-256color',
-        cols: 80,
-        rows: 24,
-        cwd: process.env.HOME,
-        env: { ...process.env, TERM: 'xterm-256color' },
-      });
+      this.pty = pty.spawn('tmux', ['new-session', '-s', tmuxName], ptyOpts);
     } else {
-      // Attach to existing tmux session
-      this.pty = pty.spawn('tmux', ['attach-session', '-t', tmuxName], {
-        name: 'xterm-256color',
-        cols: 80,
-        rows: 24,
-        cwd: process.env.HOME,
-        env: { ...process.env, TERM: 'xterm-256color' },
-      });
+      this.pty = pty.spawn('tmux', ['attach-session', '-t', tmuxName], ptyOpts);
     }
 
     this.pty.onData((data) => {
@@ -63,8 +62,13 @@ class Session {
       }
     });
 
-    this.pty.onExit(() => {
+    this.pty.onExit(({ exitCode, signal }) => {
       this._exited = true;
+      if (exitCode !== 0) {
+        console.error(
+          `[session ${tmuxName}] PTY exited: code=${exitCode} signal=${signal}`
+        );
+      }
     });
   }
 
@@ -92,7 +96,7 @@ class Session {
       const payload = data.slice(1);
 
       if (cmd === 0x30) {
-        this.pty.write(payload.toString());
+        if (!this._exited) this.pty.write(payload.toString());
       } else if (cmd === 0x01) {
         try {
           const { cols, rows } = JSON.parse(payload.toString());
@@ -147,9 +151,12 @@ class SessionManager {
   // Discover real tmux sessions from the system
   _getTmuxSessions() {
     try {
+      const execEnv = { ...process.env };
+      delete execEnv.TMUX;
+      delete execEnv.TMUX_PANE;
       const out = execSync(
         'tmux list-sessions -F "#{session_name}\t#{session_windows}\t#{session_attached}"',
-        { encoding: 'utf-8', timeout: 3000 }
+        { encoding: 'utf-8', timeout: 3000, env: execEnv }
       );
       return out.trim().split('\n').filter(Boolean).map((line) => {
         const [name, windows, attached] = line.split('\t');
@@ -221,7 +228,7 @@ class SessionManager {
     if (!tmuxName || existingNames.has(tmuxName)) {
       let counter = tmuxSessions.length + 1;
       while (existingNames.has(`session-${counter}`)) counter++;
-      tmuxName = name || `session-${counter}`;
+      tmuxName = `session-${counter}`;
     }
 
     return this.connectSession(tmuxName);

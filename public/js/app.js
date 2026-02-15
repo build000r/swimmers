@@ -36,6 +36,10 @@
   async function createSession() {
     try {
       const res = await fetch('/api/sessions', { method: 'POST' });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.error || `HTTP ${res.status}`);
+      }
       const session = await res.json();
       sessions.push(session);
       renderer.update(sessions);
