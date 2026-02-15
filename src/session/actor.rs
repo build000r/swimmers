@@ -46,6 +46,7 @@ pub enum SessionCommand {
         client_id: ClientId,
         client_tx: mpsc::Sender<OutputFrame>,
         resume_from_seq: Option<u64>,
+        ack: oneshot::Sender<SubscribeOutcome>,
     },
 
     /// Remove a client subscription.
@@ -59,6 +60,17 @@ pub enum SessionCommand {
 
     /// Graceful shutdown -- detach from tmux, do NOT kill the tmux session.
     Shutdown,
+}
+
+/// Subscribe result returned to the websocket layer.
+#[derive(Debug)]
+pub enum SubscribeOutcome {
+    Ok,
+    ReplayTruncated {
+        requested_resume_from_seq: u64,
+        replay_window_start_seq: u64,
+        latest_seq: u64,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -254,8 +266,16 @@ impl SessionActor {
                         SessionCommand::DismissAttention => {
                             self.state_detector.dismiss_attention();
                         }
-                        SessionCommand::Subscribe { client_id, client_tx, resume_from_seq } => {
-                            self.handle_subscribe(client_id, client_tx, resume_from_seq).await;
+                        SessionCommand::Subscribe {
+                            client_id,
+                            client_tx,
+                            resume_from_seq,
+                            ack,
+                        } => {
+                            let outcome = self
+                                .handle_subscribe(client_id, client_tx, resume_from_seq)
+                                .await;
+                            let _ = ack.send(outcome);
                         }
                         SessionCommand::Unsubscribe { client_id } => {
                             self.subscribers.remove(&client_id);
@@ -400,7 +420,7 @@ impl SessionActor {
         client_id: ClientId,
         client_tx: mpsc::Sender<OutputFrame>,
         resume_from_seq: Option<u64>,
-    ) {
+    ) -> SubscribeOutcome {
         info!(
             session_id = %self.session_id,
             client_id,
@@ -408,9 +428,12 @@ impl SessionActor {
             "client subscribing"
         );
 
+        let mut outcome = SubscribeOutcome::Ok;
+
         // If the client wants replay, send buffered frames first.
         if let Some(from_seq) = resume_from_seq {
-            match self.replay_ring.replay_from(from_seq) {
+            let replay_from_seq = from_seq.saturating_add(1);
+            match self.replay_ring.replay_from(replay_from_seq) {
                 Some(frames) => {
                     for (seq, data) in frames {
                         let frame = OutputFrame { seq, data };
@@ -420,7 +443,7 @@ impl SessionActor {
                                 client_id,
                                 "subscriber dropped during replay"
                             );
-                            return;
+                            return SubscribeOutcome::Ok;
                         }
                     }
                 }
@@ -435,11 +458,17 @@ impl SessionActor {
                         window_start = self.replay_ring.window_start_seq(),
                         "replay truncated, client needs full refresh"
                     );
+                    outcome = SubscribeOutcome::ReplayTruncated {
+                        requested_resume_from_seq: from_seq,
+                        replay_window_start_seq: self.replay_ring.window_start_seq(),
+                        latest_seq: self.replay_ring.latest_seq(),
+                    };
                 }
             }
         }
 
         self.subscribers.insert(client_id, client_tx);
+        outcome
     }
 
     /// Build a summary snapshot of this session's current state.

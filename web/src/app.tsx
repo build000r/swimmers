@@ -124,6 +124,13 @@ export function App() {
   // ---- Polling fallback (when on overview) ----
 
   const startPolling = useCallback(() => {
+    if (currentView.value !== "overview") return;
+    if (
+      transportHealth.value !== "degraded" &&
+      transportHealth.value !== "disconnected"
+    ) {
+      return;
+    }
     if (pollRef.current) return;
     const ms = bootstrapDataRef.current?.poll_fallback_ms ?? 2000;
     pollRef.current = setInterval(async () => {
@@ -144,13 +151,27 @@ export function App() {
     }
   }, []);
 
-  // Start polling when on overview
+  // Poll only in degraded/disconnected transport while on overview.
   useEffect(() => {
-    if (bootstrapDone && currentView.value === "overview") {
+    const shouldPoll =
+      bootstrapDone &&
+      currentView.value === "overview" &&
+      (transportHealth.value === "degraded" ||
+        transportHealth.value === "disconnected");
+
+    if (shouldPoll) {
       startPolling();
+    } else {
+      stopPolling();
     }
     return stopPolling;
-  }, [bootstrapDone, startPolling, stopPolling]);
+  }, [
+    bootstrapDone,
+    startPolling,
+    stopPolling,
+    currentView.value,
+    transportHealth.value,
+  ]);
 
   // ---- Navigation ----
 
@@ -168,8 +189,7 @@ export function App() {
     currentView.value = "overview";
     activeSessionId.value = null;
     activeZonePreference.value = null;
-    startPolling();
-  }, [startPolling]);
+  }, []);
 
   // ---- Render ----
 

@@ -46,7 +46,7 @@ async fn create_session(
             let msg = e.to_string();
             // The supervisor returns anyhow errors. We detect specific failure
             // modes by inspecting the error message.
-            if msg.contains("already exists") {
+            if msg.contains("already exists") || msg.contains("duplicate session") {
                 (
                     StatusCode::CONFLICT,
                     Json(

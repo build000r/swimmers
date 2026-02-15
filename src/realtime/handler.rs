@@ -14,15 +14,16 @@ use axum::extract::State;
 use axum::response::IntoResponse;
 use chrono::Utc;
 use futures::{SinkExt, StreamExt};
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::{broadcast, mpsc, oneshot};
 
 use crate::api::AppState;
 use crate::realtime::codec;
-use crate::session::actor::{ClientId, OutputFrame, SessionCommand};
+use crate::session::actor::{ClientId, OutputFrame, SessionCommand, SubscribeOutcome};
 use crate::session::supervisor::LifecycleEvent;
 use crate::types::{
     ClientControlMessage, ControlErrorPayload, ControlEvent, DismissAttentionPayload,
-    ResizePayload, SessionCreatedPayload, SessionDeletedPayload, SubscribeSessionPayload,
+    ReplayTruncatedPayload, ResizePayload, SessionCreatedPayload, SessionDeletedPayload,
+    SubscribeSessionPayload,
 };
 
 /// Global client ID counter for assigning unique IDs to output subscriptions.
@@ -352,11 +353,13 @@ async fn handle_subscribe(
 
     // Send the Subscribe command to the session actor. The actor handles
     // replay internally and sends replayed frames through the channel.
+    let (ack_tx, ack_rx) = oneshot::channel();
     if let Err(e) = handle
         .send(SessionCommand::Subscribe {
             client_id,
             client_tx,
             resume_from_seq: sub_payload.resume_from_seq,
+            ack: ack_tx,
         })
         .await
     {
@@ -381,6 +384,39 @@ async fn handle_subscribe(
             output_rx: client_rx,
         },
     );
+
+    // Emit replay_truncated when resume point is outside retained window.
+    match tokio::time::timeout(std::time::Duration::from_secs(2), ack_rx).await {
+        Ok(Ok(SubscribeOutcome::Ok)) => {}
+        Ok(Ok(SubscribeOutcome::ReplayTruncated {
+            requested_resume_from_seq,
+            replay_window_start_seq,
+            latest_seq,
+        })) => {
+            let event = ControlEvent {
+                event: "replay_truncated".to_string(),
+                session_id: session_id.clone(),
+                payload: serde_json::to_value(ReplayTruncatedPayload {
+                    code: "REPLAY_TRUNCATED".to_string(),
+                    requested_resume_from_seq,
+                    replay_window_start_seq,
+                    latest_seq,
+                })
+                .unwrap(),
+            };
+            let _ = ws_sink
+                .send(Message::Text(
+                    serde_json::to_string(&event).unwrap().into(),
+                ))
+                .await;
+        }
+        Ok(Err(_)) => {
+            tracing::warn!("[session {session_id}] subscribe ack channel dropped");
+        }
+        Err(_) => {
+            tracing::warn!("[session {session_id}] subscribe ack timed out");
+        }
+    }
 
     tracing::info!(
         "[session {session_id}] client {client_id} subscribed (resume_from_seq={:?})",

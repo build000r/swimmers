@@ -13,12 +13,11 @@ import { Opcodes } from "@/types";
 
 // ---- Binary frame layout ----
 // TERMINAL_OUTPUT (server -> client):
-//   [0x11] [session_id: 36 bytes UTF-8] [seq: 8 bytes big-endian u64] [data: ...]
+//   [0x11] [session_id_len: u16 BE] [session_id UTF-8] [seq: u64 BE] [data: ...]
 //
 // TERMINAL_INPUT (client -> server):
-//   [0x10] [session_id: 36 bytes UTF-8] [data: ...]
+//   [0x10] [session_id_len: u16 BE] [session_id UTF-8] [data: ...]
 
-const SESSION_ID_LEN = 36;
 const SEQ_LEN = 8;
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
@@ -58,6 +57,9 @@ export class RealtimeService {
   private ws: WebSocket | null = null;
   private url: string = "";
   private callbacks: RealtimeCallbacks = {};
+  private terminalOutputListeners = new Set<
+    (frame: TerminalOutputFrame) => void
+  >();
   private reconnectMs = INITIAL_RECONNECT_MS;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private intentionalClose = false;
@@ -77,6 +79,16 @@ export class RealtimeService {
   /** Register event callbacks. Can be called before connect(). */
   on(cbs: RealtimeCallbacks): void {
     this.callbacks = { ...this.callbacks, ...cbs };
+  }
+
+  /** Subscribe to terminal output frames. Returns an unsubscribe function. */
+  subscribeTerminalOutput(
+    cb: (frame: TerminalOutputFrame) => void,
+  ): () => void {
+    this.terminalOutputListeners.add(cb);
+    return () => {
+      this.terminalOutputListeners.delete(cb);
+    };
   }
 
   /** Open WebSocket to the given URL. */
@@ -131,10 +143,13 @@ export class RealtimeService {
   sendInput(sessionId: string, data: Uint8Array): void {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
     const idBytes = encoder.encode(sessionId);
-    const frame = new Uint8Array(1 + SESSION_ID_LEN + data.length);
+    if (idBytes.length > 0xffff) return;
+    const frame = new Uint8Array(1 + 2 + idBytes.length + data.length);
     frame[0] = Opcodes.TERMINAL_INPUT;
-    frame.set(idBytes.subarray(0, SESSION_ID_LEN), 1);
-    frame.set(data, 1 + SESSION_ID_LEN);
+    frame[1] = (idBytes.length >> 8) & 0xff;
+    frame[2] = idBytes.length & 0xff;
+    frame.set(idBytes, 3);
+    frame.set(data, 3 + idBytes.length);
     this.ws.send(frame);
   }
 
@@ -191,27 +206,31 @@ export class RealtimeService {
   }
 
   private handleBinary(buf: Uint8Array): void {
-    if (buf.length < 1) return;
+    if (buf.length < 3) return;
     const opcode = buf[0];
 
     if (opcode === Opcodes.TERMINAL_OUTPUT) {
-      // [opcode(1)] [session_id(36)] [seq(8)] [data(...)]
-      const minLen = 1 + SESSION_ID_LEN + SEQ_LEN;
+      const sessionIdLen = (buf[1] << 8) | buf[2];
+      const sessionIdStart = 3;
+      const seqStart = sessionIdStart + sessionIdLen;
+      const minLen = seqStart + SEQ_LEN;
       if (buf.length < minLen) return;
 
-      const sessionId = decoder.decode(buf.subarray(1, 1 + SESSION_ID_LEN));
-      const seqView = new DataView(
-        buf.buffer,
-        buf.byteOffset + 1 + SESSION_ID_LEN,
-        SEQ_LEN,
+      const sessionId = decoder.decode(
+        buf.subarray(sessionIdStart, sessionIdStart + sessionIdLen),
       );
+      const seqView = new DataView(buf.buffer, buf.byteOffset + seqStart, SEQ_LEN);
       // Read as two 32-bit values since JS doesn't have native u64
       const seqHigh = seqView.getUint32(0);
       const seqLow = seqView.getUint32(4);
       const seq = seqHigh * 0x100000000 + seqLow;
       const data = buf.subarray(minLen);
 
-      this.callbacks.onTerminalOutput?.({ sessionId, seq, data });
+      const frame = { sessionId, seq, data };
+      this.callbacks.onTerminalOutput?.(frame);
+      for (const listener of this.terminalOutputListeners) {
+        listener(frame);
+      }
     }
   }
 

@@ -157,7 +157,7 @@ export function TerminalWorkspace({
       term.write(frame.data);
     };
 
-    realtime.on({ onTerminalOutput: handleOutput });
+    const unsubscribeOutput = realtime.subscribeTerminalOutput(handleOutput);
 
     // ---- Wire terminal input (unless observer) ----
 
@@ -199,6 +199,7 @@ export function TerminalWorkspace({
       }
       inputDisposable?.dispose();
       resizeDisposable?.dispose();
+      unsubscribeOutput();
       if (resizeTimerRef.current) clearTimeout(resizeTimerRef.current);
 
       // Detach from DOM but keep alive for cache
