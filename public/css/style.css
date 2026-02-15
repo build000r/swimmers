@@ -51,7 +51,7 @@ html, body {
 .terminal-zone {
   display: flex;
   flex-direction: column;
-  min-height: 120px;
+  min-width: 120px;
   overflow: hidden;
 }
 
@@ -187,9 +187,9 @@ html, body {
 
 /* Divider */
 #zone-divider {
-  height: 4px;
+  width: 4px;
   background: #0d1117;
-  cursor: ns-resize;
+  cursor: ew-resize;
   flex-shrink: 0;
   z-index: 10;
 }
@@ -213,10 +213,10 @@ html, body {
 
 .drop-zone-hint {
   position: absolute;
-  bottom: 0;
+  top: 0;
   left: 0;
-  right: 0;
-  height: 40%;
+  bottom: 0;
+  width: 40%;
   border: 2px dashed #4FC08D;
   border-radius: 8px;
   background: rgba(79, 192, 141, 0.1);
@@ -228,6 +228,22 @@ html, body {
 @keyframes drop-pulse {
   0%, 100% { opacity: 0.6; }
   50% { opacity: 1; }
+}
+
+/* Running-to-zone animation */
+.thronglet.running-to-zone {
+  transition: left 0.35s ease-in, top 0.35s ease-in !important;
+  pointer-events: none;
+}
+
+.thronglet.running-to-zone .thronglet-sprite {
+  animation: walk-cycle 0.2s steps(2) infinite !important;
+}
+
+.thronglet.running-to-zone .thronglet-label,
+.thronglet.running-to-zone .thought-bubble,
+.thronglet.running-to-zone .thronglet-tool {
+  display: none !important;
 }
 
 /* Mobile: single zone only */
@@ -302,6 +318,24 @@ html, body {
   letter-spacing: 0.3px;
 }
 
+.context-gauge {
+  width: 60px;
+  height: 4px;
+  background: rgba(0,0,0,0.2);
+  border-radius: 2px;
+  margin-top: 2px;
+  overflow: hidden;
+  display: none;
+}
+
+.context-gauge-fill {
+  height: 100%;
+  width: 0%;
+  background: #4FC08D;
+  border-radius: 2px;
+  transition: width 1s ease;
+}
+
 .thronglet-activity {
   font-size: 10px;
   color: #333;
@@ -315,34 +349,46 @@ html, body {
   white-space: nowrap;
 }
 
-/* Thought bubble */
+/* Thought bubble — floats above thronglet */
 .thought-bubble {
   position: absolute;
-  bottom: 100%;
+  top: 0;
   left: 50%;
-  transform: translateX(-50%);
+  transform: translate(-50%, calc(-100% - 20px));
   background: white;
   color: #333;
   font-size: 10px;
   padding: 4px 8px;
-  border-radius: 8px;
-  margin-bottom: 8px;
-  white-space: nowrap;
-  max-width: 120px;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  border-radius: 10px;
+  white-space: normal;
+  width: max-content;
+  max-width: 200px;
   box-shadow: 0 1px 3px rgba(0,0,0,0.2);
   pointer-events: none;
+  z-index: 5;
 }
 
-.thought-bubble::after {
-  content: '';
+.thought-circle {
   position: absolute;
-  top: 100%;
+  background: white;
+  border-radius: 50%;
+  box-shadow: 0 1px 2px rgba(0,0,0,0.15);
+}
+
+.thought-circle-lg {
+  width: 10px;
+  height: 10px;
+  bottom: -12px;
   left: 50%;
   transform: translateX(-50%);
-  border: 5px solid transparent;
-  border-top-color: white;
+}
+
+.thought-circle-sm {
+  width: 6px;
+  height: 6px;
+  bottom: -20px;
+  left: 50%;
+  transform: translateX(-50%);
 }
 
 /* Animations */
@@ -383,8 +429,18 @@ html, body {
   font-size: 14px;
 }
 
-.thronglet.attention .thought-bubble::after {
-  border-top-color: #5BC0EB;
+.thronglet.attention .thought-circle {
+  background: #5BC0EB;
+}
+
+.thronglet.error .thought-bubble {
+  background: #E74C3C;
+  color: white;
+  font-weight: 700;
+}
+
+.thronglet.error .thought-circle {
+  background: #E74C3C;
 }
 
 @keyframes idle-bounce {

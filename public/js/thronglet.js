@@ -6,6 +6,7 @@ class ThrongletRenderer {
     this.onTap = onTap;
     this.onDragToBottom = onDragToBottom;
     this.thronglets = new Map(); // id → { el, x, y, wanderInterval, showingNum }
+    this._runningToZone = new Set(); // sessionIds mid-animation
     this._fieldRect = null;
   }
 
@@ -38,9 +39,9 @@ class ThrongletRenderer {
   update(sessions) {
     const currentIds = new Set(sessions.map((s) => s.id));
 
-    // Remove thronglets for deleted sessions
+    // Remove thronglets for deleted sessions (skip mid-animation ones)
     for (const [id, t] of this.thronglets) {
-      if (!currentIds.has(id)) {
+      if (!currentIds.has(id) && !this._runningToZone.has(id)) {
         clearInterval(t.wanderInterval);
         t.el.remove();
         this.thronglets.delete(id);
@@ -62,11 +63,16 @@ class ThrongletRenderer {
           ? `<div class="thronglet-tool">${this._escapeHtml(session.tool)}</div>`
           : '';
         el.innerHTML = `
-          <div class="thought-bubble" style="display:none"></div>
+          <div class="thought-bubble" style="display:none">
+            <span class="thought-text"></span>
+            <div class="thought-circle thought-circle-lg"></div>
+            <div class="thought-circle thought-circle-sm"></div>
+          </div>
           ${toolBadge}
           <img class="thronglet-sprite" src="${this._spriteForState(session.state)}" alt="">
           <div class="thronglet-label">
-            <div class="thronglet-name">${this._escapeHtml(this._repoName(session.cwd))}</div>
+            <div class="thronglet-name">${this._escapeHtml(this._numberPrefix(session.name) + ' ' + this._repoName(session.cwd))}</div>
+            <div class="context-gauge"><div class="context-gauge-fill"></div></div>
             <div class="thronglet-activity"></div>
           </div>
         `;
@@ -88,26 +94,13 @@ class ThrongletRenderer {
 
         this._enableDrag(el, session.id);
 
-        // Long press to reveal session number
+        // Long press for haptic feedback
         let lpTimer = null;
         el.addEventListener('touchstart', (e) => {
           lpTimer = setTimeout(() => {
             lpTimer = null;
             el._longPressed = true;
             if (navigator.vibrate) navigator.vibrate(30);
-
-            // Show number prefix
-            const nameEl = el.querySelector('.thronglet-name');
-            const prefix = this._numberPrefix(session.name);
-            const repo = this._repoName(session.cwd);
-            nameEl.textContent = `${prefix} ${repo}`;
-            t.showingNum = true;
-
-            // Auto-hide after 2s
-            setTimeout(() => {
-              t.showingNum = false;
-              nameEl.textContent = repo;
-            }, 2000);
           }, 500);
         }, { passive: true });
 
@@ -134,7 +127,7 @@ class ThrongletRenderer {
           el.style.top = newY + 'px';
         }, 3000);
 
-        t = { el, x, y, wanderInterval, showingNum: false };
+        t = { el, x, y, wanderInterval };
         this.thronglets.set(session.id, t);
       }
 
@@ -156,27 +149,42 @@ class ThrongletRenderer {
         toolEl.remove();
       }
 
-      // Update name (tracks CWD changes) — but don't overwrite if showing number
+      // Update name (tracks CWD changes)
       const nameEl = t.el.querySelector('.thronglet-name');
-      if (!t.showingNum) {
-        nameEl.textContent = this._repoName(session.cwd);
+      nameEl.textContent = this._numberPrefix(session.name) + ' ' + this._repoName(session.cwd);
+
+      // Update context gauge
+      const gauge = t.el.querySelector('.context-gauge');
+      const gaugeFill = t.el.querySelector('.context-gauge-fill');
+      if (session.tokenCount > 0 && session.tool) {
+        const ratio = Math.min(session.tokenCount / session.contextLimit, 1);
+        gauge.style.display = 'block';
+        gaugeFill.style.width = (ratio * 100) + '%';
+        gaugeFill.style.background = this._gaugeColor(ratio);
+      } else {
+        gauge.style.display = 'none';
       }
 
-      // Update activity label
+      // Update activity label and thought bubble
       const activity = t.el.querySelector('.thronglet-activity');
       const bubble = t.el.querySelector('.thought-bubble');
+      const thoughtText = bubble.querySelector('.thought-text');
 
-      if (session.state === 'busy' && session.currentCommand) {
+      if (session.thought) {
+        activity.textContent = session.thought;
+        thoughtText.textContent = session.thought;
+        bubble.style.display = '';
+      } else if (session.state === 'busy' && session.currentCommand) {
         activity.textContent = session.currentCommand;
-        bubble.textContent = session.currentCommand;
+        thoughtText.textContent = session.currentCommand;
         bubble.style.display = '';
       } else if (session.state === 'error') {
         activity.textContent = 'error!';
-        bubble.textContent = '!!!';
+        thoughtText.textContent = '!!!';
         bubble.style.display = '';
       } else if (session.state === 'attention') {
         activity.textContent = 'ready';
-        bubble.textContent = '?';
+        thoughtText.textContent = '?';
         bubble.style.display = '';
       } else {
         activity.textContent = '';
@@ -188,8 +196,12 @@ class ThrongletRenderer {
   _enableDrag(el, sessionId) {
     let startX, startY, dragging, ghost, hint;
 
+    // Prevent native browser image drag from stealing mouse events
+    el.addEventListener('dragstart', (e) => e.preventDefault());
+
     el.addEventListener('mousedown', (e) => {
       if (e.button !== 0) return;
+      e.preventDefault(); // prevent text selection during drag
       startX = e.clientX;
       startY = e.clientY;
       dragging = false;
@@ -198,7 +210,7 @@ class ThrongletRenderer {
         const dy = e.clientY - startY;
         const dx = e.clientX - startX;
 
-        if (!dragging && dy > 10 && Math.abs(dy) > Math.abs(dx)) {
+        if (!dragging && dx < -10 && Math.abs(dx) > Math.abs(dy)) {
           dragging = true;
           el._isDragging = true;
           el.classList.add('dragging');
@@ -226,12 +238,12 @@ class ThrongletRenderer {
         document.removeEventListener('mouseup', onMouseUp);
 
         if (dragging) {
-          const dy = e.clientY - startY;
+          const dx = e.clientX - startX;
           el.classList.remove('dragging');
           if (ghost) { ghost.remove(); ghost = null; }
           if (hint) { hint.remove(); hint = null; }
 
-          if (dy > 100 && this.onDragToBottom) {
+          if (dx < -100 && this.onDragToBottom) {
             this.onDragToBottom(sessionId);
           }
 
@@ -244,12 +256,42 @@ class ThrongletRenderer {
     });
   }
 
+  runToZone(sessionId, targetX, targetY) {
+    const t = this.thronglets.get(sessionId);
+    if (!t) return;
+
+    // Stop wandering
+    clearInterval(t.wanderInterval);
+    t.wanderInterval = null;
+
+    // Mark as animating
+    this._runningToZone.add(sessionId);
+    t.el.classList.add('running-to-zone');
+
+    // Set target position (runs leftward off-screen)
+    t.el.style.left = targetX + 'px';
+    t.el.style.top = targetY + 'px';
+
+    // Clean up after animation completes
+    setTimeout(() => {
+      this._runningToZone.delete(sessionId);
+      t.el.remove();
+      this.thronglets.delete(sessionId);
+    }, 400);
+  }
+
   removeThronglet(sessionId) {
     const t = this.thronglets.get(sessionId);
     if (!t) return;
     clearInterval(t.wanderInterval);
     t.el.remove();
     this.thronglets.delete(sessionId);
+  }
+
+  _gaugeColor(ratio) {
+    if (ratio >= 0.8) return '#E74C3C';
+    if (ratio >= 0.5) return '#F5A623';
+    return '#4FC08D';
   }
 
   _escapeHtml(s) {
