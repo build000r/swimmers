@@ -1,0 +1,310 @@
+*, *::before, *::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+:root {
+  --header-bg: #16213e;
+  --header-height: 52px;
+  --grass-green: #8CC152;
+  --grass-dark: #7AB648;
+  --safe-top: env(safe-area-inset-top, 0px);
+  --safe-bottom: env(safe-area-inset-bottom, 0px);
+  --safe-left: env(safe-area-inset-left, 0px);
+  --safe-right: env(safe-area-inset-right, 0px);
+}
+
+html, body {
+  height: 100%;
+  overflow: hidden;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, sans-serif;
+  background: #0a0a0a;
+  color: #fff;
+  -webkit-text-size-adjust: 100%;
+  -webkit-tap-highlight-color: transparent;
+}
+
+/* Views */
+.view {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  transform: translateX(100%);
+  transition: transform 0.25s ease;
+  will-change: transform;
+}
+
+.view.active {
+  transform: translateX(0);
+}
+
+.view.slide-left {
+  transform: translateX(-100%);
+}
+
+/* Header */
+.header {
+  background: var(--header-bg);
+  height: calc(var(--header-height) + var(--safe-top));
+  padding-top: var(--safe-top);
+  padding-left: max(16px, var(--safe-left));
+  padding-right: max(16px, var(--safe-right));
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-shrink: 0;
+  z-index: 10;
+}
+
+.header h1 {
+  font-size: 20px;
+  font-weight: 700;
+  letter-spacing: -0.5px;
+}
+
+.add-btn {
+  width: 44px;
+  height: 44px;
+  border: none;
+  background: rgba(255,255,255,0.15);
+  color: #fff;
+  font-size: 28px;
+  border-radius: 12px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.add-btn:active {
+  background: rgba(255,255,255,0.3);
+}
+
+/* Terminal header */
+.terminal-header {
+  gap: 12px;
+  justify-content: flex-start;
+}
+
+.back-btn {
+  width: 44px;
+  height: 44px;
+  border: none;
+  background: none;
+  color: #fff;
+  font-size: 24px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.terminal-title {
+  font-size: 16px;
+  font-weight: 600;
+  flex: 1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.state-dot {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  margin-right: 4px;
+}
+
+.state-dot.idle { background: #4FC08D; }
+.state-dot.busy { background: #F5A623; animation: pulse 1s ease infinite; }
+.state-dot.error { background: #E74C3C; animation: pulse 0.5s ease infinite; }
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
+
+/* Grass field */
+.field {
+  flex: 1;
+  background: linear-gradient(180deg, #A8D86E 0%, var(--grass-green) 30%, var(--grass-dark) 100%);
+  position: relative;
+  overflow: hidden;
+  padding-bottom: var(--safe-bottom);
+}
+
+#thronglets-container {
+  position: absolute;
+  inset: 0;
+}
+
+.empty-state {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  color: rgba(0,0,0,0.4);
+  font-size: 18px;
+  font-weight: 600;
+}
+
+.empty-state .hint {
+  font-size: 14px;
+  font-weight: 400;
+}
+
+.empty-state.hidden {
+  display: none;
+}
+
+/* Terminal container — must have explicit dimensions for xterm.js FitAddon */
+#terminal-container {
+  flex: 1;
+  width: 100%;
+  height: 100%;
+  min-height: 0; /* important: allow flex child to shrink */
+  background: #1a1a2e;
+  padding: 5px;
+  padding-bottom: max(5px, var(--safe-bottom));
+  overflow: hidden;
+}
+
+#terminal-container .xterm {
+  height: calc(100% - 10px);
+}
+
+#terminal-container .xterm-viewport {
+  overflow-y: auto;
+}
+
+/* Field scenery */
+.field-tree {
+  position: absolute;
+  width: 100px;
+  height: auto;
+  image-rendering: pixelated;
+  pointer-events: none;
+  opacity: 0.85;
+  z-index: 1;
+}
+
+.field-tree-sm {
+  width: 70px;
+}
+
+/* Thronglet */
+.thronglet {
+  position: absolute;
+  width: 80px;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+  transition: left 2s linear, top 2s linear;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  z-index: 2;
+}
+
+.thronglet-sprite {
+  width: 80px;
+  height: 80px;
+  object-fit: contain;
+  image-rendering: pixelated;
+  image-rendering: -moz-crisp-edges;
+  image-rendering: crisp-edges;
+}
+
+.thronglet-label {
+  text-align: center;
+  margin-top: 4px;
+}
+
+.thronglet-name {
+  font-size: 11px;
+  font-weight: 700;
+  color: #16213e;
+  background: rgba(255,255,255,0.8);
+  padding: 1px 6px;
+  border-radius: 4px;
+  white-space: nowrap;
+}
+
+.thronglet-activity {
+  font-size: 10px;
+  color: #333;
+  background: rgba(255,255,255,0.6);
+  padding: 1px 4px;
+  border-radius: 3px;
+  margin-top: 2px;
+  max-width: 100px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Thought bubble */
+.thought-bubble {
+  position: absolute;
+  bottom: 100%;
+  left: 50%;
+  transform: translateX(-50%);
+  background: white;
+  color: #333;
+  font-size: 10px;
+  padding: 4px 8px;
+  border-radius: 8px;
+  margin-bottom: 8px;
+  white-space: nowrap;
+  max-width: 120px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.2);
+  pointer-events: none;
+}
+
+.thought-bubble::after {
+  content: '';
+  position: absolute;
+  top: 100%;
+  left: 50%;
+  transform: translateX(-50%);
+  border: 5px solid transparent;
+  border-top-color: white;
+}
+
+/* Animations */
+.thronglet.idle .thronglet-sprite {
+  animation: idle-bounce 2s ease-in-out infinite;
+}
+
+.thronglet.busy .thronglet-sprite {
+  animation: walk-cycle 0.6s steps(2) infinite;
+}
+
+.thronglet.error .thronglet-sprite {
+  animation: shake 0.4s ease-in-out infinite;
+}
+
+@keyframes idle-bounce {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-6px); }
+}
+
+@keyframes walk-cycle {
+  0% { transform: scaleX(1); }
+  50% { transform: scaleX(-1); }
+}
+
+@keyframes shake {
+  0%, 100% { transform: translateX(0); }
+  25% { transform: translateX(-3px); }
+  75% { transform: translateX(3px); }
+}

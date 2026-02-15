@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, user-scalable=no, maximum-scale=1">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="mobile-web-app-capable" content="yes">
+  <title>Throngterm</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.min.css">
+  <link rel="stylesheet" href="/css/style.css">
+</head>
+<body>
+  <!-- Overview View: Thronglet Field -->
+  <div id="overview-view" class="view active">
+    <header class="header">
+      <h1>Throngterm</h1>
+      <button id="add-session-btn" class="add-btn" aria-label="New session">+</button>
+    </header>
+    <div id="field" class="field">
+      <img class="field-tree" src="/assets/tree.png" style="left:10%; bottom:15%;" alt="">
+      <img class="field-tree" src="/assets/tree.png" style="right:8%; bottom:35%;" alt="">
+      <img class="field-tree field-tree-sm" src="/assets/tree.png" style="left:55%; bottom:55%;" alt="">
+      <div id="thronglets-container"></div>
+      <div id="empty-state" class="empty-state">
+        <p>No sessions yet</p>
+        <p class="hint">Tap + to create one</p>
+      </div>
+    </div>
+  </div>
+
+  <!-- Terminal View -->
+  <div id="terminal-view" class="view">
+    <header class="header terminal-header">
+      <button id="back-btn" class="back-btn" aria-label="Back">&larr;</button>
+      <span id="terminal-title" class="terminal-title">session</span>
+      <span id="terminal-state-dot" class="state-dot idle"></span>
+    </header>
+    <div id="terminal-container"></div>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.min.js"></script>
+  <script src="/js/terminal.js"></script>
+  <script src="/js/thronglet.js"></script>
+  <script src="/js/app.js"></script>
+</body>
+</html>
