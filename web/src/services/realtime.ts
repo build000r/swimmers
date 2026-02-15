@@ -60,6 +60,9 @@ export class RealtimeService {
   private terminalOutputListeners = new Set<
     (frame: TerminalOutputFrame) => void
   >();
+  private replayTruncatedListeners = new Set<
+    (sessionId: string, payload: ReplayTruncatedPayload) => void
+  >();
   private reconnectMs = INITIAL_RECONNECT_MS;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private intentionalClose = false;
@@ -88,6 +91,16 @@ export class RealtimeService {
     this.terminalOutputListeners.add(cb);
     return () => {
       this.terminalOutputListeners.delete(cb);
+    };
+  }
+
+  /** Subscribe to replay-truncated events. Returns an unsubscribe function. */
+  subscribeReplayTruncated(
+    cb: (sessionId: string, payload: ReplayTruncatedPayload) => void,
+  ): () => void {
+    this.replayTruncatedListeners.add(cb);
+    return () => {
+      this.replayTruncatedListeners.delete(cb);
     };
   }
 
@@ -273,10 +286,13 @@ export class RealtimeService {
         );
         break;
       case "replay_truncated":
-        this.callbacks.onReplayTruncated?.(
-          session_id,
-          payload as ReplayTruncatedPayload,
-        );
+        {
+          const typed = payload as ReplayTruncatedPayload;
+          this.callbacks.onReplayTruncated?.(session_id, typed);
+          for (const listener of this.replayTruncatedListeners) {
+            listener(session_id, typed);
+          }
+        }
         break;
       case "session_overloaded":
         this.callbacks.onSessionOverloaded?.(

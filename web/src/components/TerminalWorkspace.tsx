@@ -6,6 +6,7 @@ import type { SessionSummary, SessionState } from "@/types";
 import { realtime } from "@/app";
 import type { TerminalOutputFrame } from "@/services/realtime";
 import type { CachedTerminal } from "@/hooks/useTerminalCache";
+import { fetchSnapshot } from "@/services/api";
 
 // ---- Helpers ----
 
@@ -158,6 +159,19 @@ export function TerminalWorkspace({
     };
 
     const unsubscribeOutput = realtime.subscribeTerminalOutput(handleOutput);
+    const unsubscribeReplay = realtime.subscribeReplayTruncated(
+      async (sessionId, _payload) => {
+        if (sessionId !== session.session_id) return;
+        try {
+          const snapshot = await fetchSnapshot(session.session_id);
+          seqRef.current = snapshot.latest_seq;
+          term.clear();
+          term.write(snapshot.screen_text);
+        } catch {
+          // Keep current terminal state; banner remains visible for manual retry.
+        }
+      },
+    );
 
     // ---- Wire terminal input (unless observer) ----
 
@@ -200,6 +214,7 @@ export function TerminalWorkspace({
       inputDisposable?.dispose();
       resizeDisposable?.dispose();
       unsubscribeOutput();
+      unsubscribeReplay();
       if (resizeTimerRef.current) clearTimeout(resizeTimerRef.current);
 
       // Detach from DOM but keep alive for cache
