@@ -9,7 +9,7 @@ const server = http.createServer(app);
 const wss = new WebSocketServer({ noServer: true });
 const manager = new SessionManager();
 
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 3210;
 
 // Serve static files
 app.use(express.static(path.join(__dirname, '..', 'public')));
@@ -42,21 +42,19 @@ app.delete('/api/sessions/:id', (req, res) => {
 
 // WebSocket upgrade — route /ws/:sessionId
 server.on('upgrade', (req, socket, head) => {
-  const match = req.url.match(/^\/ws\/([a-f0-9]+)$/);
+  const match = req.url.match(/^\/ws\/([\w.-]+)$/);
   if (!match) {
     socket.destroy();
     return;
   }
 
   const sessionId = match[1];
-  const session = manager.getSession(sessionId);
-  if (!session) {
-    socket.destroy();
-    return;
-  }
 
   wss.handleUpgrade(req, socket, head, (ws) => {
-    manager.attachWebSocket(sessionId, ws);
+    const ok = manager.attachWebSocket(sessionId, ws);
+    if (!ok) {
+      ws.close(1008, 'session not found');
+    }
   });
 });
 
