@@ -120,8 +120,17 @@ class TerminalWrapper {
       this.ws.send(frame);
     });
 
-    // Refit on window/viewport resize (debounced to avoid layout thrashing
-    // during keyboard show/hide, address bar toggle, orientation change)
+    this._addResizeListeners();
+  }
+
+  // Call this after the container is visible and has its final dimensions
+  fit() {
+    if (this.fitAddon) this.fitAddon.fit();
+  }
+
+  // --- Resize listener helpers ---
+
+  _addResizeListeners() {
     this._resizeHandler = () => {
       clearTimeout(this._resizeTimer);
       this._resizeTimer = setTimeout(() => {
@@ -134,16 +143,7 @@ class TerminalWrapper {
     }
   }
 
-  // Call this after the container is visible and has its final dimensions
-  fit() {
-    if (this.fitAddon) this.fitAddon.fit();
-  }
-
-  disconnect() {
-    if (this.ws) {
-      this.ws.close();
-      this.ws = null;
-    }
+  _removeResizeListeners() {
     if (this._resizeHandler) {
       clearTimeout(this._resizeTimer);
       window.removeEventListener('resize', this._resizeHandler);
@@ -152,12 +152,92 @@ class TerminalWrapper {
       }
       this._resizeHandler = null;
     }
+  }
+
+  // --- Cache support ---
+
+  // Remove host element from DOM and stop resize listeners.
+  // Keeps xterm instance and WebSocket alive for cache.
+  detachFromDOM() {
+    this._removeResizeListeners();
+    if (this.container && this.container.parentNode) {
+      this.container.parentNode.removeChild(this.container);
+    }
+  }
+
+  // Re-append host element into a parent, restore resize listeners, refit.
+  attachToDOM(parent) {
+    parent.appendChild(this.container);
+    this._addResizeListeners();
+    if (this.fitAddon) this.fitAddon.fit();
+  }
+
+  // Reopen WebSocket if it died while cached.
+  reconnect() {
+    if (this.ws && this.ws.readyState === WebSocket.OPEN) return;
+    // Close stale socket if lingering
+    if (this.ws) {
+      try { this.ws.close(); } catch (e) {}
+      this.ws = null;
+    }
+    const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    this.ws = new WebSocket(`${proto}//${location.host}/ws/${this.sessionId}`);
+    this.ws.binaryType = 'arraybuffer';
+
+    this.ws.onopen = () => {
+      const msg = JSON.stringify({ cols: this.term.cols, rows: this.term.rows });
+      const payload = this.textEncoder.encode(msg);
+      const frame = new Uint8Array(1 + payload.length);
+      frame[0] = 0x01;
+      frame.set(payload, 1);
+      this.ws.send(frame);
+    };
+
+    this.ws.onmessage = (ev) => {
+      const rawData = ev.data;
+      const cmd = new Uint8Array(rawData)[0];
+      const data = rawData.slice(1);
+      switch (cmd) {
+        case 0x30:
+          this.term.write(new Uint8Array(data));
+          break;
+        case 0x01:
+          document.getElementById('terminal-title').textContent = this.textDecoder.decode(data);
+          break;
+        case 0x02:
+          try {
+            const state = JSON.parse(this.textDecoder.decode(data));
+            if (this._onStateChange) this._onStateChange(state);
+          } catch (e) {}
+          break;
+        case 0x03:
+          if (this._onSessionExit) this._onSessionExit();
+          break;
+      }
+    };
+
+    this.ws.onclose = () => {
+      if (this.term) this.term.write('\r\n\x1b[90m[disconnected]\x1b[0m\r\n');
+    };
+  }
+
+  get isAlive() {
+    return !!(this.term && this.fitAddon);
+  }
+
+  // Full teardown — used by cache eviction and normal cleanup
+  disconnect() {
+    if (this.ws) {
+      this.ws.close();
+      this.ws = null;
+    }
+    this._removeResizeListeners();
     if (this.term) {
       this.term.dispose();
       this.term = null;
     }
     this.fitAddon = null;
-    this.container.innerHTML = '';
+    if (this.container) this.container.innerHTML = '';
   }
 
   focus() {

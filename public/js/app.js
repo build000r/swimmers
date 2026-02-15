@@ -3,22 +3,33 @@
 (function () {
   const overviewView = document.getElementById('overview-view');
   const terminalView = document.getElementById('terminal-view');
-  const addBtn = document.getElementById('add-session-btn');
   const backBtn = document.getElementById('back-btn');
   const termContainer = document.getElementById('terminal-container');
   const termTitle = document.getElementById('terminal-title');
   const stateDot = document.getElementById('terminal-state-dot');
   const emptyState = document.getElementById('empty-state');
+  const field = document.getElementById('field');
 
   let pollInterval = null;
   let currentView = 'overview';
-  let termWrapper = null;
+  let activeSessionId = null;
   let sessions = [];
+  const cache = new TerminalCache();
+
+  const LONG_PRESS_MS = 500;
 
   const renderer = new ThrongletRenderer(
     document.getElementById('thronglets-container'),
     (sessionId) => openTerminal(sessionId)
   );
+
+  // --- Helpers ---
+
+  function repoName(cwd) {
+    if (!cwd || cwd === '/') return 'root';
+    const parts = cwd.replace(/\/+$/, '').split('/');
+    return parts[parts.length - 1] || 'root';
+  }
 
   // --- API ---
 
@@ -53,10 +64,27 @@
   // --- Views ---
 
   function showOverview() {
-    if (termWrapper) {
-      termWrapper.disconnect();
-      termWrapper = null;
+    // Cache the active terminal instead of destroying it
+    if (activeSessionId) {
+      const entry = cache.get(activeSessionId);
+      if (entry) {
+        // Already in cache (shouldn't happen, but be safe)
+        entry.wrapper.detachFromDOM();
+        cache.put(activeSessionId, entry.wrapper, entry.hostEl);
+      } else {
+        // Find the wrapper's host element in termContainer
+        const hostEl = termContainer.querySelector('.term-host');
+        if (hostEl) {
+          const wrapper = hostEl._termWrapper;
+          if (wrapper) {
+            wrapper.detachFromDOM();
+            cache.put(activeSessionId, wrapper, hostEl);
+          }
+        }
+      }
+      activeSessionId = null;
     }
+
     currentView = 'overview';
     overviewView.classList.add('active');
     overviewView.classList.remove('slide-left');
@@ -72,13 +100,17 @@
     currentView = 'terminal';
     stopPolling();
 
-    // Clean up any previous terminal
-    if (termWrapper) {
-      termWrapper.disconnect();
-      termWrapper = null;
+    // If switching from one terminal to another, cache the old one
+    if (activeSessionId && activeSessionId !== sessionId) {
+      const hostEl = termContainer.querySelector('.term-host');
+      if (hostEl && hostEl._termWrapper) {
+        hostEl._termWrapper.detachFromDOM();
+        cache.put(activeSessionId, hostEl._termWrapper, hostEl);
+      }
     }
 
-    termTitle.textContent = session.name;
+    activeSessionId = sessionId;
+    termTitle.textContent = `tmux a -t ${session.name}`;
     updateStateDot(session.state);
 
     // Show terminal view
@@ -86,24 +118,28 @@
     overviewView.classList.add('slide-left');
     terminalView.classList.add('active');
 
-    // Wait for CSS transition to finish so container has real dimensions,
-    // then open xterm, fit it, and connect the WebSocket
-    terminalView.addEventListener('transitionend', function onEnd() {
-      terminalView.removeEventListener('transitionend', onEnd);
+    // Check cache
+    const cached = cache.get(sessionId);
+    if (cached && cached.wrapper.isAlive) {
+      restoreTerminal(cached);
+    } else {
+      if (cached) cache.evict(sessionId); // stale entry
       initTerminal(sessionId);
-    }, { once: true });
-
-    // Fallback if transitionend doesn't fire (e.g. reduced motion)
-    setTimeout(() => {
-      if (!termWrapper) initTerminal(sessionId);
-    }, 350);
+    }
   }
 
   function initTerminal(sessionId) {
-    if (termWrapper) return; // already initialized
+    // Create a per-session host div
+    const hostEl = document.createElement('div');
+    hostEl.className = 'term-host';
+    hostEl.style.width = '100%';
+    hostEl.style.height = '100%';
+    termContainer.appendChild(hostEl);
 
-    termWrapper = new TerminalWrapper(termContainer);
-    termWrapper.onStateChange((info) => {
+    const wrapper = new TerminalWrapper(hostEl);
+    hostEl._termWrapper = wrapper;
+
+    wrapper.onStateChange((info) => {
       updateStateDot(info.state);
       const s = sessions.find((x) => x.id === sessionId);
       if (s) {
@@ -111,16 +147,40 @@
         s.currentCommand = info.currentCommand;
       }
     });
-    termWrapper.onSessionExit(() => showOverview());
+    wrapper.onSessionExit(() => {
+      cache.evict(sessionId);
+      if (activeSessionId === sessionId) showOverview();
+    });
 
-    // 1. Open terminal into the now-visible container
-    termWrapper.open();
-    // 2. Connect WebSocket (sends initial resize on open)
-    termWrapper.connect(sessionId);
-    // 3. Extra fit after a tick to ensure dimensions are correct
+    wrapper.open();
+    wrapper.connect(sessionId);
+
+    // Refit after layout settles, then focus
+    const onReady = () => {
+      wrapper.fit();
+      wrapper.focus();
+    };
+    terminalView.addEventListener('transitionend', function onEnd() {
+      terminalView.removeEventListener('transitionend', onEnd);
+      onReady();
+    }, { once: true });
+    // Fallback if transitionend doesn't fire
+    setTimeout(onReady, 350);
+  }
+
+  function restoreTerminal(entry) {
+    const { wrapper, hostEl } = entry;
+
+    wrapper.attachToDOM(termContainer);
+
+    // Reconnect WS if it dropped while cached
+    if (!wrapper.ws || wrapper.ws.readyState !== WebSocket.OPEN) {
+      wrapper.reconnect();
+    }
+
     requestAnimationFrame(() => {
-      termWrapper.fit();
-      termWrapper.focus();
+      wrapper.fit();
+      wrapper.focus();
     });
   }
 
@@ -144,8 +204,52 @@
 
   // --- Events ---
 
-  addBtn.addEventListener('click', createSession);
   backBtn.addEventListener('click', showOverview);
+
+  // Tap terminal title to copy tmux attach command
+  termTitle.addEventListener('click', () => {
+    const cmd = termTitle.textContent;
+    navigator.clipboard.writeText(cmd).then(() => {
+      const orig = termTitle.textContent;
+      termTitle.textContent = 'copied!';
+      setTimeout(() => { termTitle.textContent = orig; }, 800);
+    }).catch(() => {});
+  });
+
+  // Long press on field to create a new session
+  let fieldLongPress = null;
+
+  function startFieldLongPress(e) {
+    // Don't trigger if touching a thronglet
+    const target = e.target || e.srcElement;
+    if (target.closest && target.closest('.thronglet')) return;
+    fieldLongPress = setTimeout(() => {
+      fieldLongPress = null;
+      if (navigator.vibrate) navigator.vibrate(50);
+      createSession();
+    }, LONG_PRESS_MS);
+  }
+
+  function cancelFieldLongPress() {
+    if (fieldLongPress) {
+      clearTimeout(fieldLongPress);
+      fieldLongPress = null;
+    }
+  }
+
+  // Suppress native context menu on the field (long-press on mobile triggers it)
+  field.addEventListener('contextmenu', (e) => e.preventDefault());
+
+  // Touch events (mobile)
+  field.addEventListener('touchstart', startFieldLongPress, { passive: true });
+  field.addEventListener('touchmove', cancelFieldLongPress, { passive: true });
+  field.addEventListener('touchend', cancelFieldLongPress, { passive: true });
+
+  // Mouse events (desktop)
+  field.addEventListener('mousedown', startFieldLongPress);
+  field.addEventListener('mousemove', cancelFieldLongPress);
+  field.addEventListener('mouseup', cancelFieldLongPress);
+  field.addEventListener('mouseleave', cancelFieldLongPress);
 
   // Swipe right to go back on terminal view
   let touchStartX = 0;
