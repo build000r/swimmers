@@ -24,6 +24,9 @@ use thought::loop_runner::ThoughtLoopRunner;
 
 #[tokio::main]
 async fn main() {
+    // Load .env before anything reads env vars.
+    let _ = dotenvy::dotenv();
+
     // Initialize tracing
     tracing_subscriber::fmt()
         .with_env_filter(
