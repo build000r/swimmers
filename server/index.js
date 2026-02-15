@@ -3,6 +3,7 @@ const http = require('http');
 const { WebSocketServer } = require('ws');
 const path = require('path');
 const SessionManager = require('./session-manager');
+const { startThoughtLoop } = require('./thought-loop');
 
 const app = express();
 const server = http.createServer(app);
@@ -30,8 +31,14 @@ app.post('/api/sessions', (req, res) => {
   }
 });
 
+const SESSION_ID_RE = /^[a-zA-Z0-9_-]+$/;
+
 app.delete('/api/sessions/:id', (req, res) => {
-  const ok = manager.destroySession(req.params.id);
+  const { id } = req.params;
+  if (!id || !SESSION_ID_RE.test(id)) {
+    return res.status(400).json({ error: 'invalid session id' });
+  }
+  const ok = manager.destroySession(id);
   if (ok) {
     res.json({ ok: true });
   } else {
@@ -70,5 +77,5 @@ server.listen(PORT, '0.0.0.0', () => {
     }
   }
 
-  manager.startThoughtLoop();
+  startThoughtLoop(manager);
 });

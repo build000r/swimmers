@@ -1,5 +1,5 @@
 const pty = require('node-pty');
-const { execSync, execFile } = require('child_process');
+const { execSync } = require('child_process');
 const crypto = require('crypto');
 const StateDetector = require('./state-detector');
 const ScrollGuard = require('./scroll-guard');
@@ -133,7 +133,9 @@ class Session {
         try {
           const { cols, rows } = JSON.parse(payload.toString());
           this.pty.resize(cols, rows);
-        } catch (e) {}
+        } catch (e) {
+          console.error(`[session ${this.tmuxName}] resize failed:`, e.message);
+        }
       } else if (cmd === 0x04) {
         this.detector.dismissAttention();
       }
@@ -182,9 +184,13 @@ class Session {
       // Detach from tmux cleanly (don't kill the tmux session)
       this.pty.write('\x02d'); // Ctrl-B d = tmux detach
       setTimeout(() => {
-        try { this.pty.kill(); } catch (e) {}
+        try { this.pty.kill(); } catch (e) {
+          console.error(`[session ${this.tmuxName}] pty.kill() failed:`, e.message);
+        }
       }, 500);
-    } catch (e) {}
+    } catch (e) {
+      console.error(`[session ${this.tmuxName}] destroy failed:`, e.message);
+    }
   }
 
   toJSON() {
@@ -256,6 +262,7 @@ class SessionManager {
       }
       return null;
     } catch (e) {
+      console.error(`[session-manager] _detectToolForPid(${panePid}) failed:`, e.message);
       return null;
     }
   }
@@ -281,6 +288,7 @@ class SessionManager {
         };
       });
     } catch (e) {
+      console.error('[session-manager] _getTmuxSessions failed:', e.message);
       return [];
     }
   }
@@ -361,85 +369,6 @@ class SessionManager {
     }
 
     return this.connectSession(tmuxName);
-  }
-
-  startThoughtLoop() {
-    setInterval(this._generateThoughts.bind(this), 15000);
-    console.log('  thought generation loop started');
-  }
-
-  async _generateThoughts() {
-    const sessionCount = this.sessions.size;
-    console.log(`[thought] tick — ${sessionCount} sessions`);
-
-    for (const session of this.sessions.values()) {
-      if (session._exited) {
-        console.log(`[thought] ${session.id}: skip (exited)`);
-        continue;
-      }
-
-      const state = session.detector.state;
-
-      const hash = session.replayHash();
-      if (hash === session._lastReplayHash) {
-        console.log(`[thought] ${session.id}: skip (unchanged hash)`);
-        continue;
-      }
-      session._lastReplayHash = hash;
-
-      const context = session.getThoughtContext();
-      if (!context.trim()) {
-        console.log(`[thought] ${session.id}: skip (empty context)`);
-        continue;
-      }
-
-      const prevContext = session._lastThoughtContext;
-      session._lastThoughtContext = context;
-
-      console.log(`[thought] ${session.id}: calling codex (state=${state}, first=${!prevContext}, context=${context.length} chars)`);
-
-      try {
-        const thought = await this._callCodex(context, state, prevContext);
-        console.log(`[thought] ${session.id}: codex returned: "${thought}"`);
-        if (thought) {
-          session.thought = thought;
-          this._broadcastThought(session);
-        }
-      } catch (e) {
-        console.error(`[thought] ${session.id}: codex error:`, e.message);
-      }
-    }
-  }
-
-  _callCodex(context) {
-    const prompt = `You are watching a terminal session. Summarize what's happening in 6 words or fewer, like a character's thought bubble. Be concise and playful. Terminal output:\n${context}`;
-    return new Promise((resolve, reject) => {
-      execFile(
-        'codex',
-        ['exec', '-c', 'model_reasoning_effort="low"', '--ephemeral', prompt],
-        { timeout: 15000 },
-        (err, stdout, stderr) => {
-          if (err) {
-            console.error(`[thought] execFile failed: ${err.message}`);
-            if (stderr) console.error(`[thought] stderr: ${stderr.slice(0, 200)}`);
-            return reject(err);
-          }
-          resolve(stdout.trim());
-        }
-      );
-    });
-  }
-
-  _broadcastThought(session) {
-    const payload = JSON.stringify({ sessionId: session.id, thought: session.thought });
-    const frame = Buffer.concat([Buffer.from([0x05]), Buffer.from(payload)]);
-
-    const hasWs = !!(session.attachedWs && session.attachedWs.readyState === 1);
-    console.log(`[thought] ${session.id}: broadcasting "${session.thought}" (ws attached: ${hasWs})`);
-
-    if (hasWs) {
-      session.attachedWs.send(frame);
-    }
   }
 
   destroySession(id) {
