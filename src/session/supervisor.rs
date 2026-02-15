@@ -578,6 +578,10 @@ impl SessionProvider for SupervisorProvider {
         // a non-async thread.
         let supervisor = self.supervisor.clone();
         let handle = self.handle.clone();
-        std::thread::scope(|_| handle.block_on(supervisor.collect_session_snapshots()))
+        std::thread::scope(|s| {
+            s.spawn(|| handle.block_on(supervisor.collect_session_snapshots()))
+                .join()
+                .expect("session_snapshots thread panicked")
+        })
     }
 }

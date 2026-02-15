@@ -136,6 +136,12 @@ pub struct SessionActor {
     // Cols/rows for summary reporting
     cols: u16,
     rows: u16,
+
+    // Working directory extracted from OSC 7 or OSC 0/2 title sequences
+    cwd: String,
+
+    // Detected coding tool name
+    tool: Option<String>,
 }
 
 impl SessionActor {
@@ -211,6 +217,8 @@ impl SessionActor {
             event_tx: event_tx.clone(),
             cols: 80,
             rows: 24,
+            cwd: String::new(),
+            tool: None,
         };
 
         // Spawn the actor's run loop on the Tokio runtime.
@@ -288,9 +296,13 @@ impl SessionActor {
                 Some(cmd) = self.cmd_rx.recv() => {
                     match cmd {
                         SessionCommand::WriteInput(data) => {
-                            self.scroll_guard.notify_input();
-                            if let Err(e) = self.writer.write_all(&data) {
-                                error!(session_id = %self.session_id, "PTY write error: {}", e);
+                            if pty_closed {
+                                debug!(session_id = %self.session_id, "ignoring write to exited PTY");
+                            } else {
+                                self.scroll_guard.notify_input();
+                                if let Err(e) = self.writer.write_all(&data) {
+                                    error!(session_id = %self.session_id, "PTY write error: {}", e);
+                                }
                             }
                         }
                         SessionCommand::Resize { cols, rows } => {
@@ -457,15 +469,50 @@ impl SessionActor {
         }
     }
 
-    /// Detect OSC 0 or OSC 2 title sequences in raw PTY output and emit a
-    /// `session_title` ControlEvent when found.
+    /// Detect OSC title and CWD sequences in raw PTY output.
     ///
     /// OSC 0: `\x1b]0;title\x07` -- set window title + icon name
     /// OSC 2: `\x1b]2;title\x07` -- set window title
-    fn detect_and_emit_title(&self, raw: &[u8]) {
+    /// OSC 7: `\x1b]7;file://host/path\x07` -- set working directory
+    ///
+    /// Emits `session_title` ControlEvents and updates internal cwd state.
+    fn detect_and_emit_title(&mut self, raw: &[u8]) {
         let text = String::from_utf8_lossy(raw);
-        // Match OSC 0 or 2: ESC ] (0|2) ; <title> BEL
-        // Use a simple search approach rather than regex for performance.
+
+        // OSC 7: working directory notification (file://host/path)
+        {
+            let prefix = "\x1b]7;";
+            let mut search_from = 0;
+            while let Some(start) = text[search_from..].find(prefix) {
+                let uri_start = search_from + start + prefix.len();
+                // BEL or ST (ESC \) terminates the sequence
+                let end = text[uri_start..]
+                    .find('\x07')
+                    .or_else(|| text[uri_start..].find("\x1b\\"));
+                if let Some(end_offset) = end {
+                    let uri = &text[uri_start..uri_start + end_offset];
+                    // Parse file:// URI → extract path
+                    if let Some(path) = uri.strip_prefix("file://") {
+                        // file://hostname/path — skip hostname (up to next /)
+                        let path = if let Some(slash_pos) = path.find('/') {
+                            &path[slash_pos..]
+                        } else {
+                            path
+                        };
+                        // URL-decode percent-encoded characters
+                        let decoded = percent_decode(path);
+                        if !decoded.is_empty() {
+                            self.cwd = decoded;
+                        }
+                    }
+                    search_from = uri_start + end_offset + 1;
+                } else {
+                    break;
+                }
+            }
+        }
+
+        // OSC 0/2: window title (often contains cwd for shells)
         for prefix in &["\x1b]0;", "\x1b]2;"] {
             let mut search_from = 0;
             while let Some(start) = text[search_from..].find(prefix) {
@@ -473,6 +520,19 @@ impl SessionActor {
                 if let Some(end_offset) = text[title_start..].find('\x07') {
                     let title = &text[title_start..title_start + end_offset];
                     if !title.is_empty() {
+                        // If we don't have a cwd from OSC 7, try to extract from title.
+                        // Common formats: "user@host: /path" or just "/path"
+                        if self.cwd.is_empty() {
+                            if let Some(extracted) = extract_cwd_from_title(title) {
+                                self.cwd = extracted;
+                            }
+                        }
+
+                        // Detect tool name from title (e.g. "claude" in title)
+                        if self.tool.is_none() {
+                            self.tool = detect_tool_from_title(title);
+                        }
+
                         let payload = SessionTitlePayload {
                             title: title.to_string(),
                             at: Utc::now(),
@@ -614,15 +674,16 @@ impl SessionActor {
     /// Build a summary snapshot of this session's current state.
     fn build_summary(&self) -> SessionSummary {
         let (state, current_command) = self.state_detector.get_state();
+        let context_limit = crate::types::context_limit_for_tool(self.tool.as_deref());
         SessionSummary {
             session_id: self.session_id.clone(),
             tmux_name: self.tmux_name.clone(),
             state,
             current_command,
-            cwd: String::new(), // TODO: extract from tmux or OSC 7
-            tool: None,         // TODO: detect from process tree
+            cwd: self.cwd.clone(),
+            tool: self.tool.clone(),
             token_count: 0,
-            context_limit: 128_000,
+            context_limit,
             thought: None,
             is_stale: false,
             attached_clients: self.subscribers.len() as u32,
@@ -630,6 +691,83 @@ impl SessionActor {
             last_activity_at: Utc::now(),
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Title / CWD helpers
+// ---------------------------------------------------------------------------
+
+/// Decode percent-encoded characters in a URI path (e.g. `%20` -> ` `).
+fn percent_decode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.bytes();
+    while let Some(b) = chars.next() {
+        if b == b'%' {
+            let hi = chars.next();
+            let lo = chars.next();
+            if let (Some(h), Some(l)) = (hi, lo) {
+                let hex = [h, l];
+                if let Ok(s) = std::str::from_utf8(&hex) {
+                    if let Ok(val) = u8::from_str_radix(s, 16) {
+                        out.push(val as char);
+                        continue;
+                    }
+                }
+            }
+            out.push(b as char);
+        } else {
+            out.push(b as char);
+        }
+    }
+    out
+}
+
+/// Try to extract a cwd path from an OSC 0/2 window title.
+/// Common formats: "user@host: /path", "user@host:/path", "/path/to/dir"
+fn extract_cwd_from_title(title: &str) -> Option<String> {
+    // "user@host: /path" or "user@host:/path"
+    if let Some(pos) = title.find(": /").or_else(|| title.find(":/")) {
+        let path_start = if title[pos..].starts_with(": ") {
+            pos + 2
+        } else {
+            pos + 1
+        };
+        let path = title[path_start..].trim();
+        if !path.is_empty() {
+            return Some(path.to_string());
+        }
+    }
+    // Plain absolute path
+    if title.starts_with('/') {
+        return Some(title.trim().to_string());
+    }
+    // "~" or "~/something"
+    if title.starts_with('~') {
+        if let Some(home) = std::env::var("HOME").ok() {
+            let expanded = title.replacen('~', &home, 1);
+            return Some(expanded);
+        }
+        return Some(title.trim().to_string());
+    }
+    None
+}
+
+/// Detect a coding tool name from the window title.
+fn detect_tool_from_title(title: &str) -> Option<String> {
+    let lower = title.to_lowercase();
+    // Check for known tool process names in the title
+    for (pattern, name) in &[
+        ("claude", "Claude Code"),
+        ("codex", "Codex"),
+        ("aider", "Aider"),
+        ("goose", "Goose"),
+        ("cline", "Cline"),
+    ] {
+        if lower.contains(pattern) {
+            return Some(name.to_string());
+        }
+    }
+    None
 }
 
 // ---------------------------------------------------------------------------
