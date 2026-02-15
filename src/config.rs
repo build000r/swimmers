@@ -1,0 +1,63 @@
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AuthMode {
+    LocalTrust,
+    Token,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionDeleteMode {
+    DetachBridge,
+    KillTmux,
+}
+
+#[derive(Debug, Clone)]
+pub struct Config {
+    pub port: u16,
+    pub auth_mode: AuthMode,
+    pub thought_tick_ms: u64,
+    pub thoughts_enabled_default: bool,
+    pub terminal_cache_ttl_ms: u64,
+    pub session_delete_mode: SessionDeleteMode,
+    pub poll_fallback_ms: u64,
+    pub replay_buffer_size: usize,
+    pub outbound_queue_bound: usize,
+    pub overload_window_ms: u64,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            port: 3210,
+            auth_mode: AuthMode::LocalTrust,
+            thought_tick_ms: 15000,
+            thoughts_enabled_default: true,
+            terminal_cache_ttl_ms: 300_000,
+            session_delete_mode: SessionDeleteMode::DetachBridge,
+            poll_fallback_ms: 2000,
+            replay_buffer_size: 64 * 1024, // 64KB replay ring
+            outbound_queue_bound: 512,
+            overload_window_ms: 1000,
+        }
+    }
+}
+
+impl Config {
+    pub fn from_env() -> Self {
+        let mut config = Self::default();
+        if let Ok(port) = std::env::var("PORT") {
+            if let Ok(p) = port.parse() {
+                config.port = p;
+            }
+        }
+        if let Ok(mode) = std::env::var("AUTH_MODE") {
+            if mode == "token" {
+                config.auth_mode = AuthMode::Token;
+            }
+        }
+        config
+    }
+}
