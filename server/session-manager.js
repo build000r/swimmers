@@ -69,6 +69,11 @@ class Session {
           `[session ${tmuxName}] PTY exited: code=${exitCode} signal=${signal}`
         );
       }
+      // Notify attached client that the session ended
+      if (this.attachedWs && this.attachedWs.readyState === 1) {
+        this.attachedWs.send(Buffer.from([0x03]));
+        this.attachedWs.close();
+      }
     });
   }
 

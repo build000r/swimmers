@@ -10,12 +10,17 @@ class TerminalWrapper {
     this.sessionId = null;
     this._resizeHandler = null;
     this._onStateChange = null;
+    this._onSessionExit = null;
     this.textEncoder = new TextEncoder();
     this.textDecoder = new TextDecoder();
   }
 
   onStateChange(cb) {
     this._onStateChange = cb;
+  }
+
+  onSessionExit(cb) {
+    this._onSessionExit = cb;
   }
 
   open() {
@@ -33,7 +38,8 @@ class TerminalWrapper {
       cursorBlink: true,
     });
 
-    this.fitAddon = new FitAddon();
+    const FitAddonClass = typeof FitAddon.FitAddon === 'function' ? FitAddon.FitAddon : FitAddon;
+    this.fitAddon = new FitAddonClass();
     this.term.loadAddon(this.fitAddon);
     this.term.open(this.container);
 
@@ -84,11 +90,14 @@ class TerminalWrapper {
             if (this._onStateChange) this._onStateChange(state);
           } catch (e) {}
           break;
+        case 0x03: // session exited
+          if (this._onSessionExit) this._onSessionExit();
+          break;
       }
     };
 
     this.ws.onclose = () => {
-      this.term.write('\r\n\x1b[90m[disconnected]\x1b[0m\r\n');
+      if (this.term) this.term.write('\r\n\x1b[90m[disconnected]\x1b[0m\r\n');
     };
 
     // Send user input to server

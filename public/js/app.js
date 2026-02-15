@@ -111,6 +111,7 @@
         s.currentCommand = info.currentCommand;
       }
     });
+    termWrapper.onSessionExit(() => showOverview());
 
     // 1. Open terminal into the now-visible container
     termWrapper.open();
