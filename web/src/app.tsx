@@ -20,6 +20,7 @@ export const currentView = signal<"overview" | "terminal">("overview");
 export const activeSessionId = signal<string | null>(null);
 export const activeZonePreference = signal<"main" | "bottom" | null>(null);
 export const terminalCacheTtlMs = signal<number>(300_000);
+export const zoneLayout = signal<"single" | "dual">("single");
 
 // Shared realtime service singleton
 export const realtime = new RealtimeService();
@@ -58,6 +59,29 @@ export function App() {
           current_command: payload.current_command,
           transport_health: payload.transport_health,
         }));
+        // After exit, let the thronglet walk off screen then remove it
+        if (payload.state === "exited") {
+          setTimeout(() => {
+            sessions.value = sessions.value.filter(
+              (s) => s.session_id !== sessionId,
+            );
+          }, 2500);
+        }
+      },
+
+      onSessionTitle(sessionId: string, title: string) {
+        updateSession(sessionId, (s) => {
+          // Extract cwd from title. Common formats:
+          // "user@host: /path", "user@host:/path", "/path/to/dir"
+          let cwd = s.cwd;
+          const colonSlash = title.indexOf(": /");
+          if (colonSlash !== -1) {
+            cwd = title.slice(colonSlash + 2).trim();
+          } else if (title.startsWith("/")) {
+            cwd = title.trim();
+          }
+          return { ...s, cwd };
+        });
       },
 
       onThoughtUpdate(sessionId: string, payload: ThoughtUpdatePayload) {
@@ -70,7 +94,11 @@ export function App() {
       },
 
       onSessionCreated(payload: SessionCreatedPayload) {
-        sessions.value = [...sessions.value, payload.session];
+        // Guard against duplicates — the REST create response may have
+        // already added this session before the WebSocket event arrives.
+        if (!sessions.value.some(s => s.session_id === payload.session.session_id)) {
+          sessions.value = [...sessions.value, payload.session];
+        }
       },
 
       onSessionDeleted(sessionId: string, _payload: SessionDeletedPayload) {
@@ -241,6 +269,15 @@ export function App() {
 
   const isOverview = currentView.value === "overview";
   const isTerminal = currentView.value === "terminal";
+  const splitMode = isTerminal && zoneLayout.value === "single";
+
+  // In split mode: terminal left 50%, field right 50%
+  // In dual-zone: terminal full screen, field hidden
+  const overviewTransform = isOverview
+    ? "translateX(0)"
+    : splitMode
+      ? "translateX(0)"
+      : "translateX(-100%)";
 
   return (
     <div style={{ position: "absolute", inset: 0, overflow: "hidden" }}>
@@ -269,12 +306,15 @@ export function App() {
 
       {/* Overview field */}
       <div
-        class={`view ${isOverview ? "active" : ""}`}
+        class={`view ${isOverview || splitMode ? "active" : ""}`}
         style={{
           position: "absolute",
-          inset: 0,
-          transform: isOverview ? "translateX(0)" : "translateX(-100%)",
-          transition: "transform 0.25s ease",
+          top: 0,
+          left: splitMode ? "50%" : 0,
+          right: 0,
+          bottom: 0,
+          transform: overviewTransform,
+          transition: "transform 0.25s ease, left 0.25s ease",
         }}
       >
         <OverviewField
@@ -287,7 +327,10 @@ export function App() {
             try {
               const { createSession } = await import("@/services/api");
               const resp = await createSession();
-              sessions.value = [...sessions.value, resp.session];
+              // Add only if the WebSocket session_created event hasn't already.
+              if (!sessions.value.some(s => s.session_id === resp.session.session_id)) {
+                sessions.value = [...sessions.value, resp.session];
+              }
               openTerminal(resp.session.session_id);
             } catch (err) {
               console.error("Failed to create session:", err);
@@ -301,9 +344,12 @@ export function App() {
         class={`view ${isTerminal ? "active" : ""}`}
         style={{
           position: "absolute",
-          inset: 0,
+          top: 0,
+          left: 0,
+          right: splitMode ? "50%" : 0,
+          bottom: 0,
           transform: isTerminal ? "translateX(0)" : "translateX(100%)",
-          transition: "transform 0.25s ease",
+          transition: "transform 0.25s ease, right 0.25s ease",
           display: "flex",
           flexDirection: "row",
         }}
