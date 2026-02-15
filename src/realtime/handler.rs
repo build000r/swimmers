@@ -23,7 +23,7 @@ use crate::session::supervisor::LifecycleEvent;
 use crate::types::{
     ClientControlMessage, ControlErrorPayload, ControlEvent, DismissAttentionPayload,
     ReplayTruncatedPayload, ResizePayload, SessionCreatedPayload, SessionDeletedPayload,
-    SubscribeSessionPayload,
+    SessionOverloadedPayload, SubscribeSessionPayload,
 };
 
 /// Global client ID counter for assigning unique IDs to output subscriptions.
@@ -52,8 +52,12 @@ pub async fn ws_upgrade(
 /// Per-session subscription state held by this WebSocket connection.
 struct SessionSub {
     client_id: ClientId,
-    session_id: String,
     output_rx: mpsc::Receiver<OutputFrame>,
+}
+
+enum PollEvent {
+    Output { session_id: String, frame: OutputFrame },
+    Overloaded { session_id: String },
 }
 
 /// Main WebSocket connection loop.
@@ -140,11 +144,41 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
             }
 
             // --- Per-session terminal output ---
-            Some((session_id, frame)) = output_fut => {
-                let binary = codec::encode_output_frame(&session_id, frame.seq, &frame.data);
-                if ws_sink.send(Message::Binary(binary.into())).await.is_err() {
-                    tracing::warn!("failed to send output frame to client");
-                    break;
+            Some(event) = output_fut => {
+                match event {
+                    PollEvent::Output { session_id, frame } => {
+                        let binary = codec::encode_output_frame(&session_id, frame.seq, &frame.data);
+                        if ws_sink.send(Message::Binary(binary.into())).await.is_err() {
+                            tracing::warn!("failed to send output frame to client");
+                            break;
+                        }
+                    }
+                    PollEvent::Overloaded { session_id } => {
+                        // Only emit overload when the session still exists.
+                        if state.supervisor.get_session(&session_id).await.is_some() {
+                            let event = ControlEvent {
+                                event: "session_overloaded".to_string(),
+                                session_id: session_id.clone(),
+                                payload: serde_json::to_value(SessionOverloadedPayload {
+                                    code: "SESSION_OVERLOADED".to_string(),
+                                    queue_depth: state.config.outbound_queue_bound,
+                                    queue_bytes: 0,
+                                    retry_after_ms: 250,
+                                })
+                                .unwrap(),
+                            };
+                            if ws_sink
+                                .send(Message::Text(
+                                    serde_json::to_string(&event).unwrap().into(),
+                                ))
+                                .await
+                                .is_err()
+                            {
+                                tracing::warn!("failed to send session_overloaded event");
+                                break;
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -380,7 +414,6 @@ async fn handle_subscribe(
         session_id.clone(),
         SessionSub {
             client_id,
-            session_id: session_id.clone(),
             output_rx: client_rx,
         },
     );
@@ -541,7 +574,7 @@ async fn handle_dismiss(
 /// causes the `tokio::select!` branch to be disabled.
 async fn poll_output_subs(
     subs: &mut HashMap<String, SessionSub>,
-) -> Option<(String, OutputFrame)> {
+) -> Option<PollEvent> {
     if subs.is_empty() {
         // Return a future that never resolves so the select branch is inactive.
         return std::future::pending().await;
@@ -552,11 +585,18 @@ async fn poll_output_subs(
     for key in &keys {
         if let Some(sub) = subs.get_mut(key) {
             match sub.output_rx.try_recv() {
-                Ok(frame) => return Some((key.clone(), frame)),
+                Ok(frame) => {
+                    return Some(PollEvent::Output {
+                        session_id: key.clone(),
+                        frame,
+                    });
+                }
                 Err(mpsc::error::TryRecvError::Disconnected) => {
                     tracing::info!("[session {key}] output channel closed, unsubscribing");
                     subs.remove(key);
-                    return None; // Will re-enter select loop.
+                    return Some(PollEvent::Overloaded {
+                        session_id: key.clone(),
+                    });
                 }
                 Err(mpsc::error::TryRecvError::Empty) => continue,
             }
@@ -569,11 +609,14 @@ async fn poll_output_subs(
     if let Some((key, sub)) = subs.iter_mut().next() {
         let key = key.clone();
         match sub.output_rx.recv().await {
-            Some(frame) => Some((key, frame)),
+            Some(frame) => Some(PollEvent::Output {
+                session_id: key,
+                frame,
+            }),
             None => {
                 tracing::info!("[session {key}] output channel closed during recv");
                 subs.remove(&key);
-                None
+                Some(PollEvent::Overloaded { session_id: key })
             }
         }
     } else {
