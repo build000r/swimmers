@@ -22,8 +22,7 @@ app.get('/api/sessions', (req, res) => {
 
 app.post('/api/sessions', (req, res) => {
   try {
-    const name = req.body && req.body.name;
-    const session = manager.createSession(name);
+    const session = manager.createSession();
     res.status(201).json(session.toJSON());
   } catch (e) {
     console.error('Failed to create session:', e.message);
@@ -60,4 +59,16 @@ server.on('upgrade', (req, socket, head) => {
 
 server.listen(PORT, '0.0.0.0', () => {
   console.log(`Throngterm running on http://0.0.0.0:${PORT}`);
+
+  // Auto-connect PTY bridges to all existing tmux sessions
+  // so state detection works immediately on restart
+  const existing = manager.listSessions();
+  for (const s of existing) {
+    if (!s.connected) {
+      manager.connectSession(s.name);
+      console.log(`  ↳ attached to tmux session: ${s.name}`);
+    }
+  }
+
+  manager.startThoughtLoop();
 });
