@@ -1,7 +1,8 @@
-// State detector — classifies terminal state as idle, busy, or error
+// State detector — classifies terminal state as idle, busy, error, or attention
 // Uses OSC 133 shell integration sequences when available, falls back to regex
 
 const ERROR_LINGER_MS = 4000; // error state auto-clears after 4s
+const ATTENTION_DELAY_MS = 10000; // idle → attention after 10s of waiting
 
 class StateDetector {
   constructor() {
@@ -9,6 +10,7 @@ class StateDetector {
     this.currentCommand = null;
     this._promptPattern = /[$%>#]\s*$/;
     this._errorTimer = null;
+    this._attentionTimer = null;
     // Only match patterns that unambiguously indicate a real shell error,
     // not strings that might appear in file contents or tool output
     this._errorPatterns = [
@@ -104,12 +106,47 @@ class StateDetector {
     }
   }
 
+  _scheduleAttention(fromCommand) {
+    this._clearAttentionTimer();
+    this._attentionTimer = setTimeout(() => {
+      this._attentionTimer = null;
+      if (this.state === 'idle') {
+        this._setState('attention', null);
+        this._lastAttentionCommand = fromCommand;
+      }
+    }, ATTENTION_DELAY_MS);
+  }
+
+  _clearAttentionTimer() {
+    if (this._attentionTimer) {
+      clearTimeout(this._attentionTimer);
+      this._attentionTimer = null;
+    }
+  }
+
+  dismissAttention() {
+    this._clearAttentionTimer();
+    if (this.state === 'attention') {
+      this._setState('idle', null);
+    }
+  }
+
   _setState(newState, command) {
     const prev = this.state;
     this.state = newState;
     if (command !== undefined) {
       this.currentCommand = command;
     }
+
+    // Start attention timer when transitioning from busy → idle
+    if (newState === 'idle' && prev === 'busy') {
+      this._scheduleAttention(this.currentCommand);
+    }
+    // Cancel attention timer if leaving idle for anything other than attention
+    if (prev === 'idle' && newState !== 'attention') {
+      this._clearAttentionTimer();
+    }
+
     if (newState !== prev && this._onStateChange) {
       this._onStateChange({ state: newState, previousState: prev, currentCommand: this.currentCommand });
     }
