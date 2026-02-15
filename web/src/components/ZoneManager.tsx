@@ -23,6 +23,7 @@ interface ZoneManagerProps {
   sessions: SessionSummary[];
   activeSessionId: string | null;
   preferZone: "main" | "bottom" | null;
+  observer?: boolean;
   onShowOverview: () => void;
   onStartPolling: () => void;
   onStopPolling: () => void;
@@ -32,6 +33,7 @@ export function ZoneManager({
   sessions,
   activeSessionId,
   preferZone,
+  observer = false,
   onShowOverview,
   onStartPolling,
   onStopPolling,
@@ -260,6 +262,7 @@ export function ZoneManager({
             key={mainZone.sessionId}
             session={mainSession}
             cached={cache.get(mainZone.sessionId)}
+            observer={observer}
             onCache={handleCache}
             onSessionExit={handleSessionExit}
             onClose={() => closeZone("main")}
@@ -302,6 +305,7 @@ export function ZoneManager({
             key={bottomZone.sessionId}
             session={bottomSession}
             cached={cache.get(bottomZone.sessionId)}
+            observer={observer}
             onCache={handleCache}
             onSessionExit={handleSessionExit}
             onClose={() => closeZone("bottom")}

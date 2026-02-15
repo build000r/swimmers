@@ -250,6 +250,7 @@ function ThrongletEntity({ session, onTap, onDragToBottom }: ThrongletProps) {
 
 interface OverviewFieldProps {
   sessions: SessionSummary[];
+  observer?: boolean;
   onTapSession: (id: string) => void;
   onDragToBottom: (id: string) => void;
   onCreateSession: () => void;
@@ -257,24 +258,26 @@ interface OverviewFieldProps {
 
 export function OverviewField({
   sessions,
+  observer = false,
   onTapSession,
   onDragToBottom,
   onCreateSession,
 }: OverviewFieldProps) {
-  const longPress = useLongPress(onCreateSession, 500);
+  // Disable long-press create when in observer mode
+  const longPress = useLongPress(observer ? () => {} : onCreateSession, 500);
 
   return (
     <div
       class="field"
       style={{ flex: 1, position: "relative" }}
-      onMouseDown={longPress.onMouseDown}
-      onMouseUp={longPress.onMouseUp}
-      onMouseMove={longPress.onMouseMove}
-      onMouseLeave={longPress.onMouseLeave}
-      onTouchStart={longPress.onTouchStart}
-      onTouchMove={longPress.onTouchMove}
-      onTouchEnd={longPress.onTouchEnd}
-      onContextMenu={longPress.onContextMenu}
+      onMouseDown={observer ? undefined : longPress.onMouseDown}
+      onMouseUp={observer ? undefined : longPress.onMouseUp}
+      onMouseMove={observer ? undefined : longPress.onMouseMove}
+      onMouseLeave={observer ? undefined : longPress.onMouseLeave}
+      onTouchStart={observer ? undefined : longPress.onTouchStart}
+      onTouchMove={observer ? undefined : longPress.onTouchMove}
+      onTouchEnd={observer ? undefined : longPress.onTouchEnd}
+      onContextMenu={observer ? undefined : longPress.onContextMenu}
     >
       {/* Scenery trees */}
       <img
@@ -311,11 +314,32 @@ export function OverviewField({
         ))}
       </div>
 
+      {/* Observer badge */}
+      {observer && (
+        <div
+          data-testid="observer-badge"
+          style={{
+            position: "absolute",
+            top: "8px",
+            right: "8px",
+            background: "#16213e",
+            color: "#5BC0EB",
+            padding: "4px 12px",
+            borderRadius: "4px",
+            fontSize: "11px",
+            fontWeight: 600,
+            zIndex: 100,
+          }}
+        >
+          OBSERVER
+        </div>
+      )}
+
       {/* Empty state */}
       {sessions.length === 0 && (
         <div class="empty-state">
           <p>No sessions yet</p>
-          <p class="hint">Long press to create one</p>
+          {!observer && <p class="hint">Long press to create one</p>}
         </div>
       )}
     </div>

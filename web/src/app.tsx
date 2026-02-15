@@ -11,6 +11,7 @@ import { bootstrap as apiFetch } from "@/services/api";
 import { RealtimeService } from "@/services/realtime";
 import { OverviewField } from "@/components/OverviewField";
 import { ZoneManager } from "@/components/ZoneManager";
+import { useObserverMode } from "@/hooks/useObserverMode";
 
 // ---- Global signals ----
 export const sessions = signal<SessionSummary[]>([]);
@@ -26,8 +27,10 @@ export const realtime = new RealtimeService();
 export function App() {
   const [bootstrapDone, setBootstrapDone] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [authMode, setAuthMode] = useState<string | undefined>(undefined);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const bootstrapDataRef = useRef<BootstrapResponse | null>(null);
+  const { isObserver } = useObserverMode(authMode);
 
   // ---- Session helpers ----
 
@@ -97,6 +100,8 @@ export function App() {
           sessions.value = data.sessions;
           terminalCacheTtlMs.value = data.terminal_cache_ttl_ms;
         });
+
+        setAuthMode(data.auth_mode);
 
         // Connect realtime WebSocket
         // Derive ws URL from the page origin if the bootstrap URL is absolute
@@ -274,9 +279,11 @@ export function App() {
       >
         <OverviewField
           sessions={sessions.value}
+          observer={isObserver}
           onTapSession={openTerminal}
           onDragToBottom={(id) => openTerminal(id, "bottom")}
           onCreateSession={async () => {
+            if (isObserver) return;
             try {
               const { createSession } = await import("@/services/api");
               const resp = await createSession();
@@ -306,6 +313,7 @@ export function App() {
             sessions={sessions.value}
             activeSessionId={activeSessionId.value}
             preferZone={activeZonePreference.value}
+            observer={isObserver}
             onShowOverview={showOverview}
             onStartPolling={startPolling}
             onStopPolling={stopPolling}
