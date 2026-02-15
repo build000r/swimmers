@@ -3,6 +3,7 @@ const { execSync } = require('child_process');
 const crypto = require('crypto');
 const StateDetector = require('./state-detector');
 const ScrollGuard = require('./scroll-guard');
+const { ContextReader } = require('./context-reader');
 
 const REPLAY_BUFFER_SIZE = 4096;
 
@@ -16,6 +17,10 @@ class Session {
     this.attachedWs = null;
     this.tokenCount = 0;
     this.thought = null;
+    this.tool = null;
+    this.cwd = null;
+    this._contextReader = null;
+    this._summaryHistory = [];
     this._lastReplayHash = null;
     this._lastThoughtContext = null;
 
@@ -163,6 +168,21 @@ class Session {
       .replace(/[\x00-\x08\x0e-\x1f]/g, '');
   }
 
+  updateToolInfo(tool, cwd) {
+    if (tool !== this.tool || cwd !== this.cwd) {
+      this.tool = tool;
+      this.cwd = cwd;
+      this._contextReader = null; // reset so getContextReader re-creates
+    }
+  }
+
+  getContextReader() {
+    if (!this._contextReader && this.tool && this.cwd) {
+      this._contextReader = ContextReader.for(this.tool, this.cwd);
+    }
+    return this._contextReader;
+  }
+
   getThoughtContext() {
     const raw = this.replayBuffer.toString('utf-8');
     const stripped = this._stripAnsi(raw);
@@ -199,7 +219,7 @@ class Session {
       name: this.name,
       state: this.detector.state,
       currentCommand: this.detector.currentCommand,
-      cwd: process.env.HOME,
+      cwd: this.cwd || process.env.HOME,
       thought: this.thought,
     };
   }
@@ -301,6 +321,9 @@ class SessionManager {
     return tmuxSessions.map((ts) => {
       // Find our PTY session for this tmux session
       const ptySession = this._findByTmuxName(ts.name);
+      // Cache tool/cwd on the PTY session for the thought loop
+      if (ptySession) ptySession.updateToolInfo(ts.tool, ts.cwd);
+
       const contextLimit = ts.tool
         ? (SessionManager.CONTEXT_LIMITS[ts.tool] || SessionManager.DEFAULT_CONTEXT_LIMIT)
         : SessionManager.DEFAULT_CONTEXT_LIMIT;
