@@ -3,24 +3,34 @@
 (function () {
   const overviewView = document.getElementById('overview-view');
   const terminalView = document.getElementById('terminal-view');
-  const backBtn = document.getElementById('back-btn');
-  const termContainer = document.getElementById('terminal-container');
-  const termTitle = document.getElementById('terminal-title');
-  const stateDot = document.getElementById('terminal-state-dot');
   const emptyState = document.getElementById('empty-state');
   const field = document.getElementById('field');
 
+  // Zone elements
+  const zoneMainEl = document.getElementById('zone-main');
+  const zoneBottomEl = document.getElementById('zone-bottom');
+  const zoneDivider = document.getElementById('zone-divider');
+
   let pollInterval = null;
   let currentView = 'overview';
-  let activeSessionId = null;
   let sessions = [];
   const cache = new TerminalCache();
 
+  // Zone state
+  const zones = { main: null, bottom: null };   // sessionId or null
+  const zoneAge = { main: 0, bottom: 0 };       // timestamp for "replace oldest"
+  let zoneSplitRatio = 0.6;
+
   const LONG_PRESS_MS = 500;
+
+  function isDesktop() {
+    return window.innerWidth > 768;
+  }
 
   const renderer = new ThrongletRenderer(
     document.getElementById('thronglets-container'),
-    (sessionId) => openTerminal(sessionId)
+    (sessionId) => openTerminal(sessionId),
+    (sessionId) => openTerminal(sessionId, 'bottom')
   );
 
   // --- Helpers ---
@@ -31,14 +41,22 @@
     return parts[parts.length - 1] || 'root';
   }
 
+  function spriteForState(state) {
+    const map = { idle: '/assets/idle.png', busy: '/assets/walking.png', error: '/assets/beep.png', attention: '/assets/idle.png' };
+    return map[state] || map.idle;
+  }
+
+  function getZoneEl(zone) {
+    return zone === 'main' ? zoneMainEl : zoneBottomEl;
+  }
+
   // --- API ---
 
   async function fetchSessions() {
     try {
       const res = await fetch('/api/sessions');
       sessions = await res.json();
-      renderer.update(sessions);
-      emptyState.classList.toggle('hidden', sessions.length > 0);
+      updateField();
     } catch (e) {
       // network error, keep showing stale data
     }
@@ -53,127 +71,302 @@
       }
       const session = await res.json();
       sessions.push(session);
-      renderer.update(sessions);
-      emptyState.classList.toggle('hidden', sessions.length > 0);
+      updateField();
       openTerminal(session.id);
     } catch (e) {
       console.error('Failed to create session:', e);
     }
   }
 
-  // --- Views ---
+  // --- Field filtering ---
 
-  function showOverview() {
-    // Cache the active terminal instead of destroying it
-    if (activeSessionId) {
-      const entry = cache.get(activeSessionId);
-      if (entry) {
-        // Already in cache (shouldn't happen, but be safe)
-        entry.wrapper.detachFromDOM();
-        cache.put(activeSessionId, entry.wrapper, entry.hostEl);
-      } else {
-        // Find the wrapper's host element in termContainer
-        const hostEl = termContainer.querySelector('.term-host');
-        if (hostEl) {
-          const wrapper = hostEl._termWrapper;
-          if (wrapper) {
-            wrapper.detachFromDOM();
-            cache.put(activeSessionId, wrapper, hostEl);
-          }
-        }
-      }
-      activeSessionId = null;
-    }
-
-    currentView = 'overview';
-    overviewView.classList.add('active');
-    overviewView.classList.remove('slide-left');
-    terminalView.classList.remove('active');
-    startPolling();
-    fetchSessions();
+  function updateField() {
+    const fieldSessions = sessions.filter(s =>
+      s.id !== zones.main && s.id !== zones.bottom
+    );
+    renderer.update(fieldSessions);
+    emptyState.classList.toggle('hidden', sessions.length > 0);
   }
 
-  function openTerminal(sessionId) {
-    const session = sessions.find((s) => s.id === sessionId);
+  // --- Zone management ---
+
+  function cacheZone(zone) {
+    const sessionId = zones[zone];
+    if (!sessionId) return;
+
+    const zoneEl = getZoneEl(zone);
+    const container = zoneEl.querySelector('.zone-terminal');
+    const hostEl = container.querySelector('.term-host');
+
+    if (hostEl && hostEl._termWrapper) {
+      hostEl._termWrapper.detachFromDOM();
+      cache.put(sessionId, hostEl._termWrapper, hostEl);
+    }
+  }
+
+  function openTerminal(sessionId, preferZone) {
+    const session = sessions.find(s => s.id === sessionId);
     if (!session) return;
 
-    currentView = 'terminal';
-    stopPolling();
-
-    // If switching from one terminal to another, cache the old one
-    if (activeSessionId && activeSessionId !== sessionId) {
-      const hostEl = termContainer.querySelector('.term-host');
-      if (hostEl && hostEl._termWrapper) {
-        hostEl._termWrapper.detachFromDOM();
-        cache.put(activeSessionId, hostEl._termWrapper, hostEl);
-      }
+    // Already in a zone? Just focus it
+    if (zones.main === sessionId || zones.bottom === sessionId) {
+      focusZone(zones.main === sessionId ? 'main' : 'bottom');
+      return;
     }
 
-    activeSessionId = sessionId;
-    termTitle.textContent = `tmux a -t ${session.name}`;
-    updateStateDot(session.state);
+    // Determine target zone
+    let target;
+    if (!isDesktop()) {
+      target = 'main';
+      // Mobile: close bottom zone if occupied
+      if (zones.bottom) {
+        cacheZone('bottom');
+        zones.bottom = null;
+        zoneAge.bottom = 0;
+      }
+    } else if (preferZone) {
+      target = preferZone;
+    } else if (!zones.main) {
+      target = 'main';
+    } else if (!zones.bottom) {
+      target = 'bottom';
+    } else {
+      // Both occupied, no preference → replace oldest
+      target = zoneAge.main <= zoneAge.bottom ? 'main' : 'bottom';
+    }
 
-    // Show terminal view
-    overviewView.classList.remove('active');
-    overviewView.classList.add('slide-left');
+    // Cache current occupant if target is occupied
+    if (zones[target]) {
+      cacheZone(target);
+    }
+
+    // Handle attention state
+    const dismissNeeded = session.state === 'attention';
+    if (dismissNeeded) session.state = 'idle';
+
+    // Trigger run-to-zone animation before removing from field
+    const fieldRect = field.getBoundingClientRect();
+    renderer.runToZone(sessionId, -80, fieldRect.height / 2);
+
+    // Assign session to zone
+    zones[target] = sessionId;
+    zoneAge[target] = Date.now();
+
+    // Update views and layout
+    currentView = 'terminal';
     terminalView.classList.add('active');
+    updateLayout();
+    updateField();
 
-    // Check cache
+    // Update zone header
+    updateZoneHeader(target, session);
+
+    // Init or restore terminal
+    const zoneEl = getZoneEl(target);
+    const container = zoneEl.querySelector('.zone-terminal');
+
     const cached = cache.get(sessionId);
     if (cached && cached.wrapper.isAlive) {
-      restoreTerminal(cached);
+      restoreTerminal(cached, container, sessionId);
+      if (dismissNeeded) cached.wrapper.dismissAttention();
     } else {
-      if (cached) cache.evict(sessionId); // stale entry
-      initTerminal(sessionId);
+      if (cached) cache.evict(sessionId);
+      initTerminal(sessionId, container, dismissNeeded);
     }
   }
 
-  function initTerminal(sessionId) {
-    // Create a per-session host div
+  function closeZone(zone) {
+    cacheZone(zone);
+    zones[zone] = null;
+    zoneAge[zone] = 0;
+
+    if (!zones.main && !zones.bottom) {
+      showOverview();
+    } else {
+      updateLayout();
+      updateField();
+    }
+  }
+
+  function closeAllZones() {
+    for (const zone of ['main', 'bottom']) {
+      if (zones[zone]) {
+        cacheZone(zone);
+        zones[zone] = null;
+        zoneAge[zone] = 0;
+      }
+    }
+    updateField();
+  }
+
+  function focusZone(zone) {
+    const zoneEl = getZoneEl(zone);
+    const hostEl = zoneEl.querySelector('.term-host');
+    if (hostEl && hostEl._termWrapper) {
+      hostEl._termWrapper.focus();
+    }
+  }
+
+  function updateZoneHeader(zone, session) {
+    const zoneEl = getZoneEl(zone);
+    const sprite = zoneEl.querySelector('.zone-sprite');
+    const name = zoneEl.querySelector('.zone-name');
+    const title = zoneEl.querySelector('.zone-title');
+    const dot = zoneEl.querySelector('.zone-dot');
+    const displayState = session.state || 'idle';
+
+    sprite.src = spriteForState(displayState);
+    name.textContent = repoName(session.cwd);
+    title.textContent = `tmux a -t ${session.name}`;
+    dot.className = 'zone-dot state-dot ' + displayState;
+  }
+
+  function updateLayout() {
+    const mainOccupied = !!zones.main;
+    const bottomOccupied = !!zones.bottom;
+    const dualZone = mainOccupied && bottomOccupied;
+    const singleZone = (mainOccupied || bottomOccupied) && !dualZone;
+
+    zoneMainEl.style.display = mainOccupied ? 'flex' : 'none';
+    zoneBottomEl.style.display = bottomOccupied ? 'flex' : 'none';
+    zoneDivider.style.display = dualZone ? 'block' : 'none';
+
+    if (dualZone) {
+      // Full-screen dual terminal side-by-side, hide field
+      stopPolling();
+      overviewView.classList.remove('active');
+      overviewView.classList.add('slide-left');
+      overviewView.style.left = '';
+      terminalView.style.right = '';
+      terminalView.style.flexDirection = 'row';
+      const dividerWidth = 4;
+      zoneMainEl.style.width = `calc(${zoneSplitRatio * 100}% - ${dividerWidth / 2}px)`;
+      zoneMainEl.style.height = '';
+      zoneBottomEl.style.width = `calc(${(1 - zoneSplitRatio) * 100}% - ${dividerWidth / 2}px)`;
+      zoneBottomEl.style.height = '';
+    } else if (singleZone) {
+      // 50/50 vertical: terminal left half, field right half
+      startPolling();
+      overviewView.classList.add('active');
+      overviewView.classList.remove('slide-left');
+      overviewView.style.left = '50%';
+      terminalView.style.right = '50%';
+      terminalView.style.flexDirection = 'row';
+      const z = mainOccupied ? 'main' : 'bottom';
+      const zoneEl = getZoneEl(z);
+      zoneEl.style.width = '100%';
+      zoneEl.style.height = '';
+    }
+
+    // Refit terminals after layout changes
+    requestAnimationFrame(() => {
+      fitZone('main');
+      fitZone('bottom');
+    });
+  }
+
+  function fitZone(zone) {
+    if (!zones[zone]) return;
+    const zoneEl = getZoneEl(zone);
+    const hostEl = zoneEl.querySelector('.term-host');
+    if (hostEl && hostEl._termWrapper) {
+      hostEl._termWrapper.fit();
+    }
+  }
+
+  // --- Terminal lifecycle ---
+
+  function initTerminal(sessionId, container, dismissAttention) {
     const hostEl = document.createElement('div');
     hostEl.className = 'term-host';
     hostEl.style.width = '100%';
     hostEl.style.height = '100%';
-    termContainer.appendChild(hostEl);
+    container.appendChild(hostEl);
 
     const wrapper = new TerminalWrapper(hostEl);
     hostEl._termWrapper = wrapper;
 
+    wrapper.onTitleChange((title) => {
+      for (const z of ['main', 'bottom']) {
+        if (zones[z] === sessionId) {
+          getZoneEl(z).querySelector('.zone-title').textContent = title;
+        }
+      }
+    });
+
     wrapper.onStateChange((info) => {
-      updateStateDot(info.state);
-      const s = sessions.find((x) => x.id === sessionId);
+      if (dismissAttention && info.state === 'attention') {
+        wrapper.dismissAttention();
+        info.state = 'idle';
+        dismissAttention = false;
+      }
+      for (const z of ['main', 'bottom']) {
+        if (zones[z] === sessionId) {
+          const zoneEl = getZoneEl(z);
+          zoneEl.querySelector('.zone-dot').className = 'zone-dot state-dot ' + (info.state || 'idle');
+          zoneEl.querySelector('.zone-sprite').src = spriteForState(info.state);
+        }
+      }
+      const s = sessions.find(x => x.id === sessionId);
       if (s) {
         s.state = info.state;
         s.currentCommand = info.currentCommand;
       }
     });
+
+    wrapper.onThought((data) => {
+      const s = sessions.find(x => x.id === data.sessionId);
+      if (s) s.thought = data.thought;
+      updateField();
+    });
+
     wrapper.onSessionExit(() => {
       cache.evict(sessionId);
-      if (activeSessionId === sessionId) showOverview();
+      for (const z of ['main', 'bottom']) {
+        if (zones[z] === sessionId) {
+          zones[z] = null;
+          zoneAge[z] = 0;
+        }
+      }
+      if (!zones.main && !zones.bottom) {
+        showOverview();
+      } else {
+        updateLayout();
+        updateField();
+      }
     });
 
     wrapper.open();
     wrapper.connect(sessionId);
 
-    // Refit after layout settles, then focus
+    // Refit after layout settles
     const onReady = () => {
       wrapper.fit();
       wrapper.focus();
     };
-    terminalView.addEventListener('transitionend', function onEnd() {
-      terminalView.removeEventListener('transitionend', onEnd);
-      onReady();
-    }, { once: true });
-    // Fallback if transitionend doesn't fire
     setTimeout(onReady, 350);
   }
 
-  function restoreTerminal(entry) {
-    const { wrapper, hostEl } = entry;
+  function restoreTerminal(entry, container, sessionId) {
+    const { wrapper } = entry;
 
-    wrapper.attachToDOM(termContainer);
+    wrapper.attachToDOM(container);
 
-    // Reconnect WS if it dropped while cached
+    // Update title callback for new zone context
+    wrapper.onTitleChange((title) => {
+      for (const z of ['main', 'bottom']) {
+        if (zones[z] === sessionId) {
+          getZoneEl(z).querySelector('.zone-title').textContent = title;
+        }
+      }
+    });
+
+    wrapper.onThought((data) => {
+      const s = sessions.find(x => x.id === data.sessionId);
+      if (s) s.thought = data.thought;
+      updateField();
+    });
+
     if (!wrapper.ws || wrapper.ws.readyState !== WebSocket.OPEN) {
       wrapper.reconnect();
     }
@@ -184,8 +377,53 @@
     });
   }
 
-  function updateStateDot(state) {
-    stateDot.className = 'state-dot ' + (state || 'idle');
+  // --- Views ---
+
+  function showOverview() {
+    currentView = 'overview';
+    // Reset inline positioning
+    overviewView.style.left = '';
+    overviewView.style.top = '';
+    terminalView.style.right = '';
+    terminalView.style.bottom = '';
+    terminalView.style.flexDirection = '';
+    overviewView.classList.add('active');
+    overviewView.classList.remove('slide-left');
+    terminalView.classList.remove('active');
+    startPolling();
+    fetchSessions();
+  }
+
+  // --- Divider drag ---
+
+  function initDividerDrag() {
+    let dragging = false;
+
+    zoneDivider.addEventListener('mousedown', (e) => {
+      e.preventDefault();
+      dragging = true;
+      zoneDivider.classList.add('dragging');
+      document.body.style.cursor = 'ew-resize';
+      document.body.style.userSelect = 'none';
+    });
+
+    document.addEventListener('mousemove', (e) => {
+      if (!dragging) return;
+      const viewRect = terminalView.getBoundingClientRect();
+      const relX = e.clientX - viewRect.left;
+      zoneSplitRatio = Math.max(0.2, Math.min(0.8, relX / viewRect.width));
+      updateLayout();
+    });
+
+    document.addEventListener('mouseup', () => {
+      if (!dragging) return;
+      dragging = false;
+      zoneDivider.classList.remove('dragging');
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+      fitZone('main');
+      fitZone('bottom');
+    });
   }
 
   // --- Polling ---
@@ -204,23 +442,27 @@
 
   // --- Events ---
 
-  backBtn.addEventListener('click', showOverview);
+  // Zone sprite clicks → close zone
+  zoneMainEl.querySelector('.zone-sprite').addEventListener('click', () => closeZone('main'));
+  zoneBottomEl.querySelector('.zone-sprite').addEventListener('click', () => closeZone('bottom'));
 
-  // Tap terminal title to copy tmux attach command
-  termTitle.addEventListener('click', () => {
-    const cmd = termTitle.textContent;
-    navigator.clipboard.writeText(cmd).then(() => {
-      const orig = termTitle.textContent;
-      termTitle.textContent = 'copied!';
-      setTimeout(() => { termTitle.textContent = orig; }, 800);
-    }).catch(() => {});
-  });
+  // Tap zone title to copy tmux attach command
+  for (const zoneEl of [zoneMainEl, zoneBottomEl]) {
+    zoneEl.querySelector('.zone-title').addEventListener('click', (e) => {
+      const titleEl = e.target;
+      const cmd = titleEl.textContent;
+      navigator.clipboard.writeText(cmd).then(() => {
+        const orig = cmd;
+        titleEl.textContent = 'copied!';
+        setTimeout(() => { titleEl.textContent = orig; }, 800);
+      }).catch(() => {});
+    });
+  }
 
   // Long press on field to create a new session
   let fieldLongPress = null;
 
   function startFieldLongPress(e) {
-    // Don't trigger if touching a thronglet
     const target = e.target || e.srcElement;
     if (target.closest && target.closest('.thronglet')) return;
     fieldLongPress = setTimeout(() => {
@@ -237,15 +479,10 @@
     }
   }
 
-  // Suppress native context menu on the field (long-press on mobile triggers it)
   field.addEventListener('contextmenu', (e) => e.preventDefault());
-
-  // Touch events (mobile)
   field.addEventListener('touchstart', startFieldLongPress, { passive: true });
   field.addEventListener('touchmove', cancelFieldLongPress, { passive: true });
   field.addEventListener('touchend', cancelFieldLongPress, { passive: true });
-
-  // Mouse events (desktop)
   field.addEventListener('mousedown', startFieldLongPress);
   field.addEventListener('mousemove', cancelFieldLongPress);
   field.addEventListener('mouseup', cancelFieldLongPress);
@@ -260,12 +497,21 @@
   terminalView.addEventListener('touchend', (e) => {
     const dx = e.changedTouches[0].clientX - touchStartX;
     if (touchStartX < 40 && dx > 80) {
+      closeAllZones();
       showOverview();
     }
   }, { passive: true });
 
+  // Window resize → refit zones
+  window.addEventListener('resize', () => {
+    if (currentView === 'terminal') {
+      updateLayout();
+    }
+  });
+
   // --- Init ---
 
+  initDividerDrag();
   fetchSessions();
   startPolling();
 })();

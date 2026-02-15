@@ -9,10 +9,17 @@ class TerminalWrapper {
     this.ws = null;
     this.sessionId = null;
     this._resizeHandler = null;
+    this._onTitleChange = null;
     this._onStateChange = null;
     this._onSessionExit = null;
+    this._onThought = null;
+    this._pendingAttentionDismiss = false;
     this.textEncoder = new TextEncoder();
     this.textDecoder = new TextDecoder();
+  }
+
+  onTitleChange(cb) {
+    this._onTitleChange = cb;
   }
 
   onStateChange(cb) {
@@ -21,6 +28,10 @@ class TerminalWrapper {
 
   onSessionExit(cb) {
     this._onSessionExit = cb;
+  }
+
+  onThought(cb) {
+    this._onThought = cb;
   }
 
   open() {
@@ -70,6 +81,7 @@ class TerminalWrapper {
       frame[0] = 0x01; // resize command
       frame.set(payload, 1);
       this.ws.send(frame);
+      this._flushPendingAttentionDismiss();
     };
 
     this.ws.onmessage = (ev) => {
@@ -82,7 +94,7 @@ class TerminalWrapper {
           this.term.write(new Uint8Array(data));
           break;
         case 0x01: // title
-          document.getElementById('terminal-title').textContent = this.textDecoder.decode(data);
+          if (this._onTitleChange) this._onTitleChange(this.textDecoder.decode(data));
           break;
         case 0x02: // state
           try {
@@ -92,6 +104,12 @@ class TerminalWrapper {
           break;
         case 0x03: // session exited
           if (this._onSessionExit) this._onSessionExit();
+          break;
+        case 0x05: // thought
+          try {
+            const d = JSON.parse(this.textDecoder.decode(data));
+            if (this._onThought) this._onThought(d);
+          } catch (e) {}
           break;
       }
     };
@@ -191,6 +209,7 @@ class TerminalWrapper {
       frame[0] = 0x01;
       frame.set(payload, 1);
       this.ws.send(frame);
+      this._flushPendingAttentionDismiss();
     };
 
     this.ws.onmessage = (ev) => {
@@ -202,7 +221,7 @@ class TerminalWrapper {
           this.term.write(new Uint8Array(data));
           break;
         case 0x01:
-          document.getElementById('terminal-title').textContent = this.textDecoder.decode(data);
+          if (this._onTitleChange) this._onTitleChange(this.textDecoder.decode(data));
           break;
         case 0x02:
           try {
@@ -212,6 +231,12 @@ class TerminalWrapper {
           break;
         case 0x03:
           if (this._onSessionExit) this._onSessionExit();
+          break;
+        case 0x05:
+          try {
+            const d = JSON.parse(this.textDecoder.decode(data));
+            if (this._onThought) this._onThought(d);
+          } catch (e) {}
           break;
       }
     };
@@ -238,6 +263,23 @@ class TerminalWrapper {
     }
     this.fitAddon = null;
     if (this.container) this.container.innerHTML = '';
+    this._pendingAttentionDismiss = false;
+  }
+
+  _flushPendingAttentionDismiss() {
+    if (!this._pendingAttentionDismiss) return;
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+    this.ws.send(new Uint8Array([0x04]));
+    this._pendingAttentionDismiss = false;
+  }
+
+  dismissAttention() {
+    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+      this.ws.send(new Uint8Array([0x04]));
+      this._pendingAttentionDismiss = false;
+      return;
+    }
+    this._pendingAttentionDismiss = true;
   }
 
   focus() {
