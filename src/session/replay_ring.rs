@@ -97,10 +97,7 @@ impl ReplayRing {
     /// The lowest sequence number still retained in the buffer.
     /// Returns `latest_seq() + 1` if the buffer is empty.
     pub fn window_start_seq(&self) -> u64 {
-        self.frames
-            .front()
-            .map(|f| f.seq)
-            .unwrap_or(self.next_seq)
+        self.frames.front().map(|f| f.seq).unwrap_or(self.next_seq)
     }
 
     /// Total bytes currently retained in the buffer.

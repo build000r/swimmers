@@ -6,6 +6,7 @@ import type {
   SessionDeletedPayload,
   ReplayTruncatedPayload,
   SessionOverloadedPayload,
+  SessionSubscriptionPayload,
   ControlErrorPayload,
   TransportHealth,
 } from "@/types";
@@ -45,6 +46,10 @@ export interface RealtimeCallbacks {
     sessionId: string,
     payload: SessionOverloadedPayload,
   ) => void;
+  onSessionSubscription?: (
+    sessionId: string,
+    payload: SessionSubscriptionPayload,
+  ) => void;
   onControlError?: (payload: ControlErrorPayload) => void;
   onTerminalOutput?: (frame: TerminalOutputFrame) => void;
   onHealthChange?: (health: TransportHealth) => void;
@@ -62,6 +67,9 @@ export class RealtimeService {
   >();
   private replayTruncatedListeners = new Set<
     (sessionId: string, payload: ReplayTruncatedPayload) => void
+  >();
+  private sessionSubscriptionListeners = new Set<
+    (sessionId: string, payload: SessionSubscriptionPayload) => void
   >();
   private reconnectMs = INITIAL_RECONNECT_MS;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
@@ -104,6 +112,16 @@ export class RealtimeService {
     };
   }
 
+  /** Subscribe to session lifecycle acknowledgments. */
+  subscribeSessionSubscription(
+    cb: (sessionId: string, payload: SessionSubscriptionPayload) => void,
+  ): () => void {
+    this.sessionSubscriptionListeners.add(cb);
+    return () => {
+      this.sessionSubscriptionListeners.delete(cb);
+    };
+  }
+
   /** Open WebSocket to the given URL. */
   connect(url: string): void {
     this.url = url;
@@ -134,6 +152,13 @@ export class RealtimeService {
         session_id: sessionId,
         resume_from_seq: resumeFromSeq ?? null,
       },
+    });
+  }
+
+  unsubscribeSession(sessionId: string): void {
+    this.sendJson({
+      type: "unsubscribe_session",
+      payload: { session_id: sessionId },
     });
   }
 
@@ -299,6 +324,15 @@ export class RealtimeService {
           session_id,
           payload as SessionOverloadedPayload,
         );
+        break;
+      case "session_subscription":
+        {
+          const typed = payload as SessionSubscriptionPayload;
+          this.callbacks.onSessionSubscription?.(session_id, typed);
+          for (const listener of this.sessionSubscriptionListeners) {
+            listener(session_id, typed);
+          }
+        }
         break;
       case "control_error":
         this.callbacks.onControlError?.(payload as ControlErrorPayload);

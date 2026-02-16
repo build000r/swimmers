@@ -2,7 +2,10 @@ import { describe, it, expect, beforeEach, vi } from "vitest";
 import { RealtimeService } from "@/services/realtime";
 import type { TerminalOutputFrame } from "@/services/realtime";
 import { Opcodes } from "@/types";
-import type { ReplayTruncatedPayload } from "@/types";
+import type {
+  ReplayTruncatedPayload,
+  SessionSubscriptionPayload,
+} from "@/types";
 
 const encoder = new TextEncoder();
 
@@ -159,6 +162,38 @@ describe("RealtimeService", () => {
     });
   });
 
+  describe("session_subscription event", () => {
+    it("dispatches session_subscription to listeners", () => {
+      const events: Array<{
+        sessionId: string;
+        payload: SessionSubscriptionPayload;
+      }> = [];
+
+      service.subscribeSessionSubscription((sessionId, payload) => {
+        events.push({ sessionId, payload });
+      });
+
+      mockWs.readyState = WebSocket.OPEN;
+      mockWs.onopen?.(new Event("open"));
+
+      const payload: SessionSubscriptionPayload = {
+        state: "subscribed",
+        resume_from_seq: 42,
+        latest_seq: 120,
+        replay_window_start_seq: 90,
+        at: "2026-02-16T00:00:00Z",
+      };
+
+      const msg = buildControlEvent("session_subscription", "sess-001", payload);
+      mockWs.onmessage?.({ data: msg } as MessageEvent);
+
+      expect(events).toHaveLength(1);
+      expect(events[0].sessionId).toBe("sess-001");
+      expect(events[0].payload.state).toBe("subscribed");
+      expect(events[0].payload.latest_seq).toBe(120);
+    });
+  });
+
   describe("health state transitions", () => {
     it("transitions to healthy on open", () => {
       const healthChanges: string[] = [];
@@ -221,6 +256,21 @@ describe("RealtimeService", () => {
       service.sendInput("sess-001", encoder.encode("ls\n"));
 
       expect(sentData).toHaveLength(0);
+    });
+  });
+
+  describe("control messages", () => {
+    it("sends unsubscribe_session JSON control message", () => {
+      const sent: string[] = [];
+      mockWs.readyState = WebSocket.OPEN;
+      mockWs.send = (data: any) => sent.push(String(data));
+
+      service.unsubscribeSession("sess-001");
+
+      expect(sent).toHaveLength(1);
+      const msg = JSON.parse(sent[0]);
+      expect(msg.type).toBe("unsubscribe_session");
+      expect(msg.payload.session_id).toBe("sess-001");
     });
   });
 });

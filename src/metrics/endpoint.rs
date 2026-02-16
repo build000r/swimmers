@@ -27,10 +27,7 @@ pub struct MetricsState {
 async fn metrics_handler(State(state): State<MetricsState>) -> impl IntoResponse {
     let body = state.handle.render();
     (
-        [(
-            CONTENT_TYPE,
-            "text/plain; version=0.0.4; charset=utf-8",
-        )],
+        [(CONTENT_TYPE, "text/plain; version=0.0.4; charset=utf-8")],
         body,
     )
 }

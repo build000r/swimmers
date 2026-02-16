@@ -1,11 +1,11 @@
 import { useEffect, useRef, useState, useCallback } from "preact/hooks";
 import type { SessionSummary } from "@/types";
+import type { WorkspaceLayoutState } from "@/services/workspace-history";
 import { TerminalWorkspace } from "@/components/TerminalWorkspace";
 import { useTerminalCache } from "@/hooks/useTerminalCache";
 import { useSwipeBack } from "@/hooks/useGestures";
 import { terminalCacheTtlMs, zoneLayout } from "@/app";
 import type { CachedTerminal } from "@/hooks/useTerminalCache";
-import type { ReplayTruncatedPayload, SessionOverloadedPayload } from "@/types";
 import { realtime } from "@/app";
 
 // ---- Helpers ----
@@ -19,66 +19,54 @@ interface ZoneState {
   age: number; // timestamp for "replace oldest"
 }
 
+interface RestoreLayoutRequest extends WorkspaceLayoutState {
+  requestId: number;
+}
+
 interface ZoneManagerProps {
   sessions: SessionSummary[];
   activeSessionId: string | null;
   preferZone: "main" | "bottom" | null;
+  restoreRequest: RestoreLayoutRequest | null;
   observer?: boolean;
   onShowOverview: () => void;
   onStartPolling: () => void;
   onStopPolling: () => void;
+  onLayoutChange: (layout: WorkspaceLayoutState) => void;
 }
 
 export function ZoneManager({
   sessions,
   activeSessionId,
   preferZone,
+  restoreRequest,
   observer = false,
   onShowOverview,
   onStartPolling,
   onStopPolling,
+  onLayoutChange,
 }: ZoneManagerProps) {
   const [mainZone, setMainZone] = useState<ZoneState | null>(null);
   const [bottomZone, setBottomZone] = useState<ZoneState | null>(null);
   const [splitRatio, setSplitRatio] = useState(0.6);
-  const [recoveryBanners, setRecoveryBanners] = useState<
-    Record<string, string | null>
-  >({});
+  const openSequenceRef = useRef({ main: 0, bottom: 0 });
+  const mainZoneRef = useRef<ZoneState | null>(null);
+  const bottomZoneRef = useRef<ZoneState | null>(null);
 
   const dividerRef = useRef<HTMLDivElement>(null);
   const wrapperRef = useRef<HTMLDivElement>(null);
   const cache = useTerminalCache(terminalCacheTtlMs.value);
+
+  useEffect(() => {
+    mainZoneRef.current = mainZone;
+    bottomZoneRef.current = bottomZone;
+  }, [mainZone, bottomZone]);
 
   // ---- Swipe back gesture ----
   useSwipeBack(wrapperRef, () => {
     closeAllZones();
     onShowOverview();
   });
-
-  // ---- Realtime event wiring for recovery banners ----
-
-  useEffect(() => {
-    realtime.on({
-      onReplayTruncated(
-        sessionId: string,
-        payload: ReplayTruncatedPayload,
-      ) {
-        setRecoveryBanners((prev) => ({
-          ...prev,
-          [sessionId]: `Replay gap: seq ${payload.requested_resume_from_seq}-${payload.replay_window_start_seq} lost. Refresh recommended.`,
-        }));
-      },
-      onSessionOverloaded(
-        sessionId: string,
-        payload: SessionOverloadedPayload,
-      ) {
-        setRecoveryBanners((prev) => ({
-          ...prev,
-          [sessionId]: `Session overloaded (queue: ${payload.queue_depth}). Retry in ${payload.retry_after_ms}ms.`,
-        }));
-      },
-    });
-  }, []);
 
   // ---- Zone target selection ----
 
@@ -116,25 +104,102 @@ export function ZoneManager({
     const { existing, target } = pickTargetZone(activeSessionId, preferZone);
     if (existing) return; // Already visible
 
-    // Cache current occupant if the target is occupied
-    // (The TerminalWorkspace component handles caching on unmount via onCache)
+    const sequence = ++openSequenceRef.current[target];
 
-    // On mobile, clear bottom zone
-    if (!isDesktop() && bottomZone) {
+    queueMicrotask(() => {
+      if (openSequenceRef.current[target] !== sequence) return;
+      const now = Date.now();
+
+      // On mobile, enforce single-pane behavior and detach any secondary stream.
+      if (!isDesktop()) {
+        setBottomZone((prev) => {
+          if (prev) {
+            realtime.unsubscribeSession(prev.sessionId);
+          }
+          return null;
+        });
+      }
+
+      if (target === "main") {
+        setMainZone((prev) => {
+          if (prev && prev.sessionId !== activeSessionId) {
+            realtime.unsubscribeSession(prev.sessionId);
+          }
+          return { sessionId: activeSessionId, age: now };
+        });
+      } else {
+        setBottomZone((prev) => {
+          if (prev && prev.sessionId !== activeSessionId) {
+            realtime.unsubscribeSession(prev.sessionId);
+          }
+          return { sessionId: activeSessionId, age: now };
+        });
+      }
+    });
+  }, [activeSessionId, preferZone, pickTargetZone]);
+
+  useEffect(() => {
+    if (!restoreRequest) return;
+
+    const availableIds = new Set(sessions.map((s) => s.session_id));
+    let mainSessionId =
+      restoreRequest.mainSessionId &&
+      availableIds.has(restoreRequest.mainSessionId)
+        ? restoreRequest.mainSessionId
+        : null;
+    let bottomSessionId =
+      restoreRequest.bottomSessionId &&
+      availableIds.has(restoreRequest.bottomSessionId)
+        ? restoreRequest.bottomSessionId
+        : null;
+
+    if (mainSessionId && bottomSessionId && mainSessionId === bottomSessionId) {
+      bottomSessionId = null;
+    }
+    if (!mainSessionId && bottomSessionId) {
+      mainSessionId = bottomSessionId;
+      bottomSessionId = null;
+    }
+
+    const previousAssignments = [
+      mainZoneRef.current?.sessionId,
+      bottomZoneRef.current?.sessionId,
+    ].filter((value): value is string => !!value);
+    const nextAssignments = [mainSessionId, bottomSessionId].filter(
+      (value): value is string => !!value,
+    );
+
+    for (const sessionId of previousAssignments) {
+      if (!nextAssignments.includes(sessionId)) {
+        realtime.unsubscribeSession(sessionId);
+      }
+    }
+
+    if (!mainSessionId && !bottomSessionId) {
+      setMainZone(null);
       setBottomZone(null);
+      onShowOverview();
+      return;
     }
 
-    if (target === "main") {
-      setMainZone({ sessionId: activeSessionId, age: Date.now() });
-    } else {
-      setBottomZone({ sessionId: activeSessionId, age: Date.now() });
-    }
-  }, [activeSessionId, preferZone]); // eslint-disable-line react-hooks/exhaustive-deps
+    const now = Date.now();
+    setMainZone(mainSessionId ? { sessionId: mainSessionId, age: now } : null);
+    setBottomZone(
+      bottomSessionId ? { sessionId: bottomSessionId, age: now + 1 } : null,
+    );
+    setSplitRatio(Math.max(0.2, Math.min(0.8, restoreRequest.splitRatio)));
+  }, [restoreRequest?.requestId, sessions, onShowOverview]);
 
   // ---- Close zones ----
 
   const closeZone = useCallback(
     (zone: "main" | "bottom") => {
+      const closingSessionId =
+        zone === "main" ? mainZone?.sessionId : bottomZone?.sessionId;
+      if (closingSessionId) {
+        realtime.unsubscribeSession(closingSessionId);
+      }
+
       if (zone === "main") setMainZone(null);
       else setBottomZone(null);
 
@@ -150,9 +215,15 @@ export function ZoneManager({
   );
 
   const closeAllZones = useCallback(() => {
+    if (mainZone?.sessionId) {
+      realtime.unsubscribeSession(mainZone.sessionId);
+    }
+    if (bottomZone?.sessionId) {
+      realtime.unsubscribeSession(bottomZone.sessionId);
+    }
     setMainZone(null);
     setBottomZone(null);
-  }, []);
+  }, [mainZone, bottomZone]);
 
   // ---- Handle terminal caching from workspace ----
 
@@ -168,6 +239,7 @@ export function ZoneManager({
   const handleSessionExit = useCallback(
     (sessionId: string) => {
       cache.evict(sessionId);
+      realtime.unsubscribeSession(sessionId);
       if (mainZone?.sessionId === sessionId) setMainZone(null);
       if (bottomZone?.sessionId === sessionId) setBottomZone(null);
       // Check if any zones remain
@@ -220,7 +292,30 @@ export function ZoneManager({
     } else if (singleZone) {
       onStartPolling();
     }
-  }, [mainZone, bottomZone, onStartPolling, onStopPolling]);
+
+    if (mainZone || bottomZone) {
+      onLayoutChange({
+        view: "terminal",
+        mainSessionId: mainZone?.sessionId ?? null,
+        bottomSessionId: bottomZone?.sessionId ?? null,
+        splitRatio,
+      });
+    } else {
+      onLayoutChange({
+        view: "overview",
+        mainSessionId: null,
+        bottomSessionId: null,
+        splitRatio,
+      });
+    }
+  }, [
+    mainZone,
+    bottomZone,
+    splitRatio,
+    onStartPolling,
+    onStopPolling,
+    onLayoutChange,
+  ]);
 
   // ---- Lookup session data ----
 
@@ -267,7 +362,6 @@ export function ZoneManager({
             onCache={handleCache}
             onSessionExit={handleSessionExit}
             onClose={() => closeZone("main")}
-            recoveryBanner={recoveryBanners[mainZone.sessionId] ?? null}
           />
         </div>
       )}
@@ -310,7 +404,6 @@ export function ZoneManager({
             onCache={handleCache}
             onSessionExit={handleSessionExit}
             onClose={() => closeZone("bottom")}
-            recoveryBanner={recoveryBanners[bottomZone.sessionId] ?? null}
           />
         </div>
       )}

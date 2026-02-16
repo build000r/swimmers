@@ -121,11 +121,7 @@ impl ClaudeCodeReader {
         let entries = fs::read_dir(&project_dir).ok()?;
         let mut files: Vec<(PathBuf, std::time::SystemTime)> = entries
             .filter_map(|e| e.ok())
-            .filter(|e| {
-                e.path()
-                    .extension()
-                    .map_or(false, |ext| ext == "jsonl")
-            })
+            .filter(|e| e.path().extension().map_or(false, |ext| ext == "jsonl"))
             .filter_map(|e| {
                 let md = e.metadata().ok()?;
                 let mtime = md.modified().ok()?;
@@ -176,7 +172,9 @@ impl ClaudeCodeReader {
                     if msg.get("role").and_then(Value::as_str) == Some("assistant") {
                         // Extract input_tokens from usage data
                         if let Some(usage) = msg.get("usage") {
-                            if let Some(input_tokens) = usage.get("input_tokens").and_then(Value::as_u64) {
+                            if let Some(input_tokens) =
+                                usage.get("input_tokens").and_then(Value::as_u64)
+                            {
                                 self.token_count = input_tokens;
                             }
                         }
@@ -366,9 +364,8 @@ impl CodexReader {
             if first_line.is_empty() {
                 return Ok(false);
             }
-            let entry: Value = serde_json::from_str(first_line).map_err(|e| {
-                std::io::Error::new(std::io::ErrorKind::InvalidData, e)
-            })?;
+            let entry: Value = serde_json::from_str(first_line)
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
             if entry.get("type").and_then(Value::as_str) == Some("session_meta") {
                 if let Some(payload) = entry.get("payload") {
                     return Ok(payload.get("cwd").and_then(Value::as_str) == Some(&self.cwd));
@@ -383,7 +380,10 @@ impl CodexReader {
     fn parse_entries(&mut self, entries: &[Value]) {
         for entry in entries {
             let entry_type = entry.get("type").and_then(Value::as_str).unwrap_or("");
-            let payload = entry.get("payload").cloned().unwrap_or(Value::Object(Default::default()));
+            let payload = entry
+                .get("payload")
+                .cloned()
+                .unwrap_or(Value::Object(Default::default()));
 
             // response_item with role=user -> user task
             if entry_type == "response_item"

@@ -9,6 +9,12 @@ import type {
 } from "@/types";
 import { bootstrap as apiFetch } from "@/services/api";
 import { RealtimeService } from "@/services/realtime";
+import type { WorkspaceLayoutState } from "@/services/workspace-history";
+import {
+  applyWorkspaceLayoutToUrl,
+  normalizeWorkspaceLayout,
+  parseWorkspaceLayoutFromUrl,
+} from "@/services/workspace-history";
 import { OverviewField } from "@/components/OverviewField";
 import { ZoneManager } from "@/components/ZoneManager";
 import { useObserverMode } from "@/hooks/useObserverMode";
@@ -25,12 +31,26 @@ export const zoneLayout = signal<"single" | "dual">("single");
 // Shared realtime service singleton
 export const realtime = new RealtimeService();
 
+interface RestoreLayoutRequest extends WorkspaceLayoutState {
+  requestId: number;
+}
+
 export function App() {
   const [bootstrapDone, setBootstrapDone] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [authMode, setAuthMode] = useState<string | undefined>(undefined);
+  const [restoreRequest, setRestoreRequest] =
+    useState<RestoreLayoutRequest | null>(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const bootstrapDataRef = useRef<BootstrapResponse | null>(null);
+  const workspaceHistoryModeRef = useRef("url_state_v1");
+  const restoreRequestIdRef = useRef(0);
+  const lastLayoutRef = useRef<WorkspaceLayoutState>({
+    view: "overview",
+    mainSessionId: null,
+    bottomSessionId: null,
+    splitRatio: 0.6,
+  });
   const { isObserver } = useObserverMode(authMode);
 
   // ---- Session helpers ----
@@ -40,6 +60,65 @@ export function App() {
       sessions.value = sessions.value.map((s) =>
         s.session_id === sessionId ? updater(s) : s,
       );
+    },
+    [],
+  );
+
+  const writeWorkspaceLayout = useCallback(
+    (layout: WorkspaceLayoutState, mode: "push" | "replace" = "push") => {
+      if (workspaceHistoryModeRef.current !== "url_state_v1") return;
+
+      const nextUrl = applyWorkspaceLayoutToUrl(
+        new URL(window.location.href),
+        layout,
+      );
+
+      if (
+        nextUrl.pathname === window.location.pathname &&
+        nextUrl.search === window.location.search &&
+        nextUrl.hash === window.location.hash
+      ) {
+        lastLayoutRef.current = layout;
+        return;
+      }
+
+      const nextHref = `${nextUrl.pathname}${nextUrl.search}${nextUrl.hash}`;
+      if (mode === "replace") {
+        window.history.replaceState({ workspace: layout }, "", nextHref);
+      } else {
+        window.history.pushState({ workspace: layout }, "", nextHref);
+      }
+
+      lastLayoutRef.current = layout;
+    },
+    [],
+  );
+
+  const applyWorkspaceLayout = useCallback(
+    (candidate: WorkspaceLayoutState, availableSessions: SessionSummary[]) => {
+      const normalized = normalizeWorkspaceLayout(
+        candidate,
+        new Set(availableSessions.map((s) => s.session_id)),
+      );
+
+      batch(() => {
+        currentView.value = normalized.view;
+        activeSessionId.value = null;
+        activeZonePreference.value = null;
+      });
+
+      if (normalized.view === "terminal") {
+        restoreRequestIdRef.current += 1;
+        setRestoreRequest({
+          ...normalized,
+          requestId: restoreRequestIdRef.current,
+        });
+      } else {
+        setRestoreRequest(null);
+      }
+
+      lastLayoutRef.current = normalized;
+      return normalized;
     },
     [],
   );
@@ -130,6 +209,13 @@ export function App() {
         });
 
         setAuthMode(data.auth_mode);
+        workspaceHistoryModeRef.current = data.workspace_history_mode;
+
+        const initialLayout = applyWorkspaceLayout(
+          parseWorkspaceLayoutFromUrl(new URL(window.location.href)),
+          data.sessions,
+        );
+        writeWorkspaceLayout(initialLayout, "replace");
 
         // Connect realtime WebSocket
         // Derive ws URL from the page origin if the bootstrap URL is absolute
@@ -152,7 +238,25 @@ export function App() {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [applyWorkspaceLayout, writeWorkspaceLayout]);
+
+  useEffect(() => {
+    if (!bootstrapDone || workspaceHistoryModeRef.current !== "url_state_v1") {
+      return;
+    }
+
+    const onPopState = () => {
+      applyWorkspaceLayout(
+        parseWorkspaceLayoutFromUrl(new URL(window.location.href)),
+        sessions.value,
+      );
+    };
+
+    window.addEventListener("popstate", onPopState);
+    return () => {
+      window.removeEventListener("popstate", onPopState);
+    };
+  }, [bootstrapDone, applyWorkspaceLayout]);
 
   // ---- Polling fallback (when on overview) ----
 
@@ -219,10 +323,36 @@ export function App() {
   );
 
   const showOverview = useCallback(() => {
-    currentView.value = "overview";
-    activeSessionId.value = null;
-    activeZonePreference.value = null;
-  }, []);
+    batch(() => {
+      currentView.value = "overview";
+      activeSessionId.value = null;
+      activeZonePreference.value = null;
+    });
+    setRestoreRequest(null);
+    writeWorkspaceLayout(
+      {
+        view: "overview",
+        mainSessionId: null,
+        bottomSessionId: null,
+        splitRatio: lastLayoutRef.current.splitRatio,
+      },
+      "push",
+    );
+  }, [writeWorkspaceLayout]);
+
+  const handleLayoutChange = useCallback(
+    (layout: WorkspaceLayoutState) => {
+      const previous = lastLayoutRef.current;
+      const mode =
+        previous.view === layout.view &&
+        previous.mainSessionId === layout.mainSessionId &&
+        previous.bottomSessionId === layout.bottomSessionId
+          ? "replace"
+          : "push";
+      writeWorkspaceLayout(layout, mode);
+    },
+    [writeWorkspaceLayout],
+  );
 
   // ---- Render ----
 
@@ -359,10 +489,12 @@ export function App() {
             sessions={sessions.value}
             activeSessionId={activeSessionId.value}
             preferZone={activeZonePreference.value}
+            restoreRequest={restoreRequest}
             observer={isObserver}
             onShowOverview={showOverview}
             onStartPolling={startPolling}
             onStopPolling={stopPolling}
+            onLayoutChange={handleLayoutChange}
           />
         )}
       </div>

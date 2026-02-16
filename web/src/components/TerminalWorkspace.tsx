@@ -41,8 +41,6 @@ interface TerminalWorkspaceProps {
   onSessionExit: (sessionId: string) => void;
   /** Called when header sprite is clicked (close zone) */
   onClose: () => void;
-  /** Recovery info */
-  recoveryBanner?: string | null;
 }
 
 const encoder = new TextEncoder();
@@ -54,33 +52,95 @@ export function TerminalWorkspace({
   onCache,
   onSessionExit,
   onClose,
-  recoveryBanner,
 }: TerminalWorkspaceProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
   const hostElRef = useRef<HTMLDivElement | null>(null);
   const resizeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const focusTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const seqRef = useRef<number>(0);
   const snapshotReadyRef = useRef(false);
   const pendingFramesRef = useRef<TerminalOutputFrame[]>([]);
   const [title, setTitle] = useState(`tmux a -t ${session.tmux_name}`);
   const [titleCopied, setTitleCopied] = useState(false);
   const [rushingOff, setRushingOff] = useState(false);
+  const [lifecycleState, setLifecycleState] = useState<
+    "attaching" | "snapshot_or_replay" | "live"
+  >("attaching");
+  const [recoveryBanner, setRecoveryBanner] = useState<string | null>(null);
+  const [recoveryRetrying, setRecoveryRetrying] = useState(false);
   const initDoneRef = useRef(false);
+  const autoRecoveryKeyRef = useRef<string | null>(null);
+  const recoverFromSnapshotRef = useRef<(() => Promise<void>) | null>(null);
+
+  useEffect(() => {
+    setTitle(`tmux a -t ${session.tmux_name}`);
+  }, [session.tmux_name]);
 
   // ---- Terminal init / restore ----
 
   useEffect(() => {
     if (initDoneRef.current) return;
     initDoneRef.current = true;
+    snapshotReadyRef.current = false;
+    pendingFramesRef.current = [];
+    autoRecoveryKeyRef.current = null;
+    setRecoveryBanner(null);
+    setRecoveryRetrying(false);
+    setLifecycleState("attaching");
 
     const container = containerRef.current;
     if (!container) return;
+    let disposed = false;
 
     let term: Terminal;
     let fitAddon: FitAddon;
     let hostEl: HTMLDivElement;
+
+    const flushPendingFrames = () => {
+      for (const frame of pendingFramesRef.current) {
+        if (frame.seq > seqRef.current) {
+          seqRef.current = frame.seq;
+          term.write(frame.data);
+        }
+      }
+      pendingFramesRef.current = [];
+    };
+
+    const markLive = () => {
+      if (!disposed && snapshotReadyRef.current) {
+        setLifecycleState("live");
+      }
+    };
+
+    const recoverFromSnapshot = async () => {
+      if (disposed) return;
+      setLifecycleState("snapshot_or_replay");
+      setRecoveryRetrying(true);
+      try {
+        const snapshot = await fetchSnapshot(session.session_id);
+        if (disposed) return;
+        seqRef.current = snapshot.latest_seq;
+        snapshotReadyRef.current = true;
+        term.clear();
+        if (snapshot.screen_text) {
+          term.write(snapshot.screen_text);
+        }
+        flushPendingFrames();
+        setRecoveryBanner(null);
+        setRecoveryRetrying(false);
+        markLive();
+      } catch {
+        if (disposed) return;
+        setRecoveryBanner(
+          "Replay recovery failed. Retry snapshot to re-sync this pane.",
+        );
+        setRecoveryRetrying(false);
+      }
+    };
+
+    recoverFromSnapshotRef.current = recoverFromSnapshot;
 
     if (cached) {
       // Restore from cache — terminal already has content, no snapshot needed
@@ -90,10 +150,12 @@ export function TerminalWorkspace({
       snapshotReadyRef.current = true;
       container.appendChild(hostEl);
       // Re-subscribe in case WebSocket reconnected since cache
+      setLifecycleState("snapshot_or_replay");
       realtime.subscribeSession(session.session_id, seqRef.current);
       realtime.sendResize(session.session_id, term.cols, term.rows);
       fitAddon.fit();
       term.focus();
+      markLive();
     } else {
       // Create new terminal
       hostEl = document.createElement("div");
@@ -141,6 +203,7 @@ export function TerminalWorkspace({
       fitAddon.fit();
 
       // Subscribe to session via realtime
+      setLifecycleState("snapshot_or_replay");
       realtime.subscribeSession(session.session_id);
 
       // Send initial resize
@@ -150,32 +213,27 @@ export function TerminalWorkspace({
       // Output frames are buffered until the snapshot loads to prevent garbled display.
       fetchSnapshot(session.session_id)
         .then((snapshot) => {
+          if (disposed) return;
           if (snapshot.screen_text) {
             term.write(snapshot.screen_text);
           }
           seqRef.current = snapshot.latest_seq;
           snapshotReadyRef.current = true;
           // Flush any frames that arrived while the snapshot was loading
-          for (const frame of pendingFramesRef.current) {
-            if (frame.seq > seqRef.current) {
-              seqRef.current = frame.seq;
-              term.write(frame.data);
-            }
-          }
-          pendingFramesRef.current = [];
+          flushPendingFrames();
+          markLive();
         })
         .catch(() => {
+          if (disposed) return;
           // Snapshot unavailable — flush buffered frames and accept live output
           snapshotReadyRef.current = true;
-          for (const frame of pendingFramesRef.current) {
-            seqRef.current = frame.seq;
-            term.write(frame.data);
-          }
-          pendingFramesRef.current = [];
+          flushPendingFrames();
+          markLive();
         });
 
       // Focus after layout settles
-      setTimeout(() => {
+      focusTimerRef.current = setTimeout(() => {
+        if (disposed) return;
         fitAddon.fit();
         term.focus();
       }, 350);
@@ -198,19 +256,30 @@ export function TerminalWorkspace({
       if (frame.seq <= seqRef.current) return;
       seqRef.current = frame.seq;
       term.write(frame.data);
+      setLifecycleState("live");
     };
 
     const unsubscribeOutput = realtime.subscribeTerminalOutput(handleOutput);
     const unsubscribeReplay = realtime.subscribeReplayTruncated(
-      async (sessionId, _payload) => {
+      async (sessionId, payload) => {
         if (sessionId !== session.session_id) return;
-        try {
-          const snapshot = await fetchSnapshot(session.session_id);
-          seqRef.current = snapshot.latest_seq;
-          term.clear();
-          term.write(snapshot.screen_text);
-        } catch {
-          // Keep current terminal state; banner remains visible for manual retry.
+        const incidentKey = `${payload.requested_resume_from_seq}:${payload.replay_window_start_seq}:${payload.latest_seq}`;
+        if (autoRecoveryKeyRef.current === incidentKey) return;
+        autoRecoveryKeyRef.current = incidentKey;
+        setLifecycleState("snapshot_or_replay");
+        setRecoveryBanner("Replay gap detected. Attempting automatic recovery...");
+        await recoverFromSnapshot();
+      },
+    );
+    const unsubscribeSubscription = realtime.subscribeSessionSubscription(
+      (sessionId, payload) => {
+        if (sessionId !== session.session_id) return;
+        if (payload.state === "subscribed") {
+          setLifecycleState(
+            snapshotReadyRef.current ? "live" : "snapshot_or_replay",
+          );
+        } else if (payload.state === "unsubscribed") {
+          setLifecycleState("attaching");
         }
       },
     );
@@ -249,6 +318,8 @@ export function TerminalWorkspace({
 
     // Cleanup on unmount: cache the terminal instead of destroying it
     return () => {
+      disposed = true;
+      recoverFromSnapshotRef.current = null;
       window.removeEventListener("resize", handleWindowResize);
       if (window.visualViewport) {
         window.visualViewport.removeEventListener("resize", handleWindowResize);
@@ -257,7 +328,13 @@ export function TerminalWorkspace({
       resizeDisposable?.dispose();
       unsubscribeOutput();
       unsubscribeReplay();
+      unsubscribeSubscription();
       if (resizeTimerRef.current) clearTimeout(resizeTimerRef.current);
+      if (focusTimerRef.current) {
+        clearTimeout(focusTimerRef.current);
+        focusTimerRef.current = null;
+      }
+      realtime.unsubscribeSession(session.session_id);
 
       // Detach from DOM but keep alive for cache
       if (hostEl.parentNode) hostEl.parentNode.removeChild(hostEl);
@@ -310,6 +387,19 @@ export function TerminalWorkspace({
     }).catch(() => {});
   }, [title]);
 
+  const handleManualRecovery = useCallback(() => {
+    const recover = recoverFromSnapshotRef.current;
+    if (!recover) return;
+    void recover();
+  }, []);
+
+  const lifecycleLabel =
+    lifecycleState === "attaching"
+      ? "attaching"
+      : lifecycleState === "snapshot_or_replay"
+        ? "snapshot/replay"
+        : "live";
+
   // ---- Render ----
 
   return (
@@ -334,6 +424,16 @@ export function TerminalWorkspace({
         <span class="zone-title" onClick={handleTitleClick}>
           {titleCopied ? "copied!" : title}
         </span>
+        <span
+          style={{
+            fontSize: "10px",
+            letterSpacing: "0.04em",
+            textTransform: "uppercase",
+            opacity: lifecycleState === "live" ? 0.7 : 1,
+          }}
+        >
+          {lifecycleLabel}
+        </span>
         <span class={`zone-dot state-dot ${session.state}`} />
       </header>
 
@@ -348,9 +448,30 @@ export function TerminalWorkspace({
             fontSize: "12px",
             fontWeight: 600,
             flexShrink: 0,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            gap: "8px",
           }}
         >
-          {recoveryBanner}
+          <span>{recoveryBanner}</span>
+          <button
+            type="button"
+            onClick={handleManualRecovery}
+            disabled={recoveryRetrying}
+            style={{
+              border: "1px solid rgba(255,255,255,0.5)",
+              background: "rgba(0,0,0,0.2)",
+              color: "#fff",
+              fontSize: "11px",
+              padding: "2px 8px",
+              borderRadius: "4px",
+              cursor: recoveryRetrying ? "not-allowed" : "pointer",
+              opacity: recoveryRetrying ? 0.7 : 1,
+            }}
+          >
+            {recoveryRetrying ? "recovering..." : "retry snapshot"}
+          </button>
         </div>
       )}
 

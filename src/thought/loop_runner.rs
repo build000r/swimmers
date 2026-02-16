@@ -15,9 +15,9 @@ use std::time::Duration;
 use tokio::sync::broadcast;
 use tracing::{debug, error, info};
 
-use crate::thought::context::{context_reader_for, ContextReader, ContextSnapshot};
 #[cfg(test)]
 use crate::thought::context::AgentAction;
+use crate::thought::context::{context_reader_for, ContextReader, ContextSnapshot};
 use crate::types::{ControlEvent, SessionState, ThoughtUpdatePayload};
 
 // ---------------------------------------------------------------------------
@@ -90,7 +90,10 @@ impl ThoughtLoopRunner {
         provider: std::sync::Arc<P>,
     ) -> tokio::task::JoinHandle<()> {
         tokio::spawn(async move {
-            info!("thought generation loop started (interval={}ms)", self.tick_ms);
+            info!(
+                "thought generation loop started (interval={}ms)",
+                self.tick_ms
+            );
             let mut interval = tokio::time::interval(Duration::from_millis(self.tick_ms));
             let mut per_session: HashMap<String, SessionThoughtState> = HashMap::new();
 
@@ -134,7 +137,8 @@ impl ThoughtLoopRunner {
                     let result = if state.context_reader.is_some() {
                         handle_context_aware(info, state).await
                     } else {
-                        handle_terminal_fallback(info, state).await
+                        handle_terminal_fallback(info, state)
+                            .await
                             .map(|t| (t, 0u64))
                     };
 
@@ -152,9 +156,8 @@ impl ThoughtLoopRunner {
                         } else {
                             info.token_count
                         };
-                        let context_limit = crate::types::context_limit_for_tool(
-                            info.tool.as_deref(),
-                        );
+                        let context_limit =
+                            crate::types::context_limit_for_tool(info.tool.as_deref());
 
                         let payload = ThoughtUpdatePayload {
                             thought: Some(thought),
@@ -344,10 +347,7 @@ fn build_context_prompt(
         parts.push("Actions:".to_string());
         for a in &snapshot.recent_actions {
             if a.tool == "said" {
-                parts.push(format!(
-                    "  said: {}",
-                    a.detail.as_deref().unwrap_or("")
-                ));
+                parts.push(format!("  said: {}", a.detail.as_deref().unwrap_or("")));
             } else {
                 let detail_part = a
                     .detail
@@ -371,31 +371,47 @@ fn build_context_prompt(
     parts.push(String::new());
     parts.push("Write a 1-line status (max 60 chars). Explain the PURPOSE and WHY, not the tool or command.".to_string());
     parts.push("Good: \"adding JWT refresh to prevent session timeouts\" or \"3 test failures — user_routes returns wrong status code\" or \"understanding DB schema before adding migrations\"".to_string());
-    parts.push("Bad: \"running tests\" or \"editing files\" or \"using Read tool\" or \"working on code\"".to_string());
+    parts.push(
+        "Bad: \"running tests\" or \"editing files\" or \"using Read tool\" or \"working on code\""
+            .to_string(),
+    );
     parts.push("Reply with ONLY the status line, nothing else.".to_string());
 
     parts.join("\n")
 }
 
-fn build_terminal_prompt(
-    context: &str,
-    state: SessionState,
-    prev_context: Option<&str>,
-) -> String {
+fn build_terminal_prompt(context: &str, state: SessionState, prev_context: Option<&str>) -> String {
     // Strip ANSI from the context we send to the LLM so it sees clean text.
     let clean = strip_ansi(context);
     let clean_prev = prev_context.map(strip_ansi);
 
     let context_block = if let Some(ref prev) = clean_prev {
         // Try to find new output since last check.
-        let tail: String = prev.chars().rev().take(200).collect::<Vec<_>>().into_iter().rev().collect();
+        let tail: String = prev
+            .chars()
+            .rev()
+            .take(200)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect();
         match clean.find(&tail) {
             Some(idx) => {
                 let delta = clean[idx + tail.len()..].trim();
                 if !delta.is_empty() {
                     format!("New output:\n{delta}")
                 } else {
-                    format!("Screen:\n{}", clean.chars().rev().take(300).collect::<Vec<_>>().into_iter().rev().collect::<String>())
+                    format!(
+                        "Screen:\n{}",
+                        clean
+                            .chars()
+                            .rev()
+                            .take(300)
+                            .collect::<Vec<_>>()
+                            .into_iter()
+                            .rev()
+                            .collect::<String>()
+                    )
                 }
             }
             None => format!("Screen:\n{clean}"),
@@ -476,11 +492,7 @@ async fn call_llm(prompt: &str) -> Result<String, String> {
     Err(format!("all models failed, last: {last_err}"))
 }
 
-async fn call_openrouter(
-    prompt: &str,
-    model: &str,
-    api_key: &str,
-) -> Result<String, String> {
+async fn call_openrouter(prompt: &str, model: &str, api_key: &str) -> Result<String, String> {
     let body = serde_json::json!({
         "model": model,
         "max_tokens": 80,

@@ -8,6 +8,7 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::State;
@@ -18,12 +19,15 @@ use tokio::sync::{broadcast, mpsc, oneshot};
 
 use crate::api::AppState;
 use crate::realtime::codec;
-use crate::session::actor::{ClientId, OutputFrame, SessionCommand, SubscribeOutcome};
+use crate::session::actor::{
+    ActorHandle, ClientId, OutputFrame, ReplayCursor, SessionCommand, SubscribeOutcome,
+};
 use crate::session::supervisor::LifecycleEvent;
 use crate::types::{
     ClientControlMessage, ControlErrorPayload, ControlEvent, DismissAttentionPayload,
     ReplayTruncatedPayload, ResizePayload, SessionCreatedPayload, SessionDeletedPayload,
-    SessionOverloadedPayload, SubscribeSessionPayload,
+    SessionOverloadedPayload, SessionSubscriptionPayload, SubscribeSessionPayload,
+    UnsubscribeSessionPayload,
 };
 
 /// Global client ID counter for assigning unique IDs to output subscriptions.
@@ -61,8 +65,13 @@ struct SessionSub {
 }
 
 enum PollEvent {
-    Output { session_id: String, frame: OutputFrame },
-    Overloaded { session_id: String },
+    Output {
+        session_id: String,
+        frame: OutputFrame,
+    },
+    Overloaded {
+        session_id: String,
+    },
     /// A per-session control event (session_state, session_title).
     SessionEvent(ControlEvent),
 }
@@ -83,8 +92,7 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
     let (mut ws_sink, mut ws_stream) = socket.split();
 
     // Subscribe to supervisor-level lifecycle events (session created/deleted).
-    let mut lifecycle_rx: broadcast::Receiver<LifecycleEvent> =
-        state.supervisor.subscribe_events();
+    let mut lifecycle_rx: broadcast::Receiver<LifecycleEvent> = state.supervisor.subscribe_events();
 
     // Subscribe to thought_update events from the thought loop.
     let mut thought_rx: broadcast::Receiver<ControlEvent> =
@@ -264,13 +272,13 @@ fn lifecycle_to_control_event(event: LifecycleEvent) -> ControlEvent {
         } => ControlEvent {
             event: "session_created".to_string(),
             session_id,
-            payload: serde_json::to_value(SessionCreatedPayload { reason, session: summary })
-                .unwrap(),
+            payload: serde_json::to_value(SessionCreatedPayload {
+                reason,
+                session: summary,
+            })
+            .unwrap(),
         },
-        LifecycleEvent::Deleted {
-            session_id,
-            reason,
-        } => ControlEvent {
+        LifecycleEvent::Deleted { session_id, reason } => ControlEvent {
             event: "session_deleted".to_string(),
             session_id,
             payload: serde_json::to_value(SessionDeletedPayload {
@@ -367,6 +375,9 @@ async fn handle_text_message(
         "subscribe_session" => {
             handle_subscribe(state, ws_sink, output_subs, &msg.payload, &request_id).await;
         }
+        "unsubscribe_session" => {
+            handle_unsubscribe(state, ws_sink, output_subs, &msg.payload, &request_id).await;
+        }
         "resize" => {
             handle_resize(state, ws_sink, &msg.payload, &request_id).await;
         }
@@ -428,6 +439,7 @@ async fn handle_subscribe(
 
     // If already subscribed to this session, unsubscribe first.
     if let Some(old_sub) = output_subs.remove(&session_id) {
+        crate::metrics::increment_subscription_lifecycle(&session_id, "unsubscribe");
         let _ = handle
             .send(SessionCommand::Unsubscribe {
                 client_id: old_sub.client_id,
@@ -437,9 +449,7 @@ async fn handle_subscribe(
 
     // Create a bounded channel for this subscription's output.
     let client_id = allocate_client_id();
-    let (client_tx, client_rx) = mpsc::channel::<OutputFrame>(
-        state.config.outbound_queue_bound,
-    );
+    let (client_tx, client_rx) = mpsc::channel::<OutputFrame>(state.config.outbound_queue_bound);
 
     // Subscribe to per-session control events (session_state, session_title).
     let event_rx = handle.subscribe_events();
@@ -478,8 +488,8 @@ async fn handle_subscribe(
         },
     );
 
-    // Emit replay_truncated when resume point is outside retained window.
-    match tokio::time::timeout(std::time::Duration::from_secs(2), ack_rx).await {
+    let mut replay_truncated_payload: Option<ReplayTruncatedPayload> = None;
+    match tokio::time::timeout(Duration::from_secs(2), ack_rx).await {
         Ok(Ok(SubscribeOutcome::Ok)) => {}
         Ok(Ok(SubscribeOutcome::ReplayTruncated {
             requested_resume_from_seq,
@@ -487,22 +497,12 @@ async fn handle_subscribe(
             latest_seq,
         })) => {
             crate::metrics::increment_replay_truncation(&session_id);
-            let event = ControlEvent {
-                event: "replay_truncated".to_string(),
-                session_id: session_id.clone(),
-                payload: serde_json::to_value(ReplayTruncatedPayload {
-                    code: "REPLAY_TRUNCATED".to_string(),
-                    requested_resume_from_seq,
-                    replay_window_start_seq,
-                    latest_seq,
-                })
-                .unwrap(),
-            };
-            let _ = ws_sink
-                .send(Message::Text(
-                    serde_json::to_string(&event).unwrap().into(),
-                ))
-                .await;
+            replay_truncated_payload = Some(ReplayTruncatedPayload {
+                code: "REPLAY_TRUNCATED".to_string(),
+                requested_resume_from_seq,
+                replay_window_start_seq,
+                latest_seq,
+            });
         }
         Ok(Err(_)) => {
             tracing::warn!("[session {session_id}] subscribe ack channel dropped");
@@ -512,10 +512,86 @@ async fn handle_subscribe(
         }
     }
 
+    let cursor = fetch_replay_cursor(&handle).await.unwrap_or(ReplayCursor {
+        latest_seq: 0,
+        replay_window_start_seq: 0,
+    });
+
+    emit_session_subscription(
+        ws_sink,
+        &session_id,
+        "subscribed",
+        sub_payload.resume_from_seq,
+        cursor,
+    )
+    .await;
+    crate::metrics::increment_subscription_lifecycle(&session_id, "subscribe");
+
+    if let Some(payload) = replay_truncated_payload {
+        let event = ControlEvent {
+            event: "replay_truncated".to_string(),
+            session_id: session_id.clone(),
+            payload: serde_json::to_value(payload).unwrap(),
+        };
+        send_control_event(ws_sink, &event).await;
+    }
+
     tracing::info!(
         "[session {session_id}] client {client_id} subscribed (resume_from_seq={:?})",
         sub_payload.resume_from_seq
     );
+}
+
+async fn handle_unsubscribe(
+    state: &Arc<AppState>,
+    ws_sink: &mut (impl SinkExt<Message, Error = axum::Error> + Unpin),
+    output_subs: &mut HashMap<String, SessionSub>,
+    payload: &serde_json::Value,
+    request_id: &Option<String>,
+) {
+    let unsub_payload: UnsubscribeSessionPayload = match serde_json::from_value(payload.clone()) {
+        Ok(s) => s,
+        Err(e) => {
+            send_control_error(
+                ws_sink,
+                "",
+                "VALIDATION_FAILED",
+                &e.to_string(),
+                request_id.as_deref(),
+            )
+            .await;
+            return;
+        }
+    };
+
+    let session_id = unsub_payload.session_id;
+    let removed = output_subs.remove(&session_id);
+
+    if let Some(sub) = removed {
+        if let Some(handle) = state.supervisor.get_session(&session_id).await {
+            let _ = handle
+                .send(SessionCommand::Unsubscribe {
+                    client_id: sub.client_id,
+                })
+                .await;
+        }
+        crate::metrics::increment_subscription_lifecycle(&session_id, "unsubscribe");
+    } else {
+        crate::metrics::increment_subscription_lifecycle(&session_id, "idempotent_unsubscribe");
+    }
+
+    let cursor = match state.supervisor.get_session(&session_id).await {
+        Some(handle) => fetch_replay_cursor(&handle).await.unwrap_or(ReplayCursor {
+            latest_seq: 0,
+            replay_window_start_seq: 0,
+        }),
+        None => ReplayCursor {
+            latest_seq: 0,
+            replay_window_start_seq: 0,
+        },
+    };
+
+    emit_session_subscription(ws_sink, &session_id, "unsubscribed", None, cursor).await;
 }
 
 async fn handle_resize(
@@ -634,72 +710,106 @@ async fn handle_dismiss(
 ///
 /// Returns `None` (via `pending`) if there are no active subscriptions, which
 /// causes the `tokio::select!` branch to be disabled.
-async fn poll_output_subs(
-    subs: &mut HashMap<String, SessionSub>,
-) -> Option<PollEvent> {
+async fn poll_output_subs(subs: &mut HashMap<String, SessionSub>) -> Option<PollEvent> {
     if subs.is_empty() {
         // Return a future that never resolves so the select branch is inactive.
         return std::future::pending().await;
     }
 
-    // First pass: try_recv for non-blocking check across all subscriptions.
-    let keys: Vec<String> = subs.keys().cloned().collect();
-    for key in &keys {
-        if let Some(sub) = subs.get_mut(key) {
-            // Check for terminal output first.
-            match sub.output_rx.try_recv() {
-                Ok(frame) => {
-                    return Some(PollEvent::Output {
-                        session_id: key.clone(),
-                        frame,
-                    });
+    loop {
+        // Non-blocking sweep across all subscriptions prevents a quiet session
+        // from starving peers that are actively producing output.
+        let keys: Vec<String> = subs.keys().cloned().collect();
+        for key in &keys {
+            if let Some(sub) = subs.get_mut(key) {
+                // Check for terminal output first.
+                match sub.output_rx.try_recv() {
+                    Ok(frame) => {
+                        return Some(PollEvent::Output {
+                            session_id: key.clone(),
+                            frame,
+                        });
+                    }
+                    Err(mpsc::error::TryRecvError::Disconnected) => {
+                        tracing::info!("[session {key}] output channel closed, unsubscribing");
+                        subs.remove(key);
+                        return Some(PollEvent::Overloaded {
+                            session_id: key.clone(),
+                        });
+                    }
+                    Err(mpsc::error::TryRecvError::Empty) => {}
                 }
-                Err(mpsc::error::TryRecvError::Disconnected) => {
-                    tracing::info!("[session {key}] output channel closed, unsubscribing");
-                    subs.remove(key);
-                    return Some(PollEvent::Overloaded {
-                        session_id: key.clone(),
-                    });
-                }
-                Err(mpsc::error::TryRecvError::Empty) => {}
-            }
 
-            // Check for per-session control events.
-            match sub.event_rx.try_recv() {
-                Ok(event) => {
-                    return Some(PollEvent::SessionEvent(event));
+                // Check for per-session control events.
+                match sub.event_rx.try_recv() {
+                    Ok(event) => {
+                        return Some(PollEvent::SessionEvent(event));
+                    }
+                    Err(broadcast::error::TryRecvError::Lagged(n)) => {
+                        tracing::warn!("[session {key}] lagged by {n} session events");
+                    }
+                    Err(broadcast::error::TryRecvError::Closed) => {
+                        // Actor shut down -- output channel will close soon.
+                    }
+                    Err(broadcast::error::TryRecvError::Empty) => {}
                 }
-                Err(broadcast::error::TryRecvError::Lagged(n)) => {
-                    tracing::warn!("[session {key}] lagged by {n} session events");
-                    // Continue -- lost events are not critical.
-                }
-                Err(broadcast::error::TryRecvError::Closed) => {
-                    // Actor shut down -- the output channel will also close soon.
-                }
-                Err(broadcast::error::TryRecvError::Empty) => {}
             }
         }
+
+        if subs.is_empty() {
+            return std::future::pending().await;
+        }
+
+        // Nothing ready yet; yield briefly before the next fair sweep.
+        tokio::time::sleep(Duration::from_millis(1)).await;
+    }
+}
+
+async fn fetch_replay_cursor(handle: &ActorHandle) -> Option<ReplayCursor> {
+    let (cursor_tx, cursor_rx) = oneshot::channel();
+    if handle
+        .send(SessionCommand::GetReplayCursor(cursor_tx))
+        .await
+        .is_err()
+    {
+        return None;
     }
 
-    // No data immediately available. Await the first receiver.
-    // For true fairness we would use FuturesUnordered, but this is adequate
-    // for the expected session count (typically < 32).
-    if let Some((key, sub)) = subs.iter_mut().next() {
-        let key = key.clone();
-        match sub.output_rx.recv().await {
-            Some(frame) => Some(PollEvent::Output {
-                session_id: key,
-                frame,
-            }),
-            None => {
-                tracing::info!("[session {key}] output channel closed during recv");
-                subs.remove(&key);
-                Some(PollEvent::Overloaded { session_id: key })
-            }
-        }
-    } else {
-        std::future::pending().await
+    match tokio::time::timeout(Duration::from_secs(1), cursor_rx).await {
+        Ok(Ok(cursor)) => Some(cursor),
+        Ok(Err(_)) => None,
+        Err(_) => None,
     }
+}
+
+async fn emit_session_subscription(
+    ws_sink: &mut (impl SinkExt<Message, Error = axum::Error> + Unpin),
+    session_id: &str,
+    state: &str,
+    resume_from_seq: Option<u64>,
+    cursor: ReplayCursor,
+) {
+    let event = ControlEvent {
+        event: "session_subscription".to_string(),
+        session_id: session_id.to_string(),
+        payload: serde_json::to_value(SessionSubscriptionPayload {
+            state: state.to_string(),
+            resume_from_seq,
+            latest_seq: cursor.latest_seq,
+            replay_window_start_seq: cursor.replay_window_start_seq,
+            at: Utc::now(),
+        })
+        .unwrap(),
+    };
+    send_control_event(ws_sink, &event).await;
+}
+
+async fn send_control_event(
+    ws_sink: &mut (impl SinkExt<Message, Error = axum::Error> + Unpin),
+    event: &ControlEvent,
+) {
+    let json = serde_json::to_string(event).unwrap();
+    let _ = ws_sink.send(Message::Text(json.into())).await;
 }
 
 async fn send_control_error(
@@ -719,6 +829,5 @@ async fn send_control_error(
         })
         .unwrap(),
     };
-    let json = serde_json::to_string(&event).unwrap();
-    let _ = ws_sink.send(Message::Text(json.into())).await;
+    send_control_event(ws_sink, &event).await;
 }

@@ -97,7 +97,5 @@ async fn main() {
 
     tracing::info!("Throngterm running on http://0.0.0.0:{port}");
 
-    axum::serve(listener, app)
-        .await
-        .expect("server error");
+    axum::serve(listener, app).await.expect("server error");
 }

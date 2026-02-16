@@ -37,6 +37,7 @@ export interface BootstrapResponse {
   server_time: string; // ISO 8601
   auth_mode: string;
   realtime_url: string;
+  workspace_history_mode: string;
   poll_fallback_ms: number;
   thought_tick_ms: number;
   thoughts_enabled_default: boolean;
@@ -114,6 +115,14 @@ export interface SessionOverloadedPayload {
   retry_after_ms: number;
 }
 
+export interface SessionSubscriptionPayload {
+  state: "subscribed" | "unsubscribed";
+  resume_from_seq?: number;
+  latest_seq: number;
+  replay_window_start_seq: number;
+  at: string;
+}
+
 export interface ControlErrorPayload {
   code: string;
   message: string;
@@ -131,6 +140,10 @@ export interface ClientControlMessage {
 export interface SubscribeSessionPayload {
   session_id: string;
   resume_from_seq?: number;
+}
+
+export interface UnsubscribeSessionPayload {
+  session_id: string;
 }
 
 export interface ResizePayload {

@@ -62,6 +62,7 @@ pub struct BootstrapResponse {
     pub server_time: DateTime<Utc>,
     pub auth_mode: String,
     pub realtime_url: String,
+    pub workspace_history_mode: String,
     pub poll_fallback_ms: u64,
     pub thought_tick_ms: u64,
     pub thoughts_enabled_default: bool,
@@ -161,6 +162,16 @@ pub struct SessionOverloadedPayload {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionSubscriptionPayload {
+    pub state: String, // "subscribed" | "unsubscribed"
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resume_from_seq: Option<u64>,
+    pub latest_seq: u64,
+    pub replay_window_start_seq: u64,
+    pub at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ControlErrorPayload {
     pub code: String,
     pub message: String,
@@ -182,6 +193,11 @@ pub struct ClientControlMessage {
 pub struct SubscribeSessionPayload {
     pub session_id: String,
     pub resume_from_seq: Option<u64>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct UnsubscribeSessionPayload {
+    pub session_id: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]

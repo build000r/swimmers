@@ -103,9 +103,7 @@ mod tests {
 
         // Verify seq
         let seq_offset = 3 + id_len;
-        let decoded_seq = u64::from_be_bytes(
-            frame[seq_offset..seq_offset + 8].try_into().unwrap(),
-        );
+        let decoded_seq = u64::from_be_bytes(frame[seq_offset..seq_offset + 8].try_into().unwrap());
         assert_eq!(decoded_seq, seq);
 
         // Verify payload

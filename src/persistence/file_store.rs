@@ -227,8 +227,7 @@ async fn atomic_write_blocking(path: PathBuf, data: String) -> anyhow::Result<()
         let tmp_path = path.with_extension("json.tmp");
         std::fs::write(&tmp_path, data.as_bytes())
             .map_err(|e| anyhow::anyhow!("write to tmp failed: {e}"))?;
-        std::fs::rename(&tmp_path, &path)
-            .map_err(|e| anyhow::anyhow!("rename failed: {e}"))?;
+        std::fs::rename(&tmp_path, &path).map_err(|e| anyhow::anyhow!("rename failed: {e}"))?;
         Ok(())
     })
     .await

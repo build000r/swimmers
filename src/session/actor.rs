@@ -61,6 +61,9 @@ pub enum SessionCommand {
     /// Request a session summary (reply via oneshot).
     GetSummary(oneshot::Sender<SessionSummary>),
 
+    /// Request replay cursor metadata for lifecycle acknowledgments.
+    GetReplayCursor(oneshot::Sender<ReplayCursor>),
+
     /// Graceful shutdown -- detach from tmux, do NOT kill the tmux session.
     Shutdown,
 }
@@ -74,6 +77,13 @@ pub enum SubscribeOutcome {
         replay_window_start_seq: u64,
         latest_seq: u64,
     },
+}
+
+/// Lightweight replay cursor metadata for lifecycle acknowledgments.
+#[derive(Debug, Clone, Copy)]
+pub struct ReplayCursor {
+    pub latest_seq: u64,
+    pub replay_window_start_seq: u64,
 }
 
 // ---------------------------------------------------------------------------
@@ -351,6 +361,12 @@ impl SessionActor {
                             let summary = self.build_summary();
                             let _ = reply.send(summary);
                         }
+                        SessionCommand::GetReplayCursor(reply) => {
+                            let _ = reply.send(ReplayCursor {
+                                latest_seq: self.replay_ring.latest_seq(),
+                                replay_window_start_seq: self.replay_ring.window_start_seq(),
+                            });
+                        }
                         SessionCommand::Shutdown => {
                             info!(session_id = %self.session_id, "shutdown requested, detaching");
                             break;
@@ -422,10 +438,7 @@ impl SessionActor {
             self.maybe_emit_state_change(state_before);
 
             let seq = self.replay_ring.push(&flushed);
-            let frame = OutputFrame {
-                seq,
-                data: flushed,
-            };
+            let frame = OutputFrame { seq, data: flushed };
             self.broadcast(frame).await;
         }
     }

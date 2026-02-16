@@ -44,6 +44,7 @@ async fn bootstrap(
         server_time: chrono::Utc::now(),
         auth_mode: auth_mode_to_wire(&config.auth_mode),
         realtime_url,
+        workspace_history_mode: "url_state_v1".to_string(),
         poll_fallback_ms: config.poll_fallback_ms,
         thought_tick_ms: config.thought_tick_ms,
         thoughts_enabled_default: config.thoughts_enabled_default,

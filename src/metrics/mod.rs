@@ -51,6 +51,9 @@ const OVERLOAD_EVENTS: &str = "throngterm_overload_events_total";
 /// Replay truncation events.
 const REPLAY_TRUNCATION: &str = "throngterm_replay_truncation_total";
 
+/// Subscription lifecycle events (subscribe/unsubscribe/idempotent_unsubscribe).
+const SUBSCRIPTION_LIFECYCLE: &str = "throngterm_subscription_lifecycle_total";
+
 /// Transport health state transitions.
 const TRANSPORT_TRANSITIONS: &str = "throngterm_transport_health_transitions_total";
 
@@ -100,6 +103,10 @@ pub fn init_metrics() -> PrometheusHandle {
     describe_gauge!(CONNECTED_CLIENTS, "Number of connected WebSocket clients");
     describe_counter!(OVERLOAD_EVENTS, "Total overload events emitted");
     describe_counter!(REPLAY_TRUNCATION, "Total replay truncation events");
+    describe_counter!(
+        SUBSCRIPTION_LIFECYCLE,
+        "Total subscription lifecycle events by action"
+    );
     describe_counter!(
         TRANSPORT_TRANSITIONS,
         "Total transport health state transitions"
@@ -179,6 +186,19 @@ pub fn increment_overload(session_id: &str) {
 /// event is emitted to the client).
 pub fn increment_replay_truncation(session_id: &str) {
     counter!(REPLAY_TRUNCATION, "session_id" => session_id.to_owned()).increment(1);
+}
+
+/// Increment subscription lifecycle events.
+///
+/// `action` should be one of: "subscribe", "unsubscribe",
+/// "idempotent_unsubscribe".
+pub fn increment_subscription_lifecycle(session_id: &str, action: &str) {
+    counter!(
+        SUBSCRIPTION_LIFECYCLE,
+        "session_id" => session_id.to_owned(),
+        "action" => action.to_owned()
+    )
+    .increment(1);
 }
 
 /// Record a transport health state transition.

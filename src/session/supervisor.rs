@@ -98,8 +98,12 @@ impl SessionSupervisor {
                     current_command: None,
                     cwd: ps.cwd.clone(),
                     tool: ps.tool.clone(),
-                    token_count: thought_data.map(|t| t.token_count).unwrap_or(ps.token_count),
-                    context_limit: thought_data.map(|t| t.context_limit).unwrap_or(ps.context_limit),
+                    token_count: thought_data
+                        .map(|t| t.token_count)
+                        .unwrap_or(ps.token_count),
+                    context_limit: thought_data
+                        .map(|t| t.context_limit)
+                        .unwrap_or(ps.context_limit),
                     thought: thought_data
                         .and_then(|t| t.thought.clone())
                         .or_else(|| ps.thought.clone()),
@@ -212,7 +216,10 @@ impl SessionSupervisor {
             let mut stale = self.stale_sessions.write().await;
             stale.retain(|s| !discovered_tmux_names.contains(&s.tmux_name));
             if !stale.is_empty() {
-                debug!(remaining_stale = stale.len(), "stale sessions after discovery");
+                debug!(
+                    remaining_stale = stale.len(),
+                    "stale sessions after discovery"
+                );
                 for s in stale.iter() {
                     // Broadcast session_state with exit_reason for already-connected
                     // clients. Do NOT emit LifecycleEvent::Created for stale sessions
@@ -237,7 +244,8 @@ impl SessionSupervisor {
         }
 
         // Advance the name counter past any existing numeric names.
-        self.next_name_counter.fetch_max(highest_numeric, Ordering::SeqCst);
+        self.next_name_counter
+            .fetch_max(highest_numeric, Ordering::SeqCst);
 
         let sessions = self.sessions.read().await;
         crate::metrics::set_active_sessions(sessions.len());
@@ -337,7 +345,12 @@ impl SessionSupervisor {
 
         for (_, handle) in sessions.iter() {
             let (tx, rx) = oneshot::channel();
-            if handle.cmd_tx.send(SessionCommand::GetSummary(tx)).await.is_ok() {
+            if handle
+                .cmd_tx
+                .send(SessionCommand::GetSummary(tx))
+                .await
+                .is_ok()
+            {
                 match tokio::time::timeout(std::time::Duration::from_secs(2), rx).await {
                     Ok(Ok(summary)) => summaries.push(summary),
                     Ok(Err(_)) => {
@@ -415,11 +428,11 @@ impl SessionSupervisor {
             }
 
             let timeout = std::time::Duration::from_secs(2);
-            let summary: Option<SessionSummary> =
-                match tokio::time::timeout(timeout, sum_rx).await {
-                    Ok(Ok(s)) => Some(s),
-                    _ => None,
-                };
+            let summary: Option<SessionSummary> = match tokio::time::timeout(timeout, sum_rx).await
+            {
+                Ok(Ok(s)) => Some(s),
+                _ => None,
+            };
             let snapshot: Option<TerminalSnapshot> =
                 match tokio::time::timeout(timeout, snap_rx).await {
                     Ok(Ok(s)) => Some(s),

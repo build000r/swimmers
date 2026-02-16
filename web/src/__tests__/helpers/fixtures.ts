@@ -26,6 +26,7 @@ export function makeBootstrapResponse(
     server_time: new Date().toISOString(),
     auth_mode: "operator",
     realtime_url: "ws://localhost:3210/v1/realtime",
+    workspace_history_mode: "url_state_v1",
     poll_fallback_ms: 2000,
     thought_tick_ms: 5000,
     thoughts_enabled_default: true,

@@ -223,9 +223,11 @@ async fn get_snapshot(
     }
 
     match tokio::time::timeout(std::time::Duration::from_secs(5), rx).await {
-        Ok(Ok(snapshot)) => {
-            (StatusCode::OK, Json(serde_json::to_value(snapshot).unwrap())).into_response()
-        }
+        Ok(Ok(snapshot)) => (
+            StatusCode::OK,
+            Json(serde_json::to_value(snapshot).unwrap()),
+        )
+            .into_response(),
         Ok(Err(_)) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(

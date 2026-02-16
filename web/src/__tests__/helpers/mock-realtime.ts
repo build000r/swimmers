@@ -4,7 +4,11 @@
  */
 
 import type { TerminalOutputFrame, RealtimeCallbacks } from "@/services/realtime";
-import type { ReplayTruncatedPayload, TransportHealth } from "@/types";
+import type {
+  ReplayTruncatedPayload,
+  SessionSubscriptionPayload,
+  TransportHealth,
+} from "@/types";
 
 export class MockRealtimeService {
   callbacks: RealtimeCallbacks = {};
@@ -12,9 +16,13 @@ export class MockRealtimeService {
   replayTruncatedListeners = new Set<
     (sessionId: string, payload: ReplayTruncatedPayload) => void
   >();
+  sessionSubscriptionListeners = new Set<
+    (sessionId: string, payload: SessionSubscriptionPayload) => void
+  >();
   connected = false;
   connectedUrl = "";
   subscribedSessions: Array<{ sessionId: string; resumeFromSeq?: number }> = [];
+  unsubscribedSessions: string[] = [];
   sentInputs: Array<{ sessionId: string; data: Uint8Array }> = [];
   sentResizes: Array<{ sessionId: string; cols: number; rows: number }> = [];
   sentDismissAttentions: string[] = [];
@@ -48,6 +56,15 @@ export class MockRealtimeService {
     };
   }
 
+  subscribeSessionSubscription(
+    cb: (sessionId: string, payload: SessionSubscriptionPayload) => void,
+  ): () => void {
+    this.sessionSubscriptionListeners.add(cb);
+    return () => {
+      this.sessionSubscriptionListeners.delete(cb);
+    };
+  }
+
   connect(url: string): void {
     this.connected = true;
     this.connectedUrl = url;
@@ -60,6 +77,10 @@ export class MockRealtimeService {
 
   subscribeSession(sessionId: string, resumeFromSeq?: number): void {
     this.subscribedSessions.push({ sessionId, resumeFromSeq });
+  }
+
+  unsubscribeSession(sessionId: string): void {
+    this.unsubscribedSessions.push(sessionId);
   }
 
   sendResize(sessionId: string, cols: number, rows: number): void {
@@ -98,6 +119,16 @@ export class MockRealtimeService {
     }
   }
 
+  simulateSessionSubscription(
+    sessionId: string,
+    payload: SessionSubscriptionPayload,
+  ): void {
+    this.callbacks.onSessionSubscription?.(sessionId, payload);
+    for (const listener of this.sessionSubscriptionListeners) {
+      listener(sessionId, payload);
+    }
+  }
+
   reset(): void {
     this.callbacks = {};
     this.terminalOutputListeners.clear();
@@ -105,6 +136,7 @@ export class MockRealtimeService {
     this.connected = false;
     this.connectedUrl = "";
     this.subscribedSessions = [];
+    this.unsubscribedSessions = [];
     this.sentInputs = [];
     this.sentResizes = [];
     this.sentDismissAttentions = [];
