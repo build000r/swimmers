@@ -514,8 +514,20 @@ impl SessionActor {
                         };
                         // URL-decode percent-encoded characters
                         let decoded = percent_decode(path);
-                        if !decoded.is_empty() {
+                        if !decoded.is_empty() && decoded != self.cwd {
                             self.cwd = decoded;
+                            // Notify frontend of CWD change
+                            let payload = SessionTitlePayload {
+                                title: self.cwd.clone(),
+                                at: Utc::now(),
+                            };
+                            let event = ControlEvent {
+                                event: "session_title".to_string(),
+                                session_id: self.session_id.clone(),
+                                payload: serde_json::to_value(&payload)
+                                    .unwrap_or_default(),
+                            };
+                            let _ = self.event_tx.send(event);
                         }
                     }
                     search_from = uri_start + end_offset + 1;

@@ -27,6 +27,7 @@ use crate::types::{ControlEvent, SessionState, ThoughtUpdatePayload};
 const SUMMARY_HISTORY_CAP: usize = 10;
 const CODEX_TIMEOUT: Duration = Duration::from_secs(15);
 const TERMINAL_CONTEXT_CHARS: usize = 800;
+const TERMINAL_MIN_MEANINGFUL_DELTA_CHARS: usize = 100;
 
 // ---------------------------------------------------------------------------
 // Per-session thought state
@@ -281,7 +282,15 @@ async fn handle_terminal_fallback(
         return None;
     }
 
-    let prev_context = state.last_thought_context.take();
+    let prev_context = state.last_thought_context.clone();
+    if !has_meaningful_terminal_delta(&context, prev_context.as_deref()) {
+        debug!(
+            session_id = %info.session_id,
+            min_chars = TERMINAL_MIN_MEANINGFUL_DELTA_CHARS,
+            "skip (delta below threshold)"
+        );
+        return None;
+    }
     state.last_thought_context = Some(context.clone());
 
     let prompt = build_terminal_prompt(&context, info.state, prev_context.as_deref());
@@ -308,6 +317,54 @@ async fn handle_terminal_fallback(
             None
         }
     }
+}
+
+/// Whether terminal output changed enough to justify an LLM thought call.
+///
+/// First-time snapshots always pass. For subsequent snapshots, require at
+/// least TERMINAL_MIN_MEANINGFUL_DELTA_CHARS non-whitespace chars changed
+/// after ANSI stripping.
+fn has_meaningful_terminal_delta(context: &str, prev_context: Option<&str>) -> bool {
+    let Some(prev) = prev_context else {
+        return true;
+    };
+
+    let clean = strip_ansi(context);
+    let clean_prev = strip_ansi(prev);
+
+    if clean == clean_prev {
+        return false;
+    }
+
+    changed_non_whitespace_chars(&clean, &clean_prev) >= TERMINAL_MIN_MEANINGFUL_DELTA_CHARS
+}
+
+/// Count non-whitespace chars in the changed span between two strings.
+///
+/// Uses longest common prefix/suffix to isolate the delta region in `current`.
+fn changed_non_whitespace_chars(current: &str, previous: &str) -> usize {
+    let cur: Vec<char> = current.chars().collect();
+    let prev: Vec<char> = previous.chars().collect();
+
+    let mut prefix = 0usize;
+    while prefix < cur.len() && prefix < prev.len() && cur[prefix] == prev[prefix] {
+        prefix += 1;
+    }
+
+    let mut cur_suffix = cur.len();
+    let mut prev_suffix = prev.len();
+    while cur_suffix > prefix
+        && prev_suffix > prefix
+        && cur[cur_suffix - 1] == prev[prev_suffix - 1]
+    {
+        cur_suffix -= 1;
+        prev_suffix -= 1;
+    }
+
+    cur[prefix..cur_suffix]
+        .iter()
+        .filter(|c| !c.is_whitespace())
+        .count()
 }
 
 // ---------------------------------------------------------------------------
@@ -687,5 +744,24 @@ mod tests {
         let h3 = hash_string("different");
         assert_eq!(h1, h2);
         assert_ne!(h1, h3);
+    }
+
+    #[test]
+    fn meaningful_delta_first_snapshot_always_true() {
+        assert!(has_meaningful_terminal_delta("hello", None));
+    }
+
+    #[test]
+    fn meaningful_delta_small_change_skips() {
+        let prev = "prompt$ ";
+        let current = "prompt$ ls";
+        assert!(!has_meaningful_terminal_delta(current, Some(prev)));
+    }
+
+    #[test]
+    fn meaningful_delta_large_change_triggers() {
+        let prev = "prompt$ ";
+        let current = format!("prompt$ {}\n", "x".repeat(120));
+        assert!(has_meaningful_terminal_delta(&current, Some(prev)));
     }
 }
