@@ -37,11 +37,17 @@ function gaugeColor(ratio: number): string {
 
 interface ThrongletProps {
   session: SessionSummary;
+  idlePreview?: string;
   onTap: (id: string) => void;
   onDragToBottom: (id: string) => void;
 }
 
-function ThrongletEntity({ session, onTap, onDragToBottom }: ThrongletProps) {
+function ThrongletEntity({
+  session,
+  idlePreview,
+  onTap,
+  onDragToBottom,
+}: ThrongletProps) {
   const elRef = useRef<HTMLDivElement>(null);
   const posRef = useRef({
     x: Math.random() * (window.innerWidth - 80),
@@ -167,8 +173,15 @@ function ThrongletEntity({ session, onTap, onDragToBottom }: ThrongletProps) {
   let activityText = "";
   let thoughtText = "";
   let showBubble = false;
+  const idlePreviewText = idlePreview?.trim() ?? "";
+  const showIdlePreview =
+    session.state === "idle" && idlePreviewText.length > 0;
 
-  if (session.thought) {
+  if (showIdlePreview) {
+    activityText = idlePreviewText;
+    thoughtText = idlePreviewText;
+    showBubble = true;
+  } else if (session.thought) {
     activityText = session.thought;
     thoughtText = session.thought;
     showBubble = true;
@@ -224,7 +237,7 @@ function ThrongletEntity({ session, onTap, onDragToBottom }: ThrongletProps) {
     >
       {/* Thought bubble */}
       {showBubble && (
-        <div class="thought-bubble">
+        <div class={`thought-bubble ${showIdlePreview ? "idle-preview" : ""}`}>
           <span class="thought-text">{thoughtText}</span>
           <div class="thought-circle thought-circle-lg" />
           <div class="thought-circle thought-circle-sm" />
@@ -269,6 +282,7 @@ function ThrongletEntity({ session, onTap, onDragToBottom }: ThrongletProps) {
 
 interface OverviewFieldProps {
   sessions: SessionSummary[];
+  idlePreviews?: Record<string, string>;
   observer?: boolean;
   onTapSession: (id: string) => void;
   onDragToBottom: (id: string) => void;
@@ -277,6 +291,7 @@ interface OverviewFieldProps {
 
 export function OverviewField({
   sessions,
+  idlePreviews = {},
   observer = false,
   onTapSession,
   onDragToBottom,
@@ -327,6 +342,7 @@ export function OverviewField({
           <ThrongletEntity
             key={s.session_id}
             session={s}
+            idlePreview={idlePreviews[s.session_id]}
             onTap={onTapSession}
             onDragToBottom={onDragToBottom}
           />

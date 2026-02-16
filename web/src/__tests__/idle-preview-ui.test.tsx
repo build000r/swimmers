@@ -1,0 +1,65 @@
+import { describe, it, expect, vi } from "vitest";
+import { render, screen } from "@testing-library/preact";
+import { h } from "preact";
+import { OverviewField } from "@/components/OverviewField";
+import { makeSession } from "./helpers/fixtures";
+
+vi.mock("@/hooks/useGestures", () => ({
+  useLongPress: () => ({
+    onMouseDown: () => {},
+    onTouchStart: () => {},
+    onTouchMove: () => {},
+    onTouchEnd: () => {},
+    onMouseUp: () => {},
+    onMouseLeave: () => {},
+    onMouseMove: () => {},
+    onContextMenu: (e: Event) => e.preventDefault(),
+  }),
+}));
+
+describe("idle preview bubble override", () => {
+  const noop = () => {};
+
+  it("shows idle preview text instead of thought text for idle sessions", () => {
+    const session = makeSession({
+      session_id: "sess-001",
+      state: "idle",
+      thought: "thinking through next steps",
+    });
+
+    render(
+      <OverviewField
+        sessions={[session]}
+        idlePreviews={{ "sess-001": "tail output from tmux buffer" }}
+        onTapSession={noop}
+        onDragToBottom={noop}
+        onCreateSession={noop}
+      />,
+    );
+
+    expect(screen.getByText("tail output from tmux buffer")).toBeInTheDocument();
+    expect(screen.queryByText("thinking through next steps")).toBeNull();
+  });
+
+  it("does not override bubble text for non-idle sessions", () => {
+    const session = makeSession({
+      session_id: "sess-001",
+      state: "busy",
+      thought: null,
+      current_command: "npm test",
+    });
+
+    render(
+      <OverviewField
+        sessions={[session]}
+        idlePreviews={{ "sess-001": "tail output from tmux buffer" }}
+        onTapSession={noop}
+        onDragToBottom={noop}
+        onCreateSession={noop}
+      />,
+    );
+
+    expect(screen.getByText("npm test")).toBeInTheDocument();
+    expect(screen.queryByText("tail output from tmux buffer")).toBeNull();
+  });
+});

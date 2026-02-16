@@ -378,6 +378,15 @@ html, body {
   z-index: 5;
 }
 
+.thought-bubble.idle-preview {
+  max-width: 260px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, "Courier New", monospace;
+  font-size: 9px;
+  line-height: 1.25;
+  letter-spacing: 0;
+  color: #1f2937;
+}
+
 .thought-circle {
   position: absolute;
   background: white;

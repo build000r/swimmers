@@ -7,7 +7,7 @@ import type {
   SessionCreatedPayload,
   SessionDeletedPayload,
 } from "@/types";
-import { bootstrap as apiFetch } from "@/services/api";
+import { bootstrap as apiFetch, fetchSnapshot } from "@/services/api";
 import { RealtimeService } from "@/services/realtime";
 import type { WorkspaceLayoutState } from "@/services/workspace-history";
 import {
@@ -27,9 +27,35 @@ export const activeSessionId = signal<string | null>(null);
 export const activeZonePreference = signal<"main" | "bottom" | null>(null);
 export const terminalCacheTtlMs = signal<number>(300_000);
 export const zoneLayout = signal<"single" | "dual">("single");
+export const idlePreviews = signal<Record<string, string>>({});
 
 // Shared realtime service singleton
 export const realtime = new RealtimeService();
+
+const IDLE_PREVIEW_DELAY_MS = 20_000;
+const IDLE_PREVIEW_REFRESH_MS = 12_000;
+const IDLE_PREVIEW_SCAN_MS = 2_000;
+const IDLE_PREVIEW_MAX_CHARS = 300;
+
+function parseIsoMs(value: string): number | null {
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function stripTerminalEscapes(raw: string): string {
+  const noOsc = raw.replace(/\x1b\][^\x07]*(?:\x07|\x1b\\)/g, "");
+  const noCsi = noOsc.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "");
+  const noEsc = noCsi.replace(/\x1b[@-_]/g, "");
+  return noEsc.replace(/[\x00-\x08\x0B-\x1F\x7F]/g, "");
+}
+
+function buildIdlePreviewText(screenText: string): string {
+  const cleaned = stripTerminalEscapes(screenText).replace(/\s+/g, " ").trim();
+  if (!cleaned) return "";
+  if (cleaned.length <= IDLE_PREVIEW_MAX_CHARS) return cleaned;
+  const keep = IDLE_PREVIEW_MAX_CHARS - 1;
+  return `…${cleaned.slice(cleaned.length - keep)}`;
+}
 
 interface RestoreLayoutRequest extends WorkspaceLayoutState {
   requestId: number;
@@ -51,6 +77,9 @@ export function App() {
     bottomSessionId: null,
     splitRatio: 0.6,
   });
+  const outputActivityUpdateAtRef = useRef<Map<string, number>>(new Map());
+  const idlePreviewFetchInFlightRef = useRef<Set<string>>(new Set());
+  const idlePreviewLastFetchAtRef = useRef<Map<string, number>>(new Map());
   const { isObserver } = useObserverMode(authMode);
 
   // ---- Session helpers ----
@@ -63,6 +92,17 @@ export function App() {
     },
     [],
   );
+
+  const clearIdlePreview = useCallback((sessionId: string) => {
+    const existing = idlePreviews.value;
+    if (existing[sessionId] !== undefined) {
+      const next = { ...existing };
+      delete next[sessionId];
+      idlePreviews.value = next;
+    }
+    idlePreviewLastFetchAtRef.current.delete(sessionId);
+    idlePreviewFetchInFlightRef.current.delete(sessionId);
+  }, []);
 
   const writeWorkspaceLayout = useCallback(
     (layout: WorkspaceLayoutState, mode: "push" | "replace" = "push") => {
@@ -137,9 +177,14 @@ export function App() {
           state: payload.state,
           current_command: payload.current_command,
           transport_health: payload.transport_health,
+          last_activity_at: payload.at,
         }));
+        if (payload.state !== "idle") {
+          clearIdlePreview(sessionId);
+        }
         // After exit, let the thronglet walk off screen then remove it
         if (payload.state === "exited") {
+          outputActivityUpdateAtRef.current.delete(sessionId);
           setTimeout(() => {
             sessions.value = sessions.value.filter(
               (s) => s.session_id !== sessionId,
@@ -181,16 +226,32 @@ export function App() {
       },
 
       onSessionDeleted(sessionId: string, _payload: SessionDeletedPayload) {
+        clearIdlePreview(sessionId);
+        outputActivityUpdateAtRef.current.delete(sessionId);
         sessions.value = sessions.value.filter(
           (s) => s.session_id !== sessionId,
         );
+      },
+
+      onTerminalOutput(frame) {
+        clearIdlePreview(frame.sessionId);
+
+        const now = Date.now();
+        const prev = outputActivityUpdateAtRef.current.get(frame.sessionId) ?? 0;
+        if (now - prev < 1000) return;
+        outputActivityUpdateAtRef.current.set(frame.sessionId, now);
+
+        updateSession(frame.sessionId, (s) => ({
+          ...s,
+          last_activity_at: new Date(now).toISOString(),
+        }));
       },
 
       onControlError(payload) {
         console.error("[realtime] control error:", payload.code, payload.message);
       },
     });
-  }, [updateSession]);
+  }, [updateSession, clearIdlePreview]);
 
   // ---- Bootstrap ----
 
@@ -206,7 +267,11 @@ export function App() {
         batch(() => {
           sessions.value = data.sessions;
           terminalCacheTtlMs.value = data.terminal_cache_ttl_ms;
+          idlePreviews.value = {};
         });
+        idlePreviewFetchInFlightRef.current.clear();
+        idlePreviewLastFetchAtRef.current.clear();
+        outputActivityUpdateAtRef.current.clear();
 
         setAuthMode(data.auth_mode);
         workspaceHistoryModeRef.current = data.workspace_history_mode;
@@ -309,6 +374,140 @@ export function App() {
     currentView.value,
     transportHealth.value,
   ]);
+
+  // ---- Idle preview snapshots (overview bubble override) ----
+
+  useEffect(() => {
+    if (!bootstrapDone) return;
+
+    let cancelled = false;
+    let running = false;
+
+    const tick = async () => {
+      if (running || cancelled) return;
+      running = true;
+
+      try {
+        const now = Date.now();
+        const isOverviewVisible =
+          currentView.value === "overview" ||
+          (currentView.value === "terminal" && zoneLayout.value === "single");
+
+        if (!isOverviewVisible) {
+          running = false;
+          return;
+        }
+
+        const sessionById = new Map(
+          sessions.value.map((session) => [session.session_id, session]),
+        );
+
+        // Drop stale previews that no longer qualify.
+        let nextPreviews = idlePreviews.value;
+        let previewsChanged = false;
+        for (const sessionId of Object.keys(nextPreviews)) {
+          const session = sessionById.get(sessionId);
+          const lastActivityMs = session
+            ? parseIsoMs(session.last_activity_at)
+            : null;
+          const stillEligible =
+            !!session &&
+            session.state === "idle" &&
+            lastActivityMs !== null &&
+            now - lastActivityMs >= IDLE_PREVIEW_DELAY_MS;
+          if (!stillEligible) {
+            if (!previewsChanged) {
+              nextPreviews = { ...nextPreviews };
+              previewsChanged = true;
+            }
+            delete nextPreviews[sessionId];
+            idlePreviewLastFetchAtRef.current.delete(sessionId);
+          }
+        }
+        if (previewsChanged) {
+          idlePreviews.value = nextPreviews;
+        }
+
+        const inFlight = idlePreviewFetchInFlightRef.current;
+        const lastFetchAt = idlePreviewLastFetchAtRef.current;
+        let launches = 0;
+        const maxLaunchesPerTick = 2;
+
+        for (const session of sessions.value) {
+          if (launches >= maxLaunchesPerTick) break;
+          if (session.state !== "idle") continue;
+
+          const lastActivityMs = parseIsoMs(session.last_activity_at);
+          if (lastActivityMs === null) continue;
+          if (now - lastActivityMs < IDLE_PREVIEW_DELAY_MS) continue;
+
+          const sessionId = session.session_id;
+          if (inFlight.has(sessionId)) continue;
+
+          const lastFetchMs = lastFetchAt.get(sessionId) ?? 0;
+          const hasCachedPreview = idlePreviews.value[sessionId] !== undefined;
+          if (
+            hasCachedPreview &&
+            now - lastFetchMs < IDLE_PREVIEW_REFRESH_MS
+          ) {
+            continue;
+          }
+
+          launches += 1;
+          inFlight.add(sessionId);
+          lastFetchAt.set(sessionId, now);
+
+          void fetchSnapshot(sessionId)
+            .then((snapshot) => {
+              if (cancelled) return;
+              const current = sessions.value.find(
+                (s) => s.session_id === sessionId,
+              );
+              if (!current || current.state !== "idle") return;
+
+              const currentLastActivityMs = parseIsoMs(current.last_activity_at);
+              if (currentLastActivityMs === null) return;
+              if (Date.now() - currentLastActivityMs < IDLE_PREVIEW_DELAY_MS) {
+                return;
+              }
+
+              const preview = buildIdlePreviewText(snapshot.screen_text);
+              const prev = idlePreviews.value[sessionId];
+              if (!preview && prev !== undefined) {
+                const next = { ...idlePreviews.value };
+                delete next[sessionId];
+                idlePreviews.value = next;
+                return;
+              }
+              if (preview && prev !== preview) {
+                idlePreviews.value = {
+                  ...idlePreviews.value,
+                  [sessionId]: preview,
+                };
+              }
+            })
+            .catch(() => {
+              // Keep existing preview on transient snapshot failure.
+            })
+            .finally(() => {
+              inFlight.delete(sessionId);
+            });
+        }
+      } finally {
+        running = false;
+      }
+    };
+
+    const interval = setInterval(() => {
+      void tick();
+    }, IDLE_PREVIEW_SCAN_MS);
+    void tick();
+
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, [bootstrapDone, currentView.value, zoneLayout.value]);
 
   // ---- Navigation ----
 
@@ -449,6 +648,7 @@ export function App() {
       >
         <OverviewField
           sessions={sessions.value}
+          idlePreviews={idlePreviews.value}
           observer={isObserver}
           onTapSession={openTerminal}
           onDragToBottom={(id) => openTerminal(id, "bottom")}
