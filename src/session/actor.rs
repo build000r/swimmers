@@ -152,6 +152,9 @@ pub struct SessionActor {
 
     // Detected coding tool name
     tool: Option<String>,
+
+    // Timestamp of most recent terminal output observed by this actor.
+    last_activity_at: chrono::DateTime<Utc>,
 }
 
 impl SessionActor {
@@ -229,6 +232,7 @@ impl SessionActor {
             rows: 24,
             cwd: String::new(),
             tool: None,
+            last_activity_at: Utc::now(),
         };
 
         // Spawn the actor's run loop on the Tokio runtime.
@@ -436,6 +440,7 @@ impl SessionActor {
             let state_before = self.state_detector.state();
             self.state_detector.process_output(&flushed);
             self.maybe_emit_state_change(state_before);
+            self.last_activity_at = Utc::now();
 
             let seq = self.replay_ring.push(&flushed);
             let frame = OutputFrame { seq, data: flushed };
@@ -463,6 +468,8 @@ impl SessionActor {
 
             // Emit state change event if processing caused a transition.
             self.maybe_emit_state_change(state_before);
+
+            self.last_activity_at = Utc::now();
 
             // Store in the replay ring and get the sequence number.
             let seq = self.replay_ring.push(&chunk);
@@ -524,8 +531,7 @@ impl SessionActor {
                             let event = ControlEvent {
                                 event: "session_title".to_string(),
                                 session_id: self.session_id.clone(),
-                                payload: serde_json::to_value(&payload)
-                                    .unwrap_or_default(),
+                                payload: serde_json::to_value(&payload).unwrap_or_default(),
                             };
                             let _ = self.event_tx.send(event);
                         }
@@ -713,7 +719,7 @@ impl SessionActor {
             is_stale: false,
             attached_clients: self.subscribers.len() as u32,
             transport_health: TransportHealth::Healthy,
-            last_activity_at: Utc::now(),
+            last_activity_at: self.last_activity_at,
         }
     }
 }
