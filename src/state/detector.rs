@@ -1,7 +1,6 @@
 // State detector -- classifies terminal state as idle, busy, error, or attention.
 // Uses OSC 133 shell integration sequences when available, falls back to regex.
-//
-// Port of server/state-detector.js
+
 
 use std::time::{Duration, Instant};
 
@@ -126,7 +125,9 @@ impl StateDetector {
         // Fallback: regex prompt detection (for shells without OSC 133).
         // Recovers from busy AND error states when a new prompt appears.
         // Checked against visible text so tmux escape sequences don't mask the prompt.
-        if self.state != SessionState::Idle && !found_error && self.prompt_pattern.is_match(&visible)
+        if self.state != SessionState::Idle
+            && !found_error
+            && self.prompt_pattern.is_match(&visible)
         {
             self.clear_error_timer();
             self.set_state(SessionState::Idle, Some(None), now);
@@ -204,8 +205,7 @@ impl StateDetector {
     /// Extract the command name from an OSC 133;C sequence.
     fn extract_osc133_command(text: &str) -> Option<String> {
         let re = Regex::new(r"\x1b\]133;C;cmd=([^\x07]*)\x07").unwrap();
-        re.captures(text)
-            .map(|caps| caps[1].trim().to_string())
+        re.captures(text).map(|caps| caps[1].trim().to_string())
     }
 
     /// Core state transition logic. Mirrors the JS `_setState` method.
@@ -324,7 +324,9 @@ mod tests {
         assert_eq!(d.get_state().0, SessionState::Error);
 
         let transitions = log.lock().unwrap();
-        assert!(transitions.iter().any(|(new, _)| *new == SessionState::Error));
+        assert!(transitions
+            .iter()
+            .any(|(new, _)| *new == SessionState::Error));
     }
 
     #[test]

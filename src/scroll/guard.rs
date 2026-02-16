@@ -13,8 +13,7 @@
 //     it's likely a scroll-triggered redraw from the other client --
 //     buffer it and only forward the final frame after a short delay.
 //  3. Normal output (command output, prompts) passes through immediately.
-//
-// Port of server/scroll-guard.js
+
 
 use std::time::{Duration, Instant};
 
@@ -34,8 +33,7 @@ pub struct ScrollGuard {
 impl ScrollGuard {
     pub fn new() -> Self {
         Self {
-            cursor_pos_re: Regex::new(r"\x1b\[\d+(?:;\d+)?H")
-                .expect("cursor_pos_re is valid"),
+            cursor_pos_re: Regex::new(r"\x1b\[\d+(?:;\d+)?H").expect("cursor_pos_re is valid"),
             last_input_time: None,
             buffer: None,
             flush_deadline: None,

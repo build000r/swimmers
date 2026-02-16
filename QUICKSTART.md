@@ -1,4 +1,4 @@
-# Throngterm AI Quickstart
+# Throngterm Quickstart
 
 > Give this file to your AI coding assistant to get throngterm running on your machine.
 
@@ -16,20 +16,17 @@ Install these if not already present. Check first before installing.
 
 ```bash
 # Check what's already installed
-which node && node --version
+rustc --version
+cargo --version
 which tmux && tmux -V
 which tailscale && tailscale version
 ```
 
-### Node.js (>= 18)
+### Rust toolchain
 
 ```bash
-# macOS
-brew install node
-
-# Ubuntu/Debian
-curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
-sudo apt-get install -y nodejs
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+source ~/.cargo/env
 ```
 
 ### tmux
@@ -64,31 +61,51 @@ Note your Tailscale IP (e.g. `100.x.y.z`) — you'll use it to access throngterm
 
 ---
 
-## Step 2: Clone & Install
+## Step 2: Clone & Build
 
 ```bash
 git clone <REPO_URL> throngterm
 cd throngterm
-npm install
+cargo build --release
 ```
 
-If on macOS ARM (M1/M2/M3/M4), the postinstall script handles `node-pty` spawn-helper permissions automatically.
+Build the frontend:
+
+```bash
+cd web
+npm install
+npm run build
+cd ..
+```
 
 ---
 
 ## Step 3: Run on Port 69420
 
 ```bash
-PORT=69420 npm start
+PORT=69420 ./target/release/throngterm
 ```
 
-You should see:
+Or during development:
 
+```bash
+PORT=69420 cargo run
 ```
-Throngterm running on http://0.0.0.0:69420
-```
+
+You should see the server start and begin discovering tmux sessions.
 
 It binds to `0.0.0.0` so it's accessible on all interfaces — including your Tailscale IP.
+
+### Frontend Dev Server (Optional)
+
+For frontend development with hot reload:
+
+```bash
+cd web
+npm run dev
+```
+
+This runs the Vite dev server with HMR, proxying API requests to the Rust backend.
 
 ### Run in Background (Optional)
 
@@ -96,10 +113,10 @@ To keep it running after you close your terminal:
 
 ```bash
 # Option A: nohup
-nohup env PORT=69420 node server/index.js > throngterm.log 2>&1 &
+nohup env PORT=69420 ./target/release/throngterm > throngterm.log 2>&1 &
 
 # Option B: tmux (ironic but practical)
-tmux new-session -d -s throngterm 'PORT=69420 node server/index.js'
+tmux new-session -d -s throngterm 'PORT=69420 /path/to/throngterm'
 
 # Option C: systemd (Linux, persistent across reboots)
 # See "Systemd Service" section below
@@ -120,8 +137,6 @@ From the machine itself:
 ```
 http://localhost:69420
 ```
-
-**Do NOT use `localhost:3000`** — the port is `69420`.
 
 ---
 
@@ -156,7 +171,7 @@ Type=simple
 User=YOUR_USERNAME
 WorkingDirectory=/path/to/throngterm
 Environment=PORT=69420
-ExecStart=/usr/bin/node server/index.js
+ExecStart=/path/to/throngterm/target/release/throngterm
 Restart=on-failure
 RestartSec=5
 
@@ -188,8 +203,7 @@ cat > ~/Library/LaunchAgents/com.throngterm.plist << EOF
     <string>com.throngterm</string>
     <key>ProgramArguments</key>
     <array>
-        <string>$(which node)</string>
-        <string>$(pwd)/server/index.js</string>
+        <string>/path/to/throngterm/target/release/throngterm</string>
     </array>
     <key>EnvironmentVariables</key>
     <dict>
@@ -197,7 +211,7 @@ cat > ~/Library/LaunchAgents/com.throngterm.plist << EOF
         <string>69420</string>
     </dict>
     <key>WorkingDirectory</key>
-    <string>$(pwd)</string>
+    <string>/path/to/throngterm</string>
     <key>RunAtLoad</key>
     <true/>
     <key>KeepAlive</key>
@@ -213,6 +227,8 @@ EOF
 launchctl load ~/Library/LaunchAgents/com.throngterm.plist
 ```
 
+Replace `/path/to/throngterm` with the actual path.
+
 ---
 
 ## Troubleshooting
@@ -222,9 +238,10 @@ launchctl load ~/Library/LaunchAgents/com.throngterm.plist
 | No Thronglets showing | Create tmux sessions first: `tmux new-session -d -s dev` |
 | Can't access from phone | Confirm both devices are on Tailscale. Check `tailscale status` |
 | Port already in use | Kill the old process: `lsof -ti:69420 \| xargs kill` |
-| node-pty build error | Make sure you have Xcode CLI tools (`xcode-select --install` on macOS) or `build-essential` on Linux |
+| Cargo build fails | Ensure Rust toolchain is installed: `rustup update stable` |
 | WebSocket connection fails | If behind a reverse proxy, ensure it supports WebSocket upgrades |
 | Blank terminal on connect | The session may have exited. Delete and recreate it |
+| Frontend not loading | Rebuild: `cd web && npm run build` |
 
 ---
 
@@ -232,17 +249,18 @@ launchctl load ~/Library/LaunchAgents/com.throngterm.plist
 
 ```
 Browser (phone/laptop)
-    │
-    ├── HTTP GET /api/sessions     → Lists tmux sessions
-    ├── HTTP POST /api/sessions    → Creates new session
-    ├── HTTP DELETE /api/sessions/x → Kills session
-    │
-    └── WebSocket /ws/:sessionId   → Bidirectional terminal I/O
-            │
-            ├── Input:  keystrokes → node-pty → tmux session
-            └── Output: tmux session → node-pty → xterm.js render
+    |
+    |-- GET /v1/bootstrap         -> Config + session list
+    |-- GET /v1/sessions          -> List tmux sessions
+    |-- POST /v1/sessions         -> Create new session
+    |-- DELETE /v1/sessions/:id   -> Remove session
+    |
+    '-- WebSocket /v1/realtime    -> Multiplexed terminal I/O + control events
+            |
+            |-- Binary: keystrokes -> PTY -> tmux session
+            '-- Binary: tmux session -> PTY -> xterm.js render
 ```
 
-- **3 npm dependencies**: express, ws, node-pty
-- **No database, no Docker, no build step**
-- Client is vanilla JS with xterm.js
+- **Backend**: Rust (axum + tokio + portable-pty)
+- **Frontend**: Preact + TypeScript + Vite (built to `dist/`)
+- **No database, no Docker**
