@@ -100,6 +100,13 @@ impl ReplayRing {
         self.frames.front().map(|f| f.seq).unwrap_or(self.next_seq)
     }
 
+    /// Clear all retained frames while keeping the sequence counter monotonic.
+    /// The next push will still get the next expected seq number.
+    pub fn clear(&mut self) {
+        self.frames.clear();
+        self.total_bytes = 0;
+    }
+
     /// Total bytes currently retained in the buffer.
     pub fn total_bytes_retained(&self) -> usize {
         self.total_bytes
@@ -171,6 +178,25 @@ mod tests {
         ring.push(b"hello ");
         ring.push(b"world");
         assert_eq!(ring.snapshot(), "hello world");
+    }
+
+    #[test]
+    fn clear_resets_frames_keeps_seq() {
+        let mut ring = ReplayRing::new(1024);
+        ring.push(b"hello ");
+        ring.push(b"world");
+        assert_eq!(ring.latest_seq(), 2);
+
+        ring.clear();
+        assert_eq!(ring.total_bytes_retained(), 0);
+        assert_eq!(ring.snapshot(), "");
+        // Sequence counter continues monotonically.
+        let s3 = ring.push(b"after clear");
+        assert_eq!(s3, 3);
+        assert_eq!(ring.latest_seq(), 3);
+        // Replay from seq 3 works; earlier seqs are gone.
+        assert!(ring.replay_from(1).is_none());
+        assert_eq!(ring.replay_from(3).unwrap().len(), 1);
     }
 
     #[test]

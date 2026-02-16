@@ -33,6 +33,11 @@ export interface TerminalSnapshot {
   screen_text: string;
 }
 
+export interface SessionPaneTailResponse {
+  session_id: string;
+  text: string;
+}
+
 export interface BootstrapResponse {
   server_time: string; // ISO 8601
   auth_mode: string;

@@ -5,6 +5,7 @@ use std::time::Instant;
 
 use chrono::Utc;
 use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
+use tokio::process::Command;
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tracing::{debug, error, info, warn};
 
@@ -57,6 +58,12 @@ pub enum SessionCommand {
 
     /// Request a terminal text snapshot (reply via oneshot).
     GetSnapshot(oneshot::Sender<TerminalSnapshot>),
+
+    /// Request plain captured pane text from tmux for preview use.
+    GetPaneTail {
+        lines: usize,
+        reply: oneshot::Sender<String>,
+    },
 
     /// Request a session summary (reply via oneshot).
     GetSummary(oneshot::Sender<SessionSummary>),
@@ -155,6 +162,11 @@ pub struct SessionActor {
 
     // Timestamp of most recent terminal output observed by this actor.
     last_activity_at: chrono::DateTime<Utc>,
+
+    // When true, the replay ring will be cleared on the first idle transition.
+    // This strips tmux startup output (including DA query responses) before
+    // any client subscribes.
+    clear_replay_on_first_idle: bool,
 }
 
 impl SessionActor {
@@ -233,6 +245,7 @@ impl SessionActor {
             cwd: String::new(),
             tool: None,
             last_activity_at: Utc::now(),
+            clear_replay_on_first_idle: !attach,
         };
 
         // Spawn the actor's run loop on the Tokio runtime.
@@ -361,6 +374,22 @@ impl SessionActor {
                             };
                             let _ = reply.send(snap);
                         }
+                        SessionCommand::GetPaneTail { lines, reply } => {
+                            let tmux_name = self.tmux_name.clone();
+                            let text = match capture_pane_tail(&tmux_name, lines).await {
+                                Ok(text) => text,
+                                Err(e) => {
+                                    debug!(
+                                        session_id = %self.session_id,
+                                        tmux_name = %tmux_name,
+                                        "tmux capture-pane failed: {}",
+                                        e
+                                    );
+                                    String::new()
+                                }
+                            };
+                            let _ = reply.send(text);
+                        }
                         SessionCommand::GetSummary(reply) => {
                             let summary = self.build_summary();
                             let _ = reply.send(summary);
@@ -468,6 +497,20 @@ impl SessionActor {
 
             // Emit state change event if processing caused a transition.
             self.maybe_emit_state_change(state_before);
+
+            // On new sessions, clear the replay ring when we first reach idle.
+            // This strips tmux startup output (including DA query/response
+            // sequences) so clients subscribing later get a clean prompt.
+            if self.clear_replay_on_first_idle
+                && self.state_detector.state() == SessionState::Idle
+            {
+                self.clear_replay_on_first_idle = false;
+                self.replay_ring.clear();
+                debug!(
+                    session_id = %self.session_id,
+                    "cleared replay ring on first idle (startup garbage removed)"
+                );
+            }
 
             self.last_activity_at = Utc::now();
 
@@ -722,6 +765,30 @@ impl SessionActor {
             last_activity_at: self.last_activity_at,
         }
     }
+}
+
+/// Capture visible pane text directly from tmux.
+async fn capture_pane_tail(tmux_name: &str, lines: usize) -> anyhow::Result<String> {
+    let lines = lines.clamp(20, 1000);
+    let start = format!("-{lines}");
+
+    let output = Command::new("tmux")
+        .args(["capture-pane", "-p", "-J", "-t", tmux_name, "-S", &start])
+        .env_remove("TMUX")
+        .env_remove("TMUX_PANE")
+        .output()
+        .await
+        .map_err(|e| anyhow::anyhow!("failed to run tmux capture-pane: {}", e))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(anyhow::anyhow!(
+            "tmux capture-pane failed: {}",
+            stderr.trim()
+        ));
+    }
+
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
 // ---------------------------------------------------------------------------

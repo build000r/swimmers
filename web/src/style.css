@@ -505,3 +505,63 @@ html, body {
   0%, 100% { opacity: 0.3; box-shadow: 0 0 8px rgba(91,192,235,0.3); }
   50% { opacity: 1; box-shadow: 0 0 20px rgba(91,192,235,0.6); }
 }
+
+/* Egg hatching animation */
+.hatching-egg {
+  position: absolute;
+  width: 80px;
+  height: 80px;
+  pointer-events: none;
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.hatching-egg img {
+  width: 64px;
+  height: 64px;
+  object-fit: contain;
+  image-rendering: pixelated;
+  image-rendering: crisp-edges;
+}
+
+.hatching-egg .egg-sprite.dropping {
+  animation: egg-drop 0.4s ease-out forwards;
+}
+
+.hatching-egg .egg-sprite.wobbling {
+  animation: egg-wobble 0.4s ease-in-out 2;
+}
+
+.hatching-egg .egg-sprite.hatching {
+  animation: egg-hatch 0.4s ease-in forwards;
+}
+
+.hatching-egg .hatch-sprite {
+  position: absolute;
+  animation: hatch-appear 0.4s ease-out forwards;
+}
+
+@keyframes egg-drop {
+  0% { transform: translateY(-100px) scale(0.5); opacity: 0; }
+  60% { transform: translateY(10px) scale(1); opacity: 1; }
+  80% { transform: translateY(-8px); }
+  100% { transform: translateY(0); }
+}
+
+@keyframes egg-wobble {
+  0%, 100% { transform: rotate(0); }
+  25% { transform: rotate(-8deg); }
+  75% { transform: rotate(8deg); }
+}
+
+@keyframes egg-hatch {
+  0% { transform: scale(1); opacity: 1; }
+  100% { transform: scale(0.3); opacity: 0; }
+}
+
+@keyframes hatch-appear {
+  0% { transform: scale(0.3); opacity: 0; }
+  100% { transform: scale(1); opacity: 1; }
+}

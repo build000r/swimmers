@@ -58,6 +58,12 @@ pub struct TerminalSnapshot {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionPaneTailResponse {
+    pub session_id: String,
+    pub text: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BootstrapResponse {
     pub server_time: DateTime<Utc>,
     pub auth_mode: String,

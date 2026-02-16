@@ -3,6 +3,7 @@ import type {
   SessionListResponse,
   CreateSessionResponse,
   TerminalSnapshot,
+  SessionPaneTailResponse,
 } from "@/types";
 
 const BASE = "/v1";
@@ -70,4 +71,14 @@ export async function fetchSnapshot(
     `${BASE}/sessions/${encodeURIComponent(sessionId)}/snapshot`,
   );
   return json<TerminalSnapshot>(res);
+}
+
+/** GET /v1/sessions/{id}/pane-tail - tmux captured pane text */
+export async function fetchPaneTail(
+  sessionId: string,
+): Promise<SessionPaneTailResponse> {
+  const res = await fetch(
+    `${BASE}/sessions/${encodeURIComponent(sessionId)}/pane-tail`,
+  );
+  return json<SessionPaneTailResponse>(res);
 }

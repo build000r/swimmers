@@ -1,6 +1,5 @@
-import { useEffect, useRef, useCallback } from "preact/hooks";
+import { useEffect, useRef, useCallback, useState } from "preact/hooks";
 import type { SessionSummary, SessionState } from "@/types";
-import { useLongPress } from "@/hooks/useGestures";
 
 // ---- Helpers ----
 
@@ -38,6 +37,7 @@ function gaugeColor(ratio: number): string {
 interface ThrongletProps {
   session: SessionSummary;
   idlePreview?: string;
+  spawnPosition?: { x: number; y: number };
   onTap: (id: string) => void;
   onDragToBottom: (id: string) => void;
 }
@@ -45,14 +45,19 @@ interface ThrongletProps {
 function ThrongletEntity({
   session,
   idlePreview,
+  spawnPosition,
   onTap,
   onDragToBottom,
 }: ThrongletProps) {
   const elRef = useRef<HTMLDivElement>(null);
-  const posRef = useRef({
-    x: Math.random() * (window.innerWidth - 80),
-    y: 40 + Math.random() * Math.max(window.innerHeight - 200, 60),
-  });
+  const posRef = useRef(
+    spawnPosition
+      ? { x: spawnPosition.x - 40, y: spawnPosition.y - 40 }
+      : {
+          x: Math.random() * (window.innerWidth - 80),
+          y: 40 + Math.random() * Math.max(window.innerHeight - 200, 60),
+        },
+  );
   const wanderRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const isDraggingRef = useRef(false);
   const longPressedRef = useRef(false);
@@ -278,7 +283,76 @@ function ThrongletEntity({
   );
 }
 
+// ---- HatchingEgg sub-component ----
+
+type HatchPhase = "dropping" | "wobbling" | "hatching" | "done";
+
+interface HatchingEggProps {
+  x: number;
+  y: number;
+  phase: HatchPhase;
+  onPhaseComplete: (completedPhase: HatchPhase) => void;
+}
+
+function HatchingEgg({ x, y, phase, onPhaseComplete }: HatchingEggProps) {
+  const handleAnimationEnd = useCallback(() => {
+    if (phase === "dropping") {
+      onPhaseComplete("dropping");
+    } else if (phase === "hatching") {
+      onPhaseComplete("hatching");
+    }
+  }, [phase, onPhaseComplete]);
+
+  // Wobble uses iteration count (2 iterations of 0.4s = 0.8s total).
+  // After wobble animation ends, advance to hatching.
+  const handleWobbleEnd = useCallback(() => {
+    onPhaseComplete("wobbling");
+  }, [onPhaseComplete]);
+
+  if (phase === "done") return null;
+
+  return (
+    <div
+      class="hatching-egg"
+      style={{
+        left: x - 40 + "px",
+        top: y - 40 + "px",
+      }}
+    >
+      {phase !== "hatching" ? (
+        <img
+          class={`egg-sprite ${phase}`}
+          src="/assets/egg.png"
+          alt=""
+          onAnimationEnd={phase === "wobbling" ? handleWobbleEnd : handleAnimationEnd}
+        />
+      ) : (
+        <>
+          <img
+            class="egg-sprite hatching"
+            src="/assets/egg.png"
+            alt=""
+            onAnimationEnd={handleAnimationEnd}
+          />
+          <img
+            class="hatch-sprite"
+            src="/assets/idle.png"
+            alt=""
+          />
+        </>
+      )}
+    </div>
+  );
+}
+
 // ---- OverviewField ----
+
+interface HatchState {
+  x: number;
+  y: number;
+  phase: HatchPhase;
+  sessionId: string | null;
+}
 
 interface OverviewFieldProps {
   sessions: SessionSummary[];
@@ -286,7 +360,7 @@ interface OverviewFieldProps {
   observer?: boolean;
   onTapSession: (id: string) => void;
   onDragToBottom: (id: string) => void;
-  onCreateSession: () => void;
+  onCreateSession: () => Promise<string>;
 }
 
 export function OverviewField({
@@ -297,21 +371,116 @@ export function OverviewField({
   onDragToBottom,
   onCreateSession,
 }: OverviewFieldProps) {
-  // Disable long-press create when in observer mode
-  const longPress = useLongPress(observer ? () => {} : onCreateSession, 500);
+  const [hatchState, setHatchState] = useState<HatchState | null>(null);
+  const spawnPositionsRef = useRef<Map<string, { x: number; y: number }>>(new Map());
+  const pressPositionRef = useRef<{ x: number; y: number }>({ x: 0, y: 0 });
+  const longPressTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const longPressFiredRef = useRef(false);
+  const fieldRef = useRef<HTMLDivElement>(null);
+
+  const clearLongPress = useCallback(() => {
+    if (longPressTimerRef.current !== null) {
+      clearTimeout(longPressTimerRef.current);
+      longPressTimerRef.current = null;
+    }
+  }, []);
+
+  useEffect(() => clearLongPress, [clearLongPress]);
+
+  const startHatch = useCallback(
+    (clientX: number, clientY: number) => {
+      // Convert client coords to field-relative coords.
+      const field = fieldRef.current;
+      const rect = field?.getBoundingClientRect();
+      const x = rect ? clientX - rect.left : clientX;
+      const y = rect ? clientY - rect.top : clientY;
+
+      setHatchState({ x, y, phase: "dropping", sessionId: null });
+
+      // Fire API call in parallel with animation.
+      void onCreateSession().then((sessionId) => {
+        if (sessionId) {
+          spawnPositionsRef.current.set(sessionId, { x, y });
+          setHatchState((prev) =>
+            prev ? { ...prev, sessionId } : null,
+          );
+        }
+      });
+    },
+    [onCreateSession],
+  );
+
+  const startLongPress = useCallback(
+    (clientX: number, clientY: number, target: HTMLElement) => {
+      if (target.closest?.(".thronglet") || target.closest?.(".hatching-egg")) return;
+      longPressFiredRef.current = false;
+      pressPositionRef.current = { x: clientX, y: clientY };
+      clearLongPress();
+      longPressTimerRef.current = setTimeout(() => {
+        longPressTimerRef.current = null;
+        longPressFiredRef.current = true;
+        if (navigator.vibrate) navigator.vibrate(50);
+        startHatch(pressPositionRef.current.x, pressPositionRef.current.y);
+      }, 500);
+    },
+    [clearLongPress, startHatch],
+  );
+
+  const handlePhaseComplete = useCallback(
+    (completedPhase: HatchPhase) => {
+      setHatchState((prev) => {
+        if (!prev) return null;
+        if (completedPhase === "dropping") return { ...prev, phase: "wobbling" };
+        if (completedPhase === "wobbling") return { ...prev, phase: "hatching" };
+        if (completedPhase === "hatching") {
+          // Animation done — navigate if session is ready.
+          if (prev.sessionId) {
+            // Use setTimeout to avoid setState-during-render.
+            setTimeout(() => onTapSession(prev.sessionId!), 0);
+          }
+          return { ...prev, phase: "done" };
+        }
+        return prev;
+      });
+    },
+    [onTapSession],
+  );
+
+  // If animation reached "done" but sessionId arrived late, navigate now.
+  useEffect(() => {
+    if (hatchState?.phase === "done" && hatchState.sessionId) {
+      onTapSession(hatchState.sessionId);
+      setHatchState(null);
+    }
+  }, [hatchState, onTapSession]);
 
   return (
     <div
+      ref={fieldRef}
       class="field"
       style={{ flex: 1, position: "relative" }}
-      onMouseDown={observer ? undefined : longPress.onMouseDown}
-      onMouseUp={observer ? undefined : longPress.onMouseUp}
-      onMouseMove={observer ? undefined : longPress.onMouseMove}
-      onMouseLeave={observer ? undefined : longPress.onMouseLeave}
-      onTouchStart={observer ? undefined : longPress.onTouchStart}
-      onTouchMove={observer ? undefined : longPress.onTouchMove}
-      onTouchEnd={observer ? undefined : longPress.onTouchEnd}
-      onContextMenu={observer ? undefined : longPress.onContextMenu}
+      onMouseDown={
+        observer
+          ? undefined
+          : (e: MouseEvent) => {
+              if (e.button !== 0) return;
+              startLongPress(e.clientX, e.clientY, e.target as HTMLElement);
+            }
+      }
+      onMouseUp={observer ? undefined : clearLongPress}
+      onMouseMove={observer ? undefined : clearLongPress}
+      onMouseLeave={observer ? undefined : clearLongPress}
+      onTouchStart={
+        observer
+          ? undefined
+          : (e: TouchEvent) => {
+              const t = e.touches[0];
+              startLongPress(t.clientX, t.clientY, e.target as HTMLElement);
+            }
+      }
+      onTouchMove={observer ? undefined : clearLongPress}
+      onTouchEnd={observer ? undefined : clearLongPress}
+      onContextMenu={observer ? undefined : (e: Event) => e.preventDefault()}
     >
       {/* Scenery trees */}
       <img
@@ -343,11 +512,22 @@ export function OverviewField({
             key={s.session_id}
             session={s}
             idlePreview={idlePreviews[s.session_id]}
+            spawnPosition={spawnPositionsRef.current.get(s.session_id)}
             onTap={onTapSession}
             onDragToBottom={onDragToBottom}
           />
         ))}
       </div>
+
+      {/* Hatching egg animation */}
+      {hatchState && hatchState.phase !== "done" && (
+        <HatchingEgg
+          x={hatchState.x}
+          y={hatchState.y}
+          phase={hatchState.phase}
+          onPhaseComplete={handlePhaseComplete}
+        />
+      )}
 
       {/* Observer badge */}
       {observer && (
@@ -371,7 +551,7 @@ export function OverviewField({
       )}
 
       {/* Empty state */}
-      {sessions.length === 0 && (
+      {sessions.length === 0 && !hatchState && (
         <div class="empty-state">
           <p>No sessions yet</p>
           {!observer && <p class="hint">Long press to create one</p>}

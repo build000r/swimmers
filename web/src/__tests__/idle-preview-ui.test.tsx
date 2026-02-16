@@ -19,6 +19,7 @@ vi.mock("@/hooks/useGestures", () => ({
 
 describe("idle preview bubble override", () => {
   const noop = () => {};
+  const noopCreate = async () => "";
 
   it("shows idle preview text instead of thought text for idle sessions", () => {
     const session = makeSession({
@@ -33,7 +34,7 @@ describe("idle preview bubble override", () => {
         idlePreviews={{ "sess-001": "tail output from tmux buffer" }}
         onTapSession={noop}
         onDragToBottom={noop}
-        onCreateSession={noop}
+        onCreateSession={noopCreate}
       />,
     );
 
@@ -55,7 +56,7 @@ describe("idle preview bubble override", () => {
         idlePreviews={{ "sess-001": "tail output from tmux buffer" }}
         onTapSession={noop}
         onDragToBottom={noop}
-        onCreateSession={noop}
+        onCreateSession={noopCreate}
       />,
     );
 

@@ -7,7 +7,7 @@ import type {
   SessionCreatedPayload,
   SessionDeletedPayload,
 } from "@/types";
-import { bootstrap as apiFetch, fetchSnapshot } from "@/services/api";
+import { bootstrap as apiFetch, fetchPaneTail } from "@/services/api";
 import { RealtimeService } from "@/services/realtime";
 import type { WorkspaceLayoutState } from "@/services/workspace-history";
 import {
@@ -50,7 +50,18 @@ function stripTerminalEscapes(raw: string): string {
 }
 
 function buildIdlePreviewText(screenText: string): string {
-  const cleaned = stripTerminalEscapes(screenText).replace(/\s+/g, " ").trim();
+  const lines = stripTerminalEscapes(screenText)
+    .split(/\r?\n/)
+    .map((line) =>
+      line
+        .replace(/[│┃┆┊╭╮╯╰─━┄┈]+/g, " ")
+        .replace(/\s+/g, " ")
+        .trim(),
+    )
+    .filter((line) => line.length > 0)
+    .filter((line) => !/^[>$❯]\s*$/.test(line));
+
+  const cleaned = lines.slice(-10).join(" ").trim();
   if (!cleaned) return "";
   if (cleaned.length <= IDLE_PREVIEW_MAX_CHARS) return cleaned;
   const keep = IDLE_PREVIEW_MAX_CHARS - 1;
@@ -457,8 +468,8 @@ export function App() {
           inFlight.add(sessionId);
           lastFetchAt.set(sessionId, now);
 
-          void fetchSnapshot(sessionId)
-            .then((snapshot) => {
+          void fetchPaneTail(sessionId)
+            .then((paneTail) => {
               if (cancelled) return;
               const current = sessions.value.find(
                 (s) => s.session_id === sessionId,
@@ -471,7 +482,7 @@ export function App() {
                 return;
               }
 
-              const preview = buildIdlePreviewText(snapshot.screen_text);
+              const preview = buildIdlePreviewText(paneTail.text);
               const prev = idlePreviews.value[sessionId];
               if (!preview && prev !== undefined) {
                 const next = { ...idlePreviews.value };
@@ -653,7 +664,7 @@ export function App() {
           onTapSession={openTerminal}
           onDragToBottom={(id) => openTerminal(id, "bottom")}
           onCreateSession={async () => {
-            if (isObserver) return;
+            if (isObserver) return "";
             try {
               const { createSession } = await import("@/services/api");
               const resp = await createSession();
@@ -661,9 +672,10 @@ export function App() {
               if (!sessions.value.some(s => s.session_id === resp.session.session_id)) {
                 sessions.value = [...sessions.value, resp.session];
               }
-              openTerminal(resp.session.session_id);
+              return resp.session.session_id;
             } catch (err) {
               console.error("Failed to create session:", err);
+              return "";
             }
           }}
         />

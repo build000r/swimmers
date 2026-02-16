@@ -28,6 +28,7 @@ vi.mock("@/hooks/useGestures", () => ({
 describe("observer mode UI (OverviewField)", () => {
   const sessions = [makeSession({ session_id: "sess-001" })];
   const noop = () => {};
+  const noopCreate = async () => "";
 
   it("shows OBSERVER badge when observer=true", () => {
     render(
@@ -36,7 +37,7 @@ describe("observer mode UI (OverviewField)", () => {
         observer={true}
         onTapSession={noop}
         onDragToBottom={noop}
-        onCreateSession={noop}
+        onCreateSession={noopCreate}
       />,
     );
 
@@ -52,7 +53,7 @@ describe("observer mode UI (OverviewField)", () => {
         observer={false}
         onTapSession={noop}
         onDragToBottom={noop}
-        onCreateSession={noop}
+        onCreateSession={noopCreate}
       />,
     );
 
@@ -66,7 +67,7 @@ describe("observer mode UI (OverviewField)", () => {
         observer={true}
         onTapSession={noop}
         onDragToBottom={noop}
-        onCreateSession={noop}
+        onCreateSession={noopCreate}
       />,
     );
 
@@ -83,7 +84,7 @@ describe("observer mode UI (OverviewField)", () => {
         observer={false}
         onTapSession={noop}
         onDragToBottom={noop}
-        onCreateSession={noop}
+        onCreateSession={noopCreate}
       />,
     );
 
