@@ -255,15 +255,57 @@ pub fn context_limit_for_tool(tool: Option<&str>) -> u64 {
 }
 
 pub fn detect_tool_name(comm: &str) -> Option<&'static str> {
-    match comm.to_lowercase().as_str() {
-        "claude" => Some("Claude Code"),
-        "codex" => Some("Codex"),
+    let token = comm.trim().split_whitespace().next().unwrap_or(comm);
+    let token = token.trim_matches(|c: char| {
+        c == '"'
+            || c == '\''
+            || c == '`'
+            || c == ','
+            || c == ';'
+            || c == ':'
+            || c == '('
+            || c == ')'
+            || c == '['
+            || c == ']'
+            || c == '{'
+            || c == '}'
+    });
+    let token = token.rsplit('/').next().unwrap_or(token);
+    let token = token.trim_start_matches('-');
+
+    match token.to_lowercase().as_str() {
+        "claude" | "claude-code" | "claude_code" => Some("Claude Code"),
+        "codex" | "codex-cli" | "codex_cli" => Some("Codex"),
         "amp" => Some("Amp"),
-        "opencode" => Some("OpenCode"),
+        "opencode" | "open-code" | "open_code" => Some("OpenCode"),
         "aider" => Some("Aider"),
         "goose" => Some("Goose"),
         "cline" => Some("Cline"),
         "cursor" => Some("Cursor"),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::detect_tool_name;
+
+    #[test]
+    fn detect_tool_name_normalizes_aliases_and_paths() {
+        assert_eq!(detect_tool_name("claude"), Some("Claude Code"));
+        assert_eq!(detect_tool_name("CLAUDE"), Some("Claude Code"));
+        assert_eq!(
+            detect_tool_name("/usr/local/bin/claude-code"),
+            Some("Claude Code")
+        );
+        assert_eq!(detect_tool_name("codex-cli"), Some("Codex"));
+        assert_eq!(detect_tool_name("'codex'"), Some("Codex"));
+    }
+
+    #[test]
+    fn detect_tool_name_ignores_unknown_tokens() {
+        assert_eq!(detect_tool_name("zsh"), None);
+        assert_eq!(detect_tool_name("node"), None);
+        assert_eq!(detect_tool_name(""), None);
     }
 }

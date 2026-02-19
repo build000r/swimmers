@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::Write as _;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -19,6 +19,7 @@ use crate::types::{
 };
 
 const CWD_REFRESH_MIN_INTERVAL: Duration = Duration::from_millis(750);
+const TOOL_REFRESH_MIN_INTERVAL: Duration = Duration::from_millis(1_000);
 
 // ---------------------------------------------------------------------------
 // Public command enum -- sent to the actor over its mpsc channel
@@ -162,6 +163,9 @@ pub struct SessionActor {
     // Last time we polled tmux for pane_current_path.
     last_cwd_refresh_at: Instant,
 
+    // Last time we refreshed tool detection from tmux/process state.
+    last_tool_refresh_at: Instant,
+
     // Detected coding tool name
     tool: Option<String>,
 
@@ -254,6 +258,7 @@ impl SessionActor {
             rows: 24,
             cwd: initial_cwd,
             last_cwd_refresh_at: Instant::now(),
+            last_tool_refresh_at: Instant::now(),
             tool: None,
             last_activity_at: Utc::now(),
             clear_replay_on_first_idle: !attach,
@@ -296,6 +301,7 @@ impl SessionActor {
 
         // Prime cwd from tmux's authoritative pane path.
         self.maybe_refresh_cwd_from_tmux(true).await;
+        self.maybe_refresh_tool_from_tmux(true).await;
 
         let mut pty_closed = false;
 
@@ -341,6 +347,9 @@ impl SessionActor {
                                 debug!(session_id = %self.session_id, "ignoring write to exited PTY");
                             } else {
                                 self.scroll_guard.notify_input();
+                                let state_before = self.state_detector.state();
+                                self.state_detector.note_input();
+                                let _ = self.maybe_emit_state_change(state_before);
                                 if let Err(e) = self.writer.write_all(&data) {
                                     error!(session_id = %self.session_id, "PTY write error: {}", e);
                                 }
@@ -411,6 +420,7 @@ impl SessionActor {
                         }
                         SessionCommand::GetSummary(reply) => {
                             self.maybe_refresh_cwd_from_tmux(false).await;
+                            self.maybe_refresh_tool_from_tmux(false).await;
                             let summary = self.build_summary();
                             let _ = reply.send(summary);
                         }
@@ -524,6 +534,7 @@ impl SessionActor {
 
             // Feed the state detector with each chunk.
             self.state_detector.process_output(&chunk);
+            self.maybe_update_tool_from_current_command();
 
             // Emit state change event if processing caused a transition.
             if matches!(
@@ -664,6 +675,51 @@ impl SessionActor {
                     session_id = %self.session_id,
                     tmux_name = %tmux_name,
                     "tmux cwd refresh failed: {}",
+                    e
+                );
+            }
+        }
+    }
+
+    fn maybe_update_tool_from_current_command(&mut self) {
+        let current = match self.state_detector.current_command() {
+            Some(cmd) => cmd,
+            None => return,
+        };
+
+        if let Some(tool) = detect_tool_from_command_line(&current) {
+            if self.tool.as_deref() != Some(tool) {
+                self.tool = Some(tool.to_string());
+            }
+        }
+    }
+
+    async fn maybe_refresh_tool_from_tmux(&mut self, force: bool) {
+        if !force && self.last_tool_refresh_at.elapsed() < TOOL_REFRESH_MIN_INTERVAL {
+            return;
+        }
+
+        // Once we know the tool and the pane is idle, keep the last detected
+        // tool without polling process state every summary tick.
+        if !force && self.tool.is_some() && self.state_detector.state() == SessionState::Idle {
+            return;
+        }
+
+        self.last_tool_refresh_at = Instant::now();
+
+        let tmux_name = self.tmux_name.clone();
+        match query_tool_from_tmux_process_tree(&tmux_name).await {
+            Ok(Some(tool)) => {
+                if self.tool.as_deref() != Some(tool.as_str()) {
+                    self.tool = Some(tool);
+                }
+            }
+            Ok(None) => {}
+            Err(e) => {
+                debug!(
+                    session_id = %self.session_id,
+                    tmux_name = %tmux_name,
+                    "tmux tool refresh failed: {}",
                     e
                 );
             }
@@ -888,6 +944,162 @@ async fn query_tmux_cwd(tmux_name: &str) -> anyhow::Result<String> {
     Ok(cwd)
 }
 
+#[derive(Debug, Clone)]
+struct ProcessEntry {
+    pid: u32,
+    ppid: u32,
+    comm: String,
+    args: String,
+}
+
+async fn query_tool_from_tmux_process_tree(tmux_name: &str) -> anyhow::Result<Option<String>> {
+    if let Ok(comm) = query_tmux_current_command(tmux_name).await {
+        if let Some(tool) = crate::types::detect_tool_name(&comm) {
+            return Ok(Some(tool.to_string()));
+        }
+    }
+
+    let pane_pid = query_tmux_pane_pid(tmux_name).await?;
+    let entries = query_process_entries().await?;
+
+    let mut by_pid: HashMap<u32, ProcessEntry> = HashMap::new();
+    let mut children: HashMap<u32, Vec<u32>> = HashMap::new();
+
+    for entry in entries {
+        children.entry(entry.ppid).or_default().push(entry.pid);
+        by_pid.insert(entry.pid, entry);
+    }
+
+    let mut queue = VecDeque::from([pane_pid]);
+    let mut visited: HashSet<u32> = HashSet::new();
+
+    while let Some(pid) = queue.pop_front() {
+        if !visited.insert(pid) {
+            continue;
+        }
+
+        if let Some(entry) = by_pid.get(&pid) {
+            if let Some(tool) = detect_tool_from_process_entry(entry) {
+                return Ok(Some(tool.to_string()));
+            }
+        }
+
+        if let Some(child_pids) = children.get(&pid) {
+            for child_pid in child_pids {
+                queue.push_back(*child_pid);
+            }
+        }
+    }
+
+    Ok(None)
+}
+
+async fn query_tmux_current_command(tmux_name: &str) -> anyhow::Result<String> {
+    let output = Command::new("tmux")
+        .args([
+            "display-message",
+            "-p",
+            "-t",
+            tmux_name,
+            "#{pane_current_command}",
+        ])
+        .env_remove("TMUX")
+        .env_remove("TMUX_PANE")
+        .output()
+        .await
+        .map_err(|e| anyhow::anyhow!("failed to run tmux display-message: {}", e))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(anyhow::anyhow!(
+            "tmux display-message failed: {}",
+            stderr.trim()
+        ));
+    }
+
+    let comm = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if comm.is_empty() {
+        return Err(anyhow::anyhow!("tmux returned empty pane_current_command"));
+    }
+    Ok(comm)
+}
+
+async fn query_tmux_pane_pid(tmux_name: &str) -> anyhow::Result<u32> {
+    let output = Command::new("tmux")
+        .args(["display-message", "-p", "-t", tmux_name, "#{pane_pid}"])
+        .env_remove("TMUX")
+        .env_remove("TMUX_PANE")
+        .output()
+        .await
+        .map_err(|e| anyhow::anyhow!("failed to run tmux display-message: {}", e))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(anyhow::anyhow!(
+            "tmux display-message failed: {}",
+            stderr.trim()
+        ));
+    }
+
+    let pane_pid = String::from_utf8_lossy(&output.stdout)
+        .trim()
+        .parse::<u32>()
+        .map_err(|e| anyhow::anyhow!("invalid pane_pid from tmux: {}", e))?;
+
+    Ok(pane_pid)
+}
+
+async fn query_process_entries() -> anyhow::Result<Vec<ProcessEntry>> {
+    let output = Command::new("ps")
+        .args(["-axo", "pid=,ppid=,comm=,args="])
+        .output()
+        .await
+        .map_err(|e| anyhow::anyhow!("failed to run ps: {}", e))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(anyhow::anyhow!("ps failed: {}", stderr.trim()));
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut entries = Vec::new();
+    for line in stdout.lines() {
+        if let Some(entry) = parse_process_entry(line) {
+            entries.push(entry);
+        }
+    }
+    Ok(entries)
+}
+
+fn parse_process_entry(line: &str) -> Option<ProcessEntry> {
+    let mut parts = line.split_whitespace();
+    let pid = parts.next()?.parse::<u32>().ok()?;
+    let ppid = parts.next()?.parse::<u32>().ok()?;
+    let comm = parts.next()?.to_string();
+    let args = parts.collect::<Vec<&str>>().join(" ");
+
+    Some(ProcessEntry {
+        pid,
+        ppid,
+        comm,
+        args,
+    })
+}
+
+fn detect_tool_from_process_entry(entry: &ProcessEntry) -> Option<&'static str> {
+    crate::types::detect_tool_name(&entry.comm)
+        .or_else(|| detect_tool_from_command_line(&entry.args))
+}
+
+fn detect_tool_from_command_line(command: &str) -> Option<&'static str> {
+    for token in command.split_whitespace() {
+        if let Some(tool) = crate::types::detect_tool_name(token) {
+            return Some(tool);
+        }
+    }
+    None
+}
+
 // ---------------------------------------------------------------------------
 // Title / CWD helpers
 // ---------------------------------------------------------------------------
@@ -999,5 +1211,57 @@ fn pty_read_loop(
                 break;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        detect_tool_from_command_line, detect_tool_from_process_entry, parse_process_entry,
+        ProcessEntry,
+    };
+
+    #[test]
+    fn detect_tool_from_command_line_handles_aliases() {
+        assert_eq!(
+            detect_tool_from_command_line("FOO=1 /usr/local/bin/claude-code --print"),
+            Some("Claude Code")
+        );
+        assert_eq!(
+            detect_tool_from_command_line("codex-cli --help"),
+            Some("Codex")
+        );
+    }
+
+    #[test]
+    fn parse_process_entry_parses_ps_row() {
+        let entry =
+            parse_process_entry("10715 37039 claude /usr/local/bin/claude --print").unwrap();
+        assert_eq!(entry.pid, 10_715);
+        assert_eq!(entry.ppid, 37_039);
+        assert_eq!(entry.comm, "claude");
+        assert_eq!(entry.args, "/usr/local/bin/claude --print");
+    }
+
+    #[test]
+    fn detect_tool_from_process_entry_checks_comm_then_args() {
+        let from_comm = ProcessEntry {
+            pid: 1,
+            ppid: 0,
+            comm: "codex".to_string(),
+            args: "codex".to_string(),
+        };
+        assert_eq!(detect_tool_from_process_entry(&from_comm), Some("Codex"));
+
+        let from_args = ProcessEntry {
+            pid: 2,
+            ppid: 1,
+            comm: "node".to_string(),
+            args: "/usr/local/bin/claude --json".to_string(),
+        };
+        assert_eq!(
+            detect_tool_from_process_entry(&from_args),
+            Some("Claude Code")
+        );
     }
 }
