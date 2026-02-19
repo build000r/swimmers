@@ -45,7 +45,7 @@ async fn create_session(
     if let Err(resp) = auth.require_scope(AuthScope::SessionsWrite) {
         return resp;
     }
-    match state.supervisor.create_session(body.name).await {
+    match state.supervisor.create_session(body.name, body.cwd).await {
         Ok(session) => (
             StatusCode::CREATED,
             Json(serde_json::to_value(CreateSessionResponse { session }).unwrap()),

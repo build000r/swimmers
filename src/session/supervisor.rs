@@ -47,8 +47,7 @@ pub struct SessionSupervisor {
     /// Stale (exited) sessions from persistence that have no matching live tmux.
     stale_sessions: RwLock<Vec<SessionSummary>>,
 
-    /// Monotonic counter for generating numeric session names (matches Node.js
-    /// behaviour where sessions are named "0", "1", "2", ...).
+    /// Monotonic counter for generating numeric fallback session names.
     next_name_counter: AtomicU64,
 
     /// Monotonic counter for session IDs (separate from tmux names).
@@ -190,6 +189,7 @@ impl SessionSupervisor {
                 session_id.clone(),
                 tmux_name.clone(),
                 true, // attach to existing
+                None,
                 self.config.clone(),
             ) {
                 Ok(handle) => {
@@ -261,16 +261,30 @@ impl SessionSupervisor {
     // CRUD
     // -----------------------------------------------------------------------
 
-    /// Create a new tmux session (optionally with a specific name) and spawn
-    /// an actor for it.
+    /// Create a new tmux session (optionally with a specific name and/or
+    /// working directory) and spawn an actor for it.
     pub async fn create_session(
         self: &Arc<Self>,
         name: Option<String>,
+        cwd: Option<String>,
     ) -> anyhow::Result<SessionSummary> {
-        let tmux_name = name.unwrap_or_else(|| {
-            let n = self.next_name_counter.fetch_add(1, Ordering::SeqCst);
-            n.to_string()
+        let start_cwd = cwd.or_else(current_working_dir);
+        let requested_name = name.and_then(|n| {
+            let trimmed = n.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            }
         });
+
+        let tmux_name = match requested_name {
+            Some(explicit) => explicit,
+            None => {
+                let n = self.next_name_counter.fetch_add(1, Ordering::SeqCst);
+                n.to_string()
+            }
+        };
 
         let session_id = self.allocate_session_id();
 
@@ -280,6 +294,7 @@ impl SessionSupervisor {
             session_id.clone(),
             tmux_name.clone(),
             false, // create new
+            start_cwd.clone(),
             self.config.clone(),
         )?;
 
@@ -288,7 +303,10 @@ impl SessionSupervisor {
         crate::metrics::set_active_sessions(sessions.len());
         drop(sessions);
 
-        let summary = self.build_placeholder_summary(&session_id, &tmux_name);
+        let mut summary = self.build_placeholder_summary(&session_id, &tmux_name);
+        if let Some(cwd) = start_cwd {
+            summary.cwd = cwd;
+        }
 
         // Broadcast lifecycle event.
         let _ = self.lifecycle_tx.send(LifecycleEvent::Created {
@@ -597,4 +615,10 @@ impl SessionProvider for SupervisorProvider {
                 .expect("session_snapshots thread panicked")
         })
     }
+}
+
+fn current_working_dir() -> Option<String> {
+    std::env::current_dir()
+        .ok()
+        .map(|p| p.to_string_lossy().into_owned())
 }

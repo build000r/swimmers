@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::io::Write as _;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use chrono::Utc;
 use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
@@ -17,6 +17,8 @@ use crate::types::{
     ControlEvent, SessionState, SessionStatePayload, SessionSummary, SessionTitlePayload,
     TerminalSnapshot, TransportHealth,
 };
+
+const CWD_REFRESH_MIN_INTERVAL: Duration = Duration::from_millis(750);
 
 // ---------------------------------------------------------------------------
 // Public command enum -- sent to the actor over its mpsc channel
@@ -157,6 +159,9 @@ pub struct SessionActor {
     // Working directory extracted from OSC 7 or OSC 0/2 title sequences
     cwd: String,
 
+    // Last time we polled tmux for pane_current_path.
+    last_cwd_refresh_at: Instant,
+
     // Detected coding tool name
     tool: Option<String>,
 
@@ -178,6 +183,7 @@ impl SessionActor {
         session_id: String,
         tmux_name: String,
         attach: bool,
+        start_cwd: Option<String>,
         config: Arc<Config>,
     ) -> anyhow::Result<ActorHandle> {
         let pty_system = native_pty_system();
@@ -203,6 +209,9 @@ impl SessionActor {
         } else {
             let mut c = CommandBuilder::new("tmux");
             c.args(["new-session", "-s", &tmux_name]);
+            if let Some(dir) = start_cwd.as_deref() {
+                c.args(["-c", dir]);
+            }
             c
         };
 
@@ -227,6 +236,7 @@ impl SessionActor {
         let (event_tx, _) = broadcast::channel::<ControlEvent>(64);
 
         let replay_ring = ReplayRing::new(config.replay_buffer_size);
+        let initial_cwd = start_cwd.unwrap_or_default();
 
         let actor = SessionActor {
             session_id: session_id.clone(),
@@ -242,7 +252,8 @@ impl SessionActor {
             event_tx: event_tx.clone(),
             cols: 80,
             rows: 24,
-            cwd: String::new(),
+            cwd: initial_cwd,
+            last_cwd_refresh_at: Instant::now(),
             tool: None,
             last_activity_at: Utc::now(),
             clear_replay_on_first_idle: !attach,
@@ -282,6 +293,9 @@ impl SessionActor {
         tokio::task::spawn_blocking(move || {
             pty_read_loop(session_id_for_reader, reader, pty_tx);
         });
+
+        // Prime cwd from tmux's authoritative pane path.
+        self.maybe_refresh_cwd_from_tmux(true).await;
 
         let mut pty_closed = false;
 
@@ -348,7 +362,12 @@ impl SessionActor {
                         SessionCommand::DismissAttention => {
                             let state_before = self.state_detector.state();
                             self.state_detector.dismiss_attention();
-                            self.maybe_emit_state_change(state_before);
+                            if matches!(
+                                self.maybe_emit_state_change(state_before),
+                                Some(SessionState::Idle)
+                            ) {
+                                self.maybe_refresh_cwd_from_tmux(false).await;
+                            }
                         }
                         SessionCommand::Subscribe {
                             client_id,
@@ -391,6 +410,7 @@ impl SessionActor {
                             let _ = reply.send(text);
                         }
                         SessionCommand::GetSummary(reply) => {
+                            self.maybe_refresh_cwd_from_tmux(false).await;
                             let summary = self.build_summary();
                             let _ = reply.send(summary);
                         }
@@ -462,13 +482,23 @@ impl SessionActor {
         self.state_detector.check_timers(Instant::now());
 
         // Emit state change event if timers caused a transition.
-        self.maybe_emit_state_change(state_before);
+        if matches!(
+            self.maybe_emit_state_change(state_before),
+            Some(SessionState::Idle)
+        ) {
+            self.maybe_refresh_cwd_from_tmux(false).await;
+        }
 
         // Flush any coalesced scroll guard data.
         if let Some(flushed) = self.scroll_guard.flush() {
             let state_before = self.state_detector.state();
             self.state_detector.process_output(&flushed);
-            self.maybe_emit_state_change(state_before);
+            if matches!(
+                self.maybe_emit_state_change(state_before),
+                Some(SessionState::Idle)
+            ) {
+                self.maybe_refresh_cwd_from_tmux(false).await;
+            }
             self.last_activity_at = Utc::now();
 
             let seq = self.replay_ring.push(&flushed);
@@ -496,13 +526,17 @@ impl SessionActor {
             self.state_detector.process_output(&chunk);
 
             // Emit state change event if processing caused a transition.
-            self.maybe_emit_state_change(state_before);
+            if matches!(
+                self.maybe_emit_state_change(state_before),
+                Some(SessionState::Idle)
+            ) {
+                self.maybe_refresh_cwd_from_tmux(false).await;
+            }
 
             // On new sessions, clear the replay ring when we first reach idle.
             // This strips tmux startup output (including DA query/response
             // sequences) so clients subscribing later get a clean prompt.
-            if self.clear_replay_on_first_idle
-                && self.state_detector.state() == SessionState::Idle
+            if self.clear_replay_on_first_idle && self.state_detector.state() == SessionState::Idle
             {
                 self.clear_replay_on_first_idle = false;
                 self.replay_ring.clear();
@@ -564,20 +598,7 @@ impl SessionActor {
                         };
                         // URL-decode percent-encoded characters
                         let decoded = percent_decode(path);
-                        if !decoded.is_empty() && decoded != self.cwd {
-                            self.cwd = decoded;
-                            // Notify frontend of CWD change
-                            let payload = SessionTitlePayload {
-                                title: self.cwd.clone(),
-                                at: Utc::now(),
-                            };
-                            let event = ControlEvent {
-                                event: "session_title".to_string(),
-                                session_id: self.session_id.clone(),
-                                payload: serde_json::to_value(&payload).unwrap_or_default(),
-                            };
-                            let _ = self.event_tx.send(event);
-                        }
+                        self.update_cwd_and_emit(decoded);
                     }
                     search_from = uri_start + end_offset + 1;
                 } else {
@@ -626,10 +647,52 @@ impl SessionActor {
         }
     }
 
+    async fn maybe_refresh_cwd_from_tmux(&mut self, force: bool) {
+        if !force && self.state_detector.state() != SessionState::Idle {
+            return;
+        }
+        if !force && self.last_cwd_refresh_at.elapsed() < CWD_REFRESH_MIN_INTERVAL {
+            return;
+        }
+        self.last_cwd_refresh_at = Instant::now();
+
+        let tmux_name = self.tmux_name.clone();
+        match query_tmux_cwd(&tmux_name).await {
+            Ok(cwd) => self.update_cwd_and_emit(cwd),
+            Err(e) => {
+                debug!(
+                    session_id = %self.session_id,
+                    tmux_name = %tmux_name,
+                    "tmux cwd refresh failed: {}",
+                    e
+                );
+            }
+        }
+    }
+
+    fn update_cwd_and_emit(&mut self, cwd: String) {
+        let normalized = cwd.trim();
+        if normalized.is_empty() || normalized == self.cwd {
+            return;
+        }
+
+        self.cwd = normalized.to_string();
+        let payload = SessionTitlePayload {
+            title: self.cwd.clone(),
+            at: Utc::now(),
+        };
+        let event = ControlEvent {
+            event: "session_title".to_string(),
+            session_id: self.session_id.clone(),
+            payload: serde_json::to_value(&payload).unwrap_or_default(),
+        };
+        let _ = self.event_tx.send(event);
+    }
+
     /// Compare state before and after a detector operation. If the state changed,
     /// emit a `session_state` ControlEvent through the per-session broadcast channel.
-    fn maybe_emit_state_change(&self, previous_state: SessionState) {
-        self.maybe_emit_state_change_with_exit_reason(previous_state, None);
+    fn maybe_emit_state_change(&self, previous_state: SessionState) -> Option<SessionState> {
+        self.maybe_emit_state_change_with_exit_reason(previous_state, None)
     }
 
     /// Emit a `session_state` ControlEvent if the state changed, optionally
@@ -638,7 +701,7 @@ impl SessionActor {
         &self,
         previous_state: SessionState,
         exit_reason: Option<String>,
-    ) {
+    ) -> Option<SessionState> {
         let (current_state, current_command) = self.state_detector.get_state();
         if current_state != previous_state {
             let payload = SessionStatePayload {
@@ -656,6 +719,9 @@ impl SessionActor {
             };
             // If no receivers, send returns Err -- that's fine, nobody is listening.
             let _ = self.event_tx.send(event);
+            Some(current_state)
+        } else {
+            None
         }
     }
 
@@ -789,6 +855,37 @@ async fn capture_pane_tail(tmux_name: &str, lines: usize) -> anyhow::Result<Stri
     }
 
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+/// Query tmux for the active pane cwd of a session.
+async fn query_tmux_cwd(tmux_name: &str) -> anyhow::Result<String> {
+    let output = Command::new("tmux")
+        .args([
+            "display-message",
+            "-p",
+            "-t",
+            tmux_name,
+            "#{pane_current_path}",
+        ])
+        .env_remove("TMUX")
+        .env_remove("TMUX_PANE")
+        .output()
+        .await
+        .map_err(|e| anyhow::anyhow!("failed to run tmux display-message: {}", e))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(anyhow::anyhow!(
+            "tmux display-message failed: {}",
+            stderr.trim()
+        ));
+    }
+
+    let cwd = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if cwd.is_empty() {
+        return Err(anyhow::anyhow!("tmux returned empty pane_current_path"));
+    }
+    Ok(cwd)
 }
 
 // ---------------------------------------------------------------------------

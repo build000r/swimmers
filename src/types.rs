@@ -81,6 +81,19 @@ pub struct BootstrapResponse {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateSessionRequest {
     pub name: Option<String>,
+    pub cwd: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DirEntry {
+    pub name: String,
+    pub has_children: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DirListResponse {
+    pub path: String,
+    pub entries: Vec<DirEntry>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
