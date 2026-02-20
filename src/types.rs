@@ -250,7 +250,8 @@ pub fn context_limit_for_tool(tool: Option<&str>) -> u64 {
         Some("Goose") => 200_000,
         Some("Cline") => 200_000,
         Some("Cursor") => 200_000,
-        _ => 128_000,
+        Some(_) => 128_000,
+        None => 128_000,
     }
 }
 
@@ -288,7 +289,7 @@ pub fn detect_tool_name(comm: &str) -> Option<&'static str> {
 
 #[cfg(test)]
 mod tests {
-    use super::detect_tool_name;
+    use super::{context_limit_for_tool, detect_tool_name};
 
     #[test]
     fn detect_tool_name_normalizes_aliases_and_paths() {
@@ -307,5 +308,11 @@ mod tests {
         assert_eq!(detect_tool_name("zsh"), None);
         assert_eq!(detect_tool_name("node"), None);
         assert_eq!(detect_tool_name(""), None);
+    }
+
+    #[test]
+    fn context_limit_falls_back_for_unknown_tool() {
+        assert_eq!(context_limit_for_tool(None), 128_000);
+        assert_eq!(context_limit_for_tool(Some("UnknownTool")), 128_000);
     }
 }

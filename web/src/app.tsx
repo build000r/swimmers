@@ -127,7 +127,7 @@ function extractCwdFromSessionTitle(title: string, fallback: string): string {
 
 /** Smart poll merge: preserves object references for unchanged sessions and
  *  protects exiting sessions from being clobbered by stale server data. */
-function mergePollSessions(
+export function mergePollSessions(
   prev: SessionSummary[],
   next: SessionSummary[],
   exitingIds: Set<string>,
@@ -174,8 +174,8 @@ function mergePollSessions(
     return {
       ...s,
       last_activity_at: old.last_activity_at,
-      token_count: s.token_count || old.token_count,
-      context_limit: s.context_limit || old.context_limit,
+      token_count: s.token_count ?? old.token_count,
+      context_limit: s.context_limit ?? old.context_limit,
       thought: s.thought ?? old.thought,
     };
   });
