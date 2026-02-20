@@ -5,6 +5,7 @@ use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use regex::Regex;
+use tracing::debug;
 
 use crate::types::SessionState;
 
@@ -19,8 +20,8 @@ pub type StateChangeCallback =
 pub struct StateDetector {
     state: SessionState,
     current_command: Option<String>,
-    prompt_pattern: Regex,
     error_patterns: Vec<Regex>,
+    escape_state: EscapeState,
     /// Deadline at which an active error state should auto-clear to idle.
     error_deadline: Option<Instant>,
     /// Deadline at which idle should transition to attention.
@@ -33,13 +34,13 @@ impl StateDetector {
         Self {
             state: SessionState::Idle,
             current_command: None,
-            prompt_pattern: Regex::new(r"[$%>#]\s*$").expect("prompt_pattern is valid"),
             error_patterns: vec![
                 Regex::new(r"(?i)command not found").expect("error pattern is valid"),
                 Regex::new(r"(?i)Permission denied").expect("error pattern is valid"),
                 Regex::new(r"(?i)segmentation fault").expect("error pattern is valid"),
                 Regex::new(r"panic:").expect("error pattern is valid"),
             ],
+            escape_state: EscapeState::Normal,
             error_deadline: None,
             attention_deadline: None,
             on_state_change: None,
@@ -75,8 +76,7 @@ impl StateDetector {
         let osc = OSC_RE.get_or_init(|| {
             Regex::new(r"(?s)\x1b\].*?(?:\x07|\x1b\\)").expect("osc regex is valid")
         });
-        let esc = ESC_RE
-            .get_or_init(|| Regex::new(r"\x1b[@-Z\\-_]").expect("esc regex is valid"));
+        let esc = ESC_RE.get_or_init(|| Regex::new(r"\x1b[@-Z\\-_]").expect("esc regex is valid"));
         let ctrl = CTRL_RE
             .get_or_init(|| Regex::new(r"[\x00-\x08\x0B-\x1F\x7F]").expect("ctrl regex is valid"));
 
@@ -98,31 +98,64 @@ impl StateDetector {
         // Check timer deadlines before processing new output.
         self.check_timers(now);
 
-        let text = String::from_utf8_lossy(data);
+        let ParsedChunk {
+            visible,
+            markers,
+        } = self.parse_chunk(data);
 
-        // Check for OSC 133 sequences in raw output.
-        // Prompt shown (A) -> idle
-        if text.contains("\x1b]133;A") {
+        // Check for OSC 133 prompt/command markers.
+        // If both appear in one logical sequence window, honor whichever occurs last.
+        if !markers.is_empty() {
+            let prompt_idx = markers
+                .iter()
+                .rposition(|m| matches!(m, Osc133Marker::Prompt));
+            let command = markers
+                .iter()
+                .enumerate()
+                .rev()
+                .find_map(|(idx, marker)| match marker {
+                    Osc133Marker::Command(cmd) => Some((idx, cmd.clone())),
+                    Osc133Marker::Prompt => None,
+                });
+            let command_wins = match (prompt_idx, command.as_ref()) {
+                (Some(prompt_marker_idx), Some((cmd_marker_idx, _))) => {
+                    *cmd_marker_idx >= prompt_marker_idx
+                }
+                (None, Some(_)) => true,
+                _ => false,
+            };
             self.clear_error_timer();
-            self.set_state(SessionState::Idle, Some(None), now);
+            if command_wins {
+                let (command_idx, cmd) =
+                    command.expect("command_wins implies command marker exists");
+                debug!(
+                    prompt_idx = prompt_idx,
+                    command_idx,
+                    command = %cmd,
+                    "OSC 133 classified output as busy"
+                );
+                self.set_state(SessionState::Busy, Some(Some(cmd)), now, "osc133_command");
+            } else {
+                debug!(
+                    prompt_idx = prompt_idx,
+                    command_idx = command.as_ref().map(|(idx, _)| *idx),
+                    "OSC 133 classified output as idle"
+                );
+                self.set_state(SessionState::Idle, Some(None), now, "osc133_prompt");
+            }
             return;
         }
-
-        // Command starting (C) with command name.
-        if let Some(cmd) = Self::extract_osc133_command(&text) {
-            self.clear_error_timer();
-            self.set_state(SessionState::Busy, Some(Some(cmd)), now);
-            return;
-        }
-
-        // Strip escape sequences for heuristic pattern matching.
-        let visible = Self::strip_ansi(&text);
 
         // Check for error patterns against visible text.
         let mut found_error = false;
         for pattern in &self.error_patterns {
             if pattern.is_match(&visible) {
-                self.set_state(SessionState::Error, None, now);
+                debug!(
+                    pattern = %pattern.as_str(),
+                    sample = %Self::log_excerpt(&visible),
+                    "error pattern matched visible output"
+                );
+                self.set_state(SessionState::Error, None, now, "error_pattern");
                 self.schedule_error_clear(now);
                 found_error = true;
                 break;
@@ -134,22 +167,37 @@ impl StateDetector {
         // treat this as command activity and mark busy.
         if matches!(self.state, SessionState::Idle | SessionState::Attention) && !found_error {
             let has_visible_text = visible.chars().any(|c| !c.is_whitespace());
-            let looks_like_prompt = self.prompt_pattern.is_match(&visible);
+            let looks_like_prompt = Self::looks_like_prompt(&visible);
             if has_visible_text && !looks_like_prompt {
                 self.clear_error_timer();
-                self.set_state(SessionState::Busy, Some(None), now);
+                debug!(
+                    sample = %Self::log_excerpt(&visible),
+                    "fallback classified output as busy"
+                );
+                self.set_state(
+                    SessionState::Busy,
+                    Some(None),
+                    now,
+                    "fallback_non_prompt_output",
+                );
             }
         }
 
         // Fallback: regex prompt detection (for shells without OSC 133).
         // Recovers from busy AND error states when a new prompt appears.
         // Checked against visible text so tmux escape sequences don't mask the prompt.
-        if self.state != SessionState::Idle
-            && !found_error
-            && self.prompt_pattern.is_match(&visible)
-        {
+        if self.state != SessionState::Idle && !found_error && Self::looks_like_prompt(&visible) {
             self.clear_error_timer();
-            self.set_state(SessionState::Idle, Some(None), now);
+            debug!(
+                sample = %Self::log_excerpt(&visible),
+                "fallback classified output as idle prompt"
+            );
+            self.set_state(
+                SessionState::Idle,
+                Some(None),
+                now,
+                "fallback_prompt_detected",
+            );
         }
     }
 
@@ -162,7 +210,7 @@ impl StateDetector {
             if now >= deadline {
                 self.error_deadline = None;
                 if self.state == SessionState::Error {
-                    self.set_state(SessionState::Idle, Some(None), now);
+                    self.set_state(SessionState::Idle, Some(None), now, "error_timer_expired");
                 }
             }
         }
@@ -172,7 +220,12 @@ impl StateDetector {
             if now >= deadline {
                 self.attention_deadline = None;
                 if self.state == SessionState::Idle {
-                    self.set_state(SessionState::Attention, Some(None), now);
+                    self.set_state(
+                        SessionState::Attention,
+                        Some(None),
+                        now,
+                        "attention_timer_expired",
+                    );
                 }
             }
         }
@@ -194,7 +247,7 @@ impl StateDetector {
         self.clear_attention_timer();
         if self.state == SessionState::Attention {
             let now = Instant::now();
-            self.set_state(SessionState::Idle, Some(None), now);
+            self.set_state(SessionState::Idle, Some(None), now, "dismiss_attention");
         }
     }
 
@@ -209,7 +262,21 @@ impl StateDetector {
         }
         let now = Instant::now();
         self.clear_error_timer();
-        self.set_state(SessionState::Busy, Some(None), now);
+        debug!(state = ?self.state, "local input activity marks session busy");
+        self.set_state(SessionState::Busy, Some(None), now, "local_input");
+    }
+
+    /// Force terminal state to exited after PTY/process shutdown.
+    /// This persists exited state for session summaries even if no realtime
+    /// client was subscribed when the exit event happened.
+    pub fn mark_exited(&mut self) {
+        if self.state == SessionState::Exited {
+            return;
+        }
+        self.clear_error_timer();
+        self.clear_attention_timer();
+        let now = Instant::now();
+        self.set_state(SessionState::Exited, Some(None), now, "process_exit");
     }
 
     /// Get the current state and command as a tuple.
@@ -235,10 +302,205 @@ impl StateDetector {
 
     // --- Private helpers ---
 
-    /// Extract the command name from an OSC 133;C sequence.
-    fn extract_osc133_command(text: &str) -> Option<String> {
-        let re = Regex::new(r"\x1b\]133;C;cmd=([^\x07]*)\x07").unwrap();
-        re.captures(text).map(|caps| caps[1].trim().to_string())
+    fn parse_chunk(&mut self, data: &[u8]) -> ParsedChunk {
+        let mut visible: Vec<u8> = Vec::with_capacity(data.len());
+        let mut markers: Vec<Osc133Marker> = Vec::new();
+
+        for &b in data {
+            match &mut self.escape_state {
+                EscapeState::Normal => {
+                    if b == 0x1b {
+                        self.escape_state = EscapeState::Esc;
+                    } else if b == 0x9b {
+                        self.escape_state = EscapeState::Csi;
+                    } else if b == 0x9d {
+                        self.escape_state = EscapeState::Osc {
+                            buf: Vec::new(),
+                            esc_pending: false,
+                        };
+                    } else if b == 0x90 {
+                        self.escape_state = EscapeState::Dcs { esc_pending: false };
+                    } else if b == 0x9e {
+                        self.escape_state = EscapeState::Pm { esc_pending: false };
+                    } else if b == 0x9f {
+                        self.escape_state = EscapeState::Apc { esc_pending: false };
+                    } else if b == b'\n' || b == b'\r' || b == b'\t' || (0x20..=0x7e).contains(&b)
+                    {
+                        visible.push(b);
+                    }
+                }
+                EscapeState::Esc => match b {
+                    b'[' => self.escape_state = EscapeState::Csi,
+                    b']' => {
+                        self.escape_state = EscapeState::Osc {
+                            buf: Vec::new(),
+                            esc_pending: false,
+                        }
+                    }
+                    b'P' => self.escape_state = EscapeState::Dcs { esc_pending: false },
+                    b'^' => self.escape_state = EscapeState::Pm { esc_pending: false },
+                    b'_' => self.escape_state = EscapeState::Apc { esc_pending: false },
+                    _ => self.escape_state = EscapeState::Normal,
+                },
+                EscapeState::Csi => {
+                    if (0x40..=0x7e).contains(&b) {
+                        self.escape_state = EscapeState::Normal;
+                    }
+                }
+                EscapeState::Osc { buf, esc_pending } => {
+                    if *esc_pending {
+                        if b == b'\\' {
+                            if let Some(marker) = Self::parse_osc133(buf) {
+                                markers.push(marker);
+                            }
+                            self.escape_state = EscapeState::Normal;
+                        } else {
+                            *esc_pending = false;
+                            if b != 0x1b {
+                                buf.push(b);
+                            }
+                        }
+                    } else if b == 0x07 {
+                        if let Some(marker) = Self::parse_osc133(buf) {
+                            markers.push(marker);
+                        }
+                        self.escape_state = EscapeState::Normal;
+                    } else if b == 0x1b {
+                        *esc_pending = true;
+                    } else if buf.len() < 8192 {
+                        buf.push(b);
+                    }
+                }
+                EscapeState::Dcs { esc_pending }
+                | EscapeState::Pm { esc_pending }
+                | EscapeState::Apc { esc_pending } => {
+                    if *esc_pending {
+                        if b == b'\\' {
+                            self.escape_state = EscapeState::Normal;
+                        } else if b != 0x1b {
+                            *esc_pending = false;
+                        }
+                    } else if b == 0x1b {
+                        *esc_pending = true;
+                    }
+                }
+            }
+        }
+
+        ParsedChunk {
+            visible: String::from_utf8_lossy(&visible).to_string(),
+            markers,
+        }
+    }
+
+    fn parse_osc133(buf: &[u8]) -> Option<Osc133Marker> {
+        let payload = String::from_utf8_lossy(buf);
+        if !payload.starts_with("133;") {
+            return None;
+        }
+
+        let mut parts = payload.split(';');
+        let _ = parts.next(); // 133
+        let kind = parts.next()?;
+
+        match kind {
+            "A" => Some(Osc133Marker::Prompt),
+            "C" => {
+                let command = parts
+                    .find_map(|part| part.strip_prefix("cmd=").map(str::to_string))
+                    .unwrap_or_default()
+                    .trim()
+                    .to_string();
+                Some(Osc133Marker::Command(command))
+            }
+            _ => None,
+        }
+    }
+
+    /// Heuristic prompt detection for shells that do not emit OSC 133.
+    ///
+    /// We intentionally avoid classifying generic values like "42%" as prompts
+    /// to prevent busy/idle oscillation during progress output.
+    fn looks_like_prompt(visible: &str) -> bool {
+        let line = visible
+            .split(['\n', '\r'])
+            .rev()
+            .map(str::trim_end)
+            .find(|line| !line.is_empty());
+        let Some(line) = line else {
+            return false;
+        };
+
+        let mut chars = line.chars();
+        let Some(marker @ ('$' | '%' | '#' | '>')) = chars.next_back() else {
+            return false;
+        };
+        let prefix = chars.as_str().trim_end();
+        if prefix.is_empty() {
+            return true;
+        }
+
+        if Self::has_prompt_context(prefix) {
+            if marker == '%' {
+                let compact = prefix.replace(',', "");
+                if compact
+                    .chars()
+                    .all(|c| c.is_ascii_digit() || c == '.' || c.is_ascii_whitespace())
+                {
+                    return false;
+                }
+            }
+            return true;
+        }
+
+        // Minimal prompts like "project$", "host%", etc.
+        // Keep this strict so generic output lines do not masquerade as prompts.
+        if prefix.len() > 32 {
+            return false;
+        }
+        if prefix.chars().any(|c| c.is_whitespace()) {
+            return false;
+        }
+        if prefix
+            .chars()
+            .all(|c| c.is_ascii_digit() || c == '.' || c == ',')
+        {
+            return false;
+        }
+        if !prefix
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
+        {
+            return false;
+        }
+
+        matches!(marker, '$' | '#' | '%')
+    }
+
+    fn has_prompt_context(prefix: &str) -> bool {
+        prefix.contains('@')
+            || prefix.contains(':')
+            || prefix.contains('/')
+            || prefix.contains('~')
+            || prefix.contains('\\')
+            || prefix.ends_with(')')
+            || prefix.ends_with(']')
+    }
+
+    fn log_excerpt(visible: &str) -> String {
+        let mut flat = visible
+            .replace('\r', "\\r")
+            .replace('\n', "\\n")
+            .trim()
+            .to_string();
+        if flat.is_empty() {
+            return "<empty>".to_string();
+        }
+        if flat.len() > 140 {
+            flat.truncate(140);
+            flat.push('…');
+        }
+        flat
     }
 
     /// Core state transition logic. Mirrors the JS `_setState` method.
@@ -252,6 +514,7 @@ impl StateDetector {
         new_state: SessionState,
         command_update: Option<Option<String>>,
         _now: Instant,
+        cause: &'static str,
     ) {
         let prev = self.state;
         self.state = new_state;
@@ -275,6 +538,13 @@ impl StateDetector {
         }
 
         if new_state != prev {
+            debug!(
+                from = ?prev,
+                to = ?new_state,
+                cause,
+                current_command = ?self.current_command,
+                "state transition"
+            );
             if let Some(ref cb) = self.on_state_change {
                 cb(new_state, prev, self.current_command.clone());
             }
@@ -296,6 +566,29 @@ impl StateDetector {
     fn clear_attention_timer(&mut self) {
         self.attention_deadline = None;
     }
+}
+
+#[derive(Debug)]
+struct ParsedChunk {
+    visible: String,
+    markers: Vec<Osc133Marker>,
+}
+
+#[derive(Debug, Clone)]
+enum Osc133Marker {
+    Prompt,
+    Command(String),
+}
+
+#[derive(Debug)]
+enum EscapeState {
+    Normal,
+    Esc,
+    Csi,
+    Osc { buf: Vec<u8>, esc_pending: bool },
+    Dcs { esc_pending: bool },
+    Pm { esc_pending: bool },
+    Apc { esc_pending: bool },
 }
 
 impl Default for StateDetector {
@@ -334,7 +627,7 @@ mod tests {
         d.process_output(b"\x1b]133;C;cmd=ls\x07");
         assert_eq!(d.get_state().0, SessionState::Busy);
 
-        d.process_output(b"\x1b]133;A");
+        d.process_output(b"\x1b]133;A\x07");
         assert_eq!(d.get_state().0, SessionState::Idle);
         assert!(d.get_state().1.is_none());
     }
@@ -382,7 +675,7 @@ mod tests {
         assert_eq!(d.get_state().0, SessionState::Busy);
         assert!(d.attention_deadline.is_none());
 
-        d.process_output(b"\x1b]133;A");
+        d.process_output(b"\x1b]133;A\x07");
         assert_eq!(d.get_state().0, SessionState::Idle);
         assert!(d.attention_deadline.is_some());
     }
@@ -391,7 +684,7 @@ mod tests {
     fn attention_fires_after_deadline() {
         let (mut d, log) = detector_with_log();
         d.process_output(b"\x1b]133;C;cmd=make\x07");
-        d.process_output(b"\x1b]133;A");
+        d.process_output(b"\x1b]133;A\x07");
         assert_eq!(d.get_state().0, SessionState::Idle);
 
         // Expire the attention deadline.
@@ -410,11 +703,11 @@ mod tests {
         let mut d = StateDetector::new();
         // busy -> idle starts attention timer
         d.process_output(b"\x1b]133;C;cmd=ls\x07");
-        d.process_output(b"\x1b]133;A");
+        d.process_output(b"\x1b]133;A\x07");
         assert!(d.attention_deadline.is_some());
 
         // Another idle detection must NOT clear the timer.
-        d.process_output(b"\x1b]133;A");
+        d.process_output(b"\x1b]133;A\x07");
         assert!(d.attention_deadline.is_some());
     }
 
@@ -422,7 +715,7 @@ mod tests {
     fn idle_to_busy_cancels_attention_timer() {
         let mut d = StateDetector::new();
         d.process_output(b"\x1b]133;C;cmd=ls\x07");
-        d.process_output(b"\x1b]133;A");
+        d.process_output(b"\x1b]133;A\x07");
         assert!(d.attention_deadline.is_some());
 
         d.process_output(b"\x1b]133;C;cmd=pwd\x07");
@@ -433,7 +726,7 @@ mod tests {
     fn dismiss_attention_returns_to_idle() {
         let mut d = StateDetector::new();
         d.process_output(b"\x1b]133;C;cmd=make\x07");
-        d.process_output(b"\x1b]133;A");
+        d.process_output(b"\x1b]133;A\x07");
         d.attention_deadline = Some(Instant::now() - Duration::from_millis(1));
         d.check_timers(Instant::now());
         assert_eq!(d.get_state().0, SessionState::Attention);
@@ -483,7 +776,7 @@ mod tests {
     fn callback_fires_on_state_change_not_on_same_state() {
         let (mut d, log) = detector_with_log();
         // idle -> idle: no callback
-        d.process_output(b"\x1b]133;A");
+        d.process_output(b"\x1b]133;A\x07");
         let transitions = log.lock().unwrap();
         assert!(transitions.is_empty());
     }
@@ -506,12 +799,77 @@ mod tests {
     fn note_input_sets_busy_and_clears_attention_timer() {
         let mut d = StateDetector::new();
         d.process_output(b"\x1b]133;C;cmd=ls\x07");
-        d.process_output(b"\x1b]133;A");
+        d.process_output(b"\x1b]133;A\x07");
         assert_eq!(d.get_state().0, SessionState::Idle);
         assert!(d.attention_deadline.is_some());
 
         d.note_input();
         assert_eq!(d.get_state().0, SessionState::Busy);
         assert!(d.attention_deadline.is_none());
+    }
+
+    #[test]
+    fn progress_percentage_does_not_look_like_prompt() {
+        assert!(!StateDetector::looks_like_prompt("42%"));
+        assert!(!StateDetector::looks_like_prompt("downloading 100%"));
+        assert!(StateDetector::looks_like_prompt("user@host:~$ "));
+    }
+
+    #[test]
+    fn fallback_prompt_detection_ignores_percent_progress() {
+        let mut d = StateDetector::new();
+        d.process_output(b"\x1b]133;C;cmd=curl\x07");
+        assert_eq!(d.get_state().0, SessionState::Busy);
+
+        d.process_output(b" 42%");
+        assert_eq!(d.get_state().0, SessionState::Busy);
+    }
+
+    #[test]
+    fn osc133_command_with_st_terminator_sets_busy() {
+        let mut d = StateDetector::new();
+        d.process_output(b"\x1b]133;C;cmd=git status\x1b\\");
+        let (state, cmd) = d.get_state();
+        assert_eq!(state, SessionState::Busy);
+        assert_eq!(cmd.as_deref(), Some("git status"));
+    }
+
+    #[test]
+    fn osc133_uses_last_marker_when_chunk_contains_both() {
+        let mut d = StateDetector::new();
+
+        d.process_output(b"\x1b]133;A\x07\x1b]133;C;cmd=ls\x07");
+        assert_eq!(d.get_state().0, SessionState::Busy);
+
+        d.process_output(b"\x1b]133;C;cmd=ls\x07\x1b]133;A\x07");
+        assert_eq!(d.get_state().0, SessionState::Idle);
+    }
+
+    #[test]
+    fn split_private_mode_sequence_does_not_mark_busy() {
+        let mut d = StateDetector::new();
+        d.process_output(b"\x1b[");
+        d.process_output(b"?2004h");
+        assert_eq!(d.get_state().0, SessionState::Idle);
+    }
+
+    #[test]
+    fn split_osc133_command_across_chunks_sets_busy() {
+        let mut d = StateDetector::new();
+        d.process_output(b"\x1b]133;C;cmd=git");
+        d.process_output(b" status\x07");
+        let (state, cmd) = d.get_state();
+        assert_eq!(state, SessionState::Busy);
+        assert_eq!(cmd.as_deref(), Some("git status"));
+    }
+
+    #[test]
+    fn split_osc133_prompt_across_chunks_sets_idle() {
+        let mut d = StateDetector::new();
+        d.process_output(b"\x1b]133;C;cmd=ls\x07");
+        assert_eq!(d.get_state().0, SessionState::Busy);
+        d.process_output(b"\x1b]133;");
+        d.process_output(b"A\x07");
+        assert_eq!(d.get_state().0, SessionState::Idle);
     }
 }

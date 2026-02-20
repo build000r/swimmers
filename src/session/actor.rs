@@ -20,6 +20,8 @@ use crate::types::{
 
 const CWD_REFRESH_MIN_INTERVAL: Duration = Duration::from_millis(750);
 const TOOL_REFRESH_MIN_INTERVAL: Duration = Duration::from_millis(1_000);
+const TMUX_FALLBACK_TERM: &str = "xterm-256color";
+const TMUX_FALLBACK_COLORTERM: &str = "truecolor";
 
 // ---------------------------------------------------------------------------
 // Public command enum -- sent to the actor over its mpsc channel
@@ -222,6 +224,31 @@ impl SessionActor {
         // Strip tmux-related env vars to avoid nesting issues.
         cmd.env_remove("TMUX");
         cmd.env_remove("TMUX_PANE");
+        let inherited_term = std::env::var("TERM").ok();
+        let inherited_colorterm = std::env::var("COLORTERM").ok();
+        let (tmux_term, tmux_colorterm, used_term_fallback) =
+            resolve_tmux_terminal_env(inherited_term.as_deref(), inherited_colorterm.as_deref());
+        cmd.env("TERM", &tmux_term);
+        cmd.env("COLORTERM", &tmux_colorterm);
+        cmd.env("TERM_PROGRAM", "throngterm");
+        if used_term_fallback {
+            warn!(
+                session_id = %session_id,
+                tmux_name = %tmux_name,
+                inherited_term = ?inherited_term,
+                applied_term = %tmux_term,
+                "missing/unsupported TERM for tmux client; applied fallback"
+            );
+        } else {
+            debug!(
+                session_id = %session_id,
+                tmux_name = %tmux_name,
+                inherited_term = ?inherited_term,
+                applied_term = %tmux_term,
+                colorterm = %tmux_colorterm,
+                "configured tmux client terminal environment"
+            );
+        }
 
         let _child = pair
             .slave
@@ -319,22 +346,13 @@ impl SessionActor {
                         None => {
                             info!(session_id = %self.session_id, "PTY channel closed (process exit)");
                             pty_closed = true;
-                            // Emit session_state with exit_reason = "process_exit"
                             let prev = self.state_detector.state();
-                            let payload = SessionStatePayload {
-                                state: SessionState::Exited,
-                                previous_state: prev,
-                                current_command: self.state_detector.current_command(),
-                                transport_health: TransportHealth::Healthy,
-                                exit_reason: Some("process_exit".to_string()),
-                                at: Utc::now(),
-                            };
-                            let event = ControlEvent {
-                                event: "session_state".to_string(),
-                                session_id: self.session_id.clone(),
-                                payload: serde_json::to_value(&payload).unwrap_or_default(),
-                            };
-                            let _ = self.event_tx.send(event);
+                            // Persist exited state even if no websocket subscriber is connected.
+                            self.state_detector.mark_exited();
+                            let _ = self.maybe_emit_state_change_with_exit_reason(
+                                prev,
+                                Some("process_exit".to_string()),
+                            );
                         }
                     }
                 }
@@ -768,6 +786,16 @@ impl SessionActor {
                 exit_reason,
                 at: Utc::now(),
             };
+            debug!(
+                session_id = %self.session_id,
+                previous_state = ?payload.previous_state,
+                state = ?payload.state,
+                current_command = ?payload.current_command,
+                transport_health = ?payload.transport_health,
+                exit_reason = ?payload.exit_reason,
+                at = %payload.at,
+                "emitting session_state"
+            );
             let event = ControlEvent {
                 event: "session_state".to_string(),
                 session_id: self.session_id.clone(),
@@ -1177,6 +1205,29 @@ fn detect_tool_from_title(title: &str) -> Option<String> {
     None
 }
 
+fn resolve_tmux_terminal_env(
+    inherited_term: Option<&str>,
+    inherited_colorterm: Option<&str>,
+) -> (String, String, bool) {
+    let term = inherited_term.map(str::trim).unwrap_or_default();
+    let needs_term_fallback = term.is_empty()
+        || term.eq_ignore_ascii_case("dumb")
+        || term.eq_ignore_ascii_case("unknown");
+    let resolved_term = if needs_term_fallback {
+        TMUX_FALLBACK_TERM.to_string()
+    } else {
+        term.to_string()
+    };
+
+    let colorterm = inherited_colorterm
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(TMUX_FALLBACK_COLORTERM)
+        .to_string();
+
+    (resolved_term, colorterm, needs_term_fallback)
+}
+
 // ---------------------------------------------------------------------------
 // Blocking PTY reader (runs in spawn_blocking)
 // ---------------------------------------------------------------------------
@@ -1218,7 +1269,7 @@ fn pty_read_loop(
 mod tests {
     use super::{
         detect_tool_from_command_line, detect_tool_from_process_entry, parse_process_entry,
-        ProcessEntry,
+        resolve_tmux_terminal_env, ProcessEntry,
     };
 
     #[test]
@@ -1263,5 +1314,28 @@ mod tests {
             detect_tool_from_process_entry(&from_args),
             Some("Claude Code")
         );
+    }
+
+    #[test]
+    fn resolve_tmux_terminal_env_uses_fallback_for_missing_or_dumb_term() {
+        let (term, colorterm, fallback) = resolve_tmux_terminal_env(None, None);
+        assert_eq!(term, "xterm-256color");
+        assert_eq!(colorterm, "truecolor");
+        assert!(fallback);
+
+        let (term, colorterm, fallback) =
+            resolve_tmux_terminal_env(Some("  dumb  "), Some(" 24bit "));
+        assert_eq!(term, "xterm-256color");
+        assert_eq!(colorterm, "24bit");
+        assert!(fallback);
+    }
+
+    #[test]
+    fn resolve_tmux_terminal_env_preserves_valid_term() {
+        let (term, colorterm, fallback) =
+            resolve_tmux_terminal_env(Some("screen-256color"), Some("truecolor"));
+        assert_eq!(term, "screen-256color");
+        assert_eq!(colorterm, "truecolor");
+        assert!(!fallback);
     }
 }
