@@ -63,4 +63,64 @@ describe("idle preview bubble override", () => {
     expect(screen.getByText("npm test")).toBeInTheDocument();
     expect(screen.queryByText("tail output from tmux buffer")).toBeNull();
   });
+
+  it("keeps the previous thought bubble until a new one replaces it", () => {
+    const session = makeSession({
+      session_id: "sess-001",
+      state: "busy",
+      thought: "first thought",
+      current_command: null,
+    });
+
+    const { rerender } = render(
+      <OverviewField
+        sessions={[session]}
+        idlePreviews={{}}
+        onTapSession={noop}
+        onDragToBottom={noop}
+        onCreateSession={noopCreate}
+      />,
+    );
+
+    expect(screen.getByText("first thought")).toBeInTheDocument();
+
+    rerender(
+      <OverviewField
+        sessions={[
+          {
+            ...session,
+            state: "idle",
+            thought: null,
+            current_command: null,
+          },
+        ]}
+        idlePreviews={{}}
+        onTapSession={noop}
+        onDragToBottom={noop}
+        onCreateSession={noopCreate}
+      />,
+    );
+
+    expect(screen.getByText("first thought")).toBeInTheDocument();
+
+    rerender(
+      <OverviewField
+        sessions={[
+          {
+            ...session,
+            state: "busy",
+            thought: "next thought",
+            current_command: null,
+          },
+        ]}
+        idlePreviews={{}}
+        onTapSession={noop}
+        onDragToBottom={noop}
+        onCreateSession={noopCreate}
+      />,
+    );
+
+    expect(screen.getByText("next thought")).toBeInTheDocument();
+    expect(screen.queryByText("first thought")).toBeNull();
+  });
 });

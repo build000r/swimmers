@@ -47,22 +47,29 @@ function ThrongletEntity({
   const spawnPositionAppliedRef = useRef(Boolean(spawnPosition));
   const throngletSize = compact ? 60 : 80;
   const spriteHalf = throngletSize / 2;
+  const bubbleTopClearance = compact ? 86 : 96;
   const labelClearance = compact ? 105 : 120;
   const posRef = useRef(
     spawnPosition
       ? { x: spawnPosition.x - spriteHalf, y: spawnPosition.y - spriteHalf }
       : {
           x: Math.random() * Math.max(window.innerWidth - throngletSize, 0),
-          y:
-            40 +
+          y: bubbleTopClearance +
             Math.random() *
-              Math.max(window.innerHeight - labelClearance - 40, 60),
+              Math.max(
+                window.innerHeight - labelClearance - bubbleTopClearance,
+                60,
+              ),
         },
   );
   const wanderRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const isDraggingRef = useRef(false);
   const longPressedRef = useRef(false);
   const exitingRef = useRef(false);
+  const lastBubbleRef = useRef<{
+    text: string;
+    isIdlePreview: boolean;
+  } | null>(null);
 
   // Resolve field container on mount for wander bounds
   useEffect(() => {
@@ -86,7 +93,10 @@ function ThrongletEntity({
     const maxX = Math.max(fieldW - throngletSize, 0);
     const maxY = Math.max(fieldH - labelClearance, 60);
     const x = Math.max(0, Math.min(maxX, spawnPosition.x - spriteHalf));
-    const y = Math.max(40, Math.min(maxY, spawnPosition.y - spriteHalf));
+    const y = Math.max(
+      bubbleTopClearance,
+      Math.min(maxY, spawnPosition.y - spriteHalf),
+    );
     posRef.current = { x, y };
     spawnPositionAppliedRef.current = true;
 
@@ -98,6 +108,7 @@ function ThrongletEntity({
     spawnPosition?.x,
     spawnPosition?.y,
     throngletSize,
+    bubbleTopClearance,
     labelClearance,
     spriteHalf,
   ]);
@@ -116,7 +127,7 @@ function ThrongletEntity({
         Math.min(maxX, posRef.current.x + (Math.random() - 0.5) * 100),
       );
       posRef.current.y = Math.max(
-        40,
+        bubbleTopClearance,
         Math.min(maxY, posRef.current.y + (Math.random() - 0.5) * 80),
       );
       if (elRef.current) {
@@ -128,7 +139,7 @@ function ThrongletEntity({
     return () => {
       if (wanderRef.current) clearInterval(wanderRef.current);
     };
-  }, [throngletSize, labelClearance]);
+  }, [throngletSize, bubbleTopClearance, labelClearance]);
 
   // Walk off screen when session exits
   useEffect(() => {
@@ -248,6 +259,23 @@ function ThrongletEntity({
     showBubble = true;
   }
 
+  const liveBubble = showBubble
+    ? {
+        text: thoughtText,
+        isIdlePreview: showIdlePreview,
+      }
+    : null;
+
+  useEffect(() => {
+    if (!liveBubble) return;
+    lastBubbleRef.current = liveBubble;
+  }, [liveBubble?.text, liveBubble?.isIdlePreview]);
+
+  const renderedBubble = liveBubble ?? lastBubbleRef.current;
+  const bubbleText = renderedBubble?.text ?? "";
+  const bubbleIdlePreview = renderedBubble?.isIdlePreview ?? false;
+  const showRenderedBubble = !!renderedBubble;
+
   const showGauge = session.token_count > 0;
   const gaugeRatio = session.context_limit
     ? Math.min(session.token_count / session.context_limit, 1)
@@ -286,9 +314,9 @@ function ThrongletEntity({
       onDragStart={(e: Event) => e.preventDefault()}
     >
       {/* Thought bubble */}
-      {showBubble && (
-        <div class={`thought-bubble ${showIdlePreview ? "idle-preview" : ""}`}>
-          <span class="thought-text">{thoughtText}</span>
+      {showRenderedBubble && (
+        <div class={`thought-bubble ${bubbleIdlePreview ? "idle-preview" : ""}`}>
+          <span class="thought-text">{bubbleText}</span>
           <div class="thought-circle thought-circle-lg" />
           <div class="thought-circle thought-circle-sm" />
         </div>
@@ -321,7 +349,7 @@ function ThrongletEntity({
             />
           </div>
         )}
-        {activityText && !showBubble && (
+        {activityText && !showRenderedBubble && (
           <div class="thronglet-activity">{activityText}</div>
         )}
       </div>
@@ -380,11 +408,9 @@ function HatchingEgg({ x, y, phase, onPhaseComplete }: HatchingEggProps) {
             alt=""
             onAnimationEnd={handleAnimationEnd}
           />
-          <img
-            class="hatch-sprite"
-            src="/assets/idle.png"
-            alt=""
-          />
+          <div class="hatch-sprite">
+            <ThrongletSprite state="busy" tool={null} />
+          </div>
         </>
       )}
     </div>
@@ -503,25 +529,34 @@ export function OverviewField({
         if (completedPhase === "wobbling") return { ...prev, phase: "hatching" };
         if (completedPhase === "hatching") {
           // Animation done — navigate if session is ready.
-          if (prev.sessionId) {
-            // Use setTimeout to avoid setState-during-render.
-            setTimeout(() => onTapSession(prev.sessionId!), 0);
+          // In compact/split mode, don't auto-navigate; let the thronglet
+          // stay in the field so the user keeps their current terminal.
+          if (prev.sessionId && !compact) {
+            // Brief delay so user sees the creature standing before terminal opens.
+            setTimeout(() => onTapSession(prev.sessionId!), 400);
           }
           return { ...prev, phase: "done" };
         }
         return prev;
       });
     },
-    [onTapSession],
+    [onTapSession, compact],
   );
 
   // If animation reached "done" but sessionId arrived late, navigate now.
+  // Skip auto-navigate in compact/split mode.
   useEffect(() => {
     if (hatchState?.phase === "done" && hatchState.sessionId) {
-      onTapSession(hatchState.sessionId);
+      if (!compact) {
+        const timer = setTimeout(() => {
+          onTapSession(hatchState.sessionId!);
+          setHatchState(null);
+        }, 400);
+        return () => clearTimeout(timer);
+      }
       setHatchState(null);
     }
-  }, [hatchState, onTapSession]);
+  }, [hatchState, onTapSession, compact]);
 
   return (
     <div
@@ -557,17 +592,21 @@ export function OverviewField({
         id="thronglets-container"
         style={{ position: "absolute", inset: 0 }}
       >
-        {sessions.map((s) => (
-          <ThrongletEntity
-            key={s.session_id}
-            session={s}
-            idlePreview={idlePreviews[s.session_id]}
-            spawnPosition={spawnPositionsRef.current.get(s.session_id)}
-            compact={compact}
-            onTap={onTapSession}
-            onDragToBottom={onDragToBottom}
-          />
-        ))}
+        {sessions
+          .filter((s) =>
+            !(hatchState && hatchState.phase !== "done" && hatchState.sessionId === s.session_id)
+          )
+          .map((s) => (
+            <ThrongletEntity
+              key={s.session_id}
+              session={s}
+              idlePreview={idlePreviews[s.session_id]}
+              spawnPosition={spawnPositionsRef.current.get(s.session_id)}
+              compact={compact}
+              onTap={onTapSession}
+              onDragToBottom={onDragToBottom}
+            />
+          ))}
       </div>
 
       {/* Hatching egg animation */}
