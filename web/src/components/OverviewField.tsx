@@ -28,12 +28,21 @@ function gaugeSegments(usageRatio: number): number {
   return Math.round(remaining * 8);
 }
 
+// ---- Wander / collision constants ----
+
+const MIN_SEPARATION = 120;
+const PUSH_STRENGTH = 60;
+const WANDER_INTERVAL = 3000;
+const WANDER_X = 100;
+const WANDER_Y = 80;
+
 // ---- ThrongletEntity sub-component ----
 
 interface ThrongletProps {
   session: SessionSummary;
   idlePreview?: string;
-  spawnPosition?: { x: number; y: number };
+  x: number;
+  y: number;
   compact?: boolean;
   onTap: (id: string) => void;
   onDragToBottom: (id: string) => void;
@@ -42,35 +51,17 @@ interface ThrongletProps {
 function ThrongletEntity({
   session,
   idlePreview,
-  spawnPosition,
+  x,
+  y,
   compact = false,
   onTap,
   onDragToBottom,
 }: ThrongletProps) {
   const elRef = useRef<HTMLDivElement>(null);
-  const fieldElRef = useRef<HTMLElement | null>(null);
-  const spawnPositionAppliedRef = useRef(Boolean(spawnPosition));
   const throngletSize = compact ? 60 : 80;
   const spriteHalf = throngletSize / 2;
-  const bubbleTopClearance = compact ? 86 : 96;
-  const labelClearance = compact ? 105 : 120;
-  const posRef = useRef(
-    spawnPosition
-      ? { x: spawnPosition.x - spriteHalf, y: spawnPosition.y - spriteHalf }
-      : {
-          x: Math.random() * Math.max(window.innerWidth - throngletSize, 0),
-          y: bubbleTopClearance +
-            Math.random() *
-              Math.max(
-                window.innerHeight - labelClearance - bubbleTopClearance,
-                60,
-              ),
-        },
-  );
-  const wanderRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const isDraggingRef = useRef(false);
   const longPressedRef = useRef(false);
-  const exitingRef = useRef(false);
   const prevToolRef = useRef<string | null>(session.tool);
   const [isHatching, setIsHatching] = useState(false);
   const isExited = session.state === "exited";
@@ -80,95 +71,6 @@ function ThrongletEntity({
     text: string;
     isIdlePreview: boolean;
   } | null>(null);
-
-  // Resolve field container on mount for wander bounds
-  useEffect(() => {
-    fieldElRef.current = elRef.current?.closest?.(".field") as HTMLElement | null;
-  }, []);
-
-  // If spawn position arrives after first render, snap once to the intended
-  // hatch point instead of keeping the random fallback position.
-  useEffect(() => {
-    if (!spawnPosition || spawnPositionAppliedRef.current) return;
-
-    const field =
-      fieldElRef.current ??
-      ((elRef.current?.closest?.(".field") as HTMLElement | null) ?? null);
-    if (!fieldElRef.current) {
-      fieldElRef.current = field;
-    }
-
-    const fieldW = field ? field.clientWidth : window.innerWidth;
-    const fieldH = field ? field.clientHeight : window.innerHeight;
-    const maxX = Math.max(fieldW - throngletSize, 0);
-    const maxY = Math.max(fieldH - labelClearance, 60);
-    const x = Math.max(0, Math.min(maxX, spawnPosition.x - spriteHalf));
-    const y = Math.max(
-      bubbleTopClearance,
-      Math.min(maxY, spawnPosition.y - spriteHalf),
-    );
-    posRef.current = { x, y };
-    spawnPositionAppliedRef.current = true;
-
-    if (elRef.current) {
-      elRef.current.style.left = `${x}px`;
-      elRef.current.style.top = `${y}px`;
-    }
-  }, [
-    spawnPosition?.x,
-    spawnPosition?.y,
-    throngletSize,
-    bubbleTopClearance,
-    labelClearance,
-    spriteHalf,
-  ]);
-
-  // Wander randomly every 3s
-  useEffect(() => {
-    wanderRef.current = setInterval(() => {
-      if (exitingRef.current) return;
-      const field = fieldElRef.current;
-      const fieldW = field ? field.clientWidth : window.innerWidth;
-      const fieldH = field ? field.clientHeight : window.innerHeight;
-      const maxX = fieldW - throngletSize;
-      const maxY = fieldH - labelClearance;
-      posRef.current.x = Math.max(
-        0,
-        Math.min(maxX, posRef.current.x + (Math.random() - 0.5) * 100),
-      );
-      posRef.current.y = Math.max(
-        bubbleTopClearance,
-        Math.min(maxY, posRef.current.y + (Math.random() - 0.5) * 80),
-      );
-      if (elRef.current) {
-        elRef.current.style.left = posRef.current.x + "px";
-        elRef.current.style.top = posRef.current.y + "px";
-      }
-    }, 3000);
-
-    return () => {
-      if (wanderRef.current) clearInterval(wanderRef.current);
-    };
-  }, [throngletSize, bubbleTopClearance, labelClearance]);
-
-  // Walk off screen when session exits
-  useEffect(() => {
-    if (session.state !== "exited" || exitingRef.current) return;
-    exitingRef.current = true;
-    if (wanderRef.current) {
-      clearInterval(wanderRef.current);
-      wanderRef.current = null;
-    }
-    // Walk toward the nearest horizontal edge
-    const field = fieldElRef.current;
-    const fieldW = field ? field.clientWidth : window.innerWidth;
-    const midX = fieldW / 2;
-    const targetX = posRef.current.x < midX ? -120 : fieldW + 40;
-    posRef.current.x = targetX;
-    if (elRef.current) {
-      elRef.current.style.left = targetX + "px";
-    }
-  }, [session.state]);
 
   // Hatch when tool is first detected (user typed codex/claude)
   useEffect(() => {
@@ -297,7 +199,7 @@ function ThrongletEntity({
   const bubbleIdlePreview = renderedBubble?.isIdlePreview ?? false;
   const showRenderedBubble = !!renderedBubble;
 
-  const showGauge = session.token_count > 0;
+  const showGauge = session.context_limit > 0;
   const gaugeRatio = session.context_limit
     ? Math.min(session.token_count / session.context_limit, 1)
     : 0;
@@ -308,8 +210,8 @@ function ThrongletEntity({
       class={`thronglet ${isExited ? "exited" : isEgg ? "egg" : isHatching ? "hatching-reveal" : session.state}`}
       style={{
         "--thronglet-size": `${throngletSize}px`,
-        left: posRef.current.x + "px",
-        top: posRef.current.y + "px",
+        left: x + "px",
+        top: y + "px",
       }}
       onClick={handleClick}
       onMouseDown={handleMouseDown}
@@ -462,6 +364,143 @@ export function OverviewField({
   const menuClickPosRef = useRef<{ x: number; y: number }>({ x: 0, y: 0 });
   const fieldRef = useRef<HTMLDivElement>(null);
 
+  // Centralized position state for all thronglets
+  const [positions, setPositions] = useState<Record<string, { x: number; y: number }>>({});
+  const exitingSetRef = useRef<Set<string>>(new Set());
+
+  // Sizing constants (shared between init, wander, and entity rendering)
+  const throngletSize = compact ? 60 : 80;
+  const spriteHalf = throngletSize / 2;
+  const bubbleTopClearance = compact ? 86 : 96;
+  const labelClearance = compact ? 105 : 120;
+
+  // Initialize positions for new sessions, handle exits, clean up removed sessions
+  useEffect(() => {
+    setPositions((prev) => {
+      const next = { ...prev };
+      const field = fieldRef.current;
+      const fieldW = field ? field.clientWidth : window.innerWidth;
+      const fieldH = field ? field.clientHeight : window.innerHeight;
+      const maxX = Math.max(fieldW - throngletSize, 0);
+      const maxY = Math.max(fieldH - labelClearance, 0);
+
+      for (const s of sessions) {
+        // Initialize position for new sessions
+        if (!(s.session_id in next)) {
+          const spawn = spawnPositionsRef.current.get(s.session_id);
+          if (spawn) {
+            spawnPositionsRef.current.delete(s.session_id);
+            next[s.session_id] = {
+              x: Math.max(0, Math.min(maxX, spawn.x - spriteHalf)),
+              y: Math.max(bubbleTopClearance, Math.min(maxY, spawn.y - spriteHalf)),
+            };
+          } else {
+            // Random position with initial repulsion from existing thronglets
+            let x = Math.random() * maxX;
+            let y =
+              bubbleTopClearance +
+              Math.random() * Math.max(maxY - bubbleTopClearance, 60);
+            for (const other of Object.values(next)) {
+              const dx = x - other.x;
+              const dy = y - other.y;
+              const dist = Math.sqrt(dx * dx + dy * dy);
+              if (dist < MIN_SEPARATION && dist > 0) {
+                const force = (MIN_SEPARATION - dist) / MIN_SEPARATION;
+                x += (dx / dist) * force * PUSH_STRENGTH;
+                y += (dy / dist) * force * PUSH_STRENGTH;
+              }
+            }
+            next[s.session_id] = {
+              x: Math.max(0, Math.min(maxX, x)),
+              y: Math.max(bubbleTopClearance, Math.min(maxY, y)),
+            };
+          }
+        }
+
+        // Handle exit — walk toward nearest horizontal edge
+        if (
+          s.state === "exited" &&
+          !exitingSetRef.current.has(s.session_id) &&
+          s.session_id in next
+        ) {
+          exitingSetRef.current.add(s.session_id);
+          const midX = fieldW / 2;
+          next[s.session_id] = {
+            ...next[s.session_id],
+            x: next[s.session_id].x < midX ? -120 : fieldW + 40,
+          };
+        }
+      }
+
+      // Remove positions for sessions no longer in the list
+      const currentIds = new Set(sessions.map((s) => s.session_id));
+      for (const id of Object.keys(next)) {
+        if (!currentIds.has(id)) {
+          delete next[id];
+          exitingSetRef.current.delete(id);
+        }
+      }
+
+      return next;
+    });
+  }, [sessions, throngletSize, spriteHalf, bubbleTopClearance, labelClearance]);
+
+  // Single wander interval with separation forces
+  useEffect(() => {
+    const interval = setInterval(() => {
+      setPositions((prev) => {
+        const field = fieldRef.current;
+        const fieldW = field ? field.clientWidth : window.innerWidth;
+        const fieldH = field ? field.clientHeight : window.innerHeight;
+        const maxX = Math.max(fieldW - throngletSize, 0);
+        const maxY = Math.max(fieldH - labelClearance, 0);
+
+        const next = { ...prev };
+        const activeIds = Object.keys(next).filter(
+          (id) => !exitingSetRef.current.has(id),
+        );
+
+        // Step 1: Apply random wander
+        for (const id of activeIds) {
+          next[id] = {
+            x: next[id].x + (Math.random() - 0.5) * WANDER_X,
+            y: next[id].y + (Math.random() - 0.5) * WANDER_Y,
+          };
+        }
+
+        // Step 2: Apply separation forces
+        for (const id of activeIds) {
+          let rx = 0;
+          let ry = 0;
+          for (const otherId of activeIds) {
+            if (otherId === id) continue;
+            const dx = next[id].x - next[otherId].x;
+            const dy = next[id].y - next[otherId].y;
+            const dist = Math.sqrt(dx * dx + dy * dy);
+            if (dist < MIN_SEPARATION && dist > 0) {
+              const force = (MIN_SEPARATION - dist) / MIN_SEPARATION;
+              rx += (dx / dist) * force * PUSH_STRENGTH;
+              ry += (dy / dist) * force * PUSH_STRENGTH;
+            }
+          }
+          next[id] = { x: next[id].x + rx, y: next[id].y + ry };
+        }
+
+        // Step 3: Clamp to field bounds
+        for (const id of activeIds) {
+          next[id] = {
+            x: Math.max(0, Math.min(maxX, next[id].x)),
+            y: Math.max(bubbleTopClearance, Math.min(maxY, next[id].y)),
+          };
+        }
+
+        return next;
+      });
+    }, WANDER_INTERVAL);
+
+    return () => clearInterval(interval);
+  }, [throngletSize, bubbleTopClearance, labelClearance]);
+
   const startHatch = useCallback(
     (clientX: number, clientY: number, cwd?: string) => {
       // Convert client coords to field-relative coords.
@@ -599,17 +638,22 @@ export function OverviewField({
           .filter((s) =>
             !(hatchState && hatchState.phase !== "done" && hatchState.sessionId === s.session_id)
           )
-          .map((s) => (
-            <ThrongletEntity
-              key={s.session_id}
-              session={s}
-              idlePreview={idlePreviews[s.session_id]}
-              spawnPosition={spawnPositionsRef.current.get(s.session_id)}
-              compact={compact}
-              onTap={onTapSession}
-              onDragToBottom={onDragToBottom}
-            />
-          ))}
+          .map((s) => {
+            const pos = positions[s.session_id];
+            if (!pos) return null;
+            return (
+              <ThrongletEntity
+                key={s.session_id}
+                session={s}
+                idlePreview={idlePreviews[s.session_id]}
+                x={pos.x}
+                y={pos.y}
+                compact={compact}
+                onTap={onTapSession}
+                onDragToBottom={onDragToBottom}
+              />
+            );
+          })}
       </div>
 
       {/* Hatching egg animation */}
