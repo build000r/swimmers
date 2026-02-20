@@ -11,6 +11,7 @@ use crate::types::SessionState;
 
 const ERROR_LINGER_MS: u64 = 4000;
 const ATTENTION_DELAY_MS: u64 = 10000;
+const OUTPUT_IDLE_MS: u64 = 5000;
 
 /// Callback signature for state change notifications.
 /// Arguments: new_state, previous_state, current_command.
@@ -26,6 +27,12 @@ pub struct StateDetector {
     error_deadline: Option<Instant>,
     /// Deadline at which idle should transition to attention.
     attention_deadline: Option<Instant>,
+    /// When true, use PTY output silence to detect idle instead of prompt detection.
+    /// Enabled when a TUI tool (Claude Code, Codex, etc.) is running.
+    tui_tool_mode: bool,
+    /// Deadline at which a busy TUI tool session should transition to idle
+    /// due to output silence.
+    output_idle_deadline: Option<Instant>,
     on_state_change: Option<StateChangeCallback>,
 }
 
@@ -43,6 +50,8 @@ impl StateDetector {
             escape_state: EscapeState::Normal,
             error_deadline: None,
             attention_deadline: None,
+            tui_tool_mode: false,
+            output_idle_deadline: None,
             on_state_change: None,
         }
     }
@@ -53,6 +62,15 @@ impl StateDetector {
         F: Fn(SessionState, SessionState, Option<String>) + Send + 'static,
     {
         self.on_state_change = Some(Box::new(cb));
+    }
+
+    /// Enable or disable TUI tool mode. When enabled, PTY output silence
+    /// is used to detect idle instead of prompt regex detection.
+    pub fn set_tui_tool_mode(&mut self, enabled: bool) {
+        self.tui_tool_mode = enabled;
+        if !enabled {
+            self.output_idle_deadline = None;
+        }
     }
 
     /// Shell integration init script injected into zsh on session start.
@@ -199,6 +217,14 @@ impl StateDetector {
                 "fallback_prompt_detected",
             );
         }
+
+        // TUI tool mode: reset the output idle deadline on every chunk of output.
+        // When the tool stops producing output (silence), the deadline expires
+        // and check_timers will transition busy -> idle.
+        if self.tui_tool_mode && self.state == SessionState::Busy {
+            self.output_idle_deadline =
+                Some(now + Duration::from_millis(OUTPUT_IDLE_MS));
+        }
     }
 
     /// Check and fire any expired timer deadlines. Called at the start of
@@ -211,6 +237,22 @@ impl StateDetector {
                 self.error_deadline = None;
                 if self.state == SessionState::Error {
                     self.set_state(SessionState::Idle, Some(None), now, "error_timer_expired");
+                }
+            }
+        }
+
+        // TUI tool output silence -> idle
+        if let Some(deadline) = self.output_idle_deadline {
+            if now >= deadline {
+                self.output_idle_deadline = None;
+                if self.state == SessionState::Busy {
+                    debug!("TUI tool output silence expired, transitioning to idle");
+                    self.set_state(
+                        SessionState::Idle,
+                        Some(None),
+                        now,
+                        "output_silence_expired",
+                    );
                 }
             }
         }
@@ -234,12 +276,14 @@ impl StateDetector {
     /// Returns the next Instant at which a timer will fire, if any.
     /// Useful for the actor to know when to schedule a wake-up.
     pub fn next_deadline(&self) -> Option<Instant> {
-        match (self.error_deadline, self.attention_deadline) {
-            (Some(a), Some(b)) => Some(a.min(b)),
-            (Some(a), None) => Some(a),
-            (None, Some(b)) => Some(b),
-            (None, None) => None,
-        }
+        [
+            self.error_deadline,
+            self.attention_deadline,
+            self.output_idle_deadline,
+        ]
+        .into_iter()
+        .flatten()
+        .min()
     }
 
     /// Dismiss the attention state, returning to idle.
@@ -264,6 +308,12 @@ impl StateDetector {
         self.clear_error_timer();
         debug!(state = ?self.state, "local input activity marks session busy");
         self.set_state(SessionState::Busy, Some(None), now, "local_input");
+        // In TUI tool mode, start the silence timer from the input event
+        // so idle fires if the tool produces no output after user input.
+        if self.tui_tool_mode {
+            self.output_idle_deadline =
+                Some(now + Duration::from_millis(OUTPUT_IDLE_MS));
+        }
     }
 
     /// Force terminal state to exited after PTY/process shutdown.
@@ -340,8 +390,16 @@ impl StateDetector {
                     b'P' => self.escape_state = EscapeState::Dcs { esc_pending: false },
                     b'^' => self.escape_state = EscapeState::Pm { esc_pending: false },
                     b'_' => self.escape_state = EscapeState::Apc { esc_pending: false },
+                    0x20..=0x2f => self.escape_state = EscapeState::EscIntermediate,
                     _ => self.escape_state = EscapeState::Normal,
                 },
+                EscapeState::EscIntermediate => {
+                    if (0x30..=0x7e).contains(&b) {
+                        self.escape_state = EscapeState::Normal;
+                    } else if !(0x20..=0x2f).contains(&b) {
+                        self.escape_state = EscapeState::Normal;
+                    }
+                }
                 EscapeState::Csi => {
                     if (0x40..=0x7e).contains(&b) {
                         self.escape_state = EscapeState::Normal;
@@ -365,6 +423,11 @@ impl StateDetector {
                             markers.push(marker);
                         }
                         self.escape_state = EscapeState::Normal;
+                    } else if b == 0x9c {
+                        if let Some(marker) = Self::parse_osc133(buf) {
+                            markers.push(marker);
+                        }
+                        self.escape_state = EscapeState::Normal;
                     } else if b == 0x1b {
                         *esc_pending = true;
                     } else if buf.len() < 8192 {
@@ -380,6 +443,8 @@ impl StateDetector {
                         } else if b != 0x1b {
                             *esc_pending = false;
                         }
+                    } else if b == 0x9c {
+                        self.escape_state = EscapeState::Normal;
                     } else if b == 0x1b {
                         *esc_pending = true;
                     }
@@ -584,6 +649,7 @@ enum Osc133Marker {
 enum EscapeState {
     Normal,
     Esc,
+    EscIntermediate,
     Csi,
     Osc { buf: Vec<u8>, esc_pending: bool },
     Dcs { esc_pending: bool },
@@ -846,6 +912,30 @@ mod tests {
     }
 
     #[test]
+    fn esc_charset_sequence_does_not_mark_busy() {
+        let mut d = StateDetector::new();
+        d.process_output(b"\x1b(B");
+        assert_eq!(d.get_state().0, SessionState::Idle);
+    }
+
+    #[test]
+    fn split_esc_charset_sequence_does_not_mark_busy() {
+        let mut d = StateDetector::new();
+        d.process_output(b"\x1b(");
+        d.process_output(b"B");
+        assert_eq!(d.get_state().0, SessionState::Idle);
+    }
+
+    #[test]
+    fn osc133_c1_st_terminator_sets_busy() {
+        let mut d = StateDetector::new();
+        d.process_output(b"\x9d133;C;cmd=git status\x9c");
+        let (state, cmd) = d.get_state();
+        assert_eq!(state, SessionState::Busy);
+        assert_eq!(cmd.as_deref(), Some("git status"));
+    }
+
+    #[test]
     fn split_private_mode_sequence_does_not_mark_busy() {
         let mut d = StateDetector::new();
         d.process_output(b"\x1b[");
@@ -871,5 +961,97 @@ mod tests {
         d.process_output(b"\x1b]133;");
         d.process_output(b"A\x07");
         assert_eq!(d.get_state().0, SessionState::Idle);
+    }
+
+    // --- TUI tool mode tests ---
+
+    #[test]
+    fn tui_tool_mode_output_silence_sets_idle() {
+        let mut d = StateDetector::new();
+        d.set_tui_tool_mode(true);
+        // Feed visible output to go busy via fallback.
+        d.process_output(b"Thinking...\r\n");
+        assert_eq!(d.state(), SessionState::Busy);
+        assert!(d.output_idle_deadline.is_some());
+
+        // Expire the output idle deadline.
+        d.output_idle_deadline = Some(Instant::now() - Duration::from_millis(1));
+        d.check_timers(Instant::now());
+        assert_eq!(d.state(), SessionState::Idle);
+    }
+
+    #[test]
+    fn tui_tool_mode_output_resets_deadline() {
+        let mut d = StateDetector::new();
+        d.set_tui_tool_mode(true);
+        d.process_output(b"Working...\r\n");
+        assert_eq!(d.state(), SessionState::Busy);
+        let first_deadline = d.output_idle_deadline.unwrap();
+
+        // Advance time slightly and feed more output.
+        std::thread::sleep(Duration::from_millis(10));
+        d.process_output(b"Still working...\r\n");
+        let second_deadline = d.output_idle_deadline.unwrap();
+
+        // Deadline should have been pushed forward.
+        assert!(second_deadline > first_deadline);
+    }
+
+    #[test]
+    fn tui_tool_mode_idle_to_busy_on_output() {
+        let mut d = StateDetector::new();
+        d.set_tui_tool_mode(true);
+        // Go busy then idle via silence.
+        d.process_output(b"Thinking...\r\n");
+        d.output_idle_deadline = Some(Instant::now() - Duration::from_millis(1));
+        d.check_timers(Instant::now());
+        assert_eq!(d.state(), SessionState::Idle);
+
+        // New visible output should go back to busy.
+        d.process_output(b"Agent response output\r\n");
+        assert_eq!(d.state(), SessionState::Busy);
+        assert!(d.output_idle_deadline.is_some());
+    }
+
+    #[test]
+    fn tui_tool_mode_attention_after_idle() {
+        let mut d = StateDetector::new();
+        d.set_tui_tool_mode(true);
+        // Go busy via output.
+        d.process_output(b"Processing...\r\n");
+        assert_eq!(d.state(), SessionState::Busy);
+
+        // Silence -> idle (triggers attention timer via busy->idle in set_state).
+        d.output_idle_deadline = Some(Instant::now() - Duration::from_millis(1));
+        d.check_timers(Instant::now());
+        assert_eq!(d.state(), SessionState::Idle);
+        assert!(d.attention_deadline.is_some());
+
+        // Expire attention deadline -> attention.
+        d.attention_deadline = Some(Instant::now() - Duration::from_millis(1));
+        d.check_timers(Instant::now());
+        assert_eq!(d.state(), SessionState::Attention);
+    }
+
+    #[test]
+    fn tui_tool_mode_note_input_starts_deadline() {
+        let mut d = StateDetector::new();
+        d.set_tui_tool_mode(true);
+        // Start idle, note_input should go busy AND set output_idle_deadline.
+        assert_eq!(d.state(), SessionState::Idle);
+        d.note_input();
+        assert_eq!(d.state(), SessionState::Busy);
+        assert!(d.output_idle_deadline.is_some());
+    }
+
+    #[test]
+    fn tui_tool_mode_disabled_no_deadline() {
+        let mut d = StateDetector::new();
+        // TUI mode is off by default.
+        assert!(!d.tui_tool_mode);
+        d.process_output(b"Compiling...\r\n");
+        assert_eq!(d.state(), SessionState::Busy);
+        // No output idle deadline should be set.
+        assert!(d.output_idle_deadline.is_none());
     }
 }

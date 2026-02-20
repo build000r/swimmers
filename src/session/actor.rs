@@ -655,6 +655,9 @@ impl SessionActor {
                         // Detect tool name from title (e.g. "claude" in title)
                         if self.tool.is_none() {
                             self.tool = detect_tool_from_title(title);
+                            if self.tool.is_some() {
+                                self.state_detector.set_tui_tool_mode(true);
+                            }
                         }
 
                         let payload = SessionTitlePayload {
@@ -708,6 +711,7 @@ impl SessionActor {
         if let Some(tool) = detect_tool_from_command_line(&current) {
             if self.tool.as_deref() != Some(tool) {
                 self.tool = Some(tool.to_string());
+                self.state_detector.set_tui_tool_mode(true);
             }
         }
     }
@@ -730,6 +734,7 @@ impl SessionActor {
             Ok(Some(tool)) => {
                 if self.tool.as_deref() != Some(tool.as_str()) {
                     self.tool = Some(tool);
+                    self.state_detector.set_tui_tool_mode(true);
                 }
             }
             Ok(None) => {}
