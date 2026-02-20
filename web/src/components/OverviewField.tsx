@@ -17,10 +17,15 @@ function throngletName(session: SessionSummary): string {
   return cwdLabel(session.cwd) || session.tmux_name;
 }
 
-function gaugeColor(ratio: number): string {
-  if (ratio >= 0.8) return "#E74C3C";
-  if (ratio >= 0.5) return "#F5A623";
+function gaugeColor(usageRatio: number): string {
+  if (usageRatio >= 0.8) return "#E74C3C";
+  if (usageRatio >= 0.5) return "#F5A623";
   return "#4FC08D";
+}
+
+function gaugeSegments(usageRatio: number): number {
+  const remaining = 1 - usageRatio;
+  return Math.round(remaining * 8);
 }
 
 // ---- ThrongletEntity sub-component ----
@@ -361,13 +366,13 @@ function ThrongletEntity({
           {throngletName(session)}
         </div>
         {showGauge && (
-          <div class="context-gauge" style={{ display: "block" }}>
+          <div class={`context-gauge${gaugeRatio >= 0.8 ? " critical" : ""}`}>
             <div
               class="context-gauge-fill"
               style={{
-                width: gaugeRatio * 100 + "%",
-                background: gaugeColor(gaugeRatio),
-              }}
+                "--gauge-color": gaugeColor(gaugeRatio),
+                "--gauge-segments": gaugeSegments(gaugeRatio),
+              } as Record<string, string | number>}
             />
           </div>
         )}
