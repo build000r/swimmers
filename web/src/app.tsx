@@ -99,6 +99,63 @@ function extractCwdFromSessionTitle(title: string, fallback: string): string {
   return fallback;
 }
 
+/** Smart poll merge: preserves object references for unchanged sessions and
+ *  protects exiting sessions from being clobbered by stale server data. */
+function mergePollSessions(
+  prev: SessionSummary[],
+  next: SessionSummary[],
+  exitingIds: Set<string>,
+): SessionSummary[] | null {
+  // Keep exiting sessions untouched — they're managed by the realtime handler
+  const localExiting = prev.filter((s) => exitingIds.has(s.session_id));
+  const nextActive = next.filter((s) => !exitingIds.has(s.session_id));
+  const prevActive = prev.filter((s) => !exitingIds.has(s.session_id));
+
+  const prevById = new Map(prevActive.map((s) => [s.session_id, s]));
+
+  // Check if anything actually changed
+  if (
+    prevActive.length === nextActive.length &&
+    nextActive.every((s, i) => {
+      const old = prevActive[i];
+      return (
+        old &&
+        old.session_id === s.session_id &&
+        old.state === s.state &&
+        old.thought === s.thought &&
+        old.token_count === s.token_count &&
+        old.context_limit === s.context_limit &&
+        old.current_command === s.current_command &&
+        old.cwd === s.cwd &&
+        old.tool === s.tool
+      );
+    })
+  ) {
+    return null; // No changes — skip signal update entirely
+  }
+
+  // Merge: preserve object references for unchanged sessions to avoid re-renders
+  const merged = nextActive.map((s) => {
+    const old = prevById.get(s.session_id);
+    if (!old) return s;
+    if (
+      old.state === s.state &&
+      old.thought === s.thought &&
+      old.token_count === s.token_count &&
+      old.context_limit === s.context_limit &&
+      old.current_command === s.current_command &&
+      old.cwd === s.cwd &&
+      old.tool === s.tool
+    ) {
+      return old; // Preserve reference — avoids re-rendering this thronglet
+    }
+    // Keep local last_activity_at to prevent spurious sprite changes
+    return { ...s, last_activity_at: old.last_activity_at };
+  });
+
+  return localExiting.length > 0 ? [...merged, ...localExiting] : merged;
+}
+
 interface RestoreLayoutRequest extends WorkspaceLayoutState {
   requestId: number;
 }
@@ -122,6 +179,7 @@ export function App() {
   const outputActivityUpdateAtRef = useRef<Map<string, number>>(new Map());
   const idlePreviewFetchInFlightRef = useRef<Set<string>>(new Set());
   const idlePreviewLastFetchAtRef = useRef<Map<string, number>>(new Map());
+  const exitingSessionIdsRef = useRef<Set<string>>(new Set());
   const { isObserver } = useObserverMode(authMode);
 
   // ---- Session helpers ----
@@ -242,7 +300,9 @@ export function App() {
         // After exit, let the thronglet walk off screen then remove it
         if (payload.state === "exited") {
           outputActivityUpdateAtRef.current.delete(sessionId);
+          exitingSessionIdsRef.current.add(sessionId);
           setTimeout(() => {
+            exitingSessionIdsRef.current.delete(sessionId);
             sessions.value = sessions.value.filter(
               (s) => s.session_id !== sessionId,
             );
@@ -283,6 +343,7 @@ export function App() {
       onSessionDeleted(sessionId: string, _payload: SessionDeletedPayload) {
         clearIdlePreview(sessionId);
         outputActivityUpdateAtRef.current.delete(sessionId);
+        exitingSessionIdsRef.current.delete(sessionId);
         sessions.value = sessions.value.filter(
           (s) => s.session_id !== sessionId,
         );
@@ -402,26 +463,12 @@ export function App() {
     pollRef.current = setInterval(async () => {
       try {
         const resp = await fetchSessions();
-        const prev = sessions.value;
-        if (
-          prev.length !== resp.sessions.length ||
-          resp.sessions.some((next, i) => {
-            const old = prev[i];
-            return (
-              !old ||
-              old.session_id !== next.session_id ||
-              old.state !== next.state ||
-              old.thought !== next.thought ||
-              old.token_count !== next.token_count ||
-              old.context_limit !== next.context_limit ||
-              old.current_command !== next.current_command ||
-              old.cwd !== next.cwd ||
-              old.tool !== next.tool
-            );
-          })
-        ) {
-          sessions.value = resp.sessions;
-        }
+        const merged = mergePollSessions(
+          sessions.value,
+          resp.sessions,
+          exitingSessionIdsRef.current,
+        );
+        if (merged) sessions.value = merged;
       } catch {
         // Keep stale data on network error
       }
@@ -476,30 +523,12 @@ export function App() {
       try {
         const resp = await fetchSessions();
         if (cancelled) return;
-        // Only update if session data actually changed to avoid
-        // unnecessary re-renders that flash thronglet sprites.
-        // Exclude last_activity_at — it's volatile (client vs server timestamps
-        // always differ) and already handled by the realtime handler.
-        const prev = sessions.value;
-        if (
-          prev.length !== resp.sessions.length ||
-          resp.sessions.some((next, i) => {
-            const old = prev[i];
-            return (
-              !old ||
-              old.session_id !== next.session_id ||
-              old.state !== next.state ||
-              old.thought !== next.thought ||
-              old.token_count !== next.token_count ||
-              old.context_limit !== next.context_limit ||
-              old.current_command !== next.current_command ||
-              old.cwd !== next.cwd ||
-              old.tool !== next.tool
-            );
-          })
-        ) {
-          sessions.value = resp.sessions;
-        }
+        const merged = mergePollSessions(
+          sessions.value,
+          resp.sessions,
+          exitingSessionIdsRef.current,
+        );
+        if (merged) sessions.value = merged;
       } catch {
         // Keep stale data on transient network errors.
       } finally {
@@ -668,7 +697,9 @@ export function App() {
         }
       }
       activeSessionId.value = sessionId;
-      activeZonePreference.value = preferZone ?? null;
+      // Default tap behavior should replace the main pane.
+      // Secondary pane assignment is explicit via drag-left (preferZone="bottom").
+      activeZonePreference.value = preferZone ?? "main";
       currentView.value = "terminal";
       stopPolling();
     },
@@ -757,9 +788,9 @@ export function App() {
   // In split mode: terminal left 50%, field right 50%
   // In dual-zone: terminal full screen, field hidden
   const overviewTransform = isOverview
-    ? "translateX(0)"
+    ? "none"
     : splitMode
-      ? "translateX(0)"
+      ? "none"
       : "translateX(-100%)";
 
   return (

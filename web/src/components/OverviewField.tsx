@@ -66,6 +66,9 @@ function ThrongletEntity({
   const isDraggingRef = useRef(false);
   const longPressedRef = useRef(false);
   const exitingRef = useRef(false);
+  const prevToolRef = useRef<string | null>(session.tool);
+  const [isHatching, setIsHatching] = useState(false);
+  const isEgg = !session.tool && !isHatching;
   const lastBubbleRef = useRef<{
     text: string;
     isIdlePreview: boolean;
@@ -159,6 +162,17 @@ function ThrongletEntity({
       elRef.current.style.left = targetX + "px";
     }
   }, [session.state]);
+
+  // Hatch when tool is first detected (user typed codex/claude)
+  useEffect(() => {
+    if (prevToolRef.current === null && session.tool !== null) {
+      setIsHatching(true);
+      const timer = setTimeout(() => setIsHatching(false), 900);
+      prevToolRef.current = session.tool;
+      return () => clearTimeout(timer);
+    }
+    prevToolRef.current = session.tool;
+  }, [session.tool]);
 
   // Long-press haptic on the thronglet itself
   const longPressTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -284,7 +298,7 @@ function ThrongletEntity({
   return (
     <div
       ref={elRef}
-      class={`thronglet ${session.state}`}
+      class={`thronglet ${isEgg ? "egg" : isHatching ? "hatching-reveal" : session.state}`}
       style={{
         "--thronglet-size": `${throngletSize}px`,
         left: posRef.current.x + "px",
@@ -313,8 +327,17 @@ function ThrongletEntity({
       }}
       onDragStart={(e: Event) => e.preventDefault()}
     >
-      {/* Thought bubble */}
-      {showRenderedBubble && (
+      {/* Egg sprite for unhatched / hatching sessions */}
+      {(isEgg || isHatching) && (
+        <img
+          class="egg-idle-sprite"
+          src="/assets/egg.png"
+          alt=""
+        />
+      )}
+
+      {/* Thought bubble (hidden during egg state) */}
+      {!isEgg && showRenderedBubble && (
         <div class={`thought-bubble ${bubbleIdlePreview ? "idle-preview" : ""}`}>
           <span class="thought-text">{bubbleText}</span>
           <div class="thought-circle thought-circle-lg" />
@@ -322,16 +345,15 @@ function ThrongletEntity({
         </div>
       )}
 
-      {/* Tool badge */}
-      {session.tool && <div class="thronglet-tool">{session.tool}</div>}
-
-      {/* Sprite */}
-      <ThrongletSprite
-        class="thronglet-sprite"
-        state={session.state}
-        tool={session.tool}
-        lastActivityAt={session.last_activity_at}
-      />
+      {/* Sprite (not rendered during egg state) */}
+      {!isEgg && (
+        <ThrongletSprite
+          class="thronglet-sprite"
+          state={session.state}
+          tool={session.tool}
+          lastActivityAt={session.last_activity_at}
+        />
+      )}
 
       {/* Label */}
       <div class="thronglet-label">
@@ -359,7 +381,7 @@ function ThrongletEntity({
 
 // ---- HatchingEgg sub-component ----
 
-type HatchPhase = "dropping" | "wobbling" | "hatching" | "done";
+type HatchPhase = "dropping" | "wobbling" | "done";
 
 interface HatchingEggProps {
   x: number;
@@ -372,13 +394,9 @@ function HatchingEgg({ x, y, phase, onPhaseComplete }: HatchingEggProps) {
   const handleAnimationEnd = useCallback(() => {
     if (phase === "dropping") {
       onPhaseComplete("dropping");
-    } else if (phase === "hatching") {
-      onPhaseComplete("hatching");
     }
   }, [phase, onPhaseComplete]);
 
-  // Wobble uses iteration count (2 iterations of 0.4s = 0.8s total).
-  // After wobble animation ends, advance to hatching.
   const handleWobbleEnd = useCallback(() => {
     onPhaseComplete("wobbling");
   }, [onPhaseComplete]);
@@ -393,26 +411,12 @@ function HatchingEgg({ x, y, phase, onPhaseComplete }: HatchingEggProps) {
         top: y - 40 + "px",
       }}
     >
-      {phase !== "hatching" ? (
-        <img
-          class={`egg-sprite ${phase}`}
-          src="/assets/egg.png"
-          alt=""
-          onAnimationEnd={phase === "wobbling" ? handleWobbleEnd : handleAnimationEnd}
-        />
-      ) : (
-        <>
-          <img
-            class="egg-sprite hatching"
-            src="/assets/egg.png"
-            alt=""
-            onAnimationEnd={handleAnimationEnd}
-          />
-          <div class="hatch-sprite">
-            <ThrongletSprite state="busy" tool={null} />
-          </div>
-        </>
-      )}
+      <img
+        class={`egg-sprite ${phase}`}
+        src="/assets/egg.png"
+        alt=""
+        onAnimationEnd={phase === "wobbling" ? handleWobbleEnd : handleAnimationEnd}
+      />
     </div>
   );
 }
@@ -526,13 +530,9 @@ export function OverviewField({
       setHatchState((prev) => {
         if (!prev) return null;
         if (completedPhase === "dropping") return { ...prev, phase: "wobbling" };
-        if (completedPhase === "wobbling") return { ...prev, phase: "hatching" };
-        if (completedPhase === "hatching") {
-          // Animation done — navigate if session is ready.
-          // In compact/split mode, don't auto-navigate; let the thronglet
-          // stay in the field so the user keeps their current terminal.
-          if (prev.sessionId && !compact) {
-            // Brief delay so user sees the creature standing before terminal opens.
+        if (completedPhase === "wobbling") {
+          // Wobble done — show egg as ThrongletEntity now.
+          if (prev.sessionId) {
             setTimeout(() => onTapSession(prev.sessionId!), 400);
           }
           return { ...prev, phase: "done" };
@@ -540,23 +540,19 @@ export function OverviewField({
         return prev;
       });
     },
-    [onTapSession, compact],
+    [onTapSession],
   );
 
   // If animation reached "done" but sessionId arrived late, navigate now.
-  // Skip auto-navigate in compact/split mode.
   useEffect(() => {
     if (hatchState?.phase === "done" && hatchState.sessionId) {
-      if (!compact) {
-        const timer = setTimeout(() => {
-          onTapSession(hatchState.sessionId!);
-          setHatchState(null);
-        }, 400);
-        return () => clearTimeout(timer);
-      }
-      setHatchState(null);
+      const timer = setTimeout(() => {
+        onTapSession(hatchState.sessionId!);
+        setHatchState(null);
+      }, 400);
+      return () => clearTimeout(timer);
     }
-  }, [hatchState, onTapSession, compact]);
+  }, [hatchState, onTapSession]);
 
   return (
     <div
