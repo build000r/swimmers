@@ -44,6 +44,7 @@ interface ThrongletProps {
   x: number;
   y: number;
   compact?: boolean;
+  rawMode?: boolean;
   onTap: (id: string) => void;
   onDragToBottom: (id: string) => void;
 }
@@ -54,6 +55,7 @@ function ThrongletEntity({
   x,
   y,
   compact = false,
+  rawMode = false,
   onTap,
   onDragToBottom,
 }: ThrongletProps) {
@@ -203,6 +205,32 @@ function ThrongletEntity({
   const gaugeRatio = session.context_limit
     ? Math.min(session.token_count / session.context_limit, 1)
     : 0;
+
+  // Raw mode: show session data card instead of sprite
+  if (rawMode) {
+    return (
+      <div
+        ref={elRef}
+        class="thronglet-raw"
+        style={{ left: x + "px", top: y + "px" }}
+        onClick={handleClick}
+        onDragStart={(e: Event) => e.preventDefault()}
+      >
+        <div class="raw-state" data-state={session.state}>{session.state}</div>
+        <div class="raw-row"><span class="raw-key">id</span> {session.session_id.slice(0, 8)}</div>
+        <div class="raw-row"><span class="raw-key">tmux</span> {session.tmux_name}</div>
+        <div class="raw-row"><span class="raw-key">cwd</span> {cwdLabel(session.cwd)}</div>
+        {session.tool && <div class="raw-row"><span class="raw-key">tool</span> {session.tool}</div>}
+        {session.current_command && <div class="raw-row"><span class="raw-key">cmd</span> {session.current_command}</div>}
+        {session.thought && <div class="raw-row"><span class="raw-key">thought</span> {session.thought}</div>}
+        {session.context_limit > 0 && (
+          <div class="raw-row"><span class="raw-key">ctx</span> {session.token_count.toLocaleString()}/{session.context_limit.toLocaleString()}</div>
+        )}
+        <div class="raw-row"><span class="raw-key">health</span> {session.transport_health}</div>
+        {session.is_stale && <div class="raw-row raw-stale">STALE</div>}
+      </div>
+    );
+  }
 
   return (
     <div
@@ -358,6 +386,7 @@ export function OverviewField({
   onDragToBottom,
   onCreateSession,
 }: OverviewFieldProps) {
+  const [rawMode, setRawMode] = useState(false);
   const [hatchState, setHatchState] = useState<HatchState | null>(null);
   const [menuPos, setMenuPos] = useState<{ x: number; y: number } | null>(null);
   const spawnPositionsRef = useRef<Map<string, { x: number; y: number }>>(new Map());
@@ -649,6 +678,7 @@ export function OverviewField({
                 x={pos.x}
                 y={pos.y}
                 compact={compact}
+                rawMode={rawMode}
                 onTap={onTapSession}
                 onDragToBottom={onDragToBottom}
               />
@@ -704,6 +734,22 @@ export function OverviewField({
           {!observer && <p class="hint">Tap anywhere to spawn one</p>}
         </div>
       )}
+
+      {/* Secret raw-mode toggle (bottom of field) */}
+      <div
+        class="raw-mode-tap-zone"
+        onClick={(e: MouseEvent) => {
+          e.stopPropagation();
+          setRawMode((v) => !v);
+          if (navigator.vibrate) navigator.vibrate(15);
+        }}
+        onTouchEnd={(e: TouchEvent) => {
+          e.stopPropagation();
+          e.preventDefault();
+          setRawMode((v) => !v);
+          if (navigator.vibrate) navigator.vibrate(15);
+        }}
+      />
     </div>
   );
 }

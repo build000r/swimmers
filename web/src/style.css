@@ -779,3 +779,69 @@ html, body {
     padding: 8px 10px;
   }
 }
+
+/* ---- Raw Mode (secret debug view) ---- */
+
+.raw-mode-tap-zone {
+  position: absolute;
+  bottom: 0;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 80px;
+  height: 28px;
+  z-index: 10;
+  cursor: default;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.thronglet-raw {
+  position: absolute;
+  background: rgba(15, 26, 46, 0.92);
+  border: 1px solid #2a3a5c;
+  border-radius: 4px;
+  padding: 6px 8px;
+  font-family: "SF Mono", "Menlo", monospace;
+  font-size: 10px;
+  line-height: 1.5;
+  color: #b0c4de;
+  min-width: 140px;
+  max-width: 200px;
+  cursor: pointer;
+  z-index: 2;
+  transition: left 2s linear, top 2s linear;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.thronglet-raw .raw-state {
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin-bottom: 3px;
+  font-size: 11px;
+}
+
+.thronglet-raw .raw-state[data-state="idle"] { color: #4FC08D; }
+.thronglet-raw .raw-state[data-state="busy"] { color: #F5A623; }
+.thronglet-raw .raw-state[data-state="error"] { color: #E74C3C; }
+.thronglet-raw .raw-state[data-state="attention"] { color: #5BC0EB; }
+.thronglet-raw .raw-state[data-state="exited"] { color: #666; }
+
+.thronglet-raw .raw-row {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.thronglet-raw .raw-key {
+  color: #5a7a9a;
+  margin-right: 4px;
+}
+
+.thronglet-raw .raw-key::after {
+  content: ":";
+}
+
+.thronglet-raw .raw-stale {
+  color: #E74C3C;
+  font-weight: 700;
+}
