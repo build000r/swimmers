@@ -1,6 +1,7 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use chrono::Utc;
 use tokio::process::Command;
@@ -15,6 +16,10 @@ use crate::types::{
     ControlEvent, SessionState, SessionStatePayload, SessionSummary, TerminalSnapshot,
     TransportHealth,
 };
+
+const PROCESS_EXIT_REAP_INTERVAL: Duration = Duration::from_millis(250);
+const PROCESS_EXIT_DELETE_GRACE: Duration = Duration::from_millis(2_500);
+const PROCESS_EXIT_SUMMARY_TIMEOUT: Duration = Duration::from_millis(250);
 
 // ---------------------------------------------------------------------------
 // Lifecycle events broadcast to all listeners
@@ -63,6 +68,9 @@ pub struct SessionSupervisor {
 
     /// File-based persistence store, initialized after construction.
     persistence: RwLock<Option<Arc<FileStore>>>,
+
+    /// First-observed timestamps for sessions that have entered Exited state.
+    process_exit_seen_at: RwLock<HashMap<String, Instant>>,
 }
 
 impl SessionSupervisor {
@@ -78,6 +86,7 @@ impl SessionSupervisor {
             lifecycle_tx,
             thought_tx,
             persistence: RwLock::new(None),
+            process_exit_seen_at: RwLock::new(HashMap::new()),
         })
     }
 
@@ -85,6 +94,11 @@ impl SessionSupervisor {
     pub async fn init_persistence(self: &Arc<Self>, store: Arc<FileStore>) {
         let persisted = store.load_sessions().await;
         let thoughts = store.load_thoughts().await;
+
+        // Keep the ID counter ahead of any IDs we have ever persisted.
+        for ps in &persisted {
+            self.bump_id_counter_from_session_id(&ps.session_id);
+        }
 
         if !persisted.is_empty() {
             let mut stale = Vec::new();
@@ -134,97 +148,110 @@ impl SessionSupervisor {
             .output()
             .await;
 
-        let output = match output {
-            Ok(o) => o,
-            Err(e) => {
-                // tmux may not be running at all -- that's fine, no sessions to discover.
-                warn!("tmux list-sessions failed (tmux may not be running): {}", e);
-                return Ok(());
-            }
-        };
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            // "no server running" is normal when there are no sessions.
-            if stderr.contains("no server running") || stderr.contains("no sessions") {
-                info!("no existing tmux sessions found");
-                return Ok(());
-            }
-            warn!("tmux list-sessions returned error: {}", stderr);
-            return Ok(());
-        }
-
-        let stdout = String::from_utf8_lossy(&output.stdout);
+        let mut discovery_reliable = true;
         let mut highest_numeric: u64 = 0;
         let mut discovered_tmux_names: Vec<String> = Vec::new();
+        match output {
+            Ok(output) if output.status.success() => {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                for line in stdout.lines() {
+                    let tmux_name = line.trim().to_string();
+                    if tmux_name.is_empty() {
+                        continue;
+                    }
 
-        for line in stdout.lines() {
-            let tmux_name = line.trim().to_string();
-            if tmux_name.is_empty() {
-                continue;
-            }
+                    // Track the highest numeric name so our counter stays ahead.
+                    if let Ok(n) = tmux_name.parse::<u64>() {
+                        if n >= highest_numeric {
+                            highest_numeric = n + 1;
+                        }
+                    }
 
-            // Track the highest numeric name so our counter stays ahead.
-            if let Ok(n) = tmux_name.parse::<u64>() {
-                if n >= highest_numeric {
-                    highest_numeric = n + 1;
+                    discovered_tmux_names.push(tmux_name.clone());
+
+                    // Check if this tmux session matches a stale persisted session.
+                    let reuse_id = {
+                        let stale = self.stale_sessions.read().await;
+                        stale
+                            .iter()
+                            .find(|s| s.tmux_name == tmux_name)
+                            .map(|s| s.session_id.clone())
+                    };
+
+                    let session_id = match reuse_id {
+                        Some(id) => {
+                            // Reused IDs must also advance the counter so future creates
+                            // don't accidentally collide with restored sessions.
+                            self.bump_id_counter_from_session_id(&id);
+                            id
+                        }
+                        None => self.allocate_unique_session_id().await,
+                    };
+                    info!(
+                        session_id = %session_id,
+                        tmux_name = %tmux_name,
+                        "discovered existing tmux session"
+                    );
+
+                    match crate::session::actor::SessionActor::spawn(
+                        session_id.clone(),
+                        tmux_name.clone(),
+                        true, // attach to existing
+                        None,
+                        self.config.clone(),
+                    ) {
+                        Ok(handle) => {
+                            let mut sessions = self.sessions.write().await;
+                            sessions.insert(session_id.clone(), handle);
+
+                            // Broadcast lifecycle event.
+                            let summary = self.build_placeholder_summary(&session_id, &tmux_name);
+                            let _ = self.lifecycle_tx.send(LifecycleEvent::Created {
+                                session_id,
+                                summary,
+                                reason: "startup_discovery".into(),
+                            });
+                        }
+                        Err(e) => {
+                            error!(tmux_name = %tmux_name, "failed to attach to tmux session: {}", e);
+                        }
+                    }
                 }
             }
-
-            discovered_tmux_names.push(tmux_name.clone());
-
-            // Check if this tmux session matches a stale persisted session.
-            let reuse_id = {
-                let stale = self.stale_sessions.read().await;
-                stale
-                    .iter()
-                    .find(|s| s.tmux_name == tmux_name)
-                    .map(|s| s.session_id.clone())
-            };
-
-            let session_id = reuse_id.unwrap_or_else(|| self.allocate_session_id());
-            info!(session_id = %session_id, tmux_name = %tmux_name, "discovered existing tmux session");
-
-            match crate::session::actor::SessionActor::spawn(
-                session_id.clone(),
-                tmux_name.clone(),
-                true, // attach to existing
-                None,
-                self.config.clone(),
-            ) {
-                Ok(handle) => {
-                    let mut sessions = self.sessions.write().await;
-                    sessions.insert(session_id.clone(), handle);
-
-                    // Broadcast lifecycle event.
-                    let summary = self.build_placeholder_summary(&session_id, &tmux_name);
-                    let _ = self.lifecycle_tx.send(LifecycleEvent::Created {
-                        session_id,
-                        summary,
-                        reason: "startup_discovery".into(),
-                    });
+            Ok(output) => {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                // "no server running" / "no sessions" means tmux has no live sessions.
+                if stderr.contains("no server running") || stderr.contains("no sessions") {
+                    info!("no existing tmux sessions found");
+                } else {
+                    discovery_reliable = false;
+                    warn!("tmux list-sessions returned error: {}", stderr);
                 }
-                Err(e) => {
-                    error!(tmux_name = %tmux_name, "failed to attach to tmux session: {}", e);
-                }
+            }
+            Err(e) => {
+                discovery_reliable = false;
+                warn!("tmux list-sessions failed: {}", e);
             }
         }
 
         // Remove stale sessions that were upgraded to live.
-        // Emit session_state with exit_reason="startup_missing_tmux" for remaining stale sessions.
-        {
-            let mut stale = self.stale_sessions.write().await;
-            stale.retain(|s| !discovered_tmux_names.contains(&s.tmux_name));
-            if !stale.is_empty() {
+        // For sessions still missing from tmux, emit startup exit/deletion events
+        // and then drop them so bootstrap does not keep phantom entries forever.
+        if discovery_reliable {
+            let unresolved_stale = {
+                let mut stale = self.stale_sessions.write().await;
+                stale.retain(|s| !discovered_tmux_names.contains(&s.tmux_name));
+                let unresolved = stale.clone();
+                stale.clear();
+                unresolved
+            };
+
+            if !unresolved_stale.is_empty() {
                 debug!(
-                    remaining_stale = stale.len(),
+                    remaining_stale = unresolved_stale.len(),
                     "stale sessions after discovery"
                 );
-                for s in stale.iter() {
-                    // Broadcast session_state with exit_reason for already-connected
-                    // clients. Do NOT emit LifecycleEvent::Created for stale sessions
-                    // — they are already present in bootstrap payloads from persistence
-                    // and emitting Created would confuse client state machines.
+                for s in unresolved_stale {
                     let payload = SessionStatePayload {
                         state: SessionState::Exited,
                         previous_state: s.state,
@@ -239,8 +266,15 @@ impl SessionSupervisor {
                         payload: serde_json::to_value(&payload).unwrap_or_default(),
                     };
                     let _ = self.thought_tx.send(event);
+
+                    let _ = self.lifecycle_tx.send(LifecycleEvent::Deleted {
+                        session_id: s.session_id,
+                        reason: "startup_missing_tmux".to_string(),
+                    });
                 }
             }
+        } else {
+            warn!("skipping stale reconciliation due unreliable tmux discovery");
         }
 
         // Advance the name counter past any existing numeric names.
@@ -251,8 +285,11 @@ impl SessionSupervisor {
         crate::metrics::set_active_sessions(sessions.len());
         info!(count = sessions.len(), "tmux session discovery complete");
 
-        // Persist the current session registry.
-        self.persist_registry().await;
+        // Persist the current session registry only when discovery succeeded
+        // (or definitively found no tmux sessions).
+        if discovery_reliable {
+            self.persist_registry().await;
+        }
 
         Ok(())
     }
@@ -286,7 +323,7 @@ impl SessionSupervisor {
             }
         };
 
-        let session_id = self.allocate_session_id();
+        let session_id = self.allocate_unique_session_id().await;
 
         info!(session_id = %session_id, tmux_name = %tmux_name, "creating new session");
 
@@ -332,6 +369,7 @@ impl SessionSupervisor {
             crate::metrics::set_active_sessions(sessions.len());
             handle
         };
+        self.process_exit_seen_at.write().await.remove(session_id);
 
         info!(session_id = %session_id, "deleting session");
 
@@ -358,10 +396,13 @@ impl SessionSupervisor {
 
     /// List summaries for all active sessions.
     pub async fn list_sessions(&self) -> Vec<SessionSummary> {
-        let sessions = self.sessions.read().await;
-        let mut summaries = Vec::with_capacity(sessions.len());
+        let handles: Vec<ActorHandle> = {
+            let sessions = self.sessions.read().await;
+            sessions.values().cloned().collect()
+        };
+        let mut summaries = Vec::with_capacity(handles.len());
 
-        for (_, handle) in sessions.iter() {
+        for handle in handles {
             let (tx, rx) = oneshot::channel();
             if handle
                 .cmd_tx
@@ -370,7 +411,11 @@ impl SessionSupervisor {
                 .is_ok()
             {
                 match tokio::time::timeout(std::time::Duration::from_secs(2), rx).await {
-                    Ok(Ok(summary)) => summaries.push(summary),
+                    Ok(Ok(summary)) => {
+                        if summary.state != SessionState::Exited {
+                            summaries.push(summary);
+                        }
+                    }
                     Ok(Err(_)) => {
                         warn!(session_id = %handle.session_id, "actor dropped summary reply");
                     }
@@ -388,10 +433,21 @@ impl SessionSupervisor {
     /// (exited) sessions from persistence.
     pub async fn bootstrap(&self) -> Vec<SessionSummary> {
         let mut all = self.list_sessions().await;
+        let mut seen_ids: HashSet<String> = all.iter().map(|s| s.session_id.clone()).collect();
 
         // Append stale sessions that haven't been upgraded to live.
         let stale = self.stale_sessions.read().await;
-        all.extend(stale.iter().cloned());
+        for s in stale.iter() {
+            if !seen_ids.insert(s.session_id.clone()) {
+                warn!(
+                    session_id = %s.session_id,
+                    tmux_name = %s.tmux_name,
+                    "dropping duplicate stale session_id from bootstrap"
+                );
+                continue;
+            }
+            all.push(s.clone());
+        }
 
         all
     }
@@ -549,6 +605,19 @@ impl SessionSupervisor {
         });
     }
 
+    /// Spawn a background task that reaps exited sessions after a short grace
+    /// period so clients can animate state transitions before deletion.
+    pub fn spawn_process_exit_reaper(self: &Arc<Self>) {
+        let supervisor = self.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(PROCESS_EXIT_REAP_INTERVAL);
+            loop {
+                interval.tick().await;
+                supervisor.reap_exited_sessions().await;
+            }
+        });
+    }
+
     // -----------------------------------------------------------------------
     // Internals
     // -----------------------------------------------------------------------
@@ -556,6 +625,121 @@ impl SessionSupervisor {
     fn allocate_session_id(&self) -> String {
         let n = self.next_id_counter.fetch_add(1, Ordering::SeqCst);
         format!("sess_{}", n)
+    }
+
+    async fn allocate_unique_session_id(&self) -> String {
+        loop {
+            let candidate = self.allocate_session_id();
+
+            {
+                let sessions = self.sessions.read().await;
+                if sessions.contains_key(&candidate) {
+                    continue;
+                }
+            }
+
+            {
+                let stale = self.stale_sessions.read().await;
+                if stale.iter().any(|s| s.session_id == candidate) {
+                    continue;
+                }
+            }
+
+            return candidate;
+        }
+    }
+
+    fn bump_id_counter_from_session_id(&self, session_id: &str) {
+        if let Some(next) = next_session_counter(session_id) {
+            self.next_id_counter.fetch_max(next, Ordering::SeqCst);
+        }
+    }
+
+    async fn collect_exited_session_ids(&self, timeout: Duration) -> HashSet<String> {
+        let handles: Vec<ActorHandle> = {
+            let sessions = self.sessions.read().await;
+            sessions.values().cloned().collect()
+        };
+
+        let mut exited_ids = HashSet::new();
+        for handle in handles {
+            let (tx, rx) = oneshot::channel();
+            if handle
+                .cmd_tx
+                .send(SessionCommand::GetSummary(tx))
+                .await
+                .is_err()
+            {
+                continue;
+            }
+            match tokio::time::timeout(timeout, rx).await {
+                Ok(Ok(summary)) if summary.state == SessionState::Exited => {
+                    exited_ids.insert(summary.session_id);
+                }
+                Ok(Ok(_)) => {}
+                Ok(Err(_)) => {
+                    debug!(
+                        session_id = %handle.session_id,
+                        "reaper summary channel dropped"
+                    );
+                }
+                Err(_) => {
+                    debug!(
+                        session_id = %handle.session_id,
+                        "reaper summary request timed out"
+                    );
+                }
+            }
+        }
+
+        exited_ids
+    }
+
+    async fn reap_exited_sessions(&self) {
+        let exited_ids = self
+            .collect_exited_session_ids(PROCESS_EXIT_SUMMARY_TIMEOUT)
+            .await;
+        let now = Instant::now();
+        let ready = {
+            let mut seen = self.process_exit_seen_at.write().await;
+            ready_process_exit_ids(&mut seen, &exited_ids, now, PROCESS_EXIT_DELETE_GRACE)
+        };
+        if ready.is_empty() {
+            return;
+        }
+
+        let removed: Vec<ActorHandle> = {
+            let mut sessions = self.sessions.write().await;
+            let mut removed = Vec::with_capacity(ready.len());
+            for session_id in &ready {
+                if let Some(handle) = sessions.remove(session_id) {
+                    removed.push(handle);
+                }
+            }
+            crate::metrics::set_active_sessions(sessions.len());
+            removed
+        };
+
+        if removed.is_empty() {
+            return;
+        }
+
+        {
+            let mut seen = self.process_exit_seen_at.write().await;
+            for handle in &removed {
+                seen.remove(&handle.session_id);
+            }
+        }
+
+        for handle in removed {
+            let _ = handle.cmd_tx.send(SessionCommand::Shutdown).await;
+            let _ = self.lifecycle_tx.send(LifecycleEvent::Deleted {
+                session_id: handle.session_id,
+                reason: "process_exit".to_string(),
+            });
+        }
+
+        self.persist_registry().await;
     }
 
     /// Build a minimal placeholder summary. The real summary comes from the
@@ -621,4 +805,92 @@ fn current_working_dir() -> Option<String> {
     std::env::current_dir()
         .ok()
         .map(|p| p.to_string_lossy().into_owned())
+}
+
+fn next_session_counter(session_id: &str) -> Option<u64> {
+    let n = session_id.strip_prefix("sess_")?.parse::<u64>().ok()?;
+    Some(n.saturating_add(1))
+}
+
+fn ready_process_exit_ids(
+    seen: &mut HashMap<String, Instant>,
+    exited_ids: &HashSet<String>,
+    now: Instant,
+    grace: Duration,
+) -> Vec<String> {
+    seen.retain(|session_id, _| exited_ids.contains(session_id));
+    for session_id in exited_ids {
+        seen.entry(session_id.clone()).or_insert(now);
+    }
+
+    seen.iter()
+        .filter_map(|(session_id, first_seen)| {
+            (now.duration_since(*first_seen) >= grace).then(|| session_id.clone())
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::iter::FromIterator;
+
+    #[test]
+    fn next_session_counter_parses_expected_format() {
+        assert_eq!(next_session_counter("sess_0"), Some(1));
+        assert_eq!(next_session_counter("sess_41"), Some(42));
+    }
+
+    #[test]
+    fn next_session_counter_rejects_unexpected_format() {
+        assert_eq!(next_session_counter("session_1"), None);
+        assert_eq!(next_session_counter("sess_not_a_number"), None);
+        assert_eq!(next_session_counter(""), None);
+    }
+
+    #[test]
+    fn ready_process_exit_ids_waits_for_grace_period() {
+        let mut seen = HashMap::new();
+        let exited = HashSet::from_iter(["sess_1".to_string()]);
+        let start = Instant::now();
+
+        let before = ready_process_exit_ids(&mut seen, &exited, start, Duration::from_secs(2));
+        assert!(before.is_empty());
+
+        let near = ready_process_exit_ids(
+            &mut seen,
+            &exited,
+            start + Duration::from_millis(1_999),
+            Duration::from_secs(2),
+        );
+        assert!(near.is_empty());
+
+        let after = ready_process_exit_ids(
+            &mut seen,
+            &exited,
+            start + Duration::from_secs(2),
+            Duration::from_secs(2),
+        );
+        assert_eq!(after, vec!["sess_1".to_string()]);
+    }
+
+    #[test]
+    fn ready_process_exit_ids_drops_recovered_sessions() {
+        let mut seen = HashMap::new();
+        let exited = HashSet::from_iter(["sess_1".to_string()]);
+        let start = Instant::now();
+
+        let _ = ready_process_exit_ids(&mut seen, &exited, start, Duration::from_secs(2));
+        assert!(seen.contains_key("sess_1"));
+
+        let none = HashSet::new();
+        let ready = ready_process_exit_ids(
+            &mut seen,
+            &none,
+            start + Duration::from_secs(10),
+            Duration::from_secs(2),
+        );
+        assert!(ready.is_empty());
+        assert!(!seen.contains_key("sess_1"));
+    }
 }

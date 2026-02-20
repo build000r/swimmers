@@ -56,19 +56,16 @@ async fn main() {
         }
     }
 
-    // Auto-discover existing tmux sessions (upgrades stale sessions).
-    {
-        let supervisor = supervisor.clone();
-        tokio::spawn(async move {
-            match supervisor.discover_tmux_sessions().await {
-                Ok(()) => tracing::info!("tmux session discovery complete"),
-                Err(e) => tracing::error!("tmux discovery failed: {e}"),
-            }
-        });
+    // Auto-discover existing tmux sessions (upgrades stale sessions) before
+    // serving requests, so bootstrap doesn't race against startup discovery.
+    match supervisor.discover_tmux_sessions().await {
+        Ok(()) => tracing::info!("tmux session discovery complete"),
+        Err(e) => tracing::error!("tmux discovery failed: {e}"),
     }
 
     // Start periodic persistence checkpoint (every 30s).
     supervisor.spawn_persistence_checkpoint();
+    supervisor.spawn_process_exit_reaper();
 
     // Start thought generation loop.
     {
