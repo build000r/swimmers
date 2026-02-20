@@ -260,6 +260,52 @@ describe("RealtimeService", () => {
   });
 
   describe("control messages", () => {
+    it("queues subscriptions before open and sends one subscribe on connect", () => {
+      const sent: string[] = [];
+      mockWs.send = (data: any) => sent.push(String(data));
+
+      service.subscribeSession("sess-001");
+      service.subscribeSession("sess-001");
+      service.subscribeSession("sess-001");
+
+      mockWs.readyState = WebSocket.OPEN;
+      mockWs.onopen?.(new Event("open"));
+
+      const subscribeMessages = sent
+        .map((raw) => JSON.parse(raw))
+        .filter((msg) => msg.type === "subscribe_session");
+      expect(subscribeMessages).toHaveLength(1);
+      expect(subscribeMessages[0].payload.session_id).toBe("sess-001");
+    });
+
+    it("dedupes repeated subscribe_session while already subscribed", () => {
+      const sent: string[] = [];
+      mockWs.readyState = WebSocket.OPEN;
+      mockWs.send = (data: any) => sent.push(String(data));
+      mockWs.onopen?.(new Event("open"));
+
+      service.subscribeSession("sess-001", 0);
+      service.subscribeSession("sess-001", 0);
+
+      // Server acknowledges the active subscription.
+      const subscribed = buildControlEvent("session_subscription", "sess-001", {
+        state: "subscribed",
+        resume_from_seq: 0,
+        latest_seq: 0,
+        replay_window_start_seq: 0,
+        at: "2026-02-20T00:00:00Z",
+      });
+      mockWs.onmessage?.({ data: subscribed } as MessageEvent);
+
+      // A duplicate call should be ignored client-side.
+      service.subscribeSession("sess-001", 0);
+
+      const subscribeMessages = sent
+        .map((raw) => JSON.parse(raw))
+        .filter((msg) => msg.type === "subscribe_session");
+      expect(subscribeMessages).toHaveLength(1);
+    });
+
     it("sends unsubscribe_session JSON control message", () => {
       const sent: string[] = [];
       mockWs.readyState = WebSocket.OPEN;

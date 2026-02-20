@@ -183,11 +183,25 @@ export function ZoneManager({
     }
 
     const now = Date.now();
-    setMainZone(mainSessionId ? { sessionId: mainSessionId, age: now } : null);
-    setBottomZone(
-      bottomSessionId ? { sessionId: bottomSessionId, age: now + 1 } : null,
+    const clampedSplitRatio = Math.max(0.2, Math.min(0.8, restoreRequest.splitRatio));
+
+    setMainZone((prev) => {
+      const prevSessionId = prev?.sessionId ?? null;
+      const nextSessionId = mainSessionId ?? null;
+      if (prevSessionId === nextSessionId) return prev;
+      return nextSessionId ? { sessionId: nextSessionId, age: now } : null;
+    });
+
+    setBottomZone((prev) => {
+      const prevSessionId = prev?.sessionId ?? null;
+      const nextSessionId = bottomSessionId ?? null;
+      if (prevSessionId === nextSessionId) return prev;
+      return nextSessionId ? { sessionId: nextSessionId, age: now + 1 } : null;
+    });
+
+    setSplitRatio((prev) =>
+      Math.abs(prev - clampedSplitRatio) < 0.0001 ? prev : clampedSplitRatio,
     );
-    setSplitRatio(Math.max(0.2, Math.min(0.8, restoreRequest.splitRatio)));
   }, [restoreRequest?.requestId, sessions, onShowOverview]);
 
   // ---- Close zones ----

@@ -75,6 +75,9 @@ export class RealtimeService {
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private intentionalClose = false;
   private _health: TransportHealth = "disconnected";
+  private desiredSessionSubscriptions = new Map<string, number | null>();
+  private pendingSessionSubscriptions = new Set<string>();
+  private activeSessionSubscriptions = new Set<string>();
 
   get health(): TransportHealth {
     return this._health;
@@ -146,16 +149,30 @@ export class RealtimeService {
   // ---- Client -> Server: JSON control messages ----
 
   subscribeSession(sessionId: string, resumeFromSeq?: number): void {
-    this.sendJson({
-      type: "subscribe_session",
-      payload: {
-        session_id: sessionId,
-        resume_from_seq: resumeFromSeq ?? null,
-      },
-    });
+    const normalizedResume =
+      typeof resumeFromSeq === "number" && Number.isFinite(resumeFromSeq)
+        ? Math.max(0, Math.floor(resumeFromSeq))
+        : null;
+    const previousResume = this.desiredSessionSubscriptions.get(sessionId);
+    const mergedResume = this.mergeResume(previousResume, normalizedResume);
+    this.desiredSessionSubscriptions.set(sessionId, mergedResume);
+
+    // Idempotence: if this session is already active (or subscribe is in-flight)
+    // don't re-send another subscribe request.
+    if (
+      this.activeSessionSubscriptions.has(sessionId) ||
+      this.pendingSessionSubscriptions.has(sessionId)
+    ) {
+      return;
+    }
+
+    this.sendSubscribeSession(sessionId, mergedResume);
   }
 
   unsubscribeSession(sessionId: string): void {
+    this.desiredSessionSubscriptions.delete(sessionId);
+    this.pendingSessionSubscriptions.delete(sessionId);
+    this.activeSessionSubscriptions.delete(sessionId);
     this.sendJson({
       type: "unsubscribe_session",
       payload: { session_id: sessionId },
@@ -206,6 +223,13 @@ export class RealtimeService {
     ws.onopen = () => {
       this.reconnectMs = INITIAL_RECONNECT_MS;
       this.setHealth("healthy");
+      this.pendingSessionSubscriptions.clear();
+      this.activeSessionSubscriptions.clear();
+
+      // Rehydrate desired subscriptions after transport reconnects.
+      for (const [sessionId, resumeFromSeq] of this.desiredSessionSubscriptions) {
+        this.sendSubscribeSession(sessionId, resumeFromSeq);
+      }
     };
 
     ws.onmessage = (ev: MessageEvent) => {
@@ -218,6 +242,8 @@ export class RealtimeService {
 
     ws.onclose = () => {
       this.setHealth("disconnected");
+      this.pendingSessionSubscriptions.clear();
+      this.activeSessionSubscriptions.clear();
       if (!this.intentionalClose) {
         this.scheduleReconnect();
       }
@@ -241,6 +267,31 @@ export class RealtimeService {
   private sendJson(msg: unknown): void {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
     this.ws.send(JSON.stringify(msg));
+  }
+
+  private sendSubscribeSession(
+    sessionId: string,
+    resumeFromSeq: number | null,
+  ): void {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+    this.pendingSessionSubscriptions.add(sessionId);
+    this.sendJson({
+      type: "subscribe_session",
+      payload: {
+        session_id: sessionId,
+        resume_from_seq: resumeFromSeq,
+      },
+    });
+  }
+
+  private mergeResume(
+    currentResume: number | null | undefined,
+    nextResume: number | null,
+  ): number | null {
+    if (currentResume === undefined) return nextResume;
+    if (currentResume === null) return nextResume;
+    if (nextResume === null) return currentResume;
+    return Math.max(currentResume, nextResume);
   }
 
   private handleBinary(buf: Uint8Array): void {
@@ -328,6 +379,13 @@ export class RealtimeService {
       case "session_subscription":
         {
           const typed = payload as SessionSubscriptionPayload;
+          if (typed.state === "subscribed") {
+            this.pendingSessionSubscriptions.delete(session_id);
+            this.activeSessionSubscriptions.add(session_id);
+          } else {
+            this.pendingSessionSubscriptions.delete(session_id);
+            this.activeSessionSubscriptions.delete(session_id);
+          }
           this.callbacks.onSessionSubscription?.(session_id, typed);
           for (const listener of this.sessionSubscriptionListeners) {
             listener(session_id, typed);
