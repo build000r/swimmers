@@ -26,6 +26,7 @@ describe("idle preview bubble override", () => {
       session_id: "sess-001",
       state: "idle",
       thought: "thinking through next steps",
+      tool: "Claude Code",
     });
 
     render(
@@ -48,6 +49,7 @@ describe("idle preview bubble override", () => {
       state: "busy",
       thought: null,
       current_command: "npm test",
+      tool: "Claude Code",
     });
 
     render(
@@ -70,6 +72,7 @@ describe("idle preview bubble override", () => {
       state: "busy",
       thought: "first thought",
       current_command: null,
+      tool: "Claude Code",
     });
 
     const { rerender } = render(

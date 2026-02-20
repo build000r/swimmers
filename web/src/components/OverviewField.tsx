@@ -73,7 +73,9 @@ function ThrongletEntity({
   const exitingRef = useRef(false);
   const prevToolRef = useRef<string | null>(session.tool);
   const [isHatching, setIsHatching] = useState(false);
-  const isEgg = !session.tool && !isHatching;
+  const isExited = session.state === "exited";
+  const isEgg = !isExited && !session.tool && !isHatching;
+  const showEggSprite = !isExited && (isEgg || isHatching);
   const lastBubbleRef = useRef<{
     text: string;
     isIdlePreview: boolean;
@@ -303,7 +305,7 @@ function ThrongletEntity({
   return (
     <div
       ref={elRef}
-      class={`thronglet ${isEgg ? "egg" : isHatching ? "hatching-reveal" : session.state}`}
+      class={`thronglet ${isExited ? "exited" : isEgg ? "egg" : isHatching ? "hatching-reveal" : session.state}`}
       style={{
         "--thronglet-size": `${throngletSize}px`,
         left: posRef.current.x + "px",
@@ -333,7 +335,7 @@ function ThrongletEntity({
       onDragStart={(e: Event) => e.preventDefault()}
     >
       {/* Egg sprite for unhatched / hatching sessions */}
-      {(isEgg || isHatching) && (
+      {showEggSprite && (
         <img
           class="egg-idle-sprite"
           src="/assets/egg.png"

@@ -338,22 +338,40 @@ html, body {
   letter-spacing: 0.3px;
 }
 
+/* Pixel HP bar */
 .context-gauge {
-  width: 60px;
-  height: 4px;
-  background: rgba(0,0,0,0.2);
-  border-radius: 2px;
-  margin-top: 2px;
+  width: 50px;
+  height: 7px;
+  background: #1a1a2e;
+  border: 1px solid #0d1117;
+  margin: 3px auto 0;
   overflow: hidden;
-  display: none;
+  image-rendering: pixelated;
+  image-rendering: crisp-edges;
 }
 
 .context-gauge-fill {
+  --gauge-color: #4FC08D;
+  --gauge-segments: 8;
   height: 100%;
-  width: 0%;
-  background: #4FC08D;
-  border-radius: 2px;
-  transition: width 1s ease;
+  width: calc(var(--gauge-segments) * 12.5%);
+  transition: width 1.5s ease;
+  background: repeating-linear-gradient(
+    90deg,
+    var(--gauge-color) 0px,
+    var(--gauge-color) 4px,
+    #0d1117 4px,
+    #0d1117 6px
+  );
+}
+
+.context-gauge.critical .context-gauge-fill {
+  animation: gauge-critical 1.8s ease-in-out infinite;
+}
+
+@keyframes gauge-critical {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.45; }
 }
 
 .thronglet-activity {
@@ -544,15 +562,6 @@ html, body {
   animation: egg-wobble 0.4s ease-in-out 2;
 }
 
-.hatching-egg .egg-sprite.hatching {
-  animation: egg-hatch 0.4s ease-in forwards;
-}
-
-.hatching-egg .hatch-sprite {
-  position: absolute;
-  animation: hatch-appear 0.4s ease-out forwards;
-}
-
 @keyframes egg-drop {
   0% { transform: translateY(-100px) scale(0.5); opacity: 0; }
   60% { transform: translateY(10px) scale(1); opacity: 1; }
@@ -566,14 +575,57 @@ html, body {
   75% { transform: rotate(8deg); }
 }
 
-@keyframes egg-hatch {
-  0% { transform: scale(1); opacity: 1; }
-  100% { transform: scale(0.3); opacity: 0; }
+/* ---- Egg state on ThrongletEntity (tool not yet detected) ---- */
+
+.thronglet.egg .egg-idle-sprite {
+  display: block;
+  width: var(--thronglet-size);
+  height: var(--thronglet-size);
+  object-fit: contain;
+  image-rendering: pixelated;
+  image-rendering: crisp-edges;
+  animation: egg-idle-bob 2.5s ease-in-out infinite;
 }
 
-@keyframes hatch-appear {
-  0% { transform: scale(0.3); opacity: 0; }
-  100% { transform: scale(1); opacity: 1; }
+/* Egg hides sprite/bubble/tool via conditional JSX rendering
+   (inline styles on ThrongletSprite override CSS display:none) */
+
+@keyframes egg-idle-bob {
+  0%, 100% { transform: translateY(0) rotate(0); }
+  25% { transform: translateY(-4px) rotate(-2deg); }
+  75% { transform: translateY(-2px) rotate(2deg); }
+}
+
+/* ---- Hatch-reveal: egg pops out, THEN creature bounces in ---- */
+
+.thronglet.hatching-reveal .egg-idle-sprite {
+  display: block;
+  width: var(--thronglet-size);
+  height: var(--thronglet-size);
+  object-fit: contain;
+  image-rendering: pixelated;
+  image-rendering: crisp-edges;
+  animation: egg-pop-out 0.35s ease-in forwards;
+}
+
+.thronglet.hatching-reveal .thronglet-sprite {
+  opacity: 0;
+  transform: scale(0);
+  animation: creature-emerge 0.5s ease-out 0.3s forwards;
+}
+
+@keyframes egg-pop-out {
+  0% { transform: scale(1); opacity: 1; }
+  40% { transform: scale(1.2) rotate(-8deg); }
+  70% { transform: scale(1.3) rotate(5deg); }
+  100% { transform: scale(0); opacity: 0; }
+}
+
+@keyframes creature-emerge {
+  0% { opacity: 0; transform: scale(0); }
+  50% { opacity: 1; transform: scale(1.2); }
+  75% { opacity: 1; transform: scale(0.9); }
+  100% { opacity: 1; transform: scale(1); }
 }
 
 /* ---- Spawn Menu ---- */
