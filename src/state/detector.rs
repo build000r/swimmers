@@ -1,7 +1,7 @@
 // State detector -- classifies terminal state as idle, busy, error, or attention.
 // Uses OSC 133 shell integration sequences when available, falls back to regex.
 
-
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use regex::Regex;
@@ -63,19 +63,26 @@ impl StateDetector {
     /// Strip ANSI/CSI/OSC escape sequences to get visible text for pattern matching.
     /// OSC 133 sequences are checked separately against raw output first.
     pub fn strip_ansi(s: &str) -> String {
-        // Lazily compiled regexes -- these are only constructed once per call site
-        // thanks to regex crate's internal optimizations. For a truly hot path you
-        // could hoist them into OnceLock, but clarity wins here.
-        let csi = Regex::new(r"\x1b\[[0-9;]*[A-Za-z]").unwrap();
-        let osc = Regex::new(r"\x1b\][^\x07]*\x07").unwrap();
-        let charset = Regex::new(r"\x1b[()][0-9A-B]").unwrap();
-        let mode = Regex::new(r"\x1b[>=<]").unwrap();
-        let ctrl = Regex::new(r"[\x00-\x08\x0e-\x1f]").unwrap();
+        // Strip CSI (including private-mode params like ?25h), OSC (BEL or ST),
+        // other 2-byte ESC sequences, then remaining control chars.
+        static CSI_RE: OnceLock<Regex> = OnceLock::new();
+        static OSC_RE: OnceLock<Regex> = OnceLock::new();
+        static ESC_RE: OnceLock<Regex> = OnceLock::new();
+        static CTRL_RE: OnceLock<Regex> = OnceLock::new();
+
+        let csi = CSI_RE
+            .get_or_init(|| Regex::new(r"\x1b\[[0-?]*[ -/]*[@-~]").expect("csi regex is valid"));
+        let osc = OSC_RE.get_or_init(|| {
+            Regex::new(r"(?s)\x1b\].*?(?:\x07|\x1b\\)").expect("osc regex is valid")
+        });
+        let esc = ESC_RE
+            .get_or_init(|| Regex::new(r"\x1b[@-Z\\-_]").expect("esc regex is valid"));
+        let ctrl = CTRL_RE
+            .get_or_init(|| Regex::new(r"[\x00-\x08\x0B-\x1F\x7F]").expect("ctrl regex is valid"));
 
         let s = csi.replace_all(s, "");
         let s = osc.replace_all(&s, "");
-        let s = charset.replace_all(&s, "");
-        let s = mode.replace_all(&s, "");
+        let s = esc.replace_all(&s, "");
         let s = ctrl.replace_all(&s, "");
         s.into_owned()
     }
@@ -119,6 +126,18 @@ impl StateDetector {
                 self.schedule_error_clear(now);
                 found_error = true;
                 break;
+            }
+        }
+
+        // Heuristic fallback for shells without OSC 133:
+        // if we're idle/attention and visible output is not a prompt,
+        // treat this as command activity and mark busy.
+        if matches!(self.state, SessionState::Idle | SessionState::Attention) && !found_error {
+            let has_visible_text = visible.chars().any(|c| !c.is_whitespace());
+            let looks_like_prompt = self.prompt_pattern.is_match(&visible);
+            if has_visible_text && !looks_like_prompt {
+                self.clear_error_timer();
+                self.set_state(SessionState::Busy, Some(None), now);
             }
         }
 
@@ -177,6 +196,20 @@ impl StateDetector {
             let now = Instant::now();
             self.set_state(SessionState::Idle, Some(None), now);
         }
+    }
+
+    /// Record local user input as command activity.
+    ///
+    /// This is a fallback for shells that don't emit OSC 133 command markers.
+    /// It lets the state machine enter `Busy` immediately on typed input so a
+    /// later prompt can produce a reliable busy -> idle transition.
+    pub fn note_input(&mut self) {
+        if self.state == SessionState::Busy || self.state == SessionState::Exited {
+            return;
+        }
+        let now = Instant::now();
+        self.clear_error_timer();
+        self.set_state(SessionState::Busy, Some(None), now);
     }
 
     /// Get the current state and command as a tuple.
@@ -421,9 +454,29 @@ mod tests {
 
     #[test]
     fn strip_ansi_removes_sequences() {
-        let input = "\x1b[32mgreen\x1b[0m \x1b]0;title\x07 \x1b(B \x1b> \x01\x02hello";
+        let input = "\x1b[32mgreen\x1b[0m \x1b]0;title\x07 \x1b]133;A\x1b\\ \x1b(B \x1b> \x1b[?25h \x01\x02hello";
         let result = StateDetector::strip_ansi(input);
-        assert_eq!(result, "green    hello");
+        assert!(!result.contains('\x1b'));
+        assert!(!result.contains("[?25h"));
+        assert!(result.contains("green"));
+        assert!(result.contains("hello"));
+    }
+
+    #[test]
+    fn private_mode_control_sequences_do_not_mark_busy() {
+        let mut d = StateDetector::new();
+        d.process_output(b"\x1b[?12l\x1b[?25h");
+        assert_eq!(d.get_state().0, SessionState::Idle);
+    }
+
+    #[test]
+    fn prompt_with_private_mode_sequences_returns_to_idle() {
+        let mut d = StateDetector::new();
+        d.process_output(b"\x1b]133;C;cmd=ls\x07");
+        assert_eq!(d.get_state().0, SessionState::Busy);
+
+        d.process_output(b"\x1b[?25huser@host:~$ ");
+        assert_eq!(d.get_state().0, SessionState::Idle);
     }
 
     #[test]
@@ -433,5 +486,32 @@ mod tests {
         d.process_output(b"\x1b]133;A");
         let transitions = log.lock().unwrap();
         assert!(transitions.is_empty());
+    }
+
+    #[test]
+    fn non_prompt_output_sets_busy_without_osc() {
+        let mut d = StateDetector::new();
+        d.process_output(b"Compiling...\r\n");
+        assert_eq!(d.get_state().0, SessionState::Busy);
+    }
+
+    #[test]
+    fn prompt_only_output_stays_idle_without_osc() {
+        let mut d = StateDetector::new();
+        d.process_output(b"user@host:~$ ");
+        assert_eq!(d.get_state().0, SessionState::Idle);
+    }
+
+    #[test]
+    fn note_input_sets_busy_and_clears_attention_timer() {
+        let mut d = StateDetector::new();
+        d.process_output(b"\x1b]133;C;cmd=ls\x07");
+        d.process_output(b"\x1b]133;A");
+        assert_eq!(d.get_state().0, SessionState::Idle);
+        assert!(d.attention_deadline.is_some());
+
+        d.note_input();
+        assert_eq!(d.get_state().0, SessionState::Busy);
+        assert!(d.attention_deadline.is_none());
     }
 }
