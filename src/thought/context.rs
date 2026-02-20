@@ -37,13 +37,28 @@ pub trait ContextReader: Send + Sync {
     /// Read new data from the JSONL file and return a snapshot, or `None` if
     /// nothing has changed since the last call.
     fn read(&mut self) -> Option<ContextSnapshot>;
+
+    /// Return the file path currently claimed by this reader, if any.
+    /// Used by the thought loop to prevent multiple readers from reading
+    /// the same JSONL file when sessions share a working directory.
+    fn claimed_path(&self) -> Option<PathBuf> {
+        None
+    }
 }
 
 /// Factory: build the right reader for a detected tool.
-pub fn context_reader_for(tool: &str, cwd: &str) -> Option<Box<dyn ContextReader>> {
+///
+/// `excluded` contains file paths already claimed by other readers.
+/// Readers must skip these during file discovery to avoid two sessions
+/// reading the same JSONL file (which causes thoughts to cross-contaminate).
+pub fn context_reader_for(
+    tool: &str,
+    cwd: &str,
+    excluded: &[PathBuf],
+) -> Option<Box<dyn ContextReader>> {
     match tool {
-        "Claude Code" => Some(Box::new(ClaudeCodeReader::new(cwd))),
-        "Codex" => Some(Box::new(CodexReader::new(cwd))),
+        "Claude Code" => Some(Box::new(ClaudeCodeReader::new(cwd, excluded))),
+        "Codex" => Some(Box::new(CodexReader::new(cwd, excluded))),
         _ => None,
     }
 }
@@ -96,10 +111,13 @@ pub struct ClaudeCodeReader {
     bootstrapped: bool,
     /// Most recent input_tokens from assistant message usage.
     token_count: u64,
+    /// File paths claimed by other readers — skip these during discovery
+    /// to avoid two sessions reading the same JSONL file.
+    excluded_paths: Vec<PathBuf>,
 }
 
 impl ClaudeCodeReader {
-    pub fn new(cwd: &str) -> Self {
+    pub fn new(cwd: &str, excluded: &[PathBuf]) -> Self {
         Self {
             cwd: cwd.to_string(),
             file_path: None,
@@ -109,10 +127,12 @@ impl ClaudeCodeReader {
             current_tool: None,
             bootstrapped: false,
             token_count: 0,
+            excluded_paths: excluded.to_vec(),
         }
     }
 
-    /// Discover the most recently modified JSONL file in the project dir.
+    /// Discover the most recently modified JSONL file in the project dir,
+    /// skipping files already claimed by other readers.
     fn discover_file(&self) -> Option<PathBuf> {
         let home = dirs_home()?;
         let cwd_slug = self.cwd.replace('/', "-");
@@ -122,6 +142,7 @@ impl ClaudeCodeReader {
         let mut files: Vec<(PathBuf, std::time::SystemTime)> = entries
             .filter_map(|e| e.ok())
             .filter(|e| e.path().extension().map_or(false, |ext| ext == "jsonl"))
+            .filter(|e| !self.excluded_paths.contains(&e.path()))
             .filter_map(|e| {
                 let md = e.metadata().ok()?;
                 let mtime = md.modified().ok()?;
@@ -223,7 +244,16 @@ impl ClaudeCodeReader {
 
 impl ContextReader for ClaudeCodeReader {
     fn read(&mut self) -> Option<ContextSnapshot> {
-        let file_path = self.discover_file()?;
+        // Stick with our current file if it exists; only discover on first
+        // call or after the file is deleted.  This prevents two readers with
+        // the same cwd from flip-flopping onto the same JSONL file each tick.
+        let file_path = match self.file_path.clone() {
+            Some(p) if p.exists() => p,
+            _ => {
+                self.file_path = None;
+                self.discover_file()?
+            }
+        };
 
         let stat = fs::metadata(&file_path).ok()?;
         let current_size = stat.len();
@@ -280,6 +310,10 @@ impl ContextReader for ClaudeCodeReader {
             token_count: self.token_count,
         })
     }
+
+    fn claimed_path(&self) -> Option<PathBuf> {
+        self.file_path.clone()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -297,10 +331,13 @@ pub struct CodexReader {
     current_tool: Option<AgentAction>,
     bootstrapped: bool,
     token_count: u64,
+    /// File paths claimed by other readers — skip these during discovery
+    /// to avoid two sessions reading the same JSONL file.
+    excluded_paths: Vec<PathBuf>,
 }
 
 impl CodexReader {
-    pub fn new(cwd: &str) -> Self {
+    pub fn new(cwd: &str, excluded: &[PathBuf]) -> Self {
         Self {
             cwd: cwd.to_string(),
             file_path: None,
@@ -310,6 +347,7 @@ impl CodexReader {
             current_tool: None,
             bootstrapped: false,
             token_count: 0,
+            excluded_paths: excluded.to_vec(),
         }
     }
 
@@ -340,6 +378,9 @@ impl CodexReader {
                     files.reverse();
 
                     for f in files {
+                        if self.excluded_paths.contains(&f) {
+                            continue;
+                        }
                         if self.matches_cwd(&f) {
                             return Some(f);
                         }
@@ -551,6 +592,10 @@ impl ContextReader for CodexReader {
             token_count: self.token_count,
         })
     }
+
+    fn claimed_path(&self) -> Option<PathBuf> {
+        self.file_path.clone()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -656,8 +701,8 @@ mod tests {
 
     #[test]
     fn context_reader_for_known_tools() {
-        assert!(context_reader_for("Claude Code", "/tmp").is_some());
-        assert!(context_reader_for("Codex", "/tmp").is_some());
-        assert!(context_reader_for("Unknown", "/tmp").is_none());
+        assert!(context_reader_for("Claude Code", "/tmp", &[]).is_some());
+        assert!(context_reader_for("Codex", "/tmp", &[]).is_some());
+        assert!(context_reader_for("Unknown", "/tmp", &[]).is_none());
     }
 }

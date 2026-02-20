@@ -47,6 +47,32 @@ function parseIsoMs(value: string): number | null {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
+function pickPreferredSession(
+  current: SessionSummary,
+  candidate: SessionSummary,
+): SessionSummary {
+  if (current.is_stale !== candidate.is_stale) {
+    return current.is_stale ? candidate : current;
+  }
+  const currentMs = parseIsoMs(current.last_activity_at) ?? 0;
+  const candidateMs = parseIsoMs(candidate.last_activity_at) ?? 0;
+  return candidateMs >= currentMs ? candidate : current;
+}
+
+function dedupeSessionsById(items: SessionSummary[]): SessionSummary[] {
+  if (items.length < 2) return items;
+  const byId = new Map<string, SessionSummary>();
+  for (const session of items) {
+    const existing = byId.get(session.session_id);
+    if (!existing) {
+      byId.set(session.session_id, session);
+      continue;
+    }
+    byId.set(session.session_id, pickPreferredSession(existing, session));
+  }
+  return Array.from(byId.values());
+}
+
 function stripTerminalEscapes(raw: string): string {
   const noOsc = raw.replace(/\x1b\][^\x07]*(?:\x07|\x1b\\)/g, "");
   const noCsi = noOsc.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "");
@@ -113,7 +139,8 @@ function mergePollSessions(
 
   const prevById = new Map(prevActive.map((s) => [s.session_id, s]));
 
-  // Check if anything actually changed
+  // Check if anything actually changed (ignore thought/token_count/context_limit
+  // — REST doesn't populate these; they come from WebSocket thought_update)
   if (
     prevActive.length === nextActive.length &&
     nextActive.every((s, i) => {
@@ -122,9 +149,6 @@ function mergePollSessions(
         old &&
         old.session_id === s.session_id &&
         old.state === s.state &&
-        old.thought === s.thought &&
-        old.token_count === s.token_count &&
-        old.context_limit === s.context_limit &&
         old.current_command === s.current_command &&
         old.cwd === s.cwd &&
         old.tool === s.tool
@@ -140,17 +164,20 @@ function mergePollSessions(
     if (!old) return s;
     if (
       old.state === s.state &&
-      old.thought === s.thought &&
-      old.token_count === s.token_count &&
-      old.context_limit === s.context_limit &&
       old.current_command === s.current_command &&
       old.cwd === s.cwd &&
       old.tool === s.tool
     ) {
       return old; // Preserve reference — avoids re-rendering this thronglet
     }
-    // Keep local last_activity_at to prevent spurious sprite changes
-    return { ...s, last_activity_at: old.last_activity_at };
+    // Preserve WebSocket-enriched fields that REST doesn't populate
+    return {
+      ...s,
+      last_activity_at: old.last_activity_at,
+      token_count: s.token_count || old.token_count,
+      context_limit: s.context_limit || old.context_limit,
+      thought: s.thought ?? old.thought,
+    };
   });
 
   return localExiting.length > 0 ? [...merged, ...localExiting] : merged;
@@ -333,11 +360,16 @@ export function App() {
       },
 
       onSessionCreated(payload: SessionCreatedPayload) {
-        // Guard against duplicates — the REST create response may have
-        // already added this session before the WebSocket event arrives.
-        if (!sessions.value.some(s => s.session_id === payload.session.session_id)) {
+        const existingIndex = sessions.value.findIndex(
+          (s) => s.session_id === payload.session.session_id,
+        );
+        if (existingIndex === -1) {
           sessions.value = [...sessions.value, payload.session];
+          return;
         }
+        const next = [...sessions.value];
+        next[existingIndex] = payload.session;
+        sessions.value = next;
       },
 
       onSessionDeleted(sessionId: string, _payload: SessionDeletedPayload) {
@@ -388,9 +420,10 @@ export function App() {
         const data = await apiFetch();
         if (cancelled) return;
         bootstrapDataRef.current = data;
+        const initialSessions = dedupeSessionsById(data.sessions);
 
         batch(() => {
-          sessions.value = data.sessions;
+          sessions.value = initialSessions;
           terminalCacheTtlMs.value = data.terminal_cache_ttl_ms;
           idlePreviews.value = {};
         });
@@ -403,7 +436,7 @@ export function App() {
 
         const initialLayout = applyWorkspaceLayout(
           parseWorkspaceLayoutFromUrl(new URL(window.location.href)),
-          data.sessions,
+          initialSessions,
         );
         writeWorkspaceLayout(initialLayout, "replace");
 
@@ -463,9 +496,10 @@ export function App() {
     pollRef.current = setInterval(async () => {
       try {
         const resp = await fetchSessions();
+        const polledSessions = dedupeSessionsById(resp.sessions);
         const merged = mergePollSessions(
           sessions.value,
-          resp.sessions,
+          polledSessions,
           exitingSessionIdsRef.current,
         );
         if (merged) sessions.value = merged;
@@ -523,9 +557,10 @@ export function App() {
       try {
         const resp = await fetchSessions();
         if (cancelled) return;
+        const polledSessions = dedupeSessionsById(resp.sessions);
         const merged = mergePollSessions(
           sessions.value,
-          resp.sessions,
+          polledSessions,
           exitingSessionIdsRef.current,
         );
         if (merged) sessions.value = merged;
@@ -843,9 +878,15 @@ export function App() {
             try {
               const { createSession } = await import("@/services/api");
               const resp = await createSession(undefined, cwd);
-              // Add only if the WebSocket session_created event hasn't already.
-              if (!sessions.value.some(s => s.session_id === resp.session.session_id)) {
+              const existingIndex = sessions.value.findIndex(
+                (s) => s.session_id === resp.session.session_id,
+              );
+              if (existingIndex === -1) {
                 sessions.value = [...sessions.value, resp.session];
+              } else {
+                const next = [...sessions.value];
+                next[existingIndex] = resp.session;
+                sessions.value = next;
               }
               return resp.session.session_id;
             } catch (err) {

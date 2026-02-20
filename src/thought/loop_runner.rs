@@ -114,13 +114,23 @@ impl ThoughtLoopRunner {
                         continue;
                     }
 
+                    // Collect file paths already claimed by OTHER sessions'
+                    // readers so a new reader won't pick the same JSONL file.
+                    let claimed: Vec<std::path::PathBuf> = per_session
+                        .iter()
+                        .filter(|(id, _)| *id != &info.session_id)
+                        .filter_map(|(_, s)| {
+                            s.context_reader.as_ref()?.claimed_path()
+                        })
+                        .collect();
+
                     let state = per_session
                         .entry(info.session_id.clone())
                         .or_insert_with(|| SessionThoughtState {
                             context_reader: info
                                 .tool
                                 .as_deref()
-                                .and_then(|t| context_reader_for(t, &info.cwd)),
+                                .and_then(|t| context_reader_for(t, &info.cwd, &claimed)),
                             summary_history: Vec::new(),
                             last_replay_hash: 0,
                             last_thought_context: None,
@@ -130,7 +140,8 @@ impl ThoughtLoopRunner {
                     // don't have one yet.
                     if state.context_reader.is_none() {
                         if let Some(tool) = info.tool.as_deref() {
-                            state.context_reader = context_reader_for(tool, &info.cwd);
+                            state.context_reader =
+                                context_reader_for(tool, &info.cwd, &claimed);
                         }
                     }
 
