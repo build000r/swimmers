@@ -90,7 +90,7 @@ html, body {
 
 /* Rush-off animation when closing a zone */
 .zone-header.rushing-off .zone-sprite {
-  animation: rush-off 0.4s ease-in forwards;
+  animation: rush-off 0.2s ease-in forwards;
 }
 
 @keyframes rush-off {
@@ -129,9 +129,9 @@ html, body {
 }
 
 .state-dot.idle { background: #4FC08D; }
-.state-dot.busy { background: #F5A623; animation: pulse 1s ease infinite; }
-.state-dot.error { background: #E74C3C; animation: pulse 0.5s ease infinite; }
-.state-dot.attention { background: #5BC0EB; animation: pulse 0.8s ease infinite; }
+.state-dot.busy { background: #F5A623; }
+.state-dot.error { background: #E74C3C; }
+.state-dot.attention { background: #5BC0EB; animation: pulse 0.9s ease infinite; }
 
 @keyframes pulse {
   0%, 100% { opacity: 1; }
@@ -252,7 +252,7 @@ html, body {
 }
 
 .thronglet.running-to-zone .thronglet-sprite {
-  animation: walk-cycle 0.2s steps(2) infinite !important;
+  animation: busy-bob 0.28s ease-in-out infinite !important;
 }
 
 .thronglet.running-to-zone .thronglet-label,
@@ -426,7 +426,7 @@ html, body {
 }
 
 .thronglet.busy .thronglet-sprite {
-  animation: walk-cycle 0.6s steps(2) infinite;
+  animation: busy-bob 0.6s ease-in-out infinite;
 }
 
 .thronglet.error .thronglet-sprite {
@@ -440,7 +440,7 @@ html, body {
 }
 
 .thronglet.exited .thronglet-sprite {
-  animation: walk-cycle 0.6s steps(2) infinite;
+  animation: busy-bob 0.6s ease-in-out infinite;
 }
 
 .thronglet.exited .thronglet-label,
@@ -493,9 +493,9 @@ html, body {
   50% { transform: translateY(-6px); }
 }
 
-@keyframes walk-cycle {
-  0% { transform: scaleX(1); }
-  50% { transform: scaleX(-1); }
+@keyframes busy-bob {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-3px); }
 }
 
 @keyframes shake {
