@@ -47,5 +47,6 @@ describe("ThrongletSprite tool color mapping", () => {
   it("uses Codex palette for codex aliases", () => {
     expect(renderedStyleForTool("codex")).toContain("--thr-body: #F4C542");
     expect(renderedStyleForTool("Codex")).toContain("--thr-body: #F4C542");
+    expect(renderedStyleForTool("Codex CLI")).toContain("--thr-body: #F4C542");
   });
 });
