@@ -75,12 +75,17 @@ html, body {
 .zone-sprite {
   width: 32px;
   height: 32px;
-  object-fit: contain;
   image-rendering: pixelated;
   image-rendering: crisp-edges;
   cursor: pointer;
   -webkit-tap-highlight-color: transparent;
   flex-shrink: 0;
+  overflow: hidden;
+}
+
+.zone-sprite svg {
+  width: 100%;
+  height: 100%;
 }
 
 /* Rush-off animation when closing a zone */
@@ -281,8 +286,9 @@ html, body {
 
 /* Thronglet */
 .thronglet {
+  --thronglet-size: 80px;
   position: absolute;
-  width: 80px;
+  width: var(--thronglet-size);
   cursor: pointer;
   -webkit-tap-highlight-color: transparent;
   transition: left 2s linear, top 2s linear;
@@ -293,12 +299,16 @@ html, body {
 }
 
 .thronglet-sprite {
-  width: 80px;
-  height: 80px;
-  object-fit: contain;
+  width: var(--thronglet-size);
+  height: var(--thronglet-size);
   image-rendering: pixelated;
   image-rendering: -moz-crisp-edges;
   image-rendering: crisp-edges;
+}
+
+.thronglet-sprite svg {
+  width: 100%;
+  height: 100%;
 }
 
 .thronglet-label {
@@ -564,4 +574,156 @@ html, body {
 @keyframes hatch-appear {
   0% { transform: scale(0.3); opacity: 0; }
   100% { transform: scale(1); opacity: 1; }
+}
+
+/* ---- Spawn Menu ---- */
+
+.spawn-menu {
+  position: fixed;
+  z-index: 200;
+  background: #0f1a2e;
+  border: 2px solid #2a3a5c;
+  border-radius: 6px;
+  box-shadow: 0 4px 20px rgba(0,0,0,0.5);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, "Courier New", monospace;
+  font-size: 12px;
+  color: #c8d6e5;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  animation: spawn-menu-in 0.12s ease-out;
+}
+
+@keyframes spawn-menu-in {
+  0% { opacity: 0; transform: scale(0.92); }
+  100% { opacity: 1; transform: scale(1); }
+}
+
+.spawn-menu-header {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 6px 8px;
+  background: #162040;
+  border-bottom: 1px solid #2a3a5c;
+  min-height: 28px;
+}
+
+.spawn-menu-path {
+  flex: 1;
+  font-size: 10px;
+  color: #5a7a9a;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  direction: rtl;
+  text-align: left;
+}
+
+.spawn-menu-back,
+.spawn-menu-copy,
+.spawn-menu-close {
+  background: none;
+  border: none;
+  color: #5BC0EB;
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+  padding: 0 4px;
+  line-height: 1;
+  flex-shrink: 0;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.spawn-menu-back:active,
+.spawn-menu-copy:active,
+.spawn-menu-close:active {
+  opacity: 0.6;
+}
+
+.spawn-menu-list {
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  flex: 1;
+  max-height: 260px;
+}
+
+.spawn-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 7px 10px;
+  background: none;
+  border: none;
+  color: #c8d6e5;
+  font-family: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  text-align: left;
+  -webkit-tap-highlight-color: transparent;
+  border-bottom: 1px solid rgba(42,58,92,0.4);
+}
+
+.spawn-menu-item:last-child {
+  border-bottom: none;
+}
+
+.spawn-menu-item:active {
+  background: rgba(91,192,235,0.15);
+}
+
+@media (hover: hover) {
+  .spawn-menu-item:hover {
+    background: rgba(91,192,235,0.1);
+  }
+}
+
+.spawn-menu-item.spawn-here {
+  color: #4FC08D;
+  font-weight: 600;
+  border-bottom: 1px solid #2a3a5c;
+}
+
+.spawn-menu-icon {
+  width: 14px;
+  text-align: center;
+  flex-shrink: 0;
+  color: #5a7a9a;
+  font-weight: 700;
+}
+
+.spawn-menu-item.spawn-here .spawn-menu-icon {
+  color: #4FC08D;
+}
+
+.spawn-menu-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.spawn-menu-loading,
+.spawn-menu-error,
+.spawn-menu-empty {
+  padding: 12px 10px;
+  text-align: center;
+  font-size: 11px;
+  color: #5a7a9a;
+}
+
+.spawn-menu-error {
+  color: #E74C3C;
+}
+
+/* Mobile: larger touch targets */
+@media (max-width: 480px) {
+  .spawn-menu-item {
+    padding: 10px 12px;
+    font-size: 13px;
+  }
+  .spawn-menu-header {
+    padding: 8px 10px;
+  }
 }

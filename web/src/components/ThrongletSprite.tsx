@@ -1,4 +1,4 @@
-import { useMemo } from "preact/hooks";
+import { useEffect, useMemo, useState } from "preact/hooks";
 import type { SessionState } from "@/types";
 import { ACTIVE, DROWSY, SLEEPING, DEEP_SLEEP } from "@/lib/thronglet-svgs";
 
@@ -24,12 +24,16 @@ const DEFAULT_COLORS = TOOL_COLORS["Claude Code"];
 function canonicalToolName(tool?: string | null): keyof typeof TOOL_COLORS | null {
   if (!tool) return null;
   const normalized = tool.trim().toLowerCase();
+  const normalizedSeparators = normalized.replace(/[-_]+/g, " ");
+  const compact = normalizedSeparators.replace(/\s+/g, "");
 
   if (
     normalized === "claude" ||
     normalized === "claude code" ||
     normalized === "claude-code" ||
-    normalized === "claude_code"
+    normalized === "claude_code" ||
+    compact === "claudecode" ||
+    /\bclaude\b/.test(normalizedSeparators)
   ) {
     return "Claude Code";
   }
@@ -37,7 +41,9 @@ function canonicalToolName(tool?: string | null): keyof typeof TOOL_COLORS | nul
   if (
     normalized === "codex" ||
     normalized === "codex-cli" ||
-    normalized === "codex_cli"
+    normalized === "codex_cli" ||
+    compact === "codexcli" ||
+    /\bcodex\b/.test(normalizedSeparators)
   ) {
     return "Codex";
   }
@@ -50,6 +56,7 @@ function canonicalToolName(tool?: string | null): keyof typeof TOOL_COLORS | nul
 const DROWSY_AFTER_MS = 20_000;
 const SLEEPING_AFTER_MS = 60_000;
 const DEEP_SLEEP_AFTER_MS = 120_000;
+const IDLE_SPRITE_TICK_MS = 5_000;
 
 function svgForState(state: SessionState, lastActivityAt?: string): string {
   if (state === "idle") {
@@ -81,7 +88,22 @@ export function ThrongletSprite({
   lastActivityAt,
   class: className,
 }: ThrongletSpriteProps) {
-  const svg = svgForState(state, lastActivityAt);
+  const [idleTick, setIdleTick] = useState(0);
+
+  // Keep idle-depth sprites transitioning (active -> drowsy -> sleeping)
+  // even when no other props change.
+  useEffect(() => {
+    if (state !== "idle") return;
+    const timer = setInterval(() => {
+      setIdleTick((value) => value + 1);
+    }, IDLE_SPRITE_TICK_MS);
+    return () => clearInterval(timer);
+  }, [state, lastActivityAt]);
+
+  const svg = useMemo(
+    () => svgForState(state, lastActivityAt),
+    [state, lastActivityAt, idleTick],
+  );
   const toolName = canonicalToolName(tool);
   const colors = (toolName && TOOL_COLORS[toolName]) ?? DEFAULT_COLORS;
 

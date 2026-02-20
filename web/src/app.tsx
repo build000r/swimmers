@@ -7,7 +7,11 @@ import type {
   SessionCreatedPayload,
   SessionDeletedPayload,
 } from "@/types";
-import { bootstrap as apiFetch, fetchPaneTail } from "@/services/api";
+import {
+  bootstrap as apiFetch,
+  fetchPaneTail,
+  fetchSessions,
+} from "@/services/api";
 import { RealtimeService } from "@/services/realtime";
 import type { WorkspaceLayoutState } from "@/services/workspace-history";
 import {
@@ -36,6 +40,7 @@ const IDLE_PREVIEW_DELAY_MS = 20_000;
 const IDLE_PREVIEW_REFRESH_MS = 12_000;
 const IDLE_PREVIEW_SCAN_MS = 2_000;
 const IDLE_PREVIEW_MAX_CHARS = 300;
+const TERMINAL_OUTPUT_DECODER = new TextDecoder();
 
 function parseIsoMs(value: string): number | null {
   const parsed = Date.parse(value);
@@ -68,6 +73,32 @@ function buildIdlePreviewText(screenText: string): string {
   return `…${cleaned.slice(cleaned.length - keep)}`;
 }
 
+function hasMeaningfulTerminalOutput(data: Uint8Array): boolean {
+  if (data.byteLength === 0) return false;
+  const raw = TERMINAL_OUTPUT_DECODER.decode(data);
+  const visible = stripTerminalEscapes(raw);
+  return /[^\s]/.test(visible);
+}
+
+function extractCwdFromSessionTitle(title: string, fallback: string): string {
+  const trimmed = title.trim();
+  if (!trimmed) return fallback;
+  if (trimmed.startsWith("/")) return trimmed;
+  if (trimmed.startsWith("~")) return trimmed;
+
+  const spaced = trimmed.lastIndexOf(": /");
+  if (spaced !== -1) {
+    return trimmed.slice(spaced + 2).trim();
+  }
+
+  const compact = trimmed.lastIndexOf(":/");
+  if (compact !== -1) {
+    return trimmed.slice(compact + 1).trim();
+  }
+
+  return fallback;
+}
+
 interface RestoreLayoutRequest extends WorkspaceLayoutState {
   requestId: number;
 }
@@ -97,9 +128,17 @@ export function App() {
 
   const updateSession = useCallback(
     (sessionId: string, updater: (s: SessionSummary) => SessionSummary) => {
-      sessions.value = sessions.value.map((s) =>
-        s.session_id === sessionId ? updater(s) : s,
-      );
+      const prev = sessions.value;
+      let changed = false;
+      const next = prev.map((s) => {
+        if (s.session_id !== sessionId) return s;
+        const updated = updater(s);
+        if (updated !== s) changed = true;
+        return updated;
+      });
+      if (changed) {
+        sessions.value = next;
+      }
     },
     [],
   );
@@ -183,13 +222,20 @@ export function App() {
       },
 
       onSessionState(sessionId: string, payload: SessionStatePayload) {
-        updateSession(sessionId, (s) => ({
-          ...s,
-          state: payload.state,
-          current_command: payload.current_command,
-          transport_health: payload.transport_health,
-          last_activity_at: payload.at,
-        }));
+        updateSession(sessionId, (s) =>
+          s.state === payload.state &&
+          s.current_command === payload.current_command &&
+          s.transport_health === payload.transport_health &&
+          s.last_activity_at === payload.at
+            ? s
+            : {
+                ...s,
+                state: payload.state,
+                current_command: payload.current_command,
+                transport_health: payload.transport_health,
+                last_activity_at: payload.at,
+              },
+        );
         if (payload.state !== "idle") {
           clearIdlePreview(sessionId);
         }
@@ -206,26 +252,24 @@ export function App() {
 
       onSessionTitle(sessionId: string, title: string) {
         updateSession(sessionId, (s) => {
-          // Extract cwd from title. Common formats:
-          // "user@host: /path", "user@host:/path", "/path/to/dir"
-          let cwd = s.cwd;
-          const colonSlash = title.indexOf(": /");
-          if (colonSlash !== -1) {
-            cwd = title.slice(colonSlash + 2).trim();
-          } else if (title.startsWith("/")) {
-            cwd = title.trim();
-          }
-          return { ...s, cwd };
+          const cwd = extractCwdFromSessionTitle(title, s.cwd);
+          return cwd === s.cwd ? s : { ...s, cwd };
         });
       },
 
       onThoughtUpdate(sessionId: string, payload: ThoughtUpdatePayload) {
-        updateSession(sessionId, (s) => ({
-          ...s,
-          thought: payload.thought,
-          token_count: payload.token_count,
-          context_limit: payload.context_limit,
-        }));
+        updateSession(sessionId, (s) =>
+          s.thought === payload.thought &&
+          s.token_count === payload.token_count &&
+          s.context_limit === payload.context_limit
+            ? s
+            : {
+                ...s,
+                thought: payload.thought,
+                token_count: payload.token_count,
+                context_limit: payload.context_limit,
+              },
+        );
       },
 
       onSessionCreated(payload: SessionCreatedPayload) {
@@ -245,6 +289,10 @@ export function App() {
       },
 
       onTerminalOutput(frame) {
+        if (!hasMeaningfulTerminalOutput(frame.data)) {
+          return;
+        }
+
         clearIdlePreview(frame.sessionId);
 
         const now = Date.now();
@@ -252,10 +300,15 @@ export function App() {
         if (now - prev < 1000) return;
         outputActivityUpdateAtRef.current.set(frame.sessionId, now);
 
-        updateSession(frame.sessionId, (s) => ({
-          ...s,
-          last_activity_at: new Date(now).toISOString(),
-        }));
+        const updatedAt = new Date(now).toISOString();
+        updateSession(frame.sessionId, (s) =>
+          s.last_activity_at === updatedAt
+            ? s
+            : {
+                ...s,
+                last_activity_at: updatedAt,
+              },
+        );
       },
 
       onControlError(payload) {
@@ -348,9 +401,27 @@ export function App() {
     const ms = bootstrapDataRef.current?.poll_fallback_ms ?? 2000;
     pollRef.current = setInterval(async () => {
       try {
-        const { fetchSessions } = await import("@/services/api");
         const resp = await fetchSessions();
-        sessions.value = resp.sessions;
+        const prev = sessions.value;
+        if (
+          prev.length !== resp.sessions.length ||
+          resp.sessions.some((next, i) => {
+            const old = prev[i];
+            return (
+              !old ||
+              old.session_id !== next.session_id ||
+              old.state !== next.state ||
+              old.thought !== next.thought ||
+              old.token_count !== next.token_count ||
+              old.context_limit !== next.context_limit ||
+              old.current_command !== next.current_command ||
+              old.cwd !== next.cwd ||
+              old.tool !== next.tool
+            );
+          })
+        ) {
+          sessions.value = resp.sessions;
+        }
       } catch {
         // Keep stale data on network error
       }
@@ -383,6 +454,72 @@ export function App() {
     startPolling,
     stopPolling,
     currentView.value,
+    transportHealth.value,
+  ]);
+
+  // Keep overview session states fresh even when realtime is healthy.
+  useEffect(() => {
+    if (!bootstrapDone) return;
+    if (transportHealth.value !== "healthy") return;
+    const isOverviewVisible =
+      currentView.value === "overview" ||
+      (currentView.value === "terminal" && zoneLayout.value === "single");
+    if (!isOverviewVisible) return;
+
+    let cancelled = false;
+    let running = false;
+    const ms = Math.max(bootstrapDataRef.current?.poll_fallback_ms ?? 2000, 2000);
+
+    const tick = async () => {
+      if (running || cancelled) return;
+      running = true;
+      try {
+        const resp = await fetchSessions();
+        if (cancelled) return;
+        // Only update if session data actually changed to avoid
+        // unnecessary re-renders that flash thronglet sprites.
+        // Exclude last_activity_at — it's volatile (client vs server timestamps
+        // always differ) and already handled by the realtime handler.
+        const prev = sessions.value;
+        if (
+          prev.length !== resp.sessions.length ||
+          resp.sessions.some((next, i) => {
+            const old = prev[i];
+            return (
+              !old ||
+              old.session_id !== next.session_id ||
+              old.state !== next.state ||
+              old.thought !== next.thought ||
+              old.token_count !== next.token_count ||
+              old.context_limit !== next.context_limit ||
+              old.current_command !== next.current_command ||
+              old.cwd !== next.cwd ||
+              old.tool !== next.tool
+            );
+          })
+        ) {
+          sessions.value = resp.sessions;
+        }
+      } catch {
+        // Keep stale data on transient network errors.
+      } finally {
+        running = false;
+      }
+    };
+
+    const interval = setInterval(() => {
+      void tick();
+    }, ms);
+    void tick();
+
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, [
+    bootstrapDone,
+    currentView.value,
+    zoneLayout.value,
     transportHealth.value,
   ]);
 
@@ -524,12 +661,18 @@ export function App() {
 
   const openTerminal = useCallback(
     (sessionId: string, preferZone?: "main" | "bottom") => {
+      if (!isObserver) {
+        const session = sessions.value.find((s) => s.session_id === sessionId);
+        if (session?.state === "attention") {
+          realtime.sendDismissAttention(sessionId);
+        }
+      }
       activeSessionId.value = sessionId;
       activeZonePreference.value = preferZone ?? null;
       currentView.value = "terminal";
       stopPolling();
     },
-    [stopPolling],
+    [isObserver, stopPolling],
   );
 
   const showOverview = useCallback(() => {
@@ -609,7 +752,7 @@ export function App() {
 
   const isOverview = currentView.value === "overview";
   const isTerminal = currentView.value === "terminal";
-  const splitMode = isTerminal && zoneLayout.value === "single";
+  const splitMode = isTerminal && zoneLayout.value === "single" && window.innerWidth > 768;
 
   // In split mode: terminal left 50%, field right 50%
   // In dual-zone: terminal full screen, field hidden
@@ -661,13 +804,14 @@ export function App() {
           sessions={sessions.value}
           idlePreviews={idlePreviews.value}
           observer={isObserver}
+          compact={splitMode}
           onTapSession={openTerminal}
           onDragToBottom={(id) => openTerminal(id, "bottom")}
-          onCreateSession={async () => {
+          onCreateSession={async (cwd?: string) => {
             if (isObserver) return "";
             try {
               const { createSession } = await import("@/services/api");
-              const resp = await createSession();
+              const resp = await createSession(undefined, cwd);
               // Add only if the WebSocket session_created event hasn't already.
               if (!sessions.value.some(s => s.session_id === resp.session.session_id)) {
                 sessions.value = [...sessions.value, resp.session];

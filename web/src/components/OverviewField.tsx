@@ -1,29 +1,20 @@
 import { useEffect, useRef, useCallback, useState } from "preact/hooks";
 import type { SessionSummary, SessionState } from "@/types";
+import { SpawnMenu } from "./SpawnMenu";
+import { ThrongletSprite } from "./ThrongletSprite";
 
 // ---- Helpers ----
 
-function spriteForState(state: SessionState): string {
-  const map: Record<string, string> = {
-    idle: "/assets/idle.png",
-    busy: "/assets/walking.png",
-    error: "/assets/beep.png",
-    attention: "/assets/idle.png",
-    exited: "/assets/sad.png",
-  };
-  return map[state] ?? map.idle;
+function cwdLabel(cwd: string): string {
+  const trimmed = cwd.trim();
+  if (!trimmed || trimmed === "/") return "";
+  const parts = trimmed.replace(/\/+$/, "").split("/").filter(Boolean);
+  if (parts.length === 0) return "";
+  return parts[parts.length - 1];
 }
 
-function repoName(cwd: string): string {
-  if (!cwd || cwd === "/") return "root";
-  const parts = cwd.replace(/\/+$/, "").split("/");
-  return parts[parts.length - 1] || "root";
-}
-
-function numberPrefix(name: string): string {
-  const num = parseInt(name, 10);
-  if (isNaN(num)) return name;
-  return String(num).slice(-2);
+function throngletName(session: SessionSummary): string {
+  return cwdLabel(session.cwd) || session.tmux_name;
 }
 
 function gaugeColor(ratio: number): string {
@@ -38,6 +29,7 @@ interface ThrongletProps {
   session: SessionSummary;
   idlePreview?: string;
   spawnPosition?: { x: number; y: number };
+  compact?: boolean;
   onTap: (id: string) => void;
   onDragToBottom: (id: string) => void;
 }
@@ -46,16 +38,25 @@ function ThrongletEntity({
   session,
   idlePreview,
   spawnPosition,
+  compact = false,
   onTap,
   onDragToBottom,
 }: ThrongletProps) {
   const elRef = useRef<HTMLDivElement>(null);
+  const fieldElRef = useRef<HTMLElement | null>(null);
+  const spawnPositionAppliedRef = useRef(Boolean(spawnPosition));
+  const throngletSize = compact ? 60 : 80;
+  const spriteHalf = throngletSize / 2;
+  const labelClearance = compact ? 105 : 120;
   const posRef = useRef(
     spawnPosition
-      ? { x: spawnPosition.x - 40, y: spawnPosition.y - 40 }
+      ? { x: spawnPosition.x - spriteHalf, y: spawnPosition.y - spriteHalf }
       : {
-          x: Math.random() * (window.innerWidth - 80),
-          y: 40 + Math.random() * Math.max(window.innerHeight - 200, 60),
+          x: Math.random() * Math.max(window.innerWidth - throngletSize, 0),
+          y:
+            40 +
+            Math.random() *
+              Math.max(window.innerHeight - labelClearance - 40, 60),
         },
   );
   const wanderRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -63,12 +64,53 @@ function ThrongletEntity({
   const longPressedRef = useRef(false);
   const exitingRef = useRef(false);
 
+  // Resolve field container on mount for wander bounds
+  useEffect(() => {
+    fieldElRef.current = elRef.current?.closest?.(".field") as HTMLElement | null;
+  }, []);
+
+  // If spawn position arrives after first render, snap once to the intended
+  // hatch point instead of keeping the random fallback position.
+  useEffect(() => {
+    if (!spawnPosition || spawnPositionAppliedRef.current) return;
+
+    const field =
+      fieldElRef.current ??
+      ((elRef.current?.closest?.(".field") as HTMLElement | null) ?? null);
+    if (!fieldElRef.current) {
+      fieldElRef.current = field;
+    }
+
+    const fieldW = field ? field.clientWidth : window.innerWidth;
+    const fieldH = field ? field.clientHeight : window.innerHeight;
+    const maxX = Math.max(fieldW - throngletSize, 0);
+    const maxY = Math.max(fieldH - labelClearance, 60);
+    const x = Math.max(0, Math.min(maxX, spawnPosition.x - spriteHalf));
+    const y = Math.max(40, Math.min(maxY, spawnPosition.y - spriteHalf));
+    posRef.current = { x, y };
+    spawnPositionAppliedRef.current = true;
+
+    if (elRef.current) {
+      elRef.current.style.left = `${x}px`;
+      elRef.current.style.top = `${y}px`;
+    }
+  }, [
+    spawnPosition?.x,
+    spawnPosition?.y,
+    throngletSize,
+    labelClearance,
+    spriteHalf,
+  ]);
+
   // Wander randomly every 3s
   useEffect(() => {
     wanderRef.current = setInterval(() => {
       if (exitingRef.current) return;
-      const maxX = window.innerWidth - 80;
-      const maxY = window.innerHeight - 120;
+      const field = fieldElRef.current;
+      const fieldW = field ? field.clientWidth : window.innerWidth;
+      const fieldH = field ? field.clientHeight : window.innerHeight;
+      const maxX = fieldW - throngletSize;
+      const maxY = fieldH - labelClearance;
       posRef.current.x = Math.max(
         0,
         Math.min(maxX, posRef.current.x + (Math.random() - 0.5) * 100),
@@ -86,7 +128,7 @@ function ThrongletEntity({
     return () => {
       if (wanderRef.current) clearInterval(wanderRef.current);
     };
-  }, []);
+  }, [throngletSize, labelClearance]);
 
   // Walk off screen when session exits
   useEffect(() => {
@@ -97,8 +139,10 @@ function ThrongletEntity({
       wanderRef.current = null;
     }
     // Walk toward the nearest horizontal edge
-    const midX = window.innerWidth / 2;
-    const targetX = posRef.current.x < midX ? -120 : window.innerWidth + 40;
+    const field = fieldElRef.current;
+    const fieldW = field ? field.clientWidth : window.innerWidth;
+    const midX = fieldW / 2;
+    const targetX = posRef.current.x < midX ? -120 : fieldW + 40;
     posRef.current.x = targetX;
     if (elRef.current) {
       elRef.current.style.left = targetX + "px";
@@ -139,14 +183,14 @@ function ThrongletEntity({
           if (sprite) {
             ghost = sprite.cloneNode(true) as HTMLImageElement;
             ghost.style.cssText =
-              "position:fixed;pointer-events:none;z-index:9999;opacity:0.7;width:64px;height:64px;";
+              `position:fixed;pointer-events:none;z-index:9999;opacity:0.7;width:${throngletSize}px;height:${throngletSize}px;`;
             document.body.appendChild(ghost);
           }
         }
 
         if (dragging && ghost) {
-          ghost.style.left = me.clientX - 32 + "px";
-          ghost.style.top = me.clientY - 32 + "px";
+          ghost.style.left = me.clientX - spriteHalf + "px";
+          ghost.style.top = me.clientY - spriteHalf + "px";
         }
       };
 
@@ -171,7 +215,7 @@ function ThrongletEntity({
       document.addEventListener("mousemove", onMouseMove);
       document.addEventListener("mouseup", onMouseUp);
     },
-    [session.session_id, onDragToBottom],
+    [session.session_id, onDragToBottom, throngletSize, spriteHalf],
   );
 
   // Thought / activity text
@@ -214,6 +258,7 @@ function ThrongletEntity({
       ref={elRef}
       class={`thronglet ${session.state}`}
       style={{
+        "--thronglet-size": `${throngletSize}px`,
         left: posRef.current.x + "px",
         top: posRef.current.y + "px",
       }}
@@ -253,16 +298,17 @@ function ThrongletEntity({
       {session.tool && <div class="thronglet-tool">{session.tool}</div>}
 
       {/* Sprite */}
-      <img
+      <ThrongletSprite
         class="thronglet-sprite"
-        src={spriteForState(session.state)}
-        alt=""
+        state={session.state}
+        tool={session.tool}
+        lastActivityAt={session.last_activity_at}
       />
 
       {/* Label */}
       <div class="thronglet-label">
         <div class="thronglet-name">
-          {numberPrefix(session.tmux_name) + " " + repoName(session.cwd)}
+          {throngletName(session)}
         </div>
         {showGauge && (
           <div class="context-gauge" style={{ display: "block" }}>
@@ -358,37 +404,29 @@ interface OverviewFieldProps {
   sessions: SessionSummary[];
   idlePreviews?: Record<string, string>;
   observer?: boolean;
+  compact?: boolean;
   onTapSession: (id: string) => void;
   onDragToBottom: (id: string) => void;
-  onCreateSession: () => Promise<string>;
+  onCreateSession: (cwd?: string) => Promise<string>;
 }
 
 export function OverviewField({
   sessions,
   idlePreviews = {},
   observer = false,
+  compact = false,
   onTapSession,
   onDragToBottom,
   onCreateSession,
 }: OverviewFieldProps) {
   const [hatchState, setHatchState] = useState<HatchState | null>(null);
+  const [menuPos, setMenuPos] = useState<{ x: number; y: number } | null>(null);
   const spawnPositionsRef = useRef<Map<string, { x: number; y: number }>>(new Map());
-  const pressPositionRef = useRef<{ x: number; y: number }>({ x: 0, y: 0 });
-  const longPressTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const longPressFiredRef = useRef(false);
+  const menuClickPosRef = useRef<{ x: number; y: number }>({ x: 0, y: 0 });
   const fieldRef = useRef<HTMLDivElement>(null);
 
-  const clearLongPress = useCallback(() => {
-    if (longPressTimerRef.current !== null) {
-      clearTimeout(longPressTimerRef.current);
-      longPressTimerRef.current = null;
-    }
-  }, []);
-
-  useEffect(() => clearLongPress, [clearLongPress]);
-
   const startHatch = useCallback(
-    (clientX: number, clientY: number) => {
+    (clientX: number, clientY: number, cwd?: string) => {
       // Convert client coords to field-relative coords.
       const field = fieldRef.current;
       const rect = field?.getBoundingClientRect();
@@ -398,7 +436,7 @@ export function OverviewField({
       setHatchState({ x, y, phase: "dropping", sessionId: null });
 
       // Fire API call in parallel with animation.
-      void onCreateSession().then((sessionId) => {
+      void onCreateSession(cwd).then((sessionId) => {
         if (sessionId) {
           spawnPositionsRef.current.set(sessionId, { x, y });
           setHatchState((prev) =>
@@ -410,21 +448,52 @@ export function OverviewField({
     [onCreateSession],
   );
 
-  const startLongPress = useCallback(
-    (clientX: number, clientY: number, target: HTMLElement) => {
-      if (target.closest?.(".thronglet") || target.closest?.(".hatching-egg")) return;
-      longPressFiredRef.current = false;
-      pressPositionRef.current = { x: clientX, y: clientY };
-      clearLongPress();
-      longPressTimerRef.current = setTimeout(() => {
-        longPressTimerRef.current = null;
-        longPressFiredRef.current = true;
-        if (navigator.vibrate) navigator.vibrate(50);
-        startHatch(pressPositionRef.current.x, pressPositionRef.current.y);
-      }, 500);
+  const handleFieldClick = useCallback(
+    (e: MouseEvent) => {
+      if (e.button !== 0) return;
+      const target = e.target as HTMLElement;
+      if (
+        target.closest?.(".thronglet") ||
+        target.closest?.(".hatching-egg") ||
+        target.closest?.(".spawn-menu")
+      ) {
+        return;
+      }
+      menuClickPosRef.current = { x: e.clientX, y: e.clientY };
+      setMenuPos({ x: e.clientX, y: e.clientY });
     },
-    [clearLongPress, startHatch],
+    [],
   );
+
+  const handleFieldTouch = useCallback(
+    (e: TouchEvent) => {
+      const target = e.target as HTMLElement;
+      if (
+        target.closest?.(".thronglet") ||
+        target.closest?.(".hatching-egg") ||
+        target.closest?.(".spawn-menu")
+      ) {
+        return;
+      }
+      const t = e.touches[0];
+      menuClickPosRef.current = { x: t.clientX, y: t.clientY };
+      setMenuPos({ x: t.clientX, y: t.clientY });
+    },
+    [],
+  );
+
+  const handleMenuSelect = useCallback(
+    (path: string) => {
+      setMenuPos(null);
+      if (navigator.vibrate) navigator.vibrate(50);
+      startHatch(menuClickPosRef.current.x, menuClickPosRef.current.y, path);
+    },
+    [startHatch],
+  );
+
+  const handleMenuClose = useCallback(() => {
+    setMenuPos(null);
+  }, []);
 
   const handlePhaseComplete = useCallback(
     (completedPhase: HatchPhase) => {
@@ -459,27 +528,8 @@ export function OverviewField({
       ref={fieldRef}
       class="field"
       style={{ flex: 1, position: "relative" }}
-      onMouseDown={
-        observer
-          ? undefined
-          : (e: MouseEvent) => {
-              if (e.button !== 0) return;
-              startLongPress(e.clientX, e.clientY, e.target as HTMLElement);
-            }
-      }
-      onMouseUp={observer ? undefined : clearLongPress}
-      onMouseMove={observer ? undefined : clearLongPress}
-      onMouseLeave={observer ? undefined : clearLongPress}
-      onTouchStart={
-        observer
-          ? undefined
-          : (e: TouchEvent) => {
-              const t = e.touches[0];
-              startLongPress(t.clientX, t.clientY, e.target as HTMLElement);
-            }
-      }
-      onTouchMove={observer ? undefined : clearLongPress}
-      onTouchEnd={observer ? undefined : clearLongPress}
+      onClick={observer ? undefined : handleFieldClick}
+      onTouchEnd={observer ? undefined : handleFieldTouch}
       onContextMenu={observer ? undefined : (e: Event) => e.preventDefault()}
     >
       {/* Scenery trees */}
@@ -513,6 +563,7 @@ export function OverviewField({
             session={s}
             idlePreview={idlePreviews[s.session_id]}
             spawnPosition={spawnPositionsRef.current.get(s.session_id)}
+            compact={compact}
             onTap={onTapSession}
             onDragToBottom={onDragToBottom}
           />
@@ -526,6 +577,16 @@ export function OverviewField({
           y={hatchState.y}
           phase={hatchState.phase}
           onPhaseComplete={handlePhaseComplete}
+        />
+      )}
+
+      {/* Spawn menu */}
+      {menuPos && (
+        <SpawnMenu
+          x={menuPos.x}
+          y={menuPos.y}
+          onSelect={handleMenuSelect}
+          onClose={handleMenuClose}
         />
       )}
 
@@ -551,10 +612,10 @@ export function OverviewField({
       )}
 
       {/* Empty state */}
-      {sessions.length === 0 && !hatchState && (
+      {sessions.length === 0 && !hatchState && !menuPos && (
         <div class="empty-state">
           <p>No sessions yet</p>
-          {!observer && <p class="hint">Long press to create one</p>}
+          {!observer && <p class="hint">Tap anywhere to spawn one</p>}
         </div>
       )}
     </div>
