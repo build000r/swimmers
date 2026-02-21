@@ -31,7 +31,7 @@ export function makeBootstrapResponse(
     thought_tick_ms: 5000,
     thoughts_enabled_default: true,
     terminal_cache_ttl_ms: 300000,
-    session_delete_mode: "destroy",
+    session_delete_mode: "detach_bridge",
     legacy_parity_locked: false,
     sessions: [makeSession()],
     ...overrides,

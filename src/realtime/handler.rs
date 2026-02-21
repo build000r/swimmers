@@ -278,17 +278,29 @@ fn lifecycle_to_control_event(event: LifecycleEvent) -> ControlEvent {
             })
             .unwrap(),
         },
-        LifecycleEvent::Deleted { session_id, reason } => ControlEvent {
+        LifecycleEvent::Deleted {
+            session_id,
+            reason,
+            delete_mode,
+            tmux_session_alive,
+        } => ControlEvent {
             event: "session_deleted".to_string(),
             session_id,
             payload: serde_json::to_value(SessionDeletedPayload {
                 reason,
-                delete_mode: "detach_bridge".to_string(),
-                tmux_session_alive: true,
+                delete_mode: delete_mode_to_wire(&delete_mode).to_string(),
+                tmux_session_alive,
                 at: Utc::now(),
             })
             .unwrap(),
         },
+    }
+}
+
+fn delete_mode_to_wire(mode: &crate::config::SessionDeleteMode) -> &'static str {
+    match mode {
+        crate::config::SessionDeleteMode::DetachBridge => "detach_bridge",
+        crate::config::SessionDeleteMode::KillTmux => "kill_tmux",
     }
 }
 

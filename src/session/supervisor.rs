@@ -36,6 +36,8 @@ pub enum LifecycleEvent {
     Deleted {
         session_id: String,
         reason: String,
+        delete_mode: crate::config::SessionDeleteMode,
+        tmux_session_alive: bool,
     },
 }
 
@@ -270,6 +272,8 @@ impl SessionSupervisor {
                     let _ = self.lifecycle_tx.send(LifecycleEvent::Deleted {
                         session_id: s.session_id,
                         reason: "startup_missing_tmux".to_string(),
+                        delete_mode: crate::config::SessionDeleteMode::DetachBridge,
+                        tmux_session_alive: false,
                     });
                 }
             }
@@ -348,19 +352,28 @@ impl SessionSupervisor {
         }
 
         if let Some(tool) = spawn_tool {
-            let mut command = String::from(tool.command());
-            command.push('\n');
-            if let Err(e) = bootstrap_handle
-                .send(SessionCommand::WriteInput(command.into_bytes()))
-                .await
-            {
+            if let Err(e) = send_spawn_tool_command(&tmux_name, tool).await {
                 warn!(
                     session_id = %session_id,
                     tmux_name = %tmux_name,
                     tool = ?tool,
-                    "failed to enqueue spawn command: {}",
+                    "tmux send-keys failed, falling back to PTY input: {}",
                     e
                 );
+                let mut command = String::from(tool.command());
+                command.push('\n');
+                if let Err(e) = bootstrap_handle
+                    .send(SessionCommand::WriteInput(command.into_bytes()))
+                    .await
+                {
+                    warn!(
+                        session_id = %session_id,
+                        tmux_name = %tmux_name,
+                        tool = ?tool,
+                        "failed to enqueue spawn command fallback: {}",
+                        e
+                    );
+                }
             }
         }
 
@@ -378,8 +391,13 @@ impl SessionSupervisor {
     }
 
     /// Shut down a session actor and remove it from the registry.
-    /// This detaches the bridge but does NOT kill the tmux session.
-    pub async fn delete_session(self: &Arc<Self>, session_id: &str) -> anyhow::Result<()> {
+    /// Depending on `delete_mode`, this either detaches the bridge or also
+    /// kills the underlying tmux session.
+    pub async fn delete_session(
+        self: &Arc<Self>,
+        session_id: &str,
+        delete_mode: crate::config::SessionDeleteMode,
+    ) -> anyhow::Result<()> {
         let handle = {
             let mut sessions = self.sessions.write().await;
             let handle = sessions
@@ -388,9 +406,25 @@ impl SessionSupervisor {
             crate::metrics::set_active_sessions(sessions.len());
             handle
         };
+        let mut tmux_session_alive = true;
+
+        if matches!(delete_mode, crate::config::SessionDeleteMode::KillTmux) {
+            if let Err(e) = kill_tmux_session(&handle.tmux_name).await {
+                let mut sessions = self.sessions.write().await;
+                sessions.insert(session_id.to_string(), handle.clone());
+                crate::metrics::set_active_sessions(sessions.len());
+                return Err(e);
+            }
+            tmux_session_alive = false;
+        }
+
         self.process_exit_seen_at.write().await.remove(session_id);
 
-        info!(session_id = %session_id, "deleting session");
+        info!(
+            session_id = %session_id,
+            delete_mode = ?delete_mode,
+            "deleting session"
+        );
 
         // Send shutdown command; if the channel is closed, the actor is already gone.
         let _ = handle.cmd_tx.send(SessionCommand::Shutdown).await;
@@ -399,6 +433,8 @@ impl SessionSupervisor {
         let _ = self.lifecycle_tx.send(LifecycleEvent::Deleted {
             session_id: session_id.to_string(),
             reason: "api_delete".into(),
+            delete_mode,
+            tmux_session_alive,
         });
 
         // Persist the updated registry.
@@ -755,6 +791,8 @@ impl SessionSupervisor {
             let _ = self.lifecycle_tx.send(LifecycleEvent::Deleted {
                 session_id: handle.session_id,
                 reason: "process_exit".to_string(),
+                delete_mode: crate::config::SessionDeleteMode::DetachBridge,
+                tmux_session_alive: false,
             });
         }
 
@@ -824,6 +862,79 @@ fn current_working_dir() -> Option<String> {
     std::env::current_dir()
         .ok()
         .map(|p| p.to_string_lossy().into_owned())
+}
+
+async fn send_spawn_tool_command(
+    tmux_name: &str,
+    tool: crate::types::SpawnTool,
+) -> anyhow::Result<()> {
+    const ATTEMPTS: usize = 8;
+    const RETRY_DELAY_MS: u64 = 75;
+
+    for attempt in 1..=ATTEMPTS {
+        let output = Command::new("tmux")
+            .args(["send-keys", "-t", tmux_name, tool.command(), "Enter"])
+            .env_remove("TMUX")
+            .env_remove("TMUX_PANE")
+            .output()
+            .await;
+
+        match output {
+            Ok(output) if output.status.success() => return Ok(()),
+            Ok(output) => {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                debug!(
+                    tmux_name = %tmux_name,
+                    tool = ?tool,
+                    attempt,
+                    status = ?output.status,
+                    stderr = %stderr.trim(),
+                    "tmux send-keys attempt failed"
+                );
+            }
+            Err(e) => {
+                debug!(
+                    tmux_name = %tmux_name,
+                    tool = ?tool,
+                    attempt,
+                    "failed to execute tmux send-keys: {}",
+                    e
+                );
+            }
+        }
+
+        if attempt < ATTEMPTS {
+            tokio::time::sleep(Duration::from_millis(RETRY_DELAY_MS)).await;
+        }
+    }
+
+    Err(anyhow::anyhow!(
+        "unable to inject spawn command via tmux send-keys"
+    ))
+}
+
+async fn kill_tmux_session(tmux_name: &str) -> anyhow::Result<()> {
+    let output = Command::new("tmux")
+        .args(["kill-session", "-t", tmux_name])
+        .env_remove("TMUX")
+        .env_remove("TMUX_PANE")
+        .output()
+        .await
+        .map_err(|e| anyhow::anyhow!("failed to run tmux kill-session: {}", e))?;
+
+    if output.status.success() {
+        return Ok(());
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if stderr.contains("can't find session") || stderr.contains("no server running") {
+        return Ok(());
+    }
+
+    Err(anyhow::anyhow!(
+        "tmux kill-session failed: {}",
+        stderr.trim()
+    ))
 }
 
 fn next_session_counter(session_id: &str) -> Option<u64> {

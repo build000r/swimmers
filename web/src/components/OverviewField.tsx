@@ -86,6 +86,7 @@ interface ThrongletProps {
   idlePreview?: string;
   x: number;
   y: number;
+  axeArmed?: boolean;
   compact?: boolean;
   rawMode?: boolean;
   onTap: (id: string) => void;
@@ -97,6 +98,7 @@ function ThrongletEntity({
   idlePreview,
   x,
   y,
+  axeArmed = false,
   compact = false,
   rawMode = false,
   onTap,
@@ -283,6 +285,8 @@ function ThrongletEntity({
         "--thronglet-size": `${throngletSize}px`,
         left: x + "px",
         top: y + "px",
+        boxShadow: axeArmed ? "0 0 0 2px rgba(231, 76, 60, 0.95)" : "none",
+        borderRadius: "12px",
       }}
       onClick={handleClick}
       onMouseDown={handleMouseDown}
@@ -415,6 +419,10 @@ interface OverviewFieldProps {
   idlePreviews?: Record<string, string>;
   observer?: boolean;
   compact?: boolean;
+  axeTopOffset?: number;
+  axeArmed?: boolean;
+  onDisarmAxe?: () => void;
+  onToggleAxe?: () => void;
   onTapSession: (id: string) => void;
   onDragToBottom: (id: string) => void;
   onCreateSession: (cwd?: string, spawnTool?: SpawnTool) => Promise<string>;
@@ -425,6 +433,10 @@ export function OverviewField({
   idlePreviews = {},
   observer = false,
   compact = false,
+  axeTopOffset = 8,
+  axeArmed = false,
+  onDisarmAxe,
+  onToggleAxe,
   onTapSession,
   onDragToBottom,
   onCreateSession,
@@ -633,6 +645,10 @@ export function OverviewField({
   const handleFieldClick = useCallback(
     (e: MouseEvent) => {
       if (e.button !== 0) return;
+      if (axeArmed) {
+        onDisarmAxe?.();
+        return;
+      }
       const target = e.target as HTMLElement;
       if (
         target.closest?.(".thronglet") ||
@@ -644,11 +660,15 @@ export function OverviewField({
       menuClickPosRef.current = { x: e.clientX, y: e.clientY };
       setMenuPos({ x: e.clientX, y: e.clientY });
     },
-    [],
+    [axeArmed, onDisarmAxe],
   );
 
   const handleFieldTouch = useCallback(
     (e: TouchEvent) => {
+      if (axeArmed) {
+        onDisarmAxe?.();
+        return;
+      }
       const target = e.target as HTMLElement;
       if (
         target.closest?.(".thronglet") ||
@@ -661,7 +681,7 @@ export function OverviewField({
       menuClickPosRef.current = { x: t.clientX, y: t.clientY };
       setMenuPos({ x: t.clientX, y: t.clientY });
     },
-    [],
+    [axeArmed, onDisarmAxe],
   );
 
   const handleMenuSelect = useCallback(
@@ -720,6 +740,79 @@ export function OverviewField({
       onTouchEnd={observer ? undefined : handleFieldTouch}
       onContextMenu={observer ? undefined : (e: Event) => e.preventDefault()}
     >
+      {!observer && onToggleAxe && (
+        <button
+          type="button"
+          aria-label={axeArmed ? "Disarm axe mode" : "Arm axe mode"}
+          title={axeArmed ? "Axe armed" : "Arm axe"}
+          onClick={(e: MouseEvent) => {
+            e.stopPropagation();
+            onToggleAxe();
+            if (navigator.vibrate) navigator.vibrate(axeArmed ? 10 : 25);
+          }}
+          style={{
+            position: "absolute",
+            top: `${axeTopOffset}px`,
+            left: "8px",
+            width: "60px",
+            height: "60px",
+            border: "none",
+            background: "transparent",
+            boxShadow: "none",
+            padding: 0,
+            filter: axeArmed
+              ? "drop-shadow(0 0 8px rgba(231, 76, 60, 0.9))"
+              : "drop-shadow(0 2px 3px rgba(0, 0, 0, 0.45))",
+            display: "grid",
+            placeItems: "center",
+            zIndex: 220,
+            cursor: "pointer",
+          }}
+        >
+          <svg
+            width="44"
+            height="44"
+            viewBox="0 0 32 32"
+            fill="none"
+            aria-hidden="true"
+            shapeRendering="crispEdges"
+          >
+            {/* Pixel blade base */}
+            <rect x="20" y="2" width="8" height="2" fill="#5a616c" />
+            <rect x="18" y="4" width="10" height="2" fill="#707987" />
+            <rect x="16" y="6" width="10" height="2" fill="#7f8897" />
+            <rect x="14" y="8" width="10" height="2" fill="#707987" />
+            <rect x="16" y="10" width="8" height="2" fill="#626a77" />
+            <rect x="18" y="12" width="4" height="2" fill="#4f5561" />
+            <rect x="24" y="12" width="4" height="2" fill="#5a616c" />
+
+            {/* Blade highlights */}
+            <rect x="21" y="4" width="5" height="2" fill="#c8d0da" />
+            <rect x="19" y="6" width="5" height="2" fill="#d7dde5" />
+            <rect x="17" y="8" width="4" height="2" fill="#bcc5d1" />
+            <rect x="17" y="10" width="2" height="2" fill="#9fa9b8" />
+
+            {/* Socket + rivet */}
+            <rect x="18" y="12" width="3" height="2" fill="#3e434d" />
+            <rect x="19" y="12" width="1" height="1" fill="#dbe1e9" />
+
+            {/* Pixel handle */}
+            <rect x="17" y="13" width="2" height="2" fill="#5a3419" />
+            <rect x="15" y="15" width="2" height="2" fill="#734321" />
+            <rect x="13" y="17" width="2" height="2" fill="#5a3419" />
+            <rect x="11" y="19" width="2" height="2" fill="#734321" />
+            <rect x="9" y="21" width="2" height="2" fill="#5a3419" />
+            <rect x="7" y="23" width="2" height="2" fill="#734321" />
+            <rect x="5" y="25" width="2" height="2" fill="#5a3419" />
+            <rect x="4" y="26" width="2" height="2" fill="#b7834a" />
+            <rect x="5" y="24" width="1" height="2" fill="#d3a066" />
+            <rect x="7" y="22" width="1" height="2" fill="#d3a066" />
+            <rect x="9" y="20" width="1" height="2" fill="#d3a066" />
+            <rect x="11" y="18" width="1" height="2" fill="#d3a066" />
+          </svg>
+        </button>
+      )}
+
       {/* Scenery trees */}
       <img
         class="field-tree"
@@ -759,6 +852,7 @@ export function OverviewField({
                 idlePreview={idlePreviews[s.session_id]}
                 x={pos.x}
                 y={pos.y}
+                axeArmed={axeArmed}
                 compact={compact}
                 rawMode={rawMode}
                 onTap={onTapSession}
@@ -786,6 +880,27 @@ export function OverviewField({
           onSelect={handleMenuSelect}
           onClose={handleMenuClose}
         />
+      )}
+
+      {axeArmed && !observer && (
+        <div
+          style={{
+            position: "absolute",
+            top: "10px",
+            left: "62px",
+            padding: "6px 10px",
+            borderRadius: "8px",
+            background: "rgba(22, 22, 22, 0.8)",
+            border: "1px solid rgba(231, 76, 60, 0.7)",
+            color: "#ffd9d3",
+            fontSize: "12px",
+            fontWeight: 700,
+            letterSpacing: "0.01em",
+            zIndex: 120,
+          }}
+        >
+          Axe armed: tap a thronglet
+        </div>
       )}
 
       {/* Observer badge */}

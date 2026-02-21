@@ -1,8 +1,9 @@
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::routing::{delete, get, post};
 use axum::{Extension, Json, Router};
+use serde::Deserialize;
 use std::sync::Arc;
 use tokio::sync::oneshot;
 
@@ -93,15 +94,43 @@ async fn create_session(
 // DELETE /v1/sessions/{session_id}
 // ---------------------------------------------------------------------------
 
+#[derive(Debug, Deserialize)]
+struct DeleteSessionQuery {
+    mode: Option<String>,
+}
+
 async fn delete_session(
     Extension(auth): Extension<AuthInfo>,
     State(state): State<Arc<AppState>>,
     Path(session_id): Path<String>,
+    Query(query): Query<DeleteSessionQuery>,
 ) -> impl IntoResponse {
     if let Err(resp) = auth.require_scope(AuthScope::SessionsWrite) {
         return resp;
     }
-    match state.supervisor.delete_session(&session_id).await {
+    let delete_mode = match query.mode.as_deref() {
+        None | Some("detach_bridge") => crate::config::SessionDeleteMode::DetachBridge,
+        Some("kill_tmux") => crate::config::SessionDeleteMode::KillTmux,
+        Some(other) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(
+                    serde_json::to_value(ErrorResponse {
+                        code: "VALIDATION_FAILED".to_string(),
+                        message: Some(format!("invalid delete mode: {}", other)),
+                    })
+                    .unwrap(),
+                ),
+            )
+                .into_response();
+        }
+    };
+
+    match state
+        .supervisor
+        .delete_session(&session_id, delete_mode)
+        .await
+    {
         Ok(()) => (StatusCode::OK, Json(serde_json::json!({ "ok": true }))).into_response(),
         Err(e) => {
             let msg = e.to_string();

@@ -14,6 +14,7 @@ import type {
 } from "@/types";
 import {
   bootstrap as apiFetch,
+  deleteSession as apiDeleteSession,
   fetchPaneTail,
   fetchSessions,
 } from "@/services/api";
@@ -198,6 +199,7 @@ export function App() {
   const [authMode, setAuthMode] = useState<string | undefined>(undefined);
   const [restoreRequest, setRestoreRequest] =
     useState<RestoreLayoutRequest | null>(null);
+  const [axeArmed, setAxeArmed] = useState(false);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const bootstrapDataRef = useRef<BootstrapResponse | null>(null);
   const workspaceHistoryModeRef = useRef("url_state_v1");
@@ -213,6 +215,10 @@ export function App() {
   const idlePreviewLastFetchAtRef = useRef<Map<string, number>>(new Map());
   const exitingSessionIdsRef = useRef<Set<string>>(new Set());
   const { isObserver } = useObserverMode(authMode);
+
+  useEffect(() => {
+    if (isObserver) setAxeArmed(false);
+  }, [isObserver]);
 
   // ---- Session helpers ----
 
@@ -730,6 +736,7 @@ export function App() {
 
   const openTerminal = useCallback(
     (sessionId: string, preferZone?: "main" | "bottom") => {
+      setAxeArmed(false);
       if (!isObserver) {
         const session = sessions.value.find((s) => s.session_id === sessionId);
         if (session?.state === "attention") {
@@ -744,6 +751,26 @@ export function App() {
       stopPolling();
     },
     [isObserver, stopPolling],
+  );
+
+  const disarmAxeMode = useCallback(() => {
+    setAxeArmed(false);
+  }, []);
+
+  const handleOverviewTap = useCallback(
+    (sessionId: string) => {
+      if (!axeArmed) {
+        openTerminal(sessionId);
+        return;
+      }
+
+      setAxeArmed(false);
+      if (navigator.vibrate) navigator.vibrate([20, 30, 20]);
+      void apiDeleteSession(sessionId, "kill_tmux").catch((err) => {
+        console.error("Failed to kill tmux session:", err);
+      });
+    },
+    [axeArmed, openTerminal],
   );
 
   const showOverview = useCallback(() => {
@@ -824,6 +851,10 @@ export function App() {
   const isOverview = currentView.value === "overview";
   const isTerminal = currentView.value === "terminal";
   const splitMode = isTerminal && zoneLayout.value === "single" && window.innerWidth > 768;
+  const showTransportBanner =
+    transportHealth.value !== "healthy" &&
+    transportHealth.value !== "disconnected";
+  const fieldAxeTopOffset = showTransportBanner ? 30 : 8;
 
   // In split mode: terminal left 50%, field right 50%
   // In dual-zone: terminal full screen, field hidden
@@ -836,27 +867,26 @@ export function App() {
   return (
     <div style={{ position: "absolute", inset: 0, overflow: "hidden" }}>
       {/* Transport health banner */}
-      {transportHealth.value !== "healthy" &&
-        transportHealth.value !== "disconnected" && (
-          <div
-            style={{
-              position: "fixed",
-              top: 0,
-              left: 0,
-              right: 0,
-              zIndex: 1000,
-              background:
-                transportHealth.value === "degraded" ? "#F5A623" : "#E74C3C",
-              color: "#fff",
-              textAlign: "center",
-              padding: "4px 0",
-              fontSize: "12px",
-              fontWeight: 600,
-            }}
-          >
-            Transport {transportHealth.value}
-          </div>
-        )}
+      {showTransportBanner && (
+        <div
+          style={{
+            position: "fixed",
+            top: 0,
+            left: 0,
+            right: 0,
+            zIndex: 1000,
+            background:
+              transportHealth.value === "degraded" ? "#F5A623" : "#E74C3C",
+            color: "#fff",
+            textAlign: "center",
+            padding: "4px 0",
+            fontSize: "12px",
+            fontWeight: 600,
+          }}
+        >
+          Transport {transportHealth.value}
+        </div>
+      )}
 
       {/* Overview field */}
       <div
@@ -876,7 +906,11 @@ export function App() {
           idlePreviews={idlePreviews.value}
           observer={isObserver}
           compact={splitMode}
-          onTapSession={openTerminal}
+          axeTopOffset={fieldAxeTopOffset}
+          axeArmed={axeArmed}
+          onToggleAxe={() => setAxeArmed((prev) => !prev)}
+          onDisarmAxe={disarmAxeMode}
+          onTapSession={handleOverviewTap}
           onDragToBottom={(id) => openTerminal(id, "bottom")}
           onCreateSession={async (cwd?: string, spawnTool?: SpawnTool) => {
             if (isObserver) return "";
