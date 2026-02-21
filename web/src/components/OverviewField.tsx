@@ -1,5 +1,9 @@
 import { useEffect, useRef, useCallback, useState } from "preact/hooks";
-import type { SessionSummary, SessionState } from "@/types";
+import type { SessionSummary, SpawnTool } from "@/types";
+import {
+  throngletRestStageForSession,
+  type ThrongletRestStage,
+} from "@/lib/thronglet-motion";
 import { SpawnMenu } from "./SpawnMenu";
 import { ThrongletSprite } from "./ThrongletSprite";
 
@@ -35,6 +39,45 @@ const PUSH_STRENGTH = 60;
 const WANDER_INTERVAL = 3000;
 const WANDER_X = 100;
 const WANDER_Y = 80;
+
+interface MotionProfile {
+  wanderXScale: number;
+  wanderYScale: number;
+  downwardBias: number;
+  movable: boolean;
+  allowSeparation: boolean;
+}
+
+const MOTION_BY_REST_STAGE: Record<ThrongletRestStage, MotionProfile> = {
+  active: {
+    wanderXScale: 1,
+    wanderYScale: 1,
+    downwardBias: 0,
+    movable: true,
+    allowSeparation: true,
+  },
+  drowsy: {
+    wanderXScale: 0.3,
+    wanderYScale: 0.25,
+    downwardBias: 14,
+    movable: true,
+    allowSeparation: true,
+  },
+  sleeping: {
+    wanderXScale: 0,
+    wanderYScale: 0,
+    downwardBias: 8,
+    movable: true,
+    allowSeparation: false,
+  },
+  deep_sleep: {
+    wanderXScale: 0,
+    wanderYScale: 0,
+    downwardBias: 0,
+    movable: false,
+    allowSeparation: false,
+  },
+};
 
 // ---- ThrongletEntity sub-component ----
 
@@ -374,7 +417,7 @@ interface OverviewFieldProps {
   compact?: boolean;
   onTapSession: (id: string) => void;
   onDragToBottom: (id: string) => void;
-  onCreateSession: (cwd?: string) => Promise<string>;
+  onCreateSession: (cwd?: string, spawnTool?: SpawnTool) => Promise<string>;
 }
 
 export function OverviewField({
@@ -396,12 +439,17 @@ export function OverviewField({
   // Centralized position state for all thronglets
   const [positions, setPositions] = useState<Record<string, { x: number; y: number }>>({});
   const exitingSetRef = useRef<Set<string>>(new Set());
+  const sessionsRef = useRef<SessionSummary[]>(sessions);
 
   // Sizing constants (shared between init, wander, and entity rendering)
   const throngletSize = compact ? 60 : 80;
   const spriteHalf = throngletSize / 2;
   const bubbleTopClearance = compact ? 86 : 96;
   const labelClearance = compact ? 105 : 120;
+
+  useEffect(() => {
+    sessionsRef.current = sessions;
+  }, [sessions]);
 
   // Initialize positions for new sessions, handle exits, clean up removed sessions
   useEffect(() => {
@@ -485,20 +533,49 @@ export function OverviewField({
         const maxY = Math.max(fieldH - labelClearance, 0);
 
         const next = { ...prev };
-        const activeIds = Object.keys(next).filter(
-          (id) => !exitingSetRef.current.has(id),
+        const nowMs = Date.now();
+        const sessionById = new Map(
+          sessionsRef.current.map((session) => [session.session_id, session]),
         );
+        const activeIds = Object.keys(next).filter(
+          (id) => !exitingSetRef.current.has(id) && sessionById.has(id),
+        );
+        const stageById = new Map<string, ThrongletRestStage>();
+        for (const id of activeIds) {
+          const session = sessionById.get(id);
+          if (!session) continue;
+          stageById.set(
+            id,
+            throngletRestStageForSession(
+              session.state,
+              session.last_activity_at,
+              nowMs,
+            ),
+          );
+        }
 
         // Step 1: Apply random wander
         for (const id of activeIds) {
+          const stage = stageById.get(id) ?? "active";
+          const profile = MOTION_BY_REST_STAGE[stage];
+          if (!profile.movable) continue;
           next[id] = {
-            x: next[id].x + (Math.random() - 0.5) * WANDER_X,
-            y: next[id].y + (Math.random() - 0.5) * WANDER_Y,
+            x:
+              next[id].x +
+              (Math.random() - 0.5) * WANDER_X * profile.wanderXScale,
+            y:
+              next[id].y +
+              (Math.random() - 0.5) * WANDER_Y * profile.wanderYScale +
+              profile.downwardBias,
           };
         }
 
         // Step 2: Apply separation forces
         for (const id of activeIds) {
+          const stage = stageById.get(id) ?? "active";
+          const profile = MOTION_BY_REST_STAGE[stage];
+          if (!profile.allowSeparation) continue;
+
           let rx = 0;
           let ry = 0;
           for (const otherId of activeIds) {
@@ -531,7 +608,7 @@ export function OverviewField({
   }, [throngletSize, bubbleTopClearance, labelClearance]);
 
   const startHatch = useCallback(
-    (clientX: number, clientY: number, cwd?: string) => {
+    (clientX: number, clientY: number, cwd?: string, spawnTool?: SpawnTool) => {
       // Convert client coords to field-relative coords.
       const field = fieldRef.current;
       const rect = field?.getBoundingClientRect();
@@ -541,7 +618,7 @@ export function OverviewField({
       setHatchState({ x, y, phase: "dropping", sessionId: null });
 
       // Fire API call in parallel with animation.
-      void onCreateSession(cwd).then((sessionId) => {
+      void onCreateSession(cwd, spawnTool).then((sessionId) => {
         if (sessionId) {
           spawnPositionsRef.current.set(sessionId, { x, y });
           setHatchState((prev) =>
@@ -588,10 +665,15 @@ export function OverviewField({
   );
 
   const handleMenuSelect = useCallback(
-    (path: string) => {
+    (path: string, spawnTool?: SpawnTool) => {
       setMenuPos(null);
       if (navigator.vibrate) navigator.vibrate(50);
-      startHatch(menuClickPosRef.current.x, menuClickPosRef.current.y, path);
+      startHatch(
+        menuClickPosRef.current.x,
+        menuClickPosRef.current.y,
+        path,
+        spawnTool,
+      );
     },
     [startHatch],
   );

@@ -1,6 +1,11 @@
 import { useEffect, useMemo, useState } from "preact/hooks";
 import type { SessionState } from "@/types";
 import { ACTIVE, DROWSY, SLEEPING, DEEP_SLEEP } from "@/lib/thronglet-svgs";
+import {
+  DEEP_SLEEP_AFTER_MS,
+  DROWSY_AFTER_MS,
+  SLEEPING_AFTER_MS,
+} from "@/lib/thronglet-motion";
 
 // ---- Color presets per tool ----
 
@@ -53,13 +58,10 @@ function canonicalToolName(tool?: string | null): keyof typeof TOOL_COLORS | nul
 
 // ---- Idle-depth SVG selection ----
 
-const DROWSY_AFTER_MS = 20_000;
-const SLEEPING_AFTER_MS = 60_000;
-const DEEP_SLEEP_AFTER_MS = 120_000;
 const IDLE_SPRITE_TICK_MS = 5_000;
 
 function svgForState(state: SessionState, lastActivityAt?: string): string {
-  if (state === "idle") {
+  if (state === "idle" || state === "attention") {
     if (!lastActivityAt) return DROWSY;
     const lastMs = new Date(lastActivityAt).getTime();
     if (!Number.isFinite(lastMs)) return DROWSY;
@@ -90,10 +92,10 @@ export function ThrongletSprite({
 }: ThrongletSpriteProps) {
   const [idleTick, setIdleTick] = useState(0);
 
-  // Keep idle-depth sprites transitioning (active -> drowsy -> sleeping)
+  // Keep rest-state sprites transitioning (active -> drowsy -> sleeping)
   // even when no other props change.
   useEffect(() => {
-    if (state !== "idle") return;
+    if (state !== "idle" && state !== "attention") return;
     const timer = setInterval(() => {
       setIdleTick((value) => value + 1);
     }, IDLE_SPRITE_TICK_MS);
