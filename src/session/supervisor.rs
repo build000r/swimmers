@@ -304,6 +304,7 @@ impl SessionSupervisor {
         self: &Arc<Self>,
         name: Option<String>,
         cwd: Option<String>,
+        spawn_tool: Option<crate::types::SpawnTool>,
     ) -> anyhow::Result<SessionSummary> {
         let start_cwd = cwd.or_else(current_working_dir);
         let requested_name = name.and_then(|n| {
@@ -334,6 +335,7 @@ impl SessionSupervisor {
             start_cwd.clone(),
             self.config.clone(),
         )?;
+        let bootstrap_handle = handle.clone();
 
         let mut sessions = self.sessions.write().await;
         sessions.insert(session_id.clone(), handle);
@@ -343,6 +345,23 @@ impl SessionSupervisor {
         let mut summary = self.build_placeholder_summary(&session_id, &tmux_name);
         if let Some(cwd) = start_cwd {
             summary.cwd = cwd;
+        }
+
+        if let Some(tool) = spawn_tool {
+            let mut command = String::from(tool.command());
+            command.push('\n');
+            if let Err(e) = bootstrap_handle
+                .send(SessionCommand::WriteInput(command.into_bytes()))
+                .await
+            {
+                warn!(
+                    session_id = %session_id,
+                    tmux_name = %tmux_name,
+                    tool = ?tool,
+                    "failed to enqueue spawn command: {}",
+                    e
+                );
+            }
         }
 
         // Broadcast lifecycle event.

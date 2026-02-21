@@ -32,6 +32,22 @@ impl Default for TransportHealth {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SpawnTool {
+    Claude,
+    Codex,
+}
+
+impl SpawnTool {
+    pub fn command(self) -> &'static str {
+        match self {
+            Self::Claude => "claude",
+            Self::Codex => "codex",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionSummary {
     pub session_id: String,
@@ -82,6 +98,7 @@ pub struct BootstrapResponse {
 pub struct CreateSessionRequest {
     pub name: Option<String>,
     pub cwd: Option<String>,
+    pub spawn_tool: Option<SpawnTool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -94,6 +111,19 @@ pub struct DirEntry {
 pub struct DirListResponse {
     pub path: String,
     pub entries: Vec<DirEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SkillSummary {
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SkillListResponse {
+    pub tool: String,
+    pub skills: Vec<SkillSummary>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -289,7 +319,7 @@ pub fn detect_tool_name(comm: &str) -> Option<&'static str> {
 
 #[cfg(test)]
 mod tests {
-    use super::{context_limit_for_tool, detect_tool_name};
+    use super::{context_limit_for_tool, detect_tool_name, SpawnTool};
 
     #[test]
     fn detect_tool_name_normalizes_aliases_and_paths() {
@@ -314,5 +344,11 @@ mod tests {
     fn context_limit_falls_back_for_unknown_tool() {
         assert_eq!(context_limit_for_tool(None), 128_000);
         assert_eq!(context_limit_for_tool(Some("UnknownTool")), 128_000);
+    }
+
+    #[test]
+    fn spawn_tool_commands_match_cli_entrypoints() {
+        assert_eq!(SpawnTool::Claude.command(), "claude");
+        assert_eq!(SpawnTool::Codex.command(), "codex");
     }
 }

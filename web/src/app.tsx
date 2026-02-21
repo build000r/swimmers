@@ -1,6 +1,11 @@
 import { useEffect, useRef, useCallback, useState } from "preact/hooks";
 import { signal, batch } from "@preact/signals";
-import type { SessionSummary, TransportHealth, BootstrapResponse } from "@/types";
+import type {
+  SessionSummary,
+  TransportHealth,
+  BootstrapResponse,
+  SpawnTool,
+} from "@/types";
 import type {
   SessionStatePayload,
   ThoughtUpdatePayload,
@@ -873,11 +878,11 @@ export function App() {
           compact={splitMode}
           onTapSession={openTerminal}
           onDragToBottom={(id) => openTerminal(id, "bottom")}
-          onCreateSession={async (cwd?: string) => {
+          onCreateSession={async (cwd?: string, spawnTool?: SpawnTool) => {
             if (isObserver) return "";
             try {
               const { createSession } = await import("@/services/api");
-              const resp = await createSession(undefined, cwd);
+              const resp = await createSession(undefined, cwd, spawnTool);
               const existingIndex = sessions.value.findIndex(
                 (s) => s.session_id === resp.session.session_id,
               );

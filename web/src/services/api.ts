@@ -4,6 +4,10 @@ import type {
   CreateSessionResponse,
   TerminalSnapshot,
   SessionPaneTailResponse,
+  DirListResponse,
+  SkillListResponse,
+  SkillRegistryTool,
+  SpawnTool,
 } from "@/types";
 
 const BASE = "/v1";
@@ -31,13 +35,34 @@ export async function fetchSessions(): Promise<SessionListResponse> {
 /** POST /v1/sessions - create a new tmux session */
 export async function createSession(
   name?: string,
+  cwd?: string,
+  spawnTool?: SpawnTool,
 ): Promise<CreateSessionResponse> {
   const res = await fetch(`${BASE}/sessions`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ name: name ?? null }),
+    body: JSON.stringify({
+      name: name ?? null,
+      cwd: cwd ?? null,
+      spawn_tool: spawnTool ?? null,
+    }),
   });
   return json<CreateSessionResponse>(res);
+}
+
+/** GET /v1/dirs - list subdirectories */
+export async function listDirs(path?: string): Promise<DirListResponse> {
+  const params = path ? `?path=${encodeURIComponent(path)}` : "";
+  const res = await fetch(`${BASE}/dirs${params}`);
+  return json<DirListResponse>(res);
+}
+
+/** GET /v1/skills?tool=claude|codex - list installed skills */
+export async function listSkills(
+  tool: SkillRegistryTool,
+): Promise<SkillListResponse> {
+  const res = await fetch(`${BASE}/skills?tool=${encodeURIComponent(tool)}`);
+  return json<SkillListResponse>(res);
 }
 
 /** DELETE /v1/sessions/{id} - destroy a session */

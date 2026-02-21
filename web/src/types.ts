@@ -8,6 +8,9 @@ export type TransportHealth =
   | "overloaded"
   | "disconnected";
 
+export type SpawnTool = "claude" | "codex";
+export type SkillRegistryTool = "claude" | "codex";
+
 // ---- REST Payloads ----
 
 export interface SessionSummary {
@@ -64,6 +67,26 @@ export interface CreateSessionResponse {
 export interface ErrorResponse {
   code: string;
   message?: string;
+}
+
+export interface DirEntry {
+  name: string;
+  has_children: boolean;
+}
+
+export interface DirListResponse {
+  path: string;
+  entries: DirEntry[];
+}
+
+export interface SkillSummary {
+  name: string;
+  description?: string;
+}
+
+export interface SkillListResponse {
+  tool: SkillRegistryTool;
+  skills: SkillSummary[];
 }
 
 // ---- Control Events (Server -> Client JSON) ----
