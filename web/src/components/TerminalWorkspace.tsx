@@ -64,6 +64,7 @@ const QUICK_COMMAND_STORAGE_KEY = "throngterm.quick-commands.v1";
 const DEFAULT_QUICK_COMMANDS = ["ls", "git status", "npm test"];
 const MAX_QUICK_COMMANDS = 12;
 const MAX_QUICK_COMMAND_LENGTH = 80;
+const SKILL_AUTO_RETRY_DELAYS_MS = [1500, 4000, 8000] as const;
 const LONG_PRESS_DELAY_MS = 450;
 const LONG_PRESS_CANCEL_DISTANCE_PX = 16;
 const ACTION_TOAST_MS = 1200;
@@ -225,6 +226,7 @@ export function TerminalWorkspace({
   const [skillChips, setSkillChips] = useState<SkillSummary[]>([]);
   const [skillsLoading, setSkillsLoading] = useState(false);
   const [skillsError, setSkillsError] = useState<string | null>(null);
+  const [skillsReloadSeq, setSkillsReloadSeq] = useState(0);
   const sessionToolKind = classifySessionTool(session.tool);
   const isAgentSession =
     sessionToolKind === "claude" || sessionToolKind === "codex";
@@ -239,6 +241,7 @@ export function TerminalWorkspace({
     setSkillChips([]);
     setSkillsLoading(false);
     setSkillsError(null);
+    setSkillsReloadSeq(0);
     setEditingCommandChips(false);
     setShowTerminalActions(false);
     setShowFindBar(false);
@@ -285,21 +288,27 @@ export function TerminalWorkspace({
       setSkillChips([]);
       setSkillsLoading(false);
       setSkillsError(null);
+      setSkillsReloadSeq(0);
       return;
     }
 
+    const attempt = skillsReloadSeq;
+    const forceRefresh = attempt > 0;
     let cancelled = false;
+    let retryTimer: ReturnType<typeof setTimeout> | null = null;
     setSkillsError(null);
 
-    const cached = SKILL_REGISTRY_CACHE[sessionToolKind];
-    if (cached) {
-      setSkillChips(cached);
-      setSkillsLoading(false);
-      return;
+    if (!forceRefresh) {
+      const cached = SKILL_REGISTRY_CACHE[sessionToolKind];
+      if (cached) {
+        setSkillChips(cached);
+        setSkillsLoading(false);
+        return;
+      }
     }
 
     setSkillsLoading(true);
-    loadSkillRegistry(sessionToolKind)
+    loadSkillRegistry(sessionToolKind, forceRefresh)
       .then((skills) => {
         if (cancelled) return;
         setSkillChips(skills);
@@ -309,13 +318,22 @@ export function TerminalWorkspace({
         if (cancelled) return;
         setSkillChips([]);
         setSkillsLoading(false);
-        setSkillsError("skills unavailable");
+        setSkillsError(`skills unavailable for ${sessionToolKind}`);
+        const retryDelayMs = SKILL_AUTO_RETRY_DELAYS_MS[attempt];
+        if (retryDelayMs !== undefined) {
+          retryTimer = setTimeout(() => {
+            setSkillsReloadSeq((prev) => prev + 1);
+          }, retryDelayMs);
+        }
       });
 
     return () => {
       cancelled = true;
+      if (retryTimer) {
+        clearTimeout(retryTimer);
+      }
     };
-  }, [isAgentSession, sessionToolKind]);
+  }, [isAgentSession, sessionToolKind, skillsReloadSeq]);
 
   const pushActionToast = useCallback((message: string) => {
     setActionToast(message);
@@ -664,19 +682,8 @@ export function TerminalWorkspace({
 
   const handleRefreshSkills = useCallback(() => {
     if (!isAgentSession) return;
-    setSkillsLoading(true);
-    setSkillsError(null);
-    void loadSkillRegistry(sessionToolKind, true)
-      .then((skills) => {
-        setSkillChips(skills);
-        setSkillsLoading(false);
-      })
-      .catch(() => {
-        setSkillChips([]);
-        setSkillsLoading(false);
-        setSkillsError("skills unavailable");
-      });
-  }, [isAgentSession, sessionToolKind]);
+    setSkillsReloadSeq((prev) => prev + 1);
+  }, [isAgentSession]);
 
   const handleAddCommandChip = useCallback(() => {
     if (observer) return;
