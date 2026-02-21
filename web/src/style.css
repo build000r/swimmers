@@ -361,6 +361,11 @@ html, body {
 }
 
 .mobile-keybar {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 18;
   display: flex;
   align-items: center;
   gap: 6px;
@@ -371,6 +376,11 @@ html, body {
   overflow-x: auto;
   overscroll-behavior-x: contain;
   -webkit-overflow-scrolling: touch;
+}
+
+.mobile-keybar-spacer {
+  flex-shrink: 0;
+  height: calc(48px + var(--safe-bottom));
 }
 
 .mobile-keybar-btn {
@@ -391,13 +401,9 @@ html, body {
   opacity: 0.75;
 }
 
-.mobile-keybar-btn.active {
-  border-color: #5BC0EB;
-  color: #5BC0EB;
-}
-
 @media (min-width: 769px) {
-  .mobile-keybar {
+  .mobile-keybar,
+  .mobile-keybar-spacer {
     display: none;
   }
 }

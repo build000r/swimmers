@@ -2,32 +2,22 @@ import { useEffect, useRef, useCallback, useState } from "preact/hooks";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { WebglAddon } from "@xterm/addon-webgl";
-import type { SessionSummary, SessionState } from "@/types";
+import { SearchAddon } from "@xterm/addon-search";
+import type { SessionSummary, SkillRegistryTool, SkillSummary } from "@/types";
 import { realtime } from "@/app";
 import type { TerminalOutputFrame } from "@/services/realtime";
 import type { CachedTerminal } from "@/hooks/useTerminalCache";
-import { fetchSnapshot } from "@/services/api";
+import { fetchSnapshot, listSkills } from "@/services/api";
+import { ThrongletSprite } from "./ThrongletSprite";
 
-// ---- Helpers ----
-
-function spriteForState(state: SessionState): string {
-  const map: Record<string, string> = {
-    idle: "/assets/idle.png",
-    busy: "/assets/walking.png",
-    error: "/assets/beep.png",
-    attention: "/assets/idle.png",
-    exited: "/assets/sad.png",
-  };
-  return map[state] ?? map.idle;
+function cwdLabel(cwd: string): string {
+  const trimmed = cwd.trim();
+  if (!trimmed || trimmed === "/") return "";
+  const parts = trimmed.replace(/\/+$/, "").split("/").filter(Boolean);
+  if (parts.length === 0) return "";
+  if (parts.length === 1) return parts[0];
+  return `${parts[parts.length - 2]}/${parts[parts.length - 1]}`;
 }
-
-function repoName(cwd: string): string {
-  if (!cwd || cwd === "/") return "root";
-  const parts = cwd.replace(/\/+$/, "").split("/");
-  return parts[parts.length - 1] || "root";
-}
-
-// ---- Component ----
 
 interface TerminalWorkspaceProps {
   session: SessionSummary;
@@ -43,7 +33,151 @@ interface TerminalWorkspaceProps {
   onClose: () => void;
 }
 
+type MobileKeyId =
+  | "tab"
+  | "esc"
+  | "ctrl_c"
+  | "up"
+  | "down"
+  | "left"
+  | "right"
+  | "pgup"
+  | "pgdn"
+  | "pipe"
+  | "slash"
+  | "tilde";
+
+type MobileKeyConfig = {
+  id: MobileKeyId;
+  label: string;
+  input?: string;
+};
+
+type QuickCommandMap = Record<string, string[]>;
+type SessionToolKind = "raw" | SkillRegistryTool;
+
 const encoder = new TextEncoder();
+const SEARCH_ADDONS_BY_TERM = new WeakMap<Terminal, SearchAddon>();
+const SKILL_REGISTRY_CACHE: Partial<Record<SkillRegistryTool, SkillSummary[]>> = {};
+const SKILL_REGISTRY_PENDING = new Map<SkillRegistryTool, Promise<SkillSummary[]>>();
+const QUICK_COMMAND_STORAGE_KEY = "throngterm.quick-commands.v1";
+const DEFAULT_QUICK_COMMANDS = ["ls", "git status", "npm test"];
+const MAX_QUICK_COMMANDS = 12;
+const MAX_QUICK_COMMAND_LENGTH = 80;
+const LONG_PRESS_DELAY_MS = 450;
+const LONG_PRESS_CANCEL_DISTANCE_PX = 16;
+const ACTION_TOAST_MS = 1200;
+
+const MOBILE_KEYS: MobileKeyConfig[] = [
+  { id: "tab", label: "Tab", input: "\t" },
+  { id: "esc", label: "Esc", input: "\x1b" },
+  { id: "ctrl_c", label: "Ctrl+C", input: "\x03\r" },
+  { id: "up", label: "↑", input: "\x1b[A" },
+  { id: "down", label: "↓", input: "\x1b[B" },
+  { id: "left", label: "←", input: "\x1b[D" },
+  { id: "right", label: "→", input: "\x1b[C" },
+  { id: "pgup", label: "PgUp", input: "\x1b[5~" },
+  { id: "pgdn", label: "PgDn", input: "\x1b[6~" },
+  { id: "pipe", label: "|", input: "|" },
+  { id: "slash", label: "/", input: "/" },
+  { id: "tilde", label: "~", input: "~" },
+];
+
+function classifySessionTool(tool: string | null): SessionToolKind {
+  if (!tool) return "raw";
+  const normalized = tool.trim().toLowerCase();
+  if (!normalized) return "raw";
+  if (normalized.includes("claude")) return "claude";
+  if (normalized.includes("codex")) return "codex";
+  return "raw";
+}
+
+function skillInvocationPrefix(tool: SessionToolKind): string {
+  if (tool === "claude") return "/";
+  if (tool === "codex") return "$";
+  return "";
+}
+
+async function loadSkillRegistry(
+  tool: SkillRegistryTool,
+  forceRefresh = false,
+): Promise<SkillSummary[]> {
+  if (!forceRefresh) {
+    const cached = SKILL_REGISTRY_CACHE[tool];
+    if (cached) return cached;
+    const pending = SKILL_REGISTRY_PENDING.get(tool);
+    if (pending) return pending;
+  }
+
+  const request = listSkills(tool)
+    .then((resp) => {
+      const skills = resp.skills ?? [];
+      SKILL_REGISTRY_CACHE[tool] = skills;
+      SKILL_REGISTRY_PENDING.delete(tool);
+      return skills;
+    })
+    .catch((error) => {
+      SKILL_REGISTRY_PENDING.delete(tool);
+      throw error;
+    });
+
+  SKILL_REGISTRY_PENDING.set(tool, request);
+  return request;
+}
+
+function sanitizeQuickCommands(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  const next: string[] = [];
+  for (const item of value) {
+    if (typeof item !== "string") continue;
+    const trimmed = item.trim();
+    if (!trimmed) continue;
+    const command = trimmed.slice(0, MAX_QUICK_COMMAND_LENGTH);
+    if (next.includes(command)) continue;
+    next.push(command);
+    if (next.length >= MAX_QUICK_COMMANDS) break;
+  }
+  return next;
+}
+
+function readQuickCommandMap(): QuickCommandMap {
+  if (typeof window === "undefined") return {};
+  try {
+    const raw = window.localStorage.getItem(QUICK_COMMAND_STORAGE_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw) as unknown;
+    if (!parsed || typeof parsed !== "object") return {};
+    const parsedObj = parsed as Record<string, unknown>;
+    const next: QuickCommandMap = {};
+    for (const [sessionId, commands] of Object.entries(parsedObj)) {
+      if (!sessionId) continue;
+      const sanitized = sanitizeQuickCommands(commands);
+      if (sanitized.length > 0) next[sessionId] = sanitized;
+    }
+    return next;
+  } catch {
+    return {};
+  }
+}
+
+function writeQuickCommandMap(map: QuickCommandMap): void {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.setItem(QUICK_COMMAND_STORAGE_KEY, JSON.stringify(map));
+  } catch {
+    // Ignore storage failures.
+  }
+}
+
+function ensureSearchAddon(term: Terminal): SearchAddon {
+  let addon = SEARCH_ADDONS_BY_TERM.get(term);
+  if (!addon) {
+    addon = new SearchAddon();
+    term.loadAddon(addon);
+    SEARCH_ADDONS_BY_TERM.set(term, addon);
+  }
+  return addon;
+}
 
 export function TerminalWorkspace({
   session,
@@ -56,12 +190,20 @@ export function TerminalWorkspace({
   const containerRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
-  const hostElRef = useRef<HTMLDivElement | null>(null);
+  const searchAddonRef = useRef<SearchAddon | null>(null);
   const resizeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const focusTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const actionToastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const longPressTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const longPressStartRef = useRef<{ x: number; y: number } | null>(null);
+  const findInputRef = useRef<HTMLInputElement | null>(null);
   const seqRef = useRef<number>(0);
   const snapshotReadyRef = useRef(false);
   const pendingFramesRef = useRef<TerminalOutputFrame[]>([]);
+  const initDoneRef = useRef(false);
+  const autoRecoveryKeyRef = useRef<string | null>(null);
+  const recoverFromSnapshotRef = useRef<(() => Promise<void>) | null>(null);
+
   const [title, setTitle] = useState(`tmux a -t ${session.tmux_name}`);
   const [titleCopied, setTitleCopied] = useState(false);
   const [rushingOff, setRushingOff] = useState(false);
@@ -70,15 +212,153 @@ export function TerminalWorkspace({
   >("attaching");
   const [recoveryBanner, setRecoveryBanner] = useState<string | null>(null);
   const [recoveryRetrying, setRecoveryRetrying] = useState(false);
-  const initDoneRef = useRef(false);
-  const autoRecoveryKeyRef = useRef<string | null>(null);
-  const recoverFromSnapshotRef = useRef<(() => Promise<void>) | null>(null);
+  const [commandChips, setCommandChips] = useState<string[]>(
+    DEFAULT_QUICK_COMMANDS,
+  );
+  const [editingCommandChips, setEditingCommandChips] = useState(false);
+  const [showTerminalActions, setShowTerminalActions] = useState(false);
+  const [showFindBar, setShowFindBar] = useState(false);
+  const [findQuery, setFindQuery] = useState("");
+  const [findNoMatch, setFindNoMatch] = useState(false);
+  const [actionToast, setActionToast] = useState<string | null>(null);
+  const [mobileKeybarBottom, setMobileKeybarBottom] = useState(0);
+  const [skillChips, setSkillChips] = useState<SkillSummary[]>([]);
+  const [skillsLoading, setSkillsLoading] = useState(false);
+  const [skillsError, setSkillsError] = useState<string | null>(null);
+  const sessionToolKind = classifySessionTool(session.tool);
+  const isAgentSession =
+    sessionToolKind === "claude" || sessionToolKind === "codex";
 
   useEffect(() => {
     setTitle(`tmux a -t ${session.tmux_name}`);
   }, [session.tmux_name]);
 
-  // ---- Terminal init / restore ----
+  useEffect(() => {
+    const stored = readQuickCommandMap()[session.session_id];
+    setCommandChips(stored && stored.length > 0 ? stored : DEFAULT_QUICK_COMMANDS);
+    setSkillChips([]);
+    setSkillsLoading(false);
+    setSkillsError(null);
+    setEditingCommandChips(false);
+    setShowTerminalActions(false);
+    setShowFindBar(false);
+    setFindNoMatch(false);
+  }, [session.session_id]);
+
+  useEffect(() => {
+    const viewport = window.visualViewport;
+    if (!viewport) return;
+
+    const updateBottomOffset = () => {
+      const overlap = Math.max(
+        0,
+        window.innerHeight - (viewport.height + viewport.offsetTop),
+      );
+      setMobileKeybarBottom(Math.round(overlap));
+    };
+
+    updateBottomOffset();
+    viewport.addEventListener("resize", updateBottomOffset);
+    viewport.addEventListener("scroll", updateBottomOffset);
+    window.addEventListener("orientationchange", updateBottomOffset);
+
+    return () => {
+      viewport.removeEventListener("resize", updateBottomOffset);
+      viewport.removeEventListener("scroll", updateBottomOffset);
+      window.removeEventListener("orientationchange", updateBottomOffset);
+    };
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      if (actionToastTimerRef.current) {
+        clearTimeout(actionToastTimerRef.current);
+      }
+      if (longPressTimerRef.current) {
+        clearTimeout(longPressTimerRef.current);
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!isAgentSession) {
+      setSkillChips([]);
+      setSkillsLoading(false);
+      setSkillsError(null);
+      return;
+    }
+
+    let cancelled = false;
+    setSkillsError(null);
+
+    const cached = SKILL_REGISTRY_CACHE[sessionToolKind];
+    if (cached) {
+      setSkillChips(cached);
+      setSkillsLoading(false);
+      return;
+    }
+
+    setSkillsLoading(true);
+    loadSkillRegistry(sessionToolKind)
+      .then((skills) => {
+        if (cancelled) return;
+        setSkillChips(skills);
+        setSkillsLoading(false);
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setSkillChips([]);
+        setSkillsLoading(false);
+        setSkillsError("skills unavailable");
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [isAgentSession, sessionToolKind]);
+
+  const pushActionToast = useCallback((message: string) => {
+    setActionToast(message);
+    if (actionToastTimerRef.current) {
+      clearTimeout(actionToastTimerRef.current);
+    }
+    actionToastTimerRef.current = setTimeout(() => {
+      setActionToast(null);
+      actionToastTimerRef.current = null;
+    }, ACTION_TOAST_MS);
+  }, []);
+
+  const persistCommandChips = useCallback(
+    (next: string[]) => {
+      const sanitized = sanitizeQuickCommands(next);
+      setCommandChips(sanitized);
+      const map = readQuickCommandMap();
+      if (sanitized.length > 0) {
+        map[session.session_id] = sanitized;
+      } else {
+        delete map[session.session_id];
+      }
+      writeQuickCommandMap(map);
+    },
+    [session.session_id],
+  );
+
+  const sendInput = useCallback(
+    (data: string) => {
+      if (observer || !data) return;
+      realtime.sendInput(session.session_id, encoder.encode(data));
+      termRef.current?.focus();
+    },
+    [observer, session.session_id],
+  );
+
+  const clearLongPress = useCallback(() => {
+    if (longPressTimerRef.current) {
+      clearTimeout(longPressTimerRef.current);
+      longPressTimerRef.current = null;
+    }
+    longPressStartRef.current = null;
+  }, []);
 
   useEffect(() => {
     if (initDoneRef.current) return;
@@ -143,13 +423,11 @@ export function TerminalWorkspace({
     recoverFromSnapshotRef.current = recoverFromSnapshot;
 
     if (cached) {
-      // Restore from cache — terminal already has content, no snapshot needed
       term = cached.term;
       fitAddon = cached.fitAddon;
       hostEl = cached.hostEl;
       snapshotReadyRef.current = true;
       container.appendChild(hostEl);
-      // Re-subscribe in case WebSocket reconnected since cache
       setLifecycleState("snapshot_or_replay");
       realtime.subscribeSession(session.session_id, seqRef.current);
       realtime.sendResize(session.session_id, term.cols, term.rows);
@@ -157,7 +435,6 @@ export function TerminalWorkspace({
       term.focus();
       markLive();
     } else {
-      // Create new terminal
       hostEl = document.createElement("div");
       hostEl.className = "term-host";
       hostEl.style.width = "100%";
@@ -182,16 +459,14 @@ export function TerminalWorkspace({
       term.loadAddon(fitAddon);
       term.open(hostEl);
 
-      // Try loading WebGL addon for performance
       try {
         const webgl = new WebglAddon();
         webgl.onContextLoss(() => webgl.dispose());
         term.loadAddon(webgl);
       } catch {
-        // WebGL not available, software renderer is fine
+        // WebGL not available, software renderer is fine.
       }
 
-      // Disable iOS autocorrect on the hidden textarea
       const textarea = hostEl.querySelector("textarea");
       if (textarea) {
         textarea.setAttribute("autocapitalize", "off");
@@ -202,15 +477,10 @@ export function TerminalWorkspace({
 
       fitAddon.fit();
 
-      // Subscribe to session via realtime
       setLifecycleState("snapshot_or_replay");
       realtime.subscribeSession(session.session_id);
-
-      // Send initial resize
       realtime.sendResize(session.session_id, term.cols, term.rows);
 
-      // Fetch snapshot so existing terminal content shows immediately.
-      // Output frames are buffered until the snapshot loads to prevent garbled display.
       fetchSnapshot(session.session_id)
         .then((snapshot) => {
           if (disposed) return;
@@ -219,19 +489,16 @@ export function TerminalWorkspace({
           }
           seqRef.current = snapshot.latest_seq;
           snapshotReadyRef.current = true;
-          // Flush any frames that arrived while the snapshot was loading
           flushPendingFrames();
           markLive();
         })
         .catch(() => {
           if (disposed) return;
-          // Snapshot unavailable — flush buffered frames and accept live output
           snapshotReadyRef.current = true;
           flushPendingFrames();
           markLive();
         });
 
-      // Focus after layout settles
       focusTimerRef.current = setTimeout(() => {
         if (disposed) return;
         fitAddon.fit();
@@ -241,18 +508,14 @@ export function TerminalWorkspace({
 
     termRef.current = term;
     fitAddonRef.current = fitAddon;
-    hostElRef.current = hostEl;
-
-    // ---- Wire terminal output from realtime ----
+    searchAddonRef.current = ensureSearchAddon(term);
 
     const handleOutput = (frame: TerminalOutputFrame) => {
       if (frame.sessionId !== session.session_id) return;
       if (!snapshotReadyRef.current) {
-        // Buffer frames until snapshot loads to prevent garbled display
         pendingFramesRef.current.push(frame);
         return;
       }
-      // Skip frames already covered by the snapshot
       if (frame.seq <= seqRef.current) return;
       seqRef.current = frame.seq;
       term.write(frame.data);
@@ -284,27 +547,21 @@ export function TerminalWorkspace({
       },
     );
 
-    // ---- Wire terminal input (unless observer) ----
-
     let inputDisposable: { dispose: () => void } | null = null;
     if (!observer) {
       inputDisposable = term.onData((data: string) => {
-        const bytes = encoder.encode(data);
-        realtime.sendInput(session.session_id, bytes);
+        if (!data) return;
+        realtime.sendInput(session.session_id, encoder.encode(data));
       });
     }
 
-    // ---- Resize with debounce ----
-
-    let resizeDisposable: { dispose: () => void } | null = null;
-    resizeDisposable = term.onResize(({ cols, rows }) => {
+    const resizeDisposable = term.onResize(({ cols, rows }) => {
       if (resizeTimerRef.current) clearTimeout(resizeTimerRef.current);
       resizeTimerRef.current = setTimeout(() => {
         realtime.sendResize(session.session_id, cols, rows);
       }, 100);
     });
 
-    // Window/viewport resize -> refit
     const handleWindowResize = () => {
       if (resizeTimerRef.current) clearTimeout(resizeTimerRef.current);
       resizeTimerRef.current = setTimeout(() => {
@@ -316,10 +573,10 @@ export function TerminalWorkspace({
       window.visualViewport.addEventListener("resize", handleWindowResize);
     }
 
-    // Cleanup on unmount: cache the terminal instead of destroying it
     return () => {
       disposed = true;
       recoverFromSnapshotRef.current = null;
+      clearLongPress();
       window.removeEventListener("resize", handleWindowResize);
       if (window.visualViewport) {
         window.visualViewport.removeEventListener("resize", handleWindowResize);
@@ -336,13 +593,10 @@ export function TerminalWorkspace({
       }
       realtime.unsubscribeSession(session.session_id);
 
-      // Detach from DOM but keep alive for cache
       if (hostEl.parentNode) hostEl.parentNode.removeChild(hostEl);
       onCache({ term, fitAddon, hostEl, sessionId: session.session_id });
     };
-  }, [session.session_id]); // Only re-run if the session changes
-
-  // ---- Refit when the workspace container resizes (e.g., zone split change) ----
+  }, [session.session_id, observer]);
 
   useEffect(() => {
     const container = containerRef.current;
@@ -358,11 +612,16 @@ export function TerminalWorkspace({
     return () => observer.disconnect();
   }, []);
 
-  // ---- Auto-close on session exit ----
+  useEffect(() => {
+    if (!showFindBar) return;
+    const timer = setTimeout(() => {
+      findInputRef.current?.focus();
+    }, 0);
+    return () => clearTimeout(timer);
+  }, [showFindBar]);
 
   useEffect(() => {
     if (session.state === "exited") {
-      // Brief delay so the user sees the sad state, then close
       const timer = setTimeout(() => {
         onSessionExit(session.session_id);
       }, 600);
@@ -370,21 +629,20 @@ export function TerminalWorkspace({
     }
   }, [session.state, session.session_id, onSessionExit]);
 
-  // ---- Close with rush-off animation ----
-
   const handleClose = useCallback(() => {
     if (rushingOff) return;
     setRushingOff(true);
-    setTimeout(() => onClose(), 400);
+    setTimeout(() => onClose(), 200);
   }, [rushingOff, onClose]);
 
-  // ---- Title copy handler ----
-
   const handleTitleClick = useCallback(() => {
-    navigator.clipboard.writeText(title).then(() => {
-      setTitleCopied(true);
-      setTimeout(() => setTitleCopied(false), 800);
-    }).catch(() => {});
+    navigator.clipboard
+      .writeText(title)
+      .then(() => {
+        setTitleCopied(true);
+        setTimeout(() => setTitleCopied(false), 800);
+      })
+      .catch(() => {});
   }, [title]);
 
   const handleManualRecovery = useCallback(() => {
@@ -393,14 +651,213 @@ export function TerminalWorkspace({
     void recover();
   }, []);
 
+  const handleSkillChipPress = useCallback(
+    (skillName: string) => {
+      if (!isAgentSession) return;
+      const normalized = skillName.trim();
+      if (!normalized) return;
+      const prefix = skillInvocationPrefix(sessionToolKind);
+      sendInput(`${prefix}${normalized} `);
+    },
+    [isAgentSession, sessionToolKind, sendInput],
+  );
+
+  const handleRefreshSkills = useCallback(() => {
+    if (!isAgentSession) return;
+    setSkillsLoading(true);
+    setSkillsError(null);
+    void loadSkillRegistry(sessionToolKind, true)
+      .then((skills) => {
+        setSkillChips(skills);
+        setSkillsLoading(false);
+      })
+      .catch(() => {
+        setSkillChips([]);
+        setSkillsLoading(false);
+        setSkillsError("skills unavailable");
+      });
+  }, [isAgentSession, sessionToolKind]);
+
+  const handleAddCommandChip = useCallback(() => {
+    if (observer) return;
+    const value = window.prompt("Add quick command", "");
+    if (value === null) return;
+    const trimmed = value.trim();
+    if (!trimmed) return;
+    persistCommandChips([...commandChips, trimmed]);
+  }, [observer, commandChips, persistCommandChips]);
+
+  const handleQuickCommandChipPress = useCallback(
+    (index: number) => {
+      const command = commandChips[index];
+      if (!command) return;
+      if (editingCommandChips) {
+        const value = window.prompt(
+          "Edit quick command (empty to delete)",
+          command,
+        );
+        if (value === null) return;
+        const trimmed = value.trim();
+        if (!trimmed) {
+          persistCommandChips(commandChips.filter((_, i) => i !== index));
+          return;
+        }
+        const next = [...commandChips];
+        next[index] = trimmed;
+        persistCommandChips(next);
+        return;
+      }
+      sendInput(`${command}\r`);
+    },
+    [commandChips, editingCommandChips, persistCommandChips, sendInput],
+  );
+
+  const handleMobileKeyPress = useCallback(
+    (keyId: MobileKeyId) => {
+      if (observer) return;
+      const config = MOBILE_KEYS.find((item) => item.id === keyId);
+      if (!config?.input) return;
+      sendInput(config.input);
+    },
+    [observer, sendInput],
+  );
+
+  const handleTerminalTouchStart = useCallback((e: TouchEvent) => {
+    if (e.touches.length !== 1) return;
+    const touch = e.touches[0];
+    longPressStartRef.current = { x: touch.clientX, y: touch.clientY };
+    if (longPressTimerRef.current) {
+      clearTimeout(longPressTimerRef.current);
+    }
+    longPressTimerRef.current = setTimeout(() => {
+      longPressTimerRef.current = null;
+      setShowTerminalActions(true);
+    }, LONG_PRESS_DELAY_MS);
+  }, []);
+
+  const handleTerminalTouchMove = useCallback(
+    (e: TouchEvent) => {
+      const start = longPressStartRef.current;
+      if (!start || e.touches.length !== 1) return;
+      const touch = e.touches[0];
+      if (
+        Math.abs(touch.clientX - start.x) > LONG_PRESS_CANCEL_DISTANCE_PX ||
+        Math.abs(touch.clientY - start.y) > LONG_PRESS_CANCEL_DISTANCE_PX
+      ) {
+        clearLongPress();
+      }
+    },
+    [clearLongPress],
+  );
+
+  const handleTerminalTouchEnd = useCallback(() => {
+    clearLongPress();
+  }, [clearLongPress]);
+
+  const closeTerminalActions = useCallback(() => {
+    setShowTerminalActions(false);
+  }, []);
+
+  const handleCopyAction = useCallback(async () => {
+    const term = termRef.current;
+    if (!term) return;
+    let text = term.getSelection();
+    if (!text) {
+      term.selectAll();
+      text = term.getSelection();
+      term.clearSelection();
+    }
+    if (!text) {
+      pushActionToast("Nothing to copy");
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(text);
+      setShowTerminalActions(false);
+      pushActionToast("Copied");
+    } catch {
+      pushActionToast("Clipboard write failed");
+    }
+  }, [pushActionToast]);
+
+  const handlePasteAction = useCallback(async () => {
+    if (observer) return;
+    try {
+      const text = await navigator.clipboard.readText();
+      if (!text) {
+        pushActionToast("Clipboard is empty");
+        return;
+      }
+      sendInput(text);
+      setShowTerminalActions(false);
+      pushActionToast("Pasted");
+    } catch {
+      pushActionToast("Clipboard read failed");
+    }
+  }, [observer, sendInput, pushActionToast]);
+
+  const handleSelectAllAction = useCallback(() => {
+    const term = termRef.current;
+    if (!term) return;
+    term.selectAll();
+    setShowTerminalActions(false);
+    pushActionToast("Selected all");
+  }, [pushActionToast]);
+
+  const handleFindAction = useCallback(() => {
+    setShowTerminalActions(false);
+    setShowFindBar(true);
+    setFindNoMatch(false);
+  }, []);
+
+  const handleClearAction = useCallback(() => {
+    if (observer) return;
+    sendInput("\x0c");
+    setShowTerminalActions(false);
+    pushActionToast("Sent Ctrl+L");
+  }, [observer, sendInput, pushActionToast]);
+
+  const runFind = useCallback(
+    (direction: "next" | "previous") => {
+      const query = findQuery.trim();
+      const search = searchAddonRef.current;
+      if (!query || !search) return;
+      const found =
+        direction === "next"
+          ? search.findNext(query)
+          : search.findPrevious(query);
+      setFindNoMatch(!found);
+    },
+    [findQuery],
+  );
+
+  const handleFindInput = useCallback((e: Event) => {
+    const target = e.target as HTMLInputElement | null;
+    setFindQuery(target?.value ?? "");
+    setFindNoMatch(false);
+  }, []);
+
+  const handleFindInputKeyDown = useCallback(
+    (e: KeyboardEvent) => {
+      if (e.key === "Enter") {
+        e.preventDefault();
+        runFind(e.shiftKey ? "previous" : "next");
+      } else if (e.key === "Escape") {
+        e.preventDefault();
+        setShowFindBar(false);
+        termRef.current?.focus();
+      }
+    },
+    [runFind],
+  );
+
   const lifecycleLabel =
     lifecycleState === "attaching"
       ? "attaching"
       : lifecycleState === "snapshot_or_replay"
         ? "snapshot/replay"
         : "live";
-
-  // ---- Render ----
+  const skillPrefix = skillInvocationPrefix(sessionToolKind);
 
   return (
     <div
@@ -412,15 +869,15 @@ export function TerminalWorkspace({
         overflow: "hidden",
       }}
     >
-      {/* Zone header */}
       <header class={`zone-header ${rushingOff ? "rushing-off" : ""}`}>
-        <img
-          class="zone-sprite"
-          src={rushingOff ? "/assets/sad.png" : spriteForState(session.state)}
-          alt="Close"
-          onClick={handleClose}
-        />
-        <span class="zone-name">{repoName(session.cwd)}</span>
+        <div class="zone-sprite" onClick={handleClose}>
+          <ThrongletSprite
+            state={rushingOff ? "exited" : session.state}
+            tool={session.tool}
+            lastActivityAt={session.last_activity_at}
+          />
+        </div>
+        <span class="zone-name">{cwdLabel(session.cwd) || session.tmux_name}</span>
         <span class="zone-title" onClick={handleTitleClick}>
           {titleCopied ? "copied!" : title}
         </span>
@@ -437,7 +894,6 @@ export function TerminalWorkspace({
         <span class={`zone-dot state-dot ${session.state}`} />
       </header>
 
-      {/* Recovery banner */}
       {recoveryBanner && (
         <div
           style={{
@@ -475,7 +931,6 @@ export function TerminalWorkspace({
         </div>
       )}
 
-      {/* Observer badge */}
       {observer && (
         <div
           style={{
@@ -492,12 +947,184 @@ export function TerminalWorkspace({
         </div>
       )}
 
-      {/* Terminal container */}
-      <div
-        ref={containerRef}
-        class="zone-terminal"
-        style={{ flex: 1, minHeight: 0 }}
-      />
+      {!observer && isAgentSession && (
+        <div class="quick-command-bar">
+          {skillsLoading && <span class="quick-command-status">loading skills…</span>}
+          {!skillsLoading && skillsError && (
+            <span class="quick-command-status">{skillsError}</span>
+          )}
+          {!skillsLoading && !skillsError && skillChips.length === 0 && (
+            <span class="quick-command-empty">No skills found</span>
+          )}
+          {skillChips.map((skill) => (
+            <button
+              key={`${session.session_id}-${skill.name}`}
+              type="button"
+              class="quick-command-chip skill-chip"
+              onClick={() => handleSkillChipPress(skill.name)}
+              title={
+                skill.description
+                  ? `${skillPrefix}${skill.name} — ${skill.description}`
+                  : `Insert skill: ${skillPrefix}${skill.name}`
+              }
+            >
+              {skillPrefix}
+              {skill.name}
+            </button>
+          ))}
+          <button
+            type="button"
+            class="quick-command-control"
+            onClick={handleRefreshSkills}
+          >
+            refresh
+          </button>
+        </div>
+      )}
+
+      {!observer && !isAgentSession && (
+        <div class="quick-command-bar">
+          {commandChips.length === 0 && (
+            <span class="quick-command-empty">No quick commands</span>
+          )}
+          {commandChips.map((command, index) => (
+            <button
+              key={`${session.session_id}-${index}-${command}`}
+              type="button"
+              class={`quick-command-chip ${editingCommandChips ? "editing" : ""}`}
+              onClick={() => handleQuickCommandChipPress(index)}
+              title={
+                editingCommandChips
+                  ? "Tap to edit or delete"
+                  : `Run quick command: ${command}`
+              }
+            >
+              {command}
+            </button>
+          ))}
+          <button
+            type="button"
+            class="quick-command-control"
+            onClick={handleAddCommandChip}
+          >
+            + cmd
+          </button>
+          <button
+            type="button"
+            class={`quick-command-control ${editingCommandChips ? "active" : ""}`}
+            onClick={() => setEditingCommandChips((prev) => !prev)}
+          >
+            {editingCommandChips ? "done" : "edit"}
+          </button>
+        </div>
+      )}
+
+      {showFindBar && (
+        <div class="terminal-find-bar">
+          <input
+            ref={findInputRef}
+            type="text"
+            value={findQuery}
+            placeholder="Find in terminal"
+            onInput={handleFindInput}
+            onKeyDown={handleFindInputKeyDown}
+          />
+          <button type="button" onClick={() => runFind("previous")}>
+            prev
+          </button>
+          <button type="button" onClick={() => runFind("next")}>
+            next
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              setShowFindBar(false);
+              termRef.current?.focus();
+            }}
+          >
+            close
+          </button>
+          {findNoMatch && <span class="terminal-find-status">no match</span>}
+        </div>
+      )}
+
+      <div class="zone-terminal-stage">
+        <div
+          ref={containerRef}
+          class="zone-terminal"
+          style={{ flex: 1, minHeight: 0 }}
+          onTouchStart={handleTerminalTouchStart}
+          onTouchMove={handleTerminalTouchMove}
+          onTouchEnd={handleTerminalTouchEnd}
+          onTouchCancel={handleTerminalTouchEnd}
+          onContextMenu={(e: Event) => {
+            e.preventDefault();
+            setShowTerminalActions(true);
+          }}
+        />
+
+        {actionToast && <div class="terminal-action-toast">{actionToast}</div>}
+
+        {showTerminalActions && (
+          <div class="terminal-actions-backdrop" onClick={closeTerminalActions}>
+            <div
+              class="terminal-actions-sheet"
+              onClick={(e: Event) => e.stopPropagation()}
+            >
+              <button type="button" onClick={() => void handleCopyAction()}>
+                Copy
+              </button>
+              <button
+                type="button"
+                onClick={() => void handlePasteAction()}
+                disabled={observer}
+              >
+                Paste
+              </button>
+              <button type="button" onClick={handleSelectAllAction}>
+                Select all
+              </button>
+              <button type="button" onClick={handleFindAction}>
+                Find
+              </button>
+              <button
+                type="button"
+                onClick={handleClearAction}
+                disabled={observer}
+              >
+                Clear
+              </button>
+              <button type="button" onClick={closeTerminalActions}>
+                Close
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
+
+      {!observer && <div class="mobile-keybar-spacer" />}
+
+      {!observer && (
+        <div class="mobile-keybar" style={{ bottom: `${mobileKeybarBottom}px` }}>
+          {MOBILE_KEYS.map((key) => (
+            <button
+              key={key.id}
+              type="button"
+              class="mobile-keybar-btn"
+              onClick={() => handleMobileKeyPress(key.id)}
+            >
+              {key.label}
+            </button>
+          ))}
+          <button
+            type="button"
+            class="mobile-keybar-btn"
+            onClick={() => setShowTerminalActions(true)}
+          >
+            Actions
+          </button>
+        </div>
+      )}
     </div>
   );
 }

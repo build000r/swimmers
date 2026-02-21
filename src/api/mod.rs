@@ -1,5 +1,7 @@
 pub mod bootstrap;
+pub mod dirs;
 pub mod sessions;
+pub mod skills;
 
 use axum::middleware;
 use axum::Router;
@@ -20,6 +22,8 @@ pub fn api_router(config: Arc<Config>) -> Router<Arc<AppState>> {
 
     Router::new()
         .merge(bootstrap::routes())
+        .merge(dirs::routes())
+        .merge(skills::routes())
         .merge(sessions::routes())
         .nest("/v1/realtime", realtime::handler::ws_router())
         .layer(middleware::from_fn(move |request, next| {

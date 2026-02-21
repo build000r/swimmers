@@ -8,6 +8,7 @@ import type {
   SkillListResponse,
   SkillRegistryTool,
   SpawnTool,
+  SessionDeleteMode,
 } from "@/types";
 
 const BASE = "/v1";
@@ -66,10 +67,15 @@ export async function listSkills(
 }
 
 /** DELETE /v1/sessions/{id} - destroy a session */
-export async function deleteSession(sessionId: string): Promise<void> {
-  const res = await fetch(`${BASE}/sessions/${encodeURIComponent(sessionId)}`, {
-    method: "DELETE",
-  });
+export async function deleteSession(
+  sessionId: string,
+  mode: SessionDeleteMode = "detach_bridge",
+): Promise<void> {
+  const params = new URLSearchParams({ mode });
+  const res = await fetch(
+    `${BASE}/sessions/${encodeURIComponent(sessionId)}?${params.toString()}`,
+    { method: "DELETE" },
+  );
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
     throw new Error(body.message ?? body.code ?? `HTTP ${res.status}`);

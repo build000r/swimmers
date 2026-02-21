@@ -1,6 +1,7 @@
 // ---- Enums & Literals ----
 
 export type SessionState = "idle" | "busy" | "error" | "attention" | "exited";
+export type SessionDeleteMode = "detach_bridge" | "kill_tmux";
 
 export type TransportHealth =
   | "healthy"
@@ -50,7 +51,7 @@ export interface BootstrapResponse {
   thought_tick_ms: number;
   thoughts_enabled_default: boolean;
   terminal_cache_ttl_ms: number;
-  session_delete_mode: string;
+  session_delete_mode: SessionDeleteMode;
   legacy_parity_locked: boolean;
   sessions: SessionSummary[];
 }
@@ -124,7 +125,7 @@ export interface SessionCreatedPayload {
 
 export interface SessionDeletedPayload {
   reason: string;
-  delete_mode: string;
+  delete_mode: SessionDeleteMode;
   tmux_session_alive: boolean;
   at: string;
 }
