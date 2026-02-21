@@ -65,6 +65,9 @@ const DEFAULT_QUICK_COMMANDS = ["ls", "git status", "npm test"];
 const MAX_QUICK_COMMANDS = 12;
 const MAX_QUICK_COMMAND_LENGTH = 80;
 const SKILL_AUTO_RETRY_DELAYS_MS = [1500, 4000, 8000] as const;
+const SKILL_LONG_PRESS_MS = 260;
+const SKILL_LONG_PRESS_CANCEL_DISTANCE_PX = 14;
+const SKILL_CLICK_SUPPRESS_MS = 450;
 const LONG_PRESS_DELAY_MS = 450;
 const LONG_PRESS_CANCEL_DISTANCE_PX = 16;
 const ACTION_TOAST_MS = 1200;
@@ -197,6 +200,17 @@ export function TerminalWorkspace({
   const actionToastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const longPressTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const longPressStartRef = useRef<{ x: number; y: number } | null>(null);
+  const skillLongPressTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const skillPressRef = useRef<{
+    skillName: string;
+    pointerId: number;
+    startX: number;
+    startY: number;
+  } | null>(null);
+  const suppressSkillClickRef = useRef<{
+    skillName: string;
+    until: number;
+  } | null>(null);
   const findInputRef = useRef<HTMLInputElement | null>(null);
   const seqRef = useRef<number>(0);
   const snapshotReadyRef = useRef(false);
@@ -227,6 +241,7 @@ export function TerminalWorkspace({
   const [skillsLoading, setSkillsLoading] = useState(false);
   const [skillsError, setSkillsError] = useState<string | null>(null);
   const [skillsReloadSeq, setSkillsReloadSeq] = useState(0);
+  const [skillChipHoldName, setSkillChipHoldName] = useState<string | null>(null);
   const sessionToolKind = classifySessionTool(session.tool);
   const isAgentSession =
     sessionToolKind === "claude" || sessionToolKind === "codex";
@@ -242,6 +257,7 @@ export function TerminalWorkspace({
     setSkillsLoading(false);
     setSkillsError(null);
     setSkillsReloadSeq(0);
+    setSkillChipHoldName(null);
     setEditingCommandChips(false);
     setShowTerminalActions(false);
     setShowFindBar(false);
@@ -279,6 +295,9 @@ export function TerminalWorkspace({
       }
       if (longPressTimerRef.current) {
         clearTimeout(longPressTimerRef.current);
+      }
+      if (skillLongPressTimerRef.current) {
+        clearTimeout(skillLongPressTimerRef.current);
       }
     };
   }, []);
@@ -669,15 +688,93 @@ export function TerminalWorkspace({
     void recover();
   }, []);
 
-  const handleSkillChipPress = useCallback(
-    (skillName: string) => {
+  const sendSkillInvocation = useCallback(
+    (skillName: string, submit: boolean) => {
       if (!isAgentSession) return;
       const normalized = skillName.trim();
       if (!normalized) return;
       const prefix = skillInvocationPrefix(sessionToolKind);
-      sendInput(`${prefix}${normalized} `);
+      if (submit) {
+        sendInput(`${prefix}${normalized}\r`);
+      } else {
+        sendInput(`${prefix}${normalized} `);
+      }
     },
     [isAgentSession, sessionToolKind, sendInput],
+  );
+
+  const clearSkillPress = useCallback(() => {
+    if (skillLongPressTimerRef.current) {
+      clearTimeout(skillLongPressTimerRef.current);
+      skillLongPressTimerRef.current = null;
+    }
+    skillPressRef.current = null;
+    setSkillChipHoldName(null);
+  }, []);
+
+  const handleSkillChipPointerDown = useCallback(
+    (skillName: string, e: PointerEvent) => {
+      if (!isAgentSession) return;
+      if (e.pointerType !== "touch" && e.pointerType !== "pen") return;
+      clearSkillPress();
+      skillPressRef.current = {
+        skillName,
+        pointerId: e.pointerId,
+        startX: e.clientX,
+        startY: e.clientY,
+      };
+      setSkillChipHoldName(skillName);
+      skillLongPressTimerRef.current = setTimeout(() => {
+        const active = skillPressRef.current;
+        if (!active || active.skillName !== skillName) return;
+        suppressSkillClickRef.current = {
+          skillName,
+          until: Date.now() + SKILL_CLICK_SUPPRESS_MS,
+        };
+        sendSkillInvocation(skillName, false);
+        clearSkillPress();
+      }, SKILL_LONG_PRESS_MS);
+    },
+    [isAgentSession, sendSkillInvocation, clearSkillPress],
+  );
+
+  const handleSkillChipPointerMove = useCallback(
+    (e: PointerEvent) => {
+      const active = skillPressRef.current;
+      if (!active || active.pointerId !== e.pointerId) return;
+      if (
+        Math.abs(e.clientX - active.startX) > SKILL_LONG_PRESS_CANCEL_DISTANCE_PX ||
+        Math.abs(e.clientY - active.startY) > SKILL_LONG_PRESS_CANCEL_DISTANCE_PX
+      ) {
+        clearSkillPress();
+      }
+    },
+    [clearSkillPress],
+  );
+
+  const handleSkillChipPointerEnd = useCallback(
+    (e: PointerEvent) => {
+      const active = skillPressRef.current;
+      if (!active || active.pointerId !== e.pointerId) return;
+      clearSkillPress();
+    },
+    [clearSkillPress],
+  );
+
+  const handleSkillChipClick = useCallback(
+    (skillName: string, e: MouseEvent) => {
+      const suppressed = suppressSkillClickRef.current;
+      if (suppressed) {
+        if (Date.now() > suppressed.until) {
+          suppressSkillClickRef.current = null;
+        } else if (suppressed.skillName === skillName) {
+          e.preventDefault();
+          return;
+        }
+      }
+      sendSkillInvocation(skillName, true);
+    },
+    [sendSkillInvocation],
   );
 
   const handleRefreshSkills = useCallback(() => {
@@ -967,8 +1064,13 @@ export function TerminalWorkspace({
             <button
               key={`${session.session_id}-${skill.name}`}
               type="button"
-              class="quick-command-chip skill-chip"
-              onClick={() => handleSkillChipPress(skill.name)}
+              class={`quick-command-chip skill-chip ${skillChipHoldName === skill.name ? "holding" : ""}`}
+              onClick={(e) => handleSkillChipClick(skill.name, e)}
+              onPointerDown={(e) => handleSkillChipPointerDown(skill.name, e)}
+              onPointerMove={handleSkillChipPointerMove}
+              onPointerUp={handleSkillChipPointerEnd}
+              onPointerCancel={handleSkillChipPointerEnd}
+              onPointerLeave={handleSkillChipPointerEnd}
               title={
                 skill.description
                   ? `${skillPrefix}${skill.name} — ${skill.description}`

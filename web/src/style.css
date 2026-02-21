@@ -264,6 +264,37 @@ html, body {
   border-color: #4FC08D;
   color: #c8f4df;
   background: #133227;
+  position: relative;
+  overflow: hidden;
+  isolation: isolate;
+}
+
+.quick-command-chip.skill-chip::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  transform: scaleX(0);
+  transform-origin: left center;
+  background: linear-gradient(
+    90deg,
+    rgba(79, 192, 141, 0.14),
+    rgba(79, 192, 141, 0.32)
+  );
+  z-index: 0;
+  pointer-events: none;
+}
+
+.quick-command-chip.skill-chip.holding::before {
+  animation: skill-chip-fill 260ms linear forwards;
+}
+
+@keyframes skill-chip-fill {
+  from {
+    transform: scaleX(0);
+  }
+  to {
+    transform: scaleX(1);
+  }
 }
 
 .quick-command-control.active {
