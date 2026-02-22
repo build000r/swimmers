@@ -11,6 +11,9 @@ export function makeSession(overrides: Partial<SessionSummary> = {}): SessionSum
     token_count: 0,
     context_limit: 200000,
     thought: null,
+    thought_state: "holding",
+    thought_source: "carry_forward",
+    thought_updated_at: null,
     is_stale: false,
     attached_clients: 1,
     transport_health: "healthy",
@@ -33,6 +36,16 @@ export function makeBootstrapResponse(
     terminal_cache_ttl_ms: 300000,
     session_delete_mode: "detach_bridge",
     legacy_parity_locked: false,
+    thought_policy: {
+      lifecycle_mode: "phase_gated_v1",
+      cadence_ms: {
+        hot: 15_000,
+        warm: 45_000,
+        cold: 120_000,
+      },
+      sleeping_after_ms: 60_000,
+      bubble_precedence: "thought_first",
+    },
     sessions: [makeSession()],
     ...overrides,
   };

@@ -21,7 +21,7 @@ describe("idle preview bubble override", () => {
   const noop = () => {};
   const noopCreate = async () => "";
 
-  it("shows idle preview text instead of thought text for idle sessions", () => {
+  it("keeps thought text over idle preview for idle sessions", () => {
     const session = makeSession({
       session_id: "sess-001",
       state: "idle",
@@ -39,11 +39,33 @@ describe("idle preview bubble override", () => {
       />,
     );
 
-    expect(screen.getByText("tail output from tmux buffer")).toBeInTheDocument();
-    expect(screen.queryByText("thinking through next steps")).toBeNull();
+    expect(screen.getByText("thinking through next steps")).toBeInTheDocument();
+    expect(screen.queryByText("tail output from tmux buffer")).toBeNull();
   });
 
-  it("does not override bubble text for non-idle sessions", () => {
+  it("does not override sleeping thought with idle preview", () => {
+    const session = makeSession({
+      session_id: "sess-001",
+      state: "idle",
+      thought: "Sleeping.",
+      tool: "Claude Code",
+    });
+
+    render(
+      <OverviewField
+        sessions={[session]}
+        idlePreviews={{ "sess-001": "tail output from tmux buffer" }}
+        onTapSession={noop}
+        onDragToBottom={noop}
+        onCreateSession={noopCreate}
+      />,
+    );
+
+    expect(screen.getByText("Sleeping.")).toBeInTheDocument();
+    expect(screen.queryByText("tail output from tmux buffer")).toBeNull();
+  });
+
+  it("does not show command text as thought bubble for busy sessions", () => {
     const session = makeSession({
       session_id: "sess-001",
       state: "busy",
@@ -62,7 +84,7 @@ describe("idle preview bubble override", () => {
       />,
     );
 
-    expect(screen.getByText("npm test")).toBeInTheDocument();
+    expect(screen.queryByText("npm test")).toBeNull();
     expect(screen.queryByText("tail output from tmux buffer")).toBeNull();
   });
 

@@ -9,6 +9,10 @@ export type TransportHealth =
   | "overloaded"
   | "disconnected";
 
+export type ThoughtState = "active" | "holding" | "sleeping";
+export type ThoughtSource = "carry_forward" | "llm" | "static_sleeping";
+export type BubblePrecedence = "thought_first";
+
 export type SpawnTool = "claude" | "codex";
 export type SkillRegistryTool = "claude" | "codex";
 
@@ -24,10 +28,24 @@ export interface SessionSummary {
   token_count: number;
   context_limit: number;
   thought: string | null;
+  thought_state: ThoughtState;
+  thought_source: ThoughtSource;
+  thought_updated_at: string | null;
   is_stale: boolean;
   attached_clients: number;
   transport_health: TransportHealth;
   last_activity_at: string; // ISO 8601
+}
+
+export interface ThoughtPolicy {
+  lifecycle_mode: string;
+  cadence_ms: {
+    hot: number;
+    warm: number;
+    cold: number;
+  };
+  sleeping_after_ms: number;
+  bubble_precedence: BubblePrecedence;
 }
 
 export interface TerminalSnapshot {
@@ -53,6 +71,7 @@ export interface BootstrapResponse {
   terminal_cache_ttl_ms: number;
   session_delete_mode: SessionDeleteMode;
   legacy_parity_locked: boolean;
+  thought_policy: ThoughtPolicy;
   sessions: SessionSummary[];
 }
 
@@ -115,6 +134,10 @@ export interface ThoughtUpdatePayload {
   thought: string | null;
   token_count: number;
   context_limit: number;
+  thought_state: ThoughtState;
+  thought_source: ThoughtSource;
+  objective_changed: boolean;
+  bubble_precedence: BubblePrecedence;
   at: string;
 }
 

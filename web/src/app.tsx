@@ -146,8 +146,7 @@ export function mergePollSessions(
 
   const prevById = new Map(prevActive.map((s) => [s.session_id, s]));
 
-  // Check if anything actually changed (ignore thought/token_count/context_limit
-  // — REST doesn't populate these; they come from WebSocket thought_update)
+  // Check if anything actually changed.
   if (
     prevActive.length === nextActive.length &&
     nextActive.every((s, i) => {
@@ -158,7 +157,14 @@ export function mergePollSessions(
         old.state === s.state &&
         old.current_command === s.current_command &&
         old.cwd === s.cwd &&
-        old.tool === s.tool
+        old.tool === s.tool &&
+        old.thought === s.thought &&
+        old.thought_state === s.thought_state &&
+        old.thought_source === s.thought_source &&
+        old.thought_updated_at === s.thought_updated_at &&
+        old.token_count === s.token_count &&
+        old.context_limit === s.context_limit &&
+        old.last_activity_at === s.last_activity_at
       );
     })
   ) {
@@ -173,17 +179,27 @@ export function mergePollSessions(
       old.state === s.state &&
       old.current_command === s.current_command &&
       old.cwd === s.cwd &&
-      old.tool === s.tool
+      old.tool === s.tool &&
+      old.thought === s.thought &&
+      old.thought_state === s.thought_state &&
+      old.thought_source === s.thought_source &&
+      old.thought_updated_at === s.thought_updated_at &&
+      old.token_count === s.token_count &&
+      old.context_limit === s.context_limit &&
+      old.last_activity_at === s.last_activity_at
     ) {
       return old; // Preserve reference — avoids re-rendering this thronglet
     }
-    // Preserve WebSocket-enriched fields that REST doesn't populate
+    // Preserve fields that should remain stable across quick state refreshes.
     return {
       ...s,
       last_activity_at: old.last_activity_at,
       token_count: s.token_count ?? old.token_count,
       context_limit: s.context_limit ?? old.context_limit,
       thought: s.thought ?? old.thought,
+      thought_state: s.thought_state ?? old.thought_state,
+      thought_source: s.thought_source ?? old.thought_source,
+      thought_updated_at: s.thought_updated_at ?? old.thought_updated_at,
     };
   });
 
@@ -499,12 +515,18 @@ export function App() {
       onThoughtUpdate(sessionId: string, payload: ThoughtUpdatePayload) {
         updateSession(sessionId, (s) =>
           s.thought === payload.thought &&
+          s.thought_state === payload.thought_state &&
+          s.thought_source === payload.thought_source &&
+          s.thought_updated_at === payload.at &&
           s.token_count === payload.token_count &&
           s.context_limit === payload.context_limit
             ? s
             : {
                 ...s,
                 thought: payload.thought,
+                thought_state: payload.thought_state,
+                thought_source: payload.thought_source,
+                thought_updated_at: payload.at,
                 token_count: payload.token_count,
                 context_limit: payload.context_limit,
               },

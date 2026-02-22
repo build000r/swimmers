@@ -71,7 +71,11 @@ async fn main() {
     {
         let thought_tx = supervisor.thought_event_sender();
         let provider = Arc::new(SupervisorProvider::new(supervisor.clone()));
-        let runner = ThoughtLoopRunner::new(config.thought_tick_ms, thought_tx);
+        let runner = ThoughtLoopRunner::new(
+            config.thought_tick_ms,
+            thought_tx,
+            crate::types::ThoughtPolicy::phase_gated_v1(),
+        );
         runner.spawn(provider);
     }
 

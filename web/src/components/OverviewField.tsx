@@ -213,8 +213,14 @@ function ThrongletEntity({
   let thoughtText = "";
   let showBubble = false;
   const idlePreviewText = idlePreview?.trim() ?? "";
+  const normalizedThought = session.thought?.trim().toLowerCase() ?? "";
+  const isSleepingThought =
+    normalizedThought === "sleeping" || normalizedThought === "sleeping.";
   const showIdlePreview =
-    session.state === "idle" && idlePreviewText.length > 0;
+    !session.thought &&
+    session.state === "idle" &&
+    idlePreviewText.length > 0 &&
+    !isSleepingThought;
 
   if (showIdlePreview) {
     activityText = idlePreviewText;
@@ -224,17 +230,13 @@ function ThrongletEntity({
     activityText = session.thought;
     thoughtText = session.thought;
     showBubble = true;
-  } else if (session.state === "busy" && session.current_command) {
-    activityText = session.current_command;
-    thoughtText = session.current_command;
-    showBubble = true;
   } else if (session.state === "error") {
     activityText = "error!";
     thoughtText = "!!!";
     showBubble = true;
   } else if (session.state === "attention") {
     activityText = "ready";
-    thoughtText = "?";
+    thoughtText = "ready";
     showBubble = true;
   }
 
