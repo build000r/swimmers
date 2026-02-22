@@ -677,7 +677,8 @@ export function OverviewField({
       ) {
         return;
       }
-      const t = e.touches[0];
+      const t = e.changedTouches[0] ?? e.touches[0];
+      if (!t) return;
       menuClickPosRef.current = { x: t.clientX, y: t.clientY };
       setMenuPos({ x: t.clientX, y: t.clientY });
     },

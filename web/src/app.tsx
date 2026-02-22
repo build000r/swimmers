@@ -855,6 +855,8 @@ export function App() {
     transportHealth.value !== "healthy" &&
     transportHealth.value !== "disconnected";
   const fieldAxeTopOffset = showTransportBanner ? 30 : 8;
+  const overviewInteractive = isOverview || splitMode;
+  const terminalInteractive = isTerminal;
 
   // In split mode: terminal left 50%, field right 50%
   // In dual-zone: terminal full screen, field hidden
@@ -890,15 +892,18 @@ export function App() {
 
       {/* Overview field */}
       <div
-        class={`view ${isOverview || splitMode ? "active" : ""}`}
+        class={`view ${overviewInteractive ? "active" : ""}`}
         style={{
           position: "absolute",
           top: 0,
           left: splitMode ? "50%" : 0,
-          right: 0,
+          right: splitMode ? "auto" : 0,
+          width: splitMode ? "50%" : "100%",
           bottom: 0,
           transform: overviewTransform,
           transition: "transform 0.25s ease, left 0.25s ease",
+          zIndex: splitMode ? 2 : 1,
+          pointerEvents: overviewInteractive ? "auto" : "none",
         }}
       >
         <OverviewField
@@ -943,12 +948,15 @@ export function App() {
           position: "absolute",
           top: 0,
           left: 0,
-          right: splitMode ? "50%" : 0,
+          right: splitMode ? "auto" : 0,
+          width: splitMode ? "50%" : "100%",
           bottom: 0,
           transform: isTerminal ? "translateX(0)" : "translateX(100%)",
           transition: "transform 0.25s ease, right 0.25s ease",
           display: "flex",
           flexDirection: "row",
+          zIndex: splitMode ? 1 : 2,
+          pointerEvents: terminalInteractive ? "auto" : "none",
         }}
       >
         {isTerminal && (
