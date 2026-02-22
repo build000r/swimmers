@@ -39,6 +39,7 @@ struct SessionThoughtState {
     summary_history: Vec<String>,
     last_replay_hash: u64,
     last_thought_context: Option<String>,
+    last_context_prompt_hash: u64,
 }
 
 // ---------------------------------------------------------------------------
@@ -66,6 +67,16 @@ pub struct SessionInfo {
 pub trait SessionProvider: Send + Sync {
     /// Return info for every tracked session.
     fn session_snapshots(&self) -> Vec<SessionInfo>;
+
+    /// Persist the latest thought snapshot for a session.
+    fn persist_thought(
+        &self,
+        _session_id: &str,
+        _thought: &str,
+        _token_count: u64,
+        _context_limit: u64,
+    ) {
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -119,9 +130,7 @@ impl ThoughtLoopRunner {
                     let claimed: Vec<std::path::PathBuf> = per_session
                         .iter()
                         .filter(|(id, _)| *id != &info.session_id)
-                        .filter_map(|(_, s)| {
-                            s.context_reader.as_ref()?.claimed_path()
-                        })
+                        .filter_map(|(_, s)| s.context_reader.as_ref()?.claimed_path())
                         .collect();
 
                     let state = per_session
@@ -134,14 +143,14 @@ impl ThoughtLoopRunner {
                             summary_history: Vec::new(),
                             last_replay_hash: 0,
                             last_thought_context: None,
+                            last_context_prompt_hash: 0,
                         });
 
                     // Re-create context reader if the tool changed and we
                     // don't have one yet.
                     if state.context_reader.is_none() {
                         if let Some(tool) = info.tool.as_deref() {
-                            state.context_reader =
-                                context_reader_for(tool, &info.cwd, &claimed);
+                            state.context_reader = context_reader_for(tool, &info.cwd, &claimed);
                         }
                     }
 
@@ -170,6 +179,13 @@ impl ThoughtLoopRunner {
                         };
                         let context_limit =
                             crate::types::context_limit_for_tool(info.tool.as_deref());
+
+                        provider.persist_thought(
+                            &info.session_id,
+                            &thought,
+                            token_count,
+                            context_limit,
+                        );
 
                         let payload = ThoughtUpdatePayload {
                             thought: Some(thought),
@@ -229,6 +245,13 @@ async fn handle_context_aware(
 
     let token_count = snapshot.token_count;
     let prompt = build_context_prompt(&snapshot, info.state, &state.summary_history);
+
+    let prompt_hash = hash_string(&prompt);
+    if prompt_hash == state.last_context_prompt_hash {
+        debug!(session_id = %info.session_id, "skip (context prompt unchanged)");
+        return None;
+    }
+    state.last_context_prompt_hash = prompt_hash;
 
     let task_preview = snapshot
         .user_task

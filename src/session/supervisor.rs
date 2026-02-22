@@ -856,6 +856,23 @@ impl SessionProvider for SupervisorProvider {
                 .expect("session_snapshots thread panicked")
         })
     }
+
+    fn persist_thought(
+        &self,
+        session_id: &str,
+        thought: &str,
+        token_count: u64,
+        context_limit: u64,
+    ) {
+        let supervisor = self.supervisor.clone();
+        let session_id = session_id.to_string();
+        let thought = thought.to_string();
+        self.handle.spawn(async move {
+            supervisor
+                .persist_thought(&session_id, &thought, token_count, context_limit)
+                .await;
+        });
+    }
 }
 
 fn current_working_dir() -> Option<String> {
