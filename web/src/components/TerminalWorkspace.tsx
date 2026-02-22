@@ -463,6 +463,10 @@ export function TerminalWorkspace({
       term = cached.term;
       fitAddon = cached.fitAddon;
       hostEl = cached.hostEl;
+      seqRef.current =
+        Number.isFinite(cached.latestSeq) && cached.latestSeq > 0
+          ? Math.floor(cached.latestSeq)
+          : 0;
       snapshotReadyRef.current = true;
       container.appendChild(hostEl);
       setLifecycleState("snapshot_or_replay");
@@ -631,7 +635,13 @@ export function TerminalWorkspace({
       realtime.unsubscribeSession(session.session_id);
 
       if (hostEl.parentNode) hostEl.parentNode.removeChild(hostEl);
-      onCache({ term, fitAddon, hostEl, sessionId: session.session_id });
+      onCache({
+        term,
+        fitAddon,
+        hostEl,
+        sessionId: session.session_id,
+        latestSeq: seqRef.current,
+      });
     };
   }, [session.session_id, observer]);
 

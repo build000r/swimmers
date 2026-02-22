@@ -7,6 +7,7 @@ export interface CachedTerminal {
   fitAddon: FitAddon;
   hostEl: HTMLDivElement;
   sessionId: string;
+  latestSeq: number;
 }
 
 interface CacheEntry {
