@@ -14,6 +14,7 @@ import type {
 } from "@/types";
 import {
   bootstrap as apiFetch,
+  createSession as apiCreateSession,
   deleteSession as apiDeleteSession,
   fetchPaneTail,
   fetchSessions,
@@ -193,6 +194,38 @@ interface RestoreLayoutRequest extends WorkspaceLayoutState {
   requestId: number;
 }
 
+interface UndoDeleteState {
+  sessionId: string;
+  label: string;
+  cwd: string;
+  spawnTool?: SpawnTool;
+}
+
+interface DeleteFailureState {
+  sessionId: string;
+  label: string;
+  message: string;
+}
+
+function sessionLabel(session: SessionSummary): string {
+  const trimmed = session.cwd.trim();
+  if (trimmed && trimmed !== "/") {
+    const parts = trimmed.replace(/\/+$/, "").split("/").filter(Boolean);
+    if (parts.length > 0) {
+      return parts[parts.length - 1];
+    }
+  }
+  return session.tmux_name;
+}
+
+function inferSpawnToolFromSessionTool(tool: string | null): SpawnTool | undefined {
+  if (!tool) return undefined;
+  const normalized = tool.trim().toLowerCase();
+  if (normalized.includes("codex")) return "codex";
+  if (normalized.includes("claude")) return "claude";
+  return undefined;
+}
+
 export function App() {
   const [bootstrapDone, setBootstrapDone] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -200,9 +233,14 @@ export function App() {
   const [restoreRequest, setRestoreRequest] =
     useState<RestoreLayoutRequest | null>(null);
   const [axeArmed, setAxeArmed] = useState(false);
+  const [pendingUndoDelete, setPendingUndoDelete] =
+    useState<UndoDeleteState | null>(null);
+  const [undoInFlight, setUndoInFlight] = useState(false);
+  const [deleteFailure, setDeleteFailure] = useState<DeleteFailureState | null>(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const bootstrapDataRef = useRef<BootstrapResponse | null>(null);
   const workspaceHistoryModeRef = useRef("url_state_v1");
+  const undoToastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const restoreRequestIdRef = useRef(0);
   const lastLayoutRef = useRef<WorkspaceLayoutState>({
     view: "overview",
@@ -220,7 +258,28 @@ export function App() {
     if (isObserver) setAxeArmed(false);
   }, [isObserver]);
 
+  useEffect(() => {
+    return () => {
+      if (undoToastTimerRef.current) {
+        clearTimeout(undoToastTimerRef.current);
+      }
+    };
+  }, []);
+
   // ---- Session helpers ----
+
+  const upsertSession = useCallback((session: SessionSummary) => {
+    const existingIndex = sessions.value.findIndex(
+      (s) => s.session_id === session.session_id,
+    );
+    if (existingIndex === -1) {
+      sessions.value = [...sessions.value, session];
+      return;
+    }
+    const next = [...sessions.value];
+    next[existingIndex] = session;
+    sessions.value = next;
+  }, []);
 
   const updateSession = useCallback(
     (sessionId: string, updater: (s: SessionSummary) => SessionSummary) => {
@@ -249,6 +308,88 @@ export function App() {
     idlePreviewLastFetchAtRef.current.delete(sessionId);
     idlePreviewFetchInFlightRef.current.delete(sessionId);
   }, []);
+
+  const showUndoDeleteToast = useCallback((deletedSession: SessionSummary) => {
+    if (undoToastTimerRef.current) {
+      clearTimeout(undoToastTimerRef.current);
+      undoToastTimerRef.current = null;
+    }
+    setPendingUndoDelete({
+      sessionId: deletedSession.session_id,
+      label: sessionLabel(deletedSession),
+      cwd: deletedSession.cwd,
+      spawnTool: inferSpawnToolFromSessionTool(deletedSession.tool),
+    });
+    undoToastTimerRef.current = setTimeout(() => {
+      setPendingUndoDelete(null);
+      undoToastTimerRef.current = null;
+    }, 4500);
+  }, []);
+
+  const deleteSessionWithFeedback = useCallback(
+    async (sessionId: string) => {
+      const target = sessions.value.find((s) => s.session_id === sessionId);
+      if (!target) {
+        setDeleteFailure({
+          sessionId,
+          label: sessionId,
+          message: "Session is no longer available.",
+        });
+        return;
+      }
+
+      try {
+        await apiDeleteSession(sessionId, "kill_tmux");
+        setDeleteFailure(null);
+        showUndoDeleteToast(target);
+      } catch (err) {
+        const message =
+          err instanceof Error ? err.message : "Failed to delete session";
+        setDeleteFailure({
+          sessionId,
+          label: sessionLabel(target),
+          message,
+        });
+      }
+    },
+    [showUndoDeleteToast],
+  );
+
+  const handleUndoDelete = useCallback(async () => {
+    if (!pendingUndoDelete || undoInFlight) return;
+    const payload = pendingUndoDelete;
+    if (undoToastTimerRef.current) {
+      clearTimeout(undoToastTimerRef.current);
+      undoToastTimerRef.current = null;
+    }
+    setPendingUndoDelete(null);
+    setUndoInFlight(true);
+    try {
+      const resp = await apiCreateSession(
+        undefined,
+        payload.cwd,
+        payload.spawnTool,
+      );
+      upsertSession(resp.session);
+      setDeleteFailure(null);
+      if (navigator.vibrate) navigator.vibrate(20);
+    } catch (err) {
+      const message =
+        err instanceof Error ? err.message : "Failed to restore session";
+      setDeleteFailure({
+        sessionId: payload.sessionId,
+        label: payload.label,
+        message: `Undo failed: ${message}`,
+      });
+    } finally {
+      setUndoInFlight(false);
+    }
+  }, [pendingUndoDelete, undoInFlight, upsertSession]);
+
+  const retryDelete = useCallback(() => {
+    if (!deleteFailure) return;
+    void deleteSessionWithFeedback(deleteFailure.sessionId);
+  }, [deleteFailure, deleteSessionWithFeedback]);
 
   const writeWorkspaceLayout = useCallback(
     (layout: WorkspaceLayoutState, mode: "push" | "replace" = "push") => {
@@ -371,16 +512,7 @@ export function App() {
       },
 
       onSessionCreated(payload: SessionCreatedPayload) {
-        const existingIndex = sessions.value.findIndex(
-          (s) => s.session_id === payload.session.session_id,
-        );
-        if (existingIndex === -1) {
-          sessions.value = [...sessions.value, payload.session];
-          return;
-        }
-        const next = [...sessions.value];
-        next[existingIndex] = payload.session;
-        sessions.value = next;
+        upsertSession(payload.session);
       },
 
       onSessionDeleted(sessionId: string, _payload: SessionDeletedPayload) {
@@ -419,7 +551,7 @@ export function App() {
         console.error("[realtime] control error:", payload.code, payload.message);
       },
     });
-  }, [updateSession, clearIdlePreview]);
+  }, [updateSession, clearIdlePreview, upsertSession]);
 
   // ---- Bootstrap ----
 
@@ -766,11 +898,9 @@ export function App() {
 
       setAxeArmed(false);
       if (navigator.vibrate) navigator.vibrate([20, 30, 20]);
-      void apiDeleteSession(sessionId, "kill_tmux").catch((err) => {
-        console.error("Failed to kill tmux session:", err);
-      });
+      void deleteSessionWithFeedback(sessionId);
     },
-    [axeArmed, openTerminal],
+    [axeArmed, openTerminal, deleteSessionWithFeedback],
   );
 
   const showOverview = useCallback(() => {
@@ -920,18 +1050,8 @@ export function App() {
           onCreateSession={async (cwd?: string, spawnTool?: SpawnTool) => {
             if (isObserver) return "";
             try {
-              const { createSession } = await import("@/services/api");
-              const resp = await createSession(undefined, cwd, spawnTool);
-              const existingIndex = sessions.value.findIndex(
-                (s) => s.session_id === resp.session.session_id,
-              );
-              if (existingIndex === -1) {
-                sessions.value = [...sessions.value, resp.session];
-              } else {
-                const next = [...sessions.value];
-                next[existingIndex] = resp.session;
-                sessions.value = next;
-              }
+              const resp = await apiCreateSession(undefined, cwd, spawnTool);
+              upsertSession(resp.session);
               return resp.session.session_id;
             } catch (err) {
               console.error("Failed to create session:", err);
@@ -973,6 +1093,43 @@ export function App() {
           />
         )}
       </div>
+
+      {pendingUndoDelete && (
+        <div class="axe-toast">
+          <span class="axe-toast-label">{`Axed ${pendingUndoDelete.label}`}</span>
+          <button
+            type="button"
+            class="axe-toast-btn"
+            onClick={() => void handleUndoDelete()}
+            disabled={undoInFlight}
+          >
+            {undoInFlight ? "Restoring..." : "Undo"}
+          </button>
+        </div>
+      )}
+
+      {deleteFailure && (
+        <div class="axe-error-toast" role="alert">
+          <div class="axe-error-title">{`Axe failed: ${deleteFailure.label}`}</div>
+          <div class="axe-error-message">{deleteFailure.message}</div>
+          <div class="axe-error-actions">
+            <button
+              type="button"
+              class="axe-error-btn"
+              onClick={retryDelete}
+            >
+              Retry
+            </button>
+            <button
+              type="button"
+              class="axe-error-btn dismiss"
+              onClick={() => setDeleteFailure(null)}
+            >
+              Dismiss
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

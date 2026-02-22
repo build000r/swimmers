@@ -87,8 +87,12 @@ interface ThrongletProps {
   x: number;
   y: number;
   axeArmed?: boolean;
+  axeTargeted?: boolean;
+  axeDimmed?: boolean;
+  axeHit?: boolean;
   compact?: boolean;
   rawMode?: boolean;
+  onAxeHover?: (id: string | null) => void;
   onTap: (id: string) => void;
   onDragToBottom: (id: string) => void;
 }
@@ -99,8 +103,12 @@ function ThrongletEntity({
   x,
   y,
   axeArmed = false,
+  axeTargeted = false,
+  axeDimmed = false,
+  axeHit = false,
   compact = false,
   rawMode = false,
+  onAxeHover,
   onTap,
   onDragToBottom,
 }: ThrongletProps) {
@@ -144,6 +152,7 @@ function ThrongletEntity({
   // Desktop drag-left to assign to bottom pane
   const handleMouseDown = useCallback(
     (e: MouseEvent) => {
+      if (axeArmed) return;
       if (e.button !== 0) return;
       e.preventDefault();
       const startX = e.clientX;
@@ -196,7 +205,7 @@ function ThrongletEntity({
       document.addEventListener("mousemove", onMouseMove);
       document.addEventListener("mouseup", onMouseUp);
     },
-    [session.session_id, onDragToBottom, throngletSize, spriteHalf],
+    [axeArmed, session.session_id, onDragToBottom, throngletSize, spriteHalf],
   );
 
   // Thought / activity text
@@ -280,17 +289,31 @@ function ThrongletEntity({
   return (
     <div
       ref={elRef}
-      class={`thronglet ${isExited ? "exited" : isEgg ? "egg" : isHatching ? "hatching-reveal" : session.state}`}
+      class={`thronglet ${
+        isExited ? "exited" : isEgg ? "egg" : isHatching ? "hatching-reveal" : session.state
+      } ${axeTargeted ? "axe-targeted" : ""} ${axeDimmed ? "axe-dimmed" : ""} ${
+        axeHit ? "axe-hit" : ""
+      }`}
       style={{
         "--thronglet-size": `${throngletSize}px`,
         left: x + "px",
         top: y + "px",
-        boxShadow: axeArmed ? "0 0 0 2px rgba(231, 76, 60, 0.95)" : "none",
+        boxShadow: axeTargeted ? "0 0 0 2px rgba(231, 76, 60, 0.95)" : "none",
         borderRadius: "12px",
       }}
       onClick={handleClick}
       onMouseDown={handleMouseDown}
+      onMouseEnter={() => {
+        if (axeArmed) onAxeHover?.(session.session_id);
+      }}
+      onMouseLeave={() => {
+        if (axeArmed) onAxeHover?.(null);
+      }}
       onTouchStart={(e: TouchEvent) => {
+        if (axeArmed) {
+          onAxeHover?.(session.session_id);
+          return;
+        }
         longPressTimerRef.current = setTimeout(() => {
           longPressTimerRef.current = null;
           longPressedRef.current = true;
@@ -308,6 +331,13 @@ function ThrongletEntity({
           clearTimeout(longPressTimerRef.current);
           longPressTimerRef.current = null;
         }
+      }}
+      onTouchCancel={() => {
+        if (longPressTimerRef.current) {
+          clearTimeout(longPressTimerRef.current);
+          longPressTimerRef.current = null;
+        }
+        if (axeArmed) onAxeHover?.(null);
       }}
       onDragStart={(e: Event) => e.preventDefault()}
     >
@@ -444,9 +474,18 @@ export function OverviewField({
   const [rawMode, setRawMode] = useState(false);
   const [hatchState, setHatchState] = useState<HatchState | null>(null);
   const [menuPos, setMenuPos] = useState<{ x: number; y: number } | null>(null);
+  const [axeTargetSessionId, setAxeTargetSessionId] = useState<string | null>(null);
+  const [axeHitSessionId, setAxeHitSessionId] = useState<string | null>(null);
+  const [axeSlashFx, setAxeSlashFx] = useState<{
+    key: number;
+    x: number;
+    y: number;
+  } | null>(null);
   const spawnPositionsRef = useRef<Map<string, { x: number; y: number }>>(new Map());
   const menuClickPosRef = useRef<{ x: number; y: number }>({ x: 0, y: 0 });
   const fieldRef = useRef<HTMLDivElement>(null);
+  const axeHitTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const axeDispatchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Centralized position state for all thronglets
   const [positions, setPositions] = useState<Record<string, { x: number; y: number }>>({});
@@ -462,6 +501,24 @@ export function OverviewField({
   useEffect(() => {
     sessionsRef.current = sessions;
   }, [sessions]);
+
+  useEffect(() => {
+    return () => {
+      if (axeHitTimerRef.current) {
+        clearTimeout(axeHitTimerRef.current);
+      }
+      if (axeDispatchTimerRef.current) {
+        clearTimeout(axeDispatchTimerRef.current);
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!axeArmed) {
+      setAxeTargetSessionId(null);
+      setAxeHitSessionId(null);
+    }
+  }, [axeArmed]);
 
   // Initialize positions for new sessions, handle exits, clean up removed sessions
   useEffect(() => {
@@ -538,6 +595,7 @@ export function OverviewField({
   useEffect(() => {
     const interval = setInterval(() => {
       setPositions((prev) => {
+        if (axeArmed) return prev;
         const field = fieldRef.current;
         const fieldW = field ? field.clientWidth : window.innerWidth;
         const fieldH = field ? field.clientHeight : window.innerHeight;
@@ -617,7 +675,48 @@ export function OverviewField({
     }, WANDER_INTERVAL);
 
     return () => clearInterval(interval);
-  }, [throngletSize, bubbleTopClearance, labelClearance]);
+  }, [axeArmed, throngletSize, bubbleTopClearance, labelClearance]);
+
+  const handleAxeHover = useCallback(
+    (sessionId: string | null) => {
+      if (!axeArmed) return;
+      setAxeTargetSessionId(sessionId);
+    },
+    [axeArmed],
+  );
+
+  const handleSessionTap = useCallback(
+    (sessionId: string) => {
+      if (!axeArmed) {
+        onTapSession(sessionId);
+        return;
+      }
+
+      const field = fieldRef.current;
+      const pos = positions[sessionId];
+      const centerX = pos
+        ? pos.x + throngletSize / 2
+        : (field ? field.clientWidth : window.innerWidth) / 2;
+      const centerY = pos
+        ? pos.y + throngletSize / 2
+        : (field ? field.clientHeight : window.innerHeight) / 2;
+
+      setAxeTargetSessionId(sessionId);
+      setAxeHitSessionId(sessionId);
+      setAxeSlashFx({ key: Date.now(), x: centerX, y: centerY });
+
+      if (axeHitTimerRef.current) clearTimeout(axeHitTimerRef.current);
+      axeHitTimerRef.current = setTimeout(() => {
+        setAxeHitSessionId(null);
+      }, 90);
+
+      if (axeDispatchTimerRef.current) clearTimeout(axeDispatchTimerRef.current);
+      axeDispatchTimerRef.current = setTimeout(() => {
+        onTapSession(sessionId);
+      }, 120);
+    },
+    [axeArmed, onTapSession, positions, throngletSize],
+  );
 
   const startHatch = useCallback(
     (clientX: number, clientY: number, cwd?: string, spawnTool?: SpawnTool) => {
@@ -732,10 +831,17 @@ export function OverviewField({
     }
   }, [hatchState, onTapSession]);
 
+  const axeTargetSession = axeTargetSessionId
+    ? sessions.find((session) => session.session_id === axeTargetSessionId) ?? null
+    : null;
+  const axeTargetName = axeTargetSession
+    ? throngletName(axeTargetSession)
+    : axeTargetSessionId;
+
   return (
     <div
       ref={fieldRef}
-      class="field"
+      class={`field ${axeArmed ? "axe-armed" : ""}`}
       style={{ flex: 1, position: "relative" }}
       onClick={observer ? undefined : handleFieldClick}
       onTouchEnd={observer ? undefined : handleFieldTouch}
@@ -854,14 +960,31 @@ export function OverviewField({
                 x={pos.x}
                 y={pos.y}
                 axeArmed={axeArmed}
+                axeTargeted={axeArmed && axeTargetSessionId === s.session_id}
+                axeDimmed={
+                  axeArmed &&
+                  axeTargetSessionId !== null &&
+                  axeTargetSessionId !== s.session_id
+                }
+                axeHit={axeHitSessionId === s.session_id}
                 compact={compact}
                 rawMode={rawMode}
-                onTap={onTapSession}
+                onAxeHover={handleAxeHover}
+                onTap={handleSessionTap}
                 onDragToBottom={onDragToBottom}
               />
             );
           })}
       </div>
+
+      {axeSlashFx && (
+        <div
+          key={axeSlashFx.key}
+          class="axe-slash-effect"
+          style={{ left: `${axeSlashFx.x}px`, top: `${axeSlashFx.y}px` }}
+          onAnimationEnd={() => setAxeSlashFx(null)}
+        />
+      )}
 
       {/* Hatching egg animation */}
       {hatchState && hatchState.phase !== "done" && (
@@ -900,7 +1023,9 @@ export function OverviewField({
             zIndex: 120,
           }}
         >
-          Axe armed: tap a thronglet
+          {axeTargetName
+            ? `Axe armed: ${axeTargetName}`
+            : "Axe armed: tap a thronglet"}
         </div>
       )}
 
