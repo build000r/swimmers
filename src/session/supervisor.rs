@@ -5,16 +5,16 @@ use std::time::{Duration, Instant};
 
 use chrono::Utc;
 use tokio::process::Command;
-use tokio::sync::{broadcast, oneshot, RwLock};
+use tokio::sync::{broadcast, mpsc, oneshot, RwLock};
 use tracing::{debug, error, info, warn};
 
 use crate::config::Config;
-use crate::persistence::file_store::{FileStore, PersistedSession};
+use crate::persistence::file_store::{FileStore, PersistedSession, ThoughtSnapshot};
 use crate::session::actor::{ActorHandle, SessionCommand};
 use crate::thought::loop_runner::{SessionInfo, SessionProvider};
 use crate::types::{
     ControlEvent, SessionState, SessionStatePayload, SessionSummary, TerminalSnapshot,
-    TransportHealth,
+    ThoughtSource, ThoughtState, TransportHealth,
 };
 
 const PROCESS_EXIT_REAP_INTERVAL: Duration = Duration::from_millis(250);
@@ -71,6 +71,9 @@ pub struct SessionSupervisor {
     /// File-based persistence store, initialized after construction.
     persistence: RwLock<Option<Arc<FileStore>>>,
 
+    /// Latest thought snapshots keyed by session_id.
+    thought_snapshots: RwLock<HashMap<String, ThoughtSnapshot>>,
+
     /// First-observed timestamps for sessions that have entered Exited state.
     process_exit_seen_at: RwLock<HashMap<String, Instant>>,
 }
@@ -88,6 +91,7 @@ impl SessionSupervisor {
             lifecycle_tx,
             thought_tx,
             persistence: RwLock::new(None),
+            thought_snapshots: RwLock::new(HashMap::new()),
             process_exit_seen_at: RwLock::new(HashMap::new()),
         })
     }
@@ -122,6 +126,15 @@ impl SessionSupervisor {
                     thought: thought_data
                         .and_then(|t| t.thought.clone())
                         .or_else(|| ps.thought.clone()),
+                    thought_state: thought_data
+                        .map(|t| t.thought_state)
+                        .unwrap_or(ps.thought_state),
+                    thought_source: thought_data
+                        .map(|t| t.thought_source)
+                        .unwrap_or(ps.thought_source),
+                    thought_updated_at: thought_data
+                        .map(|t| t.updated_at)
+                        .or(ps.thought_updated_at),
                     is_stale: true,
                     attached_clients: 0,
                     transport_health: crate::types::TransportHealth::Disconnected,
@@ -132,6 +145,11 @@ impl SessionSupervisor {
             info!(count = stale.len(), "loaded persisted stale sessions");
             let mut stale_lock = self.stale_sessions.write().await;
             *stale_lock = stale;
+        }
+
+        {
+            let mut thought_cache = self.thought_snapshots.write().await;
+            *thought_cache = thoughts;
         }
 
         let mut persistence = self.persistence.write().await;
@@ -481,6 +499,24 @@ impl SessionSupervisor {
             }
         }
 
+        let thought_snapshots = self.thought_snapshots.read().await;
+        for summary in &mut summaries {
+            if let Some(thought_data) = thought_snapshots.get(&summary.session_id) {
+                if summary.thought.is_none() {
+                    summary.thought = thought_data.thought.clone();
+                }
+                summary.thought_state = thought_data.thought_state;
+                summary.thought_source = thought_data.thought_source;
+                summary.thought_updated_at = Some(thought_data.updated_at);
+                if summary.token_count == 0 {
+                    summary.token_count = thought_data.token_count;
+                }
+                if summary.context_limit == 0 {
+                    summary.context_limit = thought_data.context_limit;
+                }
+            }
+        }
+
         summaries
     }
 
@@ -534,6 +570,7 @@ impl SessionSupervisor {
     /// Used by the thought loop to generate thoughts.
     pub async fn collect_session_snapshots(&self) -> Vec<SessionInfo> {
         let sessions = self.sessions.read().await;
+        let thought_snapshots = self.thought_snapshots.read().await.clone();
         let mut infos = Vec::with_capacity(sessions.len());
 
         for (_, handle) in sessions.iter() {
@@ -577,16 +614,35 @@ impl SessionSupervisor {
                         chars[start..].iter().collect()
                     })
                     .unwrap_or_default();
+                let session_id = summary.session_id.clone();
+                let thought_data = thought_snapshots.get(&session_id);
 
                 infos.push(SessionInfo {
-                    session_id: summary.session_id,
+                    session_id,
                     state: summary.state,
                     exited: summary.state == crate::types::SessionState::Exited,
                     tool: summary.tool,
                     cwd: summary.cwd,
                     replay_text,
-                    token_count: summary.token_count,
-                    context_limit: summary.context_limit,
+                    thought_state: thought_data
+                        .map(|t| t.thought_state)
+                        .unwrap_or(summary.thought_state),
+                    thought_source: thought_data
+                        .map(|t| t.thought_source)
+                        .unwrap_or(summary.thought_source),
+                    thought: thought_data
+                        .and_then(|t| t.thought.clone())
+                        .or_else(|| summary.thought.clone()),
+                    thought_updated_at: thought_data.map(|t| t.updated_at).or(summary.thought_updated_at),
+                    objective_fingerprint: thought_data
+                        .and_then(|t| t.objective_fingerprint.clone()),
+                    token_count: thought_data
+                        .map(|t| t.token_count)
+                        .unwrap_or(summary.token_count),
+                    context_limit: thought_data
+                        .map(|t| t.context_limit)
+                        .unwrap_or(summary.context_limit),
+                    last_activity_at: summary.last_activity_at,
                 });
             }
         }
@@ -609,6 +665,7 @@ impl SessionSupervisor {
         };
 
         let summaries = self.list_sessions().await;
+        let thought_snapshots = self.thought_snapshots.read().await;
         let persisted: Vec<PersistedSession> = summaries
             .iter()
             .map(|s| PersistedSession {
@@ -619,6 +676,12 @@ impl SessionSupervisor {
                 token_count: s.token_count,
                 context_limit: s.context_limit,
                 thought: s.thought.clone(),
+                thought_state: s.thought_state,
+                thought_source: s.thought_source,
+                thought_updated_at: s.thought_updated_at,
+                objective_fingerprint: thought_snapshots
+                    .get(&s.session_id)
+                    .and_then(|t| t.objective_fingerprint.clone()),
                 cwd: s.cwd.clone(),
                 last_activity_at: s.last_activity_at,
             })
@@ -634,7 +697,26 @@ impl SessionSupervisor {
         thought: &str,
         token_count: u64,
         context_limit: u64,
+        thought_state: ThoughtState,
+        thought_source: ThoughtSource,
+        objective_fingerprint: Option<String>,
     ) {
+        {
+            let mut thought_snapshots = self.thought_snapshots.write().await;
+            thought_snapshots.insert(
+                session_id.to_string(),
+                ThoughtSnapshot {
+                    thought: Some(thought.to_string()),
+                    thought_state,
+                    thought_source,
+                    objective_fingerprint,
+                    token_count,
+                    context_limit,
+                    updated_at: Utc::now(),
+                },
+            );
+        }
+
         let store = {
             let guard = self.persistence.read().await;
             match guard.as_ref() {
@@ -644,7 +726,15 @@ impl SessionSupervisor {
         };
 
         store
-            .save_thought(session_id, thought, token_count, context_limit)
+            .save_thought(
+                session_id,
+                thought,
+                token_count,
+                context_limit,
+                thought_state,
+                thought_source,
+                objective_fingerprint,
+            )
             .await;
     }
 
@@ -813,6 +903,9 @@ impl SessionSupervisor {
             token_count: 0,
             context_limit: 128_000,
             thought: None,
+            thought_state: ThoughtState::Holding,
+            thought_source: ThoughtSource::CarryForward,
+            thought_updated_at: None,
             is_stale: false,
             attached_clients: 0,
             transport_health: crate::types::TransportHealth::Healthy,
@@ -828,16 +921,50 @@ impl SessionSupervisor {
 /// Wrapper that implements the synchronous `SessionProvider` trait by using
 /// a dedicated thread to call async supervisor methods without panicking
 /// from within the tokio runtime.
+const THOUGHT_PERSIST_QUEUE_CAP: usize = 256;
+
 pub struct SupervisorProvider {
     supervisor: Arc<SessionSupervisor>,
     handle: tokio::runtime::Handle,
+    persist_tx: mpsc::Sender<PersistThoughtRequest>,
+}
+
+struct PersistThoughtRequest {
+    session_id: String,
+    thought: String,
+    token_count: u64,
+    context_limit: u64,
+    thought_state: ThoughtState,
+    thought_source: ThoughtSource,
+    objective_fingerprint: Option<String>,
 }
 
 impl SupervisorProvider {
     pub fn new(supervisor: Arc<SessionSupervisor>) -> Self {
+        let handle = tokio::runtime::Handle::current();
+        let (persist_tx, mut persist_rx) =
+            mpsc::channel::<PersistThoughtRequest>(THOUGHT_PERSIST_QUEUE_CAP);
+        let persist_supervisor = supervisor.clone();
+        handle.spawn(async move {
+            while let Some(req) = persist_rx.recv().await {
+                persist_supervisor
+                    .persist_thought(
+                        &req.session_id,
+                        &req.thought,
+                        req.token_count,
+                        req.context_limit,
+                        req.thought_state,
+                        req.thought_source,
+                        req.objective_fingerprint,
+                    )
+                    .await;
+            }
+        });
+
         Self {
             supervisor,
-            handle: tokio::runtime::Handle::current(),
+            handle,
+            persist_tx,
         }
     }
 }
@@ -863,15 +990,26 @@ impl SessionProvider for SupervisorProvider {
         thought: &str,
         token_count: u64,
         context_limit: u64,
+        thought_state: ThoughtState,
+        thought_source: ThoughtSource,
+        objective_fingerprint: Option<String>,
     ) {
-        let supervisor = self.supervisor.clone();
-        let session_id = session_id.to_string();
-        let thought = thought.to_string();
-        self.handle.spawn(async move {
-            supervisor
-                .persist_thought(&session_id, &thought, token_count, context_limit)
-                .await;
-        });
+        if self.persist_tx.try_send(PersistThoughtRequest {
+                session_id: session_id.to_string(),
+                thought: thought.to_string(),
+                token_count,
+                context_limit,
+                thought_state,
+                thought_source,
+                objective_fingerprint,
+            })
+            .is_err()
+        {
+            warn!(
+                session_id = %session_id,
+                "persist_thought queue full/closed; dropping thought snapshot"
+            );
+        }
     }
 }
 

@@ -513,24 +513,44 @@ export function App() {
       },
 
       onThoughtUpdate(sessionId: string, payload: ThoughtUpdatePayload) {
-        updateSession(sessionId, (s) =>
-          s.thought === payload.thought &&
-          s.thought_state === payload.thought_state &&
-          s.thought_source === payload.thought_source &&
-          s.thought_updated_at === payload.at &&
-          s.token_count === payload.token_count &&
-          s.context_limit === payload.context_limit
-            ? s
-            : {
-                ...s,
-                thought: payload.thought,
-                thought_state: payload.thought_state,
-                thought_source: payload.thought_source,
-                thought_updated_at: payload.at,
-                token_count: payload.token_count,
-                context_limit: payload.context_limit,
-              },
-        );
+        const incomingUpdatedAtMs = parseIsoMs(payload.at);
+        updateSession(sessionId, (s) => {
+          const sameFields =
+            s.thought === payload.thought &&
+            s.thought_state === payload.thought_state &&
+            s.thought_source === payload.thought_source &&
+            s.token_count === payload.token_count &&
+            s.context_limit === payload.context_limit;
+
+          if (sameFields) {
+            const currentUpdatedAtMs = parseIsoMs(s.thought_updated_at);
+            if (
+              incomingUpdatedAtMs !== null &&
+              currentUpdatedAtMs !== null &&
+              incomingUpdatedAtMs <= currentUpdatedAtMs
+            ) {
+              return s;
+            }
+
+            if (
+              incomingUpdatedAtMs === null &&
+              currentUpdatedAtMs === null &&
+              s.thought_updated_at === payload.at
+            ) {
+              return s;
+            }
+          }
+
+          return {
+            ...s,
+            thought: payload.thought,
+            thought_state: payload.thought_state,
+            thought_source: payload.thought_source,
+            thought_updated_at: payload.at,
+            token_count: payload.token_count,
+            context_limit: payload.context_limit,
+          };
+        });
       },
 
       onSessionCreated(payload: SessionCreatedPayload) {
@@ -700,55 +720,6 @@ export function App() {
     startPolling,
     stopPolling,
     currentView.value,
-    transportHealth.value,
-  ]);
-
-  // Keep overview session states fresh even when realtime is healthy.
-  useEffect(() => {
-    if (!bootstrapDone) return;
-    if (transportHealth.value !== "healthy") return;
-    const isOverviewVisible =
-      currentView.value === "overview" ||
-      (currentView.value === "terminal" && zoneLayout.value === "single");
-    if (!isOverviewVisible) return;
-
-    let cancelled = false;
-    let running = false;
-    const ms = Math.max(bootstrapDataRef.current?.poll_fallback_ms ?? 2000, 2000);
-
-    const tick = async () => {
-      if (running || cancelled) return;
-      running = true;
-      try {
-        const resp = await fetchSessions();
-        if (cancelled) return;
-        const polledSessions = dedupeSessionsById(resp.sessions);
-        const merged = mergePollSessions(
-          sessions.value,
-          polledSessions,
-          exitingSessionIdsRef.current,
-        );
-        if (merged) sessions.value = merged;
-      } catch {
-        // Keep stale data on transient network errors.
-      } finally {
-        running = false;
-      }
-    };
-
-    const interval = setInterval(() => {
-      void tick();
-    }, ms);
-    void tick();
-
-    return () => {
-      cancelled = true;
-      clearInterval(interval);
-    };
-  }, [
-    bootstrapDone,
-    currentView.value,
-    zoneLayout.value,
     transportHealth.value,
   ]);
 
