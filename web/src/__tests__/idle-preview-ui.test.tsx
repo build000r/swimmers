@@ -88,6 +88,50 @@ describe("idle preview bubble override", () => {
     expect(screen.queryByText("tail output from tmux buffer")).toBeNull();
   });
 
+  it("clears sleeping bubble promptly after wake", () => {
+    const session = makeSession({
+      session_id: "sess-001",
+      state: "idle",
+      thought: "Sleeping.",
+      thought_state: "sleeping",
+      thought_source: "static_sleeping",
+      current_command: null,
+      tool: "Claude Code",
+    });
+
+    const { rerender } = render(
+      <OverviewField
+        sessions={[session]}
+        idlePreviews={{}}
+        onTapSession={noop}
+        onDragToBottom={noop}
+        onCreateSession={noopCreate}
+      />,
+    );
+
+    expect(screen.getByText("Sleeping.")).toBeInTheDocument();
+
+    rerender(
+      <OverviewField
+        sessions={[
+          {
+            ...session,
+            state: "busy",
+            thought: null,
+            thought_state: "holding",
+            thought_source: "carry_forward",
+          },
+        ]}
+        idlePreviews={{}}
+        onTapSession={noop}
+        onDragToBottom={noop}
+        onCreateSession={noopCreate}
+      />,
+    );
+
+    expect(screen.queryByText("Sleeping.")).toBeNull();
+  });
+
   it("suppresses command-like idle preview fallback", () => {
     const session = makeSession({
       session_id: "sess-001",
@@ -110,7 +154,7 @@ describe("idle preview bubble override", () => {
     expect(screen.queryByText("npm test --watch")).toBeNull();
   });
 
-  it("keeps the previous thought bubble until a new one replaces it", () => {
+  it("clears the thought bubble when thought state returns to holding", () => {
     const session = makeSession({
       session_id: "sess-001",
       state: "busy",
@@ -136,27 +180,10 @@ describe("idle preview bubble override", () => {
         sessions={[
           {
             ...session,
-            state: "idle",
-            thought: null,
-            current_command: null,
-          },
-        ]}
-        idlePreviews={{}}
-        onTapSession={noop}
-        onDragToBottom={noop}
-        onCreateSession={noopCreate}
-      />,
-    );
-
-    expect(screen.getByText("first thought")).toBeInTheDocument();
-
-    rerender(
-      <OverviewField
-        sessions={[
-          {
-            ...session,
             state: "busy",
-            thought: "next thought",
+            thought: null,
+            thought_state: "holding",
+            thought_source: "carry_forward",
             current_command: null,
           },
         ]}
@@ -167,7 +194,6 @@ describe("idle preview bubble override", () => {
       />,
     );
 
-    expect(screen.getByText("next thought")).toBeInTheDocument();
     expect(screen.queryByText("first thought")).toBeNull();
   });
 });

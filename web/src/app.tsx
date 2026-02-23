@@ -80,6 +80,17 @@ function dedupeSessionsById(items: SessionSummary[]): SessionSummary[] {
   return Array.from(byId.values());
 }
 
+function pickNewerActivityAt(
+  current: string,
+  candidate: string,
+): string {
+  const currentMs = parseIsoMs(current);
+  const candidateMs = parseIsoMs(candidate);
+  if (currentMs === null) return candidate;
+  if (candidateMs === null) return current;
+  return candidateMs >= currentMs ? candidate : current;
+}
+
 export function applySessionStatePayload(
   session: SessionSummary,
   payload: SessionStatePayload,
@@ -210,16 +221,17 @@ export function mergePollSessions(
     ) {
       return old; // Preserve reference — avoids re-rendering this thronglet
     }
-    // Preserve fields that should remain stable across quick state refreshes.
+    // Prefer fresher activity timestamps from either stream while still avoiding
+    // regressions when a delayed poll response arrives.
     return {
       ...s,
-      last_activity_at: old.last_activity_at,
+      last_activity_at: pickNewerActivityAt(old.last_activity_at, s.last_activity_at),
       token_count: s.token_count ?? old.token_count,
       context_limit: s.context_limit ?? old.context_limit,
-      thought: s.thought ?? old.thought,
-      thought_state: s.thought_state ?? old.thought_state,
-      thought_source: s.thought_source ?? old.thought_source,
-      thought_updated_at: s.thought_updated_at ?? old.thought_updated_at,
+      thought: s.thought,
+      thought_state: s.thought_state,
+      thought_source: s.thought_source,
+      thought_updated_at: s.thought_updated_at,
     };
   });
 

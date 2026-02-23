@@ -122,10 +122,6 @@ function ThrongletEntity({
   const isExited = session.state === "exited";
   const isEgg = !isExited && !session.tool && !isHatching;
   const showEggSprite = !isExited && (isEgg || isHatching);
-  const lastBubbleRef = useRef<{
-    text: string;
-    isIdlePreview: boolean;
-  } | null>(null);
 
   // Hatch when tool is first detected (user typed codex/claude)
   useEffect(() => {
@@ -259,12 +255,7 @@ function ThrongletEntity({
       }
     : null;
 
-  useEffect(() => {
-    if (!liveBubble) return;
-    lastBubbleRef.current = liveBubble;
-  }, [liveBubble?.text, liveBubble?.isIdlePreview]);
-
-  const renderedBubble = liveBubble ?? lastBubbleRef.current;
+  const renderedBubble = liveBubble;
   const bubbleText = renderedBubble?.text ?? "";
   const bubbleIdlePreview = renderedBubble?.isIdlePreview ?? false;
   const showRenderedBubble = !!renderedBubble;
