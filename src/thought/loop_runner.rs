@@ -32,6 +32,7 @@ const SUMMARY_HISTORY_CAP: usize = 10;
 const CODEX_TIMEOUT: Duration = Duration::from_secs(15);
 const TERMINAL_CONTEXT_CHARS: usize = 800;
 const TERMINAL_MIN_MEANINGFUL_DELTA_CHARS: usize = 100;
+const MAX_THOUGHT_CHARS: usize = 120;
 const STATIC_SLEEPING_THOUGHT: &str = "Sleeping.";
 
 // ---------------------------------------------------------------------------
@@ -118,6 +119,7 @@ impl SessionThoughtState {
 // ---------------------------------------------------------------------------
 
 /// Snapshot of a single session's data, provided by the supervisor each tick.
+#[derive(Clone)]
 pub struct SessionInfo {
     pub session_id: String,
     pub state: SessionState,
@@ -166,7 +168,7 @@ pub trait SessionProvider: Send + Sync {
     fn persist_thought(
         &self,
         _session_id: &str,
-        _thought: &str,
+        _thought: Option<&str>,
         _token_count: u64,
         _context_limit: u64,
         _thought_state: ThoughtState,
@@ -253,7 +255,7 @@ impl ThoughtLoopRunner {
                                 &self.event_tx,
                                 provider.as_ref(),
                                 &info.session_id,
-                                STATIC_SLEEPING_THOUGHT,
+                                Some(STATIC_SLEEPING_THOUGHT),
                                 info.token_count,
                                 info.context_limit,
                                 ThoughtState::Sleeping,
@@ -282,6 +284,24 @@ impl ThoughtLoopRunner {
                     if state.thought_state == ThoughtState::Sleeping {
                         state.sleeping_emitted = false;
                         state.objective_stable_since = now;
+                        state.last_emitted_thought = None;
+                        state.last_emitted_at = Some(now);
+                        state.thought_state = ThoughtState::Holding;
+                        state.thought_source = ThoughtSource::CarryForward;
+                        state.objective_fingerprint = None;
+                        emit_thought_update(
+                            &self.event_tx,
+                            provider.as_ref(),
+                            &info.session_id,
+                            None,
+                            info.token_count,
+                            info.context_limit,
+                            state.thought_state,
+                            state.thought_source,
+                            None,
+                            false,
+                            self.thought_policy.bubble_precedence,
+                        );
                     }
 
                     // Recreate context reader if tool binding changes.
@@ -372,7 +392,7 @@ impl ThoughtLoopRunner {
                         &self.event_tx,
                         provider.as_ref(),
                         &info.session_id,
-                        &candidate.thought,
+                        Some(&candidate.thought),
                         candidate.token_count,
                         info.context_limit,
                         state.thought_state,
@@ -395,7 +415,7 @@ fn emit_thought_update<P: SessionProvider>(
     event_tx: &broadcast::Sender<ControlEvent>,
     provider: &P,
     session_id: &str,
-    thought: &str,
+    thought: Option<&str>,
     token_count: u64,
     context_limit: u64,
     thought_state: ThoughtState,
@@ -404,9 +424,13 @@ fn emit_thought_update<P: SessionProvider>(
     objective_changed: bool,
     bubble_precedence: BubblePrecedence,
 ) {
+    let thought = thought
+        .map(sanitize_thought_text)
+        .filter(|sanitized| !sanitized.is_empty());
+
     provider.persist_thought(
         session_id,
-        thought,
+        thought.as_deref(),
         token_count,
         context_limit,
         thought_state,
@@ -415,7 +439,7 @@ fn emit_thought_update<P: SessionProvider>(
     );
 
     let payload = ThoughtUpdatePayload {
-        thought: Some(thought.to_string()),
+        thought: thought.clone(),
         token_count,
         context_limit,
         thought_state,
@@ -462,6 +486,25 @@ fn is_duplicate_thought(previous: Option<&str>, next: &str) -> bool {
 
 fn normalize_for_compare(s: &str) -> String {
     s.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase()
+}
+
+fn sanitize_thought_text(raw: &str) -> String {
+    let normalized = raw.split_whitespace().collect::<Vec<_>>().join(" ");
+    if normalized.is_empty() {
+        return String::new();
+    }
+
+    let char_count = normalized.chars().count();
+    if char_count <= MAX_THOUGHT_CHARS {
+        return normalized;
+    }
+
+    if MAX_THOUGHT_CHARS <= 3 {
+        return normalized.chars().take(MAX_THOUGHT_CHARS).collect();
+    }
+
+    let clipped: String = normalized.chars().take(MAX_THOUGHT_CHARS - 3).collect();
+    format!("{}...", clipped.trim_end())
 }
 
 // ---------------------------------------------------------------------------
@@ -559,46 +602,48 @@ async fn handle_context_aware(
 
     let call_started = Instant::now();
     match call_llm(&prompt).await {
-        Ok(thought) if thought.is_empty() => {
-            debug!(session_id = %info.session_id, "llm returned empty");
-            crate::metrics::record_thought_generation_latency(
-                &info.session_id,
-                "context_aware",
-                cadence_tier,
-                call_started.elapsed(),
-            );
-            crate::metrics::increment_thought_model_call(
-                &info.session_id,
-                "context_aware",
-                cadence_tier,
-                "empty",
-            );
-            crate::metrics::increment_thought_suppression(
-                &info.session_id,
-                "llm_empty",
-                cadence_tier,
-            );
-            None
-        }
-        Ok(thought) => {
-            info!(session_id = %info.session_id, thought = %thought, "llm returned");
-            crate::metrics::record_thought_generation_latency(
-                &info.session_id,
-                "context_aware",
-                cadence_tier,
-                call_started.elapsed(),
-            );
-            crate::metrics::increment_thought_model_call(
-                &info.session_id,
-                "context_aware",
-                cadence_tier,
-                "success",
-            );
-            Some(ThoughtCandidate {
-                thought,
-                token_count,
-                objective_fingerprint,
-            })
+        Ok(raw_thought) => {
+            let thought = sanitize_thought_text(&raw_thought);
+            if thought.is_empty() {
+                debug!(session_id = %info.session_id, "llm returned empty");
+                crate::metrics::record_thought_generation_latency(
+                    &info.session_id,
+                    "context_aware",
+                    cadence_tier,
+                    call_started.elapsed(),
+                );
+                crate::metrics::increment_thought_model_call(
+                    &info.session_id,
+                    "context_aware",
+                    cadence_tier,
+                    "empty",
+                );
+                crate::metrics::increment_thought_suppression(
+                    &info.session_id,
+                    "llm_empty",
+                    cadence_tier,
+                );
+                None
+            } else {
+                info!(session_id = %info.session_id, thought = %thought, "llm returned");
+                crate::metrics::record_thought_generation_latency(
+                    &info.session_id,
+                    "context_aware",
+                    cadence_tier,
+                    call_started.elapsed(),
+                );
+                crate::metrics::increment_thought_model_call(
+                    &info.session_id,
+                    "context_aware",
+                    cadence_tier,
+                    "success",
+                );
+                Some(ThoughtCandidate {
+                    thought,
+                    token_count,
+                    objective_fingerprint,
+                })
+            }
         }
         Err(e) => {
             error!(session_id = %info.session_id, error = %e, "llm error");
@@ -695,46 +740,48 @@ async fn handle_terminal_fallback(
 
     let call_started = Instant::now();
     match call_llm(&prompt).await {
-        Ok(thought) if thought.is_empty() => {
-            debug!(session_id = %info.session_id, "llm returned empty");
-            crate::metrics::record_thought_generation_latency(
-                &info.session_id,
-                "terminal_fallback",
-                cadence_tier,
-                call_started.elapsed(),
-            );
-            crate::metrics::increment_thought_model_call(
-                &info.session_id,
-                "terminal_fallback",
-                cadence_tier,
-                "empty",
-            );
-            crate::metrics::increment_thought_suppression(
-                &info.session_id,
-                "llm_empty",
-                cadence_tier,
-            );
-            None
-        }
-        Ok(thought) => {
-            info!(session_id = %info.session_id, thought = %thought, "llm returned");
-            crate::metrics::record_thought_generation_latency(
-                &info.session_id,
-                "terminal_fallback",
-                cadence_tier,
-                call_started.elapsed(),
-            );
-            crate::metrics::increment_thought_model_call(
-                &info.session_id,
-                "terminal_fallback",
-                cadence_tier,
-                "success",
-            );
-            Some(ThoughtCandidate {
-                thought,
-                token_count: info.token_count,
-                objective_fingerprint: objective_fingerprint.to_string(),
-            })
+        Ok(raw_thought) => {
+            let thought = sanitize_thought_text(&raw_thought);
+            if thought.is_empty() {
+                debug!(session_id = %info.session_id, "llm returned empty");
+                crate::metrics::record_thought_generation_latency(
+                    &info.session_id,
+                    "terminal_fallback",
+                    cadence_tier,
+                    call_started.elapsed(),
+                );
+                crate::metrics::increment_thought_model_call(
+                    &info.session_id,
+                    "terminal_fallback",
+                    cadence_tier,
+                    "empty",
+                );
+                crate::metrics::increment_thought_suppression(
+                    &info.session_id,
+                    "llm_empty",
+                    cadence_tier,
+                );
+                None
+            } else {
+                info!(session_id = %info.session_id, thought = %thought, "llm returned");
+                crate::metrics::record_thought_generation_latency(
+                    &info.session_id,
+                    "terminal_fallback",
+                    cadence_tier,
+                    call_started.elapsed(),
+                );
+                crate::metrics::increment_thought_model_call(
+                    &info.session_id,
+                    "terminal_fallback",
+                    cadence_tier,
+                    "success",
+                );
+                Some(ThoughtCandidate {
+                    thought,
+                    token_count: info.token_count,
+                    objective_fingerprint: objective_fingerprint.to_string(),
+                })
+            }
         }
         Err(e) => {
             error!(session_id = %info.session_id, error = %e, "llm error");
@@ -1157,6 +1204,34 @@ fn hash_string(s: &str) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct SequenceProvider {
+        snapshots: Vec<Vec<SessionInfo>>,
+        tick: AtomicUsize,
+    }
+
+    impl SequenceProvider {
+        fn new(snapshots: Vec<Vec<SessionInfo>>) -> Self {
+            Self {
+                snapshots,
+                tick: AtomicUsize::new(0),
+            }
+        }
+    }
+
+    impl SessionProvider for SequenceProvider {
+        fn session_snapshots(&self) -> Vec<SessionInfo> {
+            if self.snapshots.is_empty() {
+                return Vec::new();
+            }
+
+            let idx = self.tick.fetch_add(1, Ordering::SeqCst);
+            let bounded_idx = idx.min(self.snapshots.len() - 1);
+            self.snapshots[bounded_idx].clone()
+        }
+    }
 
     fn sample_session_info(now: DateTime<Utc>) -> SessionInfo {
         SessionInfo {
@@ -1280,6 +1355,17 @@ mod tests {
             Some("working on login fix"),
             "investigating failing auth tests"
         ));
+    }
+
+    #[test]
+    fn sanitize_thought_text_collapses_and_clamps() {
+        let noisy = "   building\n\nfeature\tbranch  ".to_string()
+            + &"x".repeat(MAX_THOUGHT_CHARS + 32);
+        let sanitized = sanitize_thought_text(&noisy);
+        assert!(!sanitized.contains('\n'));
+        assert!(!sanitized.contains('\t'));
+        assert!(sanitized.chars().count() <= MAX_THOUGHT_CHARS);
+        assert!(sanitized.ends_with("..."));
     }
 
     #[test]
@@ -1502,6 +1588,56 @@ mod tests {
         assert!(is_sleeping_session(&info, &policy));
         // The main loop checks this condition before candidate generation and
         // continues early, preventing any model-call path in sleeping tier.
+    }
+
+    #[tokio::test]
+    async fn wake_from_sleeping_emits_immediate_clear_update() {
+        let now = Utc::now();
+        let mut sleeping = sample_session_info(now);
+        sleeping.state = SessionState::Idle;
+        sleeping.replay_text.clear();
+        sleeping.thought = None;
+        sleeping.thought_state = ThoughtState::Holding;
+        sleeping.last_activity_at = now - chrono::Duration::seconds(120);
+
+        let mut awake = sleeping.clone();
+        awake.last_activity_at = now;
+        awake.thought = Some(STATIC_SLEEPING_THOUGHT.to_string());
+        awake.thought_state = ThoughtState::Sleeping;
+
+        let provider = Arc::new(SequenceProvider::new(vec![vec![sleeping], vec![awake]]));
+        let (event_tx, mut event_rx) = broadcast::channel::<ControlEvent>(32);
+        let runner = ThoughtLoopRunner::new(5, event_tx, ThoughtPolicy::phase_gated_v1());
+        let handle = runner.spawn(provider);
+
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(500);
+        let mut saw_sleeping = false;
+        let mut saw_clear = false;
+
+        while tokio::time::Instant::now() < deadline && !(saw_sleeping && saw_clear) {
+            let recv = tokio::time::timeout(Duration::from_millis(50), event_rx.recv()).await;
+            let Ok(Ok(event)) = recv else {
+                continue;
+            };
+            if event.event != "thought_update" {
+                continue;
+            }
+            let Ok(payload) = serde_json::from_value::<ThoughtUpdatePayload>(event.payload) else {
+                continue;
+            };
+            if payload.thought.as_deref() == Some(STATIC_SLEEPING_THOUGHT)
+                && payload.thought_state == ThoughtState::Sleeping
+            {
+                saw_sleeping = true;
+            }
+            if payload.thought.is_none() && payload.thought_state == ThoughtState::Holding {
+                saw_clear = true;
+            }
+        }
+
+        handle.abort();
+        assert!(saw_sleeping, "expected sleeping thought update");
+        assert!(saw_clear, "expected wake clear thought update");
     }
 
     fn p99_micros(samples: &mut [u128]) -> u128 {

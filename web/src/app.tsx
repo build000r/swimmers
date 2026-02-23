@@ -46,7 +46,7 @@ export const realtime = new RealtimeService();
 const IDLE_PREVIEW_DELAY_MS = 20_000;
 const IDLE_PREVIEW_REFRESH_MS = 12_000;
 const IDLE_PREVIEW_SCAN_MS = 2_000;
-const IDLE_PREVIEW_MAX_CHARS = 300;
+const IDLE_PREVIEW_MAX_CHARS = 160;
 const TERMINAL_OUTPUT_DECODER = new TextDecoder();
 
 function parseIsoMs(value: string): number | null {
@@ -78,6 +78,26 @@ function dedupeSessionsById(items: SessionSummary[]): SessionSummary[] {
     byId.set(session.session_id, pickPreferredSession(existing, session));
   }
   return Array.from(byId.values());
+}
+
+export function applySessionStatePayload(
+  session: SessionSummary,
+  payload: SessionStatePayload,
+): SessionSummary {
+  if (
+    session.state === payload.state &&
+    session.current_command === payload.current_command &&
+    session.transport_health === payload.transport_health
+  ) {
+    return session;
+  }
+
+  return {
+    ...session,
+    state: payload.state,
+    current_command: payload.current_command,
+    transport_health: payload.transport_health,
+  };
 }
 
 function stripTerminalEscapes(raw: string): string {
@@ -475,20 +495,7 @@ export function App() {
       },
 
       onSessionState(sessionId: string, payload: SessionStatePayload) {
-        updateSession(sessionId, (s) =>
-          s.state === payload.state &&
-          s.current_command === payload.current_command &&
-          s.transport_health === payload.transport_health &&
-          s.last_activity_at === payload.at
-            ? s
-            : {
-                ...s,
-                state: payload.state,
-                current_command: payload.current_command,
-                transport_health: payload.transport_health,
-                last_activity_at: payload.at,
-              },
-        );
+        updateSession(sessionId, (s) => applySessionStatePayload(s, payload));
         if (payload.state !== "idle") {
           clearIdlePreview(sessionId);
         }

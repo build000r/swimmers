@@ -694,7 +694,7 @@ impl SessionSupervisor {
     pub async fn persist_thought(
         &self,
         session_id: &str,
-        thought: &str,
+        thought: Option<&str>,
         token_count: u64,
         context_limit: u64,
         thought_state: ThoughtState,
@@ -706,7 +706,7 @@ impl SessionSupervisor {
             thought_snapshots.insert(
                 session_id.to_string(),
                 ThoughtSnapshot {
-                    thought: Some(thought.to_string()),
+                    thought: thought.map(|value| value.to_string()),
                     thought_state,
                     thought_source,
                     objective_fingerprint: objective_fingerprint.clone(),
@@ -931,7 +931,7 @@ pub struct SupervisorProvider {
 
 struct PersistThoughtRequest {
     session_id: String,
-    thought: String,
+    thought: Option<String>,
     token_count: u64,
     context_limit: u64,
     thought_state: ThoughtState,
@@ -950,7 +950,7 @@ impl SupervisorProvider {
                 persist_supervisor
                     .persist_thought(
                         &req.session_id,
-                        &req.thought,
+                        req.thought.as_deref(),
                         req.token_count,
                         req.context_limit,
                         req.thought_state,
@@ -987,7 +987,7 @@ impl SessionProvider for SupervisorProvider {
     fn persist_thought(
         &self,
         session_id: &str,
-        thought: &str,
+        thought: Option<&str>,
         token_count: u64,
         context_limit: u64,
         thought_state: ThoughtState,
@@ -996,7 +996,7 @@ impl SessionProvider for SupervisorProvider {
     ) {
         if self.persist_tx.try_send(PersistThoughtRequest {
                 session_id: session_id.to_string(),
-                thought: thought.to_string(),
+                thought: thought.map(|value| value.to_string()),
                 token_count,
                 context_limit,
                 thought_state,

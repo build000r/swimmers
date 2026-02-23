@@ -10,10 +10,10 @@ use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 use tracing::{debug, error, info, warn};
 
-use crate::types::SessionState;
+use crate::types::{SessionState, ThoughtSource, ThoughtState};
 
 // ---------------------------------------------------------------------------
 // Persisted data types
@@ -29,6 +29,14 @@ pub struct PersistedSession {
     pub token_count: u64,
     pub context_limit: u64,
     pub thought: Option<String>,
+    #[serde(default)]
+    pub thought_state: ThoughtState,
+    #[serde(default)]
+    pub thought_source: ThoughtSource,
+    #[serde(default)]
+    pub thought_updated_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub objective_fingerprint: Option<String>,
     pub cwd: String,
     pub last_activity_at: DateTime<Utc>,
 }
@@ -37,6 +45,12 @@ pub struct PersistedSession {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ThoughtSnapshot {
     pub thought: Option<String>,
+    #[serde(default)]
+    pub thought_state: ThoughtState,
+    #[serde(default)]
+    pub thought_source: ThoughtSource,
+    #[serde(default)]
+    pub objective_fingerprint: Option<String>,
     pub token_count: u64,
     pub context_limit: u64,
     pub updated_at: DateTime<Utc>,
@@ -51,6 +65,10 @@ pub struct FileStore {
     base_dir: PathBuf,
     /// In-memory cache of persisted sessions, synced to disk on mutation.
     cache: RwLock<Vec<PersistedSession>>,
+    /// In-memory cache of thought snapshots, synced to disk on mutation.
+    thought_cache: RwLock<HashMap<String, ThoughtSnapshot>>,
+    /// Serialize thought writes to avoid stale read-modify-write races.
+    thought_write_lock: Mutex<()>,
 }
 
 impl FileStore {
@@ -69,18 +87,26 @@ impl FileStore {
         let store = Arc::new(Self {
             base_dir,
             cache: RwLock::new(Vec::new()),
+            thought_cache: RwLock::new(HashMap::new()),
+            thought_write_lock: Mutex::new(()),
         });
 
         // Load existing data into cache.
         let loaded = store.load_sessions_from_disk().await;
+        let loaded_thoughts = store.load_thoughts_from_disk().await;
         {
             let mut cache = store.cache.write().await;
             *cache = loaded;
+        }
+        {
+            let mut thought_cache = store.thought_cache.write().await;
+            *thought_cache = loaded_thoughts;
         }
 
         info!(
             dir = %store.base_dir.display(),
             sessions = store.cache.read().await.len(),
+            thoughts = store.thought_cache.read().await.len(),
             "persistence store initialized"
         );
 
@@ -164,30 +190,39 @@ impl FileStore {
     pub async fn save_thought(
         &self,
         session_id: &str,
-        thought: &str,
+        thought: Option<&str>,
         token_count: u64,
         context_limit: u64,
+        thought_state: ThoughtState,
+        thought_source: ThoughtSource,
+        objective_fingerprint: Option<String>,
     ) {
-        let mut thoughts = self.load_thoughts().await;
-        thoughts.insert(
-            session_id.to_string(),
-            ThoughtSnapshot {
-                thought: Some(thought.to_string()),
-                token_count,
-                context_limit,
-                updated_at: Utc::now(),
-            },
-        );
+        let _write_guard = self.thought_write_lock.lock().await;
+        let data = {
+            let mut thoughts = self.thought_cache.write().await;
+            thoughts.insert(
+                session_id.to_string(),
+                ThoughtSnapshot {
+                    thought: thought.map(|value| value.to_string()),
+                    thought_state,
+                    thought_source,
+                    objective_fingerprint,
+                    token_count,
+                    context_limit,
+                    updated_at: Utc::now(),
+                },
+            );
 
-        let path = self.thoughts_path();
-        let data = match serde_json::to_string_pretty(&thoughts) {
-            Ok(d) => d,
-            Err(e) => {
-                error!("failed to serialize thoughts: {e}");
-                return;
+            match serde_json::to_string_pretty(&*thoughts) {
+                Ok(d) => d,
+                Err(e) => {
+                    error!("failed to serialize thoughts: {e}");
+                    return;
+                }
             }
         };
 
+        let path = self.thoughts_path();
         if let Err(e) = atomic_write_blocking(path, data).await {
             error!("failed to write thoughts: {e}");
         } else {
@@ -197,6 +232,11 @@ impl FileStore {
 
     /// Load all persisted thought snapshots.
     pub async fn load_thoughts(&self) -> HashMap<String, ThoughtSnapshot> {
+        self.thought_cache.read().await.clone()
+    }
+
+    /// Load all persisted thought snapshots from disk.
+    async fn load_thoughts_from_disk(&self) -> HashMap<String, ThoughtSnapshot> {
         let path = self.thoughts_path();
         match read_file_blocking(path).await {
             Ok(Some(data)) => {
