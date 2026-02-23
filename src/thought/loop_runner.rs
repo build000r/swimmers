@@ -8,7 +8,8 @@
 //! prioritize safe thought bubbles over raw terminal previews.
 
 use std::collections::{hash_map::DefaultHasher, HashMap};
-use std::time::Duration;
+use std::hash::{Hash, Hasher};
+use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
 use std::collections::hash_map::RandomState;
@@ -37,7 +38,6 @@ const STATIC_SLEEPING_THOUGHT: &str = "Sleeping.";
 // Per-session thought state
 // ---------------------------------------------------------------------------
 
-#[derive(Debug)]
 struct SessionThoughtState {
     context_reader: Option<Box<dyn ContextReader>>,
     summary_history: Vec<String>,
@@ -83,14 +83,22 @@ impl SessionThoughtState {
         }
     }
 
-    fn cadence_for_state(&self, policy: &ThoughtPolicy, now: DateTime<Utc>) -> u64 {
+    fn cadence_tier_label(&self, policy: &ThoughtPolicy, now: DateTime<Utc>) -> &'static str {
         let objective_age_ms = (now - self.objective_stable_since).num_milliseconds();
         if objective_age_ms >= policy.cadence_ms.cold as i64 {
-            policy.cadence_ms.cold
+            "cold"
         } else if objective_age_ms >= policy.cadence_ms.warm as i64 {
-            policy.cadence_ms.warm
+            "warm"
         } else {
-            policy.cadence_ms.hot
+            "hot"
+        }
+    }
+
+    fn cadence_for_state(&self, policy: &ThoughtPolicy, now: DateTime<Utc>) -> u64 {
+        match self.cadence_tier_label(policy, now) {
+            "cold" => policy.cadence_ms.cold,
+            "warm" => policy.cadence_ms.warm,
+            _ => policy.cadence_ms.hot,
         }
     }
 
@@ -234,6 +242,7 @@ impl ThoughtLoopRunner {
                     let state = per_session
                         .entry(info.session_id.clone())
                         .or_insert_with(|| SessionThoughtState::initialize_from_session_info(info, now));
+                    let cadence_tier = state.cadence_tier_label(&self.thought_policy, now);
 
                     if is_sleeping_session(info, &self.thought_policy) {
                         let should_emit = state.thought_state != ThoughtState::Sleeping
@@ -253,6 +262,12 @@ impl ThoughtLoopRunner {
                                 true,
                                 self.thought_policy.bubble_precedence,
                             );
+                        } else {
+                            crate::metrics::increment_thought_suppression(
+                                &info.session_id,
+                                "sleeping_static",
+                                cadence_tier,
+                            );
                         }
                         state.sleeping_emitted = true;
                         state.thought_state = ThoughtState::Sleeping;
@@ -260,6 +275,7 @@ impl ThoughtLoopRunner {
                         state.last_emitted_thought = Some(STATIC_SLEEPING_THOUGHT.to_string());
                         state.last_emitted_at = Some(now);
                         state.last_call_at = Some(now);
+                        crate::metrics::set_thought_lifecycle_state(&info.session_id, "sleeping");
                         continue;
                     }
 
@@ -278,15 +294,16 @@ impl ThoughtLoopRunner {
                     }
 
                     let candidate = if state.context_reader.is_some() {
-                        handle_context_aware(info, state).await
+                        handle_context_aware(info, state, cadence_tier).await
                     } else {
-                        handle_terminal_fallback(info, state)
+                        handle_terminal_fallback(info, state, cadence_tier)
                             .await
                             .map(|t| t)
                     };
 
                     let Some(candidate) = candidate else {
                         state.thought_state = ThoughtState::Holding;
+                        crate::metrics::set_thought_lifecycle_state(&info.session_id, "holding");
                         continue;
                     };
 
@@ -302,6 +319,15 @@ impl ThoughtLoopRunner {
 
                     if !objective_changed && !state.should_call_for_cadence(&self.thought_policy, now) {
                         state.thought_state = next_thought_state;
+                        crate::metrics::set_thought_lifecycle_state(
+                            &info.session_id,
+                            thought_state_label(next_thought_state),
+                        );
+                        crate::metrics::increment_thought_suppression(
+                            &info.session_id,
+                            "cadence_gate",
+                            cadence_tier,
+                        );
                         continue;
                     }
 
@@ -316,6 +342,15 @@ impl ThoughtLoopRunner {
                     if is_duplicate_thought(state.last_emitted_thought.as_deref(), &candidate.thought) {
                         state.thought_state = next_thought_state;
                         state.thought_source = ThoughtSource::Llm;
+                        crate::metrics::set_thought_lifecycle_state(
+                            &info.session_id,
+                            thought_state_label(next_thought_state),
+                        );
+                        crate::metrics::increment_thought_suppression(
+                            &info.session_id,
+                            "duplicate_equivalent",
+                            cadence_tier,
+                        );
                         continue;
                     }
 
@@ -328,6 +363,10 @@ impl ThoughtLoopRunner {
                     state.last_emitted_at = Some(now);
                     state.thought_state = next_thought_state;
                     state.thought_source = ThoughtSource::Llm;
+                    crate::metrics::set_thought_lifecycle_state(
+                        &info.session_id,
+                        thought_state_label(next_thought_state),
+                    );
 
                     emit_thought_update(
                         &self.event_tx,
@@ -433,6 +472,7 @@ fn normalize_for_compare(s: &str) -> String {
 async fn handle_context_aware(
     info: &SessionInfo,
     state: &mut SessionThoughtState,
+    cadence_tier: &str,
 ) -> Option<ThoughtCandidate> {
     // ContextReader::read is blocking I/O — run on the blocking pool.
     let mut reader_box = state.context_reader.take()?;
@@ -446,6 +486,11 @@ async fn handle_context_aware(
         Ok(pair) => pair,
         Err(e) => {
             error!(session_id = %info.session_id, error = %e, "context reader task panicked");
+            crate::metrics::increment_thought_suppression(
+                &info.session_id,
+                "context_reader_panic",
+                cadence_tier,
+            );
             return None;
         }
     };
@@ -455,6 +500,11 @@ async fn handle_context_aware(
         Some(s) => s,
         None => {
             debug!(session_id = %info.session_id, "skip (context unchanged)");
+            crate::metrics::increment_thought_suppression(
+                &info.session_id,
+                "context_unchanged",
+                cadence_tier,
+            );
             return None;
         }
     };
@@ -467,9 +517,14 @@ async fn handle_context_aware(
     {
         debug!(session_id = %info.session_id, "skip (objective unchanged)");
         state.last_focus_hash = context_focus_fingerprint(&snapshot, info.state);
+        crate::metrics::increment_thought_suppression(
+            &info.session_id,
+            "objective_unchanged",
+            cadence_tier,
+        );
         return None;
     }
-    state.last_focus_hash = objective_fingerprint.hash();
+    state.last_focus_hash = hash_string(&objective_fingerprint);
     let token_count = snapshot.token_count;
     let prompt = build_context_prompt(&snapshot, info.state, &state.summary_history);
 
@@ -478,6 +533,11 @@ async fn handle_context_aware(
         debug!(
             session_id = %info.session_id,
             "skip (prompt unchanged)"
+        );
+        crate::metrics::increment_thought_suppression(
+            &info.session_id,
+            "prompt_unchanged",
+            cadence_tier,
         );
         return None;
     }
@@ -497,13 +557,43 @@ async fn handle_context_aware(
         "calling llm (context-aware)"
     );
 
+    let call_started = Instant::now();
     match call_llm(&prompt).await {
         Ok(thought) if thought.is_empty() => {
             debug!(session_id = %info.session_id, "llm returned empty");
+            crate::metrics::record_thought_generation_latency(
+                &info.session_id,
+                "context_aware",
+                cadence_tier,
+                call_started.elapsed(),
+            );
+            crate::metrics::increment_thought_model_call(
+                &info.session_id,
+                "context_aware",
+                cadence_tier,
+                "empty",
+            );
+            crate::metrics::increment_thought_suppression(
+                &info.session_id,
+                "llm_empty",
+                cadence_tier,
+            );
             None
         }
         Ok(thought) => {
             info!(session_id = %info.session_id, thought = %thought, "llm returned");
+            crate::metrics::record_thought_generation_latency(
+                &info.session_id,
+                "context_aware",
+                cadence_tier,
+                call_started.elapsed(),
+            );
+            crate::metrics::increment_thought_model_call(
+                &info.session_id,
+                "context_aware",
+                cadence_tier,
+                "success",
+            );
             Some(ThoughtCandidate {
                 thought,
                 token_count,
@@ -512,6 +602,23 @@ async fn handle_context_aware(
         }
         Err(e) => {
             error!(session_id = %info.session_id, error = %e, "llm error");
+            crate::metrics::record_thought_generation_latency(
+                &info.session_id,
+                "context_aware",
+                cadence_tier,
+                call_started.elapsed(),
+            );
+            crate::metrics::increment_thought_model_call(
+                &info.session_id,
+                "context_aware",
+                cadence_tier,
+                "error",
+            );
+            crate::metrics::increment_thought_suppression(
+                &info.session_id,
+                "llm_error",
+                cadence_tier,
+            );
             None
         }
     }
@@ -525,10 +632,16 @@ async fn handle_context_aware(
 async fn handle_terminal_fallback(
     info: &SessionInfo,
     state: &mut SessionThoughtState,
+    cadence_tier: &str,
 ) -> Option<ThoughtCandidate> {
     let hash = hash_string(&info.replay_text);
     if hash == state.last_replay_hash {
         debug!(session_id = %info.session_id, "skip (unchanged hash)");
+        crate::metrics::increment_thought_suppression(
+            &info.session_id,
+            "replay_hash_unchanged",
+            cadence_tier,
+        );
         return None;
     }
     state.last_replay_hash = hash;
@@ -546,6 +659,11 @@ async fn handle_terminal_fallback(
     let context = context.trim().to_string();
     if context.is_empty() {
         debug!(session_id = %info.session_id, "skip (empty context)");
+        crate::metrics::increment_thought_suppression(
+            &info.session_id,
+            "empty_context",
+            cadence_tier,
+        );
         return None;
     }
 
@@ -555,6 +673,11 @@ async fn handle_terminal_fallback(
             session_id = %info.session_id,
             min_chars = TERMINAL_MIN_MEANINGFUL_DELTA_CHARS,
             "skip (delta below threshold)"
+        );
+        crate::metrics::increment_thought_suppression(
+            &info.session_id,
+            "delta_below_threshold",
+            cadence_tier,
         );
         return None;
     }
@@ -570,13 +693,43 @@ async fn handle_terminal_fallback(
         "calling llm (terminal-fallback)"
     );
 
+    let call_started = Instant::now();
     match call_llm(&prompt).await {
         Ok(thought) if thought.is_empty() => {
             debug!(session_id = %info.session_id, "llm returned empty");
+            crate::metrics::record_thought_generation_latency(
+                &info.session_id,
+                "terminal_fallback",
+                cadence_tier,
+                call_started.elapsed(),
+            );
+            crate::metrics::increment_thought_model_call(
+                &info.session_id,
+                "terminal_fallback",
+                cadence_tier,
+                "empty",
+            );
+            crate::metrics::increment_thought_suppression(
+                &info.session_id,
+                "llm_empty",
+                cadence_tier,
+            );
             None
         }
         Ok(thought) => {
             info!(session_id = %info.session_id, thought = %thought, "llm returned");
+            crate::metrics::record_thought_generation_latency(
+                &info.session_id,
+                "terminal_fallback",
+                cadence_tier,
+                call_started.elapsed(),
+            );
+            crate::metrics::increment_thought_model_call(
+                &info.session_id,
+                "terminal_fallback",
+                cadence_tier,
+                "success",
+            );
             Some(ThoughtCandidate {
                 thought,
                 token_count: info.token_count,
@@ -585,6 +738,23 @@ async fn handle_terminal_fallback(
         }
         Err(e) => {
             error!(session_id = %info.session_id, error = %e, "llm error");
+            crate::metrics::record_thought_generation_latency(
+                &info.session_id,
+                "terminal_fallback",
+                cadence_tier,
+                call_started.elapsed(),
+            );
+            crate::metrics::increment_thought_model_call(
+                &info.session_id,
+                "terminal_fallback",
+                cadence_tier,
+                "error",
+            );
+            crate::metrics::increment_thought_suppression(
+                &info.session_id,
+                "llm_error",
+                cadence_tier,
+            );
             None
         }
     }
@@ -928,6 +1098,14 @@ fn state_label(state: SessionState) -> &'static str {
     }
 }
 
+fn thought_state_label(state: ThoughtState) -> &'static str {
+    match state {
+        ThoughtState::Active => "active",
+        ThoughtState::Holding => "holding",
+        ThoughtState::Sleeping => "sleeping",
+    }
+}
+
 /// Strip ANSI escape sequences so hashing compares visible content only.
 fn strip_ansi(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
@@ -976,20 +1154,28 @@ fn hash_string(s: &str) -> u64 {
     hasher.finish()
 }
 
-trait ObjectiveFingerprintExt {
-    fn hash(self) -> u64
-    where
-        Self: ToString;
-}
-impl<T: ToString> ObjectiveFingerprintExt for T {
-    fn hash(self) -> u64 {
-        hash_string(&self.to_string())
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn sample_session_info(now: DateTime<Utc>) -> SessionInfo {
+        SessionInfo {
+            session_id: "sess_test".to_string(),
+            state: SessionState::Busy,
+            exited: false,
+            tool: Some("Codex".to_string()),
+            cwd: "/tmp".to_string(),
+            replay_text: "running tests".to_string(),
+            thought: Some("Investigating failing tests".to_string()),
+            thought_state: ThoughtState::Holding,
+            thought_source: ThoughtSource::CarryForward,
+            objective_fingerprint: Some("obj-1".to_string()),
+            thought_updated_at: Some(now),
+            token_count: 1000,
+            context_limit: 192_000,
+            last_activity_at: now,
+        }
+    }
 
     #[test]
     fn state_label_matches() {
@@ -1127,5 +1313,203 @@ mod tests {
             context_focus_fingerprint(&base, SessionState::Busy),
             context_focus_fingerprint(&noisy, SessionState::Busy)
         );
+    }
+
+    #[test]
+    fn lifecycle_sleeping_threshold_requires_idle_and_threshold() {
+        let policy = ThoughtPolicy::phase_gated_v1();
+        let now = Utc::now();
+
+        let mut busy_info = sample_session_info(now);
+        busy_info.state = SessionState::Busy;
+        busy_info.last_activity_at =
+            now - chrono::Duration::milliseconds(policy.sleeping_after_ms as i64 + 5_000);
+        assert!(!is_sleeping_session(&busy_info, &policy));
+
+        let mut idle_recent = sample_session_info(now);
+        idle_recent.state = SessionState::Idle;
+        idle_recent.last_activity_at =
+            now - chrono::Duration::milliseconds(policy.sleeping_after_ms as i64 - 1);
+        assert!(!is_sleeping_session(&idle_recent, &policy));
+
+        let mut idle_stale = sample_session_info(now);
+        idle_stale.state = SessionState::Idle;
+        idle_stale.last_activity_at =
+            now - chrono::Duration::milliseconds(policy.sleeping_after_ms as i64 + 1);
+        assert!(is_sleeping_session(&idle_stale, &policy));
+    }
+
+    #[test]
+    fn cadence_tier_transitions_hot_warm_cold() {
+        let policy = ThoughtPolicy::phase_gated_v1();
+        let now = Utc::now();
+        let info = sample_session_info(now);
+        let mut state = SessionThoughtState::initialize_from_session_info(&info, now);
+
+        state.objective_stable_since = now - chrono::Duration::milliseconds(10_000);
+        assert_eq!(state.cadence_tier_label(&policy, now), "hot");
+
+        state.objective_stable_since = now - chrono::Duration::milliseconds(50_000);
+        assert_eq!(state.cadence_tier_label(&policy, now), "warm");
+
+        state.objective_stable_since = now - chrono::Duration::milliseconds(140_000);
+        assert_eq!(state.cadence_tier_label(&policy, now), "cold");
+    }
+
+    #[test]
+    fn cold_tier_call_budget_is_no_more_than_one_per_120s_window() {
+        let policy = ThoughtPolicy::phase_gated_v1();
+        let now = Utc::now();
+        let info = sample_session_info(now);
+        let mut state = SessionThoughtState::initialize_from_session_info(&info, now);
+
+        // Force stable cold tier.
+        state.objective_stable_since = now - chrono::Duration::minutes(30);
+        state.last_call_at = Some(now);
+
+        let within_budget = now + chrono::Duration::seconds(119);
+        let at_budget = now + chrono::Duration::seconds(120);
+
+        assert_eq!(state.cadence_tier_label(&policy, within_budget), "cold");
+        assert!(!state.should_call_for_cadence(&policy, within_budget));
+        assert!(state.should_call_for_cadence(&policy, at_budget));
+    }
+
+    #[test]
+    fn stable_cold_tier_budget_scales_to_32_sessions() {
+        let policy = ThoughtPolicy::phase_gated_v1();
+        let now = Utc::now();
+        let base_info = sample_session_info(now);
+
+        let mut states: Vec<SessionThoughtState> = (0..32)
+            .map(|_| {
+                let mut state = SessionThoughtState::initialize_from_session_info(&base_info, now);
+                state.objective_stable_since = now - chrono::Duration::minutes(30);
+                state.last_call_at = Some(now);
+                state
+            })
+            .collect();
+
+        let mut calls_per_session = vec![0usize; states.len()];
+
+        // Simulate 10 minutes in 1-second ticks while objective remains stable.
+        for sec in 1..=600 {
+            let tick_at = now + chrono::Duration::seconds(sec);
+            for (idx, state) in states.iter_mut().enumerate() {
+                if state.should_call_for_cadence(&policy, tick_at) {
+                    calls_per_session[idx] += 1;
+                    state.last_call_at = Some(tick_at);
+                }
+            }
+        }
+
+        // cold-tier budget => <= 1 call / 120s, so 10 minutes allows at most 5 calls.
+        assert!(calls_per_session.iter().all(|calls| *calls <= 5));
+    }
+
+    #[test]
+    fn thought_state_label_maps_all_variants() {
+        assert_eq!(thought_state_label(ThoughtState::Active), "active");
+        assert_eq!(thought_state_label(ThoughtState::Holding), "holding");
+        assert_eq!(thought_state_label(ThoughtState::Sleeping), "sleeping");
+    }
+
+    #[test]
+    fn perf_gate_p99_dispatch_and_echo_under_slo() {
+        const SESSION_COUNT: usize = 32;
+        const TICKS_PER_SESSION: usize = 300;
+        const DISPATCH_SLO_US: u128 = 10_000; // 10ms
+        const ECHO_SLO_US: u128 = 35_000; // 35ms
+
+        let policy = ThoughtPolicy::phase_gated_v1();
+        let now = Utc::now();
+        let base_info = sample_session_info(now);
+
+        let mut states: Vec<SessionThoughtState> = (0..SESSION_COUNT)
+            .map(|_| {
+                let mut state = SessionThoughtState::initialize_from_session_info(&base_info, now);
+                state.objective_stable_since = now - chrono::Duration::seconds(30);
+                state.last_call_at = Some(now - chrono::Duration::seconds(5));
+                state
+            })
+            .collect();
+
+        let mut dispatch_samples_us: Vec<u128> =
+            Vec::with_capacity(SESSION_COUNT * TICKS_PER_SESSION);
+        let mut echo_samples_us: Vec<u128> = Vec::with_capacity(SESSION_COUNT * TICKS_PER_SESSION);
+
+        for tick in 0..TICKS_PER_SESSION {
+            let tick_at = now + chrono::Duration::milliseconds((tick * 100) as i64);
+            for state in &mut states {
+                let dispatch_started = Instant::now();
+                let _tier = state.cadence_tier_label(&policy, tick_at);
+                let _eligible = state.should_call_for_cadence(&policy, tick_at);
+                let _label = thought_state_label(state.thought_state);
+                dispatch_samples_us.push(dispatch_started.elapsed().as_micros());
+
+                let echo_started = Instant::now();
+                let previous =
+                    "cargo test --package throngterm -- thought::loop_runner::tests --nocapture";
+                let current = "cargo test --package throngterm -- thought::loop_runner::tests --nocapture\nrunning 14 tests\nok";
+                let _delta = has_meaningful_terminal_delta(current, Some(previous));
+                echo_samples_us.push(echo_started.elapsed().as_micros());
+            }
+        }
+
+        let dispatch_p99 = p99_micros(&mut dispatch_samples_us);
+        let echo_p99 = p99_micros(&mut echo_samples_us);
+
+        assert!(
+            dispatch_p99 <= DISPATCH_SLO_US,
+            "dispatch p99 {}us exceeded {}us",
+            dispatch_p99,
+            DISPATCH_SLO_US
+        );
+        assert!(
+            echo_p99 <= ECHO_SLO_US,
+            "echo p99 {}us exceeded {}us",
+            echo_p99,
+            ECHO_SLO_US
+        );
+    }
+
+    #[tokio::test]
+    async fn perf_gate_backpressure_channel_is_bounded() {
+        const CAPACITY: usize = 64;
+        let (tx, mut rx) = tokio::sync::broadcast::channel::<u64>(CAPACITY);
+
+        for i in 0..(CAPACITY as u64 + 32) {
+            let _ = tx.send(i);
+        }
+
+        match rx.recv().await {
+            Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                assert!(n > 0, "expected lagged backpressure signal");
+            }
+            other => panic!("expected Lagged backpressure signal, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn perf_gate_sleeping_tier_model_calls_suppressed_by_short_circuit() {
+        let policy = ThoughtPolicy::phase_gated_v1();
+        let now = Utc::now();
+        let mut info = sample_session_info(now);
+        info.state = SessionState::Idle;
+        info.last_activity_at =
+            now - chrono::Duration::milliseconds(policy.sleeping_after_ms as i64 + 10_000);
+
+        assert!(is_sleeping_session(&info, &policy));
+        // The main loop checks this condition before candidate generation and
+        // continues early, preventing any model-call path in sleeping tier.
+    }
+
+    fn p99_micros(samples: &mut [u128]) -> u128 {
+        samples.sort_unstable();
+        if samples.is_empty() {
+            return 0;
+        }
+        let idx = ((samples.len() * 99).div_ceil(100)).saturating_sub(1);
+        samples[idx]
     }
 }

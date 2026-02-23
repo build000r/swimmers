@@ -213,18 +213,30 @@ function ThrongletEntity({
   let thoughtText = "";
   let showBubble = false;
   const idlePreviewText = idlePreview?.trim() ?? "";
+  const idlePreviewWords = idlePreviewText
+    .toLowerCase()
+    .split(/\s+/)
+    .filter(Boolean);
+  const idlePreviewLooksPromptLike =
+    /(?:^|\s)(?:\$|#|>|❯)\s*[a-z0-9_./~:-]/i.test(idlePreviewText) ||
+    (idlePreviewWords.length > 0 &&
+      idlePreviewWords.length <= 8 &&
+      /^(git|npm|pnpm|yarn|cargo|python|python3|node|npx|uv|go|rustc|make|docker|kubectl|tmux|ls|cd|cat|sed|rg|grep|curl|wget|pytest|pip|bun|deno)$/i.test(
+        idlePreviewWords[0] ?? "",
+      ));
+  const safeIdlePreviewText = idlePreviewLooksPromptLike ? "" : idlePreviewText;
   const normalizedThought = session.thought?.trim().toLowerCase() ?? "";
   const isSleepingThought =
     normalizedThought === "sleeping" || normalizedThought === "sleeping.";
   const showIdlePreview =
     !session.thought &&
     session.state === "idle" &&
-    idlePreviewText.length > 0 &&
+    safeIdlePreviewText.length > 0 &&
     !isSleepingThought;
 
   if (showIdlePreview) {
-    activityText = idlePreviewText;
-    thoughtText = idlePreviewText;
+    activityText = safeIdlePreviewText;
+    thoughtText = safeIdlePreviewText;
     showBubble = true;
   } else if (session.thought) {
     activityText = session.thought;

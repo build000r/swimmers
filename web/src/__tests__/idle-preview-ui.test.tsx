@@ -88,6 +88,28 @@ describe("idle preview bubble override", () => {
     expect(screen.queryByText("tail output from tmux buffer")).toBeNull();
   });
 
+  it("suppresses command-like idle preview fallback", () => {
+    const session = makeSession({
+      session_id: "sess-001",
+      state: "idle",
+      thought: null,
+      current_command: null,
+      tool: "Claude Code",
+    });
+
+    render(
+      <OverviewField
+        sessions={[session]}
+        idlePreviews={{ "sess-001": "npm test --watch" }}
+        onTapSession={noop}
+        onDragToBottom={noop}
+        onCreateSession={noopCreate}
+      />,
+    );
+
+    expect(screen.queryByText("npm test --watch")).toBeNull();
+  });
+
   it("keeps the previous thought bubble until a new one replaces it", () => {
     const session = makeSession({
       session_id: "sess-001",

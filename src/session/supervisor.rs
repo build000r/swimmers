@@ -709,7 +709,7 @@ impl SessionSupervisor {
                     thought: Some(thought.to_string()),
                     thought_state,
                     thought_source,
-                    objective_fingerprint,
+                    objective_fingerprint: objective_fingerprint.clone(),
                     token_count,
                     context_limit,
                     updated_at: Utc::now(),

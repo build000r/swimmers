@@ -63,6 +63,18 @@ const FRAMES_SENT: &str = "throngterm_frames_sent_total";
 /// Total binary frames received from clients.
 const FRAMES_RECEIVED: &str = "throngterm_frames_received_total";
 
+/// Per-session lifecycle-state gauge (one-hot by `state` label).
+const THOUGHT_LIFECYCLE_STATE: &str = "throngterm_thought_lifecycle_state";
+
+/// Thought model call outcomes by generation path + cadence tier.
+const THOUGHT_MODEL_CALLS: &str = "throngterm_thought_model_calls_total";
+
+/// Thought suppression counters by reason + cadence tier.
+const THOUGHT_SUPPRESSIONS: &str = "throngterm_thought_suppressions_total";
+
+/// Thought generation latency (LLM path only).
+const THOUGHT_GENERATION_LATENCY: &str = "throngterm_thought_generation_seconds";
+
 // ---------------------------------------------------------------------------
 // Initialization
 // ---------------------------------------------------------------------------
@@ -113,6 +125,22 @@ pub fn init_metrics() -> PrometheusHandle {
     );
     describe_counter!(FRAMES_SENT, "Total binary frames sent to clients");
     describe_counter!(FRAMES_RECEIVED, "Total binary frames received from clients");
+    describe_gauge!(
+        THOUGHT_LIFECYCLE_STATE,
+        "Per-session thought lifecycle state (labels: session_id, state)"
+    );
+    describe_counter!(
+        THOUGHT_MODEL_CALLS,
+        "Thought model call outcomes by path/tier/outcome"
+    );
+    describe_counter!(
+        THOUGHT_SUPPRESSIONS,
+        "Thought suppressions by reason and cadence tier"
+    );
+    describe_histogram!(
+        THOUGHT_GENERATION_LATENCY,
+        "Thought generation latency by path and cadence tier"
+    );
 
     handle
 }
@@ -150,6 +178,7 @@ pub fn record_queue_depth(session_id: &str, depth: usize) {
 /// Update the current outbound queue byte size gauge for a session.
 ///
 /// Call site: `src/session/actor.rs` (alongside queue depth updates).
+#[allow(dead_code)]
 pub fn record_queue_bytes(session_id: &str, bytes: usize) {
     gauge!(QUEUE_BYTES, "session_id" => session_id.to_owned()).set(bytes as f64);
 }
@@ -205,6 +234,7 @@ pub fn increment_subscription_lifecycle(session_id: &str, action: &str) {
 ///
 /// Call site: wherever `TransportHealth` transitions are detected (currently
 /// this would be in the session actor or a future health-monitoring component).
+#[allow(dead_code)]
 pub fn record_transport_health_transition(from_state: &str, to_state: &str) {
     counter!(
         TRANSPORT_TRANSITIONS,
@@ -228,4 +258,56 @@ pub fn increment_frames_sent() {
 /// frame is received from the WebSocket client).
 pub fn increment_frames_received() {
     counter!(FRAMES_RECEIVED).increment(1);
+}
+
+/// Set per-session lifecycle state as a one-hot gauge by state label.
+pub fn set_thought_lifecycle_state(session_id: &str, state: &str) {
+    for candidate in ["active", "holding", "sleeping"] {
+        let value = if candidate == state { 1.0 } else { 0.0 };
+        gauge!(
+            THOUGHT_LIFECYCLE_STATE,
+            "session_id" => session_id.to_owned(),
+            "state" => candidate.to_string()
+        )
+        .set(value);
+    }
+}
+
+/// Increment thought model-call counters by path/tier/outcome.
+pub fn increment_thought_model_call(session_id: &str, path: &str, tier: &str, outcome: &str) {
+    counter!(
+        THOUGHT_MODEL_CALLS,
+        "session_id" => session_id.to_owned(),
+        "path" => path.to_owned(),
+        "tier" => tier.to_owned(),
+        "outcome" => outcome.to_owned()
+    )
+    .increment(1);
+}
+
+/// Increment thought suppression counters by reason and cadence tier.
+pub fn increment_thought_suppression(session_id: &str, reason: &str, tier: &str) {
+    counter!(
+        THOUGHT_SUPPRESSIONS,
+        "session_id" => session_id.to_owned(),
+        "reason" => reason.to_owned(),
+        "tier" => tier.to_owned()
+    )
+    .increment(1);
+}
+
+/// Record thought generation latency by path/tier.
+pub fn record_thought_generation_latency(
+    session_id: &str,
+    path: &str,
+    tier: &str,
+    duration: Duration,
+) {
+    histogram!(
+        THOUGHT_GENERATION_LATENCY,
+        "session_id" => session_id.to_owned(),
+        "path" => path.to_owned(),
+        "tier" => tier.to_owned()
+    )
+    .record(duration.as_secs_f64());
 }

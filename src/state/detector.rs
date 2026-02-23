@@ -10,7 +10,7 @@ use tracing::debug;
 use crate::types::SessionState;
 
 const ERROR_LINGER_MS: u64 = 4000;
-const ATTENTION_DELAY_MS: u64 = 10000;
+const ATTENTION_DELAY_MS: u64 = 300000;
 const OUTPUT_IDLE_MS: u64 = 5000;
 
 /// Callback signature for state change notifications.
@@ -75,6 +75,7 @@ impl StateDetector {
 
     /// Shell integration init script injected into zsh on session start.
     /// Returns OSC 133 sequences for prompt/command boundaries.
+    #[allow(dead_code)]
     pub fn shell_integration_script() -> &'static str {
         "precmd() { printf '\\e]133;A\\a' }; preexec() { printf '\\e]133;C;cmd=%s\\a' \"$1\" }"
     }
@@ -116,10 +117,7 @@ impl StateDetector {
         // Check timer deadlines before processing new output.
         self.check_timers(now);
 
-        let ParsedChunk {
-            visible,
-            markers,
-        } = self.parse_chunk(data);
+        let ParsedChunk { visible, markers } = self.parse_chunk(data);
 
         // Check for OSC 133 prompt/command markers.
         // If both appear in one logical sequence window, honor whichever occurs last.
@@ -222,8 +220,7 @@ impl StateDetector {
         // When the tool stops producing output (silence), the deadline expires
         // and check_timers will transition busy -> idle.
         if self.tui_tool_mode && self.state == SessionState::Busy {
-            self.output_idle_deadline =
-                Some(now + Duration::from_millis(OUTPUT_IDLE_MS));
+            self.output_idle_deadline = Some(now + Duration::from_millis(OUTPUT_IDLE_MS));
         }
     }
 
@@ -311,8 +308,7 @@ impl StateDetector {
         // In TUI tool mode, start the silence timer from the input event
         // so idle fires if the tool produces no output after user input.
         if self.tui_tool_mode {
-            self.output_idle_deadline =
-                Some(now + Duration::from_millis(OUTPUT_IDLE_MS));
+            self.output_idle_deadline = Some(now + Duration::from_millis(OUTPUT_IDLE_MS));
         }
     }
 
@@ -346,6 +342,7 @@ impl StateDetector {
 
     /// Alias for `process_output` -- accepts a byte slice from the scroll guard
     /// output pipeline. This is the name used by the session actor.
+    #[allow(dead_code)]
     pub fn feed(&mut self, data: &[u8]) {
         self.process_output(data);
     }
@@ -374,8 +371,7 @@ impl StateDetector {
                         self.escape_state = EscapeState::Pm { esc_pending: false };
                     } else if b == 0x9f {
                         self.escape_state = EscapeState::Apc { esc_pending: false };
-                    } else if b == b'\n' || b == b'\r' || b == b'\t' || (0x20..=0x7e).contains(&b)
-                    {
+                    } else if b == b'\n' || b == b'\r' || b == b'\t' || (0x20..=0x7e).contains(&b) {
                         visible.push(b);
                     }
                 }

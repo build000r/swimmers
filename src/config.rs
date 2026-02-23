@@ -27,6 +27,7 @@ pub struct Config {
     pub poll_fallback_ms: u64,
     pub replay_buffer_size: usize,
     pub outbound_queue_bound: usize,
+    #[allow(dead_code)]
     pub overload_window_ms: u64,
 }
 

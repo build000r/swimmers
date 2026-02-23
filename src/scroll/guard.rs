@@ -14,7 +14,6 @@
 //     buffer it and only forward the final frame after a short delay.
 //  3. Normal output (command output, prompts) passes through immediately.
 
-
 use std::time::{Duration, Instant};
 
 use regex::Regex;
@@ -48,6 +47,7 @@ impl ScrollGuard {
     }
 
     /// Alias for `notify_input` -- the name used by the session actor.
+    #[allow(dead_code)]
     pub fn note_input(&mut self) {
         self.notify_input();
     }
