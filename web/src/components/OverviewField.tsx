@@ -452,10 +452,12 @@ function HatchingEgg({ x, y, phase, onPhaseComplete }: HatchingEggProps) {
 // ---- OverviewField ----
 
 interface HatchState {
+  id: number;
   x: number;
   y: number;
   phase: HatchPhase;
   sessionId: string | null;
+  spawnStatus: "pending" | "success" | "failed";
 }
 
 interface OverviewFieldProps {
@@ -496,6 +498,7 @@ export function OverviewField({
     y: number;
   } | null>(null);
   const spawnPositionsRef = useRef<Map<string, { x: number; y: number }>>(new Map());
+  const hatchIdRef = useRef(0);
   const menuClickPosRef = useRef<{ x: number; y: number }>({ x: 0, y: 0 });
   const fieldRef = useRef<HTMLDivElement>(null);
   const axeHitTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -739,18 +742,36 @@ export function OverviewField({
       const rect = field?.getBoundingClientRect();
       const x = rect ? clientX - rect.left : clientX;
       const y = rect ? clientY - rect.top : clientY;
+      const hatchId = hatchIdRef.current + 1;
+      hatchIdRef.current = hatchId;
 
-      setHatchState({ x, y, phase: "dropping", sessionId: null });
+      setHatchState({
+        id: hatchId,
+        x,
+        y,
+        phase: "dropping",
+        sessionId: null,
+        spawnStatus: "pending",
+      });
 
       // Fire API call in parallel with animation.
-      void onCreateSession(cwd, spawnTool).then((sessionId) => {
-        if (sessionId) {
-          spawnPositionsRef.current.set(sessionId, { x, y });
-          setHatchState((prev) =>
-            prev ? { ...prev, sessionId } : null,
-          );
-        }
-      });
+      void onCreateSession(cwd, spawnTool)
+        .then((sessionId) => {
+          setHatchState((prev) => {
+            if (!prev || prev.id !== hatchId) return prev;
+            if (!sessionId) {
+              return { ...prev, spawnStatus: "failed" };
+            }
+            spawnPositionsRef.current.set(sessionId, { x, y });
+            return { ...prev, sessionId, spawnStatus: "success" };
+          });
+        })
+        .catch(() => {
+          setHatchState((prev) => {
+            if (!prev || prev.id !== hatchId) return prev;
+            return { ...prev, spawnStatus: "failed" };
+          });
+        });
     },
     [onCreateSession],
   );
@@ -822,27 +843,26 @@ export function OverviewField({
         if (!prev) return null;
         if (completedPhase === "dropping") return { ...prev, phase: "wobbling" };
         if (completedPhase === "wobbling") {
-          // Wobble done — show egg as ThrongletEntity now.
-          if (prev.sessionId) {
-            setTimeout(() => onTapSession(prev.sessionId!), 400);
-          }
           return { ...prev, phase: "done" };
         }
         return prev;
       });
     },
-    [onTapSession],
+    [],
   );
 
-  // If animation reached "done" but sessionId arrived late, navigate now.
+  // Resolve hatch exactly once after animation and spawn both settle.
   useEffect(() => {
-    if (hatchState?.phase === "done" && hatchState.sessionId) {
-      const timer = setTimeout(() => {
-        onTapSession(hatchState.sessionId!);
-        setHatchState(null);
-      }, 400);
-      return () => clearTimeout(timer);
-    }
+    if (!hatchState || hatchState.phase !== "done") return;
+    if (hatchState.spawnStatus === "pending") return;
+
+    const timer = setTimeout(() => {
+      if (hatchState.spawnStatus === "success" && hatchState.sessionId) {
+        onTapSession(hatchState.sessionId);
+      }
+      setHatchState((prev) => (prev && prev.id === hatchState.id ? null : prev));
+    }, 400);
+    return () => clearTimeout(timer);
   }, [hatchState, onTapSession]);
 
   const axeTargetSession = axeTargetSessionId
