@@ -2,17 +2,18 @@ use std::env;
 use std::io;
 use std::process::Stdio;
 
+use chrono::{SecondsFormat, Utc};
+use serde_json::{json, Map, Value};
 use thiserror::Error;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 use tracing::warn;
 
 use crate::thought::loop_runner::SessionInfo;
-use crate::thought::protocol::{
-    DaemonInboundMessage, SyncRequest, SyncResponse, EMIT_PROTOCOL_V1, SYNC_RESPONSE_MESSAGE_TYPE,
-};
+use crate::thought::protocol::{SyncRequest, SyncResponse, SyncUpdate, EMIT_PROTOCOL_V1};
 
 const DEFAULT_CLAWGS_BIN: &str = "clawgs";
+const SYNC_RESULT_MESSAGE_TYPE: &str = "sync_result";
 
 struct DaemonProcess {
     child: Child,
@@ -107,16 +108,18 @@ pub enum EmitterClientError {
     DaemonError {
         code: String,
         message: String,
-        request_id: Option<u64>,
+        request_id: Option<String>,
     },
-    #[error("sync response request_id mismatch: expected {expected}, got {actual}")]
-    RequestIdMismatch { expected: u64, actual: u64 },
+    #[error("sync response id mismatch: expected `{expected}`, got `{actual}`")]
+    RequestIdMismatch { expected: String, actual: String },
     #[error("unexpected daemon message `{found}` while waiting for `{expected}`: {line}")]
     UnexpectedResponseType {
         expected: &'static str,
         found: String,
         line: String,
     },
+    #[error("sync request must serialize to a JSON object")]
+    InvalidRequestShape,
     #[error("failed to inspect clawgs emit daemon status: {source}")]
     StatusCheck {
         #[source]
@@ -210,8 +213,7 @@ impl EmitterClient {
             .as_mut()
             .expect("daemon must exist after ensure_running");
 
-        let encoded = serde_json::to_string(&request)
-            .map_err(|source| EmitterClientError::RequestSerialization { source })?;
+        let (encoded, expected_id) = normalize_sync_request(&request)?;
 
         daemon
             .write_line(&encoded)
@@ -224,7 +226,7 @@ impl EmitterClient {
             .map_err(|source| EmitterClientError::ResponseRead { source })?
             .ok_or(EmitterClientError::ResponseEof)?;
 
-        parse_sync_response_line(&response_line, request.request_id)
+        parse_sync_response_line(&response_line, &expected_id)
     }
 
     async fn ensure_running(&mut self) -> Result<(), EmitterClientError> {
@@ -303,67 +305,210 @@ fn resolve_clawgs_bin() -> String {
         .unwrap_or_else(|| DEFAULT_CLAWGS_BIN.to_string())
 }
 
+fn normalize_sync_request(request: &SyncRequest) -> Result<(String, String), EmitterClientError> {
+    let mut value = serde_json::to_value(request)
+        .map_err(|source| EmitterClientError::RequestSerialization { source })?;
+
+    let object = value
+        .as_object_mut()
+        .ok_or(EmitterClientError::InvalidRequestShape)?;
+
+    object.insert("type".to_string(), Value::String("sync".to_string()));
+
+    let request_id =
+        extract_correlation_id(object).unwrap_or_else(|| Utc::now().timestamp_millis().to_string());
+    object.insert("id".to_string(), Value::String(request_id.clone()));
+
+    object
+        .entry("now".to_string())
+        .or_insert_with(|| Value::String(Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true)));
+    object
+        .entry("config".to_string())
+        .or_insert_with(default_sync_config);
+    object
+        .entry("sessions".to_string())
+        .or_insert_with(|| Value::Array(vec![]));
+
+    let encoded = serde_json::to_string(&value)
+        .map_err(|source| EmitterClientError::RequestSerialization { source })?;
+
+    Ok((encoded, request_id))
+}
+
+fn default_sync_config() -> Value {
+    json!({
+        "enabled": true,
+        "model": "openrouter/aurora-alpha",
+        "cadence_hot_ms": 15_000,
+        "cadence_warm_ms": 45_000,
+        "cadence_cold_ms": 120_000,
+        "agent_prompt": "",
+        "terminal_prompt": ""
+    })
+}
+
+fn extract_correlation_id(object: &Map<String, Value>) -> Option<String> {
+    object
+        .get("id")
+        .and_then(value_as_correlation_id)
+        .or_else(|| object.get("request_id").and_then(value_as_correlation_id))
+}
+
+fn value_as_correlation_id(value: &Value) -> Option<String> {
+    match value {
+        Value::String(value) => {
+            let trimmed = value.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            }
+        }
+        Value::Number(value) => Some(value.to_string()),
+        _ => None,
+    }
+}
+
+fn require_matching_id(
+    object: &Map<String, Value>,
+    expected_id: &str,
+) -> Result<Option<String>, EmitterClientError> {
+    let actual_id = extract_correlation_id(object);
+    if let Some(actual_id_value) = actual_id.as_ref() {
+        if actual_id_value != expected_id {
+            return Err(EmitterClientError::RequestIdMismatch {
+                expected: expected_id.to_string(),
+                actual: actual_id_value.clone(),
+            });
+        }
+    }
+    Ok(actual_id)
+}
+
+fn message_type(object: &Map<String, Value>) -> String {
+    object
+        .get("type")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .unwrap_or_else(|| "<missing>".to_string())
+}
+
+fn parse_updates(
+    object: &Map<String, Value>,
+    line: &str,
+) -> Result<Vec<SyncUpdate>, EmitterClientError> {
+    let updates_value = match object.get("updates") {
+        Some(Value::Null) | None => Value::Array(vec![]),
+        Some(updates) => updates.clone(),
+    };
+
+    serde_json::from_value(updates_value).map_err(|source| EmitterClientError::MalformedResponse {
+        line: line.to_string(),
+        source,
+    })
+}
+
+fn parse_error_field(object: &Map<String, Value>, field: &str, fallback: &str) -> String {
+    object
+        .get(field)
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .or_else(|| object.get(field).map(Value::to_string))
+        .unwrap_or_else(|| fallback.to_string())
+}
+
+fn resolve_numeric_request_id(
+    object: &Map<String, Value>,
+    expected_id: &str,
+    actual_id: Option<&str>,
+) -> u64 {
+    object
+        .get("request_id")
+        .and_then(Value::as_u64)
+        .or_else(|| actual_id.and_then(|id| id.parse::<u64>().ok()))
+        .or_else(|| expected_id.parse::<u64>().ok())
+        .unwrap_or_default()
+}
+
 fn parse_hello_line(line: &str) -> Result<(), EmitterClientError> {
-    let message: DaemonInboundMessage =
+    let value: Value =
         serde_json::from_str(line).map_err(|source| EmitterClientError::MalformedHello {
             line: line.to_string(),
             source,
         })?;
 
-    match message {
-        DaemonInboundMessage::Hello { protocol } if protocol == EMIT_PROTOCOL_V1 => Ok(()),
-        DaemonInboundMessage::Hello { protocol } => {
-            Err(EmitterClientError::HelloProtocolMismatch {
-                expected: EMIT_PROTOCOL_V1,
-                actual: protocol,
-            })
-        }
-        other => Err(EmitterClientError::UnexpectedHelloType {
-            found: other.message_type().to_string(),
+    let object = value
+        .as_object()
+        .ok_or_else(|| EmitterClientError::UnexpectedHelloType {
+            found: "<non_object>".to_string(),
             line: line.to_string(),
-        }),
+        })?;
+
+    let message_type = message_type(object);
+    if message_type != "hello" {
+        return Err(EmitterClientError::UnexpectedHelloType {
+            found: message_type,
+            line: line.to_string(),
+        });
     }
+
+    let protocol = object
+        .get("protocol")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if protocol != EMIT_PROTOCOL_V1 {
+        return Err(EmitterClientError::HelloProtocolMismatch {
+            expected: EMIT_PROTOCOL_V1,
+            actual: protocol.to_string(),
+        });
+    }
+
+    Ok(())
 }
 
 fn parse_sync_response_line(
     line: &str,
-    expected_request_id: u64,
+    expected_id: &str,
 ) -> Result<SyncResponse, EmitterClientError> {
-    let message: DaemonInboundMessage =
+    let value: Value =
         serde_json::from_str(line).map_err(|source| EmitterClientError::MalformedResponse {
             line: line.to_string(),
             source,
         })?;
 
-    match message {
-        DaemonInboundMessage::SyncResponse {
-            request_id,
-            updates,
-        } => {
-            if request_id != expected_request_id {
-                return Err(EmitterClientError::RequestIdMismatch {
-                    expected: expected_request_id,
-                    actual: request_id,
-                });
-            }
+    let object = value
+        .as_object()
+        .ok_or_else(|| EmitterClientError::UnexpectedResponseType {
+            expected: SYNC_RESULT_MESSAGE_TYPE,
+            found: "<non_object>".to_string(),
+            line: line.to_string(),
+        })?;
+
+    match object
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+    {
+        "sync_result" | "sync_response" | "sync" => {
+            let actual_id = require_matching_id(object, expected_id)?;
+            let updates = parse_updates(object, line)?;
 
             Ok(SyncResponse {
-                request_id,
+                request_id: resolve_numeric_request_id(object, expected_id, actual_id.as_deref()),
                 updates,
             })
         }
-        DaemonInboundMessage::Error {
-            code,
-            message,
-            request_id,
-        } => Err(EmitterClientError::DaemonError {
-            code,
-            message,
-            request_id,
-        }),
-        other => Err(EmitterClientError::UnexpectedResponseType {
-            expected: SYNC_RESPONSE_MESSAGE_TYPE,
-            found: other.message_type().to_string(),
+        "error" => {
+            let actual_id = require_matching_id(object, expected_id)?;
+            Err(EmitterClientError::DaemonError {
+                code: parse_error_field(object, "code", "unknown_error"),
+                message: parse_error_field(object, "message", "daemon returned error"),
+                request_id: actual_id,
+            })
+        }
+        _ => Err(EmitterClientError::UnexpectedResponseType {
+            expected: SYNC_RESULT_MESSAGE_TYPE,
+            found: message_type(object),
             line: line.to_string(),
         }),
     }
@@ -377,7 +522,7 @@ mod tests {
 
     #[test]
     fn parse_hello_accepts_expected_protocol() {
-        let raw = r#"{"type":"hello","protocol":"clawgs.emit.v1"}"#;
+        let raw = r#"{"type":"hello","protocol":"clawgs.emit.v1","engine_version":"0.1.0"}"#;
         let result = parse_hello_line(raw);
         assert!(result.is_ok(), "expected valid hello, got: {result:?}");
     }
@@ -399,7 +544,8 @@ mod tests {
     fn parse_sync_response_extracts_updates() {
         let now = Utc::now();
         let raw = serde_json::json!({
-            "type": "sync_response",
+            "type": "sync_result",
+            "id": "req-9",
             "request_id": 9,
             "updates": [
                 {
@@ -418,8 +564,8 @@ mod tests {
         })
         .to_string();
 
-        let response =
-            parse_sync_response_line(&raw, 9).expect("sync response should parse successfully");
+        let response = parse_sync_response_line(&raw, "req-9")
+            .expect("sync response should parse successfully");
 
         assert_eq!(response.request_id, 9);
         assert_eq!(response.updates.len(), 1);
@@ -436,10 +582,26 @@ mod tests {
     }
 
     #[test]
+    fn parse_sync_response_detects_id_mismatch() {
+        let raw = r#"{"type":"sync_result","id":"req-daemon","updates":[]}"#;
+        let err =
+            parse_sync_response_line(raw, "req-client").expect_err("id mismatch should fail sync");
+
+        match err {
+            EmitterClientError::RequestIdMismatch { expected, actual } => {
+                assert_eq!(expected, "req-client");
+                assert_eq!(actual, "req-daemon");
+            }
+            other => panic!("unexpected error variant: {other:?}"),
+        }
+    }
+
+    #[test]
     fn parse_sync_response_surfaces_daemon_error() {
         let raw =
-            r#"{"type":"error","code":"bad_request","message":"invalid payload","request_id":4}"#;
-        let err = parse_sync_response_line(raw, 4).expect_err("error envelope should fail sync");
+            r#"{"type":"error","id":"req-4","code":"bad_request","message":"invalid payload"}"#;
+        let err =
+            parse_sync_response_line(raw, "req-4").expect_err("error envelope should fail sync");
 
         match err {
             EmitterClientError::DaemonError {
@@ -449,9 +611,52 @@ mod tests {
             } => {
                 assert_eq!(code, "bad_request");
                 assert_eq!(message, "invalid payload");
-                assert_eq!(request_id, Some(4));
+                assert_eq!(request_id, Some("req-4".to_string()));
             }
             other => panic!("unexpected error variant: {other:?}"),
         }
+    }
+
+    #[test]
+    fn normalize_sync_request_uses_clawgs_wire_shape() {
+        let request = SyncRequest::from_session_snapshots(7, &[]);
+        let (encoded, expected_id) =
+            normalize_sync_request(&request).expect("sync request should normalize");
+        let parsed: Value =
+            serde_json::from_str(&encoded).expect("normalized request should be valid JSON");
+
+        assert_eq!(expected_id, "7");
+        assert_eq!(parsed["type"], "sync");
+        assert_eq!(parsed["id"], "7");
+        assert!(parsed.get("request_id").is_none());
+        assert!(parsed["now"].is_string());
+        assert_eq!(parsed["config"]["enabled"], true);
+        assert_eq!(parsed["config"]["model"], "openrouter/aurora-alpha");
+        assert_eq!(parsed["config"]["agent_prompt"], "");
+        assert_eq!(parsed["config"]["terminal_prompt"], "");
+        assert!(parsed["sessions"].as_array().is_some());
+    }
+
+    #[test]
+    fn normalize_sync_request_generates_id_when_blank() {
+        let mut request = SyncRequest::from_session_snapshots(22, &[]);
+        request.id = "   ".to_string();
+
+        let (encoded, expected_id) =
+            normalize_sync_request(&request).expect("sync request should normalize");
+        let parsed: Value =
+            serde_json::from_str(&encoded).expect("normalized request should be valid JSON");
+
+        assert!(!expected_id.is_empty());
+        assert_eq!(parsed["id"], expected_id);
+    }
+
+    #[test]
+    fn parse_sync_response_accepts_legacy_string_request_id_field() {
+        let raw = r#"{"type":"sync_response","request_id":"123","updates":[]}"#;
+        let response = parse_sync_response_line(raw, "123")
+            .expect("legacy string request_id should parse successfully");
+        assert_eq!(response.request_id, 123);
+        assert!(response.updates.is_empty());
     }
 }

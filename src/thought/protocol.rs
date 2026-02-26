@@ -1,12 +1,13 @@
 use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::thought::loop_runner::SessionInfo;
 use crate::types::{BubblePrecedence, SessionState, ThoughtSource, ThoughtState};
 
 pub const HELLO_MESSAGE_TYPE: &str = "hello";
 pub const SYNC_MESSAGE_TYPE: &str = "sync";
-pub const SYNC_RESPONSE_MESSAGE_TYPE: &str = "sync_response";
+pub const SYNC_RESULT_MESSAGE_TYPE: &str = "sync_result";
+pub const SYNC_RESPONSE_MESSAGE_TYPE: &str = SYNC_RESULT_MESSAGE_TYPE;
 pub const EMIT_PROTOCOL_V1: &str = "clawgs.emit.v1";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -56,9 +57,38 @@ impl From<&SessionInfo> for SessionSnapshotPayload {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SyncRequestConfig {
+    pub enabled: bool,
+    pub model: String,
+    pub cadence_hot_ms: u64,
+    pub cadence_warm_ms: u64,
+    pub cadence_cold_ms: u64,
+    pub agent_prompt: String,
+    pub terminal_prompt: String,
+}
+
+impl Default for SyncRequestConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            model: "openrouter/aurora-alpha".to_string(),
+            cadence_hot_ms: 15_000,
+            cadence_warm_ms: 45_000,
+            cadence_cold_ms: 120_000,
+            agent_prompt: String::new(),
+            terminal_prompt: String::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct SyncRequest {
     #[serde(rename = "type")]
     pub message_type: String,
+    pub id: String,
+    pub now: DateTime<Utc>,
+    pub config: SyncRequestConfig,
+    #[serde(skip)]
     pub request_id: u64,
     pub sessions: Vec<SessionSnapshotPayload>,
 }
@@ -67,6 +97,9 @@ impl SyncRequest {
     pub fn from_session_snapshots(request_id: u64, sessions: &[SessionInfo]) -> Self {
         Self {
             message_type: SYNC_MESSAGE_TYPE.to_string(),
+            id: request_id.to_string(),
+            now: Utc::now(),
+            config: SyncRequestConfig::default(),
             request_id,
             sessions: sessions.iter().map(SessionSnapshotPayload::from).collect(),
         }
@@ -95,22 +128,62 @@ pub struct SyncResponse {
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
+#[serde(untagged)]
+enum WireRequestId {
+    Numeric(u64),
+    Stringy(String),
+}
+
+fn parse_wire_request_id(value: WireRequestId) -> String {
+    match value {
+        WireRequestId::Numeric(v) => v.to_string(),
+        WireRequestId::Stringy(v) => v,
+    }
+}
+
+fn deserialize_request_id<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let raw = WireRequestId::deserialize(deserializer)?;
+    Ok(parse_wire_request_id(raw))
+}
+
+fn deserialize_optional_request_id<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let raw = Option::<WireRequestId>::deserialize(deserializer)?;
+    Ok(raw.map(parse_wire_request_id))
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum DaemonInboundMessage {
     Hello {
         protocol: String,
     },
-    #[serde(rename = "sync_response", alias = "sync_result", alias = "sync")]
+    #[serde(rename = "sync_result", alias = "sync_response", alias = "sync")]
     SyncResponse {
-        request_id: u64,
+        #[serde(
+            rename = "id",
+            alias = "request_id",
+            deserialize_with = "deserialize_request_id"
+        )]
+        request_id: String,
         #[serde(default)]
         updates: Vec<SyncUpdate>,
     },
     Error {
         code: String,
         message: String,
-        #[serde(default)]
-        request_id: Option<u64>,
+        #[serde(
+            default,
+            rename = "id",
+            alias = "request_id",
+            deserialize_with = "deserialize_optional_request_id"
+        )]
+        request_id: Option<String>,
     },
 }
 
@@ -155,29 +228,113 @@ mod tests {
         let json = serde_json::to_value(&request).expect("request should serialize");
 
         assert_eq!(json["type"], SYNC_MESSAGE_TYPE);
-        assert_eq!(json["request_id"], 7);
+        assert_eq!(json["id"], "7");
+        assert!(json.get("request_id").is_none());
+        assert!(chrono::DateTime::parse_from_rfc3339(
+            json["now"]
+                .as_str()
+                .expect("now should be an RFC3339 string")
+        )
+        .is_ok());
+        assert_eq!(json["config"]["enabled"], true);
+        assert_eq!(json["config"]["model"], "openrouter/aurora-alpha");
+        assert_eq!(json["config"]["cadence_hot_ms"], 15_000);
+        assert_eq!(json["config"]["cadence_warm_ms"], 45_000);
+        assert_eq!(json["config"]["cadence_cold_ms"], 120_000);
+        assert_eq!(json["config"]["agent_prompt"], "");
+        assert_eq!(json["config"]["terminal_prompt"], "");
         assert_eq!(json["sessions"].as_array().map(|v| v.len()), Some(1));
         assert_eq!(json["sessions"][0]["session_id"], "sess-1");
         assert_eq!(json["sessions"][0]["state"], "busy");
     }
 
     #[test]
-    fn inbound_message_deserializes_sync_alias() {
+    fn inbound_message_deserializes_sync_result_with_string_id() {
         let raw = r#"{
             "type": "sync_result",
-            "request_id": 42,
+            "id": "42",
             "updates": []
         }"#;
         let message: DaemonInboundMessage =
-            serde_json::from_str(raw).expect("sync_result alias should deserialize");
+            serde_json::from_str(raw).expect("sync_result should deserialize");
 
         match message {
             DaemonInboundMessage::SyncResponse {
                 request_id,
                 updates,
             } => {
-                assert_eq!(request_id, 42);
+                assert_eq!(request_id, "42");
                 assert!(updates.is_empty());
+            }
+            other => panic!("unexpected message variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn inbound_message_deserializes_legacy_sync_response_alias() {
+        let raw = r#"{
+            "type": "sync_response",
+            "request_id": 17,
+            "updates": []
+        }"#;
+        let message: DaemonInboundMessage =
+            serde_json::from_str(raw).expect("legacy sync_response alias should deserialize");
+
+        match message {
+            DaemonInboundMessage::SyncResponse {
+                request_id,
+                updates,
+            } => {
+                assert_eq!(request_id, "17");
+                assert!(updates.is_empty());
+                assert_eq!(SYNC_RESPONSE_MESSAGE_TYPE, "sync_result");
+            }
+            other => panic!("unexpected message variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn inbound_message_deserializes_non_numeric_string_id() {
+        let raw = r#"{
+            "type": "sync_result",
+            "id": "req-sync-17",
+            "updates": []
+        }"#;
+        let message: DaemonInboundMessage =
+            serde_json::from_str(raw).expect("non-numeric string id should deserialize");
+
+        match message {
+            DaemonInboundMessage::SyncResponse {
+                request_id,
+                updates,
+            } => {
+                assert_eq!(request_id, "req-sync-17");
+                assert!(updates.is_empty());
+            }
+            other => panic!("unexpected message variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn inbound_error_deserializes_string_id() {
+        let raw = r#"{
+            "type": "error",
+            "id": "req-err-8",
+            "code": "bad_request",
+            "message": "invalid payload"
+        }"#;
+        let message: DaemonInboundMessage =
+            serde_json::from_str(raw).expect("error with string id should deserialize");
+
+        match message {
+            DaemonInboundMessage::Error {
+                code,
+                message,
+                request_id,
+            } => {
+                assert_eq!(code, "bad_request");
+                assert_eq!(message, "invalid payload");
+                assert_eq!(request_id.as_deref(), Some("req-err-8"));
             }
             other => panic!("unexpected message variant: {other:?}"),
         }
@@ -193,5 +350,24 @@ mod tests {
         let decoded: HelloMessage = serde_json::from_str(&encoded).expect("hello should parse");
 
         assert_eq!(decoded, hello);
+    }
+
+    #[test]
+    fn hello_inbound_parsing_tolerates_extra_fields() {
+        let raw = r#"{
+            "type": "hello",
+            "protocol": "clawgs.emit.v1",
+            "engine_version": "0.12.4",
+            "capabilities": ["sync_result"]
+        }"#;
+        let message: DaemonInboundMessage =
+            serde_json::from_str(raw).expect("hello with extra fields should deserialize");
+
+        match message {
+            DaemonInboundMessage::Hello { protocol } => {
+                assert_eq!(protocol, EMIT_PROTOCOL_V1);
+            }
+            other => panic!("unexpected message variant: {other:?}"),
+        }
     }
 }
