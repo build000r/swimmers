@@ -2,11 +2,13 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::sync::broadcast;
+use tokio::sync::RwLock;
 use tracing::{debug, info, warn};
 
 use crate::thought::emitter_client::EmitterClient;
 use crate::thought::loop_runner::SessionProvider;
 use crate::thought::protocol::{SyncResponse, SyncUpdate};
+use crate::thought::runtime_config::ThoughtConfig;
 use crate::types::{ControlEvent, ThoughtUpdatePayload};
 
 const DEFAULT_BRIDGE_TICK: Duration = Duration::from_secs(2);
@@ -16,18 +18,31 @@ const DEFAULT_BRIDGE_TICK: Duration = Duration::from_secs(2);
 pub struct BridgeRunner {
     tick: Duration,
     event_tx: broadcast::Sender<ControlEvent>,
+    runtime_config: Arc<RwLock<ThoughtConfig>>,
 }
 
 impl BridgeRunner {
-    pub fn new(event_tx: broadcast::Sender<ControlEvent>) -> Self {
+    pub fn new(
+        event_tx: broadcast::Sender<ControlEvent>,
+        runtime_config: Arc<RwLock<ThoughtConfig>>,
+    ) -> Self {
         Self {
             tick: DEFAULT_BRIDGE_TICK,
             event_tx,
+            runtime_config,
         }
     }
 
-    pub fn with_tick(event_tx: broadcast::Sender<ControlEvent>, tick: Duration) -> Self {
-        Self { tick, event_tx }
+    pub fn with_tick(
+        event_tx: broadcast::Sender<ControlEvent>,
+        tick: Duration,
+        runtime_config: Arc<RwLock<ThoughtConfig>>,
+    ) -> Self {
+        Self {
+            tick,
+            event_tx,
+            runtime_config,
+        }
     }
 
     pub fn spawn<P: SessionProvider + 'static>(
@@ -46,7 +61,11 @@ impl BridgeRunner {
                 interval.tick().await;
 
                 let snapshots = provider.session_snapshots();
-                match emitter_client.sync_sessions(&snapshots).await {
+                let runtime_config = self.runtime_config.read().await.clone();
+                match emitter_client
+                    .sync_sessions(&snapshots, &runtime_config)
+                    .await
+                {
                     Ok(response) => {
                         apply_sync_response(provider.as_ref(), &self.event_tx, response);
                     }
@@ -121,9 +140,11 @@ mod tests {
 
     use crate::thought::loop_runner::{SessionInfo, SessionProvider};
     use crate::thought::protocol::SyncUpdate;
+    use crate::thought::runtime_config::ThoughtConfig;
     use crate::types::{
         BubblePrecedence, SessionState, ThoughtSource, ThoughtState, ThoughtUpdatePayload,
     };
+    use tokio::sync::RwLock;
 
     #[derive(Debug, Clone)]
     struct PersistCall {
@@ -235,7 +256,8 @@ mod tests {
     #[test]
     fn bridge_runner_defaults_to_two_second_tick() {
         let (event_tx, _) = broadcast::channel::<ControlEvent>(8);
-        let runner = BridgeRunner::new(event_tx);
+        let runtime_config = Arc::new(RwLock::new(ThoughtConfig::default()));
+        let runner = BridgeRunner::new(event_tx, runtime_config);
         assert_eq!(runner.tick, Duration::from_secs(2));
     }
 

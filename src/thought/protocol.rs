@@ -2,6 +2,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::thought::loop_runner::SessionInfo;
+use crate::thought::runtime_config::ThoughtConfig;
 use crate::types::{BubblePrecedence, SessionState, ThoughtSource, ThoughtState};
 
 pub const HELLO_MESSAGE_TYPE: &str = "hello";
@@ -69,14 +70,26 @@ pub struct SyncRequestConfig {
 
 impl Default for SyncRequestConfig {
     fn default() -> Self {
+        Self::from(ThoughtConfig::default())
+    }
+}
+
+impl From<ThoughtConfig> for SyncRequestConfig {
+    fn from(value: ThoughtConfig) -> Self {
+        Self::from(&value)
+    }
+}
+
+impl From<&ThoughtConfig> for SyncRequestConfig {
+    fn from(value: &ThoughtConfig) -> Self {
         Self {
-            enabled: true,
-            model: "openrouter/aurora-alpha".to_string(),
-            cadence_hot_ms: 15_000,
-            cadence_warm_ms: 45_000,
-            cadence_cold_ms: 120_000,
-            agent_prompt: String::new(),
-            terminal_prompt: String::new(),
+            enabled: value.enabled,
+            model: value.model.clone(),
+            cadence_hot_ms: value.cadence_hot_ms,
+            cadence_warm_ms: value.cadence_warm_ms,
+            cadence_cold_ms: value.cadence_cold_ms,
+            agent_prompt: value.agent_prompt.clone().unwrap_or_default(),
+            terminal_prompt: value.terminal_prompt.clone().unwrap_or_default(),
         }
     }
 }
@@ -95,11 +108,19 @@ pub struct SyncRequest {
 
 impl SyncRequest {
     pub fn from_session_snapshots(request_id: u64, sessions: &[SessionInfo]) -> Self {
+        Self::from_session_snapshots_with_config(request_id, sessions, SyncRequestConfig::default())
+    }
+
+    pub fn from_session_snapshots_with_config(
+        request_id: u64,
+        sessions: &[SessionInfo],
+        config: SyncRequestConfig,
+    ) -> Self {
         Self {
             message_type: SYNC_MESSAGE_TYPE.to_string(),
             id: request_id.to_string(),
             now: Utc::now(),
-            config: SyncRequestConfig::default(),
+            config,
             request_id,
             sessions: sessions.iter().map(SessionSnapshotPayload::from).collect(),
         }
@@ -237,7 +258,7 @@ mod tests {
         )
         .is_ok());
         assert_eq!(json["config"]["enabled"], true);
-        assert_eq!(json["config"]["model"], "openrouter/aurora-alpha");
+        assert_eq!(json["config"]["model"], "");
         assert_eq!(json["config"]["cadence_hot_ms"], 15_000);
         assert_eq!(json["config"]["cadence_warm_ms"], 45_000);
         assert_eq!(json["config"]["cadence_cold_ms"], 120_000);
@@ -246,6 +267,28 @@ mod tests {
         assert_eq!(json["sessions"].as_array().map(|v| v.len()), Some(1));
         assert_eq!(json["sessions"][0]["session_id"], "sess-1");
         assert_eq!(json["sessions"][0]["state"], "busy");
+    }
+
+    #[test]
+    fn sync_request_config_maps_optional_prompts_from_runtime_config() {
+        let runtime = ThoughtConfig {
+            enabled: false,
+            model: "openrouter/custom".to_string(),
+            cadence_hot_ms: 9_000,
+            cadence_warm_ms: 60_000,
+            cadence_cold_ms: 120_000,
+            agent_prompt: Some("Agent prompt".to_string()),
+            terminal_prompt: None,
+        };
+
+        let mapped = SyncRequestConfig::from(&runtime);
+        assert!(!mapped.enabled);
+        assert_eq!(mapped.model, "openrouter/custom");
+        assert_eq!(mapped.cadence_hot_ms, 9_000);
+        assert_eq!(mapped.cadence_warm_ms, 60_000);
+        assert_eq!(mapped.cadence_cold_ms, 120_000);
+        assert_eq!(mapped.agent_prompt, "Agent prompt");
+        assert_eq!(mapped.terminal_prompt, "");
     }
 
     #[test]

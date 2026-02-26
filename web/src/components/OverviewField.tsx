@@ -5,6 +5,7 @@ import {
   type ThrongletRestStage,
 } from "@/lib/thronglet-motion";
 import { SpawnMenu } from "./SpawnMenu";
+import { ThoughtConfigPanel } from "./ThoughtConfigPanel";
 import { ThrongletSprite } from "./ThrongletSprite";
 
 // ---- Helpers ----
@@ -479,6 +480,7 @@ export function OverviewField({
   onCreateSession,
 }: OverviewFieldProps) {
   const [rawMode, setRawMode] = useState(false);
+  const [showThoughtConfig, setShowThoughtConfig] = useState(false);
   const [hatchState, setHatchState] = useState<HatchState | null>(null);
   const [menuPos, setMenuPos] = useState<{ x: number; y: number } | null>(null);
   const [axeTargetSessionId, setAxeTargetSessionId] = useState<string | null>(null);
@@ -778,7 +780,9 @@ export function OverviewField({
       if (
         target.closest?.(".thronglet") ||
         target.closest?.(".hatching-egg") ||
-        target.closest?.(".spawn-menu")
+        target.closest?.(".spawn-menu") ||
+        target.closest?.(".thought-config-overlay") ||
+        target.closest?.(".thought-config-trigger")
       ) {
         return;
       }
@@ -798,7 +802,9 @@ export function OverviewField({
       if (
         target.closest?.(".thronglet") ||
         target.closest?.(".hatching-egg") ||
-        target.closest?.(".spawn-menu")
+        target.closest?.(".spawn-menu") ||
+        target.closest?.(".thought-config-overlay") ||
+        target.closest?.(".thought-config-trigger")
       ) {
         return;
       }
@@ -945,6 +951,63 @@ export function OverviewField({
         </button>
       )}
 
+      <button
+        type="button"
+        class="thought-config-trigger"
+        aria-label="Open thought config"
+        title="Thought config"
+        onClick={(e: MouseEvent) => {
+          e.stopPropagation();
+          setShowThoughtConfig(true);
+          if (navigator.vibrate) navigator.vibrate(15);
+        }}
+        style={{
+          position: "absolute",
+          top: `${axeTopOffset + 8}px`,
+          left: !observer && onToggleAxe ? "74px" : "8px",
+          width: "44px",
+          height: "44px",
+          border: "none",
+          borderRadius: "12px",
+          background: "rgba(17, 30, 49, 0.65)",
+          boxShadow: "0 2px 8px rgba(0, 0, 0, 0.35)",
+          padding: 0,
+          display: "grid",
+          placeItems: "center",
+          zIndex: 220,
+          cursor: "pointer",
+        }}
+      >
+        <svg
+          width="24"
+          height="24"
+          viewBox="0 0 24 24"
+          fill="none"
+          aria-hidden="true"
+        >
+          <rect x="10.8" y="1.8" width="2.4" height="4.2" rx="1" fill="#f5f7fb" />
+          <rect x="10.8" y="18" width="2.4" height="4.2" rx="1" fill="#f5f7fb" />
+          <rect x="1.8" y="10.8" width="4.2" height="2.4" rx="1" fill="#f5f7fb" />
+          <rect x="18" y="10.8" width="4.2" height="2.4" rx="1" fill="#f5f7fb" />
+          <circle
+            cx="12"
+            cy="12"
+            r="6.2"
+            fill="#2d3a53"
+            stroke="#f5f7fb"
+            strokeWidth="1.4"
+          />
+          <circle
+            cx="12"
+            cy="12"
+            r="2.7"
+            fill="#101726"
+            stroke="#f5f7fb"
+            strokeWidth="1.2"
+          />
+        </svg>
+      </button>
+
       {/* Scenery trees */}
       <img
         class="field-tree"
@@ -1030,6 +1093,12 @@ export function OverviewField({
           onClose={handleMenuClose}
         />
       )}
+
+      <ThoughtConfigPanel
+        open={showThoughtConfig}
+        observer={observer}
+        onClose={() => setShowThoughtConfig(false)}
+      />
 
       {axeArmed && !observer && (
         <div

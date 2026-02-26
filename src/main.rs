@@ -14,6 +14,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axum::Router;
+use tokio::sync::RwLock;
 use tower_http::services::ServeDir;
 use tracing_subscriber::EnvFilter;
 
@@ -24,6 +25,7 @@ use session::supervisor::{SessionSupervisor, SupervisorProvider};
 use thought::bridge_runner::BridgeRunner;
 use thought::emitter_client::EmitterClient;
 use thought::loop_runner::ThoughtLoopRunner;
+use thought::runtime_config::ThoughtConfig;
 
 #[tokio::main]
 async fn main() {
@@ -46,11 +48,19 @@ async fn main() {
 
     // Create session supervisor (new() returns Arc<Self>)
     let supervisor = SessionSupervisor::new(config.clone());
+    let thought_config = Arc::new(RwLock::new(ThoughtConfig::default()));
+    let mut persistence_store: Option<Arc<FileStore>> = None;
 
     // Initialize persistence store.
     match FileStore::new("./data/throngterm/").await {
         Ok(store) => {
-            supervisor.init_persistence(store).await;
+            supervisor.init_persistence(store.clone()).await;
+            let loaded_config = store.load_thought_config().await;
+            {
+                let mut runtime_config = thought_config.write().await;
+                *runtime_config = loaded_config;
+            }
+            persistence_store = Some(store);
             tracing::info!("persistence store initialized");
         }
         Err(e) => {
@@ -89,6 +99,7 @@ async fn main() {
                 let bridge_runner = BridgeRunner::with_tick(
                     thought_tx,
                     Duration::from_millis(config.thought_tick_ms),
+                    thought_config.clone(),
                 );
                 bridge_runner.spawn(provider, EmitterClient::new());
             }
@@ -99,6 +110,8 @@ async fn main() {
     let state = Arc::new(AppState {
         supervisor,
         config: config.clone(),
+        thought_config,
+        file_store: persistence_store,
     });
 
     // Build router

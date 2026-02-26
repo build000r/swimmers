@@ -10,7 +10,10 @@ use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 use tracing::warn;
 
 use crate::thought::loop_runner::SessionInfo;
-use crate::thought::protocol::{SyncRequest, SyncResponse, SyncUpdate, EMIT_PROTOCOL_V1};
+use crate::thought::protocol::{
+    SyncRequest, SyncRequestConfig, SyncResponse, SyncUpdate, EMIT_PROTOCOL_V1,
+};
+use crate::thought::runtime_config::ThoughtConfig;
 
 const DEFAULT_CLAWGS_BIN: &str = "clawgs";
 const SYNC_RESULT_MESSAGE_TYPE: &str = "sync_result";
@@ -170,6 +173,7 @@ impl EmitterClient {
     pub async fn sync_sessions(
         &mut self,
         snapshots: &[SessionInfo],
+        runtime_config: &ThoughtConfig,
     ) -> Result<SyncResponse, EmitterClientError> {
         let request_id = self.next_request_id;
         self.next_request_id = self.next_request_id.wrapping_add(1);
@@ -177,7 +181,11 @@ impl EmitterClient {
             self.next_request_id = 1;
         }
 
-        let request = SyncRequest::from_session_snapshots(request_id, snapshots);
+        let request = SyncRequest::from_session_snapshots_with_config(
+            request_id,
+            snapshots,
+            SyncRequestConfig::from(runtime_config),
+        );
         self.sync(request).await
     }
 
@@ -336,14 +344,16 @@ fn normalize_sync_request(request: &SyncRequest) -> Result<(String, String), Emi
 }
 
 fn default_sync_config() -> Value {
-    json!({
-        "enabled": true,
-        "model": "openrouter/aurora-alpha",
-        "cadence_hot_ms": 15_000,
-        "cadence_warm_ms": 45_000,
-        "cadence_cold_ms": 120_000,
-        "agent_prompt": "",
-        "terminal_prompt": ""
+    serde_json::to_value(SyncRequestConfig::default()).unwrap_or_else(|_| {
+        json!({
+            "enabled": true,
+            "model": "",
+            "cadence_hot_ms": 15_000,
+            "cadence_warm_ms": 45_000,
+            "cadence_cold_ms": 120_000,
+            "agent_prompt": "",
+            "terminal_prompt": ""
+        })
     })
 }
 
@@ -631,7 +641,7 @@ mod tests {
         assert!(parsed.get("request_id").is_none());
         assert!(parsed["now"].is_string());
         assert_eq!(parsed["config"]["enabled"], true);
-        assert_eq!(parsed["config"]["model"], "openrouter/aurora-alpha");
+        assert_eq!(parsed["config"]["model"], "");
         assert_eq!(parsed["config"]["agent_prompt"], "");
         assert_eq!(parsed["config"]["terminal_prompt"], "");
         assert!(parsed["sessions"].as_array().is_some());

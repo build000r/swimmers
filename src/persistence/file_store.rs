@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex, RwLock};
 use tracing::{debug, error, info, warn};
 
+use crate::thought::runtime_config::ThoughtConfig;
 use crate::types::{SessionState, ThoughtSource, ThoughtState};
 
 // ---------------------------------------------------------------------------
@@ -67,6 +68,8 @@ pub struct FileStore {
     cache: RwLock<Vec<PersistedSession>>,
     /// In-memory cache of thought snapshots, synced to disk on mutation.
     thought_cache: RwLock<HashMap<String, ThoughtSnapshot>>,
+    /// In-memory cache of daemon runtime thought config.
+    thought_config_cache: RwLock<ThoughtConfig>,
     /// Serialize thought writes to avoid stale read-modify-write races.
     thought_write_lock: Mutex<()>,
 }
@@ -88,12 +91,14 @@ impl FileStore {
             base_dir,
             cache: RwLock::new(Vec::new()),
             thought_cache: RwLock::new(HashMap::new()),
+            thought_config_cache: RwLock::new(ThoughtConfig::default()),
             thought_write_lock: Mutex::new(()),
         });
 
         // Load existing data into cache.
         let loaded = store.load_sessions_from_disk().await;
         let loaded_thoughts = store.load_thoughts_from_disk().await;
+        let loaded_thought_config = store.load_thought_config_from_disk().await;
         {
             let mut cache = store.cache.write().await;
             *cache = loaded;
@@ -101,6 +106,10 @@ impl FileStore {
         {
             let mut thought_cache = store.thought_cache.write().await;
             *thought_cache = loaded_thoughts;
+        }
+        {
+            let mut thought_config_cache = store.thought_config_cache.write().await;
+            *thought_config_cache = loaded_thought_config;
         }
 
         info!(
@@ -121,6 +130,11 @@ impl FileStore {
     /// Return the path to the thoughts file.
     fn thoughts_path(&self) -> PathBuf {
         self.base_dir.join("thoughts.json")
+    }
+
+    /// Return the path to the daemon runtime thought config file.
+    fn thought_config_path(&self) -> PathBuf {
+        self.base_dir.join("thought_config.json")
     }
 
     // -----------------------------------------------------------------------
@@ -252,6 +266,61 @@ impl FileStore {
             Err(e) => {
                 warn!("failed to read thoughts: {e}");
                 HashMap::new()
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Thought runtime config
+    // -----------------------------------------------------------------------
+
+    /// Save daemon runtime thought config to disk atomically.
+    pub async fn save_thought_config(&self, config: &ThoughtConfig) -> anyhow::Result<()> {
+        let normalized = config
+            .clone()
+            .normalize_and_validate()
+            .map_err(|e| anyhow::anyhow!("invalid thought config: {e}"))?;
+
+        let path = self.thought_config_path();
+        let data = serde_json::to_string_pretty(&normalized)
+            .map_err(|e| anyhow::anyhow!("failed to serialize thought config: {e}"))?;
+        atomic_write_blocking(path, data).await?;
+
+        {
+            let mut thought_config_cache = self.thought_config_cache.write().await;
+            *thought_config_cache = normalized;
+        }
+
+        debug!("persisted thought runtime config");
+        Ok(())
+    }
+
+    /// Load daemon runtime thought config from in-memory cache.
+    pub async fn load_thought_config(&self) -> ThoughtConfig {
+        self.thought_config_cache.read().await.clone()
+    }
+
+    /// Load daemon runtime thought config from disk (default on missing/corrupt).
+    async fn load_thought_config_from_disk(&self) -> ThoughtConfig {
+        let path = self.thought_config_path();
+        match read_file_blocking(path).await {
+            Ok(Some(data)) => match serde_json::from_str::<ThoughtConfig>(&data) {
+                Ok(config) => match config.normalize_and_validate() {
+                    Ok(config) => config,
+                    Err(e) => {
+                        warn!("invalid thought config file, using defaults: {e}");
+                        ThoughtConfig::default()
+                    }
+                },
+                Err(e) => {
+                    warn!("corrupt thought config file, using defaults: {e}");
+                    ThoughtConfig::default()
+                }
+            },
+            Ok(None) => ThoughtConfig::default(),
+            Err(e) => {
+                warn!("failed to read thought config file, using defaults: {e}");
+                ThoughtConfig::default()
             }
         }
     }
