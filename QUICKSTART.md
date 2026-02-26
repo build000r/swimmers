@@ -96,6 +96,27 @@ You should see the server start and begin discovering tmux sessions.
 
 It binds to `0.0.0.0` so it's accessible on all interfaces — including your Tailscale IP.
 
+### Structured Transcript Snapshot (Optional)
+
+If you also have the sibling `skills` repo with `clawgs`, you can extract a
+normalized Claude/Codex JSON snapshot from the same machine:
+
+```bash
+bash scripts/clawgs-extract.sh
+```
+
+Override the binary path when needed:
+
+```bash
+CLAWGS_BIN=/custom/path/clawgs bash scripts/clawgs-extract.sh
+```
+
+Pass a specific cwd (used for JSONL discovery) plus extra extractor flags:
+
+```bash
+bash scripts/clawgs-extract.sh /path/to/project --pretty --include-raw
+```
+
 ### Frontend Dev Server (Optional)
 
 For frontend development with hot reload:
