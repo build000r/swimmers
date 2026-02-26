@@ -14,6 +14,23 @@ pub enum SessionDeleteMode {
     KillTmux,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ThoughtBackend {
+    Inproc,
+    Daemon,
+}
+
+impl ThoughtBackend {
+    fn from_env_value(value: &str) -> Self {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "daemon" => Self::Daemon,
+            "inproc" => Self::Inproc,
+            _ => Self::Inproc,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Config {
     pub port: u16,
@@ -27,6 +44,7 @@ pub struct Config {
     pub poll_fallback_ms: u64,
     pub replay_buffer_size: usize,
     pub outbound_queue_bound: usize,
+    pub thought_backend: ThoughtBackend,
     #[allow(dead_code)]
     pub overload_window_ms: u64,
 }
@@ -45,6 +63,7 @@ impl Default for Config {
             poll_fallback_ms: 2000,
             replay_buffer_size: 64 * 1024, // 64KB replay ring
             outbound_queue_bound: 512,
+            thought_backend: ThoughtBackend::Inproc,
             overload_window_ms: 1000,
         }
     }
@@ -72,6 +91,9 @@ impl Config {
             if !token.is_empty() {
                 config.observer_token = Some(token);
             }
+        }
+        if let Ok(backend) = std::env::var("THRONGTERM_THOUGHT_BACKEND") {
+            config.thought_backend = ThoughtBackend::from_env_value(&backend);
         }
         config
     }

@@ -11,15 +11,18 @@ mod thought;
 mod types;
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::Router;
 use tower_http::services::ServeDir;
 use tracing_subscriber::EnvFilter;
 
 use api::AppState;
-use config::Config;
+use config::{Config, ThoughtBackend};
 use persistence::file_store::FileStore;
 use session::supervisor::{SessionSupervisor, SupervisorProvider};
+use thought::bridge_runner::BridgeRunner;
+use thought::emitter_client::EmitterClient;
 use thought::loop_runner::ThoughtLoopRunner;
 
 #[tokio::main]
@@ -67,16 +70,29 @@ async fn main() {
     supervisor.spawn_persistence_checkpoint();
     supervisor.spawn_process_exit_reaper();
 
-    // Start thought generation loop.
+    // Start thought engine.
     {
         let thought_tx = supervisor.thought_event_sender();
         let provider = Arc::new(SupervisorProvider::new(supervisor.clone()));
-        let runner = ThoughtLoopRunner::new(
-            config.thought_tick_ms,
-            thought_tx,
-            crate::types::ThoughtPolicy::phase_gated_v1(),
-        );
-        runner.spawn(provider);
+        match config.thought_backend {
+            ThoughtBackend::Inproc => {
+                // Existing in-process thought loop behavior.
+                let runner = ThoughtLoopRunner::new(
+                    config.thought_tick_ms,
+                    thought_tx,
+                    crate::types::ThoughtPolicy::phase_gated_v1(),
+                );
+                runner.spawn(provider);
+            }
+            ThoughtBackend::Daemon => {
+                tracing::info!("thought backend=daemon: starting thought bridge runner");
+                let bridge_runner = BridgeRunner::with_tick(
+                    thought_tx,
+                    Duration::from_millis(config.thought_tick_ms),
+                );
+                bridge_runner.spawn(provider, EmitterClient::new());
+            }
+        }
     }
 
     // Build app state
