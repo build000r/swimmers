@@ -8,6 +8,7 @@ import { realtime } from "@/app";
 import type { TerminalOutputFrame } from "@/services/realtime";
 import type { CachedTerminal } from "@/hooks/useTerminalCache";
 import { fetchSnapshot, listSkills } from "@/services/api";
+import { copyTextToClipboard, readTextFromClipboard } from "@/lib/clipboard";
 import { ThrongletSprite } from "./ThrongletSprite";
 
 function cwdLabel(cwd: string): string {
@@ -181,6 +182,14 @@ function ensureSearchAddon(term: Terminal): SearchAddon {
     SEARCH_ADDONS_BY_TERM.set(term, addon);
   }
   return addon;
+}
+
+function isAccelShortcut(event: KeyboardEvent, key: string): boolean {
+  return (
+    (event.metaKey || event.ctrlKey) &&
+    !event.altKey &&
+    event.key.toLowerCase() === key
+  );
 }
 
 export function TerminalWorkspace({
@@ -550,6 +559,37 @@ export function TerminalWorkspace({
     termRef.current = term;
     fitAddonRef.current = fitAddon;
     searchAddonRef.current = ensureSearchAddon(term);
+    term.attachCustomKeyEventHandler((event: KeyboardEvent) => {
+      if (isAccelShortcut(event, "c")) {
+        const selected = term.getSelection();
+        if (!selected) return true;
+        event.preventDefault();
+        void copyTextToClipboard(selected).then((copied) => {
+          pushActionToast(copied ? "Copied" : "Clipboard write failed");
+        });
+        return false;
+      }
+      return true;
+    });
+
+    const scheduleAutoCopySelection = () => {
+      setTimeout(() => {
+        const selected = term.getSelection();
+        if (!selected) return;
+        void copyTextToClipboard(selected);
+      }, 0);
+    };
+    hostEl.addEventListener("mouseup", scheduleAutoCopySelection);
+    hostEl.addEventListener("touchend", scheduleAutoCopySelection);
+    const handlePasteEvent = (event: ClipboardEvent) => {
+      if (observer) return;
+      const text = event.clipboardData?.getData("text");
+      if (!text) return;
+      event.preventDefault();
+      sendInput(text);
+      pushActionToast("Pasted");
+    };
+    hostEl.addEventListener("paste", handlePasteEvent as EventListener);
 
     const handleOutput = (frame: TerminalOutputFrame) => {
       if (frame.sessionId !== session.session_id) return;
@@ -633,6 +673,9 @@ export function TerminalWorkspace({
         focusTimerRef.current = null;
       }
       realtime.unsubscribeSession(session.session_id);
+      hostEl.removeEventListener("mouseup", scheduleAutoCopySelection);
+      hostEl.removeEventListener("touchend", scheduleAutoCopySelection);
+      hostEl.removeEventListener("paste", handlePasteEvent as EventListener);
 
       if (hostEl.parentNode) hostEl.parentNode.removeChild(hostEl);
       onCache({
@@ -683,13 +726,11 @@ export function TerminalWorkspace({
   }, [rushingOff, onClose]);
 
   const handleTitleClick = useCallback(() => {
-    navigator.clipboard
-      .writeText(title)
-      .then(() => {
-        setTitleCopied(true);
-        setTimeout(() => setTitleCopied(false), 800);
-      })
-      .catch(() => {});
+    void copyTextToClipboard(title).then((copied) => {
+      if (!copied) return;
+      setTitleCopied(true);
+      setTimeout(() => setTitleCopied(false), 800);
+    });
   }, [title]);
 
   const handleManualRecovery = useCallback(() => {
@@ -885,11 +926,11 @@ export function TerminalWorkspace({
       pushActionToast("Nothing to copy");
       return;
     }
-    try {
-      await navigator.clipboard.writeText(text);
+    const copied = await copyTextToClipboard(text);
+    if (copied) {
       setShowTerminalActions(false);
       pushActionToast("Copied");
-    } catch {
+    } else {
       pushActionToast("Clipboard write failed");
     }
   }, [pushActionToast]);
@@ -897,7 +938,7 @@ export function TerminalWorkspace({
   const handlePasteAction = useCallback(async () => {
     if (observer) return;
     try {
-      const text = await navigator.clipboard.readText();
+      const text = await readTextFromClipboard();
       if (!text) {
         pushActionToast("Clipboard is empty");
         return;

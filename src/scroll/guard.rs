@@ -76,15 +76,34 @@ impl ScrollGuard {
             }
         }
 
+        // If the coalescing window expired while output keeps streaming, flush
+        // on the next chunk so rendering keeps progressing even without timer
+        // wakeups winning the select race.
+        if self.buffer.is_some()
+            && self
+                .flush_deadline
+                .map(|deadline| now >= deadline)
+                .unwrap_or(true)
+        {
+            if let Some(buffered) = self.force_flush() {
+                output.push(buffered);
+            }
+        }
+
         // Count cursor-positioning sequences as a proxy for "full-screen redraw".
         let text = String::from_utf8_lossy(data);
         let pos_count = self.cursor_pos_re.find_iter(&text).count();
 
         if pos_count >= CURSOR_POS_THRESHOLD {
             // Likely a scroll-triggered redraw from the other client -- coalesce.
-            // Replace any previously buffered frame (we only care about the last one).
-            self.buffer = Some(data.to_vec());
-            self.flush_deadline = Some(now + Duration::from_millis(COALESCE_MS));
+            // Keep a full byte stream inside the coalescing window so split
+            // escape sequences are not corrupted.
+            if let Some(buffered) = self.buffer.as_mut() {
+                buffered.extend_from_slice(data);
+            } else {
+                self.buffer = Some(data.to_vec());
+                self.flush_deadline = Some(now + Duration::from_millis(COALESCE_MS));
+            }
             // Nothing to emit yet.
         } else {
             // Normal output -- flush pending buffer, then emit immediately.
@@ -222,7 +241,7 @@ mod tests {
     }
 
     #[test]
-    fn successive_redraws_keep_only_last() {
+    fn successive_redraws_append_within_coalesce_window() {
         let mut guard = ScrollGuard::new();
         let first = make_cursor_data(15);
         let second = make_cursor_data(20);
@@ -230,9 +249,11 @@ mod tests {
         guard.process(&first);
         guard.process(&second);
 
-        // Only the second (latest) frame should be buffered.
+        // Both chunks should remain in-order inside the coalesced stream.
         let flushed = guard.flush().unwrap();
-        assert_eq!(flushed, second);
+        let mut expected = first.clone();
+        expected.extend_from_slice(&second);
+        assert_eq!(flushed, expected);
     }
 
     #[test]
@@ -262,5 +283,42 @@ mod tests {
         assert_eq!(result.len(), 2);
         assert_eq!(result[0], redraw);
         assert_eq!(result[1], more_redraw);
+    }
+
+    #[test]
+    fn expired_deadline_flushes_before_buffering_next_redraw() {
+        let mut guard = ScrollGuard::new();
+        let first = make_cursor_data(15);
+        let second = make_cursor_data(15);
+
+        let result1 = guard.process(&first);
+        assert!(result1.is_empty());
+
+        // Simulate timer starvation where PTY keeps winning the actor select.
+        guard.flush_deadline = Some(Instant::now() - Duration::from_millis(1));
+
+        let result2 = guard.process(&second);
+        assert_eq!(result2.len(), 1);
+        assert_eq!(result2[0], first);
+
+        let flushed = guard.flush().unwrap();
+        assert_eq!(flushed, second);
+    }
+
+    #[test]
+    fn split_escape_sequence_across_redraw_chunks_is_preserved() {
+        let mut guard = ScrollGuard::new();
+        let mut prefix = make_cursor_data(12);
+        prefix.extend_from_slice(b"\x1b[31");
+        let mut suffix = make_cursor_data(12);
+        suffix.extend_from_slice(b"mHELLO\x1b[0m");
+
+        assert!(guard.process(&prefix).is_empty());
+        assert!(guard.process(&suffix).is_empty());
+
+        let flushed = guard.flush().unwrap();
+        let mut expected = prefix.clone();
+        expected.extend_from_slice(&suffix);
+        assert_eq!(flushed, expected);
     }
 }
