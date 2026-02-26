@@ -49,7 +49,8 @@ const IDLE_PREVIEW_SCAN_MS = 2_000;
 const IDLE_PREVIEW_MAX_CHARS = 160;
 const TERMINAL_OUTPUT_DECODER = new TextDecoder();
 
-function parseIsoMs(value: string): number | null {
+function parseIsoMs(value: string | null | undefined): number | null {
+  if (!value) return null;
   const parsed = Date.parse(value);
   return Number.isFinite(parsed) ? parsed : null;
 }

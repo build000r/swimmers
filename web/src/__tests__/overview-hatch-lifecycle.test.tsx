@@ -10,7 +10,7 @@ vi.mock("@/services/api", () => ({
   })),
 }));
 
-async function spawnFromMenu(container: HTMLElement) {
+async function spawnFromMenu(container: Element) {
   const field = container.querySelector(".field") as HTMLDivElement | null;
   expect(field).not.toBeNull();
 
@@ -27,12 +27,20 @@ async function spawnFromMenu(container: HTMLElement) {
   await waitFor(() => {
     expect(container.querySelector(".egg-sprite.dropping")).toBeInTheDocument();
   });
-  fireEvent.animationEnd(container.querySelector(".egg-sprite.dropping") as Element);
+  const dropping = container.querySelector(
+    ".egg-sprite.dropping",
+  ) as HTMLElement | null;
+  expect(dropping).not.toBeNull();
+  fireEvent.animationEnd(dropping!);
 
   await waitFor(() => {
     expect(container.querySelector(".egg-sprite.wobbling")).toBeInTheDocument();
   });
-  fireEvent.animationEnd(container.querySelector(".egg-sprite.wobbling") as Element);
+  const wobbling = container.querySelector(
+    ".egg-sprite.wobbling",
+  ) as HTMLElement | null;
+  expect(wobbling).not.toBeNull();
+  fireEvent.animationEnd(wobbling!);
 }
 
 describe("OverviewField hatch lifecycle", () => {
