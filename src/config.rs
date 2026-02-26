@@ -26,7 +26,7 @@ impl ThoughtBackend {
         match value.trim().to_ascii_lowercase().as_str() {
             "daemon" => Self::Daemon,
             "inproc" => Self::Inproc,
-            _ => Self::Inproc,
+            _ => Self::Daemon,
         }
     }
 }
@@ -63,7 +63,7 @@ impl Default for Config {
             poll_fallback_ms: 2000,
             replay_buffer_size: 64 * 1024, // 64KB replay ring
             outbound_queue_bound: 512,
-            thought_backend: ThoughtBackend::Inproc,
+            thought_backend: ThoughtBackend::Daemon,
             overload_window_ms: 1000,
         }
     }
@@ -96,5 +96,31 @@ impl Config {
             config.thought_backend = ThoughtBackend::from_env_value(&backend);
         }
         config
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unknown_backend_defaults_to_daemon() {
+        assert_eq!(
+            ThoughtBackend::from_env_value("something-unrecognized"),
+            ThoughtBackend::Daemon
+        );
+    }
+
+    #[test]
+    fn inproc_backend_stays_available_for_compatibility() {
+        assert_eq!(
+            ThoughtBackend::from_env_value("inproc"),
+            ThoughtBackend::Inproc
+        );
+    }
+
+    #[test]
+    fn default_config_uses_daemon_backend() {
+        assert_eq!(Config::default().thought_backend, ThoughtBackend::Daemon);
     }
 }

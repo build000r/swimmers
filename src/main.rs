@@ -86,11 +86,13 @@ async fn main() {
         let provider = Arc::new(SupervisorProvider::new(supervisor.clone()));
         match config.thought_backend {
             ThoughtBackend::Inproc => {
-                // Existing in-process thought loop behavior.
-                let runner = ThoughtLoopRunner::new(
+                tracing::warn!(
+                    "thought backend=inproc is deprecated; using daemon compatibility shim"
+                );
+                let runner = ThoughtLoopRunner::with_runtime_config(
                     config.thought_tick_ms,
                     thought_tx,
-                    crate::types::ThoughtPolicy::phase_gated_v1(),
+                    thought_config.clone(),
                 );
                 runner.spawn(provider);
             }
