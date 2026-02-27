@@ -11,15 +11,27 @@ use tracing::{debug, error, info, warn};
 use crate::config::Config;
 use crate::persistence::file_store::{FileStore, PersistedSession, ThoughtSnapshot};
 use crate::session::actor::{ActorHandle, SessionCommand};
+use crate::sprites::discover_sprite_pack;
 use crate::thought::loop_runner::{SessionInfo, SessionProvider};
 use crate::types::{
-    ControlEvent, SessionState, SessionStatePayload, SessionSummary, TerminalSnapshot,
+    ControlEvent, SessionState, SessionStatePayload, SessionSummary, SpritePack, TerminalSnapshot,
     ThoughtSource, ThoughtState, TransportHealth,
 };
 
 const PROCESS_EXIT_REAP_INTERVAL: Duration = Duration::from_millis(250);
 const PROCESS_EXIT_DELETE_GRACE: Duration = Duration::from_millis(2_500);
 const PROCESS_EXIT_SUMMARY_TIMEOUT: Duration = Duration::from_millis(250);
+
+// ---------------------------------------------------------------------------
+// Bootstrap result
+// ---------------------------------------------------------------------------
+
+/// Returned by [`SessionSupervisor::bootstrap`]; bundles the session list with
+/// any per-repository sprite packs discovered from session cwds.
+pub struct BootstrapData {
+    pub sessions: Vec<SessionSummary>,
+    pub sprite_packs: HashMap<String, SpritePack>,
+}
 
 // ---------------------------------------------------------------------------
 // Lifecycle events broadcast to all listeners
@@ -139,6 +151,7 @@ impl SessionSupervisor {
                     attached_clients: 0,
                     transport_health: crate::types::TransportHealth::Disconnected,
                     last_activity_at: ps.last_activity_at,
+                    sprite_pack_id: None,
                 };
                 stale.push(summary);
             }
@@ -523,12 +536,24 @@ impl SessionSupervisor {
             }
         }
 
+        // Resolve per-repo sprite pack IDs by walking up from each session's
+        // cwd.  We do this after the thought merge so that the cwd is the
+        // actor-reported value.
+        for summary in &mut summaries {
+            if !summary.cwd.is_empty() {
+                if let Some((pack_id, _)) = discover_sprite_pack(&summary.cwd).await {
+                    summary.sprite_pack_id = Some(pack_id);
+                }
+            }
+        }
+
         summaries
     }
 
     /// Return all sessions for the bootstrap response, including stale
-    /// (exited) sessions from persistence.
-    pub async fn bootstrap(&self) -> Vec<SessionSummary> {
+    /// (exited) sessions from persistence, plus a deduplicated map of
+    /// per-repository sprite packs.
+    pub async fn bootstrap(&self) -> BootstrapData {
         let mut all = self.list_sessions().await;
         let mut seen_ids: HashSet<String> = all.iter().map(|s| s.session_id.clone()).collect();
 
@@ -546,7 +571,23 @@ impl SessionSupervisor {
             all.push(s.clone());
         }
 
-        all
+        // Build the sprite_packs map: for each unique sprite_pack_id present
+        // across all sessions, look up the SpritePack from the discovery cache.
+        let mut sprite_packs: HashMap<String, SpritePack> = HashMap::new();
+        for summary in &all {
+            if let Some(ref pack_id) = summary.sprite_pack_id {
+                if !sprite_packs.contains_key(pack_id) {
+                    if let Some((_root, pack)) = discover_sprite_pack(&summary.cwd).await {
+                        sprite_packs.insert(pack_id.clone(), pack);
+                    }
+                }
+            }
+        }
+
+        BootstrapData {
+            sessions: all,
+            sprite_packs,
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -918,6 +959,7 @@ impl SessionSupervisor {
             attached_clients: 0,
             transport_health: crate::types::TransportHealth::Healthy,
             last_activity_at: Utc::now(),
+            sprite_pack_id: None,
         }
     }
 }

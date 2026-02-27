@@ -6,6 +6,7 @@ mod persistence;
 mod realtime;
 mod scroll;
 mod session;
+mod sprites;
 mod state;
 mod thought;
 mod types;

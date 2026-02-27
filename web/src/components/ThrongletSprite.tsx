@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "preact/hooks";
-import type { SessionState } from "@/types";
+import type { SessionState, SpritePack } from "@/types";
 import { ACTIVE, DROWSY, SLEEPING, DEEP_SLEEP } from "@/lib/thronglet-svgs";
 import {
   DEEP_SLEEP_AFTER_MS,
@@ -60,19 +60,28 @@ function canonicalToolName(tool?: string | null): keyof typeof TOOL_COLORS | nul
 
 const IDLE_SPRITE_TICK_MS = 5_000;
 
-function svgForState(state: SessionState, lastActivityAt?: string): string {
+function svgForState(
+  state: SessionState,
+  lastActivityAt?: string,
+  spritePack?: SpritePack | null,
+): string {
+  const active = spritePack?.active ?? ACTIVE;
+  const drowsy = spritePack?.drowsy ?? DROWSY;
+  const sleeping = spritePack?.sleeping ?? SLEEPING;
+  const deepSleep = spritePack?.deep_sleep ?? DEEP_SLEEP;
+
   if (state === "idle" || state === "attention") {
-    if (!lastActivityAt) return DROWSY;
+    if (!lastActivityAt) return drowsy;
     const lastMs = new Date(lastActivityAt).getTime();
-    if (!Number.isFinite(lastMs)) return DROWSY;
+    if (!Number.isFinite(lastMs)) return drowsy;
     const idleMs = Date.now() - lastMs;
-    if (idleMs >= DEEP_SLEEP_AFTER_MS) return DEEP_SLEEP;
-    if (idleMs >= SLEEPING_AFTER_MS) return SLEEPING;
-    if (idleMs >= DROWSY_AFTER_MS) return DROWSY;
-    return ACTIVE;
+    if (idleMs >= DEEP_SLEEP_AFTER_MS) return deepSleep;
+    if (idleMs >= SLEEPING_AFTER_MS) return sleeping;
+    if (idleMs >= DROWSY_AFTER_MS) return drowsy;
+    return active;
   }
-  if (state === "exited") return DEEP_SLEEP;
-  return ACTIVE; // busy, error, attention
+  if (state === "exited") return deepSleep;
+  return active; // busy, error, attention
 }
 
 // ---- Component ----
@@ -81,6 +90,7 @@ interface ThrongletSpriteProps {
   state: SessionState;
   tool?: string | null;
   lastActivityAt?: string;
+  spritePack?: SpritePack | null;
   class?: string;
 }
 
@@ -88,6 +98,7 @@ export function ThrongletSprite({
   state,
   tool,
   lastActivityAt,
+  spritePack,
   class: className,
 }: ThrongletSpriteProps) {
   const [idleTick, setIdleTick] = useState(0);
@@ -103,8 +114,8 @@ export function ThrongletSprite({
   }, [state, lastActivityAt]);
 
   const svg = useMemo(
-    () => svgForState(state, lastActivityAt),
-    [state, lastActivityAt, idleTick],
+    () => svgForState(state, lastActivityAt, spritePack),
+    [state, lastActivityAt, spritePack, idleTick],
   );
   const toolName = canonicalToolName(tool);
   const colors = (toolName && TOOL_COLORS[toolName]) ?? DEFAULT_COLORS;

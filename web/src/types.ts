@@ -18,6 +18,13 @@ export type SkillRegistryTool = "claude" | "codex";
 
 // ---- REST Payloads ----
 
+export interface SpritePack {
+  active: string;
+  drowsy: string;
+  sleeping: string;
+  deep_sleep: string;
+}
+
 export interface SessionSummary {
   session_id: string;
   tmux_name: string;
@@ -35,6 +42,7 @@ export interface SessionSummary {
   attached_clients: number;
   transport_health: TransportHealth;
   last_activity_at: string; // ISO 8601
+  sprite_pack_id: string | null;
 }
 
 export interface ThoughtPolicy {
@@ -46,6 +54,16 @@ export interface ThoughtPolicy {
   };
   sleeping_after_ms: number;
   bubble_precedence: BubblePrecedence;
+}
+
+export interface ThoughtConfig {
+  enabled: boolean;
+  model: string;
+  cadence_hot_ms: number;
+  cadence_warm_ms: number;
+  cadence_cold_ms: number;
+  agent_prompt?: string | null;
+  terminal_prompt?: string | null;
 }
 
 export interface TerminalSnapshot {
@@ -72,7 +90,9 @@ export interface BootstrapResponse {
   session_delete_mode: SessionDeleteMode;
   legacy_parity_locked: boolean;
   thought_policy: ThoughtPolicy;
+  thought_config?: ThoughtConfig;
   sessions: SessionSummary[];
+  sprite_packs: Record<string, SpritePack>;
 }
 
 export interface SessionListResponse {
@@ -92,11 +112,18 @@ export interface ErrorResponse {
 export interface DirEntry {
   name: string;
   has_children: boolean;
+  is_running?: boolean;
 }
 
 export interface DirListResponse {
   path: string;
   entries: DirEntry[];
+}
+
+export interface DirRestartResponse {
+  ok: boolean;
+  path: string;
+  services: string[];
 }
 
 export interface SkillSummary {

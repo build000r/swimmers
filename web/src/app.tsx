@@ -5,6 +5,7 @@ import type {
   TransportHealth,
   BootstrapResponse,
   SpawnTool,
+  SpritePack,
 } from "@/types";
 import type {
   SessionStatePayload,
@@ -39,6 +40,7 @@ export const activeZonePreference = signal<"main" | "bottom" | null>(null);
 export const terminalCacheTtlMs = signal<number>(300_000);
 export const zoneLayout = signal<"single" | "dual">("single");
 export const idlePreviews = signal<Record<string, string>>({});
+export const spritePacks = signal<Record<string, SpritePack>>({});
 
 // Shared realtime service singleton
 export const realtime = new RealtimeService();
@@ -631,6 +633,7 @@ export function App() {
           sessions.value = initialSessions;
           terminalCacheTtlMs.value = data.terminal_cache_ttl_ms;
           idlePreviews.value = {};
+          spritePacks.value = data.sprite_packs ?? {};
         });
         idlePreviewFetchInFlightRef.current.clear();
         idlePreviewLastFetchAtRef.current.clear();
@@ -1052,6 +1055,7 @@ export function App() {
         <OverviewField
           sessions={sessions.value}
           idlePreviews={idlePreviews.value}
+          spritePacks={spritePacks.value}
           observer={isObserver}
           compact={splitMode}
           axeTopOffset={fieldAxeTopOffset}

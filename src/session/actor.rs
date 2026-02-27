@@ -946,6 +946,7 @@ impl SessionActor {
             thought_source: crate::types::ThoughtSource::CarryForward,
             thought_updated_at: None,
             last_activity_at: self.last_activity_at,
+            sprite_pack_id: None,
         }
     }
 }

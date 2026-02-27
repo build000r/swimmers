@@ -1,5 +1,5 @@
 import { useEffect, useRef, useCallback, useState } from "preact/hooks";
-import type { SessionSummary, SpawnTool } from "@/types";
+import type { SessionSummary, SpawnTool, SpritePack } from "@/types";
 import {
   throngletRestStageForSession,
   type ThrongletRestStage,
@@ -85,6 +85,7 @@ const MOTION_BY_REST_STAGE: Record<ThrongletRestStage, MotionProfile> = {
 interface ThrongletProps {
   session: SessionSummary;
   idlePreview?: string;
+  spritePack?: SpritePack | null;
   x: number;
   y: number;
   axeArmed?: boolean;
@@ -101,6 +102,7 @@ interface ThrongletProps {
 function ThrongletEntity({
   session,
   idlePreview,
+  spritePack,
   x,
   y,
   axeArmed = false,
@@ -372,6 +374,7 @@ function ThrongletEntity({
           state={session.state}
           tool={session.tool}
           lastActivityAt={session.last_activity_at}
+          spritePack={spritePack}
         />
       )}
 
@@ -455,6 +458,7 @@ interface HatchState {
 interface OverviewFieldProps {
   sessions: SessionSummary[];
   idlePreviews?: Record<string, string>;
+  spritePacks?: Record<string, SpritePack>;
   observer?: boolean;
   compact?: boolean;
   axeTopOffset?: number;
@@ -469,6 +473,7 @@ interface OverviewFieldProps {
 export function OverviewField({
   sessions,
   idlePreviews = {},
+  spritePacks = {},
   observer = false,
   compact = false,
   axeTopOffset = 8,
@@ -1040,11 +1045,16 @@ export function OverviewField({
           .map((s) => {
             const pos = positions[s.session_id];
             if (!pos) return null;
+            const resolvedPack =
+              s.sprite_pack_id != null
+                ? (spritePacks[s.sprite_pack_id] ?? null)
+                : null;
             return (
               <ThrongletEntity
                 key={s.session_id}
                 session={s}
                 idlePreview={idlePreviews[s.session_id]}
+                spritePack={resolvedPack}
                 x={pos.x}
                 y={pos.y}
                 axeArmed={axeArmed}

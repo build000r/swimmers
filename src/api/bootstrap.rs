@@ -29,7 +29,8 @@ async fn bootstrap(
     headers: HeaderMap,
 ) -> Result<Json<BootstrapResponse>, axum::response::Response> {
     auth.require_scope(AuthScope::SessionsRead)?;
-    let sessions = state.supervisor.bootstrap().await;
+    let bootstrap_data = state.supervisor.bootstrap().await;
+    let thought_config = state.thought_config.read().await.clone();
 
     // Derive the realtime WebSocket URL from the request Host header.
     let host = headers
@@ -51,7 +52,10 @@ async fn bootstrap(
         terminal_cache_ttl_ms: config.terminal_cache_ttl_ms,
         session_delete_mode: delete_mode_to_wire(&config.session_delete_mode),
         legacy_parity_locked: true,
-        sessions,
+        thought_policy: crate::types::ThoughtPolicy::phase_gated_v1(),
+        thought_config: Some(thought_config),
+        sessions: bootstrap_data.sessions,
+        sprite_packs: bootstrap_data.sprite_packs,
     }))
 }
 

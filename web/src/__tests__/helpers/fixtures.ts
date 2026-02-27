@@ -18,6 +18,7 @@ export function makeSession(overrides: Partial<SessionSummary> = {}): SessionSum
     attached_clients: 1,
     transport_health: "healthy",
     last_activity_at: new Date().toISOString(),
+    sprite_pack_id: null,
     ...overrides,
   };
 }
@@ -47,6 +48,7 @@ export function makeBootstrapResponse(
       bubble_precedence: "thought_first",
     },
     sessions: [makeSession()],
+    sprite_packs: {},
     ...overrides,
   };
 }

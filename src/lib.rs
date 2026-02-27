@@ -4,6 +4,7 @@ pub mod metrics;
 pub mod persistence;
 pub mod scroll;
 pub mod session;
+pub mod sprites;
 pub mod state;
 pub mod thought;
 pub mod types;

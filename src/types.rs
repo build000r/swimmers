@@ -1,5 +1,9 @@
+use std::collections::HashMap;
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+
+use crate::thought::runtime_config::ThoughtConfig;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -14,6 +18,76 @@ pub enum SessionState {
 impl Default for SessionState {
     fn default() -> Self {
         Self::Idle
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ThoughtState {
+    Active,
+    Holding,
+    Sleeping,
+}
+
+impl Default for ThoughtState {
+    fn default() -> Self {
+        Self::Holding
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ThoughtSource {
+    CarryForward,
+    Llm,
+    StaticSleeping,
+}
+
+impl Default for ThoughtSource {
+    fn default() -> Self {
+        Self::CarryForward
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BubblePrecedence {
+    ThoughtFirst,
+}
+
+impl Default for BubblePrecedence {
+    fn default() -> Self {
+        Self::ThoughtFirst
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ThoughtCadenceProfile {
+    pub hot: u64,
+    pub warm: u64,
+    pub cold: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ThoughtPolicy {
+    pub lifecycle_mode: String,
+    pub cadence_ms: ThoughtCadenceProfile,
+    pub sleeping_after_ms: u64,
+    pub bubble_precedence: BubblePrecedence,
+}
+
+impl ThoughtPolicy {
+    pub fn phase_gated_v1() -> Self {
+        Self {
+            lifecycle_mode: "phase_gated_v1".to_string(),
+            cadence_ms: ThoughtCadenceProfile {
+                hot: 15_000,
+                warm: 45_000,
+                cold: 120_000,
+            },
+            sleeping_after_ms: 60_000,
+            bubble_precedence: BubblePrecedence::ThoughtFirst,
+        }
     }
 }
 
@@ -48,6 +122,16 @@ impl SpawnTool {
     }
 }
 
+/// Per-repository Thronglet sprite override pack.
+/// All four variants must be present; inline SVG markup is stored as strings.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SpritePack {
+    pub active: String,
+    pub drowsy: String,
+    pub sleeping: String,
+    pub deep_sleep: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionSummary {
     pub session_id: String,
@@ -59,10 +143,20 @@ pub struct SessionSummary {
     pub token_count: u64,
     pub context_limit: u64,
     pub thought: Option<String>,
+    #[serde(default = "default_thought_state")]
+    pub thought_state: ThoughtState,
+    #[serde(default = "default_thought_source")]
+    pub thought_source: ThoughtSource,
+    #[serde(default)]
+    pub thought_updated_at: Option<DateTime<Utc>>,
     pub is_stale: bool,
     pub attached_clients: u32,
     pub transport_health: TransportHealth,
     pub last_activity_at: DateTime<Utc>,
+    /// Key into `BootstrapResponse.sprite_packs`; absent when no per-repo
+    /// sprite override was found.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sprite_pack_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -91,7 +185,14 @@ pub struct BootstrapResponse {
     pub terminal_cache_ttl_ms: u64,
     pub session_delete_mode: String,
     pub legacy_parity_locked: bool,
+    pub thought_policy: ThoughtPolicy,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thought_config: Option<ThoughtConfig>,
     pub sessions: Vec<SessionSummary>,
+    /// Per-repository sprite packs; keyed by project root path (the
+    /// `sprite_pack_id` on each `SessionSummary`).
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub sprite_packs: HashMap<String, SpritePack>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -105,12 +206,26 @@ pub struct CreateSessionRequest {
 pub struct DirEntry {
     pub name: String,
     pub has_children: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub is_running: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DirListResponse {
     pub path: String,
     pub entries: Vec<DirEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DirRestartRequest {
+    pub path: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DirRestartResponse {
+    pub ok: bool,
+    pub path: String,
+    pub services: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -177,7 +292,27 @@ pub struct ThoughtUpdatePayload {
     pub thought: Option<String>,
     pub token_count: u64,
     pub context_limit: u64,
+    #[serde(default = "default_thought_state")]
+    pub thought_state: ThoughtState,
+    #[serde(default = "default_thought_source")]
+    pub thought_source: ThoughtSource,
+    #[serde(default)]
+    pub objective_changed: bool,
+    #[serde(default = "default_bubble_precedence")]
+    pub bubble_precedence: BubblePrecedence,
     pub at: DateTime<Utc>,
+}
+
+fn default_thought_state() -> ThoughtState {
+    ThoughtState::Holding
+}
+
+fn default_thought_source() -> ThoughtSource {
+    ThoughtSource::CarryForward
+}
+
+fn default_bubble_precedence() -> BubblePrecedence {
+    BubblePrecedence::ThoughtFirst
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
