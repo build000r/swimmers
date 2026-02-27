@@ -14,12 +14,13 @@ use crate::config::Config;
 use crate::persistence::file_store::FileStore;
 use crate::realtime;
 use crate::session::supervisor::SessionSupervisor;
-use crate::thought::runtime_config::ThoughtConfig;
+use crate::thought::runtime_config::{DaemonDefaults, ThoughtConfig};
 
 pub struct AppState {
     pub supervisor: Arc<SessionSupervisor>,
     pub config: Arc<Config>,
     pub thought_config: Arc<RwLock<ThoughtConfig>>,
+    pub daemon_defaults: Option<DaemonDefaults>,
     pub file_store: Option<Arc<FileStore>>,
 }
 

@@ -23,7 +23,7 @@ use config::{Config, ThoughtBackend};
 use persistence::file_store::FileStore;
 use session::supervisor::{SessionSupervisor, SupervisorProvider};
 use thought::bridge_runner::BridgeRunner;
-use thought::emitter_client::EmitterClient;
+use thought::emitter_client::{fetch_daemon_defaults, EmitterClient};
 use thought::loop_runner::ThoughtLoopRunner;
 use thought::runtime_config::ThoughtConfig;
 
@@ -45,6 +45,12 @@ async fn main() {
     let config = Config::from_env();
     let port = config.port;
     let config = Arc::new(config);
+
+    // Query clawgs for resolved daemon defaults (model, prompts).
+    let daemon_defaults = fetch_daemon_defaults().await;
+    if daemon_defaults.is_some() {
+        tracing::info!("loaded daemon defaults from clawgs");
+    }
 
     // Create session supervisor (new() returns Arc<Self>)
     let supervisor = SessionSupervisor::new(config.clone());
@@ -113,6 +119,7 @@ async fn main() {
         supervisor,
         config: config.clone(),
         thought_config,
+        daemon_defaults,
         file_store: persistence_store,
     });
 

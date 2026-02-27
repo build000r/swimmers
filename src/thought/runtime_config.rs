@@ -2,6 +2,13 @@ use serde::{Deserialize, Serialize};
 use std::error::Error;
 use std::fmt::{Display, Formatter};
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct DaemonDefaults {
+    pub model: String,
+    pub agent_prompt: String,
+    pub terminal_prompt: String,
+}
+
 pub const CADENCE_HOT_MIN_MS: u64 = 5_000;
 pub const CADENCE_HOT_MAX_MS: u64 = 300_000;
 pub const CADENCE_WARM_MAX_MS: u64 = 600_000;

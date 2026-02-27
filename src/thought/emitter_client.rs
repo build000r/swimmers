@@ -13,7 +13,7 @@ use crate::thought::loop_runner::SessionInfo;
 use crate::thought::protocol::{
     SyncRequest, SyncRequestConfig, SyncResponse, SyncUpdate, EMIT_PROTOCOL_V1,
 };
-use crate::thought::runtime_config::ThoughtConfig;
+use crate::thought::runtime_config::{DaemonDefaults, ThoughtConfig};
 
 const DEFAULT_CLAWGS_BIN: &str = "clawgs";
 const SYNC_RESULT_MESSAGE_TYPE: &str = "sync_result";
@@ -303,6 +303,42 @@ impl Drop for EmitterClient {
             let _ = daemon.child.start_kill();
         }
     }
+}
+
+/// Run `clawgs defaults` as a one-shot process and parse the JSON output.
+/// Returns `None` on any failure (non-fatal — just means placeholders won't
+/// show actual daemon values).
+pub async fn fetch_daemon_defaults() -> Option<DaemonDefaults> {
+    let bin = resolve_clawgs_bin();
+    let output = Command::new(&bin)
+        .arg("defaults")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .await
+        .map_err(|err| {
+            warn!(bin = %bin, error = %err, "failed to run clawgs defaults");
+            err
+        })
+        .ok()?;
+
+    if !output.status.success() {
+        warn!(
+            bin = %bin,
+            status = %output.status,
+            "clawgs defaults exited with non-zero status"
+        );
+        return None;
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    serde_json::from_str(stdout.trim())
+        .map_err(|err| {
+            warn!(error = %err, "failed to parse clawgs defaults output");
+            err
+        })
+        .ok()
 }
 
 fn resolve_clawgs_bin() -> String {

@@ -10,6 +10,17 @@ export interface ThoughtConfig {
   terminal_prompt: string;
 }
 
+export interface DaemonDefaults {
+  model: string;
+  agent_prompt: string;
+  terminal_prompt: string;
+}
+
+export interface ThoughtConfigResult {
+  config: ThoughtConfig;
+  daemon_defaults: DaemonDefaults | null;
+}
+
 interface ThoughtConfigPayload {
   enabled: boolean;
   model: string;
@@ -18,10 +29,12 @@ interface ThoughtConfigPayload {
   cadence_cold_ms: number;
   agent_prompt?: string | null;
   terminal_prompt?: string | null;
+  daemon_defaults?: DaemonDefaults | null;
 }
 
 interface ThoughtConfigEnvelope {
   config: ThoughtConfigPayload;
+  daemon_defaults?: DaemonDefaults | null;
 }
 
 type ThoughtConfigWire = ThoughtConfigPayload | ThoughtConfigEnvelope;
@@ -44,17 +57,28 @@ function isThoughtConfigPayload(value: unknown): value is ThoughtConfigPayload {
   );
 }
 
-function unwrapConfig(payload: ThoughtConfigWire): ThoughtConfig {
+function extractDaemonDefaults(payload: ThoughtConfigWire): DaemonDefaults | null {
+  if (payload && typeof payload === "object") {
+    const dd = (payload as Record<string, unknown>).daemon_defaults;
+    if (dd && typeof dd === "object" && "model" in dd) {
+      return dd as DaemonDefaults;
+    }
+  }
+  return null;
+}
+
+function unwrapConfig(payload: ThoughtConfigWire): ThoughtConfigResult {
+  const daemon_defaults = extractDaemonDefaults(payload);
   if (
     payload &&
     typeof payload === "object" &&
     "config" in payload &&
     isThoughtConfigPayload(payload.config)
   ) {
-    return normalizeConfig(payload.config);
+    return { config: normalizeConfig(payload.config), daemon_defaults };
   }
   if (isThoughtConfigPayload(payload)) {
-    return normalizeConfig(payload);
+    return { config: normalizeConfig(payload), daemon_defaults };
   }
   throw new Error("Invalid thought config payload");
 }
@@ -103,7 +127,7 @@ async function json<T>(res: Response): Promise<T | null> {
   return body as T | null;
 }
 
-export async function fetchThoughtConfig(): Promise<ThoughtConfig> {
+export async function fetchThoughtConfig(): Promise<ThoughtConfigResult> {
   const res = await fetch(BASE);
   const payload = await json<ThoughtConfigWire>(res);
   if (!payload) {

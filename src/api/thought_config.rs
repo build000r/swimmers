@@ -9,16 +9,27 @@ use tracing::error;
 
 use crate::api::AppState;
 use crate::auth::{AuthInfo, AuthScope};
-use crate::thought::runtime_config::ThoughtConfig;
+use crate::thought::runtime_config::{DaemonDefaults, ThoughtConfig};
 use crate::types::ErrorResponse;
+
+#[derive(serde::Serialize)]
+struct ThoughtConfigResponse {
+    #[serde(flatten)]
+    config: ThoughtConfig,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    daemon_defaults: Option<DaemonDefaults>,
+}
 
 async fn get_thought_config(
     Extension(auth): Extension<AuthInfo>,
     State(state): State<Arc<AppState>>,
-) -> Result<Json<ThoughtConfig>, Response> {
+) -> Result<Json<ThoughtConfigResponse>, Response> {
     auth.require_scope(AuthScope::SessionsRead)?;
     let config = state.thought_config.read().await.clone();
-    Ok(Json(config))
+    Ok(Json(ThoughtConfigResponse {
+        config,
+        daemon_defaults: state.daemon_defaults.clone(),
+    }))
 }
 
 async fn put_thought_config(

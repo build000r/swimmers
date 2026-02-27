@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "preact/hooks";
 import {
   fetchThoughtConfig,
   updateThoughtConfig,
+  type DaemonDefaults,
   type ThoughtConfig,
 } from "@/services/thought-config";
 import "./ThoughtConfigPanel.css";
@@ -113,6 +114,7 @@ export function ThoughtConfigPanel({
   onClose,
 }: ThoughtConfigPanelProps) {
   const [form, setForm] = useState<ThoughtConfigForm | null>(null);
+  const [defaults, setDefaults] = useState<DaemonDefaults | null>(null);
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -127,8 +129,9 @@ export function ThoughtConfigPanel({
     setSaveError(null);
     setSaveNotice(null);
     try {
-      const config = await fetchThoughtConfig();
-      setForm(toForm(config));
+      const result = await fetchThoughtConfig();
+      setForm(toForm(result.config));
+      setDefaults(result.daemon_defaults);
     } catch (error) {
       setForm(null);
       setLoadError(
@@ -290,6 +293,7 @@ export function ThoughtConfigPanel({
                 <input
                   type="text"
                   value={form.model}
+                  placeholder={defaults?.model || "daemon default"}
                   disabled={inputsDisabled}
                   onInput={(event: Event) =>
                     updateTextField(
@@ -354,6 +358,7 @@ export function ThoughtConfigPanel({
                 <textarea
                   rows={4}
                   value={form.agent_prompt}
+                  placeholder={defaults?.agent_prompt || "daemon default"}
                   disabled={inputsDisabled}
                   onInput={(event: Event) =>
                     updateTextField(
@@ -368,6 +373,7 @@ export function ThoughtConfigPanel({
                 <textarea
                   rows={4}
                   value={form.terminal_prompt}
+                  placeholder={defaults?.terminal_prompt || "daemon default"}
                   disabled={inputsDisabled}
                   onInput={(event: Event) =>
                     updateTextField(
