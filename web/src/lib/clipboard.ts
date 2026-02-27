@@ -1,12 +1,19 @@
 export async function copyTextToClipboard(text: string): Promise<boolean> {
   if (!text) return false;
 
-  if (typeof navigator !== "undefined" && navigator.clipboard?.writeText) {
+  // Only attempt the async Clipboard API in secure contexts (HTTPS).
+  // Over HTTP the async call burns the user-gesture window, causing the
+  // synchronous execCommand fallback to also fail.
+  if (
+    typeof window !== "undefined" &&
+    window.isSecureContext &&
+    navigator.clipboard?.writeText
+  ) {
     try {
       await navigator.clipboard.writeText(text);
       return true;
     } catch {
-      // Fall through to execCommand fallback for non-secure contexts.
+      // Fall through to execCommand fallback.
     }
   }
 

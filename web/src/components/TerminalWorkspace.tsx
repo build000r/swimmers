@@ -589,6 +589,17 @@ export function TerminalWorkspace({
           snapshotReadyRef.current = true;
           flushPendingFrames();
           markLive();
+
+          // Nudge PTY size to force tmux full-screen ANSI redraw.
+          // The plain-text snapshot lacks escape sequences; this
+          // generates new frames with seq > latest_seq that replace it.
+          const c = term.cols;
+          const r = term.rows;
+          realtime.sendResize(session.session_id, c + 1, r);
+          setTimeout(() => {
+            if (disposed) return;
+            realtime.sendResize(session.session_id, c, r);
+          }, 100);
         })
         .catch(() => {
           if (disposed) return;
