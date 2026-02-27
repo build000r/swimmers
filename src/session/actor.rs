@@ -190,6 +190,7 @@ impl SessionActor {
         tmux_name: String,
         attach: bool,
         start_cwd: Option<String>,
+        initial_tool: Option<String>,
         config: Arc<Config>,
     ) -> anyhow::Result<ActorHandle> {
         let pty_system = native_pty_system();
@@ -286,7 +287,7 @@ impl SessionActor {
             cwd: initial_cwd,
             last_cwd_refresh_at: Instant::now(),
             last_tool_refresh_at: Instant::now(),
-            tool: None,
+            tool: initial_tool,
             last_activity_at: Utc::now(),
             clear_replay_on_first_idle: !attach,
         };

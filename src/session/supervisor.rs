@@ -231,6 +231,7 @@ impl SessionSupervisor {
                         tmux_name.clone(),
                         true, // attach to existing
                         None,
+                        None, // tool detected from process tree
                         self.config.clone(),
                     ) {
                         Ok(handle) => {
@@ -363,11 +364,18 @@ impl SessionSupervisor {
 
         info!(session_id = %session_id, tmux_name = %tmux_name, "creating new session");
 
+        let initial_tool = spawn_tool.as_ref().map(|t| {
+            crate::types::detect_tool_name(t.command())
+                .unwrap_or(t.command())
+                .to_string()
+        });
+
         let handle = crate::session::actor::SessionActor::spawn(
             session_id.clone(),
             tmux_name.clone(),
             false, // create new
             start_cwd.clone(),
+            initial_tool.clone(),
             self.config.clone(),
         )?;
         let bootstrap_handle = handle.clone();
@@ -381,10 +389,8 @@ impl SessionSupervisor {
         if let Some(cwd) = start_cwd {
             summary.cwd = cwd;
         }
-        if let Some(ref tool) = spawn_tool {
-            let display = crate::types::detect_tool_name(tool.command())
-                .unwrap_or(tool.command());
-            summary.tool = Some(display.to_string());
+        if let Some(ref display) = initial_tool {
+            summary.tool = Some(display.clone());
             summary.context_limit = crate::types::context_limit_for_tool(Some(display));
         }
 
