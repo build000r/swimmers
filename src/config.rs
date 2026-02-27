@@ -61,8 +61,8 @@ impl Default for Config {
             terminal_cache_ttl_ms: 300_000,
             session_delete_mode: SessionDeleteMode::DetachBridge,
             poll_fallback_ms: 2000,
-            replay_buffer_size: 64 * 1024, // 64KB replay ring
-            outbound_queue_bound: 512,
+            replay_buffer_size: 512 * 1024, // 512KB replay ring
+            outbound_queue_bound: 4096,
             thought_backend: ThoughtBackend::Daemon,
             overload_window_ms: 1000,
         }
@@ -95,6 +95,20 @@ impl Config {
         if let Ok(backend) = std::env::var("THRONGTERM_THOUGHT_BACKEND") {
             config.thought_backend = ThoughtBackend::from_env_value(&backend);
         }
+        if let Ok(val) = std::env::var("THRONGTERM_OUTBOUND_QUEUE_BOUND") {
+            if let Ok(n) = val.parse::<usize>() {
+                if n > 0 {
+                    config.outbound_queue_bound = n;
+                }
+            }
+        }
+        if let Ok(val) = std::env::var("THRONGTERM_REPLAY_BUFFER_SIZE") {
+            if let Ok(n) = val.parse::<usize>() {
+                if n > 0 {
+                    config.replay_buffer_size = n;
+                }
+            }
+        }
         config
     }
 }
@@ -122,5 +136,23 @@ mod tests {
     #[test]
     fn default_config_uses_daemon_backend() {
         assert_eq!(Config::default().thought_backend, ThoughtBackend::Daemon);
+    }
+
+    #[test]
+    fn burst_of_600_frames_fits_in_default_outbound_queue() {
+        let config = Config::default();
+        // A burst of 600 frames (e.g. rapid AI agent output) must fit within
+        // the outbound queue bound without causing subscriber eviction.
+        assert!(
+            config.outbound_queue_bound >= 600,
+            "outbound_queue_bound ({}) must be >= 600 to tolerate high-throughput bursts",
+            config.outbound_queue_bound,
+        );
+    }
+
+    #[test]
+    fn default_replay_buffer_is_512kb() {
+        let config = Config::default();
+        assert_eq!(config.replay_buffer_size, 512 * 1024);
     }
 }

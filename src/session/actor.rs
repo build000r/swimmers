@@ -412,12 +412,7 @@ impl SessionActor {
                             debug!(session_id = %self.session_id, client_id, "client unsubscribed");
                         }
                         SessionCommand::GetSnapshot(reply) => {
-                            let snap = TerminalSnapshot {
-                                session_id: self.session_id.clone(),
-                                latest_seq: self.replay_ring.latest_seq(),
-                                truncated: false,
-                                screen_text: self.replay_ring.snapshot(),
-                            };
+                            let snap = self.build_snapshot().await;
                             let _ = reply.send(snap);
                         }
                         SessionCommand::GetPaneTail { lines, reply } => {
@@ -900,6 +895,36 @@ impl SessionActor {
         outcome
     }
 
+    /// Build a terminal snapshot using tmux capture-pane, falling back to the
+    /// replay ring if the tmux command fails.
+    async fn build_snapshot(&mut self) -> TerminalSnapshot {
+        // Extract values before await to avoid holding &self across the await point
+        // (SessionActor contains non-Sync fields like dyn MasterPty).
+        let tmux_name = self.tmux_name.clone();
+        let session_id = self.session_id.clone();
+        let fallback_text = self.replay_ring.snapshot();
+        let latest_seq = self.replay_ring.latest_seq();
+
+        let screen_text = match capture_pane_tail(&tmux_name, 300).await {
+            Ok(text) => text,
+            Err(e) => {
+                warn!(
+                    session_id = %session_id,
+                    tmux_name = %tmux_name,
+                    "capture-pane failed for snapshot, falling back to replay ring: {}",
+                    e
+                );
+                fallback_text
+            }
+        };
+        TerminalSnapshot {
+            session_id,
+            latest_seq,
+            truncated: false,
+            screen_text,
+        }
+    }
+
     /// Build a summary snapshot of this session's current state.
     fn build_summary(&self) -> SessionSummary {
         let (state, current_command) = self.state_detector.get_state();
@@ -917,6 +942,9 @@ impl SessionActor {
             is_stale: false,
             attached_clients: self.subscribers.len() as u32,
             transport_health: TransportHealth::Healthy,
+            thought_state: crate::types::ThoughtState::Holding,
+            thought_source: crate::types::ThoughtSource::CarryForward,
+            thought_updated_at: None,
             last_activity_at: self.last_activity_at,
         }
     }
@@ -1273,9 +1301,10 @@ fn pty_read_loop(
 #[cfg(test)]
 mod tests {
     use super::{
-        detect_tool_from_command_line, detect_tool_from_process_entry, parse_process_entry,
-        resolve_tmux_terminal_env, ProcessEntry,
+        capture_pane_tail, detect_tool_from_command_line, detect_tool_from_process_entry,
+        parse_process_entry, resolve_tmux_terminal_env, ProcessEntry,
     };
+    use crate::session::replay_ring::ReplayRing;
 
     #[test]
     fn detect_tool_from_command_line_handles_aliases() {
@@ -1342,5 +1371,20 @@ mod tests {
         assert_eq!(term, "screen-256color");
         assert_eq!(colorterm, "truecolor");
         assert!(!fallback);
+    }
+
+    #[tokio::test]
+    async fn build_snapshot_falls_back_to_replay_ring_when_capture_pane_fails() {
+        // capture_pane_tail will fail for a non-existent tmux session.
+        let result = capture_pane_tail("__nonexistent_throngterm_test__", 300).await;
+        assert!(result.is_err(), "capture_pane_tail should fail for a non-existent session");
+
+        // Verify replay ring fallback produces the expected snapshot content.
+        let mut ring = ReplayRing::new(512 * 1024);
+        ring.push(b"$ hello world\n");
+        ring.push(b"output line 2\n");
+        let snapshot_text = ring.snapshot();
+        assert_eq!(snapshot_text, "$ hello world\noutput line 2\n");
+        assert!(ring.latest_seq() > 0);
     }
 }
