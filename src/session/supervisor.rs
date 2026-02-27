@@ -368,6 +368,12 @@ impl SessionSupervisor {
         if let Some(cwd) = start_cwd {
             summary.cwd = cwd;
         }
+        if let Some(ref tool) = spawn_tool {
+            let display = crate::types::detect_tool_name(tool.command())
+                .unwrap_or(tool.command());
+            summary.tool = Some(display.to_string());
+            summary.context_limit = crate::types::context_limit_for_tool(Some(display));
+        }
 
         if let Some(tool) = spawn_tool {
             if let Err(e) = send_spawn_tool_command(&tmux_name, tool).await {
@@ -633,7 +639,9 @@ impl SessionSupervisor {
                     thought: thought_data
                         .and_then(|t| t.thought.clone())
                         .or_else(|| summary.thought.clone()),
-                    thought_updated_at: thought_data.map(|t| t.updated_at).or(summary.thought_updated_at),
+                    thought_updated_at: thought_data
+                        .map(|t| t.updated_at)
+                        .or(summary.thought_updated_at),
                     objective_fingerprint: thought_data
                         .and_then(|t| t.objective_fingerprint.clone()),
                     token_count: thought_data
@@ -994,7 +1002,9 @@ impl SessionProvider for SupervisorProvider {
         thought_source: ThoughtSource,
         objective_fingerprint: Option<String>,
     ) {
-        if self.persist_tx.try_send(PersistThoughtRequest {
+        if self
+            .persist_tx
+            .try_send(PersistThoughtRequest {
                 session_id: session_id.to_string(),
                 thought: thought.map(|value| value.to_string()),
                 token_count,
@@ -1157,6 +1167,20 @@ mod tests {
             Duration::from_secs(2),
         );
         assert_eq!(after, vec!["sess_1".to_string()]);
+    }
+
+    #[test]
+    fn spawn_tool_roundtrip_sets_correct_display_name() {
+        use crate::types::{context_limit_for_tool, detect_tool_name, SpawnTool};
+
+        for (tool, expected_name, expected_limit) in [
+            (SpawnTool::Claude, "Claude Code", 200_000),
+            (SpawnTool::Codex, "Codex", 192_000),
+        ] {
+            let display = detect_tool_name(tool.command()).unwrap_or(tool.command());
+            assert_eq!(display, expected_name);
+            assert_eq!(context_limit_for_tool(Some(display)), expected_limit);
+        }
     }
 
     #[test]
