@@ -169,6 +169,13 @@ export class RealtimeService {
     this.sendSubscribeSession(sessionId, mergedResume);
   }
 
+  /** Force a re-subscribe by clearing idempotency guards for this session. */
+  forceResubscribe(sessionId: string, resumeFromSeq?: number): void {
+    this.activeSessionSubscriptions.delete(sessionId);
+    this.pendingSessionSubscriptions.delete(sessionId);
+    this.subscribeSession(sessionId, resumeFromSeq);
+  }
+
   unsubscribeSession(sessionId: string): void {
     this.desiredSessionSubscriptions.delete(sessionId);
     this.pendingSessionSubscriptions.delete(sessionId);

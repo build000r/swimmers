@@ -11,6 +11,12 @@ import { fetchSnapshot, listSkills } from "@/services/api";
 import { copyTextToClipboard, readTextFromClipboard } from "@/lib/clipboard";
 import { ThrongletSprite } from "./ThrongletSprite";
 
+function warn_silence_recovery(sessionId: string): void {
+  console.warn(
+    `[throngterm] silence detected for busy session ${sessionId}, triggering re-subscribe + snapshot recovery`,
+  );
+}
+
 function cwdLabel(cwd: string): string {
   const trimmed = cwd.trim();
   if (!trimmed || trimmed === "/") return "";
@@ -227,6 +233,8 @@ export function TerminalWorkspace({
   const initDoneRef = useRef(false);
   const autoRecoveryKeyRef = useRef<string | null>(null);
   const recoverFromSnapshotRef = useRef<(() => Promise<void>) | null>(null);
+  const sessionStateRef = useRef(session.state);
+  const silenceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const [title, setTitle] = useState(`tmux a -t ${session.tmux_name}`);
   const [titleCopied, setTitleCopied] = useState(false);
@@ -254,6 +262,10 @@ export function TerminalWorkspace({
   const sessionToolKind = classifySessionTool(session.tool);
   const isAgentSession =
     sessionToolKind === "claude" || sessionToolKind === "codex";
+
+  useEffect(() => {
+    sessionStateRef.current = session.state;
+  }, [session.state]);
 
   useEffect(() => {
     setTitle(`tmux a -t ${session.tmux_name}`);
@@ -434,9 +446,34 @@ export function TerminalWorkspace({
       pendingFramesRef.current = [];
     };
 
+    const SILENCE_TIMEOUT_MS = 5000;
+
+    const startSilenceTimer = () => {
+      if (disposed) return;
+      if (!snapshotReadyRef.current) return;
+      silenceTimerRef.current = setTimeout(() => {
+        silenceTimerRef.current = null;
+        if (disposed) return;
+        if (sessionStateRef.current !== "busy") return;
+        // Session is busy but no output for 5s — likely evicted subscriber.
+        warn_silence_recovery(session.session_id);
+        realtime.forceResubscribe(session.session_id);
+        void recoverFromSnapshot();
+      }, SILENCE_TIMEOUT_MS);
+    };
+
+    const resetSilenceTimer = () => {
+      if (silenceTimerRef.current) {
+        clearTimeout(silenceTimerRef.current);
+        silenceTimerRef.current = null;
+      }
+      startSilenceTimer();
+    };
+
     const markLive = () => {
       if (!disposed && snapshotReadyRef.current) {
         setLifecycleState("live");
+        resetSilenceTimer();
       }
     };
 
@@ -601,6 +638,7 @@ export function TerminalWorkspace({
       seqRef.current = frame.seq;
       term.write(frame.data);
       setLifecycleState("live");
+      resetSilenceTimer();
     };
 
     const unsubscribeOutput = realtime.subscribeTerminalOutput(handleOutput);
@@ -657,6 +695,10 @@ export function TerminalWorkspace({
     return () => {
       disposed = true;
       recoverFromSnapshotRef.current = null;
+      if (silenceTimerRef.current) {
+        clearTimeout(silenceTimerRef.current);
+        silenceTimerRef.current = null;
+      }
       clearLongPress();
       window.removeEventListener("resize", handleWindowResize);
       if (window.visualViewport) {

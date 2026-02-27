@@ -116,6 +116,61 @@ describe("snapshot recovery", () => {
     expect(currentSeq).toBe(750);
   });
 
+  it("de-duplicates recovery by incident key (guard regression)", async () => {
+    let fetchCount = 0;
+
+    const mockFetchSnapshot = vi.fn(
+      async (sessionId: string): Promise<TerminalSnapshot> => {
+        fetchCount++;
+        return {
+          session_id: sessionId,
+          latest_seq: 500,
+          truncated: false,
+          screen_text: "$ recovered\n",
+        };
+      },
+    );
+
+    const seenKeys = new Set<string>();
+
+    const replayTruncatedHandler = async (
+      sessionId: string,
+      payload: ReplayTruncatedPayload,
+    ) => {
+      const targetSessionId = "sess-001";
+      if (sessionId !== targetSessionId) return;
+      const incidentKey = `${payload.requested_resume_from_seq}:${payload.replay_window_start_seq}:${payload.latest_seq}`;
+      if (seenKeys.has(incidentKey)) return;
+      seenKeys.add(incidentKey);
+      await mockFetchSnapshot(sessionId);
+    };
+
+    const payload: ReplayTruncatedPayload = {
+      code: "replay_truncated",
+      requested_resume_from_seq: 5,
+      replay_window_start_seq: 100,
+      latest_seq: 500,
+    };
+
+    // First call triggers recovery
+    await replayTruncatedHandler("sess-001", payload);
+    expect(fetchCount).toBe(1);
+
+    // Same incident key: should be de-duplicated
+    await replayTruncatedHandler("sess-001", payload);
+    expect(fetchCount).toBe(1);
+
+    // Different incident key: should trigger a new recovery
+    const payload2: ReplayTruncatedPayload = {
+      code: "replay_truncated",
+      requested_resume_from_seq: 501,
+      replay_window_start_seq: 600,
+      latest_seq: 800,
+    };
+    await replayTruncatedHandler("sess-001", payload2);
+    expect(fetchCount).toBe(2);
+  });
+
   it("handles fetch failure gracefully (keeps current state)", async () => {
     let currentSeq = 42;
     let terminalCleared = false;
