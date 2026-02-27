@@ -32,6 +32,10 @@ interface TerminalWorkspaceProps {
   cached: CachedTerminal | null;
   /** Observer mode disables input */
   observer?: boolean;
+  /** Whether this session is benched (hidden from overview) */
+  isBenched?: boolean;
+  /** Toggle bench state for this session */
+  onBenchToggle?: (sessionId: string) => void;
   /** Called when the workspace wants to cache its terminal (e.g., before unmount) */
   onCache: (cached: CachedTerminal) => void;
   /** Called when session exits */
@@ -202,6 +206,8 @@ export function TerminalWorkspace({
   session,
   cached,
   observer = false,
+  isBenched = false,
+  onBenchToggle,
   onCache,
   onSessionExit,
   onClose,
@@ -1100,6 +1106,15 @@ export function TerminalWorkspace({
         <span class="zone-title" onClick={handleTitleClick}>
           {titleCopied ? "copied!" : title}
         </span>
+        {onBenchToggle && !observer && (
+          <button
+            type="button"
+            class={`zone-bench-toggle ${isBenched ? "benched" : ""}`}
+            onClick={() => onBenchToggle(session.session_id)}
+          >
+            {isBenched ? "Show" : "Hide"}
+          </button>
+        )}
         <span
           style={{
             fontSize: "10px",

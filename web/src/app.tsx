@@ -284,6 +284,20 @@ export function App() {
   const [restoreRequest, setRestoreRequest] =
     useState<RestoreLayoutRequest | null>(null);
   const [axeArmed, setAxeArmed] = useState(false);
+  const [benchArmed, setBenchArmed] = useState(false);
+  const [benchedIds, setBenchedIds] = useState<Set<string>>(() => {
+    try {
+      const raw = localStorage.getItem("throngterm.benched-sessions.v1");
+      if (!raw) return new Set();
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed) && parsed.every((id) => typeof id === "string")) {
+        return new Set(parsed);
+      }
+      return new Set();
+    } catch {
+      return new Set();
+    }
+  });
   const [pendingUndoDelete, setPendingUndoDelete] =
     useState<UndoDeleteState | null>(null);
   const [undoInFlight, setUndoInFlight] = useState(false);
@@ -306,8 +320,22 @@ export function App() {
   const { isObserver } = useObserverMode(authMode);
 
   useEffect(() => {
-    if (isObserver) setAxeArmed(false);
+    if (isObserver) {
+      setAxeArmed(false);
+      setBenchArmed(false);
+    }
   }, [isObserver]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(
+        "throngterm.benched-sessions.v1",
+        JSON.stringify([...benchedIds]),
+      );
+    } catch {
+      // localStorage write failure — ignore
+    }
+  }, [benchedIds]);
 
   useEffect(() => {
     return () => {
@@ -586,6 +614,12 @@ export function App() {
         sessions.value = sessions.value.filter(
           (s) => s.session_id !== sessionId,
         );
+        setBenchedIds((prev) => {
+          if (!prev.has(sessionId)) return prev;
+          const next = new Set(prev);
+          next.delete(sessionId);
+          return next;
+        });
       },
 
       onTerminalOutput(frame) {
@@ -654,6 +688,13 @@ export function App() {
           window.location.protocol === "https:" ? "wss:" : "ws:";
         const wsUrl = `${wsProto}//${window.location.host}/v1/realtime`;
         realtime.connect(wsUrl);
+
+        // Prune benched IDs against live sessions
+        const liveIds = new Set(initialSessions.map((s) => s.session_id));
+        setBenchedIds((prev) => {
+          const pruned = new Set([...prev].filter((id) => liveIds.has(id)));
+          return pruned.size === prev.size ? prev : pruned;
+        });
 
         setBootstrapDone(true);
       } catch (err) {
@@ -885,6 +926,7 @@ export function App() {
   const openTerminal = useCallback(
     (sessionId: string, preferZone?: "main" | "bottom") => {
       setAxeArmed(false);
+      setBenchArmed(false);
       if (!isObserver) {
         const session = sessions.value.find((s) => s.session_id === sessionId);
         if (session?.state === "attention") {
@@ -905,8 +947,45 @@ export function App() {
     setAxeArmed(false);
   }, []);
 
+  const handleToggleBenchArm = useCallback(() => {
+    setBenchArmed((prev) => {
+      if (!prev) setAxeArmed(false); // mutual exclusion
+      return !prev;
+    });
+  }, []);
+
+  const handleBenchSession = useCallback((sessionId: string) => {
+    setBenchArmed(false);
+    setBenchedIds((prev) => new Set([...prev, sessionId]));
+    if (navigator.vibrate) navigator.vibrate(20);
+  }, []);
+
+  const handleUnbenchSession = useCallback((sessionId: string) => {
+    setBenchedIds((prev) => {
+      const next = new Set(prev);
+      next.delete(sessionId);
+      return next;
+    });
+  }, []);
+
+  const handleBenchToggleFromTerminal = useCallback((sessionId: string) => {
+    setBenchedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(sessionId)) {
+        next.delete(sessionId);
+      } else {
+        next.add(sessionId);
+      }
+      return next;
+    });
+  }, []);
+
   const handleOverviewTap = useCallback(
     (sessionId: string) => {
+      if (benchArmed) {
+        handleBenchSession(sessionId);
+        return;
+      }
       if (!axeArmed) {
         openTerminal(sessionId);
         return;
@@ -916,7 +995,7 @@ export function App() {
       if (navigator.vibrate) navigator.vibrate([20, 30, 20]);
       void deleteSessionWithFeedback(sessionId);
     },
-    [axeArmed, openTerminal, deleteSessionWithFeedback],
+    [axeArmed, benchArmed, openTerminal, deleteSessionWithFeedback, handleBenchSession],
   );
 
   const showOverview = useCallback(() => {
@@ -1060,8 +1139,18 @@ export function App() {
           compact={splitMode}
           axeTopOffset={fieldAxeTopOffset}
           axeArmed={axeArmed}
-          onToggleAxe={() => setAxeArmed((prev) => !prev)}
+          benchArmed={benchArmed}
+          benchedIds={benchedIds}
+          onToggleAxe={() => {
+            setAxeArmed((prev) => {
+              if (!prev) setBenchArmed(false); // mutual exclusion
+              return !prev;
+            });
+          }}
           onDisarmAxe={disarmAxeMode}
+          onToggleBenchArm={handleToggleBenchArm}
+          onBenchSession={handleBenchSession}
+          onUnbenchSession={handleUnbenchSession}
           onTapSession={handleOverviewTap}
           onDragToBottom={(id) => openTerminal(id, "bottom")}
           onCreateSession={async (cwd?: string, spawnTool?: SpawnTool) => {
@@ -1103,6 +1192,8 @@ export function App() {
             preferZone={activeZonePreference.value}
             restoreRequest={restoreRequest}
             observer={isObserver}
+            benchedIds={benchedIds}
+            onBenchToggle={handleBenchToggleFromTerminal}
             onShowOverview={showOverview}
             onStartPolling={startPolling}
             onStopPolling={stopPolling}

@@ -6,6 +6,7 @@ import {
 } from "@/lib/thronglet-motion";
 import { SpawnMenu } from "./SpawnMenu";
 import { ThoughtConfigPanel } from "./ThoughtConfigPanel";
+import { BenchModal } from "./BenchModal";
 import { ThrongletSprite } from "./ThrongletSprite";
 
 // ---- Helpers ----
@@ -92,9 +93,13 @@ interface ThrongletProps {
   axeTargeted?: boolean;
   axeDimmed?: boolean;
   axeHit?: boolean;
+  benchArmed?: boolean;
+  benchTargeted?: boolean;
+  benchDimmed?: boolean;
   compact?: boolean;
   rawMode?: boolean;
   onAxeHover?: (id: string | null) => void;
+  onBenchHover?: (id: string | null) => void;
   onTap: (id: string) => void;
   onDragToBottom: (id: string) => void;
 }
@@ -109,9 +114,13 @@ function ThrongletEntity({
   axeTargeted = false,
   axeDimmed = false,
   axeHit = false,
+  benchArmed = false,
+  benchTargeted = false,
+  benchDimmed = false,
   compact = false,
   rawMode = false,
   onAxeHover,
+  onBenchHover,
   onTap,
   onDragToBottom,
 }: ThrongletProps) {
@@ -151,7 +160,7 @@ function ThrongletEntity({
   // Desktop drag-left to assign to bottom pane
   const handleMouseDown = useCallback(
     (e: MouseEvent) => {
-      if (axeArmed) return;
+      if (axeArmed || benchArmed) return;
       if (e.button !== 0) return;
       e.preventDefault();
       const startX = e.clientX;
@@ -204,7 +213,7 @@ function ThrongletEntity({
       document.addEventListener("mousemove", onMouseMove);
       document.addEventListener("mouseup", onMouseUp);
     },
-    [axeArmed, session.session_id, onDragToBottom, throngletSize, spriteHalf],
+    [axeArmed, benchArmed, session.session_id, onDragToBottom, throngletSize, spriteHalf],
   );
 
   // Thought / activity text
@@ -301,25 +310,35 @@ function ThrongletEntity({
         isExited ? "exited" : isEgg ? "egg" : isHatching ? "hatching-reveal" : session.state
       } ${axeTargeted ? "axe-targeted" : ""} ${axeDimmed ? "axe-dimmed" : ""} ${
         axeHit ? "axe-hit" : ""
-      }`}
+      } ${benchTargeted ? "bench-targeted" : ""} ${benchDimmed ? "bench-dimmed" : ""}`}
       style={{
         "--thronglet-size": `${throngletSize}px`,
         left: x + "px",
         top: y + "px",
-        boxShadow: axeTargeted ? "0 0 0 2px rgba(231, 76, 60, 0.95)" : "none",
+        boxShadow: axeTargeted
+          ? "0 0 0 2px rgba(231, 76, 60, 0.95)"
+          : benchTargeted
+            ? "0 0 0 2px rgba(91, 148, 235, 0.95)"
+            : "none",
         borderRadius: "12px",
       }}
       onClick={handleClick}
       onMouseDown={handleMouseDown}
       onMouseEnter={() => {
         if (axeArmed) onAxeHover?.(session.session_id);
+        if (benchArmed) onBenchHover?.(session.session_id);
       }}
       onMouseLeave={() => {
         if (axeArmed) onAxeHover?.(null);
+        if (benchArmed) onBenchHover?.(null);
       }}
       onTouchStart={(e: TouchEvent) => {
         if (axeArmed) {
           onAxeHover?.(session.session_id);
+          return;
+        }
+        if (benchArmed) {
+          onBenchHover?.(session.session_id);
           return;
         }
         longPressTimerRef.current = setTimeout(() => {
@@ -346,6 +365,7 @@ function ThrongletEntity({
           longPressTimerRef.current = null;
         }
         if (axeArmed) onAxeHover?.(null);
+        if (benchArmed) onBenchHover?.(null);
       }}
       onDragStart={(e: Event) => e.preventDefault()}
     >
@@ -463,8 +483,13 @@ interface OverviewFieldProps {
   compact?: boolean;
   axeTopOffset?: number;
   axeArmed?: boolean;
+  benchArmed?: boolean;
+  benchedIds?: Set<string>;
   onDisarmAxe?: () => void;
   onToggleAxe?: () => void;
+  onToggleBenchArm?: () => void;
+  onBenchSession?: (id: string) => void;
+  onUnbenchSession?: (id: string) => void;
   onTapSession: (id: string) => void;
   onDragToBottom: (id: string) => void;
   onCreateSession: (cwd?: string, spawnTool?: SpawnTool) => Promise<string>;
@@ -478,8 +503,13 @@ export function OverviewField({
   compact = false,
   axeTopOffset = 8,
   axeArmed = false,
+  benchArmed = false,
+  benchedIds = new Set(),
   onDisarmAxe,
   onToggleAxe,
+  onToggleBenchArm,
+  onBenchSession,
+  onUnbenchSession,
   onTapSession,
   onDragToBottom,
   onCreateSession,
@@ -490,6 +520,8 @@ export function OverviewField({
   const [menuPos, setMenuPos] = useState<{ x: number; y: number } | null>(null);
   const [axeTargetSessionId, setAxeTargetSessionId] = useState<string | null>(null);
   const [axeHitSessionId, setAxeHitSessionId] = useState<string | null>(null);
+  const [benchTargetSessionId, setBenchTargetSessionId] = useState<string | null>(null);
+  const [showBenchModal, setShowBenchModal] = useState(false);
   const [axeSlashFx, setAxeSlashFx] = useState<{
     key: number;
     x: number;
@@ -534,6 +566,12 @@ export function OverviewField({
       setAxeHitSessionId(null);
     }
   }, [axeArmed]);
+
+  useEffect(() => {
+    if (!benchArmed) {
+      setBenchTargetSessionId(null);
+    }
+  }, [benchArmed]);
 
   // Initialize positions for new sessions, handle exits, clean up removed sessions
   useEffect(() => {
@@ -610,7 +648,7 @@ export function OverviewField({
   useEffect(() => {
     const interval = setInterval(() => {
       setPositions((prev) => {
-        if (axeArmed) return prev;
+        if (axeArmed || benchArmed) return prev;
         const field = fieldRef.current;
         const fieldW = field ? field.clientWidth : window.innerWidth;
         const fieldH = field ? field.clientHeight : window.innerHeight;
@@ -690,7 +728,7 @@ export function OverviewField({
     }, WANDER_INTERVAL);
 
     return () => clearInterval(interval);
-  }, [axeArmed, throngletSize, bubbleTopClearance, labelClearance]);
+  }, [axeArmed, benchArmed, throngletSize, bubbleTopClearance, labelClearance]);
 
   const handleAxeHover = useCallback(
     (sessionId: string | null) => {
@@ -700,8 +738,20 @@ export function OverviewField({
     [axeArmed],
   );
 
+  const handleBenchHover = useCallback(
+    (sessionId: string | null) => {
+      if (!benchArmed) return;
+      setBenchTargetSessionId(sessionId);
+    },
+    [benchArmed],
+  );
+
   const handleSessionTap = useCallback(
     (sessionId: string) => {
+      if (benchArmed) {
+        onBenchSession?.(sessionId);
+        return;
+      }
       if (!axeArmed) {
         onTapSession(sessionId);
         return;
@@ -781,20 +831,25 @@ export function OverviewField({
         onDisarmAxe?.();
         return;
       }
+      if (benchArmed) {
+        onToggleBenchArm?.();
+        return;
+      }
       const target = e.target as HTMLElement;
       if (
         target.closest?.(".thronglet") ||
         target.closest?.(".hatching-egg") ||
         target.closest?.(".spawn-menu") ||
         target.closest?.(".thought-config-overlay") ||
-        target.closest?.(".thought-config-trigger")
+        target.closest?.(".thought-config-trigger") ||
+        target.closest?.(".bench-modal-overlay")
       ) {
         return;
       }
       menuClickPosRef.current = { x: e.clientX, y: e.clientY };
       setMenuPos({ x: e.clientX, y: e.clientY });
     },
-    [axeArmed, onDisarmAxe],
+    [axeArmed, benchArmed, onDisarmAxe, onToggleBenchArm],
   );
 
   const handleFieldTouch = useCallback(
@@ -803,13 +858,18 @@ export function OverviewField({
         onDisarmAxe?.();
         return;
       }
+      if (benchArmed) {
+        onToggleBenchArm?.();
+        return;
+      }
       const target = e.target as HTMLElement;
       if (
         target.closest?.(".thronglet") ||
         target.closest?.(".hatching-egg") ||
         target.closest?.(".spawn-menu") ||
         target.closest?.(".thought-config-overlay") ||
-        target.closest?.(".thought-config-trigger")
+        target.closest?.(".thought-config-trigger") ||
+        target.closest?.(".bench-modal-overlay")
       ) {
         return;
       }
@@ -818,7 +878,7 @@ export function OverviewField({
       menuClickPosRef.current = { x: t.clientX, y: t.clientY };
       setMenuPos({ x: t.clientX, y: t.clientY });
     },
-    [axeArmed, onDisarmAxe],
+    [axeArmed, benchArmed, onDisarmAxe, onToggleBenchArm],
   );
 
   const handleMenuSelect = useCallback(
@@ -877,7 +937,7 @@ export function OverviewField({
   return (
     <div
       ref={fieldRef}
-      class={`field ${axeArmed ? "axe-armed" : ""}`}
+      class={`field ${axeArmed ? "axe-armed" : ""} ${benchArmed ? "bench-armed" : ""}`}
       style={{ flex: 1, position: "relative" }}
       onClick={observer ? undefined : handleFieldClick}
       onTouchEnd={observer ? undefined : handleFieldTouch}
@@ -956,6 +1016,79 @@ export function OverviewField({
         </button>
       )}
 
+      {!observer && onToggleBenchArm && (
+        <button
+          type="button"
+          class={`bench-trigger ${benchArmed ? "armed" : ""}`}
+          aria-label={benchArmed ? "Disarm bench mode" : "Bench mode"}
+          title={benchArmed ? "Bench armed" : "Hide thronglets"}
+          onClick={(e: MouseEvent) => {
+            e.stopPropagation();
+            if (benchArmed) {
+              onToggleBenchArm();
+              if (navigator.vibrate) navigator.vibrate(10);
+            } else if (benchedIds.size > 0) {
+              setShowBenchModal(true);
+              if (navigator.vibrate) navigator.vibrate(15);
+            } else {
+              onToggleBenchArm();
+              if (navigator.vibrate) navigator.vibrate(25);
+            }
+          }}
+          style={{
+            position: "absolute",
+            top: `${axeTopOffset + 8}px`,
+            left: !observer && onToggleAxe ? "74px" : "8px",
+            width: "44px",
+            height: "44px",
+            border: "none",
+            borderRadius: "12px",
+            background: "rgba(17, 30, 49, 0.65)",
+            boxShadow: "0 2px 8px rgba(0, 0, 0, 0.35)",
+            padding: 0,
+            display: "grid",
+            placeItems: "center",
+            zIndex: 220,
+            cursor: "pointer",
+          }}
+        >
+          <svg
+            width="24"
+            height="24"
+            viewBox="0 0 24 24"
+            fill="none"
+            aria-hidden="true"
+          >
+            {/* Eye with slash — hide icon */}
+            <path
+              d="M3 12s3-7 9-7 9 7 9 7-3 7-9 7-9-7-9-7z"
+              stroke={benchArmed ? "#5b94eb" : "#f5f7fb"}
+              strokeWidth="1.5"
+              fill="none"
+            />
+            <circle
+              cx="12"
+              cy="12"
+              r="3"
+              stroke={benchArmed ? "#5b94eb" : "#f5f7fb"}
+              strokeWidth="1.5"
+              fill="none"
+            />
+            <line
+              x1="4"
+              y1="20"
+              x2="20"
+              y2="4"
+              stroke={benchArmed ? "#5b94eb" : "#f5f7fb"}
+              strokeWidth="1.5"
+            />
+          </svg>
+          {benchedIds.size > 0 && !benchArmed && (
+            <span class="bench-count">{benchedIds.size}</span>
+          )}
+        </button>
+      )}
+
       <button
         type="button"
         class="thought-config-trigger"
@@ -969,7 +1102,11 @@ export function OverviewField({
         style={{
           position: "absolute",
           top: `${axeTopOffset + 8}px`,
-          left: !observer && onToggleAxe ? "74px" : "8px",
+          left: !observer && onToggleAxe && onToggleBenchArm
+            ? "124px"
+            : !observer && onToggleAxe
+              ? "74px"
+              : "8px",
           width: "44px",
           height: "44px",
           border: "none",
@@ -1042,6 +1179,7 @@ export function OverviewField({
           .filter((s) =>
             !(hatchState && hatchState.phase !== "done" && hatchState.sessionId === s.session_id)
           )
+          .filter((s) => !benchedIds.has(s.session_id))
           .map((s) => {
             const pos = positions[s.session_id];
             if (!pos) return null;
@@ -1065,9 +1203,17 @@ export function OverviewField({
                   axeTargetSessionId !== s.session_id
                 }
                 axeHit={axeHitSessionId === s.session_id}
+                benchArmed={benchArmed}
+                benchTargeted={benchArmed && benchTargetSessionId === s.session_id}
+                benchDimmed={
+                  benchArmed &&
+                  benchTargetSessionId !== null &&
+                  benchTargetSessionId !== s.session_id
+                }
                 compact={compact}
                 rawMode={rawMode}
                 onAxeHover={handleAxeHover}
+                onBenchHover={handleBenchHover}
                 onTap={handleSessionTap}
                 onDragToBottom={onDragToBottom}
               />
@@ -1109,6 +1255,49 @@ export function OverviewField({
         observer={observer}
         onClose={() => setShowThoughtConfig(false)}
       />
+
+      <BenchModal
+        open={showBenchModal}
+        sessions={sessions}
+        benchedIds={benchedIds}
+        onClose={() => setShowBenchModal(false)}
+        onTapSession={(sessionId) => {
+          setShowBenchModal(false);
+          onTapSession(sessionId);
+        }}
+        onUnbench={(sessionId) => {
+          onUnbenchSession?.(sessionId);
+        }}
+      />
+
+      {benchArmed && !observer && (
+        <div
+          style={{
+            position: "absolute",
+            top: "10px",
+            left: !observer && onToggleAxe ? "62px" : "12px",
+            padding: "6px 10px",
+            borderRadius: "8px",
+            background: "rgba(22, 22, 22, 0.8)",
+            border: "1px solid rgba(91, 148, 235, 0.7)",
+            color: "#c4daff",
+            fontSize: "12px",
+            fontWeight: 700,
+            letterSpacing: "0.01em",
+            zIndex: 120,
+          }}
+        >
+          {benchTargetSessionId
+            ? (() => {
+                const target = sessions.find(
+                  (s) => s.session_id === benchTargetSessionId,
+                );
+                const name = target ? throngletName(target) : benchTargetSessionId;
+                return `Hide: ${name}`;
+              })()
+            : "Hide mode: tap a thronglet"}
+        </div>
+      )}
 
       {axeArmed && !observer && (
         <div
@@ -1159,6 +1348,29 @@ export function OverviewField({
         <div class="empty-state">
           <p>No sessions yet</p>
           {!observer && <p class="hint">Tap anywhere to spawn one</p>}
+        </div>
+      )}
+
+      {/* All benched empty state */}
+      {sessions.length > 0 &&
+        benchedIds.size > 0 &&
+        sessions.every((s) => benchedIds.has(s.session_id) || s.state === "exited") &&
+        !hatchState &&
+        !menuPos && (
+        <div class="empty-state">
+          <p>All thronglets hidden</p>
+          {!observer && (
+            <p
+              class="hint"
+              style={{ cursor: "pointer", textDecoration: "underline" }}
+              onClick={(e: MouseEvent) => {
+                e.stopPropagation();
+                setShowBenchModal(true);
+              }}
+            >
+              Tap to show hidden ({benchedIds.size})
+            </p>
+          )}
         </div>
       )}
 

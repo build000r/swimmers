@@ -29,6 +29,8 @@ interface ZoneManagerProps {
   preferZone: "main" | "bottom" | null;
   restoreRequest: RestoreLayoutRequest | null;
   observer?: boolean;
+  benchedIds?: Set<string>;
+  onBenchToggle?: (sessionId: string) => void;
   onShowOverview: () => void;
   onStartPolling: () => void;
   onStopPolling: () => void;
@@ -41,6 +43,8 @@ export function ZoneManager({
   preferZone,
   restoreRequest,
   observer = false,
+  benchedIds,
+  onBenchToggle,
   onShowOverview,
   onStartPolling,
   onStopPolling,
@@ -208,36 +212,49 @@ export function ZoneManager({
 
   const closeZone = useCallback(
     (zone: "main" | "bottom") => {
+      // Read refs for fresh state — avoids stale closures when rapidly closing
+      // both panes before React re-renders.
+      const currentMain = mainZoneRef.current;
+      const currentBottom = bottomZoneRef.current;
+
       const closingSessionId =
-        zone === "main" ? mainZone?.sessionId : bottomZone?.sessionId;
+        zone === "main" ? currentMain?.sessionId : currentBottom?.sessionId;
       if (closingSessionId) {
         realtime.unsubscribeSession(closingSessionId);
       }
 
-      if (zone === "main") setMainZone(null);
-      else setBottomZone(null);
+      // Update ref synchronously so the next closeZone call sees fresh state.
+      if (zone === "main") {
+        mainZoneRef.current = null;
+        setMainZone(null);
+      } else {
+        bottomZoneRef.current = null;
+        setBottomZone(null);
+      }
 
       // If no zones remain, go to overview
-      const otherZone = zone === "main" ? bottomZone : mainZone;
+      const otherZone = zone === "main" ? bottomZoneRef.current : mainZoneRef.current;
       if (!otherZone) {
         onShowOverview();
       } else {
         onStartPolling();
       }
     },
-    [mainZone, bottomZone, onShowOverview, onStartPolling],
+    [onShowOverview, onStartPolling],
   );
 
   const closeAllZones = useCallback(() => {
-    if (mainZone?.sessionId) {
-      realtime.unsubscribeSession(mainZone.sessionId);
+    if (mainZoneRef.current?.sessionId) {
+      realtime.unsubscribeSession(mainZoneRef.current.sessionId);
     }
-    if (bottomZone?.sessionId) {
-      realtime.unsubscribeSession(bottomZone.sessionId);
+    if (bottomZoneRef.current?.sessionId) {
+      realtime.unsubscribeSession(bottomZoneRef.current.sessionId);
     }
+    mainZoneRef.current = null;
+    bottomZoneRef.current = null;
     setMainZone(null);
     setBottomZone(null);
-  }, [mainZone, bottomZone]);
+  }, []);
 
   // ---- Handle terminal caching from workspace ----
 
@@ -254,16 +271,20 @@ export function ZoneManager({
     (sessionId: string) => {
       cache.evict(sessionId);
       realtime.unsubscribeSession(sessionId);
-      if (mainZone?.sessionId === sessionId) setMainZone(null);
-      if (bottomZone?.sessionId === sessionId) setBottomZone(null);
-      // Check if any zones remain
-      const mainAfter =
-        mainZone?.sessionId === sessionId ? null : mainZone;
-      const bottomAfter =
-        bottomZone?.sessionId === sessionId ? null : bottomZone;
-      if (!mainAfter && !bottomAfter) onShowOverview();
+
+      // Update refs synchronously to avoid stale closure issues.
+      if (mainZoneRef.current?.sessionId === sessionId) {
+        mainZoneRef.current = null;
+        setMainZone(null);
+      }
+      if (bottomZoneRef.current?.sessionId === sessionId) {
+        bottomZoneRef.current = null;
+        setBottomZone(null);
+      }
+
+      if (!mainZoneRef.current && !bottomZoneRef.current) onShowOverview();
     },
-    [mainZone, bottomZone, cache, onShowOverview],
+    [cache, onShowOverview],
   );
 
   // ---- Divider drag ----
@@ -373,6 +394,8 @@ export function ZoneManager({
             session={mainSession}
             cached={cache.get(mainZone.sessionId)}
             observer={observer}
+            isBenched={benchedIds?.has(mainZone.sessionId) ?? false}
+            onBenchToggle={onBenchToggle}
             onCache={handleCache}
             onSessionExit={handleSessionExit}
             onClose={() => closeZone("main")}
@@ -415,6 +438,8 @@ export function ZoneManager({
             session={bottomSession}
             cached={cache.get(bottomZone.sessionId)}
             observer={observer}
+            isBenched={benchedIds?.has(bottomZone.sessionId) ?? false}
+            onBenchToggle={onBenchToggle}
             onCache={handleCache}
             onSessionExit={handleSessionExit}
             onClose={() => closeZone("bottom")}
