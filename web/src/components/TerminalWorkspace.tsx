@@ -494,6 +494,17 @@ export function TerminalWorkspace({
         setRecoveryBanner(null);
         setRecoveryRetrying(false);
         markLive();
+
+        // Nudge the PTY size to force tmux to emit a full-screen ANSI
+        // redraw, replacing the plain-text snapshot with properly
+        // formatted output (colors, cursor positioning, TUI layout).
+        const cols = term.cols;
+        const rows = term.rows;
+        realtime.sendResize(session.session_id, cols + 1, rows);
+        setTimeout(() => {
+          if (disposed) return;
+          realtime.sendResize(session.session_id, cols, rows);
+        }, 100);
       } catch {
         if (disposed) return;
         setRecoveryBanner(
