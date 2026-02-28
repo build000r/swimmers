@@ -84,6 +84,13 @@ function svgForState(
   return active; // busy, error, attention
 }
 
+// ---- Tool badge labels ----
+
+const TOOL_BADGE: Record<string, string> = {
+  "Claude Code": "C",
+  Codex: "X",
+};
+
 // ---- Component ----
 
 interface ThrongletSpriteProps {
@@ -118,25 +125,34 @@ export function ThrongletSprite({
     [state, lastActivityAt, spritePack, idleTick],
   );
   const toolName = canonicalToolName(tool);
-  const colors = (toolName && TOOL_COLORS[toolName]) ?? DEFAULT_COLORS;
+
+  // When a sprite pack is present, let its baked-in brand colors show through.
+  // Only apply tool color CSS vars for default (non-branded) sprites.
+  const hasBrandSprites = !!spritePack;
+  const colors = hasBrandSprites
+    ? null
+    : (toolName && TOOL_COLORS[toolName]) ?? DEFAULT_COLORS;
 
   const style = useMemo(
     () => ({
-      ...colors,
+      ...(colors ?? {}),
       display: "inline-block",
       width: "100%",
       height: "100%",
+      position: "relative" as const,
     }),
     [colors],
   );
 
   const htmlObj = useMemo(() => ({ __html: svg }), [svg]);
+  const badgeLabel = hasBrandSprites && toolName ? TOOL_BADGE[toolName] : null;
 
   return (
-    <div
-      class={className}
-      style={style}
-      dangerouslySetInnerHTML={htmlObj}
-    />
+    <div class={className} style={style}>
+      <div dangerouslySetInnerHTML={htmlObj} style={{ width: "100%", height: "100%" }} />
+      {badgeLabel && (
+        <span class="thronglet-tool-badge" data-tool={toolName}>{badgeLabel}</span>
+      )}
+    </div>
   );
 }
