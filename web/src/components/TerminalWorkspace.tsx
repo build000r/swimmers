@@ -9,6 +9,24 @@ import type { TerminalOutputFrame } from "@/services/realtime";
 import type { CachedTerminal } from "@/hooks/useTerminalCache";
 import { fetchSnapshot, listSkills } from "@/services/api";
 import { copyTextToClipboard, readTextFromClipboard } from "@/lib/clipboard";
+import {
+  encodeTerminalInputChunk,
+  type TerminalInputEncodingState,
+} from "@/lib/terminal-input";
+import {
+  beginTouchScroll,
+  createTouchScrollState,
+  endTouchScroll,
+  nextTouchScrollTop,
+  type TouchScrollState,
+} from "@/lib/touch-scroll";
+import {
+  computeFastScrollThumbHeight,
+  computeFastScrollThumbTop,
+  computeScrollTopFromThumbOffset,
+  hasFastScrollOverflow,
+  isNearScrollBottom,
+} from "@/lib/fast-scroll";
 import { ThrongletSprite } from "./ThrongletSprite";
 
 function warn_silence_recovery(sessionId: string): void {
@@ -79,9 +97,12 @@ const SKILL_AUTO_RETRY_DELAYS_MS = [1500, 4000, 8000] as const;
 const SKILL_LONG_PRESS_MS = 260;
 const SKILL_LONG_PRESS_CANCEL_DISTANCE_PX = 14;
 const SKILL_CLICK_SUPPRESS_MS = 450;
-const LONG_PRESS_DELAY_MS = 450;
-const LONG_PRESS_CANCEL_DISTANCE_PX = 16;
+const LONG_PRESS_DELAY_MS = 650;
+const LONG_PRESS_CANCEL_DISTANCE_PX = 8;
 const ACTION_TOAST_MS = 1200;
+const FAST_SCROLL_HIDE_MS = 1200;
+const FAST_SCROLL_MIN_THUMB_PX = 26;
+const FAST_SCROLL_BOOST_THRESHOLD = 1.15;
 
 const MOBILE_KEYS: MobileKeyConfig[] = [
   { id: "tab", label: "Tab", input: "\t" },
@@ -241,6 +262,22 @@ export function TerminalWorkspace({
   const recoverFromSnapshotRef = useRef<(() => Promise<void>) | null>(null);
   const sessionStateRef = useRef(session.state);
   const silenceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const inputEncodingStateRef = useRef<TerminalInputEncodingState>({
+    pendingHighSurrogate: "",
+  });
+  const touchScrollStateRef = useRef<TouchScrollState>(createTouchScrollState());
+  const viewportRef = useRef<HTMLElement | null>(null);
+  const fastScrollHideTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const fastScrollRafRef = useRef<number | null>(null);
+  const fastScrollShowPendingRef = useRef(false);
+  const fastScrollVelocityRef = useRef(0);
+  const fastScrollLastSampleRef = useRef<{ top: number; at: number } | null>(null);
+  const fastScrollDragRef = useRef<{
+    pointerId: number;
+    startY: number;
+    startThumbTop: number;
+  } | null>(null);
+  const fastScrollDragCleanupRef = useRef<(() => void) | null>(null);
 
   const [title, setTitle] = useState(`tmux a -t ${session.tmux_name}`);
   const [titleCopied, setTitleCopied] = useState(false);
@@ -260,6 +297,13 @@ export function TerminalWorkspace({
   const [findNoMatch, setFindNoMatch] = useState(false);
   const [actionToast, setActionToast] = useState<string | null>(null);
   const [mobileKeybarBottom, setMobileKeybarBottom] = useState(0);
+  const [fastScrollOverflow, setFastScrollOverflow] = useState(false);
+  const [fastScrollVisible, setFastScrollVisible] = useState(false);
+  const [fastScrollDragging, setFastScrollDragging] = useState(false);
+  const [fastScrollBoosted, setFastScrollBoosted] = useState(false);
+  const [fastScrollThumbTop, setFastScrollThumbTop] = useState(0);
+  const [fastScrollThumbHeight, setFastScrollThumbHeight] = useState(0);
+  const [fastScrollAtBottom, setFastScrollAtBottom] = useState(true);
   const [skillChips, setSkillChips] = useState<SkillSummary[]>([]);
   const [skillsLoading, setSkillsLoading] = useState(false);
   const [skillsError, setSkillsError] = useState<string | null>(null);
@@ -289,6 +333,17 @@ export function TerminalWorkspace({
     setShowTerminalActions(false);
     setShowFindBar(false);
     setFindNoMatch(false);
+    inputEncodingStateRef.current.pendingHighSurrogate = "";
+    viewportRef.current = null;
+    setFastScrollOverflow(false);
+    setFastScrollVisible(false);
+    setFastScrollDragging(false);
+    setFastScrollBoosted(false);
+    setFastScrollThumbTop(0);
+    setFastScrollThumbHeight(0);
+    setFastScrollAtBottom(true);
+    fastScrollVelocityRef.current = 0;
+    fastScrollLastSampleRef.current = null;
   }, [session.session_id]);
 
   useEffect(() => {
@@ -326,6 +381,18 @@ export function TerminalWorkspace({
       if (skillLongPressTimerRef.current) {
         clearTimeout(skillLongPressTimerRef.current);
       }
+      if (fastScrollHideTimerRef.current) {
+        clearTimeout(fastScrollHideTimerRef.current);
+      }
+      if (fastScrollRafRef.current !== null) {
+        cancelAnimationFrame(fastScrollRafRef.current);
+      }
+      if (fastScrollDragCleanupRef.current) {
+        fastScrollDragCleanupRef.current();
+        fastScrollDragCleanupRef.current = null;
+      }
+      fastScrollVelocityRef.current = 0;
+      fastScrollLastSampleRef.current = null;
     };
   }, []);
 
@@ -392,6 +459,120 @@ export function TerminalWorkspace({
     }, ACTION_TOAST_MS);
   }, []);
 
+  const noteFastScrollVelocity = useCallback((scrollTop: number) => {
+    const now = performance.now();
+    const prev = fastScrollLastSampleRef.current;
+    if (!prev) {
+      fastScrollVelocityRef.current = 0;
+      fastScrollLastSampleRef.current = { top: scrollTop, at: now };
+      return;
+    }
+
+    const dt = Math.max(1, now - prev.at);
+    const velocity = Math.abs(scrollTop - prev.top) / dt;
+    fastScrollVelocityRef.current = velocity;
+    fastScrollLastSampleRef.current = { top: scrollTop, at: now };
+    const boosted = velocity >= FAST_SCROLL_BOOST_THRESHOLD;
+    setFastScrollBoosted((current) => (current === boosted ? current : boosted));
+  }, []);
+
+  const clearFastScrollHideTimer = useCallback(() => {
+    if (fastScrollHideTimerRef.current) {
+      clearTimeout(fastScrollHideTimerRef.current);
+      fastScrollHideTimerRef.current = null;
+    }
+  }, []);
+
+  const scheduleFastScrollHide = useCallback(() => {
+    if (observer) return;
+    clearFastScrollHideTimer();
+    const velocityBonus = Math.min(
+      1200,
+      Math.round(fastScrollVelocityRef.current * 700),
+    );
+    const hideDelay = FAST_SCROLL_HIDE_MS + velocityBonus;
+    fastScrollHideTimerRef.current = setTimeout(() => {
+      fastScrollHideTimerRef.current = null;
+      if (fastScrollDragRef.current) return;
+      setFastScrollVisible(false);
+      setFastScrollBoosted(false);
+      fastScrollVelocityRef.current = 0;
+    }, hideDelay);
+  }, [observer, clearFastScrollHideTimer]);
+
+  const refreshFastScrollUi = useCallback(
+    (show = false) => {
+      const viewport = viewportRef.current;
+      if (!viewport || observer) {
+        setFastScrollOverflow(false);
+        setFastScrollVisible(false);
+        setFastScrollBoosted(false);
+        setFastScrollAtBottom(true);
+        setFastScrollThumbTop(0);
+        setFastScrollThumbHeight(0);
+        return;
+      }
+
+      const scrollTop = viewport.scrollTop;
+      const scrollHeight = viewport.scrollHeight;
+      const clientHeight = viewport.clientHeight;
+      const overflow = hasFastScrollOverflow(scrollHeight, clientHeight);
+      setFastScrollOverflow(overflow);
+      setFastScrollAtBottom(
+        isNearScrollBottom(scrollTop, scrollHeight, clientHeight),
+      );
+
+      if (!overflow) {
+        setFastScrollVisible(false);
+        setFastScrollBoosted(false);
+        setFastScrollThumbTop(0);
+        setFastScrollThumbHeight(0);
+        return;
+      }
+
+      const trackHeight = Math.max(1, clientHeight);
+      const thumbHeight = computeFastScrollThumbHeight(
+        clientHeight,
+        scrollHeight,
+        trackHeight,
+        FAST_SCROLL_MIN_THUMB_PX,
+      );
+      const thumbTop = computeFastScrollThumbTop(
+        scrollTop,
+        scrollHeight,
+        clientHeight,
+        trackHeight,
+        thumbHeight,
+      );
+      setFastScrollThumbHeight(thumbHeight);
+      setFastScrollThumbTop(thumbTop);
+
+      if (show || fastScrollDragRef.current) {
+        setFastScrollVisible(true);
+        if (!fastScrollDragRef.current) {
+          scheduleFastScrollHide();
+        }
+      }
+    },
+    [observer, scheduleFastScrollHide],
+  );
+
+  const scheduleRefreshFastScrollUi = useCallback(
+    (show = false) => {
+      if (show) {
+        fastScrollShowPendingRef.current = true;
+      }
+      if (fastScrollRafRef.current !== null) return;
+      fastScrollRafRef.current = window.requestAnimationFrame(() => {
+        fastScrollRafRef.current = null;
+        const shouldShow = fastScrollShowPendingRef.current;
+        fastScrollShowPendingRef.current = false;
+        refreshFastScrollUi(show || shouldShow);
+      });
+    },
+    [refreshFastScrollUi],
+  );
+
   const persistCommandChips = useCallback(
     (next: string[]) => {
       const sanitized = sanitizeQuickCommands(next);
@@ -410,7 +591,13 @@ export function TerminalWorkspace({
   const sendInput = useCallback(
     (data: string) => {
       if (observer || !data) return;
-      realtime.sendInput(session.session_id, encoder.encode(data));
+      const encoded = encodeTerminalInputChunk(
+        data,
+        inputEncodingStateRef.current,
+        encoder,
+      );
+      if (!encoded || encoded.length === 0) return;
+      realtime.sendInput(session.session_id, encoded);
       termRef.current?.focus();
     },
     [observer, session.session_id],
@@ -450,6 +637,7 @@ export function TerminalWorkspace({
         }
       }
       pendingFramesRef.current = [];
+      scheduleRefreshFastScrollUi(false);
     };
 
     const SILENCE_TIMEOUT_MS = 5000;
@@ -500,6 +688,7 @@ export function TerminalWorkspace({
         setRecoveryBanner(null);
         setRecoveryRetrying(false);
         markLive();
+        scheduleRefreshFastScrollUi(false);
 
         // Nudge the PTY size to force tmux to emit a full-screen ANSI
         // redraw, replacing the plain-text snapshot with properly
@@ -538,6 +727,7 @@ export function TerminalWorkspace({
       fitAddon.fit();
       term.focus();
       markLive();
+      scheduleRefreshFastScrollUi(false);
     } else {
       hostEl = document.createElement("div");
       hostEl.className = "term-host";
@@ -595,6 +785,7 @@ export function TerminalWorkspace({
           snapshotReadyRef.current = true;
           flushPendingFrames();
           markLive();
+          scheduleRefreshFastScrollUi(false);
 
           // Nudge PTY size to force tmux full-screen ANSI redraw.
           // The plain-text snapshot lacks escape sequences; this
@@ -612,6 +803,7 @@ export function TerminalWorkspace({
           snapshotReadyRef.current = true;
           flushPendingFrames();
           markLive();
+          scheduleRefreshFastScrollUi(false);
         });
 
       focusTimerRef.current = setTimeout(() => {
@@ -634,18 +826,26 @@ export function TerminalWorkspace({
         });
         return false;
       }
+      if (isAccelShortcut(event, "v")) {
+        if (observer) return false;
+        event.preventDefault();
+        void readTextFromClipboard()
+          .then((text) => {
+            if (!text) {
+              pushActionToast("Clipboard is empty");
+              return;
+            }
+            sendInput(text);
+            pushActionToast("Pasted");
+          })
+          .catch(() => {
+            pushActionToast("Clipboard read failed");
+          });
+        return false;
+      }
       return true;
     });
 
-    const scheduleAutoCopySelection = () => {
-      setTimeout(() => {
-        const selected = term.getSelection();
-        if (!selected) return;
-        void copyTextToClipboard(selected);
-      }, 0);
-    };
-    hostEl.addEventListener("mouseup", scheduleAutoCopySelection);
-    hostEl.addEventListener("touchend", scheduleAutoCopySelection);
     const handlePasteEvent = (event: ClipboardEvent) => {
       if (observer) return;
       const text = event.clipboardData?.getData("text");
@@ -655,6 +855,98 @@ export function TerminalWorkspace({
       pushActionToast("Pasted");
     };
     hostEl.addEventListener("paste", handlePasteEvent as EventListener);
+
+    // iOS Safari can fail to propagate natural swipe scrolling into xterm's
+    // internal viewport. Bridge one-finger touch gestures to viewport.scrollTop.
+    const queryViewport = () =>
+      hostEl.querySelector(".xterm-viewport") as HTMLElement | null;
+    let viewportEl: HTMLElement | null = null;
+    let viewportResizeObserver: ResizeObserver | null = null;
+    let viewportAttachRetryTimer: ReturnType<typeof setTimeout> | null = null;
+    const handleViewportScroll = () => {
+      if (viewportRef.current) {
+        noteFastScrollVelocity(viewportRef.current.scrollTop);
+      }
+      scheduleRefreshFastScrollUi(true);
+    };
+    const attachViewport = (): boolean => {
+      const viewport = queryViewport();
+      if (!viewport) return false;
+      viewportEl = viewport;
+      viewportRef.current = viewport;
+      viewport.addEventListener("scroll", handleViewportScroll, { passive: true });
+      viewportResizeObserver = new ResizeObserver(() => {
+        scheduleRefreshFastScrollUi(false);
+      });
+      viewportResizeObserver.observe(viewport);
+      scheduleRefreshFastScrollUi(false);
+      return true;
+    };
+    if (!attachViewport()) {
+      viewportAttachRetryTimer = setTimeout(() => {
+        if (disposed) return;
+        attachViewport();
+      }, 0);
+    }
+
+    let touchViewport: HTMLElement | null = null;
+    const handleTouchScrollStart = (event: TouchEvent) => {
+      if (observer) return;
+      if (event.touches.length !== 1) {
+        endTouchScroll(touchScrollStateRef.current);
+        touchViewport = null;
+        return;
+      }
+      const viewport = queryViewport();
+      if (!viewport) return;
+      const touch = event.touches[0];
+      touchViewport = viewport;
+      beginTouchScroll(
+        touchScrollStateRef.current,
+        touch.clientY,
+        viewport.scrollTop,
+      );
+    };
+    const handleTouchScrollMove = (event: TouchEvent) => {
+      if (observer) return;
+      if (event.touches.length !== 1) return;
+      const viewport = touchViewport ?? queryViewport();
+      if (!viewport) return;
+      const touch = event.touches[0];
+      const next = nextTouchScrollTop(
+        touchScrollStateRef.current,
+        touch.clientY,
+      );
+      if (next === null) return;
+      const before = viewport.scrollTop;
+      viewport.scrollTop = next;
+      if (viewport.scrollTop !== before) {
+        noteFastScrollVelocity(viewport.scrollTop);
+        event.preventDefault();
+        event.stopPropagation();
+        scheduleRefreshFastScrollUi(true);
+      }
+    };
+    const handleTouchScrollEnd = () => {
+      endTouchScroll(touchScrollStateRef.current);
+      touchViewport = null;
+    };
+    if (!observer) {
+      hostEl.addEventListener("touchstart", handleTouchScrollStart, {
+        capture: true,
+        passive: true,
+      });
+      hostEl.addEventListener("touchmove", handleTouchScrollMove, {
+        capture: true,
+        passive: false,
+      });
+      hostEl.addEventListener("touchend", handleTouchScrollEnd, {
+        capture: true,
+      });
+      hostEl.addEventListener("touchcancel", handleTouchScrollEnd, {
+        capture: true,
+      });
+    }
 
     const handleOutput = (frame: TerminalOutputFrame) => {
       if (frame.sessionId !== session.session_id) return;
@@ -667,6 +959,7 @@ export function TerminalWorkspace({
       term.write(frame.data);
       setLifecycleState("live");
       resetSilenceTimer();
+      scheduleRefreshFastScrollUi(false);
     };
 
     const unsubscribeOutput = realtime.subscribeTerminalOutput(handleOutput);
@@ -698,7 +991,7 @@ export function TerminalWorkspace({
     if (!observer) {
       inputDisposable = term.onData((data: string) => {
         if (!data) return;
-        realtime.sendInput(session.session_id, encoder.encode(data));
+        sendInput(data);
       });
     }
 
@@ -713,6 +1006,7 @@ export function TerminalWorkspace({
       if (resizeTimerRef.current) clearTimeout(resizeTimerRef.current);
       resizeTimerRef.current = setTimeout(() => {
         if (fitAddonRef.current) fitAddonRef.current.fit();
+        scheduleRefreshFastScrollUi(false);
       }, 100);
     };
     window.addEventListener("resize", handleWindowResize);
@@ -743,9 +1037,28 @@ export function TerminalWorkspace({
         focusTimerRef.current = null;
       }
       realtime.unsubscribeSession(session.session_id);
-      hostEl.removeEventListener("mouseup", scheduleAutoCopySelection);
-      hostEl.removeEventListener("touchend", scheduleAutoCopySelection);
       hostEl.removeEventListener("paste", handlePasteEvent as EventListener);
+      if (viewportAttachRetryTimer) {
+        clearTimeout(viewportAttachRetryTimer);
+        viewportAttachRetryTimer = null;
+      }
+      if (viewportEl) {
+        viewportEl.removeEventListener("scroll", handleViewportScroll);
+      }
+      if (viewportResizeObserver) {
+        viewportResizeObserver.disconnect();
+      }
+      viewportRef.current = null;
+      setFastScrollDragging(false);
+      setFastScrollBoosted(false);
+      fastScrollVelocityRef.current = 0;
+      fastScrollLastSampleRef.current = null;
+      if (!observer) {
+        hostEl.removeEventListener("touchstart", handleTouchScrollStart, true);
+        hostEl.removeEventListener("touchmove", handleTouchScrollMove, true);
+        hostEl.removeEventListener("touchend", handleTouchScrollEnd, true);
+        hostEl.removeEventListener("touchcancel", handleTouchScrollEnd, true);
+      }
 
       if (hostEl.parentNode) hostEl.parentNode.removeChild(hostEl);
       onCache({
@@ -762,15 +1075,16 @@ export function TerminalWorkspace({
     const container = containerRef.current;
     if (!container || !fitAddonRef.current) return;
 
-    const observer = new ResizeObserver(() => {
+    const resizeObserver = new ResizeObserver(() => {
       if (resizeTimerRef.current) clearTimeout(resizeTimerRef.current);
       resizeTimerRef.current = setTimeout(() => {
         if (fitAddonRef.current) fitAddonRef.current.fit();
+        scheduleRefreshFastScrollUi(false);
       }, 100);
     });
-    observer.observe(container);
-    return () => observer.disconnect();
-  }, []);
+    resizeObserver.observe(container);
+    return () => resizeObserver.disconnect();
+  }, [scheduleRefreshFastScrollUi]);
 
   useEffect(() => {
     if (!showFindBar) return;
@@ -947,18 +1261,22 @@ export function TerminalWorkspace({
     [observer, sendInput],
   );
 
-  const handleTerminalTouchStart = useCallback((e: TouchEvent) => {
-    if (e.touches.length !== 1) return;
-    const touch = e.touches[0];
-    longPressStartRef.current = { x: touch.clientX, y: touch.clientY };
-    if (longPressTimerRef.current) {
-      clearTimeout(longPressTimerRef.current);
-    }
-    longPressTimerRef.current = setTimeout(() => {
-      longPressTimerRef.current = null;
-      setShowTerminalActions(true);
-    }, LONG_PRESS_DELAY_MS);
-  }, []);
+  const handleTerminalTouchStart = useCallback(
+    (e: TouchEvent) => {
+      if (!observer) return;
+      if (e.touches.length !== 1) return;
+      const touch = e.touches[0];
+      longPressStartRef.current = { x: touch.clientX, y: touch.clientY };
+      if (longPressTimerRef.current) {
+        clearTimeout(longPressTimerRef.current);
+      }
+      longPressTimerRef.current = setTimeout(() => {
+        longPressTimerRef.current = null;
+        setShowTerminalActions(true);
+      }, LONG_PRESS_DELAY_MS);
+    },
+    [observer],
+  );
 
   const handleTerminalTouchMove = useCallback(
     (e: TouchEvent) => {
@@ -1042,6 +1360,92 @@ export function TerminalWorkspace({
     pushActionToast("Sent Ctrl+L");
   }, [observer, sendInput, pushActionToast]);
 
+  const handleJumpToLive = useCallback(() => {
+    if (observer) return;
+    const viewport = viewportRef.current;
+    if (!viewport) return;
+    viewport.scrollTop = viewport.scrollHeight;
+    noteFastScrollVelocity(viewport.scrollTop);
+    scheduleRefreshFastScrollUi(true);
+    termRef.current?.focus();
+  }, [observer, noteFastScrollVelocity, scheduleRefreshFastScrollUi]);
+
+  const handleFastScrollThumbPointerDown = useCallback(
+    (e: PointerEvent) => {
+      if (observer || !fastScrollOverflow) return;
+      const viewport = viewportRef.current;
+      if (!viewport) return;
+      e.preventDefault();
+      e.stopPropagation();
+
+      if (fastScrollDragCleanupRef.current) {
+        fastScrollDragCleanupRef.current();
+        fastScrollDragCleanupRef.current = null;
+      }
+
+      clearFastScrollHideTimer();
+      setFastScrollVisible(true);
+      setFastScrollDragging(true);
+      fastScrollDragRef.current = {
+        pointerId: e.pointerId,
+        startY: e.clientY,
+        startThumbTop: fastScrollThumbTop,
+      };
+
+      const handlePointerMove = (ev: globalThis.PointerEvent) => {
+        const drag = fastScrollDragRef.current;
+        const activeViewport = viewportRef.current;
+        if (!drag || ev.pointerId !== drag.pointerId || !activeViewport) return;
+        ev.preventDefault();
+        const trackHeight = Math.max(1, activeViewport.clientHeight);
+        const scrollTop = computeScrollTopFromThumbOffset(
+          drag.startThumbTop + (ev.clientY - drag.startY),
+          activeViewport.scrollHeight,
+          activeViewport.clientHeight,
+          trackHeight,
+          fastScrollThumbHeight,
+        );
+        activeViewport.scrollTop = scrollTop;
+        noteFastScrollVelocity(activeViewport.scrollTop);
+        scheduleRefreshFastScrollUi(true);
+      };
+
+      const finish = (ev: globalThis.PointerEvent) => {
+        const drag = fastScrollDragRef.current;
+        if (!drag || ev.pointerId !== drag.pointerId) return;
+        if (fastScrollDragCleanupRef.current) {
+          fastScrollDragCleanupRef.current();
+          fastScrollDragCleanupRef.current = null;
+        }
+        fastScrollDragRef.current = null;
+        setFastScrollDragging(false);
+        scheduleRefreshFastScrollUi(true);
+        scheduleFastScrollHide();
+      };
+
+      window.addEventListener("pointermove", handlePointerMove, {
+        passive: false,
+      });
+      window.addEventListener("pointerup", finish);
+      window.addEventListener("pointercancel", finish);
+      fastScrollDragCleanupRef.current = () => {
+        window.removeEventListener("pointermove", handlePointerMove);
+        window.removeEventListener("pointerup", finish);
+        window.removeEventListener("pointercancel", finish);
+      };
+    },
+    [
+      observer,
+      fastScrollOverflow,
+      clearFastScrollHideTimer,
+      fastScrollThumbTop,
+      fastScrollThumbHeight,
+      noteFastScrollVelocity,
+      scheduleFastScrollHide,
+      scheduleRefreshFastScrollUi,
+    ],
+  );
+
   const runFind = useCallback(
     (direction: "next" | "previous") => {
       const query = findQuery.trim();
@@ -1083,6 +1487,13 @@ export function TerminalWorkspace({
         ? "snapshot/replay"
         : "live";
   const skillPrefix = skillInvocationPrefix(sessionToolKind);
+  const showFastScroll =
+    !observer && fastScrollOverflow && (fastScrollVisible || fastScrollDragging);
+  const showJumpToLive = !observer && fastScrollOverflow && !fastScrollAtBottom;
+  const isMobileViewport =
+    typeof window !== "undefined" && window.innerWidth <= 768;
+  const liveButtonBottom =
+    observer || !isMobileViewport ? 12 : 64 + mobileKeybarBottom;
 
   return (
     <div
@@ -1293,15 +1704,47 @@ export function TerminalWorkspace({
           ref={containerRef}
           class="zone-terminal"
           style={{ flex: 1, minHeight: 0 }}
-          onTouchStart={handleTerminalTouchStart}
-          onTouchMove={handleTerminalTouchMove}
-          onTouchEnd={handleTerminalTouchEnd}
-          onTouchCancel={handleTerminalTouchEnd}
+          onTouchStart={observer ? handleTerminalTouchStart : undefined}
+          onTouchMove={observer ? handleTerminalTouchMove : undefined}
+          onTouchEnd={observer ? handleTerminalTouchEnd : undefined}
+          onTouchCancel={observer ? handleTerminalTouchEnd : undefined}
           onContextMenu={(e: Event) => {
             e.preventDefault();
             setShowTerminalActions(true);
           }}
         />
+
+        {showFastScroll && (
+          <div
+            class={`terminal-fast-scroll ${fastScrollDragging ? "dragging" : ""} ${fastScrollBoosted ? "boosted" : ""}`}
+          >
+            <div class="terminal-fast-scroll-track">
+              <button
+                type="button"
+                class="terminal-fast-scroll-thumb"
+                style={{
+                  height: `${fastScrollThumbHeight}px`,
+                  transform: `translate(-50%, ${fastScrollThumbTop}px)`,
+                }}
+                onPointerDown={handleFastScrollThumbPointerDown}
+                aria-label="Fast scroll terminal history"
+              >
+                <span class="terminal-fast-scroll-grip" />
+              </button>
+            </div>
+          </div>
+        )}
+
+        {showJumpToLive && (
+          <button
+            type="button"
+            class="terminal-live-btn"
+            style={{ bottom: `${liveButtonBottom}px` }}
+            onClick={handleJumpToLive}
+          >
+            Live
+          </button>
+        )}
 
         {actionToast && <div class="terminal-action-toast">{actionToast}</div>}
 

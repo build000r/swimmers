@@ -199,7 +199,8 @@ html, body {
   padding: 5px;
   padding-bottom: max(5px, var(--safe-bottom));
   overflow: hidden;
-  touch-action: pan-y;
+  touch-action: auto;
+  overscroll-behavior: contain;
 }
 
 .zone-terminal .xterm {
@@ -208,8 +209,9 @@ html, body {
 
 .zone-terminal .xterm-viewport {
   overflow-y: auto;
-  overscroll-behavior: contain;
+  overscroll-behavior-y: contain;
   -webkit-overflow-scrolling: touch;
+  touch-action: pan-y;
 }
 
 .zone-terminal-stage {
@@ -401,6 +403,89 @@ html, body {
   border-radius: 999px;
   padding: 6px 10px;
   pointer-events: none;
+}
+
+.terminal-fast-scroll {
+  position: absolute;
+  top: 8px;
+  right: 6px;
+  bottom: 8px;
+  width: 28px;
+  z-index: 24;
+  display: flex;
+  align-items: stretch;
+  justify-content: center;
+  pointer-events: none;
+}
+
+.terminal-fast-scroll-track {
+  width: 8px;
+  height: 100%;
+  border-radius: 999px;
+  background: rgba(147, 164, 187, 0.2);
+  position: relative;
+  box-shadow: inset 0 0 0 1px rgba(52, 74, 109, 0.25);
+}
+
+.terminal-fast-scroll-thumb {
+  position: absolute;
+  left: 50%;
+  top: 0;
+  width: 26px;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  box-shadow: none;
+  cursor: ns-resize;
+  pointer-events: auto;
+  touch-action: none;
+  display: flex;
+  justify-content: center;
+  align-items: stretch;
+  padding: 0;
+}
+
+.terminal-fast-scroll-grip {
+  width: 8px;
+  height: 100%;
+  border-radius: 999px;
+  background: rgba(91, 192, 235, 0.88);
+  box-shadow: 0 0 0 1px rgba(18, 33, 62, 0.7);
+}
+
+.terminal-fast-scroll.dragging .terminal-fast-scroll-track {
+  background: rgba(147, 164, 187, 0.28);
+}
+
+.terminal-fast-scroll.dragging .terminal-fast-scroll-grip {
+  background: #5BC0EB;
+}
+
+.terminal-fast-scroll.boosted .terminal-fast-scroll-track {
+  background: rgba(147, 164, 187, 0.34);
+}
+
+.terminal-fast-scroll.boosted .terminal-fast-scroll-grip {
+  background: #79d2f3;
+}
+
+.terminal-live-btn {
+  position: absolute;
+  right: 26px;
+  z-index: 24;
+  border: 1px solid rgba(91, 192, 235, 0.68);
+  background: rgba(12, 28, 52, 0.92);
+  color: #d6f1ff;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 700;
+  padding: 6px 10px;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.terminal-live-btn:active {
+  opacity: 0.75;
 }
 
 .axe-toast {
@@ -610,6 +695,19 @@ html, body {
 
   .terminal-actions-sheet {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .terminal-fast-scroll {
+    right: 4px;
+    width: 32px;
+  }
+
+  .terminal-fast-scroll-thumb {
+    width: 30px;
+  }
+
+  .terminal-fast-scroll-grip {
+    width: 10px;
   }
 }
 
