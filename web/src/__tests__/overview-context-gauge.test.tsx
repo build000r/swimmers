@@ -110,4 +110,27 @@ describe("OverviewField context battery", () => {
     expect(container.querySelector(".context-gauge")).toBeNull();
     expect(container.querySelector(".context-gauge-percent")).toBeNull();
   });
+
+  it("renders last invoked skill pill above the gauge when present", () => {
+    const session = makeSession({
+      session_id: "sess-001",
+      last_skill: "describe",
+      token_count: 50_000,
+      context_limit: 200_000,
+    });
+
+    const { container } = render(
+      <OverviewField
+        sessions={[session]}
+        onTapSession={noop}
+        onDragToBottom={noop}
+        onCreateSession={noopCreate}
+      />,
+    );
+
+    const pill = container.querySelector(".thronglet .thronglet-skill-pill");
+    expect(pill).toBeInTheDocument();
+    expect(pill?.textContent).toContain("skill: describe");
+    expect(container.querySelector(".thronglet .context-gauge")).toBeInTheDocument();
+  });
 });

@@ -44,6 +44,7 @@ pub enum LifecycleEvent {
         session_id: String,
         summary: SessionSummary,
         reason: String,
+        sprite_pack: Option<SpritePack>,
     },
     Deleted {
         session_id: String,
@@ -122,7 +123,7 @@ impl SessionSupervisor {
             let mut stale = Vec::new();
             for ps in &persisted {
                 let thought_data = thoughts.get(&ps.session_id);
-                let summary = SessionSummary {
+                let mut summary = SessionSummary {
                     session_id: ps.session_id.clone(),
                     tmux_name: ps.tmux_name.clone(),
                     state: crate::types::SessionState::Exited,
@@ -147,12 +148,18 @@ impl SessionSupervisor {
                     thought_updated_at: thought_data
                         .map(|t| t.updated_at)
                         .or(ps.thought_updated_at),
+                    last_skill: ps.last_skill.clone(),
                     is_stale: true,
                     attached_clients: 0,
                     transport_health: crate::types::TransportHealth::Disconnected,
                     last_activity_at: ps.last_activity_at,
                     sprite_pack_id: None,
                 };
+                if !summary.cwd.is_empty() {
+                    if let Some((pack_id, _)) = discover_sprite_pack(&summary.cwd).await {
+                        summary.sprite_pack_id = Some(pack_id);
+                    }
+                }
                 stale.push(summary);
             }
             info!(count = stale.len(), "loaded persisted stale sessions");
@@ -244,6 +251,7 @@ impl SessionSupervisor {
                                 session_id,
                                 summary,
                                 reason: "startup_discovery".into(),
+                                sprite_pack: None,
                             });
                         }
                         Err(e) => {
@@ -341,7 +349,7 @@ impl SessionSupervisor {
         name: Option<String>,
         cwd: Option<String>,
         spawn_tool: Option<crate::types::SpawnTool>,
-    ) -> anyhow::Result<SessionSummary> {
+    ) -> anyhow::Result<(SessionSummary, Option<SpritePack>)> {
         let start_cwd = cwd.or_else(current_working_dir);
         let requested_name = name.and_then(|n| {
             let trimmed = n.trim();
@@ -394,6 +402,17 @@ impl SessionSupervisor {
             summary.context_limit = crate::types::context_limit_for_tool(Some(display));
         }
 
+        let sprite_pack = if !summary.cwd.is_empty() {
+            if let Some((pack_id, pack)) = discover_sprite_pack(&summary.cwd).await {
+                summary.sprite_pack_id = Some(pack_id);
+                Some(pack)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
         if let Some(tool) = spawn_tool {
             if let Err(e) = send_spawn_tool_command(&tmux_name, tool).await {
                 warn!(
@@ -425,12 +444,13 @@ impl SessionSupervisor {
             session_id: session_id.clone(),
             summary: summary.clone(),
             reason: "api_create".into(),
+            sprite_pack: sprite_pack.clone(),
         });
 
         // Persist the updated registry.
         self.persist_registry().await;
 
-        Ok(summary)
+        Ok((summary, sprite_pack))
     }
 
     /// Shut down a session actor and remove it from the registry.
@@ -734,6 +754,7 @@ impl SessionSupervisor {
                 thought_state: s.thought_state,
                 thought_source: s.thought_source,
                 thought_updated_at: s.thought_updated_at,
+                last_skill: s.last_skill.clone(),
                 objective_fingerprint: thought_snapshots
                     .get(&s.session_id)
                     .and_then(|t| t.objective_fingerprint.clone()),
@@ -961,6 +982,7 @@ impl SessionSupervisor {
             thought_state: ThoughtState::Holding,
             thought_source: ThoughtSource::CarryForward,
             thought_updated_at: None,
+            last_skill: None,
             is_stale: false,
             attached_clients: 0,
             transport_health: crate::types::TransportHealth::Healthy,

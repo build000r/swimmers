@@ -38,6 +38,7 @@ export interface SessionSummary {
   thought_state: ThoughtState;
   thought_source: ThoughtSource;
   thought_updated_at: string | null;
+  last_skill: string | null;
   is_stale: boolean;
   attached_clients: number;
   transport_health: TransportHealth;
@@ -102,6 +103,7 @@ export interface SessionListResponse {
 
 export interface CreateSessionResponse {
   session: SessionSummary;
+  sprite_pack?: SpritePack;
 }
 
 export interface ErrorResponse {
@@ -168,9 +170,15 @@ export interface ThoughtUpdatePayload {
   at: string;
 }
 
+export interface SessionSkillPayload {
+  last_skill: string | null;
+  at: string;
+}
+
 export interface SessionCreatedPayload {
   reason: string; // "startup_discovery" | "api_create"
   session: SessionSummary;
+  sprite_pack?: SpritePack;
 }
 
 export interface SessionDeletedPayload {

@@ -14,6 +14,7 @@ export function makeSession(overrides: Partial<SessionSummary> = {}): SessionSum
     thought_state: "holding",
     thought_source: "carry_forward",
     thought_updated_at: null,
+    last_skill: null,
     is_stale: false,
     attached_clients: 1,
     transport_health: "healthy",

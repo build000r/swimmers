@@ -404,6 +404,14 @@ function ThrongletEntity({
 
       {/* Label */}
       <div class="thronglet-label">
+        {session.last_skill && (
+          <div
+            class="thronglet-skill-pill"
+            title={`Last skill: ${session.last_skill}`}
+          >
+            skill: {session.last_skill}
+          </div>
+        )}
         {showGauge && (
           <>
             <div class={`context-gauge${gaugeRatio >= 0.8 ? " critical" : ""}`}>

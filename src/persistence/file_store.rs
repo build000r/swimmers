@@ -37,6 +37,8 @@ pub struct PersistedSession {
     #[serde(default)]
     pub thought_updated_at: Option<DateTime<Utc>>,
     #[serde(default)]
+    pub last_skill: Option<String>,
+    #[serde(default)]
     pub objective_fingerprint: Option<String>,
     pub cwd: String,
     pub last_activity_at: DateTime<Utc>,

@@ -44,7 +44,8 @@ export function scopeInlineSpriteCss(svg: string, scopeId: string): string {
   return withScopeAttr.replace(/<style>([\s\S]*?)<\/style>/i, (_match, css) => {
     const scopedCss = css.replace(
       /(^|})\s*\.([A-Za-z_][\w-]*)\s*\{/g,
-      (_rule, prefix, className) => `${prefix} ${scopeSelector} .${className} {`,
+      (_rule: string, prefix: string, className: string) =>
+        `${prefix} ${scopeSelector} .${className} {`,
     );
     return `<style>${scopedCss}</style>`;
   });

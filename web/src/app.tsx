@@ -9,6 +9,7 @@ import type {
 } from "@/types";
 import type {
   SessionStatePayload,
+  SessionSkillPayload,
   ThoughtUpdatePayload,
   SessionCreatedPayload,
   SessionDeletedPayload,
@@ -196,6 +197,7 @@ export function mergePollSessions(
         old.thought_state === s.thought_state &&
         old.thought_source === s.thought_source &&
         old.thought_updated_at === s.thought_updated_at &&
+        old.last_skill === s.last_skill &&
         old.token_count === s.token_count &&
         old.context_limit === s.context_limit &&
         old.last_activity_at === s.last_activity_at
@@ -218,6 +220,7 @@ export function mergePollSessions(
       old.thought_state === s.thought_state &&
       old.thought_source === s.thought_source &&
       old.thought_updated_at === s.thought_updated_at &&
+      old.last_skill === s.last_skill &&
       old.token_count === s.token_count &&
       old.context_limit === s.context_limit &&
       old.last_activity_at === s.last_activity_at
@@ -235,6 +238,7 @@ export function mergePollSessions(
       thought_state: s.thought_state,
       thought_source: s.thought_source,
       thought_updated_at: s.thought_updated_at,
+      last_skill: s.last_skill,
     };
   });
 
@@ -573,6 +577,17 @@ export function App() {
           const cwd = extractCwdFromSessionTitle(title, s.cwd);
           return cwd === s.cwd ? s : { ...s, cwd };
         });
+      },
+
+      onSessionSkill(sessionId: string, payload: SessionSkillPayload) {
+        updateSession(sessionId, (s) =>
+          s.last_skill === payload.last_skill
+            ? s
+            : {
+                ...s,
+                last_skill: payload.last_skill,
+              },
+        );
       },
 
       onThoughtUpdate(sessionId: string, payload: ThoughtUpdatePayload) {

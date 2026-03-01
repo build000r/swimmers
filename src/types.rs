@@ -149,6 +149,8 @@ pub struct SessionSummary {
     pub thought_source: ThoughtSource,
     #[serde(default)]
     pub thought_updated_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub last_skill: Option<String>,
     pub is_stale: bool,
     pub attached_clients: u32,
     pub transport_health: TransportHealth,
@@ -244,6 +246,8 @@ pub struct SkillListResponse {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateSessionResponse {
     pub session: SessionSummary,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sprite_pack: Option<SpritePack>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -303,6 +307,13 @@ pub struct ThoughtUpdatePayload {
     pub at: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionSkillPayload {
+    #[serde(default)]
+    pub last_skill: Option<String>,
+    pub at: DateTime<Utc>,
+}
+
 fn default_thought_state() -> ThoughtState {
     ThoughtState::Holding
 }
@@ -319,6 +330,8 @@ fn default_bubble_precedence() -> BubblePrecedence {
 pub struct SessionCreatedPayload {
     pub reason: String, // "startup_discovery" | "api_create"
     pub session: SessionSummary,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sprite_pack: Option<SpritePack>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -454,7 +467,7 @@ pub fn detect_tool_name(comm: &str) -> Option<&'static str> {
 
 #[cfg(test)]
 mod tests {
-    use super::{context_limit_for_tool, detect_tool_name, SpawnTool};
+    use super::*;
 
     #[test]
     fn detect_tool_name_normalizes_aliases_and_paths() {
@@ -485,5 +498,99 @@ mod tests {
     fn spawn_tool_commands_match_cli_entrypoints() {
         assert_eq!(SpawnTool::Claude.command(), "claude");
         assert_eq!(SpawnTool::Codex.command(), "codex");
+    }
+
+    #[test]
+    fn create_session_response_serializes_sprite_pack() {
+        let pack = SpritePack {
+            active: "<svg id='a'/>".into(),
+            drowsy: "<svg id='d'/>".into(),
+            sleeping: "<svg id='s'/>".into(),
+            deep_sleep: "<svg id='ds'/>".into(),
+        };
+        let resp = CreateSessionResponse {
+            session: SessionSummary {
+                session_id: "s1".into(),
+                tmux_name: "1".into(),
+                state: SessionState::Idle,
+                current_command: None,
+                cwd: "/tmp/proj".into(),
+                tool: None,
+                token_count: 0,
+                context_limit: 200_000,
+                thought: None,
+                thought_state: ThoughtState::Holding,
+                thought_source: ThoughtSource::CarryForward,
+                thought_updated_at: None,
+                last_skill: None,
+                is_stale: false,
+                attached_clients: 0,
+                transport_health: TransportHealth::Healthy,
+                last_activity_at: chrono::Utc::now(),
+                sprite_pack_id: Some("/tmp/proj".into()),
+            },
+            sprite_pack: Some(pack),
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        assert!(
+            json.contains("sprite_pack"),
+            "sprite_pack must be present in JSON"
+        );
+        assert!(
+            json.contains("<svg id='a'/>"),
+            "pack SVG content must serialize"
+        );
+
+        // When sprite_pack is None, the field should be omitted entirely.
+        let resp_none = CreateSessionResponse {
+            session: resp.session.clone(),
+            sprite_pack: None,
+        };
+        let json_none = serde_json::to_string(&resp_none).unwrap();
+        assert!(
+            !json_none.contains("\"sprite_pack\""),
+            "null sprite_pack must be omitted"
+        );
+    }
+
+    #[test]
+    fn session_created_payload_serializes_sprite_pack() {
+        let pack = SpritePack {
+            active: "<svg/>".into(),
+            drowsy: "<svg/>".into(),
+            sleeping: "<svg/>".into(),
+            deep_sleep: "<svg/>".into(),
+        };
+        let payload = SessionCreatedPayload {
+            reason: "api_create".into(),
+            session: SessionSummary {
+                session_id: "s1".into(),
+                tmux_name: "1".into(),
+                state: SessionState::Idle,
+                current_command: None,
+                cwd: "/tmp".into(),
+                tool: None,
+                token_count: 0,
+                context_limit: 200_000,
+                thought: None,
+                thought_state: ThoughtState::Holding,
+                thought_source: ThoughtSource::CarryForward,
+                thought_updated_at: None,
+                last_skill: None,
+                is_stale: false,
+                attached_clients: 0,
+                transport_health: TransportHealth::Healthy,
+                last_activity_at: chrono::Utc::now(),
+                sprite_pack_id: Some("/tmp".into()),
+            },
+            sprite_pack: Some(pack),
+        };
+        let json = serde_json::to_string(&payload).unwrap();
+        assert!(json.contains("\"sprite_pack\""));
+
+        // Deserialize roundtrip
+        let parsed: SessionCreatedPayload = serde_json::from_str(&json).unwrap();
+        assert!(parsed.sprite_pack.is_some());
+        assert_eq!(parsed.sprite_pack.unwrap().active, "<svg/>");
     }
 }

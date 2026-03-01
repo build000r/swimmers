@@ -1,6 +1,7 @@
 import type {
   ControlEvent,
   SessionStatePayload,
+  SessionSkillPayload,
   ThoughtUpdatePayload,
   SessionCreatedPayload,
   SessionDeletedPayload,
@@ -32,6 +33,7 @@ export interface TerminalOutputFrame {
 export interface RealtimeCallbacks {
   onSessionState?: (sessionId: string, payload: SessionStatePayload) => void;
   onSessionTitle?: (sessionId: string, title: string) => void;
+  onSessionSkill?: (sessionId: string, payload: SessionSkillPayload) => void;
   onThoughtUpdate?: (sessionId: string, payload: ThoughtUpdatePayload) => void;
   onSessionCreated?: (payload: SessionCreatedPayload) => void;
   onSessionDeleted?: (
@@ -351,6 +353,12 @@ export class RealtimeService {
         this.callbacks.onSessionTitle?.(
           session_id,
           (payload as { title: string }).title,
+        );
+        break;
+      case "session_skill":
+        this.callbacks.onSessionSkill?.(
+          session_id,
+          payload as SessionSkillPayload,
         );
         break;
       case "thought_update":

@@ -1,10 +1,11 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::Write as _;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use chrono::Utc;
 use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
+use regex::Regex;
 use tokio::process::Command;
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tracing::{debug, error, info, warn};
@@ -14,8 +15,8 @@ use crate::scroll::guard::ScrollGuard;
 use crate::session::replay_ring::ReplayRing;
 use crate::state::detector::StateDetector;
 use crate::types::{
-    ControlEvent, SessionState, SessionStatePayload, SessionSummary, SessionTitlePayload,
-    TerminalSnapshot, TransportHealth,
+    ControlEvent, SessionSkillPayload, SessionState, SessionStatePayload, SessionSummary,
+    SessionTitlePayload, TerminalSnapshot, TransportHealth,
 };
 
 const CWD_REFRESH_MIN_INTERVAL: Duration = Duration::from_millis(750);
@@ -171,6 +172,12 @@ pub struct SessionActor {
     // Detected coding tool name
     tool: Option<String>,
 
+    // Most recent detected skill invocation (e.g. "$describe").
+    last_skill: Option<String>,
+
+    // Buffered input line used for skill invocation detection.
+    input_line_buffer: String,
+
     // Timestamp of most recent terminal output observed by this actor.
     last_activity_at: chrono::DateTime<Utc>,
 
@@ -288,6 +295,8 @@ impl SessionActor {
             last_cwd_refresh_at: Instant::now(),
             last_tool_refresh_at: Instant::now(),
             tool: initial_tool,
+            last_skill: None,
+            input_line_buffer: String::new(),
             last_activity_at: Utc::now(),
             clear_replay_on_first_idle: !attach,
         };
@@ -369,6 +378,7 @@ impl SessionActor {
                                 let state_before = self.state_detector.state();
                                 self.state_detector.note_input();
                                 let _ = self.maybe_emit_state_change(state_before);
+                                self.update_last_skill_from_input(&data);
                                 if let Err(e) = self.writer.write_all(&data) {
                                     error!(session_id = %self.session_id, "PTY write error: {}", e);
                                 }
@@ -926,6 +936,61 @@ impl SessionActor {
         }
     }
 
+    fn update_last_skill_from_input(&mut self, data: &[u8]) {
+        if data.is_empty() {
+            return;
+        }
+
+        let text = String::from_utf8_lossy(data);
+        for ch in text.chars() {
+            match ch {
+                '\r' | '\n' => {
+                    self.process_completed_input_line();
+                }
+                '\u{8}' | '\u{7f}' => {
+                    self.input_line_buffer.pop();
+                }
+                _ if ch.is_control() => {}
+                _ => {
+                    self.input_line_buffer.push(ch);
+                    if self.input_line_buffer.len() > 8_192 {
+                        self.input_line_buffer.clear();
+                    }
+                }
+            }
+        }
+    }
+
+    fn process_completed_input_line(&mut self) {
+        let line = self.input_line_buffer.trim().to_string();
+        self.input_line_buffer.clear();
+        if line.is_empty() {
+            return;
+        }
+
+        let Some(detected_skill) = detect_skill_from_input_line(&line) else {
+            return;
+        };
+
+        if self.last_skill.as_deref() == Some(detected_skill.as_str()) {
+            return;
+        }
+
+        self.last_skill = Some(detected_skill.clone());
+
+        let event = ControlEvent {
+            event: "session_skill".to_string(),
+            session_id: self.session_id.clone(),
+            payload: serde_json::to_value(SessionSkillPayload {
+                last_skill: Some(detected_skill),
+                at: Utc::now(),
+            })
+            .unwrap_or_default(),
+        };
+
+        let _ = self.event_tx.send(event);
+    }
+
     /// Build a summary snapshot of this session's current state.
     fn build_summary(&self) -> SessionSummary {
         let (state, current_command) = self.state_detector.get_state();
@@ -946,6 +1011,7 @@ impl SessionActor {
             thought_state: crate::types::ThoughtState::Holding,
             thought_source: crate::types::ThoughtSource::CarryForward,
             thought_updated_at: None,
+            last_skill: self.last_skill.clone(),
             last_activity_at: self.last_activity_at,
             sprite_pack_id: None,
         }
@@ -1263,6 +1329,79 @@ fn resolve_tmux_terminal_env(
     (resolved_term, colorterm, needs_term_fallback)
 }
 
+fn detect_skill_from_input_line(line: &str) -> Option<String> {
+    extract_skill_from_xml_block(line)
+        .or_else(|| extract_skill_from_dollar_token(line))
+        .or_else(|| extract_skill_from_using_marker(line))
+}
+
+fn extract_skill_from_xml_block(text: &str) -> Option<String> {
+    static SKILL_XML_RE: OnceLock<Regex> = OnceLock::new();
+    let re = SKILL_XML_RE.get_or_init(|| {
+        Regex::new(
+            r"(?is)<skill\b[^>]*>.*?<name>\s*([A-Za-z][A-Za-z0-9._/-]{0,63})\s*</name>.*?</skill>",
+        )
+        .expect("valid skill xml regex")
+    });
+
+    re.captures_iter(text)
+        .filter_map(|caps| caps.get(1).map(|m| m.as_str()))
+        .filter_map(normalize_skill_name)
+        .last()
+}
+
+fn extract_skill_from_dollar_token(text: &str) -> Option<String> {
+    static DOLLAR_SKILL_RE: OnceLock<Regex> = OnceLock::new();
+    let re = DOLLAR_SKILL_RE.get_or_init(|| {
+        Regex::new(r"\$([A-Za-z][A-Za-z0-9_-]{0,63})").expect("valid dollar skill regex")
+    });
+
+    re.captures_iter(text)
+        .filter_map(|caps| caps.get(1).map(|m| m.as_str()))
+        .filter(|value| is_probable_skill_name(value))
+        .filter_map(normalize_skill_name)
+        .last()
+}
+
+fn extract_skill_from_using_marker(text: &str) -> Option<String> {
+    static USING_SKILL_RE: OnceLock<Regex> = OnceLock::new();
+    let re = USING_SKILL_RE.get_or_init(|| {
+        Regex::new(
+            r#"(?i)\busing\s+(?:the\s+)?(?:skill\s+)?[`"']?([A-Za-z][A-Za-z0-9._/-]{0,63})[`"']?(?:\s+skill)?\b"#,
+        )
+        .expect("valid using skill regex")
+    });
+
+    re.captures_iter(text)
+        .filter_map(|caps| caps.get(1).map(|m| m.as_str()))
+        .filter(|value| is_probable_skill_name(value))
+        .filter_map(normalize_skill_name)
+        .last()
+}
+
+fn normalize_skill_name(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    if !trimmed
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.' | '/'))
+    {
+        return None;
+    }
+
+    Some(trimmed.to_ascii_lowercase())
+}
+
+fn is_probable_skill_name(raw: &str) -> bool {
+    if raw.is_empty() {
+        return false;
+    }
+    raw.chars().any(|ch| ch.is_ascii_lowercase()) || raw.contains('-')
+}
+
 // ---------------------------------------------------------------------------
 // Blocking PTY reader (runs in spawn_blocking)
 // ---------------------------------------------------------------------------
@@ -1303,8 +1442,9 @@ fn pty_read_loop(
 #[cfg(test)]
 mod tests {
     use super::{
-        capture_pane_tail, detect_tool_from_command_line, detect_tool_from_process_entry,
-        parse_process_entry, resolve_tmux_terminal_env, ProcessEntry,
+        capture_pane_tail, detect_skill_from_input_line, detect_tool_from_command_line,
+        detect_tool_from_process_entry, parse_process_entry, resolve_tmux_terminal_env,
+        ProcessEntry,
     };
     use crate::session::replay_ring::ReplayRing;
 
@@ -1353,6 +1493,30 @@ mod tests {
     }
 
     #[test]
+    fn detect_skill_prefers_explicit_skill_block() {
+        let line = r#"send <skill><name>describe</name></skill> and $fallback"#;
+        assert_eq!(
+            detect_skill_from_input_line(line),
+            Some("describe".to_string())
+        );
+    }
+
+    #[test]
+    fn detect_skill_falls_back_to_dollar_token() {
+        let line = "please run $domain-planner for this slice";
+        assert_eq!(
+            detect_skill_from_input_line(line),
+            Some("domain-planner".to_string())
+        );
+    }
+
+    #[test]
+    fn detect_skill_ignores_common_shell_env_vars() {
+        let line = "echo $HOME && echo $PATH";
+        assert_eq!(detect_skill_from_input_line(line), None);
+    }
+
+    #[test]
     fn resolve_tmux_terminal_env_uses_fallback_for_missing_or_dumb_term() {
         let (term, colorterm, fallback) = resolve_tmux_terminal_env(None, None);
         assert_eq!(term, "xterm-256color");
@@ -1379,7 +1543,10 @@ mod tests {
     async fn build_snapshot_falls_back_to_replay_ring_when_capture_pane_fails() {
         // capture_pane_tail will fail for a non-existent tmux session.
         let result = capture_pane_tail("__nonexistent_throngterm_test__", 300).await;
-        assert!(result.is_err(), "capture_pane_tail should fail for a non-existent session");
+        assert!(
+            result.is_err(),
+            "capture_pane_tail should fail for a non-existent session"
+        );
 
         // Verify replay ring fallback produces the expected snapshot content.
         let mut ring = ReplayRing::new(512 * 1024);

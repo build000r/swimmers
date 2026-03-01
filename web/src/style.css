@@ -710,6 +710,23 @@ html, body {
   letter-spacing: 0.3px;
 }
 
+.thronglet-skill-pill {
+  font-size: 9px;
+  font-weight: 700;
+  color: #1f2937;
+  background: rgba(255, 255, 255, 0.82);
+  border: 1px solid rgba(22, 33, 62, 0.28);
+  border-radius: 4px;
+  padding: 1px 5px;
+  white-space: nowrap;
+  display: inline-block;
+  margin-bottom: 2px;
+  max-width: 120px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  vertical-align: top;
+}
+
 /* Pixel HP bar */
 .context-gauge {
   width: 50px;
