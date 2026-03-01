@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { render } from "@testing-library/preact";
 import { h } from "preact";
-import { ThrongletSprite } from "@/components/ThrongletSprite";
+import { ThrongletSprite, scopeInlineSpriteCss } from "@/components/ThrongletSprite";
 import type { SessionState, SpritePack } from "@/types";
 
 function isoAgo(ms: number): string {
@@ -23,10 +23,17 @@ function renderedStyleForTool(tool: string, spritePack?: SpritePack | null): str
 }
 
 const FAKE_SPRITE_PACK: SpritePack = {
-  active: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><title>Brand - Active</title><rect x="0" y="0" width="16" height="16" class="b"/></svg>',
-  drowsy: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><title>Brand - Drowsy</title></svg>',
-  sleeping: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><title>Brand - Sleeping</title></svg>',
-  deep_sleep: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><title>Brand - Deep Sleep</title></svg>',
+  active: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><title>Brand - Active</title><style>.b { fill: var(--thr-body, #AA5500); }</style><rect x="0" y="0" width="16" height="16" class="b"/></svg>',
+  drowsy: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><title>Brand - Drowsy</title><style>.b { fill: var(--thr-body, #AA5500); }</style></svg>',
+  sleeping: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><title>Brand - Sleeping</title><style>.b { fill: var(--thr-body, #AA5500); }</style></svg>',
+  deep_sleep: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><title>Brand - Deep Sleep</title><style>.b { fill: var(--thr-body, #AA5500); }</style></svg>',
+};
+
+const ALT_FAKE_SPRITE_PACK: SpritePack = {
+  active: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><title>Alt - Active</title><style>.b { fill: var(--thr-body, #00AA55); }</style><rect x="0" y="0" width="16" height="16" class="b"/></svg>',
+  drowsy: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><title>Alt - Drowsy</title><style>.b { fill: var(--thr-body, #00AA55); }</style></svg>',
+  sleeping: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><title>Alt - Sleeping</title><style>.b { fill: var(--thr-body, #00AA55); }</style></svg>',
+  deep_sleep: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><title>Alt - Deep Sleep</title><style>.b { fill: var(--thr-body, #00AA55); }</style></svg>',
 };
 
 describe("ThrongletSprite idle-depth selection", () => {
@@ -73,24 +80,37 @@ describe("ThrongletSprite brand preservation with sprite pack", () => {
     expect(style).not.toContain("--thr-shirt");
   });
 
-  it("renders tool badge when sprite pack + tool are present", () => {
+  it("does not render a tool badge when sprite pack + tool are present", () => {
     const { container } = render(
       <ThrongletSprite state="busy" tool="Claude Code" spritePack={FAKE_SPRITE_PACK} />,
     );
-    const badge = container.querySelector(".thronglet-tool-badge");
-    expect(badge).not.toBeNull();
-    expect(badge!.textContent).toBe("C");
-    expect(badge!.getAttribute("data-tool")).toBe("Claude Code");
+    expect(container.querySelector(".thronglet-tool-badge")).toBeNull();
   });
 
-  it("renders Codex badge distinct from Claude", () => {
+  it("scopes inline SVG class selectors per sprite instance", () => {
     const { container } = render(
-      <ThrongletSprite state="busy" tool="Codex" spritePack={FAKE_SPRITE_PACK} />,
+      <div>
+        <ThrongletSprite state="busy" tool="Claude Code" spritePack={FAKE_SPRITE_PACK} />
+        <ThrongletSprite state="busy" tool="Codex" spritePack={ALT_FAKE_SPRITE_PACK} />
+      </div>,
     );
-    const badge = container.querySelector(".thronglet-tool-badge");
-    expect(badge).not.toBeNull();
-    expect(badge!.textContent).toBe("X");
-    expect(badge!.getAttribute("data-tool")).toBe("Codex");
+    const svgs = container.querySelectorAll("svg");
+    expect(svgs).toHaveLength(2);
+
+    const scopeA = svgs[0].getAttribute("data-thr-scope");
+    const scopeB = svgs[1].getAttribute("data-thr-scope");
+    expect(scopeA).toBeTruthy();
+    expect(scopeB).toBeTruthy();
+    expect(scopeA).not.toBe(scopeB);
+
+    const scopedA = scopeInlineSpriteCss(FAKE_SPRITE_PACK.active, "scope-a");
+    const scopedB = scopeInlineSpriteCss(ALT_FAKE_SPRITE_PACK.active, "scope-b");
+    expect(scopedA).toContain('data-thr-scope="scope-a"');
+    expect(scopedA).toContain('[data-thr-scope="scope-a"] .b');
+    expect(scopedA).toContain("#AA5500");
+    expect(scopedB).toContain('data-thr-scope="scope-b"');
+    expect(scopedB).toContain('[data-thr-scope="scope-b"] .b');
+    expect(scopedB).toContain("#00AA55");
   });
 
   it("still applies tool colors when no sprite pack", () => {

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "preact/hooks";
+import { useEffect, useMemo, useRef, useState } from "preact/hooks";
 import type { SessionState, SpritePack } from "@/types";
 import { ACTIVE, DROWSY, SLEEPING, DEEP_SLEEP } from "@/lib/thronglet-svgs";
 import {
@@ -25,6 +25,30 @@ const TOOL_COLORS: Record<string, Record<string, string>> = {
 };
 
 const DEFAULT_COLORS = TOOL_COLORS["Claude Code"];
+
+const SPRITE_SCOPE_ATTR = "data-thr-scope";
+let spriteScopeSeq = 0;
+
+function nextSpriteScopeId(): string {
+  spriteScopeSeq += 1;
+  return `thr-scope-${spriteScopeSeq}`;
+}
+
+export function scopeInlineSpriteCss(svg: string, scopeId: string): string {
+  const scopeSelector = `[${SPRITE_SCOPE_ATTR}="${scopeId}"]`;
+  const withScopeAttr = svg.replace(/<svg\b([^>]*)>/i, (match, attrs) => {
+    if (attrs.includes(SPRITE_SCOPE_ATTR)) return match;
+    return `<svg${attrs} ${SPRITE_SCOPE_ATTR}="${scopeId}">`;
+  });
+
+  return withScopeAttr.replace(/<style>([\s\S]*?)<\/style>/i, (_match, css) => {
+    const scopedCss = css.replace(
+      /(^|})\s*\.([A-Za-z_][\w-]*)\s*\{/g,
+      (_rule, prefix, className) => `${prefix} ${scopeSelector} .${className} {`,
+    );
+    return `<style>${scopedCss}</style>`;
+  });
+}
 
 function canonicalToolName(tool?: string | null): keyof typeof TOOL_COLORS | null {
   if (!tool) return null;
@@ -84,13 +108,6 @@ function svgForState(
   return active; // busy, error, attention
 }
 
-// ---- Tool badge labels ----
-
-const TOOL_BADGE: Record<string, string> = {
-  "Claude Code": "C",
-  Codex: "X",
-};
-
 // ---- Component ----
 
 interface ThrongletSpriteProps {
@@ -109,6 +126,8 @@ export function ThrongletSprite({
   class: className,
 }: ThrongletSpriteProps) {
   const [idleTick, setIdleTick] = useState(0);
+  const scopeIdRef = useRef<string>("");
+  if (!scopeIdRef.current) scopeIdRef.current = nextSpriteScopeId();
 
   // Keep rest-state sprites transitioning (active -> drowsy -> sleeping)
   // even when no other props change.
@@ -139,20 +158,19 @@ export function ThrongletSprite({
       display: "inline-block",
       width: "100%",
       height: "100%",
-      position: "relative" as const,
     }),
     [colors],
   );
 
-  const htmlObj = useMemo(() => ({ __html: svg }), [svg]);
-  const badgeLabel = hasBrandSprites && toolName ? TOOL_BADGE[toolName] : null;
+  const scopedSvg = useMemo(
+    () => scopeInlineSpriteCss(svg, scopeIdRef.current),
+    [svg],
+  );
+  const htmlObj = useMemo(() => ({ __html: scopedSvg }), [scopedSvg]);
 
   return (
     <div class={className} style={style}>
       <div dangerouslySetInnerHTML={htmlObj} style={{ width: "100%", height: "100%" }} />
-      {badgeLabel && (
-        <span class="thronglet-tool-badge" data-tool={toolName}>{badgeLabel}</span>
-      )}
     </div>
   );
 }
