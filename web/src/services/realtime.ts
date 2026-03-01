@@ -59,6 +59,7 @@ export interface RealtimeCallbacks {
 
 const INITIAL_RECONNECT_MS = 500;
 const MAX_RECONNECT_MS = 30_000;
+const MAX_INPUT_PAYLOAD_BYTES = 16 * 1024;
 
 export class RealtimeService {
   private ws: WebSocket | null = null;
@@ -208,13 +209,18 @@ export class RealtimeService {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
     const idBytes = encoder.encode(sessionId);
     if (idBytes.length > 0xffff) return;
-    const frame = new Uint8Array(1 + 2 + idBytes.length + data.length);
-    frame[0] = Opcodes.TERMINAL_INPUT;
-    frame[1] = (idBytes.length >> 8) & 0xff;
-    frame[2] = idBytes.length & 0xff;
-    frame.set(idBytes, 3);
-    frame.set(data, 3 + idBytes.length);
-    this.ws.send(frame);
+    if (data.length === 0) return;
+
+    for (let offset = 0; offset < data.length; offset += MAX_INPUT_PAYLOAD_BYTES) {
+      const chunk = data.subarray(offset, offset + MAX_INPUT_PAYLOAD_BYTES);
+      const frame = new Uint8Array(1 + 2 + idBytes.length + chunk.length);
+      frame[0] = Opcodes.TERMINAL_INPUT;
+      frame[1] = (idBytes.length >> 8) & 0xff;
+      frame[2] = idBytes.length & 0xff;
+      frame.set(idBytes, 3);
+      frame.set(chunk, 3 + idBytes.length);
+      this.ws.send(frame);
+    }
   }
 
   // ---- Internal ----

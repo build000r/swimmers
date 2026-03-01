@@ -8,6 +8,7 @@ import type {
 } from "@/types";
 
 const encoder = new TextEncoder();
+const MAX_INPUT_PAYLOAD_BYTES = 16 * 1024;
 
 /**
  * Build a binary TERMINAL_OUTPUT frame matching the server wire format:
@@ -43,6 +44,21 @@ function buildControlEvent(
   payload: unknown,
 ): string {
   return JSON.stringify({ event, session_id: sessionId, payload });
+}
+
+function decodeInputFrame(frame: Uint8Array): {
+  sessionId: string;
+  payload: Uint8Array;
+} {
+  expect(frame[0]).toBe(Opcodes.TERMINAL_INPUT);
+  const idLen = (frame[1] << 8) | frame[2];
+  const idStart = 3;
+  const idEnd = idStart + idLen;
+  const sessionId = new TextDecoder().decode(frame.slice(idStart, idEnd));
+  return {
+    sessionId,
+    payload: frame.slice(idEnd),
+  };
 }
 
 describe("RealtimeService", () => {
@@ -246,6 +262,36 @@ describe("RealtimeService", () => {
       expect(sentData).toHaveLength(1);
       const frame = sentData[0];
       expect(frame[0]).toBe(Opcodes.TERMINAL_INPUT);
+    });
+
+    it("splits oversized terminal input into ordered chunks", () => {
+      const sentData: Array<Uint8Array> = [];
+      mockWs.readyState = WebSocket.OPEN;
+      mockWs.send = (data: any) => sentData.push(new Uint8Array(data));
+
+      const payload = new Uint8Array(MAX_INPUT_PAYLOAD_BYTES * 2 + 17);
+      for (let i = 0; i < payload.length; i++) {
+        payload[i] = i % 251;
+      }
+
+      service.sendInput("sess-001", payload);
+
+      expect(sentData).toHaveLength(3);
+      const decoded = sentData.map(decodeInputFrame);
+      for (const frame of decoded) {
+        expect(frame.sessionId).toBe("sess-001");
+        expect(frame.payload.length).toBeLessThanOrEqual(MAX_INPUT_PAYLOAD_BYTES);
+      }
+
+      const merged = new Uint8Array(
+        decoded.reduce((total, frame) => total + frame.payload.length, 0),
+      );
+      let offset = 0;
+      for (const frame of decoded) {
+        merged.set(frame.payload, offset);
+        offset += frame.payload.length;
+      }
+      expect(merged).toEqual(payload);
     });
 
     it("does not send when WebSocket is not open", () => {
