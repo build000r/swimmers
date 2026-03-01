@@ -203,6 +203,14 @@ html, body {
   overscroll-behavior: contain;
 }
 
+.zone-terminal.copy-drag-active {
+  cursor: text;
+}
+
+.zone-terminal.copy-drag-active .xterm-viewport {
+  touch-action: none;
+}
+
 .zone-terminal .xterm {
   height: 100%;
 }
@@ -403,6 +411,44 @@ html, body {
   border-radius: 999px;
   padding: 6px 10px;
   pointer-events: none;
+}
+
+.terminal-copy-drag-hud {
+  position: absolute;
+  left: 50%;
+  top: 12px;
+  transform: translateX(-50%);
+  z-index: 25;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border-radius: 999px;
+  background: rgba(8, 16, 29, 0.94);
+  border: 1px solid rgba(91, 192, 235, 0.45);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.32);
+}
+
+.terminal-copy-drag-hud span {
+  font-size: 11px;
+  color: #d6f1ff;
+  white-space: nowrap;
+}
+
+.terminal-copy-drag-hud button {
+  border: 1px solid rgba(91, 192, 235, 0.62);
+  border-radius: 999px;
+  background: rgba(18, 33, 62, 0.92);
+  color: #d6f1ff;
+  font-size: 11px;
+  font-weight: 700;
+  padding: 4px 8px;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.terminal-copy-drag-hud button:active {
+  opacity: 0.75;
 }
 
 .terminal-fast-scroll {
@@ -616,6 +662,11 @@ html, body {
 
 .mobile-keybar-btn:active {
   opacity: 0.75;
+}
+
+.mobile-keybar-btn.active {
+  border-color: #5BC0EB;
+  color: #5BC0EB;
 }
 
 @media (min-width: 769px) {

@@ -27,6 +27,10 @@ import {
   hasFastScrollOverflow,
   isNearScrollBottom,
 } from "@/lib/fast-scroll";
+import {
+  computeCopyDragEdgeDirection,
+  mapClientYToBufferRow,
+} from "@/lib/copy-drag";
 import { ThrongletSprite } from "./ThrongletSprite";
 
 function warn_silence_recovery(sessionId: string): void {
@@ -103,6 +107,11 @@ const ACTION_TOAST_MS = 1200;
 const FAST_SCROLL_HIDE_MS = 1200;
 const FAST_SCROLL_MIN_THUMB_PX = 26;
 const FAST_SCROLL_BOOST_THRESHOLD = 1.15;
+const COPY_DRAG_EDGE_RATIO = 0.2;
+const COPY_DRAG_EDGE_MIN_PX = 56;
+const COPY_DRAG_EDGE_MAX_PX = 140;
+const COPY_DRAG_AUTOSCROLL_MS = 20;
+const COPY_DRAG_STEP_MULTIPLIER = 1.45;
 
 const MOBILE_KEYS: MobileKeyConfig[] = [
   { id: "tab", label: "Tab", input: "\t" },
@@ -278,6 +287,14 @@ export function TerminalWorkspace({
     startThumbTop: number;
   } | null>(null);
   const fastScrollDragCleanupRef = useRef<(() => void) | null>(null);
+  const copyDragActiveRef = useRef(false);
+  const copyDragAnchorRowRef = useRef<number | null>(null);
+  const copyDragPointerIdRef = useRef<number | null>(null);
+  const copyDragLastClientYRef = useRef<number | null>(null);
+  const copyDragEdgeDirectionRef = useRef(0);
+  const copyDragAutoScrollTimerRef = useRef<ReturnType<typeof setInterval> | null>(
+    null,
+  );
 
   const [title, setTitle] = useState(`tmux a -t ${session.tmux_name}`);
   const [titleCopied, setTitleCopied] = useState(false);
@@ -304,6 +321,7 @@ export function TerminalWorkspace({
   const [fastScrollThumbTop, setFastScrollThumbTop] = useState(0);
   const [fastScrollThumbHeight, setFastScrollThumbHeight] = useState(0);
   const [fastScrollAtBottom, setFastScrollAtBottom] = useState(true);
+  const [copyDragActive, setCopyDragActive] = useState(false);
   const [skillChips, setSkillChips] = useState<SkillSummary[]>([]);
   const [skillsLoading, setSkillsLoading] = useState(false);
   const [skillsError, setSkillsError] = useState<string | null>(null);
@@ -342,8 +360,18 @@ export function TerminalWorkspace({
     setFastScrollThumbTop(0);
     setFastScrollThumbHeight(0);
     setFastScrollAtBottom(true);
+    setCopyDragActive(false);
     fastScrollVelocityRef.current = 0;
     fastScrollLastSampleRef.current = null;
+    copyDragActiveRef.current = false;
+    copyDragAnchorRowRef.current = null;
+    copyDragPointerIdRef.current = null;
+    copyDragLastClientYRef.current = null;
+    copyDragEdgeDirectionRef.current = 0;
+    if (copyDragAutoScrollTimerRef.current) {
+      clearInterval(copyDragAutoScrollTimerRef.current);
+      copyDragAutoScrollTimerRef.current = null;
+    }
   }, [session.session_id]);
 
   useEffect(() => {
@@ -371,6 +399,21 @@ export function TerminalWorkspace({
   }, []);
 
   useEffect(() => {
+    if (!observer) return;
+    if (!copyDragActiveRef.current) return;
+    copyDragActiveRef.current = false;
+    setCopyDragActive(false);
+    copyDragAnchorRowRef.current = null;
+    copyDragPointerIdRef.current = null;
+    copyDragLastClientYRef.current = null;
+    copyDragEdgeDirectionRef.current = 0;
+    if (copyDragAutoScrollTimerRef.current) {
+      clearInterval(copyDragAutoScrollTimerRef.current);
+      copyDragAutoScrollTimerRef.current = null;
+    }
+  }, [observer]);
+
+  useEffect(() => {
     return () => {
       if (actionToastTimerRef.current) {
         clearTimeout(actionToastTimerRef.current);
@@ -391,8 +434,17 @@ export function TerminalWorkspace({
         fastScrollDragCleanupRef.current();
         fastScrollDragCleanupRef.current = null;
       }
+      if (copyDragAutoScrollTimerRef.current) {
+        clearInterval(copyDragAutoScrollTimerRef.current);
+        copyDragAutoScrollTimerRef.current = null;
+      }
       fastScrollVelocityRef.current = 0;
       fastScrollLastSampleRef.current = null;
+      copyDragActiveRef.current = false;
+      copyDragAnchorRowRef.current = null;
+      copyDragPointerIdRef.current = null;
+      copyDragLastClientYRef.current = null;
+      copyDragEdgeDirectionRef.current = 0;
     };
   }, []);
 
@@ -572,6 +624,194 @@ export function TerminalWorkspace({
     },
     [refreshFastScrollUi],
   );
+
+  const clearCopyDragAutoScroll = useCallback(() => {
+    if (copyDragAutoScrollTimerRef.current) {
+      clearInterval(copyDragAutoScrollTimerRef.current);
+      copyDragAutoScrollTimerRef.current = null;
+    }
+  }, []);
+
+  const clearCopyDragGesture = useCallback(() => {
+    copyDragAnchorRowRef.current = null;
+    copyDragPointerIdRef.current = null;
+    copyDragLastClientYRef.current = null;
+    copyDragEdgeDirectionRef.current = 0;
+    clearCopyDragAutoScroll();
+  }, [clearCopyDragAutoScroll]);
+
+  const resolveCopyDragBufferRow = useCallback((clientY: number): number | null => {
+    const term = termRef.current;
+    const viewport = viewportRef.current;
+    if (!term || !viewport) return null;
+    const rect = viewport.getBoundingClientRect();
+    return mapClientYToBufferRow(
+      clientY,
+      rect.top,
+      viewport.clientHeight,
+      term.rows,
+      term.buffer.active.viewportY,
+      term.buffer.active.length,
+    );
+  }, []);
+
+  const updateCopyDragSelection = useCallback(
+    (clientY: number): boolean => {
+      const term = termRef.current;
+      const viewport = viewportRef.current;
+      const anchorRow = copyDragAnchorRowRef.current;
+      if (!term || !viewport || anchorRow === null) return false;
+      const row = resolveCopyDragBufferRow(clientY);
+      if (row === null) return false;
+      term.selectLines(anchorRow, row);
+      copyDragLastClientYRef.current = clientY;
+      scheduleRefreshFastScrollUi(true);
+      return true;
+    },
+    [resolveCopyDragBufferRow, scheduleRefreshFastScrollUi],
+  );
+
+  const ensureCopyDragAutoScroll = useCallback(() => {
+    if (copyDragAutoScrollTimerRef.current) return;
+    copyDragAutoScrollTimerRef.current = setInterval(() => {
+      if (!copyDragActiveRef.current) {
+        clearCopyDragAutoScroll();
+        return;
+      }
+      const direction = copyDragEdgeDirectionRef.current;
+      if (direction === 0) {
+        clearCopyDragAutoScroll();
+        return;
+      }
+      const viewport = viewportRef.current;
+      const term = termRef.current;
+      if (!viewport || !term) {
+        clearCopyDragAutoScroll();
+        return;
+      }
+      const rowHeight = Math.max(1, viewport.clientHeight / Math.max(1, term.rows));
+      const before = viewport.scrollTop;
+      viewport.scrollTop = before + direction * rowHeight * COPY_DRAG_STEP_MULTIPLIER;
+      if (viewport.scrollTop === before) return;
+      noteFastScrollVelocity(viewport.scrollTop);
+      scheduleRefreshFastScrollUi(true);
+      const clientY = copyDragLastClientYRef.current;
+      if (clientY !== null) {
+        updateCopyDragSelection(clientY);
+      }
+    }, COPY_DRAG_AUTOSCROLL_MS);
+  }, [
+    clearCopyDragAutoScroll,
+    noteFastScrollVelocity,
+    scheduleRefreshFastScrollUi,
+    updateCopyDragSelection,
+  ]);
+
+  const updateCopyDragEdgeDirection = useCallback(
+    (clientY: number) => {
+      const viewport = viewportRef.current;
+      if (!viewport) return;
+      const rect = viewport.getBoundingClientRect();
+      const edgePx = Math.max(
+        COPY_DRAG_EDGE_MIN_PX,
+        Math.min(
+          COPY_DRAG_EDGE_MAX_PX,
+          Math.round(viewport.clientHeight * COPY_DRAG_EDGE_RATIO),
+        ),
+      );
+      const direction = computeCopyDragEdgeDirection(
+        clientY,
+        rect.top,
+        rect.bottom,
+        edgePx,
+      );
+      copyDragEdgeDirectionRef.current = direction;
+      if (direction === 0) {
+        clearCopyDragAutoScroll();
+      } else {
+        ensureCopyDragAutoScroll();
+      }
+    },
+    [clearCopyDragAutoScroll, ensureCopyDragAutoScroll],
+  );
+
+  const startCopyDragSelection = useCallback(
+    (clientY: number, pointerId?: number): boolean => {
+      if (!copyDragActiveRef.current) return false;
+      const anchorRow = resolveCopyDragBufferRow(clientY);
+      const term = termRef.current;
+      if (anchorRow === null || !term) return false;
+      copyDragAnchorRowRef.current = anchorRow;
+      copyDragPointerIdRef.current =
+        typeof pointerId === "number" ? pointerId : null;
+      copyDragLastClientYRef.current = clientY;
+      term.selectLines(anchorRow, anchorRow);
+      updateCopyDragEdgeDirection(clientY);
+      scheduleRefreshFastScrollUi(true);
+      return true;
+    },
+    [
+      resolveCopyDragBufferRow,
+      scheduleRefreshFastScrollUi,
+      updateCopyDragEdgeDirection,
+    ],
+  );
+
+  const moveCopyDragSelection = useCallback(
+    (clientY: number, pointerId?: number): boolean => {
+      if (!copyDragActiveRef.current) return false;
+      const activePointerId = copyDragPointerIdRef.current;
+      if (
+        typeof pointerId === "number" &&
+        activePointerId !== null &&
+        pointerId !== activePointerId
+      ) {
+        return false;
+      }
+      const moved = updateCopyDragSelection(clientY);
+      if (!moved) return false;
+      updateCopyDragEdgeDirection(clientY);
+      return true;
+    },
+    [updateCopyDragEdgeDirection, updateCopyDragSelection],
+  );
+
+  const endCopyDragSelection = useCallback(
+    (pointerId?: number): void => {
+      const activePointerId = copyDragPointerIdRef.current;
+      if (
+        typeof pointerId === "number" &&
+        activePointerId !== null &&
+        pointerId !== activePointerId
+      ) {
+        return;
+      }
+      clearCopyDragGesture();
+    },
+    [clearCopyDragGesture],
+  );
+
+  const stopCopyDragMode = useCallback(() => {
+    copyDragActiveRef.current = false;
+    setCopyDragActive(false);
+    clearCopyDragGesture();
+  }, [clearCopyDragGesture]);
+
+  const startCopyDragMode = useCallback(() => {
+    if (observer) return;
+    copyDragActiveRef.current = true;
+    setCopyDragActive(true);
+    setShowTerminalActions(false);
+    pushActionToast("Drag to select. Hold near top/bottom to auto-scroll.");
+  }, [observer, pushActionToast]);
+
+  const toggleCopyDragMode = useCallback(() => {
+    if (copyDragActiveRef.current) {
+      stopCopyDragMode();
+      return;
+    }
+    startCopyDragMode();
+  }, [startCopyDragMode, stopCopyDragMode]);
 
   const persistCommandChips = useCallback(
     (next: string[]) => {
@@ -892,6 +1132,19 @@ export function TerminalWorkspace({
     let touchViewport: HTMLElement | null = null;
     const handleTouchScrollStart = (event: TouchEvent) => {
       if (observer) return;
+      if (copyDragActiveRef.current) {
+        if (event.touches.length !== 1) {
+          endCopyDragSelection();
+          return;
+        }
+        const touch = event.touches[0];
+        if (!touch) return;
+        if (startCopyDragSelection(touch.clientY)) {
+          event.preventDefault();
+          event.stopPropagation();
+        }
+        return;
+      }
       if (event.touches.length !== 1) {
         endTouchScroll(touchScrollStateRef.current);
         touchViewport = null;
@@ -909,6 +1162,16 @@ export function TerminalWorkspace({
     };
     const handleTouchScrollMove = (event: TouchEvent) => {
       if (observer) return;
+      if (copyDragActiveRef.current) {
+        if (event.touches.length !== 1) return;
+        const touch = event.touches[0];
+        if (!touch) return;
+        if (moveCopyDragSelection(touch.clientY)) {
+          event.preventDefault();
+          event.stopPropagation();
+        }
+        return;
+      }
       if (event.touches.length !== 1) return;
       const viewport = touchViewport ?? queryViewport();
       if (!viewport) return;
@@ -928,13 +1191,43 @@ export function TerminalWorkspace({
       }
     };
     const handleTouchScrollEnd = () => {
+      if (copyDragActiveRef.current) {
+        endCopyDragSelection();
+        return;
+      }
       endTouchScroll(touchScrollStateRef.current);
       touchViewport = null;
     };
+
+    const handleCopyDragPointerDown = (event: globalThis.PointerEvent) => {
+      if (observer || !copyDragActiveRef.current) return;
+      if (event.pointerType === "touch") return;
+      if (event.pointerType === "mouse" && event.button !== 0) return;
+      if (startCopyDragSelection(event.clientY, event.pointerId)) {
+        event.preventDefault();
+        event.stopPropagation();
+      }
+    };
+
+    const handleCopyDragPointerMove = (event: globalThis.PointerEvent) => {
+      if (observer || !copyDragActiveRef.current) return;
+      if (event.pointerType === "touch") return;
+      if (moveCopyDragSelection(event.clientY, event.pointerId)) {
+        event.preventDefault();
+        event.stopPropagation();
+      }
+    };
+
+    const handleCopyDragPointerEnd = (event: globalThis.PointerEvent) => {
+      if (observer || !copyDragActiveRef.current) return;
+      if (event.pointerType === "touch") return;
+      endCopyDragSelection(event.pointerId);
+    };
+
     if (!observer) {
       hostEl.addEventListener("touchstart", handleTouchScrollStart, {
         capture: true,
-        passive: true,
+        passive: false,
       });
       hostEl.addEventListener("touchmove", handleTouchScrollMove, {
         capture: true,
@@ -944,6 +1237,19 @@ export function TerminalWorkspace({
         capture: true,
       });
       hostEl.addEventListener("touchcancel", handleTouchScrollEnd, {
+        capture: true,
+      });
+      hostEl.addEventListener("pointerdown", handleCopyDragPointerDown, {
+        capture: true,
+      });
+      hostEl.addEventListener("pointermove", handleCopyDragPointerMove, {
+        capture: true,
+        passive: false,
+      });
+      hostEl.addEventListener("pointerup", handleCopyDragPointerEnd, {
+        capture: true,
+      });
+      hostEl.addEventListener("pointercancel", handleCopyDragPointerEnd, {
         capture: true,
       });
     }
@@ -1053,11 +1359,22 @@ export function TerminalWorkspace({
       setFastScrollBoosted(false);
       fastScrollVelocityRef.current = 0;
       fastScrollLastSampleRef.current = null;
+      clearCopyDragGesture();
+      copyDragActiveRef.current = false;
+      setCopyDragActive(false);
       if (!observer) {
         hostEl.removeEventListener("touchstart", handleTouchScrollStart, true);
         hostEl.removeEventListener("touchmove", handleTouchScrollMove, true);
         hostEl.removeEventListener("touchend", handleTouchScrollEnd, true);
         hostEl.removeEventListener("touchcancel", handleTouchScrollEnd, true);
+        hostEl.removeEventListener("pointerdown", handleCopyDragPointerDown, true);
+        hostEl.removeEventListener("pointermove", handleCopyDragPointerMove, true);
+        hostEl.removeEventListener("pointerup", handleCopyDragPointerEnd, true);
+        hostEl.removeEventListener(
+          "pointercancel",
+          handleCopyDragPointerEnd,
+          true,
+        );
       }
 
       if (hostEl.parentNode) hostEl.parentNode.removeChild(hostEl);
@@ -1301,6 +1618,23 @@ export function TerminalWorkspace({
     setShowTerminalActions(false);
   }, []);
 
+  const handleCopySelectionOnly = useCallback(async () => {
+    const term = termRef.current;
+    if (!term) return;
+    const selected = term.getSelection();
+    if (!selected) {
+      pushActionToast("Drag to select text first");
+      return;
+    }
+    const copied = await copyTextToClipboard(selected);
+    if (!copied) {
+      pushActionToast("Clipboard write failed");
+      return;
+    }
+    stopCopyDragMode();
+    pushActionToast("Copied");
+  }, [pushActionToast, stopCopyDragMode]);
+
   const handleCopyAction = useCallback(async () => {
     const term = termRef.current;
     if (!term) return;
@@ -1317,11 +1651,14 @@ export function TerminalWorkspace({
     const copied = await copyTextToClipboard(text);
     if (copied) {
       setShowTerminalActions(false);
+      if (copyDragActiveRef.current) {
+        stopCopyDragMode();
+      }
       pushActionToast("Copied");
     } else {
       pushActionToast("Clipboard write failed");
     }
-  }, [pushActionToast]);
+  }, [pushActionToast, stopCopyDragMode]);
 
   const handlePasteAction = useCallback(async () => {
     if (observer) return;
@@ -1348,17 +1685,19 @@ export function TerminalWorkspace({
   }, [pushActionToast]);
 
   const handleFindAction = useCallback(() => {
+    stopCopyDragMode();
     setShowTerminalActions(false);
     setShowFindBar(true);
     setFindNoMatch(false);
-  }, []);
+  }, [stopCopyDragMode]);
 
   const handleClearAction = useCallback(() => {
     if (observer) return;
+    stopCopyDragMode();
     sendInput("\x0c");
     setShowTerminalActions(false);
     pushActionToast("Sent Ctrl+L");
-  }, [observer, sendInput, pushActionToast]);
+  }, [observer, sendInput, pushActionToast, stopCopyDragMode]);
 
   const handleJumpToLive = useCallback(() => {
     if (observer) return;
@@ -1488,8 +1827,12 @@ export function TerminalWorkspace({
         : "live";
   const skillPrefix = skillInvocationPrefix(sessionToolKind);
   const showFastScroll =
-    !observer && fastScrollOverflow && (fastScrollVisible || fastScrollDragging);
-  const showJumpToLive = !observer && fastScrollOverflow && !fastScrollAtBottom;
+    !observer &&
+    !copyDragActive &&
+    fastScrollOverflow &&
+    (fastScrollVisible || fastScrollDragging);
+  const showJumpToLive =
+    !observer && !copyDragActive && fastScrollOverflow && !fastScrollAtBottom;
   const isMobileViewport =
     typeof window !== "undefined" && window.innerWidth <= 768;
   const liveButtonBottom =
@@ -1702,7 +2045,7 @@ export function TerminalWorkspace({
       <div class="zone-terminal-stage">
         <div
           ref={containerRef}
-          class="zone-terminal"
+          class={`zone-terminal ${copyDragActive ? "copy-drag-active" : ""}`}
           style={{ flex: 1, minHeight: 0 }}
           onTouchStart={observer ? handleTerminalTouchStart : undefined}
           onTouchMove={observer ? handleTerminalTouchMove : undefined}
@@ -1748,6 +2091,18 @@ export function TerminalWorkspace({
 
         {actionToast && <div class="terminal-action-toast">{actionToast}</div>}
 
+        {copyDragActive && (
+          <div class="terminal-copy-drag-hud">
+            <span>Drag to select</span>
+            <button type="button" onClick={() => void handleCopySelectionOnly()}>
+              Copy
+            </button>
+            <button type="button" onClick={stopCopyDragMode}>
+              Done
+            </button>
+          </div>
+        )}
+
         {showTerminalActions && (
           <div class="terminal-actions-backdrop" onClick={closeTerminalActions}>
             <div
@@ -1766,6 +2121,9 @@ export function TerminalWorkspace({
               </button>
               <button type="button" onClick={handleSelectAllAction}>
                 Select all
+              </button>
+              <button type="button" onClick={toggleCopyDragMode}>
+                {copyDragActive ? "Exit drag copy" : "Drag copy"}
               </button>
               <button type="button" onClick={handleFindAction}>
                 Find
@@ -1799,6 +2157,13 @@ export function TerminalWorkspace({
               {key.label}
             </button>
           ))}
+          <button
+            type="button"
+            class={`mobile-keybar-btn ${copyDragActive ? "active" : ""}`}
+            onClick={toggleCopyDragMode}
+          >
+            {copyDragActive ? "Done copy" : "Drag copy"}
+          </button>
           <button
             type="button"
             class="mobile-keybar-btn"
