@@ -193,6 +193,7 @@ export function mergePollSessions(
         old.current_command === s.current_command &&
         old.cwd === s.cwd &&
         old.tool === s.tool &&
+        old.sprite_pack_id === s.sprite_pack_id &&
         old.thought === s.thought &&
         old.thought_state === s.thought_state &&
         old.thought_source === s.thought_source &&
@@ -216,6 +217,7 @@ export function mergePollSessions(
       old.current_command === s.current_command &&
       old.cwd === s.cwd &&
       old.tool === s.tool &&
+      old.sprite_pack_id === s.sprite_pack_id &&
       old.thought === s.thought &&
       old.thought_state === s.thought_state &&
       old.thought_source === s.thought_source &&
@@ -234,6 +236,7 @@ export function mergePollSessions(
       last_activity_at: pickNewerActivityAt(old.last_activity_at, s.last_activity_at),
       token_count: s.token_count ?? old.token_count,
       context_limit: s.context_limit ?? old.context_limit,
+      sprite_pack_id: s.sprite_pack_id,
       thought: s.thought,
       thought_state: s.thought_state,
       thought_source: s.thought_source,
