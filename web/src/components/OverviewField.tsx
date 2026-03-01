@@ -4,6 +4,7 @@ import {
   throngletRestStageForSession,
   type ThrongletRestStage,
 } from "@/lib/thronglet-motion";
+import { spritePacks as spritePacksSignal } from "@/app";
 import { SpawnMenu } from "./SpawnMenu";
 import { ThoughtConfigPanel } from "./ThoughtConfigPanel";
 import { BenchModal } from "./BenchModal";
@@ -478,7 +479,6 @@ interface HatchState {
 interface OverviewFieldProps {
   sessions: SessionSummary[];
   idlePreviews?: Record<string, string>;
-  spritePacks?: Record<string, SpritePack>;
   observer?: boolean;
   compact?: boolean;
   axeTopOffset?: number;
@@ -498,7 +498,6 @@ interface OverviewFieldProps {
 export function OverviewField({
   sessions,
   idlePreviews = {},
-  spritePacks = {},
   observer = false,
   compact = false,
   axeTopOffset = 8,
@@ -1185,7 +1184,7 @@ export function OverviewField({
             if (!pos) return null;
             const resolvedPack =
               s.sprite_pack_id != null
-                ? (spritePacks[s.sprite_pack_id] ?? null)
+                ? (spritePacksSignal.value[s.sprite_pack_id] ?? null)
                 : null;
             return (
               <ThrongletEntity

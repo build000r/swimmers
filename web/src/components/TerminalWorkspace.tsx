@@ -4,7 +4,7 @@ import { FitAddon } from "@xterm/addon-fit";
 import { WebglAddon } from "@xterm/addon-webgl";
 import { SearchAddon } from "@xterm/addon-search";
 import type { SessionSummary, SkillRegistryTool, SkillSummary } from "@/types";
-import { realtime } from "@/app";
+import { realtime, spritePacks } from "@/app";
 import type { TerminalOutputFrame } from "@/services/realtime";
 import type { CachedTerminal } from "@/hooks/useTerminalCache";
 import { fetchSnapshot, listSkills } from "@/services/api";
@@ -1100,6 +1100,7 @@ export function TerminalWorkspace({
             state={rushingOff ? "exited" : session.state}
             tool={session.tool}
             lastActivityAt={session.last_activity_at}
+            spritePack={session.sprite_pack_id ? spritePacks.value[session.sprite_pack_id] ?? null : null}
           />
         </div>
         <span class="zone-name">{cwdLabel(session.cwd) || session.tmux_name}</span>

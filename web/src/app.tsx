@@ -355,8 +355,15 @@ export function App() {
       sessions.value = [...sessions.value, session];
       return;
     }
+    const existing = sessions.value[existingIndex];
+    // Preserve sprite_pack_id from existing session if the incoming one is null —
+    // prevents late session_created events from wiping bootstrapped data.
+    const merged =
+      !session.sprite_pack_id && existing.sprite_pack_id
+        ? { ...session, sprite_pack_id: existing.sprite_pack_id }
+        : session;
     const next = [...sessions.value];
-    next[existingIndex] = session;
+    next[existingIndex] = merged;
     sessions.value = next;
   }, []);
 
@@ -449,6 +456,12 @@ export function App() {
         payload.cwd,
         payload.spawnTool,
       );
+      if (resp.sprite_pack && resp.session.sprite_pack_id) {
+        spritePacks.value = {
+          ...spritePacks.value,
+          [resp.session.sprite_pack_id]: resp.sprite_pack,
+        };
+      }
       upsertSession(resp.session);
       setDeleteFailure(null);
       if (navigator.vibrate) navigator.vibrate(20);
@@ -604,6 +617,12 @@ export function App() {
       },
 
       onSessionCreated(payload: SessionCreatedPayload) {
+        if (payload.sprite_pack && payload.session.sprite_pack_id) {
+          spritePacks.value = {
+            ...spritePacks.value,
+            [payload.session.sprite_pack_id]: payload.sprite_pack,
+          };
+        }
         upsertSession(payload.session);
       },
 
@@ -1134,7 +1153,6 @@ export function App() {
         <OverviewField
           sessions={sessions.value}
           idlePreviews={idlePreviews.value}
-          spritePacks={spritePacks.value}
           observer={isObserver}
           compact={splitMode}
           axeTopOffset={fieldAxeTopOffset}
@@ -1157,6 +1175,12 @@ export function App() {
             if (isObserver) return "";
             try {
               const resp = await apiCreateSession(undefined, cwd, spawnTool);
+              if (resp.sprite_pack && resp.session.sprite_pack_id) {
+                spritePacks.value = {
+                  ...spritePacks.value,
+                  [resp.session.sprite_pack_id]: resp.sprite_pack,
+                };
+              }
               upsertSession(resp.session);
               return resp.session.session_id;
             } catch (err) {
