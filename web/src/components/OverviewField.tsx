@@ -277,6 +277,9 @@ function ThrongletEntity({
   const gaugeRatio = session.context_limit
     ? Math.min(session.token_count / session.context_limit, 1)
     : 0;
+  const gaugePercentLeft = session.context_limit
+    ? Math.max(0, Math.min(100, Math.round((1 - session.token_count / session.context_limit) * 100)))
+    : 0;
 
   // Raw mode: show session data card instead of sprite
   if (rawMode) {
@@ -401,19 +404,19 @@ function ThrongletEntity({
 
       {/* Label */}
       <div class="thronglet-label">
-        <div class="thronglet-name">
-          {throngletName(session)}
-        </div>
         {showGauge && (
-          <div class={`context-gauge${gaugeRatio >= 0.8 ? " critical" : ""}`}>
-            <div
-              class="context-gauge-fill"
-              style={{
-                "--gauge-color": gaugeColor(gaugeRatio),
-                "--gauge-segments": gaugeSegments(gaugeRatio),
-              } as Record<string, string | number>}
-            />
-          </div>
+          <>
+            <div class={`context-gauge${gaugeRatio >= 0.8 ? " critical" : ""}`}>
+              <div
+                class="context-gauge-fill"
+                style={{
+                  "--gauge-color": gaugeColor(gaugeRatio),
+                  "--gauge-segments": gaugeSegments(gaugeRatio),
+                } as Record<string, string | number>}
+              />
+            </div>
+            <div class="context-gauge-percent">{gaugePercentLeft}% left</div>
+          </>
         )}
         {activityText && !showRenderedBubble && (
           <div class="thronglet-activity">{activityText}</div>

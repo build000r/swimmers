@@ -741,6 +741,17 @@ html, body {
   animation: gauge-critical 1.8s ease-in-out infinite;
 }
 
+.context-gauge-percent {
+  margin-top: 2px;
+  font-size: 9px;
+  font-weight: 700;
+  color: #16213e;
+  background: rgba(255, 255, 255, 0.72);
+  border-radius: 3px;
+  padding: 0 4px;
+  display: inline-block;
+}
+
 @keyframes gauge-critical {
   0%, 100% { opacity: 1; }
   50% { opacity: 0.45; }
