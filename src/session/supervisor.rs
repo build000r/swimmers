@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 use chrono::Utc;
 use tokio::process::Command;
-use tokio::sync::{broadcast, mpsc, oneshot, RwLock};
+use tokio::sync::{broadcast, mpsc, oneshot, Mutex, RwLock};
 use tracing::{debug, error, info, warn};
 
 use crate::config::Config;
@@ -89,6 +89,10 @@ pub struct SessionSupervisor {
 
     /// First-observed timestamps for sessions that have entered Exited state.
     process_exit_seen_at: RwLock<HashMap<String, Instant>>,
+
+    /// Serializes tmux discovery so concurrent callers cannot race and attach
+    /// duplicate actors to the same tmux session.
+    discovery_lock: Mutex<()>,
 }
 
 impl SessionSupervisor {
@@ -106,6 +110,7 @@ impl SessionSupervisor {
             persistence: RwLock::new(None),
             thought_snapshots: RwLock::new(HashMap::new()),
             process_exit_seen_at: RwLock::new(HashMap::new()),
+            discovery_lock: Mutex::new(()),
         })
     }
 
@@ -117,6 +122,12 @@ impl SessionSupervisor {
         // Keep the ID counter ahead of any IDs we have ever persisted.
         for ps in &persisted {
             self.bump_id_counter_from_session_id(&ps.session_id);
+        }
+        // Thoughts can outlive the session registry. If we don't also advance from
+        // thought snapshot keys, a fresh boot with an empty registry can reuse
+        // an old `sess_N` and immediately inherit stale thought text.
+        for session_id in thoughts.keys() {
+            self.bump_id_counter_from_session_id(session_id);
         }
 
         if !persisted.is_empty() {
@@ -183,6 +194,17 @@ impl SessionSupervisor {
     /// Discover existing tmux sessions and create actors for each one.
     /// Called once at server startup.
     pub async fn discover_tmux_sessions(self: &Arc<Self>) -> anyhow::Result<()> {
+        self.discover_tmux_sessions_with_reason("startup_discovery")
+            .await
+    }
+
+    /// Discover existing tmux sessions, attaching only sessions not already
+    /// tracked by an in-memory actor, and emit Created events with `reason`.
+    pub async fn discover_tmux_sessions_with_reason(
+        self: &Arc<Self>,
+        reason: &'static str,
+    ) -> anyhow::Result<()> {
+        let _discovery_guard = self.discovery_lock.lock().await;
         let output = Command::new("tmux")
             .args(["list-sessions", "-F", "#{session_name}"])
             .output()
@@ -190,7 +212,7 @@ impl SessionSupervisor {
 
         let mut discovery_reliable = true;
         let mut highest_numeric: u64 = 0;
-        let mut discovered_tmux_names: Vec<String> = Vec::new();
+        let mut listed_tmux_names: Vec<String> = Vec::new();
         match output {
             Ok(output) if output.status.success() => {
                 let stdout = String::from_utf8_lossy(&output.stdout);
@@ -199,26 +221,34 @@ impl SessionSupervisor {
                     if tmux_name.is_empty() {
                         continue;
                     }
+                    listed_tmux_names.push(tmux_name);
+                }
 
-                    // Track the highest numeric name so our counter stays ahead.
-                    if let Ok(n) = tmux_name.parse::<u64>() {
-                        if n >= highest_numeric {
-                            highest_numeric = n + 1;
-                        }
+                let tracked_tmux_names: HashSet<String> = {
+                    let sessions = self.sessions.read().await;
+                    sessions.values().map(|h| h.tmux_name.clone()).collect()
+                };
+                let stale_session_ids_by_tmux: HashMap<String, String> = {
+                    let stale = self.stale_sessions.read().await;
+                    let mut by_tmux = HashMap::new();
+                    for s in stale.iter() {
+                        by_tmux
+                            .entry(s.tmux_name.clone())
+                            .or_insert_with(|| s.session_id.clone());
                     }
+                    by_tmux
+                };
 
-                    discovered_tmux_names.push(tmux_name.clone());
+                let (candidates, planned_highest_numeric) = plan_tmux_discovery_candidates(
+                    &listed_tmux_names,
+                    &tracked_tmux_names,
+                    &stale_session_ids_by_tmux,
+                );
+                highest_numeric = planned_highest_numeric;
 
-                    // Check if this tmux session matches a stale persisted session.
-                    let reuse_id = {
-                        let stale = self.stale_sessions.read().await;
-                        stale
-                            .iter()
-                            .find(|s| s.tmux_name == tmux_name)
-                            .map(|s| s.session_id.clone())
-                    };
-
-                    let session_id = match reuse_id {
+                for candidate in candidates {
+                    let tmux_name = candidate.tmux_name;
+                    let session_id = match candidate.reuse_session_id {
                         Some(id) => {
                             // Reused IDs must also advance the counter so future creates
                             // don't accidentally collide with restored sessions.
@@ -243,6 +273,15 @@ impl SessionSupervisor {
                     ) {
                         Ok(handle) => {
                             let mut sessions = self.sessions.write().await;
+                            if sessions.values().any(|h| h.tmux_name == tmux_name) {
+                                debug!(
+                                    tmux_name = %tmux_name,
+                                    "skipping duplicate discovered tmux session"
+                                );
+                                drop(sessions);
+                                let _ = handle.cmd_tx.send(SessionCommand::Shutdown).await;
+                                continue;
+                            }
                             sessions.insert(session_id.clone(), handle);
 
                             // Broadcast lifecycle event.
@@ -250,7 +289,7 @@ impl SessionSupervisor {
                             let _ = self.lifecycle_tx.send(LifecycleEvent::Created {
                                 session_id,
                                 summary,
-                                reason: "startup_discovery".into(),
+                                reason: reason.into(),
                                 sprite_pack: None,
                             });
                         }
@@ -280,6 +319,7 @@ impl SessionSupervisor {
         // For sessions still missing from tmux, emit startup exit/deletion events
         // and then drop them so bootstrap does not keep phantom entries forever.
         if discovery_reliable {
+            let discovered_tmux_names: HashSet<String> = listed_tmux_names.into_iter().collect();
             let unresolved_stale = {
                 let mut stale = self.stale_sessions.write().await;
                 stale.retain(|s| !discovered_tmux_names.contains(&s.tmux_name));
@@ -1172,6 +1212,47 @@ async fn kill_tmux_session(tmux_name: &str) -> anyhow::Result<()> {
     ))
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DiscoveryCandidate {
+    tmux_name: String,
+    reuse_session_id: Option<String>,
+}
+
+fn plan_tmux_discovery_candidates(
+    listed_tmux_names: &[String],
+    tracked_tmux_names: &HashSet<String>,
+    stale_session_ids_by_tmux: &HashMap<String, String>,
+) -> (Vec<DiscoveryCandidate>, u64) {
+    let mut seen_tmux_names = HashSet::new();
+    let mut highest_numeric = 0_u64;
+    let mut candidates = Vec::new();
+
+    for tmux_name in listed_tmux_names {
+        if tmux_name.is_empty() {
+            continue;
+        }
+
+        if let Ok(n) = tmux_name.parse::<u64>() {
+            highest_numeric = highest_numeric.max(n.saturating_add(1));
+        }
+
+        if !seen_tmux_names.insert(tmux_name.clone()) {
+            continue;
+        }
+
+        if tracked_tmux_names.contains(tmux_name) {
+            continue;
+        }
+
+        candidates.push(DiscoveryCandidate {
+            tmux_name: tmux_name.clone(),
+            reuse_session_id: stale_session_ids_by_tmux.get(tmux_name).cloned(),
+        });
+    }
+
+    (candidates, highest_numeric)
+}
+
 fn next_session_counter(session_id: &str) -> Option<u64> {
     let n = session_id.strip_prefix("sess_")?.parse::<u64>().ok()?;
     Some(n.saturating_add(1))
@@ -1198,7 +1279,9 @@ fn ready_process_exit_ids(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::Utc;
     use std::iter::FromIterator;
+    use tempfile::tempdir;
 
     #[test]
     fn next_session_counter_parses_expected_format() {
@@ -1271,5 +1354,99 @@ mod tests {
         );
         assert!(ready.is_empty());
         assert!(!seen.contains_key("sess_1"));
+    }
+
+    #[tokio::test]
+    async fn init_persistence_bumps_id_counter_from_thought_snapshot_ids() {
+        let dir = tempdir().expect("tempdir");
+        let store = FileStore::new(dir.path()).await.expect("file store");
+        store
+            .save_thought(
+                "sess_42",
+                Some("stale thought"),
+                7,
+                128_000,
+                ThoughtState::Holding,
+                ThoughtSource::CarryForward,
+                None,
+            )
+            .await;
+
+        let supervisor = SessionSupervisor::new(Arc::new(Config::default()));
+        supervisor.init_persistence(store).await;
+
+        let allocated = supervisor.allocate_unique_session_id().await;
+        assert_eq!(allocated, "sess_43");
+    }
+
+    #[tokio::test]
+    async fn init_persistence_keeps_persisted_session_id_progression() {
+        let dir = tempdir().expect("tempdir");
+        let store = FileStore::new(dir.path()).await.expect("file store");
+        store
+            .save_sessions(&[PersistedSession {
+                session_id: "sess_7".to_string(),
+                tmux_name: "7".to_string(),
+                state: SessionState::Idle,
+                tool: Some("Codex".to_string()),
+                token_count: 0,
+                context_limit: 192_000,
+                thought: None,
+                thought_state: ThoughtState::Holding,
+                thought_source: ThoughtSource::CarryForward,
+                thought_updated_at: None,
+                last_skill: None,
+                objective_fingerprint: None,
+                cwd: "/tmp".to_string(),
+                last_activity_at: Utc::now(),
+            }])
+            .await;
+
+        let supervisor = SessionSupervisor::new(Arc::new(Config::default()));
+        supervisor.init_persistence(store).await;
+
+        let allocated = supervisor.allocate_unique_session_id().await;
+        assert_eq!(allocated, "sess_8");
+    }
+
+    #[test]
+    fn plan_tmux_discovery_skips_tracked_and_dedupes_names() {
+        let listed = vec![
+            "main".to_string(),
+            "main".to_string(),
+            "codex-123".to_string(),
+        ];
+        let tracked = HashSet::from_iter(["main".to_string()]);
+        let stale_by_tmux = HashMap::new();
+
+        let (candidates, highest_numeric) =
+            plan_tmux_discovery_candidates(&listed, &tracked, &stale_by_tmux);
+
+        assert_eq!(highest_numeric, 0);
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].tmux_name, "codex-123");
+        assert_eq!(candidates[0].reuse_session_id, None);
+    }
+
+    #[test]
+    fn plan_tmux_discovery_reuses_stale_id_and_bumps_numeric_counter() {
+        let listed = vec![
+            "7".to_string(),
+            "7".to_string(),
+            "codex-20260302-162713".to_string(),
+        ];
+        let tracked = HashSet::new();
+        let stale_by_tmux =
+            HashMap::from_iter([("codex-20260302-162713".to_string(), "sess_12".to_string())]);
+
+        let (candidates, highest_numeric) =
+            plan_tmux_discovery_candidates(&listed, &tracked, &stale_by_tmux);
+
+        assert_eq!(highest_numeric, 8);
+        assert_eq!(candidates.len(), 2);
+        assert_eq!(candidates[0].tmux_name, "7");
+        assert_eq!(candidates[0].reuse_session_id, None);
+        assert_eq!(candidates[1].tmux_name, "codex-20260302-162713");
+        assert_eq!(candidates[1].reuse_session_id.as_deref(), Some("sess_12"));
     }
 }

@@ -24,6 +24,13 @@ async fn list_sessions(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<SessionListResponse>, axum::response::Response> {
     auth.require_scope(AuthScope::SessionsRead)?;
+    if let Err(e) = state
+        .supervisor
+        .discover_tmux_sessions_with_reason("runtime_discovery")
+        .await
+    {
+        tracing::warn!("runtime tmux discovery failed: {e}");
+    }
     let sessions = state.supervisor.list_sessions().await;
     // The version counter is not tracked by the supervisor itself; we use 0
     // as a placeholder. A proper monotonic version can be added to the
@@ -51,9 +58,15 @@ async fn create_session(
         .create_session(body.name, body.cwd, body.spawn_tool)
         .await
     {
-        Ok(session) => (
+        Ok((session, sprite_pack)) => (
             StatusCode::CREATED,
-            Json(serde_json::to_value(CreateSessionResponse { session }).unwrap()),
+            Json(
+                serde_json::to_value(CreateSessionResponse {
+                    session,
+                    sprite_pack,
+                })
+                .unwrap(),
+            ),
         )
             .into_response(),
         Err(e) => {

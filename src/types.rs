@@ -328,7 +328,7 @@ fn default_bubble_precedence() -> BubblePrecedence {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionCreatedPayload {
-    pub reason: String, // "startup_discovery" | "api_create"
+    pub reason: String, // "startup_discovery" | "runtime_discovery" | "api_create"
     pub session: SessionSummary,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sprite_pack: Option<SpritePack>,
