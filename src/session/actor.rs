@@ -1332,6 +1332,7 @@ fn resolve_tmux_terminal_env(
 fn detect_skill_from_input_line(line: &str) -> Option<String> {
     extract_skill_from_xml_block(line)
         .or_else(|| extract_skill_from_dollar_token(line))
+        .or_else(|| extract_skill_from_slash_token(line))
         .or_else(|| extract_skill_from_using_marker(line))
 }
 
@@ -1359,6 +1360,21 @@ fn extract_skill_from_dollar_token(text: &str) -> Option<String> {
     re.captures_iter(text)
         .filter_map(|caps| caps.get(1).map(|m| m.as_str()))
         .filter(|value| is_probable_skill_name(value))
+        .filter_map(normalize_skill_name)
+        .last()
+}
+
+fn extract_skill_from_slash_token(text: &str) -> Option<String> {
+    static SLASH_SKILL_RE: OnceLock<Regex> = OnceLock::new();
+    let re = SLASH_SKILL_RE.get_or_init(|| {
+        Regex::new(r#"^\s*/([A-Za-z][A-Za-z0-9._-]{0,63})(?:\s|$)"#)
+            .expect("valid slash skill regex")
+    });
+
+    re.captures_iter(text)
+        .filter_map(|caps| caps.get(1).map(|m| m.as_str()))
+        .filter(|value| is_probable_skill_name(value))
+        .filter(|value| !is_common_filesystem_root_name(value))
         .filter_map(normalize_skill_name)
         .last()
 }
@@ -1400,6 +1416,29 @@ fn is_probable_skill_name(raw: &str) -> bool {
         return false;
     }
     raw.chars().any(|ch| ch.is_ascii_lowercase()) || raw.contains('-')
+}
+
+fn is_common_filesystem_root_name(raw: &str) -> bool {
+    matches!(
+        raw.to_ascii_lowercase().as_str(),
+        "bin"
+            | "dev"
+            | "etc"
+            | "home"
+            | "lib"
+            | "lib64"
+            | "mnt"
+            | "opt"
+            | "private"
+            | "proc"
+            | "sbin"
+            | "sys"
+            | "tmp"
+            | "usr"
+            | "users"
+            | "var"
+            | "volumes"
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -1508,6 +1547,21 @@ mod tests {
             detect_skill_from_input_line(line),
             Some("domain-planner".to_string())
         );
+    }
+
+    #[test]
+    fn detect_skill_falls_back_to_slash_token() {
+        let line = "/describe";
+        assert_eq!(
+            detect_skill_from_input_line(line),
+            Some("describe".to_string())
+        );
+    }
+
+    #[test]
+    fn detect_skill_ignores_common_root_path_slash_token() {
+        let line = "/tmp";
+        assert_eq!(detect_skill_from_input_line(line), None);
     }
 
     #[test]

@@ -130,7 +130,7 @@ describe("OverviewField context battery", () => {
 
     const pill = container.querySelector(".thronglet .thronglet-skill-pill");
     expect(pill).toBeInTheDocument();
-    expect(pill?.textContent).toContain("skill: describe");
+    expect(pill?.textContent).toContain("describe");
     expect(container.querySelector(".thronglet .context-gauge")).toBeInTheDocument();
   });
 });

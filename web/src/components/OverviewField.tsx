@@ -407,9 +407,9 @@ function ThrongletEntity({
         {session.last_skill && (
           <div
             class="thronglet-skill-pill"
-            title={`Last skill: ${session.last_skill}`}
+            title={`Last invoked skill: ${session.last_skill}`}
           >
-            skill: {session.last_skill}
+            {session.last_skill}
           </div>
         )}
         {showGauge && (
