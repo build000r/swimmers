@@ -8,7 +8,10 @@ import { realtime, spritePacks } from "@/app";
 import type { TerminalOutputFrame } from "@/services/realtime";
 import type { CachedTerminal } from "@/hooks/useTerminalCache";
 import { fetchSnapshot, listSkills } from "@/services/api";
-import { copyTextToClipboard, readTextFromClipboard } from "@/lib/clipboard";
+import {
+  copyTextToClipboard,
+  readTextFromClipboardWithFallback,
+} from "@/lib/clipboard";
 import {
   encodeTerminalInputChunk,
   type TerminalInputEncodingState,
@@ -20,6 +23,7 @@ import {
   nextTouchScrollTop,
   type TouchScrollState,
 } from "@/lib/touch-scroll";
+import { resolveTerminalShortcutAction } from "@/lib/terminal-shortcuts";
 import {
   computeFastScrollThumbHeight,
   computeFastScrollThumbTop,
@@ -31,6 +35,7 @@ import {
   computeCopyDragEdgeDirection,
   mapClientYToBufferRow,
 } from "@/lib/copy-drag";
+import { orderQuickSkillChips } from "@/lib/skill-order";
 import { ThrongletSprite } from "./ThrongletSprite";
 
 function warn_silence_recovery(sessionId: string): void {
@@ -156,7 +161,7 @@ async function loadSkillRegistry(
 
   const request = listSkills(tool)
     .then((resp) => {
-      const skills = resp.skills ?? [];
+      const skills = orderQuickSkillChips(resp.skills ?? []);
       SKILL_REGISTRY_CACHE[tool] = skills;
       SKILL_REGISTRY_PENDING.delete(tool);
       return skills;
@@ -222,14 +227,6 @@ function ensureSearchAddon(term: Terminal): SearchAddon {
     SEARCH_ADDONS_BY_TERM.set(term, addon);
   }
   return addon;
-}
-
-function isAccelShortcut(event: KeyboardEvent, key: string): boolean {
-  return (
-    (event.metaKey || event.ctrlKey) &&
-    !event.altKey &&
-    event.key.toLowerCase() === key
-  );
 }
 
 export function TerminalWorkspace({
@@ -843,6 +840,20 @@ export function TerminalWorkspace({
     [observer, session.session_id],
   );
 
+  const pasteInput = useCallback(
+    (text: string) => {
+      if (observer || !text) return;
+      const term = termRef.current;
+      if (term) {
+        term.paste(text);
+        term.focus();
+        return;
+      }
+      sendInput(text);
+    },
+    [observer, sendInput],
+  );
+
   const clearLongPress = useCallback(() => {
     if (longPressTimerRef.current) {
       clearTimeout(longPressTimerRef.current);
@@ -1057,7 +1068,8 @@ export function TerminalWorkspace({
     fitAddonRef.current = fitAddon;
     searchAddonRef.current = ensureSearchAddon(term);
     term.attachCustomKeyEventHandler((event: KeyboardEvent) => {
-      if (isAccelShortcut(event, "c")) {
+      const shortcutAction = resolveTerminalShortcutAction(event, observer);
+      if (shortcutAction === "copy") {
         const selected = term.getSelection();
         if (!selected) return true;
         event.preventDefault();
@@ -1066,32 +1078,25 @@ export function TerminalWorkspace({
         });
         return false;
       }
-      if (isAccelShortcut(event, "v")) {
-        if (observer) return false;
-        event.preventDefault();
-        void readTextFromClipboard()
-          .then((text) => {
-            if (!text) {
-              pushActionToast("Clipboard is empty");
-              return;
-            }
-            sendInput(text);
-            pushActionToast("Pasted");
-          })
-          .catch(() => {
-            pushActionToast("Clipboard read failed");
-          });
+      if (shortcutAction === "block_paste") {
         return false;
+      }
+      if (shortcutAction === "native_paste") {
+        // Let browser/xterm handle keyboard paste natively for reliability.
+        return true;
       }
       return true;
     });
 
     const handlePasteEvent = (event: ClipboardEvent) => {
-      if (observer) return;
+      if (observer) {
+        event.preventDefault();
+        return;
+      }
       const text = event.clipboardData?.getData("text");
       if (!text) return;
       event.preventDefault();
-      sendInput(text);
+      pasteInput(text);
       pushActionToast("Pasted");
     };
     hostEl.addEventListener("paste", handlePasteEvent as EventListener);
@@ -1662,19 +1667,15 @@ export function TerminalWorkspace({
 
   const handlePasteAction = useCallback(async () => {
     if (observer) return;
-    try {
-      const text = await readTextFromClipboard();
-      if (!text) {
-        pushActionToast("Clipboard is empty");
-        return;
-      }
-      sendInput(text);
-      setShowTerminalActions(false);
-      pushActionToast("Pasted");
-    } catch {
-      pushActionToast("Clipboard read failed");
+    const text = await readTextFromClipboardWithFallback();
+    if (!text) {
+      pushActionToast("Paste canceled");
+      return;
     }
-  }, [observer, sendInput, pushActionToast]);
+    pasteInput(text);
+    setShowTerminalActions(false);
+    pushActionToast("Pasted");
+  }, [observer, pasteInput, pushActionToast]);
 
   const handleSelectAllAction = useCallback(() => {
     const term = termRef.current;
