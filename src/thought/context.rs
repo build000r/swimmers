@@ -23,6 +23,8 @@ pub struct ContextSnapshot {
     /// Most recent `input_tokens` from assistant message usage data.
     /// This approximates current context window utilization.
     pub token_count: u64,
+    /// Effective context window limit used for UI gauge calculations.
+    pub context_limit: u64,
 }
 
 /// A single action observed from the agent's JSONL log.
@@ -149,6 +151,7 @@ pub struct ClaudeCodeReader {
     bootstrapped: bool,
     /// Most recent input_tokens from assistant message usage.
     token_count: u64,
+    context_limit: u64,
     /// File paths claimed by other readers — skip these during discovery
     /// to avoid two sessions reading the same JSONL file.
     excluded_paths: Vec<PathBuf>,
@@ -165,6 +168,7 @@ impl ClaudeCodeReader {
             current_tool: None,
             bootstrapped: false,
             token_count: 0,
+            context_limit: crate::types::context_limit_for_tool(Some("Claude Code")),
             excluded_paths: excluded.to_vec(),
         }
     }
@@ -310,6 +314,8 @@ impl ContextReader for ClaudeCodeReader {
             self.recent_actions.clear();
             self.current_tool = None;
             self.bootstrapped = false;
+            self.token_count = 0;
+            self.context_limit = crate::types::context_limit_for_tool(Some("Claude Code"));
         }
 
         if !self.bootstrapped {
@@ -347,6 +353,7 @@ impl ContextReader for ClaudeCodeReader {
             recent_actions: last_n(&self.recent_actions, 5),
             current_tool: self.current_tool.clone(),
             token_count: self.token_count,
+            context_limit: self.context_limit,
         })
     }
 
@@ -370,6 +377,7 @@ pub struct CodexReader {
     current_tool: Option<AgentAction>,
     bootstrapped: bool,
     token_count: u64,
+    context_limit: u64,
     /// File paths claimed by other readers — skip these during discovery
     /// to avoid two sessions reading the same JSONL file.
     excluded_paths: Vec<PathBuf>,
@@ -386,6 +394,7 @@ impl CodexReader {
             current_tool: None,
             bootstrapped: false,
             token_count: 0,
+            context_limit: crate::types::context_limit_for_tool(Some("Codex")),
             excluded_paths: excluded.to_vec(),
         }
     }
@@ -508,6 +517,34 @@ impl CodexReader {
                 }
             }
 
+            // event_msg with type=token_count -> authoritative Codex usage info
+            if entry_type == "event_msg"
+                && payload.get("type").and_then(Value::as_str) == Some("token_count")
+            {
+                if let Some(input_tokens) = payload
+                    .get("info")
+                    .and_then(|info| info.get("total_token_usage"))
+                    .and_then(|usage| usage.get("input_tokens"))
+                    .and_then(Value::as_u64)
+                {
+                    self.token_count = input_tokens;
+                }
+
+                let context_window = payload
+                    .get("model_context_window")
+                    .and_then(Value::as_u64)
+                    .or_else(|| {
+                        payload
+                            .get("info")
+                            .and_then(|info| info.get("model_context_window"))
+                            .and_then(Value::as_u64)
+                    });
+
+                if let Some(limit) = context_window.filter(|limit| *limit > 0) {
+                    self.context_limit = limit;
+                }
+            }
+
             // response_item with type=function_call -> actions
             if entry_type == "response_item"
                 && payload.get("type").and_then(Value::as_str) == Some("function_call")
@@ -594,6 +631,8 @@ impl ContextReader for CodexReader {
             self.recent_actions.clear();
             self.current_tool = None;
             self.bootstrapped = false;
+            self.token_count = 0;
+            self.context_limit = crate::types::context_limit_for_tool(Some("Codex"));
         }
 
         if !self.bootstrapped {
@@ -629,6 +668,7 @@ impl ContextReader for CodexReader {
             recent_actions: last_n(&self.recent_actions, 5),
             current_tool: self.current_tool.clone(),
             token_count: self.token_count,
+            context_limit: self.context_limit,
         })
     }
 
@@ -748,6 +788,46 @@ mod tests {
         assert!(context_reader_for("Claude Code", "/tmp", &[]).is_some());
         assert!(context_reader_for("Codex", "/tmp", &[]).is_some());
         assert!(context_reader_for("Unknown", "/tmp", &[]).is_none());
+    }
+
+    #[test]
+    fn codex_reader_consumes_token_count_event_and_context_window() {
+        let mut reader = CodexReader::new("/tmp", &[]);
+        let entries = vec![serde_json::json!({
+            "type": "event_msg",
+            "payload": {
+                "type": "token_count",
+                "info": {
+                    "total_token_usage": { "input_tokens": 99_735_u64 }
+                },
+                "model_context_window": 258_400_u64
+            }
+        })];
+
+        reader.parse_entries(&entries);
+
+        assert_eq!(reader.token_count, 99_735);
+        assert_eq!(reader.context_limit, 258_400);
+    }
+
+    #[test]
+    fn codex_reader_keeps_previous_context_limit_when_event_lacks_window() {
+        let mut reader = CodexReader::new("/tmp", &[]);
+        let default_limit = reader.context_limit;
+        let entries = vec![serde_json::json!({
+            "type": "event_msg",
+            "payload": {
+                "type": "token_count",
+                "info": {
+                    "total_token_usage": { "input_tokens": 12_345_u64 }
+                }
+            }
+        })];
+
+        reader.parse_entries(&entries);
+
+        assert_eq!(reader.token_count, 12_345);
+        assert_eq!(reader.context_limit, default_limit);
     }
 
     #[test]

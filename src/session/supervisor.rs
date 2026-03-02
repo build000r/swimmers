@@ -553,10 +553,10 @@ impl SessionSupervisor {
                 summary.thought_state = thought_data.thought_state;
                 summary.thought_source = thought_data.thought_source;
                 summary.thought_updated_at = Some(thought_data.updated_at);
-                if summary.token_count == 0 {
+                if thought_data.token_count > 0 || summary.token_count == 0 {
                     summary.token_count = thought_data.token_count;
                 }
-                if summary.context_limit == 0 {
+                if thought_data.context_limit > 0 {
                     summary.context_limit = thought_data.context_limit;
                 }
             }

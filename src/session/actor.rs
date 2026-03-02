@@ -1,5 +1,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::fs;
 use std::io::Write as _;
+use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -937,37 +939,12 @@ impl SessionActor {
     }
 
     fn update_last_skill_from_input(&mut self, data: &[u8]) {
-        if data.is_empty() {
-            return;
-        }
-
-        let text = String::from_utf8_lossy(data);
-        for ch in text.chars() {
-            match ch {
-                '\r' | '\n' => {
-                    self.process_completed_input_line();
-                }
-                '\u{8}' | '\u{7f}' => {
-                    self.input_line_buffer.pop();
-                }
-                _ if ch.is_control() => {}
-                _ => {
-                    self.input_line_buffer.push(ch);
-                    if self.input_line_buffer.len() > 8_192 {
-                        self.input_line_buffer.clear();
-                    }
-                }
-            }
+        for line in drain_completed_input_lines(&mut self.input_line_buffer, data) {
+            self.process_completed_input_line(&line);
         }
     }
 
-    fn process_completed_input_line(&mut self) {
-        let line = self.input_line_buffer.trim().to_string();
-        self.input_line_buffer.clear();
-        if line.is_empty() {
-            return;
-        }
-
+    fn process_completed_input_line(&mut self, line: &str) {
         let Some(detected_skill) = detect_skill_from_input_line(&line) else {
             return;
         };
@@ -1336,6 +1313,42 @@ fn detect_skill_from_input_line(line: &str) -> Option<String> {
         .or_else(|| extract_skill_from_using_marker(line))
 }
 
+fn drain_completed_input_lines(buffer: &mut String, data: &[u8]) -> Vec<String> {
+    let mut completed = Vec::new();
+    if data.is_empty() {
+        return completed;
+    }
+
+    let text = String::from_utf8_lossy(data);
+    for ch in text.chars() {
+        match ch {
+            '\r' | '\n' => {
+                let line = buffer.trim().to_string();
+                buffer.clear();
+                if !line.is_empty() {
+                    completed.push(line);
+                }
+            }
+            // Ctrl+C/Ctrl+D should discard any partially typed command line.
+            '\u{3}' | '\u{4}' => {
+                buffer.clear();
+            }
+            '\u{8}' | '\u{7f}' => {
+                buffer.pop();
+            }
+            _ if ch.is_control() => {}
+            _ => {
+                buffer.push(ch);
+                if buffer.len() > 8_192 {
+                    buffer.clear();
+                }
+            }
+        }
+    }
+
+    completed
+}
+
 fn extract_skill_from_xml_block(text: &str) -> Option<String> {
     static SKILL_XML_RE: OnceLock<Regex> = OnceLock::new();
     let re = SKILL_XML_RE.get_or_init(|| {
@@ -1415,7 +1428,71 @@ fn is_probable_skill_name(raw: &str) -> bool {
     if raw.is_empty() {
         return false;
     }
-    raw.chars().any(|ch| ch.is_ascii_lowercase()) || raw.contains('-')
+
+    let normalized = raw.trim().to_ascii_lowercase();
+    if normalized.is_empty() {
+        return false;
+    }
+
+    if let Some(installed) = installed_skill_names() {
+        if installed.contains(&normalized) {
+            return true;
+        }
+
+        // Reject obvious partials when we can prove they prefix a real skill.
+        if installed.iter().any(|name| name.starts_with(&normalized)) {
+            return false;
+        }
+    }
+
+    // Short tokens are most often partial drafts (e.g. $c, $com, $comm).
+    // Allow a known short skill name used in this environment.
+    if normalized.len() < 5 {
+        return normalized == "gog";
+    }
+
+    normalized.chars().any(|ch| ch.is_ascii_lowercase()) || normalized.contains('-')
+}
+
+fn installed_skill_names() -> Option<&'static HashSet<String>> {
+    static INSTALLED_SKILLS: OnceLock<Option<HashSet<String>>> = OnceLock::new();
+    INSTALLED_SKILLS
+        .get_or_init(load_installed_skill_names)
+        .as_ref()
+}
+
+fn load_installed_skill_names() -> Option<HashSet<String>> {
+    let home = std::env::var("HOME").ok()?;
+    let mut names = HashSet::new();
+
+    for rel_root in [".codex/skills", ".claude/skills"] {
+        let root = PathBuf::from(&home).join(rel_root);
+        let entries = match fs::read_dir(root) {
+            Ok(entries) => entries,
+            Err(_) => continue,
+        };
+
+        for entry in entries.flatten() {
+            let Ok(file_type) = entry.file_type() else {
+                continue;
+            };
+            if !file_type.is_dir() {
+                continue;
+            }
+
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if let Some(normalized) = normalize_skill_name(&name) {
+                names.insert(normalized);
+            }
+        }
+    }
+
+    if names.is_empty() {
+        None
+    } else {
+        Some(names)
+    }
 }
 
 fn is_common_filesystem_root_name(raw: &str) -> bool {
@@ -1482,8 +1559,8 @@ fn pty_read_loop(
 mod tests {
     use super::{
         capture_pane_tail, detect_skill_from_input_line, detect_tool_from_command_line,
-        detect_tool_from_process_entry, parse_process_entry, resolve_tmux_terminal_env,
-        ProcessEntry,
+        detect_tool_from_process_entry, drain_completed_input_lines, parse_process_entry,
+        resolve_tmux_terminal_env, ProcessEntry,
     };
     use crate::session::replay_ring::ReplayRing;
 
@@ -1550,6 +1627,22 @@ mod tests {
     }
 
     #[test]
+    fn detect_skill_records_full_commit_name() {
+        let line = "$commit";
+        assert_eq!(
+            detect_skill_from_input_line(line),
+            Some("commit".to_string())
+        );
+    }
+
+    #[test]
+    fn detect_skill_ignores_short_partial_dollar_tokens() {
+        assert_eq!(detect_skill_from_input_line("$c"), None);
+        assert_eq!(detect_skill_from_input_line("$com"), None);
+        assert_eq!(detect_skill_from_input_line("$comm"), None);
+    }
+
+    #[test]
     fn detect_skill_falls_back_to_slash_token() {
         let line = "/describe";
         assert_eq!(
@@ -1568,6 +1661,25 @@ mod tests {
     fn detect_skill_ignores_common_shell_env_vars() {
         let line = "echo $HOME && echo $PATH";
         assert_eq!(detect_skill_from_input_line(line), None);
+    }
+
+    #[test]
+    fn completed_lines_drop_partial_skill_on_ctrl_c_carriage_return() {
+        let mut buffer = String::new();
+        assert!(drain_completed_input_lines(&mut buffer, b"$c").is_empty());
+        assert_eq!(buffer, "$c");
+
+        let lines = drain_completed_input_lines(&mut buffer, b"\x03\r");
+        assert!(lines.is_empty());
+        assert!(buffer.is_empty());
+    }
+
+    #[test]
+    fn completed_lines_emit_full_skill_after_chunked_input() {
+        let mut buffer = String::new();
+        assert!(drain_completed_input_lines(&mut buffer, b"$com").is_empty());
+        let lines = drain_completed_input_lines(&mut buffer, b"mit\r");
+        assert_eq!(lines, vec!["$commit".to_string()]);
     }
 
     #[test]
