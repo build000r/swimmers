@@ -95,6 +95,44 @@ fn basename(path_str: &str) -> &str {
     path_str.rsplit('/').next().unwrap_or(path_str)
 }
 
+/// Claude JSONL can contain multiple record kinds; scan a small prefix for
+/// top-level `cwd` fields and require an exact match when present.
+fn claude_file_matches_cwd(path: &Path, cwd: &str) -> bool {
+    use std::io::BufRead;
+
+    let file = match fs::File::open(path) {
+        Ok(file) => file,
+        Err(_) => return false,
+    };
+    let reader = std::io::BufReader::new(file);
+
+    let mut saw_cwd_field = false;
+    for line in reader.lines().take(64) {
+        let line = match line {
+            Ok(value) => value,
+            Err(_) => continue,
+        };
+        if line.trim().is_empty() {
+            continue;
+        }
+
+        let value: Value = match serde_json::from_str(&line) {
+            Ok(value) => value,
+            Err(_) => continue,
+        };
+
+        if let Some(entry_cwd) = value.get("cwd").and_then(Value::as_str) {
+            saw_cwd_field = true;
+            if entry_cwd == cwd {
+                return true;
+            }
+        }
+    }
+
+    // Legacy files may omit top-level cwd metadata; preserve old behavior.
+    !saw_cwd_field
+}
+
 // ---------------------------------------------------------------------------
 // Claude Code Reader
 // ---------------------------------------------------------------------------
@@ -142,6 +180,7 @@ impl ClaudeCodeReader {
         let mut files: Vec<(PathBuf, std::time::SystemTime)> = entries
             .filter_map(|e| e.ok())
             .filter(|e| e.path().extension().map_or(false, |ext| ext == "jsonl"))
+            .filter(|e| claude_file_matches_cwd(&e.path(), &self.cwd))
             .filter(|e| !self.excluded_paths.contains(&e.path()))
             .filter_map(|e| {
                 let md = e.metadata().ok()?;
@@ -666,6 +705,11 @@ fn extract_tool_detail(block: &Value) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+    use std::thread;
+    use std::time::Duration;
+
+    static HOME_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn parse_jsonl_lines_skips_bad() {
@@ -704,5 +748,54 @@ mod tests {
         assert!(context_reader_for("Claude Code", "/tmp", &[]).is_some());
         assert!(context_reader_for("Codex", "/tmp", &[]).is_some());
         assert!(context_reader_for("Unknown", "/tmp", &[]).is_none());
+    }
+
+    #[test]
+    fn claude_reader_discovery_filters_slug_collision_by_exact_cwd() {
+        let _lock = HOME_LOCK.lock().expect("lock HOME");
+        let tmp = tempfile::tempdir().expect("tempdir");
+
+        let cwd_a = "/tmp/a-b/c";
+        let cwd_b = "/tmp/a/b-c";
+        let slug_a = cwd_a.replace('/', "-");
+        let slug_b = cwd_b.replace('/', "-");
+        assert_eq!(slug_a, slug_b, "test requires slug collision");
+
+        let project_dir = tmp.path().join(".claude").join("projects").join(slug_a);
+        fs::create_dir_all(&project_dir).expect("mkdir");
+
+        let file_a = project_dir.join("session-a.jsonl");
+        fs::write(
+            &file_a,
+            format!(
+                "{{\"type\":\"user\",\"cwd\":\"{}\",\"message\":{{\"role\":\"user\",\"content\":\"TASK_A\"}}}}\n",
+                cwd_a
+            ),
+        )
+        .expect("write file a");
+        thread::sleep(Duration::from_millis(50));
+
+        let file_b = project_dir.join("session-b.jsonl");
+        fs::write(
+            &file_b,
+            format!(
+                "{{\"type\":\"user\",\"cwd\":\"{}\",\"message\":{{\"role\":\"user\",\"content\":\"TASK_B\"}}}}\n",
+                cwd_b
+            ),
+        )
+        .expect("write file b");
+
+        let previous_home = std::env::var_os("HOME");
+        std::env::set_var("HOME", tmp.path());
+
+        let reader = ClaudeCodeReader::new(cwd_a, &[]);
+        let discovered = reader.discover_file();
+        assert_eq!(discovered, Some(file_a));
+
+        if let Some(prev) = previous_home {
+            std::env::set_var("HOME", prev);
+        } else {
+            std::env::remove_var("HOME");
+        }
     }
 }
