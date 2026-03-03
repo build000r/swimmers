@@ -30,6 +30,13 @@ function gaugeColor(usageRatio: number): string {
   return "#4FC08D";
 }
 
+function gaugeUsageRatio(tokenCount: number, contextLimit: number): number {
+  if (!Number.isFinite(tokenCount) || !Number.isFinite(contextLimit) || contextLimit <= 0) {
+    return 0;
+  }
+  return Math.max(0, Math.min(tokenCount / contextLimit, 1));
+}
+
 function gaugeSegments(usageRatio: number): number {
   const remaining = 1 - usageRatio;
   return Math.round(remaining * 8);
@@ -273,13 +280,11 @@ function ThrongletEntity({
   const bubbleIdlePreview = renderedBubble?.isIdlePreview ?? false;
   const showRenderedBubble = !!renderedBubble;
 
-  const showGauge = session.context_limit > 0;
-  const gaugeRatio = session.context_limit
-    ? Math.min(session.token_count / session.context_limit, 1)
-    : 0;
-  const gaugePercentLeft = session.context_limit
-    ? Math.max(0, Math.min(100, Math.round((1 - session.token_count / session.context_limit) * 100)))
-    : 0;
+  const showGauge = Number.isFinite(session.context_limit) && session.context_limit > 0;
+  const gaugeRatio = gaugeUsageRatio(session.token_count, session.context_limit);
+  const gaugeFillSegments = gaugeSegments(gaugeRatio);
+  const gaugeFillWidth = `${(gaugeFillSegments / 8) * 100}%`;
+  const gaugePercentLeft = Math.round((1 - gaugeRatio) * 100);
 
   // Raw mode: show session data card instead of sprite
   if (rawMode) {
@@ -419,7 +424,8 @@ function ThrongletEntity({
                 class="context-gauge-fill"
                 style={{
                   "--gauge-color": gaugeColor(gaugeRatio),
-                  "--gauge-segments": gaugeSegments(gaugeRatio),
+                  "--gauge-segments": gaugeFillSegments,
+                  width: gaugeFillWidth,
                 } as Record<string, string | number>}
               />
             </div>

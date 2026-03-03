@@ -64,6 +64,7 @@ describe("OverviewField context battery", () => {
     const initialFill = container.querySelector(".context-gauge-fill");
     expect(initialFill).toBeInTheDocument();
     expect(initialFill?.getAttribute("style") ?? "").toContain("--gauge-segments: 6");
+    expect(initialFill?.getAttribute("style") ?? "").toContain("width: 75%;");
     expect(container.querySelector(".context-gauge")?.className ?? "").not.toContain(
       "critical",
     );
@@ -88,7 +89,51 @@ describe("OverviewField context battery", () => {
     const criticalFill = container.querySelector(".context-gauge-fill");
     expect(criticalGauge?.className ?? "").toContain("critical");
     expect(criticalFill?.getAttribute("style") ?? "").toContain("--gauge-segments: 1");
+    expect(criticalFill?.getAttribute("style") ?? "").toContain("width: 12.5%;");
     expect(container.querySelector(".context-gauge-percent")?.textContent).toBe("15% left");
+  });
+
+  it("renders a full battery bar at 100% left and clamps over-limit values to empty", () => {
+    const { container, rerender } = render(
+      <OverviewField
+        sessions={[
+          makeSession({
+            session_id: "sess-001",
+            token_count: 0,
+            context_limit: 200_000,
+          }),
+        ]}
+        onTapSession={noop}
+        onDragToBottom={noop}
+        onCreateSession={noopCreate}
+      />,
+    );
+
+    const fullFill = container.querySelector(".context-gauge-fill");
+    expect(fullFill).toBeInTheDocument();
+    expect(fullFill?.getAttribute("style") ?? "").toContain("--gauge-segments: 8");
+    expect(fullFill?.getAttribute("style") ?? "").toContain("width: 100%;");
+    expect(container.querySelector(".context-gauge-percent")?.textContent).toBe("100% left");
+
+    rerender(
+      <OverviewField
+        sessions={[
+          makeSession({
+            session_id: "sess-001",
+            token_count: 250_000,
+            context_limit: 200_000,
+          }),
+        ]}
+        onTapSession={noop}
+        onDragToBottom={noop}
+        onCreateSession={noopCreate}
+      />,
+    );
+
+    const emptyFill = container.querySelector(".context-gauge-fill");
+    expect(emptyFill?.getAttribute("style") ?? "").toContain("--gauge-segments: 0");
+    expect(emptyFill?.getAttribute("style") ?? "").toContain("width: 0%;");
+    expect(container.querySelector(".context-gauge-percent")?.textContent).toBe("0% left");
   });
 
   it("does not render a gauge when context limit is zero", () => {

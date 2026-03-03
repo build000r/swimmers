@@ -2,6 +2,8 @@ import { defineConfig } from "vite";
 import preact from "@preact/preset-vite";
 import { resolve } from "path";
 
+const DEV_ALLOWED_HOSTS = [".ts.net", ".tailnet", ".local"];
+
 export default defineConfig({
   plugins: [preact()],
   resolve: {
@@ -10,6 +12,7 @@ export default defineConfig({
     },
   },
   server: {
+    allowedHosts: DEV_ALLOWED_HOSTS,
     proxy: {
       "/v1/realtime": {
         target: "http://localhost:3210",

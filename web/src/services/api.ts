@@ -5,6 +5,7 @@ import type {
   TerminalSnapshot,
   SessionPaneTailResponse,
   DirListResponse,
+  DirRestartResponse,
   SkillListResponse,
   SkillRegistryTool,
   SpawnTool,
@@ -52,10 +53,26 @@ export async function createSession(
 }
 
 /** GET /v1/dirs - list subdirectories */
-export async function listDirs(path?: string): Promise<DirListResponse> {
-  const params = path ? `?path=${encodeURIComponent(path)}` : "";
-  const res = await fetch(`${BASE}/dirs${params}`);
+export async function listDirs(
+  path?: string,
+  managedOnly = false,
+): Promise<DirListResponse> {
+  const params = new URLSearchParams();
+  if (path) params.set("path", path);
+  if (managedOnly) params.set("managed_only", "true");
+  const query = params.toString();
+  const res = await fetch(`${BASE}/dirs${query ? `?${query}` : ""}`);
   return json<DirListResponse>(res);
+}
+
+/** POST /v1/dirs/restart - restart mapped service(s) for a folder */
+export async function restartDirServices(path: string): Promise<DirRestartResponse> {
+  const res = await fetch(`${BASE}/dirs/restart`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ path }),
+  });
+  return json<DirRestartResponse>(res);
 }
 
 /** GET /v1/skills?tool=claude|codex - list installed skills */

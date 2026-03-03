@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from "preact/hooks";
 import type { DirEntry, SpawnTool } from "@/types";
+import { copyTextToClipboard } from "@/lib/clipboard";
 
 interface SpawnMenuProps {
   x: number;
@@ -19,6 +20,8 @@ export function SpawnMenu({ x, y, onSelect, onClose }: SpawnMenuProps) {
   const [entries, setEntries] = useState<DirEntry[]>([]);
   const [currentPath, setCurrentPath] = useState<string>("");
   const [basePath, setBasePath] = useState<string>("");
+  const [managedOnly, setManagedOnly] = useState(true);
+  const [restartingPath, setRestartingPath] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [spawnMode, setSpawnMode] = useState<SpawnMode>(() => {
@@ -34,12 +37,12 @@ export function SpawnMenu({ x, y, onSelect, onClose }: SpawnMenuProps) {
   });
   const menuRef = useRef<HTMLDivElement>(null);
 
-  const fetchDirs = useCallback(async (path?: string) => {
+  const fetchDirs = useCallback(async (path: string | undefined, managedOnlyFilter: boolean) => {
     setLoading(true);
     setError(null);
     try {
       const { listDirs } = await import("@/services/api");
-      const resp = await listDirs(path);
+      const resp = await listDirs(path, managedOnlyFilter);
       setEntries(resp.entries);
       setCurrentPath(resp.path);
       // First fetch (no path arg) returns the base — remember it.
@@ -53,7 +56,7 @@ export function SpawnMenu({ x, y, onSelect, onClose }: SpawnMenuProps) {
   }, []);
 
   useEffect(() => {
-    fetchDirs();
+    fetchDirs(undefined, true);
   }, [fetchDirs]);
 
   useEffect(() => {
@@ -124,6 +127,29 @@ export function SpawnMenu({ x, y, onSelect, onClose }: SpawnMenuProps) {
   const parentPath = currentPath.replace(/\/[^/]+\/?$/, "") || "/";
   const atRoot = !basePath || currentPath === basePath.replace(/\/$/, "");
 
+  const pathForEntry = useCallback(
+    (entryName: string) => `${currentPath.replace(/\/$/, "")}/${entryName}`,
+    [currentPath],
+  );
+
+  const handleRestart = useCallback(
+    async (path: string) => {
+      if (restartingPath === path) return;
+      setRestartingPath(path);
+      setError(null);
+      try {
+        const { restartDirServices } = await import("@/services/api");
+        await restartDirServices(path);
+        await fetchDirs(currentPath || undefined, managedOnly);
+      } catch {
+        setError("restart failed");
+      } finally {
+        setRestartingPath(null);
+      }
+    },
+    [currentPath, fetchDirs, managedOnly, restartingPath],
+  );
+
   return (
     <div
       ref={menuRef}
@@ -140,7 +166,7 @@ export function SpawnMenu({ x, y, onSelect, onClose }: SpawnMenuProps) {
         {!atRoot && (
           <button
             class="spawn-menu-back"
-            onClick={() => fetchDirs(parentPath)}
+            onClick={() => fetchDirs(parentPath, managedOnly)}
             aria-label="Go up"
           >
             ..
@@ -151,7 +177,7 @@ export function SpawnMenu({ x, y, onSelect, onClose }: SpawnMenuProps) {
           class="spawn-menu-copy"
           onClick={(e: MouseEvent) => {
             e.stopPropagation();
-            navigator.clipboard.writeText(`cd ${currentPath} && tmux`);
+            void copyTextToClipboard(`cd ${currentPath} && tmux`);
             const btn = e.currentTarget as HTMLButtonElement;
             btn.textContent = "ok";
             setTimeout(() => { btn.textContent = "cp"; }, 600);
@@ -193,6 +219,31 @@ export function SpawnMenu({ x, y, onSelect, onClose }: SpawnMenuProps) {
         </button>
       </div>
 
+      <div class="spawn-menu-tools spawn-menu-tools-filter">
+        <button
+          class={`spawn-menu-tool ${managedOnly ? "active" : ""}`}
+          onClick={() => {
+            if (managedOnly) return;
+            setManagedOnly(true);
+            fetchDirs(currentPath || undefined, true);
+          }}
+          type="button"
+        >
+          Env managed
+        </button>
+        <button
+          class={`spawn-menu-tool ${!managedOnly ? "active" : ""}`}
+          onClick={() => {
+            if (!managedOnly) return;
+            setManagedOnly(false);
+            fetchDirs(currentPath || undefined, false);
+          }}
+          type="button"
+        >
+          All folders
+        </button>
+      </div>
+
       {/* Spawn here button */}
       <button
         class="spawn-menu-item spawn-here"
@@ -218,26 +269,48 @@ export function SpawnMenu({ x, y, onSelect, onClose }: SpawnMenuProps) {
         )}
         {!loading &&
           !error &&
-          entries.map((entry) => (
-            <button
-              key={entry.name}
-              class="spawn-menu-item"
-              onClick={() => {
-                const childPath = currentPath.replace(/\/$/, "") + "/" + entry.name;
-                if (entry.has_children) {
-                  fetchDirs(childPath);
-                } else {
-                  onSelect(
-                    childPath,
-                    spawnMode === "none" ? undefined : spawnMode,
-                  );
-                }
-              }}
-            >
-              <span class="spawn-menu-icon">{entry.has_children ? ">" : " "}</span>
-              <span class="spawn-menu-name">{entry.name}</span>
-            </button>
-          ))}
+          entries.map((entry) => {
+            const childPath = pathForEntry(entry.name);
+            const running = entry.is_running;
+            const isRestarting = restartingPath === childPath;
+            return (
+              <div key={entry.name} class="spawn-menu-item-row">
+                <button
+                  class="spawn-menu-item"
+                  type="button"
+                  onClick={() =>
+                    onSelect(
+                      childPath,
+                      spawnMode === "none" ? undefined : spawnMode,
+                    )}
+                >
+                  <span class="spawn-menu-icon">+</span>
+                  {typeof running === "boolean" && (
+                    <span
+                      class={`spawn-menu-status-dot ${running ? "running" : "stopped"}`}
+                      aria-hidden="true"
+                    />
+                  )}
+                  <span class="spawn-menu-name">{entry.name}</span>
+                </button>
+                {running && (
+                  <button
+                    class="spawn-menu-restart"
+                    type="button"
+                    disabled={isRestarting}
+                    onClick={(e: MouseEvent) => {
+                      e.stopPropagation();
+                      void handleRestart(childPath);
+                    }}
+                    aria-label={`Restart ${entry.name}`}
+                    title={`Restart ${entry.name}`}
+                  >
+                    {isRestarting ? "..." : "rst"}
+                  </button>
+                )}
+              </div>
+            );
+          })}
         {!loading && !error && entries.length === 0 && (
           <div class="spawn-menu-empty">empty</div>
         )}

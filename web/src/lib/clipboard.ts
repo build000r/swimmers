@@ -50,3 +50,27 @@ export async function readTextFromClipboard(): Promise<string> {
   }
   return navigator.clipboard.readText();
 }
+
+export async function readTextFromClipboardWithFallback(
+  promptFn?: (message?: string, defaultValue?: string) => string | null,
+): Promise<string> {
+  try {
+    const text = await readTextFromClipboard();
+    if (text) return text;
+  } catch {
+    // Fall through to manual paste prompt.
+  }
+
+  const fallbackPrompt =
+    promptFn ??
+    (typeof window !== "undefined" && typeof window.prompt === "function"
+      ? window.prompt.bind(window)
+      : null);
+  if (!fallbackPrompt) return "";
+
+  const manual = fallbackPrompt(
+    "Clipboard access blocked. Paste text here, then tap OK.",
+    "",
+  );
+  return manual ?? "";
+}

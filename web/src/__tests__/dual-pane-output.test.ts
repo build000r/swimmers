@@ -129,7 +129,7 @@ describe("dual-pane output continuity", () => {
 
       if (pref) return { target: pref };
       if (!mainZone) return { target: "main" };
-      if (!bottomZone) return { target: "bottom" };
+      if (!bottomZone) return { target: "main" };
 
       return {
         target:
@@ -153,6 +153,14 @@ describe("dual-pane output continuity", () => {
     // New session goes to oldest zone
     const result3 = pickTargetZone("sess-003", mainZone, bottomZone, null);
     expect(result3.existing).toBeUndefined();
+
+    // With only main occupied, default tap replaces main.
+    const result4 = pickTargetZone("sess-003", mainZone, null, null);
+    expect(result4.target).toBe("main");
+
+    // Secondary pane assignment is explicit preference.
+    const result5 = pickTargetZone("sess-003", mainZone, null, "bottom");
+    expect(result5.target).toBe("bottom");
   });
 
   it("replay_truncated events are independently delivered to each pane's listener", () => {

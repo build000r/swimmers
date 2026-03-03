@@ -7,7 +7,7 @@ import { makeSession } from "./helpers/fixtures";
 /**
  * Tests observer mode UI integration:
  *   - Observer badge is visible when observer=true
- *   - Create session controls (long-press hint) hidden in observer mode
+ *   - Create session controls (spawn hint) hidden in observer mode
  *   - Normal mode still shows controls
  */
 
@@ -60,7 +60,7 @@ describe("observer mode UI (OverviewField)", () => {
     expect(screen.queryByTestId("observer-badge")).toBeNull();
   });
 
-  it("hides 'Long press to create one' hint in observer mode (empty sessions)", () => {
+  it("hides spawn hint in observer mode (empty sessions)", () => {
     render(
       <OverviewField
         sessions={[]}
@@ -74,7 +74,7 @@ describe("observer mode UI (OverviewField)", () => {
     // "No sessions yet" should still appear
     expect(screen.getByText("No sessions yet")).toBeInTheDocument();
     // But the creation hint should not
-    expect(screen.queryByText("Long press to create one")).toBeNull();
+    expect(screen.queryByText("Tap anywhere to spawn one")).toBeNull();
   });
 
   it("shows creation hint in normal mode (empty sessions)", () => {
@@ -89,7 +89,7 @@ describe("observer mode UI (OverviewField)", () => {
     );
 
     expect(screen.getByText("No sessions yet")).toBeInTheDocument();
-    expect(screen.getByText("Long press to create one")).toBeInTheDocument();
+    expect(screen.getByText("Tap anywhere to spawn one")).toBeInTheDocument();
   });
 });
 

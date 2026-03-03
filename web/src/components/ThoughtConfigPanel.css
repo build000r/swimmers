@@ -113,6 +113,12 @@
   resize: vertical;
 }
 
+.thought-config-field input::placeholder,
+.thought-config-field textarea::placeholder {
+  color: #5a6a8a;
+  font-style: italic;
+}
+
 .thought-config-field input:focus,
 .thought-config-field textarea:focus {
   outline: none;

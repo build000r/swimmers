@@ -59,7 +59,7 @@ function isThoughtConfigPayload(value: unknown): value is ThoughtConfigPayload {
 
 function extractDaemonDefaults(payload: ThoughtConfigWire): DaemonDefaults | null {
   if (payload && typeof payload === "object") {
-    const dd = (payload as Record<string, unknown>).daemon_defaults;
+    const dd = (payload as unknown as Record<string, unknown>).daemon_defaults;
     if (dd && typeof dd === "object" && "model" in dd) {
       return dd as DaemonDefaults;
     }
@@ -148,5 +148,5 @@ export async function updateThoughtConfig(
   if (!payload) {
     return config;
   }
-  return unwrapConfig(payload);
+  return unwrapConfig(payload).config;
 }

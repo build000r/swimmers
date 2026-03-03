@@ -1,5 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { copyTextToClipboard } from "@/lib/clipboard";
+import {
+  copyTextToClipboard,
+  readTextFromClipboardWithFallback,
+} from "@/lib/clipboard";
 
 const clipboardDescriptor = Object.getOwnPropertyDescriptor(
   navigator,
@@ -120,5 +123,45 @@ describe("clipboard helpers", () => {
     expect(copied).toBe(false);
     expect(writeText).not.toHaveBeenCalled();
     expect(exec).not.toHaveBeenCalled();
+  });
+
+  it("prefers navigator.clipboard.readText when available", async () => {
+    const readText = vi.fn().mockResolvedValue("from clipboard");
+    const prompt = vi.fn(() => "from prompt");
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { readText },
+    });
+
+    const text = await readTextFromClipboardWithFallback(prompt);
+    expect(text).toBe("from clipboard");
+    expect(readText).toHaveBeenCalledTimes(1);
+    expect(prompt).not.toHaveBeenCalled();
+  });
+
+  it("falls back to prompt when clipboard read fails", async () => {
+    const readText = vi.fn().mockRejectedValue(new Error("denied"));
+    const prompt = vi.fn(() => "manual paste");
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { readText },
+    });
+
+    const text = await readTextFromClipboardWithFallback(prompt);
+    expect(text).toBe("manual paste");
+    expect(prompt).toHaveBeenCalledTimes(1);
+  });
+
+  it("returns empty string when prompt is canceled", async () => {
+    const readText = vi.fn().mockRejectedValue(new Error("denied"));
+    const prompt = vi.fn(() => null);
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { readText },
+    });
+
+    const text = await readTextFromClipboardWithFallback(prompt);
+    expect(text).toBe("");
+    expect(prompt).toHaveBeenCalledTimes(1);
   });
 });
