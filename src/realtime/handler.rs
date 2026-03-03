@@ -269,12 +269,14 @@ fn lifecycle_to_control_event(event: LifecycleEvent) -> ControlEvent {
             session_id,
             summary,
             reason,
+            sprite_pack,
         } => ControlEvent {
             event: "session_created".to_string(),
             session_id,
             payload: serde_json::to_value(SessionCreatedPayload {
                 reason,
                 session: summary,
+                sprite_pack,
             })
             .unwrap(),
         },

@@ -37,8 +37,8 @@ fn cache() -> &'static RwLock<HashMap<String, CacheEntry>> {
 pub async fn discover_sprite_pack(cwd: &str) -> Option<(String, SpritePack)> {
     let sprites_dir = walk_to_sprites_dir(cwd)?;
     let project_root = Path::new(&sprites_dir)
-        .parent()   // .throngterm/
-        .and_then(|p| p.parent())  // project root
+        .parent() // .throngterm/
+        .and_then(|p| p.parent()) // project root
         .map(|p| p.to_string_lossy().into_owned())?;
 
     // Check the current mtime of the sprites directory so we can invalidate
@@ -136,9 +136,7 @@ fn read_svg(dir: &Path, filename: &str, sprites_dir: &str) -> Option<String> {
 
 /// Return the mtime of a directory, or `None` if it cannot be stat'd.
 fn dir_mtime(path: &str) -> Option<SystemTime> {
-    std::fs::metadata(path)
-        .ok()
-        .and_then(|m| m.modified().ok())
+    std::fs::metadata(path).ok().and_then(|m| m.modified().ok())
 }
 
 // ---------------------------------------------------------------------------
