@@ -2,6 +2,16 @@ export interface TerminalInputEncodingState {
   pendingHighSurrogate: string;
 }
 
+export interface DispatchTerminalInputOptions {
+  observer: boolean;
+  chunk: string;
+  state: TerminalInputEncodingState;
+  encoder: TextEncoder;
+  send: (bytes: Uint8Array) => void;
+  refocus?: () => void;
+  refocusAfterSend?: boolean;
+}
+
 function isHighSurrogate(codeUnit: number): boolean {
   return codeUnit >= 0xd800 && codeUnit <= 0xdbff;
 }
@@ -29,4 +39,27 @@ export function encodeTerminalInputChunk(
 
   if (!combined) return null;
   return encoder.encode(combined);
+}
+
+/**
+ * Normalizes and dispatches terminal input to transport, optionally re-focusing
+ * the terminal for pointer/tap initiated actions.
+ */
+export function dispatchTerminalInput({
+  observer,
+  chunk,
+  state,
+  encoder,
+  send,
+  refocus,
+  refocusAfterSend = false,
+}: DispatchTerminalInputOptions): boolean {
+  if (observer || !chunk) return false;
+  const encoded = encodeTerminalInputChunk(chunk, state, encoder);
+  if (!encoded || encoded.length === 0) return false;
+  send(encoded);
+  if (refocusAfterSend) {
+    refocus?.();
+  }
+  return true;
 }

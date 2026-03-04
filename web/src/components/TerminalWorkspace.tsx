@@ -13,7 +13,7 @@ import {
   readTextFromClipboardWithFallback,
 } from "@/lib/clipboard";
 import {
-  encodeTerminalInputChunk,
+  dispatchTerminalInput,
   type TerminalInputEncodingState,
 } from "@/lib/terminal-input";
 import {
@@ -826,16 +826,16 @@ export function TerminalWorkspace({
   );
 
   const sendInput = useCallback(
-    (data: string) => {
-      if (observer || !data) return;
-      const encoded = encodeTerminalInputChunk(
-        data,
-        inputEncodingStateRef.current,
+    (data: string, options?: { refocus?: boolean }) => {
+      dispatchTerminalInput({
+        observer,
+        chunk: data,
+        state: inputEncodingStateRef.current,
         encoder,
-      );
-      if (!encoded || encoded.length === 0) return;
-      realtime.sendInput(session.session_id, encoded);
-      termRef.current?.focus();
+        send: (encoded) => realtime.sendInput(session.session_id, encoded),
+        refocus: () => termRef.current?.focus(),
+        refocusAfterSend: options?.refocus ?? false,
+      });
     },
     [observer, session.session_id],
   );
@@ -849,7 +849,7 @@ export function TerminalWorkspace({
         term.focus();
         return;
       }
-      sendInput(text);
+      sendInput(text, { refocus: true });
     },
     [observer, sendInput],
   );
@@ -1452,9 +1452,9 @@ export function TerminalWorkspace({
       if (!normalized) return;
       const prefix = skillInvocationPrefix(sessionToolKind);
       if (submit) {
-        sendInput(`${prefix}${normalized}\r`);
+        sendInput(`${prefix}${normalized}\r`, { refocus: true });
       } else {
-        sendInput(`${prefix}${normalized} `);
+        sendInput(`${prefix}${normalized} `, { refocus: true });
       }
     },
     [isAgentSession, sessionToolKind, sendInput],
@@ -1568,7 +1568,7 @@ export function TerminalWorkspace({
         persistCommandChips(next);
         return;
       }
-      sendInput(`${command}\r`);
+      sendInput(`${command}\r`, { refocus: true });
     },
     [commandChips, editingCommandChips, persistCommandChips, sendInput],
   );
@@ -1578,7 +1578,7 @@ export function TerminalWorkspace({
       if (observer) return;
       const config = MOBILE_KEYS.find((item) => item.id === keyId);
       if (!config?.input) return;
-      sendInput(config.input);
+      sendInput(config.input, { refocus: true });
     },
     [observer, sendInput],
   );
@@ -1695,7 +1695,7 @@ export function TerminalWorkspace({
   const handleClearAction = useCallback(() => {
     if (observer) return;
     stopCopyDragMode();
-    sendInput("\x0c");
+    sendInput("\x0c", { refocus: true });
     setShowTerminalActions(false);
     pushActionToast("Sent Ctrl+L");
   }, [observer, sendInput, pushActionToast, stopCopyDragMode]);

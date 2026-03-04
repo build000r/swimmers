@@ -1,5 +1,6 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
+  dispatchTerminalInput,
   encodeTerminalInputChunk,
   type TerminalInputEncodingState,
 } from "@/lib/terminal-input";
@@ -54,5 +55,62 @@ describe("terminal input normalization", () => {
     );
     expect(decode(bytes)).toBe("deploy café — ready ✅\n");
     expect(state.pendingHighSurrogate).toBe("");
+  });
+
+  it("dispatches keyboard input without forcing refocus", () => {
+    const state = newState();
+    const send = vi.fn();
+    const refocus = vi.fn();
+    const sent = dispatchTerminalInput({
+      observer: false,
+      chunk: "ls -la\n",
+      state,
+      encoder,
+      send,
+      refocus,
+    });
+
+    expect(sent).toBe(true);
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(decode(send.mock.calls[0][0] as Uint8Array)).toBe("ls -la\n");
+    expect(refocus).not.toHaveBeenCalled();
+  });
+
+  it("supports explicit refocus for button/tap actions", () => {
+    const state = newState();
+    const send = vi.fn();
+    const refocus = vi.fn();
+    const sent = dispatchTerminalInput({
+      observer: false,
+      chunk: "npm test\r",
+      state,
+      encoder,
+      send,
+      refocus,
+      refocusAfterSend: true,
+    });
+
+    expect(sent).toBe(true);
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(refocus).toHaveBeenCalledTimes(1);
+  });
+
+  it("blocks dispatch and refocus in observer mode", () => {
+    const state = newState();
+    const send = vi.fn();
+    const refocus = vi.fn();
+    const sent = dispatchTerminalInput({
+      observer: true,
+      chunk: "whoami\n",
+      state,
+      encoder,
+      send,
+      refocus,
+      refocusAfterSend: true,
+    });
+
+    expect(sent).toBe(false);
+    expect(send).not.toHaveBeenCalled();
+    expect(refocus).not.toHaveBeenCalled();
   });
 });
