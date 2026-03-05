@@ -36,6 +36,7 @@ import {
   mapClientYToBufferRow,
 } from "@/lib/copy-drag";
 import { orderQuickSkillChips } from "@/lib/skill-order";
+import { useHeaderSwipeClose } from "@/hooks/useGestures";
 import { ThrongletSprite } from "./ThrongletSprite";
 
 function warn_silence_recovery(sessionId: string): void {
@@ -248,6 +249,9 @@ export function TerminalWorkspace({
   const actionToastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const longPressTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const longPressStartRef = useRef<{ x: number; y: number } | null>(null);
+  const closeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const closeQueuedRef = useRef(false);
+  const headerRef = useRef<HTMLElement>(null);
   const skillLongPressTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const skillPressRef = useRef<{
     skillName: string;
@@ -349,6 +353,7 @@ export function TerminalWorkspace({
     setShowTerminalActions(false);
     setShowFindBar(false);
     setFindNoMatch(false);
+    closeQueuedRef.current = false;
     inputEncodingStateRef.current.pendingHighSurrogate = "";
     lastHostSizeRef.current = null;
     lastResizeSentRef.current = null;
@@ -417,6 +422,10 @@ export function TerminalWorkspace({
     return () => {
       if (actionToastTimerRef.current) {
         clearTimeout(actionToastTimerRef.current);
+      }
+      if (closeTimerRef.current) {
+        clearTimeout(closeTimerRef.current);
+        closeTimerRef.current = null;
       }
       if (longPressTimerRef.current) {
         clearTimeout(longPressTimerRef.current);
@@ -1408,10 +1417,19 @@ export function TerminalWorkspace({
   }, [session.state, session.session_id, onSessionExit]);
 
   const handleClose = useCallback(() => {
-    if (rushingOff) return;
+    if (rushingOff || closeQueuedRef.current) return;
+    closeQueuedRef.current = true;
     setRushingOff(true);
-    setTimeout(() => onClose(), 200);
+    if (closeTimerRef.current) {
+      clearTimeout(closeTimerRef.current);
+    }
+    closeTimerRef.current = setTimeout(() => {
+      closeTimerRef.current = null;
+      onClose();
+    }, 200);
   }, [rushingOff, onClose]);
+
+  useHeaderSwipeClose(headerRef, handleClose);
 
   const handleTitleClick = useCallback(() => {
     void copyTextToClipboard(title).then((copied) => {
@@ -1831,15 +1849,22 @@ export function TerminalWorkspace({
         overflow: "hidden",
       }}
     >
-      <header class={`zone-header ${rushingOff ? "rushing-off" : ""}`}>
-        <div class="zone-sprite" onClick={handleClose}>
-          <ThrongletSprite
-            state={rushingOff ? "exited" : session.state}
-            tool={session.tool}
-            lastActivityAt={session.last_activity_at}
-            spritePack={session.sprite_pack_id ? spritePacks.value[session.sprite_pack_id] ?? null : null}
-          />
-        </div>
+      <header ref={headerRef} class={`zone-header ${rushingOff ? "rushing-off" : ""}`}>
+        <button
+          type="button"
+          class="zone-close-hitbox"
+          onClick={handleClose}
+          aria-label="Close terminal"
+        >
+          <span class="zone-sprite">
+            <ThrongletSprite
+              state={rushingOff ? "exited" : session.state}
+              tool={session.tool}
+              lastActivityAt={session.last_activity_at}
+              spritePack={session.sprite_pack_id ? spritePacks.value[session.sprite_pack_id] ?? null : null}
+            />
+          </span>
+        </button>
         <span class="zone-name">{cwdLabel(session.cwd) || session.tmux_name}</span>
         <span class="zone-title" onClick={handleTitleClick}>
           {titleCopied ? "copied!" : title}
