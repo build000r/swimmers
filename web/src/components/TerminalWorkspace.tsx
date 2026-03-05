@@ -17,13 +17,13 @@ import {
   type TerminalInputEncodingState,
 } from "@/lib/terminal-input";
 import {
-  beginTouchScroll,
-  createTouchScrollState,
-  endTouchScroll,
-  nextTouchScrollTop,
-  type TouchScrollState,
-} from "@/lib/touch-scroll";
+  hasDistinctHostSize,
+  hasDistinctTerminalGridSize,
+  type TerminalGridSize,
+  type TerminalHostSize,
+} from "@/lib/terminal-resize";
 import { resolveTerminalShortcutAction } from "@/lib/terminal-shortcuts";
+import { handleTerminalPasteEvent } from "@/lib/terminal-paste";
 import {
   computeFastScrollThumbHeight,
   computeFastScrollThumbTop,
@@ -271,7 +271,8 @@ export function TerminalWorkspace({
   const inputEncodingStateRef = useRef<TerminalInputEncodingState>({
     pendingHighSurrogate: "",
   });
-  const touchScrollStateRef = useRef<TouchScrollState>(createTouchScrollState());
+  const lastHostSizeRef = useRef<TerminalHostSize | null>(null);
+  const lastResizeSentRef = useRef<TerminalGridSize | null>(null);
   const viewportRef = useRef<HTMLElement | null>(null);
   const fastScrollHideTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const fastScrollRafRef = useRef<number | null>(null);
@@ -349,6 +350,8 @@ export function TerminalWorkspace({
     setShowFindBar(false);
     setFindNoMatch(false);
     inputEncodingStateRef.current.pendingHighSurrogate = "";
+    lastHostSizeRef.current = null;
+    lastResizeSentRef.current = null;
     viewportRef.current = null;
     setFastScrollOverflow(false);
     setFastScrollVisible(false);
@@ -880,6 +883,30 @@ export function TerminalWorkspace({
     let fitAddon: FitAddon;
     let hostEl: HTMLDivElement;
 
+    const readHostSize = (): TerminalHostSize => ({
+      width: hostEl.clientWidth,
+      height: hostEl.clientHeight,
+    });
+
+    const fitToHost = (force = false): boolean => {
+      const nextSize = readHostSize();
+      if (!force && !hasDistinctHostSize(lastHostSizeRef.current, nextSize)) {
+        return false;
+      }
+      lastHostSizeRef.current = nextSize;
+      fitAddon.fit();
+      return true;
+    };
+
+    const sendResize = (cols: number, rows: number): void => {
+      const nextSize: TerminalGridSize = { cols, rows };
+      if (!hasDistinctTerminalGridSize(lastResizeSentRef.current, nextSize)) {
+        return;
+      }
+      lastResizeSentRef.current = nextSize;
+      realtime.sendResize(session.session_id, cols, rows);
+    };
+
     const flushPendingFrames = () => {
       for (const frame of pendingFramesRef.current) {
         if (frame.seq > seqRef.current) {
@@ -946,10 +973,10 @@ export function TerminalWorkspace({
         // formatted output (colors, cursor positioning, TUI layout).
         const cols = term.cols;
         const rows = term.rows;
-        realtime.sendResize(session.session_id, cols + 1, rows);
+        sendResize(cols + 1, rows);
         setTimeout(() => {
           if (disposed) return;
-          realtime.sendResize(session.session_id, cols, rows);
+          sendResize(cols, rows);
         }, 100);
       } catch {
         if (disposed) return;
@@ -974,8 +1001,8 @@ export function TerminalWorkspace({
       container.appendChild(hostEl);
       setLifecycleState("snapshot_or_replay");
       realtime.subscribeSession(session.session_id, seqRef.current);
-      realtime.sendResize(session.session_id, term.cols, term.rows);
-      fitAddon.fit();
+      sendResize(term.cols, term.rows);
+      fitToHost(true);
       term.focus();
       markLive();
       scheduleRefreshFastScrollUi(false);
@@ -1020,11 +1047,11 @@ export function TerminalWorkspace({
         textarea.setAttribute("spellcheck", "false");
       }
 
-      fitAddon.fit();
+      fitToHost(true);
 
       setLifecycleState("snapshot_or_replay");
       realtime.subscribeSession(session.session_id);
-      realtime.sendResize(session.session_id, term.cols, term.rows);
+      sendResize(term.cols, term.rows);
 
       fetchSnapshot(session.session_id)
         .then((snapshot) => {
@@ -1043,10 +1070,10 @@ export function TerminalWorkspace({
           // generates new frames with seq > latest_seq that replace it.
           const c = term.cols;
           const r = term.rows;
-          realtime.sendResize(session.session_id, c + 1, r);
+          sendResize(c + 1, r);
           setTimeout(() => {
             if (disposed) return;
-            realtime.sendResize(session.session_id, c, r);
+            sendResize(c, r);
           }, 100);
         })
         .catch(() => {
@@ -1059,7 +1086,7 @@ export function TerminalWorkspace({
 
       focusTimerRef.current = setTimeout(() => {
         if (disposed) return;
-        fitAddon.fit();
+        fitToHost(false);
         term.focus();
       }, 350);
     }
@@ -1089,20 +1116,17 @@ export function TerminalWorkspace({
     });
 
     const handlePasteEvent = (event: ClipboardEvent) => {
-      if (observer) {
-        event.preventDefault();
-        return;
-      }
-      const text = event.clipboardData?.getData("text");
-      if (!text) return;
-      event.preventDefault();
-      pasteInput(text);
-      pushActionToast("Pasted");
+      handleTerminalPasteEvent({
+        observer,
+        event,
+        paste: pasteInput,
+        notifyPasted: () => pushActionToast("Pasted"),
+      });
     };
     hostEl.addEventListener("paste", handlePasteEvent as EventListener);
 
-    // iOS Safari can fail to propagate natural swipe scrolling into xterm's
-    // internal viewport. Bridge one-finger touch gestures to viewport.scrollTop.
+    // Preserve native iOS momentum scrolling in normal mode. We only intercept
+    // touch gestures while drag-copy mode is active.
     const queryViewport = () =>
       hostEl.querySelector(".xterm-viewport") as HTMLElement | null;
     let viewportEl: HTMLElement | null = null;
@@ -1134,74 +1158,32 @@ export function TerminalWorkspace({
       }, 0);
     }
 
-    let touchViewport: HTMLElement | null = null;
     const handleTouchScrollStart = (event: TouchEvent) => {
-      if (observer) return;
-      if (copyDragActiveRef.current) {
-        if (event.touches.length !== 1) {
-          endCopyDragSelection();
-          return;
-        }
-        const touch = event.touches[0];
-        if (!touch) return;
-        if (startCopyDragSelection(touch.clientY)) {
-          event.preventDefault();
-          event.stopPropagation();
-        }
-        return;
-      }
+      if (observer || !copyDragActiveRef.current) return;
       if (event.touches.length !== 1) {
-        endTouchScroll(touchScrollStateRef.current);
-        touchViewport = null;
-        return;
-      }
-      const viewport = queryViewport();
-      if (!viewport) return;
-      const touch = event.touches[0];
-      touchViewport = viewport;
-      beginTouchScroll(
-        touchScrollStateRef.current,
-        touch.clientY,
-        viewport.scrollTop,
-      );
-    };
-    const handleTouchScrollMove = (event: TouchEvent) => {
-      if (observer) return;
-      if (copyDragActiveRef.current) {
-        if (event.touches.length !== 1) return;
-        const touch = event.touches[0];
-        if (!touch) return;
-        if (moveCopyDragSelection(touch.clientY)) {
-          event.preventDefault();
-          event.stopPropagation();
-        }
-        return;
-      }
-      if (event.touches.length !== 1) return;
-      const viewport = touchViewport ?? queryViewport();
-      if (!viewport) return;
-      const touch = event.touches[0];
-      const next = nextTouchScrollTop(
-        touchScrollStateRef.current,
-        touch.clientY,
-      );
-      if (next === null) return;
-      const before = viewport.scrollTop;
-      viewport.scrollTop = next;
-      if (viewport.scrollTop !== before) {
-        noteFastScrollVelocity(viewport.scrollTop);
-        event.preventDefault();
-        event.stopPropagation();
-        scheduleRefreshFastScrollUi(true);
-      }
-    };
-    const handleTouchScrollEnd = () => {
-      if (copyDragActiveRef.current) {
         endCopyDragSelection();
         return;
       }
-      endTouchScroll(touchScrollStateRef.current);
-      touchViewport = null;
+      const touch = event.touches[0];
+      if (!touch) return;
+      if (startCopyDragSelection(touch.clientY)) {
+        event.preventDefault();
+        event.stopPropagation();
+      }
+    };
+    const handleTouchScrollMove = (event: TouchEvent) => {
+      if (observer || !copyDragActiveRef.current) return;
+      if (event.touches.length !== 1) return;
+      const touch = event.touches[0];
+      if (!touch) return;
+      if (moveCopyDragSelection(touch.clientY)) {
+        event.preventDefault();
+        event.stopPropagation();
+      }
+    };
+    const handleTouchScrollEnd = () => {
+      if (!copyDragActiveRef.current) return;
+      endCopyDragSelection();
     };
 
     const handleCopyDragPointerDown = (event: globalThis.PointerEvent) => {
@@ -1309,14 +1291,14 @@ export function TerminalWorkspace({
     const resizeDisposable = term.onResize(({ cols, rows }) => {
       if (resizeTimerRef.current) clearTimeout(resizeTimerRef.current);
       resizeTimerRef.current = setTimeout(() => {
-        realtime.sendResize(session.session_id, cols, rows);
+        sendResize(cols, rows);
       }, 100);
     });
 
     const handleWindowResize = () => {
       if (resizeTimerRef.current) clearTimeout(resizeTimerRef.current);
       resizeTimerRef.current = setTimeout(() => {
-        if (fitAddonRef.current) fitAddonRef.current.fit();
+        fitToHost(false);
         scheduleRefreshFastScrollUi(false);
       }, 100);
     };
@@ -2171,6 +2153,22 @@ export function TerminalWorkspace({
             onClick={() => setShowTerminalActions(true)}
           >
             Actions
+          </button>
+          {onBenchToggle && (
+            <button
+              type="button"
+              class={`mobile-keybar-btn ${isBenched ? "active" : ""}`}
+              onClick={() => onBenchToggle(session.session_id)}
+            >
+              {isBenched ? "Show" : "Hide"}
+            </button>
+          )}
+          <button
+            type="button"
+            class="mobile-keybar-btn mobile-keybar-btn-danger"
+            onClick={handleClose}
+          >
+            Exit
           </button>
         </div>
       )}
