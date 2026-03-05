@@ -128,6 +128,44 @@ npm run dev
 
 This runs the Vite dev server with HMR, proxying API requests to the Rust backend.
 
+### iPhone App Shell (Optional, Capacitor)
+
+The iOS wrapper lives under `web/ios` and loads your host URL directly.
+For personal/Tailscale use, set one fixed host URL before syncing the iOS project.
+
+```bash
+cd web
+
+# Serve Vite on all interfaces so iPhone can reach it over Tailscale
+npm run dev:host
+```
+
+In a second terminal:
+
+```bash
+cd web
+
+# Fast dev mode (hot reload via Vite on port 5173)
+THRONGTERM_IOS_SERVER_URL=http://<YOUR_TAILSCALE_IP>:5173 npm run ios:sync
+
+# Open in Xcode, then run on your iPhone
+npm run ios:open
+```
+
+Stable mode (Rust server on port `69420`):
+
+```bash
+cd web
+THRONGTERM_IOS_SERVER_URL=http://<YOUR_TAILSCALE_IP>:69420 npm run ios:sync
+npm run ios:open
+```
+
+Notes:
+- UI code changes in the host web app are reflected in the iPhone wrapper without rebuilding native code.
+- Native iOS shell changes still require an Xcode rebuild.
+- If the host is unreachable, the app shows a local error page with pull-to-refresh and an "Open in Safari" fallback button.
+- In the iOS app, tap the top-left `Host` button to change the server URL and reload without re-syncing from CLI.
+
 ### Run in Background (Optional)
 
 To keep it running after you close your terminal:
