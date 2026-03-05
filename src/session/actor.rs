@@ -1396,7 +1396,7 @@ fn extract_skill_from_using_marker(text: &str) -> Option<String> {
     static USING_SKILL_RE: OnceLock<Regex> = OnceLock::new();
     let re = USING_SKILL_RE.get_or_init(|| {
         Regex::new(
-            r#"(?i)\busing\s+(?:the\s+)?(?:skill\s+)?[`"']?([A-Za-z][A-Za-z0-9._/-]{0,63})[`"']?(?:\s+skill)?\b"#,
+            r#"(?i)\busing\s+(?:the\s+)?skill\s+[`"']?([A-Za-z][A-Za-z0-9._/-]{0,63})[`"']?(?:\s+skill)?\b"#,
         )
         .expect("valid using skill regex")
     });
@@ -1435,13 +1435,13 @@ fn is_probable_skill_name(raw: &str) -> bool {
     }
 
     if let Some(installed) = installed_skill_names() {
+        // Only enforce strict membership when the discovered registry looks
+        // complete enough to trust; tiny registries are often partial.
+        if installed.len() >= 5 {
+            return installed.contains(&normalized);
+        }
         if installed.contains(&normalized) {
             return true;
-        }
-
-        // Reject obvious partials when we can prove they prefix a real skill.
-        if installed.iter().any(|name| name.starts_with(&normalized)) {
-            return false;
         }
     }
 
@@ -1476,7 +1476,9 @@ fn load_installed_skill_names() -> Option<HashSet<String>> {
             let Ok(file_type) = entry.file_type() else {
                 continue;
             };
-            if !file_type.is_dir() {
+            let path = entry.path();
+            let is_skill_dir = file_type.is_dir() || (file_type.is_symlink() && path.is_dir());
+            if !is_skill_dir {
                 continue;
             }
 
@@ -1660,6 +1662,18 @@ mod tests {
     #[test]
     fn detect_skill_ignores_common_shell_env_vars() {
         let line = "echo $HOME && echo $PATH";
+        assert_eq!(detect_skill_from_input_line(line), None);
+    }
+
+    #[test]
+    fn detect_skill_ignores_unknown_dollar_token() {
+        let line = "please run $notarealskillzzzzz";
+        assert_eq!(detect_skill_from_input_line(line), None);
+    }
+
+    #[test]
+    fn detect_skill_ignores_generic_using_phrase_without_skill_keyword() {
+        let line = "using decision heuristics for this pass";
         assert_eq!(detect_skill_from_input_line(line), None);
     }
 

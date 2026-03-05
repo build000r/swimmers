@@ -280,7 +280,11 @@ function ThrongletEntity({
   const bubbleIdlePreview = renderedBubble?.isIdlePreview ?? false;
   const showRenderedBubble = !!renderedBubble;
 
-  const showGauge = Number.isFinite(session.context_limit) && session.context_limit > 0;
+  const showGauge =
+    Number.isFinite(session.context_limit) &&
+    session.context_limit > 0 &&
+    Number.isFinite(session.token_count) &&
+    session.token_count > 0;
   const gaugeRatio = gaugeUsageRatio(session.token_count, session.context_limit);
   const gaugeFillSegments = gaugeSegments(gaugeRatio);
   const gaugeFillWidth = `${(gaugeFillSegments / 8) * 100}%`;

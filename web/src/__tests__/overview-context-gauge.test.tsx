@@ -93,7 +93,7 @@ describe("OverviewField context battery", () => {
     expect(container.querySelector(".context-gauge-percent")?.textContent).toBe("15% left");
   });
 
-  it("renders a full battery bar at 100% left and clamps over-limit values to empty", () => {
+  it("hides the gauge when token usage is unavailable and clamps over-limit values to empty", () => {
     const { container, rerender } = render(
       <OverviewField
         sessions={[
@@ -109,11 +109,8 @@ describe("OverviewField context battery", () => {
       />,
     );
 
-    const fullFill = container.querySelector(".context-gauge-fill");
-    expect(fullFill).toBeInTheDocument();
-    expect(fullFill?.getAttribute("style") ?? "").toContain("--gauge-segments: 8");
-    expect(fullFill?.getAttribute("style") ?? "").toContain("width: 100%;");
-    expect(container.querySelector(".context-gauge-percent")?.textContent).toBe("100% left");
+    expect(container.querySelector(".context-gauge")).toBeNull();
+    expect(container.querySelector(".context-gauge-percent")).toBeNull();
 
     rerender(
       <OverviewField
