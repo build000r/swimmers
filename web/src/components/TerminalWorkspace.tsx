@@ -32,6 +32,12 @@ import {
   isNearScrollBottom,
 } from "@/lib/fast-scroll";
 import {
+  computeVisualViewportBottomInsetPx,
+  hasMeaningfulDelta,
+  shouldEnableTerminalWebgl,
+  type DevicePlatformSnapshot,
+} from "@/lib/mobile-perf";
+import {
   computeCopyDragEdgeDirection,
   mapClientYToBufferRow,
 } from "@/lib/copy-drag";
@@ -112,12 +118,15 @@ const LONG_PRESS_CANCEL_DISTANCE_PX = 8;
 const ACTION_TOAST_MS = 1200;
 const FAST_SCROLL_HIDE_MS = 1200;
 const FAST_SCROLL_MIN_THUMB_PX = 26;
+const FAST_SCROLL_THUMB_MIN_DELTA_PX = 2;
 const FAST_SCROLL_BOOST_THRESHOLD = 1.15;
+const KEYBAR_BOTTOM_MIN_DELTA_PX = 2;
 const COPY_DRAG_EDGE_RATIO = 0.2;
 const COPY_DRAG_EDGE_MIN_PX = 56;
 const COPY_DRAG_EDGE_MAX_PX = 140;
 const COPY_DRAG_AUTOSCROLL_MS = 20;
 const COPY_DRAG_STEP_MULTIPLIER = 1.45;
+const TERMINAL_WEBGL_OVERRIDE_STORAGE_KEY = "throngterm.terminal-webgl";
 
 const MOBILE_KEYS: MobileKeyConfig[] = [
   { id: "tab", label: "Tab", input: "\t" },
@@ -230,6 +239,30 @@ function ensureSearchAddon(term: Terminal): SearchAddon {
   return addon;
 }
 
+function readDevicePlatformSnapshot(): DevicePlatformSnapshot {
+  if (typeof navigator === "undefined") {
+    return {
+      userAgent: "",
+      platform: "",
+      maxTouchPoints: 0,
+    };
+  }
+  return {
+    userAgent: navigator.userAgent ?? "",
+    platform: navigator.platform ?? "",
+    maxTouchPoints: navigator.maxTouchPoints ?? 0,
+  };
+}
+
+function readTerminalWebglOverride(): string | null {
+  if (typeof window === "undefined") return null;
+  try {
+    return window.localStorage.getItem(TERMINAL_WEBGL_OVERRIDE_STORAGE_KEY);
+  } catch {
+    return null;
+  }
+}
+
 export function TerminalWorkspace({
   session,
   cached,
@@ -297,6 +330,8 @@ export function TerminalWorkspace({
   const copyDragAutoScrollTimerRef = useRef<ReturnType<typeof setInterval> | null>(
     null,
   );
+  const mobileKeybarBottomValueRef = useRef(0);
+  const mobileKeybarBottomRafRef = useRef<number | null>(null);
 
   const [title, setTitle] = useState(`tmux a -t ${session.tmux_name}`);
   const [titleCopied, setTitleCopied] = useState(false);
@@ -383,23 +418,46 @@ export function TerminalWorkspace({
     const viewport = window.visualViewport;
     if (!viewport) return;
 
-    const updateBottomOffset = () => {
-      const overlap = Math.max(
-        0,
-        window.innerHeight - (viewport.height + viewport.offsetTop),
+    const commitBottomOffset = () => {
+      const next = computeVisualViewportBottomInsetPx(
+        window.innerHeight,
+        viewport.height,
+        viewport.offsetTop,
       );
-      setMobileKeybarBottom(Math.round(overlap));
+      const previous = mobileKeybarBottomValueRef.current;
+      if (
+        previous !== 0 &&
+        next !== 0 &&
+        !hasMeaningfulDelta(previous, next, KEYBAR_BOTTOM_MIN_DELTA_PX)
+      ) {
+        return;
+      }
+      if (previous === next) return;
+      mobileKeybarBottomValueRef.current = next;
+      setMobileKeybarBottom(next);
     };
 
-    updateBottomOffset();
-    viewport.addEventListener("resize", updateBottomOffset);
-    viewport.addEventListener("scroll", updateBottomOffset);
-    window.addEventListener("orientationchange", updateBottomOffset);
+    const queueBottomOffsetUpdate = () => {
+      if (mobileKeybarBottomRafRef.current !== null) return;
+      mobileKeybarBottomRafRef.current = window.requestAnimationFrame(() => {
+        mobileKeybarBottomRafRef.current = null;
+        commitBottomOffset();
+      });
+    };
+
+    queueBottomOffsetUpdate();
+    viewport.addEventListener("resize", queueBottomOffsetUpdate);
+    viewport.addEventListener("scroll", queueBottomOffsetUpdate);
+    window.addEventListener("orientationchange", queueBottomOffsetUpdate);
 
     return () => {
-      viewport.removeEventListener("resize", updateBottomOffset);
-      viewport.removeEventListener("scroll", updateBottomOffset);
-      window.removeEventListener("orientationchange", updateBottomOffset);
+      if (mobileKeybarBottomRafRef.current !== null) {
+        cancelAnimationFrame(mobileKeybarBottomRafRef.current);
+        mobileKeybarBottomRafRef.current = null;
+      }
+      viewport.removeEventListener("resize", queueBottomOffsetUpdate);
+      viewport.removeEventListener("scroll", queueBottomOffsetUpdate);
+      window.removeEventListener("orientationchange", queueBottomOffsetUpdate);
     };
   }, []);
 
@@ -446,6 +504,10 @@ export function TerminalWorkspace({
       if (copyDragAutoScrollTimerRef.current) {
         clearInterval(copyDragAutoScrollTimerRef.current);
         copyDragAutoScrollTimerRef.current = null;
+      }
+      if (mobileKeybarBottomRafRef.current !== null) {
+        cancelAnimationFrame(mobileKeybarBottomRafRef.current);
+        mobileKeybarBottomRafRef.current = null;
       }
       fastScrollVelocityRef.current = 0;
       fastScrollLastSampleRef.current = null;
@@ -555,8 +617,8 @@ export function TerminalWorkspace({
     fastScrollHideTimerRef.current = setTimeout(() => {
       fastScrollHideTimerRef.current = null;
       if (fastScrollDragRef.current) return;
-      setFastScrollVisible(false);
-      setFastScrollBoosted(false);
+      setFastScrollVisible((current) => (current ? false : current));
+      setFastScrollBoosted((current) => (current ? false : current));
       fastScrollVelocityRef.current = 0;
     }, hideDelay);
   }, [observer, clearFastScrollHideTimer]);
@@ -565,12 +627,12 @@ export function TerminalWorkspace({
     (show = false) => {
       const viewport = viewportRef.current;
       if (!viewport || observer) {
-        setFastScrollOverflow(false);
-        setFastScrollVisible(false);
-        setFastScrollBoosted(false);
-        setFastScrollAtBottom(true);
-        setFastScrollThumbTop(0);
-        setFastScrollThumbHeight(0);
+        setFastScrollOverflow((current) => (current ? false : current));
+        setFastScrollVisible((current) => (current ? false : current));
+        setFastScrollBoosted((current) => (current ? false : current));
+        setFastScrollAtBottom((current) => (current ? current : true));
+        setFastScrollThumbTop((current) => (current === 0 ? current : 0));
+        setFastScrollThumbHeight((current) => (current === 0 ? current : 0));
         return;
       }
 
@@ -578,16 +640,15 @@ export function TerminalWorkspace({
       const scrollHeight = viewport.scrollHeight;
       const clientHeight = viewport.clientHeight;
       const overflow = hasFastScrollOverflow(scrollHeight, clientHeight);
-      setFastScrollOverflow(overflow);
-      setFastScrollAtBottom(
-        isNearScrollBottom(scrollTop, scrollHeight, clientHeight),
-      );
+      const atBottom = isNearScrollBottom(scrollTop, scrollHeight, clientHeight);
+      setFastScrollOverflow((current) => (current === overflow ? current : overflow));
+      setFastScrollAtBottom((current) => (current === atBottom ? current : atBottom));
 
       if (!overflow) {
-        setFastScrollVisible(false);
-        setFastScrollBoosted(false);
-        setFastScrollThumbTop(0);
-        setFastScrollThumbHeight(0);
+        setFastScrollVisible((current) => (current ? false : current));
+        setFastScrollBoosted((current) => (current ? false : current));
+        setFastScrollThumbTop((current) => (current === 0 ? current : 0));
+        setFastScrollThumbHeight((current) => (current === 0 ? current : 0));
         return;
       }
 
@@ -605,11 +666,22 @@ export function TerminalWorkspace({
         trackHeight,
         thumbHeight,
       );
-      setFastScrollThumbHeight(thumbHeight);
-      setFastScrollThumbTop(thumbTop);
+      setFastScrollThumbHeight((current) =>
+        current === thumbHeight ? current : thumbHeight,
+      );
+      setFastScrollThumbTop((current) => {
+        if (current === thumbTop) return current;
+        if (
+          !fastScrollDragRef.current &&
+          !hasMeaningfulDelta(current, thumbTop, FAST_SCROLL_THUMB_MIN_DELTA_PX)
+        ) {
+          return current;
+        }
+        return thumbTop;
+      });
 
       if (show || fastScrollDragRef.current) {
-        setFastScrollVisible(true);
+        setFastScrollVisible((current) => (current ? current : true));
         if (!fastScrollDragRef.current) {
           scheduleFastScrollHide();
         }
@@ -891,6 +963,11 @@ export function TerminalWorkspace({
     let term: Terminal;
     let fitAddon: FitAddon;
     let hostEl: HTMLDivElement;
+    const platformSnapshot = readDevicePlatformSnapshot();
+    const enableTerminalWebgl = shouldEnableTerminalWebgl(
+      platformSnapshot,
+      readTerminalWebglOverride(),
+    );
 
     const readHostSize = (): TerminalHostSize => ({
       width: hostEl.clientWidth,
@@ -1040,12 +1117,14 @@ export function TerminalWorkspace({
       term.loadAddon(fitAddon);
       term.open(hostEl);
 
-      try {
-        const webgl = new WebglAddon();
-        webgl.onContextLoss(() => webgl.dispose());
-        term.loadAddon(webgl);
-      } catch {
-        // WebGL not available, software renderer is fine.
+      if (enableTerminalWebgl) {
+        try {
+          const webgl = new WebglAddon();
+          webgl.onContextLoss(() => webgl.dispose());
+          term.loadAddon(webgl);
+        } catch {
+          // WebGL not available, software renderer is fine.
+        }
       }
 
       const textarea = hostEl.querySelector("textarea");
@@ -1142,10 +1221,18 @@ export function TerminalWorkspace({
     let viewportResizeObserver: ResizeObserver | null = null;
     let viewportAttachRetryTimer: ReturnType<typeof setTimeout> | null = null;
     const handleViewportScroll = () => {
-      if (viewportRef.current) {
-        noteFastScrollVelocity(viewportRef.current.scrollTop);
+      const viewport = viewportRef.current;
+      if (!viewport) {
+        scheduleRefreshFastScrollUi(false);
+        return;
       }
-      scheduleRefreshFastScrollUi(true);
+      noteFastScrollVelocity(viewport.scrollTop);
+      const shouldShow = !isNearScrollBottom(
+        viewport.scrollTop,
+        viewport.scrollHeight,
+        viewport.clientHeight,
+      );
+      scheduleRefreshFastScrollUi(shouldShow);
     };
     const attachViewport = (): boolean => {
       const viewport = queryViewport();
@@ -2155,6 +2242,34 @@ export function TerminalWorkspace({
 
       {!observer && (
         <div class="mobile-keybar" style={{ bottom: `${mobileKeybarBottom}px` }}>
+          <button
+            type="button"
+            class="mobile-keybar-btn mobile-keybar-btn-primary mobile-keybar-btn-danger"
+            onClick={handleClose}
+          >
+            Close
+          </button>
+          <button
+            type="button"
+            class="mobile-keybar-btn mobile-keybar-btn-primary"
+            onClick={() => void handleCopyAction()}
+          >
+            Copy
+          </button>
+          <button
+            type="button"
+            class="mobile-keybar-btn mobile-keybar-btn-primary"
+            onClick={() => void handlePasteAction()}
+          >
+            Paste
+          </button>
+          <button
+            type="button"
+            class="mobile-keybar-btn mobile-keybar-btn-primary"
+            onClick={() => setShowTerminalActions(true)}
+          >
+            Actions
+          </button>
           {MOBILE_KEYS.map((key) => (
             <button
               key={key.id}
@@ -2172,13 +2287,6 @@ export function TerminalWorkspace({
           >
             {copyDragActive ? "Done copy" : "Drag copy"}
           </button>
-          <button
-            type="button"
-            class="mobile-keybar-btn"
-            onClick={() => setShowTerminalActions(true)}
-          >
-            Actions
-          </button>
           {onBenchToggle && (
             <button
               type="button"
@@ -2188,13 +2296,6 @@ export function TerminalWorkspace({
               {isBenched ? "Show" : "Hide"}
             </button>
           )}
-          <button
-            type="button"
-            class="mobile-keybar-btn mobile-keybar-btn-danger"
-            onClick={handleClose}
-          >
-            Exit
-          </button>
         </div>
       )}
     </div>
