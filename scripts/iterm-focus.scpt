@@ -1,18 +1,59 @@
+on sessionPaneId(aSession)
+	try
+		tell application id "com.googlecode.iterm2"
+			return (unique id of aSession) as text
+		end tell
+	on error
+		return ""
+	end try
+end sessionPaneId
+
+on sessionTag(aSession)
+	try
+		tell application id "com.googlecode.iterm2"
+			tell aSession to set taggedId to variable "user.throngterm.session_id"
+		end tell
+		return taggedId as text
+	on error
+		return ""
+	end try
+end sessionTag
+
+on focusExistingSession(aWindow, aTab, aSession, targetSessionId)
+	my markWorkspaceSession(aSession, targetSessionId)
+	tell application id "com.googlecode.iterm2"
+		tell aWindow to select
+		tell aTab to select
+		tell aSession to select
+		activate
+	end tell
+	return my encodeResult("focused", aSession)
+end focusExistingSession
+
+on findSessionByPaneId(targetPaneId, targetSessionId)
+	if targetPaneId is "" then return ""
+	tell application id "com.googlecode.iterm2"
+		repeat with aWindow in windows
+			repeat with aTab in tabs of aWindow
+				repeat with aSession in sessions of aTab
+					if (my sessionPaneId(aSession)) is targetPaneId then
+						return my focusExistingSession(aWindow, aTab, aSession, targetSessionId)
+					end if
+				end repeat
+			end repeat
+		end repeat
+	end tell
+	return ""
+end findSessionByPaneId
+
 on findSessionByTag(targetSessionId)
 	tell application id "com.googlecode.iterm2"
 		repeat with aWindow in windows
 			repeat with aTab in tabs of aWindow
 				repeat with aSession in sessions of aTab
-					try
-						tell aSession to set taggedId to variable "user.throngterm.session_id"
-						if taggedId is targetSessionId then
-							tell aWindow to select
-							tell aTab to select
-							tell aSession to select
-							activate
-							return my encodeResult("focused", aSession)
-						end if
-					end try
+					if (my sessionTag(aSession)) is targetSessionId then
+						return my focusExistingSession(aWindow, aTab, aSession, targetSessionId)
+					end if
 				end repeat
 			end repeat
 		end repeat
@@ -145,9 +186,20 @@ on run argv
 	set targetSessionId to item 1 of argv
 	set tmuxName to item 2 of argv
 	set tmuxPath to item 3 of argv
-	set existingSession to my findSessionByTag(targetSessionId)
-	if existingSession is not "" then
-		return existingSession
+	set knownPaneId to ""
+	if (count of argv) is greater than or equal to 4 then set knownPaneId to item 4 of argv
+	if knownPaneId is not "" then
+		set existingSession to my findSessionByPaneId(knownPaneId, targetSessionId)
+		if existingSession is not "" then
+			return existingSession
+		end if
 	end if
+	repeat with attemptIndex from 1 to 3
+		set existingSession to my findSessionByTag(targetSessionId)
+		if existingSession is not "" then
+			return existingSession
+		end if
+		if attemptIndex is less than 3 then delay 0.1
+	end repeat
 	return my createOrSplitSession(targetSessionId, tmuxName, tmuxPath)
 end run
