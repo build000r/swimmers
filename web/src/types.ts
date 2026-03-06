@@ -96,6 +96,19 @@ export interface BootstrapResponse {
   sprite_packs: Record<string, SpritePack>;
 }
 
+export interface NativeDesktopStatus {
+  supported: boolean;
+  platform?: string | null;
+  app?: string | null;
+  reason?: string | null;
+}
+
+export interface NativeDesktopOpenResponse {
+  session_id: string;
+  status: "created" | "focused" | string;
+  pane_id?: string | null;
+}
+
 export interface SessionListResponse {
   sessions: SessionSummary[];
   version: number;

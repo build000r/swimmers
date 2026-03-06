@@ -198,6 +198,30 @@ pub struct BootstrapResponse {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NativeDesktopStatusResponse {
+    pub supported: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub platform: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub app: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NativeDesktopOpenRequest {
+    pub session_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NativeDesktopOpenResponse {
+    pub session_id: String,
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pane_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateSessionRequest {
     pub name: Option<String>,
     pub cwd: Option<String>,

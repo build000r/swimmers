@@ -2,6 +2,7 @@ mod api;
 mod auth;
 mod config;
 mod metrics;
+mod native;
 mod persistence;
 mod realtime;
 mod scroll;

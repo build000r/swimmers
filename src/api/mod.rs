@@ -1,5 +1,6 @@
 pub mod bootstrap;
 pub mod dirs;
+pub mod native;
 pub mod sessions;
 pub mod skills;
 pub mod thought_config;
@@ -30,6 +31,7 @@ pub fn api_router(config: Arc<Config>) -> Router<Arc<AppState>> {
     Router::new()
         .merge(bootstrap::routes())
         .merge(dirs::routes())
+        .merge(native::routes())
         .merge(skills::routes())
         .merge(sessions::routes())
         .merge(thought_config::routes())

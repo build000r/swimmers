@@ -2,6 +2,8 @@ import type {
   BootstrapResponse,
   SessionListResponse,
   CreateSessionResponse,
+  NativeDesktopStatus,
+  NativeDesktopOpenResponse,
   TerminalSnapshot,
   SessionPaneTailResponse,
   DirListResponse,
@@ -50,6 +52,24 @@ export async function createSession(
     }),
   });
   return json<CreateSessionResponse>(res);
+}
+
+/** GET /v1/native/status - whether localhost iTerm control is available */
+export async function fetchNativeDesktopStatus(): Promise<NativeDesktopStatus> {
+  const res = await fetch(`${BASE}/native/status`);
+  return json<NativeDesktopStatus>(res);
+}
+
+/** POST /v1/native/open - open/focus native iTerm pane for a session */
+export async function openNativeDesktopSession(
+  sessionId: string,
+): Promise<NativeDesktopOpenResponse> {
+  const res = await fetch(`${BASE}/native/open`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ session_id: sessionId }),
+  });
+  return json<NativeDesktopOpenResponse>(res);
 }
 
 /** GET /v1/dirs - list subdirectories */

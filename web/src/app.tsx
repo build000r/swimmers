@@ -6,6 +6,7 @@ import type {
   BootstrapResponse,
   SpawnTool,
   SpritePack,
+  NativeDesktopStatus,
 } from "@/types";
 import type {
   SessionStatePayload,
@@ -20,6 +21,8 @@ import {
   deleteSession as apiDeleteSession,
   fetchPaneTail,
   fetchSessions,
+  fetchNativeDesktopStatus,
+  openNativeDesktopSession,
 } from "@/services/api";
 import { RealtimeService } from "@/services/realtime";
 import type { WorkspaceLayoutState } from "@/services/workspace-history";
@@ -31,6 +34,7 @@ import {
 import { OverviewField } from "@/components/OverviewField";
 import { ZoneManager } from "@/components/ZoneManager";
 import { useObserverMode } from "@/hooks/useObserverMode";
+import { shouldOpenNativeDesktopByDefault } from "@/lib/native-desktop";
 
 // ---- Global signals ----
 export const sessions = signal<SessionSummary[]>([]);
@@ -265,6 +269,18 @@ interface DeleteFailureState {
   message: string;
 }
 
+interface NativeFailureState {
+  label: string;
+  message: string;
+}
+
+const NATIVE_DESKTOP_UNSUPPORTED: NativeDesktopStatus = {
+  supported: false,
+  platform: null,
+  app: null,
+  reason: null,
+};
+
 function sessionLabel(session: SessionSummary): string {
   const trimmed = session.cwd.trim();
   if (trimmed && trimmed !== "/") {
@@ -309,10 +325,15 @@ export function App() {
     useState<UndoDeleteState | null>(null);
   const [undoInFlight, setUndoInFlight] = useState(false);
   const [deleteFailure, setDeleteFailure] = useState<DeleteFailureState | null>(null);
+  const [nativeDesktop, setNativeDesktop] = useState<NativeDesktopStatus>(
+    NATIVE_DESKTOP_UNSUPPORTED,
+  );
+  const [nativeFailure, setNativeFailure] = useState<NativeFailureState | null>(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const bootstrapDataRef = useRef<BootstrapResponse | null>(null);
   const workspaceHistoryModeRef = useRef("url_state_v1");
   const undoToastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const nativeFailureTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const restoreRequestIdRef = useRef(0);
   const lastLayoutRef = useRef<WorkspaceLayoutState>({
     view: "overview",
@@ -348,6 +369,9 @@ export function App() {
     return () => {
       if (undoToastTimerRef.current) {
         clearTimeout(undoToastTimerRef.current);
+      }
+      if (nativeFailureTimerRef.current) {
+        clearTimeout(nativeFailureTimerRef.current);
       }
     };
   }, []);
@@ -489,6 +513,44 @@ export function App() {
     if (!deleteFailure) return;
     void deleteSessionWithFeedback(deleteFailure.sessionId);
   }, [deleteFailure, deleteSessionWithFeedback]);
+
+  const showNativeFailureToast = useCallback((label: string, message: string) => {
+    if (nativeFailureTimerRef.current) {
+      clearTimeout(nativeFailureTimerRef.current);
+      nativeFailureTimerRef.current = null;
+    }
+    setNativeFailure({ label, message });
+    nativeFailureTimerRef.current = setTimeout(() => {
+      setNativeFailure(null);
+      nativeFailureTimerRef.current = null;
+    }, 5000);
+  }, []);
+
+  const openNativeSession = useCallback(
+    async (session: SessionSummary) => {
+      if (!nativeDesktop.supported || isObserver) return false;
+      if (session.state === "exited") {
+        showNativeFailureToast(sessionLabel(session), "Session has already exited.");
+        return false;
+      }
+
+      if (session.state === "attention") {
+        realtime.sendDismissAttention(session.session_id);
+      }
+
+      try {
+        await openNativeDesktopSession(session.session_id);
+        setNativeFailure(null);
+        return true;
+      } catch (err) {
+        const message =
+          err instanceof Error ? err.message : "Failed to open session in iTerm";
+        showNativeFailureToast(sessionLabel(session), message);
+        return false;
+      }
+    },
+    [isObserver, nativeDesktop.supported, showNativeFailureToast],
+  );
 
   const writeWorkspaceLayout = useCallback(
     (layout: WorkspaceLayoutState, mode: "push" | "replace" = "push") => {
@@ -695,7 +757,10 @@ export function App() {
 
     async function init() {
       try {
-        const data = await apiFetch();
+        const [data, nativeDesktopStatus] = await Promise.all([
+          apiFetch(),
+          fetchNativeDesktopStatus().catch(() => NATIVE_DESKTOP_UNSUPPORTED),
+        ]);
         if (cancelled) return;
         bootstrapDataRef.current = data;
         const initialSessions = dedupeSessionsById(data.sessions);
@@ -711,6 +776,7 @@ export function App() {
         outputActivityUpdateAtRef.current.clear();
 
         setAuthMode(data.auth_mode);
+        setNativeDesktop(nativeDesktopStatus);
         workspaceHistoryModeRef.current = data.workspace_history_mode;
 
         const initialLayout = applyWorkspaceLayout(
@@ -1024,6 +1090,12 @@ export function App() {
         return;
       }
       if (!axeArmed) {
+        const target = sessions.value.find((s) => s.session_id === sessionId);
+        if (!target) return;
+        if (shouldOpenNativeDesktopByDefault(nativeDesktop, isObserver)) {
+          void openNativeSession(target);
+          return;
+        }
         openTerminal(sessionId);
         return;
       }
@@ -1032,7 +1104,16 @@ export function App() {
       if (navigator.vibrate) navigator.vibrate([20, 30, 20]);
       void deleteSessionWithFeedback(sessionId);
     },
-    [axeArmed, benchArmed, openTerminal, deleteSessionWithFeedback, handleBenchSession],
+    [
+      axeArmed,
+      benchArmed,
+      deleteSessionWithFeedback,
+      handleBenchSession,
+      isObserver,
+      nativeDesktop,
+      openNativeSession,
+      openTerminal,
+    ],
   );
 
   const showOverview = useCallback(() => {
@@ -1200,6 +1281,9 @@ export function App() {
                 };
               }
               upsertSession(resp.session);
+              if (nativeDesktop.supported) {
+                void openNativeSession(resp.session);
+              }
               return resp.session.session_id;
             } catch (err) {
               console.error("Failed to create session:", err);
@@ -1274,6 +1358,22 @@ export function App() {
               type="button"
               class="axe-error-btn dismiss"
               onClick={() => setDeleteFailure(null)}
+            >
+              Dismiss
+            </button>
+          </div>
+        </div>
+      )}
+
+      {nativeFailure && (
+        <div class="axe-error-toast" role="alert">
+          <div class="axe-error-title">{`iTerm open failed: ${nativeFailure.label}`}</div>
+          <div class="axe-error-message">{nativeFailure.message}</div>
+          <div class="axe-error-actions">
+            <button
+              type="button"
+              class="axe-error-btn dismiss"
+              onClick={() => setNativeFailure(null)}
             >
               Dismiss
             </button>
