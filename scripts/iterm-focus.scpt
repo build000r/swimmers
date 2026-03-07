@@ -117,27 +117,45 @@ on markWorkspaceSession(aSession, targetSessionId)
 	end tell
 end markWorkspaceSession
 
+on preferredWindow()
+	tell application id "com.googlecode.iterm2"
+		if (count of windows) is 0 then return missing value
+		try
+			return current window
+		on error
+			return first window
+		end try
+	end tell
+end preferredWindow
+
 on createWorkspaceTab(attachCommand, targetSessionId)
 	tell application id "com.googlecode.iterm2"
 		activate
 		if (count of windows) is 0 then
-			create window with default profile command attachCommand
-			set newSession to current session of current tab of current window
-			my markWorkspaceSession(newSession, targetSessionId)
-			return newSession
+			set newWindow to (create window with default profile command attachCommand)
+			try
+				set newTab to current tab of newWindow
+			on error
+				set newTab to first tab of newWindow
+			end try
+		else
+			set targetWindow to my preferredWindow()
+			tell targetWindow
+				set newTab to (create tab with default profile command attachCommand)
+			end tell
 		end if
-		
-		tell current window
-			create tab with default profile command attachCommand
-			set newSession to current session of current tab
-		end tell
-		my markWorkspaceSession(newSession, targetSessionId)
-		return newSession
+
+		try
+			set newSession to current session of newTab
+		on error
+			set newSession to first session of newTab
+		end try
 	end tell
+	my markWorkspaceSession(newSession, targetSessionId)
+	return newSession
 end createWorkspaceTab
 
-on createOrSplitSession(targetSessionId, tmuxName, tmuxPath)
-	set attachCommand to tmuxPath & " attach -t " & quoted form of tmuxName
+on createOrSplitSession(targetSessionId, tmuxName, attachCommand)
 	set workspaceTab to my findWorkspaceTab()
 	if workspaceTab is missing value then
 		set createdSession to my createWorkspaceTab(attachCommand, targetSessionId)
@@ -182,10 +200,10 @@ on createOrSplitSession(targetSessionId, tmuxName, tmuxPath)
 end createOrSplitSession
 
 on run argv
-	if (count of argv) is less than 3 then error "expected session_id, tmux_name, and tmux_path"
+	if (count of argv) is less than 3 then error "expected session_id, tmux_name, and attach_command"
 	set targetSessionId to item 1 of argv
 	set tmuxName to item 2 of argv
-	set tmuxPath to item 3 of argv
+	set attachCommand to item 3 of argv
 	set knownPaneId to ""
 	if (count of argv) is greater than or equal to 4 then set knownPaneId to item 4 of argv
 	if knownPaneId is not "" then
@@ -201,5 +219,5 @@ on run argv
 		end if
 		if attemptIndex is less than 3 then delay 0.1
 	end repeat
-	return my createOrSplitSession(targetSessionId, tmuxName, tmuxPath)
+	return my createOrSplitSession(targetSessionId, tmuxName, attachCommand)
 end run

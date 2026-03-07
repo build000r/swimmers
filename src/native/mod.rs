@@ -11,6 +11,7 @@ use crate::types::{NativeDesktopOpenResponse, NativeDesktopStatusResponse};
 
 const ITERM_APP_NAME: &str = "iTerm";
 const ITERM_SCRIPT_RELATIVE_PATH: &str = "scripts/iterm-focus.scpt";
+const ITERM_SCROLLBACK_PREFILL_LINES: usize = 2000;
 const TMUX_BIN_ENV: &str = "THRONGTERM_TMUX_BIN";
 const TMUX_BIN_FALLBACKS: &[&str] = &[
     "/opt/homebrew/bin/tmux",
@@ -65,12 +66,13 @@ pub async fn open_or_focus_iterm_session(
     }
 
     let tmux_path = resolve_tmux_binary()?;
+    let attach_command = build_iterm_attach_command(tmux_name, &tmux_path);
     let known_pane_id = cached_pane_id(session_id);
     let result = run_open_or_focus_script(
         &script,
         session_id,
         tmux_name,
-        &tmux_path,
+        &attach_command,
         known_pane_id.as_deref(),
     )
     .await?;
@@ -146,7 +148,7 @@ async fn run_open_or_focus_script(
     script: &Path,
     session_id: &str,
     tmux_name: &str,
-    tmux_path: &Path,
+    attach_command: &str,
     known_pane_id: Option<&str>,
 ) -> Result<NativeDesktopOpenResponse> {
     let mut command = Command::new("osascript");
@@ -154,7 +156,7 @@ async fn run_open_or_focus_script(
         .arg(script)
         .arg(session_id)
         .arg(tmux_name)
-        .arg(tmux_path);
+        .arg(attach_command);
     if let Some(pane_id) = known_pane_id.filter(|value| !value.is_empty()) {
         command.arg(pane_id);
     }
@@ -176,6 +178,21 @@ async fn run_open_or_focus_script(
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     parse_osascript_output(stdout.trim(), session_id)
+}
+
+fn build_iterm_attach_command(tmux_name: &str, tmux_path: &Path) -> String {
+    let tmux_name = shell_single_quote(tmux_name);
+    let tmux_path = shell_single_quote(tmux_path.to_string_lossy().as_ref());
+
+    format!(
+        "{tmux_path} capture-pane -p -J -S -{lines} -t {tmux_name} 2>/dev/null || true; \
+printf '\\033[H\\033[2J'; exec {tmux_path} attach-session -t {tmux_name}",
+        lines = ITERM_SCROLLBACK_PREFILL_LINES
+    )
+}
+
+fn shell_single_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\"'\"'"))
 }
 
 fn parse_osascript_output(stdout: &str, session_id: &str) -> Result<NativeDesktopOpenResponse> {
@@ -289,6 +306,25 @@ mod tests {
         assert!(err.to_string().contains("not absolute"));
     }
 
+    #[test]
+    fn build_iterm_attach_command_prefills_scrollback_before_attach() {
+        let command = build_iterm_attach_command("main", Path::new("/opt/homebrew/bin/tmux"));
+
+        assert!(command.contains("capture-pane -p -J -S -2000 -t 'main'"));
+        assert!(command.contains("2>/dev/null || true"));
+        assert!(command.contains("printf '\\033[H\\033[2J'"));
+        assert!(command.ends_with("exec '/opt/homebrew/bin/tmux' attach-session -t 'main'"));
+    }
+
+    #[test]
+    fn build_iterm_attach_command_shell_quotes_tmux_values() {
+        let command =
+            build_iterm_attach_command("team's session", Path::new("/tmp/tmux builds/tmux"));
+
+        assert!(command.contains("-t 'team'\"'\"'s session'"));
+        assert!(command.contains("exec '/tmp/tmux builds/tmux' attach-session"));
+    }
+
     #[tokio::test]
     async fn open_or_focus_passes_cached_pane_id_on_repeat_calls() {
         let _env_guard = TEST_ENV_LOCK.lock().unwrap();
@@ -350,6 +386,7 @@ mod tests {
         let first_call = lines.next().unwrap();
         let second_call = lines.next().unwrap();
         assert!(first_call.contains(" sess-cache tmux-cache "));
+        assert!(first_call.contains("capture-pane -p -J -S -2000 -t 'tmux-cache'"));
         assert!(!first_call.ends_with(" pane-1"));
         assert!(second_call.ends_with(" pane-1"));
 
