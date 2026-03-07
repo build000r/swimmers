@@ -274,6 +274,8 @@ interface NativeFailureState {
   message: string;
 }
 
+type NativeOpenResult = "opened" | "fallback" | "missing";
+
 const NATIVE_DESKTOP_UNSUPPORTED: NativeDesktopStatus = {
   supported: false,
   platform: null,
@@ -426,6 +428,27 @@ export function App() {
     idlePreviewFetchInFlightRef.current.delete(sessionId);
   }, []);
 
+  const refreshSessionsFromServer = useCallback(async () => {
+    const resp = await fetchSessions();
+    const liveSessions = dedupeSessionsById(resp.sessions);
+    const merged = mergePollSessions(
+      sessions.value,
+      liveSessions,
+      exitingSessionIdsRef.current,
+    );
+    if (merged) {
+      sessions.value = merged;
+    }
+
+    const liveIds = new Set(liveSessions.map((session) => session.session_id));
+    setBenchedIds((prev) => {
+      const pruned = new Set([...prev].filter((id) => liveIds.has(id)));
+      return pruned.size === prev.size ? prev : pruned;
+    });
+
+    return liveSessions;
+  }, []);
+
   const showUndoDeleteToast = useCallback((deletedSession: SessionSummary) => {
     if (undoToastTimerRef.current) {
       clearTimeout(undoToastTimerRef.current);
@@ -527,11 +550,15 @@ export function App() {
   }, []);
 
   const openNativeSession = useCallback(
-    async (session: SessionSummary) => {
-      if (!nativeDesktop.supported || isObserver) return false;
+    async (session: SessionSummary): Promise<NativeOpenResult> => {
+      if (!nativeDesktop.supported || isObserver) return "fallback";
       if (session.state === "exited") {
         showNativeFailureToast(sessionLabel(session), "Session has already exited.");
-        return false;
+        return "missing";
+      }
+      if (session.is_stale) {
+        void refreshSessionsFromServer().catch(() => {});
+        return "missing";
       }
 
       if (session.state === "attention") {
@@ -541,15 +568,28 @@ export function App() {
       try {
         await openNativeDesktopSession(session.session_id);
         setNativeFailure(null);
-        return true;
+        return "opened";
       } catch (err) {
         const message =
           err instanceof Error ? err.message : "Failed to open session in iTerm";
+        if (message === "SESSION_NOT_FOUND") {
+          showNativeFailureToast(
+            sessionLabel(session),
+            "Session is no longer available.",
+          );
+          void refreshSessionsFromServer().catch(() => {});
+          return "missing";
+        }
         showNativeFailureToast(sessionLabel(session), message);
-        return false;
+        return "fallback";
       }
     },
-    [isObserver, nativeDesktop.supported, showNativeFailureToast],
+    [
+      isObserver,
+      nativeDesktop.supported,
+      refreshSessionsFromServer,
+      showNativeFailureToast,
+    ],
   );
 
   const writeWorkspaceLayout = useCallback(
@@ -763,7 +803,16 @@ export function App() {
         ]);
         if (cancelled) return;
         bootstrapDataRef.current = data;
-        const initialSessions = dedupeSessionsById(data.sessions);
+        let initialSessions = dedupeSessionsById(data.sessions);
+        if (initialSessions.some((session) => session.is_stale)) {
+          try {
+            const resp = await fetchSessions();
+            if (cancelled) return;
+            initialSessions = dedupeSessionsById(resp.sessions);
+          } catch {
+            // Keep bootstrap data if the active session refresh fails.
+          }
+        }
 
         batch(() => {
           sessions.value = initialSessions;
@@ -1046,6 +1095,17 @@ export function App() {
     [isObserver, stopPolling],
   );
 
+  const openNativeSessionOrTerminal = useCallback(
+    async (session: SessionSummary) => {
+      const result = await openNativeSession(session);
+      if (result === "fallback" && session.state !== "exited") {
+        openTerminal(session.session_id);
+      }
+      return result === "opened";
+    },
+    [openNativeSession, openTerminal],
+  );
+
   const disarmAxeMode = useCallback(() => {
     setAxeArmed(false);
   }, []);
@@ -1089,11 +1149,16 @@ export function App() {
         handleBenchSession(sessionId);
         return;
       }
+      const target = sessions.value.find((s) => s.session_id === sessionId);
+      if (!target) return;
+
       if (!axeArmed) {
-        const target = sessions.value.find((s) => s.session_id === sessionId);
-        if (!target) return;
+        if (target.is_stale) {
+          void refreshSessionsFromServer().catch(() => {});
+          return;
+        }
         if (shouldOpenNativeDesktopByDefault(nativeDesktop, isObserver)) {
-          void openNativeSession(target);
+          void openNativeSessionOrTerminal(target);
           return;
         }
         openTerminal(sessionId);
@@ -1112,6 +1177,7 @@ export function App() {
       isObserver,
       nativeDesktop,
       openNativeSession,
+      refreshSessionsFromServer,
       openTerminal,
     ],
   );
@@ -1282,7 +1348,7 @@ export function App() {
               }
               upsertSession(resp.session);
               if (nativeDesktop.supported) {
-                void openNativeSession(resp.session);
+                void openNativeSessionOrTerminal(resp.session);
               }
               return resp.session.session_id;
             } catch (err) {
