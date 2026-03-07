@@ -5,6 +5,7 @@ export function makeSession(overrides: Partial<SessionSummary> = {}): SessionSum
     session_id: "sess-001",
     tmux_name: "1",
     state: "idle",
+    exit_reason: null,
     current_command: null,
     cwd: "/home/user/project",
     tool: null,

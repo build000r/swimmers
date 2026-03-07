@@ -31,6 +31,11 @@ import {
   normalizeWorkspaceLayout,
   parseWorkspaceLayoutFromUrl,
 } from "@/services/workspace-history";
+import {
+  isProcessExitState,
+  normalizeExitReason,
+  shouldHideSessionFromOverview,
+} from "@/lib/session-exit";
 import { OverviewField } from "@/components/OverviewField";
 import { ZoneManager } from "@/components/ZoneManager";
 import { useObserverMode } from "@/hooks/useObserverMode";
@@ -103,8 +108,10 @@ export function applySessionStatePayload(
   session: SessionSummary,
   payload: SessionStatePayload,
 ): SessionSummary {
+  const exitReason = normalizeExitReason(payload.state, payload.exit_reason);
   if (
     session.state === payload.state &&
+    (session.exit_reason ?? null) === exitReason &&
     session.current_command === payload.current_command &&
     session.transport_health === payload.transport_health
   ) {
@@ -114,6 +121,7 @@ export function applySessionStatePayload(
   return {
     ...session,
     state: payload.state,
+    exit_reason: exitReason,
     current_command: payload.current_command,
     transport_health: payload.transport_health,
   };
@@ -664,16 +672,9 @@ export function App() {
         if (payload.state !== "idle") {
           clearIdlePreview(sessionId);
         }
-        // After exit, let the thronglet walk off screen then remove it
-        if (payload.state === "exited") {
+        if (isProcessExitState(payload)) {
           outputActivityUpdateAtRef.current.delete(sessionId);
-          exitingSessionIdsRef.current.add(sessionId);
-          setTimeout(() => {
-            exitingSessionIdsRef.current.delete(sessionId);
-            sessions.value = sessions.value.filter(
-              (s) => s.session_id !== sessionId,
-            );
-          }, 2500);
+          exitingSessionIdsRef.current.delete(sessionId);
         }
       },
 
@@ -1266,6 +1267,9 @@ export function App() {
   const fieldAxeTopOffset = showTransportBanner ? 30 : 8;
   const overviewInteractive = isOverview || splitMode;
   const terminalInteractive = isTerminal;
+  const overviewSessions = sessions.value.filter(
+    (session) => !shouldHideSessionFromOverview(session),
+  );
 
   // In split mode: terminal left 50%, field right 50%
   // In dual-zone: terminal full screen, field hidden
@@ -1316,7 +1320,7 @@ export function App() {
         }}
       >
         <OverviewField
-          sessions={sessions.value}
+          sessions={overviewSessions}
           idlePreviews={idlePreviews.value}
           observer={isObserver}
           compact={splitMode}

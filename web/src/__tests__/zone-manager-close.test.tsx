@@ -92,6 +92,49 @@ describe("ZoneManager close behavior", () => {
     });
   });
 
+  it("returns to overview when the only open session disappears from the live list", async () => {
+    setViewportWidth(390);
+    const onShowOverview = vi.fn();
+
+    const view = render(
+      <ZoneManager
+        sessions={[makeSession({ session_id: "sess-1", tmux_name: "1" })]}
+        activeSessionId="sess-1"
+        preferZone={null}
+        restoreRequest={null}
+        onShowOverview={onShowOverview}
+        onStartPolling={() => {}}
+        onStopPolling={() => {}}
+        onLayoutChange={() => {}}
+      />,
+    );
+
+    await waitFor(() => {
+      expect(screen.getByTestId("terminal-sess-1")).toBeInTheDocument();
+    });
+
+    unsubscribeSessionMock.mockClear();
+
+    view.rerender(
+      <ZoneManager
+        sessions={[]}
+        activeSessionId={null}
+        preferZone={null}
+        restoreRequest={null}
+        onShowOverview={onShowOverview}
+        onStartPolling={() => {}}
+        onStopPolling={() => {}}
+        onLayoutChange={() => {}}
+      />,
+    );
+
+    await waitFor(() => {
+      expect(unsubscribeSessionMock).toHaveBeenCalledWith("sess-1");
+      expect(onShowOverview).toHaveBeenCalledTimes(1);
+      expect(screen.queryByTestId("terminal-sess-1")).toBeNull();
+    });
+  });
+
   it("closing bottom zone on desktop keeps main zone open", async () => {
     setViewportWidth(1280);
     const sessions = [
@@ -141,6 +184,71 @@ describe("ZoneManager close behavior", () => {
       expect(unsubscribeSessionMock).toHaveBeenCalledWith("sess-bottom");
       expect(onShowOverview).not.toHaveBeenCalled();
       expect(screen.getByTestId("terminal-sess-main")).toBeInTheDocument();
+    });
+  });
+
+  it("removing an exited bottom session from the live session list keeps main zone open", async () => {
+    setViewportWidth(1280);
+    const sessions = [
+      makeSession({ session_id: "sess-main", tmux_name: "main" }),
+      makeSession({ session_id: "sess-exit", tmux_name: "exit" }),
+    ];
+    const onShowOverview = vi.fn();
+
+    const view = render(
+      <ZoneManager
+        sessions={sessions}
+        activeSessionId="sess-main"
+        preferZone={null}
+        restoreRequest={null}
+        onShowOverview={onShowOverview}
+        onStartPolling={() => {}}
+        onStopPolling={() => {}}
+        onLayoutChange={() => {}}
+      />,
+    );
+
+    await waitFor(() => {
+      expect(screen.getByTestId("terminal-sess-main")).toBeInTheDocument();
+    });
+
+    view.rerender(
+      <ZoneManager
+        sessions={sessions}
+        activeSessionId="sess-exit"
+        preferZone="bottom"
+        restoreRequest={null}
+        onShowOverview={onShowOverview}
+        onStartPolling={() => {}}
+        onStopPolling={() => {}}
+        onLayoutChange={() => {}}
+      />,
+    );
+
+    await waitFor(() => {
+      expect(screen.getByTestId("terminal-sess-exit")).toBeInTheDocument();
+    });
+
+    unsubscribeSessionMock.mockClear();
+
+    view.rerender(
+      <ZoneManager
+        sessions={[sessions[0]]}
+        activeSessionId={null}
+        preferZone={null}
+        restoreRequest={null}
+        onShowOverview={onShowOverview}
+        onStartPolling={() => {}}
+        onStopPolling={() => {}}
+        onLayoutChange={() => {}}
+      />,
+    );
+
+    await waitFor(() => {
+      expect(unsubscribeSessionMock).toHaveBeenCalledWith("sess-exit");
+      expect(onShowOverview).not.toHaveBeenCalled();
+      expect(screen.getByTestId("terminal-sess-main")).toBeInTheDocument();
+      expect(screen.queryByTestId("terminal-sess-exit")).toBeNull();
     });
   });
 });

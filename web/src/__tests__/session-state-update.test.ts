@@ -30,6 +30,7 @@ describe("applySessionStatePayload", () => {
     const session = makeSession({
       session_id: "sess-001",
       state: "idle",
+      exit_reason: null,
       current_command: null,
       transport_health: "healthy",
     });
@@ -43,5 +44,36 @@ describe("applySessionStatePayload", () => {
     };
 
     expect(applySessionStatePayload(session, payload)).toBe(session);
+  });
+
+  it("stores process_exit on exited sessions and clears it on recovery", () => {
+    const session = makeSession({
+      session_id: "sess-exit",
+      state: "idle",
+      exit_reason: null,
+      current_command: null,
+      transport_health: "healthy",
+    });
+
+    const exited = applySessionStatePayload(session, {
+      state: "exited",
+      previous_state: "idle",
+      current_command: null,
+      transport_health: "healthy",
+      exit_reason: "process_exit",
+      at: "2026-03-06T15:00:00.000Z",
+    });
+
+    expect(exited.exit_reason).toBe("process_exit");
+
+    const recovered = applySessionStatePayload(exited, {
+      state: "idle",
+      previous_state: "exited",
+      current_command: null,
+      transport_health: "healthy",
+      at: "2026-03-06T15:00:01.000Z",
+    });
+
+    expect(recovered.exit_reason).toBeNull();
   });
 });

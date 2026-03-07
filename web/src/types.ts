@@ -29,6 +29,7 @@ export interface SessionSummary {
   session_id: string;
   tmux_name: string;
   state: SessionState;
+  exit_reason?: string | null;
   current_command: string | null;
   cwd: string;
   tool: string | null;
@@ -164,6 +165,7 @@ export interface SessionStatePayload {
   previous_state: SessionState;
   current_command: string | null;
   transport_health: TransportHealth;
+  exit_reason?: string | null;
   at: string;
 }
 

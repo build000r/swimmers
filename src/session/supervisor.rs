@@ -19,7 +19,7 @@ use crate::types::{
 };
 
 const PROCESS_EXIT_REAP_INTERVAL: Duration = Duration::from_millis(250);
-const PROCESS_EXIT_DELETE_GRACE: Duration = Duration::from_millis(2_500);
+const PROCESS_EXIT_DELETE_GRACE: Duration = Duration::ZERO;
 const PROCESS_EXIT_SUMMARY_TIMEOUT: Duration = Duration::from_millis(250);
 
 // ---------------------------------------------------------------------------
@@ -866,8 +866,8 @@ impl SessionSupervisor {
         });
     }
 
-    /// Spawn a background task that reaps exited sessions after a short grace
-    /// period so clients can animate state transitions before deletion.
+    /// Spawn a background task that reaps exited sessions once actors report
+    /// them as exited.
     pub fn spawn_process_exit_reaper(self: &Arc<Self>) {
         let supervisor = self.clone();
         tokio::spawn(async move {
@@ -1297,29 +1297,13 @@ mod tests {
     }
 
     #[test]
-    fn ready_process_exit_ids_waits_for_grace_period() {
+    fn ready_process_exit_ids_reaps_immediately_when_grace_is_zero() {
         let mut seen = HashMap::new();
         let exited = HashSet::from_iter(["sess_1".to_string()]);
         let start = Instant::now();
 
-        let before = ready_process_exit_ids(&mut seen, &exited, start, Duration::from_secs(2));
-        assert!(before.is_empty());
-
-        let near = ready_process_exit_ids(
-            &mut seen,
-            &exited,
-            start + Duration::from_millis(1_999),
-            Duration::from_secs(2),
-        );
-        assert!(near.is_empty());
-
-        let after = ready_process_exit_ids(
-            &mut seen,
-            &exited,
-            start + Duration::from_secs(2),
-            Duration::from_secs(2),
-        );
-        assert_eq!(after, vec!["sess_1".to_string()]);
+        let ready = ready_process_exit_ids(&mut seen, &exited, start, Duration::ZERO);
+        assert_eq!(ready, vec!["sess_1".to_string()]);
     }
 
     #[test]

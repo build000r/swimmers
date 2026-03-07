@@ -210,6 +210,34 @@ export function ZoneManager({
 
   // ---- Close zones ----
 
+  const removeSessionFromZones = useCallback(
+    (sessionId: string) => {
+      let changed = false;
+
+      if (mainZoneRef.current?.sessionId === sessionId) {
+        mainZoneRef.current = null;
+        setMainZone(null);
+        changed = true;
+      }
+      if (bottomZoneRef.current?.sessionId === sessionId) {
+        bottomZoneRef.current = null;
+        setBottomZone(null);
+        changed = true;
+      }
+      if (!changed) return;
+
+      cache.evict(sessionId);
+      realtime.unsubscribeSession(sessionId);
+
+      if (!mainZoneRef.current && !bottomZoneRef.current) {
+        onShowOverview();
+      } else {
+        onStartPolling();
+      }
+    },
+    [cache, onShowOverview, onStartPolling],
+  );
+
   const closeZone = useCallback(
     (zone: "main" | "bottom") => {
       // Read refs for fresh state — avoids stale closures when rapidly closing
@@ -269,23 +297,24 @@ export function ZoneManager({
 
   const handleSessionExit = useCallback(
     (sessionId: string) => {
-      cache.evict(sessionId);
-      realtime.unsubscribeSession(sessionId);
-
-      // Update refs synchronously to avoid stale closure issues.
-      if (mainZoneRef.current?.sessionId === sessionId) {
-        mainZoneRef.current = null;
-        setMainZone(null);
-      }
-      if (bottomZoneRef.current?.sessionId === sessionId) {
-        bottomZoneRef.current = null;
-        setBottomZone(null);
-      }
-
-      if (!mainZoneRef.current && !bottomZoneRef.current) onShowOverview();
+      removeSessionFromZones(sessionId);
     },
-    [cache, onShowOverview],
+    [removeSessionFromZones],
   );
+
+  useEffect(() => {
+    const liveIds = new Set(sessions.map((session) => session.session_id));
+    const missing = [
+      mainZoneRef.current?.sessionId,
+      bottomZoneRef.current?.sessionId,
+    ].filter((sessionId): sessionId is string => !!sessionId && !liveIds.has(sessionId));
+
+    if (missing.length === 0) return;
+
+    for (const sessionId of new Set(missing)) {
+      removeSessionFromZones(sessionId);
+    }
+  }, [sessions, removeSessionFromZones]);
 
   // ---- Divider drag ----
 
