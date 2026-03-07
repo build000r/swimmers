@@ -12,13 +12,15 @@ use crossterm::{
     style::{Color, Print, ResetColor, SetForegroundColor},
     terminal::{self, Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen},
 };
+use futures::future::BoxFuture;
 use reqwest::Client;
 use tokio::runtime::Runtime;
 
 use throngterm::config::{AuthMode, Config};
 use throngterm::types::{
-    ErrorResponse, NativeDesktopOpenRequest, NativeDesktopOpenResponse,
-    NativeDesktopStatusResponse, SessionListResponse, SessionState, SessionSummary, ThoughtState,
+    CreateSessionRequest, CreateSessionResponse, DirEntry, DirListResponse, ErrorResponse,
+    NativeDesktopOpenRequest, NativeDesktopOpenResponse, NativeDesktopStatusResponse,
+    SessionListResponse, SessionState, SessionSummary, SpawnTool, ThoughtState,
 };
 
 const MIN_WIDTH: u16 = 70;
@@ -30,6 +32,8 @@ const SPRITE_HEIGHT: u16 = 4;
 const LABEL_HEIGHT: u16 = 1;
 const ENTITY_WIDTH: u16 = 12;
 const ENTITY_HEIGHT: u16 = SPRITE_HEIGHT + LABEL_HEIGHT;
+const PICKER_WIDTH: u16 = 46;
+const PICKER_MAX_HEIGHT: u16 = 16;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct Cell {
@@ -126,6 +130,14 @@ impl Renderer {
 
     fn clear(&mut self) {
         self.buffer.fill(Cell::default());
+    }
+
+    fn fill_rect(&mut self, rect: Rect, ch: char, fg: Color) {
+        for y in rect.y..rect.bottom() {
+            for x in rect.x..rect.right() {
+                self.draw_char(x, y, ch, fg);
+            }
+        }
     }
 
     fn draw_char(&mut self, x: u16, y: u16, ch: char, fg: Color) {
@@ -481,63 +493,155 @@ impl ApiClient {
             None => builder,
         }
     }
+}
 
-    async fn fetch_sessions(&self) -> Result<Vec<SessionSummary>, String> {
-        let url = format!("{}/v1/sessions", self.base_url);
-        let response = self
-            .with_auth(self.http.get(url))
-            .send()
-            .await
-            .map_err(|err| format!("failed to fetch sessions: {err}"))?;
+trait TuiApi {
+    fn fetch_sessions(&self) -> BoxFuture<'_, Result<Vec<SessionSummary>, String>>;
+    fn fetch_native_status(&self) -> BoxFuture<'_, Result<NativeDesktopStatusResponse, String>>;
+    fn open_session(
+        &self,
+        session_id: &str,
+    ) -> BoxFuture<'_, Result<NativeDesktopOpenResponse, String>>;
+    fn list_dirs(
+        &self,
+        path: Option<&str>,
+        managed_only: bool,
+    ) -> BoxFuture<'_, Result<DirListResponse, String>>;
+    fn create_session(
+        &self,
+        cwd: &str,
+        spawn_tool: SpawnTool,
+    ) -> BoxFuture<'_, Result<CreateSessionResponse, String>>;
+}
 
-        if response.status().is_success() {
-            let payload = response
-                .json::<SessionListResponse>()
+impl TuiApi for ApiClient {
+    fn fetch_sessions(&self) -> BoxFuture<'_, Result<Vec<SessionSummary>, String>> {
+        Box::pin(async move {
+            let url = format!("{}/v1/sessions", self.base_url);
+            let response = self
+                .with_auth(self.http.get(url))
+                .send()
                 .await
-                .map_err(|err| format!("failed to parse sessions response: {err}"))?;
-            return Ok(payload.sessions);
-        }
+                .map_err(|err| format!("failed to fetch sessions: {err}"))?;
 
-        Err(read_error(response).await)
+            if response.status().is_success() {
+                let payload = response
+                    .json::<SessionListResponse>()
+                    .await
+                    .map_err(|err| format!("failed to parse sessions response: {err}"))?;
+                return Ok(payload.sessions);
+            }
+
+            Err(read_error(response).await)
+        })
     }
 
-    async fn fetch_native_status(&self) -> Result<NativeDesktopStatusResponse, String> {
-        let url = format!("{}/v1/native/status", self.base_url);
-        let response = self
-            .with_auth(self.http.get(url))
-            .send()
-            .await
-            .map_err(|err| format!("failed to fetch native desktop status: {err}"))?;
-
-        if response.status().is_success() {
-            return response
-                .json::<NativeDesktopStatusResponse>()
+    fn fetch_native_status(&self) -> BoxFuture<'_, Result<NativeDesktopStatusResponse, String>> {
+        Box::pin(async move {
+            let url = format!("{}/v1/native/status", self.base_url);
+            let response = self
+                .with_auth(self.http.get(url))
+                .send()
                 .await
-                .map_err(|err| format!("failed to parse native status: {err}"));
-        }
+                .map_err(|err| format!("failed to fetch native desktop status: {err}"))?;
 
-        Err(read_error(response).await)
+            if response.status().is_success() {
+                return response
+                    .json::<NativeDesktopStatusResponse>()
+                    .await
+                    .map_err(|err| format!("failed to parse native status: {err}"));
+            }
+
+            Err(read_error(response).await)
+        })
     }
 
-    async fn open_session(&self, session_id: &str) -> Result<NativeDesktopOpenResponse, String> {
-        let url = format!("{}/v1/native/open", self.base_url);
-        let response = self
-            .with_auth(self.http.post(url))
-            .json(&NativeDesktopOpenRequest {
-                session_id: session_id.to_string(),
-            })
-            .send()
-            .await
-            .map_err(|err| format!("failed to open session: {err}"))?;
-
-        if response.status().is_success() {
-            return response
-                .json::<NativeDesktopOpenResponse>()
+    fn open_session(
+        &self,
+        session_id: &str,
+    ) -> BoxFuture<'_, Result<NativeDesktopOpenResponse, String>> {
+        let session_id = session_id.to_string();
+        Box::pin(async move {
+            let url = format!("{}/v1/native/open", self.base_url);
+            let response = self
+                .with_auth(self.http.post(url))
+                .json(&NativeDesktopOpenRequest { session_id })
+                .send()
                 .await
-                .map_err(|err| format!("failed to parse native open response: {err}"));
-        }
+                .map_err(|err| format!("failed to open session: {err}"))?;
 
-        Err(read_error(response).await)
+            if response.status().is_success() {
+                return response
+                    .json::<NativeDesktopOpenResponse>()
+                    .await
+                    .map_err(|err| format!("failed to parse native open response: {err}"));
+            }
+
+            Err(read_error(response).await)
+        })
+    }
+
+    fn list_dirs(
+        &self,
+        path: Option<&str>,
+        managed_only: bool,
+    ) -> BoxFuture<'_, Result<DirListResponse, String>> {
+        let path = path.map(|value| value.to_string());
+        Box::pin(async move {
+            let url = format!("{}/v1/dirs", self.base_url);
+            let mut request = self.http.get(url);
+            if let Some(path) = path {
+                request = request.query(&[("path", path)]);
+            }
+            if managed_only {
+                request = request.query(&[("managed_only", true)]);
+            }
+
+            let response = self
+                .with_auth(request)
+                .send()
+                .await
+                .map_err(|err| format!("failed to list dirs: {err}"))?;
+
+            if response.status().is_success() {
+                return response
+                    .json::<DirListResponse>()
+                    .await
+                    .map_err(|err| format!("failed to parse dirs response: {err}"));
+            }
+
+            Err(read_error(response).await)
+        })
+    }
+
+    fn create_session(
+        &self,
+        cwd: &str,
+        spawn_tool: SpawnTool,
+    ) -> BoxFuture<'_, Result<CreateSessionResponse, String>> {
+        let cwd = cwd.to_string();
+        Box::pin(async move {
+            let url = format!("{}/v1/sessions", self.base_url);
+            let response = self
+                .with_auth(self.http.post(url))
+                .json(&CreateSessionRequest {
+                    name: None,
+                    cwd: Some(cwd),
+                    spawn_tool: Some(spawn_tool),
+                })
+                .send()
+                .await
+                .map_err(|err| format!("failed to create session: {err}"))?;
+
+            if response.status().is_success() {
+                return response
+                    .json::<CreateSessionResponse>()
+                    .await
+                    .map_err(|err| format!("failed to parse create session response: {err}"));
+            }
+
+            Err(read_error(response).await)
+        })
     }
 }
 
@@ -551,25 +655,168 @@ async fn read_error(response: reqwest::Response) -> String {
     }
 }
 
-struct App {
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum PickerSelection {
+    SpawnHere,
+    Entry(usize),
+}
+
+#[derive(Clone)]
+struct PickerState {
+    anchor_x: u16,
+    anchor_y: u16,
+    base_path: String,
+    current_path: String,
+    entries: Vec<DirEntry>,
+    managed_only: bool,
+    selection: PickerSelection,
+    scroll: usize,
+}
+
+impl PickerState {
+    fn new(anchor_x: u16, anchor_y: u16, response: DirListResponse, managed_only: bool) -> Self {
+        Self {
+            anchor_x,
+            anchor_y,
+            base_path: response.path.clone(),
+            current_path: response.path,
+            entries: response.entries,
+            managed_only,
+            selection: PickerSelection::SpawnHere,
+            scroll: 0,
+        }
+    }
+
+    fn apply_response(&mut self, response: DirListResponse) {
+        self.current_path = response.path;
+        self.entries = response.entries;
+        self.selection = PickerSelection::SpawnHere;
+        self.scroll = 0;
+    }
+
+    fn at_root(&self) -> bool {
+        normalize_path(&self.current_path) == normalize_path(&self.base_path)
+    }
+
+    fn parent_path(&self) -> Option<String> {
+        if self.at_root() {
+            return None;
+        }
+
+        let normalized = normalize_path(&self.current_path);
+        let path = std::path::Path::new(&normalized);
+        path.parent().map(|parent| {
+            let raw = parent.to_string_lossy();
+            if raw.is_empty() {
+                "/".to_string()
+            } else {
+                raw.into_owned()
+            }
+        })
+    }
+
+    fn relative_label(&self) -> String {
+        let base = normalize_path(&self.base_path);
+        let current = normalize_path(&self.current_path);
+        if current == base {
+            return "/".to_string();
+        }
+        current
+            .strip_prefix(&base)
+            .filter(|suffix| !suffix.is_empty())
+            .map(|suffix| suffix.to_string())
+            .unwrap_or(current)
+    }
+
+    fn path_for_entry(&self, index: usize) -> Option<String> {
+        let entry = self.entries.get(index)?;
+        Some(join_path(&self.current_path, &entry.name))
+    }
+
+    fn move_selection(&mut self, delta: isize, visible_rows: usize) {
+        if self.entries.is_empty() && matches!(self.selection, PickerSelection::SpawnHere) {
+            return;
+        }
+
+        let total = self.entries.len() as isize + 1;
+        let current = match self.selection {
+            PickerSelection::SpawnHere => 0,
+            PickerSelection::Entry(index) => index as isize + 1,
+        };
+        let next = (current + delta).clamp(0, total.saturating_sub(1));
+        self.selection = if next == 0 {
+            PickerSelection::SpawnHere
+        } else {
+            PickerSelection::Entry((next - 1) as usize)
+        };
+        self.ensure_selection_visible(visible_rows);
+    }
+
+    fn ensure_selection_visible(&mut self, visible_rows: usize) {
+        if visible_rows == 0 {
+            self.scroll = 0;
+            return;
+        }
+        let PickerSelection::Entry(index) = self.selection else {
+            self.scroll = 0;
+            return;
+        };
+
+        if index < self.scroll {
+            self.scroll = index;
+            return;
+        }
+
+        let last_visible = self.scroll + visible_rows.saturating_sub(1);
+        if index > last_visible {
+            self.scroll = index + 1 - visible_rows;
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum PickerAction {
+    Close,
+    Up,
+    ToggleManaged(bool),
+    ActivateCurrentPath,
+    ActivateEntry(usize),
+}
+
+#[derive(Clone, Copy)]
+struct PickerLayout {
+    frame: Rect,
+    content: Rect,
+    back_button: Option<Rect>,
+    close_button: Rect,
+    env_button: Rect,
+    all_button: Rect,
+    spawn_here_button: Rect,
+    first_entry_y: u16,
+    visible_entry_rows: usize,
+}
+
+struct App<C: TuiApi> {
     runtime: Runtime,
-    client: ApiClient,
+    client: C,
     entities: Vec<SessionEntity>,
     selected_id: Option<String>,
     native_status: Option<NativeDesktopStatusResponse>,
+    picker: Option<PickerState>,
     message: Option<(String, Instant)>,
     last_refresh: Option<Instant>,
     tick: u64,
 }
 
-impl App {
-    fn new(runtime: Runtime, client: ApiClient) -> Self {
+impl<C: TuiApi> App<C> {
+    fn new(runtime: Runtime, client: C) -> Self {
         Self {
             runtime,
             client,
             entities: Vec::new(),
             selected_id: None,
             native_status: None,
+            picker: None,
             message: None,
             last_refresh: None,
             tick: 0,
@@ -660,6 +907,23 @@ impl App {
         }
     }
 
+    fn upsert_session(&mut self, session: SessionSummary, field: Rect) {
+        let mut sessions: Vec<SessionSummary> = self
+            .entities
+            .iter()
+            .map(|entity| entity.session.clone())
+            .collect();
+        if let Some(existing) = sessions
+            .iter_mut()
+            .find(|existing| existing.session_id == session.session_id)
+        {
+            *existing = session;
+        } else {
+            sessions.push(session);
+        }
+        self.merge_sessions(sessions, field);
+    }
+
     fn tick(&mut self, field: Rect) {
         self.tick = self.tick.wrapping_add(1);
         for entity in &mut self.entities {
@@ -685,7 +949,13 @@ impl App {
         }
     }
 
-    fn move_selection(&mut self, delta: isize) {
+    fn move_selection(&mut self, delta: isize, field: Rect) {
+        if let Some(picker) = &mut self.picker {
+            let layout = picker_layout(picker, field);
+            picker.move_selection(delta, layout.visible_entry_rows);
+            return;
+        }
+
         if self.entities.is_empty() {
             self.selected_id = None;
             return;
@@ -713,30 +983,154 @@ impl App {
             .find(|entity| entity.session.session_id == *selected)
     }
 
+    fn close_picker(&mut self) {
+        self.picker = None;
+    }
+
+    fn open_picker(&mut self, x: u16, y: u16) {
+        match self.runtime.block_on(self.client.list_dirs(None, true)) {
+            Ok(response) => {
+                self.picker = Some(PickerState::new(x, y, response, true));
+            }
+            Err(err) => {
+                self.set_message(err);
+                self.picker = None;
+            }
+        }
+    }
+
+    fn picker_reload(&mut self, path: Option<String>, managed_only: bool) {
+        let target = path.clone();
+        match self
+            .runtime
+            .block_on(self.client.list_dirs(target.as_deref(), managed_only))
+        {
+            Ok(response) => {
+                if let Some(picker) = &mut self.picker {
+                    picker.managed_only = managed_only;
+                    picker.apply_response(response);
+                }
+            }
+            Err(err) => self.set_message(err),
+        }
+    }
+
+    fn picker_up(&mut self) {
+        let Some(parent_path) = self.picker.as_ref().and_then(PickerState::parent_path) else {
+            return;
+        };
+        let managed_only = self
+            .picker
+            .as_ref()
+            .map(|picker| picker.managed_only)
+            .unwrap_or(true);
+        self.picker_reload(Some(parent_path), managed_only);
+    }
+
+    fn picker_set_managed_only(&mut self, managed_only: bool) {
+        let Some(picker) = &self.picker else {
+            return;
+        };
+        if picker.managed_only == managed_only {
+            return;
+        }
+        self.picker_reload(Some(picker.current_path.clone()), managed_only);
+    }
+
+    fn picker_activate_selection(&mut self, field: Rect) {
+        let Some((selection, current_path, entry_path, has_children)) =
+            self.picker.as_ref().map(|picker| match picker.selection {
+                PickerSelection::SpawnHere => (
+                    PickerSelection::SpawnHere,
+                    picker.current_path.clone(),
+                    None,
+                    false,
+                ),
+                PickerSelection::Entry(index) => (
+                    PickerSelection::Entry(index),
+                    picker.current_path.clone(),
+                    picker.path_for_entry(index),
+                    picker
+                        .entries
+                        .get(index)
+                        .map(|entry| entry.has_children)
+                        .unwrap_or(false),
+                ),
+            })
+        else {
+            return;
+        };
+
+        match selection {
+            PickerSelection::SpawnHere => self.spawn_session(&current_path, field),
+            PickerSelection::Entry(_) if has_children => {
+                if let Some(path) = entry_path {
+                    let managed_only = self
+                        .picker
+                        .as_ref()
+                        .map(|picker| picker.managed_only)
+                        .unwrap_or(true);
+                    self.picker_reload(Some(path), managed_only);
+                }
+            }
+            PickerSelection::Entry(_) => {
+                if let Some(path) = entry_path {
+                    self.spawn_session(&path, field);
+                }
+            }
+        }
+    }
+
+    fn spawn_session(&mut self, cwd: &str, field: Rect) {
+        match self
+            .runtime
+            .block_on(self.client.create_session(cwd, SpawnTool::Codex))
+        {
+            Ok(response) => {
+                let session = response.session;
+                let session_id = session.session_id.clone();
+                let tmux_name = session.tmux_name.clone();
+                self.upsert_session(session, field);
+                self.selected_id = Some(session_id.clone());
+                self.close_picker();
+                self.open_session_for_label(&session_id, &tmux_name);
+            }
+            Err(err) => self.set_message(err),
+        }
+    }
+
+    fn open_session_for_label(&mut self, session_id: &str, label: &str) {
+        match self.runtime.block_on(self.client.open_session(session_id)) {
+            Ok(response) => {
+                self.set_message(format!("{} {}", response.status, label));
+            }
+            Err(err) => self.set_message(err),
+        }
+    }
+
     fn open_selected(&mut self) {
         let Some(selected_id) = self.selected_id.clone() else {
             self.set_message("no session selected");
             return;
         };
 
-        match self
-            .runtime
-            .block_on(self.client.open_session(&selected_id))
-        {
-            Ok(response) => {
-                self.set_message(format!(
-                    "{} {}",
-                    response.status,
-                    selected_label(self.selected().map(|entity| &entity.session.tmux_name))
-                ));
-            }
-            Err(err) => {
-                self.set_message(err);
-            }
-        }
+        let label = selected_label(self.selected().map(|entity| &entity.session.tmux_name));
+        self.open_session_for_label(&selected_id, &label);
     }
 
-    fn click_open(&mut self, x: u16, y: u16, field: Rect) {
+    fn handle_field_click(&mut self, x: u16, y: u16, field: Rect) {
+        if let Some(picker) = &self.picker {
+            let layout = picker_layout(picker, field);
+            if layout.frame.contains(x, y) {
+                if let Some(action) = picker_action_at(picker, layout, x, y) {
+                    self.handle_picker_action(action, field);
+                }
+                return;
+            }
+            self.close_picker();
+            return;
+        }
+
         let hit = self
             .entities
             .iter()
@@ -746,6 +1140,50 @@ impl App {
         if let Some(session_id) = hit {
             self.selected_id = Some(session_id);
             self.open_selected();
+            return;
+        }
+
+        self.open_picker(x, y);
+    }
+
+    fn handle_picker_action(&mut self, action: PickerAction, field: Rect) {
+        match action {
+            PickerAction::Close => self.close_picker(),
+            PickerAction::Up => self.picker_up(),
+            PickerAction::ToggleManaged(managed_only) => {
+                self.picker_set_managed_only(managed_only);
+            }
+            PickerAction::ActivateCurrentPath => self.spawn_session_from_picker(field),
+            PickerAction::ActivateEntry(index) => self.activate_picker_entry(index, field),
+        }
+    }
+
+    fn spawn_session_from_picker(&mut self, field: Rect) {
+        let Some(path) = self
+            .picker
+            .as_ref()
+            .map(|picker| picker.current_path.clone())
+        else {
+            return;
+        };
+        self.spawn_session(&path, field);
+    }
+
+    fn activate_picker_entry(&mut self, index: usize, field: Rect) {
+        let Some((path, has_children, managed_only)) = self.picker.as_ref().and_then(|picker| {
+            Some((
+                picker.path_for_entry(index)?,
+                picker.entries.get(index)?.has_children,
+                picker.managed_only,
+            ))
+        }) else {
+            return;
+        };
+
+        if has_children {
+            self.picker_reload(Some(path), managed_only);
+        } else {
+            self.spawn_session(&path, field);
         }
     }
 
@@ -804,7 +1242,259 @@ impl App {
             render_entity(renderer, entity, rect, selected, self.tick);
         }
 
+        if let Some(picker) = &self.picker {
+            render_picker(renderer, picker, field);
+        }
+
         render_footer(self, renderer, field_box.bottom() + 1);
+    }
+}
+
+fn normalize_path(path: &str) -> String {
+    let trimmed = path.trim_end_matches('/');
+    if trimmed.is_empty() {
+        "/".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+fn join_path(base: &str, name: &str) -> String {
+    let base = normalize_path(base);
+    let name = name.trim_matches('/');
+    if base == "/" {
+        format!("/{name}")
+    } else {
+        format!("{base}/{name}")
+    }
+}
+
+fn picker_layout(picker: &PickerState, field: Rect) -> PickerLayout {
+    let width = PICKER_WIDTH.min(field.width);
+    let max_height = PICKER_MAX_HEIGHT.min(field.height);
+    let header_rows = 4;
+    let entry_capacity = max_height.saturating_sub(2 + header_rows).max(1);
+    let list_rows = picker.entries.len().max(1).min(entry_capacity as usize) as u16;
+    let height = 2 + header_rows + list_rows;
+
+    let max_x = field.right().saturating_sub(width);
+    let max_y = field.bottom().saturating_sub(height);
+
+    let mut x = picker.anchor_x;
+    if x + width > field.right() {
+        x = picker.anchor_x.saturating_sub(width.saturating_sub(1));
+    }
+    x = x.max(field.x).min(max_x);
+
+    let mut y = picker.anchor_y;
+    if y + height > field.bottom() {
+        y = picker.anchor_y.saturating_sub(height.saturating_sub(1));
+    }
+    y = y.max(field.y).min(max_y);
+
+    let frame = Rect {
+        x,
+        y,
+        width,
+        height,
+    };
+    let content = frame.inset(1);
+    let close_button = Rect {
+        x: content.right().saturating_sub(3),
+        y: content.y,
+        width: 3,
+        height: 1,
+    };
+    let back_button = if picker.at_root() {
+        None
+    } else {
+        Some(Rect {
+            x: content.x,
+            y: content.y + 1,
+            width: 4,
+            height: 1,
+        })
+    };
+    let env_button = Rect {
+        x: content.x,
+        y: content.y + 2,
+        width: 13,
+        height: 1,
+    };
+    let all_button = Rect {
+        x: (content.x + 15).min(content.right().saturating_sub(13)),
+        y: content.y + 2,
+        width: 13,
+        height: 1,
+    };
+
+    PickerLayout {
+        frame,
+        content,
+        back_button,
+        close_button,
+        env_button,
+        all_button,
+        spawn_here_button: Rect {
+            x: content.x,
+            y: content.y + 3,
+            width: content.width,
+            height: 1,
+        },
+        first_entry_y: content.y + 4,
+        visible_entry_rows: list_rows as usize,
+    }
+}
+
+fn picker_action_at(
+    picker: &PickerState,
+    layout: PickerLayout,
+    x: u16,
+    y: u16,
+) -> Option<PickerAction> {
+    if layout.close_button.contains(x, y) {
+        return Some(PickerAction::Close);
+    }
+    if layout
+        .back_button
+        .map(|button| button.contains(x, y))
+        .unwrap_or(false)
+    {
+        return Some(PickerAction::Up);
+    }
+    if layout.env_button.contains(x, y) {
+        return Some(PickerAction::ToggleManaged(true));
+    }
+    if layout.all_button.contains(x, y) {
+        return Some(PickerAction::ToggleManaged(false));
+    }
+    if layout.spawn_here_button.contains(x, y) {
+        return Some(PickerAction::ActivateCurrentPath);
+    }
+    if y >= layout.first_entry_y
+        && y < layout.first_entry_y + layout.visible_entry_rows as u16
+        && x >= layout.content.x
+        && x < layout.content.right()
+    {
+        let index = picker.scroll + (y - layout.first_entry_y) as usize;
+        if index < picker.entries.len() {
+            return Some(PickerAction::ActivateEntry(index));
+        }
+    }
+    None
+}
+
+fn render_picker(renderer: &mut Renderer, picker: &PickerState, field: Rect) {
+    let layout = picker_layout(picker, field);
+    renderer.fill_rect(layout.frame, ' ', Color::Reset);
+    renderer.draw_box(layout.frame, Color::White);
+
+    renderer.draw_text(
+        layout.content.x,
+        layout.content.y,
+        "spawn codex",
+        Color::Cyan,
+    );
+    renderer.draw_text(
+        layout.close_button.x,
+        layout.close_button.y,
+        "[x]",
+        Color::DarkGrey,
+    );
+
+    let path_x = layout
+        .back_button
+        .map(|button| {
+            renderer.draw_text(button.x, button.y, "[..]", Color::DarkGrey);
+            button.right().saturating_add(1)
+        })
+        .unwrap_or(layout.content.x);
+    let path_width = layout.content.right().saturating_sub(path_x) as usize;
+    let path_label = truncate_label(&picker.relative_label(), path_width);
+    renderer.draw_text(path_x, layout.content.y + 1, &path_label, Color::White);
+
+    renderer.draw_text(
+        layout.env_button.x,
+        layout.env_button.y,
+        "[env managed]",
+        if picker.managed_only {
+            Color::White
+        } else {
+            Color::DarkGrey
+        },
+    );
+    renderer.draw_text(
+        layout.all_button.x,
+        layout.all_button.y,
+        "[all folders]",
+        if picker.managed_only {
+            Color::DarkGrey
+        } else {
+            Color::White
+        },
+    );
+
+    let spawn_color = if matches!(picker.selection, PickerSelection::SpawnHere) {
+        Color::White
+    } else {
+        Color::Yellow
+    };
+    let spawn_line = format!(
+        "{} + spawn here",
+        if matches!(picker.selection, PickerSelection::SpawnHere) {
+            ">"
+        } else {
+            " "
+        }
+    );
+    renderer.draw_text(
+        layout.spawn_here_button.x,
+        layout.spawn_here_button.y,
+        &truncate_label(&spawn_line, layout.spawn_here_button.width as usize),
+        spawn_color,
+    );
+
+    if picker.entries.is_empty() {
+        renderer.draw_text(
+            layout.content.x,
+            layout.first_entry_y,
+            "  empty",
+            Color::DarkGrey,
+        );
+        return;
+    }
+
+    for row in 0..layout.visible_entry_rows {
+        let index = picker.scroll + row;
+        if index >= picker.entries.len() {
+            break;
+        }
+        let entry = &picker.entries[index];
+        let marker = if picker.selection == PickerSelection::Entry(index) {
+            ">"
+        } else {
+            " "
+        };
+        let icon = if entry.has_children { ">" } else { "+" };
+        let running = match entry.is_running {
+            Some(true) => " *",
+            Some(false) => " -",
+            None => "",
+        };
+        let line = format!("{marker} {icon} {}{}", entry.name, running);
+        let color = if picker.selection == PickerSelection::Entry(index) {
+            Color::White
+        } else if entry.has_children {
+            Color::Cyan
+        } else {
+            Color::DarkGrey
+        };
+        renderer.draw_text(
+            layout.content.x,
+            layout.first_entry_y + row as u16,
+            &truncate_label(&line, layout.content.width as usize),
+            color,
+        );
     }
 }
 
@@ -834,7 +1524,7 @@ fn render_entity(
     }
 }
 
-fn render_footer(app: &App, renderer: &mut Renderer, start_y: u16) {
+fn render_footer<C: TuiApi>(app: &App<C>, renderer: &mut Renderer, start_y: u16) {
     if start_y >= renderer.height() {
         return;
     }
@@ -869,7 +1559,11 @@ fn render_footer(app: &App, renderer: &mut Renderer, start_y: u16) {
         renderer.draw_text(2, start_y, "selected: none", Color::DarkGrey);
     }
 
-    let help = "click/enter open  arrows or hjkl move  r refresh  q quit";
+    let help = if app.picker.is_some() {
+        "picker: enter/right select  up/down or jk move  h/backspace up  e env  a all  esc close"
+    } else {
+        "click empty field spawn  click/enter open  arrows or hjkl move  r refresh  q quit"
+    };
     renderer.draw_text(
         2,
         start_y + 2,
@@ -1051,19 +1745,51 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         if event::poll(FRAME_DURATION)? {
             match event::read()? {
                 Event::Key(key) if key.kind == KeyEventKind::Press => match key.code {
-                    KeyCode::Char('q') | KeyCode::Esc => break,
-                    KeyCode::Left | KeyCode::Char('h') | KeyCode::Up | KeyCode::Char('k') => {
-                        app.move_selection(-1);
+                    KeyCode::Char('q') => break,
+                    KeyCode::Esc => {
+                        if app.picker.is_some() {
+                            app.close_picker();
+                        } else {
+                            break;
+                        }
                     }
-                    KeyCode::Right | KeyCode::Char('l') | KeyCode::Down | KeyCode::Char('j') => {
-                        app.move_selection(1);
+                    KeyCode::Left | KeyCode::Char('h') | KeyCode::Backspace => {
+                        if app.picker.is_some() {
+                            app.picker_up();
+                        } else {
+                            app.move_selection(-1, current_field);
+                        }
                     }
-                    KeyCode::Enter | KeyCode::Char('o') => {
-                        app.open_selected();
+                    KeyCode::Up | KeyCode::Char('k') => {
+                        app.move_selection(-1, current_field);
+                    }
+                    KeyCode::Down | KeyCode::Char('j') => {
+                        app.move_selection(1, current_field);
+                    }
+                    KeyCode::Right | KeyCode::Char('l') | KeyCode::Enter | KeyCode::Char('o') => {
+                        if app.picker.is_some() {
+                            app.picker_activate_selection(current_field);
+                        } else {
+                            app.open_selected();
+                        }
+                    }
+                    KeyCode::Char('e') => {
+                        app.picker_set_managed_only(true);
+                    }
+                    KeyCode::Char('a') => {
+                        app.picker_set_managed_only(false);
                     }
                     KeyCode::Char('r') => {
-                        let field = field_box(renderer.width(), renderer.height()).inset(1);
-                        app.refresh(field);
+                        if let Some((path, managed_only)) = app
+                            .picker
+                            .as_ref()
+                            .map(|picker| (picker.current_path.clone(), picker.managed_only))
+                        {
+                            app.picker_reload(Some(path), managed_only);
+                        } else {
+                            let field = field_box(renderer.width(), renderer.height()).inset(1);
+                            app.refresh(field);
+                        }
                     }
                     _ => {}
                 },
@@ -1072,7 +1798,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 {
                     let field = field_box(renderer.width(), renderer.height()).inset(1);
                     if field.contains(mouse.column, mouse.row) {
-                        app.click_open(mouse.column, mouse.row, field);
+                        app.handle_field_click(mouse.column, mouse.row, field);
                     }
                 }
                 Event::Resize(width, height) => {
@@ -1090,6 +1816,230 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::VecDeque;
+    use std::sync::{Arc, Mutex};
+
+    use chrono::Utc;
+    use throngterm::types::{ThoughtSource, TransportHealth};
+
+    #[derive(Default)]
+    struct MockApiState {
+        fetch_sessions_results: VecDeque<Result<Vec<SessionSummary>, String>>,
+        native_status_results: VecDeque<Result<NativeDesktopStatusResponse, String>>,
+        open_session_results: VecDeque<Result<NativeDesktopOpenResponse, String>>,
+        list_dirs_results: VecDeque<Result<DirListResponse, String>>,
+        create_session_results: VecDeque<Result<CreateSessionResponse, String>>,
+        open_calls: Vec<String>,
+        list_calls: Vec<(Option<String>, bool)>,
+        create_calls: Vec<(String, SpawnTool)>,
+    }
+
+    #[derive(Clone, Default)]
+    struct MockApi {
+        state: Arc<Mutex<MockApiState>>,
+    }
+
+    impl MockApi {
+        fn new() -> Self {
+            Self::default()
+        }
+
+        fn push_list_dirs(&self, result: Result<DirListResponse, String>) {
+            self.state
+                .lock()
+                .unwrap()
+                .list_dirs_results
+                .push_back(result);
+        }
+
+        fn push_create_session(&self, result: Result<CreateSessionResponse, String>) {
+            self.state
+                .lock()
+                .unwrap()
+                .create_session_results
+                .push_back(result);
+        }
+
+        fn push_open_session(&self, result: Result<NativeDesktopOpenResponse, String>) {
+            self.state
+                .lock()
+                .unwrap()
+                .open_session_results
+                .push_back(result);
+        }
+
+        fn list_calls(&self) -> Vec<(Option<String>, bool)> {
+            self.state.lock().unwrap().list_calls.clone()
+        }
+
+        fn create_calls(&self) -> Vec<(String, SpawnTool)> {
+            self.state.lock().unwrap().create_calls.clone()
+        }
+
+        fn open_calls(&self) -> Vec<String> {
+            self.state.lock().unwrap().open_calls.clone()
+        }
+    }
+
+    impl TuiApi for MockApi {
+        fn fetch_sessions(&self) -> BoxFuture<'_, Result<Vec<SessionSummary>, String>> {
+            let state = self.state.clone();
+            Box::pin(async move {
+                state
+                    .lock()
+                    .unwrap()
+                    .fetch_sessions_results
+                    .pop_front()
+                    .unwrap_or_else(|| Ok(Vec::new()))
+            })
+        }
+
+        fn fetch_native_status(
+            &self,
+        ) -> BoxFuture<'_, Result<NativeDesktopStatusResponse, String>> {
+            let state = self.state.clone();
+            Box::pin(async move {
+                state
+                    .lock()
+                    .unwrap()
+                    .native_status_results
+                    .pop_front()
+                    .unwrap_or_else(|| {
+                        Ok(NativeDesktopStatusResponse {
+                            supported: true,
+                            platform: Some("test".to_string()),
+                            app: Some("test".to_string()),
+                            reason: None,
+                        })
+                    })
+            })
+        }
+
+        fn open_session(
+            &self,
+            session_id: &str,
+        ) -> BoxFuture<'_, Result<NativeDesktopOpenResponse, String>> {
+            let state = self.state.clone();
+            let session_id = session_id.to_string();
+            Box::pin(async move {
+                let mut state = state.lock().unwrap();
+                state.open_calls.push(session_id);
+                state
+                    .open_session_results
+                    .pop_front()
+                    .unwrap_or_else(|| Err("unexpected open_session".to_string()))
+            })
+        }
+
+        fn list_dirs(
+            &self,
+            path: Option<&str>,
+            managed_only: bool,
+        ) -> BoxFuture<'_, Result<DirListResponse, String>> {
+            let state = self.state.clone();
+            let path = path.map(|value| value.to_string());
+            Box::pin(async move {
+                let mut state = state.lock().unwrap();
+                state.list_calls.push((path, managed_only));
+                state
+                    .list_dirs_results
+                    .pop_front()
+                    .unwrap_or_else(|| Err("unexpected list_dirs".to_string()))
+            })
+        }
+
+        fn create_session(
+            &self,
+            cwd: &str,
+            spawn_tool: SpawnTool,
+        ) -> BoxFuture<'_, Result<CreateSessionResponse, String>> {
+            let state = self.state.clone();
+            let cwd = cwd.to_string();
+            Box::pin(async move {
+                let mut state = state.lock().unwrap();
+                state.create_calls.push((cwd, spawn_tool));
+                state
+                    .create_session_results
+                    .pop_front()
+                    .unwrap_or_else(|| Err("unexpected create_session".to_string()))
+            })
+        }
+    }
+
+    fn test_runtime() -> Runtime {
+        Runtime::new().expect("test runtime")
+    }
+
+    fn test_field() -> Rect {
+        Rect {
+            x: 1,
+            y: 3,
+            width: 78,
+            height: 14,
+        }
+    }
+
+    fn make_app(api: MockApi) -> App<MockApi> {
+        App::new(test_runtime(), api)
+    }
+
+    fn session_summary(session_id: &str, tmux_name: &str, cwd: &str) -> SessionSummary {
+        SessionSummary {
+            session_id: session_id.to_string(),
+            tmux_name: tmux_name.to_string(),
+            state: SessionState::Idle,
+            current_command: None,
+            cwd: cwd.to_string(),
+            tool: Some("Codex".to_string()),
+            token_count: 0,
+            context_limit: 192_000,
+            thought: None,
+            thought_state: ThoughtState::Holding,
+            thought_source: ThoughtSource::CarryForward,
+            thought_updated_at: None,
+            last_skill: None,
+            is_stale: false,
+            attached_clients: 0,
+            transport_health: TransportHealth::Healthy,
+            last_activity_at: Utc::now(),
+            sprite_pack_id: None,
+        }
+    }
+
+    fn dir_response(path: &str, names: &[(&str, bool)]) -> DirListResponse {
+        DirListResponse {
+            path: path.to_string(),
+            entries: names
+                .iter()
+                .map(|(name, has_children)| DirEntry {
+                    name: (*name).to_string(),
+                    has_children: *has_children,
+                    is_running: None,
+                })
+                .collect(),
+        }
+    }
+
+    fn create_response(session_id: &str, tmux_name: &str, cwd: &str) -> CreateSessionResponse {
+        CreateSessionResponse {
+            session: session_summary(session_id, tmux_name, cwd),
+            sprite_pack: None,
+        }
+    }
+
+    fn entity_at(
+        field: Rect,
+        session_id: &str,
+        tmux_name: &str,
+        cwd: &str,
+        x: u16,
+        y: u16,
+    ) -> SessionEntity {
+        let mut entity = SessionEntity::new(session_summary(session_id, tmux_name, cwd), field);
+        entity.x = x.saturating_sub(field.x) as f32;
+        entity.y = y.saturating_sub(field.y) as f32;
+        entity
+    }
 
     #[test]
     fn truncate_label_adds_trailing_tilde() {
@@ -1125,5 +2075,252 @@ mod tests {
         };
         assert!(intersects(a, b));
         assert!(!intersects(a, c));
+    }
+
+    #[test]
+    fn empty_field_click_opens_picker_with_managed_order() {
+        let api = MockApi::new();
+        api.push_list_dirs(Ok(dir_response(
+            "/Users/b/repos",
+            &[("opensource", true), ("throngterm", true)],
+        )));
+        let field = test_field();
+        let mut app = make_app(api.clone());
+        app.entities.push(entity_at(
+            field,
+            "sess-1",
+            "dev",
+            "/Users/b/repos/dev",
+            30,
+            8,
+        ));
+
+        app.handle_field_click(10, 10, field);
+
+        let picker = app.picker.as_ref().expect("picker should open");
+        assert!(picker.managed_only);
+        assert_eq!(picker.base_path, "/Users/b/repos");
+        assert_eq!(
+            picker
+                .entries
+                .iter()
+                .map(|entry| entry.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["opensource", "throngterm"]
+        );
+        assert_eq!(api.list_calls(), vec![(None, true)]);
+    }
+
+    #[test]
+    fn navigating_into_folder_creates_and_opens_codex_session() {
+        let api = MockApi::new();
+        api.push_list_dirs(Ok(dir_response("/Users/b/repos", &[("opensource", true)])));
+        api.push_list_dirs(Ok(dir_response(
+            "/Users/b/repos/opensource",
+            &[("skills", false)],
+        )));
+        api.push_create_session(Ok(create_response(
+            "sess-42",
+            "42",
+            "/Users/b/repos/opensource/skills",
+        )));
+        api.push_open_session(Ok(NativeDesktopOpenResponse {
+            session_id: "sess-42".to_string(),
+            status: "opened".to_string(),
+            pane_id: None,
+        }));
+
+        let field = test_field();
+        let mut app = make_app(api.clone());
+
+        app.handle_field_click(10, 10, field);
+        app.activate_picker_entry(0, field);
+        app.activate_picker_entry(0, field);
+
+        assert_eq!(
+            api.list_calls(),
+            vec![
+                (None, true),
+                (Some("/Users/b/repos/opensource".to_string()), true),
+            ]
+        );
+        assert_eq!(
+            api.create_calls(),
+            vec![(
+                "/Users/b/repos/opensource/skills".to_string(),
+                SpawnTool::Codex,
+            )]
+        );
+        assert_eq!(api.open_calls(), vec!["sess-42".to_string()]);
+        assert_eq!(app.selected_id.as_deref(), Some("sess-42"));
+        assert_eq!(
+            app.message.as_ref().map(|(message, _)| message.as_str()),
+            Some("opened 42")
+        );
+        assert!(app
+            .entities
+            .iter()
+            .any(|entity| entity.session.session_id == "sess-42"));
+    }
+
+    #[test]
+    fn spawn_here_uses_current_path_with_codex() {
+        let api = MockApi::new();
+        api.push_create_session(Ok(create_response(
+            "sess-55",
+            "55",
+            "/Users/b/repos/opensource",
+        )));
+        api.push_open_session(Ok(NativeDesktopOpenResponse {
+            session_id: "sess-55".to_string(),
+            status: "opened".to_string(),
+            pane_id: None,
+        }));
+        let field = test_field();
+        let mut app = make_app(api.clone());
+        app.picker = Some(PickerState::new(
+            10,
+            10,
+            dir_response("/Users/b/repos/opensource", &[("skills", true)]),
+            true,
+        ));
+
+        app.spawn_session_from_picker(field);
+
+        assert_eq!(
+            api.create_calls(),
+            vec![("/Users/b/repos/opensource".to_string(), SpawnTool::Codex)]
+        );
+        assert_eq!(api.open_calls(), vec!["sess-55".to_string()]);
+        assert_eq!(app.selected_id.as_deref(), Some("sess-55"));
+    }
+
+    #[test]
+    fn toggling_to_all_reloads_same_path_without_reordering() {
+        let api = MockApi::new();
+        api.push_list_dirs(Ok(dir_response("/Users/b/repos", &[("opensource", true)])));
+        api.push_list_dirs(Ok(dir_response(
+            "/Users/b/repos",
+            &[("Alpha", true), ("beta", true), ("zzz-old", true)],
+        )));
+        let field = test_field();
+        let mut app = make_app(api.clone());
+
+        app.handle_field_click(10, 10, field);
+        app.picker_set_managed_only(false);
+
+        let picker = app.picker.as_ref().expect("picker should stay open");
+        assert!(!picker.managed_only);
+        assert_eq!(
+            picker
+                .entries
+                .iter()
+                .map(|entry| entry.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Alpha", "beta", "zzz-old"]
+        );
+        assert_eq!(
+            api.list_calls(),
+            vec![(None, true), (Some("/Users/b/repos".to_string()), false),]
+        );
+    }
+
+    #[test]
+    fn dir_list_failure_blocks_spawn_and_shows_error() {
+        let api = MockApi::new();
+        api.push_list_dirs(Err("Permission denied".to_string()));
+        let field = test_field();
+        let mut app = make_app(api.clone());
+
+        app.handle_field_click(10, 10, field);
+
+        assert!(app.picker.is_none());
+        assert_eq!(
+            app.message.as_ref().map(|(message, _)| message.as_str()),
+            Some("Permission denied")
+        );
+        assert!(api.create_calls().is_empty());
+        assert!(api.open_calls().is_empty());
+    }
+
+    #[test]
+    fn session_create_failure_does_not_attempt_native_open() {
+        let api = MockApi::new();
+        api.push_list_dirs(Ok(dir_response("/Users/b/repos", &[("throngterm", false)])));
+        api.push_create_session(Err("tmux failed to start".to_string()));
+        let field = test_field();
+        let mut app = make_app(api.clone());
+
+        app.handle_field_click(10, 10, field);
+        app.activate_picker_entry(0, field);
+
+        assert_eq!(
+            api.create_calls(),
+            vec![("/Users/b/repos/throngterm".to_string(), SpawnTool::Codex)]
+        );
+        assert!(api.open_calls().is_empty());
+        assert!(app.entities.is_empty());
+        assert_eq!(
+            app.message.as_ref().map(|(message, _)| message.as_str()),
+            Some("tmux failed to start")
+        );
+    }
+
+    #[test]
+    fn native_open_failure_preserves_created_session() {
+        let api = MockApi::new();
+        api.push_list_dirs(Ok(dir_response("/Users/b/repos", &[("throngterm", false)])));
+        api.push_create_session(Ok(create_response(
+            "sess-77",
+            "77",
+            "/Users/b/repos/throngterm",
+        )));
+        api.push_open_session(Err("native open unavailable".to_string()));
+        let field = test_field();
+        let mut app = make_app(api.clone());
+
+        app.handle_field_click(10, 10, field);
+        app.activate_picker_entry(0, field);
+
+        assert_eq!(api.open_calls(), vec!["sess-77".to_string()]);
+        assert!(app
+            .entities
+            .iter()
+            .any(|entity| entity.session.session_id == "sess-77"));
+        assert_eq!(
+            app.message.as_ref().map(|(message, _)| message.as_str()),
+            Some("native open unavailable")
+        );
+    }
+
+    #[test]
+    fn clicking_existing_thronglet_still_opens_it_directly() {
+        let api = MockApi::new();
+        api.push_open_session(Ok(NativeDesktopOpenResponse {
+            session_id: "sess-7".to_string(),
+            status: "focused".to_string(),
+            pane_id: None,
+        }));
+        let field = test_field();
+        let mut app = make_app(api.clone());
+        app.entities.push(entity_at(
+            field,
+            "sess-7",
+            "dev",
+            "/Users/b/repos/dev",
+            30,
+            8,
+        ));
+        app.selected_id = Some("sess-7".to_string());
+
+        app.handle_field_click(30, 8, field);
+
+        assert!(api.list_calls().is_empty());
+        assert!(api.create_calls().is_empty());
+        assert_eq!(api.open_calls(), vec!["sess-7".to_string()]);
+        assert_eq!(
+            app.message.as_ref().map(|(message, _)| message.as_str()),
+            Some("focused dev")
+        );
     }
 }
