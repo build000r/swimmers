@@ -6,12 +6,16 @@ use std::sync::{LazyLock, Mutex};
 use anyhow::{anyhow, Context, Result};
 use tokio::process::Command;
 use tokio::sync::Mutex as AsyncMutex;
+use tokio::time::{sleep, Duration};
 
 use crate::types::{NativeDesktopOpenResponse, NativeDesktopStatusResponse};
 
 const ITERM_APP_NAME: &str = "iTerm";
 const ITERM_SCRIPT_RELATIVE_PATH: &str = "scripts/iterm-focus.scpt";
 const ITERM_SCROLLBACK_PREFILL_LINES: usize = 2000;
+const ITERM_OPEN_RETRY_ATTEMPTS: usize = 2;
+const ITERM_OPEN_RETRY_DELAY_MS: u64 = 150;
+const DEFAULT_ITERM_SESSION_NAME: &str = "Throngterm";
 const TMUX_BIN_ENV: &str = "THRONGTERM_TMUX_BIN";
 const TMUX_BIN_FALLBACKS: &[&str] = &[
     "/opt/homebrew/bin/tmux",
@@ -58,6 +62,7 @@ pub fn support_for_host(host: &str) -> NativeDesktopStatusResponse {
 pub async fn open_or_focus_iterm_session(
     session_id: &str,
     tmux_name: &str,
+    cwd: &str,
 ) -> Result<NativeDesktopOpenResponse> {
     let _guard = NATIVE_OPEN_LOCK.lock().await;
     let script = script_path();
@@ -67,17 +72,41 @@ pub async fn open_or_focus_iterm_session(
 
     let tmux_path = resolve_tmux_binary()?;
     let attach_command = build_iterm_attach_command(tmux_name, &tmux_path);
-    let known_pane_id = cached_pane_id(session_id);
-    let result = run_open_or_focus_script(
-        &script,
-        session_id,
+    let (tmux_pane_id, tmux_cwd) = query_tmux_pane_metadata(&tmux_path, tmux_name)
+        .await
+        .unwrap_or((None, None));
+    let display_name = build_iterm_display_name(
+        tmux_cwd.as_deref().unwrap_or(cwd),
         tmux_name,
-        &attach_command,
-        known_pane_id.as_deref(),
-    )
-    .await?;
-    remember_pane_id(session_id, result.pane_id.as_deref());
-    Ok(result)
+        tmux_pane_id.as_deref(),
+    );
+    let known_pane_id = cached_pane_id(session_id);
+    for attempt in 0..ITERM_OPEN_RETRY_ATTEMPTS {
+        match run_open_or_focus_script(
+            &script,
+            session_id,
+            tmux_name,
+            &attach_command,
+            &display_name,
+            known_pane_id.as_deref(),
+        )
+        .await
+        {
+            Ok(result) => {
+                remember_pane_id(session_id, result.pane_id.as_deref());
+                return Ok(result);
+            }
+            Err(err)
+                if attempt + 1 < ITERM_OPEN_RETRY_ATTEMPTS
+                    && is_transient_iterm_missing_session_error(&err) =>
+            {
+                sleep(Duration::from_millis(ITERM_OPEN_RETRY_DELAY_MS)).await;
+            }
+            Err(err) => return Err(err),
+        }
+    }
+
+    unreachable!("native iTerm open loop should always return or error")
 }
 
 fn script_path() -> PathBuf {
@@ -149,6 +178,7 @@ async fn run_open_or_focus_script(
     session_id: &str,
     tmux_name: &str,
     attach_command: &str,
+    display_name: &str,
     known_pane_id: Option<&str>,
 ) -> Result<NativeDesktopOpenResponse> {
     let mut command = Command::new("osascript");
@@ -156,7 +186,8 @@ async fn run_open_or_focus_script(
         .arg(script)
         .arg(session_id)
         .arg(tmux_name)
-        .arg(attach_command);
+        .arg(attach_command)
+        .arg(display_name);
     if let Some(pane_id) = known_pane_id.filter(|value| !value.is_empty()) {
         command.arg(pane_id);
     }
@@ -180,6 +211,96 @@ async fn run_open_or_focus_script(
     parse_osascript_output(stdout.trim(), session_id)
 }
 
+async fn query_tmux_pane_metadata(
+    tmux_path: &Path,
+    tmux_name: &str,
+) -> Result<(Option<String>, Option<String>)> {
+    let output = Command::new(tmux_path)
+        .args([
+            "display-message",
+            "-p",
+            "-t",
+            tmux_name,
+            "#{pane_id}\t#{pane_current_path}",
+        ])
+        .env_remove("TMUX")
+        .env_remove("TMUX_PANE")
+        .output()
+        .await
+        .map_err(|e| anyhow!("failed to run tmux display-message: {e}"))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let message = if stderr.is_empty() {
+            "tmux display-message returned a non-zero exit status".to_string()
+        } else {
+            stderr
+        };
+        return Err(anyhow!(message));
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if stdout.is_empty() {
+        return Ok((None, None));
+    }
+
+    let mut parts = stdout.splitn(2, '\t');
+    let pane_id = parts.next().and_then(normalize_tmux_pane_id);
+    let cwd = parts
+        .next()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned);
+
+    Ok((pane_id, cwd))
+}
+
+fn build_iterm_display_name(cwd: &str, tmux_name: &str, tmux_pane_id: Option<&str>) -> String {
+    let target_name = cwd_basename(cwd)
+        .or_else(|| non_empty_trimmed(tmux_name).map(ToOwned::to_owned))
+        .unwrap_or_else(|| DEFAULT_ITERM_SESSION_NAME.to_string());
+
+    match normalize_tmux_pane_id(tmux_pane_id.unwrap_or_default()) {
+        Some(pane_id) => format!("{pane_id} {target_name}"),
+        None => target_name,
+    }
+}
+
+fn cwd_basename(cwd: &str) -> Option<String> {
+    let trimmed = cwd.trim().trim_end_matches('/');
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    trimmed
+        .rsplit('/')
+        .find(|segment| !segment.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn normalize_tmux_pane_id(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let normalized = trimmed.trim_start_matches('%').trim();
+    if normalized.is_empty() {
+        return None;
+    }
+
+    Some(normalized.to_string())
+}
+
+fn non_empty_trimmed(value: &str) -> Option<&str> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed)
+    }
+}
+
 fn build_iterm_attach_command(tmux_name: &str, tmux_path: &Path) -> String {
     let tmux_name = shell_single_quote(tmux_name);
     let tmux_path = shell_single_quote(tmux_path.to_string_lossy().as_ref());
@@ -193,6 +314,11 @@ printf '\\033[H\\033[2J'; exec {tmux_path} attach-session -t {tmux_name}",
 
 fn shell_single_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\"'\"'"))
+}
+
+fn is_transient_iterm_missing_session_error(err: &anyhow::Error) -> bool {
+    let message = err.to_string();
+    message.contains("session 1 of missing value") && message.contains("(-1728)")
 }
 
 fn parse_osascript_output(stdout: &str, session_id: &str) -> Result<NativeDesktopOpenResponse> {
@@ -325,6 +451,45 @@ mod tests {
         assert!(command.contains("exec '/tmp/tmux builds/tmux' attach-session"));
     }
 
+    #[test]
+    fn build_iterm_display_name_prefers_normalized_pane_id_and_cwd_basename() {
+        assert_eq!(
+            build_iterm_display_name(
+                "/Users/b/repos/throngterm/",
+                "codex-20260302-162713",
+                Some("%12")
+            ),
+            "12 throngterm"
+        );
+    }
+
+    #[test]
+    fn build_iterm_display_name_falls_back_to_tmux_name_when_cwd_is_empty() {
+        assert_eq!(
+            build_iterm_display_name("", "codex-20260302-162713", Some("%7")),
+            "7 codex-20260302-162713"
+        );
+    }
+
+    #[test]
+    fn build_iterm_display_name_omits_separator_when_pane_id_is_missing() {
+        assert_eq!(
+            build_iterm_display_name("/Users/b/repos/throngterm", "codex-20260302-162713", None),
+            "throngterm"
+        );
+    }
+
+    #[test]
+    fn detects_transient_missing_session_iterm_errors() {
+        let retryable = anyhow!(
+            "/tmp/iterm-focus.scpt: execution error: Can't get session 1 of missing value. (-1728)"
+        );
+        assert!(is_transient_iterm_missing_session_error(&retryable));
+
+        let other = anyhow!("unexpected osascript status: created");
+        assert!(!is_transient_iterm_missing_session_error(&other));
+    }
+
     #[tokio::test]
     async fn open_or_focus_passes_cached_pane_id_on_repeat_calls() {
         let _env_guard = TEST_ENV_LOCK.lock().unwrap();
@@ -335,7 +500,11 @@ mod tests {
         std::fs::create_dir_all(&fake_bin_dir).unwrap();
 
         let fake_tmux = fake_bin_dir.join("tmux");
-        std::fs::write(&fake_tmux, "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::write(
+            &fake_tmux,
+            "#!/bin/sh\nset -eu\nif [ \"${1-}\" = \"display-message\" ]; then\n  printf '%%12\\t/Users/b/repos/throngterm\\n'\n  exit 0\nfi\nexit 0\n",
+        )
+        .unwrap();
         let mut perms = std::fs::metadata(&fake_tmux).unwrap().permissions();
         perms.set_mode(0o755);
         std::fs::set_permissions(&fake_tmux, perms).unwrap();
@@ -345,8 +514,8 @@ mod tests {
         std::fs::write(
             &fake_osascript,
             format!(
-                "#!/bin/sh\nset -eu\nprintf '%s\\n' \"$*\" >> \"{}\"\nknown=\"${{5-}}\"\nif [ -z \"$known\" ]; then\n  printf 'created|pane-1\\n'\nelse\n  printf 'focused|%s\\n' \"$known\"\nfi\n",
-                log_path.display()
+                "#!/bin/sh\nset -eu\nfirst=1\nfor arg in \"$@\"; do\n  if [ \"$first\" -eq 1 ]; then\n    printf '%s' \"$arg\" >> \"{log}\"\n    first=0\n  else\n    printf '\\t%s' \"$arg\" >> \"{log}\"\n  fi\ndone\nprintf '\\n' >> \"{log}\"\nknown=\"${{6-}}\"\nif [ -z \"$known\" ]; then\n  printf 'created|pane-1\\n'\nelse\n  printf 'focused|%s\\n' \"$known\"\nfi\n",
+                log = log_path.display()
             ),
         )
         .unwrap();
@@ -360,10 +529,10 @@ mod tests {
         std::env::set_var("PATH", path_value);
         std::env::set_var(TMUX_BIN_ENV, &fake_tmux);
 
-        let first = open_or_focus_iterm_session("sess-cache", "tmux-cache")
+        let first = open_or_focus_iterm_session("sess-cache", "tmux-cache", "/tmp/fallback")
             .await
             .unwrap();
-        let second = open_or_focus_iterm_session("sess-cache", "tmux-cache")
+        let second = open_or_focus_iterm_session("sess-cache", "tmux-cache", "/tmp/fallback")
             .await
             .unwrap();
 
@@ -383,13 +552,72 @@ mod tests {
 
         let log = std::fs::read_to_string(&log_path).unwrap();
         let mut lines = log.lines();
-        let first_call = lines.next().unwrap();
-        let second_call = lines.next().unwrap();
-        assert!(first_call.contains(" sess-cache tmux-cache "));
-        assert!(first_call.contains("capture-pane -p -J -S -2000 -t 'tmux-cache'"));
-        assert!(!first_call.ends_with(" pane-1"));
-        assert!(second_call.ends_with(" pane-1"));
+        let first_call: Vec<_> = lines.next().unwrap().split('\t').collect();
+        let second_call: Vec<_> = lines.next().unwrap().split('\t').collect();
+        assert_eq!(first_call[1], "sess-cache");
+        assert_eq!(first_call[2], "tmux-cache");
+        assert!(first_call[3].contains("capture-pane -p -J -S -2000 -t 'tmux-cache'"));
+        assert_eq!(first_call[4], "12 throngterm");
+        assert_eq!(first_call.len(), 5);
+        assert_eq!(second_call[4], "12 throngterm");
+        assert_eq!(second_call[5], "pane-1");
 
         remember_pane_id("sess-cache", None);
+    }
+
+    #[tokio::test]
+    async fn open_or_focus_retries_transient_missing_session_error() {
+        let _env_guard = TEST_ENV_LOCK.lock().unwrap();
+        remember_pane_id("sess-retry", None);
+
+        let temp = tempdir().unwrap();
+        let fake_bin_dir = temp.path().join("bin");
+        std::fs::create_dir_all(&fake_bin_dir).unwrap();
+
+        let fake_tmux = fake_bin_dir.join("tmux");
+        std::fs::write(&fake_tmux, "#!/bin/sh\nexit 0\n").unwrap();
+        let mut perms = std::fs::metadata(&fake_tmux).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&fake_tmux, perms).unwrap();
+
+        let counter_path = temp.path().join("osascript-count");
+        let fake_osascript = fake_bin_dir.join("osascript");
+        std::fs::write(
+            &fake_osascript,
+            format!(
+                "#!/bin/sh\nset -eu\ncount=0\nif [ -f \"{counter}\" ]; then\n  IFS= read -r count < \"{counter}\" || true\nfi\ncount=$((count + 1))\nprintf '%s\\n' \"$count\" > \"{counter}\"\nif [ \"$count\" -eq 1 ]; then\n  printf \"%s\\n\" \"scripts/iterm-focus.scpt: execution error: Can't get session 1 of missing value. (-1728)\" >&2\n  exit 1\nfi\nprintf 'created|pane-retry\\n'\n",
+                counter = counter_path.display()
+            ),
+        )
+        .unwrap();
+        let mut perms = std::fs::metadata(&fake_osascript).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&fake_osascript, perms).unwrap();
+
+        let original_path = std::env::var_os("PATH");
+        let original_tmux = std::env::var_os(TMUX_BIN_ENV);
+        let path_value = std::env::join_paths([fake_bin_dir.as_path()]).unwrap();
+        std::env::set_var("PATH", path_value);
+        std::env::set_var(TMUX_BIN_ENV, &fake_tmux);
+
+        let result =
+            open_or_focus_iterm_session("sess-retry", "tmux-retry", "/Users/b/repos/retry")
+                .await
+                .unwrap();
+
+        match original_path {
+            Some(value) => std::env::set_var("PATH", value),
+            None => std::env::remove_var("PATH"),
+        }
+        match original_tmux {
+            Some(value) => std::env::set_var(TMUX_BIN_ENV, value),
+            None => std::env::remove_var(TMUX_BIN_ENV),
+        }
+
+        assert_eq!(result.status, "created");
+        assert_eq!(result.pane_id.as_deref(), Some("pane-retry"));
+        assert_eq!(std::fs::read_to_string(&counter_path).unwrap().trim(), "2");
+
+        remember_pane_id("sess-retry", None);
     }
 }

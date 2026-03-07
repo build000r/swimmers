@@ -125,7 +125,12 @@ async fn native_open(
             .into_response();
     }
 
-    match crate::native::open_or_focus_iterm_session(&summary.session_id, &summary.tmux_name).await
+    match crate::native::open_or_focus_iterm_session(
+        &summary.session_id,
+        &summary.tmux_name,
+        &summary.cwd,
+    )
+    .await
     {
         Ok(result) => (StatusCode::OK, Json(serde_json::to_value(result).unwrap())).into_response(),
         Err(err) => (

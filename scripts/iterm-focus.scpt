@@ -19,8 +19,8 @@ on sessionTag(aSession)
 	end try
 end sessionTag
 
-on focusExistingSession(aWindow, aTab, aSession, targetSessionId)
-	my markWorkspaceSession(aSession, targetSessionId)
+on focusExistingSession(aWindow, aTab, aSession, targetSessionId, displayName)
+	my markWorkspaceSession(aSession, targetSessionId, displayName)
 	tell application id "com.googlecode.iterm2"
 		tell aWindow to select
 		tell aTab to select
@@ -30,14 +30,14 @@ on focusExistingSession(aWindow, aTab, aSession, targetSessionId)
 	return my encodeResult("focused", aSession)
 end focusExistingSession
 
-on findSessionByPaneId(targetPaneId, targetSessionId)
+on findSessionByPaneId(targetPaneId, targetSessionId, displayName)
 	if targetPaneId is "" then return ""
 	tell application id "com.googlecode.iterm2"
 		repeat with aWindow in windows
 			repeat with aTab in tabs of aWindow
 				repeat with aSession in sessions of aTab
 					if (my sessionPaneId(aSession)) is targetPaneId then
-						return my focusExistingSession(aWindow, aTab, aSession, targetSessionId)
+						return my focusExistingSession(aWindow, aTab, aSession, targetSessionId, displayName)
 					end if
 				end repeat
 			end repeat
@@ -46,13 +46,13 @@ on findSessionByPaneId(targetPaneId, targetSessionId)
 	return ""
 end findSessionByPaneId
 
-on findSessionByTag(targetSessionId)
+on findSessionByTag(targetSessionId, displayName)
 	tell application id "com.googlecode.iterm2"
 		repeat with aWindow in windows
 			repeat with aTab in tabs of aWindow
 				repeat with aSession in sessions of aTab
 					if (my sessionTag(aSession)) is targetSessionId then
-						return my focusExistingSession(aWindow, aTab, aSession, targetSessionId)
+						return my focusExistingSession(aWindow, aTab, aSession, targetSessionId, displayName)
 					end if
 				end repeat
 			end repeat
@@ -105,13 +105,15 @@ on chooseSplitTarget(targetTab)
 	return bestSession
 end chooseSplitTarget
 
-on markWorkspaceSession(aSession, targetSessionId)
+on markWorkspaceSession(aSession, targetSessionId, displayName)
+	set resolvedName to displayName
+	if resolvedName is "" then set resolvedName to "Throngterm"
 	tell application id "com.googlecode.iterm2"
 		tell aSession
 			set variable named "user.throngterm.workspace" to "main"
 			set variable named "user.throngterm.session_id" to targetSessionId
 			try
-				set name to "Throngterm"
+				set name to resolvedName
 			end try
 		end tell
 	end tell
@@ -128,43 +130,86 @@ on preferredWindow()
 	end tell
 end preferredWindow
 
-on createWorkspaceTab(attachCommand, targetSessionId)
+on tabFromWindow(aWindow)
+	if aWindow is missing value then return missing value
+	tell application id "com.googlecode.iterm2"
+		repeat with attemptIndex from 1 to 5
+			try
+				return current tab of aWindow
+			end try
+			try
+				return first tab of aWindow
+			end try
+			if attemptIndex is less than 5 then delay 0.1
+		end repeat
+	end tell
+	return missing value
+end tabFromWindow
+
+on sessionFromTab(aTab)
+	if aTab is missing value then return missing value
+	tell application id "com.googlecode.iterm2"
+		repeat with attemptIndex from 1 to 5
+			try
+				return current session of aTab
+			end try
+			try
+				return first session of aTab
+			end try
+			if attemptIndex is less than 5 then delay 0.1
+		end repeat
+	end tell
+	return missing value
+end sessionFromTab
+
+on createWorkspaceTab(attachCommand, targetSessionId, displayName)
+	set newWindow to missing value
+	set newTab to missing value
 	tell application id "com.googlecode.iterm2"
 		activate
 		if (count of windows) is 0 then
 			set newWindow to (create window with default profile command attachCommand)
-			try
-				set newTab to current tab of newWindow
-			on error
-				set newTab to first tab of newWindow
-			end try
 		else
 			set targetWindow to my preferredWindow()
-			tell targetWindow
-				set newTab to (create tab with default profile command attachCommand)
-			end tell
+			if targetWindow is missing value then
+				set newWindow to (create window with default profile command attachCommand)
+			else
+				try
+					tell targetWindow
+						set newTab to (create tab with default profile command attachCommand)
+					end tell
+				on error
+					set newWindow to (create window with default profile command attachCommand)
+				end try
+			end if
 		end if
-
-		try
-			set newSession to current session of newTab
-		on error
-			set newSession to first session of newTab
-		end try
 	end tell
-	my markWorkspaceSession(newSession, targetSessionId)
+
+	if newTab is missing value then
+		if newWindow is not missing value then
+			set newTab to my tabFromWindow(newWindow)
+		else
+			set targetWindow to my preferredWindow()
+			if targetWindow is not missing value then set newTab to my tabFromWindow(targetWindow)
+		end if
+	end if
+
+	set newSession to my sessionFromTab(newTab)
+	if newSession is missing value then error "unable to resolve iTerm session after tab creation"
+	my markWorkspaceSession(newSession, targetSessionId, displayName)
 	return newSession
 end createWorkspaceTab
 
-on createOrSplitSession(targetSessionId, tmuxName, attachCommand)
+on createOrSplitSession(targetSessionId, tmuxName, attachCommand, displayName)
 	set workspaceTab to my findWorkspaceTab()
 	if workspaceTab is missing value then
-		set createdSession to my createWorkspaceTab(attachCommand, targetSessionId)
+		set createdSession to my createWorkspaceTab(attachCommand, targetSessionId, displayName)
 		return my encodeResult("created", createdSession)
 	end if
 	
 	set splitSource to my chooseSplitTarget(workspaceTab)
 	if splitSource is missing value then
-		set createdSession to my createWorkspaceTab(attachCommand, targetSessionId)
+		set createdSession to my createWorkspaceTab(attachCommand, targetSessionId, displayName)
 		return my encodeResult("created", createdSession)
 	end if
 	
@@ -177,21 +222,29 @@ on createOrSplitSession(targetSessionId, tmuxName, attachCommand)
 	set canSplitHorizontally to ((sourceRows / 2) is greater than or equal to 18)
 	
 	if not canSplitVertically and not canSplitHorizontally then
-		set createdSession to my createWorkspaceTab(attachCommand, targetSessionId)
+		set createdSession to my createWorkspaceTab(attachCommand, targetSessionId, displayName)
 		return my encodeResult("created", createdSession)
 	end if
 	
+	set newSession to missing value
 	tell application id "com.googlecode.iterm2"
 		tell splitSource
-			if canSplitVertically and (sourceCols is greater than or equal to sourceRows or not canSplitHorizontally) then
-				set newSession to split vertically with default profile command attachCommand
-			else
-				set newSession to split horizontally with default profile command attachCommand
-			end if
+			try
+				if canSplitVertically and (sourceCols is greater than or equal to sourceRows or not canSplitHorizontally) then
+					set newSession to split vertically with default profile command attachCommand
+				else
+					set newSession to split horizontally with default profile command attachCommand
+				end if
+			end try
 		end tell
 	end tell
+
+	if newSession is missing value then
+		set createdSession to my createWorkspaceTab(attachCommand, targetSessionId, displayName)
+		return my encodeResult("created", createdSession)
+	end if
 	
-	my markWorkspaceSession(newSession, targetSessionId)
+	my markWorkspaceSession(newSession, targetSessionId, displayName)
 	tell application id "com.googlecode.iterm2"
 		tell newSession to select
 		activate
@@ -200,24 +253,25 @@ on createOrSplitSession(targetSessionId, tmuxName, attachCommand)
 end createOrSplitSession
 
 on run argv
-	if (count of argv) is less than 3 then error "expected session_id, tmux_name, and attach_command"
+	if (count of argv) is less than 4 then error "expected session_id, tmux_name, attach_command, and display_name"
 	set targetSessionId to item 1 of argv
 	set tmuxName to item 2 of argv
 	set attachCommand to item 3 of argv
+	set displayName to item 4 of argv
 	set knownPaneId to ""
-	if (count of argv) is greater than or equal to 4 then set knownPaneId to item 4 of argv
+	if (count of argv) is greater than or equal to 5 then set knownPaneId to item 5 of argv
 	if knownPaneId is not "" then
-		set existingSession to my findSessionByPaneId(knownPaneId, targetSessionId)
+		set existingSession to my findSessionByPaneId(knownPaneId, targetSessionId, displayName)
 		if existingSession is not "" then
 			return existingSession
 		end if
 	end if
 	repeat with attemptIndex from 1 to 3
-		set existingSession to my findSessionByTag(targetSessionId)
+		set existingSession to my findSessionByTag(targetSessionId, displayName)
 		if existingSession is not "" then
 			return existingSession
 		end if
 		if attemptIndex is less than 3 then delay 0.1
 	end repeat
-	return my createOrSplitSession(targetSessionId, tmuxName, attachCommand)
+	return my createOrSplitSession(targetSessionId, tmuxName, attachCommand, displayName)
 end run
