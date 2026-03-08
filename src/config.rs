@@ -164,6 +164,11 @@ mod tests {
         "window-linked",
         "window-unlinked",
     ];
+    const TMUX_NOTIFY_SCOPE_ARGS: [&str; 3] = [
+        "--session-name \\\"#{session_name}\\\"",
+        "--window-id \\\"#{window_id}\\\"",
+        "--pane-id \\\"#{pane_id}\\\"",
+    ];
 
     #[test]
     fn unknown_backend_defaults_to_daemon() {
@@ -262,6 +267,12 @@ mod tests {
                 "hook line for `{event}` must target {}: {rendered}",
                 expected_socket.display()
             );
+            for scope_arg in TMUX_NOTIFY_SCOPE_ARGS {
+                assert!(
+                    line.contains(scope_arg),
+                    "hook line for `{event}` must include `{scope_arg}`: {line}"
+                );
+            }
         }
     }
 }
