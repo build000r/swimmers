@@ -19,9 +19,10 @@ use reqwest::Client;
 use tokio::runtime::Runtime;
 
 use throngterm::config::{AuthMode, Config};
+use throngterm::repo_theme::discover_repo_theme;
 use throngterm::types::{
     CreateSessionRequest, CreateSessionResponse, DirEntry, DirListResponse, ErrorResponse,
-    NativeDesktopOpenRequest, NativeDesktopOpenResponse, NativeDesktopStatusResponse,
+    NativeDesktopOpenRequest, NativeDesktopOpenResponse, NativeDesktopStatusResponse, RepoTheme,
     SessionListResponse, SessionState, SessionSummary, SpawnTool, ThoughtState,
 };
 
@@ -40,7 +41,7 @@ const THOUGHT_RAIL_MIN_WIDTH: u16 = 100;
 const THOUGHT_RAIL_MIN_PANEL_WIDTH: u16 = 24;
 const THOUGHT_RAIL_GAP: u16 = 1;
 const THOUGHT_RAIL_RATIO_DENOMINATOR: u16 = 3;
-const THOUGHT_RAIL_HEADER_ROWS: u16 = 1;
+const THOUGHT_RAIL_HEADER_ROWS: u16 = 2;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct Cell {
@@ -892,19 +893,69 @@ struct ThoughtFingerprint {
 struct ThoughtLogEntry {
     session_id: String,
     tmux_name: String,
+    cwd: String,
+    pwd_label: Option<String>,
     thought: String,
     updated_at: Option<DateTime<Utc>>,
+    color: Color,
 }
 
 impl ThoughtLogEntry {
-    fn from_session(session: &SessionSummary, thought: String) -> Self {
+    fn from_session(
+        session: &SessionSummary,
+        thought: String,
+        repo_themes: &HashMap<String, RepoTheme>,
+    ) -> Self {
         Self {
             session_id: session.session_id.clone(),
             tmux_name: session.tmux_name.clone(),
+            cwd: normalize_path(&session.cwd),
+            pwd_label: path_tail_label(&session.cwd),
             thought,
             updated_at: session.thought_updated_at,
+            color: session_display_color(session, repo_themes, false),
         }
     }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct ThoughtFilter {
+    cwd: Option<String>,
+    tmux_name: Option<String>,
+}
+
+impl ThoughtFilter {
+    fn is_active(&self) -> bool {
+        self.cwd.is_some() || self.tmux_name.is_some()
+    }
+
+    fn matches(&self, entry: &ThoughtLogEntry) -> bool {
+        let cwd_matches = self
+            .cwd
+            .as_ref()
+            .map(|cwd| entry.cwd == *cwd)
+            .unwrap_or(true);
+        let tmux_matches = self
+            .tmux_name
+            .as_ref()
+            .map(|tmux_name| entry.tmux_name == *tmux_name)
+            .unwrap_or(true);
+        cwd_matches && tmux_matches
+    }
+
+    fn clear(&mut self) {
+        self.cwd = None;
+        self.tmux_name = None;
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ThoughtRepoSummary {
+    cwd: String,
+    label: String,
+    count: usize,
+    color: Color,
+    last_seen: usize,
 }
 
 fn normalize_thought_text(thought: Option<&str>) -> Option<String> {
@@ -936,7 +987,9 @@ struct App<C: TuiApi> {
     client: C,
     entities: Vec<SessionEntity>,
     thought_log: Vec<ThoughtLogEntry>,
+    thought_filter: ThoughtFilter,
     last_logged_thoughts: HashMap<String, ThoughtFingerprint>,
+    repo_themes: HashMap<String, RepoTheme>,
     selected_id: Option<String>,
     native_status: Option<NativeDesktopStatusResponse>,
     picker: Option<PickerState>,
@@ -952,7 +1005,9 @@ impl<C: TuiApi> App<C> {
             client,
             entities: Vec::new(),
             thought_log: Vec::new(),
+            thought_filter: ThoughtFilter::default(),
             last_logged_thoughts: HashMap::new(),
+            repo_themes: HashMap::new(),
             selected_id: None,
             native_status: None,
             picker: None,
@@ -991,9 +1046,80 @@ impl<C: TuiApi> App<C> {
         self.thought_log.drain(0..drop_count);
     }
 
-    fn visible_thought_entries(&self, capacity: usize) -> &[ThoughtLogEntry] {
-        let start = self.thought_log.len().saturating_sub(capacity);
-        &self.thought_log[start..]
+    fn visible_thought_entries(&self, capacity: usize) -> Vec<&ThoughtLogEntry> {
+        if capacity == 0 {
+            return Vec::new();
+        }
+
+        let filtered = self
+            .thought_log
+            .iter()
+            .filter(|entry| self.thought_filter.matches(entry))
+            .collect::<Vec<_>>();
+        let start = filtered.len().saturating_sub(capacity);
+        filtered[start..].to_vec()
+    }
+
+    fn thought_repo_summaries(&self) -> Vec<ThoughtRepoSummary> {
+        let mut grouped = HashMap::<String, ThoughtRepoSummary>::new();
+        for (index, entry) in self.thought_log.iter().enumerate() {
+            let Some(label) = entry.pwd_label.as_ref() else {
+                continue;
+            };
+
+            let summary = grouped
+                .entry(entry.cwd.clone())
+                .or_insert_with(|| ThoughtRepoSummary {
+                    cwd: entry.cwd.clone(),
+                    label: label.clone(),
+                    count: 0,
+                    color: entry.color,
+                    last_seen: index,
+                });
+            summary.count += 1;
+            summary.color = entry.color;
+            summary.last_seen = index;
+        }
+
+        let mut summaries = grouped.into_values().collect::<Vec<_>>();
+        summaries.sort_by(|left, right| {
+            right
+                .last_seen
+                .cmp(&left.last_seen)
+                .then_with(|| left.label.cmp(&right.label))
+                .then_with(|| left.cwd.cmp(&right.cwd))
+        });
+        summaries
+    }
+
+    fn active_thought_filter_text(&self) -> String {
+        if !self.thought_filter.is_active() {
+            return "filter: none".to_string();
+        }
+
+        let mut parts = Vec::new();
+        if let Some(cwd) = self.thought_filter.cwd.as_deref() {
+            parts.push(format!(
+                "pwd={}",
+                path_tail_label(cwd).unwrap_or_else(|| cwd.to_string())
+            ));
+        }
+        if let Some(tmux_name) = self.thought_filter.tmux_name.as_deref() {
+            parts.push(format!("num={tmux_name}"));
+        }
+        format!("filter: {}", parts.join(", "))
+    }
+
+    fn set_thought_filter_cwd(&mut self, cwd: String) {
+        self.thought_filter.cwd = Some(cwd);
+    }
+
+    fn set_thought_filter_tmux_name(&mut self, tmux_name: String) {
+        self.thought_filter.tmux_name = Some(tmux_name);
+    }
+
+    fn clear_thought_filters(&mut self) {
+        self.thought_filter.clear();
     }
 
     fn capture_thought_updates(&mut self, sessions: &[SessionSummary], thought_capacity: usize) {
@@ -1016,7 +1142,11 @@ impl<C: TuiApi> App<C> {
 
             self.last_logged_thoughts
                 .insert(session.session_id.clone(), incoming);
-            pending.push(ThoughtLogEntry::from_session(session, thought));
+            pending.push(ThoughtLogEntry::from_session(
+                session,
+                thought,
+                &self.repo_themes,
+            ));
         }
 
         pending.sort_by(|left, right| {
@@ -1035,6 +1165,7 @@ impl<C: TuiApi> App<C> {
     fn refresh(&mut self, layout: WorkspaceLayout) {
         match self.runtime.block_on(self.client.fetch_sessions()) {
             Ok(sessions) => {
+                self.sync_repo_themes(&sessions);
                 self.capture_thought_updates(&sessions, layout.thought_entry_capacity());
                 self.merge_sessions(sessions, layout.overview_field);
                 let count = self.entities.len();
@@ -1114,6 +1245,28 @@ impl<C: TuiApi> App<C> {
         self.merge_sessions(sessions, field);
     }
 
+    fn sync_repo_themes(&mut self, sessions: &[SessionSummary]) {
+        let mut next = HashMap::new();
+        for session in sessions {
+            let Some((theme_id, theme)) = discover_repo_theme(&session.cwd) else {
+                continue;
+            };
+            next.insert(theme_id, theme);
+        }
+        self.repo_themes = next;
+    }
+
+    fn remember_repo_theme(&mut self, session: &SessionSummary, theme: Option<RepoTheme>) {
+        if let (Some(theme_id), Some(theme)) = (session.repo_theme_id.as_ref(), theme) {
+            self.repo_themes.insert(theme_id.clone(), theme);
+            return;
+        }
+
+        if let Some((theme_id, resolved)) = discover_repo_theme(&session.cwd) {
+            self.repo_themes.insert(theme_id, resolved);
+        }
+    }
+
     fn tick(&mut self, field: Rect) {
         self.tick = self.tick.wrapping_add(1);
         for entity in &mut self.entities {
@@ -1171,14 +1324,6 @@ impl<C: TuiApi> App<C> {
         self.entities
             .iter()
             .find(|entity| entity.session.session_id == *selected)
-    }
-
-    fn session_color(&self, session_id: &str) -> Color {
-        self.entities
-            .iter()
-            .find(|entity| entity.session.session_id == session_id)
-            .map(|entity| entity.sprite_kind().color(false))
-            .unwrap_or(Color::DarkGrey)
     }
 
     fn close_picker(&mut self) {
@@ -1285,9 +1430,11 @@ impl<C: TuiApi> App<C> {
             .block_on(self.client.create_session(cwd, SpawnTool::Codex))
         {
             Ok(response) => {
+                let repo_theme = response.repo_theme.clone();
                 let session = response.session;
                 let session_id = session.session_id.clone();
                 let tmux_name = session.tmux_name.clone();
+                self.remember_repo_theme(&session, repo_theme);
                 self.upsert_session(session, field);
                 self.selected_id = Some(session_id.clone());
                 self.close_picker();
@@ -1314,6 +1461,23 @@ impl<C: TuiApi> App<C> {
 
         let label = selected_label(self.selected().map(|entity| &entity.session.tmux_name));
         self.open_session_for_label(&selected_id, &label);
+    }
+
+    fn handle_thought_click(
+        &mut self,
+        x: u16,
+        y: u16,
+        thought_content: Rect,
+        entry_capacity: usize,
+    ) {
+        match thought_panel_action_at(self, thought_content, entry_capacity, x, y) {
+            Some(ThoughtPanelAction::FilterByCwd(cwd)) => self.set_thought_filter_cwd(cwd),
+            Some(ThoughtPanelAction::FilterByTmuxName(tmux_name)) => {
+                self.set_thought_filter_tmux_name(tmux_name);
+            }
+            Some(ThoughtPanelAction::ClearFilters) => self.clear_thought_filters(),
+            None => {}
+        }
     }
 
     fn handle_field_click(&mut self, x: u16, y: u16, field: Rect) {
@@ -1452,7 +1616,14 @@ impl<C: TuiApi> App<C> {
                 .as_ref()
                 .map(|selected| *selected == entity.session.session_id)
                 .unwrap_or(false);
-            render_entity(renderer, entity, rect, selected, self.tick);
+            render_entity(
+                renderer,
+                entity,
+                rect,
+                selected,
+                self.tick,
+                &self.repo_themes,
+            );
         }
 
         if let Some(picker) = &self.picker {
@@ -1463,6 +1634,54 @@ impl<C: TuiApi> App<C> {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum ThoughtPanelAction {
+    FilterByCwd(String),
+    FilterByTmuxName(String),
+    ClearFilters,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ThoughtChipLayout {
+    rect: Rect,
+    cwd: String,
+    label: String,
+    color: Color,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ThoughtRowLayout {
+    tmux_name_rect: Option<Rect>,
+    tmux_name: String,
+    line: String,
+    color: Color,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct ThoughtPanelLayout {
+    chips: Vec<ThoughtChipLayout>,
+    filter_text: String,
+    clear_filters_rect: Option<Rect>,
+    rows: Vec<ThoughtRowLayout>,
+    empty_message: Option<String>,
+}
+
+fn display_width(text: &str) -> u16 {
+    text.chars().count().min(u16::MAX as usize) as u16
+}
+
+fn path_tail_label(path: &str) -> Option<String> {
+    let normalized = normalize_path(path.trim());
+    if normalized == "/" {
+        return None;
+    }
+
+    normalized
+        .rsplit('/')
+        .find(|segment| !segment.is_empty())
+        .map(ToOwned::to_owned)
+}
+
 fn format_thought_line(entry: &ThoughtLogEntry, max_chars: usize) -> String {
     if max_chars == 0 {
         return String::new();
@@ -1470,6 +1689,40 @@ fn format_thought_line(entry: &ThoughtLogEntry, max_chars: usize) -> String {
 
     let line = format!("{}: {}", entry.tmux_name, entry.thought);
     truncate_label(&line, max_chars)
+}
+
+fn parse_hex_color(value: &str) -> Option<Color> {
+    let trimmed = value.trim();
+    if trimmed.len() != 7 || !trimmed.starts_with('#') {
+        return None;
+    }
+
+    let r = u8::from_str_radix(&trimmed[1..3], 16).ok()?;
+    let g = u8::from_str_radix(&trimmed[3..5], 16).ok()?;
+    let b = u8::from_str_radix(&trimmed[5..7], 16).ok()?;
+    Some(Color::Rgb { r, g, b })
+}
+
+fn session_theme_color(
+    session: &SessionSummary,
+    repo_themes: &HashMap<String, RepoTheme>,
+) -> Option<Color> {
+    let theme_id = session.repo_theme_id.as_ref()?;
+    let theme = repo_themes.get(theme_id)?;
+    parse_hex_color(&theme.body)
+}
+
+fn session_display_color(
+    session: &SessionSummary,
+    repo_themes: &HashMap<String, RepoTheme>,
+    selected: bool,
+) -> Color {
+    if selected {
+        return Color::White;
+    }
+
+    session_theme_color(session, repo_themes)
+        .unwrap_or_else(|| SpriteKind::from_session(session).color(false))
 }
 
 fn render_thought_panel<C: TuiApi>(
@@ -1482,23 +1735,45 @@ fn render_thought_panel<C: TuiApi>(
         return;
     }
 
+    let panel = build_thought_panel(app, thought_content, entry_capacity);
+
     renderer.draw_text(
         thought_content.x,
         thought_content.y,
-        &truncate_label("thoughts", thought_content.width as usize),
+        &truncate_label("clawgs", thought_content.width as usize),
         Color::Cyan,
     );
+
+    for chip in &panel.chips {
+        renderer.draw_text(chip.rect.x, chip.rect.y, &chip.label, chip.color);
+    }
+
+    if thought_content.height > 1 {
+        renderer.draw_text(
+            thought_content.x,
+            thought_content.y + 1,
+            &panel.filter_text,
+            if app.thought_filter.is_active() {
+                Color::White
+            } else {
+                Color::DarkGrey
+            },
+        );
+    }
+
+    if let Some(rect) = panel.clear_filters_rect {
+        renderer.draw_text(rect.x, rect.y, "[clear filters]", Color::Cyan);
+    }
 
     if entry_capacity == 0 {
         return;
     }
 
-    let entries = app.visible_thought_entries(entry_capacity);
-    if entries.is_empty() {
+    if let Some(message) = panel.empty_message.as_deref() {
         renderer.draw_text(
             thought_content.x,
-            thought_content.y + 1,
-            &truncate_label("waiting for thoughts...", thought_content.width as usize),
+            thought_content.y + THOUGHT_RAIL_HEADER_ROWS,
+            &truncate_label(message, thought_content.width as usize),
             Color::DarkGrey,
         );
         return;
@@ -1506,16 +1781,155 @@ fn render_thought_panel<C: TuiApi>(
 
     let start_y = thought_content
         .bottom()
-        .saturating_sub(entries.len() as u16);
-    for (offset, entry) in entries.iter().enumerate() {
-        let y = start_y + offset as u16;
+        .saturating_sub(panel.rows.len() as u16);
+    for (offset, row) in panel.rows.iter().enumerate() {
         renderer.draw_text(
             thought_content.x,
-            y,
-            &format_thought_line(entry, thought_content.width as usize),
-            app.session_color(&entry.session_id),
+            start_y + offset as u16,
+            &row.line,
+            row.color,
         );
     }
+}
+
+fn build_thought_panel<C: TuiApi>(
+    app: &App<C>,
+    thought_content: Rect,
+    entry_capacity: usize,
+) -> ThoughtPanelLayout {
+    if thought_content.width == 0 || thought_content.height == 0 {
+        return ThoughtPanelLayout::default();
+    }
+
+    let mut chips = Vec::new();
+    let title_width = display_width("clawgs");
+    let mut chip_x = thought_content
+        .x
+        .saturating_add(title_width)
+        .saturating_add(2);
+    for summary in app.thought_repo_summaries() {
+        let label = format!("{}x{}", summary.count, summary.label);
+        let width = display_width(&label);
+        if width == 0 || chip_x.saturating_add(width) > thought_content.right() {
+            break;
+        }
+
+        chips.push(ThoughtChipLayout {
+            rect: Rect {
+                x: chip_x,
+                y: thought_content.y,
+                width,
+                height: 1,
+            },
+            cwd: summary.cwd,
+            label,
+            color: summary.color,
+        });
+        chip_x = chip_x.saturating_add(width).saturating_add(2);
+    }
+
+    let clear_label = "[clear filters]";
+    let clear_width = display_width(clear_label);
+    let clear_filters_rect = if app.thought_filter.is_active()
+        && clear_width.saturating_add(2) < thought_content.width
+        && thought_content.height > 1
+    {
+        Some(Rect {
+            x: thought_content.right().saturating_sub(clear_width),
+            y: thought_content.y + 1,
+            width: clear_width,
+            height: 1,
+        })
+    } else {
+        None
+    };
+
+    let filter_width = clear_filters_rect
+        .map(|rect| rect.x.saturating_sub(thought_content.x).saturating_sub(1))
+        .unwrap_or(thought_content.width);
+    let filter_text = truncate_label(&app.active_thought_filter_text(), filter_width as usize);
+
+    let entries = app.visible_thought_entries(entry_capacity);
+    let empty_message = if entry_capacity == 0 {
+        None
+    } else if entries.is_empty() {
+        Some(if app.thought_filter.is_active() {
+            "no thoughts match filters".to_string()
+        } else {
+            "waiting for clawgs...".to_string()
+        })
+    } else {
+        None
+    };
+
+    let rows = entries
+        .into_iter()
+        .map(|entry| {
+            let line = format_thought_line(entry, thought_content.width as usize);
+            let visible_tmux_width = display_width(&entry.tmux_name).min(display_width(&line));
+            ThoughtRowLayout {
+                tmux_name_rect: (visible_tmux_width > 0).then_some(Rect {
+                    x: thought_content.x,
+                    y: 0,
+                    width: visible_tmux_width,
+                    height: 1,
+                }),
+                tmux_name: entry.tmux_name.clone(),
+                line,
+                color: entry.color,
+            }
+        })
+        .collect();
+
+    ThoughtPanelLayout {
+        chips,
+        filter_text,
+        clear_filters_rect,
+        rows,
+        empty_message,
+    }
+}
+
+fn thought_panel_action_at<C: TuiApi>(
+    app: &App<C>,
+    thought_content: Rect,
+    entry_capacity: usize,
+    x: u16,
+    y: u16,
+) -> Option<ThoughtPanelAction> {
+    let panel = build_thought_panel(app, thought_content, entry_capacity);
+
+    if let Some(rect) = panel.clear_filters_rect {
+        if rect.contains(x, y) {
+            return Some(ThoughtPanelAction::ClearFilters);
+        }
+    }
+
+    for chip in panel.chips {
+        if chip.rect.contains(x, y) {
+            return Some(ThoughtPanelAction::FilterByCwd(chip.cwd));
+        }
+    }
+
+    let row_start_y = thought_content
+        .bottom()
+        .saturating_sub(panel.rows.len() as u16);
+    for (offset, row) in panel.rows.into_iter().enumerate() {
+        let Some(rect) = row.tmux_name_rect else {
+            continue;
+        };
+        let rect = Rect {
+            x: rect.x,
+            y: row_start_y + offset as u16,
+            width: rect.width,
+            height: rect.height,
+        };
+        if rect.contains(x, y) {
+            return Some(ThoughtPanelAction::FilterByTmuxName(row.tmux_name));
+        }
+    }
+
+    None
 }
 
 fn normalize_path(path: &str) -> String {
@@ -1772,9 +2186,10 @@ fn render_entity(
     rect: Rect,
     selected: bool,
     tick: u64,
+    repo_themes: &HashMap<String, RepoTheme>,
 ) {
     let kind = entity.sprite_kind();
-    let color = kind.color(selected);
+    let color = session_display_color(&entity.session, repo_themes, selected);
     let sprite = kind.frame(tick);
     for (dy, line) in sprite.iter().enumerate() {
         renderer.draw_text(rect.x, rect.y + dy as u16, line, color);
@@ -2065,7 +2480,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 Event::Mouse(mouse)
                     if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) =>
                 {
-                    if layout.overview_field.contains(mouse.column, mouse.row) {
+                    if let Some(thought_box) = layout.thought_box {
+                        if thought_box.contains(mouse.column, mouse.row) {
+                            if let Some(thought_content) = layout.thought_content {
+                                app.handle_thought_click(
+                                    mouse.column,
+                                    mouse.row,
+                                    thought_content,
+                                    layout.thought_entry_capacity(),
+                                );
+                            }
+                        } else if layout.overview_field.contains(mouse.column, mouse.row) {
+                            app.handle_field_click(mouse.column, mouse.row, layout.overview_field);
+                        }
+                    } else if layout.overview_field.contains(mouse.column, mouse.row) {
                         app.handle_field_click(mouse.column, mouse.row, layout.overview_field);
                     }
                 }
@@ -2263,6 +2691,22 @@ mod tests {
         App::new(test_runtime(), api)
     }
 
+    fn test_renderer(width: u16, height: u16) -> Renderer {
+        let buffer_size = (width as usize) * (height as usize);
+        Renderer {
+            stdout: BufWriter::new(io::stdout()),
+            width,
+            height,
+            buffer: vec![Cell::default(); buffer_size],
+            last_buffer: vec![Cell::default(); buffer_size],
+            active: false,
+        }
+    }
+
+    fn cell_at(renderer: &Renderer, x: u16, y: u16) -> Cell {
+        renderer.buffer[(y as usize) * (renderer.width as usize) + (x as usize)]
+    }
+
     fn session_summary(session_id: &str, tmux_name: &str, cwd: &str) -> SessionSummary {
         SessionSummary {
             session_id: session_id.to_string(),
@@ -2283,6 +2727,7 @@ mod tests {
             transport_health: TransportHealth::Healthy,
             last_activity_at: Utc::now(),
             sprite_pack_id: None,
+            repo_theme_id: None,
         }
     }
 
@@ -2306,6 +2751,15 @@ mod tests {
         session
     }
 
+    fn repo_theme(body: &str) -> RepoTheme {
+        RepoTheme {
+            body: body.to_string(),
+            outline: "#222222".to_string(),
+            accent: "#111111".to_string(),
+            shirt: "#333333".to_string(),
+        }
+    }
+
     fn dir_response(path: &str, names: &[(&str, bool)]) -> DirListResponse {
         DirListResponse {
             path: path.to_string(),
@@ -2324,6 +2778,7 @@ mod tests {
         CreateSessionResponse {
             session: session_summary(session_id, tmux_name, cwd),
             sprite_pack: None,
+            repo_theme: None,
         }
     }
 
@@ -2497,7 +2952,7 @@ mod tests {
         let api = MockApi::new();
         let layout = test_layout(120, 24);
         let mut app = make_app(api);
-        assert_eq!(layout.thought_entry_capacity(), 10);
+        assert_eq!(layout.thought_entry_capacity(), 9);
 
         for idx in 0..15 {
             let second = idx + 1;
@@ -2513,14 +2968,394 @@ mod tests {
             app.capture_thought_updates(&[session], layout.thought_entry_capacity());
         }
 
-        assert_eq!(app.thought_log.len(), 10);
+        assert_eq!(app.thought_log.len(), 9);
         assert_eq!(
             app.thought_log.first().map(|entry| entry.thought.as_str()),
-            Some("thought 5")
+            Some("thought 6")
         );
         assert_eq!(
             app.thought_log.last().map(|entry| entry.thought.as_str()),
             Some("thought 14")
+        );
+    }
+
+    #[test]
+    fn render_thought_panel_shows_repo_chips_and_numeric_rows() {
+        let api = MockApi::new();
+        let layout = test_layout(120, 32);
+        let thought_content = layout
+            .thought_content
+            .expect("wide layout enables thought rail");
+        let mut app = make_app(api);
+
+        let throngterm_theme_id = "/tmp/throngterm".to_string();
+        let skills_theme_id = "/tmp/skills".to_string();
+        let throngterm_color = Color::Rgb {
+            r: 184,
+            g: 152,
+            b: 117,
+        };
+        let skills_color = Color::Rgb {
+            r: 79,
+            g: 166,
+            b: 106,
+        };
+        app.repo_themes
+            .insert(throngterm_theme_id.clone(), repo_theme("#B89875"));
+        app.repo_themes
+            .insert(skills_theme_id.clone(), repo_theme("#4FA66A"));
+
+        let mut first = session_summary_with_thought(
+            "sess-1",
+            "7",
+            "/Users/b/repos/throngterm",
+            "patching tui",
+            "2026-03-08T14:00:05Z",
+        );
+        first.repo_theme_id = Some(throngterm_theme_id.clone());
+
+        let mut second = session_summary_with_thought(
+            "sess-2",
+            "2",
+            "/Users/b/repos/throngterm",
+            "wiring filter state",
+            "2026-03-08T14:00:06Z",
+        );
+        second.repo_theme_id = Some(throngterm_theme_id);
+
+        let mut third = session_summary_with_thought(
+            "sess-3",
+            "9",
+            "/Users/b/repos/opensource/skills",
+            "indexing docs",
+            "2026-03-08T14:00:07Z",
+        );
+        third.repo_theme_id = Some(skills_theme_id);
+
+        app.capture_thought_updates(&[first, second, third], layout.thought_entry_capacity());
+
+        let panel = build_thought_panel(&app, thought_content, layout.thought_entry_capacity());
+        assert_eq!(
+            panel
+                .rows
+                .iter()
+                .map(|row| row.line.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "7: patching tui",
+                "2: wiring filter state",
+                "9: indexing docs",
+            ]
+        );
+
+        let throngterm_chip = panel
+            .chips
+            .iter()
+            .find(|chip| chip.label == "2xthrongterm")
+            .expect("throngterm chip should exist");
+        let skills_chip = panel
+            .chips
+            .iter()
+            .find(|chip| chip.label == "1xskills")
+            .expect("skills chip should exist");
+        assert_eq!(throngterm_chip.color, throngterm_color);
+        assert_eq!(skills_chip.color, skills_color);
+
+        let mut renderer = test_renderer(120, 32);
+        render_thought_panel(
+            &app,
+            &mut renderer,
+            thought_content,
+            layout.thought_entry_capacity(),
+        );
+
+        assert_eq!(
+            cell_at(&renderer, throngterm_chip.rect.x, throngterm_chip.rect.y).fg,
+            throngterm_color
+        );
+        assert_eq!(
+            cell_at(&renderer, skills_chip.rect.x, skills_chip.rect.y).fg,
+            skills_color
+        );
+    }
+
+    #[test]
+    fn thought_rail_clicks_apply_and_clear_filters() {
+        let api = MockApi::new();
+        let layout = test_layout(120, 32);
+        let thought_content = layout
+            .thought_content
+            .expect("wide layout enables thought rail");
+        let mut app = make_app(api);
+
+        app.repo_themes
+            .insert("/tmp/throngterm".to_string(), repo_theme("#B89875"));
+        app.repo_themes
+            .insert("/tmp/skills".to_string(), repo_theme("#4FA66A"));
+
+        let mut first = session_summary_with_thought(
+            "sess-1",
+            "7",
+            "/Users/b/repos/throngterm",
+            "patching tui",
+            "2026-03-08T14:00:05Z",
+        );
+        first.repo_theme_id = Some("/tmp/throngterm".to_string());
+
+        let mut second = session_summary_with_thought(
+            "sess-2",
+            "2",
+            "/Users/b/repos/throngterm",
+            "wiring filter state",
+            "2026-03-08T14:00:06Z",
+        );
+        second.repo_theme_id = Some("/tmp/throngterm".to_string());
+
+        let mut third = session_summary_with_thought(
+            "sess-3",
+            "9",
+            "/Users/b/repos/opensource/skills",
+            "indexing docs",
+            "2026-03-08T14:00:07Z",
+        );
+        third.repo_theme_id = Some("/tmp/skills".to_string());
+
+        app.capture_thought_updates(&[first, second, third], layout.thought_entry_capacity());
+
+        let initial_panel =
+            build_thought_panel(&app, thought_content, layout.thought_entry_capacity());
+        let chip = initial_panel
+            .chips
+            .iter()
+            .find(|chip| chip.label == "2xthrongterm")
+            .expect("throngterm chip should exist")
+            .clone();
+        app.handle_thought_click(
+            chip.rect.x,
+            chip.rect.y,
+            thought_content,
+            layout.thought_entry_capacity(),
+        );
+
+        assert_eq!(
+            app.thought_filter.cwd.as_deref(),
+            Some("/Users/b/repos/throngterm")
+        );
+        assert_eq!(app.active_thought_filter_text(), "filter: pwd=throngterm");
+        assert_eq!(
+            app.visible_thought_entries(layout.thought_entry_capacity())
+                .into_iter()
+                .map(|entry| entry.tmux_name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["7", "2"]
+        );
+
+        let filtered_panel =
+            build_thought_panel(&app, thought_content, layout.thought_entry_capacity());
+        let row_index = filtered_panel
+            .rows
+            .iter()
+            .position(|row| row.tmux_name == "2")
+            .expect("session 2 row should exist");
+        let row_start_y = thought_content
+            .bottom()
+            .saturating_sub(filtered_panel.rows.len() as u16);
+        let tmux_rect = filtered_panel.rows[row_index]
+            .tmux_name_rect
+            .expect("row should have a tmux click target");
+        app.handle_thought_click(
+            tmux_rect.x,
+            row_start_y + row_index as u16,
+            thought_content,
+            layout.thought_entry_capacity(),
+        );
+
+        assert_eq!(
+            app.thought_filter.cwd.as_deref(),
+            Some("/Users/b/repos/throngterm")
+        );
+        assert_eq!(app.thought_filter.tmux_name.as_deref(), Some("2"));
+        assert_eq!(
+            app.active_thought_filter_text(),
+            "filter: pwd=throngterm, num=2"
+        );
+        assert_eq!(
+            app.visible_thought_entries(layout.thought_entry_capacity())
+                .into_iter()
+                .map(|entry| entry.tmux_name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["2"]
+        );
+
+        let cleared_panel =
+            build_thought_panel(&app, thought_content, layout.thought_entry_capacity());
+        let clear_rect = cleared_panel
+            .clear_filters_rect
+            .expect("clear filters button should exist");
+        app.handle_thought_click(
+            clear_rect.x,
+            clear_rect.y,
+            thought_content,
+            layout.thought_entry_capacity(),
+        );
+
+        assert_eq!(app.thought_filter, ThoughtFilter::default());
+        assert_eq!(app.active_thought_filter_text(), "filter: none");
+        assert_eq!(
+            app.visible_thought_entries(layout.thought_entry_capacity())
+                .into_iter()
+                .map(|entry| entry.tmux_name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["7", "2", "9"]
+        );
+    }
+
+    #[test]
+    fn clicking_thought_body_does_not_change_filters() {
+        let api = MockApi::new();
+        let layout = test_layout(120, 32);
+        let thought_content = layout
+            .thought_content
+            .expect("wide layout enables thought rail");
+        let mut app = make_app(api);
+        app.capture_thought_updates(
+            &[session_summary_with_thought(
+                "sess-1",
+                "7",
+                "/Users/b/repos/throngterm",
+                "patching tui",
+                "2026-03-08T14:00:05Z",
+            )],
+            layout.thought_entry_capacity(),
+        );
+
+        let panel = build_thought_panel(&app, thought_content, layout.thought_entry_capacity());
+        let row_start_y = thought_content
+            .bottom()
+            .saturating_sub(panel.rows.len() as u16);
+        let line = panel.rows[0].line.clone();
+        let body_x = thought_content
+            .x
+            .saturating_add(display_width("7").saturating_add(3));
+        assert!(body_x < thought_content.x.saturating_add(display_width(&line)));
+
+        app.handle_thought_click(
+            body_x,
+            row_start_y,
+            thought_content,
+            layout.thought_entry_capacity(),
+        );
+
+        assert_eq!(app.thought_filter, ThoughtFilter::default());
+    }
+
+    #[test]
+    fn repo_theme_colors_override_state_colors_in_thought_history() {
+        let api = MockApi::new();
+        let layout = test_layout(120, 32);
+        let mut app = make_app(api);
+        let theme_id = "/tmp/buildooor".to_string();
+        let theme_color = Color::Rgb {
+            r: 184,
+            g: 152,
+            b: 117,
+        };
+        app.repo_themes.insert(
+            theme_id.clone(),
+            RepoTheme {
+                body: "#B89875".to_string(),
+                outline: "#3D2F24".to_string(),
+                accent: "#1D1914".to_string(),
+                shirt: "#AA9370".to_string(),
+            },
+        );
+
+        let mut busy = session_summary_with_thought(
+            "sess-1",
+            "alpha",
+            "/Users/b/repos/alpha",
+            "indexing repo",
+            "2026-03-08T14:00:05Z",
+        );
+        busy.state = SessionState::Busy;
+        busy.repo_theme_id = Some(theme_id.clone());
+
+        let mut attention = session_summary_with_thought(
+            "sess-1",
+            "alpha",
+            "/Users/b/repos/alpha",
+            "needs input",
+            "2026-03-08T14:00:06Z",
+        );
+        attention.state = SessionState::Attention;
+        attention.repo_theme_id = Some(theme_id);
+
+        app.capture_thought_updates(&[busy], layout.thought_entry_capacity());
+        app.capture_thought_updates(&[attention], layout.thought_entry_capacity());
+
+        assert_eq!(
+            app.thought_log
+                .iter()
+                .map(|entry| entry.color)
+                .collect::<Vec<_>>(),
+            vec![theme_color, theme_color]
+        );
+
+        let thought_content = layout
+            .thought_content
+            .expect("wide layout enables thought rail");
+        let mut renderer = test_renderer(120, 32);
+        render_thought_panel(
+            &app,
+            &mut renderer,
+            thought_content,
+            layout.thought_entry_capacity(),
+        );
+
+        let first_row = thought_content
+            .bottom()
+            .saturating_sub(app.thought_log.len() as u16);
+        assert_eq!(cell_at(&renderer, thought_content.x, first_row).ch, 'a');
+        assert_eq!(
+            cell_at(&renderer, thought_content.x, first_row).fg,
+            theme_color
+        );
+        assert_eq!(cell_at(&renderer, thought_content.x, first_row + 1).ch, 'a');
+        assert_eq!(
+            cell_at(&renderer, thought_content.x, first_row + 1).fg,
+            theme_color
+        );
+    }
+
+    #[test]
+    fn render_entity_uses_repo_theme_body_color() {
+        let field = test_layout(120, 32).overview_field;
+        let mut session = session_summary("sess-1", "alpha", "/Users/b/repos/buildooor");
+        session.state = SessionState::Busy;
+        session.repo_theme_id = Some("/tmp/buildooor".to_string());
+        let entity = SessionEntity::new(session, field);
+        let mut repo_themes = HashMap::new();
+        repo_themes.insert(
+            "/tmp/buildooor".to_string(),
+            RepoTheme {
+                body: "#B89875".to_string(),
+                outline: "#3D2F24".to_string(),
+                accent: "#1D1914".to_string(),
+                shirt: "#AA9370".to_string(),
+            },
+        );
+        let rect = entity.screen_rect(field);
+        let mut renderer = test_renderer(120, 32);
+
+        render_entity(&mut renderer, &entity, rect, false, 0, &repo_themes);
+
+        assert_eq!(
+            cell_at(&renderer, rect.x, rect.y).fg,
+            Color::Rgb {
+                r: 184,
+                g: 152,
+                b: 117,
+            }
         );
     }
 
