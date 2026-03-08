@@ -982,6 +982,13 @@ fn should_append_thought(
     !(freshness == Ordering::Equal && incoming.thought == previous.thought)
 }
 
+fn compare_thought_log_entries(left: &ThoughtLogEntry, right: &ThoughtLogEntry) -> Ordering {
+    left.updated_at
+        .cmp(&right.updated_at)
+        .then_with(|| left.tmux_name.cmp(&right.tmux_name))
+        .then_with(|| left.session_id.cmp(&right.session_id))
+}
+
 struct App<C: TuiApi> {
     runtime: Runtime,
     client: C,
@@ -1044,6 +1051,25 @@ impl<C: TuiApi> App<C> {
 
         let drop_count = self.thought_log.len() - capacity;
         self.thought_log.drain(0..drop_count);
+    }
+
+    fn upsert_thought_log_entries(
+        &mut self,
+        entries: impl IntoIterator<Item = ThoughtLogEntry>,
+        capacity: usize,
+    ) {
+        for entry in entries {
+            if let Some(index) = self
+                .thought_log
+                .iter()
+                .position(|existing| existing.session_id == entry.session_id)
+            {
+                self.thought_log.remove(index);
+            }
+            self.thought_log.push(entry);
+        }
+        self.thought_log.sort_by(compare_thought_log_entries);
+        self.trim_thought_log(capacity);
     }
 
     fn visible_thought_entries(&self, capacity: usize) -> Vec<&ThoughtLogEntry> {
@@ -1149,16 +1175,10 @@ impl<C: TuiApi> App<C> {
             ));
         }
 
-        pending.sort_by(|left, right| {
-            left.updated_at
-                .cmp(&right.updated_at)
-                .then_with(|| left.tmux_name.cmp(&right.tmux_name))
-                .then_with(|| left.session_id.cmp(&right.session_id))
-        });
+        pending.sort_by(compare_thought_log_entries);
 
         if !pending.is_empty() {
-            self.thought_log.extend(pending);
-            self.trim_thought_log(thought_capacity);
+            self.upsert_thought_log_entries(pending, thought_capacity);
         }
     }
 
@@ -2818,7 +2838,7 @@ mod tests {
     }
 
     #[test]
-    fn refresh_builds_global_thought_timeline_in_timestamp_order() {
+    fn refresh_keeps_latest_thought_per_session_in_timestamp_order() {
         let api = MockApi::new();
         let layout = test_layout(120, 32);
         api.push_fetch_sessions(Ok(vec![
@@ -2863,11 +2883,7 @@ mod tests {
                 .iter()
                 .map(|entry| (entry.session_id.as_str(), entry.thought.as_str()))
                 .collect::<Vec<_>>(),
-            vec![
-                ("sess-2", "indexing repo"),
-                ("sess-1", "writing tests"),
-                ("sess-1", "patching sidebar"),
-            ]
+            vec![("sess-2", "indexing repo"), ("sess-1", "patching sidebar"),]
         );
     }
 
@@ -2958,9 +2974,11 @@ mod tests {
             let second = idx + 1;
             let updated_at = format!("2026-03-08T14:00:{second:02}Z");
             let thought = format!("thought {idx}");
+            let session_id = format!("sess-{idx}");
+            let tmux_name = format!("alpha-{idx}");
             let session = session_summary_with_thought(
-                "sess-1",
-                "alpha",
+                &session_id,
+                &tmux_name,
                 "/Users/b/repos/alpha",
                 &thought,
                 &updated_at,
@@ -3299,7 +3317,7 @@ mod tests {
                 .iter()
                 .map(|entry| entry.color)
                 .collect::<Vec<_>>(),
-            vec![theme_color, theme_color]
+            vec![theme_color]
         );
 
         let thought_content = layout
@@ -3313,17 +3331,14 @@ mod tests {
             layout.thought_entry_capacity(),
         );
 
-        let first_row = thought_content
+        let panel = build_thought_panel(&app, thought_content, layout.thought_entry_capacity());
+        let row_start_y = thought_content
             .bottom()
-            .saturating_sub(app.thought_log.len() as u16);
-        assert_eq!(cell_at(&renderer, thought_content.x, first_row).ch, 'a');
+            .saturating_sub(panel.rows.len() as u16);
+        assert_eq!(panel.rows.len(), 1);
+        assert_eq!(cell_at(&renderer, thought_content.x, row_start_y).ch, 'a');
         assert_eq!(
-            cell_at(&renderer, thought_content.x, first_row).fg,
-            theme_color
-        );
-        assert_eq!(cell_at(&renderer, thought_content.x, first_row + 1).ch, 'a');
-        assert_eq!(
-            cell_at(&renderer, thought_content.x, first_row + 1).fg,
+            cell_at(&renderer, thought_content.x, row_start_y).fg,
             theme_color
         );
     }
