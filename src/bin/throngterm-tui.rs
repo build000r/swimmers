@@ -1,8 +1,10 @@
+use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::io::{self, BufWriter, IsTerminal, Stdout, Write};
 use std::time::{Duration, Instant};
 
+use chrono::{DateTime, Utc};
 use crossterm::event::{
     self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, MouseButton,
     MouseEventKind,
@@ -34,6 +36,11 @@ const ENTITY_WIDTH: u16 = 12;
 const ENTITY_HEIGHT: u16 = SPRITE_HEIGHT + LABEL_HEIGHT;
 const PICKER_WIDTH: u16 = 46;
 const PICKER_MAX_HEIGHT: u16 = 16;
+const THOUGHT_RAIL_MIN_WIDTH: u16 = 100;
+const THOUGHT_RAIL_MIN_PANEL_WIDTH: u16 = 24;
+const THOUGHT_RAIL_GAP: u16 = 1;
+const THOUGHT_RAIL_RATIO_DENOMINATOR: u16 = 3;
+const THOUGHT_RAIL_HEADER_ROWS: u16 = 1;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct Cell {
@@ -231,7 +238,7 @@ impl Drop for Renderer {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 struct Rect {
     x: u16,
     y: u16,
@@ -267,6 +274,85 @@ impl Rect {
             width: self.width - amount * 2,
             height: self.height - amount * 2,
         }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct WorkspaceLayout {
+    workspace_box: Rect,
+    overview_box: Rect,
+    overview_field: Rect,
+    thought_box: Option<Rect>,
+    thought_content: Option<Rect>,
+    footer_start_y: u16,
+}
+
+impl WorkspaceLayout {
+    fn for_terminal(width: u16, height: u16) -> Self {
+        let workspace_box = field_box(width, height);
+        let footer_start_y = workspace_box.bottom() + 1;
+        let inner = workspace_box.inset(1);
+
+        let split_allowed = width >= THOUGHT_RAIL_MIN_WIDTH
+            && inner.height >= 3
+            && inner.width >= THOUGHT_RAIL_MIN_PANEL_WIDTH + THOUGHT_RAIL_GAP + ENTITY_WIDTH + 4;
+        if !split_allowed {
+            return Self {
+                workspace_box,
+                overview_box: workspace_box,
+                overview_field: inner,
+                thought_box: None,
+                thought_content: None,
+                footer_start_y,
+            };
+        }
+
+        let min_overview_width = ENTITY_WIDTH + 4;
+        let ideal_thought_width =
+            (inner.width / THOUGHT_RAIL_RATIO_DENOMINATOR).max(THOUGHT_RAIL_MIN_PANEL_WIDTH);
+        let max_thought_width = inner
+            .width
+            .saturating_sub(THOUGHT_RAIL_GAP + min_overview_width);
+        let thought_width = ideal_thought_width.min(max_thought_width);
+        let overview_width = inner.width.saturating_sub(thought_width + THOUGHT_RAIL_GAP);
+        if overview_width < min_overview_width {
+            return Self {
+                workspace_box,
+                overview_box: workspace_box,
+                overview_field: inner,
+                thought_box: None,
+                thought_content: None,
+                footer_start_y,
+            };
+        }
+
+        let thought_box = Rect {
+            x: inner.x,
+            y: inner.y,
+            width: thought_width,
+            height: inner.height,
+        };
+        let overview_box = Rect {
+            x: thought_box.right() + THOUGHT_RAIL_GAP,
+            y: inner.y,
+            width: overview_width,
+            height: inner.height,
+        };
+
+        Self {
+            workspace_box,
+            overview_box,
+            overview_field: overview_box.inset(1),
+            thought_box: Some(thought_box),
+            thought_content: Some(thought_box.inset(1)),
+            footer_start_y,
+        }
+    }
+
+    fn thought_entry_capacity(self) -> usize {
+        self.thought_content
+            .map(|content| content.height.saturating_sub(THOUGHT_RAIL_HEADER_ROWS) as usize)
+            .unwrap_or(0)
     }
 }
 
@@ -796,10 +882,61 @@ struct PickerLayout {
     visible_entry_rows: usize,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ThoughtFingerprint {
+    thought: String,
+    updated_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ThoughtLogEntry {
+    session_id: String,
+    tmux_name: String,
+    thought: String,
+    updated_at: Option<DateTime<Utc>>,
+}
+
+impl ThoughtLogEntry {
+    fn from_session(session: &SessionSummary, thought: String) -> Self {
+        Self {
+            session_id: session.session_id.clone(),
+            tmux_name: session.tmux_name.clone(),
+            thought,
+            updated_at: session.thought_updated_at,
+        }
+    }
+}
+
+fn normalize_thought_text(thought: Option<&str>) -> Option<String> {
+    let thought = thought?.trim();
+    if thought.is_empty() {
+        return None;
+    }
+    Some(thought.to_string())
+}
+
+fn should_append_thought(
+    previous: Option<&ThoughtFingerprint>,
+    incoming: &ThoughtFingerprint,
+) -> bool {
+    let Some(previous) = previous else {
+        return true;
+    };
+
+    let freshness = incoming.updated_at.cmp(&previous.updated_at);
+    if freshness == Ordering::Less {
+        return false;
+    }
+
+    !(freshness == Ordering::Equal && incoming.thought == previous.thought)
+}
+
 struct App<C: TuiApi> {
     runtime: Runtime,
     client: C,
     entities: Vec<SessionEntity>,
+    thought_log: Vec<ThoughtLogEntry>,
+    last_logged_thoughts: HashMap<String, ThoughtFingerprint>,
     selected_id: Option<String>,
     native_status: Option<NativeDesktopStatusResponse>,
     picker: Option<PickerState>,
@@ -814,6 +951,8 @@ impl<C: TuiApi> App<C> {
             runtime,
             client,
             entities: Vec::new(),
+            thought_log: Vec::new(),
+            last_logged_thoughts: HashMap::new(),
             selected_id: None,
             native_status: None,
             picker: None,
@@ -843,10 +982,61 @@ impl<C: TuiApi> App<C> {
             .unwrap_or(true)
     }
 
-    fn refresh(&mut self, field: Rect) {
+    fn trim_thought_log(&mut self, capacity: usize) {
+        if capacity == 0 || self.thought_log.len() <= capacity {
+            return;
+        }
+
+        let drop_count = self.thought_log.len() - capacity;
+        self.thought_log.drain(0..drop_count);
+    }
+
+    fn visible_thought_entries(&self, capacity: usize) -> &[ThoughtLogEntry] {
+        let start = self.thought_log.len().saturating_sub(capacity);
+        &self.thought_log[start..]
+    }
+
+    fn capture_thought_updates(&mut self, sessions: &[SessionSummary], thought_capacity: usize) {
+        let mut pending = Vec::new();
+        for session in sessions {
+            let Some(thought) = normalize_thought_text(session.thought.as_deref()) else {
+                continue;
+            };
+
+            let incoming = ThoughtFingerprint {
+                thought: thought.clone(),
+                updated_at: session.thought_updated_at,
+            };
+            if !should_append_thought(
+                self.last_logged_thoughts.get(&session.session_id),
+                &incoming,
+            ) {
+                continue;
+            }
+
+            self.last_logged_thoughts
+                .insert(session.session_id.clone(), incoming);
+            pending.push(ThoughtLogEntry::from_session(session, thought));
+        }
+
+        pending.sort_by(|left, right| {
+            left.updated_at
+                .cmp(&right.updated_at)
+                .then_with(|| left.tmux_name.cmp(&right.tmux_name))
+                .then_with(|| left.session_id.cmp(&right.session_id))
+        });
+
+        if !pending.is_empty() {
+            self.thought_log.extend(pending);
+            self.trim_thought_log(thought_capacity);
+        }
+    }
+
+    fn refresh(&mut self, layout: WorkspaceLayout) {
         match self.runtime.block_on(self.client.fetch_sessions()) {
             Ok(sessions) => {
-                self.merge_sessions(sessions, field);
+                self.capture_thought_updates(&sessions, layout.thought_entry_capacity());
+                self.merge_sessions(sessions, layout.overview_field);
                 let count = self.entities.len();
                 self.set_message(format!("refreshed {count} session{}", pluralize(count)));
             }
@@ -981,6 +1171,14 @@ impl<C: TuiApi> App<C> {
         self.entities
             .iter()
             .find(|entity| entity.session.session_id == *selected)
+    }
+
+    fn session_color(&self, session_id: &str) -> Color {
+        self.entities
+            .iter()
+            .find(|entity| entity.session.session_id == session_id)
+            .map(|entity| entity.sprite_kind().color(false))
+            .unwrap_or(Color::DarkGrey)
     }
 
     fn close_picker(&mut self) {
@@ -1187,7 +1385,7 @@ impl<C: TuiApi> App<C> {
         }
     }
 
-    fn render(&self, renderer: &mut Renderer) {
+    fn render(&self, renderer: &mut Renderer, layout: WorkspaceLayout) {
         renderer.clear();
 
         if renderer.width() < MIN_WIDTH || renderer.height() < MIN_HEIGHT {
@@ -1196,8 +1394,6 @@ impl<C: TuiApi> App<C> {
         }
 
         let frame = frame_rect(renderer.width(), renderer.height());
-        let field_box = field_box(renderer.width(), renderer.height());
-        let field = field_box.inset(1);
 
         renderer.draw_box(frame, Color::DarkGrey);
         renderer.draw_text(2, 1, "throngterm tui", Color::Cyan);
@@ -1221,19 +1417,36 @@ impl<C: TuiApi> App<C> {
             .saturating_sub(2);
         renderer.draw_text(right_x, 1, &right_text, Color::DarkGrey);
 
-        renderer.draw_box(field_box, Color::DarkGrey);
+        renderer.draw_box(layout.workspace_box, Color::DarkGrey);
+
+        if let (Some(thought_box), Some(thought_content)) =
+            (layout.thought_box, layout.thought_content)
+        {
+            renderer.draw_box(thought_box, Color::DarkGrey);
+            renderer.draw_box(layout.overview_box, Color::DarkGrey);
+            render_thought_panel(
+                self,
+                renderer,
+                thought_content,
+                layout.thought_entry_capacity(),
+            );
+        }
 
         if self.entities.is_empty() {
             let empty = "no tmux sessions found - press r after starting one";
-            let x = field
-                .x
-                .saturating_add(field.width.saturating_sub(empty.len() as u16) / 2);
-            let y = field.y + field.height / 2;
+            let x = layout.overview_field.x.saturating_add(
+                layout
+                    .overview_field
+                    .width
+                    .saturating_sub(empty.len() as u16)
+                    / 2,
+            );
+            let y = layout.overview_field.y + layout.overview_field.height / 2;
             renderer.draw_text(x, y, empty, Color::DarkGrey);
         }
 
         for entity in &self.entities {
-            let rect = entity.screen_rect(field);
+            let rect = entity.screen_rect(layout.overview_field);
             let selected = self
                 .selected_id
                 .as_ref()
@@ -1243,10 +1456,65 @@ impl<C: TuiApi> App<C> {
         }
 
         if let Some(picker) = &self.picker {
-            render_picker(renderer, picker, field);
+            render_picker(renderer, picker, layout.overview_field);
         }
 
-        render_footer(self, renderer, field_box.bottom() + 1);
+        render_footer(self, renderer, layout.footer_start_y);
+    }
+}
+
+fn format_thought_line(entry: &ThoughtLogEntry, max_chars: usize) -> String {
+    if max_chars == 0 {
+        return String::new();
+    }
+
+    let line = format!("{}: {}", entry.tmux_name, entry.thought);
+    truncate_label(&line, max_chars)
+}
+
+fn render_thought_panel<C: TuiApi>(
+    app: &App<C>,
+    renderer: &mut Renderer,
+    thought_content: Rect,
+    entry_capacity: usize,
+) {
+    if thought_content.width == 0 || thought_content.height == 0 {
+        return;
+    }
+
+    renderer.draw_text(
+        thought_content.x,
+        thought_content.y,
+        &truncate_label("thoughts", thought_content.width as usize),
+        Color::Cyan,
+    );
+
+    if entry_capacity == 0 {
+        return;
+    }
+
+    let entries = app.visible_thought_entries(entry_capacity);
+    if entries.is_empty() {
+        renderer.draw_text(
+            thought_content.x,
+            thought_content.y + 1,
+            &truncate_label("waiting for thoughts...", thought_content.width as usize),
+            Color::DarkGrey,
+        );
+        return;
+    }
+
+    let start_y = thought_content
+        .bottom()
+        .saturating_sub(entries.len() as u16);
+    for (offset, entry) in entries.iter().enumerate() {
+        let y = start_y + offset as u16;
+        renderer.draw_text(
+            thought_content.x,
+            y,
+            &format_thought_line(entry, thought_content.width as usize),
+            app.session_color(&entry.session_id),
+        );
     }
 }
 
@@ -1729,17 +1997,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     renderer.init()?;
 
     let mut app = App::new(runtime, client);
-    let field = field_box(renderer.width(), renderer.height()).inset(1);
-    app.refresh(field);
+    let initial_layout = WorkspaceLayout::for_terminal(renderer.width(), renderer.height());
+    app.refresh(initial_layout);
 
     loop {
-        let current_field = field_box(renderer.width(), renderer.height()).inset(1);
+        let layout = WorkspaceLayout::for_terminal(renderer.width(), renderer.height());
+        app.trim_thought_log(layout.thought_entry_capacity());
+
         if app.should_refresh() {
-            app.refresh(current_field);
+            app.refresh(layout);
         }
 
-        app.tick(current_field);
-        app.render(&mut renderer);
+        app.tick(layout.overview_field);
+        app.render(&mut renderer, layout);
         renderer.flush()?;
 
         if event::poll(FRAME_DURATION)? {
@@ -1757,18 +2027,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         if app.picker.is_some() {
                             app.picker_up();
                         } else {
-                            app.move_selection(-1, current_field);
+                            app.move_selection(-1, layout.overview_field);
                         }
                     }
                     KeyCode::Up | KeyCode::Char('k') => {
-                        app.move_selection(-1, current_field);
+                        app.move_selection(-1, layout.overview_field);
                     }
                     KeyCode::Down | KeyCode::Char('j') => {
-                        app.move_selection(1, current_field);
+                        app.move_selection(1, layout.overview_field);
                     }
                     KeyCode::Right | KeyCode::Char('l') | KeyCode::Enter | KeyCode::Char('o') => {
                         if app.picker.is_some() {
-                            app.picker_activate_selection(current_field);
+                            app.picker_activate_selection(layout.overview_field);
                         } else {
                             app.open_selected();
                         }
@@ -1787,8 +2057,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         {
                             app.picker_reload(Some(path), managed_only);
                         } else {
-                            let field = field_box(renderer.width(), renderer.height()).inset(1);
-                            app.refresh(field);
+                            app.refresh(layout);
                         }
                     }
                     _ => {}
@@ -1796,9 +2065,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 Event::Mouse(mouse)
                     if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) =>
                 {
-                    let field = field_box(renderer.width(), renderer.height()).inset(1);
-                    if field.contains(mouse.column, mouse.row) {
-                        app.handle_field_click(mouse.column, mouse.row, field);
+                    if layout.overview_field.contains(mouse.column, mouse.row) {
+                        app.handle_field_click(mouse.column, mouse.row, layout.overview_field);
                     }
                 }
                 Event::Resize(width, height) => {
@@ -1842,6 +2110,14 @@ mod tests {
     impl MockApi {
         fn new() -> Self {
             Self::default()
+        }
+
+        fn push_fetch_sessions(&self, result: Result<Vec<SessionSummary>, String>) {
+            self.state
+                .lock()
+                .unwrap()
+                .fetch_sessions_results
+                .push_back(result);
         }
 
         fn push_list_dirs(&self, result: Result<DirListResponse, String>) {
@@ -1979,6 +2255,10 @@ mod tests {
         }
     }
 
+    fn test_layout(width: u16, height: u16) -> WorkspaceLayout {
+        WorkspaceLayout::for_terminal(width, height)
+    }
+
     fn make_app(api: MockApi) -> App<MockApi> {
         App::new(test_runtime(), api)
     }
@@ -2004,6 +2284,26 @@ mod tests {
             last_activity_at: Utc::now(),
             sprite_pack_id: None,
         }
+    }
+
+    fn timestamp(value: &str) -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339(value)
+            .expect("valid timestamp")
+            .with_timezone(&Utc)
+    }
+
+    fn session_summary_with_thought(
+        session_id: &str,
+        tmux_name: &str,
+        cwd: &str,
+        thought: &str,
+        updated_at: &str,
+    ) -> SessionSummary {
+        let mut session = session_summary(session_id, tmux_name, cwd);
+        session.thought = Some(thought.to_string());
+        session.thought_state = ThoughtState::Active;
+        session.thought_updated_at = Some(timestamp(updated_at));
+        session
     }
 
     fn dir_response(path: &str, names: &[(&str, bool)]) -> DirListResponse {
@@ -2039,6 +2339,189 @@ mod tests {
         entity.x = x.saturating_sub(field.x) as f32;
         entity.y = y.saturating_sub(field.y) as f32;
         entity
+    }
+
+    #[test]
+    fn wide_layout_enables_global_thought_rail() {
+        let layout = test_layout(120, 32);
+
+        assert!(layout.thought_box.is_some());
+        assert!(layout.thought_content.is_some());
+        assert!(layout.thought_entry_capacity() > 0);
+        assert!(layout.overview_box.x > layout.workspace_box.x);
+    }
+
+    #[test]
+    fn narrow_layout_keeps_single_overview_field() {
+        let layout = test_layout(96, 24);
+
+        assert!(layout.thought_box.is_none());
+        assert!(layout.thought_content.is_none());
+        assert_eq!(layout.thought_entry_capacity(), 0);
+        assert_eq!(layout.overview_box.x, layout.workspace_box.x);
+        assert_eq!(layout.overview_field, layout.workspace_box.inset(1));
+    }
+
+    #[test]
+    fn refresh_builds_global_thought_timeline_in_timestamp_order() {
+        let api = MockApi::new();
+        let layout = test_layout(120, 32);
+        api.push_fetch_sessions(Ok(vec![
+            session_summary_with_thought(
+                "sess-2",
+                "beta",
+                "/Users/b/repos/beta",
+                "indexing repo",
+                "2026-03-08T14:00:05Z",
+            ),
+            session_summary_with_thought(
+                "sess-1",
+                "alpha",
+                "/Users/b/repos/alpha",
+                "writing tests",
+                "2026-03-08T14:00:06Z",
+            ),
+        ]));
+        api.push_fetch_sessions(Ok(vec![
+            session_summary_with_thought(
+                "sess-2",
+                "beta",
+                "/Users/b/repos/beta",
+                "indexing repo",
+                "2026-03-08T14:00:05Z",
+            ),
+            session_summary_with_thought(
+                "sess-1",
+                "alpha",
+                "/Users/b/repos/alpha",
+                "patching sidebar",
+                "2026-03-08T14:00:07Z",
+            ),
+        ]));
+        let mut app = make_app(api);
+
+        app.refresh(layout);
+        app.refresh(layout);
+
+        assert_eq!(
+            app.thought_log
+                .iter()
+                .map(|entry| (entry.session_id.as_str(), entry.thought.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("sess-2", "indexing repo"),
+                ("sess-1", "writing tests"),
+                ("sess-1", "patching sidebar"),
+            ]
+        );
+    }
+
+    #[test]
+    fn refresh_ignores_null_duplicate_and_stale_thoughts() {
+        let api = MockApi::new();
+        let layout = test_layout(120, 32);
+        api.push_fetch_sessions(Ok(vec![session_summary_with_thought(
+            "sess-3",
+            "gamma",
+            "/Users/b/repos/gamma",
+            "reading logs",
+            "2026-03-08T14:00:05Z",
+        )]));
+
+        let mut duplicate = session_summary_with_thought(
+            "sess-3",
+            "gamma",
+            "/Users/b/repos/gamma",
+            "reading logs",
+            "2026-03-08T14:00:05Z",
+        );
+        let mut stale = session_summary_with_thought(
+            "sess-3",
+            "gamma",
+            "/Users/b/repos/gamma",
+            "reading logs",
+            "2026-03-08T14:00:04Z",
+        );
+        let mut cleared = session_summary("sess-3", "gamma", "/Users/b/repos/gamma");
+        duplicate.last_activity_at = timestamp("2026-03-08T14:00:06Z");
+        stale.last_activity_at = timestamp("2026-03-08T14:00:07Z");
+        cleared.last_activity_at = timestamp("2026-03-08T14:00:08Z");
+
+        api.push_fetch_sessions(Ok(vec![duplicate]));
+        api.push_fetch_sessions(Ok(vec![stale]));
+        api.push_fetch_sessions(Ok(vec![cleared]));
+
+        let mut app = make_app(api);
+        app.refresh(layout);
+        app.refresh(layout);
+        app.refresh(layout);
+        app.refresh(layout);
+
+        assert_eq!(app.thought_log.len(), 1);
+        assert_eq!(app.thought_log[0].thought, "reading logs");
+    }
+
+    #[test]
+    fn selection_changes_do_not_reset_global_thought_timeline() {
+        let api = MockApi::new();
+        let layout = test_layout(120, 32);
+        let mut app = make_app(api);
+        app.merge_sessions(
+            vec![
+                session_summary("sess-1", "alpha", "/Users/b/repos/alpha"),
+                session_summary("sess-2", "beta", "/Users/b/repos/beta"),
+            ],
+            layout.overview_field,
+        );
+        app.capture_thought_updates(
+            &[session_summary_with_thought(
+                "sess-1",
+                "alpha",
+                "/Users/b/repos/alpha",
+                "patching sidebar",
+                "2026-03-08T14:00:07Z",
+            )],
+            layout.thought_entry_capacity(),
+        );
+        app.selected_id = Some("sess-1".to_string());
+        let before = app.thought_log.clone();
+
+        app.move_selection(1, layout.overview_field);
+
+        assert_eq!(app.selected_id.as_deref(), Some("sess-2"));
+        assert_eq!(app.thought_log, before);
+    }
+
+    #[test]
+    fn thought_timeline_trims_to_visible_capacity() {
+        let api = MockApi::new();
+        let layout = test_layout(120, 24);
+        let mut app = make_app(api);
+        assert_eq!(layout.thought_entry_capacity(), 10);
+
+        for idx in 0..15 {
+            let second = idx + 1;
+            let updated_at = format!("2026-03-08T14:00:{second:02}Z");
+            let thought = format!("thought {idx}");
+            let session = session_summary_with_thought(
+                "sess-1",
+                "alpha",
+                "/Users/b/repos/alpha",
+                &thought,
+                &updated_at,
+            );
+            app.capture_thought_updates(&[session], layout.thought_entry_capacity());
+        }
+
+        assert_eq!(app.thought_log.len(), 10);
+        assert_eq!(
+            app.thought_log.first().map(|entry| entry.thought.as_str()),
+            Some("thought 5")
+        );
+        assert_eq!(
+            app.thought_log.last().map(|entry| entry.thought.as_str()),
+            Some("thought 14")
+        );
     }
 
     #[test]
