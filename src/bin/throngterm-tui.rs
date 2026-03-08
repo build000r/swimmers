@@ -1651,7 +1651,7 @@ struct ThoughtChipLayout {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct ThoughtRowLayout {
-    tmux_name_rect: Option<Rect>,
+    row_rect: Option<Rect>,
     tmux_name: String,
     line: String,
     color: Color,
@@ -1866,12 +1866,12 @@ fn build_thought_panel<C: TuiApi>(
         .into_iter()
         .map(|entry| {
             let line = format_thought_line(entry, thought_content.width as usize);
-            let visible_tmux_width = display_width(&entry.tmux_name).min(display_width(&line));
+            let visible_line_width = display_width(&line);
             ThoughtRowLayout {
-                tmux_name_rect: (visible_tmux_width > 0).then_some(Rect {
+                row_rect: (visible_line_width > 0).then_some(Rect {
                     x: thought_content.x,
                     y: 0,
-                    width: visible_tmux_width,
+                    width: visible_line_width,
                     height: 1,
                 }),
                 tmux_name: entry.tmux_name.clone(),
@@ -1915,7 +1915,7 @@ fn thought_panel_action_at<C: TuiApi>(
         .bottom()
         .saturating_sub(panel.rows.len() as u16);
     for (offset, row) in panel.rows.into_iter().enumerate() {
-        let Some(rect) = row.tmux_name_rect else {
+        let Some(rect) = row.row_rect else {
             continue;
         };
         let rect = Rect {
@@ -3160,11 +3160,11 @@ mod tests {
         let row_start_y = thought_content
             .bottom()
             .saturating_sub(filtered_panel.rows.len() as u16);
-        let tmux_rect = filtered_panel.rows[row_index]
-            .tmux_name_rect
-            .expect("row should have a tmux click target");
+        let row_rect = filtered_panel.rows[row_index]
+            .row_rect
+            .expect("row should have a click target");
         app.handle_thought_click(
-            tmux_rect.x,
+            row_rect.x.saturating_add(4),
             row_start_y + row_index as u16,
             thought_content,
             layout.thought_entry_capacity(),
@@ -3211,7 +3211,7 @@ mod tests {
     }
 
     #[test]
-    fn clicking_thought_body_does_not_change_filters() {
+    fn clicking_thought_body_filters_to_that_session() {
         let api = MockApi::new();
         let layout = test_layout(120, 32);
         let thought_content = layout
@@ -3246,7 +3246,8 @@ mod tests {
             layout.thought_entry_capacity(),
         );
 
-        assert_eq!(app.thought_filter, ThoughtFilter::default());
+        assert_eq!(app.thought_filter.tmux_name.as_deref(), Some("7"));
+        assert_eq!(app.active_thought_filter_text(), "filter: num=7");
     }
 
     #[test]
