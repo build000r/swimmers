@@ -36,27 +36,47 @@ pub struct BootstrapData {
     pub repo_themes: HashMap<String, RepoTheme>,
 }
 
-fn tmux_name_from_pane_session_id(session_id: &str) -> Option<&str> {
-    let rest = session_id.strip_prefix("tmux:")?;
-    let (session_and_window, _pane_id) = rest.rsplit_once(':')?;
-    let (tmux_name, _window_and_pane) = session_and_window.rsplit_once(':')?;
-    Some(tmux_name)
-}
-
 fn thought_snapshot_for_summary<'a>(
     summary: &SessionSummary,
+    active_pane_session_id: Option<&str>,
     thought_snapshots: &'a HashMap<String, ThoughtSnapshot>,
 ) -> Option<&'a ThoughtSnapshot> {
-    thought_snapshots.get(&summary.session_id).or_else(|| {
-        thought_snapshots
-            .iter()
-            .filter(|(session_id, _)| {
-                tmux_name_from_pane_session_id(session_id.as_str())
-                    == Some(summary.tmux_name.as_str())
-            })
-            .max_by_key(|(_, snapshot)| snapshot.updated_at)
-            .map(|(_, snapshot)| snapshot)
-    })
+    thought_snapshots
+        .get(&summary.session_id)
+        .or_else(|| active_pane_session_id.and_then(|session_id| thought_snapshots.get(session_id)))
+}
+
+async fn query_tmux_active_pane_session_id(tmux_name: &str) -> anyhow::Result<String> {
+    let output = Command::new("tmux")
+        .args([
+            "display-message",
+            "-p",
+            "-t",
+            tmux_name,
+            "#{window_index}.#{pane_index}:#{pane_id}",
+        ])
+        .env_remove("TMUX")
+        .env_remove("TMUX_PANE")
+        .output()
+        .await
+        .map_err(|e| anyhow::anyhow!("failed to run tmux display-message: {}", e))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(anyhow::anyhow!(
+            "tmux display-message failed: {}",
+            stderr.trim()
+        ));
+    }
+
+    let pane_selector = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if pane_selector.is_empty() {
+        return Err(anyhow::anyhow!(
+            "tmux returned empty active pane selector"
+        ));
+    }
+
+    Ok(format!("tmux:{tmux_name}:{pane_selector}"))
 }
 
 // ---------------------------------------------------------------------------
@@ -660,9 +680,22 @@ impl SessionSupervisor {
             }
         }
 
-        let thought_snapshots = self.thought_snapshots.read().await;
+        let thought_snapshots = self.thought_snapshots.read().await.clone();
         for summary in &mut summaries {
-            if let Some(thought_data) = thought_snapshot_for_summary(summary, &thought_snapshots) {
+            let active_pane_session_id =
+                if thought_snapshots.contains_key(&summary.session_id) || summary.tmux_name.is_empty()
+                {
+                    None
+                } else {
+                    query_tmux_active_pane_session_id(&summary.tmux_name)
+                        .await
+                        .ok()
+                };
+            if let Some(thought_data) = thought_snapshot_for_summary(
+                summary,
+                active_pane_session_id.as_deref(),
+                &thought_snapshots,
+            ) {
                 if summary.thought.is_none() {
                     summary.thought = thought_data.thought.clone();
                 }
@@ -802,7 +835,21 @@ impl SessionSupervisor {
                     })
                     .unwrap_or_default();
                 let session_id = summary.session_id.clone();
-                let thought_data = thought_snapshot_for_summary(&summary, &thought_snapshots);
+                let active_pane_session_id = if thought_snapshots.contains_key(&summary.session_id)
+                    || summary.tmux_name.is_empty()
+                    || summary.state == crate::types::SessionState::Exited
+                {
+                    None
+                } else {
+                    query_tmux_active_pane_session_id(&summary.tmux_name)
+                        .await
+                        .ok()
+                };
+                let thought_data = thought_snapshot_for_summary(
+                    &summary,
+                    active_pane_session_id.as_deref(),
+                    &thought_snapshots,
+                );
 
                 infos.push(SessionInfo {
                     session_id,
@@ -871,7 +918,6 @@ impl SessionSupervisor {
                 last_skill: s.last_skill.clone(),
                 objective_fingerprint: thought_snapshots
                     .get(&s.session_id)
-                    .or_else(|| thought_snapshot_for_summary(s, &thought_snapshots))
                     .and_then(|t| t.objective_fingerprint.clone()),
                 cwd: s.cwd.clone(),
                 last_activity_at: s.last_activity_at,
@@ -1534,7 +1580,7 @@ mod tests {
     }
 
     #[test]
-    fn thought_snapshot_for_summary_falls_back_to_latest_tmux_pane_match() {
+    fn thought_snapshot_for_summary_matches_active_tmux_pane() {
         let summary = SessionSummary {
             session_id: "sess_1".to_string(),
             tmux_name: "work".to_string(),
@@ -1599,10 +1645,70 @@ mod tests {
             ),
         ]);
 
-        let matched =
-            thought_snapshot_for_summary(&summary, &snapshots).expect("tmux pane snapshot");
+        let matched = thought_snapshot_for_summary(
+            &summary,
+            Some("tmux:work:1.1:%2"),
+            &snapshots,
+        )
+        .expect("tmux pane snapshot");
         assert_eq!(matched.thought.as_deref(), Some("pane two"));
         assert_eq!(matched.delivery.emission_seq, 2);
+    }
+
+    #[test]
+    fn thought_snapshot_for_summary_does_not_fall_back_to_latest_tmux_pane_without_active_binding() {
+        let summary = SessionSummary {
+            session_id: "sess_1".to_string(),
+            tmux_name: "work".to_string(),
+            state: SessionState::Idle,
+            current_command: None,
+            cwd: "/tmp".to_string(),
+            tool: None,
+            token_count: 0,
+            context_limit: 0,
+            thought: None,
+            thought_state: ThoughtState::Holding,
+            thought_source: ThoughtSource::CarryForward,
+            thought_updated_at: None,
+            last_skill: None,
+            is_stale: false,
+            attached_clients: 0,
+            transport_health: crate::types::TransportHealth::Healthy,
+            last_activity_at: Utc::now(),
+            sprite_pack_id: None,
+            repo_theme_id: None,
+        };
+
+        let snapshots = HashMap::from([
+            (
+                "tmux:work:1.0:%1".to_string(),
+                ThoughtSnapshot {
+                    thought: Some("pane one".to_string()),
+                    thought_state: ThoughtState::Holding,
+                    thought_source: ThoughtSource::Llm,
+                    objective_fingerprint: None,
+                    token_count: 10,
+                    context_limit: 100,
+                    updated_at: Utc::now(),
+                    delivery: ThoughtDeliveryState::default(),
+                },
+            ),
+            (
+                "tmux:work:1.1:%2".to_string(),
+                ThoughtSnapshot {
+                    thought: Some("pane two".to_string()),
+                    thought_state: ThoughtState::Active,
+                    thought_source: ThoughtSource::Llm,
+                    objective_fingerprint: None,
+                    token_count: 10,
+                    context_limit: 100,
+                    updated_at: Utc::now(),
+                    delivery: ThoughtDeliveryState::default(),
+                },
+            ),
+        ]);
+
+        assert!(thought_snapshot_for_summary(&summary, None, &snapshots).is_none());
     }
 
     #[test]
