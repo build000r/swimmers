@@ -14,6 +14,7 @@ use tracing::warn;
 
 use crate::thought::bridge_runner::BridgeRunner;
 use crate::thought::emitter_client::EmitterClient;
+use crate::thought::protocol::ThoughtDeliveryState;
 use crate::thought::runtime_config::ThoughtConfig;
 use crate::types::{ControlEvent, SessionState, ThoughtPolicy, ThoughtSource, ThoughtState};
 
@@ -62,8 +63,15 @@ pub trait SessionProvider: Send + Sync {
         _context_limit: u64,
         _thought_state: ThoughtState,
         _thought_source: ThoughtSource,
+        _updated_at: DateTime<Utc>,
+        _delivery: ThoughtDeliveryState,
         _objective_fingerprint: Option<String>,
     ) {
+    }
+
+    /// Return the last accepted stream/sequence watermark for each session.
+    fn thought_delivery_states(&self) -> std::collections::HashMap<String, ThoughtDeliveryState> {
+        std::collections::HashMap::new()
     }
 }
 

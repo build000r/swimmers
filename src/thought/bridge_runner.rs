@@ -7,14 +7,14 @@ use tracing::{debug, info, warn};
 
 use crate::thought::emitter_client::EmitterClient;
 use crate::thought::loop_runner::SessionProvider;
-use crate::thought::protocol::{SyncResponse, SyncUpdate};
+use crate::thought::protocol::{SyncResponse, SyncUpdate, ThoughtDeliveryState};
 use crate::thought::runtime_config::ThoughtConfig;
 use crate::types::{ControlEvent, ThoughtUpdatePayload};
 
 const DEFAULT_BRIDGE_TICK: Duration = Duration::from_secs(2);
 
-/// Periodically syncs session snapshots to the clawgs emit daemon and applies
-/// returned thought updates through the existing SessionProvider + control bus.
+/// Consumes the tmux-scoped clawgs thought stream and applies accepted updates
+/// through the existing SessionProvider + control bus.
 pub struct BridgeRunner {
     tick: Duration,
     event_tx: broadcast::Sender<ControlEvent>,
@@ -56,18 +56,20 @@ impl BridgeRunner {
                 "thought bridge runner started"
             );
 
-            let mut interval = tokio::time::interval(self.tick);
+            let mut delivery_states = provider.thought_delivery_states();
             loop {
-                interval.tick().await;
-
-                let snapshots = provider.session_snapshots();
                 let runtime_config = self.runtime_config.read().await.clone();
                 match emitter_client
-                    .sync_sessions(&snapshots, &runtime_config)
+                    .next_sync_response(&runtime_config, self.tick)
                     .await
                 {
                     Ok(response) => {
-                        apply_sync_response(provider.as_ref(), &self.event_tx, response);
+                        apply_sync_response(
+                            provider.as_ref(),
+                            &self.event_tx,
+                            &mut delivery_states,
+                            response,
+                        );
                     }
                     Err(err) => {
                         warn!(
@@ -84,24 +86,90 @@ impl BridgeRunner {
 fn apply_sync_response<P: SessionProvider>(
     provider: &P,
     event_tx: &broadcast::Sender<ControlEvent>,
+    delivery_states: &mut std::collections::HashMap<String, ThoughtDeliveryState>,
     response: SyncResponse,
 ) {
     debug!(
-        request_id = response.request_id,
+        request_id = %response.request_id,
         update_count = response.updates.len(),
         "applying thought updates from daemon"
     );
 
+    let batch_stream_instance_id = response.stream_instance_id.clone();
     for update in response.updates {
-        apply_update(provider, event_tx, update);
+        apply_update(
+            provider,
+            event_tx,
+            delivery_states,
+            batch_stream_instance_id.as_deref(),
+            update,
+        );
+    }
+}
+
+fn resolved_delivery_state(
+    batch_stream_instance_id: Option<&str>,
+    update: &SyncUpdate,
+) -> Option<ThoughtDeliveryState> {
+    let stream_instance_id = update
+        .stream_instance_id
+        .clone()
+        .or_else(|| batch_stream_instance_id.map(ToString::to_string));
+    let emission_seq = update.emission_seq?;
+    if emission_seq == 0 {
+        return None;
+    }
+
+    Some(ThoughtDeliveryState {
+        stream_instance_id,
+        emission_seq,
+    })
+}
+
+fn should_apply_delivery_state(
+    current: Option<&ThoughtDeliveryState>,
+    incoming: Option<&ThoughtDeliveryState>,
+) -> bool {
+    let Some(incoming) = incoming else {
+        return true;
+    };
+    let Some(incoming_stream) = incoming.stream_instance_id.as_deref() else {
+        return true;
+    };
+
+    let Some(current) = current else {
+        return true;
+    };
+    let Some(current_stream) = current.stream_instance_id.as_deref() else {
+        return true;
+    };
+
+    if current_stream == incoming_stream {
+        incoming.emission_seq > current.emission_seq
+    } else {
+        incoming.emission_seq == 1
     }
 }
 
 fn apply_update<P: SessionProvider>(
     provider: &P,
     event_tx: &broadcast::Sender<ControlEvent>,
+    delivery_states: &mut std::collections::HashMap<String, ThoughtDeliveryState>,
+    batch_stream_instance_id: Option<&str>,
     update: SyncUpdate,
 ) {
+    let incoming_delivery = resolved_delivery_state(batch_stream_instance_id, &update);
+    let current_delivery = delivery_states.get(&update.session_id);
+    if !should_apply_delivery_state(current_delivery, incoming_delivery.as_ref()) {
+        return;
+    }
+
+    let persisted_delivery = incoming_delivery
+        .clone()
+        .or_else(|| current_delivery.cloned())
+        .unwrap_or_default();
+    delivery_states.insert(update.session_id.clone(), persisted_delivery.clone());
+
     provider.persist_thought(
         &update.session_id,
         update.thought.as_deref(),
@@ -109,6 +177,8 @@ fn apply_update<P: SessionProvider>(
         update.context_limit,
         update.thought_state,
         update.thought_source,
+        update.at,
+        persisted_delivery,
         update.objective_fingerprint.clone(),
     );
 
@@ -135,11 +205,12 @@ fn apply_update<P: SessionProvider>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::Utc;
+    use chrono::{DateTime, Utc};
+    use std::collections::HashMap;
     use std::sync::Mutex;
 
     use crate::thought::loop_runner::{SessionInfo, SessionProvider};
-    use crate::thought::protocol::SyncUpdate;
+    use crate::thought::protocol::{SyncUpdate, ThoughtDeliveryState};
     use crate::thought::runtime_config::ThoughtConfig;
     use crate::types::{
         BubblePrecedence, SessionState, ThoughtSource, ThoughtState, ThoughtUpdatePayload,
@@ -154,6 +225,8 @@ mod tests {
         context_limit: u64,
         thought_state: ThoughtState,
         thought_source: ThoughtSource,
+        updated_at: DateTime<Utc>,
+        delivery: ThoughtDeliveryState,
         objective_fingerprint: Option<String>,
     }
 
@@ -161,6 +234,7 @@ mod tests {
     struct RecordingProvider {
         snapshots: Vec<SessionInfo>,
         persisted: Mutex<Vec<PersistCall>>,
+        delivery_states: Mutex<HashMap<String, ThoughtDeliveryState>>,
     }
 
     impl SessionProvider for RecordingProvider {
@@ -176,6 +250,8 @@ mod tests {
             context_limit: u64,
             thought_state: ThoughtState,
             thought_source: ThoughtSource,
+            updated_at: DateTime<Utc>,
+            delivery: ThoughtDeliveryState,
             objective_fingerprint: Option<String>,
         ) {
             self.persisted
@@ -188,8 +264,21 @@ mod tests {
                     context_limit,
                     thought_state,
                     thought_source,
+                    updated_at,
+                    delivery: delivery.clone(),
                     objective_fingerprint,
                 });
+            self.delivery_states
+                .lock()
+                .expect("delivery_states mutex should lock")
+                .insert(session_id.to_string(), delivery);
+        }
+
+        fn thought_delivery_states(&self) -> HashMap<String, ThoughtDeliveryState> {
+            self.delivery_states
+                .lock()
+                .expect("delivery_states mutex should lock")
+                .clone()
         }
     }
 
@@ -200,9 +289,12 @@ mod tests {
         let now = Utc::now();
 
         let response = SyncResponse {
-            request_id: 11,
+            request_id: "tmux-1".to_string(),
+            stream_instance_id: Some("stream-a".to_string()),
             updates: vec![SyncUpdate {
                 session_id: "sess-bridge".to_string(),
+                stream_instance_id: None,
+                emission_seq: Some(1),
                 thought: Some("Applying bridge update".to_string()),
                 token_count: 88,
                 context_limit: 120,
@@ -215,7 +307,8 @@ mod tests {
             }],
         };
 
-        apply_sync_response(&provider, &event_tx, response);
+        let mut delivery_states = provider.thought_delivery_states();
+        apply_sync_response(&provider, &event_tx, &mut delivery_states, response);
 
         let persisted = provider
             .persisted
@@ -231,6 +324,12 @@ mod tests {
         assert_eq!(persisted[0].context_limit, 120);
         assert_eq!(persisted[0].thought_state, ThoughtState::Active);
         assert_eq!(persisted[0].thought_source, ThoughtSource::Llm);
+        assert_eq!(persisted[0].updated_at, now);
+        assert_eq!(
+            persisted[0].delivery.stream_instance_id.as_deref(),
+            Some("stream-a")
+        );
+        assert_eq!(persisted[0].delivery.emission_seq, 1);
         assert_eq!(
             persisted[0].objective_fingerprint.as_deref(),
             Some("obj-bridge")
@@ -265,12 +364,15 @@ mod tests {
     fn apply_sync_response_handles_empty_update_list() {
         let provider = RecordingProvider::default();
         let (event_tx, mut event_rx) = broadcast::channel::<ControlEvent>(8);
+        let mut delivery_states = provider.thought_delivery_states();
 
         apply_sync_response(
             &provider,
             &event_tx,
+            &mut delivery_states,
             SyncResponse {
-                request_id: 1,
+                request_id: "tmux-1".to_string(),
+                stream_instance_id: Some("stream-a".to_string()),
                 updates: Vec::new(),
             },
         );
@@ -307,10 +409,302 @@ mod tests {
                 last_activity_at: Utc::now(),
             }],
             persisted: Mutex::new(Vec::new()),
+            delivery_states: Mutex::new(HashMap::new()),
         };
 
         let snapshots = provider.session_snapshots();
         assert_eq!(snapshots.len(), 1);
         assert_eq!(snapshots[0].session_id, "sess-a");
+    }
+
+    #[test]
+    fn duplicate_event_is_ignored() {
+        let provider = RecordingProvider::default();
+        provider
+            .delivery_states
+            .lock()
+            .expect("delivery states")
+            .insert(
+                "tmux:work:1.0:%1".to_string(),
+                ThoughtDeliveryState {
+                    stream_instance_id: Some("stream-a".to_string()),
+                    emission_seq: 2,
+                },
+            );
+        let (event_tx, mut event_rx) = broadcast::channel::<ControlEvent>(8);
+
+        let mut delivery_states = provider.thought_delivery_states();
+        apply_sync_response(
+            &provider,
+            &event_tx,
+            &mut delivery_states,
+            SyncResponse {
+                request_id: "tmux-2".to_string(),
+                stream_instance_id: Some("stream-a".to_string()),
+                updates: vec![SyncUpdate {
+                    session_id: "tmux:work:1.0:%1".to_string(),
+                    stream_instance_id: None,
+                    emission_seq: Some(2),
+                    thought: Some("Patching sidebar".to_string()),
+                    token_count: 10,
+                    context_limit: 100,
+                    thought_state: ThoughtState::Holding,
+                    thought_source: ThoughtSource::Llm,
+                    objective_changed: false,
+                    bubble_precedence: BubblePrecedence::ThoughtFirst,
+                    at: DateTime::parse_from_rfc3339("2026-03-08T14:00:07Z")
+                        .expect("timestamp")
+                        .with_timezone(&Utc),
+                    objective_fingerprint: None,
+                }],
+            },
+        );
+
+        assert!(provider.persisted.lock().expect("persisted").is_empty());
+        assert_eq!(
+            delivery_states
+                .get("tmux:work:1.0:%1")
+                .expect("delivery state")
+                .emission_seq,
+            2
+        );
+        match event_rx.try_recv() {
+            Err(broadcast::error::TryRecvError::Empty) => {}
+            other => panic!("expected no event for duplicate update, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn stale_event_in_same_stream_is_ignored() {
+        let provider = RecordingProvider::default();
+        provider
+            .delivery_states
+            .lock()
+            .expect("delivery states")
+            .insert(
+                "tmux:work:1.0:%1".to_string(),
+                ThoughtDeliveryState {
+                    stream_instance_id: Some("stream-a".to_string()),
+                    emission_seq: 4,
+                },
+            );
+        let (event_tx, mut event_rx) = broadcast::channel::<ControlEvent>(8);
+
+        let mut delivery_states = provider.thought_delivery_states();
+        apply_sync_response(
+            &provider,
+            &event_tx,
+            &mut delivery_states,
+            SyncResponse {
+                request_id: "tmux-3".to_string(),
+                stream_instance_id: Some("stream-a".to_string()),
+                updates: vec![SyncUpdate {
+                    session_id: "tmux:work:1.0:%1".to_string(),
+                    stream_instance_id: None,
+                    emission_seq: Some(3),
+                    thought: Some("Running tests".to_string()),
+                    token_count: 10,
+                    context_limit: 100,
+                    thought_state: ThoughtState::Holding,
+                    thought_source: ThoughtSource::Llm,
+                    objective_changed: false,
+                    bubble_precedence: BubblePrecedence::ThoughtFirst,
+                    at: Utc::now(),
+                    objective_fingerprint: None,
+                }],
+            },
+        );
+
+        assert!(provider.persisted.lock().expect("persisted").is_empty());
+        assert_eq!(
+            delivery_states
+                .get("tmux:work:1.0:%1")
+                .expect("delivery state")
+                .emission_seq,
+            4
+        );
+        match event_rx.try_recv() {
+            Err(broadcast::error::TryRecvError::Empty) => {}
+            other => panic!("expected no event for stale update, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn stream_restart_accepts_seq_one_and_resets_watermark() {
+        let provider = RecordingProvider::default();
+        provider
+            .delivery_states
+            .lock()
+            .expect("delivery states")
+            .insert(
+                "tmux:work:1.0:%1".to_string(),
+                ThoughtDeliveryState {
+                    stream_instance_id: Some("stream-a".to_string()),
+                    emission_seq: 4,
+                },
+            );
+        let (event_tx, mut event_rx) = broadcast::channel::<ControlEvent>(8);
+        let now = DateTime::parse_from_rfc3339("2026-03-08T14:05:00Z")
+            .expect("timestamp")
+            .with_timezone(&Utc);
+
+        let mut delivery_states = provider.thought_delivery_states();
+        apply_sync_response(
+            &provider,
+            &event_tx,
+            &mut delivery_states,
+            SyncResponse {
+                request_id: "tmux-4".to_string(),
+                stream_instance_id: Some("stream-b".to_string()),
+                updates: vec![SyncUpdate {
+                    session_id: "tmux:work:1.0:%1".to_string(),
+                    stream_instance_id: None,
+                    emission_seq: Some(1),
+                    thought: Some("Reconnected and resuming".to_string()),
+                    token_count: 10,
+                    context_limit: 100,
+                    thought_state: ThoughtState::Active,
+                    thought_source: ThoughtSource::Llm,
+                    objective_changed: true,
+                    bubble_precedence: BubblePrecedence::ThoughtFirst,
+                    at: now,
+                    objective_fingerprint: None,
+                }],
+            },
+        );
+
+        let persisted = provider.persisted.lock().expect("persisted");
+        assert_eq!(persisted.len(), 1);
+        assert_eq!(
+            persisted[0].delivery.stream_instance_id.as_deref(),
+            Some("stream-b")
+        );
+        assert_eq!(persisted[0].delivery.emission_seq, 1);
+        drop(persisted);
+
+        let event = event_rx.try_recv().expect("event");
+        assert_eq!(event.session_id, "tmux:work:1.0:%1");
+    }
+
+    #[test]
+    fn old_stream_after_restart_is_ignored() {
+        let provider = RecordingProvider::default();
+        provider
+            .delivery_states
+            .lock()
+            .expect("delivery states")
+            .insert(
+                "tmux:work:1.0:%1".to_string(),
+                ThoughtDeliveryState {
+                    stream_instance_id: Some("stream-b".to_string()),
+                    emission_seq: 1,
+                },
+            );
+        let (event_tx, mut event_rx) = broadcast::channel::<ControlEvent>(8);
+
+        let mut delivery_states = provider.thought_delivery_states();
+        apply_sync_response(
+            &provider,
+            &event_tx,
+            &mut delivery_states,
+            SyncResponse {
+                request_id: "tmux-5".to_string(),
+                stream_instance_id: Some("stream-a".to_string()),
+                updates: vec![SyncUpdate {
+                    session_id: "tmux:work:1.0:%1".to_string(),
+                    stream_instance_id: None,
+                    emission_seq: Some(99),
+                    thought: Some("late old stream".to_string()),
+                    token_count: 10,
+                    context_limit: 100,
+                    thought_state: ThoughtState::Holding,
+                    thought_source: ThoughtSource::Llm,
+                    objective_changed: false,
+                    bubble_precedence: BubblePrecedence::ThoughtFirst,
+                    at: Utc::now(),
+                    objective_fingerprint: None,
+                }],
+            },
+        );
+
+        assert!(provider.persisted.lock().expect("persisted").is_empty());
+        assert_eq!(
+            delivery_states
+                .get("tmux:work:1.0:%1")
+                .expect("delivery state")
+                .stream_instance_id
+                .as_deref(),
+            Some("stream-b")
+        );
+        match event_rx.try_recv() {
+            Err(broadcast::error::TryRecvError::Empty) => {}
+            other => panic!("expected no event for old stream update, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn same_cwd_sessions_keep_independent_watermarks() {
+        let provider = RecordingProvider::default();
+        provider
+            .delivery_states
+            .lock()
+            .expect("delivery states")
+            .extend([
+                (
+                    "tmux:work:1.0:%1".to_string(),
+                    ThoughtDeliveryState {
+                        stream_instance_id: Some("stream-a".to_string()),
+                        emission_seq: 3,
+                    },
+                ),
+                (
+                    "tmux:work:1.1:%2".to_string(),
+                    ThoughtDeliveryState {
+                        stream_instance_id: Some("stream-a".to_string()),
+                        emission_seq: 7,
+                    },
+                ),
+            ]);
+        let (event_tx, _) = broadcast::channel::<ControlEvent>(8);
+
+        let mut delivery_states = provider.thought_delivery_states();
+        apply_sync_response(
+            &provider,
+            &event_tx,
+            &mut delivery_states,
+            SyncResponse {
+                request_id: "tmux-6".to_string(),
+                stream_instance_id: Some("stream-a".to_string()),
+                updates: vec![SyncUpdate {
+                    session_id: "tmux:work:1.0:%1".to_string(),
+                    stream_instance_id: None,
+                    emission_seq: Some(4),
+                    thought: Some("pane one advanced".to_string()),
+                    token_count: 10,
+                    context_limit: 100,
+                    thought_state: ThoughtState::Holding,
+                    thought_source: ThoughtSource::Llm,
+                    objective_changed: false,
+                    bubble_precedence: BubblePrecedence::ThoughtFirst,
+                    at: Utc::now(),
+                    objective_fingerprint: None,
+                }],
+            },
+        );
+
+        assert_eq!(
+            delivery_states
+                .get("tmux:work:1.0:%1")
+                .expect("pane one")
+                .emission_seq,
+            4
+        );
+        assert_eq!(
+            delivery_states
+                .get("tmux:work:1.1:%2")
+                .expect("pane two")
+                .emission_seq,
+            7
+        );
     }
 }

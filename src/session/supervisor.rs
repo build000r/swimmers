@@ -3,19 +3,21 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use tokio::process::Command;
 use tokio::sync::{broadcast, mpsc, oneshot, Mutex, RwLock};
 use tracing::{debug, error, info, warn};
 
 use crate::config::Config;
 use crate::persistence::file_store::{FileStore, PersistedSession, ThoughtSnapshot};
+use crate::repo_theme::discover_repo_theme;
 use crate::session::actor::{ActorHandle, SessionCommand};
 use crate::sprites::discover_sprite_pack;
 use crate::thought::loop_runner::{SessionInfo, SessionProvider};
+use crate::thought::protocol::ThoughtDeliveryState;
 use crate::types::{
-    ControlEvent, SessionState, SessionStatePayload, SessionSummary, SpritePack, TerminalSnapshot,
-    ThoughtSource, ThoughtState, TransportHealth,
+    ControlEvent, RepoTheme, SessionState, SessionStatePayload, SessionSummary, SpritePack,
+    TerminalSnapshot, ThoughtSource, ThoughtState, TransportHealth,
 };
 
 const PROCESS_EXIT_REAP_INTERVAL: Duration = Duration::from_millis(250);
@@ -31,6 +33,30 @@ const PROCESS_EXIT_SUMMARY_TIMEOUT: Duration = Duration::from_millis(250);
 pub struct BootstrapData {
     pub sessions: Vec<SessionSummary>,
     pub sprite_packs: HashMap<String, SpritePack>,
+    pub repo_themes: HashMap<String, RepoTheme>,
+}
+
+fn tmux_name_from_pane_session_id(session_id: &str) -> Option<&str> {
+    let rest = session_id.strip_prefix("tmux:")?;
+    let (session_and_window, _pane_id) = rest.rsplit_once(':')?;
+    let (tmux_name, _window_and_pane) = session_and_window.rsplit_once(':')?;
+    Some(tmux_name)
+}
+
+fn thought_snapshot_for_summary<'a>(
+    summary: &SessionSummary,
+    thought_snapshots: &'a HashMap<String, ThoughtSnapshot>,
+) -> Option<&'a ThoughtSnapshot> {
+    thought_snapshots.get(&summary.session_id).or_else(|| {
+        thought_snapshots
+            .iter()
+            .filter(|(session_id, _)| {
+                tmux_name_from_pane_session_id(session_id.as_str())
+                    == Some(summary.tmux_name.as_str())
+            })
+            .max_by_key(|(_, snapshot)| snapshot.updated_at)
+            .map(|(_, snapshot)| snapshot)
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -45,6 +71,7 @@ pub enum LifecycleEvent {
         summary: SessionSummary,
         reason: String,
         sprite_pack: Option<SpritePack>,
+        repo_theme: Option<RepoTheme>,
     },
     Deleted {
         session_id: String,
@@ -114,6 +141,65 @@ impl SessionSupervisor {
         })
     }
 
+    async fn resolve_repo_assets_for_summary(
+        &self,
+        summary: &mut SessionSummary,
+    ) -> (Option<SpritePack>, Option<RepoTheme>) {
+        if summary.cwd.is_empty() {
+            summary.sprite_pack_id = None;
+            summary.repo_theme_id = None;
+            return (None, None);
+        }
+
+        let repo_theme = discover_repo_theme(&summary.cwd).map(|(theme_id, theme)| {
+            summary.repo_theme_id = Some(theme_id);
+            theme
+        });
+        if repo_theme.is_none() {
+            summary.repo_theme_id = None;
+        }
+
+        let sprite_pack = discover_sprite_pack(&summary.cwd)
+            .await
+            .map(|(pack_id, pack)| {
+                summary.sprite_pack_id = Some(pack_id);
+                pack
+            });
+        if sprite_pack.is_none() {
+            summary.sprite_pack_id = None;
+        }
+
+        (sprite_pack, repo_theme)
+    }
+
+    async fn collect_repo_assets(
+        &self,
+        summaries: &[SessionSummary],
+    ) -> (HashMap<String, SpritePack>, HashMap<String, RepoTheme>) {
+        let mut sprite_packs = HashMap::new();
+        let mut repo_themes = HashMap::new();
+
+        for summary in summaries {
+            if let Some(ref theme_id) = summary.repo_theme_id {
+                if !repo_themes.contains_key(theme_id) && !summary.cwd.is_empty() {
+                    if let Some((_root, theme)) = discover_repo_theme(&summary.cwd) {
+                        repo_themes.insert(theme_id.clone(), theme);
+                    }
+                }
+            }
+
+            if let Some(ref pack_id) = summary.sprite_pack_id {
+                if !sprite_packs.contains_key(pack_id) && !summary.cwd.is_empty() {
+                    if let Some((_root, pack)) = discover_sprite_pack(&summary.cwd).await {
+                        sprite_packs.insert(pack_id.clone(), pack);
+                    }
+                }
+            }
+        }
+
+        (sprite_packs, repo_themes)
+    }
+
     /// Initialize persistence store and load persisted sessions as stale entries.
     pub async fn init_persistence(self: &Arc<Self>, store: Arc<FileStore>) {
         let persisted = store.load_sessions().await;
@@ -165,12 +251,9 @@ impl SessionSupervisor {
                     transport_health: crate::types::TransportHealth::Disconnected,
                     last_activity_at: ps.last_activity_at,
                     sprite_pack_id: None,
+                    repo_theme_id: None,
                 };
-                if !summary.cwd.is_empty() {
-                    if let Some((pack_id, _)) = discover_sprite_pack(&summary.cwd).await {
-                        summary.sprite_pack_id = Some(pack_id);
-                    }
-                }
+                self.resolve_repo_assets_for_summary(&mut summary).await;
                 stale.push(summary);
             }
             info!(count = stale.len(), "loaded persisted stale sessions");
@@ -291,6 +374,7 @@ impl SessionSupervisor {
                                 summary,
                                 reason: reason.into(),
                                 sprite_pack: None,
+                                repo_theme: None,
                             });
                         }
                         Err(e) => {
@@ -389,7 +473,7 @@ impl SessionSupervisor {
         name: Option<String>,
         cwd: Option<String>,
         spawn_tool: Option<crate::types::SpawnTool>,
-    ) -> anyhow::Result<(SessionSummary, Option<SpritePack>)> {
+    ) -> anyhow::Result<(SessionSummary, Option<SpritePack>, Option<RepoTheme>)> {
         let start_cwd = cwd.or_else(current_working_dir);
         let requested_name = name.and_then(|n| {
             let trimmed = n.trim();
@@ -442,16 +526,7 @@ impl SessionSupervisor {
             summary.context_limit = crate::types::context_limit_for_tool(Some(display));
         }
 
-        let sprite_pack = if !summary.cwd.is_empty() {
-            if let Some((pack_id, pack)) = discover_sprite_pack(&summary.cwd).await {
-                summary.sprite_pack_id = Some(pack_id);
-                Some(pack)
-            } else {
-                None
-            }
-        } else {
-            None
-        };
+        let (sprite_pack, repo_theme) = self.resolve_repo_assets_for_summary(&mut summary).await;
 
         if let Some(tool) = spawn_tool {
             if let Err(e) = send_spawn_tool_command(&tmux_name, tool).await {
@@ -485,12 +560,13 @@ impl SessionSupervisor {
             summary: summary.clone(),
             reason: "api_create".into(),
             sprite_pack: sprite_pack.clone(),
+            repo_theme: repo_theme.clone(),
         });
 
         // Persist the updated registry.
         self.persist_registry().await;
 
-        Ok((summary, sprite_pack))
+        Ok((summary, sprite_pack, repo_theme))
     }
 
     /// Shut down a session actor and remove it from the registry.
@@ -586,7 +662,7 @@ impl SessionSupervisor {
 
         let thought_snapshots = self.thought_snapshots.read().await;
         for summary in &mut summaries {
-            if let Some(thought_data) = thought_snapshots.get(&summary.session_id) {
+            if let Some(thought_data) = thought_snapshot_for_summary(summary, &thought_snapshots) {
                 if summary.thought.is_none() {
                     summary.thought = thought_data.thought.clone();
                 }
@@ -606,14 +682,20 @@ impl SessionSupervisor {
         // cwd.  We do this after the thought merge so that the cwd is the
         // actor-reported value.
         for summary in &mut summaries {
-            if !summary.cwd.is_empty() {
-                if let Some((pack_id, _)) = discover_sprite_pack(&summary.cwd).await {
-                    summary.sprite_pack_id = Some(pack_id);
-                }
-            }
+            self.resolve_repo_assets_for_summary(summary).await;
         }
 
         summaries
+    }
+
+    pub async fn list_session_data(&self) -> BootstrapData {
+        let sessions = self.list_sessions().await;
+        let (sprite_packs, repo_themes) = self.collect_repo_assets(&sessions).await;
+        BootstrapData {
+            sessions,
+            sprite_packs,
+            repo_themes,
+        }
     }
 
     /// Return all sessions for the bootstrap response, including stale
@@ -639,20 +721,12 @@ impl SessionSupervisor {
 
         // Build the sprite_packs map: for each unique sprite_pack_id present
         // across all sessions, look up the SpritePack from the discovery cache.
-        let mut sprite_packs: HashMap<String, SpritePack> = HashMap::new();
-        for summary in &all {
-            if let Some(ref pack_id) = summary.sprite_pack_id {
-                if !sprite_packs.contains_key(pack_id) {
-                    if let Some((_root, pack)) = discover_sprite_pack(&summary.cwd).await {
-                        sprite_packs.insert(pack_id.clone(), pack);
-                    }
-                }
-            }
-        }
+        let (sprite_packs, repo_themes) = self.collect_repo_assets(&all).await;
 
         BootstrapData {
             sessions: all,
             sprite_packs,
+            repo_themes,
         }
     }
 
@@ -728,7 +802,7 @@ impl SessionSupervisor {
                     })
                     .unwrap_or_default();
                 let session_id = summary.session_id.clone();
-                let thought_data = thought_snapshots.get(&session_id);
+                let thought_data = thought_snapshot_for_summary(&summary, &thought_snapshots);
 
                 infos.push(SessionInfo {
                     session_id,
@@ -797,6 +871,7 @@ impl SessionSupervisor {
                 last_skill: s.last_skill.clone(),
                 objective_fingerprint: thought_snapshots
                     .get(&s.session_id)
+                    .or_else(|| thought_snapshot_for_summary(s, &thought_snapshots))
                     .and_then(|t| t.objective_fingerprint.clone()),
                 cwd: s.cwd.clone(),
                 last_activity_at: s.last_activity_at,
@@ -815,6 +890,8 @@ impl SessionSupervisor {
         context_limit: u64,
         thought_state: ThoughtState,
         thought_source: ThoughtSource,
+        updated_at: DateTime<Utc>,
+        delivery: ThoughtDeliveryState,
         objective_fingerprint: Option<String>,
     ) {
         {
@@ -828,7 +905,8 @@ impl SessionSupervisor {
                     objective_fingerprint: objective_fingerprint.clone(),
                     token_count,
                     context_limit,
-                    updated_at: Utc::now(),
+                    updated_at,
+                    delivery: delivery.clone(),
                 },
             );
         }
@@ -849,6 +927,8 @@ impl SessionSupervisor {
                 context_limit,
                 thought_state,
                 thought_source,
+                updated_at,
+                delivery,
                 objective_fingerprint,
             )
             .await;
@@ -1028,6 +1108,7 @@ impl SessionSupervisor {
             transport_health: crate::types::TransportHealth::Healthy,
             last_activity_at: Utc::now(),
             sprite_pack_id: None,
+            repo_theme_id: None,
         }
     }
 }
@@ -1054,6 +1135,8 @@ struct PersistThoughtRequest {
     context_limit: u64,
     thought_state: ThoughtState,
     thought_source: ThoughtSource,
+    updated_at: DateTime<Utc>,
+    delivery: ThoughtDeliveryState,
     objective_fingerprint: Option<String>,
 }
 
@@ -1073,6 +1156,8 @@ impl SupervisorProvider {
                         req.context_limit,
                         req.thought_state,
                         req.thought_source,
+                        req.updated_at,
+                        req.delivery,
                         req.objective_fingerprint,
                     )
                     .await;
@@ -1110,6 +1195,8 @@ impl SessionProvider for SupervisorProvider {
         context_limit: u64,
         thought_state: ThoughtState,
         thought_source: ThoughtSource,
+        updated_at: DateTime<Utc>,
+        delivery: ThoughtDeliveryState,
         objective_fingerprint: Option<String>,
     ) {
         if self
@@ -1121,6 +1208,8 @@ impl SessionProvider for SupervisorProvider {
                 context_limit,
                 thought_state,
                 thought_source,
+                updated_at,
+                delivery,
                 objective_fingerprint,
             })
             .is_err()
@@ -1130,6 +1219,28 @@ impl SessionProvider for SupervisorProvider {
                 "persist_thought queue full/closed; dropping thought snapshot"
             );
         }
+    }
+
+    fn thought_delivery_states(&self) -> HashMap<String, ThoughtDeliveryState> {
+        let supervisor = self.supervisor.clone();
+        let handle = self.handle.clone();
+        std::thread::scope(|s| {
+            s.spawn(|| {
+                handle.block_on(async {
+                    supervisor
+                        .thought_snapshots
+                        .read()
+                        .await
+                        .iter()
+                        .map(|(session_id, snapshot)| {
+                            (session_id.clone(), snapshot.delivery.clone())
+                        })
+                        .collect()
+                })
+            })
+            .join()
+            .expect("thought_delivery_states thread panicked")
+        })
     }
 }
 
@@ -1279,7 +1390,7 @@ fn ready_process_exit_ids(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::Utc;
+    use chrono::{DateTime, Utc};
     use std::iter::FromIterator;
     use tempfile::tempdir;
 
@@ -1352,6 +1463,8 @@ mod tests {
                 128_000,
                 ThoughtState::Holding,
                 ThoughtSource::CarryForward,
+                Utc::now(),
+                ThoughtDeliveryState::default(),
                 None,
             )
             .await;
@@ -1391,6 +1504,105 @@ mod tests {
 
         let allocated = supervisor.allocate_unique_session_id().await;
         assert_eq!(allocated, "sess_8");
+    }
+
+    #[tokio::test]
+    async fn persist_thought_preserves_supplied_updated_at() {
+        let supervisor = SessionSupervisor::new(Arc::new(Config::default()));
+        let updated_at = DateTime::parse_from_rfc3339("2026-03-08T14:00:05Z")
+            .expect("timestamp should parse")
+            .with_timezone(&Utc);
+
+        supervisor
+            .persist_thought(
+                "sess_1",
+                Some("reading logs"),
+                12,
+                192_000,
+                ThoughtState::Holding,
+                ThoughtSource::Llm,
+                updated_at,
+                ThoughtDeliveryState::default(),
+                Some("obj-1".to_string()),
+            )
+            .await;
+
+        let thoughts = supervisor.thought_snapshots.read().await;
+        let snapshot = thoughts.get("sess_1").expect("snapshot should exist");
+        assert_eq!(snapshot.updated_at, updated_at);
+        assert_eq!(snapshot.thought.as_deref(), Some("reading logs"));
+    }
+
+    #[test]
+    fn thought_snapshot_for_summary_falls_back_to_latest_tmux_pane_match() {
+        let summary = SessionSummary {
+            session_id: "sess_1".to_string(),
+            tmux_name: "work".to_string(),
+            state: SessionState::Idle,
+            current_command: None,
+            cwd: "/tmp".to_string(),
+            tool: None,
+            token_count: 0,
+            context_limit: 0,
+            thought: None,
+            thought_state: ThoughtState::Holding,
+            thought_source: ThoughtSource::CarryForward,
+            thought_updated_at: None,
+            last_skill: None,
+            is_stale: false,
+            attached_clients: 0,
+            transport_health: crate::types::TransportHealth::Healthy,
+            last_activity_at: Utc::now(),
+            sprite_pack_id: None,
+            repo_theme_id: None,
+        };
+
+        let older = DateTime::parse_from_rfc3339("2026-03-08T14:00:05Z")
+            .expect("timestamp")
+            .with_timezone(&Utc);
+        let newer = DateTime::parse_from_rfc3339("2026-03-08T14:00:06Z")
+            .expect("timestamp")
+            .with_timezone(&Utc);
+
+        let snapshots = HashMap::from([
+            (
+                "tmux:work:1.0:%1".to_string(),
+                ThoughtSnapshot {
+                    thought: Some("pane one".to_string()),
+                    thought_state: ThoughtState::Holding,
+                    thought_source: ThoughtSource::Llm,
+                    objective_fingerprint: None,
+                    token_count: 10,
+                    context_limit: 100,
+                    updated_at: older,
+                    delivery: ThoughtDeliveryState {
+                        stream_instance_id: Some("stream-a".to_string()),
+                        emission_seq: 1,
+                    },
+                },
+            ),
+            (
+                "tmux:work:1.1:%2".to_string(),
+                ThoughtSnapshot {
+                    thought: Some("pane two".to_string()),
+                    thought_state: ThoughtState::Active,
+                    thought_source: ThoughtSource::Llm,
+                    objective_fingerprint: None,
+                    token_count: 10,
+                    context_limit: 100,
+                    updated_at: newer,
+                    delivery: ThoughtDeliveryState {
+                        stream_instance_id: Some("stream-a".to_string()),
+                        emission_seq: 2,
+                    },
+                },
+            ),
+        ]);
+
+        let matched =
+            thought_snapshot_for_summary(&summary, &snapshots).expect("tmux pane snapshot");
+        assert_eq!(matched.thought.as_deref(), Some("pane two"));
+        assert_eq!(matched.delivery.emission_seq, 2);
     }
 
     #[test]

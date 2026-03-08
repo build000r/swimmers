@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex, RwLock};
 use tracing::{debug, error, info, warn};
 
+use crate::thought::protocol::ThoughtDeliveryState;
 use crate::thought::runtime_config::ThoughtConfig;
 use crate::types::{SessionState, ThoughtSource, ThoughtState};
 
@@ -57,6 +58,8 @@ pub struct ThoughtSnapshot {
     pub token_count: u64,
     pub context_limit: u64,
     pub updated_at: DateTime<Utc>,
+    #[serde(flatten)]
+    pub delivery: ThoughtDeliveryState,
 }
 
 // ---------------------------------------------------------------------------
@@ -211,6 +214,8 @@ impl FileStore {
         context_limit: u64,
         thought_state: ThoughtState,
         thought_source: ThoughtSource,
+        updated_at: DateTime<Utc>,
+        delivery: ThoughtDeliveryState,
         objective_fingerprint: Option<String>,
     ) {
         let _write_guard = self.thought_write_lock.lock().await;
@@ -225,7 +230,8 @@ impl FileStore {
                     objective_fingerprint,
                     token_count,
                     context_limit,
-                    updated_at: Utc::now(),
+                    updated_at,
+                    delivery,
                 },
             );
 

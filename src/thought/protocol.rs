@@ -130,6 +130,10 @@ impl SyncRequest {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct SyncUpdate {
     pub session_id: String,
+    #[serde(default)]
+    pub stream_instance_id: Option<String>,
+    #[serde(default)]
+    pub emission_seq: Option<u64>,
     pub thought: Option<String>,
     pub token_count: u64,
     pub context_limit: u64,
@@ -142,9 +146,18 @@ pub struct SyncUpdate {
     pub objective_fingerprint: Option<String>,
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ThoughtDeliveryState {
+    #[serde(default)]
+    pub stream_instance_id: Option<String>,
+    #[serde(default)]
+    pub emission_seq: u64,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct SyncResponse {
-    pub request_id: u64,
+    pub request_id: String,
+    pub stream_instance_id: Option<String>,
     pub updates: Vec<SyncUpdate>,
 }
 
@@ -192,6 +205,8 @@ pub enum DaemonInboundMessage {
             deserialize_with = "deserialize_request_id"
         )]
         request_id: String,
+        #[serde(default)]
+        stream_instance_id: Option<String>,
         #[serde(default)]
         updates: Vec<SyncUpdate>,
     },
@@ -304,9 +319,11 @@ mod tests {
         match message {
             DaemonInboundMessage::SyncResponse {
                 request_id,
+                stream_instance_id,
                 updates,
             } => {
                 assert_eq!(request_id, "42");
+                assert_eq!(stream_instance_id.as_deref(), None);
                 assert!(updates.is_empty());
             }
             other => panic!("unexpected message variant: {other:?}"),
@@ -326,9 +343,11 @@ mod tests {
         match message {
             DaemonInboundMessage::SyncResponse {
                 request_id,
+                stream_instance_id,
                 updates,
             } => {
                 assert_eq!(request_id, "17");
+                assert_eq!(stream_instance_id.as_deref(), None);
                 assert!(updates.is_empty());
                 assert_eq!(SYNC_RESPONSE_MESSAGE_TYPE, "sync_result");
             }
@@ -349,10 +368,54 @@ mod tests {
         match message {
             DaemonInboundMessage::SyncResponse {
                 request_id,
+                stream_instance_id,
                 updates,
             } => {
                 assert_eq!(request_id, "req-sync-17");
+                assert_eq!(stream_instance_id.as_deref(), None);
                 assert!(updates.is_empty());
+            }
+            other => panic!("unexpected message variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn inbound_message_deserializes_stream_identity_fields() {
+        let raw = r#"{
+            "type": "sync_result",
+            "id": "tmux-1",
+            "stream_instance_id": "stream-a",
+            "updates": [
+                {
+                    "session_id": "tmux:work:1.0:%1",
+                    "stream_instance_id": "stream-a",
+                    "emission_seq": 1,
+                    "thought": "Indexing repo",
+                    "token_count": 10,
+                    "context_limit": 100,
+                    "thought_state": "active",
+                    "thought_source": "llm",
+                    "objective_changed": true,
+                    "bubble_precedence": "thought_first",
+                    "at": "2026-03-08T14:00:05Z"
+                }
+            ]
+        }"#;
+
+        let message: DaemonInboundMessage =
+            serde_json::from_str(raw).expect("stream identity should deserialize");
+
+        match message {
+            DaemonInboundMessage::SyncResponse {
+                request_id,
+                stream_instance_id,
+                updates,
+            } => {
+                assert_eq!(request_id, "tmux-1");
+                assert_eq!(stream_instance_id.as_deref(), Some("stream-a"));
+                assert_eq!(updates.len(), 1);
+                assert_eq!(updates[0].stream_instance_id.as_deref(), Some("stream-a"));
+                assert_eq!(updates[0].emission_seq, Some(1));
             }
             other => panic!("unexpected message variant: {other:?}"),
         }
@@ -412,5 +475,12 @@ mod tests {
             }
             other => panic!("unexpected message variant: {other:?}"),
         }
+    }
+
+    #[test]
+    fn thought_delivery_state_defaults_empty() {
+        let states: std::collections::HashMap<String, ThoughtDeliveryState> =
+            serde_json::from_str("{}").expect("empty watermark map");
+        assert!(states.is_empty());
     }
 }
