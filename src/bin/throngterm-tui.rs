@@ -3091,6 +3091,17 @@ mod tests {
         }
     }
 
+    fn create_response_with_theme(
+        session: SessionSummary,
+        repo_theme: RepoTheme,
+    ) -> CreateSessionResponse {
+        CreateSessionResponse {
+            session,
+            sprite_pack: None,
+            repo_theme: Some(repo_theme),
+        }
+    }
+
     fn entity_at(
         field: Rect,
         session_id: &str,
@@ -3716,6 +3727,126 @@ mod tests {
                 g: 152,
                 b: 117,
             }
+        );
+    }
+
+    #[test]
+    fn selected_entity_preserves_repo_theme_body_color() {
+        let field = test_layout(120, 32).overview_field;
+        let mut session = session_summary("sess-1", "alpha", "/Users/b/repos/buildooor");
+        session.state = SessionState::Busy;
+        session.repo_theme_id = Some("/tmp/buildooor".to_string());
+        let entity = SessionEntity::new(session, field);
+        let mut repo_themes = HashMap::new();
+        repo_themes.insert("/tmp/buildooor".to_string(), repo_theme("#B89875"));
+        let rect = entity.screen_rect(field);
+        let mut renderer = test_renderer(120, 32);
+
+        render_entity(&mut renderer, &entity, rect, true, 0, &repo_themes);
+
+        assert_eq!(
+            cell_at(&renderer, rect.x, rect.y).fg,
+            Color::Rgb {
+                r: 184,
+                g: 152,
+                b: 117,
+            }
+        );
+        assert_eq!(cell_at(&renderer, rect.x - 1, rect.y + 1).fg, Color::White);
+        assert_eq!(
+            cell_at(&renderer, rect.x, rect.y + SPRITE_HEIGHT).fg,
+            Color::White
+        );
+    }
+
+    #[test]
+    fn selected_entity_preserves_fallback_state_color() {
+        let field = test_layout(120, 32).overview_field;
+        let mut session = session_summary("sess-1", "alpha", "/Users/b/repos/throngterm");
+        session.state = SessionState::Attention;
+        let entity = SessionEntity::new(session, field);
+        let rect = entity.screen_rect(field);
+        let mut renderer = test_renderer(120, 32);
+
+        render_entity(&mut renderer, &entity, rect, true, 0, &HashMap::new());
+
+        assert_eq!(cell_at(&renderer, rect.x, rect.y).fg, Color::Magenta);
+        assert_eq!(cell_at(&renderer, rect.x - 1, rect.y + 1).fg, Color::White);
+        assert_eq!(
+            cell_at(&renderer, rect.x, rect.y + SPRITE_HEIGHT).fg,
+            Color::White
+        );
+    }
+
+    #[test]
+    fn spawned_selected_entity_matches_thought_color() {
+        let api = MockApi::new();
+        let layout = test_layout(120, 32);
+        let thought_content = layout
+            .thought_content
+            .expect("wide layout enables thought rail");
+        let field = layout.overview_field;
+        let theme_id = "/tmp/throngterm".to_string();
+        let theme_color = Color::Rgb {
+            r: 184,
+            g: 152,
+            b: 117,
+        };
+        let mut spawned_session = session_summary("sess-42", "42", "/Users/b/repos/throngterm");
+        spawned_session.repo_theme_id = Some(theme_id.clone());
+        api.push_create_session(Ok(create_response_with_theme(
+            spawned_session.clone(),
+            repo_theme("#B89875"),
+        )));
+        let mut app = make_app(api);
+
+        app.spawn_session("/Users/b/repos/throngterm", None, field);
+
+        let mut thought_session = session_summary_with_thought(
+            "sess-42",
+            "42",
+            "/Users/b/repos/throngterm",
+            "patching tui",
+            "2026-03-08T14:00:05Z",
+        );
+        thought_session.repo_theme_id = Some(theme_id);
+        app.capture_thought_updates(&[thought_session.clone()], layout.thought_entry_capacity());
+        app.merge_sessions(vec![thought_session], field);
+
+        let entity = app
+            .selected()
+            .expect("spawned session should be selected")
+            .clone();
+        let rect = entity.screen_rect(field);
+        let mut entity_renderer = test_renderer(120, 32);
+        render_entity(
+            &mut entity_renderer,
+            &entity,
+            rect,
+            true,
+            0,
+            &app.repo_themes,
+        );
+
+        let panel = build_thought_panel(&app, thought_content, layout.thought_entry_capacity());
+        assert_eq!(panel.rows.len(), 1);
+        assert_eq!(panel.rows[0].color, theme_color);
+
+        let mut thought_renderer = test_renderer(120, 32);
+        render_thought_panel(
+            &app,
+            &mut thought_renderer,
+            thought_content,
+            layout.thought_entry_capacity(),
+        );
+        let row_start_y = thought_content
+            .bottom()
+            .saturating_sub(panel.rows.len() as u16);
+
+        assert_eq!(cell_at(&entity_renderer, rect.x, rect.y).fg, theme_color);
+        assert_eq!(
+            cell_at(&thought_renderer, thought_content.x, row_start_y).fg,
+            theme_color
         );
     }
 
