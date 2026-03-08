@@ -1,5 +1,6 @@
 use std::env;
 use std::io;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
 
@@ -9,6 +10,7 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, ChildStdout, Command};
 use tracing::warn;
 
+use crate::config::resolve_tmux_emit_socket;
 use crate::thought::protocol::{SyncResponse, SyncUpdate, EMIT_PROTOCOL_V1};
 use crate::thought::runtime_config::{DaemonDefaults, ThoughtConfig};
 
@@ -45,6 +47,7 @@ impl DaemonProcess {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct TmuxEmitSpawnConfig {
     interval_ms: u64,
+    socket_path: PathBuf,
     config_json: String,
 }
 
@@ -52,6 +55,7 @@ impl TmuxEmitSpawnConfig {
     fn from_runtime_config(
         runtime_config: &ThoughtConfig,
         interval: Duration,
+        socket_path: impl AsRef<Path>,
     ) -> Result<Self, EmitterClientError> {
         let interval_ms = interval.as_millis().clamp(1, u64::MAX as u128) as u64;
         let config_json = serde_json::to_string(runtime_config)
@@ -59,6 +63,7 @@ impl TmuxEmitSpawnConfig {
 
         Ok(Self {
             interval_ms,
+            socket_path: socket_path.as_ref().to_path_buf(),
             config_json,
         })
     }
@@ -147,6 +152,7 @@ impl EmitterClientError {
 /// Line-delimited JSON client for `clawgs tmux-emit`.
 pub struct EmitterClient {
     bin: String,
+    socket_path: PathBuf,
     daemon: Option<DaemonProcess>,
     spawn_config: Option<TmuxEmitSpawnConfig>,
 }
@@ -159,12 +165,17 @@ impl Default for EmitterClient {
 
 impl EmitterClient {
     pub fn new() -> Self {
-        Self::with_bin(resolve_clawgs_bin())
+        Self::with_bin_and_socket(resolve_clawgs_bin(), resolve_tmux_emit_socket())
     }
 
     pub fn with_bin(bin: impl Into<String>) -> Self {
+        Self::with_bin_and_socket(bin, resolve_tmux_emit_socket())
+    }
+
+    pub fn with_bin_and_socket(bin: impl Into<String>, socket_path: impl Into<PathBuf>) -> Self {
         Self {
             bin: bin.into(),
+            socket_path: socket_path.into(),
             daemon: None,
             spawn_config: None,
         }
@@ -175,7 +186,8 @@ impl EmitterClient {
         runtime_config: &ThoughtConfig,
         interval: Duration,
     ) -> Result<SyncResponse, EmitterClientError> {
-        let desired = TmuxEmitSpawnConfig::from_runtime_config(runtime_config, interval)?;
+        let desired =
+            TmuxEmitSpawnConfig::from_runtime_config(runtime_config, interval, &self.socket_path)?;
 
         match self.next_sync_response_once(&desired).await {
             Ok(response) => Ok(response),
@@ -249,6 +261,8 @@ impl EmitterClient {
             .arg("tmux-emit")
             .arg("--interval-ms")
             .arg(desired.interval_ms.to_string())
+            .arg("--socket")
+            .arg(&desired.socket_path)
             .arg("--config-json")
             .arg(&desired.config_json)
             .stdin(Stdio::null())
@@ -481,6 +495,12 @@ mod tests {
     use super::*;
     use crate::types::{BubblePrecedence, ThoughtSource, ThoughtState};
     use chrono::Utc;
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+    use std::sync::{LazyLock, Mutex as StdMutex};
+    use tempfile::tempdir;
+
+    static TEST_ENV_LOCK: LazyLock<StdMutex<()>> = LazyLock::new(|| StdMutex::new(()));
 
     #[test]
     fn parse_hello_accepts_expected_protocol() {
@@ -589,13 +609,100 @@ mod tests {
             terminal_prompt: Some("Terminal prompt".to_string()),
         };
 
-        let config = TmuxEmitSpawnConfig::from_runtime_config(&runtime, Duration::from_secs(15))
-            .expect("spawn config");
+        let config = TmuxEmitSpawnConfig::from_runtime_config(
+            &runtime,
+            Duration::from_secs(15),
+            "/tmp/throng-home/.tmux/clawgs-tmux.sock",
+        )
+        .expect("spawn config");
         assert_eq!(config.interval_ms, 15_000);
+        assert_eq!(
+            config.socket_path,
+            PathBuf::from("/tmp/throng-home/.tmux/clawgs-tmux.sock")
+        );
         let parsed: ThoughtConfig = serde_json::from_str(&config.config_json).expect("config json");
         assert!(!parsed.enabled);
         assert_eq!(parsed.model, "openrouter/custom");
         assert_eq!(parsed.agent_prompt.as_deref(), Some("Agent prompt"));
         assert_eq!(parsed.terminal_prompt.as_deref(), Some("Terminal prompt"));
+    }
+
+    #[tokio::test]
+    async fn daemon_spawn_includes_socket_and_returns_sync_response() {
+        let _lock = TEST_ENV_LOCK.lock().expect("env lock");
+        let temp = tempdir().expect("tempdir");
+        let args_log = temp.path().join("args.log");
+        let fake_bin = write_fake_clawgs_script(&args_log, temp.path());
+        let socket_path = PathBuf::from("/tmp/throng-home/.tmux/clawgs-tmux.sock");
+        let mut client = EmitterClient::with_bin_and_socket(
+            fake_bin.to_string_lossy().into_owned(),
+            &socket_path,
+        );
+
+        let response = client
+            .next_sync_response(&ThoughtConfig::default(), Duration::from_millis(15_000))
+            .await
+            .expect("sync response");
+
+        assert_eq!(response.request_id, "tmux-1");
+        assert_eq!(response.stream_instance_id.as_deref(), Some("stream-a"));
+        assert!(response.updates.is_empty());
+
+        let logged = fs::read_to_string(&args_log).expect("read args log");
+        let line = logged.lines().next().expect("spawned command line");
+        assert!(line.contains("tmux-emit --interval-ms 15000"));
+        assert!(line.contains("--socket /tmp/throng-home/.tmux/clawgs-tmux.sock"));
+        assert!(line.contains("--config-json"));
+    }
+
+    #[tokio::test]
+    async fn respawn_keeps_socket_while_updating_runtime_config_payload() {
+        let _lock = TEST_ENV_LOCK.lock().expect("env lock");
+        let temp = tempdir().expect("tempdir");
+        let args_log = temp.path().join("args.log");
+        let fake_bin = write_fake_clawgs_script(&args_log, temp.path());
+        let socket_path = PathBuf::from("/tmp/throng-home/.tmux/clawgs-tmux.sock");
+        let mut client = EmitterClient::with_bin_and_socket(
+            fake_bin.to_string_lossy().into_owned(),
+            &socket_path,
+        );
+
+        let baseline = ThoughtConfig::default();
+        client
+            .next_sync_response(&baseline, Duration::from_millis(15_000))
+            .await
+            .expect("initial sync response");
+
+        let mut updated = baseline.clone();
+        updated.agent_prompt = Some("Hook wakeup prompt".to_string());
+        client
+            .next_sync_response(&updated, Duration::from_millis(15_000))
+            .await
+            .expect("respawned sync response");
+
+        let logged = fs::read_to_string(&args_log).expect("read args log");
+        let lines: Vec<&str> = logged.lines().collect();
+        assert_eq!(lines.len(), 2, "expected one spawn per runtime config");
+        assert_ne!(lines[0], lines[1], "config change should respawn daemon");
+        for line in &lines {
+            assert!(line.contains("--socket /tmp/throng-home/.tmux/clawgs-tmux.sock"));
+        }
+        assert!(
+            lines[1].contains("Hook\\u0020wakeup\\u0020prompt")
+                || lines[1].contains("Hook wakeup prompt")
+        );
+    }
+
+    fn write_fake_clawgs_script(args_log: &Path, dir: &Path) -> PathBuf {
+        let script_path = dir.join("fake-clawgs.sh");
+        let script = format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"{}\"\nprintf '%s\\n' '{{\"type\":\"hello\",\"protocol\":\"clawgs.emit.v1\",\"engine_version\":\"0.1.0\"}}'\nprintf '%s\\n' '{{\"type\":\"sync_result\",\"id\":\"tmux-1\",\"stream_instance_id\":\"stream-a\",\"updates\":[]}}'\nsleep 5\n",
+            args_log.display()
+        );
+        fs::write(&script_path, script).expect("write fake clawgs");
+        let mut perms = fs::metadata(&script_path).expect("metadata").permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&script_path, perms).expect("chmod fake clawgs");
+        script_path
     }
 }

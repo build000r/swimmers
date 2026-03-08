@@ -1,4 +1,10 @@
+use std::path::PathBuf;
+
 use serde::{Deserialize, Serialize};
+
+pub const THRONGTERM_TMUX_EMIT_SOCKET_ENV: &str = "THRONGTERM_TMUX_EMIT_SOCKET";
+pub const DEFAULT_TMUX_SOCKET_DIR: &str = ".tmux";
+pub const DEFAULT_TMUX_SOCKET_FILE: &str = "clawgs-tmux.sock";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -113,9 +119,51 @@ impl Config {
     }
 }
 
+pub fn resolve_tmux_emit_socket() -> PathBuf {
+    resolve_tmux_emit_socket_from(
+        std::env::var(THRONGTERM_TMUX_EMIT_SOCKET_ENV)
+            .ok()
+            .as_deref(),
+        std::env::var("HOME").ok().as_deref(),
+    )
+}
+
+fn resolve_tmux_emit_socket_from(socket_override: Option<&str>, home: Option<&str>) -> PathBuf {
+    if let Some(socket_override) = non_empty_trimmed(socket_override) {
+        return PathBuf::from(socket_override);
+    }
+
+    default_tmux_emit_socket_for_home(home)
+}
+
+fn default_tmux_emit_socket_for_home(home: Option<&str>) -> PathBuf {
+    match non_empty_trimmed(home) {
+        Some(home) => PathBuf::from(home)
+            .join(DEFAULT_TMUX_SOCKET_DIR)
+            .join(DEFAULT_TMUX_SOCKET_FILE),
+        None => PathBuf::from(DEFAULT_TMUX_SOCKET_DIR).join(DEFAULT_TMUX_SOCKET_FILE),
+    }
+}
+
+fn non_empty_trimmed(value: Option<&str>) -> Option<&str> {
+    value.map(str::trim).filter(|value| !value.is_empty())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const TMUX_HOOK_EVENTS: [&str; 9] = [
+        "session-created",
+        "session-closed",
+        "pane-exited",
+        "pane-died",
+        "after-new-window",
+        "after-split-window",
+        "client-session-changed",
+        "window-linked",
+        "window-unlinked",
+    ];
 
     #[test]
     fn unknown_backend_defaults_to_daemon() {
@@ -154,5 +202,66 @@ mod tests {
     fn default_replay_buffer_is_512kb() {
         let config = Config::default();
         assert_eq!(config.replay_buffer_size, 512 * 1024);
+    }
+
+    #[test]
+    fn default_tmux_emit_socket_uses_home_directory_contract() {
+        assert_eq!(
+            resolve_tmux_emit_socket_from(None, Some("/tmp/throng-home")),
+            PathBuf::from("/tmp/throng-home/.tmux/clawgs-tmux.sock")
+        );
+    }
+
+    #[test]
+    fn blank_tmux_emit_socket_override_falls_back_to_home_default() {
+        assert_eq!(
+            resolve_tmux_emit_socket_from(Some("   "), Some("/tmp/throng-home")),
+            PathBuf::from("/tmp/throng-home/.tmux/clawgs-tmux.sock")
+        );
+    }
+
+    #[test]
+    fn explicit_tmux_emit_socket_override_is_used_verbatim() {
+        assert_eq!(
+            resolve_tmux_emit_socket_from(
+                Some("/tmp/custom/clawgs.sock"),
+                Some("/tmp/throng-home")
+            ),
+            PathBuf::from("/tmp/custom/clawgs.sock")
+        );
+    }
+
+    #[test]
+    fn tmux_hook_snippet_matches_default_socket_contract() {
+        let home = "/tmp/throng-home";
+        let expected_socket = resolve_tmux_emit_socket_from(None, Some(home));
+        let snippet = include_str!("../tmux/throngterm-clawgs-hooks.conf");
+
+        assert!(
+            !snippet
+                .lines()
+                .filter(|line| !line.trim_start().starts_with('#'))
+                .any(|line| line.contains("clawgs tmux-emit")),
+            "throngterm owns the tmux-emit daemon; hook snippet must stay notify-only"
+        );
+
+        let notify_lines: Vec<&str> = snippet
+            .lines()
+            .filter(|line| line.contains("clawgs tmux-notify"))
+            .collect();
+        assert_eq!(notify_lines.len(), TMUX_HOOK_EVENTS.len());
+
+        for event in TMUX_HOOK_EVENTS {
+            let line = notify_lines
+                .iter()
+                .find(|line| line.contains(&format!("--event {event}")))
+                .unwrap_or_else(|| panic!("missing tmux hook for `{event}`"));
+            let rendered = line.replace("$HOME", home);
+            assert!(
+                rendered.contains(&format!("--socket {}", expected_socket.display())),
+                "hook line for `{event}` must target {}: {rendered}",
+                expected_socket.display()
+            );
+        }
     }
 }
