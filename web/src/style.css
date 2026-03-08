@@ -257,6 +257,12 @@ html, body {
   height: 100%;
 }
 
+.zone-terminal .term-host {
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+}
+
 .zone-terminal .xterm-viewport {
   overflow-y: auto;
   overscroll-behavior-y: contain;
@@ -672,44 +678,170 @@ html, body {
   bottom: 0;
   z-index: 18;
   display: flex;
-  align-items: center;
+  flex-direction: column;
+  gap: 8px;
+  padding: 8px;
+  padding-bottom: max(8px, var(--safe-bottom));
+  background: rgba(9, 13, 20, 0.96);
+  border-top: 1px solid #24324c;
+  box-shadow: 0 -14px 28px rgba(0, 0, 0, 0.34);
+  backdrop-filter: blur(14px);
+  overscroll-behavior: contain;
+}
+
+.mobile-keybar.keyboard-open {
   gap: 6px;
   padding: 6px;
   padding-bottom: max(6px, var(--safe-bottom));
-  background: #0d1117;
-  border-top: 1px solid #24324c;
-  overflow-x: auto;
-  overscroll-behavior-x: contain;
-  -webkit-overflow-scrolling: touch;
 }
 
 .mobile-keybar-spacer {
   flex-shrink: 0;
-  height: calc(60px + var(--safe-bottom));
+  height: 0;
+  transition: height 0.18s ease;
+}
+
+.mobile-keybar-primary {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.mobile-keybar-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding-top: 8px;
+  border-top: 1px solid rgba(52, 74, 109, 0.7);
+  max-height: min(34vh, 228px);
+  overflow-y: auto;
+  overscroll-behavior-y: contain;
+  -webkit-overflow-scrolling: touch;
+}
+
+.mobile-keybar.keyboard-open .mobile-keybar-panel {
+  max-height: min(24vh, 168px);
+}
+
+.mobile-keybar-section {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.mobile-keybar-section-label {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: #88a0bd;
+}
+
+.mobile-keybar-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.mobile-keybar-grid-tight {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.mobile-keybar-grid-tools {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.mobile-keybar-chip-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.mobile-keybar-arrow-pad {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.mobile-keybar-arrow-up {
+  grid-column: 2;
+}
+
+.mobile-keybar-arrow-left {
+  grid-column: 1;
+  grid-row: 2;
+}
+
+.mobile-keybar-arrow-down {
+  grid-column: 2;
+  grid-row: 2;
+}
+
+.mobile-keybar-arrow-right {
+  grid-column: 3;
+  grid-row: 2;
 }
 
 .mobile-keybar-btn {
   border: 1px solid #334b73;
-  border-radius: 7px;
-  background: #16213e;
+  border-radius: 10px;
+  background: linear-gradient(180deg, #172342 0%, #101a2f 100%);
   color: #d8e3f2;
   font-size: 12px;
-  line-height: 1;
+  font-weight: 600;
+  line-height: 1.1;
+  width: 100%;
   min-width: 44px;
-  min-height: 44px;
-  padding: 10px 12px;
+  min-height: 46px;
+  padding: 10px 8px;
   cursor: pointer;
-  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
   -webkit-tap-highlight-color: transparent;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05);
 }
 
 .mobile-keybar-btn:active {
   opacity: 0.75;
 }
 
-.mobile-keybar-btn.active {
+.mobile-keybar-btn.active,
+.mobile-keybar-btn-toggle.active {
   border-color: #5BC0EB;
-  color: #5BC0EB;
+  background: linear-gradient(180deg, #15304d 0%, #10223b 100%);
+  color: #d6f1ff;
+}
+
+.mobile-keybar-btn-wide {
+  grid-column: span 2;
+}
+
+.mobile-keybar-btn-toggle {
+  background: linear-gradient(180deg, #121927 0%, #0d131f 100%);
+  color: #9db4cf;
+}
+
+.mobile-keybar-btn-primary {
+  font-weight: 700;
+  letter-spacing: 0.01em;
+}
+
+.mobile-keybar .quick-command-chip,
+.mobile-keybar .quick-command-control {
+  min-height: 44px;
+  padding: 10px 12px;
+  font-size: 12px;
+}
+
+.mobile-keybar .quick-command-status,
+.mobile-keybar .quick-command-empty {
+  padding: 10px 2px;
+}
+
+.mobile-keybar-panel .mobile-keybar-btn {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, "Courier New", monospace;
 }
 
 .mobile-keybar-btn-danger {
@@ -793,6 +925,14 @@ html, body {
     display: none !important;
   }
 
+  .zone-header {
+    gap: 6px;
+  }
+
+  .zone-title {
+    font-size: 11px;
+  }
+
   .field-control-rail {
     top: auto !important;
     left: 10px;
@@ -819,6 +959,10 @@ html, body {
 
   .terminal-fast-scroll-grip {
     width: 10px;
+  }
+
+  .mobile-keybar-grid-tools {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
 

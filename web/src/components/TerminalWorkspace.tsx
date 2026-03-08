@@ -4,7 +4,7 @@ import { FitAddon } from "@xterm/addon-fit";
 import { WebglAddon } from "@xterm/addon-webgl";
 import { SearchAddon } from "@xterm/addon-search";
 import type { SessionSummary, SkillRegistryTool, SkillSummary } from "@/types";
-import { realtime, spritePacks } from "@/app";
+import { realtime, repoThemes, spritePacks } from "@/app";
 import type { TerminalOutputFrame } from "@/services/realtime";
 import type { CachedTerminal } from "@/hooks/useTerminalCache";
 import { fetchSnapshot, listSkills } from "@/services/api";
@@ -19,6 +19,7 @@ import {
 import {
   hasDistinctHostSize,
   hasDistinctTerminalGridSize,
+  shouldFitTerminalHostResize,
   type TerminalGridSize,
   type TerminalHostSize,
 } from "@/lib/terminal-resize";
@@ -34,6 +35,8 @@ import {
 import {
   computeVisualViewportBottomInsetPx,
   hasMeaningfulDelta,
+  isLikelyIOSDevice,
+  shouldIgnoreHeightOnlyTerminalFit,
   shouldEnableTerminalWebgl,
   type DevicePlatformSnapshot,
 } from "@/lib/mobile-perf";
@@ -42,6 +45,7 @@ import {
   mapClientYToBufferRow,
 } from "@/lib/copy-drag";
 import { orderQuickSkillChips } from "@/lib/skill-order";
+import { isProcessExitState } from "@/lib/session-exit";
 import { useHeaderSwipeClose } from "@/hooks/useGestures";
 import { ThrongletSprite } from "./ThrongletSprite";
 
@@ -90,13 +94,24 @@ type MobileKeyId =
   | "pgdn"
   | "pipe"
   | "slash"
-  | "tilde";
+  | "tilde"
+  | "backslash"
+  | "dollar"
+  | "double_quote"
+  | "single_quote"
+  | "lparen"
+  | "rparen"
+  | "semicolon"
+  | "equals"
+  | "percent";
 
 type MobileKeyConfig = {
   id: MobileKeyId;
   label: string;
   input?: string;
 };
+
+type MobileDockPanel = "keys" | "quick" | "tools";
 
 type QuickCommandMap = Record<string, string[]>;
 type SessionToolKind = "raw" | SkillRegistryTool;
@@ -121,6 +136,8 @@ const FAST_SCROLL_MIN_THUMB_PX = 26;
 const FAST_SCROLL_THUMB_MIN_DELTA_PX = 2;
 const FAST_SCROLL_BOOST_THRESHOLD = 1.15;
 const KEYBAR_BOTTOM_MIN_DELTA_PX = 2;
+const MOBILE_KEYBOARD_OPEN_THRESHOLD_PX = 72;
+const MOBILE_SCROLL_REFRESH_DELAY_MS = 90;
 const COPY_DRAG_EDGE_RATIO = 0.2;
 const COPY_DRAG_EDGE_MIN_PX = 56;
 const COPY_DRAG_EDGE_MAX_PX = 140;
@@ -141,7 +158,45 @@ const MOBILE_KEYS: MobileKeyConfig[] = [
   { id: "pipe", label: "|", input: "|" },
   { id: "slash", label: "/", input: "/" },
   { id: "tilde", label: "~", input: "~" },
+  { id: "backslash", label: "\\", input: "\\" },
+  { id: "dollar", label: "$", input: "$" },
+  { id: "double_quote", label: "\"", input: "\"" },
+  { id: "single_quote", label: "'", input: "'" },
+  { id: "lparen", label: "(", input: "(" },
+  { id: "rparen", label: ")", input: ")" },
+  { id: "semicolon", label: ";", input: ";" },
+  { id: "equals", label: "=", input: "=" },
+  { id: "percent", label: "%", input: "%" },
 ];
+
+const MOBILE_UTILITY_KEYS: MobileKeyId[] = ["tab", "esc", "pgup", "pgdn"];
+const MOBILE_SHELL_PATH_KEYS: MobileKeyId[] = [
+  "pipe",
+  "slash",
+  "backslash",
+  "tilde",
+];
+const MOBILE_SHELL_SYNTAX_KEYS: MobileKeyId[] = [
+  "dollar",
+  "double_quote",
+  "semicolon",
+  "equals",
+];
+const MOBILE_SHELL_FORMAT_KEYS: MobileKeyId[] = [
+  "lparen",
+  "rparen",
+  "percent",
+  "single_quote",
+];
+
+function readIsMobileViewport(): boolean {
+  if (typeof window === "undefined") return false;
+  return window.innerWidth <= 768;
+}
+
+function findMobileKeyConfig(keyId: MobileKeyId): MobileKeyConfig | undefined {
+  return MOBILE_KEYS.find((item) => item.id === keyId);
+}
 
 function classifySessionTool(tool: string | null): SessionToolKind {
   if (!tool) return "raw";
@@ -283,6 +338,8 @@ export function TerminalWorkspace({
   const longPressTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const longPressStartRef = useRef<{ x: number; y: number } | null>(null);
   const closeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const mobileDockRef = useRef<HTMLDivElement | null>(null);
+  const scrollRefreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const closeQueuedRef = useRef(false);
   const headerRef = useRef<HTMLElement>(null);
   const skillLongPressTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -332,6 +389,10 @@ export function TerminalWorkspace({
   );
   const mobileKeybarBottomValueRef = useRef(0);
   const mobileKeybarBottomRafRef = useRef<number | null>(null);
+  const platformSnapshotRef = useRef<DevicePlatformSnapshot>(
+    readDevicePlatformSnapshot(),
+  );
+  const isLikelyIOS = isLikelyIOSDevice(platformSnapshotRef.current);
 
   const [title, setTitle] = useState(`tmux a -t ${session.tmux_name}`);
   const [titleCopied, setTitleCopied] = useState(false);
@@ -350,6 +411,11 @@ export function TerminalWorkspace({
   const [findQuery, setFindQuery] = useState("");
   const [findNoMatch, setFindNoMatch] = useState(false);
   const [actionToast, setActionToast] = useState<string | null>(null);
+  const [isMobileViewport, setIsMobileViewport] = useState(readIsMobileViewport);
+  const [mobileDockPanel, setMobileDockPanel] = useState<MobileDockPanel | null>(
+    null,
+  );
+  const [mobileDockHeight, setMobileDockHeight] = useState(0);
   const [mobileKeybarBottom, setMobileKeybarBottom] = useState(0);
   const [fastScrollOverflow, setFastScrollOverflow] = useState(false);
   const [fastScrollVisible, setFastScrollVisible] = useState(false);
@@ -367,6 +433,8 @@ export function TerminalWorkspace({
   const sessionToolKind = classifySessionTool(session.tool);
   const isAgentSession =
     sessionToolKind === "claude" || sessionToolKind === "codex";
+  const mobileKeyboardOpen =
+    isMobileViewport && mobileKeybarBottom >= MOBILE_KEYBOARD_OPEN_THRESHOLD_PX;
 
   useEffect(() => {
     sessionStateRef.current = session.state;
@@ -385,6 +453,7 @@ export function TerminalWorkspace({
     setSkillsReloadSeq(0);
     setSkillChipHoldName(null);
     setEditingCommandChips(false);
+    setMobileDockPanel(null);
     setShowTerminalActions(false);
     setShowFindBar(false);
     setFindNoMatch(false);
@@ -412,7 +481,28 @@ export function TerminalWorkspace({
       clearInterval(copyDragAutoScrollTimerRef.current);
       copyDragAutoScrollTimerRef.current = null;
     }
+    if (scrollRefreshTimerRef.current) {
+      clearTimeout(scrollRefreshTimerRef.current);
+      scrollRefreshTimerRef.current = null;
+    }
   }, [session.session_id]);
+
+  useEffect(() => {
+    const commitViewportMode = () => {
+      setIsMobileViewport(readIsMobileViewport());
+    };
+
+    commitViewportMode();
+    window.addEventListener("resize", commitViewportMode);
+    window.addEventListener("orientationchange", commitViewportMode);
+    window.visualViewport?.addEventListener("resize", commitViewportMode);
+
+    return () => {
+      window.removeEventListener("resize", commitViewportMode);
+      window.removeEventListener("orientationchange", commitViewportMode);
+      window.visualViewport?.removeEventListener("resize", commitViewportMode);
+    };
+  }, []);
 
   useEffect(() => {
     const viewport = window.visualViewport;
@@ -462,6 +552,46 @@ export function TerminalWorkspace({
   }, []);
 
   useEffect(() => {
+    if (observer || !isMobileViewport) {
+      setMobileDockPanel(null);
+      setMobileDockHeight(0);
+    }
+  }, [observer, isMobileViewport]);
+
+  useEffect(() => {
+    if (mobileKeyboardOpen) {
+      setMobileDockPanel(null);
+    }
+  }, [mobileKeyboardOpen]);
+
+  useEffect(() => {
+    const dock = mobileDockRef.current;
+    if (!dock || observer || !isMobileViewport) {
+      setMobileDockHeight(0);
+      return;
+    }
+
+    const updateHeight = () => {
+      const next = Math.round(dock.getBoundingClientRect().height);
+      setMobileDockHeight((current) => (current === next ? current : next));
+    };
+
+    updateHeight();
+    const rafId = window.requestAnimationFrame(updateHeight);
+    const resizeObserver = new ResizeObserver(updateHeight);
+    resizeObserver.observe(dock);
+    window.addEventListener("resize", updateHeight);
+    window.visualViewport?.addEventListener("resize", updateHeight);
+
+    return () => {
+      window.cancelAnimationFrame(rafId);
+      resizeObserver.disconnect();
+      window.removeEventListener("resize", updateHeight);
+      window.visualViewport?.removeEventListener("resize", updateHeight);
+    };
+  }, [observer, isMobileViewport]);
+
+  useEffect(() => {
     if (!observer) return;
     if (!copyDragActiveRef.current) return;
     copyDragActiveRef.current = false;
@@ -490,6 +620,10 @@ export function TerminalWorkspace({
       }
       if (skillLongPressTimerRef.current) {
         clearTimeout(skillLongPressTimerRef.current);
+      }
+      if (scrollRefreshTimerRef.current) {
+        clearTimeout(scrollRefreshTimerRef.current);
+        scrollRefreshTimerRef.current = null;
       }
       if (fastScrollHideTimerRef.current) {
         clearTimeout(fastScrollHideTimerRef.current);
@@ -580,6 +714,27 @@ export function TerminalWorkspace({
       setActionToast(null);
       actionToastTimerRef.current = null;
     }, ACTION_TOAST_MS);
+  }, []);
+
+  const dismissMobileDockPanel = useCallback(() => {
+    if (!isMobileViewport) return;
+    setMobileDockPanel(null);
+  }, [isMobileViewport]);
+
+  const toggleMobileDockPanel = useCallback((panel: MobileDockPanel) => {
+    setMobileDockPanel((current) => (current === panel ? null : panel));
+  }, []);
+
+  const scheduleTerminalRefresh = useCallback(() => {
+    if (scrollRefreshTimerRef.current) {
+      clearTimeout(scrollRefreshTimerRef.current);
+    }
+    scrollRefreshTimerRef.current = setTimeout(() => {
+      scrollRefreshTimerRef.current = null;
+      const term = termRef.current;
+      if (!term) return;
+      term.refresh(0, Math.max(0, term.rows - 1));
+    }, MOBILE_SCROLL_REFRESH_DELAY_MS);
   }, []);
 
   const noteFastScrollVelocity = useCallback((scrollTop: number) => {
@@ -889,10 +1044,12 @@ export function TerminalWorkspace({
   const toggleCopyDragMode = useCallback(() => {
     if (copyDragActiveRef.current) {
       stopCopyDragMode();
+      dismissMobileDockPanel();
       return;
     }
     startCopyDragMode();
-  }, [startCopyDragMode, stopCopyDragMode]);
+    dismissMobileDockPanel();
+  }, [dismissMobileDockPanel, startCopyDragMode, stopCopyDragMode]);
 
   const persistCommandChips = useCallback(
     (next: string[]) => {
@@ -963,7 +1120,12 @@ export function TerminalWorkspace({
     let term: Terminal;
     let fitAddon: FitAddon;
     let hostEl: HTMLDivElement;
-    const platformSnapshot = readDevicePlatformSnapshot();
+    const platformSnapshot = platformSnapshotRef.current;
+    const mobileSizedViewport = readIsMobileViewport();
+    const ignoreTransientHeightOnlyFit = shouldIgnoreHeightOnlyTerminalFit(
+      platformSnapshot,
+      mobileSizedViewport,
+    );
     const enableTerminalWebgl = shouldEnableTerminalWebgl(
       platformSnapshot,
       readTerminalWebglOverride(),
@@ -975,8 +1137,15 @@ export function TerminalWorkspace({
     });
 
     const fitToHost = (force = false): boolean => {
+      const previousSize = lastHostSizeRef.current;
       const nextSize = readHostSize();
-      if (!force && !hasDistinctHostSize(lastHostSizeRef.current, nextSize)) {
+      if (
+        !force &&
+        !shouldFitTerminalHostResize(previousSize, nextSize, {
+          ignoreHeightOnly: ignoreTransientHeightOnlyFit,
+          source: "viewport",
+        })
+      ) {
         return false;
       }
       lastHostSizeRef.current = nextSize;
@@ -1086,9 +1255,10 @@ export function TerminalWorkspace({
       snapshotReadyRef.current = true;
       container.appendChild(hostEl);
       setLifecycleState("snapshot_or_replay");
+      fitToHost(true);
+      term.refresh(0, Math.max(0, term.rows - 1));
       realtime.subscribeSession(session.session_id, seqRef.current);
       sendResize(term.cols, term.rows);
-      fitToHost(true);
       term.focus();
       markLive();
       scheduleRefreshFastScrollUi(false);
@@ -1107,8 +1277,15 @@ export function TerminalWorkspace({
           cursorAccent: "#1a1a2e",
           selectionBackground: "rgba(255,255,255,0.2)",
         },
-        fontFamily: 'Menlo, Monaco, "Courier New", monospace',
-        fontSize: 14,
+        fontFamily: mobileSizedViewport
+          ? '"SFMono-Regular", ui-monospace, Menlo, Monaco, Consolas, "Liberation Mono", monospace'
+          : 'Menlo, Monaco, "Courier New", monospace',
+        fontSize: mobileSizedViewport ? 13 : 14,
+        fontWeight: mobileSizedViewport ? "500" : "400",
+        lineHeight: mobileSizedViewport ? 1.2 : 1.05,
+        cursorWidth: mobileSizedViewport ? 2 : 1,
+        customGlyphs: !mobileSizedViewport,
+        minimumContrastRatio: mobileSizedViewport ? 1.15 : 1,
         scrollback: 5000,
         cursorBlink: true,
       });
@@ -1233,6 +1410,7 @@ export function TerminalWorkspace({
         viewport.clientHeight,
       );
       scheduleRefreshFastScrollUi(shouldShow);
+      scheduleTerminalRefresh();
     };
     const attachViewport = (): boolean => {
       const viewport = queryViewport();
@@ -1242,6 +1420,7 @@ export function TerminalWorkspace({
       viewport.addEventListener("scroll", handleViewportScroll, { passive: true });
       viewportResizeObserver = new ResizeObserver(() => {
         scheduleRefreshFastScrollUi(false);
+        scheduleTerminalRefresh();
       });
       viewportResizeObserver.observe(viewport);
       scheduleRefreshFastScrollUi(false);
@@ -1396,6 +1575,7 @@ export function TerminalWorkspace({
       resizeTimerRef.current = setTimeout(() => {
         fitToHost(false);
         scheduleRefreshFastScrollUi(false);
+        scheduleTerminalRefresh();
       }, 100);
     };
     window.addEventListener("resize", handleWindowResize);
@@ -1469,7 +1649,7 @@ export function TerminalWorkspace({
         latestSeq: seqRef.current,
       });
     };
-  }, [session.session_id, observer]);
+  }, [observer, scheduleTerminalRefresh, session.session_id]);
 
   useEffect(() => {
     const container = containerRef.current;
@@ -1478,13 +1658,32 @@ export function TerminalWorkspace({
     const resizeObserver = new ResizeObserver(() => {
       if (resizeTimerRef.current) clearTimeout(resizeTimerRef.current);
       resizeTimerRef.current = setTimeout(() => {
-        if (fitAddonRef.current) fitAddonRef.current.fit();
+        const fitAddon = fitAddonRef.current;
+        const host = container.querySelector(".term-host") as HTMLElement | null;
+        if (fitAddon && host) {
+          const previousSize = lastHostSizeRef.current;
+          const nextSize: TerminalHostSize = {
+            width: host.clientWidth,
+            height: host.clientHeight,
+          };
+          const shouldFit = shouldFitTerminalHostResize(previousSize, nextSize, {
+            source: "container",
+          });
+          if (shouldFit) {
+            lastHostSizeRef.current = nextSize;
+            fitAddon.fit();
+          }
+        }
         scheduleRefreshFastScrollUi(false);
+        scheduleTerminalRefresh();
       }, 100);
     });
     resizeObserver.observe(container);
     return () => resizeObserver.disconnect();
-  }, [scheduleRefreshFastScrollUi]);
+  }, [
+    scheduleRefreshFastScrollUi,
+    scheduleTerminalRefresh,
+  ]);
 
   useEffect(() => {
     if (!showFindBar) return;
@@ -1495,13 +1694,9 @@ export function TerminalWorkspace({
   }, [showFindBar]);
 
   useEffect(() => {
-    if (session.state === "exited") {
-      const timer = setTimeout(() => {
-        onSessionExit(session.session_id);
-      }, 600);
-      return () => clearTimeout(timer);
-    }
-  }, [session.state, session.session_id, onSessionExit]);
+    if (!isProcessExitState(session)) return;
+    onSessionExit(session.session_id);
+  }, [session.state, session.exit_reason, session.session_id, onSessionExit]);
 
   const handleClose = useCallback(() => {
     if (rushingOff || closeQueuedRef.current) return;
@@ -1540,11 +1735,12 @@ export function TerminalWorkspace({
       const prefix = skillInvocationPrefix(sessionToolKind);
       if (submit) {
         sendInput(`${prefix}${normalized}\r`, { refocus: true });
+        dismissMobileDockPanel();
       } else {
         sendInput(`${prefix}${normalized} `, { refocus: true });
       }
     },
-    [isAgentSession, sessionToolKind, sendInput],
+    [dismissMobileDockPanel, isAgentSession, sessionToolKind, sendInput],
   );
 
   const clearSkillPress = useCallback(() => {
@@ -1656,19 +1852,31 @@ export function TerminalWorkspace({
         return;
       }
       sendInput(`${command}\r`, { refocus: true });
+      dismissMobileDockPanel();
     },
-    [commandChips, editingCommandChips, persistCommandChips, sendInput],
+    [
+      commandChips,
+      dismissMobileDockPanel,
+      editingCommandChips,
+      persistCommandChips,
+      sendInput,
+    ],
   );
 
   const handleMobileKeyPress = useCallback(
     (keyId: MobileKeyId) => {
       if (observer) return;
-      const config = MOBILE_KEYS.find((item) => item.id === keyId);
+      const config = findMobileKeyConfig(keyId);
       if (!config?.input) return;
       sendInput(config.input, { refocus: true });
     },
     [observer, sendInput],
   );
+
+  const handleFocusTerminal = useCallback(() => {
+    termRef.current?.focus();
+    dismissMobileDockPanel();
+  }, [dismissMobileDockPanel]);
 
   const handleTerminalTouchStart = useCallback(
     (e: TouchEvent) => {
@@ -1746,11 +1954,12 @@ export function TerminalWorkspace({
       if (copyDragActiveRef.current) {
         stopCopyDragMode();
       }
+      dismissMobileDockPanel();
       pushActionToast("Copied");
     } else {
       pushActionToast("Clipboard write failed");
     }
-  }, [pushActionToast, stopCopyDragMode]);
+  }, [dismissMobileDockPanel, pushActionToast, stopCopyDragMode]);
 
   const handlePasteAction = useCallback(async () => {
     if (observer) return;
@@ -1761,31 +1970,35 @@ export function TerminalWorkspace({
     }
     pasteInput(text);
     setShowTerminalActions(false);
+    dismissMobileDockPanel();
     pushActionToast("Pasted");
-  }, [observer, pasteInput, pushActionToast]);
+  }, [dismissMobileDockPanel, observer, pasteInput, pushActionToast]);
 
   const handleSelectAllAction = useCallback(() => {
     const term = termRef.current;
     if (!term) return;
     term.selectAll();
     setShowTerminalActions(false);
+    dismissMobileDockPanel();
     pushActionToast("Selected all");
-  }, [pushActionToast]);
+  }, [dismissMobileDockPanel, pushActionToast]);
 
   const handleFindAction = useCallback(() => {
     stopCopyDragMode();
     setShowTerminalActions(false);
+    dismissMobileDockPanel();
     setShowFindBar(true);
     setFindNoMatch(false);
-  }, [stopCopyDragMode]);
+  }, [dismissMobileDockPanel, stopCopyDragMode]);
 
   const handleClearAction = useCallback(() => {
     if (observer) return;
     stopCopyDragMode();
     sendInput("\x0c", { refocus: true });
     setShowTerminalActions(false);
+    dismissMobileDockPanel();
     pushActionToast("Sent Ctrl+L");
-  }, [observer, sendInput, pushActionToast, stopCopyDragMode]);
+  }, [dismissMobileDockPanel, observer, pushActionToast, sendInput, stopCopyDragMode]);
 
   const handleJumpToLive = useCallback(() => {
     if (observer) return;
@@ -1916,15 +2129,37 @@ export function TerminalWorkspace({
   const skillPrefix = skillInvocationPrefix(sessionToolKind);
   const showFastScroll =
     !observer &&
+    !isLikelyIOS &&
     !copyDragActive &&
     fastScrollOverflow &&
     (fastScrollVisible || fastScrollDragging);
   const showJumpToLive =
     !observer && !copyDragActive && fastScrollOverflow && !fastScrollAtBottom;
-  const isMobileViewport =
-    typeof window !== "undefined" && window.innerWidth <= 768;
-  const liveButtonBottom =
-    observer || !isMobileViewport ? 12 : 64 + mobileKeybarBottom;
+  const showDesktopQuickCommands = !observer && !isMobileViewport;
+  const showMobileDock = !observer && isMobileViewport;
+  const mobileDockSpacerHeight = showMobileDock
+    ? Math.max(mobileDockHeight, mobileDockPanel ? 212 : 112)
+    : 0;
+  const liveButtonBottom = 12;
+
+  const renderMobileKeyButton = (
+    keyId: MobileKeyId,
+    extraClass = "",
+  ) => {
+    const config = findMobileKeyConfig(keyId);
+    if (!config) return null;
+    const className = `mobile-keybar-btn ${extraClass}`.trim();
+    return (
+      <button
+        key={keyId}
+        type="button"
+        class={className}
+        onClick={() => handleMobileKeyPress(keyId)}
+      >
+        {config.label}
+      </button>
+    );
+  };
 
   return (
     <div
@@ -1949,6 +2184,7 @@ export function TerminalWorkspace({
               tool={session.tool}
               lastActivityAt={session.last_activity_at}
               spritePack={session.sprite_pack_id ? spritePacks.value[session.sprite_pack_id] ?? null : null}
+              repoTheme={session.repo_theme_id ? repoThemes.value[session.repo_theme_id] ?? null : null}
             />
           </span>
         </button>
@@ -2031,7 +2267,7 @@ export function TerminalWorkspace({
         </div>
       )}
 
-      {!observer && isAgentSession && (
+      {showDesktopQuickCommands && isAgentSession && (
         <div class="quick-command-bar">
           {skillsLoading && <span class="quick-command-status">loading skills…</span>}
           {!skillsLoading && skillsError && (
@@ -2071,7 +2307,7 @@ export function TerminalWorkspace({
         </div>
       )}
 
-      {!observer && !isAgentSession && (
+      {showDesktopQuickCommands && !isAgentSession && (
         <div class="quick-command-bar">
           {commandChips.length === 0 && (
             <span class="quick-command-empty">No quick commands</span>
@@ -2238,63 +2474,263 @@ export function TerminalWorkspace({
         )}
       </div>
 
-      {!observer && <div class="mobile-keybar-spacer" />}
+      {showMobileDock && (
+        <div
+          class="mobile-keybar-spacer"
+          style={{ height: `${mobileDockSpacerHeight}px` }}
+        />
+      )}
 
-      {!observer && (
-        <div class="mobile-keybar" style={{ bottom: `${mobileKeybarBottom}px` }}>
-          <button
-            type="button"
-            class="mobile-keybar-btn mobile-keybar-btn-primary mobile-keybar-btn-danger"
-            onClick={handleClose}
-          >
-            Close
-          </button>
-          <button
-            type="button"
-            class="mobile-keybar-btn mobile-keybar-btn-primary"
-            onClick={() => void handleCopyAction()}
-          >
-            Copy
-          </button>
-          <button
-            type="button"
-            class="mobile-keybar-btn mobile-keybar-btn-primary"
-            onClick={() => void handlePasteAction()}
-          >
-            Paste
-          </button>
-          <button
-            type="button"
-            class="mobile-keybar-btn mobile-keybar-btn-primary"
-            onClick={() => setShowTerminalActions(true)}
-          >
-            Actions
-          </button>
-          {MOBILE_KEYS.map((key) => (
-            <button
-              key={key.id}
-              type="button"
-              class="mobile-keybar-btn"
-              onClick={() => handleMobileKeyPress(key.id)}
-            >
-              {key.label}
-            </button>
-          ))}
-          <button
-            type="button"
-            class={`mobile-keybar-btn ${copyDragActive ? "active" : ""}`}
-            onClick={toggleCopyDragMode}
-          >
-            {copyDragActive ? "Done copy" : "Drag copy"}
-          </button>
-          {onBenchToggle && (
+      {showMobileDock && (
+        <div
+          ref={mobileDockRef}
+          class={`mobile-keybar ${mobileDockPanel ? "panel-open" : ""} ${mobileKeyboardOpen ? "keyboard-open" : ""}`}
+          style={{ bottom: `${mobileKeybarBottom}px` }}
+        >
+          <div class="mobile-keybar-primary">
             <button
               type="button"
-              class={`mobile-keybar-btn ${isBenched ? "active" : ""}`}
-              onClick={() => onBenchToggle(session.session_id)}
+              class="mobile-keybar-btn mobile-keybar-btn-primary mobile-keybar-btn-wide"
+              onClick={handleFocusTerminal}
             >
-              {isBenched ? "Show" : "Hide"}
+              Keyboard
             </button>
+            <button
+              type="button"
+              class="mobile-keybar-btn mobile-keybar-btn-primary"
+              onClick={() => void handlePasteAction()}
+            >
+              Paste
+            </button>
+            <button
+              type="button"
+              class="mobile-keybar-btn mobile-keybar-btn-primary"
+              onClick={() => handleMobileKeyPress("ctrl_c")}
+            >
+              Ctrl+C
+            </button>
+            <button
+              type="button"
+              class="mobile-keybar-btn mobile-keybar-btn-primary"
+              onClick={() => void handleCopyAction()}
+            >
+              Copy
+            </button>
+            <button
+              type="button"
+              class={`mobile-keybar-btn mobile-keybar-btn-toggle ${mobileDockPanel === "keys" ? "active" : ""}`}
+              onClick={() => toggleMobileDockPanel("keys")}
+            >
+              Keys
+            </button>
+            <button
+              type="button"
+              class={`mobile-keybar-btn mobile-keybar-btn-toggle ${mobileDockPanel === "quick" ? "active" : ""}`}
+              onClick={() => toggleMobileDockPanel("quick")}
+            >
+              Quick
+            </button>
+            <button
+              type="button"
+              class={`mobile-keybar-btn mobile-keybar-btn-toggle ${mobileDockPanel === "tools" ? "active" : ""}`}
+              onClick={() => toggleMobileDockPanel("tools")}
+            >
+              Tools
+            </button>
+          </div>
+
+          {mobileDockPanel === "keys" && (
+            <div class="mobile-keybar-panel">
+              <div class="mobile-keybar-section">
+                <span class="mobile-keybar-section-label">history</span>
+                <div class="mobile-keybar-grid">
+                  {MOBILE_UTILITY_KEYS.map((keyId) => renderMobileKeyButton(keyId))}
+                </div>
+              </div>
+              <div class="mobile-keybar-section">
+                <span class="mobile-keybar-section-label">arrows</span>
+                <div class="mobile-keybar-arrow-pad">
+                  {renderMobileKeyButton("up", "mobile-keybar-arrow mobile-keybar-arrow-up")}
+                  {renderMobileKeyButton(
+                    "left",
+                    "mobile-keybar-arrow mobile-keybar-arrow-left",
+                  )}
+                  {renderMobileKeyButton(
+                    "down",
+                    "mobile-keybar-arrow mobile-keybar-arrow-down",
+                  )}
+                  {renderMobileKeyButton(
+                    "right",
+                    "mobile-keybar-arrow mobile-keybar-arrow-right",
+                  )}
+                </div>
+              </div>
+              <div class="mobile-keybar-section">
+                <span class="mobile-keybar-section-label">shell</span>
+                <div class="mobile-keybar-grid mobile-keybar-grid-tight">
+                  {MOBILE_SHELL_PATH_KEYS.map((keyId) =>
+                    renderMobileKeyButton(keyId),
+                  )}
+                  {MOBILE_SHELL_SYNTAX_KEYS.map((keyId) =>
+                    renderMobileKeyButton(keyId),
+                  )}
+                  {MOBILE_SHELL_FORMAT_KEYS.map((keyId) =>
+                    renderMobileKeyButton(keyId),
+                  )}
+                </div>
+              </div>
+            </div>
+          )}
+
+          {mobileDockPanel === "quick" && (
+            <div class="mobile-keybar-panel">
+              {isAgentSession && (
+                <>
+                  <span class="mobile-keybar-section-label">
+                    Tap to run. Hold to insert only.
+                  </span>
+                  <div class="mobile-keybar-chip-grid">
+                    {skillsLoading && (
+                      <span class="quick-command-status">loading skills…</span>
+                    )}
+                    {!skillsLoading && skillsError && (
+                      <span class="quick-command-status">{skillsError}</span>
+                    )}
+                    {!skillsLoading && !skillsError && skillChips.length === 0 && (
+                      <span class="quick-command-empty">No skills found</span>
+                    )}
+                    {skillChips.map((skill) => (
+                      <button
+                        key={`${session.session_id}-${skill.name}`}
+                        type="button"
+                        class={`quick-command-chip skill-chip ${skillChipHoldName === skill.name ? "holding" : ""}`}
+                        onClick={(e) => handleSkillChipClick(skill.name, e)}
+                        onPointerDown={(e) => handleSkillChipPointerDown(skill.name, e)}
+                        onPointerMove={handleSkillChipPointerMove}
+                        onPointerUp={handleSkillChipPointerEnd}
+                        onPointerCancel={handleSkillChipPointerEnd}
+                        onPointerLeave={handleSkillChipPointerEnd}
+                        title={
+                          skill.description
+                            ? `${skillPrefix}${skill.name} — ${skill.description}`
+                            : `Insert skill: ${skillPrefix}${skill.name}`
+                        }
+                      >
+                        {skillPrefix}
+                        {skill.name}
+                      </button>
+                    ))}
+                    <button
+                      type="button"
+                      class="quick-command-control"
+                      onClick={handleRefreshSkills}
+                    >
+                      refresh
+                    </button>
+                  </div>
+                </>
+              )}
+
+              {!isAgentSession && (
+                <>
+                  <span class="mobile-keybar-section-label">
+                    Fast shell commands
+                  </span>
+                  <div class="mobile-keybar-chip-grid">
+                    {commandChips.length === 0 && (
+                      <span class="quick-command-empty">No quick commands</span>
+                    )}
+                    {commandChips.map((command, index) => (
+                      <button
+                        key={`${session.session_id}-${index}-${command}`}
+                        type="button"
+                        class={`quick-command-chip ${editingCommandChips ? "editing" : ""}`}
+                        onClick={() => handleQuickCommandChipPress(index)}
+                        title={
+                          editingCommandChips
+                            ? "Tap to edit or delete"
+                            : `Run quick command: ${command}`
+                        }
+                      >
+                        {command}
+                      </button>
+                    ))}
+                    <button
+                      type="button"
+                      class="quick-command-control"
+                      onClick={handleAddCommandChip}
+                    >
+                      + cmd
+                    </button>
+                    <button
+                      type="button"
+                      class={`quick-command-control ${editingCommandChips ? "active" : ""}`}
+                      onClick={() => setEditingCommandChips((prev) => !prev)}
+                    >
+                      {editingCommandChips ? "done" : "edit"}
+                    </button>
+                  </div>
+                </>
+              )}
+            </div>
+          )}
+
+          {mobileDockPanel === "tools" && (
+            <div class="mobile-keybar-panel">
+              <span class="mobile-keybar-section-label">terminal tools</span>
+              <div class="mobile-keybar-grid mobile-keybar-grid-tools">
+                <button type="button" class="mobile-keybar-btn" onClick={handleFindAction}>
+                  Find
+                </button>
+                <button
+                  type="button"
+                  class="mobile-keybar-btn"
+                  onClick={handleSelectAllAction}
+                >
+                  Select all
+                </button>
+                <button
+                  type="button"
+                  class={`mobile-keybar-btn ${copyDragActive ? "active" : ""}`}
+                  onClick={toggleCopyDragMode}
+                >
+                  {copyDragActive ? "Done copy" : "Drag copy"}
+                </button>
+                <button
+                  type="button"
+                  class="mobile-keybar-btn"
+                  onClick={handleClearAction}
+                >
+                  Clear
+                </button>
+                {onBenchToggle && (
+                  <button
+                    type="button"
+                    class={`mobile-keybar-btn ${isBenched ? "active" : ""}`}
+                    onClick={() => onBenchToggle(session.session_id)}
+                  >
+                    {isBenched ? "Show" : "Hide"}
+                  </button>
+                )}
+                <button
+                  type="button"
+                  class="mobile-keybar-btn"
+                  onClick={() => {
+                    dismissMobileDockPanel();
+                    setShowTerminalActions(true);
+                  }}
+                >
+                  Sheet
+                </button>
+                <button
+                  type="button"
+                  class="mobile-keybar-btn mobile-keybar-btn-danger"
+                  onClick={handleClose}
+                >
+                  Close
+                </button>
+              </div>
+            </div>
           )}
         </div>
       )}
