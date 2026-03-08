@@ -31,13 +31,15 @@ async fn list_sessions(
     {
         tracing::warn!("runtime tmux discovery failed: {e}");
     }
-    let sessions = state.supervisor.list_sessions().await;
+    let data = state.supervisor.list_session_data().await;
     // The version counter is not tracked by the supervisor itself; we use 0
     // as a placeholder. A proper monotonic version can be added to the
     // supervisor later if clients need ETag-style cache validation.
     Ok(Json(SessionListResponse {
-        sessions,
+        sessions: data.sessions,
         version: 0,
+        sprite_packs: data.sprite_packs,
+        repo_themes: data.repo_themes,
     }))
 }
 
@@ -55,15 +57,16 @@ async fn create_session(
     }
     match state
         .supervisor
-        .create_session(body.name, body.cwd, body.spawn_tool)
+        .create_session(body.name, body.cwd, body.spawn_tool, body.initial_request)
         .await
     {
-        Ok((session, sprite_pack)) => (
+        Ok((session, sprite_pack, repo_theme)) => (
             StatusCode::CREATED,
             Json(
                 serde_json::to_value(CreateSessionResponse {
                     session,
                     sprite_pack,
+                    repo_theme,
                 })
                 .unwrap(),
             ),

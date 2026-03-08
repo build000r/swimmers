@@ -51,6 +51,21 @@ impl Default for ThoughtSource {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+pub enum RestState {
+    Active,
+    Drowsy,
+    Sleeping,
+    DeepSleep,
+}
+
+impl Default for RestState {
+    fn default() -> Self {
+        Self::Active
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum BubblePrecedence {
     ThoughtFirst,
 }
@@ -132,6 +147,15 @@ pub struct SpritePack {
     pub deep_sleep: String,
 }
 
+/// Per-repository Thronglet palette used across web and TUI surfaces.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RepoTheme {
+    pub body: String,
+    pub outline: String,
+    pub accent: String,
+    pub shirt: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionSummary {
     pub session_id: String,
@@ -149,6 +173,8 @@ pub struct SessionSummary {
     pub thought_source: ThoughtSource,
     #[serde(default)]
     pub thought_updated_at: Option<DateTime<Utc>>,
+    #[serde(default = "default_rest_state")]
+    pub rest_state: RestState,
     #[serde(default)]
     pub last_skill: Option<String>,
     pub is_stale: bool,
@@ -159,6 +185,10 @@ pub struct SessionSummary {
     /// sprite override was found.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sprite_pack_id: Option<String>,
+    /// Key into `BootstrapResponse.repo_themes`; absent when no `.throngterm/`
+    /// directory exists for this session cwd.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repo_theme_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -195,6 +225,10 @@ pub struct BootstrapResponse {
     /// `sprite_pack_id` on each `SessionSummary`).
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub sprite_packs: HashMap<String, SpritePack>,
+    /// Per-repository color themes; keyed by project root path (the
+    /// `repo_theme_id` on each `SessionSummary`).
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub repo_themes: HashMap<String, RepoTheme>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -226,6 +260,8 @@ pub struct CreateSessionRequest {
     pub name: Option<String>,
     pub cwd: Option<String>,
     pub spawn_tool: Option<SpawnTool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub initial_request: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -272,12 +308,18 @@ pub struct CreateSessionResponse {
     pub session: SessionSummary,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sprite_pack: Option<SpritePack>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repo_theme: Option<RepoTheme>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionListResponse {
     pub sessions: Vec<SessionSummary>,
     pub version: u64,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub sprite_packs: HashMap<String, SpritePack>,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub repo_themes: HashMap<String, RepoTheme>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -324,6 +366,8 @@ pub struct ThoughtUpdatePayload {
     pub thought_state: ThoughtState,
     #[serde(default = "default_thought_source")]
     pub thought_source: ThoughtSource,
+    #[serde(default = "default_rest_state")]
+    pub rest_state: RestState,
     #[serde(default)]
     pub objective_changed: bool,
     #[serde(default = "default_bubble_precedence")]
@@ -346,8 +390,24 @@ fn default_thought_source() -> ThoughtSource {
     ThoughtSource::CarryForward
 }
 
+fn default_rest_state() -> RestState {
+    RestState::Active
+}
+
 fn default_bubble_precedence() -> BubblePrecedence {
     BubblePrecedence::ThoughtFirst
+}
+
+pub fn fallback_rest_state(state: SessionState, thought_state: ThoughtState) -> RestState {
+    match state {
+        SessionState::Exited => RestState::DeepSleep,
+        SessionState::Idle => match thought_state {
+            ThoughtState::Active => RestState::Active,
+            ThoughtState::Holding => RestState::Drowsy,
+            ThoughtState::Sleeping => RestState::Sleeping,
+        },
+        SessionState::Busy | SessionState::Error | SessionState::Attention => RestState::Active,
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -356,6 +416,8 @@ pub struct SessionCreatedPayload {
     pub session: SessionSummary,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sprite_pack: Option<SpritePack>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repo_theme: Option<RepoTheme>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -532,6 +594,12 @@ mod tests {
             sleeping: "<svg id='s'/>".into(),
             deep_sleep: "<svg id='ds'/>".into(),
         };
+        let theme = RepoTheme {
+            body: "#B89875".into(),
+            outline: "#3D2F24".into(),
+            accent: "#1D1914".into(),
+            shirt: "#AA9370".into(),
+        };
         let resp = CreateSessionResponse {
             session: SessionSummary {
                 session_id: "s1".into(),
@@ -546,14 +614,17 @@ mod tests {
                 thought_state: ThoughtState::Holding,
                 thought_source: ThoughtSource::CarryForward,
                 thought_updated_at: None,
+                rest_state: RestState::Drowsy,
                 last_skill: None,
                 is_stale: false,
                 attached_clients: 0,
                 transport_health: TransportHealth::Healthy,
                 last_activity_at: chrono::Utc::now(),
                 sprite_pack_id: Some("/tmp/proj".into()),
+                repo_theme_id: Some("/tmp/proj".into()),
             },
             sprite_pack: Some(pack),
+            repo_theme: Some(theme),
         };
         let json = serde_json::to_string(&resp).unwrap();
         assert!(
@@ -564,16 +635,25 @@ mod tests {
             json.contains("<svg id='a'/>"),
             "pack SVG content must serialize"
         );
+        assert!(
+            json.contains("\"repo_theme\""),
+            "repo_theme must be present in JSON"
+        );
 
         // When sprite_pack is None, the field should be omitted entirely.
         let resp_none = CreateSessionResponse {
             session: resp.session.clone(),
             sprite_pack: None,
+            repo_theme: None,
         };
         let json_none = serde_json::to_string(&resp_none).unwrap();
         assert!(
             !json_none.contains("\"sprite_pack\""),
             "null sprite_pack must be omitted"
+        );
+        assert!(
+            !json_none.contains("\"repo_theme\""),
+            "null repo_theme must be omitted"
         );
     }
 
@@ -584,6 +664,12 @@ mod tests {
             drowsy: "<svg/>".into(),
             sleeping: "<svg/>".into(),
             deep_sleep: "<svg/>".into(),
+        };
+        let theme = RepoTheme {
+            body: "#B89875".into(),
+            outline: "#3D2F24".into(),
+            accent: "#1D1914".into(),
+            shirt: "#AA9370".into(),
         };
         let payload = SessionCreatedPayload {
             reason: "api_create".into(),
@@ -600,21 +686,26 @@ mod tests {
                 thought_state: ThoughtState::Holding,
                 thought_source: ThoughtSource::CarryForward,
                 thought_updated_at: None,
+                rest_state: RestState::Drowsy,
                 last_skill: None,
                 is_stale: false,
                 attached_clients: 0,
                 transport_health: TransportHealth::Healthy,
                 last_activity_at: chrono::Utc::now(),
                 sprite_pack_id: Some("/tmp".into()),
+                repo_theme_id: Some("/tmp".into()),
             },
             sprite_pack: Some(pack),
+            repo_theme: Some(theme),
         };
         let json = serde_json::to_string(&payload).unwrap();
         assert!(json.contains("\"sprite_pack\""));
+        assert!(json.contains("\"repo_theme\""));
 
         // Deserialize roundtrip
         let parsed: SessionCreatedPayload = serde_json::from_str(&json).unwrap();
         assert!(parsed.sprite_pack.is_some());
         assert_eq!(parsed.sprite_pack.unwrap().active, "<svg/>");
+        assert_eq!(parsed.repo_theme.unwrap().body, "#B89875");
     }
 }

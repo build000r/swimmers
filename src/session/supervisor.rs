@@ -16,8 +16,8 @@ use crate::sprites::discover_sprite_pack;
 use crate::thought::loop_runner::{SessionInfo, SessionProvider};
 use crate::thought::protocol::ThoughtDeliveryState;
 use crate::types::{
-    ControlEvent, RepoTheme, SessionState, SessionStatePayload, SessionSummary, SpritePack,
-    TerminalSnapshot, ThoughtSource, ThoughtState, TransportHealth,
+    fallback_rest_state, ControlEvent, RepoTheme, RestState, SessionState, SessionStatePayload,
+    SessionSummary, SpritePack, TerminalSnapshot, ThoughtSource, ThoughtState, TransportHealth,
 };
 
 const PROCESS_EXIT_REAP_INTERVAL: Duration = Duration::from_millis(250);
@@ -71,9 +71,7 @@ async fn query_tmux_active_pane_session_id(tmux_name: &str) -> anyhow::Result<St
 
     let pane_selector = String::from_utf8_lossy(&output.stdout).trim().to_string();
     if pane_selector.is_empty() {
-        return Err(anyhow::anyhow!(
-            "tmux returned empty active pane selector"
-        ));
+        return Err(anyhow::anyhow!("tmux returned empty active pane selector"));
     }
 
     Ok(format!("tmux:{tmux_name}:{pane_selector}"))
@@ -265,6 +263,9 @@ impl SessionSupervisor {
                     thought_updated_at: thought_data
                         .map(|t| t.updated_at)
                         .or(ps.thought_updated_at),
+                    rest_state: thought_data.map(|t| t.rest_state).unwrap_or_else(|| {
+                        fallback_rest_state(SessionState::Exited, ps.thought_state)
+                    }),
                     last_skill: ps.last_skill.clone(),
                     is_stale: true,
                     attached_clients: 0,
@@ -493,8 +494,10 @@ impl SessionSupervisor {
         name: Option<String>,
         cwd: Option<String>,
         spawn_tool: Option<crate::types::SpawnTool>,
+        initial_request: Option<String>,
     ) -> anyhow::Result<(SessionSummary, Option<SpritePack>, Option<RepoTheme>)> {
         let start_cwd = cwd.or_else(current_working_dir);
+        let initial_request = normalize_initial_request(initial_request);
         let requested_name = name.and_then(|n| {
             let trimmed = n.trim();
             if trimmed.is_empty() {
@@ -548,6 +551,11 @@ impl SessionSupervisor {
 
         let (sprite_pack, repo_theme) = self.resolve_repo_assets_for_summary(&mut summary).await;
 
+        let initial_request_delay = if spawn_tool.is_some() {
+            INITIAL_REQUEST_INPUT_DELAY
+        } else {
+            Duration::ZERO
+        };
         if let Some(tool) = spawn_tool {
             if let Err(e) = send_spawn_tool_command(&tmux_name, tool).await {
                 warn!(
@@ -572,6 +580,15 @@ impl SessionSupervisor {
                     );
                 }
             }
+        }
+        if let Some(initial_request) = initial_request {
+            enqueue_initial_request_input(
+                bootstrap_handle,
+                session_id.clone(),
+                tmux_name.clone(),
+                initial_request,
+                initial_request_delay,
+            );
         }
 
         // Broadcast lifecycle event.
@@ -682,15 +699,15 @@ impl SessionSupervisor {
 
         let thought_snapshots = self.thought_snapshots.read().await.clone();
         for summary in &mut summaries {
-            let active_pane_session_id =
-                if thought_snapshots.contains_key(&summary.session_id) || summary.tmux_name.is_empty()
-                {
-                    None
-                } else {
-                    query_tmux_active_pane_session_id(&summary.tmux_name)
-                        .await
-                        .ok()
-                };
+            let active_pane_session_id = if thought_snapshots.contains_key(&summary.session_id)
+                || summary.tmux_name.is_empty()
+            {
+                None
+            } else {
+                query_tmux_active_pane_session_id(&summary.tmux_name)
+                    .await
+                    .ok()
+            };
             if let Some(thought_data) = thought_snapshot_for_summary(
                 summary,
                 active_pane_session_id.as_deref(),
@@ -702,6 +719,7 @@ impl SessionSupervisor {
                 summary.thought_state = thought_data.thought_state;
                 summary.thought_source = thought_data.thought_source;
                 summary.thought_updated_at = Some(thought_data.updated_at);
+                summary.rest_state = thought_data.rest_state;
                 if thought_data.token_count > 0 || summary.token_count == 0 {
                     summary.token_count = thought_data.token_count;
                 }
@@ -864,6 +882,9 @@ impl SessionSupervisor {
                     thought_source: thought_data
                         .map(|t| t.thought_source)
                         .unwrap_or(summary.thought_source),
+                    rest_state: thought_data
+                        .map(|t| t.rest_state)
+                        .unwrap_or(summary.rest_state),
                     thought: thought_data
                         .and_then(|t| t.thought.clone())
                         .or_else(|| summary.thought.clone()),
@@ -915,6 +936,7 @@ impl SessionSupervisor {
                 thought_state: s.thought_state,
                 thought_source: s.thought_source,
                 thought_updated_at: s.thought_updated_at,
+                rest_state: s.rest_state,
                 last_skill: s.last_skill.clone(),
                 objective_fingerprint: thought_snapshots
                     .get(&s.session_id)
@@ -936,6 +958,7 @@ impl SessionSupervisor {
         context_limit: u64,
         thought_state: ThoughtState,
         thought_source: ThoughtSource,
+        rest_state: RestState,
         updated_at: DateTime<Utc>,
         delivery: ThoughtDeliveryState,
         objective_fingerprint: Option<String>,
@@ -948,6 +971,7 @@ impl SessionSupervisor {
                     thought: thought.map(|value| value.to_string()),
                     thought_state,
                     thought_source,
+                    rest_state,
                     objective_fingerprint: objective_fingerprint.clone(),
                     token_count,
                     context_limit,
@@ -973,6 +997,7 @@ impl SessionSupervisor {
                 context_limit,
                 thought_state,
                 thought_source,
+                rest_state,
                 updated_at,
                 delivery,
                 objective_fingerprint,
@@ -1148,6 +1173,7 @@ impl SessionSupervisor {
             thought_state: ThoughtState::Holding,
             thought_source: ThoughtSource::CarryForward,
             thought_updated_at: None,
+            rest_state: fallback_rest_state(SessionState::Idle, ThoughtState::Holding),
             last_skill: None,
             is_stale: false,
             attached_clients: 0,
@@ -1181,6 +1207,7 @@ struct PersistThoughtRequest {
     context_limit: u64,
     thought_state: ThoughtState,
     thought_source: ThoughtSource,
+    rest_state: RestState,
     updated_at: DateTime<Utc>,
     delivery: ThoughtDeliveryState,
     objective_fingerprint: Option<String>,
@@ -1202,6 +1229,7 @@ impl SupervisorProvider {
                         req.context_limit,
                         req.thought_state,
                         req.thought_source,
+                        req.rest_state,
                         req.updated_at,
                         req.delivery,
                         req.objective_fingerprint,
@@ -1241,6 +1269,7 @@ impl SessionProvider for SupervisorProvider {
         context_limit: u64,
         thought_state: ThoughtState,
         thought_source: ThoughtSource,
+        rest_state: RestState,
         updated_at: DateTime<Utc>,
         delivery: ThoughtDeliveryState,
         objective_fingerprint: Option<String>,
@@ -1254,6 +1283,7 @@ impl SessionProvider for SupervisorProvider {
                 context_limit,
                 thought_state,
                 thought_source,
+                rest_state,
                 updated_at,
                 delivery,
                 objective_fingerprint,
@@ -1294,6 +1324,53 @@ fn current_working_dir() -> Option<String> {
     std::env::current_dir()
         .ok()
         .map(|p| p.to_string_lossy().into_owned())
+}
+
+const INITIAL_REQUEST_INPUT_DELAY: Duration = Duration::from_millis(200);
+
+fn normalize_initial_request(initial_request: Option<String>) -> Option<String> {
+    initial_request.and_then(|request| {
+        let trimmed = request.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    })
+}
+
+fn build_initial_request_input(initial_request: &str) -> Vec<u8> {
+    let mut input = initial_request.as_bytes().to_vec();
+    input.push(b'\n');
+    input
+}
+
+fn enqueue_initial_request_input(
+    handle: ActorHandle,
+    session_id: String,
+    tmux_name: String,
+    initial_request: String,
+    delay: Duration,
+) {
+    tokio::spawn(async move {
+        if !delay.is_zero() {
+            tokio::time::sleep(delay).await;
+        }
+
+        if let Err(e) = handle
+            .send(SessionCommand::WriteInput(build_initial_request_input(
+                &initial_request,
+            )))
+            .await
+        {
+            warn!(
+                session_id = %session_id,
+                tmux_name = %tmux_name,
+                "failed to enqueue initial request input: {}",
+                e
+            );
+        }
+    });
 }
 
 async fn send_spawn_tool_command(
@@ -1478,6 +1555,24 @@ mod tests {
     }
 
     #[test]
+    fn normalize_initial_request_trims_blank_values() {
+        assert_eq!(normalize_initial_request(None), None);
+        assert_eq!(normalize_initial_request(Some("   ".to_string())), None);
+        assert_eq!(
+            normalize_initial_request(Some("  investigate tmux  ".to_string())),
+            Some("investigate tmux".to_string())
+        );
+    }
+
+    #[test]
+    fn build_initial_request_input_appends_newline() {
+        assert_eq!(
+            build_initial_request_input("hello codex"),
+            b"hello codex\n".to_vec()
+        );
+    }
+
+    #[test]
     fn ready_process_exit_ids_drops_recovered_sessions() {
         let mut seen = HashMap::new();
         let exited = HashSet::from_iter(["sess_1".to_string()]);
@@ -1509,6 +1604,7 @@ mod tests {
                 128_000,
                 ThoughtState::Holding,
                 ThoughtSource::CarryForward,
+                RestState::Drowsy,
                 Utc::now(),
                 ThoughtDeliveryState::default(),
                 None,
@@ -1538,6 +1634,7 @@ mod tests {
                 thought_state: ThoughtState::Holding,
                 thought_source: ThoughtSource::CarryForward,
                 thought_updated_at: None,
+                rest_state: RestState::Drowsy,
                 last_skill: None,
                 objective_fingerprint: None,
                 cwd: "/tmp".to_string(),
@@ -1567,6 +1664,7 @@ mod tests {
                 192_000,
                 ThoughtState::Holding,
                 ThoughtSource::Llm,
+                RestState::Drowsy,
                 updated_at,
                 ThoughtDeliveryState::default(),
                 Some("obj-1".to_string()),
@@ -1594,6 +1692,7 @@ mod tests {
             thought_state: ThoughtState::Holding,
             thought_source: ThoughtSource::CarryForward,
             thought_updated_at: None,
+            rest_state: RestState::Drowsy,
             last_skill: None,
             is_stale: false,
             attached_clients: 0,
@@ -1617,6 +1716,7 @@ mod tests {
                     thought: Some("pane one".to_string()),
                     thought_state: ThoughtState::Holding,
                     thought_source: ThoughtSource::Llm,
+                    rest_state: RestState::Drowsy,
                     objective_fingerprint: None,
                     token_count: 10,
                     context_limit: 100,
@@ -1633,6 +1733,7 @@ mod tests {
                     thought: Some("pane two".to_string()),
                     thought_state: ThoughtState::Active,
                     thought_source: ThoughtSource::Llm,
+                    rest_state: RestState::Active,
                     objective_fingerprint: None,
                     token_count: 10,
                     context_limit: 100,
@@ -1645,18 +1746,15 @@ mod tests {
             ),
         ]);
 
-        let matched = thought_snapshot_for_summary(
-            &summary,
-            Some("tmux:work:1.1:%2"),
-            &snapshots,
-        )
-        .expect("tmux pane snapshot");
+        let matched = thought_snapshot_for_summary(&summary, Some("tmux:work:1.1:%2"), &snapshots)
+            .expect("tmux pane snapshot");
         assert_eq!(matched.thought.as_deref(), Some("pane two"));
         assert_eq!(matched.delivery.emission_seq, 2);
     }
 
     #[test]
-    fn thought_snapshot_for_summary_does_not_fall_back_to_latest_tmux_pane_without_active_binding() {
+    fn thought_snapshot_for_summary_does_not_fall_back_to_latest_tmux_pane_without_active_binding()
+    {
         let summary = SessionSummary {
             session_id: "sess_1".to_string(),
             tmux_name: "work".to_string(),
@@ -1670,6 +1768,7 @@ mod tests {
             thought_state: ThoughtState::Holding,
             thought_source: ThoughtSource::CarryForward,
             thought_updated_at: None,
+            rest_state: RestState::Drowsy,
             last_skill: None,
             is_stale: false,
             attached_clients: 0,
@@ -1686,6 +1785,7 @@ mod tests {
                     thought: Some("pane one".to_string()),
                     thought_state: ThoughtState::Holding,
                     thought_source: ThoughtSource::Llm,
+                    rest_state: RestState::Drowsy,
                     objective_fingerprint: None,
                     token_count: 10,
                     context_limit: 100,
@@ -1699,6 +1799,7 @@ mod tests {
                     thought: Some("pane two".to_string()),
                     thought_state: ThoughtState::Active,
                     thought_source: ThoughtSource::Llm,
+                    rest_state: RestState::Active,
                     objective_fingerprint: None,
                     token_count: 10,
                     context_limit: 100,

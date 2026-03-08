@@ -6,8 +6,8 @@ use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
 use crossterm::event::{
-    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, MouseButton,
-    MouseEventKind,
+    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
+    KeyModifiers, MouseButton, MouseEventKind,
 };
 use crossterm::{
     cursor, execute, queue,
@@ -23,7 +23,7 @@ use throngterm::repo_theme::discover_repo_theme;
 use throngterm::types::{
     CreateSessionRequest, CreateSessionResponse, DirEntry, DirListResponse, ErrorResponse,
     NativeDesktopOpenRequest, NativeDesktopOpenResponse, NativeDesktopStatusResponse, RepoTheme,
-    SessionListResponse, SessionState, SessionSummary, SpawnTool, ThoughtState,
+    RestState, SessionListResponse, SessionState, SessionSummary, SpawnTool,
 };
 
 const MIN_WIDTH: u16 = 70;
@@ -37,6 +37,8 @@ const ENTITY_WIDTH: u16 = 12;
 const ENTITY_HEIGHT: u16 = SPRITE_HEIGHT + LABEL_HEIGHT;
 const PICKER_WIDTH: u16 = 46;
 const PICKER_MAX_HEIGHT: u16 = 16;
+const INITIAL_REQUEST_WIDTH: u16 = 58;
+const INITIAL_REQUEST_HEIGHT: u16 = 7;
 const THOUGHT_RAIL_MIN_WIDTH: u16 = 100;
 const THOUGHT_RAIL_MIN_PANEL_WIDTH: u16 = 24;
 const THOUGHT_RAIL_GAP: u16 = 1;
@@ -375,18 +377,15 @@ impl SpriteKind {
             SessionState::Attention => Self::Attention,
             SessionState::Error => Self::Error,
             SessionState::Exited => Self::Exited,
-            SessionState::Idle => match session.thought_state {
-                ThoughtState::Sleeping => Self::Sleeping,
-                ThoughtState::Holding => Self::Drowsy,
-                ThoughtState::Active => Self::Active,
+            SessionState::Idle => match session.rest_state {
+                RestState::DeepSleep | RestState::Sleeping => Self::Sleeping,
+                RestState::Drowsy => Self::Drowsy,
+                RestState::Active => Self::Active,
             },
         }
     }
 
-    fn color(self, selected: bool) -> Color {
-        if selected {
-            return Color::White;
-        }
+    fn color(self) -> Color {
         match self {
             Self::Active => Color::Green,
             Self::Busy => Color::Yellow,
@@ -403,7 +402,7 @@ impl SpriteKind {
             Self::Active => 1.0,
             Self::Busy => 1.15,
             Self::Drowsy => 0.45,
-            Self::Sleeping => 0.08,
+            Self::Sleeping => 0.0,
             Self::Attention => 1.0,
             Self::Error => 0.5,
             Self::Exited => 0.0,
@@ -507,6 +506,15 @@ impl SessionEntity {
         SpriteKind::from_session(&self.session)
     }
 
+    fn is_sleeping(&self) -> bool {
+        matches!(self.sprite_kind(), SpriteKind::Sleeping)
+    }
+
+    fn set_grid_position(&mut self, column: usize, row: usize) {
+        self.x = column as f32 * ENTITY_WIDTH as f32;
+        self.y = row as f32 * ENTITY_HEIGHT as f32;
+    }
+
     fn tick(&mut self, field: Rect) {
         let speed = self.sprite_kind().speed_scale();
         if speed == 0.0 || field.width <= ENTITY_WIDTH || field.height <= ENTITY_HEIGHT {
@@ -598,6 +606,7 @@ trait TuiApi {
         &self,
         cwd: &str,
         spawn_tool: SpawnTool,
+        initial_request: Option<String>,
     ) -> BoxFuture<'_, Result<CreateSessionResponse, String>>;
 }
 
@@ -705,6 +714,7 @@ impl TuiApi for ApiClient {
         &self,
         cwd: &str,
         spawn_tool: SpawnTool,
+        initial_request: Option<String>,
     ) -> BoxFuture<'_, Result<CreateSessionResponse, String>> {
         let cwd = cwd.to_string();
         Box::pin(async move {
@@ -715,6 +725,7 @@ impl TuiApi for ApiClient {
                     name: None,
                     cwd: Some(cwd),
                     spawn_tool: Some(spawn_tool),
+                    initial_request,
                 })
                 .send()
                 .await
@@ -884,6 +895,37 @@ struct PickerLayout {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+struct InitialRequestState {
+    cwd: String,
+    value: String,
+}
+
+impl InitialRequestState {
+    fn new(cwd: String) -> Self {
+        Self {
+            cwd,
+            value: String::new(),
+        }
+    }
+
+    fn trimmed_value(&self) -> Option<String> {
+        let trimmed = self.value.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct InitialRequestLayout {
+    frame: Rect,
+    content: Rect,
+    input_y: u16,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct ThoughtFingerprint {
     thought: String,
     updated_at: Option<DateTime<Utc>>,
@@ -913,7 +955,7 @@ impl ThoughtLogEntry {
             pwd_label: path_tail_label(&session.cwd),
             thought,
             updated_at: session.thought_updated_at,
-            color: session_display_color(session, repo_themes, false),
+            color: session_display_color(session, repo_themes),
         }
     }
 }
@@ -1000,6 +1042,7 @@ struct App<C: TuiApi> {
     selected_id: Option<String>,
     native_status: Option<NativeDesktopStatusResponse>,
     picker: Option<PickerState>,
+    initial_request: Option<InitialRequestState>,
     message: Option<(String, Instant)>,
     last_refresh: Option<Instant>,
     tick: u64,
@@ -1018,6 +1061,7 @@ impl<C: TuiApi> App<C> {
             selected_id: None,
             native_status: None,
             picker: None,
+            initial_request: None,
             message: None,
             last_refresh: None,
             tick: 0,
@@ -1086,12 +1130,21 @@ impl<C: TuiApi> App<C> {
         filtered[start..].to_vec()
     }
 
+    fn thought_entry_display_color(&self, entry: &ThoughtLogEntry) -> Color {
+        self.entities
+            .iter()
+            .find(|entity| entity.session.session_id == entry.session_id)
+            .map(|entity| session_display_color(&entity.session, &self.repo_themes))
+            .unwrap_or(entry.color)
+    }
+
     fn thought_repo_summaries(&self) -> Vec<ThoughtRepoSummary> {
         let mut grouped = HashMap::<String, ThoughtRepoSummary>::new();
         for (index, entry) in self.thought_log.iter().enumerate() {
             let Some(label) = entry.pwd_label.as_ref() else {
                 continue;
             };
+            let color = self.thought_entry_display_color(entry);
 
             let summary = grouped
                 .entry(entry.cwd.clone())
@@ -1099,11 +1152,11 @@ impl<C: TuiApi> App<C> {
                     cwd: entry.cwd.clone(),
                     label: label.clone(),
                     count: 0,
-                    color: entry.color,
+                    color,
                     last_seen: index,
                 });
             summary.count += 1;
-            summary.color = entry.color;
+            summary.color = color;
             summary.last_seen = index;
         }
 
@@ -1228,6 +1281,7 @@ impl<C: TuiApi> App<C> {
 
         next.sort_by(|a, b| a.session.tmux_name.cmp(&b.session.tmux_name));
         self.entities = next;
+        self.layout_sleeping_entities(field);
 
         let selection_missing = self
             .selected_id
@@ -1289,10 +1343,34 @@ impl<C: TuiApi> App<C> {
 
     fn tick(&mut self, field: Rect) {
         self.tick = self.tick.wrapping_add(1);
+        self.layout_sleeping_entities(field);
         for entity in &mut self.entities {
             entity.tick(field);
         }
         self.resolve_collisions(field);
+    }
+
+    fn layout_sleeping_entities(&mut self, field: Rect) {
+        let rows = sleep_grid_rows(field);
+        let mut sleeping_indices = self
+            .entities
+            .iter()
+            .enumerate()
+            .filter_map(|(index, entity)| entity.is_sleeping().then_some(index))
+            .collect::<Vec<_>>();
+
+        sleeping_indices.sort_by(|left, right| {
+            compare_sleepiness(
+                &self.entities[*left].session,
+                &self.entities[*right].session,
+            )
+        });
+
+        for (slot, entity_index) in sleeping_indices.into_iter().enumerate() {
+            let row = slot % rows;
+            let column = slot / rows;
+            self.entities[entity_index].set_grid_position(column, row);
+        }
     }
 
     fn resolve_collisions(&mut self, field: Rect) {
@@ -1303,10 +1381,17 @@ impl<C: TuiApi> App<C> {
                 let a_rect = a.screen_rect(field);
                 let b_rect = b.screen_rect(field);
                 if intersects(a_rect, b_rect) {
-                    std::mem::swap(&mut a.vx, &mut b.vx);
-                    std::mem::swap(&mut a.vy, &mut b.vy);
-                    a.x = (a.x - 1.0).max(0.0);
-                    b.x = (b.x + 1.0).min(field.width.saturating_sub(ENTITY_WIDTH) as f32);
+                    match (a.is_sleeping(), b.is_sleeping()) {
+                        (true, true) => {}
+                        (true, false) => separate_from_fixed_entity(b, a_rect, field),
+                        (false, true) => separate_from_fixed_entity(a, b_rect, field),
+                        (false, false) => {
+                            std::mem::swap(&mut a.vx, &mut b.vx);
+                            std::mem::swap(&mut a.vy, &mut b.vy);
+                            a.x = (a.x - 1.0).max(0.0);
+                            b.x = (b.x + 1.0).min(field.width.saturating_sub(ENTITY_WIDTH) as f32);
+                        }
+                    }
                 }
             }
         }
@@ -1348,6 +1433,7 @@ impl<C: TuiApi> App<C> {
 
     fn close_picker(&mut self) {
         self.picker = None;
+        self.initial_request = None;
     }
 
     fn open_picker(&mut self, x: u16, y: u16) {
@@ -1400,7 +1486,50 @@ impl<C: TuiApi> App<C> {
         self.picker_reload(Some(picker.current_path.clone()), managed_only);
     }
 
-    fn picker_activate_selection(&mut self, field: Rect) {
+    fn open_initial_request(&mut self, cwd: String) {
+        self.initial_request = Some(InitialRequestState::new(cwd));
+    }
+
+    fn close_initial_request(&mut self) {
+        self.initial_request = None;
+    }
+
+    fn handle_initial_request_key(&mut self, key: KeyEvent, field: Rect) {
+        match key.code {
+            KeyCode::Esc => self.close_initial_request(),
+            KeyCode::Enter => self.submit_initial_request(field),
+            KeyCode::Backspace => {
+                if let Some(initial_request) = &mut self.initial_request {
+                    initial_request.value.pop();
+                }
+            }
+            KeyCode::Char(ch)
+                if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT =>
+            {
+                if let Some(initial_request) = &mut self.initial_request {
+                    initial_request.value.push(ch);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn submit_initial_request(&mut self, field: Rect) {
+        let Some(initial_request) = self
+            .initial_request
+            .as_ref()
+            .and_then(InitialRequestState::trimmed_value)
+        else {
+            self.set_message("enter an initial request");
+            return;
+        };
+        let Some(cwd) = self.initial_request.as_ref().map(|state| state.cwd.clone()) else {
+            return;
+        };
+        self.spawn_session(&cwd, Some(initial_request), field);
+    }
+
+    fn picker_activate_selection(&mut self, _field: Rect) {
         let Some((selection, current_path, entry_path, has_children)) =
             self.picker.as_ref().map(|picker| match picker.selection {
                 PickerSelection::SpawnHere => (
@@ -1425,7 +1554,7 @@ impl<C: TuiApi> App<C> {
         };
 
         match selection {
-            PickerSelection::SpawnHere => self.spawn_session(&current_path, field),
+            PickerSelection::SpawnHere => self.open_initial_request(current_path),
             PickerSelection::Entry(_) if has_children => {
                 if let Some(path) = entry_path {
                     let managed_only = self
@@ -1438,17 +1567,18 @@ impl<C: TuiApi> App<C> {
             }
             PickerSelection::Entry(_) => {
                 if let Some(path) = entry_path {
-                    self.spawn_session(&path, field);
+                    self.open_initial_request(path);
                 }
             }
         }
     }
 
-    fn spawn_session(&mut self, cwd: &str, field: Rect) {
-        match self
-            .runtime
-            .block_on(self.client.create_session(cwd, SpawnTool::Codex))
-        {
+    fn spawn_session(&mut self, cwd: &str, initial_request: Option<String>, field: Rect) {
+        match self.runtime.block_on(self.client.create_session(
+            cwd,
+            SpawnTool::Codex,
+            initial_request,
+        )) {
             Ok(response) => {
                 let repo_theme = response.repo_theme.clone();
                 let session = response.session;
@@ -1458,7 +1588,7 @@ impl<C: TuiApi> App<C> {
                 self.upsert_session(session, field);
                 self.selected_id = Some(session_id.clone());
                 self.close_picker();
-                self.open_session_for_label(&session_id, &tmux_name);
+                self.set_message(format!("created {tmux_name}"));
             }
             Err(err) => self.set_message(err),
         }
@@ -1501,6 +1631,10 @@ impl<C: TuiApi> App<C> {
     }
 
     fn handle_field_click(&mut self, x: u16, y: u16, field: Rect) {
+        if self.initial_request.is_some() {
+            return;
+        }
+
         if let Some(picker) = &self.picker {
             let layout = picker_layout(picker, field);
             if layout.frame.contains(x, y) {
@@ -1540,7 +1674,7 @@ impl<C: TuiApi> App<C> {
         }
     }
 
-    fn spawn_session_from_picker(&mut self, field: Rect) {
+    fn spawn_session_from_picker(&mut self, _field: Rect) {
         let Some(path) = self
             .picker
             .as_ref()
@@ -1548,10 +1682,10 @@ impl<C: TuiApi> App<C> {
         else {
             return;
         };
-        self.spawn_session(&path, field);
+        self.open_initial_request(path);
     }
 
-    fn activate_picker_entry(&mut self, index: usize, field: Rect) {
+    fn activate_picker_entry(&mut self, index: usize, _field: Rect) {
         let Some((path, has_children, managed_only)) = self.picker.as_ref().and_then(|picker| {
             Some((
                 picker.path_for_entry(index)?,
@@ -1565,7 +1699,7 @@ impl<C: TuiApi> App<C> {
         if has_children {
             self.picker_reload(Some(path), managed_only);
         } else {
-            self.spawn_session(&path, field);
+            self.open_initial_request(path);
         }
     }
 
@@ -1648,6 +1782,9 @@ impl<C: TuiApi> App<C> {
 
         if let Some(picker) = &self.picker {
             render_picker(renderer, picker, layout.overview_field);
+        }
+        if let Some(initial_request) = &self.initial_request {
+            render_initial_request(renderer, initial_request, layout.overview_field);
         }
 
         render_footer(self, renderer, layout.footer_start_y);
@@ -1735,14 +1872,9 @@ fn session_theme_color(
 fn session_display_color(
     session: &SessionSummary,
     repo_themes: &HashMap<String, RepoTheme>,
-    selected: bool,
 ) -> Color {
-    if selected {
-        return Color::White;
-    }
-
     session_theme_color(session, repo_themes)
-        .unwrap_or_else(|| SpriteKind::from_session(session).color(false))
+        .unwrap_or_else(|| SpriteKind::from_session(session).color())
 }
 
 fn render_thought_panel<C: TuiApi>(
@@ -1887,6 +2019,7 @@ fn build_thought_panel<C: TuiApi>(
         .map(|entry| {
             let line = format_thought_line(entry, thought_content.width as usize);
             let visible_line_width = display_width(&line);
+            let color = app.thought_entry_display_color(entry);
             ThoughtRowLayout {
                 row_rect: (visible_line_width > 0).then_some(Rect {
                     x: thought_content.x,
@@ -1896,7 +2029,7 @@ fn build_thought_panel<C: TuiApi>(
                 }),
                 tmux_name: entry.tmux_name.clone(),
                 line,
-                color: entry.color,
+                color,
             }
         })
         .collect();
@@ -2200,6 +2333,81 @@ fn render_picker(renderer: &mut Renderer, picker: &PickerState, field: Rect) {
     }
 }
 
+fn initial_request_layout(field: Rect) -> InitialRequestLayout {
+    let width = INITIAL_REQUEST_WIDTH.min(field.width);
+    let height = INITIAL_REQUEST_HEIGHT.min(field.height);
+    let x = field.x + field.width.saturating_sub(width) / 2;
+    let y = field.y + field.height.saturating_sub(height) / 2;
+    let frame = Rect {
+        x,
+        y,
+        width,
+        height,
+    };
+    let content = frame.inset(1);
+
+    InitialRequestLayout {
+        frame,
+        content,
+        input_y: content.y + 3,
+    }
+}
+
+fn render_initial_request(
+    renderer: &mut Renderer,
+    initial_request: &InitialRequestState,
+    field: Rect,
+) {
+    let layout = initial_request_layout(field);
+    renderer.fill_rect(layout.frame, ' ', Color::Reset);
+    renderer.draw_box(layout.frame, Color::White);
+    renderer.draw_text(
+        layout.content.x,
+        layout.content.y,
+        "initial request",
+        Color::Cyan,
+    );
+
+    let cwd_line = format!(
+        "cwd: {}",
+        shorten_path(
+            &initial_request.cwd,
+            layout.content.width.saturating_sub(5) as usize,
+        )
+    );
+    renderer.draw_text(
+        layout.content.x,
+        layout.content.y + 1,
+        &truncate_label(&cwd_line, layout.content.width as usize),
+        Color::DarkGrey,
+    );
+    renderer.draw_text(
+        layout.content.x,
+        layout.content.y + 2,
+        "enter creates hidden thronglet  esc cancels",
+        Color::DarkGrey,
+    );
+
+    let input_x = layout.content.x;
+    renderer.draw_text(input_x, layout.input_y, "> ", Color::White);
+    let available = layout.content.width.saturating_sub(3) as usize;
+    let (text, color) = if initial_request.value.is_empty() {
+        ("type initial request".to_string(), Color::DarkGrey)
+    } else {
+        (tail_text(&initial_request.value, available), Color::White)
+    };
+    let visible = truncate_label(&text, available);
+    renderer.draw_text(input_x + 2, layout.input_y, &visible, color);
+    let cursor_x = if initial_request.value.is_empty() {
+        input_x + 2
+    } else {
+        input_x + 2 + visible.chars().count() as u16
+    };
+    if cursor_x < layout.content.right() {
+        renderer.draw_char(cursor_x, layout.input_y, '|', Color::Yellow);
+    }
+}
+
 fn render_entity(
     renderer: &mut Renderer,
     entity: &SessionEntity,
@@ -2209,7 +2417,7 @@ fn render_entity(
     repo_themes: &HashMap<String, RepoTheme>,
 ) {
     let kind = entity.sprite_kind();
-    let color = session_display_color(&entity.session, repo_themes, selected);
+    let color = session_display_color(&entity.session, repo_themes);
     let sprite = kind.frame(tick);
     for (dy, line) in sprite.iter().enumerate() {
         renderer.draw_text(rect.x, rect.y + dy as u16, line, color);
@@ -2262,7 +2470,9 @@ fn render_footer<C: TuiApi>(app: &App<C>, renderer: &mut Renderer, start_y: u16)
         renderer.draw_text(2, start_y, "selected: none", Color::DarkGrey);
     }
 
-    let help = if app.picker.is_some() {
+    let help = if app.initial_request.is_some() {
+        "request: type prompt  enter create hidden  backspace delete  esc cancel"
+    } else if app.picker.is_some() {
         "picker: enter/right select  up/down or jk move  h/backspace up  e env  a all  esc close"
     } else {
         "click empty field spawn  click/enter open  arrows or hjkl move  r refresh  q quit"
@@ -2328,6 +2538,44 @@ fn stable_hash(value: &str) -> u64 {
     hasher.finish()
 }
 
+fn sleep_grid_rows(field: Rect) -> usize {
+    usize::from((field.height / ENTITY_HEIGHT).max(1))
+}
+
+fn compare_sleepiness(left: &SessionSummary, right: &SessionSummary) -> Ordering {
+    left.last_activity_at
+        .cmp(&right.last_activity_at)
+        .then_with(|| left.tmux_name.cmp(&right.tmux_name))
+        .then_with(|| left.session_id.cmp(&right.session_id))
+}
+
+fn separate_from_fixed_entity(entity: &mut SessionEntity, obstacle: Rect, field: Rect) {
+    let max_x = field.width.saturating_sub(ENTITY_WIDTH);
+    let max_y = field.height.saturating_sub(ENTITY_HEIGHT);
+    let entity_rect = entity.screen_rect(field);
+    let entity_center_x = u32::from(entity_rect.x) + u32::from(entity_rect.width / 2);
+    let obstacle_center_x = u32::from(obstacle.x) + u32::from(obstacle.width / 2);
+    let entity_center_y = u32::from(entity_rect.y) + u32::from(entity_rect.height / 2);
+    let obstacle_center_y = u32::from(obstacle.y) + u32::from(obstacle.height / 2);
+    let obstacle_rel_x = obstacle.x.saturating_sub(field.x);
+    let obstacle_rel_y = obstacle.y.saturating_sub(field.y);
+    let obstacle_rel_right = obstacle_rel_x.saturating_add(obstacle.width);
+    let obstacle_rel_bottom = obstacle_rel_y.saturating_add(obstacle.height);
+
+    entity.vx = -entity.vx;
+    entity.vy = -entity.vy;
+    entity.x = if entity_center_x < obstacle_center_x {
+        obstacle_rel_x.saturating_sub(ENTITY_WIDTH) as f32
+    } else {
+        obstacle_rel_right.min(max_x) as f32
+    };
+    entity.y = if entity_center_y < obstacle_center_y {
+        obstacle_rel_y.saturating_sub(ENTITY_HEIGHT) as f32
+    } else {
+        obstacle_rel_bottom.min(max_y) as f32
+    };
+}
+
 fn velocity_component(hash: u64, axis: u64) -> f32 {
     let segment = ((hash >> (axis * 8)) & 0xff) as f32 / 255.0;
     let speed = 0.05 + segment * 0.09;
@@ -2364,6 +2612,17 @@ fn truncate_label(text: &str, max_chars: usize) -> String {
     let mut out: String = chars.into_iter().collect();
     out.push('~');
     out
+}
+
+fn tail_text(text: &str, max_chars: usize) -> String {
+    let chars = text.chars().collect::<Vec<_>>();
+    if chars.len() <= max_chars {
+        return chars.into_iter().collect();
+    }
+    if max_chars == 0 {
+        return String::new();
+    }
+    chars[chars.len() - max_chars..].iter().collect()
 }
 
 fn shorten_path(path: &str, max_chars: usize) -> String {
@@ -2407,10 +2666,11 @@ fn intersects(a: Rect, b: Rect) -> bool {
 
 fn session_state_text(session: &SessionSummary) -> &'static str {
     match session.state {
-        SessionState::Idle => match session.thought_state {
-            ThoughtState::Active => "active",
-            ThoughtState::Holding => "drowsy",
-            ThoughtState::Sleeping => "sleeping",
+        SessionState::Idle => match session.rest_state {
+            RestState::Active => "active",
+            RestState::Drowsy => "drowsy",
+            RestState::Sleeping => "sleeping",
+            RestState::DeepSleep => "deep sleep",
         },
         SessionState::Busy => "busy",
         SessionState::Attention => "attention",
@@ -2449,57 +2709,70 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         if event::poll(FRAME_DURATION)? {
             match event::read()? {
-                Event::Key(key) if key.kind == KeyEventKind::Press => match key.code {
-                    KeyCode::Char('q') => break,
-                    KeyCode::Esc => {
-                        if app.picker.is_some() {
-                            app.close_picker();
-                        } else {
-                            break;
-                        }
+                Event::Key(key) if key.kind == KeyEventKind::Press => {
+                    if app.initial_request.is_some() {
+                        app.handle_initial_request_key(key, layout.overview_field);
+                        continue;
                     }
-                    KeyCode::Left | KeyCode::Char('h') | KeyCode::Backspace => {
-                        if app.picker.is_some() {
-                            app.picker_up();
-                        } else {
+
+                    match key.code {
+                        KeyCode::Char('q') => break,
+                        KeyCode::Esc => {
+                            if app.picker.is_some() {
+                                app.close_picker();
+                            } else {
+                                break;
+                            }
+                        }
+                        KeyCode::Left | KeyCode::Char('h') | KeyCode::Backspace => {
+                            if app.picker.is_some() {
+                                app.picker_up();
+                            } else {
+                                app.move_selection(-1, layout.overview_field);
+                            }
+                        }
+                        KeyCode::Up | KeyCode::Char('k') => {
                             app.move_selection(-1, layout.overview_field);
                         }
-                    }
-                    KeyCode::Up | KeyCode::Char('k') => {
-                        app.move_selection(-1, layout.overview_field);
-                    }
-                    KeyCode::Down | KeyCode::Char('j') => {
-                        app.move_selection(1, layout.overview_field);
-                    }
-                    KeyCode::Right | KeyCode::Char('l') | KeyCode::Enter | KeyCode::Char('o') => {
-                        if app.picker.is_some() {
-                            app.picker_activate_selection(layout.overview_field);
-                        } else {
-                            app.open_selected();
+                        KeyCode::Down | KeyCode::Char('j') => {
+                            app.move_selection(1, layout.overview_field);
                         }
-                    }
-                    KeyCode::Char('e') => {
-                        app.picker_set_managed_only(true);
-                    }
-                    KeyCode::Char('a') => {
-                        app.picker_set_managed_only(false);
-                    }
-                    KeyCode::Char('r') => {
-                        if let Some((path, managed_only)) = app
-                            .picker
-                            .as_ref()
-                            .map(|picker| (picker.current_path.clone(), picker.managed_only))
-                        {
-                            app.picker_reload(Some(path), managed_only);
-                        } else {
-                            app.refresh(layout);
+                        KeyCode::Right
+                        | KeyCode::Char('l')
+                        | KeyCode::Enter
+                        | KeyCode::Char('o') => {
+                            if app.picker.is_some() {
+                                app.picker_activate_selection(layout.overview_field);
+                            } else {
+                                app.open_selected();
+                            }
                         }
+                        KeyCode::Char('e') => {
+                            app.picker_set_managed_only(true);
+                        }
+                        KeyCode::Char('a') => {
+                            app.picker_set_managed_only(false);
+                        }
+                        KeyCode::Char('r') => {
+                            if let Some((path, managed_only)) = app
+                                .picker
+                                .as_ref()
+                                .map(|picker| (picker.current_path.clone(), picker.managed_only))
+                            {
+                                app.picker_reload(Some(path), managed_only);
+                            } else {
+                                app.refresh(layout);
+                            }
+                        }
+                        _ => {}
                     }
-                    _ => {}
-                },
+                }
                 Event::Mouse(mouse)
                     if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) =>
                 {
+                    if app.initial_request.is_some() {
+                        continue;
+                    }
                     if let Some(thought_box) = layout.thought_box {
                         if thought_box.contains(mouse.column, mouse.row) {
                             if let Some(thought_content) = layout.thought_content {
@@ -2536,7 +2809,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use chrono::Utc;
-    use throngterm::types::{ThoughtSource, TransportHealth};
+    use throngterm::types::{ThoughtSource, ThoughtState, TransportHealth};
 
     #[derive(Default)]
     struct MockApiState {
@@ -2547,7 +2820,7 @@ mod tests {
         create_session_results: VecDeque<Result<CreateSessionResponse, String>>,
         open_calls: Vec<String>,
         list_calls: Vec<(Option<String>, bool)>,
-        create_calls: Vec<(String, SpawnTool)>,
+        create_calls: Vec<(String, SpawnTool, Option<String>)>,
     }
 
     #[derive(Clone, Default)]
@@ -2596,7 +2869,7 @@ mod tests {
             self.state.lock().unwrap().list_calls.clone()
         }
 
-        fn create_calls(&self) -> Vec<(String, SpawnTool)> {
+        fn create_calls(&self) -> Vec<(String, SpawnTool, Option<String>)> {
             self.state.lock().unwrap().create_calls.clone()
         }
 
@@ -2676,12 +2949,13 @@ mod tests {
             &self,
             cwd: &str,
             spawn_tool: SpawnTool,
+            initial_request: Option<String>,
         ) -> BoxFuture<'_, Result<CreateSessionResponse, String>> {
             let state = self.state.clone();
             let cwd = cwd.to_string();
             Box::pin(async move {
                 let mut state = state.lock().unwrap();
-                state.create_calls.push((cwd, spawn_tool));
+                state.create_calls.push((cwd, spawn_tool, initial_request));
                 state
                     .create_session_results
                     .pop_front()
@@ -2741,6 +3015,7 @@ mod tests {
             thought_state: ThoughtState::Holding,
             thought_source: ThoughtSource::CarryForward,
             thought_updated_at: None,
+            rest_state: RestState::Drowsy,
             last_skill: None,
             is_stale: false,
             attached_clients: 0,
@@ -2767,7 +3042,21 @@ mod tests {
         let mut session = session_summary(session_id, tmux_name, cwd);
         session.thought = Some(thought.to_string());
         session.thought_state = ThoughtState::Active;
+        session.rest_state = RestState::Active;
         session.thought_updated_at = Some(timestamp(updated_at));
+        session
+    }
+
+    fn sleeping_session(
+        session_id: &str,
+        tmux_name: &str,
+        cwd: &str,
+        last_activity_at: &str,
+    ) -> SessionSummary {
+        let mut session = session_summary(session_id, tmux_name, cwd);
+        session.thought_state = ThoughtState::Sleeping;
+        session.rest_state = RestState::Sleeping;
+        session.last_activity_at = timestamp(last_activity_at);
         session
     }
 
@@ -2814,6 +3103,24 @@ mod tests {
         entity.x = x.saturating_sub(field.x) as f32;
         entity.y = y.saturating_sub(field.y) as f32;
         entity
+    }
+
+    fn entity_rect_for(app: &App<MockApi>, session_id: &str, field: Rect) -> Rect {
+        app.entities
+            .iter()
+            .find(|entity| entity.session.session_id == session_id)
+            .expect("entity should exist")
+            .screen_rect(field)
+    }
+
+    fn sleep_grid_rect(field: Rect, slot: usize) -> Rect {
+        let rows = sleep_grid_rows(field);
+        Rect {
+            x: field.x + (slot / rows) as u16 * ENTITY_WIDTH,
+            y: field.y + (slot % rows) as u16 * ENTITY_HEIGHT,
+            width: ENTITY_WIDTH,
+            height: ENTITY_HEIGHT,
+        }
     }
 
     #[test]
@@ -3344,6 +3651,43 @@ mod tests {
     }
 
     #[test]
+    fn thought_history_rows_follow_live_session_color() {
+        let api = MockApi::new();
+        let layout = test_layout(120, 32);
+        let thought_content = layout
+            .thought_content
+            .expect("wide layout enables thought rail");
+        let mut app = make_app(api);
+
+        let mut session = session_summary_with_thought(
+            "sess-1",
+            "alpha",
+            "/Users/b/repos/throngterm",
+            "patching tui",
+            "2026-03-08T14:00:05Z",
+        );
+        session.state = SessionState::Busy;
+
+        app.capture_thought_updates(&[session.clone()], layout.thought_entry_capacity());
+        app.merge_sessions(vec![session.clone()], layout.overview_field);
+
+        session.state = SessionState::Attention;
+        session.last_activity_at = timestamp("2026-03-08T14:00:06Z");
+        app.merge_sessions(vec![session], layout.overview_field);
+
+        let panel = build_thought_panel(&app, thought_content, layout.thought_entry_capacity());
+        let chip = panel
+            .chips
+            .iter()
+            .find(|chip| chip.label == "1xthrongterm")
+            .expect("repo chip should exist");
+
+        assert_eq!(panel.rows.len(), 1);
+        assert_eq!(panel.rows[0].color, Color::Magenta);
+        assert_eq!(chip.color, Color::Magenta);
+    }
+
+    #[test]
     fn render_entity_uses_repo_theme_body_color() {
         let field = test_layout(120, 32).overview_field;
         let mut session = session_summary("sess-1", "alpha", "/Users/b/repos/buildooor");
@@ -3371,6 +3715,201 @@ mod tests {
                 r: 184,
                 g: 152,
                 b: 117,
+            }
+        );
+    }
+
+    #[test]
+    fn sleeping_entity_pins_to_top_left_grid_slot() {
+        let api = MockApi::new();
+        let field = test_field();
+        let mut app = make_app(api);
+
+        app.merge_sessions(
+            vec![sleeping_session(
+                "sess-sleep-1",
+                "7",
+                "/Users/b/repos/throngterm",
+                "2026-03-08T12:00:00Z",
+            )],
+            field,
+        );
+
+        assert_eq!(
+            entity_rect_for(&app, "sess-sleep-1", field),
+            sleep_grid_rect(field, 0)
+        );
+    }
+
+    #[test]
+    fn sleeping_entities_fill_vertical_grid_by_sleepiness() {
+        let api = MockApi::new();
+        let field = test_field();
+        let mut app = make_app(api);
+
+        app.merge_sessions(
+            vec![
+                sleeping_session(
+                    "sess-new",
+                    "8",
+                    "/Users/b/repos/throngterm",
+                    "2026-03-08T12:20:00Z",
+                ),
+                sleeping_session(
+                    "sess-mid",
+                    "7",
+                    "/Users/b/repos/throngterm",
+                    "2026-03-08T12:10:00Z",
+                ),
+                sleeping_session(
+                    "sess-old",
+                    "9",
+                    "/Users/b/repos/throngterm",
+                    "2026-03-08T12:00:00Z",
+                ),
+            ],
+            field,
+        );
+
+        assert_eq!(
+            entity_rect_for(&app, "sess-old", field),
+            sleep_grid_rect(field, 0)
+        );
+        assert_eq!(
+            entity_rect_for(&app, "sess-mid", field),
+            sleep_grid_rect(field, 1)
+        );
+        assert_eq!(
+            entity_rect_for(&app, "sess-new", field),
+            sleep_grid_rect(field, 2)
+        );
+    }
+
+    #[test]
+    fn sleeping_entities_use_tmux_name_tiebreaker() {
+        let api = MockApi::new();
+        let field = test_field();
+        let mut app = make_app(api);
+
+        app.merge_sessions(
+            vec![
+                sleeping_session(
+                    "sess-b",
+                    "8",
+                    "/Users/b/repos/throngterm",
+                    "2026-03-08T12:00:00Z",
+                ),
+                sleeping_session(
+                    "sess-a",
+                    "7",
+                    "/Users/b/repos/throngterm",
+                    "2026-03-08T12:00:00Z",
+                ),
+            ],
+            field,
+        );
+
+        assert_eq!(
+            entity_rect_for(&app, "sess-a", field),
+            sleep_grid_rect(field, 0)
+        );
+        assert_eq!(
+            entity_rect_for(&app, "sess-b", field),
+            sleep_grid_rect(field, 1)
+        );
+    }
+
+    #[test]
+    fn existing_entity_relocates_into_sleep_grid_when_it_falls_asleep() {
+        let api = MockApi::new();
+        let field = test_field();
+        let mut app = make_app(api);
+        app.entities.push(entity_at(
+            field,
+            "sess-1",
+            "dev",
+            "/Users/b/repos/dev",
+            30,
+            8,
+        ));
+
+        app.merge_sessions(
+            vec![sleeping_session(
+                "sess-1",
+                "dev",
+                "/Users/b/repos/dev",
+                "2026-03-08T12:00:00Z",
+            )],
+            field,
+        );
+
+        assert_eq!(
+            entity_rect_for(&app, "sess-1", field),
+            sleep_grid_rect(field, 0)
+        );
+    }
+
+    #[test]
+    fn sleeping_entities_stay_fixed_after_tick() {
+        let api = MockApi::new();
+        let field = test_field();
+        let mut app = make_app(api);
+
+        app.merge_sessions(
+            vec![
+                sleeping_session(
+                    "sess-a",
+                    "7",
+                    "/Users/b/repos/throngterm",
+                    "2026-03-08T12:00:00Z",
+                ),
+                sleeping_session(
+                    "sess-b",
+                    "8",
+                    "/Users/b/repos/throngterm",
+                    "2026-03-08T12:10:00Z",
+                ),
+            ],
+            field,
+        );
+        for entity in &mut app.entities {
+            entity.vx = 1.0;
+            entity.vy = 1.0;
+        }
+
+        app.tick(field);
+
+        assert_eq!(
+            entity_rect_for(&app, "sess-a", field),
+            sleep_grid_rect(field, 0)
+        );
+        assert_eq!(
+            entity_rect_for(&app, "sess-b", field),
+            sleep_grid_rect(field, 1)
+        );
+    }
+
+    #[test]
+    fn non_sleeping_entities_keep_their_normal_motion() {
+        let api = MockApi::new();
+        let field = test_field();
+        let mut app = make_app(api);
+        let mut entity = entity_at(field, "sess-1", "dev", "/Users/b/repos/dev", 30, 8);
+        entity.session.thought_state = ThoughtState::Active;
+        entity.session.rest_state = RestState::Active;
+        entity.vx = 1.0;
+        entity.vy = 1.0;
+        app.entities.push(entity);
+
+        app.tick(field);
+
+        assert_eq!(
+            entity_rect_for(&app, "sess-1", field),
+            Rect {
+                x: 31,
+                y: 9,
+                width: ENTITY_WIDTH,
+                height: ENTITY_HEIGHT,
             }
         );
     }
@@ -3446,23 +3985,13 @@ mod tests {
     }
 
     #[test]
-    fn navigating_into_folder_creates_and_opens_codex_session() {
+    fn navigating_into_folder_opens_initial_request_composer() {
         let api = MockApi::new();
         api.push_list_dirs(Ok(dir_response("/Users/b/repos", &[("opensource", true)])));
         api.push_list_dirs(Ok(dir_response(
             "/Users/b/repos/opensource",
             &[("skills", false)],
         )));
-        api.push_create_session(Ok(create_response(
-            "sess-42",
-            "42",
-            "/Users/b/repos/opensource/skills",
-        )));
-        api.push_open_session(Ok(NativeDesktopOpenResponse {
-            session_id: "sess-42".to_string(),
-            status: "opened".to_string(),
-            pane_id: None,
-        }));
 
         let field = test_field();
         let mut app = make_app(api.clone());
@@ -3480,36 +4009,19 @@ mod tests {
         );
         assert_eq!(
             api.create_calls(),
-            vec![(
-                "/Users/b/repos/opensource/skills".to_string(),
-                SpawnTool::Codex,
-            )]
+            Vec::<(String, SpawnTool, Option<String>)>::new()
         );
-        assert_eq!(api.open_calls(), vec!["sess-42".to_string()]);
-        assert_eq!(app.selected_id.as_deref(), Some("sess-42"));
+        assert!(api.open_calls().is_empty());
         assert_eq!(
-            app.message.as_ref().map(|(message, _)| message.as_str()),
-            Some("opened 42")
+            app.initial_request.as_ref().map(|state| state.cwd.as_str()),
+            Some("/Users/b/repos/opensource/skills")
         );
-        assert!(app
-            .entities
-            .iter()
-            .any(|entity| entity.session.session_id == "sess-42"));
+        assert!(app.picker.is_some());
     }
 
     #[test]
-    fn spawn_here_uses_current_path_with_codex() {
+    fn spawn_here_opens_initial_request_for_current_path() {
         let api = MockApi::new();
-        api.push_create_session(Ok(create_response(
-            "sess-55",
-            "55",
-            "/Users/b/repos/opensource",
-        )));
-        api.push_open_session(Ok(NativeDesktopOpenResponse {
-            session_id: "sess-55".to_string(),
-            status: "opened".to_string(),
-            pane_id: None,
-        }));
         let field = test_field();
         let mut app = make_app(api.clone());
         app.picker = Some(PickerState::new(
@@ -3521,12 +4033,12 @@ mod tests {
 
         app.spawn_session_from_picker(field);
 
+        assert!(api.create_calls().is_empty());
+        assert!(api.open_calls().is_empty());
         assert_eq!(
-            api.create_calls(),
-            vec![("/Users/b/repos/opensource".to_string(), SpawnTool::Codex)]
+            app.initial_request.as_ref().map(|state| state.cwd.as_str()),
+            Some("/Users/b/repos/opensource")
         );
-        assert_eq!(api.open_calls(), vec!["sess-55".to_string()]);
-        assert_eq!(app.selected_id.as_deref(), Some("sess-55"));
     }
 
     #[test]
@@ -3578,22 +4090,85 @@ mod tests {
     }
 
     #[test]
-    fn session_create_failure_does_not_attempt_native_open() {
+    fn submitting_initial_request_creates_hidden_session_without_native_open() {
         let api = MockApi::new();
-        api.push_list_dirs(Ok(dir_response("/Users/b/repos", &[("throngterm", false)])));
-        api.push_create_session(Err("tmux failed to start".to_string()));
+        api.push_create_session(Ok(create_response(
+            "sess-55",
+            "55",
+            "/Users/b/repos/throngterm",
+        )));
         let field = test_field();
         let mut app = make_app(api.clone());
+        app.picker = Some(PickerState::new(
+            10,
+            10,
+            dir_response("/Users/b/repos", &[("throngterm", false)]),
+            true,
+        ));
+        app.initial_request = Some(InitialRequestState {
+            cwd: "/Users/b/repos/throngterm".to_string(),
+            value: "add hidden spawn flow".to_string(),
+        });
 
-        app.handle_field_click(10, 10, field);
-        app.activate_picker_entry(0, field);
+        app.submit_initial_request(field);
 
         assert_eq!(
             api.create_calls(),
-            vec![("/Users/b/repos/throngterm".to_string(), SpawnTool::Codex)]
+            vec![(
+                "/Users/b/repos/throngterm".to_string(),
+                SpawnTool::Codex,
+                Some("add hidden spawn flow".to_string()),
+            )]
+        );
+        assert!(api.open_calls().is_empty());
+        assert_eq!(app.selected_id.as_deref(), Some("sess-55"));
+        assert!(app.picker.is_none());
+        assert!(app.initial_request.is_none());
+        assert_eq!(
+            app.message.as_ref().map(|(message, _)| message.as_str()),
+            Some("created 55")
+        );
+        assert!(app
+            .entities
+            .iter()
+            .any(|entity| entity.session.session_id == "sess-55"));
+    }
+
+    #[test]
+    fn session_create_failure_does_not_attempt_native_open() {
+        let api = MockApi::new();
+        api.push_create_session(Err("tmux failed to start".to_string()));
+        let field = test_field();
+        let mut app = make_app(api.clone());
+        app.picker = Some(PickerState::new(
+            10,
+            10,
+            dir_response("/Users/b/repos", &[("throngterm", false)]),
+            true,
+        ));
+        app.initial_request = Some(InitialRequestState {
+            cwd: "/Users/b/repos/throngterm".to_string(),
+            value: "fix tmux startup".to_string(),
+        });
+
+        app.submit_initial_request(field);
+
+        assert_eq!(
+            api.create_calls(),
+            vec![(
+                "/Users/b/repos/throngterm".to_string(),
+                SpawnTool::Codex,
+                Some("fix tmux startup".to_string()),
+            )]
         );
         assert!(api.open_calls().is_empty());
         assert!(app.entities.is_empty());
+        assert_eq!(
+            app.initial_request
+                .as_ref()
+                .map(|state| state.value.as_str()),
+            Some("fix tmux startup")
+        );
         assert_eq!(
             app.message.as_ref().map(|(message, _)| message.as_str()),
             Some("tmux failed to start")
@@ -3601,30 +4176,47 @@ mod tests {
     }
 
     #[test]
-    fn native_open_failure_preserves_created_session() {
+    fn blank_initial_request_is_rejected_locally() {
         let api = MockApi::new();
-        api.push_list_dirs(Ok(dir_response("/Users/b/repos", &[("throngterm", false)])));
-        api.push_create_session(Ok(create_response(
-            "sess-77",
-            "77",
-            "/Users/b/repos/throngterm",
-        )));
-        api.push_open_session(Err("native open unavailable".to_string()));
         let field = test_field();
         let mut app = make_app(api.clone());
+        app.initial_request = Some(InitialRequestState {
+            cwd: "/Users/b/repos/throngterm".to_string(),
+            value: "   ".to_string(),
+        });
 
-        app.handle_field_click(10, 10, field);
-        app.activate_picker_entry(0, field);
+        app.submit_initial_request(field);
 
-        assert_eq!(api.open_calls(), vec!["sess-77".to_string()]);
-        assert!(app
-            .entities
-            .iter()
-            .any(|entity| entity.session.session_id == "sess-77"));
+        assert!(api.create_calls().is_empty());
+        assert!(api.open_calls().is_empty());
         assert_eq!(
             app.message.as_ref().map(|(message, _)| message.as_str()),
-            Some("native open unavailable")
+            Some("enter an initial request")
         );
+    }
+
+    #[test]
+    fn esc_cancels_initial_request_without_creating_session() {
+        let api = MockApi::new();
+        let field = test_field();
+        let mut app = make_app(api.clone());
+        app.picker = Some(PickerState::new(
+            10,
+            10,
+            dir_response("/Users/b/repos", &[("throngterm", false)]),
+            true,
+        ));
+        app.initial_request = Some(InitialRequestState {
+            cwd: "/Users/b/repos/throngterm".to_string(),
+            value: "investigate snapshot restore".to_string(),
+        });
+
+        app.handle_initial_request_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), field);
+
+        assert!(api.create_calls().is_empty());
+        assert!(api.open_calls().is_empty());
+        assert!(app.initial_request.is_none());
+        assert!(app.picker.is_some());
     }
 
     #[test]
