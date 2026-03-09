@@ -20,7 +20,7 @@ use reqwest::Client;
 use tokio::runtime::Runtime;
 
 use throngterm::config::{AuthMode, Config};
-use throngterm::repo_theme::discover_repo_theme;
+use throngterm::repo_theme::{discover_repo_theme, existing_repo_theme};
 use throngterm::types::{
     CreateSessionRequest, CreateSessionResponse, DirEntry, DirListResponse, ErrorResponse,
     NativeDesktopOpenRequest, NativeDesktopOpenResponse, NativeDesktopStatusResponse, RepoTheme,
@@ -72,6 +72,26 @@ struct Renderer {
     active: bool,
 }
 
+fn enter_terminal_ui(writer: &mut impl Write) -> io::Result<()> {
+    execute!(
+        writer,
+        EnterAlternateScreen,
+        EnableMouseCapture,
+        cursor::Hide,
+        Clear(ClearType::All)
+    )
+}
+
+fn leave_terminal_ui(writer: &mut impl Write) -> io::Result<()> {
+    execute!(
+        writer,
+        DisableMouseCapture,
+        LeaveAlternateScreen,
+        cursor::Show,
+        ResetColor
+    )
+}
+
 impl Renderer {
     fn new() -> io::Result<Self> {
         if !io::stdout().is_terminal() {
@@ -92,13 +112,7 @@ impl Renderer {
 
     fn init(&mut self) -> io::Result<()> {
         terminal::enable_raw_mode()?;
-        execute!(
-            self.stdout,
-            EnterAlternateScreen,
-            EnableMouseCapture,
-            cursor::Hide,
-            Clear(ClearType::All)
-        )?;
+        enter_terminal_ui(&mut self.stdout)?;
         self.active = true;
         Ok(())
     }
@@ -107,13 +121,7 @@ impl Renderer {
         if !self.active {
             return Ok(());
         }
-        execute!(
-            self.stdout,
-            LeaveAlternateScreen,
-            DisableMouseCapture,
-            cursor::Show,
-            ResetColor
-        )?;
+        leave_terminal_ui(&mut self.stdout)?;
         terminal::disable_raw_mode()?;
         self.active = false;
         Ok(())
@@ -817,6 +825,8 @@ struct PickerState {
     base_path: String,
     current_path: String,
     entries: Vec<DirEntry>,
+    current_theme_color: Option<Color>,
+    entry_theme_colors: Vec<Option<Color>>,
     managed_only: bool,
     selection: PickerSelection,
     scroll: usize,
@@ -830,6 +840,8 @@ impl PickerState {
             base_path: response.path.clone(),
             current_path: response.path,
             entries: response.entries,
+            current_theme_color: None,
+            entry_theme_colors: Vec::new(),
             managed_only,
             selection: PickerSelection::SpawnHere,
             scroll: 0,
@@ -839,8 +851,23 @@ impl PickerState {
     fn apply_response(&mut self, response: DirListResponse) {
         self.current_path = response.path;
         self.entries = response.entries;
+        self.current_theme_color = None;
+        self.entry_theme_colors.clear();
         self.selection = PickerSelection::SpawnHere;
         self.scroll = 0;
+    }
+
+    fn sync_theme_colors(&mut self, repo_themes: &mut HashMap<String, RepoTheme>) {
+        self.current_theme_color = picker_theme_color_for_path(&self.current_path, repo_themes);
+        self.entry_theme_colors = self
+            .entries
+            .iter()
+            .enumerate()
+            .map(|(index, _)| {
+                self.path_for_entry(index)
+                    .and_then(|path| picker_theme_color_for_path(&path, repo_themes))
+            })
+            .collect();
     }
 
     fn at_root(&self) -> bool {
@@ -1580,7 +1607,9 @@ impl<C: TuiApi> App<C> {
     fn open_picker(&mut self, x: u16, y: u16) {
         match self.runtime.block_on(self.client.list_dirs(None, true)) {
             Ok(response) => {
-                self.picker = Some(PickerState::new(x, y, response, true));
+                let mut picker = PickerState::new(x, y, response, true);
+                picker.sync_theme_colors(&mut self.repo_themes);
+                self.picker = Some(picker);
             }
             Err(err) => {
                 self.set_message(err);
@@ -1599,6 +1628,7 @@ impl<C: TuiApi> App<C> {
                 if let Some(picker) = &mut self.picker {
                     picker.managed_only = managed_only;
                     picker.apply_response(response);
+                    picker.sync_theme_colors(&mut self.repo_themes);
                 }
             }
             Err(err) => self.set_message(err),
@@ -2550,16 +2580,28 @@ fn picker_action_at(
     None
 }
 
+fn picker_theme_color_for_path(
+    path: &str,
+    repo_themes: &mut HashMap<String, RepoTheme>,
+) -> Option<Color> {
+    let (theme_id, theme) = existing_repo_theme(path)?;
+    let color = parse_hex_color(&theme.body)?;
+    repo_themes.insert(theme_id, theme);
+    Some(color)
+}
+
 fn render_picker(renderer: &mut Renderer, picker: &PickerState, field: Rect) {
     let layout = picker_layout(picker, field);
+    let picker_color = picker.current_theme_color.unwrap_or(Color::White);
+    let picker_accent = picker.current_theme_color.unwrap_or(Color::Cyan);
     renderer.fill_rect(layout.frame, ' ', Color::Reset);
-    renderer.draw_box(layout.frame, Color::White);
+    renderer.draw_box(layout.frame, picker_color);
 
     renderer.draw_text(
         layout.content.x,
         layout.content.y,
         "spawn codex",
-        Color::Cyan,
+        picker_accent,
     );
     renderer.draw_text(
         layout.close_button.x,
@@ -2577,7 +2619,7 @@ fn render_picker(renderer: &mut Renderer, picker: &PickerState, field: Rect) {
         .unwrap_or(layout.content.x);
     let path_width = layout.content.right().saturating_sub(path_x) as usize;
     let path_label = truncate_label(&picker.relative_label(), path_width);
-    renderer.draw_text(path_x, layout.content.y + 1, &path_label, Color::White);
+    renderer.draw_text(path_x, layout.content.y + 1, &path_label, picker_color);
 
     renderer.draw_text(
         layout.env_button.x,
@@ -2601,9 +2643,9 @@ fn render_picker(renderer: &mut Renderer, picker: &PickerState, field: Rect) {
     );
 
     let spawn_color = if matches!(picker.selection, PickerSelection::SpawnHere) {
-        Color::White
+        picker.current_theme_color.unwrap_or(Color::White)
     } else {
-        Color::Yellow
+        picker.current_theme_color.unwrap_or(Color::Yellow)
     };
     let spawn_line = format!(
         "{} + spawn here",
@@ -2648,8 +2690,11 @@ fn render_picker(renderer: &mut Renderer, picker: &PickerState, field: Rect) {
             None => "",
         };
         let line = format!("{marker} {icon} {}{}", entry.name, running);
+        let themed_color = picker.entry_theme_colors.get(index).copied().flatten();
         let color = if picker.selection == PickerSelection::Entry(index) {
-            Color::White
+            themed_color.unwrap_or(Color::White)
+        } else if let Some(theme_color) = themed_color {
+            theme_color
         } else if entry.has_children {
             Color::Cyan
         } else {
@@ -3171,9 +3216,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 mod tests {
     use super::*;
     use std::collections::VecDeque;
+    use std::fs;
     use std::sync::{Arc, Mutex};
 
     use chrono::Utc;
+    use tempfile::tempdir;
     use throngterm::types::{ThoughtSource, ThoughtState, TransportHealth};
 
     #[derive(Default)]
@@ -3366,6 +3413,36 @@ mod tests {
         }
     }
 
+    #[test]
+    fn leave_terminal_ui_disables_mouse_before_leaving_alt_screen() {
+        let mut output = Vec::new();
+
+        leave_terminal_ui(&mut output).expect("leave terminal UI should write ANSI codes");
+
+        assert_eq!(
+            String::from_utf8(output).expect("terminal teardown output should be valid utf-8"),
+            concat!(
+                "\u{1b}[?1006l",
+                "\u{1b}[?1015l",
+                "\u{1b}[?1003l",
+                "\u{1b}[?1002l",
+                "\u{1b}[?1000l",
+                "\u{1b}[?1049l",
+                "\u{1b}[?25h",
+                "\u{1b}[0m",
+            )
+        );
+    }
+
+    #[test]
+    fn cleanup_is_noop_when_renderer_is_inactive() {
+        let mut renderer = test_renderer(80, 24);
+
+        renderer.cleanup().expect("inactive cleanup should succeed");
+
+        assert!(!renderer.active);
+    }
+
     fn cell_at(renderer: &Renderer, x: u16, y: u16) -> Cell {
         renderer.buffer[(y as usize) * (renderer.width as usize) + (x as usize)]
     }
@@ -3483,6 +3560,25 @@ mod tests {
                 })
                 .collect(),
         }
+    }
+
+    fn write_repo_theme_file(path: &std::path::Path, body: &str) {
+        let throngterm_dir = path.join(".throngterm");
+        fs::create_dir_all(&throngterm_dir).expect("create .throngterm");
+        let contents = format!(
+            concat!(
+                "{{\n",
+                "  \"palette\": {{\n",
+                "    \"body\": \"{}\",\n",
+                "    \"outline\": \"#3D2F24\",\n",
+                "    \"accent\": \"#1D1914\",\n",
+                "    \"shirt\": \"#AA9370\"\n",
+                "  }}\n",
+                "}}\n"
+            ),
+            body,
+        );
+        fs::write(throngterm_dir.join("colors.json"), contents).expect("write colors.json");
     }
 
     fn create_response(session_id: &str, tmux_name: &str, cwd: &str) -> CreateSessionResponse {
@@ -4607,6 +4703,87 @@ mod tests {
         assert_eq!(session_state_text(&active), "attention");
         assert_eq!(session_state_text(&drowsy), "drowsy");
         assert_eq!(session_state_text(&sleeping), "sleeping");
+    }
+
+    #[test]
+    fn render_picker_uses_current_repo_theme_color() {
+        let temp = tempdir().expect("tempdir");
+        let repo_root = temp.path().join("buildooor");
+        fs::create_dir_all(&repo_root).expect("create repo");
+        write_repo_theme_file(&repo_root, "#B89875");
+
+        let mut picker = PickerState::new(
+            2,
+            2,
+            dir_response(repo_root.to_string_lossy().as_ref(), &[("src", true)]),
+            true,
+        );
+        let mut repo_themes = HashMap::new();
+        picker.sync_theme_colors(&mut repo_themes);
+
+        let field = test_field();
+        let layout = picker_layout(&picker, field);
+        let mut renderer = test_renderer(100, 30);
+
+        render_picker(&mut renderer, &picker, field);
+
+        let expected = Color::Rgb {
+            r: 184,
+            g: 152,
+            b: 117,
+        };
+        assert_eq!(
+            cell_at(&renderer, layout.frame.x, layout.frame.y).fg,
+            expected
+        );
+        assert_eq!(
+            cell_at(&renderer, layout.content.x, layout.content.y).fg,
+            expected
+        );
+        assert_eq!(
+            cell_at(
+                &renderer,
+                layout.spawn_here_button.x,
+                layout.spawn_here_button.y
+            )
+            .fg,
+            expected
+        );
+    }
+
+    #[test]
+    fn render_picker_uses_entry_repo_theme_color() {
+        let temp = tempdir().expect("tempdir");
+        let repo_root = temp.path().join("throngterm");
+        fs::create_dir_all(&repo_root).expect("create repo");
+        write_repo_theme_file(&repo_root, "#4FA66A");
+
+        let mut picker = PickerState::new(
+            2,
+            2,
+            dir_response(
+                temp.path().to_string_lossy().as_ref(),
+                &[("throngterm", true)],
+            ),
+            true,
+        );
+        let mut repo_themes = HashMap::new();
+        picker.sync_theme_colors(&mut repo_themes);
+
+        let field = test_field();
+        let layout = picker_layout(&picker, field);
+        let mut renderer = test_renderer(100, 30);
+
+        render_picker(&mut renderer, &picker, field);
+
+        assert_eq!(
+            cell_at(&renderer, layout.content.x, layout.first_entry_y).fg,
+            Color::Rgb {
+                r: 79,
+                g: 166,
+                b: 106,
+            }
+        );
     }
 
     #[test]
