@@ -24,22 +24,18 @@ async fn list_sessions(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<SessionListResponse>, axum::response::Response> {
     auth.require_scope(AuthScope::SessionsRead)?;
-    if let Err(e) = state
-        .supervisor
-        .discover_tmux_sessions_with_reason("runtime_discovery")
-        .await
-    {
-        tracing::warn!("runtime tmux discovery failed: {e}");
-    }
-    let data = state.supervisor.list_session_data().await;
+    // Keep the hot polling path cheap. Bootstrap/startup populates repo assets
+    // and session discovery; repeated list calls should serve current in-memory
+    // state instead of re-running tmux discovery and asset collection.
+    let sessions = state.supervisor.list_sessions().await;
     // The version counter is not tracked by the supervisor itself; we use 0
     // as a placeholder. A proper monotonic version can be added to the
     // supervisor later if clients need ETag-style cache validation.
     Ok(Json(SessionListResponse {
-        sessions: data.sessions,
+        sessions,
         version: 0,
-        sprite_packs: data.sprite_packs,
-        repo_themes: data.repo_themes,
+        sprite_packs: Default::default(),
+        repo_themes: Default::default(),
     }))
 }
 
