@@ -2,6 +2,7 @@ use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::io::{self, BufWriter, IsTerminal, Stdout, Write};
+use std::process::Command as ProcessCommand;
 use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
@@ -43,7 +44,7 @@ const THOUGHT_RAIL_MIN_WIDTH: u16 = 100;
 const THOUGHT_RAIL_MIN_PANEL_WIDTH: u16 = 24;
 const THOUGHT_RAIL_GAP: u16 = 1;
 const THOUGHT_RAIL_RATIO_DENOMINATOR: u16 = 3;
-const THOUGHT_RAIL_HEADER_ROWS: u16 = 2;
+const THOUGHT_RAIL_HEADER_ROWS: u16 = 1;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct Cell {
@@ -985,6 +986,20 @@ impl ThoughtFilter {
         cwd_matches && tmux_matches
     }
 
+    fn matches_session(&self, session: &SessionSummary) -> bool {
+        let cwd_matches = self
+            .cwd
+            .as_ref()
+            .map(|cwd| normalize_path(&session.cwd) == *cwd)
+            .unwrap_or(true);
+        let tmux_matches = self
+            .tmux_name
+            .as_ref()
+            .map(|tmux_name| session.tmux_name == *tmux_name)
+            .unwrap_or(true);
+        cwd_matches && tmux_matches
+    }
+
     fn clear(&mut self) {
         self.cwd = None;
         self.tmux_name = None;
@@ -1086,6 +1101,56 @@ impl<C: TuiApi> App<C> {
         self.last_refresh
             .map(|last| last.elapsed() >= REFRESH_INTERVAL)
             .unwrap_or(true)
+    }
+
+    fn native_status_text(&self) -> String {
+        match &self.native_status {
+            Some(status) if status.supported => format!(
+                "native open: {}",
+                status.app.as_deref().unwrap_or("available")
+            ),
+            Some(status) => format!(
+                "native open unavailable: {}",
+                status.reason.as_deref().unwrap_or("unknown reason")
+            ),
+            None => "native open: checking".to_string(),
+        }
+    }
+
+    fn header_right_text(&self) -> String {
+        self.thought_filter
+            .tmux_name
+            .as_deref()
+            .map(|tmux_name| format!("num={tmux_name} | {}", self.native_status_text()))
+            .unwrap_or_else(|| self.native_status_text())
+    }
+
+    fn visible_entities(&self) -> Vec<&SessionEntity> {
+        self.entities
+            .iter()
+            .filter(|entity| self.thought_filter.matches_session(&entity.session))
+            .collect()
+    }
+
+    fn reconcile_selection(&mut self) {
+        let selected_visible = self
+            .selected_id
+            .as_ref()
+            .map(|selected| {
+                self.entities.iter().any(|entity| {
+                    entity.session.session_id == *selected
+                        && self.thought_filter.matches_session(&entity.session)
+                })
+            })
+            .unwrap_or(false);
+
+        if !selected_visible {
+            self.selected_id = self
+                .entities
+                .iter()
+                .find(|entity| self.thought_filter.matches_session(&entity.session))
+                .map(|entity| entity.session.session_id.clone());
+        }
     }
 
     fn trim_thought_log(&mut self, capacity: usize) {
@@ -1191,14 +1256,41 @@ impl<C: TuiApi> App<C> {
 
     fn set_thought_filter_cwd(&mut self, cwd: String) {
         self.thought_filter.cwd = Some(cwd);
+        self.reconcile_selection();
     }
 
     fn set_thought_filter_tmux_name(&mut self, tmux_name: String) {
         self.thought_filter.tmux_name = Some(tmux_name);
+        self.reconcile_selection();
     }
 
     fn clear_thought_filters(&mut self) {
         self.thought_filter.clear();
+        self.reconcile_selection();
+    }
+
+    fn reconcile_thought_log_sessions(&mut self, sessions: &[SessionSummary]) {
+        let session_by_id = sessions
+            .iter()
+            .map(|session| (session.session_id.as_str(), session))
+            .collect::<HashMap<_, _>>();
+
+        self.thought_log
+            .retain(|entry| session_by_id.contains_key(entry.session_id.as_str()));
+        self.last_logged_thoughts
+            .retain(|session_id, _| session_by_id.contains_key(session_id.as_str()));
+
+        for entry in &mut self.thought_log {
+            let Some(session) = session_by_id.get(entry.session_id.as_str()) else {
+                continue;
+            };
+            entry.tmux_name = session.tmux_name.clone();
+            entry.cwd = normalize_path(&session.cwd);
+            entry.pwd_label = path_tail_label(&session.cwd);
+            entry.color = session_display_color(session, &self.repo_themes);
+        }
+
+        self.thought_log.sort_by(compare_thought_log_entries);
     }
 
     fn capture_thought_updates(&mut self, sessions: &[SessionSummary], thought_capacity: usize) {
@@ -1239,6 +1331,7 @@ impl<C: TuiApi> App<C> {
         match self.runtime.block_on(self.client.fetch_sessions()) {
             Ok(sessions) => {
                 self.sync_repo_themes(&sessions);
+                self.reconcile_thought_log_sessions(&sessions);
                 self.capture_thought_updates(&sessions, layout.thought_entry_capacity());
                 self.merge_sessions(sessions, layout.overview_field);
                 let count = self.entities.len();
@@ -1282,24 +1375,7 @@ impl<C: TuiApi> App<C> {
         next.sort_by(|a, b| a.session.tmux_name.cmp(&b.session.tmux_name));
         self.entities = next;
         self.layout_sleeping_entities(field);
-
-        let selection_missing = self
-            .selected_id
-            .as_ref()
-            .map(|selected| {
-                !self
-                    .entities
-                    .iter()
-                    .any(|entity| entity.session.session_id == *selected)
-            })
-            .unwrap_or(true);
-
-        if selection_missing {
-            self.selected_id = self
-                .entities
-                .first()
-                .map(|entity| entity.session.session_id.clone());
-        }
+        self.reconcile_selection();
     }
 
     fn upsert_session(&mut self, session: SessionSummary, field: Rect) {
@@ -1409,26 +1485,33 @@ impl<C: TuiApi> App<C> {
             return;
         }
 
+        let visible_entities = self.visible_entities();
+        if visible_entities.is_empty() {
+            self.selected_id = None;
+            return;
+        }
+
         let current_index = self
             .selected_id
             .as_ref()
             .and_then(|selected| {
-                self.entities
+                visible_entities
                     .iter()
                     .position(|entity| entity.session.session_id == *selected)
             })
             .unwrap_or(0) as isize;
 
-        let len = self.entities.len() as isize;
+        let len = visible_entities.len() as isize;
         let next_index = (current_index + delta).rem_euclid(len) as usize;
-        self.selected_id = Some(self.entities[next_index].session.session_id.clone());
+        self.selected_id = Some(visible_entities[next_index].session.session_id.clone());
     }
 
     fn selected(&self) -> Option<&SessionEntity> {
         let selected = self.selected_id.as_ref()?;
-        self.entities
-            .iter()
-            .find(|entity| entity.session.session_id == *selected)
+        self.entities.iter().find(|entity| {
+            entity.session.session_id == *selected
+                && self.thought_filter.matches_session(&entity.session)
+        })
     }
 
     fn close_picker(&mut self) {
@@ -1586,7 +1669,8 @@ impl<C: TuiApi> App<C> {
                 let tmux_name = session.tmux_name.clone();
                 self.remember_repo_theme(&session, repo_theme);
                 self.upsert_session(session, field);
-                self.selected_id = Some(session_id.clone());
+                self.selected_id = Some(session_id);
+                self.reconcile_selection();
                 self.close_picker();
                 self.set_message(format!("created {tmux_name}"));
             }
@@ -1604,12 +1688,16 @@ impl<C: TuiApi> App<C> {
     }
 
     fn open_selected(&mut self) {
-        let Some(selected_id) = self.selected_id.clone() else {
+        let Some((selected_id, label)) = self.selected().map(|entity| {
+            (
+                entity.session.session_id.clone(),
+                selected_label(Some(&entity.session.tmux_name)),
+            )
+        }) else {
             self.set_message("no session selected");
             return;
         };
 
-        let label = selected_label(self.selected().map(|entity| &entity.session.tmux_name));
         self.open_session_for_label(&selected_id, &label);
     }
 
@@ -1620,13 +1708,37 @@ impl<C: TuiApi> App<C> {
         thought_content: Rect,
         entry_capacity: usize,
     ) {
-        match thought_panel_action_at(self, thought_content, entry_capacity, x, y) {
-            Some(ThoughtPanelAction::FilterByCwd(cwd)) => self.set_thought_filter_cwd(cwd),
-            Some(ThoughtPanelAction::FilterByTmuxName(tmux_name)) => {
+        if let Some(action) = thought_panel_action_at(self, thought_content, entry_capacity, x, y) {
+            self.apply_thought_filter_action(action);
+        }
+    }
+
+    fn handle_header_filter_click(&mut self, renderer_width: u16, x: u16, y: u16) {
+        if let Some(action) = header_filter_action_at(self, renderer_width, x, y) {
+            self.apply_thought_filter_action(action);
+        }
+    }
+
+    fn apply_thought_filter_action(&mut self, action: ThoughtPanelAction) {
+        match action {
+            ThoughtPanelAction::FilterByCwd(cwd) => self.set_thought_filter_cwd(cwd),
+            ThoughtPanelAction::FilterByTmuxName(tmux_name) => {
                 self.set_thought_filter_tmux_name(tmux_name);
             }
-            Some(ThoughtPanelAction::ClearFilters) => self.clear_thought_filters(),
-            None => {}
+            ThoughtPanelAction::OpenRepoInEditor(cwd) => self.open_repo_in_editor(&cwd),
+            ThoughtPanelAction::ClearFilters => self.clear_thought_filters(),
+        }
+    }
+
+    fn open_repo_in_editor(&mut self, cwd: &str) {
+        let repo_label = path_tail_label(cwd).unwrap_or_else(|| cwd.to_string());
+        match ProcessCommand::new("code")
+            .arg(".")
+            .current_dir(cwd)
+            .spawn()
+        {
+            Ok(_) => self.set_message(format!("code . -> {repo_label}")),
+            Err(err) => self.set_message(format!("failed to run code .: {err}")),
         }
     }
 
@@ -1648,8 +1760,8 @@ impl<C: TuiApi> App<C> {
         }
 
         let hit = self
-            .entities
-            .iter()
+            .visible_entities()
+            .into_iter()
             .find(|entity| entity.screen_rect(field).contains(x, y))
             .map(|entity| entity.session.session_id.clone());
 
@@ -1716,24 +1828,14 @@ impl<C: TuiApi> App<C> {
         renderer.draw_box(frame, Color::DarkGrey);
         renderer.draw_text(2, 1, "throngterm tui", Color::Cyan);
 
-        let status_text = match &self.native_status {
-            Some(status) if status.supported => format!(
-                "native open: {}",
-                status.app.as_deref().unwrap_or("available")
-            ),
-            Some(status) => format!(
-                "native open unavailable: {}",
-                status.reason.as_deref().unwrap_or("unknown reason")
-            ),
-            None => "native open: checking".to_string(),
-        };
-        let sessions_text = format!("sessions: {}", self.entities.len());
-        let right_text = format!("{sessions_text} | {status_text}");
+        let max_right_width = renderer.width().saturating_sub(22) as usize;
+        let right_text = truncate_label(&self.header_right_text(), max_right_width);
         let right_x = renderer
             .width()
-            .saturating_sub(right_text.len() as u16)
+            .saturating_sub(display_width(&right_text))
             .saturating_sub(2);
         renderer.draw_text(right_x, 1, &right_text, Color::DarkGrey);
+        render_header_filter_strip(self, renderer, renderer.width());
 
         renderer.draw_box(layout.workspace_box, Color::DarkGrey);
 
@@ -1750,8 +1852,15 @@ impl<C: TuiApi> App<C> {
             );
         }
 
-        if self.entities.is_empty() {
-            let empty = "no tmux sessions found - press r after starting one";
+        let visible_entities = self.visible_entities();
+        if visible_entities.is_empty() {
+            let empty = if self.entities.is_empty() {
+                "no tmux sessions found - press r after starting one"
+            } else if self.thought_filter.is_active() {
+                "no thronglets match filters"
+            } else {
+                "no tmux sessions found - press r after starting one"
+            };
             let x = layout.overview_field.x.saturating_add(
                 layout
                     .overview_field
@@ -1763,7 +1872,7 @@ impl<C: TuiApi> App<C> {
             renderer.draw_text(x, y, empty, Color::DarkGrey);
         }
 
-        for entity in &self.entities {
+        for entity in visible_entities {
             let rect = entity.screen_rect(layout.overview_field);
             let selected = self
                 .selected_id
@@ -1795,6 +1904,7 @@ impl<C: TuiApi> App<C> {
 enum ThoughtPanelAction {
     FilterByCwd(String),
     FilterByTmuxName(String),
+    OpenRepoInEditor(String),
     ClearFilters,
 }
 
@@ -1816,11 +1926,170 @@ struct ThoughtRowLayout {
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct ThoughtPanelLayout {
-    chips: Vec<ThoughtChipLayout>,
-    filter_text: String,
-    clear_filters_rect: Option<Rect>,
     rows: Vec<ThoughtRowLayout>,
     empty_message: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct HeaderFilterLayout {
+    chips: Vec<ThoughtChipLayout>,
+    clear_filters_rect: Option<Rect>,
+}
+
+fn header_filter_row() -> u16 {
+    2
+}
+
+fn build_header_filter_layout<C: TuiApi>(app: &App<C>, width: u16) -> HeaderFilterLayout {
+    if width <= 4 {
+        return HeaderFilterLayout::default();
+    }
+
+    let left_x = 2;
+    let right_edge = width.saturating_sub(2);
+    if right_edge <= left_x {
+        return HeaderFilterLayout::default();
+    }
+
+    let clear_label = "[clear filters]";
+    let clear_width = display_width(clear_label);
+    let clear_gap = 2;
+    let mut available_width = right_edge.saturating_sub(left_x);
+    let mut clear_filters_rect = None;
+    if app.thought_filter.is_active() {
+        if clear_width <= available_width {
+            available_width = available_width.saturating_sub(clear_width);
+            if available_width >= clear_gap {
+                available_width = available_width.saturating_sub(clear_gap);
+            } else {
+                available_width = 0;
+            }
+        } else {
+            return HeaderFilterLayout {
+                chips: Vec::new(),
+                clear_filters_rect: Some(Rect {
+                    x: right_edge.saturating_sub(clear_width),
+                    y: header_filter_row(),
+                    width: clear_width,
+                    height: 1,
+                }),
+            };
+        }
+    }
+
+    let mut included = Vec::new();
+    let active_cwd = app.thought_filter.cwd.as_deref();
+    let mut chips_width: u16 = 0;
+    for summary in app.thought_repo_summaries() {
+        let is_active = active_cwd.map(|cwd| cwd == summary.cwd).unwrap_or(false);
+        let label = if is_active {
+            "code .".to_string()
+        } else {
+            format!("{}x{}", summary.count, summary.label)
+        };
+        let width = display_width(&label);
+        if width == 0 {
+            continue;
+        }
+
+        let next_width = if included.is_empty() {
+            width
+        } else {
+            chips_width.saturating_add(2).saturating_add(width)
+        };
+        if next_width > available_width {
+            break;
+        }
+
+        chips_width = next_width;
+        let color = if active_cwd.is_some() && !is_active {
+            Color::DarkGrey
+        } else {
+            summary.color
+        };
+        included.push((summary.cwd, label, color, width));
+    }
+
+    let total_width = chips_width.saturating_add(if app.thought_filter.is_active() {
+        clear_gap + clear_width
+    } else {
+        0
+    });
+    let mut chip_x = right_edge.saturating_sub(total_width);
+    let chips = included
+        .into_iter()
+        .map(|(cwd, label, color, width)| {
+            let rect = Rect {
+                x: chip_x,
+                y: header_filter_row(),
+                width,
+                height: 1,
+            };
+            chip_x = chip_x.saturating_add(width).saturating_add(2);
+            ThoughtChipLayout {
+                rect,
+                cwd,
+                label,
+                color,
+            }
+        })
+        .collect::<Vec<_>>();
+
+    if app.thought_filter.is_active() {
+        clear_filters_rect = Some(Rect {
+            x: right_edge.saturating_sub(clear_width),
+            y: header_filter_row(),
+            width: clear_width,
+            height: 1,
+        });
+    }
+
+    HeaderFilterLayout {
+        chips,
+        clear_filters_rect,
+    }
+}
+
+fn render_header_filter_strip<C: TuiApi>(app: &App<C>, renderer: &mut Renderer, width: u16) {
+    let layout = build_header_filter_layout(app, width);
+    for chip in &layout.chips {
+        renderer.draw_text(chip.rect.x, chip.rect.y, &chip.label, chip.color);
+    }
+
+    if let Some(rect) = layout.clear_filters_rect {
+        renderer.draw_text(rect.x, rect.y, "[clear filters]", Color::Cyan);
+    }
+}
+
+fn header_filter_action_at<C: TuiApi>(
+    app: &App<C>,
+    width: u16,
+    x: u16,
+    y: u16,
+) -> Option<ThoughtPanelAction> {
+    let layout = build_header_filter_layout(app, width);
+    if let Some(rect) = layout.clear_filters_rect {
+        if rect.contains(x, y) {
+            return Some(ThoughtPanelAction::ClearFilters);
+        }
+    }
+
+    for chip in layout.chips {
+        if chip.rect.contains(x, y) {
+            if app
+                .thought_filter
+                .cwd
+                .as_deref()
+                .map(|cwd| cwd == chip.cwd)
+                .unwrap_or(false)
+            {
+                return Some(ThoughtPanelAction::OpenRepoInEditor(chip.cwd));
+            }
+            return Some(ThoughtPanelAction::FilterByCwd(chip.cwd));
+        }
+    }
+
+    None
 }
 
 fn display_width(text: &str) -> u16 {
@@ -1839,13 +2108,54 @@ fn path_tail_label(path: &str) -> Option<String> {
         .map(ToOwned::to_owned)
 }
 
-fn format_thought_line(entry: &ThoughtLogEntry, max_chars: usize) -> String {
+fn wrap_text(text: &str, max_chars: usize) -> Vec<String> {
     if max_chars == 0 {
-        return String::new();
+        return Vec::new();
     }
 
-    let line = format!("{}: {}", entry.tmux_name, entry.thought);
-    truncate_label(&line, max_chars)
+    let mut remaining = text.trim();
+    if remaining.is_empty() {
+        return vec![String::new()];
+    }
+
+    let mut lines = Vec::new();
+    while !remaining.is_empty() {
+        if remaining.chars().count() <= max_chars {
+            lines.push(remaining.to_string());
+            break;
+        }
+
+        let mut char_count = 0usize;
+        let mut split_at = 0usize;
+        let mut last_space = None;
+        for (idx, ch) in remaining.char_indices() {
+            char_count += 1;
+            if char_count > max_chars {
+                break;
+            }
+            split_at = idx + ch.len_utf8();
+            if ch.is_whitespace() {
+                last_space = Some(idx);
+            }
+        }
+
+        let break_idx = last_space.unwrap_or(split_at).max(1);
+        let (line, rest) = remaining.split_at(break_idx);
+        lines.push(line.trim_end().to_string());
+        remaining = rest.trim_start();
+    }
+
+    lines
+}
+
+fn format_thought_lines(entry: &ThoughtLogEntry, max_chars: usize) -> Vec<String> {
+    if max_chars == 0 {
+        return Vec::new();
+    }
+
+    let thought = entry.thought.replace('\n', " ");
+    let line = format!("{}: {}", entry.tmux_name, thought);
+    wrap_text(&line, max_chars)
 }
 
 fn parse_hex_color(value: &str) -> Option<Color> {
@@ -1896,27 +2206,6 @@ fn render_thought_panel<C: TuiApi>(
         Color::Cyan,
     );
 
-    for chip in &panel.chips {
-        renderer.draw_text(chip.rect.x, chip.rect.y, &chip.label, chip.color);
-    }
-
-    if thought_content.height > 1 {
-        renderer.draw_text(
-            thought_content.x,
-            thought_content.y + 1,
-            &panel.filter_text,
-            if app.thought_filter.is_active() {
-                Color::White
-            } else {
-                Color::DarkGrey
-            },
-        );
-    }
-
-    if let Some(rect) = panel.clear_filters_rect {
-        renderer.draw_text(rect.x, rect.y, "[clear filters]", Color::Cyan);
-    }
-
     if entry_capacity == 0 {
         return;
     }
@@ -1953,54 +2242,6 @@ fn build_thought_panel<C: TuiApi>(
         return ThoughtPanelLayout::default();
     }
 
-    let mut chips = Vec::new();
-    let title_width = display_width("clawgs");
-    let mut chip_x = thought_content
-        .x
-        .saturating_add(title_width)
-        .saturating_add(2);
-    for summary in app.thought_repo_summaries() {
-        let label = format!("{}x{}", summary.count, summary.label);
-        let width = display_width(&label);
-        if width == 0 || chip_x.saturating_add(width) > thought_content.right() {
-            break;
-        }
-
-        chips.push(ThoughtChipLayout {
-            rect: Rect {
-                x: chip_x,
-                y: thought_content.y,
-                width,
-                height: 1,
-            },
-            cwd: summary.cwd,
-            label,
-            color: summary.color,
-        });
-        chip_x = chip_x.saturating_add(width).saturating_add(2);
-    }
-
-    let clear_label = "[clear filters]";
-    let clear_width = display_width(clear_label);
-    let clear_filters_rect = if app.thought_filter.is_active()
-        && clear_width.saturating_add(2) < thought_content.width
-        && thought_content.height > 1
-    {
-        Some(Rect {
-            x: thought_content.right().saturating_sub(clear_width),
-            y: thought_content.y + 1,
-            width: clear_width,
-            height: 1,
-        })
-    } else {
-        None
-    };
-
-    let filter_width = clear_filters_rect
-        .map(|rect| rect.x.saturating_sub(thought_content.x).saturating_sub(1))
-        .unwrap_or(thought_content.width);
-    let filter_text = truncate_label(&app.active_thought_filter_text(), filter_width as usize);
-
     let entries = app.visible_thought_entries(entry_capacity);
     let empty_message = if entry_capacity == 0 {
         None
@@ -2014,30 +2255,35 @@ fn build_thought_panel<C: TuiApi>(
         None
     };
 
-    let rows = entries
+    let mut rows = entries
         .into_iter()
-        .map(|entry| {
-            let line = format_thought_line(entry, thought_content.width as usize);
-            let visible_line_width = display_width(&line);
+        .flat_map(|entry| {
             let color = app.thought_entry_display_color(entry);
-            ThoughtRowLayout {
-                row_rect: (visible_line_width > 0).then_some(Rect {
-                    x: thought_content.x,
-                    y: 0,
-                    width: visible_line_width,
-                    height: 1,
-                }),
-                tmux_name: entry.tmux_name.clone(),
-                line,
-                color,
-            }
+            format_thought_lines(entry, thought_content.width as usize)
+                .into_iter()
+                .map(move |line| {
+                    let visible_line_width = display_width(&line);
+                    ThoughtRowLayout {
+                        row_rect: (visible_line_width > 0).then_some(Rect {
+                            x: thought_content.x,
+                            y: 0,
+                            width: visible_line_width,
+                            height: 1,
+                        }),
+                        tmux_name: entry.tmux_name.clone(),
+                        line,
+                        color,
+                    }
+                })
         })
-        .collect();
+        .collect::<Vec<_>>();
+
+    if rows.len() > entry_capacity {
+        let start = rows.len().saturating_sub(entry_capacity);
+        rows = rows.split_off(start);
+    }
 
     ThoughtPanelLayout {
-        chips,
-        filter_text,
-        clear_filters_rect,
         rows,
         empty_message,
     }
@@ -2051,18 +2297,6 @@ fn thought_panel_action_at<C: TuiApi>(
     y: u16,
 ) -> Option<ThoughtPanelAction> {
     let panel = build_thought_panel(app, thought_content, entry_capacity);
-
-    if let Some(rect) = panel.clear_filters_rect {
-        if rect.contains(x, y) {
-            return Some(ThoughtPanelAction::ClearFilters);
-        }
-    }
-
-    for chip in panel.chips {
-        if chip.rect.contains(x, y) {
-            return Some(ThoughtPanelAction::FilterByCwd(chip.cwd));
-        }
-    }
 
     let row_start_y = thought_content
         .bottom()
@@ -2773,7 +3007,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     if app.initial_request.is_some() {
                         continue;
                     }
-                    if let Some(thought_box) = layout.thought_box {
+                    if header_filter_action_at(&app, renderer.width(), mouse.column, mouse.row)
+                        .is_some()
+                    {
+                        app.handle_header_filter_click(renderer.width(), mouse.column, mouse.row);
+                    } else if let Some(thought_box) = layout.thought_box {
                         if thought_box.contains(mouse.column, mouse.row) {
                             if let Some(thought_content) = layout.thought_content {
                                 app.handle_thought_click(
@@ -2999,6 +3237,21 @@ mod tests {
 
     fn cell_at(renderer: &Renderer, x: u16, y: u16) -> Cell {
         renderer.buffer[(y as usize) * (renderer.width as usize) + (x as usize)]
+    }
+
+    fn row_text(renderer: &Renderer, y: u16) -> String {
+        (0..renderer.width)
+            .map(|x| cell_at(renderer, x, y).ch)
+            .collect::<String>()
+            .trim_end()
+            .to_string()
+    }
+
+    fn visible_entity_ids(app: &App<MockApi>) -> Vec<String> {
+        app.visible_entities()
+            .into_iter()
+            .map(|entity| entity.session.session_id.clone())
+            .collect()
     }
 
     fn session_summary(session_id: &str, tmux_name: &str, cwd: &str) -> SessionSummary {
@@ -3286,7 +3539,7 @@ mod tests {
         let api = MockApi::new();
         let layout = test_layout(120, 24);
         let mut app = make_app(api);
-        assert_eq!(layout.thought_entry_capacity(), 9);
+        assert_eq!(layout.thought_entry_capacity(), 10);
 
         for idx in 0..15 {
             let second = idx + 1;
@@ -3304,10 +3557,10 @@ mod tests {
             app.capture_thought_updates(&[session], layout.thought_entry_capacity());
         }
 
-        assert_eq!(app.thought_log.len(), 9);
+        assert_eq!(app.thought_log.len(), 10);
         assert_eq!(
             app.thought_log.first().map(|entry| entry.thought.as_str()),
-            Some("thought 6")
+            Some("thought 5")
         );
         assert_eq!(
             app.thought_log.last().map(|entry| entry.thought.as_str()),
@@ -3316,7 +3569,80 @@ mod tests {
     }
 
     #[test]
-    fn render_thought_panel_shows_repo_chips_and_numeric_rows() {
+    fn refresh_prunes_exited_sessions_from_thought_timeline_and_header_filter_chips() {
+        let api = MockApi::new();
+        let layout = test_layout(120, 32);
+        let thought_content = layout
+            .thought_content
+            .expect("wide layout enables thought rail");
+        api.push_fetch_sessions(Ok(vec![
+            session_summary_with_thought(
+                "sess-1",
+                "7",
+                "/Users/b/repos/throngterm",
+                "patching tui",
+                "2026-03-08T14:00:05Z",
+            ),
+            session_summary_with_thought(
+                "sess-2",
+                "9",
+                "/Users/b/repos/opensource/skills",
+                "indexing docs",
+                "2026-03-08T14:00:06Z",
+            ),
+        ]));
+        api.push_fetch_sessions(Ok(vec![session_summary_with_thought(
+            "sess-2",
+            "9",
+            "/Users/b/repos/opensource/skills",
+            "indexing docs",
+            "2026-03-08T14:00:06Z",
+        )]));
+        let mut app = make_app(api);
+
+        app.refresh(layout);
+        let initial_header = build_header_filter_layout(&app, 120);
+        assert!(initial_header
+            .chips
+            .iter()
+            .any(|chip| chip.label == "1xthrongterm"));
+        assert!(initial_header
+            .chips
+            .iter()
+            .any(|chip| chip.label == "1xskills"));
+
+        app.refresh(layout);
+
+        assert_eq!(
+            app.thought_log
+                .iter()
+                .map(|entry| entry.session_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["sess-2"]
+        );
+
+        let header = build_header_filter_layout(&app, 120);
+        assert_eq!(
+            header
+                .chips
+                .iter()
+                .map(|chip| chip.label.as_str())
+                .collect::<Vec<_>>(),
+            vec!["1xskills"]
+        );
+        let panel = build_thought_panel(&app, thought_content, layout.thought_entry_capacity());
+        assert_eq!(
+            panel
+                .rows
+                .iter()
+                .map(|row| row.line.as_str())
+                .collect::<Vec<_>>(),
+            vec!["9: indexing docs"]
+        );
+    }
+
+    #[test]
+    fn render_header_filter_strip_shows_repo_chips_and_thought_rows() {
         let api = MockApi::new();
         let layout = test_layout(120, 32);
         let thought_content = layout
@@ -3384,12 +3710,13 @@ mod tests {
             ]
         );
 
-        let throngterm_chip = panel
+        let header = build_header_filter_layout(&app, 120);
+        let throngterm_chip = header
             .chips
             .iter()
             .find(|chip| chip.label == "2xthrongterm")
             .expect("throngterm chip should exist");
-        let skills_chip = panel
+        let skills_chip = header
             .chips
             .iter()
             .find(|chip| chip.label == "1xskills")
@@ -3398,12 +3725,7 @@ mod tests {
         assert_eq!(skills_chip.color, skills_color);
 
         let mut renderer = test_renderer(120, 32);
-        render_thought_panel(
-            &app,
-            &mut renderer,
-            thought_content,
-            layout.thought_entry_capacity(),
-        );
+        render_header_filter_strip(&app, &mut renderer, 120);
 
         assert_eq!(
             cell_at(&renderer, throngterm_chip.rect.x, throngterm_chip.rect.y).fg,
@@ -3413,10 +3735,45 @@ mod tests {
             cell_at(&renderer, skills_chip.rect.x, skills_chip.rect.y).fg,
             skills_color
         );
+        assert!(row_text(&renderer, 2).ends_with("1xskills  2xthrongterm"));
     }
 
     #[test]
-    fn thought_rail_clicks_apply_and_clear_filters() {
+    fn active_repo_header_chip_maps_to_code_open_action() {
+        let api = MockApi::new();
+        let mut app = make_app(api);
+        app.repo_themes
+            .insert("/tmp/throngterm".to_string(), repo_theme("#B89875"));
+        app.capture_thought_updates(
+            &[session_summary_with_thought(
+                "sess-1",
+                "7",
+                "/Users/b/repos/throngterm",
+                "patching tui",
+                "2026-03-08T14:00:05Z",
+            )],
+            test_layout(120, 32).thought_entry_capacity(),
+        );
+        app.set_thought_filter_cwd("/Users/b/repos/throngterm".to_string());
+
+        let header = build_header_filter_layout(&app, 120);
+        let active_chip = header
+            .chips
+            .iter()
+            .find(|chip| chip.label == "code .")
+            .expect("active repo chip should expose code dot")
+            .clone();
+
+        assert_eq!(
+            header_filter_action_at(&app, 120, active_chip.rect.x, active_chip.rect.y),
+            Some(ThoughtPanelAction::OpenRepoInEditor(
+                "/Users/b/repos/throngterm".to_string()
+            ))
+        );
+    }
+
+    #[test]
+    fn header_filter_strip_and_thought_rows_apply_and_clear_filters() {
         let api = MockApi::new();
         let layout = test_layout(120, 32);
         let thought_content = layout
@@ -3456,22 +3813,20 @@ mod tests {
         );
         third.repo_theme_id = Some("/tmp/skills".to_string());
 
+        app.merge_sessions(
+            vec![first.clone(), second.clone(), third.clone()],
+            layout.overview_field,
+        );
         app.capture_thought_updates(&[first, second, third], layout.thought_entry_capacity());
 
-        let initial_panel =
-            build_thought_panel(&app, thought_content, layout.thought_entry_capacity());
-        let chip = initial_panel
+        let initial_header = build_header_filter_layout(&app, 120);
+        let chip = initial_header
             .chips
             .iter()
             .find(|chip| chip.label == "2xthrongterm")
             .expect("throngterm chip should exist")
             .clone();
-        app.handle_thought_click(
-            chip.rect.x,
-            chip.rect.y,
-            thought_content,
-            layout.thought_entry_capacity(),
-        );
+        app.handle_header_filter_click(120, chip.rect.x, chip.rect.y);
 
         assert_eq!(
             app.thought_filter.cwd.as_deref(),
@@ -3485,6 +3840,38 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["7", "2"]
         );
+        assert_eq!(
+            visible_entity_ids(&app),
+            vec!["sess-2".to_string(), "sess-1".to_string()]
+        );
+
+        let filtered_header = build_header_filter_layout(&app, 120);
+        let active_chip = filtered_header
+            .chips
+            .iter()
+            .find(|chip| chip.label == "code .")
+            .expect("active repo chip should become code dot");
+        let dimmed_chip = filtered_header
+            .chips
+            .iter()
+            .find(|chip| chip.label == "1xskills")
+            .expect("inactive repo chip should stay visible");
+        assert_eq!(dimmed_chip.color, Color::DarkGrey);
+
+        let mut renderer = test_renderer(120, 32);
+        app.render(&mut renderer, layout);
+        assert!(!row_text(&renderer, 1).contains("filter: pwd"));
+        assert_eq!(
+            cell_at(&renderer, active_chip.rect.x, active_chip.rect.y).fg,
+            active_chip.color
+        );
+        assert_eq!(
+            cell_at(&renderer, dimmed_chip.rect.x, dimmed_chip.rect.y).fg,
+            Color::DarkGrey
+        );
+        assert!(row_text(&renderer, 2).contains("code ."));
+        assert!(row_text(&renderer, 2).contains("1xskills"));
+        assert!(row_text(&renderer, 2).contains("[clear filters]"));
 
         let filtered_panel =
             build_thought_panel(&app, thought_content, layout.thought_entry_capacity());
@@ -3499,6 +3886,7 @@ mod tests {
         let row_rect = filtered_panel.rows[row_index]
             .row_rect
             .expect("row should have a click target");
+        app.selected_id = Some("sess-3".to_string());
         app.handle_thought_click(
             row_rect.x.saturating_add(4),
             row_start_y + row_index as u16,
@@ -3522,18 +3910,14 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["2"]
         );
+        assert_eq!(visible_entity_ids(&app), vec!["sess-2".to_string()]);
+        assert_eq!(app.selected_id.as_deref(), Some("sess-2"));
 
-        let cleared_panel =
-            build_thought_panel(&app, thought_content, layout.thought_entry_capacity());
-        let clear_rect = cleared_panel
+        let cleared_header = build_header_filter_layout(&app, 120);
+        let clear_rect = cleared_header
             .clear_filters_rect
             .expect("clear filters button should exist");
-        app.handle_thought_click(
-            clear_rect.x,
-            clear_rect.y,
-            thought_content,
-            layout.thought_entry_capacity(),
-        );
+        app.handle_header_filter_click(120, clear_rect.x, clear_rect.y);
 
         assert_eq!(app.thought_filter, ThoughtFilter::default());
         assert_eq!(app.active_thought_filter_text(), "filter: none");
@@ -3543,6 +3927,14 @@ mod tests {
                 .map(|entry| entry.tmux_name.as_str())
                 .collect::<Vec<_>>(),
             vec!["7", "2", "9"]
+        );
+        assert_eq!(
+            visible_entity_ids(&app),
+            vec![
+                "sess-2".to_string(),
+                "sess-1".to_string(),
+                "sess-3".to_string(),
+            ]
         );
     }
 
@@ -3584,6 +3976,85 @@ mod tests {
 
         assert_eq!(app.thought_filter.tmux_name.as_deref(), Some("7"));
         assert_eq!(app.active_thought_filter_text(), "filter: num=7");
+    }
+
+    #[test]
+    fn wrapped_latest_thought_stays_bottom_aligned() {
+        let api = MockApi::new();
+        let mut app = make_app(api);
+        let thought_content = Rect {
+            x: 0,
+            y: 0,
+            width: 12,
+            height: 5,
+        };
+
+        app.capture_thought_updates(
+            &[
+                session_summary_with_thought(
+                    "sess-1",
+                    "7",
+                    "/Users/b/repos/throngterm",
+                    "older",
+                    "2026-03-08T14:00:05Z",
+                ),
+                session_summary_with_thought(
+                    "sess-2",
+                    "9",
+                    "/Users/b/repos/throngterm",
+                    "latest thought stays at bottom",
+                    "2026-03-08T14:00:06Z",
+                ),
+            ],
+            4,
+        );
+
+        let panel = build_thought_panel(&app, thought_content, 4);
+
+        assert_eq!(
+            panel
+                .rows
+                .iter()
+                .map(|row| row.line.as_str())
+                .collect::<Vec<_>>(),
+            vec!["9: latest", "thought", "stays at", "bottom"]
+        );
+        assert_eq!(
+            panel.rows.last().map(|row| row.line.as_str()),
+            Some("bottom")
+        );
+    }
+
+    #[test]
+    fn clicking_wrapped_thought_line_filters_to_that_session() {
+        let api = MockApi::new();
+        let mut app = make_app(api);
+        let thought_content = Rect {
+            x: 0,
+            y: 0,
+            width: 12,
+            height: 5,
+        };
+        app.capture_thought_updates(
+            &[session_summary_with_thought(
+                "sess-2",
+                "9",
+                "/Users/b/repos/throngterm",
+                "latest thought stays at bottom",
+                "2026-03-08T14:00:06Z",
+            )],
+            4,
+        );
+
+        let panel = build_thought_panel(&app, thought_content, 4);
+        let row_start_y = thought_content
+            .bottom()
+            .saturating_sub(panel.rows.len() as u16);
+
+        app.handle_thought_click(1, row_start_y + 3, thought_content, 4);
+
+        assert_eq!(app.thought_filter.tmux_name.as_deref(), Some("9"));
+        assert_eq!(app.active_thought_filter_text(), "filter: num=9");
     }
 
     #[test]
@@ -3687,7 +4158,8 @@ mod tests {
         app.merge_sessions(vec![session], layout.overview_field);
 
         let panel = build_thought_panel(&app, thought_content, layout.thought_entry_capacity());
-        let chip = panel
+        let header = build_header_filter_layout(&app, 120);
+        let chip = header
             .chips
             .iter()
             .find(|chip| chip.label == "1xthrongterm")
@@ -4378,6 +4850,73 @@ mod tests {
         assert_eq!(
             app.message.as_ref().map(|(message, _)| message.as_str()),
             Some("focused dev")
+        );
+    }
+
+    #[test]
+    fn filtered_out_thronglets_are_not_click_targets() {
+        let api = MockApi::new();
+        api.push_list_dirs(Ok(dir_response("/Users/b/repos", &[("throngterm", true)])));
+        let field = test_field();
+        let mut app = make_app(api.clone());
+        app.entities.push(entity_at(
+            field,
+            "sess-1",
+            "2",
+            "/Users/b/repos/throngterm",
+            12,
+            6,
+        ));
+        app.entities.push(entity_at(
+            field,
+            "sess-3",
+            "9",
+            "/Users/b/repos/opensource/skills",
+            30,
+            8,
+        ));
+        app.selected_id = Some("sess-3".to_string());
+
+        app.set_thought_filter_cwd("/Users/b/repos/throngterm".to_string());
+        app.handle_field_click(30, 8, field);
+
+        assert_eq!(visible_entity_ids(&app), vec!["sess-1".to_string()]);
+        assert_eq!(app.selected_id.as_deref(), Some("sess-1"));
+        assert!(api.open_calls().is_empty());
+        assert!(app.picker.is_some());
+    }
+
+    #[test]
+    fn refresh_clears_selection_when_filters_hide_all_sessions() {
+        let api = MockApi::new();
+        let layout = test_layout(120, 32);
+        api.push_fetch_sessions(Ok(vec![session_summary(
+            "sess-3",
+            "9",
+            "/Users/b/repos/opensource/skills",
+        )]));
+        let mut app = make_app(api.clone());
+        app.merge_sessions(
+            vec![
+                session_summary("sess-1", "7", "/Users/b/repos/throngterm"),
+                session_summary("sess-2", "2", "/Users/b/repos/throngterm"),
+            ],
+            layout.overview_field,
+        );
+        app.selected_id = Some("sess-1".to_string());
+        app.set_thought_filter_cwd("/Users/b/repos/throngterm".to_string());
+
+        app.refresh(layout);
+
+        assert!(app.visible_entities().is_empty());
+        assert!(app.selected_id.is_none());
+
+        app.open_selected();
+
+        assert!(api.open_calls().is_empty());
+        assert_eq!(
+            app.message.as_ref().map(|(message, _)| message.as_str()),
+            Some("no session selected")
         );
     }
 }
