@@ -460,7 +460,7 @@ impl SpriteKind {
         match self {
             Self::Active => 1.0,
             Self::Busy => 1.15,
-            Self::Drowsy => 0.45,
+            Self::Drowsy => 0.0,
             Self::Sleeping => 0.0,
             Self::Attention => 1.0,
             Self::Error => 0.5,
@@ -497,12 +497,8 @@ fn busy_frame(tick: u64) -> [&'static str; 4] {
     }
 }
 
-fn drowsy_frame(tick: u64) -> [&'static str; 4] {
-    if tick % 4 < 2 {
-        [" .-^. ", "(- -)", "/|_|\\", " / \\ "]
-    } else {
-        [" .-^. ", "(- -)", "\\|_|/", " / \\ "]
-    }
+fn drowsy_frame(_tick: u64) -> [&'static str; 4] {
+    [" .-^. ", "(- -)", " /|_| ", " _/ \\_"]
 }
 
 fn sleeping_frame(tick: u64) -> [&'static str; 4] {
@@ -567,6 +563,13 @@ impl SessionEntity {
 
     fn is_sleeping(&self) -> bool {
         matches!(self.sprite_kind(), SpriteKind::Sleeping)
+    }
+
+    fn is_stationary(&self) -> bool {
+        matches!(
+            self.sprite_kind(),
+            SpriteKind::Drowsy | SpriteKind::Sleeping | SpriteKind::Exited
+        )
     }
 
     fn set_grid_position(&mut self, column: usize, row: usize) {
@@ -1542,7 +1545,7 @@ impl<C: TuiApi> App<C> {
                 let a_rect = a.screen_rect(field);
                 let b_rect = b.screen_rect(field);
                 if intersects(a_rect, b_rect) {
-                    match (a.is_sleeping(), b.is_sleeping()) {
+                    match (a.is_stationary(), b.is_stationary()) {
                         (true, true) => {}
                         (true, false) => separate_from_fixed_entity(b, a_rect, field),
                         (false, true) => separate_from_fixed_entity(a, b_rect, field),
@@ -4931,6 +4934,80 @@ mod tests {
         assert_eq!(
             entity_rect_for(&app, "sess-b", field),
             sleep_grid_rect(field, 1)
+        );
+    }
+
+    #[test]
+    fn drowsy_sprite_frame_is_static() {
+        assert_eq!(drowsy_frame(0), drowsy_frame(1));
+        assert_eq!(SpriteKind::Drowsy.speed_scale(), 0.0);
+    }
+
+    #[test]
+    fn drowsy_entities_stay_fixed_after_tick() {
+        let api = MockApi::new();
+        let field = test_field();
+        let mut app = make_app(api);
+        let mut entity = entity_at(field, "sess-1", "dev", "/Users/b/repos/dev", 30, 8);
+        entity.session.thought_state = ThoughtState::Holding;
+        entity.session.rest_state = RestState::Drowsy;
+        entity.vx = 1.0;
+        entity.vy = 1.0;
+        app.entities.push(entity);
+
+        app.tick(field);
+
+        assert_eq!(
+            entity_rect_for(&app, "sess-1", field),
+            Rect {
+                x: 30,
+                y: 8,
+                width: ENTITY_WIDTH,
+                height: ENTITY_HEIGHT,
+            }
+        );
+    }
+
+    #[test]
+    fn drowsy_entities_remain_fixed_during_collisions() {
+        let api = MockApi::new();
+        let field = test_field();
+        let mut app = make_app(api);
+
+        let mut drowsy = entity_at(field, "sess-drowsy", "7", "/Users/b/repos/dev", 30, 8);
+        drowsy.session.thought_state = ThoughtState::Holding;
+        drowsy.session.rest_state = RestState::Drowsy;
+        drowsy.vx = 0.0;
+        drowsy.vy = 0.0;
+
+        let mut active = entity_at(field, "sess-active", "8", "/Users/b/repos/dev", 30, 8);
+        active.session.thought_state = ThoughtState::Active;
+        active.session.rest_state = RestState::Active;
+        active.vx = 1.0;
+        active.vy = 0.0;
+
+        app.entities.push(drowsy);
+        app.entities.push(active);
+
+        app.tick(field);
+
+        assert_eq!(
+            entity_rect_for(&app, "sess-drowsy", field),
+            Rect {
+                x: 30,
+                y: 8,
+                width: ENTITY_WIDTH,
+                height: ENTITY_HEIGHT,
+            }
+        );
+        assert_ne!(
+            entity_rect_for(&app, "sess-active", field),
+            Rect {
+                x: 30,
+                y: 8,
+                width: ENTITY_WIDTH,
+                height: ENTITY_HEIGHT,
+            }
         );
     }
 
