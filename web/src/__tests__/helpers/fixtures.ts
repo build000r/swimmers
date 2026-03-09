@@ -1,7 +1,7 @@
 import type { SessionSummary, BootstrapResponse } from "@/types";
 
 export function makeSession(overrides: Partial<SessionSummary> = {}): SessionSummary {
-  return {
+  const session: SessionSummary = {
     session_id: "sess-001",
     tmux_name: "1",
     state: "idle",
@@ -15,14 +15,25 @@ export function makeSession(overrides: Partial<SessionSummary> = {}): SessionSum
     thought_state: "holding",
     thought_source: "carry_forward",
     thought_updated_at: null,
+    rest_state: "drowsy",
     last_skill: null,
     is_stale: false,
     attached_clients: 1,
     transport_health: "healthy",
     last_activity_at: new Date().toISOString(),
     sprite_pack_id: null,
+    repo_theme_id: null,
     ...overrides,
   };
+  if (!session.rest_state) {
+    session.rest_state =
+      session.state === "exited"
+        ? "deep_sleep"
+        : session.state === "idle"
+          ? "drowsy"
+          : "active";
+  }
+  return session;
 }
 
 export function makeBootstrapResponse(
@@ -46,11 +57,12 @@ export function makeBootstrapResponse(
         warm: 45_000,
         cold: 120_000,
       },
-      sleeping_after_ms: 60_000,
+      sleeping_after_ms: 30_000,
       bubble_precedence: "thought_first",
     },
     sessions: [makeSession()],
     sprite_packs: {},
+    repo_themes: {},
     ...overrides,
   };
 }

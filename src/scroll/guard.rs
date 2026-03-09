@@ -29,6 +29,21 @@ pub struct ScrollGuard {
     flush_deadline: Option<Instant>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScrollOutputChunk {
+    pub data: Vec<u8>,
+    pub coalesced_redraw: bool,
+}
+
+impl ScrollOutputChunk {
+    fn new(data: Vec<u8>, coalesced_redraw: bool) -> Self {
+        Self {
+            data,
+            coalesced_redraw,
+        }
+    }
+}
+
 impl ScrollGuard {
     pub fn new() -> Self {
         Self {
@@ -61,7 +76,7 @@ impl ScrollGuard {
     ///
     /// The caller should forward each returned chunk to the replay buffer
     /// and WebSocket clients in order.
-    pub fn process(&mut self, data: &[u8]) -> Vec<Vec<u8>> {
+    pub fn process(&mut self, data: &[u8]) -> Vec<ScrollOutputChunk> {
         let now = Instant::now();
         let mut output = Vec::new();
 
@@ -71,7 +86,7 @@ impl ScrollGuard {
                 if let Some(buffered) = self.force_flush() {
                     output.push(buffered);
                 }
-                output.push(data.to_vec());
+                output.push(ScrollOutputChunk::new(data.to_vec(), false));
                 return output;
             }
         }
@@ -110,7 +125,7 @@ impl ScrollGuard {
             if let Some(buffered) = self.force_flush() {
                 output.push(buffered);
             }
-            output.push(data.to_vec());
+            output.push(ScrollOutputChunk::new(data.to_vec(), false));
         }
 
         output
@@ -118,7 +133,7 @@ impl ScrollGuard {
 
     /// Force-flush any buffered data, returning it if present.
     /// Clears the flush deadline.
-    pub fn flush(&mut self) -> Option<Vec<u8>> {
+    pub fn flush(&mut self) -> Option<ScrollOutputChunk> {
         self.force_flush()
     }
 
@@ -138,9 +153,11 @@ impl ScrollGuard {
     // --- Private helpers ---
 
     /// Internal flush that clears both buffer and deadline.
-    fn force_flush(&mut self) -> Option<Vec<u8>> {
+    fn force_flush(&mut self) -> Option<ScrollOutputChunk> {
         self.flush_deadline = None;
-        self.buffer.take()
+        self.buffer
+            .take()
+            .map(|data| ScrollOutputChunk::new(data, true))
     }
 }
 
@@ -170,7 +187,8 @@ mod tests {
         let data = b"hello world\r\n";
         let result = guard.process(data);
         assert_eq!(result.len(), 1);
-        assert_eq!(result[0], data);
+        assert_eq!(result[0].data, data);
+        assert!(!result[0].coalesced_redraw);
     }
 
     #[test]
@@ -190,7 +208,9 @@ mod tests {
 
         let flushed = guard.flush();
         assert!(flushed.is_some());
-        assert_eq!(flushed.unwrap(), data);
+        let flushed = flushed.unwrap();
+        assert_eq!(flushed.data, data);
+        assert!(flushed.coalesced_redraw);
         assert!(guard.check_flush_deadline().is_none());
     }
 
@@ -204,8 +224,10 @@ mod tests {
         let result = guard.process(normal);
         // Should get the flushed buffer + normal data.
         assert_eq!(result.len(), 2);
-        assert_eq!(result[0], redraw);
-        assert_eq!(result[1], normal.to_vec());
+        assert_eq!(result[0].data, redraw);
+        assert!(result[0].coalesced_redraw);
+        assert_eq!(result[1].data, normal.to_vec());
+        assert!(!result[1].coalesced_redraw);
     }
 
     #[test]
@@ -217,7 +239,8 @@ mod tests {
         let result = guard.process(&data);
         // Should pass through because of recent input.
         assert_eq!(result.len(), 1);
-        assert_eq!(result[0], data);
+        assert_eq!(result[0].data, data);
+        assert!(!result[0].coalesced_redraw);
     }
 
     #[test]
@@ -253,7 +276,8 @@ mod tests {
         let flushed = guard.flush().unwrap();
         let mut expected = first.clone();
         expected.extend_from_slice(&second);
-        assert_eq!(flushed, expected);
+        assert_eq!(flushed.data, expected);
+        assert!(flushed.coalesced_redraw);
     }
 
     #[test]
@@ -281,8 +305,10 @@ mod tests {
 
         // Should flush old buffer + pass through new data.
         assert_eq!(result.len(), 2);
-        assert_eq!(result[0], redraw);
-        assert_eq!(result[1], more_redraw);
+        assert_eq!(result[0].data, redraw);
+        assert!(result[0].coalesced_redraw);
+        assert_eq!(result[1].data, more_redraw);
+        assert!(!result[1].coalesced_redraw);
     }
 
     #[test]
@@ -299,10 +325,12 @@ mod tests {
 
         let result2 = guard.process(&second);
         assert_eq!(result2.len(), 1);
-        assert_eq!(result2[0], first);
+        assert_eq!(result2[0].data, first);
+        assert!(result2[0].coalesced_redraw);
 
         let flushed = guard.flush().unwrap();
-        assert_eq!(flushed, second);
+        assert_eq!(flushed.data, second);
+        assert!(flushed.coalesced_redraw);
     }
 
     #[test]
@@ -319,6 +347,7 @@ mod tests {
         let flushed = guard.flush().unwrap();
         let mut expected = prefix.clone();
         expected.extend_from_slice(&suffix);
-        assert_eq!(flushed, expected);
+        assert_eq!(flushed.data, expected);
+        assert!(flushed.coalesced_redraw);
     }
 }

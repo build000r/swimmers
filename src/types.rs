@@ -100,7 +100,7 @@ impl ThoughtPolicy {
                 warm: 45_000,
                 cold: 120_000,
             },
-            sleeping_after_ms: 60_000,
+            sleeping_after_ms: 30_000,
             bubble_precedence: BubblePrecedence::ThoughtFirst,
         }
     }

@@ -18,12 +18,14 @@ const mocks = vi.hoisted(() => {
     thought_state: "holding",
     thought_source: "carry_forward",
     thought_updated_at: null,
+    rest_state: "drowsy",
     last_skill: null,
     is_stale: true,
     attached_clients: 0,
     transport_health: "healthy",
     last_activity_at: new Date("2026-03-01T12:00:00.000Z").toISOString(),
     sprite_pack_id: null,
+    repo_theme_id: null,
   };
 
   const liveSession: SessionSummary = {
@@ -55,11 +57,12 @@ const mocks = vi.hoisted(() => {
           warm: 45_000,
           cold: 120_000,
         },
-        sleeping_after_ms: 60_000,
+        sleeping_after_ms: 30_000,
         bubble_precedence: "thought_first",
       },
       sessions: [staleSession],
       sprite_packs: {},
+      repo_themes: {},
     })),
     createSessionMock: vi.fn(),
     deleteSessionMock: vi.fn(),
@@ -67,6 +70,8 @@ const mocks = vi.hoisted(() => {
     fetchSessionsMock: vi.fn(async () => ({
       sessions: [liveSession],
       version: 1,
+      sprite_packs: {},
+      repo_themes: {},
     })),
     fetchNativeDesktopStatusMock: vi.fn(async () => ({
       supported: false,

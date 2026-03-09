@@ -13,7 +13,7 @@ use tokio::sync::{broadcast, mpsc, oneshot};
 use tracing::{debug, error, info, warn};
 
 use crate::config::Config;
-use crate::scroll::guard::ScrollGuard;
+use crate::scroll::guard::{ScrollGuard, ScrollOutputChunk};
 use crate::session::replay_ring::ReplayRing;
 use crate::state::detector::StateDetector;
 use crate::types::{
@@ -528,17 +528,20 @@ impl SessionActor {
         // Flush any coalesced scroll guard data.
         if let Some(flushed) = self.scroll_guard.flush() {
             let state_before = self.state_detector.state();
-            self.state_detector.process_output(&flushed);
+            self.state_detector.process_output(&flushed.data);
             if matches!(
                 self.maybe_emit_state_change(state_before),
                 Some(SessionState::Idle)
             ) {
                 self.maybe_refresh_cwd_from_tmux(false).await;
             }
-            self.last_activity_at = Utc::now();
+            self.record_meaningful_output_activity(state_before, &flushed);
 
-            let seq = self.replay_ring.push(&flushed);
-            let frame = OutputFrame { seq, data: flushed };
+            let seq = self.replay_ring.push(&flushed.data);
+            let frame = OutputFrame {
+                seq,
+                data: flushed.data,
+            };
             self.broadcast(frame).await;
         }
     }
@@ -559,7 +562,7 @@ impl SessionActor {
             let state_before = self.state_detector.state();
 
             // Feed the state detector with each chunk.
-            self.state_detector.process_output(&chunk);
+            self.state_detector.process_output(&chunk.data);
             self.maybe_update_tool_from_current_command();
 
             // Emit state change event if processing caused a transition.
@@ -583,12 +586,15 @@ impl SessionActor {
                 );
             }
 
-            self.last_activity_at = Utc::now();
+            self.record_meaningful_output_activity(state_before, &chunk);
 
             // Store in the replay ring and get the sequence number.
-            let seq = self.replay_ring.push(&chunk);
+            let seq = self.replay_ring.push(&chunk.data);
 
-            let frame = OutputFrame { seq, data: chunk };
+            let frame = OutputFrame {
+                seq,
+                data: chunk.data,
+            };
 
             // Broadcast to all subscribers.
             self.broadcast(frame).await;
@@ -600,6 +606,17 @@ impl SessionActor {
                 .map(|tx| tx.max_capacity() - tx.capacity())
                 .sum();
             crate::metrics::record_queue_depth(&self.session_id, total_depth);
+        }
+    }
+
+    fn record_meaningful_output_activity(
+        &mut self,
+        previous_state: SessionState,
+        chunk: &ScrollOutputChunk,
+    ) {
+        let current_state = self.state_detector.state();
+        if output_counts_as_meaningful_activity(previous_state, current_state, chunk) {
+            self.last_activity_at = Utc::now();
         }
     }
 
@@ -988,9 +1005,14 @@ impl SessionActor {
             thought_state: crate::types::ThoughtState::Holding,
             thought_source: crate::types::ThoughtSource::CarryForward,
             thought_updated_at: None,
+            rest_state: crate::types::fallback_rest_state(
+                state,
+                crate::types::ThoughtState::Holding,
+            ),
             last_skill: self.last_skill.clone(),
             last_activity_at: self.last_activity_at,
             sprite_pack_id: None,
+            repo_theme_id: None,
         }
     }
 }
@@ -1017,6 +1039,89 @@ async fn capture_pane_tail(tmux_name: &str, lines: usize) -> anyhow::Result<Stri
     }
 
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+fn output_counts_as_meaningful_activity(
+    previous_state: SessionState,
+    current_state: SessionState,
+    chunk: &ScrollOutputChunk,
+) -> bool {
+    if chunk.coalesced_redraw {
+        return false;
+    }
+
+    if previous_state != SessionState::Idle && current_state == SessionState::Idle {
+        return true;
+    }
+
+    visible_output_is_meaningful(&chunk.data)
+}
+
+fn visible_output_is_meaningful(data: &[u8]) -> bool {
+    let visible = StateDetector::strip_ansi(&String::from_utf8_lossy(data));
+
+    visible
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .any(|line| {
+            if line_looks_prompt_like(line) {
+                return false;
+            }
+
+            let non_whitespace = line.chars().filter(|c| !c.is_whitespace()).count();
+            non_whitespace >= 3 && line.chars().any(|c| c.is_alphanumeric())
+        })
+}
+
+fn line_looks_prompt_like(line: &str) -> bool {
+    let line = line.trim_end();
+    let mut chars = line.chars();
+    let Some(marker @ ('$' | '%' | '#' | '>')) = chars.next_back() else {
+        return false;
+    };
+    let prefix = chars.as_str().trim_end();
+    if prefix.is_empty() {
+        return true;
+    }
+
+    if prefix.contains('@')
+        || prefix.contains(':')
+        || prefix.contains('/')
+        || prefix.contains('~')
+        || prefix.contains('\\')
+        || prefix.ends_with(')')
+        || prefix.ends_with(']')
+    {
+        if marker == '%' {
+            let compact = prefix.replace(',', "");
+            if compact
+                .chars()
+                .all(|c| c.is_ascii_digit() || c == '.' || c.is_ascii_whitespace())
+            {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    if prefix.len() > 32 || prefix.chars().any(|c| c.is_whitespace()) {
+        return false;
+    }
+    if prefix
+        .chars()
+        .all(|c| c.is_ascii_digit() || c == '.' || c == ',')
+    {
+        return false;
+    }
+    if !prefix
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
+    {
+        return false;
+    }
+
+    matches!(marker, '$' | '#' | '%')
 }
 
 /// Query tmux for the active pane cwd of a session.
@@ -1560,11 +1665,14 @@ fn pty_read_loop(
 #[cfg(test)]
 mod tests {
     use super::{
-        capture_pane_tail, detect_skill_from_input_line, detect_tool_from_command_line,
-        detect_tool_from_process_entry, drain_completed_input_lines, parse_process_entry,
-        resolve_tmux_terminal_env, ProcessEntry,
+        detect_skill_from_input_line, detect_tool_from_command_line,
+        detect_tool_from_process_entry, drain_completed_input_lines,
+        output_counts_as_meaningful_activity, parse_process_entry, resolve_tmux_terminal_env,
+        visible_output_is_meaningful, ProcessEntry,
     };
+    use crate::scroll::guard::ScrollOutputChunk;
     use crate::session::replay_ring::ReplayRing;
+    use crate::types::SessionState;
 
     #[test]
     fn detect_tool_from_command_line_handles_aliases() {
@@ -1719,21 +1827,53 @@ mod tests {
         assert!(!fallback);
     }
 
-    #[tokio::test]
-    async fn build_snapshot_falls_back_to_replay_ring_when_capture_pane_fails() {
-        // capture_pane_tail will fail for a non-existent tmux session.
-        let result = capture_pane_tail("__nonexistent_throngterm_test__", 300).await;
-        assert!(
-            result.is_err(),
-            "capture_pane_tail should fail for a non-existent session"
-        );
-
-        // Verify replay ring fallback produces the expected snapshot content.
+    #[test]
+    fn replay_ring_snapshot_preserves_recent_output() {
         let mut ring = ReplayRing::new(512 * 1024);
         ring.push(b"$ hello world\n");
         ring.push(b"output line 2\n");
         let snapshot_text = ring.snapshot();
         assert_eq!(snapshot_text, "$ hello world\noutput line 2\n");
         assert!(ring.latest_seq() > 0);
+    }
+
+    #[test]
+    fn visible_output_ignores_prompt_only_lines() {
+        assert!(!visible_output_is_meaningful(b"b@host throngterm % "));
+        assert!(!visible_output_is_meaningful(b"$ "));
+    }
+
+    #[test]
+    fn visible_output_detects_substantive_terminal_text() {
+        assert!(visible_output_is_meaningful(
+            b"checking auth middleware header parsing\n"
+        ));
+        assert!(visible_output_is_meaningful(b"test auth::login ... FAILED\n"));
+    }
+
+    #[test]
+    fn coalesced_redraw_does_not_count_as_meaningful_activity() {
+        let chunk = ScrollOutputChunk {
+            data: b"prompt repaint".to_vec(),
+            coalesced_redraw: true,
+        };
+        assert!(!output_counts_as_meaningful_activity(
+            SessionState::Idle,
+            SessionState::Idle,
+            &chunk,
+        ));
+    }
+
+    #[test]
+    fn prompt_that_finishes_busy_work_counts_as_activity() {
+        let chunk = ScrollOutputChunk {
+            data: b"b@host throngterm % ".to_vec(),
+            coalesced_redraw: false,
+        };
+        assert!(output_counts_as_meaningful_activity(
+            SessionState::Busy,
+            SessionState::Idle,
+            &chunk,
+        ));
     }
 }

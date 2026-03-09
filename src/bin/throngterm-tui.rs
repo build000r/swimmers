@@ -36,6 +36,7 @@ const SPRITE_HEIGHT: u16 = 4;
 const LABEL_HEIGHT: u16 = 1;
 const ENTITY_WIDTH: u16 = 12;
 const ENTITY_HEIGHT: u16 = SPRITE_HEIGHT + LABEL_HEIGHT;
+const ACTIVE_WALK_STEP: f32 = 0.35;
 const PICKER_WIDTH: u16 = 46;
 const PICKER_MAX_HEIGHT: u16 = 16;
 const INITIAL_REQUEST_WIDTH: u16 = 58;
@@ -578,13 +579,20 @@ impl SessionEntity {
     }
 
     fn tick(&mut self, field: Rect) {
-        let speed = self.sprite_kind().speed_scale();
+        let sprite = self.sprite_kind();
+        let speed = sprite.speed_scale();
         if speed == 0.0 || field.width <= ENTITY_WIDTH || field.height <= ENTITY_HEIGHT {
             return;
         }
 
         let max_x = field.width.saturating_sub(ENTITY_WIDTH) as f32;
         let max_y = field.height.saturating_sub(ENTITY_HEIGHT) as f32;
+
+        if matches!(sprite, SpriteKind::Active) {
+            self.x = (self.x - ACTIVE_WALK_STEP).max(0.0);
+            self.y = (self.y - ACTIVE_WALK_STEP).max(0.0);
+            return;
+        }
 
         self.x += self.vx * speed;
         self.y += self.vy * speed;
@@ -4989,7 +4997,9 @@ mod tests {
         app.entities.push(drowsy);
         app.entities.push(active);
 
-        app.tick(field);
+        for _ in 0..4 {
+            app.tick(field);
+        }
 
         assert_eq!(
             entity_rect_for(&app, "sess-drowsy", field),
@@ -5012,13 +5022,37 @@ mod tests {
     }
 
     #[test]
-    fn non_sleeping_entities_keep_their_normal_motion() {
+    fn active_entities_walk_up_and_left() {
         let api = MockApi::new();
         let field = test_field();
         let mut app = make_app(api);
         let mut entity = entity_at(field, "sess-1", "dev", "/Users/b/repos/dev", 30, 8);
         entity.session.thought_state = ThoughtState::Active;
         entity.session.rest_state = RestState::Active;
+        entity.vx = 1.0;
+        entity.vy = 1.0;
+        app.entities.push(entity);
+
+        for _ in 0..4 {
+            app.tick(field);
+        }
+
+        let moved = app
+            .entities
+            .iter()
+            .find(|entity| entity.session.session_id == "sess-1")
+            .expect("entity should exist");
+        assert!(moved.x < 29.0);
+        assert!(moved.y < 5.0);
+    }
+
+    #[test]
+    fn busy_entities_keep_their_normal_motion() {
+        let api = MockApi::new();
+        let field = test_field();
+        let mut app = make_app(api);
+        let mut entity = entity_at(field, "sess-1", "dev", "/Users/b/repos/dev", 30, 8);
+        entity.session.state = SessionState::Busy;
         entity.vx = 1.0;
         entity.vy = 1.0;
         app.entities.push(entity);
