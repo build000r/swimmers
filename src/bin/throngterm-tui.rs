@@ -45,6 +45,8 @@ const THOUGHT_RAIL_MIN_PANEL_WIDTH: u16 = 24;
 const THOUGHT_RAIL_GAP: u16 = 1;
 const THOUGHT_RAIL_RATIO_DENOMINATOR: u16 = 3;
 const THOUGHT_RAIL_HEADER_ROWS: u16 = 1;
+const THOUGHT_RAIL_DEFAULT_RATIO: f32 = 1.0 / THOUGHT_RAIL_RATIO_DENOMINATOR as f32;
+const THOUGHT_RAIL_DRAG_HITBOX_WIDTH: u16 = 3;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct Cell {
@@ -288,11 +290,17 @@ struct WorkspaceLayout {
     overview_field: Rect,
     thought_box: Option<Rect>,
     thought_content: Option<Rect>,
+    split_divider: Option<Rect>,
+    split_hitbox: Option<Rect>,
     footer_start_y: u16,
 }
 
 impl WorkspaceLayout {
     fn for_terminal(width: u16, height: u16) -> Self {
+        Self::for_terminal_with_ratio(width, height, THOUGHT_RAIL_DEFAULT_RATIO)
+    }
+
+    fn for_terminal_with_ratio(width: u16, height: u16, thought_ratio: f32) -> Self {
         let workspace_box = field_box(width, height);
         let footer_start_y = workspace_box.bottom() + 1;
         let inner = workspace_box.inset(1);
@@ -307,13 +315,20 @@ impl WorkspaceLayout {
                 overview_field: inner,
                 thought_box: None,
                 thought_content: None,
+                split_divider: None,
+                split_hitbox: None,
                 footer_start_y,
             };
         }
 
         let min_overview_width = ENTITY_WIDTH + 4;
-        let ideal_thought_width =
-            (inner.width / THOUGHT_RAIL_RATIO_DENOMINATOR).max(THOUGHT_RAIL_MIN_PANEL_WIDTH);
+        let sanitized_ratio = if thought_ratio.is_finite() {
+            thought_ratio.clamp(0.0, 1.0)
+        } else {
+            THOUGHT_RAIL_DEFAULT_RATIO
+        };
+        let ideal_thought_width = ((inner.width as f32) * sanitized_ratio).floor() as u16;
+        let ideal_thought_width = ideal_thought_width.max(THOUGHT_RAIL_MIN_PANEL_WIDTH);
         let max_thought_width = inner
             .width
             .saturating_sub(THOUGHT_RAIL_GAP + min_overview_width);
@@ -326,6 +341,8 @@ impl WorkspaceLayout {
                 overview_field: inner,
                 thought_box: None,
                 thought_content: None,
+                split_divider: None,
+                split_hitbox: None,
                 footer_start_y,
             };
         }
@@ -342,6 +359,18 @@ impl WorkspaceLayout {
             width: overview_width,
             height: inner.height,
         };
+        let split_divider = Rect {
+            x: thought_box.right(),
+            y: inner.y,
+            width: THOUGHT_RAIL_GAP,
+            height: inner.height,
+        };
+        let split_hitbox = Rect {
+            x: split_divider.x.saturating_sub(1),
+            y: inner.y,
+            width: THOUGHT_RAIL_DRAG_HITBOX_WIDTH,
+            height: inner.height,
+        };
 
         Self {
             workspace_box,
@@ -349,6 +378,8 @@ impl WorkspaceLayout {
             overview_field: overview_box.inset(1),
             thought_box: Some(thought_box),
             thought_content: Some(thought_box.inset(1)),
+            split_divider: Some(split_divider),
+            split_hitbox: Some(split_hitbox),
             footer_start_y,
         }
     }
@@ -357,6 +388,22 @@ impl WorkspaceLayout {
         self.thought_content
             .map(|content| content.height.saturating_sub(THOUGHT_RAIL_HEADER_ROWS) as usize)
             .unwrap_or(0)
+    }
+
+    fn thought_ratio_for_divider_x(self, x: u16) -> Option<f32> {
+        let thought_box = self.thought_box?;
+        let inner = self.workspace_box.inset(1);
+        let min_overview_width = ENTITY_WIDTH + 4;
+        let max_thought_width = inner
+            .width
+            .saturating_sub(THOUGHT_RAIL_GAP + min_overview_width);
+        if max_thought_width < THOUGHT_RAIL_MIN_PANEL_WIDTH || inner.width == 0 {
+            return None;
+        }
+
+        let requested_width = x.saturating_sub(thought_box.x);
+        let thought_width = requested_width.clamp(THOUGHT_RAIL_MIN_PANEL_WIDTH, max_thought_width);
+        Some(thought_width as f32 / inner.width as f32)
     }
 }
 
@@ -375,13 +422,16 @@ impl SpriteKind {
     fn from_session(session: &SessionSummary) -> Self {
         match session.state {
             SessionState::Busy => Self::Busy,
-            SessionState::Attention => Self::Attention,
             SessionState::Error => Self::Error,
             SessionState::Exited => Self::Exited,
-            SessionState::Idle => match session.rest_state {
+            SessionState::Idle | SessionState::Attention => match session.rest_state {
                 RestState::DeepSleep | RestState::Sleeping => Self::Sleeping,
                 RestState::Drowsy => Self::Drowsy,
-                RestState::Active => Self::Active,
+                RestState::Active => match session.state {
+                    SessionState::Attention => Self::Attention,
+                    SessionState::Idle => Self::Active,
+                    _ => unreachable!("only idle/attention reach active rest-state branch"),
+                },
             },
         }
     }
@@ -1060,6 +1110,8 @@ struct App<C: TuiApi> {
     initial_request: Option<InitialRequestState>,
     message: Option<(String, Instant)>,
     last_refresh: Option<Instant>,
+    thought_panel_ratio: f32,
+    split_drag_active: bool,
     tick: u64,
 }
 
@@ -1079,8 +1131,14 @@ impl<C: TuiApi> App<C> {
             initial_request: None,
             message: None,
             last_refresh: None,
+            thought_panel_ratio: THOUGHT_RAIL_DEFAULT_RATIO,
+            split_drag_active: false,
             tick: 0,
         }
+    }
+
+    fn layout_for_terminal(&self, width: u16, height: u16) -> WorkspaceLayout {
+        WorkspaceLayout::for_terminal_with_ratio(width, height, self.thought_panel_ratio)
     }
 
     fn set_message(&mut self, message: impl Into<String>) {
@@ -1742,6 +1800,31 @@ impl<C: TuiApi> App<C> {
         }
     }
 
+    fn start_split_drag(&mut self, layout: WorkspaceLayout, x: u16) -> bool {
+        let resized = self.resize_thought_panel(layout, x);
+        self.split_drag_active = resized;
+        resized
+    }
+
+    fn drag_split(&mut self, layout: WorkspaceLayout, x: u16) -> bool {
+        if !self.split_drag_active {
+            return false;
+        }
+        self.resize_thought_panel(layout, x)
+    }
+
+    fn stop_split_drag(&mut self) {
+        self.split_drag_active = false;
+    }
+
+    fn resize_thought_panel(&mut self, layout: WorkspaceLayout, x: u16) -> bool {
+        let Some(ratio) = layout.thought_ratio_for_divider_x(x) else {
+            return false;
+        };
+        self.thought_panel_ratio = ratio;
+        true
+    }
+
     fn handle_field_click(&mut self, x: u16, y: u16, field: Rect) {
         if self.initial_request.is_some() {
             return;
@@ -1844,6 +1927,20 @@ impl<C: TuiApi> App<C> {
         {
             renderer.draw_box(thought_box, Color::DarkGrey);
             renderer.draw_box(layout.overview_box, Color::DarkGrey);
+            if let Some(split_divider) = layout.split_divider {
+                let divider_color = if self.split_drag_active {
+                    Color::Cyan
+                } else {
+                    Color::DarkGrey
+                };
+                renderer.draw_vline(
+                    split_divider.x,
+                    split_divider.y,
+                    split_divider.height,
+                    ':',
+                    divider_color,
+                );
+            }
             render_thought_panel(
                 self,
                 renderer,
@@ -2900,14 +2997,17 @@ fn intersects(a: Rect, b: Rect) -> bool {
 
 fn session_state_text(session: &SessionSummary) -> &'static str {
     match session.state {
-        SessionState::Idle => match session.rest_state {
-            RestState::Active => "active",
+        SessionState::Idle | SessionState::Attention => match session.rest_state {
+            RestState::Active => match session.state {
+                SessionState::Attention => "attention",
+                SessionState::Idle => "active",
+                _ => unreachable!("only idle/attention reach active rest-state branch"),
+            },
             RestState::Drowsy => "drowsy",
             RestState::Sleeping => "sleeping",
             RestState::DeepSleep => "deep sleep",
         },
         SessionState::Busy => "busy",
-        SessionState::Attention => "attention",
         SessionState::Error => "error",
         SessionState::Exited => "exited",
     }
@@ -2926,11 +3026,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     renderer.init()?;
 
     let mut app = App::new(runtime, client);
-    let initial_layout = WorkspaceLayout::for_terminal(renderer.width(), renderer.height());
+    let initial_layout = app.layout_for_terminal(renderer.width(), renderer.height());
     app.refresh(initial_layout);
 
     loop {
-        let layout = WorkspaceLayout::for_terminal(renderer.width(), renderer.height());
+        let layout = app.layout_for_terminal(renderer.width(), renderer.height());
+        if layout.split_divider.is_none() {
+            app.stop_split_drag();
+        }
         app.trim_thought_log(layout.thought_entry_capacity());
 
         if app.should_refresh() {
@@ -3007,8 +3110,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     if app.initial_request.is_some() {
                         continue;
                     }
-                    if header_filter_action_at(&app, renderer.width(), mouse.column, mouse.row)
-                        .is_some()
+                    if layout
+                        .split_hitbox
+                        .map(|hitbox| hitbox.contains(mouse.column, mouse.row))
+                        .unwrap_or(false)
+                    {
+                        app.start_split_drag(layout, mouse.column);
+                    } else if header_filter_action_at(
+                        &app,
+                        renderer.width(),
+                        mouse.column,
+                        mouse.row,
+                    )
+                    .is_some()
                     {
                         app.handle_header_filter_click(renderer.width(), mouse.column, mouse.row);
                     } else if let Some(thought_box) = layout.thought_box {
@@ -3028,7 +3142,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         app.handle_field_click(mouse.column, mouse.row, layout.overview_field);
                     }
                 }
+                Event::Mouse(mouse)
+                    if matches!(mouse.kind, MouseEventKind::Drag(MouseButton::Left)) =>
+                {
+                    if app.drag_split(layout, mouse.column) {
+                        continue;
+                    }
+                }
+                Event::Mouse(mouse)
+                    if matches!(mouse.kind, MouseEventKind::Up(MouseButton::Left)) =>
+                {
+                    app.stop_split_drag();
+                }
                 Event::Resize(width, height) => {
+                    app.stop_split_drag();
                     renderer.manual_resize(width, height)?;
                 }
                 _ => {}
@@ -3219,6 +3346,10 @@ mod tests {
         WorkspaceLayout::for_terminal(width, height)
     }
 
+    fn test_layout_with_ratio(width: u16, height: u16, thought_ratio: f32) -> WorkspaceLayout {
+        WorkspaceLayout::for_terminal_with_ratio(width, height, thought_ratio)
+    }
+
     fn make_app(api: MockApi) -> App<MockApi> {
         App::new(test_runtime(), api)
     }
@@ -3309,6 +3440,24 @@ mod tests {
         let mut session = session_summary(session_id, tmux_name, cwd);
         session.thought_state = ThoughtState::Sleeping;
         session.rest_state = RestState::Sleeping;
+        session.last_activity_at = timestamp(last_activity_at);
+        session
+    }
+
+    fn attention_session(
+        session_id: &str,
+        tmux_name: &str,
+        cwd: &str,
+        rest_state: RestState,
+        last_activity_at: &str,
+    ) -> SessionSummary {
+        let mut session = session_summary(session_id, tmux_name, cwd);
+        session.state = SessionState::Attention;
+        session.rest_state = rest_state;
+        session.thought_state = match rest_state {
+            RestState::Sleeping | RestState::DeepSleep => ThoughtState::Sleeping,
+            RestState::Active | RestState::Drowsy => ThoughtState::Holding,
+        };
         session.last_activity_at = timestamp(last_activity_at);
         session
     }
@@ -3406,6 +3555,63 @@ mod tests {
         assert_eq!(layout.thought_entry_capacity(), 0);
         assert_eq!(layout.overview_box.x, layout.workspace_box.x);
         assert_eq!(layout.overview_field, layout.workspace_box.inset(1));
+    }
+
+    #[test]
+    fn custom_split_ratio_changes_thought_rail_width() {
+        let default_layout = test_layout(120, 32);
+        let wider_layout = test_layout_with_ratio(120, 32, 0.5);
+
+        assert_eq!(
+            default_layout.split_divider.map(|divider| divider.width),
+            Some(THOUGHT_RAIL_GAP)
+        );
+        assert!(
+            wider_layout
+                .thought_box
+                .expect("wide layout should include thought rail")
+                .width
+                > default_layout
+                    .thought_box
+                    .expect("default layout should include thought rail")
+                    .width
+        );
+        assert!(
+            wider_layout.overview_field.width < default_layout.overview_field.width,
+            "widening the clawgs rail should shrink the throngterm field"
+        );
+    }
+
+    #[test]
+    fn divider_drag_updates_thought_rail_ratio() {
+        let api = MockApi::new();
+        let mut app = make_app(api);
+        let initial_layout = app.layout_for_terminal(120, 32);
+        let initial_width = initial_layout
+            .thought_box
+            .expect("wide layout should include thought rail")
+            .width;
+        let divider = initial_layout
+            .split_divider
+            .expect("wide layout should expose a divider");
+        let hitbox = initial_layout
+            .split_hitbox
+            .expect("wide layout should expose a divider hitbox");
+        assert!(hitbox.contains(divider.x, divider.y));
+
+        assert!(app.start_split_drag(initial_layout, divider.x));
+        assert!(app.split_drag_active);
+        assert!(app.drag_split(initial_layout, divider.x + 10));
+
+        let dragged_layout = app.layout_for_terminal(120, 32);
+        let dragged_width = dragged_layout
+            .thought_box
+            .expect("dragged layout should include thought rail")
+            .width;
+        assert!(dragged_width > initial_width);
+
+        app.stop_split_drag();
+        assert!(!app.split_drag_active);
     }
 
     #[test]
@@ -4236,6 +4442,7 @@ mod tests {
         let field = test_layout(120, 32).overview_field;
         let mut session = session_summary("sess-1", "alpha", "/Users/b/repos/throngterm");
         session.state = SessionState::Attention;
+        session.rest_state = RestState::Active;
         let entity = SessionEntity::new(session, field);
         let rect = entity.screen_rect(field);
         let mut renderer = test_renderer(120, 32);
@@ -4342,6 +4549,64 @@ mod tests {
             entity_rect_for(&app, "sess-sleep-1", field),
             sleep_grid_rect(field, 0)
         );
+    }
+
+    #[test]
+    fn attention_sleeping_entity_pins_to_top_left_grid_slot() {
+        let api = MockApi::new();
+        let field = test_field();
+        let mut app = make_app(api);
+
+        app.merge_sessions(
+            vec![attention_session(
+                "sess-attn-sleep-1",
+                "7",
+                "/Users/b/repos/throngterm",
+                RestState::Sleeping,
+                "2026-03-08T12:00:00Z",
+            )],
+            field,
+        );
+
+        let entity = app
+            .entities
+            .iter()
+            .find(|entity| entity.session.session_id == "sess-attn-sleep-1")
+            .expect("entity should exist");
+        assert!(entity.is_sleeping());
+        assert_eq!(
+            entity_rect_for(&app, "sess-attn-sleep-1", field),
+            sleep_grid_rect(field, 0)
+        );
+    }
+
+    #[test]
+    fn attention_session_state_text_uses_rest_state() {
+        let active = attention_session(
+            "sess-attn-active",
+            "7",
+            "/Users/b/repos/throngterm",
+            RestState::Active,
+            "2026-03-08T12:40:00Z",
+        );
+        let drowsy = attention_session(
+            "sess-attn-drowsy",
+            "8",
+            "/Users/b/repos/throngterm",
+            RestState::Drowsy,
+            "2026-03-08T12:20:00Z",
+        );
+        let sleeping = attention_session(
+            "sess-attn-sleep",
+            "9",
+            "/Users/b/repos/throngterm",
+            RestState::Sleeping,
+            "2026-03-08T12:00:00Z",
+        );
+
+        assert_eq!(session_state_text(&active), "attention");
+        assert_eq!(session_state_text(&drowsy), "drowsy");
+        assert_eq!(session_state_text(&sleeping), "sleeping");
     }
 
     #[test]
