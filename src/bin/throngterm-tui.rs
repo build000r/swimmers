@@ -70,7 +70,13 @@ struct Renderer {
     height: u16,
     buffer: Vec<Cell>,
     last_buffer: Vec<Cell>,
-    active: bool,
+    terminal_state: TerminalState,
+}
+
+#[derive(Default)]
+struct TerminalState {
+    raw_mode_enabled: bool,
+    terminal_ui_active: bool,
 }
 
 fn enter_terminal_ui(writer: &mut impl Write) -> io::Result<()> {
@@ -93,6 +99,63 @@ fn leave_terminal_ui(writer: &mut impl Write) -> io::Result<()> {
     )
 }
 
+impl TerminalState {
+    fn init_with<W, EnableRawMode, EnterUi>(
+        &mut self,
+        writer: &mut W,
+        enable_raw_mode: EnableRawMode,
+        enter_ui: EnterUi,
+    ) -> io::Result<()>
+    where
+        W: Write,
+        EnableRawMode: FnOnce() -> io::Result<()>,
+        EnterUi: FnOnce(&mut W) -> io::Result<()>,
+    {
+        enable_raw_mode()?;
+        self.raw_mode_enabled = true;
+        // Mark the UI as needing teardown before issuing enter sequences so a
+        // mid-init failure still triggers the full restore path on cleanup.
+        self.terminal_ui_active = true;
+        enter_ui(writer)
+    }
+
+    fn cleanup_with<W, LeaveUi, DisableRawMode>(
+        &mut self,
+        writer: &mut W,
+        leave_ui: LeaveUi,
+        disable_raw_mode: DisableRawMode,
+    ) -> io::Result<()>
+    where
+        W: Write,
+        LeaveUi: FnOnce(&mut W) -> io::Result<()>,
+        DisableRawMode: FnOnce() -> io::Result<()>,
+    {
+        let mut first_error = None;
+
+        if self.terminal_ui_active {
+            if let Err(err) = leave_ui(writer) {
+                first_error = Some(err);
+            }
+            self.terminal_ui_active = false;
+        }
+
+        if self.raw_mode_enabled {
+            if let Err(err) = disable_raw_mode() {
+                if first_error.is_none() {
+                    first_error = Some(err);
+                }
+            }
+            self.raw_mode_enabled = false;
+        }
+
+        if let Some(err) = first_error {
+            return Err(err);
+        }
+
+        Ok(())
+    }
+}
+
 impl Renderer {
     fn new() -> io::Result<Self> {
         if !io::stdout().is_terminal() {
@@ -107,25 +170,24 @@ impl Renderer {
             height,
             buffer: vec![Cell::default(); buffer_size],
             last_buffer: vec![Cell::default(); buffer_size],
-            active: false,
+            terminal_state: TerminalState::default(),
         })
     }
 
     fn init(&mut self) -> io::Result<()> {
-        terminal::enable_raw_mode()?;
-        enter_terminal_ui(&mut self.stdout)?;
-        self.active = true;
-        Ok(())
+        self.terminal_state.init_with(
+            &mut self.stdout,
+            terminal::enable_raw_mode,
+            enter_terminal_ui,
+        )
     }
 
     fn cleanup(&mut self) -> io::Result<()> {
-        if !self.active {
-            return Ok(());
-        }
-        leave_terminal_ui(&mut self.stdout)?;
-        terminal::disable_raw_mode()?;
-        self.active = false;
-        Ok(())
+        self.terminal_state.cleanup_with(
+            &mut self.stdout,
+            leave_terminal_ui,
+            terminal::disable_raw_mode,
+        )
     }
 
     fn manual_resize(&mut self, width: u16, height: u16) -> io::Result<()> {
@@ -2967,11 +3029,7 @@ fn velocity_component(hash: u64, axis: u64) -> f32 {
     let segment = ((hash >> (axis * 8)) & 0xff) as f32 / 255.0;
     let speed = 0.05 + segment * 0.09;
     if axis == 0 {
-        if hash & 1 == 0 {
-            speed
-        } else {
-            -speed
-        }
+        if hash & 1 == 0 { speed } else { -speed }
     } else if hash & 2 == 0 {
         speed
     } else {
@@ -2980,11 +3038,7 @@ fn velocity_component(hash: u64, axis: u64) -> f32 {
 }
 
 fn pluralize(count: usize) -> &'static str {
-    if count == 1 {
-        ""
-    } else {
-        "s"
-    }
+    if count == 1 { "" } else { "s" }
 }
 
 fn truncate_label(text: &str, max_chars: usize) -> String {
@@ -3226,6 +3280,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::Cell as TestCell;
     use std::collections::VecDeque;
     use std::fs;
     use std::sync::{Arc, Mutex};
@@ -3233,6 +3288,17 @@ mod tests {
     use chrono::Utc;
     use tempfile::tempdir;
     use throngterm::types::{ThoughtSource, ThoughtState, TransportHealth};
+
+    const EXPECTED_TERMINAL_TEARDOWN: &str = concat!(
+        "\u{1b}[?1006l",
+        "\u{1b}[?1015l",
+        "\u{1b}[?1003l",
+        "\u{1b}[?1002l",
+        "\u{1b}[?1000l",
+        "\u{1b}[?1049l",
+        "\u{1b}[?25h",
+        "\u{1b}[0m",
+    );
 
     #[derive(Default)]
     struct MockApiState {
@@ -3420,7 +3486,7 @@ mod tests {
             height,
             buffer: vec![Cell::default(); buffer_size],
             last_buffer: vec![Cell::default(); buffer_size],
-            active: false,
+            terminal_state: TerminalState::default(),
         }
     }
 
@@ -3432,16 +3498,7 @@ mod tests {
 
         assert_eq!(
             String::from_utf8(output).expect("terminal teardown output should be valid utf-8"),
-            concat!(
-                "\u{1b}[?1006l",
-                "\u{1b}[?1015l",
-                "\u{1b}[?1003l",
-                "\u{1b}[?1002l",
-                "\u{1b}[?1000l",
-                "\u{1b}[?1049l",
-                "\u{1b}[?25h",
-                "\u{1b}[0m",
-            )
+            EXPECTED_TERMINAL_TEARDOWN
         );
     }
 
@@ -3451,7 +3508,124 @@ mod tests {
 
         renderer.cleanup().expect("inactive cleanup should succeed");
 
-        assert!(!renderer.active);
+        assert!(!renderer.terminal_state.raw_mode_enabled);
+        assert!(!renderer.terminal_state.terminal_ui_active);
+    }
+
+    #[test]
+    fn cleanup_after_runtime_error_restores_terminal_in_reverse_order() {
+        let mut terminal_state = TerminalState::default();
+        let mut output = Vec::new();
+        let events = Arc::new(Mutex::new(Vec::new()));
+
+        terminal_state
+            .init_with(
+                &mut output,
+                {
+                    let events = Arc::clone(&events);
+                    move || {
+                        events.lock().unwrap().push("enable_raw_mode");
+                        Ok(())
+                    }
+                },
+                {
+                    let events = Arc::clone(&events);
+                    move |_writer| {
+                        events.lock().unwrap().push("enter_terminal_ui");
+                        Ok(())
+                    }
+                },
+            )
+            .expect("terminal init should succeed");
+
+        terminal_state
+            .cleanup_with(
+                &mut output,
+                {
+                    let events = Arc::clone(&events);
+                    move |writer| {
+                        events.lock().unwrap().push("leave_terminal_ui");
+                        leave_terminal_ui(writer)
+                    }
+                },
+                {
+                    let events = Arc::clone(&events);
+                    move || {
+                        events.lock().unwrap().push("disable_raw_mode");
+                        Ok(())
+                    }
+                },
+            )
+            .expect("cleanup should succeed after a runtime error");
+
+        assert_eq!(
+            String::from_utf8(output).expect("terminal teardown output should be valid utf-8"),
+            EXPECTED_TERMINAL_TEARDOWN
+        );
+        assert_eq!(
+            events.lock().unwrap().as_slice(),
+            [
+                "enable_raw_mode",
+                "enter_terminal_ui",
+                "leave_terminal_ui",
+                "disable_raw_mode",
+            ]
+        );
+    }
+
+    #[test]
+    fn failed_init_still_runs_full_cleanup_once() {
+        let mut terminal_state = TerminalState::default();
+        let mut output = Vec::new();
+        let leave_calls = TestCell::new(0usize);
+        let disable_calls = TestCell::new(0usize);
+
+        let err = terminal_state
+            .init_with(
+                &mut output,
+                || Ok(()),
+                |_writer| Err(io::Error::other("forced init failure")),
+            )
+            .expect_err("init should surface the forced failure");
+        assert_eq!(err.kind(), io::ErrorKind::Other);
+        assert_eq!(err.to_string(), "forced init failure");
+
+        terminal_state
+            .cleanup_with(
+                &mut output,
+                |writer| {
+                    leave_calls.set(leave_calls.get() + 1);
+                    leave_terminal_ui(writer)
+                },
+                || {
+                    disable_calls.set(disable_calls.get() + 1);
+                    Ok(())
+                },
+            )
+            .expect("cleanup should restore the terminal after init failure");
+
+        terminal_state
+            .cleanup_with(
+                &mut output,
+                |writer| {
+                    leave_calls.set(leave_calls.get() + 1);
+                    leave_terminal_ui(writer)
+                },
+                || {
+                    disable_calls.set(disable_calls.get() + 1);
+                    Ok(())
+                },
+            )
+            .expect("second cleanup should be a no-op");
+
+        assert_eq!(
+            String::from_utf8(output).expect("terminal teardown output should be valid utf-8"),
+            EXPECTED_TERMINAL_TEARDOWN
+        );
+        assert_eq!(leave_calls.get(), 1);
+        assert_eq!(disable_calls.get(), 1);
+        assert!(!terminal_state.raw_mode_enabled);
+        assert!(!terminal_state.terminal_ui_active);
     }
 
     fn cell_at(renderer: &Renderer, x: u16, y: u16) -> Cell {
@@ -3915,14 +4089,18 @@ mod tests {
 
         app.refresh(layout);
         let initial_header = build_header_filter_layout(&app, 120);
-        assert!(initial_header
-            .chips
-            .iter()
-            .any(|chip| chip.label == "1xthrongterm"));
-        assert!(initial_header
-            .chips
-            .iter()
-            .any(|chip| chip.label == "1xskills"));
+        assert!(
+            initial_header
+                .chips
+                .iter()
+                .any(|chip| chip.label == "1xthrongterm")
+        );
+        assert!(
+            initial_header
+                .chips
+                .iter()
+                .any(|chip| chip.label == "1xskills")
+        );
 
         app.refresh(layout);
 
@@ -5284,10 +5462,11 @@ mod tests {
             app.message.as_ref().map(|(message, _)| message.as_str()),
             Some("created 55")
         );
-        assert!(app
-            .entities
-            .iter()
-            .any(|entity| entity.session.session_id == "sess-55"));
+        assert!(
+            app.entities
+                .iter()
+                .any(|entity| entity.session.session_id == "sess-55")
+        );
     }
 
     #[test]
