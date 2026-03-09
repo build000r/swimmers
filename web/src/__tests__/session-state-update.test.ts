@@ -76,4 +76,55 @@ describe("applySessionStatePayload", () => {
 
     expect(recovered.exit_reason).toBeNull();
   });
+
+  it("wakes sleeping sessions to active rest state on busy transition", () => {
+    const session = makeSession({
+      session_id: "sess-sleep",
+      state: "idle",
+      rest_state: "sleeping",
+      thought_state: "sleeping",
+      thought: "Sleeping.",
+      transport_health: "healthy",
+    });
+
+    const updated = applySessionStatePayload(session, {
+      state: "busy",
+      previous_state: "idle",
+      current_command: "npm test",
+      transport_health: "healthy",
+      at: "2026-03-08T15:00:00.000Z",
+    });
+
+    expect(updated.state).toBe("busy");
+    expect(updated.rest_state).toBe("active");
+  });
+
+  it("maps exited sessions to deep sleep rest state", () => {
+    const session = makeSession({
+      session_id: "sess-exit-rest",
+      state: "busy",
+      rest_state: "active",
+      thought: "still thinking",
+      thought_state: "holding",
+      thought_source: "llm",
+      thought_updated_at: "2026-03-08T15:00:00.000Z",
+      transport_health: "healthy",
+    });
+
+    const updated = applySessionStatePayload(session, {
+      state: "exited",
+      previous_state: "busy",
+      current_command: null,
+      transport_health: "healthy",
+      exit_reason: "process_exit",
+      at: "2026-03-08T15:00:01.000Z",
+    });
+
+    expect(updated.state).toBe("exited");
+    expect(updated.rest_state).toBe("deep_sleep");
+    expect(updated.thought).toBeNull();
+    expect(updated.thought_state).toBe("holding");
+    expect(updated.thought_source).toBe("carry_forward");
+    expect(updated.thought_updated_at).toBeNull();
+  });
 });

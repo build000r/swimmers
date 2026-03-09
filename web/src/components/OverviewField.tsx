@@ -1,10 +1,13 @@
 import { useEffect, useRef, useCallback, useState } from "preact/hooks";
-import type { SessionSummary, SpawnTool, SpritePack } from "@/types";
+import type { RepoTheme, SessionSummary, SpawnTool, SpritePack } from "@/types";
 import {
   throngletRestStageForSession,
   type ThrongletRestStage,
 } from "@/lib/thronglet-motion";
-import { spritePacks as spritePacksSignal } from "@/app";
+import {
+  repoThemes as repoThemesSignal,
+  spritePacks as spritePacksSignal,
+} from "@/app";
 import { SpawnMenu } from "./SpawnMenu";
 import { ThoughtConfigPanel } from "./ThoughtConfigPanel";
 import { BenchModal } from "./BenchModal";
@@ -95,6 +98,7 @@ interface ThrongletProps {
   session: SessionSummary;
   idlePreview?: string;
   spritePack?: SpritePack | null;
+  repoTheme?: RepoTheme | null;
   x: number;
   y: number;
   axeArmed?: boolean;
@@ -116,6 +120,7 @@ function ThrongletEntity({
   session,
   idlePreview,
   spritePack,
+  repoTheme,
   x,
   y,
   axeArmed = false,
@@ -245,6 +250,7 @@ function ThrongletEntity({
   const isSleepingThought =
     normalizedThought === "sleeping" || normalizedThought === "sleeping.";
   const showIdlePreview =
+    !isExited &&
     !session.thought &&
     session.state === "idle" &&
     safeIdlePreviewText.length > 0 &&
@@ -254,7 +260,7 @@ function ThrongletEntity({
     activityText = safeIdlePreviewText;
     thoughtText = safeIdlePreviewText;
     showBubble = true;
-  } else if (session.thought) {
+  } else if (!isExited && session.thought) {
     activityText = session.thought;
     thoughtText = session.thought;
     showBubble = true;
@@ -306,7 +312,7 @@ function ThrongletEntity({
         <div class="raw-row"><span class="raw-key">cwd</span> {cwdLabel(session.cwd)}</div>
         {session.tool && <div class="raw-row"><span class="raw-key">tool</span> {session.tool}</div>}
         {session.current_command && <div class="raw-row"><span class="raw-key">cmd</span> {session.current_command}</div>}
-        {session.thought && <div class="raw-row"><span class="raw-key">thought</span> {session.thought}</div>}
+        {!isExited && session.thought && <div class="raw-row"><span class="raw-key">thought</span> {session.thought}</div>}
         {session.context_limit > 0 && (
           <div class="raw-row"><span class="raw-key">ctx</span> {session.token_count.toLocaleString()}/{session.context_limit.toLocaleString()}</div>
         )}
@@ -405,9 +411,10 @@ function ThrongletEntity({
         <ThrongletSprite
           class="thronglet-sprite"
           state={session.state}
+          restState={session.rest_state}
           tool={session.tool}
-          lastActivityAt={session.last_activity_at}
           spritePack={spritePack}
+          repoTheme={repoTheme}
         />
       )}
 
@@ -689,11 +696,7 @@ export function OverviewField({
           if (!session) continue;
           stageById.set(
             id,
-            throngletRestStageForSession(
-              session.state,
-              session.last_activity_at,
-              nowMs,
-            ),
+            throngletRestStageForSession(session.rest_state),
           );
         }
 
@@ -860,6 +863,7 @@ export function OverviewField({
         target.closest?.(".thronglet") ||
         target.closest?.(".hatching-egg") ||
         target.closest?.(".spawn-menu") ||
+        target.closest?.(".field-control-rail") ||
         target.closest?.(".thought-config-overlay") ||
         target.closest?.(".thought-config-trigger") ||
         target.closest?.(".bench-modal-overlay")
@@ -887,6 +891,7 @@ export function OverviewField({
         target.closest?.(".thronglet") ||
         target.closest?.(".hatching-egg") ||
         target.closest?.(".spawn-menu") ||
+        target.closest?.(".field-control-rail") ||
         target.closest?.(".thought-config-overlay") ||
         target.closest?.(".thought-config-trigger") ||
         target.closest?.(".bench-modal-overlay")
@@ -953,6 +958,8 @@ export function OverviewField({
   const axeTargetName = axeTargetSession
     ? throngletName(axeTargetSession)
     : axeTargetSessionId;
+  const showAxeControl = !observer && !!onToggleAxe;
+  const showBenchControl = !observer && !!onToggleBenchArm;
 
   return (
     <div
@@ -963,104 +970,153 @@ export function OverviewField({
       onTouchEnd={observer ? undefined : handleFieldTouch}
       onContextMenu={observer ? undefined : (e: Event) => e.preventDefault()}
     >
-      {!observer && onToggleAxe && (
-        <button
-          type="button"
-          aria-label={axeArmed ? "Disarm axe mode" : "Arm axe mode"}
-          title={axeArmed ? "Axe armed" : "Arm axe"}
-          onClick={(e: MouseEvent) => {
-            e.stopPropagation();
-            onToggleAxe();
-            if (navigator.vibrate) navigator.vibrate(axeArmed ? 10 : 25);
-          }}
-          style={{
-            position: "absolute",
-            top: `${axeTopOffset}px`,
-            left: "8px",
-            width: "60px",
-            height: "60px",
-            border: "none",
-            background: "transparent",
-            boxShadow: "none",
-            padding: 0,
-            filter: axeArmed
-              ? "drop-shadow(0 0 8px rgba(231, 76, 60, 0.9))"
-              : "drop-shadow(0 2px 3px rgba(0, 0, 0, 0.45))",
-            display: "grid",
-            placeItems: "center",
-            zIndex: 220,
-            cursor: "pointer",
-          }}
-        >
-          <svg
-            width="44"
-            height="44"
-            viewBox="0 0 32 32"
-            fill="none"
-            aria-hidden="true"
-            shapeRendering="crispEdges"
+      <div class="field-control-rail" style={{ top: `${axeTopOffset}px` }}>
+        {showAxeControl && (
+          <button
+            type="button"
+            class="field-control-btn field-control-btn-axe"
+            aria-label={axeArmed ? "Disarm axe mode" : "Arm axe mode"}
+            title={axeArmed ? "Axe armed" : "Arm axe"}
+            onClick={(e: MouseEvent) => {
+              e.stopPropagation();
+              onToggleAxe();
+              if (navigator.vibrate) navigator.vibrate(axeArmed ? 10 : 25);
+            }}
+            style={{
+              border: "none",
+              background: "transparent",
+              boxShadow: "none",
+              padding: 0,
+              filter: axeArmed
+                ? "drop-shadow(0 0 8px rgba(231, 76, 60, 0.9))"
+                : "drop-shadow(0 2px 3px rgba(0, 0, 0, 0.45))",
+              display: "grid",
+              placeItems: "center",
+              cursor: "pointer",
+            }}
           >
-            {/* Pixel blade base */}
-            <rect x="20" y="2" width="8" height="2" fill="#5a616c" />
-            <rect x="18" y="4" width="10" height="2" fill="#707987" />
-            <rect x="16" y="6" width="10" height="2" fill="#7f8897" />
-            <rect x="14" y="8" width="10" height="2" fill="#707987" />
-            <rect x="16" y="10" width="8" height="2" fill="#626a77" />
-            <rect x="18" y="12" width="4" height="2" fill="#4f5561" />
-            <rect x="24" y="12" width="4" height="2" fill="#5a616c" />
+            <svg
+              width="44"
+              height="44"
+              viewBox="0 0 32 32"
+              fill="none"
+              aria-hidden="true"
+              shapeRendering="crispEdges"
+            >
+              {/* Pixel blade base */}
+              <rect x="20" y="2" width="8" height="2" fill="#5a616c" />
+              <rect x="18" y="4" width="10" height="2" fill="#707987" />
+              <rect x="16" y="6" width="10" height="2" fill="#7f8897" />
+              <rect x="14" y="8" width="10" height="2" fill="#707987" />
+              <rect x="16" y="10" width="8" height="2" fill="#626a77" />
+              <rect x="18" y="12" width="4" height="2" fill="#4f5561" />
+              <rect x="24" y="12" width="4" height="2" fill="#5a616c" />
 
-            {/* Blade highlights */}
-            <rect x="21" y="4" width="5" height="2" fill="#c8d0da" />
-            <rect x="19" y="6" width="5" height="2" fill="#d7dde5" />
-            <rect x="17" y="8" width="4" height="2" fill="#bcc5d1" />
-            <rect x="17" y="10" width="2" height="2" fill="#9fa9b8" />
+              {/* Blade highlights */}
+              <rect x="21" y="4" width="5" height="2" fill="#c8d0da" />
+              <rect x="19" y="6" width="5" height="2" fill="#d7dde5" />
+              <rect x="17" y="8" width="4" height="2" fill="#bcc5d1" />
+              <rect x="17" y="10" width="2" height="2" fill="#9fa9b8" />
 
-            {/* Socket + rivet */}
-            <rect x="18" y="12" width="3" height="2" fill="#3e434d" />
-            <rect x="19" y="12" width="1" height="1" fill="#dbe1e9" />
+              {/* Socket + rivet */}
+              <rect x="18" y="12" width="3" height="2" fill="#3e434d" />
+              <rect x="19" y="12" width="1" height="1" fill="#dbe1e9" />
 
-            {/* Pixel handle */}
-            <rect x="17" y="13" width="2" height="2" fill="#5a3419" />
-            <rect x="15" y="15" width="2" height="2" fill="#734321" />
-            <rect x="13" y="17" width="2" height="2" fill="#5a3419" />
-            <rect x="11" y="19" width="2" height="2" fill="#734321" />
-            <rect x="9" y="21" width="2" height="2" fill="#5a3419" />
-            <rect x="7" y="23" width="2" height="2" fill="#734321" />
-            <rect x="5" y="25" width="2" height="2" fill="#5a3419" />
-            <rect x="4" y="26" width="2" height="2" fill="#b7834a" />
-            <rect x="5" y="24" width="1" height="2" fill="#d3a066" />
-            <rect x="7" y="22" width="1" height="2" fill="#d3a066" />
-            <rect x="9" y="20" width="1" height="2" fill="#d3a066" />
-            <rect x="11" y="18" width="1" height="2" fill="#d3a066" />
-          </svg>
-        </button>
-      )}
+              {/* Pixel handle */}
+              <rect x="17" y="13" width="2" height="2" fill="#5a3419" />
+              <rect x="15" y="15" width="2" height="2" fill="#734321" />
+              <rect x="13" y="17" width="2" height="2" fill="#5a3419" />
+              <rect x="11" y="19" width="2" height="2" fill="#734321" />
+              <rect x="9" y="21" width="2" height="2" fill="#5a3419" />
+              <rect x="7" y="23" width="2" height="2" fill="#734321" />
+              <rect x="5" y="25" width="2" height="2" fill="#5a3419" />
+              <rect x="4" y="26" width="2" height="2" fill="#b7834a" />
+              <rect x="5" y="24" width="1" height="2" fill="#d3a066" />
+              <rect x="7" y="22" width="1" height="2" fill="#d3a066" />
+              <rect x="9" y="20" width="1" height="2" fill="#d3a066" />
+              <rect x="11" y="18" width="1" height="2" fill="#d3a066" />
+            </svg>
+          </button>
+        )}
 
-      {!observer && onToggleBenchArm && (
+        {showBenchControl && (
+          <button
+            type="button"
+            class={`field-control-btn field-control-btn-standard bench-trigger ${benchArmed ? "armed" : ""}`}
+            aria-label={benchArmed ? "Disarm bench mode" : "Bench mode"}
+            title={benchArmed ? "Bench armed" : "Hide thronglets"}
+            onClick={(e: MouseEvent) => {
+              e.stopPropagation();
+              if (benchArmed) {
+                onToggleBenchArm();
+                if (navigator.vibrate) navigator.vibrate(10);
+              } else if (benchedIds.size > 0) {
+                setShowBenchModal(true);
+                if (navigator.vibrate) navigator.vibrate(15);
+              } else {
+                onToggleBenchArm();
+                if (navigator.vibrate) navigator.vibrate(25);
+              }
+            }}
+            style={{
+              border: "none",
+              borderRadius: "12px",
+              background: "rgba(17, 30, 49, 0.65)",
+              boxShadow: "0 2px 8px rgba(0, 0, 0, 0.35)",
+              padding: 0,
+              display: "grid",
+              placeItems: "center",
+              cursor: "pointer",
+            }}
+          >
+            <svg
+              width="24"
+              height="24"
+              viewBox="0 0 24 24"
+              fill="none"
+              aria-hidden="true"
+            >
+              {/* Eye with slash — hide icon */}
+              <path
+                d="M3 12s3-7 9-7 9 7 9 7-3 7-9 7-9-7-9-7z"
+                stroke={benchArmed ? "#5b94eb" : "#f5f7fb"}
+                strokeWidth="1.5"
+                fill="none"
+              />
+              <circle
+                cx="12"
+                cy="12"
+                r="3"
+                stroke={benchArmed ? "#5b94eb" : "#f5f7fb"}
+                strokeWidth="1.5"
+                fill="none"
+              />
+              <line
+                x1="4"
+                y1="20"
+                x2="20"
+                y2="4"
+                stroke={benchArmed ? "#5b94eb" : "#f5f7fb"}
+                strokeWidth="1.5"
+              />
+            </svg>
+            {benchedIds.size > 0 && !benchArmed && (
+              <span class="bench-count">{benchedIds.size}</span>
+            )}
+          </button>
+        )}
+
         <button
           type="button"
-          class={`bench-trigger ${benchArmed ? "armed" : ""}`}
-          aria-label={benchArmed ? "Disarm bench mode" : "Bench mode"}
-          title={benchArmed ? "Bench armed" : "Hide thronglets"}
+          class="field-control-btn field-control-btn-standard thought-config-trigger"
+          aria-label="Open thought config"
+          title="Thought config"
           onClick={(e: MouseEvent) => {
             e.stopPropagation();
-            if (benchArmed) {
-              onToggleBenchArm();
-              if (navigator.vibrate) navigator.vibrate(10);
-            } else if (benchedIds.size > 0) {
-              setShowBenchModal(true);
-              if (navigator.vibrate) navigator.vibrate(15);
-            } else {
-              onToggleBenchArm();
-              if (navigator.vibrate) navigator.vibrate(25);
-            }
+            setShowThoughtConfig(true);
+            if (navigator.vibrate) navigator.vibrate(15);
           }}
           style={{
-            position: "absolute",
-            top: `${axeTopOffset + 8}px`,
-            left: !observer && onToggleAxe ? "74px" : "8px",
-            width: "44px",
-            height: "44px",
             border: "none",
             borderRadius: "12px",
             background: "rgba(17, 30, 49, 0.65)",
@@ -1068,7 +1124,6 @@ export function OverviewField({
             padding: 0,
             display: "grid",
             placeItems: "center",
-            zIndex: 220,
             cursor: "pointer",
           }}
         >
@@ -1079,96 +1134,29 @@ export function OverviewField({
             fill="none"
             aria-hidden="true"
           >
-            {/* Eye with slash — hide icon */}
-            <path
-              d="M3 12s3-7 9-7 9 7 9 7-3 7-9 7-9-7-9-7z"
-              stroke={benchArmed ? "#5b94eb" : "#f5f7fb"}
-              strokeWidth="1.5"
-              fill="none"
+            <rect x="10.8" y="1.8" width="2.4" height="4.2" rx="1" fill="#f5f7fb" />
+            <rect x="10.8" y="18" width="2.4" height="4.2" rx="1" fill="#f5f7fb" />
+            <rect x="1.8" y="10.8" width="4.2" height="2.4" rx="1" fill="#f5f7fb" />
+            <rect x="18" y="10.8" width="4.2" height="2.4" rx="1" fill="#f5f7fb" />
+            <circle
+              cx="12"
+              cy="12"
+              r="6.2"
+              fill="#2d3a53"
+              stroke="#f5f7fb"
+              strokeWidth="1.4"
             />
             <circle
               cx="12"
               cy="12"
-              r="3"
-              stroke={benchArmed ? "#5b94eb" : "#f5f7fb"}
-              strokeWidth="1.5"
-              fill="none"
-            />
-            <line
-              x1="4"
-              y1="20"
-              x2="20"
-              y2="4"
-              stroke={benchArmed ? "#5b94eb" : "#f5f7fb"}
-              strokeWidth="1.5"
+              r="2.7"
+              fill="#101726"
+              stroke="#f5f7fb"
+              strokeWidth="1.2"
             />
           </svg>
-          {benchedIds.size > 0 && !benchArmed && (
-            <span class="bench-count">{benchedIds.size}</span>
-          )}
         </button>
-      )}
-
-      <button
-        type="button"
-        class="thought-config-trigger"
-        aria-label="Open thought config"
-        title="Thought config"
-        onClick={(e: MouseEvent) => {
-          e.stopPropagation();
-          setShowThoughtConfig(true);
-          if (navigator.vibrate) navigator.vibrate(15);
-        }}
-        style={{
-          position: "absolute",
-          top: `${axeTopOffset + 8}px`,
-          left: !observer && onToggleAxe && onToggleBenchArm
-            ? "124px"
-            : !observer && onToggleAxe
-              ? "74px"
-              : "8px",
-          width: "44px",
-          height: "44px",
-          border: "none",
-          borderRadius: "12px",
-          background: "rgba(17, 30, 49, 0.65)",
-          boxShadow: "0 2px 8px rgba(0, 0, 0, 0.35)",
-          padding: 0,
-          display: "grid",
-          placeItems: "center",
-          zIndex: 220,
-          cursor: "pointer",
-        }}
-      >
-        <svg
-          width="24"
-          height="24"
-          viewBox="0 0 24 24"
-          fill="none"
-          aria-hidden="true"
-        >
-          <rect x="10.8" y="1.8" width="2.4" height="4.2" rx="1" fill="#f5f7fb" />
-          <rect x="10.8" y="18" width="2.4" height="4.2" rx="1" fill="#f5f7fb" />
-          <rect x="1.8" y="10.8" width="4.2" height="2.4" rx="1" fill="#f5f7fb" />
-          <rect x="18" y="10.8" width="4.2" height="2.4" rx="1" fill="#f5f7fb" />
-          <circle
-            cx="12"
-            cy="12"
-            r="6.2"
-            fill="#2d3a53"
-            stroke="#f5f7fb"
-            strokeWidth="1.4"
-          />
-          <circle
-            cx="12"
-            cy="12"
-            r="2.7"
-            fill="#101726"
-            stroke="#f5f7fb"
-            strokeWidth="1.2"
-          />
-        </svg>
-      </button>
+      </div>
 
       {/* Scenery trees */}
       <img
@@ -1207,12 +1195,17 @@ export function OverviewField({
               s.sprite_pack_id != null
                 ? (spritePacksSignal.value[s.sprite_pack_id] ?? null)
                 : null;
+            const resolvedTheme =
+              s.repo_theme_id != null
+                ? (repoThemesSignal.value[s.repo_theme_id] ?? null)
+                : null;
             return (
               <ThrongletEntity
                 key={s.session_id}
                 session={s}
                 idlePreview={idlePreviews[s.session_id]}
                 spritePack={resolvedPack}
+                repoTheme={resolvedTheme}
                 x={pos.x}
                 y={pos.y}
                 axeArmed={axeArmed}

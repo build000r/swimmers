@@ -5,6 +5,7 @@ import type {
   TransportHealth,
   BootstrapResponse,
   SpawnTool,
+  RepoTheme,
   SpritePack,
   NativeDesktopStatus,
 } from "@/types";
@@ -51,6 +52,7 @@ export const terminalCacheTtlMs = signal<number>(300_000);
 export const zoneLayout = signal<"single" | "dual">("single");
 export const idlePreviews = signal<Record<string, string>>({});
 export const spritePacks = signal<Record<string, SpritePack>>({});
+export const repoThemes = signal<Record<string, RepoTheme>>({});
 
 // Shared realtime service singleton
 export const realtime = new RealtimeService();
@@ -104,16 +106,55 @@ function pickNewerActivityAt(
   return candidateMs >= currentMs ? candidate : current;
 }
 
+function fallbackRestStateForSessionState(
+  state: SessionSummary["state"],
+  thoughtState: SessionSummary["thought_state"],
+): SessionSummary["rest_state"] {
+  switch (state) {
+    case "exited":
+      return "deep_sleep";
+    case "idle":
+      switch (thoughtState) {
+        case "active":
+          return "active";
+        case "sleeping":
+          return "sleeping";
+        case "holding":
+        default:
+          return "drowsy";
+      }
+    case "busy":
+    case "error":
+    case "attention":
+    default:
+      return "active";
+  }
+}
+
 export function applySessionStatePayload(
   session: SessionSummary,
   payload: SessionStatePayload,
 ): SessionSummary {
   const exitReason = normalizeExitReason(payload.state, payload.exit_reason);
+  const exited = payload.state === "exited";
+  const restState =
+    session.state === payload.state
+      ? session.rest_state
+      : fallbackRestStateForSessionState(payload.state, session.thought_state);
+  const nextThought = exited ? null : session.thought;
+  const nextThoughtState = exited ? "holding" : session.thought_state;
+  const nextThoughtSource = exited ? "carry_forward" : session.thought_source;
+  const nextThoughtUpdatedAt = exited ? null : session.thought_updated_at;
   if (
     session.state === payload.state &&
     (session.exit_reason ?? null) === exitReason &&
     session.current_command === payload.current_command &&
-    session.transport_health === payload.transport_health
+    session.transport_health === payload.transport_health &&
+    session.rest_state === restState &&
+    session.thought === nextThought &&
+    session.thought_state === nextThoughtState &&
+    session.thought_source === nextThoughtSource &&
+    session.thought_updated_at === nextThoughtUpdatedAt
   ) {
     return session;
   }
@@ -124,6 +165,11 @@ export function applySessionStatePayload(
     exit_reason: exitReason,
     current_command: payload.current_command,
     transport_health: payload.transport_health,
+    rest_state: restState,
+    thought: nextThought,
+    thought_state: nextThoughtState,
+    thought_source: nextThoughtSource,
+    thought_updated_at: nextThoughtUpdatedAt,
   };
 }
 
@@ -206,10 +252,12 @@ export function mergePollSessions(
         old.cwd === s.cwd &&
         old.tool === s.tool &&
         old.sprite_pack_id === s.sprite_pack_id &&
+        old.repo_theme_id === s.repo_theme_id &&
         old.thought === s.thought &&
         old.thought_state === s.thought_state &&
         old.thought_source === s.thought_source &&
         old.thought_updated_at === s.thought_updated_at &&
+        old.rest_state === s.rest_state &&
         old.last_skill === s.last_skill &&
         old.token_count === s.token_count &&
         old.context_limit === s.context_limit &&
@@ -230,10 +278,12 @@ export function mergePollSessions(
       old.cwd === s.cwd &&
       old.tool === s.tool &&
       old.sprite_pack_id === s.sprite_pack_id &&
+      old.repo_theme_id === s.repo_theme_id &&
       old.thought === s.thought &&
       old.thought_state === s.thought_state &&
       old.thought_source === s.thought_source &&
       old.thought_updated_at === s.thought_updated_at &&
+      old.rest_state === s.rest_state &&
       old.last_skill === s.last_skill &&
       old.token_count === s.token_count &&
       old.context_limit === s.context_limit &&
@@ -249,10 +299,12 @@ export function mergePollSessions(
       token_count: s.token_count ?? old.token_count,
       context_limit: s.context_limit ?? old.context_limit,
       sprite_pack_id: s.sprite_pack_id,
+      repo_theme_id: s.repo_theme_id,
       thought: s.thought,
       thought_state: s.thought_state,
       thought_source: s.thought_source,
       thought_updated_at: s.thought_updated_at,
+      rest_state: s.rest_state,
       last_skill: s.last_skill,
     };
   });
@@ -403,8 +455,12 @@ export function App() {
       !session.sprite_pack_id && existing.sprite_pack_id
         ? { ...session, sprite_pack_id: existing.sprite_pack_id }
         : session;
+    const withTheme =
+      !merged.repo_theme_id && existing.repo_theme_id
+        ? { ...merged, repo_theme_id: existing.repo_theme_id }
+        : merged;
     const next = [...sessions.value];
-    next[existingIndex] = merged;
+    next[existingIndex] = withTheme;
     sessions.value = next;
   }, []);
 
@@ -438,6 +494,18 @@ export function App() {
 
   const refreshSessionsFromServer = useCallback(async () => {
     const resp = await fetchSessions();
+    if (Object.keys(resp.sprite_packs ?? {}).length > 0) {
+      spritePacks.value = {
+        ...spritePacks.value,
+        ...resp.sprite_packs,
+      };
+    }
+    if (Object.keys(resp.repo_themes ?? {}).length > 0) {
+      repoThemes.value = {
+        ...repoThemes.value,
+        ...resp.repo_themes,
+      };
+    }
     const liveSessions = dedupeSessionsById(resp.sessions);
     const merged = mergePollSessions(
       sessions.value,
@@ -522,6 +590,12 @@ export function App() {
         spritePacks.value = {
           ...spritePacks.value,
           [resp.session.sprite_pack_id]: resp.sprite_pack,
+        };
+      }
+      if (resp.repo_theme && resp.session.repo_theme_id) {
+        repoThemes.value = {
+          ...repoThemes.value,
+          [resp.session.repo_theme_id]: resp.repo_theme,
         };
       }
       upsertSession(resp.session);
@@ -703,6 +777,7 @@ export function App() {
             s.thought === payload.thought &&
             s.thought_state === payload.thought_state &&
             s.thought_source === payload.thought_source &&
+            s.rest_state === payload.rest_state &&
             s.token_count === payload.token_count &&
             s.context_limit === payload.context_limit;
 
@@ -731,6 +806,7 @@ export function App() {
             thought_state: payload.thought_state,
             thought_source: payload.thought_source,
             thought_updated_at: payload.at,
+            rest_state: payload.rest_state,
             token_count: payload.token_count,
             context_limit: payload.context_limit,
           };
@@ -742,6 +818,12 @@ export function App() {
           spritePacks.value = {
             ...spritePacks.value,
             [payload.session.sprite_pack_id]: payload.sprite_pack,
+          };
+        }
+        if (payload.repo_theme && payload.session.repo_theme_id) {
+          repoThemes.value = {
+            ...repoThemes.value,
+            [payload.session.repo_theme_id]: payload.repo_theme,
           };
         }
         upsertSession(payload.session);
@@ -810,6 +892,14 @@ export function App() {
             const resp = await fetchSessions();
             if (cancelled) return;
             initialSessions = dedupeSessionsById(resp.sessions);
+            data.sprite_packs = {
+              ...(data.sprite_packs ?? {}),
+              ...(resp.sprite_packs ?? {}),
+            };
+            data.repo_themes = {
+              ...(data.repo_themes ?? {}),
+              ...(resp.repo_themes ?? {}),
+            };
           } catch {
             // Keep bootstrap data if the active session refresh fails.
           }
@@ -820,6 +910,7 @@ export function App() {
           terminalCacheTtlMs.value = data.terminal_cache_ttl_ms;
           idlePreviews.value = {};
           spritePacks.value = data.sprite_packs ?? {};
+          repoThemes.value = data.repo_themes ?? {};
         });
         idlePreviewFetchInFlightRef.current.clear();
         idlePreviewLastFetchAtRef.current.clear();
@@ -1348,6 +1439,12 @@ export function App() {
                 spritePacks.value = {
                   ...spritePacks.value,
                   [resp.session.sprite_pack_id]: resp.sprite_pack,
+                };
+              }
+              if (resp.repo_theme && resp.session.repo_theme_id) {
+                repoThemes.value = {
+                  ...repoThemes.value,
+                  [resp.session.repo_theme_id]: resp.repo_theme,
                 };
               }
               upsertSession(resp.session);
