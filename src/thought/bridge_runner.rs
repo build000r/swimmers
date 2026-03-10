@@ -6,10 +6,11 @@ use tokio::sync::RwLock;
 use tracing::{debug, info, warn};
 
 use crate::thought::emitter_client::EmitterClient;
+use crate::thought::loop_runner::SessionInfo;
 use crate::thought::loop_runner::SessionProvider;
 use crate::thought::protocol::{SyncResponse, SyncUpdate, ThoughtDeliveryState};
 use crate::thought::runtime_config::ThoughtConfig;
-use crate::types::{ControlEvent, ThoughtUpdatePayload};
+use crate::types::{ControlEvent, ThoughtSource, ThoughtUpdatePayload};
 
 const DEFAULT_BRIDGE_TICK: Duration = Duration::from_secs(2);
 
@@ -59,8 +60,9 @@ impl BridgeRunner {
             let mut delivery_states = provider.thought_delivery_states();
             loop {
                 let runtime_config = self.runtime_config.read().await.clone();
+                let snapshots = provider.session_snapshots();
                 match emitter_client
-                    .next_sync_response(&runtime_config, self.tick)
+                    .next_sync_response(&runtime_config, &snapshots)
                     .await
                 {
                     Ok(response) => {
@@ -68,6 +70,7 @@ impl BridgeRunner {
                             provider.as_ref(),
                             &self.event_tx,
                             &mut delivery_states,
+                            &snapshots,
                             response,
                         );
                     }
@@ -87,6 +90,7 @@ fn apply_sync_response<P: SessionProvider>(
     provider: &P,
     event_tx: &broadcast::Sender<ControlEvent>,
     delivery_states: &mut std::collections::HashMap<String, ThoughtDeliveryState>,
+    session_snapshots: &[SessionInfo],
     response: SyncResponse,
 ) {
     debug!(
@@ -96,15 +100,42 @@ fn apply_sync_response<P: SessionProvider>(
     );
 
     let batch_stream_instance_id = response.stream_instance_id.clone();
+    let mut prior_thoughts = session_snapshots
+        .iter()
+        .map(|snapshot| (snapshot.session_id.clone(), snapshot.thought.clone()))
+        .collect::<std::collections::HashMap<_, _>>();
     for update in response.updates {
         apply_update(
             provider,
             event_tx,
             delivery_states,
+            &mut prior_thoughts,
             batch_stream_instance_id.as_deref(),
             update,
         );
     }
+}
+
+fn is_sleeping_placeholder(thought: &str) -> bool {
+    matches!(thought.trim().to_ascii_lowercase().as_str(), "sleeping" | "sleeping.")
+}
+
+fn normalize_sleeping_update(
+    mut update: SyncUpdate,
+    prior_thoughts: &std::collections::HashMap<String, Option<String>>,
+) -> SyncUpdate {
+    if update.thought_source != ThoughtSource::StaticSleeping {
+        return update;
+    }
+
+    update.thought = prior_thoughts
+        .get(&update.session_id)
+        .and_then(|thought| thought.as_deref())
+        .map(str::trim)
+        .filter(|thought| !thought.is_empty() && !is_sleeping_placeholder(thought))
+        .map(ToString::to_string);
+    update.thought_source = ThoughtSource::CarryForward;
+    update
 }
 
 fn resolved_delivery_state(
@@ -155,9 +186,11 @@ fn apply_update<P: SessionProvider>(
     provider: &P,
     event_tx: &broadcast::Sender<ControlEvent>,
     delivery_states: &mut std::collections::HashMap<String, ThoughtDeliveryState>,
+    prior_thoughts: &mut std::collections::HashMap<String, Option<String>>,
     batch_stream_instance_id: Option<&str>,
     update: SyncUpdate,
 ) {
+    let update = normalize_sleeping_update(update, prior_thoughts);
     let incoming_delivery = resolved_delivery_state(batch_stream_instance_id, &update);
     let current_delivery = delivery_states.get(&update.session_id);
     if !should_apply_delivery_state(current_delivery, incoming_delivery.as_ref()) {
@@ -169,6 +202,7 @@ fn apply_update<P: SessionProvider>(
         .or_else(|| current_delivery.cloned())
         .unwrap_or_default();
     delivery_states.insert(update.session_id.clone(), persisted_delivery.clone());
+    prior_thoughts.insert(update.session_id.clone(), update.thought.clone());
 
     provider.persist_thought(
         &update.session_id,
@@ -177,6 +211,7 @@ fn apply_update<P: SessionProvider>(
         update.context_limit,
         update.thought_state,
         update.thought_source,
+        update.rest_state,
         update.at,
         persisted_delivery,
         update.objective_fingerprint.clone(),
@@ -188,6 +223,7 @@ fn apply_update<P: SessionProvider>(
         context_limit: update.context_limit,
         thought_state: update.thought_state,
         thought_source: update.thought_source,
+        rest_state: update.rest_state,
         objective_changed: update.objective_changed,
         bubble_precedence: update.bubble_precedence,
         at: update.at,
@@ -213,7 +249,8 @@ mod tests {
     use crate::thought::protocol::{SyncUpdate, ThoughtDeliveryState};
     use crate::thought::runtime_config::ThoughtConfig;
     use crate::types::{
-        BubblePrecedence, SessionState, ThoughtSource, ThoughtState, ThoughtUpdatePayload,
+        BubblePrecedence, RestState, SessionState, ThoughtSource, ThoughtState,
+        ThoughtUpdatePayload,
     };
     use tokio::sync::RwLock;
 
@@ -225,6 +262,7 @@ mod tests {
         context_limit: u64,
         thought_state: ThoughtState,
         thought_source: ThoughtSource,
+        rest_state: RestState,
         updated_at: DateTime<Utc>,
         delivery: ThoughtDeliveryState,
         objective_fingerprint: Option<String>,
@@ -250,6 +288,7 @@ mod tests {
             context_limit: u64,
             thought_state: ThoughtState,
             thought_source: ThoughtSource,
+            rest_state: RestState,
             updated_at: DateTime<Utc>,
             delivery: ThoughtDeliveryState,
             objective_fingerprint: Option<String>,
@@ -264,6 +303,7 @@ mod tests {
                     context_limit,
                     thought_state,
                     thought_source,
+                    rest_state,
                     updated_at,
                     delivery: delivery.clone(),
                     objective_fingerprint,
@@ -300,6 +340,7 @@ mod tests {
                 context_limit: 120,
                 thought_state: ThoughtState::Active,
                 thought_source: ThoughtSource::Llm,
+                rest_state: RestState::Active,
                 objective_changed: true,
                 bubble_precedence: BubblePrecedence::ThoughtFirst,
                 at: now,
@@ -308,7 +349,7 @@ mod tests {
         };
 
         let mut delivery_states = provider.thought_delivery_states();
-        apply_sync_response(&provider, &event_tx, &mut delivery_states, response);
+        apply_sync_response(&provider, &event_tx, &mut delivery_states, &[], response);
 
         let persisted = provider
             .persisted
@@ -324,6 +365,7 @@ mod tests {
         assert_eq!(persisted[0].context_limit, 120);
         assert_eq!(persisted[0].thought_state, ThoughtState::Active);
         assert_eq!(persisted[0].thought_source, ThoughtSource::Llm);
+        assert_eq!(persisted[0].rest_state, RestState::Active);
         assert_eq!(persisted[0].updated_at, now);
         assert_eq!(
             persisted[0].delivery.stream_instance_id.as_deref(),
@@ -347,6 +389,7 @@ mod tests {
         assert_eq!(payload.context_limit, 120);
         assert_eq!(payload.thought_state, ThoughtState::Active);
         assert_eq!(payload.thought_source, ThoughtSource::Llm);
+        assert_eq!(payload.rest_state, RestState::Active);
         assert!(payload.objective_changed);
         assert_eq!(payload.bubble_precedence, BubblePrecedence::ThoughtFirst);
         assert_eq!(payload.at, now);
@@ -370,6 +413,7 @@ mod tests {
             &provider,
             &event_tx,
             &mut delivery_states,
+            &[],
             SyncResponse {
                 request_id: "tmux-1".to_string(),
                 stream_instance_id: Some("stream-a".to_string()),
@@ -402,6 +446,7 @@ mod tests {
                 thought: None,
                 thought_state: ThoughtState::Holding,
                 thought_source: ThoughtSource::CarryForward,
+                rest_state: RestState::Drowsy,
                 objective_fingerprint: None,
                 thought_updated_at: None,
                 token_count: 0,
@@ -438,6 +483,7 @@ mod tests {
             &provider,
             &event_tx,
             &mut delivery_states,
+            &[],
             SyncResponse {
                 request_id: "tmux-2".to_string(),
                 stream_instance_id: Some("stream-a".to_string()),
@@ -450,6 +496,7 @@ mod tests {
                     context_limit: 100,
                     thought_state: ThoughtState::Holding,
                     thought_source: ThoughtSource::Llm,
+                    rest_state: RestState::Drowsy,
                     objective_changed: false,
                     bubble_precedence: BubblePrecedence::ThoughtFirst,
                     at: DateTime::parse_from_rfc3339("2026-03-08T14:00:07Z")
@@ -495,6 +542,7 @@ mod tests {
             &provider,
             &event_tx,
             &mut delivery_states,
+            &[],
             SyncResponse {
                 request_id: "tmux-3".to_string(),
                 stream_instance_id: Some("stream-a".to_string()),
@@ -507,6 +555,7 @@ mod tests {
                     context_limit: 100,
                     thought_state: ThoughtState::Holding,
                     thought_source: ThoughtSource::Llm,
+                    rest_state: RestState::Drowsy,
                     objective_changed: false,
                     bubble_precedence: BubblePrecedence::ThoughtFirst,
                     at: Utc::now(),
@@ -553,6 +602,7 @@ mod tests {
             &provider,
             &event_tx,
             &mut delivery_states,
+            &[],
             SyncResponse {
                 request_id: "tmux-4".to_string(),
                 stream_instance_id: Some("stream-b".to_string()),
@@ -565,6 +615,7 @@ mod tests {
                     context_limit: 100,
                     thought_state: ThoughtState::Active,
                     thought_source: ThoughtSource::Llm,
+                    rest_state: RestState::Active,
                     objective_changed: true,
                     bubble_precedence: BubblePrecedence::ThoughtFirst,
                     at: now,
@@ -584,6 +635,81 @@ mod tests {
 
         let event = event_rx.try_recv().expect("event");
         assert_eq!(event.session_id, "tmux:work:1.0:%1");
+    }
+
+    #[tokio::test]
+    async fn static_sleeping_update_keeps_last_real_thought() {
+        let now = DateTime::parse_from_rfc3339("2026-03-08T14:05:00Z")
+            .expect("timestamp")
+            .with_timezone(&Utc);
+        let provider = RecordingProvider {
+            snapshots: vec![SessionInfo {
+                session_id: "sess-sleep".to_string(),
+                state: SessionState::Idle,
+                exited: false,
+                tool: Some("Codex".to_string()),
+                cwd: "/tmp".to_string(),
+                replay_text: String::new(),
+                thought: Some("Reviewing the patch".to_string()),
+                thought_state: ThoughtState::Holding,
+                thought_source: ThoughtSource::Llm,
+                rest_state: RestState::Drowsy,
+                objective_fingerprint: None,
+                thought_updated_at: Some(now),
+                token_count: 12,
+                context_limit: 100,
+                last_activity_at: now,
+            }],
+            persisted: Mutex::new(Vec::new()),
+            delivery_states: Mutex::new(HashMap::new()),
+        };
+        let (event_tx, mut event_rx) = broadcast::channel::<ControlEvent>(8);
+        let mut delivery_states = provider.thought_delivery_states();
+
+        apply_sync_response(
+            &provider,
+            &event_tx,
+            &mut delivery_states,
+            &provider.session_snapshots(),
+            SyncResponse {
+                request_id: "tmux-sleep".to_string(),
+                stream_instance_id: Some("stream-a".to_string()),
+                updates: vec![SyncUpdate {
+                    session_id: "sess-sleep".to_string(),
+                    stream_instance_id: None,
+                    emission_seq: Some(1),
+                    thought: Some("Sleeping.".to_string()),
+                    token_count: 12,
+                    context_limit: 100,
+                    thought_state: ThoughtState::Sleeping,
+                    thought_source: ThoughtSource::StaticSleeping,
+                    rest_state: RestState::Sleeping,
+                    objective_changed: false,
+                    bubble_precedence: BubblePrecedence::ThoughtFirst,
+                    at: now,
+                    objective_fingerprint: None,
+                }],
+            },
+        );
+
+        let persisted = provider
+            .persisted
+            .lock()
+            .expect("persisted mutex should lock");
+        assert_eq!(persisted.len(), 1);
+        assert_eq!(persisted[0].thought.as_deref(), Some("Reviewing the patch"));
+        assert_eq!(persisted[0].thought_state, ThoughtState::Sleeping);
+        assert_eq!(persisted[0].thought_source, ThoughtSource::CarryForward);
+        assert_eq!(persisted[0].rest_state, RestState::Sleeping);
+        drop(persisted);
+
+        let event = event_rx.recv().await.expect("event should be broadcast");
+        let payload: ThoughtUpdatePayload =
+            serde_json::from_value(event.payload).expect("payload should deserialize");
+        assert_eq!(payload.thought.as_deref(), Some("Reviewing the patch"));
+        assert_eq!(payload.thought_state, ThoughtState::Sleeping);
+        assert_eq!(payload.thought_source, ThoughtSource::CarryForward);
+        assert_eq!(payload.rest_state, RestState::Sleeping);
     }
 
     #[test]
@@ -607,6 +733,7 @@ mod tests {
             &provider,
             &event_tx,
             &mut delivery_states,
+            &[],
             SyncResponse {
                 request_id: "tmux-5".to_string(),
                 stream_instance_id: Some("stream-a".to_string()),
@@ -619,6 +746,7 @@ mod tests {
                     context_limit: 100,
                     thought_state: ThoughtState::Holding,
                     thought_source: ThoughtSource::Llm,
+                    rest_state: RestState::Drowsy,
                     objective_changed: false,
                     bubble_precedence: BubblePrecedence::ThoughtFirst,
                     at: Utc::now(),
@@ -672,6 +800,7 @@ mod tests {
             &provider,
             &event_tx,
             &mut delivery_states,
+            &[],
             SyncResponse {
                 request_id: "tmux-6".to_string(),
                 stream_instance_id: Some("stream-a".to_string()),
@@ -684,6 +813,7 @@ mod tests {
                     context_limit: 100,
                     thought_state: ThoughtState::Holding,
                     thought_source: ThoughtSource::Llm,
+                    rest_state: RestState::Drowsy,
                     objective_changed: false,
                     bubble_precedence: BubblePrecedence::ThoughtFirst,
                     at: Utc::now(),
