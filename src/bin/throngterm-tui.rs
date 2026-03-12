@@ -7,8 +7,8 @@ use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
 use crossterm::event::{
-    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
-    KeyModifiers, MouseButton, MouseEventKind,
+    self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+    Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind,
 };
 use crossterm::{
     cursor, execute, queue,
@@ -84,6 +84,7 @@ fn enter_terminal_ui(writer: &mut impl Write) -> io::Result<()> {
         writer,
         EnterAlternateScreen,
         EnableMouseCapture,
+        EnableBracketedPaste,
         cursor::Hide,
         Clear(ClearType::All)
     )
@@ -92,6 +93,7 @@ fn enter_terminal_ui(writer: &mut impl Write) -> io::Result<()> {
 fn leave_terminal_ui(writer: &mut impl Write) -> io::Result<()> {
     execute!(
         writer,
+        DisableBracketedPaste,
         DisableMouseCapture,
         LeaveAlternateScreen,
         cursor::Show,
@@ -1758,6 +1760,12 @@ impl<C: TuiApi> App<C> {
         }
     }
 
+    fn handle_paste(&mut self, text: &str) {
+        if let Some(initial_request) = &mut self.initial_request {
+            initial_request.value.push_str(text);
+        }
+    }
+
     fn submit_initial_request(&mut self, field: Rect) {
         let Some(initial_request) = self
             .initial_request
@@ -3029,7 +3037,11 @@ fn velocity_component(hash: u64, axis: u64) -> f32 {
     let segment = ((hash >> (axis * 8)) & 0xff) as f32 / 255.0;
     let speed = 0.05 + segment * 0.09;
     if axis == 0 {
-        if hash & 1 == 0 { speed } else { -speed }
+        if hash & 1 == 0 {
+            speed
+        } else {
+            -speed
+        }
     } else if hash & 2 == 0 {
         speed
     } else {
@@ -3038,7 +3050,11 @@ fn velocity_component(hash: u64, axis: u64) -> f32 {
 }
 
 fn pluralize(count: usize) -> &'static str {
-    if count == 1 { "" } else { "s" }
+    if count == 1 {
+        ""
+    } else {
+        "s"
+    }
 }
 
 fn truncate_label(text: &str, max_chars: usize) -> String {
@@ -3214,6 +3230,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         _ => {}
                     }
                 }
+                Event::Paste(text) => {
+                    app.handle_paste(&text);
+                }
                 Event::Mouse(mouse)
                     if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) =>
                 {
@@ -3289,7 +3308,20 @@ mod tests {
     use tempfile::tempdir;
     use throngterm::types::{ThoughtSource, ThoughtState, TransportHealth};
 
+    const EXPECTED_TERMINAL_ENTRY: &str = concat!(
+        "\u{1b}[?1049h",
+        "\u{1b}[?1000h",
+        "\u{1b}[?1002h",
+        "\u{1b}[?1003h",
+        "\u{1b}[?1015h",
+        "\u{1b}[?1006h",
+        "\u{1b}[?2004h",
+        "\u{1b}[?25l",
+        "\u{1b}[2J",
+    );
+
     const EXPECTED_TERMINAL_TEARDOWN: &str = concat!(
+        "\u{1b}[?2004l",
         "\u{1b}[?1006l",
         "\u{1b}[?1015l",
         "\u{1b}[?1003l",
@@ -3491,7 +3523,19 @@ mod tests {
     }
 
     #[test]
-    fn leave_terminal_ui_disables_mouse_before_leaving_alt_screen() {
+    fn enter_terminal_ui_enables_bracketed_paste_with_mouse_capture() {
+        let mut output = Vec::new();
+
+        enter_terminal_ui(&mut output).expect("enter terminal UI should write ANSI codes");
+
+        assert_eq!(
+            String::from_utf8(output).expect("terminal startup output should be valid utf-8"),
+            EXPECTED_TERMINAL_ENTRY
+        );
+    }
+
+    #[test]
+    fn leave_terminal_ui_disables_bracketed_paste_before_leaving_alt_screen() {
         let mut output = Vec::new();
 
         leave_terminal_ui(&mut output).expect("leave terminal UI should write ANSI codes");
@@ -4089,18 +4133,14 @@ mod tests {
 
         app.refresh(layout);
         let initial_header = build_header_filter_layout(&app, 120);
-        assert!(
-            initial_header
-                .chips
-                .iter()
-                .any(|chip| chip.label == "1xthrongterm")
-        );
-        assert!(
-            initial_header
-                .chips
-                .iter()
-                .any(|chip| chip.label == "1xskills")
-        );
+        assert!(initial_header
+            .chips
+            .iter()
+            .any(|chip| chip.label == "1xthrongterm"));
+        assert!(initial_header
+            .chips
+            .iter()
+            .any(|chip| chip.label == "1xskills"));
 
         app.refresh(layout);
 
@@ -5462,11 +5502,64 @@ mod tests {
             app.message.as_ref().map(|(message, _)| message.as_str()),
             Some("created 55")
         );
-        assert!(
-            app.entities
-                .iter()
-                .any(|entity| entity.session.session_id == "sess-55")
+        assert!(app
+            .entities
+            .iter()
+            .any(|entity| entity.session.session_id == "sess-55"));
+    }
+
+    #[test]
+    fn pasting_initial_request_buffers_multiline_without_submitting() {
+        let api = MockApi::new();
+        let mut app = make_app(api.clone());
+        let pasted = "it happened when i pasted a bunch of text\n### TC-6\n- Given: foo";
+        app.initial_request = Some(InitialRequestState {
+            cwd: "/Users/b/repos/throngterm".to_string(),
+            value: String::new(),
+        });
+
+        app.handle_paste(pasted);
+
+        assert_eq!(
+            app.initial_request
+                .as_ref()
+                .map(|state| state.value.as_str()),
+            Some(pasted)
         );
+        assert!(api.create_calls().is_empty());
+        assert!(api.open_calls().is_empty());
+    }
+
+    #[test]
+    fn pressing_enter_after_pasting_initial_request_submits_once() {
+        let api = MockApi::new();
+        api.push_create_session(Ok(create_response(
+            "sess-55",
+            "55",
+            "/Users/b/repos/throngterm",
+        )));
+        let field = test_field();
+        let mut app = make_app(api.clone());
+        let pasted = "it happened when i pasted a bunch of text\n### TC-6\n- Given: foo";
+        app.initial_request = Some(InitialRequestState {
+            cwd: "/Users/b/repos/throngterm".to_string(),
+            value: String::new(),
+        });
+
+        app.handle_paste(pasted);
+        app.handle_initial_request_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), field);
+
+        assert_eq!(
+            api.create_calls(),
+            vec![(
+                "/Users/b/repos/throngterm".to_string(),
+                SpawnTool::Codex,
+                Some(pasted.to_string()),
+            )]
+        );
+        assert!(api.open_calls().is_empty());
+        assert!(app.initial_request.is_none());
+        assert_eq!(app.selected_id.as_deref(), Some("sess-55"));
     }
 
     #[test]
@@ -5531,6 +5624,46 @@ mod tests {
     }
 
     #[test]
+    fn typing_initial_request_and_pressing_enter_still_creates_hidden_session() {
+        let api = MockApi::new();
+        api.push_create_session(Ok(create_response(
+            "sess-55",
+            "55",
+            "/Users/b/repos/throngterm",
+        )));
+        let field = test_field();
+        let mut app = make_app(api.clone());
+        app.initial_request = Some(InitialRequestState {
+            cwd: "/Users/b/repos/throngterm".to_string(),
+            value: String::new(),
+        });
+
+        for ch in "add hidden spawn flow".chars() {
+            app.handle_initial_request_key(
+                KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE),
+                field,
+            );
+        }
+        app.handle_initial_request_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), field);
+
+        assert_eq!(
+            api.create_calls(),
+            vec![(
+                "/Users/b/repos/throngterm".to_string(),
+                SpawnTool::Codex,
+                Some("add hidden spawn flow".to_string()),
+            )]
+        );
+        assert!(api.open_calls().is_empty());
+        assert!(app.initial_request.is_none());
+        assert_eq!(app.selected_id.as_deref(), Some("sess-55"));
+        assert_eq!(
+            app.message.as_ref().map(|(message, _)| message.as_str()),
+            Some("created 55")
+        );
+    }
+
+    #[test]
     fn esc_cancels_initial_request_without_creating_session() {
         let api = MockApi::new();
         let field = test_field();
@@ -5552,6 +5685,21 @@ mod tests {
         assert!(api.open_calls().is_empty());
         assert!(app.initial_request.is_none());
         assert!(app.picker.is_some());
+    }
+
+    #[test]
+    fn paste_outside_initial_request_is_ignored() {
+        let api = MockApi::new();
+        let mut app = make_app(api.clone());
+        app.selected_id = Some("sess-7".to_string());
+
+        app.handle_paste("q\n### TC-7\n- Then: shell spill");
+
+        assert_eq!(app.selected_id.as_deref(), Some("sess-7"));
+        assert!(api.create_calls().is_empty());
+        assert!(api.open_calls().is_empty());
+        assert!(app.initial_request.is_none());
+        assert!(app.picker.is_none());
     }
 
     #[test]
