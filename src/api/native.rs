@@ -1,17 +1,12 @@
+use crate::api::{fetch_live_summary, AppState};
+use crate::auth::{AuthInfo, AuthScope};
+use crate::types::{ErrorResponse, NativeDesktopOpenRequest, NativeDesktopStatusResponse};
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::{Extension, Json, Router};
 use std::sync::Arc;
-use tokio::sync::oneshot;
-
-use crate::api::AppState;
-use crate::auth::{AuthInfo, AuthScope};
-use crate::session::actor::SessionCommand;
-use crate::types::{
-    ErrorResponse, NativeDesktopOpenRequest, NativeDesktopStatusResponse, SessionSummary,
-};
 
 fn request_host(headers: &HeaderMap) -> &str {
     headers
@@ -32,29 +27,6 @@ fn unsupported_native_response(status: &NativeDesktopStatusResponse) -> axum::re
         ),
     )
         .into_response()
-}
-
-async fn fetch_live_summary(
-    state: &Arc<AppState>,
-    session_id: &str,
-) -> anyhow::Result<Option<SessionSummary>> {
-    let handle = match state.supervisor.get_session(session_id).await {
-        Some(handle) => handle,
-        None => return Ok(None),
-    };
-
-    let (tx, rx) = oneshot::channel();
-    handle
-        .send(SessionCommand::GetSummary(tx))
-        .await
-        .map_err(|err| anyhow::anyhow!("failed to request session summary: {err}"))?;
-
-    let summary = tokio::time::timeout(std::time::Duration::from_secs(2), rx)
-        .await
-        .map_err(|_| anyhow::anyhow!("session summary request timed out"))?
-        .map_err(|_| anyhow::anyhow!("session summary actor dropped reply"))?;
-
-    Ok(Some(summary))
 }
 
 async fn native_status(

@@ -1,5 +1,6 @@
 use std::cmp::Ordering;
 use std::collections::HashMap;
+use std::f32::consts::TAU;
 use std::hash::{Hash, Hasher};
 use std::io::{self, BufWriter, IsTerminal, Stdout, Write};
 use std::process::Command as ProcessCommand;
@@ -23,8 +24,9 @@ use throngterm::config::{AuthMode, Config};
 use throngterm::repo_theme::{discover_repo_theme, existing_repo_theme};
 use throngterm::types::{
     CreateSessionRequest, CreateSessionResponse, DirEntry, DirListResponse, ErrorResponse,
-    NativeDesktopOpenRequest, NativeDesktopOpenResponse, NativeDesktopStatusResponse, RepoTheme,
-    RestState, SessionListResponse, SessionState, SessionSummary, SpawnTool,
+    NativeDesktopOpenRequest, NativeDesktopOpenResponse, NativeDesktopStatusResponse,
+    PublishSelectionRequest, RepoTheme, RestState, SessionListResponse, SessionState,
+    SessionSummary, SpawnTool,
 };
 
 const MIN_WIDTH: u16 = 70;
@@ -36,7 +38,9 @@ const SPRITE_HEIGHT: u16 = 4;
 const LABEL_HEIGHT: u16 = 1;
 const ENTITY_WIDTH: u16 = 12;
 const ENTITY_HEIGHT: u16 = SPRITE_HEIGHT + LABEL_HEIGHT;
-const ACTIVE_WALK_STEP: f32 = 0.35;
+const SWIM_BOB_RATE: f32 = 0.08;
+const SWIM_VERTICAL_DRIFT: f32 = 0.06;
+const SWIM_DRIFT_LIMIT: f32 = 1.0;
 const PICKER_WIDTH: u16 = 46;
 const PICKER_MAX_HEIGHT: u16 = 16;
 const INITIAL_REQUEST_WIDTH: u16 = 58;
@@ -486,6 +490,7 @@ enum SpriteKind {
     Busy,
     Drowsy,
     Sleeping,
+    DeepSleep,
     Attention,
     Error,
     Exited,
@@ -498,7 +503,8 @@ impl SpriteKind {
             SessionState::Error => Self::Error,
             SessionState::Exited => Self::Exited,
             SessionState::Idle | SessionState::Attention => match session.rest_state {
-                RestState::DeepSleep | RestState::Sleeping => Self::Sleeping,
+                RestState::Sleeping => Self::Sleeping,
+                RestState::DeepSleep => Self::DeepSleep,
                 RestState::Drowsy => Self::Drowsy,
                 RestState::Active => match session.state {
                     SessionState::Attention => Self::Attention,
@@ -515,6 +521,7 @@ impl SpriteKind {
             Self::Busy => Color::Yellow,
             Self::Drowsy => Color::DarkYellow,
             Self::Sleeping => Color::Blue,
+            Self::DeepSleep => Color::DarkBlue,
             Self::Attention => Color::Magenta,
             Self::Error => Color::Red,
             Self::Exited => Color::DarkGrey,
@@ -524,11 +531,25 @@ impl SpriteKind {
     fn speed_scale(self) -> f32 {
         match self {
             Self::Active => 1.0,
-            Self::Busy => 1.15,
-            Self::Drowsy => 0.0,
+            Self::Busy => 1.3,
+            Self::Drowsy => 0.5,
             Self::Sleeping => 0.0,
-            Self::Attention => 1.0,
-            Self::Error => 0.5,
+            Self::DeepSleep => 0.0,
+            Self::Attention => 1.15,
+            Self::Error => 0.8,
+            Self::Exited => 0.0,
+        }
+    }
+
+    fn bob_amplitude(self) -> f32 {
+        match self {
+            Self::Active => 1.2,
+            Self::Busy => 1.45,
+            Self::Drowsy => 0.75,
+            Self::Sleeping => 0.0,
+            Self::DeepSleep => 0.0,
+            Self::Attention => 1.3,
+            Self::Error => 1.6,
             Self::Exited => 0.0,
         }
     }
@@ -539,59 +560,163 @@ impl SpriteKind {
             Self::Busy => busy_frame(tick),
             Self::Drowsy => drowsy_frame(tick),
             Self::Sleeping => sleeping_frame(tick),
+            Self::DeepSleep => deep_sleep_frame(tick),
             Self::Attention => attention_frame(tick),
             Self::Error => error_frame(tick),
-            Self::Exited => exited_frame(),
+            Self::Exited => exited_frame(tick),
         }
     }
 }
 
 fn active_frame(tick: u64) -> [&'static str; 4] {
-    if tick % 2 == 0 {
-        [" .-^. ", "(o o)", "/|_|\\", " / \\ "]
+    if tick % 8 < 4 {
+        [
+            "   o   .    ",
+            "><o)))'>    ",
+            "  /_/_      ",
+            "      .     ",
+        ]
     } else {
-        [" .-^. ", "(o o)", "\\|_|/", "/   \\"]
+        [
+            "      o     ",
+            "><o)))'>    ",
+            "   \\_\\      ",
+            "   .    o   ",
+        ]
     }
 }
 
 fn busy_frame(tick: u64) -> [&'static str; 4] {
-    if tick % 2 == 0 {
-        [" .-^. ", "(O O)", "/|_|\\", " / \\ "]
+    if tick % 8 < 4 {
+        [
+            "  o O  .    ",
+            "><O)))'>    ",
+            "  /_/_      ",
+            "    O   o   ",
+        ]
     } else {
-        [" .-^. ", "(O O)", "\\|_|/", "/   \\"]
+        [
+            "   O   o    ",
+            "><O)))'>    ",
+            "   \\_\\      ",
+            "  .   O     ",
+        ]
     }
 }
 
-fn drowsy_frame(_tick: u64) -> [&'static str; 4] {
-    [" .-^. ", "(- -)", " /|_| ", " _/ \\_"]
+fn drowsy_frame(tick: u64) -> [&'static str; 4] {
+    if tick % 8 < 4 {
+        [
+            "    .       ",
+            "><-)))'>    ",
+            "  /_/_      ",
+            "      .     ",
+        ]
+    } else {
+        [
+            "      .     ",
+            "><-)))'>    ",
+            "   \\_\\      ",
+            "    .       ",
+        ]
+    }
 }
 
 fn sleeping_frame(tick: u64) -> [&'static str; 4] {
     if tick % 8 < 4 {
-        [" zZ   ", " .-^. ", "(- -)", "(___)"]
+        [
+            " z z        ",
+            "            ",
+            "  ><-)))'>  ",
+            "    \\_\\     ",
+        ]
     } else {
-        ["  zZ  ", " .-^. ", "(- -)", "(___)"]
+        [
+            "  z Z       ",
+            "            ",
+            "  ><-)))'>  ",
+            "   /_/_     ",
+        ]
     }
 }
 
 fn attention_frame(tick: u64) -> [&'static str; 4] {
-    if tick % 2 == 0 {
-        [" .-^. ", "(! !)", "/|_|\\", " / \\ "]
+    if tick % 8 < 4 {
+        [
+            "  !   o     ",
+            "><!)))'>    ",
+            "  /_/_      ",
+            "     .      ",
+        ]
     } else {
-        [" .-^. ", "(! !)", "\\|_|/", "/   \\"]
+        [
+            "    o   !   ",
+            "><!)))'>    ",
+            "   \\_\\      ",
+            "   .        ",
+        ]
     }
 }
 
 fn error_frame(tick: u64) -> [&'static str; 4] {
-    if tick % 2 == 0 {
-        [" .-^. ", "(x x)", "/|_|\\", " / \\ "]
+    if tick % 8 < 4 {
+        [
+            " .   x      ",
+            "><x)))'>    ",
+            "  /_/_      ",
+            "    . o     ",
+        ]
     } else {
-        [" .-^. ", "(x x)", "\\|_|/", "/   \\"]
+        [
+            "   x   .    ",
+            "><x)))'>    ",
+            "   \\_\\      ",
+            "   o        ",
+        ]
     }
 }
 
-fn exited_frame() -> [&'static str; 4] {
-    ["  xxx ", " (x x)", " /|_|\\", "  / \\ "]
+fn deep_sleep_frame(tick: u64) -> [&'static str; 4] {
+    if tick % 8 < 4 {
+        [
+            "   /_/_  Z  ",
+            "  ><-)))'>  ",
+            "            ",
+            "            ",
+        ]
+    } else {
+        [
+            "    \\_\\ z   ",
+            "  ><-)))'>  ",
+            "            ",
+            "            ",
+        ]
+    }
+}
+
+fn exited_frame(tick: u64) -> [&'static str; 4] {
+    if tick % 8 < 4 {
+        [
+            "   /_/_ xxx",
+            "  ><x)))'>  ",
+            "            ",
+            "            ",
+        ]
+    } else {
+        [
+            "    \\_\\ xxx",
+            "  ><x)))'>  ",
+            "            ",
+            "            ",
+        ]
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RestAnchor {
+    FreeSwim,
+    Bottom,
+    Top,
 }
 
 #[derive(Clone)]
@@ -601,6 +726,10 @@ struct SessionEntity {
     y: f32,
     vx: f32,
     vy: f32,
+    swim_anchor_x: f32,
+    swim_anchor_y: f32,
+    swim_center_y: f32,
+    bob_phase: f32,
 }
 
 impl SessionEntity {
@@ -610,8 +739,8 @@ impl SessionEntity {
         let max_y = field.height.saturating_sub(ENTITY_HEIGHT).max(1);
         let x = (hash % (max_x as u64)) as f32;
         let y = ((hash / 13) % (max_y as u64)) as f32;
-        let vx = velocity_component(hash, 0);
-        let vy = velocity_component(hash, 1);
+        let vx = swim_speed(hash);
+        let vy = vertical_drift(hash);
 
         Self {
             session,
@@ -619,6 +748,10 @@ impl SessionEntity {
             y,
             vx,
             vy,
+            swim_anchor_x: x,
+            swim_anchor_y: y,
+            swim_center_y: y,
+            bob_phase: bob_phase(hash),
         }
     }
 
@@ -626,56 +759,52 @@ impl SessionEntity {
         SpriteKind::from_session(&self.session)
     }
 
-    fn is_sleeping(&self) -> bool {
-        matches!(self.sprite_kind(), SpriteKind::Sleeping)
+    fn rest_anchor(&self) -> RestAnchor {
+        match self.sprite_kind() {
+            SpriteKind::Sleeping => RestAnchor::Bottom,
+            SpriteKind::DeepSleep | SpriteKind::Exited => RestAnchor::Top,
+            _ => RestAnchor::FreeSwim,
+        }
     }
 
     fn is_stationary(&self) -> bool {
-        matches!(
-            self.sprite_kind(),
-            SpriteKind::Drowsy | SpriteKind::Sleeping | SpriteKind::Exited
-        )
+        !matches!(self.rest_anchor(), RestAnchor::FreeSwim)
     }
 
-    fn set_grid_position(&mut self, column: usize, row: usize) {
-        self.x = column as f32 * ENTITY_WIDTH as f32;
-        self.y = row as f32 * ENTITY_HEIGHT as f32;
+    fn set_relative_position(&mut self, x: u16, y: u16) {
+        self.x = x as f32;
+        self.y = y as f32;
+        self.swim_anchor_x = self.x;
+        self.swim_anchor_y = self.y;
+        self.swim_center_y = self.y;
     }
 
-    fn tick(&mut self, field: Rect) {
+    fn tick(&mut self, field: Rect, tick: u64) {
         let sprite = self.sprite_kind();
         let speed = sprite.speed_scale();
         if speed == 0.0 || field.width <= ENTITY_WIDTH || field.height <= ENTITY_HEIGHT {
             return;
         }
 
-        let max_x = field.width.saturating_sub(ENTITY_WIDTH) as f32;
         let max_y = field.height.saturating_sub(ENTITY_HEIGHT) as f32;
 
-        if matches!(sprite, SpriteKind::Active) {
-            self.x = (self.x - ACTIVE_WALK_STEP).max(0.0);
-            self.y = (self.y - ACTIVE_WALK_STEP).max(0.0);
-            return;
-        }
+        self.x = self
+            .swim_anchor_x
+            .clamp(0.0, field.width.saturating_sub(ENTITY_WIDTH) as f32);
 
-        self.x += self.vx * speed;
-        self.y += self.vy * speed;
-
-        if self.x <= 0.0 {
-            self.x = 0.0;
-            self.vx = self.vx.abs();
-        } else if self.x >= max_x {
-            self.x = max_x;
-            self.vx = -self.vx.abs();
-        }
-
-        if self.y <= 0.0 {
-            self.y = 0.0;
+        let min_center = (self.swim_anchor_y - SWIM_DRIFT_LIMIT).max(0.0);
+        let max_center = (self.swim_anchor_y + SWIM_DRIFT_LIMIT).min(max_y);
+        self.swim_center_y += self.vy * speed * SWIM_VERTICAL_DRIFT;
+        if self.swim_center_y <= min_center {
+            self.swim_center_y = min_center;
             self.vy = self.vy.abs();
-        } else if self.y >= max_y {
-            self.y = max_y;
+        } else if self.swim_center_y >= max_center {
+            self.swim_center_y = max_center;
             self.vy = -self.vy.abs();
         }
+
+        let bob = ((tick as f32 * SWIM_BOB_RATE) + self.bob_phase).sin() * sprite.bob_amplitude();
+        self.y = (self.swim_center_y + bob).clamp(0.0, max_y);
     }
 
     fn screen_rect(&self, field: Rect) -> Rect {
@@ -727,6 +856,7 @@ impl ApiClient {
 trait TuiApi {
     fn fetch_sessions(&self) -> BoxFuture<'_, Result<Vec<SessionSummary>, String>>;
     fn fetch_native_status(&self) -> BoxFuture<'_, Result<NativeDesktopStatusResponse, String>>;
+    fn publish_selection(&self, session_id: Option<&str>) -> BoxFuture<'_, Result<(), String>>;
     fn open_session(
         &self,
         session_id: &str,
@@ -780,6 +910,25 @@ impl TuiApi for ApiClient {
                     .json::<NativeDesktopStatusResponse>()
                     .await
                     .map_err(|err| format!("failed to parse native status: {err}"));
+            }
+
+            Err(read_error(response).await)
+        })
+    }
+
+    fn publish_selection(&self, session_id: Option<&str>) -> BoxFuture<'_, Result<(), String>> {
+        let session_id = session_id.map(|value| value.to_string());
+        Box::pin(async move {
+            let url = format!("{}/v1/selection", self.base_url);
+            let response = self
+                .with_auth(self.http.put(url))
+                .json(&PublishSelectionRequest { session_id })
+                .send()
+                .await
+                .map_err(|err| format!("failed to publish selection: {err}"))?;
+
+            if response.status().is_success() {
+                return Ok(());
             }
 
             Err(read_error(response).await)
@@ -1207,6 +1356,7 @@ struct App<C: TuiApi> {
     last_logged_thoughts: HashMap<String, ThoughtFingerprint>,
     repo_themes: HashMap<String, RepoTheme>,
     selected_id: Option<String>,
+    published_selected_id: Option<String>,
     native_status: Option<NativeDesktopStatusResponse>,
     picker: Option<PickerState>,
     initial_request: Option<InitialRequestState>,
@@ -1228,6 +1378,7 @@ impl<C: TuiApi> App<C> {
             last_logged_thoughts: HashMap::new(),
             repo_themes: HashMap::new(),
             selected_id: None,
+            published_selected_id: None,
             native_status: None,
             picker: None,
             initial_request: None,
@@ -1290,6 +1441,30 @@ impl<C: TuiApi> App<C> {
             .iter()
             .filter(|entity| self.thought_filter.matches_session(&entity.session))
             .collect()
+    }
+
+    fn publish_selection(&mut self, session_id: Option<String>, force: bool) {
+        if !force && session_id == self.published_selected_id {
+            return;
+        }
+
+        match self
+            .runtime
+            .block_on(self.client.publish_selection(session_id.as_deref()))
+        {
+            Ok(()) => {
+                self.published_selected_id = session_id;
+            }
+            Err(err) => self.set_message(err),
+        }
+    }
+
+    fn sync_selection_publication(&mut self) {
+        self.publish_selection(self.selected_id.clone(), false);
+    }
+
+    fn clear_published_selection(&mut self) {
+        self.publish_selection(None, true);
     }
 
     fn reconcile_selection(&mut self) {
@@ -1417,16 +1592,19 @@ impl<C: TuiApi> App<C> {
     fn set_thought_filter_cwd(&mut self, cwd: String) {
         self.thought_filter.cwd = Some(cwd);
         self.reconcile_selection();
+        self.sync_selection_publication();
     }
 
     fn set_thought_filter_tmux_name(&mut self, tmux_name: String) {
         self.thought_filter.tmux_name = Some(tmux_name);
         self.reconcile_selection();
+        self.sync_selection_publication();
     }
 
     fn clear_thought_filters(&mut self) {
         self.thought_filter.clear();
         self.reconcile_selection();
+        self.sync_selection_publication();
     }
 
     fn reconcile_thought_log_sessions(&mut self, sessions: &[SessionSummary]) {
@@ -1534,8 +1712,9 @@ impl<C: TuiApi> App<C> {
 
         next.sort_by(|a, b| a.session.tmux_name.cmp(&b.session.tmux_name));
         self.entities = next;
-        self.layout_sleeping_entities(field);
+        self.layout_resting_entities(field);
         self.reconcile_selection();
+        self.sync_selection_publication();
     }
 
     fn upsert_session(&mut self, session: SessionSummary, field: Rect) {
@@ -1579,33 +1758,51 @@ impl<C: TuiApi> App<C> {
 
     fn tick(&mut self, field: Rect) {
         self.tick = self.tick.wrapping_add(1);
-        self.layout_sleeping_entities(field);
+        self.layout_resting_entities(field);
         for entity in &mut self.entities {
-            entity.tick(field);
+            entity.tick(field, self.tick);
         }
         self.resolve_collisions(field);
     }
 
-    fn layout_sleeping_entities(&mut self, field: Rect) {
-        let rows = sleep_grid_rows(field);
-        let mut sleeping_indices = self
+    fn layout_resting_entities(&mut self, field: Rect) {
+        let mut bottom_resting = self
             .entities
             .iter()
             .enumerate()
-            .filter_map(|(index, entity)| entity.is_sleeping().then_some(index))
+            .filter_map(|(index, entity)| {
+                (entity.rest_anchor() == RestAnchor::Bottom).then_some(index)
+            })
+            .collect::<Vec<_>>();
+        let mut top_resting = self
+            .entities
+            .iter()
+            .enumerate()
+            .filter_map(|(index, entity)| {
+                (entity.rest_anchor() == RestAnchor::Top).then_some(index)
+            })
             .collect::<Vec<_>>();
 
-        sleeping_indices.sort_by(|left, right| {
+        bottom_resting.sort_by(|left, right| {
+            compare_sleepiness(
+                &self.entities[*left].session,
+                &self.entities[*right].session,
+            )
+        });
+        top_resting.sort_by(|left, right| {
             compare_sleepiness(
                 &self.entities[*left].session,
                 &self.entities[*right].session,
             )
         });
 
-        for (slot, entity_index) in sleeping_indices.into_iter().enumerate() {
-            let row = slot % rows;
-            let column = slot / rows;
-            self.entities[entity_index].set_grid_position(column, row);
+        for (slot, entity_index) in bottom_resting.into_iter().enumerate() {
+            let (x, y) = bottom_rest_origin(field, slot);
+            self.entities[entity_index].set_relative_position(x, y);
+        }
+        for (slot, entity_index) in top_resting.into_iter().enumerate() {
+            let (x, y) = top_rest_origin(field, slot);
+            self.entities[entity_index].set_relative_position(x, y);
         }
     }
 
@@ -1626,6 +1823,12 @@ impl<C: TuiApi> App<C> {
                             std::mem::swap(&mut a.vy, &mut b.vy);
                             a.x = (a.x - 1.0).max(0.0);
                             b.x = (b.x + 1.0).min(field.width.saturating_sub(ENTITY_WIDTH) as f32);
+                            a.swim_anchor_x = a.x;
+                            b.swim_anchor_x = b.x;
+                            a.swim_anchor_y = a.y;
+                            b.swim_anchor_y = b.y;
+                            a.swim_center_y = a.y;
+                            b.swim_center_y = b.y;
                         }
                     }
                 }
@@ -1642,12 +1845,14 @@ impl<C: TuiApi> App<C> {
 
         if self.entities.is_empty() {
             self.selected_id = None;
+            self.sync_selection_publication();
             return;
         }
 
         let visible_entities = self.visible_entities();
         if visible_entities.is_empty() {
             self.selected_id = None;
+            self.sync_selection_publication();
             return;
         }
 
@@ -1664,6 +1869,7 @@ impl<C: TuiApi> App<C> {
         let len = visible_entities.len() as isize;
         let next_index = (current_index + delta).rem_euclid(len) as usize;
         self.selected_id = Some(visible_entities[next_index].session.session_id.clone());
+        self.sync_selection_publication();
     }
 
     fn selected(&self) -> Option<&SessionEntity> {
@@ -1840,6 +2046,7 @@ impl<C: TuiApi> App<C> {
                 self.upsert_session(session, field);
                 self.selected_id = Some(session_id);
                 self.reconcile_selection();
+                self.sync_selection_publication();
                 self.close_picker();
                 self.set_message(format!("created {tmux_name}"));
             }
@@ -1961,6 +2168,7 @@ impl<C: TuiApi> App<C> {
 
         if let Some(session_id) = hit {
             self.selected_id = Some(session_id);
+            self.sync_selection_publication();
             self.open_selected();
             return;
         }
@@ -2059,6 +2267,8 @@ impl<C: TuiApi> App<C> {
                 layout.thought_entry_capacity(),
             );
         }
+
+        render_aquarium_background(renderer, layout.overview_field, self.tick);
 
         let visible_entities = self.visible_entities();
         if visible_entities.is_empty() {
@@ -2366,7 +2576,11 @@ fn format_thought_lines(entry: &ThoughtLogEntry, max_chars: usize) -> Vec<String
     wrap_text(&line, max_chars)
 }
 
-fn parse_hex_color(value: &str) -> Option<Color> {
+const DARK_TERMINAL_BG_RGB: (u8, u8, u8) = (0x11, 0x11, 0x11);
+const MIN_DARK_TERMINAL_CONTRAST: f64 = 4.5;
+const DARK_TERMINAL_COLOR_SEARCH_STEPS: usize = 12;
+
+fn parse_hex_rgb(value: &str) -> Option<(u8, u8, u8)> {
     let trimmed = value.trim();
     if trimmed.len() != 7 || !trimmed.starts_with('#') {
         return None;
@@ -2375,7 +2589,70 @@ fn parse_hex_color(value: &str) -> Option<Color> {
     let r = u8::from_str_radix(&trimmed[1..3], 16).ok()?;
     let g = u8::from_str_radix(&trimmed[3..5], 16).ok()?;
     let b = u8::from_str_radix(&trimmed[5..7], 16).ok()?;
-    Some(Color::Rgb { r, g, b })
+    Some((r, g, b))
+}
+
+fn rgb_color((r, g, b): (u8, u8, u8)) -> Color {
+    Color::Rgb { r, g, b }
+}
+
+fn linearize_srgb_channel(channel: u8) -> f64 {
+    let value = channel as f64 / 255.0;
+    if value <= 0.040_45 {
+        value / 12.92
+    } else {
+        ((value + 0.055) / 1.055).powf(2.4)
+    }
+}
+
+fn relative_luminance((r, g, b): (u8, u8, u8)) -> f64 {
+    0.2126 * linearize_srgb_channel(r)
+        + 0.7152 * linearize_srgb_channel(g)
+        + 0.0722 * linearize_srgb_channel(b)
+}
+
+fn contrast_ratio(foreground: (u8, u8, u8), background: (u8, u8, u8)) -> f64 {
+    let fg = relative_luminance(foreground);
+    let bg = relative_luminance(background);
+    let (lighter, darker) = if fg >= bg { (fg, bg) } else { (bg, fg) };
+    (lighter + 0.05) / (darker + 0.05)
+}
+
+fn mix_towards_white((r, g, b): (u8, u8, u8), amount: f64) -> (u8, u8, u8) {
+    let amount = amount.clamp(0.0, 1.0);
+    let mix = |channel: u8| {
+        (channel as f64 + (255.0 - channel as f64) * amount)
+            .round()
+            .clamp(0.0, 255.0) as u8
+    };
+    (mix(r), mix(g), mix(b))
+}
+
+// Assume a representative dark terminal background because the terminal theme
+// itself is not observable from crossterm.
+fn adjust_for_dark_terminal(rgb: (u8, u8, u8)) -> (u8, u8, u8) {
+    if contrast_ratio(rgb, DARK_TERMINAL_BG_RGB) >= MIN_DARK_TERMINAL_CONTRAST {
+        return rgb;
+    }
+
+    let mut low = 0.0;
+    let mut high = 1.0;
+    for _ in 0..DARK_TERMINAL_COLOR_SEARCH_STEPS {
+        let mid = (low + high) / 2.0;
+        let candidate = mix_towards_white(rgb, mid);
+        if contrast_ratio(candidate, DARK_TERMINAL_BG_RGB) >= MIN_DARK_TERMINAL_CONTRAST {
+            high = mid;
+        } else {
+            low = mid;
+        }
+    }
+
+    mix_towards_white(rgb, high)
+}
+
+fn repo_theme_display_color(value: &str) -> Option<Color> {
+    let rgb = parse_hex_rgb(value)?;
+    Some(rgb_color(adjust_for_dark_terminal(rgb)))
 }
 
 fn session_theme_color(
@@ -2384,7 +2661,7 @@ fn session_theme_color(
 ) -> Option<Color> {
     let theme_id = session.repo_theme_id.as_ref()?;
     let theme = repo_themes.get(theme_id)?;
-    parse_hex_color(&theme.body)
+    repo_theme_display_color(&theme.body)
 }
 
 fn session_display_color(
@@ -2666,7 +2943,7 @@ fn picker_theme_color_for_path(
     repo_themes: &mut HashMap<String, RepoTheme>,
 ) -> Option<Color> {
     let (theme_id, theme) = existing_repo_theme(path)?;
-    let color = parse_hex_color(&theme.body)?;
+    let color = repo_theme_display_color(&theme.body)?;
     repo_themes.insert(theme_id, theme);
     Some(color)
 }
@@ -2995,8 +3272,33 @@ fn stable_hash(value: &str) -> u64 {
     hasher.finish()
 }
 
-fn sleep_grid_rows(field: Rect) -> usize {
+fn rest_grid_columns(field: Rect) -> usize {
+    usize::from((field.width / ENTITY_WIDTH).max(1))
+}
+
+fn rest_grid_rows(field: Rect) -> usize {
     usize::from((field.height / ENTITY_HEIGHT).max(1))
+}
+
+fn bottom_rest_origin(field: Rect, slot: usize) -> (u16, u16) {
+    let columns = rest_grid_columns(field);
+    let max_rows = rest_grid_rows(field).saturating_sub(1);
+    let row = (slot / columns).min(max_rows);
+    let column = slot % columns;
+    (
+        column as u16 * ENTITY_WIDTH,
+        field
+            .height
+            .saturating_sub(ENTITY_HEIGHT * (row as u16 + 1)),
+    )
+}
+
+fn top_rest_origin(field: Rect, slot: usize) -> (u16, u16) {
+    let columns = rest_grid_columns(field);
+    let max_rows = rest_grid_rows(field).saturating_sub(1);
+    let row = (slot / columns).min(max_rows);
+    let column = slot % columns;
+    (column as u16 * ENTITY_WIDTH, row as u16 * ENTITY_HEIGHT)
 }
 
 fn compare_sleepiness(left: &SessionSummary, right: &SessionSummary) -> Ordering {
@@ -3031,21 +3333,66 @@ fn separate_from_fixed_entity(entity: &mut SessionEntity, obstacle: Rect, field:
     } else {
         obstacle_rel_bottom.min(max_y) as f32
     };
+    entity.swim_anchor_x = entity.x;
+    entity.swim_anchor_y = entity.y;
+    entity.swim_center_y = entity.y;
 }
 
-fn velocity_component(hash: u64, axis: u64) -> f32 {
-    let segment = ((hash >> (axis * 8)) & 0xff) as f32 / 255.0;
-    let speed = 0.05 + segment * 0.09;
-    if axis == 0 {
-        if hash & 1 == 0 {
-            speed
-        } else {
-            -speed
-        }
-    } else if hash & 2 == 0 {
+fn swim_speed(hash: u64) -> f32 {
+    let segment = (hash & 0xff) as f32 / 255.0;
+    0.18 + segment * 0.22
+}
+
+fn vertical_drift(hash: u64) -> f32 {
+    let segment = ((hash >> 8) & 0xff) as f32 / 255.0;
+    let speed = 0.03 + segment * 0.05;
+    if hash & 2 == 0 {
         speed
     } else {
         -speed
+    }
+}
+
+fn bob_phase(hash: u64) -> f32 {
+    ((hash >> 16) & 0xff) as f32 / 255.0 * TAU
+}
+
+fn render_aquarium_background(renderer: &mut Renderer, field: Rect, tick: u64) {
+    if field.width < 4 || field.height < 4 {
+        return;
+    }
+
+    let width = usize::from(field.width.max(1));
+    let scroll = (tick as usize / 3) % width;
+    let lane_count = usize::from((field.width / 18).clamp(1, 4));
+    let lane_spacing = (field.width / lane_count as u16).max(1);
+    let bottom_y = field.bottom().saturating_sub(1);
+    for lane in 0..lane_count {
+        let base_offset = (2 + lane as u16 * lane_spacing) as usize;
+        let x = field
+            .right()
+            .saturating_sub(1)
+            .saturating_sub(((base_offset + scroll) % width) as u16);
+        let rise = ((tick / 4) as u16 + lane as u16 * 4) % field.height.max(1);
+        let y = bottom_y.saturating_sub(rise);
+        renderer.draw_char(x, y, 'o', Color::DarkCyan);
+        if x + 1 < field.right() && y + 1 < field.bottom() {
+            renderer.draw_char(x + 1, y + 1, '.', Color::Blue);
+        }
+    }
+
+    let sparkle_count = usize::from((field.width / 24).clamp(1, 3));
+    for sparkle in 0..sparkle_count {
+        let x = field
+            .right()
+            .saturating_sub(1)
+            .saturating_sub((((tick as usize / 2) + sparkle * 11) % width) as u16);
+        let y_span = field.height.saturating_sub(3).max(1);
+        let y = field.y + 1 + (((tick / 2) as u16 + sparkle as u16 * 6) % y_span);
+        renderer.draw_char(x, y, '~', Color::DarkBlue);
+        if x > field.x {
+            renderer.draw_char(x - 1, y, '.', Color::DarkBlue);
+        }
     }
 }
 
@@ -3152,6 +3499,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     renderer.init()?;
 
     let mut app = App::new(runtime, client);
+    app.clear_published_selection();
     let initial_layout = app.layout_for_terminal(renderer.width(), renderer.height());
     app.refresh(initial_layout);
 
@@ -3292,6 +3640,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
+    app.clear_published_selection();
     renderer.cleanup()?;
     Ok(())
 }
@@ -3336,9 +3685,11 @@ mod tests {
     struct MockApiState {
         fetch_sessions_results: VecDeque<Result<Vec<SessionSummary>, String>>,
         native_status_results: VecDeque<Result<NativeDesktopStatusResponse, String>>,
+        publish_selection_results: VecDeque<Result<(), String>>,
         open_session_results: VecDeque<Result<NativeDesktopOpenResponse, String>>,
         list_dirs_results: VecDeque<Result<DirListResponse, String>>,
         create_session_results: VecDeque<Result<CreateSessionResponse, String>>,
+        publish_calls: Vec<Option<String>>,
         open_calls: Vec<String>,
         list_calls: Vec<(Option<String>, bool)>,
         create_calls: Vec<(String, SpawnTool, Option<String>)>,
@@ -3394,6 +3745,10 @@ mod tests {
             self.state.lock().unwrap().create_calls.clone()
         }
 
+        fn publish_calls(&self) -> Vec<Option<String>> {
+            self.state.lock().unwrap().publish_calls.clone()
+        }
+
         fn open_calls(&self) -> Vec<String> {
             self.state.lock().unwrap().open_calls.clone()
         }
@@ -3430,6 +3785,19 @@ mod tests {
                             reason: None,
                         })
                     })
+            })
+        }
+
+        fn publish_selection(&self, session_id: Option<&str>) -> BoxFuture<'_, Result<(), String>> {
+            let state = self.state.clone();
+            let session_id = session_id.map(|value| value.to_string());
+            Box::pin(async move {
+                let mut state = state.lock().unwrap();
+                state.publish_calls.push(session_id);
+                state
+                    .publish_selection_results
+                    .pop_front()
+                    .unwrap_or(Ok(()))
             })
         }
 
@@ -3750,6 +4118,19 @@ mod tests {
         session
     }
 
+    fn deep_sleep_session(
+        session_id: &str,
+        tmux_name: &str,
+        cwd: &str,
+        last_activity_at: &str,
+    ) -> SessionSummary {
+        let mut session = session_summary(session_id, tmux_name, cwd);
+        session.thought_state = ThoughtState::Sleeping;
+        session.rest_state = RestState::DeepSleep;
+        session.last_activity_at = timestamp(last_activity_at);
+        session
+    }
+
     fn attention_session(
         session_id: &str,
         tmux_name: &str,
@@ -3810,6 +4191,20 @@ mod tests {
         fs::write(throngterm_dir.join("colors.json"), contents).expect("write colors.json");
     }
 
+    fn color_rgb(color: Color) -> (u8, u8, u8) {
+        match color {
+            Color::Rgb { r, g, b } => (r, g, b),
+            other => panic!("expected rgb color, got {other:?}"),
+        }
+    }
+
+    fn assert_dark_terminal_readable(color: Color) {
+        assert!(
+            contrast_ratio(color_rgb(color), DARK_TERMINAL_BG_RGB) >= MIN_DARK_TERMINAL_CONTRAST,
+            "expected {color:?} to satisfy the dark-terminal contrast threshold"
+        );
+    }
+
     fn create_response(session_id: &str, tmux_name: &str, cwd: &str) -> CreateSessionResponse {
         CreateSessionResponse {
             session: session_summary(session_id, tmux_name, cwd),
@@ -3840,6 +4235,9 @@ mod tests {
         let mut entity = SessionEntity::new(session_summary(session_id, tmux_name, cwd), field);
         entity.x = x.saturating_sub(field.x) as f32;
         entity.y = y.saturating_sub(field.y) as f32;
+        entity.swim_anchor_x = entity.x;
+        entity.swim_anchor_y = entity.y;
+        entity.swim_center_y = entity.y;
         entity
     }
 
@@ -3852,10 +4250,20 @@ mod tests {
     }
 
     fn sleep_grid_rect(field: Rect, slot: usize) -> Rect {
-        let rows = sleep_grid_rows(field);
+        let (x, y) = bottom_rest_origin(field, slot);
         Rect {
-            x: field.x + (slot / rows) as u16 * ENTITY_WIDTH,
-            y: field.y + (slot % rows) as u16 * ENTITY_HEIGHT,
+            x: field.x + x,
+            y: field.y + y,
+            width: ENTITY_WIDTH,
+            height: ENTITY_HEIGHT,
+        }
+    }
+
+    fn deep_sleep_grid_rect(field: Rect, slot: usize) -> Rect {
+        let (x, y) = top_rest_origin(field, slot);
+        Rect {
+            x: field.x + x,
+            y: field.y + y,
             width: ENTITY_WIDTH,
             height: ENTITY_HEIGHT,
         }
@@ -4664,6 +5072,69 @@ mod tests {
     }
 
     #[test]
+    fn low_contrast_repo_theme_color_is_adjusted_in_thought_history_and_header() {
+        let api = MockApi::new();
+        let layout = test_layout(120, 32);
+        let thought_content = layout
+            .thought_content
+            .expect("wide layout enables thought rail");
+        let mut app = make_app(api);
+        let theme_id = "/tmp/skills".to_string();
+        let raw_color = rgb_color((0x39, 0x30, 0xB5));
+        let expected = repo_theme_display_color("#3930B5").expect("display color");
+        app.repo_themes
+            .insert(theme_id.clone(), repo_theme("#3930B5"));
+
+        let mut session = session_summary_with_thought(
+            "sess-1",
+            "9",
+            "/Users/b/repos/opensource/skills",
+            "indexing docs",
+            "2026-03-08T14:00:07Z",
+        );
+        session.state = SessionState::Busy;
+        session.repo_theme_id = Some(theme_id);
+
+        app.capture_thought_updates(&[session.clone()], layout.thought_entry_capacity());
+        app.merge_sessions(vec![session], layout.overview_field);
+
+        assert_ne!(expected, raw_color);
+        assert_dark_terminal_readable(expected);
+
+        let panel = build_thought_panel(&app, thought_content, layout.thought_entry_capacity());
+        assert_eq!(panel.rows.len(), 1);
+        assert_eq!(panel.rows[0].color, expected);
+
+        let header = build_header_filter_layout(&app, 120);
+        let chip = header
+            .chips
+            .iter()
+            .find(|chip| chip.label == "1xskills")
+            .expect("skills chip should exist");
+        assert_eq!(chip.color, expected);
+
+        let mut renderer = test_renderer(120, 32);
+        render_thought_panel(
+            &app,
+            &mut renderer,
+            thought_content,
+            layout.thought_entry_capacity(),
+        );
+        assert_eq!(
+            cell_at(
+                &renderer,
+                thought_content.x,
+                thought_content.bottom().saturating_sub(1)
+            )
+            .fg,
+            expected
+        );
+
+        render_header_filter_strip(&app, &mut renderer, 120);
+        assert_eq!(cell_at(&renderer, chip.rect.x, chip.rect.y).fg, expected);
+    }
+
+    #[test]
     fn thought_history_rows_follow_live_session_color() {
         let api = MockApi::new();
         let layout = test_layout(120, 32);
@@ -4731,6 +5202,26 @@ mod tests {
                 b: 117,
             }
         );
+    }
+
+    #[test]
+    fn render_entity_adjusts_low_contrast_repo_theme_color() {
+        let field = test_layout(120, 32).overview_field;
+        let mut session = session_summary("sess-1", "alpha", "/Users/b/repos/opensource/skills");
+        session.state = SessionState::Busy;
+        session.repo_theme_id = Some("/tmp/skills".to_string());
+        let entity = SessionEntity::new(session, field);
+        let mut repo_themes = HashMap::new();
+        repo_themes.insert("/tmp/skills".to_string(), repo_theme("#3930B5"));
+        let rect = entity.screen_rect(field);
+        let mut renderer = test_renderer(120, 32);
+        let expected = session_display_color(&entity.session, &repo_themes);
+
+        render_entity(&mut renderer, &entity, rect, false, 0, &repo_themes);
+
+        assert_ne!(expected, rgb_color((0x39, 0x30, 0xB5)));
+        assert_dark_terminal_readable(expected);
+        assert_eq!(cell_at(&renderer, rect.x, rect.y).fg, expected);
     }
 
     #[test]
@@ -4855,7 +5346,7 @@ mod tests {
     }
 
     #[test]
-    fn sleeping_entity_pins_to_top_left_grid_slot() {
+    fn sleeping_entity_pins_to_bottom_left_grid_slot() {
         let api = MockApi::new();
         let field = test_field();
         let mut app = make_app(api);
@@ -4877,7 +5368,7 @@ mod tests {
     }
 
     #[test]
-    fn attention_sleeping_entity_pins_to_top_left_grid_slot() {
+    fn attention_sleeping_entity_pins_to_bottom_left_grid_slot() {
         let api = MockApi::new();
         let field = test_field();
         let mut app = make_app(api);
@@ -4898,10 +5389,38 @@ mod tests {
             .iter()
             .find(|entity| entity.session.session_id == "sess-attn-sleep-1")
             .expect("entity should exist");
-        assert!(entity.is_sleeping());
+        assert_eq!(entity.rest_anchor(), RestAnchor::Bottom);
         assert_eq!(
             entity_rect_for(&app, "sess-attn-sleep-1", field),
             sleep_grid_rect(field, 0)
+        );
+    }
+
+    #[test]
+    fn deep_sleep_entity_floats_to_top_left_grid_slot() {
+        let api = MockApi::new();
+        let field = test_field();
+        let mut app = make_app(api);
+
+        app.merge_sessions(
+            vec![deep_sleep_session(
+                "sess-deep-1",
+                "7",
+                "/Users/b/repos/throngterm",
+                "2026-03-08T12:00:00Z",
+            )],
+            field,
+        );
+
+        let entity = app
+            .entities
+            .iter()
+            .find(|entity| entity.session.session_id == "sess-deep-1")
+            .expect("entity should exist");
+        assert_eq!(entity.rest_anchor(), RestAnchor::Top);
+        assert_eq!(
+            entity_rect_for(&app, "sess-deep-1", field),
+            deep_sleep_grid_rect(field, 0)
         );
     }
 
@@ -4928,10 +5447,18 @@ mod tests {
             RestState::Sleeping,
             "2026-03-08T12:00:00Z",
         );
+        let deep_sleep = attention_session(
+            "sess-attn-deep",
+            "10",
+            "/Users/b/repos/throngterm",
+            RestState::DeepSleep,
+            "2026-03-08T11:00:00Z",
+        );
 
         assert_eq!(session_state_text(&active), "attention");
         assert_eq!(session_state_text(&drowsy), "drowsy");
         assert_eq!(session_state_text(&sleeping), "sleeping");
+        assert_eq!(session_state_text(&deep_sleep), "deep sleep");
     }
 
     #[test]
@@ -4981,6 +5508,84 @@ mod tests {
     }
 
     #[test]
+    fn picker_theme_color_for_path_keeps_stored_theme_body_while_adjusting_display_color() {
+        let temp = tempdir().expect("tempdir");
+        let repo_root = temp.path().join("skills");
+        fs::create_dir_all(repo_root.join("src")).expect("create repo");
+        write_repo_theme_file(&repo_root, "#3930B5");
+        let colors_path = repo_root.join(".throngterm").join("colors.json");
+        let original = fs::read_to_string(&colors_path).expect("read colors.json");
+        let theme_id = repo_root.to_string_lossy().into_owned();
+        let mut repo_themes = HashMap::new();
+
+        let color = picker_theme_color_for_path(theme_id.as_str(), &mut repo_themes)
+            .expect("theme color should resolve");
+
+        assert_ne!(color, rgb_color((0x39, 0x30, 0xB5)));
+        assert_dark_terminal_readable(color);
+        assert_eq!(
+            repo_themes
+                .get(theme_id.as_str())
+                .expect("theme should be cached")
+                .body,
+            "#3930B5"
+        );
+        assert_eq!(
+            fs::read_to_string(colors_path).expect("reread colors.json"),
+            original
+        );
+    }
+
+    #[test]
+    fn render_picker_adjusts_low_contrast_repo_theme_color() {
+        let temp = tempdir().expect("tempdir");
+        let repo_root = temp.path().join("skills");
+        fs::create_dir_all(repo_root.join("src")).expect("create repo");
+        write_repo_theme_file(&repo_root, "#3930B5");
+
+        let mut picker = PickerState::new(
+            2,
+            2,
+            dir_response(repo_root.to_string_lossy().as_ref(), &[("src", true)]),
+            true,
+        );
+        let mut repo_themes = HashMap::new();
+        picker.sync_theme_colors(&mut repo_themes);
+
+        let expected = picker.current_theme_color.expect("current theme color");
+        let field = test_field();
+        let layout = picker_layout(&picker, field);
+        let mut renderer = test_renderer(100, 30);
+
+        render_picker(&mut renderer, &picker, field);
+
+        assert_ne!(expected, rgb_color((0x39, 0x30, 0xB5)));
+        assert_dark_terminal_readable(expected);
+        assert_eq!(picker.entry_theme_colors, vec![Some(expected)]);
+        assert_eq!(
+            cell_at(&renderer, layout.frame.x, layout.frame.y).fg,
+            expected
+        );
+        assert_eq!(
+            cell_at(&renderer, layout.content.x, layout.content.y + 1).fg,
+            expected
+        );
+        assert_eq!(
+            cell_at(
+                &renderer,
+                layout.spawn_here_button.x,
+                layout.spawn_here_button.y
+            )
+            .fg,
+            expected
+        );
+        assert_eq!(
+            cell_at(&renderer, layout.content.x, layout.first_entry_y).fg,
+            expected
+        );
+    }
+
+    #[test]
     fn render_picker_uses_entry_repo_theme_color() {
         let temp = tempdir().expect("tempdir");
         let repo_root = temp.path().join("throngterm");
@@ -5016,7 +5621,7 @@ mod tests {
     }
 
     #[test]
-    fn sleeping_entities_fill_vertical_grid_by_sleepiness() {
+    fn sleeping_entities_fill_bottom_row_by_sleepiness() {
         let api = MockApi::new();
         let field = test_field();
         let mut app = make_app(api);
@@ -5164,94 +5769,88 @@ mod tests {
     }
 
     #[test]
-    fn drowsy_sprite_frame_is_static() {
-        assert_eq!(drowsy_frame(0), drowsy_frame(1));
-        assert_eq!(SpriteKind::Drowsy.speed_scale(), 0.0);
+    fn drowsy_sprite_uses_fish_motion_profile() {
+        assert_eq!(SpriteKind::Drowsy.speed_scale(), 0.5);
+        assert!(drowsy_frame(0)[1].contains("><-"));
     }
 
     #[test]
-    fn drowsy_entities_stay_fixed_after_tick() {
+    fn drowsy_entities_bob_in_place_after_tick() {
         let api = MockApi::new();
         let field = test_field();
         let mut app = make_app(api);
         let mut entity = entity_at(field, "sess-1", "dev", "/Users/b/repos/dev", 30, 8);
         entity.session.thought_state = ThoughtState::Holding;
         entity.session.rest_state = RestState::Drowsy;
+        entity.bob_phase = 0.0;
         entity.vx = 1.0;
-        entity.vy = 1.0;
+        entity.vy = 0.0;
         app.entities.push(entity);
 
-        app.tick(field);
+        for _ in 0..16 {
+            app.tick(field);
+        }
 
-        assert_eq!(
-            entity_rect_for(&app, "sess-1", field),
-            Rect {
-                x: 30,
-                y: 8,
-                width: ENTITY_WIDTH,
-                height: ENTITY_HEIGHT,
-            }
-        );
+        let rect = entity_rect_for(&app, "sess-1", field);
+        assert_eq!(rect.x, 30);
+        assert_ne!(rect.y, 8);
+        assert!((rect.y as i32 - 8).abs() <= 3);
     }
 
     #[test]
-    fn drowsy_entities_remain_fixed_during_collisions() {
+    fn deep_sleep_entities_stay_fixed_after_tick() {
         let api = MockApi::new();
         let field = test_field();
         let mut app = make_app(api);
 
-        let mut drowsy = entity_at(field, "sess-drowsy", "7", "/Users/b/repos/dev", 30, 8);
-        drowsy.session.thought_state = ThoughtState::Holding;
-        drowsy.session.rest_state = RestState::Drowsy;
-        drowsy.vx = 0.0;
-        drowsy.vy = 0.0;
-
-        let mut active = entity_at(field, "sess-active", "8", "/Users/b/repos/dev", 30, 8);
-        active.session.thought_state = ThoughtState::Active;
-        active.session.rest_state = RestState::Active;
-        active.vx = 1.0;
-        active.vy = 0.0;
-
-        app.entities.push(drowsy);
-        app.entities.push(active);
-
-        for _ in 0..4 {
-            app.tick(field);
+        app.merge_sessions(
+            vec![
+                deep_sleep_session(
+                    "sess-deep-a",
+                    "7",
+                    "/Users/b/repos/throngterm",
+                    "2026-03-08T12:00:00Z",
+                ),
+                deep_sleep_session(
+                    "sess-deep-b",
+                    "8",
+                    "/Users/b/repos/throngterm",
+                    "2026-03-08T12:10:00Z",
+                ),
+            ],
+            field,
+        );
+        for entity in &mut app.entities {
+            entity.vx = 1.0;
+            entity.vy = 1.0;
         }
 
+        app.tick(field);
+
         assert_eq!(
-            entity_rect_for(&app, "sess-drowsy", field),
-            Rect {
-                x: 30,
-                y: 8,
-                width: ENTITY_WIDTH,
-                height: ENTITY_HEIGHT,
-            }
+            entity_rect_for(&app, "sess-deep-a", field),
+            deep_sleep_grid_rect(field, 0)
         );
-        assert_ne!(
-            entity_rect_for(&app, "sess-active", field),
-            Rect {
-                x: 30,
-                y: 8,
-                width: ENTITY_WIDTH,
-                height: ENTITY_HEIGHT,
-            }
+        assert_eq!(
+            entity_rect_for(&app, "sess-deep-b", field),
+            deep_sleep_grid_rect(field, 1)
         );
     }
 
     #[test]
-    fn active_entities_walk_up_and_left() {
+    fn active_entities_swim_in_place_with_bob() {
         let api = MockApi::new();
         let field = test_field();
         let mut app = make_app(api);
         let mut entity = entity_at(field, "sess-1", "dev", "/Users/b/repos/dev", 30, 8);
         entity.session.thought_state = ThoughtState::Active;
         entity.session.rest_state = RestState::Active;
+        entity.bob_phase = 0.0;
         entity.vx = 1.0;
-        entity.vy = 1.0;
+        entity.vy = 0.0;
         app.entities.push(entity);
 
-        for _ in 0..4 {
+        for _ in 0..16 {
             app.tick(field);
         }
 
@@ -5260,32 +5859,31 @@ mod tests {
             .iter()
             .find(|entity| entity.session.session_id == "sess-1")
             .expect("entity should exist");
-        assert!(moved.x < 29.0);
-        assert!(moved.y < 5.0);
+        assert_eq!(moved.screen_rect(field).x, 30);
+        assert_ne!(moved.screen_rect(field).y, 8);
+        assert!((moved.screen_rect(field).y as i32 - 8).abs() <= 3);
     }
 
     #[test]
-    fn busy_entities_keep_their_normal_motion() {
+    fn busy_entities_hold_horizontal_position() {
         let api = MockApi::new();
         let field = test_field();
         let mut app = make_app(api);
         let mut entity = entity_at(field, "sess-1", "dev", "/Users/b/repos/dev", 30, 8);
         entity.session.state = SessionState::Busy;
+        entity.bob_phase = 0.0;
         entity.vx = 1.0;
-        entity.vy = 1.0;
+        entity.vy = 0.0;
         app.entities.push(entity);
 
-        app.tick(field);
+        for _ in 0..16 {
+            app.tick(field);
+        }
 
-        assert_eq!(
-            entity_rect_for(&app, "sess-1", field),
-            Rect {
-                x: 31,
-                y: 9,
-                width: ENTITY_WIDTH,
-                height: ENTITY_HEIGHT,
-            }
-        );
+        let rect = entity_rect_for(&app, "sess-1", field);
+        assert_eq!(rect.x, 30);
+        assert_ne!(rect.y, 8);
+        assert!((rect.y as i32 - 8).abs() <= 3);
     }
 
     #[test]
@@ -5790,6 +6388,10 @@ mod tests {
 
         assert!(app.visible_entities().is_empty());
         assert!(app.selected_id.is_none());
+        assert_eq!(
+            api.publish_calls(),
+            vec![Some("sess-2".to_string()), Some("sess-1".to_string()), None,]
+        );
 
         app.open_selected();
 
@@ -5797,6 +6399,26 @@ mod tests {
         assert_eq!(
             app.message.as_ref().map(|(message, _)| message.as_str()),
             Some("no session selected")
+        );
+    }
+
+    #[test]
+    fn refresh_publishes_selected_session_for_external_dispatch() {
+        let api = MockApi::new();
+        let layout = test_layout(120, 32);
+        api.push_fetch_sessions(Ok(vec![session_summary(
+            "sess-throngterm",
+            "7",
+            "/Users/b/repos/throngterm",
+        )]));
+        let mut app = make_app(api.clone());
+
+        app.refresh(layout);
+
+        assert_eq!(app.selected_id.as_deref(), Some("sess-throngterm"));
+        assert_eq!(
+            api.publish_calls(),
+            vec![Some("sess-throngterm".to_string())]
         );
     }
 }

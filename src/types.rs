@@ -256,6 +256,24 @@ pub struct NativeDesktopOpenResponse {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PublishSelectionRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PublishedSelectionResponse {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session: Option<SessionSummary>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub published_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<ErrorResponse>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateSessionRequest {
     pub name: Option<String>,
     pub cwd: Option<String>,
@@ -310,6 +328,17 @@ pub struct CreateSessionResponse {
     pub sprite_pack: Option<SpritePack>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub repo_theme: Option<RepoTheme>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionInputRequest {
+    pub text: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionInputResponse {
+    pub ok: bool,
+    pub session_id: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

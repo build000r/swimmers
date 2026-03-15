@@ -7,15 +7,15 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::Arc;
-use std::time::Duration;
+use std::sync::{Arc, OnceLock};
+use std::time::{Duration, Instant};
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::State;
 use axum::response::IntoResponse;
 use chrono::Utc;
 use futures::{SinkExt, StreamExt};
-use tokio::sync::{broadcast, mpsc, oneshot};
+use tokio::sync::{broadcast, mpsc, oneshot, Mutex};
 
 use crate::api::AppState;
 use crate::realtime::codec;
@@ -35,9 +35,77 @@ static NEXT_CLIENT_ID: AtomicU64 = AtomicU64::new(1);
 
 /// Global connected-client counter for the connected_clients metric gauge.
 static CONNECTED_CLIENTS_COUNT: AtomicUsize = AtomicUsize::new(0);
+const RESIZE_AUTH_WINDOW: Duration = Duration::from_secs(10);
+
+#[derive(Debug, Clone, Copy)]
+struct ResizeAuthority {
+    client_id: ClientId,
+    at: Instant,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum ResizeAuthorization {
+    Authorized,
+    Missing,
+    Expired {
+        owner_client_id: ClientId,
+        age_ms: u128,
+    },
+    NotOwner {
+        owner_client_id: ClientId,
+        age_ms: u128,
+    },
+}
+
+static RESIZE_AUTHORITIES: OnceLock<Mutex<HashMap<String, ResizeAuthority>>> = OnceLock::new();
 
 fn allocate_client_id() -> ClientId {
     NEXT_CLIENT_ID.fetch_add(1, Ordering::Relaxed)
+}
+
+fn resize_authorities() -> &'static Mutex<HashMap<String, ResizeAuthority>> {
+    RESIZE_AUTHORITIES.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+async fn note_resize_input_authority(session_id: &str, client_id: ClientId) {
+    let mut authorities = resize_authorities().lock().await;
+    authorities.insert(
+        session_id.to_string(),
+        ResizeAuthority {
+            client_id,
+            at: Instant::now(),
+        },
+    );
+}
+
+async fn evaluate_resize_authority(session_id: &str, client_id: ClientId) -> ResizeAuthorization {
+    let mut authorities = resize_authorities().lock().await;
+    let Some(authority) = authorities.get(session_id).copied() else {
+        return ResizeAuthorization::Missing;
+    };
+
+    let age = authority.at.elapsed();
+    if age > RESIZE_AUTH_WINDOW {
+        authorities.remove(session_id);
+        return ResizeAuthorization::Expired {
+            owner_client_id: authority.client_id,
+            age_ms: age.as_millis(),
+        };
+    }
+
+    if authority.client_id == client_id {
+        ResizeAuthorization::Authorized
+    } else {
+        ResizeAuthorization::NotOwner {
+            owner_client_id: authority.client_id,
+            age_ms: age.as_millis(),
+        }
+    }
+}
+
+async fn clear_resize_authority_for_client(client_id: ClientId) {
+    let mut authorities = resize_authorities().lock().await;
+    authorities.retain(|_, authority| authority.client_id != client_id);
 }
 
 /// Build the router for the `/v1/realtime` WebSocket endpoint.
@@ -104,6 +172,7 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
     tracing::info!("realtime client connected");
     let client_count = CONNECTED_CLIENTS_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
     crate::metrics::set_connected_clients(client_count);
+    let connection_client_id = allocate_client_id();
 
     loop {
         // Build a future that resolves when any subscribed session has output
@@ -116,11 +185,12 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
                 match msg {
                     Some(Ok(Message::Binary(data))) => {
                         crate::metrics::increment_frames_received();
-                        handle_binary_frame(&data, &state, &mut ws_sink).await;
+                        handle_binary_frame(&data, connection_client_id, &state, &mut ws_sink).await;
                     }
                     Some(Ok(Message::Text(text))) => {
                         handle_text_message(
                             &text,
+                            connection_client_id,
                             &state,
                             &mut ws_sink,
                             &mut output_subs,
@@ -256,6 +326,8 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
         drop(sub.output_rx);
     }
 
+    clear_resize_authority_for_client(connection_client_id).await;
+
     tracing::info!("realtime client cleanup complete");
 }
 
@@ -270,6 +342,7 @@ fn lifecycle_to_control_event(event: LifecycleEvent) -> ControlEvent {
             summary,
             reason,
             sprite_pack,
+            repo_theme,
         } => ControlEvent {
             event: "session_created".to_string(),
             session_id,
@@ -277,6 +350,7 @@ fn lifecycle_to_control_event(event: LifecycleEvent) -> ControlEvent {
                 reason,
                 session: summary,
                 sprite_pack,
+                repo_theme,
             })
             .unwrap(),
         },
@@ -312,6 +386,7 @@ fn delete_mode_to_wire(mode: &crate::config::SessionDeleteMode) -> &'static str 
 
 async fn handle_binary_frame(
     data: &[u8],
+    client_id: ClientId,
     state: &Arc<AppState>,
     ws_sink: &mut (impl SinkExt<Message, Error = axum::Error> + Unpin),
 ) {
@@ -345,6 +420,7 @@ async fn handle_binary_frame(
                 )
                 .await;
             } else {
+                note_resize_input_authority(&session_id, client_id).await;
                 let elapsed = dispatch_start.elapsed();
                 crate::metrics::record_dispatch_latency(&session_id, elapsed);
                 crate::metrics::record_keystroke_echo(&session_id, elapsed);
@@ -370,6 +446,7 @@ async fn handle_binary_frame(
 
 async fn handle_text_message(
     text: &str,
+    client_id: ClientId,
     state: &Arc<AppState>,
     ws_sink: &mut (impl SinkExt<Message, Error = axum::Error> + Unpin),
     output_subs: &mut HashMap<String, SessionSub>,
@@ -393,7 +470,7 @@ async fn handle_text_message(
             handle_unsubscribe(state, ws_sink, output_subs, &msg.payload, &request_id).await;
         }
         "resize" => {
-            handle_resize(state, ws_sink, &msg.payload, &request_id).await;
+            handle_resize(client_id, state, ws_sink, &msg.payload, &request_id).await;
         }
         "dismiss_attention" => {
             handle_dismiss(state, ws_sink, &msg.payload, &request_id).await;
@@ -609,6 +686,7 @@ async fn handle_unsubscribe(
 }
 
 async fn handle_resize(
+    client_id: ClientId,
     state: &Arc<AppState>,
     ws_sink: &mut (impl SinkExt<Message, Error = axum::Error> + Unpin),
     payload: &serde_json::Value,
@@ -643,6 +721,71 @@ async fn handle_resize(
             return;
         }
     };
+
+    match evaluate_resize_authority(&resize.session_id, client_id).await {
+        ResizeAuthorization::Authorized => {}
+        ResizeAuthorization::Missing => {
+            tracing::warn!(
+                session_id = %resize.session_id,
+                requester_client_id = client_id,
+                reason = "no_recent_authority",
+                "blocked resize from non-authoritative client"
+            );
+            send_control_error(
+                ws_sink,
+                &resize.session_id,
+                "RESIZE_AUTH_REQUIRED",
+                "resize requires recent keyboard input from this client",
+                request_id.as_deref(),
+            )
+            .await;
+            return;
+        }
+        ResizeAuthorization::Expired {
+            owner_client_id,
+            age_ms,
+        } => {
+            tracing::warn!(
+                session_id = %resize.session_id,
+                requester_client_id = client_id,
+                owner_client_id,
+                lease_age_ms = age_ms,
+                reason = "expired_authority",
+                "blocked resize from non-authoritative client"
+            );
+            send_control_error(
+                ws_sink,
+                &resize.session_id,
+                "RESIZE_AUTH_REQUIRED",
+                "resize requires recent keyboard input from this client",
+                request_id.as_deref(),
+            )
+            .await;
+            return;
+        }
+        ResizeAuthorization::NotOwner {
+            owner_client_id,
+            age_ms,
+        } => {
+            tracing::warn!(
+                session_id = %resize.session_id,
+                requester_client_id = client_id,
+                owner_client_id,
+                lease_age_ms = age_ms,
+                reason = "non_authoritative_resize",
+                "blocked resize from non-authoritative client"
+            );
+            send_control_error(
+                ws_sink,
+                &resize.session_id,
+                "RESIZE_AUTH_REQUIRED",
+                "resize requires recent keyboard input from this client",
+                request_id.as_deref(),
+            )
+            .await;
+            return;
+        }
+    }
 
     if let Err(e) = handle
         .send(SessionCommand::Resize {
@@ -844,4 +987,246 @@ async fn send_control_error(
         .unwrap(),
     };
     send_control_event(ws_sink, &event).await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{Duration, Instant};
+
+    static NEXT_TEST_ID: AtomicU64 = AtomicU64::new(1);
+
+    fn test_session_id(prefix: &str) -> String {
+        let n = NEXT_TEST_ID.fetch_add(1, Ordering::Relaxed);
+        format!("{prefix}-session-{n}")
+    }
+
+    #[tokio::test]
+    async fn resize_authority_missing_without_recent_input() {
+        let session_id = test_session_id("missing");
+
+        let auth = evaluate_resize_authority(&session_id, 77).await;
+        assert!(matches!(auth, ResizeAuthorization::Missing));
+    }
+
+    #[tokio::test]
+    async fn resize_authority_latest_input_wins() {
+        let session_id = test_session_id("latest");
+
+        note_resize_input_authority(&session_id, 11).await;
+        tokio::time::sleep(Duration::from_millis(2)).await;
+        note_resize_input_authority(&session_id, 22).await;
+
+        let latest_owner = evaluate_resize_authority(&session_id, 22).await;
+        assert!(matches!(latest_owner, ResizeAuthorization::Authorized));
+
+        let previous_owner = evaluate_resize_authority(&session_id, 11).await;
+        assert!(matches!(
+            previous_owner,
+            ResizeAuthorization::NotOwner {
+                owner_client_id: 22,
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn resize_authority_is_scoped_per_session() {
+        let source_session = test_session_id("scope-a");
+        let other_session = test_session_id("scope-b");
+
+        note_resize_input_authority(&source_session, 91).await;
+
+        let auth = evaluate_resize_authority(&other_session, 91).await;
+        assert!(matches!(auth, ResizeAuthorization::Missing));
+    }
+
+    #[tokio::test]
+    async fn resize_authority_accepts_just_inside_window() {
+        let session_id = test_session_id("inside-window");
+        {
+            let mut authorities = resize_authorities().lock().await;
+            authorities.insert(
+                session_id.clone(),
+                ResizeAuthority {
+                    client_id: 33,
+                    at: Instant::now() - (RESIZE_AUTH_WINDOW - Duration::from_millis(5)),
+                },
+            );
+        }
+
+        let auth = evaluate_resize_authority(&session_id, 33).await;
+        assert!(matches!(auth, ResizeAuthorization::Authorized));
+    }
+
+    #[tokio::test]
+    async fn resize_authority_expires_after_window_and_is_removed() {
+        let session_id = test_session_id("expired-window");
+        {
+            let mut authorities = resize_authorities().lock().await;
+            authorities.insert(
+                session_id.clone(),
+                ResizeAuthority {
+                    client_id: 44,
+                    at: Instant::now() - RESIZE_AUTH_WINDOW - Duration::from_millis(100),
+                },
+            );
+        }
+
+        let expired = evaluate_resize_authority(&session_id, 44).await;
+        assert!(matches!(
+            expired,
+            ResizeAuthorization::Expired {
+                owner_client_id: 44,
+                ..
+            }
+        ));
+
+        let removed = evaluate_resize_authority(&session_id, 44).await;
+        assert!(matches!(removed, ResizeAuthorization::Missing));
+    }
+
+    #[tokio::test]
+    async fn clear_resize_authority_for_client_removes_all_owned_sessions() {
+        let client_to_clear = 501;
+        let other_client = 777;
+        let session_one = test_session_id("clear-one");
+        let session_two = test_session_id("clear-two");
+        let session_other = test_session_id("clear-other");
+
+        note_resize_input_authority(&session_one, client_to_clear).await;
+        note_resize_input_authority(&session_two, client_to_clear).await;
+        note_resize_input_authority(&session_other, other_client).await;
+
+        clear_resize_authority_for_client(client_to_clear).await;
+
+        let one = evaluate_resize_authority(&session_one, client_to_clear).await;
+        assert!(matches!(one, ResizeAuthorization::Missing));
+
+        let two = evaluate_resize_authority(&session_two, client_to_clear).await;
+        assert!(matches!(two, ResizeAuthorization::Missing));
+
+        let other = evaluate_resize_authority(&session_other, other_client).await;
+        assert!(matches!(other, ResizeAuthorization::Authorized));
+    }
+}
+
+#[cfg(test)]
+mod control_error_tests {
+    use super::*;
+    use crate::api::AppState;
+    use crate::config::Config;
+    use crate::session::supervisor::SessionSupervisor;
+    use crate::thought::runtime_config::ThoughtConfig;
+    use futures::Sink;
+    use std::pin::Pin;
+    use std::sync::Arc;
+    use std::task::{Context, Poll};
+    use tokio::sync::RwLock;
+
+    #[derive(Default)]
+    struct CaptureSink {
+        messages: Vec<Message>,
+    }
+
+    impl Sink<Message> for CaptureSink {
+        type Error = axum::Error;
+
+        fn poll_ready(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+        ) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn start_send(mut self: Pin<&mut Self>, item: Message) -> Result<(), Self::Error> {
+            self.messages.push(item);
+            Ok(())
+        }
+
+        fn poll_flush(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+        ) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_close(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+        ) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    fn test_state() -> Arc<AppState> {
+        let config = Arc::new(Config::default());
+        let supervisor = SessionSupervisor::new(config.clone());
+        Arc::new(AppState {
+            supervisor,
+            config,
+            thought_config: Arc::new(RwLock::new(ThoughtConfig::default())),
+            daemon_defaults: None,
+            file_store: None,
+            published_selection: Arc::new(RwLock::new(
+                crate::api::PublishedSelectionState::default(),
+            )),
+        })
+    }
+
+    fn last_control_error(sink: &CaptureSink) -> Option<(String, String, Option<String>)> {
+        let text = sink
+            .messages
+            .iter()
+            .rev()
+            .find_map(|message| match message {
+                Message::Text(value) => Some(value.to_string()),
+                _ => None,
+            })?;
+
+        let event: ControlEvent = serde_json::from_str(&text).ok()?;
+        if event.event != "control_error" {
+            return None;
+        }
+        let payload: ControlErrorPayload = serde_json::from_value(event.payload).ok()?;
+        Some((event.session_id, payload.code, payload.request_id))
+    }
+
+    #[tokio::test]
+    async fn resize_validation_error_precedes_auth_check() {
+        let state = test_state();
+        let mut sink = CaptureSink::default();
+        let payload = serde_json::json!({
+            "session_id": "sess-validation",
+            "cols": "bad",
+            "rows": 30
+        });
+        let request_id = Some("req-77".to_string());
+
+        handle_resize(10, &state, &mut sink, &payload, &request_id).await;
+
+        let error = last_control_error(&sink).expect("expected control_error event");
+        assert_eq!(error.1, "VALIDATION_FAILED");
+        assert_eq!(error.2.as_deref(), Some("req-77"));
+    }
+
+    #[tokio::test]
+    async fn resize_unknown_session_precedes_auth_required() {
+        let state = test_state();
+        let mut sink = CaptureSink::default();
+        let payload = serde_json::json!({
+            "session_id": "missing-1",
+            "cols": 80,
+            "rows": 24
+        });
+        let request_id = Some("req-missing".to_string());
+
+        handle_resize(10, &state, &mut sink, &payload, &request_id).await;
+
+        let error = last_control_error(&sink).expect("expected control_error event");
+        assert_eq!(error.0, "missing-1");
+        assert_eq!(error.1, "SESSION_NOT_FOUND");
+        assert_eq!(error.2.as_deref(), Some("req-missing"));
+    }
 }

@@ -7,12 +7,13 @@ use serde::Deserialize;
 use std::sync::Arc;
 use tokio::sync::oneshot;
 
-use crate::api::AppState;
+use crate::api::{fetch_live_summary, AppState};
 use crate::auth::{AuthInfo, AuthScope};
 use crate::session::actor::SessionCommand;
 use crate::types::{
-    CreateSessionRequest, CreateSessionResponse, ErrorResponse, SessionListResponse,
-    SessionPaneTailResponse, TerminalSnapshot,
+    CreateSessionRequest, CreateSessionResponse, ErrorResponse, SessionInputRequest,
+    SessionInputResponse, SessionListResponse, SessionPaneTailResponse, SessionState,
+    TerminalSnapshot,
 };
 
 // ---------------------------------------------------------------------------
@@ -224,6 +225,127 @@ async fn dismiss_attention(
 }
 
 // ---------------------------------------------------------------------------
+// POST /v1/sessions/{session_id}/input
+// ---------------------------------------------------------------------------
+
+async fn send_input(
+    Extension(auth): Extension<AuthInfo>,
+    State(state): State<Arc<AppState>>,
+    Path(session_id): Path<String>,
+    Json(body): Json<SessionInputRequest>,
+) -> impl IntoResponse {
+    if let Err(resp) = auth.require_scope(AuthScope::SessionsWrite) {
+        return resp;
+    }
+
+    if body.text.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(
+                serde_json::to_value(ErrorResponse {
+                    code: "VALIDATION_FAILED".to_string(),
+                    message: Some("text must not be empty".to_string()),
+                })
+                .unwrap(),
+            ),
+        )
+            .into_response();
+    }
+
+    let summary = match fetch_live_summary(&state, &session_id).await {
+        Ok(Some(summary)) => summary,
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(
+                    serde_json::to_value(ErrorResponse {
+                        code: "SESSION_NOT_FOUND".to_string(),
+                        message: None,
+                    })
+                    .unwrap(),
+                ),
+            )
+                .into_response();
+        }
+        Err(err) => {
+            tracing::error!("send_input summary lookup failed: {err}");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(
+                    serde_json::to_value(ErrorResponse {
+                        code: "INTERNAL_ERROR".to_string(),
+                        message: Some(err.to_string()),
+                    })
+                    .unwrap(),
+                ),
+            )
+                .into_response();
+        }
+    };
+
+    if summary.state == SessionState::Exited {
+        return (
+            StatusCode::CONFLICT,
+            Json(
+                serde_json::to_value(ErrorResponse {
+                    code: "SESSION_EXITED".to_string(),
+                    message: Some("session has already exited".to_string()),
+                })
+                .unwrap(),
+            ),
+        )
+            .into_response();
+    }
+
+    let handle = match state.supervisor.get_session(&session_id).await {
+        Some(handle) => handle,
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(
+                    serde_json::to_value(ErrorResponse {
+                        code: "SESSION_NOT_FOUND".to_string(),
+                        message: None,
+                    })
+                    .unwrap(),
+                ),
+            )
+                .into_response();
+        }
+    };
+
+    if let Err(err) = handle
+        .send(SessionCommand::WriteInput(body.text.into_bytes()))
+        .await
+    {
+        tracing::error!("[session {session_id}] send_input failed: {err}");
+        return (
+            StatusCode::NOT_FOUND,
+            Json(
+                serde_json::to_value(ErrorResponse {
+                    code: "SESSION_NOT_FOUND".to_string(),
+                    message: Some(err.to_string()),
+                })
+                .unwrap(),
+            ),
+        )
+            .into_response();
+    }
+
+    (
+        StatusCode::OK,
+        Json(
+            serde_json::to_value(SessionInputResponse {
+                ok: true,
+                session_id,
+            })
+            .unwrap(),
+        ),
+    )
+        .into_response()
+}
+
+// ---------------------------------------------------------------------------
 // GET /v1/sessions/{session_id}/snapshot
 // ---------------------------------------------------------------------------
 
@@ -392,6 +514,7 @@ pub fn routes() -> Router<Arc<AppState>> {
             "/v1/sessions/{session_id}/attention/dismiss",
             post(dismiss_attention),
         )
+        .route("/v1/sessions/{session_id}/input", post(send_input))
         .route("/v1/sessions/{session_id}/snapshot", get(get_snapshot))
         .route("/v1/sessions/{session_id}/pane-tail", get(get_pane_tail))
 }
