@@ -318,7 +318,7 @@ function readTerminalWebglOverride(): string | null {
   }
 }
 
-export function TerminalWorkspace({
+function TerminalWorkspaceImpl({
   session,
   cached,
   observer = false,
@@ -2736,4 +2736,8 @@ export function TerminalWorkspace({
       )}
     </div>
   );
+}
+
+export function TerminalWorkspace(props: TerminalWorkspaceProps) {
+  return <TerminalWorkspaceImpl {...props} />;
 }

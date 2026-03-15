@@ -45,6 +45,206 @@ function gaugeSegments(usageRatio: number): number {
   return Math.round(remaining * 8);
 }
 
+const IDLE_PREVIEW_COMMAND_RE =
+  /^(git|npm|pnpm|yarn|cargo|python|python3|node|npx|uv|go|rustc|make|docker|kubectl|tmux|ls|cd|cat|sed|rg|grep|curl|wget|pytest|pip|bun|deno)$/i;
+
+interface ThrongletBubbleModel {
+  activityText: string;
+  bubbleText: string;
+  bubbleIdlePreview: boolean;
+  showBubble: boolean;
+  showRenderedBubble: boolean;
+}
+
+interface ThrongletGaugeModel {
+  showGauge: boolean;
+  gaugeRatio: number;
+  gaugeFillSegments: number;
+  gaugeFillWidth: string;
+  gaugePercentLeft: number;
+  isCritical: boolean;
+}
+
+function isPromptLikeIdlePreview(text: string): boolean {
+  const words = text.toLowerCase().split(/\s+/).filter(Boolean);
+  return (
+    /(?:^|\s)(?:\$|#|>|❯)\s*[a-z0-9_./~:-]/i.test(text) ||
+    (words.length > 0 &&
+      words.length <= 8 &&
+      IDLE_PREVIEW_COMMAND_RE.test(words[0] ?? ""))
+  );
+}
+
+export function deriveThrongletBubble(
+  session: SessionSummary,
+  idlePreview?: string,
+): ThrongletBubbleModel {
+  const idlePreviewText = idlePreview?.trim() ?? "";
+  const safeIdlePreviewText = isPromptLikeIdlePreview(idlePreviewText)
+    ? ""
+    : idlePreviewText;
+  const isExited = session.state === "exited";
+  const normalizedThought = session.thought?.trim().toLowerCase() ?? "";
+  const isSleepingThought =
+    normalizedThought === "sleeping" || normalizedThought === "sleeping.";
+  const showIdlePreview =
+    !isExited &&
+    !session.thought &&
+    session.state === "idle" &&
+    safeIdlePreviewText.length > 0 &&
+    !isSleepingThought;
+
+  if (showIdlePreview) {
+    return {
+      activityText: safeIdlePreviewText,
+      bubbleText: safeIdlePreviewText,
+      bubbleIdlePreview: true,
+      showBubble: true,
+      showRenderedBubble: true,
+    };
+  }
+
+  if (!isExited && session.thought) {
+    return {
+      activityText: session.thought,
+      bubbleText: session.thought,
+      bubbleIdlePreview: false,
+      showBubble: true,
+      showRenderedBubble: true,
+    };
+  }
+
+  if (session.state === "error") {
+    return {
+      activityText: "error!",
+      bubbleText: "!!!",
+      bubbleIdlePreview: false,
+      showBubble: true,
+      showRenderedBubble: true,
+    };
+  }
+
+  if (session.state === "attention") {
+    return {
+      activityText: "ready",
+      bubbleText: "ready",
+      bubbleIdlePreview: false,
+      showBubble: true,
+      showRenderedBubble: true,
+    };
+  }
+
+  return {
+    activityText: "",
+    bubbleText: "",
+    bubbleIdlePreview: false,
+    showBubble: false,
+    showRenderedBubble: false,
+  };
+}
+
+export function deriveThrongletGauge(
+  session: SessionSummary,
+): ThrongletGaugeModel {
+  const showGauge =
+    Number.isFinite(session.context_limit) &&
+    session.context_limit > 0 &&
+    Number.isFinite(session.token_count) &&
+    session.token_count > 0;
+  const gaugeRatio = gaugeUsageRatio(session.token_count, session.context_limit);
+  const gaugeFillSegments = gaugeSegments(gaugeRatio);
+
+  return {
+    showGauge,
+    gaugeRatio,
+    gaugeFillSegments,
+    gaugeFillWidth: `${(gaugeFillSegments / 8) * 100}%`,
+    gaugePercentLeft: Math.round((1 - gaugeRatio) * 100),
+    isCritical: gaugeRatio >= 0.8,
+  };
+}
+
+function clearLongPressTimer(
+  longPressTimerRef: { current: ReturnType<typeof setTimeout> | null },
+): void {
+  if (!longPressTimerRef.current) return;
+  clearTimeout(longPressTimerRef.current);
+  longPressTimerRef.current = null;
+}
+
+function startDesktopDragToBottom(params: {
+  e: MouseEvent;
+  axeArmed: boolean;
+  benchArmed: boolean;
+  elRef: { current: HTMLDivElement | null };
+  isDraggingRef: { current: boolean };
+  sessionId: string;
+  onDragToBottom: (id: string) => void;
+  throngletSize: number;
+  spriteHalf: number;
+}): void {
+  const {
+    e,
+    axeArmed,
+    benchArmed,
+    elRef,
+    isDraggingRef,
+    sessionId,
+    onDragToBottom,
+    throngletSize,
+    spriteHalf,
+  } = params;
+  if (axeArmed || benchArmed) return;
+  if (e.button !== 0) return;
+  e.preventDefault();
+  const startX = e.clientX;
+  const startY = e.clientY;
+  let dragging = false;
+  let ghost: HTMLImageElement | null = null;
+
+  const onMouseMove = (me: MouseEvent) => {
+    const dx = me.clientX - startX;
+    const dy = me.clientY - startY;
+
+    if (!dragging && dx < -10 && Math.abs(dx) > Math.abs(dy)) {
+      dragging = true;
+      isDraggingRef.current = true;
+      const sprite = elRef.current?.querySelector(
+        ".thronglet-sprite",
+      ) as HTMLImageElement | null;
+      if (sprite) {
+        ghost = sprite.cloneNode(true) as HTMLImageElement;
+        ghost.style.cssText =
+          `position:fixed;pointer-events:none;z-index:9999;opacity:0.7;width:${throngletSize}px;height:${throngletSize}px;`;
+        document.body.appendChild(ghost);
+      }
+    }
+
+    if (!dragging || !ghost) return;
+    ghost.style.left = me.clientX - spriteHalf + "px";
+    ghost.style.top = me.clientY - spriteHalf + "px";
+  };
+
+  const onMouseUp = (me: MouseEvent) => {
+    document.removeEventListener("mousemove", onMouseMove);
+    document.removeEventListener("mouseup", onMouseUp);
+    if (!dragging) return;
+    if (ghost) {
+      ghost.remove();
+      ghost = null;
+    }
+    if (me.clientX - startX < -100) {
+      onDragToBottom(sessionId);
+    }
+    setTimeout(() => {
+      isDraggingRef.current = false;
+    }, 50);
+  };
+
+  document.addEventListener("mousemove", onMouseMove);
+  document.addEventListener("mouseup", onMouseUp);
+}
+
 // ---- Wander / collision constants ----
 
 const MIN_SEPARATION = 120;
@@ -116,6 +316,51 @@ interface ThrongletProps {
   onDragToBottom: (id: string) => void;
 }
 
+interface ThrongletRawCardProps {
+  elRef: { current: HTMLDivElement | null };
+  session: SessionSummary;
+  isExited: boolean;
+  x: number;
+  y: number;
+  onClick: () => void;
+}
+
+function ThrongletRawCard({
+  elRef,
+  session,
+  isExited,
+  x,
+  y,
+  onClick,
+}: ThrongletRawCardProps) {
+  return (
+    <div
+      ref={elRef}
+      class="thronglet-raw"
+      style={{ left: x + "px", top: y + "px" }}
+      onClick={onClick}
+      onDragStart={(e: Event) => e.preventDefault()}
+    >
+      <div class="raw-state" data-state={session.state}>{session.state}</div>
+      <div class="raw-row"><span class="raw-key">id</span> {session.session_id.slice(0, 8)}</div>
+      <div class="raw-row"><span class="raw-key">tmux</span> {session.tmux_name}</div>
+      <div class="raw-row"><span class="raw-key">cwd</span> {cwdLabel(session.cwd)}</div>
+      {session.tool && <div class="raw-row"><span class="raw-key">tool</span> {session.tool}</div>}
+      {session.current_command && (
+        <div class="raw-row"><span class="raw-key">cmd</span> {session.current_command}</div>
+      )}
+      {!isExited && session.thought && (
+        <div class="raw-row"><span class="raw-key">thought</span> {session.thought}</div>
+      )}
+      {session.context_limit > 0 && (
+        <div class="raw-row"><span class="raw-key">ctx</span> {session.token_count.toLocaleString()}/{session.context_limit.toLocaleString()}</div>
+      )}
+      <div class="raw-row"><span class="raw-key">health</span> {session.transport_health}</div>
+      {session.is_stale && <div class="raw-row raw-stale">STALE</div>}
+    </div>
+  );
+}
+
 function ThrongletEntity({
   session,
   idlePreview,
@@ -172,153 +417,36 @@ function ThrongletEntity({
 
   // Desktop drag-left to assign to bottom pane
   const handleMouseDown = useCallback(
-    (e: MouseEvent) => {
-      if (axeArmed || benchArmed) return;
-      if (e.button !== 0) return;
-      e.preventDefault();
-      const startX = e.clientX;
-      const startY = e.clientY;
-      let dragging = false;
-      let ghost: HTMLImageElement | null = null;
-
-      const onMouseMove = (me: MouseEvent) => {
-        const dx = me.clientX - startX;
-        const dy = me.clientY - startY;
-
-        if (!dragging && dx < -10 && Math.abs(dx) > Math.abs(dy)) {
-          dragging = true;
-          isDraggingRef.current = true;
-          const sprite = elRef.current?.querySelector(
-            ".thronglet-sprite",
-          ) as HTMLImageElement | null;
-          if (sprite) {
-            ghost = sprite.cloneNode(true) as HTMLImageElement;
-            ghost.style.cssText =
-              `position:fixed;pointer-events:none;z-index:9999;opacity:0.7;width:${throngletSize}px;height:${throngletSize}px;`;
-            document.body.appendChild(ghost);
-          }
-        }
-
-        if (dragging && ghost) {
-          ghost.style.left = me.clientX - spriteHalf + "px";
-          ghost.style.top = me.clientY - spriteHalf + "px";
-        }
-      };
-
-      const onMouseUp = (me: MouseEvent) => {
-        document.removeEventListener("mousemove", onMouseMove);
-        document.removeEventListener("mouseup", onMouseUp);
-        if (dragging) {
-          if (ghost) {
-            ghost.remove();
-            ghost = null;
-          }
-          const dx = me.clientX - startX;
-          if (dx < -100) {
-            onDragToBottom(session.session_id);
-          }
-          setTimeout(() => {
-            isDraggingRef.current = false;
-          }, 50);
-        }
-      };
-
-      document.addEventListener("mousemove", onMouseMove);
-      document.addEventListener("mouseup", onMouseUp);
-    },
+    (e: MouseEvent) =>
+      startDesktopDragToBottom({
+        e,
+        axeArmed,
+        benchArmed,
+        elRef,
+        isDraggingRef,
+        sessionId: session.session_id,
+        onDragToBottom,
+        throngletSize,
+        spriteHalf,
+      }),
     [axeArmed, benchArmed, session.session_id, onDragToBottom, throngletSize, spriteHalf],
   );
 
-  // Thought / activity text
-  let activityText = "";
-  let thoughtText = "";
-  let showBubble = false;
-  const idlePreviewText = idlePreview?.trim() ?? "";
-  const idlePreviewWords = idlePreviewText
-    .toLowerCase()
-    .split(/\s+/)
-    .filter(Boolean);
-  const idlePreviewLooksPromptLike =
-    /(?:^|\s)(?:\$|#|>|❯)\s*[a-z0-9_./~:-]/i.test(idlePreviewText) ||
-    (idlePreviewWords.length > 0 &&
-      idlePreviewWords.length <= 8 &&
-      /^(git|npm|pnpm|yarn|cargo|python|python3|node|npx|uv|go|rustc|make|docker|kubectl|tmux|ls|cd|cat|sed|rg|grep|curl|wget|pytest|pip|bun|deno)$/i.test(
-        idlePreviewWords[0] ?? "",
-      ));
-  const safeIdlePreviewText = idlePreviewLooksPromptLike ? "" : idlePreviewText;
-  const normalizedThought = session.thought?.trim().toLowerCase() ?? "";
-  const isSleepingThought =
-    normalizedThought === "sleeping" || normalizedThought === "sleeping.";
-  const showIdlePreview =
-    !isExited &&
-    !session.thought &&
-    session.state === "idle" &&
-    safeIdlePreviewText.length > 0 &&
-    !isSleepingThought;
-
-  if (showIdlePreview) {
-    activityText = safeIdlePreviewText;
-    thoughtText = safeIdlePreviewText;
-    showBubble = true;
-  } else if (!isExited && session.thought) {
-    activityText = session.thought;
-    thoughtText = session.thought;
-    showBubble = true;
-  } else if (session.state === "error") {
-    activityText = "error!";
-    thoughtText = "!!!";
-    showBubble = true;
-  } else if (session.state === "attention") {
-    activityText = "ready";
-    thoughtText = "ready";
-    showBubble = true;
-  }
-
-  const liveBubble = showBubble
-    ? {
-        text: thoughtText,
-        isIdlePreview: showIdlePreview,
-      }
-    : null;
-
-  const renderedBubble = liveBubble;
-  const bubbleText = renderedBubble?.text ?? "";
-  const bubbleIdlePreview = renderedBubble?.isIdlePreview ?? false;
-  const showRenderedBubble = !!renderedBubble;
-
-  const showGauge =
-    Number.isFinite(session.context_limit) &&
-    session.context_limit > 0 &&
-    Number.isFinite(session.token_count) &&
-    session.token_count > 0;
-  const gaugeRatio = gaugeUsageRatio(session.token_count, session.context_limit);
-  const gaugeFillSegments = gaugeSegments(gaugeRatio);
-  const gaugeFillWidth = `${(gaugeFillSegments / 8) * 100}%`;
-  const gaugePercentLeft = Math.round((1 - gaugeRatio) * 100);
+  const bubbleModel = deriveThrongletBubble(session, idlePreview);
+  const gaugeModel = deriveThrongletGauge(session);
+  const hoverId = session.session_id;
 
   // Raw mode: show session data card instead of sprite
   if (rawMode) {
     return (
-      <div
-        ref={elRef}
-        class="thronglet-raw"
-        style={{ left: x + "px", top: y + "px" }}
+      <ThrongletRawCard
+        elRef={elRef}
+        session={session}
+        isExited={isExited}
+        x={x}
+        y={y}
         onClick={handleClick}
-        onDragStart={(e: Event) => e.preventDefault()}
-      >
-        <div class="raw-state" data-state={session.state}>{session.state}</div>
-        <div class="raw-row"><span class="raw-key">id</span> {session.session_id.slice(0, 8)}</div>
-        <div class="raw-row"><span class="raw-key">tmux</span> {session.tmux_name}</div>
-        <div class="raw-row"><span class="raw-key">cwd</span> {cwdLabel(session.cwd)}</div>
-        {session.tool && <div class="raw-row"><span class="raw-key">tool</span> {session.tool}</div>}
-        {session.current_command && <div class="raw-row"><span class="raw-key">cmd</span> {session.current_command}</div>}
-        {!isExited && session.thought && <div class="raw-row"><span class="raw-key">thought</span> {session.thought}</div>}
-        {session.context_limit > 0 && (
-          <div class="raw-row"><span class="raw-key">ctx</span> {session.token_count.toLocaleString()}/{session.context_limit.toLocaleString()}</div>
-        )}
-        <div class="raw-row"><span class="raw-key">health</span> {session.transport_health}</div>
-        {session.is_stale && <div class="raw-row raw-stale">STALE</div>}
-      </div>
+      />
     );
   }
 
@@ -344,8 +472,8 @@ function ThrongletEntity({
       onClick={handleClick}
       onMouseDown={handleMouseDown}
       onMouseEnter={() => {
-        if (axeArmed) onAxeHover?.(session.session_id);
-        if (benchArmed) onBenchHover?.(session.session_id);
+        if (axeArmed) onAxeHover?.(hoverId);
+        if (benchArmed) onBenchHover?.(hoverId);
       }}
       onMouseLeave={() => {
         if (axeArmed) onAxeHover?.(null);
@@ -353,11 +481,11 @@ function ThrongletEntity({
       }}
       onTouchStart={(e: TouchEvent) => {
         if (axeArmed) {
-          onAxeHover?.(session.session_id);
+          onAxeHover?.(hoverId);
           return;
         }
         if (benchArmed) {
-          onBenchHover?.(session.session_id);
+          onBenchHover?.(hoverId);
           return;
         }
         longPressTimerRef.current = setTimeout(() => {
@@ -367,22 +495,13 @@ function ThrongletEntity({
         }, 500);
       }}
       onTouchMove={() => {
-        if (longPressTimerRef.current) {
-          clearTimeout(longPressTimerRef.current);
-          longPressTimerRef.current = null;
-        }
+        clearLongPressTimer(longPressTimerRef);
       }}
       onTouchEnd={() => {
-        if (longPressTimerRef.current) {
-          clearTimeout(longPressTimerRef.current);
-          longPressTimerRef.current = null;
-        }
+        clearLongPressTimer(longPressTimerRef);
       }}
       onTouchCancel={() => {
-        if (longPressTimerRef.current) {
-          clearTimeout(longPressTimerRef.current);
-          longPressTimerRef.current = null;
-        }
+        clearLongPressTimer(longPressTimerRef);
         if (axeArmed) onAxeHover?.(null);
         if (benchArmed) onBenchHover?.(null);
       }}
@@ -398,9 +517,9 @@ function ThrongletEntity({
       )}
 
       {/* Thought bubble (hidden during egg state) */}
-      {!isEgg && showRenderedBubble && (
-        <div class={`thought-bubble ${bubbleIdlePreview ? "idle-preview" : ""}`}>
-          <span class="thought-text">{bubbleText}</span>
+      {!isEgg && bubbleModel.showRenderedBubble && (
+        <div class={`thought-bubble ${bubbleModel.bubbleIdlePreview ? "idle-preview" : ""}`}>
+          <span class="thought-text">{bubbleModel.bubbleText}</span>
           <div class="thought-circle thought-circle-lg" />
           <div class="thought-circle thought-circle-sm" />
         </div>
@@ -428,23 +547,23 @@ function ThrongletEntity({
             {session.last_skill}
           </div>
         )}
-        {showGauge && (
+        {gaugeModel.showGauge && (
           <>
-            <div class={`context-gauge${gaugeRatio >= 0.8 ? " critical" : ""}`}>
+            <div class={`context-gauge${gaugeModel.isCritical ? " critical" : ""}`}>
               <div
                 class="context-gauge-fill"
                 style={{
-                  "--gauge-color": gaugeColor(gaugeRatio),
-                  "--gauge-segments": gaugeFillSegments,
-                  width: gaugeFillWidth,
+                  "--gauge-color": gaugeColor(gaugeModel.gaugeRatio),
+                  "--gauge-segments": gaugeModel.gaugeFillSegments,
+                  width: gaugeModel.gaugeFillWidth,
                 } as Record<string, string | number>}
               />
             </div>
-            <div class="context-gauge-percent">{gaugePercentLeft}% left</div>
+            <div class="context-gauge-percent">{gaugeModel.gaugePercentLeft}% left</div>
           </>
         )}
-        {activityText && !showRenderedBubble && (
-          <div class="thronglet-activity">{activityText}</div>
+        {bubbleModel.activityText && !bubbleModel.showRenderedBubble && (
+          <div class="thronglet-activity">{bubbleModel.activityText}</div>
         )}
       </div>
     </div>

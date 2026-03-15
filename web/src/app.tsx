@@ -8,6 +8,7 @@ import type {
   RepoTheme,
   SpritePack,
   NativeDesktopStatus,
+  CreateSessionResponse,
 } from "@/types";
 import type {
   SessionStatePayload,
@@ -362,6 +363,242 @@ function inferSpawnToolFromSessionTool(tool: string | null): SpawnTool | undefin
   return undefined;
 }
 
+type OverviewTapIntent =
+  | { type: "bench"; sessionId: string }
+  | { type: "refresh" }
+  | { type: "open-native-or-terminal"; session: SessionSummary }
+  | { type: "open-terminal"; sessionId: string }
+  | { type: "delete"; sessionId: string }
+  | { type: "noop" };
+
+interface ResolveOverviewTapIntentInput {
+  sessionId: string;
+  sessionsList: SessionSummary[];
+  benchArmed: boolean;
+  axeArmed: boolean;
+  nativeDesktop: NativeDesktopStatus;
+  isObserver: boolean;
+}
+
+export function resolveOverviewTapIntent(
+  input: ResolveOverviewTapIntentInput,
+): OverviewTapIntent {
+  if (input.benchArmed) {
+    return { type: "bench", sessionId: input.sessionId };
+  }
+
+  const target = input.sessionsList.find(
+    (session) => session.session_id === input.sessionId,
+  );
+  if (!target) {
+    return { type: "noop" };
+  }
+
+  if (input.axeArmed) {
+    return { type: "delete", sessionId: input.sessionId };
+  }
+
+  if (target.is_stale) {
+    return { type: "refresh" };
+  }
+
+  if (shouldOpenNativeDesktopByDefault(input.nativeDesktop, input.isObserver)) {
+    return { type: "open-native-or-terminal", session: target };
+  }
+
+  return { type: "open-terminal", sessionId: input.sessionId };
+}
+
+interface AppViewFlagsInput {
+  view: "overview" | "terminal";
+  zoneLayout: "single" | "dual";
+  viewportWidth: number;
+  transport: TransportHealth;
+}
+
+interface AppViewFlags {
+  isOverview: boolean;
+  isTerminal: boolean;
+  splitMode: boolean;
+  showTransportBanner: boolean;
+  fieldAxeTopOffset: number;
+  overviewInteractive: boolean;
+  terminalInteractive: boolean;
+  overviewTransform: "none" | "translateX(-100%)";
+}
+
+export function deriveAppViewFlags(input: AppViewFlagsInput): AppViewFlags {
+  const isOverview = input.view === "overview";
+  const isTerminal = input.view === "terminal";
+  const splitMode =
+    isTerminal && input.zoneLayout === "single" && input.viewportWidth > 768;
+  const showTransportBanner =
+    input.transport !== "healthy" && input.transport !== "disconnected";
+
+  return {
+    isOverview,
+    isTerminal,
+    splitMode,
+    showTransportBanner,
+    fieldAxeTopOffset: showTransportBanner ? 30 : 8,
+    overviewInteractive: isOverview || splitMode,
+    terminalInteractive: isTerminal,
+    overviewTransform: isOverview
+      ? "none"
+      : splitMode
+        ? "none"
+        : "translateX(-100%)",
+  };
+}
+
+function readBenchedIdsFromStorage(): Set<string> {
+  try {
+    const raw = localStorage.getItem("throngterm.benched-sessions.v1");
+    if (!raw) return new Set();
+    const parsed = JSON.parse(raw);
+    if (Array.isArray(parsed) && parsed.every((id) => typeof id === "string")) {
+      return new Set(parsed);
+    }
+  } catch {
+    // Ignore malformed local storage state.
+  }
+  return new Set();
+}
+
+function persistBenchedIds(ids: Set<string>): void {
+  try {
+    localStorage.setItem("throngterm.benched-sessions.v1", JSON.stringify([...ids]));
+  } catch {
+    // localStorage write failure — ignore
+  }
+}
+
+function applyCreateSessionAssets(response: CreateSessionResponse): void {
+  if (response.sprite_pack && response.session.sprite_pack_id) {
+    spritePacks.value = {
+      ...spritePacks.value,
+      [response.session.sprite_pack_id]: response.sprite_pack,
+    };
+  }
+  if (response.repo_theme && response.session.repo_theme_id) {
+    repoThemes.value = {
+      ...repoThemes.value,
+      [response.session.repo_theme_id]: response.repo_theme,
+    };
+  }
+}
+
+interface CreateOverviewSessionInput {
+  cwd?: string;
+  spawnTool?: SpawnTool;
+  isObserver: boolean;
+  nativeDesktopSupported: boolean;
+  upsertSession: (session: SessionSummary) => void;
+  openNativeSessionOrTerminal: (session: SessionSummary) => Promise<boolean>;
+}
+
+async function createOverviewSession(
+  input: CreateOverviewSessionInput,
+): Promise<string> {
+  if (input.isObserver) return "";
+  try {
+    const response = await apiCreateSession(undefined, input.cwd, input.spawnTool);
+    applyCreateSessionAssets(response);
+    input.upsertSession(response.session);
+    if (input.nativeDesktopSupported) {
+      void input.openNativeSessionOrTerminal(response.session);
+    }
+    return response.session.session_id;
+  } catch (err) {
+    console.error("Failed to create session:", err);
+    return "";
+  }
+}
+
+interface OpenNativeSessionInput {
+  session: SessionSummary;
+  nativeDesktopSupported: boolean;
+  isObserver: boolean;
+  showNativeFailureToast: (label: string, message: string) => void;
+  refreshSessionsFromServer: () => Promise<SessionSummary[]>;
+  clearNativeFailure: () => void;
+}
+
+async function openNativeSessionWithFallback(
+  input: OpenNativeSessionInput,
+): Promise<NativeOpenResult> {
+  if (!input.nativeDesktopSupported || input.isObserver) return "fallback";
+  if (input.session.state === "exited") {
+    input.showNativeFailureToast(
+      sessionLabel(input.session),
+      "Session has already exited.",
+    );
+    return "missing";
+  }
+  if (input.session.is_stale) {
+    void input.refreshSessionsFromServer().catch(() => {});
+    return "missing";
+  }
+
+  if (input.session.state === "attention") {
+    realtime.sendDismissAttention(input.session.session_id);
+  }
+
+  try {
+    await openNativeDesktopSession(input.session.session_id);
+    input.clearNativeFailure();
+    return "opened";
+  } catch (err) {
+    const message =
+      err instanceof Error ? err.message : "Failed to open session in iTerm";
+    if (message === "SESSION_NOT_FOUND") {
+      input.showNativeFailureToast(
+        sessionLabel(input.session),
+        "Session is no longer available.",
+      );
+      void input.refreshSessionsFromServer().catch(() => {});
+      return "missing";
+    }
+    input.showNativeFailureToast(sessionLabel(input.session), message);
+    return "fallback";
+  }
+}
+
+interface OverviewTapExecutionInput {
+  intent: OverviewTapIntent;
+  handleBenchSession: (sessionId: string) => void;
+  refreshSessionsFromServer: () => Promise<SessionSummary[]>;
+  openNativeSessionOrTerminal: (session: SessionSummary) => Promise<boolean>;
+  openTerminal: (sessionId: string) => void;
+  setAxeArmed: (next: boolean) => void;
+  deleteSessionWithFeedback: (sessionId: string) => Promise<void>;
+}
+
+function executeOverviewTapIntent(input: OverviewTapExecutionInput): void {
+  switch (input.intent.type) {
+    case "bench":
+      input.handleBenchSession(input.intent.sessionId);
+      return;
+    case "refresh":
+      void input.refreshSessionsFromServer().catch(() => {});
+      return;
+    case "open-native-or-terminal":
+      void input.openNativeSessionOrTerminal(input.intent.session);
+      return;
+    case "open-terminal":
+      input.openTerminal(input.intent.sessionId);
+      return;
+    case "delete":
+      input.setAxeArmed(false);
+      if (navigator.vibrate) navigator.vibrate([20, 30, 20]);
+      void input.deleteSessionWithFeedback(input.intent.sessionId);
+      return;
+    case "noop":
+    default:
+      return;
+  }
+}
+
 export function App() {
   const [bootstrapDone, setBootstrapDone] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -370,19 +607,7 @@ export function App() {
     useState<RestoreLayoutRequest | null>(null);
   const [axeArmed, setAxeArmed] = useState(false);
   const [benchArmed, setBenchArmed] = useState(false);
-  const [benchedIds, setBenchedIds] = useState<Set<string>>(() => {
-    try {
-      const raw = localStorage.getItem("throngterm.benched-sessions.v1");
-      if (!raw) return new Set();
-      const parsed = JSON.parse(raw);
-      if (Array.isArray(parsed) && parsed.every((id) => typeof id === "string")) {
-        return new Set(parsed);
-      }
-      return new Set();
-    } catch {
-      return new Set();
-    }
-  });
+  const [benchedIds, setBenchedIds] = useState<Set<string>>(readBenchedIdsFromStorage);
   const [pendingUndoDelete, setPendingUndoDelete] =
     useState<UndoDeleteState | null>(null);
   const [undoInFlight, setUndoInFlight] = useState(false);
@@ -417,14 +642,7 @@ export function App() {
   }, [isObserver]);
 
   useEffect(() => {
-    try {
-      localStorage.setItem(
-        "throngterm.benched-sessions.v1",
-        JSON.stringify([...benchedIds]),
-      );
-    } catch {
-      // localStorage write failure — ignore
-    }
+    persistBenchedIds(benchedIds);
   }, [benchedIds]);
 
   useEffect(() => {
@@ -586,18 +804,7 @@ export function App() {
         payload.cwd,
         payload.spawnTool,
       );
-      if (resp.sprite_pack && resp.session.sprite_pack_id) {
-        spritePacks.value = {
-          ...spritePacks.value,
-          [resp.session.sprite_pack_id]: resp.sprite_pack,
-        };
-      }
-      if (resp.repo_theme && resp.session.repo_theme_id) {
-        repoThemes.value = {
-          ...repoThemes.value,
-          [resp.session.repo_theme_id]: resp.repo_theme,
-        };
-      }
+      applyCreateSessionAssets(resp);
       upsertSession(resp.session);
       setDeleteFailure(null);
       if (navigator.vibrate) navigator.vibrate(20);
@@ -632,40 +839,15 @@ export function App() {
   }, []);
 
   const openNativeSession = useCallback(
-    async (session: SessionSummary): Promise<NativeOpenResult> => {
-      if (!nativeDesktop.supported || isObserver) return "fallback";
-      if (session.state === "exited") {
-        showNativeFailureToast(sessionLabel(session), "Session has already exited.");
-        return "missing";
-      }
-      if (session.is_stale) {
-        void refreshSessionsFromServer().catch(() => {});
-        return "missing";
-      }
-
-      if (session.state === "attention") {
-        realtime.sendDismissAttention(session.session_id);
-      }
-
-      try {
-        await openNativeDesktopSession(session.session_id);
-        setNativeFailure(null);
-        return "opened";
-      } catch (err) {
-        const message =
-          err instanceof Error ? err.message : "Failed to open session in iTerm";
-        if (message === "SESSION_NOT_FOUND") {
-          showNativeFailureToast(
-            sessionLabel(session),
-            "Session is no longer available.",
-          );
-          void refreshSessionsFromServer().catch(() => {});
-          return "missing";
-        }
-        showNativeFailureToast(sessionLabel(session), message);
-        return "fallback";
-      }
-    },
+    (session: SessionSummary): Promise<NativeOpenResult> =>
+      openNativeSessionWithFallback({
+        session,
+        nativeDesktopSupported: nativeDesktop.supported,
+        isObserver,
+        showNativeFailureToast,
+        refreshSessionsFromServer,
+        clearNativeFailure: () => setNativeFailure(null),
+      }),
     [
       isObserver,
       nativeDesktop.supported,
@@ -1237,29 +1419,23 @@ export function App() {
 
   const handleOverviewTap = useCallback(
     (sessionId: string) => {
-      if (benchArmed) {
-        handleBenchSession(sessionId);
-        return;
-      }
-      const target = sessions.value.find((s) => s.session_id === sessionId);
-      if (!target) return;
-
-      if (!axeArmed) {
-        if (target.is_stale) {
-          void refreshSessionsFromServer().catch(() => {});
-          return;
-        }
-        if (shouldOpenNativeDesktopByDefault(nativeDesktop, isObserver)) {
-          void openNativeSessionOrTerminal(target);
-          return;
-        }
-        openTerminal(sessionId);
-        return;
-      }
-
-      setAxeArmed(false);
-      if (navigator.vibrate) navigator.vibrate([20, 30, 20]);
-      void deleteSessionWithFeedback(sessionId);
+      const intent = resolveOverviewTapIntent({
+        sessionId,
+        sessionsList: sessions.value,
+        benchArmed,
+        axeArmed,
+        nativeDesktop,
+        isObserver,
+      });
+      executeOverviewTapIntent({
+        intent,
+        handleBenchSession,
+        refreshSessionsFromServer,
+        openNativeSessionOrTerminal,
+        openTerminal,
+        setAxeArmed,
+        deleteSessionWithFeedback,
+      });
     },
     [
       axeArmed,
@@ -1268,7 +1444,7 @@ export function App() {
       handleBenchSession,
       isObserver,
       nativeDesktop,
-      openNativeSession,
+      openNativeSessionOrTerminal,
       refreshSessionsFromServer,
       openTerminal,
     ],
@@ -1304,6 +1480,26 @@ export function App() {
       writeWorkspaceLayout(layout, mode);
     },
     [writeWorkspaceLayout],
+  );
+
+  const handleToggleAxe = useCallback(() => {
+    setAxeArmed((prev) => {
+      if (!prev) setBenchArmed(false); // mutual exclusion
+      return !prev;
+    });
+  }, []);
+
+  const handleCreateSession = useCallback(
+    (cwd?: string, spawnTool?: SpawnTool) =>
+      createOverviewSession({
+        cwd,
+        spawnTool,
+        isObserver,
+        nativeDesktopSupported: nativeDesktop.supported,
+        upsertSession,
+        openNativeSessionOrTerminal,
+      }),
+    [isObserver, nativeDesktop.supported, upsertSession, openNativeSessionOrTerminal],
   );
 
   // ---- Render ----
@@ -1349,31 +1545,20 @@ export function App() {
     );
   }
 
-  const isOverview = currentView.value === "overview";
-  const isTerminal = currentView.value === "terminal";
-  const splitMode = isTerminal && zoneLayout.value === "single" && window.innerWidth > 768;
-  const showTransportBanner =
-    transportHealth.value !== "healthy" &&
-    transportHealth.value !== "disconnected";
-  const fieldAxeTopOffset = showTransportBanner ? 30 : 8;
-  const overviewInteractive = isOverview || splitMode;
-  const terminalInteractive = isTerminal;
+  const viewFlags = deriveAppViewFlags({
+    view: currentView.value,
+    zoneLayout: zoneLayout.value,
+    viewportWidth: window.innerWidth,
+    transport: transportHealth.value,
+  });
   const overviewSessions = sessions.value.filter(
     (session) => !shouldHideSessionFromOverview(session),
   );
 
-  // In split mode: terminal left 50%, field right 50%
-  // In dual-zone: terminal full screen, field hidden
-  const overviewTransform = isOverview
-    ? "none"
-    : splitMode
-      ? "none"
-      : "translateX(-100%)";
-
   return (
     <div style={{ position: "absolute", inset: 0, overflow: "hidden" }}>
       {/* Transport health banner */}
-      {showTransportBanner && (
+      {viewFlags.showTransportBanner && (
         <div
           style={{
             position: "fixed",
@@ -1396,89 +1581,59 @@ export function App() {
 
       {/* Overview field */}
       <div
-        class={`view ${overviewInteractive ? "active" : ""}`}
+        class={`view ${viewFlags.overviewInteractive ? "active" : ""}`}
         style={{
           position: "absolute",
           top: 0,
-          left: splitMode ? "50%" : 0,
-          right: splitMode ? "auto" : 0,
-          width: splitMode ? "50%" : "100%",
+          left: viewFlags.splitMode ? "50%" : 0,
+          right: viewFlags.splitMode ? "auto" : 0,
+          width: viewFlags.splitMode ? "50%" : "100%",
           bottom: 0,
-          transform: overviewTransform,
+          transform: viewFlags.overviewTransform,
           transition: "transform 0.25s ease, left 0.25s ease",
-          zIndex: splitMode ? 2 : 1,
-          pointerEvents: overviewInteractive ? "auto" : "none",
+          zIndex: viewFlags.splitMode ? 2 : 1,
+          pointerEvents: viewFlags.overviewInteractive ? "auto" : "none",
         }}
       >
         <OverviewField
           sessions={overviewSessions}
           idlePreviews={idlePreviews.value}
           observer={isObserver}
-          compact={splitMode}
-          axeTopOffset={fieldAxeTopOffset}
+          compact={viewFlags.splitMode}
+          axeTopOffset={viewFlags.fieldAxeTopOffset}
           axeArmed={axeArmed}
           benchArmed={benchArmed}
           benchedIds={benchedIds}
-          onToggleAxe={() => {
-            setAxeArmed((prev) => {
-              if (!prev) setBenchArmed(false); // mutual exclusion
-              return !prev;
-            });
-          }}
+          onToggleAxe={handleToggleAxe}
           onDisarmAxe={disarmAxeMode}
           onToggleBenchArm={handleToggleBenchArm}
           onBenchSession={handleBenchSession}
           onUnbenchSession={handleUnbenchSession}
           onTapSession={handleOverviewTap}
           onDragToBottom={(id) => openTerminal(id, "bottom")}
-          onCreateSession={async (cwd?: string, spawnTool?: SpawnTool) => {
-            if (isObserver) return "";
-            try {
-              const resp = await apiCreateSession(undefined, cwd, spawnTool);
-              if (resp.sprite_pack && resp.session.sprite_pack_id) {
-                spritePacks.value = {
-                  ...spritePacks.value,
-                  [resp.session.sprite_pack_id]: resp.sprite_pack,
-                };
-              }
-              if (resp.repo_theme && resp.session.repo_theme_id) {
-                repoThemes.value = {
-                  ...repoThemes.value,
-                  [resp.session.repo_theme_id]: resp.repo_theme,
-                };
-              }
-              upsertSession(resp.session);
-              if (nativeDesktop.supported) {
-                void openNativeSessionOrTerminal(resp.session);
-              }
-              return resp.session.session_id;
-            } catch (err) {
-              console.error("Failed to create session:", err);
-              return "";
-            }
-          }}
+          onCreateSession={handleCreateSession}
         />
       </div>
 
       {/* Terminal workspace */}
       <div
-        class={`view ${isTerminal ? "active" : ""}`}
+        class={`view ${viewFlags.isTerminal ? "active" : ""}`}
         style={{
           position: "absolute",
           top: 0,
           left: 0,
-          right: splitMode ? "auto" : 0,
-          width: splitMode ? "50%" : "100%",
+          right: viewFlags.splitMode ? "auto" : 0,
+          width: viewFlags.splitMode ? "50%" : "100%",
           bottom: 0,
-          transform: isTerminal ? "translateX(0)" : "translateX(100%)",
+          transform: viewFlags.isTerminal ? "translateX(0)" : "translateX(100%)",
           transition: "transform 0.25s ease, right 0.25s ease",
           display: "flex",
           flexDirection: "row",
-          zIndex: splitMode ? 1 : 2,
-          pointerEvents: terminalInteractive ? "auto" : "none",
+          zIndex: viewFlags.splitMode ? 1 : 2,
+          pointerEvents: viewFlags.terminalInteractive ? "auto" : "none",
         }}
       >
-        {isTerminal && (
+        {viewFlags.isTerminal && (
           <ZoneManager
             sessions={sessions.value}
             activeSessionId={activeSessionId.value}

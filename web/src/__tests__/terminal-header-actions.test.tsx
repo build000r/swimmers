@@ -251,6 +251,43 @@ describe("terminal header actions", () => {
     });
   });
 
+  it("toggles bench state via the header control", () => {
+    const onBenchToggle = vi.fn();
+
+    const { rerender } = render(
+      <TerminalWorkspace
+        session={makeSession({ session_id: "sess-bench", tmux_name: "bench-demo" })}
+        cached={null}
+        observer={false}
+        isBenched={false}
+        onBenchToggle={onBenchToggle}
+        onCache={() => {}}
+        onSessionExit={() => {}}
+        onClose={() => {}}
+      />,
+    );
+
+    const hideButton = screen.getByRole("button", { name: "Hide" });
+    fireEvent.click(hideButton);
+    expect(onBenchToggle).toHaveBeenCalledTimes(1);
+    expect(onBenchToggle).toHaveBeenCalledWith("sess-bench");
+
+    rerender(
+      <TerminalWorkspace
+        session={makeSession({ session_id: "sess-bench", tmux_name: "bench-demo" })}
+        cached={null}
+        observer={false}
+        isBenched={true}
+        onBenchToggle={onBenchToggle}
+        onCache={() => {}}
+        onSessionExit={() => {}}
+        onClose={() => {}}
+      />,
+    );
+
+    expect(screen.getByRole("button", { name: "Show" })).toBeInTheDocument();
+  });
+
   it("does not auto-close non-process exits", async () => {
     const onSessionExit = vi.fn();
 
