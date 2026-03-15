@@ -16,7 +16,9 @@ use crate::thought::bridge_runner::BridgeRunner;
 use crate::thought::emitter_client::EmitterClient;
 use crate::thought::protocol::ThoughtDeliveryState;
 use crate::thought::runtime_config::ThoughtConfig;
-use crate::types::{ControlEvent, SessionState, ThoughtPolicy, ThoughtSource, ThoughtState};
+use crate::types::{
+    ControlEvent, RestState, SessionState, ThoughtPolicy, ThoughtSource, ThoughtState,
+};
 
 /// Snapshot of a single session's data, provided by the supervisor each tick.
 #[derive(Clone)]
@@ -36,6 +38,8 @@ pub struct SessionInfo {
     pub thought_state: ThoughtState,
     /// Current persisted thought source.
     pub thought_source: ThoughtSource,
+    /// Current daemon-authored rest state.
+    pub rest_state: RestState,
     /// Last seen objective fingerprint used to avoid noisy rewrites.
     pub objective_fingerprint: Option<String>,
     /// Time of last persisted thought update.
@@ -63,6 +67,7 @@ pub trait SessionProvider: Send + Sync {
         _context_limit: u64,
         _thought_state: ThoughtState,
         _thought_source: ThoughtSource,
+        _rest_state: RestState,
         _updated_at: DateTime<Utc>,
         _delivery: ThoughtDeliveryState,
         _objective_fingerprint: Option<String>,

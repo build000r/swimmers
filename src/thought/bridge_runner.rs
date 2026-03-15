@@ -117,7 +117,10 @@ fn apply_sync_response<P: SessionProvider>(
 }
 
 fn is_sleeping_placeholder(thought: &str) -> bool {
-    matches!(thought.trim().to_ascii_lowercase().as_str(), "sleeping" | "sleeping.")
+    matches!(
+        thought.trim().to_ascii_lowercase().as_str(),
+        "sleeping" | "sleeping."
+    )
 }
 
 fn normalize_sleeping_update(

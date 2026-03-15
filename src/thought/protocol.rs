@@ -3,7 +3,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::thought::loop_runner::SessionInfo;
 use crate::thought::runtime_config::ThoughtConfig;
-use crate::types::{BubblePrecedence, SessionState, ThoughtSource, ThoughtState};
+use crate::types::{BubblePrecedence, RestState, SessionState, ThoughtSource, ThoughtState};
 
 pub const HELLO_MESSAGE_TYPE: &str = "hello";
 pub const SYNC_MESSAGE_TYPE: &str = "sync";
@@ -29,6 +29,7 @@ pub struct SessionSnapshotPayload {
     pub thought: Option<String>,
     pub thought_state: ThoughtState,
     pub thought_source: ThoughtSource,
+    pub rest_state: RestState,
     pub objective_fingerprint: Option<String>,
     pub thought_updated_at: Option<DateTime<Utc>>,
     pub token_count: u64,
@@ -48,6 +49,7 @@ impl From<&SessionInfo> for SessionSnapshotPayload {
             thought: value.thought.clone(),
             thought_state: value.thought_state,
             thought_source: value.thought_source,
+            rest_state: value.rest_state,
             objective_fingerprint: value.objective_fingerprint.clone(),
             thought_updated_at: value.thought_updated_at,
             token_count: value.token_count,
@@ -139,6 +141,8 @@ pub struct SyncUpdate {
     pub context_limit: u64,
     pub thought_state: ThoughtState,
     pub thought_source: ThoughtSource,
+    #[serde(default)]
+    pub rest_state: RestState,
     pub objective_changed: bool,
     pub bubble_precedence: BubblePrecedence,
     pub at: DateTime<Utc>,
@@ -236,7 +240,7 @@ impl DaemonInboundMessage {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{SessionState, ThoughtSource, ThoughtState};
+    use crate::types::{RestState, SessionState, ThoughtSource, ThoughtState};
 
     fn sample_session() -> SessionInfo {
         let now = Utc::now();
@@ -250,6 +254,7 @@ mod tests {
             thought: Some("Running tests".to_string()),
             thought_state: ThoughtState::Holding,
             thought_source: ThoughtSource::CarryForward,
+            rest_state: RestState::Drowsy,
             objective_fingerprint: Some("obj-1".to_string()),
             thought_updated_at: Some(now),
             token_count: 12,

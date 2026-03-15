@@ -376,10 +376,12 @@ impl SessionActor {
                             if pty_closed {
                                 debug!(session_id = %self.session_id, "ignoring write to exited PTY");
                             } else {
-                                self.scroll_guard.notify_input();
-                                let state_before = self.state_detector.state();
-                                self.state_detector.note_input();
-                                let _ = self.maybe_emit_state_change(state_before);
+                                if write_input_counts_as_activity(&data) {
+                                    self.scroll_guard.notify_input();
+                                    let state_before = self.state_detector.state();
+                                    self.state_detector.note_input();
+                                    let _ = self.maybe_emit_state_change(state_before);
+                                }
                                 self.update_last_skill_from_input(&data);
                                 if let Err(e) = self.writer.write_all(&data) {
                                     error!(session_id = %self.session_id, "PTY write error: {}", e);
@@ -1041,6 +1043,24 @@ async fn capture_pane_tail(tmux_name: &str, lines: usize) -> anyhow::Result<Stri
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
+fn write_input_counts_as_activity(data: &[u8]) -> bool {
+    let mut index = 0;
+    while index < data.len() {
+        if data[index] == 0x1b
+            && index + 2 < data.len()
+            && data[index + 1] == b'['
+            && matches!(data[index + 2], b'I' | b'O')
+        {
+            index += 3;
+            continue;
+        }
+
+        return true;
+    }
+
+    false
+}
+
 fn output_counts_as_meaningful_activity(
     previous_state: SessionState,
     current_state: SessionState,
@@ -1668,7 +1688,7 @@ mod tests {
         detect_skill_from_input_line, detect_tool_from_command_line,
         detect_tool_from_process_entry, drain_completed_input_lines,
         output_counts_as_meaningful_activity, parse_process_entry, resolve_tmux_terminal_env,
-        visible_output_is_meaningful, ProcessEntry,
+        visible_output_is_meaningful, write_input_counts_as_activity, ProcessEntry,
     };
     use crate::scroll::guard::ScrollOutputChunk;
     use crate::session::replay_ring::ReplayRing;
@@ -1848,7 +1868,9 @@ mod tests {
         assert!(visible_output_is_meaningful(
             b"checking auth middleware header parsing\n"
         ));
-        assert!(visible_output_is_meaningful(b"test auth::login ... FAILED\n"));
+        assert!(visible_output_is_meaningful(
+            b"test auth::login ... FAILED\n"
+        ));
     }
 
     #[test]
@@ -1875,5 +1897,19 @@ mod tests {
             SessionState::Idle,
             &chunk,
         ));
+    }
+
+    #[test]
+    fn standalone_focus_reports_do_not_count_as_activity_input() {
+        assert!(!write_input_counts_as_activity(b"\x1b[I"));
+        assert!(!write_input_counts_as_activity(b"\x1b[O"));
+        assert!(!write_input_counts_as_activity(b"\x1b[I\x1b[O\x1b[I"));
+    }
+
+    #[test]
+    fn mixed_focus_reports_and_real_input_still_count_as_activity() {
+        assert!(write_input_counts_as_activity(b"\x1b[Ia"));
+        assert!(write_input_counts_as_activity(b"\x1b[O\r"));
+        assert!(write_input_counts_as_activity(b"\t"));
     }
 }

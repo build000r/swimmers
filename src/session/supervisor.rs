@@ -309,6 +309,12 @@ impl SessionSupervisor {
         reason: &'static str,
     ) -> anyhow::Result<()> {
         let _discovery_guard = self.discovery_lock.lock().await;
+        let list_started = Instant::now();
+        info!(
+            reason,
+            phase = "tmux_list_sessions",
+            "running tmux list-sessions"
+        );
         let output = Command::new("tmux")
             .args(["list-sessions", "-F", "#{session_name}"])
             .output()
@@ -319,6 +325,8 @@ impl SessionSupervisor {
         let mut listed_tmux_names: Vec<String> = Vec::new();
         match output {
             Ok(output) if output.status.success() => {
+                let elapsed = list_started.elapsed();
+                let elapsed_ms = elapsed.as_millis() as u64;
                 let stdout = String::from_utf8_lossy(&output.stdout);
                 for line in stdout.lines() {
                     let tmux_name = line.trim().to_string();
@@ -326,6 +334,23 @@ impl SessionSupervisor {
                         continue;
                     }
                     listed_tmux_names.push(tmux_name);
+                }
+                if elapsed >= Duration::from_secs(2) {
+                    warn!(
+                        reason,
+                        phase = "tmux_list_sessions",
+                        elapsed_ms,
+                        listed_sessions = listed_tmux_names.len(),
+                        "tmux list-sessions completed slowly"
+                    );
+                } else {
+                    info!(
+                        reason,
+                        phase = "tmux_list_sessions",
+                        elapsed_ms,
+                        listed_sessions = listed_tmux_names.len(),
+                        "tmux list-sessions completed"
+                    );
                 }
 
                 let tracked_tmux_names: HashSet<String> = {
@@ -405,18 +430,37 @@ impl SessionSupervisor {
                 }
             }
             Ok(output) => {
+                let elapsed_ms = list_started.elapsed().as_millis() as u64;
                 let stderr = String::from_utf8_lossy(&output.stderr);
                 // "no server running" / "no sessions" means tmux has no live sessions.
                 if stderr.contains("no server running") || stderr.contains("no sessions") {
-                    info!("no existing tmux sessions found");
+                    info!(
+                        reason,
+                        phase = "tmux_list_sessions",
+                        elapsed_ms,
+                        "no existing tmux sessions found"
+                    );
                 } else {
                     discovery_reliable = false;
-                    warn!("tmux list-sessions returned error: {}", stderr);
+                    warn!(
+                        reason,
+                        phase = "tmux_list_sessions",
+                        elapsed_ms,
+                        "tmux list-sessions returned error: {}",
+                        stderr
+                    );
                 }
             }
             Err(e) => {
+                let elapsed_ms = list_started.elapsed().as_millis() as u64;
                 discovery_reliable = false;
-                warn!("tmux list-sessions failed: {}", e);
+                warn!(
+                    reason,
+                    phase = "tmux_list_sessions",
+                    elapsed_ms,
+                    "tmux list-sessions failed: {}",
+                    e
+                );
             }
         }
 
@@ -497,7 +541,7 @@ impl SessionSupervisor {
         initial_request: Option<String>,
     ) -> anyhow::Result<(SessionSummary, Option<SpritePack>, Option<RepoTheme>)> {
         let start_cwd = cwd.or_else(current_working_dir);
-        let initial_request = normalize_initial_request(initial_request);
+        let mut initial_request = normalize_initial_request(initial_request);
         let requested_name = name.and_then(|n| {
             let trimmed = n.trim();
             if trimmed.is_empty() {
@@ -551,13 +595,18 @@ impl SessionSupervisor {
 
         let (sprite_pack, repo_theme) = self.resolve_repo_assets_for_summary(&mut summary).await;
 
-        let initial_request_delay = if spawn_tool.is_some() {
+        let initial_request_delay = if spawn_tool.is_some() && initial_request.is_some() {
             INITIAL_REQUEST_INPUT_DELAY
         } else {
             Duration::ZERO
         };
         if let Some(tool) = spawn_tool {
-            if let Err(e) = send_spawn_tool_command(&tmux_name, tool).await {
+            let spawn_command = build_spawn_tool_command(tool, initial_request.as_deref());
+            if spawn_tool_consumes_initial_request(tool) {
+                initial_request = None;
+            }
+
+            if let Err(e) = send_spawn_tool_command(&tmux_name, tool, &spawn_command).await {
                 warn!(
                     session_id = %session_id,
                     tmux_name = %tmux_name,
@@ -565,7 +614,7 @@ impl SessionSupervisor {
                     "tmux send-keys failed, falling back to PTY input: {}",
                     e
                 );
-                let mut command = String::from(tool.command());
+                let mut command = spawn_command;
                 command.push('\n');
                 if let Err(e) = bootstrap_handle
                     .send(SessionCommand::WriteInput(command.into_bytes()))
@@ -1341,8 +1390,29 @@ fn normalize_initial_request(initial_request: Option<String>) -> Option<String> 
 
 fn build_initial_request_input(initial_request: &str) -> Vec<u8> {
     let mut input = initial_request.as_bytes().to_vec();
-    input.push(b'\n');
+    input.push(b'\r');
     input
+}
+
+fn spawn_tool_consumes_initial_request(tool: crate::types::SpawnTool) -> bool {
+    matches!(tool, crate::types::SpawnTool::Codex)
+}
+
+fn build_spawn_tool_command(
+    tool: crate::types::SpawnTool,
+    initial_request: Option<&str>,
+) -> String {
+    if spawn_tool_consumes_initial_request(tool) {
+        if let Some(initial_request) = initial_request {
+            return format!("{} {}", tool.command(), shell_single_quote(initial_request));
+        }
+    }
+
+    tool.command().to_string()
+}
+
+fn shell_single_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
 }
 
 fn enqueue_initial_request_input(
@@ -1376,37 +1446,33 @@ fn enqueue_initial_request_input(
 async fn send_spawn_tool_command(
     tmux_name: &str,
     tool: crate::types::SpawnTool,
+    command: &str,
 ) -> anyhow::Result<()> {
     const ATTEMPTS: usize = 8;
     const RETRY_DELAY_MS: u64 = 75;
 
     for attempt in 1..=ATTEMPTS {
-        let output = Command::new("tmux")
-            .args(["send-keys", "-t", tmux_name, tool.command(), "Enter"])
-            .env_remove("TMUX")
-            .env_remove("TMUX_PANE")
-            .output()
-            .await;
-
-        match output {
-            Ok(output) if output.status.success() => return Ok(()),
-            Ok(output) => {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                debug!(
-                    tmux_name = %tmux_name,
-                    tool = ?tool,
-                    attempt,
-                    status = ?output.status,
-                    stderr = %stderr.trim(),
-                    "tmux send-keys attempt failed"
-                );
-            }
+        match tmux_send_keys(tmux_name, &["-l", "--", command]).await {
+            Ok(()) => match tmux_send_keys(tmux_name, &["Enter"]).await {
+                Ok(()) => return Ok(()),
+                Err(e) => {
+                    debug!(
+                        tmux_name = %tmux_name,
+                        tool = ?tool,
+                        command,
+                        attempt,
+                        "failed to execute tmux Enter send-keys: {}",
+                        e
+                    );
+                }
+            },
             Err(e) => {
                 debug!(
                     tmux_name = %tmux_name,
                     tool = ?tool,
+                    command,
                     attempt,
-                    "failed to execute tmux send-keys: {}",
+                    "failed to execute tmux literal send-keys: {}",
                     e
                 );
             }
@@ -1419,6 +1485,28 @@ async fn send_spawn_tool_command(
 
     Err(anyhow::anyhow!(
         "unable to inject spawn command via tmux send-keys"
+    ))
+}
+
+async fn tmux_send_keys(tmux_name: &str, key_args: &[&str]) -> anyhow::Result<()> {
+    let output = Command::new("tmux")
+        .args(["send-keys", "-t", tmux_name])
+        .args(key_args)
+        .env_remove("TMUX")
+        .env_remove("TMUX_PANE")
+        .output()
+        .await
+        .map_err(|e| anyhow::anyhow!("failed to execute tmux send-keys: {}", e))?;
+
+    if output.status.success() {
+        return Ok(());
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    Err(anyhow::anyhow!(
+        "tmux send-keys failed (status {:?}): {}",
+        output.status,
+        stderr.trim()
     ))
 }
 
@@ -1565,11 +1653,47 @@ mod tests {
     }
 
     #[test]
-    fn build_initial_request_input_appends_newline() {
+    fn build_initial_request_input_appends_carriage_return() {
         assert_eq!(
             build_initial_request_input("hello codex"),
-            b"hello codex\n".to_vec()
+            b"hello codex\r".to_vec()
         );
+    }
+
+    #[test]
+    fn build_spawn_tool_command_inlines_codex_initial_request() {
+        assert_eq!(
+            build_spawn_tool_command(
+                crate::types::SpawnTool::Codex,
+                Some("investigate tmux startup")
+            ),
+            "codex 'investigate tmux startup'"
+        );
+    }
+
+    #[test]
+    fn build_spawn_tool_command_escapes_single_quotes_for_shell() {
+        assert_eq!(
+            build_spawn_tool_command(
+                crate::types::SpawnTool::Codex,
+                Some("fix Bob's tmux startup")
+            ),
+            "codex 'fix Bob'\\''s tmux startup'"
+        );
+    }
+
+    #[test]
+    fn build_spawn_tool_command_keeps_other_tools_on_follow_up_input_path() {
+        assert_eq!(
+            build_spawn_tool_command(
+                crate::types::SpawnTool::Claude,
+                Some("investigate tmux startup")
+            ),
+            "claude"
+        );
+        assert!(!spawn_tool_consumes_initial_request(
+            crate::types::SpawnTool::Claude
+        ));
     }
 
     #[test]

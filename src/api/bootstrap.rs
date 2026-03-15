@@ -56,6 +56,7 @@ async fn bootstrap(
         thought_config: Some(thought_config),
         sessions: bootstrap_data.sessions,
         sprite_packs: bootstrap_data.sprite_packs,
+        repo_themes: bootstrap_data.repo_themes,
     }))
 }
 

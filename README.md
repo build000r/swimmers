@@ -26,6 +26,19 @@ THRONGTERM_IOS_SERVER_URL=http://100.101.123.63:3210 npm run ios:sync
 npm run ios:open
 ```
 
+Current local defaults:
+
+- Rust server / API / built web app: `3210`
+- Vite dev server with HMR: `5175` when started through `.env-manager`
+- Native Rust TUI target: `3210`
+
+For the native TUI on localhost, `make tui` now bootstraps the local Rust API on
+`3210` if it is not already running. `make tui-check` remains a pure readiness
+probe and will not start the server for you.
+
+No tmux hook setup is required for thought or rest-state updates. `throngterm`
+streams session snapshots directly to `clawgs emit --stdio`.
+
 ### Fast UI dev mode (HMR)
 
 ```bash
@@ -41,6 +54,9 @@ npm run dev:host
 cd /Users/b/repos/throngterm/web
 THRONGTERM_IOS_SERVER_URL=http://100.101.123.63:5173 npm run ios:sync
 ```
+
+If you use `.env-manager`, it starts the Vite dev server on `5175`, not `5173`.
+In that path, point the iPhone wrapper to `http://<TAILNET_HOST>:5175`.
 
 ### In-app host switching
 

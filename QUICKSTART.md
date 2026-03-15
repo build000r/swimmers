@@ -92,7 +92,18 @@ Or during development:
 PORT=69420 cargo run
 ```
 
+Current repo-local dev defaults are different from the release-oriented examples above:
+
+- `3210`: Rust server, API, WebSocket endpoint, and built frontend
+- `5175`: Vite dev server when started through `.env-manager`
+
+Use `3210` for the native TUI and for stable iPhone wrapper mode.
+Use `5175` only when you want frontend hot reload on the phone.
+
 You should see the server start and begin discovering tmux sessions.
+
+No tmux hook setup is required for thought or rest-state updates. `throngterm`
+streams session snapshots directly to `clawgs emit --stdio`.
 
 It binds to `0.0.0.0` so it's accessible on all interfaces — including your Tailscale IP.
 
@@ -145,18 +156,18 @@ In a second terminal:
 ```bash
 cd web
 
-# Fast dev mode (hot reload via Vite on port 5173)
+# Fast dev mode (hot reload via Vite on port 5173, or 5175 via .env-manager)
 THRONGTERM_IOS_SERVER_URL=http://<YOUR_TAILSCALE_IP>:5173 npm run ios:sync
 
 # Open in Xcode, then run on your iPhone
 npm run ios:open
 ```
 
-Stable mode (Rust server on port `69420`):
+Stable mode (Rust server on port `3210` in local dev, or `69420` in the release-oriented setup above):
 
 ```bash
 cd web
-THRONGTERM_IOS_SERVER_URL=http://<YOUR_TAILSCALE_IP>:69420 npm run ios:sync
+THRONGTERM_IOS_SERVER_URL=http://<YOUR_TAILSCALE_IP>:3210 npm run ios:sync
 npm run ios:open
 ```
 

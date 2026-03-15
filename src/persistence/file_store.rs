@@ -12,10 +12,11 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex, RwLock};
 use tracing::{debug, error, info, warn};
+use uuid::Uuid;
 
 use crate::thought::protocol::ThoughtDeliveryState;
 use crate::thought::runtime_config::ThoughtConfig;
-use crate::types::{SessionState, ThoughtSource, ThoughtState};
+use crate::types::{RestState, SessionState, ThoughtSource, ThoughtState};
 
 // ---------------------------------------------------------------------------
 // Persisted data types
@@ -38,6 +39,8 @@ pub struct PersistedSession {
     #[serde(default)]
     pub thought_updated_at: Option<DateTime<Utc>>,
     #[serde(default)]
+    pub rest_state: RestState,
+    #[serde(default)]
     pub last_skill: Option<String>,
     #[serde(default)]
     pub objective_fingerprint: Option<String>,
@@ -53,6 +56,8 @@ pub struct ThoughtSnapshot {
     pub thought_state: ThoughtState,
     #[serde(default)]
     pub thought_source: ThoughtSource,
+    #[serde(default)]
+    pub rest_state: RestState,
     #[serde(default)]
     pub objective_fingerprint: Option<String>,
     pub token_count: u64,
@@ -71,6 +76,8 @@ pub struct FileStore {
     base_dir: PathBuf,
     /// In-memory cache of persisted sessions, synced to disk on mutation.
     cache: RwLock<Vec<PersistedSession>>,
+    /// Serialize registry writes to avoid temp-file rename races.
+    session_write_lock: Mutex<()>,
     /// In-memory cache of thought snapshots, synced to disk on mutation.
     thought_cache: RwLock<HashMap<String, ThoughtSnapshot>>,
     /// In-memory cache of daemon runtime thought config.
@@ -95,6 +102,7 @@ impl FileStore {
         let store = Arc::new(Self {
             base_dir,
             cache: RwLock::new(Vec::new()),
+            session_write_lock: Mutex::new(()),
             thought_cache: RwLock::new(HashMap::new()),
             thought_config_cache: RwLock::new(ThoughtConfig::default()),
             thought_write_lock: Mutex::new(()),
@@ -148,6 +156,8 @@ impl FileStore {
 
     /// Save the full session registry to disk atomically.
     pub async fn save_sessions(&self, sessions: &[PersistedSession]) {
+        let _write_guard = self.session_write_lock.lock().await;
+
         // Update the in-memory cache.
         {
             let mut cache = self.cache.write().await;
@@ -214,6 +224,7 @@ impl FileStore {
         context_limit: u64,
         thought_state: ThoughtState,
         thought_source: ThoughtSource,
+        rest_state: RestState,
         updated_at: DateTime<Utc>,
         delivery: ThoughtDeliveryState,
         objective_fingerprint: Option<String>,
@@ -227,6 +238,7 @@ impl FileStore {
                     thought: thought.map(|value| value.to_string()),
                     thought_state,
                     thought_source,
+                    rest_state,
                     objective_fingerprint,
                     token_count,
                     context_limit,
@@ -341,10 +353,14 @@ impl FileStore {
 /// Atomically write data to a file: write to `.tmp`, then rename.
 async fn atomic_write_blocking(path: PathBuf, data: String) -> anyhow::Result<()> {
     tokio::task::spawn_blocking(move || {
-        let tmp_path = path.with_extension("json.tmp");
+        ensure_parent(&path).map_err(|e| anyhow::anyhow!("ensure parent failed: {e}"))?;
+        let tmp_path = path.with_extension(format!("json.tmp.{}", Uuid::new_v4()));
         std::fs::write(&tmp_path, data.as_bytes())
             .map_err(|e| anyhow::anyhow!("write to tmp failed: {e}"))?;
-        std::fs::rename(&tmp_path, &path).map_err(|e| anyhow::anyhow!("rename failed: {e}"))?;
+        if let Err(e) = std::fs::rename(&tmp_path, &path) {
+            let _ = std::fs::remove_file(&tmp_path);
+            return Err(anyhow::anyhow!("rename failed: {e}"));
+        }
         Ok(())
     })
     .await
@@ -369,4 +385,33 @@ fn ensure_parent(path: &Path) -> std::io::Result<()> {
         std::fs::create_dir_all(parent)?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::atomic_write_blocking;
+
+    #[tokio::test]
+    async fn atomic_write_blocking_supports_concurrent_writes() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("session_registry.json");
+
+        let mut tasks = Vec::new();
+        for n in 0..16 {
+            let path = path.clone();
+            tasks.push(tokio::spawn(async move {
+                atomic_write_blocking(path, format!("{{\"n\":{n}}}")).await
+            }));
+        }
+
+        for task in tasks {
+            let result = task.await.expect("join task");
+            assert!(result.is_ok(), "concurrent write failed: {result:?}");
+        }
+
+        let contents = tokio::fs::read_to_string(&path)
+            .await
+            .expect("read persisted file");
+        assert!(contents.starts_with("{\"n\":"));
+    }
 }
