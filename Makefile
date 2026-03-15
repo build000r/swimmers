@@ -1,15 +1,17 @@
 SHELL := /bin/bash
 .DEFAULT_GOAL := help
 
-.PHONY: help server tui tui-check
+.PHONY: help server tui tui-check vitest-cov-lcov cargo-cov-lcov
 
 help:
 	@printf '%s\n' \
 	'throngterm commands' \
 	'' \
 	'  make server                  Run the Rust server on the configured port' \
-	'  make tui                     Wait for the API, then launch the native TUI' \
-	'  make tui-check              Wait for the API and exit without launching the TUI'
+	'  make tui                     Start a local API if needed, then launch the native TUI' \
+	'  make tui-check              Wait for an existing API and exit without launching the TUI' \
+	'  make vitest-cov-lcov        Run web tests with lcov output for /crap' \
+	'  make cargo-cov-lcov         Run Rust tests with lcov output for /crap'
 
 server:
 	cargo run --bin throngterm
@@ -19,3 +21,14 @@ tui:
 
 tui-check:
 	TUI_WAIT_ONLY=1 bash ./scripts/run-tui.sh
+
+vitest-cov-lcov:
+	cd web && npx vitest run \
+		--coverage.enabled true \
+		--coverage.reporter=lcov \
+		--coverage.reporter=text
+
+cargo-cov-lcov:
+	@llvm_cov="$${LLVM_COV:-$$(command -v llvm-cov || xcrun --find llvm-cov)}"; \
+	llvm_profdata="$${LLVM_PROFDATA:-$$(command -v llvm-profdata || xcrun --find llvm-profdata)}"; \
+	LLVM_COV="$$llvm_cov" LLVM_PROFDATA="$$llvm_profdata" cargo llvm-cov --lcov --output-path lcov.info

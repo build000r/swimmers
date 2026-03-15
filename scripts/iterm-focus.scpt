@@ -8,18 +8,8 @@ on sessionPaneId(aSession)
 	end try
 end sessionPaneId
 
-on sessionTag(aSession)
-	try
-		tell application id "com.googlecode.iterm2"
-			tell aSession to set taggedId to variable "user.throngterm.session_id"
-		end tell
-		return taggedId as text
-	on error
-		return ""
-	end try
-end sessionTag
-
 on focusExistingSession(aWindow, aTab, aSession, targetSessionId, displayName)
+	set paneId to my sessionPaneId(aSession)
 	my markWorkspaceSession(aSession, targetSessionId, displayName)
 	tell application id "com.googlecode.iterm2"
 		tell aWindow to select
@@ -27,7 +17,7 @@ on focusExistingSession(aWindow, aTab, aSession, targetSessionId, displayName)
 		tell aSession to select
 		activate
 	end tell
-	return my encodeResult("focused", aSession)
+	return "focused|" & paneId
 end focusExistingSession
 
 on findSessionByPaneId(targetPaneId, targetSessionId, displayName)
@@ -51,9 +41,12 @@ on findSessionByTag(targetSessionId, displayName)
 		repeat with aWindow in windows
 			repeat with aTab in tabs of aWindow
 				repeat with aSession in sessions of aTab
-					if (my sessionTag(aSession)) is targetSessionId then
-						return my focusExistingSession(aWindow, aTab, aSession, targetSessionId, displayName)
-					end if
+					try
+						tell aSession to set taggedId to variable named "user.throngterm.session_id"
+						if (taggedId as text) is targetSessionId then
+							return my focusExistingSession(aWindow, aTab, aSession, targetSessionId, displayName)
+						end if
+					end try
 				end repeat
 			end repeat
 		end repeat
@@ -74,7 +67,7 @@ on findWorkspaceTab()
 			repeat with aTab in tabs of aWindow
 				repeat with aSession in sessions of aTab
 					try
-						tell aSession to set workspaceId to variable "user.throngterm.workspace"
+						tell aSession to set workspaceId to variable named "user.throngterm.workspace"
 						if workspaceId is "main" then
 							return aTab
 						end if
@@ -109,13 +102,9 @@ on markWorkspaceSession(aSession, targetSessionId, displayName)
 	set resolvedName to displayName
 	if resolvedName is "" then set resolvedName to "Throngterm"
 	tell application id "com.googlecode.iterm2"
-		tell aSession
-			set variable named "user.throngterm.workspace" to "main"
-			set variable named "user.throngterm.session_id" to targetSessionId
-			try
-				set name to resolvedName
-			end try
-		end tell
+		try
+			tell aSession to set name to resolvedName
+		end try
 	end tell
 end markWorkspaceSession
 
@@ -130,72 +119,139 @@ on preferredWindow()
 	end tell
 end preferredWindow
 
-on tabFromWindow(aWindow)
+on lastWindowImmediate()
+	tell application id "com.googlecode.iterm2"
+		try
+			return last window
+		end try
+	end tell
+	return missing value
+end lastWindowImmediate
+
+on lastWindow()
+	repeat with attemptIndex from 1 to 5
+		set resolvedWindow to my lastWindowImmediate()
+		if resolvedWindow is not missing value then return resolvedWindow
+		if attemptIndex is less than 5 then delay 0.1
+	end repeat
+	return missing value
+end lastWindow
+
+on tabFromWindowImmediate(aWindow)
 	if aWindow is missing value then return missing value
 	tell application id "com.googlecode.iterm2"
-		repeat with attemptIndex from 1 to 5
-			try
-				return current tab of aWindow
-			end try
-			try
-				return first tab of aWindow
-			end try
-			if attemptIndex is less than 5 then delay 0.1
-		end repeat
+		try
+			return current tab of aWindow
+		end try
+		try
+			return first tab of aWindow
+		end try
 	end tell
+	return missing value
+end tabFromWindowImmediate
+
+on tabFromWindow(aWindow)
+	if aWindow is missing value then return missing value
+	repeat with attemptIndex from 1 to 5
+		set resolvedTab to my tabFromWindowImmediate(aWindow)
+		if resolvedTab is not missing value then return resolvedTab
+		if attemptIndex is less than 5 then delay 0.1
+	end repeat
 	return missing value
 end tabFromWindow
 
-on sessionFromTab(aTab)
+on lastTabFromWindowImmediate(aWindow)
+	if aWindow is missing value then return missing value
+	tell application id "com.googlecode.iterm2"
+		try
+			return last tab of aWindow
+		end try
+		try
+			return current tab of aWindow
+		end try
+		try
+			return first tab of aWindow
+		end try
+	end tell
+	return missing value
+end lastTabFromWindowImmediate
+
+on lastTabFromWindow(aWindow)
+	if aWindow is missing value then return missing value
+	repeat with attemptIndex from 1 to 5
+		set resolvedTab to my lastTabFromWindowImmediate(aWindow)
+		if resolvedTab is not missing value then return resolvedTab
+		if attemptIndex is less than 5 then delay 0.1
+	end repeat
+	return missing value
+end lastTabFromWindow
+
+on sessionFromTabImmediate(aTab)
 	if aTab is missing value then return missing value
 	tell application id "com.googlecode.iterm2"
-		repeat with attemptIndex from 1 to 5
-			try
-				return current session of aTab
-			end try
-			try
-				return first session of aTab
-			end try
-			if attemptIndex is less than 5 then delay 0.1
-		end repeat
+		try
+			return current session of aTab
+		end try
+		try
+			return first session of aTab
+		end try
 	end tell
+	return missing value
+end sessionFromTabImmediate
+
+on sessionFromTab(aTab)
+	if aTab is missing value then return missing value
+	repeat with attemptIndex from 1 to 5
+		set resolvedSession to my sessionFromTabImmediate(aTab)
+		if resolvedSession is not missing value then return resolvedSession
+		if attemptIndex is less than 5 then delay 0.1
+	end repeat
 	return missing value
 end sessionFromTab
 
+on resolveCreatedSession(targetWindow, candidateTab)
+	if candidateTab is not missing value then
+		repeat with attemptIndex from 1 to 10
+			set candidateSession to my sessionFromTabImmediate(candidateTab)
+			if candidateSession is not missing value then return candidateSession
+			if attemptIndex is less than 10 then delay 0.1
+		end repeat
+		return my sessionFromTab(candidateTab)
+	end if
+	
+	repeat with attemptIndex from 1 to 10
+		if targetWindow is not missing value then
+			set candidateTab to my lastTabFromWindowImmediate(targetWindow)
+		end if
+		set candidateSession to my sessionFromTabImmediate(candidateTab)
+		if candidateSession is not missing value then return candidateSession
+		if attemptIndex is less than 10 then delay 0.1
+	end repeat
+	if targetWindow is not missing value then
+		set refreshedTab to my lastTabFromWindow(targetWindow)
+		return my sessionFromTab(refreshedTab)
+	end if
+	return missing value
+end resolveCreatedSession
+
 on createWorkspaceTab(attachCommand, targetSessionId, displayName)
 	set newWindow to missing value
-	set newTab to missing value
 	tell application id "com.googlecode.iterm2"
 		activate
-		if (count of windows) is 0 then
-			set newWindow to (create window with default profile command attachCommand)
-		else
-			set targetWindow to my preferredWindow()
-			if targetWindow is missing value then
-				set newWindow to (create window with default profile command attachCommand)
-			else
-				try
-					tell targetWindow
-						set newTab to (create tab with default profile command attachCommand)
-					end tell
-				on error
-					set newWindow to (create window with default profile command attachCommand)
-				end try
-			end if
-		end if
+		try
+			set newWindow to (create window with default profile)
+		end try
 	end tell
-
-	if newTab is missing value then
-		if newWindow is not missing value then
-			set newTab to my tabFromWindow(newWindow)
-		else
-			set targetWindow to my preferredWindow()
-			if targetWindow is not missing value then set newTab to my tabFromWindow(targetWindow)
-		end if
-	end if
-
-	set newSession to my sessionFromTab(newTab)
+	
+	set targetWindow to newWindow
+	if targetWindow is missing value then set targetWindow to my lastWindow()
+	set newTab to my lastTabFromWindow(targetWindow)
+	
+	set newSession to my resolveCreatedSession(targetWindow, newTab)
 	if newSession is missing value then error "unable to resolve iTerm session after tab creation"
+	tell application id "com.googlecode.iterm2"
+		tell newSession to write text attachCommand
+	end tell
 	my markWorkspaceSession(newSession, targetSessionId, displayName)
 	return newSession
 end createWorkspaceTab

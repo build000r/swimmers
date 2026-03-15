@@ -98,7 +98,7 @@ pub async fn open_or_focus_iterm_session(
             }
             Err(err)
                 if attempt + 1 < ITERM_OPEN_RETRY_ATTEMPTS
-                    && is_transient_iterm_missing_session_error(&err) =>
+                    && is_transient_iterm_open_error(&err) =>
             {
                 sleep(Duration::from_millis(ITERM_OPEN_RETRY_DELAY_MS)).await;
             }
@@ -316,9 +316,11 @@ fn shell_single_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\"'\"'"))
 }
 
-fn is_transient_iterm_missing_session_error(err: &anyhow::Error) -> bool {
+fn is_transient_iterm_open_error(err: &anyhow::Error) -> bool {
     let message = err.to_string();
-    message.contains("session 1 of missing value") && message.contains("(-1728)")
+    (message.contains("session 1 of missing value") && message.contains("(-1728)"))
+        || (message.contains("unable to resolve iTerm session after tab creation")
+            && message.contains("(-2700)"))
 }
 
 fn parse_osascript_output(stdout: &str, session_id: &str) -> Result<NativeDesktopOpenResponse> {
@@ -480,14 +482,19 @@ mod tests {
     }
 
     #[test]
-    fn detects_transient_missing_session_iterm_errors() {
+    fn detects_transient_iterm_open_errors() {
         let retryable = anyhow!(
             "/tmp/iterm-focus.scpt: execution error: Can't get session 1 of missing value. (-1728)"
         );
-        assert!(is_transient_iterm_missing_session_error(&retryable));
+        assert!(is_transient_iterm_open_error(&retryable));
+
+        let tab_creation_race = anyhow!(
+            "/tmp/iterm-focus.scpt: execution error: unable to resolve iTerm session after tab creation (-2700)"
+        );
+        assert!(is_transient_iterm_open_error(&tab_creation_race));
 
         let other = anyhow!("unexpected osascript status: created");
-        assert!(!is_transient_iterm_missing_session_error(&other));
+        assert!(!is_transient_iterm_open_error(&other));
     }
 
     #[tokio::test]
@@ -619,5 +626,60 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&counter_path).unwrap().trim(), "2");
 
         remember_pane_id("sess-retry", None);
+    }
+
+    #[tokio::test]
+    async fn open_or_focus_retries_transient_tab_creation_resolution_error() {
+        let _env_guard = TEST_ENV_LOCK.lock().unwrap();
+        remember_pane_id("sess-race", None);
+
+        let temp = tempdir().unwrap();
+        let fake_bin_dir = temp.path().join("bin");
+        std::fs::create_dir_all(&fake_bin_dir).unwrap();
+
+        let fake_tmux = fake_bin_dir.join("tmux");
+        std::fs::write(&fake_tmux, "#!/bin/sh\nexit 0\n").unwrap();
+        let mut perms = std::fs::metadata(&fake_tmux).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&fake_tmux, perms).unwrap();
+
+        let counter_path = temp.path().join("osascript-count");
+        let fake_osascript = fake_bin_dir.join("osascript");
+        std::fs::write(
+            &fake_osascript,
+            format!(
+                "#!/bin/sh\nset -eu\ncount=0\nif [ -f \"{counter}\" ]; then\n  IFS= read -r count < \"{counter}\" || true\nfi\ncount=$((count + 1))\nprintf '%s\\n' \"$count\" > \"{counter}\"\nif [ \"$count\" -eq 1 ]; then\n  printf \"%s\\n\" \"scripts/iterm-focus.scpt: execution error: unable to resolve iTerm session after tab creation (-2700)\" >&2\n  exit 1\nfi\nprintf 'created|pane-race\\n'\n",
+                counter = counter_path.display()
+            ),
+        )
+        .unwrap();
+        let mut perms = std::fs::metadata(&fake_osascript).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&fake_osascript, perms).unwrap();
+
+        let original_path = std::env::var_os("PATH");
+        let original_tmux = std::env::var_os(TMUX_BIN_ENV);
+        let path_value = std::env::join_paths([fake_bin_dir.as_path()]).unwrap();
+        std::env::set_var("PATH", path_value);
+        std::env::set_var(TMUX_BIN_ENV, &fake_tmux);
+
+        let result = open_or_focus_iterm_session("sess-race", "tmux-race", "/Users/b/repos/race")
+            .await
+            .unwrap();
+
+        match original_path {
+            Some(value) => std::env::set_var("PATH", value),
+            None => std::env::remove_var("PATH"),
+        }
+        match original_tmux {
+            Some(value) => std::env::set_var(TMUX_BIN_ENV, value),
+            None => std::env::remove_var(TMUX_BIN_ENV),
+        }
+
+        assert_eq!(result.status, "created");
+        assert_eq!(result.pane_id.as_deref(), Some("pane-race"));
+        assert_eq!(std::fs::read_to_string(&counter_path).unwrap().trim(), "2");
+
+        remember_pane_id("sess-race", None);
     }
 }
