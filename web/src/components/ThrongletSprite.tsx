@@ -1,11 +1,6 @@
-import { useEffect, useMemo, useRef, useState } from "preact/hooks";
-import type { SessionState, SpritePack } from "@/types";
+import { useMemo, useRef } from "preact/hooks";
+import type { RepoTheme, RestState, SessionState, SpritePack } from "@/types";
 import { ACTIVE, DROWSY, SLEEPING, DEEP_SLEEP } from "@/lib/thronglet-svgs";
-import {
-  DEEP_SLEEP_AFTER_MS,
-  DROWSY_AFTER_MS,
-  SLEEPING_AFTER_MS,
-} from "@/lib/thronglet-motion";
 
 // ---- Color presets per tool ----
 
@@ -25,6 +20,15 @@ const TOOL_COLORS: Record<string, Record<string, string>> = {
 };
 
 const DEFAULT_COLORS = TOOL_COLORS["Claude Code"];
+
+function cssVarsForRepoTheme(theme: RepoTheme): Record<string, string> {
+  return {
+    "--thr-body": theme.body,
+    "--thr-outline": theme.outline,
+    "--thr-accent": theme.accent,
+    "--thr-shirt": theme.shirt,
+  };
+}
 
 const SPRITE_SCOPE_ATTR = "data-thr-scope";
 let spriteScopeSeq = 0;
@@ -83,11 +87,9 @@ function canonicalToolName(tool?: string | null): keyof typeof TOOL_COLORS | nul
 
 // ---- Idle-depth SVG selection ----
 
-const IDLE_SPRITE_TICK_MS = 5_000;
-
 function svgForState(
   state: SessionState,
-  lastActivityAt?: string,
+  restState: RestState,
   spritePack?: SpritePack | null,
 ): string {
   const active = spritePack?.active ?? ACTIVE;
@@ -95,63 +97,55 @@ function svgForState(
   const sleeping = spritePack?.sleeping ?? SLEEPING;
   const deepSleep = spritePack?.deep_sleep ?? DEEP_SLEEP;
 
-  if (state === "idle" || state === "attention") {
-    if (!lastActivityAt) return drowsy;
-    const lastMs = new Date(lastActivityAt).getTime();
-    if (!Number.isFinite(lastMs)) return drowsy;
-    const idleMs = Date.now() - lastMs;
-    if (idleMs >= DEEP_SLEEP_AFTER_MS) return deepSleep;
-    if (idleMs >= SLEEPING_AFTER_MS) return sleeping;
-    if (idleMs >= DROWSY_AFTER_MS) return drowsy;
-    return active;
-  }
   if (state === "exited") return deepSleep;
-  return active; // busy, error, attention
+  switch (restState) {
+    case "deep_sleep":
+      return deepSleep;
+    case "sleeping":
+      return sleeping;
+    case "drowsy":
+      return drowsy;
+    default:
+      return active;
+  }
 }
 
 // ---- Component ----
 
 interface ThrongletSpriteProps {
   state: SessionState;
+  restState: RestState;
   tool?: string | null;
-  lastActivityAt?: string;
   spritePack?: SpritePack | null;
+  repoTheme?: RepoTheme | null;
   class?: string;
 }
 
 export function ThrongletSprite({
   state,
+  restState,
   tool,
-  lastActivityAt,
   spritePack,
+  repoTheme,
   class: className,
 }: ThrongletSpriteProps) {
-  const [idleTick, setIdleTick] = useState(0);
   const scopeIdRef = useRef<string>("");
   if (!scopeIdRef.current) scopeIdRef.current = nextSpriteScopeId();
 
-  // Keep rest-state sprites transitioning (active -> drowsy -> sleeping)
-  // even when no other props change.
-  useEffect(() => {
-    if (state !== "idle" && state !== "attention") return;
-    const timer = setInterval(() => {
-      setIdleTick((value) => value + 1);
-    }, IDLE_SPRITE_TICK_MS);
-    return () => clearInterval(timer);
-  }, [state, lastActivityAt]);
-
   const svg = useMemo(
-    () => svgForState(state, lastActivityAt, spritePack),
-    [state, lastActivityAt, spritePack, idleTick],
+    () => svgForState(state, restState, spritePack),
+    [state, restState, spritePack],
   );
   const toolName = canonicalToolName(tool);
 
-  // When a sprite pack is present, let its baked-in brand colors show through.
-  // Only apply tool color CSS vars for default (non-branded) sprites.
-  const hasBrandSprites = !!spritePack;
-  const colors = hasBrandSprites
-    ? null
-    : (toolName && TOOL_COLORS[toolName]) ?? DEFAULT_COLORS;
+  // Repo theme colors are the authoritative palette. Without a repo theme,
+  // custom sprite packs keep their baked-in defaults and plain sprites fall
+  // back to tool-based colors.
+  const colors = repoTheme
+    ? cssVarsForRepoTheme(repoTheme)
+    : spritePack
+      ? null
+      : (toolName && TOOL_COLORS[toolName]) ?? DEFAULT_COLORS;
 
   const style = useMemo(
     () => ({

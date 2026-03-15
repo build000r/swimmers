@@ -11,6 +11,7 @@ export type TransportHealth =
 
 export type ThoughtState = "active" | "holding" | "sleeping";
 export type ThoughtSource = "carry_forward" | "llm" | "static_sleeping";
+export type RestState = "active" | "drowsy" | "sleeping" | "deep_sleep";
 export type BubblePrecedence = "thought_first";
 
 export type SpawnTool = "claude" | "codex";
@@ -23,6 +24,13 @@ export interface SpritePack {
   drowsy: string;
   sleeping: string;
   deep_sleep: string;
+}
+
+export interface RepoTheme {
+  body: string;
+  outline: string;
+  accent: string;
+  shirt: string;
 }
 
 export interface SessionSummary {
@@ -39,12 +47,14 @@ export interface SessionSummary {
   thought_state: ThoughtState;
   thought_source: ThoughtSource;
   thought_updated_at: string | null;
+  rest_state: RestState;
   last_skill: string | null;
   is_stale: boolean;
   attached_clients: number;
   transport_health: TransportHealth;
   last_activity_at: string; // ISO 8601
   sprite_pack_id: string | null;
+  repo_theme_id: string | null;
 }
 
 export interface ThoughtPolicy {
@@ -95,6 +105,7 @@ export interface BootstrapResponse {
   thought_config?: ThoughtConfig;
   sessions: SessionSummary[];
   sprite_packs: Record<string, SpritePack>;
+  repo_themes: Record<string, RepoTheme>;
 }
 
 export interface NativeDesktopStatus {
@@ -113,11 +124,14 @@ export interface NativeDesktopOpenResponse {
 export interface SessionListResponse {
   sessions: SessionSummary[];
   version: number;
+  sprite_packs: Record<string, SpritePack>;
+  repo_themes: Record<string, RepoTheme>;
 }
 
 export interface CreateSessionResponse {
   session: SessionSummary;
   sprite_pack?: SpritePack;
+  repo_theme?: RepoTheme;
 }
 
 export interface ErrorResponse {
@@ -180,6 +194,7 @@ export interface ThoughtUpdatePayload {
   context_limit: number;
   thought_state: ThoughtState;
   thought_source: ThoughtSource;
+  rest_state: RestState;
   objective_changed: boolean;
   bubble_precedence: BubblePrecedence;
   at: string;
@@ -194,6 +209,7 @@ export interface SessionCreatedPayload {
   reason: string; // "startup_discovery" | "api_create"
   session: SessionSummary;
   sprite_pack?: SpritePack;
+  repo_theme?: RepoTheme;
 }
 
 export interface SessionDeletedPayload {

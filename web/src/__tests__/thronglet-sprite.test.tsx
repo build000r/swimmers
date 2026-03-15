@@ -2,22 +2,26 @@ import { describe, it, expect } from "vitest";
 import { render } from "@testing-library/preact";
 import { h } from "preact";
 import { ThrongletSprite, scopeInlineSpriteCss } from "@/components/ThrongletSprite";
-import type { SessionState, SpritePack } from "@/types";
+import type { RepoTheme, RestState, SessionState, SpritePack } from "@/types";
 
-function isoAgo(ms: number): string {
-  return new Date(Date.now() - ms).toISOString();
-}
-
-function renderedTitle(state: SessionState, lastActivityAt?: string): string | null {
-  const { container } = render(
-    <ThrongletSprite state={state} lastActivityAt={lastActivityAt} />,
-  );
+function renderedTitle(restState: RestState, state: SessionState = "idle"): string | null {
+  const { container } = render(<ThrongletSprite state={state} restState={restState} />);
   return container.querySelector("title")?.textContent ?? null;
 }
 
-function renderedStyleForTool(tool: string, spritePack?: SpritePack | null): string {
+function renderedStyleForTool(
+  tool: string,
+  spritePack?: SpritePack | null,
+  repoTheme?: RepoTheme | null,
+): string {
   const { container } = render(
-    <ThrongletSprite state="busy" tool={tool} spritePack={spritePack} />,
+    <ThrongletSprite
+      state="busy"
+      restState="active"
+      tool={tool}
+      spritePack={spritePack}
+      repoTheme={repoTheme}
+    />,
   );
   return container.firstElementChild?.getAttribute("style") ?? "";
 }
@@ -36,25 +40,32 @@ const ALT_FAKE_SPRITE_PACK: SpritePack = {
   deep_sleep: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><title>Alt - Deep Sleep</title><style>.b { fill: var(--thr-body, #00AA55); }</style></svg>',
 };
 
+const BUILD_THEME: RepoTheme = {
+  body: "#B89875",
+  outline: "#3D2F24",
+  accent: "#1D1914",
+  shirt: "#AA9370",
+};
+
 describe("ThrongletSprite idle-depth selection", () => {
-  it("uses active for recently idle sessions", () => {
-    expect(renderedTitle("idle", isoAgo(5_000))).toBe("Thronglet - Active");
+  it("uses active when rest state is active", () => {
+    expect(renderedTitle("active")).toBe("Thronglet - Active");
   });
 
-  it("uses idle-depth sprites while in attention", () => {
-    expect(renderedTitle("attention", isoAgo(30_000))).toBe("Thronglet - Drowsy");
+  it("uses daemon drowsy while in attention", () => {
+    expect(renderedTitle("drowsy", "attention")).toBe("Thronglet - Drowsy");
   });
 
-  it("uses drowsy after 20s idle", () => {
-    expect(renderedTitle("idle", isoAgo(30_000))).toBe("Thronglet - Drowsy");
+  it("uses drowsy from daemon rest state", () => {
+    expect(renderedTitle("drowsy")).toBe("Thronglet - Drowsy");
   });
 
-  it("uses sleeping after 60s idle", () => {
-    expect(renderedTitle("idle", isoAgo(90_000))).toBe("Thronglet - Sleeping");
+  it("uses sleeping from daemon rest state", () => {
+    expect(renderedTitle("sleeping")).toBe("Thronglet - Sleeping");
   });
 
-  it("uses deep sleep after 120s idle", () => {
-    expect(renderedTitle("idle", isoAgo(180_000))).toBe("Thronglet - Deep Sleep");
+  it("uses deep sleep from daemon rest state", () => {
+    expect(renderedTitle("deep_sleep")).toBe("Thronglet - Deep Sleep");
   });
 });
 
@@ -82,7 +93,12 @@ describe("ThrongletSprite brand preservation with sprite pack", () => {
 
   it("does not render a tool badge when sprite pack + tool are present", () => {
     const { container } = render(
-      <ThrongletSprite state="busy" tool="Claude Code" spritePack={FAKE_SPRITE_PACK} />,
+      <ThrongletSprite
+        state="busy"
+        restState="active"
+        tool="Claude Code"
+        spritePack={FAKE_SPRITE_PACK}
+      />,
     );
     expect(container.querySelector(".thronglet-tool-badge")).toBeNull();
   });
@@ -90,8 +106,18 @@ describe("ThrongletSprite brand preservation with sprite pack", () => {
   it("scopes inline SVG class selectors per sprite instance", () => {
     const { container } = render(
       <div>
-        <ThrongletSprite state="busy" tool="Claude Code" spritePack={FAKE_SPRITE_PACK} />
-        <ThrongletSprite state="busy" tool="Codex" spritePack={ALT_FAKE_SPRITE_PACK} />
+        <ThrongletSprite
+          state="busy"
+          restState="active"
+          tool="Claude Code"
+          spritePack={FAKE_SPRITE_PACK}
+        />
+        <ThrongletSprite
+          state="busy"
+          restState="active"
+          tool="Codex"
+          spritePack={ALT_FAKE_SPRITE_PACK}
+        />
       </div>,
     );
     const svgs = container.querySelectorAll("svg");
@@ -119,9 +145,24 @@ describe("ThrongletSprite brand preservation with sprite pack", () => {
     expect(style).toContain("--thr-outline: #8B3D1F");
   });
 
+  it("applies repo theme colors before tool fallback", () => {
+    const style = renderedStyleForTool("Codex", null, BUILD_THEME);
+    expect(style).toContain("--thr-body: #B89875");
+    expect(style).toContain("--thr-outline: #3D2F24");
+    expect(style).not.toContain("--thr-body: #F4C542");
+  });
+
+  it("applies repo theme colors even when sprite pack is present", () => {
+    const style = renderedStyleForTool("Claude Code", FAKE_SPRITE_PACK, BUILD_THEME);
+    expect(style).toContain("--thr-body: #B89875");
+    expect(style).toContain("--thr-outline: #3D2F24");
+    expect(style).toContain("--thr-accent: #1D1914");
+    expect(style).toContain("--thr-shirt: #AA9370");
+  });
+
   it("renders no badge when sprite pack present but no tool", () => {
     const { container } = render(
-      <ThrongletSprite state="busy" spritePack={FAKE_SPRITE_PACK} />,
+      <ThrongletSprite state="busy" restState="active" spritePack={FAKE_SPRITE_PACK} />,
     );
     expect(container.querySelector(".thronglet-tool-badge")).toBeNull();
   });

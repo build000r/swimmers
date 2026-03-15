@@ -4,7 +4,7 @@ const serverUrl =
   // Override per sync/run:
   // THRONGTERM_IOS_SERVER_URL=http://<YOUR_TAILSCALE_IP>:5173 npx cap sync ios
   process.env.THRONGTERM_IOS_SERVER_URL?.trim() ||
-  'http://127.0.0.1:69420';
+  'http://100.101.123.63:3210/';
 
 const config: CapacitorConfig = {
   appId: 'com.throngterm.app',

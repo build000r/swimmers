@@ -103,7 +103,7 @@ class ThrongtermBridgeViewController: CAPBridgeViewController {
 
         NSLayoutConstraint.activate([
             hostButton.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 12),
-            hostButton.leadingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.leadingAnchor, constant: 12),
+            hostButton.trailingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.trailingAnchor, constant: -12),
         ])
     }
 
@@ -122,7 +122,7 @@ class ThrongtermBridgeViewController: CAPBridgeViewController {
         view.addSubview(openInSafariButton)
 
         NSLayoutConstraint.activate([
-            openInSafariButton.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 12),
+            openInSafariButton.topAnchor.constraint(equalTo: hostButton.bottomAnchor, constant: 8),
             openInSafariButton.trailingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.trailingAnchor, constant: -12),
         ])
     }
@@ -143,9 +143,11 @@ class ThrongtermBridgeViewController: CAPBridgeViewController {
             guard let self else { return }
             let isErrorPage = webView.url?.lastPathComponent == "mobile-error.html"
             self.openInSafariButton.isHidden = !isErrorPage
+            self.hostButton.isHidden = self.shouldHideHostButton(for: webView.url)
             self.updateHostButtonSubtitle(webView.url)
         }
 
+        hostButton.isHidden = shouldHideHostButton(for: webView.url)
         updateHostButtonSubtitle(webView.url)
     }
 
@@ -253,6 +255,18 @@ class ThrongtermBridgeViewController: CAPBridgeViewController {
             return String(trimmed.dropLast())
         }
         return trimmed
+    }
+
+    private func shouldHideHostButton(for url: URL?) -> Bool {
+        guard let url else { return false }
+        if url.lastPathComponent == "mobile-error.html" {
+            return false
+        }
+        guard let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
+              let queryItems = components.queryItems else {
+            return false
+        }
+        return queryItems.contains(where: { $0.name == "view" && $0.value == "terminal" })
     }
 
     private static func savedHostOverride() -> String? {

@@ -173,4 +173,48 @@ describe("mergePollSessions", () => {
     expect(merged?.[0].last_activity_at).toBe("2026-03-01T17:00:45.000Z");
     expect(merged?.[0].sprite_pack_id).toBe("/Users/rjb/repos/canva");
   });
+
+  it("applies repo_theme_id when poll snapshot fills it in", () => {
+    const prev = [
+      makeSession({
+        session_id: "sess_0",
+        state: "idle",
+        cwd: "/Users/rjb/repos/canva",
+        repo_theme_id: null,
+      }),
+    ];
+
+    const next = [
+      makeSession({
+        session_id: "sess_0",
+        state: "idle",
+        cwd: "/Users/rjb/repos/canva",
+        repo_theme_id: "/Users/rjb/repos/canva",
+      }),
+    ];
+
+    const merged = mergePollSessions(prev, next, new Set());
+    expect(merged).not.toBeNull();
+    expect(merged?.[0].repo_theme_id).toBe("/Users/rjb/repos/canva");
+  });
+
+  it("keeps no-op short-circuit when repo_theme_id is unchanged", () => {
+    const prev = [
+      makeSession({
+        session_id: "sess_0",
+        state: "idle",
+        repo_theme_id: "/Users/rjb/repos/canva",
+      }),
+    ];
+
+    const next = [
+      makeSession({
+        session_id: "sess_0",
+        state: "idle",
+        repo_theme_id: "/Users/rjb/repos/canva",
+      }),
+    ];
+
+    expect(mergePollSessions(prev, next, new Set())).toBeNull();
+  });
 });

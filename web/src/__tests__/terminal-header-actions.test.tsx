@@ -518,6 +518,8 @@ describe("terminal header actions", () => {
     });
 
     expect(term.refresh).toHaveBeenCalledWith(0, 13);
+    expect(term.focus).toHaveBeenCalledTimes(1);
+    expect(mocks.realtime.sendInput).not.toHaveBeenCalled();
     expect(mocks.realtime.sendResize).toHaveBeenCalledWith("sess-cached", 118, 14);
     expect(mocks.realtime.sendResize).not.toHaveBeenCalledWith("sess-cached", 80, 24);
   });

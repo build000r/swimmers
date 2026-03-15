@@ -2181,8 +2181,8 @@ export function TerminalWorkspace({
           <span class="zone-sprite">
             <ThrongletSprite
               state={rushingOff ? "exited" : session.state}
+              restState={rushingOff ? "deep_sleep" : session.rest_state}
               tool={session.tool}
-              lastActivityAt={session.last_activity_at}
               spritePack={session.sprite_pack_id ? spritePacks.value[session.sprite_pack_id] ?? null : null}
               repoTheme={session.repo_theme_id ? repoThemes.value[session.repo_theme_id] ?? null : null}
             />
