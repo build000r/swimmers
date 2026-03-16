@@ -1,5 +1,6 @@
 use std::cmp::Ordering;
 use std::collections::HashMap;
+use std::error::Error as StdError;
 use std::f32::consts::TAU;
 use std::hash::{Hash, Hasher};
 use std::io::{self, BufWriter, IsTerminal, Stdout, Write};
@@ -34,6 +35,8 @@ const MIN_HEIGHT: u16 = 20;
 const FRAME_DURATION: Duration = Duration::from_millis(100);
 const REFRESH_INTERVAL: Duration = Duration::from_secs(2);
 const MESSAGE_TTL: Duration = Duration::from_secs(5);
+const API_CONNECT_TIMEOUT: Duration = Duration::from_millis(250);
+const API_REQUEST_TIMEOUT: Duration = Duration::from_millis(750);
 const SPRITE_HEIGHT: u16 = 4;
 const LABEL_HEIGHT: u16 = 1;
 const ENTITY_WIDTH: u16 = 12;
@@ -834,7 +837,8 @@ impl ApiClient {
         };
 
         let http = Client::builder()
-            .timeout(Duration::from_secs(2))
+            .connect_timeout(API_CONNECT_TIMEOUT)
+            .timeout(API_REQUEST_TIMEOUT)
             .build()
             .map_err(|err| format!("failed to build http client: {err}"))?;
 
@@ -851,6 +855,38 @@ impl ApiClient {
             None => builder,
         }
     }
+
+    fn transport_error(&self, action: &str, err: reqwest::Error) -> String {
+        friendly_transport_error(&self.base_url, action, &err)
+    }
+}
+
+fn root_error_message(err: &(dyn StdError + 'static)) -> String {
+    let mut current = Some(err);
+    let mut last = err.to_string();
+
+    while let Some(next) = current.and_then(StdError::source) {
+        let next_text = next.to_string();
+        if !next_text.is_empty() {
+            last = next_text;
+        }
+        current = Some(next);
+    }
+
+    last
+}
+
+fn friendly_transport_error(base_url: &str, action: &str, err: &reqwest::Error) -> String {
+    let detail = root_error_message(err);
+    let summary = if err.is_timeout() {
+        format!("timed out while trying to {action}")
+    } else {
+        format!("could not {action}")
+    };
+
+    format!(
+        "backend unavailable at {base_url}: {summary} ({detail}). Start `throngterm` or set THRONGTERM_TUI_URL."
+    )
 }
 
 trait TuiApi {
@@ -882,7 +918,7 @@ impl TuiApi for ApiClient {
                 .with_auth(self.http.get(url))
                 .send()
                 .await
-                .map_err(|err| format!("failed to fetch sessions: {err}"))?;
+                .map_err(|err| self.transport_error("refresh sessions", err))?;
 
             if response.status().is_success() {
                 let payload = response
@@ -903,7 +939,7 @@ impl TuiApi for ApiClient {
                 .with_auth(self.http.get(url))
                 .send()
                 .await
-                .map_err(|err| format!("failed to fetch native desktop status: {err}"))?;
+                .map_err(|err| self.transport_error("check native desktop status", err))?;
 
             if response.status().is_success() {
                 return response
@@ -925,7 +961,7 @@ impl TuiApi for ApiClient {
                 .json(&PublishSelectionRequest { session_id })
                 .send()
                 .await
-                .map_err(|err| format!("failed to publish selection: {err}"))?;
+                .map_err(|err| self.transport_error("publish the selected session", err))?;
 
             if response.status().is_success() {
                 return Ok(());
@@ -947,7 +983,7 @@ impl TuiApi for ApiClient {
                 .json(&NativeDesktopOpenRequest { session_id })
                 .send()
                 .await
-                .map_err(|err| format!("failed to open session: {err}"))?;
+                .map_err(|err| self.transport_error("open the selected session", err))?;
 
             if response.status().is_success() {
                 return response
@@ -980,7 +1016,7 @@ impl TuiApi for ApiClient {
                 .with_auth(request)
                 .send()
                 .await
-                .map_err(|err| format!("failed to list dirs: {err}"))?;
+                .map_err(|err| self.transport_error("list directories", err))?;
 
             if response.status().is_success() {
                 return response
@@ -1012,7 +1048,7 @@ impl TuiApi for ApiClient {
                 })
                 .send()
                 .await
-                .map_err(|err| format!("failed to create session: {err}"))?;
+                .map_err(|err| self.transport_error("create a session", err))?;
 
             if response.status().is_success() {
                 return response
@@ -1395,7 +1431,16 @@ impl<C: TuiApi> App<C> {
     }
 
     fn set_message(&mut self, message: impl Into<String>) {
-        self.message = Some((message.into(), Instant::now()));
+        let message = message.into();
+        if self
+            .message
+            .as_ref()
+            .map(|(existing, _)| existing == &message)
+            .unwrap_or(false)
+        {
+            return;
+        }
+        self.message = Some((message, Instant::now()));
     }
 
     fn visible_message(&self) -> Option<&str> {
@@ -1666,14 +1711,24 @@ impl<C: TuiApi> App<C> {
     }
 
     fn refresh(&mut self, layout: WorkspaceLayout) {
+        self.refresh_with_feedback(layout, false);
+    }
+
+    fn manual_refresh(&mut self, layout: WorkspaceLayout) {
+        self.refresh_with_feedback(layout, true);
+    }
+
+    fn refresh_with_feedback(&mut self, layout: WorkspaceLayout, show_success_message: bool) {
         match self.runtime.block_on(self.client.fetch_sessions()) {
             Ok(sessions) => {
                 self.sync_repo_themes(&sessions);
                 self.reconcile_thought_log_sessions(&sessions);
                 self.capture_thought_updates(&sessions, layout.thought_entry_capacity());
                 self.merge_sessions(sessions, layout.overview_field);
-                let count = self.entities.len();
-                self.set_message(format!("refreshed {count} session{}", pluralize(count)));
+                if show_success_message {
+                    let count = self.entities.len();
+                    self.set_message(format!("refreshed {count} session{}", pluralize(count)));
+                }
             }
             Err(err) => {
                 self.set_message(err);
@@ -3576,7 +3631,7 @@ fn handle_key_event<C: TuiApi>(app: &mut App<C>, layout: WorkspaceLayout, key: K
             {
                 app.picker_reload(Some(path), managed_only);
             } else {
-                app.refresh(layout);
+                app.manual_refresh(layout);
             }
             true
         }
@@ -3930,6 +3985,84 @@ mod tests {
 
     fn make_app(api: MockApi) -> App<MockApi> {
         App::new(test_runtime(), api)
+    }
+
+    #[tokio::test]
+    async fn api_client_transport_errors_are_actionable() {
+        let listener =
+            std::net::TcpListener::bind("127.0.0.1:0").expect("bind an ephemeral port");
+        let port = listener.local_addr().expect("local addr").port();
+        drop(listener);
+
+        let client = ApiClient {
+            http: Client::builder()
+                .connect_timeout(Duration::from_millis(50))
+                .timeout(Duration::from_millis(100))
+                .build()
+                .expect("http client"),
+            base_url: format!("http://127.0.0.1:{port}"),
+            auth_token: None,
+        };
+
+        let error = client
+            .fetch_sessions()
+            .await
+            .expect_err("closed localhost port should fail");
+        assert!(error.contains("backend unavailable at"));
+        assert!(error.contains("Start `throngterm` or set THRONGTERM_TUI_URL."));
+        assert!(!error.contains("error sending request for url"));
+    }
+
+    #[test]
+    fn set_message_deduplicates_repeated_errors() {
+        let api = MockApi::new();
+        let mut app = make_app(api);
+        app.set_message("backend unavailable");
+        let first = app.message.as_ref().expect("message").1;
+
+        std::thread::sleep(Duration::from_millis(5));
+        app.set_message("backend unavailable");
+
+        let second = app.message.as_ref().expect("message").1;
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn auto_refresh_keeps_existing_footer_message() {
+        let api = MockApi::new();
+        let layout = test_layout(120, 32);
+        api.push_fetch_sessions(Ok(vec![session_summary(
+            "sess-7",
+            "7",
+            "/Users/b/repos/throngterm",
+        )]));
+        let mut app = make_app(api);
+        app.set_message("sticky status");
+
+        app.refresh(layout);
+
+        assert_eq!(
+            app.message.as_ref().map(|(message, _)| message.as_str()),
+            Some("sticky status")
+        );
+    }
+
+    #[test]
+    fn manual_refresh_reports_session_count() {
+        let api = MockApi::new();
+        let layout = test_layout(120, 32);
+        api.push_fetch_sessions(Ok(vec![
+            session_summary("sess-7", "7", "/Users/b/repos/throngterm"),
+            session_summary("sess-8", "8", "/Users/b/repos/opensource"),
+        ]));
+        let mut app = make_app(api);
+
+        app.manual_refresh(layout);
+
+        assert_eq!(
+            app.message.as_ref().map(|(message, _)| message.as_str()),
+            Some("refreshed 2 sessions")
+        );
     }
 
     fn test_renderer(width: u16, height: u16) -> Renderer {
