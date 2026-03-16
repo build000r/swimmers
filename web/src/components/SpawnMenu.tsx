@@ -16,7 +16,12 @@ const MENU_MAX_HEIGHT = 560;
 const EDGE_PADDING = 8;
 const SPAWN_TOOL_STORAGE_KEY = "spawn_tool_preference_v1";
 
-export function SpawnMenu({ x, y, onSelect, onClose }: SpawnMenuProps) {
+export const SpawnMenu = function ({
+  x,
+  y,
+  onSelect,
+  onClose,
+}: SpawnMenuProps) {
   const [entries, setEntries] = useState<DirEntry[]>([]);
   const [currentPath, setCurrentPath] = useState<string>("");
   const [basePath, setBasePath] = useState<string>("");
@@ -317,4 +322,4 @@ export function SpawnMenu({ x, y, onSelect, onClose }: SpawnMenuProps) {
       </div>
     </div>
   );
-}
+};

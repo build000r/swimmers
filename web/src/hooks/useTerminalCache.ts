@@ -19,7 +19,7 @@ interface CacheEntry {
  * Terminal instance cache. Keeps xterm + addon alive across view navigations.
  * Evicts entries after `ttlMs` of inactivity.
  */
-export function useTerminalCache(ttlMs: number) {
+export const useTerminalCache = function (ttlMs: number) {
   const entriesRef = useRef<Map<string, CacheEntry>>(new Map());
 
   const evict = useCallback((sessionId: string) => {
@@ -78,4 +78,4 @@ export function useTerminalCache(ttlMs: number) {
   }, [evict]);
 
   return { get, put, evict, has };
-}
+};

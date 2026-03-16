@@ -207,7 +207,10 @@ function hasMeaningfulTerminalOutput(data: Uint8Array): boolean {
   return /[^\s]/.test(visible);
 }
 
-function extractCwdFromSessionTitle(title: string, fallback: string): string {
+const extractCwdFromSessionTitle = function (
+  title: string,
+  fallback: string,
+): string {
   const trimmed = title.trim();
   if (!trimmed) return fallback;
   if (trimmed.startsWith("/")) return trimmed;
@@ -224,11 +227,11 @@ function extractCwdFromSessionTitle(title: string, fallback: string): string {
   }
 
   return fallback;
-}
+};
 
 /** Smart poll merge: preserves object references for unchanged sessions and
  *  protects exiting sessions from being clobbered by stale server data. */
-export function mergePollSessions(
+export const mergePollSessions = function (
   prev: SessionSummary[],
   next: SessionSummary[],
   exitingIds: Set<string>,
@@ -311,7 +314,7 @@ export function mergePollSessions(
   });
 
   return localExiting.length > 0 ? [...merged, ...localExiting] : merged;
-}
+};
 
 interface RestoreLayoutRequest extends WorkspaceLayoutState {
   requestId: number;
@@ -473,7 +476,9 @@ function persistBenchedIds(ids: Set<string>): void {
   }
 }
 
-function applyCreateSessionAssets(response: CreateSessionResponse): void {
+const applyCreateSessionAssets = function (
+  response: CreateSessionResponse,
+): void {
   if (response.sprite_pack && response.session.sprite_pack_id) {
     spritePacks.value = {
       ...spritePacks.value,
@@ -486,7 +491,7 @@ function applyCreateSessionAssets(response: CreateSessionResponse): void {
       [response.session.repo_theme_id]: response.repo_theme,
     };
   }
-}
+};
 
 interface CreateOverviewSessionInput {
   cwd?: string;
@@ -574,7 +579,9 @@ interface OverviewTapExecutionInput {
   deleteSessionWithFeedback: (sessionId: string) => Promise<void>;
 }
 
-function executeOverviewTapIntent(input: OverviewTapExecutionInput): void {
+const executeOverviewTapIntent = function (
+  input: OverviewTapExecutionInput,
+): void {
   switch (input.intent.type) {
     case "bench":
       input.handleBenchSession(input.intent.sessionId);
@@ -597,9 +604,9 @@ function executeOverviewTapIntent(input: OverviewTapExecutionInput): void {
     default:
       return;
   }
-}
+};
 
-export function App() {
+export const App = function () {
   const [bootstrapDone, setBootstrapDone] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [authMode, setAuthMode] = useState<string | undefined>(undefined);
@@ -1221,7 +1228,7 @@ export function App() {
     let cancelled = false;
     let running = false;
 
-    const tick = async () => {
+    const tick = async function () {
       if (running || cancelled) return;
       running = true;
 
@@ -1704,4 +1711,4 @@ export function App() {
       )}
     </div>
   );
-}
+};

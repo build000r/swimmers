@@ -37,7 +37,7 @@ interface ZoneManagerProps {
   onLayoutChange: (layout: WorkspaceLayoutState) => void;
 }
 
-export function ZoneManager({
+export const ZoneManager = function ({
   sessions,
   activeSessionId,
   preferZone,
@@ -477,4 +477,4 @@ export function ZoneManager({
       )}
     </div>
   );
-}
+};

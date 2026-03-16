@@ -202,7 +202,7 @@ function startDesktopDragToBottom(params: {
   let dragging = false;
   let ghost: HTMLImageElement | null = null;
 
-  const onMouseMove = (me: MouseEvent) => {
+  const onMouseMove = function (me: MouseEvent) {
     const dx = me.clientX - startX;
     const dy = me.clientY - startY;
 
@@ -325,7 +325,7 @@ interface ThrongletRawCardProps {
   onClick: () => void;
 }
 
-function ThrongletRawCard({
+const ThrongletRawCard = function ({
   elRef,
   session,
   isExited,
@@ -359,9 +359,9 @@ function ThrongletRawCard({
       {session.is_stale && <div class="raw-row raw-stale">STALE</div>}
     </div>
   );
-}
+};
 
-function ThrongletEntity({
+const ThrongletEntity = function ({
   session,
   idlePreview,
   spritePack,
@@ -568,7 +568,7 @@ function ThrongletEntity({
       </div>
     </div>
   );
-}
+};
 
 // ---- HatchingEgg sub-component ----
 

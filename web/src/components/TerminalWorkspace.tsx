@@ -240,7 +240,7 @@ async function loadSkillRegistry(
   return request;
 }
 
-function sanitizeQuickCommands(value: unknown): string[] {
+const sanitizeQuickCommands = function (value: unknown): string[] {
   if (!Array.isArray(value)) return [];
   const next: string[] = [];
   for (const item of value) {
@@ -253,9 +253,9 @@ function sanitizeQuickCommands(value: unknown): string[] {
     if (next.length >= MAX_QUICK_COMMANDS) break;
   }
   return next;
-}
+};
 
-function readQuickCommandMap(): QuickCommandMap {
+const readQuickCommandMap = function (): QuickCommandMap {
   if (typeof window === "undefined") return {};
   try {
     const raw = window.localStorage.getItem(QUICK_COMMAND_STORAGE_KEY);
@@ -273,7 +273,7 @@ function readQuickCommandMap(): QuickCommandMap {
   } catch {
     return {};
   }
-}
+};
 
 function writeQuickCommandMap(map: QuickCommandMap): void {
   if (typeof window === "undefined") return;
@@ -318,7 +318,7 @@ function readTerminalWebglOverride(): string | null {
   }
 }
 
-function TerminalWorkspaceImpl({
+const TerminalWorkspaceImpl = function ({
   session,
   cached,
   observer = false,
@@ -1204,7 +1204,7 @@ function TerminalWorkspaceImpl({
       }
     };
 
-    const recoverFromSnapshot = async () => {
+    const recoverFromSnapshot = async function () {
       if (disposed) return;
       setLifecycleState("snapshot_or_replay");
       setRecoveryRetrying(true);
@@ -1433,7 +1433,7 @@ function TerminalWorkspaceImpl({
       }, 0);
     }
 
-    const handleTouchScrollStart = (event: TouchEvent) => {
+    const handleTouchScrollStart = function (event: TouchEvent) {
       if (observer || !copyDragActiveRef.current) return;
       if (event.touches.length !== 1) {
         endCopyDragSelection();
@@ -1446,7 +1446,7 @@ function TerminalWorkspaceImpl({
         event.stopPropagation();
       }
     };
-    const handleTouchScrollMove = (event: TouchEvent) => {
+    const handleTouchScrollMove = function (event: TouchEvent) {
       if (observer || !copyDragActiveRef.current) return;
       if (event.touches.length !== 1) return;
       const touch = event.touches[0];
@@ -1461,7 +1461,9 @@ function TerminalWorkspaceImpl({
       endCopyDragSelection();
     };
 
-    const handleCopyDragPointerDown = (event: globalThis.PointerEvent) => {
+    const handleCopyDragPointerDown = function (
+      event: globalThis.PointerEvent,
+    ) {
       if (observer || !copyDragActiveRef.current) return;
       if (event.pointerType === "touch") return;
       if (event.pointerType === "mouse" && event.button !== 0) return;
@@ -2736,7 +2738,7 @@ function TerminalWorkspaceImpl({
       )}
     </div>
   );
-}
+};
 
 export function TerminalWorkspace(props: TerminalWorkspaceProps) {
   return <TerminalWorkspaceImpl {...props} />;

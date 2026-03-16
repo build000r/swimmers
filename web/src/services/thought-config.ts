@@ -39,7 +39,9 @@ interface ThoughtConfigEnvelope {
 
 type ThoughtConfigWire = ThoughtConfigPayload | ThoughtConfigEnvelope;
 
-function isThoughtConfigPayload(value: unknown): value is ThoughtConfigPayload {
+const isThoughtConfigPayload = function (
+  value: unknown,
+): value is ThoughtConfigPayload {
   if (!value || typeof value !== "object") return false;
   const cfg = value as Partial<ThoughtConfigPayload>;
   return (
@@ -55,9 +57,11 @@ function isThoughtConfigPayload(value: unknown): value is ThoughtConfigPayload {
       cfg.terminal_prompt === null ||
       typeof cfg.terminal_prompt === "string")
   );
-}
+};
 
-function extractDaemonDefaults(payload: ThoughtConfigWire): DaemonDefaults | null {
+const extractDaemonDefaults = function (
+  payload: ThoughtConfigWire,
+): DaemonDefaults | null {
   if (payload && typeof payload === "object") {
     const dd = (payload as unknown as Record<string, unknown>).daemon_defaults;
     if (dd && typeof dd === "object" && "model" in dd) {
@@ -65,9 +69,11 @@ function extractDaemonDefaults(payload: ThoughtConfigWire): DaemonDefaults | nul
     }
   }
   return null;
-}
+};
 
-function unwrapConfig(payload: ThoughtConfigWire): ThoughtConfigResult {
+const unwrapConfig = function (
+  payload: ThoughtConfigWire,
+): ThoughtConfigResult {
   const daemon_defaults = extractDaemonDefaults(payload);
   if (
     payload &&
@@ -81,7 +87,7 @@ function unwrapConfig(payload: ThoughtConfigWire): ThoughtConfigResult {
     return { config: normalizeConfig(payload), daemon_defaults };
   }
   throw new Error("Invalid thought config payload");
-}
+};
 
 function normalizeConfig(config: ThoughtConfigPayload): ThoughtConfig {
   return {

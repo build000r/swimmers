@@ -108,7 +108,7 @@ function validateForm(
   };
 }
 
-export function ThoughtConfigPanel({
+export const ThoughtConfigPanel = function ({
   open,
   observer = false,
   onClose,
@@ -423,4 +423,4 @@ export function ThoughtConfigPanel({
       </div>
     </div>
   );
-}
+};
