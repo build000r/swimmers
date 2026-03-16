@@ -381,10 +381,7 @@ fn host_is_loopback(host: &str) -> bool {
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
-    use std::sync::Mutex as StdMutex;
     use tempfile::tempdir;
-
-    static TEST_ENV_LOCK: LazyLock<StdMutex<()>> = LazyLock::new(|| StdMutex::new(()));
 
     #[test]
     fn host_loopback_accepts_local_variants() {
@@ -499,7 +496,9 @@ mod tests {
 
     #[tokio::test]
     async fn open_or_focus_passes_cached_pane_id_on_repeat_calls() {
-        let _env_guard = TEST_ENV_LOCK.lock().unwrap();
+        let _env_guard = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
         remember_pane_id("sess-cache", None);
 
         let temp = tempdir().unwrap();
@@ -574,7 +573,9 @@ mod tests {
 
     #[tokio::test]
     async fn open_or_focus_retries_transient_missing_session_error() {
-        let _env_guard = TEST_ENV_LOCK.lock().unwrap();
+        let _env_guard = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
         remember_pane_id("sess-retry", None);
 
         let temp = tempdir().unwrap();
@@ -630,7 +631,9 @@ mod tests {
 
     #[tokio::test]
     async fn open_or_focus_retries_transient_tab_creation_resolution_error() {
-        let _env_guard = TEST_ENV_LOCK.lock().unwrap();
+        let _env_guard = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
         remember_pane_id("sess-race", None);
 
         let temp = tempdir().unwrap();

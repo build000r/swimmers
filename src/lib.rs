@@ -7,5 +7,7 @@ pub mod scroll;
 pub mod session;
 pub mod sprites;
 pub mod state;
+#[cfg(test)]
+pub mod test_support;
 pub mod thought;
 pub mod types;

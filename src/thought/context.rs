@@ -808,11 +808,8 @@ fn parse_codex_function_call_detail(args_str: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
     use std::thread;
     use std::time::Duration;
-
-    static HOME_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn parse_jsonl_lines_skips_bad() {
@@ -895,7 +892,9 @@ mod tests {
 
     #[test]
     fn claude_reader_discovery_filters_slug_collision_by_exact_cwd() {
-        let _lock = HOME_LOCK.lock().expect("lock HOME");
+        let _lock = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
         let tmp = tempfile::tempdir().expect("tempdir");
 
         let cwd_a = "/tmp/a-b/c";
@@ -934,6 +933,130 @@ mod tests {
         let reader = ClaudeCodeReader::new(cwd_a, &[]);
         let discovered = reader.discover_file();
         assert_eq!(discovered, Some(file_a));
+
+        if let Some(prev) = previous_home {
+            std::env::set_var("HOME", prev);
+        } else {
+            std::env::remove_var("HOME");
+        }
+    }
+
+    #[test]
+    fn claude_reader_read_bootstraps_and_then_reads_incremental_updates() {
+        let _lock = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let cwd = "/tmp/project-alpha";
+        let slug = cwd.replace('/', "-");
+        let project_dir = tmp.path().join(".claude").join("projects").join(slug);
+        fs::create_dir_all(&project_dir).expect("project dir");
+        let session_file = project_dir.join("session.jsonl");
+        fs::write(
+            &session_file,
+            format!(
+                concat!(
+                    "{{\"type\":\"user\",\"cwd\":\"{cwd}\",\"message\":{{\"role\":\"user\",\"content\":\"investigate startup\"}}}}\n",
+                    "{{\"type\":\"assistant\",\"message\":{{\"role\":\"assistant\",\"usage\":{{\"input_tokens\":321}},\"content\":[{{\"type\":\"tool_use\",\"name\":\"exec\",\"input\":{{\"cmd\":\"ls\"}}}}]}}}}\n"
+                ),
+                cwd = cwd
+            ),
+        )
+        .expect("session file");
+
+        let previous_home = std::env::var_os("HOME");
+        std::env::set_var("HOME", tmp.path());
+
+        let mut reader = ClaudeCodeReader::new(cwd, &[]);
+        let first = reader.read().expect("bootstrap snapshot");
+        assert_eq!(first.user_task.as_deref(), Some("investigate startup"));
+        assert_eq!(first.token_count, 321);
+        assert_eq!(first.current_tool.as_ref().map(|tool| tool.tool.as_str()), Some("exec"));
+        assert!(reader.read().is_none(), "no new data should yield None");
+
+        fs::write(
+            &session_file,
+            format!(
+                concat!(
+                    "{{\"type\":\"user\",\"cwd\":\"{cwd}\",\"message\":{{\"role\":\"user\",\"content\":\"investigate startup\"}}}}\n",
+                    "{{\"type\":\"assistant\",\"message\":{{\"role\":\"assistant\",\"usage\":{{\"input_tokens\":321}},\"content\":[{{\"type\":\"tool_use\",\"name\":\"exec\",\"input\":{{\"cmd\":\"ls\"}}}}]}}}}\n",
+                    "{{\"type\":\"assistant\",\"message\":{{\"role\":\"assistant\",\"content\":[{{\"type\":\"text\",\"text\":\"done reading logs\"}}]}}}}\n"
+                ),
+                cwd = cwd
+            ),
+        )
+        .expect("append assistant line");
+
+        let second = reader.read().expect("incremental snapshot");
+        assert_eq!(second.user_task.as_deref(), Some("investigate startup"));
+        assert!(
+            second
+                .recent_actions
+                .iter()
+                .any(|action| action.tool == "said"),
+            "incremental assistant text should be recorded"
+        );
+
+        if let Some(prev) = previous_home {
+            std::env::set_var("HOME", prev);
+        } else {
+            std::env::remove_var("HOME");
+        }
+    }
+
+    #[test]
+    fn codex_reader_read_discovers_matching_rollout_and_tracks_incremental_usage() {
+        let _lock = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let sessions_dir = tmp.path().join(".codex").join("sessions").join("2026").join("03").join("16");
+        fs::create_dir_all(&sessions_dir).expect("sessions dir");
+
+        let other = sessions_dir.join("rollout-other.jsonl");
+        fs::write(
+            &other,
+            "{\"type\":\"session_meta\",\"payload\":{\"cwd\":\"/tmp/other\"}}\n",
+        )
+        .expect("other rollout");
+
+        let target = sessions_dir.join("rollout-target.jsonl");
+        fs::write(
+            &target,
+            concat!(
+                "{\"type\":\"session_meta\",\"payload\":{\"cwd\":\"/tmp/project\"}}\n",
+                "{\"type\":\"response_item\",\"payload\":{\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"fix websocket bug\"}]}}\n",
+                "{\"type\":\"response_item\",\"payload\":{\"type\":\"function_call\",\"name\":\"exec\",\"arguments\":\"{\\\"cmd\\\":\\\"git status\\\"}\"}}\n",
+                "{\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\",\"info\":{\"total_token_usage\":{\"input_tokens\":555}},\"model_context_window\":258400}}\n"
+            ),
+        )
+        .expect("target rollout");
+
+        let previous_home = std::env::var_os("HOME");
+        std::env::set_var("HOME", tmp.path());
+
+        let mut reader = CodexReader::new("/tmp/project", &[]);
+        let first = reader.read().expect("bootstrap snapshot");
+        assert_eq!(first.user_task.as_deref(), Some("fix websocket bug"));
+        assert_eq!(first.token_count, 555);
+        assert_eq!(first.context_limit, 258_400);
+        assert_eq!(first.current_tool.as_ref().map(|tool| tool.tool.as_str()), Some("exec"));
+
+        fs::write(
+            &target,
+            concat!(
+                "{\"type\":\"session_meta\",\"payload\":{\"cwd\":\"/tmp/project\"}}\n",
+                "{\"type\":\"response_item\",\"payload\":{\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"fix websocket bug\"}]}}\n",
+                "{\"type\":\"response_item\",\"payload\":{\"type\":\"function_call\",\"name\":\"exec\",\"arguments\":\"{\\\"cmd\\\":\\\"git status\\\"}\"}}\n",
+                "{\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\",\"info\":{\"total_token_usage\":{\"input_tokens\":555}},\"model_context_window\":258400}}\n",
+                "{\"type\":\"event_msg\",\"payload\":{\"type\":\"user_message\",\"message\":\"tighten the retry path\"}}\n"
+            ),
+        )
+        .expect("updated rollout");
+
+        let second = reader.read().expect("incremental snapshot");
+        assert_eq!(second.user_task.as_deref(), Some("tighten the retry path"));
+        assert!(reader.read().is_none(), "steady state should not re-emit snapshot");
 
         if let Some(prev) = previous_home {
             std::env::set_var("HOME", prev);

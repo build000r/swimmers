@@ -158,15 +158,9 @@ enum PollEvent {
 /// 6. Forward thought_update events from the thought loop to the client.
 async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
     let (mut ws_sink, mut ws_stream) = socket.split();
-
-    // Subscribe to supervisor-level lifecycle events (session created/deleted).
     let mut lifecycle_rx: broadcast::Receiver<LifecycleEvent> = state.supervisor.subscribe_events();
-
-    // Subscribe to thought_update events from the thought loop.
     let mut thought_rx: broadcast::Receiver<ControlEvent> =
         state.supervisor.subscribe_thought_events();
-
-    // Track per-session output subscriptions: session_id -> sub state.
     let mut output_subs: HashMap<String, SessionSub> = HashMap::new();
 
     tracing::info!("realtime client connected");
@@ -174,147 +168,205 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
     crate::metrics::set_connected_clients(client_count);
     let connection_client_id = allocate_client_id();
 
-    loop {
-        // Build a future that resolves when any subscribed session has output
-        // or a per-session control event.
-        let output_fut = poll_output_subs(&mut output_subs);
-
-        tokio::select! {
-            // --- Client -> Server messages ---
-            msg = ws_stream.next() => {
-                match msg {
-                    Some(Ok(Message::Binary(data))) => {
-                        crate::metrics::increment_frames_received();
-                        handle_binary_frame(&data, connection_client_id, &state, &mut ws_sink).await;
-                    }
-                    Some(Ok(Message::Text(text))) => {
-                        handle_text_message(
-                            &text,
-                            connection_client_id,
-                            &state,
-                            &mut ws_sink,
-                            &mut output_subs,
-                        )
-                        .await;
-                    }
-                    Some(Ok(Message::Close(_))) | None => {
-                        tracing::info!("realtime client disconnected");
-                        break;
-                    }
-                    Some(Ok(Message::Ping(payload))) => {
-                        let _ = ws_sink.send(Message::Pong(payload)).await;
-                    }
-                    Some(Ok(Message::Pong(_))) => {
-                        // Ignore unsolicited pongs.
-                    }
-                    Some(Err(e)) => {
-                        tracing::warn!("websocket receive error: {e}");
-                        break;
-                    }
-                }
-            }
-
-            // --- Supervisor lifecycle events (session created/deleted) ---
-            event = lifecycle_rx.recv() => {
-                match event {
-                    Ok(lifecycle_event) => {
-                        let control_event = lifecycle_to_control_event(lifecycle_event);
-                        let json = serde_json::to_string(&control_event)
-                            .expect("ControlEvent must serialize");
-                        if ws_sink.send(Message::Text(json.into())).await.is_err() {
-                            tracing::warn!("failed to send lifecycle event to client");
-                            break;
-                        }
-                    }
-                    Err(broadcast::error::RecvError::Lagged(n)) => {
-                        tracing::warn!("realtime client lagged by {n} lifecycle events");
-                        // Continue -- client may miss some events but the
-                        // connection is still usable.
-                    }
-                    Err(broadcast::error::RecvError::Closed) => {
-                        tracing::info!("supervisor lifecycle broadcast closed");
-                        break;
-                    }
-                }
-            }
-
-            // --- Thought update events from the thought loop ---
-            event = thought_rx.recv() => {
-                match event {
-                    Ok(thought_event) => {
-                        let json = serde_json::to_string(&thought_event)
-                            .expect("ControlEvent must serialize");
-                        if ws_sink.send(Message::Text(json.into())).await.is_err() {
-                            tracing::warn!("failed to send thought_update event to client");
-                            break;
-                        }
-                    }
-                    Err(broadcast::error::RecvError::Lagged(n)) => {
-                        tracing::warn!("realtime client lagged by {n} thought events");
-                    }
-                    Err(broadcast::error::RecvError::Closed) => {
-                        tracing::info!("thought broadcast closed");
-                        // Don't break -- thought loop stopping is not fatal.
-                    }
-                }
-            }
-
-            // --- Per-session terminal output and control events ---
-            Some(event) = output_fut => {
-                match event {
-                    PollEvent::Output { session_id, frame } => {
-                        let binary = codec::encode_output_frame(&session_id, frame.seq, &frame.data);
-                        crate::metrics::increment_frames_sent();
-                        if ws_sink.send(Message::Binary(binary.into())).await.is_err() {
-                            tracing::warn!("failed to send output frame to client");
-                            break;
-                        }
-                    }
-                    PollEvent::Overloaded { session_id } => {
-                        crate::metrics::increment_overload(&session_id);
-                        // Only emit overload when the session still exists.
-                        if state.supervisor.get_session(&session_id).await.is_some() {
-                            let event = ControlEvent {
-                                event: "session_overloaded".to_string(),
-                                session_id: session_id.clone(),
-                                payload: serde_json::to_value(SessionOverloadedPayload {
-                                    code: "SESSION_OVERLOADED".to_string(),
-                                    queue_depth: state.config.outbound_queue_bound,
-                                    queue_bytes: 0,
-                                    retry_after_ms: 250,
-                                })
-                                .unwrap(),
-                            };
-                            if ws_sink
-                                .send(Message::Text(
-                                    serde_json::to_string(&event).unwrap().into(),
-                                ))
-                                .await
-                                .is_err()
-                            {
-                                tracing::warn!("failed to send session_overloaded event");
-                                break;
-                            }
-                        }
-                    }
-                    PollEvent::SessionEvent(control_event) => {
-                        let json = serde_json::to_string(&control_event)
-                            .expect("ControlEvent must serialize");
-                        if ws_sink.send(Message::Text(json.into())).await.is_err() {
-                            tracing::warn!("failed to send session event to client");
-                            break;
-                        }
-                    }
-                }
-            }
-        }
-    }
+    while process_socket_iteration(
+        &mut ws_stream,
+        &mut ws_sink,
+        &mut lifecycle_rx,
+        &mut thought_rx,
+        &mut output_subs,
+        connection_client_id,
+        &state,
+    )
+    .await
+    {}
 
     let client_count = CONNECTED_CLIENTS_COUNT.fetch_sub(1, Ordering::Relaxed) - 1;
     crate::metrics::set_connected_clients(client_count);
+    cleanup_output_subs(&state, &mut output_subs).await;
+    clear_resize_authority_for_client(connection_client_id).await;
+    tracing::info!("realtime client cleanup complete");
+}
 
-    // On disconnect, send Unsubscribe commands to each session actor so
-    // it can clean up the subscriber entry.
+async fn process_socket_iteration(
+    ws_stream: &mut (impl StreamExt<Item = Result<Message, axum::Error>> + Unpin),
+    ws_sink: &mut (impl SinkExt<Message, Error = axum::Error> + Unpin),
+    lifecycle_rx: &mut broadcast::Receiver<LifecycleEvent>,
+    thought_rx: &mut broadcast::Receiver<ControlEvent>,
+    output_subs: &mut HashMap<String, SessionSub>,
+    connection_client_id: ClientId,
+    state: &Arc<AppState>,
+) -> bool {
+    let output_fut = poll_output_subs(output_subs);
+    tokio::select! {
+        msg = ws_stream.next() => {
+            handle_socket_message(msg, connection_client_id, state, ws_sink, output_subs).await
+        }
+        event = lifecycle_rx.recv() => forward_lifecycle_event(event, ws_sink).await,
+        event = thought_rx.recv() => forward_thought_event(event, ws_sink).await,
+        Some(event) = output_fut => forward_polled_event(event, state, ws_sink).await,
+    }
+}
+
+async fn handle_socket_message(
+    msg: Option<Result<Message, axum::Error>>,
+    client_id: ClientId,
+    state: &Arc<AppState>,
+    ws_sink: &mut (impl SinkExt<Message, Error = axum::Error> + Unpin),
+    output_subs: &mut HashMap<String, SessionSub>,
+) -> bool {
+    match msg {
+        Some(Ok(message)) => {
+            handle_received_socket_message(message, client_id, state, ws_sink, output_subs).await
+        }
+        Some(Err(e)) => {
+            tracing::warn!("websocket receive error: {e}");
+            false
+        }
+        None => {
+            tracing::info!("realtime client disconnected");
+            false
+        }
+    }
+}
+
+async fn handle_received_socket_message(
+    message: Message,
+    client_id: ClientId,
+    state: &Arc<AppState>,
+    ws_sink: &mut (impl SinkExt<Message, Error = axum::Error> + Unpin),
+    output_subs: &mut HashMap<String, SessionSub>,
+) -> bool {
+    match message {
+        Message::Binary(data) => {
+            crate::metrics::increment_frames_received();
+            handle_binary_frame(&data, client_id, state, ws_sink).await;
+        }
+        Message::Text(text) => {
+            handle_text_message(&text, client_id, state, ws_sink, output_subs).await;
+        }
+        Message::Close(_) => {
+            tracing::info!("realtime client disconnected");
+            return false;
+        }
+        Message::Ping(payload) => {
+            let _ = ws_sink.send(Message::Pong(payload)).await;
+        }
+        Message::Pong(_) => {}
+    }
+    true
+}
+
+async fn forward_lifecycle_event(
+    event: Result<LifecycleEvent, broadcast::error::RecvError>,
+    ws_sink: &mut (impl SinkExt<Message, Error = axum::Error> + Unpin),
+) -> bool {
+    match event {
+        Ok(lifecycle_event) => send_json_message(
+            ws_sink,
+            &lifecycle_to_control_event(lifecycle_event),
+            "failed to send lifecycle event to client",
+        )
+        .await,
+        Err(broadcast::error::RecvError::Lagged(n)) => {
+            tracing::warn!("realtime client lagged by {n} lifecycle events");
+            true
+        }
+        Err(broadcast::error::RecvError::Closed) => {
+            tracing::info!("supervisor lifecycle broadcast closed");
+            false
+        }
+    }
+}
+
+async fn forward_thought_event(
+    event: Result<ControlEvent, broadcast::error::RecvError>,
+    ws_sink: &mut (impl SinkExt<Message, Error = axum::Error> + Unpin),
+) -> bool {
+    match event {
+        Ok(thought_event) => {
+            send_json_message(ws_sink, &thought_event, "failed to send thought_update event to client")
+                .await
+        }
+        Err(broadcast::error::RecvError::Lagged(n)) => {
+            tracing::warn!("realtime client lagged by {n} thought events");
+            true
+        }
+        Err(broadcast::error::RecvError::Closed) => {
+            tracing::info!("thought broadcast closed");
+            true
+        }
+    }
+}
+
+async fn forward_polled_event(
+    event: PollEvent,
+    state: &Arc<AppState>,
+    ws_sink: &mut (impl SinkExt<Message, Error = axum::Error> + Unpin),
+) -> bool {
+    match event {
+        PollEvent::Output { session_id, frame } => {
+            let binary = codec::encode_output_frame(&session_id, frame.seq, &frame.data);
+            crate::metrics::increment_frames_sent();
+            if ws_sink.send(Message::Binary(binary.into())).await.is_err() {
+                tracing::warn!("failed to send output frame to client");
+                return false;
+            }
+        }
+        PollEvent::Overloaded { session_id } => {
+            if !forward_overloaded_event(&session_id, state, ws_sink).await {
+                return false;
+            }
+        }
+        PollEvent::SessionEvent(control_event) => {
+            if !send_json_message(ws_sink, &control_event, "failed to send session event to client").await {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+async fn forward_overloaded_event(
+    session_id: &str,
+    state: &Arc<AppState>,
+    ws_sink: &mut (impl SinkExt<Message, Error = axum::Error> + Unpin),
+) -> bool {
+    crate::metrics::increment_overload(session_id);
+    if state.supervisor.get_session(session_id).await.is_none() {
+        return true;
+    }
+
+    let event = ControlEvent {
+        event: "session_overloaded".to_string(),
+        session_id: session_id.to_string(),
+        payload: serde_json::to_value(SessionOverloadedPayload {
+            code: "SESSION_OVERLOADED".to_string(),
+            queue_depth: state.config.outbound_queue_bound,
+            queue_bytes: 0,
+            retry_after_ms: 250,
+        })
+        .unwrap(),
+    };
+    send_json_message(ws_sink, &event, "failed to send session_overloaded event").await
+}
+
+async fn send_json_message(
+    ws_sink: &mut (impl SinkExt<Message, Error = axum::Error> + Unpin),
+    event: &ControlEvent,
+    warning: &str,
+) -> bool {
+    let json = serde_json::to_string(event).expect("ControlEvent must serialize");
+    if ws_sink.send(Message::Text(json.into())).await.is_err() {
+        tracing::warn!("{warning}");
+        return false;
+    }
+    true
+}
+
+async fn cleanup_output_subs(
+    state: &Arc<AppState>,
+    output_subs: &mut HashMap<String, SessionSub>,
+) {
     for (session_id, sub) in output_subs.drain() {
         if let Some(handle) = state.supervisor.get_session(&session_id).await {
             let _ = handle
@@ -325,10 +377,6 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
         }
         drop(sub.output_rx);
     }
-
-    clear_resize_authority_for_client(connection_client_id).await;
-
-    tracing::info!("realtime client cleanup complete");
 }
 
 // ---------------------------------------------------------------------------
@@ -869,56 +917,66 @@ async fn handle_dismiss(
 /// causes the `tokio::select!` branch to be disabled.
 async fn poll_output_subs(subs: &mut HashMap<String, SessionSub>) -> Option<PollEvent> {
     if subs.is_empty() {
-        // Return a future that never resolves so the select branch is inactive.
         return std::future::pending().await;
     }
 
     loop {
-        // Non-blocking sweep across all subscriptions prevents a quiet session
-        // from starving peers that are actively producing output.
-        let keys: Vec<String> = subs.keys().cloned().collect();
-        for key in &keys {
-            if let Some(sub) = subs.get_mut(key) {
-                // Check for terminal output first.
-                match sub.output_rx.try_recv() {
-                    Ok(frame) => {
-                        return Some(PollEvent::Output {
-                            session_id: key.clone(),
-                            frame,
-                        });
-                    }
-                    Err(mpsc::error::TryRecvError::Disconnected) => {
-                        tracing::info!("[session {key}] output channel closed, unsubscribing");
-                        subs.remove(key);
-                        return Some(PollEvent::Overloaded {
-                            session_id: key.clone(),
-                        });
-                    }
-                    Err(mpsc::error::TryRecvError::Empty) => {}
-                }
-
-                // Check for per-session control events.
-                match sub.event_rx.try_recv() {
-                    Ok(event) => {
-                        return Some(PollEvent::SessionEvent(event));
-                    }
-                    Err(broadcast::error::TryRecvError::Lagged(n)) => {
-                        tracing::warn!("[session {key}] lagged by {n} session events");
-                    }
-                    Err(broadcast::error::TryRecvError::Closed) => {
-                        // Actor shut down -- output channel will close soon.
-                    }
-                    Err(broadcast::error::TryRecvError::Empty) => {}
-                }
-            }
+        if let Some(event) = poll_output_subs_once(subs) {
+            return Some(event);
         }
-
         if subs.is_empty() {
             return std::future::pending().await;
         }
-
-        // Nothing ready yet; yield briefly before the next fair sweep.
         tokio::time::sleep(Duration::from_millis(1)).await;
+    }
+}
+
+fn poll_output_subs_once(subs: &mut HashMap<String, SessionSub>) -> Option<PollEvent> {
+    let keys: Vec<String> = subs.keys().cloned().collect();
+    for key in keys {
+        if let Some(event) = poll_single_sub(subs, &key) {
+            return Some(event);
+        }
+    }
+    None
+}
+
+fn poll_single_sub(subs: &mut HashMap<String, SessionSub>, session_id: &str) -> Option<PollEvent> {
+    if let Some(event) = poll_sub_output(subs, session_id) {
+        return Some(event);
+    }
+
+    let sub = subs.get_mut(session_id)?;
+    poll_sub_event(session_id, sub)
+}
+
+fn poll_sub_output(subs: &mut HashMap<String, SessionSub>, session_id: &str) -> Option<PollEvent> {
+    let sub = subs.get_mut(session_id)?;
+    match sub.output_rx.try_recv() {
+        Ok(frame) => Some(PollEvent::Output {
+            session_id: session_id.to_string(),
+            frame,
+        }),
+        Err(mpsc::error::TryRecvError::Disconnected) => {
+            tracing::info!("[session {session_id}] output channel closed, unsubscribing");
+            subs.remove(session_id);
+            Some(PollEvent::Overloaded {
+                session_id: session_id.to_string(),
+            })
+        }
+        Err(mpsc::error::TryRecvError::Empty) => None,
+    }
+}
+
+fn poll_sub_event(session_id: &str, sub: &mut SessionSub) -> Option<PollEvent> {
+    match sub.event_rx.try_recv() {
+        Ok(event) => Some(PollEvent::SessionEvent(event)),
+        Err(broadcast::error::TryRecvError::Lagged(n)) => {
+            tracing::warn!("[session {session_id}] lagged by {n} session events");
+            None
+        }
+        Err(broadcast::error::TryRecvError::Closed) => None,
+        Err(broadcast::error::TryRecvError::Empty) => None,
     }
 }
 
@@ -1121,7 +1179,7 @@ mod control_error_tests {
     use crate::thought::runtime_config::ThoughtConfig;
     use futures::Sink;
     use std::pin::Pin;
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex as StdMutex};
     use std::task::{Context, Poll};
     use tokio::sync::RwLock;
 
@@ -1193,6 +1251,53 @@ mod control_error_tests {
         Some((event.session_id, payload.code, payload.request_id))
     }
 
+    fn text_events(sink: &CaptureSink) -> Vec<ControlEvent> {
+        sink.messages
+            .iter()
+            .filter_map(|message| match message {
+                Message::Text(value) => serde_json::from_str::<ControlEvent>(value).ok(),
+                _ => None,
+            })
+            .collect()
+    }
+
+    async fn spawn_subscription_handle(
+        session_id: &str,
+        cursor: ReplayCursor,
+        truncated: bool,
+        unsubscribed: Arc<StdMutex<Vec<ClientId>>>,
+    ) -> ActorHandle {
+        let (cmd_tx, mut cmd_rx) = mpsc::channel(8);
+        let handle = ActorHandle::test_handle(session_id, format!("tmux-{session_id}"), cmd_tx);
+        tokio::spawn(async move {
+            while let Some(cmd) = cmd_rx.recv().await {
+                match cmd {
+                    SessionCommand::Subscribe { ack, .. } => {
+                        let outcome = if truncated {
+                            SubscribeOutcome::ReplayTruncated {
+                                requested_resume_from_seq: 7,
+                                replay_window_start_seq: 3,
+                                latest_seq: cursor.latest_seq,
+                            }
+                        } else {
+                            SubscribeOutcome::Ok
+                        };
+                        let _ = ack.send(outcome);
+                    }
+                    SessionCommand::GetReplayCursor(reply) => {
+                        let _ = reply.send(cursor);
+                    }
+                    SessionCommand::Unsubscribe { client_id } => {
+                        unsubscribed.lock().unwrap().push(client_id);
+                    }
+                    SessionCommand::Shutdown => break,
+                    _ => {}
+                }
+            }
+        });
+        handle
+    }
+
     #[tokio::test]
     async fn resize_validation_error_precedes_auth_check() {
         let state = test_state();
@@ -1228,5 +1333,185 @@ mod control_error_tests {
         assert_eq!(error.0, "missing-1");
         assert_eq!(error.1, "SESSION_NOT_FOUND");
         assert_eq!(error.2.as_deref(), Some("req-missing"));
+    }
+
+    #[tokio::test]
+    async fn handle_subscribe_emits_subscription_and_replay_truncated_events() {
+        let state = test_state();
+        let unsubscribed = Arc::new(StdMutex::new(Vec::new()));
+        let handle = spawn_subscription_handle(
+            "sess-sub",
+            ReplayCursor {
+                latest_seq: 11,
+                replay_window_start_seq: 4,
+            },
+            true,
+            unsubscribed,
+        )
+        .await;
+        state.supervisor.insert_test_handle(handle).await;
+
+        let mut sink = CaptureSink::default();
+        let mut output_subs = HashMap::new();
+        let payload = serde_json::json!({
+            "session_id": "sess-sub",
+            "resume_from_seq": 7
+        });
+        let request_id = Some("req-sub".to_string());
+
+        handle_subscribe(&state, &mut sink, &mut output_subs, &payload, &request_id).await;
+
+        assert!(output_subs.contains_key("sess-sub"));
+        let events = text_events(&sink);
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].event, "session_subscription");
+        assert_eq!(events[0].session_id, "sess-sub");
+        assert_eq!(events[1].event, "replay_truncated");
+        assert_eq!(events[1].session_id, "sess-sub");
+    }
+
+    #[tokio::test]
+    async fn handle_unsubscribe_removes_subscription_and_emits_event() {
+        let state = test_state();
+        let unsubscribed = Arc::new(StdMutex::new(Vec::new()));
+        let handle = spawn_subscription_handle(
+            "sess-unsub",
+            ReplayCursor {
+                latest_seq: 14,
+                replay_window_start_seq: 6,
+            },
+            false,
+            unsubscribed.clone(),
+        )
+        .await;
+        state.supervisor.insert_test_handle(handle).await;
+
+        let (_output_tx, output_rx) = mpsc::channel(1);
+        let (_event_tx, event_rx) = broadcast::channel(1);
+        let mut output_subs = HashMap::from([(
+            "sess-unsub".to_string(),
+            SessionSub {
+                client_id: 42,
+                output_rx,
+                event_rx,
+            },
+        )]);
+        let mut sink = CaptureSink::default();
+        let payload = serde_json::json!({
+            "session_id": "sess-unsub"
+        });
+
+        handle_unsubscribe(&state, &mut sink, &mut output_subs, &payload, &None).await;
+
+        assert!(!output_subs.contains_key("sess-unsub"));
+        assert_eq!(unsubscribed.lock().unwrap().as_slice(), &[42]);
+
+        let events = text_events(&sink);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].event, "session_subscription");
+        assert_eq!(events[0].session_id, "sess-unsub");
+
+        let payload: SessionSubscriptionPayload =
+            serde_json::from_value(events[0].payload.clone()).expect("session subscription");
+        assert_eq!(payload.state, "unsubscribed");
+        assert_eq!(payload.resume_from_seq, None);
+        assert_eq!(payload.latest_seq, 14);
+        assert_eq!(payload.replay_window_start_seq, 6);
+    }
+
+    #[tokio::test]
+    async fn forward_polled_event_handles_all_event_kinds() {
+        let state = test_state();
+        let (cmd_tx, _cmd_rx) = mpsc::channel(1);
+        state
+            .supervisor
+            .insert_test_handle(ActorHandle::test_handle("sess-overloaded", "tmux", cmd_tx))
+            .await;
+
+        let mut sink = CaptureSink::default();
+        assert!(forward_polled_event(
+            PollEvent::Output {
+                session_id: "sess-out".to_string(),
+                frame: OutputFrame {
+                    seq: 9,
+                    data: b"hello".to_vec(),
+                },
+            },
+            &state,
+            &mut sink,
+        )
+        .await);
+        assert!(matches!(sink.messages.first(), Some(Message::Binary(_))));
+
+        assert!(forward_polled_event(
+            PollEvent::Overloaded {
+                session_id: "sess-overloaded".to_string(),
+            },
+            &state,
+            &mut sink,
+        )
+        .await);
+        assert!(forward_polled_event(
+            PollEvent::SessionEvent(ControlEvent {
+                event: "session_state".to_string(),
+                session_id: "sess-out".to_string(),
+                payload: serde_json::json!({"state":"idle"}),
+            }),
+            &state,
+            &mut sink,
+        )
+        .await);
+
+        let events = text_events(&sink);
+        assert!(events.iter().any(|event| event.event == "session_overloaded"));
+        assert!(events.iter().any(|event| event.event == "session_state"));
+    }
+
+    #[tokio::test]
+    async fn poll_output_subs_returns_output_event_and_overload() {
+        let (output_tx, output_rx) = mpsc::channel(1);
+        let (_event_tx, event_rx) = broadcast::channel(1);
+        output_tx
+            .send(OutputFrame {
+                seq: 3,
+                data: b"frame".to_vec(),
+            })
+            .await
+            .expect("send output frame");
+        let mut subs = HashMap::from([(
+            "sess-ready".to_string(),
+            SessionSub {
+                client_id: 1,
+                output_rx,
+                event_rx,
+            },
+        )]);
+
+        let ready = poll_output_subs(&mut subs).await.expect("ready event");
+        assert!(matches!(
+            ready,
+            PollEvent::Output {
+                session_id,
+                frame: OutputFrame { seq: 3, .. }
+            } if session_id == "sess-ready"
+        ));
+
+        let (stale_tx, stale_rx) = mpsc::channel(1);
+        let (_event_tx, event_rx) = broadcast::channel(1);
+        drop(stale_tx);
+        let mut subs = HashMap::from([(
+            "sess-overloaded".to_string(),
+            SessionSub {
+                client_id: 2,
+                output_rx: stale_rx,
+                event_rx,
+            },
+        )]);
+
+        let overloaded = poll_output_subs(&mut subs).await.expect("overload event");
+        assert!(matches!(
+            overloaded,
+            PollEvent::Overloaded { session_id } if session_id == "sess-overloaded"
+        ));
     }
 }

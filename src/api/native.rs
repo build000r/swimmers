@@ -124,3 +124,79 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/v1/native/status", get(native_status))
         .route("/v1/native/open", post(native_open))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::api::PublishedSelectionState;
+    use crate::auth::OPERATOR_SCOPES;
+    use crate::config::Config;
+    use crate::session::supervisor::SessionSupervisor;
+    use crate::thought::runtime_config::ThoughtConfig;
+    use axum::body::to_bytes;
+    use axum::response::IntoResponse;
+    use serde_json::Value;
+    use tokio::sync::RwLock;
+
+    fn test_state() -> Arc<AppState> {
+        let config = Arc::new(Config::default());
+        let supervisor = SessionSupervisor::new(config.clone());
+        Arc::new(AppState {
+            supervisor,
+            config,
+            thought_config: Arc::new(RwLock::new(ThoughtConfig::default())),
+            daemon_defaults: None,
+            file_store: None,
+            published_selection: Arc::new(RwLock::new(PublishedSelectionState::default())),
+        })
+    }
+
+    async fn response_json(response: axum::response::Response) -> Value {
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("response body");
+        serde_json::from_slice(&body).expect("json body")
+    }
+
+    #[tokio::test]
+    async fn native_open_rejects_unsupported_hosts() {
+        let mut headers = HeaderMap::new();
+        headers.insert("host", "example.com".parse().expect("host header"));
+
+        let response = native_open(
+            Extension(AuthInfo::new(OPERATOR_SCOPES.to_vec())),
+            State(test_state()),
+            headers,
+            Json(NativeDesktopOpenRequest {
+                session_id: "sess-1".to_string(),
+            }),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let json = response_json(response).await;
+        assert_eq!(json["code"], "NATIVE_DESKTOP_UNAVAILABLE");
+    }
+
+    #[tokio::test]
+    async fn native_open_returns_not_found_for_missing_session() {
+        let mut headers = HeaderMap::new();
+        headers.insert("host", "localhost:3210".parse().expect("host header"));
+
+        let response = native_open(
+            Extension(AuthInfo::new(OPERATOR_SCOPES.to_vec())),
+            State(test_state()),
+            headers,
+            Json(NativeDesktopOpenRequest {
+                session_id: "missing".to_string(),
+            }),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let json = response_json(response).await;
+        assert_eq!(json["code"], "SESSION_NOT_FOUND");
+    }
+}

@@ -518,3 +518,228 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/v1/sessions/{session_id}/snapshot", get(get_snapshot))
         .route("/v1/sessions/{session_id}/pane-tail", get(get_pane_tail))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::api::PublishedSelectionState;
+    use crate::auth::{OBSERVER_SCOPES, OPERATOR_SCOPES};
+    use crate::config::Config;
+    use crate::session::actor::ActorHandle;
+    use crate::session::supervisor::SessionSupervisor;
+    use crate::thought::runtime_config::ThoughtConfig;
+    use crate::types::{ThoughtSource, ThoughtState, TransportHealth};
+    use axum::body::to_bytes;
+    use axum::extract::{Json, Path, Query, State};
+    use axum::response::IntoResponse;
+    use chrono::Utc;
+    use serde_json::Value;
+    use std::sync::Arc;
+    use tokio::sync::{mpsc, RwLock};
+
+    fn test_state() -> Arc<AppState> {
+        let config = Arc::new(Config::default());
+        let supervisor = SessionSupervisor::new(config.clone());
+        Arc::new(AppState {
+            supervisor,
+            config,
+            thought_config: Arc::new(RwLock::new(ThoughtConfig::default())),
+            daemon_defaults: None,
+            file_store: None,
+            published_selection: Arc::new(RwLock::new(PublishedSelectionState::default())),
+        })
+    }
+
+    fn summary(session_id: &str, state: SessionState) -> crate::types::SessionSummary {
+        crate::types::SessionSummary {
+            session_id: session_id.to_string(),
+            tmux_name: format!("tmux-{session_id}"),
+            state,
+            current_command: None,
+            cwd: "/tmp/project".to_string(),
+            tool: Some("Codex".to_string()),
+            token_count: 0,
+            context_limit: 192_000,
+            thought: None,
+            thought_state: ThoughtState::Holding,
+            thought_source: ThoughtSource::CarryForward,
+            thought_updated_at: None,
+            rest_state: crate::types::fallback_rest_state(state, ThoughtState::Holding),
+            last_skill: None,
+            is_stale: false,
+            attached_clients: 0,
+            transport_health: TransportHealth::Healthy,
+            last_activity_at: Utc::now(),
+            sprite_pack_id: None,
+            repo_theme_id: None,
+        }
+    }
+
+    async fn response_json(response: axum::response::Response) -> Value {
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("response body");
+        serde_json::from_slice(&body).expect("json body")
+    }
+
+    #[tokio::test]
+    async fn create_session_requires_write_scope() {
+        let response = create_session(
+            Extension(AuthInfo::new(OBSERVER_SCOPES.to_vec())),
+            State(test_state()),
+            Json(CreateSessionRequest {
+                name: None,
+                cwd: None,
+                spawn_tool: None,
+                initial_request: None,
+            }),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn delete_session_rejects_invalid_mode() {
+        let response = delete_session(
+            Extension(AuthInfo::new(OPERATOR_SCOPES.to_vec())),
+            State(test_state()),
+            Path("sess-missing".to_string()),
+            Query(DeleteSessionQuery {
+                mode: Some("invalid".to_string()),
+            }),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let json = response_json(response).await;
+        assert_eq!(json["code"], "VALIDATION_FAILED");
+    }
+
+    #[tokio::test]
+    async fn send_input_rejects_empty_text() {
+        let response = send_input(
+            Extension(AuthInfo::new(OPERATOR_SCOPES.to_vec())),
+            State(test_state()),
+            Path("sess-1".to_string()),
+            Json(SessionInputRequest {
+                text: String::new(),
+            }),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let json = response_json(response).await;
+        assert_eq!(json["code"], "VALIDATION_FAILED");
+    }
+
+    #[tokio::test]
+    async fn send_input_forwards_text_to_session_actor() {
+        let state = test_state();
+        let (cmd_tx, mut cmd_rx) = mpsc::channel(8);
+        state
+            .supervisor
+            .insert_test_handle(ActorHandle::test_handle("sess-1", "tmux-1", cmd_tx))
+            .await;
+
+        let worker = tokio::spawn(async move {
+            while let Some(cmd) = cmd_rx.recv().await {
+                match cmd {
+                    SessionCommand::GetSummary(reply) => {
+                        let _ = reply.send(summary("sess-1", SessionState::Idle));
+                    }
+                    SessionCommand::WriteInput(bytes) => return bytes,
+                    _ => {}
+                }
+            }
+            Vec::new()
+        });
+
+        let response = send_input(
+            Extension(AuthInfo::new(OPERATOR_SCOPES.to_vec())),
+            State(state),
+            Path("sess-1".to_string()),
+            Json(SessionInputRequest {
+                text: "status".to_string(),
+            }),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(worker.await.expect("worker"), b"status".to_vec());
+    }
+
+    #[tokio::test]
+    async fn get_snapshot_returns_actor_snapshot() {
+        let state = test_state();
+        let (cmd_tx, mut cmd_rx) = mpsc::channel(8);
+        state
+            .supervisor
+            .insert_test_handle(ActorHandle::test_handle("sess-snap", "tmux-snap", cmd_tx))
+            .await;
+
+        tokio::spawn(async move {
+            while let Some(cmd) = cmd_rx.recv().await {
+                if let SessionCommand::GetSnapshot(reply) = cmd {
+                    let _ = reply.send(TerminalSnapshot {
+                        session_id: "sess-snap".to_string(),
+                        latest_seq: 9,
+                        truncated: false,
+                        screen_text: "hello from tmux".to_string(),
+                    });
+                    break;
+                }
+            }
+        });
+
+        let response = get_snapshot(
+            Extension(AuthInfo::new(OPERATOR_SCOPES.to_vec())),
+            State(state),
+            Path("sess-snap".to_string()),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let json = response_json(response).await;
+        assert_eq!(json["session_id"], "sess-snap");
+        assert_eq!(json["screen_text"], "hello from tmux");
+    }
+
+    #[tokio::test]
+    async fn get_pane_tail_returns_actor_text() {
+        let state = test_state();
+        let (cmd_tx, mut cmd_rx) = mpsc::channel(8);
+        state
+            .supervisor
+            .insert_test_handle(ActorHandle::test_handle("sess-tail", "tmux-tail", cmd_tx))
+            .await;
+
+        tokio::spawn(async move {
+            while let Some(cmd) = cmd_rx.recv().await {
+                if let SessionCommand::GetPaneTail { lines, reply } = cmd {
+                    assert_eq!(lines, 300);
+                    let _ = reply.send("recent pane output".to_string());
+                    break;
+                }
+            }
+        });
+
+        let response = get_pane_tail(
+            Extension(AuthInfo::new(OPERATOR_SCOPES.to_vec())),
+            State(state),
+            Path("sess-tail".to_string()),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let json = response_json(response).await;
+        assert_eq!(json["session_id"], "sess-tail");
+        assert_eq!(json["text"], "recent pane output");
+    }
+}

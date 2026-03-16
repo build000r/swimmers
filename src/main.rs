@@ -10,6 +10,8 @@ mod scroll;
 mod session;
 mod sprites;
 mod state;
+#[cfg(test)]
+mod test_support;
 mod thought;
 mod types;
 
@@ -42,8 +44,92 @@ fn log_startup_phase_complete(phase: &'static str, started: Instant) {
     }
 }
 
-#[tokio::main]
-async fn main() {
+async fn init_persistence_store(
+    supervisor: &Arc<SessionSupervisor>,
+    thought_config: &Arc<RwLock<ThoughtConfig>>,
+) -> Option<Arc<FileStore>> {
+    tracing::info!(phase = "persistence_init", "startup phase begin");
+    let persistence_started = Instant::now();
+    let store = match FileStore::new("./data/throngterm/").await {
+        Ok(store) => {
+            supervisor.init_persistence(store.clone()).await;
+            let loaded_config = store.load_thought_config().await;
+            {
+                let mut runtime_config = thought_config.write().await;
+                *runtime_config = loaded_config;
+            }
+            tracing::info!("persistence store initialized");
+            Some(store)
+        }
+        Err(e) => {
+            tracing::error!("failed to initialize persistence store: {e}");
+            None
+        }
+    };
+    log_startup_phase_complete("persistence_init", persistence_started);
+    store
+}
+
+async fn run_startup_tmux_discovery(supervisor: &Arc<SessionSupervisor>) {
+    tracing::info!(phase = "tmux_startup_discovery", "startup phase begin");
+    let discovery_started = Instant::now();
+    match supervisor.discover_tmux_sessions().await {
+        Ok(()) => tracing::info!("tmux session discovery complete"),
+        Err(e) => tracing::error!("tmux discovery failed: {e}"),
+    }
+    log_startup_phase_complete("tmux_startup_discovery", discovery_started);
+}
+
+fn start_thought_backend(
+    config: &Arc<Config>,
+    supervisor: &Arc<SessionSupervisor>,
+    thought_config: Arc<RwLock<ThoughtConfig>>,
+) {
+    let thought_tx = supervisor.thought_event_sender();
+    let provider = Arc::new(SupervisorProvider::new(supervisor.clone()));
+    match config.thought_backend {
+        ThoughtBackend::Inproc => {
+            tracing::warn!(
+                "thought backend=inproc is deprecated; using daemon compatibility shim"
+            );
+            let runner = ThoughtLoopRunner::with_runtime_config(
+                config.thought_tick_ms,
+                thought_tx,
+                thought_config,
+            );
+            runner.spawn(provider);
+        }
+        ThoughtBackend::Daemon => {
+            tracing::info!("thought backend=daemon: starting thought bridge runner");
+            let bridge_runner = BridgeRunner::with_tick(
+                thought_tx,
+                Duration::from_millis(config.thought_tick_ms),
+                thought_config,
+            );
+            bridge_runner.spawn(provider, EmitterClient::new());
+        }
+    }
+}
+
+fn build_app_router(
+    config: Arc<Config>,
+    state: Arc<AppState>,
+    prom_handle: metrics_exporter_prometheus::PrometheusHandle,
+) -> Router {
+    Router::new()
+        .merge(api::api_router(config))
+        .fallback_service(ServeDir::new("dist").append_index_html_on_directories(true))
+        .with_state(state)
+        .merge(metrics::endpoint::metrics_router(prom_handle))
+}
+
+async fn bind_listener(port: u16) -> anyhow::Result<tokio::net::TcpListener> {
+    tokio::net::TcpListener::bind(format!("0.0.0.0:{port}"))
+        .await
+        .map_err(|err| anyhow::anyhow!("failed to bind listener: {err}"))
+}
+
+async fn run() -> anyhow::Result<()> {
     let startup_started = Instant::now();
 
     // Load .env before anything reads env vars.
@@ -77,70 +163,15 @@ async fn main() {
     // Create session supervisor (new() returns Arc<Self>)
     let supervisor = SessionSupervisor::new(config.clone());
     let thought_config = Arc::new(RwLock::new(ThoughtConfig::default()));
-    let mut persistence_store: Option<Arc<FileStore>> = None;
-
-    // Initialize persistence store.
-    tracing::info!(phase = "persistence_init", "startup phase begin");
-    let persistence_started = Instant::now();
-    match FileStore::new("./data/throngterm/").await {
-        Ok(store) => {
-            supervisor.init_persistence(store.clone()).await;
-            let loaded_config = store.load_thought_config().await;
-            {
-                let mut runtime_config = thought_config.write().await;
-                *runtime_config = loaded_config;
-            }
-            persistence_store = Some(store);
-            tracing::info!("persistence store initialized");
-        }
-        Err(e) => {
-            tracing::error!("failed to initialize persistence store: {e}");
-            // Continue without persistence -- the server still works.
-        }
-    }
-    log_startup_phase_complete("persistence_init", persistence_started);
-
-    // Auto-discover existing tmux sessions (upgrades stale sessions) before
-    // serving requests, so bootstrap doesn't race against startup discovery.
-    tracing::info!(phase = "tmux_startup_discovery", "startup phase begin");
-    let discovery_started = Instant::now();
-    match supervisor.discover_tmux_sessions().await {
-        Ok(()) => tracing::info!("tmux session discovery complete"),
-        Err(e) => tracing::error!("tmux discovery failed: {e}"),
-    }
-    log_startup_phase_complete("tmux_startup_discovery", discovery_started);
+    let persistence_store = init_persistence_store(&supervisor, &thought_config).await;
+    run_startup_tmux_discovery(&supervisor).await;
 
     // Start periodic persistence checkpoint (every 30s).
     supervisor.spawn_persistence_checkpoint();
     supervisor.spawn_process_exit_reaper();
 
     // Start thought engine.
-    {
-        let thought_tx = supervisor.thought_event_sender();
-        let provider = Arc::new(SupervisorProvider::new(supervisor.clone()));
-        match config.thought_backend {
-            ThoughtBackend::Inproc => {
-                tracing::warn!(
-                    "thought backend=inproc is deprecated; using daemon compatibility shim"
-                );
-                let runner = ThoughtLoopRunner::with_runtime_config(
-                    config.thought_tick_ms,
-                    thought_tx,
-                    thought_config.clone(),
-                );
-                runner.spawn(provider);
-            }
-            ThoughtBackend::Daemon => {
-                tracing::info!("thought backend=daemon: starting thought bridge runner");
-                let bridge_runner = BridgeRunner::with_tick(
-                    thought_tx,
-                    Duration::from_millis(config.thought_tick_ms),
-                    thought_config.clone(),
-                );
-                bridge_runner.spawn(provider, EmitterClient::new());
-            }
-        }
-    }
+    start_thought_backend(&config, &supervisor, thought_config.clone());
 
     // Build app state
     let state = Arc::new(AppState {
@@ -152,16 +183,8 @@ async fn main() {
         published_selection: Arc::new(RwLock::new(api::PublishedSelectionState::default())),
     });
 
-    // Build router
-    let app = Router::new()
-        .merge(api::api_router(config.clone()))
-        .fallback_service(ServeDir::new("dist").append_index_html_on_directories(true))
-        .with_state(state)
-        .merge(metrics::endpoint::metrics_router(prom_handle));
-
-    let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{port}"))
-        .await
-        .expect("failed to bind");
+    let app = build_app_router(config.clone(), state, prom_handle);
+    let listener = bind_listener(port).await?;
 
     tracing::info!(
         elapsed_ms = startup_started.elapsed().as_millis() as u64,
@@ -169,5 +192,17 @@ async fn main() {
     );
     tracing::info!("Throngterm running on http://0.0.0.0:{port}");
 
-    axum::serve(listener, app).await.expect("server error");
+    axum::serve(listener, app)
+        .await
+        .map_err(|err| anyhow::anyhow!("server error: {err}"))?;
+
+    Ok(())
+}
+
+#[tokio::main]
+async fn main() {
+    if let Err(err) = run().await {
+        tracing::error!("{err}");
+        std::process::exit(1);
+    }
 }

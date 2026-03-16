@@ -766,6 +766,33 @@ mod tests {
     }
 
     #[test]
+    fn consume_private_string_byte_handles_escape_and_st_terminators() {
+        let mut esc_pending = false;
+        assert!(matches!(
+            StateDetector::consume_private_string_byte(0x1b, &mut esc_pending),
+            None
+        ));
+        assert!(esc_pending);
+        assert!(matches!(
+            StateDetector::consume_private_string_byte(b'\\', &mut esc_pending),
+            Some(EscapeState::Normal)
+        ));
+
+        esc_pending = false;
+        assert!(matches!(
+            StateDetector::consume_private_string_byte(0x9c, &mut esc_pending),
+            Some(EscapeState::Normal)
+        ));
+
+        esc_pending = true;
+        assert!(matches!(
+            StateDetector::consume_private_string_byte(b'x', &mut esc_pending),
+            None
+        ));
+        assert!(!esc_pending);
+    }
+
+    #[test]
     fn error_pattern_detected() {
         let (mut d, log) = detector_with_log();
         // Force to busy first so error is a real transition.

@@ -101,6 +101,16 @@ pub struct ReplayCursor {
     pub replay_window_start_seq: u64,
 }
 
+enum ReplayPlan {
+    None,
+    Frames(Vec<(u64, Vec<u8>)>),
+    Truncated {
+        requested_resume_from_seq: u64,
+        replay_window_start_seq: u64,
+        latest_seq: u64,
+    },
+}
+
 // ---------------------------------------------------------------------------
 // Actor handle -- cheaply cloneable reference to a running actor
 // ---------------------------------------------------------------------------
@@ -127,6 +137,21 @@ impl ActorHandle {
     /// Subscribe to this session's control events (state changes, title updates).
     pub fn subscribe_events(&self) -> broadcast::Receiver<ControlEvent> {
         self.event_tx.subscribe()
+    }
+
+    #[cfg(test)]
+    pub fn test_handle(
+        session_id: impl Into<String>,
+        tmux_name: impl Into<String>,
+        cmd_tx: mpsc::Sender<SessionCommand>,
+    ) -> Self {
+        let (event_tx, _) = broadcast::channel(16);
+        Self {
+            session_id: session_id.into(),
+            tmux_name: tmux_name.into(),
+            cmd_tx,
+            event_tx,
+        }
     }
 }
 
@@ -319,18 +344,25 @@ impl SessionActor {
     /// Main actor loop. Owns all mutable state for this session.
     async fn run(mut self) {
         info!(session_id = %self.session_id, tmux = %self.tmux_name, "session actor started");
+        let Some(mut pty_rx) = self.start_pty_reader() else {
+            return;
+        };
+        self.prime_tmux_metadata().await;
 
-        // Spawn a blocking task to read from the PTY. Output is forwarded
-        // through a bounded channel.
-        let (pty_tx, mut pty_rx) = mpsc::channel::<Vec<u8>>(256);
+        let mut pty_closed = false;
+        while self.run_iteration(&mut pty_rx, &mut pty_closed).await {}
+
+        info!(session_id = %self.session_id, "session actor stopped");
+    }
+
+    fn start_pty_reader(&self) -> Option<mpsc::Receiver<Vec<u8>>> {
+        let (pty_tx, pty_rx) = mpsc::channel::<Vec<u8>>(256);
         let session_id_for_reader = self.session_id.clone();
-
-        // Take a reader from the master PTY for the blocking read loop.
         let reader = match self.master.try_clone_reader() {
-            Ok(r) => r,
+            Ok(reader) => reader,
             Err(e) => {
                 error!(session_id = %self.session_id, "failed to clone PTY reader: {}", e);
-                return;
+                return None;
             }
         };
 
@@ -338,147 +370,212 @@ impl SessionActor {
             pty_read_loop(session_id_for_reader, reader, pty_tx);
         });
 
-        // Prime cwd from tmux's authoritative pane path.
+        Some(pty_rx)
+    }
+
+    async fn prime_tmux_metadata(&mut self) {
         self.maybe_refresh_cwd_from_tmux(true).await;
         self.maybe_refresh_tool_from_tmux(true).await;
+    }
 
-        let mut pty_closed = false;
-
-        loop {
-            // Compute the next timer deadline from both StateDetector and ScrollGuard.
-            let next_timer = self.next_timer_deadline();
-
-            tokio::select! {
-                // --- PTY output ---
-                result = pty_rx.recv(), if !pty_closed => {
-                    match result {
-                        Some(raw) => {
-                            self.handle_pty_output(raw).await;
-                        }
-                        None => {
-                            info!(session_id = %self.session_id, "PTY channel closed (process exit)");
-                            pty_closed = true;
-                            let prev = self.state_detector.state();
-                            // Persist exited state even if no websocket subscriber is connected.
-                            self.state_detector.mark_exited();
-                            let _ = self.maybe_emit_state_change_with_exit_reason(
-                                prev,
-                                Some("process_exit".to_string()),
-                            );
-                        }
-                    }
-                }
-
-                // --- Inbound commands ---
-                Some(cmd) = self.cmd_rx.recv() => {
-                    match cmd {
-                        SessionCommand::WriteInput(data) => {
-                            if pty_closed {
-                                debug!(session_id = %self.session_id, "ignoring write to exited PTY");
-                            } else {
-                                if write_input_counts_as_activity(&data) {
-                                    self.scroll_guard.notify_input();
-                                    let state_before = self.state_detector.state();
-                                    self.state_detector.note_input();
-                                    let _ = self.maybe_emit_state_change(state_before);
-                                }
-                                self.update_last_skill_from_input(&data);
-                                if let Err(e) = self.writer.write_all(&data) {
-                                    error!(session_id = %self.session_id, "PTY write error: {}", e);
-                                }
-                            }
-                        }
-                        SessionCommand::Resize { cols, rows } => {
-                            self.cols = cols;
-                            self.rows = rows;
-                            let size = PtySize {
-                                rows,
-                                cols,
-                                pixel_width: 0,
-                                pixel_height: 0,
-                            };
-                            if let Err(e) = self.master.resize(size) {
-                                error!(session_id = %self.session_id, "PTY resize error: {}", e);
-                            }
-                        }
-                        SessionCommand::DismissAttention => {
-                            let state_before = self.state_detector.state();
-                            self.state_detector.dismiss_attention();
-                            if matches!(
-                                self.maybe_emit_state_change(state_before),
-                                Some(SessionState::Idle)
-                            ) {
-                                self.maybe_refresh_cwd_from_tmux(false).await;
-                            }
-                        }
-                        SessionCommand::Subscribe {
-                            client_id,
-                            client_tx,
-                            resume_from_seq,
-                            ack,
-                        } => {
-                            let outcome = self
-                                .handle_subscribe(client_id, client_tx, resume_from_seq)
-                                .await;
-                            let _ = ack.send(outcome);
-                        }
-                        SessionCommand::Unsubscribe { client_id } => {
-                            self.subscribers.remove(&client_id);
-                            debug!(session_id = %self.session_id, client_id, "client unsubscribed");
-                        }
-                        SessionCommand::GetSnapshot(reply) => {
-                            let snap = self.build_snapshot().await;
-                            let _ = reply.send(snap);
-                        }
-                        SessionCommand::GetPaneTail { lines, reply } => {
-                            let tmux_name = self.tmux_name.clone();
-                            let text = match capture_pane_tail(&tmux_name, lines).await {
-                                Ok(text) => text,
-                                Err(e) => {
-                                    debug!(
-                                        session_id = %self.session_id,
-                                        tmux_name = %tmux_name,
-                                        "tmux capture-pane failed: {}",
-                                        e
-                                    );
-                                    String::new()
-                                }
-                            };
-                            let _ = reply.send(text);
-                        }
-                        SessionCommand::GetSummary(reply) => {
-                            self.maybe_refresh_cwd_from_tmux(false).await;
-                            self.maybe_refresh_tool_from_tmux(false).await;
-                            let summary = self.build_summary();
-                            let _ = reply.send(summary);
-                        }
-                        SessionCommand::GetReplayCursor(reply) => {
-                            let _ = reply.send(ReplayCursor {
-                                latest_seq: self.replay_ring.latest_seq(),
-                                replay_window_start_seq: self.replay_ring.window_start_seq(),
-                            });
-                        }
-                        SessionCommand::Shutdown => {
-                            info!(session_id = %self.session_id, "shutdown requested, detaching");
-                            break;
-                        }
-                    }
-                }
-
-                // --- Timer tick for state detector / scroll guard deadlines ---
-                _ = Self::sleep_until_deadline(next_timer) => {
-                    self.fire_timers().await;
-                }
-
-                // If both channels close, the actor exits.
-                else => {
-                    info!(session_id = %self.session_id, "all channels closed, actor exiting");
-                    break;
-                }
+    async fn run_iteration(
+        &mut self,
+        pty_rx: &mut mpsc::Receiver<Vec<u8>>,
+        pty_closed: &mut bool,
+    ) -> bool {
+        let next_timer = self.next_timer_deadline();
+        tokio::select! {
+            result = pty_rx.recv(), if !*pty_closed => {
+                self.handle_pty_read_result(result, pty_closed).await;
+                true
+            }
+            Some(cmd) = self.cmd_rx.recv() => self.handle_command(cmd, *pty_closed).await,
+            _ = Self::sleep_until_deadline(next_timer) => {
+                self.fire_timers().await;
+                true
+            }
+            else => {
+                info!(session_id = %self.session_id, "all channels closed, actor exiting");
+                false
             }
         }
+    }
 
-        info!(session_id = %self.session_id, "session actor stopped");
+    async fn handle_pty_read_result(
+        &mut self,
+        result: Option<Vec<u8>>,
+        pty_closed: &mut bool,
+    ) {
+        match result {
+            Some(raw) => self.handle_pty_output(raw).await,
+            None => self.mark_pty_closed(pty_closed),
+        }
+    }
+
+    fn mark_pty_closed(&mut self, pty_closed: &mut bool) {
+        info!(session_id = %self.session_id, "PTY channel closed (process exit)");
+        *pty_closed = true;
+        let prev = self.state_detector.state();
+        self.state_detector.mark_exited();
+        let _ = self.maybe_emit_state_change_with_exit_reason(prev, Some("process_exit".to_string()));
+    }
+
+    async fn handle_command(&mut self, cmd: SessionCommand, pty_closed: bool) -> bool {
+        match cmd {
+            SessionCommand::WriteInput(data) => self.handle_write_input(data, pty_closed),
+            SessionCommand::Resize { cols, rows } => self.handle_resize(cols, rows),
+            SessionCommand::DismissAttention => self.handle_dismiss_attention().await,
+            SessionCommand::Subscribe {
+                client_id,
+                client_tx,
+                resume_from_seq,
+                ack,
+            } => {
+                let outcome = self
+                    .handle_subscribe(client_id, client_tx, resume_from_seq)
+                    .await;
+                let _ = ack.send(outcome);
+            }
+            SessionCommand::Unsubscribe { client_id } => self.handle_unsubscribe(client_id),
+            SessionCommand::GetSnapshot(reply) => {
+                let snap = self.build_snapshot().await;
+                let _ = reply.send(snap);
+            }
+            SessionCommand::GetPaneTail { lines, reply } => {
+                let text = capture_pane_tail_or_empty(
+                    self.session_id.clone(),
+                    self.tmux_name.clone(),
+                    lines,
+                )
+                .await;
+                let _ = reply.send(text);
+            }
+            SessionCommand::GetSummary(reply) => {
+                self.maybe_refresh_cwd_from_tmux(false).await;
+                self.maybe_refresh_tool_from_tmux(false).await;
+                let _ = reply.send(self.build_summary());
+            }
+            SessionCommand::GetReplayCursor(reply) => {
+                let _ = reply.send(self.replay_cursor());
+            }
+            SessionCommand::Shutdown => {
+                info!(session_id = %self.session_id, "shutdown requested, detaching");
+                return false;
+            }
+        }
+        true
+    }
+
+    fn handle_write_input(&mut self, data: Vec<u8>, pty_closed: bool) {
+        if pty_closed {
+            debug!(session_id = %self.session_id, "ignoring write to exited PTY");
+            return;
+        }
+
+        if write_input_counts_as_activity(&data) {
+            self.scroll_guard.notify_input();
+            let state_before = self.state_detector.state();
+            self.state_detector.note_input();
+            let _ = self.maybe_emit_state_change(state_before);
+        }
+        self.update_last_skill_from_input(&data);
+        if let Err(e) = self.writer.write_all(&data) {
+            error!(session_id = %self.session_id, "PTY write error: {}", e);
+        }
+    }
+
+    fn handle_resize(&mut self, cols: u16, rows: u16) {
+        self.cols = cols;
+        self.rows = rows;
+        let size = PtySize {
+            rows,
+            cols,
+            pixel_width: 0,
+            pixel_height: 0,
+        };
+        if let Err(e) = self.master.resize(size) {
+            error!(session_id = %self.session_id, "PTY resize error: {}", e);
+        }
+    }
+
+    async fn handle_dismiss_attention(&mut self) {
+        let state_before = self.state_detector.state();
+        self.state_detector.dismiss_attention();
+        if matches!(self.maybe_emit_state_change(state_before), Some(SessionState::Idle)) {
+            self.maybe_refresh_cwd_from_tmux(false).await;
+        }
+    }
+
+    fn handle_unsubscribe(&mut self, client_id: ClientId) {
+        self.subscribers.remove(&client_id);
+        debug!(session_id = %self.session_id, client_id, "client unsubscribed");
+    }
+
+}
+
+async fn capture_pane_tail_or_empty(session_id: String, tmux_name: String, lines: usize) -> String {
+    match capture_pane_tail(&tmux_name, lines).await {
+        Ok(text) => text,
+        Err(e) => {
+            debug!(
+                session_id = %session_id,
+                tmux_name = %tmux_name,
+                "tmux capture-pane failed: {}",
+                e
+            );
+            String::new()
+        }
+    }
+}
+
+async fn replay_existing_frames(
+    session_id: String,
+    client_id: ClientId,
+    client_tx: &mpsc::Sender<OutputFrame>,
+    replay_plan: ReplayPlan,
+) -> SubscribeOutcome {
+    match replay_plan {
+        ReplayPlan::None => SubscribeOutcome::Ok,
+        ReplayPlan::Frames(frames) => {
+            for (seq, data) in frames {
+                if client_tx.send(OutputFrame { seq, data }).await.is_err() {
+                    warn!(
+                        session_id = %session_id,
+                        client_id,
+                        "subscriber dropped during replay"
+                    );
+                    return SubscribeOutcome::Ok;
+                }
+            }
+            SubscribeOutcome::Ok
+        }
+        ReplayPlan::Truncated {
+            requested_resume_from_seq,
+            replay_window_start_seq,
+            latest_seq,
+        } => {
+            warn!(
+                session_id = %session_id,
+                client_id,
+                requested_resume_from_seq,
+                window_start = replay_window_start_seq,
+                "replay truncated, client needs full refresh"
+            );
+            SubscribeOutcome::ReplayTruncated {
+                requested_resume_from_seq,
+                replay_window_start_seq,
+                latest_seq,
+            }
+        }
+    }
+}
+
+impl SessionActor {
+    fn replay_cursor(&self) -> ReplayCursor {
+        ReplayCursor {
+            latest_seq: self.replay_ring.latest_seq(),
+            replay_window_start_seq: self.replay_ring.window_start_seq(),
+        }
     }
 
     /// Sleep until the given deadline, or pend forever if there is no deadline.
@@ -554,61 +651,42 @@ impl SessionActor {
     /// ScrollGuard returns zero or more chunks (it may buffer for coalescing,
     /// flush a previous buffer alongside new data, or pass through directly).
     async fn handle_pty_output(&mut self, raw: Vec<u8>) {
-        // Detect OSC title sequences in raw output before processing.
         self.detect_and_emit_title(&raw);
-
-        let chunks = self.scroll_guard.process(&raw);
-
-        for chunk in chunks {
-            // Snapshot state before processing for change detection.
-            let state_before = self.state_detector.state();
-
-            // Feed the state detector with each chunk.
-            self.state_detector.process_output(&chunk.data);
-            self.maybe_update_tool_from_current_command();
-
-            // Emit state change event if processing caused a transition.
-            if matches!(
-                self.maybe_emit_state_change(state_before),
-                Some(SessionState::Idle)
-            ) {
-                self.maybe_refresh_cwd_from_tmux(false).await;
-            }
-
-            // On new sessions, clear the replay ring when we first reach idle.
-            // This strips tmux startup output (including DA query/response
-            // sequences) so clients subscribing later get a clean prompt.
-            if self.clear_replay_on_first_idle && self.state_detector.state() == SessionState::Idle
-            {
-                self.clear_replay_on_first_idle = false;
-                self.replay_ring.clear();
-                debug!(
-                    session_id = %self.session_id,
-                    "cleared replay ring on first idle (startup garbage removed)"
-                );
-            }
-
-            self.record_meaningful_output_activity(state_before, &chunk);
-
-            // Store in the replay ring and get the sequence number.
-            let seq = self.replay_ring.push(&chunk.data);
-
-            let frame = OutputFrame {
-                seq,
-                data: chunk.data,
-            };
-
-            // Broadcast to all subscribers.
-            self.broadcast(frame).await;
-
-            // Report aggregate queue depth across subscribers.
-            let total_depth: usize = self
-                .subscribers
-                .values()
-                .map(|tx| tx.max_capacity() - tx.capacity())
-                .sum();
-            crate::metrics::record_queue_depth(&self.session_id, total_depth);
+        for chunk in self.scroll_guard.process(&raw) {
+            self.process_output_chunk(chunk).await;
         }
+    }
+
+    async fn process_output_chunk(&mut self, chunk: ScrollOutputChunk) {
+        let state_before = self.state_detector.state();
+        self.state_detector.process_output(&chunk.data);
+        self.maybe_update_tool_from_current_command();
+        if matches!(self.maybe_emit_state_change(state_before), Some(SessionState::Idle)) {
+            self.maybe_refresh_cwd_from_tmux(false).await;
+        }
+        self.clear_startup_replay_if_idle();
+        self.record_meaningful_output_activity(state_before, &chunk);
+        let seq = self.replay_ring.push(&chunk.data);
+        self.broadcast(OutputFrame { seq, data: chunk.data }).await;
+        crate::metrics::record_queue_depth(&self.session_id, self.total_subscriber_queue_depth());
+    }
+
+    fn clear_startup_replay_if_idle(&mut self) {
+        if self.clear_replay_on_first_idle && self.state_detector.state() == SessionState::Idle {
+            self.clear_replay_on_first_idle = false;
+            self.replay_ring.clear();
+            debug!(
+                session_id = %self.session_id,
+                "cleared replay ring on first idle (startup garbage removed)"
+            );
+        }
+    }
+
+    fn total_subscriber_queue_depth(&self) -> usize {
+        self.subscribers
+            .values()
+            .map(|tx| tx.max_capacity() - tx.capacity())
+            .sum()
     }
 
     fn record_meaningful_output_activity(
@@ -631,86 +709,43 @@ impl SessionActor {
     /// Emits `session_title` ControlEvents and updates internal cwd state.
     fn detect_and_emit_title(&mut self, raw: &[u8]) {
         let text = String::from_utf8_lossy(raw);
+        self.apply_osc7_payloads(&text);
+        self.apply_title_payloads(&text);
+    }
 
-        // OSC 7: working directory notification (file://host/path)
-        {
-            let prefix = "\x1b]7;";
-            let mut search_from = 0;
-            while let Some(start) = text[search_from..].find(prefix) {
-                let uri_start = search_from + start + prefix.len();
-                // BEL or ST (ESC \) terminates the sequence
-                let end = text[uri_start..]
-                    .find('\x07')
-                    .or_else(|| text[uri_start..].find("\x1b\\"));
-                if let Some(end_offset) = end {
-                    let uri = &text[uri_start..uri_start + end_offset];
-                    // Parse file:// URI → extract path
-                    if let Some(path) = uri.strip_prefix("file://") {
-                        // file://hostname/path — skip hostname (up to next /)
-                        let path = if let Some(slash_pos) = path.find('/') {
-                            &path[slash_pos..]
-                        } else {
-                            path
-                        };
-                        // URL-decode percent-encoded characters
-                        let decoded = percent_decode(path);
-                        self.update_cwd_and_emit(decoded);
-                    }
-                    search_from = uri_start + end_offset + 1;
-                } else {
-                    break;
-                }
-            }
-        }
-
-        // OSC 0/2: window title (often contains cwd for shells)
-        for prefix in &["\x1b]0;", "\x1b]2;"] {
-            let mut search_from = 0;
-            while let Some(start) = text[search_from..].find(prefix) {
-                let title_start = search_from + start + prefix.len();
-                if let Some(end_offset) = text[title_start..].find('\x07') {
-                    let title = &text[title_start..title_start + end_offset];
-                    if !title.is_empty() {
-                        // If we don't have a cwd from OSC 7, try to extract from title.
-                        // Common formats: "user@host: /path" or just "/path"
-                        if self.cwd.is_empty() {
-                            if let Some(extracted) = extract_cwd_from_title(title) {
-                                self.cwd = extracted;
-                            }
-                        }
-
-                        // Detect tool name from title (e.g. "claude" in title)
-                        if self.tool.is_none() {
-                            self.tool = detect_tool_from_title(title);
-                            if self.tool.is_some() {
-                                self.state_detector.set_tui_tool_mode(true);
-                            }
-                        }
-
-                        let payload = SessionTitlePayload {
-                            title: title.to_string(),
-                            at: Utc::now(),
-                        };
-                        let event = ControlEvent {
-                            event: "session_title".to_string(),
-                            session_id: self.session_id.clone(),
-                            payload: serde_json::to_value(&payload).unwrap_or_default(),
-                        };
-                        let _ = self.event_tx.send(event);
-                    }
-                    search_from = title_start + end_offset + 1;
-                } else {
-                    break;
-                }
+    fn apply_osc7_payloads(&mut self, text: &str) {
+        for uri in osc_payloads(text, "\x1b]7;") {
+            if let Some(cwd) = cwd_from_osc7_payload(uri) {
+                self.update_cwd_and_emit(cwd);
             }
         }
     }
 
-    async fn maybe_refresh_cwd_from_tmux(&mut self, force: bool) {
-        if !force && self.state_detector.state() != SessionState::Idle {
+    fn apply_title_payloads(&mut self, text: &str) {
+        for title in osc_payloads(text, "\x1b]0;")
+            .into_iter()
+            .chain(osc_payloads(text, "\x1b]2;"))
+        {
+            self.apply_title_payload(title);
+        }
+    }
+
+    fn apply_title_payload(&mut self, title: &str) {
+        if title.is_empty() {
             return;
         }
-        if !force && self.last_cwd_refresh_at.elapsed() < CWD_REFRESH_MIN_INTERVAL {
+        self.update_cwd_from_title(title);
+        self.update_tool_from_title(title);
+        self.emit_title_event(title);
+    }
+
+    async fn maybe_refresh_cwd_from_tmux(&mut self, force: bool) {
+        if !should_refresh_cwd_from_tmux(
+            force,
+            self.state_detector.state(),
+            self.last_cwd_refresh_at,
+            Instant::now(),
+        ) {
             return;
         }
         self.last_cwd_refresh_at = Instant::now();
@@ -744,13 +779,13 @@ impl SessionActor {
     }
 
     async fn maybe_refresh_tool_from_tmux(&mut self, force: bool) {
-        if !force && self.last_tool_refresh_at.elapsed() < TOOL_REFRESH_MIN_INTERVAL {
-            return;
-        }
-
-        // Once we know the tool and the pane is idle, keep the last detected
-        // tool without polling process state every summary tick.
-        if !force && self.tool.is_some() && self.state_detector.state() == SessionState::Idle {
+        if !should_refresh_tool_from_tmux(
+            force,
+            self.state_detector.state(),
+            self.tool.as_deref(),
+            self.last_tool_refresh_at,
+            Instant::now(),
+        ) {
             return;
         }
 
@@ -785,6 +820,36 @@ impl SessionActor {
         self.cwd = normalized.to_string();
         let payload = SessionTitlePayload {
             title: self.cwd.clone(),
+            at: Utc::now(),
+        };
+        let event = ControlEvent {
+            event: "session_title".to_string(),
+            session_id: self.session_id.clone(),
+            payload: serde_json::to_value(&payload).unwrap_or_default(),
+        };
+        let _ = self.event_tx.send(event);
+    }
+
+    fn update_cwd_from_title(&mut self, title: &str) {
+        if self.cwd.is_empty() {
+            if let Some(extracted) = extract_cwd_from_title(title) {
+                self.cwd = extracted;
+            }
+        }
+    }
+
+    fn update_tool_from_title(&mut self, title: &str) {
+        if self.tool.is_none() {
+            self.tool = detect_tool_from_title(title);
+            if self.tool.is_some() {
+                self.state_detector.set_tui_tool_mode(true);
+            }
+        }
+    }
+
+    fn emit_title_event(&self, title: &str) {
+        let payload = SessionTitlePayload {
+            title: title.to_string(),
             at: Utc::now(),
         };
         let event = ControlEvent {
@@ -884,47 +949,31 @@ impl SessionActor {
             "client subscribing"
         );
 
-        let mut outcome = SubscribeOutcome::Ok;
-
-        // If the client wants replay, send buffered frames first.
-        if let Some(from_seq) = resume_from_seq {
-            let replay_from_seq = from_seq.saturating_add(1);
-            match self.replay_ring.replay_from(replay_from_seq) {
-                Some(frames) => {
-                    for (seq, data) in frames {
-                        let frame = OutputFrame { seq, data };
-                        if client_tx.send(frame).await.is_err() {
-                            warn!(
-                                session_id = %self.session_id,
-                                client_id,
-                                "subscriber dropped during replay"
-                            );
-                            return SubscribeOutcome::Ok;
-                        }
-                    }
-                }
-                None => {
-                    // Data has been truncated. We still add the subscriber but
-                    // the caller should check replay_ring state and send a
-                    // REPLAY_TRUNCATED control event.
-                    warn!(
-                        session_id = %self.session_id,
-                        client_id,
-                        from_seq,
-                        window_start = self.replay_ring.window_start_seq(),
-                        "replay truncated, client needs full refresh"
-                    );
-                    outcome = SubscribeOutcome::ReplayTruncated {
-                        requested_resume_from_seq: from_seq,
-                        replay_window_start_seq: self.replay_ring.window_start_seq(),
-                        latest_seq: self.replay_ring.latest_seq(),
-                    };
-                }
-            }
-        }
-
+        let outcome = replay_existing_frames(
+            self.session_id.clone(),
+            client_id,
+            &client_tx,
+            self.replay_plan(resume_from_seq),
+        )
+        .await;
         self.subscribers.insert(client_id, client_tx);
         outcome
+    }
+
+    fn replay_plan(&self, resume_from_seq: Option<u64>) -> ReplayPlan {
+        let Some(from_seq) = resume_from_seq else {
+            return ReplayPlan::None;
+        };
+
+        let Some(frames) = self.replay_ring.replay_from(from_seq.saturating_add(1)) else {
+            return ReplayPlan::Truncated {
+                requested_resume_from_seq: from_seq,
+                replay_window_start_seq: self.replay_ring.window_start_seq(),
+                latest_seq: self.replay_ring.latest_seq(),
+            };
+        };
+
+        ReplayPlan::Frames(frames)
     }
 
     /// Build a terminal snapshot using tmux capture-pane, falling back to the
@@ -1075,6 +1124,35 @@ fn output_counts_as_meaningful_activity(
     }
 
     visible_output_is_meaningful(&chunk.data)
+}
+
+fn should_refresh_cwd_from_tmux(
+    force: bool,
+    state: SessionState,
+    last_refresh_at: Instant,
+    now: Instant,
+) -> bool {
+    force
+        || (state == SessionState::Idle
+            && now.duration_since(last_refresh_at) >= CWD_REFRESH_MIN_INTERVAL)
+}
+
+fn should_refresh_tool_from_tmux(
+    force: bool,
+    state: SessionState,
+    tool: Option<&str>,
+    last_refresh_at: Instant,
+    now: Instant,
+) -> bool {
+    if force {
+        return true;
+    }
+
+    if now.duration_since(last_refresh_at) < TOOL_REFRESH_MIN_INTERVAL {
+        return false;
+    }
+
+    !(tool.is_some() && state == SessionState::Idle)
 }
 
 fn visible_output_is_meaningful(data: &[u8]) -> bool {
@@ -1329,6 +1407,42 @@ fn detect_tool_from_command_line(command: &str) -> Option<&'static str> {
         }
     }
     None
+}
+
+fn osc_payloads<'a>(text: &'a str, prefix: &str) -> Vec<&'a str> {
+    let mut payloads = Vec::new();
+    let mut search_from = 0;
+
+    while let Some(start) = text[search_from..].find(prefix) {
+        let payload_start = search_from + start + prefix.len();
+        let Some((end_offset, terminator_len)) = find_osc_payload_end(&text[payload_start..]) else {
+            break;
+        };
+        payloads.push(&text[payload_start..payload_start + end_offset]);
+        search_from = payload_start + end_offset + terminator_len;
+    }
+
+    payloads
+}
+
+fn find_osc_payload_end(text: &str) -> Option<(usize, usize)> {
+    let bel = text.find('\x07').map(|offset| (offset, 1));
+    let st = text.find("\x1b\\").map(|offset| (offset, 2));
+    match (bel, st) {
+        (Some(left), Some(right)) => Some(if left.0 <= right.0 { left } else { right }),
+        (Some(end), None) | (None, Some(end)) => Some(end),
+        (None, None) => None,
+    }
+}
+
+fn cwd_from_osc7_payload(payload: &str) -> Option<String> {
+    let path = payload.strip_prefix("file://")?;
+    let path = if let Some(slash_pos) = path.find('/') {
+        &path[slash_pos..]
+    } else {
+        path
+    };
+    Some(percent_decode(path))
 }
 
 // ---------------------------------------------------------------------------
@@ -1685,14 +1799,19 @@ fn pty_read_loop(
 #[cfg(test)]
 mod tests {
     use super::{
-        detect_skill_from_input_line, detect_tool_from_command_line,
-        detect_tool_from_process_entry, drain_completed_input_lines,
-        output_counts_as_meaningful_activity, parse_process_entry, resolve_tmux_terminal_env,
-        visible_output_is_meaningful, write_input_counts_as_activity, ProcessEntry,
+        detect_skill_from_input_line, detect_tool_from_command_line, detect_tool_from_process_entry,
+        drain_completed_input_lines, extract_cwd_from_title, line_looks_prompt_like,
+        normalize_skill_name, output_counts_as_meaningful_activity, parse_process_entry,
+        percent_decode, query_tool_from_tmux_process_tree, resolve_tmux_terminal_env,
+        should_refresh_cwd_from_tmux, should_refresh_tool_from_tmux, visible_output_is_meaningful,
+        write_input_counts_as_activity, ProcessEntry, CWD_REFRESH_MIN_INTERVAL,
+        TOOL_REFRESH_MIN_INTERVAL, cwd_from_osc7_payload, find_osc_payload_end, osc_payloads,
     };
     use crate::scroll::guard::ScrollOutputChunk;
     use crate::session::replay_ring::ReplayRing;
     use crate::types::SessionState;
+    use std::os::unix::fs::PermissionsExt;
+    use std::time::Instant;
 
     #[test]
     fn detect_tool_from_command_line_handles_aliases() {
@@ -1736,6 +1855,211 @@ mod tests {
             detect_tool_from_process_entry(&from_args),
             Some("Claude Code")
         );
+    }
+
+    #[test]
+    fn line_looks_prompt_like_handles_common_prompt_shapes() {
+        assert!(line_looks_prompt_like("$"));
+        assert!(line_looks_prompt_like("user@host:/tmp/project$"));
+        assert!(line_looks_prompt_like("~/repo %"));
+        assert!(!line_looks_prompt_like("42%"));
+        assert!(!line_looks_prompt_like("build finished successfully >"));
+        assert!(!line_looks_prompt_like("123,456%"));
+    }
+
+    #[test]
+    fn extract_cwd_from_title_supports_absolute_home_and_host_prefixed_paths() {
+        let _guard = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let previous_home = std::env::var_os("HOME");
+        std::env::set_var("HOME", "/Users/tester");
+
+        assert_eq!(
+            extract_cwd_from_title("user@host:/tmp/project"),
+            Some("/tmp/project".to_string())
+        );
+        assert_eq!(
+            extract_cwd_from_title("user@host: /tmp/other"),
+            Some("/tmp/other".to_string())
+        );
+        assert_eq!(
+            extract_cwd_from_title("/var/tmp"),
+            Some("/var/tmp".to_string())
+        );
+        assert_eq!(
+            extract_cwd_from_title("~/repo"),
+            Some("/Users/tester/repo".to_string())
+        );
+        assert_eq!(extract_cwd_from_title("plain-title"), None);
+
+        if let Some(value) = previous_home {
+            std::env::set_var("HOME", value);
+        } else {
+            std::env::remove_var("HOME");
+        }
+    }
+
+    #[test]
+    fn percent_decode_decodes_hex_sequences_and_keeps_invalid_ones() {
+        assert_eq!(percent_decode("/tmp/My%20Repo"), "/tmp/My Repo");
+        assert_eq!(percent_decode("%ZZ/path"), "%/path");
+    }
+
+    #[test]
+    fn normalize_skill_name_rejects_blank_and_invalid_values() {
+        assert_eq!(normalize_skill_name("  "), None);
+        assert_eq!(normalize_skill_name("bad!skill"), None);
+        assert_eq!(normalize_skill_name(" Commit "), Some("commit".to_string()));
+    }
+
+    #[test]
+    fn osc_payload_helpers_extract_bel_and_st_terminated_sequences() {
+        let text = "\x1b]7;file://host/tmp/project\x1b\\ middle \x1b]2;codex\x07";
+        assert_eq!(find_osc_payload_end("title\x07tail"), Some((5, 1)));
+        assert_eq!(find_osc_payload_end("title\x1b\\tail"), Some((5, 2)));
+        assert_eq!(
+            osc_payloads(text, "\x1b]7;"),
+            vec!["file://host/tmp/project"]
+        );
+        assert_eq!(osc_payloads(text, "\x1b]2;"), vec!["codex"]);
+        assert_eq!(
+            cwd_from_osc7_payload("file://host/tmp/My%20Repo"),
+            Some("/tmp/My Repo".to_string())
+        );
+    }
+
+    #[test]
+    fn refresh_predicates_only_poll_when_needed() {
+        let now = Instant::now();
+        assert!(should_refresh_cwd_from_tmux(
+            true,
+            SessionState::Busy,
+            now,
+            now
+        ));
+        assert!(!should_refresh_cwd_from_tmux(
+            false,
+            SessionState::Busy,
+            now - CWD_REFRESH_MIN_INTERVAL,
+            now
+        ));
+        assert!(should_refresh_cwd_from_tmux(
+            false,
+            SessionState::Idle,
+            now - CWD_REFRESH_MIN_INTERVAL,
+            now
+        ));
+
+        assert!(should_refresh_tool_from_tmux(
+            true,
+            SessionState::Idle,
+            Some("Codex"),
+            now,
+            now
+        ));
+        assert!(!should_refresh_tool_from_tmux(
+            false,
+            SessionState::Busy,
+            None,
+            now,
+            now
+        ));
+        assert!(!should_refresh_tool_from_tmux(
+            false,
+            SessionState::Idle,
+            Some("Codex"),
+            now - TOOL_REFRESH_MIN_INTERVAL,
+            now
+        ));
+        assert!(should_refresh_tool_from_tmux(
+            false,
+            SessionState::Busy,
+            Some("Codex"),
+            now - TOOL_REFRESH_MIN_INTERVAL,
+            now
+        ));
+    }
+
+    #[tokio::test]
+    async fn query_tool_from_tmux_process_tree_uses_current_command_fast_path() {
+        let _guard = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let dir = tempfile::tempdir().expect("tempdir");
+        let bin_dir = dir.path().join("bin");
+        std::fs::create_dir_all(&bin_dir).expect("bin dir");
+        let tmux = bin_dir.join("tmux");
+        std::fs::write(
+            &tmux,
+            "#!/bin/sh\nif [ \"${5-}\" = \"#{pane_current_command}\" ]; then\n  printf 'codex\\n'\nelse\n  printf '101\\n'\nfi\n",
+        )
+        .expect("tmux");
+        let mut perms = std::fs::metadata(&tmux).expect("metadata").permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&tmux, perms).expect("chmod");
+
+        let previous_path = std::env::var_os("PATH");
+        std::env::set_var("PATH", std::env::join_paths([bin_dir.as_path()]).expect("path"));
+
+        let tool = query_tool_from_tmux_process_tree("demo")
+            .await
+            .expect("tool query");
+        assert_eq!(tool.as_deref(), Some("Codex"));
+
+        if let Some(value) = previous_path {
+            std::env::set_var("PATH", value);
+        } else {
+            std::env::remove_var("PATH");
+        }
+    }
+
+    #[tokio::test]
+    async fn query_tool_from_tmux_process_tree_walks_process_children_when_needed() {
+        let _guard = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let dir = tempfile::tempdir().expect("tempdir");
+        let bin_dir = dir.path().join("bin");
+        std::fs::create_dir_all(&bin_dir).expect("bin dir");
+
+        let tmux = bin_dir.join("tmux");
+        std::fs::write(
+            &tmux,
+            r##"#!/bin/sh
+if [ "${5-}" = "#{pane_current_command}" ]; then
+  printf 'bash\n'
+else
+  printf '101\n'
+fi
+"##,
+        )
+        .expect("tmux");
+        let ps = bin_dir.join("ps");
+        std::fs::write(
+            &ps,
+            "#!/bin/sh\nprintf '101 1 bash bash\\n102 101 node /usr/local/bin/claude --print\\n'\n",
+        )
+        .expect("ps");
+        for path in [&tmux, &ps] {
+            let mut perms = std::fs::metadata(path).expect("metadata").permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(path, perms).expect("chmod");
+        }
+
+        let previous_path = std::env::var_os("PATH");
+        std::env::set_var("PATH", std::env::join_paths([bin_dir.as_path()]).expect("path"));
+
+        let tool = query_tool_from_tmux_process_tree("demo")
+            .await
+            .expect("tool query");
+        assert_eq!(tool.as_deref(), Some("Claude Code"));
+
+        if let Some(value) = previous_path {
+            std::env::set_var("PATH", value);
+        } else {
+            std::env::remove_var("PATH");
+        }
     }
 
     #[test]

@@ -6475,4 +6475,289 @@ mod tests {
             vec![Some("sess-throngterm".to_string())]
         );
     }
+
+    #[test]
+    fn picker_action_at_resolves_controls_and_entries() {
+        let mut picker = PickerState::new(4, 4, dir_response("/tmp", &[("alpha", true), ("beta", false)]), true);
+        picker.apply_response(dir_response("/tmp/nested", &[("child", false)]));
+        let layout = picker_layout(&picker, test_field());
+
+        assert!(matches!(
+            picker_action_at(&picker, layout, layout.close_button.x, layout.close_button.y),
+            Some(PickerAction::Close)
+        ));
+        assert!(matches!(
+            picker_action_at(&picker, layout, layout.env_button.x, layout.env_button.y),
+            Some(PickerAction::ToggleManaged(true))
+        ));
+        assert!(matches!(
+            picker_action_at(&picker, layout, layout.all_button.x, layout.all_button.y),
+            Some(PickerAction::ToggleManaged(false))
+        ));
+        assert!(matches!(
+            picker_action_at(
+                &picker,
+                layout,
+                layout.spawn_here_button.x,
+                layout.spawn_here_button.y
+            ),
+            Some(PickerAction::ActivateCurrentPath)
+        ));
+        assert!(matches!(
+            picker_action_at(&picker, layout, layout.content.x, layout.first_entry_y),
+            Some(PickerAction::ActivateEntry(0))
+        ));
+        assert!(matches!(
+            picker_action_at(&picker, layout, layout.content.right(), layout.first_entry_y),
+            None
+        ));
+        assert!(matches!(
+            layout.back_button.and_then(|button| picker_action_at(&picker, layout, button.x, button.y)),
+            Some(PickerAction::Up)
+        ));
+    }
+
+    #[test]
+    fn renderer_flush_copies_drawn_cells_into_last_buffer() {
+        let mut renderer = test_renderer(4, 2);
+        renderer.draw_char(0, 0, 'A', Color::Green);
+        renderer.draw_char(1, 0, 'B', Color::Yellow);
+
+        renderer.flush().expect("flush should succeed");
+
+        assert!(renderer
+            .buffer
+            .iter()
+            .zip(renderer.last_buffer.iter())
+            .all(|(current, previous)| current == previous));
+    }
+
+    #[test]
+    fn move_selection_updates_picker_and_visible_session_selection() {
+        let api = MockApi::new();
+        let layout = test_layout(120, 32);
+        let mut app = make_app(api.clone());
+        app.merge_sessions(
+            vec![
+                session_summary("sess-1", "1", "/Users/b/repos/alpha"),
+                session_summary("sess-2", "2", "/Users/b/repos/beta"),
+            ],
+            layout.overview_field,
+        );
+
+        app.move_selection(1, layout.overview_field);
+        assert_eq!(app.selected_id.as_deref(), Some("sess-2"));
+
+        let mut picker = PickerState::new(3, 3, dir_response("/tmp", &[("alpha", false), ("beta", false)]), true);
+        picker.selection = PickerSelection::SpawnHere;
+        app.picker = Some(picker);
+
+        app.move_selection(1, layout.overview_field);
+
+        assert!(matches!(
+            app.picker.as_ref().map(|picker| picker.selection),
+            Some(PickerSelection::Entry(0))
+        ));
+    }
+
+    #[test]
+    fn handle_key_event_covers_initial_request_picker_and_quit_paths() {
+        let api = MockApi::new();
+        let layout = test_layout(120, 32);
+        let mut app = make_app(api.clone());
+        app.merge_sessions(
+            vec![
+                session_summary("sess-1", "1", "/Users/b/repos/alpha"),
+                session_summary("sess-2", "2", "/Users/b/repos/beta"),
+            ],
+            layout.overview_field,
+        );
+
+        app.open_initial_request("/tmp/project".to_string());
+        assert!(handle_key_event(
+            &mut app,
+            layout,
+            KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE),
+        ));
+        assert_eq!(
+            app.initial_request.as_ref().map(|state| state.value.as_str()),
+            Some("x")
+        );
+
+        app.close_initial_request();
+        app.picker = Some(PickerState::new(
+            3,
+            3,
+            dir_response("/tmp", &[("alpha", false)]),
+            true,
+        ));
+        assert!(handle_key_event(
+            &mut app,
+            layout,
+            KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+        ));
+        assert!(app.picker.is_none());
+
+        assert!(handle_key_event(
+            &mut app,
+            layout,
+            KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
+        ));
+        assert_eq!(app.selected_id.as_deref(), Some("sess-2"));
+
+        assert!(!handle_key_event(
+            &mut app,
+            layout,
+            KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE),
+        ));
+    }
+
+    #[test]
+    fn picker_activate_selection_opens_initial_request_and_reloads_children() {
+        let api = MockApi::new();
+        let layout = test_layout(120, 32);
+        let mut app = make_app(api.clone());
+        app.picker = Some(PickerState::new(
+            2,
+            2,
+            dir_response("/tmp", &[("child", true), ("leaf", false)]),
+            true,
+        ));
+
+        app.picker_activate_selection(layout.overview_field);
+        assert_eq!(
+            app.initial_request.as_ref().map(|state| state.cwd.as_str()),
+            Some("/tmp")
+        );
+
+        app.close_initial_request();
+        if let Some(picker) = &mut app.picker {
+            picker.selection = PickerSelection::Entry(0);
+        }
+        api.push_list_dirs(Ok(dir_response("/tmp/child", &[("nested", false)])));
+        app.picker_activate_selection(layout.overview_field);
+        assert_eq!(
+            api.list_calls(),
+            vec![(Some("/tmp/child".to_string()), true)]
+        );
+
+        if let Some(picker) = &mut app.picker {
+            picker.apply_response(dir_response("/tmp", &[("leaf", false)]));
+            picker.selection = PickerSelection::Entry(0);
+        }
+        app.picker_activate_selection(layout.overview_field);
+        assert_eq!(
+            app.initial_request.as_ref().map(|state| state.cwd.as_str()),
+            Some("/tmp/leaf")
+        );
+    }
+
+    #[test]
+    fn handle_workspace_click_routes_thought_and_overview_interactions() {
+        let api = MockApi::new();
+        let layout = test_layout(120, 32);
+        let thought_content = layout
+            .thought_content
+            .expect("wide layout enables thought rail");
+        let mut app = make_app(api);
+        app.merge_sessions(
+            vec![session_summary("sess-1", "7", "/Users/b/repos/throngterm")],
+            layout.overview_field,
+        );
+        app.capture_thought_updates(
+            &[session_summary_with_thought(
+                "sess-1",
+                "7",
+                "/Users/b/repos/throngterm",
+                "patching tui",
+                "2026-03-08T14:00:05Z",
+            )],
+            layout.thought_entry_capacity(),
+        );
+
+        let panel = build_thought_panel(&app, thought_content, layout.thought_entry_capacity());
+        let row_y = thought_content
+            .bottom()
+            .saturating_sub(panel.rows.len() as u16);
+        let body_x = thought_content
+            .x
+            .saturating_add(display_width("7").saturating_add(3));
+        handle_workspace_click(
+            &mut app,
+            layout,
+            crossterm::event::MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: body_x,
+                row: row_y,
+                modifiers: KeyModifiers::NONE,
+            },
+        );
+        assert_eq!(app.thought_filter.tmux_name.as_deref(), Some("7"));
+
+        let entity_rect = entity_rect_for(&app, "sess-1", layout.overview_field);
+        handle_workspace_click(
+            &mut app,
+            layout,
+            crossterm::event::MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: entity_rect.x,
+                row: entity_rect.y,
+                modifiers: KeyModifiers::NONE,
+            },
+        );
+        assert_eq!(app.selected_id.as_deref(), Some("sess-1"));
+    }
+
+    #[test]
+    fn handle_tui_event_covers_key_paste_mouse_and_resize_paths() {
+        let api = MockApi::new();
+        let layout = test_layout(120, 32);
+        let mut app = make_app(api);
+        let mut renderer = test_renderer(120, 32);
+        app.open_initial_request("/tmp/project".to_string());
+
+        assert!(handle_tui_event(
+            &mut app,
+            &mut renderer,
+            layout,
+            Event::Paste("hello".to_string()),
+        )
+        .expect("paste event should succeed"));
+        assert_eq!(
+            app.initial_request.as_ref().map(|state| state.value.as_str()),
+            Some("hello")
+        );
+
+        app.close_initial_request();
+        assert!(!handle_tui_event(
+            &mut app,
+            &mut renderer,
+            layout,
+            Event::Key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE)),
+        )
+        .expect("quit key should succeed"));
+
+        assert!(handle_tui_event(
+            &mut app,
+            &mut renderer,
+            layout,
+            Event::Mouse(crossterm::event::MouseEvent {
+                kind: MouseEventKind::Up(MouseButton::Left),
+                column: 10,
+                row: 10,
+                modifiers: KeyModifiers::NONE,
+            }),
+        )
+        .expect("mouse up should succeed"));
+
+        assert!(handle_tui_event(
+            &mut app,
+            &mut renderer,
+            layout,
+            Event::Resize(90, 20),
+        )
+        .expect("resize should succeed"));
+        assert_eq!(renderer.width(), 90);
+        assert_eq!(renderer.height(), 20);
+    }
 }

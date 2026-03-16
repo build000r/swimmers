@@ -237,3 +237,154 @@ async fn list_skills(
 pub fn routes() -> Router<Arc<AppState>> {
     Router::new().route("/v1/skills", get(list_skills))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::api::PublishedSelectionState;
+    use crate::auth::OPERATOR_SCOPES;
+    use crate::config::Config;
+    use crate::session::supervisor::SessionSupervisor;
+    use crate::thought::runtime_config::ThoughtConfig;
+    use axum::body::to_bytes;
+    use axum::extract::{Query, State};
+    use axum::response::IntoResponse;
+    use serde_json::Value;
+    use std::fs;
+    use std::sync::Arc;
+    use tokio::sync::RwLock;
+
+    fn test_state() -> Arc<AppState> {
+        let config = Arc::new(Config::default());
+        let supervisor = SessionSupervisor::new(config.clone());
+        Arc::new(AppState {
+            supervisor,
+            config,
+            thought_config: Arc::new(RwLock::new(ThoughtConfig::default())),
+            daemon_defaults: None,
+            file_store: None,
+            published_selection: Arc::new(RwLock::new(PublishedSelectionState::default())),
+        })
+    }
+
+    async fn response_json(response: axum::response::Response) -> Value {
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("response body");
+        serde_json::from_slice(&body).expect("json body")
+    }
+
+    #[test]
+    fn parse_skill_md_reads_frontmatter_fields() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let skill_md = dir.path().join("SKILL.md");
+        fs::write(
+            &skill_md,
+            r#"---
+name: "Code Review"
+description: 'Review risky code paths'
+---
+# ignored body
+"#,
+        )
+        .expect("write skill");
+
+        let parsed = parse_skill_md(&skill_md, "fallback");
+        assert_eq!(parsed.name, "Code Review");
+        assert_eq!(parsed.description.as_deref(), Some("Review risky code paths"));
+    }
+
+    #[test]
+    fn collect_skill_summaries_discovers_nested_dirs_and_packaged_skills() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        fs::create_dir_all(dir.path().join("alpha")).expect("alpha dir");
+        fs::write(
+            dir.path().join("alpha").join("SKILL.md"),
+            "---\nname: Alpha\ndescription: first\n---\n",
+        )
+        .expect("alpha skill");
+
+        fs::create_dir_all(dir.path().join(".system").join("beta")).expect("beta dir");
+        fs::write(
+            dir.path().join(".system").join("beta").join("SKILL.md"),
+            "---\nname: Beta\n---\n",
+        )
+        .expect("beta skill");
+
+        fs::create_dir_all(dir.path().join("nested").join("gamma")).expect("gamma dir");
+        fs::write(
+            dir.path().join("nested").join("gamma").join("SKILL.md"),
+            "---\nname: alpha\n---\n",
+        )
+        .expect("duplicate alpha");
+
+        fs::write(dir.path().join("delta.skill"), "packed").expect("packaged skill");
+        fs::create_dir_all(dir.path().join(".hidden")).expect("hidden dir");
+        fs::write(
+            dir.path().join(".hidden").join("SKILL.md"),
+            "---\nname: Hidden\n---\n",
+        )
+        .expect("hidden skill");
+
+        let summaries = collect_skill_summaries(dir.path());
+        let names: Vec<&str> = summaries.iter().map(|summary| summary.name.as_str()).collect();
+        assert_eq!(names, vec!["Alpha", "Beta", "delta"]);
+        assert_eq!(summaries[0].description.as_deref(), Some("first"));
+    }
+
+    #[tokio::test]
+    async fn list_skills_reads_home_default_registry() {
+        let _lock = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let dir = tempfile::tempdir().expect("tempdir");
+        let skill_root = dir.path().join(".codex").join("skills").join("focus");
+        fs::create_dir_all(&skill_root).expect("skill root");
+        fs::write(
+            skill_root.join("SKILL.md"),
+            "---\nname: Focus\ndescription: stay on the current slice\n---\n",
+        )
+        .expect("skill file");
+
+        let previous_home = std::env::var_os("HOME");
+        std::env::set_var("HOME", dir.path());
+
+        let response = list_skills(
+            Extension(AuthInfo::new(OPERATOR_SCOPES.to_vec())),
+            State(test_state()),
+            Query(SkillQuery {
+                tool: Some("codex".to_string()),
+            }),
+        )
+        .await
+        .into_response();
+
+        if let Some(value) = previous_home {
+            std::env::set_var("HOME", value);
+        } else {
+            std::env::remove_var("HOME");
+        }
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let json = response_json(response).await;
+        assert_eq!(json["tool"], "codex");
+        assert_eq!(json["skills"][0]["name"], "Focus");
+    }
+
+    #[tokio::test]
+    async fn list_skills_rejects_unknown_tool() {
+        let response = list_skills(
+            Extension(AuthInfo::new(OPERATOR_SCOPES.to_vec())),
+            State(test_state()),
+            Query(SkillQuery {
+                tool: Some("unknown".to_string()),
+            }),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let json = response_json(response).await;
+        assert_eq!(json["code"], "INVALID_SKILL_TOOL");
+    }
+}

@@ -636,3 +636,298 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/v1/dirs", get(list_dirs))
         .route("/v1/dirs/restart", post(restart_dir_services))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::api::PublishedSelectionState;
+    use crate::auth::OPERATOR_SCOPES;
+    use crate::config::Config;
+    use crate::session::supervisor::SessionSupervisor;
+    use crate::thought::runtime_config::ThoughtConfig;
+    use axum::body::to_bytes;
+    use axum::extract::{Json, Query, State};
+    use axum::response::IntoResponse;
+    use serde_json::Value;
+    use std::ffi::OsString;
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+    use std::sync::Arc;
+    use tokio::sync::RwLock;
+
+    struct EnvGuard {
+        key: &'static str,
+        previous: Option<OsString>,
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            if let Some(value) = &self.previous {
+                std::env::set_var(self.key, value);
+            } else {
+                std::env::remove_var(self.key);
+            }
+        }
+    }
+
+    fn set_env_var(key: &'static str, value: impl Into<OsString>) -> EnvGuard {
+        let previous = std::env::var_os(key);
+        std::env::set_var(key, value.into());
+        EnvGuard { key, previous }
+    }
+
+    fn test_state() -> Arc<AppState> {
+        let config = Arc::new(Config::default());
+        let supervisor = SessionSupervisor::new(config.clone());
+        Arc::new(AppState {
+            supervisor,
+            config,
+            thought_config: Arc::new(RwLock::new(ThoughtConfig::default())),
+            daemon_defaults: None,
+            file_store: None,
+            published_selection: Arc::new(RwLock::new(PublishedSelectionState::default())),
+        })
+    }
+
+    async fn response_json(response: Response) -> Value {
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("response body");
+        serde_json::from_slice(&body).expect("json body")
+    }
+
+    fn write_executable(path: &Path, contents: &str) {
+        fs::write(path, contents).expect("write executable");
+        let mut perms = fs::metadata(path).expect("metadata").permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(path, perms).expect("chmod");
+    }
+
+    fn configure_fake_make(bin_dir: &Path) {
+        write_executable(
+            &bin_dir.join("make"),
+            r#"#!/bin/sh
+action=""
+for arg in "$@"; do
+  case "$arg" in
+    action=*)
+      action="${arg#action=}"
+      ;;
+  esac
+done
+
+case "$action" in
+  status)
+    printf 'SERVICE HEALTH RUN_HANDLE\n'
+    printf 'svc-alpha up 123\n'
+    printf 'svc-nested down -\n'
+    ;;
+  restart)
+    printf 'restarted %s\n' "$*"
+    ;;
+esac
+"#,
+        );
+    }
+
+    #[test]
+    fn env_manager_targets_prefers_sync_script_then_falls_back_to_out_dirs() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        fs::write(
+            dir.path().join("sync.sh"),
+            r#"BACKEND_TARGETS=("alpha" 'services/nested-app')
+FRONTEND_TARGETS=('web-app')
+"#,
+        )
+        .expect("sync");
+
+        assert_eq!(
+            env_manager_targets(dir.path()),
+            vec![
+                "alpha".to_string(),
+                "services/nested-app".to_string(),
+                "web-app".to_string()
+            ]
+        );
+
+        fs::remove_file(dir.path().join("sync.sh")).expect("remove sync");
+        fs::create_dir_all(dir.path().join("out").join("beta")).expect("beta");
+        fs::create_dir_all(dir.path().join("out").join("local")).expect("local");
+        fs::create_dir_all(dir.path().join("out").join(".hidden")).expect("hidden");
+
+        assert_eq!(env_manager_targets(dir.path()), vec!["beta".to_string()]);
+    }
+
+    #[test]
+    fn env_manager_service_repo_map_parses_assoc_array_lines() {
+        assert_eq!(
+            parse_assoc_array_line(r#"[svc-alpha]="services/api""#),
+            Some(("svc-alpha".to_string(), "services/api".to_string()))
+        );
+        assert_eq!(parse_assoc_array_line("not an assoc entry"), None);
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let script_dir = dir.path().join("scripts").join("project");
+        fs::create_dir_all(&script_dir).expect("project dir");
+        fs::write(
+            script_dir.join("project.sh"),
+            r#"declare -A SERVICE_REPO=(
+  [svc-alpha]="alpha"
+  [svc-nested]='services/nested-app'
+  [svc-alpha]="alpha"
+)
+"#,
+        )
+        .expect("project.sh");
+
+        assert_eq!(
+            env_manager_service_repo_map(dir.path()),
+            vec![
+                ("svc-alpha".to_string(), "alpha".to_string()),
+                ("svc-nested".to_string(), "services/nested-app".to_string())
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn env_service_health_map_reads_status_output() {
+        let _lock = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let dir = tempfile::tempdir().expect("tempdir");
+        let bin_dir = dir.path().join("bin");
+        fs::create_dir_all(&bin_dir).expect("bin dir");
+        configure_fake_make(&bin_dir);
+        let _path = set_env_var(
+            "PATH",
+            format!(
+                "{}:{}",
+                bin_dir.display(),
+                std::env::var("PATH").unwrap_or_default()
+            ),
+        );
+
+        let services = vec!["svc-alpha".to_string(), "svc-nested".to_string()];
+        let map = env_service_health_map(dir.path(), &services).await;
+        assert_eq!(map.get("svc-alpha"), Some(&true));
+        assert_eq!(map.get("svc-nested"), Some(&false));
+    }
+
+    #[tokio::test]
+    async fn list_dirs_filters_managed_roots_and_reports_service_health() {
+        let _lock = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let dir = tempfile::tempdir().expect("tempdir");
+        let base = dir.path().join("repo");
+        let env_manager = base.join(".env-manager");
+        let bin_dir = dir.path().join("bin");
+        fs::create_dir_all(base.join("alpha")).expect("alpha");
+        fs::create_dir_all(base.join("services").join("nested-app")).expect("nested");
+        fs::create_dir_all(base.join("zeta")).expect("zeta");
+        fs::create_dir_all(base.join(".hidden")).expect("hidden");
+        fs::create_dir_all(env_manager.join("scripts").join("project")).expect("project");
+        fs::create_dir_all(&bin_dir).expect("bin");
+        configure_fake_make(&bin_dir);
+        fs::write(
+            env_manager.join("sync.sh"),
+            r#"BACKEND_TARGETS=("alpha" "services/nested-app")
+"#,
+        )
+        .expect("sync");
+        fs::write(
+            env_manager.join("scripts").join("project").join("project.sh"),
+            r#"declare -A SERVICE_REPO=(
+  [svc-alpha]="alpha"
+  [svc-nested]="services/nested-app"
+)
+"#,
+        )
+        .expect("project");
+
+        let _base = set_env_var("DIRS_BASE_PATH", base.as_os_str().to_os_string());
+        let _path = set_env_var(
+            "PATH",
+            format!(
+                "{}:{}",
+                bin_dir.display(),
+                std::env::var("PATH").unwrap_or_default()
+            ),
+        );
+
+        let response = list_dirs(
+            Extension(AuthInfo::new(OPERATOR_SCOPES.to_vec())),
+            State(test_state()),
+            Query(DirQuery {
+                path: None,
+                managed_only: Some(true),
+            }),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let json = response_json(response).await;
+        let entries = json["entries"].as_array().expect("entries");
+        assert_eq!(entries.len(), 2);
+        let by_name: HashMap<String, bool> = entries
+            .iter()
+            .map(|entry| {
+                (
+                    entry["name"].as_str().unwrap_or_default().to_string(),
+                    entry["is_running"].as_bool().unwrap_or(false),
+                )
+            })
+            .collect();
+        assert_eq!(by_name.get("alpha"), Some(&true));
+        assert_eq!(by_name.get("services"), Some(&false));
+    }
+
+    #[tokio::test]
+    async fn restart_dir_services_restarts_mapped_services() {
+        let _lock = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let dir = tempfile::tempdir().expect("tempdir");
+        let base = dir.path().join("repo");
+        let env_manager = base.join(".env-manager");
+        let bin_dir = dir.path().join("bin");
+        fs::create_dir_all(base.join("alpha")).expect("alpha");
+        fs::create_dir_all(env_manager.join("scripts").join("project")).expect("project");
+        fs::create_dir_all(&bin_dir).expect("bin");
+        configure_fake_make(&bin_dir);
+        fs::write(
+            env_manager.join("scripts").join("project").join("project.sh"),
+            r#"declare -A SERVICE_REPO=(
+  [svc-alpha]="alpha"
+)
+"#,
+        )
+        .expect("project");
+
+        let _base = set_env_var("DIRS_BASE_PATH", base.as_os_str().to_os_string());
+        let _path = set_env_var(
+            "PATH",
+            format!(
+                "{}:{}",
+                bin_dir.display(),
+                std::env::var("PATH").unwrap_or_default()
+            ),
+        );
+
+        let response = restart_dir_services(
+            Extension(AuthInfo::new(OPERATOR_SCOPES.to_vec())),
+            State(test_state()),
+            Json(DirRestartRequest {
+                path: base.join("alpha").to_string_lossy().into_owned(),
+            }),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let json = response_json(response).await;
+        assert_eq!(json["ok"], true);
+        assert_eq!(json["services"][0], "svc-alpha");
+    }
+}

@@ -36,6 +36,11 @@ pub struct BootstrapData {
     pub repo_themes: HashMap<String, RepoTheme>,
 }
 
+struct ListedTmuxSessions {
+    reliable: bool,
+    names: Vec<String>,
+}
+
 fn thought_snapshot_for_summary<'a>(
     summary: &SessionSummary,
     active_pane_session_id: Option<&str>,
@@ -291,6 +296,251 @@ impl SessionSupervisor {
         *persistence = Some(store);
     }
 
+    async fn list_tmux_session_names(&self, reason: &'static str) -> ListedTmuxSessions {
+        let list_started = Instant::now();
+        info!(
+            reason,
+            phase = "tmux_list_sessions",
+            "running tmux list-sessions"
+        );
+        let output = Command::new("tmux")
+            .args(["list-sessions", "-F", "#{session_name}"])
+            .output()
+            .await;
+
+        match output {
+            Ok(output) if output.status.success() => {
+                let names = parse_tmux_session_names(&output.stdout);
+                log_tmux_list_success(reason, list_started.elapsed(), names.len());
+                ListedTmuxSessions {
+                    reliable: true,
+                    names,
+                }
+            }
+            Ok(output) => {
+                let elapsed = list_started.elapsed();
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                if tmux_list_reports_no_sessions(&stderr) {
+                    info!(
+                        reason,
+                        phase = "tmux_list_sessions",
+                        elapsed_ms = elapsed.as_millis() as u64,
+                        "no existing tmux sessions found"
+                    );
+                    ListedTmuxSessions {
+                        reliable: true,
+                        names: Vec::new(),
+                    }
+                } else {
+                    warn!(
+                        reason,
+                        phase = "tmux_list_sessions",
+                        elapsed_ms = elapsed.as_millis() as u64,
+                        "tmux list-sessions returned error: {}",
+                        stderr
+                    );
+                    ListedTmuxSessions {
+                        reliable: false,
+                        names: Vec::new(),
+                    }
+                }
+            }
+            Err(error) => {
+                let elapsed = list_started.elapsed();
+                warn!(
+                    reason,
+                    phase = "tmux_list_sessions",
+                    elapsed_ms = elapsed.as_millis() as u64,
+                    "tmux list-sessions failed: {}",
+                    error
+                );
+                ListedTmuxSessions {
+                    reliable: false,
+                    names: Vec::new(),
+                }
+            }
+        }
+    }
+
+    async fn tracked_tmux_names(&self) -> HashSet<String> {
+        let sessions = self.sessions.read().await;
+        sessions.values().map(|handle| handle.tmux_name.clone()).collect()
+    }
+
+    async fn stale_session_ids_by_tmux(&self) -> HashMap<String, String> {
+        let stale = self.stale_sessions.read().await;
+        let mut by_tmux = HashMap::new();
+        for summary in stale.iter() {
+            by_tmux
+                .entry(summary.tmux_name.clone())
+                .or_insert_with(|| summary.session_id.clone());
+        }
+        by_tmux
+    }
+
+    async fn attach_discovered_sessions(
+        self: &Arc<Self>,
+        reason: &'static str,
+        listed_tmux_names: &[String],
+    ) -> u64 {
+        let tracked_tmux_names = self.tracked_tmux_names().await;
+        let stale_session_ids_by_tmux = self.stale_session_ids_by_tmux().await;
+        let (candidates, highest_numeric) = plan_tmux_discovery_candidates(
+            listed_tmux_names,
+            &tracked_tmux_names,
+            &stale_session_ids_by_tmux,
+        );
+
+        for candidate in candidates {
+            self.attach_discovery_candidate(candidate, reason).await;
+        }
+
+        highest_numeric
+    }
+
+    async fn attach_discovery_candidate(
+        self: &Arc<Self>,
+        candidate: DiscoveryCandidate,
+        reason: &'static str,
+    ) {
+        let tmux_name = candidate.tmux_name;
+        let session_id = match candidate.reuse_session_id {
+            Some(id) => {
+                self.bump_id_counter_from_session_id(&id);
+                id
+            }
+            None => self.allocate_unique_session_id().await,
+        };
+        info!(
+            session_id = %session_id,
+            tmux_name = %tmux_name,
+            "discovered existing tmux session"
+        );
+
+        match crate::session::actor::SessionActor::spawn(
+            session_id.clone(),
+            tmux_name.clone(),
+            true,
+            None,
+            None,
+            self.config.clone(),
+        ) {
+            Ok(handle) => {
+                if !self.insert_discovered_handle(session_id.clone(), tmux_name.clone(), handle).await {
+                    return;
+                }
+                self.emit_discovered_created_event(session_id, tmux_name, reason);
+            }
+            Err(error) => {
+                error!(tmux_name = %tmux_name, "failed to attach to tmux session: {}", error);
+            }
+        }
+    }
+
+    async fn insert_discovered_handle(
+        &self,
+        session_id: String,
+        tmux_name: String,
+        handle: ActorHandle,
+    ) -> bool {
+        let mut sessions = self.sessions.write().await;
+        if sessions.values().any(|existing| existing.tmux_name == tmux_name) {
+            debug!(
+                tmux_name = %tmux_name,
+                "skipping duplicate discovered tmux session"
+            );
+            drop(sessions);
+            let _ = handle.cmd_tx.send(SessionCommand::Shutdown).await;
+            return false;
+        }
+        sessions.insert(session_id, handle);
+        true
+    }
+
+    fn emit_discovered_created_event(
+        &self,
+        session_id: String,
+        tmux_name: String,
+        reason: &'static str,
+    ) {
+        let summary = self.build_placeholder_summary(&session_id, &tmux_name);
+        let _ = self.lifecycle_tx.send(LifecycleEvent::Created {
+            session_id,
+            summary,
+            reason: reason.into(),
+            sprite_pack: None,
+            repo_theme: None,
+        });
+    }
+
+    async fn reconcile_stale_sessions_after_discovery(
+        &self,
+        discovery_reliable: bool,
+        listed_tmux_names: Vec<String>,
+    ) {
+        if !discovery_reliable {
+            warn!("skipping stale reconciliation due unreliable tmux discovery");
+            return;
+        }
+
+        let discovered_tmux_names: HashSet<String> = listed_tmux_names.into_iter().collect();
+        let unresolved_stale = {
+            let mut stale = self.stale_sessions.write().await;
+            stale.retain(|summary| !discovered_tmux_names.contains(&summary.tmux_name));
+            let unresolved = stale.clone();
+            stale.clear();
+            unresolved
+        };
+
+        if !unresolved_stale.is_empty() {
+            debug!(
+                remaining_stale = unresolved_stale.len(),
+                "stale sessions after discovery"
+            );
+        }
+
+        for summary in unresolved_stale {
+            self.emit_startup_missing_tmux_events(summary);
+        }
+    }
+
+    fn emit_startup_missing_tmux_events(&self, summary: SessionSummary) {
+        let payload = SessionStatePayload {
+            state: SessionState::Exited,
+            previous_state: summary.state,
+            current_command: summary.current_command.clone(),
+            transport_health: TransportHealth::Disconnected,
+            exit_reason: Some("startup_missing_tmux".to_string()),
+            at: Utc::now(),
+        };
+        let event = ControlEvent {
+            event: "session_state".to_string(),
+            session_id: summary.session_id.clone(),
+            payload: serde_json::to_value(&payload).unwrap_or_default(),
+        };
+        let _ = self.thought_tx.send(event);
+
+        let _ = self.lifecycle_tx.send(LifecycleEvent::Deleted {
+            session_id: summary.session_id,
+            reason: "startup_missing_tmux".to_string(),
+            delete_mode: crate::config::SessionDeleteMode::DetachBridge,
+            tmux_session_alive: false,
+        });
+    }
+
+    async fn finish_tmux_discovery(&self, discovery_reliable: bool, highest_numeric: u64) {
+        self.next_name_counter
+            .fetch_max(highest_numeric, Ordering::SeqCst);
+
+        let sessions = self.sessions.read().await;
+        crate::metrics::set_active_sessions(sessions.len());
+        info!(count = sessions.len(), "tmux session discovery complete");
+
+        if discovery_reliable {
+            self.persist_registry().await;
+        }
+    }
+
     // -----------------------------------------------------------------------
     // Discovery
     // -----------------------------------------------------------------------
@@ -309,220 +559,12 @@ impl SessionSupervisor {
         reason: &'static str,
     ) -> anyhow::Result<()> {
         let _discovery_guard = self.discovery_lock.lock().await;
-        let list_started = Instant::now();
-        info!(
-            reason,
-            phase = "tmux_list_sessions",
-            "running tmux list-sessions"
-        );
-        let output = Command::new("tmux")
-            .args(["list-sessions", "-F", "#{session_name}"])
-            .output()
+        let listed = self.list_tmux_session_names(reason).await;
+        let highest_numeric = self.attach_discovered_sessions(reason, &listed.names).await;
+        self.reconcile_stale_sessions_after_discovery(listed.reliable, listed.names)
             .await;
-
-        let mut discovery_reliable = true;
-        let mut highest_numeric: u64 = 0;
-        let mut listed_tmux_names: Vec<String> = Vec::new();
-        match output {
-            Ok(output) if output.status.success() => {
-                let elapsed = list_started.elapsed();
-                let elapsed_ms = elapsed.as_millis() as u64;
-                let stdout = String::from_utf8_lossy(&output.stdout);
-                for line in stdout.lines() {
-                    let tmux_name = line.trim().to_string();
-                    if tmux_name.is_empty() {
-                        continue;
-                    }
-                    listed_tmux_names.push(tmux_name);
-                }
-                if elapsed >= Duration::from_secs(2) {
-                    warn!(
-                        reason,
-                        phase = "tmux_list_sessions",
-                        elapsed_ms,
-                        listed_sessions = listed_tmux_names.len(),
-                        "tmux list-sessions completed slowly"
-                    );
-                } else {
-                    info!(
-                        reason,
-                        phase = "tmux_list_sessions",
-                        elapsed_ms,
-                        listed_sessions = listed_tmux_names.len(),
-                        "tmux list-sessions completed"
-                    );
-                }
-
-                let tracked_tmux_names: HashSet<String> = {
-                    let sessions = self.sessions.read().await;
-                    sessions.values().map(|h| h.tmux_name.clone()).collect()
-                };
-                let stale_session_ids_by_tmux: HashMap<String, String> = {
-                    let stale = self.stale_sessions.read().await;
-                    let mut by_tmux = HashMap::new();
-                    for s in stale.iter() {
-                        by_tmux
-                            .entry(s.tmux_name.clone())
-                            .or_insert_with(|| s.session_id.clone());
-                    }
-                    by_tmux
-                };
-
-                let (candidates, planned_highest_numeric) = plan_tmux_discovery_candidates(
-                    &listed_tmux_names,
-                    &tracked_tmux_names,
-                    &stale_session_ids_by_tmux,
-                );
-                highest_numeric = planned_highest_numeric;
-
-                for candidate in candidates {
-                    let tmux_name = candidate.tmux_name;
-                    let session_id = match candidate.reuse_session_id {
-                        Some(id) => {
-                            // Reused IDs must also advance the counter so future creates
-                            // don't accidentally collide with restored sessions.
-                            self.bump_id_counter_from_session_id(&id);
-                            id
-                        }
-                        None => self.allocate_unique_session_id().await,
-                    };
-                    info!(
-                        session_id = %session_id,
-                        tmux_name = %tmux_name,
-                        "discovered existing tmux session"
-                    );
-
-                    match crate::session::actor::SessionActor::spawn(
-                        session_id.clone(),
-                        tmux_name.clone(),
-                        true, // attach to existing
-                        None,
-                        None, // tool detected from process tree
-                        self.config.clone(),
-                    ) {
-                        Ok(handle) => {
-                            let mut sessions = self.sessions.write().await;
-                            if sessions.values().any(|h| h.tmux_name == tmux_name) {
-                                debug!(
-                                    tmux_name = %tmux_name,
-                                    "skipping duplicate discovered tmux session"
-                                );
-                                drop(sessions);
-                                let _ = handle.cmd_tx.send(SessionCommand::Shutdown).await;
-                                continue;
-                            }
-                            sessions.insert(session_id.clone(), handle);
-
-                            // Broadcast lifecycle event.
-                            let summary = self.build_placeholder_summary(&session_id, &tmux_name);
-                            let _ = self.lifecycle_tx.send(LifecycleEvent::Created {
-                                session_id,
-                                summary,
-                                reason: reason.into(),
-                                sprite_pack: None,
-                                repo_theme: None,
-                            });
-                        }
-                        Err(e) => {
-                            error!(tmux_name = %tmux_name, "failed to attach to tmux session: {}", e);
-                        }
-                    }
-                }
-            }
-            Ok(output) => {
-                let elapsed_ms = list_started.elapsed().as_millis() as u64;
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                // "no server running" / "no sessions" means tmux has no live sessions.
-                if stderr.contains("no server running") || stderr.contains("no sessions") {
-                    info!(
-                        reason,
-                        phase = "tmux_list_sessions",
-                        elapsed_ms,
-                        "no existing tmux sessions found"
-                    );
-                } else {
-                    discovery_reliable = false;
-                    warn!(
-                        reason,
-                        phase = "tmux_list_sessions",
-                        elapsed_ms,
-                        "tmux list-sessions returned error: {}",
-                        stderr
-                    );
-                }
-            }
-            Err(e) => {
-                let elapsed_ms = list_started.elapsed().as_millis() as u64;
-                discovery_reliable = false;
-                warn!(
-                    reason,
-                    phase = "tmux_list_sessions",
-                    elapsed_ms,
-                    "tmux list-sessions failed: {}",
-                    e
-                );
-            }
-        }
-
-        // Remove stale sessions that were upgraded to live.
-        // For sessions still missing from tmux, emit startup exit/deletion events
-        // and then drop them so bootstrap does not keep phantom entries forever.
-        if discovery_reliable {
-            let discovered_tmux_names: HashSet<String> = listed_tmux_names.into_iter().collect();
-            let unresolved_stale = {
-                let mut stale = self.stale_sessions.write().await;
-                stale.retain(|s| !discovered_tmux_names.contains(&s.tmux_name));
-                let unresolved = stale.clone();
-                stale.clear();
-                unresolved
-            };
-
-            if !unresolved_stale.is_empty() {
-                debug!(
-                    remaining_stale = unresolved_stale.len(),
-                    "stale sessions after discovery"
-                );
-                for s in unresolved_stale {
-                    let payload = SessionStatePayload {
-                        state: SessionState::Exited,
-                        previous_state: s.state,
-                        current_command: s.current_command.clone(),
-                        transport_health: TransportHealth::Disconnected,
-                        exit_reason: Some("startup_missing_tmux".to_string()),
-                        at: Utc::now(),
-                    };
-                    let event = ControlEvent {
-                        event: "session_state".to_string(),
-                        session_id: s.session_id.clone(),
-                        payload: serde_json::to_value(&payload).unwrap_or_default(),
-                    };
-                    let _ = self.thought_tx.send(event);
-
-                    let _ = self.lifecycle_tx.send(LifecycleEvent::Deleted {
-                        session_id: s.session_id,
-                        reason: "startup_missing_tmux".to_string(),
-                        delete_mode: crate::config::SessionDeleteMode::DetachBridge,
-                        tmux_session_alive: false,
-                    });
-                }
-            }
-        } else {
-            warn!("skipping stale reconciliation due unreliable tmux discovery");
-        }
-
-        // Advance the name counter past any existing numeric names.
-        self.next_name_counter
-            .fetch_max(highest_numeric, Ordering::SeqCst);
-
-        let sessions = self.sessions.read().await;
-        crate::metrics::set_active_sessions(sessions.len());
-        info!(count = sessions.len(), "tmux session discovery complete");
-
-        // Persist the current session registry only when discovery succeeded
-        // (or definitively found no tmux sessions).
-        if discovery_reliable {
-            self.persist_registry().await;
-        }
+        self.finish_tmux_discovery(listed.reliable, highest_numeric)
+            .await;
 
         Ok(())
     }
@@ -542,33 +584,12 @@ impl SessionSupervisor {
     ) -> anyhow::Result<(SessionSummary, Option<SpritePack>, Option<RepoTheme>)> {
         let start_cwd = cwd.or_else(current_working_dir);
         let mut initial_request = normalize_initial_request(initial_request);
-        let requested_name = name.and_then(|n| {
-            let trimmed = n.trim();
-            if trimmed.is_empty() {
-                None
-            } else {
-                Some(trimmed.to_string())
-            }
-        });
-
-        let tmux_name = match requested_name {
-            Some(explicit) => explicit,
-            None => {
-                let n = self.next_name_counter.fetch_add(1, Ordering::SeqCst);
-                n.to_string()
-            }
-        };
-
+        let tmux_name = self.allocate_tmux_name(name);
         let session_id = self.allocate_unique_session_id().await;
 
         info!(session_id = %session_id, tmux_name = %tmux_name, "creating new session");
 
-        let initial_tool = spawn_tool.as_ref().map(|t| {
-            crate::types::detect_tool_name(t.command())
-                .unwrap_or(t.command())
-                .to_string()
-        });
-
+        let initial_tool = initial_tool_name(spawn_tool.as_ref());
         let handle = crate::session::actor::SessionActor::spawn(
             session_id.clone(),
             tmux_name.clone(),
@@ -579,80 +600,151 @@ impl SessionSupervisor {
         )?;
         let bootstrap_handle = handle.clone();
 
-        let mut sessions = self.sessions.write().await;
-        sessions.insert(session_id.clone(), handle);
-        crate::metrics::set_active_sessions(sessions.len());
-        drop(sessions);
-
-        let mut summary = self.build_placeholder_summary(&session_id, &tmux_name);
-        if let Some(cwd) = start_cwd {
-            summary.cwd = cwd;
-        }
-        if let Some(ref display) = initial_tool {
-            summary.tool = Some(display.clone());
-            summary.context_limit = crate::types::context_limit_for_tool(Some(display));
-        }
-
+        self.insert_active_handle(session_id.clone(), handle).await;
+        let mut summary = self
+            .build_created_summary(&session_id, &tmux_name, start_cwd.as_deref(), initial_tool.as_deref())
+            .await;
         let (sprite_pack, repo_theme) = self.resolve_repo_assets_for_summary(&mut summary).await;
-
-        let initial_request_delay = if spawn_tool.is_some() && initial_request.is_some() {
-            INITIAL_REQUEST_INPUT_DELAY
-        } else {
-            Duration::ZERO
-        };
-        if let Some(tool) = spawn_tool {
-            let spawn_command = build_spawn_tool_command(tool, initial_request.as_deref());
-            if spawn_tool_consumes_initial_request(tool) {
-                initial_request = None;
-            }
-
-            if let Err(e) = send_spawn_tool_command(&tmux_name, tool, &spawn_command).await {
-                warn!(
-                    session_id = %session_id,
-                    tmux_name = %tmux_name,
-                    tool = ?tool,
-                    "tmux send-keys failed, falling back to PTY input: {}",
-                    e
-                );
-                let mut command = spawn_command;
-                command.push('\n');
-                if let Err(e) = bootstrap_handle
-                    .send(SessionCommand::WriteInput(command.into_bytes()))
-                    .await
-                {
-                    warn!(
-                        session_id = %session_id,
-                        tmux_name = %tmux_name,
-                        tool = ?tool,
-                        "failed to enqueue spawn command fallback: {}",
-                        e
-                    );
-                }
-            }
-        }
-        if let Some(initial_request) = initial_request {
-            enqueue_initial_request_input(
-                bootstrap_handle,
-                session_id.clone(),
-                tmux_name.clone(),
-                initial_request,
-                initial_request_delay,
-            );
-        }
-
-        // Broadcast lifecycle event.
-        let _ = self.lifecycle_tx.send(LifecycleEvent::Created {
-            session_id: session_id.clone(),
-            summary: summary.clone(),
-            reason: "api_create".into(),
-            sprite_pack: sprite_pack.clone(),
-            repo_theme: repo_theme.clone(),
-        });
-
-        // Persist the updated registry.
+        let initial_request_delay = initial_request_delay(spawn_tool, initial_request.as_ref());
+        self.maybe_spawn_initial_tool(
+            &session_id,
+            &tmux_name,
+            &bootstrap_handle,
+            spawn_tool,
+            &mut initial_request,
+        )
+        .await;
+        self.enqueue_initial_request_if_present(
+            bootstrap_handle,
+            &session_id,
+            &tmux_name,
+            initial_request,
+            initial_request_delay,
+        );
+        self.emit_created_session(&session_id, &summary, sprite_pack.clone(), repo_theme.clone());
         self.persist_registry().await;
 
         Ok((summary, sprite_pack, repo_theme))
+    }
+
+    fn allocate_tmux_name(&self, requested_name: Option<String>) -> String {
+        normalize_requested_tmux_name(requested_name).unwrap_or_else(|| {
+            let n = self.next_name_counter.fetch_add(1, Ordering::SeqCst);
+            n.to_string()
+        })
+    }
+
+    async fn insert_active_handle(&self, session_id: String, handle: ActorHandle) {
+        let mut sessions = self.sessions.write().await;
+        sessions.insert(session_id, handle);
+        crate::metrics::set_active_sessions(sessions.len());
+    }
+
+    async fn build_created_summary(
+        &self,
+        session_id: &str,
+        tmux_name: &str,
+        start_cwd: Option<&str>,
+        initial_tool: Option<&str>,
+    ) -> SessionSummary {
+        let mut summary = self.build_placeholder_summary(session_id, tmux_name);
+        if let Some(cwd) = start_cwd {
+            summary.cwd = cwd.to_string();
+        }
+        if let Some(display) = initial_tool {
+            summary.tool = Some(display.to_string());
+            summary.context_limit = crate::types::context_limit_for_tool(Some(display));
+        }
+        summary
+    }
+
+    async fn maybe_spawn_initial_tool(
+        &self,
+        session_id: &str,
+        tmux_name: &str,
+        bootstrap_handle: &ActorHandle,
+        spawn_tool: Option<crate::types::SpawnTool>,
+        initial_request: &mut Option<String>,
+    ) {
+        let Some(tool) = spawn_tool else {
+            return;
+        };
+
+        let spawn_command = build_spawn_tool_command(tool, initial_request.as_deref());
+        if spawn_tool_consumes_initial_request(tool) {
+            *initial_request = None;
+        }
+
+        if let Err(e) = send_spawn_tool_command(tmux_name, tool, &spawn_command).await {
+            warn!(
+                session_id = %session_id,
+                tmux_name = %tmux_name,
+                tool = ?tool,
+                "tmux send-keys failed, falling back to PTY input: {}",
+                e
+            );
+            self.enqueue_spawn_command_fallback(session_id, tmux_name, tool, bootstrap_handle, spawn_command)
+                .await;
+        }
+    }
+
+    async fn enqueue_spawn_command_fallback(
+        &self,
+        session_id: &str,
+        tmux_name: &str,
+        tool: crate::types::SpawnTool,
+        bootstrap_handle: &ActorHandle,
+        mut spawn_command: String,
+    ) {
+        spawn_command.push('\n');
+        if let Err(e) = bootstrap_handle
+            .send(SessionCommand::WriteInput(spawn_command.into_bytes()))
+            .await
+        {
+            warn!(
+                session_id = %session_id,
+                tmux_name = %tmux_name,
+                tool = ?tool,
+                "failed to enqueue spawn command fallback: {}",
+                e
+            );
+        }
+    }
+
+    fn enqueue_initial_request_if_present(
+        &self,
+        bootstrap_handle: ActorHandle,
+        session_id: &str,
+        tmux_name: &str,
+        initial_request: Option<String>,
+        delay: Duration,
+    ) {
+        let Some(initial_request) = initial_request else {
+            return;
+        };
+        enqueue_initial_request_input(
+            bootstrap_handle,
+            session_id.to_string(),
+            tmux_name.to_string(),
+            initial_request,
+            delay,
+        );
+    }
+
+    fn emit_created_session(
+        &self,
+        session_id: &str,
+        summary: &SessionSummary,
+        sprite_pack: Option<SpritePack>,
+        repo_theme: Option<RepoTheme>,
+    ) {
+        let _ = self.lifecycle_tx.send(LifecycleEvent::Created {
+            session_id: session_id.to_string(),
+            summary: summary.clone(),
+            reason: "api_create".into(),
+            sprite_pack,
+            repo_theme,
+        });
     }
 
     /// Shut down a session actor and remove it from the registry.
@@ -847,6 +939,13 @@ impl SessionSupervisor {
     /// Get a clone of the thought event sender. Used to wire the ThoughtLoopRunner.
     pub fn thought_event_sender(&self) -> broadcast::Sender<ControlEvent> {
         self.thought_tx.clone()
+    }
+
+    #[cfg(test)]
+    pub async fn insert_test_handle(&self, handle: ActorHandle) {
+        let mut sessions = self.sessions.write().await;
+        sessions.insert(handle.session_id.clone(), handle);
+        crate::metrics::set_active_sessions(sessions.len());
     }
 
     // -----------------------------------------------------------------------
@@ -1388,6 +1487,36 @@ fn normalize_initial_request(initial_request: Option<String>) -> Option<String> 
     })
 }
 
+fn normalize_requested_tmux_name(requested_name: Option<String>) -> Option<String> {
+    requested_name.and_then(|name| {
+        let trimmed = name.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    })
+}
+
+fn initial_tool_name(spawn_tool: Option<&crate::types::SpawnTool>) -> Option<String> {
+    spawn_tool.map(|tool| {
+        crate::types::detect_tool_name(tool.command())
+            .unwrap_or(tool.command())
+            .to_string()
+    })
+}
+
+fn initial_request_delay(
+    spawn_tool: Option<crate::types::SpawnTool>,
+    initial_request: Option<&String>,
+) -> Duration {
+    if spawn_tool.is_some() && initial_request.is_some() {
+        INITIAL_REQUEST_INPUT_DELAY
+    } else {
+        Duration::ZERO
+    }
+}
+
 fn build_initial_request_input(initial_request: &str) -> Vec<u8> {
     let mut input = initial_request.as_bytes().to_vec();
     input.push(b'\r');
@@ -1575,6 +1704,40 @@ fn plan_tmux_discovery_candidates(
     (candidates, highest_numeric)
 }
 
+fn parse_tmux_session_names(stdout: &[u8]) -> Vec<String> {
+    String::from_utf8_lossy(stdout)
+        .lines()
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+fn tmux_list_reports_no_sessions(stderr: &str) -> bool {
+    stderr.contains("no server running") || stderr.contains("no sessions")
+}
+
+fn log_tmux_list_success(reason: &'static str, elapsed: Duration, listed_sessions: usize) {
+    let elapsed_ms = elapsed.as_millis() as u64;
+    if elapsed >= Duration::from_secs(2) {
+        warn!(
+            reason,
+            phase = "tmux_list_sessions",
+            elapsed_ms,
+            listed_sessions,
+            "tmux list-sessions completed slowly"
+        );
+    } else {
+        info!(
+            reason,
+            phase = "tmux_list_sessions",
+            elapsed_ms,
+            listed_sessions,
+            "tmux list-sessions completed"
+        );
+    }
+}
+
 fn next_session_counter(session_id: &str) -> Option<u64> {
     let n = session_id.strip_prefix("sess_")?.parse::<u64>().ok()?;
     Some(n.saturating_add(1))
@@ -1603,7 +1766,108 @@ mod tests {
     use super::*;
     use chrono::{DateTime, Utc};
     use std::iter::FromIterator;
+    use std::os::unix::fs::PermissionsExt;
     use tempfile::tempdir;
+    use tokio::sync::mpsc;
+
+    fn test_summary(session_id: &str, state: SessionState) -> SessionSummary {
+        SessionSummary {
+            session_id: session_id.to_string(),
+            tmux_name: format!("tmux-{session_id}"),
+            state,
+            current_command: Some("cargo test".to_string()),
+            cwd: "/tmp/project".to_string(),
+            tool: Some("Codex".to_string()),
+            token_count: 0,
+            context_limit: 192_000,
+            thought: None,
+            thought_state: ThoughtState::Holding,
+            thought_source: ThoughtSource::CarryForward,
+            thought_updated_at: None,
+            rest_state: fallback_rest_state(state, ThoughtState::Holding),
+            last_skill: None,
+            is_stale: false,
+            attached_clients: 0,
+            transport_health: TransportHealth::Healthy,
+            last_activity_at: Utc::now(),
+            sprite_pack_id: None,
+            repo_theme_id: None,
+        }
+    }
+
+    async fn spawn_summary_handle(summary: SessionSummary) -> ActorHandle {
+        let (cmd_tx, mut cmd_rx) = mpsc::channel(8);
+        let handle = ActorHandle::test_handle(summary.session_id.clone(), summary.tmux_name.clone(), cmd_tx);
+        tokio::spawn(async move {
+            while let Some(cmd) = cmd_rx.recv().await {
+                match cmd {
+                    SessionCommand::GetSummary(reply) => {
+                        let _ = reply.send(summary.clone());
+                    }
+                    SessionCommand::GetSnapshot(reply) => {
+                        let _ = reply.send(TerminalSnapshot {
+                            session_id: summary.session_id.clone(),
+                            latest_seq: 17,
+                            truncated: false,
+                            screen_text: "0123456789 replay tail".to_string(),
+                        });
+                    }
+                    SessionCommand::Shutdown => break,
+                    _ => {}
+                }
+            }
+        });
+        handle
+    }
+
+    async fn spawn_dropped_summary_handle(
+        session_id: &str,
+        tmux_name: &str,
+        state: SessionState,
+    ) -> ActorHandle {
+        let (cmd_tx, mut cmd_rx) = mpsc::channel(8);
+        let handle = ActorHandle::test_handle(session_id, tmux_name, cmd_tx);
+        let summary = test_summary(session_id, state);
+        tokio::spawn(async move {
+            while let Some(cmd) = cmd_rx.recv().await {
+                match cmd {
+                    SessionCommand::GetSummary(_reply) => {}
+                    SessionCommand::GetSnapshot(reply) => {
+                        let _ = reply.send(TerminalSnapshot {
+                            session_id: summary.session_id.clone(),
+                            latest_seq: 0,
+                            truncated: false,
+                            screen_text: String::new(),
+                        });
+                    }
+                    SessionCommand::Shutdown => break,
+                    _ => {}
+                }
+            }
+        });
+        handle
+    }
+
+    async fn spawn_closed_summary_handle(session_id: &str, tmux_name: &str) -> ActorHandle {
+        let (cmd_tx, cmd_rx) = mpsc::channel(8);
+        drop(cmd_rx);
+        ActorHandle::test_handle(session_id, tmux_name, cmd_tx)
+    }
+
+    fn write_executable(path: &std::path::Path, contents: &str) {
+        std::fs::write(path, contents).expect("write executable");
+        let mut perms = std::fs::metadata(path).expect("metadata").permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(path, perms).expect("chmod");
+    }
+
+    fn prepend_test_path(bin_dir: &std::path::Path, original_path: Option<&std::ffi::OsStr>) {
+        let mut entries = vec![bin_dir.as_os_str().to_os_string()];
+        if let Some(existing) = original_path {
+            entries.extend(std::env::split_paths(existing).map(|path| path.into_os_string()));
+        }
+        std::env::set_var("PATH", std::env::join_paths(entries).expect("path"));
+    }
 
     #[test]
     fn next_session_counter_parses_expected_format() {
@@ -1934,6 +2198,312 @@ mod tests {
         ]);
 
         assert!(thought_snapshot_for_summary(&summary, None, &snapshots).is_none());
+    }
+
+    #[tokio::test]
+    async fn list_sessions_merges_thought_snapshots_and_skips_exited_summaries() {
+        let supervisor = SessionSupervisor::new(Arc::new(Config::default()));
+        supervisor
+            .insert_test_handle(spawn_summary_handle(test_summary("sess-live", SessionState::Idle)).await)
+            .await;
+        supervisor
+            .insert_test_handle(
+                spawn_summary_handle(test_summary("sess-exited", SessionState::Exited)).await,
+            )
+            .await;
+
+        supervisor.thought_snapshots.write().await.insert(
+            "sess-live".to_string(),
+            ThoughtSnapshot {
+                thought: Some("checking logs".to_string()),
+                thought_state: ThoughtState::Active,
+                thought_source: ThoughtSource::Llm,
+                rest_state: RestState::Active,
+                objective_fingerprint: None,
+                token_count: 44,
+                context_limit: 200_000,
+                updated_at: Utc::now(),
+                delivery: ThoughtDeliveryState::default(),
+            },
+        );
+
+        let sessions = supervisor.list_sessions().await;
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].session_id, "sess-live");
+        assert_eq!(sessions[0].thought.as_deref(), Some("checking logs"));
+        assert_eq!(sessions[0].thought_state, ThoughtState::Active);
+        assert_eq!(sessions[0].token_count, 44);
+    }
+
+    #[tokio::test]
+    async fn list_sessions_skips_dropped_summary_replies() {
+        let supervisor = SessionSupervisor::new(Arc::new(Config::default()));
+        supervisor
+            .insert_test_handle(
+                spawn_dropped_summary_handle("sess-drop", "tmux-drop", SessionState::Idle).await,
+            )
+            .await;
+
+        let sessions = supervisor.list_sessions().await;
+
+        assert!(sessions.is_empty());
+    }
+
+    #[tokio::test]
+    async fn list_sessions_skips_closed_command_channels() {
+        let supervisor = SessionSupervisor::new(Arc::new(Config::default()));
+        supervisor
+            .insert_test_handle(spawn_closed_summary_handle("sess-closed", "").await)
+            .await;
+
+        let sessions = supervisor.list_sessions().await;
+
+        assert!(sessions.is_empty());
+    }
+
+    #[tokio::test]
+    async fn collect_session_snapshots_uses_summary_snapshot_and_thought_cache() {
+        let supervisor = SessionSupervisor::new(Arc::new(Config::default()));
+        supervisor
+            .insert_test_handle(spawn_summary_handle(test_summary("sess-1", SessionState::Busy)).await)
+            .await;
+        supervisor.thought_snapshots.write().await.insert(
+            "sess-1".to_string(),
+            ThoughtSnapshot {
+                thought: Some("building release".to_string()),
+                thought_state: ThoughtState::Active,
+                thought_source: ThoughtSource::Llm,
+                rest_state: RestState::Active,
+                objective_fingerprint: Some("obj-1".to_string()),
+                token_count: 55,
+                context_limit: 210_000,
+                updated_at: Utc::now(),
+                delivery: ThoughtDeliveryState::default(),
+            },
+        );
+
+        let infos = supervisor.collect_session_snapshots().await;
+        assert_eq!(infos.len(), 1);
+        assert_eq!(infos[0].session_id, "sess-1");
+        assert!(infos[0].replay_text.ends_with("replay tail"));
+        assert_eq!(infos[0].thought.as_deref(), Some("building release"));
+        assert_eq!(infos[0].token_count, 55);
+        assert_eq!(infos[0].objective_fingerprint.as_deref(), Some("obj-1"));
+    }
+
+    #[tokio::test]
+    async fn collect_exited_session_ids_reports_only_exited_sessions() {
+        let supervisor = SessionSupervisor::new(Arc::new(Config::default()));
+        supervisor
+            .insert_test_handle(spawn_summary_handle(test_summary("sess-idle", SessionState::Idle)).await)
+            .await;
+        supervisor
+            .insert_test_handle(
+                spawn_summary_handle(test_summary("sess-exited", SessionState::Exited)).await,
+            )
+            .await;
+
+        let exited = supervisor
+            .collect_exited_session_ids(Duration::from_millis(50))
+            .await;
+        assert_eq!(exited, HashSet::from_iter(["sess-exited".to_string()]));
+    }
+
+    #[tokio::test]
+    async fn reap_exited_sessions_removes_ready_actor_handles() {
+        let supervisor = SessionSupervisor::new(Arc::new(Config::default()));
+        supervisor
+            .insert_test_handle(
+                spawn_summary_handle(test_summary("sess-exited", SessionState::Exited)).await,
+            )
+            .await;
+
+        supervisor.reap_exited_sessions().await;
+        assert!(supervisor.get_session("sess-exited").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn collect_repo_assets_reads_repo_theme_and_sprite_pack() {
+        let dir = tempdir().expect("tempdir");
+        let repo_root = dir.path().join("repo");
+        let sprites_dir = repo_root.join(".throngterm").join("sprites");
+        std::fs::create_dir_all(&sprites_dir).expect("sprites dir");
+        std::fs::write(
+            repo_root.join(".throngterm").join("colors.json"),
+            r##"{"palette":{"body":"#123456","outline":"#234567","accent":"#345678","shirt":"#456789"}}"##,
+        )
+        .expect("colors");
+        for (name, value) in [
+            ("active.svg", "<svg id='active'/>"),
+            ("drowsy.svg", "<svg id='drowsy'/>"),
+            ("sleeping.svg", "<svg id='sleeping'/>"),
+            ("deep_sleep.svg", "<svg id='deep_sleep'/>"),
+        ] {
+            std::fs::write(sprites_dir.join(name), value).expect("sprite");
+        }
+
+        let project_id = repo_root.to_string_lossy().into_owned();
+        let mut summary = test_summary("sess-assets", SessionState::Idle);
+        summary.cwd = repo_root.to_string_lossy().into_owned();
+        summary.repo_theme_id = Some(project_id.clone());
+        summary.sprite_pack_id = Some(project_id.clone());
+
+        let supervisor = SessionSupervisor::new(Arc::new(Config::default()));
+        let (sprite_packs, repo_themes) = supervisor.collect_repo_assets(&[summary]).await;
+        assert!(sprite_packs.contains_key(&project_id));
+        assert!(repo_themes.contains_key(&project_id));
+    }
+
+    #[tokio::test]
+    async fn create_session_uses_fake_tmux_and_bootstraps_codex_spawn() {
+        let _guard = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let dir = tempdir().expect("tempdir");
+        let bin_dir = dir.path().join("bin");
+        std::fs::create_dir_all(&bin_dir).expect("bin");
+        write_executable(
+            &bin_dir.join("tmux"),
+            r##"#!/bin/sh
+set -eu
+cmd="${1-}"
+case "$cmd" in
+  new-session|attach-session)
+    while IFS= read -r line; do
+      printf '%s\r\n' "$line"
+    done
+    ;;
+  display-message)
+    case "${5-}" in
+      "#{pane_current_path}") printf '%s\n' "${THRONGTERM_FAKE_TMUX_CWD:-/tmp/project}" ;;
+      "#{pane_current_command}") printf '%s\n' "${THRONGTERM_FAKE_TMUX_COMMAND:-codex}" ;;
+      "#{pane_pid}") printf '101\n' ;;
+      "#{window_index}.#{pane_index}:#{pane_id}") printf '0.0:%%1\n' ;;
+    esac
+    ;;
+  send-keys|kill-session)
+    exit 0
+    ;;
+  capture-pane)
+    printf 'captured pane\n'
+    ;;
+  list-sessions)
+    if [ -f "${THRONGTERM_FAKE_TMUX_SESSIONS:-}" ]; then
+      while IFS= read -r line || [ -n "$line" ]; do
+        printf '%s\n' "$line"
+      done < "${THRONGTERM_FAKE_TMUX_SESSIONS}"
+    fi
+    ;;
+esac
+"##,
+        );
+
+        let original_path = std::env::var_os("PATH");
+        let original_cwd = std::env::var_os("THRONGTERM_FAKE_TMUX_CWD");
+        let original_cmd = std::env::var_os("THRONGTERM_FAKE_TMUX_COMMAND");
+        prepend_test_path(&bin_dir, original_path.as_deref());
+        std::env::set_var("THRONGTERM_FAKE_TMUX_CWD", dir.path());
+        std::env::set_var("THRONGTERM_FAKE_TMUX_COMMAND", "codex");
+
+        let supervisor = SessionSupervisor::new(Arc::new(Config::default()));
+        let created = supervisor
+            .create_session(
+                None,
+                Some(dir.path().to_string_lossy().into_owned()),
+                Some(crate::types::SpawnTool::Codex),
+                Some("investigate startup".to_string()),
+            )
+            .await
+            .expect("create session");
+
+        match original_path {
+            Some(value) => std::env::set_var("PATH", value),
+            None => std::env::remove_var("PATH"),
+        }
+        match original_cwd {
+            Some(value) => std::env::set_var("THRONGTERM_FAKE_TMUX_CWD", value),
+            None => std::env::remove_var("THRONGTERM_FAKE_TMUX_CWD"),
+        }
+        match original_cmd {
+            Some(value) => std::env::set_var("THRONGTERM_FAKE_TMUX_COMMAND", value),
+            None => std::env::remove_var("THRONGTERM_FAKE_TMUX_COMMAND"),
+        }
+
+        assert_eq!(created.0.session_id, "sess_0");
+        assert_eq!(created.0.tmux_name, "0");
+        assert_eq!(created.0.tool.as_deref(), Some("Codex"));
+        assert_eq!(created.0.cwd, dir.path().to_string_lossy());
+        supervisor
+            .delete_session(&created.0.session_id, crate::config::SessionDeleteMode::DetachBridge)
+            .await
+            .expect("cleanup session");
+    }
+
+    #[tokio::test]
+    async fn discover_tmux_sessions_with_reason_uses_fake_tmux_listings() {
+        let _guard = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let dir = tempdir().expect("tempdir");
+        let bin_dir = dir.path().join("bin");
+        std::fs::create_dir_all(&bin_dir).expect("bin");
+        let sessions_file = dir.path().join("sessions.txt");
+        std::fs::write(&sessions_file, "11\nworkspace\n").expect("sessions");
+        write_executable(
+            &bin_dir.join("tmux"),
+            r##"#!/bin/sh
+set -eu
+cmd="${1-}"
+case "$cmd" in
+  list-sessions)
+    while IFS= read -r line || [ -n "$line" ]; do
+      printf '%s\n' "$line"
+    done < "${THRONGTERM_FAKE_TMUX_SESSIONS}"
+    ;;
+  attach-session|new-session)
+    while IFS= read -r line; do
+      printf '%s\r\n' "$line"
+    done
+    ;;
+  display-message)
+    case "${5-}" in
+      "#{pane_current_command}") printf 'codex\n' ;;
+      "#{pane_current_path}") printf '/tmp/project\n' ;;
+      "#{pane_pid}") printf '101\n' ;;
+      "#{window_index}.#{pane_index}:#{pane_id}") printf '0.0:%%1\n' ;;
+    esac
+    ;;
+  send-keys|kill-session|capture-pane)
+    exit 0
+    ;;
+esac
+"##,
+        );
+
+        let original_path = std::env::var_os("PATH");
+        let original_sessions = std::env::var_os("THRONGTERM_FAKE_TMUX_SESSIONS");
+        prepend_test_path(&bin_dir, original_path.as_deref());
+        std::env::set_var("THRONGTERM_FAKE_TMUX_SESSIONS", &sessions_file);
+
+        let supervisor = SessionSupervisor::new(Arc::new(Config::default()));
+        supervisor
+            .discover_tmux_sessions_with_reason("test_discovery")
+            .await
+            .expect("discover sessions");
+
+        match original_path {
+            Some(value) => std::env::set_var("PATH", value),
+            None => std::env::remove_var("PATH"),
+        }
+        match original_sessions {
+            Some(value) => std::env::set_var("THRONGTERM_FAKE_TMUX_SESSIONS", value),
+            None => std::env::remove_var("THRONGTERM_FAKE_TMUX_SESSIONS"),
+        }
+
+        let sessions = supervisor.sessions.read().await;
+        assert_eq!(sessions.len(), 2);
+        assert!(sessions.values().any(|handle| handle.tmux_name == "11"));
+        assert!(sessions.values().any(|handle| handle.tmux_name == "workspace"));
     }
 
     #[test]

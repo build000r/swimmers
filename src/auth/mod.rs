@@ -100,6 +100,30 @@ fn forbidden_response() -> Response {
 // Middleware
 // ---------------------------------------------------------------------------
 
+fn token_mode_auth_info(config: &Config, request: &Request) -> Result<AuthInfo, Response> {
+    let Some(provided) = extract_bearer_token(request) else {
+        return Err(not_authenticated_response());
+    };
+
+    if config
+        .auth_token
+        .as_deref()
+        .is_some_and(|expected| provided == expected)
+    {
+        return Ok(AuthInfo::new(OPERATOR_SCOPES.to_vec()));
+    }
+
+    if config
+        .observer_token
+        .as_deref()
+        .is_some_and(|expected| provided == expected)
+    {
+        return Ok(AuthInfo::new(OBSERVER_SCOPES.to_vec()));
+    }
+
+    Err(not_authenticated_response())
+}
+
 /// Axum `from_fn` middleware that enforces authentication based on the
 /// application's [`Config::auth_mode`].
 ///
@@ -110,46 +134,16 @@ fn forbidden_response() -> Response {
 /// against [`Config::auth_token`]. A missing or invalid token results in a 401
 /// JSON response.
 pub async fn auth_middleware(config: Arc<Config>, mut request: Request, next: Next) -> Response {
-    match config.auth_mode {
-        AuthMode::LocalTrust => {
-            // Grant all scopes — no authentication overhead.
-            request
-                .extensions_mut()
-                .insert(AuthInfo::new(OPERATOR_SCOPES.to_vec()));
-            next.run(request).await
-        }
-        AuthMode::Token => {
-            let token = extract_bearer_token(&request);
+    let auth_info = match config.auth_mode {
+        AuthMode::LocalTrust => AuthInfo::new(OPERATOR_SCOPES.to_vec()),
+        AuthMode::Token => match token_mode_auth_info(&config, &request) {
+            Ok(info) => info,
+            Err(response) => return response,
+        },
+    };
 
-            match token {
-                Some(provided) => {
-                    // Check operator token first, then observer token.
-                    if config
-                        .auth_token
-                        .as_deref()
-                        .map_or(false, |expected| provided == expected)
-                    {
-                        request
-                            .extensions_mut()
-                            .insert(AuthInfo::new(OPERATOR_SCOPES.to_vec()));
-                        next.run(request).await
-                    } else if config
-                        .observer_token
-                        .as_deref()
-                        .map_or(false, |expected| provided == expected)
-                    {
-                        request
-                            .extensions_mut()
-                            .insert(AuthInfo::new(OBSERVER_SCOPES.to_vec()));
-                        next.run(request).await
-                    } else {
-                        not_authenticated_response()
-                    }
-                }
-                None => not_authenticated_response(),
-            }
-        }
-    }
+    request.extensions_mut().insert(auth_info);
+    next.run(request).await
 }
 
 /// Extract a bearer token from the `Authorization` header.
@@ -234,5 +228,63 @@ mod tests {
         );
 
         assert_eq!(extract_bearer_token(&request), None);
+    }
+
+    #[test]
+    fn token_mode_auth_info_rejects_missing_and_invalid_tokens() {
+        let request = Request::builder()
+            .uri("/test")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let config = Config {
+            auth_mode: AuthMode::Token,
+            auth_token: Some("secret".to_string()),
+            observer_token: Some("observer".to_string()),
+            ..Config::default()
+        };
+        assert!(token_mode_auth_info(&config, &request).is_err());
+
+        let mut invalid_request = Request::builder()
+            .uri("/test")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        invalid_request.headers_mut().insert(
+            "authorization",
+            axum::http::HeaderValue::from_static("Bearer nope"),
+        );
+        assert!(token_mode_auth_info(&config, &invalid_request).is_err());
+    }
+
+    #[test]
+    fn token_mode_auth_info_returns_expected_scopes() {
+        let config = Config {
+            auth_mode: AuthMode::Token,
+            auth_token: Some("secret".to_string()),
+            observer_token: Some("observer".to_string()),
+            ..Config::default()
+        };
+
+        let mut operator_request = Request::builder()
+            .uri("/test")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        operator_request.headers_mut().insert(
+            "authorization",
+            axum::http::HeaderValue::from_static("Bearer secret"),
+        );
+        let operator = token_mode_auth_info(&config, &operator_request).expect("operator auth");
+        assert!(operator.has_scope(AuthScope::SessionsWrite));
+
+        let mut observer_request = Request::builder()
+            .uri("/test")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        observer_request.headers_mut().insert(
+            "authorization",
+            axum::http::HeaderValue::from_static("Bearer observer"),
+        );
+        let observer = token_mode_auth_info(&config, &observer_request).expect("observer auth");
+        assert!(observer.has_scope(AuthScope::SessionsRead));
+        assert!(!observer.has_scope(AuthScope::SessionsWrite));
     }
 }
