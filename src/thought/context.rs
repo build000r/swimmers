@@ -202,85 +202,107 @@ impl ClaudeCodeReader {
         for entry in entries {
             let entry_type = entry.get("type").and_then(Value::as_str).unwrap_or("");
             let msg = entry.get("message");
+            self.capture_claude_user_message(entry_type, msg);
+            self.capture_claude_assistant_message(entry_type, msg);
+        }
+    }
 
-            // User message -> task
-            if entry_type == "user" {
-                if let Some(msg) = msg {
-                    if msg.get("role").and_then(Value::as_str) == Some("user") {
-                        let content = &msg["content"];
-                        if let Some(text) = content.as_str() {
-                            let trimmed = text.trim();
-                            if !trimmed.is_empty() {
-                                self.user_task = Some(truncate(trimmed, 300));
-                            }
-                        } else if let Some(blocks) = content.as_array() {
-                            for block in blocks {
-                                if block.get("type").and_then(Value::as_str) == Some("text") {
-                                    if let Some(text) = block.get("text").and_then(Value::as_str) {
-                                        let trimmed = text.trim();
-                                        if !trimmed.is_empty() {
-                                            self.user_task = Some(truncate(trimmed, 300));
-                                            break;
-                                        }
-                                    }
-                                }
-                            }
-                        }
+    fn capture_claude_user_message(&mut self, entry_type: &str, msg: Option<&Value>) {
+        if entry_type != "user"
+            || msg.and_then(|msg| msg.get("role").and_then(Value::as_str)) != Some("user")
+        {
+            return;
+        }
+
+        let Some(content) = msg.map(|msg| &msg["content"]) else {
+            return;
+        };
+
+        if let Some(text) = content.as_str() {
+            self.set_reader_user_task(text);
+            return;
+        }
+
+        for block in content.as_array().into_iter().flatten() {
+            if block.get("type").and_then(Value::as_str) != Some("text") {
+                continue;
+            }
+            if let Some(text) = block.get("text").and_then(Value::as_str) {
+                self.set_reader_user_task(text);
+                break;
+            }
+        }
+    }
+
+    fn capture_claude_assistant_message(&mut self, entry_type: &str, msg: Option<&Value>) {
+        if entry_type != "assistant"
+            || msg.and_then(|msg| msg.get("role").and_then(Value::as_str)) != Some("assistant")
+        {
+            return;
+        }
+
+        if let Some(input_tokens) = msg
+            .and_then(|msg| msg.get("usage"))
+            .and_then(|usage| usage.get("input_tokens"))
+            .and_then(Value::as_u64)
+        {
+            self.token_count = input_tokens;
+        }
+
+        for block in msg
+            .and_then(|msg| msg.get("content"))
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            self.capture_claude_assistant_block(block);
+        }
+    }
+
+    fn capture_claude_assistant_block(&mut self, block: &Value) {
+        match block.get("type").and_then(Value::as_str).unwrap_or("") {
+            "tool_use" => {
+                let action = AgentAction {
+                    tool: block
+                        .get("name")
+                        .and_then(Value::as_str)
+                        .unwrap_or("unknown")
+                        .to_string(),
+                    detail: extract_tool_detail(block),
+                };
+                self.record_reader_action(action, true);
+            }
+            "text" => {
+                if let Some(text) = block.get("text").and_then(Value::as_str) {
+                    let trimmed = text.trim();
+                    if trimmed.len() > 5 {
+                        self.record_reader_action(
+                            AgentAction {
+                                tool: "said".to_string(),
+                                detail: Some(truncate(trimmed, 100)),
+                            },
+                            false,
+                        );
                     }
                 }
             }
+            _ => {}
+        }
+    }
 
-            // Assistant message -> tool uses, text, and token usage
-            if entry_type == "assistant" {
-                if let Some(msg) = msg {
-                    if msg.get("role").and_then(Value::as_str) == Some("assistant") {
-                        // Extract input_tokens from usage data
-                        if let Some(usage) = msg.get("usage") {
-                            if let Some(input_tokens) =
-                                usage.get("input_tokens").and_then(Value::as_u64)
-                            {
-                                self.token_count = input_tokens;
-                            }
-                        }
-                        if let Some(blocks) = msg.get("content").and_then(Value::as_array) {
-                            for block in blocks {
-                                let block_type =
-                                    block.get("type").and_then(Value::as_str).unwrap_or("");
+    fn set_reader_user_task(&mut self, text: &str) {
+        let trimmed = text.trim();
+        if trimmed.is_empty() {
+            return;
+        }
+        self.user_task = Some(truncate(trimmed, 300));
+    }
 
-                                if block_type == "tool_use" {
-                                    let tool_name = block
-                                        .get("name")
-                                        .and_then(Value::as_str)
-                                        .unwrap_or("unknown")
-                                        .to_string();
-
-                                    let detail = extract_tool_detail(block);
-
-                                    let action = AgentAction {
-                                        tool: tool_name,
-                                        detail,
-                                    };
-                                    self.recent_actions.push(action.clone());
-                                    cap_actions(&mut self.recent_actions, 10);
-                                    self.current_tool = Some(action);
-                                } else if block_type == "text" {
-                                    if let Some(text) = block.get("text").and_then(Value::as_str) {
-                                        let trimmed = text.trim();
-                                        if trimmed.len() > 5 {
-                                            let action = AgentAction {
-                                                tool: "said".to_string(),
-                                                detail: Some(truncate(trimmed, 100)),
-                                            };
-                                            self.recent_actions.push(action);
-                                            cap_actions(&mut self.recent_actions, 10);
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
+    fn record_reader_action(&mut self, action: AgentAction, set_current_tool: bool) {
+        self.recent_actions.push(action.clone());
+        cap_actions(&mut self.recent_actions, 10);
+        if set_current_tool {
+            self.current_tool = Some(action);
         }
     }
 }
@@ -473,140 +495,166 @@ impl CodexReader {
                 .get("payload")
                 .cloned()
                 .unwrap_or(Value::Object(Default::default()));
+            self.capture_codex_response_item_user(entry_type, &payload);
+            self.capture_codex_user_message(entry_type, &payload);
+            self.capture_codex_usage_response(entry_type, &payload);
+            self.capture_codex_token_count(entry_type, &payload);
+            self.capture_codex_function_call(entry_type, &payload);
+            self.capture_codex_agent_reasoning(entry_type, &payload);
+            self.capture_codex_reasoning_summary(entry_type, &payload);
+        }
+    }
 
-            // response_item with role=user -> user task
-            if entry_type == "response_item"
-                && payload.get("role").and_then(Value::as_str) == Some("user")
-            {
-                if let Some(blocks) = payload.get("content").and_then(Value::as_array) {
-                    for block in blocks {
-                        if block.get("type").and_then(Value::as_str) == Some("input_text") {
-                            if let Some(text) = block.get("text").and_then(Value::as_str) {
-                                let trimmed = text.trim();
-                                // Skip system/developer prompts (very long or XML-like)
-                                if !trimmed.is_empty()
-                                    && trimmed.len() < 1000
-                                    && !trimmed.starts_with('<')
-                                {
-                                    self.user_task = Some(truncate(trimmed, 300));
-                                }
-                            }
-                        }
-                    }
-                }
+    fn capture_codex_response_item_user(&mut self, entry_type: &str, payload: &Value) {
+        if entry_type != "response_item"
+            || payload.get("role").and_then(Value::as_str) != Some("user")
+        {
+            return;
+        }
+
+        for block in payload
+            .get("content")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            if block.get("type").and_then(Value::as_str) != Some("input_text") {
+                continue;
             }
-
-            // event_msg with type=user_message -> cleaner task source
-            if entry_type == "event_msg"
-                && payload.get("type").and_then(Value::as_str) == Some("user_message")
-            {
-                if let Some(msg) = payload.get("message").and_then(Value::as_str) {
-                    let trimmed = msg.trim();
-                    if !trimmed.is_empty() {
-                        self.user_task = Some(truncate(trimmed, 300));
-                    }
-                }
+            if let Some(text) = block.get("text").and_then(Value::as_str) {
+                self.set_codex_user_task(text, true);
             }
+        }
+    }
 
-            // response with usage data -> token tracking
-            if entry_type == "response" {
-                if let Some(usage) = payload.get("usage") {
-                    if let Some(input_tokens) = usage.get("input_tokens").and_then(Value::as_u64) {
-                        self.token_count = input_tokens;
-                    }
-                }
+    fn capture_codex_user_message(&mut self, entry_type: &str, payload: &Value) {
+        if entry_type == "event_msg"
+            && payload.get("type").and_then(Value::as_str) == Some("user_message")
+        {
+            if let Some(message) = payload.get("message").and_then(Value::as_str) {
+                self.set_codex_user_task(message, false);
             }
+        }
+    }
 
-            // event_msg with type=token_count -> authoritative Codex usage info
-            if entry_type == "event_msg"
-                && payload.get("type").and_then(Value::as_str) == Some("token_count")
-            {
-                if let Some(input_tokens) = payload
+    fn capture_codex_usage_response(&mut self, entry_type: &str, payload: &Value) {
+        if entry_type != "response" {
+            return;
+        }
+        if let Some(input_tokens) = payload
+            .get("usage")
+            .and_then(|usage| usage.get("input_tokens"))
+            .and_then(Value::as_u64)
+        {
+            self.token_count = input_tokens;
+        }
+    }
+
+    fn capture_codex_token_count(&mut self, entry_type: &str, payload: &Value) {
+        if entry_type != "event_msg"
+            || payload.get("type").and_then(Value::as_str) != Some("token_count")
+        {
+            return;
+        }
+
+        if let Some(input_tokens) = payload
+            .get("info")
+            .and_then(|info| info.get("total_token_usage"))
+            .and_then(|usage| usage.get("input_tokens"))
+            .and_then(Value::as_u64)
+        {
+            self.token_count = input_tokens;
+        }
+
+        let context_window = payload
+            .get("model_context_window")
+            .and_then(Value::as_u64)
+            .or_else(|| {
+                payload
                     .get("info")
-                    .and_then(|info| info.get("total_token_usage"))
-                    .and_then(|usage| usage.get("input_tokens"))
+                    .and_then(|info| info.get("model_context_window"))
                     .and_then(Value::as_u64)
-                {
-                    self.token_count = input_tokens;
-                }
+            });
 
-                let context_window = payload
-                    .get("model_context_window")
-                    .and_then(Value::as_u64)
-                    .or_else(|| {
-                        payload
-                            .get("info")
-                            .and_then(|info| info.get("model_context_window"))
-                            .and_then(Value::as_u64)
-                    });
+        if let Some(limit) = context_window.filter(|limit| *limit > 0) {
+            self.context_limit = limit;
+        }
+    }
 
-                if let Some(limit) = context_window.filter(|limit| *limit > 0) {
-                    self.context_limit = limit;
-                }
+    fn capture_codex_function_call(&mut self, entry_type: &str, payload: &Value) {
+        if entry_type != "response_item"
+            || payload.get("type").and_then(Value::as_str) != Some("function_call")
+        {
+            return;
+        }
+
+        let action = AgentAction {
+            tool: payload
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown")
+                .to_string(),
+            detail: payload
+                .get("arguments")
+                .and_then(Value::as_str)
+                .and_then(parse_codex_function_call_detail),
+        };
+        self.record_codex_action(action, true);
+    }
+
+    fn capture_codex_agent_reasoning(&mut self, entry_type: &str, payload: &Value) {
+        if entry_type == "event_msg"
+            && payload.get("type").and_then(Value::as_str) == Some("agent_reasoning")
+        {
+            if let Some(text) = payload.get("text").and_then(Value::as_str) {
+                self.set_codex_thinking(text);
             }
+        }
+    }
 
-            // response_item with type=function_call -> actions
-            if entry_type == "response_item"
-                && payload.get("type").and_then(Value::as_str) == Some("function_call")
-            {
-                let tool_name = payload
-                    .get("name")
-                    .and_then(Value::as_str)
-                    .unwrap_or("unknown")
-                    .to_string();
+    fn capture_codex_reasoning_summary(&mut self, entry_type: &str, payload: &Value) {
+        if entry_type != "response_item"
+            || payload.get("type").and_then(Value::as_str) != Some("reasoning")
+        {
+            return;
+        }
 
-                let detail = payload
-                    .get("arguments")
-                    .and_then(Value::as_str)
-                    .and_then(|args_str| serde_json::from_str::<Value>(args_str).ok())
-                    .and_then(|args| {
-                        if let Some(cmd) = args.get("command").and_then(Value::as_str) {
-                            Some(truncate(cmd, 80))
-                        } else if let Some(fp) = args.get("file_path").and_then(Value::as_str) {
-                            Some(basename(fp).to_string())
-                        } else {
-                            None
-                        }
-                    });
-
-                let action = AgentAction {
-                    tool: tool_name,
-                    detail,
-                };
-                self.recent_actions.push(action.clone());
-                cap_actions(&mut self.recent_actions, 10);
-                self.current_tool = Some(action);
+        for summary in payload
+            .get("summary")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            if summary.get("type").and_then(Value::as_str) != Some("summary_text") {
+                continue;
             }
-
-            // event_msg with type=agent_reasoning -> thinking
-            if entry_type == "event_msg"
-                && payload.get("type").and_then(Value::as_str) == Some("agent_reasoning")
-            {
-                if let Some(text) = payload.get("text").and_then(Value::as_str) {
-                    self.current_tool = Some(AgentAction {
-                        tool: "thinking".to_string(),
-                        detail: Some(truncate(text, 100)),
-                    });
-                }
+            if let Some(text) = summary.get("text").and_then(Value::as_str) {
+                self.set_codex_thinking(text);
             }
+        }
+    }
 
-            // response_item with type=reasoning summary -> thinking
-            if entry_type == "response_item"
-                && payload.get("type").and_then(Value::as_str) == Some("reasoning")
-            {
-                if let Some(summaries) = payload.get("summary").and_then(Value::as_array) {
-                    for s in summaries {
-                        if s.get("type").and_then(Value::as_str) == Some("summary_text") {
-                            if let Some(text) = s.get("text").and_then(Value::as_str) {
-                                self.current_tool = Some(AgentAction {
-                                    tool: "thinking".to_string(),
-                                    detail: Some(truncate(text, 100)),
-                                });
-                            }
-                        }
-                    }
-                }
-            }
+    fn set_codex_user_task(&mut self, text: &str, skip_xml_like: bool) {
+        let trimmed = text.trim();
+        let looks_like_system_prompt = skip_xml_like && trimmed.starts_with('<');
+        if trimmed.is_empty() || trimmed.len() >= 1000 || looks_like_system_prompt {
+            return;
+        }
+        self.user_task = Some(truncate(trimmed, 300));
+    }
+
+    fn set_codex_thinking(&mut self, text: &str) {
+        self.current_tool = Some(AgentAction {
+            tool: "thinking".to_string(),
+            detail: Some(truncate(text, 100)),
+        });
+    }
+
+    fn record_codex_action(&mut self, action: AgentAction, set_current_tool: bool) {
+        self.recent_actions.push(action.clone());
+        cap_actions(&mut self.recent_actions, 10);
+        if set_current_tool {
+            self.current_tool = Some(action);
         }
     }
 }
@@ -740,6 +788,21 @@ fn extract_tool_detail(block: &Value) -> Option<String> {
     } else {
         None
     }
+}
+
+fn parse_codex_function_call_detail(args_str: &str) -> Option<String> {
+    serde_json::from_str::<Value>(args_str)
+        .ok()
+        .and_then(|args| {
+            args.get("command")
+                .and_then(Value::as_str)
+                .map(|command| truncate(command, 80))
+                .or_else(|| {
+                    args.get("file_path")
+                        .and_then(Value::as_str)
+                        .map(|file_path| basename(file_path).to_string())
+                })
+        })
 }
 
 #[cfg(test)]

@@ -354,103 +354,165 @@ impl StateDetector {
         let mut markers: Vec<Osc133Marker> = Vec::new();
 
         for &b in data {
-            match &mut self.escape_state {
-                EscapeState::Normal => {
-                    if b == 0x1b {
-                        self.escape_state = EscapeState::Esc;
-                    } else if b == 0x9b {
-                        self.escape_state = EscapeState::Csi;
-                    } else if b == 0x9d {
-                        self.escape_state = EscapeState::Osc {
-                            buf: Vec::new(),
-                            esc_pending: false,
-                        };
-                    } else if b == 0x90 {
-                        self.escape_state = EscapeState::Dcs { esc_pending: false };
-                    } else if b == 0x9e {
-                        self.escape_state = EscapeState::Pm { esc_pending: false };
-                    } else if b == 0x9f {
-                        self.escape_state = EscapeState::Apc { esc_pending: false };
-                    } else if b == b'\n' || b == b'\r' || b == b'\t' || (0x20..=0x7e).contains(&b) {
-                        visible.push(b);
-                    }
-                }
-                EscapeState::Esc => match b {
-                    b'[' => self.escape_state = EscapeState::Csi,
-                    b']' => {
-                        self.escape_state = EscapeState::Osc {
-                            buf: Vec::new(),
-                            esc_pending: false,
-                        }
-                    }
-                    b'P' => self.escape_state = EscapeState::Dcs { esc_pending: false },
-                    b'^' => self.escape_state = EscapeState::Pm { esc_pending: false },
-                    b'_' => self.escape_state = EscapeState::Apc { esc_pending: false },
-                    0x20..=0x2f => self.escape_state = EscapeState::EscIntermediate,
-                    _ => self.escape_state = EscapeState::Normal,
-                },
-                EscapeState::EscIntermediate => {
-                    if (0x30..=0x7e).contains(&b) {
-                        self.escape_state = EscapeState::Normal;
-                    } else if !(0x20..=0x2f).contains(&b) {
-                        self.escape_state = EscapeState::Normal;
-                    }
-                }
-                EscapeState::Csi => {
-                    if (0x40..=0x7e).contains(&b) {
-                        self.escape_state = EscapeState::Normal;
-                    }
-                }
-                EscapeState::Osc { buf, esc_pending } => {
-                    if *esc_pending {
-                        if b == b'\\' {
-                            if let Some(marker) = Self::parse_osc133(buf) {
-                                markers.push(marker);
-                            }
-                            self.escape_state = EscapeState::Normal;
-                        } else {
-                            *esc_pending = false;
-                            if b != 0x1b {
-                                buf.push(b);
-                            }
-                        }
-                    } else if b == 0x07 {
-                        if let Some(marker) = Self::parse_osc133(buf) {
-                            markers.push(marker);
-                        }
-                        self.escape_state = EscapeState::Normal;
-                    } else if b == 0x9c {
-                        if let Some(marker) = Self::parse_osc133(buf) {
-                            markers.push(marker);
-                        }
-                        self.escape_state = EscapeState::Normal;
-                    } else if b == 0x1b {
-                        *esc_pending = true;
-                    } else if buf.len() < 8192 {
-                        buf.push(b);
-                    }
-                }
-                EscapeState::Dcs { esc_pending }
-                | EscapeState::Pm { esc_pending }
-                | EscapeState::Apc { esc_pending } => {
-                    if *esc_pending {
-                        if b == b'\\' {
-                            self.escape_state = EscapeState::Normal;
-                        } else if b != 0x1b {
-                            *esc_pending = false;
-                        }
-                    } else if b == 0x9c {
-                        self.escape_state = EscapeState::Normal;
-                    } else if b == 0x1b {
-                        *esc_pending = true;
-                    }
-                }
-            }
+            self.consume_chunk_byte(b, &mut visible, &mut markers);
         }
 
         ParsedChunk {
             visible: String::from_utf8_lossy(&visible).to_string(),
             markers,
+        }
+    }
+
+    fn consume_chunk_byte(
+        &mut self,
+        b: u8,
+        visible: &mut Vec<u8>,
+        markers: &mut Vec<Osc133Marker>,
+    ) {
+        match &mut self.escape_state {
+            EscapeState::Normal => self.consume_normal_byte(b, visible),
+            EscapeState::Esc => self.consume_escape_byte(b),
+            EscapeState::EscIntermediate => self.consume_escape_intermediate_byte(b),
+            EscapeState::Csi => self.consume_csi_byte(b),
+            EscapeState::Osc { buf, esc_pending } => {
+                if let Some(next_state) = Self::consume_osc_byte(b, buf, esc_pending, markers) {
+                    self.escape_state = next_state;
+                }
+            }
+            EscapeState::Dcs { esc_pending }
+            | EscapeState::Pm { esc_pending }
+            | EscapeState::Apc { esc_pending } => {
+                if let Some(next_state) = Self::consume_private_string_byte(b, esc_pending) {
+                    self.escape_state = next_state;
+                }
+            }
+        }
+    }
+
+    fn consume_normal_byte(&mut self, b: u8, visible: &mut Vec<u8>) {
+        match b {
+            0x1b => self.escape_state = EscapeState::Esc,
+            0x9b => self.escape_state = EscapeState::Csi,
+            0x9d => self.escape_state = Self::osc_state(),
+            0x90 => self.escape_state = Self::private_string_state(EscapeState::Dcs {
+                esc_pending: false,
+            }),
+            0x9e => self.escape_state = Self::private_string_state(EscapeState::Pm {
+                esc_pending: false,
+            }),
+            0x9f => self.escape_state = Self::private_string_state(EscapeState::Apc {
+                esc_pending: false,
+            }),
+            b'\n' | b'\r' | b'\t' => visible.push(b),
+            _ if (0x20..=0x7e).contains(&b) => visible.push(b),
+            _ => {}
+        }
+    }
+
+    fn consume_escape_byte(&mut self, b: u8) {
+        self.escape_state = match b {
+            b'[' => EscapeState::Csi,
+            b']' => Self::osc_state(),
+            b'P' => Self::private_string_state(EscapeState::Dcs { esc_pending: false }),
+            b'^' => Self::private_string_state(EscapeState::Pm { esc_pending: false }),
+            b'_' => Self::private_string_state(EscapeState::Apc { esc_pending: false }),
+            0x20..=0x2f => EscapeState::EscIntermediate,
+            _ => EscapeState::Normal,
+        };
+    }
+
+    fn consume_escape_intermediate_byte(&mut self, b: u8) {
+        if (0x30..=0x7e).contains(&b) || !(0x20..=0x2f).contains(&b) {
+            self.escape_state = EscapeState::Normal;
+        }
+    }
+
+    fn consume_csi_byte(&mut self, b: u8) {
+        if (0x40..=0x7e).contains(&b) {
+            self.escape_state = EscapeState::Normal;
+        }
+    }
+
+    fn consume_osc_byte(
+        b: u8,
+        buf: &mut Vec<u8>,
+        esc_pending: &mut bool,
+        markers: &mut Vec<Osc133Marker>,
+    ) -> Option<EscapeState> {
+        if *esc_pending {
+            return Self::consume_pending_osc_escape(b, buf, esc_pending, markers);
+        }
+
+        match b {
+            0x07 | 0x9c => {
+                Self::push_osc_marker(buf, markers);
+                return Some(EscapeState::Normal);
+            }
+            0x1b => {
+                *esc_pending = true;
+                return None;
+            }
+            _ if buf.len() < 8192 => buf.push(b),
+            _ => {}
+        }
+        None
+    }
+
+    fn consume_pending_osc_escape(
+        b: u8,
+        buf: &mut Vec<u8>,
+        esc_pending: &mut bool,
+        markers: &mut Vec<Osc133Marker>,
+    ) -> Option<EscapeState> {
+        if b == b'\\' {
+            Self::push_osc_marker(buf, markers);
+            return Some(EscapeState::Normal);
+        }
+
+        *esc_pending = false;
+        if b != 0x1b {
+            buf.push(b);
+        }
+        None
+    }
+
+    fn consume_private_string_byte(
+        b: u8,
+        esc_pending: &mut bool,
+    ) -> Option<EscapeState> {
+        if *esc_pending {
+            if b == b'\\' {
+                return Some(EscapeState::Normal);
+            } else if b != 0x1b {
+                *esc_pending = false;
+            }
+            return None;
+        }
+
+        match b {
+            0x9c => Some(EscapeState::Normal),
+            0x1b => {
+                *esc_pending = true;
+                None
+            }
+            _ => None,
+        }
+    }
+
+    fn osc_state() -> EscapeState {
+        EscapeState::Osc {
+            buf: Vec::new(),
+            esc_pending: false,
+        }
+    }
+
+    fn private_string_state(state: EscapeState) -> EscapeState {
+        state
+    }
+
+    fn push_osc_marker(buf: &[u8], markers: &mut Vec<Osc133Marker>) {
+        if let Some(marker) = Self::parse_osc133(buf) {
+            markers.push(marker);
         }
     }
 

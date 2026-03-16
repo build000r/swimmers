@@ -69,46 +69,64 @@ impl Default for Config {
     }
 }
 
+fn apply_env_port(config: &mut Config) {
+    if let Ok(port) = std::env::var("PORT").and_then(|port| {
+        port.parse()
+            .map_err(|_| std::env::VarError::NotPresent)
+    }) {
+        config.port = port;
+    }
+}
+
+fn apply_env_auth_mode(config: &mut Config) {
+    if std::env::var("AUTH_MODE").as_deref() == Ok("token") {
+        config.auth_mode = AuthMode::Token;
+    }
+}
+
+fn apply_env_non_empty_string<F>(key: &str, apply: F)
+where
+    F: FnOnce(String),
+{
+    if let Some(value) = std::env::var(key)
+        .ok()
+        .filter(|value| !value.is_empty())
+    {
+        apply(value);
+    }
+}
+
+fn apply_env_usize<F>(key: &str, apply: F)
+where
+    F: FnOnce(usize),
+{
+    if let Some(value) = std::env::var(key)
+        .ok()
+        .and_then(|raw| raw.parse::<usize>().ok())
+        .filter(|value| *value > 0)
+    {
+        apply(value);
+    }
+}
+
 impl Config {
     pub fn from_env() -> Self {
         let mut config = Self::default();
-        if let Ok(port) = std::env::var("PORT") {
-            if let Ok(p) = port.parse() {
-                config.port = p;
-            }
-        }
-        if let Ok(mode) = std::env::var("AUTH_MODE") {
-            if mode == "token" {
-                config.auth_mode = AuthMode::Token;
-            }
-        }
-        if let Ok(token) = std::env::var("AUTH_TOKEN") {
-            if !token.is_empty() {
-                config.auth_token = Some(token);
-            }
-        }
-        if let Ok(token) = std::env::var("OBSERVER_TOKEN") {
-            if !token.is_empty() {
-                config.observer_token = Some(token);
-            }
-        }
-        if let Ok(backend) = std::env::var("THRONGTERM_THOUGHT_BACKEND") {
+        apply_env_port(&mut config);
+        apply_env_auth_mode(&mut config);
+        apply_env_non_empty_string("AUTH_TOKEN", |token| config.auth_token = Some(token));
+        apply_env_non_empty_string("OBSERVER_TOKEN", |token| {
+            config.observer_token = Some(token);
+        });
+        apply_env_non_empty_string("THRONGTERM_THOUGHT_BACKEND", |backend| {
             config.thought_backend = ThoughtBackend::from_env_value(&backend);
-        }
-        if let Ok(val) = std::env::var("THRONGTERM_OUTBOUND_QUEUE_BOUND") {
-            if let Ok(n) = val.parse::<usize>() {
-                if n > 0 {
-                    config.outbound_queue_bound = n;
-                }
-            }
-        }
-        if let Ok(val) = std::env::var("THRONGTERM_REPLAY_BUFFER_SIZE") {
-            if let Ok(n) = val.parse::<usize>() {
-                if n > 0 {
-                    config.replay_buffer_size = n;
-                }
-            }
-        }
+        });
+        apply_env_usize("THRONGTERM_OUTBOUND_QUEUE_BOUND", |value| {
+            config.outbound_queue_bound = value;
+        });
+        apply_env_usize("THRONGTERM_REPLAY_BUFFER_SIZE", |value| {
+            config.replay_buffer_size = value;
+        });
         config
     }
 }

@@ -3490,7 +3490,7 @@ fn selected_label(name: Option<&String>) -> String {
     name.cloned().unwrap_or_else(|| "session".to_string())
 }
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn initialize_tui_app() -> Result<(App<ApiClient>, Renderer), Box<dyn std::error::Error>> {
     let _ = dotenvy::dotenv();
 
     let runtime = Runtime::new()?;
@@ -3503,140 +3503,194 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let initial_layout = app.layout_for_terminal(renderer.width(), renderer.height());
     app.refresh(initial_layout);
 
-    loop {
-        let layout = app.layout_for_terminal(renderer.width(), renderer.height());
-        if layout.split_divider.is_none() {
+    Ok((app, renderer))
+}
+
+fn prepare_frame<C: TuiApi>(app: &mut App<C>, renderer: &mut Renderer) -> WorkspaceLayout {
+    let layout = app.layout_for_terminal(renderer.width(), renderer.height());
+    if layout.split_divider.is_none() {
+        app.stop_split_drag();
+    }
+    app.trim_thought_log(layout.thought_entry_capacity());
+    if app.should_refresh() {
+        app.refresh(layout);
+    }
+    app.tick(layout.overview_field);
+    app.render(renderer, layout);
+    layout
+}
+
+fn handle_key_event<C: TuiApi>(app: &mut App<C>, layout: WorkspaceLayout, key: KeyEvent) -> bool {
+    if app.initial_request.is_some() {
+        app.handle_initial_request_key(key, layout.overview_field);
+        return true;
+    }
+
+    match key.code {
+        KeyCode::Char('q') => false,
+        KeyCode::Esc => {
+            if app.picker.is_some() {
+                app.close_picker();
+                true
+            } else {
+                false
+            }
+        }
+        KeyCode::Left | KeyCode::Char('h') | KeyCode::Backspace => {
+            if app.picker.is_some() {
+                app.picker_up();
+            } else {
+                app.move_selection(-1, layout.overview_field);
+            }
+            true
+        }
+        KeyCode::Up | KeyCode::Char('k') => {
+            app.move_selection(-1, layout.overview_field);
+            true
+        }
+        KeyCode::Down | KeyCode::Char('j') => {
+            app.move_selection(1, layout.overview_field);
+            true
+        }
+        KeyCode::Right | KeyCode::Char('l') | KeyCode::Enter | KeyCode::Char('o') => {
+            if app.picker.is_some() {
+                app.picker_activate_selection(layout.overview_field);
+            } else {
+                app.open_selected();
+            }
+            true
+        }
+        KeyCode::Char('e') => {
+            app.picker_set_managed_only(true);
+            true
+        }
+        KeyCode::Char('a') => {
+            app.picker_set_managed_only(false);
+            true
+        }
+        KeyCode::Char('r') => {
+            if let Some((path, managed_only)) = app
+                .picker
+                .as_ref()
+                .map(|picker| (picker.current_path.clone(), picker.managed_only))
+            {
+                app.picker_reload(Some(path), managed_only);
+            } else {
+                app.refresh(layout);
+            }
+            true
+        }
+        _ => true,
+    }
+}
+
+fn handle_mouse_down<C: TuiApi>(
+    app: &mut App<C>,
+    renderer: &Renderer,
+    layout: WorkspaceLayout,
+    mouse: crossterm::event::MouseEvent,
+) {
+    if app.initial_request.is_some() {
+        return;
+    }
+    if handle_split_or_header_click(app, renderer.width(), layout, mouse) {
+        return;
+    }
+    handle_workspace_click(app, layout, mouse);
+}
+
+fn handle_split_or_header_click<C: TuiApi>(
+    app: &mut App<C>,
+    width: u16,
+    layout: WorkspaceLayout,
+    mouse: crossterm::event::MouseEvent,
+) -> bool {
+    if layout
+        .split_hitbox
+        .map(|hitbox| hitbox.contains(mouse.column, mouse.row))
+        .unwrap_or(false)
+    {
+        app.start_split_drag(layout, mouse.column);
+        return true;
+    }
+    if header_filter_action_at(app, width, mouse.column, mouse.row).is_some() {
+        app.handle_header_filter_click(width, mouse.column, mouse.row);
+        return true;
+    }
+    false
+}
+
+fn handle_workspace_click<C: TuiApi>(
+    app: &mut App<C>,
+    layout: WorkspaceLayout,
+    mouse: crossterm::event::MouseEvent,
+) {
+    if let Some(thought_box) = layout.thought_box {
+        if thought_box.contains(mouse.column, mouse.row) {
+            if let Some(thought_content) = layout.thought_content {
+                app.handle_thought_click(
+                    mouse.column,
+                    mouse.row,
+                    thought_content,
+                    layout.thought_entry_capacity(),
+                );
+            }
+            return;
+        }
+    }
+    if layout.overview_field.contains(mouse.column, mouse.row) {
+        app.handle_field_click(mouse.column, mouse.row, layout.overview_field);
+    }
+}
+
+fn handle_tui_event<C: TuiApi>(
+    app: &mut App<C>,
+    renderer: &mut Renderer,
+    layout: WorkspaceLayout,
+    event: Event,
+) -> io::Result<bool> {
+    match event {
+        Event::Key(key) if key.kind == KeyEventKind::Press => {
+            Ok(handle_key_event(app, layout, key))
+        }
+        Event::Paste(text) => {
+            app.handle_paste(&text);
+            Ok(true)
+        }
+        Event::Mouse(mouse) if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) => {
+            handle_mouse_down(app, renderer, layout, mouse);
+            Ok(true)
+        }
+        Event::Mouse(mouse) if matches!(mouse.kind, MouseEventKind::Drag(MouseButton::Left)) => {
+            if app.drag_split(layout, mouse.column) {
+                return Ok(true);
+            }
+            Ok(true)
+        }
+        Event::Mouse(mouse) if matches!(mouse.kind, MouseEventKind::Up(MouseButton::Left)) => {
             app.stop_split_drag();
+            Ok(true)
         }
-        app.trim_thought_log(layout.thought_entry_capacity());
-
-        if app.should_refresh() {
-            app.refresh(layout);
+        Event::Resize(width, height) => {
+            app.stop_split_drag();
+            renderer.manual_resize(width, height)?;
+            Ok(true)
         }
+        _ => Ok(true),
+    }
+}
 
-        app.tick(layout.overview_field);
-        app.render(&mut renderer, layout);
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let (mut app, mut renderer) = initialize_tui_app()?;
+
+    loop {
+        let layout = prepare_frame(&mut app, &mut renderer);
         renderer.flush()?;
 
-        if event::poll(FRAME_DURATION)? {
-            match event::read()? {
-                Event::Key(key) if key.kind == KeyEventKind::Press => {
-                    if app.initial_request.is_some() {
-                        app.handle_initial_request_key(key, layout.overview_field);
-                        continue;
-                    }
-
-                    match key.code {
-                        KeyCode::Char('q') => break,
-                        KeyCode::Esc => {
-                            if app.picker.is_some() {
-                                app.close_picker();
-                            } else {
-                                break;
-                            }
-                        }
-                        KeyCode::Left | KeyCode::Char('h') | KeyCode::Backspace => {
-                            if app.picker.is_some() {
-                                app.picker_up();
-                            } else {
-                                app.move_selection(-1, layout.overview_field);
-                            }
-                        }
-                        KeyCode::Up | KeyCode::Char('k') => {
-                            app.move_selection(-1, layout.overview_field);
-                        }
-                        KeyCode::Down | KeyCode::Char('j') => {
-                            app.move_selection(1, layout.overview_field);
-                        }
-                        KeyCode::Right
-                        | KeyCode::Char('l')
-                        | KeyCode::Enter
-                        | KeyCode::Char('o') => {
-                            if app.picker.is_some() {
-                                app.picker_activate_selection(layout.overview_field);
-                            } else {
-                                app.open_selected();
-                            }
-                        }
-                        KeyCode::Char('e') => {
-                            app.picker_set_managed_only(true);
-                        }
-                        KeyCode::Char('a') => {
-                            app.picker_set_managed_only(false);
-                        }
-                        KeyCode::Char('r') => {
-                            if let Some((path, managed_only)) = app
-                                .picker
-                                .as_ref()
-                                .map(|picker| (picker.current_path.clone(), picker.managed_only))
-                            {
-                                app.picker_reload(Some(path), managed_only);
-                            } else {
-                                app.refresh(layout);
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-                Event::Paste(text) => {
-                    app.handle_paste(&text);
-                }
-                Event::Mouse(mouse)
-                    if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) =>
-                {
-                    if app.initial_request.is_some() {
-                        continue;
-                    }
-                    if layout
-                        .split_hitbox
-                        .map(|hitbox| hitbox.contains(mouse.column, mouse.row))
-                        .unwrap_or(false)
-                    {
-                        app.start_split_drag(layout, mouse.column);
-                    } else if header_filter_action_at(
-                        &app,
-                        renderer.width(),
-                        mouse.column,
-                        mouse.row,
-                    )
-                    .is_some()
-                    {
-                        app.handle_header_filter_click(renderer.width(), mouse.column, mouse.row);
-                    } else if let Some(thought_box) = layout.thought_box {
-                        if thought_box.contains(mouse.column, mouse.row) {
-                            if let Some(thought_content) = layout.thought_content {
-                                app.handle_thought_click(
-                                    mouse.column,
-                                    mouse.row,
-                                    thought_content,
-                                    layout.thought_entry_capacity(),
-                                );
-                            }
-                        } else if layout.overview_field.contains(mouse.column, mouse.row) {
-                            app.handle_field_click(mouse.column, mouse.row, layout.overview_field);
-                        }
-                    } else if layout.overview_field.contains(mouse.column, mouse.row) {
-                        app.handle_field_click(mouse.column, mouse.row, layout.overview_field);
-                    }
-                }
-                Event::Mouse(mouse)
-                    if matches!(mouse.kind, MouseEventKind::Drag(MouseButton::Left)) =>
-                {
-                    if app.drag_split(layout, mouse.column) {
-                        continue;
-                    }
-                }
-                Event::Mouse(mouse)
-                    if matches!(mouse.kind, MouseEventKind::Up(MouseButton::Left)) =>
-                {
-                    app.stop_split_drag();
-                }
-                Event::Resize(width, height) => {
-                    app.stop_split_drag();
-                    renderer.manual_resize(width, height)?;
-                }
-                _ => {}
-            }
+        if event::poll(FRAME_DURATION)?
+            && !handle_tui_event(&mut app, &mut renderer, layout, event::read()?)?
+        {
+            break;
         }
     }
 
