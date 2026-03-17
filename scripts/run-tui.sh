@@ -92,24 +92,68 @@ api_url() {
   printf '%s%s\n' "${TUI_URL%/}" "${WAIT_PATH}"
 }
 
-api_status() {
-  local url="${1:-$(api_url)}"
-  curl -sS -o /dev/null -w '%{http_code}' \
-    --connect-timeout 1 \
-    --max-time 2 \
-    "${url}" \
-    2>/dev/null || true
+api_auth_header() {
+  if [[ "${AUTH_MODE:-}" == "token" && -n "${AUTH_TOKEN:-}" ]]; then
+    printf 'Authorization: Bearer %s\n' "${AUTH_TOKEN}"
+  fi
 }
 
-api_is_ready() {
+api_status() {
+  local url="${1:-$(api_url)}"
+  local header
+
+  header="$(api_auth_header)"
+  if [[ -n "${header}" ]]; then
+    curl -sS -o /dev/null -w '%{http_code}' \
+      --connect-timeout 1 \
+      --max-time 2 \
+      -H "${header}" \
+      "${url}" \
+      2>/dev/null || true
+  else
+    curl -sS -o /dev/null -w '%{http_code}' \
+      --connect-timeout 1 \
+      --max-time 2 \
+      "${url}" \
+      2>/dev/null || true
+  fi
+}
+
+probe_api_access() {
   local url="${1:-$(api_url)}"
   LAST_API_STATUS="$(api_status "${url}")"
   case "${LAST_API_STATUS}" in
-    200|401|403)
+    200)
       return 0
+      ;;
+    401|403)
+      return 10
       ;;
     *)
       return 1
+      ;;
+  esac
+}
+
+show_api_auth_failure() {
+  local url="${1:-$(api_url)}"
+
+  case "${LAST_API_STATUS}" in
+    401)
+      printf 'throngterm API at %s requires valid auth for %s; set AUTH_MODE=token and AUTH_TOKEN to match the target API\n' \
+        "${TUI_URL}" \
+        "${WAIT_PATH}" >&2
+      ;;
+    403)
+      printf 'throngterm API at %s denied session access for %s; use a token with session-list access for this TUI instance\n' \
+        "${TUI_URL}" \
+        "${WAIT_PATH}" >&2
+      ;;
+    *)
+      printf 'throngterm API at %s failed auth probe for %s (status: %s)\n' \
+        "${TUI_URL}" \
+        "${WAIT_PATH}" \
+        "${LAST_API_STATUS:-000}" >&2
       ;;
   esac
 }
@@ -158,9 +202,14 @@ wait_for_api() {
   printf 'Waiting for throngterm API at %s\n' "${url}"
 
   while (( SECONDS <= deadline )); do
-    if api_is_ready "${url}"; then
+    if probe_api_access "${url}"; then
       printf 'throngterm API is ready (%s)\n' "${LAST_API_STATUS}"
       return 0
+    fi
+    local probe_status=$?
+    if (( probe_status == 10 )); then
+      show_api_auth_failure "${url}"
+      return 1
     fi
     if (( WAIT_LOG_INTERVAL > 0 && SECONDS >= next_log_at )); then
       printf 'Still waiting for throngterm API at %s (elapsed: %ss, last status: %s)\n' \
@@ -186,8 +235,12 @@ wait_for_api_quiet() {
   deadline=$((SECONDS + timeout))
 
   while (( SECONDS <= deadline )); do
-    if api_is_ready "${url}"; then
+    if probe_api_access "${url}"; then
       return 0
+    fi
+    local probe_status=$?
+    if (( probe_status == 10 )); then
+      return 10
     fi
     sleep "${WAIT_INTERVAL}"
   done
@@ -197,18 +250,30 @@ wait_for_api_quiet() {
 
 main() {
   require curl
+  local probe_status=0
 
-  if api_is_ready "$(api_url)"; then
+  if probe_api_access "$(api_url)"; then
     printf 'throngterm API is ready (%s)\n' "${LAST_API_STATUS}"
-  elif should_auto_start_local_api; then
-    if wait_for_api_quiet "${PRESTART_WAIT_TIMEOUT}"; then
-      printf 'throngterm API is ready (%s)\n' "${LAST_API_STATUS}"
-    else
-      start_local_api
-      wait_for_api "${START_TIMEOUT}"
-    fi
   else
-    wait_for_api "${WAIT_TIMEOUT}"
+    probe_status=$?
+    if (( probe_status == 10 )); then
+      show_api_auth_failure "$(api_url)"
+      return 1
+    elif should_auto_start_local_api; then
+      if wait_for_api_quiet "${PRESTART_WAIT_TIMEOUT}"; then
+        printf 'throngterm API is ready (%s)\n' "${LAST_API_STATUS}"
+      else
+        probe_status=$?
+        if (( probe_status == 10 )); then
+          show_api_auth_failure "$(api_url)"
+          return 1
+        fi
+        start_local_api
+        wait_for_api "${START_TIMEOUT}"
+      fi
+    else
+      wait_for_api "${WAIT_TIMEOUT}"
+    fi
   fi
 
   if is_true "${WAIT_ONLY}" || is_true "${SKIP_TUI}"; then
