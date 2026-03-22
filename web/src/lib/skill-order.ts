@@ -7,7 +7,7 @@ function quickSkillPriority(name: string): number {
   if (normalized === "describe") return 2;
   if (normalized === "reproduce") return 3;
   if (normalized === "commit") return 4;
-  if (normalized === "deploy-debug") return 5;
+  if (normalized === "deploy") return 5;
   return 6;
 }
 

@@ -12,7 +12,7 @@ describe("quick skill ordering", () => {
       skill("ask-cascade"),
       skill("describe"),
       skill("domain-scaffolder-frontend"),
-      skill("deploy-debug"),
+      skill("deploy"),
       skill("audit-plans"),
       skill("commit"),
       skill("domain-planner"),
@@ -28,7 +28,7 @@ describe("quick skill ordering", () => {
       "describe",
       "reproduce",
       "commit",
-      "deploy-debug",
+      "deploy",
       "ask-cascade",
     ]);
   });
@@ -38,14 +38,14 @@ describe("quick skill ordering", () => {
       skill("zeta"),
       skill("commit"),
       skill("alpha"),
-      skill("deploy-debug"),
+      skill("deploy"),
       skill("audit-plans"),
     ]);
 
     expect(ordered.map((item) => item.name)).toEqual([
       "audit-plans",
       "commit",
-      "deploy-debug",
+      "deploy",
       "zeta",
       "alpha",
     ]);
