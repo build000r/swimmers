@@ -401,11 +401,7 @@ impl SessionActor {
         }
     }
 
-    async fn handle_pty_read_result(
-        &mut self,
-        result: Option<Vec<u8>>,
-        pty_closed: &mut bool,
-    ) {
+    async fn handle_pty_read_result(&mut self, result: Option<Vec<u8>>, pty_closed: &mut bool) {
         match result {
             Some(raw) => self.handle_pty_output(raw).await,
             None => self.mark_pty_closed(pty_closed),
@@ -417,7 +413,8 @@ impl SessionActor {
         *pty_closed = true;
         let prev = self.state_detector.state();
         self.state_detector.mark_exited();
-        let _ = self.maybe_emit_state_change_with_exit_reason(prev, Some("process_exit".to_string()));
+        let _ =
+            self.maybe_emit_state_change_with_exit_reason(prev, Some("process_exit".to_string()));
     }
 
     async fn handle_command(&mut self, cmd: SessionCommand, pty_closed: bool) -> bool {
@@ -451,8 +448,6 @@ impl SessionActor {
                 let _ = reply.send(text);
             }
             SessionCommand::GetSummary(reply) => {
-                self.maybe_refresh_cwd_from_tmux(false).await;
-                self.maybe_refresh_tool_from_tmux(false).await;
                 let _ = reply.send(self.build_summary());
             }
             SessionCommand::GetReplayCursor(reply) => {
@@ -501,7 +496,10 @@ impl SessionActor {
     async fn handle_dismiss_attention(&mut self) {
         let state_before = self.state_detector.state();
         self.state_detector.dismiss_attention();
-        if matches!(self.maybe_emit_state_change(state_before), Some(SessionState::Idle)) {
+        if matches!(
+            self.maybe_emit_state_change(state_before),
+            Some(SessionState::Idle)
+        ) {
             self.maybe_refresh_cwd_from_tmux(false).await;
         }
     }
@@ -510,7 +508,6 @@ impl SessionActor {
         self.subscribers.remove(&client_id);
         debug!(session_id = %self.session_id, client_id, "client unsubscribed");
     }
-
 }
 
 async fn capture_pane_tail_or_empty(session_id: String, tmux_name: String, lines: usize) -> String {
@@ -661,13 +658,20 @@ impl SessionActor {
         let state_before = self.state_detector.state();
         self.state_detector.process_output(&chunk.data);
         self.maybe_update_tool_from_current_command();
-        if matches!(self.maybe_emit_state_change(state_before), Some(SessionState::Idle)) {
+        if matches!(
+            self.maybe_emit_state_change(state_before),
+            Some(SessionState::Idle)
+        ) {
             self.maybe_refresh_cwd_from_tmux(false).await;
         }
         self.clear_startup_replay_if_idle();
         self.record_meaningful_output_activity(state_before, &chunk);
         let seq = self.replay_ring.push(&chunk.data);
-        self.broadcast(OutputFrame { seq, data: chunk.data }).await;
+        self.broadcast(OutputFrame {
+            seq,
+            data: chunk.data,
+        })
+        .await;
         crate::metrics::record_queue_depth(&self.session_id, self.total_subscriber_queue_depth());
     }
 
@@ -1415,7 +1419,8 @@ fn osc_payloads<'a>(text: &'a str, prefix: &str) -> Vec<&'a str> {
 
     while let Some(start) = text[search_from..].find(prefix) {
         let payload_start = search_from + start + prefix.len();
-        let Some((end_offset, terminator_len)) = find_osc_payload_end(&text[payload_start..]) else {
+        let Some((end_offset, terminator_len)) = find_osc_payload_end(&text[payload_start..])
+        else {
             break;
         };
         payloads.push(&text[payload_start..payload_start + end_offset]);
@@ -1799,19 +1804,67 @@ fn pty_read_loop(
 #[cfg(test)]
 mod tests {
     use super::{
-        detect_skill_from_input_line, detect_tool_from_command_line, detect_tool_from_process_entry,
-        drain_completed_input_lines, extract_cwd_from_title, line_looks_prompt_like,
-        normalize_skill_name, output_counts_as_meaningful_activity, parse_process_entry,
-        percent_decode, query_tool_from_tmux_process_tree, resolve_tmux_terminal_env,
-        should_refresh_cwd_from_tmux, should_refresh_tool_from_tmux, visible_output_is_meaningful,
-        write_input_counts_as_activity, ProcessEntry, CWD_REFRESH_MIN_INTERVAL,
-        TOOL_REFRESH_MIN_INTERVAL, cwd_from_osc7_payload, find_osc_payload_end, osc_payloads,
+        cwd_from_osc7_payload, detect_skill_from_input_line, detect_tool_from_command_line,
+        detect_tool_from_process_entry, drain_completed_input_lines, extract_cwd_from_title,
+        find_osc_payload_end, line_looks_prompt_like, normalize_skill_name, osc_payloads,
+        output_counts_as_meaningful_activity, parse_process_entry, percent_decode,
+        query_tool_from_tmux_process_tree, resolve_tmux_terminal_env, should_refresh_cwd_from_tmux,
+        should_refresh_tool_from_tmux, visible_output_is_meaningful,
+        write_input_counts_as_activity, ControlEvent, ProcessEntry, SessionActor,
+        SessionCommand, CWD_REFRESH_MIN_INTERVAL, TOOL_REFRESH_MIN_INTERVAL,
     };
+    use crate::config::Config;
     use crate::scroll::guard::ScrollOutputChunk;
     use crate::session::replay_ring::ReplayRing;
+    use crate::state::detector::StateDetector;
     use crate::types::SessionState;
+    use chrono::Utc;
+    use portable_pty::{native_pty_system, PtySize};
+    use crate::scroll::guard::ScrollGuard;
+    use std::collections::HashMap;
     use std::os::unix::fs::PermissionsExt;
-    use std::time::Instant;
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+    use tokio::sync::{broadcast, mpsc, oneshot};
+
+    fn test_actor() -> SessionActor {
+        let pty_system = native_pty_system();
+        let pair = pty_system
+            .openpty(PtySize {
+                rows: 24,
+                cols: 80,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .expect("openpty");
+        let writer = pair.master.take_writer().expect("writer");
+        let (_cmd_tx, cmd_rx) = mpsc::channel(8);
+        let (event_tx, _) = broadcast::channel::<ControlEvent>(8);
+
+        SessionActor {
+            session_id: "sess-test".to_string(),
+            tmux_name: "demo".to_string(),
+            config: Arc::new(Config::default()),
+            master: pair.master,
+            writer,
+            state_detector: StateDetector::new(),
+            scroll_guard: ScrollGuard::new(),
+            replay_ring: ReplayRing::new(512 * 1024),
+            subscribers: HashMap::new(),
+            cmd_rx,
+            event_tx,
+            cols: 80,
+            rows: 24,
+            cwd: "/tmp/project".to_string(),
+            last_cwd_refresh_at: Instant::now(),
+            last_tool_refresh_at: Instant::now(),
+            tool: Some("Codex".to_string()),
+            last_skill: None,
+            input_line_buffer: String::new(),
+            last_activity_at: Utc::now(),
+            clear_replay_on_first_idle: false,
+        }
+    }
 
     #[test]
     fn detect_tool_from_command_line_handles_aliases() {
@@ -2000,7 +2053,10 @@ mod tests {
         std::fs::set_permissions(&tmux, perms).expect("chmod");
 
         let previous_path = std::env::var_os("PATH");
-        std::env::set_var("PATH", std::env::join_paths([bin_dir.as_path()]).expect("path"));
+        std::env::set_var(
+            "PATH",
+            std::env::join_paths([bin_dir.as_path()]).expect("path"),
+        );
 
         let tool = query_tool_from_tmux_process_tree("demo")
             .await
@@ -2048,12 +2104,62 @@ fi
         }
 
         let previous_path = std::env::var_os("PATH");
-        std::env::set_var("PATH", std::env::join_paths([bin_dir.as_path()]).expect("path"));
+        std::env::set_var(
+            "PATH",
+            std::env::join_paths([bin_dir.as_path()]).expect("path"),
+        );
 
         let tool = query_tool_from_tmux_process_tree("demo")
             .await
             .expect("tool query");
         assert_eq!(tool.as_deref(), Some("Claude Code"));
+
+        if let Some(value) = previous_path {
+            std::env::set_var("PATH", value);
+        } else {
+            std::env::remove_var("PATH");
+        }
+    }
+
+    #[tokio::test]
+    async fn get_summary_uses_cached_metadata_without_tmux_refresh() {
+        let _guard = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let dir = tempfile::tempdir().expect("tempdir");
+        let bin_dir = dir.path().join("bin");
+        std::fs::create_dir_all(&bin_dir).expect("bin dir");
+
+        let tmux = bin_dir.join("tmux");
+        std::fs::write(&tmux, "#!/bin/sh\nsleep 2\nprintf 'codex\\n'\n").expect("tmux");
+        let mut perms = std::fs::metadata(&tmux).expect("metadata").permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&tmux, perms).expect("chmod");
+
+        let previous_path = std::env::var_os("PATH");
+        std::env::set_var(
+            "PATH",
+            std::env::join_paths([bin_dir.as_path()]).expect("path"),
+        );
+
+        let mut actor = test_actor();
+        actor.state_detector.process_output(b"running build output\n");
+        actor.last_tool_refresh_at = Instant::now() - TOOL_REFRESH_MIN_INTERVAL;
+
+        let (tx, rx) = oneshot::channel();
+        tokio::time::timeout(
+            Duration::from_millis(200),
+            actor.handle_command(SessionCommand::GetSummary(tx), false),
+        )
+        .await
+        .expect("GetSummary should not block on tmux refresh");
+
+        let summary = tokio::time::timeout(Duration::from_millis(200), rx)
+            .await
+            .expect("summary reply")
+            .expect("summary payload");
+        assert_eq!(summary.tool.as_deref(), Some("Codex"));
+        assert_eq!(summary.cwd, "/tmp/project");
 
         if let Some(value) = previous_path {
             std::env::set_var("PATH", value);
