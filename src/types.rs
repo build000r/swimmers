@@ -147,7 +147,7 @@ pub struct SpritePack {
     pub deep_sleep: String,
 }
 
-/// Per-repository Thronglet palette used across web and TUI surfaces.
+/// Per-repository Thronglet palette used by the native TUI.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RepoTheme {
     pub body: String,

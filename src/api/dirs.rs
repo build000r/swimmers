@@ -736,7 +736,7 @@ esac
         fs::write(
             dir.path().join("sync.sh"),
             r#"BACKEND_TARGETS=("alpha" 'services/nested-app')
-FRONTEND_TARGETS=('web-app')
+FRONTEND_TARGETS=('extra-target')
 "#,
         )
         .expect("sync");
@@ -745,8 +745,8 @@ FRONTEND_TARGETS=('web-app')
             env_manager_targets(dir.path()),
             vec![
                 "alpha".to_string(),
-                "services/nested-app".to_string(),
-                "web-app".to_string()
+                "extra-target".to_string(),
+                "services/nested-app".to_string()
             ]
         );
 

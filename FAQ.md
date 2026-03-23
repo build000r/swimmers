@@ -5,7 +5,7 @@ ThrongTerm is a native terminal UI for tmux-backed shell sessions.
 **How do I start it?**
 Run `make tui`. That starts the local API if needed and then launches the TUI.
 
-**Does it need the browser UI?**
+**Does it need anything besides the TUI?**
 No. The supported path is the native TUI talking to the Rust API.
 
 **How do I connect to a remote API?**

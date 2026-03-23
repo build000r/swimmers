@@ -3371,7 +3371,7 @@ fn render_too_small(renderer: &mut Renderer) {
     renderer.draw_text(
         2,
         5,
-        "resize the terminal or use the web view",
+        "resize the terminal and reopen the TUI",
         Color::DarkGrey,
     );
 }

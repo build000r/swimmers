@@ -45,6 +45,3 @@ AUTH_MODE=token AUTH_TOKEN=your-token \
 THRONGTERM_TUI_URL=http://100.101.123.63:3210 \
 cargo run --bin throngterm-tui
 ```
-
-The repo still contains older `web/` assets, but the supported workflow is the
-native TUI.

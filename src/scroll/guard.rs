@@ -4,7 +4,7 @@
 // When two tmux clients are attached to the same session, scroll events in one
 // client trigger full-screen redraws that reach the other client's PTY. These
 // arrive as bursts of cursor-positioning sequences that cause flickering and
-// partial-render artifacts in xterm.js.
+// partial-render artifacts in the terminal client.
 //
 // Strategy:
 //  1. If ThrongTerm recently sent input, pass everything through immediately

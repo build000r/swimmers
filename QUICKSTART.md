@@ -5,8 +5,7 @@
 ## What This Is
 
 Throngterm is a native terminal UI backed by a Rust API that manages tmux
-sessions. The supported path is `API + TUI`; the older browser/iPhone workflow
-is no longer the primary product surface.
+sessions. The supported path is `API + TUI`.
 
 **Target setup:** local API on `3210` with the native TUI attached to it.
 
