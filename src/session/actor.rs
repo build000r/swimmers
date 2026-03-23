@@ -1810,17 +1810,17 @@ mod tests {
         output_counts_as_meaningful_activity, parse_process_entry, percent_decode,
         query_tool_from_tmux_process_tree, resolve_tmux_terminal_env, should_refresh_cwd_from_tmux,
         should_refresh_tool_from_tmux, visible_output_is_meaningful,
-        write_input_counts_as_activity, ControlEvent, ProcessEntry, SessionActor,
-        SessionCommand, CWD_REFRESH_MIN_INTERVAL, TOOL_REFRESH_MIN_INTERVAL,
+        write_input_counts_as_activity, ControlEvent, ProcessEntry, SessionActor, SessionCommand,
+        CWD_REFRESH_MIN_INTERVAL, TOOL_REFRESH_MIN_INTERVAL,
     };
     use crate::config::Config;
+    use crate::scroll::guard::ScrollGuard;
     use crate::scroll::guard::ScrollOutputChunk;
     use crate::session::replay_ring::ReplayRing;
     use crate::state::detector::StateDetector;
     use crate::types::SessionState;
     use chrono::Utc;
     use portable_pty::{native_pty_system, PtySize};
-    use crate::scroll::guard::ScrollGuard;
     use std::collections::HashMap;
     use std::os::unix::fs::PermissionsExt;
     use std::sync::Arc;
@@ -2143,7 +2143,9 @@ fi
         );
 
         let mut actor = test_actor();
-        actor.state_detector.process_output(b"running build output\n");
+        actor
+            .state_detector
+            .process_output(b"running build output\n");
         actor.last_tool_refresh_at = Instant::now() - TOOL_REFRESH_MIN_INTERVAL;
 
         let (tx, rx) = oneshot::channel();
