@@ -89,9 +89,7 @@ fn start_thought_backend(
     let provider = Arc::new(SupervisorProvider::new(supervisor.clone()));
     match config.thought_backend {
         ThoughtBackend::Inproc => {
-            tracing::warn!(
-                "thought backend=inproc is deprecated; using daemon compatibility shim"
-            );
+            tracing::warn!("thought backend=inproc is deprecated; using daemon compatibility shim");
             let runner = ThoughtLoopRunner::with_runtime_config(
                 config.thought_tick_ms,
                 thought_tx,

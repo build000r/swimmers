@@ -70,10 +70,9 @@ impl Default for Config {
 }
 
 fn apply_env_port(config: &mut Config) {
-    if let Ok(port) = std::env::var("PORT").and_then(|port| {
-        port.parse()
-            .map_err(|_| std::env::VarError::NotPresent)
-    }) {
+    if let Ok(port) = std::env::var("PORT")
+        .and_then(|port| port.parse().map_err(|_| std::env::VarError::NotPresent))
+    {
         config.port = port;
     }
 }
@@ -88,10 +87,7 @@ fn apply_env_non_empty_string<F>(key: &str, apply: F)
 where
     F: FnOnce(String),
 {
-    if let Some(value) = std::env::var(key)
-        .ok()
-        .filter(|value| !value.is_empty())
-    {
+    if let Some(value) = std::env::var(key).ok().filter(|value| !value.is_empty()) {
         apply(value);
     }
 }

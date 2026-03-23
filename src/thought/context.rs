@@ -971,7 +971,10 @@ mod tests {
         let first = reader.read().expect("bootstrap snapshot");
         assert_eq!(first.user_task.as_deref(), Some("investigate startup"));
         assert_eq!(first.token_count, 321);
-        assert_eq!(first.current_tool.as_ref().map(|tool| tool.tool.as_str()), Some("exec"));
+        assert_eq!(
+            first.current_tool.as_ref().map(|tool| tool.tool.as_str()),
+            Some("exec")
+        );
         assert!(reader.read().is_none(), "no new data should yield None");
 
         fs::write(
@@ -1010,7 +1013,13 @@ mod tests {
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
         let tmp = tempfile::tempdir().expect("tempdir");
-        let sessions_dir = tmp.path().join(".codex").join("sessions").join("2026").join("03").join("16");
+        let sessions_dir = tmp
+            .path()
+            .join(".codex")
+            .join("sessions")
+            .join("2026")
+            .join("03")
+            .join("16");
         fs::create_dir_all(&sessions_dir).expect("sessions dir");
 
         let other = sessions_dir.join("rollout-other.jsonl");
@@ -1040,7 +1049,10 @@ mod tests {
         assert_eq!(first.user_task.as_deref(), Some("fix websocket bug"));
         assert_eq!(first.token_count, 555);
         assert_eq!(first.context_limit, 258_400);
-        assert_eq!(first.current_tool.as_ref().map(|tool| tool.tool.as_str()), Some("exec"));
+        assert_eq!(
+            first.current_tool.as_ref().map(|tool| tool.tool.as_str()),
+            Some("exec")
+        );
 
         fs::write(
             &target,
@@ -1056,7 +1068,10 @@ mod tests {
 
         let second = reader.read().expect("incremental snapshot");
         assert_eq!(second.user_task.as_deref(), Some("tighten the retry path"));
-        assert!(reader.read().is_none(), "steady state should not re-emit snapshot");
+        assert!(
+            reader.read().is_none(),
+            "steady state should not re-emit snapshot"
+        );
 
         if let Some(prev) = previous_home {
             std::env::set_var("HOME", prev);

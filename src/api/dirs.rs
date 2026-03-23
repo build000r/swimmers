@@ -836,7 +836,10 @@ FRONTEND_TARGETS=('web-app')
         )
         .expect("sync");
         fs::write(
-            env_manager.join("scripts").join("project").join("project.sh"),
+            env_manager
+                .join("scripts")
+                .join("project")
+                .join("project.sh"),
             r#"declare -A SERVICE_REPO=(
   [svc-alpha]="alpha"
   [svc-nested]="services/nested-app"
@@ -897,7 +900,10 @@ FRONTEND_TARGETS=('web-app')
         fs::create_dir_all(&bin_dir).expect("bin");
         configure_fake_make(&bin_dir);
         fs::write(
-            env_manager.join("scripts").join("project").join("project.sh"),
+            env_manager
+                .join("scripts")
+                .join("project")
+                .join("project.sh"),
             r#"declare -A SERVICE_REPO=(
   [svc-alpha]="alpha"
 )

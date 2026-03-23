@@ -37,6 +37,7 @@ const REFRESH_INTERVAL: Duration = Duration::from_secs(2);
 const MESSAGE_TTL: Duration = Duration::from_secs(5);
 const API_CONNECT_TIMEOUT: Duration = Duration::from_millis(250);
 const API_REQUEST_TIMEOUT: Duration = Duration::from_millis(750);
+const API_NATIVE_OPEN_TIMEOUT: Duration = Duration::from_secs(3);
 const SPRITE_HEIGHT: u16 = 4;
 const LABEL_HEIGHT: u16 = 1;
 const ENTITY_WIDTH: u16 = 12;
@@ -859,6 +860,70 @@ impl ApiClient {
     fn transport_error(&self, action: &str, err: reqwest::Error) -> String {
         friendly_transport_error(&self.base_url, action, &err)
     }
+
+    fn startup_access_error(&self, path: &str, status: reqwest::StatusCode) -> String {
+        match status {
+            reqwest::StatusCode::UNAUTHORIZED => format!(
+                "backend at {} requires valid auth for {}. Set AUTH_MODE=token and AUTH_TOKEN to match the target API.",
+                self.base_url, path
+            ),
+            reqwest::StatusCode::FORBIDDEN => format!(
+                "backend at {} denied startup access to {}. Use a token with the required session scope for this TUI instance.",
+                self.base_url, path
+            ),
+            _ => format!(
+                "backend at {} rejected startup access to {} ({status})",
+                self.base_url, path
+            ),
+        }
+    }
+
+    async fn ensure_startup_access(
+        &self,
+        response: reqwest::Response,
+        path: &str,
+    ) -> Result<(), String> {
+        if response.status().is_success() {
+            return Ok(());
+        }
+
+        let status = response.status();
+        match status {
+            reqwest::StatusCode::UNAUTHORIZED | reqwest::StatusCode::FORBIDDEN => {
+                Err(self.startup_access_error(path, status))
+            }
+            _ => Err(read_error(response).await),
+        }
+    }
+
+    async fn preflight_session_refresh_access(&self) -> Result<(), String> {
+        let url = format!("{}/v1/sessions", self.base_url);
+        let response = self
+            .with_auth(self.http.get(url))
+            .send()
+            .await
+            .map_err(|err| self.transport_error("refresh sessions", err))?;
+
+        self.ensure_startup_access(response, "/v1/sessions").await
+    }
+
+    async fn preflight_selection_sync_access(&self) -> Result<(), String> {
+        let url = format!("{}/v1/selection", self.base_url);
+        let response = self
+            .with_auth(self.http.put(url))
+            .json(&PublishSelectionRequest { session_id: None })
+            .send()
+            .await
+            .map_err(|err| self.transport_error("clear the published selection", err))?;
+
+        self.ensure_startup_access(response, "/v1/selection").await
+    }
+
+    async fn preflight_startup_access(&self) -> Result<(), String> {
+        self.preflight_session_refresh_access().await?;
+        self.preflight_selection_sync_access().await?;
+        Ok(())
+    }
 }
 
 fn root_error_message(err: &(dyn StdError + 'static)) -> String {
@@ -980,6 +1045,7 @@ impl TuiApi for ApiClient {
             let url = format!("{}/v1/native/open", self.base_url);
             let response = self
                 .with_auth(self.http.post(url))
+                .timeout(API_NATIVE_OPEN_TIMEOUT)
                 .json(&NativeDesktopOpenRequest { session_id })
                 .send()
                 .await
@@ -1640,12 +1706,6 @@ impl<C: TuiApi> App<C> {
         self.sync_selection_publication();
     }
 
-    fn set_thought_filter_tmux_name(&mut self, tmux_name: String) {
-        self.thought_filter.tmux_name = Some(tmux_name);
-        self.reconcile_selection();
-        self.sync_selection_publication();
-    }
-
     fn clear_thought_filters(&mut self) {
         self.thought_filter.clear();
         self.reconcile_selection();
@@ -2129,7 +2189,13 @@ impl<C: TuiApi> App<C> {
             return;
         };
 
-        self.open_session_for_label(&selected_id, &label);
+        self.select_and_open_session(selected_id, label);
+    }
+
+    fn select_and_open_session(&mut self, session_id: String, label: String) {
+        self.selected_id = Some(session_id.clone());
+        self.sync_selection_publication();
+        self.open_session_for_label(&session_id, &label);
     }
 
     fn handle_thought_click(
@@ -2153,8 +2219,8 @@ impl<C: TuiApi> App<C> {
     fn apply_thought_filter_action(&mut self, action: ThoughtPanelAction) {
         match action {
             ThoughtPanelAction::FilterByCwd(cwd) => self.set_thought_filter_cwd(cwd),
-            ThoughtPanelAction::FilterByTmuxName(tmux_name) => {
-                self.set_thought_filter_tmux_name(tmux_name);
+            ThoughtPanelAction::OpenSession { session_id, label } => {
+                self.select_and_open_session(session_id, label);
             }
             ThoughtPanelAction::OpenRepoInEditor(cwd) => self.open_repo_in_editor(&cwd),
             ThoughtPanelAction::ClearFilters => self.clear_thought_filters(),
@@ -2219,12 +2285,15 @@ impl<C: TuiApi> App<C> {
             .visible_entities()
             .into_iter()
             .find(|entity| entity.screen_rect(field).contains(x, y))
-            .map(|entity| entity.session.session_id.clone());
+            .map(|entity| {
+                (
+                    entity.session.session_id.clone(),
+                    selected_label(Some(&entity.session.tmux_name)),
+                )
+            });
 
-        if let Some(session_id) = hit {
-            self.selected_id = Some(session_id);
-            self.sync_selection_publication();
-            self.open_selected();
+        if let Some((session_id, label)) = hit {
+            self.select_and_open_session(session_id, label);
             return;
         }
 
@@ -2376,7 +2445,7 @@ impl<C: TuiApi> App<C> {
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum ThoughtPanelAction {
     FilterByCwd(String),
-    FilterByTmuxName(String),
+    OpenSession { session_id: String, label: String },
     OpenRepoInEditor(String),
     ClearFilters,
 }
@@ -2392,6 +2461,7 @@ struct ThoughtChipLayout {
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct ThoughtRowLayout {
     row_rect: Option<Rect>,
+    session_id: String,
     tmux_name: String,
     line: String,
     color: Color,
@@ -2810,6 +2880,7 @@ fn build_thought_panel<C: TuiApi>(
                             width: visible_line_width,
                             height: 1,
                         }),
+                        session_id: entry.session_id.clone(),
                         tmux_name: entry.tmux_name.clone(),
                         line,
                         color,
@@ -2852,7 +2923,10 @@ fn thought_panel_action_at<C: TuiApi>(
             height: rect.height,
         };
         if rect.contains(x, y) {
-            return Some(ThoughtPanelAction::FilterByTmuxName(row.tmux_name));
+            return Some(ThoughtPanelAction::OpenSession {
+                session_id: row.session_id,
+                label: row.tmux_name,
+            });
         }
     }
 
@@ -3550,11 +3624,13 @@ fn initialize_tui_app() -> Result<(App<ApiClient>, Renderer), Box<dyn std::error
 
     let runtime = Runtime::new()?;
     let client = ApiClient::from_env().map_err(io::Error::other)?;
+    runtime
+        .block_on(client.preflight_startup_access())
+        .map_err(io::Error::other)?;
     let mut renderer = Renderer::new()?;
     renderer.init()?;
 
     let mut app = App::new(runtime, client);
-    app.clear_published_selection();
     let initial_layout = app.layout_for_terminal(renderer.width(), renderer.height());
     app.refresh(initial_layout);
 
@@ -3983,26 +4059,97 @@ mod tests {
         WorkspaceLayout::for_terminal_with_ratio(width, height, thought_ratio)
     }
 
+    const TEST_REPOS_ROOT: &str = "/tmp/repos";
+    const TEST_REPO_ALPHA: &str = "/tmp/repos/alpha";
+    const TEST_REPO_BETA: &str = "/tmp/repos/beta";
+    const TEST_REPO_BUILDOOOR: &str = "/tmp/repos/buildooor";
+    const TEST_REPO_DEV: &str = "/tmp/repos/dev";
+    const TEST_REPO_GAMMA: &str = "/tmp/repos/gamma";
+    const TEST_REPO_OPENSOURCE: &str = "/tmp/repos/opensource";
+    const TEST_REPO_SKILLS: &str = "/tmp/repos/opensource/skills";
+    const TEST_REPO_THRONGTERM: &str = "/tmp/repos/throngterm";
+
     fn make_app(api: MockApi) -> App<MockApi> {
         App::new(test_runtime(), api)
     }
 
-    #[tokio::test]
-    async fn api_client_transport_errors_are_actionable() {
-        let listener =
-            std::net::TcpListener::bind("127.0.0.1:0").expect("bind an ephemeral port");
-        let port = listener.local_addr().expect("local addr").port();
-        drop(listener);
-
-        let client = ApiClient {
+    fn test_api_client(base_url: String, auth_token: Option<&str>) -> ApiClient {
+        ApiClient {
             http: Client::builder()
                 .connect_timeout(Duration::from_millis(50))
                 .timeout(Duration::from_millis(100))
                 .build()
                 .expect("http client"),
-            base_url: format!("http://127.0.0.1:{port}"),
-            auth_token: None,
-        };
+            base_url,
+            auth_token: auth_token.map(str::to_string),
+        }
+    }
+
+    async fn spawn_guarded_startup_server(
+        expected_token: &str,
+        selection_status: axum::http::StatusCode,
+    ) -> (String, tokio::task::JoinHandle<()>) {
+        use axum::http::{HeaderMap, StatusCode};
+        use axum::routing::{get, put};
+        use axum::Router;
+
+        let expected_sessions_auth = format!("Bearer {expected_token}");
+        let expected_selection_auth = expected_sessions_auth.clone();
+
+        let app = Router::new()
+            .route(
+                "/v1/sessions",
+                get(move |headers: HeaderMap| {
+                    let expected_auth = expected_sessions_auth.clone();
+                    async move {
+                        if headers
+                            .get("authorization")
+                            .and_then(|value| value.to_str().ok())
+                            == Some(expected_auth.as_str())
+                        {
+                            StatusCode::OK
+                        } else {
+                            StatusCode::UNAUTHORIZED
+                        }
+                    }
+                }),
+            )
+            .route(
+                "/v1/selection",
+                put(move |headers: HeaderMap| {
+                    let expected_auth = expected_selection_auth.clone();
+                    async move {
+                        if headers
+                            .get("authorization")
+                            .and_then(|value| value.to_str().ok())
+                            == Some(expected_auth.as_str())
+                        {
+                            selection_status
+                        } else {
+                            StatusCode::UNAUTHORIZED
+                        }
+                    }
+                }),
+            );
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test server");
+        let addr = listener.local_addr().expect("server addr");
+        let handle = tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("serve test api");
+        });
+
+        (format!("http://{addr}"), handle)
+    }
+
+    #[tokio::test]
+    async fn api_client_transport_errors_are_actionable() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind an ephemeral port");
+        let port = listener.local_addr().expect("local addr").port();
+        drop(listener);
+
+        let client = test_api_client(format!("http://127.0.0.1:{port}"), None);
 
         let error = client
             .fetch_sessions()
@@ -4011,6 +4158,136 @@ mod tests {
         assert!(error.contains("backend unavailable at"));
         assert!(error.contains("Start `throngterm` or set THRONGTERM_TUI_URL."));
         assert!(!error.contains("error sending request for url"));
+    }
+
+    async fn spawn_delayed_api_server(
+        sessions_delay: Option<Duration>,
+        native_open_delay: Option<Duration>,
+    ) -> (String, tokio::task::JoinHandle<()>) {
+        use axum::routing::{get, post};
+        use axum::{Json, Router};
+
+        let app = Router::new()
+            .route(
+                "/v1/sessions",
+                get(move || async move {
+                    if let Some(delay) = sessions_delay {
+                        tokio::time::sleep(delay).await;
+                    }
+                    Json(SessionListResponse {
+                        sessions: vec![session_summary("sess-1", "7", TEST_REPO_THRONGTERM)],
+                        version: 1,
+                        sprite_packs: HashMap::new(),
+                        repo_themes: HashMap::new(),
+                    })
+                }),
+            )
+            .route(
+                "/v1/native/open",
+                post(move || async move {
+                    if let Some(delay) = native_open_delay {
+                        tokio::time::sleep(delay).await;
+                    }
+                    Json(NativeDesktopOpenResponse {
+                        session_id: "sess-1".to_string(),
+                        status: "focused".to_string(),
+                        pane_id: Some("pane-1".to_string()),
+                    })
+                }),
+            );
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test server");
+        let addr = listener.local_addr().expect("server addr");
+        let handle = tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("serve test api");
+        });
+
+        (format!("http://{addr}"), handle)
+    }
+
+    #[tokio::test]
+    async fn api_client_open_session_allows_slower_native_open_responses() {
+        let (base_url, handle) =
+            spawn_delayed_api_server(None, Some(Duration::from_millis(150))).await;
+        let client = test_api_client(base_url, None);
+
+        let response = client
+            .open_session("sess-1")
+            .await
+            .expect("native open should outlive the default polling timeout");
+
+        handle.abort();
+        assert_eq!(response.session_id, "sess-1");
+        assert_eq!(response.status, "focused");
+        assert_eq!(response.pane_id.as_deref(), Some("pane-1"));
+    }
+
+    #[tokio::test]
+    async fn api_client_fetch_sessions_keeps_short_timeout_for_refresh() {
+        let (base_url, handle) =
+            spawn_delayed_api_server(Some(Duration::from_millis(150)), None).await;
+        let client = test_api_client(base_url.clone(), None);
+
+        let error = client
+            .fetch_sessions()
+            .await
+            .expect_err("refresh should keep the short polling timeout");
+
+        handle.abort();
+        assert!(error.contains(&base_url));
+        assert!(error.contains("timed out while trying to refresh sessions"));
+    }
+
+    #[tokio::test]
+    async fn startup_preflight_accepts_matching_bearer_token() {
+        let (base_url, handle) =
+            spawn_guarded_startup_server("testtoken", axum::http::StatusCode::OK).await;
+        let client = test_api_client(base_url, Some("testtoken"));
+
+        let result = client.preflight_startup_access().await;
+
+        handle.abort();
+        assert!(
+            result.is_ok(),
+            "matching token should pass startup preflight"
+        );
+    }
+
+    #[tokio::test]
+    async fn startup_preflight_requires_matching_auth_for_sessions() {
+        let (base_url, handle) =
+            spawn_guarded_startup_server("testtoken", axum::http::StatusCode::OK).await;
+        let client = test_api_client(base_url.clone(), None);
+
+        let error = client
+            .preflight_startup_access()
+            .await
+            .expect_err("missing auth should fail startup preflight");
+
+        handle.abort();
+        assert!(error.contains(&base_url));
+        assert!(error.contains("/v1/sessions"));
+        assert!(error.contains("AUTH_MODE=token"));
+        assert!(error.contains("AUTH_TOKEN"));
+    }
+
+    #[tokio::test]
+    async fn startup_preflight_requires_selection_scope() {
+        let (base_url, handle) =
+            spawn_guarded_startup_server("testtoken", axum::http::StatusCode::FORBIDDEN).await;
+        let client = test_api_client(base_url.clone(), Some("testtoken"));
+
+        let error = client
+            .preflight_startup_access()
+            .await
+            .expect_err("selection auth failure should fail startup preflight");
+
+        handle.abort();
+        assert!(error.contains(&base_url));
+        assert!(error.contains("/v1/selection"));
+        assert!(error.contains("required session scope"));
     }
 
     #[test]
@@ -4034,7 +4311,7 @@ mod tests {
         api.push_fetch_sessions(Ok(vec![session_summary(
             "sess-7",
             "7",
-            "/Users/b/repos/throngterm",
+            TEST_REPO_THRONGTERM,
         )]));
         let mut app = make_app(api);
         app.set_message("sticky status");
@@ -4052,8 +4329,8 @@ mod tests {
         let api = MockApi::new();
         let layout = test_layout(120, 32);
         api.push_fetch_sessions(Ok(vec![
-            session_summary("sess-7", "7", "/Users/b/repos/throngterm"),
-            session_summary("sess-8", "8", "/Users/b/repos/opensource"),
+            session_summary("sess-7", "7", TEST_REPO_THRONGTERM),
+            session_summary("sess-8", "8", TEST_REPO_OPENSOURCE),
         ]));
         let mut app = make_app(api);
 
@@ -4542,14 +4819,14 @@ mod tests {
             session_summary_with_thought(
                 "sess-2",
                 "beta",
-                "/Users/b/repos/beta",
+                TEST_REPO_BETA,
                 "indexing repo",
                 "2026-03-08T14:00:05Z",
             ),
             session_summary_with_thought(
                 "sess-1",
                 "alpha",
-                "/Users/b/repos/alpha",
+                TEST_REPO_ALPHA,
                 "writing tests",
                 "2026-03-08T14:00:06Z",
             ),
@@ -4558,14 +4835,14 @@ mod tests {
             session_summary_with_thought(
                 "sess-2",
                 "beta",
-                "/Users/b/repos/beta",
+                TEST_REPO_BETA,
                 "indexing repo",
                 "2026-03-08T14:00:05Z",
             ),
             session_summary_with_thought(
                 "sess-1",
                 "alpha",
-                "/Users/b/repos/alpha",
+                TEST_REPO_ALPHA,
                 "patching sidebar",
                 "2026-03-08T14:00:07Z",
             ),
@@ -4591,7 +4868,7 @@ mod tests {
         api.push_fetch_sessions(Ok(vec![session_summary_with_thought(
             "sess-3",
             "gamma",
-            "/Users/b/repos/gamma",
+            TEST_REPO_GAMMA,
             "reading logs",
             "2026-03-08T14:00:05Z",
         )]));
@@ -4599,18 +4876,18 @@ mod tests {
         let mut duplicate = session_summary_with_thought(
             "sess-3",
             "gamma",
-            "/Users/b/repos/gamma",
+            TEST_REPO_GAMMA,
             "reading logs",
             "2026-03-08T14:00:05Z",
         );
         let mut stale = session_summary_with_thought(
             "sess-3",
             "gamma",
-            "/Users/b/repos/gamma",
+            TEST_REPO_GAMMA,
             "reading logs",
             "2026-03-08T14:00:04Z",
         );
-        let mut cleared = session_summary("sess-3", "gamma", "/Users/b/repos/gamma");
+        let mut cleared = session_summary("sess-3", "gamma", TEST_REPO_GAMMA);
         duplicate.last_activity_at = timestamp("2026-03-08T14:00:06Z");
         stale.last_activity_at = timestamp("2026-03-08T14:00:07Z");
         cleared.last_activity_at = timestamp("2026-03-08T14:00:08Z");
@@ -4636,8 +4913,8 @@ mod tests {
         let mut app = make_app(api);
         app.merge_sessions(
             vec![
-                session_summary("sess-1", "alpha", "/Users/b/repos/alpha"),
-                session_summary("sess-2", "beta", "/Users/b/repos/beta"),
+                session_summary("sess-1", "alpha", TEST_REPO_ALPHA),
+                session_summary("sess-2", "beta", TEST_REPO_BETA),
             ],
             layout.overview_field,
         );
@@ -4645,7 +4922,7 @@ mod tests {
             &[session_summary_with_thought(
                 "sess-1",
                 "alpha",
-                "/Users/b/repos/alpha",
+                TEST_REPO_ALPHA,
                 "patching sidebar",
                 "2026-03-08T14:00:07Z",
             )],
@@ -4676,7 +4953,7 @@ mod tests {
             let session = session_summary_with_thought(
                 &session_id,
                 &tmux_name,
-                "/Users/b/repos/alpha",
+                TEST_REPO_ALPHA,
                 &thought,
                 &updated_at,
             );
@@ -4705,14 +4982,14 @@ mod tests {
             session_summary_with_thought(
                 "sess-1",
                 "7",
-                "/Users/b/repos/throngterm",
+                TEST_REPO_THRONGTERM,
                 "patching tui",
                 "2026-03-08T14:00:05Z",
             ),
             session_summary_with_thought(
                 "sess-2",
                 "9",
-                "/Users/b/repos/opensource/skills",
+                TEST_REPO_SKILLS,
                 "indexing docs",
                 "2026-03-08T14:00:06Z",
             ),
@@ -4720,7 +4997,7 @@ mod tests {
         api.push_fetch_sessions(Ok(vec![session_summary_with_thought(
             "sess-2",
             "9",
-            "/Users/b/repos/opensource/skills",
+            TEST_REPO_SKILLS,
             "indexing docs",
             "2026-03-08T14:00:06Z",
         )]));
@@ -4796,7 +5073,7 @@ mod tests {
         let mut first = session_summary_with_thought(
             "sess-1",
             "7",
-            "/Users/b/repos/throngterm",
+            TEST_REPO_THRONGTERM,
             "patching tui",
             "2026-03-08T14:00:05Z",
         );
@@ -4805,7 +5082,7 @@ mod tests {
         let mut second = session_summary_with_thought(
             "sess-2",
             "2",
-            "/Users/b/repos/throngterm",
+            TEST_REPO_THRONGTERM,
             "wiring filter state",
             "2026-03-08T14:00:06Z",
         );
@@ -4814,7 +5091,7 @@ mod tests {
         let mut third = session_summary_with_thought(
             "sess-3",
             "9",
-            "/Users/b/repos/opensource/skills",
+            TEST_REPO_SKILLS,
             "indexing docs",
             "2026-03-08T14:00:07Z",
         );
@@ -4874,13 +5151,13 @@ mod tests {
             &[session_summary_with_thought(
                 "sess-1",
                 "7",
-                "/Users/b/repos/throngterm",
+                TEST_REPO_THRONGTERM,
                 "patching tui",
                 "2026-03-08T14:00:05Z",
             )],
             test_layout(120, 32).thought_entry_capacity(),
         );
-        app.set_thought_filter_cwd("/Users/b/repos/throngterm".to_string());
+        app.set_thought_filter_cwd(TEST_REPO_THRONGTERM.to_string());
 
         let header = build_header_filter_layout(&app, 120);
         let active_chip = header
@@ -4893,7 +5170,7 @@ mod tests {
         assert_eq!(
             header_filter_action_at(&app, 120, active_chip.rect.x, active_chip.rect.y),
             Some(ThoughtPanelAction::OpenRepoInEditor(
-                "/Users/b/repos/throngterm".to_string()
+                TEST_REPO_THRONGTERM.to_string()
             ))
         );
     }
@@ -4905,7 +5182,7 @@ mod tests {
         let thought_content = layout
             .thought_content
             .expect("wide layout enables thought rail");
-        let mut app = make_app(api);
+        let mut app = make_app(api.clone());
 
         app.repo_themes
             .insert("/tmp/throngterm".to_string(), repo_theme("#B89875"));
@@ -4915,7 +5192,7 @@ mod tests {
         let mut first = session_summary_with_thought(
             "sess-1",
             "7",
-            "/Users/b/repos/throngterm",
+            TEST_REPO_THRONGTERM,
             "patching tui",
             "2026-03-08T14:00:05Z",
         );
@@ -4924,7 +5201,7 @@ mod tests {
         let mut second = session_summary_with_thought(
             "sess-2",
             "2",
-            "/Users/b/repos/throngterm",
+            TEST_REPO_THRONGTERM,
             "wiring filter state",
             "2026-03-08T14:00:06Z",
         );
@@ -4933,7 +5210,7 @@ mod tests {
         let mut third = session_summary_with_thought(
             "sess-3",
             "9",
-            "/Users/b/repos/opensource/skills",
+            TEST_REPO_SKILLS,
             "indexing docs",
             "2026-03-08T14:00:07Z",
         );
@@ -4956,7 +5233,7 @@ mod tests {
 
         assert_eq!(
             app.thought_filter.cwd.as_deref(),
-            Some("/Users/b/repos/throngterm")
+            Some(TEST_REPO_THRONGTERM)
         );
         assert_eq!(app.active_thought_filter_text(), "filter: pwd=throngterm");
         assert_eq!(
@@ -5013,6 +5290,11 @@ mod tests {
             .row_rect
             .expect("row should have a click target");
         app.selected_id = Some("sess-3".to_string());
+        api.push_open_session(Ok(NativeDesktopOpenResponse {
+            session_id: "sess-2".to_string(),
+            status: "focused".to_string(),
+            pane_id: None,
+        }));
         app.handle_thought_click(
             row_rect.x.saturating_add(4),
             row_start_y + row_index as u16,
@@ -5022,22 +5304,27 @@ mod tests {
 
         assert_eq!(
             app.thought_filter.cwd.as_deref(),
-            Some("/Users/b/repos/throngterm")
+            Some(TEST_REPO_THRONGTERM)
         );
-        assert_eq!(app.thought_filter.tmux_name.as_deref(), Some("2"));
-        assert_eq!(
-            app.active_thought_filter_text(),
-            "filter: pwd=throngterm, num=2"
-        );
+        assert_eq!(app.thought_filter.tmux_name, None);
+        assert_eq!(app.active_thought_filter_text(), "filter: pwd=throngterm");
         assert_eq!(
             app.visible_thought_entries(layout.thought_entry_capacity())
                 .into_iter()
                 .map(|entry| entry.tmux_name.as_str())
                 .collect::<Vec<_>>(),
-            vec!["2"]
+            vec!["7", "2"]
         );
-        assert_eq!(visible_entity_ids(&app), vec!["sess-2".to_string()]);
+        assert_eq!(
+            visible_entity_ids(&app),
+            vec!["sess-2".to_string(), "sess-1".to_string()]
+        );
         assert_eq!(app.selected_id.as_deref(), Some("sess-2"));
+        assert_eq!(api.open_calls(), vec!["sess-2".to_string()]);
+        assert_eq!(
+            app.message.as_ref().map(|(message, _)| message.as_str()),
+            Some("focused 2")
+        );
 
         let cleared_header = build_header_filter_layout(&app, 120);
         let clear_rect = cleared_header
@@ -5065,18 +5352,22 @@ mod tests {
     }
 
     #[test]
-    fn clicking_thought_body_filters_to_that_session() {
+    fn clicking_thought_body_opens_that_session() {
         let api = MockApi::new();
         let layout = test_layout(120, 32);
         let thought_content = layout
             .thought_content
             .expect("wide layout enables thought rail");
-        let mut app = make_app(api);
+        let mut app = make_app(api.clone());
+        app.merge_sessions(
+            vec![session_summary("sess-1", "7", TEST_REPO_THRONGTERM)],
+            layout.overview_field,
+        );
         app.capture_thought_updates(
             &[session_summary_with_thought(
                 "sess-1",
                 "7",
-                "/Users/b/repos/throngterm",
+                TEST_REPO_THRONGTERM,
                 "patching tui",
                 "2026-03-08T14:00:05Z",
             )],
@@ -5093,6 +5384,11 @@ mod tests {
             .saturating_add(display_width("7").saturating_add(3));
         assert!(body_x < thought_content.x.saturating_add(display_width(&line)));
 
+        api.push_open_session(Ok(NativeDesktopOpenResponse {
+            session_id: "sess-1".to_string(),
+            status: "focused".to_string(),
+            pane_id: None,
+        }));
         app.handle_thought_click(
             body_x,
             row_start_y,
@@ -5100,8 +5396,14 @@ mod tests {
             layout.thought_entry_capacity(),
         );
 
-        assert_eq!(app.thought_filter.tmux_name.as_deref(), Some("7"));
-        assert_eq!(app.active_thought_filter_text(), "filter: num=7");
+        assert_eq!(app.thought_filter.tmux_name, None);
+        assert_eq!(app.active_thought_filter_text(), "filter: none");
+        assert_eq!(app.selected_id.as_deref(), Some("sess-1"));
+        assert_eq!(api.open_calls(), vec!["sess-1".to_string()]);
+        assert_eq!(
+            app.message.as_ref().map(|(message, _)| message.as_str()),
+            Some("focused 7")
+        );
     }
 
     #[test]
@@ -5120,14 +5422,14 @@ mod tests {
                 session_summary_with_thought(
                     "sess-1",
                     "7",
-                    "/Users/b/repos/throngterm",
+                    TEST_REPO_THRONGTERM,
                     "older",
                     "2026-03-08T14:00:05Z",
                 ),
                 session_summary_with_thought(
                     "sess-2",
                     "9",
-                    "/Users/b/repos/throngterm",
+                    TEST_REPO_THRONGTERM,
                     "latest thought stays at bottom",
                     "2026-03-08T14:00:06Z",
                 ),
@@ -5152,20 +5454,24 @@ mod tests {
     }
 
     #[test]
-    fn clicking_wrapped_thought_line_filters_to_that_session() {
+    fn clicking_wrapped_thought_line_opens_that_session() {
         let api = MockApi::new();
-        let mut app = make_app(api);
+        let mut app = make_app(api.clone());
         let thought_content = Rect {
             x: 0,
             y: 0,
             width: 12,
             height: 5,
         };
+        app.merge_sessions(
+            vec![session_summary("sess-2", "9", TEST_REPO_THRONGTERM)],
+            test_field(),
+        );
         app.capture_thought_updates(
             &[session_summary_with_thought(
                 "sess-2",
                 "9",
-                "/Users/b/repos/throngterm",
+                TEST_REPO_THRONGTERM,
                 "latest thought stays at bottom",
                 "2026-03-08T14:00:06Z",
             )],
@@ -5177,10 +5483,69 @@ mod tests {
             .bottom()
             .saturating_sub(panel.rows.len() as u16);
 
+        api.push_open_session(Ok(NativeDesktopOpenResponse {
+            session_id: "sess-2".to_string(),
+            status: "focused".to_string(),
+            pane_id: None,
+        }));
         app.handle_thought_click(1, row_start_y + 3, thought_content, 4);
 
-        assert_eq!(app.thought_filter.tmux_name.as_deref(), Some("9"));
-        assert_eq!(app.active_thought_filter_text(), "filter: num=9");
+        assert_eq!(app.thought_filter.tmux_name, None);
+        assert_eq!(app.active_thought_filter_text(), "filter: none");
+        assert_eq!(app.selected_id.as_deref(), Some("sess-2"));
+        assert_eq!(api.open_calls(), vec!["sess-2".to_string()]);
+        assert_eq!(
+            app.message.as_ref().map(|(message, _)| message.as_str()),
+            Some("focused 9")
+        );
+    }
+
+    #[test]
+    fn clicking_thought_row_surfaces_native_open_errors() {
+        let api = MockApi::new();
+        let layout = test_layout(120, 32);
+        let thought_content = layout
+            .thought_content
+            .expect("wide layout enables thought rail");
+        let mut app = make_app(api.clone());
+        app.merge_sessions(
+            vec![session_summary("sess-1", "7", TEST_REPO_THRONGTERM)],
+            layout.overview_field,
+        );
+        app.capture_thought_updates(
+            &[session_summary_with_thought(
+                "sess-1",
+                "7",
+                TEST_REPO_THRONGTERM,
+                "patching tui",
+                "2026-03-08T14:00:05Z",
+            )],
+            layout.thought_entry_capacity(),
+        );
+
+        let panel = build_thought_panel(&app, thought_content, layout.thought_entry_capacity());
+        let row_start_y = thought_content
+            .bottom()
+            .saturating_sub(panel.rows.len() as u16);
+        let body_x = thought_content
+            .x
+            .saturating_add(display_width("7").saturating_add(3));
+
+        api.push_open_session(Err("native open unavailable".to_string()));
+        app.handle_thought_click(
+            body_x,
+            row_start_y,
+            thought_content,
+            layout.thought_entry_capacity(),
+        );
+
+        assert_eq!(app.selected_id.as_deref(), Some("sess-1"));
+        assert_eq!(api.open_calls(), vec!["sess-1".to_string()]);
+        assert_eq!(
+            app.message.as_ref().map(|(message, _)| message.as_str()),
+            Some("native open unavailable")
+        );
+        assert_eq!(app.active_thought_filter_text(), "filter: none");
     }
 
     #[test]
@@ -5207,7 +5572,7 @@ mod tests {
         let mut busy = session_summary_with_thought(
             "sess-1",
             "alpha",
-            "/Users/b/repos/alpha",
+            TEST_REPO_ALPHA,
             "indexing repo",
             "2026-03-08T14:00:05Z",
         );
@@ -5217,7 +5582,7 @@ mod tests {
         let mut attention = session_summary_with_thought(
             "sess-1",
             "alpha",
-            "/Users/b/repos/alpha",
+            TEST_REPO_ALPHA,
             "needs input",
             "2026-03-08T14:00:06Z",
         );
@@ -5275,7 +5640,7 @@ mod tests {
         let mut session = session_summary_with_thought(
             "sess-1",
             "9",
-            "/Users/b/repos/opensource/skills",
+            TEST_REPO_SKILLS,
             "indexing docs",
             "2026-03-08T14:00:07Z",
         );
@@ -5333,7 +5698,7 @@ mod tests {
         let mut session = session_summary_with_thought(
             "sess-1",
             "alpha",
-            "/Users/b/repos/throngterm",
+            TEST_REPO_THRONGTERM,
             "patching tui",
             "2026-03-08T14:00:05Z",
         );
@@ -5362,7 +5727,7 @@ mod tests {
     #[test]
     fn render_entity_uses_repo_theme_body_color() {
         let field = test_layout(120, 32).overview_field;
-        let mut session = session_summary("sess-1", "alpha", "/Users/b/repos/buildooor");
+        let mut session = session_summary("sess-1", "alpha", TEST_REPO_BUILDOOOR);
         session.state = SessionState::Busy;
         session.repo_theme_id = Some("/tmp/buildooor".to_string());
         let entity = SessionEntity::new(session, field);
@@ -5394,7 +5759,7 @@ mod tests {
     #[test]
     fn render_entity_adjusts_low_contrast_repo_theme_color() {
         let field = test_layout(120, 32).overview_field;
-        let mut session = session_summary("sess-1", "alpha", "/Users/b/repos/opensource/skills");
+        let mut session = session_summary("sess-1", "alpha", TEST_REPO_SKILLS);
         session.state = SessionState::Busy;
         session.repo_theme_id = Some("/tmp/skills".to_string());
         let entity = SessionEntity::new(session, field);
@@ -5414,7 +5779,7 @@ mod tests {
     #[test]
     fn selected_entity_preserves_repo_theme_body_color() {
         let field = test_layout(120, 32).overview_field;
-        let mut session = session_summary("sess-1", "alpha", "/Users/b/repos/buildooor");
+        let mut session = session_summary("sess-1", "alpha", TEST_REPO_BUILDOOOR);
         session.state = SessionState::Busy;
         session.repo_theme_id = Some("/tmp/buildooor".to_string());
         let entity = SessionEntity::new(session, field);
@@ -5443,7 +5808,7 @@ mod tests {
     #[test]
     fn selected_entity_preserves_fallback_state_color() {
         let field = test_layout(120, 32).overview_field;
-        let mut session = session_summary("sess-1", "alpha", "/Users/b/repos/throngterm");
+        let mut session = session_summary("sess-1", "alpha", TEST_REPO_THRONGTERM);
         session.state = SessionState::Attention;
         session.rest_state = RestState::Active;
         let entity = SessionEntity::new(session, field);
@@ -5474,7 +5839,7 @@ mod tests {
             g: 152,
             b: 117,
         };
-        let mut spawned_session = session_summary("sess-42", "42", "/Users/b/repos/throngterm");
+        let mut spawned_session = session_summary("sess-42", "42", TEST_REPO_THRONGTERM);
         spawned_session.repo_theme_id = Some(theme_id.clone());
         api.push_create_session(Ok(create_response_with_theme(
             spawned_session.clone(),
@@ -5482,12 +5847,12 @@ mod tests {
         )));
         let mut app = make_app(api);
 
-        app.spawn_session("/Users/b/repos/throngterm", None, field);
+        app.spawn_session(TEST_REPO_THRONGTERM, None, field);
 
         let mut thought_session = session_summary_with_thought(
             "sess-42",
             "42",
-            "/Users/b/repos/throngterm",
+            TEST_REPO_THRONGTERM,
             "patching tui",
             "2026-03-08T14:00:05Z",
         );
@@ -5542,7 +5907,7 @@ mod tests {
             vec![sleeping_session(
                 "sess-sleep-1",
                 "7",
-                "/Users/b/repos/throngterm",
+                TEST_REPO_THRONGTERM,
                 "2026-03-08T12:00:00Z",
             )],
             field,
@@ -5564,7 +5929,7 @@ mod tests {
             vec![attention_session(
                 "sess-attn-sleep-1",
                 "7",
-                "/Users/b/repos/throngterm",
+                TEST_REPO_THRONGTERM,
                 RestState::Sleeping,
                 "2026-03-08T12:00:00Z",
             )],
@@ -5593,7 +5958,7 @@ mod tests {
             vec![deep_sleep_session(
                 "sess-deep-1",
                 "7",
-                "/Users/b/repos/throngterm",
+                TEST_REPO_THRONGTERM,
                 "2026-03-08T12:00:00Z",
             )],
             field,
@@ -5616,28 +5981,28 @@ mod tests {
         let active = attention_session(
             "sess-attn-active",
             "7",
-            "/Users/b/repos/throngterm",
+            TEST_REPO_THRONGTERM,
             RestState::Active,
             "2026-03-08T12:40:00Z",
         );
         let drowsy = attention_session(
             "sess-attn-drowsy",
             "8",
-            "/Users/b/repos/throngterm",
+            TEST_REPO_THRONGTERM,
             RestState::Drowsy,
             "2026-03-08T12:20:00Z",
         );
         let sleeping = attention_session(
             "sess-attn-sleep",
             "9",
-            "/Users/b/repos/throngterm",
+            TEST_REPO_THRONGTERM,
             RestState::Sleeping,
             "2026-03-08T12:00:00Z",
         );
         let deep_sleep = attention_session(
             "sess-attn-deep",
             "10",
-            "/Users/b/repos/throngterm",
+            TEST_REPO_THRONGTERM,
             RestState::DeepSleep,
             "2026-03-08T11:00:00Z",
         );
@@ -5818,19 +6183,19 @@ mod tests {
                 sleeping_session(
                     "sess-new",
                     "8",
-                    "/Users/b/repos/throngterm",
+                    TEST_REPO_THRONGTERM,
                     "2026-03-08T12:20:00Z",
                 ),
                 sleeping_session(
                     "sess-mid",
                     "7",
-                    "/Users/b/repos/throngterm",
+                    TEST_REPO_THRONGTERM,
                     "2026-03-08T12:10:00Z",
                 ),
                 sleeping_session(
                     "sess-old",
                     "9",
-                    "/Users/b/repos/throngterm",
+                    TEST_REPO_THRONGTERM,
                     "2026-03-08T12:00:00Z",
                 ),
             ],
@@ -5859,18 +6224,8 @@ mod tests {
 
         app.merge_sessions(
             vec![
-                sleeping_session(
-                    "sess-b",
-                    "8",
-                    "/Users/b/repos/throngterm",
-                    "2026-03-08T12:00:00Z",
-                ),
-                sleeping_session(
-                    "sess-a",
-                    "7",
-                    "/Users/b/repos/throngterm",
-                    "2026-03-08T12:00:00Z",
-                ),
+                sleeping_session("sess-b", "8", TEST_REPO_THRONGTERM, "2026-03-08T12:00:00Z"),
+                sleeping_session("sess-a", "7", TEST_REPO_THRONGTERM, "2026-03-08T12:00:00Z"),
             ],
             field,
         );
@@ -5890,20 +6245,14 @@ mod tests {
         let api = MockApi::new();
         let field = test_field();
         let mut app = make_app(api);
-        app.entities.push(entity_at(
-            field,
-            "sess-1",
-            "dev",
-            "/Users/b/repos/dev",
-            30,
-            8,
-        ));
+        app.entities
+            .push(entity_at(field, "sess-1", "dev", TEST_REPO_DEV, 30, 8));
 
         app.merge_sessions(
             vec![sleeping_session(
                 "sess-1",
                 "dev",
-                "/Users/b/repos/dev",
+                TEST_REPO_DEV,
                 "2026-03-08T12:00:00Z",
             )],
             field,
@@ -5923,18 +6272,8 @@ mod tests {
 
         app.merge_sessions(
             vec![
-                sleeping_session(
-                    "sess-a",
-                    "7",
-                    "/Users/b/repos/throngterm",
-                    "2026-03-08T12:00:00Z",
-                ),
-                sleeping_session(
-                    "sess-b",
-                    "8",
-                    "/Users/b/repos/throngterm",
-                    "2026-03-08T12:10:00Z",
-                ),
+                sleeping_session("sess-a", "7", TEST_REPO_THRONGTERM, "2026-03-08T12:00:00Z"),
+                sleeping_session("sess-b", "8", TEST_REPO_THRONGTERM, "2026-03-08T12:10:00Z"),
             ],
             field,
         );
@@ -5966,7 +6305,7 @@ mod tests {
         let api = MockApi::new();
         let field = test_field();
         let mut app = make_app(api);
-        let mut entity = entity_at(field, "sess-1", "dev", "/Users/b/repos/dev", 30, 8);
+        let mut entity = entity_at(field, "sess-1", "dev", TEST_REPO_DEV, 30, 8);
         entity.session.thought_state = ThoughtState::Holding;
         entity.session.rest_state = RestState::Drowsy;
         entity.bob_phase = 0.0;
@@ -5995,13 +6334,13 @@ mod tests {
                 deep_sleep_session(
                     "sess-deep-a",
                     "7",
-                    "/Users/b/repos/throngterm",
+                    TEST_REPO_THRONGTERM,
                     "2026-03-08T12:00:00Z",
                 ),
                 deep_sleep_session(
                     "sess-deep-b",
                     "8",
-                    "/Users/b/repos/throngterm",
+                    TEST_REPO_THRONGTERM,
                     "2026-03-08T12:10:00Z",
                 ),
             ],
@@ -6029,7 +6368,7 @@ mod tests {
         let api = MockApi::new();
         let field = test_field();
         let mut app = make_app(api);
-        let mut entity = entity_at(field, "sess-1", "dev", "/Users/b/repos/dev", 30, 8);
+        let mut entity = entity_at(field, "sess-1", "dev", TEST_REPO_DEV, 30, 8);
         entity.session.thought_state = ThoughtState::Active;
         entity.session.rest_state = RestState::Active;
         entity.bob_phase = 0.0;
@@ -6056,7 +6395,7 @@ mod tests {
         let api = MockApi::new();
         let field = test_field();
         let mut app = make_app(api);
-        let mut entity = entity_at(field, "sess-1", "dev", "/Users/b/repos/dev", 30, 8);
+        let mut entity = entity_at(field, "sess-1", "dev", TEST_REPO_DEV, 30, 8);
         entity.session.state = SessionState::Busy;
         entity.bob_phase = 0.0;
         entity.vx = 1.0;
@@ -6113,25 +6452,19 @@ mod tests {
     fn empty_field_click_opens_picker_with_managed_order() {
         let api = MockApi::new();
         api.push_list_dirs(Ok(dir_response(
-            "/Users/b/repos",
+            TEST_REPOS_ROOT,
             &[("opensource", true), ("throngterm", true)],
         )));
         let field = test_field();
         let mut app = make_app(api.clone());
-        app.entities.push(entity_at(
-            field,
-            "sess-1",
-            "dev",
-            "/Users/b/repos/dev",
-            30,
-            8,
-        ));
+        app.entities
+            .push(entity_at(field, "sess-1", "dev", TEST_REPO_DEV, 30, 8));
 
         app.handle_field_click(10, 10, field);
 
         let picker = app.picker.as_ref().expect("picker should open");
         assert!(picker.managed_only);
-        assert_eq!(picker.base_path, "/Users/b/repos");
+        assert_eq!(picker.base_path, TEST_REPOS_ROOT);
         assert_eq!(
             picker
                 .entries
@@ -6146,11 +6479,8 @@ mod tests {
     #[test]
     fn navigating_into_folder_opens_initial_request_composer() {
         let api = MockApi::new();
-        api.push_list_dirs(Ok(dir_response("/Users/b/repos", &[("opensource", true)])));
-        api.push_list_dirs(Ok(dir_response(
-            "/Users/b/repos/opensource",
-            &[("skills", false)],
-        )));
+        api.push_list_dirs(Ok(dir_response(TEST_REPOS_ROOT, &[("opensource", true)])));
+        api.push_list_dirs(Ok(dir_response(TEST_REPO_OPENSOURCE, &[("skills", false)])));
 
         let field = test_field();
         let mut app = make_app(api.clone());
@@ -6161,10 +6491,7 @@ mod tests {
 
         assert_eq!(
             api.list_calls(),
-            vec![
-                (None, true),
-                (Some("/Users/b/repos/opensource".to_string()), true),
-            ]
+            vec![(None, true), (Some(TEST_REPO_OPENSOURCE.to_string()), true),]
         );
         assert_eq!(
             api.create_calls(),
@@ -6173,7 +6500,7 @@ mod tests {
         assert!(api.open_calls().is_empty());
         assert_eq!(
             app.initial_request.as_ref().map(|state| state.cwd.as_str()),
-            Some("/Users/b/repos/opensource/skills")
+            Some(TEST_REPO_SKILLS)
         );
         assert!(app.picker.is_some());
     }
@@ -6186,7 +6513,7 @@ mod tests {
         app.picker = Some(PickerState::new(
             10,
             10,
-            dir_response("/Users/b/repos/opensource", &[("skills", true)]),
+            dir_response(TEST_REPO_OPENSOURCE, &[("skills", true)]),
             true,
         ));
 
@@ -6196,16 +6523,16 @@ mod tests {
         assert!(api.open_calls().is_empty());
         assert_eq!(
             app.initial_request.as_ref().map(|state| state.cwd.as_str()),
-            Some("/Users/b/repos/opensource")
+            Some(TEST_REPO_OPENSOURCE)
         );
     }
 
     #[test]
     fn toggling_to_all_reloads_same_path_without_reordering() {
         let api = MockApi::new();
-        api.push_list_dirs(Ok(dir_response("/Users/b/repos", &[("opensource", true)])));
+        api.push_list_dirs(Ok(dir_response(TEST_REPOS_ROOT, &[("opensource", true)])));
         api.push_list_dirs(Ok(dir_response(
-            "/Users/b/repos",
+            TEST_REPOS_ROOT,
             &[("Alpha", true), ("beta", true), ("zzz-old", true)],
         )));
         let field = test_field();
@@ -6226,7 +6553,7 @@ mod tests {
         );
         assert_eq!(
             api.list_calls(),
-            vec![(None, true), (Some("/Users/b/repos".to_string()), false),]
+            vec![(None, true), (Some(TEST_REPOS_ROOT.to_string()), false),]
         );
     }
 
@@ -6251,21 +6578,17 @@ mod tests {
     #[test]
     fn submitting_initial_request_creates_hidden_session_without_native_open() {
         let api = MockApi::new();
-        api.push_create_session(Ok(create_response(
-            "sess-55",
-            "55",
-            "/Users/b/repos/throngterm",
-        )));
+        api.push_create_session(Ok(create_response("sess-55", "55", TEST_REPO_THRONGTERM)));
         let field = test_field();
         let mut app = make_app(api.clone());
         app.picker = Some(PickerState::new(
             10,
             10,
-            dir_response("/Users/b/repos", &[("throngterm", false)]),
+            dir_response(TEST_REPOS_ROOT, &[("throngterm", false)]),
             true,
         ));
         app.initial_request = Some(InitialRequestState {
-            cwd: "/Users/b/repos/throngterm".to_string(),
+            cwd: TEST_REPO_THRONGTERM.to_string(),
             value: "add hidden spawn flow".to_string(),
         });
 
@@ -6274,7 +6597,7 @@ mod tests {
         assert_eq!(
             api.create_calls(),
             vec![(
-                "/Users/b/repos/throngterm".to_string(),
+                TEST_REPO_THRONGTERM.to_string(),
                 SpawnTool::Codex,
                 Some("add hidden spawn flow".to_string()),
             )]
@@ -6299,7 +6622,7 @@ mod tests {
         let mut app = make_app(api.clone());
         let pasted = "it happened when i pasted a bunch of text\n### TC-6\n- Given: foo";
         app.initial_request = Some(InitialRequestState {
-            cwd: "/Users/b/repos/throngterm".to_string(),
+            cwd: TEST_REPO_THRONGTERM.to_string(),
             value: String::new(),
         });
 
@@ -6318,16 +6641,12 @@ mod tests {
     #[test]
     fn pressing_enter_after_pasting_initial_request_submits_once() {
         let api = MockApi::new();
-        api.push_create_session(Ok(create_response(
-            "sess-55",
-            "55",
-            "/Users/b/repos/throngterm",
-        )));
+        api.push_create_session(Ok(create_response("sess-55", "55", TEST_REPO_THRONGTERM)));
         let field = test_field();
         let mut app = make_app(api.clone());
         let pasted = "it happened when i pasted a bunch of text\n### TC-6\n- Given: foo";
         app.initial_request = Some(InitialRequestState {
-            cwd: "/Users/b/repos/throngterm".to_string(),
+            cwd: TEST_REPO_THRONGTERM.to_string(),
             value: String::new(),
         });
 
@@ -6337,7 +6656,7 @@ mod tests {
         assert_eq!(
             api.create_calls(),
             vec![(
-                "/Users/b/repos/throngterm".to_string(),
+                TEST_REPO_THRONGTERM.to_string(),
                 SpawnTool::Codex,
                 Some(pasted.to_string()),
             )]
@@ -6356,11 +6675,11 @@ mod tests {
         app.picker = Some(PickerState::new(
             10,
             10,
-            dir_response("/Users/b/repos", &[("throngterm", false)]),
+            dir_response(TEST_REPOS_ROOT, &[("throngterm", false)]),
             true,
         ));
         app.initial_request = Some(InitialRequestState {
-            cwd: "/Users/b/repos/throngterm".to_string(),
+            cwd: TEST_REPO_THRONGTERM.to_string(),
             value: "fix tmux startup".to_string(),
         });
 
@@ -6369,7 +6688,7 @@ mod tests {
         assert_eq!(
             api.create_calls(),
             vec![(
-                "/Users/b/repos/throngterm".to_string(),
+                TEST_REPO_THRONGTERM.to_string(),
                 SpawnTool::Codex,
                 Some("fix tmux startup".to_string()),
             )]
@@ -6394,7 +6713,7 @@ mod tests {
         let field = test_field();
         let mut app = make_app(api.clone());
         app.initial_request = Some(InitialRequestState {
-            cwd: "/Users/b/repos/throngterm".to_string(),
+            cwd: TEST_REPO_THRONGTERM.to_string(),
             value: "   ".to_string(),
         });
 
@@ -6411,15 +6730,11 @@ mod tests {
     #[test]
     fn typing_initial_request_and_pressing_enter_still_creates_hidden_session() {
         let api = MockApi::new();
-        api.push_create_session(Ok(create_response(
-            "sess-55",
-            "55",
-            "/Users/b/repos/throngterm",
-        )));
+        api.push_create_session(Ok(create_response("sess-55", "55", TEST_REPO_THRONGTERM)));
         let field = test_field();
         let mut app = make_app(api.clone());
         app.initial_request = Some(InitialRequestState {
-            cwd: "/Users/b/repos/throngterm".to_string(),
+            cwd: TEST_REPO_THRONGTERM.to_string(),
             value: String::new(),
         });
 
@@ -6434,7 +6749,7 @@ mod tests {
         assert_eq!(
             api.create_calls(),
             vec![(
-                "/Users/b/repos/throngterm".to_string(),
+                TEST_REPO_THRONGTERM.to_string(),
                 SpawnTool::Codex,
                 Some("add hidden spawn flow".to_string()),
             )]
@@ -6456,11 +6771,11 @@ mod tests {
         app.picker = Some(PickerState::new(
             10,
             10,
-            dir_response("/Users/b/repos", &[("throngterm", false)]),
+            dir_response(TEST_REPOS_ROOT, &[("throngterm", false)]),
             true,
         ));
         app.initial_request = Some(InitialRequestState {
-            cwd: "/Users/b/repos/throngterm".to_string(),
+            cwd: TEST_REPO_THRONGTERM.to_string(),
             value: "investigate snapshot restore".to_string(),
         });
 
@@ -6497,14 +6812,8 @@ mod tests {
         }));
         let field = test_field();
         let mut app = make_app(api.clone());
-        app.entities.push(entity_at(
-            field,
-            "sess-7",
-            "dev",
-            "/Users/b/repos/dev",
-            30,
-            8,
-        ));
+        app.entities
+            .push(entity_at(field, "sess-7", "dev", TEST_REPO_DEV, 30, 8));
         app.selected_id = Some("sess-7".to_string());
 
         app.handle_field_click(30, 8, field);
@@ -6521,28 +6830,16 @@ mod tests {
     #[test]
     fn filtered_out_thronglets_are_not_click_targets() {
         let api = MockApi::new();
-        api.push_list_dirs(Ok(dir_response("/Users/b/repos", &[("throngterm", true)])));
+        api.push_list_dirs(Ok(dir_response(TEST_REPOS_ROOT, &[("throngterm", true)])));
         let field = test_field();
         let mut app = make_app(api.clone());
-        app.entities.push(entity_at(
-            field,
-            "sess-1",
-            "2",
-            "/Users/b/repos/throngterm",
-            12,
-            6,
-        ));
-        app.entities.push(entity_at(
-            field,
-            "sess-3",
-            "9",
-            "/Users/b/repos/opensource/skills",
-            30,
-            8,
-        ));
+        app.entities
+            .push(entity_at(field, "sess-1", "2", TEST_REPO_THRONGTERM, 12, 6));
+        app.entities
+            .push(entity_at(field, "sess-3", "9", TEST_REPO_SKILLS, 30, 8));
         app.selected_id = Some("sess-3".to_string());
 
-        app.set_thought_filter_cwd("/Users/b/repos/throngterm".to_string());
+        app.set_thought_filter_cwd(TEST_REPO_THRONGTERM.to_string());
         app.handle_field_click(30, 8, field);
 
         assert_eq!(visible_entity_ids(&app), vec!["sess-1".to_string()]);
@@ -6555,21 +6852,17 @@ mod tests {
     fn refresh_clears_selection_when_filters_hide_all_sessions() {
         let api = MockApi::new();
         let layout = test_layout(120, 32);
-        api.push_fetch_sessions(Ok(vec![session_summary(
-            "sess-3",
-            "9",
-            "/Users/b/repos/opensource/skills",
-        )]));
+        api.push_fetch_sessions(Ok(vec![session_summary("sess-3", "9", TEST_REPO_SKILLS)]));
         let mut app = make_app(api.clone());
         app.merge_sessions(
             vec![
-                session_summary("sess-1", "7", "/Users/b/repos/throngterm"),
-                session_summary("sess-2", "2", "/Users/b/repos/throngterm"),
+                session_summary("sess-1", "7", TEST_REPO_THRONGTERM),
+                session_summary("sess-2", "2", TEST_REPO_THRONGTERM),
             ],
             layout.overview_field,
         );
         app.selected_id = Some("sess-1".to_string());
-        app.set_thought_filter_cwd("/Users/b/repos/throngterm".to_string());
+        app.set_thought_filter_cwd(TEST_REPO_THRONGTERM.to_string());
 
         app.refresh(layout);
 
@@ -6596,7 +6889,7 @@ mod tests {
         api.push_fetch_sessions(Ok(vec![session_summary(
             "sess-throngterm",
             "7",
-            "/Users/b/repos/throngterm",
+            TEST_REPO_THRONGTERM,
         )]));
         let mut app = make_app(api.clone());
 
@@ -6611,12 +6904,22 @@ mod tests {
 
     #[test]
     fn picker_action_at_resolves_controls_and_entries() {
-        let mut picker = PickerState::new(4, 4, dir_response("/tmp", &[("alpha", true), ("beta", false)]), true);
+        let mut picker = PickerState::new(
+            4,
+            4,
+            dir_response("/tmp", &[("alpha", true), ("beta", false)]),
+            true,
+        );
         picker.apply_response(dir_response("/tmp/nested", &[("child", false)]));
         let layout = picker_layout(&picker, test_field());
 
         assert!(matches!(
-            picker_action_at(&picker, layout, layout.close_button.x, layout.close_button.y),
+            picker_action_at(
+                &picker,
+                layout,
+                layout.close_button.x,
+                layout.close_button.y
+            ),
             Some(PickerAction::Close)
         ));
         assert!(matches!(
@@ -6641,11 +6944,18 @@ mod tests {
             Some(PickerAction::ActivateEntry(0))
         ));
         assert!(matches!(
-            picker_action_at(&picker, layout, layout.content.right(), layout.first_entry_y),
+            picker_action_at(
+                &picker,
+                layout,
+                layout.content.right(),
+                layout.first_entry_y
+            ),
             None
         ));
         assert!(matches!(
-            layout.back_button.and_then(|button| picker_action_at(&picker, layout, button.x, button.y)),
+            layout
+                .back_button
+                .and_then(|button| picker_action_at(&picker, layout, button.x, button.y)),
             Some(PickerAction::Up)
         ));
     }
@@ -6672,8 +6982,8 @@ mod tests {
         let mut app = make_app(api.clone());
         app.merge_sessions(
             vec![
-                session_summary("sess-1", "1", "/Users/b/repos/alpha"),
-                session_summary("sess-2", "2", "/Users/b/repos/beta"),
+                session_summary("sess-1", "1", TEST_REPO_ALPHA),
+                session_summary("sess-2", "2", TEST_REPO_BETA),
             ],
             layout.overview_field,
         );
@@ -6681,7 +6991,12 @@ mod tests {
         app.move_selection(1, layout.overview_field);
         assert_eq!(app.selected_id.as_deref(), Some("sess-2"));
 
-        let mut picker = PickerState::new(3, 3, dir_response("/tmp", &[("alpha", false), ("beta", false)]), true);
+        let mut picker = PickerState::new(
+            3,
+            3,
+            dir_response("/tmp", &[("alpha", false), ("beta", false)]),
+            true,
+        );
         picker.selection = PickerSelection::SpawnHere;
         app.picker = Some(picker);
 
@@ -6700,8 +7015,8 @@ mod tests {
         let mut app = make_app(api.clone());
         app.merge_sessions(
             vec![
-                session_summary("sess-1", "1", "/Users/b/repos/alpha"),
-                session_summary("sess-2", "2", "/Users/b/repos/beta"),
+                session_summary("sess-1", "1", TEST_REPO_ALPHA),
+                session_summary("sess-2", "2", TEST_REPO_BETA),
             ],
             layout.overview_field,
         );
@@ -6713,7 +7028,9 @@ mod tests {
             KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE),
         ));
         assert_eq!(
-            app.initial_request.as_ref().map(|state| state.value.as_str()),
+            app.initial_request
+                .as_ref()
+                .map(|state| state.value.as_str()),
             Some("x")
         );
 
@@ -6792,16 +7109,16 @@ mod tests {
         let thought_content = layout
             .thought_content
             .expect("wide layout enables thought rail");
-        let mut app = make_app(api);
+        let mut app = make_app(api.clone());
         app.merge_sessions(
-            vec![session_summary("sess-1", "7", "/Users/b/repos/throngterm")],
+            vec![session_summary("sess-1", "7", TEST_REPO_THRONGTERM)],
             layout.overview_field,
         );
         app.capture_thought_updates(
             &[session_summary_with_thought(
                 "sess-1",
                 "7",
-                "/Users/b/repos/throngterm",
+                TEST_REPO_THRONGTERM,
                 "patching tui",
                 "2026-03-08T14:00:05Z",
             )],
@@ -6815,6 +7132,11 @@ mod tests {
         let body_x = thought_content
             .x
             .saturating_add(display_width("7").saturating_add(3));
+        api.push_open_session(Ok(NativeDesktopOpenResponse {
+            session_id: "sess-1".to_string(),
+            status: "focused".to_string(),
+            pane_id: None,
+        }));
         handle_workspace_click(
             &mut app,
             layout,
@@ -6825,9 +7147,20 @@ mod tests {
                 modifiers: KeyModifiers::NONE,
             },
         );
-        assert_eq!(app.thought_filter.tmux_name.as_deref(), Some("7"));
+        assert_eq!(app.thought_filter.tmux_name, None);
+        assert_eq!(app.selected_id.as_deref(), Some("sess-1"));
+        assert_eq!(api.open_calls(), vec!["sess-1".to_string()]);
+        assert_eq!(
+            app.message.as_ref().map(|(message, _)| message.as_str()),
+            Some("focused 7")
+        );
 
         let entity_rect = entity_rect_for(&app, "sess-1", layout.overview_field);
+        api.push_open_session(Ok(NativeDesktopOpenResponse {
+            session_id: "sess-1".to_string(),
+            status: "focused".to_string(),
+            pane_id: None,
+        }));
         handle_workspace_click(
             &mut app,
             layout,
@@ -6839,6 +7172,10 @@ mod tests {
             },
         );
         assert_eq!(app.selected_id.as_deref(), Some("sess-1"));
+        assert_eq!(
+            api.open_calls(),
+            vec!["sess-1".to_string(), "sess-1".to_string()]
+        );
     }
 
     #[test]
@@ -6857,7 +7194,9 @@ mod tests {
         )
         .expect("paste event should succeed"));
         assert_eq!(
-            app.initial_request.as_ref().map(|state| state.value.as_str()),
+            app.initial_request
+                .as_ref()
+                .map(|state| state.value.as_str()),
             Some("hello")
         );
 
@@ -6883,13 +7222,10 @@ mod tests {
         )
         .expect("mouse up should succeed"));
 
-        assert!(handle_tui_event(
-            &mut app,
-            &mut renderer,
-            layout,
-            Event::Resize(90, 20),
-        )
-        .expect("resize should succeed"));
+        assert!(
+            handle_tui_event(&mut app, &mut renderer, layout, Event::Resize(90, 20),)
+                .expect("resize should succeed")
+        );
         assert_eq!(renderer.width(), 90);
         assert_eq!(renderer.height(), 20);
     }

@@ -394,15 +394,18 @@ impl StateDetector {
             0x1b => self.escape_state = EscapeState::Esc,
             0x9b => self.escape_state = EscapeState::Csi,
             0x9d => self.escape_state = Self::osc_state(),
-            0x90 => self.escape_state = Self::private_string_state(EscapeState::Dcs {
-                esc_pending: false,
-            }),
-            0x9e => self.escape_state = Self::private_string_state(EscapeState::Pm {
-                esc_pending: false,
-            }),
-            0x9f => self.escape_state = Self::private_string_state(EscapeState::Apc {
-                esc_pending: false,
-            }),
+            0x90 => {
+                self.escape_state =
+                    Self::private_string_state(EscapeState::Dcs { esc_pending: false })
+            }
+            0x9e => {
+                self.escape_state =
+                    Self::private_string_state(EscapeState::Pm { esc_pending: false })
+            }
+            0x9f => {
+                self.escape_state =
+                    Self::private_string_state(EscapeState::Apc { esc_pending: false })
+            }
             b'\n' | b'\r' | b'\t' => visible.push(b),
             _ if (0x20..=0x7e).contains(&b) => visible.push(b),
             _ => {}
@@ -476,10 +479,7 @@ impl StateDetector {
         None
     }
 
-    fn consume_private_string_byte(
-        b: u8,
-        esc_pending: &mut bool,
-    ) -> Option<EscapeState> {
+    fn consume_private_string_byte(b: u8, esc_pending: &mut bool) -> Option<EscapeState> {
         if *esc_pending {
             if b == b'\\' {
                 return Some(EscapeState::Normal);

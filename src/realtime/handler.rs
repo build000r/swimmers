@@ -261,12 +261,14 @@ async fn forward_lifecycle_event(
     ws_sink: &mut (impl SinkExt<Message, Error = axum::Error> + Unpin),
 ) -> bool {
     match event {
-        Ok(lifecycle_event) => send_json_message(
-            ws_sink,
-            &lifecycle_to_control_event(lifecycle_event),
-            "failed to send lifecycle event to client",
-        )
-        .await,
+        Ok(lifecycle_event) => {
+            send_json_message(
+                ws_sink,
+                &lifecycle_to_control_event(lifecycle_event),
+                "failed to send lifecycle event to client",
+            )
+            .await
+        }
         Err(broadcast::error::RecvError::Lagged(n)) => {
             tracing::warn!("realtime client lagged by {n} lifecycle events");
             true
@@ -284,8 +286,12 @@ async fn forward_thought_event(
 ) -> bool {
     match event {
         Ok(thought_event) => {
-            send_json_message(ws_sink, &thought_event, "failed to send thought_update event to client")
-                .await
+            send_json_message(
+                ws_sink,
+                &thought_event,
+                "failed to send thought_update event to client",
+            )
+            .await
         }
         Err(broadcast::error::RecvError::Lagged(n)) => {
             tracing::warn!("realtime client lagged by {n} thought events");
@@ -318,7 +324,13 @@ async fn forward_polled_event(
             }
         }
         PollEvent::SessionEvent(control_event) => {
-            if !send_json_message(ws_sink, &control_event, "failed to send session event to client").await {
+            if !send_json_message(
+                ws_sink,
+                &control_event,
+                "failed to send session event to client",
+            )
+            .await
+            {
                 return false;
             }
         }
@@ -363,10 +375,7 @@ async fn send_json_message(
     true
 }
 
-async fn cleanup_output_subs(
-    state: &Arc<AppState>,
-    output_subs: &mut HashMap<String, SessionSub>,
-) {
+async fn cleanup_output_subs(state: &Arc<AppState>, output_subs: &mut HashMap<String, SessionSub>) {
     for (session_id, sub) in output_subs.drain() {
         if let Some(handle) = state.supervisor.get_session(&session_id).await {
             let _ = handle
@@ -1429,41 +1438,49 @@ mod control_error_tests {
             .await;
 
         let mut sink = CaptureSink::default();
-        assert!(forward_polled_event(
-            PollEvent::Output {
-                session_id: "sess-out".to_string(),
-                frame: OutputFrame {
-                    seq: 9,
-                    data: b"hello".to_vec(),
+        assert!(
+            forward_polled_event(
+                PollEvent::Output {
+                    session_id: "sess-out".to_string(),
+                    frame: OutputFrame {
+                        seq: 9,
+                        data: b"hello".to_vec(),
+                    },
                 },
-            },
-            &state,
-            &mut sink,
-        )
-        .await);
+                &state,
+                &mut sink,
+            )
+            .await
+        );
         assert!(matches!(sink.messages.first(), Some(Message::Binary(_))));
 
-        assert!(forward_polled_event(
-            PollEvent::Overloaded {
-                session_id: "sess-overloaded".to_string(),
-            },
-            &state,
-            &mut sink,
-        )
-        .await);
-        assert!(forward_polled_event(
-            PollEvent::SessionEvent(ControlEvent {
-                event: "session_state".to_string(),
-                session_id: "sess-out".to_string(),
-                payload: serde_json::json!({"state":"idle"}),
-            }),
-            &state,
-            &mut sink,
-        )
-        .await);
+        assert!(
+            forward_polled_event(
+                PollEvent::Overloaded {
+                    session_id: "sess-overloaded".to_string(),
+                },
+                &state,
+                &mut sink,
+            )
+            .await
+        );
+        assert!(
+            forward_polled_event(
+                PollEvent::SessionEvent(ControlEvent {
+                    event: "session_state".to_string(),
+                    session_id: "sess-out".to_string(),
+                    payload: serde_json::json!({"state":"idle"}),
+                }),
+                &state,
+                &mut sink,
+            )
+            .await
+        );
 
         let events = text_events(&sink);
-        assert!(events.iter().any(|event| event.event == "session_overloaded"));
+        assert!(events
+            .iter()
+            .any(|event| event.event == "session_overloaded"));
         assert!(events.iter().any(|event| event.event == "session_state"));
     }
 

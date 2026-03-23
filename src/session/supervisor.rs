@@ -364,7 +364,10 @@ impl SessionSupervisor {
 
     async fn tracked_tmux_names(&self) -> HashSet<String> {
         let sessions = self.sessions.read().await;
-        sessions.values().map(|handle| handle.tmux_name.clone()).collect()
+        sessions
+            .values()
+            .map(|handle| handle.tmux_name.clone())
+            .collect()
     }
 
     async fn stale_session_ids_by_tmux(&self) -> HashMap<String, String> {
@@ -426,7 +429,10 @@ impl SessionSupervisor {
             self.config.clone(),
         ) {
             Ok(handle) => {
-                if !self.insert_discovered_handle(session_id.clone(), tmux_name.clone(), handle).await {
+                if !self
+                    .insert_discovered_handle(session_id.clone(), tmux_name.clone(), handle)
+                    .await
+                {
                     return;
                 }
                 self.emit_discovered_created_event(session_id, tmux_name, reason);
@@ -444,7 +450,10 @@ impl SessionSupervisor {
         handle: ActorHandle,
     ) -> bool {
         let mut sessions = self.sessions.write().await;
-        if sessions.values().any(|existing| existing.tmux_name == tmux_name) {
+        if sessions
+            .values()
+            .any(|existing| existing.tmux_name == tmux_name)
+        {
             debug!(
                 tmux_name = %tmux_name,
                 "skipping duplicate discovered tmux session"
@@ -602,7 +611,12 @@ impl SessionSupervisor {
 
         self.insert_active_handle(session_id.clone(), handle).await;
         let mut summary = self
-            .build_created_summary(&session_id, &tmux_name, start_cwd.as_deref(), initial_tool.as_deref())
+            .build_created_summary(
+                &session_id,
+                &tmux_name,
+                start_cwd.as_deref(),
+                initial_tool.as_deref(),
+            )
             .await;
         let (sprite_pack, repo_theme) = self.resolve_repo_assets_for_summary(&mut summary).await;
         let initial_request_delay = initial_request_delay(spawn_tool, initial_request.as_ref());
@@ -621,7 +635,12 @@ impl SessionSupervisor {
             initial_request,
             initial_request_delay,
         );
-        self.emit_created_session(&session_id, &summary, sprite_pack.clone(), repo_theme.clone());
+        self.emit_created_session(
+            &session_id,
+            &summary,
+            sprite_pack.clone(),
+            repo_theme.clone(),
+        );
         self.persist_registry().await;
 
         Ok((summary, sprite_pack, repo_theme))
@@ -683,8 +702,14 @@ impl SessionSupervisor {
                 "tmux send-keys failed, falling back to PTY input: {}",
                 e
             );
-            self.enqueue_spawn_command_fallback(session_id, tmux_name, tool, bootstrap_handle, spawn_command)
-                .await;
+            self.enqueue_spawn_command_fallback(
+                session_id,
+                tmux_name,
+                tool,
+                bootstrap_handle,
+                spawn_command,
+            )
+            .await;
         }
     }
 
@@ -1797,7 +1822,11 @@ mod tests {
 
     async fn spawn_summary_handle(summary: SessionSummary) -> ActorHandle {
         let (cmd_tx, mut cmd_rx) = mpsc::channel(8);
-        let handle = ActorHandle::test_handle(summary.session_id.clone(), summary.tmux_name.clone(), cmd_tx);
+        let handle = ActorHandle::test_handle(
+            summary.session_id.clone(),
+            summary.tmux_name.clone(),
+            cmd_tx,
+        );
         tokio::spawn(async move {
             while let Some(cmd) = cmd_rx.recv().await {
                 match cmd {
@@ -2204,7 +2233,9 @@ mod tests {
     async fn list_sessions_merges_thought_snapshots_and_skips_exited_summaries() {
         let supervisor = SessionSupervisor::new(Arc::new(Config::default()));
         supervisor
-            .insert_test_handle(spawn_summary_handle(test_summary("sess-live", SessionState::Idle)).await)
+            .insert_test_handle(
+                spawn_summary_handle(test_summary("sess-live", SessionState::Idle)).await,
+            )
             .await;
         supervisor
             .insert_test_handle(
@@ -2265,7 +2296,9 @@ mod tests {
     async fn collect_session_snapshots_uses_summary_snapshot_and_thought_cache() {
         let supervisor = SessionSupervisor::new(Arc::new(Config::default()));
         supervisor
-            .insert_test_handle(spawn_summary_handle(test_summary("sess-1", SessionState::Busy)).await)
+            .insert_test_handle(
+                spawn_summary_handle(test_summary("sess-1", SessionState::Busy)).await,
+            )
             .await;
         supervisor.thought_snapshots.write().await.insert(
             "sess-1".to_string(),
@@ -2295,7 +2328,9 @@ mod tests {
     async fn collect_exited_session_ids_reports_only_exited_sessions() {
         let supervisor = SessionSupervisor::new(Arc::new(Config::default()));
         supervisor
-            .insert_test_handle(spawn_summary_handle(test_summary("sess-idle", SessionState::Idle)).await)
+            .insert_test_handle(
+                spawn_summary_handle(test_summary("sess-idle", SessionState::Idle)).await,
+            )
             .await;
         supervisor
             .insert_test_handle(
@@ -2434,7 +2469,10 @@ esac
         assert_eq!(created.0.tool.as_deref(), Some("Codex"));
         assert_eq!(created.0.cwd, dir.path().to_string_lossy());
         supervisor
-            .delete_session(&created.0.session_id, crate::config::SessionDeleteMode::DetachBridge)
+            .delete_session(
+                &created.0.session_id,
+                crate::config::SessionDeleteMode::DetachBridge,
+            )
             .await
             .expect("cleanup session");
     }
@@ -2503,7 +2541,9 @@ esac
         let sessions = supervisor.sessions.read().await;
         assert_eq!(sessions.len(), 2);
         assert!(sessions.values().any(|handle| handle.tmux_name == "11"));
-        assert!(sessions.values().any(|handle| handle.tmux_name == "workspace"));
+        assert!(sessions
+            .values()
+            .any(|handle| handle.tmux_name == "workspace"));
     }
 
     #[test]

@@ -109,7 +109,9 @@ mod tests {
     use serde_json::Value;
     use tokio::sync::RwLock;
 
-    fn test_state(file_store: Option<Arc<crate::persistence::file_store::FileStore>>) -> Arc<AppState> {
+    fn test_state(
+        file_store: Option<Arc<crate::persistence::file_store::FileStore>>,
+    ) -> Arc<AppState> {
         let config = Arc::new(Config::default());
         let supervisor = SessionSupervisor::new(config.clone());
         Arc::new(AppState {

@@ -291,7 +291,10 @@ description: 'Review risky code paths'
 
         let parsed = parse_skill_md(&skill_md, "fallback");
         assert_eq!(parsed.name, "Code Review");
-        assert_eq!(parsed.description.as_deref(), Some("Review risky code paths"));
+        assert_eq!(
+            parsed.description.as_deref(),
+            Some("Review risky code paths")
+        );
     }
 
     #[test]
@@ -327,7 +330,10 @@ description: 'Review risky code paths'
         .expect("hidden skill");
 
         let summaries = collect_skill_summaries(dir.path());
-        let names: Vec<&str> = summaries.iter().map(|summary| summary.name.as_str()).collect();
+        let names: Vec<&str> = summaries
+            .iter()
+            .map(|summary| summary.name.as_str())
+            .collect();
         assert_eq!(names, vec!["Alpha", "Beta", "delta"]);
         assert_eq!(summaries[0].description.as_deref(), Some("first"));
     }
