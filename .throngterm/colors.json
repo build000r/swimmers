@@ -11,11 +11,5 @@
     "ink": "#1A1A1A",
     "motif": "#F4C542"
   },
-  "motif": "terminal",
-  "source_templates": {
-    "active": "thronglet-active.svg",
-    "drowsy": "thronglet-drowsy.svg",
-    "sleeping": "thronglet-sleeping.svg",
-    "deep_sleep": "thronglet-deep-sleep.svg"
-  }
+  "motif": "terminal"
 }

@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-axum = { version = "0.8", features = ["ws"] }
+axum = "0.8"
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -13,7 +13,6 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1", features = ["v4"] }
 chrono = { version = "0.4", features = ["serde"] }
-bytes = "1"
 futures = "0.3"
 regex = "1"
 anyhow = "1"
@@ -23,6 +22,10 @@ metrics-exporter-prometheus = "0.18"
 reqwest = { version = "0.12", features = ["json"] }
 dotenvy = "0.15.7"
 crossterm = "0.29"
+mermaid-rs-renderer = { version = "0.2.1", default-features = false }
+resvg = "0.47.0"
+usvg = "0.47.0"
+walkdir = "2"
 
 [dev-dependencies]
 tempfile = "3"

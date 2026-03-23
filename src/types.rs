@@ -3,8 +3,6 @@ use std::collections::HashMap;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::thought::runtime_config::ThoughtConfig;
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SessionState {
@@ -76,36 +74,6 @@ impl Default for BubblePrecedence {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ThoughtCadenceProfile {
-    pub hot: u64,
-    pub warm: u64,
-    pub cold: u64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ThoughtPolicy {
-    pub lifecycle_mode: String,
-    pub cadence_ms: ThoughtCadenceProfile,
-    pub sleeping_after_ms: u64,
-    pub bubble_precedence: BubblePrecedence,
-}
-
-impl ThoughtPolicy {
-    pub fn phase_gated_v1() -> Self {
-        Self {
-            lifecycle_mode: "phase_gated_v1".to_string(),
-            cadence_ms: ThoughtCadenceProfile {
-                hot: 15_000,
-                warm: 45_000,
-                cold: 120_000,
-            },
-            sleeping_after_ms: 30_000,
-            bubble_precedence: BubblePrecedence::ThoughtFirst,
-        }
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TransportHealth {
@@ -135,16 +103,6 @@ impl SpawnTool {
             Self::Codex => "codex",
         }
     }
-}
-
-/// Per-repository Thronglet sprite override pack.
-/// All four variants must be present; inline SVG markup is stored as strings.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SpritePack {
-    pub active: String,
-    pub drowsy: String,
-    pub sleeping: String,
-    pub deep_sleep: String,
 }
 
 /// Per-repository Thronglet palette used by the native TUI.
@@ -181,12 +139,8 @@ pub struct SessionSummary {
     pub attached_clients: u32,
     pub transport_health: TransportHealth,
     pub last_activity_at: DateTime<Utc>,
-    /// Key into `BootstrapResponse.sprite_packs`; absent when no per-repo
-    /// sprite override was found.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub sprite_pack_id: Option<String>,
-    /// Key into `BootstrapResponse.repo_themes`; absent when no `.throngterm/`
-    /// directory exists for this session cwd.
+    /// Key into `SessionListResponse.repo_themes`; absent when no
+    /// `.throngterm/` directory exists for this session cwd.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub repo_theme_id: Option<String>,
 }
@@ -205,30 +159,18 @@ pub struct SessionPaneTailResponse {
     pub text: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct BootstrapResponse {
-    pub server_time: DateTime<Utc>,
-    pub auth_mode: String,
-    pub realtime_url: String,
-    pub workspace_history_mode: String,
-    pub poll_fallback_ms: u64,
-    pub thought_tick_ms: u64,
-    pub thoughts_enabled_default: bool,
-    pub terminal_cache_ttl_ms: u64,
-    pub session_delete_mode: String,
-    pub legacy_parity_locked: bool,
-    pub thought_policy: ThoughtPolicy,
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MermaidArtifactResponse {
+    pub session_id: String,
+    pub available: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub thought_config: Option<ThoughtConfig>,
-    pub sessions: Vec<SessionSummary>,
-    /// Per-repository sprite packs; keyed by project root path (the
-    /// `sprite_pack_id` on each `SessionSummary`).
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    pub sprite_packs: HashMap<String, SpritePack>,
-    /// Per-repository color themes; keyed by project root path (the
-    /// `repo_theme_id` on each `SessionSummary`).
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    pub repo_themes: HashMap<String, RepoTheme>,
+    pub path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updated_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -325,8 +267,6 @@ pub struct SkillListResponse {
 pub struct CreateSessionResponse {
     pub session: SessionSummary,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub sprite_pack: Option<SpritePack>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub repo_theme: Option<RepoTheme>,
 }
 
@@ -345,8 +285,6 @@ pub struct SessionInputResponse {
 pub struct SessionListResponse {
     pub sessions: Vec<SessionSummary>,
     pub version: u64,
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    pub sprite_packs: HashMap<String, SpritePack>,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub repo_themes: HashMap<String, RepoTheme>,
 }
@@ -443,8 +381,6 @@ pub fn fallback_rest_state(state: SessionState, thought_state: ThoughtState) -> 
 pub struct SessionCreatedPayload {
     pub reason: String, // "startup_discovery" | "runtime_discovery" | "api_create"
     pub session: SessionSummary,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub sprite_pack: Option<SpritePack>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub repo_theme: Option<RepoTheme>,
 }
@@ -616,13 +552,7 @@ mod tests {
     }
 
     #[test]
-    fn create_session_response_serializes_sprite_pack() {
-        let pack = SpritePack {
-            active: "<svg id='a'/>".into(),
-            drowsy: "<svg id='d'/>".into(),
-            sleeping: "<svg id='s'/>".into(),
-            deep_sleep: "<svg id='ds'/>".into(),
-        };
+    fn create_session_response_serializes_repo_theme() {
         let theme = RepoTheme {
             body: "#B89875".into(),
             outline: "#3D2F24".into(),
@@ -649,37 +579,22 @@ mod tests {
                 attached_clients: 0,
                 transport_health: TransportHealth::Healthy,
                 last_activity_at: chrono::Utc::now(),
-                sprite_pack_id: Some("/tmp/proj".into()),
                 repo_theme_id: Some("/tmp/proj".into()),
             },
-            sprite_pack: Some(pack),
             repo_theme: Some(theme),
         };
         let json = serde_json::to_string(&resp).unwrap();
-        assert!(
-            json.contains("sprite_pack"),
-            "sprite_pack must be present in JSON"
-        );
-        assert!(
-            json.contains("<svg id='a'/>"),
-            "pack SVG content must serialize"
-        );
         assert!(
             json.contains("\"repo_theme\""),
             "repo_theme must be present in JSON"
         );
 
-        // When sprite_pack is None, the field should be omitted entirely.
+        // When repo_theme is None, the field should be omitted entirely.
         let resp_none = CreateSessionResponse {
             session: resp.session.clone(),
-            sprite_pack: None,
             repo_theme: None,
         };
         let json_none = serde_json::to_string(&resp_none).unwrap();
-        assert!(
-            !json_none.contains("\"sprite_pack\""),
-            "null sprite_pack must be omitted"
-        );
         assert!(
             !json_none.contains("\"repo_theme\""),
             "null repo_theme must be omitted"
@@ -687,13 +602,7 @@ mod tests {
     }
 
     #[test]
-    fn session_created_payload_serializes_sprite_pack() {
-        let pack = SpritePack {
-            active: "<svg/>".into(),
-            drowsy: "<svg/>".into(),
-            sleeping: "<svg/>".into(),
-            deep_sleep: "<svg/>".into(),
-        };
+    fn session_created_payload_serializes_repo_theme() {
         let theme = RepoTheme {
             body: "#B89875".into(),
             outline: "#3D2F24".into(),
@@ -721,20 +630,15 @@ mod tests {
                 attached_clients: 0,
                 transport_health: TransportHealth::Healthy,
                 last_activity_at: chrono::Utc::now(),
-                sprite_pack_id: Some("/tmp".into()),
                 repo_theme_id: Some("/tmp".into()),
             },
-            sprite_pack: Some(pack),
             repo_theme: Some(theme),
         };
         let json = serde_json::to_string(&payload).unwrap();
-        assert!(json.contains("\"sprite_pack\""));
         assert!(json.contains("\"repo_theme\""));
 
         // Deserialize roundtrip
         let parsed: SessionCreatedPayload = serde_json::from_str(&json).unwrap();
-        assert!(parsed.sprite_pack.is_some());
-        assert_eq!(parsed.sprite_pack.unwrap().active, "<svg/>");
         assert_eq!(parsed.repo_theme.unwrap().body, "#B89875");
     }
 }

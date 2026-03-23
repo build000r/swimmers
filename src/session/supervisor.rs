@@ -12,12 +12,11 @@ use crate::config::Config;
 use crate::persistence::file_store::{FileStore, PersistedSession, ThoughtSnapshot};
 use crate::repo_theme::discover_repo_theme;
 use crate::session::actor::{ActorHandle, SessionCommand};
-use crate::sprites::discover_sprite_pack;
 use crate::thought::loop_runner::{SessionInfo, SessionProvider};
 use crate::thought::protocol::ThoughtDeliveryState;
 use crate::types::{
     fallback_rest_state, ControlEvent, RepoTheme, RestState, SessionState, SessionStatePayload,
-    SessionSummary, SpritePack, TerminalSnapshot, ThoughtSource, ThoughtState, TransportHealth,
+    SessionSummary, TerminalSnapshot, ThoughtSource, ThoughtState, TransportHealth,
 };
 
 const PROCESS_EXIT_REAP_INTERVAL: Duration = Duration::from_millis(250);
@@ -81,7 +80,6 @@ pub enum LifecycleEvent {
         session_id: String,
         summary: SessionSummary,
         reason: String,
-        sprite_pack: Option<SpritePack>,
         repo_theme: Option<RepoTheme>,
     },
     Deleted {
@@ -152,14 +150,10 @@ impl SessionSupervisor {
         })
     }
 
-    async fn resolve_repo_assets_for_summary(
-        &self,
-        summary: &mut SessionSummary,
-    ) -> (Option<SpritePack>, Option<RepoTheme>) {
+    fn resolve_repo_theme_for_summary(&self, summary: &mut SessionSummary) -> Option<RepoTheme> {
         if summary.cwd.is_empty() {
-            summary.sprite_pack_id = None;
             summary.repo_theme_id = None;
-            return (None, None);
+            return None;
         }
 
         let repo_theme = discover_repo_theme(&summary.cwd).map(|(theme_id, theme)| {
@@ -169,46 +163,7 @@ impl SessionSupervisor {
         if repo_theme.is_none() {
             summary.repo_theme_id = None;
         }
-
-        let sprite_pack = discover_sprite_pack(&summary.cwd)
-            .await
-            .map(|(pack_id, pack)| {
-                summary.sprite_pack_id = Some(pack_id);
-                pack
-            });
-        if sprite_pack.is_none() {
-            summary.sprite_pack_id = None;
-        }
-
-        (sprite_pack, repo_theme)
-    }
-
-    async fn collect_repo_assets(
-        &self,
-        summaries: &[SessionSummary],
-    ) -> (HashMap<String, SpritePack>, HashMap<String, RepoTheme>) {
-        let mut sprite_packs = HashMap::new();
-        let mut repo_themes = HashMap::new();
-
-        for summary in summaries {
-            if let Some(ref theme_id) = summary.repo_theme_id {
-                if !repo_themes.contains_key(theme_id) && !summary.cwd.is_empty() {
-                    if let Some((_root, theme)) = discover_repo_theme(&summary.cwd) {
-                        repo_themes.insert(theme_id.clone(), theme);
-                    }
-                }
-            }
-
-            if let Some(ref pack_id) = summary.sprite_pack_id {
-                if !sprite_packs.contains_key(pack_id) && !summary.cwd.is_empty() {
-                    if let Some((_root, pack)) = discover_sprite_pack(&summary.cwd).await {
-                        sprite_packs.insert(pack_id.clone(), pack);
-                    }
-                }
-            }
-        }
-
-        (sprite_packs, repo_themes)
+        repo_theme
     }
 
     /// Initialize persistence store and load persisted sessions as stale entries.
@@ -264,10 +219,9 @@ impl SessionSupervisor {
                     attached_clients: 0,
                     transport_health: crate::types::TransportHealth::Disconnected,
                     last_activity_at: ps.last_activity_at,
-                    sprite_pack_id: None,
                     repo_theme_id: None,
                 };
-                self.resolve_repo_assets_for_summary(&mut summary).await;
+                self.resolve_repo_theme_for_summary(&mut summary);
                 stale.push(summary);
             }
             info!(count = stale.len(), "loaded persisted stale sessions");
@@ -465,7 +419,6 @@ impl SessionSupervisor {
             session_id,
             summary,
             reason: reason.into(),
-            sprite_pack: None,
             repo_theme: None,
         });
     }
@@ -578,7 +531,7 @@ impl SessionSupervisor {
         cwd: Option<String>,
         spawn_tool: Option<crate::types::SpawnTool>,
         initial_request: Option<String>,
-    ) -> anyhow::Result<(SessionSummary, Option<SpritePack>, Option<RepoTheme>)> {
+    ) -> anyhow::Result<(SessionSummary, Option<RepoTheme>)> {
         let start_cwd = cwd.or_else(current_working_dir);
         let mut initial_request = normalize_initial_request(initial_request);
         let tmux_name = self.allocate_tmux_name(name);
@@ -606,7 +559,7 @@ impl SessionSupervisor {
                 initial_tool.as_deref(),
             )
             .await;
-        let (sprite_pack, repo_theme) = self.resolve_repo_assets_for_summary(&mut summary).await;
+        let repo_theme = self.resolve_repo_theme_for_summary(&mut summary);
         let initial_request_delay = initial_request_delay(spawn_tool, initial_request.as_ref());
         self.maybe_spawn_initial_tool(
             &session_id,
@@ -623,15 +576,10 @@ impl SessionSupervisor {
             initial_request,
             initial_request_delay,
         );
-        self.emit_created_session(
-            &session_id,
-            &summary,
-            sprite_pack.clone(),
-            repo_theme.clone(),
-        );
+        self.emit_created_session(&session_id, &summary, repo_theme.clone());
         self.persist_registry().await;
 
-        Ok((summary, sprite_pack, repo_theme))
+        Ok((summary, repo_theme))
     }
 
     fn allocate_tmux_name(&self, requested_name: Option<String>) -> String {
@@ -748,14 +696,12 @@ impl SessionSupervisor {
         &self,
         session_id: &str,
         summary: &SessionSummary,
-        sprite_pack: Option<SpritePack>,
         repo_theme: Option<RepoTheme>,
     ) {
         let _ = self.lifecycle_tx.send(LifecycleEvent::Created {
             session_id: session_id.to_string(),
             summary: summary.clone(),
             reason: "api_create".into(),
-            sprite_pack,
             repo_theme,
         });
     }
@@ -883,11 +829,10 @@ impl SessionSupervisor {
             }
         }
 
-        // Resolve per-repo sprite pack IDs by walking up from each session's
-        // cwd.  We do this after the thought merge so that the cwd is the
-        // actor-reported value.
+        // Resolve per-repo theme IDs after the thought merge so the cwd is
+        // the actor-reported value.
         for summary in &mut summaries {
-            self.resolve_repo_assets_for_summary(summary).await;
+            self.resolve_repo_theme_for_summary(summary);
         }
 
         summaries
@@ -1298,7 +1243,6 @@ impl SessionSupervisor {
             attached_clients: 0,
             transport_health: crate::types::TransportHealth::Healthy,
             last_activity_at: Utc::now(),
-            sprite_pack_id: None,
             repo_theme_id: None,
         }
     }
@@ -1761,7 +1705,6 @@ mod tests {
             attached_clients: 0,
             transport_health: TransportHealth::Healthy,
             last_activity_at: Utc::now(),
-            sprite_pack_id: None,
             repo_theme_id: None,
         }
     }
@@ -2061,7 +2004,6 @@ mod tests {
             attached_clients: 0,
             transport_health: crate::types::TransportHealth::Healthy,
             last_activity_at: Utc::now(),
-            sprite_pack_id: None,
             repo_theme_id: None,
         };
 
@@ -2137,7 +2079,6 @@ mod tests {
             attached_clients: 0,
             transport_health: crate::types::TransportHealth::Healthy,
             last_activity_at: Utc::now(),
-            sprite_pack_id: None,
             repo_theme_id: None,
         };
 
@@ -2301,38 +2242,6 @@ mod tests {
 
         supervisor.reap_exited_sessions().await;
         assert!(supervisor.get_session("sess-exited").await.is_none());
-    }
-
-    #[tokio::test]
-    async fn collect_repo_assets_reads_repo_theme_and_sprite_pack() {
-        let dir = tempdir().expect("tempdir");
-        let repo_root = dir.path().join("repo");
-        let sprites_dir = repo_root.join(".throngterm").join("sprites");
-        std::fs::create_dir_all(&sprites_dir).expect("sprites dir");
-        std::fs::write(
-            repo_root.join(".throngterm").join("colors.json"),
-            r##"{"palette":{"body":"#123456","outline":"#234567","accent":"#345678","shirt":"#456789"}}"##,
-        )
-        .expect("colors");
-        for (name, value) in [
-            ("active.svg", "<svg id='active'/>"),
-            ("drowsy.svg", "<svg id='drowsy'/>"),
-            ("sleeping.svg", "<svg id='sleeping'/>"),
-            ("deep_sleep.svg", "<svg id='deep_sleep'/>"),
-        ] {
-            std::fs::write(sprites_dir.join(name), value).expect("sprite");
-        }
-
-        let project_id = repo_root.to_string_lossy().into_owned();
-        let mut summary = test_summary("sess-assets", SessionState::Idle);
-        summary.cwd = repo_root.to_string_lossy().into_owned();
-        summary.repo_theme_id = Some(project_id.clone());
-        summary.sprite_pack_id = Some(project_id.clone());
-
-        let supervisor = SessionSupervisor::new(Arc::new(Config::default()));
-        let (sprite_packs, repo_themes) = supervisor.collect_repo_assets(&[summary]).await;
-        assert!(sprite_packs.contains_key(&project_id));
-        assert!(repo_themes.contains_key(&project_id));
     }
 
     #[tokio::test]

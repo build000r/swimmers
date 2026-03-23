@@ -10,10 +10,6 @@ use crate::types::RepoTheme;
 const DEFAULT_SKIN: &str = "#F3D2B6";
 const DEFAULT_TAN: &str = "#DCCAB6";
 const DEFAULT_INK: &str = "#171717";
-const TEMPLATE_ACTIVE: &str = "thronglet-active.svg";
-const TEMPLATE_DROWSY: &str = "thronglet-drowsy.svg";
-const TEMPLATE_SLEEPING: &str = "thronglet-sleeping.svg";
-const TEMPLATE_DEEP_SLEEP: &str = "thronglet-deep-sleep.svg";
 const MOTIFS: &[&str] = &[
     "spark", "terminal", "hammer", "wave", "comet", "gear", "leaf", "bolt",
 ];
@@ -37,7 +33,6 @@ struct ColorsFileOutput {
     generated_at: String,
     palette: PaletteOutput,
     motif: String,
-    source_templates: SourceTemplates,
 }
 
 #[derive(Debug, Serialize)]
@@ -50,14 +45,6 @@ struct PaletteOutput {
     tan: String,
     ink: String,
     motif: String,
-}
-
-#[derive(Debug, Serialize)]
-struct SourceTemplates {
-    active: String,
-    drowsy: String,
-    sleeping: String,
-    deep_sleep: String,
 }
 
 pub fn existing_repo_theme(cwd: &str) -> Option<(String, RepoTheme)> {
@@ -219,12 +206,6 @@ fn write_theme_file(
             )),
         },
         motif: motif_name(project_root),
-        source_templates: SourceTemplates {
-            active: TEMPLATE_ACTIVE.to_string(),
-            drowsy: TEMPLATE_DROWSY.to_string(),
-            sleeping: TEMPLATE_SLEEPING.to_string(),
-            deep_sleep: TEMPLATE_DEEP_SLEEP.to_string(),
-        },
     };
 
     let json = serde_json::to_string_pretty(&output)
@@ -408,7 +389,7 @@ mod tests {
         let rewritten = std::fs::read_to_string(colors_path).unwrap();
 
         assert!(rewritten.contains(&theme.body));
-        assert!(rewritten.contains("\"source_templates\""));
+        assert!(rewritten.contains("\"generated_at\""));
     }
 
     #[test]

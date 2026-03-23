@@ -7,7 +7,6 @@ mod persistence;
 mod repo_theme;
 mod scroll;
 mod session;
-mod sprites;
 mod state;
 #[cfg(test)]
 mod test_support;

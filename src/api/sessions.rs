@@ -13,7 +13,7 @@ use crate::session::actor::SessionCommand;
 use crate::types::{
     CreateSessionRequest, CreateSessionResponse, ErrorResponse, SessionInputRequest,
     SessionInputResponse, SessionListResponse, SessionPaneTailResponse, SessionState,
-    TerminalSnapshot,
+    TerminalSnapshot, MermaidArtifactResponse,
 };
 
 // ---------------------------------------------------------------------------
@@ -35,7 +35,6 @@ async fn list_sessions(
     Ok(Json(SessionListResponse {
         sessions,
         version: 0,
-        sprite_packs: Default::default(),
         repo_themes: Default::default(),
     }))
 }
@@ -57,12 +56,11 @@ async fn create_session(
         .create_session(body.name, body.cwd, body.spawn_tool, body.initial_request)
         .await
     {
-        Ok((session, sprite_pack, repo_theme)) => (
+        Ok((session, repo_theme)) => (
             StatusCode::CREATED,
             Json(
                 serde_json::to_value(CreateSessionResponse {
                     session,
-                    sprite_pack,
                     repo_theme,
                 })
                 .unwrap(),
@@ -503,6 +501,85 @@ async fn get_pane_tail(
 }
 
 // ---------------------------------------------------------------------------
+// GET /v1/sessions/{session_id}/mermaid-artifact
+// ---------------------------------------------------------------------------
+
+async fn get_mermaid_artifact(
+    Extension(auth): Extension<AuthInfo>,
+    State(state): State<Arc<AppState>>,
+    Path(session_id): Path<String>,
+) -> impl IntoResponse {
+    if let Err(resp) = auth.require_scope(AuthScope::SessionsRead) {
+        return resp;
+    }
+    let handle = match state.supervisor.get_session(&session_id).await {
+        Some(h) => h,
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(
+                    serde_json::to_value(ErrorResponse {
+                        code: "SESSION_NOT_FOUND".to_string(),
+                        message: None,
+                    })
+                    .unwrap(),
+                ),
+            )
+                .into_response();
+        }
+    };
+
+    let (tx, rx) = oneshot::channel::<MermaidArtifactResponse>();
+    if handle
+        .send(SessionCommand::GetMermaidArtifact(tx))
+        .await
+        .is_err()
+    {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(
+                serde_json::to_value(ErrorResponse {
+                    code: "INTERNAL_ERROR".to_string(),
+                    message: Some("session actor unavailable".to_string()),
+                })
+                .unwrap(),
+            ),
+        )
+            .into_response();
+    }
+
+    match tokio::time::timeout(std::time::Duration::from_secs(5), rx).await {
+        Ok(Ok(artifact)) => (
+            StatusCode::OK,
+            Json(serde_json::to_value(artifact).unwrap()),
+        )
+            .into_response(),
+        Ok(Err(_)) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(
+                serde_json::to_value(ErrorResponse {
+                    code: "INTERNAL_ERROR".to_string(),
+                    message: Some("actor dropped mermaid artifact reply".to_string()),
+                })
+                .unwrap(),
+            ),
+        )
+            .into_response(),
+        Err(_) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(
+                serde_json::to_value(ErrorResponse {
+                    code: "INTERNAL_ERROR".to_string(),
+                    message: Some("mermaid artifact request timed out".to_string()),
+                })
+                .unwrap(),
+            ),
+        )
+            .into_response(),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Router
 // ---------------------------------------------------------------------------
 
@@ -517,6 +594,10 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/v1/sessions/{session_id}/input", post(send_input))
         .route("/v1/sessions/{session_id}/snapshot", get(get_snapshot))
         .route("/v1/sessions/{session_id}/pane-tail", get(get_pane_tail))
+        .route(
+            "/v1/sessions/{session_id}/mermaid-artifact",
+            get(get_mermaid_artifact),
+        )
 }
 
 #[cfg(test)]
@@ -570,7 +651,6 @@ mod tests {
             attached_clients: 0,
             transport_health: TransportHealth::Healthy,
             last_activity_at: Utc::now(),
-            sprite_pack_id: None,
             repo_theme_id: None,
         }
     }
@@ -741,5 +821,50 @@ mod tests {
         let json = response_json(response).await;
         assert_eq!(json["session_id"], "sess-tail");
         assert_eq!(json["text"], "recent pane output");
+    }
+
+    #[tokio::test]
+    async fn get_mermaid_artifact_returns_actor_payload() {
+        let state = test_state();
+        let (cmd_tx, mut cmd_rx) = mpsc::channel(8);
+        state
+            .supervisor
+            .insert_test_handle(ActorHandle::test_handle(
+                "sess-mermaid",
+                "tmux-mermaid",
+                cmd_tx,
+            ))
+            .await;
+
+        tokio::spawn(async move {
+            while let Some(cmd) = cmd_rx.recv().await {
+                if let SessionCommand::GetMermaidArtifact(reply) = cmd {
+                    let _ = reply.send(MermaidArtifactResponse {
+                        session_id: "sess-mermaid".to_string(),
+                        available: true,
+                        path: Some("/tmp/project/diagram.mmd".to_string()),
+                        updated_at: Some(Utc::now()),
+                        source: Some("graph TD\nA-->B\n".to_string()),
+                        error: None,
+                    });
+                    break;
+                }
+            }
+        });
+
+        let response = get_mermaid_artifact(
+            Extension(AuthInfo::new(OPERATOR_SCOPES.to_vec())),
+            State(state),
+            Path("sess-mermaid".to_string()),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let json = response_json(response).await;
+        assert_eq!(json["session_id"], "sess-mermaid");
+        assert_eq!(json["available"], true);
+        assert_eq!(json["path"], "/tmp/project/diagram.mmd");
+        assert_eq!(json["source"], "graph TD\nA-->B\n");
     }
 }
