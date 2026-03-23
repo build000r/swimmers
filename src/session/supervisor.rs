@@ -24,18 +24,6 @@ const PROCESS_EXIT_REAP_INTERVAL: Duration = Duration::from_millis(250);
 const PROCESS_EXIT_DELETE_GRACE: Duration = Duration::ZERO;
 const PROCESS_EXIT_SUMMARY_TIMEOUT: Duration = Duration::from_millis(250);
 
-// ---------------------------------------------------------------------------
-// Bootstrap result
-// ---------------------------------------------------------------------------
-
-/// Returned by [`SessionSupervisor::bootstrap`]; bundles the session list with
-/// any per-repository sprite packs discovered from session cwds.
-pub struct BootstrapData {
-    pub sessions: Vec<SessionSummary>,
-    pub sprite_packs: HashMap<String, SpritePack>,
-    pub repo_themes: HashMap<String, RepoTheme>,
-}
-
 struct ListedTmuxSessions {
     reliable: bool,
     names: Vec<String>,
@@ -123,12 +111,12 @@ pub struct SessionSupervisor {
     /// Monotonic counter for session IDs (separate from tmux names).
     next_id_counter: AtomicU64,
 
-    /// Broadcast channel for lifecycle events. Subscribers (e.g. the WebSocket
-    /// hub) can listen for session_created / session_deleted.
+    /// Broadcast channel for lifecycle events. Subscribers can listen for
+    /// session_created / session_deleted.
     lifecycle_tx: broadcast::Sender<LifecycleEvent>,
 
     /// Broadcast channel for thought_update ControlEvents from the thought loop.
-    /// WebSocket handlers subscribe to this to forward thought updates to clients.
+    /// UI surfaces or other listeners subscribe to this to react to updates.
     thought_tx: broadcast::Sender<ControlEvent>,
 
     /// File-based persistence store, initialized after construction.
@@ -903,48 +891,6 @@ impl SessionSupervisor {
         }
 
         summaries
-    }
-
-    pub async fn list_session_data(&self) -> BootstrapData {
-        let sessions = self.list_sessions().await;
-        let (sprite_packs, repo_themes) = self.collect_repo_assets(&sessions).await;
-        BootstrapData {
-            sessions,
-            sprite_packs,
-            repo_themes,
-        }
-    }
-
-    /// Return all sessions for the bootstrap response, including stale
-    /// (exited) sessions from persistence, plus a deduplicated map of
-    /// per-repository sprite packs.
-    pub async fn bootstrap(&self) -> BootstrapData {
-        let mut all = self.list_sessions().await;
-        let mut seen_ids: HashSet<String> = all.iter().map(|s| s.session_id.clone()).collect();
-
-        // Append stale sessions that haven't been upgraded to live.
-        let stale = self.stale_sessions.read().await;
-        for s in stale.iter() {
-            if !seen_ids.insert(s.session_id.clone()) {
-                warn!(
-                    session_id = %s.session_id,
-                    tmux_name = %s.tmux_name,
-                    "dropping duplicate stale session_id from bootstrap"
-                );
-                continue;
-            }
-            all.push(s.clone());
-        }
-
-        // Build the sprite_packs map: for each unique sprite_pack_id present
-        // across all sessions, look up the SpritePack from the discovery cache.
-        let (sprite_packs, repo_themes) = self.collect_repo_assets(&all).await;
-
-        BootstrapData {
-            sessions: all,
-            sprite_packs,
-            repo_themes,
-        }
     }
 
     // -----------------------------------------------------------------------

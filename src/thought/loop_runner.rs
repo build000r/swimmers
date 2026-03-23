@@ -16,9 +16,7 @@ use crate::thought::bridge_runner::BridgeRunner;
 use crate::thought::emitter_client::EmitterClient;
 use crate::thought::protocol::ThoughtDeliveryState;
 use crate::thought::runtime_config::ThoughtConfig;
-use crate::types::{
-    ControlEvent, RestState, SessionState, ThoughtPolicy, ThoughtSource, ThoughtState,
-};
+use crate::types::{ControlEvent, RestState, SessionState, ThoughtSource, ThoughtState};
 
 /// Snapshot of a single session's data, provided by the supervisor each tick.
 #[derive(Clone)]
@@ -88,21 +86,6 @@ pub struct ThoughtLoopRunner {
 }
 
 impl ThoughtLoopRunner {
-    /// Compatibility constructor retained for one release window.
-    ///
-    /// `thought_policy` is ignored because policy now lives in `clawgs`.
-    pub fn new(
-        tick_ms: u64,
-        event_tx: broadcast::Sender<ControlEvent>,
-        _thought_policy: ThoughtPolicy,
-    ) -> Self {
-        Self {
-            tick_ms,
-            event_tx,
-            runtime_config: Arc::new(RwLock::new(ThoughtConfig::default())),
-        }
-    }
-
     pub fn with_runtime_config(
         tick_ms: u64,
         event_tx: broadcast::Sender<ControlEvent>,

@@ -1,4 +1,3 @@
-pub mod bootstrap;
 pub mod dirs;
 pub mod native;
 pub mod selection;
@@ -15,7 +14,6 @@ use tokio::sync::{oneshot, RwLock};
 use crate::auth;
 use crate::config::Config;
 use crate::persistence::file_store::FileStore;
-use crate::realtime;
 use crate::session::actor::SessionCommand;
 use crate::session::supervisor::SessionSupervisor;
 use crate::thought::runtime_config::{DaemonDefaults, ThoughtConfig};
@@ -63,14 +61,12 @@ pub fn api_router(config: Arc<Config>) -> Router<Arc<AppState>> {
     let config_for_middleware = config.clone();
 
     Router::new()
-        .merge(bootstrap::routes())
         .merge(dirs::routes())
         .merge(native::routes())
         .merge(selection::routes())
         .merge(skills::routes())
         .merge(sessions::routes())
         .merge(thought_config::routes())
-        .nest("/v1/realtime", realtime::handler::ws_router())
         .layer(middleware::from_fn(move |request, next| {
             auth::auth_middleware(config_for_middleware.clone(), request, next)
         }))

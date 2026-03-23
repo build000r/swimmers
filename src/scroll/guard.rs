@@ -75,7 +75,7 @@ impl ScrollGuard {
     /// - Two elements: flushed buffer followed by new pass-through data.
     ///
     /// The caller should forward each returned chunk to the replay buffer
-    /// and WebSocket clients in order.
+    /// and any downstream consumers in order.
     pub fn process(&mut self, data: &[u8]) -> Vec<ScrollOutputChunk> {
         let now = Instant::now();
         let mut output = Vec::new();

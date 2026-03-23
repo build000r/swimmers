@@ -251,15 +251,15 @@ Replace `/path/to/throngterm` with the actual path.
 ```
 Native TUI
     |
-    |-- GET /v1/bootstrap         -> Config + session list
     |-- GET /v1/sessions          -> List tmux sessions
     |-- POST /v1/sessions         -> Create new session
     |-- DELETE /v1/sessions/:id   -> Remove session
-    |
-    '-- WebSocket /v1/realtime    -> Multiplexed terminal I/O + control events
-            |
-            |-- Binary: keystrokes -> PTY -> tmux session
-            '-- Binary: tmux session -> PTY -> TUI renderer
+    |-- GET /v1/sessions/:id/snapshot -> Screen text snapshot
+    |-- GET /v1/sessions/:id/pane-tail -> Recent pane output
+    |-- GET /v1/dirs              -> Repo/service explorer
+    |-- GET /v1/native/status     -> Native terminal support
+    |-- POST /v1/native/open      -> Open session in desktop terminal
+    '-- POST /v1/selection        -> Publish the selected session
 ```
 
 - **Backend**: Rust (axum + tokio + portable-pty)

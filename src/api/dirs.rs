@@ -70,8 +70,15 @@ fn parse_shell_array_items(line: &str) -> Vec<String> {
                 .trim()
                 .to_string()
         })
-        .filter(|item| !item.is_empty())
+        .filter(|item| !item.is_empty() && !item.contains('$'))
         .collect()
+}
+
+fn is_targets_assignment(line: &str) -> bool {
+    let Some((name, _)) = line.trim().split_once('=') else {
+        return false;
+    };
+    name.ends_with("_TARGETS")
 }
 
 fn env_manager_targets(env_manager_root: &Path) -> Vec<String> {
@@ -81,7 +88,7 @@ fn env_manager_targets(env_manager_root: &Path) -> Vec<String> {
     if let Ok(contents) = std::fs::read_to_string(&sync_path) {
         for line in contents.lines() {
             let trimmed = line.trim();
-            if trimmed.starts_with("BACKEND_TARGETS=") || trimmed.starts_with("FRONTEND_TARGETS=") {
+            if is_targets_assignment(trimmed) {
                 for target in parse_shell_array_items(trimmed) {
                     targets.insert(target);
                 }
@@ -285,7 +292,7 @@ async fn env_service_health_map(
         .env_remove("PROJECT_ACTION")
         .env_remove("PROJECT_SERVICES")
         .env_remove("PROJECT_PROFILE")
-        .env_remove("PROJECT_MOBILE")
+        .env_remove("PROJECT_TAILNET")
         .env_remove("PROJECT_WATCH")
         .output()
         .await
@@ -404,12 +411,12 @@ async fn restart_services(env_manager_root: &Path, services: &[String]) -> Resul
             .arg("project")
             .arg("action=restart")
             .arg(services_arg)
-            .arg("mobile=1")
+            .arg("tailnet=1")
             .arg("watch=0")
             .env_remove("PROJECT_ACTION")
             .env_remove("PROJECT_SERVICES")
             .env_remove("PROJECT_PROFILE")
-            .env_remove("PROJECT_MOBILE")
+            .env_remove("PROJECT_TAILNET")
             .env_remove("PROJECT_WATCH")
             .output(),
     )
@@ -736,7 +743,7 @@ esac
         fs::write(
             dir.path().join("sync.sh"),
             r#"BACKEND_TARGETS=("alpha" 'services/nested-app')
-FRONTEND_TARGETS=('extra-target')
+UI_TARGETS=('extra-target')
 "#,
         )
         .expect("sync");

@@ -4,7 +4,6 @@ mod config;
 mod metrics;
 mod native;
 mod persistence;
-mod realtime;
 mod repo_theme;
 mod scroll;
 mod session;
