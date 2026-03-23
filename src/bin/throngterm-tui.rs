@@ -1,7 +1,7 @@
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
-use std::error::Error as StdError;
 use std::env;
+use std::error::Error as StdError;
 use std::f32::consts::TAU;
 use std::hash::{Hash, Hasher};
 use std::io::{self, BufWriter, IsTerminal, Stdout, Write};
@@ -2467,7 +2467,11 @@ impl<C: TuiApi> App<C> {
         viewer.cached_rect = None;
     }
 
-    fn handle_mermaid_mouse_down(&mut self, field: Rect, mouse: crossterm::event::MouseEvent) -> bool {
+    fn handle_mermaid_mouse_down(
+        &mut self,
+        field: Rect,
+        mouse: crossterm::event::MouseEvent,
+    ) -> bool {
         let Some(viewer) = self.mermaid_viewer_mut() else {
             return false;
         };
@@ -2498,7 +2502,11 @@ impl<C: TuiApi> App<C> {
         false
     }
 
-    fn handle_mermaid_mouse_drag(&mut self, field: Rect, mouse: crossterm::event::MouseEvent) -> bool {
+    fn handle_mermaid_mouse_drag(
+        &mut self,
+        field: Rect,
+        mouse: crossterm::event::MouseEvent,
+    ) -> bool {
         let Some(drag) = self.mermaid_drag else {
             return false;
         };
@@ -3132,7 +3140,11 @@ fn build_thought_panel_entries<C: TuiApi>(app: &App<C>) -> Vec<ThoughtPanelEntry
     let mut entries = Vec::new();
     let mut thought_sessions = HashSet::new();
 
-    for entry in app.thought_log.iter().filter(|entry| app.thought_filter.matches(entry)) {
+    for entry in app
+        .thought_log
+        .iter()
+        .filter(|entry| app.thought_filter.matches(entry))
+    {
         thought_sessions.insert(entry.session_id.clone());
         entries.push(ThoughtPanelEntryView {
             session_id: entry.session_id.clone(),
@@ -3169,7 +3181,10 @@ fn build_thought_panel_entries<C: TuiApi>(app: &App<C>) -> Vec<ThoughtPanelEntry
     entries
 }
 
-fn build_rows_for_panel_entry(entry: &ThoughtPanelEntryView, thought_content: Rect) -> Vec<ThoughtRowLayout> {
+fn build_rows_for_panel_entry(
+    entry: &ThoughtPanelEntryView,
+    thought_content: Rect,
+) -> Vec<ThoughtRowLayout> {
     let button_width = display_width(THOUGHT_MERMAID_LABEL);
     let reserved = if entry.has_mermaid {
         button_width.saturating_add(1)
@@ -3330,7 +3345,10 @@ fn thought_panel_action_at<C: TuiApi>(
             width: rect.width,
             height: rect.height,
         });
-        if mermaid_rect.map(|rect| rect.contains(x, y)).unwrap_or(false) {
+        if mermaid_rect
+            .map(|rect| rect.contains(x, y))
+            .unwrap_or(false)
+        {
             return Some(ThoughtPanelAction::OpenMermaid(row.session_id));
         }
         if text_rect.map(|rect| rect.contains(x, y)).unwrap_or(false) {
@@ -4033,10 +4051,7 @@ fn pixmap_to_braille_lines(pixmap: &Pixmap, content_rect: Rect) -> Vec<String> {
     lines
 }
 
-fn render_mermaid_lines(
-    viewer: &mut MermaidViewerState,
-    content_rect: Rect,
-) -> Result<(), String> {
+fn render_mermaid_lines(viewer: &mut MermaidViewerState, content_rect: Rect) -> Result<(), String> {
     let source = viewer
         .source
         .as_deref()
@@ -4090,27 +4105,23 @@ fn render_mermaid_lines(
     Ok(())
 }
 
-fn render_wrapped_lines(
-    renderer: &mut Renderer,
-    rect: Rect,
-    text: &str,
-    color: Color,
-) {
+fn render_wrapped_lines(renderer: &mut Renderer, rect: Rect, text: &str, color: Color) {
     let mut y = rect.y;
     for line in wrap_text(text, rect.width as usize) {
         if y >= rect.bottom() {
             break;
         }
-        renderer.draw_text(rect.x, y, &truncate_label(&line, rect.width as usize), color);
+        renderer.draw_text(
+            rect.x,
+            y,
+            &truncate_label(&line, rect.width as usize),
+            color,
+        );
         y += 1;
     }
 }
 
-fn render_mermaid_viewer(
-    renderer: &mut Renderer,
-    field: Rect,
-    viewer: &mut MermaidViewerState,
-) {
+fn render_mermaid_viewer(renderer: &mut Renderer, field: Rect, viewer: &mut MermaidViewerState) {
     renderer.fill_rect(field, ' ', Color::Reset);
     viewer.back_rect = Some(Rect {
         x: field.x,
@@ -4120,7 +4131,9 @@ fn render_mermaid_viewer(
     });
     renderer.draw_text(field.x, field.y, MERMAID_BACK_LABEL, Color::Cyan);
 
-    let status_x = field.x.saturating_add(display_width(MERMAID_BACK_LABEL) + 1);
+    let status_x = field
+        .x
+        .saturating_add(display_width(MERMAID_BACK_LABEL) + 1);
     let status_width = field.right().saturating_sub(status_x) as usize;
     let status = format!(
         "{} | {} | zoom {:>3.0}%",
@@ -4128,13 +4141,23 @@ fn render_mermaid_viewer(
         shorten_path(&viewer.path, status_width.saturating_sub(14)),
         viewer.zoom * 100.0
     );
-    renderer.draw_text(status_x, field.y, &truncate_label(&status, status_width), Color::DarkGrey);
+    renderer.draw_text(
+        status_x,
+        field.y,
+        &truncate_label(&status, status_width),
+        Color::DarkGrey,
+    );
 
     let content_rect = mermaid_content_rect(field);
     viewer.content_rect = Some(content_rect);
     if content_rect.width < MERMAID_VIEW_MIN_WIDTH || content_rect.height < MERMAID_VIEW_MIN_HEIGHT
     {
-        render_wrapped_lines(renderer, content_rect, "Mermaid view too small", Color::DarkGrey);
+        render_wrapped_lines(
+            renderer,
+            content_rect,
+            "Mermaid view too small",
+            Color::DarkGrey,
+        );
         return;
     }
 
@@ -4540,11 +4563,8 @@ fn handle_tui_event<C: TuiApi>(
             Ok(true)
         }
         Event::Mouse(mouse) if matches!(mouse.kind, MouseEventKind::ScrollDown) => {
-            let _ = app.handle_mermaid_scroll(
-                layout.overview_field,
-                mouse,
-                1.0 / MERMAID_ZOOM_STEP,
-            );
+            let _ =
+                app.handle_mermaid_scroll(layout.overview_field, mouse, 1.0 / MERMAID_ZOOM_STEP);
             Ok(true)
         }
         Event::Resize(width, height) => {
@@ -8136,10 +8156,11 @@ mod tests {
             layout,
             KeyEvent::new(KeyCode::Char('0'), KeyModifiers::NONE),
         ));
-        let (zoom_after_reset, center_after_reset_x, center_after_reset_y) = match &app.fish_bowl_mode {
-            FishBowlMode::Mermaid(viewer) => (viewer.zoom, viewer.center_x, viewer.center_y),
-            FishBowlMode::Aquarium => panic!("expected Mermaid viewer mode"),
-        };
+        let (zoom_after_reset, center_after_reset_x, center_after_reset_y) =
+            match &app.fish_bowl_mode {
+                FishBowlMode::Mermaid(viewer) => (viewer.zoom, viewer.center_x, viewer.center_y),
+                FishBowlMode::Aquarium => panic!("expected Mermaid viewer mode"),
+            };
         assert_eq!(zoom_after_reset, 1.0);
         assert_eq!(center_after_reset_x, 0.0);
         assert_eq!(center_after_reset_y, 0.0);

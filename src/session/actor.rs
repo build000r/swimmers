@@ -5,22 +5,23 @@ use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
-use chrono::Utc;
+use chrono::{TimeZone, Utc};
 use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
 use regex::Regex;
 use tokio::process::Command;
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tracing::{debug, error, info, warn};
-use walkdir::WalkDir;
 
 use crate::config::Config;
 use crate::scroll::guard::{ScrollGuard, ScrollOutputChunk};
+use crate::session::artifacts::{
+    default_artifact_registry, ArtifactDiscoveryContext, ArtifactKind,
+};
 use crate::session::replay_ring::ReplayRing;
 use crate::state::detector::StateDetector;
 use crate::types::{
-    ControlEvent, MermaidArtifactResponse, SessionSkillPayload, SessionState,
-    SessionStatePayload, SessionSummary, SessionTitlePayload, TerminalSnapshot,
-    TransportHealth,
+    ControlEvent, MermaidArtifactResponse, SessionSkillPayload, SessionState, SessionStatePayload,
+    SessionSummary, SessionTitlePayload, TerminalSnapshot, TransportHealth,
 };
 
 const CWD_REFRESH_MIN_INTERVAL: Duration = Duration::from_millis(750);
@@ -213,8 +214,9 @@ pub struct SessionActor {
     // Timestamp of most recent terminal output observed by this actor.
     last_activity_at: chrono::DateTime<Utc>,
 
-    // Actor creation time, used as the baseline for session-scoped artifacts.
-    started_at: chrono::DateTime<Utc>,
+    // Session creation time used as the baseline for session-scoped artifacts.
+    // For attached sessions this is refreshed from tmux metadata.
+    session_started_at: chrono::DateTime<Utc>,
 
     // When true, the replay ring will be cleared on the first idle transition.
     // This strips tmux startup output (including DA query responses) before
@@ -333,7 +335,7 @@ impl SessionActor {
             last_skill: None,
             input_line_buffer: String::new(),
             last_activity_at: Utc::now(),
-            started_at: Utc::now(),
+            session_started_at: Utc::now(),
             clear_replay_on_first_idle: !attach,
         };
 
@@ -383,6 +385,7 @@ impl SessionActor {
     }
 
     async fn prime_tmux_metadata(&mut self) {
+        self.maybe_refresh_session_started_at().await;
         self.maybe_refresh_cwd_from_tmux(true).await;
         self.maybe_refresh_tool_from_tmux(true).await;
     }
@@ -462,8 +465,9 @@ impl SessionActor {
             SessionCommand::GetMermaidArtifact(reply) => {
                 let artifact = Self::build_mermaid_artifact(
                     self.session_id.clone(),
+                    self.tmux_name.clone(),
                     self.cwd.clone(),
-                    self.started_at,
+                    self.session_started_at,
                 )
                 .await;
                 let _ = reply.send(artifact);
@@ -833,6 +837,22 @@ impl SessionActor {
         }
     }
 
+    async fn maybe_refresh_session_started_at(&mut self) {
+        match query_tmux_session_created(&self.tmux_name).await {
+            Ok(session_started_at) => {
+                self.session_started_at = session_started_at;
+            }
+            Err(err) => {
+                debug!(
+                    session_id = %self.session_id,
+                    tmux_name = %self.tmux_name,
+                    "tmux session_created refresh failed: {}",
+                    err
+                );
+            }
+        }
+    }
+
     fn update_cwd_and_emit(&mut self, cwd: String) {
         let normalized = cwd.trim();
         if normalized.is_empty() || normalized == self.cwd {
@@ -1090,126 +1110,49 @@ impl SessionActor {
 
     async fn build_mermaid_artifact(
         session_id: String,
+        tmux_name: String,
         cwd: String,
-        started_at: chrono::DateTime<Utc>,
+        session_started_at: chrono::DateTime<Utc>,
     ) -> MermaidArtifactResponse {
         let fallback_session_id = session_id.clone();
-        tokio::task::spawn_blocking(move || scan_mermaid_artifact(session_id, cwd, started_at))
-            .await
-            .unwrap_or_else(|err| MermaidArtifactResponse {
-                session_id: fallback_session_id,
-                available: false,
-                path: None,
-                updated_at: None,
-                source: None,
-                error: Some(format!("artifact scan task failed: {err}")),
-            })
-    }
-}
-
-fn scan_mermaid_artifact(
-    session_id: String,
-    cwd: String,
-    started_at: chrono::DateTime<Utc>,
-) -> MermaidArtifactResponse {
-    let root = cwd.trim();
-    if root.is_empty() {
-        return MermaidArtifactResponse {
-            session_id,
+        tokio::task::spawn_blocking(move || {
+            let context = ArtifactDiscoveryContext {
+                session_id: session_id.clone(),
+                tmux_name,
+                cwd,
+                session_started_at,
+                pane_tail: String::new(),
+            };
+            let response_session_id = session_id.clone();
+            default_artifact_registry()
+                .discover(ArtifactKind::Mermaid, &context)
+                .map(|artifact| MermaidArtifactResponse {
+                    session_id: response_session_id.clone(),
+                    available: true,
+                    path: Some(artifact.path),
+                    updated_at: Some(artifact.updated_at),
+                    source: artifact.source,
+                    error: artifact.error,
+                })
+                .unwrap_or(MermaidArtifactResponse {
+                    session_id: response_session_id,
+                    available: false,
+                    path: None,
+                    updated_at: None,
+                    source: None,
+                    error: None,
+                })
+        })
+        .await
+        .unwrap_or_else(|err| MermaidArtifactResponse {
+            session_id: fallback_session_id,
             available: false,
             path: None,
             updated_at: None,
             source: None,
-            error: None,
-        };
+            error: Some(format!("artifact scan task failed: {err}")),
+        })
     }
-
-    let mut latest: Option<(PathBuf, chrono::DateTime<Utc>)> = None;
-    for entry in WalkDir::new(root)
-        .follow_links(false)
-        .into_iter()
-        .filter_entry(should_visit_mermaid_entry)
-        .filter_map(Result::ok)
-    {
-        if !entry.file_type().is_file() {
-            continue;
-        }
-        let path = entry.path();
-        if !path
-            .extension()
-            .and_then(|ext| ext.to_str())
-            .map(|ext| ext.eq_ignore_ascii_case("mmd"))
-            .unwrap_or(false)
-        {
-            continue;
-        }
-
-        let Ok(metadata) = entry.metadata() else {
-            continue;
-        };
-        let Ok(modified) = metadata.modified() else {
-            continue;
-        };
-        let updated_at = chrono::DateTime::<Utc>::from(modified);
-        if updated_at < started_at {
-            continue;
-        }
-
-        let replace = latest
-            .as_ref()
-            .map(|(best_path, best_updated_at)| {
-                updated_at > *best_updated_at
-                    || (updated_at == *best_updated_at && path > best_path.as_path())
-            })
-            .unwrap_or(true);
-        if replace {
-            latest = Some((path.to_path_buf(), updated_at));
-        }
-    }
-
-    let Some((path, updated_at)) = latest else {
-        return MermaidArtifactResponse {
-            session_id,
-            available: false,
-            path: None,
-            updated_at: None,
-            source: None,
-            error: None,
-        };
-    };
-
-    match fs::read_to_string(&path) {
-        Ok(source) => MermaidArtifactResponse {
-            session_id,
-            available: true,
-            path: Some(path.to_string_lossy().into_owned()),
-            updated_at: Some(updated_at),
-            source: Some(source),
-            error: None,
-        },
-        Err(err) => MermaidArtifactResponse {
-            session_id,
-            available: true,
-            path: Some(path.to_string_lossy().into_owned()),
-            updated_at: Some(updated_at),
-            source: None,
-            error: Some(format!("failed to read Mermaid artifact: {err}")),
-        },
-    }
-}
-
-fn should_visit_mermaid_entry(entry: &walkdir::DirEntry) -> bool {
-    if !entry.file_type().is_dir() {
-        return true;
-    }
-
-    let Some(name) = entry.file_name().to_str() else {
-        return false;
-    };
-    !matches!(
-        name,
-        ".git" | "node_modules" | "target" | ".next" | ".turbo" | ".venv" | "venv"
-    )
 }
 
 /// Capture visible pane text directly from tmux.
@@ -1395,6 +1338,38 @@ async fn query_tmux_cwd(tmux_name: &str) -> anyhow::Result<String> {
         return Err(anyhow::anyhow!("tmux returned empty pane_current_path"));
     }
     Ok(cwd)
+}
+
+async fn query_tmux_session_created(tmux_name: &str) -> anyhow::Result<chrono::DateTime<Utc>> {
+    let output = Command::new("tmux")
+        .args([
+            "display-message",
+            "-p",
+            "-t",
+            tmux_name,
+            "#{session_created}",
+        ])
+        .env_remove("TMUX")
+        .env_remove("TMUX_PANE")
+        .output()
+        .await
+        .map_err(|e| anyhow::anyhow!("failed to run tmux display-message: {}", e))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(anyhow::anyhow!(
+            "tmux display-message failed: {}",
+            stderr.trim()
+        ));
+    }
+
+    let epoch = String::from_utf8_lossy(&output.stdout)
+        .trim()
+        .parse::<i64>()
+        .map_err(|e| anyhow::anyhow!("invalid tmux session_created value: {}", e))?;
+    Utc.timestamp_opt(epoch, 0)
+        .single()
+        .ok_or_else(|| anyhow::anyhow!("tmux returned invalid session_created timestamp"))
 }
 
 #[derive(Debug, Clone)]
@@ -1948,10 +1923,10 @@ mod tests {
         detect_tool_from_process_entry, drain_completed_input_lines, extract_cwd_from_title,
         find_osc_payload_end, line_looks_prompt_like, normalize_skill_name, osc_payloads,
         output_counts_as_meaningful_activity, parse_process_entry, percent_decode,
-        query_tool_from_tmux_process_tree, resolve_tmux_terminal_env, scan_mermaid_artifact,
-        should_refresh_cwd_from_tmux, should_refresh_tool_from_tmux,
-        visible_output_is_meaningful, write_input_counts_as_activity, ControlEvent, ProcessEntry,
-        SessionActor, SessionCommand, CWD_REFRESH_MIN_INTERVAL, TOOL_REFRESH_MIN_INTERVAL,
+        query_tmux_session_created, query_tool_from_tmux_process_tree, resolve_tmux_terminal_env,
+        should_refresh_cwd_from_tmux, should_refresh_tool_from_tmux, visible_output_is_meaningful,
+        write_input_counts_as_activity, ControlEvent, ProcessEntry, SessionActor, SessionCommand,
+        CWD_REFRESH_MIN_INTERVAL, TOOL_REFRESH_MIN_INTERVAL,
     };
     use crate::config::Config;
     use crate::scroll::guard::ScrollGuard;
@@ -1959,7 +1934,7 @@ mod tests {
     use crate::session::replay_ring::ReplayRing;
     use crate::state::detector::StateDetector;
     use crate::types::SessionState;
-    use chrono::Utc;
+    use chrono::{TimeZone, Utc};
     use portable_pty::{native_pty_system, PtySize};
     use std::collections::HashMap;
     use std::os::unix::fs::PermissionsExt;
@@ -2002,7 +1977,7 @@ mod tests {
             last_skill: None,
             input_line_buffer: String::new(),
             last_activity_at: Utc::now(),
-            started_at: Utc::now(),
+            session_started_at: Utc::now(),
             clear_replay_on_first_idle: false,
         }
     }
@@ -2446,58 +2421,39 @@ fi
         ));
     }
 
-    #[test]
-    fn scan_mermaid_artifact_uses_latest_post_start_file_and_ignores_skipped_dirs() {
+    #[tokio::test]
+    async fn query_tmux_session_created_reads_epoch_from_tmux() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let root = dir.path();
-        std::fs::write(root.join("before.mmd"), "graph TD\nOld-->Node\n").expect("write before");
+        let bin_dir = dir.path().join("bin");
+        std::fs::create_dir_all(&bin_dir).expect("bin dir");
+        let tmux = bin_dir.join("tmux");
+        std::fs::write(&tmux, "#!/bin/sh\nprintf '1774274168\\n'\n").expect("tmux");
+        let mut perms = std::fs::metadata(&tmux).expect("metadata").permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&tmux, perms).expect("chmod");
 
-        let started_at = Utc::now();
-        std::thread::sleep(Duration::from_millis(25));
-
-        let docs_dir = root.join("docs");
-        std::fs::create_dir_all(&docs_dir).expect("create docs");
-        let expected_path = docs_dir.join("chosen.mmd");
-        std::fs::write(&expected_path, "graph TD\nA-->B\n").expect("write chosen");
-
-        std::thread::sleep(Duration::from_millis(25));
-
-        let skipped_dir = root.join("node_modules");
-        std::fs::create_dir_all(&skipped_dir).expect("create node_modules");
-        std::fs::write(skipped_dir.join("ignored.mmd"), "graph TD\nIgnored-->Node\n")
-            .expect("write ignored");
-
-        let artifact = scan_mermaid_artifact(
-            "sess-mermaid".to_string(),
-            root.to_string_lossy().into_owned(),
-            started_at,
+        let _guard = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let previous_path = std::env::var_os("PATH");
+        std::env::set_var(
+            "PATH",
+            std::env::join_paths([bin_dir.as_path()]).expect("path"),
         );
 
-        assert!(artifact.available);
+        let created_at = query_tmux_session_created("demo")
+            .await
+            .expect("session_created query");
         assert_eq!(
-            artifact.path.as_deref(),
-            Some(expected_path.to_string_lossy().as_ref())
-        );
-        assert_eq!(artifact.source.as_deref(), Some("graph TD\nA-->B\n"));
-        assert!(artifact.error.is_none());
-    }
-
-    #[test]
-    fn scan_mermaid_artifact_returns_unavailable_when_only_pre_session_files_exist() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let root = dir.path();
-        std::fs::write(root.join("before.mmd"), "graph TD\nOld-->Node\n").expect("write before");
-
-        let artifact = scan_mermaid_artifact(
-            "sess-mermaid".to_string(),
-            root.to_string_lossy().into_owned(),
-            Utc::now() + chrono::Duration::seconds(1),
+            created_at,
+            Utc.timestamp_opt(1_774_274_168, 0).single().unwrap()
         );
 
-        assert!(!artifact.available);
-        assert!(artifact.path.is_none());
-        assert!(artifact.source.is_none());
-        assert!(artifact.error.is_none());
+        if let Some(value) = previous_path {
+            std::env::set_var("PATH", value);
+        } else {
+            std::env::remove_var("PATH");
+        }
     }
 
     #[test]

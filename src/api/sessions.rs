@@ -11,9 +11,9 @@ use crate::api::{fetch_live_summary, AppState};
 use crate::auth::{AuthInfo, AuthScope};
 use crate::session::actor::SessionCommand;
 use crate::types::{
-    CreateSessionRequest, CreateSessionResponse, ErrorResponse, SessionInputRequest,
-    SessionInputResponse, SessionListResponse, SessionPaneTailResponse, SessionState,
-    TerminalSnapshot, MermaidArtifactResponse,
+    CreateSessionRequest, CreateSessionResponse, ErrorResponse, MermaidArtifactResponse,
+    SessionInputRequest, SessionInputResponse, SessionListResponse, SessionPaneTailResponse,
+    SessionState, TerminalSnapshot,
 };
 
 // ---------------------------------------------------------------------------
