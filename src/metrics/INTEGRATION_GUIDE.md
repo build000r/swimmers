@@ -55,7 +55,6 @@ router carries its own state (`MetricsState`) so it does not conflict with
         .merge(api::api_router())
         .merge(metrics::endpoint::metrics_router(prom_handle))   // <-- ADD THIS
         .nest("/v1/realtime", realtime::handler::ws_router())
-        .fallback_service(ServeDir::new("dist").append_index_html_on_directories(true))
         .with_state(state);
 ```
 

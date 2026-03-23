@@ -1,73 +1,50 @@
 # Throngterm
 
-Mobile-first terminal manager for tmux sessions.
+Native terminal UI for tmux-backed sessions.
 
 ## Core Docs
 
 - [QUICKSTART.md](./QUICKSTART.md) for full setup and runtime details.
 
-## iPhone Wrapper (Capacitor)
-
-This repo includes an iOS wrapper at `web/ios` that loads Throngterm from a
-remote host URL (Tailscale-friendly).
-
-### First-time setup
+## Primary Commands
 
 ```bash
-cd web
-npm install
+make tui
 ```
 
-### Sync wrapper to a host URL
+Starts the local API on `127.0.0.1:3210` if needed, then launches the native
+TUI.
 
 ```bash
-cd web
-THRONGTERM_IOS_SERVER_URL=http://100.101.123.63:3210 npm run ios:sync
-npm run ios:open
+make server
 ```
 
-Current local defaults:
+Runs only the Rust API/backend.
 
-- Rust server / API / built web app: `3210`
-- Vite dev server with HMR: `5175` when started through `.env-manager`
-- Native Rust TUI target: `3210`
+```bash
+make tui-check
+```
 
-For the native TUI on localhost, `make tui` now bootstraps the local Rust API on
-`3210` if it is not already running. `make tui-check` remains a pure readiness
-probe and will not start the server for you.
+Waits for an existing API and exits without launching the TUI.
+
+## Remote API Use
 
 No tmux hook setup is required for thought or rest-state updates. `throngterm`
 streams session snapshots directly to `clawgs emit --stdio`.
 
-### Fast UI dev mode (HMR)
+Point the TUI at a non-local API with `THRONGTERM_TUI_URL`:
 
 ```bash
-# terminal 1
-cd /Users/b/repos/throngterm
-PORT=3210 cargo run
-
-# terminal 2
-cd /Users/b/repos/throngterm/web
-npm run dev:host
-
-# terminal 3 (point iPhone app to Vite)
-cd /Users/b/repos/throngterm/web
-THRONGTERM_IOS_SERVER_URL=http://100.101.123.63:5173 npm run ios:sync
+THRONGTERM_TUI_URL=http://100.101.123.63:3210 cargo run --bin throngterm-tui
 ```
 
-If you use `.env-manager`, it starts the Vite dev server on `5175`, not `5173`.
-In that path, point the iPhone wrapper to `http://<TAILNET_HOST>:5175`.
+For token-protected APIs:
 
-### In-app host switching
+```bash
+AUTH_MODE=token AUTH_TOKEN=your-token \
+THRONGTERM_TUI_URL=http://100.101.123.63:3210 \
+cargo run --bin throngterm-tui
+```
 
-On iPhone, use the top-left `Host` button to:
-
-- set a new server URL and reload immediately
-- persist that override across relaunches
-- reset to the config default
-
-The app also includes:
-
-- pull-to-refresh reload
-- local fallback error page
-- "Open in Safari" action when host is unreachable
+The repo still contains older `web/` assets, but the supported workflow is the
+native TUI.

@@ -34,14 +34,15 @@ async fn metrics_handler(State(state): State<MetricsState>) -> impl IntoResponse
 
 /// Build a standalone router for `GET /metrics`.
 ///
-/// This returns a `Router<()>` (no shared app state required) because it
-/// carries its own `MetricsState` via a nested `.with_state()`.
+/// This is generic over the outer router state so it can be merged into the
+/// main application router while still carrying its own `MetricsState`
+/// internally.
 ///
 /// # Usage in main.rs
 ///
 /// ```rust,ignore
 /// let prom_handle = metrics::init_metrics();
-/// let metrics_router = metrics::endpoint::metrics_router(prom_handle);
+/// let metrics_router = metrics::endpoint::metrics_router::<Arc<AppState>>(prom_handle);
 ///
 /// let app = Router::new()
 ///     .merge(api::api_router())
@@ -49,7 +50,10 @@ async fn metrics_handler(State(state): State<MetricsState>) -> impl IntoResponse
 ///     // ...
 ///     .with_state(state);
 /// ```
-pub fn metrics_router(handle: PrometheusHandle) -> Router {
+pub fn metrics_router<S>(handle: PrometheusHandle) -> Router<S>
+where
+    S: Clone + Send + Sync + 'static,
+{
     let metrics_state = MetricsState {
         handle: Arc::new(handle),
     };

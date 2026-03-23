@@ -4,22 +4,22 @@
 
 ## What This Is
 
-Throngterm is a mobile-first web terminal manager. It gives you a browser UI with animated "Thronglet" creatures that represent your tmux sessions. Tap a creature to open its terminal. It runs on your machine and you access it from your phone/tablet/browser over Tailscale.
+Throngterm is a native terminal UI backed by a Rust API that manages tmux
+sessions. The supported path is `API + TUI`; the older browser/iPhone workflow
+is no longer the primary product surface.
 
-**Target setup:** throngterm on port `69420`, accessible over your Tailscale network.
+**Target setup:** local API on `3210` with the native TUI attached to it.
 
 ---
 
 ## Step 1: Prerequisites
 
-Install these if not already present. Check first before installing.
+Install these if not already present. Check first before installing:
 
 ```bash
-# Check what's already installed
 rustc --version
 cargo --version
 which tmux && tmux -V
-which tailscale && tailscale version
 ```
 
 ### Rust toolchain
@@ -39,25 +39,9 @@ brew install tmux
 sudo apt-get install -y tmux
 ```
 
-### Tailscale
+### Tailscale (Optional)
 
-```bash
-# macOS
-brew install --cask tailscale
-# Then open Tailscale.app and sign in
-
-# Linux
-curl -fsSL https://tailscale.com/install.sh | sh
-sudo tailscale up
-```
-
-Confirm Tailscale is connected:
-
-```bash
-tailscale status
-```
-
-Note your Tailscale IP (e.g. `100.x.y.z`) — you'll use it to access throngterm from other devices.
+Only needed if your TUI will talk to a remote API over your tailnet.
 
 ---
 
@@ -69,43 +53,42 @@ cd throngterm
 cargo build --release
 ```
 
-Build the frontend:
-
-```bash
-cd web
-npm install
-npm run build
-cd ..
-```
-
 ---
 
-## Step 3: Run on Port 69420
+## Step 3: Run Locally
+
+Recommended:
 
 ```bash
-PORT=69420 ./target/release/throngterm
+make tui
 ```
 
-Or during development:
+That will:
+
+- start the local API on `127.0.0.1:3210` if it is not already running
+- wait for readiness
+- launch the native TUI
+
+If you want separate processes:
 
 ```bash
-PORT=69420 cargo run
+make server
+cargo run --bin throngterm-tui
 ```
 
-Current repo-local dev defaults are different from the release-oriented examples above:
+Useful variants:
 
-- `3210`: Rust server, API, WebSocket endpoint, and built frontend
-- `5175`: Vite dev server when started through `.env-manager`
+- `make tui-check`: wait for an existing API and exit
+- `PORT=69420 cargo run --bin throngterm`: run the API on a custom port
+- `THRONGTERM_TUI_URL=http://127.0.0.1:69420 cargo run --bin throngterm-tui`: point the TUI at that custom API
 
-Use `3210` for the native TUI and for stable iPhone wrapper mode.
-Use `5175` only when you want frontend hot reload on the phone.
-
-You should see the server start and begin discovering tmux sessions.
+You should see the API start and begin discovering tmux sessions.
 
 No tmux hook setup is required for thought or rest-state updates. `throngterm`
 streams session snapshots directly to `clawgs emit --stdio`.
 
-It binds to `0.0.0.0` so it's accessible on all interfaces — including your Tailscale IP.
+The API binds to `0.0.0.0`, so you can also point a TUI at it from another
+machine if you expose the port intentionally.
 
 ### Structured Transcript Snapshot (Optional)
 
@@ -128,65 +111,32 @@ Pass a specific cwd (used for JSONL discovery) plus extra extractor flags:
 bash scripts/clawgs-extract.sh /path/to/project --pretty --include-raw
 ```
 
-### Frontend Dev Server (Optional)
+## Step 4: Connect to a Remote API (Optional)
 
-For frontend development with hot reload:
-
-```bash
-cd web
-npm run dev
-```
-
-This runs the Vite dev server with HMR, proxying API requests to the Rust backend.
-
-### iPhone App Shell (Optional, Capacitor)
-
-The iOS wrapper lives under `web/ios` and loads your host URL directly.
-For personal/Tailscale use, set one fixed host URL before syncing the iOS project.
+If the API runs on another machine:
 
 ```bash
-cd web
-
-# Serve Vite on all interfaces so iPhone can reach it over Tailscale
-npm run dev:host
+THRONGTERM_TUI_URL=http://100.x.y.z:3210 cargo run --bin throngterm-tui
 ```
 
-In a second terminal:
+For token-protected APIs:
 
 ```bash
-cd web
-
-# Fast dev mode (hot reload via Vite on port 5173, or 5175 via .env-manager)
-THRONGTERM_IOS_SERVER_URL=http://<YOUR_TAILSCALE_IP>:5173 npm run ios:sync
-
-# Open in Xcode, then run on your iPhone
-npm run ios:open
+AUTH_MODE=token AUTH_TOKEN=your-token \
+THRONGTERM_TUI_URL=http://100.x.y.z:3210 \
+cargo run --bin throngterm-tui
 ```
-
-Stable mode (Rust server on port `3210` in local dev, or `69420` in the release-oriented setup above):
-
-```bash
-cd web
-THRONGTERM_IOS_SERVER_URL=http://<YOUR_TAILSCALE_IP>:3210 npm run ios:sync
-npm run ios:open
-```
-
-Notes:
-- UI code changes in the host web app are reflected in the iPhone wrapper without rebuilding native code.
-- Native iOS shell changes still require an Xcode rebuild.
-- If the host is unreachable, the app shows a local error page with pull-to-refresh and an "Open in Safari" fallback button.
-- In the iOS app, tap the top-left `Host` button to change the server URL and reload without re-syncing from CLI.
 
 ### Run in Background (Optional)
 
-To keep it running after you close your terminal:
+To keep only the API running after you close your terminal:
 
 ```bash
 # Option A: nohup
-nohup env PORT=69420 ./target/release/throngterm > throngterm.log 2>&1 &
+nohup env PORT=3210 ./target/release/throngterm > throngterm.log 2>&1 &
 
 # Option B: tmux (ironic but practical)
-tmux new-session -d -s throngterm 'PORT=69420 /path/to/throngterm'
+tmux new-session -d -s throngterm 'PORT=3210 /path/to/throngterm/target/release/throngterm'
 
 # Option C: systemd (Linux, persistent across reboots)
 # See "Systemd Service" section below
@@ -194,27 +144,10 @@ tmux new-session -d -s throngterm 'PORT=69420 /path/to/throngterm'
 
 ---
 
-## Step 4: Access It
-
-From any device on your Tailscale network:
-
-```
-http://<YOUR_TAILSCALE_IP>:69420
-```
-
-From the machine itself:
-
-```
-http://localhost:69420
-```
-
----
-
 ## Step 5: Create tmux Sessions
 
-Throngterm manages tmux sessions. You need at least one for anything to show up.
-
-You can create sessions from the web UI (tap the `+` button) or from the terminal:
+Throngterm manages tmux sessions. You need at least one for anything to show
+up. Create them either from the TUI or directly with tmux:
 
 ```bash
 tmux new-session -d -s dev
@@ -222,7 +155,7 @@ tmux new-session -d -s logs
 tmux new-session -d -s scratch
 ```
 
-Each session appears as an animated Thronglet in the browser. Tap one to open its terminal.
+They will appear in the TUI session list.
 
 ---
 
@@ -240,7 +173,7 @@ After=network.target
 Type=simple
 User=YOUR_USERNAME
 WorkingDirectory=/path/to/throngterm
-Environment=PORT=69420
+Environment=PORT=3210
 ExecStart=/path/to/throngterm/target/release/throngterm
 Restart=on-failure
 RestartSec=5
@@ -305,20 +238,19 @@ Replace `/path/to/throngterm` with the actual path.
 
 | Problem | Fix |
 |---------|-----|
-| No Thronglets showing | Create tmux sessions first: `tmux new-session -d -s dev` |
-| Can't access from phone | Confirm both devices are on Tailscale. Check `tailscale status` |
-| Port already in use | Kill the old process: `lsof -ti:69420 \| xargs kill` |
+| TUI cannot reach the API | Run `make tui` or start the API with `make server` |
+| TUI gets `401` or `403` | Set `AUTH_MODE=token` and `AUTH_TOKEN` to match the API |
+| No sessions showing | Create tmux sessions first: `tmux new-session -d -s dev` |
+| Port already in use | Kill the old process: `lsof -ti:3210 \| xargs kill` |
 | Cargo build fails | Ensure Rust toolchain is installed: `rustup update stable` |
-| WebSocket connection fails | If behind a reverse proxy, ensure it supports WebSocket upgrades |
-| Blank terminal on connect | The session may have exited. Delete and recreate it |
-| Frontend not loading | Rebuild: `cd web && npm run build` |
+| Blank terminal on connect | The session may have exited. Recreate it or restart the shell |
 
 ---
 
 ## Architecture (For Context)
 
 ```
-Browser (phone/laptop)
+Native TUI
     |
     |-- GET /v1/bootstrap         -> Config + session list
     |-- GET /v1/sessions          -> List tmux sessions
@@ -328,9 +260,9 @@ Browser (phone/laptop)
     '-- WebSocket /v1/realtime    -> Multiplexed terminal I/O + control events
             |
             |-- Binary: keystrokes -> PTY -> tmux session
-            '-- Binary: tmux session -> PTY -> xterm.js render
+            '-- Binary: tmux session -> PTY -> TUI renderer
 ```
 
 - **Backend**: Rust (axum + tokio + portable-pty)
-- **Frontend**: Preact + TypeScript + Vite (built to `dist/`)
+- **Client**: Rust TUI (`throngterm-tui`)
 - **No database, no Docker**

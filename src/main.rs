@@ -20,7 +20,6 @@ use std::time::{Duration, Instant};
 
 use axum::Router;
 use tokio::sync::RwLock;
-use tower_http::services::ServeDir;
 use tracing_subscriber::EnvFilter;
 
 use api::AppState;
@@ -116,9 +115,8 @@ fn build_app_router(
 ) -> Router {
     Router::new()
         .merge(api::api_router(config))
-        .fallback_service(ServeDir::new("dist").append_index_html_on_directories(true))
-        .with_state(state)
         .merge(metrics::endpoint::metrics_router(prom_handle))
+        .with_state(state)
 }
 
 async fn bind_listener(port: u16) -> anyhow::Result<tokio::net::TcpListener> {
