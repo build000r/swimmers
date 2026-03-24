@@ -27,6 +27,7 @@ use session::supervisor::{SessionSupervisor, SupervisorProvider};
 use thought::bridge_runner::BridgeRunner;
 use thought::emitter_client::{fetch_daemon_defaults, EmitterClient};
 use thought::loop_runner::ThoughtLoopRunner;
+use thought::protocol::SyncRequestSequence;
 use thought::runtime_config::ThoughtConfig;
 
 const STARTUP_PHASE_WARN_THRESHOLD: Duration = Duration::from_secs(2);
@@ -81,6 +82,7 @@ fn start_thought_backend(
     config: &Arc<Config>,
     supervisor: &Arc<SessionSupervisor>,
     thought_config: Arc<RwLock<ThoughtConfig>>,
+    sync_request_sequence: Arc<SyncRequestSequence>,
 ) {
     let thought_tx = supervisor.thought_event_sender();
     let provider = Arc::new(SupervisorProvider::new(supervisor.clone()));
@@ -91,6 +93,7 @@ fn start_thought_backend(
                 config.thought_tick_ms,
                 thought_tx,
                 thought_config,
+                sync_request_sequence,
             );
             runner.spawn(provider);
         }
@@ -101,7 +104,7 @@ fn start_thought_backend(
                 Duration::from_millis(config.thought_tick_ms),
                 thought_config,
             );
-            bridge_runner.spawn(provider, EmitterClient::new());
+            bridge_runner.spawn(provider, EmitterClient::with_request_sequence(sync_request_sequence));
         }
     }
 }
@@ -157,6 +160,7 @@ async fn run() -> anyhow::Result<()> {
     // Create session supervisor (new() returns Arc<Self>)
     let supervisor = SessionSupervisor::new(config.clone());
     let thought_config = Arc::new(RwLock::new(ThoughtConfig::default()));
+    let sync_request_sequence = Arc::new(SyncRequestSequence::new());
     let persistence_store = init_persistence_store(&supervisor, &thought_config).await;
     run_startup_tmux_discovery(&supervisor).await;
 
@@ -165,13 +169,19 @@ async fn run() -> anyhow::Result<()> {
     supervisor.spawn_process_exit_reaper();
 
     // Start thought engine.
-    start_thought_backend(&config, &supervisor, thought_config.clone());
+    start_thought_backend(
+        &config,
+        &supervisor,
+        thought_config.clone(),
+        sync_request_sequence.clone(),
+    );
 
     // Build app state
     let state = Arc::new(AppState {
         supervisor,
         config: config.clone(),
         thought_config,
+        sync_request_sequence,
         daemon_defaults,
         file_store: persistence_store,
         published_selection: Arc::new(RwLock::new(api::PublishedSelectionState::default())),

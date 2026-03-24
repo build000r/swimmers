@@ -132,6 +132,7 @@ mod tests {
     use crate::auth::OPERATOR_SCOPES;
     use crate::config::Config;
     use crate::session::supervisor::SessionSupervisor;
+    use crate::thought::protocol::SyncRequestSequence;
     use crate::thought::runtime_config::ThoughtConfig;
     use axum::body::to_bytes;
     use axum::response::IntoResponse;
@@ -145,6 +146,7 @@ mod tests {
             supervisor,
             config,
             thought_config: Arc::new(RwLock::new(ThoughtConfig::default())),
+            sync_request_sequence: Arc::new(SyncRequestSequence::new()),
             daemon_defaults: None,
             file_store: None,
             published_selection: Arc::new(RwLock::new(PublishedSelectionState::default())),

@@ -14,7 +14,7 @@ use tracing::warn;
 
 use crate::thought::bridge_runner::BridgeRunner;
 use crate::thought::emitter_client::EmitterClient;
-use crate::thought::protocol::ThoughtDeliveryState;
+use crate::thought::protocol::{SyncRequestSequence, ThoughtDeliveryState};
 use crate::thought::runtime_config::ThoughtConfig;
 use crate::types::{ControlEvent, RestState, SessionState, ThoughtSource, ThoughtState};
 
@@ -83,6 +83,7 @@ pub struct ThoughtLoopRunner {
     tick_ms: u64,
     event_tx: broadcast::Sender<ControlEvent>,
     runtime_config: Arc<RwLock<ThoughtConfig>>,
+    request_sequence: Arc<SyncRequestSequence>,
 }
 
 impl ThoughtLoopRunner {
@@ -90,11 +91,13 @@ impl ThoughtLoopRunner {
         tick_ms: u64,
         event_tx: broadcast::Sender<ControlEvent>,
         runtime_config: Arc<RwLock<ThoughtConfig>>,
+        request_sequence: Arc<SyncRequestSequence>,
     ) -> Self {
         Self {
             tick_ms,
             event_tx,
             runtime_config,
+            request_sequence,
         }
     }
 
@@ -110,6 +113,6 @@ impl ThoughtLoopRunner {
             Duration::from_millis(self.tick_ms),
             self.runtime_config,
         )
-        .spawn(provider, EmitterClient::new())
+        .spawn(provider, EmitterClient::with_request_sequence(self.request_sequence))
     }
 }

@@ -16,6 +16,7 @@ use crate::config::Config;
 use crate::persistence::file_store::FileStore;
 use crate::session::actor::SessionCommand;
 use crate::session::supervisor::SessionSupervisor;
+use crate::thought::protocol::SyncRequestSequence;
 use crate::thought::runtime_config::{DaemonDefaults, ThoughtConfig};
 use crate::types::SessionSummary;
 
@@ -29,6 +30,7 @@ pub struct AppState {
     pub supervisor: Arc<SessionSupervisor>,
     pub config: Arc<Config>,
     pub thought_config: Arc<RwLock<ThoughtConfig>>,
+    pub sync_request_sequence: Arc<SyncRequestSequence>,
     pub daemon_defaults: Option<DaemonDefaults>,
     pub file_store: Option<Arc<FileStore>>,
     pub published_selection: Arc<RwLock<PublishedSelectionState>>,

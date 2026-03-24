@@ -1,9 +1,9 @@
 use std::env;
 use std::io;
 use std::process::Stdio;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use serde_json::Value;
 use thiserror::Error;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
@@ -11,7 +11,7 @@ use tracing::{info, warn};
 
 use crate::thought::loop_runner::SessionInfo;
 use crate::thought::protocol::{
-    SyncRequest, SyncRequestConfig, SyncResponse, SyncUpdate, EMIT_PROTOCOL_V1,
+    build_sync_request, DaemonInboundMessage, SyncRequestSequence, SyncResponse, EMIT_PROTOCOL_V1,
 };
 use crate::thought::runtime_config::{DaemonDefaults, ThoughtConfig};
 
@@ -145,7 +145,7 @@ impl EmitterClientError {
 pub struct EmitterClient {
     bin: String,
     daemon: Option<DaemonProcess>,
-    next_request_id: u64,
+    request_sequence: Arc<SyncRequestSequence>,
 }
 
 impl Default for EmitterClient {
@@ -156,14 +156,25 @@ impl Default for EmitterClient {
 
 impl EmitterClient {
     pub fn new() -> Self {
-        Self::with_bin(resolve_clawgs_bin())
+        Self::with_request_sequence(Arc::new(SyncRequestSequence::new()))
+    }
+
+    pub fn with_request_sequence(request_sequence: Arc<SyncRequestSequence>) -> Self {
+        Self::with_bin_and_request_sequence(resolve_clawgs_bin(), request_sequence)
     }
 
     pub fn with_bin(bin: impl Into<String>) -> Self {
+        Self::with_bin_and_request_sequence(bin, Arc::new(SyncRequestSequence::new()))
+    }
+
+    pub fn with_bin_and_request_sequence(
+        bin: impl Into<String>,
+        request_sequence: Arc<SyncRequestSequence>,
+    ) -> Self {
         Self {
             bin: bin.into(),
             daemon: None,
-            next_request_id: 0,
+            request_sequence,
         }
     }
 
@@ -199,12 +210,8 @@ impl EmitterClient {
     ) -> Result<SyncResponse, EmitterClientError> {
         self.ensure_running().await?;
 
-        let request_id = self.next_request_id();
-        let request = SyncRequest::from_session_snapshots_with_config(
-            request_id,
-            sessions,
-            SyncRequestConfig::from(runtime_config),
-        );
+        let request_id = self.request_sequence.next();
+        let request = build_sync_request(request_id, runtime_config, sessions);
         let request_line = serde_json::to_string(&request)
             .map_err(|source| EmitterClientError::RequestSerialization { source })?;
         let daemon = self
@@ -285,13 +292,6 @@ impl EmitterClient {
     }
 }
 
-impl EmitterClient {
-    fn next_request_id(&mut self) -> u64 {
-        self.next_request_id = self.next_request_id.saturating_add(1);
-        self.next_request_id
-    }
-}
-
 impl Drop for EmitterClient {
     fn drop(&mut self) {
         if let Some(daemon) = self.daemon.as_mut() {
@@ -365,136 +365,59 @@ fn resolve_clawgs_bin() -> String {
         .unwrap_or_else(|| DEFAULT_CLAWGS_BIN.to_string())
 }
 
-fn parse_error_field(
-    object: &serde_json::Map<String, Value>,
-    field: &str,
-    fallback: &str,
-) -> String {
-    object
-        .get(field)
-        .and_then(Value::as_str)
-        .map(str::to_string)
-        .or_else(|| object.get(field).map(Value::to_string))
-        .unwrap_or_else(|| fallback.to_string())
-}
-
-fn extract_correlation_id(object: &serde_json::Map<String, Value>) -> Option<String> {
-    object
-        .get("id")
-        .and_then(value_as_correlation_id)
-        .or_else(|| object.get("request_id").and_then(value_as_correlation_id))
-}
-
-fn value_as_correlation_id(value: &Value) -> Option<String> {
-    match value {
-        Value::String(value) => {
-            let trimmed = value.trim();
-            if trimmed.is_empty() {
-                None
-            } else {
-                Some(trimmed.to_string())
-            }
-        }
-        Value::Number(value) => Some(value.to_string()),
-        _ => None,
-    }
-}
-
-fn message_type(object: &serde_json::Map<String, Value>) -> String {
-    object
-        .get("type")
-        .and_then(Value::as_str)
-        .map(str::to_string)
-        .unwrap_or_else(|| "<missing>".to_string())
-}
-
-fn parse_updates(
-    object: &serde_json::Map<String, Value>,
-    line: &str,
-) -> Result<Vec<SyncUpdate>, EmitterClientError> {
-    let updates_value = match object.get("updates") {
-        Some(Value::Null) | None => Value::Array(vec![]),
-        Some(updates) => updates.clone(),
-    };
-
-    serde_json::from_value(updates_value).map_err(|source| EmitterClientError::MalformedResponse {
-        line: line.to_string(),
-        source,
-    })
-}
-
 fn parse_hello_line(line: &str) -> Result<(), EmitterClientError> {
-    let value: Value =
+    let message: DaemonInboundMessage =
         serde_json::from_str(line).map_err(|source| EmitterClientError::MalformedHello {
             line: line.to_string(),
             source,
         })?;
 
-    let object = value
-        .as_object()
-        .ok_or_else(|| EmitterClientError::UnexpectedHelloType {
-            found: "<non_object>".to_string(),
+    match message {
+        DaemonInboundMessage::Hello { protocol } => {
+            if protocol != EMIT_PROTOCOL_V1 {
+                return Err(EmitterClientError::HelloProtocolMismatch {
+                    expected: EMIT_PROTOCOL_V1,
+                    actual: protocol,
+                });
+            }
+            Ok(())
+        }
+        other => Err(EmitterClientError::UnexpectedHelloType {
+            found: other.message_type().to_string(),
             line: line.to_string(),
-        })?;
-
-    let message_type = message_type(object);
-    if message_type != "hello" {
-        return Err(EmitterClientError::UnexpectedHelloType {
-            found: message_type,
-            line: line.to_string(),
-        });
+        }),
     }
-
-    let protocol = object
-        .get("protocol")
-        .and_then(Value::as_str)
-        .unwrap_or_default();
-    if protocol != EMIT_PROTOCOL_V1 {
-        return Err(EmitterClientError::HelloProtocolMismatch {
-            expected: EMIT_PROTOCOL_V1,
-            actual: protocol.to_string(),
-        });
-    }
-
-    Ok(())
 }
 
 fn parse_sync_response_line(line: &str) -> Result<SyncResponse, EmitterClientError> {
-    let value: Value =
+    let message: DaemonInboundMessage =
         serde_json::from_str(line).map_err(|source| EmitterClientError::MalformedResponse {
             line: line.to_string(),
             source,
         })?;
 
-    let object = value
-        .as_object()
-        .ok_or_else(|| EmitterClientError::UnexpectedResponseType {
-            expected: SYNC_RESULT_MESSAGE_TYPE,
-            found: "<non_object>".to_string(),
-            line: line.to_string(),
-        })?;
-
-    match object
-        .get("type")
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-    {
-        "sync_result" | "sync_response" | "sync" => Ok(SyncResponse {
-            request_id: extract_correlation_id(object).unwrap_or_default(),
-            stream_instance_id: object
-                .get("stream_instance_id")
-                .and_then(Value::as_str)
-                .map(ToString::to_string),
-            updates: parse_updates(object, line)?,
+    match message {
+        DaemonInboundMessage::SyncResponse {
+            request_id,
+            stream_instance_id,
+            updates,
+        } => Ok(SyncResponse::from(clawgs::emit::protocol::SyncResponse {
+            request_id,
+            stream_instance_id,
+            updates,
+        })),
+        DaemonInboundMessage::Error {
+            code,
+            message,
+            request_id,
+        } => Err(EmitterClientError::DaemonError {
+            code,
+            message,
+            request_id,
         }),
-        "error" => Err(EmitterClientError::DaemonError {
-            code: parse_error_field(object, "code", "unknown_error"),
-            message: parse_error_field(object, "message", "daemon returned error"),
-            request_id: extract_correlation_id(object),
-        }),
-        _ => Err(EmitterClientError::UnexpectedResponseType {
+        other => Err(EmitterClientError::UnexpectedResponseType {
             expected: SYNC_RESULT_MESSAGE_TYPE,
-            found: message_type(object),
+            found: other.message_type().to_string(),
             line: line.to_string(),
         }),
     }
@@ -506,6 +429,7 @@ mod tests {
     use crate::thought::loop_runner::SessionInfo;
     use crate::types::{BubblePrecedence, RestState, SessionState, ThoughtSource, ThoughtState};
     use chrono::Utc;
+    use serde_json::Value;
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
     use std::path::Path;

@@ -26,6 +26,7 @@ mermaid-rs-renderer = { version = "0.2.1", default-features = false }
 resvg = "0.47.0"
 usvg = "0.47.0"
 walkdir = "2"
+clawgs = { path = "../opensource/skills/clawgs" }
 
 [dev-dependencies]
 tempfile = "3"
