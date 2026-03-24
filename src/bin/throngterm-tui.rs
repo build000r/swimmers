@@ -68,7 +68,7 @@ const THOUGHT_MERMAID_LABEL: &str = "[mmd]";
 const MERMAID_BACK_LABEL: &str = "[back to bowl]";
 const MERMAID_VIEW_MIN_WIDTH: u16 = 16;
 const MERMAID_VIEW_MIN_HEIGHT: u16 = 8;
-const MERMAID_ZOOM_STEP: f32 = 1.25;
+const MERMAID_ZOOM_STEP: f32 = 1.2;
 const MERMAID_MIN_ZOOM: f32 = 0.5;
 const MERMAID_MAX_ZOOM: f32 = 8.0;
 
@@ -1482,12 +1482,89 @@ enum MermaidTextAnchor {
     Center,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum MermaidDetailLevel {
+    L1,
+    L2,
+    L3,
+}
+
+impl MermaidDetailLevel {
+    fn label(self) -> &'static str {
+        match self {
+            MermaidDetailLevel::L1 => "L1",
+            MermaidDetailLevel::L2 => "L2",
+            MermaidDetailLevel::L3 => "L3",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MermaidSemanticKind {
+    SubgraphTitle,
+    NodeTitle,
+    EdgeLabel,
+    ClassMember,
+    ErAttributeName,
+    ErAttributeType,
+}
+
+impl MermaidSemanticKind {
+    fn min_detail_level(self) -> MermaidDetailLevel {
+        match self {
+            MermaidSemanticKind::SubgraphTitle | MermaidSemanticKind::NodeTitle => {
+                MermaidDetailLevel::L1
+            }
+            MermaidSemanticKind::EdgeLabel
+            | MermaidSemanticKind::ClassMember
+            | MermaidSemanticKind::ErAttributeName => MermaidDetailLevel::L2,
+            MermaidSemanticKind::ErAttributeType => MermaidDetailLevel::L3,
+        }
+    }
+
+    fn priority(self) -> u8 {
+        match self {
+            MermaidSemanticKind::SubgraphTitle => 0,
+            MermaidSemanticKind::NodeTitle => 1,
+            MermaidSemanticKind::ErAttributeName => 2,
+            MermaidSemanticKind::ClassMember => 3,
+            MermaidSemanticKind::EdgeLabel => 4,
+            MermaidSemanticKind::ErAttributeType => 5,
+        }
+    }
+
+    fn is_visible_for_owner(self, owner_cols: f32, owner_rows: f32) -> bool {
+        match self {
+            MermaidSemanticKind::SubgraphTitle
+            | MermaidSemanticKind::NodeTitle
+            | MermaidSemanticKind::EdgeLabel => true,
+            MermaidSemanticKind::ClassMember => owner_cols >= 10.0 && owner_rows >= 2.5,
+            MermaidSemanticKind::ErAttributeName => owner_cols >= 8.0 && owner_rows >= 2.5,
+            MermaidSemanticKind::ErAttributeType => owner_cols >= 12.0 && owner_rows >= 3.0,
+        }
+    }
+
+    fn row_nudge_budget(self) -> i32 {
+        match self {
+            MermaidSemanticKind::ClassMember
+            | MermaidSemanticKind::ErAttributeName
+            | MermaidSemanticKind::ErAttributeType => 2,
+            MermaidSemanticKind::SubgraphTitle
+            | MermaidSemanticKind::NodeTitle
+            | MermaidSemanticKind::EdgeLabel => 0,
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 struct MermaidSemanticLine {
     text: String,
     diagram_x: f32,
     diagram_y: f32,
     anchor: MermaidTextAnchor,
+    kind: MermaidSemanticKind,
+    owner_width: f32,
+    owner_height: f32,
 }
 
 #[derive(Clone, Debug)]
@@ -4177,6 +4254,9 @@ fn push_mermaid_indexed_semantic_lines(
     start_y: f32,
     line_height: f32,
     anchor: MermaidTextAnchor,
+    kind: MermaidSemanticKind,
+    owner_width: f32,
+    owner_height: f32,
 ) {
     for (idx, line) in lines {
         let text = line.trim();
@@ -4188,6 +4268,9 @@ fn push_mermaid_indexed_semantic_lines(
             diagram_x,
             diagram_y: start_y + *idx as f32 * line_height,
             anchor,
+            kind,
+            owner_width,
+            owner_height,
         });
     }
 }
@@ -4200,6 +4283,9 @@ fn push_mermaid_text_block_semantic_lines(
     font_size: f32,
     line_height: f32,
     anchor: MermaidTextAnchor,
+    kind: MermaidSemanticKind,
+    owner_width: f32,
+    owner_height: f32,
 ) {
     if label.lines.is_empty() {
         return;
@@ -4219,6 +4305,9 @@ fn push_mermaid_text_block_semantic_lines(
         start_y,
         line_height,
         anchor,
+        kind,
+        owner_width,
+        owner_height,
     );
 }
 
@@ -4253,6 +4342,9 @@ fn extend_mermaid_class_semantic_lines(
             start_y,
             class_line_height,
             MermaidTextAnchor::Center,
+            MermaidSemanticKind::NodeTitle,
+            node.width,
+            node.height,
         );
         return;
     };
@@ -4287,6 +4379,9 @@ fn extend_mermaid_class_semantic_lines(
         start_y,
         class_line_height,
         MermaidTextAnchor::Center,
+        MermaidSemanticKind::NodeTitle,
+        node.width,
+        node.height,
     );
     push_mermaid_indexed_semantic_lines(
         target,
@@ -4295,6 +4390,9 @@ fn extend_mermaid_class_semantic_lines(
         start_y,
         class_line_height,
         MermaidTextAnchor::Start,
+        MermaidSemanticKind::ClassMember,
+        node.width,
+        node.height,
     );
 }
 
@@ -4337,6 +4435,9 @@ fn extend_mermaid_er_semantic_lines(
         start_y,
         class_line_height,
         MermaidTextAnchor::Center,
+        MermaidSemanticKind::NodeTitle,
+        node.width,
+        node.height,
     );
 
     let attr_lines: Vec<(usize, &str)> = node
@@ -4363,11 +4464,10 @@ fn extend_mermaid_er_semantic_lines(
         let Some(data_type) = parts.next() else {
             continue;
         };
-        let name = trimmed[data_type.len()..].trim();
-        if name.is_empty() {
+        let Some(name) = parts.next() else {
             use_columns = false;
             break;
-        }
+        };
         max_type_chars = max_type_chars.max(data_type.chars().count());
         parsed_attrs.push((*idx, data_type.to_string(), name.to_string()));
     }
@@ -4383,12 +4483,18 @@ fn extend_mermaid_er_semantic_lines(
                 diagram_x: left_x,
                 diagram_y,
                 anchor: MermaidTextAnchor::Start,
+                kind: MermaidSemanticKind::ErAttributeType,
+                owner_width: node.width,
+                owner_height: node.height,
             });
             target.push(MermaidSemanticLine {
                 text: name,
                 diagram_x: name_x,
                 diagram_y,
                 anchor: MermaidTextAnchor::Start,
+                kind: MermaidSemanticKind::ErAttributeName,
+                owner_width: node.width,
+                owner_height: node.height,
             });
         }
         return;
@@ -4401,6 +4507,9 @@ fn extend_mermaid_er_semantic_lines(
         start_y,
         class_line_height,
         MermaidTextAnchor::Start,
+        MermaidSemanticKind::ErAttributeName,
+        node.width,
+        node.height,
     );
 }
 
@@ -4441,6 +4550,9 @@ fn build_mermaid_semantic_lines(
                 state_font_size,
                 state_line_height,
                 MermaidTextAnchor::Start,
+                MermaidSemanticKind::SubgraphTitle,
+                subgraph.width,
+                subgraph.height,
             );
         } else {
             let label_x = subgraph.x + subgraph.width / 2.0;
@@ -4453,6 +4565,9 @@ fn build_mermaid_semantic_lines(
                 theme_font_size,
                 base_line_height,
                 MermaidTextAnchor::Center,
+                MermaidSemanticKind::SubgraphTitle,
+                subgraph.width,
+                subgraph.height,
             );
         }
     }
@@ -4473,6 +4588,9 @@ fn build_mermaid_semantic_lines(
                     font_size,
                     line_height,
                     MermaidTextAnchor::Center,
+                    MermaidSemanticKind::EdgeLabel,
+                    0.0,
+                    0.0,
                 );
             }
         }
@@ -4491,6 +4609,9 @@ fn build_mermaid_semantic_lines(
                     font_size,
                     line_height,
                     MermaidTextAnchor::Center,
+                    MermaidSemanticKind::EdgeLabel,
+                    0.0,
+                    0.0,
                 );
             }
         }
@@ -4509,6 +4630,9 @@ fn build_mermaid_semantic_lines(
                     font_size,
                     line_height,
                     MermaidTextAnchor::Center,
+                    MermaidSemanticKind::EdgeLabel,
+                    0.0,
+                    0.0,
                 );
             }
         }
@@ -4573,6 +4697,9 @@ fn build_mermaid_semantic_lines(
             font_size,
             line_height,
             MermaidTextAnchor::Center,
+            MermaidSemanticKind::NodeTitle,
+            node.width,
+            node.height,
         );
     }
 
@@ -4584,6 +4711,22 @@ struct MermaidViewportTransform {
     scale: f32,
     tx: f32,
     ty: f32,
+}
+
+fn mermaid_detail_level_for_view(
+    viewer: &MermaidViewerState,
+    content_rect: Rect,
+) -> MermaidDetailLevel {
+    let _ = content_rect;
+    let effective_zoom = viewer.zoom.clamp(MERMAID_MIN_ZOOM, MERMAID_MAX_ZOOM);
+
+    if effective_zoom >= 2.4 {
+        MermaidDetailLevel::L3
+    } else if effective_zoom >= 1.4 {
+        MermaidDetailLevel::L2
+    } else {
+        MermaidDetailLevel::L1
+    }
 }
 
 fn mermaid_viewport_transform(
@@ -4620,30 +4763,54 @@ fn mermaid_viewport_transform(
     ))
 }
 
-fn clip_mermaid_overlay_text(text: &str, skip: usize, max_chars: usize) -> String {
+fn clip_mermaid_overlay_text(text: &str, _skip: usize, max_chars: usize) -> String {
     if max_chars == 0 {
         return String::new();
     }
-    text.chars().skip(skip).take(max_chars).collect()
+    text.chars().take(max_chars).collect()
 }
 
 fn project_mermaid_semantic_lines(
     lines: &[MermaidSemanticLine],
     transform: MermaidViewportTransform,
     content_rect: Rect,
+    detail_level: MermaidDetailLevel,
 ) -> Vec<MermaidProjectedLine> {
-    let mut projected = Vec::new();
+    #[derive(Clone)]
+    struct MermaidProjectedCandidate {
+        priority: u8,
+        kind: MermaidSemanticKind,
+        x: u16,
+        y: u16,
+        text: String,
+    }
+
+    let mut candidates = Vec::new();
     let left = content_rect.x as i32;
     let right = content_rect.right() as i32;
     let top = content_rect.y as i32;
     let bottom = content_rect.bottom() as i32;
 
     for line in lines {
+        if line.kind.min_detail_level() > detail_level {
+            continue;
+        }
+
+        let owner_cols = (line.owner_width * transform.scale / 2.0).max(0.0);
+        let owner_rows = (line.owner_height * transform.scale / 4.0).max(0.0);
+        if !line.kind.is_visible_for_owner(owner_cols, owner_rows) {
+            continue;
+        }
+
         let projected_x = line.diagram_x * transform.scale + transform.tx;
         let projected_y = line.diagram_y * transform.scale + transform.ty;
-        let screen_y = top + (projected_y / 4.0).floor() as i32;
+        let mut screen_y = top + (projected_y / 4.0).floor() as i32;
         if screen_y < top || screen_y >= bottom {
-            continue;
+            if line.kind.row_nudge_budget() > 0 {
+                screen_y = screen_y.clamp(top, bottom.saturating_sub(1));
+            } else {
+                continue;
+            }
         }
 
         let anchor_x = left + (projected_x / 2.0).floor() as i32;
@@ -4673,13 +4840,67 @@ fn project_mermaid_semantic_lines(
             continue;
         }
 
-        projected.push(MermaidProjectedLine {
+        candidates.push(MermaidProjectedCandidate {
+            priority: line.kind.priority(),
+            kind: line.kind,
             x: screen_x as u16,
             y: screen_y as u16,
             text: clipped,
         });
     }
 
+    candidates.sort_by_key(|line| (line.priority, line.y, line.x));
+
+    let mut occupied_rows: HashMap<u16, Vec<(u16, u16)>> = HashMap::new();
+    let mut projected = Vec::new();
+    for candidate in candidates {
+        let start = candidate.x;
+        let end = candidate
+            .x
+            .saturating_add(display_width(&candidate.text).max(1));
+        let budget = candidate.kind.row_nudge_budget();
+        let mut target_y = None;
+        let mut row_candidates = vec![candidate.y as i32];
+        for offset in 1..=budget {
+            row_candidates.push(candidate.y as i32 + offset);
+            row_candidates.push(candidate.y as i32 - offset);
+        }
+
+        for row in row_candidates {
+            if row < top || row >= bottom {
+                continue;
+            }
+            let row = row as u16;
+            let overlaps = occupied_rows
+                .get(&row)
+                .map(|ranges| {
+                    ranges
+                        .iter()
+                        .any(|(left, right)| start < *right && end > *left)
+                })
+                .unwrap_or(false);
+            if !overlaps {
+                target_y = Some(row);
+                break;
+            }
+        }
+
+        let Some(target_y) = target_y else {
+            continue;
+        };
+
+        occupied_rows
+            .entry(target_y)
+            .or_default()
+            .push((start, end));
+        projected.push(MermaidProjectedLine {
+            x: candidate.x,
+            y: target_y,
+            text: candidate.text,
+        });
+    }
+
+    projected.sort_by_key(|line| (line.y, line.x));
     projected
 }
 
@@ -4786,6 +5007,7 @@ fn ensure_mermaid_prepared_render(
 fn render_mermaid_lines(viewer: &mut MermaidViewerState, content_rect: Rect) -> Result<(), String> {
     let (sample_width, sample_height, transform) =
         mermaid_viewport_transform(viewer, content_rect)?;
+    let detail_level = mermaid_detail_level_for_view(viewer, content_rect);
 
     let mut pixmap = Pixmap::new(sample_width, sample_height)
         .ok_or_else(|| "failed to allocate Mermaid viewport".to_string())?;
@@ -4809,8 +5031,12 @@ fn render_mermaid_lines(viewer: &mut MermaidViewerState, content_rect: Rect) -> 
     );
 
     viewer.cached_lines = pixmap_to_braille_lines(&pixmap, content_rect);
-    viewer.cached_semantic_lines =
-        project_mermaid_semantic_lines(&prepared.semantic_lines, transform, content_rect);
+    viewer.cached_semantic_lines = project_mermaid_semantic_lines(
+        &prepared.semantic_lines,
+        transform,
+        content_rect,
+        detail_level,
+    );
     viewer.cached_rect = Some(content_rect);
     viewer.cached_zoom = viewer.zoom;
     viewer.cached_center_x = viewer.center_x;
@@ -4845,15 +5071,29 @@ fn render_mermaid_viewer(renderer: &mut Renderer, field: Rect, viewer: &mut Merm
     });
     renderer.draw_text(field.x, field.y, MERMAID_BACK_LABEL, Color::Cyan);
 
+    let content_rect = mermaid_content_rect(field);
+    viewer.content_rect = Some(content_rect);
+    let detail_level = mermaid_detail_level_for_view(viewer, content_rect);
     let status_x = field
         .x
         .saturating_add(display_width(MERMAID_BACK_LABEL) + 1);
     let status_width = field.right().saturating_sub(status_x) as usize;
+    let detail_label = format!("detail {}", detail_level.label());
+    let fixed_width = usize::from(display_width(&viewer.tmux_name))
+        + usize::from(display_width(" | "))
+        + usize::from(display_width(&detail_label))
+        + usize::from(display_width(" | "))
+        + usize::from(display_width(" | zoom 100% | "))
+        + usize::from(display_width(" | o open"));
     let status = format!(
-        "{} | {} | zoom {:>3.0}% | o open",
+        "{} | {} | {} | zoom {:>3.0}% | o open",
         viewer.tmux_name,
-        shorten_path(viewer.display_path(), status_width.saturating_sub(23)),
-        viewer.zoom * 100.0
+        detail_label,
+        shorten_path(
+            viewer.display_path(),
+            status_width.saturating_sub(fixed_width)
+        ),
+        viewer.zoom * 100.0,
     );
     renderer.draw_text(
         status_x,
@@ -4862,8 +5102,6 @@ fn render_mermaid_viewer(renderer: &mut Renderer, field: Rect, viewer: &mut Merm
         Color::DarkGrey,
     );
 
-    let content_rect = mermaid_content_rect(field);
-    viewer.content_rect = Some(content_rect);
     if content_rect.width < MERMAID_VIEW_MIN_WIDTH || content_rect.height < MERMAID_VIEW_MIN_HEIGHT
     {
         render_wrapped_lines(
@@ -6121,6 +6359,14 @@ mod tests {
             .iter()
             .find(|line| line.text == needle)
             .map(|line| (line.x, line.y))
+    }
+
+    fn cached_semantic_texts(viewer: &MermaidViewerState) -> Vec<String> {
+        viewer
+            .cached_semantic_lines
+            .iter()
+            .map(|line| line.text.clone())
+            .collect()
     }
 
     fn visible_entity_ids(app: &App<MockApi>) -> Vec<String> {
@@ -9198,24 +9444,31 @@ mod tests {
         let beta = find_text_position(&renderer, "Beta Node").expect("Beta Node overlay");
         assert_eq!(cell_at(&renderer, alpha.0, alpha.1).ch, 'A');
         assert_eq!(cell_at(&renderer, beta.0, beta.1).ch, 'B');
+        assert!(row_text(&renderer, layout.overview_field.y).contains("detail L1"));
     }
 
     #[test]
-    fn mermaid_er_labels_render_as_terminal_text() {
+    fn mermaid_er_overview_hides_attribute_detail_until_zoomed() {
         let source = "erDiagram\nUSER {\n  uuid id PK\n  string email\n}\nORDER {\n  uuid id PK\n  uuid user_id FK\n}\nUSER ||--o{ ORDER : places\n";
         let (mut app, mut renderer, layout) = open_mermaid_test_viewer(source, 120, 32);
 
         app.render(&mut renderer, layout);
 
-        assert!(find_text_position(&renderer, "USER").is_some());
-        assert!(find_text_position(&renderer, "ORDER").is_some());
-        assert!(find_text_position(&renderer, "email").is_some());
-        assert!(find_text_position(&renderer, "user_id").is_some());
-        assert!(find_text_position(&renderer, "places").is_some());
+        let semantic_texts = match &app.fish_bowl_mode {
+            FishBowlMode::Mermaid(viewer) => cached_semantic_texts(viewer),
+            FishBowlMode::Aquarium => panic!("expected Mermaid viewer mode"),
+        };
+        assert!(semantic_texts.contains(&"USER".to_string()));
+        assert!(semantic_texts.contains(&"ORDER".to_string()));
+        assert!(!semantic_texts.contains(&"email".to_string()));
+        assert!(!semantic_texts.contains(&"user_id".to_string()));
+        assert!(!semantic_texts.contains(&"uuid".to_string()));
+        assert!(!semantic_texts.contains(&"places".to_string()));
+        assert!(row_text(&renderer, layout.overview_field.y).contains("detail L1"));
     }
 
     #[test]
-    fn mermaid_subgraph_and_edge_labels_render_as_terminal_text() {
+    fn mermaid_flowchart_overview_hides_edge_labels_until_zoomed() {
         let source =
             "graph TD\nsubgraph Group One\nA[Producer]\nB[Consumer]\nend\nA -- ships data --> B\n";
         let (mut app, mut renderer, layout) = open_mermaid_test_viewer(source, 120, 32);
@@ -9223,7 +9476,182 @@ mod tests {
         app.render(&mut renderer, layout);
 
         assert!(find_text_position(&renderer, "Group One").is_some());
-        assert!(find_text_position(&renderer, "ships data").is_some());
+        assert!(find_text_position(&renderer, "Producer").is_some());
+        assert!(find_text_position(&renderer, "Consumer").is_some());
+        assert!(find_text_position(&renderer, "ships data").is_none());
+        assert!(row_text(&renderer, layout.overview_field.y).contains("detail L1"));
+    }
+
+    #[test]
+    fn mermaid_zoom_reveals_edge_labels_at_detail_l2() {
+        let source =
+            "graph TD\nsubgraph Group One\nA[Producer]\nB[Consumer]\nend\nA -- ships data --> B\n";
+        let (mut app, mut renderer, layout) = open_mermaid_test_viewer(source, 120, 32);
+
+        assert!(handle_key_event(
+            &mut app,
+            layout,
+            KeyEvent::new(KeyCode::Char('+'), KeyModifiers::NONE),
+        ));
+        assert!(handle_key_event(
+            &mut app,
+            layout,
+            KeyEvent::new(KeyCode::Char('+'), KeyModifiers::NONE),
+        ));
+        app.render(&mut renderer, layout);
+
+        let semantic_texts = match &app.fish_bowl_mode {
+            FishBowlMode::Mermaid(viewer) => cached_semantic_texts(viewer),
+            FishBowlMode::Aquarium => panic!("expected Mermaid viewer mode"),
+        };
+        assert!(
+            find_text_position(&renderer, "ships data").is_some(),
+            "status row: {}; semantic_texts: {:?}",
+            row_text(&renderer, layout.overview_field.y),
+            semantic_texts
+        );
+        assert!(
+            row_text(&renderer, layout.overview_field.y).contains("detail L2"),
+            "status row: {}",
+            row_text(&renderer, layout.overview_field.y)
+        );
+    }
+
+    #[test]
+    fn mermaid_er_zoom_reveals_attribute_names_before_types() {
+        let source = "erDiagram\nUSER {\n  uuid id PK\n  string email\n}\n";
+        let (mut app, mut renderer, layout) = open_mermaid_test_viewer(source, 120, 32);
+
+        for _ in 0..3 {
+            assert!(handle_key_event(
+                &mut app,
+                layout,
+                KeyEvent::new(KeyCode::Char('+'), KeyModifiers::NONE),
+            ));
+        }
+        app.render(&mut renderer, layout);
+
+        let semantic_texts = match &app.fish_bowl_mode {
+            FishBowlMode::Mermaid(viewer) => cached_semantic_texts(viewer),
+            FishBowlMode::Aquarium => panic!("expected Mermaid viewer mode"),
+        };
+        assert!(semantic_texts.contains(&"USER".to_string()));
+        assert!(
+            semantic_texts.contains(&"id".to_string()),
+            "{semantic_texts:?}"
+        );
+        assert!(
+            semantic_texts.contains(&"email".to_string()),
+            "{semantic_texts:?}"
+        );
+        assert!(
+            !semantic_texts.contains(&"uuid".to_string()),
+            "{semantic_texts:?}"
+        );
+        assert!(
+            !semantic_texts.contains(&"string".to_string()),
+            "{semantic_texts:?}"
+        );
+        assert!(
+            row_text(&renderer, layout.overview_field.y).contains("detail L2"),
+            "status row: {}",
+            row_text(&renderer, layout.overview_field.y)
+        );
+    }
+
+    #[test]
+    fn mermaid_er_zoom_reveals_attribute_types_at_detail_l3() {
+        let source = "erDiagram\nUSER {\n  uuid id PK\n  string email\n}\n";
+        let (mut app, mut renderer, layout) = open_mermaid_test_viewer(source, 120, 32);
+
+        for _ in 0..5 {
+            assert!(handle_key_event(
+                &mut app,
+                layout,
+                KeyEvent::new(KeyCode::Char('+'), KeyModifiers::NONE),
+            ));
+        }
+        app.render(&mut renderer, layout);
+
+        let semantic_texts = match &app.fish_bowl_mode {
+            FishBowlMode::Mermaid(viewer) => cached_semantic_texts(viewer),
+            FishBowlMode::Aquarium => panic!("expected Mermaid viewer mode"),
+        };
+        assert!(
+            semantic_texts.contains(&"uuid".to_string()),
+            "{semantic_texts:?}"
+        );
+        assert!(
+            semantic_texts.contains(&"string".to_string()),
+            "{semantic_texts:?}"
+        );
+        assert!(
+            row_text(&renderer, layout.overview_field.y).contains("detail L3"),
+            "status row: {}",
+            row_text(&renderer, layout.overview_field.y)
+        );
+    }
+
+    #[test]
+    fn mermaid_reset_fit_hides_subordinate_detail() {
+        let source = "erDiagram\nUSER {\n  uuid id PK\n  string email\n}\n";
+        let (mut app, mut renderer, layout) = open_mermaid_test_viewer(source, 120, 32);
+
+        for _ in 0..5 {
+            assert!(handle_key_event(
+                &mut app,
+                layout,
+                KeyEvent::new(KeyCode::Char('+'), KeyModifiers::NONE),
+            ));
+        }
+        app.render(&mut renderer, layout);
+        assert!(
+            row_text(&renderer, layout.overview_field.y).contains("detail L3"),
+            "status row: {}",
+            row_text(&renderer, layout.overview_field.y)
+        );
+
+        assert!(handle_key_event(
+            &mut app,
+            layout,
+            KeyEvent::new(KeyCode::Char('0'), KeyModifiers::NONE),
+        ));
+        app.render(&mut renderer, layout);
+
+        let semantic_texts = match &app.fish_bowl_mode {
+            FishBowlMode::Mermaid(viewer) => cached_semantic_texts(viewer),
+            FishBowlMode::Aquarium => panic!("expected Mermaid viewer mode"),
+        };
+        assert!(semantic_texts.contains(&"USER".to_string()));
+        assert!(!semantic_texts.contains(&"id".to_string()));
+        assert!(!semantic_texts.contains(&"email".to_string()));
+        assert!(!semantic_texts.contains(&"uuid".to_string()));
+        assert!(!semantic_texts.contains(&"string".to_string()));
+        assert!(row_text(&renderer, layout.overview_field.y).contains("detail L1"));
+    }
+
+    #[test]
+    fn mermaid_too_small_view_keeps_existing_guard() {
+        let (mut app, mut renderer, _layout) =
+            open_mermaid_test_viewer("graph TD\nA[Alpha Node] --> B[Beta Node]\n", 120, 32);
+        let small_field = Rect {
+            x: 0,
+            y: 0,
+            width: 15,
+            height: 7,
+        };
+        let FishBowlMode::Mermaid(viewer) = &mut app.fish_bowl_mode else {
+            panic!("expected Mermaid viewer mode");
+        };
+        render_mermaid_viewer(&mut renderer, small_field, viewer);
+
+        assert!(find_text_position(&renderer, "Mermaid view").is_some());
+        assert!(find_text_position(&renderer, "too small").is_some());
+        let semantic_count = match &app.fish_bowl_mode {
+            FishBowlMode::Mermaid(viewer) => viewer.cached_semantic_lines.len(),
+            FishBowlMode::Aquarium => panic!("expected Mermaid viewer mode"),
+        };
+        assert_eq!(semantic_count, 0);
     }
 
     #[test]
@@ -9294,6 +9722,9 @@ mod tests {
                 diagram_x: 0.0,
                 diagram_y: 4.0,
                 anchor: MermaidTextAnchor::Start,
+                kind: MermaidSemanticKind::NodeTitle,
+                owner_width: 20.0,
+                owner_height: 8.0,
             }],
             MermaidViewportTransform {
                 scale: 1.0,
@@ -9301,12 +9732,13 @@ mod tests {
                 ty: 0.0,
             },
             content_rect,
+            MermaidDetailLevel::L1,
         );
 
         assert_eq!(projected.len(), 1);
         assert_eq!(projected[0].x, content_rect.x);
         assert_eq!(projected[0].y, content_rect.y + 1);
-        assert_eq!(projected[0].text, "pha Node");
+        assert_eq!(projected[0].text, "Alpha Node");
     }
 
     #[test]
@@ -9317,7 +9749,7 @@ mod tests {
 
         app.render(&mut renderer, layout);
         let group_before = find_text_position(&renderer, "Group One").expect("Group One before");
-        let ships_before = find_text_position(&renderer, "ships data").expect("ships data before");
+        let producer_before = find_text_position(&renderer, "Producer").expect("Producer before");
 
         let resized_layout = test_layout(160, 48);
         let mut resized_renderer = test_renderer(160, 48);
@@ -9325,10 +9757,10 @@ mod tests {
 
         let group_after =
             find_text_position(&resized_renderer, "Group One").expect("Group One after");
-        let ships_after =
-            find_text_position(&resized_renderer, "ships data").expect("ships data after");
+        let producer_after =
+            find_text_position(&resized_renderer, "Producer").expect("Producer after");
         assert_ne!(group_after, group_before);
-        assert_ne!(ships_after, ships_before);
+        assert_ne!(producer_after, producer_before);
     }
 
     #[test]
