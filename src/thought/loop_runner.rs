@@ -38,6 +38,8 @@ pub struct SessionInfo {
     pub thought_source: ThoughtSource,
     /// Current daemon-authored rest state.
     pub rest_state: RestState,
+    /// Passive commit reminder state emitted by clawgs.
+    pub commit_candidate: bool,
     /// Last seen objective fingerprint used to avoid noisy rewrites.
     pub objective_fingerprint: Option<String>,
     /// Time of last persisted thought update.
@@ -66,6 +68,7 @@ pub trait SessionProvider: Send + Sync {
         _thought_state: ThoughtState,
         _thought_source: ThoughtSource,
         _rest_state: RestState,
+        _commit_candidate: bool,
         _updated_at: DateTime<Utc>,
         _delivery: ThoughtDeliveryState,
         _objective_fingerprint: Option<String>,

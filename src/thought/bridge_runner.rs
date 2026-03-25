@@ -215,6 +215,7 @@ fn apply_update<P: SessionProvider>(
         update.thought_state,
         update.thought_source,
         update.rest_state,
+        update.commit_candidate,
         update.at,
         persisted_delivery,
         update.objective_fingerprint.clone(),
@@ -227,6 +228,7 @@ fn apply_update<P: SessionProvider>(
         thought_state: update.thought_state,
         thought_source: update.thought_source,
         rest_state: update.rest_state,
+        commit_candidate: update.commit_candidate,
         objective_changed: update.objective_changed,
         bubble_precedence: update.bubble_precedence,
         at: update.at,
@@ -266,6 +268,7 @@ mod tests {
         thought_state: ThoughtState,
         thought_source: ThoughtSource,
         rest_state: RestState,
+        commit_candidate: bool,
         updated_at: DateTime<Utc>,
         delivery: ThoughtDeliveryState,
         objective_fingerprint: Option<String>,
@@ -292,6 +295,7 @@ mod tests {
             thought_state: ThoughtState,
             thought_source: ThoughtSource,
             rest_state: RestState,
+            commit_candidate: bool,
             updated_at: DateTime<Utc>,
             delivery: ThoughtDeliveryState,
             objective_fingerprint: Option<String>,
@@ -307,6 +311,7 @@ mod tests {
                     thought_state,
                     thought_source,
                     rest_state,
+                    commit_candidate,
                     updated_at,
                     delivery: delivery.clone(),
                     objective_fingerprint,
@@ -344,6 +349,7 @@ mod tests {
                 thought_state: ThoughtState::Active,
                 thought_source: ThoughtSource::Llm,
                 rest_state: RestState::Active,
+                commit_candidate: true,
                 objective_changed: true,
                 bubble_precedence: BubblePrecedence::ThoughtFirst,
                 at: now,
@@ -369,6 +375,7 @@ mod tests {
         assert_eq!(persisted[0].thought_state, ThoughtState::Active);
         assert_eq!(persisted[0].thought_source, ThoughtSource::Llm);
         assert_eq!(persisted[0].rest_state, RestState::Active);
+        assert!(persisted[0].commit_candidate);
         assert_eq!(persisted[0].updated_at, now);
         assert_eq!(
             persisted[0].delivery.stream_instance_id.as_deref(),
@@ -393,6 +400,7 @@ mod tests {
         assert_eq!(payload.thought_state, ThoughtState::Active);
         assert_eq!(payload.thought_source, ThoughtSource::Llm);
         assert_eq!(payload.rest_state, RestState::Active);
+        assert!(payload.commit_candidate);
         assert!(payload.objective_changed);
         assert_eq!(payload.bubble_precedence, BubblePrecedence::ThoughtFirst);
         assert_eq!(payload.at, now);
@@ -450,6 +458,7 @@ mod tests {
                 thought_state: ThoughtState::Holding,
                 thought_source: ThoughtSource::CarryForward,
                 rest_state: RestState::Drowsy,
+                commit_candidate: false,
                 objective_fingerprint: None,
                 thought_updated_at: None,
                 token_count: 0,
@@ -500,6 +509,7 @@ mod tests {
                     thought_state: ThoughtState::Holding,
                     thought_source: ThoughtSource::Llm,
                     rest_state: RestState::Drowsy,
+                    commit_candidate: false,
                     objective_changed: false,
                     bubble_precedence: BubblePrecedence::ThoughtFirst,
                     at: DateTime::parse_from_rfc3339("2026-03-08T14:00:07Z")
@@ -559,6 +569,7 @@ mod tests {
                     thought_state: ThoughtState::Holding,
                     thought_source: ThoughtSource::Llm,
                     rest_state: RestState::Drowsy,
+                    commit_candidate: false,
                     objective_changed: false,
                     bubble_precedence: BubblePrecedence::ThoughtFirst,
                     at: Utc::now(),
@@ -619,6 +630,7 @@ mod tests {
                     thought_state: ThoughtState::Active,
                     thought_source: ThoughtSource::Llm,
                     rest_state: RestState::Active,
+                    commit_candidate: false,
                     objective_changed: true,
                     bubble_precedence: BubblePrecedence::ThoughtFirst,
                     at: now,
@@ -657,6 +669,7 @@ mod tests {
                 thought_state: ThoughtState::Holding,
                 thought_source: ThoughtSource::Llm,
                 rest_state: RestState::Drowsy,
+                commit_candidate: false,
                 objective_fingerprint: None,
                 thought_updated_at: Some(now),
                 token_count: 12,
@@ -687,6 +700,7 @@ mod tests {
                     thought_state: ThoughtState::Sleeping,
                     thought_source: ThoughtSource::StaticSleeping,
                     rest_state: RestState::Sleeping,
+                    commit_candidate: true,
                     objective_changed: false,
                     bubble_precedence: BubblePrecedence::ThoughtFirst,
                     at: now,
@@ -704,6 +718,7 @@ mod tests {
         assert_eq!(persisted[0].thought_state, ThoughtState::Sleeping);
         assert_eq!(persisted[0].thought_source, ThoughtSource::CarryForward);
         assert_eq!(persisted[0].rest_state, RestState::Sleeping);
+        assert!(persisted[0].commit_candidate);
         drop(persisted);
 
         let event = event_rx.recv().await.expect("event should be broadcast");
@@ -713,6 +728,7 @@ mod tests {
         assert_eq!(payload.thought_state, ThoughtState::Sleeping);
         assert_eq!(payload.thought_source, ThoughtSource::CarryForward);
         assert_eq!(payload.rest_state, RestState::Sleeping);
+        assert!(payload.commit_candidate);
     }
 
     #[test]
@@ -750,6 +766,7 @@ mod tests {
                     thought_state: ThoughtState::Holding,
                     thought_source: ThoughtSource::Llm,
                     rest_state: RestState::Drowsy,
+                    commit_candidate: false,
                     objective_changed: false,
                     bubble_precedence: BubblePrecedence::ThoughtFirst,
                     at: Utc::now(),
@@ -817,6 +834,7 @@ mod tests {
                     thought_state: ThoughtState::Holding,
                     thought_source: ThoughtSource::Llm,
                     rest_state: RestState::Drowsy,
+                    commit_candidate: false,
                     objective_changed: false,
                     bubble_precedence: BubblePrecedence::ThoughtFirst,
                     at: Utc::now(),

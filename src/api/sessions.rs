@@ -648,6 +648,7 @@ mod tests {
             thought_source: ThoughtSource::CarryForward,
             thought_updated_at: None,
             rest_state: crate::types::fallback_rest_state(state, ThoughtState::Holding),
+            commit_candidate: false,
             last_skill: None,
             is_stale: false,
             attached_clients: 0,

@@ -152,9 +152,7 @@ impl TuiApi for MockApi {
         })
     }
 
-    fn fetch_native_status(
-        &self,
-    ) -> BoxFuture<'_, Result<NativeDesktopStatusResponse, String>> {
+    fn fetch_native_status(&self) -> BoxFuture<'_, Result<NativeDesktopStatusResponse, String>> {
         let state = self.state.clone();
         Box::pin(async move {
             state
@@ -447,8 +445,7 @@ async fn spawn_delayed_api_server(
 
 #[tokio::test]
 async fn api_client_open_session_allows_slower_native_open_responses() {
-    let (base_url, handle) =
-        spawn_delayed_api_server(None, Some(Duration::from_millis(150))).await;
+    let (base_url, handle) = spawn_delayed_api_server(None, Some(Duration::from_millis(150))).await;
     let client = test_api_client(base_url, None);
 
     let response = client
@@ -464,8 +461,7 @@ async fn api_client_open_session_allows_slower_native_open_responses() {
 
 #[tokio::test]
 async fn api_client_fetch_sessions_keeps_short_timeout_for_refresh() {
-    let (base_url, handle) =
-        spawn_delayed_api_server(Some(Duration::from_millis(150)), None).await;
+    let (base_url, handle) = spawn_delayed_api_server(Some(Duration::from_millis(150)), None).await;
     let client = test_api_client(base_url.clone(), None);
 
     let error = client
@@ -545,7 +541,7 @@ fn set_message_deduplicates_repeated_errors() {
 #[test]
 fn auto_refresh_keeps_existing_footer_message() {
     let api = MockApi::new();
-    let layout = test_layout(120, 32);
+    let layout = test_layout(160, 32);
     api.push_fetch_sessions(Ok(vec![session_summary(
         "sess-7",
         "7",
@@ -810,6 +806,23 @@ fn cached_semantic_texts(viewer: &MermaidViewerState) -> Vec<String> {
         .collect()
 }
 
+fn mermaid_background_charset(viewer: &MermaidViewerState) -> Vec<char> {
+    viewer
+        .cached_lines
+        .iter()
+        .flat_map(|line| line.chars())
+        .filter(|ch| *ch != ' ')
+        .collect()
+}
+
+fn press_mermaid_key(app: &mut App<MockApi>, layout: WorkspaceLayout, key: char) {
+    assert!(handle_key_event(
+        app,
+        layout,
+        KeyEvent::new(KeyCode::Char(key), KeyModifiers::NONE),
+    ));
+}
+
 #[test]
 fn mermaid_compact_overview_text_prefers_numeric_prefix_and_keywords() {
     let compact = mermaid_compact_overview_text([
@@ -819,6 +832,14 @@ fn mermaid_compact_overview_text_prefers_numeric_prefix_and_keywords() {
     .expect("compact overview text");
 
     assert_eq!(compact, "1. Verified Identity");
+}
+
+#[test]
+fn mermaid_compact_overview_text_splits_snake_case_into_words() {
+    let compact = mermaid_compact_overview_text(["governed_revision_artifacts"])
+        .expect("compact snake_case overview text");
+
+    assert_eq!(compact, "governed revision");
 }
 
 fn visible_entity_ids(app: &App<MockApi>) -> Vec<String> {
@@ -843,6 +864,7 @@ fn session_summary(session_id: &str, tmux_name: &str, cwd: &str) -> SessionSumma
         thought_source: ThoughtSource::CarryForward,
         thought_updated_at: None,
         rest_state: RestState::Drowsy,
+        commit_candidate: false,
         last_skill: None,
         is_stale: false,
         attached_clients: 0,
@@ -1456,7 +1478,8 @@ fn render_header_filter_strip_shows_repo_chips_and_thought_rows() {
         cell_at(&renderer, skills_chip.rect.x, skills_chip.rect.y).fg,
         skills_color
     );
-    assert!(row_text(&renderer, 2).ends_with("1xskills  2xthrongterm"));
+    assert!(row_text(&renderer, 2).contains("[filter out]"));
+    assert!(row_text(&renderer, 2).ends_with("[filter out]  1xskills  2xthrongterm"));
 }
 
 #[test]
@@ -1592,6 +1615,7 @@ fn header_filter_strip_and_thought_rows_apply_and_clear_filters() {
     );
     assert!(row_text(&renderer, 2).contains("code ."));
     assert!(row_text(&renderer, 2).contains("1xskills"));
+    assert!(row_text(&renderer, 2).contains("[filter out]"));
     assert!(row_text(&renderer, 2).contains("[clear filters]"));
 
     let filtered_panel =
@@ -1666,6 +1690,112 @@ fn header_filter_strip_and_thought_rows_apply_and_clear_filters() {
             "sess-1".to_string(),
             "sess-3".to_string(),
         ]
+    );
+}
+
+#[test]
+fn header_filter_strip_toggles_filter_out_mode_and_excludes_selected_projects() {
+    let api = MockApi::new();
+    let layout = test_layout(120, 32);
+    let mut app = make_app(api);
+
+    app.repo_themes
+        .insert("/tmp/throngterm".to_string(), repo_theme("#B89875"));
+    app.repo_themes
+        .insert("/tmp/skills".to_string(), repo_theme("#4FA66A"));
+
+    let mut first = session_summary_with_thought(
+        "sess-1",
+        "7",
+        TEST_REPO_THRONGTERM,
+        "patching tui",
+        "2026-03-08T14:00:05Z",
+    );
+    first.repo_theme_id = Some("/tmp/throngterm".to_string());
+
+    let mut second = session_summary_with_thought(
+        "sess-2",
+        "9",
+        TEST_REPO_SKILLS,
+        "indexing docs",
+        "2026-03-08T14:00:07Z",
+    );
+    second.repo_theme_id = Some("/tmp/skills".to_string());
+
+    app.merge_sessions(vec![first.clone(), second.clone()], layout.overview_field);
+    app.capture_thought_updates(&[first, second], layout.thought_entry_capacity());
+
+    let initial_header = build_header_filter_layout(&app, 120);
+    let filter_out_rect = initial_header
+        .filter_out_rect
+        .expect("filter out toggle should exist");
+    assert_eq!(
+        header_filter_action_at(&app, 120, filter_out_rect.x, filter_out_rect.y),
+        Some(ThoughtPanelAction::ToggleFilterOutMode)
+    );
+
+    app.handle_header_filter_click(120, filter_out_rect.x, filter_out_rect.y);
+
+    assert!(app.thought_filter.filter_out_mode);
+    assert_eq!(app.active_thought_filter_text(), "filter: none");
+
+    let filter_out_header = build_header_filter_layout(&app, 120);
+    let skills_chip = filter_out_header
+        .chips
+        .iter()
+        .find(|chip| chip.label == "1xskills")
+        .expect("skills chip should exist")
+        .clone();
+    assert_eq!(
+        header_filter_action_at(&app, 120, skills_chip.rect.x, skills_chip.rect.y),
+        Some(ThoughtPanelAction::ToggleFilterOutCwd(
+            TEST_REPO_SKILLS.to_string()
+        ))
+    );
+
+    app.handle_header_filter_click(120, skills_chip.rect.x, skills_chip.rect.y);
+
+    assert!(app.thought_filter.filter_out_mode);
+    assert!(
+        app.thought_filter
+            .excluded_cwds
+            .contains(TEST_REPO_SKILLS)
+    );
+    assert_eq!(app.active_thought_filter_text(), "filter: hide=skills");
+    assert_eq!(
+        app.visible_thought_entries(layout.thought_entry_capacity())
+            .into_iter()
+            .map(|entry| entry.tmux_name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["7"]
+    );
+    assert_eq!(visible_entity_ids(&app), vec!["sess-1".to_string()]);
+
+    let excluded_header = build_header_filter_layout(&app, 120);
+    let excluded_chip = excluded_header
+        .chips
+        .iter()
+        .find(|chip| chip.label == "1xskills")
+        .expect("skills chip should stay visible");
+    assert_eq!(excluded_chip.color, Color::DarkGrey);
+
+    let clear_rect = excluded_header
+        .clear_filters_rect
+        .expect("clear filters button should exist");
+    app.handle_header_filter_click(120, clear_rect.x, clear_rect.y);
+
+    assert_eq!(app.thought_filter, ThoughtFilter::default());
+    assert_eq!(app.active_thought_filter_text(), "filter: none");
+    assert_eq!(
+        app.visible_thought_entries(layout.thought_entry_capacity())
+            .into_iter()
+            .map(|entry| entry.tmux_name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["7", "9"]
+    );
+    assert_eq!(
+        visible_entity_ids(&app),
+        vec!["sess-1".to_string(), "sess-2".to_string()]
     );
 }
 
@@ -3057,10 +3187,7 @@ fn typing_initial_request_and_pressing_enter_still_creates_hidden_session() {
     });
 
     for ch in "add hidden spawn flow".chars() {
-        app.handle_initial_request_key(
-            KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE),
-            field,
-        );
+        app.handle_initial_request_key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE), field);
     }
     app.handle_initial_request_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), field);
 
@@ -3503,11 +3630,9 @@ fn refresh_builds_synthetic_mermaid_row_and_preserves_text_click_behavior() {
     let thought_content = layout
         .thought_content
         .expect("wide layout enables thought rail");
-    api.push_fetch_sessions(Ok(vec![session_summary(
-        "sess-1",
-        "7",
-        TEST_REPO_THRONGTERM,
-    )]));
+    let mut session = session_summary("sess-1", "7", TEST_REPO_THRONGTERM);
+    session.commit_candidate = true;
+    api.push_fetch_sessions(Ok(vec![session]));
     api.push_mermaid_artifact(Ok(mermaid_artifact(
         "sess-1",
         "/tmp/repos/throngterm/flow.mmd",
@@ -3519,9 +3644,11 @@ fn refresh_builds_synthetic_mermaid_row_and_preserves_text_click_behavior() {
     app.refresh(layout);
 
     let panel = build_thought_panel(&app, thought_content, layout.thought_entry_capacity());
-    assert_eq!(panel.rows.len(), 1);
-    assert_eq!(panel.rows[0].line, "7: mermaid diagram ready");
+    assert_eq!(panel.rows.len(), 2);
+    assert_eq!(panel.rows[0].line, "7: mermaid diagram");
+    assert_eq!(panel.rows[1].line, "ready");
     let mermaid_rect = panel.rows[0].mermaid_rect.expect("mermaid button");
+    let commit_rect = panel.rows[0].commit_rect.expect("commit badge");
     let text_rect = panel.rows[0].text_rect.expect("synthetic row text");
     let row_y = thought_content
         .bottom()
@@ -3536,6 +3663,16 @@ fn refresh_builds_synthetic_mermaid_row_and_preserves_text_click_behavior() {
             row_y,
         ),
         Some(ThoughtPanelAction::OpenMermaid("sess-1".to_string()))
+    );
+    assert_eq!(
+        thought_panel_action_at(
+            &app,
+            thought_content,
+            layout.thought_entry_capacity(),
+            commit_rect.x,
+            row_y,
+        ),
+        None
     );
     assert_eq!(
         thought_panel_action_at(
@@ -3639,7 +3776,7 @@ fn mermaid_keyboard_controls_pan_zoom_reset_and_escape() {
         FishBowlMode::Mermaid(viewer) => (viewer.zoom, (viewer.center_x, viewer.center_y)),
         FishBowlMode::Aquarium => panic!("expected Mermaid viewer mode"),
     };
-    assert!(zoom_after_plus > 1.0);
+    assert_eq!(zoom_after_plus, 1.5);
 
     assert!(handle_key_event(
         &mut app,
@@ -3663,11 +3800,10 @@ fn mermaid_keyboard_controls_pan_zoom_reset_and_escape() {
         layout,
         KeyEvent::new(KeyCode::Char('0'), KeyModifiers::NONE),
     ));
-    let (zoom_after_reset, center_after_reset_x, center_after_reset_y) =
-        match &app.fish_bowl_mode {
-            FishBowlMode::Mermaid(viewer) => (viewer.zoom, viewer.center_x, viewer.center_y),
-            FishBowlMode::Aquarium => panic!("expected Mermaid viewer mode"),
-        };
+    let (zoom_after_reset, center_after_reset_x, center_after_reset_y) = match &app.fish_bowl_mode {
+        FishBowlMode::Mermaid(viewer) => (viewer.zoom, viewer.center_x, viewer.center_y),
+        FishBowlMode::Aquarium => panic!("expected Mermaid viewer mode"),
+    };
     assert_eq!(zoom_after_reset, 1.0);
     assert_eq!(center_after_reset_x, 0.0);
     assert_eq!(center_after_reset_y, 0.0);
@@ -3751,13 +3887,14 @@ fn mermaid_mouse_drag_and_scroll_update_viewport() {
             row: start_row,
             modifiers: KeyModifiers::NONE,
         },
-        MERMAID_ZOOM_STEP,
+        MermaidZoomDirection::In,
     ));
     let zoom_after_scroll = match &app.fish_bowl_mode {
         FishBowlMode::Mermaid(viewer) => viewer.zoom,
         FishBowlMode::Aquarium => panic!("expected Mermaid viewer mode"),
     };
     assert!(zoom_after_scroll > zoom_before_scroll);
+    assert_eq!(zoom_after_scroll, 1.25);
 }
 
 #[test]
@@ -3787,15 +3924,14 @@ fn mermaid_render_reuses_prepared_source_state_across_zoom_and_pan() {
     viewer.unsupported_reason = None;
 
     app.render(&mut renderer, layout);
-    let (prepare_after_first, viewport_after_first, first_lines_empty) =
-        match &app.fish_bowl_mode {
-            FishBowlMode::Mermaid(viewer) => (
-                viewer.source_prepare_count,
-                viewer.viewport_render_count,
-                viewer.cached_lines.is_empty(),
-            ),
-            FishBowlMode::Aquarium => panic!("expected Mermaid viewer mode"),
-        };
+    let (prepare_after_first, viewport_after_first, first_lines_empty) = match &app.fish_bowl_mode {
+        FishBowlMode::Mermaid(viewer) => (
+            viewer.source_prepare_count,
+            viewer.viewport_render_count,
+            viewer.cached_lines.is_empty(),
+        ),
+        FishBowlMode::Aquarium => panic!("expected Mermaid viewer mode"),
+    };
     assert_eq!(prepare_after_first, 1);
     assert_eq!(viewport_after_first, 1);
     assert!(!first_lines_empty);
@@ -3936,24 +4072,64 @@ fn mermaid_flowchart_overview_hides_edge_labels_until_zoomed() {
 
 #[test]
 fn mermaid_flowchart_overview_compacts_long_node_labels() {
-    let source =
-        "graph TD\nA[1. Verified Identity And api cfo admin hierarchy role restricted]\n";
+    let source = "graph TD\nA[1. Verified Identity And api cfo admin hierarchy role restricted]\n";
     let (mut app, mut renderer, layout) = open_mermaid_test_viewer(source, 120, 32);
 
     app.render(&mut renderer, layout);
 
-    let semantic_texts = match &app.fish_bowl_mode {
-        FishBowlMode::Mermaid(viewer) => cached_semantic_texts(viewer),
+    let (semantic_texts, background_chars) = match &app.fish_bowl_mode {
+        FishBowlMode::Mermaid(viewer) => (
+            cached_semantic_texts(viewer),
+            mermaid_background_charset(viewer),
+        ),
+        FishBowlMode::Aquarium => panic!("expected Mermaid viewer mode"),
+    };
+    assert!(
+        semantic_texts.iter().any(|text| text.starts_with("1. Ver")),
+        "{semantic_texts:?}"
+    );
+    assert!(!semantic_texts.iter().any(|text| text.contains("hierarchy")));
+    assert!(
+        background_chars
+            .iter()
+            .all(|ch| matches!(ch, '|' | '_' | '\\' | '>' | '<')),
+        "{background_chars:?}"
+    );
+    assert!(row_text(&renderer, layout.overview_field.y).contains("detail L1"));
+}
+
+#[test]
+fn mermaid_er_overview_shows_compact_entity_words_without_svg_text_noise() {
+    let source = "erDiagram\ngoverned_revision_artifacts {\n  uuid id PK\n}\n";
+    let (mut app, mut renderer, layout) = open_mermaid_test_viewer(source, 120, 32);
+
+    app.render(&mut renderer, layout);
+
+    let (semantic_texts, background_chars) = match &app.fish_bowl_mode {
+        FishBowlMode::Mermaid(viewer) => (
+            cached_semantic_texts(viewer),
+            mermaid_background_charset(viewer),
+        ),
         FishBowlMode::Aquarium => panic!("expected Mermaid viewer mode"),
     };
     assert!(
         semantic_texts
             .iter()
-            .any(|text| text.starts_with("1. Ver")),
+            .any(|text| text == "governed revision"),
         "{semantic_texts:?}"
     );
-    assert!(!semantic_texts.iter().any(|text| text.contains("hierarchy")));
-    assert!(row_text(&renderer, layout.overview_field.y).contains("detail L1"));
+    assert!(
+        !semantic_texts
+            .iter()
+            .any(|text| text.contains("governed_revision_artifacts")),
+        "{semantic_texts:?}"
+    );
+    assert!(
+        background_chars
+            .iter()
+            .all(|ch| matches!(ch, '|' | '_' | '\\' | '>' | '<')),
+        "{background_chars:?}"
+    );
 }
 
 #[test]
@@ -3962,16 +4138,7 @@ fn mermaid_zoom_reveals_edge_labels_at_detail_l2() {
         "graph TD\nsubgraph Group One\nA[Producer]\nB[Consumer]\nend\nA -- ships data --> B\n";
     let (mut app, mut renderer, layout) = open_mermaid_test_viewer(source, 120, 32);
 
-    assert!(handle_key_event(
-        &mut app,
-        layout,
-        KeyEvent::new(KeyCode::Char('+'), KeyModifiers::NONE),
-    ));
-    assert!(handle_key_event(
-        &mut app,
-        layout,
-        KeyEvent::new(KeyCode::Char('+'), KeyModifiers::NONE),
-    ));
+    press_mermaid_key(&mut app, layout, '+');
     app.render(&mut renderer, layout);
 
     let semantic_texts = match &app.fish_bowl_mode {
@@ -3989,6 +4156,11 @@ fn mermaid_zoom_reveals_edge_labels_at_detail_l2() {
         "status row: {}",
         row_text(&renderer, layout.overview_field.y)
     );
+    assert!(
+        row_text(&renderer, layout.overview_field.y).contains("zoom 150%"),
+        "status row: {}",
+        row_text(&renderer, layout.overview_field.y)
+    );
 }
 
 #[test]
@@ -3996,12 +4168,8 @@ fn mermaid_er_zoom_reveals_attribute_names_before_types() {
     let source = "erDiagram\nUSER {\n  uuid id PK\n  string email\n}\n";
     let (mut app, mut renderer, layout) = open_mermaid_test_viewer(source, 120, 32);
 
-    for _ in 0..3 {
-        assert!(handle_key_event(
-            &mut app,
-            layout,
-            KeyEvent::new(KeyCode::Char('+'), KeyModifiers::NONE),
-        ));
+    for _ in 0..2 {
+        press_mermaid_key(&mut app, layout, '+');
     }
     app.render(&mut renderer, layout);
 
@@ -4038,12 +4206,8 @@ fn mermaid_er_zoom_reveals_attribute_types_at_detail_l3() {
     let source = "erDiagram\nUSER {\n  uuid id PK\n  string email\n}\n";
     let (mut app, mut renderer, layout) = open_mermaid_test_viewer(source, 120, 32);
 
-    for _ in 0..5 {
-        assert!(handle_key_event(
-            &mut app,
-            layout,
-            KeyEvent::new(KeyCode::Char('+'), KeyModifiers::NONE),
-        ));
+    for _ in 0..3 {
+        press_mermaid_key(&mut app, layout, '+');
     }
     app.render(&mut renderer, layout);
 
@@ -4064,6 +4228,11 @@ fn mermaid_er_zoom_reveals_attribute_types_at_detail_l3() {
         "status row: {}",
         row_text(&renderer, layout.overview_field.y)
     );
+    assert!(
+        row_text(&renderer, layout.overview_field.y).contains("zoom 250%"),
+        "status row: {}",
+        row_text(&renderer, layout.overview_field.y)
+    );
 }
 
 #[test]
@@ -4071,12 +4240,8 @@ fn mermaid_reset_fit_hides_subordinate_detail() {
     let source = "erDiagram\nUSER {\n  uuid id PK\n  string email\n}\n";
     let (mut app, mut renderer, layout) = open_mermaid_test_viewer(source, 120, 32);
 
-    for _ in 0..5 {
-        assert!(handle_key_event(
-            &mut app,
-            layout,
-            KeyEvent::new(KeyCode::Char('+'), KeyModifiers::NONE),
-        ));
+    for _ in 0..3 {
+        press_mermaid_key(&mut app, layout, '+');
     }
     app.render(&mut renderer, layout);
     assert!(
@@ -4102,6 +4267,11 @@ fn mermaid_reset_fit_hides_subordinate_detail() {
     assert!(!semantic_texts.contains(&"uuid".to_string()));
     assert!(!semantic_texts.contains(&"string".to_string()));
     assert!(row_text(&renderer, layout.overview_field.y).contains("detail L1"));
+    assert!(
+        row_text(&renderer, layout.overview_field.y).contains("fit 100%"),
+        "status row: {}",
+        row_text(&renderer, layout.overview_field.y)
+    );
 }
 
 #[test]
@@ -4143,7 +4313,7 @@ fn mermaid_semantic_labels_track_zoom_and_pan() {
         FishBowlMode::Aquarium => panic!("expected Mermaid viewer mode"),
     };
 
-    app.zoom_mermaid_viewer(MERMAID_ZOOM_STEP, None, content_rect);
+    app.zoom_mermaid_viewer(MERMAID_SCROLL_ZOOM_STEP_PERCENT, None, content_rect);
     app.pan_mermaid_viewer(24.0, 18.0);
     app.render(&mut renderer, layout);
 
@@ -4161,18 +4331,53 @@ fn mermaid_semantic_labels_track_zoom_and_pan() {
 }
 
 #[test]
-fn mermaid_sequence_diagram_falls_back_to_braille_only() {
+fn mermaid_zoom_status_clamps_to_fit_and_uses_round_percentages() {
+    let (mut app, mut renderer, layout) =
+        open_mermaid_test_viewer("graph TD\nA[Producer] --> B[Consumer]\n", 120, 32);
+
+    app.render(&mut renderer, layout);
+    assert!(
+        row_text(&renderer, layout.overview_field.y).contains("fit 100%"),
+        "status row: {}",
+        row_text(&renderer, layout.overview_field.y)
+    );
+
+    press_mermaid_key(&mut app, layout, '-');
+    app.render(&mut renderer, layout);
+    assert!(
+        row_text(&renderer, layout.overview_field.y).contains("fit 100%"),
+        "status row: {}",
+        row_text(&renderer, layout.overview_field.y)
+    );
+
+    press_mermaid_key(&mut app, layout, '+');
+    app.render(&mut renderer, layout);
+    assert!(
+        row_text(&renderer, layout.overview_field.y).contains("zoom 150%"),
+        "status row: {}",
+        row_text(&renderer, layout.overview_field.y)
+    );
+    assert!(
+        !row_text(&renderer, layout.overview_field.y).contains("179%"),
+        "status row: {}",
+        row_text(&renderer, layout.overview_field.y)
+    );
+}
+
+#[test]
+fn mermaid_sequence_diagram_falls_back_to_connector_only_background() {
     let (mut app, mut renderer, layout) =
         open_mermaid_test_viewer("sequenceDiagram\nAlice->>Bob: hello\n", 120, 32);
 
     app.render(&mut renderer, layout);
 
-    let (render_error, cached_lines_empty, cached_semantic_lines_empty) =
+    let (render_error, cached_lines_empty, cached_semantic_lines_empty, background_chars) =
         match &app.fish_bowl_mode {
             FishBowlMode::Mermaid(viewer) => (
                 viewer.render_error.clone(),
                 viewer.cached_lines.is_empty(),
                 viewer.cached_semantic_lines.is_empty(),
+                mermaid_background_charset(viewer),
             ),
             FishBowlMode::Aquarium => panic!("expected Mermaid viewer mode"),
         };
@@ -4180,6 +4385,12 @@ fn mermaid_sequence_diagram_falls_back_to_braille_only() {
     assert!(!cached_lines_empty);
     assert!(cached_semantic_lines_empty);
     assert!(find_text_position(&renderer, "hello").is_none());
+    assert!(
+        background_chars
+            .iter()
+            .all(|ch| matches!(ch, '|' | '_' | '\\' | '>' | '<')),
+        "{background_chars:?}"
+    );
 }
 
 #[test]
@@ -4229,10 +4440,8 @@ fn mermaid_resize_reprojects_semantic_labels() {
     let mut resized_renderer = test_renderer(160, 48);
     app.render(&mut resized_renderer, resized_layout);
 
-    let group_after =
-        find_text_position(&resized_renderer, "Group One").expect("Group One after");
-    let producer_after =
-        find_text_position(&resized_renderer, "Producer").expect("Producer after");
+    let group_after = find_text_position(&resized_renderer, "Group One").expect("Group One after");
+    let producer_after = find_text_position(&resized_renderer, "Producer").expect("Producer after");
     assert_ne!(group_after, group_before);
     assert_ne!(producer_after, producer_before);
 }

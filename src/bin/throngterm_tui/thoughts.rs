@@ -1,5 +1,7 @@
 use super::*;
 
+const THOUGHT_COMMIT_LABEL: &str = "[commit]";
+
 pub(crate) struct ThoughtFingerprint {
     pub(crate) thought: String,
     pub(crate) updated_at: Option<DateTime<Utc>>,
@@ -14,6 +16,7 @@ pub(crate) struct ThoughtLogEntry {
     pub(crate) thought: String,
     pub(crate) updated_at: Option<DateTime<Utc>>,
     pub(crate) color: Color,
+    pub(crate) commit_candidate: bool,
 }
 
 impl ThoughtLogEntry {
@@ -30,6 +33,7 @@ impl ThoughtLogEntry {
             thought,
             updated_at: session.thought_updated_at,
             color: session_display_color(session, repo_themes),
+            commit_candidate: session.commit_candidate,
         }
     }
 }
@@ -38,11 +42,13 @@ impl ThoughtLogEntry {
 pub(crate) struct ThoughtFilter {
     pub(crate) cwd: Option<String>,
     pub(crate) tmux_name: Option<String>,
+    pub(crate) excluded_cwds: HashSet<String>,
+    pub(crate) filter_out_mode: bool,
 }
 
 impl ThoughtFilter {
     pub(crate) fn is_active(&self) -> bool {
-        self.cwd.is_some() || self.tmux_name.is_some()
+        self.cwd.is_some() || self.tmux_name.is_some() || !self.excluded_cwds.is_empty()
     }
 
     pub(crate) fn matches(&self, entry: &ThoughtLogEntry) -> bool {
@@ -50,6 +56,9 @@ impl ThoughtFilter {
             .cwd
             .as_ref()
             .map(|cwd| entry.cwd == *cwd)
+            .or_else(|| {
+                (!self.excluded_cwds.is_empty()).then_some(!self.excluded_cwds.contains(&entry.cwd))
+            })
             .unwrap_or(true);
         let tmux_matches = self
             .tmux_name
@@ -64,6 +73,10 @@ impl ThoughtFilter {
             .cwd
             .as_ref()
             .map(|cwd| normalize_path(&session.cwd) == *cwd)
+            .or_else(|| {
+                (!self.excluded_cwds.is_empty())
+                    .then_some(!self.excluded_cwds.contains(&normalize_path(&session.cwd)))
+            })
             .unwrap_or(true);
         let tmux_matches = self
             .tmux_name
@@ -73,9 +86,15 @@ impl ThoughtFilter {
         cwd_matches && tmux_matches
     }
 
+    pub(crate) fn excludes_cwd(&self, cwd: &str) -> bool {
+        self.excluded_cwds.contains(cwd)
+    }
+
     pub(crate) fn clear(&mut self) {
         self.cwd = None;
         self.tmux_name = None;
+        self.excluded_cwds.clear();
+        self.filter_out_mode = false;
     }
 }
 
@@ -123,6 +142,8 @@ pub(crate) fn compare_thought_log_entries(left: &ThoughtLogEntry, right: &Though
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum ThoughtPanelAction {
     FilterByCwd(String),
+    ToggleFilterOutMode,
+    ToggleFilterOutCwd(String),
     OpenSession { session_id: String, label: String },
     OpenMermaid(String),
     OpenRepoInEditor(String),
@@ -141,6 +162,7 @@ pub(crate) struct ThoughtChipLayout {
 pub(crate) struct ThoughtRowLayout {
     pub(crate) text_rect: Option<Rect>,
     pub(crate) mermaid_rect: Option<Rect>,
+    pub(crate) commit_rect: Option<Rect>,
     pub(crate) session_id: String,
     pub(crate) tmux_name: String,
     pub(crate) line: String,
@@ -156,6 +178,7 @@ pub(crate) struct ThoughtPanelLayout {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct HeaderFilterLayout {
     pub(crate) chips: Vec<ThoughtChipLayout>,
+    pub(crate) filter_out_rect: Option<Rect>,
     pub(crate) clear_filters_rect: Option<Rect>,
 }
 
@@ -174,38 +197,37 @@ pub(crate) fn build_header_filter_layout<C: TuiApi>(app: &App<C>, width: u16) ->
         return HeaderFilterLayout::default();
     }
 
+    let filter_out_label = "[filter out]";
+    let filter_out_width = display_width(filter_out_label);
     let clear_label = "[clear filters]";
     let clear_width = display_width(clear_label);
-    let clear_gap = 2;
+    let gap: u16 = 2;
     let mut available_width = right_edge.saturating_sub(left_x);
-    let mut clear_filters_rect = None;
-    if app.thought_filter.is_active() {
-        if clear_width <= available_width {
-            available_width = available_width.saturating_sub(clear_width);
-            if available_width >= clear_gap {
-                available_width = available_width.saturating_sub(clear_gap);
-            } else {
-                available_width = 0;
-            }
-        } else {
-            return HeaderFilterLayout {
-                chips: Vec::new(),
-                clear_filters_rect: Some(Rect {
-                    x: right_edge.saturating_sub(clear_width),
-                    y: header_filter_row(),
-                    width: clear_width,
-                    height: 1,
-                }),
-            };
-        }
+
+    if filter_out_width > available_width {
+        return HeaderFilterLayout::default();
     }
 
+    available_width = available_width.saturating_sub(filter_out_width);
+
+    let show_clear = app.thought_filter.is_active()
+        && available_width >= gap.saturating_add(clear_width);
+    if show_clear {
+        available_width = available_width.saturating_sub(gap.saturating_add(clear_width));
+    }
+
+    let chip_budget = if available_width > gap {
+        available_width.saturating_sub(gap)
+    } else {
+        0
+    };
     let mut included = Vec::new();
     let active_cwd = app.thought_filter.cwd.as_deref();
     let mut chips_width: u16 = 0;
     for summary in app.thought_repo_summaries() {
-        let is_active = active_cwd.map(|cwd| cwd == summary.cwd).unwrap_or(false);
-        let label = if is_active {
+        let is_include_active = active_cwd.map(|cwd| cwd == summary.cwd).unwrap_or(false);
+        let is_excluded = app.thought_filter.excludes_cwd(&summary.cwd);
+        let label = if is_include_active {
             "code .".to_string()
         } else {
             format!("{}x{}", summary.count, summary.label)
@@ -220,12 +242,18 @@ pub(crate) fn build_header_filter_layout<C: TuiApi>(app: &App<C>, width: u16) ->
         } else {
             chips_width.saturating_add(2).saturating_add(width)
         };
-        if next_width > available_width {
+        if next_width > chip_budget {
             break;
         }
 
         chips_width = next_width;
-        let color = if active_cwd.is_some() && !is_active {
+        let color = if app.thought_filter.filter_out_mode {
+            if is_excluded {
+                Color::DarkGrey
+            } else {
+                summary.color
+            }
+        } else if active_cwd.is_some() && !is_include_active {
             Color::DarkGrey
         } else {
             summary.color
@@ -233,22 +261,46 @@ pub(crate) fn build_header_filter_layout<C: TuiApi>(app: &App<C>, width: u16) ->
         included.push((summary.cwd, label, color, width));
     }
 
-    let total_width = chips_width.saturating_add(if app.thought_filter.is_active() {
-        clear_gap + clear_width
-    } else {
-        0
+    let mut total_width = filter_out_width;
+    if show_clear {
+        total_width = total_width.saturating_add(gap).saturating_add(clear_width);
+    }
+    if chips_width > 0 {
+        total_width = total_width.saturating_add(gap).saturating_add(chips_width);
+    }
+    let mut cursor_x = right_edge.saturating_sub(total_width);
+
+    let clear_filters_rect = show_clear.then_some(Rect {
+        x: cursor_x,
+        y: header_filter_row(),
+        width: clear_width,
+        height: 1,
     });
-    let mut chip_x = right_edge.saturating_sub(total_width);
+    if show_clear {
+        cursor_x = cursor_x.saturating_add(clear_width).saturating_add(gap);
+    }
+
+    let filter_out_rect = Some(Rect {
+        x: cursor_x,
+        y: header_filter_row(),
+        width: filter_out_width,
+        height: 1,
+    });
+    cursor_x = cursor_x.saturating_add(filter_out_width);
+    if chips_width > 0 {
+        cursor_x = cursor_x.saturating_add(gap);
+    }
+
     let chips = included
         .into_iter()
         .map(|(cwd, label, color, width)| {
             let rect = Rect {
-                x: chip_x,
+                x: cursor_x,
                 y: header_filter_row(),
                 width,
                 height: 1,
             };
-            chip_x = chip_x.saturating_add(width).saturating_add(2);
+            cursor_x = cursor_x.saturating_add(width).saturating_add(2);
             ThoughtChipLayout {
                 rect,
                 cwd,
@@ -258,23 +310,24 @@ pub(crate) fn build_header_filter_layout<C: TuiApi>(app: &App<C>, width: u16) ->
         })
         .collect::<Vec<_>>();
 
-    if app.thought_filter.is_active() {
-        clear_filters_rect = Some(Rect {
-            x: right_edge.saturating_sub(clear_width),
-            y: header_filter_row(),
-            width: clear_width,
-            height: 1,
-        });
-    }
-
     HeaderFilterLayout {
         chips,
+        filter_out_rect,
         clear_filters_rect,
     }
 }
 
 pub(crate) fn render_header_filter_strip<C: TuiApi>(app: &App<C>, renderer: &mut Renderer, width: u16) {
     let layout = build_header_filter_layout(app, width);
+    if let Some(rect) = layout.filter_out_rect {
+        let color = if app.thought_filter.filter_out_mode {
+            Color::Cyan
+        } else {
+            Color::DarkGrey
+        };
+        renderer.draw_text(rect.x, rect.y, "[filter out]", color);
+    }
+
     for chip in &layout.chips {
         renderer.draw_text(chip.rect.x, chip.rect.y, &chip.label, chip.color);
     }
@@ -291,6 +344,11 @@ pub(crate) fn header_filter_action_at<C: TuiApi>(
     y: u16,
 ) -> Option<ThoughtPanelAction> {
     let layout = build_header_filter_layout(app, width);
+    if let Some(rect) = layout.filter_out_rect {
+        if rect.contains(x, y) {
+            return Some(ThoughtPanelAction::ToggleFilterOutMode);
+        }
+    }
     if let Some(rect) = layout.clear_filters_rect {
         if rect.contains(x, y) {
             return Some(ThoughtPanelAction::ClearFilters);
@@ -299,6 +357,9 @@ pub(crate) fn header_filter_action_at<C: TuiApi>(
 
     for chip in layout.chips {
         if chip.rect.contains(x, y) {
+            if app.thought_filter.filter_out_mode {
+                return Some(ThoughtPanelAction::ToggleFilterOutCwd(chip.cwd));
+            }
             if app
                 .thought_filter
                 .cwd
@@ -379,6 +440,7 @@ pub(crate) struct ThoughtPanelEntryView {
     pub(crate) color: Color,
     pub(crate) text: String,
     pub(crate) has_mermaid: bool,
+    pub(crate) has_commit_candidate: bool,
 }
 
 pub(crate) const DARK_TERMINAL_BG_RGB: (u8, u8, u8) = (0x11, 0x11, 0x11);
@@ -508,6 +570,7 @@ pub(crate) fn build_thought_panel_entries<C: TuiApi>(app: &App<C>) -> Vec<Though
                 .get(&entry.session_id)
                 .map(|artifact| artifact.available)
                 .unwrap_or(false),
+            has_commit_candidate: entry.commit_candidate,
         });
     }
 
@@ -525,6 +588,7 @@ pub(crate) fn build_thought_panel_entries<C: TuiApi>(app: &App<C>) -> Vec<Though
             color: session_display_color(&entity.session, &app.repo_themes),
             text: format!("{}: mermaid diagram ready", entity.session.tmux_name),
             has_mermaid: true,
+            has_commit_candidate: entity.session.commit_candidate,
         });
     }
 
@@ -536,12 +600,15 @@ pub(crate) fn build_rows_for_panel_entry(
     entry: &ThoughtPanelEntryView,
     thought_content: Rect,
 ) -> Vec<ThoughtRowLayout> {
-    let button_width = display_width(THOUGHT_MERMAID_LABEL);
-    let reserved = if entry.has_mermaid {
-        button_width.saturating_add(1)
-    } else {
-        0
-    };
+    let mermaid_width = display_width(THOUGHT_MERMAID_LABEL);
+    let commit_width = display_width(THOUGHT_COMMIT_LABEL);
+    let mut reserved: u16 = 0;
+    if entry.has_mermaid {
+        reserved = reserved.saturating_add(mermaid_width).saturating_add(1);
+    }
+    if entry.has_commit_candidate {
+        reserved = reserved.saturating_add(commit_width).saturating_add(1);
+    }
     let text_x = thought_content.x.saturating_add(reserved);
     let text_width = thought_content.width.saturating_sub(reserved) as usize;
     let wrapped = if text_width == 0 {
@@ -555,6 +622,14 @@ pub(crate) fn build_rows_for_panel_entry(
         .enumerate()
         .map(|(index, line)| {
             let visible_line_width = display_width(&line);
+            let commit_x = if entry.has_mermaid {
+                thought_content
+                    .x
+                    .saturating_add(mermaid_width)
+                    .saturating_add(1)
+            } else {
+                thought_content.x
+            };
             ThoughtRowLayout {
                 text_rect: (visible_line_width > 0).then_some(Rect {
                     x: text_x,
@@ -565,7 +640,13 @@ pub(crate) fn build_rows_for_panel_entry(
                 mermaid_rect: (index == 0 && entry.has_mermaid).then_some(Rect {
                     x: thought_content.x,
                     y: 0,
-                    width: button_width,
+                    width: mermaid_width,
+                    height: 1,
+                }),
+                commit_rect: (index == 0 && entry.has_commit_candidate).then_some(Rect {
+                    x: commit_x,
+                    y: 0,
+                    width: commit_width,
                     height: 1,
                 }),
                 session_id: entry.session_id.clone(),
@@ -617,6 +698,9 @@ pub(crate) fn render_thought_panel<C: TuiApi>(
         let y = start_y + offset as u16;
         if let Some(rect) = row.mermaid_rect {
             renderer.draw_text(rect.x, y, THOUGHT_MERMAID_LABEL, Color::Cyan);
+        }
+        if let Some(rect) = row.commit_rect {
+            renderer.draw_text(rect.x, y, THOUGHT_COMMIT_LABEL, Color::DarkGrey);
         }
         if let Some(rect) = row.text_rect {
             renderer.draw_text(rect.x, y, &row.line, row.color);

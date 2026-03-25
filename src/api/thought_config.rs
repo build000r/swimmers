@@ -161,6 +161,7 @@ mod tests {
             thought_source: ThoughtSource::Llm,
             thought_updated_at: None,
             rest_state: RestState::Drowsy,
+            commit_candidate: false,
             last_skill: None,
             is_stale: false,
             attached_clients: 0,

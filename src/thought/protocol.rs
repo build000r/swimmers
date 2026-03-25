@@ -58,6 +58,8 @@ pub struct SyncUpdate {
     pub thought_source: ThoughtSource,
     #[serde(default)]
     pub rest_state: RestState,
+    #[serde(default)]
+    pub commit_candidate: bool,
     pub objective_changed: bool,
     pub bubble_precedence: BubblePrecedence,
     pub at: DateTime<Utc>,
@@ -106,6 +108,7 @@ impl From<clawgs::emit::protocol::SyncUpdate> for SyncUpdate {
             thought_state: thought_state_from_shared(value.thought_state),
             thought_source: thought_source_from_shared(value.thought_source),
             rest_state: rest_state_from_shared(value.rest_state),
+            commit_candidate: value.commit_candidate,
             objective_changed: value.objective_changed,
             bubble_precedence: bubble_precedence_from_shared(value.bubble_precedence),
             at: value.at,
@@ -141,6 +144,7 @@ fn shared_session_snapshot(session: &SessionInfo) -> clawgs::emit::protocol::Ses
         token_count: session.token_count,
         context_limit: session.context_limit,
         last_activity_at: session.last_activity_at,
+        commit_candidate: session.commit_candidate,
     }
 }
 
@@ -229,6 +233,7 @@ mod tests {
             thought_state: ThoughtState::Holding,
             thought_source: ThoughtSource::CarryForward,
             rest_state: RestState::Drowsy,
+            commit_candidate: false,
             objective_fingerprint: Some("obj-1".to_string()),
             thought_updated_at: Some(now),
             token_count: 12,

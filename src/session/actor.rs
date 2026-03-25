@@ -1102,6 +1102,7 @@ impl SessionActor {
                 state,
                 crate::types::ThoughtState::Holding,
             ),
+            commit_candidate: false,
             last_skill: self.last_skill.clone(),
             last_activity_at: self.last_activity_at,
             repo_theme_id: None,

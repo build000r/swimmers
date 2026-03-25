@@ -547,6 +547,7 @@ mod tests {
             thought_state: ThoughtState::Holding,
             thought_source: ThoughtSource::Llm,
             rest_state: RestState::Drowsy,
+            commit_candidate: false,
             objective_fingerprint: Some("obj-1".to_string()),
             thought_updated_at: Some(Utc::now()),
             token_count: 55,

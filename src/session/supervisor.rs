@@ -214,6 +214,9 @@ impl SessionSupervisor {
                     rest_state: thought_data.map(|t| t.rest_state).unwrap_or_else(|| {
                         fallback_rest_state(SessionState::Exited, ps.thought_state)
                     }),
+                    commit_candidate: thought_data
+                        .map(|t| t.commit_candidate)
+                        .unwrap_or(ps.commit_candidate),
                     last_skill: ps.last_skill.clone(),
                     is_stale: true,
                     attached_clients: 0,
@@ -820,6 +823,7 @@ impl SessionSupervisor {
                 summary.thought_source = thought_data.thought_source;
                 summary.thought_updated_at = Some(thought_data.updated_at);
                 summary.rest_state = thought_data.rest_state;
+                summary.commit_candidate = thought_data.commit_candidate;
                 if thought_data.token_count > 0 || summary.token_count == 0 {
                     summary.token_count = thought_data.token_count;
                 }
@@ -949,6 +953,9 @@ impl SessionSupervisor {
                     rest_state: thought_data
                         .map(|t| t.rest_state)
                         .unwrap_or(summary.rest_state),
+                    commit_candidate: thought_data
+                        .map(|t| t.commit_candidate)
+                        .unwrap_or(summary.commit_candidate),
                     thought: thought_data
                         .and_then(|t| t.thought.clone())
                         .or_else(|| summary.thought.clone()),
@@ -1001,6 +1008,7 @@ impl SessionSupervisor {
                 thought_source: s.thought_source,
                 thought_updated_at: s.thought_updated_at,
                 rest_state: s.rest_state,
+                commit_candidate: s.commit_candidate,
                 last_skill: s.last_skill.clone(),
                 objective_fingerprint: thought_snapshots
                     .get(&s.session_id)
@@ -1023,6 +1031,7 @@ impl SessionSupervisor {
         thought_state: ThoughtState,
         thought_source: ThoughtSource,
         rest_state: RestState,
+        commit_candidate: bool,
         updated_at: DateTime<Utc>,
         delivery: ThoughtDeliveryState,
         objective_fingerprint: Option<String>,
@@ -1036,6 +1045,7 @@ impl SessionSupervisor {
                     thought_state,
                     thought_source,
                     rest_state,
+                    commit_candidate,
                     objective_fingerprint: objective_fingerprint.clone(),
                     token_count,
                     context_limit,
@@ -1062,6 +1072,7 @@ impl SessionSupervisor {
                 thought_state,
                 thought_source,
                 rest_state,
+                commit_candidate,
                 updated_at,
                 delivery,
                 objective_fingerprint,
@@ -1238,6 +1249,7 @@ impl SessionSupervisor {
             thought_source: ThoughtSource::CarryForward,
             thought_updated_at: None,
             rest_state: fallback_rest_state(SessionState::Idle, ThoughtState::Holding),
+            commit_candidate: false,
             last_skill: None,
             is_stale: false,
             attached_clients: 0,
@@ -1271,6 +1283,7 @@ struct PersistThoughtRequest {
     thought_state: ThoughtState,
     thought_source: ThoughtSource,
     rest_state: RestState,
+    commit_candidate: bool,
     updated_at: DateTime<Utc>,
     delivery: ThoughtDeliveryState,
     objective_fingerprint: Option<String>,
@@ -1293,6 +1306,7 @@ impl SupervisorProvider {
                         req.thought_state,
                         req.thought_source,
                         req.rest_state,
+                        req.commit_candidate,
                         req.updated_at,
                         req.delivery,
                         req.objective_fingerprint,
@@ -1333,6 +1347,7 @@ impl SessionProvider for SupervisorProvider {
         thought_state: ThoughtState,
         thought_source: ThoughtSource,
         rest_state: RestState,
+        commit_candidate: bool,
         updated_at: DateTime<Utc>,
         delivery: ThoughtDeliveryState,
         objective_fingerprint: Option<String>,
@@ -1347,6 +1362,7 @@ impl SessionProvider for SupervisorProvider {
                 thought_state,
                 thought_source,
                 rest_state,
+                commit_candidate,
                 updated_at,
                 delivery,
                 objective_fingerprint,
@@ -1700,6 +1716,7 @@ mod tests {
             thought_source: ThoughtSource::CarryForward,
             thought_updated_at: None,
             rest_state: fallback_rest_state(state, ThoughtState::Holding),
+            commit_candidate: false,
             last_skill: None,
             is_stale: false,
             attached_clients: 0,
@@ -1911,6 +1928,7 @@ mod tests {
                 ThoughtState::Holding,
                 ThoughtSource::CarryForward,
                 RestState::Drowsy,
+                false,
                 Utc::now(),
                 ThoughtDeliveryState::default(),
                 None,
@@ -1941,6 +1959,7 @@ mod tests {
                 thought_source: ThoughtSource::CarryForward,
                 thought_updated_at: None,
                 rest_state: RestState::Drowsy,
+                commit_candidate: false,
                 last_skill: None,
                 objective_fingerprint: None,
                 cwd: "/tmp".to_string(),
@@ -1971,6 +1990,7 @@ mod tests {
                 ThoughtState::Holding,
                 ThoughtSource::Llm,
                 RestState::Drowsy,
+                false,
                 updated_at,
                 ThoughtDeliveryState::default(),
                 Some("obj-1".to_string()),
@@ -1999,6 +2019,7 @@ mod tests {
             thought_source: ThoughtSource::CarryForward,
             thought_updated_at: None,
             rest_state: RestState::Drowsy,
+            commit_candidate: false,
             last_skill: None,
             is_stale: false,
             attached_clients: 0,
@@ -2022,6 +2043,7 @@ mod tests {
                     thought_state: ThoughtState::Holding,
                     thought_source: ThoughtSource::Llm,
                     rest_state: RestState::Drowsy,
+                    commit_candidate: false,
                     objective_fingerprint: None,
                     token_count: 10,
                     context_limit: 100,
@@ -2039,6 +2061,7 @@ mod tests {
                     thought_state: ThoughtState::Active,
                     thought_source: ThoughtSource::Llm,
                     rest_state: RestState::Active,
+                    commit_candidate: true,
                     objective_fingerprint: None,
                     token_count: 10,
                     context_limit: 100,
@@ -2074,6 +2097,7 @@ mod tests {
             thought_source: ThoughtSource::CarryForward,
             thought_updated_at: None,
             rest_state: RestState::Drowsy,
+            commit_candidate: false,
             last_skill: None,
             is_stale: false,
             attached_clients: 0,
@@ -2090,6 +2114,7 @@ mod tests {
                     thought_state: ThoughtState::Holding,
                     thought_source: ThoughtSource::Llm,
                     rest_state: RestState::Drowsy,
+                    commit_candidate: false,
                     objective_fingerprint: None,
                     token_count: 10,
                     context_limit: 100,
@@ -2104,6 +2129,7 @@ mod tests {
                     thought_state: ThoughtState::Active,
                     thought_source: ThoughtSource::Llm,
                     rest_state: RestState::Active,
+                    commit_candidate: true,
                     objective_fingerprint: None,
                     token_count: 10,
                     context_limit: 100,
@@ -2137,6 +2163,7 @@ mod tests {
                 thought_state: ThoughtState::Active,
                 thought_source: ThoughtSource::Llm,
                 rest_state: RestState::Active,
+                commit_candidate: true,
                 objective_fingerprint: None,
                 token_count: 44,
                 context_limit: 200_000,
@@ -2194,6 +2221,7 @@ mod tests {
                 thought_state: ThoughtState::Active,
                 thought_source: ThoughtSource::Llm,
                 rest_state: RestState::Active,
+                commit_candidate: true,
                 objective_fingerprint: Some("obj-1".to_string()),
                 token_count: 55,
                 context_limit: 210_000,

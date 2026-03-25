@@ -41,6 +41,8 @@ pub struct PersistedSession {
     #[serde(default)]
     pub rest_state: RestState,
     #[serde(default)]
+    pub commit_candidate: bool,
+    #[serde(default)]
     pub last_skill: Option<String>,
     #[serde(default)]
     pub objective_fingerprint: Option<String>,
@@ -58,6 +60,8 @@ pub struct ThoughtSnapshot {
     pub thought_source: ThoughtSource,
     #[serde(default)]
     pub rest_state: RestState,
+    #[serde(default)]
+    pub commit_candidate: bool,
     #[serde(default)]
     pub objective_fingerprint: Option<String>,
     pub token_count: u64,
@@ -225,6 +229,7 @@ impl FileStore {
         thought_state: ThoughtState,
         thought_source: ThoughtSource,
         rest_state: RestState,
+        commit_candidate: bool,
         updated_at: DateTime<Utc>,
         delivery: ThoughtDeliveryState,
         objective_fingerprint: Option<String>,
@@ -239,6 +244,7 @@ impl FileStore {
                     thought_state,
                     thought_source,
                     rest_state,
+                    commit_candidate,
                     objective_fingerprint,
                     token_count,
                     context_limit,

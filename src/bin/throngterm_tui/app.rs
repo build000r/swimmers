@@ -263,6 +263,16 @@ impl<C: TuiApi> App<C> {
                 path_tail_label(cwd).unwrap_or_else(|| cwd.to_string())
             ));
         }
+        if !self.thought_filter.excluded_cwds.is_empty() {
+            let mut hidden = self
+                .thought_filter
+                .excluded_cwds
+                .iter()
+                .map(|cwd| path_tail_label(cwd).unwrap_or_else(|| cwd.to_string()))
+                .collect::<Vec<_>>();
+            hidden.sort();
+            parts.push(format!("hide={}", hidden.join(",")));
+        }
         if let Some(tmux_name) = self.thought_filter.tmux_name.as_deref() {
             parts.push(format!("num={tmux_name}"));
         }
@@ -271,6 +281,29 @@ impl<C: TuiApi> App<C> {
 
     pub(crate) fn set_thought_filter_cwd(&mut self, cwd: String) {
         self.thought_filter.cwd = Some(cwd);
+        self.thought_filter.excluded_cwds.clear();
+        self.thought_filter.filter_out_mode = false;
+        self.reconcile_selection();
+        self.sync_selection_publication();
+    }
+
+    pub(crate) fn toggle_thought_filter_out_mode(&mut self) {
+        self.thought_filter.filter_out_mode = !self.thought_filter.filter_out_mode;
+        if self.thought_filter.filter_out_mode {
+            self.thought_filter.cwd = None;
+        } else {
+            self.thought_filter.excluded_cwds.clear();
+        }
+        self.reconcile_selection();
+        self.sync_selection_publication();
+    }
+
+    pub(crate) fn toggle_thought_filter_out_cwd(&mut self, cwd: String) {
+        self.thought_filter.cwd = None;
+        self.thought_filter.filter_out_mode = true;
+        if !self.thought_filter.excluded_cwds.insert(cwd.clone()) {
+            self.thought_filter.excluded_cwds.remove(&cwd);
+        }
         self.reconcile_selection();
         self.sync_selection_publication();
     }
@@ -334,12 +367,17 @@ impl<C: TuiApi> App<C> {
             entry.cwd = normalize_path(&session.cwd);
             entry.pwd_label = path_tail_label(&session.cwd);
             entry.color = session_display_color(session, &self.repo_themes);
+            entry.commit_candidate = session.commit_candidate;
         }
 
         self.thought_log.sort_by(compare_thought_log_entries);
     }
 
-    pub(crate) fn capture_thought_updates(&mut self, sessions: &[SessionSummary], thought_capacity: usize) {
+    pub(crate) fn capture_thought_updates(
+        &mut self,
+        sessions: &[SessionSummary],
+        thought_capacity: usize,
+    ) {
         let mut pending = Vec::new();
         for session in sessions {
             let Some(thought) = normalize_thought_text(session.thought.as_deref()) else {
@@ -381,7 +419,11 @@ impl<C: TuiApi> App<C> {
         self.refresh_with_feedback(layout, true);
     }
 
-    pub(crate) fn refresh_with_feedback(&mut self, layout: WorkspaceLayout, show_success_message: bool) {
+    pub(crate) fn refresh_with_feedback(
+        &mut self,
+        layout: WorkspaceLayout,
+        show_success_message: bool,
+    ) {
         match self.runtime.block_on(self.client.fetch_sessions()) {
             Ok(sessions) => {
                 self.sync_repo_themes(&sessions);
@@ -464,7 +506,11 @@ impl<C: TuiApi> App<C> {
         self.repo_themes = next;
     }
 
-    pub(crate) fn remember_repo_theme(&mut self, session: &SessionSummary, theme: Option<RepoTheme>) {
+    pub(crate) fn remember_repo_theme(
+        &mut self,
+        session: &SessionSummary,
+        theme: Option<RepoTheme>,
+    ) {
         if let (Some(theme_id), Some(theme)) = (session.repo_theme_id.as_ref(), theme) {
             self.repo_themes.insert(theme_id.clone(), theme);
             return;
@@ -750,7 +796,12 @@ impl<C: TuiApi> App<C> {
         }
     }
 
-    pub(crate) fn spawn_session(&mut self, cwd: &str, initial_request: Option<String>, field: Rect) {
+    pub(crate) fn spawn_session(
+        &mut self,
+        cwd: &str,
+        initial_request: Option<String>,
+        field: Rect,
+    ) {
         match self.runtime.block_on(self.client.create_session(
             cwd,
             SpawnTool::Codex,
@@ -823,6 +874,8 @@ impl<C: TuiApi> App<C> {
     pub(crate) fn apply_thought_filter_action(&mut self, action: ThoughtPanelAction) {
         match action {
             ThoughtPanelAction::FilterByCwd(cwd) => self.set_thought_filter_cwd(cwd),
+            ThoughtPanelAction::ToggleFilterOutMode => self.toggle_thought_filter_out_mode(),
+            ThoughtPanelAction::ToggleFilterOutCwd(cwd) => self.toggle_thought_filter_out_cwd(cwd),
             ThoughtPanelAction::OpenSession { session_id, label } => {
                 self.select_and_open_session(session_id, label);
             }
@@ -927,15 +980,19 @@ impl<C: TuiApi> App<C> {
 
     pub(crate) fn zoom_mermaid_viewer(
         &mut self,
-        factor: f32,
+        delta_percent: i16,
         pointer: Option<(u16, u16)>,
         content_rect: Rect,
     ) {
         let Some(viewer) = self.mermaid_viewer_mut() else {
             return;
         };
-        let old_zoom = viewer.zoom.max(MERMAID_MIN_ZOOM);
-        let new_zoom = (old_zoom * factor).clamp(MERMAID_MIN_ZOOM, MERMAID_MAX_ZOOM);
+        let old_zoom = viewer.zoom.clamp(MERMAID_MIN_ZOOM, MERMAID_MAX_ZOOM);
+        let old_percent = mermaid_zoom_percent(old_zoom);
+        let min_percent = mermaid_zoom_percent(MERMAID_MIN_ZOOM);
+        let max_percent = mermaid_zoom_percent(MERMAID_MAX_ZOOM);
+        let new_percent = (old_percent + delta_percent).clamp(min_percent, max_percent);
+        let new_zoom = new_percent as f32 / 100.0;
         if (new_zoom - old_zoom).abs() < f32::EPSILON {
             return;
         }
@@ -1053,7 +1110,7 @@ impl<C: TuiApi> App<C> {
         &mut self,
         field: Rect,
         mouse: crossterm::event::MouseEvent,
-        factor: f32,
+        direction: MermaidZoomDirection,
     ) -> bool {
         let Some(viewer) = self.mermaid_viewer_mut() else {
             return false;
@@ -1064,7 +1121,11 @@ impl<C: TuiApi> App<C> {
         if !content_rect.contains(mouse.column, mouse.row) {
             return false;
         }
-        self.zoom_mermaid_viewer(factor, Some((mouse.column, mouse.row)), content_rect);
+        let delta_percent = match direction {
+            MermaidZoomDirection::In => MERMAID_SCROLL_ZOOM_STEP_PERCENT,
+            MermaidZoomDirection::Out => -MERMAID_SCROLL_ZOOM_STEP_PERCENT,
+        };
+        self.zoom_mermaid_viewer(delta_percent, Some((mouse.column, mouse.row)), content_rect);
         true
     }
 

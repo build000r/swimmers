@@ -134,6 +134,8 @@ pub struct SessionSummary {
     #[serde(default = "default_rest_state")]
     pub rest_state: RestState,
     #[serde(default)]
+    pub commit_candidate: bool,
+    #[serde(default)]
     pub last_skill: Option<String>,
     pub is_stale: bool,
     pub attached_clients: u32,
@@ -335,6 +337,8 @@ pub struct ThoughtUpdatePayload {
     pub thought_source: ThoughtSource,
     #[serde(default = "default_rest_state")]
     pub rest_state: RestState,
+    #[serde(default)]
+    pub commit_candidate: bool,
     #[serde(default)]
     pub objective_changed: bool,
     #[serde(default = "default_bubble_precedence")]
@@ -574,6 +578,7 @@ mod tests {
                 thought_source: ThoughtSource::CarryForward,
                 thought_updated_at: None,
                 rest_state: RestState::Drowsy,
+                commit_candidate: false,
                 last_skill: None,
                 is_stale: false,
                 attached_clients: 0,
@@ -625,6 +630,7 @@ mod tests {
                 thought_source: ThoughtSource::CarryForward,
                 thought_updated_at: None,
                 rest_state: RestState::Drowsy,
+                commit_candidate: false,
                 last_skill: None,
                 is_stale: false,
                 attached_clients: 0,
