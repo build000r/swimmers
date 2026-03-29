@@ -170,14 +170,16 @@ codex exec \\\n\
 echo \"\"\n\
 echo \"Codex exited with code: $EXIT_CODE\"\n\
 \n\
-if [ \"$EXIT_CODE\" -ne 0 ]; then\n\
-  echo \"\"\n\
+echo \"\"\n\
+if [ \"$EXIT_CODE\" -eq 0 ]; then\n\
+  echo \"Finished. Session stays alive for inspection.\"\n\
+else\n\
   echo \"Failed. Session stays alive for inspection.\"\n\
-  echo \"Attach: tmux a -t $SESSION\"\n\
-  echo \"\"\n\
-  echo \"Press enter to close, or Ctrl-C to keep session.\"\n\
-  read -r\n\
-fi\n"
+fi\n\
+echo \"Attach: tmux a -t $SESSION\"\n\
+echo \"\"\n\
+echo \"Press enter to close, or Ctrl-C to keep session.\"\n\
+read -r\n"
     )
 }
 
@@ -333,5 +335,18 @@ mod tests {
         assert_eq!(sanitize_tmux_name(""), "session");
         assert_eq!(sanitize_tmux_name("$$$"), "session");
         assert_eq!(sanitize_tmux_name("dev-7"), "dev-7");
+    }
+
+    #[test]
+    fn build_commit_tmux_wrapper_keeps_successful_sessions_open_for_inspection() {
+        let wrapper = build_commit_tmux_wrapper(
+            "commit-7-123",
+            Path::new("/tmp/repos/swimmers"),
+            Path::new("/tmp/prompt.md"),
+        );
+
+        assert!(wrapper.contains("Codex exited with code: $EXIT_CODE"));
+        assert!(wrapper.contains("Finished. Session stays alive for inspection."));
+        assert!(wrapper.contains("Press enter to close, or Ctrl-C to keep session."));
     }
 }

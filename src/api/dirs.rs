@@ -35,19 +35,31 @@ struct ListCandidate {
     services: Vec<String>,
 }
 
-/// Base path for directory browsing. Falls back to the server's cwd.
+fn default_dirs_base_path(cwd: &Path) -> PathBuf {
+    find_env_manager_root(cwd)
+        .and_then(|root| root.parent().map(Path::to_path_buf))
+        .unwrap_or_else(|| cwd.to_path_buf())
+}
+
+/// Base path for directory browsing. Falls back to the repo root that owns the
+/// nearest ancestor `.env-manager`, otherwise the server's cwd.
 fn dirs_base_path() -> PathBuf {
     std::env::var("DIRS_BASE_PATH")
         .map(PathBuf::from)
-        .unwrap_or_else(|_| std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/")))
+        .unwrap_or_else(|_| {
+            let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
+            default_dirs_base_path(&cwd)
+        })
+}
+
+fn find_env_manager_root(base: &Path) -> Option<PathBuf> {
+    base.ancestors()
+        .map(|ancestor| ancestor.join(".env-manager"))
+        .find(|candidate| candidate.is_dir())
 }
 
 fn env_manager_root(base: &Path) -> Option<PathBuf> {
-    let mut candidates = vec![base.join(".env-manager")];
-    if let Some(parent) = base.parent() {
-        candidates.push(parent.join(".env-manager"));
-    }
-    candidates.into_iter().find(|candidate| candidate.is_dir())
+    find_env_manager_root(base)
 }
 
 fn parse_shell_array_items(line: &str) -> Vec<String> {
@@ -684,6 +696,28 @@ mod tests {
         EnvGuard { key, previous }
     }
 
+    fn clear_env_var(key: &'static str) -> EnvGuard {
+        let previous = std::env::var_os(key);
+        std::env::remove_var(key);
+        EnvGuard { key, previous }
+    }
+
+    struct CurrentDirGuard {
+        previous: PathBuf,
+    }
+
+    impl Drop for CurrentDirGuard {
+        fn drop(&mut self) {
+            std::env::set_current_dir(&self.previous).expect("restore cwd");
+        }
+    }
+
+    fn set_current_dir(path: &Path) -> CurrentDirGuard {
+        let previous = std::env::current_dir().expect("current dir");
+        std::env::set_current_dir(path).expect("set cwd");
+        CurrentDirGuard { previous }
+    }
+
     fn test_state() -> Arc<AppState> {
         let config = Arc::new(Config::default());
         let supervisor = SessionSupervisor::new(config.clone());
@@ -798,6 +832,30 @@ UI_TARGETS=('extra-target')
         );
     }
 
+    #[test]
+    fn default_dirs_base_path_prefers_repo_root_for_ancestor_env_manager() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let repos_root = dir.path().join("repos");
+        let swimmers = repos_root.join("swimmers");
+        fs::create_dir_all(repos_root.join(".env-manager")).expect("env-manager");
+        fs::create_dir_all(&swimmers).expect("swimmers");
+
+        assert_eq!(default_dirs_base_path(&swimmers), repos_root);
+    }
+
+    #[test]
+    fn dirs_base_path_honors_explicit_override() {
+        let _lock = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let dir = tempfile::tempdir().expect("tempdir");
+        let explicit_root = dir.path().join("custom-root");
+        fs::create_dir_all(&explicit_root).expect("custom root");
+        let _base = set_env_var("DIRS_BASE_PATH", explicit_root.as_os_str().to_os_string());
+
+        assert_eq!(dirs_base_path(), explicit_root);
+    }
+
     #[tokio::test]
     async fn env_service_health_map_reads_status_output() {
         let _lock = crate::test_support::ENV_LOCK
@@ -893,6 +951,64 @@ UI_TARGETS=('extra-target')
             .collect();
         assert_eq!(by_name.get("alpha"), Some(&true));
         assert_eq!(by_name.get("services"), Some(&false));
+    }
+
+    #[tokio::test]
+    async fn list_dirs_uses_ancestor_env_manager_repo_root_by_default() {
+        let _lock = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let dir = tempfile::tempdir().expect("tempdir");
+        let repos_root = dir.path().join("repos");
+        let swimmers = repos_root.join("swimmers");
+        let buildooor = repos_root.join("buildooor");
+        let skills = repos_root.join("opensource").join("skills");
+        let env_manager = repos_root.join(".env-manager");
+        fs::create_dir_all(&swimmers).expect("swimmers");
+        fs::create_dir_all(&buildooor).expect("buildooor");
+        fs::create_dir_all(&skills).expect("skills");
+        fs::create_dir_all(&env_manager).expect("env-manager");
+        fs::write(
+            env_manager.join("sync.sh"),
+            r#"BACKEND_TARGETS=("swimmers" "opensource/skills")
+FRONTEND_TARGETS=("buildooor")
+"#,
+        )
+        .expect("sync");
+
+        let _cwd = set_current_dir(&swimmers);
+        let _base = clear_env_var("DIRS_BASE_PATH");
+
+        let response = list_dirs(
+            Extension(AuthInfo::new(OPERATOR_SCOPES.to_vec())),
+            State(test_state()),
+            Query(DirQuery {
+                path: None,
+                managed_only: Some(true),
+            }),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let json = response_json(response).await;
+        let expected_root = repos_root.canonicalize().expect("canonical repos root");
+        assert_eq!(json["path"], expected_root.to_string_lossy().as_ref());
+        let mut names = json["entries"]
+            .as_array()
+            .expect("entries")
+            .iter()
+            .filter_map(|entry| entry["name"].as_str().map(str::to_string))
+            .collect::<Vec<_>>();
+        names.sort();
+        assert_eq!(
+            names,
+            vec![
+                "buildooor".to_string(),
+                "opensource".to_string(),
+                "swimmers".to_string()
+            ]
+        );
     }
 
     #[tokio::test]
