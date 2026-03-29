@@ -3,9 +3,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-pub use clawgs::emit::protocol::{
-    DaemonInboundMessage, EMIT_PROTOCOL_V1, SYNC_MESSAGE_TYPE,
-};
+pub use clawgs::emit::protocol::{DaemonInboundMessage, EMIT_PROTOCOL_V1, SYNC_MESSAGE_TYPE};
 
 use crate::thought::loop_runner::SessionInfo;
 use crate::thought::runtime_config::ThoughtConfig;
@@ -244,7 +242,12 @@ mod tests {
 
     #[test]
     fn sync_request_serializes_expected_shape() {
-        let request = build_sync_request_with_now(7, Utc::now(), &ThoughtConfig::default(), &[sample_session()]);
+        let request = build_sync_request_with_now(
+            7,
+            Utc::now(),
+            &ThoughtConfig::default(),
+            &[sample_session()],
+        );
         let json = serde_json::to_value(&request).expect("request should serialize");
 
         assert_eq!(json["type"], SYNC_MESSAGE_TYPE);

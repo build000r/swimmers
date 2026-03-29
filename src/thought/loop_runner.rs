@@ -116,6 +116,9 @@ impl ThoughtLoopRunner {
             Duration::from_millis(self.tick_ms),
             self.runtime_config,
         )
-        .spawn(provider, EmitterClient::with_request_sequence(self.request_sequence))
+        .spawn(
+            provider,
+            EmitterClient::with_request_sequence(self.request_sequence),
+        )
     }
 }

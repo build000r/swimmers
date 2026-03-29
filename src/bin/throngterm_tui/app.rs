@@ -4,6 +4,7 @@ pub(crate) struct App<C: TuiApi> {
     pub(crate) runtime: Runtime,
     pub(crate) client: C,
     pub(crate) artifact_opener: Arc<dyn ArtifactOpener>,
+    pub(crate) commit_launcher: Arc<dyn CommitLauncher>,
     pub(crate) entities: Vec<SessionEntity>,
     pub(crate) thought_log: Vec<ThoughtLogEntry>,
     pub(crate) thought_filter: ThoughtFilter,
@@ -26,7 +27,12 @@ pub(crate) struct App<C: TuiApi> {
 
 impl<C: TuiApi> App<C> {
     pub(crate) fn new(runtime: Runtime, client: C) -> Self {
-        Self::with_artifact_opener(runtime, client, Arc::new(SystemArtifactOpener))
+        Self::with_helpers(
+            runtime,
+            client,
+            Arc::new(SystemArtifactOpener),
+            Arc::new(SystemCommitLauncher),
+        )
     }
 
     pub(crate) fn with_artifact_opener(
@@ -34,10 +40,25 @@ impl<C: TuiApi> App<C> {
         client: C,
         artifact_opener: Arc<dyn ArtifactOpener>,
     ) -> Self {
+        Self::with_helpers(
+            runtime,
+            client,
+            artifact_opener,
+            Arc::new(SystemCommitLauncher),
+        )
+    }
+
+    pub(crate) fn with_helpers(
+        runtime: Runtime,
+        client: C,
+        artifact_opener: Arc<dyn ArtifactOpener>,
+        commit_launcher: Arc<dyn CommitLauncher>,
+    ) -> Self {
         Self {
             runtime,
             client,
             artifact_opener,
+            commit_launcher,
             entities: Vec::new(),
             thought_log: Vec::new(),
             thought_filter: ThoughtFilter::default(),
@@ -881,9 +902,29 @@ impl<C: TuiApi> App<C> {
             ThoughtPanelAction::OpenSession { session_id, label } => {
                 self.select_and_open_session(session_id, label);
             }
+            ThoughtPanelAction::LaunchCommitCodex(session_id) => {
+                self.launch_commit_codex_for_session(&session_id);
+            }
             ThoughtPanelAction::OpenMermaid(session_id) => self.open_mermaid_viewer(session_id),
             ThoughtPanelAction::OpenRepoInEditor(cwd) => self.open_repo_in_editor(&cwd),
             ThoughtPanelAction::ClearFilters => self.clear_thought_filters(),
+        }
+    }
+
+    pub(crate) fn launch_commit_codex_for_session(&mut self, session_id: &str) {
+        let Some(session) = self
+            .entities
+            .iter()
+            .find(|entity| entity.session.session_id == session_id)
+            .map(|entity| entity.session.clone())
+        else {
+            self.set_message("missing session for commit codex launch");
+            return;
+        };
+
+        match self.commit_launcher.launch(&session) {
+            Ok(launch) => self.set_message(format!("commit codex: {}", launch.watch_command)),
+            Err(err) => self.set_message(format!("failed to launch commit codex: {err}")),
         }
     }
 
@@ -952,6 +993,7 @@ impl<C: TuiApi> App<C> {
             cached_center_x: 0.0,
             cached_center_y: 0.0,
             cached_lines: Vec::new(),
+            cached_background_cells: Vec::new(),
             cached_semantic_lines: Vec::new(),
             focused_source_index: None,
             focus_status: None,

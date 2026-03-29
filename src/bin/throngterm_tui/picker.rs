@@ -21,7 +21,12 @@ pub(crate) struct PickerState {
 }
 
 impl PickerState {
-    pub(crate) fn new(anchor_x: u16, anchor_y: u16, response: DirListResponse, managed_only: bool) -> Self {
+    pub(crate) fn new(
+        anchor_x: u16,
+        anchor_y: u16,
+        response: DirListResponse,
+        managed_only: bool,
+    ) -> Self {
         Self {
             anchor_x,
             anchor_y,

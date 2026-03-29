@@ -77,6 +77,7 @@ const MERMAID_MAX_ZOOM: f32 = 8.0;
 
 mod api;
 mod app;
+mod commit;
 mod entity;
 mod events;
 mod layout;
@@ -88,6 +89,7 @@ mod thoughts;
 
 pub(crate) use api::*;
 pub(crate) use app::*;
+pub(crate) use commit::*;
 pub(crate) use entity::*;
 pub(crate) use events::*;
 pub(crate) use layout::*;

@@ -180,6 +180,7 @@ pub(crate) struct MermaidProjectedLine {
     pub(crate) x: u16,
     pub(crate) y: u16,
     pub(crate) text: String,
+    pub(crate) color: Color,
 }
 
 #[derive(Clone, Debug)]
@@ -281,6 +282,7 @@ pub(crate) struct MermaidViewerState {
     pub(crate) cached_center_x: f32,
     pub(crate) cached_center_y: f32,
     pub(crate) cached_lines: Vec<String>,
+    pub(crate) cached_background_cells: Vec<Vec<Cell>>,
     pub(crate) cached_semantic_lines: Vec<MermaidProjectedLine>,
     pub(crate) focused_source_index: Option<usize>,
     pub(crate) focus_status: Option<String>,
@@ -305,11 +307,129 @@ impl MermaidViewerState {
     pub(crate) fn invalidate_source_cache(&mut self) {
         self.prepared_render = None;
         self.cached_lines.clear();
+        self.cached_background_cells.clear();
         self.cached_semantic_lines.clear();
         self.render_error = None;
         self.focused_source_index = None;
         self.focus_status = None;
         self.invalidate_viewport_cache();
+    }
+}
+
+pub(crate) const MERMAID_CONNECTOR_COLOR: Color = Color::DarkGrey;
+pub(crate) const MERMAID_BODY_COLOR: Color = Color::White;
+pub(crate) const MERMAID_EDGE_LABEL_COLOR: Color = Color::Yellow;
+pub(crate) const MERMAID_TYPE_COLOR: Color = Color::DarkCyan;
+pub(crate) const MERMAID_FOCUS_COLOR: Color = Color::Magenta;
+pub(crate) const MERMAID_OWNER_ACCENTS: [Color; 4] =
+    [Color::Cyan, Color::Green, Color::Yellow, Color::Blue];
+
+pub(crate) fn mermaid_owner_accent_map(
+    lines: &[MermaidSemanticLine],
+) -> HashMap<String, Color> {
+    let mut owner_keys = lines
+        .iter()
+        .filter(|line| {
+            mermaid_kind_is_owner_summary(line.kind) || mermaid_kind_is_owner_detail(line.kind)
+        })
+        .map(|line| line.owner_key.clone())
+        .collect::<Vec<_>>();
+    owner_keys.sort();
+    owner_keys.dedup();
+    owner_keys
+        .into_iter()
+        .enumerate()
+        .map(|(idx, owner_key)| (owner_key, MERMAID_OWNER_ACCENTS[idx % MERMAID_OWNER_ACCENTS.len()]))
+        .collect()
+}
+
+pub(crate) fn mermaid_owner_accent_color(
+    owner_key: &str,
+    owner_colors: &HashMap<String, Color>,
+) -> Color {
+    owner_colors
+        .get(owner_key)
+        .copied()
+        .unwrap_or(MERMAID_OWNER_ACCENTS[0])
+}
+
+pub(crate) fn mermaid_semantic_line_color(
+    kind: MermaidSemanticKind,
+    owner_key: &str,
+    owner_colors: &HashMap<String, Color>,
+) -> Color {
+    match kind {
+        MermaidSemanticKind::SubgraphSummary
+        | MermaidSemanticKind::SubgraphTitle
+        | MermaidSemanticKind::NodeSummary
+        | MermaidSemanticKind::NodeTitle => mermaid_owner_accent_color(owner_key, owner_colors),
+        MermaidSemanticKind::EdgeLabel => MERMAID_EDGE_LABEL_COLOR,
+        MermaidSemanticKind::ClassMember | MermaidSemanticKind::ErAttributeName => {
+            MERMAID_BODY_COLOR
+        }
+        MermaidSemanticKind::ErAttributeType => MERMAID_TYPE_COLOR,
+    }
+}
+
+pub(crate) fn mermaid_background_cells_from_lines(
+    lines: &[String],
+    default_color: Color,
+) -> Vec<Vec<Cell>> {
+    lines.iter()
+        .map(|line| {
+            line.chars()
+                .map(|ch| Cell {
+                    ch,
+                    fg: if ch == ' ' { Color::Reset } else { default_color },
+                })
+                .collect()
+        })
+        .collect()
+}
+
+pub(crate) fn mermaid_set_background_cell_color(
+    cells: &mut [Vec<Cell>],
+    content_rect: Rect,
+    x: i32,
+    y: i32,
+    color: Color,
+) {
+    if x < content_rect.x as i32
+        || x >= content_rect.right() as i32
+        || y < content_rect.y as i32
+        || y >= content_rect.bottom() as i32
+    {
+        return;
+    }
+    let grid_x = (x - content_rect.x as i32) as usize;
+    let grid_y = (y - content_rect.y as i32) as usize;
+    let Some(row) = cells.get_mut(grid_y) else {
+        return;
+    };
+    let Some(cell) = row.get_mut(grid_x) else {
+        return;
+    };
+    if cell.ch != ' ' {
+        cell.fg = color;
+    }
+}
+
+pub(crate) fn mermaid_apply_rect_border_colors(
+    cells: &mut [Vec<Cell>],
+    content_rect: Rect,
+    label_rects: &HashMap<String, MermaidOutlineLabelRect>,
+    owner_colors: &HashMap<String, Color>,
+) {
+    for (owner_key, rect) in label_rects {
+        let color = mermaid_owner_accent_color(owner_key, owner_colors);
+        for x in rect.left..=rect.right {
+            mermaid_set_background_cell_color(cells, content_rect, x, rect.top, color);
+            mermaid_set_background_cell_color(cells, content_rect, x, rect.bottom, color);
+        }
+        for y in rect.top..=rect.bottom {
+            mermaid_set_background_cell_color(cells, content_rect, rect.left, y, color);
+            mermaid_set_background_cell_color(cells, content_rect, rect.right, y, color);
+        }
     }
 }
 
@@ -3289,6 +3409,7 @@ pub(crate) fn mermaid_project_er_packed_lines(
     content_rect: Rect,
     boxes: &[MermaidErPackedBox],
     view_state: MermaidViewState,
+    owner_colors: &HashMap<String, Color>,
 ) -> (
     Vec<MermaidProjectedLine>,
     HashMap<String, MermaidOutlineLabelRect>,
@@ -3314,6 +3435,7 @@ pub(crate) fn mermaid_project_er_packed_lines(
                 x: title_x as u16,
                 y: line_y as u16,
                 text: text.clone(),
+                color: mermaid_owner_accent_color(&er_box.owner_key, owner_colors),
             });
             line_y += 1;
         }
@@ -3327,6 +3449,7 @@ pub(crate) fn mermaid_project_er_packed_lines(
                         x: inner_left as u16,
                         y: line_y as u16,
                         text: type_text.clone(),
+                        color: MERMAID_TYPE_COLOR,
                     });
                 }
                 projected.push(MermaidProjectedLine {
@@ -3334,6 +3457,7 @@ pub(crate) fn mermaid_project_er_packed_lines(
                     x: (inner_left + i32::from(type_col_width) + 2) as u16,
                     y: line_y as u16,
                     text: row.name_text.clone(),
+                    color: MERMAID_BODY_COLOR,
                 });
             } else {
                 projected.push(MermaidProjectedLine {
@@ -3341,6 +3465,7 @@ pub(crate) fn mermaid_project_er_packed_lines(
                     x: inner_left as u16,
                     y: line_y as u16,
                     text: row.name_text.clone(),
+                    color: MERMAID_BODY_COLOR,
                 });
             }
             line_y += 1;
@@ -3389,8 +3514,9 @@ pub(crate) fn render_mermaid_er_packed_lines(
         return Ok(false);
     }
 
+    let owner_colors = mermaid_owner_accent_map(&prepared.semantic_lines);
     let (projected, label_rects) =
-        mermaid_project_er_packed_lines(content_rect, &boxes, view_state);
+        mermaid_project_er_packed_lines(content_rect, &boxes, view_state, &owner_colors);
     if projected.is_empty() || label_rects.is_empty() {
         return Ok(false);
     }
@@ -3402,6 +3528,14 @@ pub(crate) fn render_mermaid_er_packed_lines(
         .collect::<Vec<_>>();
     viewer.cached_lines =
         mermaid_render_compact_detail_background(content_rect, &label_rects, outline_edges);
+    viewer.cached_background_cells =
+        mermaid_background_cells_from_lines(&viewer.cached_lines, MERMAID_CONNECTOR_COLOR);
+    mermaid_apply_rect_border_colors(
+        &mut viewer.cached_background_cells,
+        content_rect,
+        &label_rects,
+        &owner_colors,
+    );
     viewer.cached_semantic_lines = projected;
     Ok(true)
 }
@@ -3427,9 +3561,11 @@ pub(crate) fn project_mermaid_semantic_lines(
         x: u16,
         y: u16,
         text: String,
+        color: Color,
     }
 
     let mut candidates = Vec::new();
+    let owner_colors = mermaid_owner_accent_map(lines);
     let left = content_rect.x as i32;
     let right = content_rect.right() as i32;
     let top = content_rect.y as i32;
@@ -3498,6 +3634,7 @@ pub(crate) fn project_mermaid_semantic_lines(
             x: screen_x as u16,
             y: screen_y as u16,
             text: clipped,
+            color: mermaid_semantic_line_color(line.kind, &line.owner_key, &owner_colors),
         });
     }
 
@@ -3596,6 +3733,7 @@ pub(crate) fn project_mermaid_semantic_lines(
             x: candidate.x,
             y: target_y,
             text: candidate.text,
+            color: candidate.color,
         });
     }
 
@@ -3793,8 +3931,9 @@ pub(crate) fn render_mermaid_outline_lines(
         .filter(|edge| visible_keys.contains(&edge.from_key) && visible_keys.contains(&edge.to_key))
         .collect::<Vec<_>>();
 
-    viewer.cached_lines =
-        mermaid_render_outline_background(content_rect, &outline_nodes, outline_edges);
+    viewer.cached_lines = mermaid_render_outline_background(content_rect, &outline_nodes, outline_edges);
+    viewer.cached_background_cells =
+        mermaid_background_cells_from_lines(&viewer.cached_lines, MERMAID_CONNECTOR_COLOR);
     viewer.cached_semantic_lines = projected
         .into_iter()
         .filter(|line| {
@@ -3836,9 +3975,18 @@ pub(crate) fn render_mermaid_detail_lines(
         .into_values()
         .filter(|edge| visible_keys.contains(&edge.from_key) && visible_keys.contains(&edge.to_key))
         .collect::<Vec<_>>();
+    let owner_colors = mermaid_owner_accent_map(&prepared.semantic_lines);
 
     viewer.cached_lines =
         mermaid_render_compact_detail_background(content_rect, &label_rects, outline_edges);
+    viewer.cached_background_cells =
+        mermaid_background_cells_from_lines(&viewer.cached_lines, MERMAID_CONNECTOR_COLOR);
+    mermaid_apply_rect_border_colors(
+        &mut viewer.cached_background_cells,
+        content_rect,
+        &label_rects,
+        &owner_colors,
+    );
     viewer.cached_semantic_lines = projected;
     Ok(true)
 }
@@ -3905,6 +4053,8 @@ pub(crate) fn render_mermaid_lines(
     );
 
     viewer.cached_lines = pixmap_to_ascii_lines(&pixmap, content_rect);
+    viewer.cached_background_cells =
+        mermaid_background_cells_from_lines(&viewer.cached_lines, MERMAID_CONNECTOR_COLOR);
     viewer.cached_semantic_lines = project_mermaid_semantic_lines(
         &prepared.semantic_lines,
         transform,
@@ -4019,18 +4169,33 @@ pub(crate) fn render_mermaid_viewer(
         return;
     }
 
-    for (offset, line) in viewer.cached_lines.iter().enumerate() {
-        let y = content_rect.y + offset as u16;
-        if y >= content_rect.bottom() {
-            break;
+    if viewer.cached_background_cells.len() == viewer.cached_lines.len() {
+        for (row_offset, row) in viewer.cached_background_cells.iter().enumerate() {
+            let y = content_rect.y + row_offset as u16;
+            if y >= content_rect.bottom() {
+                break;
+            }
+            for (column_offset, cell) in row.iter().enumerate() {
+                if cell.ch == ' ' {
+                    continue;
+                }
+                renderer.draw_char(content_rect.x + column_offset as u16, y, cell.ch, cell.fg);
+            }
         }
-        renderer.draw_text(content_rect.x, y, line, Color::White);
+    } else {
+        for (offset, line) in viewer.cached_lines.iter().enumerate() {
+            let y = content_rect.y + offset as u16;
+            if y >= content_rect.bottom() {
+                break;
+            }
+            renderer.draw_text(content_rect.x, y, line, MERMAID_CONNECTOR_COLOR);
+        }
     }
     for line in &viewer.cached_semantic_lines {
         let color = if Some(line.source_index) == viewer.focused_source_index {
-            Color::Cyan
+            MERMAID_FOCUS_COLOR
         } else {
-            Color::White
+            line.color
         };
         renderer.draw_text(line.x, line.y, &line.text, color);
     }

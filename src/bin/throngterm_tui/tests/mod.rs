@@ -299,6 +299,42 @@ impl ArtifactOpener for MockArtifactOpener {
     }
 }
 
+#[derive(Default)]
+struct MockCommitLauncherState {
+    calls: Vec<SessionSummary>,
+    result: Option<CommitCodexLaunch>,
+    error: Option<String>,
+}
+
+#[derive(Clone, Default)]
+struct MockCommitLauncher {
+    state: Arc<Mutex<MockCommitLauncherState>>,
+}
+
+impl MockCommitLauncher {
+    fn calls(&self) -> Vec<SessionSummary> {
+        self.state.lock().unwrap().calls.clone()
+    }
+
+    fn fail_with(&self, message: &str) {
+        self.state.lock().unwrap().error = Some(message.to_string());
+    }
+}
+
+impl CommitLauncher for MockCommitLauncher {
+    fn launch(&self, session: &SessionSummary) -> io::Result<CommitCodexLaunch> {
+        let mut state = self.state.lock().unwrap();
+        state.calls.push(session.clone());
+        if let Some(message) = state.error.clone() {
+            return Err(io::Error::other(message));
+        }
+        Ok(state.result.clone().unwrap_or(CommitCodexLaunch {
+            session_name: "commit-7-123".to_string(),
+            watch_command: "tmux a -t commit-7-123".to_string(),
+        }))
+    }
+}
+
 fn make_app(api: MockApi) -> App<MockApi> {
     App::new(test_runtime(), api)
 }
@@ -308,6 +344,18 @@ fn make_app_with_artifact_opener(
     artifact_opener: Arc<dyn ArtifactOpener>,
 ) -> App<MockApi> {
     App::with_artifact_opener(test_runtime(), api, artifact_opener)
+}
+
+fn make_app_with_commit_launcher(
+    api: MockApi,
+    commit_launcher: Arc<dyn CommitLauncher>,
+) -> App<MockApi> {
+    App::with_helpers(
+        test_runtime(),
+        api,
+        Arc::new(SystemArtifactOpener),
+        commit_launcher,
+    )
 }
 
 fn test_api_client(base_url: String, auth_token: Option<&str>) -> ApiClient {
@@ -813,6 +861,59 @@ fn mermaid_background_charset(viewer: &MermaidViewerState) -> Vec<char> {
         .flat_map(|line| line.chars())
         .filter(|ch| *ch != ' ')
         .collect()
+}
+
+fn mermaid_background_colors(viewer: &MermaidViewerState) -> Vec<Color> {
+    viewer
+        .cached_background_cells
+        .iter()
+        .flat_map(|row| row.iter())
+        .filter(|cell| cell.ch != ' ')
+        .map(|cell| cell.fg)
+        .collect()
+}
+
+fn mermaid_background_colors_set(viewer: &MermaidViewerState) -> std::collections::BTreeSet<String> {
+    mermaid_background_colors(viewer)
+        .into_iter()
+        .map(|color| format!("{color:?}"))
+        .collect()
+}
+
+fn mermaid_text_color(renderer: &Renderer, needle: &str) -> Color {
+    let (x, y) = find_text_position(renderer, needle).unwrap_or_else(|| panic!("{needle}"));
+    cell_at(renderer, x, y).fg
+}
+
+fn mermaid_border_color(renderer: &Renderer, needle: &str) -> Color {
+    let (x, y) = find_text_position(renderer, needle).unwrap_or_else(|| panic!("{needle}"));
+    let width = display_width(needle);
+    let candidates = [
+        (x.saturating_sub(1), y),
+        (x.saturating_add(width), y),
+        (x, y.saturating_sub(1)),
+        (x, y.saturating_add(1)),
+    ];
+    candidates
+        .into_iter()
+        .map(|(cx, cy)| cell_at(renderer, cx, cy))
+        .find(|cell| matches!(cell.ch, '|' | '_'))
+        .map(|cell| cell.fg)
+        .unwrap_or_else(|| panic!("missing border for {needle}"))
+}
+
+fn mermaid_owner_key_for_text(viewer: &MermaidViewerState, needle: &str) -> String {
+    let line = viewer
+        .cached_semantic_lines
+        .iter()
+        .find(|line| line.text == needle)
+        .unwrap_or_else(|| panic!("{needle}"));
+    viewer
+        .prepared_render
+        .as_ref()
+        .and_then(|prepared| prepared.semantic_lines.get(line.source_index))
+        .map(|line| line.owner_key.clone())
+        .unwrap_or_else(|| panic!("missing owner key for {needle}"))
 }
 
 fn mermaid_render_bounds(
@@ -3788,6 +3889,102 @@ fn handle_workspace_click_routes_thought_and_overview_interactions() {
 }
 
 #[test]
+fn clicking_commit_badge_launches_commit_codex_without_opening_session() {
+    let api = MockApi::new();
+    let launcher = Arc::new(MockCommitLauncher::default());
+    let layout = test_layout(120, 32);
+    let thought_content = layout
+        .thought_content
+        .expect("wide layout enables thought rail");
+    let mut app = make_app_with_commit_launcher(api.clone(), launcher.clone());
+    let mut session = session_summary("sess-1", "7", TEST_REPO_THRONGTERM);
+    session.commit_candidate = true;
+    app.merge_sessions(vec![session.clone()], layout.overview_field);
+    let mut thought_session = session.clone();
+    thought_session.thought = Some("ready to commit".to_string());
+    thought_session.thought_updated_at = Some(
+        DateTime::parse_from_rfc3339("2026-03-29T14:00:05Z")
+            .expect("timestamp")
+            .with_timezone(&Utc),
+    );
+    app.capture_thought_updates(&[thought_session], layout.thought_entry_capacity());
+
+    let panel = build_thought_panel(&app, thought_content, layout.thought_entry_capacity());
+    let commit_rect = panel.rows[0].commit_rect.expect("commit badge");
+    let row_y = thought_content
+        .bottom()
+        .saturating_sub(panel.rows.len() as u16);
+
+    handle_workspace_click(
+        &mut app,
+        layout,
+        crossterm::event::MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: commit_rect.x,
+            row: row_y,
+            modifiers: KeyModifiers::NONE,
+        },
+    );
+
+    let launch_calls = launcher.calls();
+    assert_eq!(api.open_calls(), Vec::<String>::new());
+    assert_eq!(launch_calls.len(), 1);
+    assert_eq!(launch_calls[0].session_id, session.session_id);
+    assert_eq!(launch_calls[0].cwd, session.cwd);
+    assert_eq!(launch_calls[0].tmux_name, session.tmux_name);
+    assert_eq!(
+        app.message.as_ref().map(|(message, _)| message.as_str()),
+        Some("commit codex: tmux a -t commit-7-123")
+    );
+}
+
+#[test]
+fn clicking_commit_badge_surfaces_commit_launch_errors() {
+    let api = MockApi::new();
+    let launcher = Arc::new(MockCommitLauncher::default());
+    launcher.fail_with("tmux not found");
+    let layout = test_layout(120, 32);
+    let thought_content = layout
+        .thought_content
+        .expect("wide layout enables thought rail");
+    let mut app = make_app_with_commit_launcher(api, launcher);
+    let mut session = session_summary("sess-1", "7", TEST_REPO_THRONGTERM);
+    session.commit_candidate = true;
+    app.merge_sessions(vec![session], layout.overview_field);
+    let mut thought_session = session_summary("sess-1", "7", TEST_REPO_THRONGTERM);
+    thought_session.commit_candidate = true;
+    thought_session.thought = Some("ready to commit".to_string());
+    thought_session.thought_updated_at = Some(
+        DateTime::parse_from_rfc3339("2026-03-29T14:00:05Z")
+            .expect("timestamp")
+            .with_timezone(&Utc),
+    );
+    app.capture_thought_updates(&[thought_session], layout.thought_entry_capacity());
+
+    let panel = build_thought_panel(&app, thought_content, layout.thought_entry_capacity());
+    let commit_rect = panel.rows[0].commit_rect.expect("commit badge");
+    let row_y = thought_content
+        .bottom()
+        .saturating_sub(panel.rows.len() as u16);
+
+    handle_workspace_click(
+        &mut app,
+        layout,
+        crossterm::event::MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: commit_rect.x,
+            row: row_y,
+            modifiers: KeyModifiers::NONE,
+        },
+    );
+
+    assert_eq!(
+        app.message.as_ref().map(|(message, _)| message.as_str()),
+        Some("failed to launch commit codex: tmux not found")
+    );
+}
+
+#[test]
 fn refresh_builds_synthetic_mermaid_row_and_preserves_text_click_behavior() {
     let api = MockApi::new();
     let layout = test_layout(120, 32);
@@ -3836,7 +4033,7 @@ fn refresh_builds_synthetic_mermaid_row_and_preserves_text_click_behavior() {
             commit_rect.x,
             row_y,
         ),
-        None
+        Some(ThoughtPanelAction::LaunchCommitCodex("sess-1".to_string()))
     );
     assert_eq!(
         thought_panel_action_at(
@@ -4347,7 +4544,7 @@ fn mermaid_tab_focuses_first_visible_semantic_target_and_highlights_it() {
     assert!(focused_source_index.is_some());
     assert_eq!(
         cell_at(&renderer, alpha_position.0, alpha_position.1).fg,
-        Color::Cyan
+        MERMAID_FOCUS_COLOR
     );
 }
 
@@ -4369,7 +4566,7 @@ fn mermaid_tab_cycles_forward_and_back_between_visible_targets() {
     assert_eq!(focus_status.as_deref(), Some("focus Beta Node"));
     assert_eq!(
         cell_at(&renderer, beta_position.0, beta_position.1).fg,
-        Color::Cyan
+        MERMAID_FOCUS_COLOR
     );
 
     press_mermaid_backtab(&mut app, layout);
@@ -4581,8 +4778,200 @@ fn mermaid_tab_can_focus_zoomed_edge_labels() {
     assert_eq!(focus_status.as_deref(), Some("focus ships data"));
     assert_eq!(
         cell_at(&renderer, ships_data_position.0, ships_data_position.1).fg,
+        MERMAID_FOCUS_COLOR
+    );
+}
+
+#[test]
+fn mermaid_er_schema_uses_smart_colors_for_titles_types_and_connectors() {
+    let source = "erDiagram\nUSER {\n  uuid id PK\n  string email\n}\nORDER {\n  uuid id PK\n  uuid user_id FK\n}\nUSER ||--o{ ORDER : places\n";
+    let (mut app, mut renderer, layout) = open_mermaid_test_viewer(source, 120, 32);
+
+    for _ in 0..3 {
+        scroll_mermaid(&mut app, layout, MermaidZoomDirection::In);
+    }
+    app.render(&mut renderer, layout);
+
+    let (background_colors, user_owner_key, order_owner_key, owner_colors) = match &app.fish_bowl_mode {
+        FishBowlMode::Mermaid(viewer) => (
+            mermaid_background_colors_set(viewer),
+            mermaid_owner_key_for_text(viewer, "USER"),
+            mermaid_owner_key_for_text(viewer, "ORDER"),
+            mermaid_owner_accent_map(
+                &viewer
+                    .prepared_render
+                    .as_ref()
+                    .expect("prepared render")
+                    .semantic_lines,
+            ),
+        ),
+        FishBowlMode::Aquarium => panic!("expected Mermaid viewer mode"),
+    };
+
+    let user_accent = mermaid_owner_accent_color(&user_owner_key, &owner_colors);
+    let order_accent = mermaid_owner_accent_color(&order_owner_key, &owner_colors);
+    assert_eq!(mermaid_text_color(&renderer, "USER"), user_accent);
+    assert_eq!(mermaid_text_color(&renderer, "ORDER"), order_accent);
+    assert_ne!(user_accent, order_accent);
+    assert_eq!(mermaid_border_color(&renderer, "USER"), user_accent);
+    assert_eq!(mermaid_border_color(&renderer, "ORDER"), order_accent);
+    assert_eq!(mermaid_text_color(&renderer, "uuid"), MERMAID_TYPE_COLOR);
+    assert_eq!(mermaid_text_color(&renderer, "email"), MERMAID_BODY_COLOR);
+    assert_eq!(mermaid_text_color(&renderer, "user_id FK"), MERMAID_BODY_COLOR);
+    assert!(background_colors.contains(&format!("{MERMAID_CONNECTOR_COLOR:?}")));
+}
+
+#[test]
+fn mermaid_flowchart_detail_uses_smart_colors_for_titles_labels_and_connectors() {
+    let source =
+        "graph TD\nsubgraph Group One\nA[Producer]\nB[Consumer]\nend\nA -- ships data --> B\n";
+    let (mut app, mut renderer, layout) = open_mermaid_test_viewer(source, 120, 32);
+
+    press_mermaid_key(&mut app, layout, '+');
+    app.render(&mut renderer, layout);
+
+    let (producer_owner_key, consumer_owner_key, background_colors, owner_colors) =
+        match &app.fish_bowl_mode {
+            FishBowlMode::Mermaid(viewer) => (
+                mermaid_owner_key_for_text(viewer, "Producer"),
+                mermaid_owner_key_for_text(viewer, "Consumer"),
+                mermaid_background_colors_set(viewer),
+                mermaid_owner_accent_map(
+                    &viewer
+                        .prepared_render
+                        .as_ref()
+                        .expect("prepared render")
+                        .semantic_lines,
+                ),
+            ),
+            FishBowlMode::Aquarium => panic!("expected Mermaid viewer mode"),
+        };
+
+    assert_eq!(
+        mermaid_text_color(&renderer, "Producer"),
+        mermaid_owner_accent_color(&producer_owner_key, &owner_colors)
+    );
+    assert_eq!(
+        mermaid_text_color(&renderer, "Consumer"),
+        mermaid_owner_accent_color(&consumer_owner_key, &owner_colors)
+    );
+    assert_eq!(
+        mermaid_border_color(&renderer, "Producer"),
+        mermaid_owner_accent_color(&producer_owner_key, &owner_colors)
+    );
+    assert_eq!(
+        mermaid_text_color(&renderer, "ships data"),
+        MERMAID_EDGE_LABEL_COLOR
+    );
+    assert!(!background_colors.is_empty());
+    assert!(row_text(&renderer, layout.overview_field.y).contains("detail L2"));
+}
+
+#[test]
+fn mermaid_sequence_diagram_connector_fallback_uses_dark_grey_cells() {
+    let (mut app, mut renderer, layout) =
+        open_mermaid_test_viewer("sequenceDiagram\nAlice->>Bob: hello\n", 120, 32);
+
+    app.render(&mut renderer, layout);
+
+    let background_colors = match &app.fish_bowl_mode {
+        FishBowlMode::Mermaid(viewer) => mermaid_background_colors(viewer),
+        FishBowlMode::Aquarium => panic!("expected Mermaid viewer mode"),
+    };
+    assert!(!background_colors.is_empty());
+    assert!(
+        background_colors
+            .iter()
+            .all(|color| *color == MERMAID_CONNECTOR_COLOR),
+        "{background_colors:?}"
+    );
+}
+
+#[test]
+fn mermaid_error_and_unsupported_states_keep_existing_colors() {
+    let (mut app, mut renderer, layout) =
+        open_mermaid_test_viewer("graph TD\nA[Alpha Node] --> B[Beta Node]\n", 120, 32);
+    if let FishBowlMode::Mermaid(viewer) = &mut app.fish_bowl_mode {
+        viewer.unsupported_reason =
+            Some("inline Mermaid rendering is unsupported for TERM=dumb".to_string());
+    }
+    app.render(&mut renderer, layout);
+    let unsupported = find_text_position(
+        &renderer,
+        "inline Mermaid rendering is unsupported for TERM=dumb",
+    )
+    .expect("unsupported text");
+    assert_eq!(cell_at(&renderer, unsupported.0, unsupported.1).fg, Color::DarkGrey);
+    assert_eq!(
+        cell_at(&renderer, layout.overview_field.x, layout.overview_field.y).fg,
         Color::Cyan
     );
+
+    let (mut app, mut renderer, layout) =
+        open_mermaid_test_viewer("graph TD\nA[Alpha Node] --> B[Beta Node]\n", 120, 32);
+    if let FishBowlMode::Mermaid(viewer) = &mut app.fish_bowl_mode {
+        viewer.artifact_error = Some("failed to parse mermaid artifact: bad source".to_string());
+    }
+    app.render(&mut renderer, layout);
+    let artifact_error = find_text_position(&renderer, "failed to parse mermaid artifact")
+        .expect("artifact error text");
+    assert_eq!(
+        cell_at(&renderer, artifact_error.0, artifact_error.1).fg,
+        Color::Red
+    );
+}
+
+#[test]
+fn mermaid_owner_accents_stay_stable_across_pan_and_zoom() {
+    let source = "erDiagram\nUSER {\n  uuid id PK\n  string email\n}\nORDER {\n  uuid id PK\n  uuid user_id FK\n}\nUSER ||--o{ ORDER : places\n";
+    let (mut app, mut renderer, layout) = open_mermaid_test_viewer(source, 120, 32);
+    let content_rect = mermaid_content_rect(layout.overview_field);
+
+    app.render(&mut renderer, layout);
+    let (user_before, order_before) = match &app.fish_bowl_mode {
+        FishBowlMode::Mermaid(viewer) => (
+            viewer
+                .cached_semantic_lines
+                .iter()
+                .find(|line| line.text == "USER")
+                .map(|line| line.color)
+                .expect("USER before"),
+            viewer
+                .cached_semantic_lines
+                .iter()
+                .find(|line| line.text == "ORDER")
+                .map(|line| line.color)
+                .expect("ORDER before"),
+        ),
+        FishBowlMode::Aquarium => panic!("expected Mermaid viewer mode"),
+    };
+
+    app.zoom_mermaid_viewer(MERMAID_SCROLL_ZOOM_STEP_PERCENT, None, content_rect);
+    app.pan_mermaid_viewer(18.0, 12.0);
+    app.render(&mut renderer, layout);
+
+    let (user_after, order_after, prepare_count) = match &app.fish_bowl_mode {
+        FishBowlMode::Mermaid(viewer) => (
+            viewer
+                .cached_semantic_lines
+                .iter()
+                .find(|line| line.text == "USER")
+                .map(|line| line.color)
+                .expect("USER after"),
+            viewer
+                .cached_semantic_lines
+                .iter()
+                .find(|line| line.text == "ORDER")
+                .map(|line| line.color)
+                .expect("ORDER after"),
+            viewer.source_prepare_count,
+        ),
+        FishBowlMode::Aquarium => panic!("expected Mermaid viewer mode"),
+    };
+
+    assert_eq!(user_after, user_before);
+    assert_eq!(order_after, order_before);
+    assert_eq!(prepare_count, 1);
 }
 
 #[test]
@@ -5243,18 +5632,21 @@ fn mermaid_detail_box_rects_wrap_visible_lines_tightly() {
             x: 20,
             y: 11,
             text: "USER".to_string(),
+            color: MERMAID_BODY_COLOR,
         },
         MermaidProjectedLine {
             source_index: 1,
             x: 18,
             y: 12,
             text: "id".to_string(),
+            color: MERMAID_BODY_COLOR,
         },
         MermaidProjectedLine {
             source_index: 2,
             x: 18,
             y: 13,
             text: "email".to_string(),
+            color: MERMAID_BODY_COLOR,
         },
     ];
 
@@ -5439,7 +5831,7 @@ fn mermaid_resize_preserves_focused_semantic_target() {
             highlighted_position.1
         )
         .fg,
-        Color::Cyan
+        MERMAID_FOCUS_COLOR
     );
 }
 

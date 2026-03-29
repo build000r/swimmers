@@ -132,7 +132,10 @@ pub(crate) fn should_append_thought(
     !(freshness == Ordering::Equal && incoming.thought == previous.thought)
 }
 
-pub(crate) fn compare_thought_log_entries(left: &ThoughtLogEntry, right: &ThoughtLogEntry) -> Ordering {
+pub(crate) fn compare_thought_log_entries(
+    left: &ThoughtLogEntry,
+    right: &ThoughtLogEntry,
+) -> Ordering {
     left.updated_at
         .cmp(&right.updated_at)
         .then_with(|| left.tmux_name.cmp(&right.tmux_name))
@@ -145,6 +148,7 @@ pub(crate) enum ThoughtPanelAction {
     ToggleFilterOutMode,
     ToggleFilterOutCwd(String),
     OpenSession { session_id: String, label: String },
+    LaunchCommitCodex(String),
     OpenMermaid(String),
     OpenRepoInEditor(String),
     ClearFilters,
@@ -186,7 +190,10 @@ pub(crate) fn header_filter_row() -> u16 {
     2
 }
 
-pub(crate) fn build_header_filter_layout<C: TuiApi>(app: &App<C>, width: u16) -> HeaderFilterLayout {
+pub(crate) fn build_header_filter_layout<C: TuiApi>(
+    app: &App<C>,
+    width: u16,
+) -> HeaderFilterLayout {
     if width <= 4 {
         return HeaderFilterLayout::default();
     }
@@ -210,8 +217,8 @@ pub(crate) fn build_header_filter_layout<C: TuiApi>(app: &App<C>, width: u16) ->
 
     available_width = available_width.saturating_sub(filter_out_width);
 
-    let show_clear = app.thought_filter.is_active()
-        && available_width >= gap.saturating_add(clear_width);
+    let show_clear =
+        app.thought_filter.is_active() && available_width >= gap.saturating_add(clear_width);
     if show_clear {
         available_width = available_width.saturating_sub(gap.saturating_add(clear_width));
     }
@@ -224,7 +231,7 @@ pub(crate) fn build_header_filter_layout<C: TuiApi>(app: &App<C>, width: u16) ->
     let mut included = Vec::new();
     let active_cwd = app.thought_filter.cwd.as_deref();
     let mut chips_width: u16 = 0;
-    for summary in app.thought_repo_summaries() {
+    for summary in app.header_repo_summaries() {
         let is_include_active = active_cwd.map(|cwd| cwd == summary.cwd).unwrap_or(false);
         let is_excluded = app.thought_filter.excludes_cwd(&summary.cwd);
         let label = if is_include_active {
@@ -317,7 +324,11 @@ pub(crate) fn build_header_filter_layout<C: TuiApi>(app: &App<C>, width: u16) ->
     }
 }
 
-pub(crate) fn render_header_filter_strip<C: TuiApi>(app: &App<C>, renderer: &mut Renderer, width: u16) {
+pub(crate) fn render_header_filter_strip<C: TuiApi>(
+    app: &App<C>,
+    renderer: &mut Renderer,
+    width: u16,
+) {
     let layout = build_header_filter_layout(app, width);
     if let Some(rect) = layout.filter_out_rect {
         let color = if app.thought_filter.filter_out_mode {
@@ -767,8 +778,14 @@ pub(crate) fn thought_panel_action_at<C: TuiApi>(
     let row_start_y = thought_content
         .bottom()
         .saturating_sub(panel.rows.len() as u16);
-    for (offset, row) in panel.rows.into_iter().enumerate() {
+    for (offset, row) in panel.rows.iter().enumerate() {
         let text_rect = row.text_rect.map(|rect| Rect {
+            x: rect.x,
+            y: row_start_y + offset as u16,
+            width: rect.width,
+            height: rect.height,
+        });
+        let commit_rect = row.commit_rect.map(|rect| Rect {
             x: rect.x,
             y: row_start_y + offset as u16,
             width: rect.width,
@@ -780,16 +797,21 @@ pub(crate) fn thought_panel_action_at<C: TuiApi>(
             width: rect.width,
             height: rect.height,
         });
+        if commit_rect.map(|rect| rect.contains(x, y)).unwrap_or(false) {
+            return Some(ThoughtPanelAction::LaunchCommitCodex(
+                row.session_id.clone(),
+            ));
+        }
         if mermaid_rect
             .map(|rect| rect.contains(x, y))
             .unwrap_or(false)
         {
-            return Some(ThoughtPanelAction::OpenMermaid(row.session_id));
+            return Some(ThoughtPanelAction::OpenMermaid(row.session_id.clone()));
         }
         if text_rect.map(|rect| rect.contains(x, y)).unwrap_or(false) {
             return Some(ThoughtPanelAction::OpenSession {
-                session_id: row.session_id,
-                label: row.tmux_name,
+                session_id: row.session_id.clone(),
+                label: row.tmux_name.clone(),
             });
         }
     }

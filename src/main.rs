@@ -104,7 +104,10 @@ fn start_thought_backend(
                 Duration::from_millis(config.thought_tick_ms),
                 thought_config,
             );
-            bridge_runner.spawn(provider, EmitterClient::with_request_sequence(sync_request_sequence));
+            bridge_runner.spawn(
+                provider,
+                EmitterClient::with_request_sequence(sync_request_sequence),
+            );
         }
     }
 }

@@ -120,7 +120,11 @@ pub(crate) fn root_error_message(err: &(dyn StdError + 'static)) -> String {
     last
 }
 
-pub(crate) fn friendly_transport_error(base_url: &str, action: &str, err: &reqwest::Error) -> String {
+pub(crate) fn friendly_transport_error(
+    base_url: &str,
+    action: &str,
+    err: &reqwest::Error,
+) -> String {
     let detail = root_error_message(err);
     let summary = if err.is_timeout() {
         format!("timed out while trying to {action}")
