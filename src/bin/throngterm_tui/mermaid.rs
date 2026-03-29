@@ -182,6 +182,35 @@ pub(crate) struct MermaidOutlineEdge {
     pub(crate) directed: bool,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum MermaidOutlineAxis {
+    Horizontal,
+    Vertical,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct MermaidOutlineSegment {
+    pub(crate) axis: MermaidOutlineAxis,
+    pub(crate) fixed: i32,
+    pub(crate) start: i32,
+    pub(crate) end: i32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct MermaidOutlineArrow {
+    pub(crate) x: i32,
+    pub(crate) y: i32,
+    pub(crate) ch: char,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct MermaidOutlineLabelRect {
+    pub(crate) left: i32,
+    pub(crate) right: i32,
+    pub(crate) top: i32,
+    pub(crate) bottom: i32,
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct MermaidViewerState {
     pub(crate) session_id: String,
@@ -1364,6 +1393,17 @@ pub(crate) fn mermaid_display_text_for_view(
     }
 }
 
+pub(crate) fn mermaid_kind_uses_compact_rows(kind: MermaidSemanticKind) -> bool {
+    matches!(
+        kind,
+        MermaidSemanticKind::SubgraphTitle
+            | MermaidSemanticKind::NodeTitle
+            | MermaidSemanticKind::ClassMember
+            | MermaidSemanticKind::ErAttributeName
+            | MermaidSemanticKind::ErAttributeType
+    )
+}
+
 pub(crate) fn mermaid_line_visible_in_state(
     line: &MermaidSemanticLine,
     view_state: MermaidViewState,
@@ -1456,6 +1496,219 @@ pub(crate) fn mermaid_outline_edge_map(
     edges
 }
 
+pub(crate) fn mermaid_outline_segment(
+    axis: MermaidOutlineAxis,
+    fixed: i32,
+    start: i32,
+    end: i32,
+) -> MermaidOutlineSegment {
+    if start <= end {
+        MermaidOutlineSegment {
+            axis,
+            fixed,
+            start,
+            end,
+        }
+    } else {
+        MermaidOutlineSegment {
+            axis,
+            fixed,
+            start: end,
+            end: start,
+        }
+    }
+}
+
+pub(crate) fn mermaid_outline_intervals_overlap(
+    left_start: i32,
+    left_end: i32,
+    right_start: i32,
+    right_end: i32,
+) -> bool {
+    left_start <= right_end && right_start <= left_end
+}
+
+pub(crate) fn mermaid_outline_overlap_len(
+    left_start: i32,
+    left_end: i32,
+    right_start: i32,
+    right_end: i32,
+) -> i32 {
+    if !mermaid_outline_intervals_overlap(left_start, left_end, right_start, right_end) {
+        return 0;
+    }
+    left_end.min(right_end) - left_start.max(right_start) + 1
+}
+
+pub(crate) fn mermaid_outline_label_rects(
+    nodes: &[MermaidOutlineNode],
+) -> HashMap<String, MermaidOutlineLabelRect> {
+    nodes
+        .iter()
+        .map(|node| {
+            (
+                node.key.clone(),
+                MermaidOutlineLabelRect {
+                    left: node.x as i32,
+                    right: node.x as i32 + node.text_width as i32 - 1,
+                    top: node.y as i32,
+                    bottom: node.y as i32,
+                },
+            )
+        })
+        .collect()
+}
+
+pub(crate) fn mermaid_outline_segment_crosses_label(
+    segment: MermaidOutlineSegment,
+    rect: MermaidOutlineLabelRect,
+) -> bool {
+    match segment.axis {
+        MermaidOutlineAxis::Horizontal => {
+            segment.fixed >= rect.top
+                && segment.fixed <= rect.bottom
+                && mermaid_outline_intervals_overlap(
+                    segment.start,
+                    segment.end,
+                    rect.left,
+                    rect.right,
+                )
+        }
+        MermaidOutlineAxis::Vertical => {
+            segment.fixed >= rect.left
+                && segment.fixed <= rect.right
+                && mermaid_outline_intervals_overlap(
+                    segment.start,
+                    segment.end,
+                    rect.top,
+                    rect.bottom,
+                )
+        }
+    }
+}
+
+pub(crate) fn mermaid_outline_segment_score(
+    segment: MermaidOutlineSegment,
+    reserved_segments: &[MermaidOutlineSegment],
+    label_rects: &HashMap<String, MermaidOutlineLabelRect>,
+    ignore_keys: [&str; 2],
+) -> i32 {
+    let mut score = 0;
+
+    for (key, rect) in label_rects {
+        if ignore_keys.contains(&key.as_str()) {
+            continue;
+        }
+        if mermaid_outline_segment_crosses_label(segment, *rect) {
+            score += 1_000;
+        }
+    }
+
+    for reserved in reserved_segments {
+        match (segment.axis, reserved.axis) {
+            (MermaidOutlineAxis::Horizontal, MermaidOutlineAxis::Horizontal)
+            | (MermaidOutlineAxis::Vertical, MermaidOutlineAxis::Vertical) => {
+                let overlap = mermaid_outline_overlap_len(
+                    segment.start,
+                    segment.end,
+                    reserved.start,
+                    reserved.end,
+                );
+                if overlap == 0 {
+                    continue;
+                }
+                if segment.fixed == reserved.fixed {
+                    score -= overlap * 6;
+                } else if (segment.fixed - reserved.fixed).abs() <= 1 {
+                    score += overlap * 14;
+                } else if (segment.fixed - reserved.fixed).abs() == 2 {
+                    score += overlap * 4;
+                }
+            }
+            _ => {
+                let crosses = mermaid_outline_intervals_overlap(
+                    segment.start,
+                    segment.end,
+                    reserved.fixed,
+                    reserved.fixed,
+                ) && mermaid_outline_intervals_overlap(
+                    reserved.start,
+                    reserved.end,
+                    segment.fixed,
+                    segment.fixed,
+                );
+                if crosses {
+                    score += 2;
+                }
+            }
+        }
+    }
+
+    score
+}
+
+pub(crate) fn mermaid_outline_vertical_lane_candidates(
+    content_rect: Rect,
+    preferred: i32,
+) -> Vec<i32> {
+    let mut out = Vec::new();
+    for offset in [0, -2, 2, -4, 4, -6, 6, -8, 8, -10, 10] {
+        let candidate = preferred + offset;
+        let clamped = candidate.clamp(content_rect.x as i32 + 1, content_rect.right() as i32 - 2);
+        if !out.contains(&clamped) {
+            out.push(clamped);
+        }
+    }
+    out
+}
+
+pub(crate) fn mermaid_outline_horizontal_lane_candidates(
+    content_rect: Rect,
+    preferred: i32,
+) -> Vec<i32> {
+    let mut out = Vec::new();
+    for offset in [0, -1, 1, -2, 2, -3, 3, -4, 4, -5, 5] {
+        let candidate = preferred + offset;
+        let clamped = candidate.clamp(content_rect.y as i32 + 1, content_rect.bottom() as i32 - 2);
+        if !out.contains(&clamped) {
+            out.push(clamped);
+        }
+    }
+    out
+}
+
+pub(crate) fn mermaid_merge_outline_segments(
+    segments: &[MermaidOutlineSegment],
+) -> Vec<MermaidOutlineSegment> {
+    let mut merged = segments.to_vec();
+    merged.sort_by_key(|segment| {
+        (
+            match segment.axis {
+                MermaidOutlineAxis::Horizontal => 0,
+                MermaidOutlineAxis::Vertical => 1,
+            },
+            segment.fixed,
+            segment.start,
+            segment.end,
+        )
+    });
+
+    let mut out: Vec<MermaidOutlineSegment> = Vec::new();
+    for segment in merged {
+        if let Some(last) = out.last_mut() {
+            if last.axis == segment.axis
+                && last.fixed == segment.fixed
+                && segment.start <= last.end + 1
+            {
+                last.end = last.end.max(segment.end);
+                continue;
+            }
+        }
+        out.push(segment);
+    }
+    out
+}
+
 pub(crate) fn mermaid_outline_merge_char(existing: char, next: char) -> char {
     match (existing, next) {
         (' ', ch) => ch,
@@ -1523,77 +1776,300 @@ pub(crate) fn mermaid_draw_outline_vertical(
     }
 }
 
-pub(crate) fn mermaid_render_outline_background(
+pub(crate) fn mermaid_plan_outline_route(
+    content_rect: Rect,
+    edge: &MermaidOutlineEdge,
+    from: &MermaidOutlineNode,
+    to: &MermaidOutlineNode,
+    reserved_segments: &mut Vec<MermaidOutlineSegment>,
+    lane_cache_vertical: &mut HashMap<(i32, i32, i8), i32>,
+    lane_cache_horizontal: &mut HashMap<(i32, i32, i8), i32>,
+    label_rects: &HashMap<String, MermaidOutlineLabelRect>,
+) -> (Vec<MermaidOutlineSegment>, Option<MermaidOutlineArrow>) {
+    let from_center_x = from.x as i32 + from.text_width as i32 / 2;
+    let to_center_x = to.x as i32 + to.text_width as i32 / 2;
+    let dx = to_center_x - from_center_x;
+    let dy = to.y as i32 - from.y as i32;
+    let prefer_horizontal = dx.abs() >= dy.abs();
+
+    if prefer_horizontal {
+        let start_x = if dx >= 0 {
+            from.x as i32 + from.text_width as i32
+        } else {
+            from.x as i32 - 1
+        };
+        let end_x = if dx >= 0 {
+            to.x as i32 - 1
+        } else {
+            to.x as i32 + to.text_width as i32
+        };
+
+        if from.y == to.y {
+            let segment = mermaid_outline_segment(
+                MermaidOutlineAxis::Horizontal,
+                from.y as i32,
+                start_x,
+                end_x,
+            );
+            reserved_segments.push(segment);
+            let arrow = edge.directed.then_some(MermaidOutlineArrow {
+                x: end_x,
+                y: to.y as i32,
+                ch: if dx >= 0 { '>' } else { '<' },
+            });
+            return (vec![segment], arrow);
+        }
+
+        let lane_key = (
+            (from.y as i32).min(to.y as i32),
+            (from.y as i32).max(to.y as i32),
+            dx.signum() as i8,
+        );
+        let preferred_lane = (start_x + end_x) / 2;
+        let lane = if let Some(existing) = lane_cache_vertical.get(&lane_key).copied() {
+            existing
+        } else {
+            let candidates = mermaid_outline_vertical_lane_candidates(content_rect, preferred_lane);
+            let best = candidates
+                .into_iter()
+                .min_by_key(|candidate| {
+                    let segments = [
+                        mermaid_outline_segment(
+                            MermaidOutlineAxis::Horizontal,
+                            from.y as i32,
+                            start_x,
+                            *candidate,
+                        ),
+                        mermaid_outline_segment(
+                            MermaidOutlineAxis::Vertical,
+                            *candidate,
+                            from.y as i32,
+                            to.y as i32,
+                        ),
+                        mermaid_outline_segment(
+                            MermaidOutlineAxis::Horizontal,
+                            to.y as i32,
+                            *candidate,
+                            end_x,
+                        ),
+                    ];
+                    segments
+                        .into_iter()
+                        .map(|segment| {
+                            mermaid_outline_segment_score(
+                                segment,
+                                reserved_segments,
+                                label_rects,
+                                [&edge.from_key, &edge.to_key],
+                            )
+                        })
+                        .sum::<i32>()
+                        + (candidate - preferred_lane).abs() * 2
+                })
+                .unwrap_or(preferred_lane);
+            lane_cache_vertical.insert(lane_key, best);
+            best
+        };
+
+        let segments = vec![
+            mermaid_outline_segment(MermaidOutlineAxis::Horizontal, from.y as i32, start_x, lane),
+            mermaid_outline_segment(
+                MermaidOutlineAxis::Vertical,
+                lane,
+                from.y as i32,
+                to.y as i32,
+            ),
+            mermaid_outline_segment(MermaidOutlineAxis::Horizontal, to.y as i32, lane, end_x),
+        ];
+        reserved_segments.extend(segments.iter().copied());
+        let arrow = edge.directed.then_some(MermaidOutlineArrow {
+            x: end_x,
+            y: to.y as i32,
+            ch: if dx >= 0 { '>' } else { '<' },
+        });
+        (segments, arrow)
+    } else {
+        let start_y = if dy >= 0 {
+            from.y as i32 + 1
+        } else {
+            from.y as i32 - 1
+        };
+        let end_y = if dy >= 0 {
+            to.y as i32 - 1
+        } else {
+            to.y as i32 + 1
+        };
+
+        if from_center_x == to_center_x {
+            let segment = mermaid_outline_segment(
+                MermaidOutlineAxis::Vertical,
+                from_center_x,
+                start_y,
+                end_y,
+            );
+            reserved_segments.push(segment);
+            return (vec![segment], None);
+        }
+
+        let lane_key = (
+            from_center_x.min(to_center_x),
+            from_center_x.max(to_center_x),
+            dy.signum() as i8,
+        );
+        let preferred_lane = (start_y + end_y) / 2;
+        let lane = if let Some(existing) = lane_cache_horizontal.get(&lane_key).copied() {
+            existing
+        } else {
+            let candidates =
+                mermaid_outline_horizontal_lane_candidates(content_rect, preferred_lane);
+            let best = candidates
+                .into_iter()
+                .min_by_key(|candidate| {
+                    let segments = [
+                        mermaid_outline_segment(
+                            MermaidOutlineAxis::Vertical,
+                            from_center_x,
+                            start_y,
+                            *candidate,
+                        ),
+                        mermaid_outline_segment(
+                            MermaidOutlineAxis::Horizontal,
+                            *candidate,
+                            from_center_x,
+                            to_center_x,
+                        ),
+                        mermaid_outline_segment(
+                            MermaidOutlineAxis::Vertical,
+                            to_center_x,
+                            *candidate,
+                            end_y,
+                        ),
+                    ];
+                    segments
+                        .into_iter()
+                        .map(|segment| {
+                            mermaid_outline_segment_score(
+                                segment,
+                                reserved_segments,
+                                label_rects,
+                                [&edge.from_key, &edge.to_key],
+                            )
+                        })
+                        .sum::<i32>()
+                        + (candidate - preferred_lane).abs() * 2
+                })
+                .unwrap_or(preferred_lane);
+            lane_cache_horizontal.insert(lane_key, best);
+            best
+        };
+
+        let segments = vec![
+            mermaid_outline_segment(MermaidOutlineAxis::Vertical, from_center_x, start_y, lane),
+            mermaid_outline_segment(
+                MermaidOutlineAxis::Horizontal,
+                lane,
+                from_center_x,
+                to_center_x,
+            ),
+            mermaid_outline_segment(MermaidOutlineAxis::Vertical, to_center_x, lane, end_y),
+        ];
+        reserved_segments.extend(segments.iter().copied());
+        (segments, None)
+    }
+}
+
+pub(crate) fn mermaid_build_outline_paths(
     content_rect: Rect,
     nodes: &[MermaidOutlineNode],
     edges: impl IntoIterator<Item = MermaidOutlineEdge>,
-) -> Vec<String> {
-    let mut grid = vec![vec![' '; content_rect.width as usize]; content_rect.height as usize];
+) -> (Vec<MermaidOutlineSegment>, Vec<MermaidOutlineArrow>) {
     let node_map = nodes
         .iter()
         .map(|node| (node.key.clone(), node))
         .collect::<HashMap<_, _>>();
+    let label_rects = mermaid_outline_label_rects(nodes);
+    let mut reserved_segments = Vec::new();
+    let mut raw_segments = Vec::new();
+    let mut arrows = Vec::new();
+    let mut lane_cache_vertical = HashMap::new();
+    let mut lane_cache_horizontal = HashMap::new();
 
-    for edge in edges {
+    let mut edge_list = edges.into_iter().collect::<Vec<_>>();
+    edge_list.sort_by_key(|edge| {
+        let from = node_map.get(&edge.from_key);
+        let to = node_map.get(&edge.to_key);
+        match (from, to) {
+            (Some(from), Some(to)) => {
+                let from_center_x = from.x as i32 + from.text_width as i32 / 2;
+                let to_center_x = to.x as i32 + to.text_width as i32 / 2;
+                (
+                    -((to_center_x - from_center_x).abs() + (to.y as i32 - from.y as i32).abs()),
+                    from.y,
+                    to.y,
+                )
+            }
+            _ => (0, 0, 0),
+        }
+    });
+
+    for edge in edge_list {
         let Some(from) = node_map.get(&edge.from_key) else {
             continue;
         };
         let Some(to) = node_map.get(&edge.to_key) else {
             continue;
         };
-
-        let from_center_x = from.x as i32 + from.text_width as i32 / 2;
-        let to_center_x = to.x as i32 + to.text_width as i32 / 2;
-        let dx = to_center_x - from_center_x;
-        let dy = to.y as i32 - from.y as i32;
-
-        if dx.abs() >= dy.abs() {
-            let start_x = if dx >= 0 {
-                from.x as i32 + from.text_width as i32
-            } else {
-                from.x as i32 - 1
-            };
-            let end_x = if dx >= 0 {
-                to.x as i32 - 1
-            } else {
-                to.x as i32 + to.text_width as i32
-            };
-            let mid_x = (start_x + end_x) / 2;
-            mermaid_draw_outline_horizontal(&mut grid, content_rect, start_x, mid_x, from.y as i32);
-            mermaid_draw_outline_vertical(
-                &mut grid,
-                content_rect,
-                mid_x,
-                from.y as i32,
-                to.y as i32,
-            );
-            mermaid_draw_outline_horizontal(&mut grid, content_rect, mid_x, end_x, to.y as i32);
-            if edge.directed {
-                let arrow = if dx >= 0 { '>' } else { '<' };
-                mermaid_set_outline_cell(&mut grid, content_rect, end_x, to.y as i32, arrow);
-            }
-        } else {
-            let start_y = if dy >= 0 {
-                from.y as i32 + 1
-            } else {
-                from.y as i32 - 1
-            };
-            let end_y = if dy >= 0 {
-                to.y as i32 - 1
-            } else {
-                to.y as i32 + 1
-            };
-            let mid_y = (start_y + end_y) / 2;
-            mermaid_draw_outline_vertical(&mut grid, content_rect, from_center_x, start_y, mid_y);
-            mermaid_draw_outline_horizontal(
-                &mut grid,
-                content_rect,
-                from_center_x,
-                to_center_x,
-                mid_y,
-            );
-            mermaid_draw_outline_vertical(&mut grid, content_rect, to_center_x, mid_y, end_y);
+        let (segments, arrow) = mermaid_plan_outline_route(
+            content_rect,
+            &edge,
+            from,
+            to,
+            &mut reserved_segments,
+            &mut lane_cache_vertical,
+            &mut lane_cache_horizontal,
+            &label_rects,
+        );
+        raw_segments.extend(segments);
+        if let Some(arrow) = arrow {
+            arrows.push(arrow);
         }
+    }
+
+    (mermaid_merge_outline_segments(&raw_segments), arrows)
+}
+
+pub(crate) fn mermaid_render_outline_background(
+    content_rect: Rect,
+    nodes: &[MermaidOutlineNode],
+    edges: impl IntoIterator<Item = MermaidOutlineEdge>,
+) -> Vec<String> {
+    let mut grid = vec![vec![' '; content_rect.width as usize]; content_rect.height as usize];
+
+    let (segments, arrows) = mermaid_build_outline_paths(content_rect, nodes, edges);
+    for segment in segments {
+        match segment.axis {
+            MermaidOutlineAxis::Horizontal => {
+                mermaid_draw_outline_horizontal(
+                    &mut grid,
+                    content_rect,
+                    segment.start,
+                    segment.end,
+                    segment.fixed,
+                );
+            }
+            MermaidOutlineAxis::Vertical => {
+                mermaid_draw_outline_vertical(
+                    &mut grid,
+                    content_rect,
+                    segment.fixed,
+                    segment.start,
+                    segment.end,
+                );
+            }
+        }
+    }
+    for arrow in arrows {
+        mermaid_set_outline_cell(&mut grid, content_rect, arrow.x, arrow.y, arrow.ch);
     }
 
     grid.into_iter()
@@ -1621,6 +2097,8 @@ pub(crate) fn project_mermaid_semantic_lines(
         priority: u8,
         area_rank: i32,
         kind: MermaidSemanticKind,
+        owner_key: String,
+        compact_rows: bool,
         source_index: usize,
         x: u16,
         y: u16,
@@ -1690,11 +2168,44 @@ pub(crate) fn project_mermaid_semantic_lines(
             priority: line.kind.priority(),
             area_rank: -((owner_cols * owner_rows * 10.0).round() as i32),
             kind: line.kind,
+            owner_key: line.owner_key.clone(),
+            compact_rows: mermaid_kind_uses_compact_rows(line.kind),
             source_index,
             x: screen_x as u16,
             y: screen_y as u16,
             text: clipped,
         });
+    }
+
+    let mut compact_owner_rows = HashMap::<String, Vec<u16>>::new();
+    for candidate in &candidates {
+        if !candidate.compact_rows {
+            continue;
+        }
+        compact_owner_rows
+            .entry(candidate.owner_key.clone())
+            .or_default()
+            .push(candidate.y);
+    }
+    for rows in compact_owner_rows.values_mut() {
+        rows.sort_unstable();
+        rows.dedup();
+    }
+    let max_row = content_rect.bottom().saturating_sub(1);
+    for candidate in &mut candidates {
+        if !candidate.compact_rows {
+            continue;
+        }
+        let Some(rows) = compact_owner_rows.get(&candidate.owner_key) else {
+            continue;
+        };
+        let Some(base_row) = rows.first().copied() else {
+            continue;
+        };
+        let Some(compact_offset) = rows.iter().position(|row| *row == candidate.y) else {
+            continue;
+        };
+        candidate.y = base_row.saturating_add(compact_offset as u16).min(max_row);
     }
 
     candidates.sort_by_key(|line| (line.priority, line.area_rank, line.y, line.x));

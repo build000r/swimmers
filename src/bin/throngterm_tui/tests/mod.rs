@@ -4154,6 +4154,107 @@ fn mermaid_outline_background_stays_sparse_for_simple_flowchart() {
 }
 
 #[test]
+fn mermaid_merge_outline_segments_coalesces_overlapping_ranges() {
+    let merged = mermaid_merge_outline_segments(&[
+        MermaidOutlineSegment {
+            axis: MermaidOutlineAxis::Horizontal,
+            fixed: 8,
+            start: 10,
+            end: 16,
+        },
+        MermaidOutlineSegment {
+            axis: MermaidOutlineAxis::Horizontal,
+            fixed: 8,
+            start: 14,
+            end: 22,
+        },
+        MermaidOutlineSegment {
+            axis: MermaidOutlineAxis::Vertical,
+            fixed: 30,
+            start: 4,
+            end: 7,
+        },
+        MermaidOutlineSegment {
+            axis: MermaidOutlineAxis::Vertical,
+            fixed: 30,
+            start: 8,
+            end: 11,
+        },
+    ]);
+
+    assert_eq!(
+        merged,
+        vec![
+            MermaidOutlineSegment {
+                axis: MermaidOutlineAxis::Horizontal,
+                fixed: 8,
+                start: 10,
+                end: 22,
+            },
+            MermaidOutlineSegment {
+                axis: MermaidOutlineAxis::Vertical,
+                fixed: 30,
+                start: 4,
+                end: 11,
+            },
+        ]
+    );
+}
+
+#[test]
+fn mermaid_outline_background_coalesces_duplicate_edges() {
+    let content_rect = Rect {
+        x: 0,
+        y: 0,
+        width: 40,
+        height: 12,
+    };
+    let nodes = vec![
+        MermaidOutlineNode {
+            key: "node:left".to_string(),
+            source_index: 0,
+            x: 2,
+            y: 2,
+            text_width: 4,
+        },
+        MermaidOutlineNode {
+            key: "node:right".to_string(),
+            source_index: 1,
+            x: 26,
+            y: 8,
+            text_width: 5,
+        },
+    ];
+    let single = mermaid_render_outline_background(
+        content_rect,
+        &nodes,
+        [MermaidOutlineEdge {
+            from_key: "node:left".to_string(),
+            to_key: "node:right".to_string(),
+            directed: true,
+        }],
+    );
+    let duplicated = mermaid_render_outline_background(
+        content_rect,
+        &nodes,
+        [
+            MermaidOutlineEdge {
+                from_key: "node:left".to_string(),
+                to_key: "node:right".to_string(),
+                directed: true,
+            },
+            MermaidOutlineEdge {
+                from_key: "node:left".to_string(),
+                to_key: "node:right".to_string(),
+                directed: true,
+            },
+        ],
+    );
+
+    assert_eq!(duplicated, single);
+}
+
+#[test]
 fn mermaid_tab_focuses_first_visible_semantic_target_and_highlights_it() {
     let (mut app, mut renderer, layout) =
         open_mermaid_test_viewer("graph TD\nA[Alpha Node] --> B[Beta Node]\n", 120, 32);
@@ -4679,6 +4780,66 @@ fn mermaid_semantic_labels_clip_to_viewport_bounds() {
     assert_eq!(projected[0].x, content_rect.x);
     assert_eq!(projected[0].y, content_rect.y + 1);
     assert_eq!(projected[0].text, "Alpha Node");
+}
+
+#[test]
+fn mermaid_compacts_multiline_node_text_to_consecutive_rows() {
+    let content_rect = Rect {
+        x: 10,
+        y: 10,
+        width: 30,
+        height: 8,
+    };
+    let projected = project_mermaid_semantic_lines(
+        &[
+            MermaidSemanticLine {
+                text: "first line".to_string(),
+                diagram_x: 0.0,
+                diagram_y: 4.0,
+                anchor: MermaidTextAnchor::Start,
+                kind: MermaidSemanticKind::NodeTitle,
+                owner_key: "node:A".to_string(),
+                outline_eligible: false,
+                owner_width: 20.0,
+                owner_height: 20.0,
+            },
+            MermaidSemanticLine {
+                text: "second line".to_string(),
+                diagram_x: 0.0,
+                diagram_y: 12.0,
+                anchor: MermaidTextAnchor::Start,
+                kind: MermaidSemanticKind::NodeTitle,
+                owner_key: "node:A".to_string(),
+                outline_eligible: false,
+                owner_width: 20.0,
+                owner_height: 20.0,
+            },
+            MermaidSemanticLine {
+                text: "third line".to_string(),
+                diagram_x: 0.0,
+                diagram_y: 20.0,
+                anchor: MermaidTextAnchor::Start,
+                kind: MermaidSemanticKind::NodeTitle,
+                owner_key: "node:A".to_string(),
+                outline_eligible: false,
+                owner_width: 20.0,
+                owner_height: 20.0,
+            },
+        ],
+        MermaidViewportTransform {
+            scale: 1.0,
+            tx: 0.0,
+            ty: 0.0,
+        },
+        content_rect,
+        MermaidViewState::L2,
+    );
+
+    assert_eq!(projected.len(), 3);
+    assert_eq!(
+        projected.iter().map(|line| line.y).collect::<Vec<_>>(),
+        vec![content_rect.y + 1, content_rect.y + 2, content_rect.y + 3]
+    );
 }
 
 #[test]
