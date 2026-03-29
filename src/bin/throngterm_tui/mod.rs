@@ -1,6 +1,6 @@
 use std::cmp::Ordering;
 use std::collections::hash_map::DefaultHasher;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::env;
 use std::error::Error as StdError;
 use std::f32::consts::TAU;
@@ -19,8 +19,7 @@ use crossterm::{
     cursor, execute, queue,
     style::{Color, Print, ResetColor, SetForegroundColor},
     terminal::{
-        self as crossterm_terminal, Clear, ClearType, EnterAlternateScreen,
-        LeaveAlternateScreen,
+        self as crossterm_terminal, Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen,
     },
 };
 use futures::future::BoxFuture;
@@ -71,8 +70,9 @@ const THOUGHT_MERMAID_LABEL: &str = "[mmd]";
 const MERMAID_BACK_LABEL: &str = "[back to bowl]";
 const MERMAID_VIEW_MIN_WIDTH: u16 = 16;
 const MERMAID_VIEW_MIN_HEIGHT: u16 = 8;
-const MERMAID_ZOOM_STEP: f32 = 1.2;
-const MERMAID_MIN_ZOOM: f32 = 0.5;
+const MERMAID_KEYBOARD_ZOOM_STEP_PERCENT: i16 = 50;
+const MERMAID_SCROLL_ZOOM_STEP_PERCENT: i16 = 25;
+const MERMAID_MIN_ZOOM: f32 = 1.0;
 const MERMAID_MAX_ZOOM: f32 = 8.0;
 
 mod api;

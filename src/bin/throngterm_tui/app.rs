@@ -992,6 +992,21 @@ impl<C: TuiApi> App<C> {
             return;
         };
         let old_zoom = viewer.zoom.clamp(MERMAID_MIN_ZOOM, MERMAID_MAX_ZOOM);
+        if mermaid_is_er_viewer(viewer) {
+            let direction = delta_percent.signum() as i8;
+            if direction == 0 {
+                return;
+            }
+            let new_zoom = mermaid_er_zoom_step(old_zoom, direction);
+            if (new_zoom - old_zoom).abs() < f32::EPSILON {
+                return;
+            }
+            viewer.zoom = new_zoom;
+            viewer.center_x = 0.0;
+            viewer.center_y = 0.0;
+            viewer.invalidate_viewport_cache();
+            return;
+        }
         let old_percent = mermaid_zoom_percent(old_zoom);
         let min_percent = mermaid_zoom_percent(MERMAID_MIN_ZOOM);
         let max_percent = mermaid_zoom_percent(MERMAID_MAX_ZOOM);

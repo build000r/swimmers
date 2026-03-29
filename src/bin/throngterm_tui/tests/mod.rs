@@ -815,6 +815,57 @@ fn mermaid_background_charset(viewer: &MermaidViewerState) -> Vec<char> {
         .collect()
 }
 
+fn mermaid_render_bounds(
+    viewer: &MermaidViewerState,
+    content_rect: Rect,
+) -> Option<(u16, u16, u16, u16)> {
+    let mut left = u16::MAX;
+    let mut right = 0u16;
+    let mut top = u16::MAX;
+    let mut bottom = 0u16;
+    let mut saw_any = false;
+
+    for (row_offset, line) in viewer.cached_lines.iter().enumerate() {
+        let y = content_rect.y + row_offset as u16;
+        for (column_offset, ch) in line.chars().enumerate() {
+            if ch == ' ' {
+                continue;
+            }
+            let x = content_rect.x + column_offset as u16;
+            left = left.min(x);
+            right = right.max(x);
+            top = top.min(y);
+            bottom = bottom.max(y);
+            saw_any = true;
+        }
+    }
+
+    for line in &viewer.cached_semantic_lines {
+        let text_right = line
+            .x
+            .saturating_add(display_width(&line.text).saturating_sub(1));
+        left = left.min(line.x);
+        right = right.max(text_right);
+        top = top.min(line.y);
+        bottom = bottom.max(line.y);
+        saw_any = true;
+    }
+
+    saw_any.then_some((left, right, top, bottom))
+}
+
+fn er_order_node(owner_key: &str, x: f32, y: f32, neighbors: &[&str]) -> MermaidErOrderNode {
+    MermaidErOrderNode {
+        owner_key: owner_key.to_string(),
+        x,
+        y,
+        neighbors: neighbors
+            .iter()
+            .map(|neighbor| (*neighbor).to_string())
+            .collect(),
+    }
+}
+
 fn press_mermaid_key(app: &mut App<MockApi>, layout: WorkspaceLayout, key: char) {
     assert!(handle_key_event(
         app,
@@ -836,6 +887,28 @@ fn press_mermaid_backtab(app: &mut App<MockApi>, layout: WorkspaceLayout) {
         app,
         layout,
         KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT),
+    ));
+}
+
+fn scroll_mermaid(
+    app: &mut App<MockApi>,
+    layout: WorkspaceLayout,
+    direction: MermaidZoomDirection,
+) {
+    let column = layout.overview_field.x + layout.overview_field.width / 2;
+    let row = layout.overview_field.y + layout.overview_field.height / 2;
+    assert!(app.handle_mermaid_scroll(
+        layout.overview_field,
+        crossterm::event::MouseEvent {
+            kind: match direction {
+                MermaidZoomDirection::In => MouseEventKind::ScrollUp,
+                MermaidZoomDirection::Out => MouseEventKind::ScrollDown,
+            },
+            column,
+            row,
+            modifiers: KeyModifiers::NONE,
+        },
+        direction,
     ));
 }
 
@@ -4309,14 +4382,19 @@ fn mermaid_tab_cycles_forward_and_back_between_visible_targets() {
 }
 
 #[test]
-fn mermaid_er_overview_hides_attribute_detail_until_zoomed() {
+fn mermaid_er_entities_state_shows_only_entity_names_and_is_centered() {
     let source = "erDiagram\nUSER {\n  uuid id PK\n  string email\n}\nORDER {\n  uuid id PK\n  uuid user_id FK\n}\nUSER ||--o{ ORDER : places\n";
     let (mut app, mut renderer, layout) = open_mermaid_test_viewer(source, 120, 32);
 
     app.render(&mut renderer, layout);
 
-    let semantic_texts = match &app.fish_bowl_mode {
-        FishBowlMode::Mermaid(viewer) => cached_semantic_texts(viewer),
+    let (semantic_texts, bounds, content_rect) = match &app.fish_bowl_mode {
+        FishBowlMode::Mermaid(viewer) => (
+            cached_semantic_texts(viewer),
+            mermaid_render_bounds(viewer, viewer.content_rect.expect("content rect"))
+                .expect("render bounds"),
+            viewer.content_rect.expect("content rect"),
+        ),
         FishBowlMode::Aquarium => panic!("expected Mermaid viewer mode"),
     };
     assert!(semantic_texts.contains(&"USER".to_string()));
@@ -4325,7 +4403,13 @@ fn mermaid_er_overview_hides_attribute_detail_until_zoomed() {
     assert!(!semantic_texts.contains(&"user_id".to_string()));
     assert!(!semantic_texts.contains(&"uuid".to_string()));
     assert!(!semantic_texts.contains(&"places".to_string()));
-    assert!(row_text(&renderer, layout.overview_field.y).contains("outline"));
+    let center_x = (bounds.0 + bounds.1) / 2;
+    let center_y = (bounds.2 + bounds.3) / 2;
+    let expected_x = content_rect.x + content_rect.width / 2;
+    let expected_y = content_rect.y + content_rect.height / 2;
+    assert!((center_x as i32 - expected_x as i32).abs() <= 2);
+    assert!((center_y as i32 - expected_y as i32).abs() <= 1);
+    assert!(row_text(&renderer, layout.overview_field.y).contains("ER entities"));
 }
 
 #[test]
@@ -4433,6 +4517,7 @@ fn mermaid_er_overview_shows_compact_entity_words_without_svg_text_noise() {
             .all(|ch| matches!(ch, '|' | '_' | '\\' | '>' | '<')),
         "{background_chars:?}"
     );
+    assert!(row_text(&renderer, layout.overview_field.y).contains("ER entities"));
 }
 
 #[test]
@@ -4501,13 +4586,11 @@ fn mermaid_tab_can_focus_zoomed_edge_labels() {
 }
 
 #[test]
-fn mermaid_er_zoom_reveals_attribute_names_before_types() {
+fn mermaid_er_scroll_enters_keys_then_columns_then_schema_states() {
     let source = "erDiagram\nUSER {\n  uuid id PK\n  string email\n}\n";
     let (mut app, mut renderer, layout) = open_mermaid_test_viewer(source, 120, 32);
 
-    for _ in 0..2 {
-        press_mermaid_key(&mut app, layout, '+');
-    }
+    scroll_mermaid(&mut app, layout, MermaidZoomDirection::In);
     app.render(&mut renderer, layout);
 
     let semantic_texts = match &app.fish_bowl_mode {
@@ -4516,11 +4599,11 @@ fn mermaid_er_zoom_reveals_attribute_names_before_types() {
     };
     assert!(semantic_texts.contains(&"USER".to_string()));
     assert!(
-        semantic_texts.contains(&"id".to_string()),
+        semantic_texts.contains(&"id PK".to_string()),
         "{semantic_texts:?}"
     );
     assert!(
-        semantic_texts.contains(&"email".to_string()),
+        !semantic_texts.contains(&"email".to_string()),
         "{semantic_texts:?}"
     );
     assert!(
@@ -4532,20 +4615,12 @@ fn mermaid_er_zoom_reveals_attribute_names_before_types() {
         "{semantic_texts:?}"
     );
     assert!(
-        row_text(&renderer, layout.overview_field.y).contains("detail L2"),
+        row_text(&renderer, layout.overview_field.y).contains("ER keys"),
         "status row: {}",
         row_text(&renderer, layout.overview_field.y)
     );
-}
 
-#[test]
-fn mermaid_er_zoom_reveals_attribute_types_at_detail_l3() {
-    let source = "erDiagram\nUSER {\n  uuid id PK\n  string email\n}\n";
-    let (mut app, mut renderer, layout) = open_mermaid_test_viewer(source, 120, 32);
-
-    for _ in 0..3 {
-        press_mermaid_key(&mut app, layout, '+');
-    }
+    scroll_mermaid(&mut app, layout, MermaidZoomDirection::In);
     app.render(&mut renderer, layout);
 
     let semantic_texts = match &app.fish_bowl_mode {
@@ -4553,36 +4628,56 @@ fn mermaid_er_zoom_reveals_attribute_types_at_detail_l3() {
         FishBowlMode::Aquarium => panic!("expected Mermaid viewer mode"),
     };
     assert!(
-        semantic_texts.contains(&"uuid".to_string()),
+        semantic_texts.contains(&"email".to_string()),
         "{semantic_texts:?}"
     );
     assert!(
-        semantic_texts.contains(&"string".to_string()),
+        semantic_texts.contains(&"id PK".to_string()),
         "{semantic_texts:?}"
     );
     assert!(
-        row_text(&renderer, layout.overview_field.y).contains("detail L3"),
+        !semantic_texts.contains(&"uuid".to_string()),
+        "{semantic_texts:?}"
+    );
+    assert!(
+        row_text(&renderer, layout.overview_field.y).contains("ER columns"),
         "status row: {}",
         row_text(&renderer, layout.overview_field.y)
     );
+
+    scroll_mermaid(&mut app, layout, MermaidZoomDirection::In);
+    app.render(&mut renderer, layout);
+
+    let semantic_texts = match &app.fish_bowl_mode {
+        FishBowlMode::Mermaid(viewer) => cached_semantic_texts(viewer),
+        FishBowlMode::Aquarium => panic!("expected Mermaid viewer mode"),
+    };
     assert!(
-        row_text(&renderer, layout.overview_field.y).contains("zoom 250%"),
+        semantic_texts.iter().any(|text| text.contains("uuid")),
+        "{semantic_texts:?}"
+    );
+    assert!(
+        semantic_texts.iter().any(|text| text.contains("string")),
+        "{semantic_texts:?}"
+    );
+    assert!(
+        row_text(&renderer, layout.overview_field.y).contains("ER schema"),
         "status row: {}",
         row_text(&renderer, layout.overview_field.y)
     );
 }
 
 #[test]
-fn mermaid_reset_fit_hides_subordinate_detail() {
+fn mermaid_er_reset_fit_returns_to_entities_state() {
     let source = "erDiagram\nUSER {\n  uuid id PK\n  string email\n}\n";
     let (mut app, mut renderer, layout) = open_mermaid_test_viewer(source, 120, 32);
 
     for _ in 0..3 {
-        press_mermaid_key(&mut app, layout, '+');
+        scroll_mermaid(&mut app, layout, MermaidZoomDirection::In);
     }
     app.render(&mut renderer, layout);
     assert!(
-        row_text(&renderer, layout.overview_field.y).contains("detail L3"),
+        row_text(&renderer, layout.overview_field.y).contains("ER schema"),
         "status row: {}",
         row_text(&renderer, layout.overview_field.y)
     );
@@ -4599,15 +4694,210 @@ fn mermaid_reset_fit_hides_subordinate_detail() {
         FishBowlMode::Aquarium => panic!("expected Mermaid viewer mode"),
     };
     assert!(semantic_texts.contains(&"USER".to_string()));
-    assert!(!semantic_texts.contains(&"id".to_string()));
+    assert!(!semantic_texts.contains(&"id PK".to_string()));
     assert!(!semantic_texts.contains(&"email".to_string()));
     assert!(!semantic_texts.contains(&"uuid".to_string()));
     assert!(!semantic_texts.contains(&"string".to_string()));
-    assert!(row_text(&renderer, layout.overview_field.y).contains("outline"));
+    assert!(row_text(&renderer, layout.overview_field.y).contains("ER entities"));
     assert!(
         row_text(&renderer, layout.overview_field.y).contains("fit 100%"),
         "status row: {}",
         row_text(&renderer, layout.overview_field.y)
+    );
+}
+
+#[test]
+fn mermaid_er_dense_schema_fit_is_centered_and_uses_the_viewport() {
+    let source = r#"erDiagram
+applications {
+  uuid id PK
+}
+conversation_anchor_types {
+  uuid id PK
+  uuid application_id FK
+  string anchor_type
+}
+conversation_anchors {
+  uuid id PK
+  uuid application_id FK
+  uuid anchor_type_id FK
+  string anchor_key
+}
+conversations {
+  uuid id PK
+  uuid application_id FK
+  uuid anchor_id FK
+  string conversation_type
+}
+conversation_policy_bindings {
+  uuid id PK
+  uuid conversation_id FK
+  string policy_template_key
+}
+conversation_named_participants {
+  uuid id PK
+  uuid conversation_id FK
+  string actor_type
+}
+conversation_effective_participants {
+  uuid id PK
+  uuid conversation_id FK
+  boolean can_read
+}
+conversation_messages {
+  uuid id PK
+  uuid conversation_id FK
+  string kind
+}
+conversation_events {
+  uuid id PK
+  uuid conversation_id FK
+  uuid message_id FK
+}
+conversation_reads {
+  uuid id PK
+  uuid conversation_id FK
+  uuid last_event_id FK
+}
+applications ||--o{ conversation_anchor_types : owns
+applications ||--o{ conversation_anchors : scopes
+applications ||--o{ conversations : scopes
+conversation_anchor_types ||--o{ conversation_anchors : categorizes
+conversation_anchors ||--o{ conversations : roots
+conversations ||--o{ conversation_policy_bindings : uses
+conversations ||--o{ conversation_named_participants : includes
+conversations ||--o{ conversation_effective_participants : materializes
+conversations ||--o{ conversation_messages : stores
+conversations ||--o{ conversation_events : records
+conversations ||--o{ conversation_reads : tracks
+"#;
+    let (mut app, mut renderer, layout) = open_mermaid_test_viewer(source, 160, 48);
+
+    app.render(&mut renderer, layout);
+
+    let (semantic_texts, bounds, content_rect) = match &app.fish_bowl_mode {
+        FishBowlMode::Mermaid(viewer) => (
+            cached_semantic_texts(viewer),
+            mermaid_render_bounds(viewer, viewer.content_rect.expect("content rect"))
+                .expect("render bounds"),
+            viewer.content_rect.expect("content rect"),
+        ),
+        FishBowlMode::Aquarium => panic!("expected Mermaid viewer mode"),
+    };
+    assert!(semantic_texts.len() >= 6, "{semantic_texts:?}");
+    assert!(
+        !semantic_texts.iter().any(|text| text.contains(" PK")),
+        "{semantic_texts:?}"
+    );
+    assert!(
+        !semantic_texts.iter().any(|text| text.contains(" FK")),
+        "{semantic_texts:?}"
+    );
+    let center_x = (bounds.0 + bounds.1) / 2;
+    let center_y = (bounds.2 + bounds.3) / 2;
+    let expected_x = content_rect.x + content_rect.width / 2;
+    let expected_y = content_rect.y + content_rect.height / 2;
+    assert!((center_x as i32 - expected_x as i32).abs() <= 3);
+    assert!((center_y as i32 - expected_y as i32).abs() <= 2);
+    let width_occupancy = f32::from(bounds.1.saturating_sub(bounds.0).saturating_add(1))
+        / f32::from(content_rect.width);
+    let height_occupancy = f32::from(bounds.3.saturating_sub(bounds.2).saturating_add(1))
+        / f32::from(content_rect.height);
+    assert!(width_occupancy >= 0.40, "{width_occupancy}");
+    assert!(height_occupancy >= 0.30, "{height_occupancy}");
+    assert!(row_text(&renderer, layout.overview_field.y).contains("ER entities"));
+}
+
+#[test]
+fn mermaid_er_scroll_states_are_discrete_and_reversible() {
+    let source = "erDiagram\nUSER {\n  uuid id PK\n  string email\n}\nORDER {\n  uuid id PK\n  uuid user_id FK\n}\nUSER ||--o{ ORDER : places\n";
+    let (mut app, mut renderer, layout) = open_mermaid_test_viewer(source, 120, 32);
+
+    app.render(&mut renderer, layout);
+    assert!(row_text(&renderer, layout.overview_field.y).contains("ER entities"));
+    scroll_mermaid(&mut app, layout, MermaidZoomDirection::In);
+    app.render(&mut renderer, layout);
+    assert!(row_text(&renderer, layout.overview_field.y).contains("ER keys"));
+    scroll_mermaid(&mut app, layout, MermaidZoomDirection::In);
+    app.render(&mut renderer, layout);
+    assert!(row_text(&renderer, layout.overview_field.y).contains("ER columns"));
+    scroll_mermaid(&mut app, layout, MermaidZoomDirection::Out);
+    app.render(&mut renderer, layout);
+    let status = row_text(&renderer, layout.overview_field.y);
+    assert!(status.contains("ER keys"), "{status}");
+    assert!(!status.contains("detail L"), "{status}");
+}
+
+#[test]
+fn mermaid_er_zoom_resets_pan_and_recenters_packed_layout() {
+    let source = "erDiagram\nUSER {\n  uuid id PK\n  string email\n}\nORDER {\n  uuid id PK\n  uuid user_id FK\n}\nUSER ||--o{ ORDER : places\n";
+    let (mut app, mut renderer, layout) = open_mermaid_test_viewer(source, 120, 32);
+
+    if let FishBowlMode::Mermaid(viewer) = &mut app.fish_bowl_mode {
+        viewer.center_x = 500.0;
+        viewer.center_y = 400.0;
+        viewer.invalidate_viewport_cache();
+    }
+    scroll_mermaid(&mut app, layout, MermaidZoomDirection::In);
+    app.render(&mut renderer, layout);
+
+    let (center_x, center_y, bounds, content_rect) = match &app.fish_bowl_mode {
+        FishBowlMode::Mermaid(viewer) => (
+            viewer.center_x,
+            viewer.center_y,
+            mermaid_render_bounds(viewer, viewer.content_rect.expect("content rect"))
+                .expect("render bounds"),
+            viewer.content_rect.expect("content rect"),
+        ),
+        FishBowlMode::Aquarium => panic!("expected Mermaid viewer mode"),
+    };
+    assert_ne!(center_x, 500.0);
+    assert_ne!(center_y, 400.0);
+    let center_x = (bounds.0 + bounds.1) / 2;
+    let center_y = (bounds.2 + bounds.3) / 2;
+    let expected_x = content_rect.x + content_rect.width / 2;
+    let expected_y = content_rect.y + content_rect.height / 2;
+    assert!((center_x as i32 - expected_x as i32).abs() <= 2);
+    assert!((center_y as i32 - expected_y as i32).abs() <= 1);
+}
+
+#[test]
+fn mermaid_er_order_clusters_connected_nodes_before_isolated_scanline_nodes() {
+    let order = mermaid_order_er_nodes(&[
+        er_order_node("node:a_leaf", 0.0, 0.0, &["node:a_hub"]),
+        er_order_node("node:b_isolated", 10.0, 0.0, &[]),
+        er_order_node("node:a_hub", 0.0, 10.0, &["node:a_leaf", "node:a_tail"]),
+        er_order_node("node:a_tail", 0.0, 20.0, &["node:a_hub"]),
+    ]);
+
+    assert_eq!(
+        order,
+        vec![
+            "node:a_hub".to_string(),
+            "node:a_leaf".to_string(),
+            "node:a_tail".to_string(),
+            "node:b_isolated".to_string(),
+        ]
+    );
+}
+
+#[test]
+fn mermaid_er_order_keeps_components_contiguous_when_xy_positions_interleave() {
+    let order = mermaid_order_er_nodes(&[
+        er_order_node("node:north_a", 0.0, 0.0, &["node:north_b"]),
+        er_order_node("node:south_a", 20.0, 0.0, &["node:south_b"]),
+        er_order_node("node:north_b", 0.0, 10.0, &["node:north_a"]),
+        er_order_node("node:south_b", 20.0, 10.0, &["node:south_a"]),
+    ]);
+
+    assert_eq!(
+        order,
+        vec![
+            "node:north_a".to_string(),
+            "node:north_b".to_string(),
+            "node:south_a".to_string(),
+            "node:south_b".to_string(),
+        ]
     );
 }
 
@@ -4991,7 +5281,7 @@ fn mermaid_er_detail_view_draws_compact_box_around_visible_lines() {
     app.render(&mut renderer, layout);
 
     let user = find_text_position(&renderer, "USER").expect("USER label");
-    let id = find_text_position(&renderer, "id").expect("id label");
+    let id = find_text_position(&renderer, "id PK").expect("id label");
     let email = find_text_position(&renderer, "email").expect("email label");
 
     assert_eq!(id.1, user.1 + 1);
@@ -4999,7 +5289,7 @@ fn mermaid_er_detail_view_draws_compact_box_around_visible_lines() {
 
     let left = user.0.min(id.0).min(email.0).saturating_sub(1);
     let right = (user.0 + display_width("USER") - 1)
-        .max(id.0 + display_width("id") - 1)
+        .max(id.0 + display_width("id PK") - 1)
         .max(email.0 + display_width("email") - 1)
         .saturating_add(1);
 
@@ -5081,7 +5371,7 @@ fn mermaid_er_semantic_columns_cap_type_to_name_gap_at_three_spaces() {
     };
 
     let uuid = x_for("uuid");
-    let id = x_for("id");
+    let id = x_for("id PK");
     let decimal = x_for("decimal");
     let total = x_for("total");
     let bool_pos = x_for("bool");
