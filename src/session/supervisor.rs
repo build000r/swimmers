@@ -2293,8 +2293,8 @@ case "$cmd" in
     ;;
   display-message)
     case "${5-}" in
-      "#{pane_current_path}") printf '%s\n' "${THRONGTERM_FAKE_TMUX_CWD:-/tmp/project}" ;;
-      "#{pane_current_command}") printf '%s\n' "${THRONGTERM_FAKE_TMUX_COMMAND:-codex}" ;;
+      "#{pane_current_path}") printf '%s\n' "${SWIMMERS_FAKE_TMUX_CWD:-/tmp/project}" ;;
+      "#{pane_current_command}") printf '%s\n' "${SWIMMERS_FAKE_TMUX_COMMAND:-codex}" ;;
       "#{pane_pid}") printf '101\n' ;;
       "#{window_index}.#{pane_index}:#{pane_id}") printf '0.0:%%1\n' ;;
     esac
@@ -2306,10 +2306,10 @@ case "$cmd" in
     printf 'captured pane\n'
     ;;
   list-sessions)
-    if [ -f "${THRONGTERM_FAKE_TMUX_SESSIONS:-}" ]; then
+    if [ -f "${SWIMMERS_FAKE_TMUX_SESSIONS:-}" ]; then
       while IFS= read -r line || [ -n "$line" ]; do
         printf '%s\n' "$line"
-      done < "${THRONGTERM_FAKE_TMUX_SESSIONS}"
+      done < "${SWIMMERS_FAKE_TMUX_SESSIONS}"
     fi
     ;;
 esac
@@ -2317,11 +2317,11 @@ esac
         );
 
         let original_path = std::env::var_os("PATH");
-        let original_cwd = std::env::var_os("THRONGTERM_FAKE_TMUX_CWD");
-        let original_cmd = std::env::var_os("THRONGTERM_FAKE_TMUX_COMMAND");
+        let original_cwd = std::env::var_os("SWIMMERS_FAKE_TMUX_CWD");
+        let original_cmd = std::env::var_os("SWIMMERS_FAKE_TMUX_COMMAND");
         prepend_test_path(&bin_dir, original_path.as_deref());
-        std::env::set_var("THRONGTERM_FAKE_TMUX_CWD", dir.path());
-        std::env::set_var("THRONGTERM_FAKE_TMUX_COMMAND", "codex");
+        std::env::set_var("SWIMMERS_FAKE_TMUX_CWD", dir.path());
+        std::env::set_var("SWIMMERS_FAKE_TMUX_COMMAND", "codex");
 
         let supervisor = SessionSupervisor::new(Arc::new(Config::default()));
         let created = supervisor
@@ -2339,12 +2339,12 @@ esac
             None => std::env::remove_var("PATH"),
         }
         match original_cwd {
-            Some(value) => std::env::set_var("THRONGTERM_FAKE_TMUX_CWD", value),
-            None => std::env::remove_var("THRONGTERM_FAKE_TMUX_CWD"),
+            Some(value) => std::env::set_var("SWIMMERS_FAKE_TMUX_CWD", value),
+            None => std::env::remove_var("SWIMMERS_FAKE_TMUX_CWD"),
         }
         match original_cmd {
-            Some(value) => std::env::set_var("THRONGTERM_FAKE_TMUX_COMMAND", value),
-            None => std::env::remove_var("THRONGTERM_FAKE_TMUX_COMMAND"),
+            Some(value) => std::env::set_var("SWIMMERS_FAKE_TMUX_COMMAND", value),
+            None => std::env::remove_var("SWIMMERS_FAKE_TMUX_COMMAND"),
         }
 
         assert_eq!(created.0.session_id, "sess_0");
@@ -2379,7 +2379,7 @@ case "$cmd" in
   list-sessions)
     while IFS= read -r line || [ -n "$line" ]; do
       printf '%s\n' "$line"
-    done < "${THRONGTERM_FAKE_TMUX_SESSIONS}"
+    done < "${SWIMMERS_FAKE_TMUX_SESSIONS}"
     ;;
   attach-session|new-session)
     while IFS= read -r line; do
@@ -2402,9 +2402,9 @@ esac
         );
 
         let original_path = std::env::var_os("PATH");
-        let original_sessions = std::env::var_os("THRONGTERM_FAKE_TMUX_SESSIONS");
+        let original_sessions = std::env::var_os("SWIMMERS_FAKE_TMUX_SESSIONS");
         prepend_test_path(&bin_dir, original_path.as_deref());
-        std::env::set_var("THRONGTERM_FAKE_TMUX_SESSIONS", &sessions_file);
+        std::env::set_var("SWIMMERS_FAKE_TMUX_SESSIONS", &sessions_file);
 
         let supervisor = SessionSupervisor::new(Arc::new(Config::default()));
         supervisor
@@ -2417,8 +2417,8 @@ esac
             None => std::env::remove_var("PATH"),
         }
         match original_sessions {
-            Some(value) => std::env::set_var("THRONGTERM_FAKE_TMUX_SESSIONS", value),
-            None => std::env::remove_var("THRONGTERM_FAKE_TMUX_SESSIONS"),
+            Some(value) => std::env::set_var("SWIMMERS_FAKE_TMUX_SESSIONS", value),
+            None => std::env::remove_var("SWIMMERS_FAKE_TMUX_SESSIONS"),
         }
 
         let sessions = supervisor.sessions.read().await;

@@ -1,9 +1,9 @@
 //! Compatibility shim for the retired in-process thought engine.
 //!
-//! `throngterm` now uses the external `clawgs emit --stdio` daemon as the
+//! `swimmers` now uses the external `clawgs emit --stdio` daemon as the
 //! thought engine boundary. This module preserves the session snapshot contract
 //! shared by bridge/client code and keeps a temporary compatibility runner for
-//! `THRONGTERM_THOUGHT_BACKEND=inproc`.
+//! `SWIMMERS_THOUGHT_BACKEND=inproc`.
 
 use std::sync::Arc;
 use std::time::Duration;

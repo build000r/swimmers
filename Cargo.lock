@@ -2254,6 +2254,36 @@ dependencies = [
 ]
 
 [[package]]
+name = "swimmers"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "chrono",
+ "clawgs",
+ "crossterm",
+ "dotenvy",
+ "futures",
+ "mermaid-rs-renderer",
+ "metrics",
+ "metrics-exporter-prometheus",
+ "portable-pty",
+ "regex",
+ "reqwest",
+ "resvg",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "usvg",
+ "uuid",
+ "walkdir",
+]
+
+[[package]]
 name = "syn"
 version = "2.0.116"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2374,36 +2404,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f60246a4944f24f6e018aa17cdeffb7818b76356965d03b07d6a9886e8962185"
 dependencies = [
  "cfg-if",
-]
-
-[[package]]
-name = "throngterm"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "axum",
- "chrono",
- "clawgs",
- "crossterm",
- "dotenvy",
- "futures",
- "mermaid-rs-renderer",
- "metrics",
- "metrics-exporter-prometheus",
- "portable-pty",
- "regex",
- "reqwest",
- "resvg",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
- "tracing-subscriber",
- "usvg",
- "uuid",
- "walkdir",
 ]
 
 [[package]]

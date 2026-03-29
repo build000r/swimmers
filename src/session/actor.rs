@@ -251,7 +251,7 @@ impl SessionActor {
             .map_err(|e| anyhow::anyhow!("failed to open PTY: {}", e))?;
 
         // Build the tmux command. Clean TMUX / TMUX_PANE from the environment
-        // so that tmux works even when the throngterm server itself runs inside
+        // so that tmux works even when the swimmers server itself runs inside
         // a tmux session.
         let mut cmd = if attach {
             let mut c = CommandBuilder::new("tmux");
@@ -275,7 +275,7 @@ impl SessionActor {
             resolve_tmux_terminal_env(inherited_term.as_deref(), inherited_colorterm.as_deref());
         cmd.env("TERM", &tmux_term);
         cmd.env("COLORTERM", &tmux_colorterm);
-        cmd.env("TERM_PROGRAM", "throngterm");
+        cmd.env("TERM_PROGRAM", "swimmers");
         if used_term_fallback {
             warn!(
                 session_id = %session_id,
@@ -2408,7 +2408,7 @@ fi
 
     #[test]
     fn visible_output_ignores_prompt_only_lines() {
-        assert!(!visible_output_is_meaningful(b"b@host throngterm % "));
+        assert!(!visible_output_is_meaningful(b"b@host swimmers % "));
         assert!(!visible_output_is_meaningful(b"$ "));
     }
 
@@ -2473,7 +2473,7 @@ fi
     #[test]
     fn prompt_that_finishes_busy_work_counts_as_activity() {
         let chunk = ScrollOutputChunk {
-            data: b"b@host throngterm % ".to_vec(),
+            data: b"b@host swimmers % ".to_vec(),
             coalesced_redraw: false,
         };
         assert!(output_counts_as_meaningful_activity(

@@ -1,12 +1,12 @@
-# Throngterm
+# Swimmers
 
-Native terminal session manager for tmux. The supported surface is the Rust TUI in `src/bin/throngterm-tui.rs`, backed by a small Axum HTTP API and optional repo-local sprite/theme overrides.
+Native terminal session manager for tmux. The supported surface is the Rust TUI in `src/bin/swimmers-tui.rs`, backed by a small Axum HTTP API and optional repo-local sprite/theme overrides.
 
 ## Architecture
 
 - **Server** (`src/`): Rust, Axum HTTP, Tokio async runtime, portable-pty bridging to tmux sessions
-- **Client** (`src/bin/throngterm-tui.rs`): Rust TUI for session browsing, thoughts, repo actions, and native terminal handoff
-- **Persistence** (`data/throngterm/`): file-based session snapshots and thought runtime config
+- **Client** (`src/bin/swimmers-tui.rs`): Rust TUI for session browsing, thoughts, repo actions, and native terminal handoff
+- **Persistence** (`data/swimmers/`): file-based session snapshots and thought runtime config
 - **Metrics**: Prometheus exposition at `GET /metrics`
 
 ## API

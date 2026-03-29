@@ -1,4 +1,4 @@
-//! Performance telemetry for Throngterm.
+//! Performance telemetry for Swimmers.
 //!
 //! Uses the `metrics` facade crate with `metrics-exporter-prometheus` for
 //! Prometheus-compatible exposition at `GET /metrics`.
@@ -6,7 +6,7 @@
 //! # Architecture
 //!
 //! This module is intentionally self-contained — it has **no imports** from
-//! other throngterm modules. Other modules call the recording helper functions
+//! other swimmers modules. Other modules call the recording helper functions
 //! defined here; the module never reaches into actor or handler internals.
 //!
 //! # Initialization
@@ -28,28 +28,28 @@ use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
 // ---------------------------------------------------------------------------
 
 /// Current outbound queue depth per session actor.
-const QUEUE_DEPTH: &str = "throngterm_session_queue_depth";
+const QUEUE_DEPTH: &str = "swimmers_session_queue_depth";
 
 /// Current outbound queue byte size per session actor.
-const QUEUE_BYTES: &str = "throngterm_session_queue_bytes";
+const QUEUE_BYTES: &str = "swimmers_session_queue_bytes";
 
 /// Number of active session actors.
-const ACTIVE_SESSIONS: &str = "throngterm_active_sessions";
+const ACTIVE_SESSIONS: &str = "swimmers_active_sessions";
 
 /// Overload events emitted.
-const OVERLOAD_EVENTS: &str = "throngterm_overload_events_total";
+const OVERLOAD_EVENTS: &str = "swimmers_overload_events_total";
 
 /// Per-session lifecycle-state gauge (one-hot by `state` label).
-const THOUGHT_LIFECYCLE_STATE: &str = "throngterm_thought_lifecycle_state";
+const THOUGHT_LIFECYCLE_STATE: &str = "swimmers_thought_lifecycle_state";
 
 /// Thought model call outcomes by generation path + cadence tier.
-const THOUGHT_MODEL_CALLS: &str = "throngterm_thought_model_calls_total";
+const THOUGHT_MODEL_CALLS: &str = "swimmers_thought_model_calls_total";
 
 /// Thought suppression counters by reason + cadence tier.
-const THOUGHT_SUPPRESSIONS: &str = "throngterm_thought_suppressions_total";
+const THOUGHT_SUPPRESSIONS: &str = "swimmers_thought_suppressions_total";
 
 /// Thought generation latency (LLM path only).
-const THOUGHT_GENERATION_LATENCY: &str = "throngterm_thought_generation_seconds";
+const THOUGHT_GENERATION_LATENCY: &str = "swimmers_thought_generation_seconds";
 
 // ---------------------------------------------------------------------------
 // Initialization

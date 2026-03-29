@@ -15,8 +15,8 @@ const ITERM_SCRIPT_RELATIVE_PATH: &str = "scripts/iterm-focus.scpt";
 const ITERM_SCROLLBACK_PREFILL_LINES: usize = 2000;
 const ITERM_OPEN_RETRY_ATTEMPTS: usize = 2;
 const ITERM_OPEN_RETRY_DELAY_MS: u64 = 150;
-const DEFAULT_ITERM_SESSION_NAME: &str = "Throngterm";
-const TMUX_BIN_ENV: &str = "THRONGTERM_TMUX_BIN";
+const DEFAULT_ITERM_SESSION_NAME: &str = "Swimmers";
+const TMUX_BIN_ENV: &str = "SWIMMERS_TMUX_BIN";
 const TMUX_BIN_FALLBACKS: &[&str] = &[
     "/opt/homebrew/bin/tmux",
     "/usr/local/bin/tmux",
@@ -454,11 +454,11 @@ mod tests {
     fn build_iterm_display_name_prefers_normalized_pane_id_and_cwd_basename() {
         assert_eq!(
             build_iterm_display_name(
-                "/Users/b/repos/throngterm/",
+                "/Users/b/repos/swimmers/",
                 "codex-20260302-162713",
                 Some("%12")
             ),
-            "12 throngterm"
+            "12 swimmers"
         );
     }
 
@@ -473,8 +473,8 @@ mod tests {
     #[test]
     fn build_iterm_display_name_omits_separator_when_pane_id_is_missing() {
         assert_eq!(
-            build_iterm_display_name("/Users/b/repos/throngterm", "codex-20260302-162713", None),
-            "throngterm"
+            build_iterm_display_name("/Users/b/repos/swimmers", "codex-20260302-162713", None),
+            "swimmers"
         );
     }
 
@@ -508,7 +508,7 @@ mod tests {
         let fake_tmux = fake_bin_dir.join("tmux");
         std::fs::write(
             &fake_tmux,
-            "#!/bin/sh\nset -eu\nif [ \"${1-}\" = \"display-message\" ]; then\n  printf '%%12\\t/Users/b/repos/throngterm\\n'\n  exit 0\nfi\nexit 0\n",
+            "#!/bin/sh\nset -eu\nif [ \"${1-}\" = \"display-message\" ]; then\n  printf '%%12\\t/Users/b/repos/swimmers\\n'\n  exit 0\nfi\nexit 0\n",
         )
         .unwrap();
         let mut perms = std::fs::metadata(&fake_tmux).unwrap().permissions();
@@ -563,9 +563,9 @@ mod tests {
         assert_eq!(first_call[1], "sess-cache");
         assert_eq!(first_call[2], "tmux-cache");
         assert!(first_call[3].contains("capture-pane -p -J -S -2000 -t 'tmux-cache'"));
-        assert_eq!(first_call[4], "12 throngterm");
+        assert_eq!(first_call[4], "12 swimmers");
         assert_eq!(first_call.len(), 5);
-        assert_eq!(second_call[4], "12 throngterm");
+        assert_eq!(second_call[4], "12 swimmers");
         assert_eq!(second_call[5], "pane-1");
 
         remember_pane_id("sess-cache", None);

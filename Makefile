@@ -5,7 +5,7 @@ SHELL := /bin/bash
 
 help:
 	@printf '%s\n' \
-	'throngterm commands' \
+	'swimmers commands' \
 	'' \
 	'  make server                  Run the Rust server on the configured port' \
 	'  make tui                     Start a local API if needed, then launch the native TUI' \
@@ -14,7 +14,7 @@ help:
 	'  make cargo-cov-lcov         Run Rust tests with lcov output for /crap'
 
 server:
-	cargo run --bin throngterm
+	cargo run --bin swimmers
 
 tui:
 	bash ./scripts/run-tui.sh

@@ -1356,7 +1356,7 @@ impl<C: TuiApi> App<C> {
         let frame = frame_rect(renderer.width(), renderer.height());
 
         renderer.draw_box(frame, Color::DarkGrey);
-        renderer.draw_text(2, 1, "throngterm tui", Color::Cyan);
+        renderer.draw_text(2, 1, "swimmers tui", Color::Cyan);
 
         let max_right_width = renderer.width().saturating_sub(22) as usize;
         let right_text = truncate_label(&self.header_right_text(), max_right_width);

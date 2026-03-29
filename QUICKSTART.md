@@ -1,10 +1,10 @@
-# Throngterm Quickstart
+# Swimmers Quickstart
 
-> Give this file to your AI coding assistant to get throngterm running on your machine.
+> Give this file to your AI coding assistant to get swimmers running on your machine.
 
 ## What This Is
 
-Throngterm is a native terminal UI backed by a Rust API that manages tmux
+Swimmers is a native terminal UI backed by a Rust API that manages tmux
 sessions. The supported path is `API + TUI`.
 
 **Target setup:** local API on `3210` with the native TUI attached to it.
@@ -47,8 +47,8 @@ Only needed if your TUI will talk to a remote API over your tailnet.
 ## Step 2: Clone & Build
 
 ```bash
-git clone <REPO_URL> throngterm
-cd throngterm
+git clone <REPO_URL> swimmers
+cd swimmers
 cargo build --release
 ```
 
@@ -72,18 +72,18 @@ If you want separate processes:
 
 ```bash
 make server
-cargo run --bin throngterm-tui
+cargo run --bin swimmers-tui
 ```
 
 Useful variants:
 
 - `make tui-check`: wait for an existing API and exit
-- `PORT=69420 cargo run --bin throngterm`: run the API on a custom port
-- `THRONGTERM_TUI_URL=http://127.0.0.1:69420 cargo run --bin throngterm-tui`: point the TUI at that custom API
+- `PORT=69420 cargo run --bin swimmers`: run the API on a custom port
+- `SWIMMERS_TUI_URL=http://127.0.0.1:69420 cargo run --bin swimmers-tui`: point the TUI at that custom API
 
 You should see the API start and begin discovering tmux sessions.
 
-No tmux hook setup is required for thought or rest-state updates. `throngterm`
+No tmux hook setup is required for thought or rest-state updates. `swimmers`
 streams session snapshots directly to `clawgs emit --stdio`.
 
 The API binds to `0.0.0.0`, so you can also point a TUI at it from another
@@ -115,15 +115,15 @@ bash scripts/clawgs-extract.sh /path/to/project --pretty --include-raw
 If the API runs on another machine:
 
 ```bash
-THRONGTERM_TUI_URL=http://100.x.y.z:3210 cargo run --bin throngterm-tui
+SWIMMERS_TUI_URL=http://100.x.y.z:3210 cargo run --bin swimmers-tui
 ```
 
 For token-protected APIs:
 
 ```bash
 AUTH_MODE=token AUTH_TOKEN=your-token \
-THRONGTERM_TUI_URL=http://100.x.y.z:3210 \
-cargo run --bin throngterm-tui
+SWIMMERS_TUI_URL=http://100.x.y.z:3210 \
+cargo run --bin swimmers-tui
 ```
 
 ### Run in Background (Optional)
@@ -132,10 +132,10 @@ To keep only the API running after you close your terminal:
 
 ```bash
 # Option A: nohup
-nohup env PORT=3210 ./target/release/throngterm > throngterm.log 2>&1 &
+nohup env PORT=3210 ./target/release/swimmers > swimmers.log 2>&1 &
 
 # Option B: tmux (ironic but practical)
-tmux new-session -d -s throngterm 'PORT=3210 /path/to/throngterm/target/release/throngterm'
+tmux new-session -d -s swimmers 'PORT=3210 /path/to/swimmers/target/release/swimmers'
 
 # Option C: systemd (Linux, persistent across reboots)
 # See "Systemd Service" section below
@@ -145,7 +145,7 @@ tmux new-session -d -s throngterm 'PORT=3210 /path/to/throngterm/target/release/
 
 ## Step 5: Create tmux Sessions
 
-Throngterm manages tmux sessions. You need at least one for anything to show
+Swimmers manages tmux sessions. You need at least one for anything to show
 up. Create them either from the TUI or directly with tmux:
 
 ```bash
@@ -163,17 +163,17 @@ They will appear in the TUI session list.
 For a persistent setup that survives reboots:
 
 ```bash
-sudo tee /etc/systemd/system/throngterm.service << 'EOF'
+sudo tee /etc/systemd/system/swimmers.service << 'EOF'
 [Unit]
-Description=Throngterm Terminal Manager
+Description=Swimmers Terminal Manager
 After=network.target
 
 [Service]
 Type=simple
 User=YOUR_USERNAME
-WorkingDirectory=/path/to/throngterm
+WorkingDirectory=/path/to/swimmers
 Environment=PORT=3210
-ExecStart=/path/to/throngterm/target/release/throngterm
+ExecStart=/path/to/swimmers/target/release/swimmers
 Restart=on-failure
 RestartSec=5
 
@@ -182,10 +182,10 @@ WantedBy=multi-user.target
 EOF
 
 sudo systemctl daemon-reload
-sudo systemctl enable --now throngterm
+sudo systemctl enable --now swimmers
 ```
 
-Replace `YOUR_USERNAME` and `/path/to/throngterm` with actual values.
+Replace `YOUR_USERNAME` and `/path/to/swimmers` with actual values.
 
 ---
 
@@ -196,16 +196,16 @@ For persistence on macOS:
 ```bash
 mkdir -p ~/Library/LaunchAgents
 
-cat > ~/Library/LaunchAgents/com.throngterm.plist << EOF
+cat > ~/Library/LaunchAgents/com.swimmers.plist << EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>com.throngterm</string>
+    <string>com.swimmers</string>
     <key>ProgramArguments</key>
     <array>
-        <string>/path/to/throngterm/target/release/throngterm</string>
+        <string>/path/to/swimmers/target/release/swimmers</string>
     </array>
     <key>EnvironmentVariables</key>
     <dict>
@@ -213,23 +213,23 @@ cat > ~/Library/LaunchAgents/com.throngterm.plist << EOF
         <string>69420</string>
     </dict>
     <key>WorkingDirectory</key>
-    <string>/path/to/throngterm</string>
+    <string>/path/to/swimmers</string>
     <key>RunAtLoad</key>
     <true/>
     <key>KeepAlive</key>
     <true/>
     <key>StandardOutPath</key>
-    <string>/tmp/throngterm.log</string>
+    <string>/tmp/swimmers.log</string>
     <key>StandardErrorPath</key>
-    <string>/tmp/throngterm.err</string>
+    <string>/tmp/swimmers.err</string>
 </dict>
 </plist>
 EOF
 
-launchctl load ~/Library/LaunchAgents/com.throngterm.plist
+launchctl load ~/Library/LaunchAgents/com.swimmers.plist
 ```
 
-Replace `/path/to/throngterm` with the actual path.
+Replace `/path/to/swimmers` with the actual path.
 
 ---
 
@@ -263,5 +263,5 @@ Native TUI
 ```
 
 - **Backend**: Rust (axum + tokio + portable-pty)
-- **Client**: Rust TUI (`throngterm-tui`)
+- **Client**: Rust TUI (`swimmers-tui`)
 - **No database, no Docker**

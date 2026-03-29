@@ -31,9 +31,9 @@ use resvg::tiny_skia::{Pixmap, Transform};
 use tokio::runtime::Runtime;
 use usvg::Tree;
 
-use throngterm::config::{AuthMode, Config};
-use throngterm::repo_theme::{discover_repo_theme, existing_repo_theme};
-use throngterm::types::{
+use swimmers::config::{AuthMode, Config};
+use swimmers::repo_theme::{discover_repo_theme, existing_repo_theme};
+use swimmers::types::{
     CreateSessionRequest, CreateSessionResponse, DirEntry, DirListResponse, ErrorResponse,
     MermaidArtifactResponse, NativeDesktopOpenRequest, NativeDesktopOpenResponse,
     NativeDesktopStatusResponse, PublishSelectionRequest, RepoTheme, RestState,

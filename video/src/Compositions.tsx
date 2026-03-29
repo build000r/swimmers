@@ -4,7 +4,7 @@ import { TweetCard } from "./tweet-card/TweetCard";
 import { twitterLayouts } from "./theme";
 
 /**
- * ThrongtermCompositions — all Remotion compositions for throngterm.
+ * SwimmersCompositions — all Remotion compositions for swimmers.
  *
  * Current:
  *   - TweetCard stills (single/dual/quad) for session-to-tweet images
@@ -37,9 +37,9 @@ const sampleProps = {
   metric: "Duplicate write rate 3.2% → 0.1%",
 };
 
-export const ThrongtermCompositions: React.FC = () => {
+export const SwimmersCompositions: React.FC = () => {
   return (
-    <Folder name="Throngterm">
+    <Folder name="Swimmers">
       <Folder name="TweetCards">
         {/* Single image — 16:9, full-width in Twitter feed */}
         <Still

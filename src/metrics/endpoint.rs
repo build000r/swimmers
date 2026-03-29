@@ -13,7 +13,7 @@ use metrics_exporter_prometheus::PrometheusHandle;
 use std::sync::Arc;
 
 /// Shared state for the metrics endpoint. This is kept separate from
-/// `AppState` so the metrics module has no dependency on other throngterm
+/// `AppState` so the metrics module has no dependency on other swimmers
 /// modules.
 #[derive(Clone)]
 pub struct MetricsState {

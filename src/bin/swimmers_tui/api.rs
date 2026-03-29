@@ -9,7 +9,7 @@ pub(crate) struct ApiClient {
 impl ApiClient {
     pub(crate) fn from_env() -> Result<Self, String> {
         let config = Config::from_env();
-        let base_url = std::env::var("THRONGTERM_TUI_URL")
+        let base_url = std::env::var("SWIMMERS_TUI_URL")
             .unwrap_or_else(|_| format!("http://127.0.0.1:{}", config.port));
         let auth_token = match config.auth_mode {
             AuthMode::Token => config.auth_token,
@@ -133,7 +133,7 @@ pub(crate) fn friendly_transport_error(
     };
 
     format!(
-        "backend unavailable at {base_url}: {summary} ({detail}). Start `throngterm` or set THRONGTERM_TUI_URL."
+        "backend unavailable at {base_url}: {summary} ({detail}). Start `swimmers` or set SWIMMERS_TUI_URL."
     )
 }
 

@@ -93,14 +93,14 @@ WAIT_PATH='/v1/sessions'
 LAST_API_STATUS='401'
 auth_401_message="$(show_api_auth_failure 2>&1 || true)"
 assert_eq \
-  'throngterm API at http://127.0.0.1:33210 requires valid auth for /v1/sessions; set AUTH_MODE=token and AUTH_TOKEN to match the target API' \
+  'swimmers API at http://127.0.0.1:33210 requires valid auth for /v1/sessions; set AUTH_MODE=token and AUTH_TOKEN to match the target API' \
   "${auth_401_message}" \
   '401 auth failure message'
 
 LAST_API_STATUS='403'
 auth_403_message="$(show_api_auth_failure 2>&1 || true)"
 assert_eq \
-  'throngterm API at http://127.0.0.1:33210 denied session access for /v1/sessions; use a token with session-list access for this TUI instance' \
+  'swimmers API at http://127.0.0.1:33210 denied session access for /v1/sessions; use a token with session-list access for this TUI instance' \
   "${auth_403_message}" \
   '403 auth failure message'
 

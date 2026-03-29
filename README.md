@@ -1,4 +1,4 @@
-# Throngterm
+# Swimmers
 
 Native terminal UI for tmux-backed sessions.
 
@@ -29,19 +29,19 @@ Waits for an existing API and exits without launching the TUI.
 
 ## Remote API Use
 
-No tmux hook setup is required for thought or rest-state updates. `throngterm`
+No tmux hook setup is required for thought or rest-state updates. `swimmers`
 streams session snapshots directly to `clawgs emit --stdio`.
 
-Point the TUI at a non-local API with `THRONGTERM_TUI_URL`:
+Point the TUI at a non-local API with `SWIMMERS_TUI_URL`:
 
 ```bash
-THRONGTERM_TUI_URL=http://100.101.123.63:3210 cargo run --bin throngterm-tui
+SWIMMERS_TUI_URL=http://100.101.123.63:3210 cargo run --bin swimmers-tui
 ```
 
 For token-protected APIs:
 
 ```bash
 AUTH_MODE=token AUTH_TOKEN=your-token \
-THRONGTERM_TUI_URL=http://100.101.123.63:3210 \
-cargo run --bin throngterm-tui
+SWIMMERS_TUI_URL=http://100.101.123.63:3210 \
+cargo run --bin swimmers-tui
 ```

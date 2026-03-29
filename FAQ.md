@@ -9,7 +9,7 @@ Run `make tui`. That starts the local API if needed and then launches the TUI.
 No. The supported path is the native TUI talking to the Rust API.
 
 **How do I connect to a remote API?**
-Set `THRONGTERM_TUI_URL=http://host:port` before launching the TUI. If the API
+Set `SWIMMERS_TUI_URL=http://host:port` before launching the TUI. If the API
 uses token auth, also set `AUTH_MODE=token` and `AUTH_TOKEN`.
 
 **How do I create a session?**

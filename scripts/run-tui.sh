@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-TUI_URL="${THRONGTERM_TUI_URL:-${TUI_URL:-http://127.0.0.1:3210}}"
+TUI_URL="${SWIMMERS_TUI_URL:-${TUI_URL:-http://127.0.0.1:3210}}"
 WAIT_PATH="${TUI_WAIT_PATH:-/v1/sessions}"
 WAIT_TIMEOUT="${TUI_WAIT_TIMEOUT:-20}"
 START_TIMEOUT="${TUI_START_TIMEOUT:-120}"
@@ -140,17 +140,17 @@ show_api_auth_failure() {
 
   case "${LAST_API_STATUS}" in
     401)
-      printf 'throngterm API at %s requires valid auth for %s; set AUTH_MODE=token and AUTH_TOKEN to match the target API\n' \
+      printf 'swimmers API at %s requires valid auth for %s; set AUTH_MODE=token and AUTH_TOKEN to match the target API\n' \
         "${TUI_URL}" \
         "${WAIT_PATH}" >&2
       ;;
     403)
-      printf 'throngterm API at %s denied session access for %s; use a token with session-list access for this TUI instance\n' \
+      printf 'swimmers API at %s denied session access for %s; use a token with session-list access for this TUI instance\n' \
         "${TUI_URL}" \
         "${WAIT_PATH}" >&2
       ;;
     *)
-      printf 'throngterm API at %s failed auth probe for %s (status: %s)\n' \
+      printf 'swimmers API at %s failed auth probe for %s (status: %s)\n' \
         "${TUI_URL}" \
         "${WAIT_PATH}" \
         "${LAST_API_STATUS:-000}" >&2
@@ -177,15 +177,15 @@ start_local_api() {
 
   log_dir="${TUI_SERVER_LOG_DIR:-${TMPDIR:-/tmp}}"
   mkdir -p "${log_dir}"
-  SERVER_LOG="${TUI_SERVER_LOG:-${log_dir%/}/throngterm-tui-server-${port}.log}"
+  SERVER_LOG="${TUI_SERVER_LOG:-${log_dir%/}/swimmers-tui-server-${port}.log}"
   : > "${SERVER_LOG}"
 
-  printf 'Local throngterm API is not ready; starting it on %s:%s\n' "${host}" "${port}"
+  printf 'Local swimmers API is not ready; starting it on %s:%s\n' "${host}" "${port}"
   printf 'Server log: %s\n' "${SERVER_LOG}"
 
   (
     cd "${ROOT_DIR}"
-    nohup env PORT="${port}" cargo run --bin throngterm >>"${SERVER_LOG}" 2>&1 &
+    nohup env PORT="${port}" cargo run --bin swimmers >>"${SERVER_LOG}" 2>&1 &
   )
 }
 
@@ -199,11 +199,11 @@ wait_for_api() {
   deadline=$((SECONDS + timeout))
   next_log_at=$((SECONDS + WAIT_LOG_INTERVAL))
 
-  printf 'Waiting for throngterm API at %s\n' "${url}"
+  printf 'Waiting for swimmers API at %s\n' "${url}"
 
   while (( SECONDS <= deadline )); do
     if probe_api_access "${url}"; then
-      printf 'throngterm API is ready (%s)\n' "${LAST_API_STATUS}"
+      printf 'swimmers API is ready (%s)\n' "${LAST_API_STATUS}"
       return 0
     fi
     local probe_status=$?
@@ -212,7 +212,7 @@ wait_for_api() {
       return 1
     fi
     if (( WAIT_LOG_INTERVAL > 0 && SECONDS >= next_log_at )); then
-      printf 'Still waiting for throngterm API at %s (elapsed: %ss, last status: %s)\n' \
+      printf 'Still waiting for swimmers API at %s (elapsed: %ss, last status: %s)\n' \
         "${url}" \
         "${SECONDS}" \
         "${LAST_API_STATUS:-000}"
@@ -221,7 +221,7 @@ wait_for_api() {
     sleep "${WAIT_INTERVAL}"
   done
 
-  printf 'timed out waiting for throngterm API at %s (last status: %s)\n' "${url}" "${LAST_API_STATUS:-000}" >&2
+  printf 'timed out waiting for swimmers API at %s (last status: %s)\n' "${url}" "${LAST_API_STATUS:-000}" >&2
   show_server_log_tail
   return 1
 }
@@ -253,7 +253,7 @@ main() {
   local probe_status=0
 
   if probe_api_access "$(api_url)"; then
-    printf 'throngterm API is ready (%s)\n' "${LAST_API_STATUS}"
+    printf 'swimmers API is ready (%s)\n' "${LAST_API_STATUS}"
   else
     probe_status=$?
     if (( probe_status == 10 )); then
@@ -261,7 +261,7 @@ main() {
       return 1
     elif should_auto_start_local_api; then
       if wait_for_api_quiet "${PRESTART_WAIT_TIMEOUT}"; then
-        printf 'throngterm API is ready (%s)\n' "${LAST_API_STATUS}"
+        printf 'swimmers API is ready (%s)\n' "${LAST_API_STATUS}"
       else
         probe_status=$?
         if (( probe_status == 10 )); then
@@ -281,7 +281,7 @@ main() {
   fi
 
   cd "${ROOT_DIR}"
-  THRONGTERM_TUI_URL="${TUI_URL}" cargo run --bin throngterm-tui
+  SWIMMERS_TUI_URL="${TUI_URL}" cargo run --bin swimmers-tui
 }
 
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then

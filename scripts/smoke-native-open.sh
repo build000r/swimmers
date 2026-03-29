@@ -1,8 +1,8 @@
 #!/bin/sh
 set -eu
 
-BASE_URL="${THRONGTERM_BASE_URL:-http://127.0.0.1:3210}"
-ROOT_CWD="${THRONGTERM_SMOKE_CWD:-/Users/b/repos/throngterm}"
+BASE_URL="${SWIMMERS_BASE_URL:-http://127.0.0.1:3210}"
+ROOT_CWD="${SWIMMERS_SMOKE_CWD:-/Users/b/repos/swimmers}"
 STAMP="$(date +%s)"
 NAME_A="iterm-smoke-${STAMP}-a"
 NAME_B="iterm-smoke-${STAMP}-b"

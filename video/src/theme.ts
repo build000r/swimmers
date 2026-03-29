@@ -1,7 +1,7 @@
 /**
- * Throngterm video theme — Claude Code orange palette.
+ * Swimmers video theme — Claude Code orange palette.
  *
- * Used across all throngterm Remotion compositions (tweet cards, promos, etc.).
+ * Used across all swimmers Remotion compositions (tweet cards, promos, etc.).
  * Matches the session-to-tweet diagram palette.
  */
 
@@ -54,8 +54,8 @@ export const fonts = {
 } as const;
 
 export const branding = {
-  account: "@throngterm",
+  account: "swimmers",
   displayName: "thronglet_01",
   human: "@buildooor",
-  tagline: "@throngterm · human orchestration by @buildooor",
+  tagline: "swimmers · human orchestration by @buildooor",
 } as const;

@@ -87,7 +87,7 @@ pub(crate) fn render_footer<C: TuiApi>(app: &App<C>, renderer: &mut Renderer, st
 }
 
 pub(crate) fn render_too_small(renderer: &mut Renderer) {
-    renderer.draw_text(2, 1, "throngterm tui", Color::Cyan);
+    renderer.draw_text(2, 1, "swimmers tui", Color::Cyan);
     renderer.draw_text(
         2,
         3,

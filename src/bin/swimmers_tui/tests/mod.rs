@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 
 use chrono::Utc;
 use tempfile::tempdir;
-use throngterm::types::{ThoughtSource, ThoughtState, TransportHealth};
+use swimmers::types::{ThoughtSource, ThoughtState, TransportHealth};
 
 const EXPECTED_TERMINAL_ENTRY: &str = concat!(
     "\u{1b}[?1049h",
@@ -265,7 +265,7 @@ const TEST_REPO_DEV: &str = "/tmp/repos/dev";
 const TEST_REPO_GAMMA: &str = "/tmp/repos/gamma";
 const TEST_REPO_OPENSOURCE: &str = "/tmp/repos/opensource";
 const TEST_REPO_SKILLS: &str = "/tmp/repos/opensource/skills";
-const TEST_REPO_THRONGTERM: &str = "/tmp/repos/throngterm";
+const TEST_REPO_SWIMMERS: &str = "/tmp/repos/swimmers";
 
 #[derive(Default)]
 struct MockArtifactOpenerState {
@@ -441,7 +441,7 @@ async fn api_client_transport_errors_are_actionable() {
         .await
         .expect_err("closed localhost port should fail");
     assert!(error.contains("backend unavailable at"));
-    assert!(error.contains("Start `throngterm` or set THRONGTERM_TUI_URL."));
+    assert!(error.contains("Start `swimmers` or set SWIMMERS_TUI_URL."));
     assert!(!error.contains("error sending request for url"));
 }
 
@@ -460,7 +460,7 @@ async fn spawn_delayed_api_server(
                     tokio::time::sleep(delay).await;
                 }
                 Json(SessionListResponse {
-                    sessions: vec![session_summary("sess-1", "7", TEST_REPO_THRONGTERM)],
+                    sessions: vec![session_summary("sess-1", "7", TEST_REPO_SWIMMERS)],
                     version: 1,
                     repo_themes: HashMap::new(),
                 })
@@ -593,7 +593,7 @@ fn auto_refresh_keeps_existing_footer_message() {
     api.push_fetch_sessions(Ok(vec![session_summary(
         "sess-7",
         "7",
-        TEST_REPO_THRONGTERM,
+        TEST_REPO_SWIMMERS,
     )]));
     let mut app = make_app(api);
     app.set_message("sticky status");
@@ -611,7 +611,7 @@ fn manual_refresh_reports_session_count() {
     let api = MockApi::new();
     let layout = test_layout(120, 32);
     api.push_fetch_sessions(Ok(vec![
-        session_summary("sess-7", "7", TEST_REPO_THRONGTERM),
+        session_summary("sess-7", "7", TEST_REPO_SWIMMERS),
         session_summary("sess-8", "8", TEST_REPO_OPENSOURCE),
     ]));
     let mut app = make_app(api);
@@ -818,14 +818,14 @@ fn open_mermaid_test_viewer(
     let layout = test_layout(width, height);
     let mut app = make_app(api);
     app.merge_sessions(
-        vec![session_summary("sess-1", "7", TEST_REPO_THRONGTERM)],
+        vec![session_summary("sess-1", "7", TEST_REPO_SWIMMERS)],
         layout.overview_field,
     );
     app.mermaid_artifacts.insert(
         "sess-1".to_string(),
         mermaid_artifact(
             "sess-1",
-            "/tmp/repos/throngterm/flow.mmd",
+            "/tmp/repos/swimmers/flow.mmd",
             "2026-03-23T10:05:00Z",
             source,
         ),
@@ -1169,8 +1169,8 @@ fn dir_response(path: &str, names: &[(&str, bool)]) -> DirListResponse {
 }
 
 fn write_repo_theme_file(path: &std::path::Path, body: &str) {
-    let throngterm_dir = path.join(".throngterm");
-    fs::create_dir_all(&throngterm_dir).expect("create .throngterm");
+    let swimmers_dir = path.join(".throngterm");
+    fs::create_dir_all(&swimmers_dir).expect("create .throngterm");
     let contents = format!(
         concat!(
             "{{\n",
@@ -1184,7 +1184,7 @@ fn write_repo_theme_file(path: &std::path::Path, body: &str) {
         ),
         body,
     );
-    fs::write(throngterm_dir.join("colors.json"), contents).expect("write colors.json");
+    fs::write(swimmers_dir.join("colors.json"), contents).expect("write colors.json");
 }
 
 fn color_rgb(color: Color) -> (u8, u8, u8) {
@@ -1305,7 +1305,7 @@ fn custom_split_ratio_changes_thought_rail_width() {
     );
     assert!(
         wider_layout.overview_field.width < default_layout.overview_field.width,
-        "widening the clawgs rail should shrink the throngterm field"
+        "widening the clawgs rail should shrink the swimmers field"
     );
 }
 
@@ -1550,7 +1550,7 @@ fn refresh_prunes_exited_sessions_from_thought_timeline_and_header_filter_chips(
         session_summary_with_thought(
             "sess-1",
             "7",
-            TEST_REPO_THRONGTERM,
+            TEST_REPO_SWIMMERS,
             "patching tui",
             "2026-03-08T14:00:05Z",
         ),
@@ -1576,7 +1576,7 @@ fn refresh_prunes_exited_sessions_from_thought_timeline_and_header_filter_chips(
     assert!(initial_header
         .chips
         .iter()
-        .any(|chip| chip.label == "1xthrongterm"));
+        .any(|chip| chip.label == "1xswimmers"));
     assert!(initial_header
         .chips
         .iter()
@@ -1620,7 +1620,7 @@ fn refresh_header_filter_strip_includes_active_repo_without_thought_history() {
         session_summary_with_thought(
             "sess-1",
             "7",
-            TEST_REPO_THRONGTERM,
+            TEST_REPO_SWIMMERS,
             "patching tui",
             "2026-03-08T14:00:05Z",
         ),
@@ -1636,7 +1636,7 @@ fn refresh_header_filter_strip_includes_active_repo_without_thought_history() {
         .iter()
         .map(|chip| chip.label.clone())
         .collect::<Vec<_>>();
-    assert!(labels.contains(&"1xthrongterm".to_string()));
+    assert!(labels.contains(&"1xswimmers".to_string()));
     let skills_chip = header
         .chips
         .iter()
@@ -1658,9 +1658,9 @@ fn render_header_filter_strip_shows_repo_chips_and_thought_rows() {
         .expect("wide layout enables thought rail");
     let mut app = make_app(api);
 
-    let throngterm_theme_id = "/tmp/throngterm".to_string();
+    let swimmers_theme_id = "/tmp/swimmers".to_string();
     let skills_theme_id = "/tmp/skills".to_string();
-    let throngterm_color = Color::Rgb {
+    let swimmers_color = Color::Rgb {
         r: 184,
         g: 152,
         b: 117,
@@ -1671,27 +1671,27 @@ fn render_header_filter_strip_shows_repo_chips_and_thought_rows() {
         b: 106,
     };
     app.repo_themes
-        .insert(throngterm_theme_id.clone(), repo_theme("#B89875"));
+        .insert(swimmers_theme_id.clone(), repo_theme("#B89875"));
     app.repo_themes
         .insert(skills_theme_id.clone(), repo_theme("#4FA66A"));
 
     let mut first = session_summary_with_thought(
         "sess-1",
         "7",
-        TEST_REPO_THRONGTERM,
+        TEST_REPO_SWIMMERS,
         "patching tui",
         "2026-03-08T14:00:05Z",
     );
-    first.repo_theme_id = Some(throngterm_theme_id.clone());
+    first.repo_theme_id = Some(swimmers_theme_id.clone());
 
     let mut second = session_summary_with_thought(
         "sess-2",
         "2",
-        TEST_REPO_THRONGTERM,
+        TEST_REPO_SWIMMERS,
         "wiring filter state",
         "2026-03-08T14:00:06Z",
     );
-    second.repo_theme_id = Some(throngterm_theme_id);
+    second.repo_theme_id = Some(swimmers_theme_id);
 
     let mut third = session_summary_with_thought(
         "sess-3",
@@ -1723,32 +1723,32 @@ fn render_header_filter_strip_shows_repo_chips_and_thought_rows() {
     );
 
     let header = build_header_filter_layout(&app, 120);
-    let throngterm_chip = header
+    let swimmers_chip = header
         .chips
         .iter()
-        .find(|chip| chip.label == "2xthrongterm")
-        .expect("throngterm chip should exist");
+        .find(|chip| chip.label == "2xswimmers")
+        .expect("swimmers chip should exist");
     let skills_chip = header
         .chips
         .iter()
         .find(|chip| chip.label == "1xskills")
         .expect("skills chip should exist");
-    assert_eq!(throngterm_chip.color, throngterm_color);
+    assert_eq!(swimmers_chip.color, swimmers_color);
     assert_eq!(skills_chip.color, skills_color);
 
     let mut renderer = test_renderer(120, 32);
     render_header_filter_strip(&app, &mut renderer, 120);
 
     assert_eq!(
-        cell_at(&renderer, throngterm_chip.rect.x, throngterm_chip.rect.y).fg,
-        throngterm_color
+        cell_at(&renderer, swimmers_chip.rect.x, swimmers_chip.rect.y).fg,
+        swimmers_color
     );
     assert_eq!(
         cell_at(&renderer, skills_chip.rect.x, skills_chip.rect.y).fg,
         skills_color
     );
     assert!(row_text(&renderer, 2).contains("[filter out]"));
-    assert!(row_text(&renderer, 2).ends_with("[filter out]  1xskills  2xthrongterm"));
+    assert!(row_text(&renderer, 2).ends_with("[filter out]  1xskills  2xswimmers"));
 }
 
 #[test]
@@ -1757,17 +1757,17 @@ fn active_repo_header_chip_maps_to_code_open_action() {
     let layout = test_layout(120, 32);
     let mut app = make_app(api);
     app.repo_themes
-        .insert("/tmp/throngterm".to_string(), repo_theme("#B89875"));
+        .insert("/tmp/swimmers".to_string(), repo_theme("#B89875"));
     let session = session_summary_with_thought(
         "sess-1",
         "7",
-        TEST_REPO_THRONGTERM,
+        TEST_REPO_SWIMMERS,
         "patching tui",
         "2026-03-08T14:00:05Z",
     );
     app.merge_sessions(vec![session.clone()], layout.overview_field);
     app.capture_thought_updates(&[session], layout.thought_entry_capacity());
-    app.set_thought_filter_cwd(TEST_REPO_THRONGTERM.to_string());
+    app.set_thought_filter_cwd(TEST_REPO_SWIMMERS.to_string());
 
     let header = build_header_filter_layout(&app, 120);
     let active_chip = header
@@ -1780,7 +1780,7 @@ fn active_repo_header_chip_maps_to_code_open_action() {
     assert_eq!(
         header_filter_action_at(&app, 120, active_chip.rect.x, active_chip.rect.y),
         Some(ThoughtPanelAction::OpenRepoInEditor(
-            TEST_REPO_THRONGTERM.to_string()
+            TEST_REPO_SWIMMERS.to_string()
         ))
     );
 }
@@ -1795,27 +1795,27 @@ fn header_filter_strip_and_thought_rows_apply_and_clear_filters() {
     let mut app = make_app(api.clone());
 
     app.repo_themes
-        .insert("/tmp/throngterm".to_string(), repo_theme("#B89875"));
+        .insert("/tmp/swimmers".to_string(), repo_theme("#B89875"));
     app.repo_themes
         .insert("/tmp/skills".to_string(), repo_theme("#4FA66A"));
 
     let mut first = session_summary_with_thought(
         "sess-1",
         "7",
-        TEST_REPO_THRONGTERM,
+        TEST_REPO_SWIMMERS,
         "patching tui",
         "2026-03-08T14:00:05Z",
     );
-    first.repo_theme_id = Some("/tmp/throngterm".to_string());
+    first.repo_theme_id = Some("/tmp/swimmers".to_string());
 
     let mut second = session_summary_with_thought(
         "sess-2",
         "2",
-        TEST_REPO_THRONGTERM,
+        TEST_REPO_SWIMMERS,
         "wiring filter state",
         "2026-03-08T14:00:06Z",
     );
-    second.repo_theme_id = Some("/tmp/throngterm".to_string());
+    second.repo_theme_id = Some("/tmp/swimmers".to_string());
 
     let mut third = session_summary_with_thought(
         "sess-3",
@@ -1836,16 +1836,16 @@ fn header_filter_strip_and_thought_rows_apply_and_clear_filters() {
     let chip = initial_header
         .chips
         .iter()
-        .find(|chip| chip.label == "2xthrongterm")
-        .expect("throngterm chip should exist")
+        .find(|chip| chip.label == "2xswimmers")
+        .expect("swimmers chip should exist")
         .clone();
     app.handle_header_filter_click(120, chip.rect.x, chip.rect.y);
 
     assert_eq!(
         app.thought_filter.cwd.as_deref(),
-        Some(TEST_REPO_THRONGTERM)
+        Some(TEST_REPO_SWIMMERS)
     );
-    assert_eq!(app.active_thought_filter_text(), "filter: pwd=throngterm");
+    assert_eq!(app.active_thought_filter_text(), "filter: pwd=swimmers");
     assert_eq!(
         app.visible_thought_entries(layout.thought_entry_capacity())
             .into_iter()
@@ -1915,10 +1915,10 @@ fn header_filter_strip_and_thought_rows_apply_and_clear_filters() {
 
     assert_eq!(
         app.thought_filter.cwd.as_deref(),
-        Some(TEST_REPO_THRONGTERM)
+        Some(TEST_REPO_SWIMMERS)
     );
     assert_eq!(app.thought_filter.tmux_name, None);
-    assert_eq!(app.active_thought_filter_text(), "filter: pwd=throngterm");
+    assert_eq!(app.active_thought_filter_text(), "filter: pwd=swimmers");
     assert_eq!(
         app.visible_thought_entries(layout.thought_entry_capacity())
             .into_iter()
@@ -1969,18 +1969,18 @@ fn header_filter_strip_toggles_filter_out_mode_and_excludes_selected_projects() 
     let mut app = make_app(api);
 
     app.repo_themes
-        .insert("/tmp/throngterm".to_string(), repo_theme("#B89875"));
+        .insert("/tmp/swimmers".to_string(), repo_theme("#B89875"));
     app.repo_themes
         .insert("/tmp/skills".to_string(), repo_theme("#4FA66A"));
 
     let mut first = session_summary_with_thought(
         "sess-1",
         "7",
-        TEST_REPO_THRONGTERM,
+        TEST_REPO_SWIMMERS,
         "patching tui",
         "2026-03-08T14:00:05Z",
     );
-    first.repo_theme_id = Some("/tmp/throngterm".to_string());
+    first.repo_theme_id = Some("/tmp/swimmers".to_string());
 
     let mut second = session_summary_with_thought(
         "sess-2",
@@ -2073,14 +2073,14 @@ fn clicking_thought_body_opens_that_session() {
         .expect("wide layout enables thought rail");
     let mut app = make_app(api.clone());
     app.merge_sessions(
-        vec![session_summary("sess-1", "7", TEST_REPO_THRONGTERM)],
+        vec![session_summary("sess-1", "7", TEST_REPO_SWIMMERS)],
         layout.overview_field,
     );
     app.capture_thought_updates(
         &[session_summary_with_thought(
             "sess-1",
             "7",
-            TEST_REPO_THRONGTERM,
+            TEST_REPO_SWIMMERS,
             "patching tui",
             "2026-03-08T14:00:05Z",
         )],
@@ -2135,14 +2135,14 @@ fn wrapped_latest_thought_stays_bottom_aligned() {
             session_summary_with_thought(
                 "sess-1",
                 "7",
-                TEST_REPO_THRONGTERM,
+                TEST_REPO_SWIMMERS,
                 "older",
                 "2026-03-08T14:00:05Z",
             ),
             session_summary_with_thought(
                 "sess-2",
                 "9",
-                TEST_REPO_THRONGTERM,
+                TEST_REPO_SWIMMERS,
                 "latest thought stays at bottom",
                 "2026-03-08T14:00:06Z",
             ),
@@ -2177,14 +2177,14 @@ fn clicking_wrapped_thought_line_opens_that_session() {
         height: 5,
     };
     app.merge_sessions(
-        vec![session_summary("sess-2", "9", TEST_REPO_THRONGTERM)],
+        vec![session_summary("sess-2", "9", TEST_REPO_SWIMMERS)],
         test_field(),
     );
     app.capture_thought_updates(
         &[session_summary_with_thought(
             "sess-2",
             "9",
-            TEST_REPO_THRONGTERM,
+            TEST_REPO_SWIMMERS,
             "latest thought stays at bottom",
             "2026-03-08T14:00:06Z",
         )],
@@ -2222,14 +2222,14 @@ fn clicking_thought_row_surfaces_native_open_errors() {
         .expect("wide layout enables thought rail");
     let mut app = make_app(api.clone());
     app.merge_sessions(
-        vec![session_summary("sess-1", "7", TEST_REPO_THRONGTERM)],
+        vec![session_summary("sess-1", "7", TEST_REPO_SWIMMERS)],
         layout.overview_field,
     );
     app.capture_thought_updates(
         &[session_summary_with_thought(
             "sess-1",
             "7",
-            TEST_REPO_THRONGTERM,
+            TEST_REPO_SWIMMERS,
             "patching tui",
             "2026-03-08T14:00:05Z",
         )],
@@ -2411,7 +2411,7 @@ fn thought_history_rows_follow_live_session_color() {
     let mut session = session_summary_with_thought(
         "sess-1",
         "alpha",
-        TEST_REPO_THRONGTERM,
+        TEST_REPO_SWIMMERS,
         "patching tui",
         "2026-03-08T14:00:05Z",
     );
@@ -2429,7 +2429,7 @@ fn thought_history_rows_follow_live_session_color() {
     let chip = header
         .chips
         .iter()
-        .find(|chip| chip.label == "1xthrongterm")
+        .find(|chip| chip.label == "1xswimmers")
         .expect("repo chip should exist");
 
     assert_eq!(panel.rows.len(), 1);
@@ -2521,7 +2521,7 @@ fn selected_entity_preserves_repo_theme_body_color() {
 #[test]
 fn selected_entity_preserves_fallback_state_color() {
     let field = test_layout(120, 32).overview_field;
-    let mut session = session_summary("sess-1", "alpha", TEST_REPO_THRONGTERM);
+    let mut session = session_summary("sess-1", "alpha", TEST_REPO_SWIMMERS);
     session.state = SessionState::Attention;
     session.rest_state = RestState::Active;
     let entity = SessionEntity::new(session, field);
@@ -2546,13 +2546,13 @@ fn spawned_selected_entity_matches_thought_color() {
         .thought_content
         .expect("wide layout enables thought rail");
     let field = layout.overview_field;
-    let theme_id = "/tmp/throngterm".to_string();
+    let theme_id = "/tmp/swimmers".to_string();
     let theme_color = Color::Rgb {
         r: 184,
         g: 152,
         b: 117,
     };
-    let mut spawned_session = session_summary("sess-42", "42", TEST_REPO_THRONGTERM);
+    let mut spawned_session = session_summary("sess-42", "42", TEST_REPO_SWIMMERS);
     spawned_session.repo_theme_id = Some(theme_id.clone());
     api.push_create_session(Ok(create_response_with_theme(
         spawned_session.clone(),
@@ -2560,12 +2560,12 @@ fn spawned_selected_entity_matches_thought_color() {
     )));
     let mut app = make_app(api);
 
-    app.spawn_session(TEST_REPO_THRONGTERM, None, field);
+    app.spawn_session(TEST_REPO_SWIMMERS, None, field);
 
     let mut thought_session = session_summary_with_thought(
         "sess-42",
         "42",
-        TEST_REPO_THRONGTERM,
+        TEST_REPO_SWIMMERS,
         "patching tui",
         "2026-03-08T14:00:05Z",
     );
@@ -2620,7 +2620,7 @@ fn sleeping_entity_pins_to_bottom_left_grid_slot() {
         vec![sleeping_session(
             "sess-sleep-1",
             "7",
-            TEST_REPO_THRONGTERM,
+            TEST_REPO_SWIMMERS,
             "2026-03-08T12:00:00Z",
         )],
         field,
@@ -2642,7 +2642,7 @@ fn attention_sleeping_entity_pins_to_bottom_left_grid_slot() {
         vec![attention_session(
             "sess-attn-sleep-1",
             "7",
-            TEST_REPO_THRONGTERM,
+            TEST_REPO_SWIMMERS,
             RestState::Sleeping,
             "2026-03-08T12:00:00Z",
         )],
@@ -2671,7 +2671,7 @@ fn deep_sleep_entity_floats_to_top_left_grid_slot() {
         vec![deep_sleep_session(
             "sess-deep-1",
             "7",
-            TEST_REPO_THRONGTERM,
+            TEST_REPO_SWIMMERS,
             "2026-03-08T12:00:00Z",
         )],
         field,
@@ -2694,28 +2694,28 @@ fn attention_session_state_text_uses_rest_state() {
     let active = attention_session(
         "sess-attn-active",
         "7",
-        TEST_REPO_THRONGTERM,
+        TEST_REPO_SWIMMERS,
         RestState::Active,
         "2026-03-08T12:40:00Z",
     );
     let drowsy = attention_session(
         "sess-attn-drowsy",
         "8",
-        TEST_REPO_THRONGTERM,
+        TEST_REPO_SWIMMERS,
         RestState::Drowsy,
         "2026-03-08T12:20:00Z",
     );
     let sleeping = attention_session(
         "sess-attn-sleep",
         "9",
-        TEST_REPO_THRONGTERM,
+        TEST_REPO_SWIMMERS,
         RestState::Sleeping,
         "2026-03-08T12:00:00Z",
     );
     let deep_sleep = attention_session(
         "sess-attn-deep",
         "10",
-        TEST_REPO_THRONGTERM,
+        TEST_REPO_SWIMMERS,
         RestState::DeepSleep,
         "2026-03-08T11:00:00Z",
     );
@@ -2853,7 +2853,7 @@ fn render_picker_adjusts_low_contrast_repo_theme_color() {
 #[test]
 fn render_picker_uses_entry_repo_theme_color() {
     let temp = tempdir().expect("tempdir");
-    let repo_root = temp.path().join("throngterm");
+    let repo_root = temp.path().join("swimmers");
     fs::create_dir_all(&repo_root).expect("create repo");
     write_repo_theme_file(&repo_root, "#4FA66A");
 
@@ -2862,7 +2862,7 @@ fn render_picker_uses_entry_repo_theme_color() {
         2,
         dir_response(
             temp.path().to_string_lossy().as_ref(),
-            &[("throngterm", true)],
+            &[("swimmers", true)],
         ),
         true,
     );
@@ -2896,19 +2896,19 @@ fn sleeping_entities_fill_bottom_row_by_sleepiness() {
             sleeping_session(
                 "sess-new",
                 "8",
-                TEST_REPO_THRONGTERM,
+                TEST_REPO_SWIMMERS,
                 "2026-03-08T12:20:00Z",
             ),
             sleeping_session(
                 "sess-mid",
                 "7",
-                TEST_REPO_THRONGTERM,
+                TEST_REPO_SWIMMERS,
                 "2026-03-08T12:10:00Z",
             ),
             sleeping_session(
                 "sess-old",
                 "9",
-                TEST_REPO_THRONGTERM,
+                TEST_REPO_SWIMMERS,
                 "2026-03-08T12:00:00Z",
             ),
         ],
@@ -2937,8 +2937,8 @@ fn sleeping_entities_use_tmux_name_tiebreaker() {
 
     app.merge_sessions(
         vec![
-            sleeping_session("sess-b", "8", TEST_REPO_THRONGTERM, "2026-03-08T12:00:00Z"),
-            sleeping_session("sess-a", "7", TEST_REPO_THRONGTERM, "2026-03-08T12:00:00Z"),
+            sleeping_session("sess-b", "8", TEST_REPO_SWIMMERS, "2026-03-08T12:00:00Z"),
+            sleeping_session("sess-a", "7", TEST_REPO_SWIMMERS, "2026-03-08T12:00:00Z"),
         ],
         field,
     );
@@ -2985,8 +2985,8 @@ fn sleeping_entities_stay_fixed_after_tick() {
 
     app.merge_sessions(
         vec![
-            sleeping_session("sess-a", "7", TEST_REPO_THRONGTERM, "2026-03-08T12:00:00Z"),
-            sleeping_session("sess-b", "8", TEST_REPO_THRONGTERM, "2026-03-08T12:10:00Z"),
+            sleeping_session("sess-a", "7", TEST_REPO_SWIMMERS, "2026-03-08T12:00:00Z"),
+            sleeping_session("sess-b", "8", TEST_REPO_SWIMMERS, "2026-03-08T12:10:00Z"),
         ],
         field,
     );
@@ -3047,13 +3047,13 @@ fn deep_sleep_entities_stay_fixed_after_tick() {
             deep_sleep_session(
                 "sess-deep-a",
                 "7",
-                TEST_REPO_THRONGTERM,
+                TEST_REPO_SWIMMERS,
                 "2026-03-08T12:00:00Z",
             ),
             deep_sleep_session(
                 "sess-deep-b",
                 "8",
-                TEST_REPO_THRONGTERM,
+                TEST_REPO_SWIMMERS,
                 "2026-03-08T12:10:00Z",
             ),
         ],
@@ -3166,7 +3166,7 @@ fn empty_field_click_opens_picker_with_managed_order() {
     let api = MockApi::new();
     api.push_list_dirs(Ok(dir_response(
         TEST_REPOS_ROOT,
-        &[("opensource", true), ("throngterm", true)],
+        &[("opensource", true), ("swimmers", true)],
     )));
     let field = test_field();
     let mut app = make_app(api.clone());
@@ -3184,7 +3184,7 @@ fn empty_field_click_opens_picker_with_managed_order() {
             .iter()
             .map(|entry| entry.name.as_str())
             .collect::<Vec<_>>(),
-        vec!["opensource", "throngterm"]
+        vec!["opensource", "swimmers"]
     );
     assert_eq!(api.list_calls(), vec![(None, true)]);
 }
@@ -3291,17 +3291,17 @@ fn dir_list_failure_blocks_spawn_and_shows_error() {
 #[test]
 fn submitting_initial_request_creates_hidden_session_without_native_open() {
     let api = MockApi::new();
-    api.push_create_session(Ok(create_response("sess-55", "55", TEST_REPO_THRONGTERM)));
+    api.push_create_session(Ok(create_response("sess-55", "55", TEST_REPO_SWIMMERS)));
     let field = test_field();
     let mut app = make_app(api.clone());
     app.picker = Some(PickerState::new(
         10,
         10,
-        dir_response(TEST_REPOS_ROOT, &[("throngterm", false)]),
+        dir_response(TEST_REPOS_ROOT, &[("swimmers", false)]),
         true,
     ));
     app.initial_request = Some(InitialRequestState {
-        cwd: TEST_REPO_THRONGTERM.to_string(),
+        cwd: TEST_REPO_SWIMMERS.to_string(),
         value: "add hidden spawn flow".to_string(),
     });
 
@@ -3310,7 +3310,7 @@ fn submitting_initial_request_creates_hidden_session_without_native_open() {
     assert_eq!(
         api.create_calls(),
         vec![(
-            TEST_REPO_THRONGTERM.to_string(),
+            TEST_REPO_SWIMMERS.to_string(),
             SpawnTool::Codex,
             Some("add hidden spawn flow".to_string()),
         )]
@@ -3335,7 +3335,7 @@ fn pasting_initial_request_buffers_multiline_without_submitting() {
     let mut app = make_app(api.clone());
     let pasted = "it happened when i pasted a bunch of text\n### TC-6\n- Given: foo";
     app.initial_request = Some(InitialRequestState {
-        cwd: TEST_REPO_THRONGTERM.to_string(),
+        cwd: TEST_REPO_SWIMMERS.to_string(),
         value: String::new(),
     });
 
@@ -3354,12 +3354,12 @@ fn pasting_initial_request_buffers_multiline_without_submitting() {
 #[test]
 fn pressing_enter_after_pasting_initial_request_submits_once() {
     let api = MockApi::new();
-    api.push_create_session(Ok(create_response("sess-55", "55", TEST_REPO_THRONGTERM)));
+    api.push_create_session(Ok(create_response("sess-55", "55", TEST_REPO_SWIMMERS)));
     let field = test_field();
     let mut app = make_app(api.clone());
     let pasted = "it happened when i pasted a bunch of text\n### TC-6\n- Given: foo";
     app.initial_request = Some(InitialRequestState {
-        cwd: TEST_REPO_THRONGTERM.to_string(),
+        cwd: TEST_REPO_SWIMMERS.to_string(),
         value: String::new(),
     });
 
@@ -3369,7 +3369,7 @@ fn pressing_enter_after_pasting_initial_request_submits_once() {
     assert_eq!(
         api.create_calls(),
         vec![(
-            TEST_REPO_THRONGTERM.to_string(),
+            TEST_REPO_SWIMMERS.to_string(),
             SpawnTool::Codex,
             Some(pasted.to_string()),
         )]
@@ -3388,11 +3388,11 @@ fn session_create_failure_does_not_attempt_native_open() {
     app.picker = Some(PickerState::new(
         10,
         10,
-        dir_response(TEST_REPOS_ROOT, &[("throngterm", false)]),
+        dir_response(TEST_REPOS_ROOT, &[("swimmers", false)]),
         true,
     ));
     app.initial_request = Some(InitialRequestState {
-        cwd: TEST_REPO_THRONGTERM.to_string(),
+        cwd: TEST_REPO_SWIMMERS.to_string(),
         value: "fix tmux startup".to_string(),
     });
 
@@ -3401,7 +3401,7 @@ fn session_create_failure_does_not_attempt_native_open() {
     assert_eq!(
         api.create_calls(),
         vec![(
-            TEST_REPO_THRONGTERM.to_string(),
+            TEST_REPO_SWIMMERS.to_string(),
             SpawnTool::Codex,
             Some("fix tmux startup".to_string()),
         )]
@@ -3426,7 +3426,7 @@ fn blank_initial_request_is_rejected_locally() {
     let field = test_field();
     let mut app = make_app(api.clone());
     app.initial_request = Some(InitialRequestState {
-        cwd: TEST_REPO_THRONGTERM.to_string(),
+        cwd: TEST_REPO_SWIMMERS.to_string(),
         value: "   ".to_string(),
     });
 
@@ -3443,11 +3443,11 @@ fn blank_initial_request_is_rejected_locally() {
 #[test]
 fn typing_initial_request_and_pressing_enter_still_creates_hidden_session() {
     let api = MockApi::new();
-    api.push_create_session(Ok(create_response("sess-55", "55", TEST_REPO_THRONGTERM)));
+    api.push_create_session(Ok(create_response("sess-55", "55", TEST_REPO_SWIMMERS)));
     let field = test_field();
     let mut app = make_app(api.clone());
     app.initial_request = Some(InitialRequestState {
-        cwd: TEST_REPO_THRONGTERM.to_string(),
+        cwd: TEST_REPO_SWIMMERS.to_string(),
         value: String::new(),
     });
 
@@ -3459,7 +3459,7 @@ fn typing_initial_request_and_pressing_enter_still_creates_hidden_session() {
     assert_eq!(
         api.create_calls(),
         vec![(
-            TEST_REPO_THRONGTERM.to_string(),
+            TEST_REPO_SWIMMERS.to_string(),
             SpawnTool::Codex,
             Some("add hidden spawn flow".to_string()),
         )]
@@ -3481,11 +3481,11 @@ fn esc_cancels_initial_request_without_creating_session() {
     app.picker = Some(PickerState::new(
         10,
         10,
-        dir_response(TEST_REPOS_ROOT, &[("throngterm", false)]),
+        dir_response(TEST_REPOS_ROOT, &[("swimmers", false)]),
         true,
     ));
     app.initial_request = Some(InitialRequestState {
-        cwd: TEST_REPO_THRONGTERM.to_string(),
+        cwd: TEST_REPO_SWIMMERS.to_string(),
         value: "investigate snapshot restore".to_string(),
     });
 
@@ -3540,16 +3540,16 @@ fn clicking_existing_thronglet_still_opens_it_directly() {
 #[test]
 fn filtered_out_thronglets_are_not_click_targets() {
     let api = MockApi::new();
-    api.push_list_dirs(Ok(dir_response(TEST_REPOS_ROOT, &[("throngterm", true)])));
+    api.push_list_dirs(Ok(dir_response(TEST_REPOS_ROOT, &[("swimmers", true)])));
     let field = test_field();
     let mut app = make_app(api.clone());
     app.entities
-        .push(entity_at(field, "sess-1", "2", TEST_REPO_THRONGTERM, 12, 6));
+        .push(entity_at(field, "sess-1", "2", TEST_REPO_SWIMMERS, 12, 6));
     app.entities
         .push(entity_at(field, "sess-3", "9", TEST_REPO_SKILLS, 30, 8));
     app.selected_id = Some("sess-3".to_string());
 
-    app.set_thought_filter_cwd(TEST_REPO_THRONGTERM.to_string());
+    app.set_thought_filter_cwd(TEST_REPO_SWIMMERS.to_string());
     app.handle_field_click(30, 8, field);
 
     assert_eq!(visible_entity_ids(&app), vec!["sess-1".to_string()]);
@@ -3566,13 +3566,13 @@ fn refresh_clears_selection_when_filters_hide_all_sessions() {
     let mut app = make_app(api.clone());
     app.merge_sessions(
         vec![
-            session_summary("sess-1", "7", TEST_REPO_THRONGTERM),
-            session_summary("sess-2", "2", TEST_REPO_THRONGTERM),
+            session_summary("sess-1", "7", TEST_REPO_SWIMMERS),
+            session_summary("sess-2", "2", TEST_REPO_SWIMMERS),
         ],
         layout.overview_field,
     );
     app.selected_id = Some("sess-1".to_string());
-    app.set_thought_filter_cwd(TEST_REPO_THRONGTERM.to_string());
+    app.set_thought_filter_cwd(TEST_REPO_SWIMMERS.to_string());
 
     app.refresh(layout);
 
@@ -3597,18 +3597,18 @@ fn refresh_publishes_selected_session_for_external_dispatch() {
     let api = MockApi::new();
     let layout = test_layout(120, 32);
     api.push_fetch_sessions(Ok(vec![session_summary(
-        "sess-throngterm",
+        "sess-swimmers",
         "7",
-        TEST_REPO_THRONGTERM,
+        TEST_REPO_SWIMMERS,
     )]));
     let mut app = make_app(api.clone());
 
     app.refresh(layout);
 
-    assert_eq!(app.selected_id.as_deref(), Some("sess-throngterm"));
+    assert_eq!(app.selected_id.as_deref(), Some("sess-swimmers"));
     assert_eq!(
         api.publish_calls(),
-        vec![Some("sess-throngterm".to_string())]
+        vec![Some("sess-swimmers".to_string())]
     );
 }
 
@@ -3821,14 +3821,14 @@ fn handle_workspace_click_routes_thought_and_overview_interactions() {
         .expect("wide layout enables thought rail");
     let mut app = make_app(api.clone());
     app.merge_sessions(
-        vec![session_summary("sess-1", "7", TEST_REPO_THRONGTERM)],
+        vec![session_summary("sess-1", "7", TEST_REPO_SWIMMERS)],
         layout.overview_field,
     );
     app.capture_thought_updates(
         &[session_summary_with_thought(
             "sess-1",
             "7",
-            TEST_REPO_THRONGTERM,
+            TEST_REPO_SWIMMERS,
             "patching tui",
             "2026-03-08T14:00:05Z",
         )],
@@ -3897,7 +3897,7 @@ fn clicking_commit_badge_launches_commit_codex_without_opening_session() {
         .thought_content
         .expect("wide layout enables thought rail");
     let mut app = make_app_with_commit_launcher(api.clone(), launcher.clone());
-    let mut session = session_summary("sess-1", "7", TEST_REPO_THRONGTERM);
+    let mut session = session_summary("sess-1", "7", TEST_REPO_SWIMMERS);
     session.commit_candidate = true;
     app.merge_sessions(vec![session.clone()], layout.overview_field);
     let mut thought_session = session.clone();
@@ -3948,10 +3948,10 @@ fn clicking_commit_badge_surfaces_commit_launch_errors() {
         .thought_content
         .expect("wide layout enables thought rail");
     let mut app = make_app_with_commit_launcher(api, launcher);
-    let mut session = session_summary("sess-1", "7", TEST_REPO_THRONGTERM);
+    let mut session = session_summary("sess-1", "7", TEST_REPO_SWIMMERS);
     session.commit_candidate = true;
     app.merge_sessions(vec![session], layout.overview_field);
-    let mut thought_session = session_summary("sess-1", "7", TEST_REPO_THRONGTERM);
+    let mut thought_session = session_summary("sess-1", "7", TEST_REPO_SWIMMERS);
     thought_session.commit_candidate = true;
     thought_session.thought = Some("ready to commit".to_string());
     thought_session.thought_updated_at = Some(
@@ -3991,12 +3991,12 @@ fn refresh_builds_synthetic_mermaid_row_and_preserves_text_click_behavior() {
     let thought_content = layout
         .thought_content
         .expect("wide layout enables thought rail");
-    let mut session = session_summary("sess-1", "7", TEST_REPO_THRONGTERM);
+    let mut session = session_summary("sess-1", "7", TEST_REPO_SWIMMERS);
     session.commit_candidate = true;
     api.push_fetch_sessions(Ok(vec![session]));
     api.push_mermaid_artifact(Ok(mermaid_artifact(
         "sess-1",
-        "/tmp/repos/throngterm/flow.mmd",
+        "/tmp/repos/swimmers/flow.mmd",
         "2026-03-23T10:05:00Z",
         "graph TD\nA-->B\n",
     )));
@@ -4057,14 +4057,14 @@ fn mermaid_viewer_renders_inline_unsupported_state_and_back_button_restores_aqua
     let mut app = make_app(api);
     let mut renderer = test_renderer(120, 32);
     app.merge_sessions(
-        vec![session_summary("sess-1", "7", TEST_REPO_THRONGTERM)],
+        vec![session_summary("sess-1", "7", TEST_REPO_SWIMMERS)],
         layout.overview_field,
     );
     app.mermaid_artifacts.insert(
         "sess-1".to_string(),
         mermaid_artifact(
             "sess-1",
-            "/tmp/repos/throngterm/flow.mmd",
+            "/tmp/repos/swimmers/flow.mmd",
             "2026-03-23T10:05:00Z",
             "graph TD\nA-->B\n",
         ),
@@ -4103,14 +4103,14 @@ fn mermaid_keyboard_controls_pan_zoom_reset_and_escape() {
     let layout = test_layout(120, 32);
     let mut app = make_app(api);
     app.merge_sessions(
-        vec![session_summary("sess-1", "7", TEST_REPO_THRONGTERM)],
+        vec![session_summary("sess-1", "7", TEST_REPO_SWIMMERS)],
         layout.overview_field,
     );
     app.mermaid_artifacts.insert(
         "sess-1".to_string(),
         mermaid_artifact(
             "sess-1",
-            "/tmp/repos/throngterm/flow.mmd",
+            "/tmp/repos/swimmers/flow.mmd",
             "2026-03-23T10:05:00Z",
             "graph TD\nA-->B\n",
         ),
@@ -4183,14 +4183,14 @@ fn mermaid_mouse_drag_and_scroll_update_viewport() {
     let layout = test_layout(120, 32);
     let mut app = make_app(api);
     app.merge_sessions(
-        vec![session_summary("sess-1", "7", TEST_REPO_THRONGTERM)],
+        vec![session_summary("sess-1", "7", TEST_REPO_SWIMMERS)],
         layout.overview_field,
     );
     app.mermaid_artifacts.insert(
         "sess-1".to_string(),
         mermaid_artifact(
             "sess-1",
-            "/tmp/repos/throngterm/flow.mmd",
+            "/tmp/repos/swimmers/flow.mmd",
             "2026-03-23T10:05:00Z",
             "graph TD\nA-->B\n",
         ),
@@ -4265,14 +4265,14 @@ fn mermaid_render_reuses_prepared_source_state_across_zoom_and_pan() {
     let mut app = make_app(api);
     let mut renderer = test_renderer(120, 32);
     app.merge_sessions(
-        vec![session_summary("sess-1", "7", TEST_REPO_THRONGTERM)],
+        vec![session_summary("sess-1", "7", TEST_REPO_SWIMMERS)],
         layout.overview_field,
     );
     app.mermaid_artifacts.insert(
         "sess-1".to_string(),
         mermaid_artifact(
             "sess-1",
-            "/tmp/repos/throngterm/flow.mmd",
+            "/tmp/repos/swimmers/flow.mmd",
             "2026-03-23T10:05:00Z",
             "graph TD\nA-->B\n",
         ),
@@ -4334,13 +4334,13 @@ fn mermaid_refresh_invalidates_prepared_source_state_when_artifact_changes() {
     let layout = test_layout(120, 32);
     let mut app = make_app(api.clone());
     let mut renderer = test_renderer(120, 32);
-    let sessions = vec![session_summary("sess-1", "7", TEST_REPO_THRONGTERM)];
+    let sessions = vec![session_summary("sess-1", "7", TEST_REPO_SWIMMERS)];
     app.merge_sessions(sessions.clone(), layout.overview_field);
     app.mermaid_artifacts.insert(
         "sess-1".to_string(),
         mermaid_artifact(
             "sess-1",
-            "/tmp/repos/throngterm/flow-a.mmd",
+            "/tmp/repos/swimmers/flow-a.mmd",
             "2026-03-23T10:05:00Z",
             "graph TD\nA-->B\n",
         ),
@@ -4361,7 +4361,7 @@ fn mermaid_refresh_invalidates_prepared_source_state_when_artifact_changes() {
 
     api.push_mermaid_artifact(Ok(mermaid_artifact(
         "sess-1",
-        "/tmp/repos/throngterm/flow-b.mmd",
+        "/tmp/repos/swimmers/flow-b.mmd",
         "2026-03-23T10:06:00Z",
         "graph TD\nA-->C\n",
     )));
@@ -4378,7 +4378,7 @@ fn mermaid_refresh_invalidates_prepared_source_state_when_artifact_changes() {
     assert_eq!(prepare_after_refresh, 2);
     assert_eq!(
         refreshed_path.as_deref(),
-        Some("/tmp/repos/throngterm/flow-b.mmd")
+        Some("/tmp/repos/swimmers/flow-b.mmd")
     );
 }
 
@@ -5870,14 +5870,14 @@ fn mermaid_open_shortcut_uses_artifact_path_and_stays_in_viewer() {
     let layout = test_layout(120, 32);
     let mut app = make_app_with_artifact_opener(api, opener.clone());
     app.merge_sessions(
-        vec![session_summary("sess-1", "7", TEST_REPO_THRONGTERM)],
+        vec![session_summary("sess-1", "7", TEST_REPO_SWIMMERS)],
         layout.overview_field,
     );
     app.mermaid_artifacts.insert(
         "sess-1".to_string(),
         mermaid_artifact(
             "sess-1",
-            "/tmp/repos/throngterm/flow.mmd",
+            "/tmp/repos/swimmers/flow.mmd",
             "2026-03-23T10:05:00Z",
             "graph TD\nA-->B\n",
         ),
@@ -5892,7 +5892,7 @@ fn mermaid_open_shortcut_uses_artifact_path_and_stays_in_viewer() {
 
     assert_eq!(
         opener.calls(),
-        vec!["/tmp/repos/throngterm/flow.mmd".to_string()]
+        vec!["/tmp/repos/swimmers/flow.mmd".to_string()]
     );
     assert!(matches!(app.fish_bowl_mode, FishBowlMode::Mermaid(_)));
     assert_eq!(
@@ -5909,14 +5909,14 @@ fn mermaid_open_shortcut_reports_failures_and_missing_paths() {
     let layout = test_layout(120, 32);
     let mut app = make_app_with_artifact_opener(api, opener.clone());
     app.merge_sessions(
-        vec![session_summary("sess-1", "7", TEST_REPO_THRONGTERM)],
+        vec![session_summary("sess-1", "7", TEST_REPO_SWIMMERS)],
         layout.overview_field,
     );
     app.mermaid_artifacts.insert(
         "sess-1".to_string(),
         mermaid_artifact(
             "sess-1",
-            "/tmp/repos/throngterm/flow.mmd",
+            "/tmp/repos/swimmers/flow.mmd",
             "2026-03-23T10:05:00Z",
             "graph TD\nA-->B\n",
         ),
@@ -5934,20 +5934,20 @@ fn mermaid_open_shortcut_reports_failures_and_missing_paths() {
     );
     assert_eq!(
         opener.calls(),
-        vec!["/tmp/repos/throngterm/flow.mmd".to_string()]
+        vec!["/tmp/repos/swimmers/flow.mmd".to_string()]
     );
 
     let opener = Arc::new(MockArtifactOpener::default());
     let mut app = make_app_with_artifact_opener(MockApi::new(), opener.clone());
     app.merge_sessions(
-        vec![session_summary("sess-1", "7", TEST_REPO_THRONGTERM)],
+        vec![session_summary("sess-1", "7", TEST_REPO_SWIMMERS)],
         layout.overview_field,
     );
     app.mermaid_artifacts.insert(
         "sess-1".to_string(),
         mermaid_artifact(
             "sess-1",
-            "/tmp/repos/throngterm/flow.mmd",
+            "/tmp/repos/swimmers/flow.mmd",
             "2026-03-23T10:05:00Z",
             "graph TD\nA-->B\n",
         ),

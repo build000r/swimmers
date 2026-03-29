@@ -42,7 +42,7 @@ on findSessionByTag(targetSessionId, displayName)
 			repeat with aTab in tabs of aWindow
 				repeat with aSession in sessions of aTab
 					try
-						tell aSession to set taggedId to variable named "user.throngterm.session_id"
+						tell aSession to set taggedId to variable named "user.swimmers.session_id"
 						if (taggedId as text) is targetSessionId then
 							return my focusExistingSession(aWindow, aTab, aSession, targetSessionId, displayName)
 						end if
@@ -67,7 +67,7 @@ on findWorkspaceTab()
 			repeat with aTab in tabs of aWindow
 				repeat with aSession in sessions of aTab
 					try
-						tell aSession to set workspaceId to variable named "user.throngterm.workspace"
+						tell aSession to set workspaceId to variable named "user.swimmers.workspace"
 						if workspaceId is "main" then
 							return aTab
 						end if
@@ -100,7 +100,7 @@ end chooseSplitTarget
 
 on markWorkspaceSession(aSession, targetSessionId, displayName)
 	set resolvedName to displayName
-	if resolvedName is "" then set resolvedName to "Throngterm"
+	if resolvedName is "" then set resolvedName to "Swimmers"
 	tell application id "com.googlecode.iterm2"
 		try
 			tell aSession to set name to resolvedName

@@ -110,13 +110,13 @@ impl Config {
         apply_env_non_empty_string("OBSERVER_TOKEN", |token| {
             config.observer_token = Some(token);
         });
-        apply_env_non_empty_string("THRONGTERM_THOUGHT_BACKEND", |backend| {
+        apply_env_non_empty_string("SWIMMERS_THOUGHT_BACKEND", |backend| {
             config.thought_backend = ThoughtBackend::from_env_value(&backend);
         });
-        apply_env_usize("THRONGTERM_OUTBOUND_QUEUE_BOUND", |value| {
+        apply_env_usize("SWIMMERS_OUTBOUND_QUEUE_BOUND", |value| {
             config.outbound_queue_bound = value;
         });
-        apply_env_usize("THRONGTERM_REPLAY_BUFFER_SIZE", |value| {
+        apply_env_usize("SWIMMERS_REPLAY_BUFFER_SIZE", |value| {
             config.replay_buffer_size = value;
         });
         config

@@ -48,16 +48,16 @@ struct PaletteOutput {
 }
 
 pub fn existing_repo_theme(cwd: &str) -> Option<(String, RepoTheme)> {
-    let (project_root, throngterm_dir) = walk_to_throngterm_dir(cwd)?;
-    let colors_path = throngterm_dir.join("colors.json");
+    let (project_root, swimmers_dir) = walk_to_swimmers_dir(cwd)?;
+    let colors_path = swimmers_dir.join("colors.json");
 
     let theme = read_valid_theme(&colors_path)?;
     Some((project_root.to_string_lossy().into_owned(), theme))
 }
 
 pub fn discover_repo_theme(cwd: &str) -> Option<(String, RepoTheme)> {
-    let (project_root, throngterm_dir) = walk_to_throngterm_dir(cwd)?;
-    let colors_path = throngterm_dir.join("colors.json");
+    let (project_root, swimmers_dir) = walk_to_swimmers_dir(cwd)?;
+    let colors_path = swimmers_dir.join("colors.json");
 
     if let Some(existing) = existing_repo_theme(cwd) {
         return Some(existing);
@@ -77,7 +77,7 @@ pub fn discover_repo_theme(cwd: &str) -> Option<(String, RepoTheme)> {
     Some((project_root.to_string_lossy().into_owned(), theme))
 }
 
-fn walk_to_throngterm_dir(cwd: &str) -> Option<(PathBuf, PathBuf)> {
+fn walk_to_swimmers_dir(cwd: &str) -> Option<(PathBuf, PathBuf)> {
     let mut current = Path::new(cwd);
     if !current.is_dir() {
         current = current.parent()?;
@@ -417,7 +417,7 @@ mod tests {
     }
 
     #[test]
-    fn returns_none_when_repo_has_no_throngterm_dir() {
+    fn returns_none_when_repo_has_no_swimmers_dir() {
         let tmp = tempfile::tempdir().unwrap();
         assert!(discover_repo_theme(tmp.path().to_string_lossy().as_ref()).is_none());
     }

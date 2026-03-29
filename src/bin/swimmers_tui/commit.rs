@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const COMMIT_TMUX_PREFIX: &str = "commit";
-const COMMIT_TMUX_RUNTIME_DIR: &str = "throngterm-commit-tmux";
+const COMMIT_TMUX_RUNTIME_DIR: &str = "swimmers-commit-tmux";
 const COMMIT_CODEX_MODEL: &str = "gpt-5.4";
 const COMMIT_CODEX_REASONING: &str = "low";
 
@@ -154,7 +154,7 @@ SESSION={session_name:?}\n\
 REPO_DIR={repo_root}\n\
 PROMPT_FILE={prompt_path}\n\
 \n\
-echo \"=== throngterm commit codex: $SESSION ===\"\n\
+echo \"=== swimmers commit codex: $SESSION ===\"\n\
 echo \"Repo: $REPO_DIR\"\n\
 echo \"Started: $(date)\"\n\
 echo \"\"\n\
@@ -185,7 +185,7 @@ fn build_commit_codex_prompt(session: &SessionSummary, git_state: &GitStateSnaps
     let repo_root = git_state.repo_root.to_string_lossy();
     format!(
         "$commit\n\n\
-You were launched from throngterm by clicking a [commit] opportunity in the clawgs rail.\n\
+You were launched from swimmers by clicking a [commit] opportunity in the clawgs rail.\n\
 \n\
 Source session:\n\
 - tmux: {tmux_name}\n\
@@ -278,7 +278,7 @@ fn shell_single_quote(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use throngterm::types::{ThoughtSource, ThoughtState, TransportHealth};
+    use swimmers::types::{ThoughtSource, ThoughtState, TransportHealth};
 
     fn sample_session() -> SessionSummary {
         SessionSummary {
@@ -286,7 +286,7 @@ mod tests {
             tmux_name: "7".to_string(),
             state: SessionState::Busy,
             current_command: None,
-            cwd: "/tmp/repos/throngterm/crate".to_string(),
+            cwd: "/tmp/repos/swimmers/crate".to_string(),
             tool: Some("Codex".to_string()),
             token_count: 0,
             context_limit: 0,
@@ -310,7 +310,7 @@ mod tests {
         let prompt = build_commit_codex_prompt(
             &sample_session(),
             &GitStateSnapshot {
-                repo_root: PathBuf::from("/tmp/repos/throngterm"),
+                repo_root: PathBuf::from("/tmp/repos/swimmers"),
                 status_short: " M src/main.rs\n?? src/new.rs\n".to_string(),
                 unstaged_diff_stat: " src/main.rs | 2 +-\n".to_string(),
                 staged_diff_stat: " src/lib.rs | 1 +\n".to_string(),

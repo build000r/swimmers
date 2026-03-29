@@ -48,7 +48,7 @@ async fn init_persistence_store(
 ) -> Option<Arc<FileStore>> {
     tracing::info!(phase = "persistence_init", "startup phase begin");
     let persistence_started = Instant::now();
-    let store = match FileStore::new("./data/throngterm/").await {
+    let store = match FileStore::new("./data/swimmers/").await {
         Ok(store) => {
             supervisor.init_persistence(store.clone()).await;
             let loaded_config = store.load_thought_config().await;
@@ -197,7 +197,7 @@ async fn run() -> anyhow::Result<()> {
         elapsed_ms = startup_started.elapsed().as_millis() as u64,
         "startup complete; listener ready"
     );
-    tracing::info!("Throngterm running on http://0.0.0.0:{port}");
+    tracing::info!("Swimmers running on http://0.0.0.0:{port}");
 
     axum::serve(listener, app)
         .await
