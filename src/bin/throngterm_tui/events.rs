@@ -1,6 +1,7 @@
 use super::*;
 
-pub(crate) fn initialize_tui_app() -> Result<(App<ApiClient>, Renderer), Box<dyn std::error::Error>> {
+pub(crate) fn initialize_tui_app() -> Result<(App<ApiClient>, Renderer), Box<dyn std::error::Error>>
+{
     let _ = dotenvy::dotenv();
 
     let runtime = Runtime::new()?;
@@ -18,7 +19,10 @@ pub(crate) fn initialize_tui_app() -> Result<(App<ApiClient>, Renderer), Box<dyn
     Ok((app, renderer))
 }
 
-pub(crate) fn prepare_frame<C: TuiApi>(app: &mut App<C>, renderer: &mut Renderer) -> WorkspaceLayout {
+pub(crate) fn prepare_frame<C: TuiApi>(
+    app: &mut App<C>,
+    renderer: &mut Renderer,
+) -> WorkspaceLayout {
     let layout = app.layout_for_terminal(renderer.width(), renderer.height());
     if layout.split_divider.is_none() {
         app.stop_split_drag();
@@ -32,7 +36,11 @@ pub(crate) fn prepare_frame<C: TuiApi>(app: &mut App<C>, renderer: &mut Renderer
     layout
 }
 
-pub(crate) fn handle_key_event<C: TuiApi>(app: &mut App<C>, layout: WorkspaceLayout, key: KeyEvent) -> bool {
+pub(crate) fn handle_key_event<C: TuiApi>(
+    app: &mut App<C>,
+    layout: WorkspaceLayout,
+    key: KeyEvent,
+) -> bool {
     if app.initial_request.is_some() {
         app.handle_initial_request_key(key, layout.overview_field);
         return true;
@@ -47,6 +55,14 @@ pub(crate) fn handle_key_event<C: TuiApi>(app: &mut App<C>, layout: WorkspaceLay
             KeyCode::Char('q') => false,
             KeyCode::Esc => {
                 app.close_mermaid_viewer();
+                true
+            }
+            KeyCode::Tab => {
+                app.focus_next_mermaid_target(content_rect);
+                true
+            }
+            KeyCode::BackTab => {
+                app.focus_previous_mermaid_target(content_rect);
                 true
             }
             KeyCode::Left | KeyCode::Char('h') => {
@@ -66,11 +82,11 @@ pub(crate) fn handle_key_event<C: TuiApi>(app: &mut App<C>, layout: WorkspaceLay
                 true
             }
             KeyCode::Char('+') | KeyCode::Char('=') => {
-                app.zoom_mermaid_viewer(MERMAID_ZOOM_STEP, None, content_rect);
+                app.zoom_mermaid_viewer(MERMAID_KEYBOARD_ZOOM_STEP_PERCENT, None, content_rect);
                 true
             }
             KeyCode::Char('-') => {
-                app.zoom_mermaid_viewer(1.0 / MERMAID_ZOOM_STEP, None, content_rect);
+                app.zoom_mermaid_viewer(-MERMAID_KEYBOARD_ZOOM_STEP_PERCENT, None, content_rect);
                 true
             }
             KeyCode::Char('o') => {
@@ -238,12 +254,13 @@ pub(crate) fn handle_tui_event<C: TuiApi>(
             Ok(true)
         }
         Event::Mouse(mouse) if matches!(mouse.kind, MouseEventKind::ScrollUp) => {
-            let _ = app.handle_mermaid_scroll(layout.overview_field, mouse, MERMAID_ZOOM_STEP);
+            let _ =
+                app.handle_mermaid_scroll(layout.overview_field, mouse, MermaidZoomDirection::In);
             Ok(true)
         }
         Event::Mouse(mouse) if matches!(mouse.kind, MouseEventKind::ScrollDown) => {
             let _ =
-                app.handle_mermaid_scroll(layout.overview_field, mouse, 1.0 / MERMAID_ZOOM_STEP);
+                app.handle_mermaid_scroll(layout.overview_field, mouse, MermaidZoomDirection::Out);
             Ok(true)
         }
         Event::Resize(width, height) => {
@@ -254,4 +271,3 @@ pub(crate) fn handle_tui_event<C: TuiApi>(
         _ => Ok(true),
     }
 }
-

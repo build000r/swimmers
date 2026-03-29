@@ -33,12 +33,38 @@ pub(crate) enum MermaidDetailLevel {
     L3,
 }
 
-impl MermaidDetailLevel {
-    pub(crate) fn label(self) -> &'static str {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum MermaidViewState {
+    Outline,
+    L1,
+    L2,
+    L3,
+}
+
+impl MermaidViewState {
+    pub(crate) fn status_label(self) -> &'static str {
         match self {
-            MermaidDetailLevel::L1 => "L1",
-            MermaidDetailLevel::L2 => "L2",
-            MermaidDetailLevel::L3 => "L3",
+            MermaidViewState::Outline => "outline",
+            MermaidViewState::L1 => "detail L1",
+            MermaidViewState::L2 => "detail L2",
+            MermaidViewState::L3 => "detail L3",
+        }
+    }
+
+    pub(crate) fn detail_level(self) -> Option<MermaidDetailLevel> {
+        match self {
+            MermaidViewState::Outline => None,
+            MermaidViewState::L1 => Some(MermaidDetailLevel::L1),
+            MermaidViewState::L2 => Some(MermaidDetailLevel::L2),
+            MermaidViewState::L3 => Some(MermaidDetailLevel::L3),
+        }
+    }
+
+    pub(crate) fn collision_padding(self) -> u16 {
+        match self {
+            MermaidViewState::Outline | MermaidViewState::L1 => 2,
+            MermaidViewState::L2 => 1,
+            MermaidViewState::L3 => 0,
         }
     }
 }
@@ -118,15 +144,42 @@ pub(crate) struct MermaidSemanticLine {
     pub(crate) diagram_y: f32,
     pub(crate) anchor: MermaidTextAnchor,
     pub(crate) kind: MermaidSemanticKind,
+    pub(crate) owner_key: String,
+    pub(crate) outline_eligible: bool,
     pub(crate) owner_width: f32,
     pub(crate) owner_height: f32,
 }
 
 #[derive(Clone, Debug)]
 pub(crate) struct MermaidProjectedLine {
+    pub(crate) source_index: usize,
     pub(crate) x: u16,
     pub(crate) y: u16,
     pub(crate) text: String,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct MermaidFocusTarget {
+    pub(crate) source_index: usize,
+    pub(crate) text: String,
+    pub(crate) diagram_x: f32,
+    pub(crate) diagram_y: f32,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct MermaidOutlineNode {
+    pub(crate) key: String,
+    pub(crate) source_index: usize,
+    pub(crate) x: u16,
+    pub(crate) y: u16,
+    pub(crate) text_width: u16,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct MermaidOutlineEdge {
+    pub(crate) from_key: String,
+    pub(crate) to_key: String,
+    pub(crate) directed: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -151,6 +204,8 @@ pub(crate) struct MermaidViewerState {
     pub(crate) cached_center_y: f32,
     pub(crate) cached_lines: Vec<String>,
     pub(crate) cached_semantic_lines: Vec<MermaidProjectedLine>,
+    pub(crate) focused_source_index: Option<usize>,
+    pub(crate) focus_status: Option<String>,
     pub(crate) prepared_render: Option<MermaidPreparedRender>,
     pub(crate) source_prepare_count: u64,
     pub(crate) viewport_render_count: u64,
@@ -174,6 +229,8 @@ impl MermaidViewerState {
         self.cached_lines.clear();
         self.cached_semantic_lines.clear();
         self.render_error = None;
+        self.focused_source_index = None;
+        self.focus_status = None;
         self.invalidate_viewport_cache();
     }
 }
@@ -256,6 +313,24 @@ pub(crate) fn mermaid_fit_scale(
     (sample_width / diagram_width)
         .min(sample_height / diagram_height)
         .max(0.000_1)
+}
+
+pub(crate) fn mermaid_strip_svg_text(svg: &str) -> String {
+    let mut out = String::with_capacity(svg.len());
+    let mut cursor = 0usize;
+
+    while let Some(start_rel) = svg[cursor..].find("<text") {
+        let start = cursor + start_rel;
+        out.push_str(&svg[cursor..start]);
+        let Some(end_rel) = svg[start..].find("</text>") else {
+            cursor = svg.len();
+            break;
+        };
+        cursor = start + end_rel + "</text>".len();
+    }
+
+    out.push_str(&svg[cursor..]);
+    out
 }
 
 pub(crate) fn clamp_mermaid_center(center: f32, visible: f32, total: f32) -> f32 {
@@ -368,8 +443,7 @@ pub(crate) fn mermaid_is_numeric_prefix(token: &str) -> bool {
 pub(crate) fn mermaid_summary_stopword(token: &str) -> bool {
     matches!(
         token,
-        "a"
-            | "an"
+        "a" | "an"
             | "and"
             | "are"
             | "as"
@@ -391,8 +465,76 @@ pub(crate) fn mermaid_summary_stopword(token: &str) -> bool {
 
 pub(crate) fn mermaid_clean_summary_token(token: &str) -> String {
     token
-        .trim_matches(|ch: char| matches!(ch, '"' | '\'' | ',' | '.' | ';' | ':' | '(' | ')' | '[' | ']' | '{' | '}'))
+        .trim_matches(|ch: char| {
+            matches!(
+                ch,
+                '"' | '\'' | ',' | '.' | ';' | ':' | '(' | ')' | '[' | ']' | '{' | '}'
+            )
+        })
         .to_string()
+}
+
+pub(crate) fn mermaid_outline_subgraph_key(index: usize) -> String {
+    format!("subgraph:{index}")
+}
+
+pub(crate) fn mermaid_outline_node_key(id: &str) -> String {
+    format!("node:{id}")
+}
+
+pub(crate) fn mermaid_outline_edge_key(index: usize) -> String {
+    format!("edge:{index}")
+}
+
+pub(crate) fn mermaid_subgraph_contains(
+    outer: &mermaid_rs_renderer::SubgraphLayout,
+    inner: &mermaid_rs_renderer::SubgraphLayout,
+) -> bool {
+    let epsilon = 0.5;
+    outer.x - epsilon <= inner.x
+        && outer.y - epsilon <= inner.y
+        && outer.x + outer.width + epsilon >= inner.x + inner.width
+        && outer.y + outer.height + epsilon >= inner.y + inner.height
+}
+
+pub(crate) fn mermaid_top_level_subgraph_indices(
+    subgraphs: &[mermaid_rs_renderer::SubgraphLayout],
+) -> HashSet<usize> {
+    let mut top_level = HashSet::new();
+    for (idx, subgraph) in subgraphs.iter().enumerate() {
+        let parent = subgraphs
+            .iter()
+            .enumerate()
+            .filter(|(other_idx, other)| {
+                *other_idx != idx
+                    && mermaid_subgraph_contains(other, subgraph)
+                    && (other.width * other.height) > (subgraph.width * subgraph.height)
+            })
+            .min_by(|(_, left), (_, right)| {
+                (left.width * left.height)
+                    .partial_cmp(&(right.width * right.height))
+                    .unwrap_or(Ordering::Equal)
+            });
+        if parent.is_none() {
+            top_level.insert(idx);
+        }
+    }
+    top_level
+}
+
+pub(crate) fn mermaid_summary_subtokens(token: &str) -> Vec<String> {
+    let trimmed = token.trim();
+    if mermaid_is_numeric_prefix(trimmed) {
+        return vec![trimmed.to_string()];
+    }
+
+    mermaid_clean_summary_token(token)
+        .split(|ch: char| matches!(ch, '_' | '-' | '/'))
+        .filter_map(|part| {
+            let part = part.trim();
+            (!part.is_empty()).then(|| part.to_string())
+        })
+        .collect()
 }
 
 pub(crate) fn mermaid_compact_overview_text<'a>(
@@ -401,7 +543,7 @@ pub(crate) fn mermaid_compact_overview_text<'a>(
     let raw_tokens = lines
         .into_iter()
         .flat_map(|line| line.split_whitespace())
-        .filter(|token| !token.trim().is_empty())
+        .flat_map(mermaid_summary_subtokens)
         .collect::<Vec<_>>();
     if raw_tokens.is_empty() {
         return None;
@@ -409,16 +551,12 @@ pub(crate) fn mermaid_compact_overview_text<'a>(
 
     let mut prefix = None;
     let mut start_idx = 0usize;
-    if mermaid_is_numeric_prefix(raw_tokens[0]) {
+    if mermaid_is_numeric_prefix(&raw_tokens[0]) {
         prefix = Some(raw_tokens[0].trim().to_string());
         start_idx = 1;
     }
 
-    let cleaned_tokens = raw_tokens[start_idx..]
-        .iter()
-        .map(|token| mermaid_clean_summary_token(token))
-        .filter(|token| !token.is_empty())
-        .collect::<Vec<_>>();
+    let cleaned_tokens = raw_tokens[start_idx..].to_vec();
     if cleaned_tokens.is_empty() {
         return prefix;
     }
@@ -445,15 +583,6 @@ pub(crate) fn mermaid_compact_overview_text<'a>(
         let separator = usize::from(!out.is_empty());
         let next_len = out.chars().count() + separator + token.chars().count();
         if next_len > max_chars {
-            if added == 0 {
-                let budget = max_chars.saturating_sub(out.chars().count() + separator);
-                if budget > 0 {
-                    if !out.is_empty() {
-                        out.push(' ');
-                    }
-                    out.push_str(&truncate_label(&token, budget));
-                }
-            }
             break;
         }
         if !out.is_empty() {
@@ -477,6 +606,8 @@ pub(crate) fn push_mermaid_summary_line<'a>(
     diagram_y: f32,
     anchor: MermaidTextAnchor,
     kind: MermaidSemanticKind,
+    owner_key: &str,
+    outline_eligible: bool,
     owner_width: f32,
     owner_height: f32,
 ) {
@@ -489,6 +620,8 @@ pub(crate) fn push_mermaid_summary_line<'a>(
         diagram_y,
         anchor,
         kind,
+        owner_key: owner_key.to_string(),
+        outline_eligible,
         owner_width,
         owner_height,
     });
@@ -502,6 +635,8 @@ pub(crate) fn push_mermaid_indexed_semantic_lines(
     line_height: f32,
     anchor: MermaidTextAnchor,
     kind: MermaidSemanticKind,
+    owner_key: &str,
+    outline_eligible: bool,
     owner_width: f32,
     owner_height: f32,
 ) {
@@ -516,6 +651,8 @@ pub(crate) fn push_mermaid_indexed_semantic_lines(
             diagram_y: start_y + *idx as f32 * line_height,
             anchor,
             kind,
+            owner_key: owner_key.to_string(),
+            outline_eligible,
             owner_width,
             owner_height,
         });
@@ -531,6 +668,8 @@ pub(crate) fn push_mermaid_text_block_semantic_lines(
     line_height: f32,
     anchor: MermaidTextAnchor,
     kind: MermaidSemanticKind,
+    owner_key: &str,
+    outline_eligible: bool,
     owner_width: f32,
     owner_height: f32,
 ) {
@@ -553,6 +692,8 @@ pub(crate) fn push_mermaid_text_block_semantic_lines(
         line_height,
         anchor,
         kind,
+        owner_key,
+        outline_eligible,
         owner_width,
         owner_height,
     );
@@ -564,6 +705,8 @@ pub(crate) fn extend_mermaid_class_semantic_lines(
     theme_font_size: f32,
     class_line_height: f32,
     node_padding_x: f32,
+    owner_key: &str,
+    outline_eligible: bool,
 ) {
     let total_height = node.label.lines.len() as f32 * class_line_height;
     let start_y = node.y + node.height / 2.0 - total_height / 2.0 + theme_font_size;
@@ -589,6 +732,8 @@ pub(crate) fn extend_mermaid_class_semantic_lines(
             node.y + node.height / 2.0,
             MermaidTextAnchor::Center,
             MermaidSemanticKind::NodeSummary,
+            owner_key,
+            outline_eligible,
             node.width,
             node.height,
         );
@@ -600,6 +745,8 @@ pub(crate) fn extend_mermaid_class_semantic_lines(
             class_line_height,
             MermaidTextAnchor::Center,
             MermaidSemanticKind::NodeTitle,
+            owner_key,
+            false,
             node.width,
             node.height,
         );
@@ -636,6 +783,8 @@ pub(crate) fn extend_mermaid_class_semantic_lines(
         node.y + node.height / 2.0,
         MermaidTextAnchor::Center,
         MermaidSemanticKind::NodeSummary,
+        owner_key,
+        outline_eligible,
         node.width,
         node.height,
     );
@@ -647,6 +796,8 @@ pub(crate) fn extend_mermaid_class_semantic_lines(
         class_line_height,
         MermaidTextAnchor::Center,
         MermaidSemanticKind::NodeTitle,
+        owner_key,
+        false,
         node.width,
         node.height,
     );
@@ -658,6 +809,8 @@ pub(crate) fn extend_mermaid_class_semantic_lines(
         class_line_height,
         MermaidTextAnchor::Start,
         MermaidSemanticKind::ClassMember,
+        owner_key,
+        false,
         node.width,
         node.height,
     );
@@ -669,6 +822,8 @@ pub(crate) fn extend_mermaid_er_semantic_lines(
     theme_font_size: f32,
     class_line_height: f32,
     node_padding_x: f32,
+    owner_key: &str,
+    outline_eligible: bool,
 ) {
     let Some(divider_idx) = node
         .label
@@ -702,6 +857,8 @@ pub(crate) fn extend_mermaid_er_semantic_lines(
         node.y + node.height / 2.0,
         MermaidTextAnchor::Center,
         MermaidSemanticKind::NodeSummary,
+        owner_key,
+        outline_eligible,
         node.width,
         node.height,
     );
@@ -713,6 +870,8 @@ pub(crate) fn extend_mermaid_er_semantic_lines(
         class_line_height,
         MermaidTextAnchor::Center,
         MermaidSemanticKind::NodeTitle,
+        owner_key,
+        false,
         node.width,
         node.height,
     );
@@ -761,6 +920,8 @@ pub(crate) fn extend_mermaid_er_semantic_lines(
                 diagram_y,
                 anchor: MermaidTextAnchor::Start,
                 kind: MermaidSemanticKind::ErAttributeType,
+                owner_key: owner_key.to_string(),
+                outline_eligible: false,
                 owner_width: node.width,
                 owner_height: node.height,
             });
@@ -770,6 +931,8 @@ pub(crate) fn extend_mermaid_er_semantic_lines(
                 diagram_y,
                 anchor: MermaidTextAnchor::Start,
                 kind: MermaidSemanticKind::ErAttributeName,
+                owner_key: owner_key.to_string(),
+                outline_eligible: false,
                 owner_width: node.width,
                 owner_height: node.height,
             });
@@ -785,6 +948,8 @@ pub(crate) fn extend_mermaid_er_semantic_lines(
         class_line_height,
         MermaidTextAnchor::Start,
         MermaidSemanticKind::ErAttributeName,
+        owner_key,
+        false,
         node.width,
         node.height,
     );
@@ -807,12 +972,20 @@ pub(crate) fn build_mermaid_semantic_lines(
         theme_font_size
     };
     let state_line_height = state_font_size * options.layout.label_line_height;
+    let top_level_subgraphs = mermaid_top_level_subgraph_indices(&layout.subgraphs);
+    let subgraph_node_ids = layout
+        .subgraphs
+        .iter()
+        .flat_map(|subgraph| subgraph.nodes.iter().cloned())
+        .collect::<HashSet<_>>();
     let mut semantic_lines = Vec::new();
 
-    for subgraph in &layout.subgraphs {
+    for (subgraph_idx, subgraph) in layout.subgraphs.iter().enumerate() {
         if subgraph.label.trim().is_empty() {
             continue;
         }
+        let owner_key = mermaid_outline_subgraph_key(subgraph_idx);
+        let outline_eligible = top_level_subgraphs.contains(&subgraph_idx);
         if layout.kind == DiagramKind::State {
             let header_height =
                 (subgraph.label_block.height + theme_font_size * 0.75).max(theme_font_size * 1.4);
@@ -826,6 +999,8 @@ pub(crate) fn build_mermaid_semantic_lines(
                 label_y,
                 MermaidTextAnchor::Start,
                 MermaidSemanticKind::SubgraphSummary,
+                &owner_key,
+                outline_eligible,
                 subgraph.width,
                 subgraph.height,
             );
@@ -838,6 +1013,8 @@ pub(crate) fn build_mermaid_semantic_lines(
                 state_line_height,
                 MermaidTextAnchor::Start,
                 MermaidSemanticKind::SubgraphTitle,
+                &owner_key,
+                false,
                 subgraph.width,
                 subgraph.height,
             );
@@ -851,6 +1028,8 @@ pub(crate) fn build_mermaid_semantic_lines(
                 label_y,
                 MermaidTextAnchor::Center,
                 MermaidSemanticKind::SubgraphSummary,
+                &owner_key,
+                outline_eligible,
                 subgraph.width,
                 subgraph.height,
             );
@@ -863,13 +1042,16 @@ pub(crate) fn build_mermaid_semantic_lines(
                 base_line_height,
                 MermaidTextAnchor::Center,
                 MermaidSemanticKind::SubgraphTitle,
+                &owner_key,
+                false,
                 subgraph.width,
                 subgraph.height,
             );
         }
     }
 
-    for edge in &layout.edges {
+    for (edge_idx, edge) in layout.edges.iter().enumerate() {
+        let owner_key = mermaid_outline_edge_key(edge_idx);
         if let Some(label) = edge.label.as_ref() {
             if let Some((label_x, label_y)) = edge.label_anchor {
                 let (font_size, line_height) = if layout.kind == DiagramKind::State {
@@ -886,6 +1068,8 @@ pub(crate) fn build_mermaid_semantic_lines(
                     line_height,
                     MermaidTextAnchor::Center,
                     MermaidSemanticKind::EdgeLabel,
+                    &owner_key,
+                    false,
                     0.0,
                     0.0,
                 );
@@ -907,6 +1091,8 @@ pub(crate) fn build_mermaid_semantic_lines(
                     line_height,
                     MermaidTextAnchor::Center,
                     MermaidSemanticKind::EdgeLabel,
+                    &owner_key,
+                    false,
                     0.0,
                     0.0,
                 );
@@ -928,6 +1114,8 @@ pub(crate) fn build_mermaid_semantic_lines(
                     line_height,
                     MermaidTextAnchor::Center,
                     MermaidSemanticKind::EdgeLabel,
+                    &owner_key,
+                    false,
                     0.0,
                     0.0,
                 );
@@ -953,12 +1141,17 @@ pub(crate) fn build_mermaid_semantic_lines(
                 .iter()
                 .any(|line| mermaid_is_divider_line(line))
         {
+            let outline_eligible =
+                layout.subgraphs.is_empty() || !subgraph_node_ids.contains(&node.id);
+            let owner_key = mermaid_outline_node_key(&node.id);
             extend_mermaid_er_semantic_lines(
                 &mut semantic_lines,
                 node,
                 theme_font_size,
                 class_line_height,
                 options.layout.node_padding_x,
+                &owner_key,
+                outline_eligible,
             );
             continue;
         }
@@ -969,18 +1162,25 @@ pub(crate) fn build_mermaid_semantic_lines(
             .iter()
             .any(|line| mermaid_is_divider_line(line))
         {
+            let outline_eligible =
+                layout.subgraphs.is_empty() || !subgraph_node_ids.contains(&node.id);
+            let owner_key = mermaid_outline_node_key(&node.id);
             extend_mermaid_class_semantic_lines(
                 &mut semantic_lines,
                 node,
                 theme_font_size,
                 class_line_height,
                 options.layout.node_padding_x,
+                &owner_key,
+                outline_eligible,
             );
             continue;
         }
 
         let center_x = node.x + node.width / 2.0;
         let center_y = node.y + node.height / 2.0;
+        let outline_eligible = layout.subgraphs.is_empty() || !subgraph_node_ids.contains(&node.id);
+        let owner_key = mermaid_outline_node_key(&node.id);
         let (font_size, line_height) = if layout.kind == DiagramKind::State {
             (state_font_size, state_line_height)
         } else {
@@ -993,6 +1193,8 @@ pub(crate) fn build_mermaid_semantic_lines(
             center_y,
             MermaidTextAnchor::Center,
             MermaidSemanticKind::NodeSummary,
+            &owner_key,
+            outline_eligible,
             node.width,
             node.height,
         );
@@ -1005,6 +1207,8 @@ pub(crate) fn build_mermaid_semantic_lines(
             line_height,
             MermaidTextAnchor::Center,
             MermaidSemanticKind::NodeTitle,
+            &owner_key,
+            false,
             node.width,
             node.height,
         );
@@ -1020,19 +1224,55 @@ pub(crate) struct MermaidViewportTransform {
     pub(crate) ty: f32,
 }
 
-pub(crate) fn mermaid_detail_level_for_view(
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum MermaidZoomDirection {
+    In,
+    Out,
+}
+
+pub(crate) fn mermaid_zoom_percent(zoom: f32) -> i16 {
+    (zoom.clamp(MERMAID_MIN_ZOOM, MERMAID_MAX_ZOOM) * 100.0).round() as i16
+}
+
+pub(crate) fn mermaid_zoom_status_label(zoom: f32) -> String {
+    let percent = mermaid_zoom_percent(zoom);
+    if percent <= 100 {
+        "fit 100%".to_string()
+    } else {
+        format!("zoom {percent}%")
+    }
+}
+
+pub(crate) fn ensure_mermaid_viewport_cache(
+    viewer: &mut MermaidViewerState,
+    content_rect: Rect,
+) -> Result<(), String> {
+    let needs_rerender = viewer.cached_rect != Some(content_rect)
+        || viewer.prepared_render.is_none()
+        || (viewer.cached_zoom - viewer.zoom).abs() > f32::EPSILON
+        || (viewer.cached_center_x - viewer.center_x).abs() > f32::EPSILON
+        || (viewer.cached_center_y - viewer.center_y).abs() > f32::EPSILON;
+    if needs_rerender {
+        render_mermaid_lines(viewer, content_rect)?;
+    }
+    Ok(())
+}
+
+pub(crate) fn mermaid_view_state_for_view(
     viewer: &MermaidViewerState,
     content_rect: Rect,
-) -> MermaidDetailLevel {
+) -> MermaidViewState {
     let _ = content_rect;
-    let effective_zoom = viewer.zoom.clamp(MERMAID_MIN_ZOOM, MERMAID_MAX_ZOOM);
+    let zoom_percent = mermaid_zoom_percent(viewer.zoom);
 
-    if effective_zoom >= 2.4 {
-        MermaidDetailLevel::L3
-    } else if effective_zoom >= 1.4 {
-        MermaidDetailLevel::L2
+    if zoom_percent <= 100 {
+        MermaidViewState::Outline
+    } else if zoom_percent >= 250 {
+        MermaidViewState::L3
+    } else if zoom_percent >= 150 {
+        MermaidViewState::L2
     } else {
-        MermaidDetailLevel::L1
+        MermaidViewState::L1
     }
 }
 
@@ -1080,18 +1320,293 @@ pub(crate) fn clip_mermaid_overlay_text(text: &str, _skip: usize, max_chars: usi
 pub(crate) fn mermaid_display_text_for_view(
     line: &MermaidSemanticLine,
     owner_cols: f32,
-    detail_level: MermaidDetailLevel,
+    view_state: MermaidViewState,
 ) -> String {
-    if detail_level != MermaidDetailLevel::L1 {
-        return line.text.clone();
+    fn fit_whole_words(text: &str, budget: usize) -> String {
+        if budget == 0 {
+            return String::new();
+        }
+        if text.chars().count() <= budget {
+            return text.to_string();
+        }
+
+        let mut out = String::new();
+        for word in text.split_whitespace() {
+            let separator = usize::from(!out.is_empty());
+            let next_len = out.chars().count() + separator + word.chars().count();
+            if next_len > budget {
+                break;
+            }
+            if !out.is_empty() {
+                out.push(' ');
+            }
+            out.push_str(word);
+        }
+        out
     }
 
-    match line.kind {
-        MermaidSemanticKind::SubgraphSummary | MermaidSemanticKind::NodeSummary => {
-            let budget = owner_cols.floor().max(8.0).min(18.0) as usize;
-            truncate_label(&line.text, budget)
+    match view_state {
+        MermaidViewState::Outline => match line.kind {
+            MermaidSemanticKind::SubgraphSummary | MermaidSemanticKind::NodeSummary => {
+                let budget = owner_cols.floor().max(8.0).min(18.0) as usize;
+                fit_whole_words(&line.text, budget)
+            }
+            _ => line.text.clone(),
+        },
+        MermaidViewState::L1 => match line.kind {
+            MermaidSemanticKind::SubgraphSummary | MermaidSemanticKind::NodeSummary => {
+                let budget = owner_cols.floor().max(8.0).min(18.0) as usize;
+                fit_whole_words(&line.text, budget)
+            }
+            _ => line.text.clone(),
+        },
+        MermaidViewState::L2 | MermaidViewState::L3 => line.text.clone(),
+    }
+}
+
+pub(crate) fn mermaid_line_visible_in_state(
+    line: &MermaidSemanticLine,
+    view_state: MermaidViewState,
+) -> bool {
+    match view_state {
+        MermaidViewState::Outline => line.outline_eligible,
+        MermaidViewState::L1 | MermaidViewState::L2 | MermaidViewState::L3 => {
+            line.kind.min_detail_level()
+                <= view_state
+                    .detail_level()
+                    .expect("non-outline states always have a detail level")
         }
-        _ => line.text.clone(),
+    }
+}
+
+pub(crate) fn mermaid_outline_nodes_from_projected(
+    prepared: &MermaidPreparedRender,
+    projected: &[MermaidProjectedLine],
+) -> Vec<MermaidOutlineNode> {
+    let mut seen = HashSet::new();
+    let mut nodes = Vec::new();
+    for line in projected {
+        let Some(source) = prepared.semantic_lines.get(line.source_index) else {
+            continue;
+        };
+        if !matches!(
+            source.kind,
+            MermaidSemanticKind::SubgraphSummary | MermaidSemanticKind::NodeSummary
+        ) {
+            continue;
+        }
+        if !seen.insert(source.owner_key.clone()) {
+            continue;
+        }
+        nodes.push(MermaidOutlineNode {
+            key: source.owner_key.clone(),
+            source_index: line.source_index,
+            x: line.x,
+            y: line.y,
+            text_width: display_width(&line.text).max(1),
+        });
+    }
+    nodes
+}
+
+pub(crate) fn mermaid_outline_edge_map(
+    layout: &MermaidLayout,
+) -> HashMap<String, MermaidOutlineEdge> {
+    let top_level_subgraphs = mermaid_top_level_subgraph_indices(&layout.subgraphs);
+    let mut node_groups = HashMap::new();
+
+    for subgraph_idx in top_level_subgraphs {
+        let key = mermaid_outline_subgraph_key(subgraph_idx);
+        if let Some(subgraph) = layout.subgraphs.get(subgraph_idx) {
+            for node_id in &subgraph.nodes {
+                node_groups.insert(node_id.clone(), key.clone());
+            }
+        }
+    }
+
+    for node in layout.nodes.values() {
+        if node.hidden || node.anchor_subgraph.is_some() {
+            continue;
+        }
+        node_groups
+            .entry(node.id.clone())
+            .or_insert_with(|| mermaid_outline_node_key(&node.id));
+    }
+
+    let mut edges = HashMap::new();
+    for edge in &layout.edges {
+        let Some(from_key) = node_groups.get(&edge.from) else {
+            continue;
+        };
+        let Some(to_key) = node_groups.get(&edge.to) else {
+            continue;
+        };
+        if from_key == to_key {
+            continue;
+        }
+        let directed = edge.directed || edge.arrow_end || edge.arrow_start;
+        let map_key = format!("{from_key}->{to_key}:{}", u8::from(directed));
+        edges.entry(map_key).or_insert_with(|| MermaidOutlineEdge {
+            from_key: from_key.clone(),
+            to_key: to_key.clone(),
+            directed,
+        });
+    }
+
+    edges
+}
+
+pub(crate) fn mermaid_outline_merge_char(existing: char, next: char) -> char {
+    match (existing, next) {
+        (' ', ch) => ch,
+        (current, ch) if current == ch => current,
+        ('>', _) | ('<', _) => existing,
+        (_, '>') | (_, '<') => next,
+        ('|', '_') | ('_', '|') => '|',
+        ('|', '|') => '|',
+        ('_', '_') => '_',
+        (_, ch) => ch,
+    }
+}
+
+pub(crate) fn mermaid_set_outline_cell(
+    grid: &mut [Vec<char>],
+    content_rect: Rect,
+    x: i32,
+    y: i32,
+    ch: char,
+) {
+    if x < content_rect.x as i32
+        || x >= content_rect.right() as i32
+        || y < content_rect.y as i32
+        || y >= content_rect.bottom() as i32
+    {
+        return;
+    }
+    let grid_x = (x - content_rect.x as i32) as usize;
+    let grid_y = (y - content_rect.y as i32) as usize;
+    let existing = grid[grid_y][grid_x];
+    grid[grid_y][grid_x] = mermaid_outline_merge_char(existing, ch);
+}
+
+pub(crate) fn mermaid_draw_outline_horizontal(
+    grid: &mut [Vec<char>],
+    content_rect: Rect,
+    left: i32,
+    right: i32,
+    y: i32,
+) {
+    let (start, end) = if left <= right {
+        (left, right)
+    } else {
+        (right, left)
+    };
+    for x in start..=end {
+        mermaid_set_outline_cell(grid, content_rect, x, y, '_');
+    }
+}
+
+pub(crate) fn mermaid_draw_outline_vertical(
+    grid: &mut [Vec<char>],
+    content_rect: Rect,
+    x: i32,
+    top: i32,
+    bottom: i32,
+) {
+    let (start, end) = if top <= bottom {
+        (top, bottom)
+    } else {
+        (bottom, top)
+    };
+    for y in start..=end {
+        mermaid_set_outline_cell(grid, content_rect, x, y, '|');
+    }
+}
+
+pub(crate) fn mermaid_render_outline_background(
+    content_rect: Rect,
+    nodes: &[MermaidOutlineNode],
+    edges: impl IntoIterator<Item = MermaidOutlineEdge>,
+) -> Vec<String> {
+    let mut grid = vec![vec![' '; content_rect.width as usize]; content_rect.height as usize];
+    let node_map = nodes
+        .iter()
+        .map(|node| (node.key.clone(), node))
+        .collect::<HashMap<_, _>>();
+
+    for edge in edges {
+        let Some(from) = node_map.get(&edge.from_key) else {
+            continue;
+        };
+        let Some(to) = node_map.get(&edge.to_key) else {
+            continue;
+        };
+
+        let from_center_x = from.x as i32 + from.text_width as i32 / 2;
+        let to_center_x = to.x as i32 + to.text_width as i32 / 2;
+        let dx = to_center_x - from_center_x;
+        let dy = to.y as i32 - from.y as i32;
+
+        if dx.abs() >= dy.abs() {
+            let start_x = if dx >= 0 {
+                from.x as i32 + from.text_width as i32
+            } else {
+                from.x as i32 - 1
+            };
+            let end_x = if dx >= 0 {
+                to.x as i32 - 1
+            } else {
+                to.x as i32 + to.text_width as i32
+            };
+            let mid_x = (start_x + end_x) / 2;
+            mermaid_draw_outline_horizontal(&mut grid, content_rect, start_x, mid_x, from.y as i32);
+            mermaid_draw_outline_vertical(
+                &mut grid,
+                content_rect,
+                mid_x,
+                from.y as i32,
+                to.y as i32,
+            );
+            mermaid_draw_outline_horizontal(&mut grid, content_rect, mid_x, end_x, to.y as i32);
+            if edge.directed {
+                let arrow = if dx >= 0 { '>' } else { '<' };
+                mermaid_set_outline_cell(&mut grid, content_rect, end_x, to.y as i32, arrow);
+            }
+        } else {
+            let start_y = if dy >= 0 {
+                from.y as i32 + 1
+            } else {
+                from.y as i32 - 1
+            };
+            let end_y = if dy >= 0 {
+                to.y as i32 - 1
+            } else {
+                to.y as i32 + 1
+            };
+            let mid_y = (start_y + end_y) / 2;
+            mermaid_draw_outline_vertical(&mut grid, content_rect, from_center_x, start_y, mid_y);
+            mermaid_draw_outline_horizontal(
+                &mut grid,
+                content_rect,
+                from_center_x,
+                to_center_x,
+                mid_y,
+            );
+            mermaid_draw_outline_vertical(&mut grid, content_rect, to_center_x, mid_y, end_y);
+        }
+    }
+
+    grid.into_iter()
+        .map(|row| row.into_iter().collect::<String>())
+        .collect()
+}
+
+pub(crate) fn mermaid_status_detail_label(view_state: MermaidViewState) -> String {
+    match view_state {
+        MermaidViewState::Outline => "outline".to_string(),
+        MermaidViewState::L1 | MermaidViewState::L2 | MermaidViewState::L3 => {
+            view_state.status_label().to_string()
+        }
     }
 }
 
@@ -1099,13 +1614,14 @@ pub(crate) fn project_mermaid_semantic_lines(
     lines: &[MermaidSemanticLine],
     transform: MermaidViewportTransform,
     content_rect: Rect,
-    detail_level: MermaidDetailLevel,
+    view_state: MermaidViewState,
 ) -> Vec<MermaidProjectedLine> {
     #[derive(Clone)]
     struct MermaidProjectedCandidate {
         priority: u8,
         area_rank: i32,
         kind: MermaidSemanticKind,
+        source_index: usize,
         x: u16,
         y: u16,
         text: String,
@@ -1117,8 +1633,8 @@ pub(crate) fn project_mermaid_semantic_lines(
     let top = content_rect.y as i32;
     let bottom = content_rect.bottom() as i32;
 
-    for line in lines {
-        if line.kind.min_detail_level() > detail_level {
+    for (source_index, line) in lines.iter().enumerate() {
+        if !mermaid_line_visible_in_state(line, view_state) {
             continue;
         }
 
@@ -1127,7 +1643,7 @@ pub(crate) fn project_mermaid_semantic_lines(
         if !line.kind.is_visible_for_owner(owner_cols, owner_rows) {
             continue;
         }
-        let display_text = mermaid_display_text_for_view(line, owner_cols, detail_level);
+        let display_text = mermaid_display_text_for_view(line, owner_cols, view_state);
         if display_text.trim().is_empty() {
             continue;
         }
@@ -1174,6 +1690,7 @@ pub(crate) fn project_mermaid_semantic_lines(
             priority: line.kind.priority(),
             area_rank: -((owner_cols * owner_rows * 10.0).round() as i32),
             kind: line.kind,
+            source_index,
             x: screen_x as u16,
             y: screen_y as u16,
             text: clipped,
@@ -1184,11 +1701,7 @@ pub(crate) fn project_mermaid_semantic_lines(
 
     let mut occupied_rows: HashMap<u16, Vec<(u16, u16)>> = HashMap::new();
     let mut projected = Vec::new();
-    let collision_padding = match detail_level {
-        MermaidDetailLevel::L1 => 2,
-        MermaidDetailLevel::L2 => 1,
-        MermaidDetailLevel::L3 => 0,
-    };
+    let collision_padding = view_state.collision_padding();
     for candidate in candidates {
         let start = candidate.x;
         let end = candidate
@@ -1232,6 +1745,7 @@ pub(crate) fn project_mermaid_semantic_lines(
             .or_default()
             .push((padded_start, padded_end));
         projected.push(MermaidProjectedLine {
+            source_index: candidate.source_index,
             x: candidate.x,
             y: target_y,
             text: candidate.text,
@@ -1242,18 +1756,40 @@ pub(crate) fn project_mermaid_semantic_lines(
     projected
 }
 
-pub(crate) fn braille_bit(sub_x: u32, sub_y: u32) -> u32 {
-    match (sub_x, sub_y) {
-        (0, 0) => 0x01,
-        (0, 1) => 0x02,
-        (0, 2) => 0x04,
-        (0, 3) => 0x40,
-        (1, 0) => 0x08,
-        (1, 1) => 0x10,
-        (1, 2) => 0x20,
-        (1, 3) => 0x80,
-        _ => 0,
+pub(crate) fn mermaid_visible_focus_targets(
+    viewer: &mut MermaidViewerState,
+    content_rect: Rect,
+) -> Result<Vec<MermaidFocusTarget>, String> {
+    if content_rect.width < MERMAID_VIEW_MIN_WIDTH || content_rect.height < MERMAID_VIEW_MIN_HEIGHT
+    {
+        return Ok(Vec::new());
     }
+    if viewer.unsupported_reason.is_some() || viewer.artifact_error.is_some() {
+        return Ok(Vec::new());
+    }
+
+    ensure_mermaid_viewport_cache(viewer, content_rect)?;
+    let Some(prepared) = viewer.prepared_render.as_ref() else {
+        return Ok(Vec::new());
+    };
+
+    let mut seen = HashSet::new();
+    Ok(viewer
+        .cached_semantic_lines
+        .iter()
+        .filter(|line| seen.insert(line.source_index))
+        .filter_map(|line| {
+            prepared
+                .semantic_lines
+                .get(line.source_index)
+                .map(|source| MermaidFocusTarget {
+                    source_index: line.source_index,
+                    text: source.text.clone(),
+                    diagram_x: source.diagram_x,
+                    diagram_y: source.diagram_y,
+                })
+        })
+        .collect())
 }
 
 pub(crate) fn pixel_is_dark(pixmap: &Pixmap, x: u32, y: u32) -> bool {
@@ -1278,26 +1814,64 @@ pub(crate) fn pixel_is_dark(pixmap: &Pixmap, x: u32, y: u32) -> bool {
     luminance < 230.0
 }
 
-pub(crate) fn pixmap_to_braille_lines(pixmap: &Pixmap, content_rect: Rect) -> Vec<String> {
+pub(crate) fn mermaid_ascii_cell(pixmap: &Pixmap, cell_x: u16, cell_y: u16) -> char {
+    let base_x = u32::from(cell_x) * 2;
+    let base_y = u32::from(cell_y) * 4;
+    let mut grid = [[false; 2]; 4];
+    let mut row_counts = [0u8; 4];
+    let mut col_counts = [0u8; 2];
+    let mut total = 0u8;
+
+    for sub_y in 0..4 {
+        for sub_x in 0..2 {
+            let dark = pixel_is_dark(pixmap, base_x + sub_x as u32, base_y + sub_y as u32);
+            grid[sub_y][sub_x] = dark;
+            if dark {
+                row_counts[sub_y] += 1;
+                col_counts[sub_x] += 1;
+                total += 1;
+            }
+        }
+    }
+
+    if total == 0 {
+        return ' ';
+    }
+
+    let horizontal = row_counts.into_iter().any(|count| count == 2);
+    let vertical = col_counts[0] >= 3 && col_counts[1] >= 3;
+    let right_arrow =
+        col_counts[1] >= 3 && col_counts[0] <= 1 && horizontal && (grid[1][1] || grid[2][1]);
+    let left_arrow =
+        col_counts[0] >= 3 && col_counts[1] <= 1 && horizontal && (grid[1][0] || grid[2][0]);
+    let diagonal = ((grid[0][0] || grid[1][0]) && (grid[2][1] || grid[3][1]))
+        || ((grid[0][1] || grid[1][1]) && (grid[2][0] || grid[3][0]));
+
+    if right_arrow {
+        '>'
+    } else if left_arrow {
+        '<'
+    } else if vertical {
+        '|'
+    } else if horizontal {
+        '_'
+    } else if diagonal {
+        '\\'
+    } else if col_counts[0] >= 2 || col_counts[1] >= 2 {
+        '|'
+    } else if total >= 2 {
+        '_'
+    } else {
+        ' '
+    }
+}
+
+pub(crate) fn pixmap_to_ascii_lines(pixmap: &Pixmap, content_rect: Rect) -> Vec<String> {
     let mut lines = Vec::new();
     for cell_y in 0..content_rect.height {
         let mut line = String::with_capacity(content_rect.width as usize);
         for cell_x in 0..content_rect.width {
-            let mut bits = 0u32;
-            let base_x = u32::from(cell_x) * 2;
-            let base_y = u32::from(cell_y) * 4;
-            for sub_y in 0..4 {
-                for sub_x in 0..2 {
-                    if pixel_is_dark(pixmap, base_x + sub_x, base_y + sub_y) {
-                        bits |= braille_bit(sub_x, sub_y);
-                    }
-                }
-            }
-            if bits == 0 {
-                line.push(' ');
-            } else {
-                line.push(char::from_u32(0x2800 + bits).unwrap_or(' '));
-            }
+            line.push(mermaid_ascii_cell(pixmap, cell_x, cell_y));
         }
         lines.push(line);
     }
@@ -1325,7 +1899,8 @@ pub(crate) fn ensure_mermaid_prepared_render(
         let layout = compute_layout(&parsed.graph, &options.theme, &options.layout);
         let semantic_lines = build_mermaid_semantic_lines(&layout, &options);
         let svg = render_svg(&layout, &options.theme, &options.layout);
-        let tree = Tree::from_str(&svg, &mermaid_usvg_options())
+        let connector_svg = mermaid_strip_svg_text(&svg);
+        let tree = Tree::from_str(&connector_svg, &mermaid_usvg_options())
             .map_err(|err| format!("failed to parse rendered SVG: {err}"))?;
         let prepared = MermaidPreparedRender {
             key,
@@ -1342,10 +1917,66 @@ pub(crate) fn ensure_mermaid_prepared_render(
     Ok(())
 }
 
-pub(crate) fn render_mermaid_lines(viewer: &mut MermaidViewerState, content_rect: Rect) -> Result<(), String> {
+pub(crate) fn render_mermaid_outline_lines(
+    viewer: &mut MermaidViewerState,
+    content_rect: Rect,
+    transform: MermaidViewportTransform,
+) -> Result<bool, String> {
+    let Some(prepared) = viewer.prepared_render.as_ref() else {
+        return Err("Mermaid source unavailable".to_string());
+    };
+
+    let projected = project_mermaid_semantic_lines(
+        &prepared.semantic_lines,
+        transform,
+        content_rect,
+        MermaidViewState::Outline,
+    );
+    let outline_nodes = mermaid_outline_nodes_from_projected(prepared, &projected);
+    if outline_nodes.is_empty() {
+        return Ok(false);
+    }
+
+    let visible_keys = outline_nodes
+        .iter()
+        .map(|node| node.key.clone())
+        .collect::<HashSet<_>>();
+    let outline_edges = mermaid_outline_edge_map(&prepared.layout)
+        .into_values()
+        .filter(|edge| visible_keys.contains(&edge.from_key) && visible_keys.contains(&edge.to_key))
+        .collect::<Vec<_>>();
+
+    viewer.cached_lines =
+        mermaid_render_outline_background(content_rect, &outline_nodes, outline_edges);
+    viewer.cached_semantic_lines = projected
+        .into_iter()
+        .filter(|line| {
+            outline_nodes
+                .iter()
+                .any(|node| node.source_index == line.source_index)
+        })
+        .collect();
+    Ok(true)
+}
+
+pub(crate) fn render_mermaid_lines(
+    viewer: &mut MermaidViewerState,
+    content_rect: Rect,
+) -> Result<(), String> {
     let (sample_width, sample_height, transform) =
         mermaid_viewport_transform(viewer, content_rect)?;
-    let detail_level = mermaid_detail_level_for_view(viewer, content_rect);
+    let view_state = mermaid_view_state_for_view(viewer, content_rect);
+
+    if view_state == MermaidViewState::Outline
+        && render_mermaid_outline_lines(viewer, content_rect, transform)?
+    {
+        viewer.cached_rect = Some(content_rect);
+        viewer.cached_zoom = viewer.zoom;
+        viewer.cached_center_x = viewer.center_x;
+        viewer.cached_center_y = viewer.center_y;
+        viewer.viewport_render_count = viewer.viewport_render_count.saturating_add(1);
+        return Ok(());
+    }
 
     let mut pixmap = Pixmap::new(sample_width, sample_height)
         .ok_or_else(|| "failed to allocate Mermaid viewport".to_string())?;
@@ -1368,12 +1999,12 @@ pub(crate) fn render_mermaid_lines(viewer: &mut MermaidViewerState, content_rect
         &mut pixmap_mut,
     );
 
-    viewer.cached_lines = pixmap_to_braille_lines(&pixmap, content_rect);
+    viewer.cached_lines = pixmap_to_ascii_lines(&pixmap, content_rect);
     viewer.cached_semantic_lines = project_mermaid_semantic_lines(
         &prepared.semantic_lines,
         transform,
         content_rect,
-        detail_level,
+        view_state,
     );
     viewer.cached_rect = Some(content_rect);
     viewer.cached_zoom = viewer.zoom;
@@ -1399,7 +2030,11 @@ pub(crate) fn render_wrapped_lines(renderer: &mut Renderer, rect: Rect, text: &s
     }
 }
 
-pub(crate) fn render_mermaid_viewer(renderer: &mut Renderer, field: Rect, viewer: &mut MermaidViewerState) {
+pub(crate) fn render_mermaid_viewer(
+    renderer: &mut Renderer,
+    field: Rect,
+    viewer: &mut MermaidViewerState,
+) {
     renderer.fill_rect(field, ' ', Color::Reset);
     viewer.back_rect = Some(Rect {
         x: field.x,
@@ -1411,28 +2046,40 @@ pub(crate) fn render_mermaid_viewer(renderer: &mut Renderer, field: Rect, viewer
 
     let content_rect = mermaid_content_rect(field);
     viewer.content_rect = Some(content_rect);
-    let detail_level = mermaid_detail_level_for_view(viewer, content_rect);
+    let view_state = mermaid_view_state_for_view(viewer, content_rect);
     let status_x = field
         .x
         .saturating_add(display_width(MERMAID_BACK_LABEL) + 1);
     let status_width = field.right().saturating_sub(status_x) as usize;
-    let detail_label = format!("detail {}", detail_level.label());
+    let detail_label = mermaid_status_detail_label(view_state);
+    let zoom_label = mermaid_zoom_status_label(viewer.zoom);
+    let focus_width = viewer
+        .focus_status
+        .as_deref()
+        .map(|status| usize::from(display_width(" | ")) + usize::from(display_width(status)))
+        .unwrap_or(0);
     let fixed_width = usize::from(display_width(&viewer.tmux_name))
         + usize::from(display_width(" | "))
         + usize::from(display_width(&detail_label))
         + usize::from(display_width(" | "))
-        + usize::from(display_width(" | zoom 100% | "))
-        + usize::from(display_width(" | o open"));
-    let status = format!(
-        "{} | {} | {} | zoom {:>3.0}% | o open",
+        + usize::from(display_width(" | "))
+        + usize::from(display_width(&zoom_label))
+        + usize::from(display_width(" | o open"))
+        + focus_width;
+    let mut status = format!(
+        "{} | {} | {} | {} | o open",
         viewer.tmux_name,
         detail_label,
         shorten_path(
             viewer.display_path(),
             status_width.saturating_sub(fixed_width)
         ),
-        viewer.zoom * 100.0,
+        zoom_label,
     );
+    if let Some(focus_status) = viewer.focus_status.as_deref() {
+        status.push_str(" | ");
+        status.push_str(focus_status);
+    }
     renderer.draw_text(
         status_x,
         field.y,
@@ -1460,14 +2107,7 @@ pub(crate) fn render_mermaid_viewer(renderer: &mut Renderer, field: Rect, viewer
         return;
     }
 
-    let needs_rerender = viewer.cached_rect != Some(content_rect)
-        || viewer.prepared_render.is_none()
-        || (viewer.cached_zoom - viewer.zoom).abs() > f32::EPSILON
-        || (viewer.cached_center_x - viewer.center_x).abs() > f32::EPSILON
-        || (viewer.cached_center_y - viewer.center_y).abs() > f32::EPSILON;
-    if needs_rerender {
-        viewer.render_error = render_mermaid_lines(viewer, content_rect).err();
-    }
+    viewer.render_error = ensure_mermaid_viewport_cache(viewer, content_rect).err();
 
     if let Some(error) = viewer.render_error.as_deref() {
         render_wrapped_lines(renderer, content_rect, error, Color::Red);
@@ -1482,6 +2122,11 @@ pub(crate) fn render_mermaid_viewer(renderer: &mut Renderer, field: Rect, viewer
         renderer.draw_text(content_rect.x, y, line, Color::White);
     }
     for line in &viewer.cached_semantic_lines {
-        renderer.draw_text(line.x, line.y, &line.text, Color::White);
+        let color = if Some(line.source_index) == viewer.focused_source_index {
+            Color::Cyan
+        } else {
+            Color::White
+        };
+        renderer.draw_text(line.x, line.y, &line.text, color);
     }
 }

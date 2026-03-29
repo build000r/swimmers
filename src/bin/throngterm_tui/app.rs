@@ -217,19 +217,21 @@ impl<C: TuiApi> App<C> {
             .unwrap_or(entry.color)
     }
 
-    pub(crate) fn thought_repo_summaries(&self) -> Vec<ThoughtRepoSummary> {
+    pub(crate) fn header_repo_summaries(&self) -> Vec<ThoughtRepoSummary> {
         let mut grouped = HashMap::<String, ThoughtRepoSummary>::new();
-        for (index, entry) in self.thought_log.iter().enumerate() {
-            let Some(label) = entry.pwd_label.as_ref() else {
+        for (index, entity) in self.entities.iter().enumerate() {
+            let session = &entity.session;
+            let Some(label) = path_tail_label(&session.cwd) else {
                 continue;
             };
-            let color = self.thought_entry_display_color(entry);
+            let cwd = normalize_path(&session.cwd);
+            let color = session_display_color(session, &self.repo_themes);
 
             let summary = grouped
-                .entry(entry.cwd.clone())
+                .entry(cwd.clone())
                 .or_insert_with(|| ThoughtRepoSummary {
-                    cwd: entry.cwd.clone(),
-                    label: label.clone(),
+                    cwd: cwd.clone(),
+                    label,
                     count: 0,
                     color,
                     last_seen: index,
@@ -951,6 +953,8 @@ impl<C: TuiApi> App<C> {
             cached_center_y: 0.0,
             cached_lines: Vec::new(),
             cached_semantic_lines: Vec::new(),
+            focused_source_index: None,
+            focus_status: None,
             prepared_render: None,
             source_prepare_count: 0,
             viewport_render_count: 0,
@@ -1031,6 +1035,59 @@ impl<C: TuiApi> App<C> {
         viewer.center_x = 0.0;
         viewer.center_y = 0.0;
         viewer.invalidate_viewport_cache();
+    }
+
+    pub(crate) fn cycle_mermaid_focus(&mut self, content_rect: Rect, direction: i8) {
+        let Some(viewer) = self.mermaid_viewer_mut() else {
+            return;
+        };
+
+        let targets = match mermaid_visible_focus_targets(viewer, content_rect) {
+            Ok(targets) => targets,
+            Err(err) => {
+                viewer.render_error = Some(err);
+                viewer.focused_source_index = None;
+                viewer.focus_status = Some("no semantic targets".to_string());
+                return;
+            }
+        };
+
+        if targets.is_empty() {
+            viewer.focused_source_index = None;
+            viewer.focus_status = Some("no semantic targets".to_string());
+            return;
+        }
+
+        let current_index = viewer.focused_source_index.and_then(|source_index| {
+            targets
+                .iter()
+                .position(|target| target.source_index == source_index)
+        });
+        let next_index = match (current_index, direction.is_negative()) {
+            (Some(index), false) => (index + 1) % targets.len(),
+            (Some(index), true) => index.checked_sub(1).unwrap_or(targets.len() - 1),
+            (None, false) => 0,
+            (None, true) => targets.len() - 1,
+        };
+        let target = &targets[next_index];
+        viewer.focused_source_index = Some(target.source_index);
+        viewer.focus_status = Some(format!("focus {}", target.text));
+
+        let recenter_x = (viewer.center_x - target.diagram_x).abs() > f32::EPSILON;
+        let recenter_y = (viewer.center_y - target.diagram_y).abs() > f32::EPSILON;
+        viewer.center_x = target.diagram_x;
+        viewer.center_y = target.diagram_y;
+        if recenter_x || recenter_y {
+            viewer.invalidate_viewport_cache();
+        }
+    }
+
+    pub(crate) fn focus_next_mermaid_target(&mut self, content_rect: Rect) {
+        self.cycle_mermaid_focus(content_rect, 1);
+    }
+
+    pub(crate) fn focus_previous_mermaid_target(&mut self, content_rect: Rect) {
+        self.cycle_mermaid_focus(content_rect, -1);
     }
 
     pub(crate) fn handle_mermaid_mouse_down(

@@ -823,6 +823,22 @@ fn press_mermaid_key(app: &mut App<MockApi>, layout: WorkspaceLayout, key: char)
     ));
 }
 
+fn press_mermaid_tab(app: &mut App<MockApi>, layout: WorkspaceLayout) {
+    assert!(handle_key_event(
+        app,
+        layout,
+        KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
+    ));
+}
+
+fn press_mermaid_backtab(app: &mut App<MockApi>, layout: WorkspaceLayout) {
+    assert!(handle_key_event(
+        app,
+        layout,
+        KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT),
+    ));
+}
+
 #[test]
 fn mermaid_compact_overview_text_prefers_numeric_prefix_and_keywords() {
     let compact = mermaid_compact_overview_text([
@@ -1312,6 +1328,44 @@ fn thought_timeline_trims_to_visible_capacity() {
 }
 
 #[test]
+fn header_filter_strip_uses_active_sessions_not_trimmed_thought_log() {
+    let api = MockApi::new();
+    let layout = test_layout(220, 24);
+    let mut app = make_app(api);
+    assert_eq!(layout.thought_entry_capacity(), 10);
+
+    let sessions = (0..11)
+        .map(|idx| {
+            let session_id = format!("sess-{idx:02}");
+            let tmux_name = format!("{idx:02}");
+            let cwd = format!("{TEST_REPOS_ROOT}/r{idx:02}");
+            let thought = format!("thought {idx}");
+            let updated_at = format!("2026-03-08T14:00:{:02}Z", idx + 1);
+            session_summary_with_thought(&session_id, &tmux_name, &cwd, &thought, &updated_at)
+        })
+        .collect::<Vec<_>>();
+
+    app.merge_sessions(sessions.clone(), layout.overview_field);
+    app.capture_thought_updates(&sessions, layout.thought_entry_capacity());
+
+    assert_eq!(app.thought_log.len(), 10);
+    assert!(!app
+        .thought_log
+        .iter()
+        .any(|entry| entry.cwd == format!("{TEST_REPOS_ROOT}/r00")));
+
+    let header = build_header_filter_layout(&app, 220);
+    let labels = header
+        .chips
+        .iter()
+        .map(|chip| chip.label.clone())
+        .collect::<Vec<_>>();
+    assert_eq!(labels.len(), 11);
+    assert!(labels.contains(&"1xr00".to_string()));
+    assert!(labels.contains(&"1xr10".to_string()));
+}
+
+#[test]
 fn refresh_prunes_exited_sessions_from_thought_timeline_and_header_filter_chips() {
     let api = MockApi::new();
     let layout = test_layout(120, 32);
@@ -1385,6 +1439,43 @@ fn refresh_prunes_exited_sessions_from_thought_timeline_and_header_filter_chips(
 }
 
 #[test]
+fn refresh_header_filter_strip_includes_active_repo_without_thought_history() {
+    let api = MockApi::new();
+    let layout = test_layout(160, 32);
+    api.push_fetch_sessions(Ok(vec![
+        session_summary_with_thought(
+            "sess-1",
+            "7",
+            TEST_REPO_THRONGTERM,
+            "patching tui",
+            "2026-03-08T14:00:05Z",
+        ),
+        session_summary("sess-2", "9", TEST_REPO_SKILLS),
+    ]));
+    let mut app = make_app(api);
+
+    app.refresh(layout);
+
+    let header = build_header_filter_layout(&app, 160);
+    let labels = header
+        .chips
+        .iter()
+        .map(|chip| chip.label.clone())
+        .collect::<Vec<_>>();
+    assert!(labels.contains(&"1xthrongterm".to_string()));
+    let skills_chip = header
+        .chips
+        .iter()
+        .find(|chip| chip.label == "1xskills")
+        .expect("skills chip should exist even without thought history")
+        .clone();
+
+    app.handle_header_filter_click(160, skills_chip.rect.x, skills_chip.rect.y);
+
+    assert_eq!(app.thought_filter.cwd.as_deref(), Some(TEST_REPO_SKILLS));
+}
+
+#[test]
 fn render_header_filter_strip_shows_repo_chips_and_thought_rows() {
     let api = MockApi::new();
     let layout = test_layout(120, 32);
@@ -1437,6 +1528,10 @@ fn render_header_filter_strip_shows_repo_chips_and_thought_rows() {
     );
     third.repo_theme_id = Some(skills_theme_id);
 
+    app.merge_sessions(
+        vec![first.clone(), second.clone(), third.clone()],
+        layout.overview_field,
+    );
     app.capture_thought_updates(&[first, second, third], layout.thought_entry_capacity());
 
     let panel = build_thought_panel(&app, thought_content, layout.thought_entry_capacity());
@@ -1485,19 +1580,19 @@ fn render_header_filter_strip_shows_repo_chips_and_thought_rows() {
 #[test]
 fn active_repo_header_chip_maps_to_code_open_action() {
     let api = MockApi::new();
+    let layout = test_layout(120, 32);
     let mut app = make_app(api);
     app.repo_themes
         .insert("/tmp/throngterm".to_string(), repo_theme("#B89875"));
-    app.capture_thought_updates(
-        &[session_summary_with_thought(
-            "sess-1",
-            "7",
-            TEST_REPO_THRONGTERM,
-            "patching tui",
-            "2026-03-08T14:00:05Z",
-        )],
-        test_layout(120, 32).thought_entry_capacity(),
+    let session = session_summary_with_thought(
+        "sess-1",
+        "7",
+        TEST_REPO_THRONGTERM,
+        "patching tui",
+        "2026-03-08T14:00:05Z",
     );
+    app.merge_sessions(vec![session.clone()], layout.overview_field);
+    app.capture_thought_updates(&[session], layout.thought_entry_capacity());
     app.set_thought_filter_cwd(TEST_REPO_THRONGTERM.to_string());
 
     let header = build_header_filter_layout(&app, 120);
@@ -1756,11 +1851,7 @@ fn header_filter_strip_toggles_filter_out_mode_and_excludes_selected_projects() 
     app.handle_header_filter_click(120, skills_chip.rect.x, skills_chip.rect.y);
 
     assert!(app.thought_filter.filter_out_mode);
-    assert!(
-        app.thought_filter
-            .excluded_cwds
-            .contains(TEST_REPO_SKILLS)
-    );
+    assert!(app.thought_filter.excluded_cwds.contains(TEST_REPO_SKILLS));
     assert_eq!(app.active_thought_filter_text(), "filter: hide=skills");
     assert_eq!(
         app.visible_thought_entries(layout.thought_entry_capacity())
@@ -4032,7 +4123,88 @@ fn mermaid_graph_node_labels_render_as_terminal_text() {
     let beta = find_text_position(&renderer, "Beta Node").expect("Beta Node overlay");
     assert_eq!(cell_at(&renderer, alpha.0, alpha.1).ch, 'A');
     assert_eq!(cell_at(&renderer, beta.0, beta.1).ch, 'B');
-    assert!(row_text(&renderer, layout.overview_field.y).contains("detail L1"));
+    assert!(row_text(&renderer, layout.overview_field.y).contains("outline"));
+}
+
+#[test]
+fn mermaid_outline_background_stays_sparse_for_simple_flowchart() {
+    let (mut app, mut renderer, layout) =
+        open_mermaid_test_viewer("graph TD\nA[Alpha Node] --> B[Beta Node]\n", 120, 32);
+
+    app.render(&mut renderer, layout);
+
+    let background_chars = match &app.fish_bowl_mode {
+        FishBowlMode::Mermaid(viewer) => mermaid_background_charset(viewer),
+        FishBowlMode::Aquarium => panic!("expected Mermaid viewer mode"),
+    };
+    assert!(
+        !background_chars.is_empty(),
+        "outline should draw connectors"
+    );
+    assert!(
+        background_chars.len() < 40,
+        "outline background should stay sparse: {background_chars:?}"
+    );
+    assert!(
+        background_chars
+            .iter()
+            .all(|ch| matches!(ch, '|' | '_' | '>' | '<')),
+        "{background_chars:?}"
+    );
+}
+
+#[test]
+fn mermaid_tab_focuses_first_visible_semantic_target_and_highlights_it() {
+    let (mut app, mut renderer, layout) =
+        open_mermaid_test_viewer("graph TD\nA[Alpha Node] --> B[Beta Node]\n", 120, 32);
+
+    press_mermaid_tab(&mut app, layout);
+    app.render(&mut renderer, layout);
+
+    let (focus_status, focused_source_index, alpha_position) = match &app.fish_bowl_mode {
+        FishBowlMode::Mermaid(viewer) => (
+            viewer.focus_status.clone(),
+            viewer.focused_source_index,
+            find_cached_semantic_line(viewer, "Alpha Node").expect("Alpha Node overlay"),
+        ),
+        FishBowlMode::Aquarium => panic!("expected Mermaid viewer mode"),
+    };
+    assert_eq!(focus_status.as_deref(), Some("focus Alpha Node"));
+    assert!(focused_source_index.is_some());
+    assert_eq!(
+        cell_at(&renderer, alpha_position.0, alpha_position.1).fg,
+        Color::Cyan
+    );
+}
+
+#[test]
+fn mermaid_tab_cycles_forward_and_back_between_visible_targets() {
+    let (mut app, mut renderer, layout) =
+        open_mermaid_test_viewer("graph TD\nA[Alpha Node] --> B[Beta Node]\n", 120, 32);
+
+    press_mermaid_tab(&mut app, layout);
+    press_mermaid_tab(&mut app, layout);
+    app.render(&mut renderer, layout);
+    let (focus_status, beta_position) = match &app.fish_bowl_mode {
+        FishBowlMode::Mermaid(viewer) => (
+            viewer.focus_status.clone(),
+            find_cached_semantic_line(viewer, "Beta Node").expect("Beta Node overlay"),
+        ),
+        FishBowlMode::Aquarium => panic!("expected Mermaid viewer mode"),
+    };
+    assert_eq!(focus_status.as_deref(), Some("focus Beta Node"));
+    assert_eq!(
+        cell_at(&renderer, beta_position.0, beta_position.1).fg,
+        Color::Cyan
+    );
+
+    press_mermaid_backtab(&mut app, layout);
+    app.render(&mut renderer, layout);
+    let focus_status = match &app.fish_bowl_mode {
+        FishBowlMode::Mermaid(viewer) => viewer.focus_status.clone(),
+        FishBowlMode::Aquarium => panic!("expected Mermaid viewer mode"),
+    };
+    assert_eq!(focus_status.as_deref(), Some("focus Alpha Node"));
 }
 
 #[test]
@@ -4052,7 +4224,7 @@ fn mermaid_er_overview_hides_attribute_detail_until_zoomed() {
     assert!(!semantic_texts.contains(&"user_id".to_string()));
     assert!(!semantic_texts.contains(&"uuid".to_string()));
     assert!(!semantic_texts.contains(&"places".to_string()));
-    assert!(row_text(&renderer, layout.overview_field.y).contains("detail L1"));
+    assert!(row_text(&renderer, layout.overview_field.y).contains("outline"));
 }
 
 #[test]
@@ -4064,10 +4236,40 @@ fn mermaid_flowchart_overview_hides_edge_labels_until_zoomed() {
     app.render(&mut renderer, layout);
 
     assert!(find_text_position(&renderer, "Group One").is_some());
-    assert!(find_text_position(&renderer, "Producer").is_some());
-    assert!(find_text_position(&renderer, "Consumer").is_some());
+    assert!(find_text_position(&renderer, "Producer").is_none());
+    assert!(find_text_position(&renderer, "Consumer").is_none());
     assert!(find_text_position(&renderer, "ships data").is_none());
-    assert!(row_text(&renderer, layout.overview_field.y).contains("detail L1"));
+    assert!(row_text(&renderer, layout.overview_field.y).contains("outline"));
+}
+
+#[test]
+fn mermaid_outline_collapses_subgraph_edges_to_top_level_groups() {
+    let source = "graph LR\nsubgraph Left Side\nA[Alpha]\nB[Beta]\nend\nsubgraph Right Side\nC[Gamma]\nD[Delta]\nend\nA --> C\nB --> D\n";
+    let (mut app, mut renderer, layout) = open_mermaid_test_viewer(source, 140, 36);
+
+    app.render(&mut renderer, layout);
+
+    let (semantic_texts, background_chars) = match &app.fish_bowl_mode {
+        FishBowlMode::Mermaid(viewer) => (
+            cached_semantic_texts(viewer),
+            mermaid_background_charset(viewer),
+        ),
+        FishBowlMode::Aquarium => panic!("expected Mermaid viewer mode"),
+    };
+    assert_eq!(
+        semantic_texts,
+        vec!["Left Side".to_string(), "Right Side".to_string()]
+    );
+    assert!(find_text_position(&renderer, "Alpha").is_none());
+    assert!(find_text_position(&renderer, "Beta").is_none());
+    assert!(find_text_position(&renderer, "Gamma").is_none());
+    assert!(find_text_position(&renderer, "Delta").is_none());
+    assert!(
+        background_chars
+            .iter()
+            .any(|ch| matches!(ch, '_' | '>' | '<')),
+        "{background_chars:?}"
+    );
 }
 
 #[test]
@@ -4095,7 +4297,7 @@ fn mermaid_flowchart_overview_compacts_long_node_labels() {
             .all(|ch| matches!(ch, '|' | '_' | '\\' | '>' | '<')),
         "{background_chars:?}"
     );
-    assert!(row_text(&renderer, layout.overview_field.y).contains("detail L1"));
+    assert!(row_text(&renderer, layout.overview_field.y).contains("outline"));
 }
 
 #[test]
@@ -4160,6 +4362,40 @@ fn mermaid_zoom_reveals_edge_labels_at_detail_l2() {
         row_text(&renderer, layout.overview_field.y).contains("zoom 150%"),
         "status row: {}",
         row_text(&renderer, layout.overview_field.y)
+    );
+}
+
+#[test]
+fn mermaid_tab_can_focus_zoomed_edge_labels() {
+    let source =
+        "graph TD\nsubgraph Group One\nA[Producer]\nB[Consumer]\nend\nA -- ships data --> B\n";
+    let (mut app, mut renderer, layout) = open_mermaid_test_viewer(source, 120, 32);
+
+    press_mermaid_key(&mut app, layout, '+');
+    for _ in 0..6 {
+        press_mermaid_tab(&mut app, layout);
+        let focus_status = match &app.fish_bowl_mode {
+            FishBowlMode::Mermaid(viewer) => viewer.focus_status.clone(),
+            FishBowlMode::Aquarium => panic!("expected Mermaid viewer mode"),
+        };
+        if focus_status.as_deref() == Some("focus ships data") {
+            break;
+        }
+    }
+    app.render(&mut renderer, layout);
+
+    let (focus_status, ships_data_position) = match &app.fish_bowl_mode {
+        FishBowlMode::Mermaid(viewer) => (
+            viewer.focus_status.clone(),
+            find_cached_semantic_line(viewer, "ships data").expect("ships data overlay"),
+        ),
+        FishBowlMode::Aquarium => panic!("expected Mermaid viewer mode"),
+    };
+    assert!(row_text(&renderer, layout.overview_field.y).contains("detail L2"));
+    assert_eq!(focus_status.as_deref(), Some("focus ships data"));
+    assert_eq!(
+        cell_at(&renderer, ships_data_position.0, ships_data_position.1).fg,
+        Color::Cyan
     );
 }
 
@@ -4266,7 +4502,7 @@ fn mermaid_reset_fit_hides_subordinate_detail() {
     assert!(!semantic_texts.contains(&"email".to_string()));
     assert!(!semantic_texts.contains(&"uuid".to_string()));
     assert!(!semantic_texts.contains(&"string".to_string()));
-    assert!(row_text(&renderer, layout.overview_field.y).contains("detail L1"));
+    assert!(row_text(&renderer, layout.overview_field.y).contains("outline"));
     assert!(
         row_text(&renderer, layout.overview_field.y).contains("fit 100%"),
         "status row: {}",
@@ -4394,6 +4630,23 @@ fn mermaid_sequence_diagram_falls_back_to_connector_only_background() {
 }
 
 #[test]
+fn mermaid_tab_reports_no_semantic_targets_for_sequence_diagrams() {
+    let (mut app, mut renderer, layout) =
+        open_mermaid_test_viewer("sequenceDiagram\nAlice->>Bob: hello\n", 120, 32);
+
+    press_mermaid_tab(&mut app, layout);
+    app.render(&mut renderer, layout);
+
+    let (focused_source_index, focus_status) = match &app.fish_bowl_mode {
+        FishBowlMode::Mermaid(viewer) => (viewer.focused_source_index, viewer.focus_status.clone()),
+        FishBowlMode::Aquarium => panic!("expected Mermaid viewer mode"),
+    };
+    assert_eq!(focused_source_index, None);
+    assert_eq!(focus_status.as_deref(), Some("no semantic targets"));
+    assert!(row_text(&renderer, layout.overview_field.y).contains("no semantic targets"));
+}
+
+#[test]
 fn mermaid_semantic_labels_clip_to_viewport_bounds() {
     let content_rect = Rect {
         x: 42,
@@ -4408,6 +4661,8 @@ fn mermaid_semantic_labels_clip_to_viewport_bounds() {
             diagram_y: 4.0,
             anchor: MermaidTextAnchor::Start,
             kind: MermaidSemanticKind::NodeSummary,
+            owner_key: "node:A".to_string(),
+            outline_eligible: true,
             owner_width: 20.0,
             owner_height: 8.0,
         }],
@@ -4417,7 +4672,7 @@ fn mermaid_semantic_labels_clip_to_viewport_bounds() {
             ty: 0.0,
         },
         content_rect,
-        MermaidDetailLevel::L1,
+        MermaidViewState::L1,
     );
 
     assert_eq!(projected.len(), 1);
@@ -4434,16 +4689,85 @@ fn mermaid_resize_reprojects_semantic_labels() {
 
     app.render(&mut renderer, layout);
     let group_before = find_text_position(&renderer, "Group One").expect("Group One before");
-    let producer_before = find_text_position(&renderer, "Producer").expect("Producer before");
 
     let resized_layout = test_layout(160, 48);
     let mut resized_renderer = test_renderer(160, 48);
     app.render(&mut resized_renderer, resized_layout);
 
     let group_after = find_text_position(&resized_renderer, "Group One").expect("Group One after");
-    let producer_after = find_text_position(&resized_renderer, "Producer").expect("Producer after");
     assert_ne!(group_after, group_before);
-    assert_ne!(producer_after, producer_before);
+    assert!(find_text_position(&resized_renderer, "Producer").is_none());
+}
+
+#[test]
+fn mermaid_resize_preserves_focused_semantic_target() {
+    let source =
+        "graph TD\nsubgraph Group One\nA[Producer]\nB[Consumer]\nend\nA -- ships data --> B\n";
+    let (mut app, mut renderer, layout) = open_mermaid_test_viewer(source, 120, 32);
+
+    press_mermaid_tab(&mut app, layout);
+    app.render(&mut renderer, layout);
+    let (focused_before, focus_status_before) = match &app.fish_bowl_mode {
+        FishBowlMode::Mermaid(viewer) => (viewer.focused_source_index, viewer.focus_status.clone()),
+        FishBowlMode::Aquarium => panic!("expected Mermaid viewer mode"),
+    };
+
+    let resized_layout = test_layout(160, 48);
+    let mut resized_renderer = test_renderer(160, 48);
+    app.render(&mut resized_renderer, resized_layout);
+
+    let (focused_after, focus_status, highlighted_position) = match &app.fish_bowl_mode {
+        FishBowlMode::Mermaid(viewer) => (
+            viewer.focused_source_index,
+            viewer.focus_status.clone(),
+            viewer
+                .cached_semantic_lines
+                .iter()
+                .find(|line| Some(line.source_index) == viewer.focused_source_index)
+                .map(|line| (line.x, line.y))
+                .expect("focused semantic line after resize"),
+        ),
+        FishBowlMode::Aquarium => panic!("expected Mermaid viewer mode"),
+    };
+    assert_eq!(focused_after, focused_before);
+    assert_eq!(focus_status, focus_status_before);
+    assert_eq!(
+        cell_at(
+            &resized_renderer,
+            highlighted_position.0,
+            highlighted_position.1
+        )
+        .fg,
+        Color::Cyan
+    );
+}
+
+#[test]
+fn mermaid_pan_and_zoom_preserve_focused_target() {
+    let (mut app, mut renderer, layout) =
+        open_mermaid_test_viewer("graph TD\nA[Alpha Node] --> B[Beta Node]\n", 120, 32);
+
+    press_mermaid_tab(&mut app, layout);
+    let focused_before = match &app.fish_bowl_mode {
+        FishBowlMode::Mermaid(viewer) => viewer.focused_source_index,
+        FishBowlMode::Aquarium => panic!("expected Mermaid viewer mode"),
+    };
+
+    press_mermaid_key(&mut app, layout, '+');
+    assert!(handle_key_event(
+        &mut app,
+        layout,
+        KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE),
+    ));
+    app.render(&mut renderer, layout);
+
+    let focused_after = match &app.fish_bowl_mode {
+        FishBowlMode::Mermaid(viewer) => viewer.focused_source_index,
+        FishBowlMode::Aquarium => panic!("expected Mermaid viewer mode"),
+    };
+    assert_eq!(focused_after, focused_before);
+    assert!(row_text(&renderer, layout.overview_field.y).contains("zoom 150%"));
+    assert!(row_text(&renderer, layout.overview_field.y).contains("focus Alpha Node"));
 }
 
 #[test]
