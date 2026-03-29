@@ -4843,6 +4843,256 @@ fn mermaid_compacts_multiline_node_text_to_consecutive_rows() {
 }
 
 #[test]
+fn mermaid_detail_projection_hides_owner_summary_when_detail_lines_exist() {
+    let content_rect = Rect {
+        x: 10,
+        y: 10,
+        width: 40,
+        height: 10,
+    };
+    let projected = project_mermaid_semantic_lines(
+        &[
+            MermaidSemanticLine {
+                text: "Alpha compact".to_string(),
+                diagram_x: 0.0,
+                diagram_y: 12.0,
+                anchor: MermaidTextAnchor::Start,
+                kind: MermaidSemanticKind::NodeSummary,
+                owner_key: "node:A".to_string(),
+                outline_eligible: false,
+                owner_width: 24.0,
+                owner_height: 20.0,
+            },
+            MermaidSemanticLine {
+                text: "Alpha Full".to_string(),
+                diagram_x: 0.0,
+                diagram_y: 4.0,
+                anchor: MermaidTextAnchor::Start,
+                kind: MermaidSemanticKind::NodeTitle,
+                owner_key: "node:A".to_string(),
+                outline_eligible: false,
+                owner_width: 24.0,
+                owner_height: 20.0,
+            },
+            MermaidSemanticLine {
+                text: "Second Line".to_string(),
+                diagram_x: 0.0,
+                diagram_y: 8.0,
+                anchor: MermaidTextAnchor::Start,
+                kind: MermaidSemanticKind::NodeTitle,
+                owner_key: "node:A".to_string(),
+                outline_eligible: false,
+                owner_width: 24.0,
+                owner_height: 20.0,
+            },
+        ],
+        MermaidViewportTransform {
+            scale: 1.0,
+            tx: 0.0,
+            ty: 0.0,
+        },
+        content_rect,
+        MermaidViewState::L2,
+    );
+
+    assert_eq!(
+        projected
+            .iter()
+            .map(|line| line.text.clone())
+            .collect::<Vec<_>>(),
+        vec!["Alpha Full".to_string(), "Second Line".to_string()]
+    );
+}
+
+#[test]
+fn mermaid_detail_box_rects_wrap_visible_lines_tightly() {
+    let content_rect = Rect {
+        x: 0,
+        y: 0,
+        width: 40,
+        height: 20,
+    };
+    let source_lines = vec![
+        MermaidSemanticLine {
+            text: "USER".to_string(),
+            diagram_x: 0.0,
+            diagram_y: 0.0,
+            anchor: MermaidTextAnchor::Start,
+            kind: MermaidSemanticKind::NodeTitle,
+            owner_key: "node:USER".to_string(),
+            outline_eligible: false,
+            owner_width: 20.0,
+            owner_height: 20.0,
+        },
+        MermaidSemanticLine {
+            text: "id".to_string(),
+            diagram_x: 0.0,
+            diagram_y: 0.0,
+            anchor: MermaidTextAnchor::Start,
+            kind: MermaidSemanticKind::ErAttributeName,
+            owner_key: "node:USER".to_string(),
+            outline_eligible: false,
+            owner_width: 20.0,
+            owner_height: 20.0,
+        },
+        MermaidSemanticLine {
+            text: "email".to_string(),
+            diagram_x: 0.0,
+            diagram_y: 0.0,
+            anchor: MermaidTextAnchor::Start,
+            kind: MermaidSemanticKind::ErAttributeName,
+            owner_key: "node:USER".to_string(),
+            outline_eligible: false,
+            owner_width: 20.0,
+            owner_height: 20.0,
+        },
+    ];
+    let projected = vec![
+        MermaidProjectedLine {
+            source_index: 0,
+            x: 20,
+            y: 11,
+            text: "USER".to_string(),
+        },
+        MermaidProjectedLine {
+            source_index: 1,
+            x: 18,
+            y: 12,
+            text: "id".to_string(),
+        },
+        MermaidProjectedLine {
+            source_index: 2,
+            x: 18,
+            y: 13,
+            text: "email".to_string(),
+        },
+    ];
+
+    let rects = mermaid_detail_box_rects(&source_lines, &projected, content_rect);
+    assert_eq!(
+        rects.get("node:USER").copied(),
+        Some(MermaidOutlineLabelRect {
+            left: 17,
+            right: 24,
+            top: 10,
+            bottom: 14,
+        })
+    );
+}
+
+#[test]
+fn mermaid_er_detail_view_draws_compact_box_around_visible_lines() {
+    let source = "erDiagram\nUSER {\n  uuid id PK\n  string email\n}\n";
+    let (mut app, mut renderer, layout) = open_mermaid_test_viewer(source, 120, 32);
+
+    for _ in 0..2 {
+        press_mermaid_key(&mut app, layout, '+');
+    }
+    app.render(&mut renderer, layout);
+
+    let user = find_text_position(&renderer, "USER").expect("USER label");
+    let id = find_text_position(&renderer, "id").expect("id label");
+    let email = find_text_position(&renderer, "email").expect("email label");
+
+    assert_eq!(id.1, user.1 + 1);
+    assert_eq!(email.1, id.1 + 1);
+
+    let left = user.0.min(id.0).min(email.0).saturating_sub(1);
+    let right = (user.0 + display_width("USER") - 1)
+        .max(id.0 + display_width("id") - 1)
+        .max(email.0 + display_width("email") - 1)
+        .saturating_add(1);
+
+    assert_eq!(cell_at(&renderer, left, user.1).ch, '|');
+    assert_eq!(cell_at(&renderer, left, id.1).ch, '|');
+    assert_eq!(cell_at(&renderer, left, email.1).ch, '|');
+    assert_eq!(cell_at(&renderer, right, user.1).ch, '|');
+    assert_eq!(cell_at(&renderer, right, id.1).ch, '|');
+    assert_eq!(cell_at(&renderer, right, email.1).ch, '|');
+    assert_eq!(
+        cell_at(&renderer, left + 1, user.1.saturating_sub(1)).ch,
+        '_'
+    );
+    assert_eq!(
+        cell_at(&renderer, left + 1, email.1.saturating_add(1)).ch,
+        '_'
+    );
+}
+
+#[test]
+fn mermaid_er_semantic_columns_cap_type_to_name_gap_at_three_spaces() {
+    let node = mermaid_rs_renderer::NodeLayout {
+        id: "ITEM".to_string(),
+        x: 10.0,
+        y: 10.0,
+        width: 140.0,
+        height: 80.0,
+        label: mermaid_rs_renderer::layout::TextBlock {
+            lines: vec![
+                "ITEM".to_string(),
+                "---".to_string(),
+                "uuid id PK".to_string(),
+                "decimal total".to_string(),
+                "bool open".to_string(),
+            ],
+            width: 0.0,
+            height: 0.0,
+        },
+        shape: mermaid_rs_renderer::ir::NodeShape::Rectangle,
+        style: mermaid_rs_renderer::ir::NodeStyle::default(),
+        link: None,
+        anchor_subgraph: None,
+        hidden: false,
+        icon: None,
+    };
+    let mut semantic_lines = Vec::new();
+    extend_mermaid_er_semantic_lines(
+        &mut semantic_lines,
+        &node,
+        10.0,
+        14.0,
+        10.0,
+        "node:ITEM",
+        true,
+    );
+
+    let projected = project_mermaid_semantic_lines(
+        &semantic_lines,
+        MermaidViewportTransform {
+            scale: 1.0,
+            tx: 0.0,
+            ty: 0.0,
+        },
+        Rect {
+            x: 0,
+            y: 0,
+            width: 120,
+            height: 32,
+        },
+        MermaidViewState::L3,
+    );
+
+    let x_for = |needle: &str| -> u16 {
+        projected
+            .iter()
+            .find(|line| line.text == needle)
+            .map(|line| line.x)
+            .unwrap_or_else(|| panic!("{needle}"))
+    };
+
+    let uuid = x_for("uuid");
+    let id = x_for("id");
+    let decimal = x_for("decimal");
+    let total = x_for("total");
+    let bool_pos = x_for("bool");
+    let open = x_for("open");
+
+    assert_eq!(id, uuid + display_width("uuid") + 3);
+    assert_eq!(total, decimal + display_width("decimal") + 3);
+    assert_eq!(open, bool_pos + display_width("bool") + 3);
+}
+
+#[test]
 fn mermaid_resize_reprojects_semantic_labels() {
     let source =
         "graph TD\nsubgraph Group One\nA[Producer]\nB[Consumer]\nend\nA -- ships data --> B\n";
