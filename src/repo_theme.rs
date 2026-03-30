@@ -7,6 +7,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::types::RepoTheme;
 
+const PREFERRED_THEME_DIR: &str = ".swimmers";
+const LEGACY_THEME_DIR: &str = ".throngterm";
 const DEFAULT_SKIN: &str = "#F3D2B6";
 const DEFAULT_TAN: &str = "#DCCAB6";
 const DEFAULT_INK: &str = "#171717";
@@ -48,16 +50,14 @@ struct PaletteOutput {
 }
 
 pub fn existing_repo_theme(cwd: &str) -> Option<(String, RepoTheme)> {
-    let (project_root, swimmers_dir) = walk_to_swimmers_dir(cwd)?;
-    let colors_path = swimmers_dir.join("colors.json");
-
-    let theme = read_valid_theme(&colors_path)?;
+    let project_root = walk_to_theme_root(cwd)?;
+    let theme = read_first_valid_theme(&project_root)?;
     Some((project_root.to_string_lossy().into_owned(), theme))
 }
 
 pub fn discover_repo_theme(cwd: &str) -> Option<(String, RepoTheme)> {
-    let (project_root, swimmers_dir) = walk_to_swimmers_dir(cwd)?;
-    let colors_path = swimmers_dir.join("colors.json");
+    let project_root = walk_to_theme_root(cwd)?;
+    let colors_path = preferred_colors_path(&project_root);
 
     if let Some(existing) = existing_repo_theme(cwd) {
         return Some(existing);
@@ -77,16 +77,15 @@ pub fn discover_repo_theme(cwd: &str) -> Option<(String, RepoTheme)> {
     Some((project_root.to_string_lossy().into_owned(), theme))
 }
 
-fn walk_to_swimmers_dir(cwd: &str) -> Option<(PathBuf, PathBuf)> {
+fn walk_to_theme_root(cwd: &str) -> Option<PathBuf> {
     let mut current = Path::new(cwd);
     if !current.is_dir() {
         current = current.parent()?;
     }
 
     loop {
-        let candidate = current.join(".throngterm");
-        if candidate.is_dir() {
-            return Some((current.to_path_buf(), candidate));
+        if has_theme_dir(current) {
+            return Some(current.to_path_buf());
         }
 
         match current.parent() {
@@ -94,6 +93,33 @@ fn walk_to_swimmers_dir(cwd: &str) -> Option<(PathBuf, PathBuf)> {
             _ => return None,
         }
     }
+}
+
+fn has_theme_dir(project_root: &Path) -> bool {
+    theme_dir_paths(project_root)
+        .into_iter()
+        .any(|path| path.is_dir())
+}
+
+fn theme_dir_paths(project_root: &Path) -> [PathBuf; 2] {
+    [
+        project_root.join(PREFERRED_THEME_DIR),
+        project_root.join(LEGACY_THEME_DIR),
+    ]
+}
+
+fn theme_file_paths(project_root: &Path) -> [PathBuf; 2] {
+    theme_dir_paths(project_root).map(|path| path.join("colors.json"))
+}
+
+fn preferred_colors_path(project_root: &Path) -> PathBuf {
+    project_root.join(PREFERRED_THEME_DIR).join("colors.json")
+}
+
+fn read_first_valid_theme(project_root: &Path) -> Option<RepoTheme> {
+    theme_file_paths(project_root)
+        .into_iter()
+        .find_map(|path| read_valid_theme(&path))
 }
 
 fn read_valid_theme(path: &Path) -> Option<RepoTheme> {
@@ -123,8 +149,7 @@ fn collect_used_colors(project_root: &Path) -> HashSet<String> {
         if path == project_root {
             continue;
         }
-        let colors_path = path.join(".throngterm").join("colors.json");
-        let Some(theme) = read_valid_theme(&colors_path) else {
+        let Some(theme) = read_first_valid_theme(&path) else {
             continue;
         };
         used.insert(theme.body);
@@ -316,10 +341,26 @@ mod tests {
         std::fs::write(path, contents).unwrap();
     }
 
+    fn write_theme_file(path: &Path, dir_name: &str, body: &str) {
+        write(
+            &path.join(dir_name).join("colors.json"),
+            &format!(
+                r##"{{
+  "palette": {{
+    "body": "{body}",
+    "outline": "#3D2F24",
+    "accent": "#1D1914",
+    "shirt": "#AA9370"
+  }}
+}}"##
+            ),
+        );
+    }
+
     #[test]
     fn reads_existing_valid_theme() {
         let tmp = tempfile::tempdir().unwrap();
-        let colors_path = tmp.path().join(".throngterm").join("colors.json");
+        let colors_path = tmp.path().join(PREFERRED_THEME_DIR).join("colors.json");
         write(
             &colors_path,
             r##"{
@@ -347,30 +388,17 @@ mod tests {
     fn generates_missing_theme_without_colliding_with_siblings() {
         let tmp = tempfile::tempdir().unwrap();
 
-        let sibling = tmp
-            .path()
-            .join("buildooor")
-            .join(".throngterm")
-            .join("colors.json");
-        write(
-            &sibling,
-            r##"{
-  "palette": {
-    "body": "#B89875",
-    "outline": "#3D2F24",
-    "accent": "#1D1914",
-    "shirt": "#AA9370"
-  }
-}"##,
-        );
+        write_theme_file(&tmp.path().join("buildooor"), PREFERRED_THEME_DIR, "#B89875");
 
         let repo_root = tmp.path().join("weathr");
-        std::fs::create_dir_all(repo_root.join(".throngterm")).unwrap();
+        std::fs::create_dir_all(repo_root.join(PREFERRED_THEME_DIR)).unwrap();
         let cwd = repo_root.join("app");
         std::fs::create_dir_all(&cwd).unwrap();
 
         let (_root, theme) = discover_repo_theme(cwd.to_string_lossy().as_ref()).unwrap();
-        let contents = std::fs::read_to_string(repo_root.join(".throngterm/colors.json")).unwrap();
+        let contents =
+            std::fs::read_to_string(repo_root.join(PREFERRED_THEME_DIR).join("colors.json"))
+                .unwrap();
 
         assert!(contents.contains(&theme.body));
         assert_ne!(theme.body, "#B89875");
@@ -380,9 +408,66 @@ mod tests {
     }
 
     #[test]
+    fn reads_legacy_theme_when_preferred_cache_is_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo_root = tmp.path().join("buildooor");
+        write_theme_file(&repo_root, LEGACY_THEME_DIR, "#B89875");
+
+        let cwd = repo_root.join("app");
+        std::fs::create_dir_all(&cwd).unwrap();
+
+        let (root, theme) = discover_repo_theme(cwd.to_string_lossy().as_ref()).unwrap();
+
+        assert_eq!(root, repo_root.to_string_lossy());
+        assert_eq!(theme.body, "#B89875");
+        assert!(!repo_root.join(PREFERRED_THEME_DIR).join("colors.json").exists());
+    }
+
+    #[test]
+    fn prefers_preferred_cache_over_legacy_cache_when_both_exist() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo_root = tmp.path().join("recipe-cycle-app");
+        write_theme_file(&repo_root, LEGACY_THEME_DIR, "#B89875");
+        write_theme_file(&repo_root, PREFERRED_THEME_DIR, "#4FA66A");
+
+        let cwd = repo_root.join("src");
+        std::fs::create_dir_all(&cwd).unwrap();
+
+        let (_root, theme) = discover_repo_theme(cwd.to_string_lossy().as_ref()).unwrap();
+
+        assert_eq!(theme.body, "#4FA66A");
+    }
+
+    #[test]
+    fn generated_theme_stays_stable_after_new_sibling_theme_appears() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_theme_file(&tmp.path().join("buildooor"), PREFERRED_THEME_DIR, "#B89875");
+
+        let repo_root = tmp.path().join("weathr");
+        std::fs::create_dir_all(repo_root.join(PREFERRED_THEME_DIR)).unwrap();
+        let cwd = repo_root.join("app");
+        std::fs::create_dir_all(&cwd).unwrap();
+
+        let (_root, first) = discover_repo_theme(cwd.to_string_lossy().as_ref()).unwrap();
+        let first_file =
+            std::fs::read_to_string(repo_root.join(PREFERRED_THEME_DIR).join("colors.json"))
+                .unwrap();
+
+        write_theme_file(&tmp.path().join("skills"), PREFERRED_THEME_DIR, "#4FA66A");
+
+        let (_root, second) = discover_repo_theme(cwd.to_string_lossy().as_ref()).unwrap();
+        let second_file =
+            std::fs::read_to_string(repo_root.join(PREFERRED_THEME_DIR).join("colors.json"))
+                .unwrap();
+
+        assert_eq!(second, first);
+        assert_eq!(second_file, first_file);
+    }
+
+    #[test]
     fn rewrites_invalid_theme_file() {
         let tmp = tempfile::tempdir().unwrap();
-        let colors_path = tmp.path().join(".throngterm").join("colors.json");
+        let colors_path = tmp.path().join(PREFERRED_THEME_DIR).join("colors.json");
         write(&colors_path, "{ not json ");
 
         let (_root, theme) = discover_repo_theme(tmp.path().to_string_lossy().as_ref()).unwrap();
@@ -395,7 +480,7 @@ mod tests {
     #[test]
     fn rewrites_partial_theme_file() {
         let tmp = tempfile::tempdir().unwrap();
-        let colors_path = tmp.path().join(".throngterm").join("colors.json");
+        let colors_path = tmp.path().join(PREFERRED_THEME_DIR).join("colors.json");
         write(
             &colors_path,
             r##"{
@@ -417,7 +502,7 @@ mod tests {
     }
 
     #[test]
-    fn returns_none_when_repo_has_no_swimmers_dir() {
+    fn returns_none_when_repo_has_no_theme_dir() {
         let tmp = tempfile::tempdir().unwrap();
         assert!(discover_repo_theme(tmp.path().to_string_lossy().as_ref()).is_none());
     }

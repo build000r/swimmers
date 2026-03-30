@@ -5,8 +5,8 @@ use std::fs;
 use std::sync::{Arc, Mutex};
 
 use chrono::Utc;
-use tempfile::tempdir;
 use swimmers::types::{ThoughtSource, ThoughtState, TransportHealth};
+use tempfile::tempdir;
 
 const EXPECTED_TERMINAL_ENTRY: &str = concat!(
     "\u{1b}[?1049h",
@@ -590,11 +590,7 @@ fn set_message_deduplicates_repeated_errors() {
 fn auto_refresh_keeps_existing_footer_message() {
     let api = MockApi::new();
     let layout = test_layout(160, 32);
-    api.push_fetch_sessions(Ok(vec![session_summary(
-        "sess-7",
-        "7",
-        TEST_REPO_SWIMMERS,
-    )]));
+    api.push_fetch_sessions(Ok(vec![session_summary("sess-7", "7", TEST_REPO_SWIMMERS)]));
     let mut app = make_app(api);
     app.set_message("sticky status");
 
@@ -873,7 +869,9 @@ fn mermaid_background_colors(viewer: &MermaidViewerState) -> Vec<Color> {
         .collect()
 }
 
-fn mermaid_background_colors_set(viewer: &MermaidViewerState) -> std::collections::BTreeSet<String> {
+fn mermaid_background_colors_set(
+    viewer: &MermaidViewerState,
+) -> std::collections::BTreeSet<String> {
     mermaid_background_colors(viewer)
         .into_iter()
         .map(|color| format!("{color:?}"))
@@ -1169,8 +1167,12 @@ fn dir_response(path: &str, names: &[(&str, bool)]) -> DirListResponse {
 }
 
 fn write_repo_theme_file(path: &std::path::Path, body: &str) {
-    let swimmers_dir = path.join(".throngterm");
-    fs::create_dir_all(&swimmers_dir).expect("create .throngterm");
+    write_repo_theme_file_in(path, ".swimmers", body);
+}
+
+fn write_repo_theme_file_in(path: &std::path::Path, theme_dir: &str, body: &str) {
+    let swimmers_dir = path.join(theme_dir);
+    fs::create_dir_all(&swimmers_dir).expect("create theme dir");
     let contents = format!(
         concat!(
             "{{\n",
@@ -1841,10 +1843,7 @@ fn header_filter_strip_and_thought_rows_apply_and_clear_filters() {
         .clone();
     app.handle_header_filter_click(120, chip.rect.x, chip.rect.y);
 
-    assert_eq!(
-        app.thought_filter.cwd.as_deref(),
-        Some(TEST_REPO_SWIMMERS)
-    );
+    assert_eq!(app.thought_filter.cwd.as_deref(), Some(TEST_REPO_SWIMMERS));
     assert_eq!(app.active_thought_filter_text(), "filter: pwd=swimmers");
     assert_eq!(
         app.visible_thought_entries(layout.thought_entry_capacity())
@@ -1913,10 +1912,7 @@ fn header_filter_strip_and_thought_rows_apply_and_clear_filters() {
         layout.thought_entry_capacity(),
     );
 
-    assert_eq!(
-        app.thought_filter.cwd.as_deref(),
-        Some(TEST_REPO_SWIMMERS)
-    );
+    assert_eq!(app.thought_filter.cwd.as_deref(), Some(TEST_REPO_SWIMMERS));
     assert_eq!(app.thought_filter.tmux_name, None);
     assert_eq!(app.active_thought_filter_text(), "filter: pwd=swimmers");
     assert_eq!(
@@ -2778,7 +2774,7 @@ fn picker_theme_color_for_path_keeps_stored_theme_body_while_adjusting_display_c
     let repo_root = temp.path().join("skills");
     fs::create_dir_all(repo_root.join("src")).expect("create repo");
     write_repo_theme_file(&repo_root, "#3930B5");
-    let colors_path = repo_root.join(".throngterm").join("colors.json");
+    let colors_path = repo_root.join(".swimmers").join("colors.json");
     let original = fs::read_to_string(&colors_path).expect("read colors.json");
     let theme_id = repo_root.to_string_lossy().into_owned();
     let mut repo_themes = HashMap::new();
@@ -2893,24 +2889,9 @@ fn sleeping_entities_fill_bottom_row_by_sleepiness() {
 
     app.merge_sessions(
         vec![
-            sleeping_session(
-                "sess-new",
-                "8",
-                TEST_REPO_SWIMMERS,
-                "2026-03-08T12:20:00Z",
-            ),
-            sleeping_session(
-                "sess-mid",
-                "7",
-                TEST_REPO_SWIMMERS,
-                "2026-03-08T12:10:00Z",
-            ),
-            sleeping_session(
-                "sess-old",
-                "9",
-                TEST_REPO_SWIMMERS,
-                "2026-03-08T12:00:00Z",
-            ),
+            sleeping_session("sess-new", "8", TEST_REPO_SWIMMERS, "2026-03-08T12:20:00Z"),
+            sleeping_session("sess-mid", "7", TEST_REPO_SWIMMERS, "2026-03-08T12:10:00Z"),
+            sleeping_session("sess-old", "9", TEST_REPO_SWIMMERS, "2026-03-08T12:00:00Z"),
         ],
         field,
     );
@@ -3513,7 +3494,7 @@ fn paste_outside_initial_request_is_ignored() {
 }
 
 #[test]
-fn clicking_existing_thronglet_still_opens_it_directly() {
+fn clicking_existing_swimmer_still_opens_it_directly() {
     let api = MockApi::new();
     api.push_open_session(Ok(NativeDesktopOpenResponse {
         session_id: "sess-7".to_string(),
@@ -3538,7 +3519,7 @@ fn clicking_existing_thronglet_still_opens_it_directly() {
 }
 
 #[test]
-fn filtered_out_thronglets_are_not_click_targets() {
+fn filtered_out_swimmers_are_not_click_targets() {
     let api = MockApi::new();
     api.push_list_dirs(Ok(dir_response(TEST_REPOS_ROOT, &[("swimmers", true)])));
     let field = test_field();
@@ -3606,9 +3587,31 @@ fn refresh_publishes_selected_session_for_external_dispatch() {
     app.refresh(layout);
 
     assert_eq!(app.selected_id.as_deref(), Some("sess-swimmers"));
+    assert_eq!(api.publish_calls(), vec![Some("sess-swimmers".to_string())]);
+}
+
+#[test]
+fn refresh_keeps_cached_repo_theme_when_session_still_references_it() {
+    let api = MockApi::new();
+    let layout = test_layout(120, 32);
+    let theme_id = "/tmp/buildooor".to_string();
+    let mut session = session_summary("sess-buildooor", "7", "/tmp/buildooor/src");
+    session.repo_theme_id = Some(theme_id.clone());
+    api.push_fetch_sessions(Ok(vec![session]));
+
+    let mut app = make_app(api);
+    app.repo_themes
+        .insert(theme_id.clone(), repo_theme("#B89875"));
+
+    app.refresh(layout);
+
     assert_eq!(
-        api.publish_calls(),
-        vec![Some("sess-swimmers".to_string())]
+        app.repo_themes.get(&theme_id).expect("theme retained").body,
+        "#B89875"
+    );
+    assert_eq!(
+        session_display_color(&app.entities[0].session, &app.repo_themes),
+        repo_theme_display_color("#B89875").expect("display color")
     );
 }
 
@@ -4792,21 +4795,22 @@ fn mermaid_er_schema_uses_smart_colors_for_titles_types_and_connectors() {
     }
     app.render(&mut renderer, layout);
 
-    let (background_colors, user_owner_key, order_owner_key, owner_colors) = match &app.fish_bowl_mode {
-        FishBowlMode::Mermaid(viewer) => (
-            mermaid_background_colors_set(viewer),
-            mermaid_owner_key_for_text(viewer, "USER"),
-            mermaid_owner_key_for_text(viewer, "ORDER"),
-            mermaid_owner_accent_map(
-                &viewer
-                    .prepared_render
-                    .as_ref()
-                    .expect("prepared render")
-                    .semantic_lines,
+    let (background_colors, user_owner_key, order_owner_key, owner_colors) =
+        match &app.fish_bowl_mode {
+            FishBowlMode::Mermaid(viewer) => (
+                mermaid_background_colors_set(viewer),
+                mermaid_owner_key_for_text(viewer, "USER"),
+                mermaid_owner_key_for_text(viewer, "ORDER"),
+                mermaid_owner_accent_map(
+                    &viewer
+                        .prepared_render
+                        .as_ref()
+                        .expect("prepared render")
+                        .semantic_lines,
+                ),
             ),
-        ),
-        FishBowlMode::Aquarium => panic!("expected Mermaid viewer mode"),
-    };
+            FishBowlMode::Aquarium => panic!("expected Mermaid viewer mode"),
+        };
 
     let user_accent = mermaid_owner_accent_color(&user_owner_key, &owner_colors);
     let order_accent = mermaid_owner_accent_color(&order_owner_key, &owner_colors);
@@ -4817,7 +4821,10 @@ fn mermaid_er_schema_uses_smart_colors_for_titles_types_and_connectors() {
     assert_eq!(mermaid_border_color(&renderer, "ORDER"), order_accent);
     assert_eq!(mermaid_text_color(&renderer, "uuid"), MERMAID_TYPE_COLOR);
     assert_eq!(mermaid_text_color(&renderer, "email"), MERMAID_BODY_COLOR);
-    assert_eq!(mermaid_text_color(&renderer, "user_id FK"), MERMAID_BODY_COLOR);
+    assert_eq!(
+        mermaid_text_color(&renderer, "user_id FK"),
+        MERMAID_BODY_COLOR
+    );
     assert!(background_colors.contains(&format!("{MERMAID_CONNECTOR_COLOR:?}")));
 }
 
@@ -4901,7 +4908,10 @@ fn mermaid_error_and_unsupported_states_keep_existing_colors() {
         "inline Mermaid rendering is unsupported for TERM=dumb",
     )
     .expect("unsupported text");
-    assert_eq!(cell_at(&renderer, unsupported.0, unsupported.1).fg, Color::DarkGrey);
+    assert_eq!(
+        cell_at(&renderer, unsupported.0, unsupported.1).fg,
+        Color::DarkGrey
+    );
     assert_eq!(
         cell_at(&renderer, layout.overview_field.x, layout.overview_field.y).fg,
         Color::Cyan

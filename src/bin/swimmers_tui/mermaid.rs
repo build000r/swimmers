@@ -324,9 +324,7 @@ pub(crate) const MERMAID_FOCUS_COLOR: Color = Color::Magenta;
 pub(crate) const MERMAID_OWNER_ACCENTS: [Color; 4] =
     [Color::Cyan, Color::Green, Color::Yellow, Color::Blue];
 
-pub(crate) fn mermaid_owner_accent_map(
-    lines: &[MermaidSemanticLine],
-) -> HashMap<String, Color> {
+pub(crate) fn mermaid_owner_accent_map(lines: &[MermaidSemanticLine]) -> HashMap<String, Color> {
     let mut owner_keys = lines
         .iter()
         .filter(|line| {
@@ -339,7 +337,12 @@ pub(crate) fn mermaid_owner_accent_map(
     owner_keys
         .into_iter()
         .enumerate()
-        .map(|(idx, owner_key)| (owner_key, MERMAID_OWNER_ACCENTS[idx % MERMAID_OWNER_ACCENTS.len()]))
+        .map(|(idx, owner_key)| {
+            (
+                owner_key,
+                MERMAID_OWNER_ACCENTS[idx % MERMAID_OWNER_ACCENTS.len()],
+            )
+        })
         .collect()
 }
 
@@ -375,12 +378,17 @@ pub(crate) fn mermaid_background_cells_from_lines(
     lines: &[String],
     default_color: Color,
 ) -> Vec<Vec<Cell>> {
-    lines.iter()
+    lines
+        .iter()
         .map(|line| {
             line.chars()
                 .map(|ch| Cell {
                     ch,
-                    fg: if ch == ' ' { Color::Reset } else { default_color },
+                    fg: if ch == ' ' {
+                        Color::Reset
+                    } else {
+                        default_color
+                    },
                 })
                 .collect()
         })
@@ -3931,7 +3939,8 @@ pub(crate) fn render_mermaid_outline_lines(
         .filter(|edge| visible_keys.contains(&edge.from_key) && visible_keys.contains(&edge.to_key))
         .collect::<Vec<_>>();
 
-    viewer.cached_lines = mermaid_render_outline_background(content_rect, &outline_nodes, outline_edges);
+    viewer.cached_lines =
+        mermaid_render_outline_background(content_rect, &outline_nodes, outline_edges);
     viewer.cached_background_cells =
         mermaid_background_cells_from_lines(&viewer.cached_lines, MERMAID_CONNECTOR_COLOR);
     viewer.cached_semantic_lines = projected

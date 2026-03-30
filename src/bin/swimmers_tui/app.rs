@@ -521,10 +521,18 @@ impl<C: TuiApi> App<C> {
     pub(crate) fn sync_repo_themes(&mut self, sessions: &[SessionSummary]) {
         let mut next = HashMap::new();
         for session in sessions {
-            let Some((theme_id, theme)) = discover_repo_theme(&session.cwd) else {
+            if let Some((theme_id, theme)) = discover_repo_theme(&session.cwd) {
+                next.insert(theme_id, theme);
+                continue;
+            }
+
+            let Some(theme_id) = session.repo_theme_id.as_ref() else {
                 continue;
             };
-            next.insert(theme_id, theme);
+            let Some(theme) = self.repo_themes.get(theme_id).cloned() else {
+                continue;
+            };
+            next.insert(theme_id.clone(), theme);
         }
         self.repo_themes = next;
     }
@@ -1405,7 +1413,7 @@ impl<C: TuiApi> App<C> {
                     let empty = if self.entities.is_empty() {
                         "no tmux sessions found - press r after starting one"
                     } else if self.thought_filter.is_active() {
-                        "no thronglets match filters"
+                        "no swimmers match filters"
                     } else {
                         "no tmux sessions found - press r after starting one"
                     };

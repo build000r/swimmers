@@ -2,3 +2,5 @@ node_modules/
 target/
 data/
 .env
+.swimmers/
+.throngterm/

@@ -105,7 +105,7 @@ impl SpawnTool {
     }
 }
 
-/// Per-repository Thronglet palette used by the native TUI.
+/// Per-repository Swimmer palette used by the native TUI.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RepoTheme {
     pub body: String,
@@ -141,8 +141,8 @@ pub struct SessionSummary {
     pub attached_clients: u32,
     pub transport_health: TransportHealth,
     pub last_activity_at: DateTime<Utc>,
-    /// Key into `SessionListResponse.repo_themes`; absent when no
-    /// `.throngterm/` directory exists for this session cwd.
+    /// Key into `SessionListResponse.repo_themes`; absent when no supported
+    /// repo theme cache directory exists for this session cwd.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub repo_theme_id: Option<String>,
 }
