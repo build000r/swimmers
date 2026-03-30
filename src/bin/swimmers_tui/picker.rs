@@ -510,7 +510,7 @@ pub(crate) fn render_initial_request(
     renderer.draw_text(
         layout.content.x,
         layout.content.y + 2,
-        "enter creates hidden thronglet  esc cancels",
+        "enter creates hidden swimmer esc cancels",
         Color::DarkGrey,
     );
 

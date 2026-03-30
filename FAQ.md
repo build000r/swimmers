@@ -1,6 +1,6 @@
-# ThrongTerm FAQ
+# swimmers FAQ
 
-ThrongTerm is a native terminal UI for tmux-backed shell sessions.
+swimmers is a native terminal UI for tmux-backed shell sessions.
 
 **How do I start it?**
 Run `make tui`. That starts the local API if needed and then launches the TUI.

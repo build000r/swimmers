@@ -7,7 +7,7 @@
 // partial-render artifacts in the terminal client.
 //
 // Strategy:
-//  1. If ThrongTerm recently sent input, pass everything through immediately
+//  1. If swimmers recently sent input, pass everything through immediately
 //     (the redraw is in response to our own activity).
 //  2. If output has many cursor-positioning sequences and no recent input,
 //     it's likely a scroll-triggered redraw from the other client --
@@ -20,7 +20,7 @@ use regex::Regex;
 
 const COALESCE_MS: u64 = 32; // ~2 frames at 60fps
 const CURSOR_POS_THRESHOLD: usize = 10; // min cursor-position seqs to trigger coalescing
-const INPUT_GRACE_MS: u64 = 200; // pass-through window after ThrongTerm input
+const INPUT_GRACE_MS: u64 = 200; // pass-through window after swimmers input
 
 pub struct ScrollGuard {
     cursor_pos_re: Regex,
@@ -54,7 +54,7 @@ impl ScrollGuard {
         }
     }
 
-    /// Record that ThrongTerm sent keystrokes to the PTY.
+    /// Record that swimmers sent keystrokes to the PTY.
     /// Output arriving within INPUT_GRACE_MS of this call is assumed to be
     /// in response to our own activity and is passed through without coalescing.
     pub fn notify_input(&mut self) {
@@ -80,7 +80,7 @@ impl ScrollGuard {
         let now = Instant::now();
         let mut output = Vec::new();
 
-        // Recent input from ThrongTerm -> this redraw is expected, pass through.
+        // Recent input from swimmers -> this redraw is expected, pass through.
         if let Some(last_input) = self.last_input_time {
             if now.duration_since(last_input) < Duration::from_millis(INPUT_GRACE_MS) {
                 if let Some(buffered) = self.force_flush() {
