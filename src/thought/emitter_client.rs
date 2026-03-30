@@ -1,5 +1,6 @@
 use std::env;
 use std::io;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -15,7 +16,6 @@ use crate::thought::protocol::{
 };
 use crate::thought::runtime_config::{DaemonDefaults, ThoughtConfig};
 
-const DEFAULT_CLAWGS_BIN: &str = "clawgs";
 const SYNC_RESULT_MESSAGE_TYPE: &str = "sync_result";
 const EXTERNAL_CMD_WARN_THRESHOLD: Duration = Duration::from_secs(2);
 
@@ -305,9 +305,13 @@ impl Drop for EmitterClient {
 /// show actual daemon values).
 pub async fn fetch_daemon_defaults() -> Option<DaemonDefaults> {
     let bin = resolve_clawgs_bin();
+    fetch_daemon_defaults_for_bin(&bin).await
+}
+
+async fn fetch_daemon_defaults_for_bin(bin: &str) -> Option<DaemonDefaults> {
     let started = Instant::now();
     info!(phase = "clawgs_defaults_command", bin = %bin, "running clawgs defaults");
-    let output = Command::new(&bin)
+    let output = Command::new(bin)
         .arg("defaults")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -358,11 +362,35 @@ pub async fn fetch_daemon_defaults() -> Option<DaemonDefaults> {
 }
 
 fn resolve_clawgs_bin() -> String {
-    env::var("CLAWGS_BIN")
-        .ok()
-        .map(|v| v.trim().to_string())
-        .filter(|v| !v.is_empty())
-        .unwrap_or_else(|| DEFAULT_CLAWGS_BIN.to_string())
+    resolve_clawgs_bin_with(env::var("CLAWGS_BIN").ok(), env::current_exe().ok())
+}
+
+fn resolve_clawgs_bin_with(explicit_bin: Option<String>, current_exe: Option<PathBuf>) -> String {
+    normalize_bin_override(explicit_bin)
+        .or_else(|| packaged_clawgs_bin(current_exe.as_deref()))
+        .unwrap_or_else(|| default_clawgs_bin_name().to_string())
+}
+
+fn normalize_bin_override(explicit_bin: Option<String>) -> Option<String> {
+    explicit_bin
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn packaged_clawgs_bin(executable: Option<&Path>) -> Option<String> {
+    let executable = executable?;
+    let candidate = executable.with_file_name(default_clawgs_bin_name());
+    candidate
+        .is_file()
+        .then(|| candidate.to_string_lossy().into_owned())
+}
+
+fn default_clawgs_bin_name() -> &'static str {
+    if cfg!(windows) {
+        "clawgs.exe"
+    } else {
+        "clawgs"
+    }
 }
 
 fn parse_hello_line(line: &str) -> Result<(), EmitterClientError> {
@@ -401,11 +429,11 @@ fn parse_sync_response_line(line: &str) -> Result<SyncResponse, EmitterClientErr
             request_id,
             stream_instance_id,
             updates,
-        } => Ok(SyncResponse::from(clawgs::emit::protocol::SyncResponse {
+        } => Ok(SyncResponse {
             request_id,
             stream_instance_id,
             updates,
-        })),
+        }),
         DaemonInboundMessage::Error {
             code,
             message,
@@ -626,6 +654,66 @@ mod tests {
         assert_eq!(sent[1]["config"]["agent_prompt"], "Hook wakeup prompt");
     }
 
+    #[tokio::test]
+    async fn fetch_daemon_defaults_reads_json_from_packaged_binary() {
+        let _lock = TEST_ENV_LOCK.lock().expect("env lock");
+        let original = env::var("CLAWGS_BIN").ok();
+        let temp = tempdir().expect("tempdir");
+        let args_log = temp.path().join("args.log");
+        let input_log = temp.path().join("input.log");
+        let fake_bin = write_fake_clawgs_script(&args_log, &input_log, temp.path());
+
+        env::set_var("CLAWGS_BIN", fake_bin.as_os_str());
+        let defaults = fetch_daemon_defaults().await;
+        restore_env_var("CLAWGS_BIN", original);
+
+        let defaults = defaults.expect("defaults should parse");
+        assert_eq!(defaults.model, "test-model");
+        assert_eq!(
+            defaults.agent_prompt,
+            "You are a status reporter for a coding agent session."
+        );
+        assert_eq!(
+            defaults.terminal_prompt,
+            "Terminal session status reporter."
+        );
+    }
+
+    #[test]
+    fn resolve_clawgs_bin_prefers_explicit_env_override() {
+        let resolved = resolve_clawgs_bin_with(
+            Some(" /tmp/custom-clawgs ".to_string()),
+            Some(PathBuf::from("/tmp/swimmers")),
+        );
+
+        assert_eq!(resolved, "/tmp/custom-clawgs");
+    }
+
+    #[test]
+    fn resolve_clawgs_bin_uses_packaged_sibling_before_path_lookup() {
+        let temp = tempdir().expect("tempdir");
+        let executable = temp.path().join("swimmers");
+        let packaged = temp.path().join(default_clawgs_bin_name());
+        fs::write(&packaged, "#!/bin/sh\n").expect("write packaged clawgs");
+
+        let resolved = resolve_clawgs_bin_with(None, Some(executable));
+
+        assert_eq!(resolved, packaged.to_string_lossy());
+    }
+
+    #[test]
+    fn resolve_clawgs_bin_falls_back_to_default_name() {
+        let resolved = resolve_clawgs_bin_with(None, Some(PathBuf::from("/tmp/swimmers")));
+        assert_eq!(resolved, default_clawgs_bin_name());
+    }
+
+    fn restore_env_var(key: &str, value: Option<String>) {
+        match value {
+            Some(value) => env::set_var(key, value),
+            None => env::remove_var(key),
+        }
+    }
+
     fn write_fake_clawgs_script(
         args_log: &Path,
         input_log: &Path,
@@ -633,7 +721,7 @@ mod tests {
     ) -> std::path::PathBuf {
         let script_path = dir.join("fake-clawgs.sh");
         let script = format!(
-            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"{}\"\nprintf '%s\\n' '{{\"type\":\"hello\",\"protocol\":\"clawgs.emit.v1\",\"engine_version\":\"0.1.0\"}}'\ncount=1\nwhile IFS= read -r line; do\n  printf '%s\\n' \"$line\" >> \"{}\"\n  printf '%s\\n' \"{{\\\"type\\\":\\\"sync_result\\\",\\\"id\\\":\\\"$count\\\",\\\"stream_instance_id\\\":\\\"stream-a\\\",\\\"updates\\\":[]}}\"\n  count=$((count + 1))\ndone\nsleep 5\n",
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"{}\"\nif [ \"$1\" = \"defaults\" ]; then\n  printf '%s\\n' '{{\"model\":\"test-model\",\"agent_prompt\":\"You are a status reporter for a coding agent session.\",\"terminal_prompt\":\"Terminal session status reporter.\"}}'\n  exit 0\nfi\nprintf '%s\\n' '{{\"type\":\"hello\",\"protocol\":\"clawgs.emit.v1\",\"engine_version\":\"0.1.0\"}}'\ncount=1\nwhile IFS= read -r line; do\n  printf '%s\\n' \"$line\" >> \"{}\"\n  printf '%s\\n' \"{{\\\"type\\\":\\\"sync_result\\\",\\\"id\\\":\\\"$count\\\",\\\"stream_instance_id\\\":\\\"stream-a\\\",\\\"updates\\\":[]}}\"\n  count=$((count + 1))\ndone\nsleep 5\n",
             args_log.display(),
             input_log.display()
         );

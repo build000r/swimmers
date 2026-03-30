@@ -9,7 +9,7 @@ use tracing::error;
 
 use crate::api::AppState;
 use crate::auth::{AuthInfo, AuthScope};
-use crate::thought::protocol::build_sync_request;
+use crate::thought::protocol::{build_sync_request, SyncRequest};
 use crate::thought::runtime_config::{DaemonDefaults, ThoughtConfig};
 use crate::types::ErrorResponse;
 
@@ -36,7 +36,7 @@ async fn get_thought_config(
 async fn get_thought_sync_preview(
     Extension(auth): Extension<AuthInfo>,
     State(state): State<Arc<AppState>>,
-) -> Result<Json<clawgs::emit::protocol::SyncRequest>, Response> {
+) -> Result<Json<SyncRequest>, Response> {
     auth.require_scope(AuthScope::SessionsRead)?;
     let config = state.thought_config.read().await.clone();
     let sessions = state.supervisor.collect_session_snapshots().await;

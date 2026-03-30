@@ -1,13 +1,18 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
-
-pub use clawgs::emit::protocol::{DaemonInboundMessage, EMIT_PROTOCOL_V1, SYNC_MESSAGE_TYPE};
+use serde::ser::SerializeStruct;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::thought::loop_runner::SessionInfo;
 use crate::thought::runtime_config::ThoughtConfig;
 use crate::types::{BubblePrecedence, RestState, SessionState, ThoughtSource, ThoughtState};
+
+pub const HELLO_MESSAGE_TYPE: &str = "hello";
+pub const SYNC_MESSAGE_TYPE: &str = "sync";
+pub const SYNC_RESULT_MESSAGE_TYPE: &str = "sync_result";
+pub const SYNC_RESPONSE_MESSAGE_TYPE: &str = SYNC_RESULT_MESSAGE_TYPE;
+pub const EMIT_PROTOCOL_V1: &str = "clawgs.emit.v1";
 
 #[derive(Debug, Default)]
 pub struct SyncRequestSequence {
@@ -72,11 +77,226 @@ pub struct SyncResponse {
     pub updates: Vec<SyncUpdate>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SessionSnapshot {
+    pub session_id: String,
+    pub state: SessionState,
+    pub exited: bool,
+    pub tool: Option<String>,
+    pub cwd: String,
+    pub replay_text: String,
+    pub thought: Option<String>,
+    #[serde(default)]
+    pub thought_state: ThoughtState,
+    #[serde(default)]
+    pub thought_source: ThoughtSource,
+    pub objective_fingerprint: Option<String>,
+    pub thought_updated_at: Option<DateTime<Utc>>,
+    pub token_count: u64,
+    pub context_limit: u64,
+    pub last_activity_at: DateTime<Utc>,
+    #[serde(default)]
+    pub rest_state: RestState,
+    #[serde(default)]
+    pub commit_candidate: bool,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct SyncRequest {
+    pub id: String,
+    pub now: DateTime<Utc>,
+    pub config: ThoughtConfig,
+    pub sessions: Vec<SessionSnapshot>,
+}
+
+impl SyncRequest {
+    pub fn new(
+        id: impl Into<String>,
+        now: DateTime<Utc>,
+        config: ThoughtConfig,
+        sessions: Vec<SessionSnapshot>,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            now,
+            config,
+            sessions,
+        }
+    }
+}
+
+impl Serialize for SyncRequest {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut state = serializer.serialize_struct("SyncRequest", 5)?;
+        state.serialize_field("type", SYNC_MESSAGE_TYPE)?;
+        state.serialize_field("id", &self.id)?;
+        state.serialize_field("now", &self.now)?;
+        state.serialize_field("config", &SyncRequestConfigWireRef::from(&self.config))?;
+        state.serialize_field("sessions", &self.sessions)?;
+        state.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for SyncRequest {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let wire = SyncRequestWire::deserialize(deserializer)?;
+        Ok(Self {
+            id: wire.id,
+            now: wire.now,
+            config: wire.config.into_runtime_config(),
+            sessions: wire.sessions,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+struct SyncRequestWire {
+    #[serde(default = "default_sync_message_type", rename = "type")]
+    _message_type: String,
+    id: String,
+    now: DateTime<Utc>,
+    config: SyncRequestConfigWire,
+    #[serde(default)]
+    sessions: Vec<SessionSnapshot>,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+struct SyncRequestConfigWire {
+    enabled: bool,
+    model: String,
+    cadence_hot_ms: u64,
+    cadence_warm_ms: u64,
+    cadence_cold_ms: u64,
+    #[serde(default, deserialize_with = "deserialize_wire_prompt_string")]
+    agent_prompt: String,
+    #[serde(default, deserialize_with = "deserialize_wire_prompt_string")]
+    terminal_prompt: String,
+}
+
+impl SyncRequestConfigWire {
+    fn into_runtime_config(self) -> ThoughtConfig {
+        let mut config = ThoughtConfig {
+            enabled: self.enabled,
+            model: self.model,
+            cadence_hot_ms: self.cadence_hot_ms,
+            cadence_warm_ms: self.cadence_warm_ms,
+            cadence_cold_ms: self.cadence_cold_ms,
+            agent_prompt: string_to_optional_prompt(self.agent_prompt),
+            terminal_prompt: string_to_optional_prompt(self.terminal_prompt),
+        };
+        config.normalize();
+        config
+    }
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+struct SyncRequestConfigWireRef<'a> {
+    enabled: bool,
+    model: &'a str,
+    cadence_hot_ms: u64,
+    cadence_warm_ms: u64,
+    cadence_cold_ms: u64,
+    agent_prompt: &'a str,
+    terminal_prompt: &'a str,
+}
+
+impl<'a> From<&'a ThoughtConfig> for SyncRequestConfigWireRef<'a> {
+    fn from(value: &'a ThoughtConfig) -> Self {
+        Self {
+            enabled: value.enabled,
+            model: value.model.as_str(),
+            cadence_hot_ms: value.cadence_hot_ms,
+            cadence_warm_ms: value.cadence_warm_ms,
+            cadence_cold_ms: value.cadence_cold_ms,
+            agent_prompt: value.agent_prompt.as_deref().unwrap_or_default(),
+            terminal_prompt: value.terminal_prompt.as_deref().unwrap_or_default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[serde(untagged)]
+enum WireRequestId {
+    Numeric(u64),
+    Stringy(String),
+}
+
+fn parse_wire_request_id(value: WireRequestId) -> String {
+    match value {
+        WireRequestId::Numeric(value) => value.to_string(),
+        WireRequestId::Stringy(value) => value,
+    }
+}
+
+fn deserialize_request_id<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let raw = WireRequestId::deserialize(deserializer)?;
+    Ok(parse_wire_request_id(raw))
+}
+
+fn deserialize_optional_request_id<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let raw = Option::<WireRequestId>::deserialize(deserializer)?;
+    Ok(raw.map(parse_wire_request_id))
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum DaemonInboundMessage {
+    Hello {
+        protocol: String,
+    },
+    #[serde(rename = "sync_result", alias = "sync_response", alias = "sync")]
+    SyncResponse {
+        #[serde(
+            rename = "id",
+            alias = "request_id",
+            deserialize_with = "deserialize_request_id"
+        )]
+        request_id: String,
+        #[serde(default)]
+        stream_instance_id: Option<String>,
+        #[serde(default)]
+        updates: Vec<SyncUpdate>,
+    },
+    Error {
+        code: String,
+        message: String,
+        #[serde(
+            default,
+            rename = "id",
+            alias = "request_id",
+            deserialize_with = "deserialize_optional_request_id"
+        )]
+        request_id: Option<String>,
+    },
+}
+
+impl DaemonInboundMessage {
+    pub fn message_type(&self) -> &'static str {
+        match self {
+            Self::Hello { .. } => HELLO_MESSAGE_TYPE,
+            Self::SyncResponse { .. } => SYNC_RESPONSE_MESSAGE_TYPE,
+            Self::Error { .. } => "error",
+        }
+    }
+}
+
 pub fn build_sync_request(
     request_id: u64,
     runtime_config: &ThoughtConfig,
     sessions: &[SessionInfo],
-) -> clawgs::emit::protocol::SyncRequest {
+) -> SyncRequest {
     build_sync_request_with_now(request_id, Utc::now(), runtime_config, sessions)
 }
 
@@ -85,58 +305,27 @@ pub fn build_sync_request_with_now(
     now: DateTime<Utc>,
     runtime_config: &ThoughtConfig,
     sessions: &[SessionInfo],
-) -> clawgs::emit::protocol::SyncRequest {
-    clawgs::emit::protocol::SyncRequest::new(
+) -> SyncRequest {
+    SyncRequest::new(
         request_id.to_string(),
         now,
         runtime_config.clone(),
-        sessions.iter().map(shared_session_snapshot).collect(),
+        sessions.iter().map(session_snapshot_from_info).collect(),
     )
 }
 
-impl From<clawgs::emit::protocol::SyncUpdate> for SyncUpdate {
-    fn from(value: clawgs::emit::protocol::SyncUpdate) -> Self {
-        Self {
-            session_id: value.session_id,
-            stream_instance_id: value.stream_instance_id,
-            emission_seq: value.emission_seq,
-            thought: value.thought,
-            token_count: value.token_count,
-            context_limit: value.context_limit,
-            thought_state: thought_state_from_shared(value.thought_state),
-            thought_source: thought_source_from_shared(value.thought_source),
-            rest_state: rest_state_from_shared(value.rest_state),
-            commit_candidate: value.commit_candidate,
-            objective_changed: value.objective_changed,
-            bubble_precedence: bubble_precedence_from_shared(value.bubble_precedence),
-            at: value.at,
-            objective_fingerprint: value.objective_fingerprint,
-        }
-    }
-}
-
-impl From<clawgs::emit::protocol::SyncResponse> for SyncResponse {
-    fn from(value: clawgs::emit::protocol::SyncResponse) -> Self {
-        Self {
-            request_id: value.request_id,
-            stream_instance_id: value.stream_instance_id,
-            updates: value.updates.into_iter().map(SyncUpdate::from).collect(),
-        }
-    }
-}
-
-fn shared_session_snapshot(session: &SessionInfo) -> clawgs::emit::protocol::SessionSnapshot {
-    clawgs::emit::protocol::SessionSnapshot {
+fn session_snapshot_from_info(session: &SessionInfo) -> SessionSnapshot {
+    SessionSnapshot {
         session_id: session.session_id.clone(),
-        state: session_state_to_shared(session.state),
+        state: session.state,
         exited: session.exited,
         tool: session.tool.clone(),
         cwd: session.cwd.clone(),
         replay_text: session.replay_text.clone(),
         thought: session.thought.clone(),
-        thought_state: thought_state_to_shared(session.thought_state),
-        thought_source: thought_source_to_shared(session.thought_source),
-        rest_state: rest_state_to_shared(session.rest_state),
+        thought_state: session.thought_state,
+        thought_source: session.thought_source,
+        rest_state: session.rest_state,
         objective_fingerprint: session.objective_fingerprint.clone(),
         thought_updated_at: session.thought_updated_at,
         token_count: session.token_count,
@@ -146,72 +335,23 @@ fn shared_session_snapshot(session: &SessionInfo) -> clawgs::emit::protocol::Ses
     }
 }
 
-fn session_state_to_shared(state: SessionState) -> clawgs::emit::protocol::SessionState {
-    match state {
-        SessionState::Idle => clawgs::emit::protocol::SessionState::Idle,
-        SessionState::Busy => clawgs::emit::protocol::SessionState::Busy,
-        SessionState::Error => clawgs::emit::protocol::SessionState::Error,
-        SessionState::Attention => clawgs::emit::protocol::SessionState::Attention,
-        SessionState::Exited => clawgs::emit::protocol::SessionState::Exited,
+fn string_to_optional_prompt(value: String) -> Option<String> {
+    if value.is_empty() {
+        None
+    } else {
+        Some(value)
     }
 }
 
-fn thought_state_to_shared(state: ThoughtState) -> clawgs::emit::protocol::ThoughtState {
-    match state {
-        ThoughtState::Active => clawgs::emit::protocol::ThoughtState::Active,
-        ThoughtState::Holding => clawgs::emit::protocol::ThoughtState::Holding,
-        ThoughtState::Sleeping => clawgs::emit::protocol::ThoughtState::Sleeping,
-    }
+fn deserialize_wire_prompt_string<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Ok(Option::<String>::deserialize(deserializer)?.unwrap_or_default())
 }
 
-fn thought_source_to_shared(source: ThoughtSource) -> clawgs::emit::protocol::ThoughtSource {
-    match source {
-        ThoughtSource::CarryForward => clawgs::emit::protocol::ThoughtSource::CarryForward,
-        ThoughtSource::Llm => clawgs::emit::protocol::ThoughtSource::Llm,
-        ThoughtSource::StaticSleeping => clawgs::emit::protocol::ThoughtSource::StaticSleeping,
-    }
-}
-
-fn rest_state_to_shared(state: RestState) -> clawgs::emit::protocol::RestState {
-    match state {
-        RestState::Active => clawgs::emit::protocol::RestState::Active,
-        RestState::Drowsy => clawgs::emit::protocol::RestState::Drowsy,
-        RestState::Sleeping => clawgs::emit::protocol::RestState::Sleeping,
-        RestState::DeepSleep => clawgs::emit::protocol::RestState::DeepSleep,
-    }
-}
-
-fn thought_state_from_shared(state: clawgs::emit::protocol::ThoughtState) -> ThoughtState {
-    match state {
-        clawgs::emit::protocol::ThoughtState::Active => ThoughtState::Active,
-        clawgs::emit::protocol::ThoughtState::Holding => ThoughtState::Holding,
-        clawgs::emit::protocol::ThoughtState::Sleeping => ThoughtState::Sleeping,
-    }
-}
-
-fn thought_source_from_shared(source: clawgs::emit::protocol::ThoughtSource) -> ThoughtSource {
-    match source {
-        clawgs::emit::protocol::ThoughtSource::CarryForward => ThoughtSource::CarryForward,
-        clawgs::emit::protocol::ThoughtSource::Llm => ThoughtSource::Llm,
-        clawgs::emit::protocol::ThoughtSource::StaticSleeping => ThoughtSource::StaticSleeping,
-    }
-}
-
-fn rest_state_from_shared(state: clawgs::emit::protocol::RestState) -> RestState {
-    match state {
-        clawgs::emit::protocol::RestState::Active => RestState::Active,
-        clawgs::emit::protocol::RestState::Drowsy => RestState::Drowsy,
-        clawgs::emit::protocol::RestState::Sleeping => RestState::Sleeping,
-        clawgs::emit::protocol::RestState::DeepSleep => RestState::DeepSleep,
-    }
-}
-
-fn bubble_precedence_from_shared(
-    value: clawgs::emit::protocol::BubblePrecedence,
-) -> BubblePrecedence {
-    match value {
-        clawgs::emit::protocol::BubblePrecedence::ThoughtFirst => BubblePrecedence::ThoughtFirst,
-    }
+fn default_sync_message_type() -> String {
+    SYNC_MESSAGE_TYPE.to_string()
 }
 
 #[cfg(test)]
@@ -259,6 +399,31 @@ mod tests {
     }
 
     #[test]
+    fn sync_request_deserializes_null_prompt_fields_to_none() {
+        let raw = serde_json::json!({
+            "type": "sync",
+            "id": "req-1",
+            "now": "2026-02-26T21:00:00Z",
+            "config": {
+                "enabled": true,
+                "model": "",
+                "cadence_hot_ms": 15000,
+                "cadence_warm_ms": 45000,
+                "cadence_cold_ms": 120000,
+                "agent_prompt": null,
+                "terminal_prompt": null
+            },
+            "sessions": []
+        })
+        .to_string();
+
+        let request: SyncRequest = serde_json::from_str(&raw).expect("sync request should parse");
+        assert_eq!(request.id, "req-1");
+        assert!(request.config.agent_prompt.is_none());
+        assert!(request.config.terminal_prompt.is_none());
+    }
+
+    #[test]
     fn sync_request_sequence_peek_is_read_only() {
         let sequence = SyncRequestSequence::new();
         assert_eq!(sequence.peek_next(), 1);
@@ -272,5 +437,29 @@ mod tests {
         let states: std::collections::HashMap<String, ThoughtDeliveryState> =
             serde_json::from_str("{}").expect("empty watermark map");
         assert!(states.is_empty());
+    }
+
+    #[test]
+    fn inbound_message_deserializes_legacy_sync_response_alias() {
+        let raw = r#"{
+            "type": "sync_response",
+            "request_id": 17,
+            "updates": []
+        }"#;
+        let message: DaemonInboundMessage =
+            serde_json::from_str(raw).expect("legacy sync_response alias should deserialize");
+
+        match message {
+            DaemonInboundMessage::SyncResponse {
+                request_id,
+                stream_instance_id,
+                updates,
+            } => {
+                assert_eq!(request_id, "17");
+                assert_eq!(stream_instance_id.as_deref(), None);
+                assert!(updates.is_empty());
+            }
+            other => panic!("unexpected message variant: {other:?}"),
+        }
     }
 }
