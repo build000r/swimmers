@@ -587,24 +587,6 @@ pub(crate) fn mermaid_render_options(content_rect: Rect) -> RenderOptions {
         .with_preferred_aspect_ratio_parts(sample_width as f32, sample_height as f32)
 }
 
-pub(crate) fn mermaid_fontdb() -> Arc<usvg::fontdb::Database> {
-    static FONTDB: OnceLock<Arc<usvg::fontdb::Database>> = OnceLock::new();
-    FONTDB
-        .get_or_init(|| {
-            let mut fontdb = usvg::fontdb::Database::new();
-            fontdb.load_system_fonts();
-            Arc::new(fontdb)
-        })
-        .clone()
-}
-
-pub(crate) fn mermaid_usvg_options() -> usvg::Options<'static> {
-    usvg::Options {
-        fontdb: mermaid_fontdb(),
-        ..usvg::Options::default()
-    }
-}
-
 pub(crate) fn mermaid_kind_supports_semantic_overlay(kind: DiagramKind) -> bool {
     matches!(
         kind,
@@ -3893,7 +3875,10 @@ pub(crate) fn ensure_mermaid_prepared_render(
         let semantic_lines = build_mermaid_semantic_lines(&layout, &options);
         let svg = render_svg(&layout, &options.theme, &options.layout);
         let connector_svg = mermaid_strip_svg_text(&svg);
-        let tree = Tree::from_str(&connector_svg, &mermaid_usvg_options())
+        // The terminal overlay renders Mermaid text separately, so the SVG fed
+        // into usvg has all <text> nodes removed and does not need system font
+        // discovery on the hot path.
+        let tree = Tree::from_str(&connector_svg, &usvg::Options::default())
             .map_err(|err| format!("failed to parse rendered SVG: {err}"))?;
         let prepared = MermaidPreparedRender {
             key,

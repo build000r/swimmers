@@ -388,7 +388,11 @@ mod tests {
     fn generates_missing_theme_without_colliding_with_siblings() {
         let tmp = tempfile::tempdir().unwrap();
 
-        write_theme_file(&tmp.path().join("buildooor"), PREFERRED_THEME_DIR, "#B89875");
+        write_theme_file(
+            &tmp.path().join("buildooor"),
+            PREFERRED_THEME_DIR,
+            "#B89875",
+        );
 
         let repo_root = tmp.path().join("weathr");
         std::fs::create_dir_all(repo_root.join(PREFERRED_THEME_DIR)).unwrap();
@@ -420,7 +424,10 @@ mod tests {
 
         assert_eq!(root, repo_root.to_string_lossy());
         assert_eq!(theme.body, "#B89875");
-        assert!(!repo_root.join(PREFERRED_THEME_DIR).join("colors.json").exists());
+        assert!(!repo_root
+            .join(PREFERRED_THEME_DIR)
+            .join("colors.json")
+            .exists());
     }
 
     #[test]
@@ -441,7 +448,11 @@ mod tests {
     #[test]
     fn generated_theme_stays_stable_after_new_sibling_theme_appears() {
         let tmp = tempfile::tempdir().unwrap();
-        write_theme_file(&tmp.path().join("buildooor"), PREFERRED_THEME_DIR, "#B89875");
+        write_theme_file(
+            &tmp.path().join("buildooor"),
+            PREFERRED_THEME_DIR,
+            "#B89875",
+        );
 
         let repo_root = tmp.path().join("weathr");
         std::fs::create_dir_all(repo_root.join(PREFERRED_THEME_DIR)).unwrap();

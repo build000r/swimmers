@@ -29,4 +29,5 @@ walkdir = "2"
 clawgs = { path = "../opensource/skills/clawgs" }
 
 [dev-dependencies]
+proptest = "1"
 tempfile = "3"

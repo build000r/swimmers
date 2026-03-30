@@ -7,7 +7,7 @@ use std::f32::consts::TAU;
 use std::hash::{Hash, Hasher};
 use std::io::{self, BufWriter, IsTerminal, Stdout, Write};
 use std::process::Command as ProcessCommand;
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};

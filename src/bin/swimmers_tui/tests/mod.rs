@@ -5,6 +5,7 @@ use std::fs;
 use std::sync::{Arc, Mutex};
 
 use chrono::Utc;
+use proptest::prelude::*;
 use swimmers::types::{ThoughtSource, ThoughtState, TransportHealth};
 use tempfile::tempdir;
 
@@ -832,6 +833,221 @@ fn open_mermaid_test_viewer(
     };
     viewer.unsupported_reason = None;
     (app, test_renderer(width, height), layout)
+}
+
+#[derive(Clone, Copy, Debug)]
+enum MermaidMetamorphicOp {
+    ZoomIn,
+    ZoomOut,
+    PanLeft,
+    PanRight,
+    PanUp,
+    PanDown,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct MermaidSemanticSnapshot {
+    source_index: usize,
+    text: String,
+    rel_x: u16,
+    rel_y: u16,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct MermaidMetamorphicSnapshot {
+    view_state: MermaidViewState,
+    focused_source_index: Option<usize>,
+    cached_lines: Vec<String>,
+    semantic_lines: Vec<MermaidSemanticSnapshot>,
+}
+
+fn mermaid_flowchart_source_strategy() -> impl Strategy<Value = String> {
+    let words = prop::sample::select(vec![
+        "Alpha", "Beta", "Gamma", "Delta", "Producer", "Consumer", "Queue", "Worker", "Client",
+        "Server", "Stream", "Buffer",
+    ]);
+    let edges = prop::sample::select(vec!["ships", "queues", "sends", "loads", "syncs", "pushes"]);
+
+    (
+        0u8..3,
+        words.clone(),
+        words.clone(),
+        words.clone(),
+        words.clone(),
+        edges,
+    )
+        .prop_map(
+            |(template, left, right, extra, group, edge)| match template {
+                0 => format!("graph TD\nA[{left}] -->|{edge}| B[{right}]\n"),
+                1 => format!(
+                    "graph TD\nsubgraph {group}\nA[{left}]\nB[{right}]\nend\nA -->|{edge}| B\n"
+                ),
+                _ => format!("graph TD\nA[{left}] -->|{edge}| B[{right}]\nA --> C[{extra}]\n"),
+            },
+        )
+}
+
+fn mermaid_anchorable_source_strategy() -> impl Strategy<Value = String> {
+    let words = prop::sample::select(vec![
+        "Alpha", "Beta", "Gamma", "Delta", "Producer", "Consumer", "Stream", "Buffer",
+    ]);
+    let edges = prop::sample::select(vec!["ships", "queues", "sends", "syncs"]);
+
+    (words.clone(), words, edges).prop_map(|(left, right, edge)| {
+        format!("graph TD\nA[{left} Node] -->|{edge}| B[{right} Node]\n")
+    })
+}
+
+fn mermaid_metamorphic_ops_strategy() -> impl Strategy<Value = Vec<MermaidMetamorphicOp>> {
+    proptest::collection::vec(0u8..6, 0..8).prop_map(|ops| {
+        ops.into_iter()
+            .map(|op| match op {
+                0 => MermaidMetamorphicOp::ZoomIn,
+                1 => MermaidMetamorphicOp::ZoomOut,
+                2 => MermaidMetamorphicOp::PanLeft,
+                3 => MermaidMetamorphicOp::PanRight,
+                4 => MermaidMetamorphicOp::PanUp,
+                _ => MermaidMetamorphicOp::PanDown,
+            })
+            .collect()
+    })
+}
+
+fn mermaid_snapshot(viewer: &MermaidViewerState) -> MermaidMetamorphicSnapshot {
+    let content_rect = viewer.content_rect.expect("content rect");
+    let mut semantic_lines = viewer
+        .cached_semantic_lines
+        .iter()
+        .map(|line| MermaidSemanticSnapshot {
+            source_index: line.source_index,
+            text: line.text.clone(),
+            rel_x: line.x.saturating_sub(content_rect.x),
+            rel_y: line.y.saturating_sub(content_rect.y),
+        })
+        .collect::<Vec<_>>();
+    semantic_lines.sort();
+
+    MermaidMetamorphicSnapshot {
+        view_state: mermaid_view_state_for_view(viewer, content_rect),
+        focused_source_index: viewer.focused_source_index,
+        cached_lines: viewer.cached_lines.clone(),
+        semantic_lines,
+    }
+}
+
+fn render_mermaid_snapshot(
+    app: &mut App<MockApi>,
+    renderer: &mut Renderer,
+    layout: WorkspaceLayout,
+) -> MermaidMetamorphicSnapshot {
+    app.render(renderer, layout);
+    let FishBowlMode::Mermaid(viewer) = &app.fish_bowl_mode else {
+        panic!("expected Mermaid viewer mode");
+    };
+    mermaid_snapshot(viewer)
+}
+
+fn mermaid_content_rect_for_layout(layout: WorkspaceLayout) -> Rect {
+    mermaid_content_rect(layout.overview_field)
+}
+
+fn mermaid_pan_headroom(viewer: &MermaidViewerState, content_rect: Rect) -> (f32, f32, f32, f32) {
+    let (sample_width, sample_height) = mermaid_sample_dimensions(content_rect);
+    let base_scale = mermaid_fit_scale(
+        viewer.diagram_width,
+        viewer.diagram_height,
+        sample_width as f32,
+        sample_height as f32,
+    );
+    let scale = (base_scale * viewer.zoom.clamp(MERMAID_MIN_ZOOM, MERMAID_MAX_ZOOM)).max(0.000_1);
+    let visible_width = sample_width as f32 / scale;
+    let visible_height = sample_height as f32 / scale;
+
+    let min_center_x = if visible_width >= viewer.diagram_width {
+        viewer.diagram_width / 2.0
+    } else {
+        visible_width / 2.0
+    };
+    let max_center_x = if visible_width >= viewer.diagram_width {
+        viewer.diagram_width / 2.0
+    } else {
+        viewer.diagram_width - visible_width / 2.0
+    };
+    let min_center_y = if visible_height >= viewer.diagram_height {
+        viewer.diagram_height / 2.0
+    } else {
+        visible_height / 2.0
+    };
+    let max_center_y = if visible_height >= viewer.diagram_height {
+        viewer.diagram_height / 2.0
+    } else {
+        viewer.diagram_height - visible_height / 2.0
+    };
+
+    (
+        (viewer.center_x - min_center_x).max(0.0),
+        (max_center_x - viewer.center_x).max(0.0),
+        (viewer.center_y - min_center_y).max(0.0),
+        (max_center_y - viewer.center_y).max(0.0),
+    )
+}
+
+fn mermaid_safe_pan_distance(
+    ratio_percent: i16,
+    negative_headroom: f32,
+    positive_headroom: f32,
+) -> f32 {
+    if ratio_percent < 0 {
+        -negative_headroom * f32::from(-ratio_percent) / 100.0
+    } else {
+        positive_headroom * f32::from(ratio_percent) / 100.0
+    }
+}
+
+fn apply_mermaid_metamorphic_ops(
+    app: &mut App<MockApi>,
+    layout: WorkspaceLayout,
+    ops: &[MermaidMetamorphicOp],
+) {
+    let content_rect = mermaid_content_rect_for_layout(layout);
+    for op in ops {
+        match op {
+            MermaidMetamorphicOp::ZoomIn => {
+                app.zoom_mermaid_viewer(MERMAID_SCROLL_ZOOM_STEP_PERCENT, None, content_rect);
+            }
+            MermaidMetamorphicOp::ZoomOut => {
+                app.zoom_mermaid_viewer(-MERMAID_SCROLL_ZOOM_STEP_PERCENT, None, content_rect);
+            }
+            MermaidMetamorphicOp::PanLeft => {
+                let step = match &app.fish_bowl_mode {
+                    FishBowlMode::Mermaid(viewer) => mermaid_pan_step(viewer, content_rect).0,
+                    FishBowlMode::Aquarium => panic!("expected Mermaid viewer mode"),
+                };
+                app.pan_mermaid_viewer(-step, 0.0);
+            }
+            MermaidMetamorphicOp::PanRight => {
+                let step = match &app.fish_bowl_mode {
+                    FishBowlMode::Mermaid(viewer) => mermaid_pan_step(viewer, content_rect).0,
+                    FishBowlMode::Aquarium => panic!("expected Mermaid viewer mode"),
+                };
+                app.pan_mermaid_viewer(step, 0.0);
+            }
+            MermaidMetamorphicOp::PanUp => {
+                let step = match &app.fish_bowl_mode {
+                    FishBowlMode::Mermaid(viewer) => mermaid_pan_step(viewer, content_rect).1,
+                    FishBowlMode::Aquarium => panic!("expected Mermaid viewer mode"),
+                };
+                app.pan_mermaid_viewer(0.0, -step);
+            }
+            MermaidMetamorphicOp::PanDown => {
+                let step = match &app.fish_bowl_mode {
+                    FishBowlMode::Mermaid(viewer) => mermaid_pan_step(viewer, content_rect).1,
+                    FishBowlMode::Aquarium => panic!("expected Mermaid viewer mode"),
+                };
+                app.pan_mermaid_viewer(0.0, step);
+            }
+        }
+    }
 }
 
 fn find_cached_semantic_line(viewer: &MermaidViewerState, needle: &str) -> Option<(u16, u16)> {
@@ -5978,6 +6194,129 @@ fn mermaid_open_shortcut_reports_failures_and_missing_paths() {
         app.visible_message(),
         Some("Mermaid artifact path unavailable")
     );
+}
+
+proptest::proptest! {
+    #[test]
+    fn mermaid_mr_fit_is_canonical_after_zoom_and_pan_sequences(
+        source in mermaid_flowchart_source_strategy(),
+        width in 100u16..160,
+        height in 24u16..52,
+        ops in mermaid_metamorphic_ops_strategy(),
+    ) {
+        let (mut app, mut renderer, layout) = open_mermaid_test_viewer(&source, width, height);
+        let baseline = render_mermaid_snapshot(&mut app, &mut renderer, layout);
+
+        apply_mermaid_metamorphic_ops(&mut app, layout, &ops);
+        app.reset_mermaid_viewer_fit();
+        let after_fit = render_mermaid_snapshot(&mut app, &mut renderer, layout);
+
+        proptest::prop_assert_eq!(after_fit, baseline);
+    }
+
+    #[test]
+    fn mermaid_mr_pan_round_trip_restores_viewport(
+        source in mermaid_flowchart_source_strategy(),
+        width in 110u16..180,
+        height in 28u16..56,
+        x_ratio_percent in -90i16..=90,
+        y_ratio_percent in -90i16..=90,
+    ) {
+        let (mut app, mut renderer, layout) = open_mermaid_test_viewer(&source, width, height);
+        let content_rect = mermaid_content_rect_for_layout(layout);
+
+        app.zoom_mermaid_viewer(MERMAID_KEYBOARD_ZOOM_STEP_PERCENT, None, content_rect);
+        let baseline = render_mermaid_snapshot(&mut app, &mut renderer, layout);
+
+        let (dx, dy) = match &app.fish_bowl_mode {
+            FishBowlMode::Mermaid(viewer) => {
+                let (left, right, up, down) = mermaid_pan_headroom(viewer, content_rect);
+                (
+                    mermaid_safe_pan_distance(x_ratio_percent, left, right),
+                    mermaid_safe_pan_distance(y_ratio_percent, up, down),
+                )
+            }
+            FishBowlMode::Aquarium => panic!("expected Mermaid viewer mode"),
+        };
+        proptest::prop_assume!(dx.abs() > 0.5 || dy.abs() > 0.5);
+
+        app.pan_mermaid_viewer(dx, dy);
+        let after_pan = render_mermaid_snapshot(&mut app, &mut renderer, layout);
+        proptest::prop_assume!(after_pan != baseline);
+
+        app.pan_mermaid_viewer(-dx, -dy);
+        let round_trip = render_mermaid_snapshot(&mut app, &mut renderer, layout);
+
+        proptest::prop_assert_eq!(round_trip, baseline);
+    }
+
+    #[test]
+    fn mermaid_mr_pointer_zoom_keeps_anchor_stable(
+        source in mermaid_anchorable_source_strategy(),
+        width in 120u16..180,
+        height in 28u16..56,
+        anchor_pick in 0usize..8,
+    ) {
+        let (mut app, mut renderer, layout) = open_mermaid_test_viewer(&source, width, height);
+        app.render(&mut renderer, layout);
+
+        let (source_index, anchor_x, anchor_y) = match &app.fish_bowl_mode {
+            FishBowlMode::Mermaid(viewer) => {
+                let content_rect = viewer.content_rect.expect("content rect");
+                let eligible = viewer
+                    .cached_semantic_lines
+                    .iter()
+                    .filter(|line| {
+                        line.x > content_rect.x.saturating_add(1)
+                            && line.y > content_rect.y
+                            && line.x.saturating_add(display_width(&line.text))
+                                < content_rect.right().saturating_sub(1)
+                            && line.y < content_rect.bottom().saturating_sub(1)
+                    })
+                    .collect::<Vec<_>>();
+                proptest::prop_assume!(!eligible.is_empty());
+                let anchor = eligible[anchor_pick % eligible.len()];
+                (
+                    anchor.source_index,
+                    anchor.x.saturating_add(display_width(&anchor.text) / 2),
+                    anchor.y,
+                )
+            }
+            FishBowlMode::Aquarium => panic!("expected Mermaid viewer mode"),
+        };
+
+        let content_rect = mermaid_content_rect_for_layout(layout);
+        app.zoom_mermaid_viewer(
+            MERMAID_SCROLL_ZOOM_STEP_PERCENT,
+            Some((anchor_x, anchor_y)),
+            content_rect,
+        );
+        app.render(&mut renderer, layout);
+
+        let anchored_line = match &app.fish_bowl_mode {
+            FishBowlMode::Mermaid(viewer) => viewer
+                .cached_semantic_lines
+                .iter()
+                .find(|line| line.source_index == source_index),
+            FishBowlMode::Aquarium => panic!("expected Mermaid viewer mode"),
+        };
+        proptest::prop_assume!(anchored_line.is_some());
+        let anchored_line = anchored_line.expect("anchored line");
+        let anchored_center_x = anchored_line
+            .x
+            .saturating_add(display_width(&anchored_line.text) / 2);
+
+        proptest::prop_assert!(
+            (anchored_center_x as i32 - anchor_x as i32).abs() <= 2,
+            "expected x anchor to stay stable: before={anchor_x}, after={}",
+            anchored_center_x
+        );
+        proptest::prop_assert!(
+            (anchored_line.y as i32 - anchor_y as i32).abs() <= 1,
+            "expected y anchor to stay stable: before={anchor_y}, after={}",
+            anchored_line.y
+        );
+    }
 }
 
 #[test]
