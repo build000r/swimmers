@@ -16,6 +16,7 @@ pub(crate) struct PickerState {
     pub(crate) current_theme_color: Option<Color>,
     pub(crate) entry_theme_colors: Vec<Option<Color>>,
     pub(crate) managed_only: bool,
+    pub(crate) spawn_tool: SpawnTool,
     pub(crate) selection: PickerSelection,
     pub(crate) scroll: usize,
 }
@@ -26,6 +27,7 @@ impl PickerState {
         anchor_y: u16,
         response: DirListResponse,
         managed_only: bool,
+        spawn_tool: SpawnTool,
     ) -> Self {
         Self {
             anchor_x,
@@ -36,6 +38,7 @@ impl PickerState {
             current_theme_color: None,
             entry_theme_colors: Vec::new(),
             managed_only,
+            spawn_tool,
             selection: PickerSelection::SpawnHere,
             scroll: 0,
         }
@@ -148,6 +151,7 @@ pub(crate) enum PickerAction {
     Close,
     Up,
     ToggleManaged(bool),
+    ToggleTool,
     ActivateCurrentPath,
     ActivateEntry(usize),
 }
@@ -160,6 +164,7 @@ pub(crate) struct PickerLayout {
     pub(crate) close_button: Rect,
     pub(crate) env_button: Rect,
     pub(crate) all_button: Rect,
+    pub(crate) tool_button: Rect,
     pub(crate) spawn_here_button: Rect,
     pub(crate) first_entry_y: u16,
     pub(crate) visible_entry_rows: usize,
@@ -194,6 +199,10 @@ pub(crate) struct InitialRequestLayout {
     pub(crate) frame: Rect,
     pub(crate) content: Rect,
     pub(crate) input_y: u16,
+}
+
+pub(crate) fn tool_button_label(tool: SpawnTool) -> String {
+    format!("[{}]", tool.label())
 }
 
 pub(crate) fn normalize_path(path: &str) -> String {
@@ -273,6 +282,13 @@ pub(crate) fn picker_layout(picker: &PickerState, field: Rect) -> PickerLayout {
         width: 13,
         height: 1,
     };
+    let tool_label_width = tool_button_label(picker.spawn_tool).len() as u16;
+    let tool_button = Rect {
+        x: close_button.x.saturating_sub(tool_label_width + 1),
+        y: content.y,
+        width: tool_label_width,
+        height: 1,
+    };
 
     PickerLayout {
         frame,
@@ -281,6 +297,7 @@ pub(crate) fn picker_layout(picker: &PickerState, field: Rect) -> PickerLayout {
         close_button,
         env_button,
         all_button,
+        tool_button,
         spawn_here_button: Rect {
             x: content.x,
             y: content.y + 3,
@@ -300,6 +317,9 @@ pub(crate) fn picker_action_at(
 ) -> Option<PickerAction> {
     if layout.close_button.contains(x, y) {
         return Some(PickerAction::Close);
+    }
+    if layout.tool_button.contains(x, y) {
+        return Some(PickerAction::ToggleTool);
     }
     if layout
         .back_button
@@ -347,11 +367,18 @@ pub(crate) fn render_picker(renderer: &mut Renderer, picker: &PickerState, field
     renderer.fill_rect(layout.frame, ' ', Color::Reset);
     renderer.draw_box(layout.frame, picker_color);
 
+    let spawn_title = format!("spawn {}", picker.spawn_tool.label());
     renderer.draw_text(
         layout.content.x,
         layout.content.y,
-        "spawn codex",
+        &spawn_title,
         picker_accent,
+    );
+    renderer.draw_text(
+        layout.tool_button.x,
+        layout.tool_button.y,
+        &tool_button_label(picker.spawn_tool),
+        Color::White,
     );
     renderer.draw_text(
         layout.close_button.x,

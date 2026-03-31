@@ -2950,6 +2950,7 @@ fn render_picker_uses_current_repo_theme_color() {
         2,
         dir_response(repo_root.to_string_lossy().as_ref(), &[("src", true)]),
         true,
+        SpawnTool::Codex,
     );
     let mut repo_themes = HashMap::new();
     picker.sync_theme_colors(&mut repo_themes);
@@ -3025,6 +3026,7 @@ fn render_picker_adjusts_low_contrast_repo_theme_color() {
         2,
         dir_response(repo_root.to_string_lossy().as_ref(), &[("src", true)]),
         true,
+        SpawnTool::Codex,
     );
     let mut repo_themes = HashMap::new();
     picker.sync_theme_colors(&mut repo_themes);
@@ -3077,6 +3079,7 @@ fn render_picker_uses_entry_repo_theme_color() {
             &[("swimmers", true)],
         ),
         true,
+        SpawnTool::Codex,
     );
     let mut repo_themes = HashMap::new();
     picker.sync_theme_colors(&mut repo_themes);
@@ -3425,6 +3428,7 @@ fn spawn_here_opens_initial_request_for_current_path() {
         10,
         dir_response(TEST_REPO_OPENSOURCE, &[("skills", true)]),
         true,
+        SpawnTool::Codex,
     ));
 
     app.spawn_session_from_picker(field);
@@ -3496,6 +3500,7 @@ fn submitting_initial_request_creates_hidden_session_without_native_open() {
         10,
         dir_response(TEST_REPOS_ROOT, &[("swimmers", false)]),
         true,
+        SpawnTool::Codex,
     ));
     app.initial_request = Some(InitialRequestState {
         cwd: TEST_REPO_SWIMMERS.to_string(),
@@ -3587,6 +3592,7 @@ fn session_create_failure_does_not_attempt_native_open() {
         10,
         dir_response(TEST_REPOS_ROOT, &[("swimmers", false)]),
         true,
+        SpawnTool::Codex,
     ));
     app.initial_request = Some(InitialRequestState {
         cwd: TEST_REPO_SWIMMERS.to_string(),
@@ -3680,6 +3686,7 @@ fn esc_cancels_initial_request_without_creating_session() {
         10,
         dir_response(TEST_REPOS_ROOT, &[("swimmers", false)]),
         true,
+        SpawnTool::Codex,
     ));
     app.initial_request = Some(InitialRequestState {
         cwd: TEST_REPO_SWIMMERS.to_string(),
@@ -3838,6 +3845,7 @@ fn picker_action_at_resolves_controls_and_entries() {
         4,
         dir_response("/tmp", &[("alpha", true), ("beta", false)]),
         true,
+        SpawnTool::Codex,
     );
     picker.apply_response(dir_response("/tmp/nested", &[("child", false)]));
     let layout = picker_layout(&picker, test_field());
@@ -3887,6 +3895,69 @@ fn picker_action_at_resolves_controls_and_entries() {
             .and_then(|button| picker_action_at(&picker, layout, button.x, button.y)),
         Some(PickerAction::Up)
     ));
+    assert!(matches!(
+        picker_action_at(
+            &picker,
+            layout,
+            layout.tool_button.x,
+            layout.tool_button.y
+        ),
+        Some(PickerAction::ToggleTool)
+    ));
+}
+
+#[test]
+fn toggle_tool_switches_spawn_tool_and_persists_across_picker_reopen() {
+    let api = MockApi::new();
+    api.push_list_dirs(Ok(dir_response(TEST_REPOS_ROOT, &[("swimmers", false)])));
+    api.push_list_dirs(Ok(dir_response(TEST_REPOS_ROOT, &[("swimmers", false)])));
+    let field = test_field();
+    let mut app = make_app(api.clone());
+
+    app.handle_field_click(10, 10, field);
+    assert_eq!(app.spawn_tool, SpawnTool::Codex);
+    assert_eq!(
+        app.picker.as_ref().map(|p| p.spawn_tool),
+        Some(SpawnTool::Codex)
+    );
+
+    app.handle_picker_action(PickerAction::ToggleTool, field);
+    assert_eq!(app.spawn_tool, SpawnTool::Claude);
+    assert_eq!(
+        app.picker.as_ref().map(|p| p.spawn_tool),
+        Some(SpawnTool::Claude)
+    );
+
+    app.close_picker();
+    app.handle_field_click(10, 10, field);
+    assert_eq!(
+        app.picker.as_ref().map(|p| p.spawn_tool),
+        Some(SpawnTool::Claude)
+    );
+}
+
+#[test]
+fn spawn_session_uses_selected_tool() {
+    let api = MockApi::new();
+    api.push_create_session(Ok(create_response("sess-99", "99", TEST_REPO_SWIMMERS)));
+    let field = test_field();
+    let mut app = make_app(api.clone());
+    app.spawn_tool = SpawnTool::Claude;
+    app.initial_request = Some(InitialRequestState {
+        cwd: TEST_REPO_SWIMMERS.to_string(),
+        value: "fix the build".to_string(),
+    });
+
+    app.submit_initial_request(field);
+
+    assert_eq!(
+        api.create_calls(),
+        vec![(
+            TEST_REPO_SWIMMERS.to_string(),
+            SpawnTool::Claude,
+            Some("fix the build".to_string()),
+        )]
+    );
 }
 
 #[test]
@@ -3925,6 +3996,7 @@ fn move_selection_updates_picker_and_visible_session_selection() {
         3,
         dir_response("/tmp", &[("alpha", false), ("beta", false)]),
         true,
+        SpawnTool::Codex,
     );
     picker.selection = PickerSelection::SpawnHere;
     app.picker = Some(picker);
@@ -3969,6 +4041,7 @@ fn handle_key_event_covers_initial_request_picker_and_quit_paths() {
         3,
         dir_response("/tmp", &[("alpha", false)]),
         true,
+        SpawnTool::Codex,
     ));
     assert!(handle_key_event(
         &mut app,
@@ -4001,6 +4074,7 @@ fn picker_activate_selection_opens_initial_request_and_reloads_children() {
         2,
         dir_response("/tmp", &[("child", true), ("leaf", false)]),
         true,
+        SpawnTool::Codex,
     ));
 
     app.picker_activate_selection(layout.overview_field);

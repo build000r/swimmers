@@ -103,6 +103,20 @@ impl SpawnTool {
             Self::Codex => "codex",
         }
     }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Claude => "claude",
+            Self::Codex => "codex",
+        }
+    }
+
+    pub fn toggle(self) -> Self {
+        match self {
+            Self::Claude => Self::Codex,
+            Self::Codex => Self::Claude,
+        }
+    }
 }
 
 /// Per-repository Swimmer palette used by the native TUI.

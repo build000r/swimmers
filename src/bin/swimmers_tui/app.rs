@@ -15,6 +15,7 @@ pub(crate) struct App<C: TuiApi> {
     pub(crate) published_selected_id: Option<String>,
     pub(crate) native_status: Option<NativeDesktopStatusResponse>,
     pub(crate) picker: Option<PickerState>,
+    pub(crate) spawn_tool: SpawnTool,
     pub(crate) initial_request: Option<InitialRequestState>,
     pub(crate) fish_bowl_mode: FishBowlMode,
     pub(crate) mermaid_drag: Option<MermaidDragState>,
@@ -69,6 +70,7 @@ impl<C: TuiApi> App<C> {
             published_selected_id: None,
             native_status: None,
             picker: None,
+            spawn_tool: SpawnTool::Codex,
             initial_request: None,
             fish_bowl_mode: FishBowlMode::Aquarium,
             mermaid_drag: None,
@@ -684,7 +686,7 @@ impl<C: TuiApi> App<C> {
     pub(crate) fn open_picker(&mut self, x: u16, y: u16) {
         match self.runtime.block_on(self.client.list_dirs(None, true)) {
             Ok(response) => {
-                let mut picker = PickerState::new(x, y, response, true);
+                let mut picker = PickerState::new(x, y, response, true, self.spawn_tool);
                 picker.sync_theme_colors(&mut self.repo_themes);
                 self.picker = Some(picker);
             }
@@ -835,7 +837,7 @@ impl<C: TuiApi> App<C> {
     ) {
         match self.runtime.block_on(self.client.create_session(
             cwd,
-            SpawnTool::Codex,
+            self.spawn_tool,
             initial_request,
         )) {
             Ok(response) => {
@@ -1318,6 +1320,12 @@ impl<C: TuiApi> App<C> {
             PickerAction::Up => self.picker_up(),
             PickerAction::ToggleManaged(managed_only) => {
                 self.picker_set_managed_only(managed_only);
+            }
+            PickerAction::ToggleTool => {
+                self.spawn_tool = self.spawn_tool.toggle();
+                if let Some(picker) = &mut self.picker {
+                    picker.spawn_tool = self.spawn_tool;
+                }
             }
             PickerAction::ActivateCurrentPath => self.spawn_session_from_picker(field),
             PickerAction::ActivateEntry(index) => self.activate_picker_entry(index, field),
