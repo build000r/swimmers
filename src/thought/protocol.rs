@@ -170,6 +170,8 @@ struct SyncRequestWire {
 struct SyncRequestConfigWire {
     enabled: bool,
     model: String,
+    #[serde(default)]
+    backend: String,
     cadence_hot_ms: u64,
     cadence_warm_ms: u64,
     cadence_cold_ms: u64,
@@ -184,6 +186,7 @@ impl SyncRequestConfigWire {
         let mut config = ThoughtConfig {
             enabled: self.enabled,
             model: self.model,
+            backend: self.backend,
             cadence_hot_ms: self.cadence_hot_ms,
             cadence_warm_ms: self.cadence_warm_ms,
             cadence_cold_ms: self.cadence_cold_ms,
@@ -199,6 +202,7 @@ impl SyncRequestConfigWire {
 struct SyncRequestConfigWireRef<'a> {
     enabled: bool,
     model: &'a str,
+    backend: &'a str,
     cadence_hot_ms: u64,
     cadence_warm_ms: u64,
     cadence_cold_ms: u64,
@@ -211,6 +215,7 @@ impl<'a> From<&'a ThoughtConfig> for SyncRequestConfigWireRef<'a> {
         Self {
             enabled: value.enabled,
             model: value.model.as_str(),
+            backend: value.backend.as_str(),
             cadence_hot_ms: value.cadence_hot_ms,
             cadence_warm_ms: value.cadence_warm_ms,
             cadence_cold_ms: value.cadence_cold_ms,

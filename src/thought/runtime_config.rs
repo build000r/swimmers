@@ -16,6 +16,8 @@ pub struct ThoughtConfig {
     pub enabled: bool,
     #[serde(default)]
     pub model: String,
+    #[serde(default)]
+    pub backend: String,
     #[serde(default = "default_cadence_hot_ms")]
     pub cadence_hot_ms: u64,
     #[serde(default = "default_cadence_warm_ms")]
@@ -33,6 +35,7 @@ impl Default for ThoughtConfig {
         Self {
             enabled: default_enabled(),
             model: String::new(),
+            backend: String::new(),
             cadence_hot_ms: default_cadence_hot_ms(),
             cadence_warm_ms: default_cadence_warm_ms(),
             cadence_cold_ms: default_cadence_cold_ms(),
@@ -45,6 +48,7 @@ impl Default for ThoughtConfig {
 impl ThoughtConfig {
     pub fn normalize(&mut self) {
         self.model = self.model.trim().to_string();
+        self.backend = self.backend.trim().to_string();
         self.agent_prompt = normalize_optional_prompt(self.agent_prompt.take());
         self.terminal_prompt = normalize_optional_prompt(self.terminal_prompt.take());
     }
@@ -55,6 +59,25 @@ impl ThoughtConfig {
                 "model",
                 format!("must be <= {MODEL_MAX_CHARS} characters"),
             ));
+        }
+
+        if !self.backend.is_empty() {
+            const VALID_BACKENDS: &[&str] = &[
+                "openrouter", "codex", "codex_cli", "codex-cli",
+                "claude", "claude_cli", "claude-cli",
+            ];
+            if !VALID_BACKENDS
+                .iter()
+                .any(|v| v.eq_ignore_ascii_case(&self.backend))
+            {
+                return Err(ThoughtConfigValidationError::new(
+                    "backend",
+                    format!(
+                        "unrecognized backend {:?}; expected one of: openrouter, claude, codex",
+                        self.backend
+                    ),
+                ));
+            }
         }
 
         if !(CADENCE_HOT_MIN_MS..=CADENCE_HOT_MAX_MS).contains(&self.cadence_hot_ms) {
@@ -133,6 +156,8 @@ impl Error for ThoughtConfigValidationError {}
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct DaemonDefaults {
     pub model: String,
+    #[serde(default)]
+    pub backend: String,
     pub agent_prompt: String,
     pub terminal_prompt: String,
 }
@@ -182,6 +207,7 @@ mod tests {
         let config = ThoughtConfig::default();
         assert!(config.validate().is_ok());
         assert!(config.model.is_empty());
+        assert!(config.backend.is_empty());
     }
 
     #[test]
@@ -230,5 +256,33 @@ mod tests {
             .validate()
             .expect_err("cold cadence below warm cadence should be rejected");
         assert_eq!(err.field, "cadence_cold_ms");
+    }
+
+    #[test]
+    fn backend_validation_accepts_known_values() {
+        for backend in ["openrouter", "claude", "codex", ""] {
+            let config = ThoughtConfig {
+                backend: backend.to_string(),
+                ..ThoughtConfig::default()
+            };
+            assert!(
+                config.validate().is_ok(),
+                "backend {:?} should be valid",
+                backend
+            );
+        }
+    }
+
+    #[test]
+    fn backend_validation_rejects_unknown_values() {
+        let config = ThoughtConfig {
+            backend: "gemini".to_string(),
+            ..ThoughtConfig::default()
+        };
+        let err = config
+            .validate()
+            .expect_err("unknown backend should be rejected");
+        assert_eq!(err.field, "backend");
+        assert!(err.message.contains("gemini"));
     }
 }
