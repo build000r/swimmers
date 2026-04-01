@@ -1,10 +1,13 @@
 use crate::api::{fetch_live_summary, AppState};
 use crate::auth::{AuthInfo, AuthScope};
-use crate::types::{ErrorResponse, NativeDesktopOpenRequest, NativeDesktopStatusResponse};
+use crate::types::{
+    ErrorResponse, NativeDesktopApp, NativeDesktopConfigRequest, NativeDesktopModeRequest,
+    NativeDesktopOpenRequest, NativeDesktopStatusResponse,
+};
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
-use axum::routing::{get, post};
+use axum::routing::{get, post, put};
 use axum::{Extension, Json, Router};
 use std::sync::Arc;
 
@@ -29,13 +32,65 @@ fn unsupported_native_response(status: &NativeDesktopStatusResponse) -> axum::re
         .into_response()
 }
 
+async fn native_status_for_host(
+    state: &Arc<AppState>,
+    headers: &HeaderMap,
+) -> NativeDesktopStatusResponse {
+    let app = *state.native_desktop_app.read().await;
+    let ghostty_mode = *state.ghostty_open_mode.read().await;
+    let mut status = crate::native::support_for_host(request_host(headers), app);
+    if app == NativeDesktopApp::Ghostty {
+        status.ghostty_mode = Some(ghostty_mode);
+    }
+    status
+}
+
 async fn native_status(
     Extension(auth): Extension<AuthInfo>,
+    State(state): State<Arc<AppState>>,
     headers: HeaderMap,
 ) -> Result<Json<NativeDesktopStatusResponse>, axum::response::Response> {
     auth.require_scope(AuthScope::SessionsRead)?;
-    let status = crate::native::support_for_host(request_host(&headers));
+    let status = native_status_for_host(&state, &headers).await;
     Ok(Json(status))
+}
+
+async fn set_native_app(
+    Extension(auth): Extension<AuthInfo>,
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<NativeDesktopConfigRequest>,
+) -> impl IntoResponse {
+    if let Err(resp) = auth.require_scope(AuthScope::SessionsWrite) {
+        return resp;
+    }
+
+    {
+        let mut native_app = state.native_desktop_app.write().await;
+        *native_app = body.app;
+    }
+
+    let status = native_status_for_host(&state, &headers).await;
+    (StatusCode::OK, Json(serde_json::to_value(status).unwrap())).into_response()
+}
+
+async fn set_native_mode(
+    Extension(auth): Extension<AuthInfo>,
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<NativeDesktopModeRequest>,
+) -> impl IntoResponse {
+    if let Err(resp) = auth.require_scope(AuthScope::SessionsWrite) {
+        return resp;
+    }
+
+    {
+        let mut ghostty_mode = state.ghostty_open_mode.write().await;
+        *ghostty_mode = body.mode;
+    }
+
+    let status = native_status_for_host(&state, &headers).await;
+    (StatusCode::OK, Json(serde_json::to_value(status).unwrap())).into_response()
 }
 
 async fn native_open(
@@ -48,7 +103,9 @@ async fn native_open(
         return resp;
     }
 
-    let status = crate::native::support_for_host(request_host(&headers));
+    let app = *state.native_desktop_app.read().await;
+    let ghostty_mode = *state.ghostty_open_mode.read().await;
+    let status = crate::native::support_for_host(request_host(&headers), app);
     if !status.supported {
         return unsupported_native_response(&status);
     }
@@ -97,7 +154,9 @@ async fn native_open(
             .into_response();
     }
 
-    match crate::native::open_or_focus_iterm_session(
+    match crate::native::open_native_session(
+        app,
+        ghostty_mode,
         &summary.session_id,
         &summary.tmux_name,
         &summary.cwd,
@@ -122,6 +181,8 @@ async fn native_open(
 pub fn routes() -> Router<Arc<AppState>> {
     Router::new()
         .route("/v1/native/status", get(native_status))
+        .route("/v1/native/app", put(set_native_app))
+        .route("/v1/native/mode", put(set_native_mode))
         .route("/v1/native/open", post(native_open))
 }
 
@@ -134,6 +195,7 @@ mod tests {
     use crate::session::supervisor::SessionSupervisor;
     use crate::thought::protocol::SyncRequestSequence;
     use crate::thought::runtime_config::ThoughtConfig;
+    use crate::types::{GhosttyOpenMode, NativeDesktopApp};
     use axum::body::to_bytes;
     use axum::response::IntoResponse;
     use serde_json::Value;
@@ -146,6 +208,8 @@ mod tests {
             supervisor,
             config,
             thought_config: Arc::new(RwLock::new(ThoughtConfig::default())),
+            native_desktop_app: Arc::new(RwLock::new(NativeDesktopApp::Iterm)),
+            ghostty_open_mode: Arc::new(RwLock::new(GhosttyOpenMode::Swap)),
             sync_request_sequence: Arc::new(SyncRequestSequence::new()),
             daemon_defaults: None,
             file_store: None,
@@ -200,5 +264,77 @@ mod tests {
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
         let json = response_json(response).await;
         assert_eq!(json["code"], "SESSION_NOT_FOUND");
+    }
+
+    #[tokio::test]
+    async fn set_native_app_switches_status_to_requested_app() {
+        let mut headers = HeaderMap::new();
+        headers.insert("host", "localhost:3210".parse().expect("host header"));
+        let state = test_state();
+
+        let response = set_native_app(
+            Extension(AuthInfo::new(OPERATOR_SCOPES.to_vec())),
+            State(state.clone()),
+            headers.clone(),
+            Json(NativeDesktopConfigRequest {
+                app: NativeDesktopApp::Ghostty,
+            }),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let json = response_json(response).await;
+        assert_eq!(json["app_id"], "ghostty");
+        assert_eq!(json["app"], "Ghostty");
+
+        let status = native_status(
+            Extension(AuthInfo::new(OPERATOR_SCOPES.to_vec())),
+            State(state),
+            headers,
+        )
+        .await
+        .expect("native status response");
+        let json = serde_json::to_value(status.0).expect("status json");
+        assert_eq!(json["app_id"], "ghostty");
+        assert_eq!(json["app"], "Ghostty");
+        assert_eq!(json["ghostty_mode"], "swap");
+    }
+
+    #[tokio::test]
+    async fn set_native_mode_updates_status_for_ghostty() {
+        let mut headers = HeaderMap::new();
+        headers.insert("host", "localhost:3210".parse().expect("host header"));
+        let state = test_state();
+        {
+            let mut app = state.native_desktop_app.write().await;
+            *app = NativeDesktopApp::Ghostty;
+        }
+
+        let response = set_native_mode(
+            Extension(AuthInfo::new(OPERATOR_SCOPES.to_vec())),
+            State(state.clone()),
+            headers.clone(),
+            Json(NativeDesktopModeRequest {
+                mode: GhosttyOpenMode::Add,
+            }),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let json = response_json(response).await;
+        assert_eq!(json["app_id"], "ghostty");
+        assert_eq!(json["ghostty_mode"], "add");
+
+        let status = native_status(
+            Extension(AuthInfo::new(OPERATOR_SCOPES.to_vec())),
+            State(state),
+            headers,
+        )
+        .await
+        .expect("native status response");
+        let json = serde_json::to_value(status.0).expect("status json");
+        assert_eq!(json["ghostty_mode"], "add");
     }
 }

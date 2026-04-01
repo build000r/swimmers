@@ -1454,8 +1454,8 @@ fn build_initial_request_input(initial_request: &str) -> Vec<u8> {
     input
 }
 
-fn spawn_tool_consumes_initial_request(tool: crate::types::SpawnTool) -> bool {
-    matches!(tool, crate::types::SpawnTool::Codex)
+fn spawn_tool_consumes_initial_request(_tool: crate::types::SpawnTool) -> bool {
+    true
 }
 
 fn build_spawn_tool_command(
@@ -1882,15 +1882,15 @@ mod tests {
     }
 
     #[test]
-    fn build_spawn_tool_command_keeps_other_tools_on_follow_up_input_path() {
+    fn build_spawn_tool_command_inlines_claude_initial_request() {
         assert_eq!(
             build_spawn_tool_command(
                 crate::types::SpawnTool::Claude,
                 Some("investigate tmux startup")
             ),
-            "claude"
+            "claude 'investigate tmux startup'"
         );
-        assert!(!spawn_tool_consumes_initial_request(
+        assert!(spawn_tool_consumes_initial_request(
             crate::types::SpawnTool::Claude
         ));
     }

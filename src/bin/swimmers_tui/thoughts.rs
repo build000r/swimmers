@@ -547,7 +547,39 @@ pub(crate) fn session_display_color(
     repo_themes: &HashMap<String, RepoTheme>,
 ) -> Color {
     session_theme_color(session, repo_themes)
-        .unwrap_or_else(|| SpriteKind::from_session(session).color())
+        .unwrap_or_else(|| name_based_color(&session.tmux_name))
+}
+
+/// Deterministic color derived from the session name so that sessions without a
+/// repo theme directory still show a stable, recognisable hue.
+pub(crate) fn name_based_color(name: &str) -> Color {
+    let mut hasher = DefaultHasher::new();
+    name.hash(&mut hasher);
+    let seed = hasher.finish();
+
+    let hue = (seed % 3600) as f64 / 10.0; // 0..360
+    let saturation = 0.50 + ((seed >> 16) % 200) as f64 / 1000.0; // 0.50..0.70
+    let lightness = 0.45 + ((seed >> 32) % 150) as f64 / 1000.0; // 0.45..0.60
+
+    let rgb = hsl_to_rgb_tuple(hue, saturation, lightness);
+    rgb_color(adjust_for_dark_terminal(rgb))
+}
+
+fn hsl_to_rgb_tuple(h: f64, s: f64, l: f64) -> (u8, u8, u8) {
+    let c = (1.0 - (2.0 * l - 1.0).abs()) * s;
+    let h_prime = (h % 360.0) / 60.0;
+    let x = c * (1.0 - ((h_prime % 2.0) - 1.0).abs());
+    let (r1, g1, b1) = match h_prime {
+        hp if hp < 1.0 => (c, x, 0.0),
+        hp if hp < 2.0 => (x, c, 0.0),
+        hp if hp < 3.0 => (0.0, c, x),
+        hp if hp < 4.0 => (0.0, x, c),
+        hp if hp < 5.0 => (x, 0.0, c),
+        _ => (c, 0.0, x),
+    };
+    let m = l - c / 2.0;
+    let to_byte = |v: f64| ((v + m).clamp(0.0, 1.0) * 255.0).round() as u8;
+    (to_byte(r1), to_byte(g1), to_byte(b1))
 }
 
 pub(crate) fn compare_thought_panel_entries(

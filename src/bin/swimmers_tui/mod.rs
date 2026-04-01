@@ -33,9 +33,11 @@ use usvg::Tree;
 
 use swimmers::config::{AuthMode, Config};
 use swimmers::repo_theme::{discover_repo_theme, existing_repo_theme};
+use swimmers::thought::runtime_config::{DaemonDefaults, ThoughtConfig};
 use swimmers::types::{
     CreateSessionRequest, CreateSessionResponse, DirEntry, DirListResponse, ErrorResponse,
-    MermaidArtifactResponse, NativeDesktopOpenRequest, NativeDesktopOpenResponse,
+    GhosttyOpenMode, MermaidArtifactResponse, NativeDesktopApp, NativeDesktopConfigRequest,
+    NativeDesktopModeRequest, NativeDesktopOpenRequest, NativeDesktopOpenResponse,
     NativeDesktopStatusResponse, PublishSelectionRequest, RepoTheme, RestState,
     SessionListResponse, SessionState, SessionSummary, SpawnTool,
 };
@@ -85,6 +87,7 @@ mod mermaid;
 mod picker;
 mod render;
 mod terminal;
+mod thought_config_editor;
 mod thoughts;
 
 pub(crate) use api::*;
@@ -97,6 +100,7 @@ pub(crate) use mermaid::*;
 pub(crate) use picker::*;
 pub(crate) use render::*;
 pub(crate) use terminal::*;
+pub(crate) use thought_config_editor::*;
 pub(crate) use thoughts::*;
 
 pub(crate) fn run() -> Result<(), Box<dyn std::error::Error>> {

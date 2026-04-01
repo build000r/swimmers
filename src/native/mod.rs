@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
+use std::process::Command as ProcessCommand;
 use std::sync::{LazyLock, Mutex};
 
 use anyhow::{anyhow, Context, Result};
@@ -8,14 +9,21 @@ use tokio::process::Command;
 use tokio::sync::Mutex as AsyncMutex;
 use tokio::time::{sleep, Duration};
 
-use crate::types::{NativeDesktopOpenResponse, NativeDesktopStatusResponse};
+use crate::types::{
+    GhosttyOpenMode, NativeDesktopApp, NativeDesktopOpenResponse, NativeDesktopStatusResponse,
+};
 
-const ITERM_APP_NAME: &str = "iTerm";
+const NATIVE_APP_ENV: &str = "SWIMMERS_NATIVE_APP";
+const GHOSTTY_MODE_ENV: &str = "SWIMMERS_GHOSTTY_MODE";
 const ITERM_SCRIPT_RELATIVE_PATH: &str = "scripts/iterm-focus.scpt";
 const ITERM_SCROLLBACK_PREFILL_LINES: usize = 2000;
 const ITERM_OPEN_RETRY_ATTEMPTS: usize = 2;
 const ITERM_OPEN_RETRY_DELAY_MS: u64 = 150;
 const DEFAULT_ITERM_SESSION_NAME: &str = "Swimmers";
+const GHOSTTY_SCRIPT_RELATIVE_PATH: &str = "scripts/ghostty-open.scpt";
+const GHOSTTY_MANAGED_TITLE_PREFIX: &str = "swimmers-preview :: ";
+const GHOSTTY_MIN_APPLESCRIPT_VERSION: [u64; 3] = [1, 3, 0];
+const GHOSTTY_MIN_APPLESCRIPT_VERSION_TEXT: &str = "1.3.0";
 const TMUX_BIN_ENV: &str = "SWIMMERS_TMUX_BIN";
 const TMUX_BIN_FALLBACKS: &[&str] = &[
     "/opt/homebrew/bin/tmux",
@@ -26,31 +34,92 @@ const TMUX_BIN_FALLBACKS: &[&str] = &[
 static NATIVE_OPEN_LOCK: LazyLock<AsyncMutex<()>> = LazyLock::new(|| AsyncMutex::new(()));
 static SESSION_PANE_CACHE: LazyLock<Mutex<HashMap<String, String>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
+static GHOSTTY_PREVIEW_TERM_ID: LazyLock<Mutex<Option<String>>> =
+    LazyLock::new(|| Mutex::new(None));
 
-pub fn support_for_host(host: &str) -> NativeDesktopStatusResponse {
+impl NativeDesktopApp {
+    fn script_relative_path(self) -> &'static str {
+        match self {
+            Self::Iterm => ITERM_SCRIPT_RELATIVE_PATH,
+            Self::Ghostty => GHOSTTY_SCRIPT_RELATIVE_PATH,
+        }
+    }
+}
+
+pub fn default_native_app() -> NativeDesktopApp {
+    std::env::var(NATIVE_APP_ENV)
+        .ok()
+        .as_deref()
+        .map(NativeDesktopApp::from_env_value)
+        .unwrap_or(NativeDesktopApp::Iterm)
+}
+
+pub fn default_ghostty_open_mode() -> GhosttyOpenMode {
+    std::env::var(GHOSTTY_MODE_ENV)
+        .ok()
+        .as_deref()
+        .map(GhosttyOpenMode::from_env_value)
+        .unwrap_or(GhosttyOpenMode::Swap)
+}
+
+pub fn support_for_host(host: &str, app: NativeDesktopApp) -> NativeDesktopStatusResponse {
+    let script_path = script_path_for_app(app);
+    let app_unavailable_reason = match app {
+        NativeDesktopApp::Iterm => None,
+        NativeDesktopApp::Ghostty => ghostty_unavailable_reason(),
+    };
+    support_for_host_with(
+        host,
+        app,
+        cfg!(target_os = "macos"),
+        &script_path,
+        app_unavailable_reason,
+    )
+}
+
+fn support_for_host_with(
+    host: &str,
+    app: NativeDesktopApp,
+    is_macos: bool,
+    script_path: &Path,
+    app_unavailable_reason: Option<String>,
+) -> NativeDesktopStatusResponse {
     let mut response = NativeDesktopStatusResponse {
         supported: false,
         platform: Some(std::env::consts::OS.to_string()),
-        app: Some(ITERM_APP_NAME.to_string()),
+        app_id: Some(app),
+        ghostty_mode: None,
+        app: Some(app.display_name().to_string()),
         reason: None,
     };
 
-    if !cfg!(target_os = "macos") {
-        response.reason = Some("native iTerm control is only supported on macOS".to_string());
+    if !is_macos {
+        response.reason = Some(format!(
+            "native {} control is only supported on macOS",
+            app.display_name()
+        ));
         return response;
     }
 
     if !host_is_loopback(host) {
-        response.reason = Some("native iTerm control is only available from localhost".to_string());
+        response.reason = Some(format!(
+            "native {} control is only available from localhost",
+            app.display_name()
+        ));
         return response;
     }
 
-    let script_path = script_path();
     if !script_path.exists() {
         response.reason = Some(format!(
-            "native iTerm script missing: {}",
+            "native {} script missing: {}",
+            app.display_name(),
             script_path.display()
         ));
+        return response;
+    }
+
+    if let Some(reason) = app_unavailable_reason {
+        response.reason = Some(reason);
         return response;
     }
 
@@ -59,13 +128,28 @@ pub fn support_for_host(host: &str) -> NativeDesktopStatusResponse {
     response
 }
 
+pub async fn open_native_session(
+    app: NativeDesktopApp,
+    ghostty_mode: GhosttyOpenMode,
+    session_id: &str,
+    tmux_name: &str,
+    cwd: &str,
+) -> Result<NativeDesktopOpenResponse> {
+    match app {
+        NativeDesktopApp::Iterm => open_or_focus_iterm_session(session_id, tmux_name, cwd).await,
+        NativeDesktopApp::Ghostty => {
+            open_or_focus_ghostty_session(session_id, tmux_name, cwd, ghostty_mode).await
+        }
+    }
+}
+
 pub async fn open_or_focus_iterm_session(
     session_id: &str,
     tmux_name: &str,
     cwd: &str,
 ) -> Result<NativeDesktopOpenResponse> {
     let _guard = NATIVE_OPEN_LOCK.lock().await;
-    let script = script_path();
+    let script = script_path_for_app(NativeDesktopApp::Iterm);
     if !script.exists() {
         return Err(anyhow!("native iTerm script missing: {}", script.display()));
     }
@@ -109,8 +193,112 @@ pub async fn open_or_focus_iterm_session(
     unreachable!("native iTerm open loop should always return or error")
 }
 
-fn script_path() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join(ITERM_SCRIPT_RELATIVE_PATH)
+async fn open_or_focus_ghostty_session(
+    session_id: &str,
+    tmux_name: &str,
+    cwd: &str,
+    mode: GhosttyOpenMode,
+) -> Result<NativeDesktopOpenResponse> {
+    let _guard = NATIVE_OPEN_LOCK.lock().await;
+    let script = script_path_for_app(NativeDesktopApp::Ghostty);
+    if !script.exists() {
+        return Err(anyhow!(
+            "native Ghostty script missing: {}",
+            script.display()
+        ));
+    }
+    if let Some(reason) = ghostty_unavailable_reason() {
+        return Err(anyhow!(reason));
+    }
+
+    let tmux_path = resolve_tmux_binary()?;
+    let attach_command = build_ghostty_attach_command(tmux_name, &tmux_path);
+    let (_, tmux_cwd) = query_tmux_pane_metadata(&tmux_path, tmux_name)
+        .await
+        .unwrap_or((None, None));
+    let resolved_cwd = tmux_cwd.as_deref().unwrap_or(cwd);
+    let display_name = build_ghostty_display_name(resolved_cwd, tmux_name);
+    let known_preview_id = cached_ghostty_preview_term_id();
+
+    let result = run_ghostty_open_script(
+        &script,
+        session_id,
+        tmux_name,
+        resolved_cwd,
+        &attach_command,
+        &display_name,
+        mode,
+        known_preview_id.as_deref(),
+    )
+    .await?;
+
+    if mode == GhosttyOpenMode::Swap {
+        remember_ghostty_preview_term_id(result.pane_id.as_deref());
+    }
+
+    Ok(result)
+}
+
+fn script_path_for_app(app: NativeDesktopApp) -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join(app.script_relative_path())
+}
+
+fn ghostty_unavailable_reason() -> Option<String> {
+    let output = match ProcessCommand::new("osascript")
+        .args(["-e", "tell application \"Ghostty\" to get version"])
+        .output()
+    {
+        Ok(output) => output,
+        Err(_) => return Some(ghostty_applescript_unavailable_message()),
+    };
+
+    if !output.status.success() {
+        return Some(ghostty_applescript_unavailable_message());
+    }
+
+    let version = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if version.is_empty() {
+        return Some(ghostty_applescript_unavailable_message());
+    }
+
+    ghostty_version_requirement_error(&version)
+}
+
+fn ghostty_applescript_unavailable_message() -> String {
+    format!(
+        "Ghostty AppleScript unavailable. Install Ghostty {}+ and allow automation access.",
+        GHOSTTY_MIN_APPLESCRIPT_VERSION_TEXT
+    )
+}
+
+fn ghostty_version_requirement_error(version: &str) -> Option<String> {
+    let parsed = match parse_version_triplet(version) {
+        Some(parsed) => parsed,
+        None => {
+            return Some(format!(
+                "Ghostty reported version {version:?}, but native AppleScript control requires Ghostty {}+.",
+                GHOSTTY_MIN_APPLESCRIPT_VERSION_TEXT
+            ));
+        }
+    };
+    if parsed >= GHOSTTY_MIN_APPLESCRIPT_VERSION {
+        return None;
+    }
+
+    Some(format!(
+        "Ghostty {version} is installed, but native AppleScript control requires Ghostty {}+.",
+        GHOSTTY_MIN_APPLESCRIPT_VERSION_TEXT
+    ))
+}
+
+fn parse_version_triplet(version: &str) -> Option<[u64; 3]> {
+    let mut parts = version
+        .split(|ch: char| !ch.is_ascii_digit())
+        .filter(|part| !part.is_empty());
+    let major = parts.next()?.parse().ok()?;
+    let minor = parts.next().unwrap_or("0").parse().ok()?;
+    let patch = parts.next().unwrap_or("0").parse().ok()?;
+    Some([major, minor, patch])
 }
 
 fn resolve_tmux_binary() -> Result<PathBuf> {
@@ -161,6 +349,10 @@ fn cached_pane_id(session_id: &str) -> Option<String> {
     SESSION_PANE_CACHE.lock().unwrap().get(session_id).cloned()
 }
 
+fn cached_ghostty_preview_term_id() -> Option<String> {
+    GHOSTTY_PREVIEW_TERM_ID.lock().unwrap().clone()
+}
+
 fn remember_pane_id(session_id: &str, pane_id: Option<&str>) {
     let mut cache = SESSION_PANE_CACHE.lock().unwrap();
     match pane_id.filter(|value| !value.is_empty()) {
@@ -171,6 +363,13 @@ fn remember_pane_id(session_id: &str, pane_id: Option<&str>) {
             cache.remove(session_id);
         }
     }
+}
+
+fn remember_ghostty_preview_term_id(term_id: Option<&str>) {
+    let mut cache = GHOSTTY_PREVIEW_TERM_ID.lock().unwrap();
+    *cache = term_id
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned);
 }
 
 async fn run_open_or_focus_script(
@@ -301,6 +500,12 @@ fn non_empty_trimmed(value: &str) -> Option<&str> {
     }
 }
 
+fn build_ghostty_display_name(cwd: &str, tmux_name: &str) -> String {
+    cwd_basename(cwd)
+        .or_else(|| non_empty_trimmed(tmux_name).map(ToOwned::to_owned))
+        .unwrap_or_else(|| "session".to_string())
+}
+
 fn build_iterm_attach_command(tmux_name: &str, tmux_path: &Path) -> String {
     let tmux_name = shell_single_quote(tmux_name);
     let tmux_path = shell_single_quote(tmux_path.to_string_lossy().as_ref());
@@ -312,6 +517,12 @@ printf '\\033[H\\033[2J'; exec {tmux_path} attach-session -t {tmux_name}",
     )
 }
 
+fn build_ghostty_attach_command(tmux_name: &str, tmux_path: &Path) -> String {
+    let tmux_name = shell_single_quote(tmux_name);
+    let tmux_path = shell_single_quote(tmux_path.to_string_lossy().as_ref());
+    format!("exec {tmux_path} attach-session -t {tmux_name}")
+}
+
 fn shell_single_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\"'\"'"))
 }
@@ -321,6 +532,49 @@ fn is_transient_iterm_open_error(err: &anyhow::Error) -> bool {
     (message.contains("session 1 of missing value") && message.contains("(-1728)"))
         || (message.contains("unable to resolve iTerm session after tab creation")
             && message.contains("(-2700)"))
+}
+
+async fn run_ghostty_open_script(
+    script: &Path,
+    session_id: &str,
+    tmux_name: &str,
+    cwd: &str,
+    attach_command: &str,
+    display_name: &str,
+    mode: GhosttyOpenMode,
+    known_preview_id: Option<&str>,
+) -> Result<NativeDesktopOpenResponse> {
+    let mut command = Command::new("osascript");
+    command
+        .arg(script)
+        .arg(session_id)
+        .arg(tmux_name)
+        .arg(cwd)
+        .arg(attach_command)
+        .arg(display_name)
+        .arg(GHOSTTY_MANAGED_TITLE_PREFIX)
+        .arg(mode.label());
+    if let Some(term_id) = known_preview_id.filter(|value| !value.is_empty()) {
+        command.arg(term_id);
+    }
+
+    let output = command
+        .output()
+        .await
+        .with_context(|| format!("failed to run {}", script.display()))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let message = if stderr.is_empty() {
+            "osascript returned a non-zero exit status".to_string()
+        } else {
+            stderr
+        };
+        return Err(anyhow!(message));
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    parse_osascript_output(stdout.trim(), session_id)
 }
 
 fn parse_osascript_output(stdout: &str, session_id: &str) -> Result<NativeDesktopOpenResponse> {
@@ -382,6 +636,62 @@ mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
     use tempfile::tempdir;
+
+    #[test]
+    fn native_app_env_defaults_to_iterm() {
+        assert_eq!(
+            NativeDesktopApp::from_env_value(""),
+            NativeDesktopApp::Iterm
+        );
+        assert_eq!(
+            NativeDesktopApp::from_env_value("ghostty"),
+            NativeDesktopApp::Ghostty
+        );
+        assert_eq!(
+            NativeDesktopApp::from_env_value("something-else"),
+            NativeDesktopApp::Iterm
+        );
+    }
+
+    #[test]
+    fn ghostty_mode_env_defaults_to_swap() {
+        assert_eq!(GhosttyOpenMode::from_env_value(""), GhosttyOpenMode::Swap);
+        assert_eq!(
+            GhosttyOpenMode::from_env_value("swap"),
+            GhosttyOpenMode::Swap
+        );
+        assert_eq!(GhosttyOpenMode::from_env_value("add"), GhosttyOpenMode::Add);
+        assert_eq!(
+            GhosttyOpenMode::from_env_value("split"),
+            GhosttyOpenMode::Add
+        );
+    }
+
+    #[test]
+    fn parse_version_triplet_handles_patchless_and_suffixed_versions() {
+        assert_eq!(parse_version_triplet("1.2.3"), Some([1, 2, 3]));
+        assert_eq!(parse_version_triplet("1.3"), Some([1, 3, 0]));
+        assert_eq!(
+            parse_version_triplet("Ghostty 1.3.0-dev.2"),
+            Some([1, 3, 0])
+        );
+        assert_eq!(parse_version_triplet(""), None);
+    }
+
+    #[test]
+    fn ghostty_version_requirement_error_enforces_documented_minimum() {
+        assert!(ghostty_version_requirement_error("1.3.0").is_none());
+        assert!(ghostty_version_requirement_error("1.3.1").is_none());
+
+        let message =
+            ghostty_version_requirement_error("1.2.3").expect("older Ghostty should be rejected");
+        assert!(message.contains("Ghostty 1.2.3 is installed"));
+        assert!(message.contains("1.3.0+"));
+
+        let invalid =
+            ghostty_version_requirement_error("beta").expect("invalid versions fail closed");
+        assert!(invalid.contains("Ghostty reported version"));
+    }
 
     #[test]
     fn host_loopback_accepts_local_variants() {
@@ -451,6 +761,17 @@ mod tests {
     }
 
     #[test]
+    fn build_ghostty_attach_command_shell_quotes_tmux_values() {
+        let command =
+            build_ghostty_attach_command("team's session", Path::new("/tmp/tmux builds/tmux"));
+
+        assert_eq!(
+            command,
+            "exec '/tmp/tmux builds/tmux' attach-session -t 'team'\"'\"'s session'"
+        );
+    }
+
+    #[test]
     fn build_iterm_display_name_prefers_normalized_pane_id_and_cwd_basename() {
         assert_eq!(
             build_iterm_display_name(
@@ -475,6 +796,73 @@ mod tests {
         assert_eq!(
             build_iterm_display_name("/Users/b/repos/swimmers", "codex-20260302-162713", None),
             "swimmers"
+        );
+    }
+
+    #[test]
+    fn build_ghostty_display_name_prefers_cwd_basename() {
+        assert_eq!(
+            build_ghostty_display_name("/Users/b/repos/swimmers", "codex-20260302-162713"),
+            "swimmers"
+        );
+    }
+
+    #[test]
+    fn ghostty_swap_script_replaces_managed_preview_in_place() {
+        let script = std::fs::read_to_string(script_path_for_app(NativeDesktopApp::Ghostty))
+            .expect("ghostty script should be present");
+
+        assert!(script
+            .contains("on replacePreviewSplit(managedTerm, cfg, managedTitle, attachCommand)"));
+        assert!(script
+            .contains("set newTerm to split managedTerm direction right with configuration cfg"));
+        assert!(script.contains(
+            "set newTerm to my replacePreviewSplit(managedTerm, cfg, managedTitle, attachCommand)"
+        ));
+        assert_eq!(script.match_indices("my resizePreview(").count(), 1);
+    }
+
+    #[test]
+    fn support_for_host_with_reports_ghostty_app_and_unavailable_reason() {
+        let temp = tempdir().unwrap();
+        let script_path = temp.path().join("ghostty-open.scpt");
+        std::fs::write(&script_path, "").unwrap();
+        let response = support_for_host_with(
+            "localhost:3210",
+            NativeDesktopApp::Ghostty,
+            true,
+            &script_path,
+            Some(
+                "Ghostty 1.2.3 is installed, but native AppleScript control requires Ghostty 1.3.0+."
+                    .to_string(),
+            ),
+        );
+        assert!(!response.supported);
+        assert_eq!(response.app.as_deref(), Some("Ghostty"));
+        assert!(response
+            .reason
+            .as_deref()
+            .unwrap_or_default()
+            .contains("Ghostty 1.2.3 is installed"));
+    }
+
+    #[test]
+    fn support_for_host_with_uses_selected_app_in_loopback_errors() {
+        let temp = tempdir().unwrap();
+        let script_path = temp.path().join("ghostty-open.scpt");
+        std::fs::write(&script_path, "").unwrap();
+        let response = support_for_host_with(
+            "example.com:3210",
+            NativeDesktopApp::Ghostty,
+            true,
+            &script_path,
+            None,
+        );
+        assert!(!response.supported);
+        assert_eq!(response.app.as_deref(), Some("Ghostty"));
+        assert_eq!(
+            response.reason.as_deref(),
+            Some("native Ghostty control is only available from localhost")
         );
     }
 
@@ -684,5 +1072,234 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&counter_path).unwrap().trim(), "2");
 
         remember_pane_id("sess-race", None);
+    }
+
+    #[tokio::test]
+    async fn open_or_focus_ghostty_runs_script_with_expected_args() {
+        let _env_guard = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        remember_ghostty_preview_term_id(None);
+
+        let temp = tempdir().unwrap();
+        let fake_bin_dir = temp.path().join("tmux builds");
+        std::fs::create_dir_all(&fake_bin_dir).unwrap();
+
+        let fake_tmux = fake_bin_dir.join("tmux");
+        std::fs::write(
+            &fake_tmux,
+            "#!/bin/sh\nset -eu\nif [ \"${1-}\" = \"display-message\" ]; then\n  printf '%%14\\t/Users/b/repos/swimmers\\n'\n  exit 0\nfi\nexit 0\n",
+        )
+        .unwrap();
+        let mut perms = std::fs::metadata(&fake_tmux).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&fake_tmux, perms).unwrap();
+
+        let log_path = temp.path().join("osascript.log");
+        let fake_osascript_dir = temp.path().join("bin");
+        std::fs::create_dir_all(&fake_osascript_dir).unwrap();
+        let fake_osascript = fake_osascript_dir.join("osascript");
+        std::fs::write(
+            &fake_osascript,
+            format!(
+                "#!/bin/sh\nset -eu\nif [ \"${{1-}}\" = \"-e\" ]; then\n  printf '1.3.1\\n'\n  exit 0\nfi\nfirst=1\nfor arg in \"$@\"; do\n  if [ \"$first\" -eq 1 ]; then\n    printf '%s' \"$arg\" >> \"{log}\"\n    first=0\n  else\n    printf '\\t%s' \"$arg\" >> \"{log}\"\n  fi\ndone\nprintf '\\n' >> \"{log}\"\nprintf 'created|ghost-pane\\n'\n",
+                log = log_path.display()
+            ),
+        )
+        .unwrap();
+        let mut perms = std::fs::metadata(&fake_osascript).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&fake_osascript, perms).unwrap();
+
+        let original_path = std::env::var_os("PATH");
+        let original_tmux = std::env::var_os(TMUX_BIN_ENV);
+        let path_value = std::env::join_paths([fake_osascript_dir.as_path()]).unwrap();
+        std::env::set_var("PATH", path_value);
+        std::env::set_var(TMUX_BIN_ENV, &fake_tmux);
+
+        let result = open_or_focus_ghostty_session(
+            "sess-ghostty",
+            "tmux-ghostty",
+            "/Users/b/repos/fallback",
+            GhosttyOpenMode::Swap,
+        )
+        .await
+        .unwrap();
+
+        match original_path {
+            Some(value) => std::env::set_var("PATH", value),
+            None => std::env::remove_var("PATH"),
+        }
+        match original_tmux {
+            Some(value) => std::env::set_var(TMUX_BIN_ENV, value),
+            None => std::env::remove_var(TMUX_BIN_ENV),
+        }
+
+        assert_eq!(result.status, "created");
+        assert_eq!(result.pane_id.as_deref(), Some("ghost-pane"));
+
+        let log = std::fs::read_to_string(&log_path).unwrap();
+        let call: Vec<_> = log.lines().next().unwrap().split('\t').collect();
+        assert_eq!(call[1], "sess-ghostty");
+        assert_eq!(call[2], "tmux-ghostty");
+        assert_eq!(call[3], "/Users/b/repos/swimmers");
+        assert_eq!(
+            call[4],
+            format!(
+                "exec '{}' attach-session -t 'tmux-ghostty'",
+                fake_tmux.display()
+            )
+        );
+        assert_eq!(call[5], "swimmers");
+        assert_eq!(call[6], GHOSTTY_MANAGED_TITLE_PREFIX);
+        assert_eq!(call[7], GhosttyOpenMode::Swap.label());
+
+        remember_ghostty_preview_term_id(None);
+    }
+
+    #[tokio::test]
+    async fn open_or_focus_ghostty_swap_passes_cached_preview_id_on_repeat_calls() {
+        let _env_guard = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        remember_ghostty_preview_term_id(None);
+
+        let temp = tempdir().unwrap();
+        let fake_bin_dir = temp.path().join("tmux builds");
+        std::fs::create_dir_all(&fake_bin_dir).unwrap();
+
+        let fake_tmux = fake_bin_dir.join("tmux");
+        std::fs::write(
+            &fake_tmux,
+            "#!/bin/sh\nset -eu\nif [ \"${1-}\" = \"display-message\" ]; then\n  printf '%%14\\t/Users/b/repos/swimmers\\n'\n  exit 0\nfi\nexit 0\n",
+        )
+        .unwrap();
+        let mut perms = std::fs::metadata(&fake_tmux).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&fake_tmux, perms).unwrap();
+
+        let log_path = temp.path().join("osascript.log");
+        let counter_path = temp.path().join("osascript-count");
+        let fake_osascript_dir = temp.path().join("bin");
+        std::fs::create_dir_all(&fake_osascript_dir).unwrap();
+        let fake_osascript = fake_osascript_dir.join("osascript");
+        std::fs::write(
+            &fake_osascript,
+            format!(
+                "#!/bin/sh\nset -eu\nif [ \"${{1-}}\" = \"-e\" ]; then\n  printf '1.3.1\\n'\n  exit 0\nfi\nfirst=1\nfor arg in \"$@\"; do\n  if [ \"$first\" -eq 1 ]; then\n    printf '%s' \"$arg\" >> \"{log}\"\n    first=0\n  else\n    printf '\\t%s' \"$arg\" >> \"{log}\"\n  fi\ndone\nprintf '\\n' >> \"{log}\"\ncount=0\nif [ -f \"{counter}\" ]; then\n  IFS= read -r count < \"{counter}\" || true\nfi\ncount=$((count + 1))\nprintf '%s\\n' \"$count\" > \"{counter}\"\nprintf 'created|ghost-pane-%s\\n' \"$count\"\n",
+                log = log_path.display(),
+                counter = counter_path.display()
+            ),
+        )
+        .unwrap();
+        let mut perms = std::fs::metadata(&fake_osascript).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&fake_osascript, perms).unwrap();
+
+        let original_path = std::env::var_os("PATH");
+        let original_tmux = std::env::var_os(TMUX_BIN_ENV);
+        let path_value = std::env::join_paths([fake_osascript_dir.as_path()]).unwrap();
+        std::env::set_var("PATH", path_value);
+        std::env::set_var(TMUX_BIN_ENV, &fake_tmux);
+
+        let first = open_or_focus_ghostty_session(
+            "sess-ghostty-a",
+            "tmux-ghostty-a",
+            "/Users/b/repos/fallback",
+            GhosttyOpenMode::Swap,
+        )
+        .await
+        .unwrap();
+        let second = open_or_focus_ghostty_session(
+            "sess-ghostty-b",
+            "tmux-ghostty-b",
+            "/Users/b/repos/fallback",
+            GhosttyOpenMode::Swap,
+        )
+        .await
+        .unwrap();
+
+        match original_path {
+            Some(value) => std::env::set_var("PATH", value),
+            None => std::env::remove_var("PATH"),
+        }
+        match original_tmux {
+            Some(value) => std::env::set_var(TMUX_BIN_ENV, value),
+            None => std::env::remove_var(TMUX_BIN_ENV),
+        }
+
+        assert_eq!(first.pane_id.as_deref(), Some("ghost-pane-1"));
+        assert_eq!(second.pane_id.as_deref(), Some("ghost-pane-2"));
+
+        let log = std::fs::read_to_string(&log_path).unwrap();
+        let mut lines = log.lines();
+        let first_call: Vec<_> = lines.next().unwrap().split('\t').collect();
+        let second_call: Vec<_> = lines.next().unwrap().split('\t').collect();
+        assert_eq!(first_call[7], GhosttyOpenMode::Swap.label());
+        assert_eq!(first_call.len(), 8);
+        assert_eq!(second_call[7], GhosttyOpenMode::Swap.label());
+        assert_eq!(second_call[8], "ghost-pane-1");
+
+        remember_ghostty_preview_term_id(None);
+    }
+
+    #[tokio::test]
+    async fn open_or_focus_ghostty_rejects_older_versions_before_running_script() {
+        let _env_guard = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        remember_ghostty_preview_term_id(None);
+
+        let temp = tempdir().unwrap();
+        let fake_bin_dir = temp.path().join("bin");
+        std::fs::create_dir_all(&fake_bin_dir).unwrap();
+
+        let fake_tmux = fake_bin_dir.join("tmux");
+        std::fs::write(&fake_tmux, "#!/bin/sh\nexit 0\n").unwrap();
+        let mut perms = std::fs::metadata(&fake_tmux).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&fake_tmux, perms).unwrap();
+
+        let log_path = temp.path().join("osascript.log");
+        let fake_osascript = fake_bin_dir.join("osascript");
+        std::fs::write(
+            &fake_osascript,
+            format!(
+                "#!/bin/sh\nset -eu\nif [ \"${{1-}}\" = \"-e\" ]; then\n  printf '1.2.3\\n'\n  exit 0\nfi\nprintf '%s\\n' \"$*\" >> \"{log}\"\nprintf 'created|ghost-pane\\n'\n",
+                log = log_path.display()
+            ),
+        )
+        .unwrap();
+        let mut perms = std::fs::metadata(&fake_osascript).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&fake_osascript, perms).unwrap();
+
+        let original_path = std::env::var_os("PATH");
+        let original_tmux = std::env::var_os(TMUX_BIN_ENV);
+        let path_value = std::env::join_paths([fake_bin_dir.as_path()]).unwrap();
+        std::env::set_var("PATH", path_value);
+        std::env::set_var(TMUX_BIN_ENV, &fake_tmux);
+
+        let error = open_or_focus_ghostty_session(
+            "sess-ghostty",
+            "tmux-ghostty",
+            "/tmp/fallback",
+            GhosttyOpenMode::Swap,
+        )
+        .await
+        .expect_err("older Ghostty should be rejected before running the script");
+
+        match original_path {
+            Some(value) => std::env::set_var("PATH", value),
+            None => std::env::remove_var("PATH"),
+        }
+        match original_tmux {
+            Some(value) => std::env::set_var(TMUX_BIN_ENV, value),
+            None => std::env::remove_var(TMUX_BIN_ENV),
+        }
+
+        assert!(error.to_string().contains("Ghostty 1.2.3 is installed"));
+        assert!(!log_path.exists());
+        remember_ghostty_preview_term_id(None);
     }
 }

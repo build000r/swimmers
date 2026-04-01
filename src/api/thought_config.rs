@@ -9,6 +9,7 @@ use tracing::error;
 
 use crate::api::AppState;
 use crate::auth::{AuthInfo, AuthScope};
+use crate::thought::probe::run_thought_config_probe;
 use crate::thought::protocol::{build_sync_request, SyncRequest};
 use crate::thought::runtime_config::{DaemonDefaults, ThoughtConfig};
 use crate::types::ErrorResponse;
@@ -101,11 +102,45 @@ async fn put_thought_config(
     (StatusCode::OK, Json(config)).into_response()
 }
 
+async fn post_thought_config_test(
+    Extension(auth): Extension<AuthInfo>,
+    State(_state): State<Arc<AppState>>,
+    Json(body): Json<ThoughtConfig>,
+) -> impl IntoResponse {
+    if let Err(resp) = auth.require_scope(AuthScope::SessionsWrite) {
+        return resp;
+    }
+
+    let config = match body.normalize_and_validate() {
+        Ok(config) => config,
+        Err(err) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    code: "VALIDATION_FAILED".to_string(),
+                    message: Some(err.to_string()),
+                }),
+            )
+                .into_response();
+        }
+    };
+
+    (
+        StatusCode::OK,
+        Json(run_thought_config_probe(&config).await),
+    )
+        .into_response()
+}
+
 pub fn routes() -> Router<Arc<AppState>> {
     Router::new()
         .route(
             "/v1/thought-config",
             get(get_thought_config).put(put_thought_config),
+        )
+        .route(
+            "/v1/thought-config/test",
+            axum::routing::post(post_thought_config_test),
         )
         .route("/v1/thought/sync-preview", get(get_thought_sync_preview))
 }
@@ -139,6 +174,8 @@ mod tests {
             supervisor,
             config,
             thought_config: Arc::new(RwLock::new(ThoughtConfig::default())),
+            native_desktop_app: Arc::new(RwLock::new(crate::types::NativeDesktopApp::Iterm)),
+            ghostty_open_mode: Arc::new(RwLock::new(crate::types::GhosttyOpenMode::Swap)),
             sync_request_sequence: Arc::new(SyncRequestSequence::new()),
             daemon_defaults: None,
             file_store,

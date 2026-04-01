@@ -626,6 +626,8 @@ mod tests {
             supervisor,
             config,
             thought_config: Arc::new(RwLock::new(ThoughtConfig::default())),
+            native_desktop_app: Arc::new(RwLock::new(crate::types::NativeDesktopApp::Iterm)),
+            ghostty_open_mode: Arc::new(RwLock::new(crate::types::GhosttyOpenMode::Swap)),
             sync_request_sequence: Arc::new(SyncRequestSequence::new()),
             daemon_defaults: None,
             file_store: None,

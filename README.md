@@ -33,7 +33,7 @@ git clone https://github.com/YOUR_USER/swimmers.git && cd swimmers && make tui
 | **Aquarium view** | Sessions rendered as animated ASCII fish with state-driven sprites |
 | **Live state detection** | Idle, busy, error, attention, drowsy, sleeping, deep sleep, exited |
 | **Thought rail** | Side panel showing AI agent thought streams per session |
-| **Native terminal handoff** | Open any session directly in iTerm/Terminal.app from the TUI |
+| **Native terminal handoff** | Open any session directly in iTerm or Ghostty from the TUI |
 | **Mermaid diagrams** | Render and zoom Mermaid artifacts inline in the terminal |
 | **Repo themes** | Per-repo sprite and color overrides via `.swimmers/theme.json` |
 | **Remote API** | Point the TUI at a remote server over Tailscale or any network |
@@ -160,6 +160,7 @@ Binaries land in `target/release/swimmers` (API) and `target/release/swimmers-tu
 
 ```bash
 make tui                # Start local API + TUI (recommended)
+make web                # Start the server for browser/tailnet access
 make server             # Run only the API server
 make tui-check          # Wait for an existing API, then exit
 make tui-smoke          # Run shell-level bootstrap tests
@@ -174,10 +175,19 @@ make cargo-cov-lcov     # Generate lcov coverage report
 | `SWIMMERS_TUI_URL` | `http://127.0.0.1:3210` | API URL the TUI connects to |
 | `AUTH_MODE` | `local_trust` | Auth mode: `local_trust` or `token` |
 | `AUTH_TOKEN` | (none) | Bearer token when `AUTH_MODE=token` |
+| `SWIMMERS_FRANKENTUI_PKG_DIR` | auto-detect | Path to `frankentui/pkg` for live browser terminal rendering |
+| `SWIMMERS_NATIVE_APP` | `iterm` | Native desktop target: `iterm` or `ghostty` |
 | `THOUGHT_BACKEND` | `daemon` | Thought subsystem: `daemon` or `inproc` |
 | `THOUGHT_TICK_MS` | `15000` | Thought refresh interval in milliseconds |
 | `SESSION_DELETE_MODE` | `detach_bridge` | `detach_bridge` or `kill_tmux` on session delete |
 | `REPLAY_BUFFER_SIZE` | `524288` | Replay ring size in bytes (default 512KB) |
+
+When `SWIMMERS_NATIVE_APP=ghostty`, the API uses Ghostty's AppleScript support to create or
+replace a left-side preview split for the selected tmux session. This path requires Ghostty 1.3.0+
+on macOS with automation access enabled.
+
+While the TUI is running, press `n` or click the top-right native-open label to switch between
+`iTerm` and `Ghostty` without restarting the API.
 
 ---
 
@@ -188,6 +198,9 @@ Swimmers reads all configuration from environment variables. There is no config 
 ```bash
 # Minimal local usage (everything defaults)
 make tui
+
+# Browser/tailnet usage
+make web
 
 # Production-style remote API
 PORT=3210 \
@@ -312,7 +325,7 @@ cargo build --release
 ## Limitations
 
 - **tmux only** -- swimmers does not manage screen, zellij, or plain terminal sessions
-- **No web UI** -- the only supported client is the native Rust TUI; there is no browser-based interface
+- **Browser UI is terminal-first** -- the web surface is for remote attach/control; the animated aquarium remains native-only
 - **Single-machine sessions** -- the API manages tmux sessions on the machine it runs on; it does not aggregate sessions across multiple hosts
 - **No session templating** -- swimmers discovers existing tmux sessions but does not define layouts or startup commands (use tmuxinator for that)
 - **macOS and Linux only** -- tmux does not run on Windows, so neither does swimmers
@@ -331,7 +344,7 @@ No. Single binary, flat-file persistence, talks to tmux directly.
 
 ### Can I run the API without the TUI?
 
-Yes. `make server` runs only the API. Use the REST endpoints directly or point a TUI at it later.
+Yes. `make server` runs only the API. Use the REST endpoints directly, open the browser UI with `make web`, or point a TUI at it later.
 
 ### What happens when I close the TUI?
 

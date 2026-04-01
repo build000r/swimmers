@@ -1,12 +1,16 @@
 use super::*;
 use std::cell::Cell as TestCell;
 use std::collections::VecDeque;
+use std::env;
 use std::fs;
-use std::sync::{Arc, Mutex};
+use std::os::unix::fs::PermissionsExt;
+use std::path::Path;
+use std::sync::{Arc, LazyLock, Mutex};
 
 use chrono::Utc;
 use proptest::prelude::*;
-use swimmers::types::{ThoughtSource, ThoughtState, TransportHealth};
+use swimmers::openrouter_models::default_openrouter_candidates;
+use swimmers::types::{GhosttyOpenMode, ThoughtSource, ThoughtState, TransportHealth};
 use tempfile::tempdir;
 
 const EXPECTED_TERMINAL_ENTRY: &str = concat!(
@@ -33,15 +37,27 @@ const EXPECTED_TERMINAL_TEARDOWN: &str = concat!(
     "\u{1b}[0m",
 );
 
+static TEST_ENV_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+
 #[derive(Default)]
 struct MockApiState {
     fetch_sessions_results: VecDeque<Result<Vec<SessionSummary>, String>>,
+    fetch_thought_config_results: VecDeque<Result<ThoughtConfigResponse, String>>,
+    update_thought_config_results: VecDeque<Result<ThoughtConfig, String>>,
+    test_thought_config_results: VecDeque<Result<ThoughtConfigTestResponse, String>>,
+    refresh_openrouter_candidates_results: VecDeque<Result<Vec<String>, String>>,
     mermaid_artifact_results: VecDeque<Result<MermaidArtifactResponse, String>>,
     native_status_results: VecDeque<Result<NativeDesktopStatusResponse, String>>,
+    set_native_app_results: VecDeque<Result<NativeDesktopStatusResponse, String>>,
+    set_native_mode_results: VecDeque<Result<NativeDesktopStatusResponse, String>>,
     publish_selection_results: VecDeque<Result<(), String>>,
     open_session_results: VecDeque<Result<NativeDesktopOpenResponse, String>>,
     list_dirs_results: VecDeque<Result<DirListResponse, String>>,
     create_session_results: VecDeque<Result<CreateSessionResponse, String>>,
+    update_thought_config_calls: Vec<ThoughtConfig>,
+    test_thought_config_calls: Vec<ThoughtConfig>,
+    set_native_app_calls: Vec<NativeDesktopApp>,
+    set_native_mode_calls: Vec<GhosttyOpenMode>,
     publish_calls: Vec<Option<String>>,
     open_calls: Vec<String>,
     list_calls: Vec<(Option<String>, bool)>,
@@ -71,6 +87,62 @@ impl MockApi {
             .lock()
             .unwrap()
             .mermaid_artifact_results
+            .push_back(result);
+    }
+
+    fn push_fetch_thought_config(&self, result: Result<ThoughtConfigResponse, String>) {
+        self.state
+            .lock()
+            .unwrap()
+            .fetch_thought_config_results
+            .push_back(result);
+    }
+
+    fn push_update_thought_config(&self, result: Result<ThoughtConfig, String>) {
+        self.state
+            .lock()
+            .unwrap()
+            .update_thought_config_results
+            .push_back(result);
+    }
+
+    fn push_test_thought_config(&self, result: Result<ThoughtConfigTestResponse, String>) {
+        self.state
+            .lock()
+            .unwrap()
+            .test_thought_config_results
+            .push_back(result);
+    }
+
+    fn push_refresh_openrouter_candidates(&self, result: Result<Vec<String>, String>) {
+        self.state
+            .lock()
+            .unwrap()
+            .refresh_openrouter_candidates_results
+            .push_back(result);
+    }
+
+    fn push_native_status(&self, result: Result<NativeDesktopStatusResponse, String>) {
+        self.state
+            .lock()
+            .unwrap()
+            .native_status_results
+            .push_back(result);
+    }
+
+    fn push_set_native_app(&self, result: Result<NativeDesktopStatusResponse, String>) {
+        self.state
+            .lock()
+            .unwrap()
+            .set_native_app_results
+            .push_back(result);
+    }
+
+    fn push_set_native_mode(&self, result: Result<NativeDesktopStatusResponse, String>) {
+        self.state
+            .lock()
+            .unwrap()
+            .set_native_mode_results
             .push_back(result);
     }
 
@@ -113,6 +185,26 @@ impl MockApi {
     fn open_calls(&self) -> Vec<String> {
         self.state.lock().unwrap().open_calls.clone()
     }
+
+    fn update_thought_config_calls(&self) -> Vec<ThoughtConfig> {
+        self.state
+            .lock()
+            .unwrap()
+            .update_thought_config_calls
+            .clone()
+    }
+
+    fn test_thought_config_calls(&self) -> Vec<ThoughtConfig> {
+        self.state.lock().unwrap().test_thought_config_calls.clone()
+    }
+
+    fn set_native_app_calls(&self) -> Vec<NativeDesktopApp> {
+        self.state.lock().unwrap().set_native_app_calls.clone()
+    }
+
+    fn set_native_mode_calls(&self) -> Vec<GhosttyOpenMode> {
+        self.state.lock().unwrap().set_native_mode_calls.clone()
+    }
 }
 
 impl TuiApi for MockApi {
@@ -125,6 +217,70 @@ impl TuiApi for MockApi {
                 .fetch_sessions_results
                 .pop_front()
                 .unwrap_or_else(|| Ok(Vec::new()))
+        })
+    }
+
+    fn fetch_thought_config(&self) -> BoxFuture<'_, Result<ThoughtConfigResponse, String>> {
+        let state = self.state.clone();
+        Box::pin(async move {
+            state
+                .lock()
+                .unwrap()
+                .fetch_thought_config_results
+                .pop_front()
+                .unwrap_or_else(|| {
+                    Ok(ThoughtConfigResponse {
+                        config: ThoughtConfig::default(),
+                        daemon_defaults: None,
+                    })
+                })
+        })
+    }
+
+    fn update_thought_config(
+        &self,
+        config: ThoughtConfig,
+    ) -> BoxFuture<'_, Result<ThoughtConfig, String>> {
+        let state = self.state.clone();
+        Box::pin(async move {
+            let mut state = state.lock().unwrap();
+            state.update_thought_config_calls.push(config.clone());
+            state
+                .update_thought_config_results
+                .pop_front()
+                .unwrap_or(Ok(config))
+        })
+    }
+
+    fn test_thought_config(
+        &self,
+        config: ThoughtConfig,
+    ) -> BoxFuture<'_, Result<ThoughtConfigTestResponse, String>> {
+        let state = self.state.clone();
+        Box::pin(async move {
+            let mut state = state.lock().unwrap();
+            state.test_thought_config_calls.push(config.clone());
+            state
+                .test_thought_config_results
+                .pop_front()
+                .unwrap_or(Ok(ThoughtConfigTestResponse {
+                    ok: true,
+                    message: "probe succeeded".to_string(),
+                    last_backend_error: None,
+                    llm_calls: 1,
+                }))
+        })
+    }
+
+    fn refresh_openrouter_candidates(&self) -> BoxFuture<'_, Result<Vec<String>, String>> {
+        let state = self.state.clone();
+        Box::pin(async move {
+            state
+                .lock()
+                .unwrap()
+                .refresh_openrouter_candidates_results
+                .pop_front()
+                .unwrap_or_else(|| Ok(default_openrouter_candidates()))
         })
     }
 
@@ -165,7 +321,55 @@ impl TuiApi for MockApi {
                     Ok(NativeDesktopStatusResponse {
                         supported: true,
                         platform: Some("test".to_string()),
-                        app: Some("test".to_string()),
+                        app_id: Some(NativeDesktopApp::Iterm),
+                        ghostty_mode: None,
+                        app: Some(NativeDesktopApp::Iterm.display_name().to_string()),
+                        reason: None,
+                    })
+                })
+        })
+    }
+
+    fn set_native_app(
+        &self,
+        app: NativeDesktopApp,
+    ) -> BoxFuture<'_, Result<NativeDesktopStatusResponse, String>> {
+        let state = self.state.clone();
+        Box::pin(async move {
+            let mut state = state.lock().unwrap();
+            state.set_native_app_calls.push(app);
+            state.set_native_app_results.pop_front().unwrap_or_else(|| {
+                Ok(NativeDesktopStatusResponse {
+                    supported: true,
+                    platform: Some("test".to_string()),
+                    app_id: Some(app),
+                    ghostty_mode: (app == NativeDesktopApp::Ghostty)
+                        .then_some(GhosttyOpenMode::Swap),
+                    app: Some(app.display_name().to_string()),
+                    reason: None,
+                })
+            })
+        })
+    }
+
+    fn set_native_mode(
+        &self,
+        mode: GhosttyOpenMode,
+    ) -> BoxFuture<'_, Result<NativeDesktopStatusResponse, String>> {
+        let state = self.state.clone();
+        Box::pin(async move {
+            let mut state = state.lock().unwrap();
+            state.set_native_mode_calls.push(mode);
+            state
+                .set_native_mode_results
+                .pop_front()
+                .unwrap_or_else(|| {
+                    Ok(NativeDesktopStatusResponse {
+                        supported: true,
+                        platform: Some("test".to_string()),
+                        app_id: Some(NativeDesktopApp::Ghostty),
+                        ghostty_mode: Some(mode),
+                        app: Some(NativeDesktopApp::Ghostty.display_name().to_string()),
                         reason: None,
                     })
                 })
@@ -371,6 +575,72 @@ fn test_api_client(base_url: String, auth_token: Option<&str>) -> ApiClient {
     }
 }
 
+fn restore_env_var(key: &str, value: Option<String>) {
+    match value {
+        Some(value) => env::set_var(key, value),
+        None => env::remove_var(key),
+    }
+}
+
+fn write_fake_clawgs_script(args_log: &Path, input_log: &Path, dir: &Path) -> std::path::PathBuf {
+    let script_path = dir.join("fake-clawgs.sh");
+    let script = r#"#!/bin/sh
+printf '%s\n' "$*" >> "__ARGS_LOG__"
+if [ "$1" = "defaults" ]; then
+  printf '%s\n' '{"model":"test-model","agent_prompt":"You are a status reporter for a coding agent session.","terminal_prompt":"Terminal session status reporter."}'
+  exit 0
+fi
+printf '%s\n' '{"type":"hello","protocol":"clawgs.emit.v1","engine_version":"0.1.0"}'
+count=1
+while IFS= read -r line; do
+  printf '%s\n' "$line" >> "__INPUT_LOG__"
+  printf '%s\n' '{"type":"sync_result","id":"'"$count"'","stream_instance_id":"stream-a","updates":[],"metrics":{"sessions_seen":1,"llm_calls":1,"suppressed":0}}'
+  count=$((count + 1))
+done
+sleep 5
+"#
+    .replace("__ARGS_LOG__", &args_log.display().to_string())
+    .replace("__INPUT_LOG__", &input_log.display().to_string());
+    fs::write(&script_path, script).expect("write fake clawgs");
+    let mut perms = fs::metadata(&script_path)
+        .expect("fake clawgs metadata")
+        .permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(&script_path, perms).expect("mark fake clawgs executable");
+    script_path
+}
+
+#[test]
+fn thought_config_response_deserializes_flattened_api_shape() {
+    let value = serde_json::json!({
+        "enabled": true,
+        "model": "haiku",
+        "backend": "claude",
+        "cadence_hot_ms": 15000,
+        "cadence_warm_ms": 45000,
+        "cadence_cold_ms": 120000,
+        "daemon_defaults": {
+            "model": "haiku",
+            "backend": "claude",
+            "agent_prompt": "agent",
+            "terminal_prompt": "terminal"
+        }
+    });
+
+    let response: ThoughtConfigResponse =
+        serde_json::from_value(value).expect("flattened thought config response");
+
+    assert_eq!(response.config.backend, "claude");
+    assert_eq!(response.config.model, "haiku");
+    assert_eq!(
+        response
+            .daemon_defaults
+            .as_ref()
+            .map(|defaults| defaults.backend.as_str()),
+        Some("claude")
+    );
+}
+
 async fn spawn_guarded_startup_server(
     expected_token: &str,
     selection_status: axum::http::StatusCode,
@@ -441,16 +711,79 @@ async fn api_client_transport_errors_are_actionable() {
         .fetch_sessions()
         .await
         .expect_err("closed localhost port should fail");
-    assert!(error.contains("backend unavailable at"));
+    assert!(error.contains("swimmers API unavailable at"));
     assert!(error.contains("Start `swimmers` or set SWIMMERS_TUI_URL."));
     assert!(!error.contains("error sending request for url"));
+}
+
+#[tokio::test]
+async fn api_client_test_thought_config_falls_back_when_local_backend_is_unreachable() {
+    let _lock = TEST_ENV_LOCK.lock().expect("env lock");
+    let original = env::var("CLAWGS_BIN").ok();
+    let temp = tempdir().expect("tempdir");
+    let args_log = temp.path().join("args.log");
+    let input_log = temp.path().join("input.log");
+    let fake_bin = write_fake_clawgs_script(&args_log, &input_log, temp.path());
+    env::set_var("CLAWGS_BIN", fake_bin.as_os_str());
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind an ephemeral port");
+    let port = listener.local_addr().expect("local addr").port();
+    drop(listener);
+
+    let client = test_api_client(format!("http://127.0.0.1:{port}"), None);
+    let response = client
+        .test_thought_config(ThoughtConfig::default())
+        .await
+        .expect("local transport error should fall back to local probe");
+
+    restore_env_var("CLAWGS_BIN", original);
+
+    assert!(response.ok);
+    assert_eq!(response.message, "probe succeeded");
+    assert_eq!(response.llm_calls, 1);
+}
+
+#[tokio::test]
+async fn api_client_test_thought_config_falls_back_when_backend_route_is_missing() {
+    use axum::Router;
+
+    let _lock = TEST_ENV_LOCK.lock().expect("env lock");
+    let original = env::var("CLAWGS_BIN").ok();
+    let temp = tempdir().expect("tempdir");
+    let args_log = temp.path().join("args.log");
+    let input_log = temp.path().join("input.log");
+    let fake_bin = write_fake_clawgs_script(&args_log, &input_log, temp.path());
+    env::set_var("CLAWGS_BIN", fake_bin.as_os_str());
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind test server");
+    let addr = listener.local_addr().expect("server addr");
+    let handle = tokio::spawn(async move {
+        axum::serve(listener, Router::new())
+            .await
+            .expect("serve empty test api");
+    });
+
+    let client = test_api_client(format!("http://{addr}"), None);
+    let response = client
+        .test_thought_config(ThoughtConfig::default())
+        .await
+        .expect("404 fallback should return local probe result");
+
+    handle.abort();
+    restore_env_var("CLAWGS_BIN", original);
+
+    assert!(response.ok);
+    assert_eq!(response.message, "probe succeeded");
+    assert_eq!(response.llm_calls, 1);
 }
 
 async fn spawn_delayed_api_server(
     sessions_delay: Option<Duration>,
     native_open_delay: Option<Duration>,
 ) -> (String, tokio::task::JoinHandle<()>) {
-    use axum::routing::{get, post};
+    use axum::routing::{get, post, put};
     use axum::{Json, Router};
 
     let app = Router::new()
@@ -477,6 +810,33 @@ async fn spawn_delayed_api_server(
                     session_id: "sess-1".to_string(),
                     status: "focused".to_string(),
                     pane_id: Some("pane-1".to_string()),
+                })
+            }),
+        )
+        .route(
+            "/v1/native/app",
+            put(|Json(body): Json<NativeDesktopConfigRequest>| async move {
+                Json(NativeDesktopStatusResponse {
+                    supported: true,
+                    platform: Some("macos".to_string()),
+                    app_id: Some(body.app),
+                    ghostty_mode: (body.app == NativeDesktopApp::Ghostty)
+                        .then_some(GhosttyOpenMode::Swap),
+                    app: Some(body.app.display_name().to_string()),
+                    reason: None,
+                })
+            }),
+        )
+        .route(
+            "/v1/native/mode",
+            put(|Json(body): Json<NativeDesktopModeRequest>| async move {
+                Json(NativeDesktopStatusResponse {
+                    supported: true,
+                    platform: Some("macos".to_string()),
+                    app_id: Some(NativeDesktopApp::Ghostty),
+                    ghostty_mode: Some(body.mode),
+                    app: Some(NativeDesktopApp::Ghostty.display_name().to_string()),
+                    reason: None,
                 })
             }),
         );
@@ -506,6 +866,87 @@ async fn api_client_open_session_allows_slower_native_open_responses() {
     assert_eq!(response.session_id, "sess-1");
     assert_eq!(response.status, "focused");
     assert_eq!(response.pane_id.as_deref(), Some("pane-1"));
+}
+
+#[tokio::test]
+async fn api_client_can_switch_native_app_without_restart() {
+    let (base_url, handle) = spawn_delayed_api_server(None, None).await;
+    let client = test_api_client(base_url, None);
+
+    let response = client
+        .set_native_app(NativeDesktopApp::Ghostty)
+        .await
+        .expect("native app switch should succeed");
+
+    handle.abort();
+    assert_eq!(response.app_id, Some(NativeDesktopApp::Ghostty));
+    assert_eq!(response.ghostty_mode, Some(GhosttyOpenMode::Swap));
+    assert_eq!(response.app.as_deref(), Some("Ghostty"));
+}
+
+#[tokio::test]
+async fn api_client_can_switch_ghostty_mode_without_restart() {
+    let (base_url, handle) = spawn_delayed_api_server(None, None).await;
+    let client = test_api_client(base_url, None);
+
+    let response = client
+        .set_native_mode(GhosttyOpenMode::Add)
+        .await
+        .expect("native mode switch should succeed");
+
+    handle.abort();
+    assert_eq!(response.app_id, Some(NativeDesktopApp::Ghostty));
+    assert_eq!(response.ghostty_mode, Some(GhosttyOpenMode::Add));
+}
+
+#[tokio::test]
+async fn api_client_set_native_app_reports_restart_hint_on_404() {
+    use axum::Router;
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind test server");
+    let addr = listener.local_addr().expect("server addr");
+    let handle = tokio::spawn(async move {
+        axum::serve(listener, Router::new())
+            .await
+            .expect("serve test api");
+    });
+    let client = test_api_client(format!("http://{addr}"), None);
+
+    let error = client
+        .set_native_app(NativeDesktopApp::Ghostty)
+        .await
+        .expect_err("missing route should surface restart hint");
+
+    handle.abort();
+    assert!(error.contains("does not support runtime native target switching yet"));
+    assert!(error.contains("restart `swimmers`"));
+}
+
+#[tokio::test]
+async fn api_client_set_native_mode_reports_restart_hint_on_404() {
+    use axum::Router;
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind test server");
+    let addr = listener.local_addr().expect("server addr");
+    let handle = tokio::spawn(async move {
+        axum::serve(listener, Router::new())
+            .await
+            .expect("serve test api");
+    });
+    let client = test_api_client(format!("http://{addr}"), None);
+
+    let error = client
+        .set_native_mode(GhosttyOpenMode::Add)
+        .await
+        .expect_err("missing route should surface restart hint");
+
+    handle.abort();
+    assert!(error.contains("does not support runtime Ghostty preview mode switching yet"));
+    assert!(error.contains("restart `swimmers`"));
 }
 
 #[tokio::test]
@@ -1610,6 +2051,37 @@ fn refresh_keeps_latest_thought_per_session_in_timestamp_order() {
 }
 
 #[test]
+fn refresh_updates_native_status_label_when_backend_app_changes() {
+    let api = MockApi::new();
+    let layout = test_layout(120, 32);
+    api.push_fetch_sessions(Ok(vec![session_summary("sess-1", "7", TEST_REPO_SWIMMERS)]));
+    api.push_fetch_sessions(Ok(vec![session_summary("sess-1", "7", TEST_REPO_SWIMMERS)]));
+    api.push_native_status(Ok(NativeDesktopStatusResponse {
+        supported: true,
+        platform: Some("macos".to_string()),
+        app_id: Some(NativeDesktopApp::Iterm),
+        ghostty_mode: None,
+        app: Some("iTerm".to_string()),
+        reason: None,
+    }));
+    api.push_native_status(Ok(NativeDesktopStatusResponse {
+        supported: true,
+        platform: Some("macos".to_string()),
+        app_id: Some(NativeDesktopApp::Ghostty),
+        ghostty_mode: Some(GhosttyOpenMode::Swap),
+        app: Some("Ghostty".to_string()),
+        reason: None,
+    }));
+    let mut app = make_app(api);
+
+    app.refresh(layout);
+    assert_eq!(app.native_status_text(), "native open: iTerm");
+
+    app.refresh(layout);
+    assert_eq!(app.native_status_text(), "native open: Ghostty (swap)");
+}
+
+#[test]
 fn refresh_ignores_null_duplicate_and_stale_thoughts() {
     let api = MockApi::new();
     let layout = test_layout(120, 32);
@@ -2645,8 +3117,11 @@ fn thought_history_rows_follow_live_session_color() {
         .expect("repo chip should exist");
 
     assert_eq!(panel.rows.len(), 1);
-    assert_eq!(panel.rows[0].color, Color::Magenta);
-    assert_eq!(chip.color, Color::Magenta);
+    // Without a repo theme the color is derived from the tmux name, so it stays
+    // stable across state transitions.
+    let expected = name_based_color("alpha");
+    assert_eq!(panel.rows[0].color, expected);
+    assert_eq!(chip.color, expected);
 }
 
 #[test]
@@ -2736,13 +3211,14 @@ fn selected_entity_preserves_fallback_state_color() {
     let mut session = session_summary("sess-1", "alpha", TEST_REPO_SWIMMERS);
     session.state = SessionState::Attention;
     session.rest_state = RestState::Active;
+    let expected = name_based_color("alpha");
     let entity = SessionEntity::new(session, field);
     let rect = entity.screen_rect(field);
     let mut renderer = test_renderer(120, 32);
 
     render_entity(&mut renderer, &entity, rect, true, 0, &HashMap::new());
 
-    assert_eq!(cell_at(&renderer, rect.x, rect.y).fg, Color::Magenta);
+    assert_eq!(cell_at(&renderer, rect.x, rect.y).fg, expected);
     assert_eq!(cell_at(&renderer, rect.x - 1, rect.y + 1).fg, Color::White);
     assert_eq!(
         cell_at(&renderer, rect.x, rect.y + SPRITE_HEIGHT).fg,
@@ -3896,12 +4372,7 @@ fn picker_action_at_resolves_controls_and_entries() {
         Some(PickerAction::Up)
     ));
     assert!(matches!(
-        picker_action_at(
-            &picker,
-            layout,
-            layout.tool_button.x,
-            layout.tool_button.y
-        ),
+        picker_action_at(&picker, layout, layout.tool_button.x, layout.tool_button.y),
         Some(PickerAction::ToggleTool)
     ));
 }
@@ -4065,6 +4536,437 @@ fn handle_key_event_covers_initial_request_picker_and_quit_paths() {
 }
 
 #[test]
+fn handle_key_event_opens_thought_config_editor() {
+    let api = MockApi::new();
+    api.push_fetch_thought_config(Ok(ThoughtConfigResponse {
+        config: ThoughtConfig {
+            backend: "claude".to_string(),
+            model: "haiku".to_string(),
+            ..ThoughtConfig::default()
+        },
+        daemon_defaults: Some(DaemonDefaults {
+            model: "haiku".to_string(),
+            backend: "claude".to_string(),
+            agent_prompt: "agent".to_string(),
+            terminal_prompt: "terminal".to_string(),
+        }),
+    }));
+    let layout = test_layout(120, 32);
+    let mut app = make_app(api);
+
+    assert!(handle_key_event(
+        &mut app,
+        layout,
+        KeyEvent::new(KeyCode::Char('t'), KeyModifiers::NONE),
+    ));
+
+    let editor = app
+        .thought_config_editor
+        .as_ref()
+        .expect("thought config editor should open");
+    assert_eq!(editor.config.backend, "claude");
+    assert_eq!(editor.config.model, "haiku");
+}
+
+#[test]
+fn handle_key_event_toggles_native_app_live() {
+    let api = MockApi::new();
+    let layout = test_layout(120, 32);
+    let mut app = make_app(api.clone());
+    app.native_status = Some(NativeDesktopStatusResponse {
+        supported: true,
+        platform: Some("macos".to_string()),
+        app_id: Some(NativeDesktopApp::Iterm),
+        ghostty_mode: None,
+        app: Some("iTerm".to_string()),
+        reason: None,
+    });
+    api.push_set_native_app(Ok(NativeDesktopStatusResponse {
+        supported: true,
+        platform: Some("macos".to_string()),
+        app_id: Some(NativeDesktopApp::Ghostty),
+        ghostty_mode: Some(GhosttyOpenMode::Swap),
+        app: Some("Ghostty".to_string()),
+        reason: None,
+    }));
+
+    assert!(handle_key_event(
+        &mut app,
+        layout,
+        KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE),
+    ));
+
+    assert_eq!(api.set_native_app_calls(), vec![NativeDesktopApp::Ghostty]);
+    assert_eq!(
+        app.native_status.as_ref().and_then(|status| status.app_id),
+        Some(NativeDesktopApp::Ghostty)
+    );
+    assert_eq!(
+        app.message.as_ref().map(|(message, _)| message.as_str()),
+        Some("native open target: Ghostty (swap)")
+    );
+}
+
+#[test]
+fn handle_key_event_toggles_ghostty_mode_live() {
+    let api = MockApi::new();
+    let layout = test_layout(120, 32);
+    let mut app = make_app(api.clone());
+    app.native_status = Some(NativeDesktopStatusResponse {
+        supported: true,
+        platform: Some("macos".to_string()),
+        app_id: Some(NativeDesktopApp::Ghostty),
+        ghostty_mode: Some(GhosttyOpenMode::Swap),
+        app: Some("Ghostty".to_string()),
+        reason: None,
+    });
+    api.push_set_native_mode(Ok(NativeDesktopStatusResponse {
+        supported: true,
+        platform: Some("macos".to_string()),
+        app_id: Some(NativeDesktopApp::Ghostty),
+        ghostty_mode: Some(GhosttyOpenMode::Add),
+        app: Some("Ghostty".to_string()),
+        reason: None,
+    }));
+
+    assert!(handle_key_event(
+        &mut app,
+        layout,
+        KeyEvent::new(KeyCode::Char('m'), KeyModifiers::NONE),
+    ));
+
+    assert_eq!(api.set_native_mode_calls(), vec![GhosttyOpenMode::Add]);
+    assert_eq!(
+        app.native_status
+            .as_ref()
+            .and_then(|status| status.ghostty_mode),
+        Some(GhosttyOpenMode::Add)
+    );
+    assert_eq!(
+        app.message.as_ref().map(|(message, _)| message.as_str()),
+        Some("Ghostty preview mode: add")
+    );
+}
+
+#[test]
+fn thought_config_editor_updates_backend_and_model_then_saves() {
+    let api = MockApi::new();
+    api.push_fetch_thought_config(Ok(ThoughtConfigResponse {
+        config: ThoughtConfig::default(),
+        daemon_defaults: Some(DaemonDefaults {
+            model: "haiku".to_string(),
+            backend: "claude".to_string(),
+            agent_prompt: "agent".to_string(),
+            terminal_prompt: "terminal".to_string(),
+        }),
+    }));
+    api.push_update_thought_config(Ok(ThoughtConfig {
+        backend: "codex".to_string(),
+        model: "gpt-5.4".to_string(),
+        ..ThoughtConfig::default()
+    }));
+    api.push_test_thought_config(Ok(ThoughtConfigTestResponse {
+        ok: true,
+        message: "probe succeeded".to_string(),
+        last_backend_error: None,
+        llm_calls: 1,
+    }));
+    api.push_fetch_sessions(Ok(vec![session_summary("sess-1", "1", TEST_REPO_SWIMMERS)]));
+    let layout = test_layout(120, 32);
+    let mut app = make_app(api.clone());
+
+    app.open_thought_config_editor();
+    assert!(app.thought_config_editor.is_some());
+
+    handle_key_event(
+        &mut app,
+        layout,
+        KeyEvent::new(KeyCode::Right, KeyModifiers::NONE),
+    );
+    handle_key_event(
+        &mut app,
+        layout,
+        KeyEvent::new(KeyCode::Right, KeyModifiers::NONE),
+    );
+    handle_key_event(
+        &mut app,
+        layout,
+        KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
+    );
+    for ch in "gpt-5.4".chars() {
+        handle_key_event(
+            &mut app,
+            layout,
+            KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE),
+        );
+    }
+    handle_key_event(
+        &mut app,
+        layout,
+        KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
+    );
+    handle_key_event(
+        &mut app,
+        layout,
+        KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
+    );
+    handle_key_event(
+        &mut app,
+        layout,
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+    );
+
+    assert!(app.thought_config_editor.is_none());
+    assert_eq!(api.update_thought_config_calls().len(), 1);
+    let saved = api
+        .update_thought_config_calls()
+        .into_iter()
+        .next()
+        .expect("saved config");
+    assert_eq!(saved.backend, "codex");
+    assert_eq!(saved.model, "gpt-5.4");
+    assert_eq!(api.test_thought_config_calls().len(), 1);
+}
+
+#[test]
+fn thought_config_editor_test_button_probes_without_saving() {
+    let api = MockApi::new();
+    let layout = test_layout(120, 32);
+    let mut app = make_app(api.clone());
+    app.thought_config_editor = Some(ThoughtConfigEditorState::new(
+        ThoughtConfig {
+            backend: "openrouter".to_string(),
+            model: "openrouter/free".to_string(),
+            ..ThoughtConfig::default()
+        },
+        None,
+    ));
+    if let Some(editor) = &mut app.thought_config_editor {
+        editor.focus = ThoughtConfigEditorField::Test;
+    }
+    api.push_test_thought_config(Ok(ThoughtConfigTestResponse {
+        ok: true,
+        message: "probe succeeded".to_string(),
+        last_backend_error: None,
+        llm_calls: 1,
+    }));
+
+    handle_key_event(
+        &mut app,
+        layout,
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+    );
+
+    assert!(app.thought_config_editor.is_some());
+    assert!(api.update_thought_config_calls().is_empty());
+    let tested = api
+        .test_thought_config_calls()
+        .into_iter()
+        .next()
+        .expect("tested config");
+    assert_eq!(tested.backend, "openrouter");
+    assert_eq!(tested.model, "openrouter/free");
+}
+
+#[test]
+fn thought_config_editor_test_button_rotates_openrouter_model_after_invalid_model_error() {
+    let api = MockApi::new();
+    let layout = test_layout(120, 32);
+    let mut app = make_app(api.clone());
+    app.thought_config_editor = Some(ThoughtConfigEditorState::new(
+        ThoughtConfig {
+            backend: "openrouter".to_string(),
+            model: "old/expired:free".to_string(),
+            ..ThoughtConfig::default()
+        },
+        Some(DaemonDefaults {
+            backend: "openrouter".to_string(),
+            model: "openrouter/free".to_string(),
+            agent_prompt: String::new(),
+            terminal_prompt: String::new(),
+        }),
+    ));
+    if let Some(editor) = &mut app.thought_config_editor {
+        editor.focus = ThoughtConfigEditorField::Test;
+    }
+    api.push_test_thought_config(Ok(ThoughtConfigTestResponse {
+        ok: false,
+        message: "probe failed: old/expired:free is not a valid model ID".to_string(),
+        last_backend_error: Some("old/expired:free is not a valid model ID".to_string()),
+        llm_calls: 0,
+    }));
+    api.push_refresh_openrouter_candidates(Ok(vec![
+        "openrouter/free".to_string(),
+        "google/gemma-3-4b-it:free".to_string(),
+    ]));
+    api.push_test_thought_config(Ok(ThoughtConfigTestResponse {
+        ok: true,
+        message: "probe succeeded".to_string(),
+        last_backend_error: None,
+        llm_calls: 1,
+    }));
+
+    handle_key_event(
+        &mut app,
+        layout,
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+    );
+
+    assert_eq!(
+        app.thought_config_editor
+            .as_ref()
+            .map(|editor| editor.config.model.as_str()),
+        Some("openrouter/free")
+    );
+    assert!(app
+        .visible_message()
+        .unwrap_or_default()
+        .contains("rotated to openrouter/free"));
+}
+
+#[test]
+fn thought_config_editor_save_rotates_and_persists_openrouter_model_after_invalid_model_error() {
+    let api = MockApi::new();
+    let layout = test_layout(120, 32);
+    let mut app = make_app(api.clone());
+    app.thought_config_editor = Some(ThoughtConfigEditorState::new(
+        ThoughtConfig {
+            backend: "openrouter".to_string(),
+            model: "old/expired:free".to_string(),
+            ..ThoughtConfig::default()
+        },
+        Some(DaemonDefaults {
+            backend: "openrouter".to_string(),
+            model: "openrouter/free".to_string(),
+            agent_prompt: String::new(),
+            terminal_prompt: String::new(),
+        }),
+    ));
+    if let Some(editor) = &mut app.thought_config_editor {
+        editor.focus = ThoughtConfigEditorField::Save;
+    }
+    api.push_update_thought_config(Ok(ThoughtConfig {
+        backend: "openrouter".to_string(),
+        model: "old/expired:free".to_string(),
+        ..ThoughtConfig::default()
+    }));
+    api.push_test_thought_config(Ok(ThoughtConfigTestResponse {
+        ok: false,
+        message: "probe failed: old/expired:free is not a valid model ID".to_string(),
+        last_backend_error: Some("old/expired:free is not a valid model ID".to_string()),
+        llm_calls: 0,
+    }));
+    api.push_refresh_openrouter_candidates(Ok(vec![
+        "openrouter/free".to_string(),
+        "google/gemma-3-4b-it:free".to_string(),
+    ]));
+    api.push_test_thought_config(Ok(ThoughtConfigTestResponse {
+        ok: true,
+        message: "probe succeeded".to_string(),
+        last_backend_error: None,
+        llm_calls: 1,
+    }));
+    api.push_update_thought_config(Ok(ThoughtConfig {
+        backend: "openrouter".to_string(),
+        model: "openrouter/free".to_string(),
+        ..ThoughtConfig::default()
+    }));
+
+    handle_key_event(
+        &mut app,
+        layout,
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+    );
+
+    assert!(app.thought_config_editor.is_none());
+    assert_eq!(api.update_thought_config_calls().len(), 2);
+    assert_eq!(
+        api.update_thought_config_calls()
+            .last()
+            .map(|config| config.model.as_str()),
+        Some("openrouter/free")
+    );
+    assert!(app
+        .visible_message()
+        .unwrap_or_default()
+        .contains("rotated to openrouter/free"));
+}
+
+#[test]
+fn thought_config_editor_cycles_current_openrouter_model_presets() {
+    let api = MockApi::new();
+    let layout = test_layout(120, 32);
+    let mut app = make_app(api);
+    app.thought_config_editor = Some(ThoughtConfigEditorState::new(
+        ThoughtConfig {
+            backend: "openrouter".to_string(),
+            ..ThoughtConfig::default()
+        },
+        None,
+    ));
+    if let Some(editor) = &mut app.thought_config_editor {
+        editor.focus = ThoughtConfigEditorField::Model;
+    }
+
+    handle_key_event(
+        &mut app,
+        layout,
+        KeyEvent::new(KeyCode::Right, KeyModifiers::NONE),
+    );
+    assert_eq!(
+        app.thought_config_editor
+            .as_ref()
+            .map(|editor| editor.config.model.as_str()),
+        Some("openrouter/free")
+    );
+
+    handle_key_event(
+        &mut app,
+        layout,
+        KeyEvent::new(KeyCode::Right, KeyModifiers::NONE),
+    );
+    assert_eq!(
+        app.thought_config_editor
+            .as_ref()
+            .map(|editor| editor.config.model.as_str()),
+        Some("nvidia/nemotron-3-super-120b-a12b:free")
+    );
+
+    handle_key_event(
+        &mut app,
+        layout,
+        KeyEvent::new(KeyCode::Right, KeyModifiers::NONE),
+    );
+    assert_eq!(
+        app.thought_config_editor
+            .as_ref()
+            .map(|editor| editor.config.model.as_str()),
+        Some("arcee-ai/trinity-large-preview:free")
+    );
+}
+
+#[test]
+fn thought_config_editor_clears_incompatible_model_when_backend_changes() {
+    let mut editor = ThoughtConfigEditorState::new(
+        ThoughtConfig {
+            backend: "claude".to_string(),
+            model: "haiku".to_string(),
+            ..ThoughtConfig::default()
+        },
+        None,
+    );
+
+    editor.cycle_backend(-1);
+    assert_eq!(editor.backend_label(), "auto");
+    assert!(editor.config.model.is_empty());
+
+    editor.config.model = "openrouter/free".to_string();
+    editor.cycle_backend(1);
+    assert_eq!(editor.backend_label(), "claude");
+    assert!(editor.config.model.is_empty());
+}
+
+#[test]
 fn picker_activate_selection_opens_initial_request_and_reloads_children() {
     let api = MockApi::new();
     let layout = test_layout(120, 32);
@@ -4178,6 +5080,94 @@ fn handle_workspace_click_routes_thought_and_overview_interactions() {
     assert_eq!(
         api.open_calls(),
         vec!["sess-1".to_string(), "sess-1".to_string()]
+    );
+}
+
+#[test]
+fn clicking_native_status_label_toggles_native_app_live() {
+    let api = MockApi::new();
+    let layout = test_layout(120, 32);
+    let mut app = make_app(api.clone());
+    app.native_status = Some(NativeDesktopStatusResponse {
+        supported: true,
+        platform: Some("macos".to_string()),
+        app_id: Some(NativeDesktopApp::Iterm),
+        ghostty_mode: None,
+        app: Some("iTerm".to_string()),
+        reason: None,
+    });
+    api.push_set_native_app(Ok(NativeDesktopStatusResponse {
+        supported: true,
+        platform: Some("macos".to_string()),
+        app_id: Some(NativeDesktopApp::Ghostty),
+        ghostty_mode: Some(GhosttyOpenMode::Swap),
+        app: Some("Ghostty".to_string()),
+        reason: None,
+    }));
+    let rect = app
+        .native_status_rect(120)
+        .expect("native status should render in header");
+
+    assert!(handle_split_or_header_click(
+        &mut app,
+        120,
+        layout,
+        crossterm::event::MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: rect.x,
+            row: rect.y,
+            modifiers: KeyModifiers::NONE,
+        },
+    ));
+    assert_eq!(api.set_native_app_calls(), vec![NativeDesktopApp::Ghostty]);
+    assert_eq!(
+        app.native_status.as_ref().and_then(|status| status.app_id),
+        Some(NativeDesktopApp::Ghostty)
+    );
+}
+
+#[test]
+fn clicking_ghostty_mode_label_toggles_preview_mode_live() {
+    let api = MockApi::new();
+    let layout = test_layout(120, 32);
+    let mut app = make_app(api.clone());
+    app.native_status = Some(NativeDesktopStatusResponse {
+        supported: true,
+        platform: Some("macos".to_string()),
+        app_id: Some(NativeDesktopApp::Ghostty),
+        ghostty_mode: Some(GhosttyOpenMode::Swap),
+        app: Some("Ghostty".to_string()),
+        reason: None,
+    });
+    api.push_set_native_mode(Ok(NativeDesktopStatusResponse {
+        supported: true,
+        platform: Some("macos".to_string()),
+        app_id: Some(NativeDesktopApp::Ghostty),
+        ghostty_mode: Some(GhosttyOpenMode::Add),
+        app: Some("Ghostty".to_string()),
+        reason: None,
+    }));
+    let rect = app
+        .ghostty_mode_rect(120)
+        .expect("ghostty mode should render in header");
+
+    assert!(handle_split_or_header_click(
+        &mut app,
+        120,
+        layout,
+        crossterm::event::MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: rect.x,
+            row: rect.y,
+            modifiers: KeyModifiers::NONE,
+        },
+    ));
+    assert_eq!(api.set_native_mode_calls(), vec![GhosttyOpenMode::Add]);
+    assert_eq!(
+        app.native_status
+            .as_ref()
+            .and_then(|status| status.ghostty_mode),
+        Some(GhosttyOpenMode::Add)
     );
 }
 

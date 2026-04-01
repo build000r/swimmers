@@ -63,8 +63,13 @@ impl ThoughtConfig {
 
         if !self.backend.is_empty() {
             const VALID_BACKENDS: &[&str] = &[
-                "openrouter", "codex", "codex_cli", "codex-cli",
-                "claude", "claude_cli", "claude-cli",
+                "openrouter",
+                "codex",
+                "codex_cli",
+                "codex-cli",
+                "claude",
+                "claude_cli",
+                "claude-cli",
             ];
             if !VALID_BACKENDS
                 .iter()

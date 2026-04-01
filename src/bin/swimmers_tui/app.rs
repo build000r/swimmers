@@ -1,4 +1,5 @@
 use super::*;
+use swimmers::openrouter_models::should_rotate_openrouter_model;
 
 pub(crate) struct App<C: TuiApi> {
     pub(crate) runtime: Runtime,
@@ -14,6 +15,7 @@ pub(crate) struct App<C: TuiApi> {
     pub(crate) selected_id: Option<String>,
     pub(crate) published_selected_id: Option<String>,
     pub(crate) native_status: Option<NativeDesktopStatusResponse>,
+    pub(crate) thought_config_editor: Option<ThoughtConfigEditorState>,
     pub(crate) picker: Option<PickerState>,
     pub(crate) spawn_tool: SpawnTool,
     pub(crate) initial_request: Option<InitialRequestState>,
@@ -69,6 +71,7 @@ impl<C: TuiApi> App<C> {
             selected_id: None,
             published_selected_id: None,
             native_status: None,
+            thought_config_editor: None,
             picker: None,
             spawn_tool: SpawnTool::Codex,
             initial_request: None,
@@ -117,14 +120,22 @@ impl<C: TuiApi> App<C> {
 
     pub(crate) fn native_status_text(&self) -> String {
         match &self.native_status {
-            Some(status) if status.supported => format!(
-                "native open: {}",
-                status.app.as_deref().unwrap_or("available")
-            ),
-            Some(status) => format!(
-                "native open unavailable: {}",
-                status.reason.as_deref().unwrap_or("unknown reason")
-            ),
+            Some(status) => {
+                let app_label = status.app.as_deref().unwrap_or("available");
+                let mode_suffix = status
+                    .ghostty_mode
+                    .filter(|_| self.current_native_app() == NativeDesktopApp::Ghostty)
+                    .map(|mode| format!(" ({})", mode.label()))
+                    .unwrap_or_default();
+                if status.supported {
+                    format!("native open: {app_label}{mode_suffix}")
+                } else {
+                    format!(
+                        "native open: {app_label}{mode_suffix} unavailable: {}",
+                        status.reason.as_deref().unwrap_or("unknown reason")
+                    )
+                }
+            }
             None => "native open: checking".to_string(),
         }
     }
@@ -135,6 +146,109 @@ impl<C: TuiApi> App<C> {
             .as_deref()
             .map(|tmux_name| format!("num={tmux_name} | {}", self.native_status_text()))
             .unwrap_or_else(|| self.native_status_text())
+    }
+
+    pub(crate) fn native_status_rect(&self, width: u16) -> Option<Rect> {
+        let max_right_width = width.saturating_sub(22) as usize;
+        let right_text = truncate_label(&self.header_right_text(), max_right_width);
+        let text_width = display_width(&right_text);
+        if text_width == 0 {
+            return None;
+        }
+
+        Some(Rect {
+            x: width.saturating_sub(text_width).saturating_sub(2),
+            y: 1,
+            width: text_width,
+            height: 1,
+        })
+    }
+
+    pub(crate) fn ghostty_mode_rect(&self, width: u16) -> Option<Rect> {
+        if self.current_native_app() != NativeDesktopApp::Ghostty {
+            return None;
+        }
+
+        let max_right_width = width.saturating_sub(22) as usize;
+        let right_text = truncate_label(&self.header_right_text(), max_right_width);
+        let marker = format!("({})", self.current_ghostty_mode().label());
+        let marker_idx = right_text.find(&marker)?;
+        let prefix_width = display_width(&right_text[..marker_idx]);
+        let marker_width = display_width(&marker);
+        let full_width = display_width(&right_text);
+        let x = width
+            .saturating_sub(full_width)
+            .saturating_sub(2)
+            .saturating_add(prefix_width);
+
+        Some(Rect {
+            x,
+            y: 1,
+            width: marker_width,
+            height: 1,
+        })
+    }
+
+    fn current_native_app(&self) -> NativeDesktopApp {
+        self.native_status
+            .as_ref()
+            .and_then(|status| {
+                status
+                    .app_id
+                    .or_else(|| status.app.as_deref().map(NativeDesktopApp::from_env_value))
+            })
+            .unwrap_or(NativeDesktopApp::Iterm)
+    }
+
+    fn current_ghostty_mode(&self) -> GhosttyOpenMode {
+        self.native_status
+            .as_ref()
+            .and_then(|status| status.ghostty_mode)
+            .unwrap_or(GhosttyOpenMode::Swap)
+    }
+
+    pub(crate) fn toggle_native_app(&mut self) {
+        let next_app = self.current_native_app().toggle();
+        match self.runtime.block_on(self.client.set_native_app(next_app)) {
+            Ok(status) => {
+                let app_label = status
+                    .app
+                    .clone()
+                    .unwrap_or_else(|| next_app.display_name().to_string());
+                let message = if status.supported {
+                    match status.ghostty_mode {
+                        Some(mode) => format!("native open target: {app_label} ({})", mode.label()),
+                        None => format!("native open target: {app_label}"),
+                    }
+                } else {
+                    format!(
+                        "native open target: {app_label} | {}",
+                        status.reason.as_deref().unwrap_or("unavailable")
+                    )
+                };
+                self.native_status = Some(status);
+                self.set_message(message);
+            }
+            Err(err) => self.set_message(err),
+        }
+    }
+
+    pub(crate) fn toggle_ghostty_mode(&mut self) {
+        if self.current_native_app() != NativeDesktopApp::Ghostty {
+            return;
+        }
+
+        let next_mode = self.current_ghostty_mode().toggle();
+        match self
+            .runtime
+            .block_on(self.client.set_native_mode(next_mode))
+        {
+            Ok(status) => {
+                self.native_status = Some(status);
+                self.set_message(format!("Ghostty preview mode: {}", next_mode.label()));
+            }
+            Err(err) => self.set_message(err),
+        }
     }
 
     pub(crate) fn visible_entities(&self) -> Vec<&SessionEntity> {
@@ -466,15 +580,13 @@ impl<C: TuiApi> App<C> {
             }
         }
 
-        if self.native_status.is_none() {
-            self.native_status = self
-                .runtime
-                .block_on(self.client.fetch_native_status())
-                .map(Some)
-                .unwrap_or_else(|err| {
-                    self.set_message(err);
-                    None
-                });
+        match self.runtime.block_on(self.client.fetch_native_status()) {
+            Ok(status) => {
+                self.native_status = Some(status);
+            }
+            Err(err) => {
+                self.set_message(err);
+            }
         }
 
         self.last_refresh = Some(Instant::now());
@@ -683,6 +795,301 @@ impl<C: TuiApi> App<C> {
         self.initial_request = None;
     }
 
+    pub(crate) fn open_thought_config_editor(&mut self) {
+        match self.runtime.block_on(self.client.fetch_thought_config()) {
+            Ok(response) => {
+                self.thought_config_editor = Some(ThoughtConfigEditorState::new(
+                    response.config,
+                    response.daemon_defaults,
+                ));
+            }
+            Err(err) => self.set_message(err),
+        }
+    }
+
+    pub(crate) fn close_thought_config_editor(&mut self) {
+        self.thought_config_editor = None;
+    }
+
+    pub(crate) fn handle_thought_config_key(&mut self, key: KeyEvent, layout: WorkspaceLayout) {
+        match key.code {
+            KeyCode::Esc => self.close_thought_config_editor(),
+            KeyCode::Up => {
+                if let Some(editor) = &mut self.thought_config_editor {
+                    editor.move_focus(-1);
+                }
+            }
+            KeyCode::Down | KeyCode::Tab => {
+                if let Some(editor) = &mut self.thought_config_editor {
+                    editor.move_focus(1);
+                }
+            }
+            KeyCode::BackTab => {
+                if let Some(editor) = &mut self.thought_config_editor {
+                    editor.move_focus(-1);
+                }
+            }
+            KeyCode::Left => self.adjust_thought_config_field(-1),
+            KeyCode::Right => self.adjust_thought_config_field(1),
+            KeyCode::Backspace => {
+                if let Some(editor) = &mut self.thought_config_editor {
+                    if editor.focus == ThoughtConfigEditorField::Model {
+                        editor.config.model.pop();
+                    }
+                }
+            }
+            KeyCode::Enter => self.activate_thought_config_field(layout),
+            KeyCode::Char(' ') => self.adjust_thought_config_field(1),
+            KeyCode::Char(ch)
+                if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT =>
+            {
+                if let Some(editor) = &mut self.thought_config_editor {
+                    if editor.focus == ThoughtConfigEditorField::Model {
+                        editor.config.model.push(ch);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    pub(crate) fn handle_thought_config_paste(&mut self, text: &str) {
+        if let Some(editor) = &mut self.thought_config_editor {
+            if editor.focus == ThoughtConfigEditorField::Model {
+                editor.config.model.push_str(text);
+            }
+        }
+    }
+
+    fn adjust_thought_config_field(&mut self, delta: isize) {
+        let Some(editor) = &mut self.thought_config_editor else {
+            return;
+        };
+        match editor.focus {
+            ThoughtConfigEditorField::Enabled => editor.config.enabled = !editor.config.enabled,
+            ThoughtConfigEditorField::Backend => editor.cycle_backend(delta),
+            ThoughtConfigEditorField::Model => {
+                let _ = editor.cycle_model_preset(delta);
+            }
+            ThoughtConfigEditorField::Test
+            | ThoughtConfigEditorField::Save
+            | ThoughtConfigEditorField::Cancel => {}
+        }
+    }
+
+    fn activate_thought_config_field(&mut self, layout: WorkspaceLayout) {
+        let Some(focus) = self
+            .thought_config_editor
+            .as_ref()
+            .map(|editor| editor.focus)
+        else {
+            return;
+        };
+        match focus {
+            ThoughtConfigEditorField::Enabled => self.adjust_thought_config_field(1),
+            ThoughtConfigEditorField::Backend => self.adjust_thought_config_field(1),
+            ThoughtConfigEditorField::Model => {}
+            ThoughtConfigEditorField::Test => self.test_thought_config(),
+            ThoughtConfigEditorField::Save => self.submit_thought_config(layout),
+            ThoughtConfigEditorField::Cancel => self.close_thought_config_editor(),
+        }
+    }
+
+    fn test_thought_config(&mut self) {
+        let Some(mut config) = self
+            .thought_config_editor
+            .as_ref()
+            .map(|editor| editor.config.clone())
+        else {
+            return;
+        };
+        let daemon_defaults = self
+            .thought_config_editor
+            .as_ref()
+            .and_then(|editor| editor.daemon_defaults.clone());
+        config.model = config.model.trim().to_string();
+        if let Some(editor) = &mut self.thought_config_editor {
+            editor.config.model = config.model.clone();
+        }
+        let target = format!(
+            "{} / {}",
+            if config.backend.trim().is_empty() {
+                "auto"
+            } else {
+                config.backend.as_str()
+            },
+            if config.model.trim().is_empty() {
+                "daemon default"
+            } else {
+                config.model.as_str()
+            }
+        );
+        match self
+            .runtime
+            .block_on(self.client.test_thought_config(config))
+        {
+            Ok(test) if test.ok => self.set_message(format!("test ok: {target}")),
+            Ok(test) => {
+                if let Some(message) =
+                    self.try_openrouter_rotation(&target, &test.message, daemon_defaults, false)
+                {
+                    self.set_message(message);
+                } else {
+                    self.set_message(format!("test failed: {target} | {}", test.message));
+                }
+            }
+            Err(err) => self.set_message(format!("test error: {target} | {err}")),
+        }
+    }
+
+    pub(crate) fn submit_thought_config(&mut self, layout: WorkspaceLayout) {
+        let Some(mut config) = self
+            .thought_config_editor
+            .as_ref()
+            .map(|editor| editor.config.clone())
+        else {
+            return;
+        };
+        let daemon_defaults = self
+            .thought_config_editor
+            .as_ref()
+            .and_then(|editor| editor.daemon_defaults.clone());
+        config.model = config.model.trim().to_string();
+        match self
+            .runtime
+            .block_on(self.client.update_thought_config(config))
+        {
+            Ok(saved) => {
+                if let Some(editor) = &mut self.thought_config_editor {
+                    editor.config = saved.clone();
+                }
+                let save_summary = format!(
+                    "{} / {}",
+                    if saved.backend.trim().is_empty() {
+                        "auto"
+                    } else {
+                        saved.backend.as_str()
+                    },
+                    if saved.model.trim().is_empty() {
+                        "daemon default"
+                    } else {
+                        saved.model.as_str()
+                    }
+                );
+                let test_summary = match self
+                    .runtime
+                    .block_on(self.client.test_thought_config(saved.clone()))
+                {
+                    Ok(test) if test.ok => format!("saved {save_summary} | test ok"),
+                    Ok(test) => self
+                        .try_openrouter_rotation(
+                            &save_summary,
+                            &test.message,
+                            daemon_defaults,
+                            true,
+                        )
+                        .unwrap_or_else(|| format!("saved {save_summary} | {}", test.message)),
+                    Err(err) => format!("saved {save_summary} | test error: {err}"),
+                };
+                self.close_thought_config_editor();
+                self.set_message(test_summary);
+                self.refresh(layout);
+            }
+            Err(err) => self.set_message(err),
+        }
+    }
+
+    fn try_openrouter_rotation(
+        &mut self,
+        target: &str,
+        failure_message: &str,
+        daemon_defaults: Option<DaemonDefaults>,
+        persist: bool,
+    ) -> Option<String> {
+        let config = self
+            .thought_config_editor
+            .as_ref()
+            .map(|editor| editor.config.clone())?;
+        if !self.is_effective_openrouter_backend(&config, daemon_defaults.as_ref())
+            || !should_rotate_openrouter_model(failure_message)
+        {
+            return None;
+        }
+
+        let candidates = match self
+            .runtime
+            .block_on(self.client.refresh_openrouter_candidates())
+        {
+            Ok(models) => models,
+            Err(_) => return None,
+        };
+        if let Some(editor) = &mut self.thought_config_editor {
+            editor.replace_openrouter_model_presets(candidates.clone());
+        }
+
+        for candidate in candidates {
+            if candidate.eq_ignore_ascii_case(config.model.trim()) {
+                continue;
+            }
+            let mut rotated = config.clone();
+            rotated.model = candidate.clone();
+            let test = match self
+                .runtime
+                .block_on(self.client.test_thought_config(rotated.clone()))
+            {
+                Ok(test) => test,
+                Err(_) => continue,
+            };
+            if !test.ok {
+                continue;
+            }
+
+            if persist {
+                match self
+                    .runtime
+                    .block_on(self.client.update_thought_config(rotated.clone()))
+                {
+                    Ok(saved) => {
+                        if let Some(editor) = &mut self.thought_config_editor {
+                            editor.config = saved;
+                        }
+                        return Some(format!(
+                            "saved {target} | rotated to {candidate} after OpenRouter catalog refresh | test ok"
+                        ));
+                    }
+                    Err(err) => {
+                        return Some(format!(
+                            "saved {target} | rotated probe found {candidate}, but save failed: {err}"
+                        ));
+                    }
+                }
+            }
+
+            if let Some(editor) = &mut self.thought_config_editor {
+                editor.config.model = candidate.clone();
+            }
+            return Some(format!(
+                "test failed: {target} | rotated to {candidate} after OpenRouter catalog refresh | test ok"
+            ));
+        }
+
+        None
+    }
+
+    fn is_effective_openrouter_backend(
+        &self,
+        config: &ThoughtConfig,
+        daemon_defaults: Option<&DaemonDefaults>,
+    ) -> bool {
+        if config.backend.eq_ignore_ascii_case("openrouter") {
+            return true;
+        }
+        config.backend.trim().is_empty()
+            && daemon_defaults
+                .map(|defaults| defaults.backend.eq_ignore_ascii_case("openrouter"))
+                .unwrap_or(false)
+    }
+
     pub(crate) fn open_picker(&mut self, x: u16, y: u16) {
         match self.runtime.block_on(self.client.list_dirs(None, true)) {
             Ok(response) => {
@@ -765,6 +1172,10 @@ impl<C: TuiApi> App<C> {
     }
 
     pub(crate) fn handle_paste(&mut self, text: &str) {
+        if self.thought_config_editor.is_some() {
+            self.handle_thought_config_paste(text);
+            return;
+        }
         if let Some(initial_request) = &mut self.initial_request {
             initial_request.value.push_str(text);
         }
@@ -1463,6 +1874,9 @@ impl<C: TuiApi> App<C> {
         }
         if let Some(initial_request) = &self.initial_request {
             render_initial_request(renderer, initial_request, layout.overview_field);
+        }
+        if let Some(editor) = &self.thought_config_editor {
+            render_thought_config_editor(renderer, editor, layout.overview_field);
         }
 
         render_footer(self, renderer, layout.footer_start_y);

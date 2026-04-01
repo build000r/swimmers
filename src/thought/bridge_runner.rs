@@ -355,6 +355,8 @@ mod tests {
                 at: now,
                 objective_fingerprint: Some("obj-bridge".to_string()),
             }],
+            llm_calls: 0,
+            last_backend_error: None,
         };
 
         let mut delivery_states = provider.thought_delivery_states();
@@ -429,6 +431,8 @@ mod tests {
                 request_id: "tmux-1".to_string(),
                 stream_instance_id: Some("stream-a".to_string()),
                 updates: Vec::new(),
+                llm_calls: 0,
+                last_backend_error: None,
             },
         );
 
@@ -517,6 +521,8 @@ mod tests {
                         .with_timezone(&Utc),
                     objective_fingerprint: None,
                 }],
+                llm_calls: 0,
+                last_backend_error: None,
             },
         );
 
@@ -575,6 +581,8 @@ mod tests {
                     at: Utc::now(),
                     objective_fingerprint: None,
                 }],
+                llm_calls: 0,
+                last_backend_error: None,
             },
         );
 
@@ -636,6 +644,8 @@ mod tests {
                     at: now,
                     objective_fingerprint: None,
                 }],
+                llm_calls: 0,
+                last_backend_error: None,
             },
         );
 
@@ -706,6 +716,8 @@ mod tests {
                     at: now,
                     objective_fingerprint: None,
                 }],
+                llm_calls: 0,
+                last_backend_error: None,
             },
         );
 
@@ -772,6 +784,8 @@ mod tests {
                     at: Utc::now(),
                     objective_fingerprint: None,
                 }],
+                llm_calls: 0,
+                last_backend_error: None,
             },
         );
 
@@ -840,6 +854,8 @@ mod tests {
                     at: Utc::now(),
                     objective_fingerprint: None,
                 }],
+                llm_calls: 0,
+                last_backend_error: None,
             },
         );
 

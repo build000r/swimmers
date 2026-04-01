@@ -3,6 +3,7 @@ use super::*;
 pub(crate) fn initialize_tui_app() -> Result<(App<ApiClient>, Renderer), Box<dyn std::error::Error>>
 {
     let _ = dotenvy::dotenv();
+    swimmers::env_bootstrap::bootstrap_provider_env_from_shell();
 
     let runtime = Runtime::new()?;
     let client = ApiClient::from_env().map_err(io::Error::other)?;
@@ -41,6 +42,11 @@ pub(crate) fn handle_key_event<C: TuiApi>(
     layout: WorkspaceLayout,
     key: KeyEvent,
 ) -> bool {
+    if app.thought_config_editor.is_some() {
+        app.handle_thought_config_key(key, layout);
+        return true;
+    }
+
     if app.initial_request.is_some() {
         app.handle_initial_request_key(key, layout.overview_field);
         return true;
@@ -127,6 +133,10 @@ pub(crate) fn handle_key_event<C: TuiApi>(
             app.move_selection(1, layout.overview_field);
             true
         }
+        KeyCode::Char('m') => {
+            app.toggle_ghostty_mode();
+            true
+        }
         KeyCode::Right | KeyCode::Char('l') | KeyCode::Enter | KeyCode::Char('o') => {
             if app.picker.is_some() {
                 app.picker_activate_selection(layout.overview_field);
@@ -155,6 +165,14 @@ pub(crate) fn handle_key_event<C: TuiApi>(
             }
             true
         }
+        KeyCode::Char('t') => {
+            app.open_thought_config_editor();
+            true
+        }
+        KeyCode::Char('n') => {
+            app.toggle_native_app();
+            true
+        }
         _ => true,
     }
 }
@@ -165,6 +183,9 @@ pub(crate) fn handle_mouse_down<C: TuiApi>(
     layout: WorkspaceLayout,
     mouse: crossterm::event::MouseEvent,
 ) {
+    if app.thought_config_editor.is_some() {
+        return;
+    }
     if app.initial_request.is_some() {
         return;
     }
@@ -193,6 +214,22 @@ pub(crate) fn handle_split_or_header_click<C: TuiApi>(
     }
     if header_filter_action_at(app, width, mouse.column, mouse.row).is_some() {
         app.handle_header_filter_click(width, mouse.column, mouse.row);
+        return true;
+    }
+    if app
+        .ghostty_mode_rect(width)
+        .map(|rect| rect.contains(mouse.column, mouse.row))
+        .unwrap_or(false)
+    {
+        app.toggle_ghostty_mode();
+        return true;
+    }
+    if app
+        .native_status_rect(width)
+        .map(|rect| rect.contains(mouse.column, mouse.row))
+        .unwrap_or(false)
+    {
+        app.toggle_native_app();
         return true;
     }
     false

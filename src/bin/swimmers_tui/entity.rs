@@ -31,19 +31,6 @@ impl SpriteKind {
         }
     }
 
-    pub(crate) fn color(self) -> Color {
-        match self {
-            Self::Active => Color::Green,
-            Self::Busy => Color::Yellow,
-            Self::Drowsy => Color::DarkYellow,
-            Self::Sleeping => Color::Blue,
-            Self::DeepSleep => Color::DarkBlue,
-            Self::Attention => Color::Magenta,
-            Self::Error => Color::Red,
-            Self::Exited => Color::DarkGrey,
-        }
-    }
-
     pub(crate) fn speed_scale(self) -> f32 {
         match self {
             Self::Active => 1.0,

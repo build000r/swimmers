@@ -88,6 +88,37 @@ assert_eq '10' "$(probe_status_for_http_code 401)" '401 probe is auth failure'
 assert_eq '10' "$(probe_status_for_http_code 403)" '403 probe is auth failure'
 assert_eq '1' "$(probe_status_for_http_code 503)" '503 probe keeps waiting'
 
+stop_local_api_listener() {
+  restart_stop_calls=$((restart_stop_calls + 1))
+  return 0
+}
+
+start_local_api() {
+  restart_start_calls=$((restart_start_calls + 1))
+}
+
+wait_for_api() {
+  restart_wait_calls=$((restart_wait_calls + 1))
+}
+
+restart_stop_calls=0
+restart_start_calls=0
+restart_wait_calls=0
+native_switch_route_status() {
+  if [[ "${restart_start_calls}" -eq 0 ]]; then
+    printf '404'
+  else
+    printf '422'
+  fi
+}
+
+TUI_URL='http://127.0.0.1:3210'
+WAIT_ONLY=0
+ensure_native_switch_capability
+assert_eq '1' "${restart_stop_calls}" 'stale native-switch route stops old listener'
+assert_eq '1' "${restart_start_calls}" 'stale native-switch route restarts api'
+assert_eq '1' "${restart_wait_calls}" 'stale native-switch route waits for api'
+
 TUI_URL='http://127.0.0.1:33210'
 WAIT_PATH='/v1/sessions'
 LAST_API_STATUS='401'

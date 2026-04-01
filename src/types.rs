@@ -119,6 +119,67 @@ impl SpawnTool {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NativeDesktopApp {
+    Iterm,
+    Ghostty,
+}
+
+impl NativeDesktopApp {
+    pub fn from_env_value(value: &str) -> Self {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "ghostty" => Self::Ghostty,
+            "iterm" | "iterm2" | "i_term" | "i-term" => Self::Iterm,
+            _ => Self::Iterm,
+        }
+    }
+
+    pub fn display_name(self) -> &'static str {
+        match self {
+            Self::Iterm => "iTerm",
+            Self::Ghostty => "Ghostty",
+        }
+    }
+
+    pub fn toggle(self) -> Self {
+        match self {
+            Self::Iterm => Self::Ghostty,
+            Self::Ghostty => Self::Iterm,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GhosttyOpenMode {
+    Swap,
+    Add,
+}
+
+impl GhosttyOpenMode {
+    pub fn from_env_value(value: &str) -> Self {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "add" | "split" | "new" => Self::Add,
+            _ => Self::Swap,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Swap => "swap",
+            Self::Add => "add",
+        }
+    }
+
+    pub fn toggle(self) -> Self {
+        match self {
+            Self::Swap => Self::Add,
+            Self::Add => Self::Swap,
+        }
+    }
+}
+
 /// Per-repository Swimmer palette used by the native TUI.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RepoTheme {
@@ -195,9 +256,23 @@ pub struct NativeDesktopStatusResponse {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub platform: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub app_id: Option<NativeDesktopApp>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ghostty_mode: Option<GhosttyOpenMode>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub app: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NativeDesktopConfigRequest {
+    pub app: NativeDesktopApp,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NativeDesktopModeRequest {
+    pub mode: GhosttyOpenMode,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

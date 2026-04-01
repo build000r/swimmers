@@ -75,6 +75,8 @@ pub struct SyncResponse {
     pub request_id: String,
     pub stream_instance_id: Option<String>,
     pub updates: Vec<SyncUpdate>,
+    pub llm_calls: u64,
+    pub last_backend_error: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -273,6 +275,8 @@ pub enum DaemonInboundMessage {
         stream_instance_id: Option<String>,
         #[serde(default)]
         updates: Vec<SyncUpdate>,
+        #[serde(default)]
+        metrics: SyncResponseMetrics,
     },
     Error {
         code: String,
@@ -285,6 +289,14 @@ pub enum DaemonInboundMessage {
         )]
         request_id: Option<String>,
     },
+}
+
+#[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
+pub struct SyncResponseMetrics {
+    #[serde(default)]
+    pub llm_calls: u64,
+    #[serde(default)]
+    pub last_backend_error: Option<String>,
 }
 
 impl DaemonInboundMessage {
@@ -459,6 +471,7 @@ mod tests {
                 request_id,
                 stream_instance_id,
                 updates,
+                ..
             } => {
                 assert_eq!(request_id, "17");
                 assert_eq!(stream_instance_id.as_deref(), None);

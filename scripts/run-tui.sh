@@ -11,6 +11,7 @@ WAIT_INTERVAL="${TUI_WAIT_INTERVAL:-1}"
 WAIT_LOG_INTERVAL="${TUI_WAIT_LOG_INTERVAL:-5}"
 WAIT_ONLY="${TUI_WAIT_ONLY:-0}"
 SKIP_TUI="${TUI_SKIP_TUI:-0}"
+NATIVE_SWITCH_PATH="${TUI_NATIVE_SWITCH_PATH:-/v1/native/app}"
 SERVER_LOG=""
 LAST_API_STATUS=""
 
@@ -119,6 +120,33 @@ api_status() {
   fi
 }
 
+native_switch_route_status() {
+  local url="${TUI_URL%/}${NATIVE_SWITCH_PATH}"
+  local header
+
+  header="$(api_auth_header)"
+  if [[ -n "${header}" ]]; then
+    curl -sS -o /dev/null -w '%{http_code}' \
+      --connect-timeout 1 \
+      --max-time 2 \
+      -X PUT \
+      -H "${header}" \
+      -H 'Content-Type: application/json' \
+      --data '{}' \
+      "${url}" \
+      2>/dev/null || true
+  else
+    curl -sS -o /dev/null -w '%{http_code}' \
+      --connect-timeout 1 \
+      --max-time 2 \
+      -X PUT \
+      -H 'Content-Type: application/json' \
+      --data '{}' \
+      "${url}" \
+      2>/dev/null || true
+  fi
+}
+
 probe_api_access() {
   local url="${1:-$(api_url)}"
   LAST_API_STATUS="$(api_status "${url}")"
@@ -168,7 +196,7 @@ show_server_log_tail() {
 }
 
 start_local_api() {
-  local parsed host port log_dir
+  local parsed host port log_dir launch_cmd
   parsed="$(parse_url_host_port "${TUI_URL}")"
   host="${parsed%%$'\t'*}"
   port="${parsed#*$'\t'}"
@@ -183,10 +211,70 @@ start_local_api() {
   printf 'Local swimmers API is not ready; starting it on %s:%s\n' "${host}" "${port}"
   printf 'Server log: %s\n' "${SERVER_LOG}"
 
+  launch_cmd="cd $(printf '%q' "${ROOT_DIR}") && cargo build --bin swimmers && exec env PORT=$(printf '%q' "${port}") $(printf '%q' "${ROOT_DIR}/target/debug/swimmers")"
   (
-    cd "${ROOT_DIR}"
-    nohup env PORT="${port}" cargo run --bin swimmers >>"${SERVER_LOG}" 2>&1 &
+    nohup bash -lc "${launch_cmd}" >>"${SERVER_LOG}" 2>&1 &
   )
+}
+
+stop_local_api_listener() {
+  local parsed host port listener_pid
+  parsed="$(parse_url_host_port "${TUI_URL}")"
+  host="${parsed%%$'\t'*}"
+  port="${parsed#*$'\t'}"
+
+  if ! host_is_loopback "${host}"; then
+    return 1
+  fi
+
+  require lsof
+  listener_pid="$(lsof -nP -t -iTCP:"${port}" -sTCP:LISTEN 2>/dev/null | head -1 || true)"
+  if [[ -z "${listener_pid}" ]]; then
+    return 1
+  fi
+
+  printf 'Restarting stale swimmers API on %s:%s (pid %s)\n' "${host}" "${port}" "${listener_pid}"
+  kill "${listener_pid}"
+
+  local deadline=$((SECONDS + 10))
+  while (( SECONDS <= deadline )); do
+    if ! lsof -nP -t -iTCP:"${port}" -sTCP:LISTEN >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 1
+  done
+
+  printf 'listener on %s:%s did not stop after signal\n' "${host}" "${port}" >&2
+  return 1
+}
+
+ensure_native_switch_capability() {
+  if ! should_auto_start_local_api; then
+    return 0
+  fi
+
+  local route_status
+  route_status="$(native_switch_route_status)"
+  case "${route_status}" in
+    404)
+      printf 'Local swimmers API is missing %s; restarting it to pick up the current build\n' "${NATIVE_SWITCH_PATH}"
+      stop_local_api_listener || true
+      start_local_api
+      wait_for_api "${START_TIMEOUT}"
+      route_status="$(native_switch_route_status)"
+      if [[ "${route_status}" == "404" ]]; then
+        printf 'swimmers API at %s still does not expose %s after restart\n' "${TUI_URL}" "${NATIVE_SWITCH_PATH}" >&2
+        show_server_log_tail
+        return 1
+      fi
+      ;;
+    401|403)
+      show_api_auth_failure "$(api_url)"
+      return 1
+      ;;
+    *)
+      ;;
+  esac
 }
 
 wait_for_api() {
@@ -275,6 +363,8 @@ main() {
       wait_for_api "${WAIT_TIMEOUT}"
     fi
   fi
+
+  ensure_native_switch_capability
 
   if is_true "${WAIT_ONLY}" || is_true "${SKIP_TUI}"; then
     return 0

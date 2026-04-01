@@ -362,12 +362,21 @@ async fn fetch_daemon_defaults_for_bin(bin: &str) -> Option<DaemonDefaults> {
 }
 
 fn resolve_clawgs_bin() -> String {
-    resolve_clawgs_bin_with(env::var("CLAWGS_BIN").ok(), env::current_exe().ok())
+    resolve_clawgs_bin_with(
+        env::var("CLAWGS_BIN").ok(),
+        env::current_exe().ok(),
+        env::current_dir().ok(),
+    )
 }
 
-fn resolve_clawgs_bin_with(explicit_bin: Option<String>, current_exe: Option<PathBuf>) -> String {
+fn resolve_clawgs_bin_with(
+    explicit_bin: Option<String>,
+    current_exe: Option<PathBuf>,
+    current_dir: Option<PathBuf>,
+) -> String {
     normalize_bin_override(explicit_bin)
         .or_else(|| packaged_clawgs_bin(current_exe.as_deref()))
+        .or_else(|| adjacent_checkout_clawgs_bin(current_dir.as_deref(), current_exe.as_deref()))
         .unwrap_or_else(|| default_clawgs_bin_name().to_string())
 }
 
@@ -383,6 +392,38 @@ fn packaged_clawgs_bin(executable: Option<&Path>) -> Option<String> {
     candidate
         .is_file()
         .then(|| candidate.to_string_lossy().into_owned())
+}
+
+fn adjacent_checkout_clawgs_bin(
+    current_dir: Option<&Path>,
+    executable: Option<&Path>,
+) -> Option<String> {
+    let mut search_roots = Vec::new();
+    if let Some(dir) = current_dir {
+        search_roots.push(dir.to_path_buf());
+    }
+    if let Some(exe) = executable {
+        if let Some(parent) = exe.parent() {
+            search_roots.push(parent.to_path_buf());
+        }
+    }
+
+    for root in search_roots {
+        for candidate in adjacent_checkout_candidates(&root) {
+            if candidate.is_file() {
+                return Some(candidate.to_string_lossy().into_owned());
+            }
+        }
+    }
+
+    None
+}
+
+fn adjacent_checkout_candidates(root: &Path) -> [PathBuf; 1] {
+    let base = root.parent().unwrap_or(root);
+    [base
+        .join("opensource/clawgs/target/release")
+        .join(default_clawgs_bin_name())]
 }
 
 fn default_clawgs_bin_name() -> &'static str {
@@ -429,10 +470,13 @@ fn parse_sync_response_line(line: &str) -> Result<SyncResponse, EmitterClientErr
             request_id,
             stream_instance_id,
             updates,
+            metrics,
         } => Ok(SyncResponse {
             request_id,
             stream_instance_id,
             updates,
+            llm_calls: metrics.llm_calls,
+            last_backend_error: metrics.last_backend_error,
         }),
         DaemonInboundMessage::Error {
             code,
@@ -519,6 +563,8 @@ mod tests {
         assert_eq!(response.request_id, "tmux-9");
         assert_eq!(response.stream_instance_id.as_deref(), Some("stream-a"));
         assert_eq!(response.updates.len(), 1);
+        assert_eq!(response.llm_calls, 0);
+        assert_eq!(response.last_backend_error, None);
         let update = &response.updates[0];
         assert_eq!(update.session_id, "tmux:work:1.0:%1");
         assert_eq!(update.stream_instance_id.as_deref(), Some("stream-a"));
@@ -561,6 +607,8 @@ mod tests {
             .expect("legacy string request_id should parse successfully");
         assert_eq!(response.request_id, "123");
         assert!(response.updates.is_empty());
+        assert_eq!(response.llm_calls, 0);
+        assert_eq!(response.last_backend_error, None);
     }
 
     fn sample_session_info() -> SessionInfo {
@@ -684,6 +732,7 @@ mod tests {
         let resolved = resolve_clawgs_bin_with(
             Some(" /tmp/custom-clawgs ".to_string()),
             Some(PathBuf::from("/tmp/swimmers")),
+            Some(PathBuf::from("/tmp/project")),
         );
 
         assert_eq!(resolved, "/tmp/custom-clawgs");
@@ -696,14 +745,40 @@ mod tests {
         let packaged = temp.path().join(default_clawgs_bin_name());
         fs::write(&packaged, "#!/bin/sh\n").expect("write packaged clawgs");
 
-        let resolved = resolve_clawgs_bin_with(None, Some(executable));
+        let resolved =
+            resolve_clawgs_bin_with(None, Some(executable), Some(temp.path().to_path_buf()));
 
         assert_eq!(resolved, packaged.to_string_lossy());
     }
 
     #[test]
+    fn resolve_clawgs_bin_prefers_adjacent_opensource_checkout_before_path_lookup() {
+        let temp = tempdir().expect("tempdir");
+        let repo_root = temp.path().join("swimmers");
+        let adjacent = temp
+            .path()
+            .join("opensource/clawgs/target/release")
+            .join(default_clawgs_bin_name());
+        fs::create_dir_all(adjacent.parent().expect("parent dir"))
+            .expect("create adjacent clawgs dir");
+        fs::write(&adjacent, "#!/bin/sh\n").expect("write adjacent clawgs");
+
+        let resolved = resolve_clawgs_bin_with(
+            None,
+            Some(PathBuf::from("/tmp/swimmers-bin")),
+            Some(repo_root),
+        );
+
+        assert_eq!(resolved, adjacent.to_string_lossy());
+    }
+
+    #[test]
     fn resolve_clawgs_bin_falls_back_to_default_name() {
-        let resolved = resolve_clawgs_bin_with(None, Some(PathBuf::from("/tmp/swimmers")));
+        let resolved = resolve_clawgs_bin_with(
+            None,
+            Some(PathBuf::from("/tmp/swimmers")),
+            Some(PathBuf::from("/tmp/project")),
+        );
         assert_eq!(resolved, default_clawgs_bin_name());
     }
 
@@ -720,11 +795,23 @@ mod tests {
         dir: &Path,
     ) -> std::path::PathBuf {
         let script_path = dir.join("fake-clawgs.sh");
-        let script = format!(
-            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"{}\"\nif [ \"$1\" = \"defaults\" ]; then\n  printf '%s\\n' '{{\"model\":\"test-model\",\"agent_prompt\":\"You are a status reporter for a coding agent session.\",\"terminal_prompt\":\"Terminal session status reporter.\"}}'\n  exit 0\nfi\nprintf '%s\\n' '{{\"type\":\"hello\",\"protocol\":\"clawgs.emit.v1\",\"engine_version\":\"0.1.0\"}}'\ncount=1\nwhile IFS= read -r line; do\n  printf '%s\\n' \"$line\" >> \"{}\"\n  printf '%s\\n' \"{{\\\"type\\\":\\\"sync_result\\\",\\\"id\\\":\\\"$count\\\",\\\"stream_instance_id\\\":\\\"stream-a\\\",\\\"updates\\\":[]}}\"\n  count=$((count + 1))\ndone\nsleep 5\n",
-            args_log.display(),
-            input_log.display()
-        );
+        let script = r#"#!/bin/sh
+printf '%s\n' "$*" >> "__ARGS_LOG__"
+if [ "$1" = "defaults" ]; then
+  printf '%s\n' '{"model":"test-model","agent_prompt":"You are a status reporter for a coding agent session.","terminal_prompt":"Terminal session status reporter."}'
+  exit 0
+fi
+printf '%s\n' '{"type":"hello","protocol":"clawgs.emit.v1","engine_version":"0.1.0"}'
+count=1
+while IFS= read -r line; do
+  printf '%s\n' "$line" >> "__INPUT_LOG__"
+  printf '%s\n' '{"type":"sync_result","id":"'"$count"'","stream_instance_id":"stream-a","updates":[],"metrics":{"sessions_seen":1,"llm_calls":1,"suppressed":0}}'
+  count=$((count + 1))
+done
+sleep 5
+"#
+        .replace("__ARGS_LOG__", &args_log.display().to_string())
+        .replace("__INPUT_LOG__", &input_log.display().to_string());
         fs::write(&script_path, script).expect("write fake clawgs");
         let mut perms = fs::metadata(&script_path).expect("metadata").permissions();
         perms.set_mode(0o755);

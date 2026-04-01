@@ -4,10 +4,10 @@
 
 ## What This Is
 
-Swimmers is a native terminal UI backed by a Rust API that manages tmux
-sessions. The supported path is `API + TUI`.
+Swimmers is a tmux session manager with a Rust API, a native TUI, and a
+browser surface for tailnet access.
 
-**Target setup:** local API on `3210` with the native TUI attached to it.
+**Target setup:** local API on `3210` with either the native TUI or the browser UI attached to it.
 
 ---
 
@@ -68,6 +68,18 @@ That will:
 - wait for readiness
 - launch the native TUI
 
+Browser/tailnet path:
+
+```bash
+make web
+```
+
+That will:
+
+- start the API on `0.0.0.0:3210`
+- auto-detect `frankentui/pkg` when available for live browser terminal rendering
+- print the local URL and the first tailnet IPv4 URL when Tailscale is installed
+
 If you want separate processes:
 
 ```bash
@@ -91,7 +103,7 @@ machine if you expose the port intentionally.
 
 ### Structured Transcript Snapshot (Optional)
 
-If you also have the sibling `skills` repo with `clawgs`, you can extract a
+If you also have the sibling `opensource/clawgs` repo checked out, you can extract a
 normalized Claude/Codex JSON snapshot from the same machine:
 
 ```bash

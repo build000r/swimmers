@@ -1,6 +1,7 @@
 mod api;
 mod auth;
 mod config;
+mod env_bootstrap;
 mod metrics;
 mod native;
 mod persistence;
@@ -12,6 +13,7 @@ mod state;
 mod test_support;
 mod thought;
 mod types;
+mod web;
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -118,6 +120,7 @@ fn build_app_router(
     prom_handle: metrics_exporter_prometheus::PrometheusHandle,
 ) -> Router {
     Router::new()
+        .merge(web::routes())
         .merge(api::api_router(config))
         .merge(metrics::endpoint::metrics_router(prom_handle))
         .with_state(state)
@@ -134,6 +137,7 @@ async fn run() -> anyhow::Result<()> {
 
     // Load .env before anything reads env vars.
     let _ = dotenvy::dotenv();
+    env_bootstrap::bootstrap_provider_env_from_shell();
 
     // Initialize tracing
     tracing_subscriber::fmt()
@@ -184,6 +188,8 @@ async fn run() -> anyhow::Result<()> {
         supervisor,
         config: config.clone(),
         thought_config,
+        native_desktop_app: Arc::new(RwLock::new(native::default_native_app())),
+        ghostty_open_mode: Arc::new(RwLock::new(native::default_ghostty_open_mode())),
         sync_request_sequence,
         daemon_defaults,
         file_store: persistence_store,

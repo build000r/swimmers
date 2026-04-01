@@ -1,0 +1,601 @@
+const STYLE_BOLD = 0b0000_0001;
+const STYLE_DIM = 0b0000_0010;
+const STYLE_ITALIC = 0b0000_0100;
+const STYLE_UNDERLINE = 0b0000_1000;
+
+const COLORS = {
+  transparent: 0,
+  text: rgba(214, 236, 245, 255),
+  muted: rgba(141, 164, 175, 255),
+  accent: rgba(125, 216, 255, 255),
+  accentSoft: rgba(125, 216, 255, 212),
+  success: rgba(139, 227, 191, 255),
+  warning: rgba(255, 207, 122, 255),
+  danger: rgba(255, 125, 148, 255),
+  panelBg: rgba(10, 15, 19, 214),
+  panelBgStrong: rgba(7, 11, 14, 236),
+  panelBorder: rgba(120, 210, 255, 176),
+  panelBorderSoft: rgba(120, 210, 255, 92),
+  chipBg: rgba(14, 20, 25, 228),
+  chipActiveBg: rgba(18, 43, 47, 236),
+  chipDangerBg: rgba(46, 18, 24, 236),
+  sessionActiveBg: rgba(18, 42, 49, 240),
+  sessionPublishedBg: rgba(20, 34, 30, 224),
+  footerBg: rgba(8, 12, 16, 232),
+  overlayBg: rgba(5, 8, 11, 188),
+};
+
+export function buildSurfaceFrame(model) {
+  const cols = clampInt(model?.cols, 80, 32, 240);
+  const rows = clampInt(model?.rows, 24, 16, 120);
+  const frame = {
+    cols,
+    rows,
+    cells: new Uint32Array(cols * rows * 4),
+    spans: new Uint32Array([0, cols * rows]),
+    zones: [],
+    masks: [],
+  };
+
+  const layout = computeLayout(cols, rows, Boolean(model?.focusLayout));
+  drawHeader(frame, layout, model);
+  if (layout.sessionRail) {
+    drawSessionRail(frame, layout.sessionRail, model);
+  }
+  if (layout.detailRail) {
+    drawDetailRail(frame, layout.detailRail, model);
+  }
+  drawFooter(frame, layout.footer, model);
+  drawCenterOverlay(frame, layout.center, model);
+  frame.layout = layout;
+  return frame;
+}
+
+export function surfaceActionAt(zones, cell) {
+  if (!Array.isArray(zones) || !cell) {
+    return null;
+  }
+  for (let index = zones.length - 1; index >= 0; index -= 1) {
+    const zone = zones[index];
+    if (zone && cellInRect(cell, zone.rect)) {
+      return zone;
+    }
+  }
+  return null;
+}
+
+export function surfaceConsumesPointer(masks, cell) {
+  if (!Array.isArray(masks) || !cell) {
+    return false;
+  }
+  return masks.some((rect) => cellInRect(cell, rect));
+}
+
+function computeLayout(cols, rows, focusLayout) {
+  const header = rect(2, 1, Math.max(28, cols - 4), 4);
+  const footerHeight = rows >= 26 ? 5 : 4;
+  const footer = rect(2, Math.max(6, rows - footerHeight - 1), Math.max(28, cols - 4), footerHeight);
+  const panelTop = header.y + header.h + 1;
+  const panelBottom = footer.y - 1;
+  const panelHeight = Math.max(6, panelBottom - panelTop);
+  const showSessionRail = !focusLayout && cols >= 84 && panelHeight >= 10;
+  const showDetailRail = cols >= 110 && panelHeight >= 10;
+  const leftWidth = showSessionRail ? Math.max(24, Math.min(32, Math.floor(cols * 0.24))) : 0;
+  const rightWidth = showDetailRail ? Math.max(28, Math.min(36, Math.floor(cols * 0.27))) : 0;
+  const sessionRail = showSessionRail ? rect(2, panelTop, leftWidth, panelHeight) : null;
+  const detailRail = showDetailRail ? rect(cols - rightWidth - 2, panelTop, rightWidth, panelHeight) : null;
+  const centerLeft = sessionRail ? sessionRail.x + sessionRail.w + 1 : 2;
+  const centerRight = detailRail ? detailRail.x - 1 : cols - 2;
+  const center = rect(centerLeft, panelTop, Math.max(10, centerRight - centerLeft), panelHeight);
+
+  return {
+    header,
+    footer,
+    sessionRail,
+    detailRail,
+    center,
+  };
+}
+
+function drawHeader(frame, layout, model) {
+  drawPanel(frame, layout.header, "swimmers");
+  pushMask(frame, layout.header);
+
+  const title = model?.focusLayout
+    ? "tailnet control surface / published selection"
+    : "tailnet control surface / rendered web shell";
+  drawText(frame, layout.header.x + 2, layout.header.y + 1, title, {
+    fg: COLORS.accent,
+    attrs: STYLE_BOLD,
+    width: layout.header.w - 4,
+  });
+
+  const chips = [
+    chipSpec(`conn ${safeLabel(model?.connectionLabel, "idle")}`, model?.connectionMuted ? COLORS.muted : COLORS.text, COLORS.chipBg),
+    chipSpec(`mode ${safeLabel(model?.modeLabel, "unknown")}`, model?.modeMuted ? COLORS.muted : COLORS.text, COLORS.chipBg),
+    chipSpec(
+      model?.followPublishedSelection ? "published follow on" : "published follow off",
+      model?.followPublishedSelection ? COLORS.success : COLORS.muted,
+      model?.followPublishedSelection ? COLORS.chipActiveBg : COLORS.chipBg,
+      {
+        type: "action",
+        actionId: "toggle_follow",
+      },
+    ),
+    chipSpec("auth", COLORS.text, COLORS.chipBg, {
+      type: "action",
+      actionId: "open_auth",
+    }),
+    chipSpec("refresh", COLORS.text, COLORS.chipBg, {
+      type: "action",
+      actionId: "refresh",
+    }),
+  ];
+
+  let cursorX = layout.header.x + 2;
+  const chipY = layout.header.y + 2;
+  const chipLimit = layout.header.x + layout.header.w - 2;
+  for (const chip of chips) {
+    const width = chip.label.length + 4;
+    if (cursorX + width > chipLimit) {
+      break;
+    }
+    drawChip(frame, cursorX, chipY, chip.label, chip.fg, chip.bg);
+    if (chip.zone) {
+      pushZone(frame, chip.zone, rect(cursorX, chipY, width, 1));
+    }
+    cursorX += width + 1;
+  }
+
+  const selected = model?.currentSession?.name || (model?.followPublishedSelection ? "waiting for published session" : "no session selected");
+  drawTextRight(frame, layout.header.x + layout.header.w - 2, layout.header.y + 1, selected, {
+    fg: COLORS.text,
+    attrs: STYLE_BOLD,
+    width: Math.max(12, Math.floor(layout.header.w * 0.38)),
+  });
+
+  const secondary = model?.currentSession
+    ? [model.currentSession.state, model.currentSession.toolLabel, model.currentSession.cwdLabel].filter(Boolean).join(" / ")
+    : model?.frankenTermAvailable
+      ? "rendered surface ready"
+      : "FrankenTerm assets unavailable";
+  drawTextRight(frame, layout.header.x + layout.header.w - 2, layout.header.y + 2, secondary, {
+    fg: COLORS.muted,
+    width: Math.max(16, Math.floor(layout.header.w * 0.42)),
+  });
+}
+
+function drawSessionRail(frame, rail, model) {
+  drawPanel(frame, rail, model?.focusLayout ? "published" : "sessions");
+  pushMask(frame, rail);
+
+  const sessions = Array.isArray(model?.sessions) ? model.sessions : [];
+  if (!sessions.length) {
+    drawTextBlock(frame, rail.x + 2, rail.y + 2, rail.w - 4, 4, "No live sessions.\nCreate one from the rendered action rail.", {
+      fg: COLORS.muted,
+    });
+    return;
+  }
+
+  const entryHeight = 4;
+  const availableRows = Math.max(1, rail.h - 3);
+  const visibleCount = Math.max(1, Math.floor(availableRows / entryHeight));
+  const selectedIndex = Math.max(0, sessions.findIndex((session) => session.sessionId === model?.selectedSessionId));
+  const start = clampInt(selectedIndex - Math.floor(visibleCount / 2), 0, 0, Math.max(0, sessions.length - visibleCount));
+  const end = Math.min(sessions.length, start + visibleCount);
+
+  let y = rail.y + 1;
+  for (let index = start; index < end; index += 1) {
+    const session = sessions[index];
+    const isSelected = session.sessionId === model?.selectedSessionId;
+    const isPublished = session.sessionId === model?.publishedSessionId;
+    const bg = isSelected ? COLORS.sessionActiveBg : isPublished ? COLORS.sessionPublishedBg : COLORS.transparent;
+    const fg = isSelected ? COLORS.text : COLORS.text;
+    fillRect(frame, rail.x + 1, y, rail.w - 2, entryHeight - 1, bg);
+    drawText(frame, rail.x + 2, y, truncate(session.name, rail.w - 6), {
+      fg: isSelected ? COLORS.success : fg,
+      attrs: STYLE_BOLD,
+      width: rail.w - 4,
+    });
+    drawText(frame, rail.x + 2, y + 1, truncate(`${session.state} / ${session.toolLabel}`, rail.w - 6), {
+      fg: session.transportLabel === "healthy" ? COLORS.muted : COLORS.warning,
+      width: rail.w - 4,
+    });
+    drawText(frame, rail.x + 2, y + 2, truncate(`${session.cwdLabel} :: ${session.thoughtLabel}`, rail.w - 6), {
+      fg: COLORS.muted,
+      width: rail.w - 4,
+    });
+    pushZone(
+      frame,
+      {
+        type: "session",
+        sessionId: session.sessionId,
+      },
+      rect(rail.x + 1, y, rail.w - 2, entryHeight - 1),
+    );
+    y += entryHeight;
+  }
+
+  if (end < sessions.length) {
+    drawText(frame, rail.x + 2, rail.y + rail.h - 2, truncate(`more ${sessions.length - end} below`, rail.w - 4), {
+      fg: COLORS.muted,
+      attrs: STYLE_ITALIC,
+      width: rail.w - 4,
+    });
+  }
+}
+
+function drawDetailRail(frame, rail, model) {
+  const session = model?.currentSession;
+  drawPanel(frame, rail, session ? "details" : "status");
+  pushMask(frame, rail);
+
+  if (!session) {
+    const message = model?.followPublishedSelection
+      ? "Waiting for the native TUI to publish a session."
+      : "Select a session from the rendered rail to attach.";
+    drawTextBlock(frame, rail.x + 2, rail.y + 2, rail.w - 4, 5, message, {
+      fg: COLORS.muted,
+    });
+    return;
+  }
+
+  const lines = [
+    ["state", session.state],
+    ["rest", session.restLabel],
+    ["transport", session.transportLabel],
+    ["tool", session.toolLabel],
+    ["context", session.contextLabel],
+    ["skill", session.skillLabel],
+    ["clients", session.attachedLabel],
+    ["activity", session.activityLabel],
+    ["command", session.commandLabel],
+  ];
+
+  if (model?.followPublishedSelection && model?.publishedAtLabel) {
+    lines.push(["published", model.publishedAtLabel]);
+  }
+  if (session.commitCandidate) {
+    lines.push(["commit", "candidate"]);
+  }
+
+  let y = rail.y + 1;
+  drawText(frame, rail.x + 2, y, truncate(session.name, rail.w - 4), {
+    fg: COLORS.accent,
+    attrs: STYLE_BOLD,
+    width: rail.w - 4,
+  });
+  y += 2;
+
+  for (const [label, value] of lines) {
+    if (y >= rail.y + rail.h - 5) {
+      break;
+    }
+    drawText(frame, rail.x + 2, y, truncate(label, 10), {
+      fg: COLORS.muted,
+      attrs: STYLE_UNDERLINE,
+      width: 10,
+    });
+    drawText(frame, rail.x + 13, y, truncate(value || "-", rail.w - 15), {
+      fg: COLORS.text,
+      width: rail.w - 15,
+    });
+    y += 1;
+  }
+
+  y += 1;
+  drawText(frame, rail.x + 2, y, "thought", {
+    fg: COLORS.muted,
+    attrs: STYLE_UNDERLINE,
+  });
+  drawTextBlock(frame, rail.x + 2, y + 1, rail.w - 4, Math.max(2, rail.y + rail.h - y - 2), session.thoughtLabel, {
+    fg: COLORS.text,
+  });
+}
+
+function drawFooter(frame, footer, model) {
+  drawPanel(frame, footer, model?.activeSheet ? `sheet ${model.activeSheet}` : "actions");
+  pushMask(frame, footer);
+
+  const search = `search ${safeLabel(model?.searchLabel, "idle")}`;
+  const utility = safeLabel(model?.utilityLabel, "click a rendered action to begin");
+  drawText(frame, footer.x + 2, footer.y + 1, truncate(search, footer.w - 4), {
+    fg: model?.searchMuted ? COLORS.muted : COLORS.text,
+    width: footer.w - 4,
+  });
+  if (footer.h >= 5) {
+    drawText(frame, footer.x + 2, footer.y + 2, truncate(utility, footer.w - 4), {
+      fg: model?.utilityMuted ? COLORS.muted : COLORS.text,
+      width: footer.w - 4,
+    });
+  }
+
+  const actionY = footer.h >= 5 ? footer.y + 3 : footer.y + 2;
+  const actions = [
+    actionSpec("search", "search", "open_search", Boolean(model?.terminalReady)),
+    actionSpec("send", "send", "open_send", Boolean(model?.currentSession) && !model?.readOnly),
+    actionSpec(model?.followPublishedSelection ? "following" : "follow", "follow", "toggle_follow", true),
+    actionSpec(model?.selectMode ? "select on" : "select", "select", "toggle_select", Boolean(model?.terminalReady)),
+    actionSpec("copy", "copy", "copy_selection", Boolean(model?.terminalReady)),
+    actionSpec("new", "new", "open_create", !model?.readOnly),
+    actionSpec("auth", "auth", "open_auth", true),
+    actionSpec("refresh", "refresh", "refresh", true),
+  ];
+
+  let x = footer.x + 2;
+  const limit = footer.x + footer.w - 2;
+  for (const action of actions) {
+    const width = action.label.length + 4;
+    if (x + width > limit) {
+      break;
+    }
+    drawChip(frame, x, actionY, action.label, action.enabled ? COLORS.text : COLORS.muted, action.enabled ? COLORS.chipBg : COLORS.panelBg);
+    pushZone(
+      frame,
+      {
+        type: "action",
+        actionId: action.actionId,
+        disabled: !action.enabled,
+      },
+      rect(x, actionY, width, 1),
+    );
+    x += width + 1;
+  }
+}
+
+function drawCenterOverlay(frame, center, model) {
+  const messages = [];
+  if (!model?.frankenTermAvailable) {
+    messages.push("FrankenTerm assets are unavailable. Falling back to plain snapshot text.");
+  } else if (!model?.currentSession && model?.followPublishedSelection) {
+    messages.push("Waiting for the native TUI to publish a session to this URL.");
+  } else if (!model?.currentSession) {
+    messages.push("Select a session from the rendered rail to attach from the tailnet URL.");
+  } else if (!model?.terminalReady) {
+    messages.push(`Attaching to ${model.currentSession.name}...`);
+  }
+
+  if (!messages.length) {
+    return;
+  }
+
+  const width = Math.min(center.w - 4, Math.max(28, Math.floor(center.w * 0.72)));
+  const height = Math.min(center.h - 2, 6);
+  const x = center.x + Math.max(0, Math.floor((center.w - width) / 2));
+  const y = center.y + Math.max(1, Math.floor((center.h - height) / 2));
+  const overlay = rect(x, y, width, height);
+  drawPanel(frame, overlay, "status", {
+    bg: COLORS.overlayBg,
+    border: COLORS.panelBorderSoft,
+  });
+  pushMask(frame, overlay);
+  drawTextBlock(frame, overlay.x + 2, overlay.y + 2, overlay.w - 4, overlay.h - 3, messages.join(" "), {
+    fg: COLORS.text,
+  });
+}
+
+function drawPanel(frame, panel, title, options = {}) {
+  const bg = options.bg ?? COLORS.panelBg;
+  const border = options.border ?? COLORS.panelBorder;
+  fillRect(frame, panel.x, panel.y, panel.w, panel.h, bg);
+  drawBorder(frame, panel, border);
+  if (title) {
+    drawText(frame, panel.x + 2, panel.y, ` ${truncate(title, Math.max(0, panel.w - 6))} `, {
+      fg: border,
+      bg,
+      attrs: STYLE_BOLD,
+      width: Math.max(0, panel.w - 4),
+    });
+  }
+}
+
+function drawBorder(frame, panel, fg) {
+  if (panel.w < 2 || panel.h < 2) {
+    return;
+  }
+  putChar(frame, panel.x, panel.y, "╭", fg, COLORS.transparent);
+  putChar(frame, panel.x + panel.w - 1, panel.y, "╮", fg, COLORS.transparent);
+  putChar(frame, panel.x, panel.y + panel.h - 1, "╰", fg, COLORS.transparent);
+  putChar(frame, panel.x + panel.w - 1, panel.y + panel.h - 1, "╯", fg, COLORS.transparent);
+  for (let x = panel.x + 1; x < panel.x + panel.w - 1; x += 1) {
+    putChar(frame, x, panel.y, "─", fg, COLORS.transparent);
+    putChar(frame, x, panel.y + panel.h - 1, "─", fg, COLORS.transparent);
+  }
+  for (let y = panel.y + 1; y < panel.y + panel.h - 1; y += 1) {
+    putChar(frame, panel.x, y, "│", fg, COLORS.transparent);
+    putChar(frame, panel.x + panel.w - 1, y, "│", fg, COLORS.transparent);
+  }
+}
+
+function drawChip(frame, x, y, label, fg, bg) {
+  const width = label.length + 4;
+  fillRect(frame, x, y, width, 1, bg);
+  drawText(frame, x, y, `[${label}]`, {
+    fg,
+    bg,
+    attrs: STYLE_BOLD,
+    width,
+  });
+}
+
+function drawText(frame, x, y, text, options = {}) {
+  if (typeof text !== "string" || !text) {
+    return;
+  }
+  const width = clampInt(options.width, text.length, 0, frame.cols);
+  const content = width > 0 ? truncate(text, width) : text;
+  let cursor = x;
+  for (const char of content) {
+    if (cursor >= x + width) {
+      break;
+    }
+    putChar(
+      frame,
+      cursor,
+      y,
+      char,
+      options.fg ?? COLORS.text,
+      options.bg ?? COLORS.transparent,
+      options.attrs ?? 0,
+    );
+    cursor += 1;
+  }
+}
+
+function drawTextRight(frame, rightX, y, text, options = {}) {
+  const width = clampInt(options.width, String(text || "").length, 0, frame.cols);
+  const content = truncate(String(text || ""), width);
+  drawText(frame, rightX - content.length + 1, y, content, options);
+}
+
+function drawTextBlock(frame, x, y, width, maxLines, text, options = {}) {
+  const lines = wrapText(String(text || ""), width, maxLines);
+  for (let index = 0; index < lines.length; index += 1) {
+    drawText(frame, x, y + index, lines[index], {
+      fg: options.fg,
+      bg: options.bg,
+      attrs: options.attrs,
+      width,
+    });
+  }
+}
+
+function wrapText(text, width, maxLines) {
+  const safeWidth = Math.max(1, width);
+  const lines = [];
+  const rawLines = String(text || "").replaceAll("\r", "").split("\n");
+  for (const rawLine of rawLines) {
+    if (lines.length >= maxLines) {
+      break;
+    }
+    const words = rawLine.split(/\s+/).filter(Boolean);
+    if (!words.length) {
+      lines.push("");
+      continue;
+    }
+    let current = "";
+    for (const word of words) {
+      const candidate = current ? `${current} ${word}` : word;
+      if (candidate.length <= safeWidth) {
+        current = candidate;
+        continue;
+      }
+      if (current) {
+        lines.push(truncate(current, safeWidth));
+        if (lines.length >= maxLines) {
+          return finalizeLines(lines, safeWidth, maxLines);
+        }
+        current = "";
+      }
+      if (word.length <= safeWidth) {
+        current = word;
+      } else {
+        lines.push(truncate(word, safeWidth));
+        if (lines.length >= maxLines) {
+          return finalizeLines(lines, safeWidth, maxLines);
+        }
+      }
+    }
+    if (current && lines.length < maxLines) {
+      lines.push(truncate(current, safeWidth));
+    }
+  }
+  return finalizeLines(lines, safeWidth, maxLines);
+}
+
+function finalizeLines(lines, width, maxLines) {
+  const trimmed = lines.slice(0, maxLines);
+  if (lines.length > maxLines && trimmed.length) {
+    trimmed[maxLines - 1] = truncate(trimmed[maxLines - 1], width);
+  }
+  return trimmed;
+}
+
+function putChar(frame, x, y, char, fg, bg, attrs = 0) {
+  if (x < 0 || y < 0 || x >= frame.cols || y >= frame.rows) {
+    return;
+  }
+  const index = (y * frame.cols + x) * 4;
+  frame.cells[index] = bg >>> 0;
+  frame.cells[index + 1] = fg >>> 0;
+  frame.cells[index + 2] = codePoint(char);
+  frame.cells[index + 3] = attrs >>> 0;
+}
+
+function fillRect(frame, x, y, width, height, bg) {
+  for (let row = 0; row < height; row += 1) {
+    for (let col = 0; col < width; col += 1) {
+      putChar(frame, x + col, y + row, " ", COLORS.text, bg, 0);
+    }
+  }
+}
+
+function pushZone(frame, zone, rectValue) {
+  frame.zones.push({ ...zone, rect: rectValue });
+}
+
+function pushMask(frame, rectValue) {
+  frame.masks.push(rectValue);
+}
+
+function rect(x, y, w, h) {
+  return { x, y, w, h };
+}
+
+function cellInRect(cell, rectValue) {
+  return (
+    cell.x >= rectValue.x &&
+    cell.x < rectValue.x + rectValue.w &&
+    cell.y >= rectValue.y &&
+    cell.y < rectValue.y + rectValue.h
+  );
+}
+
+function chipSpec(label, fg, bg, zone = null) {
+  return { label, fg, bg, zone };
+}
+
+function actionSpec(label, title, actionId, enabled) {
+  return {
+    label: label || title,
+    actionId,
+    enabled,
+  };
+}
+
+function truncate(value, width) {
+  const text = String(value || "");
+  if (width <= 0) {
+    return "";
+  }
+  if (text.length <= width) {
+    return text;
+  }
+  if (width <= 3) {
+    return text.slice(0, width);
+  }
+  return `${text.slice(0, width - 3)}...`;
+}
+
+function safeLabel(value, fallback) {
+  const text = String(value || "").trim();
+  return text || fallback;
+}
+
+function codePoint(char) {
+  return (String(char || " ").codePointAt(0) ?? 32) >>> 0;
+}
+
+function clampInt(value, fallback, min, max) {
+  const numeric = Number.isFinite(value) ? Math.trunc(value) : fallback;
+  return Math.max(min, Math.min(max, numeric));
+}
+
+function rgba(red, green, blue, alpha = 255) {
+  return (
+    ((red & 255) * 0x1000000) +
+    ((green & 255) << 16) +
+    ((blue & 255) << 8) +
+    (alpha & 255)
+  ) >>> 0;
+}

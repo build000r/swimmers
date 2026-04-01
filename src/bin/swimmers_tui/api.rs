@@ -1,4 +1,17 @@
 use super::*;
+use swimmers::openrouter_models::{
+    cached_or_default_openrouter_candidates, refresh_openrouter_model_cache,
+};
+use swimmers::thought::probe::{run_thought_config_probe, ThoughtConfigProbeResult};
+
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
+pub(crate) struct ThoughtConfigResponse {
+    #[serde(flatten)]
+    pub(crate) config: ThoughtConfig,
+    pub(crate) daemon_defaults: Option<DaemonDefaults>,
+}
+
+pub(crate) type ThoughtConfigTestResponse = ThoughtConfigProbeResult;
 
 pub(crate) struct ApiClient {
     pub(crate) http: Client,
@@ -38,6 +51,20 @@ impl ApiClient {
 
     pub(crate) fn transport_error(&self, action: &str, err: reqwest::Error) -> String {
         friendly_transport_error(&self.base_url, action, &err)
+    }
+
+    fn targets_local_backend(&self) -> bool {
+        let Ok(url) = reqwest::Url::parse(&self.base_url) else {
+            return false;
+        };
+        match url.host_str() {
+            Some("localhost") => true,
+            Some(host) => host
+                .parse::<std::net::IpAddr>()
+                .map(|ip| ip.is_loopback())
+                .unwrap_or(false),
+            None => false,
+        }
     }
 
     pub(crate) fn startup_access_error(&self, path: &str, status: reqwest::StatusCode) -> String {
@@ -103,6 +130,22 @@ impl ApiClient {
         self.preflight_selection_sync_access().await?;
         Ok(())
     }
+
+    async fn local_test_thought_config(
+        &self,
+        config: ThoughtConfig,
+    ) -> Result<ThoughtConfigTestResponse, String> {
+        let config = config
+            .normalize_and_validate()
+            .map_err(|err| err.to_string())?;
+        Ok(run_thought_config_probe(&config).await)
+    }
+
+    async fn refresh_openrouter_candidates_inner(&self) -> Result<Vec<String>, String> {
+        refresh_openrouter_model_cache(&self.http)
+            .await
+            .map(|cache| cache.models)
+    }
 }
 
 pub(crate) fn root_error_message(err: &(dyn StdError + 'static)) -> String {
@@ -133,17 +176,35 @@ pub(crate) fn friendly_transport_error(
     };
 
     format!(
-        "backend unavailable at {base_url}: {summary} ({detail}). Start `swimmers` or set SWIMMERS_TUI_URL."
+        "swimmers API unavailable at {base_url}: {summary} ({detail}). Start `swimmers` or set SWIMMERS_TUI_URL."
     )
 }
 
 pub(crate) trait TuiApi {
     fn fetch_sessions(&self) -> BoxFuture<'_, Result<Vec<SessionSummary>, String>>;
+    fn fetch_thought_config(&self) -> BoxFuture<'_, Result<ThoughtConfigResponse, String>>;
+    fn update_thought_config(
+        &self,
+        config: ThoughtConfig,
+    ) -> BoxFuture<'_, Result<ThoughtConfig, String>>;
+    fn test_thought_config(
+        &self,
+        config: ThoughtConfig,
+    ) -> BoxFuture<'_, Result<ThoughtConfigTestResponse, String>>;
+    fn refresh_openrouter_candidates(&self) -> BoxFuture<'_, Result<Vec<String>, String>>;
     fn fetch_mermaid_artifact(
         &self,
         session_id: &str,
     ) -> BoxFuture<'_, Result<MermaidArtifactResponse, String>>;
     fn fetch_native_status(&self) -> BoxFuture<'_, Result<NativeDesktopStatusResponse, String>>;
+    fn set_native_app(
+        &self,
+        app: NativeDesktopApp,
+    ) -> BoxFuture<'_, Result<NativeDesktopStatusResponse, String>>;
+    fn set_native_mode(
+        &self,
+        mode: GhosttyOpenMode,
+    ) -> BoxFuture<'_, Result<NativeDesktopStatusResponse, String>>;
     fn publish_selection(&self, session_id: Option<&str>) -> BoxFuture<'_, Result<(), String>>;
     fn open_session(
         &self,
@@ -181,6 +242,95 @@ impl TuiApi for ApiClient {
             }
 
             Err(read_error(response).await)
+        })
+    }
+
+    fn fetch_thought_config(&self) -> BoxFuture<'_, Result<ThoughtConfigResponse, String>> {
+        Box::pin(async move {
+            let url = format!("{}/v1/thought-config", self.base_url);
+            let response = self
+                .with_auth(self.http.get(url))
+                .send()
+                .await
+                .map_err(|err| self.transport_error("fetch thought config", err))?;
+
+            if response.status().is_success() {
+                return response
+                    .json::<ThoughtConfigResponse>()
+                    .await
+                    .map_err(|err| format!("failed to parse thought config: {err}"));
+            }
+
+            Err(read_error(response).await)
+        })
+    }
+
+    fn update_thought_config(
+        &self,
+        config: ThoughtConfig,
+    ) -> BoxFuture<'_, Result<ThoughtConfig, String>> {
+        Box::pin(async move {
+            let url = format!("{}/v1/thought-config", self.base_url);
+            let response = self
+                .with_auth(self.http.put(url))
+                .json(&config)
+                .send()
+                .await
+                .map_err(|err| self.transport_error("update thought config", err))?;
+
+            if response.status().is_success() {
+                return response
+                    .json::<ThoughtConfig>()
+                    .await
+                    .map_err(|err| format!("failed to parse updated thought config: {err}"));
+            }
+
+            Err(read_error(response).await)
+        })
+    }
+
+    fn test_thought_config(
+        &self,
+        config: ThoughtConfig,
+    ) -> BoxFuture<'_, Result<ThoughtConfigTestResponse, String>> {
+        Box::pin(async move {
+            let url = format!("{}/v1/thought-config/test", self.base_url);
+            let response = self
+                .with_auth(self.http.post(url))
+                .json(&config)
+                .send()
+                .await;
+
+            let response = match response {
+                Ok(response) => response,
+                Err(err) if self.targets_local_backend() => {
+                    return self.local_test_thought_config(config).await;
+                }
+                Err(err) => return Err(self.transport_error("test thought config", err)),
+            };
+
+            if response.status().is_success() {
+                return response
+                    .json::<ThoughtConfigTestResponse>()
+                    .await
+                    .map_err(|err| format!("failed to parse thought config test: {err}"));
+            }
+
+            if response.status() == reqwest::StatusCode::NOT_FOUND && self.targets_local_backend() {
+                return self.local_test_thought_config(config).await;
+            }
+
+            Err(read_error(response).await)
+        })
+    }
+
+    fn refresh_openrouter_candidates(&self) -> BoxFuture<'_, Result<Vec<String>, String>> {
+        Box::pin(async move {
+            match self.refresh_openrouter_candidates_inner().await {
+                Ok(models) if !models.is_empty() => Ok(models),
+                Ok(_) => Ok(cached_or_default_openrouter_candidates()),
+                Err(err) => Err(err),
+            }
         })
     }
 
@@ -225,6 +375,68 @@ impl TuiApi for ApiClient {
                     .json::<NativeDesktopStatusResponse>()
                     .await
                     .map_err(|err| format!("failed to parse native status: {err}"));
+            }
+
+            Err(read_error(response).await)
+        })
+    }
+
+    fn set_native_app(
+        &self,
+        app: NativeDesktopApp,
+    ) -> BoxFuture<'_, Result<NativeDesktopStatusResponse, String>> {
+        Box::pin(async move {
+            let url = format!("{}/v1/native/app", self.base_url);
+            let response = self
+                .with_auth(self.http.put(url))
+                .json(&NativeDesktopConfigRequest { app })
+                .send()
+                .await
+                .map_err(|err| self.transport_error("switch the native desktop target", err))?;
+
+            if response.status().is_success() {
+                return response
+                    .json::<NativeDesktopStatusResponse>()
+                    .await
+                    .map_err(|err| format!("failed to parse native status: {err}"));
+            }
+
+            if response.status() == reqwest::StatusCode::NOT_FOUND {
+                return Err(format!(
+                    "backend at {} does not support runtime native target switching yet. If this is your local server, restart `swimmers` or relaunch via `make tui`.",
+                    self.base_url
+                ));
+            }
+
+            Err(read_error(response).await)
+        })
+    }
+
+    fn set_native_mode(
+        &self,
+        mode: GhosttyOpenMode,
+    ) -> BoxFuture<'_, Result<NativeDesktopStatusResponse, String>> {
+        Box::pin(async move {
+            let url = format!("{}/v1/native/mode", self.base_url);
+            let response = self
+                .with_auth(self.http.put(url))
+                .json(&NativeDesktopModeRequest { mode })
+                .send()
+                .await
+                .map_err(|err| self.transport_error("switch the Ghostty preview mode", err))?;
+
+            if response.status().is_success() {
+                return response
+                    .json::<NativeDesktopStatusResponse>()
+                    .await
+                    .map_err(|err| format!("failed to parse native status: {err}"));
+            }
+
+            if response.status() == reqwest::StatusCode::NOT_FOUND {
+                return Err(format!(
+                    "backend at {} does not support runtime Ghostty preview mode switching yet. If this is your local server, restart `swimmers` or relaunch via `make tui`.",
+                    self.base_url
+                ));
             }
 
             Err(read_error(response).await)
