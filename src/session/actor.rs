@@ -1106,6 +1106,7 @@ impl SessionActor {
                 crate::types::ThoughtState::Holding,
             ),
             commit_candidate: false,
+            objective_changed_at: None,
             last_skill: self.last_skill.clone(),
             last_activity_at: self.last_activity_at,
             repo_theme_id: None,
@@ -1357,13 +1358,7 @@ async fn query_tmux_cwd(tmux_name: &str) -> anyhow::Result<String> {
 async fn query_tmux_session_created(tmux_name: &str) -> anyhow::Result<chrono::DateTime<Utc>> {
     let target = exact_pane_target(tmux_name);
     let output = Command::new("tmux")
-        .args([
-            "display-message",
-            "-p",
-            "-t",
-            &target,
-            "#{session_created}",
-        ])
+        .args(["display-message", "-p", "-t", &target, "#{session_created}"])
         .env_remove("TMUX")
         .env_remove("TMUX_PANE")
         .output()
@@ -1936,15 +1931,14 @@ fn pty_read_loop(
 #[cfg(test)]
 mod tests {
     use super::{
-        cwd_from_osc7_payload, detect_skill_from_input_line, detect_tool_from_command_line,
-        detect_tool_from_process_entry, drain_completed_input_lines, extract_cwd_from_title,
-        find_osc_payload_end, line_looks_prompt_like, normalize_skill_name, osc_payloads,
-        output_counts_as_meaningful_activity, parse_process_entry, percent_decode,
-        capture_pane_tail, query_tmux_session_created, query_tool_from_tmux_process_tree,
-        resolve_tmux_terminal_env, should_refresh_cwd_from_tmux, should_refresh_tool_from_tmux,
-        visible_output_is_meaningful, write_and_flush_input, write_input_counts_as_activity,
-        ControlEvent, ProcessEntry, SessionActor, SessionCommand, CWD_REFRESH_MIN_INTERVAL,
-        TOOL_REFRESH_MIN_INTERVAL,
+        capture_pane_tail, cwd_from_osc7_payload, detect_skill_from_input_line,
+        detect_tool_from_command_line, detect_tool_from_process_entry, drain_completed_input_lines,
+        extract_cwd_from_title, find_osc_payload_end, line_looks_prompt_like, normalize_skill_name,
+        osc_payloads, output_counts_as_meaningful_activity, parse_process_entry, percent_decode,
+        query_tmux_session_created, query_tool_from_tmux_process_tree, resolve_tmux_terminal_env,
+        should_refresh_cwd_from_tmux, should_refresh_tool_from_tmux, visible_output_is_meaningful,
+        write_and_flush_input, write_input_counts_as_activity, ControlEvent, ProcessEntry,
+        SessionActor, SessionCommand, CWD_REFRESH_MIN_INTERVAL, TOOL_REFRESH_MIN_INTERVAL,
     };
     use crate::config::Config;
     use crate::scroll::guard::ScrollGuard;

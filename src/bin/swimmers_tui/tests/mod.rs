@@ -1711,6 +1711,7 @@ fn session_summary(session_id: &str, tmux_name: &str, cwd: &str) -> SessionSumma
         thought_updated_at: None,
         rest_state: RestState::Drowsy,
         commit_candidate: false,
+        objective_changed_at: None,
         last_skill: None,
         is_stale: false,
         attached_clients: 0,
@@ -5273,6 +5274,86 @@ fn clicking_commit_badge_surfaces_commit_launch_errors() {
         app.message.as_ref().map(|(message, _)| message.as_str()),
         Some("failed to launch commit codex: tmux not found")
     );
+}
+
+#[test]
+fn thought_panel_renders_shift_badge_for_objective_changes() {
+    let api = MockApi::new();
+    let layout = test_layout(120, 32);
+    let thought_content = layout
+        .thought_content
+        .expect("wide layout enables thought rail");
+    let mut app = make_app(api);
+    let mut session = session_summary_with_thought(
+        "sess-shift",
+        "2",
+        TEST_REPO_SWIMMERS,
+        "reframed the plan",
+        "2026-03-29T14:00:05Z",
+    );
+    session.objective_changed_at = session.thought_updated_at;
+
+    app.capture_thought_updates(&[session], layout.thought_entry_capacity());
+
+    let panel = build_thought_panel(&app, thought_content, layout.thought_entry_capacity());
+    let shift_rect = panel.rows[0].shift_rect.expect("shift badge");
+    let row_y = thought_content
+        .bottom()
+        .saturating_sub(panel.rows.len() as u16);
+    let mut renderer = test_renderer(120, 32);
+    render_thought_panel(
+        &app,
+        &mut renderer,
+        thought_content,
+        layout.thought_entry_capacity(),
+    );
+
+    assert_eq!(cell_at(&renderer, shift_rect.x, row_y).ch, '[');
+    assert_eq!(cell_at(&renderer, shift_rect.x, row_y).fg, Color::Yellow);
+}
+
+#[test]
+fn objective_shift_entries_override_timestamp_order_in_the_visible_rail() {
+    let api = MockApi::new();
+    let layout = test_layout(120, 32);
+    let thought_content = layout
+        .thought_content
+        .expect("wide layout enables thought rail");
+    let mut app = make_app(api);
+
+    let mut shift = session_summary_with_thought(
+        "sess-shift",
+        "2",
+        TEST_REPO_ALPHA,
+        "reframed the plan",
+        "2026-03-29T14:00:05Z",
+    );
+    shift.objective_changed_at = shift.thought_updated_at;
+
+    let plain = session_summary_with_thought(
+        "sess-plain",
+        "9",
+        TEST_REPO_SWIMMERS,
+        "routine update",
+        "2026-03-29T14:00:06Z",
+    );
+
+    app.capture_thought_updates(&[shift, plain], layout.thought_entry_capacity());
+
+    let panel = build_thought_panel(&app, thought_content, layout.thought_entry_capacity());
+    let shift_index = panel
+        .rows
+        .iter()
+        .position(|row| row.line == "2: reframed the plan")
+        .expect("shift row");
+    let plain_index = panel
+        .rows
+        .iter()
+        .position(|row| row.line == "9: routine update")
+        .expect("plain row");
+
+    assert!(shift_index > plain_index);
+    assert!(panel.rows[shift_index].shift_rect.is_some());
 }
 
 #[test]

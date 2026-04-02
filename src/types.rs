@@ -212,6 +212,8 @@ pub struct SessionSummary {
     pub rest_state: RestState,
     #[serde(default)]
     pub commit_candidate: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub objective_changed_at: Option<DateTime<Utc>>,
     #[serde(default)]
     pub last_skill: Option<String>,
     pub is_stale: bool,
@@ -700,6 +702,7 @@ mod tests {
                 thought_updated_at: None,
                 rest_state: RestState::Drowsy,
                 commit_candidate: false,
+                objective_changed_at: None,
                 last_skill: None,
                 is_stale: false,
                 attached_clients: 0,
@@ -752,6 +755,7 @@ mod tests {
                 thought_updated_at: None,
                 rest_state: RestState::Drowsy,
                 commit_candidate: false,
+                objective_changed_at: None,
                 last_skill: None,
                 is_stale: false,
                 attached_clients: 0,

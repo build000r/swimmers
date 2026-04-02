@@ -219,6 +219,9 @@ impl SessionSupervisor {
                     commit_candidate: thought_data
                         .map(|t| t.commit_candidate)
                         .unwrap_or(ps.commit_candidate),
+                    objective_changed_at: thought_data
+                        .and_then(|t| t.objective_changed_at)
+                        .or(ps.objective_changed_at),
                     last_skill: ps.last_skill.clone(),
                     is_stale: true,
                     attached_clients: 0,
@@ -826,6 +829,7 @@ impl SessionSupervisor {
                 summary.thought_updated_at = Some(thought_data.updated_at);
                 summary.rest_state = thought_data.rest_state;
                 summary.commit_candidate = thought_data.commit_candidate;
+                summary.objective_changed_at = thought_data.objective_changed_at;
                 if thought_data.token_count > 0 || summary.token_count == 0 {
                     summary.token_count = thought_data.token_count;
                 }
@@ -1011,6 +1015,9 @@ impl SessionSupervisor {
                 thought_updated_at: s.thought_updated_at,
                 rest_state: s.rest_state,
                 commit_candidate: s.commit_candidate,
+                objective_changed_at: thought_snapshots
+                    .get(&s.session_id)
+                    .and_then(|t| t.objective_changed_at),
                 last_skill: s.last_skill.clone(),
                 objective_fingerprint: thought_snapshots
                     .get(&s.session_id)
@@ -1036,10 +1043,16 @@ impl SessionSupervisor {
         commit_candidate: bool,
         updated_at: DateTime<Utc>,
         delivery: ThoughtDeliveryState,
+        objective_changed_at: Option<DateTime<Utc>>,
         objective_fingerprint: Option<String>,
     ) {
         {
             let mut thought_snapshots = self.thought_snapshots.write().await;
+            let objective_changed_at = objective_changed_at.or_else(|| {
+                thought_snapshots
+                    .get(session_id)
+                    .and_then(|existing| existing.objective_changed_at)
+            });
             thought_snapshots.insert(
                 session_id.to_string(),
                 ThoughtSnapshot {
@@ -1048,6 +1061,7 @@ impl SessionSupervisor {
                     thought_source,
                     rest_state,
                     commit_candidate,
+                    objective_changed_at,
                     objective_fingerprint: objective_fingerprint.clone(),
                     token_count,
                     context_limit,
@@ -1077,6 +1091,7 @@ impl SessionSupervisor {
                 commit_candidate,
                 updated_at,
                 delivery,
+                objective_changed_at,
                 objective_fingerprint,
             )
             .await;
@@ -1252,6 +1267,7 @@ impl SessionSupervisor {
             thought_updated_at: None,
             rest_state: fallback_rest_state(SessionState::Idle, ThoughtState::Holding),
             commit_candidate: false,
+            objective_changed_at: None,
             last_skill: None,
             is_stale: false,
             attached_clients: 0,
@@ -1288,6 +1304,7 @@ struct PersistThoughtRequest {
     commit_candidate: bool,
     updated_at: DateTime<Utc>,
     delivery: ThoughtDeliveryState,
+    objective_changed_at: Option<DateTime<Utc>>,
     objective_fingerprint: Option<String>,
 }
 
@@ -1311,6 +1328,7 @@ impl SupervisorProvider {
                         req.commit_candidate,
                         req.updated_at,
                         req.delivery,
+                        req.objective_changed_at,
                         req.objective_fingerprint,
                     )
                     .await;
@@ -1352,6 +1370,7 @@ impl SessionProvider for SupervisorProvider {
         commit_candidate: bool,
         updated_at: DateTime<Utc>,
         delivery: ThoughtDeliveryState,
+        objective_changed_at: Option<DateTime<Utc>>,
         objective_fingerprint: Option<String>,
     ) {
         if self
@@ -1367,6 +1386,7 @@ impl SessionProvider for SupervisorProvider {
                 commit_candidate,
                 updated_at,
                 delivery,
+                objective_changed_at,
                 objective_fingerprint,
             })
             .is_err()
@@ -1721,6 +1741,7 @@ mod tests {
             thought_updated_at: None,
             rest_state: fallback_rest_state(state, ThoughtState::Holding),
             commit_candidate: false,
+            objective_changed_at: None,
             last_skill: None,
             is_stale: false,
             attached_clients: 0,
@@ -1972,6 +1993,7 @@ mod tests {
                 Utc::now(),
                 ThoughtDeliveryState::default(),
                 None,
+                None,
             )
             .await;
 
@@ -2000,6 +2022,7 @@ mod tests {
                 thought_updated_at: None,
                 rest_state: RestState::Drowsy,
                 commit_candidate: false,
+                objective_changed_at: None,
                 last_skill: None,
                 objective_fingerprint: None,
                 cwd: "/tmp".to_string(),
@@ -2033,6 +2056,7 @@ mod tests {
                 false,
                 updated_at,
                 ThoughtDeliveryState::default(),
+                None,
                 Some("obj-1".to_string()),
             )
             .await;
@@ -2041,6 +2065,56 @@ mod tests {
         let snapshot = thoughts.get("sess_1").expect("snapshot should exist");
         assert_eq!(snapshot.updated_at, updated_at);
         assert_eq!(snapshot.thought.as_deref(), Some("reading logs"));
+    }
+
+    #[tokio::test]
+    async fn persist_thought_retains_objective_shift_timestamp_until_next_shift() {
+        let supervisor = SessionSupervisor::new(Arc::new(Config::default()));
+        let shifted_at = DateTime::parse_from_rfc3339("2026-03-08T14:00:05Z")
+            .expect("timestamp should parse")
+            .with_timezone(&Utc);
+        let later_update = DateTime::parse_from_rfc3339("2026-03-08T14:00:09Z")
+            .expect("timestamp should parse")
+            .with_timezone(&Utc);
+
+        supervisor
+            .persist_thought(
+                "sess_1",
+                Some("reframed objective"),
+                12,
+                192_000,
+                ThoughtState::Active,
+                ThoughtSource::Llm,
+                RestState::Active,
+                false,
+                shifted_at,
+                ThoughtDeliveryState::default(),
+                Some(shifted_at),
+                Some("obj-1".to_string()),
+            )
+            .await;
+        supervisor
+            .persist_thought(
+                "sess_1",
+                Some("continuing work"),
+                14,
+                192_000,
+                ThoughtState::Active,
+                ThoughtSource::Llm,
+                RestState::Active,
+                false,
+                later_update,
+                ThoughtDeliveryState::default(),
+                None,
+                Some("obj-1".to_string()),
+            )
+            .await;
+
+        let thoughts = supervisor.thought_snapshots.read().await;
+        let snapshot = thoughts.get("sess_1").expect("snapshot should exist");
+        assert_eq!(snapshot.updated_at, later_update);
+        assert_eq!(snapshot.objective_changed_at, Some(shifted_at));
+        assert_eq!(snapshot.thought.as_deref(), Some("continuing work"));
     }
 
     #[test]
@@ -2060,6 +2134,7 @@ mod tests {
             thought_updated_at: None,
             rest_state: RestState::Drowsy,
             commit_candidate: false,
+            objective_changed_at: None,
             last_skill: None,
             is_stale: false,
             attached_clients: 0,
@@ -2084,6 +2159,7 @@ mod tests {
                     thought_source: ThoughtSource::Llm,
                     rest_state: RestState::Drowsy,
                     commit_candidate: false,
+                    objective_changed_at: None,
                     objective_fingerprint: None,
                     token_count: 10,
                     context_limit: 100,
@@ -2102,6 +2178,7 @@ mod tests {
                     thought_source: ThoughtSource::Llm,
                     rest_state: RestState::Active,
                     commit_candidate: true,
+                    objective_changed_at: None,
                     objective_fingerprint: None,
                     token_count: 10,
                     context_limit: 100,
@@ -2138,6 +2215,7 @@ mod tests {
             thought_updated_at: None,
             rest_state: RestState::Drowsy,
             commit_candidate: false,
+            objective_changed_at: None,
             last_skill: None,
             is_stale: false,
             attached_clients: 0,
@@ -2155,6 +2233,7 @@ mod tests {
                     thought_source: ThoughtSource::Llm,
                     rest_state: RestState::Drowsy,
                     commit_candidate: false,
+                    objective_changed_at: None,
                     objective_fingerprint: None,
                     token_count: 10,
                     context_limit: 100,
@@ -2170,6 +2249,7 @@ mod tests {
                     thought_source: ThoughtSource::Llm,
                     rest_state: RestState::Active,
                     commit_candidate: true,
+                    objective_changed_at: None,
                     objective_fingerprint: None,
                     token_count: 10,
                     context_limit: 100,
@@ -2204,6 +2284,7 @@ mod tests {
                 thought_source: ThoughtSource::Llm,
                 rest_state: RestState::Active,
                 commit_candidate: true,
+                objective_changed_at: Some(Utc::now()),
                 objective_fingerprint: None,
                 token_count: 44,
                 context_limit: 200_000,
@@ -2218,6 +2299,7 @@ mod tests {
         assert_eq!(sessions[0].thought.as_deref(), Some("checking logs"));
         assert_eq!(sessions[0].thought_state, ThoughtState::Active);
         assert_eq!(sessions[0].token_count, 44);
+        assert!(sessions[0].objective_changed_at.is_some());
     }
 
     #[tokio::test]
@@ -2262,6 +2344,7 @@ mod tests {
                 thought_source: ThoughtSource::Llm,
                 rest_state: RestState::Active,
                 commit_candidate: true,
+                objective_changed_at: None,
                 objective_fingerprint: Some("obj-1".to_string()),
                 token_count: 55,
                 context_limit: 210_000,

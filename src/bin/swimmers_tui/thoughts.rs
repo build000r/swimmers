@@ -1,5 +1,6 @@
 use super::*;
 
+const THOUGHT_SHIFT_LABEL: &str = "[shift]";
 const THOUGHT_COMMIT_LABEL: &str = "[commit]";
 
 pub(crate) struct ThoughtFingerprint {
@@ -16,6 +17,7 @@ pub(crate) struct ThoughtLogEntry {
     pub(crate) thought: String,
     pub(crate) updated_at: Option<DateTime<Utc>>,
     pub(crate) color: Color,
+    pub(crate) objective_changed: bool,
     pub(crate) commit_candidate: bool,
 }
 
@@ -33,6 +35,8 @@ impl ThoughtLogEntry {
             thought,
             updated_at: session.thought_updated_at,
             color: session_display_color(session, repo_themes),
+            objective_changed: session.objective_changed_at.is_some()
+                && session.objective_changed_at == session.thought_updated_at,
             commit_candidate: session.commit_candidate,
         }
     }
@@ -164,6 +168,7 @@ pub(crate) struct ThoughtChipLayout {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ThoughtRowLayout {
+    pub(crate) shift_rect: Option<Rect>,
     pub(crate) text_rect: Option<Rect>,
     pub(crate) mermaid_rect: Option<Rect>,
     pub(crate) commit_rect: Option<Rect>,
@@ -450,6 +455,7 @@ pub(crate) struct ThoughtPanelEntryView {
     pub(crate) updated_at: Option<DateTime<Utc>>,
     pub(crate) color: Color,
     pub(crate) text: String,
+    pub(crate) has_objective_shift: bool,
     pub(crate) has_mermaid: bool,
     pub(crate) has_commit_candidate: bool,
 }
@@ -586,10 +592,14 @@ pub(crate) fn compare_thought_panel_entries(
     left: &ThoughtPanelEntryView,
     right: &ThoughtPanelEntryView,
 ) -> Ordering {
-    left.updated_at
-        .cmp(&right.updated_at)
-        .then_with(|| left.tmux_name.cmp(&right.tmux_name))
-        .then_with(|| left.session_id.cmp(&right.session_id))
+    left.has_objective_shift
+        .cmp(&right.has_objective_shift)
+        .then_with(|| {
+            left.updated_at
+                .cmp(&right.updated_at)
+                .then_with(|| left.tmux_name.cmp(&right.tmux_name))
+                .then_with(|| left.session_id.cmp(&right.session_id))
+        })
 }
 
 pub(crate) fn build_thought_panel_entries<C: TuiApi>(app: &App<C>) -> Vec<ThoughtPanelEntryView> {
@@ -608,6 +618,7 @@ pub(crate) fn build_thought_panel_entries<C: TuiApi>(app: &App<C>) -> Vec<Though
             updated_at: entry.updated_at,
             color: app.thought_entry_display_color(entry),
             text: format!("{}: {}", entry.tmux_name, entry.thought.replace('\n', " ")),
+            has_objective_shift: entry.objective_changed,
             has_mermaid: app
                 .mermaid_artifacts
                 .get(&entry.session_id)
@@ -630,6 +641,7 @@ pub(crate) fn build_thought_panel_entries<C: TuiApi>(app: &App<C>) -> Vec<Though
             updated_at: artifact.updated_at,
             color: session_display_color(&entity.session, &app.repo_themes),
             text: format!("{}: mermaid diagram ready", entity.session.tmux_name),
+            has_objective_shift: false,
             has_mermaid: true,
             has_commit_candidate: entity.session.commit_candidate,
         });
@@ -643,9 +655,13 @@ pub(crate) fn build_rows_for_panel_entry(
     entry: &ThoughtPanelEntryView,
     thought_content: Rect,
 ) -> Vec<ThoughtRowLayout> {
+    let shift_width = display_width(THOUGHT_SHIFT_LABEL);
     let mermaid_width = display_width(THOUGHT_MERMAID_LABEL);
     let commit_width = display_width(THOUGHT_COMMIT_LABEL);
     let mut reserved: u16 = 0;
+    if entry.has_objective_shift {
+        reserved = reserved.saturating_add(shift_width).saturating_add(1);
+    }
     if entry.has_mermaid {
         reserved = reserved.saturating_add(mermaid_width).saturating_add(1);
     }
@@ -665,29 +681,36 @@ pub(crate) fn build_rows_for_panel_entry(
         .enumerate()
         .map(|(index, line)| {
             let visible_line_width = display_width(&line);
-            let commit_x = if entry.has_mermaid {
-                thought_content
-                    .x
-                    .saturating_add(mermaid_width)
-                    .saturating_add(1)
-            } else {
-                thought_content.x
-            };
+            let mut badge_x = thought_content.x;
+            let shift_rect = (index == 0 && entry.has_objective_shift).then_some(Rect {
+                x: badge_x,
+                y: 0,
+                width: shift_width,
+                height: 1,
+            });
+            if entry.has_objective_shift {
+                badge_x = badge_x.saturating_add(shift_width).saturating_add(1);
+            }
+            let mermaid_rect = (index == 0 && entry.has_mermaid).then_some(Rect {
+                x: badge_x,
+                y: 0,
+                width: mermaid_width,
+                height: 1,
+            });
+            if entry.has_mermaid {
+                badge_x = badge_x.saturating_add(mermaid_width).saturating_add(1);
+            }
             ThoughtRowLayout {
+                shift_rect,
                 text_rect: (visible_line_width > 0).then_some(Rect {
                     x: text_x,
                     y: 0,
                     width: visible_line_width,
                     height: 1,
                 }),
-                mermaid_rect: (index == 0 && entry.has_mermaid).then_some(Rect {
-                    x: thought_content.x,
-                    y: 0,
-                    width: mermaid_width,
-                    height: 1,
-                }),
+                mermaid_rect,
                 commit_rect: (index == 0 && entry.has_commit_candidate).then_some(Rect {
-                    x: commit_x,
+                    x: badge_x,
                     y: 0,
                     width: commit_width,
                     height: 1,
@@ -739,6 +762,9 @@ pub(crate) fn render_thought_panel<C: TuiApi>(
         .saturating_sub(panel.rows.len() as u16);
     for (offset, row) in panel.rows.iter().enumerate() {
         let y = start_y + offset as u16;
+        if let Some(rect) = row.shift_rect {
+            renderer.draw_text(rect.x, y, THOUGHT_SHIFT_LABEL, Color::Yellow);
+        }
         if let Some(rect) = row.mermaid_rect {
             renderer.draw_text(rect.x, y, THOUGHT_MERMAID_LABEL, Color::Cyan);
         }

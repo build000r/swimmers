@@ -310,9 +310,7 @@ mod tests {
     use chrono::Utc;
 
     use super::*;
-    use crate::types::{
-        RestState, SessionState, ThoughtSource, ThoughtState, TransportHealth,
-    };
+    use crate::types::{RestState, SessionState, ThoughtSource, ThoughtState, TransportHealth};
 
     fn sample_session() -> SessionSummary {
         SessionSummary {
@@ -330,6 +328,7 @@ mod tests {
             thought_updated_at: None,
             rest_state: RestState::Active,
             commit_candidate: true,
+            objective_changed_at: None,
             last_skill: None,
             is_stale: false,
             attached_clients: 0,

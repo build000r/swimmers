@@ -651,6 +651,7 @@ mod tests {
             thought_updated_at: None,
             rest_state: crate::types::fallback_rest_state(state, ThoughtState::Holding),
             commit_candidate: false,
+            objective_changed_at: None,
             last_skill: None,
             is_stale: false,
             attached_clients: 0,

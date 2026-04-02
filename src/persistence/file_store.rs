@@ -43,6 +43,8 @@ pub struct PersistedSession {
     #[serde(default)]
     pub commit_candidate: bool,
     #[serde(default)]
+    pub objective_changed_at: Option<DateTime<Utc>>,
+    #[serde(default)]
     pub last_skill: Option<String>,
     #[serde(default)]
     pub objective_fingerprint: Option<String>,
@@ -62,6 +64,8 @@ pub struct ThoughtSnapshot {
     pub rest_state: RestState,
     #[serde(default)]
     pub commit_candidate: bool,
+    #[serde(default)]
+    pub objective_changed_at: Option<DateTime<Utc>>,
     #[serde(default)]
     pub objective_fingerprint: Option<String>,
     pub token_count: u64,
@@ -232,11 +236,17 @@ impl FileStore {
         commit_candidate: bool,
         updated_at: DateTime<Utc>,
         delivery: ThoughtDeliveryState,
+        objective_changed_at: Option<DateTime<Utc>>,
         objective_fingerprint: Option<String>,
     ) {
         let _write_guard = self.thought_write_lock.lock().await;
         let data = {
             let mut thoughts = self.thought_cache.write().await;
+            let objective_changed_at = objective_changed_at.or_else(|| {
+                thoughts
+                    .get(session_id)
+                    .and_then(|existing| existing.objective_changed_at)
+            });
             thoughts.insert(
                 session_id.to_string(),
                 ThoughtSnapshot {
@@ -245,6 +255,7 @@ impl FileStore {
                     thought_source,
                     rest_state,
                     commit_candidate,
+                    objective_changed_at,
                     objective_fingerprint,
                     token_count,
                     context_limit,

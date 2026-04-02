@@ -71,6 +71,7 @@ pub trait SessionProvider: Send + Sync {
         _commit_candidate: bool,
         _updated_at: DateTime<Utc>,
         _delivery: ThoughtDeliveryState,
+        _objective_changed_at: Option<DateTime<Utc>>,
         _objective_fingerprint: Option<String>,
     ) {
     }

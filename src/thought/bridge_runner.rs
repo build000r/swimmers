@@ -218,6 +218,7 @@ fn apply_update<P: SessionProvider>(
         update.commit_candidate,
         update.at,
         persisted_delivery,
+        update.objective_changed.then_some(update.at),
         update.objective_fingerprint.clone(),
     );
 
@@ -271,6 +272,7 @@ mod tests {
         commit_candidate: bool,
         updated_at: DateTime<Utc>,
         delivery: ThoughtDeliveryState,
+        objective_changed_at: Option<DateTime<Utc>>,
         objective_fingerprint: Option<String>,
     }
 
@@ -298,6 +300,7 @@ mod tests {
             commit_candidate: bool,
             updated_at: DateTime<Utc>,
             delivery: ThoughtDeliveryState,
+            objective_changed_at: Option<DateTime<Utc>>,
             objective_fingerprint: Option<String>,
         ) {
             self.persisted
@@ -314,6 +317,7 @@ mod tests {
                     commit_candidate,
                     updated_at,
                     delivery: delivery.clone(),
+                    objective_changed_at,
                     objective_fingerprint,
                 });
             self.delivery_states
@@ -379,6 +383,7 @@ mod tests {
         assert_eq!(persisted[0].rest_state, RestState::Active);
         assert!(persisted[0].commit_candidate);
         assert_eq!(persisted[0].updated_at, now);
+        assert_eq!(persisted[0].objective_changed_at, Some(now));
         assert_eq!(
             persisted[0].delivery.stream_instance_id.as_deref(),
             Some("stream-a")

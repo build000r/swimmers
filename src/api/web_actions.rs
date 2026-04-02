@@ -49,11 +49,13 @@ pub fn routes() -> Router<Arc<AppState>> {
 fn json_error(status: StatusCode, code: &str, message: impl Into<Option<String>>) -> Response {
     (
         status,
-        Json(serde_json::to_value(ErrorResponse {
-            code: code.to_string(),
-            message: message.into(),
-        })
-        .unwrap()),
+        Json(
+            serde_json::to_value(ErrorResponse {
+                code: code.to_string(),
+                message: message.into(),
+            })
+            .unwrap(),
+        ),
     )
         .into_response()
 }
@@ -100,11 +102,13 @@ async fn post_commit_codex_with_launcher<L: CommitLauncher>(
     match launcher.launch(&summary) {
         Ok(launch) => (
             StatusCode::OK,
-            Json(serde_json::to_value(CommitCodexLaunchResponse {
-                session_name: launch.session_name,
-                watch_command: launch.watch_command,
-            })
-            .unwrap()),
+            Json(
+                serde_json::to_value(CommitCodexLaunchResponse {
+                    session_name: launch.session_name,
+                    watch_command: launch.watch_command,
+                })
+                .unwrap(),
+            ),
         )
             .into_response(),
         Err(err) => json_error(
@@ -142,7 +146,11 @@ async fn render_mermaid_artifact_svg(
     session_id: &str,
 ) -> Result<String, Response> {
     let artifact = fetch_mermaid_artifact(state, session_id).await?;
-    let Some(source) = artifact.source.as_deref().map(str::trim).filter(|source| !source.is_empty())
+    let Some(source) = artifact
+        .source
+        .as_deref()
+        .map(str::trim)
+        .filter(|source| !source.is_empty())
     else {
         return Err(json_error(
             StatusCode::NOT_FOUND,
@@ -185,7 +193,12 @@ async fn post_open_mermaid_artifact_with_opener<O: ArtifactOpener>(
         Err(resp) => return resp,
     };
 
-    let Some(path) = artifact.path.as_deref().map(str::trim).filter(|path| !path.is_empty()) else {
+    let Some(path) = artifact
+        .path
+        .as_deref()
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+    else {
         return json_error(
             StatusCode::NOT_FOUND,
             "MERMAID_ARTIFACT_PATH_UNAVAILABLE",
@@ -199,12 +212,14 @@ async fn post_open_mermaid_artifact_with_opener<O: ArtifactOpener>(
     match opener.open(path) {
         Ok(()) => (
             StatusCode::OK,
-            Json(serde_json::to_value(MermaidArtifactOpenResponse {
-                ok: true,
-                session_id,
-                path: path.to_string(),
-            })
-            .unwrap()),
+            Json(
+                serde_json::to_value(MermaidArtifactOpenResponse {
+                    ok: true,
+                    session_id,
+                    path: path.to_string(),
+                })
+                .unwrap(),
+            ),
         )
             .into_response(),
         Err(err) => json_error(
@@ -222,11 +237,7 @@ async fn fetch_mermaid_artifact(
     let handle = match state.supervisor.get_session(session_id).await {
         Some(handle) => handle,
         None => {
-            return Err(json_error(
-                StatusCode::NOT_FOUND,
-                "SESSION_NOT_FOUND",
-                None,
-            ));
+            return Err(json_error(StatusCode::NOT_FOUND, "SESSION_NOT_FOUND", None));
         }
     };
 
@@ -318,6 +329,7 @@ mod tests {
             thought_updated_at: None,
             rest_state: RestState::Active,
             commit_candidate: false,
+            objective_changed_at: None,
             last_skill: None,
             is_stale: false,
             attached_clients: 0,
@@ -414,7 +426,8 @@ mod tests {
         install_summary_handle(&state, summary("sess-1", SessionState::Busy)).await;
         let launcher = FakeCommitLauncher::default();
 
-        let response = post_commit_codex_with_launcher(state, "sess-1".to_string(), &launcher).await;
+        let response =
+            post_commit_codex_with_launcher(state, "sess-1".to_string(), &launcher).await;
 
         assert_eq!(response.status(), StatusCode::OK);
         let json = response_json(response).await;
@@ -516,13 +529,17 @@ mod tests {
         .await;
         let opener = FakeArtifactOpener::default();
 
-        let response = post_open_mermaid_artifact_with_opener(state, "sess-1".to_string(), &opener).await;
+        let response =
+            post_open_mermaid_artifact_with_opener(state, "sess-1".to_string(), &opener).await;
 
         assert_eq!(response.status(), StatusCode::OK);
         let json = response_json(response).await;
         assert_eq!(json["ok"], true);
         assert_eq!(json["path"], "/tmp/diagram.mmd");
-        assert_eq!(opener.calls.lock().unwrap().as_slice(), ["/tmp/diagram.mmd"]);
+        assert_eq!(
+            opener.calls.lock().unwrap().as_slice(),
+            ["/tmp/diagram.mmd"]
+        );
     }
 
     #[tokio::test]
@@ -561,10 +578,7 @@ mod tests {
 
     impl CommitLauncher for FakeCommitLauncher {
         fn launch(&self, session: &SessionSummary) -> io::Result<CommitCodexLaunch> {
-            self.calls
-                .lock()
-                .unwrap()
-                .push(session.session_id.clone());
+            self.calls.lock().unwrap().push(session.session_id.clone());
             Ok(CommitCodexLaunch {
                 session_name: "commit-7-123".to_string(),
                 watch_command: "tmux a -t commit-7-123".to_string(),
