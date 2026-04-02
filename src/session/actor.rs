@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
+use std::io;
 use std::io::Write as _;
 use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
@@ -19,6 +20,7 @@ use crate::session::artifacts::{
 };
 use crate::session::replay_ring::ReplayRing;
 use crate::state::detector::StateDetector;
+use crate::tmux_target::{exact_pane_target, exact_session_target};
 use crate::types::{
     ControlEvent, MermaidArtifactResponse, SessionSkillPayload, SessionState, SessionStatePayload,
     SessionSummary, SessionTitlePayload, TerminalSnapshot, TransportHealth,
@@ -255,7 +257,8 @@ impl SessionActor {
         // a tmux session.
         let mut cmd = if attach {
             let mut c = CommandBuilder::new("tmux");
-            c.args(["attach-session", "-t", &tmux_name]);
+            let target = exact_session_target(&tmux_name);
+            c.args(["attach-session", "-t", &target]);
             c
         } else {
             let mut c = CommandBuilder::new("tmux");
@@ -496,7 +499,7 @@ impl SessionActor {
             let _ = self.maybe_emit_state_change(state_before);
         }
         self.update_last_skill_from_input(&data);
-        if let Err(e) = self.writer.write_all(&data) {
+        if let Err(e) = write_and_flush_input(&mut self.writer, &data) {
             error!(session_id = %self.session_id, "PTY write error: {}", e);
         }
     }
@@ -1160,9 +1163,10 @@ impl SessionActor {
 async fn capture_pane_tail(tmux_name: &str, lines: usize) -> anyhow::Result<String> {
     let lines = lines.clamp(20, 1000);
     let start = format!("-{lines}");
+    let target = exact_pane_target(tmux_name);
 
     let output = Command::new("tmux")
-        .args(["capture-pane", "-p", "-J", "-t", tmux_name, "-S", &start])
+        .args(["capture-pane", "-p", "-J", "-t", &target, "-S", &start])
         .env_remove("TMUX")
         .env_remove("TMUX_PANE")
         .output()
@@ -1196,6 +1200,14 @@ fn write_input_counts_as_activity(data: &[u8]) -> bool {
     }
 
     false
+}
+
+fn write_and_flush_input(
+    writer: &mut Box<dyn std::io::Write + Send>,
+    data: &[u8],
+) -> io::Result<()> {
+    writer.write_all(data)?;
+    writer.flush()
 }
 
 fn output_counts_as_meaningful_activity(
@@ -1312,12 +1324,13 @@ fn line_looks_prompt_like(line: &str) -> bool {
 
 /// Query tmux for the active pane cwd of a session.
 async fn query_tmux_cwd(tmux_name: &str) -> anyhow::Result<String> {
+    let target = exact_pane_target(tmux_name);
     let output = Command::new("tmux")
         .args([
             "display-message",
             "-p",
             "-t",
-            tmux_name,
+            &target,
             "#{pane_current_path}",
         ])
         .env_remove("TMUX")
@@ -1342,12 +1355,13 @@ async fn query_tmux_cwd(tmux_name: &str) -> anyhow::Result<String> {
 }
 
 async fn query_tmux_session_created(tmux_name: &str) -> anyhow::Result<chrono::DateTime<Utc>> {
+    let target = exact_pane_target(tmux_name);
     let output = Command::new("tmux")
         .args([
             "display-message",
             "-p",
             "-t",
-            tmux_name,
+            &target,
             "#{session_created}",
         ])
         .env_remove("TMUX")
@@ -1424,12 +1438,13 @@ async fn query_tool_from_tmux_process_tree(tmux_name: &str) -> anyhow::Result<Op
 }
 
 async fn query_tmux_current_command(tmux_name: &str) -> anyhow::Result<String> {
+    let target = exact_pane_target(tmux_name);
     let output = Command::new("tmux")
         .args([
             "display-message",
             "-p",
             "-t",
-            tmux_name,
+            &target,
             "#{pane_current_command}",
         ])
         .env_remove("TMUX")
@@ -1454,8 +1469,9 @@ async fn query_tmux_current_command(tmux_name: &str) -> anyhow::Result<String> {
 }
 
 async fn query_tmux_pane_pid(tmux_name: &str) -> anyhow::Result<u32> {
+    let target = exact_pane_target(tmux_name);
     let output = Command::new("tmux")
-        .args(["display-message", "-p", "-t", tmux_name, "#{pane_pid}"])
+        .args(["display-message", "-p", "-t", &target, "#{pane_pid}"])
         .env_remove("TMUX")
         .env_remove("TMUX_PANE")
         .output()
@@ -1924,10 +1940,11 @@ mod tests {
         detect_tool_from_process_entry, drain_completed_input_lines, extract_cwd_from_title,
         find_osc_payload_end, line_looks_prompt_like, normalize_skill_name, osc_payloads,
         output_counts_as_meaningful_activity, parse_process_entry, percent_decode,
-        query_tmux_session_created, query_tool_from_tmux_process_tree, resolve_tmux_terminal_env,
-        should_refresh_cwd_from_tmux, should_refresh_tool_from_tmux, visible_output_is_meaningful,
-        write_input_counts_as_activity, ControlEvent, ProcessEntry, SessionActor, SessionCommand,
-        CWD_REFRESH_MIN_INTERVAL, TOOL_REFRESH_MIN_INTERVAL,
+        capture_pane_tail, query_tmux_session_created, query_tool_from_tmux_process_tree,
+        resolve_tmux_terminal_env, should_refresh_cwd_from_tmux, should_refresh_tool_from_tmux,
+        visible_output_is_meaningful, write_and_flush_input, write_input_counts_as_activity,
+        ControlEvent, ProcessEntry, SessionActor, SessionCommand, CWD_REFRESH_MIN_INTERVAL,
+        TOOL_REFRESH_MIN_INTERVAL,
     };
     use crate::config::Config;
     use crate::scroll::guard::ScrollGuard;
@@ -1938,8 +1955,9 @@ mod tests {
     use chrono::{TimeZone, Utc};
     use portable_pty::{native_pty_system, PtySize};
     use std::collections::HashMap;
+    use std::io::{self, Write};
     use std::os::unix::fs::PermissionsExt;
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
     use tokio::sync::{broadcast, mpsc, oneshot};
 
@@ -2321,6 +2339,50 @@ fi
         assert_eq!(detect_skill_from_input_line("$comm"), None);
     }
 
+    #[derive(Default)]
+    struct TrackingWriterState {
+        writes: Vec<u8>,
+        flushes: usize,
+    }
+
+    struct TrackingWriter {
+        state: Arc<Mutex<TrackingWriterState>>,
+    }
+
+    impl Write for TrackingWriter {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            let mut state = self
+                .state
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
+            state.writes.extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            let mut state = self
+                .state
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
+            state.flushes += 1;
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn write_and_flush_input_flushes_pty_writer() {
+        let state = Arc::new(Mutex::new(TrackingWriterState::default()));
+        let mut writer: Box<dyn Write + Send> = Box::new(TrackingWriter {
+            state: Arc::clone(&state),
+        });
+
+        write_and_flush_input(&mut writer, b"echo hi\r").expect("write and flush");
+
+        let state = state.lock().unwrap_or_else(|poison| poison.into_inner());
+        assert_eq!(state.writes, b"echo hi\r");
+        assert_eq!(state.flushes, 1);
+    }
+
     #[test]
     fn detect_skill_falls_back_to_slash_token() {
         let line = "/describe";
@@ -2448,6 +2510,48 @@ fi
         assert_eq!(
             created_at,
             Utc.timestamp_opt(1_774_274_168, 0).single().unwrap()
+        );
+
+        if let Some(value) = previous_path {
+            std::env::set_var("PATH", value);
+        } else {
+            std::env::remove_var("PATH");
+        }
+    }
+
+    #[tokio::test]
+    async fn capture_pane_tail_uses_exact_session_target_for_numeric_names() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let bin_dir = dir.path().join("bin");
+        std::fs::create_dir_all(&bin_dir).expect("bin dir");
+        let target_file = dir.path().join("target.txt");
+        let tmux = bin_dir.join("tmux");
+        std::fs::write(
+            &tmux,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"${{5-}}\" > \"{}\"\nprintf 'captured\\n'\n",
+                target_file.display()
+            ),
+        )
+        .expect("tmux");
+        let mut perms = std::fs::metadata(&tmux).expect("metadata").permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&tmux, perms).expect("chmod");
+
+        let _guard = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let previous_path = std::env::var_os("PATH");
+        std::env::set_var(
+            "PATH",
+            std::env::join_paths([bin_dir.as_path()]).expect("path"),
+        );
+
+        let captured = capture_pane_tail("0", 20).await.expect("capture pane");
+        assert_eq!(captured.trim(), "captured");
+        assert_eq!(
+            std::fs::read_to_string(&target_file).expect("target file"),
+            "=0:\n"
         );
 
         if let Some(value) = previous_path {

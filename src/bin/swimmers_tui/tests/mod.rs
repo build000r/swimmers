@@ -232,6 +232,7 @@ impl TuiApi for MockApi {
                     Ok(ThoughtConfigResponse {
                         config: ThoughtConfig::default(),
                         daemon_defaults: None,
+                        ui: swimmers::types::ThoughtConfigUiMetadata::default(),
                     })
                 })
         })
@@ -4550,6 +4551,7 @@ fn handle_key_event_opens_thought_config_editor() {
             agent_prompt: "agent".to_string(),
             terminal_prompt: "terminal".to_string(),
         }),
+        ui: swimmers::types::ThoughtConfigUiMetadata::default(),
     }));
     let layout = test_layout(120, 32);
     let mut app = make_app(api);
@@ -4659,6 +4661,7 @@ fn thought_config_editor_updates_backend_and_model_then_saves() {
             agent_prompt: "agent".to_string(),
             terminal_prompt: "terminal".to_string(),
         }),
+        ui: swimmers::types::ThoughtConfigUiMetadata::default(),
     }));
     api.push_update_thought_config(Ok(ThoughtConfig {
         backend: "codex".to_string(),
@@ -4906,6 +4909,11 @@ fn thought_config_editor_cycles_current_openrouter_model_presets() {
     ));
     if let Some(editor) = &mut app.thought_config_editor {
         editor.focus = ThoughtConfigEditorField::Model;
+        editor.replace_openrouter_model_presets(vec![
+            "openrouter/free".to_string(),
+            "nvidia/nemotron-3-super-120b-a12b:free".to_string(),
+            "arcee-ai/trinity-large-preview:free".to_string(),
+        ]);
     }
 
     handle_key_event(

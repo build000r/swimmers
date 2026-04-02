@@ -275,6 +275,16 @@ textarea {
   padding: 18px;
 }
 
+#thought-config-sheet,
+#native-sheet {
+  width: min(700px, calc(100vw - 36px));
+}
+
+#create-sheet,
+#mermaid-sheet {
+  width: min(920px, calc(100vw - 36px));
+}
+
 .surface-sheet::after {
   content: "";
   position: absolute;
@@ -322,6 +332,138 @@ textarea {
   gap: 14px;
 }
 
+.sheet-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.05fr) minmax(0, 1fr);
+  gap: 14px;
+  align-items: start;
+}
+
+.sheet-panel {
+  min-width: 0;
+  display: grid;
+  gap: 12px;
+}
+
+.sheet-panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.sheet-panel-header h3 {
+  margin: 0;
+  font-size: 0.84rem;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.sheet-toolbar {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  gap: 10px;
+}
+
+.toggle-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.55rem;
+  color: var(--text);
+  font-size: 0.84rem;
+}
+
+.toggle-row input {
+  width: auto;
+  padding: 0;
+  margin: 0;
+}
+
+.browser-list {
+  display: grid;
+  gap: 8px;
+  max-height: 320px;
+  overflow: auto;
+  padding-right: 4px;
+}
+
+.browser-entry,
+.browser-empty {
+  width: 100%;
+  text-align: left;
+  border: 1px solid rgba(120, 210, 255, 0.12);
+  border-radius: 14px;
+  background: rgba(8, 12, 16, 0.72);
+  padding: 0.72rem 0.88rem;
+  color: var(--text);
+}
+
+.browser-entry {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.browser-entry:hover:not(:disabled) {
+  background: rgba(18, 26, 33, 0.92);
+}
+
+.browser-entry:disabled {
+  color: var(--muted);
+  opacity: 0.55;
+}
+
+.browser-entry-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.browser-entry-meta {
+  color: var(--muted);
+  font-size: 0.74rem;
+  text-transform: uppercase;
+  letter-spacing: 0.14em;
+  white-space: nowrap;
+}
+
+.browser-empty {
+  color: var(--muted);
+}
+
+.sheet-result {
+  margin: 0;
+  padding: 0.8rem 0.92rem;
+  border: 1px solid rgba(120, 210, 255, 0.12);
+  border-radius: 14px;
+  background: rgba(6, 10, 13, 0.8);
+  color: var(--text);
+  white-space: pre-wrap;
+  line-height: 1.42;
+  min-height: 3.6rem;
+}
+
+.sheet-result.error,
+.sheet-copy.error {
+  color: var(--danger);
+  border-color: rgba(255, 125, 148, 0.24);
+}
+
+.mermaid-preview {
+  min-height: 180px;
+  border: 1px solid rgba(120, 210, 255, 0.12);
+  border-radius: 16px;
+  background: rgba(6, 10, 13, 0.82);
+  padding: 12px;
+  overflow: auto;
+}
+
+.mermaid-preview svg {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+
 .field {
   display: grid;
   gap: 0.42rem;
@@ -347,6 +489,14 @@ textarea {
     width: 100%;
     max-height: 82vh;
     padding: 16px;
+  }
+
+  .sheet-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .sheet-toolbar {
+    grid-template-columns: 1fr;
   }
 
   .sheet-actions {

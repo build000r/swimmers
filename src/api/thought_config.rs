@@ -9,18 +9,12 @@ use tracing::error;
 
 use crate::api::AppState;
 use crate::auth::{AuthInfo, AuthScope};
+use crate::openrouter_models::cached_or_default_openrouter_candidates;
 use crate::thought::probe::run_thought_config_probe;
 use crate::thought::protocol::{build_sync_request, SyncRequest};
-use crate::thought::runtime_config::{DaemonDefaults, ThoughtConfig};
-use crate::types::ErrorResponse;
-
-#[derive(serde::Serialize)]
-struct ThoughtConfigResponse {
-    #[serde(flatten)]
-    config: ThoughtConfig,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    daemon_defaults: Option<DaemonDefaults>,
-}
+use crate::thought::runtime_config::ThoughtConfig;
+use crate::thought_ui::thought_config_ui_metadata;
+use crate::types::{ErrorResponse, ThoughtConfigResponse};
 
 async fn get_thought_config(
     Extension(auth): Extension<AuthInfo>,
@@ -31,6 +25,7 @@ async fn get_thought_config(
     Ok(Json(ThoughtConfigResponse {
         config,
         daemon_defaults: state.daemon_defaults.clone(),
+        ui: thought_config_ui_metadata(&cached_or_default_openrouter_candidates()),
     }))
 }
 
@@ -231,6 +226,24 @@ mod tests {
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
         let json = response_json(response).await;
         assert_eq!(json["code"], "VALIDATION_FAILED");
+    }
+
+    #[tokio::test]
+    async fn get_thought_config_includes_ui_metadata() {
+        let response = get_thought_config(
+            Extension(AuthInfo::new(OBSERVER_SCOPES.to_vec())),
+            State(test_state(None)),
+        )
+        .await
+        .expect("thought config response");
+
+        assert!(!response.0.ui.backends.is_empty());
+        assert!(response
+            .0
+            .ui
+            .backends
+            .iter()
+            .any(|backend| backend.key == "openrouter"));
     }
 
     #[tokio::test]

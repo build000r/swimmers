@@ -14,6 +14,7 @@ use crate::repo_theme::discover_repo_theme;
 use crate::session::actor::{ActorHandle, SessionCommand};
 use crate::thought::loop_runner::{SessionInfo, SessionProvider};
 use crate::thought::protocol::ThoughtDeliveryState;
+use crate::tmux_target::{exact_pane_target, exact_session_target};
 use crate::types::{
     fallback_rest_state, ControlEvent, RepoTheme, RestState, SessionState, SessionStatePayload,
     SessionSummary, TerminalSnapshot, ThoughtSource, ThoughtState, TransportHealth,
@@ -39,12 +40,13 @@ fn thought_snapshot_for_summary<'a>(
 }
 
 async fn query_tmux_active_pane_session_id(tmux_name: &str) -> anyhow::Result<String> {
+    let target = exact_pane_target(tmux_name);
     let output = Command::new("tmux")
         .args([
             "display-message",
             "-p",
             "-t",
-            tmux_name,
+            &target,
             "#{window_index}.#{pane_index}:#{pane_id}",
         ])
         .env_remove("TMUX")
@@ -1549,8 +1551,9 @@ async fn send_spawn_tool_command(
 }
 
 async fn tmux_send_keys(tmux_name: &str, key_args: &[&str]) -> anyhow::Result<()> {
+    let target = exact_pane_target(tmux_name);
     let output = Command::new("tmux")
-        .args(["send-keys", "-t", tmux_name])
+        .args(["send-keys", "-t", &target])
         .args(key_args)
         .env_remove("TMUX")
         .env_remove("TMUX_PANE")
@@ -1571,8 +1574,9 @@ async fn tmux_send_keys(tmux_name: &str, key_args: &[&str]) -> anyhow::Result<()
 }
 
 async fn kill_tmux_session(tmux_name: &str) -> anyhow::Result<()> {
+    let target = exact_session_target(tmux_name);
     let output = Command::new("tmux")
-        .args(["kill-session", "-t", tmux_name])
+        .args(["kill-session", "-t", &target])
         .env_remove("TMUX")
         .env_remove("TMUX_PANE")
         .output()
@@ -1815,6 +1819,42 @@ mod tests {
         assert_eq!(next_session_counter("session_1"), None);
         assert_eq!(next_session_counter("sess_not_a_number"), None);
         assert_eq!(next_session_counter(""), None);
+    }
+
+    #[tokio::test]
+    async fn query_tmux_active_pane_session_id_uses_exact_target_for_numeric_names() {
+        let _guard = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let dir = tempdir().expect("tempdir");
+        let bin_dir = dir.path().join("bin");
+        std::fs::create_dir_all(&bin_dir).expect("bin");
+        let target_file = dir.path().join("target.txt");
+        write_executable(
+            &bin_dir.join("tmux"),
+            &format!(
+                "#!/bin/sh\nprintf '%s\\n' \"${{4-}}\" > \"{}\"\nprintf '0.0:%%1\\n'\n",
+                target_file.display()
+            ),
+        );
+
+        let original_path = std::env::var_os("PATH");
+        prepend_test_path(&bin_dir, original_path.as_deref());
+
+        let pane = query_tmux_active_pane_session_id("0")
+            .await
+            .expect("active pane session id");
+        assert_eq!(pane, "tmux:0:0.0:%1");
+        assert_eq!(
+            std::fs::read_to_string(&target_file).expect("target file"),
+            "=0:\n"
+        );
+
+        if let Some(value) = original_path {
+            std::env::set_var("PATH", value);
+        } else {
+            std::env::remove_var("PATH");
+        }
     }
 
     #[test]

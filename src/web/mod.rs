@@ -23,6 +23,7 @@ use crate::types::ErrorResponse;
 
 const APP_JS_ROUTE: &str = "/app.js";
 const RENDERED_SURFACE_JS_ROUTE: &str = "/rendered_surface.js";
+const INPUT_SUPPORT_JS_ROUTE: &str = "/input_support.js";
 const APP_CSS_ROUTE: &str = "/app.css";
 const FRANKENTERM_JS_ROUTE: &str = "/assets/frankenterm/FrankenTerm.js";
 const FRANKENTERM_WASM_ROUTE: &str = "/assets/frankenterm/FrankenTerm_bg.wasm";
@@ -42,6 +43,7 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route(PUBLISHED_VIEW_ROUTE, get(selected_index))
         .route(APP_JS_ROUTE, get(app_js))
         .route(RENDERED_SURFACE_JS_ROUTE, get(rendered_surface_js))
+        .route(INPUT_SUPPORT_JS_ROUTE, get(input_support_js))
         .route(APP_CSS_ROUTE, get(app_css))
         .route(FRANKENTERM_JS_ROUTE, get(franken_term_js))
         .route(FRANKENTERM_WASM_ROUTE, get(franken_term_wasm))
@@ -130,6 +132,71 @@ async fn render_index(focus_layout: bool) -> impl IntoResponse {
           </form>
         </section>
 
+        <section class="surface-sheet hidden" id="thought-config-sheet" aria-labelledby="thought-config-title">
+          <div class="sheet-header">
+            <p class="sheet-eyebrow">Policy</p>
+            <h2 id="thought-config-title">Thought Config</h2>
+          </div>
+          <div class="sheet-copy" id="thought-config-summary">Loading thought config…</div>
+          <form class="sheet-form" id="thought-config-form">
+            <div class="field">
+              <span>Enabled</span>
+              <label class="toggle-row">
+                <input id="thought-config-enabled" type="checkbox" />
+                <span>Run the thought loop</span>
+              </label>
+            </div>
+            <label class="field">
+              <span>Backend</span>
+              <select id="thought-config-backend"></select>
+            </label>
+            <label class="field">
+              <span>Model</span>
+              <input id="thought-config-model" type="text" placeholder="Use backend default or choose a preset" autocomplete="off" list="thought-config-model-presets" />
+              <datalist id="thought-config-model-presets"></datalist>
+            </label>
+            <div class="sheet-copy" id="thought-config-hint"></div>
+            <div class="sheet-copy" id="thought-config-daemon"></div>
+            <pre class="sheet-result" id="thought-config-result"></pre>
+            <div class="sheet-actions">
+              <button class="ghost-button" id="thought-config-test-button" type="button">Test</button>
+              <button class="ghost-button" id="thought-config-close-button" type="button">Close</button>
+              <button id="thought-config-save-button" type="submit">Save</button>
+            </div>
+          </form>
+        </section>
+
+        <section class="surface-sheet hidden" id="native-sheet" aria-labelledby="native-sheet-title">
+          <div class="sheet-header">
+            <p class="sheet-eyebrow">Desktop</p>
+            <h2 id="native-sheet-title">Native Open</h2>
+          </div>
+          <div class="sheet-copy" id="native-status-copy">Loading native status…</div>
+          <form class="sheet-form" id="native-form">
+            <label class="field">
+              <span>App</span>
+              <select id="native-app">
+                <option value="iterm">iTerm</option>
+                <option value="ghostty">Ghostty</option>
+              </select>
+            </label>
+            <label class="field">
+              <span>Ghostty mode</span>
+              <select id="native-mode">
+                <option value="swap">swap</option>
+                <option value="add">add</option>
+              </select>
+            </label>
+            <pre class="sheet-result" id="native-status-result"></pre>
+            <div class="sheet-actions">
+              <button class="ghost-button" id="native-refresh-button" type="button">Refresh</button>
+              <button class="ghost-button" id="native-open-button" type="button">Open Selected</button>
+              <button class="ghost-button" id="native-close-button" type="button">Close</button>
+              <button id="native-save-button" type="submit">Apply</button>
+            </div>
+          </form>
+        </section>
+
         <section class="surface-sheet hidden" id="send-sheet" aria-labelledby="send-sheet-title">
           <div class="sheet-header">
             <p class="sheet-eyebrow">Rendered Action</p>
@@ -170,30 +237,64 @@ async fn render_index(focus_layout: bool) -> impl IntoResponse {
 
         <section class="surface-sheet hidden" id="create-sheet" aria-labelledby="create-sheet-title">
           <div class="sheet-header">
-            <p class="sheet-eyebrow">Rendered Action</p>
+            <p class="sheet-eyebrow">Repository</p>
             <h2 id="create-sheet-title">Create Session</h2>
           </div>
-          <form class="sheet-form" id="create-form">
-            <label class="field">
-              <span>Working Directory</span>
-              <input id="create-cwd" type="text" placeholder="/absolute/path" autocomplete="off" />
-            </label>
-            <label class="field">
-              <span>Tool</span>
-              <select id="create-tool">
-                <option value="codex">Codex</option>
-                <option value="claude">Claude</option>
-              </select>
-            </label>
-            <label class="field">
-              <span>Initial Request</span>
-              <textarea id="create-request" rows="5" placeholder="Optional boot prompt for the new session"></textarea>
-            </label>
-            <div class="sheet-actions">
-              <button class="ghost-button" id="create-close-button" type="button">Cancel</button>
-              <button id="create-button" type="submit">Create Session</button>
-            </div>
-          </form>
+          <div class="sheet-copy" id="dirs-summary">Browse directories before creating a session.</div>
+          <div class="sheet-grid">
+            <section class="sheet-panel">
+              <div class="sheet-panel-header">
+                <h3>Directory Browser</h3>
+                <label class="toggle-row">
+                  <input id="dirs-managed-only" type="checkbox" />
+                  <span>Managed only</span>
+                </label>
+              </div>
+              <div class="sheet-toolbar">
+                <input id="dirs-path" type="text" placeholder="/absolute/path" autocomplete="off" />
+                <button class="ghost-button" id="dirs-load-button" type="button">Load</button>
+                <button class="ghost-button" id="dirs-up-button" type="button">Up</button>
+              </div>
+              <div class="browser-list" id="dirs-list" role="listbox" aria-label="Directory entries"></div>
+            </section>
+
+            <form class="sheet-form sheet-panel" id="create-form">
+              <label class="field">
+                <span>Working Directory</span>
+                <input id="create-cwd" type="text" placeholder="/absolute/path" autocomplete="off" />
+              </label>
+              <label class="field">
+                <span>Tool</span>
+                <select id="create-tool">
+                  <option value="codex">Codex</option>
+                  <option value="claude">Claude</option>
+                </select>
+              </label>
+              <label class="field">
+                <span>Initial Request</span>
+                <textarea id="create-request" rows="5" placeholder="Optional boot prompt for the new session"></textarea>
+              </label>
+              <div class="sheet-actions">
+                <button class="ghost-button" id="create-close-button" type="button">Cancel</button>
+                <button id="create-button" type="submit">Create Session</button>
+              </div>
+            </form>
+          </div>
+        </section>
+
+        <section class="surface-sheet hidden" id="mermaid-sheet" aria-labelledby="mermaid-sheet-title">
+          <div class="sheet-header">
+            <p class="sheet-eyebrow">Artifact</p>
+            <h2 id="mermaid-sheet-title">Mermaid Diagram</h2>
+          </div>
+          <div class="sheet-copy" id="mermaid-summary">Loading Mermaid artifact…</div>
+          <div class="mermaid-preview" id="mermaid-preview" aria-live="polite"></div>
+          <pre class="sheet-result" id="mermaid-source"></pre>
+          <div class="sheet-actions">
+            <button class="ghost-button" id="mermaid-refresh-button" type="button">Refresh</button>
+            <button class="ghost-button" id="mermaid-open-button" type="button">Open Host Artifact</button>
+            <button class="ghost-button" id="mermaid-close-button" type="button">Close</button>
+          </div>
         </section>
       </div>
     </div>
@@ -230,6 +331,19 @@ async fn rendered_surface_js() -> impl IntoResponse {
             (header::CACHE_CONTROL, "no-store"),
         ],
         include_str!("rendered_surface.js"),
+    )
+}
+
+async fn input_support_js() -> impl IntoResponse {
+    (
+        [
+            (
+                header::CONTENT_TYPE,
+                "application/javascript; charset=utf-8",
+            ),
+            (header::CACHE_CONTROL, "no-store"),
+        ],
+        include_str!("input_support.js"),
     )
 }
 
@@ -662,7 +776,17 @@ fn json_error(status: StatusCode, code: &str, message: &str) -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::body::to_bytes;
+    use axum::response::IntoResponse;
     use tempfile::tempdir;
+
+    async fn html_string(response: impl IntoResponse) -> String {
+        let response = response.into_response();
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("html body");
+        String::from_utf8(body.to_vec()).expect("utf8 html")
+    }
 
     #[test]
     fn valid_pkg_dir_requires_js_and_wasm() {
@@ -695,5 +819,22 @@ mod tests {
         let observer = resolve_ws_auth(&config, Some("observer")).expect("observer auth");
         assert!(observer.has_scope(AuthScope::SessionsRead));
         assert!(!observer.has_scope(AuthScope::StreamWrite));
+    }
+
+    #[tokio::test]
+    async fn index_shell_includes_new_web_parity_sheets() {
+        let html = html_string(render_index(false).await).await;
+        assert!(html.contains("thought-config-sheet"));
+        assert!(html.contains("native-sheet"));
+        assert!(html.contains("mermaid-sheet"));
+        assert!(html.contains("dirs-list"));
+        assert!(html.contains("window.__SWIMMERS_BOOT__"));
+    }
+
+    #[tokio::test]
+    async fn published_route_shell_sets_follow_focus_mode() {
+        let html = html_string(render_index(true).await).await;
+        assert!(html.contains("published-focus"));
+        assert!(html.contains("follow_published_selection"));
     }
 }

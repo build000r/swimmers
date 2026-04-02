@@ -2,6 +2,7 @@ pub mod api;
 pub mod auth;
 pub mod config;
 pub mod env_bootstrap;
+pub mod host_actions;
 pub mod metrics;
 pub mod native;
 pub mod openrouter_models;
@@ -13,5 +14,7 @@ pub mod state;
 #[cfg(test)]
 pub mod test_support;
 pub mod thought;
+pub mod thought_ui;
+pub mod tmux_target;
 pub mod types;
 pub mod web;

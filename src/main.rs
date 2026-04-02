@@ -2,8 +2,10 @@ mod api;
 mod auth;
 mod config;
 mod env_bootstrap;
+mod host_actions;
 mod metrics;
 mod native;
+mod openrouter_models;
 mod persistence;
 mod repo_theme;
 mod scroll;
@@ -12,6 +14,8 @@ mod state;
 #[cfg(test)]
 mod test_support;
 mod thought;
+mod thought_ui;
+mod tmux_target;
 mod types;
 mod web;
 

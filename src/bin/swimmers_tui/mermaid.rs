@@ -1,4 +1,5 @@
 use super::*;
+pub(crate) use swimmers::host_actions::{ArtifactOpener, SystemArtifactOpener};
 
 pub(crate) enum FishBowlMode {
     Aquarium,
@@ -437,31 +438,6 @@ pub(crate) fn mermaid_apply_rect_border_colors(
         for y in rect.top..=rect.bottom {
             mermaid_set_background_cell_color(cells, content_rect, rect.left, y, color);
             mermaid_set_background_cell_color(cells, content_rect, rect.right, y, color);
-        }
-    }
-}
-
-pub(crate) trait ArtifactOpener: Send + Sync {
-    fn open(&self, path: &str) -> io::Result<()>;
-}
-
-#[derive(Default)]
-pub(crate) struct SystemArtifactOpener;
-
-impl ArtifactOpener for SystemArtifactOpener {
-    fn open(&self, path: &str) -> io::Result<()> {
-        if cfg!(target_os = "macos") {
-            ProcessCommand::new("open").arg(path).spawn().map(|_| ())
-        } else if cfg!(target_os = "windows") {
-            ProcessCommand::new("cmd")
-                .args(["/C", "start", "", path])
-                .spawn()
-                .map(|_| ())
-        } else {
-            ProcessCommand::new("xdg-open")
-                .arg(path)
-                .spawn()
-                .map(|_| ())
         }
     }
 }

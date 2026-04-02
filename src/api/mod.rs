@@ -2,6 +2,7 @@ pub mod dirs;
 pub mod native;
 pub mod selection;
 pub mod sessions;
+pub mod web_actions;
 pub mod skills;
 pub mod thought_config;
 
@@ -71,6 +72,7 @@ pub fn api_router(config: Arc<Config>) -> Router<Arc<AppState>> {
         .merge(skills::routes())
         .merge(sessions::routes())
         .merge(thought_config::routes())
+        .merge(web_actions::routes())
         .layer(middleware::from_fn(move |request, next| {
             auth::auth_middleware(config_for_middleware.clone(), request, next)
         }))

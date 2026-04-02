@@ -3,6 +3,8 @@ use std::collections::HashMap;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+use crate::thought::runtime_config::{DaemonDefaults, ThoughtConfig};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SessionState {
@@ -361,6 +363,32 @@ pub struct CreateSessionResponse {
     pub repo_theme: Option<RepoTheme>,
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ThoughtConfigUiMetadata {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub backends: Vec<ThoughtConfigBackendMetadata>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ThoughtConfigBackendMetadata {
+    pub key: String,
+    pub label: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub model_presets_hint: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub model_presets: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ThoughtConfigResponse {
+    #[serde(flatten)]
+    pub config: ThoughtConfig,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub daemon_defaults: Option<DaemonDefaults>,
+    #[serde(default, skip_serializing_if = "is_default_thought_config_ui")]
+    pub ui: ThoughtConfigUiMetadata,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionInputRequest {
     pub text: String,
@@ -456,6 +484,10 @@ fn default_rest_state() -> RestState {
 
 fn default_bubble_precedence() -> BubblePrecedence {
     BubblePrecedence::ThoughtFirst
+}
+
+fn is_default_thought_config_ui(value: &ThoughtConfigUiMetadata) -> bool {
+    value.backends.is_empty()
 }
 
 pub fn fallback_rest_state(state: SessionState, thought_state: ThoughtState) -> RestState {

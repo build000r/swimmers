@@ -1,5 +1,9 @@
 use super::*;
 use swimmers::openrouter_models::cached_or_default_openrouter_candidates;
+use swimmers::thought_ui::{
+    normalize_thought_model_for_backend, thought_backend_cycle_options, thought_backend_label,
+    thought_model_presets, thought_model_presets_hint,
+};
 
 const THOUGHT_CONFIG_WIDTH: u16 = 58;
 const THOUGHT_CONFIG_HEIGHT: u16 = 12;
@@ -51,29 +55,19 @@ impl ThoughtConfigEditorState {
     }
 
     pub(crate) fn cycle_backend(&mut self, delta: isize) {
-        const OPTIONS: [&str; 4] = ["", "claude", "codex", "openrouter"];
-        let current = OPTIONS
+        let options = thought_backend_cycle_options();
+        let current = options
             .iter()
             .position(|option| option.eq_ignore_ascii_case(self.config.backend.trim()))
             .unwrap_or(0) as isize;
-        let len = OPTIONS.len() as isize;
+        let len = options.len() as isize;
         let next = (current + delta).rem_euclid(len) as usize;
-        self.config.backend = OPTIONS[next].to_string();
+        self.config.backend = options[next].to_string();
         self.normalize_model_for_backend();
     }
 
     pub(crate) fn backend_label(&self) -> &'static str {
-        if self.config.backend.trim().is_empty() {
-            "auto"
-        } else if self.config.backend.eq_ignore_ascii_case("claude") {
-            "claude"
-        } else if self.config.backend.eq_ignore_ascii_case("codex") {
-            "codex"
-        } else if self.config.backend.eq_ignore_ascii_case("openrouter") {
-            "openrouter"
-        } else {
-            "custom"
-        }
+        thought_backend_label(&self.config.backend)
     }
 
     pub(crate) fn daemon_label(&self) -> String {
@@ -111,31 +105,11 @@ impl ThoughtConfigEditorState {
     }
 
     pub(crate) fn model_presets_hint(&self) -> Option<&'static str> {
-        match self.config.backend.trim().to_ascii_lowercase().as_str() {
-            "openrouter" => Some("presets: auto  router  cached free models"),
-            "codex" | "codex-cli" | "codex_cli" => Some("presets: auto  5.1-mini  5.3-codex  5.4"),
-            "claude" | "claude-cli" | "claude_cli" => Some("presets: auto  haiku  sonnet"),
-            _ => Some("auto backend uses daemon default model"),
-        }
+        Some(thought_model_presets_hint(&self.config.backend))
     }
 
     fn model_preset_values(&self) -> Vec<String> {
-        if self.config.backend.eq_ignore_ascii_case("openrouter") {
-            let mut values = vec![String::new()];
-            values.extend(self.openrouter_model_presets.iter().cloned());
-            values
-        } else if self.config.backend.eq_ignore_ascii_case("codex") {
-            vec![
-                String::new(),
-                "gpt-5.1-codex-mini".to_string(),
-                "gpt-5.3-codex".to_string(),
-                "gpt-5.4".to_string(),
-            ]
-        } else if self.config.backend.eq_ignore_ascii_case("claude") {
-            vec![String::new(), "haiku".to_string(), "sonnet".to_string()]
-        } else {
-            vec![String::new()]
-        }
+        thought_model_presets(&self.config.backend, &self.openrouter_model_presets)
     }
 
     pub(crate) fn replace_openrouter_model_presets(&mut self, models: Vec<String>) {
@@ -147,25 +121,8 @@ impl ThoughtConfigEditorState {
     }
 
     fn normalize_model_for_backend(&mut self) {
-        let trimmed = self.config.model.trim();
-        if trimmed.is_empty() {
-            self.config.model.clear();
-            return;
-        }
-
-        let keep = match self.config.backend.trim().to_ascii_lowercase().as_str() {
-            "" => false,
-            "openrouter" => trimmed.contains('/'),
-            "codex" | "codex-cli" | "codex_cli" => trimmed.starts_with("gpt-"),
-            "claude" | "claude-cli" | "claude_cli" => {
-                matches!(trimmed, "haiku" | "sonnet" | "opus") || trimmed.starts_with("claude-")
-            }
-            _ => true,
-        };
-
-        if !keep {
-            self.config.model.clear();
-        }
+        self.config.model =
+            normalize_thought_model_for_backend(&self.config.backend, &self.config.model);
     }
 }
 

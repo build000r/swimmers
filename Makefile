@@ -1,7 +1,7 @@
 SHELL := /bin/bash
 .DEFAULT_GOAL := help
 
-.PHONY: help server web tui tui-check tui-smoke cargo-cov-lcov
+.PHONY: help server web web-smoke tui tui-check tui-smoke cargo-cov-lcov
 
 help:
 	@printf '%s\n' \
@@ -9,6 +9,7 @@ help:
 	'' \
 	'  make server                  Run the Rust server on the configured port' \
 	'  make web                     Run the server and print the local/tailnet browser URL' \
+	'  make web-smoke              Verify live browser terminal attach on a fresh session' \
 	'  make tui                     Start a local API if needed, then launch the native TUI' \
 	'  make tui-check              Wait for an existing API and exit without launching the TUI' \
 	'  make tui-smoke              Run shell checks for the TUI bootstrap helper' \
@@ -19,6 +20,9 @@ server:
 
 web:
 	bash ./scripts/run-web.sh
+
+web-smoke:
+	bash ./scripts/test-web-live-terminal.sh
 
 tui:
 	bash ./scripts/run-tui.sh

@@ -3,13 +3,7 @@ use swimmers::openrouter_models::{
     cached_or_default_openrouter_candidates, refresh_openrouter_model_cache,
 };
 use swimmers::thought::probe::{run_thought_config_probe, ThoughtConfigProbeResult};
-
-#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
-pub(crate) struct ThoughtConfigResponse {
-    #[serde(flatten)]
-    pub(crate) config: ThoughtConfig,
-    pub(crate) daemon_defaults: Option<DaemonDefaults>,
-}
+pub(crate) use swimmers::types::ThoughtConfigResponse;
 
 pub(crate) type ThoughtConfigTestResponse = ThoughtConfigProbeResult;
 

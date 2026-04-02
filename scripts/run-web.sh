@@ -2,46 +2,9 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+source "${ROOT_DIR}/scripts/web-common.sh"
 PORT="${PORT:-3210}"
 WEB_ROUTE_PATH="${WEB_ROUTE_PATH:-/app.js}"
-
-require() {
-  if ! command -v "$1" >/dev/null 2>&1; then
-    printf 'missing required command: %s\n' "$1" >&2
-    exit 1
-  fi
-}
-
-valid_frankentui_pkg_dir() {
-  local dir="${1:-}"
-  [[ -n "${dir}" ]] || return 1
-  [[ -f "${dir}/FrankenTerm.js" && -f "${dir}/FrankenTerm_bg.wasm" ]]
-}
-
-resolve_frankentui_pkg_dir() {
-  if valid_frankentui_pkg_dir "${SWIMMERS_FRANKENTUI_PKG_DIR:-}"; then
-    printf '%s\n' "${SWIMMERS_FRANKENTUI_PKG_DIR}"
-    return 0
-  fi
-
-  if valid_frankentui_pkg_dir "${FRANKENTUI_PKG_DIR:-}"; then
-    printf '%s\n' "${FRANKENTUI_PKG_DIR}"
-    return 0
-  fi
-
-  local candidate
-  for candidate in \
-    "/Users/b/projects/frankentui/pkg" \
-    "/Users/b/repos/frankentui/pkg"
-  do
-    if valid_frankentui_pkg_dir "${candidate}"; then
-      printf '%s\n' "${candidate}"
-      return 0
-    fi
-  done
-
-  return 1
-}
 
 announce_urls() {
   printf 'swimmers web surface\n'
@@ -138,10 +101,10 @@ handle_existing_listener() {
 }
 
 main() {
-  require cargo
+  swimmers_require cargo
 
   local pkg_dir=""
-  if pkg_dir="$(resolve_frankentui_pkg_dir)"; then
+  if pkg_dir="$(swimmers_resolve_frankentui_pkg_dir)"; then
     export SWIMMERS_FRANKENTUI_PKG_DIR="${pkg_dir}"
     printf 'Using FrankenTerm assets from %s\n' "${SWIMMERS_FRANKENTUI_PKG_DIR}"
   else

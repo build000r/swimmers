@@ -45,6 +45,7 @@ export function buildSurfaceFrame(model) {
   if (layout.detailRail) {
     drawDetailRail(frame, layout.detailRail, model);
   }
+  drawTerminalViewport(frame, layout.center, model);
   drawFooter(frame, layout.footer, model);
   drawCenterOverlay(frame, layout.center, model);
   frame.layout = layout;
@@ -113,6 +114,16 @@ function drawHeader(frame, layout, model) {
   const chips = [
     chipSpec(`conn ${safeLabel(model?.connectionLabel, "idle")}`, model?.connectionMuted ? COLORS.muted : COLORS.text, COLORS.chipBg),
     chipSpec(`mode ${safeLabel(model?.modeLabel, "unknown")}`, model?.modeMuted ? COLORS.muted : COLORS.text, COLORS.chipBg),
+    chipSpec(
+      `term ${terminalStateCopy(model).shortLabel}`,
+      terminalStateCopy(model).muted ? COLORS.muted : COLORS.text,
+      terminalStateCopy(model).muted ? COLORS.chipBg : COLORS.chipActiveBg,
+      {
+        type: "action",
+        actionId: "focus_terminal",
+        disabled: !model?.currentSession,
+      },
+    ),
     chipSpec(
       model?.followPublishedSelection ? "published follow on" : "published follow off",
       model?.followPublishedSelection ? COLORS.success : COLORS.muted,
@@ -283,6 +294,22 @@ function drawDetailRail(frame, rail, model) {
     y += 1;
   }
 
+  if (session) {
+    const actions = [
+      actionSpec("mmd", "mmd", "open_mermaid", true),
+      actionSpec("commit", "commit", "launch_commit", session.commitCandidate),
+      actionSpec("native", "native", "open_native", true),
+    ];
+    const actionY = Math.min(rail.y + rail.h - 4, y + 1);
+    drawText(frame, rail.x + 2, actionY, "actions", {
+      fg: COLORS.muted,
+      attrs: STYLE_UNDERLINE,
+      width: rail.w - 4,
+    });
+    drawActionChipRow(frame, rail.x + 2, actionY + 1, rail.x + rail.w - 2, actions, "action");
+    y = Math.max(y, actionY + 3);
+  }
+
   y += 1;
   drawText(frame, rail.x + 2, y, "thought", {
     fg: COLORS.muted,
@@ -312,8 +339,13 @@ function drawFooter(frame, footer, model) {
 
   const actionY = footer.h >= 5 ? footer.y + 3 : footer.y + 2;
   const actions = [
+    actionSpec("terminal", "terminal", "focus_terminal", Boolean(model?.currentSession)),
     actionSpec("search", "search", "open_search", Boolean(model?.terminalReady)),
     actionSpec("send", "send", "open_send", Boolean(model?.currentSession) && !model?.readOnly),
+    actionSpec("mmd", "mmd", "open_mermaid", Boolean(model?.currentSession)),
+    actionSpec("commit", "commit", "launch_commit", Boolean(model?.currentSession?.commitCandidate)),
+    actionSpec("config", "config", "open_config", true),
+    actionSpec("native", "native", "open_native", true),
     actionSpec(model?.followPublishedSelection ? "following" : "follow", "follow", "toggle_follow", true),
     actionSpec(model?.selectMode ? "select on" : "select", "select", "toggle_select", Boolean(model?.terminalReady)),
     actionSpec("copy", "copy", "copy_selection", Boolean(model?.terminalReady)),
@@ -324,54 +356,245 @@ function drawFooter(frame, footer, model) {
 
   let x = footer.x + 2;
   const limit = footer.x + footer.w - 2;
-  for (const action of actions) {
-    const width = action.label.length + 4;
-    if (x + width > limit) {
-      break;
-    }
-    drawChip(frame, x, actionY, action.label, action.enabled ? COLORS.text : COLORS.muted, action.enabled ? COLORS.chipBg : COLORS.panelBg);
-    pushZone(
-      frame,
-      {
-        type: "action",
-        actionId: action.actionId,
-        disabled: !action.enabled,
-      },
-      rect(x, actionY, width, 1),
-    );
-    x += width + 1;
-  }
+  drawActionChipRow(frame, x, actionY, limit, actions, "action");
+}
+
+function drawTerminalViewport(frame, center, model) {
+  const status = terminalStateCopy(model);
+  drawBorder(frame, center, model?.terminalReady ? COLORS.accentSoft : COLORS.panelBorderSoft);
+  drawText(frame, center.x + 2, center.y, ` ${status.label} `, {
+    fg: status.muted ? COLORS.muted : COLORS.accent,
+    bg: COLORS.panelBgStrong,
+    attrs: STYLE_BOLD,
+    width: Math.max(0, center.w - 4),
+  });
 }
 
 function drawCenterOverlay(frame, center, model) {
-  const messages = [];
-  if (!model?.frankenTermAvailable) {
-    messages.push("FrankenTerm assets are unavailable. Falling back to plain snapshot text.");
-  } else if (!model?.currentSession && model?.followPublishedSelection) {
-    messages.push("Waiting for the native TUI to publish a session to this URL.");
-  } else if (!model?.currentSession) {
-    messages.push("Select a session from the rendered rail to attach from the tailnet URL.");
-  } else if (!model?.terminalReady) {
-    messages.push(`Attaching to ${model.currentSession.name}...`);
-  }
+  if (model?.currentSession) {
+    const messages = [];
+    if (!model?.frankenTermAvailable) {
+      messages.push("Snapshot fallback active. FrankenTerm assets are unavailable on this host.");
+    } else if (!model?.terminalReady) {
+      messages.push(`Attaching terminal to ${model.currentSession.name}...`);
+    }
 
-  if (!messages.length) {
+    if (!messages.length) {
+      return;
+    }
+
+    const width = Math.min(center.w - 4, Math.max(28, Math.floor(center.w * 0.72)));
+    const height = Math.min(center.h - 2, 6);
+    const x = center.x + Math.max(0, Math.floor((center.w - width) / 2));
+    const y = center.y + Math.max(1, Math.floor((center.h - height) / 2));
+    const overlay = rect(x, y, width, height);
+    drawPanel(frame, overlay, "status", {
+      bg: COLORS.overlayBg,
+      border: COLORS.panelBorderSoft,
+    });
+    pushMask(frame, overlay);
+    drawTextBlock(frame, overlay.x + 2, overlay.y + 2, overlay.w - 4, overlay.h - 3, messages.join(" "), {
+      fg: COLORS.text,
+    });
     return;
   }
 
-  const width = Math.min(center.w - 4, Math.max(28, Math.floor(center.w * 0.72)));
-  const height = Math.min(center.h - 2, 6);
-  const x = center.x + Math.max(0, Math.floor((center.w - width) / 2));
-  const y = center.y + Math.max(1, Math.floor((center.h - height) / 2));
-  const overlay = rect(x, y, width, height);
-  drawPanel(frame, overlay, "status", {
+  const sessions = Array.isArray(model?.sessions) ? model.sessions : [];
+  if (!sessions.length) {
+    const width = Math.min(center.w - 4, Math.max(28, Math.floor(center.w * 0.72)));
+    const height = Math.min(center.h - 2, 6);
+    const x = center.x + Math.max(0, Math.floor((center.w - width) / 2));
+    const y = center.y + Math.max(1, Math.floor((center.h - height) / 2));
+    const overlay = rect(x, y, width, height);
+    drawPanel(frame, overlay, "status", {
+      bg: COLORS.overlayBg,
+      border: COLORS.panelBorderSoft,
+    });
+    pushMask(frame, overlay);
+    drawTextBlock(frame, overlay.x + 2, overlay.y + 2, overlay.w - 4, overlay.h - 3, "No live sessions. Create one from the rendered action rail.", {
+      fg: COLORS.text,
+    });
+    return;
+  }
+
+  const summary = summarizeSessions(sessions, model?.publishedSessionId, model?.selectedSessionId);
+  const overlay = rect(
+    center.x + 1,
+    center.y + 1,
+    Math.max(20, center.w - 2),
+    Math.max(8, center.h - 2),
+  );
+  drawPanel(frame, overlay, "overview", {
     bg: COLORS.overlayBg,
     border: COLORS.panelBorderSoft,
   });
   pushMask(frame, overlay);
-  drawTextBlock(frame, overlay.x + 2, overlay.y + 2, overlay.w - 4, overlay.h - 3, messages.join(" "), {
-    fg: COLORS.text,
+  drawText(frame, overlay.x + 2, overlay.y + 1, "web-native aquarium / session atlas", {
+    fg: COLORS.accent,
+    attrs: STYLE_BOLD,
+    width: overlay.w - 4,
   });
+  drawText(frame, overlay.x + 2, overlay.y + 2, truncate(summary.subtitle, overlay.w - 4), {
+    fg: COLORS.muted,
+    width: overlay.w - 4,
+  });
+
+  const cardY = overlay.y + 4;
+  const cardHeight = Math.min(7, Math.max(5, overlay.h - 6));
+  const cardCount = overlay.w >= 84 ? 3 : 2;
+  const cardGap = 1;
+  const cardWidth = Math.max(16, Math.floor((overlay.w - 4 - cardGap * (cardCount - 1)) / cardCount));
+  const cards = [
+    {
+      title: "live",
+      accent: COLORS.success,
+      lines: [
+        `busy ${summary.busy}`,
+        `attention ${summary.attention}`,
+        `commands ${summary.activeCommands}`,
+      ],
+    },
+    {
+      title: "rest",
+      accent: COLORS.warning,
+      lines: [
+        `idle ${summary.idle}`,
+        `exited ${summary.exited}`,
+        `stale ${summary.stale}`,
+      ],
+    },
+    {
+      title: "repo",
+      accent: COLORS.accent,
+      lines: [
+        `commit ${summary.commitCandidates}`,
+        `codex ${summary.codexCount}`,
+        `claude ${summary.claudeCount}`,
+      ],
+    },
+  ].slice(0, cardCount);
+
+  let cardX = overlay.x + 2;
+  for (const card of cards) {
+    drawOverviewCard(frame, rect(cardX, cardY, cardWidth, cardHeight), card.title, card.lines, card.accent);
+    cardX += cardWidth + cardGap;
+  }
+
+  drawText(frame, overlay.x + 2, overlay.y + overlay.h - 2, truncate(summary.footer, overlay.w - 4), {
+    fg: COLORS.muted,
+    attrs: STYLE_ITALIC,
+    width: overlay.w - 4,
+  });
+}
+
+function summarizeSessions(sessions, publishedSessionId, selectedSessionId) {
+  const summary = {
+    busy: 0,
+    idle: 0,
+    attention: 0,
+    exited: 0,
+    stale: 0,
+    commitCandidates: 0,
+    codexCount: 0,
+    claudeCount: 0,
+    activeCommands: 0,
+    subtitle: "Select a session row on the left to attach its terminal.",
+    footer: "Use the HUD to open config, native, Mermaid, or repo browser sheets.",
+  };
+
+  for (const session of sessions) {
+    const state = String(session.state || "").toLowerCase();
+    if (state === "busy") {
+      summary.busy += 1;
+    } else if (state === "attention") {
+      summary.attention += 1;
+    } else if (state === "exited") {
+      summary.exited += 1;
+    } else {
+      summary.idle += 1;
+    }
+
+    if (session.commitCandidate) {
+      summary.commitCandidates += 1;
+    }
+    if (session.isStale) {
+      summary.stale += 1;
+    }
+    const tool = String(session.toolLabel || session.tool || "").toLowerCase();
+    if (tool.includes("codex")) {
+      summary.codexCount += 1;
+    } else if (tool.includes("claude")) {
+      summary.claudeCount += 1;
+    }
+    if (session.commandLabel && session.commandLabel !== "idle") {
+      summary.activeCommands += 1;
+    }
+  }
+
+  const selected = sessions.find((session) => session.sessionId === selectedSessionId) || null;
+  const published = sessions.find((session) => session.sessionId === publishedSessionId) || null;
+  if (selected) {
+    summary.subtitle = `Selected ${selected.name} / ${selected.cwdLabel} / ${selected.state}`;
+  } else if (published) {
+    summary.subtitle = `Following published session ${published.name} / ${published.cwdLabel}.`;
+  } else {
+    summary.subtitle = `Watching ${sessions.length} live sessions across ${summary.codexCount + summary.claudeCount} tools.`;
+  }
+
+  return summary;
+}
+
+function terminalStateCopy(model) {
+  if (model?.currentSession) {
+    if (!model?.frankenTermAvailable || model?.snapshotFallback) {
+      return {
+        label: "snapshot fallback",
+        shortLabel: "snapshot",
+        muted: false,
+      };
+    }
+    if (model?.terminalReady) {
+      return {
+        label: "live terminal",
+        shortLabel: "live",
+        muted: false,
+      };
+    }
+    return {
+      label: `attaching ${model.currentSession.name || "terminal"}`,
+      shortLabel: "attaching",
+      muted: false,
+    };
+  }
+
+  if (model?.followPublishedSelection) {
+    return {
+      label: "awaiting published terminal",
+      shortLabel: "waiting",
+      muted: true,
+    };
+  }
+
+  return {
+    label: "select a session to attach its terminal",
+    shortLabel: "select",
+    muted: true,
+  };
+}
+
+function drawOverviewCard(frame, panel, title, lines, accent) {
+  drawPanel(frame, panel, title, {
+    bg: COLORS.panelBg,
+    border: accent,
+  });
+  let y = panel.y + 1;
+  for (const line of lines) {
+    drawText(frame, panel.x + 2, y, truncate(line, panel.w - 4), {
+      fg: COLORS.text,
+      width: panel.w - 4,
+    });
+    y += 1;
+  }
 }
 
 function drawPanel(frame, panel, title, options = {}) {
@@ -416,6 +639,34 @@ function drawChip(frame, x, y, label, fg, bg) {
     attrs: STYLE_BOLD,
     width,
   });
+}
+
+function drawActionChipRow(frame, x, y, limit, actions, zoneType) {
+  let cursor = x;
+  for (const action of actions) {
+    const width = action.label.length + 4;
+    if (cursor + width > limit) {
+      break;
+    }
+    drawChip(
+      frame,
+      cursor,
+      y,
+      action.label,
+      action.enabled ? COLORS.text : COLORS.muted,
+      action.enabled ? COLORS.chipBg : COLORS.panelBg,
+    );
+    pushZone(
+      frame,
+      {
+        type: zoneType,
+        actionId: action.actionId,
+        disabled: !action.enabled,
+      },
+      rect(cursor, y, width, 1),
+    );
+    cursor += width + 1;
+  }
 }
 
 function drawText(frame, x, y, text, options = {}) {
