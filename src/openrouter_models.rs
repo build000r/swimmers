@@ -88,7 +88,10 @@ pub async fn refresh_openrouter_model_cache(
     models.sort_by(compare_rotator_candidates);
 
     let mut ordered = vec!["openrouter/free".to_string()];
-    for entry in models.into_iter().take(MAX_ROTATOR_MODELS.saturating_sub(1)) {
+    for entry in models
+        .into_iter()
+        .take(MAX_ROTATOR_MODELS.saturating_sub(1))
+    {
         if !ordered
             .iter()
             .any(|existing| existing.eq_ignore_ascii_case(&entry.id))
@@ -148,7 +151,11 @@ fn is_rotator_candidate(entry: &OpenRouterModelEntry) -> bool {
     }
 
     let lowered_id = entry.id.to_ascii_lowercase();
-    let lowered_name = entry.name.as_deref().unwrap_or_default().to_ascii_lowercase();
+    let lowered_name = entry
+        .name
+        .as_deref()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
 
     !lowered_id.contains("-vl")
         && !lowered_id.contains(":vl")
@@ -202,12 +209,18 @@ mod tests {
 
     #[test]
     fn should_rotate_openrouter_model_matches_invalid_or_stale_catalog_errors() {
-        assert!(should_rotate_openrouter_model("haiku is not a valid model ID"));
+        assert!(should_rotate_openrouter_model(
+            "haiku is not a valid model ID"
+        ));
         assert!(should_rotate_openrouter_model(
             "No endpoints available matching your guardrail restrictions"
         ));
-        assert!(should_rotate_openrouter_model("temporarily rate-limited upstream"));
-        assert!(!should_rotate_openrouter_model("OPENROUTER_API_KEY not set"));
+        assert!(should_rotate_openrouter_model(
+            "temporarily rate-limited upstream"
+        ));
+        assert!(!should_rotate_openrouter_model(
+            "OPENROUTER_API_KEY not set"
+        ));
     }
 
     #[test]

@@ -27,6 +27,7 @@ swimmers_resolve_frankentui_pkg_dir() {
   local candidate
   for candidate in \
     "/Users/b/projects/frankentui/pkg" \
+    "/Users/b/repos/opensource/frankentui/pkg" \
     "/Users/b/repos/frankentui/pkg"
   do
     if swimmers_valid_frankentui_pkg_dir "${candidate}"; then

@@ -9,6 +9,8 @@ pub const CADENCE_WARM_MAX_MS: u64 = 600_000;
 pub const CADENCE_COLD_MAX_MS: u64 = 1_800_000;
 pub const MODEL_MAX_CHARS: usize = 200;
 pub const PROMPT_MAX_CHARS: usize = 4_000;
+pub const DEFAULT_THOUGHT_BACKEND: &str = "openrouter";
+pub const DEFAULT_OPENROUTER_MODEL: &str = "openrouter/free";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ThoughtConfig {
@@ -34,8 +36,8 @@ impl Default for ThoughtConfig {
     fn default() -> Self {
         Self {
             enabled: default_enabled(),
-            model: String::new(),
-            backend: String::new(),
+            model: default_model(),
+            backend: default_backend().to_string(),
             cadence_hot_ms: default_cadence_hot_ms(),
             cadence_warm_ms: default_cadence_warm_ms(),
             cadence_cold_ms: default_cadence_cold_ms(),
@@ -47,8 +49,8 @@ impl Default for ThoughtConfig {
 
 impl ThoughtConfig {
     pub fn normalize(&mut self) {
-        self.model = self.model.trim().to_string();
-        self.backend = self.backend.trim().to_string();
+        self.backend = normalize_backend(&self.backend);
+        self.model = normalize_model_for_backend(&self.backend, &self.model);
         self.agent_prompt = normalize_optional_prompt(self.agent_prompt.take());
         self.terminal_prompt = normalize_optional_prompt(self.terminal_prompt.take());
     }
@@ -61,28 +63,18 @@ impl ThoughtConfig {
             ));
         }
 
-        if !self.backend.is_empty() {
-            const VALID_BACKENDS: &[&str] = &[
-                "openrouter",
-                "codex",
-                "codex_cli",
-                "codex-cli",
-                "claude",
-                "claude_cli",
-                "claude-cli",
-            ];
-            if !VALID_BACKENDS
-                .iter()
-                .any(|v| v.eq_ignore_ascii_case(&self.backend))
-            {
-                return Err(ThoughtConfigValidationError::new(
-                    "backend",
-                    format!(
-                        "unrecognized backend {:?}; expected one of: openrouter, claude, codex",
-                        self.backend
-                    ),
-                ));
-            }
+        const VALID_BACKENDS: &[&str] = &["openrouter", "codex"];
+        if !VALID_BACKENDS
+            .iter()
+            .any(|v| v.eq_ignore_ascii_case(&self.backend))
+        {
+            return Err(ThoughtConfigValidationError::new(
+                "backend",
+                format!(
+                    "unrecognized backend {:?}; expected one of: openrouter, codex",
+                    self.backend
+                ),
+            ));
         }
 
         if !(CADENCE_HOT_MIN_MS..=CADENCE_HOT_MAX_MS).contains(&self.cadence_hot_ms) {
@@ -187,8 +179,45 @@ fn normalize_optional_prompt(value: Option<String>) -> Option<String> {
     }
 }
 
+fn normalize_backend(value: &str) -> String {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "" | "openrouter" | "claude" | "claude_cli" | "claude-cli" => default_backend().to_string(),
+        "codex" | "codex_cli" | "codex-cli" => "codex".to_string(),
+        other => other.to_string(),
+    }
+}
+
+fn normalize_model_for_backend(backend: &str, model: &str) -> String {
+    let trimmed = model.trim();
+    match backend {
+        "openrouter" => {
+            if trimmed.contains('/') {
+                trimmed.to_string()
+            } else {
+                default_model()
+            }
+        }
+        "codex" => {
+            if trimmed.starts_with("gpt-") {
+                trimmed.to_string()
+            } else {
+                String::new()
+            }
+        }
+        _ => trimmed.to_string(),
+    }
+}
+
 const fn default_enabled() -> bool {
     true
+}
+
+fn default_model() -> String {
+    DEFAULT_OPENROUTER_MODEL.to_string()
+}
+
+const fn default_backend() -> &'static str {
+    DEFAULT_THOUGHT_BACKEND
 }
 
 const fn default_cadence_hot_ms() -> u64 {
@@ -211,8 +240,8 @@ mod tests {
     fn default_config_is_valid() {
         let config = ThoughtConfig::default();
         assert!(config.validate().is_ok());
-        assert!(config.model.is_empty());
-        assert!(config.backend.is_empty());
+        assert_eq!(config.backend, "openrouter");
+        assert_eq!(config.model, "openrouter/free");
     }
 
     #[test]
@@ -264,16 +293,31 @@ mod tests {
     }
 
     #[test]
-    fn backend_validation_accepts_known_values() {
-        for backend in ["openrouter", "claude", "codex", ""] {
+    fn normalize_migrates_empty_and_claude_backends_to_openrouter_defaults() {
+        for backend in ["", "claude", "claude_cli", "claude-cli"] {
+            let config = ThoughtConfig {
+                backend: backend.to_string(),
+                model: "haiku".to_string(),
+                ..ThoughtConfig::default()
+            };
+            let normalized = config
+                .normalize_and_validate()
+                .expect("legacy backend should normalize");
+            assert_eq!(normalized.backend, "openrouter");
+            assert_eq!(normalized.model, "openrouter/free");
+        }
+    }
+
+    #[test]
+    fn backend_validation_accepts_supported_values_and_aliases() {
+        for backend in ["openrouter", "codex", "codex_cli", "codex-cli"] {
             let config = ThoughtConfig {
                 backend: backend.to_string(),
                 ..ThoughtConfig::default()
             };
             assert!(
-                config.validate().is_ok(),
-                "backend {:?} should be valid",
-                backend
+                config.normalize_and_validate().is_ok(),
+                "{backend:?} should normalize"
             );
         }
     }

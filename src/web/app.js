@@ -18,9 +18,8 @@ const SNAPSHOT_REFRESH_MS = 900;
 const SURFACE_CLICK_SUPPRESS_MS = 450;
 const FALLBACK_THOUGHT_BACKENDS = [
   { key: "", label: "auto" },
-  { key: "claude", label: "claude" },
-  { key: "codex", label: "codex" },
   { key: "openrouter", label: "openrouter" },
+  { key: "codex", label: "codex" },
 ];
 
 const state = {
@@ -238,14 +237,12 @@ function fallbackThoughtBackendMetadata() {
         ? "presets: auto  router  cached free models"
         : backend.key === "codex"
           ? "presets: auto  5.1-mini  5.3-codex  5.4"
-          : "presets: auto  haiku  sonnet",
+          : "auto backend uses daemon default model",
     model_presets: backend.key === "openrouter"
       ? ["", "openrouter/free", "nvidia/nemotron-3-super-120b-a12b:free", "arcee-ai/trinity-large-preview:free"]
       : backend.key === "codex"
         ? ["", "gpt-5.1-codex-mini", "gpt-5.3-codex", "gpt-5.4"]
-        : backend.key === "claude"
-          ? ["", "haiku", "sonnet"]
-          : [""],
+        : [""],
   }));
 }
 
@@ -263,9 +260,27 @@ function selectedThoughtBackendMetadata() {
 function normalizeBackendKey(value) {
   const key = String(value || "").trim().toLowerCase();
   if (!key) return "";
-  if (key === "claude-cli" || key === "claude_cli") return "claude";
+  if (key === "claude" || key === "claude-cli" || key === "claude_cli") return "openrouter";
   if (key === "codex-cli" || key === "codex_cli") return "codex";
   return key;
+}
+
+function normalizeThoughtModelForBackend(backend, model) {
+  const key = normalizeBackendKey(backend);
+  const trimmed = String(model || "").trim();
+  if (!trimmed) {
+    return "";
+  }
+  if (key === "openrouter") {
+    return trimmed.includes("/") ? trimmed : "";
+  }
+  if (key === "codex") {
+    return trimmed.startsWith("gpt-") ? trimmed : "";
+  }
+  if (!key) {
+    return "";
+  }
+  return trimmed;
 }
 
 function currentNativeModeLabel() {
@@ -600,9 +615,17 @@ function renderThoughtConfigOptions() {
 }
 
 function applyThoughtConfigToForm(payload) {
-  const config = payload?.config || payload || null;
+  const rawConfig = payload?.config || payload || null;
   const daemonDefaults = payload?.daemon_defaults ?? null;
   const ui = payload?.ui ?? null;
+  const backend = normalizeBackendKey(rawConfig?.backend || "");
+  const config = rawConfig
+    ? {
+        ...rawConfig,
+        backend,
+        model: normalizeThoughtModelForBackend(backend, rawConfig.model || ""),
+      }
+    : null;
 
   state.thoughtConfig.config = config;
   state.thoughtConfig.ui = ui;
@@ -614,8 +637,9 @@ function applyThoughtConfigToForm(payload) {
   el.thoughtConfigSummary.textContent = backend
     ? `${backend.label || backend.key || "auto"} backend selected.`
     : "Thought config loaded.";
+  const daemonBackend = normalizeBackendKey(daemonDefaults?.backend || "");
   el.thoughtConfigDaemon.textContent = daemonDefaults
-    ? `daemon default: ${daemonDefaults.backend || "auto"} / ${daemonDefaults.model || "(empty)"}`
+    ? `daemon default: ${daemonBackend || "auto"} / ${daemonDefaults.model || "(empty)"}`
     : "daemon default: unavailable";
   syncSheetActionAvailability();
 }
@@ -2002,7 +2026,12 @@ function bindEvents() {
     await saveThoughtConfig();
   });
   el.thoughtConfigBackend.addEventListener("change", () => {
+    el.thoughtConfigModel.value = normalizeThoughtModelForBackend(
+      el.thoughtConfigBackend.value,
+      el.thoughtConfigModel.value,
+    );
     renderThoughtConfigOptions();
+    syncSheetActionAvailability();
   });
   el.thoughtConfigModel.addEventListener("input", () => {
     syncSheetActionAvailability();

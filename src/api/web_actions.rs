@@ -462,6 +462,7 @@ mod tests {
                 updated_at: None,
                 source: Some("flowchart TD\nA-->B\n".to_string()),
                 error: None,
+                slice_name: None,
             },
         )
         .await;
@@ -487,6 +488,7 @@ mod tests {
                 updated_at: None,
                 source: None,
                 error: Some("artifact missing".to_string()),
+                slice_name: None,
             },
         )
         .await;
@@ -524,6 +526,7 @@ mod tests {
                 updated_at: None,
                 source: Some("flowchart TD\nA-->B\n".to_string()),
                 error: None,
+                slice_name: None,
             },
         )
         .await;
@@ -555,6 +558,7 @@ mod tests {
                 updated_at: None,
                 source: Some("flowchart TD\nA-->B\n".to_string()),
                 error: Some("artifact path unavailable".to_string()),
+                slice_name: None,
             },
         )
         .await;

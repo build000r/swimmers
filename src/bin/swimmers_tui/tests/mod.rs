@@ -305,6 +305,7 @@ impl TuiApi for MockApi {
                         updated_at: None,
                         source: None,
                         error: None,
+                        slice_name: None,
                     })
                 })
         })
@@ -1248,6 +1249,17 @@ fn find_text_position(renderer: &Renderer, needle: &str) -> Option<(u16, u16)> {
     None
 }
 
+fn find_blank_position(renderer: &Renderer, rect: Rect) -> Option<(u16, u16)> {
+    for y in rect.y..rect.bottom() {
+        for x in rect.x..rect.right() {
+            if cell_at(renderer, x, y).ch == ' ' {
+                return Some((x, y));
+            }
+        }
+    }
+    None
+}
+
 fn open_mermaid_test_viewer(
     source: &str,
     width: u16,
@@ -1748,6 +1760,7 @@ fn mermaid_artifact(
     updated_at: &str,
     source: &str,
 ) -> MermaidArtifactResponse {
+    let slice_name = swimmers::session::artifacts::extract_mmd_slice_name(path).map(str::to_owned);
     MermaidArtifactResponse {
         session_id: session_id.to_string(),
         available: true,
@@ -1755,6 +1768,7 @@ fn mermaid_artifact(
         updated_at: Some(timestamp(updated_at)),
         source: Some(source.to_string()),
         error: None,
+        slice_name,
     }
 }
 
@@ -2300,7 +2314,7 @@ fn refresh_prunes_exited_sessions_from_thought_timeline_and_header_filter_chips(
             .iter()
             .map(|row| row.line.as_str())
             .collect::<Vec<_>>(),
-        vec!["9: indexing docs"]
+        vec!["skills/9: indexing docs"]
     );
 }
 
@@ -2408,9 +2422,9 @@ fn render_header_filter_strip_shows_repo_chips_and_thought_rows() {
             .map(|row| row.line.as_str())
             .collect::<Vec<_>>(),
         vec![
-            "7: patching tui",
-            "2: wiring filter state",
-            "9: indexing docs",
+            "swimmers/7: patching tui",
+            "swimmers/2: wiring filter state",
+            "skills/9: indexing docs",
         ]
     );
 
@@ -2620,7 +2634,7 @@ fn header_filter_strip_and_thought_rows_apply_and_clear_filters() {
     assert_eq!(api.open_calls(), vec!["sess-2".to_string()]);
     assert_eq!(
         app.message.as_ref().map(|(message, _)| message.as_str()),
-        Some("focused 2")
+        Some("focused swimmers/2")
     );
 
     let cleared_header = build_header_filter_layout(&app, 120);
@@ -2778,9 +2792,11 @@ fn clicking_thought_body_opens_that_session() {
         .bottom()
         .saturating_sub(panel.rows.len() as u16);
     let line = panel.rows[0].line.clone();
-    let body_x = thought_content
+    let body_x = panel.rows[0]
+        .text_rect
+        .expect("row should have text")
         .x
-        .saturating_add(display_width("7").saturating_add(3));
+        .saturating_add(1);
     assert!(body_x < thought_content.x.saturating_add(display_width(&line)));
 
     api.push_open_session(Ok(NativeDesktopOpenResponse {
@@ -2801,7 +2817,7 @@ fn clicking_thought_body_opens_that_session() {
     assert_eq!(api.open_calls(), vec!["sess-1".to_string()]);
     assert_eq!(
         app.message.as_ref().map(|(message, _)| message.as_str()),
-        Some("focused 7")
+        Some("focused swimmers/7")
     );
 }
 
@@ -2844,7 +2860,7 @@ fn wrapped_latest_thought_stays_bottom_aligned() {
             .iter()
             .map(|row| row.line.as_str())
             .collect::<Vec<_>>(),
-        vec!["9: latest", "thought", "stays at", "bottom"]
+        vec!["latest", "thought", "stays at", "bottom"]
     );
     assert_eq!(
         panel.rows.last().map(|row| row.line.as_str()),
@@ -2895,7 +2911,7 @@ fn clicking_wrapped_thought_line_opens_that_session() {
     assert_eq!(api.open_calls(), vec!["sess-2".to_string()]);
     assert_eq!(
         app.message.as_ref().map(|(message, _)| message.as_str()),
-        Some("focused 9")
+        Some("focused swimmers/9")
     );
 }
 
@@ -2926,9 +2942,11 @@ fn clicking_thought_row_surfaces_native_open_errors() {
     let row_start_y = thought_content
         .bottom()
         .saturating_sub(panel.rows.len() as u16);
-    let body_x = thought_content
+    let body_x = panel.rows[0]
+        .text_rect
+        .expect("row should have text")
         .x
-        .saturating_add(display_width("7").saturating_add(3));
+        .saturating_add(1);
 
     api.push_open_session(Err("native open unavailable".to_string()));
     app.handle_thought_click(
@@ -4567,8 +4585,8 @@ fn handle_key_event_opens_thought_config_editor() {
         .thought_config_editor
         .as_ref()
         .expect("thought config editor should open");
-    assert_eq!(editor.config.backend, "claude");
-    assert_eq!(editor.config.model, "haiku");
+    assert_eq!(editor.config.backend, "openrouter");
+    assert_eq!(editor.config.model, "openrouter/free");
 }
 
 #[test]
@@ -4657,8 +4675,8 @@ fn thought_config_editor_updates_backend_and_model_then_saves() {
     api.push_fetch_thought_config(Ok(ThoughtConfigResponse {
         config: ThoughtConfig::default(),
         daemon_defaults: Some(DaemonDefaults {
-            model: "haiku".to_string(),
-            backend: "claude".to_string(),
+            model: "openrouter/free".to_string(),
+            backend: "openrouter".to_string(),
             agent_prompt: "agent".to_string(),
             terminal_prompt: "terminal".to_string(),
         }),
@@ -4682,11 +4700,6 @@ fn thought_config_editor_updates_backend_and_model_then_saves() {
     app.open_thought_config_editor();
     assert!(app.thought_config_editor.is_some());
 
-    handle_key_event(
-        &mut app,
-        layout,
-        KeyEvent::new(KeyCode::Right, KeyModifiers::NONE),
-    );
     handle_key_event(
         &mut app,
         layout,
@@ -4904,12 +4917,14 @@ fn thought_config_editor_cycles_current_openrouter_model_presets() {
     app.thought_config_editor = Some(ThoughtConfigEditorState::new(
         ThoughtConfig {
             backend: "openrouter".to_string(),
+            model: String::new(),
             ..ThoughtConfig::default()
         },
         None,
     ));
     if let Some(editor) = &mut app.thought_config_editor {
         editor.focus = ThoughtConfigEditorField::Model;
+        editor.config.model.clear();
         editor.replace_openrouter_model_presets(vec![
             "openrouter/free".to_string(),
             "nvidia/nemotron-3-super-120b-a12b:free".to_string(),
@@ -4958,20 +4973,20 @@ fn thought_config_editor_cycles_current_openrouter_model_presets() {
 fn thought_config_editor_clears_incompatible_model_when_backend_changes() {
     let mut editor = ThoughtConfigEditorState::new(
         ThoughtConfig {
-            backend: "claude".to_string(),
-            model: "haiku".to_string(),
+            backend: "openrouter".to_string(),
+            model: "openrouter/free".to_string(),
             ..ThoughtConfig::default()
         },
         None,
     );
 
-    editor.cycle_backend(-1);
-    assert_eq!(editor.backend_label(), "auto");
+    editor.cycle_backend(1);
+    assert_eq!(editor.backend_label(), "codex");
     assert!(editor.config.model.is_empty());
 
-    editor.config.model = "openrouter/free".to_string();
-    editor.cycle_backend(1);
-    assert_eq!(editor.backend_label(), "claude");
+    editor.config.model = "gpt-5.4".to_string();
+    editor.cycle_backend(-1);
+    assert_eq!(editor.backend_label(), "openrouter");
     assert!(editor.config.model.is_empty());
 }
 
@@ -5043,9 +5058,11 @@ fn handle_workspace_click_routes_thought_and_overview_interactions() {
     let row_y = thought_content
         .bottom()
         .saturating_sub(panel.rows.len() as u16);
-    let body_x = thought_content
+    let body_x = panel.rows[0]
+        .text_rect
+        .expect("row should have text")
         .x
-        .saturating_add(display_width("7").saturating_add(3));
+        .saturating_add(1);
     api.push_open_session(Ok(NativeDesktopOpenResponse {
         session_id: "sess-1".to_string(),
         status: "focused".to_string(),
@@ -5066,7 +5083,7 @@ fn handle_workspace_click_routes_thought_and_overview_interactions() {
     assert_eq!(api.open_calls(), vec!["sess-1".to_string()]);
     assert_eq!(
         app.message.as_ref().map(|(message, _)| message.as_str()),
-        Some("focused 7")
+        Some("focused swimmers/7")
     );
 
     let entity_rect = entity_rect_for(&app, "sess-1", layout.overview_field);
@@ -5344,12 +5361,12 @@ fn objective_shift_entries_override_timestamp_order_in_the_visible_rail() {
     let shift_index = panel
         .rows
         .iter()
-        .position(|row| row.line == "2: reframed the plan")
+        .position(|row| row.line == "alpha/2: reframed the plan")
         .expect("shift row");
     let plain_index = panel
         .rows
         .iter()
-        .position(|row| row.line == "9: routine update")
+        .position(|row| row.line == "swimmers/9: routine update")
         .expect("plain row");
 
     assert!(shift_index > plain_index);
@@ -5378,8 +5395,8 @@ fn refresh_builds_synthetic_mermaid_row_and_preserves_text_click_behavior() {
 
     let panel = build_thought_panel(&app, thought_content, layout.thought_entry_capacity());
     assert_eq!(panel.rows.len(), 2);
-    assert_eq!(panel.rows[0].line, "7: mermaid diagram");
-    assert_eq!(panel.rows[1].line, "ready");
+    assert_eq!(panel.rows[0].line, "swimmers/7: mermaid");
+    assert_eq!(panel.rows[1].line, "diagram ready");
     let mermaid_rect = panel.rows[0].mermaid_rect.expect("mermaid button");
     let commit_rect = panel.rows[0].commit_rect.expect("commit badge");
     let text_rect = panel.rows[0].text_rect.expect("synthetic row text");
@@ -5417,7 +5434,7 @@ fn refresh_builds_synthetic_mermaid_row_and_preserves_text_click_behavior() {
         ),
         Some(ThoughtPanelAction::OpenSession {
             session_id: "sess-1".to_string(),
-            label: "7".to_string(),
+            label: "swimmers/7".to_string(),
         })
     );
 }
@@ -5579,9 +5596,11 @@ fn mermaid_mouse_drag_and_scroll_update_viewport() {
     viewer.center_x = 500.0;
     viewer.center_y = 400.0;
     viewer.unsupported_reason = None;
+    let mut renderer = test_renderer(120, 32);
+    app.render(&mut renderer, layout);
 
-    let start_column = content_rect.x + 4;
-    let start_row = content_rect.y + 2;
+    let (start_column, start_row) =
+        find_blank_position(&renderer, content_rect).expect("empty Mermaid canvas cell");
     assert!(app.handle_mermaid_mouse_down(
         layout.overview_field,
         crossterm::event::MouseEvent {
@@ -5628,6 +5647,72 @@ fn mermaid_mouse_drag_and_scroll_update_viewport() {
     };
     assert!(zoom_after_scroll > zoom_before_scroll);
     assert_eq!(zoom_after_scroll, 1.25);
+}
+
+#[test]
+fn mermaid_clicking_visible_owner_label_focuses_it() {
+    let (mut app, mut renderer, layout) =
+        open_mermaid_test_viewer("graph TD\nA[Alpha Node] --> B[Beta Node]\n", 120, 32);
+    app.render(&mut renderer, layout);
+
+    let beta = find_text_position(&renderer, "Beta Node").expect("Beta Node overlay");
+    let center_before = match &app.fish_bowl_mode {
+        FishBowlMode::Mermaid(viewer) => (viewer.center_x, viewer.center_y),
+        FishBowlMode::Aquarium => panic!("expected Mermaid viewer mode"),
+    };
+
+    assert!(app.handle_mermaid_mouse_down(
+        layout.overview_field,
+        crossterm::event::MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: beta.0,
+            row: beta.1,
+            modifiers: KeyModifiers::NONE,
+        },
+    ));
+
+    let (focus_status, focused_source_index, center_after) = match &app.fish_bowl_mode {
+        FishBowlMode::Mermaid(viewer) => (
+            viewer.focus_status.clone(),
+            viewer.focused_source_index,
+            (viewer.center_x, viewer.center_y),
+        ),
+        FishBowlMode::Aquarium => panic!("expected Mermaid viewer mode"),
+    };
+    assert_eq!(focus_status.as_deref(), Some("focus Beta Node"));
+    assert!(focused_source_index.is_some());
+    assert_ne!(center_after, center_before);
+}
+
+#[test]
+fn mermaid_clicking_sequence_diagram_does_not_create_focus() {
+    let (mut app, mut renderer, layout) =
+        open_mermaid_test_viewer("sequenceDiagram\nAlice->>Bob: hello\n", 120, 32);
+    app.render(&mut renderer, layout);
+    let content_rect = mermaid_content_rect(layout.overview_field);
+    let (column, row) = find_blank_position(&renderer, content_rect).expect("blank sequence cell");
+
+    assert!(app.handle_mermaid_mouse_down(
+        layout.overview_field,
+        crossterm::event::MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column,
+            row,
+            modifiers: KeyModifiers::NONE,
+        },
+    ));
+
+    let (focused_source_index, focus_status, render_error) = match &app.fish_bowl_mode {
+        FishBowlMode::Mermaid(viewer) => (
+            viewer.focused_source_index,
+            viewer.focus_status.clone(),
+            viewer.render_error.clone(),
+        ),
+        FishBowlMode::Aquarium => panic!("expected Mermaid viewer mode"),
+    };
+    assert_eq!(focused_source_index, None);
+    assert_eq!(focus_status, None);
+    assert_eq!(render_error, None);
 }
 
 #[test]
@@ -6090,7 +6175,7 @@ fn mermaid_er_overview_shows_compact_entity_words_without_svg_text_noise() {
 }
 
 #[test]
-fn mermaid_zoom_reveals_edge_labels_at_detail_l2() {
+fn mermaid_detail_projection_suppresses_edge_labels_in_compact_views() {
     let source =
         "graph TD\nsubgraph Group One\nA[Producer]\nB[Consumer]\nend\nA -- ships data --> B\n";
     let (mut app, mut renderer, layout) = open_mermaid_test_viewer(source, 120, 32);
@@ -6103,11 +6188,13 @@ fn mermaid_zoom_reveals_edge_labels_at_detail_l2() {
         FishBowlMode::Aquarium => panic!("expected Mermaid viewer mode"),
     };
     assert!(
-        find_text_position(&renderer, "ships data").is_some(),
+        find_text_position(&renderer, "ships data").is_none(),
         "status row: {}; semantic_texts: {:?}",
         row_text(&renderer, layout.overview_field.y),
         semantic_texts
     );
+    assert!(find_text_position(&renderer, "Producer").is_some());
+    assert!(find_text_position(&renderer, "Consumer").is_some());
     assert!(
         row_text(&renderer, layout.overview_field.y).contains("detail L2"),
         "status row: {}",
@@ -6121,37 +6208,56 @@ fn mermaid_zoom_reveals_edge_labels_at_detail_l2() {
 }
 
 #[test]
-fn mermaid_tab_can_focus_zoomed_edge_labels() {
+fn mermaid_tab_focuses_visible_owner_labels_in_detail_l2() {
     let source =
         "graph TD\nsubgraph Group One\nA[Producer]\nB[Consumer]\nend\nA -- ships data --> B\n";
     let (mut app, mut renderer, layout) = open_mermaid_test_viewer(source, 120, 32);
 
     press_mermaid_key(&mut app, layout, '+');
-    for _ in 0..6 {
-        press_mermaid_tab(&mut app, layout);
-        let focus_status = match &app.fish_bowl_mode {
-            FishBowlMode::Mermaid(viewer) => viewer.focus_status.clone(),
-            FishBowlMode::Aquarium => panic!("expected Mermaid viewer mode"),
-        };
-        if focus_status.as_deref() == Some("focus ships data") {
-            break;
-        }
-    }
+    press_mermaid_tab(&mut app, layout);
     app.render(&mut renderer, layout);
 
-    let (focus_status, ships_data_position) = match &app.fish_bowl_mode {
+    let (focus_status, producer_position) = match &app.fish_bowl_mode {
         FishBowlMode::Mermaid(viewer) => (
             viewer.focus_status.clone(),
-            find_cached_semantic_line(viewer, "ships data").expect("ships data overlay"),
+            find_cached_semantic_line(viewer, "Producer").expect("Producer overlay"),
         ),
         FishBowlMode::Aquarium => panic!("expected Mermaid viewer mode"),
     };
     assert!(row_text(&renderer, layout.overview_field.y).contains("detail L2"));
-    assert_eq!(focus_status.as_deref(), Some("focus ships data"));
+    assert_eq!(focus_status.as_deref(), Some("focus Producer"));
     assert_eq!(
-        cell_at(&renderer, ships_data_position.0, ships_data_position.1).fg,
+        cell_at(&renderer, producer_position.0, producer_position.1).fg,
         MERMAID_FOCUS_COLOR
     );
+    assert!(find_text_position(&renderer, "ships data").is_none());
+}
+
+#[test]
+fn mermaid_escape_clears_focus_before_closing() {
+    let (mut app, mut renderer, layout) =
+        open_mermaid_test_viewer("graph TD\nA[Alpha Node] --> B[Beta Node]\n", 120, 32);
+    press_mermaid_tab(&mut app, layout);
+    app.render(&mut renderer, layout);
+
+    assert!(handle_key_event(
+        &mut app,
+        layout,
+        KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+    ));
+    let (focused_source_index, focus_status) = match &app.fish_bowl_mode {
+        FishBowlMode::Mermaid(viewer) => (viewer.focused_source_index, viewer.focus_status.clone()),
+        FishBowlMode::Aquarium => panic!("expected Mermaid viewer mode"),
+    };
+    assert_eq!(focused_source_index, None);
+    assert_eq!(focus_status, None);
+
+    assert!(handle_key_event(
+        &mut app,
+        layout,
+        KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+    ));
+    assert!(matches!(app.fish_bowl_mode, FishBowlMode::Aquarium));
 }
 
 #[test]
@@ -6235,10 +6341,7 @@ fn mermaid_flowchart_detail_uses_smart_colors_for_titles_labels_and_connectors()
         mermaid_border_color(&renderer, "Producer"),
         mermaid_owner_accent_color(&producer_owner_key, &owner_colors)
     );
-    assert_eq!(
-        mermaid_text_color(&renderer, "ships data"),
-        MERMAID_EDGE_LABEL_COLOR
-    );
+    assert_eq!(find_text_position(&renderer, "ships data"), None);
     assert!(!background_colors.is_empty());
     assert!(row_text(&renderer, layout.overview_field.y).contains("detail L2"));
 }
@@ -7042,6 +7145,111 @@ fn mermaid_detail_box_rects_wrap_visible_lines_tightly() {
 }
 
 #[test]
+fn mermaid_packed_detail_rects_center_cluster_within_viewport() {
+    let content_rect = Rect {
+        x: 0,
+        y: 0,
+        width: 60,
+        height: 20,
+    };
+    let owners = vec![
+        MermaidPackedDetailOwner {
+            owner_key: "node:a".to_string(),
+            sort_x: 48,
+            sort_y: 1,
+            lines: vec![MermaidPackedDetailLine {
+                source_index: 0,
+                text: "SSH as sandbox user".to_string(),
+                color: MERMAID_BODY_COLOR,
+                kind: MermaidSemanticKind::NodeTitle,
+            }],
+        },
+        MermaidPackedDetailOwner {
+            owner_key: "node:b".to_string(),
+            sort_x: 50,
+            sort_y: 5,
+            lines: vec![
+                MermaidPackedDetailLine {
+                    source_index: 1,
+                    text: "skillbox-login.sh".to_string(),
+                    color: MERMAID_BODY_COLOR,
+                    kind: MermaidSemanticKind::NodeTitle,
+                },
+                MermaidPackedDetailLine {
+                    source_index: 2,
+                    text: "ForceCommand".to_string(),
+                    color: MERMAID_BODY_COLOR,
+                    kind: MermaidSemanticKind::NodeTitle,
+                },
+            ],
+        },
+        MermaidPackedDetailOwner {
+            owner_key: "node:c".to_string(),
+            sort_x: 48,
+            sort_y: 10,
+            lines: vec![
+                MermaidPackedDetailLine {
+                    source_index: 3,
+                    text: "tailscale whois".to_string(),
+                    color: MERMAID_BODY_COLOR,
+                    kind: MermaidSemanticKind::NodeTitle,
+                },
+                MermaidPackedDetailLine {
+                    source_index: 4,
+                    text: "identity resolution".to_string(),
+                    color: MERMAID_BODY_COLOR,
+                    kind: MermaidSemanticKind::NodeTitle,
+                },
+            ],
+        },
+        MermaidPackedDetailOwner {
+            owner_key: "node:d".to_string(),
+            sort_x: 50,
+            sort_y: 15,
+            lines: vec![
+                MermaidPackedDetailLine {
+                    source_index: 5,
+                    text: "SKILLBOX_DEV".to_string(),
+                    color: MERMAID_BODY_COLOR,
+                    kind: MermaidSemanticKind::NodeTitle,
+                },
+                MermaidPackedDetailLine {
+                    source_index: 6,
+                    text: "GIT_AUTHOR_NAME".to_string(),
+                    color: MERMAID_BODY_COLOR,
+                    kind: MermaidSemanticKind::NodeTitle,
+                },
+                MermaidPackedDetailLine {
+                    source_index: 7,
+                    text: "GIT_AUTHOR_EMAIL".to_string(),
+                    color: MERMAID_BODY_COLOR,
+                    kind: MermaidSemanticKind::NodeTitle,
+                },
+            ],
+        },
+    ];
+
+    let rects = mermaid_pack_detail_box_rects(content_rect, &owners);
+    assert_eq!(rects.len(), owners.len());
+
+    let left = rects.values().map(|rect| rect.left).min().expect("left");
+    let right = rects.values().map(|rect| rect.right).max().expect("right");
+    let top = rects.values().map(|rect| rect.top).min().expect("top");
+    let bottom = rects
+        .values()
+        .map(|rect| rect.bottom)
+        .max()
+        .expect("bottom");
+    let center_x = (left + right) / 2;
+    let center_y = (top + bottom) / 2;
+    let expected_x = i32::from(content_rect.x + content_rect.width / 2);
+    let expected_y = i32::from(content_rect.y + content_rect.height / 2);
+    assert!((center_x - expected_x).abs() <= 2);
+    assert!((center_y - expected_y).abs() <= 2);
+    assert!(right - left >= i32::from(content_rect.width / 3));
+}
+
+#[test]
 fn mermaid_er_detail_view_draws_compact_box_around_visible_lines() {
     let source = "erDiagram\nUSER {\n  uuid id PK\n  string email\n}\n";
     let (mut app, mut renderer, layout) = open_mermaid_test_viewer(source, 120, 32);
@@ -7078,6 +7286,27 @@ fn mermaid_er_detail_view_draws_compact_box_around_visible_lines() {
         cell_at(&renderer, left + 1, email.1.saturating_add(1)).ch,
         '_'
     );
+}
+
+#[test]
+fn mermaid_flowchart_detail_l2_packs_boxes_to_use_viewport() {
+    let source = "graph TD\nA[SSH as sandbox user] -->|triggers| B[skillbox-login.sh]\nB -->|runs| C[tailscale whois]\nC -->|sets| D[SKILLBOX_DEV]\n";
+    let (mut app, mut renderer, layout) = open_mermaid_test_viewer(source, 120, 32);
+
+    press_mermaid_key(&mut app, layout, '+');
+    app.render(&mut renderer, layout);
+
+    let (bounds, content_rect) = match &app.fish_bowl_mode {
+        FishBowlMode::Mermaid(viewer) => (
+            mermaid_render_bounds(viewer, viewer.content_rect.expect("content rect"))
+                .expect("render bounds"),
+            viewer.content_rect.expect("content rect"),
+        ),
+        FishBowlMode::Aquarium => panic!("expected Mermaid viewer mode"),
+    };
+    let center_x = (bounds.0 + bounds.1) / 2;
+    let expected_x = content_rect.x + content_rect.width / 2;
+    assert!((center_x as i32 - expected_x as i32).abs() <= 2);
 }
 
 #[test]

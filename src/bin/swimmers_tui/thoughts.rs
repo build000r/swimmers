@@ -171,8 +171,10 @@ pub(crate) struct ThoughtRowLayout {
     pub(crate) shift_rect: Option<Rect>,
     pub(crate) text_rect: Option<Rect>,
     pub(crate) mermaid_rect: Option<Rect>,
+    pub(crate) mermaid_label: Option<String>,
     pub(crate) commit_rect: Option<Rect>,
     pub(crate) session_id: String,
+    pub(crate) label: String,
     pub(crate) tmux_name: String,
     pub(crate) line: String,
     pub(crate) color: Color,
@@ -408,6 +410,15 @@ pub(crate) fn path_tail_label(path: &str) -> Option<String> {
         .map(ToOwned::to_owned)
 }
 
+pub(crate) fn thought_session_label(pwd_label: Option<&str>, tmux_name: &str) -> String {
+    match pwd_label.map(str::trim).filter(|label| !label.is_empty()) {
+        Some(pwd_label) if !tmux_name.trim().is_empty() => format!("{pwd_label}/{tmux_name}"),
+        Some(pwd_label) => pwd_label.to_string(),
+        None if !tmux_name.trim().is_empty() => tmux_name.to_string(),
+        None => "session".to_string(),
+    }
+}
+
 pub(crate) fn wrap_text(text: &str, max_chars: usize) -> Vec<String> {
     if max_chars == 0 {
         return Vec::new();
@@ -451,12 +462,13 @@ pub(crate) fn wrap_text(text: &str, max_chars: usize) -> Vec<String> {
 #[derive(Clone, Debug)]
 pub(crate) struct ThoughtPanelEntryView {
     pub(crate) session_id: String,
+    pub(crate) label: String,
     pub(crate) tmux_name: String,
     pub(crate) updated_at: Option<DateTime<Utc>>,
     pub(crate) color: Color,
     pub(crate) text: String,
     pub(crate) has_objective_shift: bool,
-    pub(crate) has_mermaid: bool,
+    pub(crate) mermaid_label: Option<String>,
     pub(crate) has_commit_candidate: bool,
 }
 
@@ -612,18 +624,20 @@ pub(crate) fn build_thought_panel_entries<C: TuiApi>(app: &App<C>) -> Vec<Though
         .filter(|entry| app.thought_filter.matches(entry))
     {
         thought_sessions.insert(entry.session_id.clone());
+        let label = thought_session_label(entry.pwd_label.as_deref(), &entry.tmux_name);
         entries.push(ThoughtPanelEntryView {
             session_id: entry.session_id.clone(),
+            label: label.clone(),
             tmux_name: entry.tmux_name.clone(),
             updated_at: entry.updated_at,
             color: app.thought_entry_display_color(entry),
-            text: format!("{}: {}", entry.tmux_name, entry.thought.replace('\n', " ")),
+            text: format!("{label}: {}", entry.thought.replace('\n', " ")),
             has_objective_shift: entry.objective_changed,
-            has_mermaid: app
+            mermaid_label: app
                 .mermaid_artifacts
                 .get(&entry.session_id)
-                .map(|artifact| artifact.available)
-                .unwrap_or(false),
+                .filter(|artifact| artifact.available)
+                .map(|artifact| mermaid_badge_label(artifact.slice_name.as_deref())),
             has_commit_candidate: entry.commit_candidate,
         });
     }
@@ -635,14 +649,17 @@ pub(crate) fn build_thought_panel_entries<C: TuiApi>(app: &App<C>) -> Vec<Though
         let Some(artifact) = app.mermaid_artifacts.get(&entity.session.session_id) else {
             continue;
         };
+        let cwd_label = path_tail_label(&entity.session.cwd);
+        let label = thought_session_label(cwd_label.as_deref(), &entity.session.tmux_name);
         entries.push(ThoughtPanelEntryView {
             session_id: entity.session.session_id.clone(),
+            label: label.clone(),
             tmux_name: entity.session.tmux_name.clone(),
             updated_at: artifact.updated_at,
             color: session_display_color(&entity.session, &app.repo_themes),
-            text: format!("{}: mermaid diagram ready", entity.session.tmux_name),
+            text: format!("{label}: mermaid diagram ready"),
             has_objective_shift: false,
-            has_mermaid: true,
+            mermaid_label: Some(mermaid_badge_label(artifact.slice_name.as_deref())),
             has_commit_candidate: entity.session.commit_candidate,
         });
     }
@@ -656,13 +673,17 @@ pub(crate) fn build_rows_for_panel_entry(
     thought_content: Rect,
 ) -> Vec<ThoughtRowLayout> {
     let shift_width = display_width(THOUGHT_SHIFT_LABEL);
-    let mermaid_width = display_width(THOUGHT_MERMAID_LABEL);
+    let mermaid_width = entry
+        .mermaid_label
+        .as_deref()
+        .map(display_width)
+        .unwrap_or(0);
     let commit_width = display_width(THOUGHT_COMMIT_LABEL);
     let mut reserved: u16 = 0;
     if entry.has_objective_shift {
         reserved = reserved.saturating_add(shift_width).saturating_add(1);
     }
-    if entry.has_mermaid {
+    if entry.mermaid_label.is_some() {
         reserved = reserved.saturating_add(mermaid_width).saturating_add(1);
     }
     if entry.has_commit_candidate {
@@ -691,13 +712,13 @@ pub(crate) fn build_rows_for_panel_entry(
             if entry.has_objective_shift {
                 badge_x = badge_x.saturating_add(shift_width).saturating_add(1);
             }
-            let mermaid_rect = (index == 0 && entry.has_mermaid).then_some(Rect {
+            let mermaid_rect = (index == 0 && entry.mermaid_label.is_some()).then_some(Rect {
                 x: badge_x,
                 y: 0,
                 width: mermaid_width,
                 height: 1,
             });
-            if entry.has_mermaid {
+            if entry.mermaid_label.is_some() {
                 badge_x = badge_x.saturating_add(mermaid_width).saturating_add(1);
             }
             ThoughtRowLayout {
@@ -709,6 +730,11 @@ pub(crate) fn build_rows_for_panel_entry(
                     height: 1,
                 }),
                 mermaid_rect,
+                mermaid_label: if index == 0 {
+                    entry.mermaid_label.clone()
+                } else {
+                    None
+                },
                 commit_rect: (index == 0 && entry.has_commit_candidate).then_some(Rect {
                     x: badge_x,
                     y: 0,
@@ -716,6 +742,7 @@ pub(crate) fn build_rows_for_panel_entry(
                     height: 1,
                 }),
                 session_id: entry.session_id.clone(),
+                label: entry.label.clone(),
                 tmux_name: entry.tmux_name.clone(),
                 line,
                 color: entry.color,
@@ -765,8 +792,8 @@ pub(crate) fn render_thought_panel<C: TuiApi>(
         if let Some(rect) = row.shift_rect {
             renderer.draw_text(rect.x, y, THOUGHT_SHIFT_LABEL, Color::Yellow);
         }
-        if let Some(rect) = row.mermaid_rect {
-            renderer.draw_text(rect.x, y, THOUGHT_MERMAID_LABEL, Color::Cyan);
+        if let (Some(rect), Some(label)) = (row.mermaid_rect, &row.mermaid_label) {
+            renderer.draw_text(rect.x, y, label, Color::Cyan);
         }
         if let Some(rect) = row.commit_rect {
             renderer.draw_text(rect.x, y, THOUGHT_COMMIT_LABEL, Color::DarkGrey);
@@ -869,7 +896,7 @@ pub(crate) fn thought_panel_action_at<C: TuiApi>(
         if text_rect.map(|rect| rect.contains(x, y)).unwrap_or(false) {
             return Some(ThoughtPanelAction::OpenSession {
                 session_id: row.session_id.clone(),
-                label: row.tmux_name.clone(),
+                label: row.label.clone(),
             });
         }
     }

@@ -252,6 +252,8 @@ pub struct MermaidArtifactResponse {
     pub source: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slice_name: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

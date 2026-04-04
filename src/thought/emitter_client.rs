@@ -422,7 +422,7 @@ fn adjacent_checkout_clawgs_bin(
 fn adjacent_checkout_candidates(root: &Path) -> [PathBuf; 1] {
     let base = root.parent().unwrap_or(root);
     [base
-        .join("opensource/clawgs/target/release")
+        .join("clawgs/target/release")
         .join(default_clawgs_bin_name())]
 }
 
@@ -754,7 +754,7 @@ mod tests {
     #[test]
     fn resolve_clawgs_bin_prefers_adjacent_opensource_checkout_before_path_lookup() {
         let temp = tempdir().expect("tempdir");
-        let repo_root = temp.path().join("swimmers");
+        let repo_root = temp.path().join("opensource/swimmers");
         let adjacent = temp
             .path()
             .join("opensource/clawgs/target/release")

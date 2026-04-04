@@ -15,6 +15,7 @@ use crate::types::{
 
 const NATIVE_APP_ENV: &str = "SWIMMERS_NATIVE_APP";
 const GHOSTTY_MODE_ENV: &str = "SWIMMERS_GHOSTTY_MODE";
+const NATIVE_SCRIPT_ROOT_ENV: &str = "SWIMMERS_NATIVE_SCRIPT_ROOT";
 const ITERM_SCRIPT_RELATIVE_PATH: &str = "scripts/iterm-focus.scpt";
 const ITERM_SCROLLBACK_PREFILL_LINES: usize = 2000;
 const ITERM_OPEN_RETRY_ATTEMPTS: usize = 2;
@@ -240,7 +241,61 @@ async fn open_or_focus_ghostty_session(
 }
 
 fn script_path_for_app(app: NativeDesktopApp) -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join(app.script_relative_path())
+    let override_root = std::env::var_os(NATIVE_SCRIPT_ROOT_ENV).map(PathBuf::from);
+    let current_exe = std::env::current_exe().ok();
+    let current_dir = std::env::current_dir().ok();
+    resolve_script_path(
+        app.script_relative_path(),
+        override_root.as_deref(),
+        current_exe.as_deref(),
+        current_dir.as_deref(),
+        Path::new(env!("CARGO_MANIFEST_DIR")),
+    )
+}
+
+fn resolve_script_path(
+    script_relative_path: &str,
+    override_root: Option<&Path>,
+    current_exe: Option<&Path>,
+    current_dir: Option<&Path>,
+    manifest_dir: &Path,
+) -> PathBuf {
+    let mut roots = Vec::new();
+    if let Some(root) = override_root {
+        push_unique_root(&mut roots, root);
+    }
+    if let Some(dir) = current_dir {
+        push_ancestor_roots(&mut roots, dir);
+    }
+    if let Some(exe_dir) = current_exe.and_then(Path::parent) {
+        push_ancestor_roots(&mut roots, exe_dir);
+    }
+    push_unique_root(&mut roots, manifest_dir);
+
+    for root in roots {
+        let candidate = root.join(script_relative_path);
+        if candidate.is_file() {
+            return candidate;
+        }
+    }
+
+    manifest_dir.join(script_relative_path)
+}
+
+fn push_ancestor_roots(roots: &mut Vec<PathBuf>, start: &Path) {
+    for ancestor in start.ancestors() {
+        push_unique_root(roots, ancestor);
+    }
+}
+
+fn push_unique_root(roots: &mut Vec<PathBuf>, candidate: &Path) {
+    if candidate.as_os_str().is_empty() {
+        return;
+    }
+    if roots.iter().any(|existing| existing == candidate) {
+        return;
+    }
+    roots.push(candidate.to_path_buf());
 }
 
 fn ghostty_unavailable_reason() -> Option<String> {
@@ -864,6 +919,46 @@ mod tests {
             response.reason.as_deref(),
             Some("native Ghostty control is only available from localhost")
         );
+    }
+
+    #[test]
+    fn resolve_script_path_prefers_override_root() {
+        let temp = tempdir().unwrap();
+        let override_root = temp.path().join("override");
+        let override_script = override_root.join(ITERM_SCRIPT_RELATIVE_PATH);
+        std::fs::create_dir_all(override_script.parent().unwrap()).unwrap();
+        std::fs::write(&override_script, "-- override").unwrap();
+
+        let resolved = resolve_script_path(
+            ITERM_SCRIPT_RELATIVE_PATH,
+            Some(override_root.as_path()),
+            None,
+            None,
+            Path::new("/tmp/missing-manifest"),
+        );
+
+        assert_eq!(resolved, override_script);
+    }
+
+    #[test]
+    fn resolve_script_path_finds_repo_relative_to_current_exe_after_move() {
+        let temp = tempdir().unwrap();
+        let repo_root = temp.path().join("opensource/swimmers");
+        let script_path = repo_root.join(ITERM_SCRIPT_RELATIVE_PATH);
+        let current_exe = repo_root.join("target/debug/swimmers");
+        std::fs::create_dir_all(script_path.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(current_exe.parent().unwrap()).unwrap();
+        std::fs::write(&script_path, "-- repo script").unwrap();
+
+        let resolved = resolve_script_path(
+            ITERM_SCRIPT_RELATIVE_PATH,
+            None,
+            Some(current_exe.as_path()),
+            None,
+            Path::new("/tmp/old/swimmers"),
+        );
+
+        assert_eq!(resolved, script_path);
     }
 
     #[test]

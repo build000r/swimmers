@@ -150,6 +150,19 @@ fn compare_mermaid_candidates(left: &MermaidCandidate, right: &MermaidCandidate)
         .then_with(|| left.display_path.cmp(&right.display_path))
 }
 
+pub fn extract_mmd_slice_name(path: &str) -> Option<&str> {
+    let parts: Vec<&str> = path.split('/').collect();
+    for window in parts.windows(4) {
+        if window[0] == "plans"
+            && (window[1] == "released" || window[1] == "draft")
+            && window[3] == "schema.mmd"
+        {
+            return Some(window[2]);
+        }
+    }
+    None
+}
+
 fn should_visit_artifact_entry(entry: &walkdir::DirEntry) -> bool {
     if !entry.file_type().is_dir() {
         return true;
@@ -246,5 +259,35 @@ mod tests {
         });
 
         assert!(artifact.is_none());
+    }
+
+    #[test]
+    fn extract_slice_name_from_released_plan_path() {
+        let path =
+            "/home/user/skillbox-config/clients/personal/plans/released/journal_to_cm/schema.mmd";
+        assert_eq!(super::extract_mmd_slice_name(path), Some("journal_to_cm"));
+    }
+
+    #[test]
+    fn extract_slice_name_from_draft_plan_path() {
+        let path = "/home/user/skillbox-config/clients/personal/plans/draft/persistence_topology/schema.mmd";
+        assert_eq!(
+            super::extract_mmd_slice_name(path),
+            Some("persistence_topology")
+        );
+    }
+
+    #[test]
+    fn extract_slice_name_returns_none_for_non_plan_mmd() {
+        assert_eq!(
+            super::extract_mmd_slice_name("/some/repo/docs/architecture.mmd"),
+            None
+        );
+    }
+
+    #[test]
+    fn extract_slice_name_returns_none_for_template_schema() {
+        let path = "clients/personal/skills/domain-planner/assets/templates/schema.mmd";
+        assert_eq!(super::extract_mmd_slice_name(path), None);
     }
 }

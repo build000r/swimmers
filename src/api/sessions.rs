@@ -852,6 +852,7 @@ mod tests {
                         updated_at: Some(Utc::now()),
                         source: Some("graph TD\nA-->B\n".to_string()),
                         error: None,
+                        slice_name: None,
                     });
                     break;
                 }

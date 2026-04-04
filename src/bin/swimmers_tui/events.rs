@@ -60,7 +60,9 @@ pub(crate) fn handle_key_event<C: TuiApi>(
         return match key.code {
             KeyCode::Char('q') => false,
             KeyCode::Esc => {
-                app.close_mermaid_viewer();
+                if !app.clear_mermaid_focus() {
+                    app.close_mermaid_viewer();
+                }
                 true
             }
             KeyCode::Tab => {

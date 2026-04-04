@@ -2,7 +2,9 @@
 set -eu
 
 BASE_URL="${SWIMMERS_BASE_URL:-http://127.0.0.1:3210}"
-ROOT_CWD="${SWIMMERS_SMOKE_CWD:-/Users/b/repos/swimmers}"
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname "$0")" && pwd)"
+REPO_ROOT="$(CDPATH= cd -- "${SCRIPT_DIR}/.." && pwd)"
+ROOT_CWD="${SWIMMERS_SMOKE_CWD:-${REPO_ROOT}}"
 STAMP="$(date +%s)"
 NAME_A="iterm-smoke-${STAMP}-a"
 NAME_B="iterm-smoke-${STAMP}-b"

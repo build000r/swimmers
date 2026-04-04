@@ -190,6 +190,7 @@ pub(crate) struct MermaidFocusTarget {
     pub(crate) text: String,
     pub(crate) diagram_x: f32,
     pub(crate) diagram_y: f32,
+    pub(crate) hitbox: Rect,
 }
 
 #[derive(Clone, Debug)]
@@ -252,6 +253,22 @@ pub(crate) struct MermaidErPackedBox {
     pub(crate) sort_y: f32,
     pub(crate) title_lines: Vec<(usize, String)>,
     pub(crate) attr_rows: Vec<MermaidErPackedAttrRow>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct MermaidPackedDetailLine {
+    pub(crate) source_index: usize,
+    pub(crate) text: String,
+    pub(crate) color: Color,
+    pub(crate) kind: MermaidSemanticKind,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct MermaidPackedDetailOwner {
+    pub(crate) owner_key: String,
+    pub(crate) sort_x: u16,
+    pub(crate) sort_y: u16,
+    pub(crate) lines: Vec<MermaidPackedDetailLine>,
 }
 
 #[derive(Clone, Debug)]
@@ -2411,6 +2428,265 @@ pub(crate) fn mermaid_detail_box_rects(
     rects
 }
 
+pub(crate) fn mermaid_build_packed_detail_owners(
+    semantic_lines: &[MermaidSemanticLine],
+    projected: &[MermaidProjectedLine],
+) -> Vec<MermaidPackedDetailOwner> {
+    let mut grouped = HashMap::<String, MermaidPackedDetailOwner>::new();
+
+    for line in projected {
+        let Some(source) = semantic_lines.get(line.source_index) else {
+            continue;
+        };
+        if !mermaid_is_compact_box_owner_key(&source.owner_key) {
+            continue;
+        }
+
+        grouped
+            .entry(source.owner_key.clone())
+            .and_modify(|owner| {
+                owner.sort_x = owner.sort_x.min(line.x);
+                owner.sort_y = owner.sort_y.min(line.y);
+                owner.lines.push(MermaidPackedDetailLine {
+                    source_index: line.source_index,
+                    text: line.text.clone(),
+                    color: line.color,
+                    kind: source.kind,
+                });
+            })
+            .or_insert_with(|| MermaidPackedDetailOwner {
+                owner_key: source.owner_key.clone(),
+                sort_x: line.x,
+                sort_y: line.y,
+                lines: vec![MermaidPackedDetailLine {
+                    source_index: line.source_index,
+                    text: line.text.clone(),
+                    color: line.color,
+                    kind: source.kind,
+                }],
+            });
+    }
+
+    let mut owners = grouped.into_values().collect::<Vec<_>>();
+    owners.sort_by_key(|owner| (owner.sort_y, owner.sort_x, owner.owner_key.clone()));
+    owners
+}
+
+pub(crate) fn mermaid_pack_detail_box_rects(
+    content_rect: Rect,
+    owners: &[MermaidPackedDetailOwner],
+) -> HashMap<String, MermaidOutlineLabelRect> {
+    #[derive(Clone, Copy)]
+    struct BoxSize {
+        outer_width: u16,
+        outer_height: u16,
+    }
+
+    let specs = owners
+        .iter()
+        .map(|owner| {
+            let inner_width = owner
+                .lines
+                .iter()
+                .map(|line| display_width(&line.text))
+                .max()
+                .unwrap_or(1)
+                .min(content_rect.width.saturating_sub(2).max(1));
+            let inner_height = owner.lines.len().max(1) as u16;
+            BoxSize {
+                outer_width: inner_width.saturating_add(2).min(content_rect.width.max(1)),
+                outer_height: inner_height
+                    .saturating_add(2)
+                    .min(content_rect.height.max(1)),
+            }
+        })
+        .collect::<Vec<_>>();
+    if specs.is_empty() {
+        return HashMap::new();
+    }
+
+    let gap_x = 2u16;
+    let gap_y = 1u16;
+    let viewport_width = content_rect.width.max(1);
+    let viewport_height = content_rect.height.max(1);
+    let target_aspect = viewport_width as f32 / viewport_height as f32;
+
+    let mut best_layout = None::<(usize, Vec<u16>, Vec<u16>, u16, u16, f32)>;
+    for column_count in 1..=owners.len() {
+        let mut row_widths = Vec::new();
+        let mut row_heights = Vec::new();
+        let mut row_start = 0usize;
+        let mut fits = true;
+        while row_start < specs.len() {
+            let row = &specs[row_start..(row_start + column_count).min(specs.len())];
+            let row_width = row
+                .iter()
+                .map(|spec| spec.outer_width)
+                .sum::<u16>()
+                .saturating_add(gap_x.saturating_mul(row.len().saturating_sub(1) as u16));
+            let row_height = row.iter().map(|spec| spec.outer_height).max().unwrap_or(0);
+            if row_width > viewport_width || row_height > viewport_height {
+                fits = false;
+                break;
+            }
+            row_widths.push(row_width);
+            row_heights.push(row_height);
+            row_start += column_count;
+        }
+        if !fits || row_widths.is_empty() {
+            continue;
+        }
+
+        let cluster_width = row_widths.iter().copied().max().unwrap_or(0);
+        let cluster_height = row_heights
+            .iter()
+            .copied()
+            .sum::<u16>()
+            .saturating_add(gap_y.saturating_mul(row_heights.len().saturating_sub(1) as u16));
+        if cluster_width > viewport_width || cluster_height > viewport_height {
+            continue;
+        }
+
+        let width_util = cluster_width as f32 / viewport_width as f32;
+        let height_util = cluster_height as f32 / viewport_height as f32;
+        let area_util = width_util * height_util;
+        let aspect = cluster_width as f32 / cluster_height.max(1) as f32;
+        let aspect_penalty = (aspect - target_aspect).abs();
+        let score =
+            width_util.min(height_util) * 1000.0 + area_util * 400.0 - aspect_penalty * 40.0;
+
+        match best_layout {
+            Some((_, _, _, _, _, best_score)) if best_score >= score => {}
+            _ => {
+                best_layout = Some((
+                    column_count,
+                    row_widths,
+                    row_heights,
+                    cluster_width,
+                    cluster_height,
+                    score,
+                ));
+            }
+        }
+    }
+
+    let (column_count, row_widths, row_heights, _cluster_width, cluster_height, _) = best_layout
+        .unwrap_or_else(|| {
+            let row_widths = specs
+                .iter()
+                .map(|spec| spec.outer_width)
+                .collect::<Vec<_>>();
+            let row_heights = specs
+                .iter()
+                .map(|spec| spec.outer_height)
+                .collect::<Vec<_>>();
+            let cluster_width = row_widths
+                .iter()
+                .copied()
+                .max()
+                .unwrap_or(0)
+                .min(viewport_width);
+            let cluster_height = row_heights
+                .iter()
+                .copied()
+                .sum::<u16>()
+                .saturating_add(gap_y.saturating_mul(row_heights.len().saturating_sub(1) as u16))
+                .min(viewport_height);
+            (
+                1,
+                row_widths,
+                row_heights,
+                cluster_width,
+                cluster_height,
+                0.0,
+            )
+        });
+
+    let start_y = content_rect
+        .y
+        .saturating_add(viewport_height.saturating_sub(cluster_height) / 2);
+
+    let mut rects = HashMap::new();
+    let mut row_top = start_y;
+    let mut owner_index = 0usize;
+    for (row_index, row_width) in row_widths.iter().enumerate() {
+        let row = &owners[owner_index..(owner_index + column_count).min(owners.len())];
+        let row_left = content_rect
+            .x
+            .saturating_add(viewport_width.saturating_sub(*row_width) / 2);
+        let mut column_left = row_left;
+        for owner in row {
+            let spec = specs[owner_index];
+            rects.insert(
+                owner.owner_key.clone(),
+                MermaidOutlineLabelRect {
+                    left: column_left as i32,
+                    right: column_left
+                        .saturating_add(spec.outer_width)
+                        .saturating_sub(1) as i32,
+                    top: row_top as i32,
+                    bottom: row_top.saturating_add(spec.outer_height).saturating_sub(1) as i32,
+                },
+            );
+            column_left = column_left
+                .saturating_add(spec.outer_width)
+                .saturating_add(gap_x);
+            owner_index += 1;
+        }
+        row_top = row_top
+            .saturating_add(row_heights[row_index])
+            .saturating_add(gap_y);
+    }
+
+    rects
+}
+
+pub(crate) fn mermaid_project_packed_detail_lines(
+    owners: &[MermaidPackedDetailOwner],
+    label_rects: &HashMap<String, MermaidOutlineLabelRect>,
+) -> Vec<MermaidProjectedLine> {
+    let mut projected = Vec::new();
+
+    for owner in owners {
+        let Some(rect) = label_rects.get(&owner.owner_key).copied() else {
+            continue;
+        };
+        let inner_left = rect.left + 1;
+        let inner_width = (rect.right - rect.left - 1).max(1) as u16;
+        let mut line_y = rect.top + 1;
+        for line in &owner.lines {
+            let text = clip_mermaid_overlay_text(&line.text, 0, inner_width as usize);
+            if text.is_empty() {
+                continue;
+            }
+            let text_width = display_width(&text).min(inner_width);
+            let x = match line.kind {
+                MermaidSemanticKind::SubgraphSummary
+                | MermaidSemanticKind::SubgraphTitle
+                | MermaidSemanticKind::NodeSummary
+                | MermaidSemanticKind::NodeTitle => {
+                    inner_left + i32::from(inner_width.saturating_sub(text_width) / 2)
+                }
+                MermaidSemanticKind::ClassMember
+                | MermaidSemanticKind::ErAttributeName
+                | MermaidSemanticKind::ErAttributeType
+                | MermaidSemanticKind::EdgeLabel => inner_left,
+            };
+            projected.push(MermaidProjectedLine {
+                source_index: line.source_index,
+                x: x as u16,
+                y: line_y as u16,
+                text,
+                color: line.color,
+            });
+            line_y += 1;
+        }
+    }
+
+    projected.sort_by_key(|line| (line.y, line.x));
+    projected
+}
+
 pub(crate) fn mermaid_draw_outline_rect(
     grid: &mut [Vec<char>],
     content_rect: Rect,
@@ -3510,6 +3786,19 @@ pub(crate) fn mermaid_status_detail_label(view_state: MermaidViewState) -> Strin
     view_state.status_label().to_string()
 }
 
+pub(crate) fn mermaid_compact_detail_hides_kind(
+    view_state: MermaidViewState,
+    kind: MermaidSemanticKind,
+) -> bool {
+    matches!(
+        (view_state, kind),
+        (
+            MermaidViewState::L1 | MermaidViewState::L2 | MermaidViewState::L3,
+            MermaidSemanticKind::EdgeLabel
+        )
+    )
+}
+
 pub(crate) fn project_mermaid_semantic_lines(
     lines: &[MermaidSemanticLine],
     transform: MermaidViewportTransform,
@@ -3539,6 +3828,9 @@ pub(crate) fn project_mermaid_semantic_lines(
 
     for (source_index, line) in lines.iter().enumerate() {
         if !mermaid_line_visible_in_state(line, view_state) {
+            continue;
+        }
+        if mermaid_compact_detail_hides_kind(view_state, line.kind) {
             continue;
         }
 
@@ -3711,6 +4003,21 @@ pub(crate) fn mermaid_visible_focus_targets(
     viewer: &mut MermaidViewerState,
     content_rect: Rect,
 ) -> Result<Vec<MermaidFocusTarget>, String> {
+    #[derive(Clone)]
+    struct MermaidFocusAccumulator {
+        source_index: usize,
+        text: String,
+        diagram_x: f32,
+        diagram_y: f32,
+        priority: u8,
+        sort_y: u16,
+        sort_x: u16,
+        left: u16,
+        right: u16,
+        top: u16,
+        bottom: u16,
+    }
+
     if content_rect.width < MERMAID_VIEW_MIN_WIDTH || content_rect.height < MERMAID_VIEW_MIN_HEIGHT
     {
         return Ok(Vec::new());
@@ -3724,23 +4031,88 @@ pub(crate) fn mermaid_visible_focus_targets(
         return Ok(Vec::new());
     };
 
-    let mut seen = HashSet::new();
-    Ok(viewer
-        .cached_semantic_lines
-        .iter()
-        .filter(|line| seen.insert(line.source_index))
-        .filter_map(|line| {
-            prepared
-                .semantic_lines
-                .get(line.source_index)
-                .map(|source| MermaidFocusTarget {
-                    source_index: line.source_index,
-                    text: source.text.clone(),
-                    diagram_x: source.diagram_x,
-                    diagram_y: source.diagram_y,
-                })
+    let mut grouped = HashMap::<String, MermaidFocusAccumulator>::new();
+    for line in &viewer.cached_semantic_lines {
+        let Some(source) = prepared.semantic_lines.get(line.source_index) else {
+            continue;
+        };
+        if !mermaid_kind_is_owner_summary(source.kind) && !mermaid_kind_is_owner_detail(source.kind)
+        {
+            continue;
+        }
+
+        let line_width = display_width(&line.text).max(1);
+        let line_right = line.x.saturating_add(line_width.saturating_sub(1));
+        let priority = match source.kind {
+            MermaidSemanticKind::SubgraphSummary | MermaidSemanticKind::NodeSummary => 0,
+            MermaidSemanticKind::SubgraphTitle | MermaidSemanticKind::NodeTitle => 1,
+            MermaidSemanticKind::ClassMember => 2,
+            MermaidSemanticKind::ErAttributeName => 3,
+            MermaidSemanticKind::ErAttributeType => 4,
+            MermaidSemanticKind::EdgeLabel => 5,
+        };
+        grouped
+            .entry(source.owner_key.clone())
+            .and_modify(|target| {
+                target.left = target.left.min(line.x);
+                target.right = target.right.max(line_right);
+                target.top = target.top.min(line.y);
+                target.bottom = target.bottom.max(line.y);
+
+                if priority < target.priority
+                    || (priority == target.priority
+                        && (line.y, line.x, line.source_index)
+                            < (target.sort_y, target.sort_x, target.source_index))
+                {
+                    target.source_index = line.source_index;
+                    target.text = source.text.clone();
+                    target.diagram_x = source.diagram_x;
+                    target.diagram_y = source.diagram_y;
+                    target.priority = priority;
+                    target.sort_y = line.y;
+                    target.sort_x = line.x;
+                }
+            })
+            .or_insert_with(|| MermaidFocusAccumulator {
+                source_index: line.source_index,
+                text: source.text.clone(),
+                diagram_x: source.diagram_x,
+                diagram_y: source.diagram_y,
+                priority,
+                sort_y: line.y,
+                sort_x: line.x,
+                left: line.x,
+                right: line_right,
+                top: line.y,
+                bottom: line.y,
+            });
+    }
+
+    let max_x = content_rect.right().saturating_sub(1);
+    let max_y = content_rect.bottom().saturating_sub(1);
+    let mut targets = grouped
+        .into_values()
+        .map(|target| {
+            let left = target.left.saturating_sub(1).max(content_rect.x);
+            let top = target.top.saturating_sub(1).max(content_rect.y);
+            let right = target.right.saturating_add(1).min(max_x);
+            let bottom = target.bottom.saturating_add(1).min(max_y);
+            MermaidFocusTarget {
+                source_index: target.source_index,
+                text: target.text,
+                diagram_x: target.diagram_x,
+                diagram_y: target.diagram_y,
+                hitbox: Rect {
+                    x: left,
+                    y: top,
+                    width: right.saturating_sub(left).saturating_add(1),
+                    height: bottom.saturating_sub(top).saturating_add(1),
+                },
+            }
         })
-        .collect())
+        .collect::<Vec<_>>();
+    targets.sort_by_key(|target| (target.hitbox.y, target.hitbox.x, target.source_index));
+    Ok(targets)
 }
 
 pub(crate) fn pixel_is_dark(pixmap: &Pixmap, x: u32, y: u32) -> bool {
@@ -3935,7 +4307,26 @@ pub(crate) fn render_mermaid_detail_lines(
         return Ok(false);
     }
 
-    let label_rects = mermaid_detail_box_rects(&prepared.semantic_lines, &projected, content_rect);
+    let owner_colors = mermaid_owner_accent_map(&prepared.semantic_lines);
+    let (projected, label_rects) =
+        if matches!(view_state, MermaidViewState::L2 | MermaidViewState::L3) {
+            let owners = mermaid_build_packed_detail_owners(&prepared.semantic_lines, &projected);
+            if owners.is_empty() {
+                return Ok(false);
+            }
+            let label_rects = mermaid_pack_detail_box_rects(content_rect, &owners);
+            if label_rects.is_empty() {
+                return Ok(false);
+            }
+            (
+                mermaid_project_packed_detail_lines(&owners, &label_rects),
+                label_rects,
+            )
+        } else {
+            let label_rects =
+                mermaid_detail_box_rects(&prepared.semantic_lines, &projected, content_rect);
+            (projected, label_rects)
+        };
     if label_rects.is_empty() {
         return Ok(false);
     }
@@ -3945,7 +4336,6 @@ pub(crate) fn render_mermaid_detail_lines(
         .into_values()
         .filter(|edge| visible_keys.contains(&edge.from_key) && visible_keys.contains(&edge.to_key))
         .collect::<Vec<_>>();
-    let owner_colors = mermaid_owner_accent_map(&prepared.semantic_lines);
 
     viewer.cached_lines =
         mermaid_render_compact_detail_background(content_rect, &label_rects, outline_edges);

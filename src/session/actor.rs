@@ -16,7 +16,7 @@ use tracing::{debug, error, info, warn};
 use crate::config::Config;
 use crate::scroll::guard::{ScrollGuard, ScrollOutputChunk};
 use crate::session::artifacts::{
-    default_artifact_registry, ArtifactDiscoveryContext, ArtifactKind,
+    default_artifact_registry, extract_mmd_slice_name, ArtifactDiscoveryContext, ArtifactKind,
 };
 use crate::session::replay_ring::ReplayRing;
 use crate::state::detector::StateDetector;
@@ -1131,13 +1131,17 @@ impl SessionActor {
             let response_session_id = session_id.clone();
             default_artifact_registry()
                 .discover(ArtifactKind::Mermaid, &context)
-                .map(|artifact| MermaidArtifactResponse {
-                    session_id: response_session_id.clone(),
-                    available: true,
-                    path: Some(artifact.path),
-                    updated_at: Some(artifact.updated_at),
-                    source: artifact.source,
-                    error: artifact.error,
+                .map(|artifact| {
+                    let slice_name = extract_mmd_slice_name(&artifact.path).map(str::to_owned);
+                    MermaidArtifactResponse {
+                        session_id: response_session_id.clone(),
+                        available: true,
+                        path: Some(artifact.path),
+                        updated_at: Some(artifact.updated_at),
+                        source: artifact.source,
+                        error: artifact.error,
+                        slice_name,
+                    }
                 })
                 .unwrap_or(MermaidArtifactResponse {
                     session_id: response_session_id,
@@ -1146,6 +1150,7 @@ impl SessionActor {
                     updated_at: None,
                     source: None,
                     error: None,
+                    slice_name: None,
                 })
         })
         .await
@@ -1156,6 +1161,7 @@ impl SessionActor {
             updated_at: None,
             source: None,
             error: Some(format!("artifact scan task failed: {err}")),
+            slice_name: None,
         })
     }
 }

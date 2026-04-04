@@ -2,9 +2,9 @@ pub mod dirs;
 pub mod native;
 pub mod selection;
 pub mod sessions;
-pub mod web_actions;
 pub mod skills;
 pub mod thought_config;
+pub mod web_actions;
 
 use axum::middleware;
 use axum::Router;

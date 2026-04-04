@@ -1548,6 +1548,18 @@ impl<C: TuiApi> App<C> {
             (None, true) => targets.len() - 1,
         };
         let target = &targets[next_index];
+        Self::apply_mermaid_focus_target(viewer, target);
+    }
+
+    pub(crate) fn focus_next_mermaid_target(&mut self, content_rect: Rect) {
+        self.cycle_mermaid_focus(content_rect, 1);
+    }
+
+    pub(crate) fn focus_previous_mermaid_target(&mut self, content_rect: Rect) {
+        self.cycle_mermaid_focus(content_rect, -1);
+    }
+
+    fn apply_mermaid_focus_target(viewer: &mut MermaidViewerState, target: &MermaidFocusTarget) {
         viewer.focused_source_index = Some(target.source_index);
         viewer.focus_status = Some(format!("focus {}", target.text));
 
@@ -1560,12 +1572,16 @@ impl<C: TuiApi> App<C> {
         }
     }
 
-    pub(crate) fn focus_next_mermaid_target(&mut self, content_rect: Rect) {
-        self.cycle_mermaid_focus(content_rect, 1);
-    }
-
-    pub(crate) fn focus_previous_mermaid_target(&mut self, content_rect: Rect) {
-        self.cycle_mermaid_focus(content_rect, -1);
+    pub(crate) fn clear_mermaid_focus(&mut self) -> bool {
+        let Some(viewer) = self.mermaid_viewer_mut() else {
+            return false;
+        };
+        if viewer.focused_source_index.is_none() {
+            return false;
+        }
+        viewer.focused_source_index = None;
+        viewer.focus_status = None;
+        true
     }
 
     pub(crate) fn handle_mermaid_mouse_down(
@@ -1591,6 +1607,22 @@ impl<C: TuiApi> App<C> {
             .content_rect
             .unwrap_or_else(|| mermaid_content_rect(field));
         if content_rect.contains(mouse.column, mouse.row) {
+            match mermaid_visible_focus_targets(viewer, content_rect) {
+                Ok(targets) => {
+                    if let Some(target) = targets
+                        .iter()
+                        .find(|target| target.hitbox.contains(mouse.column, mouse.row))
+                    {
+                        Self::apply_mermaid_focus_target(viewer, target);
+                        self.mermaid_drag = None;
+                        return true;
+                    }
+                }
+                Err(err) => {
+                    viewer.render_error = Some(err);
+                    return true;
+                }
+            }
             self.mermaid_drag = Some(MermaidDragState {
                 start_column: mouse.column,
                 start_row: mouse.row,

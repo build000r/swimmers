@@ -27,7 +27,8 @@ pub(crate) struct ThoughtConfigEditorState {
 }
 
 impl ThoughtConfigEditorState {
-    pub(crate) fn new(config: ThoughtConfig, daemon_defaults: Option<DaemonDefaults>) -> Self {
+    pub(crate) fn new(mut config: ThoughtConfig, daemon_defaults: Option<DaemonDefaults>) -> Self {
+        config.normalize();
         Self {
             config,
             daemon_defaults,
@@ -73,11 +74,7 @@ impl ThoughtConfigEditorState {
     pub(crate) fn daemon_label(&self) -> String {
         match &self.daemon_defaults {
             Some(defaults) => {
-                let backend = if defaults.backend.trim().is_empty() {
-                    "auto"
-                } else {
-                    defaults.backend.as_str()
-                };
+                let backend = thought_backend_label(&defaults.backend);
                 let model = if defaults.model.trim().is_empty() {
                     "(empty)"
                 } else {

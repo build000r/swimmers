@@ -68,7 +68,12 @@ const THOUGHT_RAIL_RATIO_DENOMINATOR: u16 = 3;
 const THOUGHT_RAIL_HEADER_ROWS: u16 = 1;
 const THOUGHT_RAIL_DEFAULT_RATIO: f32 = 1.0 / THOUGHT_RAIL_RATIO_DENOMINATOR as f32;
 const THOUGHT_RAIL_DRAG_HITBOX_WIDTH: u16 = 3;
-const THOUGHT_MERMAID_LABEL: &str = "[mmd]";
+fn mermaid_badge_label(slice_name: Option<&str>) -> String {
+    match slice_name {
+        Some(name) => format!("[mmd:{name}]"),
+        None => "[mmd]".to_string(),
+    }
+}
 const MERMAID_BACK_LABEL: &str = "[back to bowl]";
 const MERMAID_VIEW_MIN_WIDTH: u16 = 16;
 const MERMAID_VIEW_MIN_HEIGHT: u16 = 8;

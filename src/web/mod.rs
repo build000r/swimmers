@@ -32,6 +32,7 @@ const PUBLISHED_VIEW_ROUTE: &str = "/selected";
 const REPLY_TIMEOUT: Duration = Duration::from_secs(2);
 const DEFAULT_FRANKENTUI_PKG_CANDIDATES: &[&str] = &[
     "/Users/b/projects/frankentui/pkg",
+    "/Users/b/repos/opensource/frankentui/pkg",
     "/Users/b/repos/frankentui/pkg",
 ];
 
