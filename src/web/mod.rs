@@ -563,94 +563,102 @@ enum BrowserClientMessage {
     Ping,
 }
 
+/// Pure routing decision derived from an incoming WebSocket message. No I/O.
+#[derive(Debug)]
+enum WsClientDecision {
+    Close,
+    Ignore,
+    SendPong(Vec<u8>),
+    ReplyPong,
+    SendError { code: &'static str, message: String },
+    Forward(SessionCommand),
+}
+
+fn decode_client_message(auth: &AuthInfo, message: &Message) -> WsClientDecision {
+    match message {
+        Message::Close(_) => WsClientDecision::Close,
+        Message::Pong(_) => WsClientDecision::Ignore,
+        Message::Ping(bytes) => WsClientDecision::SendPong(bytes.to_vec()),
+        Message::Binary(bytes) => {
+            if !auth.has_scope(AuthScope::StreamWrite) {
+                return WsClientDecision::SendError {
+                    code: "READ_ONLY",
+                    message: "observer connections cannot send terminal input".to_string(),
+                };
+            }
+            if bytes.is_empty() {
+                WsClientDecision::Ignore
+            } else {
+                WsClientDecision::Forward(SessionCommand::WriteInput(bytes.to_vec()))
+            }
+        }
+        Message::Text(text) => decode_text_client_message(auth, text.as_str()),
+    }
+}
+
+fn decode_text_client_message(auth: &AuthInfo, text: &str) -> WsClientDecision {
+    let parsed: BrowserClientMessage = match serde_json::from_str(text) {
+        Ok(m) => m,
+        Err(err) => {
+            return WsClientDecision::SendError {
+                code: "INVALID_MESSAGE",
+                message: format!("invalid control message: {err}"),
+            }
+        }
+    };
+    match parsed {
+        BrowserClientMessage::Ping => WsClientDecision::ReplyPong,
+        BrowserClientMessage::InputText { data } => {
+            if !auth.has_scope(AuthScope::StreamWrite) {
+                return WsClientDecision::SendError {
+                    code: "READ_ONLY",
+                    message: "observer connections cannot send terminal input".to_string(),
+                };
+            }
+            if data.is_empty() {
+                WsClientDecision::Ignore
+            } else {
+                WsClientDecision::Forward(SessionCommand::WriteInput(data.into_bytes()))
+            }
+        }
+        BrowserClientMessage::Resize { cols, rows } => {
+            if !auth.has_scope(AuthScope::StreamWrite) {
+                return WsClientDecision::SendError {
+                    code: "READ_ONLY",
+                    message: "observer connections cannot resize terminal sessions".to_string(),
+                };
+            }
+            WsClientDecision::Forward(SessionCommand::Resize { cols, rows })
+        }
+    }
+}
+
 async fn handle_client_message(
     handle: &ActorHandle,
     sender: &mut futures::stream::SplitSink<WebSocket, Message>,
     auth: &AuthInfo,
     message: Message,
 ) -> anyhow::Result<bool> {
-    match message {
-        Message::Binary(bytes) => {
-            if !auth.has_scope(AuthScope::StreamWrite) {
-                send_ws_error(
-                    sender,
-                    "READ_ONLY",
-                    "observer connections cannot send terminal input",
-                )
+    match decode_client_message(auth, &message) {
+        WsClientDecision::Close => return Ok(false),
+        WsClientDecision::Ignore => {}
+        WsClientDecision::SendPong(bytes) => {
+            sender.send(Message::Pong(bytes.into())).await?;
+        }
+        WsClientDecision::ReplyPong => {
+            sender
+                .send(Message::Text(r#"{"type":"pong"}"#.into()))
                 .await?;
-                return Ok(true);
-            }
-
-            if !bytes.is_empty() {
-                handle
-                    .send(SessionCommand::WriteInput(bytes.to_vec()))
-                    .await
-                    .map_err(|err| anyhow::anyhow!("failed to forward binary input: {err}"))?;
-            }
         }
-        Message::Text(text) => {
-            let message: BrowserClientMessage = match serde_json::from_str(&text) {
-                Ok(message) => message,
-                Err(err) => {
-                    send_ws_error(
-                        sender,
-                        "INVALID_MESSAGE",
-                        &format!("invalid control message: {err}"),
-                    )
-                    .await?;
-                    return Ok(true);
-                }
-            };
-
-            match message {
-                BrowserClientMessage::InputText { data } => {
-                    if !auth.has_scope(AuthScope::StreamWrite) {
-                        send_ws_error(
-                            sender,
-                            "READ_ONLY",
-                            "observer connections cannot send terminal input",
-                        )
-                        .await?;
-                        return Ok(true);
-                    }
-
-                    if !data.is_empty() {
-                        handle
-                            .send(SessionCommand::WriteInput(data.into_bytes()))
-                            .await
-                            .map_err(|err| {
-                                anyhow::anyhow!("failed to forward text input: {err}")
-                            })?;
-                    }
-                }
-                BrowserClientMessage::Resize { cols, rows } => {
-                    if !auth.has_scope(AuthScope::StreamWrite) {
-                        send_ws_error(
-                            sender,
-                            "READ_ONLY",
-                            "observer connections cannot resize terminal sessions",
-                        )
-                        .await?;
-                        return Ok(true);
-                    }
-
-                    handle
-                        .send(SessionCommand::Resize { cols, rows })
-                        .await
-                        .map_err(|err| anyhow::anyhow!("failed to resize terminal: {err}"))?;
-                }
-                BrowserClientMessage::Ping => {
-                    sender
-                        .send(Message::Text(r#"{"type":"pong"}"#.into()))
-                        .await?;
-                }
-            }
+        WsClientDecision::SendError { code, message: msg } => {
+            send_ws_error(sender, code, &msg).await?;
         }
-        Message::Ping(bytes) => {
-            sender.send(Message::Pong(bytes)).await?;
+        WsClientDecision::Forward(cmd) => {
+            handle
+                .send(cmd)
+                .await
+                .map_err(|err| anyhow::anyhow!("failed to forward command: {err}"))?;
         }
-        Message::Pong(_) => {}
-        Message::Close(_) => return Ok(false),
     }
 
     Ok(true)
@@ -837,5 +845,128 @@ mod tests {
         let html = html_string(render_index(true).await).await;
         assert!(html.contains("published-focus"));
         assert!(html.contains("follow_published_selection"));
+    }
+
+    // --- decode_client_message unit tests ---
+
+    fn operator_auth() -> AuthInfo {
+        AuthInfo::new(OPERATOR_SCOPES.to_vec())
+    }
+
+    fn observer_auth() -> AuthInfo {
+        AuthInfo::new(OBSERVER_SCOPES.to_vec())
+    }
+
+    #[test]
+    fn decode_client_message_close_returns_close() {
+        let msg = Message::Close(None);
+        assert!(matches!(
+            decode_client_message(&operator_auth(), &msg),
+            WsClientDecision::Close
+        ));
+    }
+
+    #[test]
+    fn decode_client_message_pong_is_ignored() {
+        let msg = Message::Pong(b"ping".to_vec().into());
+        assert!(matches!(
+            decode_client_message(&operator_auth(), &msg),
+            WsClientDecision::Ignore
+        ));
+    }
+
+    #[test]
+    fn decode_client_message_ping_frame_sends_pong() {
+        let msg = Message::Ping(b"abc".to_vec().into());
+        match decode_client_message(&operator_auth(), &msg) {
+            WsClientDecision::SendPong(bytes) => assert_eq!(bytes, b"abc"),
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn decode_client_message_binary_without_write_scope_is_read_only_error() {
+        let msg = Message::Binary(b"hello".to_vec().into());
+        match decode_client_message(&observer_auth(), &msg) {
+            WsClientDecision::SendError { code, .. } => assert_eq!(code, "READ_ONLY"),
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn decode_client_message_binary_with_write_scope_forwards_write_input() {
+        let msg = Message::Binary(b"hello".to_vec().into());
+        match decode_client_message(&operator_auth(), &msg) {
+            WsClientDecision::Forward(SessionCommand::WriteInput(data)) => {
+                assert_eq!(data, b"hello")
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn decode_client_message_empty_binary_is_ignored() {
+        let msg = Message::Binary(b"".to_vec().into());
+        assert!(matches!(
+            decode_client_message(&operator_auth(), &msg),
+            WsClientDecision::Ignore
+        ));
+    }
+
+    #[test]
+    fn decode_text_client_message_invalid_json_sends_error() {
+        match decode_text_client_message(&operator_auth(), "not-json") {
+            WsClientDecision::SendError { code, .. } => assert_eq!(code, "INVALID_MESSAGE"),
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn decode_text_client_message_ping_replies_pong() {
+        assert!(matches!(
+            decode_text_client_message(&operator_auth(), r#"{"type":"ping"}"#),
+            WsClientDecision::ReplyPong
+        ));
+    }
+
+    #[test]
+    fn decode_text_client_message_input_text_without_scope_is_read_only() {
+        let json = r#"{"type":"input_text","data":"hello"}"#;
+        match decode_text_client_message(&observer_auth(), json) {
+            WsClientDecision::SendError { code, .. } => assert_eq!(code, "READ_ONLY"),
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn decode_text_client_message_input_text_forwards_write_input() {
+        let json = r#"{"type":"input_text","data":"hello"}"#;
+        match decode_text_client_message(&operator_auth(), json) {
+            WsClientDecision::Forward(SessionCommand::WriteInput(data)) => {
+                assert_eq!(data, b"hello")
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn decode_text_client_message_resize_without_scope_is_read_only() {
+        let json = r#"{"type":"resize","cols":80,"rows":24}"#;
+        match decode_text_client_message(&observer_auth(), json) {
+            WsClientDecision::SendError { code, .. } => assert_eq!(code, "READ_ONLY"),
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn decode_text_client_message_resize_forwards_resize_command() {
+        let json = r#"{"type":"resize","cols":80,"rows":24}"#;
+        match decode_text_client_message(&operator_auth(), json) {
+            WsClientDecision::Forward(SessionCommand::Resize { cols, rows }) => {
+                assert_eq!(cols, 80);
+                assert_eq!(rows, 24);
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
     }
 }
