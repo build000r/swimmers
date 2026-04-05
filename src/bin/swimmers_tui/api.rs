@@ -190,6 +190,11 @@ pub(crate) trait TuiApi {
         &self,
         session_id: &str,
     ) -> BoxFuture<'_, Result<MermaidArtifactResponse, String>>;
+    fn fetch_plan_file(
+        &self,
+        session_id: &str,
+        name: &str,
+    ) -> BoxFuture<'_, Result<PlanFileResponse, String>>;
     fn fetch_native_status(&self) -> BoxFuture<'_, Result<NativeDesktopStatusResponse, String>>;
     fn set_native_app(
         &self,
@@ -349,6 +354,36 @@ impl TuiApi for ApiClient {
                     .json::<MermaidArtifactResponse>()
                     .await
                     .map_err(|err| format!("failed to parse mermaid artifact: {err}"));
+            }
+
+            Err(read_error(response).await)
+        })
+    }
+
+    fn fetch_plan_file(
+        &self,
+        session_id: &str,
+        name: &str,
+    ) -> BoxFuture<'_, Result<PlanFileResponse, String>> {
+        let session_id = session_id.to_string();
+        let name = name.to_string();
+        Box::pin(async move {
+            let url = format!(
+                "{}/v1/sessions/{}/plan-file",
+                self.base_url, session_id
+            );
+            let response = self
+                .with_auth(self.http.get(url))
+                .query(&[("name", &name)])
+                .send()
+                .await
+                .map_err(|err| self.transport_error("fetch plan file", err))?;
+
+            if response.status().is_success() {
+                return response
+                    .json::<PlanFileResponse>()
+                    .await
+                    .map_err(|err| format!("failed to parse plan file: {err}"));
             }
 
             Err(read_error(response).await)

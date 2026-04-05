@@ -12,8 +12,8 @@ use crate::auth::{AuthInfo, AuthScope};
 use crate::session::actor::SessionCommand;
 use crate::types::{
     CreateSessionRequest, CreateSessionResponse, ErrorResponse, MermaidArtifactResponse,
-    SessionInputRequest, SessionInputResponse, SessionListResponse, SessionPaneTailResponse,
-    SessionState, TerminalSnapshot,
+    PlanFileResponse, SessionInputRequest, SessionInputResponse, SessionListResponse,
+    SessionPaneTailResponse, SessionState, TerminalSnapshot,
 };
 
 // ---------------------------------------------------------------------------
@@ -580,6 +580,94 @@ async fn get_mermaid_artifact(
 }
 
 // ---------------------------------------------------------------------------
+// GET /v1/sessions/{session_id}/plan-file?name=plan.md
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+struct PlanFileQuery {
+    name: String,
+}
+
+async fn get_plan_file(
+    Extension(auth): Extension<AuthInfo>,
+    State(state): State<Arc<AppState>>,
+    Path(session_id): Path<String>,
+    Query(query): Query<PlanFileQuery>,
+) -> impl IntoResponse {
+    if let Err(resp) = auth.require_scope(AuthScope::SessionsRead) {
+        return resp;
+    }
+    let handle = match state.supervisor.get_session(&session_id).await {
+        Some(h) => h,
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(
+                    serde_json::to_value(ErrorResponse {
+                        code: "SESSION_NOT_FOUND".to_string(),
+                        message: None,
+                    })
+                    .unwrap(),
+                ),
+            )
+                .into_response();
+        }
+    };
+
+    let (tx, rx) = oneshot::channel::<PlanFileResponse>();
+    if handle
+        .send(SessionCommand::GetPlanFile {
+            name: query.name,
+            reply: tx,
+        })
+        .await
+        .is_err()
+    {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(
+                serde_json::to_value(ErrorResponse {
+                    code: "INTERNAL_ERROR".to_string(),
+                    message: Some("session actor unavailable".to_string()),
+                })
+                .unwrap(),
+            ),
+        )
+            .into_response();
+    }
+
+    match tokio::time::timeout(std::time::Duration::from_secs(5), rx).await {
+        Ok(Ok(response)) => (
+            StatusCode::OK,
+            Json(serde_json::to_value(response).unwrap()),
+        )
+            .into_response(),
+        Ok(Err(_)) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(
+                serde_json::to_value(ErrorResponse {
+                    code: "INTERNAL_ERROR".to_string(),
+                    message: Some("actor dropped plan file reply".to_string()),
+                })
+                .unwrap(),
+            ),
+        )
+            .into_response(),
+        Err(_) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(
+                serde_json::to_value(ErrorResponse {
+                    code: "INTERNAL_ERROR".to_string(),
+                    message: Some("plan file request timed out".to_string()),
+                })
+                .unwrap(),
+            ),
+        )
+            .into_response(),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Router
 // ---------------------------------------------------------------------------
 
@@ -597,6 +685,10 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route(
             "/v1/sessions/{session_id}/mermaid-artifact",
             get(get_mermaid_artifact),
+        )
+        .route(
+            "/v1/sessions/{session_id}/plan-file",
+            get(get_plan_file),
         )
 }
 
@@ -853,6 +945,7 @@ mod tests {
                         source: Some("graph TD\nA-->B\n".to_string()),
                         error: None,
                         slice_name: None,
+                        plan_files: None,
                     });
                     break;
                 }

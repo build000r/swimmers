@@ -36,7 +36,7 @@ use swimmers::repo_theme::{discover_repo_theme, existing_repo_theme};
 use swimmers::thought::runtime_config::{DaemonDefaults, ThoughtConfig};
 use swimmers::types::{
     CreateSessionRequest, CreateSessionResponse, DirEntry, DirListResponse, ErrorResponse,
-    GhosttyOpenMode, MermaidArtifactResponse, NativeDesktopApp, NativeDesktopConfigRequest,
+    GhosttyOpenMode, MermaidArtifactResponse, NativeDesktopApp, NativeDesktopConfigRequest, PlanFileResponse,
     NativeDesktopModeRequest, NativeDesktopOpenRequest, NativeDesktopOpenResponse,
     NativeDesktopStatusResponse, PublishSelectionRequest, RepoTheme, RestState,
     SessionListResponse, SessionState, SessionSummary, SpawnTool,
@@ -48,7 +48,7 @@ const FRAME_DURATION: Duration = Duration::from_millis(100);
 const REFRESH_INTERVAL: Duration = Duration::from_secs(2);
 const MESSAGE_TTL: Duration = Duration::from_secs(5);
 const API_CONNECT_TIMEOUT: Duration = Duration::from_millis(250);
-const API_REQUEST_TIMEOUT: Duration = Duration::from_millis(750);
+const API_REQUEST_TIMEOUT: Duration = Duration::from_millis(2_000);
 const API_NATIVE_OPEN_TIMEOUT: Duration = Duration::from_secs(3);
 const SPRITE_HEIGHT: u16 = 4;
 const LABEL_HEIGHT: u16 = 1;
@@ -108,7 +108,19 @@ pub(crate) use terminal::*;
 pub(crate) use thought_config_editor::*;
 pub(crate) use thoughts::*;
 
+pub(crate) fn install_panic_hook() {
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        // Leave alternate screen before printing the panic so it is visible.
+        let mut stdout = io::stdout();
+        let _ = leave_terminal_ui(&mut stdout);
+        let _ = crossterm_terminal::disable_raw_mode();
+        default_hook(info);
+    }));
+}
+
 pub(crate) fn run() -> Result<(), Box<dyn std::error::Error>> {
+    install_panic_hook();
     let (mut app, mut renderer) = initialize_tui_app()?;
 
     loop {

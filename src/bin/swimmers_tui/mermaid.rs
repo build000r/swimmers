@@ -1,6 +1,56 @@
 use super::*;
 pub(crate) use swimmers::host_actions::{ArtifactOpener, SystemArtifactOpener};
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum DomainPlanTab {
+    Schema,
+    Plan,
+    Shared,
+    Backend,
+    Frontend,
+    Flows,
+    Workgraph,
+}
+
+impl DomainPlanTab {
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Schema => "schema",
+            Self::Plan => "plan",
+            Self::Shared => "shared",
+            Self::Backend => "backend",
+            Self::Frontend => "frontend",
+            Self::Flows => "flows",
+            Self::Workgraph => "WORKGRAPH",
+        }
+    }
+
+    pub(crate) fn filename(self) -> &'static str {
+        match self {
+            Self::Schema => "schema.mmd",
+            Self::Plan => "plan.md",
+            Self::Shared => "shared.md",
+            Self::Backend => "backend.md",
+            Self::Frontend => "frontend.md",
+            Self::Flows => "flows.md",
+            Self::Workgraph => "WORKGRAPH.md",
+        }
+    }
+
+    pub(crate) fn from_filename(name: &str) -> Option<Self> {
+        match name {
+            "schema.mmd" => Some(Self::Schema),
+            "plan.md" => Some(Self::Plan),
+            "shared.md" => Some(Self::Shared),
+            "backend.md" => Some(Self::Backend),
+            "frontend.md" => Some(Self::Frontend),
+            "flows.md" => Some(Self::Flows),
+            "WORKGRAPH.md" => Some(Self::Workgraph),
+            _ => None,
+        }
+    }
+}
+
 pub(crate) enum FishBowlMode {
     Aquarium,
     Mermaid(MermaidViewerState),
@@ -307,6 +357,14 @@ pub(crate) struct MermaidViewerState {
     pub(crate) prepared_render: Option<MermaidPreparedRender>,
     pub(crate) source_prepare_count: u64,
     pub(crate) viewport_render_count: u64,
+    // Domain plan tab state
+    pub(crate) plan_tabs: Option<Vec<DomainPlanTab>>,
+    pub(crate) active_tab: DomainPlanTab,
+    pub(crate) plan_text_content: Option<String>,
+    pub(crate) plan_text_lines: Vec<String>,
+    pub(crate) plan_text_scroll: usize,
+    pub(crate) plan_text_cached_width: u16,
+    pub(crate) tab_rects: Vec<(DomainPlanTab, Rect)>,
 }
 
 impl MermaidViewerState {
@@ -4445,6 +4503,90 @@ pub(crate) fn render_wrapped_lines(renderer: &mut Renderer, rect: Rect, text: &s
     }
 }
 
+fn render_plan_text_content(
+    renderer: &mut Renderer,
+    content_rect: Rect,
+    viewer: &mut MermaidViewerState,
+) {
+    let Some(content) = viewer.plan_text_content.as_ref() else {
+        render_wrapped_lines(
+            renderer,
+            content_rect,
+            "loading plan file...",
+            Color::DarkGrey,
+        );
+        return;
+    };
+
+    let width = content_rect.width as usize;
+    if width == 0 {
+        return;
+    }
+
+    // Re-wrap if width changed or lines not yet computed
+    if viewer.plan_text_lines.is_empty() || viewer.plan_text_cached_width != content_rect.width {
+        viewer.plan_text_lines = content
+            .lines()
+            .flat_map(|line| {
+                if line.is_empty() {
+                    vec![String::new()]
+                } else {
+                    wrap_text(line, width)
+                }
+            })
+            .collect();
+        viewer.plan_text_cached_width = content_rect.width;
+    }
+
+    let visible_height = content_rect.height as usize;
+    let total_lines = viewer.plan_text_lines.len();
+    let max_scroll = total_lines.saturating_sub(visible_height);
+    viewer.plan_text_scroll = viewer.plan_text_scroll.min(max_scroll);
+
+    for (offset, line) in viewer
+        .plan_text_lines
+        .iter()
+        .skip(viewer.plan_text_scroll)
+        .take(visible_height)
+        .enumerate()
+    {
+        let color = if line.starts_with('#') {
+            Color::Cyan
+        } else if line.starts_with("- ") || line.starts_with("  - ") {
+            Color::Green
+        } else if line.starts_with("| ") || line.starts_with("|-") {
+            Color::DarkCyan
+        } else {
+            Color::White
+        };
+        renderer.draw_text(
+            content_rect.x,
+            content_rect.y + offset as u16,
+            &truncate_label(line, width),
+            color,
+        );
+    }
+
+    // Scroll indicator at bottom-right
+    if total_lines > visible_height {
+        let pct = if max_scroll == 0 {
+            100
+        } else {
+            (viewer.plan_text_scroll * 100) / max_scroll
+        };
+        let indicator = format!("{}/{} ({}%)", viewer.plan_text_scroll + 1, total_lines, pct);
+        let indicator_x = content_rect
+            .right()
+            .saturating_sub(display_width(&indicator));
+        renderer.draw_text(
+            indicator_x,
+            content_rect.bottom().saturating_sub(1),
+            &indicator,
+            Color::DarkGrey,
+        );
+    }
+}
+
 pub(crate) fn render_mermaid_viewer(
     renderer: &mut Renderer,
     field: Rect,
@@ -4461,46 +4603,88 @@ pub(crate) fn render_mermaid_viewer(
 
     let content_rect = mermaid_content_rect(field);
     viewer.content_rect = Some(content_rect);
-    let view_state = mermaid_view_state_for_view(viewer, content_rect);
-    let status_x = field
+
+    // Render tab bar or status bar on the header row
+    let after_back = field
         .x
         .saturating_add(display_width(MERMAID_BACK_LABEL) + 1);
-    let status_width = field.right().saturating_sub(status_x) as usize;
-    let detail_label = mermaid_status_detail_label(view_state);
-    let zoom_label = mermaid_zoom_status_label(viewer.zoom);
-    let focus_width = viewer
-        .focus_status
-        .as_deref()
-        .map(|status| usize::from(display_width(" | ")) + usize::from(display_width(status)))
-        .unwrap_or(0);
-    let fixed_width = usize::from(display_width(&viewer.tmux_name))
-        + usize::from(display_width(" | "))
-        + usize::from(display_width(&detail_label))
-        + usize::from(display_width(" | "))
-        + usize::from(display_width(" | "))
-        + usize::from(display_width(&zoom_label))
-        + usize::from(display_width(" | o open"))
-        + focus_width;
-    let mut status = format!(
-        "{} | {} | {} | {} | o open",
-        viewer.tmux_name,
-        detail_label,
-        shorten_path(
-            viewer.display_path(),
-            status_width.saturating_sub(fixed_width)
-        ),
-        zoom_label,
-    );
-    if let Some(focus_status) = viewer.focus_status.as_deref() {
-        status.push_str(" | ");
-        status.push_str(focus_status);
+
+    if let Some(tabs) = &viewer.plan_tabs {
+        // Tab bar mode
+        viewer.tab_rects.clear();
+        let mut tab_x = after_back;
+        for &tab in tabs {
+            let label = format!("[{}]", tab.label());
+            let label_width = display_width(&label);
+            if tab_x + label_width >= field.right() {
+                break;
+            }
+            let color = if tab == viewer.active_tab {
+                Color::Cyan
+            } else {
+                Color::DarkGrey
+            };
+            renderer.draw_text(tab_x, field.y, &label, color);
+            viewer.tab_rects.push((tab, Rect {
+                x: tab_x,
+                y: field.y,
+                width: label_width,
+                height: 1,
+            }));
+            tab_x = tab_x.saturating_add(label_width + 1);
+        }
+        // Show tmux name at the end if room
+        let name_label = format!("| {}", viewer.tmux_name);
+        if tab_x + display_width(&name_label) < field.right() {
+            renderer.draw_text(tab_x, field.y, &name_label, Color::DarkGrey);
+        }
+    } else {
+        // Original status bar (no tabs)
+        let status_x = after_back;
+        let status_width = field.right().saturating_sub(status_x) as usize;
+        let view_state = mermaid_view_state_for_view(viewer, content_rect);
+        let detail_label = mermaid_status_detail_label(view_state);
+        let zoom_label = mermaid_zoom_status_label(viewer.zoom);
+        let focus_width = viewer
+            .focus_status
+            .as_deref()
+            .map(|status| usize::from(display_width(" | ")) + usize::from(display_width(status)))
+            .unwrap_or(0);
+        let fixed_width = usize::from(display_width(&viewer.tmux_name))
+            + usize::from(display_width(" | "))
+            + usize::from(display_width(&detail_label))
+            + usize::from(display_width(" | "))
+            + usize::from(display_width(" | "))
+            + usize::from(display_width(&zoom_label))
+            + usize::from(display_width(" | o open"))
+            + focus_width;
+        let mut status = format!(
+            "{} | {} | {} | {} | o open",
+            viewer.tmux_name,
+            detail_label,
+            shorten_path(
+                viewer.display_path(),
+                status_width.saturating_sub(fixed_width)
+            ),
+            zoom_label,
+        );
+        if let Some(focus_status) = viewer.focus_status.as_deref() {
+            status.push_str(" | ");
+            status.push_str(focus_status);
+        }
+        renderer.draw_text(
+            status_x,
+            field.y,
+            &truncate_label(&status, status_width),
+            Color::DarkGrey,
+        );
     }
-    renderer.draw_text(
-        status_x,
-        field.y,
-        &truncate_label(&status, status_width),
-        Color::DarkGrey,
-    );
+
+    // If on a plan text tab, render text instead of the mermaid diagram
+    if viewer.active_tab != DomainPlanTab::Schema {
+        render_plan_text_content(renderer, content_rect, viewer);
+        return;
+    }
 
     if content_rect.width < MERMAID_VIEW_MIN_WIDTH || content_rect.height < MERMAID_VIEW_MIN_HEIGHT
     {

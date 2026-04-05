@@ -56,6 +56,81 @@ pub(crate) fn handle_key_event<C: TuiApi>(
         let content_rect = viewer
             .content_rect
             .unwrap_or_else(|| mermaid_content_rect(layout.overview_field));
+        let is_text_tab = viewer.active_tab != DomainPlanTab::Schema;
+        let has_tabs = viewer.plan_tabs.is_some();
+
+        // Tab navigation keys (available in both schema and text modes)
+        if has_tabs {
+            match key.code {
+                KeyCode::Char('[') => {
+                    app.cycle_plan_tab(-1);
+                    return true;
+                }
+                KeyCode::Char(']') => {
+                    app.cycle_plan_tab(1);
+                    return true;
+                }
+                KeyCode::Char(c @ '1'..='7') => {
+                    let idx = (c as usize) - ('1' as usize);
+                    if let FishBowlMode::Mermaid(v) = &app.fish_bowl_mode {
+                        if let Some(tabs) = &v.plan_tabs {
+                            if let Some(&tab) = tabs.get(idx) {
+                                app.switch_plan_tab(tab);
+                                return true;
+                            }
+                        }
+                    }
+                    return true;
+                }
+                _ => {}
+            }
+        }
+
+        // Text tab scrolling keys
+        if is_text_tab {
+            return match key.code {
+                KeyCode::Char('q') => false,
+                KeyCode::Esc => {
+                    app.close_mermaid_viewer();
+                    true
+                }
+                KeyCode::Up | KeyCode::Char('k') => {
+                    app.scroll_plan_text(-1);
+                    true
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    app.scroll_plan_text(1);
+                    true
+                }
+                KeyCode::PageUp => {
+                    app.scroll_plan_text_page(-1);
+                    true
+                }
+                KeyCode::PageDown => {
+                    app.scroll_plan_text_page(1);
+                    true
+                }
+                KeyCode::Home => {
+                    if let Some(viewer) = app.mermaid_viewer_mut() {
+                        viewer.plan_text_scroll = 0;
+                    }
+                    true
+                }
+                KeyCode::End => {
+                    if let Some(viewer) = app.mermaid_viewer_mut() {
+                        viewer.plan_text_scroll = viewer.plan_text_lines.len().saturating_sub(1);
+                    }
+                    true
+                }
+                KeyCode::Char('o') => {
+                    app.open_mermaid_artifact();
+                    true
+                }
+                _ => true,
+            };
+        }
+
+        // Schema tab: original mermaid diagram keys
         let (step_x, step_y) = mermaid_pan_step(viewer, content_rect);
         return match key.code {
             KeyCode::Char('q') => false,

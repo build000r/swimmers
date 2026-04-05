@@ -1,10 +1,12 @@
 use std::cmp::Ordering;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 use chrono::{DateTime, Utc};
 use walkdir::WalkDir;
+
+use crate::session::overlay::default_overlay;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ArtifactKind {
@@ -84,28 +86,45 @@ impl ArtifactDetector for MermaidArtifactDetector {
             return None;
         }
 
+        // Phase 1: Try skillbox overlay plan directories (no time filter)
+        if let Some(overlay) = default_overlay() {
+            if let Some(plan_dirs) = overlay.find_plan_dirs(root) {
+                let mut overlay_candidates = Vec::new();
+                for dir in &plan_dirs {
+                    overlay_candidates
+                        .extend(scan_mermaid_candidates(&dir.to_string_lossy()));
+                }
+                if let Some(best) = overlay_candidates
+                    .iter()
+                    .max_by(|l, r| compare_mermaid_candidates(l, r))
+                    .cloned()
+                {
+                    return Some(read_candidate_artifact(best));
+                }
+            }
+        }
+
+        // Phase 2: In-repo scan with relaxed time filter for plan directories
         let candidates = scan_mermaid_candidates(root);
+
+        // Prefer: plan-directory candidates (no time filter), then time-filtered others
+        let plan_best = candidates
+            .iter()
+            .filter(|c| has_plan_siblings(&c.display_path))
+            .max_by(|l, r| compare_mermaid_candidates(l, r))
+            .cloned();
+        if let Some(best) = plan_best {
+            return Some(read_candidate_artifact(best));
+        }
+
+        // Original: time-filtered non-plan candidates
         let best = candidates
             .iter()
             .filter(|candidate| candidate.updated_at >= context.session_started_at)
             .max_by(|left, right| compare_mermaid_candidates(left, right))
             .cloned()?;
 
-        let (source, error) = match fs::read_to_string(&best.display_path) {
-            Ok(source) => (Some(source), None),
-            Err(err) => (
-                None,
-                Some(format!("failed to read Mermaid artifact: {err}")),
-            ),
-        };
-
-        Some(DiscoveredArtifact {
-            kind: ArtifactKind::Mermaid,
-            path: best.display_path.to_string_lossy().into_owned(),
-            updated_at: best.updated_at,
-            source,
-            error,
-        })
+        Some(read_candidate_artifact(best))
     }
 }
 
@@ -144,6 +163,33 @@ fn scan_mermaid_candidates(root: &str) -> Vec<MermaidCandidate> {
     candidates
 }
 
+fn read_candidate_artifact(candidate: MermaidCandidate) -> DiscoveredArtifact {
+    let (source, error) = match fs::read_to_string(&candidate.display_path) {
+        Ok(source) => (Some(source), None),
+        Err(err) => (
+            None,
+            Some(format!("failed to read Mermaid artifact: {err}")),
+        ),
+    };
+    DiscoveredArtifact {
+        kind: ArtifactKind::Mermaid,
+        path: candidate.display_path.to_string_lossy().into_owned(),
+        updated_at: candidate.updated_at,
+        source,
+        error,
+    }
+}
+
+/// Returns true if the .mmd file's parent directory contains known plan sibling files.
+pub fn has_plan_siblings(mmd_path: &Path) -> bool {
+    let Some(dir) = mmd_path.parent() else {
+        return false;
+    };
+    PLAN_SIBLING_FILENAMES
+        .iter()
+        .any(|name| dir.join(name).is_file())
+}
+
 fn compare_mermaid_candidates(left: &MermaidCandidate, right: &MermaidCandidate) -> Ordering {
     left.updated_at
         .cmp(&right.updated_at)
@@ -151,6 +197,7 @@ fn compare_mermaid_candidates(left: &MermaidCandidate, right: &MermaidCandidate)
 }
 
 pub fn extract_mmd_slice_name(path: &str) -> Option<&str> {
+    // Pattern 1: plans/{released|draft}/{slice}/schema.mmd (original)
     let parts: Vec<&str> = path.split('/').collect();
     for window in parts.windows(4) {
         if window[0] == "plans"
@@ -160,7 +207,46 @@ pub fn extract_mmd_slice_name(path: &str) -> Option<&str> {
             return Some(window[2]);
         }
     }
+
+    // Pattern 2: any {parent}/{released|draft|planned}/{slice}/schema.mmd
+    for window in parts.windows(4) {
+        if matches!(window[1], "released" | "draft" | "planned")
+            && window[3] == "schema.mmd"
+        {
+            return Some(window[2]);
+        }
+    }
+
+    // Pattern 3: schema.mmd with plan siblings — use parent dir name
+    let p = Path::new(path);
+    if p.file_name()?.to_str()? == "schema.mmd" && has_plan_siblings(p) {
+        return p.parent()?.file_name()?.to_str();
+    }
+
     None
+}
+
+pub const PLAN_SIBLING_FILENAMES: &[&str] = &[
+    "plan.md",
+    "shared.md",
+    "backend.md",
+    "frontend.md",
+    "flows.md",
+    "WORKGRAPH.md",
+];
+
+/// Given the absolute path to a `schema.mmd` inside a plan directory, returns the
+/// filenames of sibling plan files that exist on disk.
+pub fn list_plan_siblings(schema_path: &str) -> Vec<String> {
+    let path = std::path::Path::new(schema_path);
+    let Some(dir) = path.parent() else {
+        return Vec::new();
+    };
+    PLAN_SIBLING_FILENAMES
+        .iter()
+        .filter(|name| dir.join(name).is_file())
+        .map(|name| (*name).to_string())
+        .collect()
 }
 
 fn should_visit_artifact_entry(entry: &walkdir::DirEntry) -> bool {
@@ -289,5 +375,87 @@ mod tests {
     fn extract_slice_name_returns_none_for_template_schema() {
         let path = "clients/personal/skills/domain-planner/assets/templates/schema.mmd";
         assert_eq!(super::extract_mmd_slice_name(path), None);
+    }
+
+    #[test]
+    fn extract_slice_name_from_planned_path() {
+        let path = "/home/user/repos/project/src/data/db-schemas/planned/agent_billing/schema.mmd";
+        assert_eq!(super::extract_mmd_slice_name(path), Some("agent_billing"));
+    }
+
+    #[test]
+    fn has_plan_siblings_detects_plan_directory() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let plan_dir = dir.path().join("my_slice");
+        fs::create_dir_all(&plan_dir).expect("create plan dir");
+        fs::write(plan_dir.join("schema.mmd"), "erDiagram\n").expect("write schema");
+        fs::write(plan_dir.join("plan.md"), "# Plan\n").expect("write plan");
+
+        assert!(super::has_plan_siblings(&plan_dir.join("schema.mmd")));
+    }
+
+    #[test]
+    fn has_plan_siblings_returns_false_without_siblings() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let lone_dir = dir.path().join("lonely");
+        fs::create_dir_all(&lone_dir).expect("create dir");
+        fs::write(lone_dir.join("diagram.mmd"), "graph TD\n").expect("write mmd");
+
+        assert!(!super::has_plan_siblings(&lone_dir.join("diagram.mmd")));
+    }
+
+    #[test]
+    fn plan_siblings_bypass_time_filter_in_discovery() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let plan_dir = dir.path().join("db-schemas").join("planned").join("test_slice");
+        fs::create_dir_all(&plan_dir).expect("create plan dir");
+        fs::write(plan_dir.join("schema.mmd"), "erDiagram\n").expect("write schema");
+        fs::write(plan_dir.join("plan.md"), "# Plan\n").expect("write plan");
+        fs::write(plan_dir.join("shared.md"), "# Shared\n").expect("write shared");
+
+        // Session starts AFTER the files were written — normally they'd be filtered out
+        let session_started_at = chrono::Utc::now() + Duration::seconds(60);
+
+        let artifact = discover_mermaid(&ArtifactDiscoveryContext {
+            session_id: "sess-plan".to_string(),
+            tmux_name: "99".to_string(),
+            cwd: dir.path().to_string_lossy().into_owned(),
+            session_started_at,
+            pane_tail: String::new(),
+        })
+        .expect("artifact should be found despite time filter");
+
+        assert!(artifact.path.ends_with("schema.mmd"));
+        assert_eq!(
+            super::extract_mmd_slice_name(&artifact.path),
+            Some("test_slice")
+        );
+    }
+
+    #[test]
+    fn list_plan_siblings_finds_existing_files() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let plan_dir = dir.path().join("plans").join("draft").join("test_slice");
+        fs::create_dir_all(&plan_dir).expect("create plan dir");
+        fs::write(plan_dir.join("schema.mmd"), "erDiagram\n").expect("write schema");
+        fs::write(plan_dir.join("plan.md"), "# Plan\n").expect("write plan");
+        fs::write(plan_dir.join("shared.md"), "# Shared\n").expect("write shared");
+        fs::write(plan_dir.join("unrelated.txt"), "nope\n").expect("write unrelated");
+
+        let schema_path = plan_dir.join("schema.mmd");
+        let siblings = super::list_plan_siblings(&schema_path.to_string_lossy());
+        assert_eq!(siblings, vec!["plan.md", "shared.md"]);
+    }
+
+    #[test]
+    fn list_plan_siblings_returns_empty_for_no_siblings() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let plan_dir = dir.path().join("plans").join("draft").join("lonely");
+        fs::create_dir_all(&plan_dir).expect("create plan dir");
+        fs::write(plan_dir.join("schema.mmd"), "erDiagram\n").expect("write schema");
+
+        let schema_path = plan_dir.join("schema.mmd");
+        let siblings = super::list_plan_siblings(&schema_path.to_string_lossy());
+        assert!(siblings.is_empty());
     }
 }

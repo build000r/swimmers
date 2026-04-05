@@ -44,9 +44,11 @@ pub fn thought_config_probe_session(now: DateTime<Utc>) -> SessionInfo {
 }
 
 pub async fn run_thought_config_probe(config: &ThoughtConfig) -> ThoughtConfigProbeResult {
+    let mut probe_config = config.clone();
+    probe_config.enabled = true;
     let mut client = EmitterClient::new();
     let sample = thought_config_probe_session(Utc::now());
-    match client.next_sync_response(config, &[sample]).await {
+    match client.next_sync_response(&probe_config, &[sample]).await {
         Ok(response) => {
             let ok = response.last_backend_error.is_none() && response.llm_calls > 0;
             let message = if let Some(err) = response.last_backend_error.clone() {

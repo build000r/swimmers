@@ -336,12 +336,38 @@ wait_for_api_quiet() {
   return 1
 }
 
+maybe_rebuild_clawgs() {
+  local clawgs_dir="${ROOT_DIR}/../clawgs"
+  if [[ ! -d "${clawgs_dir}" ]]; then
+    return 0
+  fi
+
+  local bin="${clawgs_dir}/target/release/clawgs"
+  if [[ ! -f "${bin}" ]] || [[ -n "$(find "${clawgs_dir}/src" -newer "${bin}" -print -quit 2>/dev/null)" ]]; then
+    printf 'Rebuilding clawgs (adjacent checkout has source changes)\n'
+    (cd "${clawgs_dir}" && cargo build --release --bin clawgs) || {
+      printf 'clawgs build failed; continuing with existing binary\n' >&2
+    }
+  else
+    printf 'clawgs binary is up to date\n'
+  fi
+}
+
 main() {
   require curl
   local probe_status=0
 
+  maybe_rebuild_clawgs
+
   if probe_api_access "$(api_url)"; then
-    printf 'swimmers API is ready (%s)\n' "${LAST_API_STATUS}"
+    if should_auto_start_local_api; then
+      printf 'Rebuilding local swimmers API to pick up code changes\n'
+      stop_local_api_listener || true
+      start_local_api
+      wait_for_api "${START_TIMEOUT}"
+    else
+      printf 'swimmers API is ready (%s)\n' "${LAST_API_STATUS}"
+    fi
   else
     probe_status=$?
     if (( probe_status == 10 )); then
@@ -349,7 +375,10 @@ main() {
       return 1
     elif should_auto_start_local_api; then
       if wait_for_api_quiet "${PRESTART_WAIT_TIMEOUT}"; then
-        printf 'swimmers API is ready (%s)\n' "${LAST_API_STATUS}"
+        printf 'Rebuilding local swimmers API to pick up code changes\n'
+        stop_local_api_listener || true
+        start_local_api
+        wait_for_api "${START_TIMEOUT}"
       else
         probe_status=$?
         if (( probe_status == 10 )); then
