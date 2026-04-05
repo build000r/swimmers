@@ -325,6 +325,37 @@ impl StateDetector {
         self.set_state(SessionState::Exited, Some(None), now, "process_exit");
     }
 
+    /// Reconcile detector state with process-tree ground truth.
+    ///
+    /// Called periodically (~2s) by the actor after querying the pane's process
+    /// tree. When the process tree disagrees with the output-based heuristics,
+    /// the process tree wins:
+    ///
+    /// - Detector says `Busy` but shell has no children → override to `Idle`
+    ///   (the prompt was missed by output heuristics).
+    /// - Detector says `Idle`/`Attention` but shell has children → override to
+    ///   `Busy` (a quiet command is running that produced no recognizable output).
+    ///
+    /// `Exited` and `Error` states are never overridden — they come from
+    /// higher-confidence signals (PTY close, error pattern match).
+    pub fn apply_process_liveness(&mut self, has_children: bool) {
+        let now = Instant::now();
+        match self.state {
+            SessionState::Busy if !has_children => {
+                debug!("process liveness: no children but state is busy, correcting to idle");
+                self.set_state(SessionState::Idle, Some(None), now, "liveness_no_children");
+            }
+            SessionState::Idle | SessionState::Attention if has_children => {
+                debug!(
+                    state = ?self.state,
+                    "process liveness: children found but state is idle/attention, correcting to busy"
+                );
+                self.set_state(SessionState::Busy, Some(None), now, "liveness_has_children");
+            }
+            _ => {}
+        }
+    }
+
     /// Get the current state and command as a tuple.
     pub fn get_state(&self) -> (SessionState, Option<String>) {
         (self.state, self.current_command.clone())
@@ -1138,5 +1169,94 @@ mod tests {
         assert_eq!(d.state(), SessionState::Busy);
         // No output idle deadline should be set.
         assert!(d.output_idle_deadline.is_none());
+    }
+
+    // --- Process liveness reconciliation tests ---
+
+    #[test]
+    fn liveness_corrects_busy_to_idle_when_no_children() {
+        let (mut d, log) = detector_with_log();
+        // Drive to Busy via output.
+        d.process_output(b"Compiling...\r\n");
+        assert_eq!(d.state(), SessionState::Busy);
+
+        // Process tree says: no children.
+        d.apply_process_liveness(false);
+        assert_eq!(d.state(), SessionState::Idle);
+
+        let transitions = log.lock().unwrap();
+        let last = transitions.last().unwrap();
+        assert_eq!(last.0, SessionState::Idle);
+        assert_eq!(last.1, SessionState::Busy);
+    }
+
+    #[test]
+    fn liveness_corrects_idle_to_busy_when_has_children() {
+        let (mut d, log) = detector_with_log();
+        assert_eq!(d.state(), SessionState::Idle);
+
+        // Process tree says: children running.
+        d.apply_process_liveness(true);
+        assert_eq!(d.state(), SessionState::Busy);
+
+        let transitions = log.lock().unwrap();
+        let last = transitions.last().unwrap();
+        assert_eq!(last.0, SessionState::Busy);
+        assert_eq!(last.1, SessionState::Idle);
+    }
+
+    #[test]
+    fn liveness_corrects_attention_to_busy_when_has_children() {
+        let mut d = StateDetector::new();
+        // Drive to Busy then Idle then Attention.
+        d.process_output(b"Compiling...\r\n");
+        d.process_output(b"user@host:~$ ");
+        assert_eq!(d.state(), SessionState::Idle);
+        // Simulate attention deadline expiring.
+        d.attention_deadline = Some(Instant::now() - Duration::from_secs(1));
+        d.check_timers(Instant::now());
+        assert_eq!(d.state(), SessionState::Attention);
+
+        // Process tree says: children running.
+        d.apply_process_liveness(true);
+        assert_eq!(d.state(), SessionState::Busy);
+    }
+
+    #[test]
+    fn liveness_does_not_override_exited() {
+        let mut d = StateDetector::new();
+        d.mark_exited();
+        assert_eq!(d.state(), SessionState::Exited);
+
+        d.apply_process_liveness(false);
+        assert_eq!(d.state(), SessionState::Exited);
+
+        d.apply_process_liveness(true);
+        assert_eq!(d.state(), SessionState::Exited);
+    }
+
+    #[test]
+    fn liveness_does_not_override_error() {
+        let mut d = StateDetector::new();
+        d.process_output(b"command not found\r\n");
+        assert_eq!(d.state(), SessionState::Error);
+
+        d.apply_process_liveness(false);
+        assert_eq!(d.state(), SessionState::Error);
+    }
+
+    #[test]
+    fn liveness_noop_when_state_matches_tree() {
+        let (mut d, log) = detector_with_log();
+        // Idle with no children — no transition expected.
+        d.apply_process_liveness(false);
+        assert_eq!(d.state(), SessionState::Idle);
+
+        // Busy with children — no transition expected.
+        d.process_output(b"Compiling...\r\n");
+        let count_before = log.lock().unwrap().len();
+        d.apply_process_liveness(true);
+        assert_eq!(d.state(), SessionState::Busy);
+        assert_eq!(log.lock().unwrap().len(), count_before);
     }
 }

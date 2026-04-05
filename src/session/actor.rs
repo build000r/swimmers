@@ -28,6 +28,7 @@ use crate::types::{
 
 const CWD_REFRESH_MIN_INTERVAL: Duration = Duration::from_millis(750);
 const TOOL_REFRESH_MIN_INTERVAL: Duration = Duration::from_millis(1_000);
+const LIVENESS_CHECK_INTERVAL: Duration = Duration::from_millis(2_000);
 const TMUX_FALLBACK_TERM: &str = "xterm-256color";
 const TMUX_FALLBACK_COLORTERM: &str = "truecolor";
 
@@ -204,6 +205,9 @@ pub struct SessionActor {
     // Last time we refreshed tool detection from tmux/process state.
     last_tool_refresh_at: Instant,
 
+    // Last time we ran a process-tree liveness check.
+    last_liveness_check_at: Instant,
+
     // Detected coding tool name
     tool: Option<String>,
 
@@ -334,6 +338,7 @@ impl SessionActor {
             cwd: initial_cwd,
             last_cwd_refresh_at: Instant::now(),
             last_tool_refresh_at: Instant::now(),
+            last_liveness_check_at: Instant::now(),
             tool: initial_tool,
             last_skill: None,
             input_line_buffer: String::new(),
@@ -618,16 +623,20 @@ impl SessionActor {
         }
     }
 
-    /// Compute the earliest timer deadline across StateDetector and ScrollGuard.
+    /// Compute the earliest timer deadline across StateDetector, ScrollGuard,
+    /// and the periodic liveness check.
     fn next_timer_deadline(&self) -> Option<Instant> {
         let state_deadline = self.state_detector.next_deadline();
         let scroll_deadline = self.scroll_guard.check_flush_deadline();
-        match (state_deadline, scroll_deadline) {
-            (Some(a), Some(b)) => Some(a.min(b)),
-            (Some(a), None) => Some(a),
-            (None, Some(b)) => Some(b),
-            (None, None) => None,
-        }
+        let liveness_deadline = if self.state_detector.state() != SessionState::Exited {
+            Some(self.last_liveness_check_at + LIVENESS_CHECK_INTERVAL)
+        } else {
+            None
+        };
+        [state_deadline, scroll_deadline, liveness_deadline]
+            .into_iter()
+            .flatten()
+            .min()
     }
 
     /// Fire any expired timers and process the results.
@@ -665,6 +674,9 @@ impl SessionActor {
             };
             self.broadcast(frame).await;
         }
+
+        // Process-tree liveness reconciliation.
+        self.maybe_check_liveness().await;
     }
 
     /// Process raw PTY output through the pipeline:
@@ -851,6 +863,47 @@ impl SessionActor {
                     tmux_name = %self.tmux_name,
                     "tmux session_created refresh failed: {}",
                     err
+                );
+            }
+        }
+    }
+
+    /// Periodically query the pane's process tree to reconcile state.
+    /// Runs every LIVENESS_CHECK_INTERVAL (~2s). Skips if the session has exited.
+    async fn maybe_check_liveness(&mut self) {
+        if self.state_detector.state() == SessionState::Exited {
+            return;
+        }
+        let now = Instant::now();
+        if now.duration_since(self.last_liveness_check_at) < LIVENESS_CHECK_INTERVAL {
+            return;
+        }
+        self.last_liveness_check_at = now;
+
+        let tmux_name = self.tmux_name.clone();
+        match query_pane_liveness(&tmux_name).await {
+            Ok(liveness) => {
+                let state_before = self.state_detector.state();
+                self.state_detector
+                    .apply_process_liveness(liveness.has_children);
+                if matches!(
+                    self.maybe_emit_state_change(state_before),
+                    Some(SessionState::Idle)
+                ) {
+                    self.maybe_refresh_cwd_from_tmux(false).await;
+                }
+                // Also refresh tool detection when liveness discovers children,
+                // since a new tool may have started between tool refresh polls.
+                if liveness.has_children {
+                    self.maybe_refresh_tool_from_tmux(false).await;
+                }
+            }
+            Err(e) => {
+                debug!(
+                    session_id = %self.session_id,
+                    tmux_name = %self.tmux_name,
+                    "liveness check failed: {}",
+                    e
                 );
             }
         }
@@ -1392,6 +1445,7 @@ async fn query_tmux_session_created(tmux_name: &str) -> anyhow::Result<chrono::D
 struct ProcessEntry {
     pid: u32,
     ppid: u32,
+    pcpu: f32,
     comm: String,
     args: String,
 }
@@ -1436,6 +1490,65 @@ async fn query_tool_from_tmux_process_tree(tmux_name: &str) -> anyhow::Result<Op
     }
 
     Ok(None)
+}
+
+/// Result of a process-tree liveness check for a tmux pane.
+#[derive(Debug, Clone, Copy)]
+struct PaneLiveness {
+    /// True when the pane's shell has at least one child process.
+    has_children: bool,
+    /// Sum of `%cpu` across all descendant processes (excludes the shell itself).
+    descendant_cpu: f32,
+}
+
+/// Query whether the pane's shell process has running children and their
+/// aggregate CPU usage. This is the ground-truth signal for idle vs busy:
+/// if the shell is the leaf process, no command is running regardless of what
+/// the terminal output looks like.
+async fn query_pane_liveness(tmux_name: &str) -> anyhow::Result<PaneLiveness> {
+    let pane_pid = query_tmux_pane_pid(tmux_name).await?;
+    let entries = query_process_entries().await?;
+
+    let mut children: HashMap<u32, Vec<u32>> = HashMap::new();
+    let mut by_pid: HashMap<u32, ProcessEntry> = HashMap::new();
+
+    for entry in entries {
+        children.entry(entry.ppid).or_default().push(entry.pid);
+        by_pid.insert(entry.pid, entry);
+    }
+
+    // Walk descendants of the pane pid (excluding the shell itself).
+    let mut has_children = false;
+    let mut descendant_cpu: f32 = 0.0;
+    let mut queue: VecDeque<u32> = VecDeque::new();
+    let mut visited: HashSet<u32> = HashSet::new();
+    visited.insert(pane_pid);
+
+    if let Some(direct_children) = children.get(&pane_pid) {
+        for &child_pid in direct_children {
+            queue.push_back(child_pid);
+        }
+    }
+
+    while let Some(pid) = queue.pop_front() {
+        if !visited.insert(pid) {
+            continue;
+        }
+        has_children = true;
+        if let Some(entry) = by_pid.get(&pid) {
+            descendant_cpu += entry.pcpu;
+        }
+        if let Some(grandchildren) = children.get(&pid) {
+            for &gc in grandchildren {
+                queue.push_back(gc);
+            }
+        }
+    }
+
+    Ok(PaneLiveness {
+        has_children,
+        descendant_cpu,
+    })
 }
 
 async fn query_tmux_current_command(tmux_name: &str) -> anyhow::Result<String> {
@@ -1497,7 +1610,7 @@ async fn query_tmux_pane_pid(tmux_name: &str) -> anyhow::Result<u32> {
 
 async fn query_process_entries() -> anyhow::Result<Vec<ProcessEntry>> {
     let output = Command::new("ps")
-        .args(["-axo", "pid=,ppid=,comm=,args="])
+        .args(["-axo", "pid=,ppid=,pcpu=,comm=,args="])
         .output()
         .await
         .map_err(|e| anyhow::anyhow!("failed to run ps: {}", e))?;
@@ -1521,12 +1634,14 @@ fn parse_process_entry(line: &str) -> Option<ProcessEntry> {
     let mut parts = line.split_whitespace();
     let pid = parts.next()?.parse::<u32>().ok()?;
     let ppid = parts.next()?.parse::<u32>().ok()?;
+    let pcpu = parts.next()?.parse::<f32>().ok()?;
     let comm = parts.next()?.to_string();
     let args = parts.collect::<Vec<&str>>().join(" ");
 
     Some(ProcessEntry {
         pid,
         ppid,
+        pcpu,
         comm,
         args,
     })
@@ -1992,6 +2107,7 @@ mod tests {
             cwd: "/tmp/project".to_string(),
             last_cwd_refresh_at: Instant::now(),
             last_tool_refresh_at: Instant::now(),
+            last_liveness_check_at: Instant::now(),
             tool: Some("Codex".to_string()),
             last_skill: None,
             input_line_buffer: String::new(),
@@ -2016,9 +2132,10 @@ mod tests {
     #[test]
     fn parse_process_entry_parses_ps_row() {
         let entry =
-            parse_process_entry("10715 37039 claude /usr/local/bin/claude --print").unwrap();
+            parse_process_entry("10715 37039 2.3 claude /usr/local/bin/claude --print").unwrap();
         assert_eq!(entry.pid, 10_715);
         assert_eq!(entry.ppid, 37_039);
+        assert!((entry.pcpu - 2.3).abs() < f32::EPSILON);
         assert_eq!(entry.comm, "claude");
         assert_eq!(entry.args, "/usr/local/bin/claude --print");
     }
@@ -2028,6 +2145,7 @@ mod tests {
         let from_comm = ProcessEntry {
             pid: 1,
             ppid: 0,
+            pcpu: 0.0,
             comm: "codex".to_string(),
             args: "codex".to_string(),
         };
@@ -2036,6 +2154,7 @@ mod tests {
         let from_args = ProcessEntry {
             pid: 2,
             ppid: 1,
+            pcpu: 0.0,
             comm: "node".to_string(),
             args: "/usr/local/bin/claude --json".to_string(),
         };
@@ -2229,7 +2348,7 @@ fi
         let ps = bin_dir.join("ps");
         std::fs::write(
             &ps,
-            "#!/bin/sh\nprintf '101 1 bash bash\\n102 101 node /usr/local/bin/claude --print\\n'\n",
+            "#!/bin/sh\nprintf '101 1 0.0 bash bash\\n102 101 5.2 node /usr/local/bin/claude --print\\n'\n",
         )
         .expect("ps");
         for path in [&tmux, &ps] {
