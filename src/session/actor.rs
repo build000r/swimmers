@@ -1601,7 +1601,11 @@ struct PaneLiveness {
 async fn query_pane_liveness(tmux_name: &str) -> anyhow::Result<PaneLiveness> {
     let pane_pid = query_tmux_pane_pid(tmux_name).await?;
     let entries = query_process_entries().await?;
+    Ok(compute_pane_liveness(pane_pid, entries))
+}
 
+/// Pure BFS over the process tree rooted at `pane_pid`. Exported for testing.
+fn compute_pane_liveness(pane_pid: u32, entries: Vec<ProcessEntry>) -> PaneLiveness {
     let mut children: HashMap<u32, Vec<u32>> = HashMap::new();
     let mut by_pid: HashMap<u32, ProcessEntry> = HashMap::new();
 
@@ -1638,10 +1642,10 @@ async fn query_pane_liveness(tmux_name: &str) -> anyhow::Result<PaneLiveness> {
         }
     }
 
-    Ok(PaneLiveness {
+    PaneLiveness {
         has_children,
         descendant_cpu,
-    })
+    }
 }
 
 async fn query_tmux_current_command(tmux_name: &str) -> anyhow::Result<String> {
@@ -2151,8 +2155,9 @@ mod tests {
         osc_payloads, output_counts_as_meaningful_activity, parse_process_entry, percent_decode,
         query_tmux_session_created, query_tool_from_tmux_process_tree, resolve_tmux_terminal_env,
         should_refresh_cwd_from_tmux, should_refresh_tool_from_tmux, visible_output_is_meaningful,
-        write_and_flush_input, write_input_counts_as_activity, ControlEvent, ProcessEntry,
-        SessionActor, SessionCommand, CWD_REFRESH_MIN_INTERVAL, TOOL_REFRESH_MIN_INTERVAL,
+        compute_pane_liveness, write_and_flush_input, write_input_counts_as_activity, ControlEvent,
+        ProcessEntry, SessionActor, SessionCommand, CWD_REFRESH_MIN_INTERVAL,
+        TOOL_REFRESH_MIN_INTERVAL,
     };
     use crate::config::Config;
     use crate::scroll::guard::ScrollGuard;
@@ -2841,5 +2846,50 @@ fi
         assert!(write_input_counts_as_activity(b"\x1b[Ia"));
         assert!(write_input_counts_as_activity(b"\x1b[O\r"));
         assert!(write_input_counts_as_activity(b"\t"));
+    }
+
+    fn proc(pid: u32, ppid: u32, pcpu: f32) -> ProcessEntry {
+        ProcessEntry {
+            pid,
+            ppid,
+            pcpu,
+            comm: "test".to_string(),
+            args: String::new(),
+        }
+    }
+
+    #[test]
+    fn compute_pane_liveness_idle_shell_has_no_children() {
+        // pane_pid 100 has no child processes
+        let liveness = compute_pane_liveness(100, vec![proc(99, 1, 0.0), proc(101, 99, 0.0)]);
+        assert!(!liveness.has_children);
+        assert_eq!(liveness.descendant_cpu, 0.0);
+    }
+
+    #[test]
+    fn compute_pane_liveness_direct_child_marks_busy() {
+        // pane_pid 100 has child 101
+        let liveness = compute_pane_liveness(100, vec![proc(100, 1, 0.0), proc(101, 100, 2.5)]);
+        assert!(liveness.has_children);
+        assert!((liveness.descendant_cpu - 2.5).abs() < 0.01);
+    }
+
+    #[test]
+    fn compute_pane_liveness_sums_deep_descendant_cpu() {
+        // pane 100 → child 101 → grandchild 102
+        let entries = vec![
+            proc(100, 1, 0.0),
+            proc(101, 100, 1.0),
+            proc(102, 101, 3.0),
+        ];
+        let liveness = compute_pane_liveness(100, entries);
+        assert!(liveness.has_children);
+        assert!((liveness.descendant_cpu - 4.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn compute_pane_liveness_empty_process_list_is_idle() {
+        let liveness = compute_pane_liveness(100, vec![]);
+        assert!(!liveness.has_children);
     }
 }
