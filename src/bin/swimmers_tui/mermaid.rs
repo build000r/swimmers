@@ -1299,77 +1299,42 @@ pub(crate) fn build_mermaid_semantic_lines(
         }
     }
 
+    let is_state = layout.kind == DiagramKind::State;
     for (edge_idx, edge) in layout.edges.iter().enumerate() {
         let owner_key = mermaid_outline_edge_key(edge_idx);
-        if let Some(label) = edge.label.as_ref() {
-            if let Some((label_x, label_y)) = edge.label_anchor {
-                let (font_size, line_height) = if layout.kind == DiagramKind::State {
-                    (state_font_size, state_line_height)
-                } else {
-                    (theme_font_size, base_line_height)
-                };
-                push_mermaid_text_block_semantic_lines(
-                    &mut semantic_lines,
-                    label,
-                    label_x,
-                    label_y,
-                    font_size,
-                    line_height,
-                    MermaidTextAnchor::Center,
-                    MermaidSemanticKind::EdgeLabel,
-                    &owner_key,
-                    false,
-                    0.0,
-                    0.0,
-                );
-            }
-        }
-        if let Some(label) = edge.start_label.as_ref() {
-            if let Some((label_x, label_y)) = edge.start_label_anchor {
-                let (font_size, line_height) = if layout.kind == DiagramKind::State {
-                    (state_font_size, state_line_height)
-                } else {
-                    (theme_font_size, base_line_height)
-                };
-                push_mermaid_text_block_semantic_lines(
-                    &mut semantic_lines,
-                    label,
-                    label_x,
-                    label_y,
-                    font_size,
-                    line_height,
-                    MermaidTextAnchor::Center,
-                    MermaidSemanticKind::EdgeLabel,
-                    &owner_key,
-                    false,
-                    0.0,
-                    0.0,
-                );
-            }
-        }
-        if let Some(label) = edge.end_label.as_ref() {
-            if let Some((label_x, label_y)) = edge.end_label_anchor {
-                let (font_size, line_height) = if layout.kind == DiagramKind::State {
-                    (state_font_size, state_line_height)
-                } else {
-                    (theme_font_size, base_line_height)
-                };
-                push_mermaid_text_block_semantic_lines(
-                    &mut semantic_lines,
-                    label,
-                    label_x,
-                    label_y,
-                    font_size,
-                    line_height,
-                    MermaidTextAnchor::Center,
-                    MermaidSemanticKind::EdgeLabel,
-                    &owner_key,
-                    false,
-                    0.0,
-                    0.0,
-                );
-            }
-        }
+        push_edge_label_block(
+            &mut semantic_lines,
+            edge.label.as_ref(),
+            edge.label_anchor,
+            is_state,
+            state_font_size,
+            state_line_height,
+            theme_font_size,
+            base_line_height,
+            &owner_key,
+        );
+        push_edge_label_block(
+            &mut semantic_lines,
+            edge.start_label.as_ref(),
+            edge.start_label_anchor,
+            is_state,
+            state_font_size,
+            state_line_height,
+            theme_font_size,
+            base_line_height,
+            &owner_key,
+        );
+        push_edge_label_block(
+            &mut semantic_lines,
+            edge.end_label.as_ref(),
+            edge.end_label_anchor,
+            is_state,
+            state_font_size,
+            state_line_height,
+            theme_font_size,
+            base_line_height,
+            &owner_key,
+        );
     }
 
     for node in layout.nodes.values() {
@@ -3857,25 +3822,109 @@ pub(crate) fn mermaid_compact_detail_hides_kind(
     )
 }
 
+#[derive(Clone)]
+struct MermaidProjectedCandidate {
+    priority: u8,
+    area_rank: i32,
+    kind: MermaidSemanticKind,
+    owner_key: String,
+    compact_rows: bool,
+    source_index: usize,
+    x: u16,
+    y: u16,
+    text: String,
+    color: Color,
+}
+
+/// Push a single optional edge label (main, start, or end) onto `semantic_lines`.
+/// Handles the inner `if-let` guards and State vs. non-State font selection.
+fn push_edge_label_block(
+    semantic_lines: &mut Vec<MermaidSemanticLine>,
+    label: Option<&mermaid_rs_renderer::layout::TextBlock>,
+    anchor: Option<(f32, f32)>,
+    is_state: bool,
+    state_font_size: f32,
+    state_line_height: f32,
+    theme_font_size: f32,
+    base_line_height: f32,
+    owner_key: &str,
+) {
+    let Some(label) = label else { return };
+    let Some((label_x, label_y)) = anchor else { return };
+    let (font_size, line_height) = if is_state {
+        (state_font_size, state_line_height)
+    } else {
+        (theme_font_size, base_line_height)
+    };
+    push_mermaid_text_block_semantic_lines(
+        semantic_lines,
+        label,
+        label_x,
+        label_y,
+        font_size,
+        line_height,
+        MermaidTextAnchor::Center,
+        MermaidSemanticKind::EdgeLabel,
+        owner_key,
+        false,
+        0.0,
+        0.0,
+    );
+}
+
+/// Compact-row packing: group rows per owner so multi-line compact labels
+/// occupy consecutive rows starting from the owner's first occupied row.
+fn pack_compact_rows(candidates: &mut Vec<MermaidProjectedCandidate>, max_row: u16) {
+    let mut compact_owner_rows = HashMap::<String, Vec<u16>>::new();
+    for candidate in candidates.iter() {
+        if !candidate.compact_rows {
+            continue;
+        }
+        compact_owner_rows
+            .entry(candidate.owner_key.clone())
+            .or_default()
+            .push(candidate.y);
+    }
+    for rows in compact_owner_rows.values_mut() {
+        rows.sort_unstable();
+        rows.dedup();
+    }
+    for candidate in candidates.iter_mut() {
+        if !candidate.compact_rows {
+            continue;
+        }
+        let Some(rows) = compact_owner_rows.get(&candidate.owner_key) else {
+            continue;
+        };
+        let Some(base_row) = rows.first().copied() else {
+            continue;
+        };
+        let Some(compact_offset) = rows.iter().position(|row| *row == candidate.y) else {
+            continue;
+        };
+        candidate.y = base_row.saturating_add(compact_offset as u16).min(max_row);
+    }
+}
+
+/// In L2/L3 view, suppress owner-summary lines when the same owner has
+/// detail lines visible (avoids redundant label stacking).
+fn filter_owner_summaries_with_details(candidates: &mut Vec<MermaidProjectedCandidate>) {
+    let owner_detail_keys = candidates
+        .iter()
+        .filter(|c| mermaid_kind_is_owner_detail(c.kind))
+        .map(|c| c.owner_key.clone())
+        .collect::<HashSet<_>>();
+    candidates.retain(|c| {
+        !mermaid_kind_is_owner_summary(c.kind) || !owner_detail_keys.contains(&c.owner_key)
+    });
+}
+
 pub(crate) fn project_mermaid_semantic_lines(
     lines: &[MermaidSemanticLine],
     transform: MermaidViewportTransform,
     content_rect: Rect,
     view_state: MermaidViewState,
 ) -> Vec<MermaidProjectedLine> {
-    #[derive(Clone)]
-    struct MermaidProjectedCandidate {
-        priority: u8,
-        area_rank: i32,
-        kind: MermaidSemanticKind,
-        owner_key: String,
-        compact_rows: bool,
-        source_index: usize,
-        x: u16,
-        y: u16,
-        text: String,
-        color: Color,
-    }
 
     let mut candidates = Vec::new();
     let owner_colors = mermaid_owner_accent_map(lines);
@@ -3954,47 +4003,11 @@ pub(crate) fn project_mermaid_semantic_lines(
         });
     }
 
-    let mut compact_owner_rows = HashMap::<String, Vec<u16>>::new();
-    for candidate in &candidates {
-        if !candidate.compact_rows {
-            continue;
-        }
-        compact_owner_rows
-            .entry(candidate.owner_key.clone())
-            .or_default()
-            .push(candidate.y);
-    }
-    for rows in compact_owner_rows.values_mut() {
-        rows.sort_unstable();
-        rows.dedup();
-    }
     let max_row = content_rect.bottom().saturating_sub(1);
-    for candidate in &mut candidates {
-        if !candidate.compact_rows {
-            continue;
-        }
-        let Some(rows) = compact_owner_rows.get(&candidate.owner_key) else {
-            continue;
-        };
-        let Some(base_row) = rows.first().copied() else {
-            continue;
-        };
-        let Some(compact_offset) = rows.iter().position(|row| *row == candidate.y) else {
-            continue;
-        };
-        candidate.y = base_row.saturating_add(compact_offset as u16).min(max_row);
-    }
+    pack_compact_rows(&mut candidates, max_row);
 
     if matches!(view_state, MermaidViewState::L2 | MermaidViewState::L3) {
-        let owner_detail_keys = candidates
-            .iter()
-            .filter(|candidate| mermaid_kind_is_owner_detail(candidate.kind))
-            .map(|candidate| candidate.owner_key.clone())
-            .collect::<HashSet<_>>();
-        candidates.retain(|candidate| {
-            !mermaid_kind_is_owner_summary(candidate.kind)
-                || !owner_detail_keys.contains(&candidate.owner_key)
-        });
+        filter_owner_summaries_with_details(&mut candidates);
     }
 
     candidates.sort_by_key(|line| (line.priority, line.area_rank, line.y, line.x));
