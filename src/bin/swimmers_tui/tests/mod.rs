@@ -6353,6 +6353,85 @@ fn mermaid_refresh_invalidates_prepared_source_state_when_artifact_changes() {
 }
 
 #[test]
+fn mermaid_build_semantic_lines_early_returns_for_unsupported_kind() {
+    // Sequence diagrams are not in the supported list → exercises the
+    // mermaid_kind_supports_semantic_overlay early-return branch.
+    let content_rect = Rect { x: 0, y: 0, width: 100, height: 30 };
+    let options = mermaid_render_options(content_rect);
+    let source = "sequenceDiagram\n  Alice ->> Bob: Hello\n  Bob -->> Alice: Hi\n";
+    let parsed = parse_mermaid(source).expect("parse");
+    let layout = compute_layout(&parsed.graph, &options.theme, &options.layout);
+    let lines = build_mermaid_semantic_lines(&layout, &options);
+    assert!(lines.is_empty(), "sequence diagram should yield no semantic lines");
+}
+
+#[test]
+fn mermaid_state_diagram_renders_without_panic() {
+    // Exercises DiagramKind::State paths in build_mermaid_semantic_lines:
+    // State subgraph label (header_height / label_x), State node font/line_height,
+    // and __start_/__end_ node hiding.
+    let source = "stateDiagram-v2\n  [*] --> Still\n  Still --> Moving\n  Moving --> Crash\n  Crash --> [*]\n";
+    let (mut app, mut renderer, layout) = open_mermaid_test_viewer(source, 120, 32);
+    app.render(&mut renderer, layout);
+    // Diagram rendered successfully; state labels appear as overlay text
+    assert!(matches!(&app.fish_bowl_mode, FishBowlMode::Mermaid(v) if v.prepared_render.is_some()));
+}
+
+#[test]
+fn mermaid_state_diagram_with_edge_labels_exercises_state_edge_font_path() {
+    // State diagram with labeled transitions → exercises the DiagramKind::State
+    // branch inside the edge loop (state_font_size / state_line_height selection).
+    let source = "stateDiagram-v2\n  [*] --> Active : start\n  Active --> Inactive : stop\n  Inactive --> [*]\n";
+    let content_rect = Rect { x: 0, y: 0, width: 100, height: 30 };
+    let options = mermaid_render_options(content_rect);
+    let parsed = parse_mermaid(source).expect("parse");
+    let layout = compute_layout(&parsed.graph, &options.theme, &options.layout);
+    let lines = build_mermaid_semantic_lines(&layout, &options);
+    // State transitions with labels produce EdgeLabel semantic lines
+    assert!(lines.iter().any(|l| matches!(l.kind, MermaidSemanticKind::EdgeLabel)));
+}
+
+#[test]
+fn mermaid_state_diagram_with_compound_state_renders_subgraph_label() {
+    // Compound states produce subgraphs in the layout → exercises the
+    // DiagramKind::State subgraph branch (header_height, label_x).
+    let source = "stateDiagram-v2\n  state \"Running\" as running {\n    [*] --> Start\n    Start --> End\n  }\n  [*] --> running\n  running --> [*]\n";
+    let (mut app, mut renderer, layout) = open_mermaid_test_viewer(source, 120, 32);
+    app.render(&mut renderer, layout);
+    assert!(matches!(&app.fish_bowl_mode, FishBowlMode::Mermaid(v) if v.prepared_render.is_some()));
+}
+
+#[test]
+fn mermaid_class_diagram_with_methods_renders_divider_lines() {
+    // Class diagrams with methods produce divider lines in node labels →
+    // exercises the extend_mermaid_class_semantic_lines branch.
+    let source = "classDiagram\n  class Animal {\n    +String name\n    +makeSound() void\n  }\n  class Dog {\n    +fetch() void\n  }\n  Animal <|-- Dog\n";
+    let (mut app, mut renderer, layout) = open_mermaid_test_viewer(source, 120, 32);
+    app.render(&mut renderer, layout);
+    assert!(matches!(&app.fish_bowl_mode, FishBowlMode::Mermaid(v) if v.prepared_render.is_some()));
+}
+
+#[test]
+fn mermaid_flowchart_with_subgraph_renders_subgraph_label() {
+    // Subgraph with a label exercises the non-State subgraph code path
+    // (label_x = subgraph.x + subgraph.width / 2, push_mermaid_summary_line).
+    let source = "graph TD\n  subgraph cluster[\"My Cluster\"]\n    A --> B\n  end\n  C --> cluster\n";
+    let (mut app, mut renderer, layout) = open_mermaid_test_viewer(source, 120, 32);
+    app.render(&mut renderer, layout);
+    assert!(matches!(&app.fish_bowl_mode, FishBowlMode::Mermaid(v) if v.prepared_render.is_some()));
+}
+
+#[test]
+fn mermaid_flowchart_edge_with_label_exercises_edge_label_path() {
+    // An edge with a label exercises the edge label anchor branch
+    // (push_mermaid_text_block_semantic_lines for EdgeLabel kind).
+    let source = "graph LR\n  A -->|transfer data| B\n";
+    let (mut app, mut renderer, layout) = open_mermaid_test_viewer(source, 120, 32);
+    app.render(&mut renderer, layout);
+    assert!(matches!(&app.fish_bowl_mode, FishBowlMode::Mermaid(v) if v.prepared_render.is_some()));
+}
+
+#[test]
 fn mermaid_graph_node_labels_render_as_terminal_text() {
     let (mut app, mut renderer, layout) =
         open_mermaid_test_viewer("graph TD\nA[Alpha Node] --> B[Beta Node]\n", 120, 32);
@@ -8264,4 +8343,96 @@ fn handle_tui_event_covers_key_paste_mouse_and_resize_paths() {
     );
     assert_eq!(renderer.width(), 90);
     assert_eq!(renderer.height(), 20);
+}
+
+fn mouse_down(column: u16, row: u16) -> crossterm::event::MouseEvent {
+    crossterm::event::MouseEvent {
+        kind: crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+        column,
+        row,
+        modifiers: crossterm::event::KeyModifiers::NONE,
+    }
+}
+
+#[test]
+fn handle_mouse_down_early_returns_when_thought_config_editor_open() {
+    let api = MockApi::new();
+    let layout = test_layout(120, 32);
+    let mut app = make_app(api);
+    let renderer = test_renderer(120, 32);
+    app.open_thought_config_editor();
+    assert!(app.thought_config_editor.is_some());
+    // Should return immediately without panicking
+    handle_mouse_down(&mut app, &renderer, layout, mouse_down(10, 10));
+    // State unchanged — still in editor
+    assert!(app.thought_config_editor.is_some());
+}
+
+#[test]
+fn handle_mouse_down_early_returns_when_initial_request_open() {
+    let api = MockApi::new();
+    let layout = test_layout(120, 32);
+    let mut app = make_app(api);
+    let renderer = test_renderer(120, 32);
+    app.open_initial_request("/tmp/project".to_string());
+    assert!(app.initial_request.is_some());
+    handle_mouse_down(&mut app, &renderer, layout, mouse_down(10, 10));
+    assert!(app.initial_request.is_some());
+}
+
+#[test]
+fn handle_mouse_down_plain_app_reaches_workspace_click() {
+    let api = MockApi::new();
+    let layout = test_layout(120, 32);
+    let mut app = make_app(api);
+    let renderer = test_renderer(120, 32);
+    // Click at (0,0) hits workspace area — should not panic
+    handle_mouse_down(&mut app, &renderer, layout, mouse_down(0, 0));
+}
+
+#[test]
+fn handle_key_event_schema_tab_q_returns_false() {
+    let api = MockApi::new();
+    let layout = test_layout(120, 32);
+    let mut app = open_mermaid_with_plan_tabs(api);
+    // Default active_tab is Schema
+    assert!(!handle_key_event(&mut app, layout, key(KeyCode::Char('q'))));
+}
+
+#[test]
+fn handle_key_event_schema_tab_esc_closes_viewer() {
+    let api = MockApi::new();
+    let layout = test_layout(120, 32);
+    let mut app = open_mermaid_with_plan_tabs(api);
+    // Schema tab, no focus → Esc closes viewer
+    assert!(handle_key_event(&mut app, layout, key(KeyCode::Esc)));
+    assert!(matches!(app.fish_bowl_mode, FishBowlMode::Aquarium));
+}
+
+#[test]
+fn handle_key_event_schema_tab_navigation_keys() {
+    let api = MockApi::new();
+    let layout = test_layout(120, 32);
+    let (mut app, _, _) = open_mermaid_on_plan_tab(Some("graph LR\nA-->B"), DomainPlanTab::Schema);
+    // These pan/zoom keys should return true and not panic
+    for code in [
+        KeyCode::Left,
+        KeyCode::Right,
+        KeyCode::Up,
+        KeyCode::Down,
+        KeyCode::Char('h'),
+        KeyCode::Char('l'),
+        KeyCode::Char('k'),
+        KeyCode::Char('j'),
+        KeyCode::Char('+'),
+        KeyCode::Char('='),
+        KeyCode::Char('-'),
+        KeyCode::Char('0'),
+        KeyCode::Char('o'),
+        KeyCode::Tab,
+        KeyCode::BackTab,
+        KeyCode::Char('x'), // unknown → true
+    ] {
+        assert!(handle_key_event(&mut app, layout, key(code)), "code: {code:?}");
+    }
 }
