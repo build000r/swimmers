@@ -1779,6 +1779,10 @@ fn er_order_node(owner_key: &str, x: f32, y: f32, neighbors: &[&str]) -> Mermaid
     }
 }
 
+fn key(code: KeyCode) -> KeyEvent {
+    KeyEvent::new(code, KeyModifiers::NONE)
+}
+
 fn press_mermaid_key(app: &mut App<MockApi>, layout: WorkspaceLayout, key: char) {
     assert!(handle_key_event(
         app,
@@ -4698,6 +4702,81 @@ fn handle_key_event_covers_initial_request_picker_and_quit_paths() {
         layout,
         KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE),
     ));
+}
+
+#[test]
+fn handle_key_event_plan_tab_bracket_navigation() {
+    let api = MockApi::new();
+    let layout = test_layout(120, 32);
+    let mut app = open_mermaid_with_plan_tabs(api);
+    // `[` cycles backward, `]` cycles forward
+    assert!(handle_key_event(&mut app, layout, key(KeyCode::Char('['))));
+    assert!(handle_key_event(&mut app, layout, key(KeyCode::Char(']'))));
+}
+
+#[test]
+fn handle_key_event_plan_tab_digit_selects_tab() {
+    let api = MockApi::new();
+    let layout = test_layout(120, 32);
+    let mut app = open_mermaid_with_plan_tabs(api);
+    // '1' selects the first tab (Schema); '2' selects Plan; '9' is out of range → noop
+    assert!(handle_key_event(&mut app, layout, key(KeyCode::Char('1'))));
+    assert!(handle_key_event(&mut app, layout, key(KeyCode::Char('2'))));
+    // Out-of-range digit: tabs has 3 entries, '7' is index 6 → doesn't exist → still returns true
+    assert!(handle_key_event(&mut app, layout, key(KeyCode::Char('7'))));
+}
+
+#[test]
+fn handle_key_event_text_tab_scroll_keys() {
+    let api = MockApi::new();
+    let layout = test_layout(120, 32);
+    let mut app = open_mermaid_with_plan_tabs(api);
+    // Switch to a non-Schema tab to enter text-tab mode
+    if let FishBowlMode::Mermaid(viewer) = &mut app.fish_bowl_mode {
+        viewer.active_tab = DomainPlanTab::Plan;
+        viewer.plan_text_content = Some("line1\nline2\nline3".to_string());
+        viewer.plan_text_lines = vec![
+            "line1".to_string(),
+            "line2".to_string(),
+            "line3".to_string(),
+        ];
+        viewer.plan_text_cached_width = 120;
+    }
+    // Down/j, Up/k, PageDown, PageUp, Home, End, 'o', and fallthrough
+    assert!(handle_key_event(&mut app, layout, key(KeyCode::Down)));
+    assert!(handle_key_event(&mut app, layout, key(KeyCode::Char('j'))));
+    assert!(handle_key_event(&mut app, layout, key(KeyCode::Up)));
+    assert!(handle_key_event(&mut app, layout, key(KeyCode::Char('k'))));
+    assert!(handle_key_event(&mut app, layout, key(KeyCode::PageDown)));
+    assert!(handle_key_event(&mut app, layout, key(KeyCode::PageUp)));
+    assert!(handle_key_event(&mut app, layout, key(KeyCode::Home)));
+    assert!(handle_key_event(&mut app, layout, key(KeyCode::End)));
+    assert!(handle_key_event(&mut app, layout, key(KeyCode::Char('o'))));
+    // Arbitrary key → falls through to `_ => true`
+    assert!(handle_key_event(&mut app, layout, key(KeyCode::Char('x'))));
+}
+
+#[test]
+fn handle_key_event_text_tab_esc_closes_viewer() {
+    let api = MockApi::new();
+    let layout = test_layout(120, 32);
+    let mut app = open_mermaid_with_plan_tabs(api);
+    if let FishBowlMode::Mermaid(viewer) = &mut app.fish_bowl_mode {
+        viewer.active_tab = DomainPlanTab::Plan;
+    }
+    assert!(handle_key_event(&mut app, layout, key(KeyCode::Esc)));
+    assert!(matches!(app.fish_bowl_mode, FishBowlMode::Aquarium));
+}
+
+#[test]
+fn handle_key_event_text_tab_q_returns_false() {
+    let api = MockApi::new();
+    let layout = test_layout(120, 32);
+    let mut app = open_mermaid_with_plan_tabs(api);
+    if let FishBowlMode::Mermaid(viewer) = &mut app.fish_bowl_mode {
+        viewer.active_tab = DomainPlanTab::Plan;
+    }
+    assert!(!handle_key_event(&mut app, layout, key(KeyCode::Char('q'))));
 }
 
 #[test]
