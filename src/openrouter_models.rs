@@ -201,6 +201,38 @@ fn parse_billion_size(text: &str) -> Option<u32> {
 mod tests {
     use super::*;
 
+    fn entry(id: &str, name: Option<&str>) -> OpenRouterModelEntry {
+        OpenRouterModelEntry {
+            id: id.to_string(),
+            name: name.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn is_rotator_candidate_rejects_non_free() {
+        assert!(!is_rotator_candidate(&entry("meta/llama-3:plus", None)));
+        assert!(!is_rotator_candidate(&entry("openai/gpt-4o", None)));
+    }
+
+    #[test]
+    fn is_rotator_candidate_rejects_vision_by_id() {
+        assert!(!is_rotator_candidate(&entry("model-vl:free", None)));
+        assert!(!is_rotator_candidate(&entry("model:vl:free", None)));
+    }
+
+    #[test]
+    fn is_rotator_candidate_rejects_vision_by_name() {
+        assert!(!is_rotator_candidate(&entry("llama:free", Some("Vision Model"))));
+        assert!(!is_rotator_candidate(&entry("llama:free", Some("Image Generator"))));
+    }
+
+    #[test]
+    fn is_rotator_candidate_accepts_text_free_models() {
+        assert!(is_rotator_candidate(&entry("llama-3:free", None)));
+        assert!(is_rotator_candidate(&entry("gemma-3:free", Some("Gemma 3"))));
+        assert!(is_rotator_candidate(&entry("nemotron:free", Some("Nemotron"))));
+    }
+
     #[test]
     fn parse_billion_size_extracts_decimal_sizes() {
         assert_eq!(parse_billion_size("lfm-2.5-1.2b-instruct"), Some(120));

@@ -779,31 +779,36 @@ impl SessionSupervisor {
             let sessions = self.sessions.read().await;
             sessions.values().cloned().collect()
         };
-        let mut summaries = Vec::with_capacity(handles.len());
 
-        for handle in handles {
-            let (tx, rx) = oneshot::channel();
-            if handle
-                .cmd_tx
-                .send(SessionCommand::GetSummary(tx))
-                .await
-                .is_ok()
-            {
+        let futs: Vec<_> = handles
+            .into_iter()
+            .map(|handle| async move {
+                let (tx, rx) = oneshot::channel();
+                if handle
+                    .cmd_tx
+                    .send(SessionCommand::GetSummary(tx))
+                    .await
+                    .is_err()
+                {
+                    return None;
+                }
                 match tokio::time::timeout(std::time::Duration::from_secs(2), rx).await {
-                    Ok(Ok(summary)) => {
-                        if summary.state != SessionState::Exited {
-                            summaries.push(summary);
-                        }
-                    }
+                    Ok(Ok(summary)) if summary.state != SessionState::Exited => Some(summary),
+                    Ok(Ok(_)) => None,
                     Ok(Err(_)) => {
                         warn!(session_id = %handle.session_id, "actor dropped summary reply");
+                        None
                     }
                     Err(_) => {
                         warn!(session_id = %handle.session_id, "summary request timed out");
+                        None
                     }
                 }
-            }
-        }
+            })
+            .collect();
+
+        let mut summaries: Vec<SessionSummary> =
+            futures::future::join_all(futs).await.into_iter().flatten().collect();
 
         let thought_snapshots = self.thought_snapshots.read().await.clone();
         for summary in &mut summaries {
@@ -2591,5 +2596,35 @@ esac
         assert_eq!(candidates[0].reuse_session_id, None);
         assert_eq!(candidates[1].tmux_name, "codex-20260302-162713");
         assert_eq!(candidates[1].reuse_session_id.as_deref(), Some("sess_12"));
+    }
+
+    #[test]
+    fn plan_tmux_discovery_skips_empty_names() {
+        let listed = vec!["".to_string(), "  ".to_string(), "".to_string()];
+        let (candidates, highest_numeric) =
+            plan_tmux_discovery_candidates(&listed, &HashSet::new(), &HashMap::new());
+        // Empty strings pass the is_empty() guard; whitespace names do not parse as u64
+        // and are not empty so they become candidates — but "" is skipped
+        assert_eq!(highest_numeric, 0);
+        assert_eq!(candidates.len(), 1); // "  " is non-empty, not tracked
+        assert_eq!(candidates[0].tmux_name, "  ");
+    }
+
+    #[test]
+    fn plan_tmux_discovery_all_tracked_returns_empty_candidates() {
+        let listed = vec!["alpha".to_string(), "beta".to_string()];
+        let tracked = HashSet::from_iter(["alpha".to_string(), "beta".to_string()]);
+        let (candidates, highest_numeric) =
+            plan_tmux_discovery_candidates(&listed, &tracked, &HashMap::new());
+        assert_eq!(highest_numeric, 0);
+        assert!(candidates.is_empty());
+    }
+
+    #[test]
+    fn plan_tmux_discovery_empty_list_returns_empty() {
+        let (candidates, highest_numeric) =
+            plan_tmux_discovery_candidates(&[], &HashSet::new(), &HashMap::new());
+        assert_eq!(highest_numeric, 0);
+        assert!(candidates.is_empty());
     }
 }

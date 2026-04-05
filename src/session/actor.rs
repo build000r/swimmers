@@ -16,14 +16,15 @@ use tracing::{debug, error, info, warn};
 use crate::config::Config;
 use crate::scroll::guard::{ScrollGuard, ScrollOutputChunk};
 use crate::session::artifacts::{
-    default_artifact_registry, extract_mmd_slice_name, ArtifactDiscoveryContext, ArtifactKind,
+    default_artifact_registry, extract_mmd_slice_name, list_plan_siblings,
+    ArtifactDiscoveryContext, ArtifactKind,
 };
 use crate::session::replay_ring::ReplayRing;
 use crate::state::detector::StateDetector;
 use crate::tmux_target::{exact_pane_target, exact_session_target};
 use crate::types::{
-    ControlEvent, MermaidArtifactResponse, SessionSkillPayload, SessionState, SessionStatePayload,
-    SessionSummary, SessionTitlePayload, TerminalSnapshot, TransportHealth,
+    ControlEvent, MermaidArtifactResponse, PlanFileResponse, SessionSkillPayload, SessionState,
+    SessionStatePayload, SessionSummary, SessionTitlePayload, TerminalSnapshot, TransportHealth,
 };
 
 const CWD_REFRESH_MIN_INTERVAL: Duration = Duration::from_millis(750);
@@ -84,6 +85,12 @@ pub enum SessionCommand {
 
     /// Request latest Mermaid artifact metadata and source for this session.
     GetMermaidArtifact(oneshot::Sender<MermaidArtifactResponse>),
+
+    /// Read a plan file sibling to the session's schema.mmd.
+    GetPlanFile {
+        name: String,
+        reply: oneshot::Sender<PlanFileResponse>,
+    },
 
     /// Request replay cursor metadata for lifecycle acknowledgments.
     GetReplayCursor(oneshot::Sender<ReplayCursor>),
@@ -479,6 +486,24 @@ impl SessionActor {
                 )
                 .await;
                 let _ = reply.send(artifact);
+            }
+            SessionCommand::GetPlanFile { name, reply } => {
+                let session_id = self.session_id.clone();
+                let cwd = self.cwd.clone();
+                let session_started_at = self.session_started_at;
+                let fallback_name = name.clone();
+                let fallback_session_id = self.session_id.clone();
+                let response = tokio::task::spawn_blocking(move || {
+                    Self::build_plan_file_response(session_id, cwd, session_started_at, &name)
+                })
+                .await
+                .unwrap_or_else(|err| PlanFileResponse {
+                    session_id: fallback_session_id,
+                    name: fallback_name,
+                    content: None,
+                    error: Some(format!("plan file task failed: {err}")),
+                });
+                let _ = reply.send(response);
             }
             SessionCommand::GetReplayCursor(reply) => {
                 let _ = reply.send(self.replay_cursor());
@@ -1186,6 +1211,11 @@ impl SessionActor {
                 .discover(ArtifactKind::Mermaid, &context)
                 .map(|artifact| {
                     let slice_name = extract_mmd_slice_name(&artifact.path).map(str::to_owned);
+                    let plan_files = slice_name.as_ref().map(|_| {
+                        let siblings = list_plan_siblings(&artifact.path);
+                        if siblings.is_empty() { return Vec::new(); }
+                        siblings
+                    }).filter(|f| !f.is_empty());
                     MermaidArtifactResponse {
                         session_id: response_session_id.clone(),
                         available: true,
@@ -1194,6 +1224,7 @@ impl SessionActor {
                         source: artifact.source,
                         error: artifact.error,
                         slice_name,
+                        plan_files,
                     }
                 })
                 .unwrap_or(MermaidArtifactResponse {
@@ -1204,6 +1235,7 @@ impl SessionActor {
                     source: None,
                     error: None,
                     slice_name: None,
+                    plan_files: None,
                 })
         })
         .await
@@ -1215,7 +1247,67 @@ impl SessionActor {
             source: None,
             error: Some(format!("artifact scan task failed: {err}")),
             slice_name: None,
+            plan_files: None,
         })
+    }
+
+    fn build_plan_file_response(
+        session_id: String,
+        cwd: String,
+        session_started_at: chrono::DateTime<Utc>,
+        name: &str,
+    ) -> PlanFileResponse {
+        use crate::session::artifacts::PLAN_SIBLING_FILENAMES;
+
+        if !PLAN_SIBLING_FILENAMES.contains(&name) {
+            return PlanFileResponse {
+                session_id,
+                name: name.to_string(),
+                content: None,
+                error: Some(format!("plan file name not allowed: {name}")),
+            };
+        }
+
+        // Discover the mermaid artifact to find the schema.mmd path
+        let context = ArtifactDiscoveryContext {
+            session_id: session_id.clone(),
+            tmux_name: String::new(),
+            cwd,
+            session_started_at,
+            pane_tail: String::new(),
+        };
+        let Some(artifact) = default_artifact_registry().discover(ArtifactKind::Mermaid, &context)
+        else {
+            return PlanFileResponse {
+                session_id,
+                name: name.to_string(),
+                content: None,
+                error: Some("no mermaid artifact found".to_string()),
+            };
+        };
+        let Some(dir) = std::path::Path::new(&artifact.path).parent() else {
+            return PlanFileResponse {
+                session_id,
+                name: name.to_string(),
+                content: None,
+                error: Some("cannot determine plan directory".to_string()),
+            };
+        };
+        let file_path = dir.join(name);
+        match fs::read_to_string(&file_path) {
+            Ok(content) => PlanFileResponse {
+                session_id,
+                name: name.to_string(),
+                content: Some(content),
+                error: None,
+            },
+            Err(err) => PlanFileResponse {
+                session_id,
+                name: name.to_string(),
+                content: None,
+                error: Some(format!("failed to read plan file: {err}")),
+            },
+        }
     }
 }
 
@@ -1498,6 +1590,7 @@ struct PaneLiveness {
     /// True when the pane's shell has at least one child process.
     has_children: bool,
     /// Sum of `%cpu` across all descendant processes (excludes the shell itself).
+    #[allow(dead_code)]
     descendant_cpu: f32,
 }
 
@@ -2115,6 +2208,36 @@ mod tests {
             session_started_at: Utc::now(),
             clear_replay_on_first_idle: false,
         }
+    }
+
+    #[tokio::test]
+    async fn maybe_check_liveness_skips_exited_sessions() {
+        let mut actor = test_actor();
+        actor.state_detector.mark_exited();
+        // Should return immediately without trying tmux (tmux_name "demo" does not exist)
+        actor.maybe_check_liveness().await;
+        // If we reach here without hanging/panicking, the early-return worked
+    }
+
+    #[tokio::test]
+    async fn maybe_check_liveness_throttled_by_interval() {
+        let mut actor = test_actor();
+        // last_liveness_check_at is set to Instant::now() by test_actor,
+        // so the interval guard fires immediately and we never touch tmux.
+        actor.maybe_check_liveness().await;
+    }
+
+    #[tokio::test]
+    async fn maybe_check_liveness_runs_query_when_interval_elapsed() {
+        let mut actor = test_actor();
+        // Push last_liveness_check_at far enough back to pass the interval guard.
+        actor.last_liveness_check_at =
+            Instant::now() - Duration::from_millis(2_100); // past LIVENESS_CHECK_INTERVAL (2s)
+        // query_pane_liveness will fail for tmux_name "demo" (no real tmux),
+        // but the Err branch just logs — it must not panic.
+        actor.maybe_check_liveness().await;
+        // last_liveness_check_at is updated even on query failure
+        assert!(actor.last_liveness_check_at.elapsed() < Duration::from_secs(1));
     }
 
     #[test]

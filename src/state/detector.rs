@@ -998,6 +998,107 @@ mod tests {
     }
 
     #[test]
+    fn looks_like_prompt_empty_and_whitespace_only() {
+        assert!(!StateDetector::looks_like_prompt(""));
+        assert!(!StateDetector::looks_like_prompt("   "));
+        assert!(!StateDetector::looks_like_prompt("\n\n\r\n"));
+    }
+
+    #[test]
+    fn looks_like_prompt_no_trailing_marker() {
+        assert!(!StateDetector::looks_like_prompt("hello world"));
+        assert!(!StateDetector::looks_like_prompt("user@host:~"));
+        assert!(!StateDetector::looks_like_prompt("building..."));
+    }
+
+    #[test]
+    fn looks_like_prompt_minimal_prompts_accept_dollar_hash_percent() {
+        // Bare marker only: prefix is empty → return true
+        assert!(StateDetector::looks_like_prompt("$"));
+        assert!(StateDetector::looks_like_prompt("#"));
+        assert!(StateDetector::looks_like_prompt("%"));
+        // Minimal identifier prefix
+        assert!(StateDetector::looks_like_prompt("project$"));
+        assert!(StateDetector::looks_like_prompt("myhost#"));
+        assert!(StateDetector::looks_like_prompt("zsh%"));
+    }
+
+    #[test]
+    fn looks_like_prompt_gt_marker_rejected_for_minimal_prefix() {
+        // `>` with non-empty minimal prefix is rejected (not in the minimal-prompt allow list)
+        assert!(!StateDetector::looks_like_prompt("project>"));
+        // `>` alone has empty prefix → returns true (same as any bare marker)
+        assert!(StateDetector::looks_like_prompt(">"));
+    }
+
+    #[test]
+    fn looks_like_prompt_prefix_too_long() {
+        let long = "a".repeat(33) + "$";
+        assert!(!StateDetector::looks_like_prompt(&long));
+        // 32 chars is the boundary: still passes
+        let boundary = "a".repeat(32) + "$";
+        assert!(StateDetector::looks_like_prompt(&boundary));
+    }
+
+    #[test]
+    fn looks_like_prompt_prefix_with_whitespace_rejected() {
+        assert!(!StateDetector::looks_like_prompt("my host$"));
+        assert!(!StateDetector::looks_like_prompt("a b$"));
+    }
+
+    #[test]
+    fn looks_like_prompt_prefix_all_digits_dots_commas_rejected() {
+        assert!(!StateDetector::looks_like_prompt("1.2.3$"));
+        assert!(!StateDetector::looks_like_prompt("100,000$"));
+    }
+
+    #[test]
+    fn looks_like_prompt_prefix_with_invalid_chars_rejected() {
+        // `!` is not in the allowed minimal-prefix charset
+        assert!(!StateDetector::looks_like_prompt("host!$"));
+        // Pipe is not in the allowed charset
+        assert!(!StateDetector::looks_like_prompt("foo|bar$"));
+        // `@` triggers has_prompt_context → accepted as a real prompt
+        assert!(StateDetector::looks_like_prompt("host@domain$"));
+    }
+
+    #[test]
+    fn looks_like_prompt_multiline_uses_last_nonempty_line() {
+        // Only the last non-empty line is inspected
+        assert!(StateDetector::looks_like_prompt("some output\nuser@host:~$ "));
+        assert!(!StateDetector::looks_like_prompt("user@host:~$ \nsome output\n"));
+        // Trailing blank lines are skipped to find the prompt line
+        assert!(StateDetector::looks_like_prompt("user@host:~$ \n\n  \n"));
+    }
+
+    #[test]
+    fn looks_like_prompt_crlf_multiline() {
+        assert!(StateDetector::looks_like_prompt("output\r\nuser@host:~$ "));
+    }
+
+    #[test]
+    fn looks_like_prompt_gt_with_context_is_accepted() {
+        // `>` is accepted when prefix has prompt context (e.g. contains `@`)
+        assert!(StateDetector::looks_like_prompt("user@host>"));
+        assert!(StateDetector::looks_like_prompt("~/project>"));
+    }
+
+    #[test]
+    fn looks_like_prompt_percent_numeric_context_path() {
+        // has_prompt_context + compact prefix is all digits/dots/spaces → rejected as progress
+        // This requires a prefix that (a) contains a context char and
+        // (b) after comma removal is purely digit/dot/whitespace.
+        // The classic "% progress in shell" case uses no context chars so the
+        // early whitespace/digit guards catch it; this test covers the context path.
+        // "42%" — no context, caught by all-digits guard
+        assert!(!StateDetector::looks_like_prompt("42%"));
+        // "user@host: 99.5%" — has context but prefix has alpha chars → still a prompt
+        assert!(StateDetector::looks_like_prompt("user@host: 99.5%"));
+        // "user@host:~$ " — canonical prompt with context, dollar marker
+        assert!(StateDetector::looks_like_prompt("user@host:~$ "));
+    }
+
+    #[test]
     fn fallback_prompt_detection_ignores_percent_progress() {
         let mut d = StateDetector::new();
         d.process_output(b"\x1b]133;C;cmd=curl\x07");

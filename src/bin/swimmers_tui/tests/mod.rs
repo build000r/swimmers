@@ -47,6 +47,7 @@ struct MockApiState {
     test_thought_config_results: VecDeque<Result<ThoughtConfigTestResponse, String>>,
     refresh_openrouter_candidates_results: VecDeque<Result<Vec<String>, String>>,
     mermaid_artifact_results: VecDeque<Result<MermaidArtifactResponse, String>>,
+    plan_file_results: VecDeque<Result<PlanFileResponse, String>>,
     native_status_results: VecDeque<Result<NativeDesktopStatusResponse, String>>,
     set_native_app_results: VecDeque<Result<NativeDesktopStatusResponse, String>>,
     set_native_mode_results: VecDeque<Result<NativeDesktopStatusResponse, String>>,
@@ -56,6 +57,7 @@ struct MockApiState {
     create_session_results: VecDeque<Result<CreateSessionResponse, String>>,
     update_thought_config_calls: Vec<ThoughtConfig>,
     test_thought_config_calls: Vec<ThoughtConfig>,
+    native_status_calls: usize,
     set_native_app_calls: Vec<NativeDesktopApp>,
     set_native_mode_calls: Vec<GhosttyOpenMode>,
     publish_calls: Vec<Option<String>>,
@@ -119,6 +121,14 @@ impl MockApi {
             .lock()
             .unwrap()
             .refresh_openrouter_candidates_results
+            .push_back(result);
+    }
+
+    fn push_plan_file(&self, result: Result<PlanFileResponse, String>) {
+        self.state
+            .lock()
+            .unwrap()
+            .plan_file_results
             .push_back(result);
     }
 
@@ -196,6 +206,10 @@ impl MockApi {
 
     fn test_thought_config_calls(&self) -> Vec<ThoughtConfig> {
         self.state.lock().unwrap().test_thought_config_calls.clone()
+    }
+
+    fn native_status_calls(&self) -> usize {
+        self.state.lock().unwrap().native_status_calls
     }
 
     fn set_native_app_calls(&self) -> Vec<NativeDesktopApp> {
@@ -306,6 +320,32 @@ impl TuiApi for MockApi {
                         source: None,
                         error: None,
                         slice_name: None,
+                        plan_files: None,
+                    })
+                })
+        })
+    }
+
+    fn fetch_plan_file(
+        &self,
+        session_id: &str,
+        name: &str,
+    ) -> BoxFuture<'_, Result<PlanFileResponse, String>> {
+        let state = self.state.clone();
+        let session_id = session_id.to_string();
+        let name = name.to_string();
+        Box::pin(async move {
+            state
+                .lock()
+                .unwrap()
+                .plan_file_results
+                .pop_front()
+                .unwrap_or_else(|| {
+                    Ok(PlanFileResponse {
+                        session_id,
+                        name,
+                        content: None,
+                        error: Some("no mock result configured".to_string()),
                     })
                 })
         })
@@ -314,9 +354,9 @@ impl TuiApi for MockApi {
     fn fetch_native_status(&self) -> BoxFuture<'_, Result<NativeDesktopStatusResponse, String>> {
         let state = self.state.clone();
         Box::pin(async move {
-            state
-                .lock()
-                .unwrap()
+            let mut locked = state.lock().unwrap();
+            locked.native_status_calls += 1;
+            locked
                 .native_status_results
                 .pop_front()
                 .unwrap_or_else(|| {
@@ -1064,6 +1104,110 @@ fn manual_refresh_reports_session_count() {
     );
 }
 
+#[test]
+fn refresh_skips_native_status_when_sessions_fail() {
+    let api = MockApi::new();
+    let layout = test_layout(120, 32);
+    api.push_fetch_sessions(Err("timed out while trying to refresh sessions".to_string()));
+    let mut app = make_app(api.clone());
+
+    app.refresh(layout);
+
+    assert_eq!(
+        api.native_status_calls(),
+        0,
+        "native status should not be called when sessions failed"
+    );
+    assert!(
+        app.message
+            .as_ref()
+            .map(|(m, _)| m.contains("refresh sessions"))
+            .unwrap_or(false),
+        "sessions error should be in message"
+    );
+}
+
+#[test]
+fn refresh_calls_native_status_when_sessions_succeed() {
+    let api = MockApi::new();
+    let layout = test_layout(120, 32);
+    api.push_fetch_sessions(Ok(vec![]));
+    api.push_native_status(Ok(NativeDesktopStatusResponse {
+        supported: true,
+        platform: Some("macos".to_string()),
+        app_id: Some(NativeDesktopApp::Iterm),
+        ghostty_mode: None,
+        app: Some("iTerm".to_string()),
+        reason: None,
+    }));
+    let mut app = make_app(api.clone());
+
+    app.refresh(layout);
+
+    assert_eq!(
+        api.native_status_calls(),
+        1,
+        "native status should be called when sessions succeeded"
+    );
+    assert!(app.native_status.is_some());
+}
+
+#[test]
+fn refresh_sessions_error_not_overwritten_by_native_status_error() {
+    let api = MockApi::new();
+    let layout = test_layout(120, 32);
+    api.push_fetch_sessions(Err("timed out while trying to refresh sessions".to_string()));
+    let mut app = make_app(api.clone());
+
+    app.refresh(layout);
+
+    let msg = app
+        .message
+        .as_ref()
+        .map(|(m, _)| m.as_str())
+        .unwrap_or("");
+    assert!(
+        msg.contains("refresh sessions"),
+        "expected sessions error, got: {msg}"
+    );
+    assert!(
+        !msg.contains("native desktop status"),
+        "native-status error must not overwrite sessions error: {msg}"
+    );
+}
+
+#[test]
+fn refresh_retains_cached_native_status_when_sessions_fail() {
+    let api = MockApi::new();
+    let layout = test_layout(120, 32);
+    let cached = NativeDesktopStatusResponse {
+        supported: true,
+        platform: Some("macos".to_string()),
+        app_id: Some(NativeDesktopApp::Iterm),
+        ghostty_mode: None,
+        app: Some("iTerm".to_string()),
+        reason: None,
+    };
+    api.push_fetch_sessions(Ok(vec![]));
+    api.push_native_status(Ok(cached.clone()));
+    let mut app = make_app(api.clone());
+    app.refresh(layout);
+    assert!(app.native_status.is_some(), "setup: native_status should be populated");
+
+    api.push_fetch_sessions(Err("backend down".to_string()));
+    app.refresh(layout);
+
+    assert!(
+        app.native_status.is_some(),
+        "cached native_status should be retained after a failed refresh"
+    );
+    assert_eq!(
+        app.native_status.as_ref().unwrap().app.as_deref(),
+        Some("iTerm"),
+        "cached value should match what was last successfully fetched"
+    );
+}
+
 fn test_renderer(width: u16, height: u16) -> Renderer {
     let buffer_size = (width as usize) * (height as usize);
     Renderer {
@@ -1769,6 +1913,7 @@ fn mermaid_artifact(
         source: Some(source.to_string()),
         error: None,
         slice_name,
+        plan_files: None,
     }
 }
 
@@ -5682,6 +5827,295 @@ fn mermaid_clicking_visible_owner_label_focuses_it() {
     assert_eq!(focus_status.as_deref(), Some("focus Beta Node"));
     assert!(focused_source_index.is_some());
     assert_ne!(center_after, center_before);
+}
+
+// ── render_thought_config_editor coverage ────────────────────────────────────
+
+#[test]
+fn render_thought_config_editor_enabled_field_focused() {
+    let api = MockApi::new();
+    let layout = test_layout(120, 32);
+    let mut renderer = test_renderer(120, 32);
+    let mut app = make_app(api);
+    app.thought_config_editor = Some(ThoughtConfigEditorState::new(
+        ThoughtConfig { enabled: true, ..ThoughtConfig::default() },
+        None,
+    ));
+    if let Some(editor) = &mut app.thought_config_editor {
+        editor.focus = ThoughtConfigEditorField::Enabled;
+    }
+    app.render(&mut renderer, layout);
+}
+
+#[test]
+fn render_thought_config_editor_model_field_focused_with_model() {
+    let api = MockApi::new();
+    let layout = test_layout(120, 32);
+    let mut renderer = test_renderer(120, 32);
+    let mut app = make_app(api);
+    app.thought_config_editor = Some(ThoughtConfigEditorState::new(
+        ThoughtConfig {
+            enabled: false,
+            model: "claude-opus-4-6".to_string(),
+            ..ThoughtConfig::default()
+        },
+        None,
+    ));
+    if let Some(editor) = &mut app.thought_config_editor {
+        editor.focus = ThoughtConfigEditorField::Model;
+    }
+    app.render(&mut renderer, layout);
+}
+
+#[test]
+fn render_thought_config_editor_model_field_focused_empty_model() {
+    let api = MockApi::new();
+    let layout = test_layout(120, 32);
+    let mut renderer = test_renderer(120, 32);
+    let mut app = make_app(api);
+    app.thought_config_editor = Some(ThoughtConfigEditorState::new(
+        ThoughtConfig { model: String::new(), ..ThoughtConfig::default() },
+        None,
+    ));
+    if let Some(editor) = &mut app.thought_config_editor {
+        editor.focus = ThoughtConfigEditorField::Model;
+    }
+    app.render(&mut renderer, layout);
+}
+
+#[test]
+fn render_thought_config_editor_save_and_cancel_focused() {
+    let api = MockApi::new();
+    let layout = test_layout(120, 32);
+    let mut renderer = test_renderer(120, 32);
+    let mut app = make_app(api);
+    app.thought_config_editor = Some(ThoughtConfigEditorState::new(
+        ThoughtConfig::default(),
+        None,
+    ));
+    for focus in [
+        ThoughtConfigEditorField::Save,
+        ThoughtConfigEditorField::Cancel,
+        ThoughtConfigEditorField::Test,
+        ThoughtConfigEditorField::Backend,
+    ] {
+        if let Some(editor) = &mut app.thought_config_editor {
+            editor.focus = focus;
+        }
+        app.render(&mut renderer, layout);
+    }
+}
+
+// ── render_plan_text_content coverage ────────────────────────────────────────
+
+fn open_mermaid_on_plan_tab(content: Option<&str>, active_tab: DomainPlanTab) -> (App<MockApi>, Renderer, WorkspaceLayout) {
+    let api = MockApi::new();
+    let layout = test_layout(120, 32);
+    let mut app = make_app(api);
+    app.merge_sessions(
+        vec![session_summary("sess-1", "7", TEST_REPO_SWIMMERS)],
+        layout.overview_field,
+    );
+    let mut artifact = mermaid_artifact(
+        "sess-1",
+        "/tmp/repos/swimmers/flow.mmd",
+        "2026-03-23T10:05:00Z",
+        "graph LR\nA-->B",
+    );
+    artifact.plan_files = Some(vec![
+        "schema.mmd".to_string(),
+        "plan.md".to_string(),
+        "backend.md".to_string(),
+    ]);
+    app.mermaid_artifacts.insert("sess-1".to_string(), artifact);
+    app.open_mermaid_viewer("sess-1".to_string());
+    if let FishBowlMode::Mermaid(viewer) = &mut app.fish_bowl_mode {
+        viewer.active_tab = active_tab;
+        viewer.plan_text_content = content.map(str::to_string);
+    }
+    let renderer = test_renderer(120, 32);
+    (app, renderer, layout)
+}
+
+#[test]
+fn render_plan_text_content_loading_state_when_no_content() {
+    let (mut app, mut renderer, layout) = open_mermaid_on_plan_tab(None, DomainPlanTab::Plan);
+    app.render(&mut renderer, layout);
+}
+
+#[test]
+fn render_plan_text_content_heading_and_list_lines() {
+    let content = "# Heading\n- list item\n  - nested\nbody text\n| table |\n|-|-|";
+    let (mut app, mut renderer, layout) = open_mermaid_on_plan_tab(Some(content), DomainPlanTab::Plan);
+    app.render(&mut renderer, layout);
+}
+
+#[test]
+fn render_plan_text_content_scroll_indicator_when_content_exceeds_height() {
+    // 50 lines of content will overflow the viewport height (~28 usable rows)
+    let content = (0..50)
+        .map(|i| format!("line {i}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let (mut app, mut renderer, layout) = open_mermaid_on_plan_tab(Some(&content), DomainPlanTab::Plan);
+    // Set scroll to trigger the non-zero pct branch
+    if let FishBowlMode::Mermaid(viewer) = &mut app.fish_bowl_mode {
+        viewer.plan_text_scroll = 5;
+    }
+    app.render(&mut renderer, layout);
+}
+
+#[test]
+fn render_plan_text_content_scroll_indicator_at_top_pct_100() {
+    // Short enough that scroll is 0 but total_lines > visible → pct = 100 when max_scroll == 0
+    // Actually max_scroll == 0 when total_lines <= visible_height, so we need more lines but scroll stays 0
+    let content = (0..50)
+        .map(|i| format!("line {i}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let (mut app, mut renderer, layout) = open_mermaid_on_plan_tab(Some(&content), DomainPlanTab::Plan);
+    // Leave scroll at 0; max_scroll > 0 so we get normal pct calculation
+    app.render(&mut renderer, layout);
+}
+
+#[test]
+fn render_plan_text_content_rewraps_on_second_render_same_width() {
+    let content = "# Title\nbody";
+    let (mut app, mut renderer, layout) = open_mermaid_on_plan_tab(Some(content), DomainPlanTab::Backend);
+    // First render populates plan_text_lines
+    app.render(&mut renderer, layout);
+    // Second render should reuse cached lines (no re-wrap needed)
+    app.render(&mut renderer, layout);
+}
+
+// ── switch_plan_tab tests ─────────────────────────────────────────────────────
+
+fn open_mermaid_with_plan_tabs(api: MockApi) -> App<MockApi> {
+    let layout = test_layout(120, 32);
+    let mut app = make_app(api);
+    app.merge_sessions(
+        vec![session_summary("sess-1", "7", TEST_REPO_SWIMMERS)],
+        layout.overview_field,
+    );
+    let mut artifact = mermaid_artifact(
+        "sess-1",
+        "/tmp/repos/swimmers/flow.mmd",
+        "2026-03-23T10:05:00Z",
+        "graph LR\nA-->B",
+    );
+    artifact.plan_files = Some(vec![
+        "schema.mmd".to_string(),
+        "plan.md".to_string(),
+        "backend.md".to_string(),
+    ]);
+    app.mermaid_artifacts.insert("sess-1".to_string(), artifact);
+    app.open_mermaid_viewer("sess-1".to_string());
+    app
+}
+
+#[test]
+fn switch_plan_tab_noop_in_aquarium_mode() {
+    let api = MockApi::new();
+    let mut app = make_app(api);
+    // Default mode is Aquarium; switch_plan_tab must not panic or change state
+    app.switch_plan_tab(DomainPlanTab::Plan);
+}
+
+#[test]
+fn switch_plan_tab_noop_when_no_plan_tabs() {
+    let api = MockApi::new();
+    let (mut app, _, _) = open_mermaid_test_viewer("graph LR\nA-->B", 120, 32);
+    // viewer has no plan_tabs (open_mermaid_test_viewer doesn't set plan_files)
+    app.switch_plan_tab(DomainPlanTab::Plan);
+    let FishBowlMode::Mermaid(viewer) = &app.fish_bowl_mode else { panic!() };
+    // active_tab unchanged
+    assert_eq!(viewer.active_tab, DomainPlanTab::Schema);
+}
+
+#[test]
+fn switch_plan_tab_noop_when_already_on_tab() {
+    let api = MockApi::new();
+    let mut app = open_mermaid_with_plan_tabs(api);
+    // active_tab starts at Schema; switching to Schema again is a no-op
+    app.switch_plan_tab(DomainPlanTab::Schema);
+    let FishBowlMode::Mermaid(viewer) = &app.fish_bowl_mode else { panic!() };
+    assert_eq!(viewer.active_tab, DomainPlanTab::Schema);
+}
+
+#[test]
+fn switch_plan_tab_to_schema_updates_viewer_without_fetch() {
+    let api = MockApi::new();
+    let mut app = open_mermaid_with_plan_tabs(api.clone());
+    // Set active_tab to Plan first so switching to Schema is valid
+    {
+        let FishBowlMode::Mermaid(viewer) = &mut app.fish_bowl_mode else { panic!() };
+        viewer.active_tab = DomainPlanTab::Plan;
+        viewer.plan_text_content = Some("old content".to_string());
+    }
+    app.switch_plan_tab(DomainPlanTab::Schema);
+    let FishBowlMode::Mermaid(viewer) = &app.fish_bowl_mode else { panic!() };
+    assert_eq!(viewer.active_tab, DomainPlanTab::Schema);
+    assert!(viewer.plan_text_content.is_none());
+    // No plan file fetch should have been issued
+    assert_eq!(api.native_status_calls(), 0);
+}
+
+#[test]
+fn switch_plan_tab_to_non_schema_fetches_plan_file_ok() {
+    let api = MockApi::new();
+    api.push_plan_file(Ok(PlanFileResponse {
+        session_id: "sess-1".to_string(),
+        name: "plan.md".to_string(),
+        content: Some("# Plan\n- slice one".to_string()),
+        error: None,
+    }));
+    let mut app = open_mermaid_with_plan_tabs(api);
+    app.switch_plan_tab(DomainPlanTab::Plan);
+    let FishBowlMode::Mermaid(viewer) = &app.fish_bowl_mode else { panic!() };
+    assert_eq!(viewer.active_tab, DomainPlanTab::Plan);
+    assert_eq!(
+        viewer.plan_text_content.as_deref(),
+        Some("# Plan\n- slice one")
+    );
+    assert_eq!(viewer.plan_text_scroll, 0);
+}
+
+#[test]
+fn switch_plan_tab_to_non_schema_shows_error_from_response() {
+    let api = MockApi::new();
+    api.push_plan_file(Ok(PlanFileResponse {
+        session_id: "sess-1".to_string(),
+        name: "plan.md".to_string(),
+        content: None,
+        error: Some("file not found".to_string()),
+    }));
+    let mut app = open_mermaid_with_plan_tabs(api);
+    app.switch_plan_tab(DomainPlanTab::Plan);
+    let FishBowlMode::Mermaid(viewer) = &app.fish_bowl_mode else { panic!() };
+    assert_eq!(viewer.active_tab, DomainPlanTab::Plan);
+    assert!(
+        app.message
+            .as_ref()
+            .map(|(m, _)| m.contains("plan file"))
+            .unwrap_or(false)
+    );
+}
+
+#[test]
+fn switch_plan_tab_to_non_schema_shows_error_on_fetch_failure() {
+    let api = MockApi::new();
+    api.push_plan_file(Err("network error".to_string()));
+    let mut app = open_mermaid_with_plan_tabs(api);
+    app.switch_plan_tab(DomainPlanTab::Plan);
+    let FishBowlMode::Mermaid(viewer) = &app.fish_bowl_mode else { panic!() };
+    assert_eq!(viewer.active_tab, DomainPlanTab::Plan);
+    assert!(viewer.plan_text_content.is_none());
+    assert!(
+        app.message
+            .as_ref()
+            .map(|(m, _)| m.contains("plan file fetch failed"))
+            .unwrap_or(false)
+    );
 }
 
 #[test]
