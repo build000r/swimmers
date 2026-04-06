@@ -119,6 +119,30 @@ assert_eq '1' "${restart_stop_calls}" 'stale native-switch route stops old liste
 assert_eq '1' "${restart_start_calls}" 'stale native-switch route restarts api'
 assert_eq '1' "${restart_wait_calls}" 'stale native-switch route waits for api'
 
+restart_stop_calls=0
+restart_start_calls=0
+restart_wait_calls=0
+local_api_listener_exists() {
+  return 0
+}
+
+handle_local_probe_failure 1
+assert_eq '1' "${restart_stop_calls}" 'slow existing listener is stopped before restart'
+assert_eq '1' "${restart_start_calls}" 'slow existing listener triggers restart'
+assert_eq '1' "${restart_wait_calls}" 'slow existing listener waits for restarted api'
+
+restart_stop_calls=0
+restart_start_calls=0
+restart_wait_calls=0
+local_api_listener_exists() {
+  return 1
+}
+
+handle_local_probe_failure 1
+assert_eq '0' "${restart_stop_calls}" 'missing listener does not stop before start'
+assert_eq '1' "${restart_start_calls}" 'missing listener still starts api'
+assert_eq '1' "${restart_wait_calls}" 'missing listener waits for started api'
+
 TUI_URL='http://127.0.0.1:33210'
 WAIT_PATH='/v1/sessions'
 LAST_API_STATUS='401'

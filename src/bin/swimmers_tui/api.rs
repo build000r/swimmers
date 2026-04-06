@@ -9,11 +9,35 @@ pub(crate) type ThoughtConfigTestResponse = ThoughtConfigProbeResult;
 
 pub(crate) struct ApiClient {
     pub(crate) http: Client,
+    pub(crate) startup_http: Client,
     pub(crate) base_url: String,
     pub(crate) auth_token: Option<String>,
+    pub(crate) startup_wait_timeout: Duration,
+    pub(crate) startup_retry_interval: Duration,
+}
+
+enum StartupAccessError {
+    Retryable(String),
+    Fatal(String),
+}
+
+impl StartupAccessError {
+    fn into_string(self) -> String {
+        match self {
+            Self::Retryable(message) | Self::Fatal(message) => message,
+        }
+    }
 }
 
 impl ApiClient {
+    fn build_http_client(timeout: Duration) -> Result<Client, String> {
+        Client::builder()
+            .connect_timeout(API_CONNECT_TIMEOUT)
+            .timeout(timeout)
+            .build()
+            .map_err(|err| format!("failed to build http client: {err}"))
+    }
+
     pub(crate) fn from_env() -> Result<Self, String> {
         let config = Config::from_env();
         let base_url = std::env::var("SWIMMERS_TUI_URL")
@@ -22,17 +46,16 @@ impl ApiClient {
             AuthMode::Token => config.auth_token,
             AuthMode::LocalTrust => None,
         };
-
-        let http = Client::builder()
-            .connect_timeout(API_CONNECT_TIMEOUT)
-            .timeout(API_REQUEST_TIMEOUT)
-            .build()
-            .map_err(|err| format!("failed to build http client: {err}"))?;
+        let http = Self::build_http_client(API_REQUEST_TIMEOUT)?;
+        let startup_http = Self::build_http_client(API_STARTUP_REQUEST_TIMEOUT)?;
 
         Ok(Self {
             http,
+            startup_http,
             base_url,
             auth_token,
+            startup_wait_timeout: API_STARTUP_WAIT_TIMEOUT,
+            startup_retry_interval: API_STARTUP_RETRY_INTERVAL,
         })
     }
 
@@ -47,7 +70,7 @@ impl ApiClient {
         friendly_transport_error(&self.base_url, action, &err)
     }
 
-    fn targets_local_backend(&self) -> bool {
+    pub(crate) fn targets_local_backend(&self) -> bool {
         let Ok(url) = reqwest::Url::parse(&self.base_url) else {
             return false;
         };
@@ -78,48 +101,116 @@ impl ApiClient {
         }
     }
 
-    async fn ensure_startup_access(
+    fn startup_transport_error(&self, action: &str, err: reqwest::Error) -> StartupAccessError {
+        let retryable = err.is_connect() || err.is_timeout();
+        let message = self.transport_error(action, err);
+        if retryable {
+            StartupAccessError::Retryable(message)
+        } else {
+            StartupAccessError::Fatal(message)
+        }
+    }
+
+    async fn ensure_startup_access_probe(
         &self,
         response: reqwest::Response,
         path: &str,
-    ) -> Result<(), String> {
+    ) -> Result<(), StartupAccessError> {
         if response.status().is_success() {
             return Ok(());
         }
 
         let status = response.status();
         match status {
-            reqwest::StatusCode::UNAUTHORIZED | reqwest::StatusCode::FORBIDDEN => {
-                Err(self.startup_access_error(path, status))
-            }
-            _ => Err(read_error(response).await),
+            reqwest::StatusCode::UNAUTHORIZED | reqwest::StatusCode::FORBIDDEN => Err(
+                StartupAccessError::Fatal(self.startup_access_error(path, status)),
+            ),
+            _ => Err(StartupAccessError::Fatal(read_error(response).await)),
         }
     }
 
-    async fn preflight_session_refresh_access(&self) -> Result<(), String> {
+    async fn preflight_session_refresh_access_with_client(
+        &self,
+        http: &Client,
+    ) -> Result<(), StartupAccessError> {
         let url = format!("{}/v1/sessions", self.base_url);
         let response = self
-            .with_auth(self.http.get(url))
+            .with_auth(http.get(url))
             .send()
             .await
-            .map_err(|err| self.transport_error("refresh sessions", err))?;
+            .map_err(|err| self.startup_transport_error("refresh sessions", err))?;
 
-        self.ensure_startup_access(response, "/v1/sessions").await
+        self.ensure_startup_access_probe(response, "/v1/sessions")
+            .await
     }
 
-    async fn preflight_selection_sync_access(&self) -> Result<(), String> {
+    async fn preflight_session_refresh_access(&self) -> Result<(), String> {
+        self.preflight_session_refresh_access_with_client(&self.http)
+            .await
+            .map_err(StartupAccessError::into_string)
+    }
+
+    async fn preflight_selection_sync_access_with_client(
+        &self,
+        http: &Client,
+    ) -> Result<(), StartupAccessError> {
         let url = format!("{}/v1/selection", self.base_url);
         let response = self
-            .with_auth(self.http.put(url))
+            .with_auth(http.put(url))
             .json(&PublishSelectionRequest { session_id: None })
             .send()
             .await
-            .map_err(|err| self.transport_error("clear the published selection", err))?;
+            .map_err(|err| self.startup_transport_error("clear the published selection", err))?;
 
-        self.ensure_startup_access(response, "/v1/selection").await
+        self.ensure_startup_access_probe(response, "/v1/selection")
+            .await
+    }
+
+    async fn preflight_selection_sync_access(&self) -> Result<(), String> {
+        self.preflight_selection_sync_access_with_client(&self.http)
+            .await
+            .map_err(StartupAccessError::into_string)
+    }
+
+    async fn wait_for_local_startup_probe<F, Fut>(
+        &self,
+        deadline: Instant,
+        mut probe: F,
+    ) -> Result<(), String>
+    where
+        F: FnMut() -> Fut,
+        Fut: std::future::Future<Output = Result<(), StartupAccessError>>,
+    {
+        loop {
+            match probe().await {
+                Ok(()) => return Ok(()),
+                Err(StartupAccessError::Fatal(message)) => return Err(message),
+                Err(StartupAccessError::Retryable(message)) => {
+                    if Instant::now() >= deadline {
+                        return Err(message);
+                    }
+                }
+            }
+            tokio::time::sleep(self.startup_retry_interval).await;
+        }
+    }
+
+    async fn preflight_local_startup_access(&self) -> Result<(), String> {
+        let deadline = Instant::now() + self.startup_wait_timeout;
+        self.wait_for_local_startup_probe(deadline, || {
+            self.preflight_session_refresh_access_with_client(&self.startup_http)
+        })
+        .await?;
+        self.wait_for_local_startup_probe(deadline, || {
+            self.preflight_selection_sync_access_with_client(&self.startup_http)
+        })
+        .await
     }
 
     pub(crate) async fn preflight_startup_access(&self) -> Result<(), String> {
+        if self.targets_local_backend() {
+            return self.preflight_local_startup_access().await;
+        }
         self.preflight_session_refresh_access().await?;
         self.preflight_selection_sync_access().await?;
         Ok(())
@@ -174,7 +265,7 @@ pub(crate) fn friendly_transport_error(
     )
 }
 
-pub(crate) trait TuiApi {
+pub(crate) trait TuiApi: Send + Sync + 'static {
     fn fetch_sessions(&self) -> BoxFuture<'_, Result<Vec<SessionSummary>, String>>;
     fn fetch_thought_config(&self) -> BoxFuture<'_, Result<ThoughtConfigResponse, String>>;
     fn update_thought_config(
@@ -368,10 +459,7 @@ impl TuiApi for ApiClient {
         let session_id = session_id.to_string();
         let name = name.to_string();
         Box::pin(async move {
-            let url = format!(
-                "{}/v1/sessions/{}/plan-file",
-                self.base_url, session_id
-            );
+            let url = format!("{}/v1/sessions/{}/plan-file", self.base_url, session_id);
             let response = self
                 .with_auth(self.http.get(url))
                 .query(&[("name", &name)])
@@ -534,7 +622,7 @@ impl TuiApi for ApiClient {
             }
 
             let response = self
-                .with_auth(request)
+                .with_auth(request.timeout(API_DIRECTORY_LIST_TIMEOUT))
                 .send()
                 .await
                 .map_err(|err| self.transport_error("list directories", err))?;
@@ -561,6 +649,7 @@ impl TuiApi for ApiClient {
             let url = format!("{}/v1/sessions", self.base_url);
             let response = self
                 .with_auth(self.http.post(url))
+                .timeout(API_CREATE_SESSION_TIMEOUT)
                 .json(&CreateSessionRequest {
                     name: None,
                     cwd: Some(cwd),

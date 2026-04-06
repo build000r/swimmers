@@ -1,9 +1,66 @@
 use super::*;
 use swimmers::openrouter_models::should_rotate_openrouter_model;
 
+pub(crate) struct RefreshResult {
+    pub(crate) sessions: Result<Vec<SessionSummary>, String>,
+    pub(crate) mermaid_artifacts: Vec<(String, Result<MermaidArtifactResponse, String>)>,
+    pub(crate) native_status: Option<Result<NativeDesktopStatusResponse, String>>,
+    pub(crate) show_success_message: bool,
+}
+
+pub(crate) struct PendingSelectionPublicationResult {
+    pub(crate) session_id: Option<String>,
+    pub(crate) response: Result<(), String>,
+}
+
+pub(crate) struct ThoughtConfigActionOutcome {
+    pub(crate) message: String,
+    pub(crate) updated_config: Option<ThoughtConfig>,
+    pub(crate) openrouter_candidates: Option<Vec<String>>,
+    pub(crate) close_editor: bool,
+    pub(crate) refresh_sessions: bool,
+}
+
+pub(crate) enum PendingInteractionResult {
+    OpenPicker {
+        x: u16,
+        y: u16,
+        response: Result<DirListResponse, String>,
+    },
+    ReloadPicker {
+        managed_only: bool,
+        response: Result<DirListResponse, String>,
+    },
+    CreateSession {
+        field: Rect,
+        response: Result<CreateSessionResponse, String>,
+    },
+    OpenSession {
+        label: String,
+        response: Result<NativeDesktopOpenResponse, String>,
+    },
+    ToggleNativeApp {
+        next_app: NativeDesktopApp,
+        response: Result<NativeDesktopStatusResponse, String>,
+    },
+    ToggleGhosttyMode {
+        next_mode: GhosttyOpenMode,
+        response: Result<NativeDesktopStatusResponse, String>,
+    },
+    OpenThoughtConfig {
+        response: Result<ThoughtConfigResponse, String>,
+    },
+    TestThoughtConfig {
+        outcome: ThoughtConfigActionOutcome,
+    },
+    SaveThoughtConfig {
+        outcome: ThoughtConfigActionOutcome,
+    },
+}
+
 pub(crate) struct App<C: TuiApi> {
     pub(crate) runtime: Runtime,
-    pub(crate) client: C,
+    pub(crate) client: Arc<C>,
     pub(crate) artifact_opener: Arc<dyn ArtifactOpener>,
     pub(crate) commit_launcher: Arc<dyn CommitLauncher>,
     pub(crate) entities: Vec<SessionEntity>,
@@ -26,6 +83,11 @@ pub(crate) struct App<C: TuiApi> {
     pub(crate) thought_panel_ratio: f32,
     pub(crate) split_drag_active: bool,
     pub(crate) tick: u64,
+    pub(crate) pending_refresh: Option<oneshot::Receiver<RefreshResult>>,
+    pub(crate) pending_interaction: Option<oneshot::Receiver<PendingInteractionResult>>,
+    pub(crate) pending_selection_publication:
+        Option<oneshot::Receiver<PendingSelectionPublicationResult>>,
+    pub(crate) queued_selection_publication: Option<(Option<String>, bool)>,
 }
 
 impl<C: TuiApi> App<C> {
@@ -60,7 +122,7 @@ impl<C: TuiApi> App<C> {
     ) -> Self {
         Self {
             runtime,
-            client,
+            client: Arc::new(client),
             artifact_opener,
             commit_launcher,
             entities: Vec::new(),
@@ -83,6 +145,10 @@ impl<C: TuiApi> App<C> {
             thought_panel_ratio: THOUGHT_RAIL_DEFAULT_RATIO,
             split_drag_active: false,
             tick: 0,
+            pending_refresh: None,
+            pending_interaction: None,
+            pending_selection_publication: None,
+            queued_selection_publication: None,
         }
     }
 
@@ -210,28 +276,19 @@ impl<C: TuiApi> App<C> {
 
     pub(crate) fn toggle_native_app(&mut self) {
         let next_app = self.current_native_app().toggle();
-        match self.runtime.block_on(self.client.set_native_app(next_app)) {
-            Ok(status) => {
-                let app_label = status
-                    .app
-                    .clone()
-                    .unwrap_or_else(|| next_app.display_name().to_string());
-                let message = if status.supported {
-                    match status.ghostty_mode {
-                        Some(mode) => format!("native open target: {app_label} ({})", mode.label()),
-                        None => format!("native open target: {app_label}"),
-                    }
-                } else {
-                    format!(
-                        "native open target: {app_label} | {}",
-                        status.reason.as_deref().unwrap_or("unavailable")
-                    )
-                };
-                self.native_status = Some(status);
-                self.set_message(message);
-            }
-            Err(err) => self.set_message(err),
-        }
+        let Some(tx) = self.begin_pending_interaction() else {
+            return;
+        };
+
+        let client = Arc::clone(&self.client);
+        self.set_message(format!(
+            "switching native open target to {}...",
+            next_app.display_name()
+        ));
+        self.runtime.spawn(async move {
+            let response = client.set_native_app(next_app).await;
+            let _ = tx.send(PendingInteractionResult::ToggleNativeApp { next_app, response });
+        });
     }
 
     pub(crate) fn toggle_ghostty_mode(&mut self) {
@@ -240,16 +297,22 @@ impl<C: TuiApi> App<C> {
         }
 
         let next_mode = self.current_ghostty_mode().toggle();
-        match self
-            .runtime
-            .block_on(self.client.set_native_mode(next_mode))
-        {
-            Ok(status) => {
-                self.native_status = Some(status);
-                self.set_message(format!("Ghostty preview mode: {}", next_mode.label()));
-            }
-            Err(err) => self.set_message(err),
-        }
+        let Some(tx) = self.begin_pending_interaction() else {
+            return;
+        };
+
+        let client = Arc::clone(&self.client);
+        self.set_message(format!(
+            "switching Ghostty preview mode to {}...",
+            next_mode.label()
+        ));
+        self.runtime.spawn(async move {
+            let response = client.set_native_mode(next_mode).await;
+            let _ = tx.send(PendingInteractionResult::ToggleGhosttyMode {
+                next_mode,
+                response,
+            });
+        });
     }
 
     pub(crate) fn visible_entities(&self) -> Vec<&SessionEntity> {
@@ -257,6 +320,17 @@ impl<C: TuiApi> App<C> {
             .iter()
             .filter(|entity| self.thought_filter.matches_session(&entity.session))
             .collect()
+    }
+
+    fn begin_pending_interaction(&mut self) -> Option<oneshot::Sender<PendingInteractionResult>> {
+        if self.pending_interaction.is_some() {
+            self.set_message("wait for the current action to finish");
+            return None;
+        }
+
+        let (tx, rx) = oneshot::channel();
+        self.pending_interaction = Some(rx);
+        Some(tx)
     }
 
     pub(crate) fn publish_selection(&mut self, session_id: Option<String>, force: bool) {
@@ -276,11 +350,65 @@ impl<C: TuiApi> App<C> {
     }
 
     pub(crate) fn sync_selection_publication(&mut self) {
-        self.publish_selection(self.selected_id.clone(), false);
+        self.queue_selection_publication(self.selected_id.clone(), false);
     }
 
     pub(crate) fn clear_published_selection(&mut self) {
         self.publish_selection(None, true);
+    }
+
+    fn queue_selection_publication(&mut self, session_id: Option<String>, force: bool) {
+        self.queued_selection_publication = Some((session_id, force));
+        self.maybe_spawn_selection_publication();
+    }
+
+    fn maybe_spawn_selection_publication(&mut self) {
+        if self.pending_selection_publication.is_some() {
+            return;
+        }
+
+        let Some((session_id, force)) = self.queued_selection_publication.take() else {
+            return;
+        };
+        if !force && session_id == self.published_selected_id {
+            return;
+        }
+
+        let (tx, rx) = oneshot::channel();
+        self.pending_selection_publication = Some(rx);
+        let client = Arc::clone(&self.client);
+        self.runtime.spawn(async move {
+            let response = client.publish_selection(session_id.as_deref()).await;
+            let _ = tx.send(PendingSelectionPublicationResult {
+                session_id,
+                response,
+            });
+        });
+    }
+
+    pub(crate) fn poll_pending_selection_publication(&mut self) {
+        let Some(rx) = &mut self.pending_selection_publication else {
+            return;
+        };
+
+        let result = match rx.try_recv() {
+            Ok(result) => result,
+            Err(oneshot::error::TryRecvError::Empty) => return,
+            Err(oneshot::error::TryRecvError::Closed) => {
+                self.pending_selection_publication = None;
+                self.maybe_spawn_selection_publication();
+                return;
+            }
+        };
+
+        self.pending_selection_publication = None;
+        match result.response {
+            Ok(()) => {
+                self.published_selected_id = result.session_id;
+            }
+            Err(err) => self.set_message(err),
+        }
+        self.maybe_spawn_selection_publication();
     }
 
     pub(crate) fn reconcile_selection(&mut self) {
@@ -555,8 +683,9 @@ impl<C: TuiApi> App<C> {
         self.refresh_with_feedback(layout, false);
     }
 
-    pub(crate) fn manual_refresh(&mut self, layout: WorkspaceLayout) {
-        self.refresh_with_feedback(layout, true);
+    pub(crate) fn manual_refresh(&mut self, _layout: WorkspaceLayout) {
+        self.pending_refresh = None;
+        self.spawn_background_refresh(true);
     }
 
     pub(crate) fn refresh_with_feedback(
@@ -585,6 +714,263 @@ impl<C: TuiApi> App<C> {
 
         if sessions_ok {
             match self.runtime.block_on(self.client.fetch_native_status()) {
+                Ok(status) => {
+                    self.native_status = Some(status);
+                }
+                Err(err) => {
+                    self.set_message(err);
+                }
+            }
+        }
+
+        self.last_refresh = Some(Instant::now());
+    }
+
+    pub(crate) fn spawn_background_refresh(&mut self, show_success_message: bool) {
+        let client = Arc::clone(&self.client);
+        let (tx, rx) = oneshot::channel();
+        self.pending_refresh = Some(rx);
+        self.runtime.spawn(async move {
+            let sessions_result = client.fetch_sessions().await;
+
+            let (mermaid_artifacts, native_status) = match &sessions_result {
+                Ok(sessions) => {
+                    let mermaid_futs: Vec<_> = sessions
+                        .iter()
+                        .map(|s| {
+                            let client = Arc::clone(&client);
+                            let sid = s.session_id.clone();
+                            async move {
+                                let result = client.fetch_mermaid_artifact(&sid).await;
+                                (sid, result)
+                            }
+                        })
+                        .collect();
+
+                    let (mermaid_results, native_result) = tokio::join!(
+                        futures::future::join_all(mermaid_futs),
+                        client.fetch_native_status(),
+                    );
+
+                    (mermaid_results, Some(native_result))
+                }
+                Err(_) => (Vec::new(), None),
+            };
+
+            let _ = tx.send(RefreshResult {
+                sessions: sessions_result,
+                mermaid_artifacts,
+                native_status,
+                show_success_message,
+            });
+        });
+    }
+
+    pub(crate) fn poll_pending_interaction(&mut self) {
+        let Some(rx) = &mut self.pending_interaction else {
+            return;
+        };
+
+        let result = match rx.try_recv() {
+            Ok(result) => result,
+            Err(oneshot::error::TryRecvError::Empty) => return,
+            Err(oneshot::error::TryRecvError::Closed) => {
+                self.pending_interaction = None;
+                return;
+            }
+        };
+
+        self.pending_interaction = None;
+        self.apply_pending_interaction_result(result);
+    }
+
+    fn apply_pending_interaction_result(&mut self, result: PendingInteractionResult) {
+        match result {
+            PendingInteractionResult::OpenPicker { x, y, response } => match response {
+                Ok(response) => {
+                    let mut picker = PickerState::new(x, y, response, true, self.spawn_tool);
+                    picker.sync_theme_colors(&mut self.repo_themes);
+                    self.picker = Some(picker);
+                }
+                Err(err) => {
+                    self.set_message(err);
+                    self.picker = None;
+                }
+            },
+            PendingInteractionResult::ReloadPicker {
+                managed_only,
+                response,
+            } => match response {
+                Ok(response) => {
+                    if let Some(picker) = &mut self.picker {
+                        picker.managed_only = managed_only;
+                        picker.apply_response(response);
+                        picker.sync_theme_colors(&mut self.repo_themes);
+                    }
+                }
+                Err(err) => self.set_message(err),
+            },
+            PendingInteractionResult::CreateSession { field, response } => match response {
+                Ok(response) => {
+                    let repo_theme = response.repo_theme.clone();
+                    let session = response.session;
+                    let session_id = session.session_id.clone();
+                    let tmux_name = session.tmux_name.clone();
+                    self.remember_repo_theme(&session, repo_theme);
+                    self.upsert_session(session, field);
+                    self.selected_id = Some(session_id);
+                    self.reconcile_selection();
+                    self.sync_selection_publication();
+                    self.close_picker();
+                    self.set_message(format!("created {tmux_name}"));
+                }
+                Err(err) => self.set_message(err),
+            },
+            PendingInteractionResult::OpenSession { label, response } => match response {
+                Ok(response) => {
+                    self.set_message(format!("{} {}", response.status, label));
+                }
+                Err(err) => self.set_message(err),
+            },
+            PendingInteractionResult::ToggleNativeApp { next_app, response } => match response {
+                Ok(status) => {
+                    self.native_status = Some(status.clone());
+                    self.set_message(Self::native_status_message(&status, next_app));
+                }
+                Err(err) => self.set_message(err),
+            },
+            PendingInteractionResult::ToggleGhosttyMode {
+                next_mode,
+                response,
+            } => match response {
+                Ok(status) => {
+                    self.native_status = Some(status);
+                    self.set_message(format!("Ghostty preview mode: {}", next_mode.label()));
+                }
+                Err(err) => self.set_message(err),
+            },
+            PendingInteractionResult::OpenThoughtConfig { response } => match response {
+                Ok(response) => {
+                    self.thought_config_editor = Some(ThoughtConfigEditorState::new(
+                        response.config,
+                        response.daemon_defaults,
+                    ));
+                }
+                Err(err) => self.set_message(err),
+            },
+            PendingInteractionResult::TestThoughtConfig { outcome }
+            | PendingInteractionResult::SaveThoughtConfig { outcome } => {
+                if let Some(candidates) = outcome.openrouter_candidates {
+                    if let Some(editor) = &mut self.thought_config_editor {
+                        editor.replace_openrouter_model_presets(candidates);
+                    }
+                }
+                if let Some(config) = outcome.updated_config {
+                    if let Some(editor) = &mut self.thought_config_editor {
+                        editor.config = config;
+                    }
+                }
+                if outcome.close_editor {
+                    self.close_thought_config_editor();
+                }
+                if outcome.refresh_sessions {
+                    self.pending_refresh = None;
+                    self.spawn_background_refresh(false);
+                }
+                self.set_message(outcome.message);
+            }
+        }
+    }
+
+    fn native_status_message(
+        status: &NativeDesktopStatusResponse,
+        fallback_app: NativeDesktopApp,
+    ) -> String {
+        let app_label = status
+            .app
+            .clone()
+            .unwrap_or_else(|| fallback_app.display_name().to_string());
+        if status.supported {
+            match status.ghostty_mode {
+                Some(mode) => format!("native open target: {app_label} ({})", mode.label()),
+                None => format!("native open target: {app_label}"),
+            }
+        } else {
+            format!(
+                "native open target: {app_label} | {}",
+                status.reason.as_deref().unwrap_or("unavailable")
+            )
+        }
+    }
+
+    pub(crate) fn poll_refresh(&mut self, layout: WorkspaceLayout) {
+        let Some(rx) = &mut self.pending_refresh else {
+            return;
+        };
+
+        let result = match rx.try_recv() {
+            Ok(result) => result,
+            Err(oneshot::error::TryRecvError::Empty) => return,
+            Err(oneshot::error::TryRecvError::Closed) => {
+                self.pending_refresh = None;
+                return;
+            }
+        };
+
+        self.pending_refresh = None;
+        self.apply_refresh_result(result, layout);
+    }
+
+    pub(crate) fn apply_refresh_result(&mut self, result: RefreshResult, layout: WorkspaceLayout) {
+        match result.sessions {
+            Ok(sessions) => {
+                self.sync_repo_themes(&sessions);
+
+                let mut next_artifacts = HashMap::new();
+                for (session_id, artifact_result) in result.mermaid_artifacts {
+                    match artifact_result {
+                        Ok(artifact) if artifact.available => {
+                            next_artifacts.insert(session_id, artifact);
+                        }
+                        Ok(_) => {}
+                        Err(err) => self.set_message(err),
+                    }
+                }
+                self.mermaid_artifacts = next_artifacts;
+
+                if let FishBowlMode::Mermaid(viewer) = &mut self.fish_bowl_mode {
+                    if let Some(artifact) = self.mermaid_artifacts.get(&viewer.session_id) {
+                        let path_changed = viewer.path != artifact.path;
+                        let source_changed = viewer.source != artifact.source;
+                        let error_changed = viewer.artifact_error != artifact.error;
+                        viewer.path = artifact.path.clone();
+                        viewer.source = artifact.source.clone();
+                        viewer.artifact_error = artifact.error.clone();
+                        viewer.render_error = None;
+                        if source_changed || error_changed {
+                            viewer.invalidate_source_cache();
+                        } else if path_changed {
+                            viewer.invalidate_viewport_cache();
+                        }
+                    }
+                }
+
+                self.reconcile_thought_log_sessions(&sessions);
+                self.capture_thought_updates(&sessions, layout.thought_entry_capacity());
+                self.merge_sessions(sessions, layout.overview_field);
+
+                if result.show_success_message {
+                    let count = self.entities.len();
+                    self.set_message(format!("refreshed {count} session{}", pluralize(count)));
+                }
+            }
+            Err(err) => {
+                self.set_message(err);
+            }
+        }
+
+        if let Some(native_result) = result.native_status {
+            match native_result {
                 Ok(status) => {
                     self.native_status = Some(status);
                 }
@@ -801,15 +1187,16 @@ impl<C: TuiApi> App<C> {
     }
 
     pub(crate) fn open_thought_config_editor(&mut self) {
-        match self.runtime.block_on(self.client.fetch_thought_config()) {
-            Ok(response) => {
-                self.thought_config_editor = Some(ThoughtConfigEditorState::new(
-                    response.config,
-                    response.daemon_defaults,
-                ));
-            }
-            Err(err) => self.set_message(err),
-        }
+        let Some(tx) = self.begin_pending_interaction() else {
+            return;
+        };
+
+        let client = Arc::clone(&self.client);
+        self.set_message("loading thought config...");
+        self.runtime.spawn(async move {
+            let response = client.fetch_thought_config().await;
+            let _ = tx.send(PendingInteractionResult::OpenThoughtConfig { response });
+        });
     }
 
     pub(crate) fn close_thought_config_editor(&mut self) {
@@ -817,6 +1204,15 @@ impl<C: TuiApi> App<C> {
     }
 
     pub(crate) fn handle_thought_config_key(&mut self, key: KeyEvent, layout: WorkspaceLayout) {
+        if self.pending_interaction.is_some() {
+            if key.code == KeyCode::Esc {
+                self.close_thought_config_editor();
+            } else {
+                self.set_message("wait for the current action to finish");
+            }
+            return;
+        }
+
         match key.code {
             KeyCode::Esc => self.close_thought_config_editor(),
             KeyCode::Up => {
@@ -859,6 +1255,10 @@ impl<C: TuiApi> App<C> {
     }
 
     pub(crate) fn handle_thought_config_paste(&mut self, text: &str) {
+        if self.pending_interaction.is_some() {
+            self.set_message("wait for the current action to finish");
+            return;
+        }
         if let Some(editor) = &mut self.thought_config_editor {
             if editor.focus == ThoughtConfigEditorField::Model {
                 editor.config.model.push_str(text);
@@ -916,38 +1316,20 @@ impl<C: TuiApi> App<C> {
         if let Some(editor) = &mut self.thought_config_editor {
             editor.config.model = config.model.clone();
         }
-        let target = format!(
-            "{} / {}",
-            if config.backend.trim().is_empty() {
-                "auto"
-            } else {
-                config.backend.as_str()
-            },
-            if config.model.trim().is_empty() {
-                "daemon default"
-            } else {
-                config.model.as_str()
-            }
-        );
-        match self
-            .runtime
-            .block_on(self.client.test_thought_config(config))
-        {
-            Ok(test) if test.ok => self.set_message(format!("test ok: {target}")),
-            Ok(test) => {
-                if let Some(message) =
-                    self.try_openrouter_rotation(&target, &test.message, daemon_defaults, false)
-                {
-                    self.set_message(message);
-                } else {
-                    self.set_message(format!("test failed: {target} | {}", test.message));
-                }
-            }
-            Err(err) => self.set_message(format!("test error: {target} | {err}")),
-        }
+        let Some(tx) = self.begin_pending_interaction() else {
+            return;
+        };
+
+        let client = Arc::clone(&self.client);
+        self.set_message("testing thought config...");
+        self.runtime.spawn(async move {
+            let outcome =
+                Self::run_thought_config_test_action(client, config, daemon_defaults).await;
+            let _ = tx.send(PendingInteractionResult::TestThoughtConfig { outcome });
+        });
     }
 
-    pub(crate) fn submit_thought_config(&mut self, layout: WorkspaceLayout) {
+    pub(crate) fn submit_thought_config(&mut self, _layout: WorkspaceLayout) {
         let Some(mut config) = self
             .thought_config_editor
             .as_ref()
@@ -960,88 +1342,139 @@ impl<C: TuiApi> App<C> {
             .as_ref()
             .and_then(|editor| editor.daemon_defaults.clone());
         config.model = config.model.trim().to_string();
-        match self
-            .runtime
-            .block_on(self.client.update_thought_config(config))
-        {
-            Ok(saved) => {
-                if let Some(editor) = &mut self.thought_config_editor {
-                    editor.config = saved.clone();
-                }
-                let save_summary = format!(
-                    "{} / {}",
-                    if saved.backend.trim().is_empty() {
-                        "auto"
-                    } else {
-                        saved.backend.as_str()
-                    },
-                    if saved.model.trim().is_empty() {
-                        "daemon default"
-                    } else {
-                        saved.model.as_str()
-                    }
-                );
-                let test_summary = match self
-                    .runtime
-                    .block_on(self.client.test_thought_config(saved.clone()))
-                {
-                    Ok(test) if test.ok => format!("saved {save_summary} | test ok"),
-                    Ok(test) => self
-                        .try_openrouter_rotation(
-                            &save_summary,
-                            &test.message,
-                            daemon_defaults,
-                            true,
-                        )
-                        .unwrap_or_else(|| format!("saved {save_summary} | {}", test.message)),
-                    Err(err) => format!("saved {save_summary} | test error: {err}"),
-                };
-                self.close_thought_config_editor();
-                self.set_message(test_summary);
-                self.refresh(layout);
-            }
-            Err(err) => self.set_message(err),
+        if let Some(editor) = &mut self.thought_config_editor {
+            editor.config.model = config.model.clone();
+        }
+        let Some(tx) = self.begin_pending_interaction() else {
+            return;
+        };
+
+        let client = Arc::clone(&self.client);
+        self.set_message("saving thought config...");
+        self.runtime.spawn(async move {
+            let outcome =
+                Self::run_thought_config_save_action(client, config, daemon_defaults).await;
+            let _ = tx.send(PendingInteractionResult::SaveThoughtConfig { outcome });
+        });
+    }
+
+    async fn run_thought_config_test_action(
+        client: Arc<C>,
+        config: ThoughtConfig,
+        daemon_defaults: Option<DaemonDefaults>,
+    ) -> ThoughtConfigActionOutcome {
+        let target = Self::thought_config_target_summary(&config);
+        match client.test_thought_config(config.clone()).await {
+            Ok(test) if test.ok => ThoughtConfigActionOutcome {
+                message: format!("test ok: {target}"),
+                updated_config: None,
+                openrouter_candidates: None,
+                close_editor: false,
+                refresh_sessions: false,
+            },
+            Ok(test) => Self::try_openrouter_rotation(
+                client,
+                &config,
+                daemon_defaults,
+                false,
+                target.clone(),
+                test.message.clone(),
+            )
+            .await
+            .unwrap_or_else(|| ThoughtConfigActionOutcome {
+                message: format!("test failed: {target} | {}", test.message),
+                updated_config: None,
+                openrouter_candidates: None,
+                close_editor: false,
+                refresh_sessions: false,
+            }),
+            Err(err) => ThoughtConfigActionOutcome {
+                message: format!("test error: {target} | {err}"),
+                updated_config: None,
+                openrouter_candidates: None,
+                close_editor: false,
+                refresh_sessions: false,
+            },
         }
     }
 
-    fn try_openrouter_rotation(
-        &mut self,
-        target: &str,
-        failure_message: &str,
+    async fn run_thought_config_save_action(
+        client: Arc<C>,
+        config: ThoughtConfig,
+        daemon_defaults: Option<DaemonDefaults>,
+    ) -> ThoughtConfigActionOutcome {
+        match client.update_thought_config(config).await {
+            Ok(saved) => {
+                let save_summary = Self::thought_config_target_summary(&saved);
+                let maybe_rotation = match client.test_thought_config(saved.clone()).await {
+                    Ok(test) if test.ok => None,
+                    Ok(test) => Self::try_openrouter_rotation(
+                        Arc::clone(&client),
+                        &saved,
+                        daemon_defaults,
+                        true,
+                        save_summary.clone(),
+                        test.message.clone(),
+                    )
+                    .await
+                    .or_else(|| {
+                        Some(ThoughtConfigActionOutcome {
+                            message: format!("saved {save_summary} | {}", test.message),
+                            updated_config: None,
+                            openrouter_candidates: None,
+                            close_editor: true,
+                            refresh_sessions: true,
+                        })
+                    }),
+                    Err(err) => Some(ThoughtConfigActionOutcome {
+                        message: format!("saved {save_summary} | test error: {err}"),
+                        updated_config: None,
+                        openrouter_candidates: None,
+                        close_editor: true,
+                        refresh_sessions: true,
+                    }),
+                };
+                maybe_rotation.unwrap_or(ThoughtConfigActionOutcome {
+                    message: format!("saved {save_summary} | test ok"),
+                    updated_config: None,
+                    openrouter_candidates: None,
+                    close_editor: true,
+                    refresh_sessions: true,
+                })
+            }
+            Err(err) => ThoughtConfigActionOutcome {
+                message: err,
+                updated_config: None,
+                openrouter_candidates: None,
+                close_editor: false,
+                refresh_sessions: false,
+            },
+        }
+    }
+
+    async fn try_openrouter_rotation(
+        client: Arc<C>,
+        config: &ThoughtConfig,
         daemon_defaults: Option<DaemonDefaults>,
         persist: bool,
-    ) -> Option<String> {
-        let config = self
-            .thought_config_editor
-            .as_ref()
-            .map(|editor| editor.config.clone())?;
-        if !self.is_effective_openrouter_backend(&config, daemon_defaults.as_ref())
-            || !should_rotate_openrouter_model(failure_message)
+        target: String,
+        failure_message: String,
+    ) -> Option<ThoughtConfigActionOutcome> {
+        if !Self::is_effective_openrouter_backend(config, daemon_defaults.as_ref())
+            || !should_rotate_openrouter_model(&failure_message)
         {
             return None;
         }
 
-        let candidates = match self
-            .runtime
-            .block_on(self.client.refresh_openrouter_candidates())
-        {
-            Ok(models) => models,
-            Err(_) => return None,
-        };
-        if let Some(editor) = &mut self.thought_config_editor {
-            editor.replace_openrouter_model_presets(candidates.clone());
-        }
-
-        for candidate in candidates {
+        let candidates = client.refresh_openrouter_candidates().await.ok()?;
+        for candidate in &candidates {
             if candidate.eq_ignore_ascii_case(config.model.trim()) {
                 continue;
             }
+
             let mut rotated = config.clone();
             rotated.model = candidate.clone();
-            let test = match self
-                .runtime
-                .block_on(self.client.test_thought_config(rotated.clone()))
-            {
+            let test = match client.test_thought_config(rotated.clone()).await {
                 Ok(test) => test,
                 Err(_) => continue,
             };
@@ -1050,39 +1483,43 @@ impl<C: TuiApi> App<C> {
             }
 
             if persist {
-                match self
-                    .runtime
-                    .block_on(self.client.update_thought_config(rotated.clone()))
-                {
-                    Ok(saved) => {
-                        if let Some(editor) = &mut self.thought_config_editor {
-                            editor.config = saved;
-                        }
-                        return Some(format!(
+                return Some(match client.update_thought_config(rotated).await {
+                    Ok(_) => ThoughtConfigActionOutcome {
+                        message: format!(
                             "saved {target} | rotated to {candidate} after OpenRouter catalog refresh | test ok"
-                        ));
-                    }
-                    Err(err) => {
-                        return Some(format!(
+                        ),
+                        updated_config: None,
+                        openrouter_candidates: Some(candidates),
+                        close_editor: true,
+                        refresh_sessions: true,
+                    },
+                    Err(err) => ThoughtConfigActionOutcome {
+                        message: format!(
                             "saved {target} | rotated probe found {candidate}, but save failed: {err}"
-                        ));
-                    }
-                }
+                        ),
+                        updated_config: None,
+                        openrouter_candidates: Some(candidates),
+                        close_editor: true,
+                        refresh_sessions: true,
+                    },
+                });
             }
 
-            if let Some(editor) = &mut self.thought_config_editor {
-                editor.config.model = candidate.clone();
-            }
-            return Some(format!(
-                "test failed: {target} | rotated to {candidate} after OpenRouter catalog refresh | test ok"
-            ));
+            return Some(ThoughtConfigActionOutcome {
+                message: format!(
+                    "test failed: {target} | rotated to {candidate} after OpenRouter catalog refresh | test ok"
+                ),
+                updated_config: Some(rotated),
+                openrouter_candidates: Some(candidates),
+                close_editor: false,
+                refresh_sessions: false,
+            });
         }
 
         None
     }
 
     fn is_effective_openrouter_backend(
-        &self,
         config: &ThoughtConfig,
         daemon_defaults: Option<&DaemonDefaults>,
     ) -> bool {
@@ -1095,35 +1532,49 @@ impl<C: TuiApi> App<C> {
                 .unwrap_or(false)
     }
 
+    fn thought_config_target_summary(config: &ThoughtConfig) -> String {
+        format!(
+            "{} / {}",
+            if config.backend.trim().is_empty() {
+                "auto"
+            } else {
+                config.backend.as_str()
+            },
+            if config.model.trim().is_empty() {
+                "daemon default"
+            } else {
+                config.model.as_str()
+            }
+        )
+    }
+
     pub(crate) fn open_picker(&mut self, x: u16, y: u16) {
-        match self.runtime.block_on(self.client.list_dirs(None, true)) {
-            Ok(response) => {
-                let mut picker = PickerState::new(x, y, response, true, self.spawn_tool);
-                picker.sync_theme_colors(&mut self.repo_themes);
-                self.picker = Some(picker);
-            }
-            Err(err) => {
-                self.set_message(err);
-                self.picker = None;
-            }
-        }
+        let Some(tx) = self.begin_pending_interaction() else {
+            return;
+        };
+
+        let client = Arc::clone(&self.client);
+        self.set_message("loading directories...");
+        self.runtime.spawn(async move {
+            let response = client.list_dirs(None, true).await;
+            let _ = tx.send(PendingInteractionResult::OpenPicker { x, y, response });
+        });
     }
 
     pub(crate) fn picker_reload(&mut self, path: Option<String>, managed_only: bool) {
-        let target = path.clone();
-        match self
-            .runtime
-            .block_on(self.client.list_dirs(target.as_deref(), managed_only))
-        {
-            Ok(response) => {
-                if let Some(picker) = &mut self.picker {
-                    picker.managed_only = managed_only;
-                    picker.apply_response(response);
-                    picker.sync_theme_colors(&mut self.repo_themes);
-                }
-            }
-            Err(err) => self.set_message(err),
-        }
+        let Some(tx) = self.begin_pending_interaction() else {
+            return;
+        };
+
+        let client = Arc::clone(&self.client);
+        self.set_message("loading directories...");
+        self.runtime.spawn(async move {
+            let response = client.list_dirs(path.as_deref(), managed_only).await;
+            let _ = tx.send(PendingInteractionResult::ReloadPicker {
+                managed_only,
+                response,
+            });
+        });
     }
 
     pub(crate) fn picker_up(&mut self) {
@@ -1251,35 +1702,35 @@ impl<C: TuiApi> App<C> {
         initial_request: Option<String>,
         field: Rect,
     ) {
-        match self.runtime.block_on(self.client.create_session(
-            cwd,
-            self.spawn_tool,
-            initial_request,
-        )) {
-            Ok(response) => {
-                let repo_theme = response.repo_theme.clone();
-                let session = response.session;
-                let session_id = session.session_id.clone();
-                let tmux_name = session.tmux_name.clone();
-                self.remember_repo_theme(&session, repo_theme);
-                self.upsert_session(session, field);
-                self.selected_id = Some(session_id);
-                self.reconcile_selection();
-                self.sync_selection_publication();
-                self.close_picker();
-                self.set_message(format!("created {tmux_name}"));
-            }
-            Err(err) => self.set_message(err),
-        }
+        let Some(tx) = self.begin_pending_interaction() else {
+            return;
+        };
+
+        let client = Arc::clone(&self.client);
+        let cwd = cwd.to_string();
+        let spawn_tool = self.spawn_tool;
+        self.set_message("creating session...");
+        self.runtime.spawn(async move {
+            let response = client
+                .create_session(&cwd, spawn_tool, initial_request)
+                .await;
+            let _ = tx.send(PendingInteractionResult::CreateSession { field, response });
+        });
     }
 
     pub(crate) fn open_session_for_label(&mut self, session_id: &str, label: &str) {
-        match self.runtime.block_on(self.client.open_session(session_id)) {
-            Ok(response) => {
-                self.set_message(format!("{} {}", response.status, label));
-            }
-            Err(err) => self.set_message(err),
-        }
+        let Some(tx) = self.begin_pending_interaction() else {
+            return;
+        };
+
+        let client = Arc::clone(&self.client);
+        let session_id = session_id.to_string();
+        let label = label.to_string();
+        self.set_message(format!("opening {label}..."));
+        self.runtime.spawn(async move {
+            let response = client.open_session(&session_id).await;
+            let _ = tx.send(PendingInteractionResult::OpenSession { label, response });
+        });
     }
 
     pub(crate) fn open_selected(&mut self) {
@@ -1419,7 +1870,11 @@ impl<C: TuiApi> App<C> {
                     }
                 }
             }
-            if tabs.len() > 1 { Some(tabs) } else { None }
+            if tabs.len() > 1 {
+                Some(tabs)
+            } else {
+                None
+            }
         });
         self.fish_bowl_mode = FishBowlMode::Mermaid(MermaidViewerState {
             session_id: session.session_id.clone(),
@@ -1473,7 +1928,10 @@ impl<C: TuiApi> App<C> {
     pub(crate) fn switch_plan_tab(&mut self, tab: DomainPlanTab) {
         let is_valid = match &self.fish_bowl_mode {
             FishBowlMode::Mermaid(viewer) => {
-                viewer.plan_tabs.as_ref().map_or(false, |tabs| tabs.contains(&tab))
+                viewer
+                    .plan_tabs
+                    .as_ref()
+                    .map_or(false, |tabs| tabs.contains(&tab))
                     && viewer.active_tab != tab
             }
             FishBowlMode::Aquarium => false,
@@ -1532,7 +1990,9 @@ impl<C: TuiApi> App<C> {
     }
 
     pub(crate) fn scroll_plan_text(&mut self, delta: isize) {
-        let Some(viewer) = self.mermaid_viewer_mut() else { return };
+        let Some(viewer) = self.mermaid_viewer_mut() else {
+            return;
+        };
         let max = viewer.plan_text_lines.len().saturating_sub(1);
         viewer.plan_text_scroll =
             (viewer.plan_text_scroll as isize + delta).clamp(0, max as isize) as usize;

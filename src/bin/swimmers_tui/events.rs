@@ -1,5 +1,9 @@
 use super::*;
 
+pub(crate) fn should_background_startup_refresh(client: &ApiClient) -> bool {
+    client.targets_local_backend()
+}
+
 pub(crate) fn initialize_tui_app() -> Result<(App<ApiClient>, Renderer), Box<dyn std::error::Error>>
 {
     let _ = dotenvy::dotenv();
@@ -7,15 +11,24 @@ pub(crate) fn initialize_tui_app() -> Result<(App<ApiClient>, Renderer), Box<dyn
 
     let runtime = Runtime::new()?;
     let client = ApiClient::from_env().map_err(io::Error::other)?;
-    runtime
-        .block_on(client.preflight_startup_access())
-        .map_err(io::Error::other)?;
+    let background_startup_refresh = should_background_startup_refresh(&client);
+    if !background_startup_refresh {
+        runtime
+            .block_on(client.preflight_startup_access())
+            .map_err(io::Error::other)?;
+    }
+    let startup_base_url = client.base_url.clone();
     let mut renderer = Renderer::new()?;
     renderer.init()?;
 
     let mut app = App::new(runtime, client);
     let initial_layout = app.layout_for_terminal(renderer.width(), renderer.height());
-    app.refresh(initial_layout);
+    if background_startup_refresh {
+        app.set_message(format!("connecting to swimmers API at {startup_base_url}"));
+        app.spawn_background_refresh(false);
+    } else {
+        app.refresh(initial_layout);
+    }
 
     Ok((app, renderer))
 }
@@ -29,8 +42,11 @@ pub(crate) fn prepare_frame<C: TuiApi>(
         app.stop_split_drag();
     }
     app.trim_thought_log(layout.thought_entry_capacity());
-    if app.should_refresh() {
-        app.refresh(layout);
+    app.poll_pending_selection_publication();
+    app.poll_pending_interaction();
+    app.poll_refresh(layout);
+    if app.should_refresh() && app.pending_refresh.is_none() {
+        app.spawn_background_refresh(false);
     }
     app.tick(layout.overview_field);
     app.render(renderer, layout);

@@ -29,6 +29,7 @@ use mermaid_rs_renderer::{
 use reqwest::Client;
 use resvg::tiny_skia::{Pixmap, Transform};
 use tokio::runtime::Runtime;
+use tokio::sync::oneshot;
 use usvg::Tree;
 
 use swimmers::config::{AuthMode, Config};
@@ -36,19 +37,24 @@ use swimmers::repo_theme::{discover_repo_theme, existing_repo_theme};
 use swimmers::thought::runtime_config::{DaemonDefaults, ThoughtConfig};
 use swimmers::types::{
     CreateSessionRequest, CreateSessionResponse, DirEntry, DirListResponse, ErrorResponse,
-    GhosttyOpenMode, MermaidArtifactResponse, NativeDesktopApp, NativeDesktopConfigRequest, PlanFileResponse,
+    GhosttyOpenMode, MermaidArtifactResponse, NativeDesktopApp, NativeDesktopConfigRequest,
     NativeDesktopModeRequest, NativeDesktopOpenRequest, NativeDesktopOpenResponse,
-    NativeDesktopStatusResponse, PublishSelectionRequest, RepoTheme, RestState,
+    NativeDesktopStatusResponse, PlanFileResponse, PublishSelectionRequest, RepoTheme, RestState,
     SessionListResponse, SessionState, SessionSummary, SpawnTool,
 };
 
 const MIN_WIDTH: u16 = 70;
 const MIN_HEIGHT: u16 = 20;
-const FRAME_DURATION: Duration = Duration::from_millis(100);
+const FRAME_DURATION: Duration = Duration::from_millis(33);
 const REFRESH_INTERVAL: Duration = Duration::from_secs(2);
 const MESSAGE_TTL: Duration = Duration::from_secs(5);
 const API_CONNECT_TIMEOUT: Duration = Duration::from_millis(250);
 const API_REQUEST_TIMEOUT: Duration = Duration::from_millis(2_000);
+const API_DIRECTORY_LIST_TIMEOUT: Duration = Duration::from_secs(5);
+const API_CREATE_SESSION_TIMEOUT: Duration = Duration::from_secs(10);
+const API_STARTUP_REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
+const API_STARTUP_WAIT_TIMEOUT: Duration = Duration::from_secs(20);
+const API_STARTUP_RETRY_INTERVAL: Duration = Duration::from_millis(250);
 const API_NATIVE_OPEN_TIMEOUT: Duration = Duration::from_secs(3);
 const SPRITE_HEIGHT: u16 = 4;
 const LABEL_HEIGHT: u16 = 1;

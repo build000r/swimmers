@@ -81,6 +81,20 @@ target_is_loopback() {
   host_is_loopback "${host}"
 }
 
+local_api_listener_exists() {
+  local parsed host port
+  parsed="$(parse_url_host_port "${TUI_URL}")"
+  host="${parsed%%$'\t'*}"
+  port="${parsed#*$'\t'}"
+
+  if ! host_is_loopback "${host}"; then
+    return 1
+  fi
+
+  require lsof
+  lsof -nP -t -iTCP:"${port}" -sTCP:LISTEN >/dev/null 2>&1
+}
+
 should_auto_start_local_api() {
   if is_true "${WAIT_ONLY}"; then
     return 1
@@ -215,6 +229,29 @@ start_local_api() {
   (
     nohup bash -lc "${launch_cmd}" >>"${SERVER_LOG}" 2>&1 &
   )
+}
+
+restart_local_api() {
+  stop_local_api_listener || true
+  start_local_api
+  wait_for_api "${START_TIMEOUT}"
+}
+
+handle_local_probe_failure() {
+  local probe_status="${1:-1}"
+
+  if (( probe_status == 10 )); then
+    show_api_auth_failure "$(api_url)"
+    return 1
+  fi
+
+  if local_api_listener_exists; then
+    printf 'Existing local swimmers API listener is responding too slowly; restarting it\n'
+    stop_local_api_listener || true
+  fi
+
+  start_local_api
+  wait_for_api "${START_TIMEOUT}"
 }
 
 stop_local_api_listener() {
@@ -362,9 +399,7 @@ main() {
   if probe_api_access "$(api_url)"; then
     if should_auto_start_local_api; then
       printf 'Rebuilding local swimmers API to pick up code changes\n'
-      stop_local_api_listener || true
-      start_local_api
-      wait_for_api "${START_TIMEOUT}"
+      restart_local_api
     else
       printf 'swimmers API is ready (%s)\n' "${LAST_API_STATUS}"
     fi
@@ -376,17 +411,10 @@ main() {
     elif should_auto_start_local_api; then
       if wait_for_api_quiet "${PRESTART_WAIT_TIMEOUT}"; then
         printf 'Rebuilding local swimmers API to pick up code changes\n'
-        stop_local_api_listener || true
-        start_local_api
-        wait_for_api "${START_TIMEOUT}"
+        restart_local_api
       else
         probe_status=$?
-        if (( probe_status == 10 )); then
-          show_api_auth_failure "$(api_url)"
-          return 1
-        fi
-        start_local_api
-        wait_for_api "${START_TIMEOUT}"
+        handle_local_probe_failure "${probe_status}"
       fi
     else
       wait_for_api "${WAIT_TIMEOUT}"

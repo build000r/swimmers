@@ -356,19 +356,16 @@ impl TuiApi for MockApi {
         Box::pin(async move {
             let mut locked = state.lock().unwrap();
             locked.native_status_calls += 1;
-            locked
-                .native_status_results
-                .pop_front()
-                .unwrap_or_else(|| {
-                    Ok(NativeDesktopStatusResponse {
-                        supported: true,
-                        platform: Some("test".to_string()),
-                        app_id: Some(NativeDesktopApp::Iterm),
-                        ghostty_mode: None,
-                        app: Some(NativeDesktopApp::Iterm.display_name().to_string()),
-                        reason: None,
-                    })
+            locked.native_status_results.pop_front().unwrap_or_else(|| {
+                Ok(NativeDesktopStatusResponse {
+                    supported: true,
+                    platform: Some("test".to_string()),
+                    app_id: Some(NativeDesktopApp::Iterm),
+                    ghostty_mode: None,
+                    app: Some(NativeDesktopApp::Iterm.display_name().to_string()),
+                    reason: None,
                 })
+            })
         })
     }
 
@@ -605,16 +602,32 @@ fn make_app_with_commit_launcher(
     )
 }
 
+fn test_http_client(timeout: Duration) -> Client {
+    Client::builder()
+        .connect_timeout(Duration::from_millis(50))
+        .timeout(timeout)
+        .build()
+        .expect("http client")
+}
+
 fn test_api_client(base_url: String, auth_token: Option<&str>) -> ApiClient {
     ApiClient {
-        http: Client::builder()
-            .connect_timeout(Duration::from_millis(50))
-            .timeout(Duration::from_millis(100))
-            .build()
-            .expect("http client"),
+        http: test_http_client(Duration::from_millis(100)),
+        startup_http: test_http_client(Duration::from_millis(250)),
         base_url,
         auth_token: auth_token.map(str::to_string),
+        startup_wait_timeout: Duration::from_millis(400),
+        startup_retry_interval: Duration::from_millis(10),
     }
+}
+
+#[test]
+fn local_targets_use_background_startup_refresh() {
+    let client = test_api_client("http://127.0.0.1:3210".to_string(), None);
+    assert!(should_background_startup_refresh(&client));
+
+    let remote = test_api_client("http://100.101.123.63:3210".to_string(), None);
+    assert!(!should_background_startup_refresh(&remote));
 }
 
 fn restore_env_var(key: &str, value: Option<String>) {
@@ -650,6 +663,43 @@ sleep 5
     perms.set_mode(0o755);
     fs::set_permissions(&script_path, perms).expect("mark fake clawgs executable");
     script_path
+}
+
+/// Poll `pending_refresh` until the background result arrives and is applied.
+fn poll_until_refresh(app: &mut App<MockApi>, layout: WorkspaceLayout) {
+    for _ in 0..200 {
+        app.poll_refresh(layout);
+        if app.pending_refresh.is_none() {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    panic!("background refresh did not complete within timeout");
+}
+
+/// Poll `pending_interaction` until the background result arrives and is applied.
+fn poll_until_interaction(app: &mut App<MockApi>) {
+    for _ in 0..200 {
+        app.poll_pending_interaction();
+        if app.pending_interaction.is_none() {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    panic!("background interaction did not complete within timeout");
+}
+
+/// Poll selection publication until there is no in-flight or queued publish left.
+fn poll_until_selection_publication(app: &mut App<MockApi>) {
+    for _ in 0..200 {
+        app.poll_pending_selection_publication();
+        if app.pending_selection_publication.is_none() && app.queued_selection_publication.is_none()
+        {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    panic!("selection publication did not complete within timeout");
 }
 
 #[test]
@@ -825,6 +875,7 @@ async fn spawn_delayed_api_server(
     sessions_delay: Option<Duration>,
     native_open_delay: Option<Duration>,
 ) -> (String, tokio::task::JoinHandle<()>) {
+    use axum::http::StatusCode;
     use axum::routing::{get, post, put};
     use axum::{Json, Router};
 
@@ -842,6 +893,7 @@ async fn spawn_delayed_api_server(
                 })
             }),
         )
+        .route("/v1/selection", put(|| async { StatusCode::OK }))
         .route(
             "/v1/native/open",
             post(move || async move {
@@ -894,6 +946,56 @@ async fn spawn_delayed_api_server(
     (format!("http://{addr}"), handle)
 }
 
+async fn spawn_delayed_create_api_server(
+    create_delay: Duration,
+) -> (String, tokio::task::JoinHandle<()>) {
+    use axum::routing::post;
+    use axum::{Json, Router};
+
+    let app = Router::new().route(
+        "/v1/sessions",
+        post(move || async move {
+            tokio::time::sleep(create_delay).await;
+            Json(create_response("sess-1", "7", TEST_REPO_SWIMMERS))
+        }),
+    );
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind test server");
+    let addr = listener.local_addr().expect("server addr");
+    let handle = tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("serve test api");
+    });
+
+    (format!("http://{addr}"), handle)
+}
+
+async fn spawn_delayed_dirs_api_server(
+    list_delay: Duration,
+) -> (String, tokio::task::JoinHandle<()>) {
+    use axum::routing::get;
+    use axum::{Json, Router};
+
+    let app = Router::new().route(
+        "/v1/dirs",
+        get(move || async move {
+            tokio::time::sleep(list_delay).await;
+            Json(dir_response(TEST_REPOS_ROOT, &[("swimmers", false)]))
+        }),
+    );
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind test server");
+    let addr = listener.local_addr().expect("server addr");
+    let handle = tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("serve test api");
+    });
+
+    (format!("http://{addr}"), handle)
+}
+
 #[tokio::test]
 async fn api_client_open_session_allows_slower_native_open_responses() {
     let (base_url, handle) = spawn_delayed_api_server(None, Some(Duration::from_millis(150))).await;
@@ -908,6 +1010,43 @@ async fn api_client_open_session_allows_slower_native_open_responses() {
     assert_eq!(response.session_id, "sess-1");
     assert_eq!(response.status, "focused");
     assert_eq!(response.pane_id.as_deref(), Some("pane-1"));
+}
+
+#[tokio::test]
+async fn api_client_create_session_allows_slower_session_creation_responses() {
+    let (base_url, handle) = spawn_delayed_create_api_server(Duration::from_millis(150)).await;
+    let client = test_api_client(base_url, None);
+
+    let response = client
+        .create_session(TEST_REPO_SWIMMERS, SpawnTool::Codex, None)
+        .await
+        .expect("create session should outlive the default polling timeout");
+
+    handle.abort();
+    assert_eq!(response.session.session_id, "sess-1");
+    assert_eq!(response.session.tmux_name, "7");
+}
+
+#[tokio::test]
+async fn api_client_list_dirs_allows_slower_directory_listing_responses() {
+    let (base_url, handle) = spawn_delayed_dirs_api_server(Duration::from_millis(150)).await;
+    let client = test_api_client(base_url, None);
+
+    let response = client
+        .list_dirs(None, true)
+        .await
+        .expect("list dirs should outlive the default polling timeout");
+
+    handle.abort();
+    assert_eq!(response.path, TEST_REPOS_ROOT);
+    assert_eq!(
+        response
+            .entries
+            .iter()
+            .map(|entry| entry.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["swimmers"]
+    );
 }
 
 #[tokio::test]
@@ -1007,6 +1146,86 @@ async fn api_client_fetch_sessions_keeps_short_timeout_for_refresh() {
 }
 
 #[tokio::test]
+async fn startup_preflight_waits_for_slow_local_sessions() {
+    let (base_url, handle) = spawn_delayed_api_server(Some(Duration::from_millis(150)), None).await;
+    let client = test_api_client(base_url, None);
+
+    let result = client.preflight_startup_access().await;
+
+    handle.abort();
+    assert!(
+        result.is_ok(),
+        "local startup preflight should allow cold responses"
+    );
+}
+
+#[tokio::test]
+async fn startup_preflight_retries_until_local_listener_is_ready() {
+    use axum::http::StatusCode;
+    use axum::routing::{get, put};
+    use axum::{Json, Router};
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
+    let port = listener.local_addr().expect("local addr").port();
+    drop(listener);
+
+    let handle = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(120)).await;
+        let app = Router::new()
+            .route(
+                "/v1/sessions",
+                get(|| async {
+                    Json(SessionListResponse {
+                        sessions: vec![session_summary("sess-1", "7", TEST_REPO_SWIMMERS)],
+                        version: 1,
+                        repo_themes: HashMap::new(),
+                    })
+                }),
+            )
+            .route("/v1/selection", put(|| async { StatusCode::OK }));
+        let listener = tokio::net::TcpListener::bind(format!("127.0.0.1:{port}"))
+            .await
+            .expect("bind delayed startup server");
+        axum::serve(listener, app)
+            .await
+            .expect("serve delayed startup api");
+    });
+
+    let client = test_api_client(format!("http://127.0.0.1:{port}"), None);
+    let result = client.preflight_startup_access().await;
+
+    handle.abort();
+    assert!(
+        result.is_ok(),
+        "startup preflight should retry local transport errors"
+    );
+}
+
+#[tokio::test]
+async fn startup_preflight_times_out_after_local_warmup_budget() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind an ephemeral port");
+    let port = listener.local_addr().expect("local addr").port();
+    drop(listener);
+
+    let client = ApiClient {
+        http: test_http_client(Duration::from_millis(100)),
+        startup_http: test_http_client(Duration::from_millis(100)),
+        base_url: format!("http://127.0.0.1:{port}"),
+        auth_token: None,
+        startup_wait_timeout: Duration::from_millis(40),
+        startup_retry_interval: Duration::from_millis(10),
+    };
+
+    let error = client
+        .preflight_startup_access()
+        .await
+        .expect_err("missing local backend should fail after startup budget");
+
+    assert!(error.contains("swimmers API unavailable at"));
+    assert!(error.contains("Start `swimmers` or set SWIMMERS_TUI_URL."));
+}
+
+#[tokio::test]
 async fn startup_preflight_accepts_matching_bearer_token() {
     let (base_url, handle) =
         spawn_guarded_startup_server("testtoken", axum::http::StatusCode::OK).await;
@@ -1097,6 +1316,7 @@ fn manual_refresh_reports_session_count() {
     let mut app = make_app(api);
 
     app.manual_refresh(layout);
+    poll_until_refresh(&mut app, layout);
 
     assert_eq!(
         app.message.as_ref().map(|(message, _)| message.as_str()),
@@ -1161,11 +1381,7 @@ fn refresh_sessions_error_not_overwritten_by_native_status_error() {
 
     app.refresh(layout);
 
-    let msg = app
-        .message
-        .as_ref()
-        .map(|(m, _)| m.as_str())
-        .unwrap_or("");
+    let msg = app.message.as_ref().map(|(m, _)| m.as_str()).unwrap_or("");
     assert!(
         msg.contains("refresh sessions"),
         "expected sessions error, got: {msg}"
@@ -1192,7 +1408,10 @@ fn refresh_retains_cached_native_status_when_sessions_fail() {
     api.push_native_status(Ok(cached.clone()));
     let mut app = make_app(api.clone());
     app.refresh(layout);
-    assert!(app.native_status.is_some(), "setup: native_status should be populated");
+    assert!(
+        app.native_status.is_some(),
+        "setup: native_status should be populated"
+    );
 
     api.push_fetch_sessions(Err("backend down".to_string()));
     app.refresh(layout);
@@ -2764,6 +2983,9 @@ fn header_filter_strip_and_thought_rows_apply_and_clear_filters() {
         thought_content,
         layout.thought_entry_capacity(),
     );
+    assert!(app.pending_interaction.is_some());
+
+    poll_until_interaction(&mut app);
 
     assert_eq!(app.thought_filter.cwd.as_deref(), Some(TEST_REPO_SWIMMERS));
     assert_eq!(app.thought_filter.tmux_name, None);
@@ -2959,6 +3181,9 @@ fn clicking_thought_body_opens_that_session() {
         thought_content,
         layout.thought_entry_capacity(),
     );
+    assert!(app.pending_interaction.is_some());
+
+    poll_until_interaction(&mut app);
 
     assert_eq!(app.thought_filter.tmux_name, None);
     assert_eq!(app.active_thought_filter_text(), "filter: none");
@@ -3053,6 +3278,9 @@ fn clicking_wrapped_thought_line_opens_that_session() {
         pane_id: None,
     }));
     app.handle_thought_click(1, row_start_y + 3, thought_content, 4);
+    assert!(app.pending_interaction.is_some());
+
+    poll_until_interaction(&mut app);
 
     assert_eq!(app.thought_filter.tmux_name, None);
     assert_eq!(app.active_thought_filter_text(), "filter: none");
@@ -3104,6 +3332,9 @@ fn clicking_thought_row_surfaces_native_open_errors() {
         thought_content,
         layout.thought_entry_capacity(),
     );
+    assert!(app.pending_interaction.is_some());
+
+    poll_until_interaction(&mut app);
 
     assert_eq!(app.selected_id.as_deref(), Some("sess-1"));
     assert_eq!(api.open_calls(), vec!["sess-1".to_string()]);
@@ -3418,6 +3649,8 @@ fn spawned_selected_entity_matches_thought_color() {
     let mut app = make_app(api);
 
     app.spawn_session(TEST_REPO_SWIMMERS, None, field);
+    assert!(app.pending_interaction.is_some());
+    poll_until_interaction(&mut app);
 
     let mut thought_session = session_summary_with_thought(
         "sess-42",
@@ -4019,6 +4252,10 @@ fn empty_field_click_opens_picker_with_managed_order() {
         .push(entity_at(field, "sess-1", "dev", TEST_REPO_DEV, 30, 8));
 
     app.handle_field_click(10, 10, field);
+    assert!(app.pending_interaction.is_some());
+    assert!(app.picker.is_none());
+
+    poll_until_interaction(&mut app);
 
     let picker = app.picker.as_ref().expect("picker should open");
     assert!(picker.managed_only);
@@ -4044,7 +4281,13 @@ fn navigating_into_folder_opens_initial_request_composer() {
     let mut app = make_app(api.clone());
 
     app.handle_field_click(10, 10, field);
+    assert!(app.pending_interaction.is_some());
+    poll_until_interaction(&mut app);
+
     app.activate_picker_entry(0, field);
+    assert!(app.pending_interaction.is_some());
+    poll_until_interaction(&mut app);
+
     app.activate_picker_entry(0, field);
 
     assert_eq!(
@@ -4098,7 +4341,12 @@ fn toggling_to_all_reloads_same_path_without_reordering() {
     let mut app = make_app(api.clone());
 
     app.handle_field_click(10, 10, field);
+    assert!(app.pending_interaction.is_some());
+    poll_until_interaction(&mut app);
+
     app.picker_set_managed_only(false);
+    assert!(app.pending_interaction.is_some());
+    poll_until_interaction(&mut app);
 
     let picker = app.picker.as_ref().expect("picker should stay open");
     assert!(!picker.managed_only);
@@ -4124,6 +4372,10 @@ fn dir_list_failure_blocks_spawn_and_shows_error() {
     let mut app = make_app(api.clone());
 
     app.handle_field_click(10, 10, field);
+    assert!(app.pending_interaction.is_some());
+    assert!(app.picker.is_none());
+
+    poll_until_interaction(&mut app);
 
     assert!(app.picker.is_none());
     assert_eq!(
@@ -4153,6 +4405,13 @@ fn submitting_initial_request_creates_hidden_session_without_native_open() {
     });
 
     app.submit_initial_request(field);
+    assert!(app.pending_interaction.is_some());
+    assert!(api.open_calls().is_empty());
+    assert!(app.initial_request.is_some());
+    assert!(app.picker.is_some());
+    assert!(app.selected_id.is_none());
+
+    poll_until_interaction(&mut app);
 
     assert_eq!(
         api.create_calls(),
@@ -4212,6 +4471,11 @@ fn pressing_enter_after_pasting_initial_request_submits_once() {
 
     app.handle_paste(pasted);
     app.handle_initial_request_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), field);
+    assert!(app.pending_interaction.is_some());
+    assert!(app.initial_request.is_some());
+    assert!(app.selected_id.is_none());
+
+    poll_until_interaction(&mut app);
 
     assert_eq!(
         api.create_calls(),
@@ -4245,6 +4509,11 @@ fn session_create_failure_does_not_attempt_native_open() {
     });
 
     app.submit_initial_request(field);
+    assert!(app.pending_interaction.is_some());
+    assert!(app.initial_request.is_some());
+    assert!(app.entities.is_empty());
+
+    poll_until_interaction(&mut app);
 
     assert_eq!(
         api.create_calls(),
@@ -4303,6 +4572,11 @@ fn typing_initial_request_and_pressing_enter_still_creates_hidden_session() {
         app.handle_initial_request_key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE), field);
     }
     app.handle_initial_request_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), field);
+    assert!(app.pending_interaction.is_some());
+    assert!(app.initial_request.is_some());
+    assert!(app.selected_id.is_none());
+
+    poll_until_interaction(&mut app);
 
     assert_eq!(
         api.create_calls(),
@@ -4376,6 +4650,14 @@ fn clicking_existing_swimmer_still_opens_it_directly() {
     app.selected_id = Some("sess-7".to_string());
 
     app.handle_field_click(30, 8, field);
+    assert!(app.pending_interaction.is_some());
+    assert_eq!(app.selected_id.as_deref(), Some("sess-7"));
+    assert_eq!(
+        app.message.as_ref().map(|(message, _)| message.as_str()),
+        Some("opening dev...")
+    );
+
+    poll_until_interaction(&mut app);
 
     assert!(api.list_calls().is_empty());
     assert!(api.create_calls().is_empty());
@@ -4400,6 +4682,9 @@ fn filtered_out_swimmers_are_not_click_targets() {
 
     app.set_thought_filter_cwd(TEST_REPO_SWIMMERS.to_string());
     app.handle_field_click(30, 8, field);
+    assert!(app.pending_interaction.is_some());
+
+    poll_until_interaction(&mut app);
 
     assert_eq!(visible_entity_ids(&app), vec!["sess-1".to_string()]);
     assert_eq!(app.selected_id.as_deref(), Some("sess-1"));
@@ -4424,12 +4709,13 @@ fn refresh_clears_selection_when_filters_hide_all_sessions() {
     app.set_thought_filter_cwd(TEST_REPO_SWIMMERS.to_string());
 
     app.refresh(layout);
+    poll_until_selection_publication(&mut app);
 
     assert!(app.visible_entities().is_empty());
     assert!(app.selected_id.is_none());
     assert_eq!(
         api.publish_calls(),
-        vec![Some("sess-2".to_string()), Some("sess-1".to_string()), None,]
+        vec![Some("sess-2".to_string()), None,]
     );
 
     app.open_selected();
@@ -4453,6 +4739,7 @@ fn refresh_publishes_selected_session_for_external_dispatch() {
     let mut app = make_app(api.clone());
 
     app.refresh(layout);
+    poll_until_selection_publication(&mut app);
 
     assert_eq!(app.selected_id.as_deref(), Some("sess-swimmers"));
     assert_eq!(api.publish_calls(), vec![Some("sess-swimmers".to_string())]);
@@ -4555,6 +4842,9 @@ fn toggle_tool_switches_spawn_tool_and_persists_across_picker_reopen() {
     let mut app = make_app(api.clone());
 
     app.handle_field_click(10, 10, field);
+    assert!(app.pending_interaction.is_some());
+    poll_until_interaction(&mut app);
+
     assert_eq!(app.spawn_tool, SpawnTool::Codex);
     assert_eq!(
         app.picker.as_ref().map(|p| p.spawn_tool),
@@ -4570,6 +4860,9 @@ fn toggle_tool_switches_spawn_tool_and_persists_across_picker_reopen() {
 
     app.close_picker();
     app.handle_field_click(10, 10, field);
+    assert!(app.pending_interaction.is_some());
+    poll_until_interaction(&mut app);
+
     assert_eq!(
         app.picker.as_ref().map(|p| p.spawn_tool),
         Some(SpawnTool::Claude)
@@ -4589,6 +4882,9 @@ fn spawn_session_uses_selected_tool() {
     });
 
     app.submit_initial_request(field);
+    assert!(app.pending_interaction.is_some());
+
+    poll_until_interaction(&mut app);
 
     assert_eq!(
         api.create_calls(),
@@ -4804,6 +5100,9 @@ fn handle_key_event_opens_thought_config_editor() {
         layout,
         KeyEvent::new(KeyCode::Char('t'), KeyModifiers::NONE),
     ));
+    assert!(app.pending_interaction.is_some());
+    assert!(app.thought_config_editor.is_none());
+    poll_until_interaction(&mut app);
 
     let editor = app
         .thought_config_editor
@@ -4840,6 +5139,12 @@ fn handle_key_event_toggles_native_app_live() {
         layout,
         KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE),
     ));
+    assert!(app.pending_interaction.is_some());
+    assert_eq!(
+        app.native_status.as_ref().and_then(|status| status.app_id),
+        Some(NativeDesktopApp::Iterm)
+    );
+    poll_until_interaction(&mut app);
 
     assert_eq!(api.set_native_app_calls(), vec![NativeDesktopApp::Ghostty]);
     assert_eq!(
@@ -4879,6 +5184,14 @@ fn handle_key_event_toggles_ghostty_mode_live() {
         layout,
         KeyEvent::new(KeyCode::Char('m'), KeyModifiers::NONE),
     ));
+    assert!(app.pending_interaction.is_some());
+    assert_eq!(
+        app.native_status
+            .as_ref()
+            .and_then(|status| status.ghostty_mode),
+        Some(GhosttyOpenMode::Swap)
+    );
+    poll_until_interaction(&mut app);
 
     assert_eq!(api.set_native_mode_calls(), vec![GhosttyOpenMode::Add]);
     assert_eq!(
@@ -4922,6 +5235,8 @@ fn thought_config_editor_updates_backend_and_model_then_saves() {
     let mut app = make_app(api.clone());
 
     app.open_thought_config_editor();
+    assert!(app.pending_interaction.is_some());
+    poll_until_interaction(&mut app);
     assert!(app.thought_config_editor.is_some());
 
     handle_key_event(
@@ -4956,6 +5271,10 @@ fn thought_config_editor_updates_backend_and_model_then_saves() {
         layout,
         KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
     );
+    assert!(app.pending_interaction.is_some());
+    poll_until_interaction(&mut app);
+    assert!(app.pending_refresh.is_some());
+    poll_until_refresh(&mut app, layout);
 
     assert!(app.thought_config_editor.is_none());
     assert_eq!(api.update_thought_config_calls().len(), 1);
@@ -4997,6 +5316,8 @@ fn thought_config_editor_test_button_probes_without_saving() {
         layout,
         KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
     );
+    assert!(app.pending_interaction.is_some());
+    poll_until_interaction(&mut app);
 
     assert!(app.thought_config_editor.is_some());
     assert!(api.update_thought_config_calls().is_empty());
@@ -5052,6 +5373,8 @@ fn thought_config_editor_test_button_rotates_openrouter_model_after_invalid_mode
         layout,
         KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
     );
+    assert!(app.pending_interaction.is_some());
+    poll_until_interaction(&mut app);
 
     assert_eq!(
         app.thought_config_editor
@@ -5118,6 +5441,10 @@ fn thought_config_editor_save_rotates_and_persists_openrouter_model_after_invali
         layout,
         KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
     );
+    assert!(app.pending_interaction.is_some());
+    poll_until_interaction(&mut app);
+    assert!(app.pending_refresh.is_some());
+    poll_until_refresh(&mut app, layout);
 
     assert!(app.thought_config_editor.is_none());
     assert_eq!(api.update_thought_config_calls().len(), 2);
@@ -5239,6 +5566,8 @@ fn picker_activate_selection_opens_initial_request_and_reloads_children() {
     }
     api.push_list_dirs(Ok(dir_response("/tmp/child", &[("nested", false)])));
     app.picker_activate_selection(layout.overview_field);
+    assert!(app.pending_interaction.is_some());
+    poll_until_interaction(&mut app);
     assert_eq!(
         api.list_calls(),
         vec![(Some("/tmp/child".to_string()), true)]
@@ -5302,6 +5631,9 @@ fn handle_workspace_click_routes_thought_and_overview_interactions() {
             modifiers: KeyModifiers::NONE,
         },
     );
+    assert!(app.pending_interaction.is_some());
+
+    poll_until_interaction(&mut app);
     assert_eq!(app.thought_filter.tmux_name, None);
     assert_eq!(app.selected_id.as_deref(), Some("sess-1"));
     assert_eq!(api.open_calls(), vec!["sess-1".to_string()]);
@@ -5326,6 +5658,9 @@ fn handle_workspace_click_routes_thought_and_overview_interactions() {
             modifiers: KeyModifiers::NONE,
         },
     );
+    assert!(app.pending_interaction.is_some());
+
+    poll_until_interaction(&mut app);
     assert_eq!(app.selected_id.as_deref(), Some("sess-1"));
     assert_eq!(
         api.open_calls(),
@@ -5369,6 +5704,8 @@ fn clicking_native_status_label_toggles_native_app_live() {
             modifiers: KeyModifiers::NONE,
         },
     ));
+    assert!(app.pending_interaction.is_some());
+    poll_until_interaction(&mut app);
     assert_eq!(api.set_native_app_calls(), vec![NativeDesktopApp::Ghostty]);
     assert_eq!(
         app.native_status.as_ref().and_then(|status| status.app_id),
@@ -5412,6 +5749,8 @@ fn clicking_ghostty_mode_label_toggles_preview_mode_live() {
             modifiers: KeyModifiers::NONE,
         },
     ));
+    assert!(app.pending_interaction.is_some());
+    poll_until_interaction(&mut app);
     assert_eq!(api.set_native_mode_calls(), vec![GhosttyOpenMode::Add]);
     assert_eq!(
         app.native_status
@@ -5917,7 +6256,10 @@ fn render_thought_config_editor_enabled_field_focused() {
     let mut renderer = test_renderer(120, 32);
     let mut app = make_app(api);
     app.thought_config_editor = Some(ThoughtConfigEditorState::new(
-        ThoughtConfig { enabled: true, ..ThoughtConfig::default() },
+        ThoughtConfig {
+            enabled: true,
+            ..ThoughtConfig::default()
+        },
         None,
     ));
     if let Some(editor) = &mut app.thought_config_editor {
@@ -5953,7 +6295,10 @@ fn render_thought_config_editor_model_field_focused_empty_model() {
     let mut renderer = test_renderer(120, 32);
     let mut app = make_app(api);
     app.thought_config_editor = Some(ThoughtConfigEditorState::new(
-        ThoughtConfig { model: String::new(), ..ThoughtConfig::default() },
+        ThoughtConfig {
+            model: String::new(),
+            ..ThoughtConfig::default()
+        },
         None,
     ));
     if let Some(editor) = &mut app.thought_config_editor {
@@ -5987,7 +6332,10 @@ fn render_thought_config_editor_save_and_cancel_focused() {
 
 // ── render_plan_text_content coverage ────────────────────────────────────────
 
-fn open_mermaid_on_plan_tab(content: Option<&str>, active_tab: DomainPlanTab) -> (App<MockApi>, Renderer, WorkspaceLayout) {
+fn open_mermaid_on_plan_tab(
+    content: Option<&str>,
+    active_tab: DomainPlanTab,
+) -> (App<MockApi>, Renderer, WorkspaceLayout) {
     let api = MockApi::new();
     let layout = test_layout(120, 32);
     let mut app = make_app(api);
@@ -6025,7 +6373,8 @@ fn render_plan_text_content_loading_state_when_no_content() {
 #[test]
 fn render_plan_text_content_heading_and_list_lines() {
     let content = "# Heading\n- list item\n  - nested\nbody text\n| table |\n|-|-|";
-    let (mut app, mut renderer, layout) = open_mermaid_on_plan_tab(Some(content), DomainPlanTab::Plan);
+    let (mut app, mut renderer, layout) =
+        open_mermaid_on_plan_tab(Some(content), DomainPlanTab::Plan);
     app.render(&mut renderer, layout);
 }
 
@@ -6036,7 +6385,8 @@ fn render_plan_text_content_scroll_indicator_when_content_exceeds_height() {
         .map(|i| format!("line {i}"))
         .collect::<Vec<_>>()
         .join("\n");
-    let (mut app, mut renderer, layout) = open_mermaid_on_plan_tab(Some(&content), DomainPlanTab::Plan);
+    let (mut app, mut renderer, layout) =
+        open_mermaid_on_plan_tab(Some(&content), DomainPlanTab::Plan);
     // Set scroll to trigger the non-zero pct branch
     if let FishBowlMode::Mermaid(viewer) = &mut app.fish_bowl_mode {
         viewer.plan_text_scroll = 5;
@@ -6052,7 +6402,8 @@ fn render_plan_text_content_scroll_indicator_at_top_pct_100() {
         .map(|i| format!("line {i}"))
         .collect::<Vec<_>>()
         .join("\n");
-    let (mut app, mut renderer, layout) = open_mermaid_on_plan_tab(Some(&content), DomainPlanTab::Plan);
+    let (mut app, mut renderer, layout) =
+        open_mermaid_on_plan_tab(Some(&content), DomainPlanTab::Plan);
     // Leave scroll at 0; max_scroll > 0 so we get normal pct calculation
     app.render(&mut renderer, layout);
 }
@@ -6060,7 +6411,8 @@ fn render_plan_text_content_scroll_indicator_at_top_pct_100() {
 #[test]
 fn render_plan_text_content_rewraps_on_second_render_same_width() {
     let content = "# Title\nbody";
-    let (mut app, mut renderer, layout) = open_mermaid_on_plan_tab(Some(content), DomainPlanTab::Backend);
+    let (mut app, mut renderer, layout) =
+        open_mermaid_on_plan_tab(Some(content), DomainPlanTab::Backend);
     // First render populates plan_text_lines
     app.render(&mut renderer, layout);
     // Second render should reuse cached lines (no re-wrap needed)
@@ -6106,7 +6458,9 @@ fn switch_plan_tab_noop_when_no_plan_tabs() {
     let (mut app, _, _) = open_mermaid_test_viewer("graph LR\nA-->B", 120, 32);
     // viewer has no plan_tabs (open_mermaid_test_viewer doesn't set plan_files)
     app.switch_plan_tab(DomainPlanTab::Plan);
-    let FishBowlMode::Mermaid(viewer) = &app.fish_bowl_mode else { panic!() };
+    let FishBowlMode::Mermaid(viewer) = &app.fish_bowl_mode else {
+        panic!()
+    };
     // active_tab unchanged
     assert_eq!(viewer.active_tab, DomainPlanTab::Schema);
 }
@@ -6117,7 +6471,9 @@ fn switch_plan_tab_noop_when_already_on_tab() {
     let mut app = open_mermaid_with_plan_tabs(api);
     // active_tab starts at Schema; switching to Schema again is a no-op
     app.switch_plan_tab(DomainPlanTab::Schema);
-    let FishBowlMode::Mermaid(viewer) = &app.fish_bowl_mode else { panic!() };
+    let FishBowlMode::Mermaid(viewer) = &app.fish_bowl_mode else {
+        panic!()
+    };
     assert_eq!(viewer.active_tab, DomainPlanTab::Schema);
 }
 
@@ -6127,12 +6483,16 @@ fn switch_plan_tab_to_schema_updates_viewer_without_fetch() {
     let mut app = open_mermaid_with_plan_tabs(api.clone());
     // Set active_tab to Plan first so switching to Schema is valid
     {
-        let FishBowlMode::Mermaid(viewer) = &mut app.fish_bowl_mode else { panic!() };
+        let FishBowlMode::Mermaid(viewer) = &mut app.fish_bowl_mode else {
+            panic!()
+        };
         viewer.active_tab = DomainPlanTab::Plan;
         viewer.plan_text_content = Some("old content".to_string());
     }
     app.switch_plan_tab(DomainPlanTab::Schema);
-    let FishBowlMode::Mermaid(viewer) = &app.fish_bowl_mode else { panic!() };
+    let FishBowlMode::Mermaid(viewer) = &app.fish_bowl_mode else {
+        panic!()
+    };
     assert_eq!(viewer.active_tab, DomainPlanTab::Schema);
     assert!(viewer.plan_text_content.is_none());
     // No plan file fetch should have been issued
@@ -6150,7 +6510,9 @@ fn switch_plan_tab_to_non_schema_fetches_plan_file_ok() {
     }));
     let mut app = open_mermaid_with_plan_tabs(api);
     app.switch_plan_tab(DomainPlanTab::Plan);
-    let FishBowlMode::Mermaid(viewer) = &app.fish_bowl_mode else { panic!() };
+    let FishBowlMode::Mermaid(viewer) = &app.fish_bowl_mode else {
+        panic!()
+    };
     assert_eq!(viewer.active_tab, DomainPlanTab::Plan);
     assert_eq!(
         viewer.plan_text_content.as_deref(),
@@ -6170,14 +6532,15 @@ fn switch_plan_tab_to_non_schema_shows_error_from_response() {
     }));
     let mut app = open_mermaid_with_plan_tabs(api);
     app.switch_plan_tab(DomainPlanTab::Plan);
-    let FishBowlMode::Mermaid(viewer) = &app.fish_bowl_mode else { panic!() };
+    let FishBowlMode::Mermaid(viewer) = &app.fish_bowl_mode else {
+        panic!()
+    };
     assert_eq!(viewer.active_tab, DomainPlanTab::Plan);
-    assert!(
-        app.message
-            .as_ref()
-            .map(|(m, _)| m.contains("plan file"))
-            .unwrap_or(false)
-    );
+    assert!(app
+        .message
+        .as_ref()
+        .map(|(m, _)| m.contains("plan file"))
+        .unwrap_or(false));
 }
 
 #[test]
@@ -6186,15 +6549,16 @@ fn switch_plan_tab_to_non_schema_shows_error_on_fetch_failure() {
     api.push_plan_file(Err("network error".to_string()));
     let mut app = open_mermaid_with_plan_tabs(api);
     app.switch_plan_tab(DomainPlanTab::Plan);
-    let FishBowlMode::Mermaid(viewer) = &app.fish_bowl_mode else { panic!() };
+    let FishBowlMode::Mermaid(viewer) = &app.fish_bowl_mode else {
+        panic!()
+    };
     assert_eq!(viewer.active_tab, DomainPlanTab::Plan);
     assert!(viewer.plan_text_content.is_none());
-    assert!(
-        app.message
-            .as_ref()
-            .map(|(m, _)| m.contains("plan file fetch failed"))
-            .unwrap_or(false)
-    );
+    assert!(app
+        .message
+        .as_ref()
+        .map(|(m, _)| m.contains("plan file fetch failed"))
+        .unwrap_or(false));
 }
 
 #[test]
@@ -6356,13 +6720,21 @@ fn mermaid_refresh_invalidates_prepared_source_state_when_artifact_changes() {
 fn mermaid_build_semantic_lines_early_returns_for_unsupported_kind() {
     // Sequence diagrams are not in the supported list → exercises the
     // mermaid_kind_supports_semantic_overlay early-return branch.
-    let content_rect = Rect { x: 0, y: 0, width: 100, height: 30 };
+    let content_rect = Rect {
+        x: 0,
+        y: 0,
+        width: 100,
+        height: 30,
+    };
     let options = mermaid_render_options(content_rect);
     let source = "sequenceDiagram\n  Alice ->> Bob: Hello\n  Bob -->> Alice: Hi\n";
     let parsed = parse_mermaid(source).expect("parse");
     let layout = compute_layout(&parsed.graph, &options.theme, &options.layout);
     let lines = build_mermaid_semantic_lines(&layout, &options);
-    assert!(lines.is_empty(), "sequence diagram should yield no semantic lines");
+    assert!(
+        lines.is_empty(),
+        "sequence diagram should yield no semantic lines"
+    );
 }
 
 #[test]
@@ -6382,13 +6754,20 @@ fn mermaid_state_diagram_with_edge_labels_exercises_state_edge_font_path() {
     // State diagram with labeled transitions → exercises the DiagramKind::State
     // branch inside the edge loop (state_font_size / state_line_height selection).
     let source = "stateDiagram-v2\n  [*] --> Active : start\n  Active --> Inactive : stop\n  Inactive --> [*]\n";
-    let content_rect = Rect { x: 0, y: 0, width: 100, height: 30 };
+    let content_rect = Rect {
+        x: 0,
+        y: 0,
+        width: 100,
+        height: 30,
+    };
     let options = mermaid_render_options(content_rect);
     let parsed = parse_mermaid(source).expect("parse");
     let layout = compute_layout(&parsed.graph, &options.theme, &options.layout);
     let lines = build_mermaid_semantic_lines(&layout, &options);
     // State transitions with labels produce EdgeLabel semantic lines
-    assert!(lines.iter().any(|l| matches!(l.kind, MermaidSemanticKind::EdgeLabel)));
+    assert!(lines
+        .iter()
+        .any(|l| matches!(l.kind, MermaidSemanticKind::EdgeLabel)));
 }
 
 #[test]
@@ -6415,7 +6794,8 @@ fn mermaid_class_diagram_with_methods_renders_divider_lines() {
 fn mermaid_flowchart_with_subgraph_renders_subgraph_label() {
     // Subgraph with a label exercises the non-State subgraph code path
     // (label_x = subgraph.x + subgraph.width / 2, push_mermaid_summary_line).
-    let source = "graph TD\n  subgraph cluster[\"My Cluster\"]\n    A --> B\n  end\n  C --> cluster\n";
+    let source =
+        "graph TD\n  subgraph cluster[\"My Cluster\"]\n    A --> B\n  end\n  C --> cluster\n";
     let (mut app, mut renderer, layout) = open_mermaid_test_viewer(source, 120, 32);
     app.render(&mut renderer, layout);
     assert!(matches!(&app.fish_bowl_mode, FishBowlMode::Mermaid(v) if v.prepared_render.is_some()));
@@ -8360,7 +8740,10 @@ fn handle_mouse_down_early_returns_when_thought_config_editor_open() {
     let layout = test_layout(120, 32);
     let mut app = make_app(api);
     let renderer = test_renderer(120, 32);
-    app.open_thought_config_editor();
+    app.thought_config_editor = Some(ThoughtConfigEditorState::new(
+        ThoughtConfig::default(),
+        None,
+    ));
     assert!(app.thought_config_editor.is_some());
     // Should return immediately without panicking
     handle_mouse_down(&mut app, &renderer, layout, mouse_down(10, 10));
@@ -8433,6 +8816,291 @@ fn handle_key_event_schema_tab_navigation_keys() {
         KeyCode::BackTab,
         KeyCode::Char('x'), // unknown → true
     ] {
-        assert!(handle_key_event(&mut app, layout, key(code)), "code: {code:?}");
+        assert!(
+            handle_key_event(&mut app, layout, key(code)),
+            "code: {code:?}"
+        );
     }
+}
+
+// ---------------------------------------------------------------------------
+// Async background refresh tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn poll_refresh_noop_when_no_pending() {
+    let api = MockApi::new();
+    let layout = test_layout(120, 32);
+    let mut app = make_app(api);
+
+    // Should not panic or modify state when nothing is pending
+    app.poll_refresh(layout);
+    assert!(app.pending_refresh.is_none());
+    assert!(app.entities.is_empty());
+}
+
+#[test]
+fn background_refresh_delivers_sessions_and_native_status() {
+    let api = MockApi::new();
+    let layout = test_layout(120, 32);
+    api.push_fetch_sessions(Ok(vec![
+        session_summary("s1", "1", TEST_REPO_ALPHA),
+        session_summary("s2", "2", TEST_REPO_BETA),
+        session_summary("s3", "3", TEST_REPO_GAMMA),
+    ]));
+    api.push_native_status(Ok(NativeDesktopStatusResponse {
+        supported: true,
+        platform: Some("macos".to_string()),
+        app_id: Some(NativeDesktopApp::Iterm),
+        ghostty_mode: None,
+        app: Some("iTerm".to_string()),
+        reason: None,
+    }));
+
+    let mut app = make_app(api);
+    app.spawn_background_refresh(false);
+    assert!(app.pending_refresh.is_some());
+
+    poll_until_refresh(&mut app, layout);
+
+    assert_eq!(app.entities.len(), 3);
+    assert!(app.native_status.is_some());
+    assert!(app.pending_refresh.is_none());
+    assert!(app.last_refresh.is_some());
+}
+
+#[test]
+fn background_refresh_fetches_mermaid_artifacts_concurrently() {
+    let api = MockApi::new();
+    let layout = test_layout(120, 32);
+    api.push_fetch_sessions(Ok(vec![
+        session_summary("s1", "1", TEST_REPO_ALPHA),
+        session_summary("s2", "2", TEST_REPO_BETA),
+        session_summary("s3", "3", TEST_REPO_GAMMA),
+    ]));
+    api.push_mermaid_artifact(Ok(mermaid_artifact(
+        "s1",
+        "/tmp/s1.mmd",
+        "2025-01-01T00:00:00Z",
+        "graph TD; A-->B;",
+    )));
+    api.push_mermaid_artifact(Ok(mermaid_artifact(
+        "s2",
+        "/tmp/s2.mmd",
+        "2025-01-01T00:00:00Z",
+        "graph TD; C-->D;",
+    )));
+    api.push_mermaid_artifact(Ok(MermaidArtifactResponse {
+        session_id: "s3".to_string(),
+        available: false,
+        path: None,
+        updated_at: None,
+        source: None,
+        error: None,
+        slice_name: None,
+        plan_files: None,
+    }));
+
+    let mut app = make_app(api);
+    app.spawn_background_refresh(false);
+    poll_until_refresh(&mut app, layout);
+
+    assert_eq!(app.entities.len(), 3);
+    assert_eq!(
+        app.mermaid_artifacts.len(),
+        2,
+        "only available artifacts stored"
+    );
+    assert!(app.mermaid_artifacts.contains_key("s1"));
+    assert!(app.mermaid_artifacts.contains_key("s2"));
+}
+
+#[test]
+fn background_refresh_error_retains_previous_entities() {
+    let api = MockApi::new();
+    let layout = test_layout(120, 32);
+
+    // First: populate with a sync refresh
+    api.push_fetch_sessions(Ok(vec![session_summary("s1", "1", TEST_REPO_ALPHA)]));
+    let mut app = make_app(api.clone());
+    app.refresh(layout);
+    assert_eq!(app.entities.len(), 1, "setup: one entity");
+
+    assert!(
+        app.native_status.is_some(),
+        "setup: native status populated"
+    );
+
+    // Second: background refresh with error
+    api.push_fetch_sessions(Err("connection refused".to_string()));
+    app.spawn_background_refresh(false);
+    poll_until_refresh(&mut app, layout);
+
+    assert_eq!(app.entities.len(), 1, "entities retained after error");
+    assert_eq!(
+        app.message.as_ref().map(|(m, _)| m.as_str()),
+        Some("connection refused")
+    );
+    assert!(
+        app.native_status.is_some(),
+        "native_status not overwritten on error"
+    );
+}
+
+#[test]
+fn background_refresh_partial_mermaid_failure() {
+    let api = MockApi::new();
+    let layout = test_layout(120, 32);
+    api.push_fetch_sessions(Ok(vec![
+        session_summary("s1", "1", TEST_REPO_ALPHA),
+        session_summary("s2", "2", TEST_REPO_BETA),
+        session_summary("s3", "3", TEST_REPO_GAMMA),
+    ]));
+    api.push_mermaid_artifact(Ok(mermaid_artifact(
+        "s1",
+        "/tmp/s1.mmd",
+        "2025-01-01T00:00:00Z",
+        "graph TD; A-->B;",
+    )));
+    api.push_mermaid_artifact(Err("timeout".to_string()));
+    api.push_mermaid_artifact(Ok(mermaid_artifact(
+        "s3",
+        "/tmp/s3.mmd",
+        "2025-01-01T00:00:00Z",
+        "graph TD; E-->F;",
+    )));
+
+    let mut app = make_app(api);
+    app.spawn_background_refresh(false);
+    poll_until_refresh(&mut app, layout);
+
+    assert_eq!(app.entities.len(), 3, "sessions still merged");
+    assert_eq!(app.mermaid_artifacts.len(), 2, "two successful artifacts");
+    assert_eq!(
+        app.message.as_ref().map(|(m, _)| m.as_str()),
+        Some("timeout"),
+        "mermaid error surfaced"
+    );
+}
+
+#[test]
+fn background_refresh_syncs_selection_publication() {
+    let api = MockApi::new();
+    let layout = test_layout(120, 32);
+    api.push_fetch_sessions(Ok(vec![session_summary("s1", "1", TEST_REPO_ALPHA)]));
+    let mut app = make_app(api.clone());
+
+    // Set a selected session
+    app.selected_id = Some("s1".to_string());
+    app.spawn_background_refresh(false);
+    poll_until_refresh(&mut app, layout);
+    poll_until_selection_publication(&mut app);
+
+    let calls = api.publish_calls();
+    assert!(
+        calls.iter().any(|c| c.as_deref() == Some("s1")),
+        "publish_selection should have been called with s1, got: {calls:?}"
+    );
+}
+
+#[test]
+fn sync_selection_publication_runs_in_background() {
+    let api = MockApi::new();
+    let mut app = make_app(api.clone());
+    app.selected_id = Some("s1".to_string());
+
+    app.sync_selection_publication();
+
+    assert!(app.pending_selection_publication.is_some());
+    assert_eq!(app.published_selected_id, None);
+    poll_until_selection_publication(&mut app);
+
+    assert_eq!(app.published_selected_id.as_deref(), Some("s1"));
+    assert_eq!(api.publish_calls(), vec![Some("s1".to_string())]);
+}
+
+#[test]
+fn selection_publication_coalesces_to_latest_target() {
+    let api = MockApi::new();
+    let mut app = make_app(api.clone());
+    app.selected_id = Some("s1".to_string());
+    app.sync_selection_publication();
+    app.selected_id = Some("s2".to_string());
+    app.sync_selection_publication();
+
+    assert!(app.pending_selection_publication.is_some());
+    assert_eq!(
+        app.queued_selection_publication,
+        Some((Some("s2".to_string()), false))
+    );
+    poll_until_selection_publication(&mut app);
+
+    assert_eq!(app.published_selected_id.as_deref(), Some("s2"));
+    assert_eq!(
+        api.publish_calls(),
+        vec![Some("s1".to_string()), Some("s2".to_string())]
+    );
+}
+
+#[test]
+fn manual_refresh_cancels_inflight_background() {
+    let api = MockApi::new();
+    let layout = test_layout(120, 32);
+
+    // Queue results for first (cancelled) refresh
+    api.push_fetch_sessions(Ok(vec![session_summary("s1", "1", TEST_REPO_ALPHA)]));
+    // Queue results for second (manual) refresh
+    api.push_fetch_sessions(Ok(vec![
+        session_summary("s1", "1", TEST_REPO_ALPHA),
+        session_summary("s2", "2", TEST_REPO_BETA),
+    ]));
+
+    let mut app = make_app(api);
+    app.spawn_background_refresh(false);
+    assert!(app.pending_refresh.is_some());
+
+    // Manual refresh should drop old receiver and spawn new one
+    app.manual_refresh(layout);
+    assert!(app.pending_refresh.is_some());
+
+    poll_until_refresh(&mut app, layout);
+
+    // The manual refresh had show_success_message=true
+    assert!(
+        app.message
+            .as_ref()
+            .map(|(m, _)| m.contains("refreshed"))
+            .unwrap_or(false),
+        "manual refresh message should appear"
+    );
+}
+
+#[test]
+fn frame_duration_is_30fps() {
+    assert_eq!(FRAME_DURATION, Duration::from_millis(33));
+}
+
+#[test]
+fn initial_sync_refresh_populates_state() {
+    let api = MockApi::new();
+    let layout = test_layout(120, 32);
+    api.push_fetch_sessions(Ok(vec![session_summary("s1", "1", TEST_REPO_ALPHA)]));
+    api.push_native_status(Ok(NativeDesktopStatusResponse {
+        supported: true,
+        platform: Some("macos".to_string()),
+        app_id: Some(NativeDesktopApp::Iterm),
+        ghostty_mode: None,
+        app: Some("iTerm".to_string()),
+        reason: None,
+    }));
+
+    let mut app = make_app(api);
+    // Sync refresh (used at startup)
+    app.refresh(layout);
+
+    assert_eq!(app.entities.len(), 1, "entities populated synchronously");
+    assert!(
+        app.native_status.is_some(),
+        "native status populated synchronously"
+    );
 }
