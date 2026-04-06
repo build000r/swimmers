@@ -57,6 +57,7 @@ struct MockApiState {
     create_session_results: VecDeque<Result<CreateSessionResponse, String>>,
     update_thought_config_calls: Vec<ThoughtConfig>,
     test_thought_config_calls: Vec<ThoughtConfig>,
+    mermaid_artifact_calls: Vec<String>,
     native_status_calls: usize,
     set_native_app_calls: Vec<NativeDesktopApp>,
     set_native_mode_calls: Vec<GhosttyOpenMode>,
@@ -212,6 +213,10 @@ impl MockApi {
         self.state.lock().unwrap().native_status_calls
     }
 
+    fn mermaid_artifact_calls(&self) -> Vec<String> {
+        self.state.lock().unwrap().mermaid_artifact_calls.clone()
+    }
+
     fn set_native_app_calls(&self) -> Vec<NativeDesktopApp> {
         self.state.lock().unwrap().set_native_app_calls.clone()
     }
@@ -306,9 +311,9 @@ impl TuiApi for MockApi {
         let state = self.state.clone();
         let session_id = session_id.to_string();
         Box::pin(async move {
+            let mut state = state.lock().unwrap();
+            state.mermaid_artifact_calls.push(session_id.clone());
             state
-                .lock()
-                .unwrap()
                 .mermaid_artifact_results
                 .pop_front()
                 .unwrap_or_else(|| {
@@ -2191,6 +2196,35 @@ fn repo_theme(body: &str) -> RepoTheme {
         accent: "#111111".to_string(),
         shirt: "#333333".to_string(),
     }
+}
+
+fn session_summary_with_theme_id(
+    session_id: &str,
+    tmux_name: &str,
+    cwd: &str,
+    theme_id: &str,
+) -> SessionSummary {
+    let mut session = session_summary(session_id, tmux_name, cwd);
+    session.repo_theme_id = Some(theme_id.to_string());
+    session
+}
+
+fn write_repo_theme_colors(root: &Path, body: &str) {
+    let theme_dir = root.join(".swimmers");
+    fs::create_dir_all(&theme_dir).expect("create theme dir");
+    let content = serde_json::json!({
+        "palette": {
+            "body": body,
+            "outline": "#222222",
+            "accent": "#111111",
+            "shirt": "#333333",
+        }
+    });
+    fs::write(
+        theme_dir.join("colors.json"),
+        serde_json::to_string(&content).expect("serialize theme"),
+    )
+    .expect("write theme colors");
 }
 
 fn dir_response(path: &str, names: &[(&str, bool)]) -> DirListResponse {
@@ -4713,10 +4747,7 @@ fn refresh_clears_selection_when_filters_hide_all_sessions() {
 
     assert!(app.visible_entities().is_empty());
     assert!(app.selected_id.is_none());
-    assert_eq!(
-        api.publish_calls(),
-        vec![Some("sess-2".to_string()), None,]
-    );
+    assert_eq!(api.publish_calls(), vec![Some("sess-2".to_string()), None,]);
 
     app.open_selected();
 
@@ -6454,7 +6485,6 @@ fn switch_plan_tab_noop_in_aquarium_mode() {
 
 #[test]
 fn switch_plan_tab_noop_when_no_plan_tabs() {
-    let api = MockApi::new();
     let (mut app, _, _) = open_mermaid_test_viewer("graph LR\nA-->B", 120, 32);
     // viewer has no plan_tabs (open_mermaid_test_viewer doesn't set plan_files)
     app.switch_plan_tab(DomainPlanTab::Plan);
@@ -8794,7 +8824,6 @@ fn handle_key_event_schema_tab_esc_closes_viewer() {
 
 #[test]
 fn handle_key_event_schema_tab_navigation_keys() {
-    let api = MockApi::new();
     let layout = test_layout(120, 32);
     let (mut app, _, _) = open_mermaid_on_plan_tab(Some("graph LR\nA-->B"), DomainPlanTab::Schema);
     // These pan/zoom keys should return true and not panic
@@ -8913,6 +8942,223 @@ fn background_refresh_fetches_mermaid_artifacts_concurrently() {
     );
     assert!(app.mermaid_artifacts.contains_key("s1"));
     assert!(app.mermaid_artifacts.contains_key("s2"));
+}
+
+#[test]
+fn background_refresh_reuses_cached_assets_for_unchanged_sessions() {
+    let api = MockApi::new();
+    let layout = test_layout(120, 32);
+    let repo = tempdir().expect("tempdir");
+    let repo_src = repo.path().join("src");
+    fs::create_dir_all(&repo_src).expect("create repo src");
+    let theme_id = repo.path().to_string_lossy().into_owned();
+    let cwd = repo_src.to_string_lossy().into_owned();
+
+    write_repo_theme_colors(repo.path(), "#B89875");
+    api.push_fetch_sessions(Ok(vec![session_summary_with_theme_id(
+        "s1", "1", &cwd, &theme_id,
+    )]));
+    api.push_mermaid_artifact(Ok(mermaid_artifact(
+        "s1",
+        "/tmp/s1-a.mmd",
+        "2026-04-05T20:00:00Z",
+        "graph TD; A-->B;",
+    )));
+    let mut app = make_app(api.clone());
+
+    app.refresh(layout);
+    assert_eq!(
+        app.mermaid_artifacts
+            .get("s1")
+            .and_then(|artifact| artifact.path.as_deref()),
+        Some("/tmp/s1-a.mmd")
+    );
+    assert_eq!(
+        app.repo_themes.get(&theme_id).expect("cached theme").body,
+        "#B89875"
+    );
+
+    write_repo_theme_colors(repo.path(), "#44AA88");
+    api.push_fetch_sessions(Ok(vec![session_summary_with_theme_id(
+        "s1", "1", &cwd, &theme_id,
+    )]));
+    api.push_mermaid_artifact(Ok(mermaid_artifact(
+        "s1",
+        "/tmp/s1-b.mmd",
+        "2026-04-05T20:01:00Z",
+        "graph TD; B-->C;",
+    )));
+
+    app.spawn_background_refresh(false);
+    poll_until_refresh(&mut app, layout);
+
+    assert_eq!(
+        app.mermaid_artifacts
+            .get("s1")
+            .and_then(|artifact| artifact.path.as_deref()),
+        Some("/tmp/s1-a.mmd")
+    );
+    assert_eq!(
+        app.repo_themes.get(&theme_id).expect("cached theme").body,
+        "#B89875"
+    );
+    assert_eq!(api.mermaid_artifact_calls(), vec!["s1".to_string()]);
+}
+
+#[test]
+fn manual_refresh_revalidates_cached_assets() {
+    let api = MockApi::new();
+    let layout = test_layout(120, 32);
+    let repo = tempdir().expect("tempdir");
+    let repo_src = repo.path().join("src");
+    fs::create_dir_all(&repo_src).expect("create repo src");
+    let theme_id = repo.path().to_string_lossy().into_owned();
+    let cwd = repo_src.to_string_lossy().into_owned();
+
+    write_repo_theme_colors(repo.path(), "#B89875");
+    api.push_fetch_sessions(Ok(vec![session_summary_with_theme_id(
+        "s1", "1", &cwd, &theme_id,
+    )]));
+    api.push_mermaid_artifact(Ok(mermaid_artifact(
+        "s1",
+        "/tmp/s1-a.mmd",
+        "2026-04-05T20:00:00Z",
+        "graph TD; A-->B;",
+    )));
+    let mut app = make_app(api.clone());
+    app.refresh(layout);
+
+    write_repo_theme_colors(repo.path(), "#44AA88");
+    api.push_fetch_sessions(Ok(vec![session_summary_with_theme_id(
+        "s1", "1", &cwd, &theme_id,
+    )]));
+    api.push_mermaid_artifact(Ok(mermaid_artifact(
+        "s1",
+        "/tmp/s1-b.mmd",
+        "2026-04-05T20:01:00Z",
+        "graph TD; B-->C;",
+    )));
+
+    app.manual_refresh(layout);
+    poll_until_refresh(&mut app, layout);
+
+    assert_eq!(
+        app.mermaid_artifacts
+            .get("s1")
+            .and_then(|artifact| artifact.path.as_deref()),
+        Some("/tmp/s1-b.mmd")
+    );
+    assert_eq!(
+        app.repo_themes
+            .get(&theme_id)
+            .expect("refreshed theme")
+            .body,
+        "#44AA88"
+    );
+    assert_eq!(
+        api.mermaid_artifact_calls(),
+        vec!["s1".to_string(), "s1".to_string()]
+    );
+}
+
+#[test]
+fn open_mermaid_viewer_revalidates_cached_artifact_for_known_session() {
+    let api = MockApi::new();
+    let layout = test_layout(120, 32);
+    api.push_fetch_sessions(Ok(vec![session_summary("s1", "1", TEST_REPO_ALPHA)]));
+    api.push_mermaid_artifact(Ok(mermaid_artifact(
+        "s1",
+        "/tmp/s1-a.mmd",
+        "2026-04-05T20:00:00Z",
+        "graph TD; A-->B;",
+    )));
+    let mut app = make_app(api.clone());
+    app.refresh(layout);
+
+    api.push_mermaid_artifact(Ok(mermaid_artifact(
+        "s1",
+        "/tmp/s1-b.mmd",
+        "2026-04-05T20:01:00Z",
+        "graph TD; B-->C;",
+    )));
+
+    app.open_mermaid_viewer("s1".to_string());
+
+    let FishBowlMode::Mermaid(viewer) = &app.fish_bowl_mode else {
+        panic!("expected Mermaid viewer mode");
+    };
+    assert_eq!(viewer.path.as_deref(), Some("/tmp/s1-b.mmd"));
+    assert_eq!(
+        api.mermaid_artifact_calls(),
+        vec!["s1".to_string(), "s1".to_string()]
+    );
+}
+
+#[test]
+fn background_refresh_reloads_assets_when_session_context_changes() {
+    let api = MockApi::new();
+    let layout = test_layout(120, 32);
+    let repo_a = tempdir().expect("tempdir");
+    let repo_a_src = repo_a.path().join("src");
+    fs::create_dir_all(&repo_a_src).expect("create repo a src");
+    let repo_b = tempdir().expect("tempdir");
+    let repo_b_src = repo_b.path().join("src");
+    fs::create_dir_all(&repo_b_src).expect("create repo b src");
+
+    let theme_id_a = repo_a.path().to_string_lossy().into_owned();
+    let theme_id_b = repo_b.path().to_string_lossy().into_owned();
+    let cwd_a = repo_a_src.to_string_lossy().into_owned();
+    let cwd_b = repo_b_src.to_string_lossy().into_owned();
+
+    write_repo_theme_colors(repo_a.path(), "#B89875");
+    write_repo_theme_colors(repo_b.path(), "#44AA88");
+
+    api.push_fetch_sessions(Ok(vec![session_summary_with_theme_id(
+        "s1",
+        "1",
+        &cwd_a,
+        &theme_id_a,
+    )]));
+    api.push_mermaid_artifact(Ok(mermaid_artifact(
+        "s1",
+        "/tmp/s1-a.mmd",
+        "2026-04-05T20:00:00Z",
+        "graph TD; A-->B;",
+    )));
+    let mut app = make_app(api.clone());
+    app.refresh(layout);
+
+    api.push_fetch_sessions(Ok(vec![session_summary_with_theme_id(
+        "s1",
+        "1",
+        &cwd_b,
+        &theme_id_b,
+    )]));
+    api.push_mermaid_artifact(Ok(mermaid_artifact(
+        "s1",
+        "/tmp/s1-b.mmd",
+        "2026-04-05T20:01:00Z",
+        "graph TD; B-->C;",
+    )));
+
+    app.spawn_background_refresh(false);
+    poll_until_refresh(&mut app, layout);
+
+    assert_eq!(
+        app.mermaid_artifacts
+            .get("s1")
+            .and_then(|artifact| artifact.path.as_deref()),
+        Some("/tmp/s1-b.mmd")
+    );
+    assert_eq!(
+        app.repo_themes.get(&theme_id_b).expect("repo b theme").body,
+        "#44AA88"
+    );
+    assert!(!app.repo_themes.contains_key(&theme_id_a));
+    assert_eq!(
+        api.mermaid_artifact_calls(),
+        vec!["s1".to_string(), "s1".to_string()]
+    );
 }
 
 #[test]

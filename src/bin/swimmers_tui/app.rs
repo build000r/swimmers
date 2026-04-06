@@ -6,6 +6,49 @@ pub(crate) struct RefreshResult {
     pub(crate) mermaid_artifacts: Vec<(String, Result<MermaidArtifactResponse, String>)>,
     pub(crate) native_status: Option<Result<NativeDesktopStatusResponse, String>>,
     pub(crate) show_success_message: bool,
+    pub(crate) force_asset_refresh: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct MermaidCacheContext {
+    tmux_name: String,
+    cwd: String,
+}
+
+impl MermaidCacheContext {
+    fn from_session(session: &SessionSummary) -> Self {
+        Self {
+            tmux_name: session.tmux_name.clone(),
+            cwd: normalize_path(&session.cwd),
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct MermaidCacheEntry {
+    context: MermaidCacheContext,
+    artifact: Option<MermaidArtifactResponse>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct RepoThemeCacheContext {
+    cwd: String,
+    repo_theme_id: Option<String>,
+}
+
+impl RepoThemeCacheContext {
+    fn from_session(session: &SessionSummary) -> Self {
+        Self {
+            cwd: normalize_path(&session.cwd),
+            repo_theme_id: session.repo_theme_id.clone(),
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct RepoThemeCacheEntry {
+    context: RepoThemeCacheContext,
+    resolved: Option<(String, RepoTheme)>,
 }
 
 pub(crate) struct PendingSelectionPublicationResult {
@@ -67,6 +110,8 @@ pub(crate) struct App<C: TuiApi> {
     pub(crate) thought_log: Vec<ThoughtLogEntry>,
     pub(crate) thought_filter: ThoughtFilter,
     pub(crate) last_logged_thoughts: HashMap<String, ThoughtFingerprint>,
+    session_mermaid_cache: HashMap<String, MermaidCacheEntry>,
+    session_repo_theme_cache: HashMap<String, RepoThemeCacheEntry>,
     pub(crate) mermaid_artifacts: HashMap<String, MermaidArtifactResponse>,
     pub(crate) repo_themes: HashMap<String, RepoTheme>,
     pub(crate) selected_id: Option<String>,
@@ -129,6 +174,8 @@ impl<C: TuiApi> App<C> {
             thought_log: Vec::new(),
             thought_filter: ThoughtFilter::default(),
             last_logged_thoughts: HashMap::new(),
+            session_mermaid_cache: HashMap::new(),
+            session_repo_theme_cache: HashMap::new(),
             mermaid_artifacts: HashMap::new(),
             repo_themes: HashMap::new(),
             selected_id: None,
@@ -582,22 +629,22 @@ impl<C: TuiApi> App<C> {
         self.sync_selection_publication();
     }
 
-    pub(crate) fn refresh_mermaid_artifacts(&mut self, sessions: &[SessionSummary]) {
-        let mut next = HashMap::new();
-        for session in sessions {
-            match self
-                .runtime
-                .block_on(self.client.fetch_mermaid_artifact(&session.session_id))
-            {
-                Ok(artifact) if artifact.available => {
-                    next.insert(session.session_id.clone(), artifact);
-                }
-                Ok(_) => {}
-                Err(err) => self.set_message(err),
-            }
-        }
-        self.mermaid_artifacts = next;
+    fn active_session_ids(sessions: &[SessionSummary]) -> HashSet<&str> {
+        sessions
+            .iter()
+            .map(|session| session.session_id.as_str())
+            .collect()
+    }
 
+    fn retain_cached_assets(&mut self, sessions: &[SessionSummary]) {
+        let active_session_ids = Self::active_session_ids(sessions);
+        self.session_mermaid_cache
+            .retain(|session_id, _| active_session_ids.contains(session_id.as_str()));
+        self.session_repo_theme_cache
+            .retain(|session_id, _| active_session_ids.contains(session_id.as_str()));
+    }
+
+    fn refresh_mermaid_viewer_from_cache(&mut self) {
         if let FishBowlMode::Mermaid(viewer) = &mut self.fish_bowl_mode {
             if let Some(artifact) = self.mermaid_artifacts.get(&viewer.session_id) {
                 let path_changed = viewer.path != artifact.path;
@@ -614,6 +661,115 @@ impl<C: TuiApi> App<C> {
                 }
             }
         }
+    }
+
+    fn rebuild_mermaid_artifacts_from_cache(&mut self) {
+        self.mermaid_artifacts = self
+            .session_mermaid_cache
+            .iter()
+            .filter_map(|(session_id, entry)| {
+                entry
+                    .artifact
+                    .clone()
+                    .map(|artifact| (session_id.clone(), artifact))
+            })
+            .collect();
+        self.refresh_mermaid_viewer_from_cache();
+    }
+
+    fn rebuild_repo_themes_from_cache(&mut self) {
+        let mut next = HashMap::new();
+        for entry in self.session_repo_theme_cache.values() {
+            if let Some((theme_id, theme)) = &entry.resolved {
+                next.insert(theme_id.clone(), theme.clone());
+            }
+        }
+        self.repo_themes = next;
+    }
+
+    fn should_refresh_mermaid_with_contexts(
+        cached_contexts: &HashMap<String, MermaidCacheContext>,
+        session: &SessionSummary,
+        force: bool,
+    ) -> bool {
+        if force {
+            return true;
+        }
+
+        let context = MermaidCacheContext::from_session(session);
+        cached_contexts
+            .get(&session.session_id)
+            .map(|cached| cached != &context)
+            .unwrap_or(true)
+    }
+
+    fn apply_mermaid_artifact_result(
+        &mut self,
+        session: &SessionSummary,
+        result: Result<MermaidArtifactResponse, String>,
+    ) {
+        let context = MermaidCacheContext::from_session(session);
+        let previous = self.session_mermaid_cache.get(&session.session_id).cloned();
+        let preserve_cached = previous
+            .as_ref()
+            .map(|entry| entry.context == context)
+            .unwrap_or(false);
+
+        let artifact = match result {
+            Ok(artifact) if artifact.available => Some(artifact),
+            Ok(_) => None,
+            Err(err) => {
+                self.set_message(err);
+                if preserve_cached {
+                    previous.and_then(|entry| entry.artifact)
+                } else {
+                    None
+                }
+            }
+        };
+
+        self.session_mermaid_cache.insert(
+            session.session_id.clone(),
+            MermaidCacheEntry { context, artifact },
+        );
+    }
+
+    fn refresh_single_mermaid_artifact(&mut self, session: &SessionSummary, force: bool) {
+        let cached_contexts = self
+            .session_mermaid_cache
+            .iter()
+            .map(|(session_id, entry)| (session_id.clone(), entry.context.clone()))
+            .collect::<HashMap<_, _>>();
+        if !Self::should_refresh_mermaid_with_contexts(&cached_contexts, session, force) {
+            return;
+        }
+
+        let result = self
+            .runtime
+            .block_on(self.client.fetch_mermaid_artifact(&session.session_id));
+        self.apply_mermaid_artifact_result(session, result);
+        self.rebuild_mermaid_artifacts_from_cache();
+    }
+
+    pub(crate) fn refresh_mermaid_artifacts(&mut self, sessions: &[SessionSummary]) {
+        self.retain_cached_assets(sessions);
+        for session in sessions {
+            let context = MermaidCacheContext::from_session(session);
+            let should_refresh = self
+                .session_mermaid_cache
+                .get(&session.session_id)
+                .map(|entry| entry.context != context)
+                .unwrap_or(true);
+            if !should_refresh {
+                continue;
+            }
+
+            let result = self
+                .runtime
+                .block_on(self.client.fetch_mermaid_artifact(&session.session_id));
+            self.apply_mermaid_artifact_result(session, result);
+        }
+        self.rebuild_mermaid_artifacts_from_cache();
     }
 
     pub(crate) fn reconcile_thought_log_sessions(&mut self, sessions: &[SessionSummary]) {
@@ -685,7 +841,7 @@ impl<C: TuiApi> App<C> {
 
     pub(crate) fn manual_refresh(&mut self, _layout: WorkspaceLayout) {
         self.pending_refresh = None;
-        self.spawn_background_refresh(true);
+        self.spawn_background_refresh_with_policy(true, true);
     }
 
     pub(crate) fn refresh_with_feedback(
@@ -695,7 +851,7 @@ impl<C: TuiApi> App<C> {
     ) {
         let sessions_ok = match self.runtime.block_on(self.client.fetch_sessions()) {
             Ok(sessions) => {
-                self.sync_repo_themes(&sessions);
+                self.sync_repo_themes(&sessions, false);
                 self.refresh_mermaid_artifacts(&sessions);
                 self.reconcile_thought_log_sessions(&sessions);
                 self.capture_thought_updates(&sessions, layout.thought_entry_capacity());
@@ -727,7 +883,20 @@ impl<C: TuiApi> App<C> {
     }
 
     pub(crate) fn spawn_background_refresh(&mut self, show_success_message: bool) {
+        self.spawn_background_refresh_with_policy(show_success_message, false);
+    }
+
+    fn spawn_background_refresh_with_policy(
+        &mut self,
+        show_success_message: bool,
+        force_asset_refresh: bool,
+    ) {
         let client = Arc::clone(&self.client);
+        let mermaid_contexts = self
+            .session_mermaid_cache
+            .iter()
+            .map(|(session_id, entry)| (session_id.clone(), entry.context.clone()))
+            .collect::<HashMap<_, _>>();
         let (tx, rx) = oneshot::channel();
         self.pending_refresh = Some(rx);
         self.runtime.spawn(async move {
@@ -737,6 +906,13 @@ impl<C: TuiApi> App<C> {
                 Ok(sessions) => {
                     let mermaid_futs: Vec<_> = sessions
                         .iter()
+                        .filter(|session| {
+                            Self::should_refresh_mermaid_with_contexts(
+                                &mermaid_contexts,
+                                session,
+                                force_asset_refresh,
+                            )
+                        })
                         .map(|s| {
                             let client = Arc::clone(&client);
                             let sid = s.session_id.clone();
@@ -762,6 +938,7 @@ impl<C: TuiApi> App<C> {
                 mermaid_artifacts,
                 native_status,
                 show_success_message,
+                force_asset_refresh,
             });
         });
     }
@@ -924,36 +1101,19 @@ impl<C: TuiApi> App<C> {
     pub(crate) fn apply_refresh_result(&mut self, result: RefreshResult, layout: WorkspaceLayout) {
         match result.sessions {
             Ok(sessions) => {
-                self.sync_repo_themes(&sessions);
+                self.sync_repo_themes(&sessions, result.force_asset_refresh);
 
-                let mut next_artifacts = HashMap::new();
+                self.retain_cached_assets(&sessions);
+                let sessions_by_id = sessions
+                    .iter()
+                    .map(|session| (session.session_id.as_str(), session))
+                    .collect::<HashMap<_, _>>();
                 for (session_id, artifact_result) in result.mermaid_artifacts {
-                    match artifact_result {
-                        Ok(artifact) if artifact.available => {
-                            next_artifacts.insert(session_id, artifact);
-                        }
-                        Ok(_) => {}
-                        Err(err) => self.set_message(err),
+                    if let Some(session) = sessions_by_id.get(session_id.as_str()) {
+                        self.apply_mermaid_artifact_result(session, artifact_result);
                     }
                 }
-                self.mermaid_artifacts = next_artifacts;
-
-                if let FishBowlMode::Mermaid(viewer) = &mut self.fish_bowl_mode {
-                    if let Some(artifact) = self.mermaid_artifacts.get(&viewer.session_id) {
-                        let path_changed = viewer.path != artifact.path;
-                        let source_changed = viewer.source != artifact.source;
-                        let error_changed = viewer.artifact_error != artifact.error;
-                        viewer.path = artifact.path.clone();
-                        viewer.source = artifact.source.clone();
-                        viewer.artifact_error = artifact.error.clone();
-                        viewer.render_error = None;
-                        if source_changed || error_changed {
-                            viewer.invalidate_source_cache();
-                        } else if path_changed {
-                            viewer.invalidate_viewport_cache();
-                        }
-                    }
-                }
+                self.rebuild_mermaid_artifacts_from_cache();
 
                 self.reconcile_thought_log_sessions(&sessions);
                 self.capture_thought_updates(&sessions, layout.thought_entry_capacity());
@@ -1023,23 +1183,35 @@ impl<C: TuiApi> App<C> {
         self.merge_sessions(sessions, field);
     }
 
-    pub(crate) fn sync_repo_themes(&mut self, sessions: &[SessionSummary]) {
-        let mut next = HashMap::new();
+    pub(crate) fn sync_repo_themes(&mut self, sessions: &[SessionSummary], force: bool) {
+        self.retain_cached_assets(sessions);
+        let cached_themes = self.repo_themes.clone();
         for session in sessions {
-            if let Some((theme_id, theme)) = discover_repo_theme(&session.cwd) {
-                next.insert(theme_id, theme);
+            let context = RepoThemeCacheContext::from_session(session);
+            let reuse_cached = !force
+                && self
+                    .session_repo_theme_cache
+                    .get(&session.session_id)
+                    .map(|entry| entry.context == context)
+                    .unwrap_or(false);
+            if reuse_cached {
                 continue;
             }
 
-            let Some(theme_id) = session.repo_theme_id.as_ref() else {
-                continue;
-            };
-            let Some(theme) = self.repo_themes.get(theme_id).cloned() else {
-                continue;
-            };
-            next.insert(theme_id.clone(), theme);
+            let resolved = discover_repo_theme(&session.cwd).or_else(|| {
+                if force {
+                    return None;
+                }
+                let theme_id = session.repo_theme_id.as_ref()?;
+                let theme = cached_themes.get(theme_id)?.clone();
+                Some((theme_id.clone(), theme))
+            });
+            self.session_repo_theme_cache.insert(
+                session.session_id.clone(),
+                RepoThemeCacheEntry { context, resolved },
+            );
         }
-        self.repo_themes = next;
+        self.rebuild_repo_themes_from_cache();
     }
 
     pub(crate) fn remember_repo_theme(
@@ -1854,6 +2026,12 @@ impl<C: TuiApi> App<C> {
             self.set_message("missing session for Mermaid viewer");
             return;
         };
+
+        let should_revalidate = self.session_mermaid_cache.contains_key(&session.session_id)
+            || !self.mermaid_artifacts.contains_key(&session.session_id);
+        if should_revalidate {
+            self.refresh_single_mermaid_artifact(&session, true);
+        }
 
         let Some(artifact) = self.mermaid_artifacts.get(&session.session_id).cloned() else {
             self.set_message("no Mermaid artifact found");
