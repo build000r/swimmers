@@ -130,10 +130,14 @@ fn build_app_router(
         .with_state(state)
 }
 
-async fn bind_listener(port: u16) -> anyhow::Result<tokio::net::TcpListener> {
-    tokio::net::TcpListener::bind(format!("0.0.0.0:{port}"))
+async fn bind_listener(addr: &str, port: u16) -> anyhow::Result<tokio::net::TcpListener> {
+    tokio::net::TcpListener::bind(format!("{addr}:{port}"))
         .await
         .map_err(|err| anyhow::anyhow!("failed to bind listener: {err}"))
+}
+
+fn is_loopback(addr: &str) -> bool {
+    matches!(addr, "127.0.0.1" | "::1" | "localhost")
 }
 
 async fn run() -> anyhow::Result<()> {
@@ -155,6 +159,7 @@ async fn run() -> anyhow::Result<()> {
 
     let config = Config::from_env();
     let port = config.port;
+    let bind = config.bind.clone();
     let config = Arc::new(config);
 
     // Query clawgs for resolved daemon defaults (model, prompts).
@@ -201,13 +206,19 @@ async fn run() -> anyhow::Result<()> {
     });
 
     let app = build_app_router(config.clone(), state, prom_handle);
-    let listener = bind_listener(port).await?;
+    let listener = bind_listener(&bind, port).await?;
+
+    if !is_loopback(&bind) {
+        eprintln!(
+            "swimmers: binding to non-loopback address {bind}, LocalTrust auth mode is insecure on non-loopback interfaces"
+        );
+    }
 
     tracing::info!(
         elapsed_ms = startup_started.elapsed().as_millis() as u64,
         "startup complete; listener ready"
     );
-    tracing::info!("Swimmers running on http://0.0.0.0:{port}");
+    tracing::info!("Swimmers running on http://{bind}:{port}");
 
     axum::serve(listener, app)
         .await

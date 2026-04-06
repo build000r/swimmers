@@ -34,6 +34,7 @@ impl ThoughtBackend {
 #[derive(Debug, Clone)]
 pub struct Config {
     pub port: u16,
+    pub bind: String,
     pub auth_mode: AuthMode,
     pub auth_token: Option<String>,
     pub observer_token: Option<String>,
@@ -51,6 +52,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             port: 3210,
+            bind: "127.0.0.1".to_string(),
             auth_mode: AuthMode::LocalTrust,
             auth_token: None,
             observer_token: None,
@@ -109,6 +111,9 @@ impl Config {
         apply_env_non_empty_string("AUTH_TOKEN", |token| config.auth_token = Some(token));
         apply_env_non_empty_string("OBSERVER_TOKEN", |token| {
             config.observer_token = Some(token);
+        });
+        apply_env_non_empty_string("SWIMMERS_BIND", |addr| {
+            config.bind = addr;
         });
         apply_env_non_empty_string("SWIMMERS_THOUGHT_BACKEND", |backend| {
             config.thought_backend = ThoughtBackend::from_env_value(&backend);
