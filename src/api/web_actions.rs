@@ -9,14 +9,19 @@ use axum::{Extension, Json, Router};
 use mermaid_rs_renderer::{compute_layout, parse_mermaid, render_svg, RenderOptions};
 use tokio::sync::oneshot;
 
-use crate::api::{fetch_live_summary, AppState};
+use crate::api::AppState;
+#[cfg(feature = "personal-workflows")]
+use crate::api::fetch_live_summary;
 use crate::auth::{AuthInfo, AuthScope};
-use crate::host_actions::{
-    ArtifactOpener, CommitLauncher, SystemArtifactOpener, SystemCommitLauncher,
-};
+use crate::host_actions::{ArtifactOpener, SystemArtifactOpener};
+#[cfg(feature = "personal-workflows")]
+use crate::host_actions::{CommitLauncher, SystemCommitLauncher};
 use crate::session::actor::SessionCommand;
-use crate::types::{ErrorResponse, MermaidArtifactResponse, SessionState};
+use crate::types::{ErrorResponse, MermaidArtifactResponse};
+#[cfg(feature = "personal-workflows")]
+use crate::types::SessionState;
 
+#[cfg(feature = "personal-workflows")]
 #[derive(Debug, serde::Serialize)]
 struct CommitCodexLaunchResponse {
     session_name: String,
@@ -31,11 +36,7 @@ struct MermaidArtifactOpenResponse {
 }
 
 pub fn routes() -> Router<Arc<AppState>> {
-    Router::new()
-        .route(
-            "/v1/sessions/{session_id}/commit-codex",
-            post(post_commit_codex),
-        )
+    let router = Router::new()
         .route(
             "/v1/sessions/{session_id}/mermaid-artifact/svg",
             get(get_mermaid_artifact_svg),
@@ -43,7 +44,15 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route(
             "/v1/sessions/{session_id}/mermaid-artifact/open",
             post(post_open_mermaid_artifact),
-        )
+        );
+
+    #[cfg(feature = "personal-workflows")]
+    let router = router.route(
+        "/v1/sessions/{session_id}/commit-codex",
+        post(post_commit_codex),
+    );
+
+    router
 }
 
 fn json_error(status: StatusCode, code: &str, message: impl Into<Option<String>>) -> Response {
@@ -60,6 +69,7 @@ fn json_error(status: StatusCode, code: &str, message: impl Into<Option<String>>
         .into_response()
 }
 
+#[cfg(feature = "personal-workflows")]
 async fn post_commit_codex(
     Extension(auth): Extension<AuthInfo>,
     State(state): State<Arc<AppState>>,
@@ -72,6 +82,7 @@ async fn post_commit_codex(
     post_commit_codex_with_launcher(state, session_id, &SystemCommitLauncher).await
 }
 
+#[cfg(feature = "personal-workflows")]
 async fn post_commit_codex_with_launcher<L: CommitLauncher>(
     state: Arc<AppState>,
     session_id: String,
@@ -277,17 +288,21 @@ fn render_mermaid_svg(source: &str) -> Result<String, String> {
 }
 
 #[cfg(test)]
+#[allow(dead_code)] // test helpers are feature-gated at their call sites
 mod tests {
     use super::*;
     use crate::api::PublishedSelectionState;
     use crate::auth::OBSERVER_SCOPES;
     use crate::config::Config;
+    #[cfg(feature = "personal-workflows")]
     use crate::host_actions::CommitCodexLaunch;
     use crate::session::actor::{ActorHandle, SessionCommand};
     use crate::session::supervisor::SessionSupervisor;
     use crate::thought::protocol::SyncRequestSequence;
     use crate::thought::runtime_config::ThoughtConfig;
-    use crate::types::{RestState, SessionSummary, ThoughtSource, ThoughtState, TransportHealth};
+    use crate::types::{
+        RestState, SessionState, SessionSummary, ThoughtSource, ThoughtState, TransportHealth,
+    };
     use axum::body::to_bytes;
     use axum::extract::{Extension, Path, State};
     use axum::response::IntoResponse;
@@ -390,6 +405,7 @@ mod tests {
         serde_json::from_slice(&body).expect("json body")
     }
 
+    #[cfg(feature = "personal-workflows")]
     #[tokio::test]
     async fn commit_codex_requires_write_scope() {
         let response = post_commit_codex(
@@ -403,6 +419,7 @@ mod tests {
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
     }
 
+    #[cfg(feature = "personal-workflows")]
     #[tokio::test]
     async fn commit_codex_rejects_exited_session() {
         let state = test_state();
@@ -420,6 +437,7 @@ mod tests {
         assert_eq!(json["code"], "SESSION_EXITED");
     }
 
+    #[cfg(feature = "personal-workflows")]
     #[tokio::test]
     async fn commit_codex_launches_with_session_summary() {
         let state = test_state();
@@ -579,11 +597,13 @@ mod tests {
         assert_eq!(json["code"], "MERMAID_ARTIFACT_PATH_UNAVAILABLE");
     }
 
+    #[cfg(feature = "personal-workflows")]
     #[derive(Default)]
     struct FakeCommitLauncher {
         calls: Arc<Mutex<Vec<String>>>,
     }
 
+    #[cfg(feature = "personal-workflows")]
     impl CommitLauncher for FakeCommitLauncher {
         fn launch(&self, session: &SessionSummary) -> io::Result<CommitCodexLaunch> {
             self.calls.lock().unwrap().push(session.session_id.clone());

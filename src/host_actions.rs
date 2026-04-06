@@ -1,3 +1,5 @@
+#![cfg_attr(not(feature = "personal-workflows"), allow(dead_code))]
+
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};

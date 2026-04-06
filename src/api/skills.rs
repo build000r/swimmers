@@ -1,3 +1,5 @@
+#![cfg_attr(not(feature = "personal-workflows"), allow(dead_code))]
+
 use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;

@@ -65,15 +65,20 @@ pub(crate) async fn fetch_live_summary(
 pub fn api_router(config: Arc<Config>) -> Router<Arc<AppState>> {
     let config_for_middleware = config.clone();
 
-    Router::new()
-        .merge(dirs::routes())
+    let router = Router::new()
         .merge(native::routes())
         .merge(selection::routes())
-        .merge(skills::routes())
         .merge(sessions::routes())
         .merge(thought_config::routes())
-        .merge(web_actions::routes())
-        .layer(middleware::from_fn(move |request, next| {
-            auth::auth_middleware(config_for_middleware.clone(), request, next)
-        }))
+        .merge(web_actions::routes());
+
+    #[cfg(feature = "personal-workflows")]
+    let router = router.merge(dirs::routes());
+
+    #[cfg(feature = "personal-workflows")]
+    let router = router.merge(skills::routes());
+
+    router.layer(middleware::from_fn(move |request, next| {
+        auth::auth_middleware(config_for_middleware.clone(), request, next)
+    }))
 }
