@@ -160,10 +160,8 @@ When you bind externally and want real auth, set `AUTH_MODE=token` and a shared 
 | `AUTH_MODE` | `local_trust` | Auth mode: `local_trust` or `token` |
 | `AUTH_TOKEN` | (none) | Bearer token when `AUTH_MODE=token` |
 | `SWIMMERS_NATIVE_APP` | `iterm` | Native desktop target: `iterm` or `ghostty` |
-| `THOUGHT_BACKEND` | `daemon` | Thought subsystem: `daemon` or `inproc` |
-| `THOUGHT_TICK_MS` | `15000` | Thought refresh interval in milliseconds |
-| `SESSION_DELETE_MODE` | `detach_bridge` | `detach_bridge` or `kill_tmux` on session delete |
-| `REPLAY_BUFFER_SIZE` | `524288` | Replay ring size in bytes (default 512 KB) |
+| `SWIMMERS_THOUGHT_BACKEND` | `openrouter` | Thought subsystem backend: `openrouter`, `codex`, or `inproc` |
+| `SWIMMERS_REPLAY_BUFFER_SIZE` | `524288` | Replay ring size in bytes (default 512 KB) |
 | `SWIMMERS_FRANKENTUI_PKG_DIR` | auto-detect | Path to `frankentui/pkg` for live browser terminal rendering |
 
 When `SWIMMERS_NATIVE_APP=ghostty`, the API uses Ghostty's AppleScript support to create or replace a left-side preview split for the selected tmux session. This path requires Ghostty 1.3.0+ on macOS with automation access enabled.
