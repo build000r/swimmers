@@ -39,36 +39,76 @@ fn thought_snapshot_for_summary<'a>(
         .or_else(|| active_pane_session_id.and_then(|session_id| thought_snapshots.get(session_id)))
 }
 
-async fn query_tmux_active_pane_session_id(tmux_name: &str) -> anyhow::Result<String> {
-    let target = exact_pane_target(tmux_name);
+fn format_tmux_active_pane_session_id(tmux_name: &str, pane_selector: &str) -> String {
+    format!("tmux:{tmux_name}:{pane_selector}")
+}
+
+fn tmux_names_requiring_active_pane_lookup<'a, I>(
+    summaries: I,
+    thought_snapshots: &HashMap<String, ThoughtSnapshot>,
+) -> HashSet<String>
+where
+    I: IntoIterator<Item = &'a SessionSummary>,
+{
+    summaries
+        .into_iter()
+        .filter(|summary| {
+            !thought_snapshots.contains_key(&summary.session_id)
+                && !summary.tmux_name.is_empty()
+                && summary.state != SessionState::Exited
+        })
+        .map(|summary| summary.tmux_name.clone())
+        .collect()
+}
+
+async fn query_tmux_active_pane_session_ids(
+    tmux_names: &HashSet<String>,
+) -> anyhow::Result<HashMap<String, String>> {
+    if tmux_names.is_empty() {
+        return Ok(HashMap::new());
+    }
+
     let output = Command::new("tmux")
         .args([
-            "display-message",
-            "-p",
-            "-t",
-            &target,
-            "#{window_index}.#{pane_index}:#{pane_id}",
+            "list-panes",
+            "-a",
+            "-F",
+            "#{session_name}\t#{window_active}\t#{pane_active}\t#{window_index}.#{pane_index}:#{pane_id}",
         ])
         .env_remove("TMUX")
         .env_remove("TMUX_PANE")
         .output()
         .await
-        .map_err(|e| anyhow::anyhow!("failed to run tmux display-message: {}", e))?;
+        .map_err(|e| anyhow::anyhow!("failed to run tmux list-panes: {}", e))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(anyhow::anyhow!(
-            "tmux display-message failed: {}",
-            stderr.trim()
-        ));
+        return Err(anyhow::anyhow!("tmux list-panes failed: {}", stderr.trim()));
     }
 
-    let pane_selector = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if pane_selector.is_empty() {
-        return Err(anyhow::anyhow!("tmux returned empty active pane selector"));
+    let mut active_panes = HashMap::new();
+    for line in String::from_utf8_lossy(&output.stdout).lines() {
+        let mut fields = line.splitn(4, '\t');
+        let session_name = fields.next().unwrap_or_default();
+        let window_active = fields.next().unwrap_or_default();
+        let pane_active = fields.next().unwrap_or_default();
+        let pane_selector = fields.next().unwrap_or_default();
+
+        if !tmux_names.contains(session_name)
+            || window_active != "1"
+            || pane_active != "1"
+            || pane_selector.is_empty()
+        {
+            continue;
+        }
+
+        active_panes.insert(
+            session_name.to_string(),
+            format_tmux_active_pane_session_id(session_name, pane_selector),
+        );
     }
 
-    Ok(format!("tmux:{tmux_name}:{pane_selector}"))
+    Ok(active_panes)
 }
 
 // ---------------------------------------------------------------------------
@@ -807,19 +847,25 @@ impl SessionSupervisor {
             })
             .collect();
 
-        let mut summaries: Vec<SessionSummary> =
-            futures::future::join_all(futs).await.into_iter().flatten().collect();
+        let mut summaries: Vec<SessionSummary> = futures::future::join_all(futs)
+            .await
+            .into_iter()
+            .flatten()
+            .collect();
 
         let thought_snapshots = self.thought_snapshots.read().await.clone();
+        let tmux_names =
+            tmux_names_requiring_active_pane_lookup(summaries.iter(), &thought_snapshots);
+        let active_pane_session_ids = query_tmux_active_pane_session_ids(&tmux_names)
+            .await
+            .unwrap_or_default();
         for summary in &mut summaries {
             let active_pane_session_id = if thought_snapshots.contains_key(&summary.session_id)
                 || summary.tmux_name.is_empty()
             {
                 None
             } else {
-                query_tmux_active_pane_session_id(&summary.tmux_name)
-                    .await
-                    .ok()
+                active_pane_session_ids.get(&summary.tmux_name).cloned()
             };
             if let Some(thought_data) = thought_snapshot_for_summary(
                 summary,
@@ -889,6 +935,7 @@ impl SessionSupervisor {
         let sessions = self.sessions.read().await;
         let thought_snapshots = self.thought_snapshots.read().await.clone();
         let mut infos = Vec::with_capacity(sessions.len());
+        let mut summaries_with_replay = Vec::with_capacity(sessions.len());
 
         for (_, handle) in sessions.iter() {
             // Request summary and snapshot from the actor.
@@ -931,59 +978,68 @@ impl SessionSupervisor {
                         chars[start..].iter().collect()
                     })
                     .unwrap_or_default();
-                let session_id = summary.session_id.clone();
-                let active_pane_session_id = if thought_snapshots.contains_key(&summary.session_id)
-                    || summary.tmux_name.is_empty()
-                    || summary.state == crate::types::SessionState::Exited
-                {
-                    None
-                } else {
-                    query_tmux_active_pane_session_id(&summary.tmux_name)
-                        .await
-                        .ok()
-                };
-                let thought_data = thought_snapshot_for_summary(
-                    &summary,
-                    active_pane_session_id.as_deref(),
-                    &thought_snapshots,
-                );
-
-                infos.push(SessionInfo {
-                    session_id,
-                    state: summary.state,
-                    exited: summary.state == crate::types::SessionState::Exited,
-                    tool: summary.tool,
-                    cwd: summary.cwd,
-                    replay_text,
-                    thought_state: thought_data
-                        .map(|t| t.thought_state)
-                        .unwrap_or(summary.thought_state),
-                    thought_source: thought_data
-                        .map(|t| t.thought_source)
-                        .unwrap_or(summary.thought_source),
-                    rest_state: thought_data
-                        .map(|t| t.rest_state)
-                        .unwrap_or(summary.rest_state),
-                    commit_candidate: thought_data
-                        .map(|t| t.commit_candidate)
-                        .unwrap_or(summary.commit_candidate),
-                    thought: thought_data
-                        .and_then(|t| t.thought.clone())
-                        .or_else(|| summary.thought.clone()),
-                    thought_updated_at: thought_data
-                        .map(|t| t.updated_at)
-                        .or(summary.thought_updated_at),
-                    objective_fingerprint: thought_data
-                        .and_then(|t| t.objective_fingerprint.clone()),
-                    token_count: thought_data
-                        .map(|t| t.token_count)
-                        .unwrap_or(summary.token_count),
-                    context_limit: thought_data
-                        .map(|t| t.context_limit)
-                        .unwrap_or(summary.context_limit),
-                    last_activity_at: summary.last_activity_at,
-                });
+                summaries_with_replay.push((summary, replay_text));
             }
+        }
+
+        let tmux_names = tmux_names_requiring_active_pane_lookup(
+            summaries_with_replay.iter().map(|(summary, _)| summary),
+            &thought_snapshots,
+        );
+        let active_pane_session_ids = query_tmux_active_pane_session_ids(&tmux_names)
+            .await
+            .unwrap_or_default();
+
+        for (summary, replay_text) in summaries_with_replay {
+            let session_id = summary.session_id.clone();
+            let active_pane_session_id = if thought_snapshots.contains_key(&summary.session_id)
+                || summary.tmux_name.is_empty()
+                || summary.state == crate::types::SessionState::Exited
+            {
+                None
+            } else {
+                active_pane_session_ids.get(&summary.tmux_name).cloned()
+            };
+            let thought_data = thought_snapshot_for_summary(
+                &summary,
+                active_pane_session_id.as_deref(),
+                &thought_snapshots,
+            );
+
+            infos.push(SessionInfo {
+                session_id,
+                state: summary.state,
+                exited: summary.state == crate::types::SessionState::Exited,
+                tool: summary.tool,
+                cwd: summary.cwd,
+                replay_text,
+                thought_state: thought_data
+                    .map(|t| t.thought_state)
+                    .unwrap_or(summary.thought_state),
+                thought_source: thought_data
+                    .map(|t| t.thought_source)
+                    .unwrap_or(summary.thought_source),
+                rest_state: thought_data
+                    .map(|t| t.rest_state)
+                    .unwrap_or(summary.rest_state),
+                commit_candidate: thought_data
+                    .map(|t| t.commit_candidate)
+                    .unwrap_or(summary.commit_candidate),
+                thought: thought_data
+                    .and_then(|t| t.thought.clone())
+                    .or_else(|| summary.thought.clone()),
+                thought_updated_at: thought_data
+                    .map(|t| t.updated_at)
+                    .or(summary.thought_updated_at),
+                objective_fingerprint: thought_data.and_then(|t| t.objective_fingerprint.clone()),
+                token_count: thought_data
+                    .map(|t| t.token_count)
+                    .unwrap_or(summary.token_count),
+                context_limit: thought_data
+                    .map(|t| t.context_limit)
+                    .unwrap_or(summary.context_limit),
+                last_activity_at: summary.last_activity_at,
+            });
         }
 
         infos
@@ -1834,6 +1890,24 @@ mod tests {
         std::env::set_var("PATH", std::env::join_paths(entries).expect("path"));
     }
 
+    fn install_fake_tmux(script: &str) -> (tempfile::TempDir, Option<std::ffi::OsString>) {
+        let dir = tempdir().expect("tempdir");
+        let bin_dir = dir.path().join("bin");
+        std::fs::create_dir_all(&bin_dir).expect("bin");
+        write_executable(&bin_dir.join("tmux"), script);
+        let original_path = std::env::var_os("PATH");
+        prepend_test_path(&bin_dir, original_path.as_deref());
+        (dir, original_path)
+    }
+
+    fn restore_test_path(original_path: Option<std::ffi::OsString>) {
+        if let Some(value) = original_path {
+            std::env::set_var("PATH", value);
+        } else {
+            std::env::remove_var("PATH");
+        }
+    }
+
     #[test]
     fn next_session_counter_parses_expected_format() {
         assert_eq!(next_session_counter("sess_0"), Some(1));
@@ -1848,39 +1922,41 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn query_tmux_active_pane_session_id_uses_exact_target_for_numeric_names() {
+    async fn query_tmux_active_pane_session_ids_uses_list_panes_and_supports_numeric_names() {
         let _guard = crate::test_support::ENV_LOCK
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
         let dir = tempdir().expect("tempdir");
         let bin_dir = dir.path().join("bin");
         std::fs::create_dir_all(&bin_dir).expect("bin");
-        let target_file = dir.path().join("target.txt");
+        let command_file = dir.path().join("tmux-command.txt");
         write_executable(
             &bin_dir.join("tmux"),
             &format!(
-                "#!/bin/sh\nprintf '%s\\n' \"${{4-}}\" > \"{}\"\nprintf '0.0:%%1\\n'\n",
-                target_file.display()
+                "#!/bin/sh\nset -eu\nprintf '%s\\n' \"$1\" > \"{}\"\ncat <<'EOF'\n0\t1\t1\t0.0:%1\nwork\t0\t1\t1.0:%9\nwork\t1\t1\t1.1:%2\nEOF\n",
+                command_file.display()
             ),
         );
-
         let original_path = std::env::var_os("PATH");
         prepend_test_path(&bin_dir, original_path.as_deref());
 
-        let pane = query_tmux_active_pane_session_id("0")
-            .await
-            .expect("active pane session id");
-        assert_eq!(pane, "tmux:0:0.0:%1");
+        let pane_ids = query_tmux_active_pane_session_ids(&HashSet::from_iter([
+            "0".to_string(),
+            "work".to_string(),
+        ]))
+        .await
+        .expect("active pane session ids");
+        assert_eq!(pane_ids.get("0").map(String::as_str), Some("tmux:0:0.0:%1"));
         assert_eq!(
-            std::fs::read_to_string(&target_file).expect("target file"),
-            "=0:\n"
+            pane_ids.get("work").map(String::as_str),
+            Some("tmux:work:1.1:%2")
+        );
+        assert_eq!(
+            std::fs::read_to_string(&command_file).expect("command file"),
+            "list-panes\n"
         );
 
-        if let Some(value) = original_path {
-            std::env::set_var("PATH", value);
-        } else {
-            std::env::remove_var("PATH");
-        }
+        restore_test_path(original_path);
     }
 
     #[test]
@@ -2308,6 +2384,107 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn list_sessions_merges_thought_snapshot_from_active_tmux_pane_batch_lookup() {
+        let _guard = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let (_dir, original_path) = install_fake_tmux(
+            r#"#!/bin/sh
+set -eu
+case "${1-}" in
+  list-panes)
+    cat <<'EOF'
+work	0	1	1.0:%1
+work	1	1	1.1:%2
+EOF
+    ;;
+  *)
+    printf 'unexpected tmux command: %s\n' "${1-}" >&2
+    exit 1
+    ;;
+esac
+"#,
+        );
+
+        let supervisor = SessionSupervisor::new(Arc::new(Config::default()));
+        let mut summary = test_summary("sess-live", SessionState::Idle);
+        summary.tmux_name = "work".to_string();
+        supervisor
+            .insert_test_handle(spawn_summary_handle(summary).await)
+            .await;
+        supervisor.thought_snapshots.write().await.insert(
+            "tmux:work:1.1:%2".to_string(),
+            ThoughtSnapshot {
+                thought: Some("pane two".to_string()),
+                thought_state: ThoughtState::Active,
+                thought_source: ThoughtSource::Llm,
+                rest_state: RestState::Active,
+                commit_candidate: true,
+                objective_changed_at: None,
+                objective_fingerprint: None,
+                token_count: 77,
+                context_limit: 200_000,
+                updated_at: Utc::now(),
+                delivery: ThoughtDeliveryState::default(),
+            },
+        );
+
+        let sessions = supervisor.list_sessions().await;
+
+        restore_test_path(original_path);
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].thought.as_deref(), Some("pane two"));
+        assert_eq!(sessions[0].thought_state, ThoughtState::Active);
+        assert_eq!(sessions[0].rest_state, RestState::Active);
+        assert_eq!(sessions[0].token_count, 77);
+    }
+
+    #[tokio::test]
+    async fn list_sessions_keeps_summary_when_active_tmux_pane_batch_lookup_fails() {
+        let _guard = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let (_dir, original_path) = install_fake_tmux(
+            r#"#!/bin/sh
+set -eu
+printf 'boom\n' >&2
+exit 1
+"#,
+        );
+
+        let supervisor = SessionSupervisor::new(Arc::new(Config::default()));
+        let mut summary = test_summary("sess-live", SessionState::Idle);
+        summary.tmux_name = "work".to_string();
+        supervisor
+            .insert_test_handle(spawn_summary_handle(summary).await)
+            .await;
+        supervisor.thought_snapshots.write().await.insert(
+            "tmux:work:1.1:%2".to_string(),
+            ThoughtSnapshot {
+                thought: Some("pane two".to_string()),
+                thought_state: ThoughtState::Active,
+                thought_source: ThoughtSource::Llm,
+                rest_state: RestState::Active,
+                commit_candidate: true,
+                objective_changed_at: None,
+                objective_fingerprint: None,
+                token_count: 77,
+                context_limit: 200_000,
+                updated_at: Utc::now(),
+                delivery: ThoughtDeliveryState::default(),
+            },
+        );
+
+        let sessions = supervisor.list_sessions().await;
+
+        restore_test_path(original_path);
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].session_id, "sess-live");
+        assert_eq!(sessions[0].thought.as_deref(), None);
+        assert_eq!(sessions[0].thought_state, ThoughtState::Holding);
+    }
+
+    #[tokio::test]
     async fn list_sessions_skips_dropped_summary_replies() {
         let supervisor = SessionSupervisor::new(Arc::new(Config::default()));
         supervisor
@@ -2365,6 +2542,65 @@ mod tests {
         assert_eq!(infos[0].thought.as_deref(), Some("building release"));
         assert_eq!(infos[0].token_count, 55);
         assert_eq!(infos[0].objective_fingerprint.as_deref(), Some("obj-1"));
+    }
+
+    #[tokio::test]
+    async fn collect_session_snapshots_merges_thought_snapshot_from_active_tmux_pane_batch_lookup()
+    {
+        let _guard = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let (_dir, original_path) = install_fake_tmux(
+            r#"#!/bin/sh
+set -eu
+case "${1-}" in
+  list-panes)
+    cat <<'EOF'
+work	0	1	1.0:%1
+work	1	1	1.1:%2
+EOF
+    ;;
+  *)
+    printf 'unexpected tmux command: %s\n' "${1-}" >&2
+    exit 1
+    ;;
+esac
+"#,
+        );
+
+        let supervisor = SessionSupervisor::new(Arc::new(Config::default()));
+        let mut summary = test_summary("sess-live", SessionState::Busy);
+        summary.tmux_name = "work".to_string();
+        supervisor
+            .insert_test_handle(spawn_summary_handle(summary).await)
+            .await;
+        supervisor.thought_snapshots.write().await.insert(
+            "tmux:work:1.1:%2".to_string(),
+            ThoughtSnapshot {
+                thought: Some("pane two".to_string()),
+                thought_state: ThoughtState::Active,
+                thought_source: ThoughtSource::Llm,
+                rest_state: RestState::Active,
+                commit_candidate: true,
+                objective_changed_at: None,
+                objective_fingerprint: Some("obj-pane".to_string()),
+                token_count: 88,
+                context_limit: 199_000,
+                updated_at: Utc::now(),
+                delivery: ThoughtDeliveryState::default(),
+            },
+        );
+
+        let infos = supervisor.collect_session_snapshots().await;
+
+        restore_test_path(original_path);
+        assert_eq!(infos.len(), 1);
+        assert_eq!(infos[0].session_id, "sess-live");
+        assert_eq!(infos[0].thought.as_deref(), Some("pane two"));
+        assert_eq!(infos[0].thought_state, ThoughtState::Active);
+        assert_eq!(infos[0].rest_state, RestState::Active);
+        assert_eq!(infos[0].objective_fingerprint.as_deref(), Some("obj-pane"));
+        assert_eq!(infos[0].token_count, 88);
     }
 
     #[tokio::test]

@@ -686,10 +686,7 @@ pub fn routes() -> Router<Arc<AppState>> {
             "/v1/sessions/{session_id}/mermaid-artifact",
             get(get_mermaid_artifact),
         )
-        .route(
-            "/v1/sessions/{session_id}/plan-file",
-            get(get_plan_file),
-        )
+        .route("/v1/sessions/{session_id}/plan-file", get(get_plan_file))
 }
 
 #[cfg(test)]
@@ -708,7 +705,12 @@ mod tests {
     use axum::response::IntoResponse;
     use chrono::Utc;
     use serde_json::Value;
+    use std::ffi::{OsStr, OsString};
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::Path as FsPath;
     use std::sync::Arc;
+    use std::time::{Duration, Instant};
+    use tempfile::{tempdir, TempDir};
     use tokio::sync::{mpsc, RwLock};
 
     fn test_state() -> Arc<AppState> {
@@ -758,6 +760,64 @@ mod tests {
             .await
             .expect("response body");
         serde_json::from_slice(&body).expect("json body")
+    }
+
+    struct TestPathGuard(Option<OsString>);
+
+    impl Drop for TestPathGuard {
+        fn drop(&mut self) {
+            if let Some(value) = self.0.take() {
+                std::env::set_var("PATH", value);
+            } else {
+                std::env::remove_var("PATH");
+            }
+        }
+    }
+
+    fn write_executable(path: &FsPath, contents: &str) {
+        std::fs::write(path, contents).expect("write executable");
+        let mut perms = std::fs::metadata(path).expect("metadata").permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(path, perms).expect("chmod");
+    }
+
+    fn prepend_test_path(bin_dir: &FsPath, original_path: Option<&OsStr>) {
+        let mut entries = vec![bin_dir.as_os_str().to_os_string()];
+        if let Some(existing) = original_path {
+            entries.extend(std::env::split_paths(existing).map(|path| path.into_os_string()));
+        }
+        std::env::set_var("PATH", std::env::join_paths(entries).expect("path"));
+    }
+
+    fn install_fake_tmux(script: &str) -> (TempDir, TestPathGuard) {
+        let dir = tempdir().expect("tempdir");
+        let bin_dir = dir.path().join("bin");
+        std::fs::create_dir_all(&bin_dir).expect("bin");
+        write_executable(&bin_dir.join("tmux"), script);
+        let original_path = std::env::var_os("PATH");
+        prepend_test_path(&bin_dir, original_path.as_deref());
+        (dir, TestPathGuard(original_path))
+    }
+
+    async fn spawn_summary_handle(summary: crate::types::SessionSummary) -> ActorHandle {
+        let (cmd_tx, mut cmd_rx) = mpsc::channel(8);
+        let handle = ActorHandle::test_handle(
+            summary.session_id.clone(),
+            summary.tmux_name.clone(),
+            cmd_tx,
+        );
+        tokio::spawn(async move {
+            while let Some(cmd) = cmd_rx.recv().await {
+                match cmd {
+                    SessionCommand::GetSummary(reply) => {
+                        let _ = reply.send(summary.clone());
+                    }
+                    SessionCommand::Shutdown => break,
+                    _ => {}
+                }
+            }
+        });
+        handle
     }
 
     #[tokio::test]
@@ -886,6 +946,76 @@ mod tests {
         let json = response_json(response).await;
         assert_eq!(json["session_id"], "sess-snap");
         assert_eq!(json["screen_text"], "hello from tmux");
+    }
+
+    #[tokio::test]
+    async fn list_sessions_perf_gate_batches_tmux_lookup_within_budget() {
+        let _env_guard = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let (_dir, _path_guard) = install_fake_tmux(
+            r#"#!/bin/sh
+set -eu
+case "${1-}" in
+  list-panes)
+    sleep 0.20
+    cat <<'EOF'
+work-1	1	1	0.0:%1
+work-2	1	1	0.0:%2
+work-3	1	1	0.0:%3
+work-4	1	1	0.0:%4
+work-5	1	1	0.0:%5
+work-6	1	1	0.0:%6
+EOF
+    ;;
+  display-message)
+    sleep 0.20
+    printf '0.0:%%1\n'
+    ;;
+  *)
+    printf 'unexpected tmux command: %s\n' "${1-}" >&2
+    exit 1
+    ;;
+esac
+"#,
+        );
+
+        let state = test_state();
+        let mut expected_ids = Vec::new();
+        for index in 1..=6 {
+            let session_id = format!("sess-{index}");
+            let mut live_summary = summary(&session_id, SessionState::Idle);
+            live_summary.tmux_name = format!("work-{index}");
+            state
+                .supervisor
+                .insert_test_handle(spawn_summary_handle(live_summary).await)
+                .await;
+            expected_ids.push(session_id);
+        }
+
+        let started = Instant::now();
+        let Json(payload) = list_sessions(
+            Extension(AuthInfo::new(OBSERVER_SCOPES.to_vec())),
+            State(state),
+        )
+        .await
+        .expect("session list should succeed");
+        let elapsed = started.elapsed();
+
+        let mut actual_ids = payload
+            .sessions
+            .iter()
+            .map(|session| session.session_id.clone())
+            .collect::<Vec<_>>();
+        actual_ids.sort();
+        expected_ids.sort();
+
+        assert_eq!(actual_ids, expected_ids);
+        assert!(
+            elapsed < Duration::from_millis(500),
+            "expected /v1/sessions under 500ms, got {:?}",
+            elapsed
+        );
     }
 
     #[tokio::test]
