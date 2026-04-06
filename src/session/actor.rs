@@ -249,6 +249,7 @@ impl SessionActor {
         start_cwd: Option<String>,
         initial_tool: Option<String>,
         config: Arc<Config>,
+        last_activity_override: Option<chrono::DateTime<Utc>>,
     ) -> anyhow::Result<ActorHandle> {
         let pty_system = native_pty_system();
 
@@ -349,7 +350,7 @@ impl SessionActor {
             tool: initial_tool,
             last_skill: None,
             input_line_buffer: String::new(),
-            last_activity_at: Utc::now(),
+            last_activity_at: last_activity_override.unwrap_or_else(Utc::now),
             session_started_at: Utc::now(),
             clear_replay_on_first_idle: !attach,
         };
@@ -1179,9 +1180,10 @@ impl SessionActor {
             thought_state: crate::types::ThoughtState::Holding,
             thought_source: crate::types::ThoughtSource::CarryForward,
             thought_updated_at: None,
-            rest_state: crate::types::fallback_rest_state(
+            rest_state: crate::types::rest_state_from_idle(
                 state,
-                crate::types::ThoughtState::Holding,
+                self.last_activity_at,
+                Utc::now(),
             ),
             commit_candidate: false,
             objective_changed_at: None,
@@ -2227,6 +2229,35 @@ mod tests {
         // Should return immediately without trying tmux (tmux_name "demo" does not exist)
         actor.maybe_check_liveness().await;
         // If we reach here without hanging/panicking, the early-return worked
+    }
+
+    #[tokio::test]
+    async fn build_summary_reports_sleeping_when_idle_past_threshold() {
+        // End-to-end wiring check: prove that build_summary feeds
+        // self.last_activity_at into rest_state_from_idle and that the result
+        // lands on SessionSummary.rest_state unclobbered. Pure math for the
+        // ladder is covered by types::rest_state_tests; this guards the
+        // actor-side plumbing.
+        let mut actor = test_actor();
+        // StateDetector::new() defaults to SessionState::Idle.
+        let aged = Utc::now() - chrono::Duration::minutes(10);
+        actor.last_activity_at = aged;
+
+        let summary = actor.build_summary();
+
+        assert_eq!(summary.state, crate::types::SessionState::Idle);
+        assert_eq!(summary.rest_state, crate::types::RestState::Sleeping);
+        assert_eq!(summary.last_activity_at, aged);
+    }
+
+    #[tokio::test]
+    async fn build_summary_reports_active_for_fresh_idle_session() {
+        // Regression guard: a brand-new idle session (last_activity_at = now)
+        // must not immediately report Drowsy/Sleeping.
+        let actor = test_actor();
+        let summary = actor.build_summary();
+        assert_eq!(summary.state, crate::types::SessionState::Idle);
+        assert_eq!(summary.rest_state, crate::types::RestState::Active);
     }
 
     #[tokio::test]

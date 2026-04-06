@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::thought::runtime_config::{DaemonDefaults, ThoughtConfig};
@@ -515,6 +515,180 @@ pub fn fallback_rest_state(state: SessionState, thought_state: ThoughtState) -> 
             ThoughtState::Sleeping => RestState::Sleeping,
         },
         SessionState::Busy | SessionState::Error | SessionState::Attention => RestState::Active,
+    }
+}
+
+/// An idle session stays `Active` until it has been silent for this long.
+pub const REST_STATE_DROWSY_AFTER: Duration = Duration::seconds(30);
+/// An idle session that has been silent past this threshold becomes `Sleeping`
+/// (sprite freezes).
+pub const REST_STATE_SLEEPING_AFTER: Duration = Duration::minutes(5);
+/// An idle session that has been silent past this threshold becomes
+/// `DeepSleep`.
+pub const REST_STATE_DEEP_SLEEP_AFTER: Duration = Duration::minutes(30);
+
+/// Compute a session's `RestState` from how long it has been silent.
+///
+/// This is the no-thought-daemon fallback. When the thought daemon is running
+/// it publishes its own `RestState` which supersedes this value in the
+/// supervisor merge path. Non-idle states (`Busy`, `Error`, `Attention`) are
+/// unaffected by elapsed time — they always stay `Active` so attention-flagged
+/// sessions keep their attention animation and busy sessions never "fall
+/// asleep" mid-task. `Exited` stays `DeepSleep`.
+///
+/// Negative durations (e.g. from clock skew or future-dated
+/// `last_activity_at`) resolve to `Active` — a fresh session is never sleepy.
+pub fn rest_state_from_idle(
+    state: SessionState,
+    last_activity_at: DateTime<Utc>,
+    now: DateTime<Utc>,
+) -> RestState {
+    match state {
+        SessionState::Exited => RestState::DeepSleep,
+        SessionState::Busy | SessionState::Error | SessionState::Attention => RestState::Active,
+        SessionState::Idle => {
+            let elapsed = now.signed_duration_since(last_activity_at);
+            if elapsed >= REST_STATE_DEEP_SLEEP_AFTER {
+                RestState::DeepSleep
+            } else if elapsed >= REST_STATE_SLEEPING_AFTER {
+                RestState::Sleeping
+            } else if elapsed >= REST_STATE_DROWSY_AFTER {
+                RestState::Drowsy
+            } else {
+                RestState::Active
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod rest_state_tests {
+    use super::*;
+
+    fn base() -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339("2026-04-05T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc)
+    }
+
+    #[test]
+    fn tc1_freshly_active_idle_stays_active() {
+        let now = base();
+        let last = now - Duration::seconds(5);
+        assert_eq!(
+            rest_state_from_idle(SessionState::Idle, last, now),
+            RestState::Active
+        );
+    }
+
+    #[test]
+    fn tc2_two_minutes_silent_becomes_drowsy() {
+        let now = base();
+        let last = now - Duration::minutes(2);
+        assert_eq!(
+            rest_state_from_idle(SessionState::Idle, last, now),
+            RestState::Drowsy
+        );
+    }
+
+    #[test]
+    fn tc3_ten_minutes_silent_becomes_sleeping() {
+        let now = base();
+        let last = now - Duration::minutes(10);
+        assert_eq!(
+            rest_state_from_idle(SessionState::Idle, last, now),
+            RestState::Sleeping
+        );
+    }
+
+    #[test]
+    fn tc4_hours_silent_becomes_deep_sleep() {
+        let now = base();
+        let last = now - Duration::hours(2);
+        assert_eq!(
+            rest_state_from_idle(SessionState::Idle, last, now),
+            RestState::DeepSleep
+        );
+    }
+
+    #[test]
+    fn tc5_busy_session_ignores_idle_duration() {
+        let now = base();
+        let last = now - Duration::hours(1);
+        assert_eq!(
+            rest_state_from_idle(SessionState::Busy, last, now),
+            RestState::Active
+        );
+    }
+
+    #[test]
+    fn tc5b_attention_session_ignores_idle_duration() {
+        let now = base();
+        let last = now - Duration::minutes(10);
+        assert_eq!(
+            rest_state_from_idle(SessionState::Attention, last, now),
+            RestState::Active,
+            "attention-flagged sessions must keep animating until dismissed"
+        );
+    }
+
+    #[test]
+    fn tc7_exited_stays_deep_sleep() {
+        let now = base();
+        let last = now - Duration::seconds(1);
+        assert_eq!(
+            rest_state_from_idle(SessionState::Exited, last, now),
+            RestState::DeepSleep
+        );
+    }
+
+    #[test]
+    fn tc11_future_last_activity_resolves_to_active() {
+        let now = base();
+        let last = now + Duration::minutes(1);
+        assert_eq!(
+            rest_state_from_idle(SessionState::Idle, last, now),
+            RestState::Active,
+            "clock skew must not panic or sleep the session"
+        );
+    }
+
+    #[test]
+    fn threshold_boundaries() {
+        let now = base();
+        // Exactly at drowsy threshold → Drowsy
+        assert_eq!(
+            rest_state_from_idle(SessionState::Idle, now - REST_STATE_DROWSY_AFTER, now),
+            RestState::Drowsy
+        );
+        // Exactly at sleeping threshold → Sleeping
+        assert_eq!(
+            rest_state_from_idle(SessionState::Idle, now - REST_STATE_SLEEPING_AFTER, now),
+            RestState::Sleeping
+        );
+        // Exactly at deep-sleep threshold → DeepSleep
+        assert_eq!(
+            rest_state_from_idle(SessionState::Idle, now - REST_STATE_DEEP_SLEEP_AFTER, now),
+            RestState::DeepSleep
+        );
+    }
+
+    #[test]
+    fn fallback_rest_state_unchanged() {
+        // TC-10: fallback_rest_state must keep its existing behavior for
+        // preserved call sites (stale-session path, test fixtures).
+        assert_eq!(
+            fallback_rest_state(SessionState::Exited, ThoughtState::Holding),
+            RestState::DeepSleep
+        );
+        assert_eq!(
+            fallback_rest_state(SessionState::Idle, ThoughtState::Holding),
+            RestState::Drowsy
+        );
+        assert_eq!(
+            fallback_rest_state(SessionState::Busy, ThoughtState::Holding),
+            RestState::Active
+        );
     }
 }
 

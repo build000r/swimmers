@@ -410,6 +410,12 @@ impl SessionSupervisor {
             "discovered existing tmux session"
         );
 
+        // Carry the persisted `last_activity_at` forward so long-silent
+        // sessions resume in the correct rest state (e.g. discovered at
+        // startup after an overnight idle should wake up already asleep,
+        // not reset to Active).
+        let last_activity_override = self.persisted_last_activity(&session_id).await;
+
         match crate::session::actor::SessionActor::spawn(
             session_id.clone(),
             tmux_name.clone(),
@@ -417,6 +423,7 @@ impl SessionSupervisor {
             None,
             None,
             self.config.clone(),
+            last_activity_override,
         ) {
             Ok(handle) => {
                 if !self
@@ -595,6 +602,7 @@ impl SessionSupervisor {
             start_cwd.clone(),
             initial_tool.clone(),
             self.config.clone(),
+            None,
         )?;
         let bootstrap_handle = handle.clone();
 
@@ -1048,6 +1056,22 @@ impl SessionSupervisor {
     // -----------------------------------------------------------------------
     // Persistence
     // -----------------------------------------------------------------------
+
+    /// Look up the persisted `last_activity_at` for a session id so a
+    /// discovered/adopted actor can resume in the correct rest state instead
+    /// of resetting its fatigue ladder to "Active" on every restart.
+    async fn persisted_last_activity(&self, session_id: &str) -> Option<chrono::DateTime<Utc>> {
+        let store = {
+            let guard = self.persistence.read().await;
+            guard.as_ref().cloned()?
+        };
+        store
+            .load_sessions()
+            .await
+            .into_iter()
+            .find(|ps| ps.session_id == session_id)
+            .map(|ps| ps.last_activity_at)
+    }
 
     /// Persist the current session registry to disk.
     pub async fn persist_registry(&self) {
