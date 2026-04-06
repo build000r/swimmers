@@ -43,6 +43,8 @@ pub type ClientId = u64;
 /// A framed chunk of terminal output with its sequence number.
 #[derive(Debug, Clone)]
 pub struct OutputFrame {
+    // TODO: re-evaluate when per-frame sequence numbers are surfaced to WS clients
+    #[allow(dead_code)]
     pub seq: u64,
     pub data: Vec<u8>,
 }
@@ -139,6 +141,8 @@ pub struct ActorHandle {
     pub cmd_tx: mpsc::Sender<SessionCommand>,
     /// Per-session broadcast channel for ControlEvents (session_state, session_title).
     /// Multiple WS clients can subscribe to the same session's events.
+    // TODO: re-evaluate when per-session event subscription is wired into WS handlers
+    #[allow(dead_code)]
     event_tx: broadcast::Sender<ControlEvent>,
 }
 
@@ -151,6 +155,8 @@ impl ActorHandle {
     }
 
     /// Subscribe to this session's control events (state changes, title updates).
+    // TODO: re-evaluate when per-session WS event subscription is implemented
+    #[allow(dead_code)]
     pub fn subscribe_events(&self) -> broadcast::Receiver<ControlEvent> {
         self.event_tx.subscribe()
     }

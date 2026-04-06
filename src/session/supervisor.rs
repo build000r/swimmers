@@ -116,6 +116,8 @@ async fn query_tmux_active_pane_session_ids(
 // ---------------------------------------------------------------------------
 
 /// Events emitted by the supervisor when sessions are created or removed.
+// TODO: re-evaluate when lifecycle event subscription is wired into the WebSocket push path
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub enum LifecycleEvent {
     Created {
@@ -912,11 +914,15 @@ impl SessionSupervisor {
     // -----------------------------------------------------------------------
 
     /// Subscribe to lifecycle events (session created/deleted).
+    // TODO: re-evaluate when the WebSocket push path subscribes to lifecycle events
+    #[allow(dead_code)]
     pub fn subscribe_events(&self) -> broadcast::Receiver<LifecycleEvent> {
         self.lifecycle_tx.subscribe()
     }
 
     /// Subscribe to thought_update ControlEvents from the thought loop.
+    // TODO: re-evaluate when external consumers subscribe to thought events
+    #[allow(dead_code)]
     pub fn subscribe_thought_events(&self) -> broadcast::Receiver<ControlEvent> {
         self.thought_tx.subscribe()
     }

@@ -138,6 +138,8 @@ pub fn increment_overload(session_id: &str) {
 }
 
 /// Set per-session lifecycle state as a one-hot gauge by state label.
+// TODO: re-evaluate when thought lifecycle state is tracked in the thought loop
+#[allow(dead_code)]
 pub fn set_thought_lifecycle_state(session_id: &str, state: &str) {
     for candidate in ["active", "holding", "sleeping"] {
         let value = if candidate == state { 1.0 } else { 0.0 };
@@ -151,6 +153,8 @@ pub fn set_thought_lifecycle_state(session_id: &str, state: &str) {
 }
 
 /// Increment thought model-call counters by path/tier/outcome.
+// TODO: re-evaluate when thought model-call metrics are emitted from the thought loop
+#[allow(dead_code)]
 pub fn increment_thought_model_call(session_id: &str, path: &str, tier: &str, outcome: &str) {
     counter!(
         THOUGHT_MODEL_CALLS,
@@ -163,6 +167,8 @@ pub fn increment_thought_model_call(session_id: &str, path: &str, tier: &str, ou
 }
 
 /// Increment thought suppression counters by reason and cadence tier.
+// TODO: re-evaluate when thought suppression metrics are emitted from the thought loop
+#[allow(dead_code)]
 pub fn increment_thought_suppression(session_id: &str, reason: &str, tier: &str) {
     counter!(
         THOUGHT_SUPPRESSIONS,
@@ -174,6 +180,8 @@ pub fn increment_thought_suppression(session_id: &str, reason: &str, tier: &str)
 }
 
 /// Record thought generation latency by path/tier.
+// TODO: re-evaluate when thought latency metrics are emitted from the thought loop
+#[allow(dead_code)]
 pub fn record_thought_generation_latency(
     session_id: &str,
     path: &str,

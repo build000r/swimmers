@@ -106,6 +106,8 @@ impl SpawnTool {
         }
     }
 
+    // Used by swimmers-tui picker; not called from the daemon binary directly.
+    #[allow(dead_code)]
     pub fn label(self) -> &'static str {
         match self {
             Self::Claude => "claude",
@@ -113,6 +115,8 @@ impl SpawnTool {
         }
     }
 
+    // Used by swimmers-tui app; not called from the daemon binary directly.
+    #[allow(dead_code)]
     pub fn toggle(self) -> Self {
         match self {
             Self::Claude => Self::Codex,
@@ -144,6 +148,8 @@ impl NativeDesktopApp {
         }
     }
 
+    // Used by swimmers-tui app; not called from the daemon binary directly.
+    #[allow(dead_code)]
     pub fn toggle(self) -> Self {
         match self {
             Self::Iterm => Self::Ghostty,
@@ -174,6 +180,8 @@ impl GhosttyOpenMode {
         }
     }
 
+    // Used by swimmers-tui app; not called from the daemon binary directly.
+    #[allow(dead_code)]
     pub fn toggle(self) -> Self {
         match self {
             Self::Swap => Self::Add,
@@ -692,6 +700,12 @@ mod rest_state_tests {
     }
 }
 
+// --- WebSocket Push Protocol Types ---
+// TODO: re-evaluate when the push-based WS API is wired up; these are schema
+// types for the server→client and client→server control envelopes that will be
+// constructed once the subscription path is implemented.
+
+#[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionCreatedPayload {
     pub reason: String, // "startup_discovery" | "runtime_discovery" | "api_create"
@@ -700,6 +714,7 @@ pub struct SessionCreatedPayload {
     pub repo_theme: Option<RepoTheme>,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionDeletedPayload {
     pub reason: String,
@@ -708,6 +723,7 @@ pub struct SessionDeletedPayload {
     pub at: DateTime<Utc>,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReplayTruncatedPayload {
     pub code: String,
@@ -716,6 +732,7 @@ pub struct ReplayTruncatedPayload {
     pub latest_seq: u64,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionOverloadedPayload {
     pub code: String,
@@ -724,6 +741,7 @@ pub struct SessionOverloadedPayload {
     pub retry_after_ms: u64,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionSubscriptionPayload {
     pub state: String, // "subscribed" | "unsubscribed"
@@ -734,6 +752,7 @@ pub struct SessionSubscriptionPayload {
     pub at: DateTime<Utc>,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ControlErrorPayload {
     pub code: String,
@@ -744,6 +763,7 @@ pub struct ControlErrorPayload {
 
 // --- Client -> Server Control ---
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize)]
 pub struct ClientControlMessage {
     #[serde(rename = "type")]
@@ -752,17 +772,20 @@ pub struct ClientControlMessage {
     pub payload: serde_json::Value,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize)]
 pub struct SubscribeSessionPayload {
     pub session_id: String,
     pub resume_from_seq: Option<u64>,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize)]
 pub struct UnsubscribeSessionPayload {
     pub session_id: String,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize)]
 pub struct ResizePayload {
     pub session_id: String,
@@ -770,6 +793,7 @@ pub struct ResizePayload {
     pub rows: u16,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize)]
 pub struct DismissAttentionPayload {
     pub session_id: String,
@@ -778,7 +802,10 @@ pub struct DismissAttentionPayload {
 // --- Binary Frame Constants ---
 
 pub mod opcodes {
+    // TODO: re-evaluate when binary frame encoding is implemented in the WS handler
+    #[allow(dead_code)]
     pub const TERMINAL_INPUT: u8 = 0x10;
+    #[allow(dead_code)]
     pub const TERMINAL_OUTPUT: u8 = 0x11;
 }
 

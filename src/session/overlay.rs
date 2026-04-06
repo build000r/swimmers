@@ -14,6 +14,7 @@ pub struct SkillboxOverlay {
 }
 
 struct ClientOverlay {
+    #[allow(dead_code)] // TODO: re-evaluate when overlay debug/export paths are wired up
     client_dir: PathBuf,
     cwd_patterns: Vec<String>,
     /// Number of explicit cwd_match entries (not repo_landscape paths).

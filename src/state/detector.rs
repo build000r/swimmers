@@ -57,6 +57,8 @@ impl StateDetector {
     }
 
     /// Register a callback invoked on every state transition.
+    // TODO: re-evaluate when the supervisor wires up state-change callbacks
+    #[allow(dead_code)]
     pub fn on_state_change<F>(&mut self, cb: F)
     where
         F: Fn(SessionState, SessionState, Option<String>) + Send + 'static,

@@ -12,6 +12,8 @@ use crate::thought::protocol::{SyncResponse, SyncUpdate, ThoughtDeliveryState};
 use crate::thought::runtime_config::ThoughtConfig;
 use crate::types::{ControlEvent, ThoughtSource, ThoughtUpdatePayload};
 
+// TODO: re-evaluate when BridgeRunner::new is used outside tests
+#[allow(dead_code)]
 const DEFAULT_BRIDGE_TICK: Duration = Duration::from_secs(2);
 
 /// Consumes the tmux-scoped clawgs thought stream and applies accepted updates
@@ -23,6 +25,8 @@ pub struct BridgeRunner {
 }
 
 impl BridgeRunner {
+    // TODO: re-evaluate when direct BridgeRunner construction is needed outside tests
+    #[allow(dead_code)]
     pub fn new(
         event_tx: broadcast::Sender<ControlEvent>,
         runtime_config: Arc<RwLock<ThoughtConfig>>,

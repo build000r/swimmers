@@ -1,3 +1,8 @@
+// TODO: re-evaluate when the daemon binary itself calls model-rotation logic;
+// all public functions here are consumed by swimmers-tui, not by the daemon,
+// so the daemon's dead-code pass flags them even though they are load-bearing.
+#![allow(dead_code)]
+
 use std::cmp::Ordering;
 use std::env;
 use std::fs;

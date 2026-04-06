@@ -39,7 +39,9 @@ pub struct Config {
     pub auth_token: Option<String>,
     pub observer_token: Option<String>,
     pub thought_tick_ms: u64,
+    #[allow(dead_code)] // TODO: re-evaluate when per-session thought defaults are used by the API
     pub thoughts_enabled_default: bool,
+    #[allow(dead_code)] // TODO: re-evaluate when session delete mode is surfaced in the API
     pub session_delete_mode: SessionDeleteMode,
     pub replay_buffer_size: usize,
     pub outbound_queue_bound: usize,

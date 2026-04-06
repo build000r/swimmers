@@ -120,6 +120,8 @@ impl ThoughtConfig {
         Ok(self)
     }
 
+    // TODO: re-evaluate when thought loop consults model_override for per-request model selection
+    #[allow(dead_code)]
     pub fn model_override(&self) -> Option<&str> {
         let trimmed = self.model.trim();
         if trimmed.is_empty() {

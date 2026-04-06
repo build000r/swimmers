@@ -108,6 +108,8 @@ impl ReplayRing {
     }
 
     /// Total bytes currently retained in the buffer.
+    // TODO: re-evaluate when buffer memory metrics are exposed in the API
+    #[allow(dead_code)]
     pub fn total_bytes_retained(&self) -> usize {
         self.total_bytes
     }
