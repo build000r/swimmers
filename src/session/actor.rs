@@ -1211,11 +1211,16 @@ impl SessionActor {
                 .discover(ArtifactKind::Mermaid, &context)
                 .map(|artifact| {
                     let slice_name = extract_mmd_slice_name(&artifact.path).map(str::to_owned);
-                    let plan_files = slice_name.as_ref().map(|_| {
-                        let siblings = list_plan_siblings(&artifact.path);
-                        if siblings.is_empty() { return Vec::new(); }
-                        siblings
-                    }).filter(|f| !f.is_empty());
+                    let plan_files = slice_name
+                        .as_ref()
+                        .map(|_| {
+                            let siblings = list_plan_siblings(&artifact.path);
+                            if siblings.is_empty() {
+                                return Vec::new();
+                            }
+                            siblings
+                        })
+                        .filter(|f| !f.is_empty());
                     MermaidArtifactResponse {
                         session_id: response_session_id.clone(),
                         available: true,
@@ -2149,15 +2154,15 @@ fn pty_read_loop(
 #[cfg(test)]
 mod tests {
     use super::{
-        capture_pane_tail, cwd_from_osc7_payload, detect_skill_from_input_line,
-        detect_tool_from_command_line, detect_tool_from_process_entry, drain_completed_input_lines,
-        extract_cwd_from_title, find_osc_payload_end, line_looks_prompt_like, normalize_skill_name,
-        osc_payloads, output_counts_as_meaningful_activity, parse_process_entry, percent_decode,
+        capture_pane_tail, compute_pane_liveness, cwd_from_osc7_payload,
+        detect_skill_from_input_line, detect_tool_from_command_line,
+        detect_tool_from_process_entry, drain_completed_input_lines, extract_cwd_from_title,
+        find_osc_payload_end, line_looks_prompt_like, normalize_skill_name, osc_payloads,
+        output_counts_as_meaningful_activity, parse_process_entry, percent_decode,
         query_tmux_session_created, query_tool_from_tmux_process_tree, resolve_tmux_terminal_env,
         should_refresh_cwd_from_tmux, should_refresh_tool_from_tmux, visible_output_is_meaningful,
-        compute_pane_liveness, write_and_flush_input, write_input_counts_as_activity, ControlEvent,
-        ProcessEntry, SessionActor, SessionCommand, CWD_REFRESH_MIN_INTERVAL,
-        TOOL_REFRESH_MIN_INTERVAL,
+        write_and_flush_input, write_input_counts_as_activity, ControlEvent, ProcessEntry,
+        SessionActor, SessionCommand, CWD_REFRESH_MIN_INTERVAL, TOOL_REFRESH_MIN_INTERVAL,
     };
     use crate::config::Config;
     use crate::scroll::guard::ScrollGuard;
@@ -2236,10 +2241,9 @@ mod tests {
     async fn maybe_check_liveness_runs_query_when_interval_elapsed() {
         let mut actor = test_actor();
         // Push last_liveness_check_at far enough back to pass the interval guard.
-        actor.last_liveness_check_at =
-            Instant::now() - Duration::from_millis(2_100); // past LIVENESS_CHECK_INTERVAL (2s)
-        // query_pane_liveness will fail for tmux_name "demo" (no real tmux),
-        // but the Err branch just logs — it must not panic.
+        actor.last_liveness_check_at = Instant::now() - Duration::from_millis(2_100); // past LIVENESS_CHECK_INTERVAL (2s)
+                                                                                      // query_pane_liveness will fail for tmux_name "demo" (no real tmux),
+                                                                                      // but the Err branch just logs — it must not panic.
         actor.maybe_check_liveness().await;
         // last_liveness_check_at is updated even on query failure
         assert!(actor.last_liveness_check_at.elapsed() < Duration::from_secs(1));
@@ -2877,11 +2881,7 @@ fi
     #[test]
     fn compute_pane_liveness_sums_deep_descendant_cpu() {
         // pane 100 → child 101 → grandchild 102
-        let entries = vec![
-            proc(100, 1, 0.0),
-            proc(101, 100, 1.0),
-            proc(102, 101, 3.0),
-        ];
+        let entries = vec![proc(100, 1, 0.0), proc(101, 100, 1.0), proc(102, 101, 3.0)];
         let liveness = compute_pane_liveness(100, entries);
         assert!(liveness.has_children);
         assert!((liveness.descendant_cpu - 4.0).abs() < 0.01);

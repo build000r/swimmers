@@ -1065,8 +1065,12 @@ mod tests {
     #[test]
     fn looks_like_prompt_multiline_uses_last_nonempty_line() {
         // Only the last non-empty line is inspected
-        assert!(StateDetector::looks_like_prompt("some output\nuser@host:~$ "));
-        assert!(!StateDetector::looks_like_prompt("user@host:~$ \nsome output\n"));
+        assert!(StateDetector::looks_like_prompt(
+            "some output\nuser@host:~$ "
+        ));
+        assert!(!StateDetector::looks_like_prompt(
+            "user@host:~$ \nsome output\n"
+        ));
         // Trailing blank lines are skipped to find the prompt line
         assert!(StateDetector::looks_like_prompt("user@host:~$ \n\n  \n"));
     }

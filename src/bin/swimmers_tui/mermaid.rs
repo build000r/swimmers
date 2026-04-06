@@ -3850,7 +3850,9 @@ fn push_edge_label_block(
     owner_key: &str,
 ) {
     let Some(label) = label else { return };
-    let Some((label_x, label_y)) = anchor else { return };
+    let Some((label_x, label_y)) = anchor else {
+        return;
+    };
     let (font_size, line_height) = if is_state {
         (state_font_size, state_line_height)
     } else {
@@ -3925,7 +3927,6 @@ pub(crate) fn project_mermaid_semantic_lines(
     content_rect: Rect,
     view_state: MermaidViewState,
 ) -> Vec<MermaidProjectedLine> {
-
     let mut candidates = Vec::new();
     let owner_colors = mermaid_owner_accent_map(lines);
     let left = content_rect.x as i32;
@@ -4638,12 +4639,15 @@ pub(crate) fn render_mermaid_viewer(
                 Color::DarkGrey
             };
             renderer.draw_text(tab_x, field.y, &label, color);
-            viewer.tab_rects.push((tab, Rect {
-                x: tab_x,
-                y: field.y,
-                width: label_width,
-                height: 1,
-            }));
+            viewer.tab_rects.push((
+                tab,
+                Rect {
+                    x: tab_x,
+                    y: field.y,
+                    width: label_width,
+                    height: 1,
+                },
+            ));
             tab_x = tab_x.saturating_add(label_width + 1);
         }
         // Show tmux name at the end if room

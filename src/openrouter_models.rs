@@ -222,15 +222,27 @@ mod tests {
 
     #[test]
     fn is_rotator_candidate_rejects_vision_by_name() {
-        assert!(!is_rotator_candidate(&entry("llama:free", Some("Vision Model"))));
-        assert!(!is_rotator_candidate(&entry("llama:free", Some("Image Generator"))));
+        assert!(!is_rotator_candidate(&entry(
+            "llama:free",
+            Some("Vision Model")
+        )));
+        assert!(!is_rotator_candidate(&entry(
+            "llama:free",
+            Some("Image Generator")
+        )));
     }
 
     #[test]
     fn is_rotator_candidate_accepts_text_free_models() {
         assert!(is_rotator_candidate(&entry("llama-3:free", None)));
-        assert!(is_rotator_candidate(&entry("gemma-3:free", Some("Gemma 3"))));
-        assert!(is_rotator_candidate(&entry("nemotron:free", Some("Nemotron"))));
+        assert!(is_rotator_candidate(&entry(
+            "gemma-3:free",
+            Some("Gemma 3")
+        )));
+        assert!(is_rotator_candidate(&entry(
+            "nemotron:free",
+            Some("Nemotron")
+        )));
     }
 
     #[test]

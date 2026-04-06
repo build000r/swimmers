@@ -81,7 +81,11 @@ impl SkillboxOverlay {
                 dirs.push(draft.clone());
             }
         }
-        if dirs.is_empty() { None } else { Some(dirs) }
+        if dirs.is_empty() {
+            None
+        } else {
+            Some(dirs)
+        }
     }
 }
 
@@ -138,11 +142,7 @@ fn parse_client_overlay(client_dir: &Path, overlay_path: &Path) -> Option<Client
     let context = client.context?;
 
     let cwd_match_count = context.cwd_match.len();
-    let mut cwd_patterns: Vec<String> = context
-        .cwd_match
-        .iter()
-        .map(|p| expand_path(p))
-        .collect();
+    let mut cwd_patterns: Vec<String> = context.cwd_match.iter().map(|p| expand_path(p)).collect();
 
     if let Some(landscape) = &context.repo_landscape {
         for repo in &landscape.repos {
@@ -210,7 +210,12 @@ fn expand_path(path: &str) -> String {
         };
         let var_name = &result[start + 2..start + end];
         let replacement = std::env::var(var_name).unwrap_or_default();
-        result = format!("{}{}{}", &result[..start], replacement, &result[start + end + 1..]);
+        result = format!(
+            "{}{}{}",
+            &result[..start],
+            replacement,
+            &result[start + end + 1..]
+        );
     }
 
     result
@@ -237,7 +242,10 @@ mod tests {
 
     #[test]
     fn cwd_starts_with_exact_match() {
-        assert!(cwd_starts_with("/Users/b/repos/htma", "/Users/b/repos/htma"));
+        assert!(cwd_starts_with(
+            "/Users/b/repos/htma",
+            "/Users/b/repos/htma"
+        ));
     }
 
     #[test]

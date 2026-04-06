@@ -91,8 +91,7 @@ impl ArtifactDetector for MermaidArtifactDetector {
             if let Some(plan_dirs) = overlay.find_plan_dirs(root) {
                 let mut overlay_candidates = Vec::new();
                 for dir in &plan_dirs {
-                    overlay_candidates
-                        .extend(scan_mermaid_candidates(&dir.to_string_lossy()));
+                    overlay_candidates.extend(scan_mermaid_candidates(&dir.to_string_lossy()));
                 }
                 if let Some(best) = overlay_candidates
                     .iter()
@@ -210,9 +209,7 @@ pub fn extract_mmd_slice_name(path: &str) -> Option<&str> {
 
     // Pattern 2: any {parent}/{released|draft|planned}/{slice}/schema.mmd
     for window in parts.windows(4) {
-        if matches!(window[1], "released" | "draft" | "planned")
-            && window[3] == "schema.mmd"
-        {
+        if matches!(window[1], "released" | "draft" | "planned") && window[3] == "schema.mmd" {
             return Some(window[2]);
         }
     }
@@ -407,7 +404,11 @@ mod tests {
     #[test]
     fn plan_siblings_bypass_time_filter_in_discovery() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let plan_dir = dir.path().join("db-schemas").join("planned").join("test_slice");
+        let plan_dir = dir
+            .path()
+            .join("db-schemas")
+            .join("planned")
+            .join("test_slice");
         fs::create_dir_all(&plan_dir).expect("create plan dir");
         fs::write(plan_dir.join("schema.mmd"), "erDiagram\n").expect("write schema");
         fs::write(plan_dir.join("plan.md"), "# Plan\n").expect("write plan");
