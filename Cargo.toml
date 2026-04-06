@@ -3,6 +3,31 @@ name = "swimmers"
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
+description = "Axum server plus TUI for orchestrating Claude Code and Codex agents across tmux panes"
+repository = "https://github.com/build000r/swimmers"
+homepage = "https://github.com/build000r/swimmers"
+documentation = "https://docs.rs/swimmers"
+readme = "README.md"
+keywords = ["claude", "codex", "tmux", "tui", "agents"]
+categories = ["command-line-utilities", "web-programming::http-server", "development-tools"]
+authors = ["build000r <buildooor@gmail.com>"]
+rust-version = "1.75"
+exclude = [
+    ".claude/",
+    ".DS_Store",
+    ".env",
+    ".run/",
+    ".swimmers/",
+    "data/",
+    "FAQ.md",
+    "lcov.info",
+    "Makefile",
+    "QUICKSTART.md",
+    "scripts/",
+    "video/",
+    "target/",
+    "src/metrics/INTEGRATION_GUIDE.md",
+]
 
 [dependencies]
 axum = { version = "0.8", features = ["ws"] }
@@ -20,7 +45,7 @@ anyhow = "1"
 thiserror = "2"
 metrics = "0.24"
 metrics-exporter-prometheus = "0.18"
-reqwest = { version = "0.12", features = ["json"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 dotenvy = "0.15.7"
 crossterm = "0.29"
 mermaid-rs-renderer = { version = "0.2.1", default-features = false }
@@ -33,3 +58,10 @@ dirs = "6.0.0"
 [dev-dependencies]
 proptest = "1"
 tempfile = "3"
+
+[features]
+# Personal workstation workflow endpoints (env-manager browsing, skill
+# scanning, clawgs commit helpers). Off by default so the crates.io build
+# is lean; enable with `--features personal-workflows` when building from
+# source for the maintainer's local workflow.
+personal-workflows = []
