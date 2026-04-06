@@ -30,11 +30,7 @@ const FRANKENTERM_WASM_ROUTE: &str = "/assets/frankenterm/FrankenTerm_bg.wasm";
 const FRANKENTERM_FONT_ROUTE: &str = "/assets/frankenterm/pragmasevka-nf-subset.woff2";
 const PUBLISHED_VIEW_ROUTE: &str = "/selected";
 const REPLY_TIMEOUT: Duration = Duration::from_secs(2);
-const DEFAULT_FRANKENTUI_PKG_CANDIDATES: &[&str] = &[
-    "/Users/b/projects/frankentui/pkg",
-    "/Users/b/repos/opensource/frankentui/pkg",
-    "/Users/b/repos/frankentui/pkg",
-];
+const DEFAULT_FRANKENTUI_PKG_CANDIDATES: &[&str] = &[];
 
 static NEXT_WS_CLIENT_ID: AtomicU64 = AtomicU64::new(1);
 

@@ -3219,13 +3219,20 @@ fn mermaid_distance_sq(left: (f32, f32), right: (f32, f32)) -> f32 {
     dx * dx + dy * dy
 }
 
-fn mermaid_er_node_position<'a>(
-    positions: &'a HashMap<String, (f32, f32)>,
+fn mermaid_er_node_position(
+    positions: &HashMap<String, (f32, f32)>,
     owner_key: &str,
-) -> &'a (f32, f32) {
-    positions
-        .get(owner_key)
-        .unwrap_or_else(|| panic!("missing ER order node position for {owner_key}"))
+) -> (f32, f32) {
+    match positions.get(owner_key) {
+        Some(pos) => *pos,
+        None => {
+            tracing::warn!(
+                owner_key = %owner_key,
+                "missing ER order node position, falling back to (0.0, 0.0)"
+            );
+            (0.0, 0.0)
+        }
+    }
 }
 
 fn mermaid_er_compare_seed_nodes(
@@ -3237,8 +3244,8 @@ fn mermaid_er_compare_seed_nodes(
 ) -> Ordering {
     let left_degree = adjacency.get(left).map_or(0, BTreeSet::len);
     let right_degree = adjacency.get(right).map_or(0, BTreeSet::len);
-    let left_position = *mermaid_er_node_position(positions, left);
-    let right_position = *mermaid_er_node_position(positions, right);
+    let left_position = mermaid_er_node_position(positions, left);
+    let right_position = mermaid_er_node_position(positions, right);
 
     right_degree
         .cmp(&left_degree)
@@ -3266,11 +3273,11 @@ fn mermaid_er_candidate_metrics(
         .filter(|neighbor| placed.contains(*neighbor))
         .collect::<Vec<_>>();
     let adjacent_count = adjacent_neighbors.len();
-    let position = *mermaid_er_node_position(positions, owner_key);
+    let position = mermaid_er_node_position(positions, owner_key);
     let min_neighbor_distance = adjacent_neighbors
         .into_iter()
         .map(|neighbor| {
-            mermaid_distance_sq(position, *mermaid_er_node_position(positions, neighbor))
+            mermaid_distance_sq(position, mermaid_er_node_position(positions, neighbor))
         })
         .min_by(|left, right| mermaid_cmp_f32(*left, *right))
         .unwrap_or(f32::INFINITY);
@@ -3291,8 +3298,8 @@ fn mermaid_er_compare_component_candidates(
         mermaid_er_candidate_metrics(right, placed, positions, adjacency);
     let left_degree = adjacency.get(left).map_or(0, BTreeSet::len);
     let right_degree = adjacency.get(right).map_or(0, BTreeSet::len);
-    let left_position = *mermaid_er_node_position(positions, left);
-    let right_position = *mermaid_er_node_position(positions, right);
+    let left_position = mermaid_er_node_position(positions, left);
+    let right_position = mermaid_er_node_position(positions, right);
 
     right_adjacent_count
         .cmp(&left_adjacent_count)
