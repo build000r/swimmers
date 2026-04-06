@@ -10,13 +10,20 @@
   active            busy           sleeping
 ```
 
-</div>
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://github.com/build000r/swimmers/blob/main/LICENSE)
+[![Rust](https://img.shields.io/badge/Rust-2021-orange.svg)](https://www.rust-lang.org/)
 
-A terminal aquarium for your tmux sessions. Each session becomes an animated fish whose behavior reflects its real-time state -- swimming when active, bubbling when busy, dozing when idle. Backed by a Rust API server that discovers and manages tmux sessions, with a native TUI client that renders the whole thing as a fish bowl you can navigate, inspect, and control.
+**Quick Start**
 
 ```bash
-git clone https://github.com/YOUR_USER/swimmers.git && cd swimmers && make tui
+cargo install swimmers
+swimmers &          # start the API server on 127.0.0.1:3210
+swimmers-tui        # open the aquarium TUI
 ```
+
+</div>
+
+A terminal aquarium for your tmux sessions. Each session becomes an animated fish whose behavior reflects its real-time state — swimming when active, bubbling when busy, dozing when idle. Backed by a Rust API server that discovers and manages tmux sessions, with a native TUI client that renders the whole thing as a fish bowl you can navigate, inspect, and control.
 
 ---
 
@@ -42,82 +49,20 @@ git clone https://github.com/YOUR_USER/swimmers.git && cd swimmers && make tui
 
 ---
 
-## Quick Example
-
-```bash
-# Build and launch (starts API + TUI in one command)
-make tui
-
-# Or run API and TUI separately
-make server                    # API on 127.0.0.1:3210
-cargo run --bin swimmers-tui   # TUI connects to local API
-
-# Create some tmux sessions for the aquarium
-tmux new-session -d -s dev
-tmux new-session -d -s logs
-tmux new-session -d -s deploy
-
-# Point TUI at a remote API (e.g., over Tailscale)
-SWIMMERS_TUI_URL=http://100.101.123.63:3210 cargo run --bin swimmers-tui
-
-# With token auth
-AUTH_MODE=token AUTH_TOKEN=secret \
-  SWIMMERS_TUI_URL=http://100.101.123.63:3210 \
-  cargo run --bin swimmers-tui
-
-# Custom port
-PORT=69420 cargo run --bin swimmers
-SWIMMERS_TUI_URL=http://127.0.0.1:69420 cargo run --bin swimmers-tui
-```
-
----
-
-## Design Philosophy
-
-**Sessions are living things.** The aquarium metaphor is not decoration. It encodes session state into spatial position, animation speed, and sprite shape so you can assess a fleet of sessions with a glance instead of reading text.
-
-**The API is the truth.** The TUI is a client. The API discovers tmux sessions, tracks their state, and serves snapshots. You can point multiple TUIs at the same API, run the API headless, or build your own client against the REST endpoints.
-
-**No infrastructure required.** No database, no Docker, no message broker. The server binary talks to tmux directly via `portable-pty`, persists state to flat files under `data/swimmers/`, and serves HTTP on a single port.
-
-**Thoughts are first-class.** The thought subsystem streams AI agent context (from Claude Code, Codex, etc.) into a side panel. Sessions that run AI coding agents surface their internal monologue alongside the terminal output.
-
----
-
-## How swimmers Compares
-
-| Feature | swimmers | tmux ls | tmuxinator | byobu |
-|---------|----------|---------|------------|-------|
-| Visual session overview | Session-state-driven animated sprites | Text list | Text list | Status bar |
-| State detection (busy/idle/error) | Automatic | Manual | None | Partial |
-| AI thought stream | Built-in side panel | None | None | None |
-| Remote access | REST API, any network | SSH + tmux attach | Local only | SSH + byobu |
-| Native terminal handoff | One keypress from TUI | `tmux attach -t` | Manual | Manual |
-| Metrics/observability | Prometheus `/metrics` | None | None | None |
-| Setup complexity | `make tui` | Already installed | Ruby + config files | apt install |
-
-**When to use swimmers:**
-- You run many tmux sessions and want a visual overview
-- You use AI coding agents and want to see their thought streams
-- You want to monitor remote sessions from a local TUI
-
-**When swimmers is not the right tool:**
-- You only use one or two tmux sessions (tmux is fine on its own)
-- You need a tmux session template/layout manager (use tmuxinator)
-
----
-
 ## Installation
 
-### From Source (Recommended)
+### From crates.io
 
 ```bash
-git clone https://github.com/YOUR_USER/swimmers.git
-cd swimmers
-cargo build --release
+cargo install swimmers
 ```
 
-Binaries land in `target/release/swimmers` (API) and `target/release/swimmers-tui` (TUI).
+That installs **two binaries** on your `PATH`:
+
+- `swimmers` — the Axum HTTP/WebSocket API server that discovers and manages tmux sessions
+- `swimmers-tui` — the terminal UI client that connects to the server and renders the aquarium
+
+No repo checkout required.
 
 ### Prerequisites
 
@@ -127,67 +72,118 @@ Binaries land in `target/release/swimmers` (API) and `target/release/swimmers-tu
 | tmux | `brew install tmux` (macOS) or `apt install tmux` (Debian/Ubuntu) |
 | Tailscale (optional) | Only needed for remote API access over a tailnet |
 
+### From Source
+
+```bash
+git clone https://github.com/build000r/swimmers.git
+cd swimmers
+cargo build --release
+```
+
+Binaries land in `target/release/swimmers` (API server) and `target/release/swimmers-tui` (TUI client). You can also run `cargo install --path .` from inside the checkout.
+
 ---
 
 ## Quick Start
 
-1. **Clone and build**
+After `cargo install swimmers`, both `swimmers` and `swimmers-tui` are on your PATH. No clone required.
+
+1. **Start the API server**
+
    ```bash
-   git clone https://github.com/YOUR_USER/swimmers.git
-   cd swimmers
-   cargo build --release
+   swimmers
    ```
 
-2. **Launch everything**
-   ```bash
-   make tui
-   ```
-   This starts the API on `127.0.0.1:3210` if it is not already running, waits for readiness, then launches the TUI.
+   The server binds to `127.0.0.1:3210` by default. It will keep running in the foreground; open a second terminal (or use `swimmers &` to background it).
 
-3. **Create sessions** (if you don't have any tmux sessions yet)
+2. **Open the TUI** (in a separate terminal or after backgrounding the server)
+
+   ```bash
+   swimmers-tui
+   ```
+
+   The TUI connects to `http://127.0.0.1:3210` automatically.
+
+3. **Create some tmux sessions** if you don't have any yet
+
    ```bash
    tmux new-session -d -s dev
    tmux new-session -d -s logs
+   tmux new-session -d -s deploy
    ```
 
-4. **Navigate the aquarium** -- arrow keys to select fish, Enter to open in your terminal, and the thought rail appears on wide terminals.
+   They appear in the aquarium within seconds.
+
+4. **Navigate** — arrow keys to select a fish, Enter to open the session in your terminal, `q` to quit the TUI.
+
+5. **Stop the server** — `Ctrl-C` in the terminal running `swimmers`, or `kill $(lsof -ti:3210)` if you backgrounded it.
 
 ---
 
-## Commands
+## Bind Address and Network Access
 
-### Make Targets
+By default the server binds to **`127.0.0.1:3210`** (loopback only). The TUI also defaults to `http://127.0.0.1:3210`.
+
+### Loopback (default, no auth required)
 
 ```bash
-make tui                # Start local API + TUI (recommended)
+swimmers          # binds 127.0.0.1:3210
+swimmers-tui      # connects to http://127.0.0.1:3210
+```
+
+### External / Tailscale access
+
+Set `SWIMMERS_BIND` to expose the server on a non-loopback interface. The server emits a warning to stderr when binding to a non-loopback address because `LocalTrust` auth (the v0.1.0 default) grants full access to any client that can reach the port.
+
+```bash
+# Bind to all interfaces (e.g., for Tailscale access from another machine)
+SWIMMERS_BIND=0.0.0.0 swimmers
+
+# Bind to a specific Tailscale IP
+SWIMMERS_BIND=100.101.123.63 swimmers
+
+# Point the TUI at the remote server
+SWIMMERS_TUI_URL=http://100.101.123.63:3210 swimmers-tui
+```
+
+When you bind externally and want real auth, set `AUTH_MODE=token` and a shared `AUTH_TOKEN`.
+
+---
+
+## Environment Variables
+
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `SWIMMERS_BIND` | `127.0.0.1` | Server bind address (interface only, not `host:port`) |
+| `PORT` | `3210` | Server listen port |
+| `SWIMMERS_TUI_URL` | `http://127.0.0.1:3210` | API URL the TUI connects to |
+| `AUTH_MODE` | `local_trust` | Auth mode: `local_trust` or `token` |
+| `AUTH_TOKEN` | (none) | Bearer token when `AUTH_MODE=token` |
+| `SWIMMERS_NATIVE_APP` | `iterm` | Native desktop target: `iterm` or `ghostty` |
+| `THOUGHT_BACKEND` | `daemon` | Thought subsystem: `daemon` or `inproc` |
+| `THOUGHT_TICK_MS` | `15000` | Thought refresh interval in milliseconds |
+| `SESSION_DELETE_MODE` | `detach_bridge` | `detach_bridge` or `kill_tmux` on session delete |
+| `REPLAY_BUFFER_SIZE` | `524288` | Replay ring size in bytes (default 512 KB) |
+| `SWIMMERS_FRANKENTUI_PKG_DIR` | auto-detect | Path to `frankentui/pkg` for live browser terminal rendering |
+
+When `SWIMMERS_NATIVE_APP=ghostty`, the API uses Ghostty's AppleScript support to create or replace a left-side preview split for the selected tmux session. This path requires Ghostty 1.3.0+ on macOS with automation access enabled.
+
+While the TUI is running, press `n` or click the top-right native-open label to switch between `iTerm` and `Ghostty` without restarting the API.
+
+---
+
+## Make Targets
+
+If you are working from a source checkout, the Makefile has convenience targets:
+
+```bash
+make tui                # Start local API + TUI (one command)
 make web                # Start the server for browser/tailnet access
 make server             # Run only the API server
 make tui-check          # Wait for an existing API, then exit
 make tui-smoke          # Run shell-level bootstrap tests
 make cargo-cov-lcov     # Generate lcov coverage report
 ```
-
-### Environment Variables
-
-| Variable | Default | Purpose |
-|----------|---------|---------|
-| `PORT` | `3210` | API listen port |
-| `SWIMMERS_TUI_URL` | `http://127.0.0.1:3210` | API URL the TUI connects to |
-| `AUTH_MODE` | `local_trust` | Auth mode: `local_trust` or `token` |
-| `AUTH_TOKEN` | (none) | Bearer token when `AUTH_MODE=token` |
-| `SWIMMERS_FRANKENTUI_PKG_DIR` | auto-detect | Path to `frankentui/pkg` for live browser terminal rendering |
-| `SWIMMERS_NATIVE_APP` | `iterm` | Native desktop target: `iterm` or `ghostty` |
-| `THOUGHT_BACKEND` | `daemon` | Thought subsystem: `daemon` or `inproc` |
-| `THOUGHT_TICK_MS` | `15000` | Thought refresh interval in milliseconds |
-| `SESSION_DELETE_MODE` | `detach_bridge` | `detach_bridge` or `kill_tmux` on session delete |
-| `REPLAY_BUFFER_SIZE` | `524288` | Replay ring size in bytes (default 512KB) |
-
-When `SWIMMERS_NATIVE_APP=ghostty`, the API uses Ghostty's AppleScript support to create or
-replace a left-side preview split for the selected tmux session. This path requires Ghostty 1.3.0+
-on macOS with automation access enabled.
-
-While the TUI is running, press `n` or click the top-right native-open label to switch between
-`iTerm` and `Ghostty` without restarting the API.
 
 ---
 
@@ -197,17 +193,13 @@ Swimmers reads all configuration from environment variables. There is no config 
 
 ```bash
 # Minimal local usage (everything defaults)
-make tui
+swimmers
 
-# Browser/tailnet usage
-make web
-
-# Production-style remote API
-PORT=3210 \
+# External access with token auth
+SWIMMERS_BIND=0.0.0.0 \
 AUTH_MODE=token \
 AUTH_TOKEN=your-secret-token \
-THOUGHT_BACKEND=daemon \
-cargo run --bin swimmers
+swimmers
 ```
 
 ### Repo Themes
@@ -277,99 +269,12 @@ Drop a `.swimmers/theme.json` in any repo directory to override sprite colors fo
 
 ---
 
-## Troubleshooting
-
-### TUI cannot reach the API
-
-```bash
-# Check if the API is running
-curl -s http://127.0.0.1:3210/v1/sessions
-
-# Start it manually
-make server
-```
-
-### TUI gets 401 or 403
-
-The API is running with token auth. Set your credentials:
-
-```bash
-AUTH_MODE=token AUTH_TOKEN=your-token cargo run --bin swimmers-tui
-```
-
-### No sessions showing in the aquarium
-
-Create at least one tmux session:
-
-```bash
-tmux new-session -d -s dev
-```
-
-### Port already in use
-
-```bash
-lsof -ti:3210 | xargs kill
-make server
-```
-
-### Cargo build fails
-
-```bash
-rustup update stable
-cargo clean
-cargo build --release
-```
-
----
-
-## Limitations
-
-- **tmux only** -- swimmers does not manage screen, zellij, or plain terminal sessions
-- **Browser UI is terminal-first** -- the web surface is for remote attach/control; the animated aquarium remains native-only
-- **Single-machine sessions** -- the API manages tmux sessions on the machine it runs on; it does not aggregate sessions across multiple hosts
-- **No session templating** -- swimmers discovers existing tmux sessions but does not define layouts or startup commands (use tmuxinator for that)
-- **macOS and Linux only** -- tmux does not run on Windows, so neither does swimmers
-
----
-
-## FAQ
-
-### Why "swimmers"?
-
-Sessions are fish. The TUI is an aquarium. Fish swim. Sessions swim between states.
-
-### Does it need Docker?
-
-No. Single binary, flat-file persistence, talks to tmux directly.
-
-### Can I run the API without the TUI?
-
-Yes. `make server` runs only the API. Use the REST endpoints directly, open the browser UI with `make web`, or point a TUI at it later.
-
-### What happens when I close the TUI?
-
-Your tmux sessions keep running. The API keeps running (if started separately or via `make tui`). Reopen the TUI to reconnect.
-
-### Can multiple TUIs connect to the same API?
-
-Yes. The API is a standard HTTP server. Point multiple TUI instances at the same URL.
-
-### How does state detection work?
-
-The `SessionActor` monitors each session's PTY output and classifies it into states (idle, busy, error, attention) based on shell activity patterns. Rest states (drowsy, sleeping, deep sleep) layer on top based on inactivity duration.
-
-### What is the thought rail?
-
-A side panel in the TUI that displays AI agent thought streams. When a session runs Claude Code, Codex, or similar tools, their internal reasoning appears in the thought rail next to the aquarium view.
-
----
-
 ## Running in Background
 
 ### nohup
 
 ```bash
-nohup env PORT=3210 ./target/release/swimmers > swimmers.log 2>&1 &
+nohup swimmers > swimmers.log 2>&1 &
 ```
 
 ### systemd (Linux)
@@ -382,10 +287,10 @@ After=network.target
 
 [Service]
 Type=simple
-User=YOUR_USERNAME
-WorkingDirectory=/path/to/swimmers
+User=your-username
+Environment=SWIMMERS_BIND=127.0.0.1
 Environment=PORT=3210
-ExecStart=/path/to/swimmers/target/release/swimmers
+ExecStart=/home/your-username/.cargo/bin/swimmers
 Restart=on-failure
 RestartSec=5
 
@@ -402,7 +307,7 @@ sudo systemctl enable --now swimmers
 ```bash
 mkdir -p ~/Library/LaunchAgents
 
-cat > ~/Library/LaunchAgents/com.swimmers.plist << EOF
+cat > ~/Library/LaunchAgents/com.swimmers.plist << 'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
   "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -412,15 +317,8 @@ cat > ~/Library/LaunchAgents/com.swimmers.plist << EOF
     <string>com.swimmers</string>
     <key>ProgramArguments</key>
     <array>
-        <string>/path/to/swimmers/target/release/swimmers</string>
+        <string>/Users/your-username/.cargo/bin/swimmers</string>
     </array>
-    <key>EnvironmentVariables</key>
-    <dict>
-        <key>PORT</key>
-        <string>3210</string>
-    </dict>
-    <key>WorkingDirectory</key>
-    <string>/path/to/swimmers</string>
     <key>RunAtLoad</key>
     <true/>
     <key>KeepAlive</key>
@@ -438,6 +336,138 @@ launchctl load ~/Library/LaunchAgents/com.swimmers.plist
 
 ---
 
+## How swimmers Compares
+
+| Feature | swimmers | tmux ls | tmuxinator | byobu |
+|---------|----------|---------|------------|-------|
+| Visual session overview | Session-state-driven animated sprites | Text list | Text list | Status bar |
+| State detection (busy/idle/error) | Automatic | Manual | None | Partial |
+| AI thought stream | Built-in side panel | None | None | None |
+| Remote access | REST API, any network | SSH + tmux attach | Local only | SSH + byobu |
+| Native terminal handoff | One keypress from TUI | `tmux attach -t` | Manual | Manual |
+| Metrics/observability | Prometheus `/metrics` | None | None | None |
+| Setup complexity | `cargo install swimmers` | Already installed | Ruby + config files | apt install |
+
+**When to use swimmers:**
+- You run many tmux sessions and want a visual overview
+- You use AI coding agents and want to see their thought streams
+- You want to monitor remote sessions from a local TUI
+
+**When swimmers is not the right tool:**
+- You only use one or two tmux sessions (tmux is fine on its own)
+- You need a tmux session template/layout manager (use tmuxinator)
+
+---
+
+## Troubleshooting
+
+### TUI cannot reach the API
+
+```bash
+# Check if the API is running
+curl -s http://127.0.0.1:3210/v1/sessions
+
+# Start it
+swimmers
+```
+
+### TUI gets 401 or 403
+
+The API is running with token auth. Set your credentials:
+
+```bash
+AUTH_MODE=token AUTH_TOKEN=your-token swimmers-tui
+```
+
+### No sessions showing in the aquarium
+
+Create at least one tmux session:
+
+```bash
+tmux new-session -d -s dev
+```
+
+### Port already in use
+
+```bash
+lsof -ti:3210 | xargs kill
+swimmers
+```
+
+### Cargo build fails
+
+```bash
+rustup update stable
+cargo clean
+cargo build --release
+```
+
+---
+
+## Limitations
+
+- **tmux only** — swimmers does not manage screen, zellij, or plain terminal sessions
+- **Browser UI is terminal-first** — the web surface is for remote attach/control; the animated aquarium remains native-only
+- **Single-machine sessions** — the API manages tmux sessions on the machine it runs on; it does not aggregate sessions across multiple hosts
+- **No session templating** — swimmers discovers existing tmux sessions but does not define layouts or startup commands (use tmuxinator for that)
+- **macOS and Linux only** — tmux does not run on Windows, so neither does swimmers
+
+---
+
+## FAQ
+
+### Why "swimmers"?
+
+Sessions are fish. The TUI is an aquarium. Fish swim. Sessions swim between states.
+
+### Does it need Docker?
+
+No. Single binary, flat-file persistence, talks to tmux directly.
+
+### Can I run the API without the TUI?
+
+Yes. Run `swimmers` on its own and use the REST endpoints directly, open the browser UI, or point a TUI at it later.
+
+### What happens when I close the TUI?
+
+Your tmux sessions keep running. The API keeps running if started separately. Reopen the TUI to reconnect.
+
+### Can multiple TUIs connect to the same API?
+
+Yes. The API is a standard HTTP server. Point multiple TUI instances at the same URL.
+
+### How does state detection work?
+
+The `SessionActor` monitors each session's PTY output and classifies it into states (idle, busy, error, attention) based on shell activity patterns. Rest states (drowsy, sleeping, deep sleep) layer on top based on inactivity duration.
+
+### What is the thought rail?
+
+A side panel in the TUI that displays AI agent thought streams. When a session runs Claude Code, Codex, or similar tools, their internal reasoning appears in the thought rail next to the aquarium view.
+
+### Is `LocalTrust` auth safe?
+
+On loopback (`127.0.0.1`), yes — only processes on the same machine can reach the port. When you set `SWIMMERS_BIND` to a non-loopback address, the server warns you on startup. Use `AUTH_MODE=token` with a strong `AUTH_TOKEN` for any external exposure.
+
+---
+
+## Design Philosophy
+
+**Sessions are living things.** The aquarium metaphor is not decoration. It encodes session state into spatial position, animation speed, and sprite shape so you can assess a fleet of sessions with a glance instead of reading text.
+
+**The API is the truth.** The TUI is a client. The API discovers tmux sessions, tracks their state, and serves snapshots. You can point multiple TUIs at the same API, run the API headless, or build your own client against the REST endpoints.
+
+**No infrastructure required.** No database, no Docker, no message broker. The server binary talks to tmux directly via `portable-pty`, persists state to flat files under `data/swimmers/`, and serves HTTP on a single port.
+
+**Thoughts are first-class.** The thought subsystem streams AI agent context (from Claude Code, Codex, etc.) into a side panel. Sessions that run AI coding agents surface their internal monologue alongside the terminal output.
+
+---
+
 ## About Contributions
 
-> *About Contributions:* Please don't take this the wrong way, but I do not accept outside contributions for any of my projects. I simply don't have the mental bandwidth to review anything, and it's my name on the thing, so I'm responsible for any problems it causes; thus, the risk-reward is highly asymmetric from my perspective. I'd also have to worry about other "stakeholders," which seems unwise for tools I mostly make for myself for free. Feel free to submit issues, and even PRs if you want to illustrate a proposed fix, but know I won't merge them directly. Instead, I'll have Claude or Codex review submissions via `gh` and independently decide whether and how to address them. Bug reports in particular are welcome. Sorry if this offends, but I want to avoid wasted time and hurt feelings. I understand this isn't in sync with the prevailing open-source ethos that seeks community contributions, but it's the only way I can move at this velocity and keep my sanity.
+Please don't take this the wrong way, but I do not accept outside contributions for any of my projects. Feel free to open issues — bug reports in particular are welcome. PRs are fine as a way to illustrate a proposed fix, but I won't merge them directly; I'll have Claude or Codex review and independently decide whether and how to address them.
+
+---
+
+## License
+
+MIT. See [LICENSE](https://github.com/build000r/swimmers/blob/main/LICENSE).
