@@ -38,6 +38,24 @@ use thought::runtime_config::ThoughtConfig;
 
 const STARTUP_PHASE_WARN_THRESHOLD: Duration = Duration::from_secs(2);
 
+fn resolve_data_dir() -> std::path::PathBuf {
+    if let Ok(val) = std::env::var("SWIMMERS_DATA_DIR") {
+        if !val.is_empty() {
+            return std::path::PathBuf::from(val);
+        }
+    }
+    match dirs::data_dir() {
+        Some(base) => base.join("swimmers"),
+        None => {
+            tracing::warn!(
+                "dirs::data_dir() returned None (HOME may be unset); \
+                 falling back to ./data/swimmers/"
+            );
+            std::path::PathBuf::from("./data/swimmers/")
+        }
+    }
+}
+
 fn log_startup_phase_complete(phase: &'static str, started: Instant) {
     let elapsed = started.elapsed();
     let elapsed_ms = elapsed.as_millis() as u64;
@@ -54,7 +72,12 @@ async fn init_persistence_store(
 ) -> Option<Arc<FileStore>> {
     tracing::info!(phase = "persistence_init", "startup phase begin");
     let persistence_started = Instant::now();
-    let store = match FileStore::new("./data/swimmers/").await {
+    let data_dir = resolve_data_dir();
+    tracing::info!(data_dir = %data_dir.display(), "using data dir");
+    if let Err(err) = std::fs::create_dir_all(&data_dir) {
+        tracing::error!(error = %err, dir = %data_dir.display(), "failed to create data dir");
+    }
+    let store = match FileStore::new(&data_dir).await {
         Ok(store) => {
             supervisor.init_persistence(store.clone()).await;
             let loaded_config = store.load_thought_config().await;
