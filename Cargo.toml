@@ -54,6 +54,7 @@ usvg = "0.47.0"
 walkdir = "2"
 serde_yaml = "0.9.34"
 dirs = "6.0.0"
+clap = { version = "4", features = ["derive"] }
 
 [dev-dependencies]
 proptest = "1"

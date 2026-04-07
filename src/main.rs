@@ -1,5 +1,6 @@
 mod api;
 mod auth;
+mod cli;
 mod config;
 mod env_bootstrap;
 mod host_actions;
@@ -23,10 +24,12 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use axum::Router;
+use clap::Parser;
 use tokio::sync::RwLock;
 use tracing_subscriber::EnvFilter;
 
 use api::AppState;
+use cli::{ConfigAction, ServerCli, ServerCommand};
 use config::{Config, ThoughtBackend};
 use persistence::file_store::FileStore;
 use session::supervisor::{SessionSupervisor, SupervisorProvider};
@@ -159,10 +162,6 @@ async fn bind_listener(addr: &str, port: u16) -> anyhow::Result<tokio::net::TcpL
         .map_err(|err| anyhow::anyhow!("failed to bind listener: {err}"))
 }
 
-fn is_loopback(addr: &str) -> bool {
-    matches!(addr, "127.0.0.1" | "::1" | "localhost")
-}
-
 async fn run() -> anyhow::Result<()> {
     let startup_started = Instant::now();
 
@@ -181,6 +180,17 @@ async fn run() -> anyhow::Result<()> {
     let prom_handle = metrics::init_metrics();
 
     let config = Config::from_env();
+
+    // Refuse to start if LocalTrust auth is paired with a non-loopback bind.
+    // The pre-clap version only emitted a stderr warning here, which the
+    // README's own external-access example silently relied on; that left
+    // the API exposed to the network with no auth. Now we exit with
+    // sysexits EX_CONFIG instead.
+    if let Err(msg) = cli::enforce_localtrust_loopback(&config) {
+        eprintln!("swimmers: {msg}");
+        std::process::exit(cli::EXIT_CONFIG);
+    }
+
     let port = config.port;
     let bind = config.bind.clone();
     let config = Arc::new(config);
@@ -231,12 +241,6 @@ async fn run() -> anyhow::Result<()> {
     let app = build_app_router(config.clone(), state, prom_handle);
     let listener = bind_listener(&bind, port).await?;
 
-    if !is_loopback(&bind) {
-        eprintln!(
-            "swimmers: binding to non-loopback address {bind}, LocalTrust auth mode is insecure on non-loopback interfaces"
-        );
-    }
-
     tracing::info!(
         elapsed_ms = startup_started.elapsed().as_millis() as u64,
         "startup complete; listener ready"
@@ -250,10 +254,48 @@ async fn run() -> anyhow::Result<()> {
     Ok(())
 }
 
-#[tokio::main]
-async fn main() {
-    if let Err(err) = run().await {
-        tracing::error!("{err}");
-        std::process::exit(1);
+fn run_config_subcommand(action: Option<ConfigAction>) -> i32 {
+    // Load .env so subcommands see the same environment the server would.
+    let _ = dotenvy::dotenv();
+
+    match action {
+        None => {
+            cli::print_config_table();
+            0
+        }
+        Some(ConfigAction::Doctor) => {
+            let config = Config::from_env();
+            let tmux_present = cli::tmux_on_path();
+            let data_dir = resolve_data_dir();
+            let data_dir_writable = cli::check_data_dir_writable(&data_dir);
+            let findings = cli::run_doctor_checks(&config, tmux_present, data_dir_writable);
+            cli::print_doctor_findings(&findings)
+        }
+    }
+}
+
+fn main() {
+    let cli_args = ServerCli::parse();
+    match cli_args.command {
+        None => {
+            // Default behavior: run the API server.
+            let runtime = match tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(rt) => rt,
+                Err(err) => {
+                    eprintln!("swimmers: failed to build tokio runtime: {err}");
+                    std::process::exit(1);
+                }
+            };
+            if let Err(err) = runtime.block_on(run()) {
+                tracing::error!("{err}");
+                std::process::exit(1);
+            }
+        }
+        Some(ServerCommand::Config { action }) => {
+            std::process::exit(run_config_subcommand(action));
+        }
     }
 }

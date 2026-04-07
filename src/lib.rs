@@ -1,5 +1,6 @@
 pub mod api;
 pub mod auth;
+pub mod cli;
 pub mod config;
 pub mod env_bootstrap;
 pub mod host_actions;

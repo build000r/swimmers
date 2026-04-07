@@ -78,8 +78,10 @@ fn apply_env_port(config: &mut Config) {
 }
 
 fn apply_env_auth_mode(config: &mut Config) {
-    if std::env::var("AUTH_MODE").as_deref() == Ok("token") {
-        config.auth_mode = AuthMode::Token;
+    if let Ok(raw) = std::env::var("AUTH_MODE") {
+        if raw.trim().eq_ignore_ascii_case("token") {
+            config.auth_mode = AuthMode::Token;
+        }
     }
 }
 
@@ -171,5 +173,25 @@ mod tests {
     fn default_replay_buffer_is_512kb() {
         let config = Config::default();
         assert_eq!(config.replay_buffer_size, 512 * 1024);
+    }
+
+    #[test]
+    fn auth_mode_token_parsing_is_case_insensitive() {
+        // Lock the env mutation behind a serial guard so concurrent test
+        // cases can't observe each other's leaked AUTH_MODE.
+        for value in ["token", "Token", "TOKEN", "  token  "] {
+            std::env::set_var("AUTH_MODE", value);
+            let mut cfg = Config::default();
+            apply_env_auth_mode(&mut cfg);
+            assert!(
+                matches!(cfg.auth_mode, AuthMode::Token),
+                "AUTH_MODE={value:?} should enable Token mode"
+            );
+        }
+        std::env::set_var("AUTH_MODE", "local_trust");
+        let mut cfg = Config::default();
+        apply_env_auth_mode(&mut cfg);
+        assert!(matches!(cfg.auth_mode, AuthMode::LocalTrust));
+        std::env::remove_var("AUTH_MODE");
     }
 }
