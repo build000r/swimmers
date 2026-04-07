@@ -1,4 +1,5 @@
 pub mod dirs;
+pub mod health;
 pub mod native;
 pub mod selection;
 pub mod sessions;
@@ -78,7 +79,9 @@ pub fn api_router(config: Arc<Config>) -> Router<Arc<AppState>> {
     #[cfg(feature = "personal-workflows")]
     let router = router.merge(skills::routes());
 
-    router.layer(middleware::from_fn(move |request, next| {
-        auth::auth_middleware(config_for_middleware.clone(), request, next)
-    }))
+    router
+        .layer(middleware::from_fn(move |request, next| {
+            auth::auth_middleware(config_for_middleware.clone(), request, next)
+        }))
+        .merge(health::health_router())
 }

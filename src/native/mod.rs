@@ -435,13 +435,15 @@ async fn run_open_or_focus_script(
     display_name: &str,
     known_pane_id: Option<&str>,
 ) -> Result<NativeDesktopOpenResponse> {
+    let safe_session_id = sanitize_osascript_text_arg(session_id);
+    let safe_display_name = sanitize_osascript_text_arg(display_name);
     let mut command = Command::new("osascript");
     command
         .arg(script)
-        .arg(session_id)
+        .arg(&safe_session_id)
         .arg(tmux_name)
         .arg(attach_command)
-        .arg(display_name);
+        .arg(&safe_display_name);
     if let Some(pane_id) = known_pane_id.filter(|value| !value.is_empty()) {
         command.arg(pane_id);
     }
@@ -582,6 +584,19 @@ fn shell_single_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\"'\"'"))
 }
 
+/// Defense-in-depth: strip bytes that could desync `parse_osascript_output`
+/// (which splits on `|`) or corrupt downstream consumers like log lines and
+/// terminal titles when request-borne strings round-trip back through them.
+///
+/// This is NOT shell or AppleScript escaping — both `osascript` invocations
+/// pass these values via `Command::arg` (execve-style, no shell), and the
+/// `.scpt` files read each argv slot as an opaque AppleScript text item.
+fn sanitize_osascript_text_arg(s: &str) -> String {
+    s.chars()
+        .filter(|c| !matches!(c, '\0' | '\n' | '\r' | '\t' | '|'))
+        .collect()
+}
+
 fn is_transient_iterm_open_error(err: &anyhow::Error) -> bool {
     let message = err.to_string();
     (message.contains("session 1 of missing value") && message.contains("(-1728)"))
@@ -599,14 +614,17 @@ async fn run_ghostty_open_script(
     mode: GhosttyOpenMode,
     known_preview_id: Option<&str>,
 ) -> Result<NativeDesktopOpenResponse> {
+    let safe_session_id = sanitize_osascript_text_arg(session_id);
+    let safe_cwd = sanitize_osascript_text_arg(cwd);
+    let safe_display_name = sanitize_osascript_text_arg(display_name);
     let mut command = Command::new("osascript");
     command
         .arg(script)
-        .arg(session_id)
+        .arg(&safe_session_id)
         .arg(tmux_name)
-        .arg(cwd)
+        .arg(&safe_cwd)
         .arg(attach_command)
-        .arg(display_name)
+        .arg(&safe_display_name)
         .arg(GHOSTTY_MANAGED_TITLE_PREFIX)
         .arg(mode.label());
     if let Some(term_id) = known_preview_id.filter(|value| !value.is_empty()) {
@@ -691,6 +709,39 @@ mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
     use tempfile::tempdir;
+
+    #[test]
+    fn sanitize_osascript_text_arg_strips_corrupting_bytes_and_preserves_rest() {
+        let hostile = "name\0\n\r\t|with'\"\\chars; rm -rf /";
+        let cleaned = sanitize_osascript_text_arg(hostile);
+
+        // The five stripped bytes must be gone.
+        assert!(!cleaned.contains('\0'));
+        assert!(!cleaned.contains('\n'));
+        assert!(!cleaned.contains('\r'));
+        assert!(!cleaned.contains('\t'));
+        assert!(!cleaned.contains('|'));
+
+        // Quotes, backslashes, and shell metacharacters survive — they are
+        // not in the strip set, and there is no shell sink anyway.
+        assert!(cleaned.contains('\''));
+        assert!(cleaned.contains('"'));
+        assert!(cleaned.contains('\\'));
+        assert!(cleaned.contains("; rm -rf /"));
+
+        // Safe inputs round-trip byte-identical.
+        let safe = "swimmers-session-1";
+        assert_eq!(sanitize_osascript_text_arg(safe), safe);
+
+        // Parser-desync regression: a hostile value cannot inject extra `|`
+        // separators into a synthetic `parse_osascript_output`-style line.
+        let line = format!(
+            "created|{}|{}",
+            sanitize_osascript_text_arg(hostile),
+            "trailing"
+        );
+        assert_eq!(line.matches('|').count(), 2);
+    }
 
     #[test]
     fn native_app_env_defaults_to_iterm() {

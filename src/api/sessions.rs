@@ -58,13 +58,10 @@ async fn create_session(
     {
         Ok((session, repo_theme)) => (
             StatusCode::CREATED,
-            Json(
-                serde_json::to_value(CreateSessionResponse {
-                    session,
-                    repo_theme,
-                })
-                .unwrap(),
-            ),
+            Json(CreateSessionResponse {
+                session,
+                repo_theme,
+            }),
         )
             .into_response(),
         Err(e) => {
@@ -74,26 +71,20 @@ async fn create_session(
             if msg.contains("already exists") || msg.contains("duplicate session") {
                 (
                     StatusCode::CONFLICT,
-                    Json(
-                        serde_json::to_value(ErrorResponse {
-                            code: "SESSION_ALREADY_EXISTS".to_string(),
-                            message: Some(msg),
-                        })
-                        .unwrap(),
-                    ),
+                    Json(ErrorResponse {
+                        code: "SESSION_ALREADY_EXISTS".to_string(),
+                        message: Some(msg),
+                    }),
                 )
                     .into_response()
             } else {
                 tracing::error!("create_session failed: {e}");
                 (
                     StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(
-                        serde_json::to_value(ErrorResponse {
-                            code: "INTERNAL_ERROR".to_string(),
-                            message: Some(msg),
-                        })
-                        .unwrap(),
-                    ),
+                    Json(ErrorResponse {
+                        code: "INTERNAL_ERROR".to_string(),
+                        message: Some(msg),
+                    }),
                 )
                     .into_response()
             }
@@ -125,13 +116,10 @@ async fn delete_session(
         Some(other) => {
             return (
                 StatusCode::BAD_REQUEST,
-                Json(
-                    serde_json::to_value(ErrorResponse {
-                        code: "VALIDATION_FAILED".to_string(),
-                        message: Some(format!("invalid delete mode: {}", other)),
-                    })
-                    .unwrap(),
-                ),
+                Json(ErrorResponse {
+                    code: "VALIDATION_FAILED".to_string(),
+                    message: Some(format!("invalid delete mode: {}", other)),
+                }),
             )
                 .into_response();
         }
@@ -148,26 +136,20 @@ async fn delete_session(
             if msg.contains("not found") {
                 (
                     StatusCode::NOT_FOUND,
-                    Json(
-                        serde_json::to_value(ErrorResponse {
-                            code: "SESSION_NOT_FOUND".to_string(),
-                            message: None,
-                        })
-                        .unwrap(),
-                    ),
+                    Json(ErrorResponse {
+                        code: "SESSION_NOT_FOUND".to_string(),
+                        message: None,
+                    }),
                 )
                     .into_response()
             } else {
                 tracing::error!("delete_session failed: {e}");
                 (
                     StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(
-                        serde_json::to_value(ErrorResponse {
-                            code: "INTERNAL_ERROR".to_string(),
-                            message: Some(msg),
-                        })
-                        .unwrap(),
-                    ),
+                    Json(ErrorResponse {
+                        code: "INTERNAL_ERROR".to_string(),
+                        message: Some(msg),
+                    }),
                 )
                     .into_response()
             }
@@ -192,13 +174,10 @@ async fn dismiss_attention(
         None => {
             return (
                 StatusCode::NOT_FOUND,
-                Json(
-                    serde_json::to_value(ErrorResponse {
-                        code: "SESSION_NOT_FOUND".to_string(),
-                        message: None,
-                    })
-                    .unwrap(),
-                ),
+                Json(ErrorResponse {
+                    code: "SESSION_NOT_FOUND".to_string(),
+                    message: None,
+                }),
             )
                 .into_response();
         }
@@ -208,13 +187,10 @@ async fn dismiss_attention(
         tracing::error!("[session {session_id}] dismiss_attention send failed: {e}");
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(
-                serde_json::to_value(ErrorResponse {
-                    code: "INTERNAL_ERROR".to_string(),
-                    message: Some(e.to_string()),
-                })
-                .unwrap(),
-            ),
+            Json(ErrorResponse {
+                code: "INTERNAL_ERROR".to_string(),
+                message: Some(e.to_string()),
+            }),
         )
             .into_response();
     }
@@ -239,13 +215,10 @@ async fn send_input(
     if body.text.is_empty() {
         return (
             StatusCode::BAD_REQUEST,
-            Json(
-                serde_json::to_value(ErrorResponse {
-                    code: "VALIDATION_FAILED".to_string(),
-                    message: Some("text must not be empty".to_string()),
-                })
-                .unwrap(),
-            ),
+            Json(ErrorResponse {
+                code: "VALIDATION_FAILED".to_string(),
+                message: Some("text must not be empty".to_string()),
+            }),
         )
             .into_response();
     }
@@ -255,13 +228,10 @@ async fn send_input(
         Ok(None) => {
             return (
                 StatusCode::NOT_FOUND,
-                Json(
-                    serde_json::to_value(ErrorResponse {
-                        code: "SESSION_NOT_FOUND".to_string(),
-                        message: None,
-                    })
-                    .unwrap(),
-                ),
+                Json(ErrorResponse {
+                    code: "SESSION_NOT_FOUND".to_string(),
+                    message: None,
+                }),
             )
                 .into_response();
         }
@@ -269,13 +239,10 @@ async fn send_input(
             tracing::error!("send_input summary lookup failed: {err}");
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(
-                    serde_json::to_value(ErrorResponse {
-                        code: "INTERNAL_ERROR".to_string(),
-                        message: Some(err.to_string()),
-                    })
-                    .unwrap(),
-                ),
+                Json(ErrorResponse {
+                    code: "INTERNAL_ERROR".to_string(),
+                    message: Some(err.to_string()),
+                }),
             )
                 .into_response();
         }
@@ -284,13 +251,10 @@ async fn send_input(
     if summary.state == SessionState::Exited {
         return (
             StatusCode::CONFLICT,
-            Json(
-                serde_json::to_value(ErrorResponse {
-                    code: "SESSION_EXITED".to_string(),
-                    message: Some("session has already exited".to_string()),
-                })
-                .unwrap(),
-            ),
+            Json(ErrorResponse {
+                code: "SESSION_EXITED".to_string(),
+                message: Some("session has already exited".to_string()),
+            }),
         )
             .into_response();
     }
@@ -300,13 +264,10 @@ async fn send_input(
         None => {
             return (
                 StatusCode::NOT_FOUND,
-                Json(
-                    serde_json::to_value(ErrorResponse {
-                        code: "SESSION_NOT_FOUND".to_string(),
-                        message: None,
-                    })
-                    .unwrap(),
-                ),
+                Json(ErrorResponse {
+                    code: "SESSION_NOT_FOUND".to_string(),
+                    message: None,
+                }),
             )
                 .into_response();
         }
@@ -319,26 +280,20 @@ async fn send_input(
         tracing::error!("[session {session_id}] send_input failed: {err}");
         return (
             StatusCode::NOT_FOUND,
-            Json(
-                serde_json::to_value(ErrorResponse {
-                    code: "SESSION_NOT_FOUND".to_string(),
-                    message: Some(err.to_string()),
-                })
-                .unwrap(),
-            ),
+            Json(ErrorResponse {
+                code: "SESSION_NOT_FOUND".to_string(),
+                message: Some(err.to_string()),
+            }),
         )
             .into_response();
     }
 
     (
         StatusCode::OK,
-        Json(
-            serde_json::to_value(SessionInputResponse {
-                ok: true,
-                session_id,
-            })
-            .unwrap(),
-        ),
+        Json(SessionInputResponse {
+            ok: true,
+            session_id,
+        }),
     )
         .into_response()
 }
@@ -360,13 +315,10 @@ async fn get_snapshot(
         None => {
             return (
                 StatusCode::NOT_FOUND,
-                Json(
-                    serde_json::to_value(ErrorResponse {
-                        code: "SESSION_NOT_FOUND".to_string(),
-                        message: None,
-                    })
-                    .unwrap(),
-                ),
+                Json(ErrorResponse {
+                    code: "SESSION_NOT_FOUND".to_string(),
+                    message: None,
+                }),
             )
                 .into_response();
         }
@@ -376,43 +328,30 @@ async fn get_snapshot(
     if handle.send(SessionCommand::GetSnapshot(tx)).await.is_err() {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(
-                serde_json::to_value(ErrorResponse {
-                    code: "INTERNAL_ERROR".to_string(),
-                    message: Some("session actor unavailable".to_string()),
-                })
-                .unwrap(),
-            ),
+            Json(ErrorResponse {
+                code: "INTERNAL_ERROR".to_string(),
+                message: Some("session actor unavailable".to_string()),
+            }),
         )
             .into_response();
     }
 
     match tokio::time::timeout(std::time::Duration::from_secs(5), rx).await {
-        Ok(Ok(snapshot)) => (
-            StatusCode::OK,
-            Json(serde_json::to_value(snapshot).unwrap()),
-        )
-            .into_response(),
+        Ok(Ok(snapshot)) => (StatusCode::OK, Json(snapshot)).into_response(),
         Ok(Err(_)) => (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(
-                serde_json::to_value(ErrorResponse {
-                    code: "INTERNAL_ERROR".to_string(),
-                    message: Some("actor dropped snapshot reply".to_string()),
-                })
-                .unwrap(),
-            ),
+            Json(ErrorResponse {
+                code: "INTERNAL_ERROR".to_string(),
+                message: Some("actor dropped snapshot reply".to_string()),
+            }),
         )
             .into_response(),
         Err(_) => (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(
-                serde_json::to_value(ErrorResponse {
-                    code: "INTERNAL_ERROR".to_string(),
-                    message: Some("snapshot request timed out".to_string()),
-                })
-                .unwrap(),
-            ),
+            Json(ErrorResponse {
+                code: "INTERNAL_ERROR".to_string(),
+                message: Some("snapshot request timed out".to_string()),
+            }),
         )
             .into_response(),
     }
@@ -435,13 +374,10 @@ async fn get_pane_tail(
         None => {
             return (
                 StatusCode::NOT_FOUND,
-                Json(
-                    serde_json::to_value(ErrorResponse {
-                        code: "SESSION_NOT_FOUND".to_string(),
-                        message: None,
-                    })
-                    .unwrap(),
-                ),
+                Json(ErrorResponse {
+                    code: "SESSION_NOT_FOUND".to_string(),
+                    message: None,
+                }),
             )
                 .into_response();
         }
@@ -458,13 +394,10 @@ async fn get_pane_tail(
     {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(
-                serde_json::to_value(ErrorResponse {
-                    code: "INTERNAL_ERROR".to_string(),
-                    message: Some("session actor unavailable".to_string()),
-                })
-                .unwrap(),
-            ),
+            Json(ErrorResponse {
+                code: "INTERNAL_ERROR".to_string(),
+                message: Some("session actor unavailable".to_string()),
+            }),
         )
             .into_response();
     }
@@ -472,29 +405,23 @@ async fn get_pane_tail(
     match tokio::time::timeout(std::time::Duration::from_secs(5), rx).await {
         Ok(Ok(text)) => (
             StatusCode::OK,
-            Json(serde_json::to_value(SessionPaneTailResponse { session_id, text }).unwrap()),
+            Json(SessionPaneTailResponse { session_id, text }),
         )
             .into_response(),
         Ok(Err(_)) => (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(
-                serde_json::to_value(ErrorResponse {
-                    code: "INTERNAL_ERROR".to_string(),
-                    message: Some("actor dropped pane tail reply".to_string()),
-                })
-                .unwrap(),
-            ),
+            Json(ErrorResponse {
+                code: "INTERNAL_ERROR".to_string(),
+                message: Some("actor dropped pane tail reply".to_string()),
+            }),
         )
             .into_response(),
         Err(_) => (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(
-                serde_json::to_value(ErrorResponse {
-                    code: "INTERNAL_ERROR".to_string(),
-                    message: Some("pane tail request timed out".to_string()),
-                })
-                .unwrap(),
-            ),
+            Json(ErrorResponse {
+                code: "INTERNAL_ERROR".to_string(),
+                message: Some("pane tail request timed out".to_string()),
+            }),
         )
             .into_response(),
     }
@@ -517,13 +444,10 @@ async fn get_mermaid_artifact(
         None => {
             return (
                 StatusCode::NOT_FOUND,
-                Json(
-                    serde_json::to_value(ErrorResponse {
-                        code: "SESSION_NOT_FOUND".to_string(),
-                        message: None,
-                    })
-                    .unwrap(),
-                ),
+                Json(ErrorResponse {
+                    code: "SESSION_NOT_FOUND".to_string(),
+                    message: None,
+                }),
             )
                 .into_response();
         }
@@ -537,43 +461,30 @@ async fn get_mermaid_artifact(
     {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(
-                serde_json::to_value(ErrorResponse {
-                    code: "INTERNAL_ERROR".to_string(),
-                    message: Some("session actor unavailable".to_string()),
-                })
-                .unwrap(),
-            ),
+            Json(ErrorResponse {
+                code: "INTERNAL_ERROR".to_string(),
+                message: Some("session actor unavailable".to_string()),
+            }),
         )
             .into_response();
     }
 
     match tokio::time::timeout(std::time::Duration::from_secs(5), rx).await {
-        Ok(Ok(artifact)) => (
-            StatusCode::OK,
-            Json(serde_json::to_value(artifact).unwrap()),
-        )
-            .into_response(),
+        Ok(Ok(artifact)) => (StatusCode::OK, Json(artifact)).into_response(),
         Ok(Err(_)) => (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(
-                serde_json::to_value(ErrorResponse {
-                    code: "INTERNAL_ERROR".to_string(),
-                    message: Some("actor dropped mermaid artifact reply".to_string()),
-                })
-                .unwrap(),
-            ),
+            Json(ErrorResponse {
+                code: "INTERNAL_ERROR".to_string(),
+                message: Some("actor dropped mermaid artifact reply".to_string()),
+            }),
         )
             .into_response(),
         Err(_) => (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(
-                serde_json::to_value(ErrorResponse {
-                    code: "INTERNAL_ERROR".to_string(),
-                    message: Some("mermaid artifact request timed out".to_string()),
-                })
-                .unwrap(),
-            ),
+            Json(ErrorResponse {
+                code: "INTERNAL_ERROR".to_string(),
+                message: Some("mermaid artifact request timed out".to_string()),
+            }),
         )
             .into_response(),
     }
@@ -602,13 +513,10 @@ async fn get_plan_file(
         None => {
             return (
                 StatusCode::NOT_FOUND,
-                Json(
-                    serde_json::to_value(ErrorResponse {
-                        code: "SESSION_NOT_FOUND".to_string(),
-                        message: None,
-                    })
-                    .unwrap(),
-                ),
+                Json(ErrorResponse {
+                    code: "SESSION_NOT_FOUND".to_string(),
+                    message: None,
+                }),
             )
                 .into_response();
         }
@@ -625,43 +533,30 @@ async fn get_plan_file(
     {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(
-                serde_json::to_value(ErrorResponse {
-                    code: "INTERNAL_ERROR".to_string(),
-                    message: Some("session actor unavailable".to_string()),
-                })
-                .unwrap(),
-            ),
+            Json(ErrorResponse {
+                code: "INTERNAL_ERROR".to_string(),
+                message: Some("session actor unavailable".to_string()),
+            }),
         )
             .into_response();
     }
 
     match tokio::time::timeout(std::time::Duration::from_secs(5), rx).await {
-        Ok(Ok(response)) => (
-            StatusCode::OK,
-            Json(serde_json::to_value(response).unwrap()),
-        )
-            .into_response(),
+        Ok(Ok(response)) => (StatusCode::OK, Json(response)).into_response(),
         Ok(Err(_)) => (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(
-                serde_json::to_value(ErrorResponse {
-                    code: "INTERNAL_ERROR".to_string(),
-                    message: Some("actor dropped plan file reply".to_string()),
-                })
-                .unwrap(),
-            ),
+            Json(ErrorResponse {
+                code: "INTERNAL_ERROR".to_string(),
+                message: Some("actor dropped plan file reply".to_string()),
+            }),
         )
             .into_response(),
         Err(_) => (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(
-                serde_json::to_value(ErrorResponse {
-                    code: "INTERNAL_ERROR".to_string(),
-                    message: Some("plan file request timed out".to_string()),
-                })
-                .unwrap(),
-            ),
+            Json(ErrorResponse {
+                code: "INTERNAL_ERROR".to_string(),
+                message: Some("plan file request timed out".to_string()),
+            }),
         )
             .into_response(),
     }
