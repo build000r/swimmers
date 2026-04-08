@@ -18,7 +18,7 @@ env:
 jobs:
   build-linux-amd64:
     name: Build Linux amd64
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     timeout-minutes: 30
 
     steps:
@@ -51,7 +51,7 @@ jobs:
   release:
     name: Create Release
     needs: build-linux-amd64
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     permissions:
       contents: write
 
