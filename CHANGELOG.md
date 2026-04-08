@@ -2,6 +2,11 @@
 
 All notable changes to swimmers are documented here. The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.1] — 2026-04-08
+
+- Added a GitHub Actions release workflow that publishes a native `swimmers-linux-amd64` binary and companion SHA-256 asset for box installs.
+- This release exists to remove the slow local `linux/amd64` emulation path from skillbox provisioning and recovery.
+
 ## [0.1.0] — 2026-04-07
 
 First public release on crates.io. swimmers ships two binaries:
@@ -72,4 +77,5 @@ The final stretch closed three publish blockers and nine should-fixes flagged by
 - Renamed throngterm → swimmers ([`5bc4c03`](https://github.com/build000r/swimmers/commit/5bc4c03))
 - Legacy Node.js stack removed and docs updated for the Rust/Preact world ([`5d9c3ed`](https://github.com/build000r/swimmers/commit/5d9c3ed))
 
+[0.1.1]: https://github.com/build000r/swimmers/releases/tag/v0.1.1
 [0.1.0]: https://github.com/build000r/swimmers/releases/tag/v0.1.0

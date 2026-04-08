@@ -1,0 +1,68 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to release (e.g. 0.1.0)"
+        required: true
+        type: string
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_NET_RETRY: 10
+
+jobs:
+  build-linux-amd64:
+    name: Build Linux amd64
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-gnu
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-linux-amd64
+
+      - name: Build release binary
+        run: cargo build --locked --release --bin swimmers --target x86_64-unknown-linux-gnu
+
+      - name: Package tarball
+        run: |
+          mkdir -p dist
+          cp target/x86_64-unknown-linux-gnu/release/swimmers dist/swimmers-linux-amd64
+          chmod +x dist/swimmers-linux-amd64
+          cd dist
+          shasum -a 256 swimmers-linux-amd64 > swimmers-linux-amd64.sha256
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: swimmers-linux-amd64
+          path: dist/*
+
+  release:
+    name: Create Release
+    needs: build-linux-amd64
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          name: ${{ github.event_name == 'workflow_dispatch' && format('v{0}', inputs.version) || github.ref_name }}
+          tag_name: ${{ github.event_name == 'workflow_dispatch' && format('v{0}', inputs.version) || github.ref_name }}
+          files: dist/*
