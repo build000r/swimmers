@@ -18,30 +18,24 @@ env:
 jobs:
   build-linux-amd64:
     name: Build Linux amd64
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-latest
+    container:
+      image: rust:1-bookworm
     timeout-minutes: 30
 
     steps:
       - uses: actions/checkout@v4
 
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: x86_64-unknown-linux-gnu
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: release-linux-amd64
-
       - name: Build release binary
-        run: cargo build --release --bin swimmers --target x86_64-unknown-linux-gnu
+        run: cargo build --release --bin swimmers
 
       - name: Package tarball
         run: |
           mkdir -p dist
-          cp target/x86_64-unknown-linux-gnu/release/swimmers dist/swimmers-linux-amd64
+          cp target/release/swimmers dist/swimmers-linux-amd64
           chmod +x dist/swimmers-linux-amd64
           cd dist
-          shasum -a 256 swimmers-linux-amd64 > swimmers-linux-amd64.sha256
+          sha256sum swimmers-linux-amd64 > swimmers-linux-amd64.sha256
 
       - uses: actions/upload-artifact@v4
         with:

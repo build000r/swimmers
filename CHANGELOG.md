@@ -4,7 +4,7 @@ All notable changes to swimmers are documented here. The format is based on [Kee
 
 ## [0.1.2] — 2026-04-08
 
-- Rebuilt the GitHub release workflow on `ubuntu-22.04` so published `swimmers-linux-amd64` assets stay compatible with Debian/Ubuntu environments that ship glibc 2.36.
+- Rebuilt the GitHub release workflow inside `rust:1-bookworm` so published `swimmers-linux-amd64` assets stay compatible with Debian/Ubuntu environments that ship glibc 2.36.
 - This fixes the `GLIBC_2.38` / `GLIBC_2.39` runtime failure from `0.1.1` when skillbox boxes install swimmers from GitHub releases.
 
 ## [0.1.1] — 2026-04-08
