@@ -197,6 +197,8 @@ pub struct RepoTheme {
     pub outline: String,
     pub accent: String,
     pub shirt: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sprite: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -900,6 +902,7 @@ mod tests {
             outline: "#3D2F24".into(),
             accent: "#1D1914".into(),
             shirt: "#AA9370".into(),
+            sprite: Some("jelly".into()),
         };
         let resp = CreateSessionResponse {
             session: SessionSummary {
@@ -932,6 +935,10 @@ mod tests {
             json.contains("\"repo_theme\""),
             "repo_theme must be present in JSON"
         );
+        assert!(
+            json.contains("\"sprite\":\"jelly\""),
+            "repo_theme sprite must roundtrip when present"
+        );
 
         // When repo_theme is None, the field should be omitted entirely.
         let resp_none = CreateSessionResponse {
@@ -952,6 +959,7 @@ mod tests {
             outline: "#3D2F24".into(),
             accent: "#1D1914".into(),
             shirt: "#AA9370".into(),
+            sprite: Some("balls".into()),
         };
         let payload = SessionCreatedPayload {
             reason: "api_create".into(),
@@ -985,6 +993,8 @@ mod tests {
 
         // Deserialize roundtrip
         let parsed: SessionCreatedPayload = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed.repo_theme.unwrap().body, "#B89875");
+        let parsed_theme = parsed.repo_theme.expect("repo theme");
+        assert_eq!(parsed_theme.body, "#B89875");
+        assert_eq!(parsed_theme.sprite.as_deref(), Some("balls"));
     }
 }

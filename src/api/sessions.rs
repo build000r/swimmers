@@ -914,6 +914,68 @@ esac
     }
 
     #[tokio::test]
+    async fn list_sessions_perf_gate_skips_hung_tmux_active_pane_lookup() {
+        let _env_guard = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let (_dir, _path_guard) = install_fake_tmux(
+            r#"#!/bin/sh
+set -eu
+case "${1-}" in
+  list-panes)
+    sleep 2
+    cat <<'EOF'
+work-1	1	1	0.0:%1
+work-2	1	1	0.0:%2
+EOF
+    ;;
+  *)
+    printf 'unexpected tmux command: %s\n' "${1-}" >&2
+    exit 1
+    ;;
+esac
+"#,
+        );
+
+        let state = test_state();
+        let mut expected_ids = Vec::new();
+        for index in 1..=2 {
+            let session_id = format!("sess-{index}");
+            let mut live_summary = summary(&session_id, SessionState::Idle);
+            live_summary.tmux_name = format!("work-{index}");
+            state
+                .supervisor
+                .insert_test_handle(spawn_summary_handle(live_summary).await)
+                .await;
+            expected_ids.push(session_id);
+        }
+
+        let started = Instant::now();
+        let Json(payload) = list_sessions(
+            Extension(AuthInfo::new(OBSERVER_SCOPES.to_vec())),
+            State(state),
+        )
+        .await
+        .expect("session list should succeed when tmux stalls");
+        let elapsed = started.elapsed();
+
+        let mut actual_ids = payload
+            .sessions
+            .iter()
+            .map(|session| session.session_id.clone())
+            .collect::<Vec<_>>();
+        actual_ids.sort();
+        expected_ids.sort();
+
+        assert_eq!(actual_ids, expected_ids);
+        assert!(
+            elapsed < Duration::from_millis(900),
+            "expected /v1/sessions to degrade gracefully when tmux list-panes stalls, got {:?}",
+            elapsed
+        );
+    }
+
+    #[tokio::test]
     async fn get_pane_tail_returns_actor_text() {
         let state = test_state();
         let (cmd_tx, mut cmd_rx) = mpsc::channel(8);

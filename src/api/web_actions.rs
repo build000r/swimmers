@@ -9,17 +9,17 @@ use axum::{Extension, Json, Router};
 use mermaid_rs_renderer::{compute_layout, parse_mermaid, render_svg, RenderOptions};
 use tokio::sync::oneshot;
 
-use crate::api::AppState;
 #[cfg(feature = "personal-workflows")]
 use crate::api::fetch_live_summary;
+use crate::api::AppState;
 use crate::auth::{AuthInfo, AuthScope};
 use crate::host_actions::{ArtifactOpener, SystemArtifactOpener};
 #[cfg(feature = "personal-workflows")]
 use crate::host_actions::{CommitLauncher, SystemCommitLauncher};
 use crate::session::actor::SessionCommand;
-use crate::types::{ErrorResponse, MermaidArtifactResponse};
 #[cfg(feature = "personal-workflows")]
 use crate::types::SessionState;
+use crate::types::{ErrorResponse, MermaidArtifactResponse};
 
 #[cfg(feature = "personal-workflows")]
 #[derive(Debug, serde::Serialize)]

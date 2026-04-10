@@ -1,11 +1,11 @@
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
 use tokio::process::Command;
-use tokio::sync::{broadcast, mpsc, oneshot, Mutex, RwLock};
+use tokio::sync::{broadcast, mpsc, oneshot, Mutex, Notify, RwLock};
 use tracing::{debug, error, info, warn};
 
 use crate::config::Config;
@@ -23,6 +23,8 @@ use crate::types::{
 const PROCESS_EXIT_REAP_INTERVAL: Duration = Duration::from_millis(250);
 const PROCESS_EXIT_DELETE_GRACE: Duration = Duration::ZERO;
 const PROCESS_EXIT_SUMMARY_TIMEOUT: Duration = Duration::from_millis(250);
+const ACTIVE_PANE_LOOKUP_TIMEOUT: Duration = Duration::from_millis(500);
+const ACTIVE_PANE_LOOKUP_WARN_THRESHOLD: Duration = Duration::from_millis(200);
 
 struct ListedTmuxSessions {
     reliable: bool,
@@ -37,6 +39,53 @@ fn thought_snapshot_for_summary<'a>(
     thought_snapshots
         .get(&summary.session_id)
         .or_else(|| active_pane_session_id.and_then(|session_id| thought_snapshots.get(session_id)))
+}
+
+fn merge_summary_with_thought_snapshot(
+    summary: &mut SessionSummary,
+    thought_data: &ThoughtSnapshot,
+) {
+    if summary.thought.is_none() {
+        summary.thought = thought_data.thought.clone();
+    }
+    summary.thought_state = thought_data.thought_state;
+    summary.thought_source = thought_data.thought_source;
+    summary.thought_updated_at = Some(thought_data.updated_at);
+    summary.rest_state = thought_data.rest_state;
+    summary.commit_candidate = thought_data.commit_candidate;
+    summary.objective_changed_at = thought_data.objective_changed_at;
+    if thought_data.token_count > 0 || summary.token_count == 0 {
+        summary.token_count = thought_data.token_count;
+    }
+    if thought_data.context_limit > 0 {
+        summary.context_limit = thought_data.context_limit;
+    }
+}
+
+fn persisted_session_from_summary(
+    summary: &SessionSummary,
+    thought_data: Option<&ThoughtSnapshot>,
+) -> PersistedSession {
+    PersistedSession {
+        session_id: summary.session_id.clone(),
+        tmux_name: summary.tmux_name.clone(),
+        state: summary.state,
+        tool: summary.tool.clone(),
+        token_count: summary.token_count,
+        context_limit: summary.context_limit,
+        thought: summary.thought.clone(),
+        thought_state: summary.thought_state,
+        thought_source: summary.thought_source,
+        thought_updated_at: summary.thought_updated_at,
+        rest_state: summary.rest_state,
+        commit_candidate: summary.commit_candidate,
+        objective_changed_at: summary.objective_changed_at,
+        last_skill: summary.last_skill.clone(),
+        objective_fingerprint: thought_data
+            .and_then(|snapshot| snapshot.objective_fingerprint.clone()),
+        cwd: summary.cwd.clone(),
+        last_activity_at: summary.last_activity_at,
+    }
 }
 
 fn format_tmux_active_pane_session_id(tmux_name: &str, pane_selector: &str) -> String {
@@ -68,22 +117,42 @@ async fn query_tmux_active_pane_session_ids(
         return Ok(HashMap::new());
     }
 
-    let output = Command::new("tmux")
-        .args([
-            "list-panes",
-            "-a",
-            "-F",
-            "#{session_name}\t#{window_active}\t#{pane_active}\t#{window_index}.#{pane_index}:#{pane_id}",
-        ])
-        .env_remove("TMUX")
-        .env_remove("TMUX_PANE")
-        .output()
+    let started = Instant::now();
+    let output = tokio::time::timeout(
+        ACTIVE_PANE_LOOKUP_TIMEOUT,
+        Command::new("tmux")
+            .args([
+                "list-panes",
+                "-a",
+                "-F",
+                "#{session_name}\t#{window_active}\t#{pane_active}\t#{window_index}.#{pane_index}:#{pane_id}",
+            ])
+            .env_remove("TMUX")
+            .env_remove("TMUX_PANE")
+            .output(),
+    )
         .await
+        .map_err(|_| {
+            anyhow::anyhow!(
+                "tmux list-panes timed out after {}ms",
+                ACTIVE_PANE_LOOKUP_TIMEOUT.as_millis()
+            )
+        })?
         .map_err(|e| anyhow::anyhow!("failed to run tmux list-panes: {}", e))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(anyhow::anyhow!("tmux list-panes failed: {}", stderr.trim()));
+    }
+
+    let elapsed = started.elapsed();
+    if elapsed >= ACTIVE_PANE_LOOKUP_WARN_THRESHOLD {
+        warn!(
+            phase = "tmux_list_panes",
+            elapsed_ms = elapsed.as_millis() as u64,
+            tmux_names = tmux_names.len(),
+            "tmux active pane lookup completed slowly"
+        );
     }
 
     let mut active_panes = HashMap::new();
@@ -109,6 +178,23 @@ async fn query_tmux_active_pane_session_ids(
     }
 
     Ok(active_panes)
+}
+
+async fn active_pane_session_ids_or_empty(
+    tmux_names: &HashSet<String>,
+    reason: &'static str,
+) -> HashMap<String, String> {
+    match query_tmux_active_pane_session_ids(tmux_names).await {
+        Ok(ids) => ids,
+        Err(err) => {
+            warn!(
+                reason,
+                tmux_names = tmux_names.len(),
+                "skipping tmux active pane lookup: {err}"
+            );
+            HashMap::new()
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -167,6 +253,12 @@ pub struct SessionSupervisor {
     /// Latest thought snapshots keyed by session_id.
     thought_snapshots: RwLock<HashMap<String, ThoughtSnapshot>>,
 
+    /// Number of accepted thought-persist writes still queued or in flight.
+    pending_thought_persists: AtomicUsize,
+
+    /// Wakes shutdown waiters when the pending thought-persist count changes.
+    pending_thought_persists_notify: Notify,
+
     /// First-observed timestamps for sessions that have entered Exited state.
     process_exit_seen_at: RwLock<HashMap<String, Instant>>,
 
@@ -189,6 +281,8 @@ impl SessionSupervisor {
             thought_tx,
             persistence: RwLock::new(None),
             thought_snapshots: RwLock::new(HashMap::new()),
+            pending_thought_persists: AtomicUsize::new(0),
+            pending_thought_persists_notify: Notify::new(),
             process_exit_seen_at: RwLock::new(HashMap::new()),
             discovery_lock: Mutex::new(()),
         })
@@ -823,8 +917,7 @@ impl SessionSupervisor {
         sessions.get(session_id).cloned()
     }
 
-    /// List summaries for all active sessions.
-    pub async fn list_sessions(&self) -> Vec<SessionSummary> {
+    async fn collect_live_summaries(&self, timeout: Duration) -> Vec<SessionSummary> {
         let handles: Vec<ActorHandle> = {
             let sessions = self.sessions.read().await;
             sessions.values().cloned().collect()
@@ -842,7 +935,7 @@ impl SessionSupervisor {
                 {
                     return None;
                 }
-                match tokio::time::timeout(std::time::Duration::from_secs(2), rx).await {
+                match tokio::time::timeout(timeout, rx).await {
                     Ok(Ok(summary)) if summary.state != SessionState::Exited => Some(summary),
                     Ok(Ok(_)) => None,
                     Ok(Err(_)) => {
@@ -857,18 +950,22 @@ impl SessionSupervisor {
             })
             .collect();
 
-        let mut summaries: Vec<SessionSummary> = futures::future::join_all(futs)
+        futures::future::join_all(futs)
             .await
             .into_iter()
             .flatten()
-            .collect();
+            .collect()
+    }
+
+    /// List summaries for all active sessions.
+    pub async fn list_sessions(&self) -> Vec<SessionSummary> {
+        let mut summaries = self.collect_live_summaries(Duration::from_secs(2)).await;
 
         let thought_snapshots = self.thought_snapshots.read().await.clone();
         let tmux_names =
             tmux_names_requiring_active_pane_lookup(summaries.iter(), &thought_snapshots);
-        let active_pane_session_ids = query_tmux_active_pane_session_ids(&tmux_names)
-            .await
-            .unwrap_or_default();
+        let active_pane_session_ids =
+            active_pane_session_ids_or_empty(&tmux_names, "list_sessions").await;
         for summary in &mut summaries {
             let active_pane_session_id = if thought_snapshots.contains_key(&summary.session_id)
                 || summary.tmux_name.is_empty()
@@ -882,21 +979,7 @@ impl SessionSupervisor {
                 active_pane_session_id.as_deref(),
                 &thought_snapshots,
             ) {
-                if summary.thought.is_none() {
-                    summary.thought = thought_data.thought.clone();
-                }
-                summary.thought_state = thought_data.thought_state;
-                summary.thought_source = thought_data.thought_source;
-                summary.thought_updated_at = Some(thought_data.updated_at);
-                summary.rest_state = thought_data.rest_state;
-                summary.commit_candidate = thought_data.commit_candidate;
-                summary.objective_changed_at = thought_data.objective_changed_at;
-                if thought_data.token_count > 0 || summary.token_count == 0 {
-                    summary.token_count = thought_data.token_count;
-                }
-                if thought_data.context_limit > 0 {
-                    summary.context_limit = thought_data.context_limit;
-                }
+                merge_summary_with_thought_snapshot(summary, thought_data);
             }
         }
 
@@ -1000,9 +1083,8 @@ impl SessionSupervisor {
             summaries_with_replay.iter().map(|(summary, _)| summary),
             &thought_snapshots,
         );
-        let active_pane_session_ids = query_tmux_active_pane_session_ids(&tmux_names)
-            .await
-            .unwrap_or_default();
+        let active_pane_session_ids =
+            active_pane_session_ids_or_empty(&tmux_names, "collect_session_infos").await;
 
         for (summary, replay_text) in summaries_with_replay {
             let session_id = summary.session_id.clone();
@@ -1089,36 +1171,63 @@ impl SessionSupervisor {
             }
         };
 
-        let summaries = self.list_sessions().await;
-        let thought_snapshots = self.thought_snapshots.read().await;
-        let persisted: Vec<PersistedSession> = summaries
-            .iter()
-            .map(|s| PersistedSession {
-                session_id: s.session_id.clone(),
-                tmux_name: s.tmux_name.clone(),
-                state: s.state,
-                tool: s.tool.clone(),
-                token_count: s.token_count,
-                context_limit: s.context_limit,
-                thought: s.thought.clone(),
-                thought_state: s.thought_state,
-                thought_source: s.thought_source,
-                thought_updated_at: s.thought_updated_at,
-                rest_state: s.rest_state,
-                commit_candidate: s.commit_candidate,
-                objective_changed_at: thought_snapshots
-                    .get(&s.session_id)
-                    .and_then(|t| t.objective_changed_at),
-                last_skill: s.last_skill.clone(),
-                objective_fingerprint: thought_snapshots
-                    .get(&s.session_id)
-                    .and_then(|t| t.objective_fingerprint.clone()),
-                cwd: s.cwd.clone(),
-                last_activity_at: s.last_activity_at,
+        let thought_snapshots = self.thought_snapshots.read().await.clone();
+        let persisted: Vec<PersistedSession> = self
+            .collect_live_summaries(Duration::from_secs(2))
+            .await
+            .into_iter()
+            .map(|mut summary| {
+                let thought_data = thought_snapshots.get(&summary.session_id);
+                if let Some(thought_data) = thought_data {
+                    merge_summary_with_thought_snapshot(&mut summary, thought_data);
+                }
+                persisted_session_from_summary(&summary, thought_data)
             })
             .collect();
 
         store.save_sessions(&persisted).await;
+    }
+
+    fn begin_pending_thought_persist(&self) {
+        self.pending_thought_persists.fetch_add(1, Ordering::SeqCst);
+        self.pending_thought_persists_notify.notify_waiters();
+    }
+
+    fn finish_pending_thought_persist(&self) {
+        let previous = self.pending_thought_persists.fetch_sub(1, Ordering::SeqCst);
+        debug_assert!(previous > 0, "pending thought persist counter underflow");
+        self.pending_thought_persists_notify.notify_waiters();
+    }
+
+    pub async fn wait_for_pending_thought_persists(&self, timeout: Duration) -> bool {
+        let deadline = Instant::now() + timeout;
+        loop {
+            let notified = self.pending_thought_persists_notify.notified();
+            let pending = self.pending_thought_persists.load(Ordering::SeqCst);
+            if pending == 0 {
+                return true;
+            }
+
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                warn!(
+                    pending,
+                    timeout_ms = timeout.as_millis() as u64,
+                    "timed out waiting for pending thought persists to drain"
+                );
+                return false;
+            }
+
+            if tokio::time::timeout(remaining, notified).await.is_err() {
+                let still_pending = self.pending_thought_persists.load(Ordering::SeqCst);
+                warn!(
+                    pending = still_pending,
+                    timeout_ms = timeout.as_millis() as u64,
+                    "timed out waiting for pending thought persists to drain"
+                );
+                return still_pending == 0;
+            }
+        }
     }
 
     /// Persist a thought update for a specific session.
@@ -1423,6 +1532,7 @@ impl SupervisorProvider {
                         req.objective_fingerprint,
                     )
                     .await;
+                persist_supervisor.finish_pending_thought_persist();
             }
         });
 
@@ -1464,6 +1574,7 @@ impl SessionProvider for SupervisorProvider {
         objective_changed_at: Option<DateTime<Utc>>,
         objective_fingerprint: Option<String>,
     ) {
+        self.supervisor.begin_pending_thought_persist();
         if self
             .persist_tx
             .try_send(PersistThoughtRequest {
@@ -1482,6 +1593,7 @@ impl SessionProvider for SupervisorProvider {
             })
             .is_err()
         {
+            self.supervisor.finish_pending_thought_persist();
             warn!(
                 session_id = %session_id,
                 "persist_thought queue full/closed; dropping thought snapshot"
@@ -2226,6 +2338,89 @@ mod tests {
         assert_eq!(snapshot.updated_at, later_update);
         assert_eq!(snapshot.objective_changed_at, Some(shifted_at));
         assert_eq!(snapshot.thought.as_deref(), Some("continuing work"));
+    }
+
+    #[tokio::test]
+    async fn persist_registry_uses_actor_state_without_querying_tmux() {
+        let _guard = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let dir = tempdir().expect("tempdir");
+        let bin_dir = dir.path().join("bin");
+        std::fs::create_dir_all(&bin_dir).expect("bin");
+        let command_file = dir.path().join("tmux-command.txt");
+        write_executable(
+            &bin_dir.join("tmux"),
+            &format!(
+                "#!/bin/sh\nset -eu\nprintf '%s\\n' \"$1\" > \"{}\"\nexit 1\n",
+                command_file.display()
+            ),
+        );
+        let original_path = std::env::var_os("PATH");
+        prepend_test_path(&bin_dir, original_path.as_deref());
+
+        let store = FileStore::new(dir.path()).await.expect("file store");
+        let supervisor = SessionSupervisor::new(Arc::new(Config::default()));
+        supervisor.init_persistence(store.clone()).await;
+        supervisor
+            .insert_test_handle(
+                spawn_summary_handle(test_summary("sess-live", SessionState::Idle)).await,
+            )
+            .await;
+
+        supervisor.persist_registry().await;
+        restore_test_path(original_path);
+
+        let persisted = store.load_sessions().await;
+        assert_eq!(persisted.len(), 1);
+        assert_eq!(persisted[0].session_id, "sess-live");
+        assert!(
+            !command_file.exists(),
+            "persist_registry should not shell out to tmux"
+        );
+    }
+
+    #[tokio::test]
+    async fn persist_registry_merges_direct_thought_snapshot_into_registry() {
+        let dir = tempdir().expect("tempdir");
+        let store = FileStore::new(dir.path()).await.expect("file store");
+        let supervisor = SessionSupervisor::new(Arc::new(Config::default()));
+        supervisor.init_persistence(store.clone()).await;
+        supervisor
+            .insert_test_handle(
+                spawn_summary_handle(test_summary("sess-live", SessionState::Idle)).await,
+            )
+            .await;
+
+        let updated_at = DateTime::parse_from_rfc3339("2026-03-08T14:00:05Z")
+            .expect("timestamp")
+            .with_timezone(&Utc);
+        supervisor
+            .persist_thought(
+                "sess-live",
+                Some("reading logs"),
+                12,
+                192_000,
+                ThoughtState::Active,
+                ThoughtSource::Llm,
+                RestState::Active,
+                true,
+                updated_at,
+                ThoughtDeliveryState::default(),
+                None,
+                Some("obj-1".to_string()),
+            )
+            .await;
+
+        supervisor.persist_registry().await;
+
+        let persisted = store.load_sessions().await;
+        assert_eq!(persisted.len(), 1);
+        assert_eq!(persisted[0].thought.as_deref(), Some("reading logs"));
+        assert_eq!(persisted[0].thought_updated_at, Some(updated_at));
+        assert_eq!(persisted[0].rest_state, RestState::Active);
+        assert!(persisted[0].commit_candidate);
+        assert_eq!(persisted[0].objective_fingerprint.as_deref(), Some("obj-1"));
     }
 
     #[test]

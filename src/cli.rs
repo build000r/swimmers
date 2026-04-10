@@ -455,11 +455,7 @@ mod tests {
     #[test]
     fn doctor_flags_unwritable_data_dir() {
         let c = cfg("127.0.0.1", AuthMode::LocalTrust, None);
-        let findings = run_doctor_checks(
-            &c,
-            true,
-            Err("permission denied".to_string()),
-        );
+        let findings = run_doctor_checks(&c, true, Err("permission denied".to_string()));
         let dd = findings.iter().find(|f| f.name == "data_dir").unwrap();
         assert!(!dd.ok);
         assert!(dd.detail.contains("permission denied"));

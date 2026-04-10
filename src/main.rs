@@ -40,6 +40,7 @@ use thought::protocol::SyncRequestSequence;
 use thought::runtime_config::ThoughtConfig;
 
 const STARTUP_PHASE_WARN_THRESHOLD: Duration = Duration::from_secs(2);
+const SHUTDOWN_PERSIST_TIMEOUT: Duration = Duration::from_secs(5);
 
 fn resolve_data_dir() -> std::path::PathBuf {
     if let Ok(val) = std::env::var("SWIMMERS_DATA_DIR") {
@@ -115,7 +116,7 @@ fn start_thought_backend(
     supervisor: &Arc<SessionSupervisor>,
     thought_config: Arc<RwLock<ThoughtConfig>>,
     sync_request_sequence: Arc<SyncRequestSequence>,
-) {
+) -> tokio::task::JoinHandle<()> {
     let thought_tx = supervisor.thought_event_sender();
     let provider = Arc::new(SupervisorProvider::new(supervisor.clone()));
     match config.thought_backend {
@@ -127,7 +128,7 @@ fn start_thought_backend(
                 thought_config,
                 sync_request_sequence,
             );
-            runner.spawn(provider);
+            runner.spawn(provider)
         }
         ThoughtBackend::Daemon => {
             tracing::info!("thought backend=daemon: starting thought bridge runner");
@@ -139,9 +140,21 @@ fn start_thought_backend(
             bridge_runner.spawn(
                 provider,
                 EmitterClient::with_request_sequence(sync_request_sequence),
-            );
+            )
         }
     }
+}
+
+async fn finalize_shutdown(
+    supervisor: &Arc<SessionSupervisor>,
+    thought_backend: tokio::task::JoinHandle<()>,
+) {
+    thought_backend.abort();
+    let _ = thought_backend.await;
+    supervisor
+        .wait_for_pending_thought_persists(SHUTDOWN_PERSIST_TIMEOUT)
+        .await;
+    supervisor.persist_registry().await;
 }
 
 fn build_app_router(
@@ -218,7 +231,7 @@ async fn run() -> anyhow::Result<()> {
     supervisor.spawn_process_exit_reaper();
 
     // Start thought engine.
-    start_thought_backend(
+    let thought_backend = start_thought_backend(
         &config,
         &supervisor,
         thought_config.clone(),
@@ -227,7 +240,7 @@ async fn run() -> anyhow::Result<()> {
 
     // Build app state
     let state = Arc::new(AppState {
-        supervisor,
+        supervisor: supervisor.clone(),
         config: config.clone(),
         thought_config,
         native_desktop_app: Arc::new(RwLock::new(native::default_native_app())),
@@ -247,10 +260,13 @@ async fn run() -> anyhow::Result<()> {
     );
     tracing::info!("Swimmers running on http://{bind}:{port}");
 
-    axum::serve(listener, app)
+    let server_result = axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())
-        .await
-        .map_err(|err| anyhow::anyhow!("server error: {err}"))?;
+        .await;
+
+    finalize_shutdown(&supervisor, thought_backend).await;
+
+    server_result.map_err(|err| anyhow::anyhow!("server error: {err}"))?;
 
     Ok(())
 }
@@ -329,5 +345,131 @@ fn main() {
         Some(ServerCommand::Config { action }) => {
             std::process::exit(run_config_subcommand(action));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::future::pending;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    use chrono::Utc;
+    use tokio::sync::mpsc;
+
+    use crate::session::actor::{ActorHandle, SessionCommand};
+    use crate::thought::loop_runner::SessionProvider;
+    use crate::thought::protocol::ThoughtDeliveryState;
+    use crate::types::{
+        fallback_rest_state, RestState, SessionState, SessionSummary, ThoughtSource, ThoughtState,
+        TransportHealth,
+    };
+
+    struct AbortFlag(Arc<AtomicBool>);
+
+    impl Drop for AbortFlag {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+
+    async fn spawn_summary_handle(summary: SessionSummary) -> ActorHandle {
+        let (cmd_tx, mut cmd_rx) = mpsc::channel(8);
+        let handle = ActorHandle::test_handle(
+            summary.session_id.clone(),
+            summary.tmux_name.clone(),
+            cmd_tx,
+        );
+        tokio::spawn(async move {
+            while let Some(cmd) = cmd_rx.recv().await {
+                match cmd {
+                    SessionCommand::GetSummary(reply) => {
+                        let _ = reply.send(summary.clone());
+                    }
+                    SessionCommand::Shutdown => break,
+                    _ => {}
+                }
+            }
+        });
+        handle
+    }
+
+    #[tokio::test]
+    async fn finalize_shutdown_aborts_backend_drains_pending_persists_and_flushes_registry() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = FileStore::new(dir.path()).await.expect("file store");
+        let supervisor = SessionSupervisor::new(Arc::new(Config::default()));
+        supervisor.init_persistence(store.clone()).await;
+
+        let summary = SessionSummary {
+            session_id: "sess_1".to_string(),
+            tmux_name: "work".to_string(),
+            state: SessionState::Idle,
+            current_command: Some("cargo test".to_string()),
+            cwd: "/tmp/project".to_string(),
+            tool: Some("Codex".to_string()),
+            token_count: 0,
+            context_limit: 192_000,
+            thought: None,
+            thought_state: ThoughtState::Holding,
+            thought_source: ThoughtSource::CarryForward,
+            thought_updated_at: None,
+            rest_state: fallback_rest_state(SessionState::Idle, ThoughtState::Holding),
+            commit_candidate: false,
+            objective_changed_at: None,
+            last_skill: None,
+            is_stale: false,
+            attached_clients: 0,
+            transport_health: TransportHealth::Healthy,
+            last_activity_at: Utc::now(),
+            repo_theme_id: None,
+        };
+        supervisor
+            .insert_test_handle(spawn_summary_handle(summary).await)
+            .await;
+
+        let provider = Arc::new(SupervisorProvider::new(supervisor.clone()));
+        provider.persist_thought(
+            "sess_1",
+            Some("queued thought"),
+            17,
+            192_000,
+            ThoughtState::Active,
+            ThoughtSource::Llm,
+            RestState::Active,
+            true,
+            Utc::now(),
+            ThoughtDeliveryState::default(),
+            None,
+            Some("obj-1".to_string()),
+        );
+
+        let aborted = Arc::new(AtomicBool::new(false));
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let task_provider = provider.clone();
+        let task_aborted = aborted.clone();
+        let thought_backend = tokio::spawn(async move {
+            let _flag = AbortFlag(task_aborted);
+            let _ = started_tx.send(());
+            let _provider = task_provider;
+            pending::<()>().await;
+        });
+        drop(provider);
+        started_rx.await.expect("backend task should start");
+
+        finalize_shutdown(&supervisor, thought_backend).await;
+
+        assert!(aborted.load(Ordering::SeqCst));
+
+        let thoughts = store.load_thoughts().await;
+        let thought = thoughts.get("sess_1").expect("persisted thought");
+        assert_eq!(thought.thought.as_deref(), Some("queued thought"));
+        assert_eq!(thought.objective_fingerprint.as_deref(), Some("obj-1"));
+
+        let sessions = store.load_sessions().await;
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].session_id, "sess_1");
+        assert_eq!(sessions[0].thought.as_deref(), Some("queued thought"));
+        assert_eq!(sessions[0].objective_fingerprint.as_deref(), Some("obj-1"));
     }
 }
