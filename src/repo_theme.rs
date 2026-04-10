@@ -18,6 +18,7 @@ const MOTIFS: &[&str] = &[
 
 #[derive(Debug, Deserialize)]
 struct ColorsFileInput {
+    sprite: Option<String>,
     palette: Option<PaletteInput>,
 }
 
@@ -34,6 +35,8 @@ struct ColorsFileOutput {
     target: String,
     generated_at: String,
     palette: PaletteOutput,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    sprite: Option<String>,
     motif: String,
 }
 
@@ -131,6 +134,7 @@ fn read_valid_theme(path: &Path) -> Option<RepoTheme> {
         outline: normalize_hex(palette.outline.as_deref()?)?,
         accent: normalize_hex(palette.accent.as_deref()?)?,
         shirt: normalize_hex(palette.shirt.as_deref()?)?,
+        sprite: parsed.sprite.as_deref().and_then(normalize_sprite_name),
     })
 }
 
@@ -198,6 +202,7 @@ fn theme_candidate(seed: u64, attempt: u64) -> RepoTheme {
             (body_l * 0.22).clamp(0.08, 0.18),
         )),
         shirt: rgb_to_hex(hsl_to_rgb(shirt_hue, shirt_s, shirt_l)),
+        sprite: None,
     }
 }
 
@@ -230,6 +235,7 @@ fn write_theme_file(
                 0.60,
             )),
         },
+        sprite: theme.sprite.as_deref().and_then(normalize_sprite_name),
         motif: motif_name(project_root),
     };
 
@@ -259,6 +265,15 @@ fn normalize_hex(value: &str) -> Option<String> {
         normalized.push(ch.to_ascii_uppercase());
     }
     Some(normalized)
+}
+
+fn normalize_sprite_name(value: &str) -> Option<String> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "fish" => Some("fish".to_string()),
+        "balls" => Some("balls".to_string()),
+        "jelly" => Some("jelly".to_string()),
+        _ => None,
+    }
 }
 
 fn seed_fraction(seed: u64) -> f64 {
@@ -382,6 +397,29 @@ mod tests {
         assert_eq!(theme.outline, "#3D2F24");
         assert_eq!(theme.accent, "#1D1914");
         assert_eq!(theme.shirt, "#AA9370");
+        assert_eq!(theme.sprite, None);
+    }
+
+    #[test]
+    fn reads_existing_valid_theme_sprite() {
+        let tmp = tempfile::tempdir().unwrap();
+        let colors_path = tmp.path().join(PREFERRED_THEME_DIR).join("colors.json");
+        write(
+            &colors_path,
+            r##"{
+  "sprite": "JELLY",
+  "palette": {
+    "body": "#b89875",
+    "outline": "#3d2f24",
+    "accent": "#1d1914",
+    "shirt": "#aa9370"
+  }
+}"##,
+        );
+
+        let (_root, theme) = discover_repo_theme(tmp.path().to_string_lossy().as_ref()).unwrap();
+
+        assert_eq!(theme.sprite.as_deref(), Some("jelly"));
     }
 
     #[test]
@@ -409,6 +447,7 @@ mod tests {
         assert_ne!(theme.outline, "#3D2F24");
         assert_ne!(theme.accent, "#1D1914");
         assert_ne!(theme.shirt, "#AA9370");
+        assert!(!contents.contains("\"sprite\""));
     }
 
     #[test]
