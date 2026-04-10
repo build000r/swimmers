@@ -61,8 +61,8 @@ proptest = "1"
 tempfile = "3"
 
 [features]
-# Personal workstation workflow endpoints (env-manager browsing, skill
-# scanning, clawgs commit helpers). Off by default so the crates.io build
-# is lean; enable with `--features personal-workflows` when building from
-# source for the maintainer's local workflow.
+# Personal workstation workflow endpoints (overlay-driven directory browsing,
+# skill scanning, clawgs commit helpers). Off by default so the crates.io
+# build is lean; enable with `--features personal-workflows` when building
+# from source for the maintainer's local workflow.
 personal-workflows = []

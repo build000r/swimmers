@@ -16,6 +16,7 @@ pub(crate) struct PickerState {
     pub(crate) current_theme_color: Option<Color>,
     pub(crate) entry_theme_colors: Vec<Option<Color>>,
     pub(crate) managed_only: bool,
+    pub(crate) overlay_label: Option<String>,
     pub(crate) spawn_tool: SpawnTool,
     pub(crate) selection: PickerSelection,
     pub(crate) scroll: usize,
@@ -38,6 +39,7 @@ impl PickerState {
             current_theme_color: None,
             entry_theme_colors: Vec::new(),
             managed_only,
+            overlay_label: response.overlay_label,
             spawn_tool,
             selection: PickerSelection::SpawnHere,
             scroll: 0,
@@ -47,6 +49,7 @@ impl PickerState {
     pub(crate) fn apply_response(&mut self, response: DirListResponse) {
         self.current_path = response.path;
         self.entries = response.entries;
+        self.overlay_label = response.overlay_label;
         self.current_theme_color = None;
         self.entry_theme_colors.clear();
         self.selection = PickerSelection::SpawnHere;
@@ -270,14 +273,18 @@ pub(crate) fn picker_layout(picker: &PickerState, field: Rect) -> PickerLayout {
             height: 1,
         })
     };
+    let managed_label_width = match &picker.overlay_label {
+        Some(label) => label.len() as u16 + 2, // [label]
+        None => 9, // [managed]
+    };
     let env_button = Rect {
         x: content.x,
         y: content.y + 2,
-        width: 13,
+        width: managed_label_width,
         height: 1,
     };
     let all_button = Rect {
-        x: (content.x + 15).min(content.right().saturating_sub(13)),
+        x: (content.x + managed_label_width + 2).min(content.right().saturating_sub(13)),
         y: content.y + 2,
         width: 13,
         height: 1,
@@ -398,10 +405,14 @@ pub(crate) fn render_picker(renderer: &mut Renderer, picker: &PickerState, field
     let path_label = truncate_label(&picker.relative_label(), path_width);
     renderer.draw_text(path_x, layout.content.y + 1, &path_label, picker_color);
 
+    let managed_label = match &picker.overlay_label {
+        Some(label) => format!("[{}]", label.to_lowercase()),
+        None => "[managed]".to_string(),
+    };
     renderer.draw_text(
         layout.env_button.x,
         layout.env_button.y,
-        "[env managed]",
+        &managed_label,
         if picker.managed_only {
             Color::White
         } else {

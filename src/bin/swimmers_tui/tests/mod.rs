@@ -2281,6 +2281,7 @@ fn dir_response(path: &str, names: &[(&str, bool)]) -> DirListResponse {
                 is_running: None,
             })
             .collect(),
+        overlay_label: None,
     }
 }
 

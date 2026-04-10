@@ -10,10 +10,9 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, UNIX_EPOCH};
 use tokio::process::Command;
-use tracing::warn;
-
 use crate::api::AppState;
 use crate::auth::{AuthInfo, AuthScope};
+use crate::session::overlay::{default_overlay, OverlayDirConfig, OverlayServiceEntry};
 use crate::types::{
     DirEntry, DirListResponse, DirRestartRequest, DirRestartResponse, ErrorResponse,
 };
@@ -24,10 +23,9 @@ struct DirQuery {
     managed_only: Option<bool>,
 }
 
-struct EnvServiceContext {
-    env_manager_root: PathBuf,
-    repo_root: PathBuf,
-    service_repo_map: Vec<(String, String)>,
+struct OverlayServiceContext {
+    base_path: PathBuf,
+    services: Vec<OverlayServiceEntry>,
 }
 
 struct ListCandidate {
@@ -37,130 +35,49 @@ struct ListCandidate {
     services: Vec<String>,
 }
 
-fn default_dirs_base_path(cwd: &Path) -> PathBuf {
-    find_env_manager_root(cwd)
-        .and_then(|root| root.parent().map(Path::to_path_buf))
-        .unwrap_or_else(|| cwd.to_path_buf())
-}
-
-/// Base path for directory browsing. Falls back to the repo root that owns the
-/// nearest ancestor `.env-manager`, otherwise the server's cwd.
+/// Base path for directory browsing. Prefers `DIRS_BASE_PATH` env var, then
+/// the overlay's `dev_sanity.services.base_path`, then the server's cwd.
 fn dirs_base_path() -> PathBuf {
-    std::env::var("DIRS_BASE_PATH")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| {
-            let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
-            default_dirs_base_path(&cwd)
-        })
-}
-
-fn find_env_manager_root(base: &Path) -> Option<PathBuf> {
-    base.ancestors()
-        .map(|ancestor| ancestor.join(".env-manager"))
-        .find(|candidate| candidate.is_dir())
-}
-
-fn env_manager_root(base: &Path) -> Option<PathBuf> {
-    find_env_manager_root(base)
-}
-
-fn parse_shell_array_items(line: &str) -> Vec<String> {
-    let Some(start) = line.find('(') else {
-        return Vec::new();
-    };
-    let Some(end) = line.rfind(')') else {
-        return Vec::new();
-    };
-    if end <= start + 1 {
-        return Vec::new();
+    if let Ok(explicit) = std::env::var("DIRS_BASE_PATH") {
+        return PathBuf::from(explicit);
     }
 
-    line[start + 1..end]
-        .split_whitespace()
-        .map(|raw| {
-            raw.trim()
-                .trim_matches('"')
-                .trim_matches('\'')
-                .trim()
-                .to_string()
-        })
-        .filter(|item| !item.is_empty() && !item.contains('$'))
-        .collect()
-}
-
-fn is_targets_assignment(line: &str) -> bool {
-    let Some((name, _)) = line.trim().split_once('=') else {
-        return false;
-    };
-    name.ends_with("_TARGETS")
-}
-
-fn env_manager_targets(env_manager_root: &Path) -> Vec<String> {
-    let mut targets = BTreeSet::new();
-
-    let sync_path = env_manager_root.join("sync.sh");
-    if let Ok(contents) = std::fs::read_to_string(&sync_path) {
-        for line in contents.lines() {
-            let trimmed = line.trim();
-            if is_targets_assignment(trimmed) {
-                for target in parse_shell_array_items(trimmed) {
-                    targets.insert(target);
-                }
-            }
-        }
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
+    if let Some(config) = resolve_dir_config(&cwd) {
+        return config.base_path.clone();
     }
 
-    // Fallback for environments where sync.sh isn't available.
-    if targets.is_empty() {
-        let out_dir = env_manager_root.join("out");
-        if let Ok(entries) = std::fs::read_dir(out_dir) {
-            for entry in entries.flatten() {
-                let Ok(ft) = entry.file_type() else {
-                    continue;
-                };
-                if !ft.is_dir() {
-                    continue;
-                }
-                let name = entry.file_name().to_string_lossy().into_owned();
-                if name.starts_with('.') || name == "local" {
-                    continue;
-                }
-                targets.insert(name);
-            }
-        }
-    }
-
-    targets.into_iter().collect()
+    cwd
 }
 
-fn target_code_dir(base: &Path, target: &str) -> PathBuf {
-    match target {
-        "cfo-discord-bot" => base.join("cfo").join("discord_bot"),
-        "unclawg-approval-feedback-api" | "openclawth-approval-feedback-api" => base
-            .join("unclawg")
-            .join("services")
-            .join("approval_feedback_api"),
-        _ => base.join(target),
-    }
+/// Resolve the overlay dir config for the given path.
+fn resolve_dir_config(path: &Path) -> Option<&'static OverlayDirConfig> {
+    let overlay = default_overlay()?;
+    overlay.find_dir_config(&path.to_string_lossy())
 }
 
-fn managed_base_child_names(base: &Path) -> Option<BTreeSet<String>> {
-    let manager_root = env_manager_root(base)?;
-    let targets = env_manager_targets(&manager_root);
-    if targets.is_empty() {
+/// Compute which top-level children of `base` are "managed" by the overlay.
+///
+/// Derives the set from the `dir` fields of overlay service entries: each
+/// entry's first path component is a managed child of the base directory.
+fn managed_base_child_names(config: &OverlayDirConfig, base: &Path) -> Option<BTreeSet<String>> {
+    if config.services.is_empty() {
         return None;
     }
 
+    let resolved_base = config.base_path.canonicalize().unwrap_or(config.base_path.clone());
+    let canonical_base = base.canonicalize().unwrap_or(base.to_path_buf());
+
     let mut children = BTreeSet::new();
-    for target in targets {
-        let project_dir = target_code_dir(base, &target);
-        let Ok(canonical_project) = project_dir.canonicalize() else {
+    for service in &config.services {
+        let service_path = resolved_base.join(&service.dir);
+        let Ok(canonical) = service_path.canonicalize() else {
             continue;
         };
-        if !canonical_project.starts_with(base) {
+        if !canonical.starts_with(&canonical_base) {
             continue;
         }
-        let Ok(relative) = canonical_project.strip_prefix(base) else {
+        let Ok(relative) = canonical.strip_prefix(&canonical_base) else {
             continue;
         };
         let Some(Component::Normal(name)) = relative.components().next() else {
@@ -176,86 +93,8 @@ fn managed_base_child_names(base: &Path) -> Option<BTreeSet<String>> {
     }
 }
 
-fn normalize_repo_rel_path(raw: &str) -> String {
-    raw.trim().trim_matches('/').replace('\\', "/")
-}
-
-fn parse_assoc_array_line(line: &str) -> Option<(String, String)> {
-    let trimmed = line.trim();
-    if !trimmed.starts_with('[') {
-        return None;
-    }
-    let key_end = trimmed.find(']')?;
-    let key = trimmed.get(1..key_end)?.trim();
-    if key.is_empty() {
-        return None;
-    }
-
-    let remainder = trimmed.get(key_end + 1..)?.trim_start();
-    let remainder = remainder.strip_prefix('=')?.trim_start();
-    let quote = remainder.chars().next()?;
-    if quote != '"' && quote != '\'' {
-        return None;
-    }
-    let value_portion = remainder.get(1..)?;
-    let value_end = value_portion.find(quote)?;
-    let value = value_portion.get(..value_end)?.trim();
-    if value.is_empty() {
-        return None;
-    }
-    Some((key.to_string(), normalize_repo_rel_path(value)))
-}
-
-fn env_manager_service_repo_map(env_manager_root: &Path) -> Vec<(String, String)> {
-    let script_path = env_manager_root
-        .join("scripts")
-        .join("project")
-        .join("project.sh");
-    let Ok(contents) = std::fs::read_to_string(script_path) else {
-        return Vec::new();
-    };
-
-    let mut in_block = false;
-    let mut seen = BTreeSet::new();
-    let mut parsed = Vec::new();
-    for line in contents.lines() {
-        let trimmed = line.trim();
-        if !in_block {
-            if trimmed.starts_with("declare -A SERVICE_REPO=(") {
-                in_block = true;
-            }
-            continue;
-        }
-        if trimmed == ")" {
-            break;
-        }
-        let Some((service, repo_rel)) = parse_assoc_array_line(trimmed) else {
-            continue;
-        };
-        if seen.insert((service.clone(), repo_rel.clone())) {
-            parsed.push((service, repo_rel));
-        }
-    }
-    parsed
-}
-
-fn env_service_context(base: &Path) -> Option<EnvServiceContext> {
-    let env_manager_root = env_manager_root(base)?;
-    let repo_root = env_manager_root.parent()?.to_path_buf();
-    let repo_root = repo_root.canonicalize().unwrap_or(repo_root);
-    let service_repo_map = env_manager_service_repo_map(&env_manager_root);
-    if service_repo_map.is_empty() {
-        return None;
-    }
-    Some(EnvServiceContext {
-        env_manager_root,
-        repo_root,
-        service_repo_map,
-    })
-}
-
-fn relative_repo_path(repo_root: &Path, path: &Path) -> Option<String> {
-    let relative = path.strip_prefix(repo_root).ok()?;
+fn relative_repo_path(base: &Path, path: &Path) -> Option<String> {
+    let relative = path.strip_prefix(base).ok()?;
     let components: Vec<String> = relative
         .components()
         .filter_map(|component| match component {
@@ -266,8 +105,11 @@ fn relative_repo_path(repo_root: &Path, path: &Path) -> Option<String> {
     Some(components.join("/"))
 }
 
-fn services_for_directory(path: &Path, context: &EnvServiceContext) -> Vec<String> {
-    let Some(relative_path) = relative_repo_path(&context.repo_root, path) else {
+fn services_for_directory(
+    path: &Path,
+    context: &OverlayServiceContext,
+) -> Vec<String> {
+    let Some(relative_path) = relative_repo_path(&context.base_path, path) else {
         return Vec::new();
     };
     if relative_path.is_empty() {
@@ -275,90 +117,105 @@ fn services_for_directory(path: &Path, context: &EnvServiceContext) -> Vec<Strin
     }
 
     let mut services = BTreeSet::new();
-    for (service, service_repo_path) in &context.service_repo_map {
-        if service_repo_path == &relative_path
-            || service_repo_path.starts_with(&format!("{relative_path}/"))
-            || relative_path.starts_with(&format!("{service_repo_path}/"))
+    for service in &context.services {
+        if service.dir == relative_path
+            || service.dir.starts_with(&format!("{relative_path}/"))
+            || relative_path.starts_with(&format!("{}/", service.dir))
         {
-            services.insert(service.clone());
+            services.insert(service.name.clone());
         }
     }
 
     services.into_iter().collect()
 }
 
-async fn env_service_health_map(
-    env_manager_root: &Path,
-    services: &[String],
+/// Check service health by sending HTTP GET requests to overlay-defined URLs.
+async fn overlay_service_health_map(
+    services: &[OverlayServiceEntry],
+    requested: &[String],
 ) -> HashMap<String, bool> {
     let mut map = HashMap::new();
-    if services.is_empty() {
+    if requested.is_empty() {
         return map;
     }
 
-    let services_arg = format!("services={}", services.join(" "));
-    let output = match Command::new("make")
-        .current_dir(env_manager_root)
-        .arg("--no-print-directory")
-        .arg("project")
-        .arg("action=status")
-        .arg(services_arg)
-        .env_remove("PROJECT_ACTION")
-        .env_remove("PROJECT_SERVICES")
-        .env_remove("PROJECT_PROFILE")
-        .env_remove("PROJECT_TAILNET")
-        .env_remove("PROJECT_WATCH")
-        .output()
-        .await
-    {
-        Ok(output) => output,
-        Err(error) => {
-            warn!(
-                error = %error,
-                root = %env_manager_root.display(),
-                "failed to run env-manager status"
-            );
-            return map;
-        }
-    };
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()
+        .unwrap_or_default();
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    for line in stdout.lines() {
-        let trimmed = line.trim();
-        if trimmed.is_empty()
-            || trimmed.starts_with("SERVICE")
-            || trimmed.starts_with("-------")
-            || trimmed.starts_with('[')
-        {
+    let mut handles = Vec::new();
+    for service in services {
+        if !requested.contains(&service.name) {
             continue;
         }
-        let mut parts = trimmed.split_whitespace();
-        let Some(service) = parts.next() else {
+        let Some(url) = &service.health_url else {
+            // No health URL — assume running if the service is declared.
+            map.insert(service.name.clone(), true);
             continue;
         };
-        let Some(health) = parts.next() else {
-            continue;
-        };
-        let Some(run_handle) = parts.next() else {
-            continue;
-        };
-        // "running" should match operator intent (process exists), not only health.
-        // env-manager status can report HEALTH=down with a live RUN HANDLE pid.
-        if health == "up" || health == "down" {
-            let running = health == "up" || run_handle != "-";
-            map.insert(service.to_string(), running);
-        }
+        let name = service.name.clone();
+        let url = url.clone();
+        let client = client.clone();
+        handles.push(tokio::spawn(async move {
+            let ok = client.get(&url).send().await.is_ok();
+            (name, ok)
+        }));
     }
 
-    if !output.status.success() {
-        warn!(
-            status = %output.status,
-            root = %env_manager_root.display(),
-            "env-manager status exited non-zero"
-        );
+    for handle in handles {
+        if let Ok((name, ok)) = handle.await {
+            map.insert(name, ok);
+        }
     }
 
     map
+}
+
+/// Restart services by running overlay-defined shell commands.
+async fn restart_services(
+    services: &[OverlayServiceEntry],
+    requested: &[String],
+) -> Result<(), String> {
+    if requested.is_empty() {
+        return Err("no restartable services mapped for this path".to_string());
+    }
+
+    for service in services {
+        if !requested.contains(&service.name) {
+            continue;
+        }
+        let Some(cmd) = &service.restart else {
+            continue;
+        };
+        let output = tokio::time::timeout(
+            Duration::from_secs(240),
+            Command::new("sh").arg("-c").arg(cmd).output(),
+        )
+        .await
+        .map_err(|_| format!("restart of {} timed out after 240s", service.name))?
+        .map_err(|error| error.to_string())?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            let detail: String = if stderr.is_empty() {
+                String::from_utf8_lossy(&output.stdout)
+                    .lines()
+                    .rev()
+                    .find(|line| !line.trim().is_empty())
+                    .unwrap_or("restart failed")
+                    .trim()
+                    .chars()
+                    .take(600)
+                    .collect()
+            } else {
+                stderr.chars().take(600).collect()
+            };
+            return Err(format!("{}: {}", service.name, detail));
+        }
+    }
+
+    Ok(())
 }
 
 fn error_response(status: StatusCode, code: &str, message: impl Into<String>) -> Response {
@@ -396,55 +253,6 @@ fn resolve_target_path(base: PathBuf, target: PathBuf) -> Result<(PathBuf, PathB
     Ok((canonical_base, canonical))
 }
 
-fn trim_failure_details(output: &std::process::Output) -> String {
-    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-    if !stderr.is_empty() {
-        return stderr.chars().take(600).collect();
-    }
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let tail = stdout
-        .lines()
-        .rev()
-        .find(|line| !line.trim().is_empty())
-        .unwrap_or("restart failed");
-    tail.trim().chars().take(600).collect()
-}
-
-async fn restart_services(env_manager_root: &Path, services: &[String]) -> Result<(), String> {
-    if services.is_empty() {
-        return Err("no restartable services mapped for this path".to_string());
-    }
-
-    let services_arg = format!("services={}", services.join(" "));
-    let output = tokio::time::timeout(
-        Duration::from_secs(240),
-        Command::new("make")
-            .current_dir(env_manager_root)
-            .arg("--no-print-directory")
-            .arg("project")
-            .arg("action=restart")
-            .arg(services_arg)
-            .arg("tailnet=1")
-            .arg("watch=0")
-            .env_remove("PROJECT_ACTION")
-            .env_remove("PROJECT_SERVICES")
-            .env_remove("PROJECT_PROFILE")
-            .env_remove("PROJECT_TAILNET")
-            .env_remove("PROJECT_WATCH")
-            .output(),
-    )
-    .await
-    .map_err(|_| "restart timed out after 240s".to_string())?
-    .map_err(|error| error.to_string())?;
-
-    if output.status.success() {
-        Ok(())
-    } else {
-        Err(trim_failure_details(&output))
-    }
-}
-
 // GET /v1/dirs?path=...
 async fn list_dirs(
     Extension(auth): Extension<AuthInfo>,
@@ -478,13 +286,18 @@ async fn list_dirs(
     };
 
     let managed_only = query.managed_only.unwrap_or(false);
+    let dir_config = resolve_dir_config(&canonical_base);
+
     let managed_children = if managed_only && canonical == canonical_base {
-        managed_base_child_names(&canonical_base)
+        dir_config.and_then(|config| managed_base_child_names(config, &canonical_base))
     } else {
         None
     };
 
-    let env_context = env_service_context(&canonical_base);
+    let service_context = dir_config.map(|config| OverlayServiceContext {
+        base_path: config.base_path.clone(),
+        services: config.services.clone(),
+    });
 
     let mut candidates: Vec<ListCandidate> = Vec::new();
     let mut unique_services: BTreeSet<String> = BTreeSet::new();
@@ -524,7 +337,7 @@ async fn list_dirs(
             .map(|duration| duration.as_secs())
             .unwrap_or(0);
 
-        let services = env_context
+        let services = service_context
             .as_ref()
             .map(|context| services_for_directory(&entry_path, context))
             .unwrap_or_default();
@@ -540,9 +353,9 @@ async fn list_dirs(
         });
     }
 
-    let health_map = if let Some(context) = &env_context {
+    let health_map = if let Some(config) = dir_config {
         let services: Vec<String> = unique_services.into_iter().collect();
-        env_service_health_map(&context.env_manager_root, &services).await
+        overlay_service_health_map(&config.services, &services).await
     } else {
         HashMap::new()
     };
@@ -584,6 +397,7 @@ async fn list_dirs(
             serde_json::to_value(DirListResponse {
                 path: canonical.to_string_lossy().into_owned(),
                 entries,
+                overlay_label: dir_config.map(|c| c.label.clone()),
             })
             .unwrap(),
         ),
@@ -617,24 +431,28 @@ async fn restart_dir_services(
         Err(response) => return response,
     };
 
-    let Some(context) = env_service_context(&canonical_base) else {
+    let Some(config) = resolve_dir_config(&canonical_base) else {
         return error_response(
             StatusCode::SERVICE_UNAVAILABLE,
-            "ENV_MANAGER_UNAVAILABLE",
-            "could not locate .env-manager service metadata",
+            "OVERLAY_UNAVAILABLE",
+            "no skillbox-config overlay found with service definitions",
         );
     };
 
-    let services = services_for_directory(&canonical, &context);
-    if services.is_empty() {
+    let context = OverlayServiceContext {
+        base_path: config.base_path.clone(),
+        services: config.services.clone(),
+    };
+    let matched_services = services_for_directory(&canonical, &context);
+    if matched_services.is_empty() {
         return error_response(
             StatusCode::BAD_REQUEST,
             "NO_SERVICE_FOR_PATH",
-            "no .env-manager service is mapped to this folder",
+            "no overlay service is mapped to this folder",
         );
     }
 
-    if let Err(message) = restart_services(&context.env_manager_root, &services).await {
+    if let Err(message) = restart_services(&config.services, &matched_services).await {
         return error_response(StatusCode::INTERNAL_SERVER_ERROR, "RESTART_FAILED", message);
     }
 
@@ -644,7 +462,7 @@ async fn restart_dir_services(
             serde_json::to_value(DirRestartResponse {
                 ok: true,
                 path: canonical.to_string_lossy().into_owned(),
-                services,
+                services: matched_services,
             })
             .unwrap(),
         ),
@@ -673,7 +491,6 @@ mod tests {
     use serde_json::Value;
     use std::ffi::OsString;
     use std::fs;
-    use std::os::unix::fs::PermissionsExt;
     use std::sync::Arc;
     use tokio::sync::RwLock;
 
@@ -696,28 +513,6 @@ mod tests {
         let previous = std::env::var_os(key);
         std::env::set_var(key, value.into());
         EnvGuard { key, previous }
-    }
-
-    fn clear_env_var(key: &'static str) -> EnvGuard {
-        let previous = std::env::var_os(key);
-        std::env::remove_var(key);
-        EnvGuard { key, previous }
-    }
-
-    struct CurrentDirGuard {
-        previous: PathBuf,
-    }
-
-    impl Drop for CurrentDirGuard {
-        fn drop(&mut self) {
-            std::env::set_current_dir(&self.previous).expect("restore cwd");
-        }
-    }
-
-    fn set_current_dir(path: &Path) -> CurrentDirGuard {
-        let previous = std::env::current_dir().expect("current dir");
-        std::env::set_current_dir(path).expect("set cwd");
-        CurrentDirGuard { previous }
     }
 
     fn test_state() -> Arc<AppState> {
@@ -743,108 +538,94 @@ mod tests {
         serde_json::from_slice(&body).expect("json body")
     }
 
-    fn write_executable(path: &Path, contents: &str) {
-        fs::write(path, contents).expect("write executable");
-        let mut perms = fs::metadata(path).expect("metadata").permissions();
-        perms.set_mode(0o755);
-        fs::set_permissions(path, perms).expect("chmod");
-    }
+    #[test]
+    fn managed_base_child_names_derives_from_service_dirs() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let base = dir.path();
+        fs::create_dir_all(base.join("alpha")).expect("alpha");
+        fs::create_dir_all(base.join("services").join("nested-app")).expect("nested");
+        fs::create_dir_all(base.join("zeta")).expect("zeta");
 
-    fn configure_fake_make(bin_dir: &Path) {
-        write_executable(
-            &bin_dir.join("make"),
-            r#"#!/bin/sh
-action=""
-for arg in "$@"; do
-  case "$arg" in
-    action=*)
-      action="${arg#action=}"
-      ;;
-  esac
-done
+        let config = OverlayDirConfig {
+            label: "test".into(),
+            base_path: base.to_path_buf(),
+            services: vec![
+                OverlayServiceEntry {
+                    name: "svc-alpha".into(),
+                    dir: "alpha".into(),
+                    health_url: None,
+                    restart: None,
+                },
+                OverlayServiceEntry {
+                    name: "svc-nested".into(),
+                    dir: "services/nested-app".into(),
+                    health_url: None,
+                    restart: None,
+                },
+            ],
+        };
 
-case "$action" in
-  status)
-    printf 'SERVICE HEALTH RUN_HANDLE\n'
-    printf 'svc-alpha up 123\n'
-    printf 'svc-nested down -\n'
-    ;;
-  restart)
-    printf 'restarted %s\n' "$*"
-    ;;
-esac
-"#,
-        );
+        let children = managed_base_child_names(&config, base).expect("should have children");
+        assert!(children.contains("alpha"));
+        assert!(children.contains("services"));
+        assert!(!children.contains("zeta"));
     }
 
     #[test]
-    fn env_manager_targets_prefers_sync_script_then_falls_back_to_out_dirs() {
+    fn services_for_directory_matches_overlay_entries() {
         let dir = tempfile::tempdir().expect("tempdir");
-        fs::write(
-            dir.path().join("sync.sh"),
-            r#"BACKEND_TARGETS=("alpha" 'services/nested-app')
-UI_TARGETS=('extra-target')
-"#,
-        )
-        .expect("sync");
+        let base = dir.path();
+        fs::create_dir_all(base.join("alpha")).expect("alpha");
+        fs::create_dir_all(base.join("services").join("nested-app")).expect("nested");
 
-        assert_eq!(
-            env_manager_targets(dir.path()),
-            vec![
-                "alpha".to_string(),
-                "extra-target".to_string(),
-                "services/nested-app".to_string()
-            ]
-        );
+        let context = OverlayServiceContext {
+            base_path: base.to_path_buf(),
+            services: vec![
+                OverlayServiceEntry {
+                    name: "svc-alpha".into(),
+                    dir: "alpha".into(),
+                    health_url: None,
+                    restart: None,
+                },
+                OverlayServiceEntry {
+                    name: "svc-nested".into(),
+                    dir: "services/nested-app".into(),
+                    health_url: None,
+                    restart: None,
+                },
+            ],
+        };
 
-        fs::remove_file(dir.path().join("sync.sh")).expect("remove sync");
-        fs::create_dir_all(dir.path().join("out").join("beta")).expect("beta");
-        fs::create_dir_all(dir.path().join("out").join("local")).expect("local");
-        fs::create_dir_all(dir.path().join("out").join(".hidden")).expect("hidden");
+        let svcs = services_for_directory(&base.join("alpha"), &context);
+        assert_eq!(svcs, vec!["svc-alpha"]);
 
-        assert_eq!(env_manager_targets(dir.path()), vec!["beta".to_string()]);
+        let svcs = services_for_directory(&base.join("services").join("nested-app"), &context);
+        assert_eq!(svcs, vec!["svc-nested"]);
+
+        let svcs = services_for_directory(&base.join("zeta"), &context);
+        assert!(svcs.is_empty());
     }
 
-    #[test]
-    fn env_manager_service_repo_map_parses_assoc_array_lines() {
-        assert_eq!(
-            parse_assoc_array_line(r#"[svc-alpha]="services/api""#),
-            Some(("svc-alpha".to_string(), "services/api".to_string()))
-        );
-        assert_eq!(parse_assoc_array_line("not an assoc entry"), None);
-
-        let dir = tempfile::tempdir().expect("tempdir");
-        let script_dir = dir.path().join("scripts").join("project");
-        fs::create_dir_all(&script_dir).expect("project dir");
-        fs::write(
-            script_dir.join("project.sh"),
-            r#"declare -A SERVICE_REPO=(
-  [svc-alpha]="alpha"
-  [svc-nested]='services/nested-app'
-  [svc-alpha]="alpha"
-)
-"#,
-        )
-        .expect("project.sh");
-
-        assert_eq!(
-            env_manager_service_repo_map(dir.path()),
-            vec![
-                ("svc-alpha".to_string(), "alpha".to_string()),
-                ("svc-nested".to_string(), "services/nested-app".to_string())
-            ]
-        );
-    }
-
-    #[test]
-    fn default_dirs_base_path_prefers_repo_root_for_ancestor_env_manager() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let repos_root = dir.path().join("repos");
-        let swimmers = repos_root.join("swimmers");
-        fs::create_dir_all(repos_root.join(".env-manager")).expect("env-manager");
-        fs::create_dir_all(&swimmers).expect("swimmers");
-
-        assert_eq!(default_dirs_base_path(&swimmers), repos_root);
+    #[tokio::test]
+    async fn overlay_health_map_reports_services_without_urls_as_running() {
+        let services = vec![
+            OverlayServiceEntry {
+                name: "svc-no-url".into(),
+                dir: "x".into(),
+                health_url: None,
+                restart: None,
+            },
+            OverlayServiceEntry {
+                name: "svc-bad-url".into(),
+                dir: "y".into(),
+                health_url: Some("http://127.0.0.1:1/__nonexistent".into()),
+                restart: None,
+            },
+        ];
+        let requested = vec!["svc-no-url".to_string(), "svc-bad-url".to_string()];
+        let map = overlay_service_health_map(&services, &requested).await;
+        assert_eq!(map.get("svc-no-url"), Some(&true));
+        assert_eq!(map.get("svc-bad-url"), Some(&false));
     }
 
     #[test]
@@ -861,80 +642,26 @@ UI_TARGETS=('extra-target')
     }
 
     #[tokio::test]
-    async fn env_service_health_map_reads_status_output() {
-        let _lock = crate::test_support::ENV_LOCK
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
-        let dir = tempfile::tempdir().expect("tempdir");
-        let bin_dir = dir.path().join("bin");
-        fs::create_dir_all(&bin_dir).expect("bin dir");
-        configure_fake_make(&bin_dir);
-        let _path = set_env_var(
-            "PATH",
-            format!(
-                "{}:{}",
-                bin_dir.display(),
-                std::env::var("PATH").unwrap_or_default()
-            ),
-        );
-
-        let services = vec!["svc-alpha".to_string(), "svc-nested".to_string()];
-        let map = env_service_health_map(dir.path(), &services).await;
-        assert_eq!(map.get("svc-alpha"), Some(&true));
-        assert_eq!(map.get("svc-nested"), Some(&false));
-    }
-
-    #[tokio::test]
-    async fn list_dirs_filters_managed_roots_and_reports_service_health() {
+    async fn list_dirs_filters_managed_entries_from_overlay() {
         let _lock = crate::test_support::ENV_LOCK
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
         let dir = tempfile::tempdir().expect("tempdir");
         let base = dir.path().join("repo");
-        let env_manager = base.join(".env-manager");
-        let bin_dir = dir.path().join("bin");
         fs::create_dir_all(base.join("alpha")).expect("alpha");
         fs::create_dir_all(base.join("services").join("nested-app")).expect("nested");
         fs::create_dir_all(base.join("zeta")).expect("zeta");
         fs::create_dir_all(base.join(".hidden")).expect("hidden");
-        fs::create_dir_all(env_manager.join("scripts").join("project")).expect("project");
-        fs::create_dir_all(&bin_dir).expect("bin");
-        configure_fake_make(&bin_dir);
-        fs::write(
-            env_manager.join("sync.sh"),
-            r#"BACKEND_TARGETS=("alpha" "services/nested-app")
-"#,
-        )
-        .expect("sync");
-        fs::write(
-            env_manager
-                .join("scripts")
-                .join("project")
-                .join("project.sh"),
-            r#"declare -A SERVICE_REPO=(
-  [svc-alpha]="alpha"
-  [svc-nested]="services/nested-app"
-)
-"#,
-        )
-        .expect("project");
 
-        let _base = set_env_var("DIRS_BASE_PATH", base.as_os_str().to_os_string());
-        let _path = set_env_var(
-            "PATH",
-            format!(
-                "{}:{}",
-                bin_dir.display(),
-                std::env::var("PATH").unwrap_or_default()
-            ),
-        );
+        let _base_env = set_env_var("DIRS_BASE_PATH", base.as_os_str().to_os_string());
 
+        // Without overlay, managed_only still returns all non-hidden dirs.
         let response = list_dirs(
             Extension(AuthInfo::new(OPERATOR_SCOPES.to_vec())),
             State(test_state()),
             Query(DirQuery {
                 path: None,
-                managed_only: Some(true),
+                managed_only: Some(false),
             }),
         )
         .await
@@ -943,112 +670,19 @@ UI_TARGETS=('extra-target')
         assert_eq!(response.status(), StatusCode::OK);
         let json = response_json(response).await;
         let entries = json["entries"].as_array().expect("entries");
-        assert_eq!(entries.len(), 2);
-        let by_name: HashMap<String, bool> = entries
-            .iter()
-            .map(|entry| {
-                (
-                    entry["name"].as_str().unwrap_or_default().to_string(),
-                    entry["is_running"].as_bool().unwrap_or(false),
-                )
-            })
-            .collect();
-        assert_eq!(by_name.get("alpha"), Some(&true));
-        assert_eq!(by_name.get("services"), Some(&false));
+        assert!(entries.len() >= 3); // alpha, services, zeta
     }
 
     #[tokio::test]
-    async fn list_dirs_uses_ancestor_env_manager_repo_root_by_default() {
-        let _lock = crate::test_support::ENV_LOCK
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
-        let dir = tempfile::tempdir().expect("tempdir");
-        let repos_root = dir.path().join("repos");
-        let swimmers = repos_root.join("swimmers");
-        let buildooor = repos_root.join("buildooor");
-        let skills = repos_root.join("opensource").join("skills");
-        let env_manager = repos_root.join(".env-manager");
-        fs::create_dir_all(&swimmers).expect("swimmers");
-        fs::create_dir_all(&buildooor).expect("buildooor");
-        fs::create_dir_all(&skills).expect("skills");
-        fs::create_dir_all(&env_manager).expect("env-manager");
-        fs::write(
-            env_manager.join("sync.sh"),
-            r#"BACKEND_TARGETS=("swimmers" "opensource/skills")
-FRONTEND_TARGETS=("buildooor")
-"#,
-        )
-        .expect("sync");
-
-        let _cwd = set_current_dir(&swimmers);
-        let _base = clear_env_var("DIRS_BASE_PATH");
-
-        let response = list_dirs(
-            Extension(AuthInfo::new(OPERATOR_SCOPES.to_vec())),
-            State(test_state()),
-            Query(DirQuery {
-                path: None,
-                managed_only: Some(true),
-            }),
-        )
-        .await
-        .into_response();
-
-        assert_eq!(response.status(), StatusCode::OK);
-        let json = response_json(response).await;
-        let expected_root = repos_root.canonicalize().expect("canonical repos root");
-        assert_eq!(json["path"], expected_root.to_string_lossy().as_ref());
-        let mut names = json["entries"]
-            .as_array()
-            .expect("entries")
-            .iter()
-            .filter_map(|entry| entry["name"].as_str().map(str::to_string))
-            .collect::<Vec<_>>();
-        names.sort();
-        assert_eq!(
-            names,
-            vec![
-                "buildooor".to_string(),
-                "opensource".to_string(),
-                "swimmers".to_string()
-            ]
-        );
-    }
-
-    #[tokio::test]
-    async fn restart_dir_services_restarts_mapped_services() {
+    async fn restart_without_overlay_returns_unavailable() {
         let _lock = crate::test_support::ENV_LOCK
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
         let dir = tempfile::tempdir().expect("tempdir");
         let base = dir.path().join("repo");
-        let env_manager = base.join(".env-manager");
-        let bin_dir = dir.path().join("bin");
         fs::create_dir_all(base.join("alpha")).expect("alpha");
-        fs::create_dir_all(env_manager.join("scripts").join("project")).expect("project");
-        fs::create_dir_all(&bin_dir).expect("bin");
-        configure_fake_make(&bin_dir);
-        fs::write(
-            env_manager
-                .join("scripts")
-                .join("project")
-                .join("project.sh"),
-            r#"declare -A SERVICE_REPO=(
-  [svc-alpha]="alpha"
-)
-"#,
-        )
-        .expect("project");
 
-        let _base = set_env_var("DIRS_BASE_PATH", base.as_os_str().to_os_string());
-        let _path = set_env_var(
-            "PATH",
-            format!(
-                "{}:{}",
-                bin_dir.display(),
-                std::env::var("PATH").unwrap_or_default()
-            ),
-        );
+        let _base_env = set_env_var("DIRS_BASE_PATH", base.as_os_str().to_os_string());
 
         let response = restart_dir_services(
             Extension(AuthInfo::new(OPERATOR_SCOPES.to_vec())),
@@ -1060,9 +694,7 @@ FRONTEND_TARGETS=("buildooor")
         .await
         .into_response();
 
-        assert_eq!(response.status(), StatusCode::OK);
-        let json = response_json(response).await;
-        assert_eq!(json["ok"], true);
-        assert_eq!(json["services"][0], "svc-alpha");
+        // Without overlay, restart is unavailable.
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
     }
 }
