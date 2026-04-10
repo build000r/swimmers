@@ -627,12 +627,15 @@ fn test_api_client(base_url: String, auth_token: Option<&str>) -> ApiClient {
 }
 
 #[test]
-fn local_targets_use_background_startup_refresh() {
+fn api_client_targets_local_backend_for_loopback_hosts() {
     let client = test_api_client("http://127.0.0.1:3210".to_string(), None);
-    assert!(should_background_startup_refresh(&client));
+    assert!(client.targets_local_backend());
+
+    let localhost = test_api_client("http://localhost:3210".to_string(), None);
+    assert!(localhost.targets_local_backend());
 
     let remote = test_api_client("http://100.101.123.63:3210".to_string(), None);
-    assert!(!should_background_startup_refresh(&remote));
+    assert!(!remote.targets_local_backend());
 }
 
 fn restore_env_var(key: &str, value: Option<String>) {
@@ -1136,18 +1139,44 @@ async fn api_client_set_native_mode_reports_restart_hint_on_404() {
 }
 
 #[tokio::test]
-async fn api_client_fetch_sessions_keeps_short_timeout_for_refresh() {
+async fn api_client_list_dirs_reports_feature_hint_on_404() {
+    use axum::Router;
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind test server");
+    let addr = listener.local_addr().expect("server addr");
+    let handle = tokio::spawn(async move {
+        axum::serve(listener, Router::new())
+            .await
+            .expect("serve test api");
+    });
+    let client = test_api_client(format!("http://{addr}"), None);
+
+    let error = client
+        .list_dirs(None, true)
+        .await
+        .expect_err("missing route should explain the required feature");
+
+    handle.abort();
+    assert!(error.contains("does not expose /v1/dirs"));
+    assert!(error.contains("personal-workflows"));
+    assert!(error.contains("make tui"));
+}
+
+#[tokio::test]
+async fn api_client_fetch_sessions_overrides_default_client_timeout() {
     let (base_url, handle) = spawn_delayed_api_server(Some(Duration::from_millis(150)), None).await;
     let client = test_api_client(base_url.clone(), None);
 
-    let error = client
+    let sessions = client
         .fetch_sessions()
         .await
-        .expect_err("refresh should keep the short polling timeout");
+        .expect("session refresh should allow slow-but-healthy local responses");
 
     handle.abort();
-    assert!(error.contains(&base_url));
-    assert!(error.contains("timed out while trying to refresh sessions"));
+    assert_eq!(sessions.len(), 1);
+    assert_eq!(sessions[0].session_id, "sess-1");
 }
 
 #[tokio::test]
@@ -2195,7 +2224,14 @@ fn repo_theme(body: &str) -> RepoTheme {
         outline: "#222222".to_string(),
         accent: "#111111".to_string(),
         shirt: "#333333".to_string(),
+        sprite: None,
     }
+}
+
+fn repo_theme_with_sprite(body: &str, sprite: Option<&str>) -> RepoTheme {
+    let mut theme = repo_theme(body);
+    theme.sprite = sprite.map(str::to_string);
+    theme
 }
 
 fn session_summary_with_theme_id(
@@ -2210,9 +2246,13 @@ fn session_summary_with_theme_id(
 }
 
 fn write_repo_theme_colors(root: &Path, body: &str) {
+    write_repo_theme_colors_with_sprite(root, body, None);
+}
+
+fn write_repo_theme_colors_with_sprite(root: &Path, body: &str, sprite: Option<&str>) {
     let theme_dir = root.join(".swimmers");
     fs::create_dir_all(&theme_dir).expect("create theme dir");
-    let content = serde_json::json!({
+    let mut content = serde_json::json!({
         "palette": {
             "body": body,
             "outline": "#222222",
@@ -2220,6 +2260,9 @@ fn write_repo_theme_colors(root: &Path, body: &str) {
             "shirt": "#333333",
         }
     });
+    if let Some(sprite) = sprite {
+        content["sprite"] = serde_json::Value::String(sprite.to_string());
+    }
     fs::write(
         theme_dir.join("colors.json"),
         serde_json::to_string(&content).expect("serialize theme"),
@@ -3397,6 +3440,7 @@ fn repo_theme_colors_override_state_colors_in_thought_history() {
             outline: "#3D2F24".to_string(),
             accent: "#1D1914".to_string(),
             shirt: "#AA9370".to_string(),
+            sprite: None,
         },
     );
 
@@ -3573,6 +3617,7 @@ fn render_entity_uses_repo_theme_body_color() {
             outline: "#3D2F24".to_string(),
             accent: "#1D1914".to_string(),
             shirt: "#AA9370".to_string(),
+            sprite: None,
         },
     );
     let rect = entity.screen_rect(field);
@@ -4123,6 +4168,176 @@ fn sleeping_entities_stay_fixed_after_tick() {
 fn drowsy_sprite_uses_fish_motion_profile() {
     assert_eq!(SpriteKind::Drowsy.speed_scale(), 0.5);
     assert!(drowsy_frame(0)[1].contains("><-"));
+}
+
+#[test]
+fn jelly_sprites_match_entity_width_for_all_states() {
+    let kinds = [
+        SpriteKind::Active,
+        SpriteKind::Busy,
+        SpriteKind::Drowsy,
+        SpriteKind::Sleeping,
+        SpriteKind::DeepSleep,
+        SpriteKind::Attention,
+        SpriteKind::Error,
+        SpriteKind::Exited,
+    ];
+    for kind in kinds {
+        for tick in [0u64, 4u64] {
+            let frame = kind.frame_with_theme(tick, SpriteTheme::Jelly);
+            for (row, line) in frame.iter().enumerate() {
+                let count = line.chars().count();
+                assert_eq!(
+                    count, ENTITY_WIDTH as usize,
+                    "jelly sprite row {row} for {kind:?} tick {tick} must be exactly {} chars, got {count}: {line:?}",
+                    ENTITY_WIDTH
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn deep_sleep_jelly_sprite_is_saggier_than_active() {
+    let active_bottom = ball_active_frame(0)[3]
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .count();
+    let deep_sleep_bottom = ball_deep_sleep_frame(0)[3]
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .count();
+    assert!(
+        deep_sleep_bottom > active_bottom,
+        "deep sleep bottom row should be saggier (more glyphs) than active; deep_sleep={deep_sleep_bottom}, active={active_bottom}",
+    );
+}
+
+#[test]
+fn balls_theme_sags_sleepier_sessions_and_clamps_to_floor() {
+    let api = MockApi::new();
+    let layout = test_layout(120, 40);
+    let mut app = make_app(api);
+    app.merge_sessions(
+        vec![
+            attention_session(
+                "sess-attn",
+                "1",
+                TEST_REPO_SWIMMERS,
+                RestState::Active,
+                "2026-03-08T12:30:00Z",
+            ),
+            sleeping_session(
+                "sess-sleep",
+                "2",
+                TEST_REPO_SWIMMERS,
+                "2026-03-08T12:10:00Z",
+            ),
+            deep_sleep_session("sess-deep", "3", TEST_REPO_SWIMMERS, "2026-03-08T12:00:00Z"),
+        ],
+        layout.overview_field,
+    );
+    let visible = app.visible_entities();
+    let slots = balls_theme_slots(&visible, layout.overview_field);
+    let attention = slots
+        .iter()
+        .find(|slot| slot.entity.session.session_id == "sess-attn")
+        .expect("attention slot");
+    let deep_sleep = slots
+        .iter()
+        .find(|slot| slot.entity.session.session_id == "sess-deep")
+        .expect("deep sleep slot");
+
+    assert!(
+        deep_sleep.ball_y > attention.ball_y,
+        "older sleepier sessions should sag lower than attention seekers"
+    );
+    assert!(deep_sleep.on_floor, "deep sleep should clamp to the floor");
+}
+
+#[test]
+fn balls_theme_renders_floor_and_attention_marker() {
+    let api = MockApi::new();
+    let layout = test_layout(120, 40);
+    let mut app = make_app(api);
+    let theme_id = "/tmp/swimmers".to_string();
+    app.repo_themes.insert(
+        theme_id.clone(),
+        repo_theme_with_sprite("#B89875", Some("balls")),
+    );
+    let mut attention = attention_session(
+        "sess-attn",
+        "7",
+        TEST_REPO_SWIMMERS,
+        RestState::Active,
+        "2026-03-08T12:30:00Z",
+    );
+    attention.repo_theme_id = Some(theme_id.clone());
+    let mut deep_sleep =
+        deep_sleep_session("sess-deep", "8", TEST_REPO_SWIMMERS, "2026-03-08T12:00:00Z");
+    deep_sleep.repo_theme_id = Some(theme_id);
+    app.merge_sessions(vec![attention, deep_sleep], layout.overview_field);
+    let mut renderer = test_renderer(120, 40);
+
+    app.render(&mut renderer, layout);
+
+    assert!(
+        find_text_position(&renderer, "!").is_some(),
+        "attention swimmers should render as tight attention-seeking balls"
+    );
+    assert_eq!(
+        cell_at(
+            &renderer,
+            layout.overview_field.x,
+            layout.overview_field.bottom().saturating_sub(1)
+        )
+        .ch,
+        '_'
+    );
+}
+
+#[test]
+fn toggle_sprite_theme_cycles_between_auto_and_overrides() {
+    let api = MockApi::new();
+    let mut app = make_app(api);
+    assert_eq!(app.sprite_theme_override, None);
+    app.toggle_sprite_theme();
+    assert_eq!(app.sprite_theme_override, Some(SpriteTheme::Fish));
+    app.toggle_sprite_theme();
+    assert_eq!(app.sprite_theme_override, Some(SpriteTheme::Balls));
+    app.toggle_sprite_theme();
+    assert_eq!(app.sprite_theme_override, Some(SpriteTheme::Jelly));
+    app.toggle_sprite_theme();
+    assert_eq!(app.sprite_theme_override, None);
+}
+
+#[test]
+fn effective_sprite_theme_prefers_override_then_repo_then_default() {
+    let api = MockApi::new();
+    let mut app = make_app(api);
+    let theme_id = "/tmp/swimmers".to_string();
+    let mut session = session_summary("sess-1", "7", TEST_REPO_SWIMMERS);
+    session.repo_theme_id = Some(theme_id.clone());
+    app.repo_themes
+        .insert(theme_id, repo_theme_with_sprite("#B89875", Some("jelly")));
+
+    assert_eq!(
+        app.effective_sprite_theme_for_session(&session),
+        SpriteTheme::Jelly
+    );
+
+    app.sprite_theme_override = Some(SpriteTheme::Fish);
+    assert_eq!(
+        app.effective_sprite_theme_for_session(&session),
+        SpriteTheme::Fish
+    );
+
+    app.sprite_theme_override = None;
+    session.repo_theme_id = None;
+    assert_eq!(
+        app.effective_sprite_theme_for_session(&session),
+        SpriteTheme::Balls
+    );
 }
 
 #[test]
@@ -4679,6 +4894,7 @@ fn clicking_existing_swimmer_still_opens_it_directly() {
     }));
     let field = test_field();
     let mut app = make_app(api.clone());
+    app.sprite_theme_override = Some(SpriteTheme::Jelly);
     app.entities
         .push(entity_at(field, "sess-7", "dev", TEST_REPO_DEV, 30, 8));
     app.selected_id = Some("sess-7".to_string());
@@ -5623,6 +5839,7 @@ fn handle_workspace_click_routes_thought_and_overview_interactions() {
         .thought_content
         .expect("wide layout enables thought rail");
     let mut app = make_app(api.clone());
+    app.sprite_theme_override = Some(SpriteTheme::Jelly);
     app.merge_sessions(
         vec![session_summary("sess-1", "7", TEST_REPO_SWIMMERS)],
         layout.overview_field,
@@ -8954,7 +9171,7 @@ fn background_refresh_reuses_cached_assets_for_unchanged_sessions() {
     let theme_id = repo.path().to_string_lossy().into_owned();
     let cwd = repo_src.to_string_lossy().into_owned();
 
-    write_repo_theme_colors(repo.path(), "#B89875");
+    write_repo_theme_colors_with_sprite(repo.path(), "#B89875", Some("jelly"));
     api.push_fetch_sessions(Ok(vec![session_summary_with_theme_id(
         "s1", "1", &cwd, &theme_id,
     )]));
@@ -8977,8 +9194,14 @@ fn background_refresh_reuses_cached_assets_for_unchanged_sessions() {
         app.repo_themes.get(&theme_id).expect("cached theme").body,
         "#B89875"
     );
+    assert_eq!(
+        app.repo_themes
+            .get(&theme_id)
+            .and_then(|theme| theme.sprite.as_deref()),
+        Some("jelly")
+    );
 
-    write_repo_theme_colors(repo.path(), "#44AA88");
+    write_repo_theme_colors_with_sprite(repo.path(), "#44AA88", Some("fish"));
     api.push_fetch_sessions(Ok(vec![session_summary_with_theme_id(
         "s1", "1", &cwd, &theme_id,
     )]));
@@ -9002,6 +9225,12 @@ fn background_refresh_reuses_cached_assets_for_unchanged_sessions() {
         app.repo_themes.get(&theme_id).expect("cached theme").body,
         "#B89875"
     );
+    assert_eq!(
+        app.repo_themes
+            .get(&theme_id)
+            .and_then(|theme| theme.sprite.as_deref()),
+        Some("jelly")
+    );
     assert_eq!(api.mermaid_artifact_calls(), vec!["s1".to_string()]);
 }
 
@@ -9015,7 +9244,7 @@ fn manual_refresh_revalidates_cached_assets() {
     let theme_id = repo.path().to_string_lossy().into_owned();
     let cwd = repo_src.to_string_lossy().into_owned();
 
-    write_repo_theme_colors(repo.path(), "#B89875");
+    write_repo_theme_colors_with_sprite(repo.path(), "#B89875", Some("jelly"));
     api.push_fetch_sessions(Ok(vec![session_summary_with_theme_id(
         "s1", "1", &cwd, &theme_id,
     )]));
@@ -9028,7 +9257,7 @@ fn manual_refresh_revalidates_cached_assets() {
     let mut app = make_app(api.clone());
     app.refresh(layout);
 
-    write_repo_theme_colors(repo.path(), "#44AA88");
+    write_repo_theme_colors_with_sprite(repo.path(), "#44AA88", Some("fish"));
     api.push_fetch_sessions(Ok(vec![session_summary_with_theme_id(
         "s1", "1", &cwd, &theme_id,
     )]));
@@ -9054,6 +9283,12 @@ fn manual_refresh_revalidates_cached_assets() {
             .expect("refreshed theme")
             .body,
         "#44AA88"
+    );
+    assert_eq!(
+        app.repo_themes
+            .get(&theme_id)
+            .and_then(|theme| theme.sprite.as_deref()),
+        Some("fish")
     );
     assert_eq!(
         api.mermaid_artifact_calls(),
@@ -9185,11 +9420,64 @@ fn background_refresh_error_retains_previous_entities() {
     assert_eq!(app.entities.len(), 1, "entities retained after error");
     assert_eq!(
         app.message.as_ref().map(|(m, _)| m.as_str()),
-        Some("connection refused")
+        Some("backend offline"),
+        "recent success should produce short message, not full diagnostic"
     );
     assert!(
         app.native_status.is_some(),
         "native_status not overwritten on error"
+    );
+}
+
+#[test]
+fn refresh_error_escalates_after_prolonged_outage() {
+    let api = MockApi::new();
+    let layout = test_layout(120, 32);
+
+    // Successful initial refresh sets last_successful_refresh.
+    api.push_fetch_sessions(Ok(vec![session_summary("s1", "1", TEST_REPO_ALPHA)]));
+    let mut app = make_app(api.clone());
+    app.refresh(layout);
+    assert_eq!(
+        app.message.as_ref().map(|(m, _)| m.as_str()),
+        None,
+        "no message after successful refresh"
+    );
+
+    // Immediate failure → short message.
+    api.push_fetch_sessions(Err("connection refused".to_string()));
+    app.refresh(layout);
+    assert_eq!(
+        app.message.as_ref().map(|(m, _)| m.as_str()),
+        Some("backend offline"),
+    );
+
+    // Simulate stale last_successful_refresh beyond BACKEND_OFFLINE_ESCALATION.
+    app.last_successful_refresh =
+        Some(Instant::now() - BACKEND_OFFLINE_ESCALATION - Duration::from_secs(1));
+    api.push_fetch_sessions(Err("connection refused".to_string()));
+    app.message = None; // clear so set_message dedup doesn't suppress
+    app.refresh(layout);
+    assert_eq!(
+        app.message.as_ref().map(|(m, _)| m.as_str()),
+        Some("connection refused"),
+        "should escalate to full diagnostic after prolonged outage"
+    );
+}
+
+#[test]
+fn refresh_error_shows_full_message_without_prior_success() {
+    let api = MockApi::new();
+    let layout = test_layout(120, 32);
+
+    // No prior successful refresh → full diagnostic immediately.
+    api.push_fetch_sessions(Err("connection refused".to_string()));
+    let mut app = make_app(api.clone());
+    app.refresh(layout);
+    assert_eq!(
+        app.message.as_ref().map(|(m, _)| m.as_str()),
+        Some("connection refused"),
+        "first failure without any prior success should show full message"
     );
 }
 

@@ -1,6 +1,50 @@
 use super::*;
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SpriteTheme {
+    Fish,
+    Balls,
+    Jelly,
+}
+
+impl Default for SpriteTheme {
+    fn default() -> Self {
+        Self::Balls
+    }
+}
+
+impl SpriteTheme {
+    pub(crate) const fn override_options() -> [Option<Self>; 4] {
+        [None, Some(Self::Fish), Some(Self::Balls), Some(Self::Jelly)]
+    }
+
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Fish => "fish",
+            Self::Balls => "balls",
+            Self::Jelly => "jelly",
+        }
+    }
+
+    pub(crate) fn override_label(theme: Option<Self>) -> &'static str {
+        theme.map(Self::label).unwrap_or("auto")
+    }
+
+    pub(crate) fn from_name(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "fish" => Some(Self::Fish),
+            "balls" => Some(Self::Balls),
+            "jelly" => Some(Self::Jelly),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn from_repo_theme(theme: &RepoTheme) -> Option<Self> {
+        theme.sprite.as_deref().and_then(Self::from_name)
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
 pub(crate) enum SpriteKind {
     Active,
     Busy,
@@ -57,16 +101,28 @@ impl SpriteKind {
         }
     }
 
-    pub(crate) fn frame(self, tick: u64) -> [&'static str; 4] {
-        match self {
-            Self::Active => active_frame(tick),
-            Self::Busy => busy_frame(tick),
-            Self::Drowsy => drowsy_frame(tick),
-            Self::Sleeping => sleeping_frame(tick),
-            Self::DeepSleep => deep_sleep_frame(tick),
-            Self::Attention => attention_frame(tick),
-            Self::Error => error_frame(tick),
-            Self::Exited => exited_frame(tick),
+    pub(crate) fn frame_with_theme(self, tick: u64, theme: SpriteTheme) -> [&'static str; 4] {
+        match theme {
+            SpriteTheme::Fish => match self {
+                Self::Active => active_frame(tick),
+                Self::Busy => busy_frame(tick),
+                Self::Drowsy => drowsy_frame(tick),
+                Self::Sleeping => sleeping_frame(tick),
+                Self::DeepSleep => deep_sleep_frame(tick),
+                Self::Attention => attention_frame(tick),
+                Self::Error => error_frame(tick),
+                Self::Exited => exited_frame(tick),
+            },
+            SpriteTheme::Balls | SpriteTheme::Jelly => match self {
+                Self::Active => ball_active_frame(tick),
+                Self::Busy => ball_busy_frame(tick),
+                Self::Drowsy => ball_drowsy_frame(tick),
+                Self::Sleeping => ball_sleeping_frame(tick),
+                Self::DeepSleep => ball_deep_sleep_frame(tick),
+                Self::Attention => ball_attention_frame(tick),
+                Self::Error => ball_error_frame(tick),
+                Self::Exited => ball_exited_frame(tick),
+            },
         }
     }
 }
@@ -213,6 +269,149 @@ pub(crate) fn exited_frame(tick: u64) -> [&'static str; 4] {
             "            ",
         ]
     }
+}
+
+// Ball/sack sprites.  All frames are exactly 12 columns wide and 4 rows tall
+// so they occupy the same entity slot as the fish.  The shape progresses from
+// perky and round in `active` to dramatically saggy in `deep_sleep`: the top
+// pinches in while the bottom bulges out, as if the sack is drooping under
+// its own weight.
+
+pub(crate) fn ball_active_frame(tick: u64) -> [&'static str; 4] {
+    if tick % 8 < 4 {
+        [
+            "  .-~~~-.   ",
+            " ( o   o )  ",
+            "  '.___.'   ",
+            "            ",
+        ]
+    } else {
+        [
+            "  .-~~~-.   ",
+            " ( O   O )  ",
+            "  '.___.'   ",
+            "    ' '     ",
+        ]
+    }
+}
+
+pub(crate) fn ball_busy_frame(tick: u64) -> [&'static str; 4] {
+    if tick % 8 < 4 {
+        [
+            "  .~*~*~.   ",
+            " ( O * O )  ",
+            "  \\_____/   ",
+            "   v   v    ",
+        ]
+    } else {
+        [
+            "  .~*~*~.   ",
+            " ( * O * )  ",
+            "  \\_____/   ",
+            "    v v     ",
+        ]
+    }
+}
+
+pub(crate) fn ball_drowsy_frame(tick: u64) -> [&'static str; 4] {
+    if tick % 8 < 4 {
+        [
+            "  .-----.   ",
+            " ( -   - )  ",
+            " (  ___  )  ",
+            "  '-----'   ",
+        ]
+    } else {
+        [
+            "  .-----.   ",
+            " ( _   _ )  ",
+            " (  ___  )  ",
+            "  '-----'   ",
+        ]
+    }
+}
+
+pub(crate) fn ball_sleeping_frame(tick: u64) -> [&'static str; 4] {
+    if tick % 8 < 4 {
+        [
+            "   .---.    ",
+            "  ( z z )   ",
+            " ( _____ )  ",
+            "  '-----'   ",
+        ]
+    } else {
+        [
+            "   .---.    ",
+            "  ( z Z )   ",
+            " ( _____ )  ",
+            "  '-----'   ",
+        ]
+    }
+}
+
+pub(crate) fn ball_deep_sleep_frame(tick: u64) -> [&'static str; 4] {
+    // Reeeeally saggy: pinched top, dramatically bulging bottom, drooping low.
+    if tick % 8 < 4 {
+        [
+            "    ,-,     ",
+            "   ( - )    ",
+            "  ( ___ )   ",
+            " (_______)  ",
+        ]
+    } else {
+        [
+            "    ,-,     ",
+            "   ( _ )    ",
+            "  ( ___ )   ",
+            " (_______)  ",
+        ]
+    }
+}
+
+pub(crate) fn ball_attention_frame(tick: u64) -> [&'static str; 4] {
+    if tick % 8 < 4 {
+        [
+            "  .-!!!-.   ",
+            " ( O ! O )  ",
+            "  '.___.'   ",
+            "     !      ",
+        ]
+    } else {
+        [
+            "  .-!!!-.   ",
+            " ( ! O ! )  ",
+            "  '.___.'   ",
+            "    ! !     ",
+        ]
+    }
+}
+
+pub(crate) fn ball_error_frame(tick: u64) -> [&'static str; 4] {
+    if tick % 8 < 4 {
+        [
+            "  .xx-xx.   ",
+            " ( X _ X )  ",
+            "  '._X_.'   ",
+            "    \\ /     ",
+        ]
+    } else {
+        [
+            "  .xx-xx.   ",
+            " ( x _ x )  ",
+            "  '._x_.'   ",
+            "    / \\     ",
+        ]
+    }
+}
+
+pub(crate) fn ball_exited_frame(tick: u64) -> [&'static str; 4] {
+    let _ = tick;
+    [
+        "            ",
+        "    _____   ",
+        "   (_____)  ",
+        "    '---'   ",
+    ]
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

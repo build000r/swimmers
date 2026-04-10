@@ -48,8 +48,13 @@ const MIN_HEIGHT: u16 = 20;
 const FRAME_DURATION: Duration = Duration::from_millis(33);
 const REFRESH_INTERVAL: Duration = Duration::from_secs(2);
 const MESSAGE_TTL: Duration = Duration::from_secs(5);
+/// How long the backend must be unreachable before the status bar escalates
+/// from the short "backend offline" hint to the full diagnostic message.
+const BACKEND_OFFLINE_ESCALATION: Duration = Duration::from_secs(10);
 const API_CONNECT_TIMEOUT: Duration = Duration::from_millis(250);
 const API_REQUEST_TIMEOUT: Duration = Duration::from_millis(2_000);
+const API_SESSION_LIST_TIMEOUT: Duration = Duration::from_secs(5);
+const API_MERMAID_ARTIFACT_TIMEOUT: Duration = Duration::from_secs(5);
 const API_DIRECTORY_LIST_TIMEOUT: Duration = Duration::from_secs(5);
 const API_CREATE_SESSION_TIMEOUT: Duration = Duration::from_secs(10);
 const API_STARTUP_REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
@@ -60,6 +65,8 @@ const SPRITE_HEIGHT: u16 = 4;
 const LABEL_HEIGHT: u16 = 1;
 const ENTITY_WIDTH: u16 = 12;
 const ENTITY_HEIGHT: u16 = SPRITE_HEIGHT + LABEL_HEIGHT;
+// Sprite theme toggle position (on the header row, right of "swimmers tui").
+const SPRITE_THEME_TOGGLE_X: u16 = 16;
 const SWIM_BOB_RATE: f32 = 0.08;
 const SWIM_VERTICAL_DRIFT: f32 = 0.06;
 const SWIM_DRIFT_LIMIT: f32 = 1.0;

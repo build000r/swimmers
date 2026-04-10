@@ -122,9 +122,11 @@ pub(crate) struct App<C: TuiApi> {
     pub(crate) spawn_tool: SpawnTool,
     pub(crate) initial_request: Option<InitialRequestState>,
     pub(crate) fish_bowl_mode: FishBowlMode,
+    pub(crate) sprite_theme_override: Option<SpriteTheme>,
     pub(crate) mermaid_drag: Option<MermaidDragState>,
     pub(crate) message: Option<(String, Instant)>,
     pub(crate) last_refresh: Option<Instant>,
+    pub(crate) last_successful_refresh: Option<Instant>,
     pub(crate) thought_panel_ratio: f32,
     pub(crate) split_drag_active: bool,
     pub(crate) tick: u64,
@@ -186,9 +188,11 @@ impl<C: TuiApi> App<C> {
             spawn_tool: SpawnTool::Codex,
             initial_request: None,
             fish_bowl_mode: FishBowlMode::Aquarium,
+            sprite_theme_override: None,
             mermaid_drag: None,
             message: None,
             last_refresh: None,
+            last_successful_refresh: None,
             thought_panel_ratio: THOUGHT_RAIL_DEFAULT_RATIO,
             split_drag_active: false,
             tick: 0,
@@ -226,6 +230,22 @@ impl<C: TuiApi> App<C> {
         })
     }
 
+    /// Return a terse status-bar message for a refresh transport error.
+    /// For the first `BACKEND_OFFLINE_ESCALATION` of downtime the user sees
+    /// only "backend offline"; after that the full diagnostic is shown so
+    /// they know how to recover.
+    fn refresh_error_message(&self, verbose: String) -> String {
+        let dominated = self
+            .last_successful_refresh
+            .map(|t| t.elapsed() < BACKEND_OFFLINE_ESCALATION)
+            .unwrap_or(false);
+        if dominated {
+            "backend offline".to_string()
+        } else {
+            verbose
+        }
+    }
+
     pub(crate) fn should_refresh(&self) -> bool {
         self.last_refresh
             .map(|last| last.elapsed() >= REFRESH_INTERVAL)
@@ -260,6 +280,82 @@ impl<C: TuiApi> App<C> {
             .as_deref()
             .map(|tmux_name| format!("num={tmux_name} | {}", self.native_status_text()))
             .unwrap_or_else(|| self.native_status_text())
+    }
+
+    pub(crate) fn sprite_theme_rect(&self, _width: u16) -> Rect {
+        let width = SpriteTheme::override_options()
+            .iter()
+            .fold(0u16, |acc, theme| {
+                let label = format!("[{}]", SpriteTheme::override_label(*theme));
+                acc.saturating_add(display_width(&label))
+            });
+        let gaps = SpriteTheme::override_options().len().saturating_sub(1) as u16;
+        Rect {
+            x: SPRITE_THEME_TOGGLE_X,
+            y: 1,
+            width: width.saturating_add(gaps),
+            height: 1,
+        }
+    }
+
+    pub(crate) fn toggle_sprite_theme(&mut self) {
+        let themes = SpriteTheme::override_options();
+        let current = themes
+            .iter()
+            .position(|theme| *theme == self.sprite_theme_override)
+            .unwrap_or(0);
+        self.sprite_theme_override = themes[(current + 1) % themes.len()];
+        self.set_message(format!(
+            "sprite theme: {}",
+            SpriteTheme::override_label(self.sprite_theme_override)
+        ));
+    }
+
+    pub(crate) fn set_sprite_theme_from_click(&mut self, x: u16) {
+        let rect = self.sprite_theme_rect(0);
+        let mut cursor = rect.x;
+        for theme in SpriteTheme::override_options() {
+            let label = format!("[{}]", SpriteTheme::override_label(theme));
+            let width = display_width(&label);
+            if x >= cursor && x < cursor.saturating_add(width) {
+                if self.sprite_theme_override != theme {
+                    self.sprite_theme_override = theme;
+                    self.set_message(format!(
+                        "sprite theme: {}",
+                        SpriteTheme::override_label(self.sprite_theme_override)
+                    ));
+                }
+                return;
+            }
+            cursor = cursor.saturating_add(width + 1);
+        }
+    }
+
+    pub(crate) fn effective_sprite_theme_for_session(
+        &self,
+        session: &SessionSummary,
+    ) -> SpriteTheme {
+        self.sprite_theme_override
+            .or_else(|| {
+                let theme_id = session.repo_theme_id.as_ref()?;
+                let repo_theme = self.repo_themes.get(theme_id)?;
+                SpriteTheme::from_repo_theme(repo_theme)
+            })
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn uses_balls_scene(&self, visible_entities: &[&SessionEntity]) -> bool {
+        match self.sprite_theme_override {
+            Some(SpriteTheme::Balls) => true,
+            Some(_) => false,
+            None => {
+                !visible_entities.is_empty()
+                    && visible_entities.iter().all(|entity| {
+                        self.effective_sprite_theme_for_session(&entity.session)
+                            == SpriteTheme::Balls
+                    })
+            }
+        }
     }
 
     pub(crate) fn native_status_rect(&self, width: u16) -> Option<Rect> {
@@ -719,7 +815,7 @@ impl<C: TuiApi> App<C> {
             Ok(artifact) if artifact.available => Some(artifact),
             Ok(_) => None,
             Err(err) => {
-                self.set_message(err);
+                self.set_message(self.refresh_error_message(err));
                 if preserve_cached {
                     previous.and_then(|entry| entry.artifact)
                 } else {
@@ -856,6 +952,7 @@ impl<C: TuiApi> App<C> {
                 self.reconcile_thought_log_sessions(&sessions);
                 self.capture_thought_updates(&sessions, layout.thought_entry_capacity());
                 self.merge_sessions(sessions, layout.overview_field);
+                self.last_successful_refresh = Some(Instant::now());
                 if show_success_message {
                     let count = self.entities.len();
                     self.set_message(format!("refreshed {count} session{}", pluralize(count)));
@@ -863,7 +960,7 @@ impl<C: TuiApi> App<C> {
                 true
             }
             Err(err) => {
-                self.set_message(err);
+                self.set_message(self.refresh_error_message(err));
                 false
             }
         };
@@ -874,7 +971,7 @@ impl<C: TuiApi> App<C> {
                     self.native_status = Some(status);
                 }
                 Err(err) => {
-                    self.set_message(err);
+                    self.set_message(self.refresh_error_message(err));
                 }
             }
         }
@@ -1118,6 +1215,7 @@ impl<C: TuiApi> App<C> {
                 self.reconcile_thought_log_sessions(&sessions);
                 self.capture_thought_updates(&sessions, layout.thought_entry_capacity());
                 self.merge_sessions(sessions, layout.overview_field);
+                self.last_successful_refresh = Some(Instant::now());
 
                 if result.show_success_message {
                     let count = self.entities.len();
@@ -1125,7 +1223,7 @@ impl<C: TuiApi> App<C> {
                 }
             }
             Err(err) => {
-                self.set_message(err);
+                self.set_message(self.refresh_error_message(err));
             }
         }
 
@@ -1135,7 +1233,7 @@ impl<C: TuiApi> App<C> {
                     self.native_status = Some(status);
                 }
                 Err(err) => {
-                    self.set_message(err);
+                    self.set_message(self.refresh_error_message(err));
                 }
             }
         }
@@ -2514,16 +2612,21 @@ impl<C: TuiApi> App<C> {
             return;
         }
 
-        let hit = self
-            .visible_entities()
-            .into_iter()
-            .find(|entity| entity.screen_rect(field).contains(x, y))
-            .map(|entity| {
-                (
-                    entity.session.session_id.clone(),
-                    selected_label(Some(&entity.session.tmux_name)),
-                )
-            });
+        let visible_entities = self.visible_entities();
+        let hit = if self.uses_balls_scene(&visible_entities) {
+            balls_theme_hit_test(&visible_entities, field, x, y)
+        } else {
+            visible_entities
+                .iter()
+                .copied()
+                .find(|entity| entity.screen_rect(field).contains(x, y))
+        }
+        .map(|entity| {
+            (
+                entity.session.session_id.clone(),
+                selected_label(Some(&entity.session.tmux_name)),
+            )
+        });
 
         if let Some((session_id, label)) = hit {
             self.select_and_open_session(session_id, label);
@@ -2593,6 +2696,20 @@ impl<C: TuiApi> App<C> {
         renderer.draw_box(frame, Color::DarkGrey);
         renderer.draw_text(2, 1, "swimmers tui", Color::Cyan);
 
+        // Sprite theme toggle: [auto] [fish] [balls] [jelly] — highlighted option is Cyan.
+        let toggle_rect = self.sprite_theme_rect(renderer.width());
+        let mut toggle_x = toggle_rect.x;
+        for theme in SpriteTheme::override_options() {
+            let label = format!("[{}]", SpriteTheme::override_label(theme));
+            let color = if self.sprite_theme_override == theme {
+                Color::Cyan
+            } else {
+                Color::DarkGrey
+            };
+            renderer.draw_text(toggle_x, toggle_rect.y, &label, color);
+            toggle_x = toggle_x.saturating_add(display_width(&label) + 1);
+        }
+
         let max_right_width = renderer.width().saturating_sub(22) as usize;
         let right_text = truncate_label(&self.header_right_text(), max_right_width);
         let right_x = renderer
@@ -2633,9 +2750,8 @@ impl<C: TuiApi> App<C> {
 
         match &mut self.fish_bowl_mode {
             FishBowlMode::Aquarium => {
-                render_aquarium_background(renderer, layout.overview_field, self.tick);
-
                 let visible_entities = self.visible_entities();
+                let use_balls_scene = self.uses_balls_scene(&visible_entities);
                 if visible_entities.is_empty() {
                     let empty = if self.entities.is_empty() {
                         "no tmux sessions found - press r after starting one"
@@ -2655,21 +2771,35 @@ impl<C: TuiApi> App<C> {
                     renderer.draw_text(x, y, empty, Color::DarkGrey);
                 }
 
-                for entity in visible_entities {
-                    let rect = entity.screen_rect(layout.overview_field);
-                    let selected = self
-                        .selected_id
-                        .as_ref()
-                        .map(|selected| *selected == entity.session.session_id)
-                        .unwrap_or(false);
-                    render_entity(
+                if use_balls_scene {
+                    render_balls_theme(
                         renderer,
-                        entity,
-                        rect,
-                        selected,
-                        self.tick,
+                        layout.overview_field,
+                        &visible_entities,
+                        self.selected_id.as_deref(),
                         &self.repo_themes,
+                        self.tick,
                     );
+                } else {
+                    render_aquarium_background(renderer, layout.overview_field, self.tick);
+
+                    for entity in visible_entities {
+                        let rect = entity.screen_rect(layout.overview_field);
+                        let selected = self
+                            .selected_id
+                            .as_ref()
+                            .map(|selected| *selected == entity.session.session_id)
+                            .unwrap_or(false);
+                        render_entity_with_theme(
+                            renderer,
+                            entity,
+                            rect,
+                            selected,
+                            self.tick,
+                            &self.repo_themes,
+                            self.effective_sprite_theme_for_session(&entity.session),
+                        );
+                    }
                 }
             }
             FishBowlMode::Mermaid(viewer) => {

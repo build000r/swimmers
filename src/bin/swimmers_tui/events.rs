@@ -1,9 +1,5 @@
 use super::*;
 
-pub(crate) fn should_background_startup_refresh(client: &ApiClient) -> bool {
-    client.targets_local_backend()
-}
-
 pub(crate) fn initialize_tui_app() -> Result<(App<ApiClient>, Renderer), Box<dyn std::error::Error>>
 {
     let _ = dotenvy::dotenv();
@@ -11,24 +7,15 @@ pub(crate) fn initialize_tui_app() -> Result<(App<ApiClient>, Renderer), Box<dyn
 
     let runtime = Runtime::new()?;
     let client = ApiClient::from_env().map_err(io::Error::other)?;
-    let background_startup_refresh = should_background_startup_refresh(&client);
-    if !background_startup_refresh {
-        runtime
-            .block_on(client.preflight_startup_access())
-            .map_err(io::Error::other)?;
-    }
-    let startup_base_url = client.base_url.clone();
+    runtime
+        .block_on(client.preflight_startup_access())
+        .map_err(io::Error::other)?;
     let mut renderer = Renderer::new()?;
     renderer.init()?;
 
     let mut app = App::new(runtime, client);
     let initial_layout = app.layout_for_terminal(renderer.width(), renderer.height());
-    if background_startup_refresh {
-        app.set_message(format!("connecting to swimmers API at {startup_base_url}"));
-        app.spawn_background_refresh(false);
-    } else {
-        app.refresh(initial_layout);
-    }
+    app.refresh(initial_layout);
 
     Ok((app, renderer))
 }
@@ -266,6 +253,10 @@ pub(crate) fn handle_key_event<C: TuiApi>(
             app.toggle_native_app();
             true
         }
+        KeyCode::Char('s') => {
+            app.toggle_sprite_theme();
+            true
+        }
         _ => true,
     }
 }
@@ -307,6 +298,13 @@ pub(crate) fn handle_split_or_header_click<C: TuiApi>(
     }
     if header_filter_action_at(app, width, mouse.column, mouse.row).is_some() {
         app.handle_header_filter_click(width, mouse.column, mouse.row);
+        return true;
+    }
+    if app
+        .sprite_theme_rect(width)
+        .contains(mouse.column, mouse.row)
+    {
+        app.set_sprite_theme_from_click(mouse.column);
         return true;
     }
     if app

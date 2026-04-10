@@ -318,7 +318,7 @@ impl TuiApi for ApiClient {
         Box::pin(async move {
             let url = format!("{}/v1/sessions", self.base_url);
             let response = self
-                .with_auth(self.http.get(url))
+                .with_auth(self.http.get(url).timeout(API_SESSION_LIST_TIMEOUT))
                 .send()
                 .await
                 .map_err(|err| self.transport_error("refresh sessions", err))?;
@@ -435,7 +435,7 @@ impl TuiApi for ApiClient {
                 self.base_url, session_id
             );
             let response = self
-                .with_auth(self.http.get(url))
+                .with_auth(self.http.get(url).timeout(API_MERMAID_ARTIFACT_TIMEOUT))
                 .send()
                 .await
                 .map_err(|err| self.transport_error("fetch mermaid artifact", err))?;
@@ -632,6 +632,13 @@ impl TuiApi for ApiClient {
                     .json::<DirListResponse>()
                     .await
                     .map_err(|err| format!("failed to parse dirs response: {err}"));
+            }
+
+            if response.status() == reqwest::StatusCode::NOT_FOUND {
+                return Err(format!(
+                    "backend at {} does not expose /v1/dirs. Click-to-spawn directory browsing requires a `swimmers` build with `--features personal-workflows`; if this is your local server, relaunch via `make tui`.",
+                    self.base_url
+                ));
             }
 
             Err(read_error(response).await)
