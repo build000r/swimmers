@@ -88,6 +88,30 @@ assert_eq '10' "$(probe_status_for_http_code 401)" '401 probe is auth failure'
 assert_eq '10' "$(probe_status_for_http_code 403)" '403 probe is auth failure'
 assert_eq '1' "$(probe_status_for_http_code 503)" '503 probe keeps waiting'
 
+kill_calls=''
+kill() {
+  local signal='TERM'
+  if [[ "${1:-}" == '-KILL' ]]; then
+    signal='KILL'
+    shift
+  fi
+  kill_calls+="${signal}:${1} "
+}
+sleep() {
+  SECONDS=$((SECONDS + ${1:-1}))
+}
+lsof() {
+  if [[ "${kill_calls}" != *'KILL:'* ]]; then
+    printf '123\n'
+    return 0
+  fi
+  return 1
+}
+TUI_URL='http://127.0.0.1:3210'
+SECONDS=0
+stop_local_api_listener
+assert_eq 'TERM:123 KILL:123 ' "${kill_calls}" 'stale listener escalates from term to kill'
+
 stop_local_api_listener() {
   restart_stop_calls=$((restart_stop_calls + 1))
   return 0
@@ -143,6 +167,22 @@ assert_eq '0' "${restart_stop_calls}" 'missing listener does not stop before sta
 assert_eq '1' "${restart_start_calls}" 'missing listener still starts api'
 assert_eq '1' "${restart_wait_calls}" 'missing listener waits for started api'
 
+restart_stop_calls=0
+restart_start_calls=0
+restart_wait_calls=0
+dir_picker_route_status() {
+  if [[ "${restart_start_calls}" -eq 0 ]]; then
+    printf '404'
+  else
+    printf '200'
+  fi
+}
+
+ensure_dir_picker_capability
+assert_eq '1' "${restart_stop_calls}" 'stale dir-picker route stops old listener'
+assert_eq '1' "${restart_start_calls}" 'stale dir-picker route restarts api'
+assert_eq '1' "${restart_wait_calls}" 'stale dir-picker route waits for api'
+
 TUI_URL='http://127.0.0.1:33210'
 WAIT_PATH='/v1/sessions'
 LAST_API_STATUS='401'
@@ -158,5 +198,78 @@ assert_eq \
   'swimmers API at http://127.0.0.1:33210 denied session access for /v1/sessions; use a token with session-list access for this TUI instance' \
   "${auth_403_message}" \
   '403 auth failure message'
+
+maybe_rebuild_clawgs() {
+  :
+}
+
+require() {
+  :
+}
+
+ready_probe_calls=0
+probe_api_access() {
+  ready_probe_calls=$((ready_probe_calls + 1))
+  LAST_API_STATUS='200'
+  return 0
+}
+
+restart_calls=0
+restart_local_api() {
+  restart_calls=$((restart_calls + 1))
+}
+
+ensure_calls=0
+ensure_native_switch_capability() {
+  ensure_calls=$((ensure_calls + 1))
+}
+
+TUI_URL='http://127.0.0.1:3210'
+WAIT_ONLY=0
+SKIP_TUI=1
+TUI_FORCE_RESTART_LOCAL_API=0
+TUI_SERVER_FEATURES='personal-workflows'
+main
+assert_eq '1' "${ready_probe_calls}" 'ready listener is probed once'
+assert_eq '0' "${restart_calls}" 'ready local listener is not restarted'
+assert_eq '1' "${ensure_calls}" 'native-switch capability still checked after ready probe'
+
+ready_probe_calls=0
+restart_calls=0
+ensure_calls=0
+TUI_FORCE_RESTART_LOCAL_API=1
+main
+assert_eq '1' "${ready_probe_calls}" 'forced restart still probes readiness once'
+assert_eq '1' "${restart_calls}" 'forced restart refreshes ready local listener'
+assert_eq '1' "${ensure_calls}" 'forced restart still checks native-switch capability'
+
+fake_server_bin="$(mktemp "${TMPDIR:-/tmp}/swimmers-fake-server.XXXXXX")"
+fake_pid_file="$(mktemp "${TMPDIR:-/tmp}/swimmers-fake-pid.XXXXXX")"
+fake_port_file="$(mktemp "${TMPDIR:-/tmp}/swimmers-fake-port.XXXXXX")"
+cat >"${fake_server_bin}" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$$" > "${PID_FILE}"
+printf '%s\n' "${PORT:-}" > "${PORT_FILE}"
+sleep 5
+EOF
+chmod +x "${fake_server_bin}"
+
+ROOT_DIR="${ROOT_DIR}" \
+FAKE_SERVER_BIN="${fake_server_bin}" \
+PID_FILE="${fake_pid_file}" \
+PORT_FILE="${fake_port_file}" \
+bash -lc '
+  source "'"${ROOT_DIR}/scripts/run-tui.sh"'"
+  build_local_api() { :; }
+  local_server_bin() { printf "%s\n" "${FAKE_SERVER_BIN}"; }
+  TUI_URL="http://127.0.0.1:3210"
+  TUI_SERVER_LOG="${TMPDIR:-/tmp}/swimmers-fake-launch.log"
+  start_local_api
+'
+
+fake_server_pid="$(cat "${fake_pid_file}")"
+assert_true 'detached fake server survives launcher shell exit' kill -0 "${fake_server_pid}"
+kill "${fake_server_pid}" 2>/dev/null || true
+rm -f "${fake_server_bin}" "${fake_pid_file}" "${fake_port_file}"
 
 printf 'run-tui.sh checks passed\n'

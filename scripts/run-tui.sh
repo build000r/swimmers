@@ -12,6 +12,7 @@ WAIT_LOG_INTERVAL="${TUI_WAIT_LOG_INTERVAL:-5}"
 WAIT_ONLY="${TUI_WAIT_ONLY:-0}"
 SKIP_TUI="${TUI_SKIP_TUI:-0}"
 NATIVE_SWITCH_PATH="${TUI_NATIVE_SWITCH_PATH:-/v1/native/app}"
+DIR_PICKER_PATH="${TUI_DIR_PICKER_PATH:-/v1/dirs}"
 SERVER_LOG=""
 LAST_API_STATUS=""
 
@@ -103,6 +104,10 @@ should_auto_start_local_api() {
   target_is_loopback
 }
 
+should_force_restart_local_api() {
+  is_true "${TUI_FORCE_RESTART_LOCAL_API:-0}"
+}
+
 api_url() {
   printf '%s%s\n' "${TUI_URL%/}" "${WAIT_PATH}"
 }
@@ -161,6 +166,27 @@ native_switch_route_status() {
   fi
 }
 
+dir_picker_route_status() {
+  local url="${TUI_URL%/}${DIR_PICKER_PATH}?managed_only=true"
+  local header
+
+  header="$(api_auth_header)"
+  if [[ -n "${header}" ]]; then
+    curl -sS -o /dev/null -w '%{http_code}' \
+      --connect-timeout 1 \
+      --max-time 2 \
+      -H "${header}" \
+      "${url}" \
+      2>/dev/null || true
+  else
+    curl -sS -o /dev/null -w '%{http_code}' \
+      --connect-timeout 1 \
+      --max-time 2 \
+      "${url}" \
+      2>/dev/null || true
+  fi
+}
+
 probe_api_access() {
   local url="${1:-$(api_url)}"
   LAST_API_STATUS="$(api_status "${url}")"
@@ -179,22 +205,23 @@ probe_api_access() {
 
 show_api_auth_failure() {
   local url="${1:-$(api_url)}"
+  local path="${2:-${WAIT_PATH}}"
 
   case "${LAST_API_STATUS}" in
     401)
       printf 'swimmers API at %s requires valid auth for %s; set AUTH_MODE=token and AUTH_TOKEN to match the target API\n' \
         "${TUI_URL}" \
-        "${WAIT_PATH}" >&2
+        "${path}" >&2
       ;;
     403)
       printf 'swimmers API at %s denied session access for %s; use a token with session-list access for this TUI instance\n' \
         "${TUI_URL}" \
-        "${WAIT_PATH}" >&2
+        "${path}" >&2
       ;;
     *)
       printf 'swimmers API at %s failed auth probe for %s (status: %s)\n' \
         "${TUI_URL}" \
-        "${WAIT_PATH}" \
+        "${path}" \
         "${LAST_API_STATUS:-000}" >&2
       ;;
   esac
@@ -209,13 +236,71 @@ show_server_log_tail() {
   tail -n 20 "${SERVER_LOG}" >&2 || true
 }
 
+build_local_api() {
+  local server_features
+  server_features="${TUI_SERVER_FEATURES:-personal-workflows}"
+
+  require cargo
+  if [[ -n "${server_features}" ]]; then
+    (cd "${ROOT_DIR}" && cargo build --bin swimmers --features "${server_features}")
+  else
+    (cd "${ROOT_DIR}" && cargo build --bin swimmers)
+  fi
+}
+
+local_server_bin() {
+  printf '%s\n' "${TUI_SERVER_BIN:-${ROOT_DIR}/target/debug/swimmers}"
+}
+
+launch_local_api_process() {
+  local server_bin="${1:?server_bin required}"
+  local port="${2:?port required}"
+  local launched_pid=""
+
+  if command -v python3 >/dev/null 2>&1; then
+    launched_pid="$(
+      SERVER_BIN="${server_bin}" \
+      SERVER_LOG="${SERVER_LOG}" \
+      SERVER_PORT="${port}" \
+      python3 - <<'PY'
+import os
+import subprocess
+import sys
+
+log_path = os.environ["SERVER_LOG"]
+bin_path = os.environ["SERVER_BIN"]
+port = os.environ["SERVER_PORT"]
+
+with open(log_path, "ab", buffering=0) as log:
+    env = os.environ.copy()
+    env["PORT"] = port
+    proc = subprocess.Popen(
+        [bin_path],
+        stdin=subprocess.DEVNULL,
+        stdout=log,
+        stderr=subprocess.STDOUT,
+        env=env,
+        start_new_session=True,
+        close_fds=True,
+    )
+    print(proc.pid)
+PY
+    )"
+  else
+    nohup env PORT="${port}" "${server_bin}" </dev/null >>"${SERVER_LOG}" 2>&1 &
+    launched_pid="$!"
+  fi
+
+  if [[ -n "${launched_pid}" ]]; then
+    printf 'Started swimmers API pid %s\n' "${launched_pid}"
+  fi
+}
+
 start_local_api() {
-  local parsed host port log_dir launch_cmd
+  local parsed host port log_dir server_bin
   parsed="$(parse_url_host_port "${TUI_URL}")"
   host="${parsed%%$'\t'*}"
   port="${parsed#*$'\t'}"
-
-  require cargo
 
   log_dir="${TUI_SERVER_LOG_DIR:-${TMPDIR:-/tmp}}"
   mkdir -p "${log_dir}"
@@ -225,10 +310,14 @@ start_local_api() {
   printf 'Local swimmers API is not ready; starting it on %s:%s\n' "${host}" "${port}"
   printf 'Server log: %s\n' "${SERVER_LOG}"
 
-  launch_cmd="cd $(printf '%q' "${ROOT_DIR}") && cargo build --bin swimmers && exec env PORT=$(printf '%q' "${port}") $(printf '%q' "${ROOT_DIR}/target/debug/swimmers")"
-  (
-    nohup bash -lc "${launch_cmd}" >>"${SERVER_LOG}" 2>&1 &
-  )
+  build_local_api
+  server_bin="$(local_server_bin)"
+  if [[ ! -x "${server_bin}" ]]; then
+    printf 'expected swimmers binary at %s after build\n' "${server_bin}" >&2
+    return 1
+  fi
+
+  launch_local_api_process "${server_bin}" "${port}"
 }
 
 restart_local_api() {
@@ -281,7 +370,18 @@ stop_local_api_listener() {
     sleep 1
   done
 
-  printf 'listener on %s:%s did not stop after signal\n' "${host}" "${port}" >&2
+  printf 'listener on %s:%s did not stop after SIGTERM; forcing SIGKILL\n' "${host}" "${port}" >&2
+  kill -KILL "${listener_pid}" 2>/dev/null || true
+
+  deadline=$((SECONDS + 5))
+  while (( SECONDS <= deadline )); do
+    if ! lsof -nP -t -iTCP:"${port}" -sTCP:LISTEN >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 1
+  done
+
+  printf 'listener on %s:%s did not stop after SIGKILL\n' "${host}" "${port}" >&2
   return 1
 }
 
@@ -306,7 +406,36 @@ ensure_native_switch_capability() {
       fi
       ;;
     401|403)
-      show_api_auth_failure "$(api_url)"
+      show_api_auth_failure "$(api_url)" "${NATIVE_SWITCH_PATH}"
+      return 1
+      ;;
+    *)
+      ;;
+  esac
+}
+
+ensure_dir_picker_capability() {
+  if ! should_auto_start_local_api; then
+    return 0
+  fi
+
+  local route_status
+  route_status="$(dir_picker_route_status)"
+  case "${route_status}" in
+    404)
+      printf 'Local swimmers API is missing %s; restarting it to pick up click-to-spawn support\n' "${DIR_PICKER_PATH}"
+      stop_local_api_listener || true
+      start_local_api
+      wait_for_api "${START_TIMEOUT}"
+      route_status="$(dir_picker_route_status)"
+      if [[ "${route_status}" == "404" ]]; then
+        printf 'swimmers API at %s still does not expose %s after restart\n' "${TUI_URL}" "${DIR_PICKER_PATH}" >&2
+        show_server_log_tail
+        return 1
+      fi
+      ;;
+    401|403)
+      show_api_auth_failure "$(api_url)" "${DIR_PICKER_PATH}"
       return 1
       ;;
     *)
@@ -397,8 +526,8 @@ main() {
   maybe_rebuild_clawgs
 
   if probe_api_access "$(api_url)"; then
-    if should_auto_start_local_api; then
-      printf 'Rebuilding local swimmers API to pick up code changes\n'
+    if should_auto_start_local_api && should_force_restart_local_api; then
+      printf 'Force-restarting local swimmers API to pick up code changes\n'
       restart_local_api
     else
       printf 'swimmers API is ready (%s)\n' "${LAST_API_STATUS}"
@@ -422,6 +551,7 @@ main() {
   fi
 
   ensure_native_switch_capability
+  ensure_dir_picker_capability
 
   if is_true "${WAIT_ONLY}" || is_true "${SKIP_TUI}"; then
     return 0

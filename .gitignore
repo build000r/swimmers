@@ -4,3 +4,11 @@ data/
 .env
 .swimmers/
 .throngterm/
+
+# NTM / modes-of-reasoning tool artifacts
+.ntm/
+.modes_prompts/
+MODES_CONTEXT_PACK.md
+MODES_OF_REASONING_REPORT_AND_ANALYSIS_OF_PROJECT.md
+MODE_OUTPUT_*.md
+SMART_RECOMMENDATION_CHAIN.md

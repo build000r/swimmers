@@ -4,8 +4,8 @@
 
 ## What This Is
 
-Swimmers is a tmux session manager with a Rust API, a native TUI, and a
-browser surface for tailnet access.
+Swimmers is a tmux session manager with a Rust API, a native TUI, and an
+optional browser surface.
 
 **Target setup:** local API on `3210` with either the native TUI or the browser UI attached to it.
 
@@ -68,7 +68,7 @@ That will:
 - wait for readiness
 - launch the native TUI
 
-Browser/tailnet path:
+Browser path:
 
 ```bash
 make web
@@ -76,9 +76,12 @@ make web
 
 That will:
 
-- start the API on `0.0.0.0:3210`
+- start the API with the normal local default (`127.0.0.1:3210`)
 - auto-detect `frankentui/pkg` when available for live browser terminal rendering
-- print the local URL and the first tailnet IPv4 URL when Tailscale is installed
+- print the local browser URL, plus Tailscale URLs when Tailscale is installed
+
+If the API is later run in token mode, the browser UI can connect with either
+`AUTH_TOKEN` or the read-only `OBSERVER_TOKEN` from its auth sheet.
 
 If you want separate processes:
 
@@ -98,8 +101,18 @@ You should see the API start and begin discovering tmux sessions.
 No tmux hook setup is required for thought or rest-state updates. `swimmers`
 streams session snapshots directly to `clawgs emit --stdio`.
 
-The API binds to `0.0.0.0`, so you can also point a TUI at it from another
-machine if you expose the port intentionally.
+By default, both `make tui` and `make web` keep the API on loopback
+(`127.0.0.1`). If you want another machine or your tailnet to reach it, opt in
+explicitly:
+
+```bash
+SWIMMERS_BIND=0.0.0.0 \
+AUTH_MODE=token \
+AUTH_TOKEN=your-token \
+make web
+```
+
+You can also bind to a specific Tailscale IP instead of `0.0.0.0`.
 
 ### Structured Transcript Snapshot (Optional)
 
@@ -124,7 +137,9 @@ bash scripts/clawgs-extract.sh /path/to/project --pretty --include-raw
 
 ## Step 4: Connect to a Remote API (Optional)
 
-If the API runs on another machine:
+If the API runs on another machine, that host must have started `swimmers` with
+an explicit non-loopback `SWIMMERS_BIND` and token auth. Non-loopback
+`SWIMMERS_BIND` with `AUTH_MODE=local_trust` is refused at startup:
 
 ```bash
 SWIMMERS_TUI_URL=http://100.x.y.z:3210 cargo run --bin swimmers-tui
@@ -137,6 +152,15 @@ AUTH_MODE=token AUTH_TOKEN=your-token \
 SWIMMERS_TUI_URL=http://100.x.y.z:3210 \
 cargo run --bin swimmers-tui
 ```
+
+Browser access to a remote API works too:
+
+```text
+http://100.x.y.z:3210/
+```
+
+If that API is running in token mode, paste `AUTH_TOKEN` or `OBSERVER_TOKEN`
+into the browser auth sheet after the page loads.
 
 ### Run in Background (Optional)
 
@@ -251,6 +275,7 @@ Replace `/path/to/swimmers` with the actual path.
 |---------|-----|
 | TUI cannot reach the API | Run `make tui` or start the API with `make server` |
 | TUI gets `401` or `403` | Set `AUTH_MODE=token` and `AUTH_TOKEN` to match the API |
+| Tailnet URL prints but is unreachable | Restart the API with explicit external bind + token auth, for example `SWIMMERS_BIND=0.0.0.0 AUTH_MODE=token AUTH_TOKEN=... make web` |
 | No sessions showing | Create tmux sessions first: `tmux new-session -d -s dev` |
 | Port already in use | Kill the old process: `lsof -ti:3210 \| xargs kill` |
 | Cargo build fails | Ensure Rust toolchain is installed: `rustup update stable` |

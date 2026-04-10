@@ -42,7 +42,7 @@ A terminal aquarium for your tmux sessions. Each session becomes an animated fis
 | **Thought rail** | Side panel showing AI agent thought streams per session |
 | **Native terminal handoff** | Open any session directly in iTerm or Ghostty from the TUI |
 | **Mermaid diagrams** | Render and zoom Mermaid artifacts inline in the terminal |
-| **Repo themes** | Per-repo sprite and color overrides via `.swimmers/theme.json` |
+| **Repo themes** | Per-repo colors plus default sprite overrides via `.swimmers/colors.json` |
 | **Remote API** | Point the TUI at a remote server over Tailscale or any network |
 | **Prometheus metrics** | `GET /metrics` for monitoring session counts and API health |
 | **No database, no Docker** | File-based persistence, single binary, tmux is the only dependency |
@@ -133,20 +133,29 @@ swimmers-tui      # connects to http://127.0.0.1:3210
 
 ### External / Tailscale access
 
-Set `SWIMMERS_BIND` to expose the server on a non-loopback interface. The server emits a warning to stderr when binding to a non-loopback address because `LocalTrust` auth (the v0.1.0 default) grants full access to any client that can reach the port.
+Set `SWIMMERS_BIND` to expose the server on a non-loopback interface. The server refuses to start if you pair a non-loopback bind with `AUTH_MODE=local_trust`; for external exposure, switch to `AUTH_MODE=token` and set `AUTH_TOKEN`.
 
 ```bash
 # Bind to all interfaces (e.g., for Tailscale access from another machine)
-SWIMMERS_BIND=0.0.0.0 swimmers
+SWIMMERS_BIND=0.0.0.0 \
+AUTH_MODE=token \
+AUTH_TOKEN=your-secret-token \
+swimmers
 
 # Bind to a specific Tailscale IP
-SWIMMERS_BIND=100.101.123.63 swimmers
+SWIMMERS_BIND=100.101.123.63 \
+AUTH_MODE=token \
+AUTH_TOKEN=your-secret-token \
+swimmers
 
 # Point the TUI at the remote server
-SWIMMERS_TUI_URL=http://100.101.123.63:3210 swimmers-tui
+SWIMMERS_TUI_URL=http://100.101.123.63:3210 \
+AUTH_MODE=token \
+AUTH_TOKEN=your-secret-token \
+swimmers-tui
 ```
 
-When you bind externally and want real auth, set `AUTH_MODE=token` and a shared `AUTH_TOKEN`.
+For any non-loopback bind, use `AUTH_MODE=token` with `AUTH_TOKEN`. `OBSERVER_TOKEN` is optional when you also want a read-only credential for browser or observer clients.
 
 ---
 
@@ -156,17 +165,20 @@ When you bind externally and want real auth, set `AUTH_MODE=token` and a shared 
 |----------|---------|---------|
 | `SWIMMERS_BIND` | `127.0.0.1` | Server bind address (interface only, not `host:port`) |
 | `PORT` | `3210` | Server listen port |
-| `SWIMMERS_TUI_URL` | `http://127.0.0.1:3210` | API URL the TUI connects to |
 | `AUTH_MODE` | `local_trust` | Auth mode: `local_trust` or `token` |
-| `AUTH_TOKEN` | (none) | Bearer token when `AUTH_MODE=token` |
+| `AUTH_TOKEN` | `(unset)` | Bearer token when `AUTH_MODE=token` |
+| `OBSERVER_TOKEN` | `(unset)` | Read-only bearer token for token-auth deployments |
 | `SWIMMERS_NATIVE_APP` | `iterm` | Native desktop target: `iterm` or `ghostty` |
-| `SWIMMERS_THOUGHT_BACKEND` | `openrouter` | Thought subsystem backend: `openrouter`, `codex`, or `inproc` |
+| `SWIMMERS_THOUGHT_BACKEND` | `daemon` | Thought subsystem backend: `daemon` or `inproc` |
 | `SWIMMERS_REPLAY_BUFFER_SIZE` | `524288` | Replay ring size in bytes (default 512 KB) |
-| `SWIMMERS_FRANKENTUI_PKG_DIR` | auto-detect | Path to `frankentui/pkg` for live browser terminal rendering |
+| `SWIMMERS_DATA_DIR` | `(platform data dir)` | Override the persistence directory |
+| `SWIMMERS_TUI_URL` | `http://127.0.0.1:3210` | API URL the TUI connects to |
 
 When `SWIMMERS_NATIVE_APP=ghostty`, the API uses Ghostty's AppleScript support to create or replace a left-side preview split for the selected tmux session. This path requires Ghostty 1.3.0+ on macOS with automation access enabled.
 
 While the TUI is running, press `n` or click the top-right native-open label to switch between `iTerm` and `Ghostty` without restarting the API.
+
+The optional browser terminal renderer also honors `SWIMMERS_FRANKENTUI_PKG_DIR` (or `FRANKENTUI_PKG_DIR`) to override the auto-detected `frankentui/pkg` asset path.
 
 ---
 
@@ -176,7 +188,7 @@ If you are working from a source checkout, the Makefile has convenience targets:
 
 ```bash
 make tui                # Start local API + TUI (one command)
-make web                # Start the server for browser/tailnet access
+make web                # Start the server and print local browser URLs
 make server             # Run only the API server
 make tui-check          # Wait for an existing API, then exit
 make tui-smoke          # Run shell-level bootstrap tests
@@ -202,7 +214,21 @@ swimmers
 
 ### Repo Themes
 
-Drop a `.swimmers/theme.json` in any repo directory to override sprite colors for sessions whose `cwd` matches that repo. The TUI discovers themes automatically.
+Drop a `.swimmers/colors.json` in any repo directory to override session colors and the repo's default sprite. The TUI discovers themes automatically, and the header `[auto]` sprite mode uses the repo default before falling back to the built-in default.
+
+```json
+{
+  "sprite": "jelly",
+  "palette": {
+    "body": "#B89875",
+    "outline": "#3D2F24",
+    "accent": "#1D1914",
+    "shirt": "#AA9370"
+  }
+}
+```
+
+Valid sprite values are `fish`, `balls`, and `jelly`. The header sprite toggle can still force a global override for the current TUI session.
 
 ---
 
@@ -444,7 +470,7 @@ A side panel in the TUI that displays AI agent thought streams. When a session r
 
 ### Is `LocalTrust` auth safe?
 
-On loopback (`127.0.0.1`), yes — only processes on the same machine can reach the port. When you set `SWIMMERS_BIND` to a non-loopback address, the server warns you on startup. Use `AUTH_MODE=token` with a strong `AUTH_TOKEN` for any external exposure.
+On loopback (`127.0.0.1`), yes — only processes on the same machine can reach the port. When you set `SWIMMERS_BIND` to a non-loopback address, the server refuses to start under `AUTH_MODE=local_trust`. Use `AUTH_MODE=token` with a strong `AUTH_TOKEN` for any external exposure.
 
 ---
 
