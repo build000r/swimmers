@@ -1,7 +1,7 @@
 SHELL := /bin/bash
 .DEFAULT_GOAL := help
 
-.PHONY: help server web web-smoke tui tui-check tui-smoke cargo-cov-lcov
+.PHONY: help server web web-smoke tui tui-check tui-smoke tui-stress ci-perf-gates cargo-cov-lcov
 
 help:
 	@printf '%s\n' \
@@ -13,6 +13,8 @@ help:
 	'  make tui                     Start a local API if needed, then launch the native TUI' \
 	'  make tui-check              Wait for an existing API and exit without launching the TUI' \
 	'  make tui-smoke              Run shell checks for the TUI bootstrap helper' \
+	'  make tui-stress             Concurrent-load regression smoke for /v1/dirs + POST /v1/sessions' \
+	'  make ci-perf-gates          Run perf/concurrency gates (the CI regression guard bundle)' \
 	'  make cargo-cov-lcov         Run Rust tests with lcov output for /crap'
 
 server:
@@ -32,6 +34,12 @@ tui-check:
 
 tui-smoke:
 	bash ./scripts/test-run-tui.sh
+
+tui-stress:
+	bash ./scripts/stress-dirs-concurrency.sh
+
+ci-perf-gates:
+	bash ./scripts/ci-perf-gates.sh
 
 cargo-cov-lcov:
 	@llvm_cov="$${LLVM_COV:-$$(command -v llvm-cov || xcrun --find llvm-cov)}"; \

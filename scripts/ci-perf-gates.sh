@@ -7,6 +7,9 @@ cargo test thought::loop_runner::tests
 echo "[ci-perf-gates] running /v1/sessions hot-path perf gate"
 cargo test list_sessions_perf_gate --lib
 
+echo "[ci-perf-gates] running /v1/dirs concurrent-safety perf gate"
+cargo test list_dirs_parallelizes_git_probes_under_slow_git --lib
+
 echo "[ci-perf-gates] running TUI bootstrap helper checks"
 bash ./scripts/test-run-tui.sh
 
