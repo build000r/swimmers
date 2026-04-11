@@ -36,11 +36,12 @@ use swimmers::config::{AuthMode, Config};
 use swimmers::repo_theme::{discover_repo_theme, existing_repo_theme};
 use swimmers::thought::runtime_config::{DaemonDefaults, ThoughtConfig};
 use swimmers::types::{
-    CreateSessionRequest, CreateSessionResponse, DirEntry, DirListResponse, ErrorResponse,
-    GhosttyOpenMode, MermaidArtifactResponse, NativeDesktopApp, NativeDesktopConfigRequest,
-    NativeDesktopModeRequest, NativeDesktopOpenRequest, NativeDesktopOpenResponse,
-    NativeDesktopStatusResponse, PlanFileResponse, PublishSelectionRequest, RepoTheme, RestState,
-    SessionListResponse, SessionState, SessionSummary, SpawnTool,
+    CreateSessionRequest, CreateSessionResponse, DirEntry, DirListResponse, DirRepoActionRequest,
+    DirRepoActionResponse, ErrorResponse, GhosttyOpenMode, MermaidArtifactResponse,
+    NativeDesktopApp, NativeDesktopConfigRequest, NativeDesktopModeRequest,
+    NativeDesktopOpenRequest, NativeDesktopOpenResponse, NativeDesktopStatusResponse,
+    PlanFileResponse, PublishSelectionRequest, RepoActionKind, RepoActionState, RepoTheme,
+    RestState, SessionListResponse, SessionState, SessionSummary, SpawnTool,
 };
 
 const MIN_WIDTH: u16 = 70;
@@ -56,6 +57,7 @@ const API_REQUEST_TIMEOUT: Duration = Duration::from_millis(2_000);
 const API_SESSION_LIST_TIMEOUT: Duration = Duration::from_secs(5);
 const API_MERMAID_ARTIFACT_TIMEOUT: Duration = Duration::from_secs(5);
 const API_DIRECTORY_LIST_TIMEOUT: Duration = Duration::from_secs(5);
+const API_DIRECTORY_ACTION_TIMEOUT: Duration = Duration::from_secs(5);
 const API_CREATE_SESSION_TIMEOUT: Duration = Duration::from_secs(10);
 const API_STARTUP_REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
 const API_STARTUP_WAIT_TIMEOUT: Duration = Duration::from_secs(20);

@@ -20,6 +20,10 @@ pub(crate) struct PickerState {
     pub(crate) spawn_tool: SpawnTool,
     pub(crate) selection: PickerSelection,
     pub(crate) scroll: usize,
+    /// When set, the picker is showing a virtual group listing.
+    pub(crate) current_group: Option<String>,
+    /// Group names available from the overlay (shown as header buttons).
+    pub(crate) available_groups: Vec<String>,
 }
 
 impl PickerState {
@@ -43,17 +47,47 @@ impl PickerState {
             spawn_tool,
             selection: PickerSelection::SpawnHere,
             scroll: 0,
+            current_group: None,
+            available_groups: response.groups,
         }
     }
 
-    pub(crate) fn apply_response(&mut self, response: DirListResponse) {
+    pub(crate) fn apply_response(&mut self, response: DirListResponse, preserve_selection: bool) {
+        let previous_selection = self.selection;
+        let previous_scroll = self.scroll;
+        let selected_name = match previous_selection {
+            PickerSelection::Entry(index) => {
+                self.entries.get(index).map(|entry| entry.name.clone())
+            }
+            PickerSelection::SpawnHere => None,
+        };
         self.current_path = response.path;
         self.entries = response.entries;
         self.overlay_label = response.overlay_label;
+        if !response.groups.is_empty() {
+            self.available_groups = response.groups;
+        }
         self.current_theme_color = None;
         self.entry_theme_colors.clear();
-        self.selection = PickerSelection::SpawnHere;
-        self.scroll = 0;
+        if preserve_selection {
+            self.selection = selected_name
+                .as_ref()
+                .and_then(|name| self.entries.iter().position(|entry| &entry.name == name))
+                .map(PickerSelection::Entry)
+                .unwrap_or(match previous_selection {
+                    PickerSelection::SpawnHere => PickerSelection::SpawnHere,
+                    PickerSelection::Entry(index) if self.entries.is_empty() => {
+                        PickerSelection::SpawnHere
+                    }
+                    PickerSelection::Entry(index) => {
+                        PickerSelection::Entry(index.min(self.entries.len().saturating_sub(1)))
+                    }
+                });
+            self.scroll = previous_scroll.min(self.entries.len().saturating_sub(1));
+        } else {
+            self.selection = PickerSelection::SpawnHere;
+            self.scroll = 0;
+        }
     }
 
     pub(crate) fn sync_theme_colors(&mut self, repo_themes: &mut HashMap<String, RepoTheme>) {
@@ -70,7 +104,8 @@ impl PickerState {
     }
 
     pub(crate) fn at_root(&self) -> bool {
-        normalize_path(&self.current_path) == normalize_path(&self.base_path)
+        self.current_group.is_none()
+            && normalize_path(&self.current_path) == normalize_path(&self.base_path)
     }
 
     pub(crate) fn parent_path(&self) -> Option<String> {
@@ -91,6 +126,9 @@ impl PickerState {
     }
 
     pub(crate) fn relative_label(&self) -> String {
+        if let Some(group) = &self.current_group {
+            return format!("/{group}");
+        }
         let base = normalize_path(&self.base_path);
         let current = normalize_path(&self.current_path);
         if current == base {
@@ -105,6 +143,9 @@ impl PickerState {
 
     pub(crate) fn path_for_entry(&self, index: usize) -> Option<String> {
         let entry = self.entries.get(index)?;
+        if let Some(full_path) = &entry.full_path {
+            return Some(full_path.clone());
+        }
         Some(join_path(&self.current_path, &entry.name))
     }
 
@@ -149,23 +190,26 @@ impl PickerState {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub(crate) enum PickerAction {
     Close,
     Up,
     ToggleManaged(bool),
+    ActivateGroup(String),
     ToggleTool,
     ActivateCurrentPath,
     ActivateEntry(usize),
+    StartRepoAction(usize, RepoActionKind),
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub(crate) struct PickerLayout {
     pub(crate) frame: Rect,
     pub(crate) content: Rect,
     pub(crate) back_button: Option<Rect>,
     pub(crate) close_button: Rect,
     pub(crate) env_button: Rect,
+    pub(crate) group_buttons: Vec<(String, Rect)>,
     pub(crate) all_button: Rect,
     pub(crate) tool_button: Rect,
     pub(crate) spawn_here_button: Rect,
@@ -227,6 +271,71 @@ pub(crate) fn join_path(base: &str, name: &str) -> String {
     }
 }
 
+pub(crate) fn kind_label(kind: RepoActionKind) -> &'static str {
+    match kind {
+        RepoActionKind::Commit => "commit",
+    }
+}
+
+fn picker_entry_action_kind(entry: &DirEntry) -> Option<RepoActionKind> {
+    if entry.repo_action.as_ref().map(|status| status.state) == Some(RepoActionState::Running) {
+        return None;
+    }
+
+    entry
+        .repo_dirty
+        .unwrap_or(false)
+        .then_some(RepoActionKind::Commit)
+}
+
+pub(crate) fn picker_entry_action_is_clickable(entry: &DirEntry) -> bool {
+    picker_entry_action_kind(entry).is_some()
+}
+
+pub(crate) fn picker_entry_action_label(entry: &DirEntry) -> Option<String> {
+    match entry.repo_action.as_ref().map(|status| status.state) {
+        Some(RepoActionState::Running) => Some("[running]".to_string()),
+        Some(RepoActionState::Failed) => Some("[failed]".to_string()),
+        Some(RepoActionState::Succeeded) if !entry.repo_dirty.unwrap_or(false) => {
+            Some("[done]".to_string())
+        }
+        _ if entry.repo_dirty.unwrap_or(false) => {
+            Some(format!("[{}]", kind_label(RepoActionKind::Commit)))
+        }
+        _ => None,
+    }
+}
+
+fn picker_entry_action_color(entry: &DirEntry) -> Color {
+    match entry.repo_action.as_ref().map(|status| status.state) {
+        Some(RepoActionState::Running) => Color::Yellow,
+        Some(RepoActionState::Failed) => Color::Red,
+        Some(RepoActionState::Succeeded) if !entry.repo_dirty.unwrap_or(false) => Color::Green,
+        _ if entry.repo_dirty.unwrap_or(false) => Color::Green,
+        _ => Color::DarkGrey,
+    }
+}
+
+fn picker_entry_action_rect(
+    picker: &PickerState,
+    layout: &PickerLayout,
+    index: usize,
+) -> Option<Rect> {
+    if index < picker.scroll || index >= picker.scroll + layout.visible_entry_rows {
+        return None;
+    }
+
+    let entry = picker.entries.get(index)?;
+    let label = picker_entry_action_label(entry)?;
+    let width = label.len() as u16;
+    Some(Rect {
+        x: layout.content.right().saturating_sub(width),
+        y: layout.first_entry_y + (index - picker.scroll) as u16,
+        width,
+        height: 1,
+    })
+}
+
 pub(crate) fn picker_layout(picker: &PickerState, field: Rect) -> PickerLayout {
     let width = PICKER_WIDTH.min(field.width);
     let max_height = PICKER_MAX_HEIGHT.min(field.height);
@@ -275,7 +384,7 @@ pub(crate) fn picker_layout(picker: &PickerState, field: Rect) -> PickerLayout {
     };
     let managed_label_width = match &picker.overlay_label {
         Some(label) => label.len() as u16 + 2, // [label]
-        None => 9, // [managed]
+        None => 9,                             // [managed]
     };
     let env_button = Rect {
         x: content.x,
@@ -283,8 +392,21 @@ pub(crate) fn picker_layout(picker: &PickerState, field: Rect) -> PickerLayout {
         width: managed_label_width,
         height: 1,
     };
+    let mut next_group_x = env_button.right() + 1;
+    let mut group_buttons: Vec<(String, Rect)> = Vec::new();
+    for name in &picker.available_groups {
+        let label_width = name.len() as u16 + 2; // [name]
+        let rect = Rect {
+            x: next_group_x.min(content.right().saturating_sub(label_width)),
+            y: content.y + 2,
+            width: label_width,
+            height: 1,
+        };
+        next_group_x = rect.right() + 1;
+        group_buttons.push((name.clone(), rect));
+    }
     let all_button = Rect {
-        x: (content.x + managed_label_width + 2).min(content.right().saturating_sub(13)),
+        x: next_group_x.min(content.right().saturating_sub(13)),
         y: content.y + 2,
         width: 13,
         height: 1,
@@ -303,6 +425,7 @@ pub(crate) fn picker_layout(picker: &PickerState, field: Rect) -> PickerLayout {
         back_button,
         close_button,
         env_button,
+        group_buttons,
         all_button,
         tool_button,
         spawn_here_button: Rect {
@@ -318,7 +441,7 @@ pub(crate) fn picker_layout(picker: &PickerState, field: Rect) -> PickerLayout {
 
 pub(crate) fn picker_action_at(
     picker: &PickerState,
-    layout: PickerLayout,
+    layout: &PickerLayout,
     x: u16,
     y: u16,
 ) -> Option<PickerAction> {
@@ -338,6 +461,11 @@ pub(crate) fn picker_action_at(
     if layout.env_button.contains(x, y) {
         return Some(PickerAction::ToggleManaged(true));
     }
+    for (name, rect) in &layout.group_buttons {
+        if rect.contains(x, y) {
+            return Some(PickerAction::ActivateGroup(name.clone()));
+        }
+    }
     if layout.all_button.contains(x, y) {
         return Some(PickerAction::ToggleManaged(false));
     }
@@ -351,6 +479,13 @@ pub(crate) fn picker_action_at(
     {
         let index = picker.scroll + (y - layout.first_entry_y) as usize;
         if index < picker.entries.len() {
+            if let Some(rect) = picker_entry_action_rect(picker, layout, index) {
+                if rect.contains(x, y) {
+                    if let Some(kind) = picker_entry_action_kind(&picker.entries[index]) {
+                        return Some(PickerAction::StartRepoAction(index, kind));
+                    }
+                }
+            }
             return Some(PickerAction::ActivateEntry(index));
         }
     }
@@ -409,24 +544,35 @@ pub(crate) fn render_picker(renderer: &mut Renderer, picker: &PickerState, field
         Some(label) => format!("[{}]", label.to_lowercase()),
         None => "[managed]".to_string(),
     };
+    let in_group = picker.current_group.is_some();
     renderer.draw_text(
         layout.env_button.x,
         layout.env_button.y,
         &managed_label,
-        if picker.managed_only {
+        if picker.managed_only && !in_group {
             Color::White
         } else {
             Color::DarkGrey
         },
     );
+    for (name, rect) in &layout.group_buttons {
+        let label = format!("[{name}]");
+        let active = picker.current_group.as_deref() == Some(name);
+        renderer.draw_text(
+            rect.x,
+            rect.y,
+            &label,
+            if active { Color::White } else { Color::DarkGrey },
+        );
+    }
     renderer.draw_text(
         layout.all_button.x,
         layout.all_button.y,
         "[all folders]",
-        if picker.managed_only {
-            Color::DarkGrey
-        } else {
+        if !picker.managed_only && !in_group {
             Color::White
+        } else {
+            Color::DarkGrey
         },
     );
 
@@ -478,6 +624,12 @@ pub(crate) fn render_picker(renderer: &mut Renderer, picker: &PickerState, field
             None => "",
         };
         let line = format!("{marker} {icon} {}{}", entry.name, running);
+        let action_label = picker_entry_action_label(entry);
+        let action_width = action_label
+            .as_ref()
+            .map(|label| label.len() as u16 + 1)
+            .unwrap_or(0);
+        let text_width = layout.content.width.saturating_sub(action_width) as usize;
         let themed_color = picker.entry_theme_colors.get(index).copied().flatten();
         let color = if picker.selection == PickerSelection::Entry(index) {
             themed_color.unwrap_or(Color::White)
@@ -491,9 +643,18 @@ pub(crate) fn render_picker(renderer: &mut Renderer, picker: &PickerState, field
         renderer.draw_text(
             layout.content.x,
             layout.first_entry_y + row as u16,
-            &truncate_label(&line, layout.content.width as usize),
+            &truncate_label(&line, text_width),
             color,
         );
+        if let Some(label) = action_label {
+            let action_x = layout.content.right().saturating_sub(label.len() as u16);
+            renderer.draw_text(
+                action_x,
+                layout.first_entry_y + row as u16,
+                &label,
+                picker_entry_action_color(entry),
+            );
+        }
     }
 }
 

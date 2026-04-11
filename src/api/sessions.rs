@@ -621,6 +621,7 @@ mod tests {
             daemon_defaults: None,
             file_store: None,
             published_selection: Arc::new(RwLock::new(PublishedSelectionState::default())),
+            repo_actions: crate::host_actions::RepoActionTracker::default(),
         })
     }
 

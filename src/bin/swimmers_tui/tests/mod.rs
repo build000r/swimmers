@@ -10,7 +10,9 @@ use std::sync::{Arc, LazyLock, Mutex};
 use chrono::Utc;
 use proptest::prelude::*;
 use swimmers::openrouter_models::default_openrouter_candidates;
-use swimmers::types::{GhosttyOpenMode, ThoughtSource, ThoughtState, TransportHealth};
+use swimmers::types::{
+    GhosttyOpenMode, RepoActionStatus, ThoughtSource, ThoughtState, TransportHealth,
+};
 use tempfile::tempdir;
 
 const EXPECTED_TERMINAL_ENTRY: &str = concat!(
@@ -54,6 +56,7 @@ struct MockApiState {
     publish_selection_results: VecDeque<Result<(), String>>,
     open_session_results: VecDeque<Result<NativeDesktopOpenResponse, String>>,
     list_dirs_results: VecDeque<Result<DirListResponse, String>>,
+    start_repo_action_results: VecDeque<Result<DirRepoActionResponse, String>>,
     create_session_results: VecDeque<Result<CreateSessionResponse, String>>,
     update_thought_config_calls: Vec<ThoughtConfig>,
     test_thought_config_calls: Vec<ThoughtConfig>,
@@ -64,6 +67,7 @@ struct MockApiState {
     publish_calls: Vec<Option<String>>,
     open_calls: Vec<String>,
     list_calls: Vec<(Option<String>, bool)>,
+    start_repo_action_calls: Vec<(String, RepoActionKind)>,
     create_calls: Vec<(String, SpawnTool, Option<String>)>,
 }
 
@@ -173,6 +177,14 @@ impl MockApi {
             .push_back(result);
     }
 
+    fn push_start_repo_action(&self, result: Result<DirRepoActionResponse, String>) {
+        self.state
+            .lock()
+            .unwrap()
+            .start_repo_action_results
+            .push_back(result);
+    }
+
     fn push_open_session(&self, result: Result<NativeDesktopOpenResponse, String>) {
         self.state
             .lock()
@@ -187,6 +199,10 @@ impl MockApi {
 
     fn create_calls(&self) -> Vec<(String, SpawnTool, Option<String>)> {
         self.state.lock().unwrap().create_calls.clone()
+    }
+
+    fn start_repo_action_calls(&self) -> Vec<(String, RepoActionKind)> {
+        self.state.lock().unwrap().start_repo_action_calls.clone()
     }
 
     fn publish_calls(&self) -> Vec<Option<String>> {
@@ -453,6 +469,7 @@ impl TuiApi for MockApi {
         &self,
         path: Option<&str>,
         managed_only: bool,
+        _group: Option<&str>,
     ) -> BoxFuture<'_, Result<DirListResponse, String>> {
         let state = self.state.clone();
         let path = path.map(|value| value.to_string());
@@ -463,6 +480,23 @@ impl TuiApi for MockApi {
                 .list_dirs_results
                 .pop_front()
                 .unwrap_or_else(|| Err("unexpected list_dirs".to_string()))
+        })
+    }
+
+    fn start_repo_action(
+        &self,
+        path: &str,
+        kind: RepoActionKind,
+    ) -> BoxFuture<'_, Result<DirRepoActionResponse, String>> {
+        let state = self.state.clone();
+        let path = path.to_string();
+        Box::pin(async move {
+            let mut state = state.lock().unwrap();
+            state.start_repo_action_calls.push((path, kind));
+            state
+                .start_repo_action_results
+                .pop_front()
+                .unwrap_or_else(|| Err("unexpected start_repo_action".to_string()))
         })
     }
 
@@ -1041,7 +1075,7 @@ async fn api_client_list_dirs_allows_slower_directory_listing_responses() {
     let client = test_api_client(base_url, None);
 
     let response = client
-        .list_dirs(None, true)
+        .list_dirs(None, true, None)
         .await
         .expect("list dirs should outlive the default polling timeout");
 
@@ -1154,7 +1188,7 @@ async fn api_client_list_dirs_reports_feature_hint_on_404() {
     let client = test_api_client(format!("http://{addr}"), None);
 
     let error = client
-        .list_dirs(None, true)
+        .list_dirs(None, true, None)
         .await
         .expect_err("missing route should explain the required feature");
 
@@ -2279,9 +2313,31 @@ fn dir_response(path: &str, names: &[(&str, bool)]) -> DirListResponse {
                 name: (*name).to_string(),
                 has_children: *has_children,
                 is_running: None,
+                repo_dirty: None,
+                repo_action: None,
+                group: None,
+                full_path: None,
             })
             .collect(),
         overlay_label: None,
+        groups: Vec::new(),
+    }
+}
+
+fn repo_dir_entry(
+    name: &str,
+    has_children: bool,
+    repo_dirty: Option<bool>,
+    repo_action: Option<RepoActionStatus>,
+) -> DirEntry {
+    DirEntry {
+        name: name.to_string(),
+        has_children,
+        is_running: None,
+        repo_dirty,
+        repo_action,
+        group: None,
+        full_path: None,
     }
 }
 
@@ -5027,43 +5083,43 @@ fn picker_action_at_resolves_controls_and_entries() {
         true,
         SpawnTool::Codex,
     );
-    picker.apply_response(dir_response("/tmp/nested", &[("child", false)]));
+    picker.apply_response(dir_response("/tmp/nested", &[("child", false)]), false);
     let layout = picker_layout(&picker, test_field());
 
     assert!(matches!(
         picker_action_at(
             &picker,
-            layout,
+            &layout,
             layout.close_button.x,
             layout.close_button.y
         ),
         Some(PickerAction::Close)
     ));
     assert!(matches!(
-        picker_action_at(&picker, layout, layout.env_button.x, layout.env_button.y),
+        picker_action_at(&picker, &layout, layout.env_button.x, layout.env_button.y),
         Some(PickerAction::ToggleManaged(true))
     ));
     assert!(matches!(
-        picker_action_at(&picker, layout, layout.all_button.x, layout.all_button.y),
+        picker_action_at(&picker, &layout, layout.all_button.x, layout.all_button.y),
         Some(PickerAction::ToggleManaged(false))
     ));
     assert!(matches!(
         picker_action_at(
             &picker,
-            layout,
+            &layout,
             layout.spawn_here_button.x,
             layout.spawn_here_button.y
         ),
         Some(PickerAction::ActivateCurrentPath)
     ));
     assert!(matches!(
-        picker_action_at(&picker, layout, layout.content.x, layout.first_entry_y),
+        picker_action_at(&picker, &layout, layout.content.x, layout.first_entry_y),
         Some(PickerAction::ActivateEntry(0))
     ));
     assert!(matches!(
         picker_action_at(
             &picker,
-            layout,
+            &layout,
             layout.content.right(),
             layout.first_entry_y
         ),
@@ -5072,12 +5128,36 @@ fn picker_action_at_resolves_controls_and_entries() {
     assert!(matches!(
         layout
             .back_button
-            .and_then(|button| picker_action_at(&picker, layout, button.x, button.y)),
+            .and_then(|button| picker_action_at(&picker, &layout, button.x, button.y)),
         Some(PickerAction::Up)
     ));
     assert!(matches!(
-        picker_action_at(&picker, layout, layout.tool_button.x, layout.tool_button.y),
+        picker_action_at(&picker, &layout, layout.tool_button.x, layout.tool_button.y),
         Some(PickerAction::ToggleTool)
+    ));
+}
+
+#[test]
+fn picker_action_at_prefers_repo_action_badges() {
+    let picker = PickerState::new(
+        4,
+        4,
+        DirListResponse {
+            path: TEST_REPOS_ROOT.to_string(),
+            entries: vec![repo_dir_entry("swimmers", true, Some(true), None)],
+            overlay_label: None,
+            groups: Vec::new(),
+        },
+        true,
+        SpawnTool::Codex,
+    );
+    let layout = picker_layout(&picker, test_field());
+    let label = "[commit]";
+    let action_x = layout.content.right().saturating_sub(label.len() as u16);
+
+    assert!(matches!(
+        picker_action_at(&picker, &layout, action_x, layout.first_entry_y),
+        Some(PickerAction::StartRepoAction(0, RepoActionKind::Commit))
     ));
 }
 
@@ -5114,6 +5194,76 @@ fn toggle_tool_switches_spawn_tool_and_persists_across_picker_reopen() {
     assert_eq!(
         app.picker.as_ref().map(|p| p.spawn_tool),
         Some(SpawnTool::Claude)
+    );
+}
+
+#[test]
+fn picker_commit_action_calls_api_and_preserves_selection() {
+    let api = MockApi::new();
+    api.push_start_repo_action(Ok(DirRepoActionResponse {
+        ok: true,
+        path: TEST_REPO_SWIMMERS.to_string(),
+        status: RepoActionStatus {
+            kind: RepoActionKind::Commit,
+            state: RepoActionState::Running,
+            detail: None,
+        },
+    }));
+    api.push_list_dirs(Ok(DirListResponse {
+        path: TEST_REPOS_ROOT.to_string(),
+        entries: vec![repo_dir_entry(
+            "swimmers",
+            true,
+            Some(true),
+            Some(RepoActionStatus {
+                kind: RepoActionKind::Commit,
+                state: RepoActionState::Running,
+                detail: None,
+            }),
+        )],
+        overlay_label: None,
+        groups: Vec::new(),
+    }));
+
+    let mut app = make_app(api.clone());
+    let mut picker = PickerState::new(
+        2,
+        2,
+        DirListResponse {
+            path: TEST_REPOS_ROOT.to_string(),
+            entries: vec![repo_dir_entry("swimmers", true, Some(true), None)],
+            overlay_label: None,
+            groups: Vec::new(),
+        },
+        true,
+        SpawnTool::Codex,
+    );
+    picker.selection = PickerSelection::Entry(0);
+    app.picker = Some(picker);
+
+    app.picker_start_action_for_selection(RepoActionKind::Commit);
+    assert!(app.pending_interaction.is_some());
+    poll_until_interaction(&mut app);
+
+    assert_eq!(
+        api.start_repo_action_calls(),
+        vec![(TEST_REPO_SWIMMERS.to_string(), RepoActionKind::Commit)]
+    );
+    assert_eq!(
+        app.picker.as_ref().map(|picker| picker.selection),
+        Some(PickerSelection::Entry(0))
+    );
+    assert_eq!(
+        app.picker
+            .as_ref()
+            .and_then(|picker| picker.entries.first())
+            .and_then(|entry| entry.repo_action.as_ref())
+            .map(|status| status.state),
+        Some(RepoActionState::Running)
+    );
+    assert_eq!(
+        app.message.as_ref().map(|(message, _)| message.as_str()),
+        Some("commit started for swimmers")
     );
 }
 
@@ -5822,7 +5972,7 @@ fn picker_activate_selection_opens_initial_request_and_reloads_children() {
     );
 
     if let Some(picker) = &mut app.picker {
-        picker.apply_response(dir_response("/tmp", &[("leaf", false)]));
+        picker.apply_response(dir_response("/tmp", &[("leaf", false)]), false);
         picker.selection = PickerSelection::Entry(0);
     }
     app.picker_activate_selection(layout.overview_field);

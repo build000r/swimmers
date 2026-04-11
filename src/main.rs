@@ -249,6 +249,7 @@ async fn run() -> anyhow::Result<()> {
         daemon_defaults,
         file_store: persistence_store,
         published_selection: Arc::new(RwLock::new(api::PublishedSelectionState::default())),
+        repo_actions: host_actions::RepoActionTracker::default(),
     });
 
     let app = build_app_router(config.clone(), state, prom_handle);

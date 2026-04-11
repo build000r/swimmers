@@ -127,6 +127,28 @@ impl SpawnTool {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+pub enum RepoActionKind {
+    Commit,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RepoActionState {
+    Running,
+    Succeeded,
+    Failed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RepoActionStatus {
+    pub kind: RepoActionKind,
+    pub state: RepoActionState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum NativeDesktopApp {
     Iterm,
     Ghostty,
@@ -349,6 +371,17 @@ pub struct DirEntry {
     pub has_children: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub is_running: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repo_dirty: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repo_action: Option<RepoActionStatus>,
+    /// When set, this entry represents a virtual directory group.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
+    /// Explicit absolute path for entries whose parent differs from the
+    /// response `path` (e.g. entries inside a group listing).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub full_path: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -357,6 +390,8 @@ pub struct DirListResponse {
     pub entries: Vec<DirEntry>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub overlay_label: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub groups: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -369,6 +404,19 @@ pub struct DirRestartResponse {
     pub ok: bool,
     pub path: String,
     pub services: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DirRepoActionRequest {
+    pub path: String,
+    pub kind: RepoActionKind,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DirRepoActionResponse {
+    pub ok: bool,
+    pub path: String,
+    pub status: RepoActionStatus,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

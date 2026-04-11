@@ -15,6 +15,7 @@ use tokio::sync::{oneshot, RwLock};
 
 use crate::auth;
 use crate::config::Config;
+use crate::host_actions::RepoActionTracker;
 use crate::persistence::file_store::FileStore;
 use crate::session::actor::SessionCommand;
 use crate::session::supervisor::SessionSupervisor;
@@ -38,6 +39,7 @@ pub struct AppState {
     pub daemon_defaults: Option<DaemonDefaults>,
     pub file_store: Option<Arc<FileStore>>,
     pub published_selection: Arc<RwLock<PublishedSelectionState>>,
+    pub repo_actions: RepoActionTracker,
 }
 
 pub(crate) async fn fetch_live_summary(

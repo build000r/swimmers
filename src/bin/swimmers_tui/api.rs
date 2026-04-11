@@ -304,7 +304,13 @@ pub(crate) trait TuiApi: Send + Sync + 'static {
         &self,
         path: Option<&str>,
         managed_only: bool,
+        group: Option<&str>,
     ) -> BoxFuture<'_, Result<DirListResponse, String>>;
+    fn start_repo_action(
+        &self,
+        path: &str,
+        kind: RepoActionKind,
+    ) -> BoxFuture<'_, Result<DirRepoActionResponse, String>>;
     fn create_session(
         &self,
         cwd: &str,
@@ -609,8 +615,10 @@ impl TuiApi for ApiClient {
         &self,
         path: Option<&str>,
         managed_only: bool,
+        group: Option<&str>,
     ) -> BoxFuture<'_, Result<DirListResponse, String>> {
         let path = path.map(|value| value.to_string());
+        let group = group.map(|value| value.to_string());
         Box::pin(async move {
             let url = format!("{}/v1/dirs", self.base_url);
             let mut request = self.http.get(url);
@@ -619,6 +627,9 @@ impl TuiApi for ApiClient {
             }
             if managed_only {
                 request = request.query(&[("managed_only", true)]);
+            }
+            if let Some(group) = group {
+                request = request.query(&[("group", group)]);
             }
 
             let response = self
@@ -637,6 +648,40 @@ impl TuiApi for ApiClient {
             if response.status() == reqwest::StatusCode::NOT_FOUND {
                 return Err(format!(
                     "backend at {} does not expose /v1/dirs. Click-to-spawn directory browsing requires a `swimmers` build with `--features personal-workflows`; if this is your local server, relaunch via `make tui`.",
+                    self.base_url
+                ));
+            }
+
+            Err(read_error(response).await)
+        })
+    }
+
+    fn start_repo_action(
+        &self,
+        path: &str,
+        kind: RepoActionKind,
+    ) -> BoxFuture<'_, Result<DirRepoActionResponse, String>> {
+        let path = path.to_string();
+        Box::pin(async move {
+            let url = format!("{}/v1/dirs/actions", self.base_url);
+            let response = self
+                .with_auth(self.http.post(url))
+                .timeout(API_DIRECTORY_ACTION_TIMEOUT)
+                .json(&DirRepoActionRequest { path, kind })
+                .send()
+                .await
+                .map_err(|err| self.transport_error("start the repo action", err))?;
+
+            if response.status().is_success() {
+                return response
+                    .json::<DirRepoActionResponse>()
+                    .await
+                    .map_err(|err| format!("failed to parse repo action response: {err}"));
+            }
+
+            if response.status() == reqwest::StatusCode::NOT_FOUND {
+                return Err(format!(
+                    "backend at {} does not expose /v1/dirs/actions. Repo actions require a `swimmers` build with `--features personal-workflows`; if this is your local server, relaunch via `make tui`.",
                     self.base_url
                 ));
             }

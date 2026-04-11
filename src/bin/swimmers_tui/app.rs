@@ -72,7 +72,15 @@ pub(crate) enum PendingInteractionResult {
     },
     ReloadPicker {
         managed_only: bool,
+        group: Option<String>,
+        preserve_selection: bool,
         response: Result<DirListResponse, String>,
+    },
+    StartRepoAction {
+        repo_label: String,
+        reload_path: String,
+        managed_only: bool,
+        response: Result<DirRepoActionResponse, String>,
     },
     CreateSession {
         field: Rect,
@@ -127,6 +135,7 @@ pub(crate) struct App<C: TuiApi> {
     pub(crate) message: Option<(String, Instant)>,
     pub(crate) last_refresh: Option<Instant>,
     pub(crate) last_successful_refresh: Option<Instant>,
+    pub(crate) last_picker_refresh: Option<Instant>,
     pub(crate) thought_panel_ratio: f32,
     pub(crate) split_drag_active: bool,
     pub(crate) tick: u64,
@@ -193,6 +202,7 @@ impl<C: TuiApi> App<C> {
             message: None,
             last_refresh: None,
             last_successful_refresh: None,
+            last_picker_refresh: None,
             thought_panel_ratio: THOUGHT_RAIL_DEFAULT_RATIO,
             split_drag_active: false,
             tick: 0,
@@ -250,6 +260,34 @@ impl<C: TuiApi> App<C> {
         self.last_refresh
             .map(|last| last.elapsed() >= REFRESH_INTERVAL)
             .unwrap_or(true)
+    }
+
+    pub(crate) fn should_refresh_picker(&self) -> bool {
+        self.picker.is_some()
+            && self.pending_interaction.is_none()
+            && self.initial_request.is_none()
+            && self
+                .last_picker_refresh
+                .map(|last| last.elapsed() >= REFRESH_INTERVAL)
+                .unwrap_or(true)
+    }
+
+    pub(crate) fn maybe_refresh_picker(&mut self) {
+        if !self.should_refresh_picker() {
+            return;
+        }
+
+        let Some((path, managed_only, group)) = self.picker.as_ref().map(|picker| {
+            (
+                picker.current_path.clone(),
+                picker.managed_only,
+                picker.current_group.clone(),
+            )
+        }) else {
+            return;
+        };
+
+        self.picker_reload_with_options(Some(path), managed_only, group, false, true);
     }
 
     pub(crate) fn native_status_text(&self) -> String {
@@ -1065,22 +1103,50 @@ impl<C: TuiApi> App<C> {
                     let mut picker = PickerState::new(x, y, response, true, self.spawn_tool);
                     picker.sync_theme_colors(&mut self.repo_themes);
                     self.picker = Some(picker);
+                    self.last_picker_refresh = Some(Instant::now());
                 }
                 Err(err) => {
                     self.set_message(err);
                     self.picker = None;
+                    self.last_picker_refresh = None;
                 }
             },
             PendingInteractionResult::ReloadPicker {
                 managed_only,
+                group,
+                preserve_selection,
                 response,
             } => match response {
                 Ok(response) => {
                     if let Some(picker) = &mut self.picker {
                         picker.managed_only = managed_only;
-                        picker.apply_response(response);
+                        picker.current_group = group;
+                        picker.apply_response(response, preserve_selection);
                         picker.sync_theme_colors(&mut self.repo_themes);
+                        self.last_picker_refresh = Some(Instant::now());
                     }
+                }
+                Err(err) => self.set_message(err),
+            },
+            PendingInteractionResult::StartRepoAction {
+                repo_label,
+                reload_path,
+                managed_only,
+                response,
+            } => match response {
+                Ok(_) => {
+                    self.set_message(format!("commit started for {repo_label}"));
+                    let group = self
+                        .picker
+                        .as_ref()
+                        .and_then(|p| p.current_group.clone());
+                    self.picker_reload_with_options(
+                        Some(reload_path),
+                        managed_only,
+                        group,
+                        false,
+                        true,
+                    );
                 }
                 Err(err) => self.set_message(err),
             },
@@ -1454,6 +1520,7 @@ impl<C: TuiApi> App<C> {
     pub(crate) fn close_picker(&mut self) {
         self.picker = None;
         self.initial_request = None;
+        self.last_picker_refresh = None;
     }
 
     pub(crate) fn open_thought_config_editor(&mut self) {
@@ -1826,47 +1893,127 @@ impl<C: TuiApi> App<C> {
         let client = Arc::clone(&self.client);
         self.set_message("loading directories...");
         self.runtime.spawn(async move {
-            let response = client.list_dirs(None, true).await;
+            let response = client.list_dirs(None, true, None).await;
             let _ = tx.send(PendingInteractionResult::OpenPicker { x, y, response });
         });
     }
 
-    pub(crate) fn picker_reload(&mut self, path: Option<String>, managed_only: bool) {
+    pub(crate) fn picker_reload(
+        &mut self,
+        path: Option<String>,
+        managed_only: bool,
+        group: Option<String>,
+    ) {
+        self.picker_reload_with_options(path, managed_only, group, true, false);
+    }
+
+    pub(crate) fn picker_reload_with_options(
+        &mut self,
+        path: Option<String>,
+        managed_only: bool,
+        group: Option<String>,
+        show_message: bool,
+        preserve_selection: bool,
+    ) {
         let Some(tx) = self.begin_pending_interaction() else {
             return;
         };
 
         let client = Arc::clone(&self.client);
-        self.set_message("loading directories...");
+        if show_message {
+            self.set_message("loading directories...");
+        }
         self.runtime.spawn(async move {
-            let response = client.list_dirs(path.as_deref(), managed_only).await;
+            let response = client
+                .list_dirs(path.as_deref(), managed_only, group.as_deref())
+                .await;
             let _ = tx.send(PendingInteractionResult::ReloadPicker {
                 managed_only,
+                group,
+                preserve_selection,
                 response,
             });
         });
     }
 
     pub(crate) fn picker_up(&mut self) {
-        let Some(parent_path) = self.picker.as_ref().and_then(PickerState::parent_path) else {
+        let Some(picker) = &self.picker else {
             return;
         };
-        let managed_only = self
-            .picker
-            .as_ref()
-            .map(|picker| picker.managed_only)
-            .unwrap_or(true);
-        self.picker_reload(Some(parent_path), managed_only);
+
+        // Inside a group → go back to root listing.
+        if picker.current_group.is_some() {
+            let managed_only = picker.managed_only;
+            self.picker_reload(None, managed_only, None);
+            return;
+        }
+
+        let Some(parent_path) = picker.parent_path() else {
+            return;
+        };
+        let managed_only = picker.managed_only;
+        self.picker_reload(Some(parent_path), managed_only, None);
     }
 
     pub(crate) fn picker_set_managed_only(&mut self, managed_only: bool) {
         let Some(picker) = &self.picker else {
             return;
         };
-        if picker.managed_only == managed_only {
+        if picker.managed_only == managed_only && picker.current_group.is_none() {
             return;
         }
-        self.picker_reload(Some(picker.current_path.clone()), managed_only);
+        let path = if picker.current_group.is_some() {
+            None
+        } else {
+            Some(picker.current_path.clone())
+        };
+        self.picker_reload(path, managed_only, None);
+    }
+
+    pub(crate) fn picker_set_group(&mut self, name: String) {
+        let Some(picker) = &self.picker else {
+            return;
+        };
+        if picker.current_group.as_ref() == Some(&name) {
+            return;
+        }
+        self.picker_reload(None, picker.managed_only, Some(name));
+    }
+
+    pub(crate) fn start_picker_repo_action(&mut self, index: usize, kind: RepoActionKind) {
+        let Some((entry_path, repo_label, reload_path, managed_only)) =
+            self.picker.as_ref().and_then(|picker| {
+                let entry = picker.entries.get(index)?;
+                if !picker_entry_action_is_clickable(entry) {
+                    return None;
+                }
+                Some((
+                    picker.path_for_entry(index)?,
+                    entry.name.clone(),
+                    picker.current_path.clone(),
+                    picker.managed_only,
+                ))
+            })
+        else {
+            self.set_message("selected folder has no repo action");
+            return;
+        };
+
+        let Some(tx) = self.begin_pending_interaction() else {
+            return;
+        };
+
+        let client = Arc::clone(&self.client);
+        self.set_message(format!("starting {}...", kind_label(kind)));
+        self.runtime.spawn(async move {
+            let response = client.start_repo_action(&entry_path, kind).await;
+            let _ = tx.send(PendingInteractionResult::StartRepoAction {
+                repo_label,
+                reload_path,
+                managed_only,
+                response,
+            });
+        });
     }
 
     pub(crate) fn open_initial_request(&mut self, cwd: String) {
@@ -1955,7 +2102,7 @@ impl<C: TuiApi> App<C> {
                         .as_ref()
                         .map(|picker| picker.managed_only)
                         .unwrap_or(true);
-                    self.picker_reload(Some(path), managed_only);
+                    self.picker_reload(Some(path), managed_only, None);
                 }
             }
             PickerSelection::Entry(_) => {
@@ -1964,6 +2111,22 @@ impl<C: TuiApi> App<C> {
                 }
             }
         }
+    }
+
+    pub(crate) fn picker_start_action_for_selection(&mut self, kind: RepoActionKind) {
+        let Some(index) = self
+            .picker
+            .as_ref()
+            .and_then(|picker| match picker.selection {
+                PickerSelection::Entry(index) => Some(index),
+                PickerSelection::SpawnHere => None,
+            })
+        else {
+            self.set_message("select a repo first");
+            return;
+        };
+
+        self.start_picker_repo_action(index, kind);
     }
 
     pub(crate) fn spawn_session(
@@ -2603,7 +2766,7 @@ impl<C: TuiApi> App<C> {
         if let Some(picker) = &self.picker {
             let layout = picker_layout(picker, field);
             if layout.frame.contains(x, y) {
-                if let Some(action) = picker_action_at(picker, layout, x, y) {
+                if let Some(action) = picker_action_at(picker, &layout, x, y) {
                     self.handle_picker_action(action, field);
                 }
                 return;
@@ -2643,6 +2806,9 @@ impl<C: TuiApi> App<C> {
             PickerAction::ToggleManaged(managed_only) => {
                 self.picker_set_managed_only(managed_only);
             }
+            PickerAction::ActivateGroup(name) => {
+                self.picker_set_group(name);
+            }
             PickerAction::ToggleTool => {
                 self.spawn_tool = self.spawn_tool.toggle();
                 if let Some(picker) = &mut self.picker {
@@ -2651,6 +2817,9 @@ impl<C: TuiApi> App<C> {
             }
             PickerAction::ActivateCurrentPath => self.spawn_session_from_picker(field),
             PickerAction::ActivateEntry(index) => self.activate_picker_entry(index, field),
+            PickerAction::StartRepoAction(index, kind) => {
+                self.start_picker_repo_action(index, kind)
+            }
         }
     }
 
@@ -2677,7 +2846,7 @@ impl<C: TuiApi> App<C> {
         };
 
         if has_children {
-            self.picker_reload(Some(path), managed_only);
+            self.picker_reload(Some(path), managed_only, None);
         } else {
             self.open_initial_request(path);
         }

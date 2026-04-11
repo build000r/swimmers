@@ -32,6 +32,7 @@ pub(crate) fn prepare_frame<C: TuiApi>(
     app.poll_pending_selection_publication();
     app.poll_pending_interaction();
     app.poll_refresh(layout);
+    app.maybe_refresh_picker();
     if app.should_refresh() && app.pending_refresh.is_none() {
         app.spawn_background_refresh(false);
     }
@@ -233,13 +234,19 @@ pub(crate) fn handle_key_event<C: TuiApi>(
             app.picker_set_managed_only(false);
             true
         }
+        KeyCode::Char('c') if app.picker.is_some() => {
+            app.picker_start_action_for_selection(RepoActionKind::Commit);
+            true
+        }
         KeyCode::Char('r') => {
-            if let Some((path, managed_only)) = app
-                .picker
-                .as_ref()
-                .map(|picker| (picker.current_path.clone(), picker.managed_only))
-            {
-                app.picker_reload(Some(path), managed_only);
+            if let Some((path, managed_only, group)) = app.picker.as_ref().map(|picker| {
+                (
+                    picker.current_path.clone(),
+                    picker.managed_only,
+                    picker.current_group.clone(),
+                )
+            }) {
+                app.picker_reload(Some(path), managed_only, group);
             } else {
                 app.manual_refresh(layout);
             }

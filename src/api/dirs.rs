@@ -1,26 +1,40 @@
 #![cfg_attr(not(feature = "personal-workflows"), allow(dead_code))]
 
+use crate::api::AppState;
+use crate::auth::{AuthInfo, AuthScope};
+use crate::host_actions::{
+    inspect_git_repo, RepoActionExecutor, RepoActionTracker, SystemRepoActionExecutor,
+};
+use crate::session::overlay::{
+    default_overlay, OverlayDirConfig, OverlayDirGroup, OverlayServiceEntry,
+};
+use crate::types::{
+    DirEntry, DirListResponse, DirRepoActionRequest, DirRepoActionResponse, DirRestartRequest,
+    DirRestartResponse, ErrorResponse, RepoActionStatus,
+};
 use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Extension, Json, Router};
+use futures::stream::{self, StreamExt};
 use std::collections::{BTreeSet, HashMap};
+use std::io;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, UNIX_EPOCH};
 use tokio::process::Command;
-use crate::api::AppState;
-use crate::auth::{AuthInfo, AuthScope};
-use crate::session::overlay::{default_overlay, OverlayDirConfig, OverlayServiceEntry};
-use crate::types::{
-    DirEntry, DirListResponse, DirRestartRequest, DirRestartResponse, ErrorResponse,
-};
+
+/// Max concurrent git probes per `list_dirs` call. Keeps a single listing from
+/// fork-bombing the system when a repos directory has many git subdirs, while
+/// still parallelizing enough to hide per-call git latency.
+const GIT_PROBE_CONCURRENCY: usize = 16;
 
 #[derive(serde::Deserialize)]
 struct DirQuery {
     path: Option<String>,
     managed_only: Option<bool>,
+    group: Option<String>,
 }
 
 struct OverlayServiceContext {
@@ -33,6 +47,8 @@ struct ListCandidate {
     has_children: bool,
     modified_at: u64,
     services: Vec<String>,
+    repo_dirty: Option<bool>,
+    repo_action: Option<RepoActionStatus>,
 }
 
 /// Base path for directory browsing. Prefers `DIRS_BASE_PATH` env var, then
@@ -65,7 +81,10 @@ fn managed_base_child_names(config: &OverlayDirConfig, base: &Path) -> Option<BT
         return None;
     }
 
-    let resolved_base = config.base_path.canonicalize().unwrap_or(config.base_path.clone());
+    let resolved_base = config
+        .base_path
+        .canonicalize()
+        .unwrap_or(config.base_path.clone());
     let canonical_base = base.canonicalize().unwrap_or(base.to_path_buf());
 
     let mut children = BTreeSet::new();
@@ -105,10 +124,7 @@ fn relative_repo_path(base: &Path, path: &Path) -> Option<String> {
     Some(components.join("/"))
 }
 
-fn services_for_directory(
-    path: &Path,
-    context: &OverlayServiceContext,
-) -> Vec<String> {
+fn services_for_directory(path: &Path, context: &OverlayServiceContext) -> Vec<String> {
     let Some(relative_path) = relative_repo_path(&context.base_path, path) else {
         return Vec::new();
     };
@@ -218,6 +234,13 @@ async fn restart_services(
     Ok(())
 }
 
+fn repo_action_error_code(error: &io::Error) -> (&'static str, StatusCode) {
+    match error.kind() {
+        io::ErrorKind::AlreadyExists => ("ACTION_ALREADY_RUNNING", StatusCode::CONFLICT),
+        _ => ("ACTION_START_FAILED", StatusCode::INTERNAL_SERVER_ERROR),
+    }
+}
+
 fn error_response(status: StatusCode, code: &str, message: impl Into<String>) -> Response {
     (
         status,
@@ -253,10 +276,92 @@ fn resolve_target_path(base: PathBuf, target: PathBuf) -> Result<(PathBuf, PathB
     Ok((canonical_base, canonical))
 }
 
+/// List entries from a virtual directory group, combining children from all
+/// source directories. Each entry carries its full absolute path since entries
+/// come from multiple distinct parents.
+///
+/// Runs on Tokio's blocking pool via `spawn_blocking` — the nested
+/// `std::fs::read_dir` walks would otherwise stall an async handler worker
+/// the same way `inspect_git_repo` did before it was offloaded. Group configs
+/// can aggregate many sources with many entries each, so this is a
+/// latent hot-path stall waiting to happen.
+async fn list_group_entries(group: &OverlayDirGroup) -> Vec<DirEntry> {
+    let group = group.clone();
+    tokio::task::spawn_blocking(move || list_group_entries_sync(&group))
+        .await
+        .unwrap_or_default()
+}
+
+fn list_group_entries_sync(group: &OverlayDirGroup) -> Vec<DirEntry> {
+    let mut seen = BTreeSet::new();
+    let mut entries: Vec<(DirEntry, u64)> = Vec::new();
+
+    for source_dir in &group.dirs {
+        let Ok(read_dir) = std::fs::read_dir(source_dir) else {
+            continue;
+        };
+        for entry in read_dir.flatten() {
+            let Ok(file_type) = entry.file_type() else {
+                continue;
+            };
+            if !file_type.is_dir() {
+                continue;
+            }
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if name.starts_with('.') {
+                continue;
+            }
+            if !seen.insert(name.clone()) {
+                continue;
+            }
+
+            let entry_path = entry.path();
+            let has_children = std::fs::read_dir(&entry_path)
+                .map(|rd| {
+                    rd.flatten().any(|child| {
+                        child.file_type().map(|ft| ft.is_dir()).unwrap_or(false)
+                            && !child.file_name().to_string_lossy().starts_with('.')
+                    })
+                })
+                .unwrap_or(false);
+
+            let modified_at = entry
+                .metadata()
+                .ok()
+                .and_then(|meta| meta.modified().ok())
+                .and_then(|modified| modified.duration_since(UNIX_EPOCH).ok())
+                .map(|duration| duration.as_secs())
+                .unwrap_or(0);
+
+            let full_path = entry_path
+                .canonicalize()
+                .unwrap_or(entry_path)
+                .to_string_lossy()
+                .into_owned();
+
+            entries.push((
+                DirEntry {
+                    name,
+                    has_children,
+                    is_running: None,
+                    repo_dirty: None,
+                    repo_action: None,
+                    group: None,
+                    full_path: Some(full_path),
+                },
+                modified_at,
+            ));
+        }
+    }
+
+    entries.sort_by(|(a, _), (b, _)| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    entries.into_iter().map(|(entry, _)| entry).collect()
+}
+
 // GET /v1/dirs?path=...
 async fn list_dirs(
     Extension(auth): Extension<AuthInfo>,
-    State(_state): State<Arc<AppState>>,
+    State(state): State<Arc<AppState>>,
     Query(query): Query<DirQuery>,
 ) -> impl IntoResponse {
     if let Err(resp) = auth.require_scope(AuthScope::SessionsRead) {
@@ -264,6 +369,38 @@ async fn list_dirs(
     }
 
     let base = dirs_base_path();
+
+    // Handle group listing: return combined entries from the group's source dirs.
+    if let Some(group_name) = &query.group {
+        let canonical_base = base.canonicalize().unwrap_or(base.clone());
+        let dir_config = resolve_dir_config(&canonical_base);
+        let group = dir_config
+            .and_then(|config| config.groups.iter().find(|g| &g.name == group_name));
+        let Some(group) = group else {
+            return error_response(
+                StatusCode::NOT_FOUND,
+                "GROUP_NOT_FOUND",
+                format!("no group named '{group_name}' in overlay"),
+            );
+        };
+        let entries = list_group_entries(group).await;
+        return (
+            StatusCode::OK,
+            Json(
+                serde_json::to_value(DirListResponse {
+                    path: canonical_base.to_string_lossy().into_owned(),
+                    entries,
+                    overlay_label: dir_config.map(|c| c.label.clone()),
+                    groups: dir_config
+                        .map(|c| c.groups.iter().map(|g| g.name.clone()).collect())
+                        .unwrap_or_default(),
+                })
+                .unwrap(),
+            ),
+        )
+            .into_response();
+    }
+
     let target = match &query.path {
         Some(path) if !path.is_empty() => PathBuf::from(path),
         _ => base.clone(),
@@ -299,7 +436,15 @@ async fn list_dirs(
         services: config.services.clone(),
     });
 
-    let mut candidates: Vec<ListCandidate> = Vec::new();
+    struct PendingEntry {
+        name: String,
+        entry_path: PathBuf,
+        has_children: bool,
+        modified_at: u64,
+        services: Vec<String>,
+    }
+
+    let mut pending: Vec<PendingEntry> = Vec::new();
     let mut unique_services: BTreeSet<String> = BTreeSet::new();
     for entry in read_dir.flatten() {
         let Ok(file_type) = entry.file_type() else {
@@ -345,13 +490,61 @@ async fn list_dirs(
             unique_services.insert(service.clone());
         }
 
-        candidates.push(ListCandidate {
+        pending.push(PendingEntry {
             name,
+            entry_path,
             has_children,
             modified_at,
             services,
         });
     }
+
+    // Probe git state for every entry concurrently. `inspect_git_repo` uses
+    // `tokio::process::Command` with a per-call timeout so a slow repo can't
+    // stall the Tokio worker, and `buffered(N)` bounds concurrent git forks.
+    // Inputs are materialized as owned tuples up-front so the stream closure
+    // has no borrows into `pending` (rustc can't infer HRTBs through it).
+    let probe_inputs: Vec<(PathBuf, RepoActionTracker)> = pending
+        .iter()
+        .map(|pending_entry| (pending_entry.entry_path.clone(), state.repo_actions.clone()))
+        .collect();
+
+    let probes: Vec<(Option<bool>, Option<RepoActionStatus>)> = stream::iter(probe_inputs)
+        .map(|(entry_path, repo_actions)| async move {
+            let repo_summary = inspect_git_repo(&entry_path)
+                .await
+                .ok()
+                .flatten()
+                .and_then(|summary| {
+                    let canonical_entry =
+                        entry_path.canonicalize().unwrap_or(entry_path.clone());
+                    (summary.repo_root == canonical_entry).then_some(summary)
+                });
+            let repo_dirty = repo_summary.as_ref().map(|summary| summary.dirty);
+            let repo_action = match repo_summary.as_ref() {
+                Some(summary) => repo_actions.status_for(&summary.repo_root).await,
+                None => None,
+            };
+            (repo_dirty, repo_action)
+        })
+        .buffered(GIT_PROBE_CONCURRENCY)
+        .collect()
+        .await;
+
+    let candidates: Vec<ListCandidate> = pending
+        .into_iter()
+        .zip(probes.into_iter())
+        .map(
+            |(pending_entry, (repo_dirty, repo_action))| ListCandidate {
+                name: pending_entry.name,
+                has_children: pending_entry.has_children,
+                modified_at: pending_entry.modified_at,
+                services: pending_entry.services,
+                repo_dirty,
+                repo_action,
+            },
+        )
+        .collect();
 
     let health_map = if let Some(config) = dir_config {
         let services: Vec<String> = unique_services.into_iter().collect();
@@ -378,6 +571,10 @@ async fn list_dirs(
                     name: candidate.name,
                     has_children: candidate.has_children,
                     is_running,
+                    repo_dirty: candidate.repo_dirty,
+                    repo_action: candidate.repo_action,
+                    group: None,
+                    full_path: None,
                 },
                 candidate.modified_at,
             )
@@ -391,6 +588,16 @@ async fn list_dirs(
     });
     let entries: Vec<DirEntry> = entries.into_iter().map(|(entry, _)| entry).collect();
 
+    let groups = dir_config
+        .map(|config| {
+            config
+                .groups
+                .iter()
+                .map(|g| g.name.clone())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
     (
         StatusCode::OK,
         Json(
@@ -398,6 +605,7 @@ async fn list_dirs(
                 path: canonical.to_string_lossy().into_owned(),
                 entries,
                 overlay_label: dir_config.map(|c| c.label.clone()),
+                groups,
             })
             .unwrap(),
         ),
@@ -470,10 +678,94 @@ async fn restart_dir_services(
         .into_response()
 }
 
+// POST /v1/dirs/actions
+async fn start_dir_repo_action(
+    Extension(auth): Extension<AuthInfo>,
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<DirRepoActionRequest>,
+) -> Response {
+    if let Err(resp) = auth.require_scope(AuthScope::SessionsWrite) {
+        return resp;
+    }
+
+    start_dir_repo_action_with_executor(state, body, Arc::new(SystemRepoActionExecutor)).await
+}
+
+async fn start_dir_repo_action_with_executor(
+    state: Arc<AppState>,
+    body: DirRepoActionRequest,
+    executor: Arc<dyn RepoActionExecutor>,
+) -> Response {
+    let requested_path = body.path.trim();
+    if requested_path.is_empty() {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "VALIDATION_FAILED",
+            "path is required",
+        );
+    }
+
+    let base = dirs_base_path();
+    let target = PathBuf::from(requested_path);
+    let (_canonical_base, canonical) = match resolve_target_path(base, target) {
+        Ok(paths) => paths,
+        Err(response) => return response,
+    };
+
+    let Some(repo_summary) = inspect_git_repo(&canonical).await.ok().flatten() else {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "NO_GIT_REPO",
+            "path is not inside a git repository",
+        );
+    };
+
+    if !repo_summary.dirty {
+        return error_response(
+            StatusCode::CONFLICT,
+            "REPO_CLEAN",
+            "repo has no pending changes to commit",
+        );
+    }
+
+    if let Err(error) = state
+        .repo_actions
+        .start(repo_summary.repo_root.clone(), body.kind, executor)
+        .await
+    {
+        let (code, status) = repo_action_error_code(&error);
+        return error_response(status, code, error.to_string());
+    }
+
+    let status = state
+        .repo_actions
+        .status_for(&repo_summary.repo_root)
+        .await
+        .unwrap_or(RepoActionStatus {
+            kind: body.kind,
+            state: crate::types::RepoActionState::Running,
+            detail: None,
+        });
+
+    (
+        StatusCode::ACCEPTED,
+        Json(
+            serde_json::to_value(DirRepoActionResponse {
+                ok: true,
+                path: repo_summary.repo_root.to_string_lossy().into_owned(),
+                status,
+            })
+            .unwrap(),
+        ),
+    )
+        .into_response()
+}
+
 pub fn routes() -> Router<Arc<AppState>> {
     Router::new()
         .route("/v1/dirs", get(list_dirs))
         .route("/v1/dirs/restart", post(restart_dir_services))
+        .route("/v1/dirs/actions", post(start_dir_repo_action))
 }
 
 #[cfg(test)]
@@ -485,13 +777,17 @@ mod tests {
     use crate::session::supervisor::SessionSupervisor;
     use crate::thought::protocol::SyncRequestSequence;
     use crate::thought::runtime_config::ThoughtConfig;
+    use crate::types::RepoActionKind;
     use axum::body::to_bytes;
     use axum::extract::{Json, Query, State};
     use axum::response::IntoResponse;
     use serde_json::Value;
     use std::ffi::OsString;
     use std::fs;
+    use std::io;
+    use std::process::Command as ProcessCommand;
     use std::sync::Arc;
+    use std::time::Duration;
     use tokio::sync::RwLock;
 
     struct EnvGuard {
@@ -515,6 +811,33 @@ mod tests {
         EnvGuard { key, previous }
     }
 
+    struct FakeRepoActionExecutor {
+        sleep_ms: u64,
+        detail: Option<String>,
+    }
+
+    impl FakeRepoActionExecutor {
+        fn sleeping_ok(sleep_ms: u64) -> Self {
+            Self {
+                sleep_ms,
+                detail: None,
+            }
+        }
+    }
+
+    impl RepoActionExecutor for FakeRepoActionExecutor {
+        fn execute(
+            &self,
+            _repo_root: std::path::PathBuf,
+            _kind: RepoActionKind,
+        ) -> io::Result<Option<String>> {
+            if self.sleep_ms > 0 {
+                std::thread::sleep(Duration::from_millis(self.sleep_ms));
+            }
+            Ok(self.detail.clone())
+        }
+    }
+
     fn test_state() -> Arc<AppState> {
         let config = Arc::new(Config::default());
         let supervisor = SessionSupervisor::new(config.clone());
@@ -528,6 +851,7 @@ mod tests {
             daemon_defaults: None,
             file_store: None,
             published_selection: Arc::new(RwLock::new(PublishedSelectionState::default())),
+            repo_actions: crate::host_actions::RepoActionTracker::default(),
         })
     }
 
@@ -536,6 +860,17 @@ mod tests {
             .await
             .expect("response body");
         serde_json::from_slice(&body).expect("json body")
+    }
+
+    fn init_dirty_git_repo(path: &Path) {
+        fs::create_dir_all(path).expect("repo dir");
+        let status = ProcessCommand::new("git")
+            .args(["init", "-q"])
+            .current_dir(path)
+            .status()
+            .expect("git init");
+        assert!(status.success(), "git init should succeed");
+        fs::write(path.join("README.md"), "dirty\n").expect("write readme");
     }
 
     #[test]
@@ -563,6 +898,7 @@ mod tests {
                     restart: None,
                 },
             ],
+            groups: Vec::new(),
         };
 
         let children = managed_base_child_names(&config, base).expect("should have children");
@@ -662,6 +998,7 @@ mod tests {
             Query(DirQuery {
                 path: None,
                 managed_only: Some(false),
+                group: None,
             }),
         )
         .await
@@ -696,5 +1033,207 @@ mod tests {
 
         // Without overlay, restart is unavailable.
         assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[tokio::test]
+    async fn list_dirs_reports_repo_dirty_and_running_action() {
+        let _lock = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let dir = tempfile::tempdir().expect("tempdir");
+        let base = dir.path().join("repos");
+        let repo = base.join("swimmers");
+        init_dirty_git_repo(&repo);
+        let _base_env = set_env_var("DIRS_BASE_PATH", base.as_os_str().to_os_string());
+
+        let state = test_state();
+        state
+            .repo_actions
+            .start(
+                repo.clone(),
+                RepoActionKind::Commit,
+                Arc::new(FakeRepoActionExecutor::sleeping_ok(200)),
+            )
+            .await
+            .expect("start repo action");
+
+        let response = list_dirs(
+            Extension(AuthInfo::new(OPERATOR_SCOPES.to_vec())),
+            State(state),
+            Query(DirQuery {
+                path: None,
+                managed_only: Some(false),
+                group: None,
+            }),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let json = response_json(response).await;
+        let entry = json["entries"]
+            .as_array()
+            .and_then(|entries| entries.first())
+            .expect("entry");
+        assert_eq!(entry["name"], "swimmers");
+        assert_eq!(entry["repo_dirty"], true);
+        assert_eq!(entry["repo_action"]["kind"], "commit");
+        assert_eq!(entry["repo_action"]["state"], "running");
+    }
+
+    #[tokio::test]
+    async fn start_dir_repo_action_accepts_dirty_repo() {
+        let _lock = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let dir = tempfile::tempdir().expect("tempdir");
+        let base = dir.path().join("repos");
+        let repo = base.join("swimmers");
+        init_dirty_git_repo(&repo);
+        let _base_env = set_env_var("DIRS_BASE_PATH", base.as_os_str().to_os_string());
+
+        let state = test_state();
+        let response = start_dir_repo_action_with_executor(
+            state.clone(),
+            DirRepoActionRequest {
+                path: repo.to_string_lossy().into_owned(),
+                kind: RepoActionKind::Commit,
+            },
+            Arc::new(FakeRepoActionExecutor::sleeping_ok(200)),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        let json = response_json(response).await;
+        assert_eq!(json["ok"], true);
+        assert_eq!(json["status"]["state"], "running");
+        assert_eq!(
+            state
+                .repo_actions
+                .status_for(&repo)
+                .await
+                .map(|status| status.state),
+            Some(crate::types::RepoActionState::Running)
+        );
+    }
+
+    struct PathGuard(Option<OsString>);
+
+    impl Drop for PathGuard {
+        fn drop(&mut self) {
+            match self.0.take() {
+                Some(value) => std::env::set_var("PATH", value),
+                None => std::env::remove_var("PATH"),
+            }
+        }
+    }
+
+    fn install_fake_slow_git(sleep_ms: u64) -> (tempfile::TempDir, PathGuard) {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().expect("fake git tempdir");
+        let bin_dir = dir.path().join("bin");
+        std::fs::create_dir_all(&bin_dir).expect("bin dir");
+
+        // Sleep per git invocation, then return the `-C PATH` value for
+        // `rev-parse --show-toplevel` and empty output for `status --short`
+        // (clean repo). Any other subcommand exits silently.
+        let sleep_seconds = format!("{:.3}", sleep_ms as f64 / 1000.0);
+        let script = format!(
+            r#"#!/bin/sh
+set -eu
+sleep {sleep_seconds}
+repo_root=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -C)
+      shift
+      repo_root="$1"
+      shift
+      ;;
+    *)
+      break
+      ;;
+  esac
+done
+
+case "${{1-}}" in
+  rev-parse)
+    printf '%s\n' "$repo_root"
+    ;;
+  status)
+    ;;
+  *)
+    ;;
+esac
+"#
+        );
+
+        let git_path = bin_dir.join("git");
+        std::fs::write(&git_path, script).expect("write fake git script");
+        let mut perms = std::fs::metadata(&git_path).expect("metadata").permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&git_path, perms).expect("chmod fake git");
+
+        let original_path = std::env::var_os("PATH");
+        let mut entries = vec![bin_dir.as_os_str().to_os_string()];
+        if let Some(existing) = original_path.as_ref() {
+            entries.extend(std::env::split_paths(existing).map(|p| p.into_os_string()));
+        }
+        std::env::set_var(
+            "PATH",
+            std::env::join_paths(entries).expect("join fake git path"),
+        );
+
+        (dir, PathGuard(original_path))
+    }
+
+    /// Regression guard for the "swimmers API unavailable (timed out while
+    /// trying to create a session)" class of bug: `list_dirs` used to run
+    /// synchronous `git` subprocesses per entry on the async handler worker,
+    /// which stalled the Tokio runtime long enough for `POST /v1/sessions`
+    /// to hit its 10s client timeout. The fix runs each probe via
+    /// `spawn_blocking` + a bounded `buffered(16)` stream.
+    ///
+    /// With 24 fake repos × 200ms per probe, a serial blocking path would
+    /// take ≥4.8s; the parallel path must land well under 2s. Bound is loose
+    /// enough to absorb CI noise.
+    #[tokio::test]
+    async fn list_dirs_parallelizes_git_probes_under_slow_git() {
+        let _lock = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+
+        let (_fake_git_dir, _path_guard) = install_fake_slow_git(200);
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let base = tmp.path().join("repos");
+        std::fs::create_dir_all(&base).expect("repos base");
+        for i in 0..24 {
+            std::fs::create_dir_all(base.join(format!("repo-{i:02}"))).expect("repo subdir");
+        }
+        let _base_env = set_env_var("DIRS_BASE_PATH", base.as_os_str().to_os_string());
+
+        let started = std::time::Instant::now();
+        let response = list_dirs(
+            Extension(AuthInfo::new(OPERATOR_SCOPES.to_vec())),
+            State(test_state()),
+            Query(DirQuery {
+                path: None,
+                managed_only: Some(false),
+                group: None,
+            }),
+        )
+        .await
+        .into_response();
+        let elapsed = started.elapsed();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let json = response_json(response).await;
+        let entries = json["entries"].as_array().expect("entries array");
+        assert_eq!(entries.len(), 24, "all repo entries should be present");
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "list_dirs must parallelize git probes; serial would be ~4.8s, got {elapsed:?}"
+        );
     }
 }
