@@ -1545,18 +1545,8 @@ impl SupervisorProvider {
 }
 
 impl SessionProvider for SupervisorProvider {
-    fn session_snapshots(&self) -> Vec<SessionInfo> {
-        // The thought loop runner calls this from a tokio::spawn async task.
-        // We cannot call handle.block_on() from within an async context (it
-        // would panic). Instead, use std::thread::scope to run block_on from
-        // a non-async thread.
-        let supervisor = self.supervisor.clone();
-        let handle = self.handle.clone();
-        std::thread::scope(|s| {
-            s.spawn(|| handle.block_on(supervisor.collect_session_snapshots()))
-                .join()
-                .expect("session_snapshots thread panicked")
-        })
+    async fn session_snapshots(&self) -> Vec<SessionInfo> {
+        self.supervisor.collect_session_snapshots().await
     }
 
     fn persist_thought(

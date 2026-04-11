@@ -56,7 +56,14 @@ pub struct SessionInfo {
 /// isolation.
 pub trait SessionProvider: Send + Sync {
     /// Return info for every tracked session.
-    fn session_snapshots(&self) -> Vec<SessionInfo>;
+    ///
+    /// Must be async: the supervisor implementation awaits RwLocks and
+    /// session-actor mailboxes. An earlier sync version wrapped an
+    /// `std::thread::scope(|s| s.spawn(|| handle.block_on(...)).join())`
+    /// which blocked the calling Tokio worker and, when the I/O driver
+    /// happened to ride on that worker, stalled the entire reactor. Making
+    /// this method async lets callers `.await` it without migrating threads.
+    fn session_snapshots(&self) -> impl std::future::Future<Output = Vec<SessionInfo>> + Send;
 
     /// Persist the latest thought snapshot for a session.
     fn persist_thought(

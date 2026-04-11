@@ -64,7 +64,7 @@ impl BridgeRunner {
             let mut delivery_states = provider.thought_delivery_states();
             loop {
                 let runtime_config = self.runtime_config.read().await.clone();
-                let snapshots = provider.session_snapshots();
+                let snapshots = provider.session_snapshots().await;
                 match emitter_client
                     .next_sync_response(&runtime_config, &snapshots)
                     .await
@@ -288,7 +288,7 @@ mod tests {
     }
 
     impl SessionProvider for RecordingProvider {
-        fn session_snapshots(&self) -> Vec<SessionInfo> {
+        async fn session_snapshots(&self) -> Vec<SessionInfo> {
             self.snapshots.clone()
         }
 
@@ -457,8 +457,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn recording_provider_session_snapshots_roundtrip() {
+    #[tokio::test]
+    async fn recording_provider_session_snapshots_roundtrip() {
         let provider = RecordingProvider {
             snapshots: vec![SessionInfo {
                 session_id: "sess-a".to_string(),
@@ -482,7 +482,7 @@ mod tests {
             delivery_states: Mutex::new(HashMap::new()),
         };
 
-        let snapshots = provider.session_snapshots();
+        let snapshots = provider.session_snapshots().await;
         assert_eq!(snapshots.len(), 1);
         assert_eq!(snapshots[0].session_id, "sess-a");
     }
@@ -701,11 +701,12 @@ mod tests {
         let (event_tx, mut event_rx) = broadcast::channel::<ControlEvent>(8);
         let mut delivery_states = provider.thought_delivery_states();
 
+        let snapshots = provider.session_snapshots().await;
         apply_sync_response(
             &provider,
             &event_tx,
             &mut delivery_states,
-            &provider.session_snapshots(),
+            &snapshots,
             SyncResponse {
                 request_id: "tmux-sleep".to_string(),
                 stream_instance_id: Some("stream-a".to_string()),
