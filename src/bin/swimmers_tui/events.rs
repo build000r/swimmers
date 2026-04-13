@@ -238,6 +238,14 @@ pub(crate) fn handle_key_event<C: TuiApi>(
             app.picker_start_action_for_selection(RepoActionKind::Commit);
             true
         }
+        KeyCode::Char('R') if app.picker.is_some() => {
+            app.picker_start_action_for_selection(RepoActionKind::Restart);
+            true
+        }
+        KeyCode::Char('O') if app.picker.is_some() => {
+            app.picker_open_url_for_selection();
+            true
+        }
         KeyCode::Char('r') => {
             if let Some((path, managed_only, group)) = app.picker.as_ref().map(|picker| {
                 (

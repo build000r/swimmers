@@ -274,66 +274,156 @@ pub(crate) fn join_path(base: &str, name: &str) -> String {
 pub(crate) fn kind_label(kind: RepoActionKind) -> &'static str {
     match kind {
         RepoActionKind::Commit => "commit",
+        RepoActionKind::Restart => "restart",
+        RepoActionKind::Open => "open",
     }
 }
 
-fn picker_entry_action_kind(entry: &DirEntry) -> Option<RepoActionKind> {
-    if entry.repo_action.as_ref().map(|status| status.state) == Some(RepoActionState::Running) {
-        return None;
+#[derive(Clone, Debug)]
+pub(crate) struct ActionLabel {
+    pub(crate) text: String,
+    pub(crate) kind: RepoActionKind,
+    pub(crate) color: Color,
+    pub(crate) clickable: bool,
+}
+
+/// Compute all action labels for a directory entry. Returns labels ordered
+/// left-to-right as they should appear in the picker row.
+pub(crate) fn picker_entry_actions(entry: &DirEntry) -> Vec<ActionLabel> {
+    let mut actions = Vec::new();
+    let tracked_kind = entry.repo_action.as_ref().map(|s| s.kind);
+    let tracked_state = entry.repo_action.as_ref().map(|s| s.state);
+
+    // If any action is currently running, show only its status.
+    if tracked_state == Some(RepoActionState::Running) {
+        actions.push(ActionLabel {
+            text: "[running]".into(),
+            kind: tracked_kind.unwrap(),
+            color: Color::Yellow,
+            clickable: false,
+        });
+        return actions;
     }
 
-    entry
-        .repo_dirty
-        .unwrap_or(false)
-        .then_some(RepoActionKind::Commit)
-}
-
-pub(crate) fn picker_entry_action_is_clickable(entry: &DirEntry) -> bool {
-    picker_entry_action_kind(entry).is_some()
-}
-
-pub(crate) fn picker_entry_action_label(entry: &DirEntry) -> Option<String> {
-    match entry.repo_action.as_ref().map(|status| status.state) {
-        Some(RepoActionState::Running) => Some("[running]".to_string()),
-        Some(RepoActionState::Failed) => Some("[failed]".to_string()),
-        Some(RepoActionState::Succeeded) if !entry.repo_dirty.unwrap_or(false) => {
-            Some("[done]".to_string())
+    // Commit: show status if tracked, else show [commit] when dirty.
+    if tracked_kind == Some(RepoActionKind::Commit) {
+        match tracked_state {
+            Some(RepoActionState::Failed) => actions.push(ActionLabel {
+                text: "[failed]".into(),
+                kind: RepoActionKind::Commit,
+                color: Color::Red,
+                clickable: false,
+            }),
+            Some(RepoActionState::Succeeded) if !entry.repo_dirty.unwrap_or(false) => {
+                actions.push(ActionLabel {
+                    text: "[done]".into(),
+                    kind: RepoActionKind::Commit,
+                    color: Color::Green,
+                    clickable: false,
+                })
+            }
+            _ if entry.repo_dirty.unwrap_or(false) => actions.push(ActionLabel {
+                text: "[commit]".into(),
+                kind: RepoActionKind::Commit,
+                color: Color::Green,
+                clickable: true,
+            }),
+            _ => {}
         }
-        _ if entry.repo_dirty.unwrap_or(false) => {
-            Some(format!("[{}]", kind_label(RepoActionKind::Commit)))
+    } else if entry.repo_dirty.unwrap_or(false) {
+        actions.push(ActionLabel {
+            text: "[commit]".into(),
+            kind: RepoActionKind::Commit,
+            color: Color::Green,
+            clickable: true,
+        });
+    }
+
+    // Restart: show status if tracked, else show [restart] when available.
+    if tracked_kind == Some(RepoActionKind::Restart) {
+        match tracked_state {
+            Some(RepoActionState::Failed) => actions.push(ActionLabel {
+                text: "[failed]".into(),
+                kind: RepoActionKind::Restart,
+                color: Color::Red,
+                clickable: false,
+            }),
+            Some(RepoActionState::Succeeded) => actions.push(ActionLabel {
+                text: "[done]".into(),
+                kind: RepoActionKind::Restart,
+                color: Color::Green,
+                clickable: false,
+            }),
+            _ if entry.has_restart.unwrap_or(false) => actions.push(ActionLabel {
+                text: "[restart]".into(),
+                kind: RepoActionKind::Restart,
+                color: Color::Yellow,
+                clickable: true,
+            }),
+            _ => {}
         }
-        _ => None,
+    } else if entry.has_restart.unwrap_or(false) {
+        actions.push(ActionLabel {
+            text: "[restart]".into(),
+            kind: RepoActionKind::Restart,
+            color: Color::Yellow,
+            clickable: true,
+        });
     }
+
+    // Open: always available when open_url is set.
+    if entry.open_url.is_some() {
+        actions.push(ActionLabel {
+            text: "[open]".into(),
+            kind: RepoActionKind::Open,
+            color: Color::Cyan,
+            clickable: true,
+        });
+    }
+
+    actions
 }
 
-fn picker_entry_action_color(entry: &DirEntry) -> Color {
-    match entry.repo_action.as_ref().map(|status| status.state) {
-        Some(RepoActionState::Running) => Color::Yellow,
-        Some(RepoActionState::Failed) => Color::Red,
-        Some(RepoActionState::Succeeded) if !entry.repo_dirty.unwrap_or(false) => Color::Green,
-        _ if entry.repo_dirty.unwrap_or(false) => Color::Green,
-        _ => Color::DarkGrey,
+/// Total display width of all action labels (including spaces between them).
+fn picker_entry_actions_width(actions: &[ActionLabel]) -> u16 {
+    if actions.is_empty() {
+        return 0;
     }
+    let text_width: u16 = actions.iter().map(|a| a.text.len() as u16).sum();
+    text_width + (actions.len() as u16 - 1) // spaces between labels
 }
 
-fn picker_entry_action_rect(
+/// Compute click-target rects for all action labels on a given entry row.
+fn picker_entry_action_rects(
     picker: &PickerState,
     layout: &PickerLayout,
     index: usize,
-) -> Option<Rect> {
+) -> Vec<(Rect, RepoActionKind)> {
     if index < picker.scroll || index >= picker.scroll + layout.visible_entry_rows {
-        return None;
+        return Vec::new();
     }
 
-    let entry = picker.entries.get(index)?;
-    let label = picker_entry_action_label(entry)?;
-    let width = label.len() as u16;
-    Some(Rect {
-        x: layout.content.right().saturating_sub(width),
-        y: layout.first_entry_y + (index - picker.scroll) as u16,
-        width,
-        height: 1,
-    })
+    let Some(entry) = picker.entries.get(index) else {
+        return Vec::new();
+    };
+    let actions = picker_entry_actions(entry);
+    if actions.is_empty() {
+        return Vec::new();
+    }
+
+    let row_y = layout.first_entry_y + (index - picker.scroll) as u16;
+    let total_width = picker_entry_actions_width(&actions);
+    let mut x = layout.content.right().saturating_sub(total_width);
+    let mut rects = Vec::new();
+
+    for action in &actions {
+        let w = action.text.len() as u16;
+        if action.clickable {
+            rects.push((Rect { x, y: row_y, width: w, height: 1 }, action.kind));
+        }
+        x += w + 1; // +1 for space separator
+    }
+    rects
 }
 
 pub(crate) fn picker_layout(picker: &PickerState, field: Rect) -> PickerLayout {
@@ -479,11 +569,9 @@ pub(crate) fn picker_action_at(
     {
         let index = picker.scroll + (y - layout.first_entry_y) as usize;
         if index < picker.entries.len() {
-            if let Some(rect) = picker_entry_action_rect(picker, layout, index) {
+            for (rect, kind) in picker_entry_action_rects(picker, layout, index) {
                 if rect.contains(x, y) {
-                    if let Some(kind) = picker_entry_action_kind(&picker.entries[index]) {
-                        return Some(PickerAction::StartRepoAction(index, kind));
-                    }
+                    return Some(PickerAction::StartRepoAction(index, kind));
                 }
             }
             return Some(PickerAction::ActivateEntry(index));
@@ -624,12 +712,10 @@ pub(crate) fn render_picker(renderer: &mut Renderer, picker: &PickerState, field
             None => "",
         };
         let line = format!("{marker} {icon} {}{}", entry.name, running);
-        let action_label = picker_entry_action_label(entry);
-        let action_width = action_label
-            .as_ref()
-            .map(|label| label.len() as u16 + 1)
-            .unwrap_or(0);
-        let text_width = layout.content.width.saturating_sub(action_width) as usize;
+        let actions = picker_entry_actions(entry);
+        let actions_width = picker_entry_actions_width(&actions);
+        let reserved = if actions_width > 0 { actions_width + 1 } else { 0 };
+        let text_width = layout.content.width.saturating_sub(reserved) as usize;
         let themed_color = picker.entry_theme_colors.get(index).copied().flatten();
         let color = if picker.selection == PickerSelection::Entry(index) {
             themed_color.unwrap_or(Color::White)
@@ -646,14 +732,17 @@ pub(crate) fn render_picker(renderer: &mut Renderer, picker: &PickerState, field
             &truncate_label(&line, text_width),
             color,
         );
-        if let Some(label) = action_label {
-            let action_x = layout.content.right().saturating_sub(label.len() as u16);
-            renderer.draw_text(
-                action_x,
-                layout.first_entry_y + row as u16,
-                &label,
-                picker_entry_action_color(entry),
-            );
+        if !actions.is_empty() {
+            let mut ax = layout.content.right().saturating_sub(actions_width);
+            for action in &actions {
+                renderer.draw_text(
+                    ax,
+                    layout.first_entry_y + row as u16,
+                    &action.text,
+                    action.color,
+                );
+                ax += action.text.len() as u16 + 1;
+            }
         }
     }
 }

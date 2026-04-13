@@ -2317,6 +2317,8 @@ fn dir_response(path: &str, names: &[(&str, bool)]) -> DirListResponse {
                 repo_action: None,
                 group: None,
                 full_path: None,
+                has_restart: None,
+                open_url: None,
             })
             .collect(),
         overlay_label: None,
@@ -2338,6 +2340,8 @@ fn repo_dir_entry(
         repo_action,
         group: None,
         full_path: None,
+        has_restart: None,
+        open_url: None,
     }
 }
 

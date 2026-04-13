@@ -78,6 +78,7 @@ pub(crate) enum PendingInteractionResult {
     },
     StartRepoAction {
         repo_label: String,
+        kind: RepoActionKind,
         reload_path: String,
         managed_only: bool,
         response: Result<DirRepoActionResponse, String>,
@@ -1130,12 +1131,13 @@ impl<C: TuiApi> App<C> {
             },
             PendingInteractionResult::StartRepoAction {
                 repo_label,
+                kind,
                 reload_path,
                 managed_only,
                 response,
             } => match response {
                 Ok(_) => {
-                    self.set_message(format!("commit started for {repo_label}"));
+                    self.set_message(format!("{} started for {repo_label}", kind_label(kind)));
                     let group = self
                         .picker
                         .as_ref()
@@ -1981,10 +1983,18 @@ impl<C: TuiApi> App<C> {
     }
 
     pub(crate) fn start_picker_repo_action(&mut self, index: usize, kind: RepoActionKind) {
+        // Open is handled client-side — no server round-trip.
+        if kind == RepoActionKind::Open {
+            self.open_picker_url_at(index);
+            return;
+        }
+
         let Some((entry_path, repo_label, reload_path, managed_only)) =
             self.picker.as_ref().and_then(|picker| {
                 let entry = picker.entries.get(index)?;
-                if !picker_entry_action_is_clickable(entry) {
+                let actions = picker_entry_actions(entry);
+                let has_action = actions.iter().any(|a| a.kind == kind && a.clickable);
+                if !has_action {
                     return None;
                 }
                 Some((
@@ -1995,7 +2005,7 @@ impl<C: TuiApi> App<C> {
                 ))
             })
         else {
-            self.set_message("selected folder has no repo action");
+            self.set_message(format!("no {} action for this entry", kind_label(kind)));
             return;
         };
 
@@ -2009,11 +2019,43 @@ impl<C: TuiApi> App<C> {
             let response = client.start_repo_action(&entry_path, kind).await;
             let _ = tx.send(PendingInteractionResult::StartRepoAction {
                 repo_label,
+                kind,
                 reload_path,
                 managed_only,
                 response,
             });
         });
+    }
+
+    fn open_picker_url_at(&mut self, index: usize) {
+        let Some(url) = self
+            .picker
+            .as_ref()
+            .and_then(|picker| picker.entries.get(index))
+            .and_then(|entry| entry.open_url.clone())
+        else {
+            self.set_message("no open URL for this entry");
+            return;
+        };
+        match open::that(&url) {
+            Ok(_) => self.set_message(format!("opened {url}")),
+            Err(err) => self.set_message(format!("failed to open {url}: {err}")),
+        }
+    }
+
+    pub(crate) fn picker_open_url_for_selection(&mut self) {
+        let Some(index) = self
+            .picker
+            .as_ref()
+            .and_then(|picker| match picker.selection {
+                PickerSelection::Entry(index) => Some(index),
+                PickerSelection::SpawnHere => None,
+            })
+        else {
+            self.set_message("select an entry first");
+            return;
+        };
+        self.open_picker_url_at(index);
     }
 
     pub(crate) fn open_initial_request(&mut self, cwd: String) {
