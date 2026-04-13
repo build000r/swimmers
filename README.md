@@ -474,6 +474,12 @@ On loopback (`127.0.0.1`), yes — only processes on the same machine can reach 
 
 ---
 
+## Vision
+
+See [docs/VISION.md](docs/VISION.md) for the project's mission, competitive positioning, and strategic non-goals.
+
+---
+
 ## Design Philosophy
 
 **Sessions are living things.** The aquarium metaphor is not decoration. It encodes session state into spatial position, animation speed, and sprite shape so you can assess a fleet of sessions with a glance instead of reading text.
