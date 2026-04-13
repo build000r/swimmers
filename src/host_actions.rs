@@ -56,7 +56,53 @@ impl RepoActionExecutor for SystemRepoActionExecutor {
     fn execute(&self, repo_root: PathBuf, kind: RepoActionKind) -> io::Result<Option<String>> {
         match kind {
             RepoActionKind::Commit => run_commit_codex_for_repo(&repo_root),
+            RepoActionKind::Restart | RepoActionKind::Open => Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                format!("{kind:?} is not handled through the default executor"),
+            )),
         }
+    }
+}
+
+/// Executor for service restart actions that runs overlay-defined shell commands.
+pub struct RestartExecutor {
+    /// Shell commands to execute in order.
+    pub commands: Vec<(String, String)>, // (service_name, shell_command)
+}
+
+impl RepoActionExecutor for RestartExecutor {
+    fn execute(&self, _repo_root: PathBuf, _kind: RepoActionKind) -> io::Result<Option<String>> {
+        for (service_name, cmd) in &self.commands {
+            let output = ProcessCommand::new("sh")
+                .arg("-c")
+                .arg(cmd)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .output()?;
+
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+                let detail: String = if stderr.is_empty() {
+                    String::from_utf8_lossy(&output.stdout)
+                        .lines()
+                        .rev()
+                        .find(|line| !line.trim().is_empty())
+                        .unwrap_or("restart failed")
+                        .trim()
+                        .chars()
+                        .take(600)
+                        .collect()
+                } else {
+                    stderr.chars().take(600).collect()
+                };
+                return Err(io::Error::new(
+                    io::ErrorKind::Other,
+                    format!("{service_name}: {detail}"),
+                ));
+            }
+        }
+        let names: Vec<&str> = self.commands.iter().map(|(n, _)| n.as_str()).collect();
+        Ok(Some(format!("restarted {}", names.join(", "))))
     }
 }
 

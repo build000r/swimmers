@@ -3,14 +3,15 @@
 use crate::api::AppState;
 use crate::auth::{AuthInfo, AuthScope};
 use crate::host_actions::{
-    inspect_git_repo, RepoActionExecutor, RepoActionTracker, SystemRepoActionExecutor,
+    inspect_git_repo, RepoActionExecutor, RepoActionTracker, RestartExecutor,
+    SystemRepoActionExecutor,
 };
 use crate::session::overlay::{
     default_overlay, OverlayDirConfig, OverlayDirGroup, OverlayServiceEntry,
 };
 use crate::types::{
     DirEntry, DirListResponse, DirRepoActionRequest, DirRepoActionResponse, DirRestartRequest,
-    DirRestartResponse, ErrorResponse, RepoActionStatus,
+    DirRestartResponse, ErrorResponse, RepoActionKind, RepoActionStatus,
 };
 use axum::extract::{Query, State};
 use axum::http::StatusCode;
@@ -348,6 +349,8 @@ fn list_group_entries_sync(group: &OverlayDirGroup) -> Vec<DirEntry> {
                     repo_action: None,
                     group: None,
                     full_path: Some(full_path),
+                    has_restart: None,
+                    open_url: None,
                 },
                 modified_at,
             ));
@@ -553,6 +556,17 @@ async fn list_dirs(
         HashMap::new()
     };
 
+    // Build lookup from service name → overlay metadata for restart/open_url.
+    let svc_meta: HashMap<&str, &OverlayServiceEntry> = dir_config
+        .map(|config| {
+            config
+                .services
+                .iter()
+                .map(|s| (s.name.as_str(), s))
+                .collect()
+        })
+        .unwrap_or_default();
+
     let mut entries: Vec<(DirEntry, u64)> = candidates
         .into_iter()
         .map(|candidate| {
@@ -566,6 +580,24 @@ async fn list_dirs(
                         .any(|service| health_map.get(service).copied().unwrap_or(false)),
                 )
             };
+            let has_restart = candidate
+                .services
+                .iter()
+                .any(|svc| {
+                    svc_meta
+                        .get(svc.as_str())
+                        .and_then(|e| e.restart.as_ref())
+                        .is_some()
+                })
+                .then_some(true);
+            let open_url = candidate
+                .services
+                .iter()
+                .find_map(|svc| {
+                    svc_meta.get(svc.as_str()).and_then(|e| {
+                        e.open_url.clone().or_else(|| e.health_url.clone())
+                    })
+                });
             (
                 DirEntry {
                     name: candidate.name,
@@ -575,6 +607,8 @@ async fn list_dirs(
                     repo_action: candidate.repo_action,
                     group: None,
                     full_path: None,
+                    has_restart,
+                    open_url,
                 },
                 candidate.modified_at,
             )
@@ -688,7 +722,108 @@ async fn start_dir_repo_action(
         return resp;
     }
 
-    start_dir_repo_action_with_executor(state, body, Arc::new(SystemRepoActionExecutor)).await
+    match body.kind {
+        RepoActionKind::Restart => start_restart_action(state, body).await,
+        RepoActionKind::Open => error_response(
+            StatusCode::BAD_REQUEST,
+            "CLIENT_ONLY",
+            "open actions are handled client-side",
+        ),
+        _ => {
+            start_dir_repo_action_with_executor(state, body, Arc::new(SystemRepoActionExecutor))
+                .await
+        }
+    }
+}
+
+/// Start a restart action by looking up overlay service commands and tracking
+/// execution through the standard `RepoActionTracker`.
+async fn start_restart_action(state: Arc<AppState>, body: DirRepoActionRequest) -> Response {
+    let requested_path = body.path.trim();
+    if requested_path.is_empty() {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "VALIDATION_FAILED",
+            "path is required",
+        );
+    }
+
+    let base = dirs_base_path();
+    let target = PathBuf::from(requested_path);
+    let (canonical_base, canonical) = match resolve_target_path(base, target) {
+        Ok(paths) => paths,
+        Err(response) => return response,
+    };
+
+    let Some(config) = resolve_dir_config(&canonical_base) else {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "NO_OVERLAY",
+            "no overlay configuration found for this path",
+        );
+    };
+
+    let context = OverlayServiceContext {
+        base_path: config.base_path.clone(),
+        services: config.services.clone(),
+    };
+    let matched_services = services_for_directory(&canonical, &context);
+    if matched_services.is_empty() {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "NO_SERVICE_FOR_PATH",
+            "no overlay service is mapped to this folder",
+        );
+    }
+
+    let commands: Vec<(String, String)> = config
+        .services
+        .iter()
+        .filter(|s| matched_services.contains(&s.name))
+        .filter_map(|s| s.restart.as_ref().map(|cmd| (s.name.clone(), cmd.clone())))
+        .collect();
+
+    if commands.is_empty() {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "NO_RESTART_COMMAND",
+            "matched services have no restart command configured",
+        );
+    }
+
+    let executor: Arc<dyn RepoActionExecutor> = Arc::new(RestartExecutor { commands });
+
+    if let Err(error) = state
+        .repo_actions
+        .start(canonical.clone(), body.kind, executor)
+        .await
+    {
+        let (code, status) = repo_action_error_code(&error);
+        return error_response(status, code, error.to_string());
+    }
+
+    let status = state
+        .repo_actions
+        .status_for(&canonical)
+        .await
+        .unwrap_or(RepoActionStatus {
+            kind: body.kind,
+            state: crate::types::RepoActionState::Running,
+            detail: None,
+        });
+
+    (
+        StatusCode::ACCEPTED,
+        Json(
+            serde_json::to_value(DirRepoActionResponse {
+                ok: true,
+                path: canonical.to_string_lossy().into_owned(),
+                status,
+            })
+            .unwrap(),
+        ),
+    )
+        .into_response()
 }
 
 async fn start_dir_repo_action_with_executor(
@@ -890,12 +1025,14 @@ mod tests {
                     dir: "alpha".into(),
                     health_url: None,
                     restart: None,
+                    open_url: None,
                 },
                 OverlayServiceEntry {
                     name: "svc-nested".into(),
                     dir: "services/nested-app".into(),
                     health_url: None,
                     restart: None,
+                    open_url: None,
                 },
             ],
             groups: Vec::new(),
@@ -922,12 +1059,14 @@ mod tests {
                     dir: "alpha".into(),
                     health_url: None,
                     restart: None,
+                    open_url: None,
                 },
                 OverlayServiceEntry {
                     name: "svc-nested".into(),
                     dir: "services/nested-app".into(),
                     health_url: None,
                     restart: None,
+                    open_url: None,
                 },
             ],
         };
@@ -950,12 +1089,14 @@ mod tests {
                 dir: "x".into(),
                 health_url: None,
                 restart: None,
+                open_url: None,
             },
             OverlayServiceEntry {
                 name: "svc-bad-url".into(),
                 dir: "y".into(),
                 health_url: Some("http://127.0.0.1:1/__nonexistent".into()),
                 restart: None,
+                open_url: None,
             },
         ];
         let requested = vec!["svc-no-url".to_string(), "svc-bad-url".to_string()];

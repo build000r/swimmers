@@ -24,6 +24,8 @@ pub struct OverlayServiceEntry {
     pub health_url: Option<String>,
     /// Optional shell command to restart the service.
     pub restart: Option<String>,
+    /// Optional URL to open in a browser (e.g. local dev server).
+    pub open_url: Option<String>,
 }
 
 /// A virtual directory group that aggregates entries from multiple source paths.
@@ -256,6 +258,8 @@ struct DevSanityServiceEntry {
     health_url: Option<String>,
     #[serde(default)]
     restart: Option<String>,
+    #[serde(default)]
+    open_url: Option<String>,
 }
 
 fn parse_client_overlay(client_dir: &Path, overlay_path: &Path) -> Option<ClientOverlay> {
@@ -332,6 +336,7 @@ fn parse_client_overlay(client_dir: &Path, overlay_path: &Path) -> Option<Client
                     dir: entry.dir?,
                     health_url: entry.health_url,
                     restart: entry.restart,
+                    open_url: entry.open_url,
                 })
             })
             .collect();

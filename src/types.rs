@@ -129,6 +129,8 @@ impl SpawnTool {
 #[serde(rename_all = "snake_case")]
 pub enum RepoActionKind {
     Commit,
+    Restart,
+    Open,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -382,6 +384,12 @@ pub struct DirEntry {
     /// response `path` (e.g. entries inside a group listing).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub full_path: Option<String>,
+    /// Whether this entry has a restart command available from the overlay.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub has_restart: Option<bool>,
+    /// URL to open in a browser (local dev URL from the overlay).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub open_url: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
