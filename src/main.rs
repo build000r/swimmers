@@ -35,6 +35,7 @@ use persistence::file_store::FileStore;
 use session::supervisor::{SessionSupervisor, SupervisorProvider};
 use thought::bridge_runner::BridgeRunner;
 use thought::emitter_client::{fetch_daemon_defaults, EmitterClient};
+use thought::health::BridgeHealthState;
 use thought::loop_runner::ThoughtLoopRunner;
 use thought::protocol::SyncRequestSequence;
 use thought::runtime_config::ThoughtConfig;
@@ -116,7 +117,7 @@ fn start_thought_backend(
     supervisor: &Arc<SessionSupervisor>,
     thought_config: Arc<RwLock<ThoughtConfig>>,
     sync_request_sequence: Arc<SyncRequestSequence>,
-) -> tokio::task::JoinHandle<()> {
+) -> (tokio::task::JoinHandle<()>, Arc<BridgeHealthState>) {
     let thought_tx = supervisor.thought_event_sender();
     let provider = Arc::new(SupervisorProvider::new(supervisor.clone()));
     match config.thought_backend {
@@ -128,7 +129,8 @@ fn start_thought_backend(
                 thought_config,
                 sync_request_sequence,
             );
-            runner.spawn(provider)
+            let bridge_health = runner.bridge_health();
+            (runner.spawn(provider), bridge_health)
         }
         ThoughtBackend::Daemon => {
             tracing::info!("thought backend=daemon: starting thought bridge runner");
@@ -137,9 +139,13 @@ fn start_thought_backend(
                 Duration::from_millis(config.thought_tick_ms),
                 thought_config,
             );
-            bridge_runner.spawn(
-                provider,
-                EmitterClient::with_request_sequence(sync_request_sequence),
+            let bridge_health = bridge_runner.health();
+            (
+                bridge_runner.spawn(
+                    provider,
+                    EmitterClient::with_request_sequence(sync_request_sequence),
+                ),
+                bridge_health,
             )
         }
     }
@@ -231,7 +237,7 @@ async fn run() -> anyhow::Result<()> {
     supervisor.spawn_process_exit_reaper();
 
     // Start thought engine.
-    let thought_backend = start_thought_backend(
+    let (thought_backend, bridge_health) = start_thought_backend(
         &config,
         &supervisor,
         thought_config.clone(),
@@ -248,6 +254,7 @@ async fn run() -> anyhow::Result<()> {
         sync_request_sequence,
         daemon_defaults,
         file_store: persistence_store,
+        bridge_health: bridge_health.clone(),
         published_selection: Arc::new(RwLock::new(api::PublishedSelectionState::default())),
         repo_actions: host_actions::RepoActionTracker::default(),
     });
@@ -262,17 +269,22 @@ async fn run() -> anyhow::Result<()> {
     tracing::info!("Swimmers running on http://{bind}:{port}");
 
     let server_result = axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
+        .with_graceful_shutdown(shutdown_signal(bridge_health.clone()))
         .await;
 
     finalize_shutdown(&supervisor, thought_backend).await;
 
     server_result.map_err(|err| anyhow::anyhow!("server error: {err}"))?;
+    if let Some(reason) = bridge_health.shutdown_reason() {
+        return Err(anyhow::anyhow!(
+            "thought bridge requested shutdown: {reason}"
+        ));
+    }
 
     Ok(())
 }
 
-async fn shutdown_signal() {
+async fn shutdown_signal(bridge_health: Arc<BridgeHealthState>) {
     let ctrl_c = async {
         if let Err(err) = tokio::signal::ctrl_c().await {
             tracing::error!("failed to install Ctrl-C handler: {err}");
@@ -295,9 +307,15 @@ async fn shutdown_signal() {
     #[cfg(not(unix))]
     let terminate = std::future::pending::<()>();
 
+    let bridge_unhealthy = async move {
+        let reason = bridge_health.wait_for_shutdown_request().await;
+        tracing::error!(reason, "thought bridge requested process shutdown");
+    };
+
     tokio::select! {
         _ = ctrl_c => {},
         _ = terminate => {},
+        _ = bridge_unhealthy => {},
     }
 
     tracing::info!("received shutdown signal; draining");

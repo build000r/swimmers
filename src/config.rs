@@ -107,6 +107,19 @@ where
     }
 }
 
+fn apply_env_u64<F>(key: &str, apply: F)
+where
+    F: FnOnce(u64),
+{
+    if let Some(value) = std::env::var(key)
+        .ok()
+        .and_then(|raw| raw.parse::<u64>().ok())
+        .filter(|value| *value > 0)
+    {
+        apply(value);
+    }
+}
+
 impl Config {
     pub fn from_env() -> Self {
         let mut config = Self::default();
@@ -121,6 +134,9 @@ impl Config {
         });
         apply_env_non_empty_string("SWIMMERS_THOUGHT_BACKEND", |backend| {
             config.thought_backend = ThoughtBackend::from_env_value(&backend);
+        });
+        apply_env_u64("SWIMMERS_THOUGHT_TICK_MS", |value| {
+            config.thought_tick_ms = value;
         });
         apply_env_usize("SWIMMERS_OUTBOUND_QUEUE_BOUND", |value| {
             config.outbound_queue_bound = value;
@@ -155,6 +171,14 @@ mod tests {
     #[test]
     fn default_config_uses_daemon_backend() {
         assert_eq!(Config::default().thought_backend, ThoughtBackend::Daemon);
+    }
+
+    #[test]
+    fn config_reads_thought_tick_from_env() {
+        std::env::set_var("SWIMMERS_THOUGHT_TICK_MS", "2500");
+        let config = Config::from_env();
+        std::env::remove_var("SWIMMERS_THOUGHT_TICK_MS");
+        assert_eq!(config.thought_tick_ms, 2500);
     }
 
     #[test]

@@ -6,6 +6,7 @@ use tokio::sync::RwLock;
 use tracing::{debug, info, warn};
 
 use crate::thought::emitter_client::EmitterClient;
+use crate::thought::health::BridgeHealthState;
 use crate::thought::loop_runner::SessionInfo;
 use crate::thought::loop_runner::SessionProvider;
 use crate::thought::protocol::{SyncResponse, SyncUpdate, ThoughtDeliveryState};
@@ -19,9 +20,9 @@ const DEFAULT_BRIDGE_TICK: Duration = Duration::from_secs(2);
 /// Consumes the tmux-scoped clawgs thought stream and applies accepted updates
 /// through the existing SessionProvider + control bus.
 pub struct BridgeRunner {
-    tick: Duration,
     event_tx: broadcast::Sender<ControlEvent>,
     runtime_config: Arc<RwLock<ThoughtConfig>>,
+    health: Arc<BridgeHealthState>,
 }
 
 impl BridgeRunner {
@@ -31,11 +32,7 @@ impl BridgeRunner {
         event_tx: broadcast::Sender<ControlEvent>,
         runtime_config: Arc<RwLock<ThoughtConfig>>,
     ) -> Self {
-        Self {
-            tick: DEFAULT_BRIDGE_TICK,
-            event_tx,
-            runtime_config,
-        }
+        Self::with_tick(event_tx, DEFAULT_BRIDGE_TICK, runtime_config)
     }
 
     pub fn with_tick(
@@ -43,11 +40,27 @@ impl BridgeRunner {
         tick: Duration,
         runtime_config: Arc<RwLock<ThoughtConfig>>,
     ) -> Self {
-        Self {
-            tick,
+        Self::with_existing_health(
             event_tx,
             runtime_config,
+            Arc::new(BridgeHealthState::new_with_tick(tick)),
+        )
+    }
+
+    pub fn with_existing_health(
+        event_tx: broadcast::Sender<ControlEvent>,
+        runtime_config: Arc<RwLock<ThoughtConfig>>,
+        health: Arc<BridgeHealthState>,
+    ) -> Self {
+        Self {
+            event_tx,
+            runtime_config,
+            health,
         }
+    }
+
+    pub fn health(&self) -> Arc<BridgeHealthState> {
+        self.health.clone()
     }
 
     pub fn spawn<P: SessionProvider + 'static>(
@@ -56,8 +69,10 @@ impl BridgeRunner {
         mut emitter_client: EmitterClient,
     ) -> tokio::task::JoinHandle<()> {
         tokio::spawn(async move {
+            let timing = self.health.timing();
             info!(
-                tick_ms = self.tick.as_millis() as u64,
+                tick_ms = timing.tick.as_millis() as u64,
+                sync_timeout_ms = timing.sync_timeout.as_millis() as u64,
                 "thought bridge runner started"
             );
 
@@ -65,11 +80,21 @@ impl BridgeRunner {
             loop {
                 let runtime_config = self.runtime_config.read().await.clone();
                 let snapshots = provider.session_snapshots().await;
-                match emitter_client
-                    .next_sync_response(&runtime_config, &snapshots)
-                    .await
+                match tokio::time::timeout(
+                    timing.sync_timeout,
+                    emitter_client.next_sync_response(&runtime_config, &snapshots),
+                )
+                .await
                 {
-                    Ok(response) => {
+                    Ok(Ok(response)) => {
+                        let last_backend_error = response.last_backend_error.clone();
+                        self.health.record_success(last_backend_error.clone());
+                        if let Some(error) = last_backend_error {
+                            warn!(
+                                error = %error,
+                                "clawgs emit daemon sync reported backend error"
+                            );
+                        }
                         apply_sync_response(
                             provider.as_ref(),
                             &self.event_tx,
@@ -77,12 +102,35 @@ impl BridgeRunner {
                             &snapshots,
                             response,
                         );
+                        tokio::time::sleep(timing.tick).await;
                     }
-                    Err(err) => {
+                    Ok(Err(err)) => {
+                        let retry_delay = self.health.next_retry_delay_for_failure();
+                        let error_text = err.to_string();
+                        self.health.record_failure(error_text.clone(), retry_delay);
                         warn!(
-                            error = %err,
-                            "clawgs emit daemon sync failed; continuing bridge loop"
+                            error = %error_text,
+                            retry_delay_ms = retry_delay.as_millis() as u64,
+                            "clawgs emit daemon sync failed; backing off"
                         );
+                        tokio::time::sleep(retry_delay).await;
+                    }
+                    Err(_) => {
+                        let retry_delay = self.health.next_retry_delay_for_failure();
+                        let mut error_text = format!(
+                            "clawgs emit daemon sync timed out after {}ms",
+                            timing.sync_timeout.as_millis()
+                        );
+                        if let Err(restart_err) = emitter_client.restart_daemon().await {
+                            error_text = format!("{error_text}; restart failed: {restart_err}");
+                        }
+                        self.health.record_failure(error_text.clone(), retry_delay);
+                        warn!(
+                            error = %error_text,
+                            retry_delay_ms = retry_delay.as_millis() as u64,
+                            "clawgs emit daemon sync timed out; backing off"
+                        );
+                        tokio::time::sleep(retry_delay).await;
                     }
                 }
             }
@@ -253,7 +301,12 @@ mod tests {
     use super::*;
     use chrono::{DateTime, Utc};
     use std::collections::HashMap;
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::{Path, PathBuf};
     use std::sync::Mutex;
+    use std::time::Instant;
+    use tempfile::tempdir;
 
     use crate::thought::loop_runner::{SessionInfo, SessionProvider};
     use crate::thought::protocol::{SyncUpdate, ThoughtDeliveryState};
@@ -422,7 +475,7 @@ mod tests {
         let (event_tx, _) = broadcast::channel::<ControlEvent>(8);
         let runtime_config = Arc::new(RwLock::new(ThoughtConfig::default()));
         let runner = BridgeRunner::new(event_tx, runtime_config);
-        assert_eq!(runner.tick, Duration::from_secs(2));
+        assert_eq!(runner.health().timing().tick, Duration::from_secs(2));
     }
 
     #[test]
@@ -883,5 +936,102 @@ mod tests {
                 .emission_seq,
             7
         );
+    }
+
+    #[tokio::test]
+    async fn bridge_runner_waits_for_tick_between_sync_requests() {
+        let temp = tempdir().expect("tempdir");
+        let request_log = temp.path().join("requests.log");
+        let fake_bin = write_fake_bridge_daemon_script(temp.path(), &request_log);
+        let (event_tx, _) = broadcast::channel::<ControlEvent>(8);
+        let runtime_config = Arc::new(RwLock::new(ThoughtConfig::default()));
+        let runner = BridgeRunner::with_tick(event_tx, Duration::from_millis(60), runtime_config);
+
+        let handle = runner.spawn(
+            Arc::new(RecordingProvider::default()),
+            EmitterClient::with_bin(fake_bin.to_string_lossy().into_owned()),
+        );
+
+        wait_for_log_lines(&request_log, 2).await;
+        handle.abort();
+        let _ = handle.await;
+
+        let timestamps: Vec<u128> = fs::read_to_string(&request_log)
+            .expect("request log")
+            .lines()
+            .map(|line| line.parse::<u128>().expect("nanoseconds timestamp"))
+            .collect();
+        assert!(
+            timestamps.len() >= 2,
+            "expected at least two bridge sync requests, got {:?}",
+            timestamps
+        );
+        let diff_ns = timestamps[1].saturating_sub(timestamps[0]);
+        assert!(
+            diff_ns >= 40_000_000,
+            "expected bridge tick delay, got only {}ns between sync requests",
+            diff_ns
+        );
+    }
+
+    async fn wait_for_log_lines(path: &Path, expected: usize) {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            let count = fs::read_to_string(path)
+                .ok()
+                .map(|content| content.lines().count())
+                .unwrap_or(0);
+            if count >= expected {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "timed out waiting for {expected} log lines in {}",
+                path.display()
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    fn write_fake_bridge_daemon_script(temp_root: &Path, log_path: &Path) -> PathBuf {
+        let script_path = temp_root.join("fake-clawgs-bridge.py");
+        let script = format!(
+            r#"#!/usr/bin/env python3
+import json
+import pathlib
+import sys
+import time
+
+log_path = pathlib.Path({log_path:?})
+print(json.dumps({{"type": "hello", "protocol": "clawgs.emit.v1"}}), flush=True)
+request_id = 0
+for line in sys.stdin:
+    if not line.strip():
+        continue
+    request_id += 1
+    with log_path.open("a", encoding="utf-8") as handle:
+        handle.write(f"{{time.time_ns()}}\n")
+    print(
+        json.dumps(
+            {{
+                "type": "sync_result",
+                "id": str(request_id),
+                "stream_instance_id": "stream-a",
+                "updates": [],
+                "metrics": {{"llm_calls": 0, "last_backend_error": None}},
+            }}
+        ),
+        flush=True,
+    )
+"#,
+            log_path = log_path.to_string_lossy()
+        );
+        fs::write(&script_path, script).expect("write fake bridge daemon");
+        let mut perms = fs::metadata(&script_path)
+            .expect("script metadata")
+            .permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&script_path, perms).expect("set script permissions");
+        script_path
     }
 }

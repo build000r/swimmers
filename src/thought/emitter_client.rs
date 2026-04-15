@@ -205,6 +205,10 @@ impl EmitterClient {
         Ok(())
     }
 
+    pub async fn restart_daemon(&mut self) -> Result<(), EmitterClientError> {
+        self.restart().await
+    }
+
     async fn next_sync_response_once(
         &mut self,
         runtime_config: &ThoughtConfig,

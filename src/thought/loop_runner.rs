@@ -14,6 +14,7 @@ use tracing::warn;
 
 use crate::thought::bridge_runner::BridgeRunner;
 use crate::thought::emitter_client::EmitterClient;
+use crate::thought::health::BridgeHealthState;
 use crate::thought::protocol::{SyncRequestSequence, ThoughtDeliveryState};
 use crate::thought::runtime_config::ThoughtConfig;
 use crate::types::{ControlEvent, RestState, SessionState, ThoughtSource, ThoughtState};
@@ -91,10 +92,10 @@ pub trait SessionProvider: Send + Sync {
 
 /// Temporary compatibility runner that delegates to the daemon bridge.
 pub struct ThoughtLoopRunner {
-    tick_ms: u64,
     event_tx: broadcast::Sender<ControlEvent>,
     runtime_config: Arc<RwLock<ThoughtConfig>>,
     request_sequence: Arc<SyncRequestSequence>,
+    bridge_health: Arc<BridgeHealthState>,
 }
 
 impl ThoughtLoopRunner {
@@ -105,11 +106,17 @@ impl ThoughtLoopRunner {
         request_sequence: Arc<SyncRequestSequence>,
     ) -> Self {
         Self {
-            tick_ms,
             event_tx,
             runtime_config,
             request_sequence,
+            bridge_health: Arc::new(BridgeHealthState::new_with_tick(Duration::from_millis(
+                tick_ms,
+            ))),
         }
+    }
+
+    pub fn bridge_health(&self) -> Arc<BridgeHealthState> {
+        self.bridge_health.clone()
     }
 
     /// Start the compatibility shim as a detached task.
@@ -119,14 +126,10 @@ impl ThoughtLoopRunner {
     ) -> tokio::task::JoinHandle<()> {
         warn!("legacy inproc thought backend selected; delegating to clawgs daemon bridge");
 
-        BridgeRunner::with_tick(
-            self.event_tx,
-            Duration::from_millis(self.tick_ms),
-            self.runtime_config,
-        )
-        .spawn(
-            provider,
-            EmitterClient::with_request_sequence(self.request_sequence),
-        )
+        BridgeRunner::with_existing_health(self.event_tx, self.runtime_config, self.bridge_health)
+            .spawn(
+                provider,
+                EmitterClient::with_request_sequence(self.request_sequence),
+            )
     }
 }

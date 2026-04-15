@@ -19,6 +19,7 @@ use crate::host_actions::RepoActionTracker;
 use crate::persistence::file_store::FileStore;
 use crate::session::actor::SessionCommand;
 use crate::session::supervisor::SessionSupervisor;
+use crate::thought::health::BridgeHealthState;
 use crate::thought::protocol::SyncRequestSequence;
 use crate::thought::runtime_config::{DaemonDefaults, ThoughtConfig};
 use crate::types::{GhosttyOpenMode, NativeDesktopApp, SessionSummary};
@@ -38,6 +39,7 @@ pub struct AppState {
     pub sync_request_sequence: Arc<SyncRequestSequence>,
     pub daemon_defaults: Option<DaemonDefaults>,
     pub file_store: Option<Arc<FileStore>>,
+    pub bridge_health: Arc<BridgeHealthState>,
     pub published_selection: Arc<RwLock<PublishedSelectionState>>,
     pub repo_actions: RepoActionTracker,
 }

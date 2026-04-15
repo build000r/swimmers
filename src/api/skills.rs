@@ -269,6 +269,9 @@ mod tests {
             sync_request_sequence: Arc::new(SyncRequestSequence::new()),
             daemon_defaults: None,
             file_store: None,
+            bridge_health: Arc::new(crate::thought::health::BridgeHealthState::new_with_tick(
+                std::time::Duration::from_secs(15),
+            )),
             published_selection: Arc::new(RwLock::new(PublishedSelectionState::default())),
             repo_actions: crate::host_actions::RepoActionTracker::default(),
         })
