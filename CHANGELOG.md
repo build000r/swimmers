@@ -2,6 +2,13 @@
 
 All notable changes to swimmers are documented here. The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.3] — 2026-04-15
+
+- Added bridge health state, `/readyz`, retry backoff, and self-fencing so the daemon-backed thought loop can surface degraded/unhealthy state instead of failing silently.
+- Made `SWIMMERS_THOUGHT_TICK_MS` configurable and wired the bridge health snapshot through the API response surface.
+- Reworked the TUI thought rail so only the bracketed session label is clickable, tagged rows split cleanly into metadata/body lines, and badges inherit the session color.
+- Removed a dead overlay helper so `cargo build --release` stays warning-free under the publish gate.
+
 ## [0.1.2] — 2026-04-08
 
 - Rebuilt the GitHub release workflow inside `rust:1-bookworm` so published `swimmers-linux-amd64` assets stay compatible with Debian/Ubuntu environments that ship glibc 2.36.
@@ -83,5 +90,6 @@ The final stretch closed three publish blockers and nine should-fixes flagged by
 - Legacy Node.js stack removed and docs updated for the Rust/Preact world ([`5d9c3ed`](https://github.com/build000r/swimmers/commit/5d9c3ed))
 
 [0.1.1]: https://github.com/build000r/swimmers/releases/tag/v0.1.1
+[0.1.3]: https://github.com/build000r/swimmers/releases/tag/v0.1.3
 [0.1.2]: https://github.com/build000r/swimmers/releases/tag/v0.1.2
 [0.1.0]: https://github.com/build000r/swimmers/releases/tag/v0.1.0
