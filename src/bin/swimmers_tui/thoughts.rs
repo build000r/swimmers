@@ -1,6 +1,5 @@
 use super::*;
 
-const THOUGHT_SHIFT_LABEL: &str = "[shift]";
 const THOUGHT_COMMIT_LABEL: &str = "[commit]";
 
 pub(crate) struct ThoughtFingerprint {
@@ -168,7 +167,7 @@ pub(crate) struct ThoughtChipLayout {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ThoughtRowLayout {
-    pub(crate) shift_rect: Option<Rect>,
+    pub(crate) session_rect: Option<Rect>,
     pub(crate) text_rect: Option<Rect>,
     pub(crate) mermaid_rect: Option<Rect>,
     pub(crate) mermaid_label: Option<String>,
@@ -419,6 +418,10 @@ pub(crate) fn thought_session_label(pwd_label: Option<&str>, tmux_name: &str) ->
     }
 }
 
+pub(crate) fn thought_session_click_label(label: &str) -> String {
+    format!("[{label}]")
+}
+
 pub(crate) fn wrap_text(text: &str, max_chars: usize) -> Vec<String> {
     if max_chars == 0 {
         return Vec::new();
@@ -466,7 +469,7 @@ pub(crate) struct ThoughtPanelEntryView {
     pub(crate) tmux_name: String,
     pub(crate) updated_at: Option<DateTime<Utc>>,
     pub(crate) color: Color,
-    pub(crate) text: String,
+    pub(crate) thought: String,
     pub(crate) has_objective_shift: bool,
     pub(crate) mermaid_label: Option<String>,
     pub(crate) has_commit_candidate: bool,
@@ -631,7 +634,7 @@ pub(crate) fn build_thought_panel_entries<C: TuiApi>(app: &App<C>) -> Vec<Though
             tmux_name: entry.tmux_name.clone(),
             updated_at: entry.updated_at,
             color: app.thought_entry_display_color(entry),
-            text: format!("{label}: {}", entry.thought.replace('\n', " ")),
+            thought: entry.thought.replace('\n', " "),
             has_objective_shift: entry.objective_changed,
             mermaid_label: app
                 .mermaid_artifacts
@@ -657,7 +660,7 @@ pub(crate) fn build_thought_panel_entries<C: TuiApi>(app: &App<C>) -> Vec<Though
             tmux_name: entity.session.tmux_name.clone(),
             updated_at: artifact.updated_at,
             color: session_display_color(&entity.session, &app.repo_themes),
-            text: format!("{label}: mermaid diagram ready"),
+            thought: "diagram ready".to_string(),
             has_objective_shift: false,
             mermaid_label: Some(mermaid_badge_label(artifact.slice_name.as_deref())),
             has_commit_candidate: entity.session.commit_candidate,
@@ -672,83 +675,124 @@ pub(crate) fn build_rows_for_panel_entry(
     entry: &ThoughtPanelEntryView,
     thought_content: Rect,
 ) -> Vec<ThoughtRowLayout> {
-    let shift_width = display_width(THOUGHT_SHIFT_LABEL);
     let mermaid_width = entry
         .mermaid_label
         .as_deref()
         .map(display_width)
         .unwrap_or(0);
     let commit_width = display_width(THOUGHT_COMMIT_LABEL);
-    let mut reserved: u16 = 0;
-    if entry.has_objective_shift {
-        reserved = reserved.saturating_add(shift_width).saturating_add(1);
-    }
-    if entry.mermaid_label.is_some() {
-        reserved = reserved.saturating_add(mermaid_width).saturating_add(1);
-    }
-    if entry.has_commit_candidate {
-        reserved = reserved.saturating_add(commit_width).saturating_add(1);
-    }
-    let text_x = thought_content.x.saturating_add(reserved);
-    let text_width = thought_content.width.saturating_sub(reserved) as usize;
-    let wrapped = if text_width == 0 {
-        vec![String::new()]
-    } else {
-        wrap_text(&entry.text, text_width)
-    };
+    let has_inline_tags = entry.mermaid_label.is_some() || entry.has_commit_candidate;
+    let session_label = thought_session_click_label(&entry.label);
+    let session_width = display_width(&session_label);
 
-    wrapped
-        .into_iter()
-        .enumerate()
-        .map(|(index, line)| {
-            let visible_line_width = display_width(&line);
-            let mut badge_x = thought_content.x;
-            let shift_rect = (index == 0 && entry.has_objective_shift).then_some(Rect {
-                x: badge_x,
-                y: 0,
-                width: shift_width,
-                height: 1,
-            });
-            if entry.has_objective_shift {
-                badge_x = badge_x.saturating_add(shift_width).saturating_add(1);
-            }
-            let mermaid_rect = (index == 0 && entry.mermaid_label.is_some()).then_some(Rect {
-                x: badge_x,
-                y: 0,
-                width: mermaid_width,
-                height: 1,
-            });
-            if entry.mermaid_label.is_some() {
-                badge_x = badge_x.saturating_add(mermaid_width).saturating_add(1);
-            }
-            ThoughtRowLayout {
-                shift_rect,
-                text_rect: (visible_line_width > 0).then_some(Rect {
-                    x: text_x,
-                    y: 0,
-                    width: visible_line_width,
-                    height: 1,
-                }),
-                mermaid_rect,
-                mermaid_label: if index == 0 {
-                    entry.mermaid_label.clone()
-                } else {
-                    None
-                },
-                commit_rect: (index == 0 && entry.has_commit_candidate).then_some(Rect {
-                    x: badge_x,
-                    y: 0,
-                    width: commit_width,
-                    height: 1,
-                }),
-                session_id: entry.session_id.clone(),
-                label: entry.label.clone(),
-                tmux_name: entry.tmux_name.clone(),
-                line,
-                color: entry.color,
-            }
-        })
-        .collect()
+    if !has_inline_tags {
+        let line = format!("{session_label} {}", entry.thought);
+        return wrap_text(&line, thought_content.width as usize)
+            .into_iter()
+            .enumerate()
+            .map(|(index, line)| {
+                let visible_line_width = display_width(&line);
+                ThoughtRowLayout {
+                    session_rect: (index == 0 && visible_line_width > 0).then_some(Rect {
+                        x: thought_content.x,
+                        y: 0,
+                        width: session_width.min(visible_line_width),
+                        height: 1,
+                    }),
+                    text_rect: (visible_line_width > 0).then_some(Rect {
+                        x: thought_content.x,
+                        y: 0,
+                        width: visible_line_width,
+                        height: 1,
+                    }),
+                    mermaid_rect: None,
+                    mermaid_label: None,
+                    commit_rect: None,
+                    session_id: entry.session_id.clone(),
+                    label: entry.label.clone(),
+                    tmux_name: entry.tmux_name.clone(),
+                    line,
+                    color: entry.color,
+                }
+            })
+            .collect();
+    }
+
+    let mut badge_x = thought_content.x;
+    let mermaid_rect = entry.mermaid_label.as_ref().map(|_| Rect {
+        x: badge_x,
+        y: 0,
+        width: mermaid_width,
+        height: 1,
+    });
+    if entry.mermaid_label.is_some() {
+        badge_x = badge_x.saturating_add(mermaid_width).saturating_add(1);
+    }
+
+    let commit_rect = entry.has_commit_candidate.then_some(Rect {
+        x: badge_x,
+        y: 0,
+        width: commit_width,
+        height: 1,
+    });
+    if entry.has_commit_candidate {
+        badge_x = badge_x.saturating_add(commit_width).saturating_add(1);
+    }
+
+    let label_line = session_label;
+    let label_available = thought_content.right().saturating_sub(badge_x) as usize;
+    let label_line = truncate_label(&label_line, label_available);
+    let label_width = display_width(&label_line);
+
+    let mut rows = vec![ThoughtRowLayout {
+        session_rect: (label_width > 0).then_some(Rect {
+            x: badge_x,
+            y: 0,
+            width: label_width,
+            height: 1,
+        }),
+        text_rect: (label_width > 0).then_some(Rect {
+            x: badge_x,
+            y: 0,
+            width: label_width,
+            height: 1,
+        }),
+        mermaid_rect,
+        mermaid_label: entry.mermaid_label.clone(),
+        commit_rect,
+        session_id: entry.session_id.clone(),
+        label: entry.label.clone(),
+        tmux_name: entry.tmux_name.clone(),
+        line: label_line,
+        color: entry.color,
+    }];
+
+    rows.extend(
+        wrap_text(&entry.thought, thought_content.width as usize)
+            .into_iter()
+            .map(|line| {
+                let visible_line_width = display_width(&line);
+                ThoughtRowLayout {
+                    session_rect: None,
+                    text_rect: (visible_line_width > 0).then_some(Rect {
+                        x: thought_content.x,
+                        y: 0,
+                        width: visible_line_width,
+                        height: 1,
+                    }),
+                    mermaid_rect: None,
+                    mermaid_label: None,
+                    commit_rect: None,
+                    session_id: entry.session_id.clone(),
+                    label: entry.label.clone(),
+                    tmux_name: entry.tmux_name.clone(),
+                    line,
+                    color: entry.color,
+                }
+            }),
+    );
+
+    rows
 }
 
 pub(crate) fn render_thought_panel<C: TuiApi>(
@@ -789,14 +833,11 @@ pub(crate) fn render_thought_panel<C: TuiApi>(
         .saturating_sub(panel.rows.len() as u16);
     for (offset, row) in panel.rows.iter().enumerate() {
         let y = start_y + offset as u16;
-        if let Some(rect) = row.shift_rect {
-            renderer.draw_text(rect.x, y, THOUGHT_SHIFT_LABEL, Color::Yellow);
-        }
         if let (Some(rect), Some(label)) = (row.mermaid_rect, &row.mermaid_label) {
-            renderer.draw_text(rect.x, y, label, Color::Cyan);
+            renderer.draw_text(rect.x, y, label, row.color);
         }
         if let Some(rect) = row.commit_rect {
-            renderer.draw_text(rect.x, y, THOUGHT_COMMIT_LABEL, Color::DarkGrey);
+            renderer.draw_text(rect.x, y, THOUGHT_COMMIT_LABEL, row.color);
         }
         if let Some(rect) = row.text_rect {
             renderer.draw_text(rect.x, y, &row.line, row.color);
@@ -864,7 +905,7 @@ pub(crate) fn thought_panel_action_at<C: TuiApi>(
         .bottom()
         .saturating_sub(panel.rows.len() as u16);
     for (offset, row) in panel.rows.iter().enumerate() {
-        let text_rect = row.text_rect.map(|rect| Rect {
+        let session_rect = row.session_rect.map(|rect| Rect {
             x: rect.x,
             y: row_start_y + offset as u16,
             width: rect.width,
@@ -893,7 +934,10 @@ pub(crate) fn thought_panel_action_at<C: TuiApi>(
         {
             return Some(ThoughtPanelAction::OpenMermaid(row.session_id.clone()));
         }
-        if text_rect.map(|rect| rect.contains(x, y)).unwrap_or(false) {
+        if session_rect
+            .map(|rect| rect.contains(x, y))
+            .unwrap_or(false)
+        {
             return Some(ThoughtPanelAction::OpenSession {
                 session_id: row.session_id.clone(),
                 label: row.label.clone(),

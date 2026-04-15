@@ -2820,7 +2820,7 @@ fn refresh_prunes_exited_sessions_from_thought_timeline_and_header_filter_chips(
             .iter()
             .map(|row| row.line.as_str())
             .collect::<Vec<_>>(),
-        vec!["skills/9: indexing docs"]
+        vec!["[skills/9] indexing docs"]
     );
 }
 
@@ -2928,9 +2928,9 @@ fn render_header_filter_strip_shows_repo_chips_and_thought_rows() {
             .map(|row| row.line.as_str())
             .collect::<Vec<_>>(),
         vec![
-            "swimmers/7: patching tui",
-            "swimmers/2: wiring filter state",
-            "skills/9: indexing docs",
+            "[swimmers/7] patching tui",
+            "[swimmers/2] wiring filter state",
+            "[skills/9] indexing docs",
         ]
     );
 
@@ -3107,7 +3107,7 @@ fn header_filter_strip_and_thought_rows_apply_and_clear_filters() {
         .bottom()
         .saturating_sub(filtered_panel.rows.len() as u16);
     let row_rect = filtered_panel.rows[row_index]
-        .text_rect
+        .session_rect
         .expect("row should have a click target");
     app.selected_id = Some("sess-3".to_string());
     api.push_open_session(Ok(NativeDesktopOpenResponse {
@@ -3274,7 +3274,7 @@ fn header_filter_strip_toggles_filter_out_mode_and_excludes_selected_projects() 
 }
 
 #[test]
-fn clicking_thought_body_opens_that_session() {
+fn clicking_bracketed_thought_label_opens_that_session() {
     let api = MockApi::new();
     let layout = test_layout(120, 32);
     let thought_content = layout
@@ -3300,13 +3300,11 @@ fn clicking_thought_body_opens_that_session() {
     let row_start_y = thought_content
         .bottom()
         .saturating_sub(panel.rows.len() as u16);
-    let line = panel.rows[0].line.clone();
-    let body_x = panel.rows[0]
-        .text_rect
-        .expect("row should have text")
+    let label_x = panel.rows[0]
+        .session_rect
+        .expect("row should have a clickable session label")
         .x
         .saturating_add(1);
-    assert!(body_x < thought_content.x.saturating_add(display_width(&line)));
 
     api.push_open_session(Ok(NativeDesktopOpenResponse {
         session_id: "sess-1".to_string(),
@@ -3314,7 +3312,7 @@ fn clicking_thought_body_opens_that_session() {
         pane_id: None,
     }));
     app.handle_thought_click(
-        body_x,
+        label_x,
         row_start_y,
         thought_content,
         layout.thought_entry_capacity(),
@@ -3331,6 +3329,51 @@ fn clicking_thought_body_opens_that_session() {
         app.message.as_ref().map(|(message, _)| message.as_str()),
         Some("focused swimmers/7")
     );
+}
+
+#[test]
+fn clicking_plain_thought_body_does_not_open_that_session() {
+    let api = MockApi::new();
+    let layout = test_layout(120, 32);
+    let thought_content = layout
+        .thought_content
+        .expect("wide layout enables thought rail");
+    let mut app = make_app(api.clone());
+    app.merge_sessions(
+        vec![session_summary("sess-1", "7", TEST_REPO_SWIMMERS)],
+        layout.overview_field,
+    );
+    app.capture_thought_updates(
+        &[session_summary_with_thought(
+            "sess-1",
+            "7",
+            TEST_REPO_SWIMMERS,
+            "patching tui",
+            "2026-03-08T14:00:05Z",
+        )],
+        layout.thought_entry_capacity(),
+    );
+
+    let panel = build_thought_panel(&app, thought_content, layout.thought_entry_capacity());
+    let row_start_y = thought_content
+        .bottom()
+        .saturating_sub(panel.rows.len() as u16);
+    let selected_before = app.selected_id.clone();
+    let session_rect = panel.rows[0]
+        .session_rect
+        .expect("row should have a clickable session label");
+    let body_x = session_rect.right().saturating_add(1);
+
+    app.handle_thought_click(
+        body_x,
+        row_start_y,
+        thought_content,
+        layout.thought_entry_capacity(),
+    );
+
+    assert!(app.pending_interaction.is_none());
+    assert_eq!(api.open_calls(), Vec::<String>::new());
+    assert_eq!(app.selected_id, selected_before);
 }
 
 #[test]
@@ -3381,14 +3424,14 @@ fn wrapped_latest_thought_stays_bottom_aligned() {
 }
 
 #[test]
-fn clicking_wrapped_thought_line_opens_that_session() {
+fn clicking_wrapped_thought_session_label_opens_that_session() {
     let api = MockApi::new();
     let mut app = make_app(api.clone());
     let thought_content = Rect {
         x: 0,
         y: 0,
         width: 12,
-        height: 5,
+        height: 6,
     };
     app.merge_sessions(
         vec![session_summary("sess-2", "9", TEST_REPO_SWIMMERS)],
@@ -3402,20 +3445,21 @@ fn clicking_wrapped_thought_line_opens_that_session() {
             "latest thought stays at bottom",
             "2026-03-08T14:00:06Z",
         )],
-        4,
+        5,
     );
 
-    let panel = build_thought_panel(&app, thought_content, 4);
+    let panel = build_thought_panel(&app, thought_content, 5);
     let row_start_y = thought_content
         .bottom()
         .saturating_sub(panel.rows.len() as u16);
+    assert_eq!(panel.rows[0].line, "[swimmers/9]");
 
     api.push_open_session(Ok(NativeDesktopOpenResponse {
         session_id: "sess-2".to_string(),
         status: "focused".to_string(),
         pane_id: None,
     }));
-    app.handle_thought_click(1, row_start_y + 3, thought_content, 4);
+    app.handle_thought_click(1, row_start_y, thought_content, 5);
     assert!(app.pending_interaction.is_some());
 
     poll_until_interaction(&mut app);
@@ -3458,7 +3502,7 @@ fn clicking_thought_row_surfaces_native_open_errors() {
         .bottom()
         .saturating_sub(panel.rows.len() as u16);
     let body_x = panel.rows[0]
-        .text_rect
+        .session_rect
         .expect("row should have text")
         .x
         .saturating_add(1);
@@ -3552,7 +3596,7 @@ fn repo_theme_colors_override_state_colors_in_thought_history() {
         .bottom()
         .saturating_sub(panel.rows.len() as u16);
     assert_eq!(panel.rows.len(), 1);
-    assert_eq!(cell_at(&renderer, thought_content.x, row_start_y).ch, 'a');
+    assert_eq!(cell_at(&renderer, thought_content.x, row_start_y).ch, '[');
     assert_eq!(
         cell_at(&renderer, thought_content.x, row_start_y).fg,
         theme_color
@@ -6260,7 +6304,7 @@ fn clicking_commit_badge_surfaces_commit_launch_errors() {
 }
 
 #[test]
-fn thought_panel_renders_shift_badge_for_objective_changes() {
+fn objective_shift_entries_no_longer_render_shift_badges() {
     let api = MockApi::new();
     let layout = test_layout(120, 32);
     let thought_content = layout
@@ -6279,7 +6323,7 @@ fn thought_panel_renders_shift_badge_for_objective_changes() {
     app.capture_thought_updates(&[session], layout.thought_entry_capacity());
 
     let panel = build_thought_panel(&app, thought_content, layout.thought_entry_capacity());
-    let shift_rect = panel.rows[0].shift_rect.expect("shift badge");
+    let text_rect = panel.rows[0].text_rect.expect("row text");
     let row_y = thought_content
         .bottom()
         .saturating_sub(panel.rows.len() as u16);
@@ -6291,8 +6335,10 @@ fn thought_panel_renders_shift_badge_for_objective_changes() {
         layout.thought_entry_capacity(),
     );
 
-    assert_eq!(cell_at(&renderer, shift_rect.x, row_y).ch, '[');
-    assert_eq!(cell_at(&renderer, shift_rect.x, row_y).fg, Color::Yellow);
+    assert_eq!(panel.rows[0].line, "[swimmers/2] reframed the plan");
+    assert_eq!(text_rect.x, thought_content.x);
+    assert_eq!(cell_at(&renderer, thought_content.x, row_y).ch, '[');
+    assert_eq!(cell_at(&renderer, thought_content.x, row_y).fg, panel.rows[0].color);
 }
 
 #[test]
@@ -6327,16 +6373,22 @@ fn objective_shift_entries_override_timestamp_order_in_the_visible_rail() {
     let shift_index = panel
         .rows
         .iter()
-        .position(|row| row.line == "alpha/2: reframed the plan")
+        .position(|row| row.line == "[alpha/2] reframed the plan")
         .expect("shift row");
     let plain_index = panel
         .rows
         .iter()
-        .position(|row| row.line == "swimmers/9: routine update")
+        .position(|row| row.line == "[swimmers/9] routine update")
         .expect("plain row");
 
     assert!(shift_index > plain_index);
-    assert!(panel.rows[shift_index].shift_rect.is_some());
+    assert_eq!(
+        panel.rows[shift_index]
+            .text_rect
+            .expect("shift row text")
+            .x,
+        thought_content.x
+    );
 }
 
 #[test]
@@ -6361,7 +6413,7 @@ fn refresh_builds_synthetic_mermaid_row_and_preserves_text_click_behavior() {
 
     let panel = build_thought_panel(&app, thought_content, layout.thought_entry_capacity());
     assert_eq!(panel.rows.len(), 2);
-    assert_eq!(panel.rows[0].line, "swimmers/7: mermaid");
+    assert_eq!(panel.rows[0].line, "[swimmers/7]");
     assert_eq!(panel.rows[1].line, "diagram ready");
     let mermaid_rect = panel.rows[0].mermaid_rect.expect("mermaid button");
     let commit_rect = panel.rows[0].commit_rect.expect("commit badge");
@@ -6402,6 +6454,70 @@ fn refresh_builds_synthetic_mermaid_row_and_preserves_text_click_behavior() {
             session_id: "sess-1".to_string(),
             label: "swimmers/7".to_string(),
         })
+    );
+}
+
+#[test]
+fn tagged_thought_rows_render_metadata_above_full_width_body_with_matching_color() {
+    let api = MockApi::new();
+    let layout = test_layout(120, 32);
+    let thought_content = layout
+        .thought_content
+        .expect("wide layout enables thought rail");
+    let mut app = make_app(api);
+    let mut session = session_summary_with_thought(
+        "sess-1",
+        "7",
+        TEST_REPO_SWIMMERS,
+        "patching the clawgs rail layout",
+        "2026-03-29T14:00:05Z",
+    );
+    session.repo_theme_id = Some("/tmp/swimmers".to_string());
+    app.repo_themes
+        .insert("/tmp/swimmers".to_string(), repo_theme("#B89875"));
+    app.merge_sessions(vec![session.clone()], layout.overview_field);
+    app.mermaid_artifacts.insert(
+        session.session_id.clone(),
+        mermaid_artifact(
+            &session.session_id,
+            "/tmp/repos/swimmers/flow.mmd",
+            "2026-03-29T14:00:06Z",
+            "graph TD\nA-->B\n",
+        ),
+    );
+    app.capture_thought_updates(&[session], layout.thought_entry_capacity());
+
+    let panel = build_thought_panel(&app, thought_content, layout.thought_entry_capacity());
+    assert_eq!(
+        panel
+            .rows
+            .iter()
+            .map(|row| row.line.as_str())
+            .collect::<Vec<_>>(),
+        vec!["[swimmers/7]", "patching the clawgs rail layout"]
+    );
+
+    let mermaid_rect = panel.rows[0].mermaid_rect.expect("mermaid button");
+    let row_y = thought_content
+        .bottom()
+        .saturating_sub(panel.rows.len() as u16);
+    let mut renderer = test_renderer(120, 32);
+    render_thought_panel(
+        &app,
+        &mut renderer,
+        thought_content,
+        layout.thought_entry_capacity(),
+    );
+
+    assert_eq!(cell_at(&renderer, mermaid_rect.x, row_y).fg, panel.rows[0].color);
+    assert_eq!(
+        cell_at(
+            &renderer,
+            panel.rows[1].text_rect.expect("thought body").x,
+            row_y + 1
+        )
+        .fg,
+        panel.rows[1].color
     );
 }
 
