@@ -130,12 +130,6 @@ impl SkillboxOverlay {
             .and_then(|c| c.dir_config.as_ref())
     }
 
-    /// Find a named directory group from the overlay whose dir config matches `cwd`.
-    pub fn find_group(&self, cwd: &str, group_name: &str) -> Option<&OverlayDirGroup> {
-        let config = self.find_dir_config(cwd)?;
-        config.groups.iter().find(|g| g.name == group_name)
-    }
-
     /// Given a session CWD, find the matching client's plan directories.
     ///
     /// Multi-repo clients (more than one `cwd_match` entry) are skipped —
