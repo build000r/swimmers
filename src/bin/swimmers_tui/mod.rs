@@ -225,7 +225,9 @@ pub(crate) fn run() -> Result<(), Box<dyn std::error::Error>> {
     init_tui_tracing();
     install_panic_hook();
     tracing::info!(
-        target_url = std::env::var("SWIMMERS_TUI_URL").as_deref().unwrap_or("<unset>"),
+        target_url = std::env::var("SWIMMERS_TUI_URL")
+            .as_deref()
+            .unwrap_or("<unset>"),
         "swimmers-tui run loop starting"
     );
     let (mut app, mut renderer) = initialize_tui_app()?;
