@@ -23,7 +23,7 @@ use std::collections::{BTreeSet, HashMap};
 use std::io;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
-use std::time::{Duration, UNIX_EPOCH};
+use std::time::{Duration, Instant, UNIX_EPOCH};
 use tokio::process::Command;
 
 /// Max concurrent git probes per `list_dirs` call. Keeps a single listing from
@@ -147,6 +147,20 @@ fn services_for_directory(path: &Path, context: &OverlayServiceContext) -> Vec<S
 }
 
 /// Check service health by sending HTTP GET requests to overlay-defined URLs.
+///
+/// Local-dev overlays routinely declare health URLs for services that are not
+/// currently running (`http://localhost:PORT/...`). Without these tight
+/// budgets, reqwest's defaults make every `/v1/dirs` call take 5 s whenever
+/// any one service is down or hung.
+///
+/// `connect_timeout` catches services with no listener (port closed → fails
+/// fast at 250 ms). `timeout` caps the worst case for services that *accept*
+/// the TCP connection but never write a response (a stuck process holding the
+/// port). For local picker-decoration UX, 500 ms is generous — healthy local
+/// services typically respond in 1–20 ms.
+const HEALTH_PROBE_CONNECT_TIMEOUT: Duration = Duration::from_millis(250);
+const HEALTH_PROBE_TOTAL_TIMEOUT: Duration = Duration::from_millis(500);
+
 async fn overlay_service_health_map(
     services: &[OverlayServiceEntry],
     requested: &[String],
@@ -157,7 +171,8 @@ async fn overlay_service_health_map(
     }
 
     let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(5))
+        .connect_timeout(HEALTH_PROBE_CONNECT_TIMEOUT)
+        .timeout(HEALTH_PROBE_TOTAL_TIMEOUT)
         .build()
         .unwrap_or_default();
 
@@ -404,6 +419,7 @@ async fn list_dirs(
             .into_response();
     }
 
+    let request_started = Instant::now();
     let target = match &query.path {
         Some(path) if !path.is_empty() => PathBuf::from(path),
         _ => base.clone(),
@@ -512,6 +528,9 @@ async fn list_dirs(
         .map(|pending_entry| (pending_entry.entry_path.clone(), state.repo_actions.clone()))
         .collect();
 
+    let pending_phase_ms = request_started.elapsed().as_millis() as u64;
+    let pending_count = pending.len();
+    let probe_started = Instant::now();
     let probes: Vec<(Option<bool>, Option<RepoActionStatus>)> = stream::iter(probe_inputs)
         .map(|(entry_path, repo_actions)| async move {
             let repo_summary =
@@ -534,6 +553,7 @@ async fn list_dirs(
         .buffered(GIT_PROBE_CONCURRENCY)
         .collect()
         .await;
+    let probe_phase_ms = probe_started.elapsed().as_millis() as u64;
 
     let candidates: Vec<ListCandidate> = pending
         .into_iter()
@@ -548,12 +568,25 @@ async fn list_dirs(
         })
         .collect();
 
+    let health_started = Instant::now();
     let health_map = if let Some(config) = dir_config {
         let services: Vec<String> = unique_services.into_iter().collect();
         overlay_service_health_map(&config.services, &services).await
     } else {
         HashMap::new()
     };
+    let health_phase_ms = health_started.elapsed().as_millis() as u64;
+    let total_ms = request_started.elapsed().as_millis() as u64;
+    tracing::info!(
+        target: "swimmers::api::dirs::timing",
+        managed_only,
+        pending_count,
+        pending_phase_ms,
+        probe_phase_ms,
+        health_phase_ms,
+        total_ms,
+        "list_dirs phase timing"
+    );
 
     // Build lookup from service name → overlay metadata for restart/open_url.
     let svc_meta: HashMap<&str, &OverlayServiceEntry> = dir_config
