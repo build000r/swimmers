@@ -2,6 +2,27 @@
 
 All notable changes to swimmers are documented here. The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Diagnosability and `/v1/dirs` performance
+
+- Added file-backed structured tracing to `swimmers-tui`. Default log path is `${SWIMMERS_TUI_LOG_DIR:-${TMPDIR:-/tmp}}/swimmers-tui-client-${pid}.log`, filter overridable via `SWIMMERS_TUI_LOG` (env-filter syntax, default `swimmers_tui=info,reqwest=warn`). Preflight, transport, and retry sites now emit URL/probe/attempt/elapsed events; transport-error messages append the active log path so the user never has to hunt for it. `scripts/run-tui.sh` pins the same log directory for both client and server processes via `configure_log_paths`, prints the paths once at startup, and identifies foreign listeners in failure diagnostics ([`0b39f1c`](https://github.com/build000r/swimmers/commit/0b39f1c)).
+- Raised the TUI's client-side `/v1/dirs` timeout from 5 s to 20 s (and `/v1/dirs/actions` from 5 s to 15 s) as an immediate band-aid for hosts where live response time was racing the 5 s ceiling and surfacing as false "backend unavailable" toasts ([`d968046`](https://github.com/build000r/swimmers/commit/d968046)).
+- Bounded `/v1/dirs` server-side health probes with `connect_timeout=250ms` and `timeout=500ms` so dead-port and hung-listener local-dev services can't dominate response time. Measured improvement on a 12-entry overlay with 10 declared `localhost:PORT` health URLs (most not running, one wedged on `localhost:3301`): 5104 ms → 580–650 ms across three back-to-back runs (**8.5× faster**). Phase-level INFO timing logs added to `list_dirs` so future regressions are visible in server logs without re-instrumenting ([`3b30aa4`](https://github.com/build000r/swimmers/commit/3b30aa4)).
+
+### Repo-doc viewer + transcript-aware rest states
+
+- `README.md` and `docs/VISION.md` (or root `VISION.md`) now ride alongside slice plan files as viewable artifacts in the swimmers TUI. The mermaid plan-tab strip exposes new `Readme` and `Vision` `DomainPlanTab` variants, the badge label reads "artifacts ready" (covers more than diagrams now), viewer text fetches route through a new `resolve_viewer_text_path` helper, and the keybinding range extends from `1–7` to `1–9` to reach the new tabs ([`1c818fa`](https://github.com/build000r/swimmers/commit/1c818fa)).
+- Dropped the wall-clock `Sleeping`/`DeepSleep` thresholds. The fallback `rest_state_from_idle` now stops at `Drowsy`; `Sleeping` and `DeepSleep` are reserved for transcript-driven daemon updates that actually know whether the session is waiting on the user. The state detector also stops flipping `Idle`/`Attention` to `Busy` from child-process liveness alone when in TUI tool mode, since TUI agents stay running while polling for input ([`1c818fa`](https://github.com/build000r/swimmers/commit/1c818fa)).
+
+### Native handoff
+
+- Per-tab Ghostty preview tracking. The single global preview-term slot (`GHOSTTY_PREVIEW_TERM_ID`) was replaced with a per-tab map (`GHOSTTY_PREVIEW_TERM_IDS`) keyed by Ghostty tab id, and the AppleScript helpers now reap duplicate managed terms and exclude the managed term from anchor selection. Fixes preview collisions when swap-mode opens are triggered across multiple Ghostty tabs ([`3875351`](https://github.com/build000r/swimmers/commit/3875351)).
+
+### Housekeeping
+
+- Pure rustfmt cleanup of `src/api/dirs.rs`, `src/session/overlay.rs`, and `src/bin/swimmers_tui/picker.rs` ([`7ccf8ce`](https://github.com/build000r/swimmers/commit/7ccf8ce)), plus a one-line wrap fix in the TUI run-loop tracing call ([`c8b2d69`](https://github.com/build000r/swimmers/commit/c8b2d69)).
+
 ## [0.1.3] — 2026-04-15
 
 - Added bridge health state, `/readyz`, retry backoff, and self-fencing so the daemon-backed thought loop can surface degraded/unhealthy state instead of failing silently.
@@ -89,7 +110,8 @@ The final stretch closed three publish blockers and nine should-fixes flagged by
 - Renamed throngterm → swimmers ([`5bc4c03`](https://github.com/build000r/swimmers/commit/5bc4c03))
 - Legacy Node.js stack removed and docs updated for the Rust/Preact world ([`5d9c3ed`](https://github.com/build000r/swimmers/commit/5d9c3ed))
 
-[0.1.1]: https://github.com/build000r/swimmers/releases/tag/v0.1.1
+[Unreleased]: https://github.com/build000r/swimmers/compare/v0.1.3...HEAD
 [0.1.3]: https://github.com/build000r/swimmers/releases/tag/v0.1.3
 [0.1.2]: https://github.com/build000r/swimmers/releases/tag/v0.1.2
+[0.1.1]: https://github.com/build000r/swimmers/releases/tag/v0.1.1
 [0.1.0]: https://github.com/build000r/swimmers/releases/tag/v0.1.0
