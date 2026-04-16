@@ -35,8 +35,8 @@ const TMUX_BIN_FALLBACKS: &[&str] = &[
 static NATIVE_OPEN_LOCK: LazyLock<AsyncMutex<()>> = LazyLock::new(|| AsyncMutex::new(()));
 static SESSION_PANE_CACHE: LazyLock<Mutex<HashMap<String, String>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
-static GHOSTTY_PREVIEW_TERM_ID: LazyLock<Mutex<Option<String>>> =
-    LazyLock::new(|| Mutex::new(None));
+static GHOSTTY_PREVIEW_TERM_IDS: LazyLock<Mutex<HashMap<String, String>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 
 impl NativeDesktopApp {
     fn script_relative_path(self) -> &'static str {
@@ -219,7 +219,8 @@ async fn open_or_focus_ghostty_session(
         .unwrap_or((None, None));
     let resolved_cwd = tmux_cwd.as_deref().unwrap_or(cwd);
     let display_name = build_ghostty_display_name(resolved_cwd, tmux_name);
-    let known_preview_id = cached_ghostty_preview_term_id();
+    let active_tab_id = query_front_ghostty_tab_id().await.unwrap_or(None);
+    let known_preview_id = cached_ghostty_preview_term_id(active_tab_id.as_deref());
 
     let result = run_ghostty_open_script(
         &script,
@@ -234,7 +235,8 @@ async fn open_or_focus_ghostty_session(
     .await?;
 
     if mode == GhosttyOpenMode::Swap {
-        remember_ghostty_preview_term_id(result.pane_id.as_deref());
+        let resulting_tab_id = query_front_ghostty_tab_id().await.unwrap_or(active_tab_id);
+        remember_ghostty_preview_term_id(resulting_tab_id.as_deref(), result.pane_id.as_deref());
     }
 
     Ok(result)
@@ -404,8 +406,36 @@ fn cached_pane_id(session_id: &str) -> Option<String> {
     SESSION_PANE_CACHE.lock().unwrap().get(session_id).cloned()
 }
 
-fn cached_ghostty_preview_term_id() -> Option<String> {
-    GHOSTTY_PREVIEW_TERM_ID.lock().unwrap().clone()
+async fn query_front_ghostty_tab_id() -> Result<Option<String>> {
+    let output = Command::new("osascript")
+        .args([
+            "-e",
+            "tell application \"Ghostty\"\nif (count of windows) = 0 then return \"\"\nreturn (id of selected tab of front window) as text\nend tell",
+        ])
+        .output()
+        .await
+        .map_err(|err| anyhow!("failed to query Ghostty front tab: {err}"))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let message = if stderr.is_empty() {
+            "Ghostty tab query returned a non-zero exit status".to_string()
+        } else {
+            stderr
+        };
+        return Err(anyhow!(message));
+    }
+
+    Ok(non_empty_trimmed(String::from_utf8_lossy(&output.stdout).trim()).map(ToOwned::to_owned))
+}
+
+fn cached_ghostty_preview_term_id(tab_id: Option<&str>) -> Option<String> {
+    let tab_id = tab_id.and_then(non_empty_trimmed)?;
+    GHOSTTY_PREVIEW_TERM_IDS
+        .lock()
+        .unwrap()
+        .get(tab_id)
+        .cloned()
 }
 
 fn remember_pane_id(session_id: &str, pane_id: Option<&str>) {
@@ -420,11 +450,25 @@ fn remember_pane_id(session_id: &str, pane_id: Option<&str>) {
     }
 }
 
-fn remember_ghostty_preview_term_id(term_id: Option<&str>) {
-    let mut cache = GHOSTTY_PREVIEW_TERM_ID.lock().unwrap();
-    *cache = term_id
-        .filter(|value| !value.is_empty())
-        .map(ToOwned::to_owned);
+fn remember_ghostty_preview_term_id(tab_id: Option<&str>, term_id: Option<&str>) {
+    let Some(tab_id) = tab_id.and_then(non_empty_trimmed) else {
+        return;
+    };
+
+    let mut cache = GHOSTTY_PREVIEW_TERM_IDS.lock().unwrap();
+    match term_id.filter(|value| !value.is_empty()) {
+        Some(term_id) => {
+            cache.insert(tab_id.to_string(), term_id.to_string());
+        }
+        None => {
+            cache.remove(tab_id);
+        }
+    }
+}
+
+#[cfg(test)]
+fn clear_ghostty_preview_term_cache() {
+    GHOSTTY_PREVIEW_TERM_IDS.lock().unwrap().clear();
 }
 
 async fn run_open_or_focus_script(
@@ -707,6 +751,7 @@ fn host_is_loopback(host: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
     use std::os::unix::fs::PermissionsExt;
     use tempfile::tempdir;
 
@@ -918,6 +963,11 @@ mod tests {
         let script = std::fs::read_to_string(script_path_for_app(NativeDesktopApp::Ghostty))
             .expect("ghostty script should be present");
 
+        assert!(script.contains("on managedTerminals(targetTab, managedTitlePrefix)"));
+        assert!(script.contains("on closeManagedTerminals(targetTerms)"));
+        assert!(script
+            .contains("set managedTerms to my managedTerminals(targetTab, managedTitlePrefix)"));
+        assert!(script.contains("my closeManagedTerminals(duplicateManagedTerms)"));
         assert!(script
             .contains("on replacePreviewSplit(managedTerm, cfg, managedTitle, attachCommand)"));
         assert!(script
@@ -1225,7 +1275,7 @@ mod tests {
         let _env_guard = crate::test_support::ENV_LOCK
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
-        remember_ghostty_preview_term_id(None);
+        clear_ghostty_preview_term_cache();
 
         let temp = tempdir().unwrap();
         let fake_bin_dir = temp.path().join("tmux builds");
@@ -1248,7 +1298,7 @@ mod tests {
         std::fs::write(
             &fake_osascript,
             format!(
-                "#!/bin/sh\nset -eu\nif [ \"${{1-}}\" = \"-e\" ]; then\n  printf '1.3.1\\n'\n  exit 0\nfi\nfirst=1\nfor arg in \"$@\"; do\n  if [ \"$first\" -eq 1 ]; then\n    printf '%s' \"$arg\" >> \"{log}\"\n    first=0\n  else\n    printf '\\t%s' \"$arg\" >> \"{log}\"\n  fi\ndone\nprintf '\\n' >> \"{log}\"\nprintf 'created|ghost-pane\\n'\n",
+                "#!/bin/sh\nset -eu\nif [ \"${{1-}}\" = \"-e\" ]; then\n  case \"${{2-}}\" in\n    *\"get version\"*)\n      printf '1.3.1\\n'\n      ;;\n    *)\n      printf 'ghostty-tab-main\\n'\n      ;;\n  esac\n  exit 0\nfi\nfirst=1\nfor arg in \"$@\"; do\n  if [ \"$first\" -eq 1 ]; then\n    printf '%s' \"$arg\" >> \"{log}\"\n    first=0\n  else\n    printf '\\t%s' \"$arg\" >> \"{log}\"\n  fi\ndone\nprintf '\\n' >> \"{log}\"\nprintf 'created|ghost-pane\\n'\n",
                 log = log_path.display()
             ),
         )
@@ -1300,7 +1350,7 @@ mod tests {
         assert_eq!(call[6], GHOSTTY_MANAGED_TITLE_PREFIX);
         assert_eq!(call[7], GhosttyOpenMode::Swap.label());
 
-        remember_ghostty_preview_term_id(None);
+        clear_ghostty_preview_term_cache();
     }
 
     #[tokio::test]
@@ -1308,7 +1358,7 @@ mod tests {
         let _env_guard = crate::test_support::ENV_LOCK
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
-        remember_ghostty_preview_term_id(None);
+        clear_ghostty_preview_term_cache();
 
         let temp = tempdir().unwrap();
         let fake_bin_dir = temp.path().join("tmux builds");
@@ -1332,7 +1382,7 @@ mod tests {
         std::fs::write(
             &fake_osascript,
             format!(
-                "#!/bin/sh\nset -eu\nif [ \"${{1-}}\" = \"-e\" ]; then\n  printf '1.3.1\\n'\n  exit 0\nfi\nfirst=1\nfor arg in \"$@\"; do\n  if [ \"$first\" -eq 1 ]; then\n    printf '%s' \"$arg\" >> \"{log}\"\n    first=0\n  else\n    printf '\\t%s' \"$arg\" >> \"{log}\"\n  fi\ndone\nprintf '\\n' >> \"{log}\"\ncount=0\nif [ -f \"{counter}\" ]; then\n  IFS= read -r count < \"{counter}\" || true\nfi\ncount=$((count + 1))\nprintf '%s\\n' \"$count\" > \"{counter}\"\nprintf 'created|ghost-pane-%s\\n' \"$count\"\n",
+                "#!/bin/sh\nset -eu\nif [ \"${{1-}}\" = \"-e\" ]; then\n  case \"${{2-}}\" in\n    *\"get version\"*)\n      printf '1.3.1\\n'\n      ;;\n    *)\n      printf 'ghostty-tab-main\\n'\n      ;;\n  esac\n  exit 0\nfi\nfirst=1\nfor arg in \"$@\"; do\n  if [ \"$first\" -eq 1 ]; then\n    printf '%s' \"$arg\" >> \"{log}\"\n    first=0\n  else\n    printf '\\t%s' \"$arg\" >> \"{log}\"\n  fi\ndone\nprintf '\\n' >> \"{log}\"\ncount=0\nif [ -f \"{counter}\" ]; then\n  IFS= read -r count < \"{counter}\" || true\nfi\ncount=$((count + 1))\nprintf '%s\\n' \"$count\" > \"{counter}\"\nprintf 'created|ghost-pane-%s\\n' \"$count\"\n",
                 log = log_path.display(),
                 counter = counter_path.display()
             ),
@@ -1386,7 +1436,98 @@ mod tests {
         assert_eq!(second_call[7], GhosttyOpenMode::Swap.label());
         assert_eq!(second_call[8], "ghost-pane-1");
 
-        remember_ghostty_preview_term_id(None);
+        clear_ghostty_preview_term_cache();
+    }
+
+    #[tokio::test]
+    async fn open_or_focus_ghostty_swap_scopes_cached_preview_id_to_active_tab() {
+        let _env_guard = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        clear_ghostty_preview_term_cache();
+
+        let temp = tempdir().unwrap();
+        let fake_bin_dir = temp.path().join("tmux builds");
+        std::fs::create_dir_all(&fake_bin_dir).unwrap();
+
+        let fake_tmux = fake_bin_dir.join("tmux");
+        std::fs::write(
+            &fake_tmux,
+            "#!/bin/sh\nset -eu\nif [ \"${1-}\" = \"display-message\" ]; then\n  printf '%%14\\t/Users/b/repos/swimmers\\n'\n  exit 0\nfi\nexit 0\n",
+        )
+        .unwrap();
+        let mut perms = std::fs::metadata(&fake_tmux).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&fake_tmux, perms).unwrap();
+
+        let log_path = temp.path().join("osascript.log");
+        let open_counter_path = temp.path().join("osascript-open-count");
+        let tab_counter_path = temp.path().join("osascript-tab-count");
+        let fake_osascript_dir = temp.path().join("bin");
+        std::fs::create_dir_all(&fake_osascript_dir).unwrap();
+        let fake_osascript = fake_osascript_dir.join("osascript");
+        std::fs::write(
+            &fake_osascript,
+            format!(
+                "#!/bin/sh\nset -eu\nif [ \"${{1-}}\" = \"-e\" ]; then\n  case \"${{2-}}\" in\n    *\"get version\"*)\n      printf '1.3.1\\n'\n      ;;\n    *)\n      count=0\n      if [ -f \"{tab_counter}\" ]; then\n        IFS= read -r count < \"{tab_counter}\" || true\n      fi\n      count=$((count + 1))\n      printf '%s\\n' \"$count\" > \"{tab_counter}\"\n      case \"$count\" in\n        1|2) printf 'ghostty-tab-a\\n' ;;\n        3|4) printf 'ghostty-tab-b\\n' ;;\n        *) printf 'ghostty-tab-a\\n' ;;\n      esac\n      ;;\n  esac\n  exit 0\nfi\nfirst=1\nfor arg in \"$@\"; do\n  if [ \"$first\" -eq 1 ]; then\n    printf '%s' \"$arg\" >> \"{log}\"\n    first=0\n  else\n    printf '\\t%s' \"$arg\" >> \"{log}\"\n  fi\ndone\nprintf '\\n' >> \"{log}\"\ncount=0\nif [ -f \"{open_counter}\" ]; then\n  IFS= read -r count < \"{open_counter}\" || true\nfi\ncount=$((count + 1))\nprintf '%s\\n' \"$count\" > \"{open_counter}\"\nprintf 'created|ghost-pane-%s\\n' \"$count\"\n",
+                log = log_path.display(),
+                open_counter = open_counter_path.display(),
+                tab_counter = tab_counter_path.display()
+            ),
+        )
+        .unwrap();
+        let mut perms = std::fs::metadata(&fake_osascript).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&fake_osascript, perms).unwrap();
+
+        let original_path = std::env::var_os("PATH");
+        let original_tmux = std::env::var_os(TMUX_BIN_ENV);
+        let path_value = std::env::join_paths([fake_osascript_dir.as_path()]).unwrap();
+        std::env::set_var("PATH", path_value);
+        std::env::set_var(TMUX_BIN_ENV, &fake_tmux);
+
+        open_or_focus_ghostty_session(
+            "sess-ghostty-a1",
+            "tmux-ghostty-a1",
+            "/Users/b/repos/fallback",
+            GhosttyOpenMode::Swap,
+        )
+        .await
+        .unwrap();
+        open_or_focus_ghostty_session(
+            "sess-ghostty-b1",
+            "tmux-ghostty-b1",
+            "/Users/b/repos/fallback",
+            GhosttyOpenMode::Swap,
+        )
+        .await
+        .unwrap();
+        open_or_focus_ghostty_session(
+            "sess-ghostty-a2",
+            "tmux-ghostty-a2",
+            "/Users/b/repos/fallback",
+            GhosttyOpenMode::Swap,
+        )
+        .await
+        .unwrap();
+
+        match original_path {
+            Some(value) => std::env::set_var("PATH", value),
+            None => std::env::remove_var("PATH"),
+        }
+        match original_tmux {
+            Some(value) => std::env::set_var(TMUX_BIN_ENV, value),
+            None => std::env::remove_var(TMUX_BIN_ENV),
+        }
+
+        let log = std::fs::read_to_string(&log_path).unwrap();
+        let calls: Vec<Vec<_>> = log.lines().map(|line| line.split('\t').collect()).collect();
+        assert_eq!(calls.len(), 3);
+        assert_eq!(calls[0].len(), 8);
+        assert_eq!(calls[1].len(), 8);
+        assert_eq!(calls[2][8], "ghost-pane-1");
+
+        clear_ghostty_preview_term_cache();
     }
 
     #[tokio::test]
@@ -1394,7 +1535,7 @@ mod tests {
         let _env_guard = crate::test_support::ENV_LOCK
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
-        remember_ghostty_preview_term_id(None);
+        clear_ghostty_preview_term_cache();
 
         let temp = tempdir().unwrap();
         let fake_bin_dir = temp.path().join("bin");
@@ -1411,7 +1552,7 @@ mod tests {
         std::fs::write(
             &fake_osascript,
             format!(
-                "#!/bin/sh\nset -eu\nif [ \"${{1-}}\" = \"-e\" ]; then\n  printf '1.2.3\\n'\n  exit 0\nfi\nprintf '%s\\n' \"$*\" >> \"{log}\"\nprintf 'created|ghost-pane\\n'\n",
+                "#!/bin/sh\nset -eu\nif [ \"${{1-}}\" = \"-e\" ]; then\n  case \"${{2-}}\" in\n    *\"get version\"*)\n      printf '1.2.3\\n'\n      ;;\n    *)\n      printf 'ghostty-tab-main\\n'\n      ;;\n  esac\n  exit 0\nfi\nprintf '%s\\n' \"$*\" >> \"{log}\"\nprintf 'created|ghost-pane\\n'\n",
                 log = log_path.display()
             ),
         )
@@ -1446,6 +1587,36 @@ mod tests {
 
         assert!(error.to_string().contains("Ghostty 1.2.3 is installed"));
         assert!(!log_path.exists());
-        remember_ghostty_preview_term_id(None);
+        clear_ghostty_preview_term_cache();
+    }
+
+    #[test]
+    fn ghostty_preview_cache_is_invariant_under_other_tabs() {
+        let mut runner = proptest::test_runner::TestRunner::default();
+        let strategy = proptest::collection::vec((0u8..3, 0u16..256), 0..40);
+
+        runner
+            .run(&strategy, |ops| {
+                clear_ghostty_preview_term_cache();
+
+                for (tab, pane) in &ops {
+                    let tab_id = format!("tab-{tab}");
+                    let pane_id = format!("pane-{pane}");
+                    remember_ghostty_preview_term_id(Some(tab_id.as_str()), Some(pane_id.as_str()));
+                }
+                let interleaved = cached_ghostty_preview_term_id(Some("tab-0"));
+
+                clear_ghostty_preview_term_cache();
+                for (_, pane) in ops.iter().filter(|(tab, _)| *tab == 0) {
+                    let pane_id = format!("pane-{pane}");
+                    remember_ghostty_preview_term_id(Some("tab-0"), Some(pane_id.as_str()));
+                }
+                let projected = cached_ghostty_preview_term_id(Some("tab-0"));
+
+                clear_ghostty_preview_term_cache();
+                prop_assert_eq!(interleaved, projected);
+                Ok(())
+            })
+            .unwrap();
     }
 }

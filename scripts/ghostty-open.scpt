@@ -40,25 +40,64 @@ on terminalById(targetTab, targetId)
 	return missing value
 end terminalById
 
-on firstManagedTerminal(targetTab, managedTitlePrefix)
+on managedTerminals(targetTab, managedTitlePrefix)
+	set matches to {}
+
 	tell application "Ghostty"
 		repeat with candidateTerm in terminals of targetTab
 			try
 				set termTitle to name of candidateTerm
-				if termTitle starts with managedTitlePrefix then return candidateTerm
+				if termTitle starts with managedTitlePrefix then set end of matches to candidateTerm
 			end try
 		end repeat
 	end tell
 
-	return missing value
-end firstManagedTerminal
+	return matches
+end managedTerminals
 
-on anchorTerminalFor(targetTab, managedTerm)
+on terminalIds(targetTerms)
+	set ids to {}
+
 	tell application "Ghostty"
-		repeat with candidateTerm in terminals of targetTab
-			if managedTerm is missing value then return candidateTerm
+		repeat with candidateTerm in targetTerms
 			try
-				if (id of candidateTerm as text) is not (id of managedTerm as text) then return candidateTerm
+				set end of ids to (id of candidateTerm as text)
+			end try
+		end repeat
+	end tell
+
+	return ids
+end terminalIds
+
+on preferredManagedTerminal(targetTab, knownManagedId, managedTerms)
+	set knownTerm to my terminalById(targetTab, knownManagedId)
+	if knownTerm is not missing value then return knownTerm
+	if (count of managedTerms) > 0 then return item 1 of managedTerms
+	return missing value
+end preferredManagedTerminal
+
+on closeManagedTerminals(targetTerms)
+	tell application "Ghostty"
+		repeat with candidateTerm in targetTerms
+			try
+				close candidateTerm
+			end try
+		end repeat
+	end tell
+end closeManagedTerminals
+
+on anchorTerminalFor(targetTab, excludedIds)
+	tell application "Ghostty"
+		try
+			set focusedTerm to focused terminal of targetTab
+			set focusedId to id of focusedTerm as text
+			if excludedIds does not contain focusedId then return focusedTerm
+		end try
+
+		repeat with candidateTerm in terminals of targetTab
+			try
+				set candidateId to id of candidateTerm as text
+				if excludedIds does not contain candidateId then return candidateTerm
 			end try
 		end repeat
 	end tell
@@ -126,15 +165,29 @@ on run argv
 		set targetTab to selected tab of targetWindow
 	end tell
 
+	set managedTerms to {}
 	set managedTerm to missing value
+	set excludedIds to {}
 	if openMode is "swap" then
-		set managedTerm to my terminalById(targetTab, knownManagedId)
-		if managedTerm is missing value then
-			set managedTerm to my firstManagedTerminal(targetTab, managedTitlePrefix)
+		set managedTerms to my managedTerminals(targetTab, managedTitlePrefix)
+		set managedTerm to my preferredManagedTerminal(targetTab, knownManagedId, managedTerms)
+		if managedTerm is not missing value then
+			tell application "Ghostty" to set managedTermId to (id of managedTerm as text)
+			set duplicateManagedTerms to {}
+			repeat with candidateTerm in managedTerms
+				try
+					tell application "Ghostty" to set candidateId to (id of candidateTerm as text)
+					if candidateId is not managedTermId then set end of duplicateManagedTerms to candidateTerm
+				end try
+			end repeat
+			my closeManagedTerminals(duplicateManagedTerms)
+			set excludedIds to {managedTermId}
+		else
+			set excludedIds to my terminalIds(managedTerms)
 		end if
 	end if
 
-	set anchorTerm to my anchorTerminalFor(targetTab, managedTerm)
+	set anchorTerm to my anchorTerminalFor(targetTab, excludedIds)
 	if anchorTerm is missing value then
 		tell application "Ghostty" to set anchorTerm to focused terminal of targetTab
 	end if
