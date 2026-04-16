@@ -14,6 +14,7 @@ SKIP_TUI="${TUI_SKIP_TUI:-0}"
 NATIVE_SWITCH_PATH="${TUI_NATIVE_SWITCH_PATH:-/v1/native/app}"
 DIR_PICKER_PATH="${TUI_DIR_PICKER_PATH:-/v1/dirs}"
 SERVER_LOG=""
+CLIENT_LOG_DIR=""
 LAST_API_STATUS=""
 
 is_true() {
@@ -236,6 +237,62 @@ show_server_log_tail() {
   tail -n 20 "${SERVER_LOG}" >&2 || true
 }
 
+configure_log_paths() {
+  local parsed host port log_dir
+  parsed="$(parse_url_host_port "${TUI_URL}")"
+  host="${parsed%%$'\t'*}"
+  port="${parsed#*$'\t'}"
+
+  log_dir="${TUI_SERVER_LOG_DIR:-${TMPDIR:-/tmp}}"
+  mkdir -p "${log_dir}" 2>/dev/null || true
+  CLIENT_LOG_DIR="${log_dir%/}"
+  SERVER_LOG="${TUI_SERVER_LOG:-${CLIENT_LOG_DIR}/swimmers-tui-server-${port}.log}"
+
+  # Touch (don't truncate) so show_server_log_tail can read it even when
+  # we never spawned the server ourselves. start_local_api still truncates
+  # at fresh launch.
+  : >> "${SERVER_LOG}" 2>/dev/null || true
+
+  # Tell the swimmers-tui binary to write its client log to the same dir
+  # so failure diagnostics can name both paths from one place.
+  export SWIMMERS_TUI_LOG_DIR="${CLIENT_LOG_DIR}"
+
+  printf 'Logs: server -> %s ; client -> %s/swimmers-tui-client-<pid>.log\n' \
+    "${SERVER_LOG}" "${CLIENT_LOG_DIR}"
+}
+
+show_failure_diagnostic() {
+  local parsed host port listener_pid newest_client
+  parsed="$(parse_url_host_port "${TUI_URL}")"
+  host="${parsed%%$'\t'*}"
+  port="${parsed#*$'\t'}"
+
+  printf '\n--- TUI bootstrap diagnostics ---\n' >&2
+  if [[ -n "${SERVER_LOG:-}" ]]; then
+    printf 'server log : %s\n' "${SERVER_LOG}" >&2
+  fi
+  if [[ -n "${CLIENT_LOG_DIR:-}" ]]; then
+    newest_client="$(ls -t "${CLIENT_LOG_DIR}"/swimmers-tui-client-*.log 2>/dev/null | head -1 || true)"
+    if [[ -n "${newest_client}" ]]; then
+      printf 'client log : %s\n' "${newest_client}" >&2
+    else
+      printf 'client log : %s/swimmers-tui-client-<pid>.log (none yet)\n' \
+        "${CLIENT_LOG_DIR}" >&2
+    fi
+  fi
+
+  show_server_log_tail
+
+  if host_is_loopback "${host}" && command -v lsof >/dev/null 2>&1; then
+    listener_pid="$(lsof -nP -t -iTCP:"${port}" -sTCP:LISTEN 2>/dev/null | head -1 || true)"
+    if [[ -n "${listener_pid}" ]] && [[ -z "${SERVER_LOG:-}" || ! -s "${SERVER_LOG}" ]]; then
+      printf 'note: a swimmers process is already listening on %s:%s (pid %s); if it was not started by run-tui.sh its logs are wherever that process was launched.\n' \
+        "${host}" "${port}" "${listener_pid}" >&2
+    fi
+  fi
+  printf '%s\n\n' '---------------------------------' >&2
+}
+
 build_local_api() {
   local server_features
   server_features="${TUI_SERVER_FEATURES:-personal-workflows}"
@@ -302,9 +359,13 @@ start_local_api() {
   host="${parsed%%$'\t'*}"
   port="${parsed#*$'\t'}"
 
-  log_dir="${TUI_SERVER_LOG_DIR:-${TMPDIR:-/tmp}}"
-  mkdir -p "${log_dir}"
-  SERVER_LOG="${TUI_SERVER_LOG:-${log_dir%/}/swimmers-tui-server-${port}.log}"
+  if [[ -z "${SERVER_LOG:-}" ]]; then
+    log_dir="${TUI_SERVER_LOG_DIR:-${TMPDIR:-/tmp}}"
+    mkdir -p "${log_dir}"
+    SERVER_LOG="${TUI_SERVER_LOG:-${log_dir%/}/swimmers-tui-server-${port}.log}"
+  fi
+  # Truncate at fresh launch so each spawn produces a clean log; pre-existing
+  # listeners that we did not start are handled by configure_log_paths' touch.
   : > "${SERVER_LOG}"
 
   printf 'Local swimmers API is not ready; starting it on %s:%s\n' "${host}" "${port}"
@@ -401,7 +462,7 @@ ensure_native_switch_capability() {
       route_status="$(native_switch_route_status)"
       if [[ "${route_status}" == "404" ]]; then
         printf 'swimmers API at %s still does not expose %s after restart\n' "${TUI_URL}" "${NATIVE_SWITCH_PATH}" >&2
-        show_server_log_tail
+        show_failure_diagnostic
         return 1
       fi
       ;;
@@ -430,7 +491,7 @@ ensure_dir_picker_capability() {
       route_status="$(dir_picker_route_status)"
       if [[ "${route_status}" == "404" ]]; then
         printf 'swimmers API at %s still does not expose %s after restart\n' "${TUI_URL}" "${DIR_PICKER_PATH}" >&2
-        show_server_log_tail
+        show_failure_diagnostic
         return 1
       fi
       ;;
@@ -476,7 +537,7 @@ wait_for_api() {
   done
 
   printf 'timed out waiting for swimmers API at %s (last status: %s)\n' "${url}" "${LAST_API_STATUS:-000}" >&2
-  show_server_log_tail
+  show_failure_diagnostic
   return 1
 }
 
@@ -523,6 +584,7 @@ main() {
   require curl
   local probe_status=0
 
+  configure_log_paths
   maybe_rebuild_clawgs
 
   if probe_api_access "$(api_url)"; then

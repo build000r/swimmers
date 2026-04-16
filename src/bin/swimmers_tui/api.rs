@@ -67,7 +67,18 @@ impl ApiClient {
     }
 
     pub(crate) fn transport_error(&self, action: &str, err: reqwest::Error) -> String {
-        friendly_transport_error(&self.base_url, action, &err)
+        let detail = root_error_message(&err);
+        tracing::warn!(
+            url = %self.base_url,
+            action,
+            is_timeout = err.is_timeout(),
+            is_connect = err.is_connect(),
+            is_request = err.is_request(),
+            status = ?err.status(),
+            detail = %detail,
+            "tui http transport error"
+        );
+        friendly_transport_error_with_detail(&self.base_url, action, &err, &detail)
     }
 
     pub(crate) fn targets_local_backend(&self) -> bool {
@@ -103,6 +114,9 @@ impl ApiClient {
 
     fn startup_transport_error(&self, action: &str, err: reqwest::Error) -> StartupAccessError {
         let retryable = err.is_connect() || err.is_timeout();
+        // transport_error already emits a structured warn; this just labels
+        // whether the preflight loop will retry or give up.
+        tracing::debug!(action, retryable, "startup transport error classified");
         let message = self.transport_error(action, err);
         if retryable {
             StartupAccessError::Retryable(message)
@@ -134,6 +148,7 @@ impl ApiClient {
         http: &Client,
     ) -> Result<(), StartupAccessError> {
         let url = format!("{}/v1/sessions", self.base_url);
+        tracing::debug!(url = %url, "preflight: GET /v1/sessions");
         let response = self
             .with_auth(http.get(url))
             .send()
@@ -155,6 +170,7 @@ impl ApiClient {
         http: &Client,
     ) -> Result<(), StartupAccessError> {
         let url = format!("{}/v1/selection", self.base_url);
+        tracing::debug!(url = %url, "preflight: PUT /v1/selection (clear)");
         let response = self
             .with_auth(http.put(url))
             .json(&PublishSelectionRequest { session_id: None })
@@ -181,14 +197,49 @@ impl ApiClient {
         F: FnMut() -> Fut,
         Fut: std::future::Future<Output = Result<(), StartupAccessError>>,
     {
+        let started = Instant::now();
+        let mut attempt: u32 = 0;
         loop {
+            attempt += 1;
             match probe().await {
-                Ok(()) => return Ok(()),
-                Err(StartupAccessError::Fatal(message)) => return Err(message),
+                Ok(()) => {
+                    tracing::info!(
+                        attempt,
+                        elapsed_ms = started.elapsed().as_millis() as u64,
+                        url = %self.base_url,
+                        "preflight probe ready"
+                    );
+                    return Ok(());
+                }
+                Err(StartupAccessError::Fatal(message)) => {
+                    tracing::error!(
+                        attempt,
+                        elapsed_ms = started.elapsed().as_millis() as u64,
+                        url = %self.base_url,
+                        message = %message,
+                        "preflight probe failed (fatal)"
+                    );
+                    return Err(message);
+                }
                 Err(StartupAccessError::Retryable(message)) => {
+                    let elapsed_ms = started.elapsed().as_millis() as u64;
                     if Instant::now() >= deadline {
+                        tracing::error!(
+                            attempt,
+                            elapsed_ms,
+                            url = %self.base_url,
+                            message = %message,
+                            "preflight probe deadline exceeded"
+                        );
                         return Err(message);
                     }
+                    tracing::warn!(
+                        attempt,
+                        elapsed_ms,
+                        url = %self.base_url,
+                        message = %message,
+                        "preflight probe retrying"
+                    );
                 }
             }
             tokio::time::sleep(self.startup_retry_interval).await;
@@ -208,7 +259,14 @@ impl ApiClient {
     }
 
     pub(crate) async fn preflight_startup_access(&self) -> Result<(), String> {
-        if self.targets_local_backend() {
+        let local = self.targets_local_backend();
+        tracing::info!(
+            url = %self.base_url,
+            local,
+            wait_timeout_ms = self.startup_wait_timeout.as_millis() as u64,
+            "preflight startup access begin"
+        );
+        if local {
             return self.preflight_local_startup_access().await;
         }
         self.preflight_session_refresh_access().await?;
@@ -248,21 +306,24 @@ pub(crate) fn root_error_message(err: &(dyn StdError + 'static)) -> String {
     last
 }
 
-pub(crate) fn friendly_transport_error(
+fn friendly_transport_error_with_detail(
     base_url: &str,
     action: &str,
     err: &reqwest::Error,
+    detail: &str,
 ) -> String {
-    let detail = root_error_message(err);
     let summary = if err.is_timeout() {
         format!("timed out while trying to {action}")
     } else {
         format!("could not {action}")
     };
-
-    format!(
+    let mut msg = format!(
         "swimmers API unavailable at {base_url}: {summary} ({detail}). Start `swimmers` or set SWIMMERS_TUI_URL."
-    )
+    );
+    if let Some(path) = client_log_path() {
+        msg.push_str(&format!(" Tail logs: {}", path.display()));
+    }
+    msg
 }
 
 pub(crate) trait TuiApi: Send + Sync + 'static {
@@ -323,13 +384,20 @@ impl TuiApi for ApiClient {
     fn fetch_sessions(&self) -> BoxFuture<'_, Result<Vec<SessionSummary>, String>> {
         Box::pin(async move {
             let url = format!("{}/v1/sessions", self.base_url);
+            let started = Instant::now();
             let response = self
                 .with_auth(self.http.get(url).timeout(API_SESSION_LIST_TIMEOUT))
                 .send()
                 .await
                 .map_err(|err| self.transport_error("refresh sessions", err))?;
 
-            if response.status().is_success() {
+            let status = response.status();
+            tracing::debug!(
+                elapsed_ms = started.elapsed().as_millis() as u64,
+                status = %status,
+                "fetch_sessions response"
+            );
+            if status.is_success() {
                 let payload = response
                     .json::<SessionListResponse>()
                     .await
@@ -337,7 +405,9 @@ impl TuiApi for ApiClient {
                 return Ok(payload.sessions);
             }
 
-            Err(read_error(response).await)
+            let body = read_error(response).await;
+            tracing::warn!(status = %status, body = %body, "fetch_sessions non-success status");
+            Err(body)
         })
     }
 

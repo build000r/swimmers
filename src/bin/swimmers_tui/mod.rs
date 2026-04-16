@@ -6,8 +6,9 @@ use std::error::Error as StdError;
 use std::f32::consts::TAU;
 use std::hash::{Hash, Hasher};
 use std::io::{self, BufWriter, IsTerminal, Stdout, Write};
+use std::path::{Path, PathBuf};
 use std::process::Command as ProcessCommand;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
@@ -85,8 +86,8 @@ const THOUGHT_RAIL_DEFAULT_RATIO: f32 = 1.0 / THOUGHT_RAIL_RATIO_DENOMINATOR as 
 const THOUGHT_RAIL_DRAG_HITBOX_WIDTH: u16 = 3;
 fn mermaid_badge_label(slice_name: Option<&str>) -> String {
     match slice_name {
-        Some(name) => format!("[mmd:{name}]"),
-        None => "[mmd]".to_string(),
+        Some(name) => format!("[art:{name}]"),
+        None => "[art]".to_string(),
     }
 }
 const MERMAID_BACK_LABEL: &str = "[back to bowl]";
@@ -126,16 +127,101 @@ pub(crate) use thoughts::*;
 pub(crate) fn install_panic_hook() {
     let default_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
+        // Capture the panic in the log file so post-mortem doesn't depend on
+        // whether the terminal scrollback caught it before the alt screen left.
+        tracing::error!(panic = %info, "swimmers-tui panicked");
         // Leave alternate screen before printing the panic so it is visible.
         let mut stdout = io::stdout();
         let _ = leave_terminal_ui(&mut stdout);
         let _ = crossterm_terminal::disable_raw_mode();
+        if let Some(path) = client_log_path() {
+            eprintln!("swimmers-tui: client log -> {}", path.display());
+        }
         default_hook(info);
     }));
 }
 
+static CLIENT_LOG_FILE: OnceLock<std::fs::File> = OnceLock::new();
+static CLIENT_LOG_PATH: OnceLock<PathBuf> = OnceLock::new();
+
+pub(crate) fn client_log_path() -> Option<&'static Path> {
+    CLIENT_LOG_PATH.get().map(PathBuf::as_path)
+}
+
+fn make_log_writer() -> Box<dyn io::Write + Send + 'static> {
+    match CLIENT_LOG_FILE.get().and_then(|file| file.try_clone().ok()) {
+        Some(file) => Box::new(file),
+        None => Box::new(io::stderr()),
+    }
+}
+
+/// Initialize a file-backed tracing subscriber for the TUI binary.
+///
+/// The diagnostic log path is `${SWIMMERS_TUI_LOG_DIR:-${TMPDIR:-/tmp}}/swimmers-tui-client-${pid}.log`.
+/// Filter defaults to `swimmers_tui=info,reqwest=warn`; override with
+/// `SWIMMERS_TUI_LOG=...` (env-filter syntax). On any IO failure we fall back
+/// to a stderr subscriber so we never silently lose diagnostics.
+pub(crate) fn init_tui_tracing() {
+    use tracing_subscriber::{fmt, EnvFilter};
+
+    let filter = EnvFilter::try_from_env("SWIMMERS_TUI_LOG")
+        .unwrap_or_else(|_| EnvFilter::new("swimmers_tui=info,reqwest=warn"));
+
+    let dir = env::var_os("SWIMMERS_TUI_LOG_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            env::var_os("TMPDIR")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from("/tmp"))
+        });
+
+    let try_open = std::fs::create_dir_all(&dir).and_then(|_| {
+        let path = dir.join(format!("swimmers-tui-client-{}.log", std::process::id()));
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)?;
+        Ok((path, file))
+    });
+
+    match try_open {
+        Ok((path, file)) => {
+            let _ = CLIENT_LOG_FILE.set(file);
+            let _ = CLIENT_LOG_PATH.set(path.clone());
+            let _ = fmt()
+                .with_env_filter(filter)
+                .with_writer(make_log_writer)
+                .with_ansi(false)
+                .with_target(true)
+                .try_init();
+            tracing::info!(
+                path = %path.display(),
+                pid = std::process::id(),
+                "swimmers-tui client log opened"
+            );
+        }
+        Err(err) => {
+            let _ = fmt()
+                .with_env_filter(filter)
+                .with_writer(io::stderr)
+                .with_ansi(false)
+                .try_init();
+            tracing::warn!(
+                dir = %dir.display(),
+                error = %err,
+                "could not open swimmers-tui log file; logging to stderr"
+            );
+        }
+    }
+}
+
 pub(crate) fn run() -> Result<(), Box<dyn std::error::Error>> {
+    init_tui_tracing();
     install_panic_hook();
+    tracing::info!(
+        target_url = std::env::var("SWIMMERS_TUI_URL").as_deref().unwrap_or("<unset>"),
+        "swimmers-tui run loop starting"
+    );
     let (mut app, mut renderer) = initialize_tui_app()?;
 
     loop {
