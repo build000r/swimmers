@@ -57,8 +57,14 @@ const API_CONNECT_TIMEOUT: Duration = Duration::from_millis(250);
 const API_REQUEST_TIMEOUT: Duration = Duration::from_millis(2_000);
 const API_SESSION_LIST_TIMEOUT: Duration = Duration::from_secs(5);
 const API_MERMAID_ARTIFACT_TIMEOUT: Duration = Duration::from_secs(5);
-const API_DIRECTORY_LIST_TIMEOUT: Duration = Duration::from_secs(5);
-const API_DIRECTORY_ACTION_TIMEOUT: Duration = Duration::from_secs(5);
+// /v1/dirs walks the configured base, runs git probes, and inspects services
+// per entry. On hosts with many managed repos that real cost runs 4-10 s, so
+// the 5 s ceiling we used to ship raced the work and surfaced false
+// "backend unavailable" toasts. The real fix is making the endpoint faster
+// (parallel probes, caching), but until then keep the budget generous so
+// honest slow paths don't look like outages.
+const API_DIRECTORY_LIST_TIMEOUT: Duration = Duration::from_secs(20);
+const API_DIRECTORY_ACTION_TIMEOUT: Duration = Duration::from_secs(15);
 const API_CREATE_SESSION_TIMEOUT: Duration = Duration::from_secs(10);
 const API_STARTUP_REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
 const API_STARTUP_WAIT_TIMEOUT: Duration = Duration::from_secs(20);
