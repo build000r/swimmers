@@ -377,8 +377,8 @@ async fn list_dirs(
     if let Some(group_name) = &query.group {
         let canonical_base = base.canonicalize().unwrap_or(base.clone());
         let dir_config = resolve_dir_config(&canonical_base);
-        let group = dir_config
-            .and_then(|config| config.groups.iter().find(|g| &g.name == group_name));
+        let group =
+            dir_config.and_then(|config| config.groups.iter().find(|g| &g.name == group_name));
         let Some(group) = group else {
             return error_response(
                 StatusCode::NOT_FOUND,
@@ -514,15 +514,16 @@ async fn list_dirs(
 
     let probes: Vec<(Option<bool>, Option<RepoActionStatus>)> = stream::iter(probe_inputs)
         .map(|(entry_path, repo_actions)| async move {
-            let repo_summary = inspect_git_repo(&entry_path)
-                .await
-                .ok()
-                .flatten()
-                .and_then(|summary| {
-                    let canonical_entry =
-                        entry_path.canonicalize().unwrap_or(entry_path.clone());
-                    (summary.repo_root == canonical_entry).then_some(summary)
-                });
+            let repo_summary =
+                inspect_git_repo(&entry_path)
+                    .await
+                    .ok()
+                    .flatten()
+                    .and_then(|summary| {
+                        let canonical_entry =
+                            entry_path.canonicalize().unwrap_or(entry_path.clone());
+                        (summary.repo_root == canonical_entry).then_some(summary)
+                    });
             let repo_dirty = repo_summary.as_ref().map(|summary| summary.dirty);
             let repo_action = match repo_summary.as_ref() {
                 Some(summary) => repo_actions.status_for(&summary.repo_root).await,
@@ -537,16 +538,14 @@ async fn list_dirs(
     let candidates: Vec<ListCandidate> = pending
         .into_iter()
         .zip(probes.into_iter())
-        .map(
-            |(pending_entry, (repo_dirty, repo_action))| ListCandidate {
-                name: pending_entry.name,
-                has_children: pending_entry.has_children,
-                modified_at: pending_entry.modified_at,
-                services: pending_entry.services,
-                repo_dirty,
-                repo_action,
-            },
-        )
+        .map(|(pending_entry, (repo_dirty, repo_action))| ListCandidate {
+            name: pending_entry.name,
+            has_children: pending_entry.has_children,
+            modified_at: pending_entry.modified_at,
+            services: pending_entry.services,
+            repo_dirty,
+            repo_action,
+        })
         .collect();
 
     let health_map = if let Some(config) = dir_config {
@@ -590,14 +589,11 @@ async fn list_dirs(
                         .is_some()
                 })
                 .then_some(true);
-            let open_url = candidate
-                .services
-                .iter()
-                .find_map(|svc| {
-                    svc_meta.get(svc.as_str()).and_then(|e| {
-                        e.open_url.clone().or_else(|| e.health_url.clone())
-                    })
-                });
+            let open_url = candidate.services.iter().find_map(|svc| {
+                svc_meta
+                    .get(svc.as_str())
+                    .and_then(|e| e.open_url.clone().or_else(|| e.health_url.clone()))
+            });
             (
                 DirEntry {
                     name: candidate.name,
@@ -1314,7 +1310,9 @@ esac
 
         let git_path = bin_dir.join("git");
         std::fs::write(&git_path, script).expect("write fake git script");
-        let mut perms = std::fs::metadata(&git_path).expect("metadata").permissions();
+        let mut perms = std::fs::metadata(&git_path)
+            .expect("metadata")
+            .permissions();
         perms.set_mode(0o755);
         std::fs::set_permissions(&git_path, perms).expect("chmod fake git");
 

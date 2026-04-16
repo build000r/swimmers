@@ -382,7 +382,11 @@ fn expand_group_dir(raw: &str) -> Vec<PathBuf> {
     let expanded = expand_path(raw);
     if !expanded.contains('*') {
         let path = PathBuf::from(expanded);
-        return if path.is_dir() { vec![path] } else { Vec::new() };
+        return if path.is_dir() {
+            vec![path]
+        } else {
+            Vec::new()
+        };
     }
 
     let Some(star_idx) = expanded.find('*') else {
@@ -544,12 +548,8 @@ mod tests {
         let results = expand_group_dir(&pattern);
 
         assert_eq!(results.len(), 2);
-        assert!(results
-            .iter()
-            .any(|p| p.ends_with("repo-a/.claude/skills")));
-        assert!(results
-            .iter()
-            .any(|p| p.ends_with("repo-b/.claude/skills")));
+        assert!(results.iter().any(|p| p.ends_with("repo-a/.claude/skills")));
+        assert!(results.iter().any(|p| p.ends_with("repo-b/.claude/skills")));
     }
 
     #[test]

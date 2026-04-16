@@ -419,7 +419,15 @@ fn picker_entry_action_rects(
     for action in &actions {
         let w = action.text.len() as u16;
         if action.clickable {
-            rects.push((Rect { x, y: row_y, width: w, height: 1 }, action.kind));
+            rects.push((
+                Rect {
+                    x,
+                    y: row_y,
+                    width: w,
+                    height: 1,
+                },
+                action.kind,
+            ));
         }
         x += w + 1; // +1 for space separator
     }
@@ -650,7 +658,11 @@ pub(crate) fn render_picker(renderer: &mut Renderer, picker: &PickerState, field
             rect.x,
             rect.y,
             &label,
-            if active { Color::White } else { Color::DarkGrey },
+            if active {
+                Color::White
+            } else {
+                Color::DarkGrey
+            },
         );
     }
     renderer.draw_text(
@@ -714,7 +726,11 @@ pub(crate) fn render_picker(renderer: &mut Renderer, picker: &PickerState, field
         let line = format!("{marker} {icon} {}{}", entry.name, running);
         let actions = picker_entry_actions(entry);
         let actions_width = picker_entry_actions_width(&actions);
-        let reserved = if actions_width > 0 { actions_width + 1 } else { 0 };
+        let reserved = if actions_width > 0 {
+            actions_width + 1
+        } else {
+            0
+        };
         let text_width = layout.content.width.saturating_sub(reserved) as usize;
         let themed_color = picker.entry_theme_colors.get(index).copied().flatten();
         let color = if picker.selection == PickerSelection::Entry(index) {
