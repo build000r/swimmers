@@ -10,6 +10,8 @@ pub(crate) enum DomainPlanTab {
     Frontend,
     Flows,
     Workgraph,
+    Readme,
+    Vision,
 }
 
 impl DomainPlanTab {
@@ -22,6 +24,8 @@ impl DomainPlanTab {
             Self::Frontend => "frontend",
             Self::Flows => "flows",
             Self::Workgraph => "WORKGRAPH",
+            Self::Readme => "README",
+            Self::Vision => "VISION",
         }
     }
 
@@ -34,6 +38,8 @@ impl DomainPlanTab {
             Self::Frontend => "frontend.md",
             Self::Flows => "flows.md",
             Self::Workgraph => "WORKGRAPH.md",
+            Self::Readme => "README.md",
+            Self::Vision => "VISION.md",
         }
     }
 
@@ -46,6 +52,8 @@ impl DomainPlanTab {
             "frontend.md" => Some(Self::Frontend),
             "flows.md" => Some(Self::Flows),
             "WORKGRAPH.md" => Some(Self::Workgraph),
+            "README.md" => Some(Self::Readme),
+            "VISION.md" => Some(Self::Vision),
             _ => None,
         }
     }
@@ -333,6 +341,7 @@ pub(crate) struct MermaidErOrderNode {
 pub(crate) struct MermaidViewerState {
     pub(crate) session_id: String,
     pub(crate) tmux_name: String,
+    pub(crate) cwd: String,
     pub(crate) path: Option<String>,
     pub(crate) source: Option<String>,
     pub(crate) artifact_error: Option<String>,
@@ -4533,7 +4542,7 @@ fn render_plan_text_content(
         render_wrapped_lines(
             renderer,
             content_rect,
-            "loading plan file...",
+            "loading artifact file...",
             Color::DarkGrey,
         );
         return;

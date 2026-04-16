@@ -16,8 +16,8 @@ use tracing::{debug, error, info, warn};
 use crate::config::Config;
 use crate::scroll::guard::{ScrollGuard, ScrollOutputChunk};
 use crate::session::artifacts::{
-    default_artifact_registry, extract_mmd_slice_name, list_plan_siblings,
-    ArtifactDiscoveryContext, ArtifactKind,
+    default_artifact_registry, extract_mmd_slice_name, list_plan_siblings, list_repo_docs,
+    resolve_viewer_text_path, ArtifactDiscoveryContext, ArtifactKind, VIEWER_TEXT_FILENAMES,
 };
 use crate::session::replay_ring::ReplayRing;
 use crate::state::detector::StateDetector;
@@ -1219,16 +1219,10 @@ impl SessionActor {
                 .discover(ArtifactKind::Mermaid, &context)
                 .map(|artifact| {
                     let slice_name = extract_mmd_slice_name(&artifact.path).map(str::to_owned);
-                    let plan_files = slice_name
-                        .as_ref()
-                        .map(|_| {
-                            let siblings = list_plan_siblings(&artifact.path);
-                            if siblings.is_empty() {
-                                return Vec::new();
-                            }
-                            siblings
-                        })
-                        .filter(|f| !f.is_empty());
+                    let mut plan_files = list_plan_siblings(&artifact.path);
+                    plan_files.extend(list_repo_docs(&context.cwd));
+                    plan_files.dedup();
+                    let plan_files = (!plan_files.is_empty()).then_some(plan_files);
                     MermaidArtifactResponse {
                         session_id: response_session_id.clone(),
                         available: true,
@@ -1270,14 +1264,12 @@ impl SessionActor {
         session_started_at: chrono::DateTime<Utc>,
         name: &str,
     ) -> PlanFileResponse {
-        use crate::session::artifacts::PLAN_SIBLING_FILENAMES;
-
-        if !PLAN_SIBLING_FILENAMES.contains(&name) {
+        if !VIEWER_TEXT_FILENAMES.contains(&name) {
             return PlanFileResponse {
                 session_id,
                 name: name.to_string(),
                 content: None,
-                error: Some(format!("plan file name not allowed: {name}")),
+                error: Some(format!("artifact file name not allowed: {name}")),
             };
         }
 
@@ -1285,7 +1277,7 @@ impl SessionActor {
         let context = ArtifactDiscoveryContext {
             session_id: session_id.clone(),
             tmux_name: String::new(),
-            cwd,
+            cwd: cwd.clone(),
             session_started_at,
             pane_tail: String::new(),
         };
@@ -1298,15 +1290,17 @@ impl SessionActor {
                 error: Some("no mermaid artifact found".to_string()),
             };
         };
-        let Some(dir) = std::path::Path::new(&artifact.path).parent() else {
-            return PlanFileResponse {
-                session_id,
-                name: name.to_string(),
-                content: None,
-                error: Some("cannot determine plan directory".to_string()),
-            };
+        let file_path = match resolve_viewer_text_path(&cwd, Some(&artifact.path), name) {
+            Some(path) => path,
+            None => {
+                return PlanFileResponse {
+                    session_id,
+                    name: name.to_string(),
+                    content: None,
+                    error: Some(format!("artifact file unavailable: {name}")),
+                };
+            }
         };
-        let file_path = dir.join(name);
         match fs::read_to_string(&file_path) {
             Ok(content) => PlanFileResponse {
                 session_id,
@@ -2238,7 +2232,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn build_summary_reports_sleeping_when_idle_past_threshold() {
+    async fn build_summary_reports_drowsy_when_idle_past_threshold() {
         // End-to-end wiring check: prove that build_summary feeds
         // self.last_activity_at into rest_state_from_idle and that the result
         // lands on SessionSummary.rest_state unclobbered. Pure math for the
@@ -2252,7 +2246,7 @@ mod tests {
         let summary = actor.build_summary();
 
         assert_eq!(summary.state, crate::types::SessionState::Idle);
-        assert_eq!(summary.rest_state, crate::types::RestState::Sleeping);
+        assert_eq!(summary.rest_state, crate::types::RestState::Drowsy);
         assert_eq!(summary.last_activity_at, aged);
     }
 

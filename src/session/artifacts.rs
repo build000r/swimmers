@@ -232,6 +232,17 @@ pub const PLAN_SIBLING_FILENAMES: &[&str] = &[
     "WORKGRAPH.md",
 ];
 
+pub const VIEWER_TEXT_FILENAMES: &[&str] = &[
+    "plan.md",
+    "shared.md",
+    "backend.md",
+    "frontend.md",
+    "flows.md",
+    "WORKGRAPH.md",
+    "README.md",
+    "VISION.md",
+];
+
 /// Given the absolute path to a `schema.mmd` inside a plan directory, returns the
 /// filenames of sibling plan files that exist on disk.
 pub fn list_plan_siblings(schema_path: &str) -> Vec<String> {
@@ -244,6 +255,77 @@ pub fn list_plan_siblings(schema_path: &str) -> Vec<String> {
         .filter(|name| dir.join(name).is_file())
         .map(|name| (*name).to_string())
         .collect()
+}
+
+pub fn resolve_repo_root(cwd: &str) -> Option<PathBuf> {
+    let mut current = Path::new(cwd);
+    if !current.is_dir() {
+        current = current.parent()?;
+    }
+
+    loop {
+        if looks_like_repo_root(current) {
+            return Some(current.to_path_buf());
+        }
+
+        match current.parent() {
+            Some(parent) if parent != current => current = parent,
+            _ => return None,
+        }
+    }
+}
+
+fn looks_like_repo_root(path: &Path) -> bool {
+    path.join(".git").exists()
+        || path.join("Cargo.toml").is_file()
+        || path.join("package.json").is_file()
+        || path.join(".swimmers").is_dir()
+        || path.join(".throngterm").is_dir()
+}
+
+pub fn list_repo_docs(cwd: &str) -> Vec<String> {
+    let Some(root) = resolve_repo_root(cwd) else {
+        return Vec::new();
+    };
+
+    let mut docs = Vec::new();
+    if root.join("README.md").is_file() {
+        docs.push("README.md".to_string());
+    }
+    if root.join("docs").join("VISION.md").is_file() || root.join("VISION.md").is_file() {
+        docs.push("VISION.md".to_string());
+    }
+    docs
+}
+
+pub fn resolve_viewer_text_path(
+    cwd: &str,
+    schema_path: Option<&str>,
+    name: &str,
+) -> Option<PathBuf> {
+    if PLAN_SIBLING_FILENAMES.contains(&name) {
+        let dir = Path::new(schema_path?).parent()?;
+        let path = dir.join(name);
+        return path.is_file().then_some(path);
+    }
+
+    let root = resolve_repo_root(cwd)?;
+    match name {
+        "README.md" => {
+            let path = root.join("README.md");
+            path.is_file().then_some(path)
+        }
+        "VISION.md" => {
+            let docs_path = root.join("docs").join("VISION.md");
+            if docs_path.is_file() {
+                Some(docs_path)
+            } else {
+                let root_path = root.join("VISION.md");
+                root_path.is_file().then_some(root_path)
+            }
+        }
+        _ => None,
+    }
 }
 
 fn should_visit_artifact_entry(entry: &walkdir::DirEntry) -> bool {
@@ -263,7 +345,8 @@ fn should_visit_artifact_entry(entry: &walkdir::DirEntry) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        default_artifact_registry, ArtifactDiscoveryContext, ArtifactKind, DiscoveredArtifact,
+        default_artifact_registry, resolve_repo_root, resolve_viewer_text_path,
+        ArtifactDiscoveryContext, ArtifactKind, DiscoveredArtifact,
     };
     use chrono::{Duration, Utc};
     use std::fs;
@@ -458,5 +541,47 @@ mod tests {
         let schema_path = plan_dir.join("schema.mmd");
         let siblings = super::list_plan_siblings(&schema_path.to_string_lossy());
         assert!(siblings.is_empty());
+    }
+
+    #[test]
+    fn list_repo_docs_prefers_repo_root_markers() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        fs::write(
+            dir.path().join("Cargo.toml"),
+            "[package]\nname = \"demo\"\n",
+        )
+        .expect("write cargo");
+        fs::write(dir.path().join("README.md"), "# Demo\n").expect("write readme");
+        fs::create_dir_all(dir.path().join("docs")).expect("create docs");
+        fs::write(dir.path().join("docs").join("VISION.md"), "# Vision\n").expect("write vision");
+        fs::create_dir_all(dir.path().join("src").join("nested")).expect("create nested");
+
+        let docs = super::list_repo_docs(&dir.path().join("src").join("nested").to_string_lossy());
+        assert_eq!(docs, vec!["README.md", "VISION.md"]);
+    }
+
+    #[test]
+    fn resolve_viewer_text_path_finds_repo_docs() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        fs::write(
+            dir.path().join("Cargo.toml"),
+            "[package]\nname = \"demo\"\n",
+        )
+        .expect("write cargo");
+        fs::write(dir.path().join("README.md"), "# Demo\n").expect("write readme");
+        fs::create_dir_all(dir.path().join("docs")).expect("create docs");
+        fs::write(dir.path().join("docs").join("VISION.md"), "# Vision\n").expect("write vision");
+
+        let readme = resolve_viewer_text_path(&dir.path().to_string_lossy(), None, "README.md")
+            .expect("readme path");
+        let vision = resolve_viewer_text_path(&dir.path().to_string_lossy(), None, "VISION.md")
+            .expect("vision path");
+
+        assert_eq!(readme, dir.path().join("README.md"));
+        assert_eq!(vision, dir.path().join("docs").join("VISION.md"));
+        assert_eq!(
+            resolve_repo_root(&dir.path().to_string_lossy()).as_deref(),
+            Some(dir.path())
+        );
     }
 }

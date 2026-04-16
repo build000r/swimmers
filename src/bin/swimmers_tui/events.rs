@@ -74,7 +74,7 @@ pub(crate) fn handle_key_event<C: TuiApi>(
                     app.cycle_plan_tab(1);
                     return true;
                 }
-                KeyCode::Char(c @ '1'..='7') => {
+                KeyCode::Char(c @ '1'..='9') => {
                     let idx = (c as usize) - ('1' as usize);
                     if let FishBowlMode::Mermaid(v) = &app.fish_bowl_mode {
                         if let Some(tabs) = &v.plan_tabs {

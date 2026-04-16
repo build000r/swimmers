@@ -588,12 +588,6 @@ pub fn fallback_rest_state(state: SessionState, thought_state: ThoughtState) -> 
 
 /// An idle session stays `Active` until it has been silent for this long.
 pub const REST_STATE_DROWSY_AFTER: Duration = Duration::seconds(30);
-/// An idle session that has been silent past this threshold becomes `Sleeping`
-/// (sprite freezes).
-pub const REST_STATE_SLEEPING_AFTER: Duration = Duration::minutes(5);
-/// An idle session that has been silent past this threshold becomes
-/// `DeepSleep`.
-pub const REST_STATE_DEEP_SLEEP_AFTER: Duration = Duration::minutes(30);
 
 /// Compute a session's `RestState` from how long it has been silent.
 ///
@@ -602,7 +596,9 @@ pub const REST_STATE_DEEP_SLEEP_AFTER: Duration = Duration::minutes(30);
 /// supervisor merge path. Non-idle states (`Busy`, `Error`, `Attention`) are
 /// unaffected by elapsed time — they always stay `Active` so attention-flagged
 /// sessions keep their attention animation and busy sessions never "fall
-/// asleep" mid-task. `Exited` stays `DeepSleep`.
+/// asleep" mid-task. In this fallback path, idle sessions only age into
+/// `Drowsy`; `Sleeping` is reserved for transcript-aware "waiting on user"
+/// updates from the thought daemon. `Exited` stays `DeepSleep`.
 ///
 /// Negative durations (e.g. from clock skew or future-dated
 /// `last_activity_at`) resolve to `Active` — a fresh session is never sleepy.
@@ -616,11 +612,7 @@ pub fn rest_state_from_idle(
         SessionState::Busy | SessionState::Error | SessionState::Attention => RestState::Active,
         SessionState::Idle => {
             let elapsed = now.signed_duration_since(last_activity_at);
-            if elapsed >= REST_STATE_DEEP_SLEEP_AFTER {
-                RestState::DeepSleep
-            } else if elapsed >= REST_STATE_SLEEPING_AFTER {
-                RestState::Sleeping
-            } else if elapsed >= REST_STATE_DROWSY_AFTER {
+            if elapsed >= REST_STATE_DROWSY_AFTER {
                 RestState::Drowsy
             } else {
                 RestState::Active
@@ -660,22 +652,22 @@ mod rest_state_tests {
     }
 
     #[test]
-    fn tc3_ten_minutes_silent_becomes_sleeping() {
+    fn tc3_long_idle_stays_drowsy_without_thought_daemon() {
         let now = base();
         let last = now - Duration::minutes(10);
         assert_eq!(
             rest_state_from_idle(SessionState::Idle, last, now),
-            RestState::Sleeping
+            RestState::Drowsy
         );
     }
 
     #[test]
-    fn tc4_hours_silent_becomes_deep_sleep() {
+    fn tc4_hours_silent_stays_drowsy_without_thought_daemon() {
         let now = base();
         let last = now - Duration::hours(2);
         assert_eq!(
             rest_state_from_idle(SessionState::Idle, last, now),
-            RestState::DeepSleep
+            RestState::Drowsy
         );
     }
 
@@ -729,15 +721,10 @@ mod rest_state_tests {
             rest_state_from_idle(SessionState::Idle, now - REST_STATE_DROWSY_AFTER, now),
             RestState::Drowsy
         );
-        // Exactly at sleeping threshold → Sleeping
+        // Long-idle fallback remains Drowsy; sleeping requires transcript state.
         assert_eq!(
-            rest_state_from_idle(SessionState::Idle, now - REST_STATE_SLEEPING_AFTER, now),
-            RestState::Sleeping
-        );
-        // Exactly at deep-sleep threshold → DeepSleep
-        assert_eq!(
-            rest_state_from_idle(SessionState::Idle, now - REST_STATE_DEEP_SLEEP_AFTER, now),
-            RestState::DeepSleep
+            rest_state_from_idle(SessionState::Idle, now - Duration::hours(3), now),
+            RestState::Drowsy
         );
     }
 

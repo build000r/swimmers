@@ -5024,6 +5024,39 @@ fn clicking_existing_swimmer_still_opens_it_directly() {
 }
 
 #[test]
+fn clicking_existing_swimmer_ignores_second_click_while_open_is_pending() {
+    let api = MockApi::new();
+    api.push_open_session(Ok(NativeDesktopOpenResponse {
+        session_id: "sess-7".to_string(),
+        status: "focused".to_string(),
+        pane_id: None,
+    }));
+    let field = test_field();
+    let mut app = make_app(api.clone());
+    app.sprite_theme_override = Some(SpriteTheme::Jelly);
+    app.entities
+        .push(entity_at(field, "sess-7", "dev", TEST_REPO_DEV, 30, 8));
+    app.selected_id = Some("sess-7".to_string());
+
+    app.handle_field_click(30, 8, field);
+    app.handle_field_click(30, 8, field);
+
+    assert!(app.pending_interaction.is_some());
+    assert_eq!(
+        app.message.as_ref().map(|(message, _)| message.as_str()),
+        Some("wait for the current action to finish")
+    );
+
+    poll_until_interaction(&mut app);
+
+    assert_eq!(api.open_calls(), vec!["sess-7".to_string()]);
+    assert_eq!(
+        app.message.as_ref().map(|(message, _)| message.as_str()),
+        Some("focused dev")
+    );
+}
+
+#[test]
 fn filtered_out_swimmers_are_not_click_targets() {
     let api = MockApi::new();
     api.push_list_dirs(Ok(dir_response(TEST_REPOS_ROOT, &[("swimmers", true)])));
@@ -6338,7 +6371,10 @@ fn objective_shift_entries_no_longer_render_shift_badges() {
     assert_eq!(panel.rows[0].line, "[swimmers/2] reframed the plan");
     assert_eq!(text_rect.x, thought_content.x);
     assert_eq!(cell_at(&renderer, thought_content.x, row_y).ch, '[');
-    assert_eq!(cell_at(&renderer, thought_content.x, row_y).fg, panel.rows[0].color);
+    assert_eq!(
+        cell_at(&renderer, thought_content.x, row_y).fg,
+        panel.rows[0].color
+    );
 }
 
 #[test]
@@ -6383,10 +6419,7 @@ fn objective_shift_entries_override_timestamp_order_in_the_visible_rail() {
 
     assert!(shift_index > plain_index);
     assert_eq!(
-        panel.rows[shift_index]
-            .text_rect
-            .expect("shift row text")
-            .x,
+        panel.rows[shift_index].text_rect.expect("shift row text").x,
         thought_content.x
     );
 }
@@ -6414,7 +6447,7 @@ fn refresh_builds_synthetic_mermaid_row_and_preserves_text_click_behavior() {
     let panel = build_thought_panel(&app, thought_content, layout.thought_entry_capacity());
     assert_eq!(panel.rows.len(), 2);
     assert_eq!(panel.rows[0].line, "[swimmers/7]");
-    assert_eq!(panel.rows[1].line, "diagram ready");
+    assert_eq!(panel.rows[1].line, "artifacts ready");
     let mermaid_rect = panel.rows[0].mermaid_rect.expect("mermaid button");
     let commit_rect = panel.rows[0].commit_rect.expect("commit badge");
     let text_rect = panel.rows[0].text_rect.expect("synthetic row text");
@@ -6509,7 +6542,10 @@ fn tagged_thought_rows_render_metadata_above_full_width_body_with_matching_color
         layout.thought_entry_capacity(),
     );
 
-    assert_eq!(cell_at(&renderer, mermaid_rect.x, row_y).fg, panel.rows[0].color);
+    assert_eq!(
+        cell_at(&renderer, mermaid_rect.x, row_y).fg,
+        panel.rows[0].color
+    );
     assert_eq!(
         cell_at(
             &renderer,
@@ -7040,6 +7076,81 @@ fn switch_plan_tab_to_non_schema_fetches_plan_file_ok() {
 }
 
 #[test]
+fn open_mermaid_viewer_includes_repo_doc_tabs_when_advertised() {
+    let api = MockApi::new();
+    let layout = test_layout(120, 32);
+    let mut app = make_app(api);
+    app.merge_sessions(
+        vec![session_summary("sess-1", "7", TEST_REPO_SWIMMERS)],
+        layout.overview_field,
+    );
+    let mut artifact = mermaid_artifact(
+        "sess-1",
+        "/tmp/repos/swimmers/flow.mmd",
+        "2026-03-23T10:05:00Z",
+        "graph LR\nA-->B",
+    );
+    artifact.plan_files = Some(vec![
+        "plan.md".to_string(),
+        "README.md".to_string(),
+        "VISION.md".to_string(),
+    ]);
+    app.mermaid_artifacts.insert("sess-1".to_string(), artifact);
+
+    app.open_mermaid_viewer("sess-1".to_string());
+
+    let FishBowlMode::Mermaid(viewer) = &app.fish_bowl_mode else {
+        panic!()
+    };
+    assert_eq!(
+        viewer.plan_tabs,
+        Some(vec![
+            DomainPlanTab::Schema,
+            DomainPlanTab::Plan,
+            DomainPlanTab::Readme,
+            DomainPlanTab::Vision,
+        ])
+    );
+}
+
+#[test]
+fn switch_plan_tab_to_readme_fetches_artifact_file_ok() {
+    let api = MockApi::new();
+    api.push_plan_file(Ok(PlanFileResponse {
+        session_id: "sess-1".to_string(),
+        name: "README.md".to_string(),
+        content: Some("# swimmers\n\nrepo docs".to_string()),
+        error: None,
+    }));
+    let layout = test_layout(120, 32);
+    let mut app = make_app(api);
+    app.merge_sessions(
+        vec![session_summary("sess-1", "7", TEST_REPO_SWIMMERS)],
+        layout.overview_field,
+    );
+    let mut artifact = mermaid_artifact(
+        "sess-1",
+        "/tmp/repos/swimmers/flow.mmd",
+        "2026-03-23T10:05:00Z",
+        "graph LR\nA-->B",
+    );
+    artifact.plan_files = Some(vec!["README.md".to_string()]);
+    app.mermaid_artifacts.insert("sess-1".to_string(), artifact);
+    app.open_mermaid_viewer("sess-1".to_string());
+
+    app.switch_plan_tab(DomainPlanTab::Readme);
+
+    let FishBowlMode::Mermaid(viewer) = &app.fish_bowl_mode else {
+        panic!()
+    };
+    assert_eq!(viewer.active_tab, DomainPlanTab::Readme);
+    assert_eq!(
+        viewer.plan_text_content.as_deref(),
+        Some("# swimmers\n\nrepo docs")
+    );
+}
+
+#[test]
 fn switch_plan_tab_to_non_schema_shows_error_from_response() {
     let api = MockApi::new();
     api.push_plan_file(Ok(PlanFileResponse {
@@ -7057,7 +7168,7 @@ fn switch_plan_tab_to_non_schema_shows_error_from_response() {
     assert!(app
         .message
         .as_ref()
-        .map(|(m, _)| m.contains("plan file"))
+        .map(|(m, _)| m.contains("artifact file"))
         .unwrap_or(false));
 }
 
@@ -7075,7 +7186,7 @@ fn switch_plan_tab_to_non_schema_shows_error_on_fetch_failure() {
     assert!(app
         .message
         .as_ref()
-        .map(|(m, _)| m.contains("plan file fetch failed"))
+        .map(|(m, _)| m.contains("artifact file fetch failed"))
         .unwrap_or(false));
 }
 
@@ -8993,10 +9104,7 @@ fn mermaid_open_shortcut_uses_artifact_path_and_stays_in_viewer() {
         vec!["/tmp/repos/swimmers/flow.mmd".to_string()]
     );
     assert!(matches!(app.fish_bowl_mode, FishBowlMode::Mermaid(_)));
-    assert_eq!(
-        app.visible_message(),
-        Some("open Mermaid artifact -> flow.mmd")
-    );
+    assert_eq!(app.visible_message(), Some("open artifact -> flow.mmd"));
 }
 
 #[test]
@@ -9026,10 +9134,7 @@ fn mermaid_open_shortcut_reports_failures_and_missing_paths() {
         layout,
         KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE),
     ));
-    assert_eq!(
-        app.visible_message(),
-        Some("failed to open Mermaid artifact: boom")
-    );
+    assert_eq!(app.visible_message(), Some("failed to open artifact: boom"));
     assert_eq!(
         opener.calls(),
         vec!["/tmp/repos/swimmers/flow.mmd".to_string()]
@@ -9062,10 +9167,62 @@ fn mermaid_open_shortcut_reports_failures_and_missing_paths() {
         KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE),
     ));
     assert_eq!(opener.calls(), Vec::<String>::new());
-    assert_eq!(
-        app.visible_message(),
-        Some("Mermaid artifact path unavailable")
+    assert_eq!(app.visible_message(), Some("artifact path unavailable"));
+}
+
+#[test]
+fn mermaid_open_shortcut_resolves_readme_from_repo_root() {
+    let repo = tempdir().expect("tempdir");
+    fs::write(
+        repo.path().join("Cargo.toml"),
+        "[package]\nname = \"demo\"\n",
+    )
+    .expect("write cargo");
+    fs::write(repo.path().join("README.md"), "# Demo\n").expect("write readme");
+    fs::create_dir_all(repo.path().join("plans").join("draft").join("slice"))
+        .expect("create plan dir");
+    let schema_path = repo
+        .path()
+        .join("plans")
+        .join("draft")
+        .join("slice")
+        .join("schema.mmd");
+    fs::write(&schema_path, "graph TD\nA-->B\n").expect("write schema");
+
+    let api = MockApi::new();
+    let opener = Arc::new(MockArtifactOpener::default());
+    let layout = test_layout(120, 32);
+    let mut app = make_app_with_artifact_opener(api, opener.clone());
+    app.merge_sessions(
+        vec![session_summary(
+            "sess-1",
+            "7",
+            repo.path().join("src").to_string_lossy().as_ref(),
+        )],
+        layout.overview_field,
     );
+    let mut artifact = mermaid_artifact(
+        "sess-1",
+        &schema_path.to_string_lossy(),
+        "2026-03-23T10:05:00Z",
+        "graph TD\nA-->B\n",
+    );
+    artifact.plan_files = Some(vec!["README.md".to_string()]);
+    app.mermaid_artifacts.insert("sess-1".to_string(), artifact);
+
+    app.open_mermaid_viewer("sess-1".to_string());
+    app.switch_plan_tab(DomainPlanTab::Readme);
+    assert!(handle_key_event(
+        &mut app,
+        layout,
+        KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE),
+    ));
+
+    assert_eq!(
+        opener.calls(),
+        vec![repo.path().join("README.md").to_string_lossy().into_owned()]
+    );
+    assert_eq!(app.visible_message(), Some("open artifact -> README.md"));
 }
 
 proptest::proptest! {

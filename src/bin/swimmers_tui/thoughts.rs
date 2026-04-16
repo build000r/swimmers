@@ -660,7 +660,7 @@ pub(crate) fn build_thought_panel_entries<C: TuiApi>(app: &App<C>) -> Vec<Though
             tmux_name: entity.session.tmux_name.clone(),
             updated_at: artifact.updated_at,
             color: session_display_color(&entity.session, &app.repo_themes),
-            thought: "diagram ready".to_string(),
+            thought: "artifacts ready".to_string(),
             has_objective_shift: false,
             mermaid_label: Some(mermaid_badge_label(artifact.slice_name.as_deref())),
             has_commit_candidate: entity.session.commit_candidate,

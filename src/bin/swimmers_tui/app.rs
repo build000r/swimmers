@@ -1138,10 +1138,7 @@ impl<C: TuiApi> App<C> {
             } => match response {
                 Ok(_) => {
                     self.set_message(format!("{} started for {repo_label}", kind_label(kind)));
-                    let group = self
-                        .picker
-                        .as_ref()
-                        .and_then(|p| p.current_group.clone());
+                    let group = self.picker.as_ref().and_then(|p| p.current_group.clone());
                     self.picker_reload_with_options(
                         Some(reload_path),
                         managed_only,
@@ -2296,26 +2293,26 @@ impl<C: TuiApi> App<C> {
         let Some(path) = (match &self.fish_bowl_mode {
             FishBowlMode::Mermaid(viewer) => {
                 if viewer.active_tab != DomainPlanTab::Schema {
-                    // Derive the plan file path from schema.mmd's directory
-                    viewer.path.as_ref().and_then(|p| {
-                        let dir = std::path::Path::new(p).parent()?;
-                        let file_path = dir.join(viewer.active_tab.filename());
-                        Some(file_path.to_string_lossy().into_owned())
-                    })
+                    swimmers::session::artifacts::resolve_viewer_text_path(
+                        &viewer.cwd,
+                        viewer.path.as_deref(),
+                        viewer.active_tab.filename(),
+                    )
+                    .map(|path| path.to_string_lossy().into_owned())
                 } else {
                     viewer.openable_path().map(str::to_string)
                 }
             }
             FishBowlMode::Aquarium => None,
         }) else {
-            self.set_message("Mermaid artifact path unavailable");
+            self.set_message("artifact path unavailable");
             return;
         };
 
         let path_label = path_tail_label(&path).unwrap_or_else(|| path.clone());
         match self.artifact_opener.open(&path) {
-            Ok(_) => self.set_message(format!("open Mermaid artifact -> {path_label}")),
-            Err(err) => self.set_message(format!("failed to open Mermaid artifact: {err}")),
+            Ok(_) => self.set_message(format!("open artifact -> {path_label}")),
+            Err(err) => self.set_message(format!("failed to open artifact: {err}")),
         }
     }
 
@@ -2360,6 +2357,7 @@ impl<C: TuiApi> App<C> {
         self.fish_bowl_mode = FishBowlMode::Mermaid(MermaidViewerState {
             session_id: session.session_id.clone(),
             tmux_name: session.tmux_name.clone(),
+            cwd: session.cwd.clone(),
             path: artifact.path,
             source: artifact.source,
             artifact_error: artifact.error,
@@ -2438,12 +2436,12 @@ impl<C: TuiApi> App<C> {
                 Ok(response) => {
                     viewer.plan_text_content = response.content;
                     if let Some(err) = response.error {
-                        self.set_message(format!("plan file: {err}"));
+                        self.set_message(format!("artifact file: {err}"));
                     }
                 }
                 Err(err) => {
                     viewer.plan_text_content = None;
-                    self.set_message(format!("plan file fetch failed: {err}"));
+                    self.set_message(format!("artifact file fetch failed: {err}"));
                 }
             }
         } else {

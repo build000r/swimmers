@@ -340,6 +340,11 @@ impl StateDetector {
     ///
     /// `Exited` and `Error` states are never overridden — they come from
     /// higher-confidence signals (PTY close, error pattern match).
+    ///
+    /// TUI agent tools are the exception to the idle/attention -> busy rule.
+    /// Those processes stay alive while waiting on user input, so child
+    /// existence alone is not evidence of active work once silence has already
+    /// settled the pane into `Idle` or `Attention`.
     pub fn apply_process_liveness(&mut self, has_children: bool) {
         let now = Instant::now();
         match self.state {
@@ -348,6 +353,13 @@ impl StateDetector {
                 self.set_state(SessionState::Idle, Some(None), now, "liveness_no_children");
             }
             SessionState::Idle | SessionState::Attention if has_children => {
+                if self.tui_tool_mode {
+                    debug!(
+                        state = ?self.state,
+                        "process liveness: ignoring child-only busy override in TUI tool mode"
+                    );
+                    return;
+                }
                 debug!(
                     state = ?self.state,
                     "process liveness: children found but state is idle/attention, correcting to busy"
@@ -1276,6 +1288,33 @@ mod tests {
         assert_eq!(d.state(), SessionState::Busy);
         // No output idle deadline should be set.
         assert!(d.output_idle_deadline.is_none());
+    }
+
+    #[test]
+    fn tui_tool_mode_liveness_keeps_idle_when_tool_is_waiting() {
+        let mut d = StateDetector::new();
+        d.set_tui_tool_mode(true);
+        assert_eq!(d.state(), SessionState::Idle);
+
+        d.apply_process_liveness(true);
+        assert_eq!(d.state(), SessionState::Idle);
+    }
+
+    #[test]
+    fn tui_tool_mode_liveness_keeps_attention_when_tool_is_waiting() {
+        let mut d = StateDetector::new();
+        d.set_tui_tool_mode(true);
+        d.process_output(b"Processing...\r\n");
+        d.output_idle_deadline = Some(Instant::now() - Duration::from_millis(1));
+        d.check_timers(Instant::now());
+        assert_eq!(d.state(), SessionState::Idle);
+
+        d.attention_deadline = Some(Instant::now() - Duration::from_millis(1));
+        d.check_timers(Instant::now());
+        assert_eq!(d.state(), SessionState::Attention);
+
+        d.apply_process_liveness(true);
+        assert_eq!(d.state(), SessionState::Attention);
     }
 
     // --- Process liveness reconciliation tests ---

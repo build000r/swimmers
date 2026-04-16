@@ -507,9 +507,10 @@ impl SessionSupervisor {
         );
 
         // Carry the persisted `last_activity_at` forward so long-silent
-        // sessions resume in the correct rest state (e.g. discovered at
-        // startup after an overnight idle should wake up already asleep,
-        // not reset to Active).
+        // sessions resume in the correct fallback rest state (e.g. discovered
+        // at startup after an overnight idle should wake up already drowsy,
+        // not reset to Active before transcript sync has a chance to mark it
+        // as waiting on the user).
         let last_activity_override = self.persisted_last_activity(&session_id).await;
 
         match crate::session::actor::SessionActor::spawn(
@@ -2596,6 +2597,60 @@ mod tests {
         assert_eq!(sessions[0].thought_state, ThoughtState::Active);
         assert_eq!(sessions[0].token_count, 44);
         assert!(sessions[0].objective_changed_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn startup_idle_session_only_sleeps_after_waiting_thought_snapshot() {
+        let supervisor = SessionSupervisor::new(Arc::new(Config::default()));
+        let aged = DateTime::parse_from_rfc3339("2026-03-08T13:55:00Z")
+            .expect("timestamp")
+            .with_timezone(&Utc);
+        let mut summary = test_summary("sess-startup", SessionState::Idle);
+        summary.rest_state = RestState::Drowsy;
+        summary.last_activity_at = aged;
+        supervisor
+            .insert_test_handle(spawn_summary_handle(summary).await)
+            .await;
+
+        let sessions = supervisor.list_sessions().await;
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].session_id, "sess-startup");
+        assert!(sessions[0].thought.is_none());
+        assert_eq!(sessions[0].thought_state, ThoughtState::Holding);
+        assert_eq!(sessions[0].rest_state, RestState::Drowsy);
+        assert_eq!(sessions[0].last_activity_at, aged);
+
+        let updated_at = DateTime::parse_from_rfc3339("2026-03-08T14:00:05Z")
+            .expect("timestamp")
+            .with_timezone(&Utc);
+        supervisor
+            .persist_thought(
+                "sess-startup",
+                Some("Need your approval to continue."),
+                12,
+                192_000,
+                ThoughtState::Sleeping,
+                ThoughtSource::CarryForward,
+                RestState::Sleeping,
+                false,
+                updated_at,
+                ThoughtDeliveryState::default(),
+                None,
+                None,
+            )
+            .await;
+
+        let sessions = supervisor.list_sessions().await;
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(
+            sessions[0].thought.as_deref(),
+            Some("Need your approval to continue.")
+        );
+        assert_eq!(sessions[0].thought_state, ThoughtState::Sleeping);
+        assert_eq!(sessions[0].thought_source, ThoughtSource::CarryForward);
+        assert_eq!(sessions[0].rest_state, RestState::Sleeping);
+        assert_eq!(sessions[0].thought_updated_at, Some(updated_at));
+        assert_eq!(sessions[0].last_activity_at, aged);
     }
 
     #[tokio::test]
