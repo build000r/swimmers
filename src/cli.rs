@@ -78,8 +78,11 @@ pub struct ServerCli {
     pub command: Option<ServerCommand>,
 }
 
-#[derive(Subcommand, Debug)]
+#[derive(Subcommand, Debug, PartialEq, Eq)]
 pub enum ServerCommand {
+    #[command(about = "Run the API server (same as bare `swimmers`).")]
+    Serve,
+
     /// Show resolved configuration and run validation checks.
     Config {
         #[command(subcommand)]
@@ -87,7 +90,7 @@ pub enum ServerCommand {
     },
 }
 
-#[derive(Subcommand, Debug)]
+#[derive(Subcommand, Debug, PartialEq, Eq)]
 pub enum ConfigAction {
     /// Run validation checks against the active environment.
     ///
@@ -403,6 +406,24 @@ mod tests {
         assert!(is_loopback_bind("localhost"));
         assert!(!is_loopback_bind("0.0.0.0"));
         assert!(!is_loopback_bind("100.101.123.63"));
+    }
+
+    #[test]
+    fn parse_serve_subcommand() {
+        let cli = ServerCli::parse_from(["swimmers", "serve"]);
+        assert_eq!(cli.command, Some(ServerCommand::Serve));
+    }
+
+    #[test]
+    fn parse_bare_invocation_without_subcommand() {
+        let cli = ServerCli::parse_from(["swimmers"]);
+        assert_eq!(cli.command, None);
+    }
+
+    #[test]
+    fn parse_config_subcommand_without_action() {
+        let cli = ServerCli::parse_from(["swimmers", "config"]);
+        assert_eq!(cli.command, Some(ServerCommand::Config { action: None }));
     }
 
     #[test]
