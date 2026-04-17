@@ -1,15 +1,209 @@
 use super::*;
 
-pub(crate) fn initialize_tui_app() -> Result<(App<ApiClient>, Renderer), Box<dyn std::error::Error>>
+pub(crate) enum TuiClient {
+    Embedded(in_process::InProcessApi),
+    External(ApiClient),
+}
+
+impl TuiApi for TuiClient {
+    fn fetch_sessions(&self) -> BoxFuture<'_, Result<Vec<SessionSummary>, String>> {
+        match self {
+            Self::Embedded(client) => client.fetch_sessions(),
+            Self::External(client) => client.fetch_sessions(),
+        }
+    }
+
+    fn fetch_thought_config(&self) -> BoxFuture<'_, Result<ThoughtConfigResponse, String>> {
+        match self {
+            Self::Embedded(client) => client.fetch_thought_config(),
+            Self::External(client) => client.fetch_thought_config(),
+        }
+    }
+
+    fn update_thought_config(
+        &self,
+        config: ThoughtConfig,
+    ) -> BoxFuture<'_, Result<ThoughtConfig, String>> {
+        match self {
+            Self::Embedded(client) => client.update_thought_config(config),
+            Self::External(client) => client.update_thought_config(config),
+        }
+    }
+
+    fn test_thought_config(
+        &self,
+        config: ThoughtConfig,
+    ) -> BoxFuture<'_, Result<ThoughtConfigTestResponse, String>> {
+        match self {
+            Self::Embedded(client) => client.test_thought_config(config),
+            Self::External(client) => client.test_thought_config(config),
+        }
+    }
+
+    fn refresh_openrouter_candidates(&self) -> BoxFuture<'_, Result<Vec<String>, String>> {
+        match self {
+            Self::Embedded(client) => client.refresh_openrouter_candidates(),
+            Self::External(client) => client.refresh_openrouter_candidates(),
+        }
+    }
+
+    fn fetch_mermaid_artifact(
+        &self,
+        session_id: &str,
+    ) -> BoxFuture<'_, Result<MermaidArtifactResponse, String>> {
+        match self {
+            Self::Embedded(client) => client.fetch_mermaid_artifact(session_id),
+            Self::External(client) => client.fetch_mermaid_artifact(session_id),
+        }
+    }
+
+    fn fetch_plan_file(
+        &self,
+        session_id: &str,
+        name: &str,
+    ) -> BoxFuture<'_, Result<PlanFileResponse, String>> {
+        match self {
+            Self::Embedded(client) => client.fetch_plan_file(session_id, name),
+            Self::External(client) => client.fetch_plan_file(session_id, name),
+        }
+    }
+
+    fn fetch_native_status(&self) -> BoxFuture<'_, Result<NativeDesktopStatusResponse, String>> {
+        match self {
+            Self::Embedded(client) => client.fetch_native_status(),
+            Self::External(client) => client.fetch_native_status(),
+        }
+    }
+
+    fn set_native_app(
+        &self,
+        app: NativeDesktopApp,
+    ) -> BoxFuture<'_, Result<NativeDesktopStatusResponse, String>> {
+        match self {
+            Self::Embedded(client) => client.set_native_app(app),
+            Self::External(client) => client.set_native_app(app),
+        }
+    }
+
+    fn set_native_mode(
+        &self,
+        mode: GhosttyOpenMode,
+    ) -> BoxFuture<'_, Result<NativeDesktopStatusResponse, String>> {
+        match self {
+            Self::Embedded(client) => client.set_native_mode(mode),
+            Self::External(client) => client.set_native_mode(mode),
+        }
+    }
+
+    fn publish_selection(&self, session_id: Option<&str>) -> BoxFuture<'_, Result<(), String>> {
+        match self {
+            Self::Embedded(client) => client.publish_selection(session_id),
+            Self::External(client) => client.publish_selection(session_id),
+        }
+    }
+
+    fn open_session(
+        &self,
+        session_id: &str,
+    ) -> BoxFuture<'_, Result<NativeDesktopOpenResponse, String>> {
+        match self {
+            Self::Embedded(client) => client.open_session(session_id),
+            Self::External(client) => client.open_session(session_id),
+        }
+    }
+
+    fn list_dirs(
+        &self,
+        path: Option<&str>,
+        managed_only: bool,
+        group: Option<&str>,
+    ) -> BoxFuture<'_, Result<DirListResponse, String>> {
+        match self {
+            Self::Embedded(client) => client.list_dirs(path, managed_only, group),
+            Self::External(client) => client.list_dirs(path, managed_only, group),
+        }
+    }
+
+    fn start_repo_action(
+        &self,
+        path: &str,
+        kind: RepoActionKind,
+    ) -> BoxFuture<'_, Result<DirRepoActionResponse, String>> {
+        match self {
+            Self::Embedded(client) => client.start_repo_action(path, kind),
+            Self::External(client) => client.start_repo_action(path, kind),
+        }
+    }
+
+    fn create_session(
+        &self,
+        cwd: &str,
+        spawn_tool: SpawnTool,
+        initial_request: Option<String>,
+    ) -> BoxFuture<'_, Result<CreateSessionResponse, String>> {
+        match self {
+            Self::Embedded(client) => client.create_session(cwd, spawn_tool, initial_request),
+            Self::External(client) => client.create_session(cwd, spawn_tool, initial_request),
+        }
+    }
+}
+
+fn external_mode_requested() -> bool {
+    std::env::var_os("SWIMMERS_TUI_URL").is_some()
+}
+
+fn is_loopback_base_url(base_url: &str) -> Result<bool, String> {
+    let parsed = reqwest::Url::parse(base_url)
+        .map_err(|err| format!("invalid SWIMMERS_TUI_URL `{base_url}`: {err}"))?;
+
+    Ok(match parsed.host_str() {
+        Some("localhost") => true,
+        Some(host) => host
+            .parse::<std::net::IpAddr>()
+            .map(|ip| ip.is_loopback())
+            .unwrap_or(false),
+        None => false,
+    })
+}
+
+fn build_external_client(runtime: &Runtime) -> Result<TuiClient, io::Error> {
+    let client = ApiClient::from_env().map_err(io::Error::other)?;
+    if is_loopback_base_url(&client.base_url).map_err(io::Error::other)? {
+        let handle = runtime
+            .block_on(lifecycle::ensure_server(
+                &client.base_url,
+                Duration::from_secs(10),
+            ))
+            .map_err(io::Error::other)?;
+        tracing::info!(?handle, url = %client.base_url, "external mode backend ready");
+    } else {
+        tracing::info!(url = %client.base_url, "external mode with remote backend URL");
+    }
+    runtime
+        .block_on(client.preflight_startup_access())
+        .map_err(io::Error::other)?;
+    Ok(TuiClient::External(client))
+}
+
+fn build_embedded_client(runtime: &Runtime) -> TuiClient {
+    let config = Arc::new(Config::from_env());
+    let (state, _thought_handle, _bridge_health) =
+        runtime.block_on(swimmers::startup::init_app_state(config));
+    tracing::info!("embedded mode initialized");
+    TuiClient::Embedded(in_process::InProcessApi::new(state))
+}
+
+pub(crate) fn initialize_tui_app() -> Result<(App<TuiClient>, Renderer), Box<dyn std::error::Error>>
 {
     let _ = dotenvy::dotenv();
     swimmers::env_bootstrap::bootstrap_provider_env_from_shell();
 
     let runtime = Runtime::new()?;
-    let client = ApiClient::from_env().map_err(io::Error::other)?;
-    runtime
-        .block_on(client.preflight_startup_access())
-        .map_err(io::Error::other)?;
+    let client = if external_mode_requested() {
+        build_external_client(&runtime)?
+    } else {
+        build_embedded_client(&runtime)
+    };
     let mut renderer = Renderer::new()?;
     renderer.init()?;
 
