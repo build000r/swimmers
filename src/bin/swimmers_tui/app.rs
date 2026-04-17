@@ -133,6 +133,7 @@ pub(crate) struct App<C: TuiApi> {
     pub(crate) fish_bowl_mode: FishBowlMode,
     pub(crate) sprite_theme_override: Option<SpriteTheme>,
     pub(crate) mermaid_drag: Option<MermaidDragState>,
+    pub(crate) loading: bool,
     pub(crate) message: Option<(String, Instant)>,
     pub(crate) last_refresh: Option<Instant>,
     pub(crate) last_successful_refresh: Option<Instant>,
@@ -200,6 +201,7 @@ impl<C: TuiApi> App<C> {
             fish_bowl_mode: FishBowlMode::Aquarium,
             sprite_theme_override: None,
             mermaid_drag: None,
+            loading: true,
             message: None,
             last_refresh: None,
             last_successful_refresh: None,
@@ -229,6 +231,10 @@ impl<C: TuiApi> App<C> {
             return;
         }
         self.message = Some((message, Instant::now()));
+    }
+
+    pub(crate) fn set_loading(&mut self, loading: bool) {
+        self.loading = loading;
     }
 
     pub(crate) fn visible_message(&self) -> Option<&str> {
