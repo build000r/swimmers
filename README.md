@@ -17,8 +17,7 @@
 
 ```bash
 cargo install swimmers
-swimmers &          # start the API server on 127.0.0.1:3210
-swimmers-tui        # open the aquarium TUI
+swimmers-tui        # opens the aquarium — no server process to manage
 ```
 
 </div>
@@ -59,8 +58,8 @@ cargo install swimmers
 
 That installs **two binaries** on your `PATH`:
 
-- `swimmers` — the Axum HTTP/WebSocket API server that discovers and manages tmux sessions
-- `swimmers-tui` — the terminal UI client that connects to the server and renders the aquarium
+- `swimmers-tui` — the aquarium TUI. By default it hosts the API in-process, so one command is enough to get started.
+- `swimmers` — the standalone Axum HTTP/WebSocket API server. Use it when you want a long-running headless server, multiple TUI clients against one backend, or remote access over Tailscale. Run it as `swimmers` or, equivalently, `swimmers serve`.
 
 No repo checkout required.
 
@@ -88,23 +87,15 @@ Binaries land in `target/release/swimmers` (API server) and `target/release/swim
 
 After `cargo install swimmers`, both `swimmers` and `swimmers-tui` are on your PATH. No clone required.
 
-1. **Start the API server**
-
-   ```bash
-   swimmers
-   ```
-
-   The server binds to `127.0.0.1:3210` by default. It will keep running in the foreground; open a second terminal (or use `swimmers &` to background it).
-
-2. **Open the TUI** (in a separate terminal or after backgrounding the server)
+1. **Open the TUI**
 
    ```bash
    swimmers-tui
    ```
 
-   The TUI connects to `http://127.0.0.1:3210` automatically.
+   The TUI hosts the API in-process by default — no separate server to start, no port to worry about, no handshake message while you wait for something to boot. Quit with `q` and the whole thing exits cleanly.
 
-3. **Create some tmux sessions** if you don't have any yet
+2. **Create some tmux sessions** if you don't have any yet
 
    ```bash
    tmux new-session -d -s dev
@@ -114,21 +105,39 @@ After `cargo install swimmers`, both `swimmers` and `swimmers-tui` are on your P
 
    They appear in the aquarium within seconds.
 
-4. **Navigate** — arrow keys to select a fish, Enter to open the session in your terminal, `q` to quit the TUI.
+3. **Navigate** — arrow keys to select a fish, Enter to open the session in your terminal, `q` to quit the TUI.
 
-5. **Stop the server** — `Ctrl-C` in the terminal running `swimmers`, or `kill $(lsof -ti:3210)` if you backgrounded it.
+### External server mode
+
+Set `SWIMMERS_TUI_URL` to run the API as a separate process (for multi-client access, remote access over Tailscale, or integration with the REST endpoints from `curl`/browser). The TUI switches to HTTP transport and, for loopback URLs, auto-spawns a sibling `swimmers` binary if one isn't already listening — using a readiness pipe instead of polling, so the handoff is invisible.
+
+```bash
+SWIMMERS_TUI_URL=http://127.0.0.1:3210 swimmers-tui
+```
+
+To run the API explicitly as a standalone headless server:
+
+```bash
+swimmers          # same as `swimmers serve`
+# or
+swimmers serve    # explicit form for service managers and docs
+```
+
+`Ctrl-C` stops it. `kill $(lsof -ti:3210)` works for a backgrounded instance.
 
 ---
 
 ## Bind Address and Network Access
 
-By default the server binds to **`127.0.0.1:3210`** (loopback only). The TUI also defaults to `http://127.0.0.1:3210`.
+Bind addresses only apply to the standalone `swimmers` / `swimmers serve` binary. Embedded mode (`swimmers-tui` with no `SWIMMERS_TUI_URL`) binds no socket at all.
+
+By default the server binds to **`127.0.0.1:3210`** (loopback only).
 
 ### Loopback (default, no auth required)
 
 ```bash
-swimmers          # binds 127.0.0.1:3210
-swimmers-tui      # connects to http://127.0.0.1:3210
+swimmers                                            # binds 127.0.0.1:3210
+SWIMMERS_TUI_URL=http://127.0.0.1:3210 swimmers-tui # opt into external HTTP transport
 ```
 
 ### External / Tailscale access
@@ -172,7 +181,7 @@ For any non-loopback bind, use `AUTH_MODE=token` with `AUTH_TOKEN`. `OBSERVER_TO
 | `SWIMMERS_THOUGHT_BACKEND` | `daemon` | Thought subsystem backend: `daemon` or `inproc` |
 | `SWIMMERS_REPLAY_BUFFER_SIZE` | `524288` | Replay ring size in bytes (default 512 KB) |
 | `SWIMMERS_DATA_DIR` | `(platform data dir)` | Override the persistence directory |
-| `SWIMMERS_TUI_URL` | `http://127.0.0.1:3210` | API URL the TUI connects to |
+| `SWIMMERS_TUI_URL` | `(unset)` | When set, the TUI uses HTTP transport against this URL instead of hosting the API in-process. Auto-spawns a local server for loopback URLs. |
 
 When `SWIMMERS_NATIVE_APP=ghostty`, the API uses Ghostty's AppleScript support to create or replace a left-side preview split for the selected tmux session. This path requires Ghostty 1.3.0+ on macOS with automation access enabled.
 
@@ -187,11 +196,11 @@ The optional browser terminal renderer also honors `SWIMMERS_FRANKENTUI_PKG_DIR`
 If you are working from a source checkout, the Makefile has convenience targets:
 
 ```bash
-make tui                # Start local API + TUI (one command)
-make web                # Start the server and print local browser URLs
-make server             # Run only the API server
-make tui-check          # Wait for an existing API, then exit
-make tui-smoke          # Run shell-level bootstrap tests
+make tui                # Launch swimmers-tui (embedded mode by default)
+make web                # Start the standalone server and print local browser URLs
+make server             # Run only the standalone API server
+make tui-check          # Wait for an existing API (external mode only), then exit
+make tui-smoke          # Run shell-level bootstrap tests on the run-tui.sh shim
 make cargo-cov-lcov     # Generate lcov coverage report
 ```
 
@@ -234,6 +243,33 @@ Valid sprite values are `fish`, `balls`, and `jelly`. The header sprite toggle c
 
 ## Architecture
 
+### Default: embedded mode
+
+`swimmers-tui` hosts the API in the same process. No port, no handshake, no second binary. All the subsystems below run in one Tokio runtime alongside the render loop.
+
+```
+┌──────────────────────────────────────────────────────────────┐
+│                         swimmers-tui                         │
+│  Aquarium view  |  Thought rail  |  Mermaid viewer           │
+│  Keyboard/mouse navigation  |  Native terminal handoff       │
+│──────────────────────────────────────────────────────────────│
+│  InProcessApi (TuiApi trait) — zero HTTP, zero JSON          │
+│──────────────────────────────────────────────────────────────│
+│  SessionSupervisor, SessionActor, Thought subsystem,         │
+│  FileStore — the same subsystems the standalone server       │
+│  runs, just in the same process.                             │
+└───────────────────────────┬──────────────────────────────────┘
+                            │ PTY / shell exec
+                            ▼
+┌──────────────────────────────────────────────────────────────┐
+│                         tmux server                          │
+└──────────────────────────────────────────────────────────────┘
+```
+
+### External mode (`SWIMMERS_TUI_URL`)
+
+Set `SWIMMERS_TUI_URL` to split the API into its own process. Multiple TUIs, headless setups, remote access, and direct REST/`curl` use all take this path. For loopback URLs the TUI auto-spawns a sibling `swimmers` binary using a readiness-pipe handshake (no `curl` polling).
+
 ```
 ┌──────────────────────────────────────────────────────────────┐
 │                     swimmers-tui (client)                     │
@@ -241,9 +277,11 @@ Valid sprite values are `fish`, `balls`, and `jelly`. The header sprite toggle c
 │  Keyboard/mouse navigation  |  Native terminal handoff       │
 └───────────────────────────┬──────────────────────────────────┘
                             │ HTTP (REST JSON)
+                            │ auto-spawns `swimmers` for loopback
+                            │ URLs via readiness-pipe handshake
                             ▼
 ┌──────────────────────────────────────────────────────────────┐
-│                     swimmers (API server)                     │
+│            swimmers  (a.k.a. `swimmers serve`)                │
 │  Axum router  |  Auth middleware  |  Prometheus /metrics      │
 ├──────────────────────────────────────────────────────────────┤
 │  SessionSupervisor                                           │
@@ -387,13 +425,17 @@ launchctl load ~/Library/LaunchAgents/com.swimmers.plist
 
 ### TUI cannot reach the API
 
+This only applies to **external mode** (`SWIMMERS_TUI_URL` set). Embedded mode (the default) does not talk to a network at all.
+
 ```bash
 # Check if the API is running
 curl -s http://127.0.0.1:3210/v1/sessions
 
 # Start it
-swimmers
+swimmers          # or: swimmers serve
 ```
+
+If you want to avoid the external-mode setup entirely, unset `SWIMMERS_TUI_URL` and run `swimmers-tui` directly — it hosts the API in-process.
 
 ### TUI gets 401 or 403
 
@@ -450,15 +492,17 @@ No. Single binary, flat-file persistence, talks to tmux directly.
 
 ### Can I run the API without the TUI?
 
-Yes. Run `swimmers` on its own and use the REST endpoints directly, open the browser UI, or point a TUI at it later.
+Yes. Run `swimmers` (or `swimmers serve`) on its own and use the REST endpoints directly, open the browser UI, or point a TUI at it via `SWIMMERS_TUI_URL`.
 
 ### What happens when I close the TUI?
 
-Your tmux sessions keep running. The API keeps running if started separately. Reopen the TUI to reconnect.
+Your tmux sessions always keep running — the aquarium observes tmux, it doesn't own it.
+
+In **embedded mode** (default), closing the TUI tears down its in-process API too, since they're the same process. The next `swimmers-tui` launch rediscovers tmux from scratch. In **external mode** (`SWIMMERS_TUI_URL` set), the standalone `swimmers` server keeps running independently; reopen the TUI to reconnect.
 
 ### Can multiple TUIs connect to the same API?
 
-Yes. The API is a standard HTTP server. Point multiple TUI instances at the same URL.
+Yes, via external mode. Run a standalone `swimmers` server and point each TUI at its URL via `SWIMMERS_TUI_URL`. Embedded mode is single-tenant by design — the API only exists inside that TUI process.
 
 ### How does state detection work?
 
