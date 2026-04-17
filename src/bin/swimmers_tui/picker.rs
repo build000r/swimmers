@@ -786,6 +786,7 @@ pub(crate) fn initial_request_layout(field: Rect) -> InitialRequestLayout {
 pub(crate) fn render_initial_request(
     renderer: &mut Renderer,
     initial_request: &InitialRequestState,
+    voice_state: &VoiceUiState,
     field: Rect,
 ) {
     let layout = initial_request_layout(field);
@@ -814,7 +815,10 @@ pub(crate) fn render_initial_request(
     renderer.draw_text(
         layout.content.x,
         layout.content.y + 2,
-        "enter creates hidden swimmer esc cancels",
+        &format!(
+            "enter creates hidden swimmer  {}  esc cancels",
+            toggle_hint()
+        ),
         Color::DarkGrey,
     );
 
@@ -836,4 +840,16 @@ pub(crate) fn render_initial_request(
     if cursor_x < layout.content.right() {
         renderer.draw_char(cursor_x, layout.input_y, '|', Color::Yellow);
     }
+    renderer.draw_text(
+        layout.content.x,
+        layout.content.y + 4,
+        &truncate_label(&voice_state.status_line(), layout.content.width as usize),
+        match voice_state {
+            VoiceUiState::Recording => Color::Red,
+            VoiceUiState::Transcribing => Color::Yellow,
+            VoiceUiState::Failed(_) => Color::Red,
+            VoiceUiState::Unsupported => Color::DarkGrey,
+            VoiceUiState::Ready => Color::Cyan,
+        },
+    );
 }

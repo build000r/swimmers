@@ -11,7 +11,7 @@ readme = "README.md"
 keywords = ["claude", "codex", "tmux", "tui", "agents"]
 categories = ["command-line-utilities", "web-programming::http-server", "development-tools"]
 authors = ["build000r <buildooor@gmail.com>"]
-rust-version = "1.75"
+rust-version = "1.82"
 exclude = [
     ".claude/",
     ".DS_Store",
@@ -57,6 +57,8 @@ dirs = "6.0.0"
 clap = { version = "4", features = ["derive"] }
 open = "5"
 os_pipe = "1"
+cpal = { version = "0.17", optional = true }
+whisper-rs = { version = "0.16", optional = true }
 
 [dev-dependencies]
 proptest = "1"
@@ -68,3 +70,4 @@ tempfile = "3"
 # build is lean; enable with `--features personal-workflows` when building
 # from source for the maintainer's local workflow.
 personal-workflows = []
+voice = ["dep:cpal", "dep:whisper-rs"]

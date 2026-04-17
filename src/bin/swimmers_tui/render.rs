@@ -380,7 +380,7 @@ pub(crate) fn render_footer<C: TuiApi>(app: &App<C>, renderer: &mut Renderer, st
     }
 
     let help = if app.initial_request.is_some() {
-        "request: type prompt  enter create hidden  backspace delete  esc cancel"
+        "request: type prompt  ctrl-v voice  enter create hidden  backspace delete  esc cancel"
     } else if app.thought_config_editor.is_some() {
         "thought config: tab moves  arrows adjust  enter saves  esc cancels"
     } else if app.picker.is_some() {

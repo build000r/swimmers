@@ -4879,6 +4879,84 @@ fn session_create_failure_does_not_attempt_native_open() {
     );
     assert!(api.open_calls().is_empty());
     assert!(app.entities.is_empty());
+#[test]
+fn ctrl_v_in_initial_request_reports_voice_feature_when_not_built() {
+    let api = MockApi::new();
+    let field = test_field();
+    let mut app = make_app(api);
+    app.open_initial_request(TEST_REPO_SWIMMERS.to_string());
+
+    app.handle_initial_request_key(
+        KeyEvent::new(KeyCode::Char('v'), KeyModifiers::CONTROL),
+        field,
+    );
+
+    assert_eq!(
+        app.message.as_ref().map(|(message, _)| message.as_str()),
+        Some("voice support is not built; rebuild with `--features voice`")
+    );
+    assert!(matches!(app.voice_state, VoiceUiState::Failed(_)));
+    assert_eq!(
+        app.initial_request
+            .as_ref()
+            .map(|state| state.value.as_str()),
+        Some("")
+    );
+}
+
+#[test]
+fn submit_initial_request_waits_for_voice_transcription() {
+    let api = MockApi::new();
+    let field = test_field();
+    let mut app = make_app(api.clone());
+    app.initial_request = Some(InitialRequestState {
+        cwd: TEST_REPO_SWIMMERS.to_string(),
+        value: "draft the request".to_string(),
+    });
+    app.voice_state = VoiceUiState::Transcribing;
+
+    app.submit_initial_request(field);
+
+    assert!(api.create_calls().is_empty());
+    assert_eq!(
+        app.message.as_ref().map(|(message, _)| message.as_str()),
+        Some("wait for voice transcription to finish")
+    );
+    assert!(app.initial_request.is_some());
+}
+
+#[test]
+fn stale_voice_transcription_result_is_dropped_after_reopening_composer() {
+    let api = MockApi::new();
+    let mut app = make_app(api);
+    app.open_initial_request(TEST_REPO_SWIMMERS.to_string());
+    let stale_generation = app.initial_request_generation;
+    app.close_initial_request();
+    app.open_initial_request("/tmp/other".to_string());
+
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    app.pending_interaction = Some(rx);
+    assert!(tx
+        .send(PendingInteractionResult::VoiceTranscription {
+            generation: stale_generation,
+            response: Ok("hello from the old composer".to_string()),
+        })
+        .is_ok());
+
+    poll_until_interaction(&mut app);
+
+    assert_eq!(
+        app.initial_request
+            .as_ref()
+            .map(|state| state.value.as_str()),
+        Some("")
+    );
+    assert_eq!(
+        app.message.as_ref().map(|(message, _)| message.as_str()),
+        Some("voice transcript finished after the composer changed")
+    );
+}
+
     assert_eq!(
         app.initial_request
             .as_ref()

@@ -118,6 +118,7 @@ mod render;
 mod terminal;
 mod thought_config_editor;
 mod thoughts;
+mod voice;
 
 pub(crate) use api::*;
 pub(crate) use app::*;
@@ -131,6 +132,7 @@ pub(crate) use render::*;
 pub(crate) use terminal::*;
 pub(crate) use thought_config_editor::*;
 pub(crate) use thoughts::*;
+pub(crate) use voice::*;
 
 pub(crate) fn install_panic_hook() {
     let default_hook = std::panic::take_hook();

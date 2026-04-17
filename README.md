@@ -67,7 +67,7 @@ No repo checkout required.
 
 | Dependency | Install |
 |------------|---------|
-| Rust toolchain | `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \| sh` |
+| Rust toolchain (1.82+) | `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \| sh` |
 | tmux | `brew install tmux` (macOS) or `apt install tmux` (Debian/Ubuntu) |
 | Tailscale (optional) | Only needed for remote API access over a tailnet |
 
@@ -80,6 +80,13 @@ cargo build --release
 ```
 
 Binaries land in `target/release/swimmers` (API server) and `target/release/swimmers-tui` (TUI client). You can also run `cargo install --path .` from inside the checkout.
+
+To build the experimental local voice-input path for the TUI, enable the `voice` feature:
+
+```bash
+cargo build --release --features voice
+SWIMMERS_VOICE_MODEL=~/models/ggml-base.en.bin target/release/swimmers-tui
+```
 
 ---
 
@@ -106,6 +113,10 @@ After `cargo install swimmers`, both `swimmers` and `swimmers-tui` are on your P
    They appear in the aquarium within seconds.
 
 3. **Navigate** — arrow keys to select a fish, Enter to open the session in your terminal, `q` to quit the TUI.
+
+### Experimental voice input
+
+In a source build with `--features voice`, open the initial-request composer and press `Ctrl-V` to start or stop microphone capture. Swimmers records locally, transcribes with a local Whisper model, and inserts the transcript into the composer so you can edit it before creating the hidden swimmer.
 
 ### External server mode
 
@@ -182,6 +193,8 @@ For any non-loopback bind, use `AUTH_MODE=token` with `AUTH_TOKEN`. `OBSERVER_TO
 | `SWIMMERS_REPLAY_BUFFER_SIZE` | `524288` | Replay ring size in bytes (default 512 KB) |
 | `SWIMMERS_DATA_DIR` | `(platform data dir)` | Override the persistence directory |
 | `SWIMMERS_TUI_URL` | `(unset)` | When set, the TUI uses HTTP transport against this URL instead of hosting the API in-process. Auto-spawns a local server for loopback URLs. |
+| `SWIMMERS_VOICE_MODEL` | `(unset)` | Path to a local Whisper `.bin` model used by the experimental `voice` feature. |
+| `SWIMMERS_VOICE_LANGUAGE` | `auto` | Optional language hint for the experimental `voice` feature (`en`, `fr`, `auto`, etc.). |
 
 When `SWIMMERS_NATIVE_APP=ghostty`, the API uses Ghostty's AppleScript support to create or replace a left-side preview split for the selected tmux session. This path requires Ghostty 1.3.0+ on macOS with automation access enabled.
 

@@ -108,6 +108,10 @@ pub(crate) enum PendingInteractionResult {
     SaveThoughtConfig {
         outcome: ThoughtConfigActionOutcome,
     },
+    VoiceTranscription {
+        generation: u64,
+        response: Result<String, String>,
+    },
 }
 
 pub(crate) struct App<C: TuiApi> {
@@ -130,6 +134,9 @@ pub(crate) struct App<C: TuiApi> {
     pub(crate) picker: Option<PickerState>,
     pub(crate) spawn_tool: SpawnTool,
     pub(crate) initial_request: Option<InitialRequestState>,
+    pub(crate) initial_request_generation: u64,
+    pub(crate) voice_state: VoiceUiState,
+    pub(crate) voice_recording: Option<VoiceRecording>,
     pub(crate) fish_bowl_mode: FishBowlMode,
     pub(crate) sprite_theme_override: Option<SpriteTheme>,
     pub(crate) mermaid_drag: Option<MermaidDragState>,
@@ -198,6 +205,9 @@ impl<C: TuiApi> App<C> {
             picker: None,
             spawn_tool: SpawnTool::Codex,
             initial_request: None,
+            initial_request_generation: 0,
+            voice_state: default_ui_state(),
+            voice_recording: None,
             fish_bowl_mode: FishBowlMode::Aquarium,
             sprite_theme_override: None,
             mermaid_drag: None,
@@ -1224,6 +1234,16 @@ impl<C: TuiApi> App<C> {
                 }
                 self.set_message(outcome.message);
             }
+            PendingInteractionResult::VoiceTranscription {
+                generation,
+                response,
+            } => match response {
+                Ok(transcript) => self.insert_voice_transcript(generation, transcript),
+                Err(err) => {
+                    self.voice_state = VoiceUiState::Failed(err.clone());
+                    self.set_message(err);
+                }
+            },
         }
     }
 
@@ -1524,7 +1544,7 @@ impl<C: TuiApi> App<C> {
 
     pub(crate) fn close_picker(&mut self) {
         self.picker = None;
-        self.initial_request = None;
+        self.close_initial_request();
         self.last_picker_refresh = None;
     }
 
@@ -2062,10 +2082,15 @@ impl<C: TuiApi> App<C> {
     }
 
     pub(crate) fn open_initial_request(&mut self, cwd: String) {
+        self.cancel_voice_recording();
+        self.initial_request_generation = self.initial_request_generation.saturating_add(1);
         self.initial_request = Some(InitialRequestState::new(cwd));
+        self.voice_state = default_ui_state();
     }
 
     pub(crate) fn close_initial_request(&mut self) {
+        self.cancel_voice_recording();
+        self.initial_request_generation = self.initial_request_generation.saturating_add(1);
         self.initial_request = None;
     }
 
@@ -2073,6 +2098,9 @@ impl<C: TuiApi> App<C> {
         match key.code {
             KeyCode::Esc => self.close_initial_request(),
             KeyCode::Enter => self.submit_initial_request(field),
+            KeyCode::Char('v') if key.modifiers == KeyModifiers::CONTROL => {
+                self.toggle_voice_recording();
+            }
             KeyCode::Backspace => {
                 if let Some(initial_request) = &mut self.initial_request {
                     initial_request.value.pop();
@@ -2100,6 +2128,14 @@ impl<C: TuiApi> App<C> {
     }
 
     pub(crate) fn submit_initial_request(&mut self, field: Rect) {
+        if self.voice_recording.is_some() {
+            self.set_message("stop voice recording before creating a swimmer");
+            return;
+        }
+        if matches!(self.voice_state, VoiceUiState::Transcribing) {
+            self.set_message("wait for voice transcription to finish");
+            return;
+        }
         let Some(initial_request) = self
             .initial_request
             .as_ref()
@@ -2112,6 +2148,86 @@ impl<C: TuiApi> App<C> {
             return;
         };
         self.spawn_session(&cwd, Some(initial_request), field);
+    }
+
+    pub(crate) fn toggle_voice_recording(&mut self) {
+        if self.initial_request.is_none() {
+            self.set_message("open an initial request first");
+            return;
+        }
+        if matches!(self.voice_state, VoiceUiState::Transcribing) {
+            self.set_message("wait for voice transcription to finish");
+            return;
+        }
+        if let Some(recording) = self.voice_recording.take() {
+            self.finish_voice_recording(recording);
+        } else {
+            self.start_voice_recording();
+        }
+    }
+
+    fn start_voice_recording(&mut self) {
+        match start_recording() {
+            Ok(recording) => {
+                self.voice_recording = Some(recording);
+                self.voice_state = VoiceUiState::Recording;
+                self.set_message("voice recording started");
+            }
+            Err(err) => {
+                self.voice_state = VoiceUiState::Failed(err.clone());
+                self.set_message(err);
+            }
+        }
+    }
+
+    fn finish_voice_recording(&mut self, recording: VoiceRecording) {
+        if self.pending_interaction.is_some() {
+            self.voice_recording = Some(recording);
+            self.set_message("wait for the current action to finish");
+            return;
+        }
+
+        let (tx, rx) = oneshot::channel();
+        let generation = self.initial_request_generation;
+        self.pending_interaction = Some(rx);
+        self.voice_state = VoiceUiState::Transcribing;
+        self.set_message("transcribing voice capture...");
+
+        self.runtime.spawn(async move {
+            let response = match tokio::task::spawn_blocking(move || recording.finish()).await {
+                Ok(response) => response,
+                Err(err) => Err(format!("voice task failed: {err}")),
+            };
+            let _ = tx.send(PendingInteractionResult::VoiceTranscription {
+                generation,
+                response,
+            });
+        });
+    }
+
+    fn cancel_voice_recording(&mut self) {
+        if let Some(recording) = self.voice_recording.take() {
+            recording.cancel();
+        }
+        self.voice_state = default_ui_state();
+    }
+
+    fn insert_voice_transcript(&mut self, generation: u64, transcript: String) {
+        self.voice_state = default_ui_state();
+        if generation != self.initial_request_generation {
+            self.set_message("voice transcript finished after the composer changed");
+            return;
+        }
+        let Some(initial_request) = &mut self.initial_request else {
+            self.set_message("voice transcript finished after the composer closed");
+            return;
+        };
+
+        if !initial_request.value.trim().is_empty() {
+            initial_request.value.push('\n');
+        }
+        initial_request.value.push_str(transcript.trim());
+        self.set_message("voice transcript inserted");
     }
 
     pub(crate) fn picker_activate_selection(&mut self, _field: Rect) {
@@ -3026,7 +3142,12 @@ impl<C: TuiApi> App<C> {
             render_picker(renderer, picker, layout.overview_field);
         }
         if let Some(initial_request) = &self.initial_request {
-            render_initial_request(renderer, initial_request, layout.overview_field);
+            render_initial_request(
+                renderer,
+                initial_request,
+                &self.voice_state,
+                layout.overview_field,
+            );
         }
         if let Some(editor) = &self.thought_config_editor {
             render_thought_config_editor(renderer, editor, layout.overview_field);
