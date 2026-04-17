@@ -69,6 +69,7 @@ No repo checkout required.
 |------------|---------|
 | Rust toolchain (1.82+) | `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \| sh` |
 | tmux | `brew install tmux` (macOS) or `apt install tmux` (Debian/Ubuntu) |
+| CMake (voice feature only) | `brew install cmake` (macOS) or `apt install cmake` (Debian/Ubuntu) |
 | Tailscale (optional) | Only needed for remote API access over a tailnet |
 
 ### From Source
@@ -87,6 +88,8 @@ To build the experimental local voice-input path for the TUI, enable the `voice`
 cargo build --release --features voice
 SWIMMERS_VOICE_MODEL=~/models/ggml-base.en.bin target/release/swimmers-tui
 ```
+
+The `voice` feature builds `whisper-rs`, so you need `cmake` available on your `PATH` during the build and a local Whisper `.bin` model at runtime.
 
 ---
 
