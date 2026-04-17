@@ -4,6 +4,8 @@ All notable changes to swimmers are documented here. The format is based on [Kee
 
 ## [Unreleased]
 
+## [0.2.0] — 2026-04-16
+
 ### TUI↔API bootstrap rewrite
 
 - `swimmers-tui` now hosts the API in-process by default. Users no longer need to run a separate server first — a single `swimmers-tui` invocation renders the aquarium. The pre-existing `TuiApi` trait gains a second implementor (`InProcessApi`) that wraps `Arc<AppState>` and calls supervisor methods directly, skipping HTTP, JSON serialization, and the auth round-trip. External HTTP mode still works: set `SWIMMERS_TUI_URL=...` to opt back into the two-process layout ([`583577a`](https://github.com/build000r/swimmers/commit/583577a), [`b4c6fce`](https://github.com/build000r/swimmers/commit/b4c6fce)).
