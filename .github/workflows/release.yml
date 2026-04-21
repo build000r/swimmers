@@ -50,13 +50,21 @@ jobs:
       contents: write
 
     steps:
+      - uses: actions/checkout@v4
+
       - uses: actions/download-artifact@v4
         with:
           path: dist
           merge-multiple: true
 
+      - name: Render release notes from CHANGELOG.md
+        run: ./scripts/release-notes-from-changelog.sh "$RELEASE_VERSION" > release-notes.md
+        env:
+          RELEASE_VERSION: ${{ github.event_name == 'workflow_dispatch' && inputs.version || github.ref_name }}
+
       - uses: softprops/action-gh-release@v2
         with:
           name: ${{ github.event_name == 'workflow_dispatch' && format('v{0}', inputs.version) || github.ref_name }}
           tag_name: ${{ github.event_name == 'workflow_dispatch' && format('v{0}', inputs.version) || github.ref_name }}
+          body_path: release-notes.md
           files: dist/*

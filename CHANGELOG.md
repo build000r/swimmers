@@ -9,6 +9,10 @@ All notable changes to swimmers are documented here. The format is based on [Kee
 - Wired embedded mode onto the deferred-init path for real. `AppState.daemon_defaults` and `AppState.file_store` now use `OnceLock`, `init_app_state_skeleton` can render the first frame without waiting on persistence/bootstrap work, and `spawn_deferred_init` now attaches the loaded defaults/store back into shared app state once they arrive.
 - Extracted the duplicated dirs/native helper stack into `src/api/service.rs` and repointed both the HTTP handlers and `InProcessApi` at it. `/v1/dirs`, native desktop status/open, and repo-action behavior now share one implementation instead of carrying `TODO(parity)` copies in the embedded client.
 
+### Release notes
+
+- The GitHub release workflow now renders release notes from the matching `CHANGELOG.md` version block and ships that body with each tag, instead of creating empty releases when the assets publish successfully.
+
 ## [0.2.0] — 2026-04-16
 
 ### TUI↔API bootstrap rewrite
