@@ -1,8 +1,12 @@
-use crate::api::{fetch_live_summary, AppState};
+use crate::api::service::{
+    native_status_for_host as native_status_for_host_service, open_native_session_for_host,
+    NativeOpenServiceError,
+};
+use crate::api::AppState;
 use crate::auth::{AuthInfo, AuthScope};
 use crate::types::{
-    ErrorResponse, NativeDesktopApp, NativeDesktopConfigRequest, NativeDesktopModeRequest,
-    NativeDesktopOpenRequest, NativeDesktopStatusResponse,
+    ErrorResponse, NativeDesktopConfigRequest, NativeDesktopModeRequest, NativeDesktopOpenRequest,
+    NativeDesktopStatusResponse,
 };
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
@@ -18,13 +22,13 @@ fn request_host(headers: &HeaderMap) -> &str {
         .unwrap_or("localhost")
 }
 
-fn unsupported_native_response(status: &NativeDesktopStatusResponse) -> axum::response::Response {
+fn unsupported_native_response(reason: Option<String>) -> axum::response::Response {
     (
         StatusCode::BAD_REQUEST,
         Json(
             serde_json::to_value(ErrorResponse {
                 code: "NATIVE_DESKTOP_UNAVAILABLE".to_string(),
-                message: status.reason.clone(),
+                message: reason,
             })
             .unwrap(),
         ),
@@ -36,13 +40,7 @@ async fn native_status_for_host(
     state: &Arc<AppState>,
     headers: &HeaderMap,
 ) -> NativeDesktopStatusResponse {
-    let app = *state.native_desktop_app.read().await;
-    let ghostty_mode = *state.ghostty_open_mode.read().await;
-    let mut status = crate::native::support_for_host(request_host(headers), app);
-    if app == NativeDesktopApp::Ghostty {
-        status.ghostty_mode = Some(ghostty_mode);
-    }
-    status
+    native_status_for_host_service(state, request_host(headers)).await
 }
 
 async fn native_status(
@@ -103,45 +101,21 @@ async fn native_open(
         return resp;
     }
 
-    let app = *state.native_desktop_app.read().await;
-    let ghostty_mode = *state.ghostty_open_mode.read().await;
-    let status = crate::native::support_for_host(request_host(&headers), app);
-    if !status.supported {
-        return unsupported_native_response(&status);
-    }
-
-    let summary = match fetch_live_summary(&state, &body.session_id).await {
-        Ok(Some(summary)) => summary,
-        Ok(None) => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(
-                    serde_json::to_value(ErrorResponse {
-                        code: "SESSION_NOT_FOUND".to_string(),
-                        message: None,
-                    })
-                    .unwrap(),
-                ),
-            )
-                .into_response();
-        }
-        Err(err) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(
-                    serde_json::to_value(ErrorResponse {
-                        code: "INTERNAL_ERROR".to_string(),
-                        message: Some(err.to_string()),
-                    })
-                    .unwrap(),
-                ),
-            )
-                .into_response();
-        }
-    };
-
-    if summary.state == crate::types::SessionState::Exited {
-        return (
+    match open_native_session_for_host(&state, request_host(&headers), &body.session_id).await {
+        Ok(result) => (StatusCode::OK, Json(serde_json::to_value(result).unwrap())).into_response(),
+        Err(NativeOpenServiceError::Unsupported { reason }) => unsupported_native_response(reason),
+        Err(NativeOpenServiceError::SessionNotFound) => (
+            StatusCode::NOT_FOUND,
+            Json(
+                serde_json::to_value(ErrorResponse {
+                    code: "SESSION_NOT_FOUND".to_string(),
+                    message: None,
+                })
+                .unwrap(),
+            ),
+        )
+            .into_response(),
+        Err(NativeOpenServiceError::SessionExited) => (
             StatusCode::CONFLICT,
             Json(
                 serde_json::to_value(ErrorResponse {
@@ -151,25 +125,13 @@ async fn native_open(
                 .unwrap(),
             ),
         )
-            .into_response();
-    }
-
-    match crate::native::open_native_session(
-        app,
-        ghostty_mode,
-        &summary.session_id,
-        &summary.tmux_name,
-        &summary.cwd,
-    )
-    .await
-    {
-        Ok(result) => (StatusCode::OK, Json(serde_json::to_value(result).unwrap())).into_response(),
-        Err(err) => (
+            .into_response(),
+        Err(NativeOpenServiceError::Internal(err)) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(
                 serde_json::to_value(ErrorResponse {
                     code: "NATIVE_DESKTOP_OPEN_FAILED".to_string(),
-                    message: Some(err.to_string()),
+                    message: Some(err),
                 })
                 .unwrap(),
             ),
@@ -211,8 +173,8 @@ mod tests {
             native_desktop_app: Arc::new(RwLock::new(NativeDesktopApp::Iterm)),
             ghostty_open_mode: Arc::new(RwLock::new(GhosttyOpenMode::Swap)),
             sync_request_sequence: Arc::new(SyncRequestSequence::new()),
-            daemon_defaults: None,
-            file_store: None,
+            daemon_defaults: crate::api::once_lock_with(None),
+            file_store: crate::api::once_lock_with(None),
             bridge_health: Arc::new(crate::thought::health::BridgeHealthState::new_with_tick(
                 std::time::Duration::from_secs(15),
             )),

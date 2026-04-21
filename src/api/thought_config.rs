@@ -24,7 +24,7 @@ async fn get_thought_config(
     let config = state.thought_config.read().await.clone();
     Ok(Json(ThoughtConfigResponse {
         config,
-        daemon_defaults: state.daemon_defaults.clone(),
+        daemon_defaults: state.current_daemon_defaults(),
         ui: thought_config_ui_metadata(&cached_or_default_openrouter_candidates()),
     }))
 }
@@ -63,7 +63,7 @@ async fn put_thought_config(
         }
     };
 
-    let store = match state.file_store.as_ref() {
+    let store = match state.current_file_store() {
         Some(store) => store,
         None => {
             return (
@@ -172,8 +172,8 @@ mod tests {
             native_desktop_app: Arc::new(RwLock::new(crate::types::NativeDesktopApp::Iterm)),
             ghostty_open_mode: Arc::new(RwLock::new(crate::types::GhosttyOpenMode::Swap)),
             sync_request_sequence: Arc::new(SyncRequestSequence::new()),
-            daemon_defaults: None,
-            file_store,
+            daemon_defaults: crate::api::once_lock_with(None),
+            file_store: crate::api::once_lock_with(file_store),
             bridge_health: Arc::new(crate::thought::health::BridgeHealthState::new_with_tick(
                 std::time::Duration::from_secs(15),
             )),

@@ -2,6 +2,7 @@ use super::*;
 use std::cell::Cell as TestCell;
 use std::collections::VecDeque;
 use std::env;
+use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
@@ -38,6 +39,8 @@ const EXPECTED_TERMINAL_TEARDOWN: &str = concat!(
     "\u{1b}[?25h",
     "\u{1b}[0m",
 );
+
+const EMBEDDED_FIRST_FRAME_BUDGET: Duration = Duration::from_millis(80);
 
 static TEST_ENV_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
@@ -677,6 +680,38 @@ fn restore_env_var(key: &str, value: Option<String>) {
         Some(value) => env::set_var(key, value),
         None => env::remove_var(key),
     }
+}
+
+fn restore_os_env_var(key: &str, value: Option<OsString>) {
+    match value {
+        Some(value) => env::set_var(key, value),
+        None => env::remove_var(key),
+    }
+}
+
+fn prepend_test_path(bin_dir: &Path, original_path: Option<&OsStr>) {
+    let mut entries = vec![bin_dir.as_os_str().to_os_string()];
+    if let Some(existing) = original_path {
+        entries.extend(env::split_paths(existing).map(|path| path.into_os_string()));
+    }
+    env::set_var("PATH", env::join_paths(entries).expect("join fake PATH"));
+}
+
+fn install_fake_tmux(script: &str) -> (tempfile::TempDir, Option<OsString>) {
+    let dir = tempdir().expect("fake tmux tempdir");
+    let bin_dir = dir.path().join("bin");
+    fs::create_dir_all(&bin_dir).expect("fake tmux bin dir");
+    let tmux_path = bin_dir.join("tmux");
+    fs::write(&tmux_path, script).expect("write fake tmux");
+    let mut perms = fs::metadata(&tmux_path)
+        .expect("fake tmux metadata")
+        .permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(&tmux_path, perms).expect("mark fake tmux executable");
+
+    let original_path = env::var_os("PATH");
+    prepend_test_path(&bin_dir, original_path.as_deref());
+    (dir, original_path)
 }
 
 fn write_fake_clawgs_script(args_log: &Path, input_log: &Path, dir: &Path) -> std::path::PathBuf {
@@ -4845,41 +4880,6 @@ fn pressing_enter_after_pasting_initial_request_submits_once() {
 }
 
 #[test]
-fn session_create_failure_does_not_attempt_native_open() {
-    let api = MockApi::new();
-    api.push_create_session(Err("tmux failed to start".to_string()));
-    let field = test_field();
-    let mut app = make_app(api.clone());
-    app.picker = Some(PickerState::new(
-        10,
-        10,
-        dir_response(TEST_REPOS_ROOT, &[("swimmers", false)]),
-        true,
-        SpawnTool::Codex,
-    ));
-    app.initial_request = Some(InitialRequestState {
-        cwd: TEST_REPO_SWIMMERS.to_string(),
-        value: "fix tmux startup".to_string(),
-    });
-
-    app.submit_initial_request(field);
-    assert!(app.pending_interaction.is_some());
-    assert!(app.initial_request.is_some());
-    assert!(app.entities.is_empty());
-
-    poll_until_interaction(&mut app);
-
-    assert_eq!(
-        api.create_calls(),
-        vec![(
-            TEST_REPO_SWIMMERS.to_string(),
-            SpawnTool::Codex,
-            Some("fix tmux startup".to_string()),
-        )]
-    );
-    assert!(api.open_calls().is_empty());
-    assert!(app.entities.is_empty());
-#[test]
 fn ctrl_v_in_initial_request_reports_voice_feature_when_not_built() {
     let api = MockApi::new();
     let field = test_field();
@@ -4957,6 +4957,41 @@ fn stale_voice_transcription_result_is_dropped_after_reopening_composer() {
     );
 }
 
+#[test]
+fn session_create_failure_does_not_attempt_native_open() {
+    let api = MockApi::new();
+    api.push_create_session(Err("tmux failed to start".to_string()));
+    let field = test_field();
+    let mut app = make_app(api.clone());
+    app.picker = Some(PickerState::new(
+        10,
+        10,
+        dir_response(TEST_REPOS_ROOT, &[("swimmers", false)]),
+        true,
+        SpawnTool::Codex,
+    ));
+    app.initial_request = Some(InitialRequestState {
+        cwd: TEST_REPO_SWIMMERS.to_string(),
+        value: "fix tmux startup".to_string(),
+    });
+
+    app.submit_initial_request(field);
+    assert!(app.pending_interaction.is_some());
+    assert!(app.initial_request.is_some());
+    assert!(app.entities.is_empty());
+
+    poll_until_interaction(&mut app);
+
+    assert_eq!(
+        api.create_calls(),
+        vec![(
+            TEST_REPO_SWIMMERS.to_string(),
+            SpawnTool::Codex,
+            Some("fix tmux startup".to_string()),
+        )]
+    );
+    assert!(api.open_calls().is_empty());
+    assert!(app.entities.is_empty());
     assert_eq!(
         app.initial_request
             .as_ref()
@@ -10142,5 +10177,75 @@ fn initial_sync_refresh_populates_state() {
     assert!(
         app.native_status.is_some(),
         "native status populated synchronously"
+    );
+}
+
+/// Regression guard for the embedded-mode deferred-init path: the first
+/// visible frame must render without waiting for slow startup discovery.
+#[test]
+fn embedded_mode_first_frame_perf_gate() {
+    let _lock = TEST_ENV_LOCK.lock().expect("env lock");
+    let original_clawgs = env::var_os("CLAWGS_BIN");
+    let original_data_dir = env::var_os("SWIMMERS_DATA_DIR");
+    let original_tui_url = env::var_os("SWIMMERS_TUI_URL");
+    let temp = tempdir().expect("tempdir");
+    let args_log = temp.path().join("args.log");
+    let input_log = temp.path().join("input.log");
+    let fake_clawgs = write_fake_clawgs_script(&args_log, &input_log, temp.path());
+    let data_dir = temp.path().join("data");
+
+    env::set_var("CLAWGS_BIN", fake_clawgs.as_os_str());
+    env::set_var("SWIMMERS_DATA_DIR", &data_dir);
+    env::remove_var("SWIMMERS_TUI_URL");
+
+    let (_tmux_dir, original_path) = install_fake_tmux(
+        r#"#!/bin/sh
+set -eu
+case "${1-}" in
+  list-sessions)
+    sleep 0.25
+    ;;
+  *)
+    exit 0
+    ;;
+esac
+"#,
+    );
+
+    let runtime = test_runtime();
+    let started = Instant::now();
+    let (client, deferred_init) = {
+        let _runtime_guard = runtime.enter();
+        build_embedded_client(&runtime)
+    };
+    let mut app = App::new(runtime, client);
+    let mut renderer = test_renderer(120, 32);
+    let layout = app.layout_for_terminal(renderer.width(), renderer.height());
+    app.refresh(layout);
+    prepare_frame(&mut app, &mut renderer);
+    let elapsed = started.elapsed();
+    let header_visible = find_text_position(&renderer, "swimmers tui").is_some();
+    let empty_state_visible = find_text_position(&renderer, "no tmux sessions found").is_some();
+
+    deferred_init.abort();
+    app.runtime.block_on(async {
+        tokio::task::yield_now().await;
+    });
+
+    restore_os_env_var("PATH", original_path);
+    restore_os_env_var("SWIMMERS_TUI_URL", original_tui_url);
+    restore_os_env_var("SWIMMERS_DATA_DIR", original_data_dir);
+    restore_os_env_var("CLAWGS_BIN", original_clawgs);
+
+    assert!(header_visible, "first frame should render the TUI header");
+    assert!(
+        empty_state_visible,
+        "first frame should render the empty aquarium state before deferred discovery completes"
+    );
+    assert!(
+        elapsed < EMBEDDED_FIRST_FRAME_BUDGET,
+        "expected embedded first frame under {:?}, got {:?}",
+        EMBEDDED_FIRST_FRAME_BUDGET,
+        elapsed
     );
 }

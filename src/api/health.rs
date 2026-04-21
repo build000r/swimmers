@@ -122,8 +122,8 @@ mod tests {
             native_desktop_app: Arc::new(RwLock::new(crate::types::NativeDesktopApp::Iterm)),
             ghostty_open_mode: Arc::new(RwLock::new(crate::types::GhosttyOpenMode::Swap)),
             sync_request_sequence: Arc::new(SyncRequestSequence::new()),
-            daemon_defaults: None,
-            file_store: None,
+            daemon_defaults: crate::api::once_lock_with(None),
+            file_store: crate::api::once_lock_with(None),
             bridge_health,
             published_selection: Arc::new(RwLock::new(crate::api::PublishedSelectionState {
                 session_id: None,

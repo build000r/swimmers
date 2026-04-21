@@ -4,6 +4,11 @@ All notable changes to swimmers are documented here. The format is based on [Kee
 
 ## [Unreleased]
 
+### Startup and embedded-mode parity follow-through
+
+- Wired embedded mode onto the deferred-init path for real. `AppState.daemon_defaults` and `AppState.file_store` now use `OnceLock`, `init_app_state_skeleton` can render the first frame without waiting on persistence/bootstrap work, and `spawn_deferred_init` now attaches the loaded defaults/store back into shared app state once they arrive.
+- Extracted the duplicated dirs/native helper stack into `src/api/service.rs` and repointed both the HTTP handlers and `InProcessApi` at it. `/v1/dirs`, native desktop status/open, and repo-action behavior now share one implementation instead of carrying `TODO(parity)` copies in the embedded client.
+
 ## [0.2.0] — 2026-04-16
 
 ### TUI↔API bootstrap rewrite
@@ -124,7 +129,8 @@ The final stretch closed three publish blockers and nine should-fixes flagged by
 - Renamed throngterm → swimmers ([`5bc4c03`](https://github.com/build000r/swimmers/commit/5bc4c03))
 - Legacy Node.js stack removed and docs updated for the Rust/Preact world ([`5d9c3ed`](https://github.com/build000r/swimmers/commit/5d9c3ed))
 
-[Unreleased]: https://github.com/build000r/swimmers/compare/v0.1.3...HEAD
+[Unreleased]: https://github.com/build000r/swimmers/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/build000r/swimmers/releases/tag/v0.2.0
 [0.1.3]: https://github.com/build000r/swimmers/releases/tag/v0.1.3
 [0.1.2]: https://github.com/build000r/swimmers/releases/tag/v0.1.2
 [0.1.1]: https://github.com/build000r/swimmers/releases/tag/v0.1.1

@@ -6,7 +6,7 @@ use axum::Router;
 use tokio::sync::RwLock;
 use tokio::task::JoinHandle;
 
-use crate::api::AppState;
+use crate::api::{once_lock_with, AppState};
 use crate::config::{Config, ThoughtBackend};
 use crate::host_actions;
 use crate::metrics;
@@ -18,7 +18,7 @@ use crate::thought::emitter_client::{fetch_daemon_defaults, EmitterClient};
 use crate::thought::health::BridgeHealthState;
 use crate::thought::loop_runner::ThoughtLoopRunner;
 use crate::thought::protocol::SyncRequestSequence;
-use crate::thought::runtime_config::ThoughtConfig;
+use crate::thought::runtime_config::{DaemonDefaults, ThoughtConfig};
 use crate::{api, web};
 
 const STARTUP_PHASE_WARN_THRESHOLD: Duration = Duration::from_secs(2);
@@ -249,8 +249,8 @@ pub async fn init_app_state(
         native_desktop_app: Arc::new(RwLock::new(native::default_native_app())),
         ghostty_open_mode: Arc::new(RwLock::new(native::default_ghostty_open_mode())),
         sync_request_sequence,
-        daemon_defaults,
-        file_store: persistence_store,
+        daemon_defaults: once_lock_with(daemon_defaults),
+        file_store: once_lock_with(persistence_store),
         bridge_health: bridge_health.clone(),
         published_selection: Arc::new(RwLock::new(api::PublishedSelectionState::default())),
         repo_actions: host_actions::RepoActionTracker::default(),
@@ -271,8 +271,8 @@ pub fn init_app_state_skeleton(config: Arc<Config>) -> Arc<AppState> {
         native_desktop_app: Arc::new(RwLock::new(native::default_native_app())),
         ghostty_open_mode: Arc::new(RwLock::new(native::default_ghostty_open_mode())),
         sync_request_sequence: Arc::new(SyncRequestSequence::new()),
-        daemon_defaults: None,
-        file_store: None,
+        daemon_defaults: once_lock_with(None),
+        file_store: once_lock_with(None),
         bridge_health: Arc::new(BridgeHealthState::new_with_tick(Duration::from_millis(
             config.thought_tick_ms,
         ))),
@@ -300,11 +300,7 @@ where
 async fn run_deferred_init_phases(
     supervisor: Arc<SessionSupervisor>,
     thought_config: Arc<RwLock<ThoughtConfig>>,
-) -> (
-    Option<Arc<FileStore>>,
-    (),
-    Option<crate::thought::runtime_config::DaemonDefaults>,
-) {
+) -> (Option<Arc<FileStore>>, (), Option<DaemonDefaults>) {
     let persistence_supervisor = supervisor.clone();
     let persistence_config = thought_config.clone();
     let discovery_supervisor = supervisor;
@@ -317,6 +313,35 @@ async fn run_deferred_init_phases(
         fetch_daemon_defaults,
     )
     .await
+}
+
+fn log_deferred_attachment(subject: &'static str, attached: bool) {
+    if attached {
+        tracing::info!("deferred init attached {subject} to AppState");
+    } else {
+        tracing::info!("deferred init found AppState {subject} already initialized");
+    }
+}
+
+fn attach_deferred_file_store(state: &Arc<AppState>, persistence_store: Option<Arc<FileStore>>) {
+    if let Some(store) = persistence_store {
+        log_deferred_attachment("persistence store", state.set_file_store(store));
+    }
+}
+
+fn attach_deferred_daemon_defaults(state: &Arc<AppState>, daemon_defaults: Option<DaemonDefaults>) {
+    if let Some(defaults) = daemon_defaults {
+        log_deferred_attachment("daemon defaults", state.set_daemon_defaults(defaults));
+    }
+}
+
+fn attach_deferred_init_results(
+    state: &Arc<AppState>,
+    persistence_store: Option<Arc<FileStore>>,
+    daemon_defaults: Option<DaemonDefaults>,
+) {
+    attach_deferred_file_store(state, persistence_store);
+    attach_deferred_daemon_defaults(state, daemon_defaults);
 }
 
 fn start_deferred_thought_backend(state: &Arc<AppState>) -> JoinHandle<()> {
@@ -363,21 +388,8 @@ pub fn spawn_deferred_init(state: Arc<AppState>) -> JoinHandle<()> {
                     .await;
 
             log_startup_phase_complete("deferred_init", deferred_started);
-
-            if persistence_store.is_some() && state.file_store.is_none() {
-                tracing::info!(
-                    "deferred init attached persistence to supervisor; AppState.file_store remains unchanged"
-                );
-            }
-
-            if daemon_defaults.is_some() && state.daemon_defaults.is_none() {
-                tracing::info!(
-                    "deferred init fetched daemon defaults; AppState.daemon_defaults remains unchanged"
-                );
-            }
-
-            let thought_backend = start_deferred_thought_backend(&state);
-            drop(thought_backend);
+            attach_deferred_init_results(&state, persistence_store, daemon_defaults);
+            drop(start_deferred_thought_backend(&state));
         });
     })
 }
@@ -593,8 +605,8 @@ mod tests {
             elapsed.as_millis()
         );
         assert_eq!(state.config.port, config.port);
-        assert!(state.file_store.is_none());
-        assert!(state.daemon_defaults.is_none());
+        assert!(state.current_file_store().is_none());
+        assert!(state.current_daemon_defaults().is_none());
     }
 
     #[tokio::test]

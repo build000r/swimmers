@@ -1,260 +1,24 @@
 #![cfg_attr(not(feature = "personal-workflows"), allow(dead_code))]
 
+use crate::api::service::{
+    list_dirs as list_dirs_service, restart_dir_services as restart_dir_services_service,
+    start_dir_repo_action as start_dir_repo_action_service, ApiServiceError,
+};
 use crate::api::AppState;
 use crate::auth::{AuthInfo, AuthScope};
-use crate::host_actions::{
-    inspect_git_repo, RepoActionExecutor, RepoActionTracker, RestartExecutor,
-    SystemRepoActionExecutor,
-};
-use crate::session::overlay::{
-    default_overlay, OverlayDirConfig, OverlayDirGroup, OverlayServiceEntry,
-};
-use crate::types::{
-    DirEntry, DirListResponse, DirRepoActionRequest, DirRepoActionResponse, DirRestartRequest,
-    DirRestartResponse, ErrorResponse, RepoActionKind, RepoActionStatus,
-};
+use crate::types::{DirRepoActionRequest, DirRestartRequest, ErrorResponse};
 use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Extension, Json, Router};
-use futures::stream::{self, StreamExt};
-use std::collections::{BTreeSet, HashMap};
-use std::io;
-use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
-use std::time::{Duration, Instant, UNIX_EPOCH};
-use tokio::process::Command;
-
-/// Max concurrent git probes per `list_dirs` call. Keeps a single listing from
-/// fork-bombing the system when a repos directory has many git subdirs, while
-/// still parallelizing enough to hide per-call git latency.
-const GIT_PROBE_CONCURRENCY: usize = 16;
 
 #[derive(serde::Deserialize)]
 struct DirQuery {
     path: Option<String>,
     managed_only: Option<bool>,
     group: Option<String>,
-}
-
-struct OverlayServiceContext {
-    base_path: PathBuf,
-    services: Vec<OverlayServiceEntry>,
-}
-
-struct ListCandidate {
-    name: String,
-    has_children: bool,
-    modified_at: u64,
-    services: Vec<String>,
-    repo_dirty: Option<bool>,
-    repo_action: Option<RepoActionStatus>,
-}
-
-/// Base path for directory browsing. Prefers `DIRS_BASE_PATH` env var, then
-/// the overlay's `dev_sanity.services.base_path`, then the server's cwd.
-fn dirs_base_path() -> PathBuf {
-    if let Ok(explicit) = std::env::var("DIRS_BASE_PATH") {
-        return PathBuf::from(explicit);
-    }
-
-    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
-    if let Some(config) = resolve_dir_config(&cwd) {
-        return config.base_path.clone();
-    }
-
-    cwd
-}
-
-/// Resolve the overlay dir config for the given path.
-fn resolve_dir_config(path: &Path) -> Option<&'static OverlayDirConfig> {
-    let overlay = default_overlay()?;
-    overlay.find_dir_config(&path.to_string_lossy())
-}
-
-/// Compute which top-level children of `base` are "managed" by the overlay.
-///
-/// Derives the set from the `dir` fields of overlay service entries: each
-/// entry's first path component is a managed child of the base directory.
-fn managed_base_child_names(config: &OverlayDirConfig, base: &Path) -> Option<BTreeSet<String>> {
-    if config.services.is_empty() {
-        return None;
-    }
-
-    let resolved_base = config
-        .base_path
-        .canonicalize()
-        .unwrap_or(config.base_path.clone());
-    let canonical_base = base.canonicalize().unwrap_or(base.to_path_buf());
-
-    let mut children = BTreeSet::new();
-    for service in &config.services {
-        let service_path = resolved_base.join(&service.dir);
-        let Ok(canonical) = service_path.canonicalize() else {
-            continue;
-        };
-        if !canonical.starts_with(&canonical_base) {
-            continue;
-        }
-        let Ok(relative) = canonical.strip_prefix(&canonical_base) else {
-            continue;
-        };
-        let Some(Component::Normal(name)) = relative.components().next() else {
-            continue;
-        };
-        children.insert(name.to_string_lossy().into_owned());
-    }
-
-    if children.is_empty() {
-        None
-    } else {
-        Some(children)
-    }
-}
-
-fn relative_repo_path(base: &Path, path: &Path) -> Option<String> {
-    let relative = path.strip_prefix(base).ok()?;
-    let components: Vec<String> = relative
-        .components()
-        .filter_map(|component| match component {
-            Component::Normal(name) => Some(name.to_string_lossy().into_owned()),
-            _ => None,
-        })
-        .collect();
-    Some(components.join("/"))
-}
-
-fn services_for_directory(path: &Path, context: &OverlayServiceContext) -> Vec<String> {
-    let Some(relative_path) = relative_repo_path(&context.base_path, path) else {
-        return Vec::new();
-    };
-    if relative_path.is_empty() {
-        return Vec::new();
-    }
-
-    let mut services = BTreeSet::new();
-    for service in &context.services {
-        if service.dir == relative_path
-            || service.dir.starts_with(&format!("{relative_path}/"))
-            || relative_path.starts_with(&format!("{}/", service.dir))
-        {
-            services.insert(service.name.clone());
-        }
-    }
-
-    services.into_iter().collect()
-}
-
-/// Check service health by sending HTTP GET requests to overlay-defined URLs.
-///
-/// Local-dev overlays routinely declare health URLs for services that are not
-/// currently running (`http://localhost:PORT/...`). Without these tight
-/// budgets, reqwest's defaults make every `/v1/dirs` call take 5 s whenever
-/// any one service is down or hung.
-///
-/// `connect_timeout` catches services with no listener (port closed → fails
-/// fast at 250 ms). `timeout` caps the worst case for services that *accept*
-/// the TCP connection but never write a response (a stuck process holding the
-/// port). For local picker-decoration UX, 500 ms is generous — healthy local
-/// services typically respond in 1–20 ms.
-const HEALTH_PROBE_CONNECT_TIMEOUT: Duration = Duration::from_millis(250);
-const HEALTH_PROBE_TOTAL_TIMEOUT: Duration = Duration::from_millis(500);
-
-async fn overlay_service_health_map(
-    services: &[OverlayServiceEntry],
-    requested: &[String],
-) -> HashMap<String, bool> {
-    let mut map = HashMap::new();
-    if requested.is_empty() {
-        return map;
-    }
-
-    let client = reqwest::Client::builder()
-        .connect_timeout(HEALTH_PROBE_CONNECT_TIMEOUT)
-        .timeout(HEALTH_PROBE_TOTAL_TIMEOUT)
-        .build()
-        .unwrap_or_default();
-
-    let mut handles = Vec::new();
-    for service in services {
-        if !requested.contains(&service.name) {
-            continue;
-        }
-        let Some(url) = &service.health_url else {
-            // No health URL — assume running if the service is declared.
-            map.insert(service.name.clone(), true);
-            continue;
-        };
-        let name = service.name.clone();
-        let url = url.clone();
-        let client = client.clone();
-        handles.push(tokio::spawn(async move {
-            let ok = client.get(&url).send().await.is_ok();
-            (name, ok)
-        }));
-    }
-
-    for handle in handles {
-        if let Ok((name, ok)) = handle.await {
-            map.insert(name, ok);
-        }
-    }
-
-    map
-}
-
-/// Restart services by running overlay-defined shell commands.
-async fn restart_services(
-    services: &[OverlayServiceEntry],
-    requested: &[String],
-) -> Result<(), String> {
-    if requested.is_empty() {
-        return Err("no restartable services mapped for this path".to_string());
-    }
-
-    for service in services {
-        if !requested.contains(&service.name) {
-            continue;
-        }
-        let Some(cmd) = &service.restart else {
-            continue;
-        };
-        let output = tokio::time::timeout(
-            Duration::from_secs(240),
-            Command::new("sh").arg("-c").arg(cmd).output(),
-        )
-        .await
-        .map_err(|_| format!("restart of {} timed out after 240s", service.name))?
-        .map_err(|error| error.to_string())?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-            let detail: String = if stderr.is_empty() {
-                String::from_utf8_lossy(&output.stdout)
-                    .lines()
-                    .rev()
-                    .find(|line| !line.trim().is_empty())
-                    .unwrap_or("restart failed")
-                    .trim()
-                    .chars()
-                    .take(600)
-                    .collect()
-            } else {
-                stderr.chars().take(600).collect()
-            };
-            return Err(format!("{}: {}", service.name, detail));
-        }
-    }
-
-    Ok(())
-}
-
-fn repo_action_error_code(error: &io::Error) -> (&'static str, StatusCode) {
-    match error.kind() {
-        io::ErrorKind::AlreadyExists => ("ACTION_ALREADY_RUNNING", StatusCode::CONFLICT),
-        _ => ("ACTION_START_FAILED", StatusCode::INTERNAL_SERVER_ERROR),
-    }
 }
 
 fn error_response(status: StatusCode, code: &str, message: impl Into<String>) -> Response {
@@ -271,109 +35,8 @@ fn error_response(status: StatusCode, code: &str, message: impl Into<String>) ->
         .into_response()
 }
 
-fn resolve_target_path(base: PathBuf, target: PathBuf) -> Result<(PathBuf, PathBuf), Response> {
-    let canonical = target.canonicalize().map_err(|_| {
-        error_response(
-            StatusCode::NOT_FOUND,
-            "DIR_NOT_FOUND",
-            format!("directory not found: {}", target.display()),
-        )
-    })?;
-
-    let canonical_base = base.canonicalize().unwrap_or(base);
-    if !canonical.starts_with(&canonical_base) {
-        return Err(error_response(
-            StatusCode::FORBIDDEN,
-            "DIR_OUTSIDE_BASE",
-            "path is outside the allowed base directory",
-        ));
-    }
-
-    Ok((canonical_base, canonical))
-}
-
-/// List entries from a virtual directory group, combining children from all
-/// source directories. Each entry carries its full absolute path since entries
-/// come from multiple distinct parents.
-///
-/// Runs on Tokio's blocking pool via `spawn_blocking` — the nested
-/// `std::fs::read_dir` walks would otherwise stall an async handler worker
-/// the same way `inspect_git_repo` did before it was offloaded. Group configs
-/// can aggregate many sources with many entries each, so this is a
-/// latent hot-path stall waiting to happen.
-async fn list_group_entries(group: &OverlayDirGroup) -> Vec<DirEntry> {
-    let group = group.clone();
-    tokio::task::spawn_blocking(move || list_group_entries_sync(&group))
-        .await
-        .unwrap_or_default()
-}
-
-fn list_group_entries_sync(group: &OverlayDirGroup) -> Vec<DirEntry> {
-    let mut seen = BTreeSet::new();
-    let mut entries: Vec<(DirEntry, u64)> = Vec::new();
-
-    for source_dir in &group.dirs {
-        let Ok(read_dir) = std::fs::read_dir(source_dir) else {
-            continue;
-        };
-        for entry in read_dir.flatten() {
-            let Ok(file_type) = entry.file_type() else {
-                continue;
-            };
-            if !file_type.is_dir() {
-                continue;
-            }
-            let name = entry.file_name().to_string_lossy().into_owned();
-            if name.starts_with('.') {
-                continue;
-            }
-            if !seen.insert(name.clone()) {
-                continue;
-            }
-
-            let entry_path = entry.path();
-            let has_children = std::fs::read_dir(&entry_path)
-                .map(|rd| {
-                    rd.flatten().any(|child| {
-                        child.file_type().map(|ft| ft.is_dir()).unwrap_or(false)
-                            && !child.file_name().to_string_lossy().starts_with('.')
-                    })
-                })
-                .unwrap_or(false);
-
-            let modified_at = entry
-                .metadata()
-                .ok()
-                .and_then(|meta| meta.modified().ok())
-                .and_then(|modified| modified.duration_since(UNIX_EPOCH).ok())
-                .map(|duration| duration.as_secs())
-                .unwrap_or(0);
-
-            let full_path = entry_path
-                .canonicalize()
-                .unwrap_or(entry_path)
-                .to_string_lossy()
-                .into_owned();
-
-            entries.push((
-                DirEntry {
-                    name,
-                    has_children,
-                    is_running: None,
-                    repo_dirty: None,
-                    repo_action: None,
-                    group: None,
-                    full_path: Some(full_path),
-                    has_restart: None,
-                    open_url: None,
-                },
-                modified_at,
-            ));
-        }
-    }
-
-    entries.sort_by(|(a, _), (b, _)| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
-    entries.into_iter().map(|(entry, _)| entry).collect()
+fn service_error_response(error: ApiServiceError) -> Response {
+    error_response(error.status(), error.code(), error.message())
 }
 
 // GET /v1/dirs?path=...
@@ -386,294 +49,21 @@ async fn list_dirs(
         return resp;
     }
 
-    let base = dirs_base_path();
-
-    // Handle group listing: return combined entries from the group's source dirs.
-    if let Some(group_name) = &query.group {
-        let canonical_base = base.canonicalize().unwrap_or(base.clone());
-        let dir_config = resolve_dir_config(&canonical_base);
-        let group =
-            dir_config.and_then(|config| config.groups.iter().find(|g| &g.name == group_name));
-        let Some(group) = group else {
-            return error_response(
-                StatusCode::NOT_FOUND,
-                "GROUP_NOT_FOUND",
-                format!("no group named '{group_name}' in overlay"),
-            );
-        };
-        let entries = list_group_entries(group).await;
-        return (
-            StatusCode::OK,
-            Json(
-                serde_json::to_value(DirListResponse {
-                    path: canonical_base.to_string_lossy().into_owned(),
-                    entries,
-                    overlay_label: dir_config.map(|c| c.label.clone()),
-                    groups: dir_config
-                        .map(|c| c.groups.iter().map(|g| g.name.clone()).collect())
-                        .unwrap_or_default(),
-                })
-                .unwrap(),
-            ),
-        )
-            .into_response();
-    }
-
-    let request_started = Instant::now();
-    let target = match &query.path {
-        Some(path) if !path.is_empty() => PathBuf::from(path),
-        _ => base.clone(),
-    };
-
-    let (canonical_base, canonical) = match resolve_target_path(base, target) {
-        Ok(paths) => paths,
-        Err(response) => return response,
-    };
-
-    let read_dir = match std::fs::read_dir(&canonical) {
-        Ok(read_dir) => read_dir,
-        Err(error) => {
-            return error_response(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "DIR_READ_ERROR",
-                error.to_string(),
-            );
-        }
-    };
-
-    let managed_only = query.managed_only.unwrap_or(false);
-    let dir_config = resolve_dir_config(&canonical_base);
-
-    let managed_children = if managed_only && canonical == canonical_base {
-        dir_config.and_then(|config| managed_base_child_names(config, &canonical_base))
-    } else {
-        None
-    };
-
-    let service_context = dir_config.map(|config| OverlayServiceContext {
-        base_path: config.base_path.clone(),
-        services: config.services.clone(),
-    });
-
-    struct PendingEntry {
-        name: String,
-        entry_path: PathBuf,
-        has_children: bool,
-        modified_at: u64,
-        services: Vec<String>,
-    }
-
-    let mut pending: Vec<PendingEntry> = Vec::new();
-    let mut unique_services: BTreeSet<String> = BTreeSet::new();
-    for entry in read_dir.flatten() {
-        let Ok(file_type) = entry.file_type() else {
-            continue;
-        };
-        if !file_type.is_dir() {
-            continue;
-        }
-
-        let name = entry.file_name().to_string_lossy().into_owned();
-        if name.starts_with('.') {
-            continue;
-        }
-        if let Some(allowed) = &managed_children {
-            if !allowed.contains(&name) {
-                continue;
-            }
-        }
-
-        let entry_path = entry.path();
-        let has_children = std::fs::read_dir(&entry_path)
-            .map(|read_dir| {
-                read_dir.flatten().any(|child| {
-                    child.file_type().map(|ft| ft.is_dir()).unwrap_or(false)
-                        && !child.file_name().to_string_lossy().starts_with('.')
-                })
-            })
-            .unwrap_or(false);
-
-        let modified_at = entry
-            .metadata()
-            .ok()
-            .and_then(|meta| meta.modified().ok())
-            .and_then(|modified| modified.duration_since(UNIX_EPOCH).ok())
-            .map(|duration| duration.as_secs())
-            .unwrap_or(0);
-
-        let services = service_context
-            .as_ref()
-            .map(|context| services_for_directory(&entry_path, context))
-            .unwrap_or_default();
-        for service in &services {
-            unique_services.insert(service.clone());
-        }
-
-        pending.push(PendingEntry {
-            name,
-            entry_path,
-            has_children,
-            modified_at,
-            services,
-        });
-    }
-
-    // Probe git state for every entry concurrently. `inspect_git_repo` uses
-    // `tokio::process::Command` with a per-call timeout so a slow repo can't
-    // stall the Tokio worker, and `buffered(N)` bounds concurrent git forks.
-    // Inputs are materialized as owned tuples up-front so the stream closure
-    // has no borrows into `pending` (rustc can't infer HRTBs through it).
-    let probe_inputs: Vec<(PathBuf, RepoActionTracker)> = pending
-        .iter()
-        .map(|pending_entry| (pending_entry.entry_path.clone(), state.repo_actions.clone()))
-        .collect();
-
-    let pending_phase_ms = request_started.elapsed().as_millis() as u64;
-    let pending_count = pending.len();
-    let probe_started = Instant::now();
-    let probes: Vec<(Option<bool>, Option<RepoActionStatus>)> = stream::iter(probe_inputs)
-        .map(|(entry_path, repo_actions)| async move {
-            let repo_summary =
-                inspect_git_repo(&entry_path)
-                    .await
-                    .ok()
-                    .flatten()
-                    .and_then(|summary| {
-                        let canonical_entry =
-                            entry_path.canonicalize().unwrap_or(entry_path.clone());
-                        (summary.repo_root == canonical_entry).then_some(summary)
-                    });
-            let repo_dirty = repo_summary.as_ref().map(|summary| summary.dirty);
-            let repo_action = match repo_summary.as_ref() {
-                Some(summary) => repo_actions.status_for(&summary.repo_root).await,
-                None => None,
-            };
-            (repo_dirty, repo_action)
-        })
-        .buffered(GIT_PROBE_CONCURRENCY)
-        .collect()
-        .await;
-    let probe_phase_ms = probe_started.elapsed().as_millis() as u64;
-
-    let candidates: Vec<ListCandidate> = pending
-        .into_iter()
-        .zip(probes.into_iter())
-        .map(|(pending_entry, (repo_dirty, repo_action))| ListCandidate {
-            name: pending_entry.name,
-            has_children: pending_entry.has_children,
-            modified_at: pending_entry.modified_at,
-            services: pending_entry.services,
-            repo_dirty,
-            repo_action,
-        })
-        .collect();
-
-    let health_started = Instant::now();
-    let health_map = if let Some(config) = dir_config {
-        let services: Vec<String> = unique_services.into_iter().collect();
-        overlay_service_health_map(&config.services, &services).await
-    } else {
-        HashMap::new()
-    };
-    let health_phase_ms = health_started.elapsed().as_millis() as u64;
-    let total_ms = request_started.elapsed().as_millis() as u64;
-    tracing::info!(
-        target: "swimmers::api::dirs::timing",
-        managed_only,
-        pending_count,
-        pending_phase_ms,
-        probe_phase_ms,
-        health_phase_ms,
-        total_ms,
-        "list_dirs phase timing"
-    );
-
-    // Build lookup from service name → overlay metadata for restart/open_url.
-    let svc_meta: HashMap<&str, &OverlayServiceEntry> = dir_config
-        .map(|config| {
-            config
-                .services
-                .iter()
-                .map(|s| (s.name.as_str(), s))
-                .collect()
-        })
-        .unwrap_or_default();
-
-    let mut entries: Vec<(DirEntry, u64)> = candidates
-        .into_iter()
-        .map(|candidate| {
-            let is_running = if candidate.services.is_empty() {
-                None
-            } else {
-                Some(
-                    candidate
-                        .services
-                        .iter()
-                        .any(|service| health_map.get(service).copied().unwrap_or(false)),
-                )
-            };
-            let has_restart = candidate
-                .services
-                .iter()
-                .any(|svc| {
-                    svc_meta
-                        .get(svc.as_str())
-                        .and_then(|e| e.restart.as_ref())
-                        .is_some()
-                })
-                .then_some(true);
-            let open_url = candidate.services.iter().find_map(|svc| {
-                svc_meta
-                    .get(svc.as_str())
-                    .and_then(|e| e.open_url.clone().or_else(|| e.health_url.clone()))
-            });
-            (
-                DirEntry {
-                    name: candidate.name,
-                    has_children: candidate.has_children,
-                    is_running,
-                    repo_dirty: candidate.repo_dirty,
-                    repo_action: candidate.repo_action,
-                    group: None,
-                    full_path: None,
-                    has_restart,
-                    open_url,
-                },
-                candidate.modified_at,
-            )
-        })
-        .collect();
-
-    entries.sort_by(|(a, a_modified), (b, b_modified)| {
-        b_modified
-            .cmp(a_modified)
-            .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
-    });
-    let entries: Vec<DirEntry> = entries.into_iter().map(|(entry, _)| entry).collect();
-
-    let groups = dir_config
-        .map(|config| {
-            config
-                .groups
-                .iter()
-                .map(|g| g.name.clone())
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-
-    (
-        StatusCode::OK,
-        Json(
-            serde_json::to_value(DirListResponse {
-                path: canonical.to_string_lossy().into_owned(),
-                entries,
-                overlay_label: dir_config.map(|c| c.label.clone()),
-                groups,
-            })
-            .unwrap(),
-        ),
+    match list_dirs_service(
+        &state,
+        query.path.as_deref(),
+        query.managed_only.unwrap_or(false),
+        query.group.as_deref(),
     )
-        .into_response()
+    .await
+    {
+        Ok(response) => (
+            StatusCode::OK,
+            Json(serde_json::to_value(response).unwrap()),
+        )
+            .into_response(),
+        Err(error) => service_error_response(error),
+    }
 }
 
 // POST /v1/dirs/restart
@@ -686,59 +76,14 @@ async fn restart_dir_services(
         return resp;
     }
 
-    let requested_path = body.path.trim();
-    if requested_path.is_empty() {
-        return error_response(
-            StatusCode::BAD_REQUEST,
-            "VALIDATION_FAILED",
-            "path is required",
-        );
+    match restart_dir_services_service(&body.path).await {
+        Ok(response) => (
+            StatusCode::OK,
+            Json(serde_json::to_value(response).unwrap()),
+        )
+            .into_response(),
+        Err(error) => service_error_response(error),
     }
-
-    let base = dirs_base_path();
-    let target = PathBuf::from(requested_path);
-    let (canonical_base, canonical) = match resolve_target_path(base, target) {
-        Ok(paths) => paths,
-        Err(response) => return response,
-    };
-
-    let Some(config) = resolve_dir_config(&canonical_base) else {
-        return error_response(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "OVERLAY_UNAVAILABLE",
-            "no skillbox-config overlay found with service definitions",
-        );
-    };
-
-    let context = OverlayServiceContext {
-        base_path: config.base_path.clone(),
-        services: config.services.clone(),
-    };
-    let matched_services = services_for_directory(&canonical, &context);
-    if matched_services.is_empty() {
-        return error_response(
-            StatusCode::BAD_REQUEST,
-            "NO_SERVICE_FOR_PATH",
-            "no overlay service is mapped to this folder",
-        );
-    }
-
-    if let Err(message) = restart_services(&config.services, &matched_services).await {
-        return error_response(StatusCode::INTERNAL_SERVER_ERROR, "RESTART_FAILED", message);
-    }
-
-    (
-        StatusCode::OK,
-        Json(
-            serde_json::to_value(DirRestartResponse {
-                ok: true,
-                path: canonical.to_string_lossy().into_owned(),
-                services: matched_services,
-            })
-            .unwrap(),
-        ),
-    )
-        .into_response()
 }
 
 // POST /v1/dirs/actions
@@ -751,178 +96,14 @@ async fn start_dir_repo_action(
         return resp;
     }
 
-    match body.kind {
-        RepoActionKind::Restart => start_restart_action(state, body).await,
-        RepoActionKind::Open => error_response(
-            StatusCode::BAD_REQUEST,
-            "CLIENT_ONLY",
-            "open actions are handled client-side",
-        ),
-        _ => {
-            start_dir_repo_action_with_executor(state, body, Arc::new(SystemRepoActionExecutor))
-                .await
-        }
+    match start_dir_repo_action_service(state, &body.path, body.kind).await {
+        Ok(response) => (
+            StatusCode::ACCEPTED,
+            Json(serde_json::to_value(response).unwrap()),
+        )
+            .into_response(),
+        Err(error) => service_error_response(error),
     }
-}
-
-/// Start a restart action by looking up overlay service commands and tracking
-/// execution through the standard `RepoActionTracker`.
-async fn start_restart_action(state: Arc<AppState>, body: DirRepoActionRequest) -> Response {
-    let requested_path = body.path.trim();
-    if requested_path.is_empty() {
-        return error_response(
-            StatusCode::BAD_REQUEST,
-            "VALIDATION_FAILED",
-            "path is required",
-        );
-    }
-
-    let base = dirs_base_path();
-    let target = PathBuf::from(requested_path);
-    let (canonical_base, canonical) = match resolve_target_path(base, target) {
-        Ok(paths) => paths,
-        Err(response) => return response,
-    };
-
-    let Some(config) = resolve_dir_config(&canonical_base) else {
-        return error_response(
-            StatusCode::BAD_REQUEST,
-            "NO_OVERLAY",
-            "no overlay configuration found for this path",
-        );
-    };
-
-    let context = OverlayServiceContext {
-        base_path: config.base_path.clone(),
-        services: config.services.clone(),
-    };
-    let matched_services = services_for_directory(&canonical, &context);
-    if matched_services.is_empty() {
-        return error_response(
-            StatusCode::BAD_REQUEST,
-            "NO_SERVICE_FOR_PATH",
-            "no overlay service is mapped to this folder",
-        );
-    }
-
-    let commands: Vec<(String, String)> = config
-        .services
-        .iter()
-        .filter(|s| matched_services.contains(&s.name))
-        .filter_map(|s| s.restart.as_ref().map(|cmd| (s.name.clone(), cmd.clone())))
-        .collect();
-
-    if commands.is_empty() {
-        return error_response(
-            StatusCode::BAD_REQUEST,
-            "NO_RESTART_COMMAND",
-            "matched services have no restart command configured",
-        );
-    }
-
-    let executor: Arc<dyn RepoActionExecutor> = Arc::new(RestartExecutor { commands });
-
-    if let Err(error) = state
-        .repo_actions
-        .start(canonical.clone(), body.kind, executor)
-        .await
-    {
-        let (code, status) = repo_action_error_code(&error);
-        return error_response(status, code, error.to_string());
-    }
-
-    let status = state
-        .repo_actions
-        .status_for(&canonical)
-        .await
-        .unwrap_or(RepoActionStatus {
-            kind: body.kind,
-            state: crate::types::RepoActionState::Running,
-            detail: None,
-        });
-
-    (
-        StatusCode::ACCEPTED,
-        Json(
-            serde_json::to_value(DirRepoActionResponse {
-                ok: true,
-                path: canonical.to_string_lossy().into_owned(),
-                status,
-            })
-            .unwrap(),
-        ),
-    )
-        .into_response()
-}
-
-async fn start_dir_repo_action_with_executor(
-    state: Arc<AppState>,
-    body: DirRepoActionRequest,
-    executor: Arc<dyn RepoActionExecutor>,
-) -> Response {
-    let requested_path = body.path.trim();
-    if requested_path.is_empty() {
-        return error_response(
-            StatusCode::BAD_REQUEST,
-            "VALIDATION_FAILED",
-            "path is required",
-        );
-    }
-
-    let base = dirs_base_path();
-    let target = PathBuf::from(requested_path);
-    let (_canonical_base, canonical) = match resolve_target_path(base, target) {
-        Ok(paths) => paths,
-        Err(response) => return response,
-    };
-
-    let Some(repo_summary) = inspect_git_repo(&canonical).await.ok().flatten() else {
-        return error_response(
-            StatusCode::BAD_REQUEST,
-            "NO_GIT_REPO",
-            "path is not inside a git repository",
-        );
-    };
-
-    if !repo_summary.dirty {
-        return error_response(
-            StatusCode::CONFLICT,
-            "REPO_CLEAN",
-            "repo has no pending changes to commit",
-        );
-    }
-
-    if let Err(error) = state
-        .repo_actions
-        .start(repo_summary.repo_root.clone(), body.kind, executor)
-        .await
-    {
-        let (code, status) = repo_action_error_code(&error);
-        return error_response(status, code, error.to_string());
-    }
-
-    let status = state
-        .repo_actions
-        .status_for(&repo_summary.repo_root)
-        .await
-        .unwrap_or(RepoActionStatus {
-            kind: body.kind,
-            state: crate::types::RepoActionState::Running,
-            detail: None,
-        });
-
-    (
-        StatusCode::ACCEPTED,
-        Json(
-            serde_json::to_value(DirRepoActionResponse {
-                ok: true,
-                path: repo_summary.repo_root.to_string_lossy().into_owned(),
-                status,
-            })
-            .unwrap(),
-        ),
-    )
-        .into_response()
 }
 
 pub fn routes() -> Router<Arc<AppState>> {
@@ -935,9 +116,16 @@ pub fn routes() -> Router<Arc<AppState>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::api::service::{
+        dirs_base_path, list_group_entries_sync, managed_base_child_names,
+        overlay_service_health_map, restart_services, services_for_directory,
+        start_repo_action_with_executor, OverlayServiceContext,
+    };
     use crate::api::PublishedSelectionState;
     use crate::auth::OPERATOR_SCOPES;
     use crate::config::Config;
+    use crate::host_actions::RepoActionExecutor;
+    use crate::session::overlay::{OverlayDirConfig, OverlayDirGroup, OverlayServiceEntry};
     use crate::session::supervisor::SessionSupervisor;
     use crate::thought::protocol::SyncRequestSequence;
     use crate::thought::runtime_config::ThoughtConfig;
@@ -949,6 +137,7 @@ mod tests {
     use std::ffi::OsString;
     use std::fs;
     use std::io;
+    use std::path::Path;
     use std::process::Command as ProcessCommand;
     use std::sync::Arc;
     use std::time::Duration;
@@ -1012,8 +201,8 @@ mod tests {
             native_desktop_app: Arc::new(RwLock::new(crate::types::NativeDesktopApp::Iterm)),
             ghostty_open_mode: Arc::new(RwLock::new(crate::types::GhosttyOpenMode::Swap)),
             sync_request_sequence: Arc::new(SyncRequestSequence::new()),
-            daemon_defaults: None,
-            file_store: None,
+            daemon_defaults: crate::api::once_lock_with(None),
+            file_store: crate::api::once_lock_with(None),
             bridge_health: Arc::new(crate::thought::health::BridgeHealthState::new_with_tick(
                 std::time::Duration::from_secs(15),
             )),
@@ -1135,6 +324,103 @@ mod tests {
         let map = overlay_service_health_map(&services, &requested).await;
         assert_eq!(map.get("svc-no-url"), Some(&true));
         assert_eq!(map.get("svc-bad-url"), Some(&false));
+    }
+
+    #[test]
+    fn list_group_entries_sync_merges_sources_and_preserves_full_paths() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let src_a = dir.path().join("skills-a");
+        let src_b = dir.path().join("skills-b");
+        fs::create_dir_all(src_a.join("alpha").join("nested")).expect("alpha nested");
+        fs::create_dir_all(src_b.join("beta")).expect("beta");
+        fs::create_dir_all(src_b.join("alpha")).expect("duplicate alpha");
+        fs::create_dir_all(src_b.join(".hidden")).expect("hidden");
+
+        let group = OverlayDirGroup {
+            name: "skills".into(),
+            dirs: vec![src_a.clone(), src_b.clone()],
+        };
+
+        let entries = list_group_entries_sync(&group);
+        let names: Vec<&str> = entries.iter().map(|entry| entry.name.as_str()).collect();
+        assert_eq!(names, vec!["alpha", "beta"]);
+
+        let alpha = entries
+            .iter()
+            .find(|entry| entry.name == "alpha")
+            .expect("alpha entry");
+        let alpha_path = src_a
+            .join("alpha")
+            .canonicalize()
+            .expect("canonical alpha path")
+            .to_string_lossy()
+            .into_owned();
+        assert!(alpha.has_children);
+        assert_eq!(alpha.full_path.as_deref(), Some(alpha_path.as_str()));
+    }
+
+    #[tokio::test]
+    async fn restart_services_runs_only_requested_commands() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let requested_marker = dir.path().join("requested.txt");
+        let skipped_marker = dir.path().join("skipped.txt");
+        let services = vec![
+            OverlayServiceEntry {
+                name: "svc-requested".into(),
+                dir: "alpha".into(),
+                health_url: None,
+                restart: Some(format!(
+                    "printf requested > '{}'",
+                    requested_marker.display()
+                )),
+                open_url: None,
+            },
+            OverlayServiceEntry {
+                name: "svc-skipped".into(),
+                dir: "beta".into(),
+                health_url: None,
+                restart: Some(format!("printf skipped > '{}'", skipped_marker.display())),
+                open_url: None,
+            },
+        ];
+
+        restart_services(&services, &["svc-requested".to_string()])
+            .await
+            .expect("requested service restart should succeed");
+
+        assert_eq!(
+            fs::read_to_string(&requested_marker).expect("requested marker"),
+            "requested"
+        );
+        assert!(
+            !skipped_marker.exists(),
+            "unrequested service should not run"
+        );
+    }
+
+    #[tokio::test]
+    async fn restart_services_rejects_empty_requested_list() {
+        let err = restart_services(&[], &[])
+            .await
+            .expect_err("empty requested list");
+        assert_eq!(err, "no restartable services mapped for this path");
+    }
+
+    #[tokio::test]
+    async fn restart_services_surfaces_command_failures() {
+        let services = vec![OverlayServiceEntry {
+            name: "svc-failing".into(),
+            dir: "alpha".into(),
+            health_url: None,
+            restart: Some("printf boom >&2; exit 9".into()),
+            open_url: None,
+        }];
+
+        let err = restart_services(&services, &["svc-failing".to_string()])
+            .await
+            .expect_err("restart command should fail");
+        assert!(err.contains("svc-failing"));
+        assert!(err.contains("boom"));
     }
 
     #[test]
@@ -1266,20 +552,20 @@ mod tests {
         let _base_env = set_env_var("DIRS_BASE_PATH", base.as_os_str().to_os_string());
 
         let state = test_state();
-        let response = start_dir_repo_action_with_executor(
+        let response = start_repo_action_with_executor(
             state.clone(),
-            DirRepoActionRequest {
-                path: repo.to_string_lossy().into_owned(),
-                kind: RepoActionKind::Commit,
-            },
+            &repo.to_string_lossy(),
+            RepoActionKind::Commit,
             Arc::new(FakeRepoActionExecutor::sleeping_ok(200)),
         )
-        .await;
+        .await
+        .expect("repo action should start");
 
-        assert_eq!(response.status(), StatusCode::ACCEPTED);
-        let json = response_json(response).await;
-        assert_eq!(json["ok"], true);
-        assert_eq!(json["status"]["state"], "running");
+        assert!(response.ok);
+        assert_eq!(
+            response.status.state,
+            crate::types::RepoActionState::Running
+        );
         assert_eq!(
             state
                 .repo_actions

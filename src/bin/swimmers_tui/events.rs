@@ -185,12 +185,16 @@ fn build_external_client(runtime: &Runtime) -> Result<TuiClient, io::Error> {
     Ok(TuiClient::External(client))
 }
 
-fn build_embedded_client(runtime: &Runtime) -> TuiClient {
+pub(crate) fn build_embedded_client(runtime: &Runtime) -> (TuiClient, tokio::task::JoinHandle<()>) {
     let config = Arc::new(Config::from_env());
-    let (state, _thought_handle, _bridge_health) =
-        runtime.block_on(swimmers::startup::init_app_state(config));
-    tracing::info!("embedded mode initialized");
-    TuiClient::Embedded(in_process::InProcessApi::new(state))
+    let _guard = runtime.enter();
+    let state = swimmers::startup::init_app_state_skeleton(config);
+    let deferred_init = swimmers::startup::spawn_deferred_init(Arc::clone(&state));
+    tracing::info!("embedded mode initialized with deferred startup");
+    (
+        TuiClient::Embedded(in_process::InProcessApi::new(state)),
+        deferred_init,
+    )
 }
 
 pub(crate) fn initialize_tui_app() -> Result<(App<TuiClient>, Renderer), Box<dyn std::error::Error>>
@@ -202,7 +206,8 @@ pub(crate) fn initialize_tui_app() -> Result<(App<TuiClient>, Renderer), Box<dyn
     let client = if external_mode_requested() {
         build_external_client(&runtime)?
     } else {
-        build_embedded_client(&runtime)
+        let (client, _deferred_init) = build_embedded_client(&runtime);
+        client
     };
     let mut renderer = Renderer::new()?;
     renderer.init()?;
