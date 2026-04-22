@@ -12,6 +12,7 @@ use axum::http::StatusCode;
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
+use subtle::ConstantTimeEq;
 
 use crate::config::{AuthMode, Config};
 use crate::types::ErrorResponse;
@@ -108,7 +109,7 @@ fn token_mode_auth_info(config: &Config, request: &Request) -> Result<AuthInfo, 
     if config
         .auth_token
         .as_deref()
-        .is_some_and(|expected| provided == expected)
+        .is_some_and(|expected| bearer_tokens_eq(provided, expected))
     {
         return Ok(AuthInfo::new(OPERATOR_SCOPES.to_vec()));
     }
@@ -116,12 +117,16 @@ fn token_mode_auth_info(config: &Config, request: &Request) -> Result<AuthInfo, 
     if config
         .observer_token
         .as_deref()
-        .is_some_and(|expected| provided == expected)
+        .is_some_and(|expected| bearer_tokens_eq(provided, expected))
     {
         return Ok(AuthInfo::new(OBSERVER_SCOPES.to_vec()));
     }
 
     Err(not_authenticated_response())
+}
+
+fn bearer_tokens_eq(provided: &str, expected: &str) -> bool {
+    provided.as_bytes().ct_eq(expected.as_bytes()).into()
 }
 
 /// Axum `from_fn` middleware that enforces authentication based on the
@@ -228,6 +233,13 @@ mod tests {
         );
 
         assert_eq!(extract_bearer_token(&request), None);
+    }
+
+    #[test]
+    fn bearer_tokens_eq_distinguishes_equal_and_unequal_values() {
+        assert!(bearer_tokens_eq("secret-token", "secret-token"));
+        assert!(!bearer_tokens_eq("secret-token", "secret-tokxn"));
+        assert!(!bearer_tokens_eq("secret-token", "secret-token-extra"));
     }
 
     #[test]

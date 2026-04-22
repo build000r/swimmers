@@ -11,6 +11,7 @@ use axum::routing::get;
 use axum::{Json, Router};
 use futures::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
+use subtle::ConstantTimeEq;
 use tokio::sync::{mpsc, oneshot};
 
 use crate::api::{fetch_live_summary, AppState};
@@ -727,11 +728,19 @@ fn resolve_ws_auth(config: &Config, token: Option<&str>) -> Result<AuthInfo, Res
                 ));
             };
 
-            if config.auth_token.as_deref() == Some(token) {
+            if config
+                .auth_token
+                .as_deref()
+                .is_some_and(|expected| bearer_tokens_eq(token, expected))
+            {
                 return Ok(AuthInfo::new(OPERATOR_SCOPES.to_vec()));
             }
 
-            if config.observer_token.as_deref() == Some(token) {
+            if config
+                .observer_token
+                .as_deref()
+                .is_some_and(|expected| bearer_tokens_eq(token, expected))
+            {
                 return Ok(AuthInfo::new(OBSERVER_SCOPES.to_vec()));
             }
 
@@ -742,6 +751,10 @@ fn resolve_ws_auth(config: &Config, token: Option<&str>) -> Result<AuthInfo, Res
             ))
         }
     }
+}
+
+fn bearer_tokens_eq(provided: &str, expected: &str) -> bool {
+    provided.as_bytes().ct_eq(expected.as_bytes()).into()
 }
 
 fn resolve_frankentui_pkg_dir() -> Option<PathBuf> {
