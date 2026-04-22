@@ -1,4 +1,7 @@
 use super::*;
+
+mod glance;
+
 use std::cell::Cell as TestCell;
 use std::collections::VecDeque;
 use std::env;
@@ -8115,6 +8118,27 @@ fn mermaid_error_and_unsupported_states_keep_existing_colors() {
         cell_at(&renderer, artifact_error.0, artifact_error.1).fg,
         Color::Red
     );
+}
+
+#[test]
+fn mermaid_viewport_cache_errors_render_text_and_set_render_error() {
+    let (mut app, mut renderer, layout) =
+        open_mermaid_test_viewer("graph TD\nA[Alpha Node] --> B[Beta Node]\n", 120, 32);
+    if let FishBowlMode::Mermaid(viewer) = &mut app.fish_bowl_mode {
+        viewer.source = None;
+    }
+
+    app.render(&mut renderer, layout);
+
+    let render_error = match &app.fish_bowl_mode {
+        FishBowlMode::Mermaid(viewer) => viewer.render_error.clone(),
+        FishBowlMode::Aquarium => panic!("expected Mermaid viewer mode"),
+    };
+    assert_eq!(render_error.as_deref(), Some("Mermaid source unavailable"));
+
+    let error_text =
+        find_text_position(&renderer, "Mermaid source unavailable").expect("viewport error text");
+    assert_eq!(cell_at(&renderer, error_text.0, error_text.1).fg, Color::Red);
 }
 
 #[test]
