@@ -49,6 +49,7 @@ metrics-exporter-prometheus = "0.18"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 dotenvy = "0.15.7"
 crossterm = "0.29"
+unicode-width = "0.1"
 mermaid-rs-renderer = { version = "0.2.1", default-features = false }
 resvg = "0.47.0"
 usvg = "0.47.0"
@@ -58,6 +59,8 @@ dirs = "6.0.0"
 clap = { version = "4", features = ["derive"] }
 open = "5"
 os_pipe = "1"
+crc32fast = "1.4"
+fs2 = "0.4"
 cpal = { version = "0.17", optional = true }
 whisper-rs = { version = "0.16", optional = true }
 

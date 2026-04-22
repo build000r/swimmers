@@ -5,11 +5,14 @@
 //! then rename) for crash safety.
 
 use std::collections::HashMap;
+use std::fs::OpenOptions;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
+use fs2::FileExt;
 use serde::{Deserialize, Serialize};
+use thiserror::Error;
 use tokio::sync::{Mutex, RwLock};
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
@@ -82,6 +85,8 @@ pub struct ThoughtSnapshot {
 /// File-based persistence store. Thread-safe via internal RwLock on cached state.
 pub struct FileStore {
     base_dir: PathBuf,
+    /// Serialize all writes in-process before taking the cross-process lock.
+    write_lock: Mutex<()>,
     /// In-memory cache of persisted sessions, synced to disk on mutation.
     cache: RwLock<Vec<PersistedSession>>,
     /// Serialize registry writes to avoid temp-file rename races.
@@ -92,6 +97,24 @@ pub struct FileStore {
     thought_config_cache: RwLock<ThoughtConfig>,
     /// Serialize thought writes to avoid stale read-modify-write races.
     thought_write_lock: Mutex<()>,
+}
+
+#[derive(Debug, Error)]
+enum FileStoreIoError {
+    #[error("persistence lock is held by another writer: {path}")]
+    LockBusy { path: PathBuf },
+    #[error("checksum mismatch for {path}: expected {expected:08x}, actual {actual:08x}")]
+    ChecksumMismatch {
+        path: PathBuf,
+        expected: u32,
+        actual: u32,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ChecksummedPayload {
+    checksum_crc32: u32,
+    payload: String,
 }
 
 impl FileStore {
@@ -109,6 +132,7 @@ impl FileStore {
 
         let store = Arc::new(Self {
             base_dir,
+            write_lock: Mutex::new(()),
             cache: RwLock::new(Vec::new()),
             session_write_lock: Mutex::new(()),
             thought_cache: RwLock::new(HashMap::new()),
@@ -164,6 +188,7 @@ impl FileStore {
 
     /// Save the full session registry to disk atomically.
     pub async fn save_sessions(&self, sessions: &[PersistedSession]) {
+        let _global_write_guard = self.write_lock.lock().await;
         let _write_guard = self.session_write_lock.lock().await;
 
         // Update the in-memory cache.
@@ -239,6 +264,7 @@ impl FileStore {
         objective_changed_at: Option<DateTime<Utc>>,
         objective_fingerprint: Option<String>,
     ) {
+        let _global_write_guard = self.write_lock.lock().await;
         let _write_guard = self.thought_write_lock.lock().await;
         let data = {
             let mut thoughts = self.thought_cache.write().await;
@@ -313,6 +339,7 @@ impl FileStore {
 
     /// Save daemon runtime thought config to disk atomically.
     pub async fn save_thought_config(&self, config: &ThoughtConfig) -> anyhow::Result<()> {
+        let _global_write_guard = self.write_lock.lock().await;
         let normalized = config
             .clone()
             .normalize_and_validate()
@@ -330,6 +357,44 @@ impl FileStore {
 
         debug!("persisted thought runtime config");
         Ok(())
+    }
+
+    /// Sync persistence files and directory entries as a shutdown durability barrier.
+    pub async fn flush_barrier(&self) -> anyhow::Result<()> {
+        let _global_write_guard = self.write_lock.lock().await;
+        let base_dir = self.base_dir.clone();
+        let files = vec![
+            self.registry_path(),
+            self.thoughts_path(),
+            self.thought_config_path(),
+        ];
+        tokio::task::spawn_blocking(move || {
+            for path in files {
+                match std::fs::File::open(&path) {
+                    Ok(file) => file.sync_all().map_err(|err| {
+                        anyhow::anyhow!("sync file {} failed: {err}", path.display())
+                    })?,
+                    Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(err) => {
+                        return Err(anyhow::anyhow!(
+                            "open file {} failed: {err}",
+                            path.display()
+                        ));
+                    }
+                }
+            }
+            std::fs::File::open(&base_dir)
+                .and_then(|dir| dir.sync_all())
+                .map_err(|err| {
+                    anyhow::anyhow!(
+                        "sync persistence directory {} failed: {err}",
+                        base_dir.display()
+                    )
+                })?;
+            Ok(())
+        })
+        .await
+        .map_err(|err| anyhow::anyhow!("spawn_blocking panicked: {err}"))?
     }
 
     /// Load daemon runtime thought config from in-memory cache.
@@ -371,13 +436,40 @@ impl FileStore {
 async fn atomic_write_blocking(path: PathBuf, data: String) -> anyhow::Result<()> {
     tokio::task::spawn_blocking(move || {
         ensure_parent(&path).map_err(|e| anyhow::anyhow!("ensure parent failed: {e}"))?;
+        let lock_path = lock_path_for(&path)?;
+        let lock_file = open_lock_file(&lock_path)?;
+        match lock_file.try_lock_exclusive() {
+            Ok(()) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                return Err(anyhow::Error::new(FileStoreIoError::LockBusy {
+                    path: lock_path,
+                }));
+            }
+            Err(err) => {
+                return Err(anyhow::anyhow!(
+                    "acquire lock {} failed: {err}",
+                    lock_path.display()
+                ));
+            }
+        }
+
         let tmp_path = path.with_extension(format!("json.tmp.{}", Uuid::new_v4()));
-        std::fs::write(&tmp_path, data.as_bytes())
+        let envelope = ChecksummedPayload {
+            checksum_crc32: crc32fast::hash(data.as_bytes()),
+            payload: data,
+        };
+        let encoded = serde_json::to_vec_pretty(&envelope)
+            .map_err(|e| anyhow::anyhow!("serialize checksummed payload failed: {e}"))?;
+        std::fs::write(&tmp_path, &encoded)
             .map_err(|e| anyhow::anyhow!("write to tmp failed: {e}"))?;
+        std::fs::File::open(&tmp_path)
+            .and_then(|f| f.sync_all())
+            .map_err(|e| anyhow::anyhow!("sync tmp file failed: {e}"))?;
         if let Err(e) = std::fs::rename(&tmp_path, &path) {
             let _ = std::fs::remove_file(&tmp_path);
             return Err(anyhow::anyhow!("rename failed: {e}"));
         }
+        sync_parent_dir(&path)?;
         Ok(())
     })
     .await
@@ -387,7 +479,19 @@ async fn atomic_write_blocking(path: PathBuf, data: String) -> anyhow::Result<()
 /// Read a file's contents, returning None if the file does not exist.
 async fn read_file_blocking(path: PathBuf) -> anyhow::Result<Option<String>> {
     tokio::task::spawn_blocking(move || match std::fs::read_to_string(&path) {
-        Ok(data) => Ok(Some(data)),
+        Ok(data) => {
+            let decoded: ChecksummedPayload = serde_json::from_str(&data)
+                .map_err(|e| anyhow::anyhow!("decode checksummed payload failed: {e}"))?;
+            let actual = crc32fast::hash(decoded.payload.as_bytes());
+            if actual != decoded.checksum_crc32 {
+                return Err(anyhow::Error::new(FileStoreIoError::ChecksumMismatch {
+                    path,
+                    expected: decoded.checksum_crc32,
+                    actual,
+                }));
+            }
+            Ok(Some(decoded.payload))
+        }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(e) => Err(anyhow::anyhow!("read failed: {e}")),
     })
@@ -404,31 +508,98 @@ fn ensure_parent(path: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
+fn lock_path_for(path: &Path) -> anyhow::Result<PathBuf> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("missing parent for {}", path.display()))?;
+    Ok(parent.join(".lock"))
+}
+
+fn open_lock_file(path: &Path) -> anyhow::Result<std::fs::File> {
+    OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .open(path)
+        .map_err(|e| anyhow::anyhow!("open lock file {} failed: {e}", path.display()))
+}
+
+fn sync_parent_dir(path: &Path) -> anyhow::Result<()> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("missing parent for {}", path.display()))?;
+    std::fs::File::open(parent)
+        .and_then(|dir| dir.sync_all())
+        .map_err(|e| anyhow::anyhow!("sync parent directory {} failed: {e}", parent.display()))
+}
+
 #[cfg(test)]
 mod tests {
-    use super::atomic_write_blocking;
+    use super::*;
+    use fs2::FileExt;
 
     #[tokio::test]
-    async fn atomic_write_blocking_supports_concurrent_writes() {
+    async fn read_file_blocking_reports_checksum_mismatch() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("session_registry.json");
+        let corrupted = ChecksummedPayload {
+            checksum_crc32: 1,
+            payload: "{\"n\":1}".to_string(),
+        };
+        tokio::fs::write(
+            &path,
+            serde_json::to_vec_pretty(&corrupted).expect("serialize corrupted payload"),
+        )
+        .await
+        .expect("write corrupted payload");
 
-        let mut tasks = Vec::new();
-        for n in 0..16 {
-            let path = path.clone();
-            tasks.push(tokio::spawn(async move {
-                atomic_write_blocking(path, format!("{{\"n\":{n}}}")).await
-            }));
-        }
-
-        for task in tasks {
-            let result = task.await.expect("join task");
-            assert!(result.is_ok(), "concurrent write failed: {result:?}");
-        }
-
-        let contents = tokio::fs::read_to_string(&path)
+        let err = read_file_blocking(path.clone())
             .await
-            .expect("read persisted file");
-        assert!(contents.starts_with("{\"n\":"));
+            .expect_err("checksum mismatch should fail");
+        let typed = err
+            .downcast_ref::<FileStoreIoError>()
+            .expect("typed file store error");
+        assert!(matches!(typed, FileStoreIoError::ChecksumMismatch { .. }));
+    }
+
+    #[tokio::test]
+    async fn atomic_write_blocking_fails_fast_when_lock_is_held() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("session_registry.json");
+        let lock_path = lock_path_for(&path).expect("lock path");
+        std::fs::create_dir_all(dir.path()).expect("create parent");
+        let lock_file = open_lock_file(&lock_path).expect("open lock file");
+        lock_file.lock_exclusive().expect("hold lock");
+
+        let err = atomic_write_blocking(path, "{\"n\":1}".to_string())
+            .await
+            .expect_err("writer should fail fast under lock contention");
+
+        lock_file.unlock().expect("unlock lock file");
+
+        let typed = err
+            .downcast_ref::<FileStoreIoError>()
+            .expect("typed file store error");
+        assert!(matches!(typed, FileStoreIoError::LockBusy { .. }));
+    }
+
+    #[tokio::test]
+    async fn atomic_write_and_read_round_trip_with_checksum_envelope() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("thoughts.json");
+
+        atomic_write_blocking(path.clone(), "{\"n\":42}".to_string())
+            .await
+            .expect("write checksummed payload");
+        let decoded = read_file_blocking(path.clone())
+            .await
+            .expect("read checksummed payload")
+            .expect("payload present");
+        assert_eq!(decoded, "{\"n\":42}");
+
+        let raw = tokio::fs::read_to_string(&path)
+            .await
+            .expect("read raw file");
+        assert!(raw.contains("checksum_crc32"));
     }
 }

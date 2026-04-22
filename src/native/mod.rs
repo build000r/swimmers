@@ -1,13 +1,15 @@
 use std::collections::HashMap;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
-use std::process::Command as ProcessCommand;
+use std::process::{Command as ProcessCommand, Output, Stdio};
 use std::sync::{LazyLock, Mutex};
+use std::time::Instant;
 
 use anyhow::{anyhow, Context, Result};
+use thiserror::Error;
 use tokio::process::Command;
 use tokio::sync::Mutex as AsyncMutex;
-use tokio::time::{sleep, Duration};
+use tokio::time::{sleep, timeout, Duration};
 
 use crate::types::{
     GhosttyOpenMode, NativeDesktopApp, NativeDesktopOpenResponse, NativeDesktopStatusResponse,
@@ -17,7 +19,6 @@ const NATIVE_APP_ENV: &str = "SWIMMERS_NATIVE_APP";
 const GHOSTTY_MODE_ENV: &str = "SWIMMERS_GHOSTTY_MODE";
 const NATIVE_SCRIPT_ROOT_ENV: &str = "SWIMMERS_NATIVE_SCRIPT_ROOT";
 const ITERM_SCRIPT_RELATIVE_PATH: &str = "scripts/iterm-focus.scpt";
-const ITERM_SCROLLBACK_PREFILL_LINES: usize = 2000;
 const ITERM_OPEN_RETRY_ATTEMPTS: usize = 2;
 const ITERM_OPEN_RETRY_DELAY_MS: u64 = 150;
 const DEFAULT_ITERM_SESSION_NAME: &str = "Swimmers";
@@ -25,6 +26,9 @@ const GHOSTTY_SCRIPT_RELATIVE_PATH: &str = "scripts/ghostty-open.scpt";
 const GHOSTTY_MANAGED_TITLE_PREFIX: &str = "swimmers-preview :: ";
 const GHOSTTY_MIN_APPLESCRIPT_VERSION: [u64; 3] = [1, 3, 0];
 const GHOSTTY_MIN_APPLESCRIPT_VERSION_TEXT: &str = "1.3.0";
+// 5s bounds AppleScript hangs while still allowing normal local automation latency.
+const OSASCRIPT_TIMEOUT: Duration = Duration::from_secs(5);
+const OSASCRIPT_ARG_MAX_LEN: usize = 256;
 const TMUX_BIN_ENV: &str = "SWIMMERS_TMUX_BIN";
 const TMUX_BIN_FALLBACKS: &[&str] = &[
     "/opt/homebrew/bin/tmux",
@@ -37,6 +41,17 @@ static SESSION_PANE_CACHE: LazyLock<Mutex<HashMap<String, String>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 static GHOSTTY_PREVIEW_TERM_IDS: LazyLock<Mutex<HashMap<String, String>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
+
+#[derive(Debug, Error)]
+enum NativeScriptError {
+    #[error("osascript timed out while {operation} after {timeout_ms}ms")]
+    OsaScriptTimeout {
+        operation: &'static str,
+        timeout_ms: u128,
+    },
+    #[error("invalid osascript argument `{field}`: {reason}")]
+    InvalidOsaScriptArg { field: &'static str, reason: String },
+}
 
 impl NativeDesktopApp {
     fn script_relative_path(self) -> &'static str {
@@ -301,10 +316,10 @@ fn push_unique_root(roots: &mut Vec<PathBuf>, candidate: &Path) {
 }
 
 fn ghostty_unavailable_reason() -> Option<String> {
-    let output = match ProcessCommand::new("osascript")
-        .args(["-e", "tell application \"Ghostty\" to get version"])
-        .output()
-    {
+    let output = match run_osascript_blocking_output(
+        ["-e", "tell application \"Ghostty\" to get version"],
+        "querying Ghostty version",
+    ) {
         Ok(output) => output,
         Err(_) => return Some(ghostty_applescript_unavailable_message()),
     };
@@ -319,6 +334,45 @@ fn ghostty_unavailable_reason() -> Option<String> {
     }
 
     ghostty_version_requirement_error(&version)
+}
+
+fn osascript_timeout_error(operation: &'static str, timeout_duration: Duration) -> anyhow::Error {
+    anyhow::Error::new(NativeScriptError::OsaScriptTimeout {
+        operation,
+        timeout_ms: timeout_duration.as_millis(),
+    })
+}
+
+fn run_osascript_blocking_output<const N: usize>(
+    args: [&str; N],
+    operation: &'static str,
+) -> Result<Output> {
+    let mut child = ProcessCommand::new("osascript")
+        .args(args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|err| anyhow!("failed to start osascript: {err}"))?;
+    let started = Instant::now();
+
+    loop {
+        match child.try_wait() {
+            Ok(Some(_status)) => {
+                return child
+                    .wait_with_output()
+                    .map_err(|err| anyhow!("failed to collect osascript output: {err}"));
+            }
+            Ok(None) => {
+                if started.elapsed() >= OSASCRIPT_TIMEOUT {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(osascript_timeout_error(operation, OSASCRIPT_TIMEOUT));
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            Err(err) => return Err(anyhow!("failed while waiting for osascript: {err}")),
+        }
+    }
 }
 
 fn ghostty_applescript_unavailable_message() -> String {
@@ -407,12 +461,12 @@ fn cached_pane_id(session_id: &str) -> Option<String> {
 }
 
 async fn query_front_ghostty_tab_id() -> Result<Option<String>> {
-    let output = Command::new("osascript")
-        .args([
-            "-e",
-            "tell application \"Ghostty\"\nif (count of windows) = 0 then return \"\"\nreturn (id of selected tab of front window) as text\nend tell",
-        ])
-        .output()
+    let mut command = Command::new("osascript");
+    command.args([
+        "-e",
+        "tell application \"Ghostty\"\nif (count of windows) = 0 then return \"\"\nreturn (id of selected tab of front window) as text\nend tell",
+    ]);
+    let output = run_osascript_output(&mut command, "querying Ghostty front tab")
         .await
         .map_err(|err| anyhow!("failed to query Ghostty front tab: {err}"))?;
 
@@ -471,6 +525,24 @@ fn clear_ghostty_preview_term_cache() {
     GHOSTTY_PREVIEW_TERM_IDS.lock().unwrap().clear();
 }
 
+async fn run_osascript_output(
+    command: &mut Command,
+    operation: &'static str,
+) -> Result<std::process::Output> {
+    run_osascript_output_with_timeout(command, operation, OSASCRIPT_TIMEOUT).await
+}
+
+async fn run_osascript_output_with_timeout(
+    command: &mut Command,
+    operation: &'static str,
+    timeout_duration: Duration,
+) -> Result<std::process::Output> {
+    match timeout(timeout_duration, command.output()).await {
+        Ok(result) => result.map_err(|err| anyhow!("failed to run osascript: {err}")),
+        Err(_) => Err(osascript_timeout_error(operation, timeout_duration)),
+    }
+}
+
 async fn run_open_or_focus_script(
     script: &Path,
     session_id: &str,
@@ -479,6 +551,30 @@ async fn run_open_or_focus_script(
     display_name: &str,
     known_pane_id: Option<&str>,
 ) -> Result<NativeDesktopOpenResponse> {
+    run_open_or_focus_script_with_timeout(
+        script,
+        session_id,
+        tmux_name,
+        attach_command,
+        display_name,
+        known_pane_id,
+        OSASCRIPT_TIMEOUT,
+    )
+    .await
+}
+
+async fn run_open_or_focus_script_with_timeout(
+    script: &Path,
+    session_id: &str,
+    tmux_name: &str,
+    attach_command: &str,
+    display_name: &str,
+    known_pane_id: Option<&str>,
+    timeout_duration: Duration,
+) -> Result<NativeDesktopOpenResponse> {
+    validate_osascript_script_arg("tmux_name", tmux_name)?;
+    validate_osascript_script_arg("attach_command", attach_command)?;
+
     let safe_session_id = sanitize_osascript_text_arg(session_id);
     let safe_display_name = sanitize_osascript_text_arg(display_name);
     let mut command = Command::new("osascript");
@@ -492,10 +588,13 @@ async fn run_open_or_focus_script(
         command.arg(pane_id);
     }
 
-    let output = command
-        .output()
-        .await
-        .with_context(|| format!("failed to run {}", script.display()))?;
+    let output = run_osascript_output_with_timeout(
+        &mut command,
+        "opening/focusing iTerm session",
+        timeout_duration,
+    )
+    .await
+    .with_context(|| format!("failed to run {}", script.display()))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
@@ -608,24 +707,19 @@ fn build_ghostty_display_name(cwd: &str, tmux_name: &str) -> String {
 }
 
 fn build_iterm_attach_command(tmux_name: &str, tmux_path: &Path) -> String {
-    let tmux_name = shell_single_quote(tmux_name);
-    let tmux_path = shell_single_quote(tmux_path.to_string_lossy().as_ref());
-
     format!(
-        "{tmux_path} capture-pane -p -J -S -{lines} -t {tmux_name} 2>/dev/null || true; \
-printf '\\033[H\\033[2J'; exec {tmux_path} attach-session -t {tmux_name}",
-        lines = ITERM_SCROLLBACK_PREFILL_LINES
+        "exec {} attach-session -t {}",
+        tmux_path.to_string_lossy(),
+        tmux_name
     )
 }
 
 fn build_ghostty_attach_command(tmux_name: &str, tmux_path: &Path) -> String {
-    let tmux_name = shell_single_quote(tmux_name);
-    let tmux_path = shell_single_quote(tmux_path.to_string_lossy().as_ref());
-    format!("exec {tmux_path} attach-session -t {tmux_name}")
-}
-
-fn shell_single_quote(value: &str) -> String {
-    format!("'{}'", value.replace('\'', "'\"'\"'"))
+    format!(
+        "exec {} attach-session -t {}",
+        tmux_path.to_string_lossy(),
+        tmux_name
+    )
 }
 
 /// Defense-in-depth: strip bytes that could desync `parse_osascript_output`
@@ -639,6 +733,42 @@ fn sanitize_osascript_text_arg(s: &str) -> String {
     s.chars()
         .filter(|c| !matches!(c, '\0' | '\n' | '\r' | '\t' | '|'))
         .collect()
+}
+
+fn validate_osascript_script_arg(field: &'static str, value: &str) -> Result<()> {
+    if value.len() > OSASCRIPT_ARG_MAX_LEN {
+        return Err(anyhow::Error::new(NativeScriptError::InvalidOsaScriptArg {
+            field,
+            reason: format!(
+                "value length {} exceeds maximum {}",
+                value.len(),
+                OSASCRIPT_ARG_MAX_LEN
+            ),
+        }));
+    }
+    if value.contains('\n') || value.contains('\r') {
+        return Err(anyhow::Error::new(NativeScriptError::InvalidOsaScriptArg {
+            field,
+            reason: "newlines are not allowed".to_string(),
+        }));
+    }
+    if value.contains('"') || value.contains('\'') {
+        return Err(anyhow::Error::new(NativeScriptError::InvalidOsaScriptArg {
+            field,
+            reason: "quotes are not allowed".to_string(),
+        }));
+    }
+
+    if let Some(invalid) = value
+        .chars()
+        .find(|ch| !(ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.' | '/' | ' ')))
+    {
+        return Err(anyhow::Error::new(NativeScriptError::InvalidOsaScriptArg {
+            field,
+            reason: format!("contains disallowed character `{invalid}`"),
+        }));
+    }
+    Ok(())
 }
 
 fn is_transient_iterm_open_error(err: &anyhow::Error) -> bool {
@@ -658,6 +788,9 @@ async fn run_ghostty_open_script(
     mode: GhosttyOpenMode,
     known_preview_id: Option<&str>,
 ) -> Result<NativeDesktopOpenResponse> {
+    validate_osascript_script_arg("tmux_name", tmux_name)?;
+    validate_osascript_script_arg("attach_command", attach_command)?;
+
     let safe_session_id = sanitize_osascript_text_arg(session_id);
     let safe_cwd = sanitize_osascript_text_arg(cwd);
     let safe_display_name = sanitize_osascript_text_arg(display_name);
@@ -675,8 +808,7 @@ async fn run_ghostty_open_script(
         command.arg(term_id);
     }
 
-    let output = command
-        .output()
+    let output = run_osascript_output(&mut command, "opening/focusing Ghostty session")
         .await
         .with_context(|| format!("failed to run {}", script.display()))?;
 
@@ -789,6 +921,42 @@ mod tests {
     }
 
     #[test]
+    fn validate_osascript_script_arg_rejects_subshell_payload() {
+        let err = validate_osascript_script_arg("tmux_name", "$(rm -rf /)").unwrap_err();
+        let typed = err
+            .downcast_ref::<NativeScriptError>()
+            .expect("typed native error");
+        assert!(matches!(
+            typed,
+            NativeScriptError::InvalidOsaScriptArg { .. }
+        ));
+    }
+
+    #[test]
+    fn validate_osascript_script_arg_rejects_quoted_payload() {
+        let err = validate_osascript_script_arg("attach_command", "\"malicious\"").unwrap_err();
+        let typed = err
+            .downcast_ref::<NativeScriptError>()
+            .expect("typed native error");
+        assert!(matches!(
+            typed,
+            NativeScriptError::InvalidOsaScriptArg { .. }
+        ));
+    }
+
+    #[test]
+    fn validate_osascript_script_arg_rejects_newline_payload() {
+        let err = validate_osascript_script_arg("tmux_name", "line1\nline2").unwrap_err();
+        let typed = err
+            .downcast_ref::<NativeScriptError>()
+            .expect("typed native error");
+        assert!(matches!(
+            typed,
+            NativeScriptError::InvalidOsaScriptArg { .. }
+        ));
+    }
+
+    #[test]
     fn native_app_env_defaults_to_iterm() {
         assert_eq!(
             NativeDesktopApp::from_env_value(""),
@@ -893,32 +1061,30 @@ mod tests {
     }
 
     #[test]
-    fn build_iterm_attach_command_prefills_scrollback_before_attach() {
+    fn build_iterm_attach_command_uses_simple_attach_exec() {
         let command = build_iterm_attach_command("main", Path::new("/opt/homebrew/bin/tmux"));
-
-        assert!(command.contains("capture-pane -p -J -S -2000 -t 'main'"));
-        assert!(command.contains("2>/dev/null || true"));
-        assert!(command.contains("printf '\\033[H\\033[2J'"));
-        assert!(command.ends_with("exec '/opt/homebrew/bin/tmux' attach-session -t 'main'"));
-    }
-
-    #[test]
-    fn build_iterm_attach_command_shell_quotes_tmux_values() {
-        let command =
-            build_iterm_attach_command("team's session", Path::new("/tmp/tmux builds/tmux"));
-
-        assert!(command.contains("-t 'team'\"'\"'s session'"));
-        assert!(command.contains("exec '/tmp/tmux builds/tmux' attach-session"));
-    }
-
-    #[test]
-    fn build_ghostty_attach_command_shell_quotes_tmux_values() {
-        let command =
-            build_ghostty_attach_command("team's session", Path::new("/tmp/tmux builds/tmux"));
 
         assert_eq!(
             command,
-            "exec '/tmp/tmux builds/tmux' attach-session -t 'team'\"'\"'s session'"
+            "exec /opt/homebrew/bin/tmux attach-session -t main"
+        );
+    }
+
+    #[test]
+    fn build_iterm_attach_command_preserves_whitelisted_tokens() {
+        let command = build_iterm_attach_command("team-session", Path::new("/tmp/tmux/tmux"));
+        assert_eq!(
+            command,
+            "exec /tmp/tmux/tmux attach-session -t team-session"
+        );
+    }
+
+    #[test]
+    fn build_ghostty_attach_command_preserves_whitelisted_tokens() {
+        let command = build_ghostty_attach_command("team-session", Path::new("/tmp/tmux/tmux"));
+        assert_eq!(
+            command,
+            "exec /tmp/tmux/tmux attach-session -t team-session"
         );
     }
 
@@ -1079,6 +1245,56 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn run_open_or_focus_script_returns_typed_timeout_error() {
+        let _env_guard = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+
+        let temp = tempdir().unwrap();
+        let fake_bin_dir = temp.path().join("bin");
+        std::fs::create_dir_all(&fake_bin_dir).unwrap();
+
+        let fake_osascript = fake_bin_dir.join("osascript");
+        std::fs::write(
+            &fake_osascript,
+            "#!/bin/sh\nset -eu\nsleep 1\nprintf 'created|pane-timeout\\n'\n",
+        )
+        .unwrap();
+        let mut perms = std::fs::metadata(&fake_osascript).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&fake_osascript, perms).unwrap();
+
+        let script = temp.path().join("iterm-focus.scpt");
+        std::fs::write(&script, "-- fake").unwrap();
+
+        let original_path = std::env::var_os("PATH");
+        let path_value = std::env::join_paths([fake_bin_dir.as_path()]).unwrap();
+        std::env::set_var("PATH", path_value);
+
+        let err = run_open_or_focus_script_with_timeout(
+            &script,
+            "sess-timeout",
+            "tmux-timeout",
+            "exec /usr/bin/tmux attach-session -t tmux-timeout",
+            "timeout-display",
+            None,
+            Duration::from_millis(20),
+        )
+        .await
+        .expect_err("sleeping osascript should time out");
+
+        match original_path {
+            Some(value) => std::env::set_var("PATH", value),
+            None => std::env::remove_var("PATH"),
+        }
+
+        let typed = err
+            .downcast_ref::<NativeScriptError>()
+            .expect("typed native error");
+        assert!(matches!(typed, NativeScriptError::OsaScriptTimeout { .. }));
+    }
+
+    #[tokio::test]
     async fn open_or_focus_passes_cached_pane_id_on_repeat_calls() {
         let _env_guard = crate::test_support::ENV_LOCK
             .lock()
@@ -1146,7 +1362,10 @@ mod tests {
         let second_call: Vec<_> = lines.next().unwrap().split('\t').collect();
         assert_eq!(first_call[1], "sess-cache");
         assert_eq!(first_call[2], "tmux-cache");
-        assert!(first_call[3].contains("capture-pane -p -J -S -2000 -t 'tmux-cache'"));
+        assert_eq!(
+            first_call[3],
+            format!("exec {} attach-session -t tmux-cache", fake_tmux.display())
+        );
         assert_eq!(first_call[4], "12 swimmers");
         assert_eq!(first_call.len(), 5);
         assert_eq!(second_call[4], "12 swimmers");
@@ -1342,7 +1561,7 @@ mod tests {
         assert_eq!(
             call[4],
             format!(
-                "exec '{}' attach-session -t 'tmux-ghostty'",
+                "exec {} attach-session -t tmux-ghostty",
                 fake_tmux.display()
             )
         );
