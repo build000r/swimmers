@@ -110,6 +110,15 @@ where
         .collect()
 }
 
+fn tmux_query_command(args: &[&str]) -> Command {
+    let mut command = Command::new("tmux");
+    command
+        .args(args)
+        .env_remove("TMUX")
+        .env_remove("TMUX_PANE");
+    command
+}
+
 async fn query_tmux_active_pane_session_ids(
     tmux_names: &HashSet<String>,
 ) -> anyhow::Result<HashMap<String, String>> {
@@ -120,16 +129,13 @@ async fn query_tmux_active_pane_session_ids(
     let started = Instant::now();
     let output = tokio::time::timeout(
         ACTIVE_PANE_LOOKUP_TIMEOUT,
-        Command::new("tmux")
-            .args([
-                "list-panes",
-                "-a",
-                "-F",
-                "#{session_name}\t#{window_active}\t#{pane_active}\t#{window_index}.#{pane_index}:#{pane_id}",
-            ])
-            .env_remove("TMUX")
-            .env_remove("TMUX_PANE")
-            .output(),
+        tmux_query_command(&[
+            "list-panes",
+            "-a",
+            "-F",
+            "#{session_name}\t#{window_active}\t#{pane_active}\t#{window_index}.#{pane_index}:#{pane_id}",
+        ])
+        .output(),
     )
         .await
         .map_err(|_| {
@@ -202,8 +208,6 @@ async fn active_pane_session_ids_or_empty(
 // ---------------------------------------------------------------------------
 
 /// Events emitted by the supervisor when sessions are created or removed.
-// TODO: re-evaluate when lifecycle event subscription is wired into the WebSocket push path
-#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub enum LifecycleEvent {
     Created {
@@ -389,8 +393,7 @@ impl SessionSupervisor {
             phase = "tmux_list_sessions",
             "running tmux list-sessions"
         );
-        let output = Command::new("tmux")
-            .args(["list-sessions", "-F", "#{session_name}"])
+        let output = tmux_query_command(&["list-sessions", "-F", "#{session_name}"])
             .output()
             .await;
 
@@ -998,14 +1001,14 @@ impl SessionSupervisor {
     // -----------------------------------------------------------------------
 
     /// Subscribe to lifecycle events (session created/deleted).
-    // TODO: re-evaluate when the WebSocket push path subscribes to lifecycle events
+    // FIXME(2026-04-21): WebSocket transport does not subscribe to supervisor lifecycle broadcasts yet.
     #[allow(dead_code)]
     pub fn subscribe_events(&self) -> broadcast::Receiver<LifecycleEvent> {
         self.lifecycle_tx.subscribe()
     }
 
     /// Subscribe to thought_update ControlEvents from the thought loop.
-    // TODO: re-evaluate when external consumers subscribe to thought events
+    // FIXME(2026-04-21): No external consumer subscribes through this hook; startup uses `thought_event_sender`.
     #[allow(dead_code)]
     pub fn subscribe_thought_events(&self) -> broadcast::Receiver<ControlEvent> {
         self.thought_tx.subscribe()
@@ -2090,6 +2093,23 @@ mod tests {
         );
 
         restore_test_path(original_path);
+    }
+
+    #[test]
+    fn tmux_query_command_scrubs_tmux_env_vars() {
+        let command = tmux_query_command(&["list-sessions", "-F", "#{session_name}"]);
+
+        let tmux_value = command
+            .as_std()
+            .get_envs()
+            .find_map(|(key, value)| (key == std::ffi::OsStr::new("TMUX")).then_some(value));
+        assert_eq!(tmux_value, Some(None));
+
+        let tmux_pane_value = command
+            .as_std()
+            .get_envs()
+            .find_map(|(key, value)| (key == std::ffi::OsStr::new("TMUX_PANE")).then_some(value));
+        assert_eq!(tmux_pane_value, Some(None));
     }
 
     #[test]

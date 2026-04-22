@@ -43,7 +43,7 @@ pub type ClientId = u64;
 /// A framed chunk of terminal output with its sequence number.
 #[derive(Debug, Clone)]
 pub struct OutputFrame {
-    // TODO: re-evaluate when per-frame sequence numbers are surfaced to WS clients
+    // FIXME(2026-04-21): WebSocket transport still forwards bytes only; seq is retained for replay-aware client envelopes.
     #[allow(dead_code)]
     pub seq: u64,
     pub data: Vec<u8>,
@@ -141,7 +141,7 @@ pub struct ActorHandle {
     pub cmd_tx: mpsc::Sender<SessionCommand>,
     /// Per-session broadcast channel for ControlEvents (session_state, session_title).
     /// Multiple WS clients can subscribe to the same session's events.
-    // TODO: re-evaluate when per-session event subscription is wired into WS handlers
+    // FIXME(2026-04-21): Web handlers do not expose per-session ControlEvent subscriptions yet.
     #[allow(dead_code)]
     event_tx: broadcast::Sender<ControlEvent>,
 }
@@ -155,7 +155,7 @@ impl ActorHandle {
     }
 
     /// Subscribe to this session's control events (state changes, title updates).
-    // TODO: re-evaluate when per-session WS event subscription is implemented
+    // FIXME(2026-04-21): Reserved for future per-session event streams; current WS route does not call this.
     #[allow(dead_code)]
     pub fn subscribe_events(&self) -> broadcast::Receiver<ControlEvent> {
         self.event_tx.subscribe()
@@ -419,11 +419,12 @@ impl SessionActor {
     ) -> bool {
         let next_timer = self.next_timer_deadline();
         tokio::select! {
+            biased;
+            Some(cmd) = self.cmd_rx.recv() => self.handle_command(cmd, *pty_closed).await,
             result = pty_rx.recv(), if !*pty_closed => {
                 self.handle_pty_read_result(result, pty_closed).await;
                 true
             }
-            Some(cmd) = self.cmd_rx.recv() => self.handle_command(cmd, *pty_closed).await,
             _ = Self::sleep_until_deadline(next_timer) => {
                 self.fire_timers().await;
                 true
