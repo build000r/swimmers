@@ -1,4 +1,5 @@
 use super::*;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 const BALLS_BODY_HEIGHT: u16 = 3;
 const BALLS_BALL_WIDTH: u16 = 5;
@@ -471,33 +472,104 @@ pub(crate) fn pluralize(count: usize) -> &'static str {
     }
 }
 
+fn text_display_width(text: &str) -> usize {
+    UnicodeWidthStr::width(text)
+}
+
+fn char_display_width(ch: char) -> usize {
+    UnicodeWidthChar::width(ch).unwrap_or(0)
+}
+
+fn trim_trailing_joiners(text: &mut String) {
+    while text.ends_with('\u{200c}') || text.ends_with('\u{200d}') {
+        text.pop();
+    }
+}
+
+fn prefix_by_display_width(text: &str, max_cols: usize) -> String {
+    if max_cols == 0 {
+        return String::new();
+    }
+
+    let mut out = String::new();
+    let mut used = 0usize;
+    for ch in text.chars() {
+        let ch_width = char_display_width(ch);
+        if ch_width == 0 {
+            if !out.is_empty() {
+                out.push(ch);
+            }
+            continue;
+        }
+        if used.saturating_add(ch_width) > max_cols {
+            break;
+        }
+        used = used.saturating_add(ch_width);
+        out.push(ch);
+    }
+    trim_trailing_joiners(&mut out);
+    out
+}
+
+fn suffix_by_display_width(text: &str, max_cols: usize) -> String {
+    if max_cols == 0 {
+        return String::new();
+    }
+
+    let mut start = text.len();
+    let mut used = 0usize;
+    let mut has_base = false;
+    for (idx, ch) in text.char_indices().rev() {
+        let ch_width = char_display_width(ch);
+        if ch_width == 0 {
+            if has_base {
+                start = idx;
+            }
+            continue;
+        }
+        if used.saturating_add(ch_width) > max_cols {
+            break;
+        }
+        used = used.saturating_add(ch_width);
+        has_base = true;
+        start = idx;
+    }
+
+    let mut out = text[start..].to_string();
+    trim_trailing_joiners(&mut out);
+    out
+}
+
 pub(crate) fn truncate_label(text: &str, max_chars: usize) -> String {
-    let mut chars = text.chars().collect::<Vec<_>>();
-    if chars.len() <= max_chars {
-        return chars.into_iter().collect();
+    if text_display_width(text) <= max_chars {
+        return text.to_string();
     }
     if max_chars == 0 {
         return String::new();
     }
-    chars.truncate(max_chars.saturating_sub(1));
-    let mut out: String = chars.into_iter().collect();
+
+    let marker = "~";
+    let marker_width = text_display_width(marker);
+    if max_chars <= marker_width {
+        return prefix_by_display_width(marker, max_chars);
+    }
+    let mut out = prefix_by_display_width(text, max_chars.saturating_sub(marker_width));
     out.push('~');
     out
 }
 
 pub(crate) fn tail_text(text: &str, max_chars: usize) -> String {
-    let chars = text.chars().collect::<Vec<_>>();
-    if chars.len() <= max_chars {
-        return chars.into_iter().collect();
+    if text_display_width(text) <= max_chars {
+        return text.to_string();
     }
     if max_chars == 0 {
         return String::new();
     }
-    chars[chars.len() - max_chars..].iter().collect()
+    suffix_by_display_width(text, max_chars)
 }
 
 pub(crate) fn shorten_path(path: &str, max_chars: usize) -> String {
-    if path.chars().count() <= max_chars {
+    if text_display_width(path) <= max_chars {
         return path.to_string();
     }
     if path.contains('/') && max_chars > 3 {
@@ -509,7 +581,7 @@ pub(crate) fn shorten_path(path: &str, max_chars: usize) -> String {
             } else {
                 format!("/{part}{suffix}")
             };
-            if candidate.chars().count() > budget {
+            if text_display_width(&candidate) > budget {
                 break;
             }
             suffix = candidate;
@@ -518,16 +590,10 @@ pub(crate) fn shorten_path(path: &str, max_chars: usize) -> String {
             return format!("...{suffix}");
         }
     }
-    let chars = path.chars().collect::<Vec<_>>();
     if max_chars <= 3 {
-        return chars.into_iter().take(max_chars).collect();
+        return prefix_by_display_width(path, max_chars);
     }
-    let tail = chars
-        .into_iter()
-        .rev()
-        .take(max_chars - 3)
-        .collect::<Vec<_>>();
-    let tail = tail.into_iter().rev().collect::<String>();
+    let tail = tail_text(path, max_chars - 3);
     format!("...{tail}")
 }
 
@@ -551,4 +617,17 @@ pub(crate) fn session_state_text(session: &SessionSummary) -> &'static str {
 
 pub(crate) fn selected_label(name: Option<&String>) -> String {
     name.cloned().unwrap_or_else(|| "session".to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn truncate_label_respects_terminal_columns_for_mixed_width_text() {
+        let text = "ab漢字a\u{0301}xyz";
+        let truncated = truncate_label(text, 7);
+        assert_eq!(UnicodeWidthStr::width(truncated.as_str()), 7);
+        assert!(truncated.ends_with('~'));
+    }
 }

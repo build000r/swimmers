@@ -1,6 +1,14 @@
 use super::*;
 use swimmers::openrouter_models::should_rotate_openrouter_model;
 
+// Once the school is large, the O(n^2) pairwise collision pass gets expensive.
+// 50 entities is where we start seeing frame-time spikes on laptops, so we cap
+// checks per entity above that point and distribute checks across frames.
+const COLLISION_THROTTLE_ENTITY_THRESHOLD: usize = 50;
+const COLLISION_THROTTLE_PAIR_BUDGET: usize = 24;
+const API_FAILURE_BANNER_THRESHOLD: u8 = 3;
+const API_STALE_BANNER_TEXT: &str = "API disconnected - showing stale data";
+
 pub(crate) struct RefreshResult {
     pub(crate) sessions: Result<Vec<SessionSummary>, String>,
     pub(crate) mermaid_artifacts: Vec<(String, Result<MermaidArtifactResponse, String>)>,
@@ -54,6 +62,25 @@ struct RepoThemeCacheEntry {
 pub(crate) struct PendingSelectionPublicationResult {
     pub(crate) session_id: Option<String>,
     pub(crate) response: Result<(), String>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct ApiRefreshHealth {
+    consecutive_errors: u8,
+}
+
+impl ApiRefreshHealth {
+    fn record_success(&mut self) {
+        self.consecutive_errors = 0;
+    }
+
+    fn record_failure(&mut self) {
+        self.consecutive_errors = self.consecutive_errors.saturating_add(1);
+    }
+
+    fn banner_text(&self) -> Option<&'static str> {
+        (self.consecutive_errors >= API_FAILURE_BANNER_THRESHOLD).then_some(API_STALE_BANNER_TEXT)
+    }
 }
 
 pub(crate) struct ThoughtConfigActionOutcome {
@@ -144,6 +171,7 @@ pub(crate) struct App<C: TuiApi> {
     pub(crate) message: Option<(String, Instant)>,
     pub(crate) last_refresh: Option<Instant>,
     pub(crate) last_successful_refresh: Option<Instant>,
+    api_refresh_health: ApiRefreshHealth,
     pub(crate) last_picker_refresh: Option<Instant>,
     pub(crate) thought_panel_ratio: f32,
     pub(crate) split_drag_active: bool,
@@ -215,6 +243,7 @@ impl<C: TuiApi> App<C> {
             message: None,
             last_refresh: None,
             last_successful_refresh: None,
+            api_refresh_health: ApiRefreshHealth::default(),
             last_picker_refresh: None,
             thought_panel_ratio: THOUGHT_RAIL_DEFAULT_RATIO,
             split_drag_active: false,
@@ -1008,6 +1037,7 @@ impl<C: TuiApi> App<C> {
                 self.capture_thought_updates(&sessions, layout.thought_entry_capacity());
                 self.merge_sessions(sessions, layout.overview_field);
                 self.last_successful_refresh = Some(Instant::now());
+                self.api_refresh_health.record_success();
                 if show_success_message {
                     let count = self.entities.len();
                     self.set_message(format!("refreshed {count} session{}", pluralize(count)));
@@ -1016,6 +1046,7 @@ impl<C: TuiApi> App<C> {
             }
             Err(err) => {
                 self.set_message(self.refresh_error_message(err));
+                self.api_refresh_health.record_failure();
                 false
             }
         };
@@ -1307,6 +1338,7 @@ impl<C: TuiApi> App<C> {
                 self.capture_thought_updates(&sessions, layout.thought_entry_capacity());
                 self.merge_sessions(sessions, layout.overview_field);
                 self.last_successful_refresh = Some(Instant::now());
+                self.api_refresh_health.record_success();
 
                 if result.show_success_message {
                     let count = self.entities.len();
@@ -1315,6 +1347,7 @@ impl<C: TuiApi> App<C> {
             }
             Err(err) => {
                 self.set_message(self.refresh_error_message(err));
+                self.api_refresh_health.record_failure();
             }
         }
 
@@ -1469,31 +1502,50 @@ impl<C: TuiApi> App<C> {
     }
 
     pub(crate) fn resolve_collisions(&mut self, field: Rect) {
-        for idx in 0..self.entities.len() {
+        let entity_count = self.entities.len();
+        let throttle_collisions = entity_count > COLLISION_THROTTLE_ENTITY_THRESHOLD;
+
+        for idx in 0..entity_count {
             let (left, right) = self.entities.split_at_mut(idx + 1);
             let a = &mut left[idx];
-            for b in right {
-                let a_rect = a.screen_rect(field);
-                let b_rect = b.screen_rect(field);
-                if intersects(a_rect, b_rect) {
-                    match (a.is_stationary(), b.is_stationary()) {
-                        (true, true) => {}
-                        (true, false) => separate_from_fixed_entity(b, a_rect, field),
-                        (false, true) => separate_from_fixed_entity(a, b_rect, field),
-                        (false, false) => {
-                            std::mem::swap(&mut a.vx, &mut b.vx);
-                            std::mem::swap(&mut a.vy, &mut b.vy);
-                            a.x = (a.x - 1.0).max(0.0);
-                            b.x = (b.x + 1.0).min(field.width.saturating_sub(ENTITY_WIDTH) as f32);
-                            a.swim_anchor_x = a.x;
-                            b.swim_anchor_x = b.x;
-                            a.swim_anchor_y = a.y;
-                            b.swim_anchor_y = b.y;
-                            a.swim_center_y = a.y;
-                            b.swim_center_y = b.y;
-                        }
-                    }
+            if throttle_collisions && !right.is_empty() {
+                let budget = COLLISION_THROTTLE_PAIR_BUDGET.min(right.len());
+                let start = (self.tick as usize).wrapping_add(idx.saturating_mul(13)) % right.len();
+                for step in 0..budget {
+                    let b_index = (start + step) % right.len();
+                    let b = &mut right[b_index];
+                    Self::resolve_collision_pair(a, b, field);
                 }
+            } else {
+                for b in right {
+                    Self::resolve_collision_pair(a, b, field);
+                }
+            }
+        }
+    }
+
+    fn resolve_collision_pair(a: &mut SessionEntity, b: &mut SessionEntity, field: Rect) {
+        let a_rect = a.screen_rect(field);
+        let b_rect = b.screen_rect(field);
+        if !intersects(a_rect, b_rect) {
+            return;
+        }
+
+        match (a.is_stationary(), b.is_stationary()) {
+            (true, true) => {}
+            (true, false) => separate_from_fixed_entity(b, a_rect, field),
+            (false, true) => separate_from_fixed_entity(a, b_rect, field),
+            (false, false) => {
+                std::mem::swap(&mut a.vx, &mut b.vx);
+                std::mem::swap(&mut a.vy, &mut b.vy);
+                a.x = (a.x - 1.0).max(0.0);
+                b.x = (b.x + 1.0).min(field.width.saturating_sub(ENTITY_WIDTH) as f32);
+                a.swim_anchor_x = a.x;
+                b.swim_anchor_x = b.x;
+                a.swim_anchor_y = a.y;
+                b.swim_anchor_y = b.y;
+                a.swim_center_y = a.y;
+                b.swim_center_y = b.y;
             }
         }
     }
@@ -3132,6 +3184,15 @@ impl<C: TuiApi> App<C> {
                         );
                     }
                 }
+
+                if let Some(banner) = self.api_refresh_health.banner_text() {
+                    renderer.draw_text(
+                        layout.overview_field.x,
+                        layout.overview_field.y,
+                        &truncate_label(banner, layout.overview_field.width as usize),
+                        Color::Red,
+                    );
+                }
             }
             FishBowlMode::Mermaid(viewer) => {
                 render_mermaid_viewer(renderer, layout.overview_field, viewer);
@@ -3154,5 +3215,26 @@ impl<C: TuiApi> App<C> {
         }
 
         render_footer(self, renderer, layout.footer_start_y);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn api_error_banner_shows_after_three_failures_and_clears_on_success() {
+        let mut health = ApiRefreshHealth::default();
+        assert!(health.banner_text().is_none());
+
+        health.record_failure();
+        assert!(health.banner_text().is_none());
+        health.record_failure();
+        assert!(health.banner_text().is_none());
+        health.record_failure();
+        assert_eq!(health.banner_text(), Some(API_STALE_BANNER_TEXT));
+
+        health.record_success();
+        assert!(health.banner_text().is_none());
     }
 }

@@ -406,6 +406,12 @@ pub(crate) const MERMAID_BODY_COLOR: Color = Color::White;
 pub(crate) const MERMAID_EDGE_LABEL_COLOR: Color = Color::Yellow;
 pub(crate) const MERMAID_TYPE_COLOR: Color = Color::DarkCyan;
 pub(crate) const MERMAID_FOCUS_COLOR: Color = Color::Magenta;
+// Guardrail: skip parsing giant Mermaid inputs to keep the UI responsive and
+// avoid unbounded render work on malformed or oversized artifacts.
+const MERMAID_SOURCE_MAX_BYTES: usize = 64 * 1024;
+// Guardrail: cap rendered rows to keep worst-case terminal work bounded.
+const MERMAID_RENDER_MAX_ROWS: usize = 200;
+const MERMAID_TRUNCATED_MARKER: &str = "(…truncated)";
 pub(crate) const MERMAID_OWNER_ACCENTS: [Color; 4] =
     [Color::Cyan, Color::Green, Color::Yellow, Color::Blue];
 
@@ -1558,6 +1564,43 @@ pub(crate) fn mermaid_zoom_status_label(zoom: f32) -> String {
     }
 }
 
+fn mermaid_truncate_lines_with_marker(lines: &mut Vec<String>, max_rows: usize) -> bool {
+    if lines.len() <= max_rows {
+        return false;
+    }
+    if max_rows == 0 {
+        lines.clear();
+        return true;
+    }
+    lines.truncate(max_rows);
+    if let Some(last) = lines.last_mut() {
+        *last = MERMAID_TRUNCATED_MARKER.to_string();
+    }
+    true
+}
+
+fn mermaid_apply_render_line_cap(viewer: &mut MermaidViewerState, content_rect: Rect) {
+    let original_rows = viewer.cached_lines.len();
+    if !mermaid_truncate_lines_with_marker(&mut viewer.cached_lines, MERMAID_RENDER_MAX_ROWS) {
+        return;
+    }
+
+    tracing::warn!(
+        session_id = %viewer.session_id,
+        rendered_rows = original_rows,
+        cap_rows = MERMAID_RENDER_MAX_ROWS,
+        "Mermaid rendered output exceeded row cap; truncating"
+    );
+
+    viewer.cached_background_cells.clear();
+    let cutoff_row = content_rect
+        .y
+        .saturating_add(MERMAID_RENDER_MAX_ROWS.saturating_sub(1) as u16);
+    viewer
+        .cached_semantic_lines
+        .retain(|line| line.y < cutoff_row);
+}
+
 pub(crate) fn ensure_mermaid_viewport_cache(
     viewer: &mut MermaidViewerState,
     content_rect: Rect,
@@ -1705,10 +1748,14 @@ pub(crate) fn mermaid_line_visible_in_state(
     match view_state {
         MermaidViewState::Outline => line.outline_eligible,
         MermaidViewState::L1 | MermaidViewState::L2 | MermaidViewState::L3 => {
-            line.kind.min_detail_level()
-                <= view_state
-                    .detail_level()
-                    .expect("non-outline states always have a detail level")
+            let Some(detail_level) = view_state.detail_level() else {
+                tracing::warn!(
+                    ?view_state,
+                    "Mermaid detail state was missing a detail level; hiding line"
+                );
+                return false;
+            };
+            line.kind.min_detail_level() <= detail_level
         }
         MermaidViewState::ErEntities => line.kind == MermaidSemanticKind::NodeSummary,
         MermaidViewState::ErKeys => {
@@ -3391,11 +3438,17 @@ pub(crate) fn mermaid_order_er_nodes(nodes: &[MermaidErOrderNode]) -> Vec<String
     }
 
     components.sort_by(|left, right| {
-        let left_seed = left.first().expect("component seed");
-        let right_seed = right.first().expect("component seed");
-        right.len().cmp(&left.len()).then_with(|| {
-            mermaid_er_compare_seed_nodes(left_seed, right_seed, &positions, &adjacency, centroid)
-        })
+        let size_cmp = right.len().cmp(&left.len());
+        match (left.first(), right.first()) {
+            (Some(left_seed), Some(right_seed)) => size_cmp.then_with(|| {
+                mermaid_er_compare_seed_nodes(
+                    left_seed, right_seed, &positions, &adjacency, centroid,
+                )
+            }),
+            (Some(_), None) => Ordering::Less,
+            (None, Some(_)) => Ordering::Greater,
+            (None, None) => size_cmp,
+        }
     });
 
     let mut ordered = Vec::with_capacity(nodes.len());
@@ -3415,7 +3468,7 @@ pub(crate) fn mermaid_order_er_nodes(nodes: &[MermaidErOrderNode]) -> Vec<String
         };
 
         let mut remaining = component.into_iter().collect::<BTreeSet<_>>();
-        let seed = remaining
+        let Some(seed) = remaining
             .iter()
             .min_by(|left, right| {
                 mermaid_er_compare_seed_nodes(
@@ -3427,13 +3480,16 @@ pub(crate) fn mermaid_order_er_nodes(nodes: &[MermaidErOrderNode]) -> Vec<String
                 )
             })
             .cloned()
-            .expect("component seed");
+        else {
+            tracing::warn!("Mermaid ER ordering skipped an empty component");
+            continue;
+        };
         remaining.remove(&seed);
         ordered.push(seed.clone());
 
         let mut placed = HashSet::from([seed]);
         while !remaining.is_empty() {
-            let next = remaining
+            let Some(next) = remaining
                 .iter()
                 .min_by(|left, right| {
                     mermaid_er_compare_component_candidates(
@@ -3446,7 +3502,10 @@ pub(crate) fn mermaid_order_er_nodes(nodes: &[MermaidErOrderNode]) -> Vec<String
                     )
                 })
                 .cloned()
-                .expect("remaining ER order node");
+            else {
+                tracing::warn!("Mermaid ER ordering lost remaining-node candidate");
+                break;
+            };
             remaining.remove(&next);
             placed.insert(next.clone());
             ordered.push(next);
@@ -4297,6 +4356,22 @@ pub(crate) fn ensure_mermaid_prepared_render(
         .source
         .as_deref()
         .ok_or_else(|| "Mermaid source unavailable".to_string())?;
+    if source.len() > MERMAID_SOURCE_MAX_BYTES {
+        tracing::warn!(
+            session_id = %viewer.session_id,
+            source_bytes = source.len(),
+            cap_bytes = MERMAID_SOURCE_MAX_BYTES,
+            "Mermaid source exceeded size cap; skipping render"
+        );
+        viewer.prepared_render = None;
+        viewer.cached_lines.clear();
+        viewer.cached_background_cells.clear();
+        viewer.cached_semantic_lines.clear();
+        return Err(format!(
+            "Mermaid source exceeds {} KiB {MERMAID_TRUNCATED_MARKER}",
+            MERMAID_SOURCE_MAX_BYTES / 1024
+        ));
+    }
     let key = mermaid_source_cache_key(source, content_rect);
     let prepared = if let Some(prepared) = viewer
         .prepared_render
@@ -4565,6 +4640,16 @@ fn render_plan_text_content(
                 }
             })
             .collect();
+        let original_rows = viewer.plan_text_lines.len();
+        if mermaid_truncate_lines_with_marker(&mut viewer.plan_text_lines, MERMAID_RENDER_MAX_ROWS)
+        {
+            tracing::warn!(
+                session_id = %viewer.session_id,
+                rows = original_rows,
+                cap_rows = MERMAID_RENDER_MAX_ROWS,
+                "Mermaid plan text exceeded row cap; truncating"
+            );
+        }
         viewer.plan_text_cached_width = content_rect.width;
     }
 
@@ -4739,12 +4824,17 @@ pub(crate) fn render_mermaid_viewer(
         return;
     }
 
-    viewer.render_error = ensure_mermaid_viewport_cache(viewer, content_rect).err();
-
-    if let Some(error) = viewer.render_error.as_deref() {
-        render_wrapped_lines(renderer, content_rect, error, Color::Red);
+    if let Err(err) = ensure_mermaid_viewport_cache(viewer, content_rect) {
+        tracing::warn!(
+            session_id = %viewer.session_id,
+            error = %err,
+            "Mermaid viewport render failed; leaving panel empty"
+        );
+        viewer.render_error = Some(err);
         return;
     }
+    viewer.render_error = None;
+    mermaid_apply_render_line_cap(viewer, content_rect);
 
     if viewer.cached_background_cells.len() == viewer.cached_lines.len() {
         for (row_offset, row) in viewer.cached_background_cells.iter().enumerate() {

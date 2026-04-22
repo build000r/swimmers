@@ -1,4 +1,5 @@
 use super::*;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 const THOUGHT_COMMIT_LABEL: &str = "[commit]";
 
@@ -394,7 +395,7 @@ pub(crate) fn header_filter_action_at<C: TuiApi>(
 }
 
 pub(crate) fn display_width(text: &str) -> u16 {
-    text.chars().count().min(u16::MAX as usize) as u16
+    UnicodeWidthStr::width(text).min(u16::MAX as usize) as u16
 }
 
 pub(crate) fn path_tail_label(path: &str) -> Option<String> {
@@ -434,23 +435,34 @@ pub(crate) fn wrap_text(text: &str, max_chars: usize) -> Vec<String> {
 
     let mut lines = Vec::new();
     while !remaining.is_empty() {
-        if remaining.chars().count() <= max_chars {
+        if UnicodeWidthStr::width(remaining) <= max_chars {
             lines.push(remaining.to_string());
             break;
         }
 
-        let mut char_count = 0usize;
+        let mut used_cols = 0usize;
         let mut split_at = 0usize;
         let mut last_space = None;
         for (idx, ch) in remaining.char_indices() {
-            char_count += 1;
-            if char_count > max_chars {
+            let ch_width = UnicodeWidthChar::width(ch).unwrap_or(0);
+            if ch_width > 0 && used_cols.saturating_add(ch_width) > max_chars {
                 break;
             }
+            used_cols = used_cols.saturating_add(ch_width);
             split_at = idx + ch.len_utf8();
             if ch.is_whitespace() {
                 last_space = Some(idx);
             }
+        }
+
+        if split_at == 0 {
+            // Ensure forward progress when the first visible scalar is wider
+            // than the available space for this wrapped row.
+            split_at = remaining
+                .char_indices()
+                .next()
+                .map(|(idx, ch)| idx + ch.len_utf8())
+                .unwrap_or(remaining.len());
         }
 
         let break_idx = last_space.unwrap_or(split_at).max(1);
