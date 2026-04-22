@@ -8138,7 +8138,10 @@ fn mermaid_viewport_cache_errors_render_text_and_set_render_error() {
 
     let error_text =
         find_text_position(&renderer, "Mermaid source unavailable").expect("viewport error text");
-    assert_eq!(cell_at(&renderer, error_text.0, error_text.1).fg, Color::Red);
+    assert_eq!(
+        cell_at(&renderer, error_text.0, error_text.1).fg,
+        Color::Red
+    );
 }
 
 #[test]

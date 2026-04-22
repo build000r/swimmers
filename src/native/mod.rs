@@ -807,14 +807,11 @@ fn validate_osascript_script_arg(field: &'static str, value: &str) -> Result<()>
         }));
     }
 
-    if let Some(invalid) = value
-        .chars()
-        .find(|ch| {
-            !(ch.is_ascii_alphanumeric()
-                || matches!(ch, '_' | '-' | '.' | '/' | ' ')
-                || (allow_shell_quotes && matches!(ch, '\'')))
-        })
-    {
+    if let Some(invalid) = value.chars().find(|ch| {
+        !(ch.is_ascii_alphanumeric()
+            || matches!(ch, '_' | '-' | '.' | '/' | ' ')
+            || (allow_shell_quotes && matches!(ch, '\'')))
+    }) {
         return Err(anyhow::Error::new(NativeScriptError::InvalidOsaScriptArg {
             field,
             reason: format!("contains disallowed character `{invalid}`"),

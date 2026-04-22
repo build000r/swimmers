@@ -128,7 +128,6 @@ pub fn routes() -> Router<Arc<AppState>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::LazyLock;
     use crate::api::PublishedSelectionState;
     use crate::auth::OPERATOR_SCOPES;
     use crate::config::Config;
@@ -139,6 +138,7 @@ mod tests {
     use axum::extract::{Json, State};
     use axum::http::HeaderMap;
     use serde_json::Value;
+    use std::sync::LazyLock;
     use tokio::sync::Mutex;
     use tokio::sync::RwLock;
 
@@ -265,7 +265,10 @@ mod tests {
             &json_b
         };
 
-        assert_eq!(success_json["version"], serde_json::json!(expected_version + 1));
+        assert_eq!(
+            success_json["version"],
+            serde_json::json!(expected_version + 1)
+        );
         assert_eq!(conflict_json["code"], "VERSION_CONFLICT");
     }
 }

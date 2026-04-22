@@ -141,7 +141,6 @@ pub fn routes() -> Router<Arc<AppState>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::LazyLock;
     use crate::api::PublishedSelectionState;
     use crate::auth::{AuthScope, OBSERVER_SCOPES, OPERATOR_SCOPES};
     use crate::config::Config;
@@ -157,6 +156,7 @@ mod tests {
     use axum::response::IntoResponse;
     use chrono::Utc;
     use serde_json::Value;
+    use std::sync::LazyLock;
     use tokio::sync::mpsc;
     use tokio::sync::Mutex;
     use tokio::sync::RwLock;
@@ -439,14 +439,21 @@ mod tests {
         let expected_version = json["version"].as_u64().expect("version should be present");
 
         let (resp_a, resp_b) = tokio::join!(
-            put_config_response(state.clone(), ThoughtConfig::default(), Some(expected_version)),
+            put_config_response(
+                state.clone(),
+                ThoughtConfig::default(),
+                Some(expected_version)
+            ),
             put_config_response(state, ThoughtConfig::default(), Some(expected_version)),
         );
 
         let status_a = resp_a.status();
         let status_b = resp_b.status();
         assert!(status_a == StatusCode::OK || status_b == StatusCode::OK);
-        assert!(status_a == StatusCode::PRECONDITION_FAILED || status_b == StatusCode::PRECONDITION_FAILED);
+        assert!(
+            status_a == StatusCode::PRECONDITION_FAILED
+                || status_b == StatusCode::PRECONDITION_FAILED
+        );
 
         let json_a = response_json(resp_a).await;
         let json_b = response_json(resp_b).await;
@@ -461,7 +468,10 @@ mod tests {
             &json_b
         };
 
-        assert_eq!(success_json["version"], serde_json::json!(expected_version + 1));
+        assert_eq!(
+            success_json["version"],
+            serde_json::json!(expected_version + 1)
+        );
         assert_eq!(conflict_json["code"], "VERSION_CONFLICT");
     }
 }
