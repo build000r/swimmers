@@ -30,22 +30,36 @@ impl ReplayRing {
     /// Push terminal output data into the ring. Returns the sequence number
     /// assigned to this frame. Evicts oldest frames as needed to stay within
     /// the byte capacity.
+    ///
+    /// Capacity policy:
+    /// - When total retained bytes would exceed capacity, evict oldest frames.
+    /// - When a single incoming frame is larger than total capacity, clamp it
+    ///   to the newest `capacity` bytes and store only that suffix.
     pub fn push(&mut self, data: &[u8]) -> u64 {
         let seq = self.next_seq;
         self.next_seq += 1;
 
-        // Evict oldest frames until we have room (or the buffer is empty).
-        // If a single frame exceeds capacity, we still store it (evicting everything else).
-        while self.total_bytes + data.len() > self.capacity && !self.frames.is_empty() {
+        let retained = if data.len() > self.capacity {
+            &data[data.len().saturating_sub(self.capacity)..]
+        } else {
+            data
+        };
+
+        // Evict oldest frames until the retained payload fits.
+        while self.total_bytes + retained.len() > self.capacity && !self.frames.is_empty() {
             if let Some(evicted) = self.frames.pop_front() {
                 self.total_bytes -= evicted.data.len();
             }
         }
 
-        self.total_bytes += data.len();
+        if retained.is_empty() {
+            return seq;
+        }
+
+        self.total_bytes += retained.len();
         self.frames.push_back(Frame {
             seq,
-            data: data.to_vec(),
+            data: retained.to_vec(),
         });
 
         seq
@@ -162,7 +176,7 @@ mod tests {
     }
 
     #[test]
-    fn eviction_under_pressure() {
+    fn push_over_capacity_evicts_oldest_frames() {
         // Capacity is 10 bytes. Push frames that force eviction.
         let mut ring = ReplayRing::new(10);
         ring.push(b"aaaa"); // 4 bytes, seq 1
@@ -172,6 +186,23 @@ mod tests {
         assert_eq!(ring.window_start_seq(), 2);
         assert!(ring.replay_from(1).is_none()); // seq 1 evicted
         assert_eq!(ring.replay_from(2).unwrap().len(), 2);
+        assert_eq!(ring.snapshot(), "bbbbcccc");
+    }
+
+    #[test]
+    fn oversized_single_frame_is_clamped_to_capacity_suffix() {
+        let mut ring = ReplayRing::new(8);
+
+        ring.push(b"12");
+        let seq = ring.push(b"abcdefghijklmnopqrstuvwxyz");
+
+        assert_eq!(seq, 2);
+        assert_eq!(ring.latest_seq(), 2);
+        assert_eq!(ring.total_bytes_retained(), 8);
+        assert_eq!(ring.window_start_seq(), 2);
+        assert_eq!(ring.snapshot(), "stuvwxyz");
+        let replay = ring.replay_from(2).expect("seq 2 should be retained");
+        assert_eq!(replay, vec![(2, b"stuvwxyz".to_vec())]);
     }
 
     #[test]
