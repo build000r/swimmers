@@ -7,6 +7,7 @@ use std::time::Instant;
 
 use anyhow::{anyhow, Context, Result};
 use thiserror::Error;
+use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 use tokio::sync::Mutex as AsyncMutex;
 use tokio::time::{sleep, timeout, Duration};
@@ -537,10 +538,41 @@ async fn run_osascript_output_with_timeout(
     operation: &'static str,
     timeout_duration: Duration,
 ) -> Result<std::process::Output> {
-    match timeout(timeout_duration, command.output()).await {
-        Ok(result) => result.map_err(|err| anyhow!("failed to run osascript: {err}")),
-        Err(_) => Err(osascript_timeout_error(operation, timeout_duration)),
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut child = command
+        .spawn()
+        .map_err(|err| anyhow!("failed to run osascript: {err}"))?;
+
+    let status = match timeout(timeout_duration, child.wait()).await {
+        Ok(result) => result.map_err(|err| anyhow!("failed to run osascript: {err}"))?,
+        Err(_) => {
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+            return Err(osascript_timeout_error(operation, timeout_duration));
+        }
+    };
+
+    let mut stdout = Vec::new();
+    if let Some(mut stdout_pipe) = child.stdout.take() {
+        stdout_pipe
+            .read_to_end(&mut stdout)
+            .await
+            .map_err(|err| anyhow!("failed to collect osascript output: {err}"))?;
     }
+
+    let mut stderr = Vec::new();
+    if let Some(mut stderr_pipe) = child.stderr.take() {
+        stderr_pipe
+            .read_to_end(&mut stderr)
+            .await
+            .map_err(|err| anyhow!("failed to collect osascript output: {err}"))?;
+    }
+
+    Ok(std::process::Output {
+        status,
+        stdout,
+        stderr,
+    })
 }
 
 async fn run_open_or_focus_script(
@@ -706,19 +738,34 @@ fn build_ghostty_display_name(cwd: &str, tmux_name: &str) -> String {
         .unwrap_or_else(|| "session".to_string())
 }
 
+fn shell_quote_token(value: &str) -> String {
+    if value.is_empty() {
+        return "''".to_string();
+    }
+
+    if value
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.' | '/'))
+    {
+        return value.to_string();
+    }
+
+    format!("'{}'", value.replace('\'', "'\"'\"'"))
+}
+
 fn build_iterm_attach_command(tmux_name: &str, tmux_path: &Path) -> String {
     format!(
         "exec {} attach-session -t {}",
-        tmux_path.to_string_lossy(),
-        tmux_name
+        shell_quote_token(&tmux_path.to_string_lossy()),
+        shell_quote_token(tmux_name)
     )
 }
 
 fn build_ghostty_attach_command(tmux_name: &str, tmux_path: &Path) -> String {
     format!(
         "exec {} attach-session -t {}",
-        tmux_path.to_string_lossy(),
-        tmux_name
+        shell_quote_token(&tmux_path.to_string_lossy()),
+        shell_quote_token(tmux_name)
     )
 }
 
@@ -736,6 +783,7 @@ fn sanitize_osascript_text_arg(s: &str) -> String {
 }
 
 fn validate_osascript_script_arg(field: &'static str, value: &str) -> Result<()> {
+    let allow_shell_quotes = field == "attach_command";
     if value.len() > OSASCRIPT_ARG_MAX_LEN {
         return Err(anyhow::Error::new(NativeScriptError::InvalidOsaScriptArg {
             field,
@@ -752,7 +800,7 @@ fn validate_osascript_script_arg(field: &'static str, value: &str) -> Result<()>
             reason: "newlines are not allowed".to_string(),
         }));
     }
-    if value.contains('"') || value.contains('\'') {
+    if value.contains('"') || (!allow_shell_quotes && value.contains('\'')) {
         return Err(anyhow::Error::new(NativeScriptError::InvalidOsaScriptArg {
             field,
             reason: "quotes are not allowed".to_string(),
@@ -761,7 +809,11 @@ fn validate_osascript_script_arg(field: &'static str, value: &str) -> Result<()>
 
     if let Some(invalid) = value
         .chars()
-        .find(|ch| !(ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.' | '/' | ' ')))
+        .find(|ch| {
+            !(ch.is_ascii_alphanumeric()
+                || matches!(ch, '_' | '-' | '.' | '/' | ' ')
+                || (allow_shell_quotes && matches!(ch, '\'')))
+        })
     {
         return Err(anyhow::Error::new(NativeScriptError::InvalidOsaScriptArg {
             field,
@@ -924,7 +976,8 @@ mod tests {
     fn validate_osascript_script_arg_rejects_subshell_payload() {
         let err = validate_osascript_script_arg("tmux_name", "$(rm -rf /)").unwrap_err();
         let typed = err
-            .downcast_ref::<NativeScriptError>()
+            .chain()
+            .find_map(|cause| cause.downcast_ref::<NativeScriptError>())
             .expect("typed native error");
         assert!(matches!(
             typed,
@@ -942,6 +995,15 @@ mod tests {
             typed,
             NativeScriptError::InvalidOsaScriptArg { .. }
         ));
+    }
+
+    #[test]
+    fn validate_osascript_script_arg_allows_shell_quoted_attach_command() {
+        validate_osascript_script_arg(
+            "attach_command",
+            "exec '/tmp/tmux builds/tmux' attach-session -t 'team session'",
+        )
+        .expect("single-quoted shell words should be accepted for attach_command");
     }
 
     #[test]
@@ -1085,6 +1147,26 @@ mod tests {
         assert_eq!(
             command,
             "exec /tmp/tmux/tmux attach-session -t team-session"
+        );
+    }
+
+    #[test]
+    fn build_iterm_attach_command_quotes_words_with_spaces() {
+        let command =
+            build_iterm_attach_command("team session", Path::new("/tmp/tmux builds/tmux"));
+        assert_eq!(
+            command,
+            "exec '/tmp/tmux builds/tmux' attach-session -t 'team session'"
+        );
+    }
+
+    #[test]
+    fn build_ghostty_attach_command_quotes_words_with_spaces() {
+        let command =
+            build_ghostty_attach_command("team session", Path::new("/tmp/tmux builds/tmux"));
+        assert_eq!(
+            command,
+            "exec '/tmp/tmux builds/tmux' attach-session -t 'team session'"
         );
     }
 
@@ -1255,9 +1337,13 @@ mod tests {
         std::fs::create_dir_all(&fake_bin_dir).unwrap();
 
         let fake_osascript = fake_bin_dir.join("osascript");
+        let pid_path = temp.path().join("osascript.pid");
         std::fs::write(
             &fake_osascript,
-            "#!/bin/sh\nset -eu\nsleep 1\nprintf 'created|pane-timeout\\n'\n",
+            format!(
+                "#!/bin/sh\nset -eu\nprintf '%s\\n' \"$$\" > \"{pid}\"\n/bin/sleep 1\nprintf 'created|pane-timeout\\n'\n",
+                pid = pid_path.display()
+            ),
         )
         .unwrap();
         let mut perms = std::fs::metadata(&fake_osascript).unwrap().permissions();
@@ -1278,7 +1364,7 @@ mod tests {
             "exec /usr/bin/tmux attach-session -t tmux-timeout",
             "timeout-display",
             None,
-            Duration::from_millis(20),
+            Duration::from_millis(200),
         )
         .await
         .expect_err("sleeping osascript should time out");
@@ -1288,10 +1374,36 @@ mod tests {
             None => std::env::remove_var("PATH"),
         }
 
-        let typed = err
-            .downcast_ref::<NativeScriptError>()
-            .expect("typed native error");
-        assert!(matches!(typed, NativeScriptError::OsaScriptTimeout { .. }));
+        assert!(
+            err.chain().any(|cause| cause.is::<NativeScriptError>()),
+            "typed native error missing in chain: {err:#}"
+        );
+        assert!(
+            format!("{err:#}").contains("osascript timed out"),
+            "timeout message missing: {err:#}"
+        );
+
+        let mut pid = None;
+        for _ in 0..20 {
+            if let Ok(raw_pid) = std::fs::read_to_string(&pid_path) {
+                let trimmed = raw_pid.trim();
+                if !trimmed.is_empty() {
+                    pid = Some(trimmed.to_string());
+                    break;
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+
+        let pid = pid.expect("fake osascript should persist its pid");
+        let probe = ProcessCommand::new("kill")
+            .args(["-0", pid.as_str()])
+            .status()
+            .expect("kill -0 should execute");
+        assert!(
+            !probe.success(),
+            "timed-out osascript child should be terminated"
+        );
     }
 
     #[tokio::test]
@@ -1561,7 +1673,7 @@ mod tests {
         assert_eq!(
             call[4],
             format!(
-                "exec {} attach-session -t tmux-ghostty",
+                "exec '{}' attach-session -t tmux-ghostty",
                 fake_tmux.display()
             )
         );

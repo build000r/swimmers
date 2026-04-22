@@ -17,6 +17,19 @@ use crate::types::{
 
 static SELECTION_VERSION: AtomicU64 = AtomicU64::new(0);
 
+fn reserve_next_version(counter: &AtomicU64, requested_version: Option<u64>) -> Option<u64> {
+    match requested_version {
+        Some(expected) => {
+            let next = expected.checked_add(1)?;
+            counter
+                .compare_exchange(expected, next, Ordering::AcqRel, Ordering::Acquire)
+                .ok()
+                .map(|_| next)
+        }
+        None => Some(counter.fetch_add(1, Ordering::AcqRel) + 1),
+    }
+}
+
 async fn get_published_selection(
     Extension(auth): Extension<AuthInfo>,
     State(state): State<Arc<AppState>>,
@@ -80,12 +93,8 @@ async fn publish_selection(
     auth.require_scope(AuthScope::SessionsWrite)?;
 
     let requested_version = parse_if_match_version(&headers);
-    let current = SELECTION_VERSION.load(Ordering::Acquire);
-    if let Some(v) = requested_version {
-        if v != current {
-            return Err(api_error(&VERSION_CONFLICT));
-        }
-    }
+    let new_version = reserve_next_version(&SELECTION_VERSION, requested_version)
+        .ok_or_else(|| api_error(&VERSION_CONFLICT))?;
 
     let session_id = body.session_id.and_then(|value| {
         let trimmed = value.trim();
@@ -103,7 +112,6 @@ async fn publish_selection(
         published_at,
     };
 
-    let new_version = SELECTION_VERSION.fetch_add(1, Ordering::Release) + 1;
     Ok(success_json(
         axum::http::StatusCode::OK,
         &serde_json::json!({ "ok": true, "version": new_version }),
@@ -120,6 +128,7 @@ pub fn routes() -> Router<Arc<AppState>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::LazyLock;
     use crate::api::PublishedSelectionState;
     use crate::auth::OPERATOR_SCOPES;
     use crate::config::Config;
@@ -130,7 +139,10 @@ mod tests {
     use axum::extract::{Json, State};
     use axum::http::HeaderMap;
     use serde_json::Value;
+    use tokio::sync::Mutex;
     use tokio::sync::RwLock;
+
+    static VERSION_TEST_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
     fn test_state() -> Arc<AppState> {
         let config = Arc::new(Config::default());
@@ -188,6 +200,8 @@ mod tests {
 
     #[tokio::test]
     async fn publish_selection_optimistic_concurrency() {
+        let _guard = VERSION_TEST_LOCK.lock().await;
+        SELECTION_VERSION.store(0, Ordering::Release);
         let state = test_state();
 
         // (b) missing header → 200 + new version
@@ -212,5 +226,46 @@ mod tests {
         );
         let json = response_json(response).await;
         assert_eq!(json["code"], "VERSION_CONFLICT");
+    }
+
+    #[tokio::test]
+    async fn publish_selection_optimistic_concurrency_rejects_second_concurrent_if_match() {
+        let _guard = VERSION_TEST_LOCK.lock().await;
+        SELECTION_VERSION.store(0, Ordering::Release);
+        let state = test_state();
+
+        let initial = publish_response(state.clone(), Some("seed"), None).await;
+        assert_eq!(initial.status(), axum::http::StatusCode::OK);
+        let json = response_json(initial).await;
+        let expected_version = json["version"].as_u64().expect("version should be present");
+
+        let (resp_a, resp_b) = tokio::join!(
+            publish_response(state.clone(), Some("sess-a"), Some(expected_version)),
+            publish_response(state, Some("sess-b"), Some(expected_version)),
+        );
+
+        let status_a = resp_a.status();
+        let status_b = resp_b.status();
+        assert!(status_a == axum::http::StatusCode::OK || status_b == axum::http::StatusCode::OK);
+        assert!(
+            status_a == axum::http::StatusCode::PRECONDITION_FAILED
+                || status_b == axum::http::StatusCode::PRECONDITION_FAILED
+        );
+
+        let json_a = response_json(resp_a).await;
+        let json_b = response_json(resp_b).await;
+        let success_json = if status_a == axum::http::StatusCode::OK {
+            &json_a
+        } else {
+            &json_b
+        };
+        let conflict_json = if status_a == axum::http::StatusCode::PRECONDITION_FAILED {
+            &json_a
+        } else {
+            &json_b
+        };
+
+        assert_eq!(success_json["version"], serde_json::json!(expected_version + 1));
+        assert_eq!(conflict_json["code"], "VERSION_CONFLICT");
     }
 }

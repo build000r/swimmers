@@ -14,6 +14,9 @@ pub struct ReplayRing {
 struct Frame {
     seq: u64,
     data: Vec<u8>,
+    // True when the original pushed frame exceeded ring capacity and was
+    // clamped to its suffix before storing.
+    clamped: bool,
 }
 
 impl ReplayRing {
@@ -39,6 +42,7 @@ impl ReplayRing {
         let seq = self.next_seq;
         self.next_seq += 1;
 
+        let clamped = data.len() > self.capacity;
         let retained = if data.len() > self.capacity {
             &data[data.len().saturating_sub(self.capacity)..]
         } else {
@@ -60,6 +64,7 @@ impl ReplayRing {
         self.frames.push_back(Frame {
             seq,
             data: retained.to_vec(),
+            clamped,
         });
 
         seq
@@ -70,6 +75,10 @@ impl ReplayRing {
     /// Returns `Some(vec)` with `(seq, data)` pairs if the requested seq is
     /// still in the buffer. Returns `None` if the requested seq has been
     /// evicted (truncated), meaning the client must do a full refresh.
+    ///
+    /// Frames that were clamped on insert are also treated as truncated for
+    /// replay: their suffix remains available for snapshots, but replay calls
+    /// spanning that sequence return `None`.
     pub fn replay_from(&self, seq: u64) -> Option<Vec<(u64, Vec<u8>)>> {
         // If the buffer is empty and they ask for seq 1 (or our next_seq), that's fine - empty replay.
         if self.frames.is_empty() {
@@ -87,12 +96,13 @@ impl ReplayRing {
             return None;
         }
 
-        let result: Vec<(u64, Vec<u8>)> = self
-            .frames
-            .iter()
-            .filter(|f| f.seq >= seq)
-            .map(|f| (f.seq, f.data.clone()))
-            .collect();
+        let mut result: Vec<(u64, Vec<u8>)> = Vec::new();
+        for frame in self.frames.iter().filter(|f| f.seq >= seq) {
+            if frame.clamped {
+                return None;
+            }
+            result.push((frame.seq, frame.data.clone()));
+        }
 
         Some(result)
     }
@@ -201,8 +211,7 @@ mod tests {
         assert_eq!(ring.total_bytes_retained(), 8);
         assert_eq!(ring.window_start_seq(), 2);
         assert_eq!(ring.snapshot(), "stuvwxyz");
-        let replay = ring.replay_from(2).expect("seq 2 should be retained");
-        assert_eq!(replay, vec![(2, b"stuvwxyz".to_vec())]);
+        assert!(ring.replay_from(2).is_none());
     }
 
     #[test]

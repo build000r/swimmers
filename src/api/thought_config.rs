@@ -23,6 +23,19 @@ use crate::types::ThoughtConfigResponse;
 
 static THOUGHT_CONFIG_VERSION: AtomicU64 = AtomicU64::new(0);
 
+fn reserve_next_version(counter: &AtomicU64, requested_version: Option<u64>) -> Option<u64> {
+    match requested_version {
+        Some(expected) => {
+            let next = expected.checked_add(1)?;
+            counter
+                .compare_exchange(expected, next, Ordering::AcqRel, Ordering::Acquire)
+                .ok()
+                .map(|_| next)
+        }
+        None => Some(counter.fetch_add(1, Ordering::AcqRel) + 1),
+    }
+}
+
 async fn get_thought_config(
     Extension(auth): Extension<AuthInfo>,
     State(state): State<Arc<AppState>>,
@@ -73,14 +86,10 @@ async fn put_thought_config(
     };
 
     let requested_version = parse_if_match_version(&headers);
-    {
-        let current = THOUGHT_CONFIG_VERSION.load(Ordering::Acquire);
-        if let Some(v) = requested_version {
-            if v != current {
-                return api_error(&VERSION_CONFLICT);
-            }
-        }
-    }
+    let new_version = match reserve_next_version(&THOUGHT_CONFIG_VERSION, requested_version) {
+        Some(version) => version,
+        None => return api_error(&VERSION_CONFLICT),
+    };
 
     if let Err(err) = store.save_thought_config(&config).await {
         error!(error = %err, "failed to persist thought runtime config");
@@ -92,7 +101,6 @@ async fn put_thought_config(
         *runtime_config = config.clone();
     }
 
-    let new_version = THOUGHT_CONFIG_VERSION.fetch_add(1, Ordering::Release) + 1;
     let mut body = serde_json::to_value(&config).unwrap_or_else(|_| serde_json::json!({}));
     if let Some(obj) = body.as_object_mut() {
         obj.insert("version".to_string(), serde_json::json!(new_version));
@@ -133,6 +141,7 @@ pub fn routes() -> Router<Arc<AppState>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::LazyLock;
     use crate::api::PublishedSelectionState;
     use crate::auth::{AuthScope, OBSERVER_SCOPES, OPERATOR_SCOPES};
     use crate::config::Config;
@@ -149,7 +158,10 @@ mod tests {
     use chrono::Utc;
     use serde_json::Value;
     use tokio::sync::mpsc;
+    use tokio::sync::Mutex;
     use tokio::sync::RwLock;
+
+    static VERSION_TEST_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
     fn test_state(
         file_store: Option<Arc<crate::persistence::file_store::FileStore>>,
@@ -382,6 +394,8 @@ mod tests {
 
     #[tokio::test]
     async fn put_thought_config_optimistic_concurrency() {
+        let _guard = VERSION_TEST_LOCK.lock().await;
+        THOUGHT_CONFIG_VERSION.store(0, Ordering::Release);
         let dir = tempfile::tempdir().expect("tempdir");
         let store = crate::persistence::file_store::FileStore::new(dir.path())
             .await
@@ -407,5 +421,47 @@ mod tests {
         assert_eq!(response.status(), StatusCode::PRECONDITION_FAILED);
         let json = response_json(response).await;
         assert_eq!(json["code"], "VERSION_CONFLICT");
+    }
+
+    #[tokio::test]
+    async fn put_thought_config_optimistic_concurrency_rejects_second_concurrent_if_match() {
+        let _guard = VERSION_TEST_LOCK.lock().await;
+        THOUGHT_CONFIG_VERSION.store(0, Ordering::Release);
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = crate::persistence::file_store::FileStore::new(dir.path())
+            .await
+            .expect("file store");
+        let state = test_state(Some(store));
+
+        let initial = put_config_response(state.clone(), ThoughtConfig::default(), None).await;
+        assert_eq!(initial.status(), StatusCode::OK);
+        let json = response_json(initial).await;
+        let expected_version = json["version"].as_u64().expect("version should be present");
+
+        let (resp_a, resp_b) = tokio::join!(
+            put_config_response(state.clone(), ThoughtConfig::default(), Some(expected_version)),
+            put_config_response(state, ThoughtConfig::default(), Some(expected_version)),
+        );
+
+        let status_a = resp_a.status();
+        let status_b = resp_b.status();
+        assert!(status_a == StatusCode::OK || status_b == StatusCode::OK);
+        assert!(status_a == StatusCode::PRECONDITION_FAILED || status_b == StatusCode::PRECONDITION_FAILED);
+
+        let json_a = response_json(resp_a).await;
+        let json_b = response_json(resp_b).await;
+        let success_json = if status_a == StatusCode::OK {
+            &json_a
+        } else {
+            &json_b
+        };
+        let conflict_json = if status_a == StatusCode::PRECONDITION_FAILED {
+            &json_a
+        } else {
+            &json_b
+        };
+
+        assert_eq!(success_json["version"], serde_json::json!(expected_version + 1));
+        assert_eq!(conflict_json["code"], "VERSION_CONFLICT");
     }
 }

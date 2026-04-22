@@ -4828,9 +4828,12 @@ pub(crate) fn render_mermaid_viewer(
         tracing::warn!(
             session_id = %viewer.session_id,
             error = %err,
-            "Mermaid viewport render failed; leaving panel empty"
+            "Mermaid viewport render failed; rendering wrapped error text"
         );
         viewer.render_error = Some(err);
+        if let Some(error) = viewer.render_error.as_deref() {
+            render_wrapped_lines(renderer, content_rect, error, Color::Red);
+        }
         return;
     }
     viewer.render_error = None;
