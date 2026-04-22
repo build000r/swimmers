@@ -1,11 +1,11 @@
 # Swimmers
 
-Native terminal session manager for tmux. The supported surface is the Rust TUI in `src/bin/swimmers-tui.rs`, backed by a small Axum HTTP API and optional repo-local sprite/theme overrides.
+Native terminal session manager for tmux. The supported surface is the Rust TUI in `src/bin/swimmers_tui/`, backed by a small Axum HTTP API and optional repo-local sprite/theme overrides.
 
 ## Architecture
 
 - **Server** (`src/`): Rust, Axum HTTP, Tokio async runtime, portable-pty bridging to tmux sessions
-- **Client** (`src/bin/swimmers-tui.rs`): Rust TUI for session browsing, thoughts, repo actions, and native terminal handoff
+- **Client** (`src/bin/swimmers_tui/`): Rust TUI for session browsing, thoughts, repo actions, and native terminal handoff
 - **Persistence** (`data/swimmers/`): file-based session snapshots and thought runtime config
 - **Metrics**: Prometheus exposition at `GET /metrics`
 
@@ -30,7 +30,7 @@ All supported routes live under `/v1/`:
 
 - `SessionSupervisor` owns session actors, tmux discovery, lifecycle broadcasts, and persistence checkpoints.
 - `SessionActor` owns PTY I/O, replay buffering, scroll-guard coalescing, state detection, and session summaries.
-- The thought subsystem publishes in-process updates; there is no supported browser/realtime transport layer.
+- The thought subsystem publishes in-process updates; `src/web/` provides a browser-based remote-attach surface for convenience, though the TUI remains the flagship experience.
 - `ScrollGuard` coalesces redraw bursts from multi-client tmux scrolling so the TUI sees the final frame instead of intermediate garbage.
 
 ## File map
@@ -44,11 +44,14 @@ src/
   api/
     mod.rs                    — router composition and AppState
     dirs.rs                   — directory browser + service restart endpoints
+    health.rs                 — health check endpoint
     native.rs                 — native terminal handoff endpoints
     selection.rs              — published selection endpoints
+    service.rs                — service management endpoints
     sessions.rs               — session CRUD and session detail endpoints
     skills.rs                 — skill listing endpoints
     thought_config.rs         — thought runtime config endpoints
+    web_actions.rs            — web-surface action endpoints
   session/
     actor.rs                  — per-session PTY actor
     supervisor.rs             — tmux discovery, lifecycle, persistence hooks
@@ -65,6 +68,31 @@ src/
   metrics/
     mod.rs                    — metric helpers and registration
     endpoint.rs               — `/metrics`
+  bin/
+    swimmers_tui/
+      mod.rs                  — TUI entry point
+      api.rs                  — API client helpers
+      app.rs                  — application state
+      commit.rs               — commit flow UI
+      entity.rs               — swimmer entity rendering
+      events.rs               — input/event handling
+      in_process.rs           — in-process server bridge
+      layout.rs               — layout computation
+      lifecycle.rs            — startup and shutdown
+      mermaid.rs              — mermaid diagram support
+      picker.rs               — interactive picker widget
+      render.rs               — frame rendering
+      terminal.rs             — terminal setup and teardown
+      thought_config_editor.rs — thought config editing UI
+      thoughts.rs             — thought display panel
+      voice.rs                — voice input support
+      tests/                  — TUI integration tests
+  web/
+    mod.rs                    — browser remote-attach surface
+    app.css                   — web UI styles
+    app.js                    — web UI logic
+    input_support.js          — input handling helpers
+    rendered_surface.js       — terminal surface renderer
   persistence/
     file_store.rs             — local persistence
 ```
