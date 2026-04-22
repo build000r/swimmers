@@ -4,6 +4,7 @@ data/
 .env
 .swimmers/
 .throngterm/
+.claude/*.lock
 
 # NTM / modes-of-reasoning tool artifacts
 .ntm/
