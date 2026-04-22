@@ -39,9 +39,11 @@ pub struct Config {
     pub auth_token: Option<String>,
     pub observer_token: Option<String>,
     pub thought_tick_ms: u64,
-    #[allow(dead_code)] // TODO: re-evaluate when per-session thought defaults are used by the API
+    #[allow(dead_code)]
+    // FIXME(2026-04-21): Session-level thought defaults are not yet surfaced in API payloads.
     pub thoughts_enabled_default: bool,
-    #[allow(dead_code)] // TODO: re-evaluate when session delete mode is surfaced in the API
+    #[allow(dead_code)]
+    // FIXME(2026-04-21): API delete flows still use a fixed mode and do not expose this field.
     pub session_delete_mode: SessionDeleteMode,
     pub replay_buffer_size: usize,
     pub outbound_queue_bound: usize,
@@ -62,6 +64,7 @@ impl Default for Config {
             thoughts_enabled_default: true,
             session_delete_mode: SessionDeleteMode::DetachBridge,
             replay_buffer_size: 512 * 1024, // 512KB replay ring
+            // NOTE: empirical default — sized well above the 600-frame burst floor verified in tests.
             outbound_queue_bound: 4096,
             thought_backend: ThoughtBackend::Daemon,
             overload_window_ms: 1000,
@@ -184,8 +187,7 @@ mod tests {
     #[test]
     fn burst_of_600_frames_fits_in_default_outbound_queue() {
         let config = Config::default();
-        // A burst of 600 frames (e.g. rapid AI agent output) must fit within
-        // the outbound queue bound without causing subscriber eviction.
+        // NOTE: empirical default — revisit if production bursts exceed 600 frames.
         assert!(
             config.outbound_queue_bound >= 600,
             "outbound_queue_bound ({}) must be >= 600 to tolerate high-throughput bursts",

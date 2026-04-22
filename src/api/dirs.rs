@@ -22,17 +22,17 @@ struct DirQuery {
 }
 
 fn error_response(status: StatusCode, code: &str, message: impl Into<String>) -> Response {
-    (
-        status,
-        Json(
-            serde_json::to_value(ErrorResponse {
-                code: code.to_string(),
-                message: Some(message.into()),
-            })
-            .unwrap(),
-        ),
-    )
-        .into_response()
+    let body = serde_json::to_value(ErrorResponse {
+        code: code.to_string(),
+        message: Some(message.into()),
+    })
+    .unwrap_or_else(|_| {
+        serde_json::json!({
+            "code": "internal_error",
+            "message": "failed to serialize error response",
+        })
+    });
+    (status, Json(body)).into_response()
 }
 
 fn service_error_response(error: ApiServiceError) -> Response {
