@@ -543,30 +543,46 @@ async fn run_osascript_output_with_timeout(
         .spawn()
         .map_err(|err| anyhow!("failed to run osascript: {err}"))?;
 
-    let status = match timeout(timeout_duration, child.wait()).await {
-        Ok(result) => result.map_err(|err| anyhow!("failed to run osascript: {err}"))?,
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    let mut stdout_pipe = child.stdout.take();
+    let mut stderr_pipe = child.stderr.take();
+
+    let status = match timeout(timeout_duration, async {
+        let wait_status = async {
+            child
+                .wait()
+                .await
+                .map_err(|err| anyhow!("failed to run osascript: {err}"))
+        };
+        let read_stdout = async {
+            if let Some(pipe) = stdout_pipe.as_mut() {
+                pipe.read_to_end(&mut stdout)
+                    .await
+                    .map_err(|err| anyhow!("failed to collect osascript output: {err}"))?;
+            }
+            Ok::<_, anyhow::Error>(())
+        };
+        let read_stderr = async {
+            if let Some(pipe) = stderr_pipe.as_mut() {
+                pipe.read_to_end(&mut stderr)
+                    .await
+                    .map_err(|err| anyhow!("failed to collect osascript output: {err}"))?;
+            }
+            Ok::<_, anyhow::Error>(())
+        };
+        let (status, _, _) = tokio::try_join!(wait_status, read_stdout, read_stderr)?;
+        Ok::<_, anyhow::Error>(status)
+    })
+    .await
+    {
+        Ok(result) => result?,
         Err(_) => {
             let _ = child.kill().await;
             let _ = child.wait().await;
             return Err(osascript_timeout_error(operation, timeout_duration));
         }
     };
-
-    let mut stdout = Vec::new();
-    if let Some(mut stdout_pipe) = child.stdout.take() {
-        stdout_pipe
-            .read_to_end(&mut stdout)
-            .await
-            .map_err(|err| anyhow!("failed to collect osascript output: {err}"))?;
-    }
-
-    let mut stderr = Vec::new();
-    if let Some(mut stderr_pipe) = child.stderr.take() {
-        stderr_pipe
-            .read_to_end(&mut stderr)
-            .await
-            .map_err(|err| anyhow!("failed to collect osascript output: {err}"))?;
-    }
 
     Ok(std::process::Output {
         status,
@@ -1324,11 +1340,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn run_open_or_focus_script_returns_typed_timeout_error() {
-        let _env_guard = crate::test_support::ENV_LOCK
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
-
+    async fn run_osascript_output_kills_child_on_timeout() {
         let temp = tempdir().unwrap();
         let fake_bin_dir = temp.path().join("bin");
         std::fs::create_dir_all(&fake_bin_dir).unwrap();
@@ -1338,7 +1350,7 @@ mod tests {
         std::fs::write(
             &fake_osascript,
             format!(
-                "#!/bin/sh\nset -eu\nprintf '%s\\n' \"$$\" > \"{pid}\"\n/bin/sleep 1\nprintf 'created|pane-timeout\\n'\n",
+                "#!/bin/sh\nset -eu\nprintf '%s\\n' \"$$\" > \"{pid}\"\n/bin/sleep 2\nprintf 'created|pane-timeout\\n'\n",
                 pid = pid_path.display()
             ),
         )
@@ -1347,29 +1359,14 @@ mod tests {
         perms.set_mode(0o755);
         std::fs::set_permissions(&fake_osascript, perms).unwrap();
 
-        let script = temp.path().join("iterm-focus.scpt");
-        std::fs::write(&script, "-- fake").unwrap();
-
-        let original_path = std::env::var_os("PATH");
-        let path_value = std::env::join_paths([fake_bin_dir.as_path()]).unwrap();
-        std::env::set_var("PATH", path_value);
-
-        let err = run_open_or_focus_script_with_timeout(
-            &script,
-            "sess-timeout",
-            "tmux-timeout",
-            "exec /usr/bin/tmux attach-session -t tmux-timeout",
-            "timeout-display",
-            None,
-            Duration::from_millis(200),
+        let mut command = Command::new(&fake_osascript);
+        let err = run_osascript_output_with_timeout(
+            &mut command,
+            "opening/focusing iTerm session",
+            Duration::from_secs(1),
         )
         .await
         .expect_err("sleeping osascript should time out");
-
-        match original_path {
-            Some(value) => std::env::set_var("PATH", value),
-            None => std::env::remove_var("PATH"),
-        }
 
         assert!(
             err.chain().any(|cause| cause.is::<NativeScriptError>()),
@@ -1393,7 +1390,7 @@ mod tests {
         }
 
         let pid = pid.expect("fake osascript should persist its pid");
-        let probe = ProcessCommand::new("kill")
+        let probe = ProcessCommand::new("/bin/kill")
             .args(["-0", pid.as_str()])
             .status()
             .expect("kill -0 should execute");
