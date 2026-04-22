@@ -1,12 +1,13 @@
 #![cfg_attr(not(feature = "personal-workflows"), allow(dead_code))]
 
+use crate::api::envelope::{error_response, success_json};
 use crate::api::service::{
     list_dirs as list_dirs_service, restart_dir_services as restart_dir_services_service,
     start_dir_repo_action as start_dir_repo_action_service, ApiServiceError,
 };
 use crate::api::AppState;
 use crate::auth::{AuthInfo, AuthScope};
-use crate::types::{DirRepoActionRequest, DirRestartRequest, ErrorResponse};
+use crate::types::{DirRepoActionRequest, DirRestartRequest};
 use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
@@ -19,20 +20,6 @@ struct DirQuery {
     path: Option<String>,
     managed_only: Option<bool>,
     group: Option<String>,
-}
-
-fn error_response(status: StatusCode, code: &str, message: impl Into<String>) -> Response {
-    let body = serde_json::to_value(ErrorResponse {
-        code: code.to_string(),
-        message: Some(message.into()),
-    })
-    .unwrap_or_else(|_| {
-        serde_json::json!({
-            "code": "internal_error",
-            "message": "failed to serialize error response",
-        })
-    });
-    (status, Json(body)).into_response()
 }
 
 fn service_error_response(error: ApiServiceError) -> Response {
@@ -57,11 +44,7 @@ async fn list_dirs(
     )
     .await
     {
-        Ok(response) => (
-            StatusCode::OK,
-            Json(serde_json::to_value(response).unwrap()),
-        )
-            .into_response(),
+        Ok(response) => success_json(StatusCode::OK, &response),
         Err(error) => service_error_response(error),
     }
 }
@@ -77,11 +60,7 @@ async fn restart_dir_services(
     }
 
     match restart_dir_services_service(&body.path).await {
-        Ok(response) => (
-            StatusCode::OK,
-            Json(serde_json::to_value(response).unwrap()),
-        )
-            .into_response(),
+        Ok(response) => success_json(StatusCode::OK, &response),
         Err(error) => service_error_response(error),
     }
 }
@@ -97,11 +76,7 @@ async fn start_dir_repo_action(
     }
 
     match start_dir_repo_action_service(state, &body.path, body.kind).await {
-        Ok(response) => (
-            StatusCode::ACCEPTED,
-            Json(serde_json::to_value(response).unwrap()),
-        )
-            .into_response(),
+        Ok(response) => success_json(StatusCode::ACCEPTED, &response),
         Err(error) => service_error_response(error),
     }
 }

@@ -4,14 +4,15 @@ use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::routing::get;
-use axum::{Extension, Json, Router};
+use axum::{Extension, Router};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use crate::api::envelope::{api_error, success_json, INVALID_SKILL_TOOL};
 use crate::api::AppState;
 use crate::auth::{AuthInfo, AuthScope};
-use crate::types::{ErrorResponse, SkillListResponse, SkillSummary};
+use crate::types::{SkillListResponse, SkillSummary};
 
 const MAX_SCAN_DEPTH: usize = 6;
 
@@ -204,17 +205,7 @@ async fn list_skills(
     }
 
     let Some(tool) = SkillRegistryTool::from_query(query.tool.as_deref()) else {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(
-                serde_json::to_value(ErrorResponse {
-                    code: "INVALID_SKILL_TOOL".to_string(),
-                    message: Some("tool must be one of: claude, codex".to_string()),
-                })
-                .unwrap(),
-            ),
-        )
-            .into_response();
+        return api_error(&INVALID_SKILL_TOOL);
     };
 
     let root = skill_root_for_tool(tool);
@@ -223,17 +214,13 @@ async fn list_skills(
         .map(collect_skill_summaries)
         .unwrap_or_default();
 
-    (
+    success_json(
         StatusCode::OK,
-        Json(
-            serde_json::to_value(SkillListResponse {
-                tool: tool.wire_name().to_string(),
-                skills,
-            })
-            .unwrap(),
-        ),
+        &SkillListResponse {
+            tool: tool.wire_name().to_string(),
+            skills,
+        },
     )
-        .into_response()
 }
 
 pub fn routes() -> Router<Arc<AppState>> {

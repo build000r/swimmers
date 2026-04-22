@@ -12,10 +12,16 @@ use crate::api::AppState;
 use crate::thought::health::{BridgeHealthSnapshot, BridgeStatus};
 
 #[derive(Debug, Serialize)]
+struct PersistenceHealth {
+    ok: bool,
+}
+
+#[derive(Debug, Serialize)]
 struct HealthResponse {
     status: BridgeStatus,
     uptime_secs: u64,
     thought_bridge: BridgeHealthSnapshot,
+    persistence: PersistenceHealth,
 }
 
 #[derive(Debug, Serialize)]
@@ -41,10 +47,14 @@ fn process_start() -> Instant {
 fn health_response(state: &Arc<AppState>) -> HealthResponse {
     let uptime_secs = process_start().elapsed().as_secs();
     let thought_bridge = state.bridge_health.snapshot();
+    let persistence = PersistenceHealth {
+        ok: state.current_file_store().is_some(),
+    };
     HealthResponse {
         status: thought_bridge.status,
         uptime_secs,
         thought_bridge,
+        persistence,
     }
 }
 
@@ -150,6 +160,48 @@ mod tests {
         );
         assert_eq!(json["thought_bridge"]["status"], "healthy");
         assert_eq!(json["thought_bridge"]["tick_ms"], 15_000);
+        assert!(
+            json["persistence"].is_object(),
+            "persistence field should be present"
+        );
+        assert_eq!(
+            json["persistence"]["ok"], false,
+            "persistence.ok should be false without a file store"
+        );
+    }
+
+    #[tokio::test]
+    async fn health_reports_persistence_ok_when_file_store_present() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = crate::persistence::file_store::FileStore::new(dir.path())
+            .await
+            .expect("file store");
+
+        let bridge_health = Arc::new(BridgeHealthState::new_with_tick(Duration::from_secs(15)));
+        bridge_health.record_success(None);
+
+        let config = Arc::new(Config::default());
+        let supervisor = SessionSupervisor::new(config.clone());
+        let state = Arc::new(AppState {
+            supervisor,
+            config,
+            thought_config: Arc::new(RwLock::new(ThoughtConfig::default())),
+            native_desktop_app: Arc::new(RwLock::new(crate::types::NativeDesktopApp::Iterm)),
+            ghostty_open_mode: Arc::new(RwLock::new(crate::types::GhosttyOpenMode::Swap)),
+            sync_request_sequence: Arc::new(SyncRequestSequence::new()),
+            daemon_defaults: crate::api::once_lock_with(None),
+            file_store: crate::api::once_lock_with(Some(store)),
+            bridge_health,
+            published_selection: Arc::new(RwLock::new(
+                crate::api::PublishedSelectionState::default(),
+            )),
+            repo_actions: RepoActionTracker::default(),
+        });
+
+        let response = health(State(state)).await.into_response();
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let json = response_json(response).await;
+        assert_eq!(json["persistence"]["ok"], true);
     }
 
     #[tokio::test]

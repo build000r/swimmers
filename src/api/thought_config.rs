@@ -1,12 +1,17 @@
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use axum::extract::State;
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Extension, Json, Router};
 use tracing::error;
 
+use crate::api::envelope::{
+    api_error, api_error_msg, parse_if_match_version, success_json, INTERNAL_ERROR,
+    PERSISTENCE_UNAVAILABLE, VALIDATION_FAILED, VERSION_CONFLICT,
+};
 use crate::api::AppState;
 use crate::auth::{AuthInfo, AuthScope};
 use crate::openrouter_models::cached_or_default_openrouter_candidates;
@@ -14,7 +19,9 @@ use crate::thought::probe::run_thought_config_probe;
 use crate::thought::protocol::{build_sync_request, SyncRequest};
 use crate::thought::runtime_config::ThoughtConfig;
 use crate::thought_ui::thought_config_ui_metadata;
-use crate::types::{ErrorResponse, ThoughtConfigResponse};
+use crate::types::ThoughtConfigResponse;
+
+static THOUGHT_CONFIG_VERSION: AtomicU64 = AtomicU64::new(0);
 
 async fn get_thought_config(
     Extension(auth): Extension<AuthInfo>,
@@ -43,6 +50,7 @@ async fn get_thought_sync_preview(
 async fn put_thought_config(
     Extension(auth): Extension<AuthInfo>,
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Json(body): Json<ThoughtConfig>,
 ) -> impl IntoResponse {
     if let Err(resp) = auth.require_scope(AuthScope::SessionsWrite) {
@@ -51,42 +59,32 @@ async fn put_thought_config(
 
     let config = match body.normalize_and_validate() {
         Ok(config) => config,
-        Err(err) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(ErrorResponse {
-                    code: "VALIDATION_FAILED".to_string(),
-                    message: Some(err.to_string()),
-                }),
-            )
-                .into_response();
-        }
+        Err(err) => return api_error_msg(&VALIDATION_FAILED, err.to_string()),
     };
 
     let store = match state.current_file_store() {
         Some(store) => store,
         None => {
-            return (
-                StatusCode::SERVICE_UNAVAILABLE,
-                Json(ErrorResponse {
-                    code: "PERSISTENCE_UNAVAILABLE".to_string(),
-                    message: Some("thought config persistence is unavailable".to_string()),
-                }),
-            )
-                .into_response();
+            return api_error_msg(
+                &PERSISTENCE_UNAVAILABLE,
+                "thought config persistence is unavailable",
+            );
         }
     };
 
+    let requested_version = parse_if_match_version(&headers);
+    {
+        let current = THOUGHT_CONFIG_VERSION.load(Ordering::Acquire);
+        if let Some(v) = requested_version {
+            if v != current {
+                return api_error(&VERSION_CONFLICT);
+            }
+        }
+    }
+
     if let Err(err) = store.save_thought_config(&config).await {
         error!(error = %err, "failed to persist thought runtime config");
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                code: "INTERNAL_ERROR".to_string(),
-                message: Some("failed to persist thought config".to_string()),
-            }),
-        )
-            .into_response();
+        return api_error_msg(&INTERNAL_ERROR, "failed to persist thought config");
     }
 
     {
@@ -94,7 +92,12 @@ async fn put_thought_config(
         *runtime_config = config.clone();
     }
 
-    (StatusCode::OK, Json(config)).into_response()
+    let new_version = THOUGHT_CONFIG_VERSION.fetch_add(1, Ordering::Release) + 1;
+    let mut body = serde_json::to_value(&config).unwrap_or_else(|_| serde_json::json!({}));
+    if let Some(obj) = body.as_object_mut() {
+        obj.insert("version".to_string(), serde_json::json!(new_version));
+    }
+    success_json(StatusCode::OK, &body)
 }
 
 async fn post_thought_config_test(
@@ -108,23 +111,10 @@ async fn post_thought_config_test(
 
     let config = match body.normalize_and_validate() {
         Ok(config) => config,
-        Err(err) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(ErrorResponse {
-                    code: "VALIDATION_FAILED".to_string(),
-                    message: Some(err.to_string()),
-                }),
-            )
-                .into_response();
-        }
+        Err(err) => return api_error_msg(&VALIDATION_FAILED, err.to_string()),
     };
 
-    (
-        StatusCode::OK,
-        Json(run_thought_config_probe(&config).await),
-    )
-        .into_response()
+    success_json(StatusCode::OK, &run_thought_config_probe(&config).await)
 }
 
 pub fn routes() -> Router<Arc<AppState>> {
@@ -154,6 +144,7 @@ mod tests {
     };
     use axum::body::to_bytes;
     use axum::extract::{Json, State};
+    use axum::http::HeaderMap;
     use axum::response::IntoResponse;
     use chrono::Utc;
     use serde_json::Value;
@@ -220,6 +211,7 @@ mod tests {
         let response = put_thought_config(
             Extension(AuthInfo::new(OPERATOR_SCOPES.to_vec())),
             State(test_state(None)),
+            HeaderMap::new(),
             Json(ThoughtConfig {
                 cadence_hot_ms: 1,
                 ..ThoughtConfig::default()
@@ -256,6 +248,7 @@ mod tests {
         let response = put_thought_config(
             Extension(AuthInfo::new(OPERATOR_SCOPES.to_vec())),
             State(test_state(None)),
+            HeaderMap::new(),
             Json(ThoughtConfig::default()),
         )
         .await
@@ -363,5 +356,56 @@ mod tests {
         assert_eq!(first.0.id, "1");
         assert_eq!(second.0.id, "1");
         assert_eq!(state.sync_request_sequence.peek_next(), 1);
+    }
+
+    async fn put_config_response(
+        state: Arc<AppState>,
+        config: ThoughtConfig,
+        if_match: Option<u64>,
+    ) -> axum::response::Response {
+        let mut headers = HeaderMap::new();
+        if let Some(v) = if_match {
+            headers.insert(
+                "if-match",
+                format!("\"{v}\"").parse().expect("header value"),
+            );
+        }
+        put_thought_config(
+            Extension(AuthInfo::new(OPERATOR_SCOPES.to_vec())),
+            State(state),
+            headers,
+            Json(config),
+        )
+        .await
+        .into_response()
+    }
+
+    #[tokio::test]
+    async fn put_thought_config_optimistic_concurrency() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = crate::persistence::file_store::FileStore::new(dir.path())
+            .await
+            .expect("file store");
+        let state = test_state(Some(store));
+
+        // (b) missing header → 200 + new version
+        let response = put_config_response(state.clone(), ThoughtConfig::default(), None).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let json = response_json(response).await;
+        let v1 = json["version"].as_u64().expect("version should be present");
+        assert!(v1 > 0);
+
+        // (c) matching version → 200 + bumped version
+        let response = put_config_response(state.clone(), ThoughtConfig::default(), Some(v1)).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let json = response_json(response).await;
+        let v2 = json["version"].as_u64().expect("version should be present");
+        assert_eq!(v2, v1 + 1);
+
+        // (a) stale version → 412
+        let response = put_config_response(state.clone(), ThoughtConfig::default(), Some(v1)).await;
+        assert_eq!(response.status(), StatusCode::PRECONDITION_FAILED);
+        let json = response_json(response).await;
+        assert_eq!(json["code"], "VERSION_CONFLICT");
     }
 }

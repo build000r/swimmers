@@ -1,3 +1,7 @@
+use crate::api::envelope::{
+    api_error, api_error_msg, success_json, NATIVE_DESKTOP_UNAVAILABLE, NATIVE_OPEN_FAILED,
+    SESSION_EXITED, SESSION_NOT_FOUND,
+};
 use crate::api::service::{
     native_status_for_host as native_status_for_host_service, open_native_session_for_host,
     NativeOpenServiceError,
@@ -5,7 +9,7 @@ use crate::api::service::{
 use crate::api::AppState;
 use crate::auth::{AuthInfo, AuthScope};
 use crate::types::{
-    ErrorResponse, NativeDesktopConfigRequest, NativeDesktopModeRequest, NativeDesktopOpenRequest,
+    NativeDesktopConfigRequest, NativeDesktopModeRequest, NativeDesktopOpenRequest,
     NativeDesktopStatusResponse,
 };
 use axum::extract::State;
@@ -20,20 +24,6 @@ fn request_host(headers: &HeaderMap) -> &str {
         .get("host")
         .and_then(|value| value.to_str().ok())
         .unwrap_or("localhost")
-}
-
-fn unsupported_native_response(reason: Option<String>) -> axum::response::Response {
-    (
-        StatusCode::BAD_REQUEST,
-        Json(
-            serde_json::to_value(ErrorResponse {
-                code: "NATIVE_DESKTOP_UNAVAILABLE".to_string(),
-                message: reason,
-            })
-            .unwrap(),
-        ),
-    )
-        .into_response()
 }
 
 async fn native_status_for_host(
@@ -69,7 +59,7 @@ async fn set_native_app(
     }
 
     let status = native_status_for_host(&state, &headers).await;
-    (StatusCode::OK, Json(serde_json::to_value(status).unwrap())).into_response()
+    success_json(StatusCode::OK, &status)
 }
 
 async fn set_native_mode(
@@ -88,7 +78,7 @@ async fn set_native_mode(
     }
 
     let status = native_status_for_host(&state, &headers).await;
-    (StatusCode::OK, Json(serde_json::to_value(status).unwrap())).into_response()
+    success_json(StatusCode::OK, &status)
 }
 
 async fn native_open(
@@ -102,41 +92,14 @@ async fn native_open(
     }
 
     match open_native_session_for_host(&state, request_host(&headers), &body.session_id).await {
-        Ok(result) => (StatusCode::OK, Json(serde_json::to_value(result).unwrap())).into_response(),
-        Err(NativeOpenServiceError::Unsupported { reason }) => unsupported_native_response(reason),
-        Err(NativeOpenServiceError::SessionNotFound) => (
-            StatusCode::NOT_FOUND,
-            Json(
-                serde_json::to_value(ErrorResponse {
-                    code: "SESSION_NOT_FOUND".to_string(),
-                    message: None,
-                })
-                .unwrap(),
-            ),
-        )
-            .into_response(),
-        Err(NativeOpenServiceError::SessionExited) => (
-            StatusCode::CONFLICT,
-            Json(
-                serde_json::to_value(ErrorResponse {
-                    code: "SESSION_EXITED".to_string(),
-                    message: Some("session has already exited".to_string()),
-                })
-                .unwrap(),
-            ),
-        )
-            .into_response(),
-        Err(NativeOpenServiceError::Internal(err)) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(
-                serde_json::to_value(ErrorResponse {
-                    code: "NATIVE_DESKTOP_OPEN_FAILED".to_string(),
-                    message: Some(err),
-                })
-                .unwrap(),
-            ),
-        )
-            .into_response(),
+        Ok(result) => success_json(StatusCode::OK, &result),
+        Err(NativeOpenServiceError::Unsupported { reason }) => {
+            let msg = reason.unwrap_or_else(|| NATIVE_DESKTOP_UNAVAILABLE.default_message.into());
+            api_error_msg(&NATIVE_DESKTOP_UNAVAILABLE, msg)
+        }
+        Err(NativeOpenServiceError::SessionNotFound) => api_error(&SESSION_NOT_FOUND),
+        Err(NativeOpenServiceError::SessionExited) => api_error(&SESSION_EXITED),
+        Err(NativeOpenServiceError::Internal(err)) => api_error_msg(&NATIVE_OPEN_FAILED, err),
     }
 }
 

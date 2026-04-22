@@ -1,15 +1,21 @@
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+
 use axum::extract::State;
+use axum::http::HeaderMap;
 use axum::response::IntoResponse;
 use axum::routing::get;
 use axum::{Extension, Json, Router};
 use chrono::Utc;
-use std::sync::Arc;
 
+use crate::api::envelope::{api_error, parse_if_match_version, success_json, VERSION_CONFLICT};
 use crate::api::{fetch_live_summary, AppState, PublishedSelectionState};
 use crate::auth::{AuthInfo, AuthScope};
 use crate::types::{
     ErrorResponse, PublishSelectionRequest, PublishedSelectionResponse, SessionState,
 };
+
+static SELECTION_VERSION: AtomicU64 = AtomicU64::new(0);
 
 async fn get_published_selection(
     Extension(auth): Extension<AuthInfo>,
@@ -68,9 +74,18 @@ async fn get_published_selection(
 async fn publish_selection(
     Extension(auth): Extension<AuthInfo>,
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Json(body): Json<PublishSelectionRequest>,
-) -> Result<Json<serde_json::Value>, axum::response::Response> {
+) -> Result<axum::response::Response, axum::response::Response> {
     auth.require_scope(AuthScope::SessionsWrite)?;
+
+    let requested_version = parse_if_match_version(&headers);
+    let current = SELECTION_VERSION.load(Ordering::Acquire);
+    if let Some(v) = requested_version {
+        if v != current {
+            return Err(api_error(&VERSION_CONFLICT));
+        }
+    }
 
     let session_id = body.session_id.and_then(|value| {
         let trimmed = value.trim();
@@ -88,7 +103,11 @@ async fn publish_selection(
         published_at,
     };
 
-    Ok(Json(serde_json::json!({ "ok": true })))
+    let new_version = SELECTION_VERSION.fetch_add(1, Ordering::Release) + 1;
+    Ok(success_json(
+        axum::http::StatusCode::OK,
+        &serde_json::json!({ "ok": true, "version": new_version }),
+    ))
 }
 
 pub fn routes() -> Router<Arc<AppState>> {
@@ -96,4 +115,102 @@ pub fn routes() -> Router<Arc<AppState>> {
         "/v1/selection",
         get(get_published_selection).put(publish_selection),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::api::PublishedSelectionState;
+    use crate::auth::OPERATOR_SCOPES;
+    use crate::config::Config;
+    use crate::session::supervisor::SessionSupervisor;
+    use crate::thought::protocol::SyncRequestSequence;
+    use crate::thought::runtime_config::ThoughtConfig;
+    use axum::body::to_bytes;
+    use axum::extract::{Json, State};
+    use axum::http::HeaderMap;
+    use serde_json::Value;
+    use tokio::sync::RwLock;
+
+    fn test_state() -> Arc<AppState> {
+        let config = Arc::new(Config::default());
+        let supervisor = SessionSupervisor::new(config.clone());
+        Arc::new(AppState {
+            supervisor,
+            config,
+            thought_config: Arc::new(RwLock::new(ThoughtConfig::default())),
+            native_desktop_app: Arc::new(RwLock::new(crate::types::NativeDesktopApp::Iterm)),
+            ghostty_open_mode: Arc::new(RwLock::new(crate::types::GhosttyOpenMode::Swap)),
+            sync_request_sequence: Arc::new(SyncRequestSequence::new()),
+            daemon_defaults: crate::api::once_lock_with(None),
+            file_store: crate::api::once_lock_with(None),
+            bridge_health: Arc::new(crate::thought::health::BridgeHealthState::new_with_tick(
+                std::time::Duration::from_secs(15),
+            )),
+            published_selection: Arc::new(RwLock::new(PublishedSelectionState::default())),
+            repo_actions: crate::host_actions::RepoActionTracker::default(),
+        })
+    }
+
+    async fn response_json(response: axum::response::Response) -> Value {
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("response body");
+        serde_json::from_slice(&body).expect("json body")
+    }
+
+    async fn publish_response(
+        state: Arc<AppState>,
+        session_id: Option<&str>,
+        if_match: Option<u64>,
+    ) -> axum::response::Response {
+        let mut headers = HeaderMap::new();
+        if let Some(v) = if_match {
+            headers.insert(
+                "if-match",
+                format!("\"{v}\"").parse().expect("header value"),
+            );
+        }
+        let result = publish_selection(
+            Extension(AuthInfo::new(OPERATOR_SCOPES.to_vec())),
+            State(state),
+            headers,
+            Json(PublishSelectionRequest {
+                session_id: session_id.map(|s| s.to_string()),
+            }),
+        )
+        .await;
+        match result {
+            Ok(resp) => resp,
+            Err(resp) => resp,
+        }
+    }
+
+    #[tokio::test]
+    async fn publish_selection_optimistic_concurrency() {
+        let state = test_state();
+
+        // (b) missing header → 200 + new version
+        let response = publish_response(state.clone(), Some("sess-1"), None).await;
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let json = response_json(response).await;
+        let v1 = json["version"].as_u64().expect("version should be present");
+        assert!(v1 > 0);
+
+        // (c) matching version → 200 + bumped version
+        let response = publish_response(state.clone(), Some("sess-2"), Some(v1)).await;
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let json = response_json(response).await;
+        let v2 = json["version"].as_u64().expect("version should be present");
+        assert_eq!(v2, v1 + 1);
+
+        // (a) stale version → 412
+        let response = publish_response(state.clone(), Some("sess-3"), Some(v1)).await;
+        assert_eq!(
+            response.status(),
+            axum::http::StatusCode::PRECONDITION_FAILED
+        );
+        let json = response_json(response).await;
+        assert_eq!(json["code"], "VERSION_CONFLICT");
+    }
 }
