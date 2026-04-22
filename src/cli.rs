@@ -13,6 +13,7 @@
 //! environment variables — clap is intentionally only used for subcommands,
 //! not as a replacement for env-var-based config. See README.md.
 
+use std::net::IpAddr;
 use std::path::PathBuf;
 use std::process::Command as ProcessCommand;
 
@@ -308,14 +309,40 @@ pub fn run_doctor_checks(
     findings
 }
 
-/// Returns true when `bind` is one of the well-known loopback strings.
-///
-/// Conservative on purpose: it only matches the canonical strings the
-/// server actually uses. `127.0.0.2` etc. would also be loopback in theory,
-/// but treating those as non-loopback is a safe false-positive — the
-/// LocalTrust gate will refuse to start, which is the correct failure mode.
+fn bind_host(bind: &str) -> &str {
+    let bind = bind.trim();
+
+    if let Some(rest) = bind.strip_prefix('[') {
+        if let Some((host, tail)) = rest.split_once(']') {
+            if tail.is_empty() || tail.starts_with(':') {
+                return host;
+            }
+        }
+    }
+
+    if let Some((host, port)) = bind.rsplit_once(':') {
+        if !host.is_empty()
+            && !port.is_empty()
+            && port.chars().all(|ch| ch.is_ascii_digit())
+            && !host.contains(':')
+        {
+            return host;
+        }
+    }
+
+    bind
+}
+
+/// Returns true when `bind` resolves to a loopback host literal.
 pub fn is_loopback_bind(bind: &str) -> bool {
-    matches!(bind, "127.0.0.1" | "::1" | "localhost")
+    let host = bind_host(bind);
+    if host == "localhost" {
+        return true; // Keep localhost as a DNS-free local-dev shorthand.
+    }
+
+    host.parse::<IpAddr>()
+        .map(|ip| ip.is_loopback())
+        .unwrap_or(false)
 }
 
 /// Synchronously check whether `tmux` is on PATH.
@@ -402,10 +429,19 @@ mod tests {
     #[test]
     fn loopback_strings_are_loopback() {
         assert!(is_loopback_bind("127.0.0.1"));
+        assert!(is_loopback_bind("127.0.0.2"));
         assert!(is_loopback_bind("::1"));
         assert!(is_loopback_bind("localhost"));
         assert!(!is_loopback_bind("0.0.0.0"));
-        assert!(!is_loopback_bind("100.101.123.63"));
+        assert!(!is_loopback_bind("192.168.1.1"));
+        assert!(!is_loopback_bind("10.0.0.1"));
+    }
+
+    #[test]
+    fn loopback_bind_parses_host_port_forms() {
+        assert!(is_loopback_bind("127.0.0.1:3210"));
+        assert!(is_loopback_bind("[::1]:3210"));
+        assert!(!is_loopback_bind("0.0.0.0:3210"));
     }
 
     #[test]
