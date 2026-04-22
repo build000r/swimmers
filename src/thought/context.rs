@@ -4,9 +4,8 @@
 //! All file I/O in this module is blocking (`std::fs`). Callers must run
 //! reads from `spawn_blocking` to avoid stalling the async runtime.
 
-// TODO: re-evaluate when context-reader is wired into the thought loop runner;
-// the entire reader subsystem (ClaudeCodeReader, CodexReader, helpers) is built
-// but not yet called from any thought loop path.
+// FIXME(2026-04-21): Reader implementations are complete, but the thought loop
+// still runs without consuming this context-reader subsystem in production paths.
 #![allow(dead_code)]
 
 use std::fs;

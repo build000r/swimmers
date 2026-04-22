@@ -51,7 +51,8 @@ pub struct OverlayDirConfig {
 }
 
 struct ClientOverlay {
-    #[allow(dead_code)] // TODO: re-evaluate when overlay debug/export paths are wired up
+    #[allow(dead_code)]
+    // FIXME(2026-04-21): Retained for overlay diagnostics/export metadata that is not surfaced yet.
     client_dir: PathBuf,
     cwd_patterns: Vec<String>,
     /// Number of explicit cwd_match entries (not repo_landscape paths).

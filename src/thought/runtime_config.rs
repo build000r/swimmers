@@ -120,7 +120,7 @@ impl ThoughtConfig {
         Ok(self)
     }
 
-    // TODO: re-evaluate when thought loop consults model_override for per-request model selection
+    // FIXME(2026-04-21): Sync request wiring still reads `model` directly; this helper is kept for future call sites.
     #[allow(dead_code)]
     pub fn model_override(&self) -> Option<&str> {
         let trimmed = self.model.trim();

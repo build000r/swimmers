@@ -57,7 +57,7 @@ impl StateDetector {
     }
 
     /// Register a callback invoked on every state transition.
-    // TODO: re-evaluate when the supervisor wires up state-change callbacks
+    // FIXME(2026-04-21): Runtime wiring still polls state directly; callback registration is currently test-only.
     #[allow(dead_code)]
     pub fn on_state_change<F>(&mut self, cb: F)
     where

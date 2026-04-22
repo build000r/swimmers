@@ -748,9 +748,8 @@ mod rest_state_tests {
 }
 
 // --- WebSocket Push Protocol Types ---
-// TODO: re-evaluate when the push-based WS API is wired up; these are schema
-// types for the server→client and client→server control envelopes that will be
-// constructed once the subscription path is implemented.
+// FIXME(2026-04-21): Typed WS control envelopes are retained for protocol hardening.
+// Current handlers in `src/web/mod.rs` still emit and parse ad-hoc JSON payloads.
 
 #[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -849,7 +848,7 @@ pub struct DismissAttentionPayload {
 // --- Binary Frame Constants ---
 
 pub mod opcodes {
-    // TODO: re-evaluate when binary frame encoding is implemented in the WS handler
+    // FIXME(2026-04-21): WS transport currently uses text JSON frames; binary opcodes stay reserved.
     #[allow(dead_code)]
     pub const TERMINAL_INPUT: u8 = 0x10;
     #[allow(dead_code)]

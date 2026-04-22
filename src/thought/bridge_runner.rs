@@ -13,7 +13,8 @@ use crate::thought::protocol::{SyncResponse, SyncUpdate, ThoughtDeliveryState};
 use crate::thought::runtime_config::ThoughtConfig;
 use crate::types::{ControlEvent, ThoughtSource, ThoughtUpdatePayload};
 
-// TODO: re-evaluate when BridgeRunner::new is used outside tests
+// FIXME(2026-04-21): `BridgeRunner::new` is retained for tests/simple callers;
+// production startup uses `BridgeRunner::with_tick(...)`.
 #[allow(dead_code)]
 const DEFAULT_BRIDGE_TICK: Duration = Duration::from_secs(2);
 
@@ -26,7 +27,7 @@ pub struct BridgeRunner {
 }
 
 impl BridgeRunner {
-    // TODO: re-evaluate when direct BridgeRunner construction is needed outside tests
+    // FIXME(2026-04-21): Production wiring uses `with_tick`; this convenience ctor is currently exercised in tests.
     #[allow(dead_code)]
     pub fn new(
         event_tx: broadcast::Sender<ControlEvent>,

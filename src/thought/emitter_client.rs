@@ -163,7 +163,7 @@ impl EmitterClient {
         Self::with_bin_and_request_sequence(resolve_clawgs_bin(), request_sequence)
     }
 
-    // TODO: re-evaluate when non-test callers need a custom binary path without a request sequence
+    // FIXME(2026-04-21): Runtime callers use request-sequenced constructors; this path is kept for tests/fakes.
     #[allow(dead_code)]
     pub fn with_bin(bin: impl Into<String>) -> Self {
         Self::with_bin_and_request_sequence(bin, Arc::new(SyncRequestSequence::new()))

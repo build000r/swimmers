@@ -1,7 +1,5 @@
-// All public items in this module are consumed by swimmers-tui; the daemon
-// binary includes the module but does not call these functions directly.
-// TODO: re-evaluate when the daemon exposes thought-config UI endpoints.
-#![allow(dead_code)]
+// Thought-config UI helpers shared by daemon API and swimmers-tui.
+// NOTE(2026-04-21): Keep this module focused on presentation-layer metadata and presets.
 
 use crate::openrouter_models::cached_or_default_openrouter_candidates;
 use crate::types::{ThoughtConfigBackendMetadata, ThoughtConfigUiMetadata};

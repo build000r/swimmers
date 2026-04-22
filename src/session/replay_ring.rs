@@ -108,7 +108,7 @@ impl ReplayRing {
     }
 
     /// Total bytes currently retained in the buffer.
-    // TODO: re-evaluate when buffer memory metrics are exposed in the API
+    // FIXME(2026-04-21): Used by replay-ring tests/debug checks; no API metric currently exports this value.
     #[allow(dead_code)]
     pub fn total_bytes_retained(&self) -> usize {
         self.total_bytes
