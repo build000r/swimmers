@@ -19,6 +19,7 @@ use crate::thought::runtime_config::{DaemonDefaults, ThoughtConfig};
 const SYNC_RESULT_MESSAGE_TYPE: &str = "sync_result";
 const EXTERNAL_CMD_WARN_THRESHOLD: Duration = Duration::from_secs(2);
 const EMIT_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
+const EMIT_RESPONSE_TIMEOUT: Duration = Duration::from_secs(30);
 const DEFAULTS_COMMAND_TIMEOUT: Duration = Duration::from_secs(5);
 
 struct DaemonProcess {
@@ -106,6 +107,8 @@ pub enum EmitterClientError {
     },
     #[error("clawgs emit daemon closed stdout before emitting a sync response")]
     ResponseEof,
+    #[error("clawgs emit daemon did not send sync response within {timeout_ms}ms")]
+    ResponseTimeout { timeout_ms: u64 },
     #[error("malformed sync response from clawgs emit daemon: {line}")]
     MalformedResponse {
         line: String,
@@ -141,6 +144,7 @@ impl EmitterClientError {
                 | Self::RequestWrite { .. }
                 | Self::ResponseRead { .. }
                 | Self::ResponseEof
+                | Self::ResponseTimeout { .. }
                 | Self::StatusCheck { .. }
         )
     }
@@ -219,6 +223,16 @@ impl EmitterClient {
         runtime_config: &ThoughtConfig,
         sessions: &[SessionInfo],
     ) -> Result<SyncResponse, EmitterClientError> {
+        self.next_sync_response_once_with_timeout(runtime_config, sessions, EMIT_RESPONSE_TIMEOUT)
+            .await
+    }
+
+    async fn next_sync_response_once_with_timeout(
+        &mut self,
+        runtime_config: &ThoughtConfig,
+        sessions: &[SessionInfo],
+        response_timeout: Duration,
+    ) -> Result<SyncResponse, EmitterClientError> {
         self.ensure_running().await?;
 
         let request_id = self.request_sequence.next();
@@ -234,11 +248,17 @@ impl EmitterClient {
             .await
             .map_err(|source| EmitterClientError::RequestWrite { source })?;
 
-        let response_line = daemon
-            .read_non_empty_line()
-            .await
-            .map_err(|source| EmitterClientError::ResponseRead { source })?
-            .ok_or(EmitterClientError::ResponseEof)?;
+        let response_line =
+            match tokio::time::timeout(response_timeout, daemon.read_non_empty_line()).await {
+                Ok(Ok(Some(line))) => line,
+                Ok(Ok(None)) => return Err(EmitterClientError::ResponseEof),
+                Ok(Err(source)) => return Err(EmitterClientError::ResponseRead { source }),
+                Err(_) => {
+                    return Err(EmitterClientError::ResponseTimeout {
+                        timeout_ms: response_timeout.as_millis() as u64,
+                    });
+                }
+            };
 
         parse_sync_response_line(&response_line)
     }
@@ -743,6 +763,50 @@ mod tests {
         assert_eq!(sent[0]["id"], "1");
         assert_eq!(sent[1]["id"], "2");
         assert_eq!(sent[1]["config"]["agent_prompt"], "Hook wakeup prompt");
+    }
+
+    #[tokio::test]
+    async fn sync_response_times_out_when_daemon_hangs_after_request() {
+        let _lock = TEST_ENV_LOCK.lock().expect("env lock");
+        let temp = tempdir().expect("tempdir");
+        let args_log = temp.path().join("args.log");
+        let input_log = temp.path().join("input.log");
+        let script_path = temp.path().join("hanging-clawgs.sh");
+        let script = r#"#!/bin/sh
+printf '%s\n' "$*" >> "__ARGS_LOG__"
+printf '%s\n' '{"type":"hello","protocol":"clawgs.emit.v1","engine_version":"0.1.0"}'
+IFS= read -r line || exit 0
+printf '%s\n' "$line" >> "__INPUT_LOG__"
+exec sleep 2
+"#
+        .replace("__ARGS_LOG__", &args_log.display().to_string())
+        .replace("__INPUT_LOG__", &input_log.display().to_string());
+        fs::write(&script_path, script).expect("write hanging clawgs");
+        let mut perms = fs::metadata(&script_path).expect("metadata").permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&script_path, perms).expect("chmod hanging clawgs");
+
+        let mut client = EmitterClient::with_bin(script_path.to_string_lossy().into_owned());
+        let err = client
+            .next_sync_response_once_with_timeout(
+                &ThoughtConfig::default(),
+                &[sample_session_info()],
+                Duration::from_millis(50),
+            )
+            .await
+            .expect_err("daemon response should time out");
+
+        match err {
+            EmitterClientError::ResponseTimeout { timeout_ms } => assert_eq!(timeout_ms, 50),
+            other => panic!("unexpected error variant: {other:?}"),
+        }
+
+        let request_line = fs::read_to_string(&input_log).expect("read input log");
+        let request: Value =
+            serde_json::from_str(request_line.lines().next().expect("first sync request"))
+                .expect("sync request json");
+        assert_eq!(request["type"], "sync");
+        assert_eq!(request["id"], "1");
     }
 
     #[tokio::test]
