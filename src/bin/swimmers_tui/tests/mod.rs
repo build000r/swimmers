@@ -10880,3 +10880,26 @@ fn open_plan_viewer_reads_schema_source_from_disk() {
         .as_ref()
         .is_some_and(|tabs| tabs.contains(&DomainPlanTab::Plan)));
 }
+
+#[test]
+fn read_plan_file_from_disk_rejects_path_traversal_names() {
+    let temp = tempdir().expect("tempdir");
+    let plan_dir = temp.path().join("plans").join("released").join("alpha");
+    fs::create_dir_all(&plan_dir).expect("plan dir");
+    let schema = plan_dir.join("schema.mmd");
+    fs::write(&schema, "graph TD\nA-->B\n").expect("schema");
+    fs::write(plan_dir.join("plan.md"), "# Plan\n").expect("plan doc");
+    fs::write(plan_dir.parent().unwrap().join("secret.txt"), "secret\n").expect("secret");
+
+    let schema_path = schema.to_string_lossy().into_owned();
+    let valid = read_plan_file_from_disk(Some(&schema_path), "plan.md").expect("valid response");
+    assert_eq!(valid.content.as_deref(), Some("# Plan\n"));
+
+    let rejected =
+        read_plan_file_from_disk(Some(&schema_path), "../secret.txt").expect("rejection response");
+    assert!(rejected.content.is_none());
+    assert_eq!(
+        rejected.error.as_deref(),
+        Some("artifact file name not allowed: ../secret.txt")
+    );
+}

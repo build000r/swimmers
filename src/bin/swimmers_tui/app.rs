@@ -3426,13 +3426,30 @@ pub(crate) fn read_plan_file_from_disk(
     let Some(dir) = std::path::Path::new(schema_path).parent() else {
         return Err("plan schema path has no parent".to_string());
     };
-    let target = dir.join(filename);
     let response = PlanFileResponse {
         session_id: format!("plan::{schema_path}"),
         name: filename.to_string(),
         content: None,
         error: None,
     };
+
+    if !swimmers::session::artifacts::VIEWER_TEXT_FILENAMES.contains(&filename) {
+        return Ok(PlanFileResponse {
+            error: Some(format!("artifact file name not allowed: {filename}")),
+            ..response
+        });
+    }
+
+    let cwd = dir.to_string_lossy();
+    let Some(target) =
+        swimmers::session::artifacts::resolve_viewer_text_path(&cwd, Some(schema_path), filename)
+    else {
+        return Ok(PlanFileResponse {
+            error: Some(format!("artifact file unavailable: {filename}")),
+            ..response
+        });
+    };
+
     match std::fs::read_to_string(&target) {
         Ok(content) => Ok(PlanFileResponse {
             content: Some(content),
