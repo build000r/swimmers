@@ -153,8 +153,17 @@ fn build_app_router(
         .with_state(state)
 }
 
+pub fn listener_addr(bind: &str, port: u16) -> String {
+    let bind = bind.trim();
+    if bind.starts_with('[') || !bind.contains(':') {
+        format!("{bind}:{port}")
+    } else {
+        format!("[{bind}]:{port}")
+    }
+}
+
 async fn bind_listener(addr: &str, port: u16) -> anyhow::Result<tokio::net::TcpListener> {
-    tokio::net::TcpListener::bind(format!("{addr}:{port}"))
+    tokio::net::TcpListener::bind(listener_addr(addr, port))
         .await
         .map_err(|err| anyhow::anyhow!("failed to bind listener: {err}"))
 }
@@ -412,11 +421,14 @@ pub async fn run_server(
         elapsed_ms = startup_started.elapsed().as_millis() as u64,
         "startup complete; listener ready"
     );
-    tracing::info!("Swimmers running on http://{bind}:{port}");
+    tracing::info!("Swimmers running on http://{}", listener_addr(&bind, port));
 
-    let server_result = axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal(bridge_health.clone()))
-        .await;
+    let server_result = axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown_signal(bridge_health.clone()))
+    .await;
 
     finalize_shutdown(&supervisor, thought_backend).await;
 
@@ -490,6 +502,13 @@ mod tests {
         fn drop(&mut self) {
             self.0.store(true, Ordering::SeqCst);
         }
+    }
+
+    #[test]
+    fn listener_addr_brackets_ipv6_literals() {
+        assert_eq!(listener_addr("127.0.0.1", 3210), "127.0.0.1:3210");
+        assert_eq!(listener_addr("::1", 3210), "[::1]:3210");
+        assert_eq!(listener_addr("[::1]", 3210), "[::1]:3210");
     }
 
     async fn spawn_summary_handle(summary: SessionSummary) -> ActorHandle {

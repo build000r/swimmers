@@ -121,6 +121,8 @@ After `cargo install swimmers`, both `swimmers` and `swimmers-tui` are on your P
 
 In a source build with `--features voice`, open the initial-request composer and press `Ctrl-V` to start or stop microphone capture. Swimmers records locally, transcribes with a local Whisper model, and inserts the transcript into the composer so you can edit it before creating the hidden swimmer.
 
+Set `SWIMMERS_VOICE_MODEL=/path/to/whisper.bin` before launching the TUI, and on macOS make sure your terminal app has Microphone permission in System Settings.
+
 ### External server mode
 
 Set `SWIMMERS_TUI_URL` to run the API as a separate process (for multi-client access, remote access over Tailscale, or integration with the REST endpoints from `curl`/browser). The TUI switches to HTTP transport and, for loopback URLs, auto-spawns a sibling `swimmers` binary if one isn't already listening — using a readiness pipe instead of polling, so the handoff is invisible.
@@ -215,7 +217,7 @@ If you are working from a source checkout, the Makefile has convenience targets:
 make tui                # Launch swimmers-tui (embedded mode by default)
 make web                # Start the standalone server and print local browser URLs
 make server             # Run only the standalone API server
-make tui-check          # Wait for an existing API (external mode only), then exit
+make tui-check          # Type-check the native TUI binary
 make tui-smoke          # Run shell-level bootstrap tests on the run-tui.sh shim
 make cargo-cov-lcov     # Generate lcov coverage report
 ```
@@ -335,7 +337,7 @@ Set `SWIMMERS_TUI_URL` to split the API into its own process. Multiple TUIs, hea
 | `POST` | `/v1/sessions/{id}/attention/dismiss` | Clear attention state |
 | `POST` | `/v1/sessions/{id}/input` | Send text input to a session |
 | `GET` | `/v1/selection` | Read the published selection |
-| `POST` | `/v1/selection` | Publish the selected session |
+| `PUT` | `/v1/selection` | Publish the selected session |
 | `GET` | `/v1/native/status` | Native terminal support check |
 | `POST` | `/v1/native/open` | Open session in desktop terminal |
 | `GET` | `/v1/dirs` | Repo/service directory browser |

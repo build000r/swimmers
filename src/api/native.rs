@@ -12,41 +12,39 @@ use crate::types::{
     NativeDesktopConfigRequest, NativeDesktopModeRequest, NativeDesktopOpenRequest,
     NativeDesktopStatusResponse,
 };
-use axum::extract::State;
-use axum::http::{HeaderMap, StatusCode};
+use axum::extract::{ConnectInfo, State};
+use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::routing::{get, post, put};
 use axum::{Extension, Json, Router};
+use std::net::SocketAddr;
 use std::sync::Arc;
 
-fn request_host(headers: &HeaderMap) -> &str {
-    headers
-        .get("host")
-        .and_then(|value| value.to_str().ok())
-        .unwrap_or("localhost")
+fn request_peer(ConnectInfo(addr): &ConnectInfo<SocketAddr>) -> String {
+    addr.to_string()
 }
 
-async fn native_status_for_host(
+async fn native_status_for_peer(
     state: &Arc<AppState>,
-    headers: &HeaderMap,
+    connect_info: &ConnectInfo<SocketAddr>,
 ) -> NativeDesktopStatusResponse {
-    native_status_for_host_service(state, request_host(headers)).await
+    native_status_for_host_service(state, &request_peer(connect_info)).await
 }
 
 async fn native_status(
     Extension(auth): Extension<AuthInfo>,
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
+    connect_info: ConnectInfo<SocketAddr>,
 ) -> Result<Json<NativeDesktopStatusResponse>, axum::response::Response> {
     auth.require_scope(AuthScope::SessionsRead)?;
-    let status = native_status_for_host(&state, &headers).await;
+    let status = native_status_for_peer(&state, &connect_info).await;
     Ok(Json(status))
 }
 
 async fn set_native_app(
     Extension(auth): Extension<AuthInfo>,
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
+    connect_info: ConnectInfo<SocketAddr>,
     Json(body): Json<NativeDesktopConfigRequest>,
 ) -> impl IntoResponse {
     if let Err(resp) = auth.require_scope(AuthScope::SessionsWrite) {
@@ -58,14 +56,14 @@ async fn set_native_app(
         *native_app = body.app;
     }
 
-    let status = native_status_for_host(&state, &headers).await;
+    let status = native_status_for_peer(&state, &connect_info).await;
     success_json(StatusCode::OK, &status)
 }
 
 async fn set_native_mode(
     Extension(auth): Extension<AuthInfo>,
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
+    connect_info: ConnectInfo<SocketAddr>,
     Json(body): Json<NativeDesktopModeRequest>,
 ) -> impl IntoResponse {
     if let Err(resp) = auth.require_scope(AuthScope::SessionsWrite) {
@@ -77,21 +75,22 @@ async fn set_native_mode(
         *ghostty_mode = body.mode;
     }
 
-    let status = native_status_for_host(&state, &headers).await;
+    let status = native_status_for_peer(&state, &connect_info).await;
     success_json(StatusCode::OK, &status)
 }
 
 async fn native_open(
     Extension(auth): Extension<AuthInfo>,
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
+    connect_info: ConnectInfo<SocketAddr>,
     Json(body): Json<NativeDesktopOpenRequest>,
 ) -> impl IntoResponse {
     if let Err(resp) = auth.require_scope(AuthScope::SessionsWrite) {
         return resp;
     }
 
-    match open_native_session_for_host(&state, request_host(&headers), &body.session_id).await {
+    let peer = request_peer(&connect_info);
+    match open_native_session_for_host(&state, &peer, &body.session_id).await {
         Ok(result) => success_json(StatusCode::OK, &result),
         Err(NativeOpenServiceError::Unsupported { reason }) => {
             let msg = reason.unwrap_or_else(|| NATIVE_DESKTOP_UNAVAILABLE.default_message.into());
@@ -153,15 +152,20 @@ mod tests {
         serde_json::from_slice(&body).expect("json body")
     }
 
-    #[tokio::test]
-    async fn native_open_rejects_unsupported_hosts() {
-        let mut headers = HeaderMap::new();
-        headers.insert("host", "example.com".parse().expect("host header"));
+    fn loopback_peer() -> ConnectInfo<SocketAddr> {
+        ConnectInfo("127.0.0.1:3210".parse().expect("loopback peer"))
+    }
 
+    fn remote_peer() -> ConnectInfo<SocketAddr> {
+        ConnectInfo("100.101.1.2:3210".parse().expect("remote peer"))
+    }
+
+    #[tokio::test]
+    async fn native_open_rejects_non_loopback_peer() {
         let response = native_open(
             Extension(AuthInfo::new(OPERATOR_SCOPES.to_vec())),
             State(test_state()),
-            headers,
+            remote_peer(),
             Json(NativeDesktopOpenRequest {
                 session_id: "sess-1".to_string(),
             }),
@@ -176,13 +180,10 @@ mod tests {
 
     #[tokio::test]
     async fn native_open_returns_not_found_for_missing_session() {
-        let mut headers = HeaderMap::new();
-        headers.insert("host", "localhost:3210".parse().expect("host header"));
-
         let response = native_open(
             Extension(AuthInfo::new(OPERATOR_SCOPES.to_vec())),
             State(test_state()),
-            headers,
+            loopback_peer(),
             Json(NativeDesktopOpenRequest {
                 session_id: "missing".to_string(),
             }),
@@ -197,14 +198,12 @@ mod tests {
 
     #[tokio::test]
     async fn set_native_app_switches_status_to_requested_app() {
-        let mut headers = HeaderMap::new();
-        headers.insert("host", "localhost:3210".parse().expect("host header"));
         let state = test_state();
 
         let response = set_native_app(
             Extension(AuthInfo::new(OPERATOR_SCOPES.to_vec())),
             State(state.clone()),
-            headers.clone(),
+            loopback_peer(),
             Json(NativeDesktopConfigRequest {
                 app: NativeDesktopApp::Ghostty,
             }),
@@ -220,7 +219,7 @@ mod tests {
         let status = native_status(
             Extension(AuthInfo::new(OPERATOR_SCOPES.to_vec())),
             State(state),
-            headers,
+            loopback_peer(),
         )
         .await
         .expect("native status response");
@@ -232,8 +231,6 @@ mod tests {
 
     #[tokio::test]
     async fn set_native_mode_updates_status_for_ghostty() {
-        let mut headers = HeaderMap::new();
-        headers.insert("host", "localhost:3210".parse().expect("host header"));
         let state = test_state();
         {
             let mut app = state.native_desktop_app.write().await;
@@ -243,7 +240,7 @@ mod tests {
         let response = set_native_mode(
             Extension(AuthInfo::new(OPERATOR_SCOPES.to_vec())),
             State(state.clone()),
-            headers.clone(),
+            loopback_peer(),
             Json(NativeDesktopModeRequest {
                 mode: GhosttyOpenMode::Add,
             }),
@@ -259,7 +256,7 @@ mod tests {
         let status = native_status(
             Extension(AuthInfo::new(OPERATOR_SCOPES.to_vec())),
             State(state),
-            headers,
+            loopback_peer(),
         )
         .await
         .expect("native status response");

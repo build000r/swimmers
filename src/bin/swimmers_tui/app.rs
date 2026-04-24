@@ -167,12 +167,13 @@ pub(crate) struct App<C: TuiApi> {
     pub(crate) fish_bowl_mode: FishBowlMode,
     pub(crate) sprite_theme_override: Option<SpriteTheme>,
     pub(crate) mermaid_drag: Option<MermaidDragState>,
-    pub(crate) loading: bool,
     pub(crate) message: Option<(String, Instant)>,
     pub(crate) last_refresh: Option<Instant>,
     pub(crate) last_successful_refresh: Option<Instant>,
     api_refresh_health: ApiRefreshHealth,
     pub(crate) last_picker_refresh: Option<Instant>,
+    pub(crate) cached_plans: Vec<PlanPanelEntry>,
+    pub(crate) last_plans_refresh: Option<Instant>,
     pub(crate) thought_panel_ratio: f32,
     pub(crate) split_drag_active: bool,
     pub(crate) tick: u64,
@@ -239,12 +240,13 @@ impl<C: TuiApi> App<C> {
             fish_bowl_mode: FishBowlMode::Aquarium,
             sprite_theme_override: None,
             mermaid_drag: None,
-            loading: true,
             message: None,
             last_refresh: None,
             last_successful_refresh: None,
             api_refresh_health: ApiRefreshHealth::default(),
             last_picker_refresh: None,
+            cached_plans: Vec::new(),
+            last_plans_refresh: None,
             thought_panel_ratio: THOUGHT_RAIL_DEFAULT_RATIO,
             split_drag_active: false,
             tick: 0,
@@ -270,10 +272,6 @@ impl<C: TuiApi> App<C> {
             return;
         }
         self.message = Some((message, Instant::now()));
-    }
-
-    pub(crate) fn set_loading(&mut self, loading: bool) {
-        self.loading = loading;
     }
 
     pub(crate) fn visible_message(&self) -> Option<&str> {
@@ -336,6 +334,32 @@ impl<C: TuiApi> App<C> {
         self.picker_reload_with_options(Some(path), managed_only, group, false, true);
     }
 
+    pub(crate) fn maybe_refresh_plans(&mut self) {
+        // Plan mtimes rarely change — 5s debounce is plenty.
+        const PLANS_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
+        // Skip plans scanning on the very first frame: walking the skillbox
+        // overlay tree can add ~20–40ms on a warm machine, which blows the
+        // embedded-mode first-frame perf gate. Sessions/thoughts drive the
+        // initial render anyway; plans appear on the next tick.
+        if self.tick == 0 {
+            return;
+        }
+        let due = self
+            .last_plans_refresh
+            .map(|last| last.elapsed() >= PLANS_REFRESH_INTERVAL)
+            .unwrap_or(true);
+        if !due {
+            return;
+        }
+        self.last_plans_refresh = Some(Instant::now());
+        match self.runtime.block_on(self.client.fetch_overlay_plans()) {
+            Ok(plans) => {
+                self.cached_plans = plans;
+            }
+            Err(err) => self.set_message(err),
+        }
+    }
+
     pub(crate) fn native_status_text(&self) -> String {
         match &self.native_status {
             Some(status) => {
@@ -343,18 +367,18 @@ impl<C: TuiApi> App<C> {
                 let mode_suffix = status
                     .ghostty_mode
                     .filter(|_| self.current_native_app() == NativeDesktopApp::Ghostty)
-                    .map(|mode| format!(" ({})", mode.label()))
+                    .map(|mode| format!(" ({})", mode.display_label()))
                     .unwrap_or_default();
                 if status.supported {
-                    format!("native open: {app_label}{mode_suffix}")
+                    format!("terminal handoff: {app_label}{mode_suffix}")
                 } else {
                     format!(
-                        "native open: {app_label}{mode_suffix} unavailable: {}",
+                        "terminal handoff: {app_label}{mode_suffix} unavailable: {}",
                         status.reason.as_deref().unwrap_or("unknown reason")
                     )
                 }
             }
-            None => "native open: checking".to_string(),
+            None => "terminal handoff: checking".to_string(),
         }
     }
 
@@ -465,7 +489,7 @@ impl<C: TuiApi> App<C> {
 
         let max_right_width = width.saturating_sub(22) as usize;
         let right_text = truncate_label(&self.header_right_text(), max_right_width);
-        let marker = format!("({})", self.current_ghostty_mode().label());
+        let marker = format!("({})", self.current_ghostty_mode().display_label());
         let marker_idx = right_text.find(&marker)?;
         let prefix_width = display_width(&right_text[..marker_idx]);
         let marker_width = display_width(&marker);
@@ -509,7 +533,7 @@ impl<C: TuiApi> App<C> {
 
         let client = Arc::clone(&self.client);
         self.set_message(format!(
-            "switching native open target to {}...",
+            "switching terminal handoff target to {}...",
             next_app.display_name()
         ));
         self.runtime.spawn(async move {
@@ -530,8 +554,8 @@ impl<C: TuiApi> App<C> {
 
         let client = Arc::clone(&self.client);
         self.set_message(format!(
-            "switching Ghostty preview mode to {}...",
-            next_mode.label()
+            "switching Ghostty placement to {}...",
+            next_mode.display_label()
         ));
         self.runtime.spawn(async move {
             let response = client.set_native_mode(next_mode).await;
@@ -1231,7 +1255,7 @@ impl<C: TuiApi> App<C> {
             } => match response {
                 Ok(status) => {
                     self.native_status = Some(status);
-                    self.set_message(format!("Ghostty preview mode: {}", next_mode.label()));
+                    self.set_message(format!("Ghostty placement: {}", next_mode.display_label()));
                 }
                 Err(err) => self.set_message(err),
             },
@@ -1288,12 +1312,15 @@ impl<C: TuiApi> App<C> {
             .unwrap_or_else(|| fallback_app.display_name().to_string());
         if status.supported {
             match status.ghostty_mode {
-                Some(mode) => format!("native open target: {app_label} ({})", mode.label()),
-                None => format!("native open target: {app_label}"),
+                Some(mode) => format!(
+                    "terminal handoff target: {app_label} ({})",
+                    mode.display_label()
+                ),
+                None => format!("terminal handoff target: {app_label}"),
             }
         } else {
             format!(
-                "native open target: {app_label} | {}",
+                "terminal handoff target: {app_label} | {}",
                 status.reason.as_deref().unwrap_or("unavailable")
             )
         }
@@ -1598,6 +1625,38 @@ impl<C: TuiApi> App<C> {
         self.picker = None;
         self.close_initial_request();
         self.last_picker_refresh = None;
+    }
+
+    pub(crate) fn picker_search_push(&mut self, ch: char) {
+        let Some(picker) = self.picker.as_mut() else {
+            return;
+        };
+        picker.search.push(ch);
+        picker.snap_selection_to_visible();
+    }
+
+    pub(crate) fn picker_search_pop(&mut self) -> bool {
+        let Some(picker) = self.picker.as_mut() else {
+            return false;
+        };
+        if picker.search.is_empty() {
+            return false;
+        }
+        picker.search.pop();
+        picker.snap_selection_to_visible();
+        true
+    }
+
+    pub(crate) fn picker_search_clear(&mut self) -> bool {
+        let Some(picker) = self.picker.as_mut() else {
+            return false;
+        };
+        if picker.search.is_empty() {
+            return false;
+        }
+        picker.search.clear();
+        picker.snap_selection_to_visible();
+        true
     }
 
     pub(crate) fn open_thought_config_editor(&mut self) {
@@ -2404,9 +2463,21 @@ impl<C: TuiApi> App<C> {
         x: u16,
         y: u16,
         thought_content: Rect,
-        entry_capacity: usize,
+        _entry_capacity: usize,
     ) {
-        if let Some(action) = thought_panel_action_at(self, thought_content, entry_capacity, x, y) {
+        let (clawgs_rect, plans_rect) =
+            split_rail_for_plans(thought_content, self.cached_plans.len());
+        if let Some(plans_rect) = plans_rect {
+            if plans_rect.contains(x, y) {
+                let plans_layout = build_plans_panel(&self.cached_plans, plans_rect);
+                if let Some(action) = plans_panel_action_at(&plans_layout, x, y) {
+                    self.apply_thought_filter_action(action);
+                }
+                return;
+            }
+        }
+        let clawgs_capacity = clawgs_rect.height.saturating_sub(THOUGHT_RAIL_HEADER_ROWS) as usize;
+        if let Some(action) = thought_panel_action_at(self, clawgs_rect, clawgs_capacity, x, y) {
             self.apply_thought_filter_action(action);
         }
     }
@@ -2429,6 +2500,9 @@ impl<C: TuiApi> App<C> {
                 self.launch_commit_codex_for_session(&session_id);
             }
             ThoughtPanelAction::OpenMermaid(session_id) => self.open_mermaid_viewer(session_id),
+            ThoughtPanelAction::OpenPlanFromDisk { schema_path, slug } => {
+                self.open_plan_viewer(schema_path, slug);
+            }
             ThoughtPanelAction::OpenRepoInEditor(cwd) => self.open_repo_in_editor(&cwd),
             ThoughtPanelAction::ClearFilters => self.clear_thought_filters(),
         }
@@ -2563,6 +2637,82 @@ impl<C: TuiApi> App<C> {
             plan_text_scroll: 0,
             plan_text_cached_width: 0,
             tab_rects: Vec::new(),
+            disk_only: false,
+        });
+    }
+
+    /// Open the Mermaid/plan viewer directly from a `schema.mmd` path on disk.
+    ///
+    /// Unlike `open_mermaid_viewer`, this has no backing tmux session — the
+    /// source is a skillbox-overlay plan directory. Plan tabs are populated by
+    /// stat'ing sibling files, and tab content is read straight from disk.
+    pub(crate) fn open_plan_viewer(&mut self, schema_path: String, slug: String) {
+        let path = std::path::PathBuf::from(&schema_path);
+        let Some(parent) = path.parent() else {
+            self.set_message("plan path has no parent directory");
+            return;
+        };
+        let cwd = parent.to_string_lossy().into_owned();
+        let siblings = swimmers::session::artifacts::list_plan_siblings(&schema_path);
+        let session_id = format!("plan::{schema_path}");
+        let (source, artifact_error) = match std::fs::read_to_string(&path) {
+            Ok(source) => (Some(source), None),
+            Err(err) => (None, Some(format!("read {}: {err}", path.display()))),
+        };
+
+        let plan_tabs = {
+            let mut tabs = vec![DomainPlanTab::Schema];
+            for name in &siblings {
+                if let Some(tab) = DomainPlanTab::from_filename(name) {
+                    if tab != DomainPlanTab::Schema {
+                        tabs.push(tab);
+                    }
+                }
+            }
+            if tabs.len() > 1 {
+                Some(tabs)
+            } else {
+                None
+            }
+        };
+
+        let unsupported_reason = detect_mermaid_backend_support();
+        self.fish_bowl_mode = FishBowlMode::Mermaid(MermaidViewerState {
+            session_id,
+            tmux_name: slug.clone(),
+            cwd,
+            path: Some(schema_path),
+            source,
+            artifact_error,
+            render_error: None,
+            unsupported_reason,
+            zoom: 1.0,
+            center_x: 0.0,
+            center_y: 0.0,
+            diagram_width: 0.0,
+            diagram_height: 0.0,
+            back_rect: None,
+            content_rect: None,
+            cached_rect: None,
+            cached_zoom: 1.0,
+            cached_center_x: 0.0,
+            cached_center_y: 0.0,
+            cached_lines: Vec::new(),
+            cached_background_cells: Vec::new(),
+            cached_semantic_lines: Vec::new(),
+            focused_source_index: None,
+            focus_status: None,
+            prepared_render: None,
+            source_prepare_count: 0,
+            viewport_render_count: 0,
+            plan_tabs,
+            active_tab: DomainPlanTab::Schema,
+            plan_text_content: None,
+            plan_text_lines: Vec::new(),
+            plan_text_scroll: 0,
+            plan_text_cached_width: 0,
+            tab_rects: Vec::new(),
+            disk_only: true,
         });
     }
 
@@ -2594,13 +2744,16 @@ impl<C: TuiApi> App<C> {
         }
 
         if tab != DomainPlanTab::Schema {
-            let (session_id, _) = match &self.fish_bowl_mode {
-                FishBowlMode::Mermaid(v) => (v.session_id.clone(), ()),
+            let (session_id, schema_path, disk_only) = match &self.fish_bowl_mode {
+                FishBowlMode::Mermaid(v) => (v.session_id.clone(), v.path.clone(), v.disk_only),
                 _ => return,
             };
-            let result = self
-                .runtime
-                .block_on(self.client.fetch_plan_file(&session_id, tab.filename()));
+            let result = if disk_only {
+                read_plan_file_from_disk(schema_path.as_deref(), tab.filename())
+            } else {
+                self.runtime
+                    .block_on(self.client.fetch_plan_file(&session_id, tab.filename()))
+            };
             let viewer = self.mermaid_viewer_mut().unwrap();
             viewer.active_tab = tab;
             viewer.plan_text_scroll = 0;
@@ -3123,12 +3276,15 @@ impl<C: TuiApi> App<C> {
                     divider_color,
                 );
             }
-            render_thought_panel(
-                self,
-                renderer,
-                thought_content,
-                layout.thought_entry_capacity(),
-            );
+            let (clawgs_rect, plans_rect) =
+                split_rail_for_plans(thought_content, self.cached_plans.len());
+            let clawgs_capacity =
+                clawgs_rect.height.saturating_sub(THOUGHT_RAIL_HEADER_ROWS) as usize;
+            render_thought_panel(self, renderer, clawgs_rect, clawgs_capacity);
+            if let Some(plans_rect) = plans_rect {
+                let plans_layout = build_plans_panel(&self.cached_plans, plans_rect);
+                render_plans_panel(renderer, plans_rect, &plans_layout);
+            }
         }
 
         match &mut self.fish_bowl_mode {
@@ -3236,5 +3392,55 @@ mod tests {
 
         health.record_success();
         assert!(health.banner_text().is_none());
+    }
+}
+
+/// Load the list of overlay-configured domain plans from disk, mapped into
+/// the TUI's `PlanPanelEntry` shape.
+pub(crate) fn load_overlay_plan_entries() -> Vec<PlanPanelEntry> {
+    let Some(overlay) = swimmers::session::overlay::default_overlay() else {
+        return Vec::new();
+    };
+    overlay
+        .list_all_plans()
+        .into_iter()
+        .map(|entry| PlanPanelEntry {
+            slug: entry.slug,
+            client_label: entry.client_label,
+            kind: entry.kind.to_string(),
+            schema_path: entry.schema_path.to_string_lossy().into_owned(),
+        })
+        .collect()
+}
+
+/// Read a plan sibling file from disk, matching the shape of the server's
+/// `fetch_plan_file` response so disk-backed and session-backed viewers can
+/// share the tab-switching code path.
+pub(crate) fn read_plan_file_from_disk(
+    schema_path: Option<&str>,
+    filename: &str,
+) -> Result<PlanFileResponse, String> {
+    let Some(schema_path) = schema_path else {
+        return Err("plan viewer has no schema path".to_string());
+    };
+    let Some(dir) = std::path::Path::new(schema_path).parent() else {
+        return Err("plan schema path has no parent".to_string());
+    };
+    let target = dir.join(filename);
+    let response = PlanFileResponse {
+        session_id: format!("plan::{schema_path}"),
+        name: filename.to_string(),
+        content: None,
+        error: None,
+    };
+    match std::fs::read_to_string(&target) {
+        Ok(content) => Ok(PlanFileResponse {
+            content: Some(content),
+            ..response
+        }),
+        Err(err) => Ok(PlanFileResponse {
+            error: Some(format!("read {}: {err}", target.display())),
+            ..response
+        }),
     }
 }

@@ -154,8 +154,32 @@ pub(crate) enum ThoughtPanelAction {
     OpenSession { session_id: String, label: String },
     LaunchCommitCodex(String),
     OpenMermaid(String),
+    OpenPlanFromDisk { schema_path: String, slug: String },
     OpenRepoInEditor(String),
     ClearFilters,
+}
+
+/// How many rows at the bottom of the clawgs rail are reserved for the plans list.
+/// Includes a 1-row header + plan rows. The plans list consumes from bottom-up
+/// so the clawgs list shrinks by exactly this much.
+pub(crate) const PLANS_PANE_MIN_HEIGHT: u16 = 3;
+pub(crate) const PLANS_PANE_MAX_HEIGHT: u16 = 14;
+pub(crate) const PLANS_PANE_HEADER_ROWS: u16 = 1;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct PlanRowLayout {
+    pub(crate) rect: Rect,
+    pub(crate) schema_path: String,
+    pub(crate) slug: String,
+    pub(crate) display: String,
+    pub(crate) color: Color,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct PlansPanelLayout {
+    pub(crate) header_rect: Option<Rect>,
+    pub(crate) rows: Vec<PlanRowLayout>,
+    pub(crate) empty_message: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -904,6 +928,165 @@ pub(crate) fn build_thought_panel<C: TuiApi>(
     }
 }
 
+/// How many rows the plans pane would consume given the rail's total height.
+///
+/// The plans pane always reserves at least `PLANS_PANE_MIN_HEIGHT` rows, grows
+/// up to `PLANS_PANE_MAX_HEIGHT`, and never consumes more than ~35% of the rail
+/// so the clawgs stream still has useful room. Returns 0 when the rail is too
+/// short to host plans at all.
+pub(crate) fn plans_pane_height(total_content_height: u16, plan_count: usize) -> u16 {
+    if total_content_height < PLANS_PANE_MIN_HEIGHT + 3 {
+        return 0;
+    }
+    let content_budget = (total_content_height as usize).saturating_mul(35) / 100;
+    let desired = (PLANS_PANE_HEADER_ROWS as usize).saturating_add(plan_count.max(1)) + 1; /* empty-state row */
+    let want = desired
+        .min(PLANS_PANE_MAX_HEIGHT as usize)
+        .min(content_budget);
+    want.max(PLANS_PANE_MIN_HEIGHT as usize) as u16
+}
+
+/// Split the rail's inner rect into (clawgs_rect, plans_rect). Returns `None`
+/// for `plans_rect` when there are no plans to show or the rail is too short.
+pub(crate) fn split_rail_for_plans(
+    thought_content: Rect,
+    plan_count: usize,
+) -> (Rect, Option<Rect>) {
+    if plan_count == 0 {
+        return (thought_content, None);
+    }
+    let plans_height = plans_pane_height(thought_content.height, plan_count);
+    if plans_height == 0 {
+        return (thought_content, None);
+    }
+    let clawgs_height = thought_content.height.saturating_sub(plans_height);
+    let clawgs = Rect {
+        x: thought_content.x,
+        y: thought_content.y,
+        width: thought_content.width,
+        height: clawgs_height,
+    };
+    let plans = Rect {
+        x: thought_content.x,
+        y: thought_content.y + clawgs_height,
+        width: thought_content.width,
+        height: plans_height,
+    };
+    (clawgs, Some(plans))
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct PlanPanelEntry {
+    pub(crate) slug: String,
+    pub(crate) client_label: String,
+    pub(crate) kind: String, // "released" | "draft"
+    pub(crate) schema_path: String,
+}
+
+pub(crate) fn build_plans_panel(plans: &[PlanPanelEntry], plans_rect: Rect) -> PlansPanelLayout {
+    if plans_rect.width == 0 || plans_rect.height == 0 {
+        return PlansPanelLayout::default();
+    }
+    let header_rect = Some(Rect {
+        x: plans_rect.x,
+        y: plans_rect.y,
+        width: plans_rect.width,
+        height: 1,
+    });
+    let row_capacity = plans_rect.height.saturating_sub(PLANS_PANE_HEADER_ROWS) as usize;
+    if row_capacity == 0 {
+        return PlansPanelLayout {
+            header_rect,
+            rows: Vec::new(),
+            empty_message: None,
+        };
+    }
+    if plans.is_empty() {
+        return PlansPanelLayout {
+            header_rect,
+            rows: Vec::new(),
+            empty_message: Some("no plans found".to_string()),
+        };
+    }
+
+    let mut rows = Vec::new();
+    let width = plans_rect.width as usize;
+    let base_y = plans_rect.y + PLANS_PANE_HEADER_ROWS;
+    for (i, plan) in plans.iter().take(row_capacity).enumerate() {
+        let kind_suffix = if plan.kind == "draft" { " (draft)" } else { "" };
+        let raw = format!("{} · {}{}", plan.slug, plan.client_label, kind_suffix);
+        let display = truncate_label(&raw, width);
+        let color = if plan.kind == "draft" {
+            Color::DarkGrey
+        } else {
+            Color::Cyan
+        };
+        rows.push(PlanRowLayout {
+            rect: Rect {
+                x: plans_rect.x,
+                y: base_y + i as u16,
+                width: display_width(&display) as u16,
+                height: 1,
+            },
+            schema_path: plan.schema_path.clone(),
+            slug: plan.slug.clone(),
+            display,
+            color,
+        });
+    }
+    PlansPanelLayout {
+        header_rect,
+        rows,
+        empty_message: None,
+    }
+}
+
+pub(crate) fn render_plans_panel(
+    renderer: &mut Renderer,
+    plans_rect: Rect,
+    layout: &PlansPanelLayout,
+) {
+    if plans_rect.width == 0 || plans_rect.height == 0 {
+        return;
+    }
+    if let Some(header) = layout.header_rect {
+        renderer.draw_text(
+            header.x,
+            header.y,
+            &truncate_label("plans", header.width as usize),
+            Color::Yellow,
+        );
+    }
+    if let Some(message) = layout.empty_message.as_deref() {
+        renderer.draw_text(
+            plans_rect.x,
+            plans_rect.y + PLANS_PANE_HEADER_ROWS,
+            &truncate_label(message, plans_rect.width as usize),
+            Color::DarkGrey,
+        );
+        return;
+    }
+    for row in &layout.rows {
+        renderer.draw_text(row.rect.x, row.rect.y, &row.display, row.color);
+    }
+}
+
+pub(crate) fn plans_panel_action_at(
+    layout: &PlansPanelLayout,
+    x: u16,
+    y: u16,
+) -> Option<ThoughtPanelAction> {
+    for row in &layout.rows {
+        if row.rect.contains(x, y) {
+            return Some(ThoughtPanelAction::OpenPlanFromDisk {
+                schema_path: row.schema_path.clone(),
+                slug: row.slug.clone(),
+            });
+        }
+    }
+    None
+}
+
 pub(crate) fn thought_panel_action_at<C: TuiApi>(
     app: &App<C>,
     thought_content: Rect,
@@ -958,4 +1141,113 @@ pub(crate) fn thought_panel_action_at<C: TuiApi>(
     }
 
     None
+}
+
+#[cfg(test)]
+mod plans_panel_tests {
+    use super::*;
+
+    fn entry(slug: &str, client: &str, kind: &str, schema: &str) -> PlanPanelEntry {
+        PlanPanelEntry {
+            slug: slug.to_string(),
+            client_label: client.to_string(),
+            kind: kind.to_string(),
+            schema_path: schema.to_string(),
+        }
+    }
+
+    #[test]
+    fn split_rail_carves_bottom_band_when_there_is_room() {
+        let rect = Rect {
+            x: 0,
+            y: 0,
+            width: 40,
+            height: 30,
+        };
+        let (clawgs, plans) = split_rail_for_plans(rect, 5);
+        let plans = plans.expect("plans pane should be visible");
+        assert_eq!(clawgs.x, 0);
+        assert_eq!(clawgs.y, 0);
+        assert_eq!(plans.x, 0);
+        assert_eq!(plans.y, clawgs.height);
+        assert_eq!(clawgs.height + plans.height, rect.height);
+        assert!(plans.height >= PLANS_PANE_MIN_HEIGHT);
+    }
+
+    #[test]
+    fn split_rail_hides_plans_when_rail_too_short() {
+        let rect = Rect {
+            x: 0,
+            y: 0,
+            width: 40,
+            height: 4,
+        };
+        let (clawgs, plans) = split_rail_for_plans(rect, 5);
+        assert!(plans.is_none());
+        assert_eq!(clawgs, rect);
+    }
+
+    #[test]
+    fn build_plans_panel_lists_entries() {
+        let rect = Rect {
+            x: 2,
+            y: 3,
+            width: 30,
+            height: 6,
+        };
+        let plans = vec![
+            entry("alpha", "personal", "released", "/tmp/alpha/schema.mmd"),
+            entry("beta", "clawgs", "draft", "/tmp/beta/schema.mmd"),
+        ];
+        let layout = build_plans_panel(&plans, rect);
+        assert_eq!(layout.rows.len(), 2);
+        assert!(layout.rows[0].display.starts_with("alpha"));
+        assert!(layout.rows[1].display.contains("(draft)"));
+        let header = layout.header_rect.expect("header rect");
+        assert_eq!(header.y, rect.y);
+    }
+
+    #[test]
+    fn split_rail_hides_plans_when_list_is_empty() {
+        let rect = Rect {
+            x: 0,
+            y: 0,
+            width: 40,
+            height: 30,
+        };
+        let (clawgs, plans) = split_rail_for_plans(rect, 0);
+        assert_eq!(clawgs, rect);
+        assert!(plans.is_none());
+    }
+
+    #[test]
+    fn plans_panel_click_returns_open_plan_action() {
+        let rect = Rect {
+            x: 0,
+            y: 0,
+            width: 40,
+            height: 6,
+        };
+        let plans = vec![entry(
+            "alpha",
+            "personal",
+            "released",
+            "/tmp/alpha/schema.mmd",
+        )];
+        let layout = build_plans_panel(&plans, rect);
+        let row = &layout.rows[0];
+        let action = plans_panel_action_at(&layout, row.rect.x + 1, row.rect.y)
+            .expect("action for plan row");
+        match action {
+            ThoughtPanelAction::OpenPlanFromDisk { schema_path, slug } => {
+                assert_eq!(schema_path, "/tmp/alpha/schema.mmd");
+                assert_eq!(slug, "alpha");
+            }
+            other => panic!("unexpected action: {other:?}"),
+        }
+
+        // Click outside any row returns None.
+        let miss = plans_panel_action_at(&layout, 0, rect.y); // header row
+        assert!(miss.is_none());
+    }
 }

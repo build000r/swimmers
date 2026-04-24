@@ -63,6 +63,7 @@ struct MockApiState {
     open_session_results: VecDeque<Result<NativeDesktopOpenResponse, String>>,
     list_dirs_results: VecDeque<Result<DirListResponse, String>>,
     start_repo_action_results: VecDeque<Result<DirRepoActionResponse, String>>,
+    overlay_plans_results: VecDeque<Result<Vec<PlanPanelEntry>, String>>,
     create_session_results: VecDeque<Result<CreateSessionResponse, String>>,
     update_thought_config_calls: Vec<ThoughtConfig>,
     test_thought_config_calls: Vec<ThoughtConfig>,
@@ -188,6 +189,14 @@ impl MockApi {
             .lock()
             .unwrap()
             .start_repo_action_results
+            .push_back(result);
+    }
+
+    fn push_overlay_plans(&self, result: Result<Vec<PlanPanelEntry>, String>) {
+        self.state
+            .lock()
+            .unwrap()
+            .overlay_plans_results
             .push_back(result);
     }
 
@@ -503,6 +512,18 @@ impl TuiApi for MockApi {
                 .start_repo_action_results
                 .pop_front()
                 .unwrap_or_else(|| Err("unexpected start_repo_action".to_string()))
+        })
+    }
+
+    fn fetch_overlay_plans(&self) -> BoxFuture<'_, Result<Vec<PlanPanelEntry>, String>> {
+        let state = self.state.clone();
+        Box::pin(async move {
+            state
+                .lock()
+                .unwrap()
+                .overlay_plans_results
+                .pop_front()
+                .unwrap_or_else(|| Ok(Vec::new()))
         })
     }
 
@@ -1084,7 +1105,7 @@ async fn api_client_open_session_allows_slower_native_open_responses() {
     let response = client
         .open_session("sess-1")
         .await
-        .expect("native open should outlive the default polling timeout");
+        .expect("terminal handoff should outlive the default polling timeout");
 
     handle.abort();
     assert_eq!(response.session_id, "sess-1");
@@ -1137,7 +1158,7 @@ async fn api_client_can_switch_native_app_without_restart() {
     let response = client
         .set_native_app(NativeDesktopApp::Ghostty)
         .await
-        .expect("native app switch should succeed");
+        .expect("terminal handoff target switch should succeed");
 
     handle.abort();
     assert_eq!(response.app_id, Some(NativeDesktopApp::Ghostty));
@@ -1181,7 +1202,7 @@ async fn api_client_set_native_app_reports_restart_hint_on_404() {
         .expect_err("missing route should surface restart hint");
 
     handle.abort();
-    assert!(error.contains("does not support runtime native target switching yet"));
+    assert!(error.contains("does not support runtime terminal handoff target switching yet"));
     assert!(error.contains("restart `swimmers`"));
 }
 
@@ -1206,7 +1227,7 @@ async fn api_client_set_native_mode_reports_restart_hint_on_404() {
         .expect_err("missing route should surface restart hint");
 
     handle.abort();
-    assert!(error.contains("does not support runtime Ghostty preview mode switching yet"));
+    assert!(error.contains("does not support runtime Ghostty handoff placement switching yet"));
     assert!(error.contains("restart `swimmers`"));
 }
 
@@ -1442,7 +1463,7 @@ fn refresh_skips_native_status_when_sessions_fail() {
     assert_eq!(
         api.native_status_calls(),
         0,
-        "native status should not be called when sessions failed"
+        "terminal handoff status should not be called when sessions failed"
     );
     assert!(
         app.message
@@ -1473,7 +1494,7 @@ fn refresh_calls_native_status_when_sessions_succeed() {
     assert_eq!(
         api.native_status_calls(),
         1,
-        "native status should be called when sessions succeeded"
+        "terminal handoff status should be called when sessions succeeded"
     );
     assert!(app.native_status.is_some());
 }
@@ -1493,7 +1514,7 @@ fn refresh_sessions_error_not_overwritten_by_native_status_error() {
         "expected sessions error, got: {msg}"
     );
     assert!(
-        !msg.contains("native desktop status"),
+        !msg.contains("terminal handoff status"),
         "native-status error must not overwrite sessions error: {msg}"
     );
 }
@@ -2635,10 +2656,10 @@ fn refresh_updates_native_status_label_when_backend_app_changes() {
     let mut app = make_app(api);
 
     app.refresh(layout);
-    assert_eq!(app.native_status_text(), "native open: iTerm");
+    assert_eq!(app.native_status_text(), "terminal handoff: iTerm");
 
     app.refresh(layout);
-    assert_eq!(app.native_status_text(), "native open: Ghostty (swap)");
+    assert_eq!(app.native_status_text(), "terminal handoff: Ghostty (swap)");
 }
 
 #[test]
@@ -3545,7 +3566,7 @@ fn clicking_thought_row_surfaces_native_open_errors() {
         .x
         .saturating_add(1);
 
-    api.push_open_session(Err("native open unavailable".to_string()));
+    api.push_open_session(Err("terminal handoff unavailable".to_string()));
     app.handle_thought_click(
         body_x,
         row_start_y,
@@ -3560,7 +3581,7 @@ fn clicking_thought_row_surfaces_native_open_errors() {
     assert_eq!(api.open_calls(), vec!["sess-1".to_string()]);
     assert_eq!(
         app.message.as_ref().map(|(message, _)| message.as_str()),
-        Some("native open unavailable")
+        Some("terminal handoff unavailable")
     );
     assert_eq!(app.active_thought_filter_text(), "filter: none");
 }
@@ -4200,6 +4221,285 @@ fn render_picker_uses_entry_repo_theme_color() {
     );
 }
 
+fn action_summary(actions: Vec<ActionLabel>) -> Vec<(String, RepoActionKind, Color, bool)> {
+    actions
+        .into_iter()
+        .map(|action| (action.text, action.kind, action.color, action.clickable))
+        .collect()
+}
+
+fn picker_entry(name: &str) -> DirEntry {
+    dir_response("/tmp", &[(name, true)])
+        .entries
+        .into_iter()
+        .next()
+        .expect("entry")
+}
+
+#[test]
+fn picker_entry_actions_lists_available_repo_actions_in_row_order() {
+    let mut entry = picker_entry("swimmers");
+    entry.repo_dirty = Some(true);
+    entry.has_restart = Some(true);
+    entry.open_url = Some("http://127.0.0.1:3210".to_string());
+
+    assert_eq!(
+        action_summary(picker_entry_actions(&entry)),
+        vec![
+            (
+                "[commit]".to_string(),
+                RepoActionKind::Commit,
+                Color::Green,
+                true
+            ),
+            (
+                "[restart]".to_string(),
+                RepoActionKind::Restart,
+                Color::Yellow,
+                true
+            ),
+            (
+                "[open]".to_string(),
+                RepoActionKind::Open,
+                Color::Cyan,
+                true
+            ),
+        ]
+    );
+}
+
+#[test]
+fn picker_entry_actions_running_status_suppresses_other_actions() {
+    let mut entry = picker_entry("swimmers");
+    entry.repo_dirty = Some(true);
+    entry.has_restart = Some(true);
+    entry.open_url = Some("http://127.0.0.1:3210".to_string());
+    entry.repo_action = Some(RepoActionStatus {
+        kind: RepoActionKind::Restart,
+        state: RepoActionState::Running,
+        detail: None,
+    });
+
+    assert_eq!(
+        action_summary(picker_entry_actions(&entry)),
+        vec![(
+            "[running]".to_string(),
+            RepoActionKind::Restart,
+            Color::Yellow,
+            false
+        )]
+    );
+}
+
+#[test]
+fn picker_entry_actions_reports_commit_status_without_stale_clicks() {
+    let mut failed = picker_entry("dirty");
+    failed.repo_dirty = Some(true);
+    failed.repo_action = Some(RepoActionStatus {
+        kind: RepoActionKind::Commit,
+        state: RepoActionState::Failed,
+        detail: None,
+    });
+
+    let mut done = picker_entry("clean");
+    done.repo_dirty = Some(false);
+    done.repo_action = Some(RepoActionStatus {
+        kind: RepoActionKind::Commit,
+        state: RepoActionState::Succeeded,
+        detail: None,
+    });
+
+    let mut dirty_after_success = picker_entry("dirty-again");
+    dirty_after_success.repo_dirty = Some(true);
+    dirty_after_success.repo_action = Some(RepoActionStatus {
+        kind: RepoActionKind::Commit,
+        state: RepoActionState::Succeeded,
+        detail: None,
+    });
+
+    assert_eq!(
+        action_summary(picker_entry_actions(&failed)),
+        vec![(
+            "[failed]".to_string(),
+            RepoActionKind::Commit,
+            Color::Red,
+            false
+        )]
+    );
+    assert_eq!(
+        action_summary(picker_entry_actions(&done)),
+        vec![(
+            "[done]".to_string(),
+            RepoActionKind::Commit,
+            Color::Green,
+            false
+        )]
+    );
+    assert_eq!(
+        action_summary(picker_entry_actions(&dirty_after_success)),
+        vec![(
+            "[commit]".to_string(),
+            RepoActionKind::Commit,
+            Color::Green,
+            true
+        )]
+    );
+}
+
+#[test]
+fn picker_entry_actions_reports_restart_status_without_stale_clicks() {
+    let mut failed = picker_entry("failed-service");
+    failed.repo_action = Some(RepoActionStatus {
+        kind: RepoActionKind::Restart,
+        state: RepoActionState::Failed,
+        detail: None,
+    });
+
+    let mut done = picker_entry("done-service");
+    done.repo_action = Some(RepoActionStatus {
+        kind: RepoActionKind::Restart,
+        state: RepoActionState::Succeeded,
+        detail: None,
+    });
+
+    assert_eq!(
+        action_summary(picker_entry_actions(&failed)),
+        vec![(
+            "[failed]".to_string(),
+            RepoActionKind::Restart,
+            Color::Red,
+            false
+        )]
+    );
+    assert_eq!(
+        action_summary(picker_entry_actions(&done)),
+        vec![(
+            "[done]".to_string(),
+            RepoActionKind::Restart,
+            Color::Green,
+            false
+        )]
+    );
+}
+
+#[test]
+fn render_picker_draws_repo_action_badges_on_entry_row() {
+    let mut response = dir_response("/tmp", &[("swimmers", true)]);
+    response.entries[0].repo_dirty = Some(true);
+    response.entries[0].has_restart = Some(true);
+    response.entries[0].open_url = Some("http://127.0.0.1:3210".to_string());
+    let picker = PickerState::new(2, 2, response, true, SpawnTool::Codex);
+    let field = test_field();
+    let layout = picker_layout(&picker, field);
+    let mut renderer = test_renderer(100, 30);
+
+    render_picker(&mut renderer, &picker, field);
+
+    let row = row_text(&renderer, layout.first_entry_y);
+    assert!(
+        row.contains("swimmers"),
+        "row should include entry label: {row}"
+    );
+    assert!(
+        row.contains("[commit]"),
+        "row should include commit badge: {row}"
+    );
+    assert!(
+        row.contains("[restart]"),
+        "row should include restart badge: {row}"
+    );
+    assert!(
+        row.contains("[open]"),
+        "row should include open badge: {row}"
+    );
+
+    let (commit_x, commit_y) =
+        find_text_position(&renderer, "[commit]").expect("commit badge position");
+    let (restart_x, restart_y) =
+        find_text_position(&renderer, "[restart]").expect("restart badge position");
+    let (open_x, open_y) = find_text_position(&renderer, "[open]").expect("open badge position");
+    assert_eq!(commit_y, layout.first_entry_y);
+    assert_eq!(restart_y, layout.first_entry_y);
+    assert_eq!(open_y, layout.first_entry_y);
+    assert_eq!(cell_at(&renderer, commit_x, commit_y).fg, Color::Green);
+    assert_eq!(cell_at(&renderer, restart_x, restart_y).fg, Color::Yellow);
+    assert_eq!(cell_at(&renderer, open_x, open_y).fg, Color::Cyan);
+}
+
+#[test]
+fn render_picker_draws_empty_state_for_empty_directory() {
+    let picker = PickerState::new(
+        2,
+        2,
+        dir_response("/tmp/empty", &[]),
+        true,
+        SpawnTool::Codex,
+    );
+    let field = test_field();
+    let layout = picker_layout(&picker, field);
+    let mut renderer = test_renderer(100, 30);
+
+    render_picker(&mut renderer, &picker, field);
+
+    assert!(
+        row_text(&renderer, layout.first_entry_y).contains("empty"),
+        "empty directories should render an empty row"
+    );
+}
+
+#[test]
+fn render_initial_request_draws_placeholder_and_ready_voice_state() {
+    let request = InitialRequestState::new("/tmp/swimmers".to_string());
+    let field = test_field();
+    let layout = initial_request_layout(field);
+    let mut renderer = test_renderer(100, 30);
+
+    render_initial_request(&mut renderer, &request, &VoiceUiState::Ready, field);
+
+    let cursor_x = layout.content.x + 2;
+    let (status_x, status_y) = find_text_position(&renderer, "voice: ready").expect("voice status");
+    let input_row = row_text(&renderer, layout.input_y);
+    assert!(
+        input_row.contains("|ype initial request"),
+        "empty composer should show cursor over placeholder text: {input_row}"
+    );
+    assert_eq!(
+        cell_at(&renderer, cursor_x, layout.input_y).fg,
+        Color::Yellow
+    );
+    assert_eq!(
+        cell_at(&renderer, cursor_x + 1, layout.input_y).fg,
+        Color::DarkGrey
+    );
+    assert_eq!(status_y, layout.content.y + 4);
+    assert_eq!(cell_at(&renderer, status_x, status_y).fg, Color::Cyan);
+}
+
+#[test]
+fn render_initial_request_draws_typed_value_and_failed_voice_state() {
+    let mut request = InitialRequestState::new("/tmp/swimmers".to_string());
+    request.value = "Ask Codex to harden the picker".to_string();
+    let field = test_field();
+    let layout = initial_request_layout(field);
+    let mut renderer = test_renderer(100, 30);
+
+    render_initial_request(
+        &mut renderer,
+        &request,
+        &VoiceUiState::Failed("microphone denied".to_string()),
+        field,
+    );
+
+    let (value_x, value_y) =
+        find_text_position(&renderer, "Ask Codex to harden the picker").expect("typed value");
+    let (status_x, status_y) =
+        find_text_position(&renderer, "voice: microphone denied").expect("voice failure");
+    assert_eq!(value_y, layout.input_y);
+    assert_eq!(cell_at(&renderer, value_x, value_y).fg, Color::White);
+    assert_eq!(status_y, layout.content.y + 4);
+    assert_eq!(cell_at(&renderer, status_x, status_y).fg, Color::Red);
+}
+
 #[test]
 fn sleeping_entities_fill_bottom_row_by_sleepiness() {
     let api = MockApi::new();
@@ -4757,6 +5057,30 @@ fn toggling_to_all_reloads_same_path_without_reordering() {
 }
 
 #[test]
+fn picker_search_filters_without_changing_browsing_scope() {
+    let api = MockApi::new();
+    let mut app = make_app(api.clone());
+    let mut picker = PickerState::new(
+        10,
+        10,
+        dir_response(TEST_REPOS_ROOT, &[("alpha", true), ("beta", true)]),
+        true,
+        SpawnTool::Codex,
+    );
+    picker.current_group = Some("work".to_string());
+    app.picker = Some(picker);
+
+    app.picker_search_push('b');
+
+    let picker = app.picker.as_ref().expect("picker");
+    assert_eq!(picker.search, "b");
+    assert!(picker.managed_only);
+    assert_eq!(picker.current_group.as_deref(), Some("work"));
+    assert_eq!(picker.visible_entries(), vec![1]);
+    assert!(api.list_calls().is_empty());
+}
+
+#[test]
 fn dir_list_failure_blocks_spawn_and_shows_error() {
     let api = MockApi::new();
     api.push_list_dirs(Err("Permission denied".to_string()));
@@ -4882,6 +5206,7 @@ fn pressing_enter_after_pasting_initial_request_submits_once() {
     assert_eq!(app.selected_id.as_deref(), Some("sess-55"));
 }
 
+#[cfg(not(feature = "voice"))]
 #[test]
 fn ctrl_v_in_initial_request_reports_voice_feature_when_not_built() {
     let api = MockApi::new();
@@ -4905,6 +5230,61 @@ fn ctrl_v_in_initial_request_reports_voice_feature_when_not_built() {
             .map(|state| state.value.as_str()),
         Some("")
     );
+}
+
+#[cfg(feature = "voice")]
+#[test]
+fn opening_initial_request_reports_voice_setup_gap_when_model_is_unset() {
+    let _lock = TEST_ENV_LOCK.lock().expect("env lock");
+    let original_model = env::var("SWIMMERS_VOICE_MODEL").ok();
+    env::remove_var("SWIMMERS_VOICE_MODEL");
+
+    let api = MockApi::new();
+    let mut app = make_app(api);
+    app.open_initial_request(TEST_REPO_SWIMMERS.to_string());
+
+    assert_eq!(
+        app.voice_state,
+        VoiceUiState::Failed("set SWIMMERS_VOICE_MODEL to enable voice".to_string())
+    );
+    assert_eq!(toggle_hint(), "ctrl-v voice needs model");
+
+    restore_env_var("SWIMMERS_VOICE_MODEL", original_model);
+}
+
+#[cfg(feature = "voice")]
+#[test]
+fn ctrl_v_in_initial_request_reports_missing_voice_model_when_feature_is_built() {
+    let _lock = TEST_ENV_LOCK.lock().expect("env lock");
+    let original_model = env::var("SWIMMERS_VOICE_MODEL").ok();
+    env::remove_var("SWIMMERS_VOICE_MODEL");
+
+    let api = MockApi::new();
+    let field = test_field();
+    let mut app = make_app(api);
+    app.open_initial_request(TEST_REPO_SWIMMERS.to_string());
+
+    app.handle_initial_request_key(
+        KeyEvent::new(KeyCode::Char('v'), KeyModifiers::CONTROL),
+        field,
+    );
+
+    assert_eq!(
+        app.message.as_ref().map(|(message, _)| message.as_str()),
+        Some("set SWIMMERS_VOICE_MODEL to enable voice")
+    );
+    assert_eq!(
+        app.voice_state,
+        VoiceUiState::Failed("set SWIMMERS_VOICE_MODEL to enable voice".to_string())
+    );
+    assert_eq!(
+        app.initial_request
+            .as_ref()
+            .map(|state| state.value.as_str()),
+        Some("")
+    );
+
+    restore_env_var("SWIMMERS_VOICE_MODEL", original_model);
 }
 
 #[test]
@@ -5596,6 +5976,63 @@ fn handle_key_event_covers_initial_request_picker_and_quit_paths() {
 }
 
 #[test]
+fn handle_key_event_keeps_picker_hotkeys_before_live_search() {
+    let api = MockApi::new();
+    api.push_start_repo_action(Ok(DirRepoActionResponse {
+        ok: true,
+        path: TEST_REPO_SWIMMERS.to_string(),
+        status: RepoActionStatus {
+            kind: RepoActionKind::Commit,
+            state: RepoActionState::Running,
+            detail: None,
+        },
+    }));
+    api.push_list_dirs(Ok(DirListResponse {
+        path: TEST_REPOS_ROOT.to_string(),
+        entries: vec![repo_dir_entry(
+            "swimmers",
+            true,
+            Some(true),
+            Some(RepoActionStatus {
+                kind: RepoActionKind::Commit,
+                state: RepoActionState::Running,
+                detail: None,
+            }),
+        )],
+        overlay_label: None,
+        groups: Vec::new(),
+    }));
+    let layout = test_layout(120, 32);
+    let mut app = make_app(api.clone());
+    let mut picker = PickerState::new(
+        3,
+        3,
+        DirListResponse {
+            path: TEST_REPOS_ROOT.to_string(),
+            entries: vec![repo_dir_entry("swimmers", true, Some(true), None)],
+            overlay_label: None,
+            groups: Vec::new(),
+        },
+        true,
+        SpawnTool::Codex,
+    );
+    picker.selection = PickerSelection::Entry(0);
+    app.picker = Some(picker);
+
+    assert!(handle_key_event(&mut app, layout, key(KeyCode::Char('c'))));
+    poll_until_interaction(&mut app);
+
+    assert_eq!(
+        api.start_repo_action_calls(),
+        vec![(TEST_REPO_SWIMMERS.to_string(), RepoActionKind::Commit)]
+    );
+    assert_eq!(
+        app.picker.as_ref().map(|picker| picker.search.as_str()),
+        Some("")
+    );
+}
+
+#[test]
 fn handle_key_event_plan_tab_bracket_navigation() {
     let api = MockApi::new();
     let layout = test_layout(120, 32);
@@ -5748,7 +6185,7 @@ fn handle_key_event_toggles_native_app_live() {
     );
     assert_eq!(
         app.message.as_ref().map(|(message, _)| message.as_str()),
-        Some("native open target: Ghostty (swap)")
+        Some("terminal handoff target: Ghostty (swap)")
     );
 }
 
@@ -5797,7 +6234,7 @@ fn handle_key_event_toggles_ghostty_mode_live() {
     );
     assert_eq!(
         app.message.as_ref().map(|(message, _)| message.as_str()),
-        Some("Ghostty preview mode: add")
+        Some("Ghostty placement: new split")
     );
 }
 
@@ -5881,6 +6318,130 @@ fn thought_config_editor_updates_backend_and_model_then_saves() {
     assert_eq!(saved.backend, "codex");
     assert_eq!(saved.model, "gpt-5.4");
     assert_eq!(api.test_thought_config_calls().len(), 1);
+}
+
+fn thought_config_test_editor(focus: ThoughtConfigEditorField) -> ThoughtConfigEditorState {
+    let mut editor = ThoughtConfigEditorState::new(
+        ThoughtConfig {
+            backend: "openrouter".to_string(),
+            model: String::new(),
+            ..ThoughtConfig::default()
+        },
+        None,
+    );
+    editor.focus = focus;
+    editor
+}
+
+#[test]
+fn thought_config_key_pending_action_blocks_edits_but_escape_closes() {
+    let api = MockApi::new();
+    let layout = test_layout(120, 32);
+    let mut app = make_app(api);
+    app.thought_config_editor = Some(thought_config_test_editor(ThoughtConfigEditorField::Model));
+    let (_tx, rx) = tokio::sync::oneshot::channel();
+    app.pending_interaction = Some(rx);
+
+    app.handle_thought_config_key(
+        KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE),
+        layout,
+    );
+
+    assert_eq!(
+        app.thought_config_editor
+            .as_ref()
+            .map(|editor| editor.config.model.as_str()),
+        Some("openrouter/free")
+    );
+    assert_eq!(
+        app.visible_message().as_deref(),
+        Some("wait for the current action to finish")
+    );
+
+    app.handle_thought_config_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), layout);
+
+    assert!(app.thought_config_editor.is_none());
+    assert!(
+        app.pending_interaction.is_some(),
+        "escape only closes the editor; the in-flight action remains pending"
+    );
+}
+
+#[test]
+fn thought_config_key_moves_focus_and_edits_fields() {
+    let api = MockApi::new();
+    let layout = test_layout(120, 32);
+    let mut app = make_app(api);
+    app.thought_config_editor = Some(thought_config_test_editor(
+        ThoughtConfigEditorField::Backend,
+    ));
+
+    app.handle_thought_config_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), layout);
+    assert_eq!(
+        app.thought_config_editor
+            .as_ref()
+            .map(|editor| editor.focus),
+        Some(ThoughtConfigEditorField::Model)
+    );
+
+    app.handle_thought_config_key(
+        KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE),
+        layout,
+    );
+    app.handle_thought_config_key(
+        KeyEvent::new(KeyCode::Char('P'), KeyModifiers::SHIFT),
+        layout,
+    );
+    app.handle_thought_config_key(
+        KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE),
+        layout,
+    );
+    assert_eq!(
+        app.thought_config_editor
+            .as_ref()
+            .map(|editor| editor.config.model.as_str()),
+        Some("openrouter/freeg")
+    );
+
+    app.handle_thought_config_key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT), layout);
+    app.handle_thought_config_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE), layout);
+    assert_eq!(
+        app.thought_config_editor
+            .as_ref()
+            .map(|editor| editor.config.backend.as_str()),
+        Some("codex")
+    );
+    app.handle_thought_config_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE), layout);
+    assert_eq!(
+        app.thought_config_editor
+            .as_ref()
+            .map(|editor| editor.config.backend.as_str()),
+        Some("openrouter")
+    );
+
+    app.handle_thought_config_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE), layout);
+    app.handle_thought_config_key(
+        KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE),
+        layout,
+    );
+    assert_eq!(
+        app.thought_config_editor
+            .as_ref()
+            .map(|editor| editor.config.enabled),
+        Some(false)
+    );
+}
+
+#[test]
+fn thought_config_key_enter_on_cancel_closes_editor() {
+    let api = MockApi::new();
+    let layout = test_layout(120, 32);
+    let mut app = make_app(api);
+    app.thought_config_editor = Some(thought_config_test_editor(ThoughtConfigEditorField::Cancel));
+
+    app.handle_thought_config_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), layout);
+
+    assert!(app.thought_config_editor.is_none());
 }
 
 #[test]
@@ -6287,7 +6848,7 @@ fn clicking_native_status_label_toggles_native_app_live() {
     }));
     let rect = app
         .native_status_rect(120)
-        .expect("native status should render in header");
+        .expect("terminal handoff status should render in header");
 
     assert!(handle_split_or_header_click(
         &mut app,
@@ -6332,7 +6893,7 @@ fn clicking_ghostty_mode_label_toggles_preview_mode_live() {
     }));
     let rect = app
         .ghostty_mode_rect(120)
-        .expect("ghostty mode should render in header");
+        .expect("Ghostty placement should render in header");
 
     assert!(handle_split_or_header_click(
         &mut app,
@@ -9977,7 +10538,7 @@ fn background_refresh_error_retains_previous_entities() {
 
     assert!(
         app.native_status.is_some(),
-        "setup: native status populated"
+        "setup: terminal handoff status populated"
     );
 
     // Second: background refresh with error
@@ -10203,7 +10764,7 @@ fn initial_sync_refresh_populates_state() {
     assert_eq!(app.entities.len(), 1, "entities populated synchronously");
     assert!(
         app.native_status.is_some(),
-        "native status populated synchronously"
+        "terminal handoff status populated synchronously"
     );
 }
 
@@ -10275,4 +10836,47 @@ esac
         EMBEDDED_FIRST_FRAME_BUDGET,
         elapsed
     );
+}
+
+#[test]
+fn maybe_refresh_plans_uses_tui_api_source() {
+    let api = MockApi::new();
+    api.push_overlay_plans(Ok(vec![PlanPanelEntry {
+        slug: "alpha".to_string(),
+        client_label: "remote".to_string(),
+        kind: "released".to_string(),
+        schema_path: "/tmp/plans/alpha/schema.mmd".to_string(),
+    }]));
+    let mut app = make_app(api);
+    app.tick = 1;
+
+    app.maybe_refresh_plans();
+
+    assert_eq!(app.cached_plans.len(), 1);
+    assert_eq!(app.cached_plans[0].slug, "alpha");
+    assert_eq!(app.cached_plans[0].client_label, "remote");
+}
+
+#[test]
+fn open_plan_viewer_reads_schema_source_from_disk() {
+    let temp = tempdir().expect("tempdir");
+    let plan_dir = temp.path().join("plans").join("released").join("alpha");
+    fs::create_dir_all(&plan_dir).expect("plan dir");
+    let schema = plan_dir.join("schema.mmd");
+    fs::write(&schema, "graph TD\nA-->B\n").expect("schema");
+    fs::write(plan_dir.join("plan.md"), "# Plan\n").expect("plan doc");
+
+    let mut app = make_app(MockApi::new());
+    app.open_plan_viewer(schema.to_string_lossy().into_owned(), "alpha".to_string());
+
+    let FishBowlMode::Mermaid(viewer) = &app.fish_bowl_mode else {
+        panic!("expected mermaid viewer");
+    };
+    assert!(viewer.disk_only);
+    assert_eq!(viewer.source.as_deref(), Some("graph TD\nA-->B\n"));
+    assert!(viewer.artifact_error.is_none());
+    assert!(viewer
+        .plan_tabs
+        .as_ref()
+        .is_some_and(|tabs| tabs.contains(&DomainPlanTab::Plan)));
 }

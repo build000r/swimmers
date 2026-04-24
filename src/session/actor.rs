@@ -30,6 +30,7 @@ use crate::types::{
 const CWD_REFRESH_MIN_INTERVAL: Duration = Duration::from_millis(750);
 const TOOL_REFRESH_MIN_INTERVAL: Duration = Duration::from_millis(1_000);
 const LIVENESS_CHECK_INTERVAL: Duration = Duration::from_millis(2_000);
+const TMUX_NEW_SESSION_EXIT_GRACE: Duration = Duration::from_millis(50);
 const TMUX_FALLBACK_TERM: &str = "xterm-256color";
 const TMUX_FALLBACK_COLORTERM: &str = "truecolor";
 
@@ -266,6 +267,16 @@ impl SessionActor {
             pixel_height: 0,
         };
 
+        if !attach {
+            if let Some(dir) = start_cwd.as_deref() {
+                if !std::path::Path::new(dir).is_dir() {
+                    return Err(anyhow::anyhow!(
+                        "session cwd does not exist or is not a directory: {dir}"
+                    ));
+                }
+            }
+        }
+
         let pair = pty_system
             .openpty(initial_size)
             .map_err(|e| anyhow::anyhow!("failed to open PTY: {}", e))?;
@@ -316,10 +327,21 @@ impl SessionActor {
             );
         }
 
-        let _child = pair
+        let mut child = pair
             .slave
             .spawn_command(cmd)
             .map_err(|e| anyhow::anyhow!("failed to spawn tmux: {}", e))?;
+        if !attach {
+            std::thread::sleep(TMUX_NEW_SESSION_EXIT_GRACE);
+            if let Some(status) = child
+                .try_wait()
+                .map_err(|e| anyhow::anyhow!("failed to inspect tmux after spawn: {}", e))?
+            {
+                return Err(anyhow::anyhow!(
+                    "tmux new-session exited immediately with status {status}"
+                ));
+            }
+        }
 
         // We intentionally drop the slave side -- the master side is what we use.
         drop(pair.slave);
@@ -2031,6 +2053,10 @@ fn is_probable_skill_name(raw: &str) -> bool {
         return false;
     }
 
+    if is_builtin_skill_name(&normalized) {
+        return true;
+    }
+
     if let Some(installed) = installed_skill_names() {
         // Only enforce strict membership when the discovered registry looks
         // complete enough to trust; tiny registries are often partial.
@@ -2042,13 +2068,11 @@ fn is_probable_skill_name(raw: &str) -> bool {
         }
     }
 
-    // Short tokens are most often partial drafts (e.g. $c, $com, $comm).
-    // Allow a known short skill name used in this environment.
-    if normalized.len() < 5 {
-        return normalized == "gog";
-    }
+    false
+}
 
-    normalized.chars().any(|ch| ch.is_ascii_lowercase()) || normalized.contains('-')
+fn is_builtin_skill_name(normalized: &str) -> bool {
+    matches!(normalized, "commit" | "describe" | "gog")
 }
 
 fn installed_skill_names() -> Option<&'static HashSet<String>> {

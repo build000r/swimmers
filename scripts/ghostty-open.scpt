@@ -203,5 +203,5 @@ on run argv
 	end if
 
 	set newTerm to my replacePreviewSplit(managedTerm, cfg, managedTitle, attachCommand)
-	return "created|" & (id of newTerm as text)
+	return "swapped|" & (id of newTerm as text)
 end run

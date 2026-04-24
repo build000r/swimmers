@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
+use std::time::SystemTime;
 
 use serde::Deserialize;
 
@@ -37,6 +38,21 @@ pub struct OverlayDirGroup {
     pub dirs: Vec<PathBuf>,
 }
 
+/// A domain plan discovered on disk under an overlay's `plans/{released,draft}` root.
+#[derive(Debug, Clone)]
+pub struct OverlayPlanEntry {
+    /// Plan directory name, e.g. `"hybrid_booking_wrapper"`.
+    pub slug: String,
+    /// Display label for the overlay client that owns the plan (e.g. `"personal"`).
+    pub client_label: String,
+    /// Either `"released"` or `"draft"` — which plans subfolder the entry came from.
+    pub kind: &'static str,
+    /// Absolute path to the plan's `schema.mmd` file.
+    pub schema_path: PathBuf,
+    /// Most-recent mtime across the plan directory's files, for sort-by-recent.
+    pub updated_at: Option<SystemTime>,
+}
+
 /// Directory browsing configuration derived from an overlay's `dev_sanity` section.
 #[derive(Debug, Clone)]
 pub struct OverlayDirConfig {
@@ -54,6 +70,7 @@ struct ClientOverlay {
     #[allow(dead_code)]
     // FIXME(2026-04-21): Retained for overlay diagnostics/export metadata that is not surfaced yet.
     client_dir: PathBuf,
+    label: String,
     cwd_patterns: Vec<String>,
     /// Number of explicit cwd_match entries (not repo_landscape paths).
     cwd_match_count: usize,
@@ -165,6 +182,102 @@ impl SkillboxOverlay {
             Some(dirs)
         }
     }
+
+    /// Enumerate every domain plan across every overlay client.
+    ///
+    /// Walks each client's `plans/released` and `plans/draft` directories (if
+    /// configured) and returns one entry per plan directory that contains a
+    /// `schema.mmd` file. Entries are sorted by `updated_at` descending so the
+    /// most-recently-touched plans come first. Paths whose components contain
+    /// `archived` are skipped; `sessions` subfolders are never scanned.
+    pub fn list_all_plans(&self) -> Vec<OverlayPlanEntry> {
+        let mut entries = Vec::new();
+        for client in &self.clients {
+            let label = client_display_label(client);
+            if let Some(root) = &client.plan_root {
+                collect_plans_from_root(root, &label, "released", &mut entries);
+            }
+            if let Some(draft) = &client.plan_draft {
+                collect_plans_from_root(draft, &label, "draft", &mut entries);
+            }
+        }
+        entries.sort_by(|a, b| match (a.updated_at, b.updated_at) {
+            (Some(lhs), Some(rhs)) => rhs.cmp(&lhs),
+            (Some(_), None) => std::cmp::Ordering::Less,
+            (None, Some(_)) => std::cmp::Ordering::Greater,
+            (None, None) => a.slug.cmp(&b.slug),
+        });
+        entries
+    }
+}
+
+fn client_display_label(client: &ClientOverlay) -> String {
+    client.label.clone()
+}
+
+fn collect_plans_from_root(
+    root: &Path,
+    client_label: &str,
+    kind: &'static str,
+    out: &mut Vec<OverlayPlanEntry>,
+) {
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        if !file_type.is_dir() {
+            continue;
+        }
+        let plan_dir = entry.path();
+        let slug = match plan_dir.file_name().and_then(|n| n.to_str()) {
+            Some(name) => name.to_string(),
+            None => continue,
+        };
+        // Skip any plan dir whose path mentions "archived" anywhere — the user
+        // wants live plans only.
+        if plan_dir
+            .components()
+            .any(|c| c.as_os_str().to_string_lossy().contains("archived"))
+        {
+            continue;
+        }
+        let schema_path = plan_dir.join("schema.mmd");
+        if !schema_path.is_file() {
+            continue;
+        }
+        let updated_at = plan_dir_latest_mtime(&plan_dir);
+        out.push(OverlayPlanEntry {
+            slug,
+            client_label: client_label.to_string(),
+            kind,
+            schema_path,
+            updated_at,
+        });
+    }
+}
+
+fn plan_dir_latest_mtime(dir: &Path) -> Option<SystemTime> {
+    let mut latest: Option<SystemTime> = None;
+    let walk = std::fs::read_dir(dir).ok()?;
+    for entry in walk.flatten() {
+        let Ok(meta) = entry.metadata() else {
+            continue;
+        };
+        if !meta.is_file() {
+            continue;
+        }
+        let Ok(mtime) = meta.modified() else {
+            continue;
+        };
+        latest = Some(match latest {
+            Some(prev) if prev >= mtime => prev,
+            _ => mtime,
+        });
+    }
+    latest
 }
 
 // ---------------------------------------------------------------------------
@@ -345,6 +458,7 @@ fn parse_client_overlay(client_dir: &Path, overlay_path: &Path) -> Option<Client
 
     Some(ClientOverlay {
         client_dir: client_dir.to_path_buf(),
+        label: client_label,
         cwd_patterns,
         cwd_match_count,
         plan_root,
@@ -485,6 +599,15 @@ fn cwd_starts_with(cwd: &str, pattern: &str) -> bool {
 mod tests {
     use super::*;
 
+    #[cfg(test)]
+    fn set_mtime(path: &Path, when: SystemTime) {
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .open(path)
+            .expect("open for mtime");
+        file.set_modified(when).expect("set_modified");
+    }
+
     #[test]
     fn cwd_starts_with_exact_match() {
         assert!(cwd_starts_with(
@@ -566,6 +689,84 @@ mod tests {
         assert_eq!(results.len(), 2);
         assert!(results.iter().any(|p| p.ends_with("alpha/skills")));
         assert!(results.iter().any(|p| p.ends_with("beta/skills")));
+    }
+
+    #[test]
+    fn list_all_plans_sorts_by_mtime_desc() {
+        use std::time::Duration;
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let client_dir = tmp.path().join("clients").join("personal");
+        let released = client_dir.join("plans").join("released");
+        let draft = client_dir.join("plans").join("draft");
+        std::fs::create_dir_all(released.join("older_plan")).unwrap();
+        std::fs::create_dir_all(released.join("newest_plan")).unwrap();
+        std::fs::create_dir_all(draft.join("draft_plan")).unwrap();
+        let older_schema = released.join("older_plan").join("schema.mmd");
+        let newest_schema = released.join("newest_plan").join("schema.mmd");
+        let draft_schema = draft.join("draft_plan").join("schema.mmd");
+        std::fs::write(&older_schema, "older").unwrap();
+        std::fs::write(&newest_schema, "newest").unwrap();
+        std::fs::write(&draft_schema, "draft").unwrap();
+        // Stamp mtimes so the sort order is deterministic without relying on
+        // fs precision or write-order side-effects.
+        let now = SystemTime::now();
+        let earlier = now - Duration::from_secs(3600);
+        let oldest = earlier - Duration::from_secs(3600);
+        set_mtime(&older_schema, oldest);
+        set_mtime(&newest_schema, now);
+        set_mtime(&draft_schema, earlier);
+
+        let client = ClientOverlay {
+            client_dir: client_dir.clone(),
+            label: "personal".to_string(),
+            cwd_patterns: Vec::new(),
+            cwd_match_count: 0,
+            plan_root: Some(released.clone()),
+            plan_draft: Some(draft.clone()),
+            dir_config: None,
+        };
+        let overlay = SkillboxOverlay {
+            clients: vec![client],
+        };
+        let plans = overlay.list_all_plans();
+        assert_eq!(
+            plans.iter().map(|p| p.slug.as_str()).collect::<Vec<_>>(),
+            vec!["newest_plan", "draft_plan", "older_plan"]
+        );
+        assert_eq!(plans[0].kind, "released");
+        assert_eq!(plans[1].kind, "draft");
+        assert!(plans.iter().all(|p| p.client_label == "personal"));
+    }
+
+    #[test]
+    fn list_all_plans_skips_archived_and_missing_schema() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let client_dir = tmp.path().join("clients").join("personal");
+        let released = client_dir.join("plans").join("released");
+        std::fs::create_dir_all(released.join("live_plan")).unwrap();
+        std::fs::write(released.join("live_plan").join("schema.mmd"), "ok").unwrap();
+        // No schema.mmd → skipped.
+        std::fs::create_dir_all(released.join("no_schema")).unwrap();
+        // "archived" in path → skipped even with schema.mmd.
+        let archived = client_dir.join("plans").join("archived").join("stale_plan");
+        std::fs::create_dir_all(&archived).unwrap();
+        std::fs::write(archived.join("schema.mmd"), "stale").unwrap();
+
+        let client = ClientOverlay {
+            client_dir: client_dir.clone(),
+            label: "personal".to_string(),
+            cwd_patterns: Vec::new(),
+            cwd_match_count: 0,
+            plan_root: Some(released),
+            plan_draft: Some(client_dir.join("plans").join("archived")),
+            dir_config: None,
+        };
+        let overlay = SkillboxOverlay {
+            clients: vec![client],
+        };
+        let plans = overlay.list_all_plans();
+        assert_eq!(plans.len(), 1);
+        assert_eq!(plans[0].slug, "live_plan");
     }
 
     #[test]

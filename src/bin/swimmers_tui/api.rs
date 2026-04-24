@@ -372,6 +372,7 @@ pub(crate) trait TuiApi: Send + Sync + 'static {
         path: &str,
         kind: RepoActionKind,
     ) -> BoxFuture<'_, Result<DirRepoActionResponse, String>>;
+    fn fetch_overlay_plans(&self) -> BoxFuture<'_, Result<Vec<PlanPanelEntry>, String>>;
     fn create_session(
         &self,
         cwd: &str,
@@ -561,13 +562,13 @@ impl TuiApi for ApiClient {
                 .with_auth(self.http.get(url))
                 .send()
                 .await
-                .map_err(|err| self.transport_error("check native desktop status", err))?;
+                .map_err(|err| self.transport_error("check terminal handoff status", err))?;
 
             if response.status().is_success() {
                 return response
                     .json::<NativeDesktopStatusResponse>()
                     .await
-                    .map_err(|err| format!("failed to parse native status: {err}"));
+                    .map_err(|err| format!("failed to parse terminal handoff status: {err}"));
             }
 
             Err(read_error(response).await)
@@ -585,18 +586,18 @@ impl TuiApi for ApiClient {
                 .json(&NativeDesktopConfigRequest { app })
                 .send()
                 .await
-                .map_err(|err| self.transport_error("switch the native desktop target", err))?;
+                .map_err(|err| self.transport_error("switch the terminal handoff target", err))?;
 
             if response.status().is_success() {
                 return response
                     .json::<NativeDesktopStatusResponse>()
                     .await
-                    .map_err(|err| format!("failed to parse native status: {err}"));
+                    .map_err(|err| format!("failed to parse terminal handoff status: {err}"));
             }
 
             if response.status() == reqwest::StatusCode::NOT_FOUND {
                 return Err(format!(
-                    "backend at {} does not support runtime native target switching yet. If this is your local server, restart `swimmers` or relaunch via `make tui`.",
+                    "backend at {} does not support runtime terminal handoff target switching yet. If this is your local server, restart `swimmers` or relaunch via `make tui`.",
                     self.base_url
                 ));
             }
@@ -616,18 +617,18 @@ impl TuiApi for ApiClient {
                 .json(&NativeDesktopModeRequest { mode })
                 .send()
                 .await
-                .map_err(|err| self.transport_error("switch the Ghostty preview mode", err))?;
+                .map_err(|err| self.transport_error("switch the Ghostty handoff placement", err))?;
 
             if response.status().is_success() {
                 return response
                     .json::<NativeDesktopStatusResponse>()
                     .await
-                    .map_err(|err| format!("failed to parse native status: {err}"));
+                    .map_err(|err| format!("failed to parse terminal handoff status: {err}"));
             }
 
             if response.status() == reqwest::StatusCode::NOT_FOUND {
                 return Err(format!(
-                    "backend at {} does not support runtime Ghostty preview mode switching yet. If this is your local server, restart `swimmers` or relaunch via `make tui`.",
+                    "backend at {} does not support runtime Ghostty handoff placement switching yet. If this is your local server, restart `swimmers` or relaunch via `make tui`.",
                     self.base_url
                 ));
             }
@@ -674,7 +675,7 @@ impl TuiApi for ApiClient {
                 return response
                     .json::<NativeDesktopOpenResponse>()
                     .await
-                    .map_err(|err| format!("failed to parse native open response: {err}"));
+                    .map_err(|err| format!("failed to parse terminal handoff response: {err}"));
             }
 
             Err(read_error(response).await)
@@ -758,6 +759,10 @@ impl TuiApi for ApiClient {
 
             Err(read_error(response).await)
         })
+    }
+
+    fn fetch_overlay_plans(&self) -> BoxFuture<'_, Result<Vec<PlanPanelEntry>, String>> {
+        Box::pin(async move { Ok(Vec::new()) })
     }
 
     fn create_session(

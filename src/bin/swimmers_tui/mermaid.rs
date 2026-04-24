@@ -374,6 +374,10 @@ pub(crate) struct MermaidViewerState {
     pub(crate) plan_text_scroll: usize,
     pub(crate) plan_text_cached_width: u16,
     pub(crate) tab_rects: Vec<(DomainPlanTab, Rect)>,
+    /// True when the viewer was opened from a plan directory on disk (no
+    /// backing tmux session). Tab-switching reads sibling files directly
+    /// instead of calling the session-scoped plan-file API.
+    pub(crate) disk_only: bool,
 }
 
 impl MermaidViewerState {

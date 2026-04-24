@@ -25,6 +25,7 @@ use swimmers::types::{
 };
 
 use super::api::{ThoughtConfigTestResponse, TuiApi};
+use super::{load_overlay_plan_entries, PlanPanelEntry};
 pub(crate) use swimmers::types::ThoughtConfigResponse;
 
 pub(crate) struct InProcessApi {
@@ -269,6 +270,14 @@ impl TuiApi for InProcessApi {
             start_dir_repo_action_service(self.state.clone(), &path, kind)
                 .await
                 .map_err(|err| err.to_string())
+        })
+    }
+
+    fn fetch_overlay_plans(&self) -> BoxFuture<'_, Result<Vec<PlanPanelEntry>, String>> {
+        Box::pin(async move {
+            tokio::task::spawn_blocking(load_overlay_plan_entries)
+                .await
+                .map_err(|err| format!("overlay plan scan failed: {err}"))
         })
     }
 

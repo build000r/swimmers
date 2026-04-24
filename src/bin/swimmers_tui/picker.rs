@@ -24,6 +24,8 @@ pub(crate) struct PickerState {
     pub(crate) current_group: Option<String>,
     /// Group names available from the overlay (shown as header buttons).
     pub(crate) available_groups: Vec<String>,
+    /// Live filter query typed by the user; filters `entries` by substring.
+    pub(crate) search: String,
 }
 
 impl PickerState {
@@ -49,7 +51,38 @@ impl PickerState {
             scroll: 0,
             current_group: None,
             available_groups: response.groups,
+            search: String::new(),
         }
+    }
+
+    pub(crate) fn visible_entries(&self) -> Vec<usize> {
+        if self.search.is_empty() {
+            return (0..self.entries.len()).collect();
+        }
+        let needle = self.search.to_lowercase();
+        self.entries
+            .iter()
+            .enumerate()
+            .filter(|(_, entry)| entry.name.to_lowercase().contains(&needle))
+            .map(|(idx, _)| idx)
+            .collect()
+    }
+
+    pub(crate) fn snap_selection_to_visible(&mut self) {
+        let visible = self.visible_entries();
+        match self.selection {
+            PickerSelection::SpawnHere => {}
+            PickerSelection::Entry(index) => {
+                if !visible.contains(&index) {
+                    self.selection = visible
+                        .first()
+                        .copied()
+                        .map(PickerSelection::Entry)
+                        .unwrap_or(PickerSelection::SpawnHere);
+                }
+            }
+        }
+        self.scroll = 0;
     }
 
     pub(crate) fn apply_response(&mut self, response: DirListResponse, preserve_selection: bool) {
@@ -87,6 +120,9 @@ impl PickerState {
         } else {
             self.selection = PickerSelection::SpawnHere;
             self.scroll = 0;
+        }
+        if !self.search.is_empty() {
+            self.snap_selection_to_visible();
         }
     }
 
@@ -150,20 +186,25 @@ impl PickerState {
     }
 
     pub(crate) fn move_selection(&mut self, delta: isize, visible_rows: usize) {
-        if self.entries.is_empty() && matches!(self.selection, PickerSelection::SpawnHere) {
+        let visible = self.visible_entries();
+        if visible.is_empty() && matches!(self.selection, PickerSelection::SpawnHere) {
             return;
         }
 
-        let total = self.entries.len() as isize + 1;
-        let current = match self.selection {
-            PickerSelection::SpawnHere => 0,
-            PickerSelection::Entry(index) => index as isize + 1,
+        let total = visible.len() as isize + 1;
+        let current_pos = match self.selection {
+            PickerSelection::SpawnHere => 0_isize,
+            PickerSelection::Entry(index) => visible
+                .iter()
+                .position(|i| *i == index)
+                .map(|pos| pos as isize + 1)
+                .unwrap_or(0),
         };
-        let next = (current + delta).clamp(0, total.saturating_sub(1));
-        self.selection = if next == 0 {
+        let next_pos = (current_pos + delta).clamp(0, total.saturating_sub(1));
+        self.selection = if next_pos == 0 {
             PickerSelection::SpawnHere
         } else {
-            PickerSelection::Entry((next - 1) as usize)
+            PickerSelection::Entry(visible[(next_pos - 1) as usize])
         };
         self.ensure_selection_visible(visible_rows);
     }
@@ -177,15 +218,20 @@ impl PickerState {
             self.scroll = 0;
             return;
         };
+        let visible = self.visible_entries();
+        let Some(pos) = visible.iter().position(|i| *i == index) else {
+            self.scroll = 0;
+            return;
+        };
 
-        if index < self.scroll {
-            self.scroll = index;
+        if pos < self.scroll {
+            self.scroll = pos;
             return;
         }
 
         let last_visible = self.scroll + visible_rows.saturating_sub(1);
-        if index > last_visible {
-            self.scroll = index + 1 - visible_rows;
+        if pos > last_visible {
+            self.scroll = pos + 1 - visible_rows;
         }
     }
 }
@@ -215,6 +261,8 @@ pub(crate) struct PickerLayout {
     pub(crate) spawn_here_button: Rect,
     pub(crate) first_entry_y: u16,
     pub(crate) visible_entry_rows: usize,
+    /// Indices into `picker.entries` that pass the current search filter.
+    pub(crate) visible_entries: Vec<usize>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -397,13 +445,14 @@ fn picker_entry_actions_width(actions: &[ActionLabel]) -> u16 {
 fn picker_entry_action_rects(
     picker: &PickerState,
     layout: &PickerLayout,
-    index: usize,
+    visible_pos: usize,
+    raw_index: usize,
 ) -> Vec<(Rect, RepoActionKind)> {
-    if index < picker.scroll || index >= picker.scroll + layout.visible_entry_rows {
+    if visible_pos < picker.scroll || visible_pos >= picker.scroll + layout.visible_entry_rows {
         return Vec::new();
     }
 
-    let Some(entry) = picker.entries.get(index) else {
+    let Some(entry) = picker.entries.get(raw_index) else {
         return Vec::new();
     };
     let actions = picker_entry_actions(entry);
@@ -411,7 +460,7 @@ fn picker_entry_action_rects(
         return Vec::new();
     }
 
-    let row_y = layout.first_entry_y + (index - picker.scroll) as u16;
+    let row_y = layout.first_entry_y + (visible_pos - picker.scroll) as u16;
     let total_width = picker_entry_actions_width(&actions);
     let mut x = layout.content.right().saturating_sub(total_width);
     let mut rects = Vec::new();
@@ -435,35 +484,13 @@ fn picker_entry_action_rects(
 }
 
 pub(crate) fn picker_layout(picker: &PickerState, field: Rect) -> PickerLayout {
-    let width = PICKER_WIDTH.min(field.width);
-    let max_height = PICKER_MAX_HEIGHT.min(field.height);
-    let header_rows = 4;
-    let entry_capacity = max_height.saturating_sub(2 + header_rows).max(1);
-    let list_rows = picker.entries.len().max(1).min(entry_capacity as usize) as u16;
-    let height = 2 + header_rows + list_rows;
-
-    let max_x = field.right().saturating_sub(width);
-    let max_y = field.bottom().saturating_sub(height);
-
-    let mut x = picker.anchor_x;
-    if x + width > field.right() {
-        x = picker.anchor_x.saturating_sub(width.saturating_sub(1));
-    }
-    x = x.max(field.x).min(max_x);
-
-    let mut y = picker.anchor_y;
-    if y + height > field.bottom() {
-        y = picker.anchor_y.saturating_sub(height.saturating_sub(1));
-    }
-    y = y.max(field.y).min(max_y);
-
-    let frame = Rect {
-        x,
-        y,
-        width,
-        height,
-    };
+    let _ = (picker.anchor_x, picker.anchor_y);
+    let frame = field;
     let content = frame.inset(1);
+    let header_rows = 4u16;
+    let entry_capacity = content.height.saturating_sub(header_rows).max(1);
+    let visible_entries = picker.visible_entries();
+    let list_rows = visible_entries.len().min(entry_capacity as usize).max(1) as u16;
     let close_button = Rect {
         x: content.right().saturating_sub(3),
         y: content.y,
@@ -534,6 +561,7 @@ pub(crate) fn picker_layout(picker: &PickerState, field: Rect) -> PickerLayout {
         },
         first_entry_y: content.y + 4,
         visible_entry_rows: list_rows as usize,
+        visible_entries,
     }
 }
 
@@ -575,14 +603,14 @@ pub(crate) fn picker_action_at(
         && x >= layout.content.x
         && x < layout.content.right()
     {
-        let index = picker.scroll + (y - layout.first_entry_y) as usize;
-        if index < picker.entries.len() {
-            for (rect, kind) in picker_entry_action_rects(picker, layout, index) {
+        let visible_pos = picker.scroll + (y - layout.first_entry_y) as usize;
+        if let Some(&raw_index) = layout.visible_entries.get(visible_pos) {
+            for (rect, kind) in picker_entry_action_rects(picker, layout, visible_pos, raw_index) {
                 if rect.contains(x, y) {
-                    return Some(PickerAction::StartRepoAction(index, kind));
+                    return Some(PickerAction::StartRepoAction(raw_index, kind));
                 }
             }
-            return Some(PickerAction::ActivateEntry(index));
+            return Some(PickerAction::ActivateEntry(raw_index));
         }
     }
     None
@@ -696,21 +724,52 @@ pub(crate) fn render_picker(renderer: &mut Renderer, picker: &PickerState, field
         spawn_color,
     );
 
-    if picker.entries.is_empty() {
+    if !picker.search.is_empty() {
+        let label = format!(
+            "search: {}_ ({} match{})",
+            picker.search,
+            layout.visible_entries.len(),
+            if layout.visible_entries.len() == 1 {
+                ""
+            } else {
+                "es"
+            },
+        );
+        let path_y = layout.content.y + 1;
+        let overlay_x = layout
+            .content
+            .right()
+            .saturating_sub(label.len() as u16)
+            .max(layout.content.x);
+        let available = layout.content.right().saturating_sub(overlay_x) as usize;
+        renderer.draw_text(
+            overlay_x,
+            path_y,
+            &truncate_label(&label, available),
+            picker_accent,
+        );
+    }
+
+    if layout.visible_entries.is_empty() {
+        let empty_label = if picker.search.is_empty() {
+            "  empty"
+        } else {
+            "  no matches"
+        };
         renderer.draw_text(
             layout.content.x,
             layout.first_entry_y,
-            "  empty",
+            empty_label,
             Color::DarkGrey,
         );
         return;
     }
 
     for row in 0..layout.visible_entry_rows {
-        let index = picker.scroll + row;
-        if index >= picker.entries.len() {
+        let visible_pos = picker.scroll + row;
+        let Some(&index) = layout.visible_entries.get(visible_pos) else {
             break;
-        }
+        };
         let entry = &picker.entries[index];
         let marker = if picker.selection == PickerSelection::Entry(index) {
             ">"

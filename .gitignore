@@ -5,6 +5,8 @@ data/
 .swimmers/
 .throngterm/
 .claude/*.lock
+.claude/skills/
+.codex/skills/
 
 # NTM / modes-of-reasoning tool artifacts
 .ntm/

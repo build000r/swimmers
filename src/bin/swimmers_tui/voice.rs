@@ -1,6 +1,8 @@
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum VoiceUiState {
+    #[cfg_attr(feature = "voice", allow(dead_code))]
     Unsupported,
+    #[cfg_attr(not(feature = "voice"), allow(dead_code))]
     Ready,
     Recording,
     Transcribing,
@@ -20,18 +22,32 @@ impl VoiceUiState {
 }
 
 pub(crate) fn default_ui_state() -> VoiceUiState {
-    if cfg!(feature = "voice") {
-        VoiceUiState::Ready
-    } else {
+    #[cfg(feature = "voice")]
+    {
+        enabled::readiness_error()
+            .map(VoiceUiState::Failed)
+            .unwrap_or(VoiceUiState::Ready)
+    }
+
+    #[cfg(not(feature = "voice"))]
+    {
         VoiceUiState::Unsupported
     }
 }
 
-pub(crate) fn toggle_hint() -> &'static str {
-    if cfg!(feature = "voice") {
-        "ctrl-v voice"
-    } else {
-        "ctrl-v voice unavailable"
+pub(crate) fn toggle_hint() -> String {
+    #[cfg(feature = "voice")]
+    {
+        if enabled::readiness_error().is_some() {
+            "ctrl-v voice needs model".to_string()
+        } else {
+            "ctrl-v voice".to_string()
+        }
+    }
+
+    #[cfg(not(feature = "voice"))]
+    {
+        "ctrl-v voice unavailable".to_string()
     }
 }
 
@@ -55,7 +71,7 @@ impl VoiceRecording {
 #[cfg(feature = "voice")]
 mod enabled {
     use std::env;
-    use std::path::{Path, PathBuf};
+    use std::path::PathBuf;
     use std::sync::{Arc, Mutex};
 
     use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
@@ -85,8 +101,20 @@ mod enabled {
         config: VoiceConfig,
     }
 
+    pub(crate) fn readiness_error() -> Option<String> {
+        match VoiceConfig::from_env() {
+            Ok(_) => {}
+            Err(err) => return Some(setup_error_message(err)),
+        }
+
+        let host = cpal::default_host();
+        host.default_input_device()
+            .is_none()
+            .then_some("no default input device available".to_string())
+    }
+
     pub(crate) fn start_recording() -> Result<VoiceRecording, String> {
-        let config = VoiceConfig::from_env()?;
+        let config = VoiceConfig::from_env().map_err(setup_error_message)?;
         let host = cpal::default_host();
         let device = host
             .default_input_device()
@@ -250,6 +278,15 @@ mod enabled {
         }
     }
 
+    fn setup_error_message(err: String) -> String {
+        match err.as_str() {
+            "SWIMMERS_VOICE_MODEL is not set" => {
+                "set SWIMMERS_VOICE_MODEL to enable voice".to_string()
+            }
+            _ => err,
+        }
+    }
+
     fn expand_home(value: String) -> String {
         if let Some(rest) = value.strip_prefix("~/") {
             if let Some(home) = dirs::home_dir() {
@@ -408,7 +445,10 @@ mod enabled {
                 return;
             };
             let expanded = expand_home("~/models/test.bin".to_string());
-            assert_eq!(Path::new(&expanded), home.join("models/test.bin"));
+            assert_eq!(
+                std::path::Path::new(&expanded),
+                home.join("models/test.bin")
+            );
         }
     }
 }

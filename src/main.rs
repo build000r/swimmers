@@ -111,7 +111,7 @@ async fn run_server_with_bounded_shutdown(
 
     let (state, thought_backend, bridge_health) = startup::init_app_state(config.clone()).await;
     let app = build_app_router(config, state.clone(), prom_handle);
-    let listener = tokio::net::TcpListener::bind(format!("{bind}:{port}"))
+    let listener = tokio::net::TcpListener::bind(startup::listener_addr(&bind, port))
         .await
         .map_err(|err| anyhow!("failed to bind listener: {err}"))?;
     startup::signal_readiness();
@@ -120,16 +120,22 @@ async fn run_server_with_bounded_shutdown(
         elapsed_ms = startup_started.elapsed().as_millis() as u64,
         "startup complete; listener ready"
     );
-    tracing::info!("Swimmers running on http://{bind}:{port}");
+    tracing::info!(
+        "Swimmers running on http://{}",
+        startup::listener_addr(&bind, port)
+    );
 
     let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
     let mut server_task = tokio::spawn(
-        axum::serve(listener, app)
-            .with_graceful_shutdown(async move {
-                let _ = shutdown_rx.await;
-                tracing::info!("received shutdown signal; draining");
-            })
-            .into_future(),
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .with_graceful_shutdown(async move {
+            let _ = shutdown_rx.await;
+            tracing::info!("received shutdown signal; draining");
+        })
+        .into_future(),
     );
 
     let mut shutdown_tx = Some(shutdown_tx);

@@ -387,7 +387,7 @@ pub(crate) fn render_footer<C: TuiApi>(app: &App<C>, renderer: &mut Renderer, st
     } else if app.picker.is_some() {
         "picker: enter/right select  c commit  click badge runs action  h/backspace up  e env  a all  esc close"
     } else {
-        "click empty field spawn  click/enter open  arrows or hjkl move  n native target  m ghostty mode  s sprite theme  t thought cfg  r refresh  q quit"
+        "click empty field spawn  click/enter open  arrows or hjkl move  n terminal target  m Ghostty placement  s sprite theme  t thought cfg  r refresh  q quit"
     };
     renderer.draw_text(
         2,

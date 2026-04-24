@@ -18,6 +18,8 @@ use crate::thought::runtime_config::{DaemonDefaults, ThoughtConfig};
 
 const SYNC_RESULT_MESSAGE_TYPE: &str = "sync_result";
 const EXTERNAL_CMD_WARN_THRESHOLD: Duration = Duration::from_secs(2);
+const EMIT_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
+const DEFAULTS_COMMAND_TIMEOUT: Duration = Duration::from_secs(5);
 
 struct DaemonProcess {
     child: Child,
@@ -72,6 +74,8 @@ pub enum EmitterClientError {
     },
     #[error("clawgs emit daemon exited before sending hello handshake")]
     HandshakeEof,
+    #[error("clawgs emit daemon did not send hello handshake within {timeout_ms}ms")]
+    HelloTimeout { timeout_ms: u64 },
     #[error("malformed hello message from clawgs emit daemon: {line}")]
     MalformedHello {
         line: String,
@@ -133,6 +137,7 @@ impl EmitterClientError {
             self,
             Self::HelloRead { .. }
                 | Self::HandshakeEof
+                | Self::HelloTimeout { .. }
                 | Self::RequestWrite { .. }
                 | Self::ResponseRead { .. }
                 | Self::ResponseEof
@@ -255,12 +260,16 @@ impl EmitterClient {
     }
 
     async fn spawn_daemon(&self) -> Result<DaemonProcess, EmitterClientError> {
-        let mut child = Command::new(&self.bin)
+        let mut command = Command::new(&self.bin);
+        command
             .arg("emit")
             .arg("--stdio")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
+            .stderr(Stdio::null())
+            .kill_on_drop(true);
+
+        let mut child = command
             .spawn()
             .map_err(|source| EmitterClientError::Spawn {
                 bin: self.bin.clone(),
@@ -279,11 +288,21 @@ impl EmitterClient {
             stdout: BufReader::new(stdout),
         };
 
-        let hello_line = daemon
-            .read_non_empty_line()
-            .await
-            .map_err(|source| EmitterClientError::HelloRead { source })?
-            .ok_or(EmitterClientError::HandshakeEof)?;
+        let hello_line = match tokio::time::timeout(
+            EMIT_HANDSHAKE_TIMEOUT,
+            daemon.read_non_empty_line(),
+        )
+        .await
+        {
+            Ok(Ok(Some(line))) => line,
+            Ok(Ok(None)) => return Err(EmitterClientError::HandshakeEof),
+            Ok(Err(source)) => return Err(EmitterClientError::HelloRead { source }),
+            Err(_) => {
+                return Err(EmitterClientError::HelloTimeout {
+                    timeout_ms: EMIT_HANDSHAKE_TIMEOUT.as_millis() as u64,
+                });
+            }
+        };
 
         parse_hello_line(&hello_line)?;
 
@@ -315,20 +334,38 @@ pub async fn fetch_daemon_defaults() -> Option<DaemonDefaults> {
 }
 
 async fn fetch_daemon_defaults_for_bin(bin: &str) -> Option<DaemonDefaults> {
+    fetch_daemon_defaults_for_bin_with_timeout(bin, DEFAULTS_COMMAND_TIMEOUT).await
+}
+
+async fn fetch_daemon_defaults_for_bin_with_timeout(
+    bin: &str,
+    timeout_duration: Duration,
+) -> Option<DaemonDefaults> {
     let started = Instant::now();
     info!(phase = "clawgs_defaults_command", bin = %bin, "running clawgs defaults");
-    let output = Command::new(bin)
+    let mut command = Command::new(bin);
+    command
         .arg("defaults")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .output()
-        .await
-        .map_err(|err| {
+        .kill_on_drop(true);
+
+    let output = match tokio::time::timeout(timeout_duration, command.output()).await {
+        Ok(Ok(output)) => output,
+        Ok(Err(err)) => {
             warn!(bin = %bin, error = %err, "failed to run clawgs defaults");
-            err
-        })
-        .ok()?;
+            return None;
+        }
+        Err(_) => {
+            warn!(
+                bin = %bin,
+                timeout_ms = timeout_duration.as_millis() as u64,
+                "clawgs defaults timed out"
+            );
+            return None;
+        }
+    };
 
     let elapsed_ms = started.elapsed().as_millis() as u64;
     if started.elapsed() >= EXTERNAL_CMD_WARN_THRESHOLD {
@@ -731,6 +768,29 @@ mod tests {
             defaults.terminal_prompt,
             "Terminal session status reporter."
         );
+    }
+
+    #[tokio::test]
+    async fn fetch_daemon_defaults_times_out() {
+        let _lock = TEST_ENV_LOCK.lock().expect("env lock");
+        let temp = tempdir().expect("tempdir");
+        let script_path = temp.path().join("hanging-clawgs.sh");
+        fs::write(
+            &script_path,
+            "#!/bin/sh\nif [ \"$1\" = \"defaults\" ]; then exec sleep 2; fi\n",
+        )
+        .expect("write hanging clawgs");
+        let mut perms = fs::metadata(&script_path).expect("metadata").permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&script_path, perms).expect("chmod hanging clawgs");
+
+        let defaults = fetch_daemon_defaults_for_bin_with_timeout(
+            &script_path.to_string_lossy(),
+            Duration::from_millis(50),
+        )
+        .await;
+
+        assert!(defaults.is_none());
     }
 
     #[test]

@@ -479,9 +479,17 @@ async fn atomic_write_blocking(path: PathBuf, data: String) -> anyhow::Result<()
 /// Read a file's contents, returning None if the file does not exist.
 async fn read_file_blocking(path: PathBuf) -> anyhow::Result<Option<String>> {
     tokio::task::spawn_blocking(move || match std::fs::read_to_string(&path) {
-        Ok(data) => {
-            let decoded: ChecksummedPayload = serde_json::from_str(&data)
-                .map_err(|e| anyhow::anyhow!("decode checksummed payload failed: {e}"))?;
+        Ok(data) => decode_file_payload(path, data).map(Some),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(anyhow::anyhow!("read failed: {e}")),
+    })
+    .await
+    .map_err(|e| anyhow::anyhow!("spawn_blocking panicked: {e}"))?
+}
+
+fn decode_file_payload(path: PathBuf, data: String) -> anyhow::Result<String> {
+    match serde_json::from_str::<ChecksummedPayload>(&data) {
+        Ok(decoded) => {
             let actual = crc32fast::hash(decoded.payload.as_bytes());
             if actual != decoded.checksum_crc32 {
                 return Err(anyhow::Error::new(FileStoreIoError::ChecksumMismatch {
@@ -490,13 +498,20 @@ async fn read_file_blocking(path: PathBuf) -> anyhow::Result<Option<String>> {
                     actual,
                 }));
             }
-            Ok(Some(decoded.payload))
+            Ok(decoded.payload)
         }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(anyhow::anyhow!("read failed: {e}")),
-    })
-    .await
-    .map_err(|e| anyhow::anyhow!("spawn_blocking panicked: {e}"))?
+        Err(envelope_error) => {
+            let value: serde_json::Value = serde_json::from_str(&data).map_err(|_| {
+                anyhow::anyhow!("decode checksummed payload failed: {envelope_error}")
+            })?;
+            if value.get("checksum_crc32").is_some() || value.get("payload").is_some() {
+                return Err(anyhow::anyhow!(
+                    "decode checksummed payload failed: {envelope_error}"
+                ));
+            }
+            Ok(data)
+        }
+    }
 }
 
 /// Convenience: convert a `Path` to an owned `PathBuf`.
@@ -601,5 +616,21 @@ mod tests {
             .await
             .expect("read raw file");
         assert!(raw.contains("checksum_crc32"));
+    }
+
+    #[tokio::test]
+    async fn read_file_blocking_accepts_legacy_raw_json_payloads() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("session_registry.json");
+        tokio::fs::write(&path, "[{\"session_id\":\"sess-1\"}]")
+            .await
+            .expect("write legacy payload");
+
+        let decoded = read_file_blocking(path)
+            .await
+            .expect("read legacy payload")
+            .expect("payload present");
+
+        assert_eq!(decoded, "[{\"session_id\":\"sess-1\"}]");
     }
 }

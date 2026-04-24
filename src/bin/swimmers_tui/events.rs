@@ -135,6 +135,13 @@ impl TuiApi for TuiClient {
         }
     }
 
+    fn fetch_overlay_plans(&self) -> BoxFuture<'_, Result<Vec<PlanPanelEntry>, String>> {
+        match self {
+            Self::Embedded(client) => client.fetch_overlay_plans(),
+            Self::External(client) => client.fetch_overlay_plans(),
+        }
+    }
+
     fn create_session(
         &self,
         cwd: &str,
@@ -232,6 +239,7 @@ pub(crate) fn prepare_frame<C: TuiApi>(
     app.poll_pending_interaction();
     app.poll_refresh(layout);
     app.maybe_refresh_picker();
+    app.maybe_refresh_plans();
     if app.should_refresh() && app.pending_refresh.is_none() {
         app.spawn_background_refresh(false);
     }
@@ -387,9 +395,24 @@ pub(crate) fn handle_key_event<C: TuiApi>(
         };
     }
 
+    if app.picker.is_some() {
+        let no_mods = key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT;
+        if no_mods {
+            if let KeyCode::Char(c) = key.code {
+                if !c.is_control() && picker_char_should_search(app, c) {
+                    app.picker_search_push(c);
+                    return true;
+                }
+            }
+        }
+    }
+
     match key.code {
         KeyCode::Char('q') => false,
         KeyCode::Esc => {
+            if app.picker_search_clear() {
+                return true;
+            }
             if app.picker.is_some() {
                 app.close_picker();
                 true
@@ -397,7 +420,18 @@ pub(crate) fn handle_key_event<C: TuiApi>(
                 false
             }
         }
-        KeyCode::Left | KeyCode::Char('h') | KeyCode::Backspace => {
+        KeyCode::Backspace => {
+            if app.picker_search_pop() {
+                return true;
+            }
+            if app.picker.is_some() {
+                app.picker_up();
+            } else {
+                app.move_selection(-1, layout.overview_field);
+            }
+            true
+        }
+        KeyCode::Left | KeyCode::Char('h') => {
             if app.picker.is_some() {
                 app.picker_up();
             } else {
@@ -473,6 +507,34 @@ pub(crate) fn handle_key_event<C: TuiApi>(
         }
         _ => true,
     }
+}
+
+fn picker_char_should_search<C: TuiApi>(app: &App<C>, ch: char) -> bool {
+    let Some(picker) = app.picker.as_ref() else {
+        return false;
+    };
+    if !picker.search.is_empty() {
+        return true;
+    }
+
+    !matches!(
+        ch,
+        'q' | 'h'
+            | 'j'
+            | 'k'
+            | 'l'
+            | 'o'
+            | 'e'
+            | 'a'
+            | 'c'
+            | 'R'
+            | 'O'
+            | 'r'
+            | 'm'
+            | 't'
+            | 'n'
+            | 's'
+    )
 }
 
 pub(crate) fn handle_mouse_down<C: TuiApi>(

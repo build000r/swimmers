@@ -204,6 +204,16 @@ impl GhosttyOpenMode {
         }
     }
 
+    /// Human-facing label used in TUI status messages. `label()` returns the
+    /// short env-value forms; this returns the phrase users recognize in the
+    /// menu ("swap" / "new split").
+    pub fn display_label(self) -> &'static str {
+        match self {
+            Self::Swap => "swap",
+            Self::Add => "new split",
+        }
+    }
+
     // Used by swimmers-tui app; not called from the daemon binary directly.
     #[allow(dead_code)]
     pub fn toggle(self) -> Self {
