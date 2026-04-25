@@ -17,16 +17,28 @@ use crate::types::{
 
 static SELECTION_VERSION: AtomicU64 = AtomicU64::new(0);
 
-fn reserve_next_version(counter: &AtomicU64, requested_version: Option<u64>) -> Option<u64> {
+/// Bump the version counter while a serializing lock is held by the caller.
+///
+/// Must be called from inside the `published_selection` write lock so that the
+/// version returned to the client always matches the order in which state
+/// writes commit. With the lock held, the atomic load+store collapses to a
+/// non-racing read-modify-write.
+fn bump_version_locked(counter: &AtomicU64, requested_version: Option<u64>) -> Option<u64> {
+    let current = counter.load(Ordering::Acquire);
     match requested_version {
         Some(expected) => {
+            if current != expected {
+                return None;
+            }
             let next = expected.checked_add(1)?;
-            counter
-                .compare_exchange(expected, next, Ordering::AcqRel, Ordering::Acquire)
-                .ok()
-                .map(|_| next)
+            counter.store(next, Ordering::Release);
+            Some(next)
         }
-        None => Some(counter.fetch_add(1, Ordering::AcqRel) + 1),
+        None => {
+            let next = current.checked_add(1)?;
+            counter.store(next, Ordering::Release);
+            Some(next)
+        }
     }
 }
 
@@ -93,8 +105,6 @@ async fn publish_selection(
     auth.require_scope(AuthScope::SessionsWrite)?;
 
     let requested_version = parse_if_match_version(&headers);
-    let new_version = reserve_next_version(&SELECTION_VERSION, requested_version)
-        .ok_or_else(|| api_error(&VERSION_CONFLICT))?;
 
     let session_id = body.session_id.and_then(|value| {
         let trimmed = value.trim();
@@ -106,11 +116,17 @@ async fn publish_selection(
     });
 
     let published_at = session_id.as_ref().map(|_| Utc::now());
+
+    // Hold the write lock while bumping the version so the version handed to
+    // the client always matches the order in which state writes land.
     let mut selection = state.published_selection.write().await;
+    let new_version = bump_version_locked(&SELECTION_VERSION, requested_version)
+        .ok_or_else(|| api_error(&VERSION_CONFLICT))?;
     *selection = PublishedSelectionState {
         session_id,
         published_at,
     };
+    drop(selection);
 
     Ok(success_json(
         axum::http::StatusCode::OK,
