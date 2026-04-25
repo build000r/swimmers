@@ -23,17 +23,24 @@ use crate::types::ThoughtConfigResponse;
 
 static THOUGHT_CONFIG_VERSION: AtomicU64 = AtomicU64::new(0);
 
-fn reserve_next_version(counter: &AtomicU64, requested_version: Option<u64>) -> Option<u64> {
+/// Validate an `If-Match` precondition against the current counter and compute
+/// the version that should be published if the write succeeds. The caller must
+/// be holding a serializing lock (the `thought_config` write lock).
+///
+/// Does NOT mutate the counter — `commit_version_locked` does that, and only
+/// after the disk write has succeeded. That ordering keeps a failed save from
+/// silently consuming a version slot.
+fn next_version_locked(counter: &AtomicU64, requested_version: Option<u64>) -> Option<u64> {
+    let current = counter.load(Ordering::Acquire);
     match requested_version {
-        Some(expected) => {
-            let next = expected.checked_add(1)?;
-            counter
-                .compare_exchange(expected, next, Ordering::AcqRel, Ordering::Acquire)
-                .ok()
-                .map(|_| next)
-        }
-        None => Some(counter.fetch_add(1, Ordering::AcqRel) + 1),
+        Some(expected) if current != expected => None,
+        Some(expected) => expected.checked_add(1),
+        None => current.checked_add(1),
     }
+}
+
+fn commit_version_locked(counter: &AtomicU64, new_version: u64) {
+    counter.store(new_version, Ordering::Release);
 }
 
 async fn get_thought_config(
@@ -86,7 +93,16 @@ async fn put_thought_config(
     };
 
     let requested_version = parse_if_match_version(&headers);
-    let new_version = match reserve_next_version(&THOUGHT_CONFIG_VERSION, requested_version) {
+
+    // Hold the runtime-config write lock across the version check, the disk
+    // write, and the in-memory update. This guarantees three things:
+    //   * the version returned to the client matches the order in which
+    //     state writes commit (no concurrent reorder),
+    //   * a failed disk save does NOT advance the counter — retries with the
+    //     original `If-Match` keep working,
+    //   * disk and in-memory state can never diverge.
+    let mut runtime_config = state.thought_config.write().await;
+    let new_version = match next_version_locked(&THOUGHT_CONFIG_VERSION, requested_version) {
         Some(version) => version,
         None => return api_error(&VERSION_CONFLICT),
     };
@@ -96,10 +112,9 @@ async fn put_thought_config(
         return api_error_msg(&INTERNAL_ERROR, "failed to persist thought config");
     }
 
-    {
-        let mut runtime_config = state.thought_config.write().await;
-        *runtime_config = config.clone();
-    }
+    *runtime_config = config.clone();
+    commit_version_locked(&THOUGHT_CONFIG_VERSION, new_version);
+    drop(runtime_config);
 
     let mut body = serde_json::to_value(&config).unwrap_or_else(|_| serde_json::json!({}));
     if let Some(obj) = body.as_object_mut() {
@@ -421,6 +436,54 @@ mod tests {
         assert_eq!(response.status(), StatusCode::PRECONDITION_FAILED);
         let json = response_json(response).await;
         assert_eq!(json["code"], "VERSION_CONFLICT");
+    }
+
+    #[tokio::test]
+    async fn put_thought_config_does_not_advance_version_when_disk_save_fails() {
+        // Regression: previously the counter was bumped before the disk write,
+        // so a failed save permanently consumed a version slot and broke the
+        // next If-Match retry. The fix delays the counter bump until after
+        // the save succeeds.
+        use fs2::FileExt;
+
+        let _guard = VERSION_TEST_LOCK.lock().await;
+        THOUGHT_CONFIG_VERSION.store(0, Ordering::Release);
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = crate::persistence::file_store::FileStore::new(dir.path())
+            .await
+            .expect("file store");
+        let state = test_state(Some(store));
+
+        // Establish a starting version so the regression target (If-Match = v1
+        // after a failed save) has a non-trivial precondition to verify.
+        let response = put_config_response(state.clone(), ThoughtConfig::default(), None).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let json = response_json(response).await;
+        let v1 = json["version"].as_u64().expect("version should be present");
+
+        // Hold the file_store cross-process lock so the next save fails fast.
+        let lock_path = dir.path().join(".lock");
+        let lock_file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&lock_path)
+            .expect("open lock file");
+        lock_file.lock_exclusive().expect("hold lock");
+
+        let response = put_config_response(state.clone(), ThoughtConfig::default(), Some(v1)).await;
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+
+        lock_file.unlock().expect("release lock");
+
+        // The original `If-Match: v1` must still succeed: the failed save must
+        // not have silently advanced the version counter.
+        let response = put_config_response(state.clone(), ThoughtConfig::default(), Some(v1)).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let json = response_json(response).await;
+        let v2 = json["version"].as_u64().expect("version should be present");
+        assert_eq!(v2, v1 + 1);
     }
 
     #[tokio::test]
