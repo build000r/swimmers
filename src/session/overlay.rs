@@ -552,29 +552,35 @@ fn expand_group_dir(raw: &str) -> Vec<PathBuf> {
 }
 
 /// Expand `~` and `${VAR}` in path strings.
+///
+/// Substitution is forward-only: each `${VAR}` slot is resolved exactly once,
+/// and its replacement is not rescanned. That keeps the function terminating
+/// even when an env var resolves to text containing another `${VAR}` (or even
+/// itself).
 fn expand_path(path: &str) -> String {
     let mut result = path.to_string();
 
-    // Expand ~ at start
     if result.starts_with("~/") {
         if let Some(home) = dirs::home_dir() {
             result = format!("{}{}", home.display(), &result[1..]);
         }
     }
 
-    // Expand ${VAR} patterns
-    while let Some(start) = result.find("${") {
-        let Some(end) = result[start..].find('}') else {
+    let mut search_from = 0usize;
+    while let Some(rel_start) = result[search_from..].find("${") {
+        let start = search_from + rel_start;
+        let Some(rel_end) = result[start..].find('}') else {
             break;
         };
-        let var_name = &result[start + 2..start + end];
+        let end = start + rel_end;
+        let var_name = &result[start + 2..end];
         let replacement = std::env::var(var_name).unwrap_or_default();
-        result = format!(
-            "{}{}{}",
-            &result[..start],
-            replacement,
-            &result[start + end + 1..]
-        );
+        let suffix = result[end + 1..].to_string();
+        result.truncate(start);
+        result.push_str(&replacement);
+        // Advance past the inserted text so it is not re-scanned.
+        search_from = result.len();
+        result.push_str(&suffix);
     }
 
     result
@@ -637,6 +643,27 @@ mod tests {
         let expanded = expand_path("~/repos/foo");
         assert!(!expanded.starts_with('~'));
         assert!(expanded.ends_with("/repos/foo"));
+    }
+
+    #[test]
+    fn expand_path_terminates_when_env_var_resolves_to_self_referential_text() {
+        // Regression: the previous implementation re-scanned from offset 0
+        // after each substitution, so an env var that expanded to text
+        // containing the same `${VAR}` reference would loop forever.
+        let key = "SWIMMERS_EXPAND_PATH_RECURSIVE_TEST";
+        let prior = std::env::var(key).ok();
+        std::env::set_var(key, format!("${{{key}}}/x"));
+
+        let expanded = expand_path(&format!("${{{key}}}/y"));
+
+        match prior {
+            Some(value) => std::env::set_var(key, value),
+            None => std::env::remove_var(key),
+        }
+
+        // The first expansion is the only one performed; the inserted
+        // `${VAR}` is treated as literal text, not re-resolved.
+        assert_eq!(expanded, format!("${{{key}}}/x/y"));
     }
 
     #[test]
