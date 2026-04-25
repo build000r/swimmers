@@ -1,4 +1,4 @@
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 
 use axum::extract::State;
@@ -9,8 +9,8 @@ use axum::{Extension, Json, Router};
 use tracing::error;
 
 use crate::api::envelope::{
-    api_error, api_error_msg, parse_if_match_version, success_json, INTERNAL_ERROR,
-    PERSISTENCE_UNAVAILABLE, VALIDATION_FAILED, VERSION_CONFLICT,
+    api_error, api_error_msg, parse_if_match_version, reserve_version_locked, success_json,
+    INTERNAL_ERROR, PERSISTENCE_UNAVAILABLE, VALIDATION_FAILED, VERSION_CONFLICT,
 };
 use crate::api::AppState;
 use crate::auth::{AuthInfo, AuthScope};
@@ -22,26 +22,6 @@ use crate::thought_ui::thought_config_ui_metadata;
 use crate::types::ThoughtConfigResponse;
 
 static THOUGHT_CONFIG_VERSION: AtomicU64 = AtomicU64::new(0);
-
-/// Validate an `If-Match` precondition against the current counter and compute
-/// the version that should be published if the write succeeds. The caller must
-/// be holding a serializing lock (the `thought_config` write lock).
-///
-/// Does NOT mutate the counter — `commit_version_locked` does that, and only
-/// after the disk write has succeeded. That ordering keeps a failed save from
-/// silently consuming a version slot.
-fn next_version_locked(counter: &AtomicU64, requested_version: Option<u64>) -> Option<u64> {
-    let current = counter.load(Ordering::Acquire);
-    match requested_version {
-        Some(expected) if current != expected => None,
-        Some(expected) => expected.checked_add(1),
-        None => current.checked_add(1),
-    }
-}
-
-fn commit_version_locked(counter: &AtomicU64, new_version: u64) {
-    counter.store(new_version, Ordering::Release);
-}
 
 async fn get_thought_config(
     Extension(auth): Extension<AuthInfo>,
@@ -94,16 +74,17 @@ async fn put_thought_config(
 
     let requested_version = parse_if_match_version(&headers);
 
-    // Hold the runtime-config write lock across the version check, the disk
-    // write, and the in-memory update. This guarantees three things:
+    // Hold the runtime-config write lock across the version reservation, the
+    // disk write, and the in-memory update. This guarantees three things:
     //   * the version returned to the client matches the order in which
     //     state writes commit (no concurrent reorder),
-    //   * a failed disk save does NOT advance the counter — retries with the
-    //     original `If-Match` keep working,
+    //   * a failed disk save drops the reservation without committing — the
+    //     counter never advances and retries with the original `If-Match`
+    //     keep working,
     //   * disk and in-memory state can never diverge.
     let mut runtime_config = state.thought_config.write().await;
-    let new_version = match next_version_locked(&THOUGHT_CONFIG_VERSION, requested_version) {
-        Some(version) => version,
+    let reservation = match reserve_version_locked(&THOUGHT_CONFIG_VERSION, requested_version) {
+        Some(reservation) => reservation,
         None => return api_error(&VERSION_CONFLICT),
     };
 
@@ -113,7 +94,7 @@ async fn put_thought_config(
     }
 
     *runtime_config = config.clone();
-    commit_version_locked(&THOUGHT_CONFIG_VERSION, new_version);
+    let new_version = reservation.commit();
     drop(runtime_config);
 
     let mut body = serde_json::to_value(&config).unwrap_or_else(|_| serde_json::json!({}));
@@ -171,6 +152,7 @@ mod tests {
     use axum::response::IntoResponse;
     use chrono::Utc;
     use serde_json::Value;
+    use std::sync::atomic::Ordering;
     use std::sync::LazyLock;
     use tokio::sync::mpsc;
     use tokio::sync::Mutex;

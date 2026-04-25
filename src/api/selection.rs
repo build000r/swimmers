@@ -1,4 +1,4 @@
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 
 use axum::extract::State;
@@ -8,7 +8,9 @@ use axum::routing::get;
 use axum::{Extension, Json, Router};
 use chrono::Utc;
 
-use crate::api::envelope::{api_error, parse_if_match_version, success_json, VERSION_CONFLICT};
+use crate::api::envelope::{
+    api_error, parse_if_match_version, reserve_version_locked, success_json, VERSION_CONFLICT,
+};
 use crate::api::{fetch_live_summary, AppState, PublishedSelectionState};
 use crate::auth::{AuthInfo, AuthScope};
 use crate::types::{
@@ -16,31 +18,6 @@ use crate::types::{
 };
 
 static SELECTION_VERSION: AtomicU64 = AtomicU64::new(0);
-
-/// Bump the version counter while a serializing lock is held by the caller.
-///
-/// Must be called from inside the `published_selection` write lock so that the
-/// version returned to the client always matches the order in which state
-/// writes commit. With the lock held, the atomic load+store collapses to a
-/// non-racing read-modify-write.
-fn bump_version_locked(counter: &AtomicU64, requested_version: Option<u64>) -> Option<u64> {
-    let current = counter.load(Ordering::Acquire);
-    match requested_version {
-        Some(expected) => {
-            if current != expected {
-                return None;
-            }
-            let next = expected.checked_add(1)?;
-            counter.store(next, Ordering::Release);
-            Some(next)
-        }
-        None => {
-            let next = current.checked_add(1)?;
-            counter.store(next, Ordering::Release);
-            Some(next)
-        }
-    }
-}
 
 async fn get_published_selection(
     Extension(auth): Extension<AuthInfo>,
@@ -117,11 +94,13 @@ async fn publish_selection(
 
     let published_at = session_id.as_ref().map(|_| Utc::now());
 
-    // Hold the write lock while bumping the version so the version handed to
-    // the client always matches the order in which state writes land.
+    // Hold the write lock while reserving and committing the version so the
+    // version handed to the client always matches the order in which state
+    // writes land.
     let mut selection = state.published_selection.write().await;
-    let new_version = bump_version_locked(&SELECTION_VERSION, requested_version)
-        .ok_or_else(|| api_error(&VERSION_CONFLICT))?;
+    let new_version = reserve_version_locked(&SELECTION_VERSION, requested_version)
+        .ok_or_else(|| api_error(&VERSION_CONFLICT))?
+        .commit();
     *selection = PublishedSelectionState {
         session_id,
         published_at,
@@ -154,6 +133,7 @@ mod tests {
     use axum::extract::{Json, State};
     use axum::http::HeaderMap;
     use serde_json::Value;
+    use std::sync::atomic::Ordering;
     use std::sync::LazyLock;
     use tokio::sync::Mutex;
     use tokio::sync::RwLock;

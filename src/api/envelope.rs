@@ -1,3 +1,5 @@
+use std::sync::atomic::{AtomicU64, Ordering};
+
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
@@ -103,4 +105,48 @@ pub fn parse_if_match_version(headers: &HeaderMap) -> Option<u64> {
         .get("if-match")
         .and_then(|v| v.to_str().ok())
         .and_then(|s| s.trim().trim_matches('"').parse::<u64>().ok())
+}
+
+/// A validated reservation for the next version of an optimistic-concurrency
+/// counter. Holding this value asserts the `If-Match` precondition was checked
+/// against `counter` while the caller's serializing lock was held.
+///
+/// `commit` publishes the new version; dropping without committing aborts the
+/// reservation and leaves the counter untouched, so a fallible step (e.g. a
+/// disk save) can sit between reservation and commit without consuming a
+/// version slot on failure.
+#[must_use = "version reservation must be committed or explicitly dropped"]
+pub struct VersionReservation<'a> {
+    counter: &'a AtomicU64,
+    new_version: u64,
+}
+
+impl VersionReservation<'_> {
+    pub fn commit(self) -> u64 {
+        self.counter.store(self.new_version, Ordering::Release);
+        self.new_version
+    }
+}
+
+/// Validate an `If-Match` precondition and reserve the next version.
+///
+/// Must be called from inside the caller's write lock so concurrent writers
+/// cannot race the precondition check and so the eventual commit order matches
+/// the order in which state writes land. Returns `None` when the precondition
+/// fails or the counter would overflow; the caller maps that to
+/// [`VERSION_CONFLICT`].
+pub fn reserve_version_locked(
+    counter: &AtomicU64,
+    requested_version: Option<u64>,
+) -> Option<VersionReservation<'_>> {
+    let current = counter.load(Ordering::Acquire);
+    let new_version = match requested_version {
+        Some(expected) if current != expected => return None,
+        Some(expected) => expected.checked_add(1)?,
+        None => current.checked_add(1)?,
+    };
+    Some(VersionReservation {
+        counter,
+        new_version,
+    })
 }
