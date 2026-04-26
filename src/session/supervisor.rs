@@ -1206,7 +1206,16 @@ impl SessionSupervisor {
     pub async fn wait_for_pending_thought_persists(&self, timeout: Duration) -> bool {
         let deadline = Instant::now() + timeout;
         loop {
+            // Register the waiter (via `enable`) BEFORE reading the counter so a
+            // notify_waiters() that fires between the load and the await is not
+            // lost. Without `enable`, `Notified` is only added to the wait list
+            // on its first poll, opening a race window during shutdown where a
+            // single in-flight persist's wakeup arrives before we begin awaiting
+            // and we then sit on the timeout instead of completing immediately.
             let notified = self.pending_thought_persists_notify.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+
             let pending = self.pending_thought_persists.load(Ordering::SeqCst);
             if pending == 0 {
                 return true;
