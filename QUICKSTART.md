@@ -7,7 +7,7 @@
 Swimmers is a tmux session manager with a Rust API, a native TUI, and an
 optional browser surface.
 
-**Target setup:** local API on `3210` with either the native TUI or the browser UI attached to it.
+**Target setup:** native TUI with an in-process API, or a loopback API on `3210` for browser/external mode.
 
 ---
 
@@ -64,9 +64,8 @@ make tui
 
 That will:
 
-- start the local API on `127.0.0.1:3210` if it is not already running
-- wait for readiness
-- launch the native TUI
+- clear a stale local `swimmers` server on the target loopback port
+- launch the native TUI with its in-process API
 
 Browser path:
 
@@ -92,11 +91,16 @@ cargo run --bin swimmers-tui
 
 Useful variants:
 
-- `make tui-check`: wait for an existing API and exit
+- `make tui-check`: type-check the native TUI binary
 - `PORT=69420 cargo run --bin swimmers`: run the API on a custom port
 - `SWIMMERS_TUI_URL=http://127.0.0.1:69420 cargo run --bin swimmers-tui`: point the TUI at that custom API
+- `SWIMMERS_TUI_REUSE_SERVER=1 make tui`: keep an existing local backend instead of restarting it
 
 You should see the API start and begin discovering tmux sessions.
+
+In the TUI, click empty aquarium space to open the directory picker. To launch
+one prompt in several dirs, filter the picker to the rows you want, choose
+`[batch visible]`, type the initial request once, and press Enter.
 
 No tmux hook setup is required for thought or rest-state updates. `swimmers`
 streams session snapshots directly to `clawgs emit --stdio`.
@@ -290,6 +294,7 @@ Native TUI
     |
     |-- GET /v1/sessions          -> List tmux sessions
     |-- POST /v1/sessions         -> Create new session
+    |-- POST /v1/sessions/batch   -> Create one session per directory
     |-- DELETE /v1/sessions/:id   -> Remove session
     |-- GET /v1/sessions/:id/snapshot -> Screen text snapshot
     |-- GET /v1/sessions/:id/pane-tail -> Recent pane output

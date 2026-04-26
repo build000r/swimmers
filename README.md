@@ -117,6 +117,8 @@ After `cargo install swimmers`, both `swimmers` and `swimmers-tui` are on your P
 
 3. **Navigate** — arrow keys to select a fish, Enter to open the session in your terminal, `q` to quit the TUI.
 
+To start the same prompt in multiple directories from the TUI, click empty aquarium space to open the directory picker, optionally type to filter the visible rows, choose `[batch visible]`, type the initial request once, and press Enter.
+
 ### Experimental voice input
 
 In a source build with `--features voice`, open the initial-request composer and press `Ctrl-V` to start or stop microphone capture. Swimmers records locally, transcribes with a local Whisper model, and inserts the transcript into the composer so you can edit it before creating the hidden swimmer.
@@ -130,6 +132,8 @@ Set `SWIMMERS_TUI_URL` to run the API as a separate process (for multi-client ac
 ```bash
 SWIMMERS_TUI_URL=http://127.0.0.1:3210 swimmers-tui
 ```
+
+The `make tui` wrapper clears a stale loopback `swimmers` process on the target API port before launching, so local overlay edits are reread instead of silently reusing an old server. Set `SWIMMERS_TUI_REUSE_SERVER=1` to keep an existing local backend.
 
 To run the API explicitly as a standalone headless server:
 
@@ -198,6 +202,7 @@ For any non-loopback bind, use `AUTH_MODE=token` with `AUTH_TOKEN`. `OBSERVER_TO
 | `SWIMMERS_REPLAY_BUFFER_SIZE` | `524288` | Replay ring size in bytes (default 512 KB) |
 | `SWIMMERS_DATA_DIR` | `(platform data dir)` | Override the persistence directory |
 | `SWIMMERS_TUI_URL` | `(unset)` | When set, the TUI uses HTTP transport against this URL instead of hosting the API in-process. Auto-spawns a local server for loopback URLs. |
+| `SWIMMERS_TUI_REUSE_SERVER` | `(unset)` | Set to `1` for `make tui` to keep an existing loopback `swimmers` backend instead of restarting it first. |
 | `SWIMMERS_VOICE_MODEL` | `(unset)` | Path to a local Whisper `.bin` model used by the experimental `voice` feature. |
 | `SWIMMERS_VOICE_LANGUAGE` | `auto` | Optional language hint for the experimental `voice` feature (`en`, `fr`, `auto`, etc.). |
 
@@ -331,6 +336,7 @@ Set `SWIMMERS_TUI_URL` to split the API into its own process. Multiple TUIs, hea
 |--------|------|---------|
 | `GET` | `/v1/sessions` | List tmux sessions with state |
 | `POST` | `/v1/sessions` | Create a new tmux session |
+| `POST` | `/v1/sessions/batch` | Create one session per directory with the same initial request |
 | `DELETE` | `/v1/sessions/{id}` | Remove a session |
 | `GET` | `/v1/sessions/{id}/snapshot` | Capture visible screen text |
 | `GET` | `/v1/sessions/{id}/pane-tail` | Recent pane output |
