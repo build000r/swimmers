@@ -153,6 +153,22 @@ impl TuiApi for TuiClient {
             Self::External(client) => client.create_session(cwd, spawn_tool, initial_request),
         }
     }
+
+    fn create_sessions_batch(
+        &self,
+        dirs: Vec<String>,
+        spawn_tool: SpawnTool,
+        initial_request: Option<String>,
+    ) -> BoxFuture<'_, Result<CreateSessionsBatchResponse, String>> {
+        match self {
+            Self::Embedded(client) => {
+                client.create_sessions_batch(dirs, spawn_tool, initial_request)
+            }
+            Self::External(client) => {
+                client.create_sessions_batch(dirs, spawn_tool, initial_request)
+            }
+        }
+    }
 }
 
 fn external_mode_requested() -> bool {
@@ -395,6 +411,11 @@ pub(crate) fn handle_key_event<C: TuiApi>(
         };
     }
 
+    if app.picker.is_some() && matches!(key.code, KeyCode::Char('B')) {
+        app.open_batch_initial_request_for_visible_entries();
+        return true;
+    }
+
     if app.picker.is_some() {
         let no_mods = key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT;
         if no_mods {
@@ -493,6 +514,10 @@ pub(crate) fn handle_key_event<C: TuiApi>(
             }
             true
         }
+        KeyCode::Tab => {
+            app.toggle_thought_group_by();
+            true
+        }
         KeyCode::Char('t') => {
             app.open_thought_config_editor();
             true
@@ -529,6 +554,7 @@ fn picker_char_should_search<C: TuiApi>(app: &App<C>, ch: char) -> bool {
             | 'c'
             | 'R'
             | 'O'
+            | 'B'
             | 'r'
             | 'm'
             | 't'

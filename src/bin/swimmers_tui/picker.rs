@@ -243,6 +243,7 @@ pub(crate) enum PickerAction {
     ToggleManaged(bool),
     ActivateGroup(String),
     ToggleTool,
+    BatchVisible,
     ActivateCurrentPath,
     ActivateEntry(usize),
     StartRepoAction(usize, RepoActionKind),
@@ -258,6 +259,7 @@ pub(crate) struct PickerLayout {
     pub(crate) group_buttons: Vec<(String, Rect)>,
     pub(crate) all_button: Rect,
     pub(crate) tool_button: Rect,
+    pub(crate) batch_button: Rect,
     pub(crate) spawn_here_button: Rect,
     pub(crate) first_entry_y: u16,
     pub(crate) visible_entry_rows: usize,
@@ -269,6 +271,7 @@ pub(crate) struct PickerLayout {
 pub(crate) struct InitialRequestState {
     pub(crate) cwd: String,
     pub(crate) value: String,
+    pub(crate) batch_dirs: Option<Vec<String>>,
 }
 
 impl InitialRequestState {
@@ -276,6 +279,15 @@ impl InitialRequestState {
         Self {
             cwd,
             value: String::new(),
+            batch_dirs: None,
+        }
+    }
+
+    pub(crate) fn new_batch(dirs: Vec<String>) -> Self {
+        Self {
+            cwd: dirs.first().cloned().unwrap_or_default(),
+            value: String::new(),
+            batch_dirs: Some(dirs),
         }
     }
 
@@ -298,6 +310,10 @@ pub(crate) struct InitialRequestLayout {
 
 pub(crate) fn tool_button_label(tool: SpawnTool) -> String {
     format!("[{}]", tool.label())
+}
+
+pub(crate) fn batch_button_label() -> &'static str {
+    "[batch visible]"
 }
 
 pub(crate) fn normalize_path(path: &str) -> String {
@@ -543,6 +559,13 @@ pub(crate) fn picker_layout(picker: &PickerState, field: Rect) -> PickerLayout {
         width: tool_label_width,
         height: 1,
     };
+    let batch_label_width = batch_button_label().len() as u16;
+    let batch_button = Rect {
+        x: tool_button.x.saturating_sub(batch_label_width + 1),
+        y: content.y,
+        width: batch_label_width,
+        height: 1,
+    };
 
     PickerLayout {
         frame,
@@ -553,6 +576,7 @@ pub(crate) fn picker_layout(picker: &PickerState, field: Rect) -> PickerLayout {
         group_buttons,
         all_button,
         tool_button,
+        batch_button,
         spawn_here_button: Rect {
             x: content.x,
             y: content.y + 3,
@@ -576,6 +600,9 @@ pub(crate) fn picker_action_at(
     }
     if layout.tool_button.contains(x, y) {
         return Some(PickerAction::ToggleTool);
+    }
+    if layout.batch_button.contains(x, y) {
+        return Some(PickerAction::BatchVisible);
     }
     if layout
         .back_button
@@ -645,6 +672,16 @@ pub(crate) fn render_picker(renderer: &mut Renderer, picker: &PickerState, field
         layout.tool_button.y,
         &tool_button_label(picker.spawn_tool),
         Color::White,
+    );
+    renderer.draw_text(
+        layout.batch_button.x,
+        layout.batch_button.y,
+        batch_button_label(),
+        if layout.visible_entries.is_empty() {
+            Color::DarkGrey
+        } else {
+            Color::White
+        },
     );
     renderer.draw_text(
         layout.close_button.x,
@@ -858,13 +895,17 @@ pub(crate) fn render_initial_request(
         Color::Cyan,
     );
 
-    let cwd_line = format!(
-        "cwd: {}",
-        shorten_path(
-            &initial_request.cwd,
-            layout.content.width.saturating_sub(5) as usize,
+    let cwd_line = if let Some(dirs) = initial_request.batch_dirs.as_ref() {
+        format!("batch: {} visible dirs", dirs.len())
+    } else {
+        format!(
+            "cwd: {}",
+            shorten_path(
+                &initial_request.cwd,
+                layout.content.width.saturating_sub(5) as usize,
+            )
         )
-    );
+    };
     renderer.draw_text(
         layout.content.x,
         layout.content.y + 1,
@@ -875,7 +916,12 @@ pub(crate) fn render_initial_request(
         layout.content.x,
         layout.content.y + 2,
         &format!(
-            "enter creates hidden swimmer  {}  esc cancels",
+            "enter creates hidden swimmer{}  {}  esc cancels",
+            if initial_request.batch_dirs.is_some() {
+                "s"
+            } else {
+                ""
+            },
             toggle_hint()
         ),
         Color::DarkGrey,

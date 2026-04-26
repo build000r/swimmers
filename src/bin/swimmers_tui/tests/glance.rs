@@ -53,13 +53,25 @@ fn glance_product_test_state_to_sprite_label_mapping_is_canonical_and_distinct()
 
     let mut busy = session_summary("glance-5", "5", TEST_REPO_SWIMMERS);
     busy.state = SessionState::Busy;
-    busy.rest_state = RestState::DeepSleep;
+    busy.rest_state = RestState::Active;
     assert!(matches!(SpriteKind::from_session(&busy), SpriteKind::Busy));
     let label = session_state_text(&busy);
     assert_eq!(label, "busy");
     labels.insert(label);
 
-    let mut error = session_summary("glance-6", "6", TEST_REPO_SWIMMERS);
+    let mut busy_sleeping = session_summary("glance-6", "6", TEST_REPO_SWIMMERS);
+    busy_sleeping.state = SessionState::Busy;
+    busy_sleeping.thought_state = ThoughtState::Sleeping;
+    busy_sleeping.rest_state = RestState::Sleeping;
+    assert!(matches!(
+        SpriteKind::from_session(&busy_sleeping),
+        SpriteKind::Sleeping
+    ));
+    let label = session_state_text(&busy_sleeping);
+    assert_eq!(label, "sleeping");
+    labels.insert(label);
+
+    let mut error = session_summary("glance-7", "7", TEST_REPO_SWIMMERS);
     error.state = SessionState::Error;
     error.rest_state = RestState::Sleeping;
     assert!(matches!(
@@ -70,7 +82,7 @@ fn glance_product_test_state_to_sprite_label_mapping_is_canonical_and_distinct()
     assert_eq!(label, "error");
     labels.insert(label);
 
-    let mut exited = session_summary("glance-7", "7", TEST_REPO_SWIMMERS);
+    let mut exited = session_summary("glance-8", "8", TEST_REPO_SWIMMERS);
     exited.state = SessionState::Exited;
     exited.rest_state = RestState::Drowsy;
     assert!(matches!(

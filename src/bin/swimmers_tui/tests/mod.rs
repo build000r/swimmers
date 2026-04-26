@@ -15,7 +15,8 @@ use chrono::Utc;
 use proptest::prelude::*;
 use swimmers::openrouter_models::default_openrouter_candidates;
 use swimmers::types::{
-    GhosttyOpenMode, RepoActionStatus, ThoughtSource, ThoughtState, TransportHealth,
+    CreateSessionsBatchResult, GhosttyOpenMode, RepoActionStatus, SessionBatchMembership,
+    ThoughtSource, ThoughtState, TransportHealth,
 };
 use tempfile::tempdir;
 
@@ -65,6 +66,7 @@ struct MockApiState {
     start_repo_action_results: VecDeque<Result<DirRepoActionResponse, String>>,
     overlay_plans_results: VecDeque<Result<Vec<PlanPanelEntry>, String>>,
     create_session_results: VecDeque<Result<CreateSessionResponse, String>>,
+    create_sessions_batch_results: VecDeque<Result<CreateSessionsBatchResponse, String>>,
     update_thought_config_calls: Vec<ThoughtConfig>,
     test_thought_config_calls: Vec<ThoughtConfig>,
     mermaid_artifact_calls: Vec<String>,
@@ -76,6 +78,7 @@ struct MockApiState {
     list_calls: Vec<(Option<String>, bool)>,
     start_repo_action_calls: Vec<(String, RepoActionKind)>,
     create_calls: Vec<(String, SpawnTool, Option<String>)>,
+    create_batch_calls: Vec<(Vec<String>, SpawnTool, Option<String>)>,
 }
 
 #[derive(Clone, Default)]
@@ -184,6 +187,14 @@ impl MockApi {
             .push_back(result);
     }
 
+    fn push_create_sessions_batch(&self, result: Result<CreateSessionsBatchResponse, String>) {
+        self.state
+            .lock()
+            .unwrap()
+            .create_sessions_batch_results
+            .push_back(result);
+    }
+
     fn push_start_repo_action(&self, result: Result<DirRepoActionResponse, String>) {
         self.state
             .lock()
@@ -214,6 +225,10 @@ impl MockApi {
 
     fn create_calls(&self) -> Vec<(String, SpawnTool, Option<String>)> {
         self.state.lock().unwrap().create_calls.clone()
+    }
+
+    fn create_batch_calls(&self) -> Vec<(Vec<String>, SpawnTool, Option<String>)> {
+        self.state.lock().unwrap().create_batch_calls.clone()
     }
 
     fn start_repo_action_calls(&self) -> Vec<(String, RepoActionKind)> {
@@ -542,6 +557,25 @@ impl TuiApi for MockApi {
                 .create_session_results
                 .pop_front()
                 .unwrap_or_else(|| Err("unexpected create_session".to_string()))
+        })
+    }
+
+    fn create_sessions_batch(
+        &self,
+        dirs: Vec<String>,
+        spawn_tool: SpawnTool,
+        initial_request: Option<String>,
+    ) -> BoxFuture<'_, Result<CreateSessionsBatchResponse, String>> {
+        let state = self.state.clone();
+        Box::pin(async move {
+            let mut state = state.lock().unwrap();
+            state
+                .create_batch_calls
+                .push((dirs, spawn_tool, initial_request));
+            state
+                .create_sessions_batch_results
+                .pop_front()
+                .unwrap_or_else(|| Err("unexpected create_sessions_batch".to_string()))
         })
     }
 }
@@ -2224,7 +2258,26 @@ fn session_summary(session_id: &str, tmux_name: &str, cwd: &str) -> SessionSumma
         transport_health: TransportHealth::Healthy,
         last_activity_at: Utc::now(),
         repo_theme_id: None,
+        batch: None,
     }
+}
+
+fn with_batch(
+    mut session: SessionSummary,
+    id: &str,
+    label: &str,
+    index: usize,
+    total: usize,
+) -> SessionSummary {
+    session.batch = Some(SessionBatchMembership {
+        id: id.to_string(),
+        label: label.to_string(),
+        index,
+        total,
+        created_at: Utc::now(),
+        prompt_excerpt: Some(label.to_string()),
+    });
+    session
 }
 
 fn timestamp(value: &str) -> DateTime<Utc> {
@@ -2455,6 +2508,25 @@ fn create_response_with_theme(
     CreateSessionResponse {
         session,
         repo_theme: Some(repo_theme),
+    }
+}
+
+fn create_batch_response(items: &[(&str, &str, &str)]) -> CreateSessionsBatchResponse {
+    CreateSessionsBatchResponse {
+        results: items
+            .iter()
+            .enumerate()
+            .map(
+                |(index, (session_id, tmux_name, cwd))| CreateSessionsBatchResult {
+                    index,
+                    cwd: (*cwd).to_string(),
+                    ok: true,
+                    session: Some(session_summary(session_id, tmux_name, cwd)),
+                    repo_theme: None,
+                    error: None,
+                },
+            )
+            .collect(),
     }
 }
 
@@ -2987,8 +3059,10 @@ fn render_header_filter_strip_shows_repo_chips_and_thought_rows() {
             .map(|row| row.line.as_str())
             .collect::<Vec<_>>(),
         vec![
+            "v swimmers (2)",
             "[swimmers/7] patching tui",
             "[swimmers/2] wiring filter state",
+            "v skills (1)",
             "[skills/9] indexing docs",
         ]
     );
@@ -4896,6 +4970,33 @@ fn busy_entities_hold_horizontal_position() {
 }
 
 #[test]
+fn busy_sleeping_entities_anchor_to_bottom() {
+    let api = MockApi::new();
+    let field = test_field();
+    let mut app = make_app(api);
+    let mut session = sleeping_session(
+        "sess-busy-sleeping",
+        "busy-waiting",
+        TEST_REPO_DEV,
+        "2026-03-08T12:00:00Z",
+    );
+    session.state = SessionState::Busy;
+
+    app.merge_sessions(vec![session], field);
+    for entity in &mut app.entities {
+        entity.vx = 1.0;
+        entity.vy = 1.0;
+    }
+
+    app.tick(field);
+
+    assert_eq!(
+        entity_rect_for(&app, "sess-busy-sleeping", field),
+        sleep_grid_rect(field, 0)
+    );
+}
+
+#[test]
 fn truncate_label_adds_trailing_tilde() {
     assert_eq!(truncate_label("abcdefghijkl", 6), "abcde~");
     assert_eq!(truncate_label("abc", 6), "abc");
@@ -5081,6 +5182,32 @@ fn picker_search_filters_without_changing_browsing_scope() {
 }
 
 #[test]
+fn picker_batch_visible_opens_composer_for_filtered_entries() {
+    let api = MockApi::new();
+    let layout = test_layout(120, 32);
+    let mut app = make_app(api.clone());
+    app.picker = Some(PickerState::new(
+        10,
+        10,
+        dir_response(TEST_REPOS_ROOT, &[("alpha", true), ("beta", true)]),
+        true,
+        SpawnTool::Codex,
+    ));
+    app.picker_search_push('b');
+
+    assert!(handle_key_event(&mut app, layout, key(KeyCode::Char('B'))));
+
+    let request = app.initial_request.as_ref().expect("composer");
+    assert_eq!(request.value, "");
+    assert_eq!(
+        request.batch_dirs.as_deref(),
+        Some(&[TEST_REPO_BETA.to_string()][..])
+    );
+    assert!(api.create_calls().is_empty());
+    assert!(api.create_batch_calls().is_empty());
+}
+
+#[test]
 fn dir_list_failure_blocks_spawn_and_shows_error() {
     let api = MockApi::new();
     api.push_list_dirs(Err("Permission denied".to_string()));
@@ -5118,6 +5245,7 @@ fn submitting_initial_request_creates_hidden_session_without_native_open() {
     app.initial_request = Some(InitialRequestState {
         cwd: TEST_REPO_SWIMMERS.to_string(),
         value: "add hidden spawn flow".to_string(),
+        batch_dirs: None,
     });
 
     app.submit_initial_request(field);
@@ -5152,6 +5280,67 @@ fn submitting_initial_request_creates_hidden_session_without_native_open() {
 }
 
 #[test]
+fn submitting_batch_initial_request_creates_visible_sessions_without_native_open() {
+    let api = MockApi::new();
+    api.push_create_sessions_batch(Ok(create_batch_response(&[
+        ("sess-alpha", "alpha", TEST_REPO_ALPHA),
+        ("sess-beta", "beta", TEST_REPO_BETA),
+    ])));
+    let field = test_field();
+    let mut app = make_app(api.clone());
+    app.picker = Some(PickerState::new(
+        10,
+        10,
+        dir_response(TEST_REPOS_ROOT, &[("alpha", true), ("beta", true)]),
+        true,
+        SpawnTool::Codex,
+    ));
+    app.initial_request = Some({
+        let mut state = InitialRequestState::new_batch(vec![
+            TEST_REPO_ALPHA.to_string(),
+            TEST_REPO_BETA.to_string(),
+        ]);
+        state.value = "refactor shared logger".to_string();
+        state
+    });
+
+    app.submit_initial_request(field);
+    assert!(app.pending_interaction.is_some());
+    assert!(api.open_calls().is_empty());
+    assert!(app.initial_request.is_some());
+    assert!(app.picker.is_some());
+    assert!(app.selected_id.is_none());
+
+    poll_until_interaction(&mut app);
+
+    assert_eq!(
+        api.create_batch_calls(),
+        vec![(
+            vec![TEST_REPO_ALPHA.to_string(), TEST_REPO_BETA.to_string()],
+            SpawnTool::Codex,
+            Some("refactor shared logger".to_string()),
+        )]
+    );
+    assert!(api.create_calls().is_empty());
+    assert!(api.open_calls().is_empty());
+    assert_eq!(app.selected_id.as_deref(), Some("sess-beta"));
+    assert!(app.picker.is_none());
+    assert!(app.initial_request.is_none());
+    assert_eq!(
+        app.message.as_ref().map(|(message, _)| message.as_str()),
+        Some("created 2 sessions")
+    );
+    assert!(app
+        .entities
+        .iter()
+        .any(|entity| entity.session.session_id == "sess-alpha"));
+    assert!(app
+        .entities
+        .iter()
+        .any(|entity| entity.session.session_id == "sess-beta"));
+}
+
+#[test]
 fn pasting_initial_request_buffers_multiline_without_submitting() {
     let api = MockApi::new();
     let mut app = make_app(api.clone());
@@ -5159,6 +5348,7 @@ fn pasting_initial_request_buffers_multiline_without_submitting() {
     app.initial_request = Some(InitialRequestState {
         cwd: TEST_REPO_SWIMMERS.to_string(),
         value: String::new(),
+        batch_dirs: None,
     });
 
     app.handle_paste(pasted);
@@ -5183,6 +5373,7 @@ fn pressing_enter_after_pasting_initial_request_submits_once() {
     app.initial_request = Some(InitialRequestState {
         cwd: TEST_REPO_SWIMMERS.to_string(),
         value: String::new(),
+        batch_dirs: None,
     });
 
     app.handle_paste(pasted);
@@ -5295,6 +5486,7 @@ fn submit_initial_request_waits_for_voice_transcription() {
     app.initial_request = Some(InitialRequestState {
         cwd: TEST_REPO_SWIMMERS.to_string(),
         value: "draft the request".to_string(),
+        batch_dirs: None,
     });
     app.voice_state = VoiceUiState::Transcribing;
 
@@ -5356,6 +5548,7 @@ fn session_create_failure_does_not_attempt_native_open() {
     app.initial_request = Some(InitialRequestState {
         cwd: TEST_REPO_SWIMMERS.to_string(),
         value: "fix tmux startup".to_string(),
+        batch_dirs: None,
     });
 
     app.submit_initial_request(field);
@@ -5395,6 +5588,7 @@ fn blank_initial_request_is_rejected_locally() {
     app.initial_request = Some(InitialRequestState {
         cwd: TEST_REPO_SWIMMERS.to_string(),
         value: "   ".to_string(),
+        batch_dirs: None,
     });
 
     app.submit_initial_request(field);
@@ -5416,6 +5610,7 @@ fn typing_initial_request_and_pressing_enter_still_creates_hidden_session() {
     app.initial_request = Some(InitialRequestState {
         cwd: TEST_REPO_SWIMMERS.to_string(),
         value: String::new(),
+        batch_dirs: None,
     });
 
     for ch in "add hidden spawn flow".chars() {
@@ -5460,6 +5655,7 @@ fn esc_cancels_initial_request_without_creating_session() {
     app.initial_request = Some(InitialRequestState {
         cwd: TEST_REPO_SWIMMERS.to_string(),
         value: "investigate snapshot restore".to_string(),
+        batch_dirs: None,
     });
 
     app.handle_initial_request_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), field);
@@ -5854,6 +6050,7 @@ fn spawn_session_uses_selected_tool() {
     app.initial_request = Some(InitialRequestState {
         cwd: TEST_REPO_SWIMMERS.to_string(),
         value: "fix the build".to_string(),
+        batch_dirs: None,
     });
 
     app.submit_initial_request(field);
@@ -7010,6 +7207,112 @@ fn clicking_commit_badge_surfaces_commit_launch_errors() {
     assert_eq!(
         app.message.as_ref().map(|(message, _)| message.as_str()),
         Some("failed to launch commit codex: tmux not found")
+    );
+}
+
+#[test]
+fn thought_panel_groups_by_pwd_by_default() {
+    let api = MockApi::new();
+    let layout = test_layout(120, 32);
+    let thought_content = layout
+        .thought_content
+        .expect("wide layout enables thought rail");
+    let mut app = make_app(api);
+
+    let swimmers = session_summary_with_thought(
+        "sess-swimmers",
+        "7",
+        TEST_REPO_SWIMMERS,
+        "patching rail",
+        "2026-03-08T14:00:05Z",
+    );
+    let skills = session_summary_with_thought(
+        "sess-skills",
+        "9",
+        TEST_REPO_SKILLS,
+        "checking docs",
+        "2026-03-08T14:00:06Z",
+    );
+
+    app.capture_thought_updates(&[swimmers, skills], layout.thought_entry_capacity());
+
+    let panel = build_thought_panel(&app, thought_content, layout.thought_entry_capacity());
+    assert_eq!(app.thought_group_by, ThoughtGroupBy::Pwd);
+    assert_eq!(
+        panel
+            .rows
+            .iter()
+            .map(|row| row.line.as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            "v swimmers (1)",
+            "[swimmers/7] patching rail",
+            "v skills (1)",
+            "[skills/9] checking docs",
+        ]
+    );
+}
+
+#[test]
+fn thought_panel_groups_by_batch_when_toggled() {
+    let api = MockApi::new();
+    let layout = test_layout(120, 32);
+    let thought_content = layout
+        .thought_content
+        .expect("wide layout enables thought rail");
+    let mut app = make_app(api);
+    app.thought_group_by = ThoughtGroupBy::Batch;
+
+    let first = with_batch(
+        session_summary_with_thought(
+            "sess-swimmers",
+            "7",
+            TEST_REPO_SWIMMERS,
+            "patching rail",
+            "2026-03-08T14:00:05Z",
+        ),
+        "batch-auth",
+        "auth-rebuild",
+        0,
+        2,
+    );
+    let second = with_batch(
+        session_summary_with_thought(
+            "sess-skills",
+            "9",
+            TEST_REPO_SKILLS,
+            "checking docs",
+            "2026-03-08T14:00:06Z",
+        ),
+        "batch-auth",
+        "auth-rebuild",
+        1,
+        2,
+    );
+    let unbatched = session_summary_with_thought(
+        "sess-alpha",
+        "2",
+        TEST_REPO_ALPHA,
+        "routine update",
+        "2026-03-08T14:00:07Z",
+    );
+
+    app.capture_thought_updates(&[first, second, unbatched], layout.thought_entry_capacity());
+
+    let panel = build_thought_panel(&app, thought_content, layout.thought_entry_capacity());
+    assert_eq!(
+        panel
+            .rows
+            .iter()
+            .map(|row| row.line.as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            "v auth-rebuild (2)",
+            "[swimmers/7] patching rail",
+            "[skills/9] checking docs",
+            "v unbatched (1)",
+            "[alpha/2] routine update",
+        ]
     );
 }
 

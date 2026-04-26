@@ -114,6 +114,10 @@ pub(crate) enum PendingInteractionResult {
         field: Rect,
         response: Result<CreateSessionResponse, String>,
     },
+    CreateSessionsBatch {
+        field: Rect,
+        response: Result<CreateSessionsBatchResponse, String>,
+    },
     OpenSession {
         label: String,
         response: Result<NativeDesktopOpenResponse, String>,
@@ -149,6 +153,7 @@ pub(crate) struct App<C: TuiApi> {
     pub(crate) entities: Vec<SessionEntity>,
     pub(crate) thought_log: Vec<ThoughtLogEntry>,
     pub(crate) thought_filter: ThoughtFilter,
+    pub(crate) thought_group_by: ThoughtGroupBy,
     pub(crate) last_logged_thoughts: HashMap<String, ThoughtFingerprint>,
     session_mermaid_cache: HashMap<String, MermaidCacheEntry>,
     session_repo_theme_cache: HashMap<String, RepoThemeCacheEntry>,
@@ -222,6 +227,7 @@ impl<C: TuiApi> App<C> {
             entities: Vec::new(),
             thought_log: Vec::new(),
             thought_filter: ThoughtFilter::default(),
+            thought_group_by: ThoughtGroupBy::default(),
             last_logged_thoughts: HashMap::new(),
             session_mermaid_cache: HashMap::new(),
             session_repo_theme_cache: HashMap::new(),
@@ -827,6 +833,14 @@ impl<C: TuiApi> App<C> {
         self.sync_selection_publication();
     }
 
+    pub(crate) fn toggle_thought_group_by(&mut self) {
+        self.thought_group_by = self.thought_group_by.toggled();
+        self.set_message(format!(
+            "thought rail grouped by {}",
+            self.thought_group_by.label()
+        ));
+    }
+
     pub(crate) fn clear_thought_filters(&mut self) {
         self.thought_filter.clear();
         self.reconcile_selection();
@@ -994,6 +1008,7 @@ impl<C: TuiApi> App<C> {
             entry.tmux_name = session.tmux_name.clone();
             entry.cwd = normalize_path(&session.cwd);
             entry.pwd_label = path_tail_label(&session.cwd);
+            entry.batch = session.batch.clone();
             entry.color = session_display_color(session, &self.repo_themes);
             entry.commit_candidate = session.commit_candidate;
         }
@@ -1234,6 +1249,10 @@ impl<C: TuiApi> App<C> {
                     self.close_picker();
                     self.set_message(format!("created {tmux_name}"));
                 }
+                Err(err) => self.set_message(err),
+            },
+            PendingInteractionResult::CreateSessionsBatch { field, response } => match response {
+                Ok(response) => self.apply_batch_create_response(field, response),
                 Err(err) => self.set_message(err),
             },
             PendingInteractionResult::OpenSession { label, response } => match response {
@@ -2199,6 +2218,29 @@ impl<C: TuiApi> App<C> {
         self.voice_state = default_ui_state();
     }
 
+    pub(crate) fn open_batch_initial_request_for_visible_entries(&mut self) {
+        let Some(dirs) = self
+            .picker
+            .as_ref()
+            .map(|picker| {
+                picker
+                    .visible_entries()
+                    .into_iter()
+                    .filter_map(|index| picker.path_for_entry(index))
+                    .collect::<Vec<_>>()
+            })
+            .filter(|dirs| !dirs.is_empty())
+        else {
+            self.set_message("no visible directories to batch");
+            return;
+        };
+
+        self.cancel_voice_recording();
+        self.initial_request_generation = self.initial_request_generation.saturating_add(1);
+        self.initial_request = Some(InitialRequestState::new_batch(dirs));
+        self.voice_state = default_ui_state();
+    }
+
     pub(crate) fn close_initial_request(&mut self) {
         self.cancel_voice_recording();
         self.initial_request_generation = self.initial_request_generation.saturating_add(1);
@@ -2258,7 +2300,15 @@ impl<C: TuiApi> App<C> {
         let Some(cwd) = self.initial_request.as_ref().map(|state| state.cwd.clone()) else {
             return;
         };
-        self.spawn_session(&cwd, Some(initial_request), field);
+        if let Some(dirs) = self
+            .initial_request
+            .as_ref()
+            .and_then(|state| state.batch_dirs.clone())
+        {
+            self.spawn_sessions_batch(dirs, Some(initial_request), field);
+        } else {
+            self.spawn_session(&cwd, Some(initial_request), field);
+        }
     }
 
     pub(crate) fn toggle_voice_recording(&mut self) {
@@ -2421,6 +2471,81 @@ impl<C: TuiApi> App<C> {
                 .await;
             let _ = tx.send(PendingInteractionResult::CreateSession { field, response });
         });
+    }
+
+    pub(crate) fn spawn_sessions_batch(
+        &mut self,
+        dirs: Vec<String>,
+        initial_request: Option<String>,
+        field: Rect,
+    ) {
+        let total = dirs.len();
+        if total == 0 {
+            self.set_message("no visible directories to batch");
+            return;
+        }
+        let Some(tx) = self.begin_pending_interaction() else {
+            return;
+        };
+
+        let client = Arc::clone(&self.client);
+        let spawn_tool = self.spawn_tool;
+        self.set_message(format!("creating {total} sessions..."));
+        self.runtime.spawn(async move {
+            let response = client
+                .create_sessions_batch(dirs, spawn_tool, initial_request)
+                .await;
+            let _ = tx.send(PendingInteractionResult::CreateSessionsBatch { field, response });
+        });
+    }
+
+    fn apply_batch_create_response(&mut self, field: Rect, response: CreateSessionsBatchResponse) {
+        let total = response.results.len();
+        let mut success_count = 0usize;
+        let mut last_tmux_name = None;
+        let mut last_session_id = None;
+        let mut first_error = None;
+
+        for result in response.results {
+            if result.ok {
+                if let Some(session) = result.session {
+                    self.remember_repo_theme(&session, result.repo_theme);
+                    last_tmux_name = Some(session.tmux_name.clone());
+                    last_session_id = Some(session.session_id.clone());
+                    self.upsert_session(session, field);
+                    success_count += 1;
+                }
+            } else if first_error.is_none() {
+                let detail = result
+                    .error
+                    .and_then(|error| error.message)
+                    .unwrap_or_else(|| "unknown error".to_string());
+                first_error = Some(format!("{}: {detail}", shorten_path(&result.cwd, 32)));
+            }
+        }
+
+        if let Some(session_id) = last_session_id {
+            self.selected_id = Some(session_id);
+            self.reconcile_selection();
+            self.sync_selection_publication();
+        }
+
+        if success_count > 0 {
+            self.close_picker();
+            if success_count == total {
+                match last_tmux_name {
+                    Some(name) if success_count == 1 => self.set_message(format!("created {name}")),
+                    _ => self.set_message(format!("created {success_count} sessions")),
+                }
+            } else {
+                self.set_message(format!(
+                    "created {success_count}/{total}; {}",
+                    first_error.unwrap_or_else(|| "some sessions failed".to_string())
+                ));
+            }
+        } else {
+            self.set_message(first_error.unwrap_or_else(|| "batch create failed".to_string()));
+        }
     }
 
     pub(crate) fn open_session_for_label(&mut self, session_id: &str, label: &str) {
@@ -3182,6 +3307,7 @@ impl<C: TuiApi> App<C> {
                     picker.spawn_tool = self.spawn_tool;
                 }
             }
+            PickerAction::BatchVisible => self.open_batch_initial_request_for_visible_entries(),
             PickerAction::ActivateCurrentPath => self.spawn_session_from_picker(field),
             PickerAction::ActivateEntry(index) => self.activate_picker_entry(index, field),
             PickerAction::StartRepoAction(index, kind) => {

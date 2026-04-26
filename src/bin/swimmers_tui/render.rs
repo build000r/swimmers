@@ -599,6 +599,10 @@ pub(crate) fn shorten_path(path: &str, max_chars: usize) -> String {
 
 pub(crate) fn session_state_text(session: &SessionSummary) -> &'static str {
     match session.state {
+        SessionState::Error => "error",
+        SessionState::Exited => "exited",
+        _ if session.rest_state == RestState::Sleeping => "sleeping",
+        SessionState::Busy => "busy",
         SessionState::Idle | SessionState::Attention => match session.rest_state {
             RestState::Active => match session.state {
                 SessionState::Attention => "attention",
@@ -609,9 +613,6 @@ pub(crate) fn session_state_text(session: &SessionSummary) -> &'static str {
             RestState::Sleeping => "sleeping",
             RestState::DeepSleep => "deep sleep",
         },
-        SessionState::Busy => "busy",
-        SessionState::Error => "error",
-        SessionState::Exited => "exited",
     }
 }
 

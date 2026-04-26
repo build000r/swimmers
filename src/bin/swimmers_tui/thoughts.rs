@@ -14,6 +14,7 @@ pub(crate) struct ThoughtLogEntry {
     pub(crate) tmux_name: String,
     pub(crate) cwd: String,
     pub(crate) pwd_label: Option<String>,
+    pub(crate) batch: Option<SessionBatchMembership>,
     pub(crate) thought: String,
     pub(crate) updated_at: Option<DateTime<Utc>>,
     pub(crate) color: Color,
@@ -32,6 +33,7 @@ impl ThoughtLogEntry {
             tmux_name: session.tmux_name.clone(),
             cwd: normalize_path(&session.cwd),
             pwd_label: path_tail_label(&session.cwd),
+            batch: session.batch.clone(),
             thought,
             updated_at: session.thought_updated_at,
             color: session_display_color(session, repo_themes),
@@ -499,10 +501,49 @@ pub(crate) fn wrap_text(text: &str, max_chars: usize) -> Vec<String> {
 }
 
 #[derive(Clone, Debug)]
+pub(crate) struct ThoughtGroup {
+    pub(crate) key: String,
+    pub(crate) label: String,
+    pub(crate) color: Color,
+    pub(crate) entries: Vec<ThoughtPanelEntryView>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ThoughtGroupBy {
+    Pwd,
+    Batch,
+}
+
+impl ThoughtGroupBy {
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Pwd => "pwd",
+            Self::Batch => "batch",
+        }
+    }
+
+    pub(crate) fn toggled(self) -> Self {
+        match self {
+            Self::Pwd => Self::Batch,
+            Self::Batch => Self::Pwd,
+        }
+    }
+}
+
+impl Default for ThoughtGroupBy {
+    fn default() -> Self {
+        Self::Pwd
+    }
+}
+
+#[derive(Clone, Debug)]
 pub(crate) struct ThoughtPanelEntryView {
     pub(crate) session_id: String,
     pub(crate) label: String,
     pub(crate) tmux_name: String,
+    pub(crate) cwd: String,
+    pub(crate) pwd_label: Option<String>,
+    pub(crate) batch: Option<SessionBatchMembership>,
     pub(crate) updated_at: Option<DateTime<Utc>>,
     pub(crate) color: Color,
     pub(crate) thought: String,
@@ -668,6 +709,9 @@ pub(crate) fn build_thought_panel_entries<C: TuiApi>(app: &App<C>) -> Vec<Though
             session_id: entry.session_id.clone(),
             label: label.clone(),
             tmux_name: entry.tmux_name.clone(),
+            cwd: entry.cwd.clone(),
+            pwd_label: entry.pwd_label.clone(),
+            batch: entry.batch.clone(),
             updated_at: entry.updated_at,
             color: app.thought_entry_display_color(entry),
             thought: entry.thought.replace('\n', " "),
@@ -694,6 +738,9 @@ pub(crate) fn build_thought_panel_entries<C: TuiApi>(app: &App<C>) -> Vec<Though
             session_id: entity.session.session_id.clone(),
             label: label.clone(),
             tmux_name: entity.session.tmux_name.clone(),
+            cwd: normalize_path(&entity.session.cwd),
+            pwd_label: cwd_label,
+            batch: entity.session.batch.clone(),
             updated_at: artifact.updated_at,
             color: session_display_color(&entity.session, &app.repo_themes),
             thought: "artifacts ready".to_string(),
@@ -705,6 +752,86 @@ pub(crate) fn build_thought_panel_entries<C: TuiApi>(app: &App<C>) -> Vec<Though
 
     entries.sort_by(compare_thought_panel_entries);
     entries
+}
+
+pub(crate) fn thought_group_label(
+    group_by: ThoughtGroupBy,
+    entry: &ThoughtPanelEntryView,
+) -> String {
+    match group_by {
+        ThoughtGroupBy::Pwd => entry.pwd_label.clone().unwrap_or_else(|| entry.cwd.clone()),
+        ThoughtGroupBy::Batch => entry
+            .batch
+            .as_ref()
+            .map(|batch| batch.label.clone())
+            .unwrap_or_else(|| "unbatched".to_string()),
+    }
+}
+
+fn thought_group_key(group_by: ThoughtGroupBy, entry: &ThoughtPanelEntryView) -> String {
+    match group_by {
+        ThoughtGroupBy::Pwd => format!("pwd:{}", entry.cwd),
+        ThoughtGroupBy::Batch => entry
+            .batch
+            .as_ref()
+            .map(|batch| format!("batch:{}", batch.id))
+            .unwrap_or_else(|| "batch:unbatched".to_string()),
+    }
+}
+
+pub(crate) fn build_thought_groups(
+    entries: &[ThoughtPanelEntryView],
+    group_by: ThoughtGroupBy,
+) -> Vec<ThoughtGroup> {
+    let mut groups: Vec<ThoughtGroup> = Vec::new();
+    for entry in entries {
+        let key = thought_group_key(group_by, entry);
+        if let Some(group) = groups.iter_mut().find(|group| group.key == key) {
+            group.entries.push(entry.clone());
+            group.color = entry.color;
+            continue;
+        }
+        groups.push(ThoughtGroup {
+            key,
+            label: thought_group_label(group_by, entry),
+            color: entry.color,
+            entries: vec![entry.clone()],
+        });
+    }
+    groups.sort_by(|left, right| {
+        match (left.entries.last(), right.entries.last()) {
+            (Some(left_entry), Some(right_entry)) => {
+                compare_thought_panel_entries(left_entry, right_entry)
+            }
+            _ => Ordering::Equal,
+        }
+        .then_with(|| left.label.cmp(&right.label))
+        .then_with(|| left.key.cmp(&right.key))
+    });
+    groups
+}
+
+fn group_header_row(group: &ThoughtGroup, thought_content: Rect) -> ThoughtRowLayout {
+    let label = format!("v {} ({})", group.label, group.entries.len());
+    let line = truncate_label(&label, thought_content.width as usize);
+    let width = display_width(&line);
+    ThoughtRowLayout {
+        session_rect: None,
+        text_rect: (width > 0).then_some(Rect {
+            x: thought_content.x,
+            y: 0,
+            width,
+            height: 1,
+        }),
+        mermaid_rect: None,
+        mermaid_label: None,
+        commit_rect: None,
+        session_id: String::new(),
+        label: group.label.clone(),
+        tmux_name: String::new(),
+        line,
+        color: Color::DarkGrey,
+    }
 }
 
 pub(crate) fn build_rows_for_panel_entry(
@@ -846,7 +973,10 @@ pub(crate) fn render_thought_panel<C: TuiApi>(
     renderer.draw_text(
         thought_content.x,
         thought_content.y,
-        &truncate_label("clawgs", thought_content.width as usize),
+        &truncate_label(
+            &format!("clawgs / {}", app.thought_group_by.label()),
+            thought_content.width as usize,
+        ),
         Color::Cyan,
     );
 
@@ -903,6 +1033,37 @@ pub(crate) fn build_thought_panel<C: TuiApi>(
         None
     };
 
+    let rows = if should_group_thought_entries(app.thought_group_by, &entries) {
+        build_grouped_rows(
+            &entries,
+            app.thought_group_by,
+            thought_content,
+            entry_capacity,
+        )
+    } else {
+        build_flat_rows(&entries, thought_content, entry_capacity)
+    };
+
+    ThoughtPanelLayout {
+        rows,
+        empty_message,
+    }
+}
+
+fn should_group_thought_entries(
+    group_by: ThoughtGroupBy,
+    entries: &[ThoughtPanelEntryView],
+) -> bool {
+    let groups = build_thought_groups(entries, group_by);
+    groups.len() > 1
+        || (group_by == ThoughtGroupBy::Batch && entries.iter().any(|entry| entry.batch.is_some()))
+}
+
+fn build_flat_rows(
+    entries: &[ThoughtPanelEntryView],
+    thought_content: Rect,
+    entry_capacity: usize,
+) -> Vec<ThoughtRowLayout> {
     let mut rows_rev = Vec::new();
     let mut remaining = entry_capacity;
     for entry in entries.iter().rev() {
@@ -921,11 +1082,30 @@ pub(crate) fn build_thought_panel<C: TuiApi>(
         }
     }
     rows_rev.reverse();
+    rows_rev
+}
 
-    ThoughtPanelLayout {
-        rows: rows_rev,
-        empty_message,
+fn build_grouped_rows(
+    entries: &[ThoughtPanelEntryView],
+    group_by: ThoughtGroupBy,
+    thought_content: Rect,
+    entry_capacity: usize,
+) -> Vec<ThoughtRowLayout> {
+    if entry_capacity == 0 {
+        return Vec::new();
     }
+
+    let groups = build_thought_groups(entries, group_by);
+    let mut rows = Vec::new();
+    for group in &groups {
+        rows.push(group_header_row(group, thought_content));
+        for entry in &group.entries {
+            rows.extend(build_rows_for_panel_entry(entry, thought_content));
+        }
+    }
+
+    let start = rows.len().saturating_sub(entry_capacity);
+    rows[start..].to_vec()
 }
 
 /// How many rows the plans pane would consume given the rail's total height.

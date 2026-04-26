@@ -37,12 +37,14 @@ use swimmers::config::{AuthMode, Config};
 use swimmers::repo_theme::{discover_repo_theme, existing_repo_theme};
 use swimmers::thought::runtime_config::{DaemonDefaults, ThoughtConfig};
 use swimmers::types::{
-    CreateSessionRequest, CreateSessionResponse, DirEntry, DirListResponse, DirRepoActionRequest,
+    CreateSessionRequest, CreateSessionResponse, CreateSessionsBatchRequest,
+    CreateSessionsBatchResponse, DirEntry, DirListResponse, DirRepoActionRequest,
     DirRepoActionResponse, ErrorResponse, GhosttyOpenMode, MermaidArtifactResponse,
     NativeDesktopApp, NativeDesktopConfigRequest, NativeDesktopModeRequest,
     NativeDesktopOpenRequest, NativeDesktopOpenResponse, NativeDesktopStatusResponse,
     PlanFileResponse, PublishSelectionRequest, RepoActionKind, RepoActionState, RepoTheme,
-    RestState, SessionListResponse, SessionState, SessionSummary, SpawnTool,
+    RestState, SessionBatchMembership, SessionListResponse, SessionState, SessionSummary,
+    SpawnTool,
 };
 
 const MIN_WIDTH: u16 = 70;

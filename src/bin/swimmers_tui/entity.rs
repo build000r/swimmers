@@ -59,9 +59,10 @@ pub(crate) enum SpriteKind {
 impl SpriteKind {
     pub(crate) fn from_session(session: &SessionSummary) -> Self {
         match session.state {
-            SessionState::Busy => Self::Busy,
             SessionState::Error => Self::Error,
             SessionState::Exited => Self::Exited,
+            _ if session.rest_state == RestState::Sleeping => Self::Sleeping,
+            SessionState::Busy => Self::Busy,
             SessionState::Idle | SessionState::Attention => match session.rest_state {
                 RestState::Sleeping => Self::Sleeping,
                 RestState::DeepSleep => Self::DeepSleep,

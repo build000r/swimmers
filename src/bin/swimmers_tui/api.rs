@@ -379,6 +379,12 @@ pub(crate) trait TuiApi: Send + Sync + 'static {
         spawn_tool: SpawnTool,
         initial_request: Option<String>,
     ) -> BoxFuture<'_, Result<CreateSessionResponse, String>>;
+    fn create_sessions_batch(
+        &self,
+        dirs: Vec<String>,
+        spawn_tool: SpawnTool,
+        initial_request: Option<String>,
+    ) -> BoxFuture<'_, Result<CreateSessionsBatchResponse, String>>;
 }
 
 impl TuiApi for ApiClient {
@@ -792,6 +798,37 @@ impl TuiApi for ApiClient {
                     .json::<CreateSessionResponse>()
                     .await
                     .map_err(|err| format!("failed to parse create session response: {err}"));
+            }
+
+            Err(read_error(response).await)
+        })
+    }
+
+    fn create_sessions_batch(
+        &self,
+        dirs: Vec<String>,
+        spawn_tool: SpawnTool,
+        initial_request: Option<String>,
+    ) -> BoxFuture<'_, Result<CreateSessionsBatchResponse, String>> {
+        Box::pin(async move {
+            let url = format!("{}/v1/sessions/batch", self.base_url);
+            let response = self
+                .with_auth(self.http.post(url))
+                .timeout(API_CREATE_SESSION_TIMEOUT)
+                .json(&CreateSessionsBatchRequest {
+                    dirs,
+                    spawn_tool: Some(spawn_tool),
+                    initial_request,
+                })
+                .send()
+                .await
+                .map_err(|err| self.transport_error("create sessions", err))?;
+
+            if response.status().is_success() {
+                return response
+                    .json::<CreateSessionsBatchResponse>()
+                    .await
+                    .map_err(|err| format!("failed to parse batch create response: {err}"));
             }
 
             Err(read_error(response).await)

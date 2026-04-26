@@ -10,6 +10,9 @@ use swimmers::api::service::{
     open_native_session_for_host, start_dir_repo_action as start_dir_repo_action_service,
     NativeOpenServiceError,
 };
+use swimmers::api::sessions::{
+    create_sessions_batch_result, new_batch_context, session_batch_membership,
+};
 use swimmers::api::{AppState, PublishedSelectionState};
 use swimmers::openrouter_models::{
     cached_or_default_openrouter_candidates, refresh_openrouter_model_cache,
@@ -19,8 +22,8 @@ use swimmers::thought::probe::run_thought_config_probe;
 use swimmers::thought::runtime_config::ThoughtConfig;
 use swimmers::thought_ui::thought_config_ui_metadata;
 use swimmers::types::{
-    CreateSessionResponse, DirListResponse, DirRepoActionResponse, GhosttyOpenMode,
-    MermaidArtifactResponse, NativeDesktopApp, NativeDesktopOpenResponse,
+    CreateSessionResponse, CreateSessionsBatchResponse, DirListResponse, DirRepoActionResponse,
+    GhosttyOpenMode, MermaidArtifactResponse, NativeDesktopApp, NativeDesktopOpenResponse,
     NativeDesktopStatusResponse, PlanFileResponse, RepoActionKind, SessionSummary, SpawnTool,
 };
 
@@ -301,6 +304,47 @@ impl TuiApi for InProcessApi {
             Ok(CreateSessionResponse {
                 session,
                 repo_theme,
+            })
+        })
+    }
+
+    fn create_sessions_batch(
+        &self,
+        dirs: Vec<String>,
+        spawn_tool: SpawnTool,
+        initial_request: Option<String>,
+    ) -> BoxFuture<'_, Result<CreateSessionsBatchResponse, String>> {
+        let state = self.state.clone();
+        Box::pin(async move {
+            let total = dirs.len();
+            let (batch_id, batch_label, batch_created_at, prompt_excerpt) =
+                new_batch_context(total, initial_request.as_deref());
+            let tasks = dirs.into_iter().enumerate().map(|(index, cwd)| {
+                let supervisor = state.supervisor.clone();
+                let initial_request = initial_request.clone();
+                let batch = session_batch_membership(
+                    batch_id.clone(),
+                    batch_label.clone(),
+                    index,
+                    total,
+                    batch_created_at,
+                    prompt_excerpt.clone(),
+                );
+                async move {
+                    let created = supervisor
+                        .create_session_with_batch(
+                            None,
+                            Some(cwd.clone()),
+                            Some(spawn_tool),
+                            initial_request,
+                            Some(batch),
+                        )
+                        .await;
+                    create_sessions_batch_result(index, cwd, created)
+                }
+            });
+            Ok(CreateSessionsBatchResponse {
+                results: futures::future::join_all(tasks).await,
             })
         })
     }
