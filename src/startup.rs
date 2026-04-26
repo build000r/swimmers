@@ -561,6 +561,7 @@ mod tests {
             transport_health: TransportHealth::Healthy,
             last_activity_at: Utc::now(),
             repo_theme_id: None,
+            batch: None,
         };
         supervisor
             .insert_test_handle(spawn_summary_handle(summary).await)

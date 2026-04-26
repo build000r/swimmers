@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::OnceLock;
 use std::time::SystemTime;
 
@@ -34,6 +34,8 @@ pub struct OverlayServiceEntry {
 pub struct OverlayDirGroup {
     /// Display name shown in the picker (e.g. "skills").
     pub name: String,
+    /// Exact directories that become group entries.
+    pub paths: Vec<PathBuf>,
     /// Source directories whose immediate children become group entries.
     pub dirs: Vec<PathBuf>,
 }
@@ -300,6 +302,8 @@ struct OverlayClient {
     label: Option<String>,
     #[serde(default)]
     context: Option<OverlayContext>,
+    #[serde(default)]
+    repos: Vec<ClientRepoEntry>,
 }
 
 #[derive(Deserialize, Default)]
@@ -333,6 +337,16 @@ struct RepoEntry {
 }
 
 #[derive(Deserialize, Default)]
+struct ClientRepoEntry {
+    #[serde(default)]
+    id: Option<String>,
+    #[serde(default)]
+    kind: Option<String>,
+    #[serde(default)]
+    repo_path: Option<String>,
+}
+
+#[derive(Deserialize, Default)]
 struct DevSanitySection {
     #[serde(default)]
     services: Option<DevSanityServices>,
@@ -344,6 +358,8 @@ struct DevSanitySection {
 struct DevSanityGroup {
     #[serde(default)]
     name: Option<String>,
+    #[serde(default)]
+    paths: Vec<String>,
     #[serde(default)]
     dirs: Vec<String>,
 }
@@ -384,6 +400,7 @@ fn parse_client_overlay(client_dir: &Path, overlay_path: &Path) -> Option<Client
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_else(|| "overlay".to_string())
         });
+    let client_repos = client.repos;
     let context = client.context?;
 
     let cwd_match_count = context.cwd_match.len();
@@ -413,9 +430,17 @@ fn parse_client_overlay(client_dir: &Path, overlay_path: &Path) -> Option<Client
             .into_iter()
             .filter_map(|g| {
                 let name = g.name?;
+                let mut paths: Vec<PathBuf> = Vec::new();
                 let mut dirs: Vec<PathBuf> = Vec::new();
                 let mut seen: std::collections::BTreeSet<PathBuf> =
                     std::collections::BTreeSet::new();
+                for raw in &g.paths {
+                    for path in expand_exact_group_path(raw) {
+                        if seen.insert(path.clone()) {
+                            paths.push(path);
+                        }
+                    }
+                }
                 for raw in &g.dirs {
                     for path in expand_group_dir(raw) {
                         if seen.insert(path.clone()) {
@@ -423,10 +448,10 @@ fn parse_client_overlay(client_dir: &Path, overlay_path: &Path) -> Option<Client
                         }
                     }
                 }
-                if dirs.is_empty() {
+                if paths.is_empty() && dirs.is_empty() {
                     return None;
                 }
-                Some(OverlayDirGroup { name, dirs })
+                Some(OverlayDirGroup { name, paths, dirs })
             })
             .collect();
 
@@ -435,19 +460,30 @@ fn parse_client_overlay(client_dir: &Path, overlay_path: &Path) -> Option<Client
             .base_path
             .as_deref()
             .map(|p| PathBuf::from(expand_path(p)))?;
-        let services = svc
+        let mut seen_service_dirs = std::collections::BTreeSet::<String>::new();
+        let mut services: Vec<OverlayServiceEntry> = svc
             .entries
             .into_iter()
             .filter_map(|entry| {
-                Some(OverlayServiceEntry {
+                let entry = OverlayServiceEntry {
                     name: entry.name?,
                     dir: entry.dir?,
                     health_url: entry.health_url,
                     restart: entry.restart,
                     open_url: entry.open_url,
-                })
+                };
+                seen_service_dirs.insert(entry.dir.clone());
+                Some(entry)
             })
             .collect();
+        services.extend(client_repos.into_iter().filter_map(|repo| {
+            let entry = service_entry_from_client_repo(repo, &base_path)?;
+            if seen_service_dirs.insert(entry.dir.clone()) {
+                Some(entry)
+            } else {
+                None
+            }
+        }));
         Some(OverlayDirConfig {
             label: client_label.clone(),
             base_path,
@@ -465,6 +501,53 @@ fn parse_client_overlay(client_dir: &Path, overlay_path: &Path) -> Option<Client
         plan_draft,
         dir_config,
     })
+}
+
+fn service_entry_from_client_repo(
+    repo: ClientRepoEntry,
+    base_path: &Path,
+) -> Option<OverlayServiceEntry> {
+    if repo.kind.as_deref().is_some_and(|kind| kind != "repo") {
+        return None;
+    }
+
+    let repo_path = expand_repo_path(&repo.repo_path?, base_path);
+    let dir = relative_dir_from_base(base_path, &repo_path)?;
+    let name = repo.id.or_else(|| {
+        repo_path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+    })?;
+
+    Some(OverlayServiceEntry {
+        name,
+        dir,
+        health_url: None,
+        restart: None,
+        open_url: None,
+    })
+}
+
+fn expand_repo_path(raw: &str, base_path: &Path) -> PathBuf {
+    if let Some(suffix) = raw.strip_prefix("${SKILLBOX_MONOSERVER_ROOT}/") {
+        if std::env::var_os("SKILLBOX_MONOSERVER_ROOT").is_none() {
+            return base_path.join(suffix);
+        }
+    }
+
+    PathBuf::from(expand_path(raw))
+}
+
+fn relative_dir_from_base(base_path: &Path, path: &Path) -> Option<String> {
+    let relative = path.strip_prefix(base_path).ok()?;
+    let components: Vec<String> = relative
+        .components()
+        .filter_map(|component| match component {
+            Component::Normal(name) => Some(name.to_string_lossy().into_owned()),
+            _ => None,
+        })
+        .collect();
+    (!components.is_empty()).then(|| components.join("/"))
 }
 
 // ---------------------------------------------------------------------------
@@ -494,6 +577,19 @@ fn resolve_skillbox_config_root() -> Option<PathBuf> {
 /// `~/repos/*/.claude/skills` or `~/projects/*/skills`). Literal paths
 /// (no `*`) are returned as-is if they exist as directories.
 fn expand_group_dir(raw: &str) -> Vec<PathBuf> {
+    expand_existing_dirs(raw)
+}
+
+/// Expand an exact group entry into concrete filesystem paths.
+///
+/// This currently shares the same path expansion rules as `dirs`; the
+/// difference is semantic: `paths` become entries themselves, while `dirs`
+/// contribute their immediate children.
+fn expand_exact_group_path(raw: &str) -> Vec<PathBuf> {
+    expand_existing_dirs(raw)
+}
+
+fn expand_existing_dirs(raw: &str) -> Vec<PathBuf> {
     let expanded = expand_path(raw);
     if !expanded.contains('*') {
         let path = PathBuf::from(expanded);
@@ -617,24 +713,24 @@ mod tests {
     #[test]
     fn cwd_starts_with_exact_match() {
         assert!(cwd_starts_with(
-            "/Users/b/repos/htma",
-            "/Users/b/repos/htma"
+            "/tmp/repos/example",
+            "/tmp/repos/example"
         ));
     }
 
     #[test]
     fn cwd_starts_with_child_dir() {
         assert!(cwd_starts_with(
-            "/Users/b/repos/htma/src/data",
-            "/Users/b/repos/htma"
+            "/tmp/repos/example/src/data",
+            "/tmp/repos/example"
         ));
     }
 
     #[test]
     fn cwd_starts_with_rejects_partial_name() {
         assert!(!cwd_starts_with(
-            "/Users/b/repos/htma_server",
-            "/Users/b/repos/htma"
+            "/tmp/repos/example_server",
+            "/tmp/repos/example"
         ));
     }
 
@@ -664,6 +760,23 @@ mod tests {
         // The first expansion is the only one performed; the inserted
         // `${VAR}` is treated as literal text, not re-resolved.
         assert_eq!(expanded, format!("${{{key}}}/x/y"));
+    }
+
+    #[test]
+    fn expand_repo_path_falls_back_to_base_for_unset_monoserver_root() {
+        let key = "SKILLBOX_MONOSERVER_ROOT";
+        let prior = std::env::var(key).ok();
+        std::env::remove_var(key);
+
+        let base = PathBuf::from("/tmp/repos");
+        let expanded = expand_repo_path("${SKILLBOX_MONOSERVER_ROOT}/voice-to-text", &base);
+
+        match prior {
+            Some(value) => std::env::set_var(key, value),
+            None => std::env::remove_var(key),
+        }
+
+        assert_eq!(expanded, base.join("voice-to-text"));
     }
 
     #[test]
@@ -716,6 +829,70 @@ mod tests {
         assert_eq!(results.len(), 2);
         assert!(results.iter().any(|p| p.ends_with("alpha/skills")));
         assert!(results.iter().any(|p| p.ends_with("beta/skills")));
+    }
+
+    #[test]
+    fn parse_client_overlay_adds_client_repos_to_dir_config_services() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let client_dir = tmp.path().join("clients").join("personal");
+        std::fs::create_dir_all(&client_dir).expect("client dir");
+        let repo_base = tmp.path().join("repos");
+        std::fs::create_dir_all(&repo_base).expect("repo base");
+        std::fs::create_dir_all(repo_base.join("finalreceipts")).expect("finalreceipts repo");
+        std::fs::create_dir_all(repo_base.join("sweet-potato")).expect("sweet-potato repo");
+        let overlay_path = client_dir.join("overlay.yaml");
+        std::fs::write(
+            &overlay_path,
+            format!(
+                r#"
+version: 1
+client:
+  id: personal
+  context:
+    cwd_match:
+      - {repo_base}
+  repos:
+    - id: finalreceipts
+      kind: repo
+      repo_path: {repo_base}/finalreceipts
+    - id: sweet-potato-dupe
+      kind: repo
+      repo_path: {repo_base}/sweet-potato
+dev_sanity:
+  services:
+    base_path: {repo_base}
+    entries:
+      - name: spaps
+        dir: sweet-potato
+        health_url: http://localhost:3301
+  groups:
+    - name: frontend
+      paths:
+        - {repo_base}/finalreceipts
+"#,
+                repo_base = repo_base.display()
+            ),
+        )
+        .expect("write overlay");
+
+        let client = parse_client_overlay(&client_dir, &overlay_path).expect("parse overlay");
+        let config = client.dir_config.expect("dir config");
+        let service_dirs: Vec<&str> = config
+            .services
+            .iter()
+            .map(|service| service.dir.as_str())
+            .collect();
+
+        assert_eq!(service_dirs, vec!["sweet-potato", "finalreceipts"]);
+        assert!(config
+            .services
+            .iter()
+            .any(|service| service.name == "finalreceipts"));
+        assert_eq!(config.groups[0].name, "frontend");
+        assert!(config.groups[0]
+            .paths
+            .iter()
+            .any(|path| path.ends_with("finalreceipts")));
     }
 
     #[test]

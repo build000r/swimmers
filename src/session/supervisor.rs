@@ -16,8 +16,9 @@ use crate::thought::loop_runner::{SessionInfo, SessionProvider};
 use crate::thought::protocol::ThoughtDeliveryState;
 use crate::tmux_target::{exact_pane_target, exact_session_target};
 use crate::types::{
-    fallback_rest_state, ControlEvent, RepoTheme, RestState, SessionState, SessionStatePayload,
-    SessionSummary, TerminalSnapshot, ThoughtSource, ThoughtState, TransportHealth,
+    fallback_rest_state, ControlEvent, RepoTheme, RestState, SessionBatchMembership, SessionState,
+    SessionStatePayload, SessionSummary, TerminalSnapshot, ThoughtSource, ThoughtState,
+    TransportHealth,
 };
 
 const PROCESS_EXIT_REAP_INTERVAL: Duration = Duration::from_millis(250);
@@ -83,6 +84,7 @@ fn persisted_session_from_summary(
         last_skill: summary.last_skill.clone(),
         objective_fingerprint: thought_data
             .and_then(|snapshot| snapshot.objective_fingerprint.clone()),
+        batch: summary.batch.clone(),
         cwd: summary.cwd.clone(),
         last_activity_at: summary.last_activity_at,
     }
@@ -363,6 +365,7 @@ impl SessionSupervisor {
                         .and_then(|t| t.objective_changed_at)
                         .or(ps.objective_changed_at),
                     last_skill: ps.last_skill.clone(),
+                    batch: ps.batch.clone(),
                     is_stale: true,
                     attached_clients: 0,
                     transport_health: crate::types::TransportHealth::Disconnected,
@@ -515,6 +518,7 @@ impl SessionSupervisor {
         // not reset to Active before transcript sync has a chance to mark it
         // as waiting on the user).
         let last_activity_override = self.persisted_last_activity(&session_id).await;
+        let batch = self.persisted_batch(&session_id).await;
 
         match crate::session::actor::SessionActor::spawn(
             session_id.clone(),
@@ -524,6 +528,7 @@ impl SessionSupervisor {
             None,
             self.config.clone(),
             last_activity_override,
+            batch,
         ) {
             Ok(handle) => {
                 if !self
@@ -687,6 +692,18 @@ impl SessionSupervisor {
         spawn_tool: Option<crate::types::SpawnTool>,
         initial_request: Option<String>,
     ) -> anyhow::Result<(SessionSummary, Option<RepoTheme>)> {
+        self.create_session_with_batch(name, cwd, spawn_tool, initial_request, None)
+            .await
+    }
+
+    pub async fn create_session_with_batch(
+        self: &Arc<Self>,
+        name: Option<String>,
+        cwd: Option<String>,
+        spawn_tool: Option<crate::types::SpawnTool>,
+        initial_request: Option<String>,
+        batch: Option<SessionBatchMembership>,
+    ) -> anyhow::Result<(SessionSummary, Option<RepoTheme>)> {
         let start_cwd = cwd.or_else(current_working_dir);
         let mut initial_request = normalize_initial_request(initial_request);
         let tmux_name = self.allocate_tmux_name(name);
@@ -703,6 +720,7 @@ impl SessionSupervisor {
             initial_tool.clone(),
             self.config.clone(),
             None,
+            batch.clone(),
         )?;
         let bootstrap_handle = handle.clone();
 
@@ -713,6 +731,7 @@ impl SessionSupervisor {
                 &tmux_name,
                 start_cwd.as_deref(),
                 initial_tool.as_deref(),
+                batch,
             )
             .await;
         let repo_theme = self.resolve_repo_theme_for_summary(&mut summary);
@@ -757,6 +776,7 @@ impl SessionSupervisor {
         tmux_name: &str,
         start_cwd: Option<&str>,
         initial_tool: Option<&str>,
+        batch: Option<SessionBatchMembership>,
     ) -> SessionSummary {
         let mut summary = self.build_placeholder_summary(session_id, tmux_name);
         if let Some(cwd) = start_cwd {
@@ -766,6 +786,7 @@ impl SessionSupervisor {
             summary.tool = Some(display.to_string());
             summary.context_limit = crate::types::context_limit_for_tool(Some(display));
         }
+        summary.batch = batch;
         summary
     }
 
@@ -1165,6 +1186,19 @@ impl SessionSupervisor {
             .map(|ps| ps.last_activity_at)
     }
 
+    async fn persisted_batch(&self, session_id: &str) -> Option<SessionBatchMembership> {
+        let store = {
+            let guard = self.persistence.read().await;
+            guard.as_ref().cloned()?
+        };
+        store
+            .load_sessions()
+            .await
+            .into_iter()
+            .find(|ps| ps.session_id == session_id)
+            .and_then(|ps| ps.batch)
+    }
+
     /// Persist the current session registry to disk.
     pub async fn persist_registry(&self) {
         let store = {
@@ -1487,6 +1521,7 @@ impl SessionSupervisor {
             transport_health: crate::types::TransportHealth::Healthy,
             last_activity_at: Utc::now(),
             repo_theme_id: None,
+            batch: None,
         }
     }
 }
@@ -1954,6 +1989,7 @@ mod tests {
             transport_health: TransportHealth::Healthy,
             last_activity_at: Utc::now(),
             repo_theme_id: None,
+            batch: None,
         }
     }
 
@@ -2268,6 +2304,7 @@ mod tests {
                 objective_changed_at: None,
                 last_skill: None,
                 objective_fingerprint: None,
+                batch: None,
                 cwd: "/tmp".to_string(),
                 last_activity_at: Utc::now(),
             }])
@@ -2278,6 +2315,51 @@ mod tests {
 
         let allocated = supervisor.allocate_unique_session_id().await;
         assert_eq!(allocated, "sess_8");
+    }
+
+    #[tokio::test]
+    async fn init_persistence_preserves_batch_membership_on_stale_sessions() {
+        let dir = tempdir().expect("tempdir");
+        let store = FileStore::new(dir.path()).await.expect("file store");
+        store
+            .save_sessions(&[PersistedSession {
+                session_id: "sess_7".to_string(),
+                tmux_name: "7".to_string(),
+                state: SessionState::Idle,
+                tool: Some("Codex".to_string()),
+                token_count: 0,
+                context_limit: 192_000,
+                thought: None,
+                thought_state: ThoughtState::Holding,
+                thought_source: ThoughtSource::CarryForward,
+                thought_updated_at: None,
+                rest_state: RestState::Drowsy,
+                commit_candidate: false,
+                objective_changed_at: None,
+                last_skill: None,
+                objective_fingerprint: None,
+                batch: Some(SessionBatchMembership {
+                    id: "batch-auth".to_string(),
+                    label: "auth-rebuild".to_string(),
+                    index: 0,
+                    total: 2,
+                    created_at: Utc::now(),
+                    prompt_excerpt: Some("auth-rebuild".to_string()),
+                }),
+                cwd: "/tmp".to_string(),
+                last_activity_at: Utc::now(),
+            }])
+            .await;
+
+        let supervisor = SessionSupervisor::new(Arc::new(Config::default()));
+        supervisor.init_persistence(store).await;
+
+        let stale = supervisor.stale_sessions.read().await;
+        let batch = stale[0].batch.as_ref().expect("batch membership");
+        assert_eq!(batch.id, "batch-auth");
+        assert_eq!(batch.label, "auth-rebuild");
+        assert_eq!(batch.index, 0);
+        assert_eq!(batch.total, 2);
     }
 
     #[tokio::test]
@@ -2467,6 +2549,7 @@ mod tests {
             transport_health: crate::types::TransportHealth::Healthy,
             last_activity_at: Utc::now(),
             repo_theme_id: None,
+            batch: None,
         };
 
         let older = DateTime::parse_from_rfc3339("2026-03-08T14:00:05Z")
@@ -2548,6 +2631,7 @@ mod tests {
             transport_health: crate::types::TransportHealth::Healthy,
             last_activity_at: Utc::now(),
             repo_theme_id: None,
+            batch: None,
         };
 
         let snapshots = HashMap::from([

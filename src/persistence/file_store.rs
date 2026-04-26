@@ -19,7 +19,7 @@ use uuid::Uuid;
 
 use crate::thought::protocol::ThoughtDeliveryState;
 use crate::thought::runtime_config::ThoughtConfig;
-use crate::types::{RestState, SessionState, ThoughtSource, ThoughtState};
+use crate::types::{RestState, SessionBatchMembership, SessionState, ThoughtSource, ThoughtState};
 
 // ---------------------------------------------------------------------------
 // Persisted data types
@@ -51,6 +51,8 @@ pub struct PersistedSession {
     pub last_skill: Option<String>,
     #[serde(default)]
     pub objective_fingerprint: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub batch: Option<SessionBatchMembership>,
     pub cwd: String,
     pub last_activity_at: DateTime<Utc>,
 }

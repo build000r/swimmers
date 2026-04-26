@@ -342,6 +342,39 @@ pub fn list_group_entries_sync(group: &OverlayDirGroup) -> Vec<DirEntry> {
     let mut seen = BTreeSet::new();
     let mut entries: Vec<(DirEntry, u64)> = Vec::new();
 
+    for entry_path in &group.paths {
+        let Some(name) = entry_path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+        else {
+            continue;
+        };
+        if name.starts_with('.') || !seen.insert(name.clone()) {
+            continue;
+        }
+
+        let full_path = entry_path
+            .canonicalize()
+            .unwrap_or_else(|_| entry_path.clone())
+            .to_string_lossy()
+            .into_owned();
+
+        entries.push((
+            DirEntry {
+                name,
+                has_children: false,
+                is_running: None,
+                repo_dirty: None,
+                repo_action: None,
+                group: None,
+                full_path: Some(full_path),
+                has_restart: None,
+                open_url: None,
+            },
+            modified_secs(entry_path),
+        ));
+    }
+
     for source_dir in &group.dirs {
         let Ok(read_dir) = std::fs::read_dir(source_dir) else {
             continue;
@@ -406,6 +439,159 @@ pub fn list_group_entries_sync(group: &OverlayDirGroup) -> Vec<DirEntry> {
     entries.into_iter().map(|(entry, _)| entry).collect()
 }
 
+fn has_visible_child_dirs(path: &Path) -> bool {
+    std::fs::read_dir(path)
+        .map(|read_dir| {
+            read_dir.flatten().any(|child| {
+                child.file_type().map(|ft| ft.is_dir()).unwrap_or(false)
+                    && !child.file_name().to_string_lossy().starts_with('.')
+            })
+        })
+        .unwrap_or(false)
+}
+
+fn modified_secs(path: &Path) -> u64 {
+    path.metadata()
+        .ok()
+        .and_then(|meta| meta.modified().ok())
+        .and_then(|modified| modified.duration_since(UNIX_EPOCH).ok())
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0)
+}
+
+pub async fn list_managed_service_entries(
+    state: &Arc<AppState>,
+    config: &OverlayDirConfig,
+) -> Vec<DirEntry> {
+    let base_path = config
+        .base_path
+        .canonicalize()
+        .unwrap_or(config.base_path.clone());
+    let context = OverlayServiceContext {
+        base_path: base_path.clone(),
+        services: config.services.clone(),
+    };
+    let mut seen_paths = BTreeSet::new();
+    let mut unique_services = BTreeSet::new();
+    let mut pending = Vec::new();
+
+    for service in &config.services {
+        let raw_path = base_path.join(&service.dir);
+        let Ok(entry_path) = raw_path.canonicalize() else {
+            continue;
+        };
+        if !entry_path.is_dir() || !seen_paths.insert(entry_path.clone()) {
+            continue;
+        }
+
+        let name = entry_path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| service.name.clone());
+        let services = services_for_directory(&entry_path, &context);
+        for service_name in &services {
+            unique_services.insert(service_name.clone());
+        }
+
+        pending.push(PendingEntry {
+            name,
+            has_children: false,
+            modified_at: modified_secs(&entry_path),
+            services,
+            entry_path,
+        });
+    }
+
+    let probe_inputs: Vec<(PathBuf, _)> = pending
+        .iter()
+        .map(|pending_entry| (pending_entry.entry_path.clone(), state.repo_actions.clone()))
+        .collect();
+    let probes: Vec<(Option<bool>, Option<RepoActionStatus>)> = stream::iter(probe_inputs)
+        .map(|(entry_path, repo_actions)| async move {
+            let repo_summary =
+                inspect_git_repo(&entry_path)
+                    .await
+                    .ok()
+                    .flatten()
+                    .and_then(|summary| {
+                        let canonical_entry =
+                            entry_path.canonicalize().unwrap_or(entry_path.clone());
+                        (summary.repo_root == canonical_entry).then_some(summary)
+                    });
+            let repo_dirty = repo_summary.as_ref().map(|summary| summary.dirty);
+            let repo_action = match repo_summary.as_ref() {
+                Some(summary) => repo_actions.status_for(&summary.repo_root).await,
+                None => None,
+            };
+            (repo_dirty, repo_action)
+        })
+        .buffered(GIT_PROBE_CONCURRENCY)
+        .collect()
+        .await;
+
+    let services: Vec<String> = unique_services.into_iter().collect();
+    let health_map = overlay_service_health_map(&config.services, &services).await;
+    let svc_meta: HashMap<&str, &OverlayServiceEntry> = config
+        .services
+        .iter()
+        .map(|service| (service.name.as_str(), service))
+        .collect();
+
+    let mut entries: Vec<(DirEntry, u64)> = pending
+        .into_iter()
+        .zip(probes)
+        .map(|(pending_entry, (repo_dirty, repo_action))| {
+            let is_running = if pending_entry.services.is_empty() {
+                None
+            } else {
+                Some(
+                    pending_entry
+                        .services
+                        .iter()
+                        .any(|service| health_map.get(service).copied().unwrap_or(false)),
+                )
+            };
+            let has_restart = pending_entry
+                .services
+                .iter()
+                .any(|service| {
+                    svc_meta
+                        .get(service.as_str())
+                        .and_then(|entry| entry.restart.as_ref())
+                        .is_some()
+                })
+                .then_some(true);
+            let open_url = pending_entry.services.iter().find_map(|service| {
+                svc_meta
+                    .get(service.as_str())
+                    .and_then(|entry| entry.open_url.clone().or_else(|| entry.health_url.clone()))
+            });
+            let full_path = pending_entry.entry_path.to_string_lossy().into_owned();
+            (
+                DirEntry {
+                    name: pending_entry.name,
+                    has_children: pending_entry.has_children,
+                    is_running,
+                    repo_dirty,
+                    repo_action,
+                    group: None,
+                    full_path: Some(full_path),
+                    has_restart,
+                    open_url,
+                },
+                pending_entry.modified_at,
+            )
+        })
+        .collect();
+
+    entries.sort_by(|(a, a_modified), (b, b_modified)| {
+        b_modified
+            .cmp(a_modified)
+            .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+    });
+    entries.into_iter().map(|(entry, _)| entry).collect()
+}
+
 pub async fn list_dirs(
     state: &Arc<AppState>,
     path: Option<&str>,
@@ -444,6 +630,35 @@ pub async fn list_dirs(
     };
 
     let (canonical_base, canonical) = resolve_target_path(base, target)?;
+    let dir_config = resolve_dir_config(&canonical_base);
+    if managed_only && canonical == canonical_base {
+        if let Some(config) = dir_config.filter(|config| !config.services.is_empty()) {
+            let pending_started = Instant::now();
+            let entries = list_managed_service_entries(state, config).await;
+            let total_ms = request_started.elapsed().as_millis() as u64;
+            tracing::info!(
+                target: "swimmers::api::dirs::timing",
+                managed_only,
+                pending_count = entries.len(),
+                pending_phase_ms = pending_started.elapsed().as_millis() as u64,
+                probe_phase_ms = 0_u64,
+                health_phase_ms = 0_u64,
+                total_ms,
+                "list_dirs managed exact entries timing"
+            );
+            return Ok(DirListResponse {
+                path: canonical.to_string_lossy().into_owned(),
+                entries,
+                overlay_label: Some(config.label.clone()),
+                groups: config
+                    .groups
+                    .iter()
+                    .map(|group| group.name.clone())
+                    .collect(),
+            });
+        }
+    }
+
     let read_dir = std::fs::read_dir(&canonical).map_err(|error| {
         ApiServiceError::new(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -451,13 +666,6 @@ pub async fn list_dirs(
             error.to_string(),
         )
     })?;
-
-    let dir_config = resolve_dir_config(&canonical_base);
-    let managed_children = if managed_only && canonical == canonical_base {
-        dir_config.and_then(|config| managed_base_child_names(config, &canonical_base))
-    } else {
-        None
-    };
 
     let service_context = dir_config.map(|config| OverlayServiceContext {
         base_path: config.base_path.clone(),
@@ -478,29 +686,10 @@ pub async fn list_dirs(
         if name.starts_with('.') {
             continue;
         }
-        if let Some(allowed) = &managed_children {
-            if !allowed.contains(&name) {
-                continue;
-            }
-        }
 
         let entry_path = entry.path();
-        let has_children = std::fs::read_dir(&entry_path)
-            .map(|read_dir| {
-                read_dir.flatten().any(|child| {
-                    child.file_type().map(|ft| ft.is_dir()).unwrap_or(false)
-                        && !child.file_name().to_string_lossy().starts_with('.')
-                })
-            })
-            .unwrap_or(false);
-
-        let modified_at = entry
-            .metadata()
-            .ok()
-            .and_then(|meta| meta.modified().ok())
-            .and_then(|modified| modified.duration_since(UNIX_EPOCH).ok())
-            .map(|duration| duration.as_secs())
-            .unwrap_or(0);
+        let has_children = has_visible_child_dirs(&entry_path);
+        let modified_at = modified_secs(&entry_path);
 
         let services = service_context
             .as_ref()

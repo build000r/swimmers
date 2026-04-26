@@ -23,8 +23,9 @@ use crate::session::replay_ring::ReplayRing;
 use crate::state::detector::StateDetector;
 use crate::tmux_target::{exact_pane_target, exact_session_target};
 use crate::types::{
-    ControlEvent, MermaidArtifactResponse, PlanFileResponse, SessionSkillPayload, SessionState,
-    SessionStatePayload, SessionSummary, SessionTitlePayload, TerminalSnapshot, TransportHealth,
+    ControlEvent, MermaidArtifactResponse, PlanFileResponse, SessionBatchMembership,
+    SessionSkillPayload, SessionState, SessionStatePayload, SessionSummary, SessionTitlePayload,
+    TerminalSnapshot, TransportHealth,
 };
 
 const CWD_REFRESH_MIN_INTERVAL: Duration = Duration::from_millis(750);
@@ -228,6 +229,9 @@ pub struct SessionActor {
     // Most recent detected skill invocation (e.g. "$describe").
     last_skill: Option<String>,
 
+    // Optional batch/mission this session was spawned under.
+    batch: Option<SessionBatchMembership>,
+
     // Buffered input line used for skill invocation detection.
     input_line_buffer: String,
 
@@ -257,6 +261,7 @@ impl SessionActor {
         initial_tool: Option<String>,
         config: Arc<Config>,
         last_activity_override: Option<chrono::DateTime<Utc>>,
+        batch: Option<SessionBatchMembership>,
     ) -> anyhow::Result<ActorHandle> {
         let pty_system = native_pty_system();
 
@@ -377,6 +382,7 @@ impl SessionActor {
             last_liveness_check_at: Instant::now(),
             tool: initial_tool,
             last_skill: None,
+            batch,
             input_line_buffer: String::new(),
             last_activity_at: last_activity_override.unwrap_or_else(Utc::now),
             session_started_at: Utc::now(),
@@ -1219,6 +1225,7 @@ impl SessionActor {
             last_skill: self.last_skill.clone(),
             last_activity_at: self.last_activity_at,
             repo_theme_id: None,
+            batch: self.batch.clone(),
         }
     }
 
@@ -2240,6 +2247,7 @@ mod tests {
             last_liveness_check_at: Instant::now(),
             tool: Some("Codex".to_string()),
             last_skill: None,
+            batch: None,
             input_line_buffer: String::new(),
             last_activity_at: Utc::now(),
             session_started_at: Utc::now(),

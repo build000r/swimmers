@@ -3,18 +3,24 @@ use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::routing::{delete, get, post};
 use axum::{Extension, Json, Router};
+use chrono::{DateTime, Utc};
 use serde::Deserialize;
 use std::sync::Arc;
 use tokio::sync::oneshot;
+use uuid::Uuid;
 
 use crate::api::{fetch_live_summary, AppState};
 use crate::auth::{AuthInfo, AuthScope};
 use crate::session::actor::SessionCommand;
 use crate::types::{
-    CreateSessionRequest, CreateSessionResponse, ErrorResponse, MermaidArtifactResponse,
-    PlanFileResponse, SessionInputRequest, SessionInputResponse, SessionListResponse,
-    SessionPaneTailResponse, SessionState, TerminalSnapshot,
+    CreateSessionRequest, CreateSessionResponse, CreateSessionsBatchRequest,
+    CreateSessionsBatchResponse, CreateSessionsBatchResult, ErrorResponse, MermaidArtifactResponse,
+    PlanFileResponse, RepoTheme, SessionBatchMembership, SessionInputRequest, SessionInputResponse,
+    SessionListResponse, SessionPaneTailResponse, SessionState, SessionSummary, TerminalSnapshot,
 };
+
+const BATCH_PROMPT_EXCERPT_MAX_CHARS: usize = 72;
+const BATCH_LABEL_MAX_CHARS: usize = 28;
 
 // ---------------------------------------------------------------------------
 // GET /v1/sessions
@@ -89,6 +95,177 @@ async fn create_session(
                     .into_response()
             }
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// POST /v1/sessions/batch
+// ---------------------------------------------------------------------------
+
+async fn create_sessions_batch(
+    Extension(auth): Extension<AuthInfo>,
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<CreateSessionsBatchRequest>,
+) -> impl IntoResponse {
+    if let Err(resp) = auth.require_scope(AuthScope::SessionsWrite) {
+        return resp;
+    }
+
+    if body.dirs.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                code: "VALIDATION_FAILED".to_string(),
+                message: Some("dirs must not be empty".to_string()),
+            }),
+        )
+            .into_response();
+    }
+
+    let total = body.dirs.len();
+    let spawn_tool = body.spawn_tool;
+    let initial_request = body.initial_request;
+    let (batch_id, batch_label, batch_created_at, prompt_excerpt) =
+        new_batch_context(total, initial_request.as_deref());
+    let supervisor = state.supervisor.clone();
+    let tasks = body.dirs.into_iter().enumerate().map(|(index, cwd)| {
+        let supervisor = supervisor.clone();
+        let initial_request = initial_request.clone();
+        let batch = session_batch_membership(
+            batch_id.clone(),
+            batch_label.clone(),
+            index,
+            total,
+            batch_created_at,
+            prompt_excerpt.clone(),
+        );
+        async move {
+            let created = supervisor
+                .create_session_with_batch(
+                    None,
+                    Some(cwd.clone()),
+                    spawn_tool,
+                    initial_request,
+                    Some(batch),
+                )
+                .await;
+            create_sessions_batch_result(index, cwd, created)
+        }
+    });
+
+    let results: Vec<_> = futures::future::join_all(tasks).await;
+    let status = if results.iter().all(|result| result.ok) {
+        StatusCode::CREATED
+    } else {
+        StatusCode::MULTI_STATUS
+    };
+
+    (status, Json(CreateSessionsBatchResponse { results })).into_response()
+}
+
+pub fn session_batch_membership(
+    id: String,
+    label: String,
+    index: usize,
+    total: usize,
+    created_at: DateTime<Utc>,
+    prompt_excerpt: Option<String>,
+) -> SessionBatchMembership {
+    SessionBatchMembership {
+        id,
+        label,
+        index,
+        total,
+        created_at,
+        prompt_excerpt,
+    }
+}
+
+pub fn new_batch_context(
+    total: usize,
+    initial_request: Option<&str>,
+) -> (String, String, DateTime<Utc>, Option<String>) {
+    let batch_id = format!("batch-{}", Uuid::new_v4().simple());
+    let created_at = Utc::now();
+    let prompt_excerpt = prompt_excerpt(initial_request);
+    let label = batch_label(prompt_excerpt.as_deref(), &batch_id);
+    debug_assert!(total > 0);
+    (batch_id, label, created_at, prompt_excerpt)
+}
+
+fn prompt_excerpt(prompt: Option<&str>) -> Option<String> {
+    let normalized = prompt?.split_whitespace().collect::<Vec<_>>().join(" ");
+    let normalized = normalized.trim();
+    if normalized.is_empty() {
+        return None;
+    }
+    Some(truncate_chars(normalized, BATCH_PROMPT_EXCERPT_MAX_CHARS))
+}
+
+fn batch_label(prompt_excerpt: Option<&str>, batch_id: &str) -> String {
+    prompt_excerpt
+        .map(|excerpt| truncate_chars(excerpt, BATCH_LABEL_MAX_CHARS))
+        .unwrap_or_else(|| {
+            let suffix = batch_id
+                .strip_prefix("batch-")
+                .unwrap_or(batch_id)
+                .chars()
+                .take(8)
+                .collect::<String>();
+            format!("batch {suffix}")
+        })
+}
+
+fn truncate_chars(value: &str, max_chars: usize) -> String {
+    let mut chars = value.chars();
+    let truncated = chars.by_ref().take(max_chars).collect::<String>();
+    if chars.next().is_some() {
+        format!("{truncated}~")
+    } else {
+        truncated
+    }
+}
+
+pub fn create_sessions_batch_result(
+    index: usize,
+    cwd: String,
+    created: anyhow::Result<(SessionSummary, Option<RepoTheme>)>,
+) -> CreateSessionsBatchResult {
+    match created {
+        Ok((session, repo_theme)) => CreateSessionsBatchResult {
+            index,
+            cwd,
+            ok: true,
+            session: Some(session),
+            repo_theme,
+            error: None,
+        },
+        Err(err) => {
+            let msg = err.to_string();
+            CreateSessionsBatchResult {
+                index,
+                cwd,
+                ok: false,
+                session: None,
+                repo_theme: None,
+                error: Some(create_session_error(&msg)),
+            }
+        }
+    }
+}
+
+fn create_session_error(msg: &str) -> ErrorResponse {
+    let code = if msg.contains("already exists") || msg.contains("duplicate session") {
+        "SESSION_ALREADY_EXISTS"
+    } else if msg.contains("cwd does not exist") {
+        "VALIDATION_FAILED"
+    } else {
+        "INTERNAL_ERROR"
+    };
+
+    ErrorResponse {
+        code: code.to_string(),
+        message: Some(msg.to_string()),
     }
 }
 
@@ -569,6 +746,7 @@ async fn get_plan_file(
 pub fn routes() -> Router<Arc<AppState>> {
     Router::new()
         .route("/v1/sessions", get(list_sessions).post(create_session))
+        .route("/v1/sessions/batch", post(create_sessions_batch))
         .route("/v1/sessions/{session_id}", delete(delete_session))
         .route(
             "/v1/sessions/{session_id}/attention/dismiss",
@@ -599,7 +777,10 @@ mod tests {
     use axum::extract::{Json, Path, Query, State};
     use axum::response::IntoResponse;
     use chrono::Utc;
+    use proptest::strategy::{Strategy, ValueTree};
+    use proptest::test_runner::TestRunner;
     use serde_json::Value;
+    use std::collections::BTreeMap;
     use std::ffi::{OsStr, OsString};
     use std::os::unix::fs::PermissionsExt;
     use std::path::Path as FsPath;
@@ -651,6 +832,7 @@ mod tests {
             transport_health: TransportHealth::Healthy,
             last_activity_at: Utc::now(),
             repo_theme_id: None,
+            batch: None,
         }
     }
 
@@ -698,6 +880,115 @@ mod tests {
         (dir, TestPathGuard(original_path))
     }
 
+    const FAKE_TMUX_FOR_CREATE: &str = r##"#!/bin/sh
+set -eu
+cmd="${1-}"
+case "$cmd" in
+  new-session|attach-session)
+    while IFS= read -r line; do
+      printf '%s\r\n' "$line"
+    done
+    ;;
+  send-keys|kill-session)
+    exit 0
+    ;;
+  display-message)
+    case "${5-}" in
+      "#{pane_current_path}") printf '%s\n' "${SWIMMERS_FAKE_TMUX_CWD:-/tmp/project}" ;;
+      "#{pane_current_command}") printf '%s\n' "${SWIMMERS_FAKE_TMUX_COMMAND:-zsh}" ;;
+      "#{pane_pid}") printf '101\n' ;;
+      "#{window_index}.#{pane_index}:#{pane_id}") printf '0.0:%%1\n' ;;
+    esac
+    ;;
+  capture-pane)
+    printf 'captured pane\n'
+    ;;
+  list-sessions)
+    exit 0
+    ;;
+esac
+"##;
+
+    fn generated_dir_name_sets() -> Vec<Vec<String>> {
+        let mut runner = TestRunner::deterministic();
+        let name = proptest::string::string_regex("[a-z]{1,8}").expect("valid regex");
+        let strategy = proptest::collection::btree_set(name, 1..=4);
+        (0..4)
+            .map(|_| {
+                strategy
+                    .new_tree(&mut runner)
+                    .expect("generate dir names")
+                    .current()
+                    .into_iter()
+                    .collect()
+            })
+            .collect()
+    }
+
+    fn create_case_dirs(root: &FsPath, case_index: usize, names: &[String]) -> Vec<String> {
+        names
+            .iter()
+            .enumerate()
+            .map(|(index, name)| {
+                let path = root.join(format!("case-{case_index}-{index}-{name}"));
+                std::fs::create_dir_all(&path).expect("create test cwd");
+                path.to_string_lossy().into_owned()
+            })
+            .collect()
+    }
+
+    async fn create_batch(state: Arc<AppState>, dirs: Vec<String>) -> axum::response::Response {
+        create_sessions_batch(
+            Extension(AuthInfo::new(OPERATOR_SCOPES.to_vec())),
+            State(state),
+            Json(CreateSessionsBatchRequest {
+                dirs,
+                spawn_tool: None,
+                initial_request: None,
+            }),
+        )
+        .await
+        .into_response()
+    }
+
+    async fn cleanup_created_sessions(state: &Arc<AppState>, json: &Value) {
+        let Some(results) = json["results"].as_array() else {
+            return;
+        };
+        for result in results {
+            let Some(session_id) = result["session"]["session_id"].as_str() else {
+                continue;
+            };
+            let _ = state
+                .supervisor
+                .delete_session(session_id, crate::config::SessionDeleteMode::DetachBridge)
+                .await;
+        }
+    }
+
+    fn cwd_result_classes(json: &Value) -> BTreeMap<String, bool> {
+        json["results"]
+            .as_array()
+            .expect("results array")
+            .iter()
+            .map(|result| {
+                (
+                    result["cwd"].as_str().expect("cwd").to_string(),
+                    result["ok"].as_bool().expect("ok"),
+                )
+            })
+            .collect()
+    }
+
+    fn success_count(json: &Value) -> usize {
+        json["results"]
+            .as_array()
+            .expect("results array")
+            .iter()
+            .filter(|result| result["ok"].as_bool() == Some(true))
+            .count()
+    }
+
     async fn spawn_summary_handle(summary: crate::types::SessionSummary) -> ActorHandle {
         let (cmd_tx, mut cmd_rx) = mpsc::channel(8);
         let handle = ActorHandle::test_handle(
@@ -735,6 +1026,186 @@ mod tests {
         .into_response();
 
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn create_sessions_batch_requires_write_scope() {
+        let response = create_sessions_batch(
+            Extension(AuthInfo::new(OBSERVER_SCOPES.to_vec())),
+            State(test_state()),
+            Json(CreateSessionsBatchRequest {
+                dirs: vec!["/tmp/project".to_string()],
+                spawn_tool: None,
+                initial_request: None,
+            }),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn create_sessions_batch_rejects_empty_dirs() {
+        let response = create_sessions_batch(
+            Extension(AuthInfo::new(OPERATOR_SCOPES.to_vec())),
+            State(test_state()),
+            Json(CreateSessionsBatchRequest {
+                dirs: Vec::new(),
+                spawn_tool: None,
+                initial_request: None,
+            }),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let json = response_json(response).await;
+        assert_eq!(json["code"], "VALIDATION_FAILED");
+        assert_eq!(json["message"], "dirs must not be empty");
+    }
+
+    #[tokio::test]
+    async fn create_sessions_batch_assigns_shared_batch_metadata() {
+        let _guard = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let (_tmux_dir, _path_guard) = install_fake_tmux(FAKE_TMUX_FOR_CREATE);
+        let state = test_state();
+        let root = tempdir().expect("tempdir");
+        let dirs = create_case_dirs(root.path(), 0, &["api".to_string(), "worker".to_string()]);
+
+        let response = create_sessions_batch(
+            Extension(AuthInfo::new(OPERATOR_SCOPES.to_vec())),
+            State(state.clone()),
+            Json(CreateSessionsBatchRequest {
+                dirs,
+                spawn_tool: None,
+                initial_request: Some("wire jwt refresh + tests".to_string()),
+            }),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let json = response_json(response).await;
+        let results = json["results"].as_array().expect("results");
+        let first_batch = &results[0]["session"]["batch"];
+        let second_batch = &results[1]["session"]["batch"];
+
+        assert!(first_batch["id"]
+            .as_str()
+            .expect("batch id")
+            .starts_with("batch-"));
+        assert_eq!(second_batch["id"], first_batch["id"]);
+        assert_eq!(first_batch["label"], "wire jwt refresh + tests");
+        assert_eq!(first_batch["prompt_excerpt"], "wire jwt refresh + tests");
+        assert_eq!(first_batch["index"], 0);
+        assert_eq!(second_batch["index"], 1);
+        assert_eq!(first_batch["total"], 2);
+        assert_eq!(second_batch["total"], 2);
+        assert!(first_batch["created_at"].is_string());
+
+        cleanup_created_sessions(&state, &json).await;
+    }
+
+    #[tokio::test]
+    async fn create_sessions_batch_mr_permutation_preserves_cwd_result_classes() {
+        let _guard = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let (_tmux_dir, _path_guard) = install_fake_tmux(FAKE_TMUX_FOR_CREATE);
+        let state = test_state();
+        let root = tempdir().expect("tempdir");
+
+        for (case_index, names) in generated_dir_name_sets().into_iter().enumerate() {
+            let dirs = create_case_dirs(root.path(), case_index, &names);
+            let reversed_dirs = dirs.iter().rev().cloned().collect::<Vec<_>>();
+
+            let response = create_batch(state.clone(), dirs.clone()).await;
+            assert_eq!(response.status(), StatusCode::CREATED);
+            let forward_json = response_json(response).await;
+
+            let response = create_batch(state.clone(), reversed_dirs).await;
+            assert_eq!(response.status(), StatusCode::CREATED);
+            let reversed_json = response_json(response).await;
+
+            assert_eq!(
+                cwd_result_classes(&forward_json),
+                cwd_result_classes(&reversed_json)
+            );
+
+            cleanup_created_sessions(&state, &forward_json).await;
+            cleanup_created_sessions(&state, &reversed_json).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn create_sessions_batch_mr_additive_valid_dir_increases_success_count() {
+        let _guard = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let (_tmux_dir, _path_guard) = install_fake_tmux(FAKE_TMUX_FOR_CREATE);
+        let state = test_state();
+        let root = tempdir().expect("tempdir");
+        let base_dirs =
+            create_case_dirs(root.path(), 0, &["api".to_string(), "worker".to_string()]);
+        let mut extended_dirs = base_dirs.clone();
+        extended_dirs.extend(create_case_dirs(root.path(), 1, &["docs".to_string()]));
+
+        let response = create_batch(state.clone(), base_dirs).await;
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let base_json = response_json(response).await;
+
+        let response = create_batch(state.clone(), extended_dirs).await;
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let extended_json = response_json(response).await;
+
+        assert_eq!(success_count(&extended_json), success_count(&base_json) + 1);
+        assert_eq!(
+            extended_json["results"].as_array().expect("results").len(),
+            base_json["results"].as_array().expect("results").len() + 1
+        );
+
+        cleanup_created_sessions(&state, &base_json).await;
+        cleanup_created_sessions(&state, &extended_json).await;
+    }
+
+    #[tokio::test]
+    async fn create_sessions_batch_mr_invalid_dir_injection_is_exclusive() {
+        let _guard = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let (_tmux_dir, _path_guard) = install_fake_tmux(FAKE_TMUX_FOR_CREATE);
+        let state = test_state();
+        let root = tempdir().expect("tempdir");
+        let valid_dirs = create_case_dirs(
+            root.path(),
+            0,
+            &["frontend".to_string(), "backend".to_string()],
+        );
+        let missing_dir = root.path().join("missing").to_string_lossy().into_owned();
+        let dirs = vec![
+            valid_dirs[0].clone(),
+            missing_dir.clone(),
+            valid_dirs[1].clone(),
+        ];
+
+        let response = create_batch(state.clone(), dirs).await;
+        assert_eq!(response.status(), StatusCode::MULTI_STATUS);
+        let json = response_json(response).await;
+        let results = json["results"].as_array().expect("results");
+
+        assert_eq!(results.len(), 3);
+        assert_eq!(success_count(&json), 2);
+        assert_eq!(results[1]["index"], 1);
+        assert_eq!(results[1]["cwd"], missing_dir);
+        assert_eq!(results[1]["ok"], false);
+        assert_eq!(results[1]["error"]["code"], "VALIDATION_FAILED");
+        assert!(results[0]["session"]["session_id"].is_string());
+        assert!(results[2]["session"]["session_id"].is_string());
+
+        cleanup_created_sessions(&state, &json).await;
     }
 
     #[tokio::test]

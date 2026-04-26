@@ -344,7 +344,8 @@ impl ContextReader for ClaudeCodeReader {
         // File truncated in place (log rotation, agent rewrote the file, etc.):
         // re-bootstrap from the new contents so we do not feed a reversed
         // byte range into the incremental read path.
-        let truncated = self.file_path.as_ref() == Some(&file_path) && current_size < self.file_size;
+        let truncated =
+            self.file_path.as_ref() == Some(&file_path) && current_size < self.file_size;
 
         // New, different, or truncated file — reset state
         if self.file_path.as_ref() != Some(&file_path) || truncated {
@@ -691,7 +692,8 @@ impl ContextReader for CodexReader {
 
         // File truncated in place: re-bootstrap from the new contents so we
         // do not feed a reversed byte range into the incremental read path.
-        let truncated = self.file_path.as_ref() == Some(&file_path) && current_size < self.file_size;
+        let truncated =
+            self.file_path.as_ref() == Some(&file_path) && current_size < self.file_size;
 
         // New, different, or truncated file — reset state
         if self.file_path.as_ref() != Some(&file_path) || truncated {

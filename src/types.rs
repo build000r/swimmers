@@ -235,6 +235,17 @@ pub struct RepoTheme {
     pub sprite: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionBatchMembership {
+    pub id: String,
+    pub label: String,
+    pub index: usize,
+    pub total: usize,
+    pub created_at: DateTime<Utc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_excerpt: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionSummary {
     pub session_id: String,
@@ -268,6 +279,8 @@ pub struct SessionSummary {
     /// repo theme cache directory exists for this session cwd.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub repo_theme_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub batch: Option<SessionBatchMembership>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -375,6 +388,38 @@ pub struct CreateSessionRequest {
     pub spawn_tool: Option<SpawnTool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub initial_request: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateSessionsBatchRequest {
+    pub dirs: Vec<String>,
+    pub spawn_tool: Option<SpawnTool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub initial_request: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateSessionsBatchResult {
+    pub index: usize,
+    pub cwd: String,
+    pub ok: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session: Option<SessionSummary>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repo_theme: Option<RepoTheme>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<ErrorResponse>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateSessionsBatchResponse {
+    pub results: Vec<CreateSessionsBatchResult>,
+}
+
+impl CreateSessionsBatchResponse {
+    pub fn success_count(&self) -> usize {
+        self.results.iter().filter(|result| result.ok).count()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -981,6 +1026,7 @@ mod tests {
                 transport_health: TransportHealth::Healthy,
                 last_activity_at: chrono::Utc::now(),
                 repo_theme_id: Some("/tmp/proj".into()),
+                batch: None,
             },
             repo_theme: Some(theme),
         };
@@ -1039,6 +1085,7 @@ mod tests {
                 transport_health: TransportHealth::Healthy,
                 last_activity_at: chrono::Utc::now(),
                 repo_theme_id: Some("/tmp".into()),
+                batch: None,
             },
             repo_theme: Some(theme),
         };

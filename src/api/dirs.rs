@@ -92,9 +92,9 @@ pub fn routes() -> Router<Arc<AppState>> {
 mod tests {
     use super::*;
     use crate::api::service::{
-        dirs_base_path, list_group_entries_sync, managed_base_child_names,
-        overlay_service_health_map, restart_services, services_for_directory,
-        start_repo_action_with_executor, OverlayServiceContext,
+        dirs_base_path, list_group_entries_sync, list_managed_service_entries,
+        managed_base_child_names, overlay_service_health_map, restart_services,
+        services_for_directory, start_repo_action_with_executor, OverlayServiceContext,
     };
     use crate::api::PublishedSelectionState;
     use crate::auth::OPERATOR_SCOPES;
@@ -240,6 +240,60 @@ mod tests {
         assert!(!children.contains("zeta"));
     }
 
+    #[tokio::test]
+    async fn managed_service_entries_preserve_exact_repo_paths() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let base = dir.path();
+        let finalreceipts = base.join("finalreceipts");
+        let swimmers = base.join("opensource").join("swimmers");
+        fs::create_dir_all(&finalreceipts).expect("finalreceipts");
+        fs::create_dir_all(swimmers.join("src")).expect("swimmers");
+        fs::create_dir_all(base.join("zeta")).expect("zeta");
+
+        let config = OverlayDirConfig {
+            label: "test".into(),
+            base_path: base.to_path_buf(),
+            services: vec![
+                OverlayServiceEntry {
+                    name: "finalreceipts".into(),
+                    dir: "finalreceipts".into(),
+                    health_url: None,
+                    restart: None,
+                    open_url: None,
+                },
+                OverlayServiceEntry {
+                    name: "swimmers".into(),
+                    dir: "opensource/swimmers".into(),
+                    health_url: None,
+                    restart: None,
+                    open_url: None,
+                },
+            ],
+            groups: Vec::new(),
+        };
+
+        let entries = list_managed_service_entries(&test_state(), &config).await;
+        let names: Vec<&str> = entries.iter().map(|entry| entry.name.as_str()).collect();
+
+        assert!(names.contains(&"finalreceipts"));
+        assert!(names.contains(&"swimmers"));
+        assert!(!names.contains(&"opensource"));
+        assert!(!names.contains(&"zeta"));
+        assert!(entries.iter().all(|entry| !entry.has_children));
+        let swimmers_path = swimmers
+            .canonicalize()
+            .expect("canonical swimmers")
+            .to_string_lossy()
+            .into_owned();
+        assert_eq!(
+            entries
+                .iter()
+                .find(|entry| entry.name == "swimmers")
+                .and_then(|entry| entry.full_path.as_deref()),
+            Some(swimmers_path.as_str())
+        );
+    }
+
     #[test]
     fn services_for_directory_matches_overlay_entries() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -313,6 +367,7 @@ mod tests {
 
         let group = OverlayDirGroup {
             name: "skills".into(),
+            paths: Vec::new(),
             dirs: vec![src_a.clone(), src_b.clone()],
         };
 
@@ -332,6 +387,40 @@ mod tests {
             .into_owned();
         assert!(alpha.has_children);
         assert_eq!(alpha.full_path.as_deref(), Some(alpha_path.as_str()));
+    }
+
+    #[test]
+    fn list_group_entries_sync_includes_exact_paths_as_launch_targets() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let repo = dir.path().join("finalreceipts");
+        let source = dir.path().join("source");
+        fs::create_dir_all(repo.join("src")).expect("repo");
+        fs::create_dir_all(source.join("backend")).expect("backend");
+
+        let group = OverlayDirGroup {
+            name: "frontend".into(),
+            paths: vec![repo.clone()],
+            dirs: vec![source],
+        };
+
+        let entries = list_group_entries_sync(&group);
+        let exact = entries
+            .iter()
+            .find(|entry| entry.name == "finalreceipts")
+            .expect("exact path entry");
+        let child = entries
+            .iter()
+            .find(|entry| entry.name == "backend")
+            .expect("source child entry");
+
+        assert!(!exact.has_children, "exact group paths should launch");
+        let repo_path = repo
+            .canonicalize()
+            .expect("canonical repo")
+            .to_string_lossy()
+            .into_owned();
+        assert_eq!(exact.full_path.as_deref(), Some(repo_path.as_str()));
+        assert_eq!(child.name, "backend");
     }
 
     #[tokio::test]
