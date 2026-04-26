@@ -102,6 +102,10 @@ In the TUI, click empty aquarium space to open the directory picker. To launch
 one prompt in several dirs, filter the picker to the rows you want, choose
 `[batch visible]`, type the initial request once, and press Enter.
 
+The clawgs rail is an attention board: each row shows a status badge and one
+current objective line. It starts grouped by `pwd`; press `Tab` to toggle to
+batch grouping.
+
 No tmux hook setup is required for thought or rest-state updates. `swimmers`
 streams session snapshots directly to `clawgs emit --stdio`.
 

@@ -81,8 +81,15 @@ impl ScrollGuard {
         let mut output = Vec::new();
 
         // Recent input from swimmers -> this redraw is expected, pass through.
+        // `checked_duration_since` keeps us safe if the monotonic clock ever
+        // appears to move backwards (NTP step, suspend/resume on some
+        // platforms): treat that case as "still inside the grace window"
+        // rather than panicking on Instant subtraction.
         if let Some(last_input) = self.last_input_time {
-            if now.duration_since(last_input) < Duration::from_millis(INPUT_GRACE_MS) {
+            let elapsed = now
+                .checked_duration_since(last_input)
+                .unwrap_or(Duration::ZERO);
+            if elapsed < Duration::from_millis(INPUT_GRACE_MS) {
                 if let Some(buffered) = self.force_flush() {
                     output.push(buffered);
                 }
@@ -331,6 +338,21 @@ mod tests {
         let flushed = guard.flush().unwrap();
         assert_eq!(flushed.data, second);
         assert!(flushed.coalesced_redraw);
+    }
+
+    #[test]
+    fn last_input_in_the_future_does_not_panic() {
+        // Regression: `now.duration_since(last_input)` panics if last_input >
+        // now, which can happen on NTP steps or platform-specific monotonic
+        // clock quirks. We must treat that case as "still in the grace window"
+        // and pass output through without crashing.
+        let mut guard = ScrollGuard::new();
+        guard.last_input_time = Some(Instant::now() + Duration::from_secs(60));
+        let data = make_cursor_data(20);
+        let result = guard.process(&data);
+        assert_eq!(result.len(), 1, "future last_input should treat as grace");
+        assert_eq!(result[0].data, data);
+        assert!(!result[0].coalesced_redraw);
     }
 
     #[test]

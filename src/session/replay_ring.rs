@@ -21,7 +21,13 @@ struct Frame {
 
 impl ReplayRing {
     /// Create a new ring buffer with the given byte capacity.
+    ///
+    /// Capacity must be > 0. A zero-capacity ring would silently bump
+    /// `next_seq` on every push without storing anything, so `snapshot()`
+    /// would always be empty and `replay_from(seq)` would always return
+    /// `None` — fail loudly at construction instead of leaking data.
     pub fn new(capacity: usize) -> Self {
+        assert!(capacity > 0, "ReplayRing capacity must be > 0");
         Self {
             capacity,
             frames: VecDeque::new(),
@@ -239,6 +245,15 @@ mod tests {
         // Replay from seq 3 works; earlier seqs are gone.
         assert!(ring.replay_from(1).is_none());
         assert_eq!(ring.replay_from(3).unwrap().len(), 1);
+    }
+
+    #[test]
+    #[should_panic(expected = "capacity must be > 0")]
+    fn zero_capacity_panics_at_construction() {
+        // Regression: previously `ReplayRing::new(0)` returned a ring that
+        // accepted pushes (incrementing seq) but stored nothing, producing
+        // empty snapshots and `None` replays — silent data loss.
+        let _ = ReplayRing::new(0);
     }
 
     #[test]

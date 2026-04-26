@@ -15,9 +15,16 @@ pub(crate) struct ThoughtLogEntry {
     pub(crate) cwd: String,
     pub(crate) pwd_label: Option<String>,
     pub(crate) batch: Option<SessionBatchMembership>,
+    pub(crate) state: SessionState,
+    pub(crate) current_command: Option<String>,
+    pub(crate) tool: Option<String>,
     pub(crate) thought: String,
+    pub(crate) thought_state: ThoughtState,
     pub(crate) updated_at: Option<DateTime<Utc>>,
+    pub(crate) rest_state: RestState,
     pub(crate) color: Color,
+    pub(crate) is_stale: bool,
+    pub(crate) transport_health: TransportHealth,
     pub(crate) objective_changed: bool,
     pub(crate) commit_candidate: bool,
 }
@@ -34,9 +41,16 @@ impl ThoughtLogEntry {
             cwd: normalize_path(&session.cwd),
             pwd_label: path_tail_label(&session.cwd),
             batch: session.batch.clone(),
+            state: session.state,
+            current_command: session.current_command.clone(),
+            tool: session.tool.clone(),
             thought,
+            thought_state: session.thought_state,
             updated_at: session.thought_updated_at,
+            rest_state: session.rest_state,
             color: session_display_color(session, repo_themes),
+            is_stale: session.is_stale,
+            transport_health: session.transport_health,
             objective_changed: session.objective_changed_at.is_some()
                 && session.objective_changed_at == session.thought_updated_at,
             commit_candidate: session.commit_candidate,
@@ -544,12 +558,71 @@ pub(crate) struct ThoughtPanelEntryView {
     pub(crate) cwd: String,
     pub(crate) pwd_label: Option<String>,
     pub(crate) batch: Option<SessionBatchMembership>,
+    pub(crate) state: SessionState,
+    pub(crate) current_command: Option<String>,
+    pub(crate) tool: Option<String>,
     pub(crate) updated_at: Option<DateTime<Utc>>,
+    pub(crate) thought_state: ThoughtState,
+    pub(crate) rest_state: RestState,
     pub(crate) color: Color,
+    pub(crate) is_stale: bool,
+    pub(crate) transport_health: TransportHealth,
     pub(crate) thought: String,
     pub(crate) has_objective_shift: bool,
     pub(crate) mermaid_label: Option<String>,
     pub(crate) has_commit_candidate: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ThoughtAttentionStatus {
+    Error,
+    Need,
+    Commit,
+    Shift,
+    Off,
+    Running,
+    Idle,
+}
+
+impl ThoughtAttentionStatus {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Error => "[error]",
+            Self::Need => "[need]",
+            Self::Commit => THOUGHT_COMMIT_LABEL,
+            Self::Shift => "[shift]",
+            Self::Off => "[off]",
+            Self::Running => "[run]",
+            Self::Idle => "[idle]",
+        }
+    }
+
+    fn sort_rank(self) -> u8 {
+        match self {
+            Self::Idle => 0,
+            Self::Off => 1,
+            Self::Running => 2,
+            Self::Shift => 3,
+            Self::Commit => 4,
+            Self::Need | Self::Error => 5,
+        }
+    }
+}
+
+fn thought_attention_status(entry: &ThoughtPanelEntryView) -> ThoughtAttentionStatus {
+    match entry.state {
+        SessionState::Error => ThoughtAttentionStatus::Error,
+        SessionState::Attention => ThoughtAttentionStatus::Need,
+        _ if entry.has_commit_candidate => ThoughtAttentionStatus::Commit,
+        _ if entry.has_objective_shift => ThoughtAttentionStatus::Shift,
+        SessionState::Exited => ThoughtAttentionStatus::Off,
+        _ if entry.is_stale || entry.transport_health == TransportHealth::Disconnected => {
+            ThoughtAttentionStatus::Off
+        }
+        SessionState::Busy => ThoughtAttentionStatus::Running,
+        _ if entry.thought_state == ThoughtState::Active => ThoughtAttentionStatus::Running,
+        _ => ThoughtAttentionStatus::Idle,
+    }
 }
 
 pub(crate) const DARK_TERMINAL_BG_RGB: (u8, u8, u8) = (0x11, 0x11, 0x11);
@@ -684,8 +757,9 @@ pub(crate) fn compare_thought_panel_entries(
     left: &ThoughtPanelEntryView,
     right: &ThoughtPanelEntryView,
 ) -> Ordering {
-    left.has_objective_shift
-        .cmp(&right.has_objective_shift)
+    thought_attention_status(left)
+        .sort_rank()
+        .cmp(&thought_attention_status(right).sort_rank())
         .then_with(|| {
             left.updated_at
                 .cmp(&right.updated_at)
@@ -712,8 +786,15 @@ pub(crate) fn build_thought_panel_entries<C: TuiApi>(app: &App<C>) -> Vec<Though
             cwd: entry.cwd.clone(),
             pwd_label: entry.pwd_label.clone(),
             batch: entry.batch.clone(),
+            state: entry.state,
+            current_command: entry.current_command.clone(),
+            tool: entry.tool.clone(),
             updated_at: entry.updated_at,
+            thought_state: entry.thought_state,
+            rest_state: entry.rest_state,
             color: app.thought_entry_display_color(entry),
+            is_stale: entry.is_stale,
+            transport_health: entry.transport_health,
             thought: entry.thought.replace('\n', " "),
             has_objective_shift: entry.objective_changed,
             mermaid_label: app
@@ -729,9 +810,7 @@ pub(crate) fn build_thought_panel_entries<C: TuiApi>(app: &App<C>) -> Vec<Though
         if thought_sessions.contains(&entity.session.session_id) {
             continue;
         }
-        let Some(artifact) = app.mermaid_artifacts.get(&entity.session.session_id) else {
-            continue;
-        };
+        let artifact = app.mermaid_artifacts.get(&entity.session.session_id);
         let cwd_label = path_tail_label(&entity.session.cwd);
         let label = thought_session_label(cwd_label.as_deref(), &entity.session.tmux_name);
         entries.push(ThoughtPanelEntryView {
@@ -741,11 +820,28 @@ pub(crate) fn build_thought_panel_entries<C: TuiApi>(app: &App<C>) -> Vec<Though
             cwd: normalize_path(&entity.session.cwd),
             pwd_label: cwd_label,
             batch: entity.session.batch.clone(),
-            updated_at: artifact.updated_at,
+            state: entity.session.state,
+            current_command: entity.session.current_command.clone(),
+            tool: entity.session.tool.clone(),
+            updated_at: artifact.and_then(|artifact| artifact.updated_at),
+            thought_state: entity.session.thought_state,
+            rest_state: entity.session.rest_state,
             color: session_display_color(&entity.session, &app.repo_themes),
-            thought: "artifacts ready".to_string(),
+            is_stale: entity.session.is_stale,
+            transport_health: entity.session.transport_health,
+            thought: normalize_thought_text(entity.session.thought.as_deref()).unwrap_or_else(
+                || {
+                    if artifact.is_some_and(|artifact| artifact.available) {
+                        "artifacts ready".to_string()
+                    } else {
+                        "no recent thought".to_string()
+                    }
+                },
+            ),
             has_objective_shift: false,
-            mermaid_label: Some(mermaid_badge_label(artifact.slice_name.as_deref())),
+            mermaid_label: artifact
+                .filter(|artifact| artifact.available)
+                .map(|artifact| mermaid_badge_label(artifact.slice_name.as_deref())),
             has_commit_candidate: entity.session.commit_candidate,
         });
     }
@@ -834,90 +930,128 @@ fn group_header_row(group: &ThoughtGroup, thought_content: Rect) -> ThoughtRowLa
     }
 }
 
+fn clean_inline_text(value: &str) -> String {
+    value.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn thought_agent_label(entry: &ThoughtPanelEntryView) -> Option<String> {
+    entry
+        .tool
+        .as_deref()
+        .map(str::trim)
+        .filter(|tool| !tool.is_empty())
+        .map(|tool| tool.to_ascii_lowercase())
+}
+
+fn thought_detail_line(entry: &ThoughtPanelEntryView) -> String {
+    let thought = clean_inline_text(&entry.thought);
+    if !thought.is_empty() && thought != "no recent thought" {
+        return thought;
+    }
+
+    if let Some(command) = entry.current_command.as_deref() {
+        let command = clean_inline_text(command);
+        if !command.is_empty() {
+            return format!("cmd: {command}");
+        }
+    }
+
+    if entry.is_stale {
+        return "stale session".to_string();
+    }
+    if entry.transport_health == TransportHealth::Disconnected
+        || entry.state == SessionState::Exited
+    {
+        return "no daemon".to_string();
+    }
+    if entry.rest_state == RestState::Sleeping || entry.rest_state == RestState::DeepSleep {
+        return "sleeping".to_string();
+    }
+
+    "no recent thought".to_string()
+}
+
+fn visible_segment_rect(
+    base_x: u16,
+    start_col: u16,
+    segment_width: u16,
+    visible_width: u16,
+) -> Option<Rect> {
+    if segment_width == 0 || start_col >= visible_width {
+        return None;
+    }
+    Some(Rect {
+        x: base_x.saturating_add(start_col),
+        y: 0,
+        width: segment_width.min(visible_width.saturating_sub(start_col)),
+        height: 1,
+    })
+}
+
 pub(crate) fn build_rows_for_panel_entry(
     entry: &ThoughtPanelEntryView,
     thought_content: Rect,
 ) -> Vec<ThoughtRowLayout> {
+    let session_label = thought_session_click_label(&entry.label);
+    let session_width = display_width(&session_label);
+    let status = thought_attention_status(entry);
+    let status_label = status.label();
+    let status_width = display_width(status_label);
     let mermaid_width = entry
         .mermaid_label
         .as_deref()
         .map(display_width)
         .unwrap_or(0);
-    let commit_width = display_width(THOUGHT_COMMIT_LABEL);
-    let has_inline_tags = entry.mermaid_label.is_some() || entry.has_commit_candidate;
-    let session_label = thought_session_click_label(&entry.label);
-    let session_width = display_width(&session_label);
 
-    if !has_inline_tags {
-        let line = format!("{session_label} {}", entry.thought);
-        return wrap_text(&line, thought_content.width as usize)
-            .into_iter()
-            .enumerate()
-            .map(|(index, line)| {
-                let visible_line_width = display_width(&line);
-                ThoughtRowLayout {
-                    session_rect: (index == 0 && visible_line_width > 0).then_some(Rect {
-                        x: thought_content.x,
-                        y: 0,
-                        width: session_width.min(visible_line_width),
-                        height: 1,
-                    }),
-                    text_rect: (visible_line_width > 0).then_some(Rect {
-                        x: thought_content.x,
-                        y: 0,
-                        width: visible_line_width,
-                        height: 1,
-                    }),
-                    mermaid_rect: None,
-                    mermaid_label: None,
-                    commit_rect: None,
-                    session_id: entry.session_id.clone(),
-                    label: entry.label.clone(),
-                    tmux_name: entry.tmux_name.clone(),
-                    line,
-                    color: entry.color,
-                }
-            })
-            .collect();
-    }
+    let mut line = String::new();
+    let mut cursor = 0u16;
 
-    let mut badge_x = thought_content.x;
-    let mermaid_rect = entry.mermaid_label.as_ref().map(|_| Rect {
-        x: badge_x,
-        y: 0,
-        width: mermaid_width,
-        height: 1,
+    let mermaid_start = entry.mermaid_label.as_ref().map(|label| {
+        let start = cursor;
+        line.push_str(label);
+        cursor = cursor.saturating_add(display_width(label));
+        line.push(' ');
+        cursor = cursor.saturating_add(1);
+        start
     });
-    if entry.mermaid_label.is_some() {
-        badge_x = badge_x.saturating_add(mermaid_width).saturating_add(1);
+
+    let status_start = cursor;
+    line.push_str(status_label);
+    cursor = cursor.saturating_add(status_width);
+    line.push(' ');
+    cursor = cursor.saturating_add(1);
+
+    let session_start = cursor;
+    line.push_str(&session_label);
+
+    if let Some(agent) = thought_agent_label(entry) {
+        line.push(' ');
+        line.push_str(&agent);
     }
 
-    let commit_rect = entry.has_commit_candidate.then_some(Rect {
-        x: badge_x,
-        y: 0,
-        width: commit_width,
-        height: 1,
+    let line = truncate_label(&line, thought_content.width as usize);
+    let visible_width = display_width(&line);
+    let mermaid_rect = mermaid_start.and_then(|start| {
+        visible_segment_rect(thought_content.x, start, mermaid_width, visible_width)
     });
-    if entry.has_commit_candidate {
-        badge_x = badge_x.saturating_add(commit_width).saturating_add(1);
-    }
-
-    let label_line = session_label;
-    let label_available = thought_content.right().saturating_sub(badge_x) as usize;
-    let label_line = truncate_label(&label_line, label_available);
-    let label_width = display_width(&label_line);
+    let commit_rect = if status == ThoughtAttentionStatus::Commit {
+        visible_segment_rect(thought_content.x, status_start, status_width, visible_width)
+    } else {
+        None
+    };
+    let session_rect = visible_segment_rect(
+        thought_content.x,
+        session_start,
+        session_width,
+        visible_width,
+    );
 
     let mut rows = vec![ThoughtRowLayout {
-        session_rect: (label_width > 0).then_some(Rect {
-            x: badge_x,
+        session_rect,
+        text_rect: (visible_width > 0).then_some(Rect {
+            x: thought_content.x,
             y: 0,
-            width: label_width,
-            height: 1,
-        }),
-        text_rect: (label_width > 0).then_some(Rect {
-            x: badge_x,
-            y: 0,
-            width: label_width,
+            width: visible_width,
             height: 1,
         }),
         mermaid_rect,
@@ -926,34 +1060,34 @@ pub(crate) fn build_rows_for_panel_entry(
         session_id: entry.session_id.clone(),
         label: entry.label.clone(),
         tmux_name: entry.tmux_name.clone(),
-        line: label_line,
+        line,
         color: entry.color,
     }];
 
-    rows.extend(
-        wrap_text(&entry.thought, thought_content.width as usize)
-            .into_iter()
-            .map(|line| {
-                let visible_line_width = display_width(&line);
-                ThoughtRowLayout {
-                    session_rect: None,
-                    text_rect: (visible_line_width > 0).then_some(Rect {
-                        x: thought_content.x,
-                        y: 0,
-                        width: visible_line_width,
-                        height: 1,
-                    }),
-                    mermaid_rect: None,
-                    mermaid_label: None,
-                    commit_rect: None,
-                    session_id: entry.session_id.clone(),
-                    label: entry.label.clone(),
-                    tmux_name: entry.tmux_name.clone(),
-                    line,
-                    color: entry.color,
-                }
-            }),
+    let detail_line = truncate_label(
+        &format!("  {}", thought_detail_line(entry)),
+        thought_content.width as usize,
     );
+    let detail_width = display_width(&detail_line);
+    if detail_width > 0 {
+        rows.push(ThoughtRowLayout {
+            session_rect: None,
+            text_rect: Some(Rect {
+                x: thought_content.x,
+                y: 0,
+                width: detail_width,
+                height: 1,
+            }),
+            mermaid_rect: None,
+            mermaid_label: None,
+            commit_rect: None,
+            session_id: entry.session_id.clone(),
+            label: entry.label.clone(),
+            tmux_name: entry.tmux_name.clone(),
+            line: detail_line,
+            color: Color::DarkGrey,
+        });
+    }
 
     rows
 }

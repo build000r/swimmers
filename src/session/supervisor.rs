@@ -1643,21 +1643,30 @@ impl SessionProvider for SupervisorProvider {
         let supervisor = self.supervisor.clone();
         let handle = self.handle.clone();
         std::thread::scope(|s| {
-            s.spawn(|| {
-                handle.block_on(async {
-                    supervisor
-                        .thought_snapshots
-                        .read()
-                        .await
-                        .iter()
-                        .map(|(session_id, snapshot)| {
-                            (session_id.clone(), snapshot.delivery.clone())
-                        })
-                        .collect()
+            let join = s
+                .spawn(|| {
+                    handle.block_on(async {
+                        supervisor
+                            .thought_snapshots
+                            .read()
+                            .await
+                            .iter()
+                            .map(|(session_id, snapshot)| {
+                                (session_id.clone(), snapshot.delivery.clone())
+                            })
+                            .collect::<HashMap<_, _>>()
+                    })
                 })
+                .join();
+            // A panic inside the scoped thread used to crash the entire
+            // thought-bridge runner via `.expect(..)`. Degrade gracefully:
+            // log and return an empty map so the next tick can recover.
+            join.unwrap_or_else(|_| {
+                tracing::error!(
+                    "thought_delivery_states snapshot thread panicked; returning empty map"
+                );
+                HashMap::new()
             })
-            .join()
-            .expect("thought_delivery_states thread panicked")
         })
     }
 }

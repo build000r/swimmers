@@ -44,7 +44,7 @@ use swimmers::types::{
     NativeDesktopOpenRequest, NativeDesktopOpenResponse, NativeDesktopStatusResponse,
     PlanFileResponse, PublishSelectionRequest, RepoActionKind, RepoActionState, RepoTheme,
     RestState, SessionBatchMembership, SessionListResponse, SessionState, SessionSummary,
-    SpawnTool,
+    SpawnTool, ThoughtState, TransportHealth,
 };
 
 const MIN_WIDTH: u16 = 70;

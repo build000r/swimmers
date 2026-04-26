@@ -117,7 +117,7 @@ After `cargo install swimmers`, both `swimmers` and `swimmers-tui` are on your P
 
 3. **Navigate** — arrow keys to select a fish, Enter to open the session in your terminal, `q` to quit the TUI.
 
-To start the same prompt in multiple directories from the TUI, click empty aquarium space to open the directory picker, optionally type to filter the visible rows, choose `[batch visible]`, type the initial request once, and press Enter.
+To start the same prompt in multiple directories from the TUI, click empty aquarium space to open the directory picker, optionally type to filter the visible rows, choose `[batch visible]`, type the initial request once, and press Enter. The clawgs rail groups by `pwd` by default; press `Tab` to toggle to the batch view.
 
 ### Experimental voice input
 
@@ -534,7 +534,7 @@ The `SessionActor` monitors each session's PTY output and classifies it into sta
 
 ### What is the thought rail?
 
-A side panel in the TUI that displays AI agent thought streams. When a session runs Claude Code, Codex, or similar tools, their internal reasoning appears in the thought rail next to the aquarium view.
+A side panel in the TUI that turns AI agent thoughts into an attention board. Each swimmer gets a compact status badge (`[need]`, `[commit]`, `[shift]`, `[run]`, `[idle]`, `[off]`) plus one current objective line, grouped by `pwd` or by batch with `Tab`.
 
 ### Is `LocalTrust` auth safe?
 

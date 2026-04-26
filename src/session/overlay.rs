@@ -712,10 +712,7 @@ mod tests {
 
     #[test]
     fn cwd_starts_with_exact_match() {
-        assert!(cwd_starts_with(
-            "/tmp/repos/example",
-            "/tmp/repos/example"
-        ));
+        assert!(cwd_starts_with("/tmp/repos/example", "/tmp/repos/example"));
     }
 
     #[test]

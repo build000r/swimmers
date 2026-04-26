@@ -146,6 +146,13 @@ pub(crate) fn balls_theme_slots<'a>(
     let centers = balls_theme_centers(entities.len(), body);
     let placement = balls_center_out_indices(entities.len());
 
+    // `balls_theme_centers` returns one entry per entity, so this should
+    // always succeed for non-empty entities; fall back to the body x to keep
+    // the `&centers[0]` indexing footgun out of the hot path entirely.
+    let Some(&first_center) = centers.first() else {
+        return Vec::new();
+    };
+
     let mut ordered = entities.to_vec();
     ordered.sort_by(|left, right| compare_sleepiness(&left.session, &right.session));
 
@@ -154,7 +161,10 @@ pub(crate) fn balls_theme_slots<'a>(
     let mut slots = Vec::with_capacity(ordered.len());
     for (age_rank, entity) in ordered.into_iter().enumerate() {
         let placement_index = *placement.get(age_rank).unwrap_or(&age_rank);
-        let anchor_x = *centers.get(placement_index).unwrap_or(&centers[0]);
+        let anchor_x = centers
+            .get(placement_index)
+            .copied()
+            .unwrap_or(first_center);
         let kind = entity.sprite_kind();
         let ball_height = balls_theme_ball_height(kind);
         let mut drop =
@@ -360,7 +370,7 @@ pub(crate) fn render_footer<C: TuiApi>(app: &App<C>, renderer: &mut Renderer, st
         renderer.draw_text(
             2,
             start_y,
-            &truncate_label(&state_line, (renderer.width() - 4) as usize),
+            &truncate_label(&state_line, renderer.width().saturating_sub(4) as usize),
             Color::White,
         );
 
@@ -373,7 +383,7 @@ pub(crate) fn render_footer<C: TuiApi>(app: &App<C>, renderer: &mut Renderer, st
         renderer.draw_text(
             2,
             start_y + 1,
-            &truncate_label(&cmd_line, (renderer.width() - 4) as usize),
+            &truncate_label(&cmd_line, renderer.width().saturating_sub(4) as usize),
             Color::DarkGrey,
         );
     } else {
@@ -392,7 +402,7 @@ pub(crate) fn render_footer<C: TuiApi>(app: &App<C>, renderer: &mut Renderer, st
     renderer.draw_text(
         2,
         start_y + 2,
-        &truncate_label(help, (renderer.width() - 4) as usize),
+        &truncate_label(help, renderer.width().saturating_sub(4) as usize),
         Color::Cyan,
     );
 
@@ -400,7 +410,7 @@ pub(crate) fn render_footer<C: TuiApi>(app: &App<C>, renderer: &mut Renderer, st
         renderer.draw_text(
             2,
             start_y + 3,
-            &truncate_label(message, (renderer.width() - 4) as usize),
+            &truncate_label(message, renderer.width().saturating_sub(4) as usize),
             Color::Yellow,
         );
     }

@@ -1009,7 +1009,14 @@ impl<C: TuiApi> App<C> {
             entry.cwd = normalize_path(&session.cwd);
             entry.pwd_label = path_tail_label(&session.cwd);
             entry.batch = session.batch.clone();
+            entry.state = session.state;
+            entry.current_command = session.current_command.clone();
+            entry.tool = session.tool.clone();
+            entry.thought_state = session.thought_state;
+            entry.rest_state = session.rest_state;
             entry.color = session_display_color(session, &self.repo_themes);
+            entry.is_stale = session.is_stale;
+            entry.transport_health = session.transport_health;
             entry.commit_candidate = session.commit_candidate;
         }
 
