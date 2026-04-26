@@ -9,6 +9,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use tokio::sync::RwLock;
+use uuid::Uuid;
 
 use crate::types::{RepoActionKind, RepoActionState, RepoActionStatus, SessionSummary};
 
@@ -379,8 +380,14 @@ fn launch_commit_codex_tmux(
     let runtime_dir = std::env::temp_dir().join(COMMIT_TMUX_RUNTIME_DIR);
     fs::create_dir_all(&runtime_dir)?;
 
-    let prompt_path = runtime_dir.join(format!("{session_name}.prompt.md"));
-    let wrapper_path = runtime_dir.join(format!("{session_name}.sh"));
+    // The session name includes a millisecond timestamp, but two launches that
+    // share `(tmux_name, ms)` would collide on the prompt/wrapper file paths
+    // and potentially deliver the wrong prompt to the surviving tmux session
+    // if the loser overwrites the wrapper before tmux starts reading it.
+    // A per-launch nonce is cheaper than reasoning about that race.
+    let nonce = Uuid::new_v4();
+    let prompt_path = runtime_dir.join(format!("{session_name}-{nonce}.prompt.md"));
+    let wrapper_path = runtime_dir.join(format!("{session_name}-{nonce}.sh"));
     fs::write(&prompt_path, build_commit_codex_prompt(session, git_state))?;
     fs::write(
         &wrapper_path,
@@ -551,8 +558,15 @@ fn run_commit_codex_command(
 ) -> io::Result<Option<String>> {
     let runtime_dir = std::env::temp_dir().join(COMMIT_CODEX_RUNTIME_DIR);
     fs::create_dir_all(&runtime_dir)?;
+    // RepoActionTracker only serializes starts on the same repo_root, so two
+    // picker [commit] clicks on different repos can race here. The millisecond
+    // timestamp alone is not enough entropy: a same-ms collision causes one
+    // call's `fs::write` to truncate the other's prompt before codex reads it,
+    // delivering the wrong commit context to one of the two repos. Add a
+    // per-call UUID so concurrent picker actions never share a path.
+    let nonce = Uuid::new_v4();
     let prompt_path = runtime_dir.join(format!(
-        "{label}-{}.prompt.md",
+        "{label}-{}-{nonce}.prompt.md",
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
@@ -707,6 +721,34 @@ mod tests {
         assert_eq!(sanitize_tmux_name(""), "session");
         assert_eq!(sanitize_tmux_name("$$$"), "session");
         assert_eq!(sanitize_tmux_name("dev-7"), "dev-7");
+    }
+
+    #[test]
+    fn commit_runtime_path_format_uses_uuid_to_avoid_concurrent_overwrite() {
+        // Regression: previously the path used only a millisecond timestamp,
+        // so two concurrent picker [commit] clicks on different repos that
+        // landed in the same millisecond would write to the same file and one
+        // call's codex stdin would read the other's prompt. The fix adds a
+        // per-call UUID, so even bit-for-bit identical timestamps cannot
+        // collide on a path. Mirror the production format here so future
+        // refactors that drop the UUID surface as a test failure.
+        let runtime_dir = std::env::temp_dir().join(COMMIT_CODEX_RUNTIME_DIR);
+        let ts = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis();
+        let nonce_a = Uuid::new_v4();
+        let nonce_b = Uuid::new_v4();
+        let path_a = runtime_dir.join(format!("picker-{ts}-{nonce_a}.prompt.md"));
+        let path_b = runtime_dir.join(format!("picker-{ts}-{nonce_b}.prompt.md"));
+        assert_ne!(
+            nonce_a, nonce_b,
+            "uuid::Uuid::new_v4 must produce distinct values"
+        );
+        assert_ne!(
+            path_a, path_b,
+            "concurrent picker commits must never share a prompt path"
+        );
     }
 
     #[test]
