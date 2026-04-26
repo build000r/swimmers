@@ -76,8 +76,17 @@ pub fn context_reader_for(
 const BOOTSTRAP_MAX: u64 = 1024 * 1024; // 1 MB
 
 /// Read a byte range `[start, end)` from a file.
+///
+/// Returns an empty buffer when `end <= start` — this guards against the
+/// caller passing a reversed range (e.g. when a file has been truncated since
+/// the last read), which would otherwise underflow the `end - start`
+/// subtraction and trigger a panic or a multi-exabyte allocation request.
 fn read_range(path: &Path, start: u64, end: u64) -> std::io::Result<Vec<u8>> {
     use std::io::{Read, Seek, SeekFrom};
+
+    if end <= start {
+        return Ok(Vec::new());
+    }
 
     let mut f = fs::File::open(path)?;
     f.seek(SeekFrom::Start(start))?;
@@ -332,8 +341,13 @@ impl ContextReader for ClaudeCodeReader {
             return None;
         }
 
-        // New or different file — reset state
-        if self.file_path.as_ref() != Some(&file_path) {
+        // File truncated in place (log rotation, agent rewrote the file, etc.):
+        // re-bootstrap from the new contents so we do not feed a reversed
+        // byte range into the incremental read path.
+        let truncated = self.file_path.as_ref() == Some(&file_path) && current_size < self.file_size;
+
+        // New, different, or truncated file — reset state
+        if self.file_path.as_ref() != Some(&file_path) || truncated {
             self.file_path = Some(file_path.clone());
             self.file_size = 0;
             self.user_task = None;
@@ -675,8 +689,12 @@ impl ContextReader for CodexReader {
             return None;
         }
 
-        // New or different file — reset state
-        if self.file_path.as_ref() != Some(&file_path) {
+        // File truncated in place: re-bootstrap from the new contents so we
+        // do not feed a reversed byte range into the incremental read path.
+        let truncated = self.file_path.as_ref() == Some(&file_path) && current_size < self.file_size;
+
+        // New, different, or truncated file — reset state
+        if self.file_path.as_ref() != Some(&file_path) || truncated {
             self.file_path = Some(file_path.clone());
             self.file_size = 0;
             self.user_task = None;
@@ -1003,6 +1021,80 @@ mod tests {
                 .any(|action| action.tool == "said"),
             "incremental assistant text should be recorded"
         );
+
+        if let Some(prev) = previous_home {
+            std::env::set_var("HOME", prev);
+        } else {
+            std::env::remove_var("HOME");
+        }
+    }
+
+    #[test]
+    fn read_range_returns_empty_when_end_le_start() {
+        // Regression: previously this underflowed `(end - start) as usize` for
+        // reversed ranges (which the readers can pass when a JSONL file gets
+        // truncated in place between ticks), producing a panic in debug builds
+        // and a multi-exabyte allocation request in release builds.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("payload.jsonl");
+        fs::write(&path, b"hello world").expect("write");
+
+        let buf = read_range(&path, 5, 5).expect("eq range");
+        assert!(buf.is_empty());
+
+        let buf = read_range(&path, 9, 3).expect("reversed range");
+        assert!(buf.is_empty());
+    }
+
+    #[test]
+    fn claude_reader_recovers_when_file_is_truncated_between_reads() {
+        // Regression: previously a JSONL file truncated in place between ticks
+        // (log rotation, agent rewrote the file) would feed `read_range` a
+        // reversed byte range and panic the reader.
+        let _lock = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let cwd = "/tmp/project-truncate";
+        let slug = cwd.replace('/', "-");
+        let project_dir = tmp.path().join(".claude").join("projects").join(slug);
+        fs::create_dir_all(&project_dir).expect("project dir");
+        let session_file = project_dir.join("session.jsonl");
+
+        let initial = format!(
+            concat!(
+                "{{\"type\":\"user\",\"cwd\":\"{cwd}\",\"message\":{{\"role\":\"user\",\"content\":\"first task\"}}}}\n",
+                "{{\"type\":\"assistant\",\"message\":{{\"role\":\"assistant\",\"usage\":{{\"input_tokens\":111}},\"content\":[{{\"type\":\"tool_use\",\"name\":\"exec\",\"input\":{{\"cmd\":\"ls\"}}}}]}}}}\n",
+                "{{\"type\":\"assistant\",\"message\":{{\"role\":\"assistant\",\"content\":[{{\"type\":\"text\",\"text\":\"long enough first text\"}}]}}}}\n"
+            ),
+            cwd = cwd
+        );
+        fs::write(&session_file, &initial).expect("session file");
+
+        let previous_home = std::env::var_os("HOME");
+        std::env::set_var("HOME", tmp.path());
+
+        let mut reader = ClaudeCodeReader::new(cwd, &[]);
+        let first = reader.read().expect("bootstrap snapshot");
+        assert_eq!(first.user_task.as_deref(), Some("first task"));
+        assert_eq!(first.token_count, 111);
+
+        // Truncate the file in place to a strictly shorter, valid payload.
+        let shorter = format!(
+            "{{\"type\":\"user\",\"cwd\":\"{cwd}\",\"message\":{{\"role\":\"user\",\"content\":\"new task\"}}}}\n",
+            cwd = cwd
+        );
+        assert!(
+            shorter.len() < initial.len(),
+            "test requires shorter post-truncation payload"
+        );
+        fs::write(&session_file, &shorter).expect("truncate file");
+
+        // Must not panic and must reflect the new, post-truncation state.
+        let after = reader.read().expect("post-truncation snapshot");
+        assert_eq!(after.user_task.as_deref(), Some("new task"));
+        // token_count was reset on truncation; the new payload has no usage.
+        assert_eq!(after.token_count, 0);
 
         if let Some(prev) = previous_home {
             std::env::set_var("HOME", prev);
