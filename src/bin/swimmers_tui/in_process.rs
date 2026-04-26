@@ -79,15 +79,17 @@ impl TuiApi for InProcessApi {
                 .current_file_store()
                 .ok_or_else(|| "thought config persistence is unavailable".to_string())?;
 
+            // Hold the runtime-config write lock across the disk save and the
+            // in-memory update so disk and in-memory state cannot diverge under
+            // concurrent updaters: the last writer to land on disk is also the
+            // last writer to land in memory.
+            let mut runtime_config = self.state.thought_config.write().await;
             store.save_thought_config(&config).await.map_err(|err| {
                 tracing::error!(error = %err, "failed to persist thought runtime config");
                 "failed to persist thought config".to_string()
             })?;
-
-            {
-                let mut runtime_config = self.state.thought_config.write().await;
-                *runtime_config = config.clone();
-            }
+            *runtime_config = config.clone();
+            drop(runtime_config);
 
             Ok(config)
         })
