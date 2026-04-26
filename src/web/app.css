@@ -508,3 +508,9 @@ textarea {
     padding: 18px;
   }
 }
+
+/* claude:scrollbar-style */
+html {
+  scrollbar-width: thin;
+  scrollbar-color: gray transparent;
+}
