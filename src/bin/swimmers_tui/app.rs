@@ -154,6 +154,7 @@ pub(crate) struct App<C: TuiApi> {
     pub(crate) thought_log: Vec<ThoughtLogEntry>,
     pub(crate) thought_filter: ThoughtFilter,
     pub(crate) thought_group_by: ThoughtGroupBy,
+    pub(crate) thought_show_all: bool,
     pub(crate) last_logged_thoughts: HashMap<String, ThoughtFingerprint>,
     session_mermaid_cache: HashMap<String, MermaidCacheEntry>,
     session_repo_theme_cache: HashMap<String, RepoThemeCacheEntry>,
@@ -228,6 +229,7 @@ impl<C: TuiApi> App<C> {
             thought_log: Vec::new(),
             thought_filter: ThoughtFilter::default(),
             thought_group_by: ThoughtGroupBy::default(),
+            thought_show_all: false,
             last_logged_thoughts: HashMap::new(),
             session_mermaid_cache: HashMap::new(),
             session_repo_theme_cache: HashMap::new(),
@@ -841,6 +843,16 @@ impl<C: TuiApi> App<C> {
         ));
     }
 
+    pub(crate) fn toggle_thought_show_all(&mut self) {
+        self.thought_show_all = !self.thought_show_all;
+        let mode = if self.thought_show_all {
+            "showing all agents"
+        } else {
+            "showing asleep agents"
+        };
+        self.set_message(format!("clawgs rail {mode}"));
+    }
+
     pub(crate) fn clear_thought_filters(&mut self) {
         self.thought_filter.clear();
         self.reconcile_selection();
@@ -1012,7 +1024,6 @@ impl<C: TuiApi> App<C> {
             entry.state = session.state;
             entry.current_command = session.current_command.clone();
             entry.tool = session.tool.clone();
-            entry.thought_state = session.thought_state;
             entry.rest_state = session.rest_state;
             entry.color = session_display_color(session, &self.repo_themes);
             entry.is_stale = session.is_stale;
@@ -2595,21 +2606,9 @@ impl<C: TuiApi> App<C> {
         x: u16,
         y: u16,
         thought_content: Rect,
-        _entry_capacity: usize,
+        entry_capacity: usize,
     ) {
-        let (clawgs_rect, plans_rect) =
-            split_rail_for_plans(thought_content, self.cached_plans.len());
-        if let Some(plans_rect) = plans_rect {
-            if plans_rect.contains(x, y) {
-                let plans_layout = build_plans_panel(&self.cached_plans, plans_rect);
-                if let Some(action) = plans_panel_action_at(&plans_layout, x, y) {
-                    self.apply_thought_filter_action(action);
-                }
-                return;
-            }
-        }
-        let clawgs_capacity = clawgs_rect.height.saturating_sub(THOUGHT_RAIL_HEADER_ROWS) as usize;
-        if let Some(action) = thought_panel_action_at(self, clawgs_rect, clawgs_capacity, x, y) {
+        if let Some(action) = thought_panel_action_at(self, thought_content, entry_capacity, x, y) {
             self.apply_thought_filter_action(action);
         }
     }
@@ -3409,15 +3408,12 @@ impl<C: TuiApi> App<C> {
                     divider_color,
                 );
             }
-            let (clawgs_rect, plans_rect) =
-                split_rail_for_plans(thought_content, self.cached_plans.len());
-            let clawgs_capacity =
-                clawgs_rect.height.saturating_sub(THOUGHT_RAIL_HEADER_ROWS) as usize;
-            render_thought_panel(self, renderer, clawgs_rect, clawgs_capacity);
-            if let Some(plans_rect) = plans_rect {
-                let plans_layout = build_plans_panel(&self.cached_plans, plans_rect);
-                render_plans_panel(renderer, plans_rect, &plans_layout);
-            }
+            render_thought_panel(
+                self,
+                renderer,
+                thought_content,
+                layout.thought_entry_capacity(),
+            );
         }
 
         match &mut self.fish_bowl_mode {

@@ -2,6 +2,7 @@ use super::*;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 const THOUGHT_COMMIT_LABEL: &str = "[commit]";
+const THOUGHT_PLANS_LABEL: &str = "[plans]";
 
 pub(crate) struct ThoughtFingerprint {
     pub(crate) thought: String,
@@ -19,13 +20,11 @@ pub(crate) struct ThoughtLogEntry {
     pub(crate) current_command: Option<String>,
     pub(crate) tool: Option<String>,
     pub(crate) thought: String,
-    pub(crate) thought_state: ThoughtState,
     pub(crate) updated_at: Option<DateTime<Utc>>,
     pub(crate) rest_state: RestState,
     pub(crate) color: Color,
     pub(crate) is_stale: bool,
     pub(crate) transport_health: TransportHealth,
-    pub(crate) objective_changed: bool,
     pub(crate) commit_candidate: bool,
 }
 
@@ -45,14 +44,11 @@ impl ThoughtLogEntry {
             current_command: session.current_command.clone(),
             tool: session.tool.clone(),
             thought,
-            thought_state: session.thought_state,
             updated_at: session.thought_updated_at,
             rest_state: session.rest_state,
             color: session_display_color(session, repo_themes),
             is_stale: session.is_stale,
             transport_health: session.transport_health,
-            objective_changed: session.objective_changed_at.is_some()
-                && session.objective_changed_at == session.thought_updated_at,
             commit_candidate: session.commit_candidate,
         }
     }
@@ -175,29 +171,6 @@ pub(crate) enum ThoughtPanelAction {
     ClearFilters,
 }
 
-/// How many rows at the bottom of the clawgs rail are reserved for the plans list.
-/// Includes a 1-row header + plan rows. The plans list consumes from bottom-up
-/// so the clawgs list shrinks by exactly this much.
-pub(crate) const PLANS_PANE_MIN_HEIGHT: u16 = 3;
-pub(crate) const PLANS_PANE_MAX_HEIGHT: u16 = 14;
-pub(crate) const PLANS_PANE_HEADER_ROWS: u16 = 1;
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct PlanRowLayout {
-    pub(crate) rect: Rect,
-    pub(crate) schema_path: String,
-    pub(crate) slug: String,
-    pub(crate) display: String,
-    pub(crate) color: Color,
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub(crate) struct PlansPanelLayout {
-    pub(crate) header_rect: Option<Rect>,
-    pub(crate) rows: Vec<PlanRowLayout>,
-    pub(crate) empty_message: Option<String>,
-}
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ThoughtChipLayout {
     pub(crate) rect: Rect,
@@ -213,6 +186,9 @@ pub(crate) struct ThoughtRowLayout {
     pub(crate) mermaid_rect: Option<Rect>,
     pub(crate) mermaid_label: Option<String>,
     pub(crate) commit_rect: Option<Rect>,
+    pub(crate) plan_rect: Option<Rect>,
+    pub(crate) plan_schema_path: Option<String>,
+    pub(crate) plan_slug: Option<String>,
     pub(crate) session_id: String,
     pub(crate) label: String,
     pub(crate) tmux_name: String,
@@ -562,67 +538,50 @@ pub(crate) struct ThoughtPanelEntryView {
     pub(crate) current_command: Option<String>,
     pub(crate) tool: Option<String>,
     pub(crate) updated_at: Option<DateTime<Utc>>,
-    pub(crate) thought_state: ThoughtState,
     pub(crate) rest_state: RestState,
     pub(crate) color: Color,
     pub(crate) is_stale: bool,
     pub(crate) transport_health: TransportHealth,
     pub(crate) thought: String,
-    pub(crate) has_objective_shift: bool,
     pub(crate) mermaid_label: Option<String>,
     pub(crate) has_commit_candidate: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ThoughtAttentionStatus {
-    Error,
-    Need,
-    Commit,
-    Shift,
-    Off,
-    Running,
-    Idle,
+enum ThoughtWorkStatus {
+    Working,
+    Stopped,
 }
 
-impl ThoughtAttentionStatus {
+impl ThoughtWorkStatus {
     fn label(self) -> &'static str {
         match self {
-            Self::Error => "[error]",
-            Self::Need => "[need]",
-            Self::Commit => THOUGHT_COMMIT_LABEL,
-            Self::Shift => "[shift]",
-            Self::Off => "[off]",
-            Self::Running => "[run]",
-            Self::Idle => "[idle]",
+            Self::Working => "[work]",
+            Self::Stopped => "[asleep]",
         }
     }
 
     fn sort_rank(self) -> u8 {
         match self {
-            Self::Idle => 0,
-            Self::Off => 1,
-            Self::Running => 2,
-            Self::Shift => 3,
-            Self::Commit => 4,
-            Self::Need | Self::Error => 5,
+            Self::Working => 0,
+            Self::Stopped => 1,
         }
     }
 }
 
-fn thought_attention_status(entry: &ThoughtPanelEntryView) -> ThoughtAttentionStatus {
-    match entry.state {
-        SessionState::Error => ThoughtAttentionStatus::Error,
-        SessionState::Attention => ThoughtAttentionStatus::Need,
-        _ if entry.has_commit_candidate => ThoughtAttentionStatus::Commit,
-        _ if entry.has_objective_shift => ThoughtAttentionStatus::Shift,
-        SessionState::Exited => ThoughtAttentionStatus::Off,
-        _ if entry.is_stale || entry.transport_health == TransportHealth::Disconnected => {
-            ThoughtAttentionStatus::Off
-        }
-        SessionState::Busy => ThoughtAttentionStatus::Running,
-        _ if entry.thought_state == ThoughtState::Active => ThoughtAttentionStatus::Running,
-        _ => ThoughtAttentionStatus::Idle,
+fn thought_work_status(entry: &ThoughtPanelEntryView) -> ThoughtWorkStatus {
+    if thought_entry_is_stopped(entry) {
+        ThoughtWorkStatus::Stopped
+    } else {
+        ThoughtWorkStatus::Working
     }
+}
+
+pub(crate) fn thought_entry_is_stopped(entry: &ThoughtPanelEntryView) -> bool {
+    entry.state == SessionState::Exited
+        || entry.is_stale
+        || entry.transport_health == TransportHealth::Disconnected
+        || matches!(entry.rest_state, RestState::Sleeping | RestState::DeepSleep)
 }
 
 pub(crate) const DARK_TERMINAL_BG_RGB: (u8, u8, u8) = (0x11, 0x11, 0x11);
@@ -757,9 +716,9 @@ pub(crate) fn compare_thought_panel_entries(
     left: &ThoughtPanelEntryView,
     right: &ThoughtPanelEntryView,
 ) -> Ordering {
-    thought_attention_status(left)
+    thought_work_status(left)
         .sort_rank()
-        .cmp(&thought_attention_status(right).sort_rank())
+        .cmp(&thought_work_status(right).sort_rank())
         .then_with(|| {
             left.updated_at
                 .cmp(&right.updated_at)
@@ -790,13 +749,11 @@ pub(crate) fn build_thought_panel_entries<C: TuiApi>(app: &App<C>) -> Vec<Though
             current_command: entry.current_command.clone(),
             tool: entry.tool.clone(),
             updated_at: entry.updated_at,
-            thought_state: entry.thought_state,
             rest_state: entry.rest_state,
             color: app.thought_entry_display_color(entry),
             is_stale: entry.is_stale,
             transport_health: entry.transport_health,
             thought: entry.thought.replace('\n', " "),
-            has_objective_shift: entry.objective_changed,
             mermaid_label: app
                 .mermaid_artifacts
                 .get(&entry.session_id)
@@ -824,7 +781,6 @@ pub(crate) fn build_thought_panel_entries<C: TuiApi>(app: &App<C>) -> Vec<Though
             current_command: entity.session.current_command.clone(),
             tool: entity.session.tool.clone(),
             updated_at: artifact.and_then(|artifact| artifact.updated_at),
-            thought_state: entity.session.thought_state,
             rest_state: entity.session.rest_state,
             color: session_display_color(&entity.session, &app.repo_themes),
             is_stale: entity.session.is_stale,
@@ -838,7 +794,6 @@ pub(crate) fn build_thought_panel_entries<C: TuiApi>(app: &App<C>) -> Vec<Though
                     }
                 },
             ),
-            has_objective_shift: false,
             mermaid_label: artifact
                 .filter(|artifact| artifact.available)
                 .map(|artifact| mermaid_badge_label(artifact.slice_name.as_deref())),
@@ -907,10 +862,87 @@ pub(crate) fn build_thought_groups(
     groups
 }
 
-fn group_header_row(group: &ThoughtGroup, thought_content: Rect) -> ThoughtRowLayout {
-    let label = format!("v {} ({})", group.label, group.entries.len());
+fn plan_key(value: &str) -> String {
+    value.trim().to_ascii_lowercase().replace(['_', ' '], "-")
+}
+
+fn cached_plan_for_group(
+    group_by: ThoughtGroupBy,
+    group: &ThoughtGroup,
+    plans: &[PlanPanelEntry],
+) -> Option<PlanPanelEntry> {
+    if group_by != ThoughtGroupBy::Pwd {
+        return None;
+    }
+    let group_key = plan_key(&group.label);
+    plans
+        .iter()
+        .find(|plan| plan_key(&plan.client_label) == group_key || plan_key(&plan.slug) == group_key)
+        .cloned()
+}
+
+fn artifact_plan_for_group<C: TuiApi>(
+    app: &App<C>,
+    group_by: ThoughtGroupBy,
+    group: &ThoughtGroup,
+) -> Option<PlanPanelEntry> {
+    if group_by != ThoughtGroupBy::Pwd {
+        return None;
+    }
+    group.entries.iter().rev().find_map(|entry| {
+        let artifact = app.mermaid_artifacts.get(&entry.session_id)?;
+        if !artifact.available {
+            return None;
+        }
+        let schema_path = artifact.path.as_deref()?;
+        let slug = artifact
+            .slice_name
+            .as_deref()
+            .or_else(|| swimmers::session::artifacts::extract_mmd_slice_name(schema_path))?;
+        Some(PlanPanelEntry {
+            slug: slug.to_string(),
+            client_label: group.label.clone(),
+            kind: "session".to_string(),
+            schema_path: schema_path.to_string(),
+        })
+    })
+}
+
+fn plan_for_group<C: TuiApi>(
+    app: &App<C>,
+    group_by: ThoughtGroupBy,
+    group: &ThoughtGroup,
+) -> Option<PlanPanelEntry> {
+    artifact_plan_for_group(app, group_by, group)
+        .or_else(|| cached_plan_for_group(group_by, group, &app.cached_plans))
+}
+
+fn group_header_row<C: TuiApi>(
+    app: &App<C>,
+    group: &ThoughtGroup,
+    group_by: ThoughtGroupBy,
+    thought_content: Rect,
+) -> ThoughtRowLayout {
+    let plan = plan_for_group(app, group_by, group);
+    let base_label = format!("v {} ({})", group.label, group.entries.len());
+    let label = if plan.is_some() {
+        format!("{base_label} {THOUGHT_PLANS_LABEL}")
+    } else {
+        base_label.clone()
+    };
+    let plan_start = plan
+        .as_ref()
+        .map(|_| display_width(&base_label).saturating_add(1));
     let line = truncate_label(&label, thought_content.width as usize);
     let width = display_width(&line);
+    let plan_rect = plan_start.and_then(|start| {
+        visible_segment_rect(
+            thought_content.x,
+            start,
+            display_width(THOUGHT_PLANS_LABEL),
+            width,
+        )
+    });
     ThoughtRowLayout {
         session_rect: None,
         text_rect: (width > 0).then_some(Rect {
@@ -922,6 +954,9 @@ fn group_header_row(group: &ThoughtGroup, thought_content: Rect) -> ThoughtRowLa
         mermaid_rect: None,
         mermaid_label: None,
         commit_rect: None,
+        plan_rect,
+        plan_schema_path: plan.as_ref().map(|plan| plan.schema_path.clone()),
+        plan_slug: plan.as_ref().map(|plan| plan.slug.clone()),
         session_id: String::new(),
         label: group.label.clone(),
         tmux_name: String::new(),
@@ -994,9 +1029,10 @@ pub(crate) fn build_rows_for_panel_entry(
 ) -> Vec<ThoughtRowLayout> {
     let session_label = thought_session_click_label(&entry.label);
     let session_width = display_width(&session_label);
-    let status = thought_attention_status(entry);
+    let status = thought_work_status(entry);
     let status_label = status.label();
     let status_width = display_width(status_label);
+    let commit_width = display_width(THOUGHT_COMMIT_LABEL);
     let mermaid_width = entry
         .mermaid_label
         .as_deref()
@@ -1021,6 +1057,15 @@ pub(crate) fn build_rows_for_panel_entry(
     line.push(' ');
     cursor = cursor.saturating_add(1);
 
+    let commit_start = entry.has_commit_candidate.then(|| {
+        let start = cursor;
+        line.push_str(THOUGHT_COMMIT_LABEL);
+        cursor = cursor.saturating_add(commit_width);
+        line.push(' ');
+        cursor = cursor.saturating_add(1);
+        start
+    });
+
     let session_start = cursor;
     line.push_str(&session_label);
 
@@ -1034,11 +1079,11 @@ pub(crate) fn build_rows_for_panel_entry(
     let mermaid_rect = mermaid_start.and_then(|start| {
         visible_segment_rect(thought_content.x, start, mermaid_width, visible_width)
     });
-    let commit_rect = if status == ThoughtAttentionStatus::Commit {
-        visible_segment_rect(thought_content.x, status_start, status_width, visible_width)
-    } else {
-        None
-    };
+    let _status_rect =
+        visible_segment_rect(thought_content.x, status_start, status_width, visible_width);
+    let commit_rect = commit_start.and_then(|start| {
+        visible_segment_rect(thought_content.x, start, commit_width, visible_width)
+    });
     let session_rect = visible_segment_rect(
         thought_content.x,
         session_start,
@@ -1057,6 +1102,9 @@ pub(crate) fn build_rows_for_panel_entry(
         mermaid_rect,
         mermaid_label: entry.mermaid_label.clone(),
         commit_rect,
+        plan_rect: None,
+        plan_schema_path: None,
+        plan_slug: None,
         session_id: entry.session_id.clone(),
         label: entry.label.clone(),
         tmux_name: entry.tmux_name.clone(),
@@ -1081,6 +1129,9 @@ pub(crate) fn build_rows_for_panel_entry(
             mermaid_rect: None,
             mermaid_label: None,
             commit_rect: None,
+            plan_rect: None,
+            plan_schema_path: None,
+            plan_slug: None,
             session_id: entry.session_id.clone(),
             label: entry.label.clone(),
             tmux_name: entry.tmux_name.clone(),
@@ -1090,6 +1141,37 @@ pub(crate) fn build_rows_for_panel_entry(
     }
 
     rows
+}
+
+pub(crate) fn thought_panel_stopped_counts<C: TuiApi>(app: &App<C>) -> (usize, usize) {
+    let entries = build_thought_panel_entries(app);
+    let stopped = entries
+        .iter()
+        .filter(|entry| thought_entry_is_stopped(entry))
+        .count();
+    (stopped, entries.len())
+}
+
+pub(crate) fn thought_panel_header<C: TuiApi>(app: &App<C>) -> String {
+    let (stopped, total) = thought_panel_stopped_counts(app);
+    let scope = if app.thought_show_all {
+        "all"
+    } else {
+        "asleep"
+    };
+    let toggle = if app.thought_show_all {
+        "> asleep"
+    } else {
+        "> all"
+    };
+    format!(
+        "clawgs / {} / {} · {}/{} asleep · {}",
+        app.thought_group_by.label(),
+        scope,
+        stopped,
+        total,
+        toggle
+    )
 }
 
 pub(crate) fn render_thought_panel<C: TuiApi>(
@@ -1107,10 +1189,7 @@ pub(crate) fn render_thought_panel<C: TuiApi>(
     renderer.draw_text(
         thought_content.x,
         thought_content.y,
-        &truncate_label(
-            &format!("clawgs / {}", app.thought_group_by.label()),
-            thought_content.width as usize,
-        ),
+        &truncate_label(&thought_panel_header(app), thought_content.width as usize),
         Color::Cyan,
     );
 
@@ -1136,11 +1215,19 @@ pub(crate) fn render_thought_panel<C: TuiApi>(
         if let (Some(rect), Some(label)) = (row.mermaid_rect, &row.mermaid_label) {
             renderer.draw_text(rect.x, y, label, row.color);
         }
+        if let Some(rect) = row.text_rect {
+            renderer.draw_text(rect.x, y, &row.line, row.color);
+        }
         if let Some(rect) = row.commit_rect {
             renderer.draw_text(rect.x, y, THOUGHT_COMMIT_LABEL, row.color);
         }
-        if let Some(rect) = row.text_rect {
-            renderer.draw_text(rect.x, y, &row.line, row.color);
+        if let Some(rect) = row.plan_rect {
+            renderer.draw_text(
+                rect.x,
+                y,
+                &truncate_label(THOUGHT_PLANS_LABEL, rect.width as usize),
+                Color::Cyan,
+            );
         }
     }
 }
@@ -1154,11 +1241,22 @@ pub(crate) fn build_thought_panel<C: TuiApi>(
         return ThoughtPanelLayout::default();
     }
 
-    let entries = build_thought_panel_entries(app);
+    let all_entries = build_thought_panel_entries(app);
+    let total_count = all_entries.len();
+    let entries = if app.thought_show_all {
+        all_entries
+    } else {
+        all_entries
+            .into_iter()
+            .filter(thought_entry_is_stopped)
+            .collect::<Vec<_>>()
+    };
     let empty_message = if entry_capacity == 0 {
         None
     } else if entries.is_empty() {
-        Some(if app.thought_filter.is_active() {
+        Some(if !app.thought_show_all && total_count > 0 {
+            format!("0 asleep / {total_count} working")
+        } else if app.thought_filter.is_active() {
             "no thoughts match filters".to_string()
         } else {
             "waiting for clawgs...".to_string()
@@ -1167,13 +1265,8 @@ pub(crate) fn build_thought_panel<C: TuiApi>(
         None
     };
 
-    let rows = if should_group_thought_entries(app.thought_group_by, &entries) {
-        build_grouped_rows(
-            &entries,
-            app.thought_group_by,
-            thought_content,
-            entry_capacity,
-        )
+    let rows = if should_group_thought_entries(app, &entries) {
+        build_grouped_rows(&entries, app, thought_content, entry_capacity)
     } else {
         build_flat_rows(&entries, thought_content, entry_capacity)
     };
@@ -1184,13 +1277,17 @@ pub(crate) fn build_thought_panel<C: TuiApi>(
     }
 }
 
-fn should_group_thought_entries(
-    group_by: ThoughtGroupBy,
+fn should_group_thought_entries<C: TuiApi>(
+    app: &App<C>,
     entries: &[ThoughtPanelEntryView],
 ) -> bool {
+    let group_by = app.thought_group_by;
     let groups = build_thought_groups(entries, group_by);
     groups.len() > 1
         || (group_by == ThoughtGroupBy::Batch && entries.iter().any(|entry| entry.batch.is_some()))
+        || groups
+            .iter()
+            .any(|group| plan_for_group(app, group_by, group).is_some())
 }
 
 fn build_flat_rows(
@@ -1219,9 +1316,9 @@ fn build_flat_rows(
     rows_rev
 }
 
-fn build_grouped_rows(
+fn build_grouped_rows<C: TuiApi>(
     entries: &[ThoughtPanelEntryView],
-    group_by: ThoughtGroupBy,
+    app: &App<C>,
     thought_content: Rect,
     entry_capacity: usize,
 ) -> Vec<ThoughtRowLayout> {
@@ -1229,10 +1326,15 @@ fn build_grouped_rows(
         return Vec::new();
     }
 
-    let groups = build_thought_groups(entries, group_by);
+    let groups = build_thought_groups(entries, app.thought_group_by);
     let mut rows = Vec::new();
     for group in &groups {
-        rows.push(group_header_row(group, thought_content));
+        rows.push(group_header_row(
+            app,
+            group,
+            app.thought_group_by,
+            thought_content,
+        ));
         for entry in &group.entries {
             rows.extend(build_rows_for_panel_entry(entry, thought_content));
         }
@@ -1242,163 +1344,12 @@ fn build_grouped_rows(
     rows[start..].to_vec()
 }
 
-/// How many rows the plans pane would consume given the rail's total height.
-///
-/// The plans pane always reserves at least `PLANS_PANE_MIN_HEIGHT` rows, grows
-/// up to `PLANS_PANE_MAX_HEIGHT`, and never consumes more than ~35% of the rail
-/// so the clawgs stream still has useful room. Returns 0 when the rail is too
-/// short to host plans at all.
-pub(crate) fn plans_pane_height(total_content_height: u16, plan_count: usize) -> u16 {
-    if total_content_height < PLANS_PANE_MIN_HEIGHT + 3 {
-        return 0;
-    }
-    let content_budget = (total_content_height as usize).saturating_mul(35) / 100;
-    let desired = (PLANS_PANE_HEADER_ROWS as usize).saturating_add(plan_count.max(1)) + 1; /* empty-state row */
-    let want = desired
-        .min(PLANS_PANE_MAX_HEIGHT as usize)
-        .min(content_budget);
-    want.max(PLANS_PANE_MIN_HEIGHT as usize) as u16
-}
-
-/// Split the rail's inner rect into (clawgs_rect, plans_rect). Returns `None`
-/// for `plans_rect` when there are no plans to show or the rail is too short.
-pub(crate) fn split_rail_for_plans(
-    thought_content: Rect,
-    plan_count: usize,
-) -> (Rect, Option<Rect>) {
-    if plan_count == 0 {
-        return (thought_content, None);
-    }
-    let plans_height = plans_pane_height(thought_content.height, plan_count);
-    if plans_height == 0 {
-        return (thought_content, None);
-    }
-    let clawgs_height = thought_content.height.saturating_sub(plans_height);
-    let clawgs = Rect {
-        x: thought_content.x,
-        y: thought_content.y,
-        width: thought_content.width,
-        height: clawgs_height,
-    };
-    let plans = Rect {
-        x: thought_content.x,
-        y: thought_content.y + clawgs_height,
-        width: thought_content.width,
-        height: plans_height,
-    };
-    (clawgs, Some(plans))
-}
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct PlanPanelEntry {
     pub(crate) slug: String,
     pub(crate) client_label: String,
     pub(crate) kind: String, // "released" | "draft"
     pub(crate) schema_path: String,
-}
-
-pub(crate) fn build_plans_panel(plans: &[PlanPanelEntry], plans_rect: Rect) -> PlansPanelLayout {
-    if plans_rect.width == 0 || plans_rect.height == 0 {
-        return PlansPanelLayout::default();
-    }
-    let header_rect = Some(Rect {
-        x: plans_rect.x,
-        y: plans_rect.y,
-        width: plans_rect.width,
-        height: 1,
-    });
-    let row_capacity = plans_rect.height.saturating_sub(PLANS_PANE_HEADER_ROWS) as usize;
-    if row_capacity == 0 {
-        return PlansPanelLayout {
-            header_rect,
-            rows: Vec::new(),
-            empty_message: None,
-        };
-    }
-    if plans.is_empty() {
-        return PlansPanelLayout {
-            header_rect,
-            rows: Vec::new(),
-            empty_message: Some("no plans found".to_string()),
-        };
-    }
-
-    let mut rows = Vec::new();
-    let width = plans_rect.width as usize;
-    let base_y = plans_rect.y + PLANS_PANE_HEADER_ROWS;
-    for (i, plan) in plans.iter().take(row_capacity).enumerate() {
-        let kind_suffix = if plan.kind == "draft" { " (draft)" } else { "" };
-        let raw = format!("{} · {}{}", plan.slug, plan.client_label, kind_suffix);
-        let display = truncate_label(&raw, width);
-        let color = if plan.kind == "draft" {
-            Color::DarkGrey
-        } else {
-            Color::Cyan
-        };
-        rows.push(PlanRowLayout {
-            rect: Rect {
-                x: plans_rect.x,
-                y: base_y + i as u16,
-                width: display_width(&display) as u16,
-                height: 1,
-            },
-            schema_path: plan.schema_path.clone(),
-            slug: plan.slug.clone(),
-            display,
-            color,
-        });
-    }
-    PlansPanelLayout {
-        header_rect,
-        rows,
-        empty_message: None,
-    }
-}
-
-pub(crate) fn render_plans_panel(
-    renderer: &mut Renderer,
-    plans_rect: Rect,
-    layout: &PlansPanelLayout,
-) {
-    if plans_rect.width == 0 || plans_rect.height == 0 {
-        return;
-    }
-    if let Some(header) = layout.header_rect {
-        renderer.draw_text(
-            header.x,
-            header.y,
-            &truncate_label("plans", header.width as usize),
-            Color::Yellow,
-        );
-    }
-    if let Some(message) = layout.empty_message.as_deref() {
-        renderer.draw_text(
-            plans_rect.x,
-            plans_rect.y + PLANS_PANE_HEADER_ROWS,
-            &truncate_label(message, plans_rect.width as usize),
-            Color::DarkGrey,
-        );
-        return;
-    }
-    for row in &layout.rows {
-        renderer.draw_text(row.rect.x, row.rect.y, &row.display, row.color);
-    }
-}
-
-pub(crate) fn plans_panel_action_at(
-    layout: &PlansPanelLayout,
-    x: u16,
-    y: u16,
-) -> Option<ThoughtPanelAction> {
-    for row in &layout.rows {
-        if row.rect.contains(x, y) {
-            return Some(ThoughtPanelAction::OpenPlanFromDisk {
-                schema_path: row.schema_path.clone(),
-                slug: row.slug.clone(),
-            });
-        }
-    }
-    None
 }
 
 pub(crate) fn thought_panel_action_at<C: TuiApi>(
@@ -1432,6 +1383,20 @@ pub(crate) fn thought_panel_action_at<C: TuiApi>(
             width: rect.width,
             height: rect.height,
         });
+        let plan_rect = row.plan_rect.map(|rect| Rect {
+            x: rect.x,
+            y: row_start_y + offset as u16,
+            width: rect.width,
+            height: rect.height,
+        });
+        if plan_rect.map(|rect| rect.contains(x, y)).unwrap_or(false) {
+            if let (Some(schema_path), Some(slug)) = (&row.plan_schema_path, &row.plan_slug) {
+                return Some(ThoughtPanelAction::OpenPlanFromDisk {
+                    schema_path: schema_path.clone(),
+                    slug: slug.clone(),
+                });
+            }
+        }
         if commit_rect.map(|rect| rect.contains(x, y)).unwrap_or(false) {
             return Some(ThoughtPanelAction::LaunchCommitCodex(
                 row.session_id.clone(),
@@ -1455,113 +1420,4 @@ pub(crate) fn thought_panel_action_at<C: TuiApi>(
     }
 
     None
-}
-
-#[cfg(test)]
-mod plans_panel_tests {
-    use super::*;
-
-    fn entry(slug: &str, client: &str, kind: &str, schema: &str) -> PlanPanelEntry {
-        PlanPanelEntry {
-            slug: slug.to_string(),
-            client_label: client.to_string(),
-            kind: kind.to_string(),
-            schema_path: schema.to_string(),
-        }
-    }
-
-    #[test]
-    fn split_rail_carves_bottom_band_when_there_is_room() {
-        let rect = Rect {
-            x: 0,
-            y: 0,
-            width: 40,
-            height: 30,
-        };
-        let (clawgs, plans) = split_rail_for_plans(rect, 5);
-        let plans = plans.expect("plans pane should be visible");
-        assert_eq!(clawgs.x, 0);
-        assert_eq!(clawgs.y, 0);
-        assert_eq!(plans.x, 0);
-        assert_eq!(plans.y, clawgs.height);
-        assert_eq!(clawgs.height + plans.height, rect.height);
-        assert!(plans.height >= PLANS_PANE_MIN_HEIGHT);
-    }
-
-    #[test]
-    fn split_rail_hides_plans_when_rail_too_short() {
-        let rect = Rect {
-            x: 0,
-            y: 0,
-            width: 40,
-            height: 4,
-        };
-        let (clawgs, plans) = split_rail_for_plans(rect, 5);
-        assert!(plans.is_none());
-        assert_eq!(clawgs, rect);
-    }
-
-    #[test]
-    fn build_plans_panel_lists_entries() {
-        let rect = Rect {
-            x: 2,
-            y: 3,
-            width: 30,
-            height: 6,
-        };
-        let plans = vec![
-            entry("alpha", "personal", "released", "/tmp/alpha/schema.mmd"),
-            entry("beta", "clawgs", "draft", "/tmp/beta/schema.mmd"),
-        ];
-        let layout = build_plans_panel(&plans, rect);
-        assert_eq!(layout.rows.len(), 2);
-        assert!(layout.rows[0].display.starts_with("alpha"));
-        assert!(layout.rows[1].display.contains("(draft)"));
-        let header = layout.header_rect.expect("header rect");
-        assert_eq!(header.y, rect.y);
-    }
-
-    #[test]
-    fn split_rail_hides_plans_when_list_is_empty() {
-        let rect = Rect {
-            x: 0,
-            y: 0,
-            width: 40,
-            height: 30,
-        };
-        let (clawgs, plans) = split_rail_for_plans(rect, 0);
-        assert_eq!(clawgs, rect);
-        assert!(plans.is_none());
-    }
-
-    #[test]
-    fn plans_panel_click_returns_open_plan_action() {
-        let rect = Rect {
-            x: 0,
-            y: 0,
-            width: 40,
-            height: 6,
-        };
-        let plans = vec![entry(
-            "alpha",
-            "personal",
-            "released",
-            "/tmp/alpha/schema.mmd",
-        )];
-        let layout = build_plans_panel(&plans, rect);
-        let row = &layout.rows[0];
-        let action = plans_panel_action_at(&layout, row.rect.x + 1, row.rect.y)
-            .expect("action for plan row");
-        match action {
-            ThoughtPanelAction::OpenPlanFromDisk { schema_path, slug } => {
-                assert_eq!(schema_path, "/tmp/alpha/schema.mmd");
-                assert_eq!(slug, "alpha");
-            }
-            other => panic!("unexpected action: {other:?}"),
-        }
-
-        // Click outside any row returns None.
-        let miss = plans_panel_action_at(&layout, 0, rect.y); // header row
-        assert!(miss.is_none());
-    }
 }

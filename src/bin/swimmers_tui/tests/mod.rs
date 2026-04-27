@@ -680,26 +680,32 @@ impl CommitLauncher for MockCommitLauncher {
 }
 
 fn make_app(api: MockApi) -> App<MockApi> {
-    App::new(test_runtime(), api)
+    let mut app = App::new(test_runtime(), api);
+    app.thought_show_all = true;
+    app
 }
 
 fn make_app_with_artifact_opener(
     api: MockApi,
     artifact_opener: Arc<dyn ArtifactOpener>,
 ) -> App<MockApi> {
-    App::with_artifact_opener(test_runtime(), api, artifact_opener)
+    let mut app = App::with_artifact_opener(test_runtime(), api, artifact_opener);
+    app.thought_show_all = true;
+    app
 }
 
 fn make_app_with_commit_launcher(
     api: MockApi,
     commit_launcher: Arc<dyn CommitLauncher>,
 ) -> App<MockApi> {
-    App::with_helpers(
+    let mut app = App::with_helpers(
         test_runtime(),
         api,
         Arc::new(SystemArtifactOpener),
         commit_launcher,
-    )
+    );
+    app.thought_show_all = true;
+    app
 }
 
 fn test_http_client(timeout: Duration) -> Client {
@@ -2951,7 +2957,7 @@ fn refresh_prunes_exited_sessions_from_thought_timeline_and_header_filter_chips(
             .iter()
             .map(|row| row.line.as_str())
             .collect::<Vec<_>>(),
-        vec!["[run] [skills/9] codex", "  indexing docs"]
+        vec!["[work] [skills/9] codex", "  indexing docs"]
     );
 }
 
@@ -3060,12 +3066,12 @@ fn render_header_filter_strip_shows_repo_chips_and_thought_rows() {
             .collect::<Vec<_>>(),
         vec![
             "v swimmers (2)",
-            "[run] [swimmers/7] codex",
+            "[work] [swimmers/7] codex",
             "  patching tui",
-            "[run] [swimmers/2] codex",
+            "[work] [swimmers/2] codex",
             "  wiring filter state",
             "v skills (1)",
-            "[run] [skills/9] codex",
+            "[work] [skills/9] codex",
             "  indexing docs",
         ]
     );
@@ -3551,7 +3557,7 @@ fn wrapped_latest_thought_stays_bottom_aligned() {
             .iter()
             .map(|row| row.line.as_str())
             .collect::<Vec<_>>(),
-        vec!["[run] [swim~", "  older", "[run] [swim~", "  latest th~"]
+        vec!["[work] [swi~", "  older", "[work] [swi~", "  latest th~"]
     );
     assert_eq!(
         panel.rows.last().map(|row| row.line.as_str()),
@@ -3588,7 +3594,7 @@ fn clicking_wrapped_thought_session_label_opens_that_session() {
     let row_start_y = thought_content
         .bottom()
         .saturating_sub(panel.rows.len() as u16);
-    assert_eq!(panel.rows[0].line, "[run] [swim~");
+    assert_eq!(panel.rows[0].line, "[work] [swi~");
     let session_rect = panel.rows[0]
         .session_rect
         .expect("truncated session label should remain clickable");
@@ -7250,11 +7256,261 @@ fn thought_panel_groups_by_pwd_by_default() {
             .collect::<Vec<_>>(),
         vec![
             "v swimmers (1)",
-            "[run] [swimmers/7] codex",
+            "[work] [swimmers/7] codex",
             "  patching rail",
             "v skills (1)",
-            "[run] [skills/9] codex",
+            "[work] [skills/9] codex",
             "  checking docs",
+        ]
+    );
+}
+
+#[test]
+fn thought_panel_places_plans_action_on_matching_pwd_group_header() {
+    let api = MockApi::new();
+    let layout = test_layout(120, 32);
+    let thought_content = layout
+        .thought_content
+        .expect("wide layout enables thought rail");
+    let mut app = make_app(api);
+    app.cached_plans = vec![PlanPanelEntry {
+        slug: "agent-billing".to_string(),
+        client_label: "swimmers".to_string(),
+        kind: "released".to_string(),
+        schema_path: "/tmp/plans/agent-billing/schema.mmd".to_string(),
+    }];
+
+    let session = session_summary_with_thought(
+        "sess-swimmers",
+        "7",
+        TEST_REPO_SWIMMERS,
+        "patching rail",
+        "2026-03-08T14:00:05Z",
+    );
+    app.capture_thought_updates(&[session], layout.thought_entry_capacity());
+
+    let panel = build_thought_panel(&app, thought_content, layout.thought_entry_capacity());
+    assert_eq!(
+        panel
+            .rows
+            .iter()
+            .map(|row| row.line.as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            "v swimmers (1) [plans]",
+            "[work] [swimmers/7] codex",
+            "  patching rail",
+        ]
+    );
+
+    let plan_rect = panel.rows[0].plan_rect.expect("plans badge");
+    let row_y = thought_content
+        .bottom()
+        .saturating_sub(panel.rows.len() as u16);
+    assert_eq!(
+        thought_panel_action_at(
+            &app,
+            thought_content,
+            layout.thought_entry_capacity(),
+            plan_rect.x,
+            row_y,
+        ),
+        Some(ThoughtPanelAction::OpenPlanFromDisk {
+            schema_path: "/tmp/plans/agent-billing/schema.mmd".to_string(),
+            slug: "agent-billing".to_string(),
+        })
+    );
+
+    let mut renderer = test_renderer(120, 32);
+    render_thought_panel(
+        &app,
+        &mut renderer,
+        thought_content,
+        layout.thought_entry_capacity(),
+    );
+    assert_eq!(cell_at(&renderer, plan_rect.x, row_y).ch, '[');
+    assert_eq!(cell_at(&renderer, plan_rect.x, row_y).fg, Color::Cyan);
+}
+
+#[test]
+fn thought_panel_places_plans_action_on_pwd_header_for_live_plan_artifact() {
+    let api = MockApi::new();
+    let layout = test_layout(120, 32);
+    let thought_content = layout
+        .thought_content
+        .expect("wide layout enables thought rail");
+    let mut app = make_app(api);
+    let schema_path = "/tmp/repos/swimmers/plans/draft/agent_billing/schema.mmd";
+
+    let session = session_summary_with_thought(
+        "sess-swimmers",
+        "7",
+        TEST_REPO_SWIMMERS,
+        "done implementing agent billing",
+        "2026-03-08T14:00:05Z",
+    );
+    app.mermaid_artifacts.insert(
+        "sess-swimmers".to_string(),
+        mermaid_artifact(
+            "sess-swimmers",
+            schema_path,
+            "2026-03-08T14:00:06Z",
+            "graph TD\nA-->B\n",
+        ),
+    );
+    app.capture_thought_updates(&[session], layout.thought_entry_capacity());
+
+    let panel = build_thought_panel(&app, thought_content, layout.thought_entry_capacity());
+    assert_eq!(panel.rows[0].line, "v swimmers (1) [plans]");
+    let plan_rect = panel.rows[0].plan_rect.expect("plans badge");
+    let row_y = thought_content
+        .bottom()
+        .saturating_sub(panel.rows.len() as u16);
+    assert_eq!(
+        thought_panel_action_at(
+            &app,
+            thought_content,
+            layout.thought_entry_capacity(),
+            plan_rect.x,
+            row_y,
+        ),
+        Some(ThoughtPanelAction::OpenPlanFromDisk {
+            schema_path: schema_path.to_string(),
+            slug: "agent_billing".to_string(),
+        })
+    );
+}
+
+#[test]
+fn thought_panel_keeps_plans_action_off_batch_group_headers() {
+    let api = MockApi::new();
+    let layout = test_layout(120, 32);
+    let thought_content = layout
+        .thought_content
+        .expect("wide layout enables thought rail");
+    let mut app = make_app(api);
+    app.thought_group_by = ThoughtGroupBy::Batch;
+    app.cached_plans = vec![PlanPanelEntry {
+        slug: "agent-billing".to_string(),
+        client_label: "swimmers".to_string(),
+        kind: "released".to_string(),
+        schema_path: "/tmp/plans/agent-billing/schema.mmd".to_string(),
+    }];
+
+    let session = with_batch(
+        session_summary_with_thought(
+            "sess-swimmers",
+            "7",
+            TEST_REPO_SWIMMERS,
+            "patching rail",
+            "2026-03-08T14:00:05Z",
+        ),
+        "batch-billing",
+        "agent-billing",
+        0,
+        1,
+    );
+    app.capture_thought_updates(&[session], layout.thought_entry_capacity());
+
+    let panel = build_thought_panel(&app, thought_content, layout.thought_entry_capacity());
+    assert_eq!(panel.rows[0].line, "v agent-billing (1)");
+    assert!(panel.rows[0].plan_rect.is_none());
+}
+
+#[test]
+fn thought_panel_defaults_to_stopped_only_and_counts_sleeping_agents() {
+    let api = MockApi::new();
+    let layout = test_layout(120, 32);
+    let thought_content = layout
+        .thought_content
+        .expect("wide layout enables thought rail");
+    let mut app = App::new(test_runtime(), api);
+
+    let working = session_summary_with_thought(
+        "sess-working",
+        "7",
+        TEST_REPO_SWIMMERS,
+        "patching rail",
+        "2026-03-08T14:00:05Z",
+    );
+    let mut stopped = session_summary_with_thought(
+        "sess-stopped",
+        "9",
+        TEST_REPO_SKILLS,
+        "went quiet",
+        "2026-03-08T14:00:06Z",
+    );
+    stopped.thought_state = ThoughtState::Sleeping;
+    stopped.rest_state = RestState::Sleeping;
+
+    app.capture_thought_updates(&[working, stopped], layout.thought_entry_capacity());
+
+    assert!(!app.thought_show_all);
+    assert_eq!(
+        thought_panel_header(&app),
+        "clawgs / pwd / asleep · 1/2 asleep · > all"
+    );
+
+    let panel = build_thought_panel(&app, thought_content, layout.thought_entry_capacity());
+    assert_eq!(
+        panel
+            .rows
+            .iter()
+            .map(|row| row.line.as_str())
+            .collect::<Vec<_>>(),
+        vec!["[asleep] [skills/9] codex", "  went quiet"]
+    );
+}
+
+#[test]
+fn thought_panel_show_all_toggle_restores_working_agents() {
+    let api = MockApi::new();
+    let layout = test_layout(120, 32);
+    let thought_content = layout
+        .thought_content
+        .expect("wide layout enables thought rail");
+    let mut app = App::new(test_runtime(), api);
+
+    let working = session_summary_with_thought(
+        "sess-working",
+        "7",
+        TEST_REPO_SWIMMERS,
+        "patching rail",
+        "2026-03-08T14:00:05Z",
+    );
+    let mut stopped = session_summary_with_thought(
+        "sess-stopped",
+        "9",
+        TEST_REPO_SKILLS,
+        "went quiet",
+        "2026-03-08T14:00:06Z",
+    );
+    stopped.thought_state = ThoughtState::Sleeping;
+    stopped.rest_state = RestState::Sleeping;
+
+    app.capture_thought_updates(&[working, stopped], layout.thought_entry_capacity());
+    app.toggle_thought_show_all();
+
+    assert!(app.thought_show_all);
+    assert_eq!(
+        thought_panel_header(&app),
+        "clawgs / pwd / all · 1/2 asleep · > asleep"
+    );
+
+    let panel = build_thought_panel(&app, thought_content, layout.thought_entry_capacity());
+    assert_eq!(
+        panel
+            .rows
+            .iter()
+            .map(|row| row.line.as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            "v swimmers (1)",
+            "[work] [swimmers/7] codex",
+            "  patching rail",
+            "v skills (1)",
+            "[asleep] [skills/9] codex",
+            "  went quiet",
         ]
     );
 }
@@ -7314,19 +7570,19 @@ fn thought_panel_groups_by_batch_when_toggled() {
             .collect::<Vec<_>>(),
         vec![
             "v auth-rebuild (2)",
-            "[run] [swimmers/7] codex",
+            "[work] [swimmers/7] codex",
             "  patching rail",
-            "[run] [skills/9] codex",
+            "[work] [skills/9] codex",
             "  checking docs",
             "v unbatched (1)",
-            "[run] [alpha/2] codex",
+            "[work] [alpha/2] codex",
             "  routine update",
         ]
     );
 }
 
 #[test]
-fn objective_shift_entries_render_shift_status_badges() {
+fn objective_shift_entries_stay_working_status_badges() {
     let api = MockApi::new();
     let layout = test_layout(120, 32);
     let thought_content = layout
@@ -7357,7 +7613,7 @@ fn objective_shift_entries_render_shift_status_badges() {
         layout.thought_entry_capacity(),
     );
 
-    assert_eq!(panel.rows[0].line, "[shift] [swimmers/2] codex");
+    assert_eq!(panel.rows[0].line, "[work] [swimmers/2] codex");
     assert_eq!(panel.rows[1].line, "  reframed the plan");
     assert_eq!(text_rect.x, thought_content.x);
     assert_eq!(cell_at(&renderer, thought_content.x, row_y).ch, '[');
@@ -7368,7 +7624,7 @@ fn objective_shift_entries_render_shift_status_badges() {
 }
 
 #[test]
-fn objective_shift_entries_override_timestamp_order_in_the_visible_rail() {
+fn objective_shift_entries_keep_timestamp_order_in_the_visible_rail() {
     let api = MockApi::new();
     let layout = test_layout(120, 32);
     let thought_content = layout
@@ -7399,15 +7655,15 @@ fn objective_shift_entries_override_timestamp_order_in_the_visible_rail() {
     let shift_index = panel
         .rows
         .iter()
-        .position(|row| row.line == "[shift] [alpha/2] codex")
+        .position(|row| row.line == "[work] [alpha/2] codex")
         .expect("shift row");
     let plain_index = panel
         .rows
         .iter()
-        .position(|row| row.line == "[run] [swimmers/9] codex")
+        .position(|row| row.line == "[work] [swimmers/9] codex")
         .expect("plain row");
 
-    assert!(shift_index > plain_index);
+    assert!(plain_index > shift_index);
     assert_eq!(
         panel.rows[shift_index].text_rect.expect("shift row text").x,
         thought_content.x
@@ -7436,7 +7692,7 @@ fn refresh_builds_synthetic_mermaid_row_and_preserves_text_click_behavior() {
 
     let panel = build_thought_panel(&app, thought_content, layout.thought_entry_capacity());
     assert_eq!(panel.rows.len(), 2);
-    assert_eq!(panel.rows[0].line, "[art] [commit] [swimmers/7] codex");
+    assert_eq!(panel.rows[0].line, "[art] [work] [commit] [swimmers/7] ~");
     assert_eq!(panel.rows[1].line, "  artifacts ready");
     let mermaid_rect = panel.rows[0].mermaid_rect.expect("mermaid button");
     let commit_rect = panel.rows[0].commit_rect.expect("commit badge");
@@ -7520,7 +7776,7 @@ fn tagged_thought_rows_render_metadata_above_full_width_body_with_matching_color
             .map(|row| row.line.as_str())
             .collect::<Vec<_>>(),
         vec![
-            "[art] [run] [swimmers/7] codex",
+            "[art] [work] [swimmers/7] codex",
             "  patching the clawgs rail layout",
         ]
     );

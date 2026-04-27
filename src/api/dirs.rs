@@ -471,6 +471,22 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn restart_services_rejects_matched_services_without_commands() {
+        let services = vec![OverlayServiceEntry {
+            name: "svc-no-restart".into(),
+            dir: "alpha".into(),
+            health_url: None,
+            restart: None,
+            open_url: None,
+        }];
+
+        let err = restart_services(&services, &["svc-no-restart".to_string()])
+            .await
+            .expect_err("matched service has no restart command");
+        assert_eq!(err, "matched services have no restart command configured");
+    }
+
+    #[tokio::test]
     async fn restart_services_surfaces_command_failures() {
         let services = vec![OverlayServiceEntry {
             name: "svc-failing".into(),

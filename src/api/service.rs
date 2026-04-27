@@ -267,6 +267,7 @@ pub async fn restart_services(
         return Err("no restartable services mapped for this path".to_string());
     }
 
+    let mut ran_command = false;
     for service in services {
         if !requested.contains(&service.name) {
             continue;
@@ -274,6 +275,7 @@ pub async fn restart_services(
         let Some(cmd) = &service.restart else {
             continue;
         };
+        ran_command = true;
         let output = tokio::time::timeout(
             Duration::from_secs(240),
             Command::new("sh").arg("-c").arg(cmd).output(),
@@ -299,6 +301,10 @@ pub async fn restart_services(
             };
             return Err(format!("{}: {}", service.name, detail));
         }
+    }
+
+    if !ran_command {
+        return Err("matched services have no restart command configured".to_string());
     }
 
     Ok(())

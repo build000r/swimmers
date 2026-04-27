@@ -117,7 +117,7 @@ After `cargo install swimmers`, both `swimmers` and `swimmers-tui` are on your P
 
 3. **Navigate** — arrow keys to select a fish, Enter to open the session in your terminal, `q` to quit the TUI.
 
-To start the same prompt in multiple directories from the TUI, click empty aquarium space to open the directory picker, optionally type to filter the visible rows, choose `[batch visible]`, type the initial request once, and press Enter. The clawgs rail groups by `pwd` by default; press `Tab` to toggle to the batch view.
+To start the same prompt in multiple directories from the TUI, click empty aquarium space to open the directory picker, optionally type to filter the visible rows, choose `[batch visible]`, type the initial request once, and press Enter. The clawgs rail shows asleep agents by default, groups by `pwd`, and reports the asleep/total count; press `Tab` to toggle batch grouping and `>` to show all agents.
 
 ### Experimental voice input
 
@@ -534,7 +534,7 @@ The `SessionActor` monitors each session's PTY output and classifies it into sta
 
 ### What is the thought rail?
 
-A side panel in the TUI that turns AI agent thoughts into an attention board. Each swimmer gets a compact status badge (`[need]`, `[commit]`, `[shift]`, `[run]`, `[idle]`, `[off]`) plus one current objective line, grouped by `pwd` or by batch with `Tab`.
+A side panel in the TUI that answers one question first: which agents stopped working? It shows sleeping/stale/exited agents by default with an asleep/total count, uses `[asleep]` and `[work]` as the primary badges, and keeps the latest objective line under each row. Press `>` to show all agents, or `Tab` to pivot between `pwd` and batch grouping.
 
 ### Is `LocalTrust` auth safe?
 

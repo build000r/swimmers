@@ -518,6 +518,10 @@ pub(crate) fn handle_key_event<C: TuiApi>(
             app.toggle_thought_group_by();
             true
         }
+        KeyCode::Char('>') => {
+            app.toggle_thought_show_all();
+            true
+        }
         KeyCode::Char('t') => {
             app.open_thought_config_editor();
             true
