@@ -196,7 +196,7 @@ impl ClaudeCodeReader {
         let entries = fs::read_dir(&project_dir).ok()?;
         let mut files: Vec<(PathBuf, std::time::SystemTime)> = entries
             .filter_map(|e| e.ok())
-            .filter(|e| e.path().extension().map_or(false, |ext| ext == "jsonl"))
+            .filter(|e| e.path().extension().is_some_and(|ext| ext == "jsonl"))
             .filter(|e| claude_file_matches_cwd(&e.path(), &self.cwd))
             .filter(|e| !self.excluded_paths.contains(&e.path()))
             .filter_map(|e| {
@@ -764,12 +764,8 @@ fn sorted_subdirs_reverse(dir: &Path, pattern: &str) -> Option<Vec<PathBuf>> {
     let entries = fs::read_dir(dir).ok()?;
     let mut dirs: Vec<PathBuf> = entries
         .filter_map(|e| e.ok())
-        .filter(|e| e.file_type().ok().map_or(false, |ft| ft.is_dir()))
-        .filter(|e| {
-            e.file_name()
-                .to_str()
-                .map_or(false, |name| re.is_match(name))
-        })
+        .filter(|e| e.file_type().ok().is_some_and(|ft| ft.is_dir()))
+        .filter(|e| e.file_name().to_str().is_some_and(|name| re.is_match(name)))
         .map(|e| e.path())
         .collect();
     dirs.sort();
@@ -807,10 +803,11 @@ fn extract_tool_detail(block: &Value) -> Option<String> {
         Some(basename(fp).to_string())
     } else if let Some(cmd) = input.get("command").and_then(Value::as_str) {
         Some(truncate(cmd, 80))
-    } else if let Some(pat) = input.get("pattern").and_then(Value::as_str) {
-        Some(pat.to_string())
     } else {
-        None
+        input
+            .get("pattern")
+            .and_then(Value::as_str)
+            .map(|pat| pat.to_string())
     }
 }
 

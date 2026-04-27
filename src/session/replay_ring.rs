@@ -117,11 +117,7 @@ impl ReplayRing {
     pub fn latest_seq(&self) -> u64 {
         // The last assigned seq is next_seq - 1, but if nothing has been pushed yet,
         // return 0 to indicate "no data yet".
-        if self.next_seq <= 1 {
-            0
-        } else {
-            self.next_seq - 1
-        }
+        self.next_seq.saturating_sub(1)
     }
 
     /// The lowest sequence number still retained in the buffer.

@@ -716,6 +716,7 @@ async fn request_replay_cursor(handle: &ActorHandle) -> anyhow::Result<ReplayCur
         .map_err(|_| anyhow::anyhow!("session actor dropped replay cursor"))
 }
 
+#[allow(clippy::result_large_err)]
 fn resolve_ws_auth(config: &Config, token: Option<&str>) -> Result<AuthInfo, Response> {
     match config.auth_mode {
         AuthMode::LocalTrust => Ok(AuthInfo::new(OPERATOR_SCOPES.to_vec())),

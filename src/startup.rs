@@ -210,7 +210,6 @@ pub fn signal_readiness() {
                 tracing::warn!(fd, error = %err, "failed to write readiness signal");
             }
         }
-        return;
     }
 
     #[cfg(not(unix))]

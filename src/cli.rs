@@ -189,11 +189,10 @@ pub fn print_config_table() {
         .max(7);
 
     println!(
-        "{:<nw$}  {:<dw$}  {:<cw$}  {}",
+        "{:<nw$}  {:<dw$}  {:<cw$}  SOURCE",
         "NAME",
         "DEFAULT",
         "CURRENT",
-        "SOURCE",
         nw = name_w,
         dw = default_w,
         cw = current_w,

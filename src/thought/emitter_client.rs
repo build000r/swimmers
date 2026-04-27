@@ -38,7 +38,7 @@ impl DaemonProcess {
                 return Ok(None);
             }
 
-            let trimmed = line.trim_end_matches(|c| c == '\r' || c == '\n').trim();
+            let trimmed = line.trim_end_matches(['\r', '\n']).trim();
             if !trimmed.is_empty() {
                 return Ok(Some(trimmed.to_string()));
             }

@@ -844,6 +844,7 @@ fn is_transient_iterm_open_error(err: &anyhow::Error) -> bool {
             && message.contains("(-2700)"))
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_ghostty_open_script(
     script: &Path,
     session_id: &str,

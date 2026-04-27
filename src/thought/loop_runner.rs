@@ -67,6 +67,7 @@ pub trait SessionProvider: Send + Sync {
     fn session_snapshots(&self) -> impl std::future::Future<Output = Vec<SessionInfo>> + Send;
 
     /// Persist the latest thought snapshot for a session.
+    #[allow(clippy::too_many_arguments)]
     fn persist_thought(
         &self,
         _session_id: &str,

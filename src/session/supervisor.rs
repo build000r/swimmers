@@ -211,6 +211,7 @@ async fn active_pane_session_ids_or_empty(
 
 /// Events emitted by the supervisor when sessions are created or removed.
 #[derive(Debug, Clone)]
+#[allow(clippy::large_enum_variant)]
 pub enum LifecycleEvent {
     Created {
         session_id: String,
@@ -1278,6 +1279,7 @@ impl SessionSupervisor {
     }
 
     /// Persist a thought update for a specific session.
+    #[allow(clippy::too_many_arguments)]
     pub async fn persist_thought(
         &self,
         session_id: &str,
@@ -1960,9 +1962,8 @@ fn ready_process_exit_ids(
     }
 
     seen.iter()
-        .filter_map(|(session_id, first_seen)| {
-            (now.duration_since(*first_seen) >= grace).then(|| session_id.clone())
-        })
+        .filter(|(_, first_seen)| now.duration_since(**first_seen) >= grace)
+        .map(|(session_id, _)| session_id.clone())
         .collect()
 }
 

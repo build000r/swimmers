@@ -62,6 +62,7 @@ impl AuthInfo {
     }
 
     /// Convenience: require a scope or return a 403 error response.
+    #[allow(clippy::result_large_err)]
     pub fn require_scope(&self, scope: AuthScope) -> Result<(), Response> {
         if self.has_scope(scope) {
             Ok(())
@@ -101,6 +102,7 @@ fn forbidden_response() -> Response {
 // Middleware
 // ---------------------------------------------------------------------------
 
+#[allow(clippy::result_large_err)]
 fn token_mode_auth_info(config: &Config, request: &Request) -> Result<AuthInfo, Response> {
     let Some(provided) = extract_bearer_token(request) else {
         return Err(not_authenticated_response());

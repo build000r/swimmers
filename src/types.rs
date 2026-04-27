@@ -5,9 +5,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::thought::runtime_config::{DaemonDefaults, ThoughtConfig};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SessionState {
+    #[default]
     Idle,
     Busy,
     Error,
@@ -15,80 +16,49 @@ pub enum SessionState {
     Exited,
 }
 
-impl Default for SessionState {
-    fn default() -> Self {
-        Self::Idle
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ThoughtState {
     Active,
+    #[default]
     Holding,
     Sleeping,
 }
 
-impl Default for ThoughtState {
-    fn default() -> Self {
-        Self::Holding
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ThoughtSource {
+    #[default]
     CarryForward,
     Llm,
     StaticSleeping,
 }
 
-impl Default for ThoughtSource {
-    fn default() -> Self {
-        Self::CarryForward
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RestState {
+    #[default]
     Active,
     Drowsy,
     Sleeping,
     DeepSleep,
 }
 
-impl Default for RestState {
-    fn default() -> Self {
-        Self::Active
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BubblePrecedence {
+    #[default]
     ThoughtFirst,
 }
 
-impl Default for BubblePrecedence {
-    fn default() -> Self {
-        Self::ThoughtFirst
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TransportHealth {
+    #[default]
     Healthy,
     Degraded,
     Overloaded,
     Disconnected,
-}
-
-impl Default for TransportHealth {
-    fn default() -> Self {
-        Self::Healthy
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -928,7 +898,7 @@ pub fn context_limit_for_tool(tool: Option<&str>) -> u64 {
 }
 
 pub fn detect_tool_name(comm: &str) -> Option<&'static str> {
-    let token = comm.trim().split_whitespace().next().unwrap_or(comm);
+    let token = comm.split_whitespace().next().unwrap_or(comm);
     let token = token.trim_matches(|c: char| {
         c == '"'
             || c == '\''

@@ -253,6 +253,7 @@ impl SessionActor {
     /// tmux session; otherwise creates a new one.
     ///
     /// Returns an `ActorHandle` that callers use to send commands to the actor.
+    #[allow(clippy::too_many_arguments)]
     pub fn spawn(
         session_id: String,
         tmux_name: String,
@@ -1172,7 +1173,7 @@ impl SessionActor {
     }
 
     fn process_completed_input_line(&mut self, line: &str) {
-        let Some(detected_skill) = detect_skill_from_input_line(&line) else {
+        let Some(detected_skill) = detect_skill_from_input_line(line) else {
             return;
         };
 
@@ -1882,7 +1883,7 @@ fn extract_cwd_from_title(title: &str) -> Option<String> {
     }
     // "~" or "~/something"
     if title.starts_with('~') {
-        if let Some(home) = std::env::var("HOME").ok() {
+        if let Ok(home) = std::env::var("HOME") {
             let expanded = title.replacen('~', &home, 1);
             return Some(expanded);
         }

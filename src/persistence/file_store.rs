@@ -251,6 +251,7 @@ impl FileStore {
 
     /// Save a single session's thought data. Merges with existing thought data
     /// on disk.
+    #[allow(clippy::too_many_arguments)]
     pub async fn save_thought(
         &self,
         session_id: &str,
@@ -537,6 +538,7 @@ fn open_lock_file(path: &Path) -> anyhow::Result<std::fs::File> {
         .read(true)
         .write(true)
         .create(true)
+        .truncate(false)
         .open(path)
         .map_err(|e| anyhow::anyhow!("open lock file {} failed: {e}", path.display()))
 }

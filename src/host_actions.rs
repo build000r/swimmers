@@ -96,10 +96,7 @@ impl RepoActionExecutor for RestartExecutor {
                 } else {
                     stderr.chars().take(600).collect()
                 };
-                return Err(io::Error::new(
-                    io::ErrorKind::Other,
-                    format!("{service_name}: {detail}"),
-                ));
+                return Err(io::Error::other(format!("{service_name}: {detail}")));
             }
         }
         let names: Vec<&str> = self.commands.iter().map(|(n, _)| n.as_str()).collect();
@@ -309,11 +306,11 @@ fn collect_git_state(cwd: &str) -> io::Result<GitStateSnapshot> {
 
 fn collect_git_state_from_root(repo_root: &Path) -> io::Result<GitStateSnapshot> {
     Ok(GitStateSnapshot {
-        status_short: run_git_capture(&repo_root, &["status", "--short"])?,
-        unstaged_diff_stat: run_git_capture(&repo_root, &["diff", "--stat"])?,
-        staged_diff_stat: run_git_capture(&repo_root, &["diff", "--cached", "--stat"])?,
-        unstaged_diff: run_git_capture(&repo_root, &["diff"])?,
-        staged_diff: run_git_capture(&repo_root, &["diff", "--cached"])?,
+        status_short: run_git_capture(repo_root, &["status", "--short"])?,
+        unstaged_diff_stat: run_git_capture(repo_root, &["diff", "--stat"])?,
+        staged_diff_stat: run_git_capture(repo_root, &["diff", "--cached", "--stat"])?,
+        unstaged_diff: run_git_capture(repo_root, &["diff"])?,
+        staged_diff: run_git_capture(repo_root, &["diff", "--cached"])?,
         repo_root: repo_root.to_path_buf(),
     })
 }
