@@ -18,6 +18,8 @@ pub(crate) struct PickerState {
     pub(crate) managed_only: bool,
     pub(crate) overlay_label: Option<String>,
     pub(crate) spawn_tool: SpawnTool,
+    pub(crate) launch_targets: Vec<LaunchTargetSummary>,
+    pub(crate) launch_target: Option<String>,
     pub(crate) selection: PickerSelection,
     pub(crate) scroll: usize,
     /// When set, the picker is showing a virtual group listing.
@@ -35,7 +37,14 @@ impl PickerState {
         response: DirListResponse,
         managed_only: bool,
         spawn_tool: SpawnTool,
+        preferred_launch_target: Option<String>,
     ) -> Self {
+        let launch_targets = normalized_launch_targets(response.launch_targets);
+        let launch_target = select_launch_target(
+            preferred_launch_target.as_deref(),
+            response.default_launch_target.as_deref(),
+            &launch_targets,
+        );
         Self {
             anchor_x,
             anchor_y,
@@ -47,6 +56,8 @@ impl PickerState {
             managed_only,
             overlay_label: response.overlay_label,
             spawn_tool,
+            launch_targets,
+            launch_target,
             selection: PickerSelection::SpawnHere,
             scroll: 0,
             current_group: None,
@@ -97,6 +108,15 @@ impl PickerState {
         self.current_path = response.path;
         self.entries = response.entries;
         self.overlay_label = response.overlay_label;
+        let previous_launch_target = self.launch_target.clone();
+        self.launch_targets = normalized_launch_targets(response.launch_targets);
+        self.launch_target = select_launch_target(
+            preserve_selection
+                .then_some(previous_launch_target.as_deref())
+                .flatten(),
+            response.default_launch_target.as_deref(),
+            &self.launch_targets,
+        );
         if !response.groups.is_empty() {
             self.available_groups = response.groups;
         }
@@ -234,6 +254,30 @@ impl PickerState {
             self.scroll = pos + 1 - visible_rows;
         }
     }
+
+    pub(crate) fn toggle_launch_target(&mut self) -> Option<String> {
+        if self.launch_targets.is_empty() {
+            self.launch_targets = vec![LaunchTargetSummary::local()];
+        }
+        let current = self.launch_target.as_deref().unwrap_or("local");
+        let index = self
+            .launch_targets
+            .iter()
+            .position(|target| target.id == current)
+            .unwrap_or(0);
+        let next = (index + 1) % self.launch_targets.len();
+        self.launch_target = Some(self.launch_targets[next].id.clone());
+        self.launch_target.clone()
+    }
+
+    pub(crate) fn launch_target_label(&self) -> String {
+        let current = self.launch_target.as_deref().unwrap_or("local");
+        self.launch_targets
+            .iter()
+            .find(|target| target.id == current)
+            .map(|target| target.label.clone())
+            .unwrap_or_else(|| current.to_string())
+    }
 }
 
 #[derive(Clone)]
@@ -243,6 +287,7 @@ pub(crate) enum PickerAction {
     ToggleManaged(bool),
     ActivateGroup(String),
     ToggleTool,
+    ToggleLaunchTarget,
     BatchVisible,
     ActivateCurrentPath,
     ActivateEntry(usize),
@@ -259,6 +304,7 @@ pub(crate) struct PickerLayout {
     pub(crate) group_buttons: Vec<(String, Rect)>,
     pub(crate) all_button: Rect,
     pub(crate) tool_button: Rect,
+    pub(crate) launch_target_button: Rect,
     pub(crate) batch_button: Rect,
     pub(crate) spawn_here_button: Rect,
     pub(crate) first_entry_y: u16,
@@ -272,22 +318,25 @@ pub(crate) struct InitialRequestState {
     pub(crate) cwd: String,
     pub(crate) value: String,
     pub(crate) batch_dirs: Option<Vec<String>>,
+    pub(crate) launch_target: Option<String>,
 }
 
 impl InitialRequestState {
-    pub(crate) fn new(cwd: String) -> Self {
+    pub(crate) fn new(cwd: String, launch_target: Option<String>) -> Self {
         Self {
             cwd,
             value: String::new(),
             batch_dirs: None,
+            launch_target,
         }
     }
 
-    pub(crate) fn new_batch(dirs: Vec<String>) -> Self {
+    pub(crate) fn new_batch(dirs: Vec<String>, launch_target: Option<String>) -> Self {
         Self {
             cwd: dirs.first().cloned().unwrap_or_default(),
             value: String::new(),
             batch_dirs: Some(dirs),
+            launch_target,
         }
     }
 
@@ -314,6 +363,32 @@ pub(crate) fn tool_button_label(tool: SpawnTool) -> String {
 
 pub(crate) fn batch_button_label() -> &'static str {
     "[batch visible]"
+}
+
+pub(crate) fn launch_target_button_label(picker: &PickerState) -> String {
+    format!("[{}]", picker.launch_target_label())
+}
+
+fn normalized_launch_targets(mut targets: Vec<LaunchTargetSummary>) -> Vec<LaunchTargetSummary> {
+    if targets.is_empty() {
+        return vec![LaunchTargetSummary::local()];
+    }
+    if !targets.iter().any(|target| target.id == "local") {
+        targets.insert(0, LaunchTargetSummary::local());
+    }
+    targets
+}
+
+fn select_launch_target(
+    preferred: Option<&str>,
+    fallback: Option<&str>,
+    targets: &[LaunchTargetSummary],
+) -> Option<String> {
+    let candidate = preferred
+        .filter(|id| targets.iter().any(|target| target.id == *id))
+        .or_else(|| fallback.filter(|id| targets.iter().any(|target| target.id == *id)))
+        .unwrap_or("local");
+    Some(candidate.to_string())
 }
 
 pub(crate) fn normalize_path(path: &str) -> String {
@@ -559,9 +634,16 @@ pub(crate) fn picker_layout(picker: &PickerState, field: Rect) -> PickerLayout {
         width: tool_label_width,
         height: 1,
     };
+    let launch_target_label_width = launch_target_button_label(picker).len() as u16;
+    let launch_target_button = Rect {
+        x: tool_button.x.saturating_sub(launch_target_label_width + 1),
+        y: content.y,
+        width: launch_target_label_width,
+        height: 1,
+    };
     let batch_label_width = batch_button_label().len() as u16;
     let batch_button = Rect {
-        x: tool_button.x.saturating_sub(batch_label_width + 1),
+        x: launch_target_button.x.saturating_sub(batch_label_width + 1),
         y: content.y,
         width: batch_label_width,
         height: 1,
@@ -576,6 +658,7 @@ pub(crate) fn picker_layout(picker: &PickerState, field: Rect) -> PickerLayout {
         group_buttons,
         all_button,
         tool_button,
+        launch_target_button,
         batch_button,
         spawn_here_button: Rect {
             x: content.x,
@@ -600,6 +683,9 @@ pub(crate) fn picker_action_at(
     }
     if layout.tool_button.contains(x, y) {
         return Some(PickerAction::ToggleTool);
+    }
+    if layout.launch_target_button.contains(x, y) {
+        return Some(PickerAction::ToggleLaunchTarget);
     }
     if layout.batch_button.contains(x, y) {
         return Some(PickerAction::BatchVisible);
@@ -672,6 +758,16 @@ pub(crate) fn render_picker(renderer: &mut Renderer, picker: &PickerState, field
         layout.tool_button.y,
         &tool_button_label(picker.spawn_tool),
         Color::White,
+    );
+    renderer.draw_text(
+        layout.launch_target_button.x,
+        layout.launch_target_button.y,
+        &launch_target_button_label(picker),
+        if picker.launch_targets.len() > 1 {
+            Color::White
+        } else {
+            Color::DarkGrey
+        },
     );
     renderer.draw_text(
         layout.batch_button.x,

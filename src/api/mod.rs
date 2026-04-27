@@ -2,6 +2,7 @@ pub mod dirs;
 pub mod envelope;
 pub mod health;
 pub mod native;
+pub mod remote_sessions;
 pub mod selection;
 pub mod service;
 pub mod sessions;

@@ -5,6 +5,7 @@ use chrono::Utc;
 use futures::future::BoxFuture;
 use tokio::sync::oneshot;
 
+use swimmers::api::remote_sessions;
 use swimmers::api::service::{
     list_dirs as list_dirs_service, native_status_for_host as native_status_for_host_service,
     open_native_session_for_host, start_dir_repo_action as start_dir_repo_action_service,
@@ -22,8 +23,9 @@ use swimmers::thought::probe::run_thought_config_probe;
 use swimmers::thought::runtime_config::ThoughtConfig;
 use swimmers::thought_ui::thought_config_ui_metadata;
 use swimmers::types::{
-    CreateSessionResponse, CreateSessionsBatchResponse, DirListResponse, DirRepoActionResponse,
-    GhosttyOpenMode, MermaidArtifactResponse, NativeDesktopApp, NativeDesktopOpenResponse,
+    CreateSessionRequest, CreateSessionResponse, CreateSessionsBatchRequest,
+    CreateSessionsBatchResponse, DirListResponse, DirRepoActionResponse, GhosttyOpenMode,
+    MermaidArtifactResponse, NativeDesktopApp, NativeDesktopOpenResponse,
     NativeDesktopStatusResponse, PlanFileResponse, RepoActionKind, SessionSummary, SpawnTool,
 };
 
@@ -52,7 +54,11 @@ impl InProcessApi {
 impl TuiApi for InProcessApi {
     fn fetch_sessions(&self) -> BoxFuture<'_, Result<Vec<SessionSummary>, String>> {
         // Mirrors: src/api/sessions.rs:23 (list_sessions)
-        Box::pin(async move { Ok(self.state.supervisor.list_sessions().await) })
+        Box::pin(async move {
+            let mut sessions = self.state.supervisor.list_sessions().await;
+            sessions.extend(remote_sessions::list_remote_sessions().await);
+            Ok(sessions)
+        })
     }
 
     fn fetch_thought_config(&self) -> BoxFuture<'_, Result<ThoughtConfigResponse, String>> {
@@ -129,6 +135,14 @@ impl TuiApi for InProcessApi {
         // Mirrors: src/api/sessions.rs:434 (get_mermaid_artifact)
         let session_id = session_id.to_string();
         Box::pin(async move {
+            if let Some((target, remote_session_id)) =
+                remote_sessions::denamespace_for_target(&session_id)
+                    .map_err(|err| err.message().to_string())?
+            {
+                return remote_sessions::fetch_remote_mermaid_artifact(&target, remote_session_id)
+                    .await
+                    .map_err(|err| err.message().to_string());
+            }
             let handle = self
                 .state
                 .supervisor
@@ -156,6 +170,14 @@ impl TuiApi for InProcessApi {
         let session_id = session_id.to_string();
         let name = name.to_string();
         Box::pin(async move {
+            if let Some((target, remote_session_id)) =
+                remote_sessions::denamespace_for_target(&session_id)
+                    .map_err(|err| err.message().to_string())?
+            {
+                return remote_sessions::fetch_remote_plan_file(&target, remote_session_id, &name)
+                    .await
+                    .map_err(|err| err.message().to_string());
+            }
             let handle = self
                 .state
                 .supervisor
@@ -235,6 +257,12 @@ impl TuiApi for InProcessApi {
         // Mirrors: src/api/native.rs:96 (native_open)
         let session_id = session_id.to_string();
         Box::pin(async move {
+            if remote_sessions::split_remote_session_id(&session_id).is_some() {
+                return Err(
+                    "remote sessions are visible locally, but native terminal handoff must be opened on the target host"
+                        .to_string(),
+                );
+            }
             open_native_session_for_host(&self.state, "localhost", &session_id)
                 .await
                 .map_err(|err| match err {
@@ -290,11 +318,23 @@ impl TuiApi for InProcessApi {
         &self,
         cwd: &str,
         spawn_tool: SpawnTool,
+        launch_target: Option<String>,
         initial_request: Option<String>,
     ) -> BoxFuture<'_, Result<CreateSessionResponse, String>> {
         // Mirrors: src/api/sessions.rs:46 (create_session)
         let cwd = cwd.to_string();
         Box::pin(async move {
+            if remote_sessions::is_remote_launch_target(launch_target.as_deref()) {
+                return remote_sessions::create_remote_session(CreateSessionRequest {
+                    name: None,
+                    cwd: Some(cwd),
+                    spawn_tool: Some(spawn_tool),
+                    launch_target,
+                    initial_request,
+                })
+                .await
+                .map_err(|err| err.message().to_string());
+            }
             let (session, repo_theme) = self
                 .state
                 .supervisor
@@ -312,10 +352,24 @@ impl TuiApi for InProcessApi {
         &self,
         dirs: Vec<String>,
         spawn_tool: SpawnTool,
+        launch_target: Option<String>,
         initial_request: Option<String>,
     ) -> BoxFuture<'_, Result<CreateSessionsBatchResponse, String>> {
         let state = self.state.clone();
         Box::pin(async move {
+            if remote_sessions::is_remote_launch_target(launch_target.as_deref()) {
+                return remote_sessions::create_remote_sessions_batch(CreateSessionsBatchRequest {
+                    dirs,
+                    spawn_tool: Some(spawn_tool),
+                    launch_target,
+                    initial_request,
+                })
+                .await
+                .map_err(|err| err.message().to_string());
+            }
+            if dirs.is_empty() {
+                return Err("dirs must not be empty".to_string());
+            }
             let total = dirs.len();
             let (batch_id, batch_label, batch_created_at, prompt_excerpt) =
                 new_batch_context(total, initial_request.as_deref());

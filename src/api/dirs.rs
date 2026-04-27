@@ -100,7 +100,9 @@ mod tests {
     use crate::auth::OPERATOR_SCOPES;
     use crate::config::Config;
     use crate::host_actions::RepoActionExecutor;
-    use crate::session::overlay::{OverlayDirConfig, OverlayDirGroup, OverlayServiceEntry};
+    use crate::session::overlay::{
+        OverlayDirConfig, OverlayDirGroup, OverlayLaunchConfig, OverlayServiceEntry,
+    };
     use crate::session::supervisor::SessionSupervisor;
     use crate::thought::protocol::SyncRequestSequence;
     use crate::thought::runtime_config::ThoughtConfig;
@@ -232,6 +234,7 @@ mod tests {
                 },
             ],
             groups: Vec::new(),
+            launch: OverlayLaunchConfig::local_only(),
         };
 
         let children = managed_base_child_names(&config, base).expect("should have children");
@@ -270,6 +273,7 @@ mod tests {
                 },
             ],
             groups: Vec::new(),
+            launch: OverlayLaunchConfig::local_only(),
         };
 
         let entries = list_managed_service_entries(&test_state(), &config).await;

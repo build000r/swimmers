@@ -126,9 +126,9 @@ These are things swimmers will deliberately not become:
 
 - **Not a tmux replacement.** Swimmers sits above tmux, not beside it. It will never manage windows, panes, or key bindings.
 - **Not a session templating tool.** Swimmers discovers sessions that already exist. Defining layouts, startup commands, and window arrangements is tmuxinator's job.
-- **Not a multi-host aggregator.** Each swimmers instance manages sessions on one machine. Cross-host aggregation is a different product with different failure modes.
+- **Not a general multi-host control plane.** Each swimmers instance manages sessions on one machine. It may aggregate explicitly configured `swimmers_api` launch targets for a single operator, but it will not become arbitrary cluster scheduling or fleet management.
 - **Not an IDE or editor.** Swimmers shows session state and thought streams. It does not edit code, run LSP servers, or replace your terminal workflow.
-- **Not an agent launcher.** Swimmers monitors agents that are already running. It does not provision, configure, or schedule AI coding agents — that is the job of the agent harness (Claude Code, Codex, etc.).
+- **Not a general agent scheduler.** Swimmers can create tmux sessions and hand an initial request to the selected agent harness. It does not provision, configure, rank, or schedule AI coding agents beyond the operator's explicit local or overlay-declared launch target.
 - **Not a web-first app.** The TUI is the primary interface. The browser surface exists for remote convenience, not as the flagship experience.
 
 ## Product Test

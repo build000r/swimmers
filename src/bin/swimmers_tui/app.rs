@@ -166,6 +166,7 @@ pub(crate) struct App<C: TuiApi> {
     pub(crate) thought_config_editor: Option<ThoughtConfigEditorState>,
     pub(crate) picker: Option<PickerState>,
     pub(crate) spawn_tool: SpawnTool,
+    pub(crate) launch_target: Option<String>,
     pub(crate) initial_request: Option<InitialRequestState>,
     pub(crate) initial_request_generation: u64,
     pub(crate) voice_state: VoiceUiState,
@@ -241,6 +242,7 @@ impl<C: TuiApi> App<C> {
             thought_config_editor: None,
             picker: None,
             spawn_tool: SpawnTool::Codex,
+            launch_target: None,
             initial_request: None,
             initial_request_generation: 0,
             voice_state: default_ui_state(),
@@ -1205,7 +1207,15 @@ impl<C: TuiApi> App<C> {
         match result {
             PendingInteractionResult::OpenPicker { x, y, response } => match response {
                 Ok(response) => {
-                    let mut picker = PickerState::new(x, y, response, true, self.spawn_tool);
+                    let mut picker = PickerState::new(
+                        x,
+                        y,
+                        response,
+                        true,
+                        self.spawn_tool,
+                        self.launch_target.clone(),
+                    );
+                    self.launch_target = picker.launch_target.clone();
                     picker.sync_theme_colors(&mut self.repo_themes);
                     self.picker = Some(picker);
                     self.last_picker_refresh = Some(Instant::now());
@@ -1227,6 +1237,7 @@ impl<C: TuiApi> App<C> {
                         picker.managed_only = managed_only;
                         picker.current_group = group;
                         picker.apply_response(response, preserve_selection);
+                        self.launch_target = picker.launch_target.clone();
                         picker.sync_theme_colors(&mut self.repo_themes);
                         self.last_picker_refresh = Some(Instant::now());
                     }
@@ -2229,10 +2240,10 @@ impl<C: TuiApi> App<C> {
         self.open_picker_url_at(index);
     }
 
-    pub(crate) fn open_initial_request(&mut self, cwd: String) {
+    pub(crate) fn open_initial_request(&mut self, cwd: String, launch_target: Option<String>) {
         self.cancel_voice_recording();
         self.initial_request_generation = self.initial_request_generation.saturating_add(1);
-        self.initial_request = Some(InitialRequestState::new(cwd));
+        self.initial_request = Some(InitialRequestState::new(cwd, launch_target));
         self.voice_state = default_ui_state();
     }
 
@@ -2255,7 +2266,12 @@ impl<C: TuiApi> App<C> {
 
         self.cancel_voice_recording();
         self.initial_request_generation = self.initial_request_generation.saturating_add(1);
-        self.initial_request = Some(InitialRequestState::new_batch(dirs));
+        let launch_target = self
+            .picker
+            .as_ref()
+            .and_then(|picker| picker.launch_target.clone());
+        self.launch_target = launch_target.clone();
+        self.initial_request = Some(InitialRequestState::new_batch(dirs, launch_target));
         self.voice_state = default_ui_state();
     }
 
@@ -2323,9 +2339,17 @@ impl<C: TuiApi> App<C> {
             .as_ref()
             .and_then(|state| state.batch_dirs.clone())
         {
-            self.spawn_sessions_batch(dirs, Some(initial_request), field);
+            let launch_target = self
+                .initial_request
+                .as_ref()
+                .and_then(|state| state.launch_target.clone());
+            self.spawn_sessions_batch(dirs, launch_target, Some(initial_request), field);
         } else {
-            self.spawn_session(&cwd, Some(initial_request), field);
+            let launch_target = self
+                .initial_request
+                .as_ref()
+                .and_then(|state| state.launch_target.clone());
+            self.spawn_session(&cwd, launch_target, Some(initial_request), field);
         }
     }
 
@@ -2433,8 +2457,14 @@ impl<C: TuiApi> App<C> {
             return;
         };
 
+        let launch_target = self
+            .picker
+            .as_ref()
+            .and_then(|picker| picker.launch_target.clone());
+        self.launch_target = launch_target.clone();
+
         match selection {
-            PickerSelection::SpawnHere => self.open_initial_request(current_path),
+            PickerSelection::SpawnHere => self.open_initial_request(current_path, launch_target),
             PickerSelection::Entry(_) if has_children => {
                 if let Some(path) = entry_path {
                     let managed_only = self
@@ -2447,7 +2477,7 @@ impl<C: TuiApi> App<C> {
             }
             PickerSelection::Entry(_) => {
                 if let Some(path) = entry_path {
-                    self.open_initial_request(path);
+                    self.open_initial_request(path, launch_target);
                 }
             }
         }
@@ -2472,6 +2502,7 @@ impl<C: TuiApi> App<C> {
     pub(crate) fn spawn_session(
         &mut self,
         cwd: &str,
+        launch_target: Option<String>,
         initial_request: Option<String>,
         field: Rect,
     ) {
@@ -2482,10 +2513,11 @@ impl<C: TuiApi> App<C> {
         let client = Arc::clone(&self.client);
         let cwd = cwd.to_string();
         let spawn_tool = self.spawn_tool;
+        self.launch_target = launch_target.clone();
         self.set_message("creating session...");
         self.runtime.spawn(async move {
             let response = client
-                .create_session(&cwd, spawn_tool, initial_request)
+                .create_session(&cwd, spawn_tool, launch_target, initial_request)
                 .await;
             let _ = tx.send(PendingInteractionResult::CreateSession { field, response });
         });
@@ -2494,6 +2526,7 @@ impl<C: TuiApi> App<C> {
     pub(crate) fn spawn_sessions_batch(
         &mut self,
         dirs: Vec<String>,
+        launch_target: Option<String>,
         initial_request: Option<String>,
         field: Rect,
     ) {
@@ -2508,10 +2541,11 @@ impl<C: TuiApi> App<C> {
 
         let client = Arc::clone(&self.client);
         let spawn_tool = self.spawn_tool;
+        self.launch_target = launch_target.clone();
         self.set_message(format!("creating {total} sessions..."));
         self.runtime.spawn(async move {
             let response = client
-                .create_sessions_batch(dirs, spawn_tool, initial_request)
+                .create_sessions_batch(dirs, spawn_tool, launch_target, initial_request)
                 .await;
             let _ = tx.send(PendingInteractionResult::CreateSessionsBatch { field, response });
         });
@@ -3313,6 +3347,11 @@ impl<C: TuiApi> App<C> {
                     picker.spawn_tool = self.spawn_tool;
                 }
             }
+            PickerAction::ToggleLaunchTarget => {
+                if let Some(picker) = &mut self.picker {
+                    self.launch_target = picker.toggle_launch_target();
+                }
+            }
             PickerAction::BatchVisible => self.open_batch_initial_request_for_visible_entries(),
             PickerAction::ActivateCurrentPath => self.spawn_session_from_picker(field),
             PickerAction::ActivateEntry(index) => self.activate_picker_entry(index, field),
@@ -3330,7 +3369,12 @@ impl<C: TuiApi> App<C> {
         else {
             return;
         };
-        self.open_initial_request(path);
+        let launch_target = self
+            .picker
+            .as_ref()
+            .and_then(|picker| picker.launch_target.clone());
+        self.launch_target = launch_target.clone();
+        self.open_initial_request(path, launch_target);
     }
 
     pub(crate) fn activate_picker_entry(&mut self, index: usize, _field: Rect) {
@@ -3347,7 +3391,12 @@ impl<C: TuiApi> App<C> {
         if has_children {
             self.picker_reload(Some(path), managed_only, None);
         } else {
-            self.open_initial_request(path);
+            let launch_target = self
+                .picker
+                .as_ref()
+                .and_then(|picker| picker.launch_target.clone());
+            self.launch_target = launch_target.clone();
+            self.open_initial_request(path, launch_target);
         }
     }
 

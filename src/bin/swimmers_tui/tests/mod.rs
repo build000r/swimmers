@@ -77,8 +77,8 @@ struct MockApiState {
     open_calls: Vec<String>,
     list_calls: Vec<(Option<String>, bool)>,
     start_repo_action_calls: Vec<(String, RepoActionKind)>,
-    create_calls: Vec<(String, SpawnTool, Option<String>)>,
-    create_batch_calls: Vec<(Vec<String>, SpawnTool, Option<String>)>,
+    create_calls: Vec<(String, SpawnTool, Option<String>, Option<String>)>,
+    create_batch_calls: Vec<(Vec<String>, SpawnTool, Option<String>, Option<String>)>,
 }
 
 #[derive(Clone, Default)]
@@ -224,10 +224,34 @@ impl MockApi {
     }
 
     fn create_calls(&self) -> Vec<(String, SpawnTool, Option<String>)> {
-        self.state.lock().unwrap().create_calls.clone()
+        self.state
+            .lock()
+            .unwrap()
+            .create_calls
+            .iter()
+            .map(|(cwd, tool, _target, request)| (cwd.clone(), *tool, request.clone()))
+            .collect()
     }
 
     fn create_batch_calls(&self) -> Vec<(Vec<String>, SpawnTool, Option<String>)> {
+        self.state
+            .lock()
+            .unwrap()
+            .create_batch_calls
+            .iter()
+            .map(|(dirs, tool, _target, request)| (dirs.clone(), *tool, request.clone()))
+            .collect()
+    }
+
+    fn create_calls_with_targets(
+        &self,
+    ) -> Vec<(String, SpawnTool, Option<String>, Option<String>)> {
+        self.state.lock().unwrap().create_calls.clone()
+    }
+
+    fn create_batch_calls_with_targets(
+        &self,
+    ) -> Vec<(Vec<String>, SpawnTool, Option<String>, Option<String>)> {
         self.state.lock().unwrap().create_batch_calls.clone()
     }
 
@@ -546,13 +570,16 @@ impl TuiApi for MockApi {
         &self,
         cwd: &str,
         spawn_tool: SpawnTool,
+        launch_target: Option<String>,
         initial_request: Option<String>,
     ) -> BoxFuture<'_, Result<CreateSessionResponse, String>> {
         let state = self.state.clone();
         let cwd = cwd.to_string();
         Box::pin(async move {
             let mut state = state.lock().unwrap();
-            state.create_calls.push((cwd, spawn_tool, initial_request));
+            state
+                .create_calls
+                .push((cwd, spawn_tool, launch_target, initial_request));
             state
                 .create_session_results
                 .pop_front()
@@ -564,6 +591,7 @@ impl TuiApi for MockApi {
         &self,
         dirs: Vec<String>,
         spawn_tool: SpawnTool,
+        launch_target: Option<String>,
         initial_request: Option<String>,
     ) -> BoxFuture<'_, Result<CreateSessionsBatchResponse, String>> {
         let state = self.state.clone();
@@ -571,7 +599,7 @@ impl TuiApi for MockApi {
             let mut state = state.lock().unwrap();
             state
                 .create_batch_calls
-                .push((dirs, spawn_tool, initial_request));
+                .push((dirs, spawn_tool, launch_target, initial_request));
             state
                 .create_sessions_batch_results
                 .pop_front()
@@ -1159,7 +1187,7 @@ async fn api_client_create_session_allows_slower_session_creation_responses() {
     let client = test_api_client(base_url, None);
 
     let response = client
-        .create_session(TEST_REPO_SWIMMERS, SpawnTool::Codex, None)
+        .create_session(TEST_REPO_SWIMMERS, SpawnTool::Codex, None, None)
         .await
         .expect("create session should outlive the default polling timeout");
 
@@ -2441,7 +2469,26 @@ fn dir_response(path: &str, names: &[(&str, bool)]) -> DirListResponse {
             .collect(),
         overlay_label: None,
         groups: Vec::new(),
+        launch_targets: Vec::new(),
+        default_launch_target: None,
     }
+}
+
+fn dir_response_with_launch_targets(path: &str, names: &[(&str, bool)]) -> DirListResponse {
+    let mut response = dir_response(path, names);
+    response.launch_targets = vec![
+        LaunchTargetSummary::local(),
+        LaunchTargetSummary {
+            id: "jeremy-skillbox".to_string(),
+            label: "Jeremy Skillbox".to_string(),
+            kind: "swimmers_api".to_string(),
+            base_url: Some("http://100.105.106.104:3210".to_string()),
+            auth_token_env: Some("SWIMMERS_JEREMY_AUTH_TOKEN".to_string()),
+            path_mappings: Vec::new(),
+        },
+    ];
+    response.default_launch_target = Some("local".to_string());
+    response
 }
 
 fn repo_dir_entry(
@@ -3975,7 +4022,7 @@ fn spawned_selected_entity_matches_thought_color() {
     )));
     let mut app = make_app(api);
 
-    app.spawn_session(TEST_REPO_SWIMMERS, None, field);
+    app.spawn_session(TEST_REPO_SWIMMERS, None, None, field);
     assert!(app.pending_interaction.is_some());
     poll_until_interaction(&mut app);
 
@@ -4156,6 +4203,7 @@ fn render_picker_uses_current_repo_theme_color() {
         dir_response(repo_root.to_string_lossy().as_ref(), &[("src", true)]),
         true,
         SpawnTool::Codex,
+        None,
     );
     let mut repo_themes = HashMap::new();
     picker.sync_theme_colors(&mut repo_themes);
@@ -4232,6 +4280,7 @@ fn render_picker_adjusts_low_contrast_repo_theme_color() {
         dir_response(repo_root.to_string_lossy().as_ref(), &[("src", true)]),
         true,
         SpawnTool::Codex,
+        None,
     );
     let mut repo_themes = HashMap::new();
     picker.sync_theme_colors(&mut repo_themes);
@@ -4285,6 +4334,7 @@ fn render_picker_uses_entry_repo_theme_color() {
         ),
         true,
         SpawnTool::Codex,
+        None,
     );
     let mut repo_themes = HashMap::new();
     picker.sync_theme_colors(&mut repo_themes);
@@ -4472,7 +4522,7 @@ fn render_picker_draws_repo_action_badges_on_entry_row() {
     response.entries[0].repo_dirty = Some(true);
     response.entries[0].has_restart = Some(true);
     response.entries[0].open_url = Some("http://127.0.0.1:3210".to_string());
-    let picker = PickerState::new(2, 2, response, true, SpawnTool::Codex);
+    let picker = PickerState::new(2, 2, response, true, SpawnTool::Codex, None);
     let field = test_field();
     let layout = picker_layout(&picker, field);
     let mut renderer = test_renderer(100, 30);
@@ -4518,6 +4568,7 @@ fn render_picker_draws_empty_state_for_empty_directory() {
         dir_response("/tmp/empty", &[]),
         true,
         SpawnTool::Codex,
+        None,
     );
     let field = test_field();
     let layout = picker_layout(&picker, field);
@@ -4533,7 +4584,7 @@ fn render_picker_draws_empty_state_for_empty_directory() {
 
 #[test]
 fn render_initial_request_draws_placeholder_and_ready_voice_state() {
-    let request = InitialRequestState::new("/tmp/swimmers".to_string());
+    let request = InitialRequestState::new("/tmp/swimmers".to_string(), None);
     let field = test_field();
     let layout = initial_request_layout(field);
     let mut renderer = test_renderer(100, 30);
@@ -4561,7 +4612,7 @@ fn render_initial_request_draws_placeholder_and_ready_voice_state() {
 
 #[test]
 fn render_initial_request_draws_typed_value_and_failed_voice_state() {
-    let mut request = InitialRequestState::new("/tmp/swimmers".to_string());
+    let mut request = InitialRequestState::new("/tmp/swimmers".to_string(), None);
     request.value = "Ask Codex to harden the picker".to_string();
     let field = test_field();
     let layout = initial_request_layout(field);
@@ -5120,6 +5171,7 @@ fn spawn_here_opens_initial_request_for_current_path() {
         dir_response(TEST_REPO_OPENSOURCE, &[("skills", true)]),
         true,
         SpawnTool::Codex,
+        None,
     ));
 
     app.spawn_session_from_picker(field);
@@ -5177,6 +5229,7 @@ fn picker_search_filters_without_changing_browsing_scope() {
         dir_response(TEST_REPOS_ROOT, &[("alpha", true), ("beta", true)]),
         true,
         SpawnTool::Codex,
+        None,
     );
     picker.current_group = Some("work".to_string());
     app.picker = Some(picker);
@@ -5202,6 +5255,7 @@ fn picker_batch_visible_opens_composer_for_filtered_entries() {
         dir_response(TEST_REPOS_ROOT, &[("alpha", true), ("beta", true)]),
         true,
         SpawnTool::Codex,
+        None,
     ));
     app.picker_search_push('b');
 
@@ -5251,11 +5305,13 @@ fn submitting_initial_request_creates_hidden_session_without_native_open() {
         dir_response(TEST_REPOS_ROOT, &[("swimmers", false)]),
         true,
         SpawnTool::Codex,
+        None,
     ));
     app.initial_request = Some(InitialRequestState {
         cwd: TEST_REPO_SWIMMERS.to_string(),
         value: "add hidden spawn flow".to_string(),
         batch_dirs: None,
+        launch_target: None,
     });
 
     app.submit_initial_request(field);
@@ -5304,12 +5360,13 @@ fn submitting_batch_initial_request_creates_visible_sessions_without_native_open
         dir_response(TEST_REPOS_ROOT, &[("alpha", true), ("beta", true)]),
         true,
         SpawnTool::Codex,
+        None,
     ));
     app.initial_request = Some({
-        let mut state = InitialRequestState::new_batch(vec![
-            TEST_REPO_ALPHA.to_string(),
-            TEST_REPO_BETA.to_string(),
-        ]);
+        let mut state = InitialRequestState::new_batch(
+            vec![TEST_REPO_ALPHA.to_string(), TEST_REPO_BETA.to_string()],
+            None,
+        );
         state.value = "refactor shared logger".to_string();
         state
     });
@@ -5359,6 +5416,7 @@ fn pasting_initial_request_buffers_multiline_without_submitting() {
         cwd: TEST_REPO_SWIMMERS.to_string(),
         value: String::new(),
         batch_dirs: None,
+        launch_target: None,
     });
 
     app.handle_paste(pasted);
@@ -5384,6 +5442,7 @@ fn pressing_enter_after_pasting_initial_request_submits_once() {
         cwd: TEST_REPO_SWIMMERS.to_string(),
         value: String::new(),
         batch_dirs: None,
+        launch_target: None,
     });
 
     app.handle_paste(pasted);
@@ -5413,7 +5472,7 @@ fn ctrl_v_in_initial_request_reports_voice_feature_when_not_built() {
     let api = MockApi::new();
     let field = test_field();
     let mut app = make_app(api);
-    app.open_initial_request(TEST_REPO_SWIMMERS.to_string());
+    app.open_initial_request(TEST_REPO_SWIMMERS.to_string(), None);
 
     app.handle_initial_request_key(
         KeyEvent::new(KeyCode::Char('v'), KeyModifiers::CONTROL),
@@ -5442,7 +5501,7 @@ fn opening_initial_request_reports_voice_setup_gap_when_model_is_unset() {
 
     let api = MockApi::new();
     let mut app = make_app(api);
-    app.open_initial_request(TEST_REPO_SWIMMERS.to_string());
+    app.open_initial_request(TEST_REPO_SWIMMERS.to_string(), None);
 
     assert_eq!(
         app.voice_state,
@@ -5463,7 +5522,7 @@ fn ctrl_v_in_initial_request_reports_missing_voice_model_when_feature_is_built()
     let api = MockApi::new();
     let field = test_field();
     let mut app = make_app(api);
-    app.open_initial_request(TEST_REPO_SWIMMERS.to_string());
+    app.open_initial_request(TEST_REPO_SWIMMERS.to_string(), None);
 
     app.handle_initial_request_key(
         KeyEvent::new(KeyCode::Char('v'), KeyModifiers::CONTROL),
@@ -5497,6 +5556,7 @@ fn submit_initial_request_waits_for_voice_transcription() {
         cwd: TEST_REPO_SWIMMERS.to_string(),
         value: "draft the request".to_string(),
         batch_dirs: None,
+        launch_target: None,
     });
     app.voice_state = VoiceUiState::Transcribing;
 
@@ -5514,10 +5574,10 @@ fn submit_initial_request_waits_for_voice_transcription() {
 fn stale_voice_transcription_result_is_dropped_after_reopening_composer() {
     let api = MockApi::new();
     let mut app = make_app(api);
-    app.open_initial_request(TEST_REPO_SWIMMERS.to_string());
+    app.open_initial_request(TEST_REPO_SWIMMERS.to_string(), None);
     let stale_generation = app.initial_request_generation;
     app.close_initial_request();
-    app.open_initial_request("/tmp/other".to_string());
+    app.open_initial_request("/tmp/other".to_string(), None);
 
     let (tx, rx) = tokio::sync::oneshot::channel();
     app.pending_interaction = Some(rx);
@@ -5554,11 +5614,13 @@ fn session_create_failure_does_not_attempt_native_open() {
         dir_response(TEST_REPOS_ROOT, &[("swimmers", false)]),
         true,
         SpawnTool::Codex,
+        None,
     ));
     app.initial_request = Some(InitialRequestState {
         cwd: TEST_REPO_SWIMMERS.to_string(),
         value: "fix tmux startup".to_string(),
         batch_dirs: None,
+        launch_target: None,
     });
 
     app.submit_initial_request(field);
@@ -5599,6 +5661,7 @@ fn blank_initial_request_is_rejected_locally() {
         cwd: TEST_REPO_SWIMMERS.to_string(),
         value: "   ".to_string(),
         batch_dirs: None,
+        launch_target: None,
     });
 
     app.submit_initial_request(field);
@@ -5621,6 +5684,7 @@ fn typing_initial_request_and_pressing_enter_still_creates_hidden_session() {
         cwd: TEST_REPO_SWIMMERS.to_string(),
         value: String::new(),
         batch_dirs: None,
+        launch_target: None,
     });
 
     for ch in "add hidden spawn flow".chars() {
@@ -5661,11 +5725,13 @@ fn esc_cancels_initial_request_without_creating_session() {
         dir_response(TEST_REPOS_ROOT, &[("swimmers", false)]),
         true,
         SpawnTool::Codex,
+        None,
     ));
     app.initial_request = Some(InitialRequestState {
         cwd: TEST_REPO_SWIMMERS.to_string(),
         value: "investigate snapshot restore".to_string(),
         batch_dirs: None,
+        launch_target: None,
     });
 
     app.handle_initial_request_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), field);
@@ -5865,6 +5931,7 @@ fn picker_action_at_resolves_controls_and_entries() {
         dir_response("/tmp", &[("alpha", true), ("beta", false)]),
         true,
         SpawnTool::Codex,
+        None,
     );
     picker.apply_response(dir_response("/tmp/nested", &[("child", false)]), false);
     let layout = picker_layout(&picker, test_field());
@@ -5918,6 +5985,67 @@ fn picker_action_at_resolves_controls_and_entries() {
         picker_action_at(&picker, &layout, layout.tool_button.x, layout.tool_button.y),
         Some(PickerAction::ToggleTool)
     ));
+    assert!(matches!(
+        picker_action_at(
+            &picker,
+            &layout,
+            layout.launch_target_button.x,
+            layout.launch_target_button.y
+        ),
+        Some(PickerAction::ToggleLaunchTarget)
+    ));
+}
+
+#[test]
+fn toggle_launch_target_persists_across_picker_reopen() {
+    let api = MockApi::new();
+    api.push_list_dirs(Ok(dir_response_with_launch_targets(
+        TEST_REPOS_ROOT,
+        &[("swimmers", false)],
+    )));
+    api.push_list_dirs(Ok(dir_response_with_launch_targets(
+        TEST_REPOS_ROOT,
+        &[("swimmers", false)],
+    )));
+    let field = test_field();
+    let mut app = make_app(api.clone());
+
+    app.handle_field_click(10, 10, field);
+    poll_until_interaction(&mut app);
+
+    assert_eq!(app.launch_target.as_deref(), Some("local"));
+    app.handle_picker_action(PickerAction::ToggleLaunchTarget, field);
+    assert_eq!(app.launch_target.as_deref(), Some("jeremy-skillbox"));
+
+    app.close_picker();
+    app.handle_field_click(10, 10, field);
+    poll_until_interaction(&mut app);
+
+    assert_eq!(
+        app.picker
+            .as_ref()
+            .and_then(|picker| picker.launch_target.as_deref()),
+        Some("jeremy-skillbox")
+    );
+}
+
+#[test]
+fn picker_reload_without_preserve_uses_response_launch_default() {
+    let mut picker = PickerState::new(
+        4,
+        4,
+        dir_response_with_launch_targets("/tmp", &[("alpha", true)]),
+        true,
+        SpawnTool::Codex,
+        None,
+    );
+    assert_eq!(picker.launch_target.as_deref(), Some("local"));
+
+    let mut response = dir_response_with_launch_targets("/tmp", &[("beta", true)]);
+    response.default_launch_target = Some("jeremy-skillbox".to_string());
+    picker.apply_response(response, false);
+
+    assert_eq!(picker.launch_target.as_deref(), Some("jeremy-skillbox"));
 }
 
 #[test]
@@ -5930,9 +6058,12 @@ fn picker_action_at_prefers_repo_action_badges() {
             entries: vec![repo_dir_entry("swimmers", true, Some(true), None)],
             overlay_label: None,
             groups: Vec::new(),
+            launch_targets: Vec::new(),
+            default_launch_target: None,
         },
         true,
         SpawnTool::Codex,
+        None,
     );
     let layout = picker_layout(&picker, test_field());
     let label = "[commit]";
@@ -6006,6 +6137,8 @@ fn picker_commit_action_calls_api_and_preserves_selection() {
         )],
         overlay_label: None,
         groups: Vec::new(),
+        launch_targets: Vec::new(),
+        default_launch_target: None,
     }));
 
     let mut app = make_app(api.clone());
@@ -6017,9 +6150,12 @@ fn picker_commit_action_calls_api_and_preserves_selection() {
             entries: vec![repo_dir_entry("swimmers", true, Some(true), None)],
             overlay_label: None,
             groups: Vec::new(),
+            launch_targets: Vec::new(),
+            default_launch_target: None,
         },
         true,
         SpawnTool::Codex,
+        None,
     );
     picker.selection = PickerSelection::Entry(0);
     app.picker = Some(picker);
@@ -6061,6 +6197,7 @@ fn spawn_session_uses_selected_tool() {
         cwd: TEST_REPO_SWIMMERS.to_string(),
         value: "fix the build".to_string(),
         batch_dirs: None,
+        launch_target: None,
     });
 
     app.submit_initial_request(field);
@@ -6074,6 +6211,64 @@ fn spawn_session_uses_selected_tool() {
             TEST_REPO_SWIMMERS.to_string(),
             SpawnTool::Claude,
             Some("fix the build".to_string()),
+        )]
+    );
+}
+
+#[test]
+fn spawn_session_sends_selected_launch_target() {
+    let api = MockApi::new();
+    api.push_create_session(Ok(create_response("sess-100", "100", TEST_REPO_SWIMMERS)));
+    let field = test_field();
+    let mut app = make_app(api.clone());
+    app.initial_request = Some(InitialRequestState {
+        cwd: TEST_REPO_SWIMMERS.to_string(),
+        value: "move this off laptop".to_string(),
+        batch_dirs: None,
+        launch_target: Some("jeremy-skillbox".to_string()),
+    });
+
+    app.submit_initial_request(field);
+    poll_until_interaction(&mut app);
+
+    assert_eq!(
+        api.create_calls_with_targets(),
+        vec![(
+            TEST_REPO_SWIMMERS.to_string(),
+            SpawnTool::Codex,
+            Some("jeremy-skillbox".to_string()),
+            Some("move this off laptop".to_string()),
+        )]
+    );
+}
+
+#[test]
+fn spawn_batch_sends_selected_launch_target() {
+    let api = MockApi::new();
+    api.push_create_sessions_batch(Ok(create_batch_response(&[(
+        "sess-alpha",
+        "alpha",
+        TEST_REPO_ALPHA,
+    )])));
+    let field = test_field();
+    let mut app = make_app(api.clone());
+    let mut request = InitialRequestState::new_batch(
+        vec![TEST_REPO_ALPHA.to_string()],
+        Some("jeremy-skillbox".to_string()),
+    );
+    request.value = "fan out remotely".to_string();
+    app.initial_request = Some(request);
+
+    app.submit_initial_request(field);
+    poll_until_interaction(&mut app);
+
+    assert_eq!(
+        api.create_batch_calls_with_targets(),
+        vec![(
+            vec![TEST_REPO_ALPHA.to_string()],
+            SpawnTool::Codex,
+            Some("jeremy-skillbox".to_string()),
+            Some("fan out remotely".to_string()),
         )]
     );
 }
@@ -6115,6 +6310,7 @@ fn move_selection_updates_picker_and_visible_session_selection() {
         dir_response("/tmp", &[("alpha", false), ("beta", false)]),
         true,
         SpawnTool::Codex,
+        None,
     );
     picker.selection = PickerSelection::SpawnHere;
     app.picker = Some(picker);
@@ -6140,7 +6336,7 @@ fn handle_key_event_covers_initial_request_picker_and_quit_paths() {
         layout.overview_field,
     );
 
-    app.open_initial_request("/tmp/project".to_string());
+    app.open_initial_request("/tmp/project".to_string(), None);
     assert!(handle_key_event(
         &mut app,
         layout,
@@ -6160,6 +6356,7 @@ fn handle_key_event_covers_initial_request_picker_and_quit_paths() {
         dir_response("/tmp", &[("alpha", false)]),
         true,
         SpawnTool::Codex,
+        None,
     ));
     assert!(handle_key_event(
         &mut app,
@@ -6208,6 +6405,8 @@ fn handle_key_event_keeps_picker_hotkeys_before_live_search() {
         )],
         overlay_label: None,
         groups: Vec::new(),
+        launch_targets: Vec::new(),
+        default_launch_target: None,
     }));
     let layout = test_layout(120, 32);
     let mut app = make_app(api.clone());
@@ -6219,9 +6418,12 @@ fn handle_key_event_keeps_picker_hotkeys_before_live_search() {
             entries: vec![repo_dir_entry("swimmers", true, Some(true), None)],
             overlay_label: None,
             groups: Vec::new(),
+            launch_targets: Vec::new(),
+            default_launch_target: None,
         },
         true,
         SpawnTool::Codex,
+        None,
     );
     picker.selection = PickerSelection::Entry(0);
     app.picker = Some(picker);
@@ -6915,6 +7117,7 @@ fn picker_activate_selection_opens_initial_request_and_reloads_children() {
         dir_response("/tmp", &[("child", true), ("leaf", false)]),
         true,
         SpawnTool::Codex,
+        None,
     ));
 
     app.picker_activate_selection(layout.overview_field);
@@ -10629,7 +10832,7 @@ fn handle_tui_event_covers_key_paste_mouse_and_resize_paths() {
     let layout = test_layout(120, 32);
     let mut app = make_app(api);
     let mut renderer = test_renderer(120, 32);
-    app.open_initial_request("/tmp/project".to_string());
+    app.open_initial_request("/tmp/project".to_string(), None);
 
     assert!(handle_tui_event(
         &mut app,
@@ -10707,7 +10910,7 @@ fn handle_mouse_down_early_returns_when_initial_request_open() {
     let layout = test_layout(120, 32);
     let mut app = make_app(api);
     let renderer = test_renderer(120, 32);
-    app.open_initial_request("/tmp/project".to_string());
+    app.open_initial_request("/tmp/project".to_string(), None);
     assert!(app.initial_request.is_some());
     handle_mouse_down(&mut app, &renderer, layout, mouse_down(10, 10));
     assert!(app.initial_request.is_some());

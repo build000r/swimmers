@@ -39,12 +39,12 @@ use swimmers::thought::runtime_config::{DaemonDefaults, ThoughtConfig};
 use swimmers::types::{
     CreateSessionRequest, CreateSessionResponse, CreateSessionsBatchRequest,
     CreateSessionsBatchResponse, DirEntry, DirListResponse, DirRepoActionRequest,
-    DirRepoActionResponse, ErrorResponse, GhosttyOpenMode, MermaidArtifactResponse,
-    NativeDesktopApp, NativeDesktopConfigRequest, NativeDesktopModeRequest,
-    NativeDesktopOpenRequest, NativeDesktopOpenResponse, NativeDesktopStatusResponse,
-    PlanFileResponse, PublishSelectionRequest, RepoActionKind, RepoActionState, RepoTheme,
-    RestState, SessionBatchMembership, SessionListResponse, SessionState, SessionSummary,
-    SpawnTool, TransportHealth,
+    DirRepoActionResponse, ErrorResponse, GhosttyOpenMode, LaunchTargetSummary,
+    MermaidArtifactResponse, NativeDesktopApp, NativeDesktopConfigRequest,
+    NativeDesktopModeRequest, NativeDesktopOpenRequest, NativeDesktopOpenResponse,
+    NativeDesktopStatusResponse, PlanFileResponse, PublishSelectionRequest, RepoActionKind,
+    RepoActionState, RepoTheme, RestState, SessionBatchMembership, SessionListResponse,
+    SessionState, SessionSummary, SpawnTool, TransportHealth,
 };
 
 const MIN_WIDTH: u16 = 70;

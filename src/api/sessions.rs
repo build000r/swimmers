@@ -9,7 +9,7 @@ use std::sync::Arc;
 use tokio::sync::oneshot;
 use uuid::Uuid;
 
-use crate::api::{fetch_live_summary, AppState};
+use crate::api::{fetch_live_summary, remote_sessions, AppState};
 use crate::auth::{AuthInfo, AuthScope};
 use crate::session::actor::SessionCommand;
 use crate::types::{
@@ -34,7 +34,8 @@ async fn list_sessions(
     // Keep the hot polling path cheap. Bootstrap/startup populates repo assets
     // and session discovery; repeated list calls should serve current in-memory
     // state instead of re-running tmux discovery and asset collection.
-    let sessions = state.supervisor.list_sessions().await;
+    let mut sessions = state.supervisor.list_sessions().await;
+    sessions.extend(remote_sessions::list_remote_sessions().await);
     // The version counter is not tracked by the supervisor itself; we use 0
     // as a placeholder. A proper monotonic version can be added to the
     // supervisor later if clients need ETag-style cache validation.
@@ -56,6 +57,12 @@ async fn create_session(
 ) -> impl IntoResponse {
     if let Err(resp) = auth.require_scope(AuthScope::SessionsWrite) {
         return resp;
+    }
+    if remote_sessions::is_remote_launch_target(body.launch_target.as_deref()) {
+        return match remote_sessions::create_remote_session(body).await {
+            Ok(response) => (StatusCode::CREATED, Json(response)).into_response(),
+            Err(err) => err.into_response(),
+        };
     }
     match state
         .supervisor
@@ -120,6 +127,20 @@ async fn create_sessions_batch(
             }),
         )
             .into_response();
+    }
+
+    if remote_sessions::is_remote_launch_target(body.launch_target.as_deref()) {
+        return match remote_sessions::create_remote_sessions_batch(body).await {
+            Ok(response) => {
+                let status = if response.results.iter().all(|result| result.ok) {
+                    StatusCode::CREATED
+                } else {
+                    StatusCode::MULTI_STATUS
+                };
+                (status, Json(response)).into_response()
+            }
+            Err(err) => err.into_response(),
+        };
     }
 
     let total = body.dirs.len();
@@ -616,6 +637,18 @@ async fn get_mermaid_artifact(
     if let Err(resp) = auth.require_scope(AuthScope::SessionsRead) {
         return resp;
     }
+    match remote_sessions::denamespace_for_target(&session_id) {
+        Ok(Some((target, remote_session_id))) => {
+            return match remote_sessions::fetch_remote_mermaid_artifact(&target, remote_session_id)
+                .await
+            {
+                Ok(response) => (StatusCode::OK, Json(response)).into_response(),
+                Err(err) => err.into_response(),
+            };
+        }
+        Ok(None) => {}
+        Err(err) => return err.into_response(),
+    }
     let handle = match state.supervisor.get_session(&session_id).await {
         Some(h) => h,
         None => {
@@ -684,6 +717,22 @@ async fn get_plan_file(
 ) -> impl IntoResponse {
     if let Err(resp) = auth.require_scope(AuthScope::SessionsRead) {
         return resp;
+    }
+    match remote_sessions::denamespace_for_target(&session_id) {
+        Ok(Some((target, remote_session_id))) => {
+            return match remote_sessions::fetch_remote_plan_file(
+                &target,
+                remote_session_id,
+                &query.name,
+            )
+            .await
+            {
+                Ok(response) => (StatusCode::OK, Json(response)).into_response(),
+                Err(err) => err.into_response(),
+            };
+        }
+        Ok(None) => {}
+        Err(err) => return err.into_response(),
     }
     let handle = match state.supervisor.get_session(&session_id).await {
         Some(h) => h,
@@ -944,6 +993,7 @@ esac
             Json(CreateSessionsBatchRequest {
                 dirs,
                 spawn_tool: None,
+                launch_target: None,
                 initial_request: None,
             }),
         )
@@ -1019,6 +1069,7 @@ esac
                 name: None,
                 cwd: None,
                 spawn_tool: None,
+                launch_target: None,
                 initial_request: None,
             }),
         )
@@ -1029,6 +1080,31 @@ esac
     }
 
     #[tokio::test]
+    async fn create_session_rejects_unknown_non_local_launch_target_explicitly() {
+        let response = create_session(
+            Extension(AuthInfo::new(OPERATOR_SCOPES.to_vec())),
+            State(test_state()),
+            Json(CreateSessionRequest {
+                name: None,
+                cwd: None,
+                spawn_tool: None,
+                launch_target: Some("not-configured-target-for-test".to_string()),
+                initial_request: None,
+            }),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let json = response_json(response).await;
+        assert_eq!(json["code"], "LAUNCH_TARGET_UNKNOWN");
+        assert!(json["message"]
+            .as_str()
+            .expect("message")
+            .contains("launch target 'not-configured-target-for-test' is not configured"));
+    }
+
+    #[tokio::test]
     async fn create_sessions_batch_requires_write_scope() {
         let response = create_sessions_batch(
             Extension(AuthInfo::new(OBSERVER_SCOPES.to_vec())),
@@ -1036,6 +1112,7 @@ esac
             Json(CreateSessionsBatchRequest {
                 dirs: vec!["/tmp/project".to_string()],
                 spawn_tool: None,
+                launch_target: None,
                 initial_request: None,
             }),
         )
@@ -1053,6 +1130,7 @@ esac
             Json(CreateSessionsBatchRequest {
                 dirs: Vec::new(),
                 spawn_tool: None,
+                launch_target: None,
                 initial_request: None,
             }),
         )
@@ -1081,6 +1159,7 @@ esac
             Json(CreateSessionsBatchRequest {
                 dirs,
                 spawn_tool: None,
+                launch_target: None,
                 initial_request: Some("wire jwt refresh + tests".to_string()),
             }),
         )

@@ -17,9 +17,9 @@ use crate::session::overlay::{
     default_overlay, OverlayDirConfig, OverlayDirGroup, OverlayServiceEntry,
 };
 use crate::types::{
-    DirEntry, DirListResponse, DirRepoActionResponse, DirRestartResponse, NativeDesktopApp,
-    NativeDesktopOpenResponse, NativeDesktopStatusResponse, RepoActionKind, RepoActionState,
-    RepoActionStatus, SessionState,
+    DirEntry, DirListResponse, DirRepoActionResponse, DirRestartResponse, LaunchTargetSummary,
+    NativeDesktopApp, NativeDesktopOpenResponse, NativeDesktopStatusResponse, RepoActionKind,
+    RepoActionState, RepoActionStatus, SessionState,
 };
 
 /// Max concurrent git probes per `list_dirs` call. Keeps a single listing from
@@ -626,6 +626,8 @@ pub async fn list_dirs(
             groups: dir_config
                 .map(|c| c.groups.iter().map(|g| g.name.clone()).collect())
                 .unwrap_or_default(),
+            launch_targets: launch_targets_for(dir_config),
+            default_launch_target: default_launch_target_for(dir_config, Some(group_name)),
         });
     }
 
@@ -661,6 +663,8 @@ pub async fn list_dirs(
                     .iter()
                     .map(|group| group.name.clone())
                     .collect(),
+                launch_targets: launch_targets_for(Some(config)),
+                default_launch_target: default_launch_target_for(Some(config), None),
             });
         }
     }
@@ -855,7 +859,27 @@ pub async fn list_dirs(
         entries,
         overlay_label: dir_config.map(|c| c.label.clone()),
         groups,
+        launch_targets: launch_targets_for(dir_config),
+        default_launch_target: default_launch_target_for(dir_config, None),
     })
+}
+
+fn launch_targets_for(config: Option<&OverlayDirConfig>) -> Vec<LaunchTargetSummary> {
+    config
+        .map(|config| config.launch.targets.clone())
+        .filter(|targets| !targets.is_empty())
+        .unwrap_or_else(|| vec![LaunchTargetSummary::local()])
+}
+
+fn default_launch_target_for(
+    config: Option<&OverlayDirConfig>,
+    group: Option<&str>,
+) -> Option<String> {
+    Some(
+        config
+            .map(|config| config.launch.default_for_group(group))
+            .unwrap_or_else(|| "local".to_string()),
+    )
 }
 
 fn repo_action_error(error: &io::Error) -> ApiServiceError {

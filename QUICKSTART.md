@@ -170,6 +170,25 @@ http://100.x.y.z:3210/
 If that API is running in token mode, paste `AUTH_TOKEN` or `OBSERVER_TOKEN`
 into the browser auth sheet after the page loads.
 
+### Route Picker Launches to a Remote Box
+
+If your `skillbox-config` overlay declares `dev_sanity.agent_launch`, the
+directory picker can route new sessions to a configured remote `swimmers` API
+without moving the whole TUI there. Toggle the target in the picker, enter the
+initial request, and swimmers maps the local cwd through the target
+`path_mappings` before creating the session remotely.
+
+For token-protected targets, export the token env var named by the overlay,
+for example:
+
+```bash
+export SWIMMERS_JEREMY_AUTH_TOKEN=your-token
+cargo run --bin swimmers-tui
+```
+
+Remote sessions appear in the local aquarium with namespaced IDs such as
+`jeremy-skillbox::sess_0`.
+
 ### Run in Background (Optional)
 
 To keep only the API running after you close your terminal:

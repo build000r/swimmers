@@ -377,12 +377,14 @@ pub(crate) trait TuiApi: Send + Sync + 'static {
         &self,
         cwd: &str,
         spawn_tool: SpawnTool,
+        launch_target: Option<String>,
         initial_request: Option<String>,
     ) -> BoxFuture<'_, Result<CreateSessionResponse, String>>;
     fn create_sessions_batch(
         &self,
         dirs: Vec<String>,
         spawn_tool: SpawnTool,
+        launch_target: Option<String>,
         initial_request: Option<String>,
     ) -> BoxFuture<'_, Result<CreateSessionsBatchResponse, String>>;
 }
@@ -775,6 +777,7 @@ impl TuiApi for ApiClient {
         &self,
         cwd: &str,
         spawn_tool: SpawnTool,
+        launch_target: Option<String>,
         initial_request: Option<String>,
     ) -> BoxFuture<'_, Result<CreateSessionResponse, String>> {
         let cwd = cwd.to_string();
@@ -787,6 +790,7 @@ impl TuiApi for ApiClient {
                     name: None,
                     cwd: Some(cwd),
                     spawn_tool: Some(spawn_tool),
+                    launch_target,
                     initial_request,
                 })
                 .send()
@@ -808,6 +812,7 @@ impl TuiApi for ApiClient {
         &self,
         dirs: Vec<String>,
         spawn_tool: SpawnTool,
+        launch_target: Option<String>,
         initial_request: Option<String>,
     ) -> BoxFuture<'_, Result<CreateSessionsBatchResponse, String>> {
         Box::pin(async move {
@@ -818,6 +823,7 @@ impl TuiApi for ApiClient {
                 .json(&CreateSessionsBatchRequest {
                     dirs,
                     spawn_tool: Some(spawn_tool),
+                    launch_target,
                     initial_request,
                 })
                 .send()

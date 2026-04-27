@@ -6,7 +6,7 @@ use crate::api::service::{
     native_status_for_host as native_status_for_host_service, open_native_session_for_host,
     NativeOpenServiceError,
 };
-use crate::api::AppState;
+use crate::api::{remote_sessions, AppState};
 use crate::auth::{AuthInfo, AuthScope};
 use crate::types::{
     NativeDesktopConfigRequest, NativeDesktopModeRequest, NativeDesktopOpenRequest,
@@ -87,6 +87,13 @@ async fn native_open(
 ) -> impl IntoResponse {
     if let Err(resp) = auth.require_scope(AuthScope::SessionsWrite) {
         return resp;
+    }
+
+    if remote_sessions::split_remote_session_id(&body.session_id).is_some() {
+        return api_error_msg(
+            &NATIVE_DESKTOP_UNAVAILABLE,
+            "remote sessions are visible locally, but native terminal handoff must be opened on the target host",
+        );
     }
 
     let peer = request_peer(&connect_info);

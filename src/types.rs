@@ -95,6 +95,38 @@ impl SpawnTool {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LaunchPathMapping {
+    pub local_prefix: String,
+    pub remote_prefix: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LaunchTargetSummary {
+    pub id: String,
+    pub label: String,
+    pub kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth_token_env: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub path_mappings: Vec<LaunchPathMapping>,
+}
+
+impl LaunchTargetSummary {
+    pub fn local() -> Self {
+        Self {
+            id: "local".to_string(),
+            label: "Local machine".to_string(),
+            kind: "local".to_string(),
+            base_url: None,
+            auth_token_env: None,
+            path_mappings: Vec::new(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RepoActionKind {
@@ -357,6 +389,8 @@ pub struct CreateSessionRequest {
     pub cwd: Option<String>,
     pub spawn_tool: Option<SpawnTool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub launch_target: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub initial_request: Option<String>,
 }
 
@@ -364,6 +398,8 @@ pub struct CreateSessionRequest {
 pub struct CreateSessionsBatchRequest {
     pub dirs: Vec<String>,
     pub spawn_tool: Option<SpawnTool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub launch_target: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub initial_request: Option<String>,
 }
@@ -425,6 +461,10 @@ pub struct DirListResponse {
     pub overlay_label: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub groups: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub launch_targets: Vec<LaunchTargetSummary>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_launch_target: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

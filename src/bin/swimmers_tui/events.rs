@@ -146,11 +146,16 @@ impl TuiApi for TuiClient {
         &self,
         cwd: &str,
         spawn_tool: SpawnTool,
+        launch_target: Option<String>,
         initial_request: Option<String>,
     ) -> BoxFuture<'_, Result<CreateSessionResponse, String>> {
         match self {
-            Self::Embedded(client) => client.create_session(cwd, spawn_tool, initial_request),
-            Self::External(client) => client.create_session(cwd, spawn_tool, initial_request),
+            Self::Embedded(client) => {
+                client.create_session(cwd, spawn_tool, launch_target, initial_request)
+            }
+            Self::External(client) => {
+                client.create_session(cwd, spawn_tool, launch_target, initial_request)
+            }
         }
     }
 
@@ -158,14 +163,15 @@ impl TuiApi for TuiClient {
         &self,
         dirs: Vec<String>,
         spawn_tool: SpawnTool,
+        launch_target: Option<String>,
         initial_request: Option<String>,
     ) -> BoxFuture<'_, Result<CreateSessionsBatchResponse, String>> {
         match self {
             Self::Embedded(client) => {
-                client.create_sessions_batch(dirs, spawn_tool, initial_request)
+                client.create_sessions_batch(dirs, spawn_tool, launch_target, initial_request)
             }
             Self::External(client) => {
-                client.create_sessions_batch(dirs, spawn_tool, initial_request)
+                client.create_sessions_batch(dirs, spawn_tool, launch_target, initial_request)
             }
         }
     }

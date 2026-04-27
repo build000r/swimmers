@@ -42,7 +42,7 @@ A terminal aquarium for your tmux sessions. Each session becomes an animated fis
 | **Native terminal handoff** | Open any session directly in iTerm or Ghostty from the TUI |
 | **Mermaid diagrams** | Render and zoom Mermaid artifacts inline in the terminal |
 | **Repo themes** | Per-repo colors plus default sprite overrides via `.swimmers/colors.json` |
-| **Remote API** | Point the TUI at a remote server over Tailscale or any network |
+| **Remote API + launch targets** | Point the TUI at a remote server, or route selected directory launches to overlay-declared remote `swimmers` APIs |
 | **Prometheus metrics** | `GET /metrics` for monitoring session counts and API health |
 | **No database, no Docker** | File-based persistence, single binary, tmux is the only dependency |
 
@@ -144,6 +144,21 @@ swimmers serve    # explicit form for service managers and docs
 ```
 
 `Ctrl-C` stops it. `kill $(lsof -ti:3210)` works for a backgrounded instance.
+
+### Directory launch targets
+
+When a `skillbox-config` client overlay declares `dev_sanity.agent_launch`,
+the directory picker shows a launch-target toggle next to the tool selector.
+`local` keeps the existing behavior. A `kind: swimmers_api` target maps the
+selected local cwd through its `path_mappings`, POSTs the create request to
+the target API with the token named by `auth_token_env`, and namespaces remote
+sessions as `target::session_id` so local and remote `sess_0` values cannot
+collide.
+
+Remote targets are different from `SWIMMERS_TUI_URL`: `SWIMMERS_TUI_URL`
+points the entire TUI at one backend, while launch targets let one local TUI
+spawn selected directory/list runs onto another configured machine and keep
+those sessions visible in the local aquarium.
 
 ---
 

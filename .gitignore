@@ -19,3 +19,6 @@ data/
 # Coverage artifacts
 lcov.info
 **/*.lcov
+
+# Generated benchmark/profiling reports
+tests/artifacts/

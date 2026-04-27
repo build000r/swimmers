@@ -1,8 +1,11 @@
+use std::collections::BTreeMap;
 use std::path::{Component, Path, PathBuf};
 use std::sync::OnceLock;
 use std::time::SystemTime;
 
 use serde::Deserialize;
+
+use crate::types::{LaunchPathMapping, LaunchTargetSummary};
 
 /// Cached skillbox overlay, loaded once from disk.
 pub fn default_overlay() -> Option<&'static SkillboxOverlay> {
@@ -40,6 +43,30 @@ pub struct OverlayDirGroup {
     pub dirs: Vec<PathBuf>,
 }
 
+#[derive(Debug, Clone)]
+pub struct OverlayLaunchConfig {
+    pub default_target: String,
+    pub targets: Vec<LaunchTargetSummary>,
+    pub group_defaults: BTreeMap<String, String>,
+}
+
+impl OverlayLaunchConfig {
+    pub fn local_only() -> Self {
+        Self {
+            default_target: "local".to_string(),
+            targets: vec![LaunchTargetSummary::local()],
+            group_defaults: BTreeMap::new(),
+        }
+    }
+
+    pub fn default_for_group(&self, group: Option<&str>) -> String {
+        group
+            .and_then(|name| self.group_defaults.get(name))
+            .cloned()
+            .unwrap_or_else(|| self.default_target.clone())
+    }
+}
+
 /// A domain plan discovered on disk under an overlay's `plans/{released,draft}` root.
 #[derive(Debug, Clone)]
 pub struct OverlayPlanEntry {
@@ -66,6 +93,8 @@ pub struct OverlayDirConfig {
     pub services: Vec<OverlayServiceEntry>,
     /// Virtual directory groups shown alongside managed entries.
     pub groups: Vec<OverlayDirGroup>,
+    /// Agent launch targets/defaults declared by the overlay.
+    pub launch: OverlayLaunchConfig,
 }
 
 struct ClientOverlay {
@@ -148,6 +177,42 @@ impl SkillboxOverlay {
                     .any(|pattern| cwd_starts_with(&cwd_normalized, pattern))
             })
             .and_then(|c| c.dir_config.as_ref())
+    }
+
+    pub fn launch_target_by_id(&self, id: &str) -> Option<LaunchTargetSummary> {
+        self.clients
+            .iter()
+            .filter_map(|client| client.dir_config.as_ref())
+            .flat_map(|config| config.launch.targets.iter())
+            .find(|target| target.id == id)
+            .cloned()
+    }
+
+    pub fn launch_target_for_cwd(&self, cwd: &str, id: &str) -> Option<LaunchTargetSummary> {
+        self.find_dir_config(cwd)?
+            .launch
+            .targets
+            .iter()
+            .find(|target| target.id == id)
+            .cloned()
+    }
+
+    pub fn all_launch_targets(&self) -> Vec<LaunchTargetSummary> {
+        let mut targets = Vec::new();
+        for target in self
+            .clients
+            .iter()
+            .filter_map(|client| client.dir_config.as_ref())
+            .flat_map(|config| config.launch.targets.iter())
+        {
+            if !targets
+                .iter()
+                .any(|existing: &LaunchTargetSummary| existing.id == target.id)
+            {
+                targets.push(target.clone());
+            }
+        }
+        targets
     }
 
     /// Given a session CWD, find the matching client's plan directories.
@@ -349,9 +414,45 @@ struct ClientRepoEntry {
 #[derive(Deserialize, Default)]
 struct DevSanitySection {
     #[serde(default)]
+    agent_launch: Option<DevSanityAgentLaunch>,
+    #[serde(default)]
     services: Option<DevSanityServices>,
     #[serde(default)]
     groups: Vec<DevSanityGroup>,
+}
+
+#[derive(Deserialize, Default)]
+struct DevSanityAgentLaunch {
+    #[serde(default)]
+    default_target: Option<String>,
+    #[serde(default)]
+    targets: Vec<DevSanityLaunchTarget>,
+    #[serde(default)]
+    group_defaults: BTreeMap<String, String>,
+}
+
+#[derive(Deserialize, Default)]
+struct DevSanityLaunchTarget {
+    #[serde(default)]
+    id: Option<String>,
+    #[serde(default)]
+    label: Option<String>,
+    #[serde(default)]
+    kind: Option<String>,
+    #[serde(default)]
+    base_url: Option<String>,
+    #[serde(default)]
+    auth_token_env: Option<String>,
+    #[serde(default)]
+    path_mappings: Vec<DevSanityLaunchPathMapping>,
+}
+
+#[derive(Deserialize, Default)]
+struct DevSanityLaunchPathMapping {
+    #[serde(default)]
+    local_prefix: Option<String>,
+    #[serde(default)]
+    remote_prefix: Option<String>,
 }
 
 #[derive(Deserialize, Default)]
@@ -425,6 +526,7 @@ fn parse_client_overlay(client_dir: &Path, overlay_path: &Path) -> Option<Client
         .map(|rel| client_dir.join(rel));
 
     let dir_config = file.dev_sanity.and_then(|ds| {
+        let launch = parse_agent_launch(ds.agent_launch);
         let groups: Vec<OverlayDirGroup> = ds
             .groups
             .into_iter()
@@ -489,6 +591,7 @@ fn parse_client_overlay(client_dir: &Path, overlay_path: &Path) -> Option<Client
             base_path,
             services,
             groups,
+            launch,
         })
     });
 
@@ -501,6 +604,61 @@ fn parse_client_overlay(client_dir: &Path, overlay_path: &Path) -> Option<Client
         plan_draft,
         dir_config,
     })
+}
+
+fn parse_agent_launch(section: Option<DevSanityAgentLaunch>) -> OverlayLaunchConfig {
+    let Some(section) = section else {
+        return OverlayLaunchConfig::local_only();
+    };
+
+    let mut targets: Vec<LaunchTargetSummary> = section
+        .targets
+        .into_iter()
+        .filter_map(|target| {
+            let id = target.id?;
+            let label = target.label.unwrap_or_else(|| id.clone());
+            let kind = target.kind.unwrap_or_else(|| "local".to_string());
+            let path_mappings = target
+                .path_mappings
+                .into_iter()
+                .filter_map(|mapping| {
+                    Some(LaunchPathMapping {
+                        local_prefix: expand_path(&mapping.local_prefix?),
+                        remote_prefix: expand_path(&mapping.remote_prefix?),
+                    })
+                })
+                .collect();
+            Some(LaunchTargetSummary {
+                id,
+                label,
+                kind,
+                base_url: target.base_url,
+                auth_token_env: target.auth_token_env,
+                path_mappings,
+            })
+        })
+        .collect();
+
+    if !targets.iter().any(|target| target.id == "local") {
+        targets.insert(0, LaunchTargetSummary::local());
+    }
+
+    let default_target = section
+        .default_target
+        .filter(|target| targets.iter().any(|candidate| candidate.id == *target))
+        .unwrap_or_else(|| "local".to_string());
+
+    let group_defaults = section
+        .group_defaults
+        .into_iter()
+        .filter(|(_, target)| targets.iter().any(|candidate| candidate.id == *target))
+        .collect();
+
+    OverlayLaunchConfig {
+        default_target,
+        targets,
+        group_defaults,
+    }
 }
 
 fn service_entry_from_client_repo(
