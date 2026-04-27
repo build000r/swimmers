@@ -70,6 +70,13 @@ is_swimmers_server_command() {
   [[ "${argv0##*/}" == "swimmers" ]]
 }
 
+loopback_port_has_listener() {
+  local port="${1}"
+  (: <"/dev/tcp/127.0.0.1/${port}") >/dev/null 2>&1 && return 0
+  (: <"/dev/tcp/::1/${port}") >/dev/null 2>&1 && return 0
+  return 1
+}
+
 wait_for_pid_to_exit() {
   local pid="${1}"
   local _i
@@ -99,6 +106,9 @@ restart_loopback_swimmers_if_needed() {
   local target_url port
   target_url="${SWIMMERS_TUI_URL:-http://127.0.0.1:${PORT:-3210}}"
   port="$(loopback_port_from_url "${target_url}")" || return 0
+  if ! loopback_port_has_listener "${port}"; then
+    return 0
+  fi
 
   local pids=()
   local found_pid
@@ -143,5 +153,40 @@ feature_args=()
 if [[ -n "${SWIMMERS_TUI_FEATURES:-}" ]]; then
   feature_args=(--features "${SWIMMERS_TUI_FEATURES}")
 fi
+
+tui_binary_path() {
+  local target_dir="${CARGO_TARGET_DIR:-target}"
+  printf '%s\n' "${target_dir%/}/debug/swimmers-tui"
+}
+
+direct_binary_supported() {
+  [[ "${#feature_args[@]}" -eq 0 ]] || return 1
+  [[ -z "${RUSTFLAGS:-}" ]] || return 1
+  [[ -z "${CARGO_BUILD_TARGET:-}" ]] || return 1
+}
+
+tui_binary_is_current() {
+  local binary="${1}"
+  [[ -x "${binary}" ]] || return 1
+
+  local inputs=(Cargo.toml Cargo.lock src)
+  [[ -f build.rs ]] && inputs+=(build.rs)
+  [[ -d .cargo ]] && inputs+=(.cargo)
+
+  [[ -z "$(find "${inputs[@]}" -type f -newer "${binary}" -print -quit)" ]]
+}
+
+exec_tui() {
+  if direct_binary_supported; then
+    local binary
+    binary="$(tui_binary_path)"
+    if tui_binary_is_current "${binary}"; then
+      exec "${binary}" "$@"
+    fi
+  fi
+
+  exec cargo run --quiet "${feature_args[@]}" --bin swimmers-tui -- "$@"
+}
+
 restart_loopback_swimmers_if_needed "$@"
-exec cargo run --quiet "${feature_args[@]}" --bin swimmers-tui -- "$@"
+exec_tui "$@"
