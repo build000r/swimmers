@@ -422,6 +422,34 @@ pub(crate) fn handle_key_event<C: TuiApi>(
         return true;
     }
 
+    if app.picker.is_some() && matches!(key.code, KeyCode::Char('X')) {
+        app.handle_picker_action(PickerAction::ToggleBatchExcludeMode, layout.overview_field);
+        return true;
+    }
+
+    if app
+        .picker
+        .as_ref()
+        .map(|picker| picker.batch_exclude_mode)
+        .unwrap_or(false)
+        && matches!(key.code, KeyCode::Char(' '))
+    {
+        if let Some(index) = app
+            .picker
+            .as_ref()
+            .and_then(|picker| match picker.selection {
+                PickerSelection::Entry(index) => Some(index),
+                PickerSelection::SpawnHere => None,
+            })
+        {
+            app.handle_picker_action(
+                PickerAction::ToggleBatchExclude(index),
+                layout.overview_field,
+            );
+        }
+        return true;
+    }
+
     if app.picker.is_some() {
         let no_mods = key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT;
         if no_mods {
@@ -565,6 +593,7 @@ fn picker_char_should_search<C: TuiApi>(app: &App<C>, ch: char) -> bool {
             | 'R'
             | 'O'
             | 'B'
+            | 'X'
             | 'r'
             | 'm'
             | 't'

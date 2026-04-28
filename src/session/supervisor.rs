@@ -1,4 +1,7 @@
 use std::collections::{HashMap, HashSet};
+use std::fs::{self, OpenOptions};
+use std::io::{self, Write};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -7,6 +10,7 @@ use chrono::{DateTime, Utc};
 use tokio::process::Command;
 use tokio::sync::{broadcast, mpsc, oneshot, Mutex, Notify, RwLock};
 use tracing::{debug, error, info, warn};
+use uuid::Uuid;
 
 use crate::config::Config;
 use crate::persistence::file_store::{FileStore, PersistedSession, ThoughtSnapshot};
@@ -240,6 +244,10 @@ pub struct SessionSupervisor {
     /// Stale (exited) sessions from persistence that have no matching live tmux.
     stale_sessions: RwLock<Vec<SessionSummary>>,
 
+    /// Last successful live summaries keyed by session_id. Session listing uses
+    /// this to avoid treating transient actor backpressure as deletion.
+    summary_cache: RwLock<HashMap<String, SessionSummary>>,
+
     /// Monotonic counter for generating numeric fallback session names.
     next_name_counter: AtomicU64,
 
@@ -282,6 +290,7 @@ impl SessionSupervisor {
             config,
             sessions: RwLock::new(HashMap::new()),
             stale_sessions: RwLock::new(Vec::new()),
+            summary_cache: RwLock::new(HashMap::new()),
             next_name_counter: AtomicU64::new(0),
             next_id_counter: AtomicU64::new(0),
             lifecycle_tx,
@@ -948,39 +957,94 @@ impl SessionSupervisor {
             let sessions = self.sessions.read().await;
             sessions.values().cloned().collect()
         };
+        let live_session_ids = handles
+            .iter()
+            .map(|handle| handle.session_id.clone())
+            .collect::<HashSet<_>>();
+        let cached_summaries = self.summary_cache.read().await.clone();
+
+        enum SummaryCollectOutcome {
+            Live(SessionSummary),
+            Fallback(SessionSummary),
+            Exited(String),
+            Missing,
+        }
 
         let futs: Vec<_> = handles
             .into_iter()
-            .map(|handle| async move {
-                let (tx, rx) = oneshot::channel();
-                if handle
-                    .cmd_tx
-                    .send(SessionCommand::GetSummary(tx))
-                    .await
-                    .is_err()
-                {
-                    return None;
-                }
-                match tokio::time::timeout(timeout, rx).await {
-                    Ok(Ok(summary)) if summary.state != SessionState::Exited => Some(summary),
-                    Ok(Ok(_)) => None,
-                    Ok(Err(_)) => {
-                        warn!(session_id = %handle.session_id, "actor dropped summary reply");
-                        None
+            .map(|handle| {
+                let cached = cached_summaries.get(&handle.session_id).cloned();
+                async move {
+                    let (tx, rx) = oneshot::channel();
+                    if handle
+                        .cmd_tx
+                        .send(SessionCommand::GetSummary(tx))
+                        .await
+                        .is_err()
+                    {
+                        warn!(session_id = %handle.session_id, "actor summary command channel closed");
+                        return cached
+                            .map(|mut summary| {
+                                summary.transport_health = TransportHealth::Disconnected;
+                                SummaryCollectOutcome::Fallback(summary)
+                            })
+                            .unwrap_or(SummaryCollectOutcome::Missing);
                     }
-                    Err(_) => {
-                        warn!(session_id = %handle.session_id, "summary request timed out");
-                        None
+                    match tokio::time::timeout(timeout, rx).await {
+                        Ok(Ok(summary)) if summary.state != SessionState::Exited => {
+                            SummaryCollectOutcome::Live(summary)
+                        }
+                        Ok(Ok(summary)) => SummaryCollectOutcome::Exited(summary.session_id),
+                        Ok(Err(_)) => {
+                            warn!(session_id = %handle.session_id, "actor dropped summary reply");
+                            cached
+                                .map(|mut summary| {
+                                    summary.transport_health = TransportHealth::Degraded;
+                                    SummaryCollectOutcome::Fallback(summary)
+                                })
+                                .unwrap_or(SummaryCollectOutcome::Missing)
+                        }
+                        Err(_) => {
+                            warn!(session_id = %handle.session_id, "summary request timed out");
+                            cached
+                                .map(|mut summary| {
+                                    summary.transport_health = TransportHealth::Overloaded;
+                                    SummaryCollectOutcome::Fallback(summary)
+                                })
+                                .unwrap_or(SummaryCollectOutcome::Missing)
+                        }
                     }
                 }
             })
             .collect();
 
-        futures::future::join_all(futs)
-            .await
-            .into_iter()
-            .flatten()
-            .collect()
+        let mut summaries = Vec::new();
+        let mut live_updates = Vec::new();
+        let mut exited_ids = Vec::new();
+        for outcome in futures::future::join_all(futs).await {
+            match outcome {
+                SummaryCollectOutcome::Live(summary) => {
+                    live_updates.push(summary.clone());
+                    summaries.push(summary);
+                }
+                SummaryCollectOutcome::Fallback(summary) => summaries.push(summary),
+                SummaryCollectOutcome::Exited(session_id) => exited_ids.push(session_id),
+                SummaryCollectOutcome::Missing => {}
+            }
+        }
+
+        {
+            let mut cache = self.summary_cache.write().await;
+            cache.retain(|session_id, _| live_session_ids.contains(session_id));
+            for session_id in exited_ids {
+                cache.remove(&session_id);
+            }
+            for summary in live_updates {
+                cache.insert(summary.session_id.clone(), summary);
+            }
+        }
+
+        summaries
     }
 
     /// List summaries for all active sessions.
@@ -1738,11 +1802,87 @@ fn build_spawn_tool_command(
 ) -> String {
     if spawn_tool_consumes_initial_request(tool) {
         if let Some(initial_request) = initial_request {
+            if tool == crate::types::SpawnTool::Codex {
+                match build_codex_prompt_file_command(initial_request) {
+                    Ok(command) => return command,
+                    Err(err) => {
+                        warn!(
+                            tool = ?tool,
+                            "failed to create prompt file for spawn command; starting without initial request: {}",
+                            err
+                        );
+                        return tool.command().to_string();
+                    }
+                }
+            }
             return format!("{} {}", tool.command(), shell_single_quote(initial_request));
         }
     }
 
     tool.command().to_string()
+}
+
+fn build_codex_prompt_file_command(initial_request: &str) -> io::Result<String> {
+    let prompt_path = write_spawn_prompt_file(initial_request)?;
+    let prompt_path = shell_single_quote(&prompt_path.to_string_lossy());
+    Ok(format!(
+        "prompt_file={prompt_path}; if prompt=\"$(cat \"$prompt_file\")\"; then rm -f \"$prompt_file\"; if command -v codex-raw >/dev/null 2>&1; then codex-raw \"$prompt\"; else codex \"$prompt\"; fi; else rm -f \"$prompt_file\"; echo 'swimmers: failed to read initial request' >&2; fi"
+    ))
+}
+
+fn write_spawn_prompt_file(initial_request: &str) -> io::Result<PathBuf> {
+    let dir = std::env::temp_dir().join("swimmers-initial-requests");
+    prepare_private_prompt_dir(&dir)?;
+    let prompt_path = dir.join(format!("{}.prompt.txt", Uuid::new_v4()));
+    let mut file = create_private_prompt_file(&prompt_path)?;
+    file.write_all(initial_request.as_bytes())?;
+    Ok(prompt_path)
+}
+
+fn prepare_private_prompt_dir(path: &Path) -> io::Result<()> {
+    fs::create_dir_all(path)?;
+    let metadata = fs::symlink_metadata(path)?;
+    if metadata.file_type().is_symlink() {
+        return Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            format!("prompt directory is a symlink: {}", path.display()),
+        ));
+    }
+    if !metadata.is_dir() {
+        return Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            format!("prompt path is not a directory: {}", path.display()),
+        ));
+    }
+    set_private_dir_permissions(path)
+}
+
+#[cfg(unix)]
+fn set_private_dir_permissions(path: &Path) -> io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    fs::set_permissions(path, fs::Permissions::from_mode(0o700))
+}
+
+#[cfg(not(unix))]
+fn set_private_dir_permissions(_path: &Path) -> io::Result<()> {
+    Ok(())
+}
+
+#[cfg(unix)]
+fn create_private_prompt_file(path: &Path) -> io::Result<fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)
+}
+
+#[cfg(not(unix))]
+fn create_private_prompt_file(path: &Path) -> io::Result<fs::File> {
+    OpenOptions::new().write(true).create_new(true).open(path)
 }
 
 fn shell_single_quote(value: &str) -> String {
@@ -2060,6 +2200,24 @@ mod tests {
         handle
     }
 
+    async fn spawn_hung_summary_handle(session_id: &str, tmux_name: &str) -> ActorHandle {
+        let (cmd_tx, mut cmd_rx) = mpsc::channel(8);
+        let handle = ActorHandle::test_handle(session_id, tmux_name, cmd_tx);
+        tokio::spawn(async move {
+            let mut held_replies = Vec::new();
+            while let Some(cmd) = cmd_rx.recv().await {
+                match cmd {
+                    SessionCommand::GetSummary(reply) => {
+                        held_replies.push(reply);
+                    }
+                    SessionCommand::Shutdown => break,
+                    _ => {}
+                }
+            }
+        });
+        handle
+    }
+
     async fn spawn_closed_summary_handle(session_id: &str, tmux_name: &str) -> ActorHandle {
         let (cmd_tx, cmd_rx) = mpsc::channel(8);
         drop(cmd_rx);
@@ -2209,26 +2367,100 @@ mod tests {
         );
     }
 
-    #[test]
-    fn build_spawn_tool_command_inlines_codex_initial_request() {
-        assert_eq!(
-            build_spawn_tool_command(
-                crate::types::SpawnTool::Codex,
-                Some("investigate tmux startup")
-            ),
-            "codex 'investigate tmux startup'"
-        );
+    fn prompt_file_from_spawn_command(command: &str) -> PathBuf {
+        let prefix = "prompt_file='";
+        let suffix = "'; if prompt=\"$(cat \"$prompt_file\")\"; then rm -f \"$prompt_file\"; if command -v codex-raw >/dev/null 2>&1; then codex-raw \"$prompt\"; else codex \"$prompt\"; fi; else rm -f \"$prompt_file\"; echo 'swimmers: failed to read initial request' >&2; fi";
+        assert!(command.starts_with(prefix), "unexpected command: {command}");
+        assert!(command.ends_with(suffix), "unexpected command: {command}");
+        PathBuf::from(&command[prefix.len()..command.len() - suffix.len()])
     }
 
     #[test]
-    fn build_spawn_tool_command_escapes_single_quotes_for_shell() {
+    fn build_spawn_tool_command_uses_prompt_file_for_codex_initial_request() {
+        let prompt = "investigate tmux startup\nthen inspect imports";
+        let command = build_spawn_tool_command(crate::types::SpawnTool::Codex, Some(prompt));
+        let prompt_path = prompt_file_from_spawn_command(&command);
+
+        assert!(!command.contains("investigate tmux startup"));
+        assert!(!command.contains('\n'));
+        assert!(command.contains("rm -f \"$prompt_file\""));
         assert_eq!(
-            build_spawn_tool_command(
-                crate::types::SpawnTool::Codex,
-                Some("fix Bob's tmux startup")
-            ),
-            "codex 'fix Bob'\\''s tmux startup'"
+            std::fs::read_to_string(&prompt_path).expect("prompt file"),
+            prompt
         );
+        let _ = std::fs::remove_file(prompt_path);
+    }
+
+    #[test]
+    fn build_spawn_tool_command_prompt_file_preserves_quote_sensitive_prompt() {
+        let prompt = "fix Bob's tmux startup with \"fresh eyes\"";
+        let command = build_spawn_tool_command(crate::types::SpawnTool::Codex, Some(prompt));
+        let prompt_path = prompt_file_from_spawn_command(&command);
+
+        assert!(!command.contains("Bob"));
+        assert!(!command.contains("fresh eyes"));
+        assert_eq!(
+            std::fs::read_to_string(&prompt_path).expect("prompt file"),
+            prompt
+        );
+        let _ = std::fs::remove_file(prompt_path);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn codex_prompt_file_is_private() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let prompt = "private prompt";
+        let command = build_spawn_tool_command(crate::types::SpawnTool::Codex, Some(prompt));
+        let prompt_path = prompt_file_from_spawn_command(&command);
+        let dir_mode = std::fs::metadata(prompt_path.parent().expect("prompt dir"))
+            .expect("prompt dir metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        let file_mode = std::fs::metadata(&prompt_path)
+            .expect("prompt file metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+
+        assert_eq!(dir_mode, 0o700);
+        assert_eq!(file_mode, 0o600);
+        let _ = std::fs::remove_file(prompt_path);
+    }
+
+    #[test]
+    fn codex_prompt_command_reads_and_removes_prompt_file() {
+        let temp = tempdir().expect("tempdir");
+        let bin_dir = temp.path().join("bin");
+        std::fs::create_dir_all(&bin_dir).expect("bin dir");
+        let captured_prompt = temp.path().join("captured-prompt.txt");
+        let capture_script = format!(
+            "#!/usr/bin/env bash\nprintf '%s' \"$1\" > {}\n",
+            shell_single_quote(&captured_prompt.to_string_lossy())
+        );
+        write_executable(&bin_dir.join("codex-raw"), &capture_script);
+
+        let original_path = std::env::var_os("PATH");
+        prepend_test_path(&bin_dir, original_path.as_deref());
+
+        let prompt = "fix shell quoting\nwithout leaking prompt text";
+        let command = build_spawn_tool_command(crate::types::SpawnTool::Codex, Some(prompt));
+        let prompt_path = prompt_file_from_spawn_command(&command);
+        let status = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(&command)
+            .status()
+            .expect("run spawn command");
+        restore_test_path(original_path);
+
+        assert!(status.success());
+        assert_eq!(
+            std::fs::read_to_string(captured_prompt).expect("captured prompt"),
+            prompt
+        );
+        assert!(!prompt_path.exists(), "prompt file should be removed");
     }
 
     #[test]
@@ -2889,6 +3121,64 @@ exit 1
         let sessions = supervisor.list_sessions().await;
 
         assert!(sessions.is_empty());
+    }
+
+    #[tokio::test]
+    async fn list_sessions_keeps_cached_summary_when_live_reply_drops() {
+        let supervisor = SessionSupervisor::new(Arc::new(Config::default()));
+        let mut summary = test_summary("sess-live", SessionState::Idle);
+        summary.tmux_name = "tmux-live".to_string();
+        supervisor
+            .insert_test_handle(spawn_summary_handle(summary).await)
+            .await;
+
+        let initial = supervisor.list_sessions().await;
+        assert_eq!(initial.len(), 1);
+        assert_eq!(initial[0].transport_health, TransportHealth::Healthy);
+
+        supervisor
+            .insert_test_handle(
+                spawn_dropped_summary_handle("sess-live", "tmux-live", SessionState::Idle).await,
+            )
+            .await;
+
+        let sessions = supervisor.list_sessions().await;
+
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].session_id, "sess-live");
+        assert_eq!(sessions[0].tmux_name, "tmux-live");
+        assert_eq!(sessions[0].transport_health, TransportHealth::Degraded);
+        assert!(!sessions[0].is_stale);
+    }
+
+    #[tokio::test]
+    async fn collect_live_summaries_keeps_cached_summary_when_live_reply_times_out() {
+        let supervisor = SessionSupervisor::new(Arc::new(Config::default()));
+        supervisor
+            .insert_test_handle(
+                spawn_summary_handle(test_summary("sess-timeout", SessionState::Busy)).await,
+            )
+            .await;
+
+        let initial = supervisor
+            .collect_live_summaries(Duration::from_millis(10))
+            .await;
+        assert_eq!(initial.len(), 1);
+
+        supervisor
+            .insert_test_handle(
+                spawn_hung_summary_handle("sess-timeout", "tmux-sess-timeout").await,
+            )
+            .await;
+
+        let sessions = supervisor
+            .collect_live_summaries(Duration::from_millis(10))
+            .await;
+
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].session_id, "sess-timeout");
+        assert_eq!(sessions[0].transport_health, TransportHealth::Overloaded);
+        assert!(!sessions[0].is_stale);
     }
 
     #[tokio::test]

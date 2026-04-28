@@ -268,7 +268,11 @@ impl<C: TuiApi> App<C> {
     }
 
     pub(crate) fn layout_for_terminal(&self, width: u16, height: u16) -> WorkspaceLayout {
-        WorkspaceLayout::for_terminal_with_ratio(width, height, self.thought_panel_ratio)
+        if thought_panel_needs_input(self) {
+            WorkspaceLayout::for_terminal_with_ratio(width, height, self.thought_panel_ratio)
+        } else {
+            WorkspaceLayout::for_terminal_without_thought_panel(width, height)
+        }
     }
 
     pub(crate) fn set_message(&mut self, message: impl Into<String>) {
@@ -2248,19 +2252,21 @@ impl<C: TuiApi> App<C> {
     }
 
     pub(crate) fn open_batch_initial_request_for_visible_entries(&mut self) {
-        let Some(dirs) = self
-            .picker
-            .as_ref()
-            .map(|picker| {
-                picker
-                    .visible_entries()
-                    .into_iter()
-                    .filter_map(|index| picker.path_for_entry(index))
-                    .collect::<Vec<_>>()
-            })
-            .filter(|dirs| !dirs.is_empty())
-        else {
-            self.set_message("no visible directories to batch");
+        let Some((visible_count, dirs)) = self.picker.as_ref().map(|picker| {
+            (
+                picker.visible_entries().len(),
+                picker.batch_dirs_for_visible_entries(),
+            )
+        }) else {
+            return;
+        };
+
+        if dirs.is_empty() {
+            if visible_count == 0 {
+                self.set_message("no visible directories to batch");
+            } else {
+                self.set_message("all visible directories are excluded");
+            }
             return;
         };
 
@@ -2660,6 +2666,9 @@ impl<C: TuiApi> App<C> {
             ThoughtPanelAction::ToggleFilterOutCwd(cwd) => self.toggle_thought_filter_out_cwd(cwd),
             ThoughtPanelAction::OpenSession { session_id, label } => {
                 self.select_and_open_session(session_id, label);
+            }
+            ThoughtPanelAction::OpenInitialRequest { cwd } => {
+                self.open_initial_request(cwd, self.launch_target.clone());
             }
             ThoughtPanelAction::LaunchCommitCodex(session_id) => {
                 self.launch_commit_codex_for_session(&session_id);
@@ -3352,9 +3361,19 @@ impl<C: TuiApi> App<C> {
                     self.launch_target = picker.toggle_launch_target();
                 }
             }
+            PickerAction::ToggleBatchExcludeMode => {
+                if let Some(picker) = &mut self.picker {
+                    picker.batch_exclude_mode = !picker.batch_exclude_mode;
+                }
+            }
             PickerAction::BatchVisible => self.open_batch_initial_request_for_visible_entries(),
             PickerAction::ActivateCurrentPath => self.spawn_session_from_picker(field),
             PickerAction::ActivateEntry(index) => self.activate_picker_entry(index, field),
+            PickerAction::ToggleBatchExclude(index) => {
+                if let Some(picker) = &mut self.picker {
+                    picker.toggle_batch_exclusion(index);
+                }
+            }
             PickerAction::StartRepoAction(index, kind) => {
                 self.start_picker_repo_action(index, kind)
             }

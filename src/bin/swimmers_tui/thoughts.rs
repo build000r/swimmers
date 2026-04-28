@@ -2,6 +2,7 @@ use super::*;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 const THOUGHT_COMMIT_LABEL: &str = "[commit]";
+const THOUGHT_LAUNCH_LABEL: &str = "[launch]";
 const THOUGHT_PLANS_LABEL: &str = "[plans]";
 
 pub(crate) struct ThoughtFingerprint {
@@ -164,6 +165,7 @@ pub(crate) enum ThoughtPanelAction {
     ToggleFilterOutMode,
     ToggleFilterOutCwd(String),
     OpenSession { session_id: String, label: String },
+    OpenInitialRequest { cwd: String },
     LaunchCommitCodex(String),
     OpenMermaid(String),
     OpenPlanFromDisk { schema_path: String, slug: String },
@@ -185,11 +187,13 @@ pub(crate) struct ThoughtRowLayout {
     pub(crate) text_rect: Option<Rect>,
     pub(crate) mermaid_rect: Option<Rect>,
     pub(crate) mermaid_label: Option<String>,
+    pub(crate) launch_rect: Option<Rect>,
     pub(crate) commit_rect: Option<Rect>,
     pub(crate) plan_rect: Option<Rect>,
     pub(crate) plan_schema_path: Option<String>,
     pub(crate) plan_slug: Option<String>,
     pub(crate) session_id: String,
+    pub(crate) cwd: String,
     pub(crate) label: String,
     pub(crate) tmux_name: String,
     pub(crate) line: String,
@@ -550,6 +554,7 @@ pub(crate) struct ThoughtPanelEntryView {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ThoughtWorkStatus {
     Working,
+    Asleep,
     Stopped,
 }
 
@@ -557,7 +562,8 @@ impl ThoughtWorkStatus {
     fn label(self) -> &'static str {
         match self {
             Self::Working => "[work]",
-            Self::Stopped => "[asleep]",
+            Self::Asleep => "[asleep]",
+            Self::Stopped => "[done]",
         }
     }
 
@@ -565,23 +571,33 @@ impl ThoughtWorkStatus {
         match self {
             Self::Working => 0,
             Self::Stopped => 1,
+            Self::Asleep => 2,
         }
     }
 }
 
 fn thought_work_status(entry: &ThoughtPanelEntryView) -> ThoughtWorkStatus {
-    if thought_entry_is_stopped(entry) {
+    if thought_entry_needs_input(entry) {
+        ThoughtWorkStatus::Asleep
+    } else if entry.state == SessionState::Exited
+        || entry.is_stale
+        || entry.transport_health == TransportHealth::Disconnected
+        || entry.rest_state == RestState::DeepSleep
+    {
         ThoughtWorkStatus::Stopped
     } else {
         ThoughtWorkStatus::Working
     }
 }
 
-pub(crate) fn thought_entry_is_stopped(entry: &ThoughtPanelEntryView) -> bool {
-    entry.state == SessionState::Exited
-        || entry.is_stale
-        || entry.transport_health == TransportHealth::Disconnected
-        || matches!(entry.rest_state, RestState::Sleeping | RestState::DeepSleep)
+pub(crate) fn thought_entry_needs_input(entry: &ThoughtPanelEntryView) -> bool {
+    entry.rest_state == RestState::Sleeping
+}
+
+pub(crate) fn thought_panel_needs_input<C: TuiApi>(app: &App<C>) -> bool {
+    build_thought_panel_entries(app)
+        .iter()
+        .any(thought_entry_needs_input)
 }
 
 pub(crate) const DARK_TERMINAL_BG_RGB: (u8, u8, u8) = (0x11, 0x11, 0x11);
@@ -953,11 +969,13 @@ fn group_header_row<C: TuiApi>(
         }),
         mermaid_rect: None,
         mermaid_label: None,
+        launch_rect: None,
         commit_rect: None,
         plan_rect,
         plan_schema_path: plan.as_ref().map(|plan| plan.schema_path.clone()),
         plan_slug: plan.as_ref().map(|plan| plan.slug.clone()),
         session_id: String::new(),
+        cwd: String::new(),
         label: group.label.clone(),
         tmux_name: String::new(),
         line,
@@ -1032,6 +1050,7 @@ pub(crate) fn build_rows_for_panel_entry(
     let status = thought_work_status(entry);
     let status_label = status.label();
     let status_width = display_width(status_label);
+    let launch_width = display_width(THOUGHT_LAUNCH_LABEL);
     let commit_width = display_width(THOUGHT_COMMIT_LABEL);
     let mermaid_width = entry
         .mermaid_label
@@ -1057,6 +1076,15 @@ pub(crate) fn build_rows_for_panel_entry(
     line.push(' ');
     cursor = cursor.saturating_add(1);
 
+    let launch_start = thought_entry_needs_input(entry).then(|| {
+        let start = cursor;
+        line.push_str(THOUGHT_LAUNCH_LABEL);
+        cursor = cursor.saturating_add(launch_width);
+        line.push(' ');
+        cursor = cursor.saturating_add(1);
+        start
+    });
+
     let commit_start = entry.has_commit_candidate.then(|| {
         let start = cursor;
         line.push_str(THOUGHT_COMMIT_LABEL);
@@ -1081,6 +1109,9 @@ pub(crate) fn build_rows_for_panel_entry(
     });
     let _status_rect =
         visible_segment_rect(thought_content.x, status_start, status_width, visible_width);
+    let launch_rect = launch_start.and_then(|start| {
+        visible_segment_rect(thought_content.x, start, launch_width, visible_width)
+    });
     let commit_rect = commit_start.and_then(|start| {
         visible_segment_rect(thought_content.x, start, commit_width, visible_width)
     });
@@ -1101,11 +1132,13 @@ pub(crate) fn build_rows_for_panel_entry(
         }),
         mermaid_rect,
         mermaid_label: entry.mermaid_label.clone(),
+        launch_rect,
         commit_rect,
         plan_rect: None,
         plan_schema_path: None,
         plan_slug: None,
         session_id: entry.session_id.clone(),
+        cwd: entry.cwd.clone(),
         label: entry.label.clone(),
         tmux_name: entry.tmux_name.clone(),
         line,
@@ -1128,11 +1161,13 @@ pub(crate) fn build_rows_for_panel_entry(
             }),
             mermaid_rect: None,
             mermaid_label: None,
+            launch_rect: None,
             commit_rect: None,
             plan_rect: None,
             plan_schema_path: None,
             plan_slug: None,
             session_id: entry.session_id.clone(),
+            cwd: entry.cwd.clone(),
             label: entry.label.clone(),
             tmux_name: entry.tmux_name.clone(),
             line: detail_line,
@@ -1147,7 +1182,7 @@ pub(crate) fn thought_panel_stopped_counts<C: TuiApi>(app: &App<C>) -> (usize, u
     let entries = build_thought_panel_entries(app);
     let stopped = entries
         .iter()
-        .filter(|entry| thought_entry_is_stopped(entry))
+        .filter(|entry| thought_entry_needs_input(entry))
         .count();
     (stopped, entries.len())
 }
@@ -1218,6 +1253,14 @@ pub(crate) fn render_thought_panel<C: TuiApi>(
         if let Some(rect) = row.text_rect {
             renderer.draw_text(rect.x, y, &row.line, row.color);
         }
+        if let Some(rect) = row.launch_rect {
+            renderer.draw_text(
+                rect.x,
+                y,
+                &truncate_label(THOUGHT_LAUNCH_LABEL, rect.width as usize),
+                Color::Cyan,
+            );
+        }
         if let Some(rect) = row.commit_rect {
             renderer.draw_text(rect.x, y, THOUGHT_COMMIT_LABEL, row.color);
         }
@@ -1248,7 +1291,7 @@ pub(crate) fn build_thought_panel<C: TuiApi>(
     } else {
         all_entries
             .into_iter()
-            .filter(thought_entry_is_stopped)
+            .filter(thought_entry_needs_input)
             .collect::<Vec<_>>()
     };
     let empty_message = if entry_capacity == 0 {
@@ -1377,6 +1420,12 @@ pub(crate) fn thought_panel_action_at<C: TuiApi>(
             width: rect.width,
             height: rect.height,
         });
+        let launch_rect = row.launch_rect.map(|rect| Rect {
+            x: rect.x,
+            y: row_start_y + offset as u16,
+            width: rect.width,
+            height: rect.height,
+        });
         let mermaid_rect = row.mermaid_rect.map(|rect| Rect {
             x: rect.x,
             y: row_start_y + offset as u16,
@@ -1396,6 +1445,11 @@ pub(crate) fn thought_panel_action_at<C: TuiApi>(
                     slug: slug.clone(),
                 });
             }
+        }
+        if launch_rect.map(|rect| rect.contains(x, y)).unwrap_or(false) {
+            return Some(ThoughtPanelAction::OpenInitialRequest {
+                cwd: row.cwd.clone(),
+            });
         }
         if commit_rect.map(|rect| rect.contains(x, y)).unwrap_or(false) {
             return Some(ThoughtPanelAction::LaunchCommitCodex(

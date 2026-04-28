@@ -117,7 +117,7 @@ After `cargo install swimmers`, both `swimmers` and `swimmers-tui` are on your P
 
 3. **Navigate** — arrow keys to select a fish, Enter to open the session in your terminal, `q` to quit the TUI.
 
-To start the same prompt in multiple directories from the TUI, click empty aquarium space to open the directory picker, optionally type to filter the visible rows, choose `[batch visible]`, type the initial request once, and press Enter. The clawgs rail shows asleep agents by default, groups by `pwd`, and reports the asleep/total count; press `Tab` to toggle batch grouping and `>` to show all agents.
+To start the same prompt in multiple directories from the TUI, click empty aquarium space to open the directory picker, optionally type to filter the visible rows, use `[exclude]` to mark any rows `[out]`, choose `[batch N]`, type the initial request once, and press Enter. The clawgs rail stays hidden until an agent is actually asleep/waiting for input, then shows those agents with a `[launch]` shortcut for starting the next prompt in the same repo; press `Tab` to toggle batch grouping and `>` to show all agents while the rail is open.
 
 ### Experimental voice input
 
@@ -549,7 +549,7 @@ The `SessionActor` monitors each session's PTY output and classifies it into sta
 
 ### What is the thought rail?
 
-A side panel in the TUI that answers one question first: which agents stopped working? It shows sleeping/stale/exited agents by default with an asleep/total count, uses `[asleep]` and `[work]` as the primary badges, and keeps the latest objective line under each row. Press `>` to show all agents, or `Tab` to pivot between `pwd` and batch grouping.
+A side panel in the TUI that answers one question first: which agents are waiting for input? It stays hidden until at least one agent reaches the transcript-aware sleeping state, then shows those rows with an asleep/total count and a `[launch]` shortcut that opens the normal request composer for that repo using the current tool and launch target. Press `>` to show all agents while the rail is open, or `Tab` to pivot between `pwd` and batch grouping.
 
 ### Is `LocalTrust` auth safe?
 

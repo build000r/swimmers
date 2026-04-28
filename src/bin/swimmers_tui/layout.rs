@@ -57,6 +57,22 @@ impl WorkspaceLayout {
         Self::for_terminal_with_ratio(width, height, THOUGHT_RAIL_DEFAULT_RATIO)
     }
 
+    pub(crate) fn for_terminal_without_thought_panel(width: u16, height: u16) -> Self {
+        let workspace_box = field_box(width, height);
+        let footer_start_y = workspace_box.bottom() + 1;
+        let inner = workspace_box.inset(1);
+        Self {
+            workspace_box,
+            overview_box: workspace_box,
+            overview_field: inner,
+            thought_box: None,
+            thought_content: None,
+            split_divider: None,
+            split_hitbox: None,
+            footer_start_y,
+        }
+    }
+
     pub(crate) fn for_terminal_with_ratio(width: u16, height: u16, thought_ratio: f32) -> Self {
         let workspace_box = field_box(width, height);
         let footer_start_y = workspace_box.bottom() + 1;

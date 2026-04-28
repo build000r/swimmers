@@ -99,12 +99,14 @@ Useful variants:
 You should see the API start and begin discovering tmux sessions.
 
 In the TUI, click empty aquarium space to open the directory picker. To launch
-one prompt in several dirs, filter the picker to the rows you want, choose
-`[batch visible]`, type the initial request once, and press Enter.
+one prompt in several dirs, filter the picker to the rows you want, use
+`[exclude]` to mark any rows `[out]`, choose `[batch N]`, type the initial
+request once, and press Enter.
 
-The clawgs rail shows asleep agents by default: sleeping/stale/exited sessions
-with an asleep/total count. Press `>` to show all agents, or `Tab` to toggle
-between `pwd` and batch grouping.
+The clawgs rail stays hidden until an agent is asleep and waiting for input.
+When it appears, `[launch]` opens the normal request composer for that repo
+using the current tool and launch target. Press `>` to show all agents while
+the rail is open, or `Tab` to toggle between `pwd` and batch grouping.
 
 No tmux hook setup is required for thought or rest-state updates. `swimmers`
 streams session snapshots directly to `clawgs emit --stdio`.

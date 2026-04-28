@@ -28,6 +28,8 @@ pub(crate) struct PickerState {
     pub(crate) available_groups: Vec<String>,
     /// Live filter query typed by the user; filters `entries` by substring.
     pub(crate) search: String,
+    pub(crate) batch_exclude_mode: bool,
+    pub(crate) batch_excluded_paths: HashSet<String>,
 }
 
 impl PickerState {
@@ -63,6 +65,8 @@ impl PickerState {
             current_group: None,
             available_groups: response.groups,
             search: String::new(),
+            batch_exclude_mode: false,
+            batch_excluded_paths: HashSet::new(),
         }
     }
 
@@ -94,6 +98,49 @@ impl PickerState {
             }
         }
         self.scroll = 0;
+    }
+
+    pub(crate) fn batch_dirs_for_visible_entries(&self) -> Vec<String> {
+        self.visible_entries()
+            .into_iter()
+            .filter_map(|index| {
+                let path = self.path_for_entry(index)?;
+                (!self.batch_path_is_excluded(&path)).then_some(path)
+            })
+            .collect()
+    }
+
+    pub(crate) fn batch_included_count(&self) -> usize {
+        self.batch_dirs_for_visible_entries().len()
+    }
+
+    pub(crate) fn batch_path_is_excluded(&self, path: &str) -> bool {
+        self.batch_excluded_paths.contains(&normalize_path(path))
+    }
+
+    pub(crate) fn batch_entry_is_excluded(&self, index: usize) -> bool {
+        self.path_for_entry(index)
+            .map(|path| self.batch_path_is_excluded(&path))
+            .unwrap_or(false)
+    }
+
+    pub(crate) fn toggle_batch_exclusion(&mut self, index: usize) {
+        let Some(path) = self.path_for_entry(index) else {
+            return;
+        };
+        let normalized = normalize_path(&path);
+        if !self.batch_excluded_paths.insert(normalized.clone()) {
+            self.batch_excluded_paths.remove(&normalized);
+        }
+    }
+
+    fn retain_current_batch_exclusions(&mut self) {
+        let valid_paths = (0..self.entries.len())
+            .filter_map(|index| self.path_for_entry(index))
+            .map(|path| normalize_path(&path))
+            .collect::<HashSet<_>>();
+        self.batch_excluded_paths
+            .retain(|path| valid_paths.contains(path));
     }
 
     pub(crate) fn apply_response(&mut self, response: DirListResponse, preserve_selection: bool) {
@@ -143,6 +190,11 @@ impl PickerState {
         }
         if !self.search.is_empty() {
             self.snap_selection_to_visible();
+        }
+        if preserve_selection {
+            self.retain_current_batch_exclusions();
+        } else {
+            self.batch_excluded_paths.clear();
         }
     }
 
@@ -288,9 +340,11 @@ pub(crate) enum PickerAction {
     ActivateGroup(String),
     ToggleTool,
     ToggleLaunchTarget,
+    ToggleBatchExcludeMode,
     BatchVisible,
     ActivateCurrentPath,
     ActivateEntry(usize),
+    ToggleBatchExclude(usize),
     StartRepoAction(usize, RepoActionKind),
 }
 
@@ -305,6 +359,7 @@ pub(crate) struct PickerLayout {
     pub(crate) all_button: Rect,
     pub(crate) tool_button: Rect,
     pub(crate) launch_target_button: Rect,
+    pub(crate) exclude_button: Rect,
     pub(crate) batch_button: Rect,
     pub(crate) spawn_here_button: Rect,
     pub(crate) first_entry_y: u16,
@@ -361,8 +416,12 @@ pub(crate) fn tool_button_label(tool: SpawnTool) -> String {
     format!("[{}]", tool.label())
 }
 
-pub(crate) fn batch_button_label() -> &'static str {
-    "[batch visible]"
+pub(crate) fn exclude_button_label() -> &'static str {
+    "[exclude]"
+}
+
+pub(crate) fn batch_button_label(picker: &PickerState) -> String {
+    format!("[batch {}]", picker.batch_included_count())
 }
 
 pub(crate) fn launch_target_button_label(picker: &PickerState) -> String {
@@ -574,6 +633,46 @@ fn picker_entry_action_rects(
     rects
 }
 
+fn picker_batch_exclude_rect(
+    picker: &PickerState,
+    layout: &PickerLayout,
+    visible_pos: usize,
+    raw_index: usize,
+) -> Option<Rect> {
+    if !picker.batch_exclude_mode
+        || visible_pos < picker.scroll
+        || visible_pos >= picker.scroll + layout.visible_entry_rows
+    {
+        return None;
+    }
+
+    let entry = picker.entries.get(raw_index)?;
+    let actions_width = picker_entry_actions_width(&picker_entry_actions(entry));
+    let label = picker_batch_exclude_label(picker, raw_index);
+    let label_width = label.len() as u16;
+    let row_y = layout.first_entry_y + (visible_pos - picker.scroll) as u16;
+    let total_width = label_width
+        + if actions_width > 0 {
+            actions_width + 1
+        } else {
+            0
+        };
+    Some(Rect {
+        x: layout.content.right().saturating_sub(total_width),
+        y: row_y,
+        width: label_width,
+        height: 1,
+    })
+}
+
+fn picker_batch_exclude_label(picker: &PickerState, raw_index: usize) -> &'static str {
+    if picker.batch_entry_is_excluded(raw_index) {
+        "[in]"
+    } else {
+        "[out]"
+    }
+}
+
 pub(crate) fn picker_layout(picker: &PickerState, field: Rect) -> PickerLayout {
     let _ = (picker.anchor_x, picker.anchor_y);
     let frame = field;
@@ -641,11 +740,18 @@ pub(crate) fn picker_layout(picker: &PickerState, field: Rect) -> PickerLayout {
         width: launch_target_label_width,
         height: 1,
     };
-    let batch_label_width = batch_button_label().len() as u16;
+    let batch_label_width = batch_button_label(picker).len() as u16;
     let batch_button = Rect {
         x: launch_target_button.x.saturating_sub(batch_label_width + 1),
         y: content.y,
         width: batch_label_width,
+        height: 1,
+    };
+    let exclude_label_width = exclude_button_label().len() as u16;
+    let exclude_button = Rect {
+        x: batch_button.x.saturating_sub(exclude_label_width + 1),
+        y: content.y,
+        width: exclude_label_width,
         height: 1,
     };
 
@@ -659,6 +765,7 @@ pub(crate) fn picker_layout(picker: &PickerState, field: Rect) -> PickerLayout {
         all_button,
         tool_button,
         launch_target_button,
+        exclude_button,
         batch_button,
         spawn_here_button: Rect {
             x: content.x,
@@ -686,6 +793,9 @@ pub(crate) fn picker_action_at(
     }
     if layout.launch_target_button.contains(x, y) {
         return Some(PickerAction::ToggleLaunchTarget);
+    }
+    if layout.exclude_button.contains(x, y) {
+        return Some(PickerAction::ToggleBatchExcludeMode);
     }
     if layout.batch_button.contains(x, y) {
         return Some(PickerAction::BatchVisible);
@@ -718,6 +828,11 @@ pub(crate) fn picker_action_at(
     {
         let visible_pos = picker.scroll + (y - layout.first_entry_y) as usize;
         if let Some(&raw_index) = layout.visible_entries.get(visible_pos) {
+            if let Some(rect) = picker_batch_exclude_rect(picker, layout, visible_pos, raw_index) {
+                if rect.contains(x, y) {
+                    return Some(PickerAction::ToggleBatchExclude(raw_index));
+                }
+            }
             for (rect, kind) in picker_entry_action_rects(picker, layout, visible_pos, raw_index) {
                 if rect.contains(x, y) {
                     return Some(PickerAction::StartRepoAction(raw_index, kind));
@@ -772,8 +887,20 @@ pub(crate) fn render_picker(renderer: &mut Renderer, picker: &PickerState, field
     renderer.draw_text(
         layout.batch_button.x,
         layout.batch_button.y,
-        batch_button_label(),
-        if layout.visible_entries.is_empty() {
+        &batch_button_label(picker),
+        if picker.batch_included_count() == 0 {
+            Color::DarkGrey
+        } else {
+            Color::White
+        },
+    );
+    renderer.draw_text(
+        layout.exclude_button.x,
+        layout.exclude_button.y,
+        exclude_button_label(),
+        if picker.batch_exclude_mode {
+            Color::Cyan
+        } else if layout.visible_entries.is_empty() {
             Color::DarkGrey
         } else {
             Color::White
@@ -918,14 +1045,25 @@ pub(crate) fn render_picker(renderer: &mut Renderer, picker: &PickerState, field
         let line = format!("{marker} {icon} {}{}", entry.name, running);
         let actions = picker_entry_actions(entry);
         let actions_width = picker_entry_actions_width(&actions);
+        let exclude_label = picker
+            .batch_exclude_mode
+            .then(|| picker_batch_exclude_label(picker, index));
+        let exclude_width = exclude_label
+            .map(|label| label.len() as u16 + if actions_width > 0 { 1 } else { 0 })
+            .unwrap_or(0);
         let reserved = if actions_width > 0 {
-            actions_width + 1
+            actions_width + 1 + exclude_width
+        } else if exclude_width > 0 {
+            exclude_width + 1
         } else {
             0
         };
         let text_width = layout.content.width.saturating_sub(reserved) as usize;
         let themed_color = picker.entry_theme_colors.get(index).copied().flatten();
-        let color = if picker.selection == PickerSelection::Entry(index) {
+        let excluded = picker.batch_entry_is_excluded(index);
+        let color = if excluded {
+            Color::DarkGrey
+        } else if picker.selection == PickerSelection::Entry(index) {
             themed_color.unwrap_or(Color::White)
         } else if let Some(theme_color) = themed_color {
             theme_color
@@ -940,6 +1078,23 @@ pub(crate) fn render_picker(renderer: &mut Renderer, picker: &PickerState, field
             &truncate_label(&line, text_width),
             color,
         );
+        if let Some(label) = exclude_label {
+            let actions_padding = if actions_width > 0 {
+                actions_width + 1
+            } else {
+                0
+            };
+            let x = layout
+                .content
+                .right()
+                .saturating_sub(actions_padding + label.len() as u16);
+            renderer.draw_text(
+                x,
+                layout.first_entry_y + row as u16,
+                label,
+                if excluded { Color::Cyan } else { Color::Yellow },
+            );
+        }
         if !actions.is_empty() {
             let mut ax = layout.content.right().saturating_sub(actions_width);
             for action in &actions {
@@ -992,7 +1147,7 @@ pub(crate) fn render_initial_request(
     );
 
     let cwd_line = if let Some(dirs) = initial_request.batch_dirs.as_ref() {
-        format!("batch: {} visible dirs", dirs.len())
+        format!("batch: {} included dirs", dirs.len())
     } else {
         format!(
             "cwd: {}",

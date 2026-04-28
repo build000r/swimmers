@@ -10,7 +10,7 @@ use chrono::{TimeZone, Utc};
 use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
 use regex::Regex;
 use tokio::process::Command;
-use tokio::sync::{broadcast, mpsc, oneshot};
+use tokio::sync::{broadcast, mpsc, oneshot, Mutex};
 use tracing::{debug, error, info, warn};
 
 use crate::config::Config;
@@ -31,6 +31,9 @@ use crate::types::{
 const CWD_REFRESH_MIN_INTERVAL: Duration = Duration::from_millis(750);
 const TOOL_REFRESH_MIN_INTERVAL: Duration = Duration::from_millis(1_000);
 const LIVENESS_CHECK_INTERVAL: Duration = Duration::from_millis(2_000);
+const TMUX_DISPLAY_MESSAGE_TIMEOUT: Duration = Duration::from_millis(500);
+const PROCESS_ENTRIES_QUERY_TIMEOUT: Duration = Duration::from_millis(750);
+const PROCESS_ENTRIES_CACHE_TTL: Duration = Duration::from_millis(1_500);
 const TMUX_NEW_SESSION_EXIT_GRACE: Duration = Duration::from_millis(50);
 const TMUX_FALLBACK_TERM: &str = "xterm-256color";
 const TMUX_FALLBACK_COLORTERM: &str = "truecolor";
@@ -1513,20 +1516,23 @@ fn line_looks_prompt_like(line: &str) -> bool {
 }
 
 /// Query tmux for the active pane cwd of a session.
-async fn query_tmux_cwd(tmux_name: &str) -> anyhow::Result<String> {
+async fn query_tmux_display_message(tmux_name: &str, format: &str) -> anyhow::Result<String> {
     let target = exact_pane_target(tmux_name);
-    let output = Command::new("tmux")
-        .args([
-            "display-message",
-            "-p",
-            "-t",
-            &target,
-            "#{pane_current_path}",
-        ])
+    let mut command = Command::new("tmux");
+    command
+        .args(["display-message", "-p", "-t", &target, format])
         .env_remove("TMUX")
         .env_remove("TMUX_PANE")
-        .output()
+        .kill_on_drop(true);
+
+    let output = tokio::time::timeout(TMUX_DISPLAY_MESSAGE_TIMEOUT, command.output())
         .await
+        .map_err(|_| {
+            anyhow::anyhow!(
+                "tmux display-message timed out after {}ms",
+                TMUX_DISPLAY_MESSAGE_TIMEOUT.as_millis()
+            )
+        })?
         .map_err(|e| anyhow::anyhow!("failed to run tmux display-message: {}", e))?;
 
     if !output.status.success() {
@@ -1537,7 +1543,11 @@ async fn query_tmux_cwd(tmux_name: &str) -> anyhow::Result<String> {
         ));
     }
 
-    let cwd = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+async fn query_tmux_cwd(tmux_name: &str) -> anyhow::Result<String> {
+    let cwd = query_tmux_display_message(tmux_name, "#{pane_current_path}").await?;
     if cwd.is_empty() {
         return Err(anyhow::anyhow!("tmux returned empty pane_current_path"));
     }
@@ -1545,25 +1555,8 @@ async fn query_tmux_cwd(tmux_name: &str) -> anyhow::Result<String> {
 }
 
 async fn query_tmux_session_created(tmux_name: &str) -> anyhow::Result<chrono::DateTime<Utc>> {
-    let target = exact_pane_target(tmux_name);
-    let output = Command::new("tmux")
-        .args(["display-message", "-p", "-t", &target, "#{session_created}"])
-        .env_remove("TMUX")
-        .env_remove("TMUX_PANE")
-        .output()
-        .await
-        .map_err(|e| anyhow::anyhow!("failed to run tmux display-message: {}", e))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(anyhow::anyhow!(
-            "tmux display-message failed: {}",
-            stderr.trim()
-        ));
-    }
-
-    let epoch = String::from_utf8_lossy(&output.stdout)
-        .trim()
+    let epoch = query_tmux_display_message(tmux_name, "#{session_created}")
+        .await?
         .parse::<i64>()
         .map_err(|e| anyhow::anyhow!("invalid tmux session_created value: {}", e))?;
     Utc.timestamp_opt(epoch, 0)
@@ -1578,6 +1571,18 @@ struct ProcessEntry {
     pcpu: f32,
     comm: String,
     args: String,
+}
+
+#[derive(Debug, Default)]
+struct ProcessEntriesCache {
+    fetched_at: Option<Instant>,
+    entries: Vec<ProcessEntry>,
+}
+
+static PROCESS_ENTRIES_CACHE: OnceLock<Mutex<ProcessEntriesCache>> = OnceLock::new();
+
+fn process_entries_cache() -> &'static Mutex<ProcessEntriesCache> {
+    PROCESS_ENTRIES_CACHE.get_or_init(|| Mutex::new(ProcessEntriesCache::default()))
 }
 
 async fn query_tool_from_tmux_process_tree(tmux_name: &str) -> anyhow::Result<Option<String>> {
@@ -1687,30 +1692,7 @@ fn compute_pane_liveness(pane_pid: u32, entries: Vec<ProcessEntry>) -> PaneLiven
 }
 
 async fn query_tmux_current_command(tmux_name: &str) -> anyhow::Result<String> {
-    let target = exact_pane_target(tmux_name);
-    let output = Command::new("tmux")
-        .args([
-            "display-message",
-            "-p",
-            "-t",
-            &target,
-            "#{pane_current_command}",
-        ])
-        .env_remove("TMUX")
-        .env_remove("TMUX_PANE")
-        .output()
-        .await
-        .map_err(|e| anyhow::anyhow!("failed to run tmux display-message: {}", e))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(anyhow::anyhow!(
-            "tmux display-message failed: {}",
-            stderr.trim()
-        ));
-    }
-
-    let comm = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let comm = query_tmux_display_message(tmux_name, "#{pane_current_command}").await?;
     if comm.is_empty() {
         return Err(anyhow::anyhow!("tmux returned empty pane_current_command"));
     }
@@ -1718,25 +1700,8 @@ async fn query_tmux_current_command(tmux_name: &str) -> anyhow::Result<String> {
 }
 
 async fn query_tmux_pane_pid(tmux_name: &str) -> anyhow::Result<u32> {
-    let target = exact_pane_target(tmux_name);
-    let output = Command::new("tmux")
-        .args(["display-message", "-p", "-t", &target, "#{pane_pid}"])
-        .env_remove("TMUX")
-        .env_remove("TMUX_PANE")
-        .output()
-        .await
-        .map_err(|e| anyhow::anyhow!("failed to run tmux display-message: {}", e))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(anyhow::anyhow!(
-            "tmux display-message failed: {}",
-            stderr.trim()
-        ));
-    }
-
-    let pane_pid = String::from_utf8_lossy(&output.stdout)
-        .trim()
+    let pane_pid = query_tmux_display_message(tmux_name, "#{pane_pid}")
+        .await?
         .parse::<u32>()
         .map_err(|e| anyhow::anyhow!("invalid pane_pid from tmux: {}", e))?;
 
@@ -1744,10 +1709,46 @@ async fn query_tmux_pane_pid(tmux_name: &str) -> anyhow::Result<u32> {
 }
 
 async fn query_process_entries() -> anyhow::Result<Vec<ProcessEntry>> {
-    let output = Command::new("ps")
+    let mut cache = process_entries_cache().lock().await;
+    if cache
+        .fetched_at
+        .map(|fetched_at| fetched_at.elapsed() <= PROCESS_ENTRIES_CACHE_TTL)
+        .unwrap_or(false)
+    {
+        return Ok(cache.entries.clone());
+    }
+
+    match query_process_entries_uncached().await {
+        Ok(entries) => {
+            cache.fetched_at = Some(Instant::now());
+            cache.entries = entries.clone();
+            Ok(entries)
+        }
+        Err(err) if !cache.entries.is_empty() => {
+            debug!(
+                "using stale process snapshot after ps refresh failed: {}",
+                err
+            );
+            Ok(cache.entries.clone())
+        }
+        Err(err) => Err(err),
+    }
+}
+
+async fn query_process_entries_uncached() -> anyhow::Result<Vec<ProcessEntry>> {
+    let mut command = Command::new("ps");
+    command
         .args(["-axo", "pid=,ppid=,pcpu=,comm=,args="])
-        .output()
+        .kill_on_drop(true);
+
+    let output = tokio::time::timeout(PROCESS_ENTRIES_QUERY_TIMEOUT, command.output())
         .await
+        .map_err(|_| {
+            anyhow::anyhow!(
+                "ps timed out after {}ms",
+                PROCESS_ENTRIES_QUERY_TIMEOUT.as_millis()
+            )
+        })?
         .map_err(|e| anyhow::anyhow!("failed to run ps: {}", e))?;
 
     if !output.status.success() {

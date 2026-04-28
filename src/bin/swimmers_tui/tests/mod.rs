@@ -2639,6 +2639,63 @@ fn wide_layout_enables_global_thought_rail() {
 }
 
 #[test]
+fn app_layout_hides_thought_rail_until_a_session_needs_input() {
+    let api = MockApi::new();
+    let mut app = make_app(api);
+    let layout = app.layout_for_terminal(120, 32);
+
+    assert!(layout.thought_box.is_none());
+    assert_eq!(layout.overview_box, layout.workspace_box);
+
+    let full_layout = WorkspaceLayout::for_terminal_without_thought_panel(120, 32);
+    app.merge_sessions(
+        vec![sleeping_session(
+            "sess-sleeping",
+            "7",
+            TEST_REPO_SWIMMERS,
+            "2026-03-08T12:00:00Z",
+        )],
+        full_layout.overview_field,
+    );
+
+    let attention_layout = app.layout_for_terminal(120, 32);
+    assert!(attention_layout.thought_box.is_some());
+    assert!(attention_layout.overview_box.x > attention_layout.workspace_box.x);
+}
+
+#[test]
+fn app_layout_hides_thought_rail_again_after_sleeping_session_wakes() {
+    let api = MockApi::new();
+    let mut app = make_app(api);
+    let full_layout = WorkspaceLayout::for_terminal_without_thought_panel(120, 32);
+    app.merge_sessions(
+        vec![sleeping_session(
+            "sess-sleeping",
+            "7",
+            TEST_REPO_SWIMMERS,
+            "2026-03-08T12:00:00Z",
+        )],
+        full_layout.overview_field,
+    );
+    assert!(app.layout_for_terminal(120, 32).thought_box.is_some());
+
+    app.merge_sessions(
+        vec![session_summary_with_thought(
+            "sess-sleeping",
+            "7",
+            TEST_REPO_SWIMMERS,
+            "patching rail",
+            "2026-03-08T14:00:05Z",
+        )],
+        full_layout.overview_field,
+    );
+
+    let layout = app.layout_for_terminal(120, 32);
+    assert!(layout.thought_box.is_none());
+    assert_eq!(layout.overview_box, layout.workspace_box);
+}
+
+#[test]
 fn narrow_layout_keeps_single_overview_field() {
     let layout = test_layout(96, 24);
 
@@ -2678,6 +2735,16 @@ fn custom_split_ratio_changes_thought_rail_width() {
 fn divider_drag_updates_thought_rail_ratio() {
     let api = MockApi::new();
     let mut app = make_app(api);
+    let full_layout = WorkspaceLayout::for_terminal_without_thought_panel(120, 32);
+    app.merge_sessions(
+        vec![sleeping_session(
+            "sess-sleeping",
+            "7",
+            TEST_REPO_SWIMMERS,
+            "2026-03-08T12:00:00Z",
+        )],
+        full_layout.overview_field,
+    );
     let initial_layout = app.layout_for_terminal(120, 32);
     let initial_width = initial_layout
         .thought_box
@@ -5272,6 +5339,110 @@ fn picker_batch_visible_opens_composer_for_filtered_entries() {
 }
 
 #[test]
+fn picker_batch_exclusion_removes_dirs_from_batch_composer() {
+    let api = MockApi::new();
+    let field = test_field();
+    let mut app = make_app(api.clone());
+    app.picker = Some(PickerState::new(
+        10,
+        10,
+        dir_response(
+            TEST_REPOS_ROOT,
+            &[("alpha", true), ("beta", true), ("gamma", true)],
+        ),
+        true,
+        SpawnTool::Codex,
+        None,
+    ));
+
+    app.handle_picker_action(PickerAction::ToggleBatchExcludeMode, field);
+    app.handle_picker_action(PickerAction::ToggleBatchExclude(1), field);
+    app.open_batch_initial_request_for_visible_entries();
+
+    let request = app.initial_request.as_ref().expect("composer");
+    assert_eq!(
+        request.batch_dirs.as_deref(),
+        Some(&[TEST_REPO_ALPHA.to_string(), TEST_REPO_GAMMA.to_string()][..])
+    );
+    assert!(api.create_calls().is_empty());
+    assert!(api.create_batch_calls().is_empty());
+}
+
+#[test]
+fn picker_batch_exclude_badge_toggles_without_activating_entry() {
+    let field = test_field();
+    let mut picker = PickerState::new(
+        10,
+        10,
+        dir_response(TEST_REPOS_ROOT, &[("alpha", true), ("beta", true)]),
+        true,
+        SpawnTool::Codex,
+        None,
+    );
+    picker.batch_exclude_mode = true;
+    let layout = picker_layout(&picker, field);
+    let out_x = layout.content.right().saturating_sub("[out]".len() as u16);
+
+    assert!(matches!(
+        picker_action_at(&picker, &layout, out_x, layout.first_entry_y),
+        Some(PickerAction::ToggleBatchExclude(0))
+    ));
+}
+
+#[test]
+fn picker_keyboard_exclusion_toggles_selected_entry_out_of_batch() {
+    let api = MockApi::new();
+    let layout = test_layout(120, 32);
+    let mut app = make_app(api);
+    app.picker = Some(PickerState::new(
+        10,
+        10,
+        dir_response(TEST_REPOS_ROOT, &[("alpha", true), ("beta", true)]),
+        true,
+        SpawnTool::Codex,
+        None,
+    ));
+
+    assert!(handle_key_event(&mut app, layout, key(KeyCode::Char('X'))));
+    {
+        let picker = app.picker.as_mut().expect("picker");
+        assert!(picker.batch_exclude_mode);
+        picker.selection = PickerSelection::Entry(1);
+    }
+    assert!(handle_key_event(&mut app, layout, key(KeyCode::Char(' '))));
+
+    let picker = app.picker.as_ref().expect("picker");
+    assert!(picker.batch_entry_is_excluded(1));
+    assert_eq!(
+        picker.batch_dirs_for_visible_entries(),
+        vec![TEST_REPO_ALPHA.to_string()]
+    );
+}
+
+#[test]
+fn render_picker_shows_batch_count_and_out_in_chips() {
+    let field = test_field();
+    let mut picker = PickerState::new(
+        10,
+        10,
+        dir_response(TEST_REPOS_ROOT, &[("alpha", true), ("beta", true)]),
+        true,
+        SpawnTool::Codex,
+        None,
+    );
+    picker.batch_exclude_mode = true;
+    picker.toggle_batch_exclusion(1);
+    let layout = picker_layout(&picker, field);
+    let mut renderer = test_renderer(100, 30);
+
+    render_picker(&mut renderer, &picker, field);
+
+    assert!(row_text(&renderer, layout.batch_button.y).contains("[batch 1]"));
+    assert!(row_text(&renderer, layout.first_entry_y).contains("[out]"));
+    assert!(row_text(&renderer, layout.first_entry_y + 1).contains("[in]"));
+}
+
+#[test]
 fn dir_list_failure_blocks_spawn_and_shows_error() {
     let api = MockApi::new();
     api.push_list_dirs(Err("Permission denied".to_string()));
@@ -5993,6 +6164,15 @@ fn picker_action_at_resolves_controls_and_entries() {
             layout.launch_target_button.y
         ),
         Some(PickerAction::ToggleLaunchTarget)
+    ));
+    assert!(matches!(
+        picker_action_at(
+            &picker,
+            &layout,
+            layout.exclude_button.x,
+            layout.exclude_button.y
+        ),
+        Some(PickerAction::ToggleBatchExcludeMode)
     ));
 }
 
@@ -7645,13 +7825,22 @@ fn thought_panel_defaults_to_stopped_only_and_counts_sleeping_agents() {
     );
     stopped.thought_state = ThoughtState::Sleeping;
     stopped.rest_state = RestState::Sleeping;
+    let mut done = session_summary_with_thought(
+        "sess-done",
+        "3",
+        TEST_REPO_ALPHA,
+        "finished the batch item",
+        "2026-03-08T14:00:07Z",
+    );
+    done.state = SessionState::Exited;
+    done.rest_state = RestState::DeepSleep;
 
-    app.capture_thought_updates(&[working, stopped], layout.thought_entry_capacity());
+    app.capture_thought_updates(&[working, stopped, done], layout.thought_entry_capacity());
 
     assert!(!app.thought_show_all);
     assert_eq!(
         thought_panel_header(&app),
-        "clawgs / pwd / asleep · 1/2 asleep · > all"
+        "clawgs / pwd / asleep · 1/3 asleep · > all"
     );
 
     let panel = build_thought_panel(&app, thought_content, layout.thought_entry_capacity());
@@ -7661,7 +7850,7 @@ fn thought_panel_defaults_to_stopped_only_and_counts_sleeping_agents() {
             .iter()
             .map(|row| row.line.as_str())
             .collect::<Vec<_>>(),
-        vec!["[asleep] [skills/9] codex", "  went quiet"]
+        vec!["[asleep] [launch] [skills/9] codex", "  went quiet"]
     );
 }
 
@@ -7712,10 +7901,53 @@ fn thought_panel_show_all_toggle_restores_working_agents() {
             "[work] [swimmers/7] codex",
             "  patching rail",
             "v skills (1)",
-            "[asleep] [skills/9] codex",
+            "[asleep] [launch] [skills/9] codex",
             "  went quiet",
         ]
     );
+}
+
+#[test]
+fn clicking_thought_launch_badge_opens_composer_for_selected_launch_target() {
+    let api = MockApi::new();
+    let layout = test_layout(120, 32);
+    let thought_content = layout
+        .thought_content
+        .expect("wide layout enables thought rail");
+    let mut app = make_app(api.clone());
+    app.launch_target = Some("jeremy-skillbox".to_string());
+    let mut session = session_summary_with_thought(
+        "sess-sleeping",
+        "9",
+        TEST_REPO_SKILLS,
+        "needs input",
+        "2026-03-08T14:00:06Z",
+    );
+    session.thought_state = ThoughtState::Sleeping;
+    session.rest_state = RestState::Sleeping;
+    app.capture_thought_updates(&[session], layout.thought_entry_capacity());
+
+    let panel = build_thought_panel(&app, thought_content, layout.thought_entry_capacity());
+    let launch_rect = panel.rows[0].launch_rect.expect("launch badge");
+    let row_y = thought_content
+        .bottom()
+        .saturating_sub(panel.rows.len() as u16);
+
+    handle_workspace_click(
+        &mut app,
+        layout,
+        crossterm::event::MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: launch_rect.x,
+            row: row_y,
+            modifiers: KeyModifiers::NONE,
+        },
+    );
+
+    let request = app.initial_request.as_ref().expect("composer opened");
+    assert_eq!(request.cwd, normalize_path(TEST_REPO_SKILLS));
+    assert_eq!(request.launch_target.as_deref(), Some("jeremy-skillbox"));
+    assert!(api.create_calls().is_empty());
 }
 
 #[test]
