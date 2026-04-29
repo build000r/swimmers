@@ -101,6 +101,37 @@ fn map_server_join_result(
     }
 }
 
+fn log_shutdown_trigger(trigger: ShutdownTrigger) {
+    match trigger {
+        ShutdownTrigger::Signal(signal) => {
+            tracing::info!(signal, "received shutdown signal");
+        }
+        ShutdownTrigger::Bridge(reason) => {
+            tracing::error!(reason, "thought bridge requested process shutdown");
+        }
+    }
+}
+
+async fn drain_server_task(
+    shutdown_tx: oneshot::Sender<()>,
+    server_task: &mut JoinHandle<Result<(), std::io::Error>>,
+) -> anyhow::Result<()> {
+    let _ = shutdown_tx.send(());
+
+    match timeout(SHUTDOWN_DRAIN_TIMEOUT, &mut *server_task).await {
+        Ok(result) => map_server_join_result(result),
+        Err(_) => {
+            tracing::warn!("graceful shutdown timed out; forcing server task abort");
+            server_task.abort();
+            let _ = server_task.await;
+            Err(anyhow!(
+                "graceful shutdown exceeded {}s drain timeout",
+                SHUTDOWN_DRAIN_TIMEOUT.as_secs()
+            ))
+        }
+    }
+}
+
 async fn run_server_with_bounded_shutdown(
     config: Arc<Config>,
     prom_handle: metrics_exporter_prometheus::PrometheusHandle,
@@ -138,47 +169,17 @@ async fn run_server_with_bounded_shutdown(
         .into_future(),
     );
 
-    let mut shutdown_tx = Some(shutdown_tx);
-    let mut server_result: anyhow::Result<()> = Ok(());
-    let mut drain_timed_out = false;
-
-    tokio::select! {
+    let server_result = tokio::select! {
         result = &mut server_task => {
-            server_result = map_server_join_result(result);
+            map_server_join_result(result)
         }
         trigger = wait_for_shutdown_trigger(bridge_health.clone()) => {
-            match trigger {
-                ShutdownTrigger::Signal(signal) => tracing::info!(signal, "received shutdown signal"),
-                ShutdownTrigger::Bridge(reason) => tracing::error!(reason, "thought bridge requested process shutdown"),
-            }
-
-            if let Some(tx) = shutdown_tx.take() {
-                let _ = tx.send(());
-            }
-
-            match timeout(SHUTDOWN_DRAIN_TIMEOUT, &mut server_task).await {
-                Ok(result) => {
-                    server_result = map_server_join_result(result);
-                }
-                Err(_) => {
-                    drain_timed_out = true;
-                    tracing::warn!("graceful shutdown timed out; forcing server task abort");
-                    server_task.abort();
-                    let _ = server_task.await;
-                }
-            }
+            log_shutdown_trigger(trigger);
+            drain_server_task(shutdown_tx, &mut server_task).await
         }
-    }
+    };
 
     finalize_persistence_shutdown(&state, thought_backend).await?;
-
-    if drain_timed_out {
-        return Err(anyhow!(
-            "graceful shutdown exceeded {}s drain timeout",
-            SHUTDOWN_DRAIN_TIMEOUT.as_secs()
-        ));
-    }
-
     server_result?;
 
     if let Some(reason) = bridge_health.shutdown_reason() {
@@ -208,54 +209,65 @@ fn run_config_subcommand(action: Option<ConfigAction>) -> i32 {
     }
 }
 
+fn init_tracing() {
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
+        )
+        .init();
+}
+
+fn prepare_server_startup() -> (Arc<Config>, metrics_exporter_prometheus::PrometheusHandle) {
+    // Load .env before anything reads env vars.
+    let _ = dotenvy::dotenv();
+    env_bootstrap::bootstrap_provider_env_from_shell();
+
+    init_tracing();
+
+    let prom_handle = metrics::init_metrics();
+    let config = Config::from_env();
+
+    // Refuse to start if LocalTrust auth is paired with a non-loopback bind.
+    // The pre-clap version only emitted a stderr warning here, which the
+    // README's own external-access example silently relied on; that left
+    // the API exposed to the network with no auth. Now we exit with
+    // sysexits EX_CONFIG instead.
+    if let Err(msg) = cli::enforce_localtrust_loopback(&config) {
+        eprintln!("swimmers: {msg}");
+        std::process::exit(cli::EXIT_CONFIG);
+    }
+
+    (Arc::new(config), prom_handle)
+}
+
+fn build_runtime_or_exit() -> tokio::runtime::Runtime {
+    match tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(rt) => rt,
+        Err(err) => {
+            eprintln!("swimmers: failed to build tokio runtime: {err}");
+            std::process::exit(1);
+        }
+    }
+}
+
+fn run_server_command() {
+    let (config, prom_handle) = prepare_server_startup();
+    let runtime = build_runtime_or_exit();
+
+    if let Err(err) = runtime.block_on(run_server_with_bounded_shutdown(config, prom_handle)) {
+        tracing::error!("{err}");
+        std::process::exit(1);
+    }
+}
+
 fn main() {
     let cli_args = ServerCli::parse();
     match cli_args.command {
         None | Some(ServerCommand::Serve) => {
-            // Load .env before anything reads env vars.
-            let _ = dotenvy::dotenv();
-            env_bootstrap::bootstrap_provider_env_from_shell();
-
-            // Initialize tracing.
-            tracing_subscriber::fmt()
-                .with_env_filter(
-                    EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
-                )
-                .init();
-
-            // Initialize Prometheus metrics exporter.
-            let prom_handle = metrics::init_metrics();
-
-            let config = Config::from_env();
-
-            // Refuse to start if LocalTrust auth is paired with a non-loopback bind.
-            // The pre-clap version only emitted a stderr warning here, which the
-            // README's own external-access example silently relied on; that left
-            // the API exposed to the network with no auth. Now we exit with
-            // sysexits EX_CONFIG instead.
-            if let Err(msg) = cli::enforce_localtrust_loopback(&config) {
-                eprintln!("swimmers: {msg}");
-                std::process::exit(cli::EXIT_CONFIG);
-            }
-
-            let config = Arc::new(config);
-            let runtime = match tokio::runtime::Builder::new_multi_thread()
-                .enable_all()
-                .build()
-            {
-                Ok(rt) => rt,
-                Err(err) => {
-                    eprintln!("swimmers: failed to build tokio runtime: {err}");
-                    std::process::exit(1);
-                }
-            };
-
-            if let Err(err) =
-                runtime.block_on(run_server_with_bounded_shutdown(config, prom_handle))
-            {
-                tracing::error!("{err}");
-                std::process::exit(1);
-            }
+            run_server_command();
         }
         Some(ServerCommand::Config { action }) => {
             std::process::exit(run_config_subcommand(action));

@@ -132,13 +132,21 @@ fn start_thought_backend(
     }
 }
 
-async fn finalize_shutdown(supervisor: &Arc<SessionSupervisor>, thought_backend: JoinHandle<()>) {
+async fn finalize_shutdown(
+    supervisor: &Arc<SessionSupervisor>,
+    thought_backend: JoinHandle<()>,
+    file_store: Option<Arc<FileStore>>,
+) -> anyhow::Result<()> {
     thought_backend.abort();
     let _ = thought_backend.await;
     supervisor
         .wait_for_pending_thought_persists(SHUTDOWN_PERSIST_TIMEOUT)
         .await;
     supervisor.persist_registry().await;
+    if let Some(store) = file_store {
+        store.flush_barrier().await?;
+    }
+    Ok(())
 }
 
 fn build_app_router(
@@ -169,19 +177,32 @@ async fn bind_listener(addr: &str, port: u16) -> anyhow::Result<tokio::net::TcpL
 }
 
 pub fn signal_readiness() {
-    let fd_raw = match std::env::var("SWIMMERS_READY_FD") {
+    if let Some(fd) = readiness_fd_from_env() {
+        write_readiness_signal(fd);
+    }
+}
+
+fn readiness_fd_from_env() -> Option<i32> {
+    readiness_fd_raw().and_then(parse_readiness_fd)
+}
+
+fn readiness_fd_raw() -> Option<String> {
+    match std::env::var("SWIMMERS_READY_FD") {
         Ok(value) if !value.trim().is_empty() => value,
         Ok(_) => {
             tracing::trace!("SWIMMERS_READY_FD is empty; skipping readiness signal");
-            return;
+            return None;
         }
         Err(_) => {
             tracing::trace!("SWIMMERS_READY_FD not set; skipping readiness signal");
-            return;
+            return None;
         }
-    };
+    }
+    .into()
+}
 
-    let fd = match fd_raw.parse::<i32>() {
+fn parse_readiness_fd(fd_raw: String) -> Option<i32> {
+    match fd_raw.parse::<i32>() {
         Ok(fd) => fd,
         Err(err) => {
             tracing::trace!(
@@ -189,36 +210,37 @@ pub fn signal_readiness() {
                 error = %err,
                 "SWIMMERS_READY_FD is not a valid i32; skipping readiness signal"
             );
-            return;
-        }
-    };
-
-    #[cfg(unix)]
-    {
-        use std::os::fd::FromRawFd;
-
-        // SAFETY: The launcher passes SWIMMERS_READY_FD as an owned pipe writer
-        // fd intended for a one-shot readiness byte. We consume exactly once and
-        // drop immediately to close the descriptor.
-        let mut writer = unsafe { os_pipe::PipeWriter::from_raw_fd(fd) };
-        match writer.write_all(b"R") {
-            Ok(()) => {
-                drop(writer);
-                tracing::info!(fd, "sent readiness signal");
-            }
-            Err(err) => {
-                tracing::warn!(fd, error = %err, "failed to write readiness signal");
-            }
+            return None;
         }
     }
+    .into()
+}
 
-    #[cfg(not(unix))]
-    {
-        tracing::warn!(
-            fd,
-            "SWIMMERS_READY_FD signaling is only implemented on unix platforms"
-        );
+#[cfg(unix)]
+fn write_readiness_signal(fd: i32) {
+    use std::os::fd::FromRawFd;
+
+    // SAFETY: The launcher passes SWIMMERS_READY_FD as an owned pipe writer
+    // fd intended for a one-shot readiness byte. We consume exactly once and
+    // drop immediately to close the descriptor.
+    let mut writer = unsafe { os_pipe::PipeWriter::from_raw_fd(fd) };
+    match writer.write_all(b"R") {
+        Ok(()) => {
+            drop(writer);
+            tracing::info!(fd, "sent readiness signal");
+        }
+        Err(err) => {
+            tracing::warn!(fd, error = %err, "failed to write readiness signal");
+        }
     }
+}
+
+#[cfg(not(unix))]
+fn write_readiness_signal(fd: i32) {
+    tracing::warn!(
+        fd,
+        "SWIMMERS_READY_FD signaling is only implemented on unix platforms"
+    );
 }
 
 pub async fn init_app_state(
@@ -412,6 +434,7 @@ pub async fn run_server(
 
     let (state, thought_backend, bridge_health) = init_app_state(config.clone()).await;
     let supervisor = state.supervisor.clone();
+    let file_store = state.current_file_store();
     let app = build_app_router(config, state, prom_handle);
     let listener = bind_listener(&bind, port).await?;
     signal_readiness();
@@ -429,7 +452,7 @@ pub async fn run_server(
     .with_graceful_shutdown(shutdown_signal(bridge_health.clone()))
     .await;
 
-    finalize_shutdown(&supervisor, thought_backend).await;
+    finalize_shutdown(&supervisor, thought_backend, file_store).await?;
 
     server_result.map_err(|err| anyhow::anyhow!("server error: {err}"))?;
     if let Some(reason) = bridge_health.shutdown_reason() {
@@ -595,7 +618,9 @@ mod tests {
         drop(provider);
         started_rx.await.expect("backend task should start");
 
-        finalize_shutdown(&supervisor, thought_backend).await;
+        finalize_shutdown(&supervisor, thought_backend, Some(store.clone()))
+            .await
+            .expect("shutdown flush");
 
         assert!(aborted.load(Ordering::SeqCst));
 

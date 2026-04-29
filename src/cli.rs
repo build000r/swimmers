@@ -370,17 +370,25 @@ pub fn check_data_dir_writable(path: &std::path::Path) -> Result<PathBuf, String
 
 /// Format and print doctor findings, returning the appropriate exit code.
 pub fn print_doctor_findings(findings: &[DoctorFinding]) -> i32 {
-    let mut failed = 0usize;
-    for f in findings {
-        let mark = if f.ok { "ok " } else { "FAIL" };
-        let line = format!("[{mark}] {}: {}", f.name, f.detail);
-        if f.ok {
-            println!("{line}");
-        } else {
-            eprintln!("{line}");
-            failed += 1;
-        }
+    let failed = findings
+        .iter()
+        .filter(|finding| !print_doctor_finding(finding))
+        .count();
+    print_doctor_summary(failed)
+}
+
+fn print_doctor_finding(finding: &DoctorFinding) -> bool {
+    let mark = if finding.ok { "ok " } else { "FAIL" };
+    let line = format!("[{mark}] {}: {}", finding.name, finding.detail);
+    if finding.ok {
+        println!("{line}");
+    } else {
+        eprintln!("{line}");
     }
+    finding.ok
+}
+
+fn print_doctor_summary(failed: usize) -> i32 {
     if failed == 0 {
         println!("\ndoctor: all checks passed");
         0

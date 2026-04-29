@@ -366,38 +366,14 @@ impl FileStore {
     pub async fn flush_barrier(&self) -> anyhow::Result<()> {
         let _global_write_guard = self.write_lock.lock().await;
         let base_dir = self.base_dir.clone();
-        let files = vec![
+        let files = [
             self.registry_path(),
             self.thoughts_path(),
             self.thought_config_path(),
         ];
-        tokio::task::spawn_blocking(move || {
-            for path in files {
-                match std::fs::File::open(&path) {
-                    Ok(file) => file.sync_all().map_err(|err| {
-                        anyhow::anyhow!("sync file {} failed: {err}", path.display())
-                    })?,
-                    Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
-                    Err(err) => {
-                        return Err(anyhow::anyhow!(
-                            "open file {} failed: {err}",
-                            path.display()
-                        ));
-                    }
-                }
-            }
-            std::fs::File::open(&base_dir)
-                .and_then(|dir| dir.sync_all())
-                .map_err(|err| {
-                    anyhow::anyhow!(
-                        "sync persistence directory {} failed: {err}",
-                        base_dir.display()
-                    )
-                })?;
-            Ok(())
-        })
-        .await
-        .map_err(|err| anyhow::anyhow!("spawn_blocking panicked: {err}"))?
+        tokio::task::spawn_blocking(move || flush_barrier_blocking(&base_dir, &files))
+            .await
+            .map_err(|err| anyhow::anyhow!("spawn_blocking panicked: {err}"))?
     }
 
     /// Load daemon runtime thought config from in-memory cache.
@@ -434,6 +410,32 @@ impl FileStore {
 // ---------------------------------------------------------------------------
 // Blocking I/O helpers (run inside spawn_blocking)
 // ---------------------------------------------------------------------------
+
+fn flush_barrier_blocking(base_dir: &Path, files: &[PathBuf]) -> anyhow::Result<()> {
+    for path in files {
+        sync_existing_file(path)?;
+    }
+    sync_directory(base_dir, "persistence")
+}
+
+fn sync_existing_file(path: &Path) -> anyhow::Result<()> {
+    match std::fs::File::open(path) {
+        Ok(file) => file
+            .sync_all()
+            .map_err(|err| anyhow::anyhow!("sync file {} failed: {err}", path.display())),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(anyhow::anyhow!(
+            "open file {} failed: {err}",
+            path.display()
+        )),
+    }
+}
+
+fn sync_directory(path: &Path, label: &str) -> anyhow::Result<()> {
+    std::fs::File::open(path)
+        .and_then(|dir| dir.sync_all())
+        .map_err(|err| anyhow::anyhow!("sync {label} directory {} failed: {err}", path.display()))
+}
 
 /// Atomically write data to a file: write to `.tmp`, then rename.
 async fn atomic_write_blocking(path: PathBuf, data: String) -> anyhow::Result<()> {
@@ -636,5 +638,13 @@ mod tests {
             .expect("payload present");
 
         assert_eq!(decoded, "[{\"session_id\":\"sess-1\"}]");
+    }
+
+    #[test]
+    fn sync_existing_file_ignores_missing_files() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("missing.json");
+
+        sync_existing_file(&path).expect("missing persistence files are optional");
     }
 }
