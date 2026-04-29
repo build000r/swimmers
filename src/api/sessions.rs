@@ -1,6 +1,6 @@
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
-use axum::response::IntoResponse;
+use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post};
 use axum::{Extension, Json, Router};
 use chrono::{DateTime, Utc};
@@ -11,7 +11,7 @@ use uuid::Uuid;
 
 use crate::api::{fetch_live_summary, remote_sessions, AppState};
 use crate::auth::{AuthInfo, AuthScope};
-use crate::session::actor::SessionCommand;
+use crate::session::actor::{ActorHandle, SessionCommand};
 use crate::types::{
     CreateSessionRequest, CreateSessionResponse, CreateSessionsBatchRequest,
     CreateSessionsBatchResponse, CreateSessionsBatchResult, ErrorResponse, MermaidArtifactResponse,
@@ -21,6 +21,9 @@ use crate::types::{
 
 const BATCH_PROMPT_EXCERPT_MAX_CHARS: usize = 72;
 const BATCH_LABEL_MAX_CHARS: usize = 28;
+const PANE_TAIL_LINES: usize = 300;
+const PANE_TAIL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+const PLAN_FILE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 // ---------------------------------------------------------------------------
 // GET /v1/sessions
@@ -59,11 +62,23 @@ async fn create_session(
         return resp;
     }
     if remote_sessions::is_remote_launch_target(body.launch_target.as_deref()) {
-        return match remote_sessions::create_remote_session(body).await {
-            Ok(response) => (StatusCode::CREATED, Json(response)).into_response(),
-            Err(err) => err.into_response(),
-        };
+        return create_remote_session_response(body).await;
     }
+
+    create_local_session_response(&state, body).await
+}
+
+async fn create_remote_session_response(body: CreateSessionRequest) -> axum::response::Response {
+    match remote_sessions::create_remote_session(body).await {
+        Ok(response) => (StatusCode::CREATED, Json(response)).into_response(),
+        Err(err) => err.into_response(),
+    }
+}
+
+async fn create_local_session_response(
+    state: &Arc<AppState>,
+    body: CreateSessionRequest,
+) -> axum::response::Response {
     match state
         .supervisor
         .create_session(body.name, body.cwd, body.spawn_tool, body.initial_request)
@@ -77,31 +92,33 @@ async fn create_session(
             }),
         )
             .into_response(),
-        Err(e) => {
-            let msg = e.to_string();
-            // The supervisor returns anyhow errors. We detect specific failure
-            // modes by inspecting the error message.
-            if msg.contains("already exists") || msg.contains("duplicate session") {
-                (
-                    StatusCode::CONFLICT,
-                    Json(ErrorResponse {
-                        code: "SESSION_ALREADY_EXISTS".to_string(),
-                        message: Some(msg),
-                    }),
-                )
-                    .into_response()
-            } else {
-                tracing::error!("create_session failed: {e}");
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(ErrorResponse {
-                        code: "INTERNAL_ERROR".to_string(),
-                        message: Some(msg),
-                    }),
-                )
-                    .into_response()
-            }
-        }
+        Err(err) => create_local_session_error_response(err),
+    }
+}
+
+fn create_local_session_error_response(error: anyhow::Error) -> axum::response::Response {
+    let msg = error.to_string();
+    // The supervisor returns anyhow errors. We detect specific failure modes by
+    // inspecting the error message.
+    if msg.contains("already exists") || msg.contains("duplicate session") {
+        (
+            StatusCode::CONFLICT,
+            Json(ErrorResponse {
+                code: "SESSION_ALREADY_EXISTS".to_string(),
+                message: Some(msg),
+            }),
+        )
+            .into_response()
+    } else {
+        tracing::error!("create_session failed: {error}");
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                code: "INTERNAL_ERROR".to_string(),
+                message: Some(msg),
+            }),
+        )
+            .into_response()
     }
 }
 
@@ -563,66 +580,85 @@ async fn get_pane_tail(
     Extension(auth): Extension<AuthInfo>,
     State(state): State<Arc<AppState>>,
     Path(session_id): Path<String>,
-) -> impl IntoResponse {
+) -> Response {
     if let Err(resp) = auth.require_scope(AuthScope::SessionsRead) {
         return resp;
     }
-    let handle = match state.supervisor.get_session(&session_id).await {
-        Some(h) => h,
-        None => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(ErrorResponse {
-                    code: "SESSION_NOT_FOUND".to_string(),
-                    message: None,
-                }),
-            )
-                .into_response();
-        }
-    };
 
+    match request_pane_tail(&state, &session_id).await {
+        Ok(text) => (
+            StatusCode::OK,
+            Json(SessionPaneTailResponse { session_id, text }),
+        )
+            .into_response(),
+        Err(error) => pane_tail_error_response(error),
+    }
+}
+
+enum PaneTailError {
+    SessionNotFound,
+    ActorUnavailable,
+    ReplyDropped,
+    TimedOut,
+}
+
+async fn request_pane_tail(
+    state: &Arc<AppState>,
+    session_id: &str,
+) -> Result<String, PaneTailError> {
+    let handle = state
+        .supervisor
+        .get_session(session_id)
+        .await
+        .ok_or(PaneTailError::SessionNotFound)?;
+    request_pane_tail_from_actor(&handle).await
+}
+
+async fn request_pane_tail_from_actor(handle: &ActorHandle) -> Result<String, PaneTailError> {
     let (tx, rx) = oneshot::channel::<String>();
     if handle
         .send(SessionCommand::GetPaneTail {
-            lines: 300,
+            lines: PANE_TAIL_LINES,
             reply: tx,
         })
         .await
         .is_err()
     {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                code: "INTERNAL_ERROR".to_string(),
-                message: Some("session actor unavailable".to_string()),
-            }),
-        )
-            .into_response();
+        return Err(PaneTailError::ActorUnavailable);
     }
 
-    match tokio::time::timeout(std::time::Duration::from_secs(5), rx).await {
-        Ok(Ok(text)) => (
-            StatusCode::OK,
-            Json(SessionPaneTailResponse { session_id, text }),
-        )
-            .into_response(),
-        Ok(Err(_)) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                code: "INTERNAL_ERROR".to_string(),
-                message: Some("actor dropped pane tail reply".to_string()),
-            }),
-        )
-            .into_response(),
-        Err(_) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                code: "INTERNAL_ERROR".to_string(),
-                message: Some("pane tail request timed out".to_string()),
-            }),
-        )
-            .into_response(),
+    match tokio::time::timeout(PANE_TAIL_TIMEOUT, rx).await {
+        Ok(Ok(text)) => Ok(text),
+        Ok(Err(_)) => Err(PaneTailError::ReplyDropped),
+        Err(_) => Err(PaneTailError::TimedOut),
     }
+}
+
+fn pane_tail_error_response(error: PaneTailError) -> Response {
+    match error {
+        PaneTailError::SessionNotFound => (
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                code: "SESSION_NOT_FOUND".to_string(),
+                message: None,
+            }),
+        )
+            .into_response(),
+        PaneTailError::ActorUnavailable => pane_tail_internal_error("session actor unavailable"),
+        PaneTailError::ReplyDropped => pane_tail_internal_error("actor dropped pane tail reply"),
+        PaneTailError::TimedOut => pane_tail_internal_error("pane tail request timed out"),
+    }
+}
+
+fn pane_tail_internal_error(message: &str) -> Response {
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        Json(ErrorResponse {
+            code: "INTERNAL_ERROR".to_string(),
+            message: Some(message.to_string()),
+        }),
+    )
+        .into_response()
 }
 
 // ---------------------------------------------------------------------------
@@ -637,29 +673,36 @@ async fn get_mermaid_artifact(
     if let Err(resp) = auth.require_scope(AuthScope::SessionsRead) {
         return resp;
     }
-    match remote_sessions::denamespace_for_target(&session_id) {
-        Ok(Some((target, remote_session_id))) => {
-            return match remote_sessions::fetch_remote_mermaid_artifact(&target, remote_session_id)
-                .await
-            {
-                Ok(response) => (StatusCode::OK, Json(response)).into_response(),
-                Err(err) => err.into_response(),
-            };
-        }
-        Ok(None) => {}
-        Err(err) => return err.into_response(),
+
+    match fetch_mermaid_artifact_response(&state, &session_id).await {
+        Ok(artifact) => (StatusCode::OK, Json(artifact)).into_response(),
+        Err(resp) => resp,
     }
-    let handle = match state.supervisor.get_session(&session_id).await {
+}
+
+pub(crate) async fn fetch_mermaid_artifact_response(
+    state: &Arc<AppState>,
+    session_id: &str,
+) -> Result<MermaidArtifactResponse, axum::response::Response> {
+    if let Some((target, remote_session_id)) =
+        remote_sessions::denamespace_for_target(session_id).map_err(|err| err.into_response())?
+    {
+        return remote_sessions::fetch_remote_mermaid_artifact(&target, remote_session_id)
+            .await
+            .map_err(|err| err.into_response());
+    }
+
+    let handle = match state.supervisor.get_session(session_id).await {
         Some(h) => h,
         None => {
-            return (
+            return Err((
                 StatusCode::NOT_FOUND,
                 Json(ErrorResponse {
                     code: "SESSION_NOT_FOUND".to_string(),
                     message: None,
                 }),
             )
-                .into_response();
+                .into_response());
         }
     };
 
@@ -669,34 +712,34 @@ async fn get_mermaid_artifact(
         .await
         .is_err()
     {
-        return (
+        return Err((
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ErrorResponse {
                 code: "INTERNAL_ERROR".to_string(),
                 message: Some("session actor unavailable".to_string()),
             }),
         )
-            .into_response();
+            .into_response());
     }
 
     match tokio::time::timeout(std::time::Duration::from_secs(5), rx).await {
-        Ok(Ok(artifact)) => (StatusCode::OK, Json(artifact)).into_response(),
-        Ok(Err(_)) => (
+        Ok(Ok(artifact)) => Ok(artifact),
+        Ok(Err(_)) => Err((
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ErrorResponse {
                 code: "INTERNAL_ERROR".to_string(),
                 message: Some("actor dropped mermaid artifact reply".to_string()),
             }),
         )
-            .into_response(),
-        Err(_) => (
+            .into_response()),
+        Err(_) => Err((
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ErrorResponse {
                 code: "INTERNAL_ERROR".to_string(),
                 message: Some("mermaid artifact request timed out".to_string()),
             }),
         )
-            .into_response(),
+            .into_response()),
     }
 }
 
@@ -714,78 +757,98 @@ async fn get_plan_file(
     State(state): State<Arc<AppState>>,
     Path(session_id): Path<String>,
     Query(query): Query<PlanFileQuery>,
-) -> impl IntoResponse {
+) -> Response {
     if let Err(resp) = auth.require_scope(AuthScope::SessionsRead) {
         return resp;
     }
-    match remote_sessions::denamespace_for_target(&session_id) {
+
+    fetch_plan_file_response(&state, &session_id, &query.name).await
+}
+
+async fn fetch_plan_file_response(state: &Arc<AppState>, session_id: &str, name: &str) -> Response {
+    match request_plan_file(state, session_id, name).await {
+        Ok(response) => (StatusCode::OK, Json(response)).into_response(),
+        Err(error) => plan_file_error_response(error),
+    }
+}
+
+enum PlanFileError {
+    Remote(remote_sessions::RemoteSessionError),
+    SessionNotFound,
+    ActorUnavailable,
+    ReplyDropped,
+    TimedOut,
+}
+
+async fn request_plan_file(
+    state: &Arc<AppState>,
+    session_id: &str,
+    name: &str,
+) -> Result<PlanFileResponse, PlanFileError> {
+    match remote_sessions::denamespace_for_target(session_id) {
         Ok(Some((target, remote_session_id))) => {
-            return match remote_sessions::fetch_remote_plan_file(
-                &target,
-                remote_session_id,
-                &query.name,
-            )
-            .await
-            {
-                Ok(response) => (StatusCode::OK, Json(response)).into_response(),
-                Err(err) => err.into_response(),
-            };
+            return remote_sessions::fetch_remote_plan_file(&target, remote_session_id, name)
+                .await
+                .map_err(PlanFileError::Remote);
         }
         Ok(None) => {}
-        Err(err) => return err.into_response(),
+        Err(err) => return Err(PlanFileError::Remote(err)),
     }
-    let handle = match state.supervisor.get_session(&session_id).await {
-        Some(h) => h,
-        None => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(ErrorResponse {
-                    code: "SESSION_NOT_FOUND".to_string(),
-                    message: None,
-                }),
-            )
-                .into_response();
-        }
-    };
 
+    let handle = state
+        .supervisor
+        .get_session(session_id)
+        .await
+        .ok_or(PlanFileError::SessionNotFound)?;
+    request_plan_file_from_actor(&handle, name.to_string()).await
+}
+
+async fn request_plan_file_from_actor(
+    handle: &ActorHandle,
+    name: String,
+) -> Result<PlanFileResponse, PlanFileError> {
     let (tx, rx) = oneshot::channel::<PlanFileResponse>();
     if handle
-        .send(SessionCommand::GetPlanFile {
-            name: query.name,
-            reply: tx,
-        })
+        .send(SessionCommand::GetPlanFile { name, reply: tx })
         .await
         .is_err()
     {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                code: "INTERNAL_ERROR".to_string(),
-                message: Some("session actor unavailable".to_string()),
-            }),
-        )
-            .into_response();
+        return Err(PlanFileError::ActorUnavailable);
     }
 
-    match tokio::time::timeout(std::time::Duration::from_secs(5), rx).await {
-        Ok(Ok(response)) => (StatusCode::OK, Json(response)).into_response(),
-        Ok(Err(_)) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                code: "INTERNAL_ERROR".to_string(),
-                message: Some("actor dropped plan file reply".to_string()),
-            }),
-        )
-            .into_response(),
-        Err(_) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                code: "INTERNAL_ERROR".to_string(),
-                message: Some("plan file request timed out".to_string()),
-            }),
-        )
-            .into_response(),
+    match tokio::time::timeout(PLAN_FILE_TIMEOUT, rx).await {
+        Ok(Ok(response)) => Ok(response),
+        Ok(Err(_)) => Err(PlanFileError::ReplyDropped),
+        Err(_) => Err(PlanFileError::TimedOut),
     }
+}
+
+fn plan_file_error_response(error: PlanFileError) -> Response {
+    match error {
+        PlanFileError::Remote(err) => err.into_response(),
+        PlanFileError::SessionNotFound => (
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                code: "SESSION_NOT_FOUND".to_string(),
+                message: None,
+            }),
+        )
+            .into_response(),
+        PlanFileError::ActorUnavailable => plan_file_internal_error("session actor unavailable"),
+        PlanFileError::ReplyDropped => plan_file_internal_error("actor dropped plan file reply"),
+        PlanFileError::TimedOut => plan_file_internal_error("plan file request timed out"),
+    }
+}
+
+fn plan_file_internal_error(message: &str) -> Response {
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        Json(ErrorResponse {
+            code: "INTERNAL_ERROR".to_string(),
+            message: Some(message.to_string()),
+        }),
+    )
+        .into_response()
 }
 
 // ---------------------------------------------------------------------------
@@ -1560,6 +1623,64 @@ esac
         let json = response_json(response).await;
         assert_eq!(json["session_id"], "sess-tail");
         assert_eq!(json["text"], "recent pane output");
+    }
+
+    #[tokio::test]
+    async fn get_plan_file_returns_actor_payload() {
+        let state = test_state();
+        let (cmd_tx, mut cmd_rx) = mpsc::channel(8);
+        state
+            .supervisor
+            .insert_test_handle(ActorHandle::test_handle("sess-plan", "tmux-plan", cmd_tx))
+            .await;
+
+        tokio::spawn(async move {
+            while let Some(cmd) = cmd_rx.recv().await {
+                if let SessionCommand::GetPlanFile { name, reply } = cmd {
+                    assert_eq!(name, "plan.md");
+                    let _ = reply.send(PlanFileResponse {
+                        session_id: "sess-plan".to_string(),
+                        name,
+                        content: Some("# Plan\n".to_string()),
+                        error: None,
+                    });
+                    break;
+                }
+            }
+        });
+
+        let response = get_plan_file(
+            Extension(AuthInfo::new(OPERATOR_SCOPES.to_vec())),
+            State(state),
+            Path("sess-plan".to_string()),
+            Query(PlanFileQuery {
+                name: "plan.md".to_string(),
+            }),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let json = response_json(response).await;
+        assert_eq!(json["session_id"], "sess-plan");
+        assert_eq!(json["name"], "plan.md");
+        assert_eq!(json["content"], "# Plan\n");
+    }
+
+    #[tokio::test]
+    async fn get_plan_file_returns_not_found_for_missing_session() {
+        let response = get_plan_file(
+            Extension(AuthInfo::new(OPERATOR_SCOPES.to_vec())),
+            State(test_state()),
+            Path("missing-plan".to_string()),
+            Query(PlanFileQuery {
+                name: "plan.md".to_string(),
+            }),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let json = response_json(response).await;
+        assert_eq!(json["code"], "SESSION_NOT_FOUND");
     }
 
     #[tokio::test]

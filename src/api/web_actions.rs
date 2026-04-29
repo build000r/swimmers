@@ -1,5 +1,4 @@
 use std::sync::Arc;
-use std::time::Duration;
 
 use axum::extract::{Path, State};
 use axum::http::{header, StatusCode};
@@ -7,19 +6,17 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Extension, Json, Router};
 use mermaid_rs_renderer::{compute_layout, parse_mermaid, render_svg, RenderOptions};
-use tokio::sync::oneshot;
 
 #[cfg(feature = "personal-workflows")]
 use crate::api::fetch_live_summary;
-use crate::api::AppState;
+use crate::api::{sessions, AppState};
 use crate::auth::{AuthInfo, AuthScope};
 use crate::host_actions::{ArtifactOpener, SystemArtifactOpener};
 #[cfg(feature = "personal-workflows")]
 use crate::host_actions::{CommitLauncher, SystemCommitLauncher};
-use crate::session::actor::SessionCommand;
+use crate::types::ErrorResponse;
 #[cfg(feature = "personal-workflows")]
 use crate::types::SessionState;
-use crate::types::{ErrorResponse, MermaidArtifactResponse};
 
 #[cfg(feature = "personal-workflows")]
 #[derive(Debug, serde::Serialize)]
@@ -156,7 +153,7 @@ async fn render_mermaid_artifact_svg(
     state: &Arc<AppState>,
     session_id: &str,
 ) -> Result<String, Response> {
-    let artifact = fetch_mermaid_artifact(state, session_id).await?;
+    let artifact = sessions::fetch_mermaid_artifact_response(state, session_id).await?;
     let Some(source) = artifact
         .source
         .as_deref()
@@ -199,7 +196,7 @@ async fn post_open_mermaid_artifact_with_opener<O: ArtifactOpener>(
     session_id: String,
     opener: &O,
 ) -> Response {
-    let artifact = match fetch_mermaid_artifact(&state, &session_id).await {
+    let artifact = match sessions::fetch_mermaid_artifact_response(&state, &session_id).await {
         Ok(artifact) => artifact,
         Err(resp) => return resp,
     };
@@ -241,45 +238,6 @@ async fn post_open_mermaid_artifact_with_opener<O: ArtifactOpener>(
     }
 }
 
-async fn fetch_mermaid_artifact(
-    state: &Arc<AppState>,
-    session_id: &str,
-) -> Result<MermaidArtifactResponse, Response> {
-    let handle = match state.supervisor.get_session(session_id).await {
-        Some(handle) => handle,
-        None => {
-            return Err(json_error(StatusCode::NOT_FOUND, "SESSION_NOT_FOUND", None));
-        }
-    };
-
-    let (tx, rx) = oneshot::channel::<MermaidArtifactResponse>();
-    if handle
-        .send(SessionCommand::GetMermaidArtifact(tx))
-        .await
-        .is_err()
-    {
-        return Err(json_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "INTERNAL_ERROR",
-            Some("session actor unavailable".to_string()),
-        ));
-    }
-
-    match tokio::time::timeout(Duration::from_secs(5), rx).await {
-        Ok(Ok(artifact)) => Ok(artifact),
-        Ok(Err(_)) => Err(json_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "INTERNAL_ERROR",
-            Some("actor dropped mermaid artifact reply".to_string()),
-        )),
-        Err(_) => Err(json_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "INTERNAL_ERROR",
-            Some("mermaid artifact request timed out".to_string()),
-        )),
-    }
-}
-
 fn render_mermaid_svg(source: &str) -> Result<String, String> {
     let parsed = parse_mermaid(source).map_err(|err| err.to_string())?;
     let options = RenderOptions::default();
@@ -301,7 +259,8 @@ mod tests {
     use crate::thought::protocol::SyncRequestSequence;
     use crate::thought::runtime_config::ThoughtConfig;
     use crate::types::{
-        RestState, SessionState, SessionSummary, ThoughtSource, ThoughtState, TransportHealth,
+        MermaidArtifactResponse, RestState, SessionState, SessionSummary, ThoughtSource,
+        ThoughtState, TransportHealth,
     };
     use axum::body::to_bytes;
     use axum::extract::{Extension, Path, State};

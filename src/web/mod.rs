@@ -527,19 +527,11 @@ async fn session_ws_inner(
     }
 
     while let Some(result) = tokio::select! {
-        maybe_message = receiver.next() => maybe_message.map(Either::Incoming),
-        maybe_frame = output_rx.recv() => maybe_frame.map(Either::Frame),
+        maybe_message = receiver.next() => maybe_message.map(SessionWsEvent::Incoming),
+        maybe_frame = output_rx.recv() => maybe_frame.map(SessionWsEvent::Frame),
     } {
-        match result {
-            Either::Incoming(Ok(message)) => {
-                if !handle_client_message(&handle, &mut sender, &auth, message).await? {
-                    break;
-                }
-            }
-            Either::Incoming(Err(err)) => return Err(err.into()),
-            Either::Frame(OutputFrame { data, .. }) => {
-                sender.send(Message::Binary(data.into())).await?;
-            }
+        if !handle_session_ws_event(&handle, &mut sender, &auth, result).await? {
+            break;
         }
     }
 
@@ -547,9 +539,27 @@ async fn session_ws_inner(
     Ok(())
 }
 
-enum Either {
+enum SessionWsEvent {
     Incoming(Result<Message, axum::Error>),
     Frame(OutputFrame),
+}
+
+async fn handle_session_ws_event(
+    handle: &ActorHandle,
+    sender: &mut futures::stream::SplitSink<WebSocket, Message>,
+    auth: &AuthInfo,
+    event: SessionWsEvent,
+) -> anyhow::Result<bool> {
+    match event {
+        SessionWsEvent::Incoming(Ok(message)) => {
+            handle_client_message(handle, sender, auth, message).await
+        }
+        SessionWsEvent::Incoming(Err(err)) => Err(err.into()),
+        SessionWsEvent::Frame(OutputFrame { data, .. }) => {
+            sender.send(Message::Binary(data.into())).await?;
+            Ok(true)
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]

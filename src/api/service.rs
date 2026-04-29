@@ -53,6 +53,7 @@ struct ListCandidate {
     services: Vec<String>,
     repo_dirty: Option<bool>,
     repo_action: Option<RepoActionStatus>,
+    full_path: Option<String>,
 }
 
 struct PendingEntry {
@@ -62,6 +63,8 @@ struct PendingEntry {
     modified_at: u64,
     services: Vec<String>,
 }
+
+type RepoProbe = (Option<bool>, Option<RepoActionStatus>);
 
 #[derive(Debug, Clone)]
 pub struct ApiServiceError {
@@ -465,6 +468,178 @@ fn modified_secs(path: &Path) -> u64 {
         .unwrap_or(0)
 }
 
+async fn probe_pending_entries(state: &Arc<AppState>, pending: &[PendingEntry]) -> Vec<RepoProbe> {
+    let repo_actions = state.repo_actions.clone();
+    let entry_paths = pending
+        .iter()
+        .map(|pending_entry| pending_entry.entry_path.clone())
+        .collect::<Vec<_>>();
+    stream::iter(entry_paths.into_iter().map(|entry_path| {
+        let repo_actions = repo_actions.clone();
+        async move {
+            let repo_summary =
+                inspect_git_repo(&entry_path)
+                    .await
+                    .ok()
+                    .flatten()
+                    .and_then(|summary| {
+                        let canonical_entry =
+                            entry_path.canonicalize().unwrap_or(entry_path.clone());
+                        (summary.repo_root == canonical_entry).then_some(summary)
+                    });
+            let repo_dirty = repo_summary.as_ref().map(|summary| summary.dirty);
+            let repo_action = match repo_summary.as_ref() {
+                Some(summary) => repo_actions.status_for(&summary.repo_root).await,
+                None => None,
+            };
+            (repo_dirty, repo_action)
+        }
+    }))
+    .buffered(GIT_PROBE_CONCURRENCY)
+    .collect()
+    .await
+}
+
+fn service_metadata_map(services: &[OverlayServiceEntry]) -> HashMap<&str, &OverlayServiceEntry> {
+    services
+        .iter()
+        .map(|service| (service.name.as_str(), service))
+        .collect()
+}
+
+fn service_entry_metadata(
+    services: &[String],
+    health_map: &HashMap<String, bool>,
+    svc_meta: &HashMap<&str, &OverlayServiceEntry>,
+) -> (Option<bool>, Option<bool>, Option<String>) {
+    let is_running = if services.is_empty() {
+        None
+    } else {
+        Some(
+            services
+                .iter()
+                .any(|service| health_map.get(service).copied().unwrap_or(false)),
+        )
+    };
+    let has_restart = services
+        .iter()
+        .any(|service| {
+            svc_meta
+                .get(service.as_str())
+                .and_then(|entry| entry.restart.as_ref())
+                .is_some()
+        })
+        .then_some(true);
+    let open_url = services.iter().find_map(|service| {
+        svc_meta
+            .get(service.as_str())
+            .and_then(|entry| entry.open_url.clone().or_else(|| entry.health_url.clone()))
+    });
+
+    (is_running, has_restart, open_url)
+}
+
+fn pending_to_candidates(
+    pending: Vec<PendingEntry>,
+    probes: Vec<RepoProbe>,
+    include_full_path: bool,
+) -> Vec<ListCandidate> {
+    pending
+        .into_iter()
+        .zip(probes)
+        .map(|(pending_entry, (repo_dirty, repo_action))| {
+            let full_path =
+                include_full_path.then(|| pending_entry.entry_path.to_string_lossy().into_owned());
+            ListCandidate {
+                name: pending_entry.name,
+                has_children: pending_entry.has_children,
+                modified_at: pending_entry.modified_at,
+                services: pending_entry.services,
+                repo_dirty,
+                repo_action,
+                full_path,
+            }
+        })
+        .collect()
+}
+
+fn build_dir_entries(
+    candidates: Vec<ListCandidate>,
+    health_map: &HashMap<String, bool>,
+    svc_meta: &HashMap<&str, &OverlayServiceEntry>,
+) -> Vec<DirEntry> {
+    let mut entries: Vec<(DirEntry, u64)> = candidates
+        .into_iter()
+        .map(|candidate| {
+            let (is_running, has_restart, open_url) =
+                service_entry_metadata(&candidate.services, health_map, svc_meta);
+            (
+                DirEntry {
+                    name: candidate.name,
+                    has_children: candidate.has_children,
+                    is_running,
+                    repo_dirty: candidate.repo_dirty,
+                    repo_action: candidate.repo_action,
+                    group: None,
+                    full_path: candidate.full_path,
+                    has_restart,
+                    open_url,
+                },
+                candidate.modified_at,
+            )
+        })
+        .collect();
+
+    entries.sort_by(|(a, a_modified), (b, b_modified)| {
+        b_modified
+            .cmp(a_modified)
+            .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+    });
+    entries.into_iter().map(|(entry, _)| entry).collect()
+}
+
+fn collect_visible_pending_entries(
+    read_dir: std::fs::ReadDir,
+    service_context: Option<&OverlayServiceContext>,
+) -> (Vec<PendingEntry>, BTreeSet<String>) {
+    let mut pending = Vec::new();
+    let mut unique_services = BTreeSet::new();
+    for entry in read_dir.flatten() {
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        if !file_type.is_dir() {
+            continue;
+        }
+
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if name.starts_with('.') {
+            continue;
+        }
+
+        let entry_path = entry.path();
+        let has_children = has_visible_child_dirs(&entry_path);
+        let modified_at = modified_secs(&entry_path);
+
+        let services = service_context
+            .map(|context| services_for_directory(&entry_path, context))
+            .unwrap_or_default();
+        for service in &services {
+            unique_services.insert(service.clone());
+        }
+
+        pending.push(PendingEntry {
+            name,
+            entry_path,
+            has_children,
+            modified_at,
+            services,
+        });
+    }
+
+    (pending, unique_services)
+}
+
 pub async fn list_managed_service_entries(
     state: &Arc<AppState>,
     config: &OverlayDirConfig,
@@ -508,94 +683,12 @@ pub async fn list_managed_service_entries(
         });
     }
 
-    let probe_inputs: Vec<(PathBuf, _)> = pending
-        .iter()
-        .map(|pending_entry| (pending_entry.entry_path.clone(), state.repo_actions.clone()))
-        .collect();
-    let probes: Vec<(Option<bool>, Option<RepoActionStatus>)> = stream::iter(probe_inputs)
-        .map(|(entry_path, repo_actions)| async move {
-            let repo_summary =
-                inspect_git_repo(&entry_path)
-                    .await
-                    .ok()
-                    .flatten()
-                    .and_then(|summary| {
-                        let canonical_entry =
-                            entry_path.canonicalize().unwrap_or(entry_path.clone());
-                        (summary.repo_root == canonical_entry).then_some(summary)
-                    });
-            let repo_dirty = repo_summary.as_ref().map(|summary| summary.dirty);
-            let repo_action = match repo_summary.as_ref() {
-                Some(summary) => repo_actions.status_for(&summary.repo_root).await,
-                None => None,
-            };
-            (repo_dirty, repo_action)
-        })
-        .buffered(GIT_PROBE_CONCURRENCY)
-        .collect()
-        .await;
-
+    let probes = probe_pending_entries(state, &pending).await;
     let services: Vec<String> = unique_services.into_iter().collect();
     let health_map = overlay_service_health_map(&config.services, &services).await;
-    let svc_meta: HashMap<&str, &OverlayServiceEntry> = config
-        .services
-        .iter()
-        .map(|service| (service.name.as_str(), service))
-        .collect();
-
-    let mut entries: Vec<(DirEntry, u64)> = pending
-        .into_iter()
-        .zip(probes)
-        .map(|(pending_entry, (repo_dirty, repo_action))| {
-            let is_running = if pending_entry.services.is_empty() {
-                None
-            } else {
-                Some(
-                    pending_entry
-                        .services
-                        .iter()
-                        .any(|service| health_map.get(service).copied().unwrap_or(false)),
-                )
-            };
-            let has_restart = pending_entry
-                .services
-                .iter()
-                .any(|service| {
-                    svc_meta
-                        .get(service.as_str())
-                        .and_then(|entry| entry.restart.as_ref())
-                        .is_some()
-                })
-                .then_some(true);
-            let open_url = pending_entry.services.iter().find_map(|service| {
-                svc_meta
-                    .get(service.as_str())
-                    .and_then(|entry| entry.open_url.clone().or_else(|| entry.health_url.clone()))
-            });
-            let full_path = pending_entry.entry_path.to_string_lossy().into_owned();
-            (
-                DirEntry {
-                    name: pending_entry.name,
-                    has_children: pending_entry.has_children,
-                    is_running,
-                    repo_dirty,
-                    repo_action,
-                    group: None,
-                    full_path: Some(full_path),
-                    has_restart,
-                    open_url,
-                },
-                pending_entry.modified_at,
-            )
-        })
-        .collect();
-
-    entries.sort_by(|(a, a_modified), (b, b_modified)| {
-        b_modified
-            .cmp(a_modified)
-            .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
-    });
-    entries.into_iter().map(|(entry, _)| entry).collect()
+    let svc_meta = service_metadata_map(&config.services);
+    let candidates = pending_to_candidates(pending, probes, true);
+    build_dir_entries(candidates, &health_map, &svc_meta)
 }
 
 pub async fn list_dirs(
@@ -607,68 +700,108 @@ pub async fn list_dirs(
     let base = dirs_base_path();
 
     if let Some(group_name) = group {
-        let canonical_base = base.canonicalize().unwrap_or(base.clone());
-        let dir_config = resolve_dir_config(&canonical_base);
-        let group =
-            dir_config.and_then(|config| config.groups.iter().find(|g| g.name == group_name));
-        let Some(group) = group else {
-            return Err(ApiServiceError::new(
-                StatusCode::NOT_FOUND,
-                "GROUP_NOT_FOUND",
-                format!("no group named '{group_name}' in overlay"),
-            ));
-        };
-        let entries = list_group_entries(group).await;
-        return Ok(DirListResponse {
-            path: canonical_base.to_string_lossy().into_owned(),
-            entries,
-            overlay_label: dir_config.map(|c| c.label.clone()),
-            groups: dir_config
-                .map(|c| c.groups.iter().map(|g| g.name.clone()).collect())
-                .unwrap_or_default(),
-            launch_targets: launch_targets_for(dir_config),
-            default_launch_target: default_launch_target_for(dir_config, Some(group_name)),
-        });
+        return list_group_dir_response(base, group_name).await;
     }
 
     let request_started = Instant::now();
-    let target = match path {
-        Some(path) if !path.is_empty() => PathBuf::from(path),
-        _ => base.clone(),
-    };
+    let target = path
+        .filter(|path| !path.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| base.clone());
 
     let (canonical_base, canonical) = resolve_target_path(base, target)?;
     let dir_config = resolve_dir_config(&canonical_base);
-    if managed_only && canonical == canonical_base {
-        if let Some(config) = dir_config.filter(|config| !config.services.is_empty()) {
-            let pending_started = Instant::now();
-            let entries = list_managed_service_entries(state, config).await;
-            let total_ms = request_started.elapsed().as_millis() as u64;
-            tracing::info!(
-                target: "swimmers::api::dirs::timing",
-                managed_only,
-                pending_count = entries.len(),
-                pending_phase_ms = pending_started.elapsed().as_millis() as u64,
-                probe_phase_ms = 0_u64,
-                health_phase_ms = 0_u64,
-                total_ms,
-                "list_dirs managed exact entries timing"
-            );
-            return Ok(DirListResponse {
-                path: canonical.to_string_lossy().into_owned(),
-                entries,
-                overlay_label: Some(config.label.clone()),
-                groups: config
-                    .groups
-                    .iter()
-                    .map(|group| group.name.clone())
-                    .collect(),
-                launch_targets: launch_targets_for(Some(config)),
-                default_launch_target: default_launch_target_for(Some(config), None),
-            });
-        }
+    if let Some(response) = list_managed_root_response(
+        state,
+        canonical_base.as_path(),
+        canonical.as_path(),
+        dir_config,
+        managed_only,
+        request_started,
+    )
+    .await
+    {
+        return Ok(response);
     }
 
+    list_regular_dir_response(
+        state,
+        canonical.as_path(),
+        dir_config,
+        managed_only,
+        request_started,
+    )
+    .await
+}
+
+async fn list_group_dir_response(
+    base: PathBuf,
+    group_name: &str,
+) -> Result<DirListResponse, ApiServiceError> {
+    let canonical_base = base.canonicalize().unwrap_or(base.clone());
+    let dir_config = resolve_dir_config(&canonical_base);
+    let group = dir_config.and_then(|config| config.groups.iter().find(|g| g.name == group_name));
+    let Some(group) = group else {
+        return Err(ApiServiceError::new(
+            StatusCode::NOT_FOUND,
+            "GROUP_NOT_FOUND",
+            format!("no group named '{group_name}' in overlay"),
+        ));
+    };
+    let entries = list_group_entries(group).await;
+    Ok(DirListResponse {
+        path: canonical_base.to_string_lossy().into_owned(),
+        entries,
+        overlay_label: dir_config.map(|c| c.label.clone()),
+        groups: dir_groups(dir_config),
+        launch_targets: launch_targets_for(dir_config),
+        default_launch_target: default_launch_target_for(dir_config, Some(group_name)),
+    })
+}
+
+async fn list_managed_root_response(
+    state: &Arc<AppState>,
+    canonical_base: &Path,
+    canonical: &Path,
+    dir_config: Option<&OverlayDirConfig>,
+    managed_only: bool,
+    request_started: Instant,
+) -> Option<DirListResponse> {
+    if !managed_only || canonical != canonical_base {
+        return None;
+    }
+
+    let config = dir_config.filter(|config| !config.services.is_empty())?;
+    let pending_started = Instant::now();
+    let entries = list_managed_service_entries(state, config).await;
+    let total_ms = request_started.elapsed().as_millis() as u64;
+    tracing::info!(
+        target: "swimmers::api::dirs::timing",
+        managed_only,
+        pending_count = entries.len(),
+        pending_phase_ms = pending_started.elapsed().as_millis() as u64,
+        probe_phase_ms = 0_u64,
+        health_phase_ms = 0_u64,
+        total_ms,
+        "list_dirs managed exact entries timing"
+    );
+    Some(DirListResponse {
+        path: canonical.to_string_lossy().into_owned(),
+        entries,
+        overlay_label: Some(config.label.clone()),
+        groups: dir_groups(Some(config)),
+        launch_targets: launch_targets_for(Some(config)),
+        default_launch_target: default_launch_target_for(Some(config), None),
+    })
+}
+
+async fn list_regular_dir_response(
+    state: &Arc<AppState>,
+    canonical: &Path,
+    dir_config: Option<&OverlayDirConfig>,
+    managed_only: bool,
+    request_started: Instant,
+) -> Result<DirListResponse, ApiServiceError> {
     let read_dir = std::fs::read_dir(&canonical).map_err(|error| {
         ApiServiceError::new(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -682,86 +815,14 @@ pub async fn list_dirs(
         services: config.services.clone(),
     });
 
-    let mut pending: Vec<PendingEntry> = Vec::new();
-    let mut unique_services: BTreeSet<String> = BTreeSet::new();
-    for entry in read_dir.flatten() {
-        let Ok(file_type) = entry.file_type() else {
-            continue;
-        };
-        if !file_type.is_dir() {
-            continue;
-        }
-
-        let name = entry.file_name().to_string_lossy().into_owned();
-        if name.starts_with('.') {
-            continue;
-        }
-
-        let entry_path = entry.path();
-        let has_children = has_visible_child_dirs(&entry_path);
-        let modified_at = modified_secs(&entry_path);
-
-        let services = service_context
-            .as_ref()
-            .map(|context| services_for_directory(&entry_path, context))
-            .unwrap_or_default();
-        for service in &services {
-            unique_services.insert(service.clone());
-        }
-
-        pending.push(PendingEntry {
-            name,
-            entry_path,
-            has_children,
-            modified_at,
-            services,
-        });
-    }
-
-    let probe_inputs: Vec<(PathBuf, _)> = pending
-        .iter()
-        .map(|pending_entry| (pending_entry.entry_path.clone(), state.repo_actions.clone()))
-        .collect();
-
+    let (pending, unique_services) =
+        collect_visible_pending_entries(read_dir, service_context.as_ref());
     let pending_phase_ms = request_started.elapsed().as_millis() as u64;
     let pending_count = pending.len();
     let probe_started = Instant::now();
-    let probes: Vec<(Option<bool>, Option<RepoActionStatus>)> = stream::iter(probe_inputs)
-        .map(|(entry_path, repo_actions)| async move {
-            let repo_summary =
-                inspect_git_repo(&entry_path)
-                    .await
-                    .ok()
-                    .flatten()
-                    .and_then(|summary| {
-                        let canonical_entry =
-                            entry_path.canonicalize().unwrap_or(entry_path.clone());
-                        (summary.repo_root == canonical_entry).then_some(summary)
-                    });
-            let repo_dirty = repo_summary.as_ref().map(|summary| summary.dirty);
-            let repo_action = match repo_summary.as_ref() {
-                Some(summary) => repo_actions.status_for(&summary.repo_root).await,
-                None => None,
-            };
-            (repo_dirty, repo_action)
-        })
-        .buffered(GIT_PROBE_CONCURRENCY)
-        .collect()
-        .await;
+    let probes = probe_pending_entries(state, &pending).await;
     let probe_phase_ms = probe_started.elapsed().as_millis() as u64;
-
-    let candidates: Vec<ListCandidate> = pending
-        .into_iter()
-        .zip(probes)
-        .map(|(pending_entry, (repo_dirty, repo_action))| ListCandidate {
-            name: pending_entry.name,
-            has_children: pending_entry.has_children,
-            modified_at: pending_entry.modified_at,
-            services: pending_entry.services,
-            repo_dirty,
-            repo_action,
-        })
-        .collect();
+    let candidates = pending_to_candidates(pending, probes, false);
 
     let health_started = Instant::now();
     let health_map = if let Some(config) = dir_config {
@@ -783,67 +844,10 @@ pub async fn list_dirs(
         "list_dirs phase timing"
     );
 
-    let svc_meta: HashMap<&str, &OverlayServiceEntry> = dir_config
-        .map(|config| {
-            config
-                .services
-                .iter()
-                .map(|service| (service.name.as_str(), service))
-                .collect()
-        })
+    let svc_meta = dir_config
+        .map(|config| service_metadata_map(&config.services))
         .unwrap_or_default();
-
-    let mut entries: Vec<(DirEntry, u64)> = candidates
-        .into_iter()
-        .map(|candidate| {
-            let is_running = if candidate.services.is_empty() {
-                None
-            } else {
-                Some(
-                    candidate
-                        .services
-                        .iter()
-                        .any(|service| health_map.get(service).copied().unwrap_or(false)),
-                )
-            };
-            let has_restart = candidate
-                .services
-                .iter()
-                .any(|service| {
-                    svc_meta
-                        .get(service.as_str())
-                        .and_then(|entry| entry.restart.as_ref())
-                        .is_some()
-                })
-                .then_some(true);
-            let open_url = candidate.services.iter().find_map(|service| {
-                svc_meta
-                    .get(service.as_str())
-                    .and_then(|entry| entry.open_url.clone().or_else(|| entry.health_url.clone()))
-            });
-            (
-                DirEntry {
-                    name: candidate.name,
-                    has_children: candidate.has_children,
-                    is_running,
-                    repo_dirty: candidate.repo_dirty,
-                    repo_action: candidate.repo_action,
-                    group: None,
-                    full_path: None,
-                    has_restart,
-                    open_url,
-                },
-                candidate.modified_at,
-            )
-        })
-        .collect();
-
-    entries.sort_by(|(a, a_modified), (b, b_modified)| {
-        b_modified
-            .cmp(a_modified)
-            .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
-    });
-    let entries = entries.into_iter().map(|(entry, _)| entry).collect();
+    let entries = build_dir_entries(candidates, &health_map, &svc_meta);
     let groups = dir_config
         .map(|config| {
             config
@@ -862,6 +866,18 @@ pub async fn list_dirs(
         launch_targets: launch_targets_for(dir_config),
         default_launch_target: default_launch_target_for(dir_config, None),
     })
+}
+
+fn dir_groups(config: Option<&OverlayDirConfig>) -> Vec<String> {
+    config
+        .map(|config| {
+            config
+                .groups
+                .iter()
+                .map(|group| group.name.clone())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default()
 }
 
 fn launch_targets_for(config: Option<&OverlayDirConfig>) -> Vec<LaunchTargetSummary> {
