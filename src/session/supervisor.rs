@@ -1800,26 +1800,41 @@ fn build_spawn_tool_command(
     tool: crate::types::SpawnTool,
     initial_request: Option<&str>,
 ) -> String {
-    if spawn_tool_consumes_initial_request(tool) {
-        if let Some(initial_request) = initial_request {
-            if tool == crate::types::SpawnTool::Codex {
-                match build_codex_prompt_file_command(initial_request) {
-                    Ok(command) => return command,
-                    Err(err) => {
-                        warn!(
-                            tool = ?tool,
-                            "failed to create prompt file for spawn command; starting without initial request: {}",
-                            err
-                        );
-                        return tool.command().to_string();
-                    }
-                }
-            }
-            return format!("{} {}", tool.command(), shell_single_quote(initial_request));
-        }
+    let Some(initial_request) = initial_request else {
+        return tool.command().to_string();
+    };
+    if !spawn_tool_consumes_initial_request(tool) {
+        return tool.command().to_string();
     }
 
-    tool.command().to_string()
+    build_spawn_tool_command_with_initial_request(tool, initial_request)
+}
+
+fn build_spawn_tool_command_with_initial_request(
+    tool: crate::types::SpawnTool,
+    initial_request: &str,
+) -> String {
+    if tool == crate::types::SpawnTool::Codex {
+        return build_codex_spawn_command_or_fallback(tool, initial_request);
+    }
+    format!("{} {}", tool.command(), shell_single_quote(initial_request))
+}
+
+fn build_codex_spawn_command_or_fallback(
+    tool: crate::types::SpawnTool,
+    initial_request: &str,
+) -> String {
+    match build_codex_prompt_file_command(initial_request) {
+        Ok(command) => command,
+        Err(err) => {
+            warn!(
+                tool = ?tool,
+                "failed to create prompt file for spawn command; starting without initial request: {}",
+                err
+            );
+            tool.command().to_string()
+        }
+    }
 }
 
 fn build_codex_prompt_file_command(initial_request: &str) -> io::Result<String> {
@@ -2231,12 +2246,29 @@ mod tests {
         std::fs::set_permissions(path, perms).expect("chmod");
     }
 
-    fn prepend_test_path(bin_dir: &std::path::Path, original_path: Option<&std::ffi::OsStr>) {
+    fn test_path_with_prepend(
+        bin_dir: &std::path::Path,
+        original_path: Option<&std::ffi::OsStr>,
+    ) -> std::ffi::OsString {
         let mut entries = vec![bin_dir.as_os_str().to_os_string()];
         if let Some(existing) = original_path {
             entries.extend(std::env::split_paths(existing).map(|path| path.into_os_string()));
         }
-        std::env::set_var("PATH", std::env::join_paths(entries).expect("path"));
+        for system_dir in ["/bin", "/usr/bin"] {
+            let system_dir = std::path::Path::new(system_dir);
+            if system_dir.is_dir()
+                && !entries
+                    .iter()
+                    .any(|entry| std::path::Path::new(entry) == system_dir)
+            {
+                entries.push(system_dir.as_os_str().to_os_string());
+            }
+        }
+        std::env::join_paths(entries).expect("path")
+    }
+
+    fn prepend_test_path(bin_dir: &std::path::Path, original_path: Option<&std::ffi::OsStr>) {
+        std::env::set_var("PATH", test_path_with_prepend(bin_dir, original_path));
     }
 
     fn install_fake_tmux(script: &str) -> (tempfile::TempDir, Option<std::ffi::OsString>) {
@@ -2443,17 +2475,18 @@ mod tests {
         write_executable(&bin_dir.join("codex-raw"), &capture_script);
 
         let original_path = std::env::var_os("PATH");
-        prepend_test_path(&bin_dir, original_path.as_deref());
+        let test_path = test_path_with_prepend(&bin_dir, original_path.as_deref());
 
         let prompt = "fix shell quoting\nwithout leaking prompt text";
         let command = build_spawn_tool_command(crate::types::SpawnTool::Codex, Some(prompt));
         let prompt_path = prompt_file_from_spawn_command(&command);
-        let status = std::process::Command::new("sh")
+        let shell = if cfg!(unix) { "/bin/sh" } else { "sh" };
+        let status = std::process::Command::new(shell)
             .arg("-c")
             .arg(&command)
+            .env("PATH", test_path)
             .status()
             .expect("run spawn command");
-        restore_test_path(original_path);
 
         assert!(status.success());
         assert_eq!(

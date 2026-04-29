@@ -1354,11 +1354,19 @@ impl SessionActor {
 
 /// Capture visible pane text directly from tmux.
 async fn capture_pane_tail(tmux_name: &str, lines: usize) -> anyhow::Result<String> {
+    capture_pane_tail_with_command("tmux", tmux_name, lines).await
+}
+
+async fn capture_pane_tail_with_command(
+    tmux_command: impl AsRef<std::ffi::OsStr>,
+    tmux_name: &str,
+    lines: usize,
+) -> anyhow::Result<String> {
     let lines = lines.clamp(20, 1000);
     let start = format!("-{lines}");
     let target = exact_pane_target(tmux_name);
 
-    let output = Command::new("tmux")
+    let output = Command::new(tmux_command)
         .args(["capture-pane", "-p", "-J", "-t", &target, "-S", &start])
         .env_remove("TMUX")
         .env_remove("TMUX_PANE")
@@ -2038,18 +2046,15 @@ fn extract_skill_from_using_marker(text: &str) -> Option<String> {
 
 fn normalize_skill_name(raw: &str) -> Option<String> {
     let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
+    is_valid_skill_name_token(trimmed).then(|| trimmed.to_ascii_lowercase())
+}
 
-    if !trimmed
-        .chars()
-        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.' | '/'))
-    {
-        return None;
-    }
+fn is_valid_skill_name_token(value: &str) -> bool {
+    !value.is_empty() && value.bytes().all(is_skill_name_byte)
+}
 
-    Some(trimmed.to_ascii_lowercase())
+fn is_skill_name_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || b"-_./".contains(&byte)
 }
 
 fn is_probable_skill_name(raw: &str) -> bool {
@@ -2190,7 +2195,7 @@ fn pty_read_loop(
 #[cfg(test)]
 mod tests {
     use super::{
-        capture_pane_tail, compute_pane_liveness, cwd_from_osc7_payload,
+        capture_pane_tail_with_command, compute_pane_liveness, cwd_from_osc7_payload,
         detect_skill_from_input_line, detect_tool_from_command_line,
         detect_tool_from_process_entry, drain_completed_input_lines, extract_cwd_from_title,
         find_osc_payload_end, line_looks_prompt_like, normalize_skill_name, osc_payloads,
@@ -2416,6 +2421,24 @@ mod tests {
         assert_eq!(normalize_skill_name("  "), None);
         assert_eq!(normalize_skill_name("bad!skill"), None);
         assert_eq!(normalize_skill_name(" Commit "), Some("commit".to_string()));
+    }
+
+    #[test]
+    fn normalize_skill_name_preserves_existing_character_policy() {
+        let cases = [
+            ("skill-name", Some("skill-name")),
+            ("skill_name", Some("skill_name")),
+            ("skill.name", Some("skill.name")),
+            ("path/to-skill", Some("path/to-skill")),
+            ("UPPER/Case_1", Some("upper/case_1")),
+            ("bad skill", None),
+            ("skill:bad", None),
+            ("skíll", None),
+        ];
+
+        for (raw, expected) in cases {
+            assert_eq!(normalize_skill_name(raw).as_deref(), expected, "{raw}");
+        }
     }
 
     #[test]
@@ -2855,27 +2878,14 @@ fi
         perms.set_mode(0o755);
         std::fs::set_permissions(&tmux, perms).expect("chmod");
 
-        let _guard = crate::test_support::ENV_LOCK
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
-        let previous_path = std::env::var_os("PATH");
-        std::env::set_var(
-            "PATH",
-            std::env::join_paths([bin_dir.as_path()]).expect("path"),
-        );
-
-        let captured = capture_pane_tail("0", 20).await.expect("capture pane");
+        let captured = capture_pane_tail_with_command(&tmux, "0", 20)
+            .await
+            .expect("capture pane");
         assert_eq!(captured.trim(), "captured");
         assert_eq!(
             std::fs::read_to_string(&target_file).expect("target file"),
             "=0:\n"
         );
-
-        if let Some(value) = previous_path {
-            std::env::set_var("PATH", value);
-        } else {
-            std::env::remove_var("PATH");
-        }
     }
 
     #[test]
