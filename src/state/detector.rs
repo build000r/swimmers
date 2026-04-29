@@ -12,6 +12,7 @@ use crate::types::SessionState;
 const ERROR_LINGER_MS: u64 = 4000;
 const ATTENTION_DELAY_MS: u64 = 300000;
 const OUTPUT_IDLE_MS: u64 = 5000;
+const TERMINAL_STRING_RECOVERY_BYTES: usize = 8192;
 
 /// Callback signature for state change notifications.
 /// Arguments: new_state, previous_state, current_command.
@@ -164,6 +165,8 @@ impl StateDetector {
             return;
         }
 
+        let looks_like_prompt = Self::looks_like_prompt(&visible);
+
         // Check for error patterns against visible text.
         let mut found_error = false;
         for pattern in &self.error_patterns {
@@ -185,7 +188,6 @@ impl StateDetector {
         // treat this as command activity and mark busy.
         if matches!(self.state, SessionState::Idle | SessionState::Attention) && !found_error {
             let has_visible_text = visible.chars().any(|c| !c.is_whitespace());
-            let looks_like_prompt = Self::looks_like_prompt(&visible);
             if has_visible_text && !looks_like_prompt {
                 self.clear_error_timer();
                 debug!(
@@ -204,7 +206,7 @@ impl StateDetector {
         // Fallback: regex prompt detection (for shells without OSC 133).
         // Recovers from busy AND error states when a new prompt appears.
         // Checked against visible text so tmux escape sequences don't mask the prompt.
-        if self.state != SessionState::Idle && !found_error && Self::looks_like_prompt(&visible) {
+        if self.state != SessionState::Idle && looks_like_prompt {
             self.clear_error_timer();
             debug!(
                 sample = %Self::log_excerpt(&visible),
@@ -419,15 +421,32 @@ impl StateDetector {
             EscapeState::Esc => self.consume_escape_byte(b),
             EscapeState::EscIntermediate => self.consume_escape_intermediate_byte(b),
             EscapeState::Csi => self.consume_csi_byte(b),
-            EscapeState::Osc { buf, esc_pending } => {
-                if let Some(next_state) = Self::consume_osc_byte(b, buf, esc_pending, markers) {
+            EscapeState::Osc {
+                buf,
+                esc_pending,
+                consumed,
+            } => {
+                if let Some(next_state) =
+                    Self::consume_osc_byte(b, buf, esc_pending, consumed, markers)
+                {
                     self.escape_state = next_state;
                 }
             }
-            EscapeState::Dcs { esc_pending }
-            | EscapeState::Pm { esc_pending }
-            | EscapeState::Apc { esc_pending } => {
-                if let Some(next_state) = Self::consume_private_string_byte(b, esc_pending) {
+            EscapeState::Dcs {
+                esc_pending,
+                consumed,
+            }
+            | EscapeState::Pm {
+                esc_pending,
+                consumed,
+            }
+            | EscapeState::Apc {
+                esc_pending,
+                consumed,
+            } => {
+                if let Some(next_state) =
+                    Self::consume_private_string_byte(b, esc_pending, consumed)
+                {
                     self.escape_state = next_state;
                 }
             }
@@ -440,16 +459,22 @@ impl StateDetector {
             0x9b => self.escape_state = EscapeState::Csi,
             0x9d => self.escape_state = Self::osc_state(),
             0x90 => {
-                self.escape_state =
-                    Self::private_string_state(EscapeState::Dcs { esc_pending: false })
+                self.escape_state = Self::private_string_state(EscapeState::Dcs {
+                    esc_pending: false,
+                    consumed: 0,
+                })
             }
             0x9e => {
-                self.escape_state =
-                    Self::private_string_state(EscapeState::Pm { esc_pending: false })
+                self.escape_state = Self::private_string_state(EscapeState::Pm {
+                    esc_pending: false,
+                    consumed: 0,
+                })
             }
             0x9f => {
-                self.escape_state =
-                    Self::private_string_state(EscapeState::Apc { esc_pending: false })
+                self.escape_state = Self::private_string_state(EscapeState::Apc {
+                    esc_pending: false,
+                    consumed: 0,
+                })
             }
             b'\n' | b'\r' | b'\t' => visible.push(b),
             _ if (0x20..=0x7e).contains(&b) => visible.push(b),
@@ -461,9 +486,18 @@ impl StateDetector {
         self.escape_state = match b {
             b'[' => EscapeState::Csi,
             b']' => Self::osc_state(),
-            b'P' => Self::private_string_state(EscapeState::Dcs { esc_pending: false }),
-            b'^' => Self::private_string_state(EscapeState::Pm { esc_pending: false }),
-            b'_' => Self::private_string_state(EscapeState::Apc { esc_pending: false }),
+            b'P' => Self::private_string_state(EscapeState::Dcs {
+                esc_pending: false,
+                consumed: 0,
+            }),
+            b'^' => Self::private_string_state(EscapeState::Pm {
+                esc_pending: false,
+                consumed: 0,
+            }),
+            b'_' => Self::private_string_state(EscapeState::Apc {
+                esc_pending: false,
+                consumed: 0,
+            }),
             0x20..=0x2f => EscapeState::EscIntermediate,
             _ => EscapeState::Normal,
         };
@@ -485,8 +519,14 @@ impl StateDetector {
         b: u8,
         buf: &mut Vec<u8>,
         esc_pending: &mut bool,
+        consumed: &mut usize,
         markers: &mut Vec<Osc133Marker>,
     ) -> Option<EscapeState> {
+        *consumed += 1;
+        if *consumed > TERMINAL_STRING_RECOVERY_BYTES {
+            return Some(EscapeState::Normal);
+        }
+
         if *esc_pending {
             return Self::consume_pending_osc_escape(b, buf, esc_pending, markers);
         }
@@ -500,7 +540,7 @@ impl StateDetector {
                 *esc_pending = true;
                 return None;
             }
-            _ if buf.len() < 8192 => buf.push(b),
+            _ if buf.len() < TERMINAL_STRING_RECOVERY_BYTES => buf.push(b),
             _ => {}
         }
         None
@@ -524,7 +564,16 @@ impl StateDetector {
         None
     }
 
-    fn consume_private_string_byte(b: u8, esc_pending: &mut bool) -> Option<EscapeState> {
+    fn consume_private_string_byte(
+        b: u8,
+        esc_pending: &mut bool,
+        consumed: &mut usize,
+    ) -> Option<EscapeState> {
+        *consumed += 1;
+        if *consumed > TERMINAL_STRING_RECOVERY_BYTES {
+            return Some(EscapeState::Normal);
+        }
+
         if *esc_pending {
             if b == b'\\' {
                 return Some(EscapeState::Normal);
@@ -548,6 +597,7 @@ impl StateDetector {
         EscapeState::Osc {
             buf: Vec::new(),
             esc_pending: false,
+            consumed: 0,
         }
     }
 
@@ -754,10 +804,23 @@ enum EscapeState {
     Esc,
     EscIntermediate,
     Csi,
-    Osc { buf: Vec<u8>, esc_pending: bool },
-    Dcs { esc_pending: bool },
-    Pm { esc_pending: bool },
-    Apc { esc_pending: bool },
+    Osc {
+        buf: Vec<u8>,
+        esc_pending: bool,
+        consumed: usize,
+    },
+    Dcs {
+        esc_pending: bool,
+        consumed: usize,
+    },
+    Pm {
+        esc_pending: bool,
+        consumed: usize,
+    },
+    Apc {
+        esc_pending: bool,
+        consumed: usize,
+    },
 }
 
 impl Default for StateDetector {
@@ -813,25 +876,28 @@ mod tests {
     #[test]
     fn consume_private_string_byte_handles_escape_and_st_terminators() {
         let mut esc_pending = false;
+        let mut consumed = 0;
         assert!(matches!(
-            StateDetector::consume_private_string_byte(0x1b, &mut esc_pending),
+            StateDetector::consume_private_string_byte(0x1b, &mut esc_pending, &mut consumed),
             None
         ));
         assert!(esc_pending);
         assert!(matches!(
-            StateDetector::consume_private_string_byte(b'\\', &mut esc_pending),
+            StateDetector::consume_private_string_byte(b'\\', &mut esc_pending, &mut consumed),
             Some(EscapeState::Normal)
         ));
 
         esc_pending = false;
+        consumed = 0;
         assert!(matches!(
-            StateDetector::consume_private_string_byte(0x9c, &mut esc_pending),
+            StateDetector::consume_private_string_byte(0x9c, &mut esc_pending, &mut consumed),
             Some(EscapeState::Normal)
         ));
 
         esc_pending = true;
+        consumed = 0;
         assert!(matches!(
-            StateDetector::consume_private_string_byte(b'x', &mut esc_pending),
+            StateDetector::consume_private_string_byte(b'x', &mut esc_pending, &mut consumed),
             None
         ));
         assert!(!esc_pending);
@@ -862,6 +928,16 @@ mod tests {
         d.error_deadline = Some(Instant::now() - Duration::from_millis(1));
         d.check_timers(Instant::now());
         assert_eq!(d.get_state().0, SessionState::Idle);
+    }
+
+    #[test]
+    fn fallback_error_and_prompt_same_chunk_returns_idle() {
+        let mut d = StateDetector::new();
+
+        d.process_output(b"bash: foo: command not found\nuser@host:~$ ");
+
+        assert_eq!(d.get_state().0, SessionState::Idle);
+        assert!(d.error_deadline.is_none());
     }
 
     #[test]
@@ -1196,6 +1272,34 @@ mod tests {
         d.process_output(b"\x1b]133;");
         d.process_output(b"A\x07");
         assert_eq!(d.get_state().0, SessionState::Idle);
+    }
+
+    #[test]
+    fn unterminated_osc_recovers_after_limit() {
+        let mut d = StateDetector::new();
+        let mut chunk = Vec::from(&b"\x1b]"[..]);
+        chunk.extend(std::iter::repeat(b'x').take(TERMINAL_STRING_RECOVERY_BYTES + 1));
+        chunk.extend_from_slice(b"user@host:~$ ");
+
+        d.process_output(b"Compiling...\r\n");
+        assert_eq!(d.state(), SessionState::Busy);
+
+        d.process_output(&chunk);
+        assert_eq!(d.state(), SessionState::Idle);
+    }
+
+    #[test]
+    fn unterminated_private_string_recovers_after_limit() {
+        let mut d = StateDetector::new();
+        let mut chunk = Vec::from(&b"\x1bP"[..]);
+        chunk.extend(std::iter::repeat(b'x').take(TERMINAL_STRING_RECOVERY_BYTES + 1));
+        chunk.extend_from_slice(b"user@host:~$ ");
+
+        d.process_output(b"Compiling...\r\n");
+        assert_eq!(d.state(), SessionState::Busy);
+
+        d.process_output(&chunk);
+        assert_eq!(d.state(), SessionState::Idle);
     }
 
     // --- TUI tool mode tests ---
