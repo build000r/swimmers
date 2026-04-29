@@ -51,10 +51,12 @@ impl<'a> BallsThemeSlot<'a> {
 }
 
 fn balls_theme_body_rect(count: usize, field: Rect) -> Rect {
+    let max_width = field.width.saturating_sub(2);
     let desired_width = (count as u16)
         .saturating_mul(5)
         .saturating_add(12)
-        .clamp(18, field.width.saturating_sub(2));
+        .min(max_width)
+        .max(max_width.min(18));
     Rect {
         x: field.x + field.width.saturating_sub(desired_width) / 2,
         y: field.y,
@@ -173,9 +175,14 @@ pub(crate) fn balls_theme_slots<'a>(
             drop = drop.max(field.height.saturating_sub(BALLS_BODY_HEIGHT + ball_height));
         }
         let ball_y = (cord_top_y + drop).min(floor_y.saturating_add(1).saturating_sub(ball_height));
-        let ball_x = anchor_x
-            .saturating_sub(BALLS_BALL_WIDTH / 2)
-            .clamp(field.x, field.right().saturating_sub(BALLS_BALL_WIDTH));
+        let max_ball_x = field.right().saturating_sub(BALLS_BALL_WIDTH);
+        let ball_x = if max_ball_x >= field.x {
+            anchor_x
+                .saturating_sub(BALLS_BALL_WIDTH / 2)
+                .clamp(field.x, max_ball_x)
+        } else {
+            field.x
+        };
         slots.push(BallsThemeSlot {
             entity,
             anchor_x,

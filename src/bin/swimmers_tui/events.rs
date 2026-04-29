@@ -275,28 +275,55 @@ pub(crate) fn handle_key_event<C: TuiApi>(
     layout: WorkspaceLayout,
     key: KeyEvent,
 ) -> bool {
+    if let Some(handled) = handle_modal_key(app, layout, key) {
+        return handled;
+    }
+    if let Some(handled) = handle_picker_priority_key(app, layout, key) {
+        return handled;
+    }
+    if let Some(handled) = handle_picker_search_key(app, key) {
+        return handled;
+    }
+    handle_workspace_key(app, layout, key)
+}
+
+fn handle_modal_key<C: TuiApi>(
+    app: &mut App<C>,
+    layout: WorkspaceLayout,
+    key: KeyEvent,
+) -> Option<bool> {
     if app.thought_config_editor.is_some() {
         app.handle_thought_config_key(key, layout);
-        return true;
+        return Some(true);
     }
 
     if app.initial_request.is_some() {
         app.handle_initial_request_key(key, layout.overview_field);
-        return true;
+        return Some(true);
     }
 
     if matches!(app.fish_bowl_mode, FishBowlMode::Mermaid(_)) {
-        return handle_mermaid_key(app, layout, key);
+        return Some(handle_mermaid_key(app, layout, key));
     }
+
+    None
+}
+
+fn handle_picker_priority_key<C: TuiApi>(
+    app: &mut App<C>,
+    layout: WorkspaceLayout,
+    key: KeyEvent,
+) -> Option<bool> {
+    app.picker.as_ref()?;
 
     if app.picker.is_some() && matches!(key.code, KeyCode::Char('B')) {
         app.open_batch_initial_request_for_visible_entries();
-        return true;
+        return Some(true);
     }
 
     if app.picker.is_some() && matches!(key.code, KeyCode::Char('X')) {
         app.handle_picker_action(PickerAction::ToggleBatchExcludeMode, layout.overview_field);
-        return true;
+        return Some(true);
     }
 
     if app
@@ -319,44 +346,82 @@ pub(crate) fn handle_key_event<C: TuiApi>(
                 layout.overview_field,
             );
         }
-        return true;
+        return Some(true);
     }
 
+    None
+}
+
+fn handle_picker_search_key<C: TuiApi>(app: &mut App<C>, key: KeyEvent) -> Option<bool> {
     if app.picker.is_some() {
         let no_mods = key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT;
         if no_mods {
             if let KeyCode::Char(c) = key.code {
                 if !c.is_control() && picker_char_should_search(app, c) {
                     app.picker_search_push(c);
-                    return true;
+                    return Some(true);
                 }
             }
         }
     }
 
+    None
+}
+
+fn handle_workspace_key<C: TuiApi>(
+    app: &mut App<C>,
+    layout: WorkspaceLayout,
+    key: KeyEvent,
+) -> bool {
+    if let Some(handled) = handle_quit_or_escape_key(app, key) {
+        return handled;
+    }
+    if let Some(handled) = handle_selection_key(app, layout, key) {
+        return handled;
+    }
+    if let Some(handled) = handle_picker_command_key(app, layout, key) {
+        return handled;
+    }
+    if let Some(handled) = handle_global_toggle_key(app, key) {
+        return handled;
+    }
+    true
+}
+
+fn handle_quit_or_escape_key<C: TuiApi>(app: &mut App<C>, key: KeyEvent) -> Option<bool> {
     match key.code {
-        KeyCode::Char('q') => false,
+        KeyCode::Char('q') => Some(false),
         KeyCode::Esc => {
             if app.picker_search_clear() {
-                return true;
+                return Some(true);
             }
             if app.picker.is_some() {
                 app.close_picker();
-                true
+                Some(true)
             } else {
-                false
+                Some(false)
             }
         }
+        _ => None,
+    }
+}
+
+fn handle_selection_key<C: TuiApi>(
+    app: &mut App<C>,
+    layout: WorkspaceLayout,
+    key: KeyEvent,
+) -> Option<bool> {
+    match key.code {
         KeyCode::Backspace => {
             if app.picker_search_pop() {
-                return true;
+                return Some(true);
             }
             if app.picker.is_some() {
                 app.picker_up();
             } else {
                 app.move_selection(-1, layout.overview_field);
             }
-            true
+            Some(true)
         }
         KeyCode::Left | KeyCode::Char('h') => {
             if app.picker.is_some() {
@@ -364,19 +429,15 @@ pub(crate) fn handle_key_event<C: TuiApi>(
             } else {
                 app.move_selection(-1, layout.overview_field);
             }
-            true
+            Some(true)
         }
         KeyCode::Up | KeyCode::Char('k') => {
             app.move_selection(-1, layout.overview_field);
-            true
+            Some(true)
         }
         KeyCode::Down | KeyCode::Char('j') => {
             app.move_selection(1, layout.overview_field);
-            true
-        }
-        KeyCode::Char('m') => {
-            app.toggle_ghostty_mode();
-            true
+            Some(true)
         }
         KeyCode::Right | KeyCode::Char('l') | KeyCode::Enter | KeyCode::Char('o') => {
             if app.picker.is_some() {
@@ -384,27 +445,37 @@ pub(crate) fn handle_key_event<C: TuiApi>(
             } else {
                 app.open_selected();
             }
-            true
+            Some(true)
         }
+        _ => None,
+    }
+}
+
+fn handle_picker_command_key<C: TuiApi>(
+    app: &mut App<C>,
+    layout: WorkspaceLayout,
+    key: KeyEvent,
+) -> Option<bool> {
+    match key.code {
         KeyCode::Char('e') => {
             app.picker_set_managed_only(true);
-            true
+            Some(true)
         }
         KeyCode::Char('a') => {
             app.picker_set_managed_only(false);
-            true
+            Some(true)
         }
         KeyCode::Char('c') if app.picker.is_some() => {
             app.picker_start_action_for_selection(RepoActionKind::Commit);
-            true
+            Some(true)
         }
         KeyCode::Char('R') if app.picker.is_some() => {
             app.picker_start_action_for_selection(RepoActionKind::Restart);
-            true
+            Some(true)
         }
         KeyCode::Char('O') if app.picker.is_some() => {
             app.picker_open_url_for_selection();
-            true
+            Some(true)
         }
         KeyCode::Char('r') => {
             if let Some((path, managed_only, group)) = app.picker.as_ref().map(|picker| {
@@ -418,37 +489,43 @@ pub(crate) fn handle_key_event<C: TuiApi>(
             } else {
                 app.manual_refresh(layout);
             }
-            true
+            Some(true)
         }
-        KeyCode::Tab => {
-            app.toggle_thought_group_by();
-            true
-        }
-        KeyCode::Char('>') => {
-            app.toggle_thought_show_all();
-            true
-        }
-        KeyCode::Char('t') => {
-            app.open_thought_config_editor();
-            true
-        }
-        KeyCode::Char('n') => {
-            app.toggle_native_app();
-            true
-        }
-        KeyCode::Char('s') => {
-            app.toggle_sprite_theme();
-            true
-        }
-        _ => true,
+        _ => None,
     }
 }
 
-fn handle_mermaid_key<C: TuiApi>(
-    app: &mut App<C>,
-    layout: WorkspaceLayout,
-    key: KeyEvent,
-) -> bool {
+fn handle_global_toggle_key<C: TuiApi>(app: &mut App<C>, key: KeyEvent) -> Option<bool> {
+    match key.code {
+        KeyCode::Char('m') => {
+            app.toggle_ghostty_mode();
+            Some(true)
+        }
+        KeyCode::Tab => {
+            app.toggle_thought_group_by();
+            Some(true)
+        }
+        KeyCode::Char('>') => {
+            app.toggle_thought_show_all();
+            Some(true)
+        }
+        KeyCode::Char('t') => {
+            app.open_thought_config_editor();
+            Some(true)
+        }
+        KeyCode::Char('n') => {
+            app.toggle_native_app();
+            Some(true)
+        }
+        KeyCode::Char('s') => {
+            app.toggle_sprite_theme();
+            Some(true)
+        }
+        _ => None,
+    }
+}
+
+fn handle_mermaid_key<C: TuiApi>(app: &mut App<C>, layout: WorkspaceLayout, key: KeyEvent) -> bool {
     let (content_rect, is_text_tab, has_tabs) = {
         let FishBowlMode::Mermaid(viewer) = &app.fish_bowl_mode else {
             return true;
@@ -463,72 +540,13 @@ fn handle_mermaid_key<C: TuiApi>(
     };
 
     if has_tabs {
-        match key.code {
-            KeyCode::Char('[') => {
-                app.cycle_plan_tab(-1);
-                return true;
-            }
-            KeyCode::Char(']') => {
-                app.cycle_plan_tab(1);
-                return true;
-            }
-            KeyCode::Char(c @ '1'..='9') => {
-                let idx = (c as usize) - ('1' as usize);
-                if let FishBowlMode::Mermaid(v) = &app.fish_bowl_mode {
-                    if let Some(tabs) = &v.plan_tabs {
-                        if let Some(&tab) = tabs.get(idx) {
-                            app.switch_plan_tab(tab);
-                            return true;
-                        }
-                    }
-                }
-                return true;
-            }
-            _ => {}
+        if let Some(handled) = handle_mermaid_tab_key(app, key) {
+            return handled;
         }
     }
 
     if is_text_tab {
-        return match key.code {
-            KeyCode::Char('q') => false,
-            KeyCode::Esc => {
-                app.close_mermaid_viewer();
-                true
-            }
-            KeyCode::Up | KeyCode::Char('k') => {
-                app.scroll_plan_text(-1);
-                true
-            }
-            KeyCode::Down | KeyCode::Char('j') => {
-                app.scroll_plan_text(1);
-                true
-            }
-            KeyCode::PageUp => {
-                app.scroll_plan_text_page(-1);
-                true
-            }
-            KeyCode::PageDown => {
-                app.scroll_plan_text_page(1);
-                true
-            }
-            KeyCode::Home => {
-                if let Some(viewer) = app.mermaid_viewer_mut() {
-                    viewer.plan_text_scroll = 0;
-                }
-                true
-            }
-            KeyCode::End => {
-                if let Some(viewer) = app.mermaid_viewer_mut() {
-                    viewer.plan_text_scroll = viewer.plan_text_lines.len().saturating_sub(1);
-                }
-                true
-            }
-            KeyCode::Char('o') => {
-                app.open_mermaid_artifact();
-                true
-            }
-            _ => true,
-        };
+        return handle_mermaid_text_key(app, key);
     }
 
     let (step_x, step_y) = {
@@ -537,6 +555,85 @@ fn handle_mermaid_key<C: TuiApi>(
         };
         mermaid_pan_step(viewer, content_rect)
     };
+
+    handle_mermaid_diagram_key(app, content_rect, step_x, step_y, key)
+}
+
+fn handle_mermaid_tab_key<C: TuiApi>(app: &mut App<C>, key: KeyEvent) -> Option<bool> {
+    match key.code {
+        KeyCode::Char('[') => {
+            app.cycle_plan_tab(-1);
+            Some(true)
+        }
+        KeyCode::Char(']') => {
+            app.cycle_plan_tab(1);
+            Some(true)
+        }
+        KeyCode::Char(c @ '1'..='9') => {
+            let idx = (c as usize) - ('1' as usize);
+            if let FishBowlMode::Mermaid(viewer) = &app.fish_bowl_mode {
+                if let Some(tabs) = &viewer.plan_tabs {
+                    if let Some(&tab) = tabs.get(idx) {
+                        app.switch_plan_tab(tab);
+                    }
+                }
+            }
+            Some(true)
+        }
+        _ => None,
+    }
+}
+
+fn handle_mermaid_text_key<C: TuiApi>(app: &mut App<C>, key: KeyEvent) -> bool {
+    match key.code {
+        KeyCode::Char('q') => false,
+        KeyCode::Esc => {
+            app.close_mermaid_viewer();
+            true
+        }
+        KeyCode::Up | KeyCode::Char('k') => {
+            app.scroll_plan_text(-1);
+            true
+        }
+        KeyCode::Down | KeyCode::Char('j') => {
+            app.scroll_plan_text(1);
+            true
+        }
+        KeyCode::PageUp => {
+            app.scroll_plan_text_page(-1);
+            true
+        }
+        KeyCode::PageDown => {
+            app.scroll_plan_text_page(1);
+            true
+        }
+        KeyCode::Home => {
+            if let Some(viewer) = app.mermaid_viewer_mut() {
+                viewer.plan_text_scroll = 0;
+            }
+            true
+        }
+        KeyCode::End => {
+            if let Some(viewer) = app.mermaid_viewer_mut() {
+                viewer.plan_text_scroll = viewer.plan_text_lines.len().saturating_sub(1);
+            }
+            true
+        }
+        KeyCode::Char('o') => {
+            app.open_mermaid_artifact();
+            true
+        }
+        _ => true,
+    }
+}
+
+fn handle_mermaid_diagram_key<C: TuiApi>(
+    app: &mut App<C>,
+    content_rect: Rect,
+    step_x: f32,
+    step_y: f32,
+    key: KeyEvent,
+) -> bool {
     match key.code {
         KeyCode::Char('q') => false,
         KeyCode::Esc => {

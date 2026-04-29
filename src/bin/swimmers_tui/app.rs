@@ -9,6 +9,11 @@ const COLLISION_THROTTLE_PAIR_BUDGET: usize = 24;
 const API_FAILURE_BANNER_THRESHOLD: u8 = 3;
 const API_STALE_BANNER_TEXT: &str = "API disconnected - showing stale data";
 
+fn sprite_theme_option_width(theme: Option<SpriteTheme>) -> u16 {
+    let label = format!("[{}]", SpriteTheme::override_label(theme));
+    display_width(&label)
+}
+
 pub(crate) struct RefreshResult {
     pub(crate) sessions: Result<Vec<SessionSummary>, String>,
     pub(crate) mermaid_artifacts: Vec<(String, Result<MermaidArtifactResponse, String>)>,
@@ -408,8 +413,7 @@ impl<C: TuiApi> App<C> {
         let width = SpriteTheme::override_options()
             .iter()
             .fold(0u16, |acc, theme| {
-                let label = format!("[{}]", SpriteTheme::override_label(*theme));
-                acc.saturating_add(display_width(&label))
+                acc.saturating_add(sprite_theme_option_width(*theme))
             });
         let gaps = SpriteTheme::override_options().len().saturating_sub(1) as u16;
         Rect {
@@ -434,23 +438,33 @@ impl<C: TuiApi> App<C> {
     }
 
     pub(crate) fn set_sprite_theme_from_click(&mut self, x: u16) {
+        if let Some(theme) = self.sprite_theme_at_x(x) {
+            self.set_sprite_theme_override(theme);
+        }
+    }
+
+    fn sprite_theme_at_x(&self, x: u16) -> Option<Option<SpriteTheme>> {
         let rect = self.sprite_theme_rect(0);
         let mut cursor = rect.x;
         for theme in SpriteTheme::override_options() {
-            let label = format!("[{}]", SpriteTheme::override_label(theme));
-            let width = display_width(&label);
+            let width = sprite_theme_option_width(theme);
             if x >= cursor && x < cursor.saturating_add(width) {
-                if self.sprite_theme_override != theme {
-                    self.sprite_theme_override = theme;
-                    self.set_message(format!(
-                        "sprite theme: {}",
-                        SpriteTheme::override_label(self.sprite_theme_override)
-                    ));
-                }
-                return;
+                return Some(theme);
             }
             cursor = cursor.saturating_add(width + 1);
         }
+        None
+    }
+
+    fn set_sprite_theme_override(&mut self, theme: Option<SpriteTheme>) {
+        if self.sprite_theme_override == theme {
+            return;
+        }
+        self.sprite_theme_override = theme;
+        self.set_message(format!(
+            "sprite theme: {}",
+            SpriteTheme::override_label(self.sprite_theme_override)
+        ));
     }
 
     pub(crate) fn effective_sprite_theme_for_session(
@@ -1730,52 +1744,55 @@ impl<C: TuiApi> App<C> {
 
     pub(crate) fn handle_thought_config_key(&mut self, key: KeyEvent, layout: WorkspaceLayout) {
         if self.pending_interaction.is_some() {
-            if key.code == KeyCode::Esc {
-                self.close_thought_config_editor();
-            } else {
-                self.set_message("wait for the current action to finish");
-            }
+            self.handle_pending_thought_config_key(key);
             return;
         }
 
         match key.code {
             KeyCode::Esc => self.close_thought_config_editor(),
-            KeyCode::Up => {
-                if let Some(editor) = &mut self.thought_config_editor {
-                    editor.move_focus(-1);
-                }
-            }
-            KeyCode::Down | KeyCode::Tab => {
-                if let Some(editor) = &mut self.thought_config_editor {
-                    editor.move_focus(1);
-                }
-            }
-            KeyCode::BackTab => {
-                if let Some(editor) = &mut self.thought_config_editor {
-                    editor.move_focus(-1);
-                }
-            }
+            KeyCode::Up | KeyCode::BackTab => self.move_thought_config_focus(-1),
+            KeyCode::Down | KeyCode::Tab => self.move_thought_config_focus(1),
             KeyCode::Left => self.adjust_thought_config_field(-1),
             KeyCode::Right => self.adjust_thought_config_field(1),
-            KeyCode::Backspace => {
-                if let Some(editor) = &mut self.thought_config_editor {
-                    if editor.focus == ThoughtConfigEditorField::Model {
-                        editor.config.model.pop();
-                    }
-                }
-            }
+            KeyCode::Backspace => self.pop_thought_config_model_char(),
             KeyCode::Enter => self.activate_thought_config_field(layout),
             KeyCode::Char(' ') => self.adjust_thought_config_field(1),
             KeyCode::Char(ch)
                 if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT =>
             {
-                if let Some(editor) = &mut self.thought_config_editor {
-                    if editor.focus == ThoughtConfigEditorField::Model {
-                        editor.config.model.push(ch);
-                    }
-                }
+                self.push_thought_config_model_char(ch);
             }
             _ => {}
+        }
+    }
+
+    fn handle_pending_thought_config_key(&mut self, key: KeyEvent) {
+        if key.code == KeyCode::Esc {
+            self.close_thought_config_editor();
+        } else {
+            self.set_message("wait for the current action to finish");
+        }
+    }
+
+    fn move_thought_config_focus(&mut self, delta: isize) {
+        if let Some(editor) = &mut self.thought_config_editor {
+            editor.move_focus(delta);
+        }
+    }
+
+    fn pop_thought_config_model_char(&mut self) {
+        if let Some(editor) = &mut self.thought_config_editor {
+            if editor.focus == ThoughtConfigEditorField::Model {
+                editor.config.model.pop();
+            }
+        }
+    }
+
+    fn push_thought_config_model_char(&mut self, ch: char) {
+        if let Some(editor) = &mut self.thought_config_editor {
+            if editor.focus == ThoughtConfigEditorField::Model {
+                editor.config.model.push(ch);
+            }
         }
     }
 
@@ -3427,12 +3444,32 @@ impl<C: TuiApi> App<C> {
             return;
         }
 
-        let frame = frame_rect(renderer.width(), renderer.height());
+        self.render_shell(renderer, layout);
 
-        renderer.draw_box(frame, Color::DarkGrey);
+        if matches!(self.fish_bowl_mode, FishBowlMode::Aquarium) {
+            self.render_aquarium(renderer, layout.overview_field);
+        } else if let FishBowlMode::Mermaid(viewer) = &mut self.fish_bowl_mode {
+            render_mermaid_viewer(renderer, layout.overview_field, viewer);
+        }
+
+        self.render_overlays(renderer, layout);
+        render_footer(self, renderer, layout.footer_start_y);
+    }
+
+    fn render_shell(&self, renderer: &mut Renderer, layout: WorkspaceLayout) {
+        renderer.draw_box(
+            frame_rect(renderer.width(), renderer.height()),
+            Color::DarkGrey,
+        );
         renderer.draw_text(2, 1, "swimmers tui", Color::Cyan);
+        self.render_theme_toggle(renderer);
+        self.render_header_right(renderer);
+        render_header_filter_strip(self, renderer, renderer.width());
+        renderer.draw_box(layout.workspace_box, Color::DarkGrey);
+        self.render_thought_split(renderer, layout);
+    }
 
-        // Sprite theme toggle: [auto] [fish] [balls] [jelly] — highlighted option is Cyan.
+    fn render_theme_toggle(&self, renderer: &mut Renderer) {
         let toggle_rect = self.sprite_theme_rect(renderer.width());
         let mut toggle_x = toggle_rect.x;
         for theme in SpriteTheme::override_options() {
@@ -3445,7 +3482,9 @@ impl<C: TuiApi> App<C> {
             renderer.draw_text(toggle_x, toggle_rect.y, &label, color);
             toggle_x = toggle_x.saturating_add(display_width(&label) + 1);
         }
+    }
 
+    fn render_header_right(&self, renderer: &mut Renderer) {
         let max_right_width = renderer.width().saturating_sub(22) as usize;
         let right_text = truncate_label(&self.header_right_text(), max_right_width);
         let right_x = renderer
@@ -3453,105 +3492,115 @@ impl<C: TuiApi> App<C> {
             .saturating_sub(display_width(&right_text))
             .saturating_sub(2);
         renderer.draw_text(right_x, 1, &right_text, Color::DarkGrey);
-        render_header_filter_strip(self, renderer, renderer.width());
+    }
 
-        renderer.draw_box(layout.workspace_box, Color::DarkGrey);
-
-        if let (Some(thought_box), Some(thought_content)) =
+    fn render_thought_split(&self, renderer: &mut Renderer, layout: WorkspaceLayout) {
+        let (Some(thought_box), Some(thought_content)) =
             (layout.thought_box, layout.thought_content)
-        {
-            renderer.draw_box(thought_box, Color::DarkGrey);
-            renderer.draw_box(layout.overview_box, Color::DarkGrey);
-            if let Some(split_divider) = layout.split_divider {
-                let divider_color = if self.split_drag_active {
-                    Color::Cyan
-                } else {
-                    Color::DarkGrey
-                };
-                renderer.draw_vline(
-                    split_divider.x,
-                    split_divider.y,
-                    split_divider.height,
-                    ':',
-                    divider_color,
-                );
-            }
-            render_thought_panel(
-                self,
-                renderer,
-                thought_content,
-                layout.thought_entry_capacity(),
+        else {
+            return;
+        };
+
+        renderer.draw_box(thought_box, Color::DarkGrey);
+        renderer.draw_box(layout.overview_box, Color::DarkGrey);
+        if let Some(split_divider) = layout.split_divider {
+            let divider_color = if self.split_drag_active {
+                Color::Cyan
+            } else {
+                Color::DarkGrey
+            };
+            renderer.draw_vline(
+                split_divider.x,
+                split_divider.y,
+                split_divider.height,
+                ':',
+                divider_color,
             );
         }
+        render_thought_panel(
+            self,
+            renderer,
+            thought_content,
+            layout.thought_entry_capacity(),
+        );
+    }
 
-        match &mut self.fish_bowl_mode {
-            FishBowlMode::Aquarium => {
-                let visible_entities = self.visible_entities();
-                let use_balls_scene = self.uses_balls_scene(&visible_entities);
-                if visible_entities.is_empty() {
-                    let empty = if self.entities.is_empty() {
-                        "no tmux sessions found - press r after starting one"
-                    } else if self.thought_filter.is_active() {
-                        "no swimmers match filters"
-                    } else {
-                        "no tmux sessions found - press r after starting one"
-                    };
-                    let x = layout.overview_field.x.saturating_add(
-                        layout
-                            .overview_field
-                            .width
-                            .saturating_sub(empty.len() as u16)
-                            / 2,
-                    );
-                    let y = layout.overview_field.y + layout.overview_field.height / 2;
-                    renderer.draw_text(x, y, empty, Color::DarkGrey);
-                }
-
-                if use_balls_scene {
-                    render_balls_theme(
-                        renderer,
-                        layout.overview_field,
-                        &visible_entities,
-                        self.selected_id.as_deref(),
-                        &self.repo_themes,
-                        self.tick,
-                    );
-                } else {
-                    render_aquarium_background(renderer, layout.overview_field, self.tick);
-
-                    for entity in visible_entities {
-                        let rect = entity.screen_rect(layout.overview_field);
-                        let selected = self
-                            .selected_id
-                            .as_ref()
-                            .map(|selected| *selected == entity.session.session_id)
-                            .unwrap_or(false);
-                        render_entity_with_theme(
-                            renderer,
-                            entity,
-                            rect,
-                            selected,
-                            self.tick,
-                            &self.repo_themes,
-                            self.effective_sprite_theme_for_session(&entity.session),
-                        );
-                    }
-                }
-
-                if let Some(banner) = self.api_refresh_health.banner_text() {
-                    renderer.draw_text(
-                        layout.overview_field.x,
-                        layout.overview_field.y,
-                        &truncate_label(banner, layout.overview_field.width as usize),
-                        Color::Red,
-                    );
-                }
-            }
-            FishBowlMode::Mermaid(viewer) => {
-                render_mermaid_viewer(renderer, layout.overview_field, viewer);
-            }
+    fn render_aquarium(&self, renderer: &mut Renderer, field: Rect) {
+        let visible_entities = self.visible_entities();
+        if visible_entities.is_empty() {
+            self.render_empty_aquarium_message(renderer, field);
         }
 
+        if self.uses_balls_scene(&visible_entities) {
+            render_balls_theme(
+                renderer,
+                field,
+                &visible_entities,
+                self.selected_id.as_deref(),
+                &self.repo_themes,
+                self.tick,
+            );
+        } else {
+            self.render_fish_scene(renderer, field, visible_entities);
+        }
+
+        self.render_api_stale_banner(renderer, field);
+    }
+
+    fn render_empty_aquarium_message(&self, renderer: &mut Renderer, field: Rect) {
+        let empty = if self.entities.is_empty() {
+            "no tmux sessions found - press r after starting one"
+        } else if self.thought_filter.is_active() {
+            "no swimmers match filters"
+        } else {
+            "no tmux sessions found - press r after starting one"
+        };
+        let x = field
+            .x
+            .saturating_add(field.width.saturating_sub(empty.len() as u16) / 2);
+        let y = field.y + field.height / 2;
+        renderer.draw_text(x, y, empty, Color::DarkGrey);
+    }
+
+    fn render_fish_scene(
+        &self,
+        renderer: &mut Renderer,
+        field: Rect,
+        visible_entities: Vec<&SessionEntity>,
+    ) {
+        render_aquarium_background(renderer, field, self.tick);
+
+        for entity in visible_entities {
+            let rect = entity.screen_rect(field);
+            let selected = self
+                .selected_id
+                .as_ref()
+                .map(|selected| *selected == entity.session.session_id)
+                .unwrap_or(false);
+            render_entity_with_theme(
+                renderer,
+                entity,
+                rect,
+                selected,
+                self.tick,
+                &self.repo_themes,
+                self.effective_sprite_theme_for_session(&entity.session),
+            );
+        }
+    }
+
+    fn render_api_stale_banner(&self, renderer: &mut Renderer, field: Rect) {
+        if let Some(banner) = self.api_refresh_health.banner_text() {
+            renderer.draw_text(
+                field.x,
+                field.y,
+                &truncate_label(banner, field.width as usize),
+                Color::Red,
+            );
+        }
+    }
+
+    fn render_overlays(&self, renderer: &mut Renderer, layout: WorkspaceLayout) {
         if let Some(picker) = &self.picker {
             render_picker(renderer, picker, layout.overview_field);
         }
@@ -3566,8 +3615,6 @@ impl<C: TuiApi> App<C> {
         if let Some(editor) = &self.thought_config_editor {
             render_thought_config_editor(renderer, editor, layout.overview_field);
         }
-
-        render_footer(self, renderer, layout.footer_start_y);
     }
 }
 

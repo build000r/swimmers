@@ -785,6 +785,16 @@ pub(crate) fn picker_action_at(
     x: u16,
     y: u16,
 ) -> Option<PickerAction> {
+    if let Some(action) = picker_top_control_action_at(layout, x, y) {
+        return Some(action);
+    }
+    if let Some(action) = picker_filter_action_at(layout, x, y) {
+        return Some(action);
+    }
+    picker_entry_action_at(picker, layout, x, y)
+}
+
+fn picker_top_control_action_at(layout: &PickerLayout, x: u16, y: u16) -> Option<PickerAction> {
     if layout.close_button.contains(x, y) {
         return Some(PickerAction::Close);
     }
@@ -807,6 +817,10 @@ pub(crate) fn picker_action_at(
     {
         return Some(PickerAction::Up);
     }
+    None
+}
+
+fn picker_filter_action_at(layout: &PickerLayout, x: u16, y: u16) -> Option<PickerAction> {
     if layout.env_button.contains(x, y) {
         return Some(PickerAction::ToggleManaged(true));
     }
@@ -821,6 +835,15 @@ pub(crate) fn picker_action_at(
     if layout.spawn_here_button.contains(x, y) {
         return Some(PickerAction::ActivateCurrentPath);
     }
+    None
+}
+
+fn picker_entry_action_at(
+    picker: &PickerState,
+    layout: &PickerLayout,
+    x: u16,
+    y: u16,
+) -> Option<PickerAction> {
     if y >= layout.first_entry_y
         && y < layout.first_entry_y + layout.visible_entry_rows as u16
         && x >= layout.content.x
@@ -858,9 +881,24 @@ pub(crate) fn render_picker(renderer: &mut Renderer, picker: &PickerState, field
     let layout = picker_layout(picker, field);
     let picker_color = picker.current_theme_color.unwrap_or(Color::White);
     let picker_accent = picker.current_theme_color.unwrap_or(Color::Cyan);
+
     renderer.fill_rect(layout.frame, ' ', Color::Reset);
     renderer.draw_box(layout.frame, picker_color);
 
+    render_picker_header_controls(renderer, picker, &layout, picker_accent);
+    render_picker_path_row(renderer, picker, &layout, picker_color);
+    render_picker_filter_row(renderer, picker, &layout);
+    render_picker_spawn_row(renderer, picker, &layout);
+    render_picker_search_overlay(renderer, picker, &layout, picker_accent);
+    render_picker_entries(renderer, picker, &layout);
+}
+
+fn render_picker_header_controls(
+    renderer: &mut Renderer,
+    picker: &PickerState,
+    layout: &PickerLayout,
+    picker_accent: Color,
+) {
     let spawn_title = format!("spawn {}", picker.spawn_tool.label());
     renderer.draw_text(
         layout.content.x,
@@ -912,7 +950,14 @@ pub(crate) fn render_picker(renderer: &mut Renderer, picker: &PickerState, field
         "[x]",
         Color::DarkGrey,
     );
+}
 
+fn render_picker_path_row(
+    renderer: &mut Renderer,
+    picker: &PickerState,
+    layout: &PickerLayout,
+    picker_color: Color,
+) {
     let path_x = layout
         .back_button
         .map(|button| {
@@ -923,7 +968,9 @@ pub(crate) fn render_picker(renderer: &mut Renderer, picker: &PickerState, field
     let path_width = layout.content.right().saturating_sub(path_x) as usize;
     let path_label = truncate_label(&picker.relative_label(), path_width);
     renderer.draw_text(path_x, layout.content.y + 1, &path_label, picker_color);
+}
 
+fn render_picker_filter_row(renderer: &mut Renderer, picker: &PickerState, layout: &PickerLayout) {
     let managed_label = match &picker.overlay_label {
         Some(label) => format!("[{}]", label.to_lowercase()),
         None => "[managed]".to_string(),
@@ -963,7 +1010,9 @@ pub(crate) fn render_picker(renderer: &mut Renderer, picker: &PickerState, field
             Color::DarkGrey
         },
     );
+}
 
+fn render_picker_spawn_row(renderer: &mut Renderer, picker: &PickerState, layout: &PickerLayout) {
     let spawn_color = if matches!(picker.selection, PickerSelection::SpawnHere) {
         picker.current_theme_color.unwrap_or(Color::White)
     } else {
@@ -983,7 +1032,14 @@ pub(crate) fn render_picker(renderer: &mut Renderer, picker: &PickerState, field
         &truncate_label(&spawn_line, layout.spawn_here_button.width as usize),
         spawn_color,
     );
+}
 
+fn render_picker_search_overlay(
+    renderer: &mut Renderer,
+    picker: &PickerState,
+    layout: &PickerLayout,
+    picker_accent: Color,
+) {
     if !picker.search.is_empty() {
         let label = format!(
             "search: {}_ ({} match{})",
@@ -1009,7 +1065,9 @@ pub(crate) fn render_picker(renderer: &mut Renderer, picker: &PickerState, field
             picker_accent,
         );
     }
+}
 
+fn render_picker_entries(renderer: &mut Renderer, picker: &PickerState, layout: &PickerLayout) {
     if layout.visible_entries.is_empty() {
         let empty_label = if picker.search.is_empty() {
             "  empty"
@@ -1026,86 +1084,95 @@ pub(crate) fn render_picker(renderer: &mut Renderer, picker: &PickerState, field
     }
 
     for row in 0..layout.visible_entry_rows {
-        let visible_pos = picker.scroll + row;
-        let Some(&index) = layout.visible_entries.get(visible_pos) else {
-            break;
-        };
-        let entry = &picker.entries[index];
-        let marker = if picker.selection == PickerSelection::Entry(index) {
-            ">"
-        } else {
-            " "
-        };
-        let icon = if entry.has_children { ">" } else { "+" };
-        let running = match entry.is_running {
-            Some(true) => " *",
-            Some(false) => " -",
-            None => "",
-        };
-        let line = format!("{marker} {icon} {}{}", entry.name, running);
-        let actions = picker_entry_actions(entry);
-        let actions_width = picker_entry_actions_width(&actions);
-        let exclude_label = picker
-            .batch_exclude_mode
-            .then(|| picker_batch_exclude_label(picker, index));
-        let exclude_width = exclude_label
-            .map(|label| label.len() as u16 + if actions_width > 0 { 1 } else { 0 })
-            .unwrap_or(0);
-        let reserved = if actions_width > 0 {
-            actions_width + 1 + exclude_width
-        } else if exclude_width > 0 {
-            exclude_width + 1
+        render_picker_entry_row(renderer, picker, layout, row);
+    }
+}
+
+fn render_picker_entry_row(
+    renderer: &mut Renderer,
+    picker: &PickerState,
+    layout: &PickerLayout,
+    row: usize,
+) {
+    let visible_pos = picker.scroll + row;
+    let Some(&index) = layout.visible_entries.get(visible_pos) else {
+        return;
+    };
+    let entry = &picker.entries[index];
+    let marker = if picker.selection == PickerSelection::Entry(index) {
+        ">"
+    } else {
+        " "
+    };
+    let icon = if entry.has_children { ">" } else { "+" };
+    let running = match entry.is_running {
+        Some(true) => " *",
+        Some(false) => " -",
+        None => "",
+    };
+    let line = format!("{marker} {icon} {}{}", entry.name, running);
+    let actions = picker_entry_actions(entry);
+    let actions_width = picker_entry_actions_width(&actions);
+    let exclude_label = picker
+        .batch_exclude_mode
+        .then(|| picker_batch_exclude_label(picker, index));
+    let exclude_width = exclude_label
+        .map(|label| label.len() as u16 + if actions_width > 0 { 1 } else { 0 })
+        .unwrap_or(0);
+    let reserved = if actions_width > 0 {
+        actions_width + 1 + exclude_width
+    } else if exclude_width > 0 {
+        exclude_width + 1
+    } else {
+        0
+    };
+    let text_width = layout.content.width.saturating_sub(reserved) as usize;
+    let themed_color = picker.entry_theme_colors.get(index).copied().flatten();
+    let excluded = picker.batch_entry_is_excluded(index);
+    let color = if excluded {
+        Color::DarkGrey
+    } else if picker.selection == PickerSelection::Entry(index) {
+        themed_color.unwrap_or(Color::White)
+    } else if let Some(theme_color) = themed_color {
+        theme_color
+    } else if entry.has_children {
+        Color::Cyan
+    } else {
+        Color::DarkGrey
+    };
+    renderer.draw_text(
+        layout.content.x,
+        layout.first_entry_y + row as u16,
+        &truncate_label(&line, text_width),
+        color,
+    );
+    if let Some(label) = exclude_label {
+        let actions_padding = if actions_width > 0 {
+            actions_width + 1
         } else {
             0
         };
-        let text_width = layout.content.width.saturating_sub(reserved) as usize;
-        let themed_color = picker.entry_theme_colors.get(index).copied().flatten();
-        let excluded = picker.batch_entry_is_excluded(index);
-        let color = if excluded {
-            Color::DarkGrey
-        } else if picker.selection == PickerSelection::Entry(index) {
-            themed_color.unwrap_or(Color::White)
-        } else if let Some(theme_color) = themed_color {
-            theme_color
-        } else if entry.has_children {
-            Color::Cyan
-        } else {
-            Color::DarkGrey
-        };
+        let x = layout
+            .content
+            .right()
+            .saturating_sub(actions_padding + label.len() as u16);
         renderer.draw_text(
-            layout.content.x,
+            x,
             layout.first_entry_y + row as u16,
-            &truncate_label(&line, text_width),
-            color,
+            label,
+            if excluded { Color::Cyan } else { Color::Yellow },
         );
-        if let Some(label) = exclude_label {
-            let actions_padding = if actions_width > 0 {
-                actions_width + 1
-            } else {
-                0
-            };
-            let x = layout
-                .content
-                .right()
-                .saturating_sub(actions_padding + label.len() as u16);
+    }
+    if !actions.is_empty() {
+        let mut ax = layout.content.right().saturating_sub(actions_width);
+        for action in &actions {
             renderer.draw_text(
-                x,
+                ax,
                 layout.first_entry_y + row as u16,
-                label,
-                if excluded { Color::Cyan } else { Color::Yellow },
+                &action.text,
+                action.color,
             );
-        }
-        if !actions.is_empty() {
-            let mut ax = layout.content.right().saturating_sub(actions_width);
-            for action in &actions {
-                renderer.draw_text(
-                    ax,
-                    layout.first_entry_y + row as u16,
-                    &action.text,
-                    action.color,
-                );
-                ax += action.text.len() as u16 + 1;
-            }
+            ax += action.text.len() as u16 + 1;
         }
     }
 }

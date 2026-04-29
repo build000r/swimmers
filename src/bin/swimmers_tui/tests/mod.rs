@@ -4901,6 +4901,26 @@ fn balls_theme_sags_sleepier_sessions_and_clamps_to_floor() {
 }
 
 #[test]
+fn balls_theme_handles_very_narrow_fields() {
+    let field = Rect {
+        x: 7,
+        y: 3,
+        width: 4,
+        height: 12,
+    };
+    let entity = SessionEntity::new(
+        session_summary("sess-narrow", "1", TEST_REPO_SWIMMERS),
+        field,
+    );
+    let visible = vec![&entity];
+
+    let slots = balls_theme_slots(&visible, field);
+
+    assert_eq!(slots.len(), 1);
+    assert_eq!(slots[0].ball_x, field.x);
+}
+
+#[test]
 fn balls_theme_renders_floor_and_attention_marker() {
     let api = MockApi::new();
     let layout = test_layout(120, 40);
@@ -4953,6 +4973,28 @@ fn toggle_sprite_theme_cycles_between_auto_and_overrides() {
     app.toggle_sprite_theme();
     assert_eq!(app.sprite_theme_override, Some(SpriteTheme::Jelly));
     app.toggle_sprite_theme();
+    assert_eq!(app.sprite_theme_override, None);
+}
+
+#[test]
+fn sprite_theme_click_selects_matching_segment() {
+    let api = MockApi::new();
+    let mut app = make_app(api);
+    let rect = app.sprite_theme_rect(120);
+    let auto_width = display_width("[auto]");
+    let fish_width = display_width("[fish]");
+    let balls_width = display_width("[balls]");
+
+    app.set_sprite_theme_from_click(rect.x + auto_width + 1);
+    assert_eq!(app.sprite_theme_override, Some(SpriteTheme::Fish));
+
+    app.set_sprite_theme_from_click(rect.x + auto_width + 1 + fish_width + 1);
+    assert_eq!(app.sprite_theme_override, Some(SpriteTheme::Balls));
+
+    app.set_sprite_theme_from_click(rect.x + auto_width + 1 + fish_width + 1 + balls_width + 1);
+    assert_eq!(app.sprite_theme_override, Some(SpriteTheme::Jelly));
+
+    app.set_sprite_theme_from_click(rect.x);
     assert_eq!(app.sprite_theme_override, None);
 }
 

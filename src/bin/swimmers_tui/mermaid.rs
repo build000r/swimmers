@@ -3915,6 +3915,25 @@ struct MermaidProjectedCandidate {
     color: Color,
 }
 
+#[derive(Clone, Copy)]
+struct MermaidProjectionBounds {
+    left: i32,
+    right: i32,
+    top: i32,
+    bottom: i32,
+}
+
+impl MermaidProjectionBounds {
+    fn from_rect(rect: Rect) -> Self {
+        Self {
+            left: rect.x as i32,
+            right: rect.right() as i32,
+            top: rect.y as i32,
+            bottom: rect.bottom() as i32,
+        }
+    }
+}
+
 /// Push a single optional edge label (main, start, or end) onto `semantic_lines`.
 /// Handles the inner `if-let` guards and State vs. non-State font selection.
 fn push_edge_label_block(
@@ -4000,6 +4019,127 @@ fn filter_owner_summaries_with_details(candidates: &mut Vec<MermaidProjectedCand
     });
 }
 
+fn mermaid_semantic_line_to_candidate(
+    source_index: usize,
+    line: &MermaidSemanticLine,
+    transform: MermaidViewportTransform,
+    bounds: MermaidProjectionBounds,
+    view_state: MermaidViewState,
+    owner_colors: &HashMap<String, Color>,
+) -> Option<MermaidProjectedCandidate> {
+    if !mermaid_line_visible_in_state(line, view_state)
+        || mermaid_compact_detail_hides_kind(view_state, line.kind)
+    {
+        return None;
+    }
+
+    let owner_cols = (line.owner_width * transform.scale / 2.0).max(0.0);
+    let owner_rows = (line.owner_height * transform.scale / 4.0).max(0.0);
+    if !line.kind.is_visible_for_owner(owner_cols, owner_rows) {
+        return None;
+    }
+
+    let display_text = mermaid_display_text_for_view(line, owner_cols, view_state);
+    if display_text.trim().is_empty() {
+        return None;
+    }
+
+    let projected_y = line.diagram_y * transform.scale + transform.ty;
+    let mut screen_y = bounds.top + (projected_y / 4.0).floor() as i32;
+    if screen_y < bounds.top || screen_y >= bounds.bottom {
+        if line.kind.row_nudge_budget() == 0 {
+            return None;
+        }
+        screen_y = screen_y.clamp(bounds.top, bounds.bottom.saturating_sub(1));
+    }
+
+    let projected_x = line.diagram_x * transform.scale + transform.tx;
+    let anchor_x = bounds.left + (projected_x / 2.0).floor() as i32;
+    let text_width = display_width(&display_text) as i32;
+    if text_width <= 0 {
+        return None;
+    }
+
+    let mut screen_x = match line.anchor {
+        MermaidTextAnchor::Start => anchor_x,
+        MermaidTextAnchor::Center => anchor_x - text_width / 2,
+    };
+    if screen_x >= bounds.right || screen_x + text_width <= bounds.left {
+        return None;
+    }
+
+    let skipped_chars = if screen_x < bounds.left {
+        (bounds.left - screen_x) as usize
+    } else {
+        0
+    };
+    if screen_x < bounds.left {
+        screen_x = bounds.left;
+    }
+    let max_chars = bounds.right.saturating_sub(screen_x) as usize;
+    let clipped = clip_mermaid_overlay_text(&display_text, skipped_chars, max_chars);
+    if clipped.is_empty() {
+        return None;
+    }
+
+    Some(MermaidProjectedCandidate {
+        priority: line.kind.priority(),
+        area_rank: -((owner_cols * owner_rows * 10.0).round() as i32),
+        kind: line.kind,
+        owner_key: line.owner_key.clone(),
+        compact_rows: mermaid_kind_uses_compact_rows(line.kind),
+        source_index,
+        x: screen_x as u16,
+        y: screen_y as u16,
+        text: clipped,
+        color: mermaid_semantic_line_color(line.kind, &line.owner_key, owner_colors),
+    })
+}
+
+fn mermaid_candidate_row_order(candidate: &MermaidProjectedCandidate) -> Vec<i32> {
+    let budget = candidate.kind.row_nudge_budget();
+    let mut row_candidates = vec![candidate.y as i32];
+    for offset in 1..=budget {
+        row_candidates.push(candidate.y as i32 + offset);
+        row_candidates.push(candidate.y as i32 - offset);
+    }
+    row_candidates
+}
+
+fn mermaid_first_available_candidate_row(
+    candidate: &MermaidProjectedCandidate,
+    occupied_rows: &HashMap<u16, Vec<(u16, u16)>>,
+    collision_padding: u16,
+    bounds: MermaidProjectionBounds,
+) -> Option<(u16, u16, u16)> {
+    let start = candidate.x;
+    let end = candidate
+        .x
+        .saturating_add(display_width(&candidate.text).max(1));
+    let padded_start = start.saturating_sub(collision_padding);
+    let padded_end = end.saturating_add(collision_padding);
+
+    for row in mermaid_candidate_row_order(candidate) {
+        if row < bounds.top || row >= bounds.bottom {
+            continue;
+        }
+        let row = row as u16;
+        let overlaps = occupied_rows
+            .get(&row)
+            .map(|ranges| {
+                ranges
+                    .iter()
+                    .any(|(left, right)| padded_start < *right && padded_end > *left)
+            })
+            .unwrap_or(false);
+        if !overlaps {
+            return Some((row, padded_start, padded_end));
+        }
+    }
+
+    None
+}
+
 pub(crate) fn project_mermaid_semantic_lines(
     lines: &[MermaidSemanticLine],
     transform: MermaidViewportTransform,
@@ -4008,79 +4148,17 @@ pub(crate) fn project_mermaid_semantic_lines(
 ) -> Vec<MermaidProjectedLine> {
     let mut candidates = Vec::new();
     let owner_colors = mermaid_owner_accent_map(lines);
-    let left = content_rect.x as i32;
-    let right = content_rect.right() as i32;
-    let top = content_rect.y as i32;
-    let bottom = content_rect.bottom() as i32;
+    let bounds = MermaidProjectionBounds::from_rect(content_rect);
 
     for (source_index, line) in lines.iter().enumerate() {
-        if !mermaid_line_visible_in_state(line, view_state) {
-            continue;
-        }
-        if mermaid_compact_detail_hides_kind(view_state, line.kind) {
-            continue;
-        }
-
-        let owner_cols = (line.owner_width * transform.scale / 2.0).max(0.0);
-        let owner_rows = (line.owner_height * transform.scale / 4.0).max(0.0);
-        if !line.kind.is_visible_for_owner(owner_cols, owner_rows) {
-            continue;
-        }
-        let display_text = mermaid_display_text_for_view(line, owner_cols, view_state);
-        if display_text.trim().is_empty() {
-            continue;
-        }
-
-        let projected_x = line.diagram_x * transform.scale + transform.tx;
-        let projected_y = line.diagram_y * transform.scale + transform.ty;
-        let mut screen_y = top + (projected_y / 4.0).floor() as i32;
-        if screen_y < top || screen_y >= bottom {
-            if line.kind.row_nudge_budget() > 0 {
-                screen_y = screen_y.clamp(top, bottom.saturating_sub(1));
-            } else {
-                continue;
-            }
-        }
-
-        let anchor_x = left + (projected_x / 2.0).floor() as i32;
-        let text_width = display_width(&display_text) as i32;
-        if text_width <= 0 {
-            continue;
-        }
-        let mut screen_x = match line.anchor {
-            MermaidTextAnchor::Start => anchor_x,
-            MermaidTextAnchor::Center => anchor_x - text_width / 2,
-        };
-        if screen_x >= right || screen_x + text_width <= left {
-            continue;
-        }
-
-        let skipped_chars = if screen_x < left {
-            (left - screen_x) as usize
-        } else {
-            0
-        };
-        if screen_x < left {
-            screen_x = left;
-        }
-        let max_chars = right.saturating_sub(screen_x) as usize;
-        let clipped = clip_mermaid_overlay_text(&display_text, skipped_chars, max_chars);
-        if clipped.is_empty() {
-            continue;
-        }
-
-        candidates.push(MermaidProjectedCandidate {
-            priority: line.kind.priority(),
-            area_rank: -((owner_cols * owner_rows * 10.0).round() as i32),
-            kind: line.kind,
-            owner_key: line.owner_key.clone(),
-            compact_rows: mermaid_kind_uses_compact_rows(line.kind),
+        candidates.extend(mermaid_semantic_line_to_candidate(
             source_index,
-            x: screen_x as u16,
-            y: screen_y as u16,
-            text: clipped,
-            color: mermaid_semantic_line_color(line.kind, &line.owner_key, &owner_colors),
-        });
+            line,
+            transform,
+            bounds,
+            view_state,
+            &owner_colors,
+        ));
     }
 
     let max_row = content_rect.bottom().saturating_sub(1);
@@ -4096,40 +4174,12 @@ pub(crate) fn project_mermaid_semantic_lines(
     let mut projected = Vec::new();
     let collision_padding = view_state.collision_padding();
     for candidate in candidates {
-        let start = candidate.x;
-        let end = candidate
-            .x
-            .saturating_add(display_width(&candidate.text).max(1));
-        let padded_start = start.saturating_sub(collision_padding);
-        let padded_end = end.saturating_add(collision_padding);
-        let budget = candidate.kind.row_nudge_budget();
-        let mut target_y = None;
-        let mut row_candidates = vec![candidate.y as i32];
-        for offset in 1..=budget {
-            row_candidates.push(candidate.y as i32 + offset);
-            row_candidates.push(candidate.y as i32 - offset);
-        }
-
-        for row in row_candidates {
-            if row < top || row >= bottom {
-                continue;
-            }
-            let row = row as u16;
-            let overlaps = occupied_rows
-                .get(&row)
-                .map(|ranges| {
-                    ranges
-                        .iter()
-                        .any(|(left, right)| padded_start < *right && padded_end > *left)
-                })
-                .unwrap_or(false);
-            if !overlaps {
-                target_y = Some(row);
-                break;
-            }
-        }
-
-        let Some(target_y) = target_y else {
+        let Some((target_y, padded_start, padded_end)) = mermaid_first_available_candidate_row(
+            &candidate,
+            &occupied_rows,
+            collision_padding,
+            bounds,
+        ) else {
             continue;
         };
 
@@ -4288,7 +4338,15 @@ pub(crate) fn pixel_is_dark(pixmap: &Pixmap, x: u32, y: u32) -> bool {
     luminance < 230.0
 }
 
-pub(crate) fn mermaid_ascii_cell(pixmap: &Pixmap, cell_x: u16, cell_y: u16) -> char {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct MermaidAsciiSample {
+    grid: [[bool; 2]; 4],
+    row_counts: [u8; 4],
+    col_counts: [u8; 2],
+    total: u8,
+}
+
+fn mermaid_ascii_sample(pixmap: &Pixmap, cell_x: u16, cell_y: u16) -> MermaidAsciiSample {
     let base_x = u32::from(cell_x) * 2;
     let base_y = u32::from(cell_y) * 4;
     let mut grid = [[false; 2]; 4];
@@ -4308,36 +4366,60 @@ pub(crate) fn mermaid_ascii_cell(pixmap: &Pixmap, cell_x: u16, cell_y: u16) -> c
         }
     }
 
-    if total == 0 {
-        return ' ';
+    MermaidAsciiSample {
+        grid,
+        row_counts,
+        col_counts,
+        total,
     }
+}
 
-    let horizontal = row_counts.into_iter().any(|count| count == 2);
-    let vertical = col_counts[0] >= 3 && col_counts[1] >= 3;
-    let right_arrow =
-        col_counts[1] >= 3 && col_counts[0] <= 1 && horizontal && (grid[1][1] || grid[2][1]);
-    let left_arrow =
-        col_counts[0] >= 3 && col_counts[1] <= 1 && horizontal && (grid[1][0] || grid[2][0]);
-    let diagonal = ((grid[0][0] || grid[1][0]) && (grid[2][1] || grid[3][1]))
-        || ((grid[0][1] || grid[1][1]) && (grid[2][0] || grid[3][0]));
+fn mermaid_ascii_has_horizontal(sample: &MermaidAsciiSample) -> bool {
+    sample.row_counts.into_iter().any(|count| count == 2)
+}
 
-    if right_arrow {
-        '>'
-    } else if left_arrow {
-        '<'
-    } else if vertical {
-        '|'
-    } else if horizontal {
-        '_'
-    } else if diagonal {
-        '\\'
-    } else if col_counts[0] >= 2 || col_counts[1] >= 2 {
-        '|'
-    } else if total >= 2 {
-        '_'
-    } else {
-        ' '
-    }
+fn mermaid_ascii_has_vertical(sample: &MermaidAsciiSample) -> bool {
+    sample.col_counts[0] >= 3 && sample.col_counts[1] >= 3
+}
+
+fn mermaid_ascii_has_right_arrow(sample: &MermaidAsciiSample, horizontal: bool) -> bool {
+    sample.col_counts[1] >= 3
+        && sample.col_counts[0] <= 1
+        && horizontal
+        && (sample.grid[1][1] || sample.grid[2][1])
+}
+
+fn mermaid_ascii_has_left_arrow(sample: &MermaidAsciiSample, horizontal: bool) -> bool {
+    sample.col_counts[0] >= 3
+        && sample.col_counts[1] <= 1
+        && horizontal
+        && (sample.grid[1][0] || sample.grid[2][0])
+}
+
+fn mermaid_ascii_has_diagonal(sample: &MermaidAsciiSample) -> bool {
+    ((sample.grid[0][0] || sample.grid[1][0]) && (sample.grid[2][1] || sample.grid[3][1]))
+        || ((sample.grid[0][1] || sample.grid[1][1]) && (sample.grid[2][0] || sample.grid[3][0]))
+}
+
+fn mermaid_ascii_char(sample: &MermaidAsciiSample) -> char {
+    let horizontal = mermaid_ascii_has_horizontal(sample);
+    [
+        (sample.total == 0, ' '),
+        (mermaid_ascii_has_right_arrow(sample, horizontal), '>'),
+        (mermaid_ascii_has_left_arrow(sample, horizontal), '<'),
+        (mermaid_ascii_has_vertical(sample), '|'),
+        (horizontal, '_'),
+        (mermaid_ascii_has_diagonal(sample), '\\'),
+        (sample.col_counts[0] >= 2 || sample.col_counts[1] >= 2, '|'),
+        (sample.total >= 2, '_'),
+    ]
+    .into_iter()
+    .find_map(|(matched, ch)| matched.then_some(ch))
+    .unwrap_or(' ')
+}
+
+pub(crate) fn mermaid_ascii_cell(pixmap: &Pixmap, cell_x: u16, cell_y: u16) -> char {
+    mermaid_ascii_char(&mermaid_ascii_sample(pixmap, cell_x, cell_y))
 }
 
 pub(crate) fn pixmap_to_ascii_lines(pixmap: &Pixmap, content_rect: Rect) -> Vec<String> {
@@ -4350,6 +4432,64 @@ pub(crate) fn pixmap_to_ascii_lines(pixmap: &Pixmap, content_rect: Rect) -> Vec<
         lines.push(line);
     }
     lines
+}
+
+#[cfg(test)]
+mod mermaid_ascii_tests {
+    use super::*;
+
+    fn sample(rows: [&str; 4]) -> MermaidAsciiSample {
+        let mut grid = [[false; 2]; 4];
+        let mut row_counts = [0u8; 4];
+        let mut col_counts = [0u8; 2];
+        let mut total = 0u8;
+
+        for (sub_y, row) in rows.into_iter().enumerate() {
+            for (sub_x, ch) in row.chars().enumerate() {
+                let dark = ch == '#';
+                grid[sub_y][sub_x] = dark;
+                if dark {
+                    row_counts[sub_y] += 1;
+                    col_counts[sub_x] += 1;
+                    total += 1;
+                }
+            }
+        }
+
+        MermaidAsciiSample {
+            grid,
+            row_counts,
+            col_counts,
+            total,
+        }
+    }
+
+    #[test]
+    fn mermaid_ascii_char_preserves_priority_order() {
+        assert_eq!(mermaid_ascii_char(&sample(["..", "..", "..", ".."])), ' ');
+        assert_eq!(mermaid_ascii_char(&sample([".#", "##", ".#", ".#"])), '>');
+        assert_eq!(mermaid_ascii_char(&sample(["#.", "##", "#.", "#."])), '<');
+        assert_eq!(mermaid_ascii_char(&sample(["##", "##", "##", ".."])), '|');
+        assert_eq!(mermaid_ascii_char(&sample(["##", "..", "..", ".."])), '_');
+        assert_eq!(mermaid_ascii_char(&sample(["#.", "..", ".#", ".."])), '\\');
+        assert_eq!(mermaid_ascii_char(&sample(["#.", "#.", "..", ".."])), '|');
+        assert_eq!(mermaid_ascii_char(&sample(["#.", ".#", "..", ".."])), '_');
+        assert_eq!(mermaid_ascii_char(&sample(["#.", "..", "..", ".."])), ' ');
+    }
+
+    #[test]
+    fn mermaid_ascii_cell_samples_same_two_by_four_pixel_block() {
+        let mut pixmap = Pixmap::new(6, 8).expect("pixmap");
+        pixmap.fill(resvg::tiny_skia::Color::from_rgba8(255, 255, 255, 255));
+        for (x, y) in [(2, 4), (3, 5), (2, 6)] {
+            let idx = ((y * pixmap.width() + x) * 4) as usize;
+            pixmap.data_mut()[idx..idx + 4].copy_from_slice(&[0, 0, 0, 255]);
+        }
+
+        assert_eq!(mermaid_ascii_cell(&pixmap, 1, 1), '\\');
+        assert_eq!(mermaid_ascii_cell(&pixmap, 0, 1), ' ');
+        assert_eq!(mermaid_ascii_cell(&pixmap, 1, 0), ' ');
+    }
 }
 
 pub(crate) fn ensure_mermaid_prepared_render(
@@ -4706,12 +4846,12 @@ fn render_plan_text_content(
     }
 }
 
-pub(crate) fn render_mermaid_viewer(
+fn render_mermaid_viewer_header(
     renderer: &mut Renderer,
     field: Rect,
+    content_rect: Rect,
     viewer: &mut MermaidViewerState,
 ) {
-    renderer.fill_rect(field, ' ', Color::Reset);
     viewer.back_rect = Some(Rect {
         x: field.x,
         y: field.y,
@@ -4720,16 +4860,11 @@ pub(crate) fn render_mermaid_viewer(
     });
     renderer.draw_text(field.x, field.y, MERMAID_BACK_LABEL, Color::Cyan);
 
-    let content_rect = mermaid_content_rect(field);
-    viewer.content_rect = Some(content_rect);
-
-    // Render tab bar or status bar on the header row
     let after_back = field
         .x
         .saturating_add(display_width(MERMAID_BACK_LABEL) + 1);
 
     if let Some(tabs) = &viewer.plan_tabs {
-        // Tab bar mode
         viewer.tab_rects.clear();
         let mut tab_x = after_back;
         for &tab in tabs {
@@ -4755,52 +4890,104 @@ pub(crate) fn render_mermaid_viewer(
             ));
             tab_x = tab_x.saturating_add(label_width + 1);
         }
-        // Show tmux name at the end if room
         let name_label = format!("| {}", viewer.tmux_name);
         if tab_x + display_width(&name_label) < field.right() {
             renderer.draw_text(tab_x, field.y, &name_label, Color::DarkGrey);
         }
-    } else {
-        // Original status bar (no tabs)
-        let status_x = after_back;
-        let status_width = field.right().saturating_sub(status_x) as usize;
-        let view_state = mermaid_view_state_for_view(viewer, content_rect);
-        let detail_label = mermaid_status_detail_label(view_state);
-        let zoom_label = mermaid_zoom_status_label(viewer.zoom);
-        let focus_width = viewer
-            .focus_status
-            .as_deref()
-            .map(|status| usize::from(display_width(" | ")) + usize::from(display_width(status)))
-            .unwrap_or(0);
-        let fixed_width = usize::from(display_width(&viewer.tmux_name))
-            + usize::from(display_width(" | "))
-            + usize::from(display_width(&detail_label))
-            + usize::from(display_width(" | "))
-            + usize::from(display_width(" | "))
-            + usize::from(display_width(&zoom_label))
-            + usize::from(display_width(" | o open"))
-            + focus_width;
-        let mut status = format!(
-            "{} | {} | {} | {} | o open",
-            viewer.tmux_name,
-            detail_label,
-            shorten_path(
-                viewer.display_path(),
-                status_width.saturating_sub(fixed_width)
-            ),
-            zoom_label,
-        );
-        if let Some(focus_status) = viewer.focus_status.as_deref() {
-            status.push_str(" | ");
-            status.push_str(focus_status);
-        }
-        renderer.draw_text(
-            status_x,
-            field.y,
-            &truncate_label(&status, status_width),
-            Color::DarkGrey,
-        );
+        return;
     }
+
+    let status_x = after_back;
+    let status_width = field.right().saturating_sub(status_x) as usize;
+    let view_state = mermaid_view_state_for_view(viewer, content_rect);
+    let detail_label = mermaid_status_detail_label(view_state);
+    let zoom_label = mermaid_zoom_status_label(viewer.zoom);
+    let focus_width = viewer
+        .focus_status
+        .as_deref()
+        .map(|status| usize::from(display_width(" | ")) + usize::from(display_width(status)))
+        .unwrap_or(0);
+    let fixed_width = usize::from(display_width(&viewer.tmux_name))
+        + usize::from(display_width(" | "))
+        + usize::from(display_width(&detail_label))
+        + usize::from(display_width(" | "))
+        + usize::from(display_width(" | "))
+        + usize::from(display_width(&zoom_label))
+        + usize::from(display_width(" | o open"))
+        + focus_width;
+    let mut status = format!(
+        "{} | {} | {} | {} | o open",
+        viewer.tmux_name,
+        detail_label,
+        shorten_path(
+            viewer.display_path(),
+            status_width.saturating_sub(fixed_width)
+        ),
+        zoom_label,
+    );
+    if let Some(focus_status) = viewer.focus_status.as_deref() {
+        status.push_str(" | ");
+        status.push_str(focus_status);
+    }
+    renderer.draw_text(
+        status_x,
+        field.y,
+        &truncate_label(&status, status_width),
+        Color::DarkGrey,
+    );
+}
+
+fn render_mermaid_cached_background(
+    renderer: &mut Renderer,
+    content_rect: Rect,
+    viewer: &MermaidViewerState,
+) {
+    if viewer.cached_background_cells.len() == viewer.cached_lines.len() {
+        for (row_offset, row) in viewer.cached_background_cells.iter().enumerate() {
+            let y = content_rect.y + row_offset as u16;
+            if y >= content_rect.bottom() {
+                break;
+            }
+            for (column_offset, cell) in row.iter().enumerate() {
+                if cell.ch == ' ' {
+                    continue;
+                }
+                renderer.draw_char(content_rect.x + column_offset as u16, y, cell.ch, cell.fg);
+            }
+        }
+        return;
+    }
+
+    for (offset, line) in viewer.cached_lines.iter().enumerate() {
+        let y = content_rect.y + offset as u16;
+        if y >= content_rect.bottom() {
+            break;
+        }
+        renderer.draw_text(content_rect.x, y, line, MERMAID_CONNECTOR_COLOR);
+    }
+}
+
+fn render_mermaid_cached_semantic_lines(renderer: &mut Renderer, viewer: &MermaidViewerState) {
+    for line in &viewer.cached_semantic_lines {
+        let color = if Some(line.source_index) == viewer.focused_source_index {
+            MERMAID_FOCUS_COLOR
+        } else {
+            line.color
+        };
+        renderer.draw_text(line.x, line.y, &line.text, color);
+    }
+}
+
+pub(crate) fn render_mermaid_viewer(
+    renderer: &mut Renderer,
+    field: Rect,
+    viewer: &mut MermaidViewerState,
+) {
+    renderer.fill_rect(field, ' ', Color::Reset);
+
+    let content_rect = mermaid_content_rect(field);
+    viewer.content_rect = Some(content_rect);
+    render_mermaid_viewer_header(renderer, field, content_rect, viewer);
 
     // If on a plan text tab, render text instead of the mermaid diagram
     if viewer.active_tab != DomainPlanTab::Schema {
@@ -4843,34 +5030,6 @@ pub(crate) fn render_mermaid_viewer(
     viewer.render_error = None;
     mermaid_apply_render_line_cap(viewer, content_rect);
 
-    if viewer.cached_background_cells.len() == viewer.cached_lines.len() {
-        for (row_offset, row) in viewer.cached_background_cells.iter().enumerate() {
-            let y = content_rect.y + row_offset as u16;
-            if y >= content_rect.bottom() {
-                break;
-            }
-            for (column_offset, cell) in row.iter().enumerate() {
-                if cell.ch == ' ' {
-                    continue;
-                }
-                renderer.draw_char(content_rect.x + column_offset as u16, y, cell.ch, cell.fg);
-            }
-        }
-    } else {
-        for (offset, line) in viewer.cached_lines.iter().enumerate() {
-            let y = content_rect.y + offset as u16;
-            if y >= content_rect.bottom() {
-                break;
-            }
-            renderer.draw_text(content_rect.x, y, line, MERMAID_CONNECTOR_COLOR);
-        }
-    }
-    for line in &viewer.cached_semantic_lines {
-        let color = if Some(line.source_index) == viewer.focused_source_index {
-            MERMAID_FOCUS_COLOR
-        } else {
-            line.color
-        };
-        renderer.draw_text(line.x, line.y, &line.text, color);
-    }
+    render_mermaid_cached_background(renderer, content_rect, viewer);
+    render_mermaid_cached_semantic_lines(renderer, viewer);
 }
