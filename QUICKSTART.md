@@ -19,6 +19,7 @@ Install these if not already present. Check first before installing:
 rustc --version
 cargo --version
 which tmux && tmux -V
+if command -v clawgs >/dev/null 2>&1; then clawgs defaults; else echo "clawgs not found"; fi
 ```
 
 ### Rust toolchain
@@ -36,6 +37,15 @@ brew install tmux
 
 # Ubuntu/Debian
 sudo apt-get install -y tmux
+```
+
+### clawgs (Thought Rail)
+
+The thought rail needs `clawgs defaults` and `clawgs emit --stdio` to work.
+Install or build the `clawgs` binary, or point swimmers at it explicitly:
+
+```bash
+CLAWGS_BIN=/custom/path/clawgs swimmers config doctor
 ```
 
 ### Tailscale (Optional)
@@ -110,6 +120,8 @@ the rail is open, or `Tab` to toggle between `pwd` and batch grouping.
 
 No tmux hook setup is required for thought or rest-state updates. `swimmers`
 streams session snapshots directly to `clawgs emit --stdio`.
+If the rail reports `clawgs` as unavailable, run `swimmers config doctor` and
+set `CLAWGS_BIN=/path/to/clawgs` when needed.
 
 By default, both `make tui` and `make web` keep the API on loopback
 (`127.0.0.1`). If you want another machine or your tailnet to reach it, opt in

@@ -2664,6 +2664,25 @@ fn app_layout_hides_thought_rail_until_a_session_needs_input() {
 }
 
 #[test]
+fn app_layout_shows_thought_rail_setup_hint_when_clawgs_is_unavailable() {
+    let api = MockApi::new();
+    let mut app = App::new(test_runtime(), api);
+    app.daemon_defaults_status = DaemonDefaultsStatus::Unavailable;
+
+    let layout = app.layout_for_terminal(120, 32);
+    assert!(layout.thought_box.is_some());
+
+    let thought_content = layout
+        .thought_content
+        .expect("unavailable clawgs status should show thought rail");
+    let panel = build_thought_panel(&app, thought_content, layout.thought_entry_capacity());
+    assert_eq!(
+        panel.empty_message.as_deref(),
+        Some("clawgs unavailable - run swimmers config doctor")
+    );
+}
+
+#[test]
 fn app_layout_hides_thought_rail_again_after_sleeping_session_wakes() {
     let api = MockApi::new();
     let mut app = make_app(api);

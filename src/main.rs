@@ -201,9 +201,11 @@ fn run_config_subcommand(action: Option<ConfigAction>) -> i32 {
         Some(ConfigAction::Doctor) => {
             let config = Config::from_env();
             let tmux_present = cli::tmux_on_path();
+            let clawgs_defaults = cli::check_clawgs_defaults();
             let data_dir = startup::resolve_data_dir();
             let data_dir_writable = cli::check_data_dir_writable(&data_dir);
-            let findings = cli::run_doctor_checks(&config, tmux_present, data_dir_writable);
+            let findings =
+                cli::run_doctor_checks(&config, tmux_present, clawgs_defaults, data_dir_writable);
             cli::print_doctor_findings(&findings)
         }
     }

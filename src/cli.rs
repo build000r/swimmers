@@ -13,13 +13,17 @@
 //! environment variables — clap is intentionally only used for subcommands,
 //! not as a replacement for env-var-based config. See README.md.
 
+use std::io::ErrorKind;
 use std::net::IpAddr;
 use std::path::PathBuf;
-use std::process::Command as ProcessCommand;
+use std::process::{Command as ProcessCommand, Stdio};
+use std::time::{Duration, Instant};
 
 use clap::{Parser, Subcommand};
 
 use crate::config::{AuthMode, Config};
+use crate::thought::emitter_client::resolve_clawgs_bin;
+use crate::thought::runtime_config::DaemonDefaults;
 
 /// Documented environment variables exposed via `swimmers config`.
 ///
@@ -34,6 +38,7 @@ const ENV_VARS: &[&str] = &[
     "OBSERVER_TOKEN",
     "SWIMMERS_NATIVE_APP",
     "SWIMMERS_THOUGHT_BACKEND",
+    "CLAWGS_BIN",
     "SWIMMERS_REPLAY_BUFFER_SIZE",
     "SWIMMERS_DATA_DIR",
     "SWIMMERS_TUI_URL",
@@ -50,6 +55,7 @@ const ENV_VAR_HELP: &str = "ENVIRONMENT VARIABLES:
   OBSERVER_TOKEN               Read-only bearer token (optional)
   SWIMMERS_NATIVE_APP          'iterm' or 'ghostty' (default: iterm)
   SWIMMERS_THOUGHT_BACKEND     'daemon' or 'inproc' (default: daemon)
+  CLAWGS_BIN                   Override path to the clawgs binary
   SWIMMERS_REPLAY_BUFFER_SIZE  Replay ring size in bytes (default: 524288)
   SWIMMERS_DATA_DIR            Override the data directory
   SWIMMERS_TUI_URL             API URL the TUI connects to
@@ -60,7 +66,10 @@ Run `swimmers config doctor` to validate the active configuration.";
 const TUI_ENV_HELP: &str = "ENVIRONMENT VARIABLES:
   SWIMMERS_TUI_URL  API URL to connect to (default: http://127.0.0.1:3210)
   AUTH_MODE         'local_trust' or 'token'
-  AUTH_TOKEN        Bearer token when AUTH_MODE=token";
+  AUTH_TOKEN        Bearer token when AUTH_MODE=token
+  CLAWGS_BIN        Override path to the clawgs binary in embedded mode";
+
+const CLAWGS_DEFAULTS_DOCTOR_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// Top-level CLI for the `swimmers` server binary.
 ///
@@ -164,6 +173,7 @@ fn default_for(name: &str, config: &Config) -> String {
         "OBSERVER_TOKEN" => "(unset)".to_string(),
         "SWIMMERS_NATIVE_APP" => "iterm".to_string(),
         "SWIMMERS_THOUGHT_BACKEND" => "daemon".to_string(),
+        "CLAWGS_BIN" => "(auto)".to_string(),
         "SWIMMERS_REPLAY_BUFFER_SIZE" => config.replay_buffer_size.to_string(),
         "SWIMMERS_DATA_DIR" => "(platform data dir)".to_string(),
         "SWIMMERS_TUI_URL" => "http://127.0.0.1:3210".to_string(),
@@ -226,6 +236,7 @@ pub struct DoctorFinding {
 pub fn run_doctor_checks(
     config: &Config,
     tmux_present: bool,
+    clawgs_defaults: Result<String, String>,
     data_dir_writable: Result<PathBuf, String>,
 ) -> Vec<DoctorFinding> {
     let mut findings = Vec::new();
@@ -291,7 +302,21 @@ pub fn run_doctor_checks(
         });
     }
 
-    // Check 4: data dir creatable / writable
+    // Check 4: clawgs defaults available for the thought rail
+    match clawgs_defaults {
+        Ok(detail) => findings.push(DoctorFinding {
+            ok: true,
+            name: "clawgs",
+            detail,
+        }),
+        Err(reason) => findings.push(DoctorFinding {
+            ok: false,
+            name: "clawgs",
+            detail: reason,
+        }),
+    }
+
+    // Check 5: data dir creatable / writable
     match data_dir_writable {
         Ok(path) => findings.push(DoctorFinding {
             ok: true,
@@ -351,6 +376,97 @@ pub fn tmux_on_path() -> bool {
         .output()
         .map(|out| out.status.success())
         .unwrap_or(false)
+}
+
+/// Verify that the resolved `clawgs` binary can provide daemon defaults.
+///
+/// The TUI thought rail depends on this command during startup. Doctor keeps
+/// the same binary resolution path and bounds execution so a broken external
+/// tool cannot hang configuration checks.
+pub fn check_clawgs_defaults() -> Result<String, String> {
+    check_clawgs_defaults_for_bin(&resolve_clawgs_bin(), CLAWGS_DEFAULTS_DOCTOR_TIMEOUT)
+}
+
+fn check_clawgs_defaults_for_bin(bin: &str, timeout: Duration) -> Result<String, String> {
+    let mut child = ProcessCommand::new(bin)
+        .arg("defaults")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|err| match err.kind() {
+            ErrorKind::NotFound => format!(
+                "clawgs not found at `{bin}`. Install clawgs or set CLAWGS_BIN=/path/to/clawgs; \
+                 the thought rail will run in degraded mode until this works."
+            ),
+            _ => format!(
+                "failed to run `{bin} defaults`: {err}. Set CLAWGS_BIN=/path/to/clawgs if needed."
+            ),
+        })?;
+
+    let deadline = Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) if Instant::now() >= deadline => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!(
+                    "`{bin} defaults` timed out after {}ms. Run it manually or set \
+                     CLAWGS_BIN=/path/to/clawgs; the thought rail will run in degraded mode \
+                     until this works.",
+                    timeout.as_millis()
+                ));
+            }
+            Ok(None) => std::thread::sleep(Duration::from_millis(25)),
+            Err(err) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!("failed to inspect `{bin} defaults`: {err}"));
+            }
+        }
+    }
+
+    let output = child
+        .wait_with_output()
+        .map_err(|err| format!("failed to collect `{bin} defaults` output: {err}"))?;
+
+    if !output.status.success() {
+        let stderr = compact_command_text(&output.stderr);
+        let detail = if stderr.is_empty() {
+            output.status.to_string()
+        } else {
+            format!("{}: {stderr}", output.status)
+        };
+        return Err(format!(
+            "`{bin} defaults` failed ({detail}). Install or rebuild clawgs, or set \
+             CLAWGS_BIN=/path/to/clawgs."
+        ));
+    }
+
+    let defaults: DaemonDefaults = serde_json::from_slice(&output.stdout).map_err(|err| {
+        format!("`{bin} defaults` returned invalid JSON: {err}. Rebuild clawgs or set CLAWGS_BIN.")
+    })?;
+    let backend = if defaults.backend.trim().is_empty() {
+        "unknown"
+    } else {
+        defaults.backend.as_str()
+    };
+    Ok(format!(
+        "`{bin} defaults` ok (backend={backend}, model={})",
+        defaults.model
+    ))
+}
+
+fn compact_command_text(bytes: &[u8]) -> String {
+    String::from_utf8_lossy(bytes)
+        .trim()
+        .lines()
+        .next()
+        .unwrap_or("")
+        .chars()
+        .take(240)
+        .collect()
 }
 
 /// Try to create the resolved data dir and write a temp file in it.
@@ -492,7 +608,12 @@ mod tests {
     #[test]
     fn doctor_flags_localtrust_non_loopback() {
         let c = cfg("0.0.0.0", AuthMode::LocalTrust, None);
-        let findings = run_doctor_checks(&c, true, Ok(PathBuf::from("/tmp")));
+        let findings = run_doctor_checks(
+            &c,
+            true,
+            Ok("`clawgs defaults` ok".to_string()),
+            Ok(PathBuf::from("/tmp")),
+        );
         let auth_bind = findings.iter().find(|f| f.name == "auth/bind").unwrap();
         assert!(!auth_bind.ok);
         assert!(auth_bind.detail.contains("non-loopback"));
@@ -501,7 +622,12 @@ mod tests {
     #[test]
     fn doctor_flags_token_mode_without_token() {
         let c = cfg("127.0.0.1", AuthMode::Token, None);
-        let findings = run_doctor_checks(&c, true, Ok(PathBuf::from("/tmp")));
+        let findings = run_doctor_checks(
+            &c,
+            true,
+            Ok("`clawgs defaults` ok".to_string()),
+            Ok(PathBuf::from("/tmp")),
+        );
         let auth_token = findings.iter().find(|f| f.name == "auth/token").unwrap();
         assert!(!auth_token.ok);
         assert!(auth_token.detail.contains("AUTH_TOKEN"));
@@ -510,16 +636,40 @@ mod tests {
     #[test]
     fn doctor_flags_missing_tmux() {
         let c = cfg("127.0.0.1", AuthMode::LocalTrust, None);
-        let findings = run_doctor_checks(&c, false, Ok(PathBuf::from("/tmp")));
+        let findings = run_doctor_checks(
+            &c,
+            false,
+            Ok("`clawgs defaults` ok".to_string()),
+            Ok(PathBuf::from("/tmp")),
+        );
         let tmux = findings.iter().find(|f| f.name == "tmux").unwrap();
         assert!(!tmux.ok);
         assert!(tmux.detail.contains("brew install tmux"));
     }
 
     #[test]
+    fn doctor_flags_missing_clawgs() {
+        let c = cfg("127.0.0.1", AuthMode::LocalTrust, None);
+        let findings = run_doctor_checks(
+            &c,
+            true,
+            Err("clawgs not found at `clawgs`".to_string()),
+            Ok(PathBuf::from("/tmp")),
+        );
+        let clawgs = findings.iter().find(|f| f.name == "clawgs").unwrap();
+        assert!(!clawgs.ok);
+        assert!(clawgs.detail.contains("clawgs not found"));
+    }
+
+    #[test]
     fn doctor_flags_unwritable_data_dir() {
         let c = cfg("127.0.0.1", AuthMode::LocalTrust, None);
-        let findings = run_doctor_checks(&c, true, Err("permission denied".to_string()));
+        let findings = run_doctor_checks(
+            &c,
+            true,
+            Ok("`clawgs defaults` ok".to_string()),
+            Err("permission denied".to_string()),
+        );
         let dd = findings.iter().find(|f| f.name == "data_dir").unwrap();
         assert!(!dd.ok);
         assert!(dd.detail.contains("permission denied"));
@@ -528,7 +678,12 @@ mod tests {
     #[test]
     fn doctor_all_pass_with_safe_config() {
         let c = cfg("127.0.0.1", AuthMode::LocalTrust, None);
-        let findings = run_doctor_checks(&c, true, Ok(PathBuf::from("/tmp")));
+        let findings = run_doctor_checks(
+            &c,
+            true,
+            Ok("`clawgs defaults` ok".to_string()),
+            Ok(PathBuf::from("/tmp")),
+        );
         assert!(findings.iter().all(|f| f.ok));
     }
 

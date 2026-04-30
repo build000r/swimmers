@@ -595,6 +595,9 @@ pub(crate) fn thought_entry_needs_input(entry: &ThoughtPanelEntryView) -> bool {
 }
 
 pub(crate) fn thought_panel_needs_input<C: TuiApi>(app: &App<C>) -> bool {
+    if app.daemon_defaults_status.is_unavailable() {
+        return true;
+    }
     build_thought_panel_entries(app)
         .iter()
         .any(thought_entry_needs_input)
@@ -1298,9 +1301,15 @@ pub(crate) fn build_thought_panel<C: TuiApi>(
         None
     } else if entries.is_empty() {
         Some(if !app.thought_show_all && total_count > 0 {
-            format!("0 asleep / {total_count} working")
+            if app.daemon_defaults_status.is_unavailable() {
+                "clawgs unavailable - run swimmers config doctor".to_string()
+            } else {
+                format!("0 asleep / {total_count} working")
+            }
         } else if app.thought_filter.is_active() {
             "no thoughts match filters".to_string()
+        } else if app.daemon_defaults_status.is_unavailable() {
+            "clawgs unavailable - run swimmers config doctor".to_string()
         } else {
             "waiting for clawgs...".to_string()
         })
@@ -1319,7 +1328,6 @@ pub(crate) fn build_thought_panel<C: TuiApi>(
         empty_message,
     }
 }
-
 fn should_group_thought_entries<C: TuiApi>(
     app: &App<C>,
     entries: &[ThoughtPanelEntryView],

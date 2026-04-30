@@ -18,6 +18,7 @@ pub(crate) struct RefreshResult {
     pub(crate) sessions: Result<Vec<SessionSummary>, String>,
     pub(crate) mermaid_artifacts: Vec<(String, Result<MermaidArtifactResponse, String>)>,
     pub(crate) native_status: Option<Result<NativeDesktopStatusResponse, String>>,
+    pub(crate) daemon_defaults_status: Option<DaemonDefaultsStatus>,
     pub(crate) show_success_message: bool,
     pub(crate) force_asset_refresh: bool,
 }
@@ -85,6 +86,28 @@ impl ApiRefreshHealth {
 
     fn banner_text(&self) -> Option<&'static str> {
         (self.consecutive_errors >= API_FAILURE_BANNER_THRESHOLD).then_some(API_STALE_BANNER_TEXT)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum DaemonDefaultsStatus {
+    #[default]
+    Unknown,
+    Available,
+    Unavailable,
+}
+
+impl DaemonDefaultsStatus {
+    fn from_defaults(defaults: Option<&DaemonDefaults>) -> Self {
+        if defaults.is_some() {
+            Self::Available
+        } else {
+            Self::Unavailable
+        }
+    }
+
+    pub(crate) fn is_unavailable(self) -> bool {
+        self == Self::Unavailable
     }
 }
 
@@ -168,6 +191,7 @@ pub(crate) struct App<C: TuiApi> {
     pub(crate) selected_id: Option<String>,
     pub(crate) published_selected_id: Option<String>,
     pub(crate) native_status: Option<NativeDesktopStatusResponse>,
+    pub(crate) daemon_defaults_status: DaemonDefaultsStatus,
     pub(crate) thought_config_editor: Option<ThoughtConfigEditorState>,
     pub(crate) picker: Option<PickerState>,
     pub(crate) spawn_tool: SpawnTool,
@@ -244,6 +268,7 @@ impl<C: TuiApi> App<C> {
             selected_id: None,
             published_selected_id: None,
             native_status: None,
+            daemon_defaults_status: DaemonDefaultsStatus::Unknown,
             thought_config_editor: None,
             picker: None,
             spawn_tool: SpawnTool::Codex,
@@ -1119,6 +1144,7 @@ impl<C: TuiApi> App<C> {
                     let count = self.entities.len();
                     self.set_message(format!("refreshed {count} session{}", pluralize(count)));
                 }
+                self.refresh_daemon_defaults_status_once();
                 true
             }
             Err(err) => {
@@ -1142,6 +1168,16 @@ impl<C: TuiApi> App<C> {
         self.last_refresh = Some(Instant::now());
     }
 
+    fn refresh_daemon_defaults_status_once(&mut self) {
+        if self.daemon_defaults_status != DaemonDefaultsStatus::Unknown {
+            return;
+        }
+        if let Ok(response) = self.runtime.block_on(self.client.fetch_thought_config()) {
+            self.daemon_defaults_status =
+                DaemonDefaultsStatus::from_defaults(response.daemon_defaults.as_ref());
+        }
+    }
+
     pub(crate) fn spawn_background_refresh(&mut self, show_success_message: bool) {
         self.spawn_background_refresh_with_policy(show_success_message, false);
     }
@@ -1152,6 +1188,7 @@ impl<C: TuiApi> App<C> {
         force_asset_refresh: bool,
     ) {
         let client = Arc::clone(&self.client);
+        let check_daemon_defaults = self.daemon_defaults_status == DaemonDefaultsStatus::Unknown;
         let mermaid_contexts = self
             .session_mermaid_cache
             .iter()
@@ -1193,10 +1230,19 @@ impl<C: TuiApi> App<C> {
                 Err(_) => (Vec::new(), None),
             };
 
+            let daemon_defaults_status = if check_daemon_defaults {
+                client.fetch_thought_config().await.ok().map(|response| {
+                    DaemonDefaultsStatus::from_defaults(response.daemon_defaults.as_ref())
+                })
+            } else {
+                None
+            };
+
             let _ = tx.send(RefreshResult {
                 sessions: sessions_result,
                 mermaid_artifacts,
                 native_status,
+                daemon_defaults_status,
                 show_success_message,
                 force_asset_refresh,
             });
@@ -1327,6 +1373,8 @@ impl<C: TuiApi> App<C> {
             },
             PendingInteractionResult::OpenThoughtConfig { response } => match response {
                 Ok(response) => {
+                    self.daemon_defaults_status =
+                        DaemonDefaultsStatus::from_defaults(response.daemon_defaults.as_ref());
                     self.thought_config_editor = Some(ThoughtConfigEditorState::new(
                         response.config,
                         response.daemon_defaults,
@@ -1453,6 +1501,9 @@ impl<C: TuiApi> App<C> {
                     self.set_message(self.refresh_error_message(err));
                 }
             }
+        }
+        if let Some(status) = result.daemon_defaults_status {
+            self.daemon_defaults_status = status;
         }
 
         self.last_refresh = Some(Instant::now());

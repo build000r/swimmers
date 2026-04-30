@@ -424,7 +424,7 @@ async fn fetch_daemon_defaults_for_bin_with_timeout(
         .ok()
 }
 
-fn resolve_clawgs_bin() -> String {
+pub fn resolve_clawgs_bin() -> String {
     resolve_clawgs_bin_with(
         env::var("CLAWGS_BIN").ok(),
         env::current_exe().ok(),
