@@ -11973,3 +11973,56 @@ fn read_plan_file_from_disk_rejects_path_traversal_names() {
         Some("artifact file name not allowed: ../secret.txt")
     );
 }
+
+#[test]
+fn resolve_tui_log_path_honors_explicit_dir_override() {
+    // SWIMMERS_TUI_LOG_DIR takes precedence over TMPDIR. The filename always
+    // embeds the calling pid so concurrent TUIs don't clobber each other.
+    let _lock = TEST_ENV_LOCK.lock().expect("env lock");
+    let tmp = tempdir().expect("tempdir");
+    let prior_dir = env::var_os("SWIMMERS_TUI_LOG_DIR");
+    let prior_tmp = env::var_os("TMPDIR");
+    env::set_var("SWIMMERS_TUI_LOG_DIR", tmp.path());
+    env::set_var("TMPDIR", "/should-not-be-used");
+
+    let (dir, path) = super::resolve_tui_log_path();
+    assert_eq!(dir, tmp.path());
+    let expected_name = format!("swimmers-tui-client-{}.log", std::process::id());
+    assert_eq!(
+        path.file_name().and_then(|n| n.to_str()),
+        Some(expected_name.as_str())
+    );
+    assert_eq!(path.parent(), Some(tmp.path()));
+
+    match prior_dir {
+        Some(value) => env::set_var("SWIMMERS_TUI_LOG_DIR", value),
+        None => env::remove_var("SWIMMERS_TUI_LOG_DIR"),
+    }
+    match prior_tmp {
+        Some(value) => env::set_var("TMPDIR", value),
+        None => env::remove_var("TMPDIR"),
+    }
+}
+
+#[test]
+fn resolve_tui_log_path_falls_back_to_tmpdir_when_override_unset() {
+    let _lock = TEST_ENV_LOCK.lock().expect("env lock");
+    let tmp = tempdir().expect("tempdir");
+    let prior_dir = env::var_os("SWIMMERS_TUI_LOG_DIR");
+    let prior_tmp = env::var_os("TMPDIR");
+    env::remove_var("SWIMMERS_TUI_LOG_DIR");
+    env::set_var("TMPDIR", tmp.path());
+
+    let (dir, path) = super::resolve_tui_log_path();
+    assert_eq!(dir, tmp.path());
+    assert_eq!(path.parent(), Some(tmp.path()));
+
+    match prior_dir {
+        Some(value) => env::set_var("SWIMMERS_TUI_LOG_DIR", value),
+        None => env::remove_var("SWIMMERS_TUI_LOG_DIR"),
+    }
+    match prior_tmp {
+        Some(value) => env::set_var("TMPDIR", value),
+        None => env::remove_var("TMPDIR"),
+    }
+}

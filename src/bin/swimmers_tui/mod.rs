@@ -171,12 +171,11 @@ fn make_log_writer() -> Box<dyn io::Write + Send + 'static> {
 /// Filter defaults to `swimmers_tui=info,reqwest=warn`; override with
 /// `SWIMMERS_TUI_LOG=...` (env-filter syntax). On any IO failure we fall back
 /// to a stderr subscriber so we never silently lose diagnostics.
-pub(crate) fn init_tui_tracing() {
-    use tracing_subscriber::{fmt, EnvFilter};
-
-    let filter = EnvFilter::try_from_env("SWIMMERS_TUI_LOG")
-        .unwrap_or_else(|_| EnvFilter::new("swimmers_tui=info,reqwest=warn"));
-
+/// Resolve the directory and absolute log path the TUI tracing layer will use.
+///
+/// Precedence: `SWIMMERS_TUI_LOG_DIR` > `TMPDIR` > `/tmp`. The filename always
+/// embeds the calling process pid so concurrent TUIs don't clobber each other.
+pub(crate) fn resolve_tui_log_path() -> (PathBuf, PathBuf) {
     let dir = env::var_os("SWIMMERS_TUI_LOG_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|| {
@@ -184,9 +183,19 @@ pub(crate) fn init_tui_tracing() {
                 .map(PathBuf::from)
                 .unwrap_or_else(|| PathBuf::from("/tmp"))
         });
+    let path = dir.join(format!("swimmers-tui-client-{}.log", std::process::id()));
+    (dir, path)
+}
+
+pub(crate) fn init_tui_tracing() {
+    use tracing_subscriber::{fmt, EnvFilter};
+
+    let filter = EnvFilter::try_from_env("SWIMMERS_TUI_LOG")
+        .unwrap_or_else(|_| EnvFilter::new("swimmers_tui=info,reqwest=warn"));
+
+    let (dir, path) = resolve_tui_log_path();
 
     let try_open = std::fs::create_dir_all(&dir).and_then(|_| {
-        let path = dir.join(format!("swimmers-tui-client-{}.log", std::process::id()));
         let file = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
