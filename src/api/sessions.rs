@@ -1729,4 +1729,65 @@ esac
         assert_eq!(json["path"], "/tmp/project/diagram.mmd");
         assert_eq!(json["source"], "graph TD\nA-->B\n");
     }
+
+    #[tokio::test]
+    async fn dismiss_attention_requires_write_scope() {
+        let response = dismiss_attention(
+            Extension(AuthInfo::new(OBSERVER_SCOPES.to_vec())),
+            State(test_state()),
+            Path("sess-1".to_string()),
+        )
+        .await
+        .into_response();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn dismiss_attention_returns_not_found_for_unknown_session() {
+        let response = dismiss_attention(
+            Extension(AuthInfo::new(OPERATOR_SCOPES.to_vec())),
+            State(test_state()),
+            Path("missing".to_string()),
+        )
+        .await
+        .into_response();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let json = response_json(response).await;
+        assert_eq!(json["code"], "SESSION_NOT_FOUND");
+    }
+
+    #[tokio::test]
+    async fn dismiss_attention_forwards_command_and_returns_ok() {
+        let state = test_state();
+        let (cmd_tx, mut cmd_rx) = mpsc::channel(8);
+        state
+            .supervisor
+            .insert_test_handle(ActorHandle::test_handle(
+                "sess-att",
+                "tmux-att",
+                cmd_tx,
+            ))
+            .await;
+
+        let received = tokio::spawn(async move {
+            while let Some(cmd) = cmd_rx.recv().await {
+                if matches!(cmd, SessionCommand::DismissAttention) {
+                    return true;
+                }
+            }
+            false
+        });
+
+        let response = dismiss_attention(
+            Extension(AuthInfo::new(OPERATOR_SCOPES.to_vec())),
+            State(state),
+            Path("sess-att".to_string()),
+        )
+        .await
+        .into_response();
+        assert_eq!(response.status(), StatusCode::OK);
+        let json = response_json(response).await;
+        assert_eq!(json["ok"], true);
+        assert!(received.await.expect("worker"), "actor never saw DismissAttention");
+    }
 }
