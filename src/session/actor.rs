@@ -550,6 +550,9 @@ impl SessionActor {
             }
             SessionCommand::Shutdown => {
                 info!(session_id = %self.session_id, "shutdown requested, detaching");
+                // Drain any coalesced scroll-guard frame so the final visible
+                // state isn't dropped between the last process() and exit.
+                self.flush_scroll_guard().await;
                 return false;
             }
         }
@@ -721,27 +724,19 @@ impl SessionActor {
         }
 
         // Flush any coalesced scroll guard data.
-        if let Some(flushed) = self.scroll_guard.flush() {
-            let state_before = self.state_detector.state();
-            self.state_detector.process_output(&flushed.data);
-            if matches!(
-                self.maybe_emit_state_change(state_before),
-                Some(SessionState::Idle)
-            ) {
-                self.maybe_refresh_cwd_from_tmux(false).await;
-            }
-            self.record_meaningful_output_activity(state_before, &flushed);
-
-            let seq = self.replay_ring.push(&flushed.data);
-            let frame = OutputFrame {
-                seq,
-                data: flushed.data,
-            };
-            self.broadcast(frame).await;
-        }
+        self.flush_scroll_guard().await;
 
         // Process-tree liveness reconciliation.
         self.maybe_check_liveness().await;
+    }
+
+    /// Flush any frame buffered in the ScrollGuard through the canonical
+    /// output pipeline. Used by the periodic timer fan-out and at session
+    /// shutdown so the last coalesced frame isn't dropped.
+    async fn flush_scroll_guard(&mut self) {
+        if let Some(flushed) = self.scroll_guard.flush() {
+            self.process_output_chunk(flushed).await;
+        }
     }
 
     /// Process raw PTY output through the pipeline:
