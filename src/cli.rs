@@ -333,7 +333,7 @@ pub fn run_doctor_checks(
     findings
 }
 
-fn bind_host(bind: &str) -> &str {
+pub(crate) fn bind_host(bind: &str) -> &str {
     let bind = bind.trim();
 
     if let Some(rest) = bind.strip_prefix('[') {

@@ -162,11 +162,13 @@ fn build_app_router(
 }
 
 pub fn listener_addr(bind: &str, port: u16) -> String {
-    let bind = bind.trim();
-    if bind.starts_with('[') || !bind.contains(':') {
-        format!("{bind}:{port}")
+    // Tolerate `host:port`, `[ipv6]:port`, or bare-host inputs in `bind` and
+    // always emit `host:port` with IPv6 literals correctly bracketed.
+    let host = crate::cli::bind_host(bind);
+    if host.contains(':') {
+        format!("[{host}]:{port}")
     } else {
-        format!("[{bind}]:{port}")
+        format!("{host}:{port}")
     }
 }
 
@@ -531,6 +533,22 @@ mod tests {
         assert_eq!(listener_addr("127.0.0.1", 3210), "127.0.0.1:3210");
         assert_eq!(listener_addr("::1", 3210), "[::1]:3210");
         assert_eq!(listener_addr("[::1]", 3210), "[::1]:3210");
+    }
+
+    #[test]
+    fn listener_addr_strips_port_from_host_port_inputs() {
+        // Operators commonly export SWIMMERS_BIND="host:port" even though
+        // the docs say "interface only" — the resulting socket address must
+        // still parse, not become double-bracketed gibberish.
+        assert_eq!(listener_addr("127.0.0.1:3210", 3210), "127.0.0.1:3210");
+        assert_eq!(listener_addr("127.0.0.1:9999", 3210), "127.0.0.1:3210");
+        assert_eq!(listener_addr("[::1]:9999", 3210), "[::1]:3210");
+    }
+
+    #[test]
+    fn listener_addr_trims_whitespace_around_input() {
+        assert_eq!(listener_addr("  127.0.0.1  ", 3210), "127.0.0.1:3210");
+        assert_eq!(listener_addr("\t[::1]\n", 3210), "[::1]:3210");
     }
 
     async fn spawn_summary_handle(summary: SessionSummary) -> ActorHandle {
