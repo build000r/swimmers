@@ -1320,8 +1320,8 @@ fn push_subgraph_semantic_lines(
     let (label_x, label_y, anchor, font_size, line_height) = if metrics.is_state {
         let header_height = (subgraph.label_block.height + metrics.theme_font_size * 0.75)
             .max(metrics.theme_font_size * 1.4);
-        let label_x = subgraph.x
-            + (metrics.theme_font_size * 0.6).max(subgraph.label_block.height * 0.35);
+        let label_x =
+            subgraph.x + (metrics.theme_font_size * 0.6).max(subgraph.label_block.height * 0.35);
         let label_y = subgraph.y + header_height / 2.0;
         (
             label_x,

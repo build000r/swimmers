@@ -827,11 +827,9 @@ mod tests {
     fn check_clawgs_defaults_reports_timeout_for_slow_bin() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let script = write_executable_script(tmp.path(), "slow-clawgs", "#!/bin/sh\nsleep 5\n");
-        let err = check_clawgs_defaults_for_bin(
-            script.to_str().unwrap(),
-            Duration::from_millis(100),
-        )
-        .expect_err("slow bin must time out");
+        let err =
+            check_clawgs_defaults_for_bin(script.to_str().unwrap(), Duration::from_millis(100))
+                .expect_err("slow bin must time out");
         assert!(
             err.contains("timed out"),
             "expected timeout branch, got: {err}"
@@ -849,7 +847,10 @@ mod tests {
         );
         let ok = check_clawgs_defaults_for_bin(script.to_str().unwrap(), fast_timeout())
             .expect("valid bin must succeed");
-        assert!(ok.contains("backend=claude"), "summary missing backend: {ok}");
+        assert!(
+            ok.contains("backend=claude"),
+            "summary missing backend: {ok}"
+        );
         assert!(ok.contains("model=sonnet-4"), "summary missing model: {ok}");
     }
 

@@ -1762,11 +1762,7 @@ esac
         let (cmd_tx, mut cmd_rx) = mpsc::channel(8);
         state
             .supervisor
-            .insert_test_handle(ActorHandle::test_handle(
-                "sess-att",
-                "tmux-att",
-                cmd_tx,
-            ))
+            .insert_test_handle(ActorHandle::test_handle("sess-att", "tmux-att", cmd_tx))
             .await;
 
         let received = tokio::spawn(async move {
@@ -1788,6 +1784,9 @@ esac
         assert_eq!(response.status(), StatusCode::OK);
         let json = response_json(response).await;
         assert_eq!(json["ok"], true);
-        assert!(received.await.expect("worker"), "actor never saw DismissAttention");
+        assert!(
+            received.await.expect("worker"),
+            "actor never saw DismissAttention"
+        );
     }
 }

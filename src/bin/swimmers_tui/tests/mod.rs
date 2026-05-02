@@ -12013,6 +12013,78 @@ fn resolve_tui_log_path_honors_explicit_dir_override() {
 }
 
 #[test]
+fn handle_thought_config_paste_appends_text_when_model_field_focused() {
+    let api = MockApi::new();
+    let mut app = make_app(api);
+    app.thought_config_editor = Some(thought_config_test_editor(ThoughtConfigEditorField::Model));
+
+    app.handle_thought_config_paste("-pro");
+
+    assert_eq!(
+        app.thought_config_editor
+            .as_ref()
+            .map(|editor| editor.config.model.as_str()),
+        Some("openrouter/free-pro"),
+        "paste should append to focused model field"
+    );
+}
+
+#[test]
+fn handle_thought_config_paste_no_op_for_non_model_fields() {
+    let api = MockApi::new();
+    let mut app = make_app(api);
+    app.thought_config_editor = Some(thought_config_test_editor(
+        ThoughtConfigEditorField::Backend,
+    ));
+
+    app.handle_thought_config_paste("garbage");
+
+    // Model field is unchanged because focus is on Backend.
+    assert_eq!(
+        app.thought_config_editor
+            .as_ref()
+            .map(|editor| editor.config.model.as_str()),
+        Some("openrouter/free")
+    );
+}
+
+#[test]
+fn handle_thought_config_paste_blocks_during_pending_interaction() {
+    let api = MockApi::new();
+    let mut app = make_app(api);
+    app.thought_config_editor = Some(thought_config_test_editor(ThoughtConfigEditorField::Model));
+    let (_tx, rx) = tokio::sync::oneshot::channel();
+    app.pending_interaction = Some(rx);
+
+    app.handle_thought_config_paste("attempted-paste");
+
+    assert_eq!(
+        app.thought_config_editor
+            .as_ref()
+            .map(|editor| editor.config.model.as_str()),
+        Some("openrouter/free"),
+        "paste must not modify state while an interaction is pending"
+    );
+    assert_eq!(
+        app.visible_message().as_deref(),
+        Some("wait for the current action to finish")
+    );
+}
+
+#[test]
+fn handle_thought_config_paste_no_op_when_editor_closed() {
+    let api = MockApi::new();
+    let mut app = make_app(api);
+    // No editor is open; paste should be a silent no-op (not a panic).
+    assert!(app.thought_config_editor.is_none());
+
+    app.handle_thought_config_paste("anything");
+
+    assert!(app.thought_config_editor.is_none());
+    assert!(app.visible_message().is_none());
+}
+
+#[test]
 fn publish_selection_skips_redundant_publish_when_unchanged_and_unforced() {
     let api = MockApi::new();
     let mut app = make_app(api.clone());
