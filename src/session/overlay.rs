@@ -1147,4 +1147,136 @@ dev_sanity:
         let results = expand_group_dir(pattern);
         assert!(results.is_empty());
     }
+
+    fn find_plan_dirs_overlay(client: ClientOverlay) -> SkillboxOverlay {
+        SkillboxOverlay {
+            clients: vec![client],
+        }
+    }
+
+    fn make_plan_client(
+        cwd_patterns: Vec<String>,
+        cwd_match_count: usize,
+        plan_root: Option<PathBuf>,
+        plan_draft: Option<PathBuf>,
+    ) -> ClientOverlay {
+        ClientOverlay {
+            client_dir: PathBuf::from("/tmp/find_plan_dirs_test"),
+            label: "test".to_string(),
+            cwd_patterns,
+            cwd_match_count,
+            plan_root,
+            plan_draft,
+            dir_config: None,
+        }
+    }
+
+    #[test]
+    fn find_plan_dirs_returns_none_when_no_client_matches_cwd() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let plan_root = tmp.path().join("plans").join("released");
+        std::fs::create_dir_all(&plan_root).unwrap();
+        let client = make_plan_client(
+            vec!["/some/other/repo".to_string()],
+            1,
+            Some(plan_root),
+            None,
+        );
+        let overlay = find_plan_dirs_overlay(client);
+        assert!(overlay.find_plan_dirs("/unrelated/path").is_none());
+    }
+
+    #[test]
+    fn find_plan_dirs_skips_multi_repo_clients() {
+        // Multi-repo clients (cwd_match_count > 1) span multiple repos so the
+        // overlay can't pick a single plan dir set; caller falls back to the
+        // in-repo scan.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let cwd = tmp.path().to_string_lossy().to_string();
+        let plan_root = tmp.path().join("plans").join("released");
+        std::fs::create_dir_all(&plan_root).unwrap();
+        let client = make_plan_client(vec![cwd.clone()], 2, Some(plan_root), None);
+        let overlay = find_plan_dirs_overlay(client);
+        assert!(overlay.find_plan_dirs(&cwd).is_none());
+    }
+
+    #[test]
+    fn find_plan_dirs_returns_both_root_and_draft_when_present() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let cwd = tmp.path().to_string_lossy().to_string();
+        let plan_root = tmp.path().join("plans").join("released");
+        let plan_draft = tmp.path().join("plans").join("draft");
+        std::fs::create_dir_all(&plan_root).unwrap();
+        std::fs::create_dir_all(&plan_draft).unwrap();
+        let client = make_plan_client(
+            vec![cwd.clone()],
+            1,
+            Some(plan_root.clone()),
+            Some(plan_draft.clone()),
+        );
+        let overlay = find_plan_dirs_overlay(client);
+        let dirs = overlay.find_plan_dirs(&cwd).expect("dirs");
+        assert_eq!(dirs, vec![plan_root, plan_draft]);
+    }
+
+    #[test]
+    fn find_plan_dirs_skips_directories_that_do_not_exist_on_disk() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let cwd = tmp.path().to_string_lossy().to_string();
+        let real_root = tmp.path().join("plans").join("released");
+        std::fs::create_dir_all(&real_root).unwrap();
+        // plan_draft points to a path that was never created.
+        let missing_draft = tmp.path().join("plans").join("draft");
+        let client = make_plan_client(
+            vec![cwd.clone()],
+            1,
+            Some(real_root.clone()),
+            Some(missing_draft),
+        );
+        let overlay = find_plan_dirs_overlay(client);
+        let dirs = overlay.find_plan_dirs(&cwd).expect("dirs");
+        assert_eq!(dirs, vec![real_root]);
+    }
+
+    #[test]
+    fn find_plan_dirs_returns_none_when_neither_dir_exists_on_disk() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let cwd = tmp.path().to_string_lossy().to_string();
+        let missing_root = tmp.path().join("plans").join("released");
+        let missing_draft = tmp.path().join("plans").join("draft");
+        let client = make_plan_client(
+            vec![cwd.clone()],
+            1,
+            Some(missing_root),
+            Some(missing_draft),
+        );
+        let overlay = find_plan_dirs_overlay(client);
+        assert!(overlay.find_plan_dirs(&cwd).is_none());
+    }
+
+    #[test]
+    fn find_plan_dirs_matches_cwd_inside_pattern_dir() {
+        // cwd_starts_with allows nested directories under the pattern.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let pattern = tmp.path().to_string_lossy().to_string();
+        let nested = tmp.path().join("nested").join("crate");
+        std::fs::create_dir_all(&nested).unwrap();
+        let plan_root = tmp.path().join("plans").join("released");
+        std::fs::create_dir_all(&plan_root).unwrap();
+        let client = make_plan_client(vec![pattern], 1, Some(plan_root.clone()), None);
+        let overlay = find_plan_dirs_overlay(client);
+        let dirs = overlay
+            .find_plan_dirs(&nested.to_string_lossy())
+            .expect("dirs");
+        assert_eq!(dirs, vec![plan_root]);
+    }
+
+    #[test]
+    fn find_plan_dirs_returns_none_when_no_plan_paths_configured() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let cwd = tmp.path().to_string_lossy().to_string();
+        let client = make_plan_client(vec![cwd.clone()], 1, None, None);
+        let overlay = find_plan_dirs_overlay(client);
+        assert!(overlay.find_plan_dirs(&cwd).is_none());
+    }
 }
