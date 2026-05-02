@@ -154,12 +154,21 @@ pub async fn auth_middleware(config: Arc<Config>, mut request: Request, next: Ne
 }
 
 /// Extract a bearer token from the `Authorization` header.
+///
+/// Returns `None` for missing, non-UTF-8, non-`Bearer ` prefixed, or empty
+/// tokens. The empty-token guard makes a misconfigured `AUTH_TOKEN=""` (or a
+/// header literally `Bearer `) impossible to authenticate, defense-in-depth
+/// for the constant-time compare in `bearer_tokens_eq`.
 fn extract_bearer_token(request: &Request) -> Option<&str> {
-    request
+    let token = request
         .headers()
         .get("authorization")
         .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "))
+        .and_then(|v| v.strip_prefix("Bearer "))?;
+    if token.is_empty() {
+        return None;
+    }
+    Some(token)
 }
 
 // ---------------------------------------------------------------------------
@@ -242,6 +251,23 @@ mod tests {
         assert!(bearer_tokens_eq("secret-token", "secret-token"));
         assert!(!bearer_tokens_eq("secret-token", "secret-tokxn"));
         assert!(!bearer_tokens_eq("secret-token", "secret-token-extra"));
+    }
+
+    #[test]
+    fn extract_bearer_rejects_empty_token() {
+        use axum::http::HeaderValue;
+
+        let mut request = Request::builder()
+            .uri("/test")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        request
+            .headers_mut()
+            .insert("authorization", HeaderValue::from_static("Bearer "));
+
+        // A `Bearer ` header with no token must never authenticate, even
+        // if a misconfigured AUTH_TOKEN="" exists.
+        assert_eq!(extract_bearer_token(&request), None);
     }
 
     #[test]
