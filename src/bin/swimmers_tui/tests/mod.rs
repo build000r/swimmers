@@ -219,6 +219,14 @@ impl MockApi {
             .push_back(result);
     }
 
+    fn push_publish_selection(&self, result: Result<(), String>) {
+        self.state
+            .lock()
+            .unwrap()
+            .publish_selection_results
+            .push_back(result);
+    }
+
     fn list_calls(&self) -> Vec<(Option<String>, bool)> {
         self.state.lock().unwrap().list_calls.clone()
     }
@@ -12002,6 +12010,52 @@ fn resolve_tui_log_path_honors_explicit_dir_override() {
         Some(value) => env::set_var("TMPDIR", value),
         None => env::remove_var("TMPDIR"),
     }
+}
+
+#[test]
+fn publish_selection_skips_redundant_publish_when_unchanged_and_unforced() {
+    let api = MockApi::new();
+    let mut app = make_app(api.clone());
+    app.published_selected_id = Some("s1".to_string());
+
+    app.publish_selection(Some("s1".to_string()), false);
+
+    // Same session_id without force ⇒ skipped — no API call recorded.
+    assert!(
+        api.publish_calls().is_empty(),
+        "redundant publish must be skipped, got: {:?}",
+        api.publish_calls()
+    );
+    assert_eq!(app.published_selected_id.as_deref(), Some("s1"));
+}
+
+#[test]
+fn publish_selection_force_publishes_even_when_unchanged() {
+    let api = MockApi::new();
+    let mut app = make_app(api.clone());
+    app.published_selected_id = Some("s1".to_string());
+
+    app.publish_selection(Some("s1".to_string()), true);
+
+    assert_eq!(api.publish_calls(), vec![Some("s1".to_string())]);
+    assert_eq!(app.published_selected_id.as_deref(), Some("s1"));
+}
+
+#[test]
+fn publish_selection_records_error_message_on_api_failure() {
+    let api = MockApi::new();
+    api.push_publish_selection(Err("publish broke".to_string()));
+    let mut app = make_app(api);
+
+    app.publish_selection(Some("s7".to_string()), false);
+
+    assert_eq!(
+        app.message.as_ref().map(|(m, _)| m.as_str()),
+        Some("publish broke")
+    );
+    // The published id stays at whatever it was before — failed publish must
+    // not be remembered as successful.
+    assert_eq!(app.published_selected_id, None);
 }
 
 #[test]
