@@ -768,4 +768,105 @@ mod tests {
         assert_ne!(auth.current, "supersecret");
         std::env::remove_var("AUTH_TOKEN");
     }
+
+    fn fast_timeout() -> Duration {
+        Duration::from_secs(2)
+    }
+
+    fn write_executable_script(dir: &std::path::Path, name: &str, body: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let path = dir.join(name);
+        std::fs::write(&path, body).expect("write script");
+        let mut perms = std::fs::metadata(&path).expect("metadata").permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&path, perms).expect("chmod");
+        path
+    }
+
+    #[test]
+    fn check_clawgs_defaults_reports_not_found_for_missing_bin() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let missing = tmp.path().join("does-not-exist-clawgs");
+        let err = check_clawgs_defaults_for_bin(missing.to_str().unwrap(), fast_timeout())
+            .expect_err("missing bin must error");
+        assert!(
+            err.contains("clawgs not found"),
+            "expected NotFound branch, got: {err}"
+        );
+    }
+
+    #[test]
+    fn check_clawgs_defaults_reports_failure_when_bin_exits_non_zero() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let script = write_executable_script(tmp.path(), "fail-clawgs", "#!/bin/sh\nexit 7\n");
+        let err = check_clawgs_defaults_for_bin(script.to_str().unwrap(), fast_timeout())
+            .expect_err("non-zero exit must error");
+        assert!(
+            err.contains("failed"),
+            "expected non-zero failure branch, got: {err}"
+        );
+    }
+
+    #[test]
+    fn check_clawgs_defaults_reports_invalid_json_for_garbage_stdout() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let script = write_executable_script(
+            tmp.path(),
+            "garbage-clawgs",
+            "#!/bin/sh\nprintf 'not json\\n'\n",
+        );
+        let err = check_clawgs_defaults_for_bin(script.to_str().unwrap(), fast_timeout())
+            .expect_err("invalid JSON must error");
+        assert!(
+            err.contains("invalid JSON"),
+            "expected JSON parse branch, got: {err}"
+        );
+    }
+
+    #[test]
+    fn check_clawgs_defaults_reports_timeout_for_slow_bin() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let script = write_executable_script(tmp.path(), "slow-clawgs", "#!/bin/sh\nsleep 5\n");
+        let err = check_clawgs_defaults_for_bin(
+            script.to_str().unwrap(),
+            Duration::from_millis(100),
+        )
+        .expect_err("slow bin must time out");
+        assert!(
+            err.contains("timed out"),
+            "expected timeout branch, got: {err}"
+        );
+    }
+
+    #[test]
+    fn check_clawgs_defaults_returns_summary_for_valid_json() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let script = write_executable_script(
+            tmp.path(),
+            "ok-clawgs",
+            "#!/bin/sh\nprintf '{\"model\":\"sonnet-4\",\"backend\":\"claude\",\
+                \"agent_prompt\":\"a\",\"terminal_prompt\":\"t\"}\\n'\n",
+        );
+        let ok = check_clawgs_defaults_for_bin(script.to_str().unwrap(), fast_timeout())
+            .expect("valid bin must succeed");
+        assert!(ok.contains("backend=claude"), "summary missing backend: {ok}");
+        assert!(ok.contains("model=sonnet-4"), "summary missing model: {ok}");
+    }
+
+    #[test]
+    fn check_clawgs_defaults_uses_unknown_for_blank_backend() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let script = write_executable_script(
+            tmp.path(),
+            "blank-backend-clawgs",
+            "#!/bin/sh\nprintf '{\"model\":\"m\",\"backend\":\"   \",\
+                \"agent_prompt\":\"a\",\"terminal_prompt\":\"t\"}\\n'\n",
+        );
+        let ok = check_clawgs_defaults_for_bin(script.to_str().unwrap(), fast_timeout())
+            .expect("valid bin must succeed");
+        assert!(
+            ok.contains("backend=unknown"),
+            "blank backend should fall back to 'unknown': {ok}"
+        );
+    }
 }
