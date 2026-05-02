@@ -1167,3 +1167,53 @@ pub async fn open_native_session_for_host(
     .await
     .map_err(|error| NativeOpenServiceError::Internal(error.to_string()))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::Config;
+    use crate::session::supervisor::SessionSupervisor;
+    use crate::thought::health::BridgeHealthState;
+    use crate::thought::protocol::SyncRequestSequence;
+    use crate::thought::runtime_config::ThoughtConfig;
+    use std::sync::Arc;
+    use tokio::sync::RwLock;
+
+    fn test_state() -> Arc<AppState> {
+        let config = Arc::new(Config::default());
+        let supervisor = SessionSupervisor::new(config.clone());
+        Arc::new(AppState {
+            supervisor,
+            config,
+            thought_config: Arc::new(RwLock::new(ThoughtConfig::default())),
+            native_desktop_app: Arc::new(RwLock::new(NativeDesktopApp::Iterm)),
+            ghostty_open_mode: Arc::new(RwLock::new(crate::types::GhosttyOpenMode::Swap)),
+            sync_request_sequence: Arc::new(SyncRequestSequence::new()),
+            daemon_defaults: crate::api::once_lock_with(None),
+            file_store: crate::api::once_lock_with(None),
+            bridge_health: Arc::new(BridgeHealthState::new_with_tick(Duration::from_secs(15))),
+            published_selection: Arc::new(RwLock::new(
+                crate::api::PublishedSelectionState::default(),
+            )),
+            repo_actions: crate::host_actions::RepoActionTracker::default(),
+        })
+    }
+
+    #[tokio::test]
+    async fn start_restart_action_rejects_empty_path() {
+        let err = start_restart_action(test_state(), "", RepoActionKind::Restart)
+            .await
+            .expect_err("empty path must error");
+        assert_eq!(err.status, StatusCode::BAD_REQUEST);
+        assert_eq!(err.code, "VALIDATION_FAILED");
+    }
+
+    #[tokio::test]
+    async fn start_restart_action_rejects_whitespace_path() {
+        let err = start_restart_action(test_state(), "   \t\n", RepoActionKind::Restart)
+            .await
+            .expect_err("whitespace-only path must error");
+        assert_eq!(err.status, StatusCode::BAD_REQUEST);
+        assert_eq!(err.code, "VALIDATION_FAILED");
+    }
+}
