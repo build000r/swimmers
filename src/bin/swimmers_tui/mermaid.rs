@@ -1223,6 +1223,45 @@ pub(crate) fn extend_mermaid_er_semantic_lines(
     );
 }
 
+struct SemanticLineMetrics {
+    theme_font_size: f32,
+    base_line_height: f32,
+    class_line_height: f32,
+    state_font_size: f32,
+    state_line_height: f32,
+    node_padding_x: f32,
+    is_state: bool,
+}
+
+impl SemanticLineMetrics {
+    fn from(layout: &MermaidLayout, options: &RenderOptions) -> Self {
+        let theme_font_size = options.theme.font_size;
+        let is_state = layout.kind == DiagramKind::State;
+        let state_font_size = if is_state {
+            theme_font_size * 0.85
+        } else {
+            theme_font_size
+        };
+        Self {
+            theme_font_size,
+            base_line_height: theme_font_size * options.layout.label_line_height,
+            class_line_height: theme_font_size * options.layout.class_label_line_height(),
+            state_font_size,
+            state_line_height: state_font_size * options.layout.label_line_height,
+            node_padding_x: options.layout.node_padding_x,
+            is_state,
+        }
+    }
+
+    fn node_label_metrics(&self) -> (f32, f32) {
+        if self.is_state {
+            (self.state_font_size, self.state_line_height)
+        } else {
+            (self.theme_font_size, self.base_line_height)
+        }
+    }
+}
+
 pub(crate) fn build_mermaid_semantic_lines(
     layout: &MermaidLayout,
     options: &RenderOptions,
@@ -1231,15 +1270,7 @@ pub(crate) fn build_mermaid_semantic_lines(
         return Vec::new();
     }
 
-    let theme_font_size = options.theme.font_size;
-    let base_line_height = theme_font_size * options.layout.label_line_height;
-    let class_line_height = theme_font_size * options.layout.class_label_line_height();
-    let state_font_size = if layout.kind == DiagramKind::State {
-        theme_font_size * 0.85
-    } else {
-        theme_font_size
-    };
-    let state_line_height = state_font_size * options.layout.label_line_height;
+    let metrics = SemanticLineMetrics::from(layout, options);
     let top_level_subgraphs = mermaid_top_level_subgraph_indices(&layout.subgraphs);
     let subgraph_node_ids = layout
         .subgraphs
@@ -1252,202 +1283,191 @@ pub(crate) fn build_mermaid_semantic_lines(
         if subgraph.label.trim().is_empty() {
             continue;
         }
-        let owner_key = mermaid_outline_subgraph_key(subgraph_idx);
-        let outline_eligible = top_level_subgraphs.contains(&subgraph_idx);
-        if layout.kind == DiagramKind::State {
-            let header_height =
-                (subgraph.label_block.height + theme_font_size * 0.75).max(theme_font_size * 1.4);
-            let label_x =
-                subgraph.x + (theme_font_size * 0.6).max(subgraph.label_block.height * 0.35);
-            let label_y = subgraph.y + header_height / 2.0;
-            push_mermaid_summary_line(
-                &mut semantic_lines,
-                subgraph.label_block.lines.iter().map(String::as_str),
-                label_x,
-                label_y,
-                MermaidTextAnchor::Start,
-                MermaidSemanticKind::SubgraphSummary,
-                &owner_key,
-                outline_eligible,
-                subgraph.width,
-                subgraph.height,
-            );
-            push_mermaid_text_block_semantic_lines(
-                &mut semantic_lines,
-                &subgraph.label_block,
-                label_x,
-                label_y,
-                state_font_size,
-                state_line_height,
-                MermaidTextAnchor::Start,
-                MermaidSemanticKind::SubgraphTitle,
-                &owner_key,
-                false,
-                subgraph.width,
-                subgraph.height,
-            );
-        } else {
-            let label_x = subgraph.x + subgraph.width / 2.0;
-            let label_y = subgraph.y + 12.0 + subgraph.label_block.height / 2.0;
-            push_mermaid_summary_line(
-                &mut semantic_lines,
-                subgraph.label_block.lines.iter().map(String::as_str),
-                label_x,
-                label_y,
-                MermaidTextAnchor::Center,
-                MermaidSemanticKind::SubgraphSummary,
-                &owner_key,
-                outline_eligible,
-                subgraph.width,
-                subgraph.height,
-            );
-            push_mermaid_text_block_semantic_lines(
-                &mut semantic_lines,
-                &subgraph.label_block,
-                label_x,
-                label_y,
-                theme_font_size,
-                base_line_height,
-                MermaidTextAnchor::Center,
-                MermaidSemanticKind::SubgraphTitle,
-                &owner_key,
-                false,
-                subgraph.width,
-                subgraph.height,
-            );
-        }
+        push_subgraph_semantic_lines(
+            &mut semantic_lines,
+            subgraph,
+            subgraph_idx,
+            top_level_subgraphs.contains(&subgraph_idx),
+            &metrics,
+        );
     }
 
-    let is_state = layout.kind == DiagramKind::State;
     for (edge_idx, edge) in layout.edges.iter().enumerate() {
-        let owner_key = mermaid_outline_edge_key(edge_idx);
-        push_edge_label_block(
-            &mut semantic_lines,
-            edge.label.as_ref(),
-            edge.label_anchor,
-            is_state,
-            state_font_size,
-            state_line_height,
-            theme_font_size,
-            base_line_height,
-            &owner_key,
-        );
-        push_edge_label_block(
-            &mut semantic_lines,
-            edge.start_label.as_ref(),
-            edge.start_label_anchor,
-            is_state,
-            state_font_size,
-            state_line_height,
-            theme_font_size,
-            base_line_height,
-            &owner_key,
-        );
-        push_edge_label_block(
-            &mut semantic_lines,
-            edge.end_label.as_ref(),
-            edge.end_label_anchor,
-            is_state,
-            state_font_size,
-            state_line_height,
-            theme_font_size,
-            base_line_height,
-            &owner_key,
-        );
+        push_edge_semantic_lines(&mut semantic_lines, edge, edge_idx, &metrics);
     }
 
     for node in layout.nodes.values() {
-        if node.hidden || node.anchor_subgraph.is_some() {
-            continue;
-        }
-        let hide_label = node.label.lines.iter().all(|line| line.trim().is_empty())
-            || node.id.starts_with("__start_")
-            || node.id.starts_with("__end_");
-        if hide_label {
-            continue;
-        }
-
-        if layout.kind == DiagramKind::Er
-            && node
-                .label
-                .lines
-                .iter()
-                .any(|line| mermaid_is_divider_line(line))
-        {
-            let outline_eligible =
-                layout.subgraphs.is_empty() || !subgraph_node_ids.contains(&node.id);
-            let owner_key = mermaid_outline_node_key(&node.id);
-            extend_mermaid_er_semantic_lines(
-                &mut semantic_lines,
-                node,
-                theme_font_size,
-                class_line_height,
-                options.layout.node_padding_x,
-                &owner_key,
-                outline_eligible,
-            );
-            continue;
-        }
-
-        if node
-            .label
-            .lines
-            .iter()
-            .any(|line| mermaid_is_divider_line(line))
-        {
-            let outline_eligible =
-                layout.subgraphs.is_empty() || !subgraph_node_ids.contains(&node.id);
-            let owner_key = mermaid_outline_node_key(&node.id);
-            extend_mermaid_class_semantic_lines(
-                &mut semantic_lines,
-                node,
-                theme_font_size,
-                class_line_height,
-                options.layout.node_padding_x,
-                &owner_key,
-                outline_eligible,
-            );
-            continue;
-        }
-
-        let center_x = node.x + node.width / 2.0;
-        let center_y = node.y + node.height / 2.0;
-        let outline_eligible = layout.subgraphs.is_empty() || !subgraph_node_ids.contains(&node.id);
-        let owner_key = mermaid_outline_node_key(&node.id);
-        let (font_size, line_height) = if layout.kind == DiagramKind::State {
-            (state_font_size, state_line_height)
-        } else {
-            (theme_font_size, base_line_height)
-        };
-        push_mermaid_summary_line(
+        push_node_semantic_lines(
             &mut semantic_lines,
-            node.label.lines.iter().map(String::as_str),
-            center_x,
-            center_y,
-            MermaidTextAnchor::Center,
-            MermaidSemanticKind::NodeSummary,
-            &owner_key,
-            outline_eligible,
-            node.width,
-            node.height,
-        );
-        push_mermaid_text_block_semantic_lines(
-            &mut semantic_lines,
-            &node.label,
-            center_x,
-            center_y,
-            font_size,
-            line_height,
-            MermaidTextAnchor::Center,
-            MermaidSemanticKind::NodeTitle,
-            &owner_key,
-            false,
-            node.width,
-            node.height,
+            node,
+            layout,
+            &subgraph_node_ids,
+            &metrics,
         );
     }
 
     semantic_lines
+}
+
+fn push_subgraph_semantic_lines(
+    semantic_lines: &mut Vec<MermaidSemanticLine>,
+    subgraph: &mermaid_rs_renderer::layout::SubgraphLayout,
+    subgraph_idx: usize,
+    outline_eligible: bool,
+    metrics: &SemanticLineMetrics,
+) {
+    let owner_key = mermaid_outline_subgraph_key(subgraph_idx);
+    let (label_x, label_y, anchor, font_size, line_height) = if metrics.is_state {
+        let header_height = (subgraph.label_block.height + metrics.theme_font_size * 0.75)
+            .max(metrics.theme_font_size * 1.4);
+        let label_x = subgraph.x
+            + (metrics.theme_font_size * 0.6).max(subgraph.label_block.height * 0.35);
+        let label_y = subgraph.y + header_height / 2.0;
+        (
+            label_x,
+            label_y,
+            MermaidTextAnchor::Start,
+            metrics.state_font_size,
+            metrics.state_line_height,
+        )
+    } else {
+        let label_x = subgraph.x + subgraph.width / 2.0;
+        let label_y = subgraph.y + 12.0 + subgraph.label_block.height / 2.0;
+        (
+            label_x,
+            label_y,
+            MermaidTextAnchor::Center,
+            metrics.theme_font_size,
+            metrics.base_line_height,
+        )
+    };
+
+    push_mermaid_summary_line(
+        semantic_lines,
+        subgraph.label_block.lines.iter().map(String::as_str),
+        label_x,
+        label_y,
+        anchor,
+        MermaidSemanticKind::SubgraphSummary,
+        &owner_key,
+        outline_eligible,
+        subgraph.width,
+        subgraph.height,
+    );
+    push_mermaid_text_block_semantic_lines(
+        semantic_lines,
+        &subgraph.label_block,
+        label_x,
+        label_y,
+        font_size,
+        line_height,
+        anchor,
+        MermaidSemanticKind::SubgraphTitle,
+        &owner_key,
+        false,
+        subgraph.width,
+        subgraph.height,
+    );
+}
+
+fn push_edge_semantic_lines(
+    semantic_lines: &mut Vec<MermaidSemanticLine>,
+    edge: &mermaid_rs_renderer::layout::EdgeLayout,
+    edge_idx: usize,
+    metrics: &SemanticLineMetrics,
+) {
+    let owner_key = mermaid_outline_edge_key(edge_idx);
+    for (label, anchor) in [
+        (edge.label.as_ref(), edge.label_anchor),
+        (edge.start_label.as_ref(), edge.start_label_anchor),
+        (edge.end_label.as_ref(), edge.end_label_anchor),
+    ] {
+        push_edge_label_block(
+            semantic_lines,
+            label,
+            anchor,
+            metrics.is_state,
+            metrics.state_font_size,
+            metrics.state_line_height,
+            metrics.theme_font_size,
+            metrics.base_line_height,
+            &owner_key,
+        );
+    }
+}
+
+fn push_node_semantic_lines(
+    semantic_lines: &mut Vec<MermaidSemanticLine>,
+    node: &mermaid_rs_renderer::NodeLayout,
+    layout: &MermaidLayout,
+    subgraph_node_ids: &HashSet<String>,
+    metrics: &SemanticLineMetrics,
+) {
+    if node.hidden || node.anchor_subgraph.is_some() {
+        return;
+    }
+    let hide_label = node.label.lines.iter().all(|line| line.trim().is_empty())
+        || node.id.starts_with("__start_")
+        || node.id.starts_with("__end_");
+    if hide_label {
+        return;
+    }
+
+    let outline_eligible = layout.subgraphs.is_empty() || !subgraph_node_ids.contains(&node.id);
+    let owner_key = mermaid_outline_node_key(&node.id);
+    let has_divider = node
+        .label
+        .lines
+        .iter()
+        .any(|line| mermaid_is_divider_line(line));
+
+    if has_divider {
+        let extender = if layout.kind == DiagramKind::Er {
+            extend_mermaid_er_semantic_lines
+        } else {
+            extend_mermaid_class_semantic_lines
+        };
+        extender(
+            semantic_lines,
+            node,
+            metrics.theme_font_size,
+            metrics.class_line_height,
+            metrics.node_padding_x,
+            &owner_key,
+            outline_eligible,
+        );
+        return;
+    }
+
+    let center_x = node.x + node.width / 2.0;
+    let center_y = node.y + node.height / 2.0;
+    let (font_size, line_height) = metrics.node_label_metrics();
+    push_mermaid_summary_line(
+        semantic_lines,
+        node.label.lines.iter().map(String::as_str),
+        center_x,
+        center_y,
+        MermaidTextAnchor::Center,
+        MermaidSemanticKind::NodeSummary,
+        &owner_key,
+        outline_eligible,
+        node.width,
+        node.height,
+    );
+    push_mermaid_text_block_semantic_lines(
+        semantic_lines,
+        &node.label,
+        center_x,
+        center_y,
+        font_size,
+        line_height,
+        MermaidTextAnchor::Center,
+        MermaidSemanticKind::NodeTitle,
+        &owner_key,
+        false,
+        node.width,
+        node.height,
+    );
 }
 
 #[derive(Clone, Copy, Debug)]
