@@ -255,45 +255,7 @@ pub(crate) fn build_header_filter_layout<C: TuiApi>(
     } else {
         0
     };
-    let mut included = Vec::new();
-    let active_cwd = app.thought_filter.cwd.as_deref();
-    let mut chips_width: u16 = 0;
-    for summary in app.header_repo_summaries() {
-        let is_include_active = active_cwd.map(|cwd| cwd == summary.cwd).unwrap_or(false);
-        let is_excluded = app.thought_filter.excludes_cwd(&summary.cwd);
-        let label = if is_include_active {
-            "code .".to_string()
-        } else {
-            format!("{}x{}", summary.count, summary.label)
-        };
-        let width = display_width(&label);
-        if width == 0 {
-            continue;
-        }
-
-        let next_width = if included.is_empty() {
-            width
-        } else {
-            chips_width.saturating_add(2).saturating_add(width)
-        };
-        if next_width > chip_budget {
-            break;
-        }
-
-        chips_width = next_width;
-        let color = if app.thought_filter.filter_out_mode {
-            if is_excluded {
-                Color::DarkGrey
-            } else {
-                summary.color
-            }
-        } else if active_cwd.is_some() && !is_include_active {
-            Color::DarkGrey
-        } else {
-            summary.color
-        };
-        included.push((summary.cwd, label, color, width));
-    }
+    let (included, chips_width) = gather_filter_chips(app, chip_budget);
 
     let mut total_width = filter_out_width;
     if show_clear {
@@ -348,6 +310,71 @@ pub(crate) fn build_header_filter_layout<C: TuiApi>(
         chips,
         filter_out_rect,
         clear_filters_rect,
+    }
+}
+
+/// Build the per-repo filter chips and their cumulative width, stopping as
+/// soon as the next chip would overflow the budget. Returns the chip data
+/// (cwd, label, color, width) so the caller can place rects later.
+fn gather_filter_chips<C: TuiApi>(
+    app: &App<C>,
+    chip_budget: u16,
+) -> (Vec<(String, String, Color, u16)>, u16) {
+    let mut included = Vec::new();
+    let active_cwd = app.thought_filter.cwd.as_deref();
+    let mut chips_width: u16 = 0;
+    for summary in app.header_repo_summaries() {
+        let is_include_active = active_cwd.map(|cwd| cwd == summary.cwd).unwrap_or(false);
+        let is_excluded = app.thought_filter.excludes_cwd(&summary.cwd);
+        let label = if is_include_active {
+            "code .".to_string()
+        } else {
+            format!("{}x{}", summary.count, summary.label)
+        };
+        let width = display_width(&label);
+        if width == 0 {
+            continue;
+        }
+
+        let next_width = if included.is_empty() {
+            width
+        } else {
+            chips_width.saturating_add(2).saturating_add(width)
+        };
+        if next_width > chip_budget {
+            break;
+        }
+
+        chips_width = next_width;
+        let color = chip_color(
+            summary.color,
+            app.thought_filter.filter_out_mode,
+            is_excluded,
+            active_cwd.is_some(),
+            is_include_active,
+        );
+        included.push((summary.cwd, label, color, width));
+    }
+    (included, chips_width)
+}
+
+fn chip_color(
+    summary_color: Color,
+    filter_out_mode: bool,
+    is_excluded: bool,
+    has_active_cwd: bool,
+    is_include_active: bool,
+) -> Color {
+    if filter_out_mode {
+        if is_excluded {
+            Color::DarkGrey
+        } else {
+            summary_color
+        }
+    } else if has_active_cwd && !is_include_active {
+        Color::DarkGrey
+    } else {
+        summary_color
     }
 }
 
