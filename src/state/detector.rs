@@ -419,8 +419,16 @@ impl StateDetector {
         match &mut self.escape_state {
             EscapeState::Normal => self.consume_normal_byte(b, visible),
             EscapeState::Esc => self.consume_escape_byte(b),
-            EscapeState::EscIntermediate => self.consume_escape_intermediate_byte(b),
-            EscapeState::Csi => self.consume_csi_byte(b),
+            EscapeState::EscIntermediate { consumed } => {
+                if let Some(next_state) = Self::consume_escape_intermediate_byte(b, consumed) {
+                    self.escape_state = next_state;
+                }
+            }
+            EscapeState::Csi { consumed } => {
+                if let Some(next_state) = Self::consume_csi_byte(b, consumed) {
+                    self.escape_state = next_state;
+                }
+            }
             EscapeState::Osc {
                 buf,
                 esc_pending,
@@ -456,7 +464,7 @@ impl StateDetector {
     fn consume_normal_byte(&mut self, b: u8, visible: &mut Vec<u8>) {
         match b {
             0x1b => self.escape_state = EscapeState::Esc,
-            0x9b => self.escape_state = EscapeState::Csi,
+            0x9b => self.escape_state = EscapeState::Csi { consumed: 0 },
             0x9d => self.escape_state = Self::osc_state(),
             0x90 => {
                 self.escape_state = Self::private_string_state(EscapeState::Dcs {
@@ -484,7 +492,7 @@ impl StateDetector {
 
     fn consume_escape_byte(&mut self, b: u8) {
         self.escape_state = match b {
-            b'[' => EscapeState::Csi,
+            b'[' => EscapeState::Csi { consumed: 0 },
             b']' => Self::osc_state(),
             b'P' => Self::private_string_state(EscapeState::Dcs {
                 esc_pending: false,
@@ -498,21 +506,31 @@ impl StateDetector {
                 esc_pending: false,
                 consumed: 0,
             }),
-            0x20..=0x2f => EscapeState::EscIntermediate,
+            0x20..=0x2f => EscapeState::EscIntermediate { consumed: 0 },
             _ => EscapeState::Normal,
         };
     }
 
-    fn consume_escape_intermediate_byte(&mut self, b: u8) {
-        if (0x30..=0x7e).contains(&b) || !(0x20..=0x2f).contains(&b) {
-            self.escape_state = EscapeState::Normal;
+    fn consume_escape_intermediate_byte(b: u8, consumed: &mut usize) -> Option<EscapeState> {
+        *consumed += 1;
+        if *consumed > TERMINAL_STRING_RECOVERY_BYTES {
+            return Some(EscapeState::Normal);
         }
+        if (0x30..=0x7e).contains(&b) || !(0x20..=0x2f).contains(&b) {
+            return Some(EscapeState::Normal);
+        }
+        None
     }
 
-    fn consume_csi_byte(&mut self, b: u8) {
-        if (0x40..=0x7e).contains(&b) {
-            self.escape_state = EscapeState::Normal;
+    fn consume_csi_byte(b: u8, consumed: &mut usize) -> Option<EscapeState> {
+        *consumed += 1;
+        if *consumed > TERMINAL_STRING_RECOVERY_BYTES {
+            return Some(EscapeState::Normal);
         }
+        if (0x40..=0x7e).contains(&b) {
+            return Some(EscapeState::Normal);
+        }
+        None
     }
 
     fn consume_osc_byte(
@@ -802,8 +820,12 @@ enum Osc133Marker {
 enum EscapeState {
     Normal,
     Esc,
-    EscIntermediate,
-    Csi,
+    EscIntermediate {
+        consumed: usize,
+    },
+    Csi {
+        consumed: usize,
+    },
     Osc {
         buf: Vec<u8>,
         esc_pending: bool,
@@ -1293,6 +1315,41 @@ mod tests {
         let mut d = StateDetector::new();
         let mut chunk = Vec::from(&b"\x1bP"[..]);
         chunk.extend(std::iter::repeat(b'x').take(TERMINAL_STRING_RECOVERY_BYTES + 1));
+        chunk.extend_from_slice(b"user@host:~$ ");
+
+        d.process_output(b"Compiling...\r\n");
+        assert_eq!(d.state(), SessionState::Busy);
+
+        d.process_output(&chunk);
+        assert_eq!(d.state(), SessionState::Idle);
+    }
+
+    #[test]
+    fn unterminated_csi_recovers_after_limit() {
+        // Adversarial input: ESC `[` followed by bytes outside CSI's accepted
+        // ranges (param 0x30-0x3f, intermediate 0x20-0x2f, final 0x40-0x7e).
+        // Without the consumed cap the parser stays in CSI forever and drops
+        // every byte, so the prompt that follows is never seen.
+        let mut d = StateDetector::new();
+        let mut chunk = Vec::from(&b"\x1b["[..]);
+        chunk.extend(std::iter::repeat(0x00u8).take(TERMINAL_STRING_RECOVERY_BYTES + 1));
+        chunk.extend_from_slice(b"user@host:~$ ");
+
+        d.process_output(b"Compiling...\r\n");
+        assert_eq!(d.state(), SessionState::Busy);
+
+        d.process_output(&chunk);
+        assert_eq!(d.state(), SessionState::Idle);
+    }
+
+    #[test]
+    fn unterminated_escape_intermediate_recovers_after_limit() {
+        // ESC followed by an unbounded run of intermediate bytes (0x20-0x2f)
+        // would never reset under the previous code. The recovery cap forces
+        // a return to Normal so subsequent prompt bytes are detected.
+        let mut d = StateDetector::new();
+        let mut chunk = Vec::from(&b"\x1b "[..]);
+        chunk.extend(std::iter::repeat(0x24u8).take(TERMINAL_STRING_RECOVERY_BYTES + 1));
         chunk.extend_from_slice(b"user@host:~$ ");
 
         d.process_output(b"Compiling...\r\n");
