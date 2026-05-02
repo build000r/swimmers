@@ -1484,24 +1484,8 @@ fn line_looks_prompt_like(line: &str) -> bool {
         return true;
     }
 
-    if prefix.contains('@')
-        || prefix.contains(':')
-        || prefix.contains('/')
-        || prefix.contains('~')
-        || prefix.contains('\\')
-        || prefix.ends_with(')')
-        || prefix.ends_with(']')
-    {
-        if marker == '%' {
-            let compact = prefix.replace(',', "");
-            if compact
-                .chars()
-                .all(|c| c.is_ascii_digit() || c == '.' || c.is_ascii_whitespace())
-            {
-                return false;
-            }
-        }
-        return true;
+    if prefix_has_path_or_user_marker(prefix) {
+        return !(marker == '%' && prefix_is_zsh_jobs_summary(prefix));
     }
 
     if prefix.len() > 32 || prefix.chars().any(|c| c.is_whitespace()) {
@@ -1521,6 +1505,24 @@ fn line_looks_prompt_like(line: &str) -> bool {
     }
 
     matches!(marker, '$' | '#' | '%')
+}
+
+fn prefix_has_path_or_user_marker(prefix: &str) -> bool {
+    prefix.contains('@')
+        || prefix.contains(':')
+        || prefix.contains('/')
+        || prefix.contains('~')
+        || prefix.contains('\\')
+        || prefix.ends_with(')')
+        || prefix.ends_with(']')
+}
+
+fn prefix_is_zsh_jobs_summary(prefix: &str) -> bool {
+    // zsh's `%` jobs summary line ends in `... 12.34%`; reject those.
+    let compact = prefix.replace(',', "");
+    compact
+        .chars()
+        .all(|c| c.is_ascii_digit() || c == '.' || c.is_ascii_whitespace())
 }
 
 /// Query tmux for the active pane cwd of a session.
