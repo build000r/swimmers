@@ -568,6 +568,69 @@ mod tests {
     }
 
     #[test]
+    fn bind_host_passes_through_plain_hosts() {
+        assert_eq!(bind_host("127.0.0.1"), "127.0.0.1");
+        assert_eq!(bind_host("0.0.0.0"), "0.0.0.0");
+        assert_eq!(bind_host("localhost"), "localhost");
+        assert_eq!(bind_host("example.internal"), "example.internal");
+    }
+
+    #[test]
+    fn bind_host_strips_numeric_port_from_host_port_forms() {
+        assert_eq!(bind_host("127.0.0.1:3210"), "127.0.0.1");
+        assert_eq!(bind_host("0.0.0.0:8080"), "0.0.0.0");
+        assert_eq!(bind_host("localhost:80"), "localhost");
+    }
+
+    #[test]
+    fn bind_host_strips_brackets_from_ipv6_host_port_forms() {
+        assert_eq!(bind_host("[::1]:3210"), "::1");
+        assert_eq!(bind_host("[fe80::1]:8080"), "fe80::1");
+    }
+
+    #[test]
+    fn bind_host_keeps_plain_ipv6_literal_intact() {
+        // Bare `::1` has multiple `:` so the host:port path bails out and the
+        // whole string is returned, letting `is_loopback_bind` parse it as IP.
+        assert_eq!(bind_host("::1"), "::1");
+        assert_eq!(bind_host("fe80::1"), "fe80::1");
+    }
+
+    #[test]
+    fn bind_host_handles_bracketed_host_without_port() {
+        assert_eq!(bind_host("[::1]"), "::1");
+    }
+
+    #[test]
+    fn bind_host_rejects_malformed_bracketed_input() {
+        // No closing `]` falls through to the rsplit path; trailing junk after
+        // the bracket must not be silently dropped.
+        assert_eq!(bind_host("[::1"), "[::1");
+        assert_eq!(bind_host("[::1]extra"), "[::1]extra");
+    }
+
+    #[test]
+    fn bind_host_rejects_non_numeric_or_empty_ports() {
+        // Empty port, alphabetic port, or empty host all fall through to the
+        // whole-string return so callers see the original (malformed) input.
+        assert_eq!(bind_host("127.0.0.1:"), "127.0.0.1:");
+        assert_eq!(bind_host("127.0.0.1:abc"), "127.0.0.1:abc");
+        assert_eq!(bind_host(":3210"), ":3210");
+    }
+
+    #[test]
+    fn bind_host_trims_surrounding_whitespace() {
+        assert_eq!(bind_host("  127.0.0.1  "), "127.0.0.1");
+        assert_eq!(bind_host("\t[::1]:3210\n"), "::1");
+    }
+
+    #[test]
+    fn bind_host_handles_empty_string() {
+        assert_eq!(bind_host(""), "");
+        assert_eq!(bind_host("   "), "");
+    }
+
+    #[test]
     fn parse_serve_subcommand() {
         let cli = ServerCli::parse_from(["swimmers", "serve"]);
         assert_eq!(cli.command, Some(ServerCommand::Serve));
