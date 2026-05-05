@@ -232,6 +232,10 @@ function resetWebState() {
   web.state.trogdorReaderStartIndex = 0;
   web.state.trogdorReaderClawgKey = "";
   web.state.trogdorSurfaceSignature = "";
+  web.state.trogdorReadProgress = {};
+  web.state.trogdorDismissedClawgs = {};
+  web.state.trogdorBurntSessions = new Map();
+  web.state.trogdorAwaitingSessionIds = new Set();
   web.state.hud = null;
   web.state.terminal = null;
   web.state.ws = null;
@@ -268,6 +272,21 @@ test("selecting a Trogdor swordsman forces the terminal view, not just URL state
   assert.equal(document.body.classList.contains("terminal-focus-mode"), true);
   assert.equal(web.el.terminalStage.classList.contains("terminal-view-active"), true);
   assert.equal(window.location.search, "?session=sess_0");
+});
+
+test("Trogdor atlas renders dragon sprite assets and flames burnt swordsmen", () => {
+  resetWebState();
+  web.state.trogdorAtlasOpen = true;
+  web.state.trogdorBurntSessions.set("sess_0", performance.now() + 1000);
+
+  web.renderHudSurface();
+
+  const html = web.el.trogdorSurface.innerHTML;
+  assert.match(html, /class="[^"]*trogdor-dragon[^"]*is-firing/);
+  assert.match(html, /\/assets\/dragon\/mouth-closed\/left\.png/);
+  assert.match(html, /\/assets\/dragon\/fire-left-full\/left\.png/);
+  assert.match(html, /agent-burn-flame/);
+  assert.match(html, /agent-burn-smoke/);
 });
 
 test("live terminal presentation hides the HUD canvas with class and inline state", () => {

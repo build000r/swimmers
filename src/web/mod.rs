@@ -29,6 +29,7 @@ const APP_CSS_ROUTE: &str = "/app.css";
 const FRANKENTERM_JS_ROUTE: &str = "/assets/frankenterm/FrankenTerm.js";
 const FRANKENTERM_WASM_ROUTE: &str = "/assets/frankenterm/FrankenTerm_bg.wasm";
 const FRANKENTERM_FONT_ROUTE: &str = "/assets/frankenterm/pragmasevka-nf-subset.woff2";
+const TROGDOR_DRAGON_ASSET_ROUTE: &str = "/assets/dragon/{pose}/{frame}";
 const PUBLISHED_VIEW_ROUTE: &str = "/selected";
 const REPLY_TIMEOUT: Duration = Duration::from_secs(2);
 const DEFAULT_FRANKENTUI_PKG_CANDIDATES: &[&str] = &[];
@@ -46,6 +47,7 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route(FRANKENTERM_JS_ROUTE, get(franken_term_js))
         .route(FRANKENTERM_WASM_ROUTE, get(franken_term_wasm))
         .route(FRANKENTERM_FONT_ROUTE, get(franken_term_font))
+        .route(TROGDOR_DRAGON_ASSET_ROUTE, get(trogdor_dragon_asset))
         .route("/ws/sessions/{session_id}", get(session_ws))
 }
 
@@ -450,6 +452,55 @@ async fn app_css() -> impl IntoResponse {
         ],
         include_str!("app.css"),
     )
+}
+
+async fn trogdor_dragon_asset(AxumPath((pose, frame)): AxumPath<(String, String)>) -> Response {
+    let Some(bytes) = trogdor_dragon_asset_bytes(&pose, &frame) else {
+        return json_error(
+            StatusCode::NOT_FOUND,
+            "TROGDOR_DRAGON_ASSET_NOT_FOUND",
+            "The requested Trogdor dragon sprite frame is not available",
+        );
+    };
+
+    (
+        [
+            (header::CONTENT_TYPE, "image/png"),
+            (header::CACHE_CONTROL, "public, max-age=31536000, immutable"),
+        ],
+        bytes,
+    )
+        .into_response()
+}
+
+fn trogdor_dragon_asset_bytes(pose: &str, frame: &str) -> Option<&'static [u8]> {
+    match (pose, frame) {
+        ("mouth-closed", "left.png") => {
+            Some(include_bytes!("../../assets/dragon/mouth-closed/left.png"))
+        }
+        ("mouth-closed", "right.png") => {
+            Some(include_bytes!("../../assets/dragon/mouth-closed/right.png"))
+        }
+        ("fire-left-full", "left.png") => Some(include_bytes!(
+            "../../assets/dragon/fire-left-full/left.png"
+        )),
+        ("fire-left-mid", "left.png") => {
+            Some(include_bytes!("../../assets/dragon/fire-left-mid/left.png"))
+        }
+        ("fire-left-short", "left.png") => Some(include_bytes!(
+            "../../assets/dragon/fire-left-short/left.png"
+        )),
+        ("fire-right-full", "right.png") => Some(include_bytes!(
+            "../../assets/dragon/fire-right-full/right.png"
+        )),
+        ("fire-right-mid", "right.png") => Some(include_bytes!(
+            "../../assets/dragon/fire-right-mid/right.png"
+        )),
+        ("fire-right-short", "right.png") => Some(include_bytes!(
+            "../../assets/dragon/fire-right-short/right.png"
+        )),
+        _ => None,
+    }
 }
 
 async fn franken_term_js() -> Response {
@@ -985,6 +1036,42 @@ mod tests {
         assert!(html.contains("send-history"));
         assert!(html.contains(FRANKENTERM_FONT_ROUTE));
         assert!(html.contains("window.__SWIMMERS_BOOT__"));
+    }
+
+    #[tokio::test]
+    async fn trogdor_dragon_asset_route_serves_embedded_png() {
+        let response = trogdor_dragon_asset(AxumPath((
+            "mouth-closed".to_string(),
+            "right.png".to_string(),
+        )))
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers().get(header::CONTENT_TYPE).unwrap(),
+            "image/png"
+        );
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("dragon sprite body");
+        assert_eq!(&body[..8], b"\x89PNG\r\n\x1a\n");
+    }
+
+    #[test]
+    fn app_js_and_css_wire_trogdor_sprite_burn_loop() {
+        let js = include_str!("app.js");
+        assert!(js.contains("TROGDOR_DRAGON_ASSET_BASE = \"/assets/dragon\""));
+        assert!(js.contains("function trogdorDragonPose(groups, summary)"));
+        assert!(js.contains("trogdor-dragon-sprite"));
+        assert!(js.contains("agent-burn-flame"));
+        assert!(js.contains("const dragonTarget = dragonPose || TROGDOR_DRAGON_TARGET"));
+
+        let css = include_str!("app.css");
+        assert!(css.contains("@keyframes dragon-walk-around"));
+        assert!(css.contains("@keyframes dragon-sprite-fire"));
+        assert!(css.contains(".agent-burn-flame"));
+        assert!(css.contains("@media (prefers-reduced-motion: reduce)"));
     }
 
     #[test]

@@ -12,6 +12,7 @@ Status as of 2026-05-03.
 - `WG-06` Wire hover-panel actions to existing session input, group input, create session, Mermaid, plan-file, and commit flows.
 - `WG-07` Harden live web input and web smoke terminal replies.
 - `WG-08` Document the operator workflow and reuse contract in `docs/TROGDOR_WEB.md`.
+- `WG-09` Use tracked dragon PNG frames for the walking/fire atlas dragon and render a visible flame/smoke burn state for resolved swordsmen.
 
 ## Verification
 
@@ -19,7 +20,7 @@ Status as of 2026-05-03.
 - `cargo test --lib`
 - `cargo test --test metamorphic`
 - `node --check src/web/app.js`
-- `node --test src/web/rendered_surface.test.mjs src/web/input_support.test.mjs`
+- `node --test src/web/rendered_surface.test.mjs src/web/input_support.test.mjs src/web/app_behavior.test.mjs`
 - `make web-smoke`
 
 ## Deferred Only With New Scope

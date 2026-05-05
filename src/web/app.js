@@ -20,7 +20,9 @@ const SNAPSHOT_REFRESH_MS = 900;
 const SURFACE_CLICK_SUPPRESS_MS = 450;
 const TROGDOR_READ_PROGRESS_KEY = "swimmers.web.trogdor.readProgress";
 const TROGDOR_BURN_MS = 1100;
+const TROGDOR_DRAGON_ASSET_BASE = "/assets/dragon";
 const TROGDOR_DRAGON_TARGET = { x: 56, y: 64 };
+const TROGDOR_DRAGON_FIRE_STAGES = ["short", "mid", "full"];
 const TERMINAL_ZOOM_MIN = 0.65;
 const TERMINAL_ZOOM_MAX = 2.4;
 const TERMINAL_ZOOM_STEP = 0.1;
@@ -1911,6 +1913,7 @@ function renderTrogdorSurface() {
   const hoveredCandidate = sessions.find((session) => session.sessionId === state.hoveredTrogdorSessionId) || null;
   const hovered = hoveredCandidate && trogdorSessionCanRead(hoveredCandidate) ? hoveredCandidate : null;
   const summary = summarizeTrogdorDom(groups, sessions);
+  const dragonPose = trogdorDragonPose(groups, summary);
   const signature = trogdorSurfaceSignature(sessions, summary);
   if (signature !== state.trogdorSurfaceSignature) {
     state.trogdorSurfaceSignature = signature;
@@ -1931,8 +1934,10 @@ function renderTrogdorSurface() {
             <span class="trogdor-cloud trogdor-cloud-b"></span>
           </div>
           <div class="trogdor-props" aria-hidden="true">${renderTrogdorProps()}</div>
-          ${renderTrogdorDragon(summary)}
-          ${groups.length ? groups.map(renderTrogdorStructure).join("") : renderTrogdorEmptyField()}
+          ${renderTrogdorDragon(dragonPose)}
+          ${groups.length
+            ? groups.map((group, index) => renderTrogdorStructure(group, index, dragonPose)).join("")
+            : renderTrogdorEmptyField()}
         </div>
         <div class="trogdor-bottombar">
           <div class="trogdor-wpm">
@@ -2095,88 +2100,104 @@ function renderTrogdorProps() {
   `;
 }
 
-function renderTrogdorDragon(summary) {
-  const hot = summary.level >= 70;
-  // Trogdor silhouette: calligraphic figure-8 where the body line CROSSES
-  // itself at the chest pinch (~102,150). Upper loop bulges LEFT (back of S),
-  // lower loop bulges RIGHT (belly of S). A free-floating tail spiral coils
-  // off the upper-left behind the head; crown is 2 sharp horns (back taller);
-  // snout is a wide-open triangular maw firing a large angled jagged flame.
+function trogdorDragonPose(groups, summary) {
+  let focusIndex = -1;
+  let focusGroup = null;
+  let flamingResponse = false;
+  for (let index = 0; index < groups.length; index += 1) {
+    if (groups[index].sessions.some((session) => session.trogdorBurnt)) {
+      focusIndex = index;
+      focusGroup = groups[index];
+      flamingResponse = true;
+      break;
+    }
+  }
+  if (!focusGroup && groups.length) {
+    focusIndex = 0;
+    focusGroup = groups[0];
+  }
+
+  const target = focusGroup ? TROGDOR_REPO_POSITIONS[focusIndex % TROGDOR_REPO_POSITIONS.length] : null;
+  let x = TROGDOR_DRAGON_TARGET.x;
+  let y = TROGDOR_DRAGON_TARGET.y;
+  let direction = "right";
+  let walkX = "3.2vw";
+  let walkY = "-1.2vh";
+
+  if (target) {
+    const approachX = target.x < 50 ? 20 : -18;
+    x = clampInt(target.x + approachX, TROGDOR_DRAGON_TARGET.x, 18, 82);
+    y = clampInt(target.y + (target.y < 54 ? 18 : -10), TROGDOR_DRAGON_TARGET.y, 30, 80);
+    direction = target.x < x ? "left" : "right";
+    walkX = direction === "left" ? "-3.2vw" : "3.2vw";
+    walkY = target.y < y ? "-1.2vh" : "1.2vh";
+  }
+
+  return {
+    x,
+    y,
+    direction,
+    walkX,
+    walkY,
+    heated: clampInt(summary?.level, 0, 0, 99) >= 70,
+    firing: flamingResponse,
+  };
+}
+
+function trogdorDragonAsset(pose, direction) {
+  const frame = direction === "left" ? "left.png" : "right.png";
+  return `${TROGDOR_DRAGON_ASSET_BASE}/${pose}/${frame}`;
+}
+
+function renderTrogdorDragon(pose) {
+  const direction = pose?.direction === "left" ? "left" : "right";
+  const classes = [
+    "trogdor-dragon",
+    `is-${direction}`,
+    pose?.heated ? "is-heated" : "",
+    pose?.firing ? "is-firing" : "",
+  ].filter(Boolean).join(" ");
+  const style = [
+    `--dragon-x:${clampInt(pose?.x, TROGDOR_DRAGON_TARGET.x, 12, 88)}%`,
+    `--dragon-y:${clampInt(pose?.y, TROGDOR_DRAGON_TARGET.y, 26, 84)}%`,
+    `--dragon-walk-x:${pose?.walkX || "3.2vw"}`,
+    `--dragon-walk-y:${pose?.walkY || "-1.2vh"}`,
+  ].join("; ");
+  const idleSrc = escapeAttr(trogdorDragonAsset("mouth-closed", direction));
+  const fireFrames = TROGDOR_DRAGON_FIRE_STAGES.map((stage) => {
+    const src = escapeAttr(trogdorDragonAsset(`fire-${direction}-${stage}`, direction));
+    return `
+      <img
+        class="trogdor-dragon-sprite trogdor-dragon-fire is-${stage}"
+        src="${src}"
+        alt=""
+        width="155"
+        height="147"
+        decoding="async"
+        draggable="false"
+      />
+    `;
+  }).join("");
+
   return `
-    <div class="trogdor-dragon ${hot ? "is-hot" : ""}" aria-hidden="true">
-      <svg viewBox="0 0 220 240" role="img">
-        <g class="dragon-ink" filter="url(#trogdor-stamp)">
-          <!-- TAIL SPIRAL: free-floating curl off the upper-left, behind head -->
-          <path class="dragon-stroke" d="M 70 70
-                                          C 52 56 26 64 24 92
-                                          C 22 116 50 124 58 108
-                                          C 64 96 48 86 42 96
-                                          C 38 104 50 108 52 100" />
-
-          <!-- CROWN: two sharp horns. Front horn (~88,18) shorter, back horn
-               (~108,4) taller; the path enters from the back of the neck on
-               the left and exits onto the forehead on the right. -->
-          <path class="dragon-stroke" d="M 70 70
-                                          L 78 56
-                                          L 88 18
-                                          L 96 50
-                                          L 108 4
-                                          L 122 54" />
-
-          <!-- HEAD / OPEN MAW: top jaw runs from forehead to snout tip; lower
-               jaw forms a wedge below it; the two meet at the snout tip on
-               the right. The triangular gap between them is the open mouth. -->
-          <path class="dragon-stroke" d="M 122 54 L 168 90" />
-          <path class="dragon-stroke" d="M 168 90 L 134 102" />
-          <path class="dragon-stroke" d="M 134 102 L 124 92" />
-
-          <!-- EYE: single dot, set back near the brow -->
-          <circle class="dragon-eye" cx="108" cy="74" r="2.6" />
-
-          <!-- WHISKERS / cheek hatches behind the mouth corner -->
-          <path class="dragon-stroke thin" d="M 122 92 L 132 96" />
-          <path class="dragon-stroke thin" d="M 124 84 L 134 88" />
-          <path class="dragon-stroke thin" d="M 120 100 L 130 102" />
-
-          <!-- UPPER LOOP (back of S): backwards-C bulging to the LEFT, from
-               under the chin down around to the chest pinch. -->
-          <path class="dragon-stroke" d="M 124 92
-                                          C 80 96 28 108 26 150
-                                          C 26 178 70 178 96 158
-                                          C 104 152 104 150 102 150" />
-
-          <!-- LOWER LOOP (belly of S): forward-C bulging to the RIGHT and
-               DOWN from the chest pinch, wrapping around a fat belly and
-               returning UP the LEFT side to re-cross the pinch. -->
-          <path class="dragon-stroke" d="M 102 150
-                                          C 156 146 200 168 192 208
-                                          C 184 240 110 238 80 224
-                                          C 50 210 48 178 92 162
-                                          C 100 158 102 152 102 150 Z" />
-
-          <!-- LEGS: tiny stubby chevron feet directly under the belly -->
-          <path class="dragon-stroke" d="M 90 222 L 86 234 L 100 234 L 102 224" />
-          <path class="dragon-stroke" d="M 144 226 L 142 236 L 156 236 L 158 226" />
-        </g>
-
-        <!-- FLAME: large jagged angled flame venting up-and-right from the
-             open mouth, with a single cream highlight cut near the throat. -->
-        <g class="dragon-flame ${hot ? "is-hot" : ""}" filter="url(#trogdor-stamp)">
-          <path class="dragon-fire" d="M 168 90
-                                        L 178 78 L 188 92
-                                        L 198 70 L 206 88
-                                        L 218 76 L 216 100
-                                        L 208 110 L 196 102
-                                        L 184 108 L 170 102
-                                        L 162 96 Z" />
-          <path class="dragon-fire-cut" d="M 184 92 L 200 80" />
-        </g>
-      </svg>
+    <div class="${classes}" style="${style}" aria-hidden="true" data-dragon-direction="${direction}">
+      <span class="trogdor-dragon-sprite-stack">
+        <img
+          class="trogdor-dragon-sprite trogdor-dragon-idle"
+          src="${idleSrc}"
+          alt=""
+          width="155"
+          height="147"
+          decoding="async"
+          draggable="false"
+        />
+        ${fireFrames}
+      </span>
     </div>
   `;
 }
 
-function renderTrogdorStructure(group, index) {
+function renderTrogdorStructure(group, index, dragonPose = null) {
   const pos = TROGDOR_REPO_POSITIONS[index % TROGDOR_REPO_POSITIONS.length];
   const pressure = clampInt(group.pressure, 0, 0, 99);
   const pressureBurning = pressure >= 70;
@@ -2208,7 +2229,7 @@ function renderTrogdorStructure(group, index) {
         <span>${pressure} / ${reason}</span>
       </div>
       <div class="trogdor-agent-pack">
-        ${swordsmen.map((session, agentIndex) => renderTrogdorAgent(session, agentIndex, pos)).join("")}
+        ${swordsmen.map((session, agentIndex) => renderTrogdorAgent(session, agentIndex, pos, dragonPose)).join("")}
       </div>
     </article>
   `;
@@ -2339,7 +2360,7 @@ function renderStructureSvg(variant, burning) {
   `;
 }
 
-function renderTrogdorAgent(session, index, structurePos = null) {
+function renderTrogdorAgent(session, index, structurePos = null, dragonPose = null) {
   const offset = TROGDOR_AGENT_OFFSETS[index % TROGDOR_AGENT_OFFSETS.length];
   const hovered = session.sessionId === state.hoveredTrogdorSessionId;
   const glyph = escapeHtml(trogdorAgentGlyph(session));
@@ -2347,8 +2368,9 @@ function renderTrogdorAgent(session, index, structurePos = null) {
   const tone = trogdorAgentTone(session);
   const attacking = trogdorSessionAwaitingUser(session) && !trogdorClawgDismissed(session) && !session.trogdorBurnt;
   const burnt = Boolean(session.trogdorBurnt);
-  const chargeX = structurePos ? (TROGDOR_DRAGON_TARGET.x - structurePos.x) * 0.82 : 0;
-  const chargeY = structurePos ? (TROGDOR_DRAGON_TARGET.y - structurePos.y) * 0.62 : 0;
+  const dragonTarget = dragonPose || TROGDOR_DRAGON_TARGET;
+  const chargeX = structurePos ? (dragonTarget.x - structurePos.x) * 0.82 : 0;
+  const chargeY = structurePos ? (dragonTarget.y - structurePos.y) * 0.62 : 0;
   const style = [
     `--ax:${offset.x}px`,
     `--ay:${offset.y}px`,
@@ -2417,6 +2439,12 @@ function renderTrogdorAgent(session, index, structurePos = null) {
         <!-- Action-cue glyph centered on the shield -->
         <text class="agent-glyph" x="14" y="76" text-anchor="middle">${glyph}</text>
       </svg>
+      ${burnt
+        ? `
+          <span class="agent-burn-flame" aria-hidden="true"></span>
+          <span class="agent-burn-smoke" aria-hidden="true"></span>
+        `
+        : ""}
     </button>
   `;
 }

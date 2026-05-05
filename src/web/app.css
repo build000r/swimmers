@@ -766,14 +766,29 @@ body.mobile-keyboard-active .terminal-control-strip {
 .trogdor-dragon {
   position: absolute;
   z-index: 4;
-  left: 56%;
-  top: 64%;
-  width: clamp(200px, 22vw, 320px);
+  left: var(--dragon-x, 56%);
+  top: var(--dragon-y, 64%);
+  width: clamp(140px, 14vw, 230px);
   transform: translate(-50%, -50%);
-  filter: drop-shadow(2px 3px 0 rgba(0, 0, 0, 0.5));
+  filter:
+    drop-shadow(2px 3px 0 rgba(0, 0, 0, 0.5))
+    drop-shadow(0 0 10px rgba(234, 216, 184, 0.08));
+  animation: dragon-walk-around 8400ms steps(7, end) infinite;
 }
 
-.trogdor-dragon svg,
+.trogdor-dragon.is-heated {
+  filter:
+    drop-shadow(2px 3px 0 rgba(0, 0, 0, 0.54))
+    drop-shadow(0 0 16px rgba(185, 79, 57, 0.32));
+}
+
+.trogdor-dragon-sprite-stack {
+  position: relative;
+  display: block;
+  aspect-ratio: 155 / 147;
+}
+
+.trogdor-dragon-sprite,
 .structure-svg,
 .trogdor-agent svg,
 .trogdor-empty-field svg {
@@ -783,7 +798,46 @@ body.mobile-keyboard-active .terminal-control-strip {
   overflow: visible;
 }
 
-.dragon-stroke,
+.trogdor-dragon-sprite {
+  position: absolute;
+  inset: 0;
+  height: 100%;
+  object-fit: contain;
+  object-position: center;
+  image-rendering: auto;
+}
+
+.trogdor-dragon-idle {
+  opacity: 1;
+}
+
+.trogdor-dragon-fire {
+  opacity: 0;
+}
+
+.trogdor-dragon.is-firing {
+  z-index: 7;
+  animation:
+    dragon-walk-around 8400ms steps(7, end) infinite,
+    dragon-fire-lunge 1100ms steps(3, end) infinite;
+}
+
+.trogdor-dragon.is-firing .trogdor-dragon-idle {
+  opacity: 0;
+}
+
+.trogdor-dragon.is-firing .trogdor-dragon-fire.is-short {
+  animation: dragon-sprite-fire 360ms steps(1, end) infinite;
+}
+
+.trogdor-dragon.is-firing .trogdor-dragon-fire.is-mid {
+  animation: dragon-sprite-fire 360ms steps(1, end) infinite 120ms;
+}
+
+.trogdor-dragon.is-firing .trogdor-dragon-fire.is-full {
+  animation: dragon-sprite-fire 360ms steps(1, end) infinite 240ms;
+}
+
 .empty-bone {
   fill: none;
   stroke: #ead8b8;
@@ -792,15 +846,6 @@ body.mobile-keyboard-active .terminal-control-strip {
   stroke-linejoin: round;
 }
 
-.dragon-stroke.thin {
-  stroke-width: 5;
-}
-
-.dragon-eye {
-  fill: #ead8b8;
-}
-
-.dragon-fire,
 .structure-flame {
   fill: #b94f39;
   stroke: #ead8b8;
@@ -814,12 +859,6 @@ body.mobile-keyboard-active .terminal-control-strip {
   stroke: #b94f39;
 }
 
-.dragon-flame.is-hot .dragon-fire {
-  fill: #ead8b8;
-  stroke: #b94f39;
-}
-
-.dragon-fire-cut,
 .structure-flame-cut {
   fill: none;
   stroke: #ead8b8;
@@ -827,10 +866,6 @@ body.mobile-keyboard-active .terminal-control-strip {
   stroke-linecap: round;
   stroke-linejoin: round;
   opacity: 0.95;
-}
-
-.dragon-flame.is-hot .dragon-fire-cut {
-  stroke: #b94f39;
 }
 
 .trogdor-structure {
@@ -1037,6 +1072,7 @@ body.mobile-keyboard-active .terminal-control-strip {
   animation: villager-step var(--walk) steps(2, end) infinite;
   cursor: pointer;
   filter: drop-shadow(2px 2px 0 rgba(17, 24, 23, 0.55));
+  overflow: visible;
 }
 
 .trogdor-agent.is-attacking {
@@ -1086,6 +1122,43 @@ body.mobile-keyboard-active .terminal-control-strip {
 .trogdor-agent.is-burnt .agent-plume {
   fill: #b94f39;
   stroke: #b94f39;
+}
+
+.agent-burn-flame,
+.agent-burn-smoke {
+  position: absolute;
+  pointer-events: none;
+}
+
+.agent-burn-flame {
+  left: -18%;
+  top: -8%;
+  width: 132%;
+  height: 104%;
+  background:
+    linear-gradient(180deg, rgba(234, 216, 184, 0.95) 0 30%, transparent 30%),
+    radial-gradient(ellipse at 52% 72%, rgba(234, 216, 184, 0.95) 0 20%, transparent 22%),
+    #b94f39;
+  clip-path: polygon(
+    8% 100%, 16% 46%, 26% 76%, 34% 18%, 44% 68%, 54% 8%,
+    62% 66%, 72% 28%, 80% 74%, 90% 38%, 98% 100%
+  );
+  mix-blend-mode: screen;
+  opacity: 0;
+  animation: agent-burn-flame 180ms steps(2, end) infinite;
+}
+
+.agent-burn-smoke {
+  left: 0;
+  top: -34%;
+  width: 100%;
+  height: 48%;
+  background:
+    radial-gradient(ellipse at 28% 70%, rgba(234, 216, 184, 0.6) 0 16%, transparent 18%),
+    radial-gradient(ellipse at 58% 50%, rgba(234, 216, 184, 0.48) 0 18%, transparent 20%),
+    radial-gradient(ellipse at 78% 72%, rgba(234, 216, 184, 0.42) 0 14%, transparent 16%);
+  opacity: 0;
+  animation: agent-burn-smoke 900ms steps(4, end) infinite;
 }
 
 .agent-body,
@@ -1320,6 +1393,57 @@ body.trogdor-mode .terminal-fallback {
   pointer-events: none;
 }
 
+@keyframes dragon-walk-around {
+  0%,
+  100% {
+    translate: 0 0;
+    rotate: -1deg;
+  }
+
+  18% {
+    translate: calc(var(--dragon-walk-x, 3.2vw) * -0.28) 0.4vh;
+    rotate: 1deg;
+  }
+
+  42% {
+    translate: var(--dragon-walk-x, 3.2vw) var(--dragon-walk-y, -1.2vh);
+    rotate: -2deg;
+  }
+
+  66% {
+    translate: calc(var(--dragon-walk-x, 3.2vw) * 0.42) calc(var(--dragon-walk-y, -1.2vh) * -0.4);
+    rotate: 2deg;
+  }
+
+  84% {
+    translate: calc(var(--dragon-walk-x, 3.2vw) * -0.12) calc(var(--dragon-walk-y, -1.2vh) * 0.34);
+    rotate: 0deg;
+  }
+}
+
+@keyframes dragon-fire-lunge {
+  0%,
+  100% {
+    scale: 1;
+  }
+
+  38% {
+    scale: 1.08;
+  }
+}
+
+@keyframes dragon-sprite-fire {
+  0%,
+  33% {
+    opacity: 1;
+  }
+
+  34%,
+  100% {
+    opacity: 0;
+  }
+}
+
 @keyframes villager-step {
   0%,
   100% {
@@ -1328,6 +1452,35 @@ body.trogdor-mode .terminal-fallback {
 
   50% {
     translate: 2px 1px;
+  }
+}
+
+@keyframes agent-burn-flame {
+  0%,
+  100% {
+    opacity: 0.82;
+    translate: -1px 1px;
+  }
+
+  50% {
+    opacity: 1;
+    translate: 2px -2px;
+  }
+}
+
+@keyframes agent-burn-smoke {
+  0% {
+    opacity: 0;
+    translate: 0 8px;
+  }
+
+  30% {
+    opacity: 0.42;
+  }
+
+  100% {
+    opacity: 0;
+    translate: 4px -12px;
   }
 }
 
@@ -2187,6 +2340,32 @@ body.trogdor-mode .terminal-fallback {
 
   .trogdor-agent {
     width: 38px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .trogdor-dragon,
+  .trogdor-dragon.is-firing,
+  .trogdor-dragon.is-firing .trogdor-dragon-fire,
+  .trogdor-agent,
+  .trogdor-agent.is-attacking,
+  .trogdor-agent.is-burnt,
+  .agent-burn-flame,
+  .agent-burn-smoke,
+  .trogdor-structure.is-burning .structure-svg {
+    animation: none;
+  }
+
+  .trogdor-dragon.is-firing .trogdor-dragon-fire.is-full {
+    opacity: 1;
+  }
+
+  .trogdor-agent.is-burnt {
+    opacity: 0.45;
+  }
+
+  .trogdor-agent.is-burnt .agent-burn-flame {
+    opacity: 0.82;
   }
 }
 

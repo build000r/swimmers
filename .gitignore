@@ -26,6 +26,22 @@ tests/artifacts/
 refactor/
 test-results/
 
-# Generated local visual references
-/assets/dragon/
+# Generated local visual references, except the production Trogdor sprite frames
+/assets/dragon/*
+!/assets/dragon/mouth-closed/
+!/assets/dragon/fire-left-full/
+!/assets/dragon/fire-left-mid/
+!/assets/dragon/fire-left-short/
+!/assets/dragon/fire-right-full/
+!/assets/dragon/fire-right-mid/
+!/assets/dragon/fire-right-short/
+/assets/dragon/*/*
+!/assets/dragon/mouth-closed/left.png
+!/assets/dragon/mouth-closed/right.png
+!/assets/dragon/fire-left-full/left.png
+!/assets/dragon/fire-left-mid/left.png
+!/assets/dragon/fire-left-short/left.png
+!/assets/dragon/fire-right-full/right.png
+!/assets/dragon/fire-right-mid/right.png
+!/assets/dragon/fire-right-short/right.png
 /scripts/extract-dragon-sprites.py

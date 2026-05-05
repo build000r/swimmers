@@ -7,6 +7,7 @@ Trogdor mode is the web operator view for live Swimmers sessions. It keeps the b
 - Repo structure: one working directory or repository with one or more active sessions.
 - Villager/agent glyph: one `SessionSummary`.
 - Burninate level: shared Rust `operator_pressure` score derived from existing session state and clawgs `action_cues`.
+- Dragon sprite: tracked PNG frames under `assets/dragon/`, served by the web binary at `/assets/dragon/{pose}/{frame}`.
 - `!`: awaiting user or attention.
 - `$`: commit-ready.
 - `v`: validation missing after edit.
@@ -25,7 +26,8 @@ Trogdor mode is the web operator view for live Swimmers sessions. It keeps the b
    - `launch`: open the create-session sheet for the same repo.
    - `mmd`: open the Mermaid artifact sheet.
    - `commit`: launch the existing commit Codex flow when the shared pressure model marks the session commit-ready.
-5. In the Mermaid sheet, use plan-file tabs when the artifact reports `plan_files`; the web reads them through the existing `/v1/sessions/{id}/plan-file` API.
+5. When an operator response resolves an awaiting-user swordsman, the atlas briefly keeps that swordsman visible as burnt and moves the dragon into a fire pose aimed at the same repo slot. This is the visual close of the loop; it does not create a new backend state.
+6. In the Mermaid sheet, use plan-file tabs when the artifact reports `plan_files`; the web reads them through the existing `/v1/sessions/{id}/plan-file` API.
 
 ## Reuse Contract
 
