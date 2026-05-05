@@ -333,7 +333,6 @@ impl NativeDesktopApp {
     pub fn from_env_value(value: &str) -> Self {
         match value.trim().to_ascii_lowercase().as_str() {
             "ghostty" => Self::Ghostty,
-            "iterm" | "iterm2" | "i_term" | "i-term" => Self::Iterm,
             _ => Self::Iterm,
         }
     }
@@ -1176,16 +1175,9 @@ pub mod opcodes {
 
 pub fn context_limit_for_tool(tool: Option<&str>) -> u64 {
     match tool {
-        Some("Claude Code") => 200_000,
         Some("Codex") => 192_000,
-        Some("Amp") => 200_000,
-        Some("OpenCode") => 128_000,
-        Some("Aider") => 128_000,
-        Some("Goose") => 200_000,
-        Some("Cline") => 200_000,
-        Some("Cursor") => 200_000,
-        Some(_) => 128_000,
-        None => 128_000,
+        Some("Claude Code" | "Amp" | "Goose" | "Cline" | "Cursor") => 200_000,
+        _ => 128_000,
     }
 }
 

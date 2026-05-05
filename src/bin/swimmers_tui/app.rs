@@ -1826,10 +1826,9 @@ impl<C: TuiApi> App<C> {
             KeyCode::Up | KeyCode::BackTab => self.move_thought_config_focus(-1),
             KeyCode::Down | KeyCode::Tab => self.move_thought_config_focus(1),
             KeyCode::Left => self.adjust_thought_config_field(-1),
-            KeyCode::Right => self.adjust_thought_config_field(1),
+            KeyCode::Right | KeyCode::Char(' ') => self.adjust_thought_config_field(1),
             KeyCode::Backspace => self.pop_thought_config_model_char(),
             KeyCode::Enter => self.activate_thought_config_field(layout),
-            KeyCode::Char(' ') => self.adjust_thought_config_field(1),
             KeyCode::Char(ch)
                 if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT =>
             {
@@ -1906,8 +1905,9 @@ impl<C: TuiApi> App<C> {
             return;
         };
         match focus {
-            ThoughtConfigEditorField::Enabled => self.adjust_thought_config_field(1),
-            ThoughtConfigEditorField::Backend => self.adjust_thought_config_field(1),
+            ThoughtConfigEditorField::Enabled | ThoughtConfigEditorField::Backend => {
+                self.adjust_thought_config_field(1)
+            }
             ThoughtConfigEditorField::Model => {}
             ThoughtConfigEditorField::Test => self.test_thought_config(),
             ThoughtConfigEditorField::Save => self.submit_thought_config(layout),

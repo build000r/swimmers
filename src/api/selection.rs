@@ -188,10 +188,7 @@ mod tests {
             }),
         )
         .await;
-        match result {
-            Ok(resp) => resp,
-            Err(resp) => resp,
-        }
+        result.unwrap_or_else(|resp| resp)
     }
 
     #[tokio::test]

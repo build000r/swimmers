@@ -24,7 +24,6 @@ pub enum ThoughtBackend {
 impl ThoughtBackend {
     fn from_env_value(value: &str) -> Self {
         match value.trim().to_ascii_lowercase().as_str() {
-            "daemon" => Self::Daemon,
             "inproc" => Self::Inproc,
             _ => Self::Daemon,
         }

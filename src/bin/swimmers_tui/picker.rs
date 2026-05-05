@@ -1339,9 +1339,8 @@ pub(crate) fn render_initial_request(
         layout.content.y + 4,
         &truncate_label(&voice_state.status_line(), layout.content.width as usize),
         match voice_state {
-            VoiceUiState::Recording => Color::Red,
             VoiceUiState::Transcribing => Color::Yellow,
-            VoiceUiState::Failed(_) => Color::Red,
+            VoiceUiState::Recording | VoiceUiState::Failed(_) => Color::Red,
             VoiceUiState::Unsupported => Color::DarkGrey,
             VoiceUiState::Ready => Color::Cyan,
         },

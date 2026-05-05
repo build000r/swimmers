@@ -120,11 +120,11 @@ impl MermaidViewState {
 
     pub(crate) fn detail_level(self) -> Option<MermaidDetailLevel> {
         match self {
-            MermaidViewState::Outline => None,
             MermaidViewState::L1 => Some(MermaidDetailLevel::L1),
             MermaidViewState::L2 => Some(MermaidDetailLevel::L2),
             MermaidViewState::L3 => Some(MermaidDetailLevel::L3),
-            MermaidViewState::ErEntities
+            MermaidViewState::Outline
+            | MermaidViewState::ErEntities
             | MermaidViewState::ErKeys
             | MermaidViewState::ErColumns
             | MermaidViewState::ErSchema => None,
@@ -134,10 +134,8 @@ impl MermaidViewState {
     pub(crate) fn collision_padding(self) -> u16 {
         match self {
             MermaidViewState::Outline | MermaidViewState::L1 => 2,
-            MermaidViewState::L2 => 1,
-            MermaidViewState::L3 => 0,
-            MermaidViewState::ErEntities | MermaidViewState::ErKeys => 1,
-            MermaidViewState::ErColumns | MermaidViewState::ErSchema => 0,
+            MermaidViewState::L2 | MermaidViewState::ErEntities | MermaidViewState::ErKeys => 1,
+            MermaidViewState::L3 | MermaidViewState::ErColumns | MermaidViewState::ErSchema => 0,
         }
     }
 
@@ -1520,11 +1518,11 @@ pub(crate) fn mermaid_er_view_states() -> [MermaidViewState; 4] {
 
 pub(crate) fn mermaid_er_state_zoom(view_state: MermaidViewState) -> f32 {
     match view_state {
-        MermaidViewState::ErEntities => 1.0,
         MermaidViewState::ErKeys => 1.25,
         MermaidViewState::ErColumns => 1.5,
         MermaidViewState::ErSchema => 1.75,
-        MermaidViewState::Outline
+        MermaidViewState::ErEntities
+        | MermaidViewState::Outline
         | MermaidViewState::L1
         | MermaidViewState::L2
         | MermaidViewState::L3 => 1.0,
@@ -2100,8 +2098,7 @@ pub(crate) fn mermaid_outline_merge_char(existing: char, next: char) -> char {
         (current, ch) if current == ch => current,
         ('>', _) | ('<', _) => existing,
         (_, '>') | (_, '<') => next,
-        ('|', '_') | ('_', '|') => '|',
-        ('|', '|') => '|',
+        ('|', '_') | ('_', '|') | ('|', '|') => '|',
         ('_', '_') => '_',
         (_, ch) => ch,
     }
@@ -3207,12 +3204,12 @@ pub(crate) fn mermaid_build_er_packed_boxes(
                 })
             })
             .filter(|row| match view_state {
-                MermaidViewState::ErEntities => false,
                 MermaidViewState::ErKeys => {
                     row.name_text.contains(" PK") || row.name_text.contains(" FK")
                 }
                 MermaidViewState::ErColumns | MermaidViewState::ErSchema => true,
-                MermaidViewState::Outline
+                MermaidViewState::ErEntities
+                | MermaidViewState::Outline
                 | MermaidViewState::L1
                 | MermaidViewState::L2
                 | MermaidViewState::L3 => false,

@@ -98,11 +98,9 @@ impl SpriteKind {
             Self::Active => 1.0,
             Self::Busy => 1.3,
             Self::Drowsy => 0.5,
-            Self::Sleeping => 0.0,
-            Self::DeepSleep => 0.0,
             Self::Attention => 1.15,
             Self::Error => 0.8,
-            Self::Exited => 0.0,
+            Self::Sleeping | Self::DeepSleep | Self::Exited => 0.0,
         }
     }
 
@@ -111,11 +109,9 @@ impl SpriteKind {
             Self::Active => 1.2,
             Self::Busy => 1.45,
             Self::Drowsy => 0.75,
-            Self::Sleeping => 0.0,
-            Self::DeepSleep => 0.0,
             Self::Attention => 1.3,
             Self::Error => 1.6,
-            Self::Exited => 0.0,
+            Self::Sleeping | Self::DeepSleep | Self::Exited => 0.0,
         }
     }
 

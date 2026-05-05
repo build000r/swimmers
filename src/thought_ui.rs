@@ -13,9 +13,8 @@ pub fn thought_backend_cycle_options() -> &'static [&'static str] {
 pub fn canonical_thought_backend_key(value: &str) -> &'static str {
     match value.trim().to_ascii_lowercase().as_str() {
         "" => "",
-        "claude" | "claude-cli" | "claude_cli" => "openrouter",
+        "claude" | "claude-cli" | "claude_cli" | "openrouter" => "openrouter",
         "codex" | "codex-cli" | "codex_cli" => "codex",
-        "openrouter" => "openrouter",
         _ => "custom",
     }
 }
