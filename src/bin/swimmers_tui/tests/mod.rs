@@ -1653,7 +1653,7 @@ fn refresh_sessions_error_not_overwritten_by_native_status_error() {
     let api = MockApi::new();
     let layout = test_layout(120, 32);
     api.push_fetch_sessions(Err("timed out while trying to refresh sessions".to_string()));
-    let mut app = make_app(api.clone());
+    let mut app = make_app(api);
 
     app.refresh(layout);
 
@@ -1681,7 +1681,7 @@ fn refresh_retains_cached_native_status_when_sessions_fail() {
         reason: None,
     };
     api.push_fetch_sessions(Ok(vec![]));
-    api.push_native_status(Ok(cached.clone()));
+    api.push_native_status(Ok(cached));
     let mut app = make_app(api.clone());
     app.refresh(layout);
     assert!(
@@ -4268,7 +4268,7 @@ fn spawned_selected_entity_matches_thought_color() {
     let mut spawned_session = session_summary("sess-42", "42", TEST_REPO_SWIMMERS);
     spawned_session.repo_theme_id = Some(theme_id.clone());
     api.push_create_session(Ok(create_response_with_theme(
-        spawned_session.clone(),
+        spawned_session,
         repo_theme("#B89875"),
     )));
     let mut app = make_app(api);
@@ -6642,7 +6642,7 @@ fn toggle_launch_target_persists_across_picker_reopen() {
         &[("swimmers", false)],
     )));
     let field = test_field();
-    let mut app = make_app(api.clone());
+    let mut app = make_app(api);
 
     app.handle_field_click(10, 10, field);
     poll_until_interaction(&mut app);
@@ -6715,7 +6715,7 @@ fn toggle_tool_switches_spawn_tool_and_persists_across_picker_reopen() {
     api.push_list_dirs(Ok(dir_response(TEST_REPOS_ROOT, &[("swimmers", false)])));
     api.push_list_dirs(Ok(dir_response(TEST_REPOS_ROOT, &[("swimmers", false)])));
     let field = test_field();
-    let mut app = make_app(api.clone());
+    let mut app = make_app(api);
 
     app.handle_field_click(10, 10, field);
     assert!(app.pending_interaction.is_some());
@@ -6926,7 +6926,7 @@ fn renderer_flush_copies_drawn_cells_into_last_buffer() {
 fn move_selection_updates_picker_and_visible_session_selection() {
     let api = MockApi::new();
     let layout = test_layout(120, 32);
-    let mut app = make_app(api.clone());
+    let mut app = make_app(api);
     app.merge_sessions(
         vec![
             session_summary("sess-1", "1", TEST_REPO_ALPHA),
@@ -6961,7 +6961,7 @@ fn move_selection_updates_picker_and_visible_session_selection() {
 fn handle_key_event_covers_initial_request_picker_and_quit_paths() {
     let api = MockApi::new();
     let layout = test_layout(120, 32);
-    let mut app = make_app(api.clone());
+    let mut app = make_app(api);
     app.merge_sessions(
         vec![
             session_summary("sess-1", "1", TEST_REPO_ALPHA),
@@ -12522,7 +12522,7 @@ fn refresh_error_shows_full_message_without_prior_success() {
 
     // No prior successful refresh → full diagnostic immediately.
     api.push_fetch_sessions(Err("connection refused".to_string()));
-    let mut app = make_app(api.clone());
+    let mut app = make_app(api);
     app.refresh(layout);
     assert_eq!(
         app.message.as_ref().map(|(m, _)| m.as_str()),

@@ -1316,7 +1316,7 @@ mod tests {
 
         // When repo_theme is None, the field should be omitted entirely.
         let resp_none = CreateSessionResponse {
-            session: resp.session.clone(),
+            session: resp.session,
             repo_theme: None,
         };
         let json_none = serde_json::to_string(&resp_none).unwrap();

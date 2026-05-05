@@ -98,7 +98,7 @@ pub(crate) async fn fetch_live_summary(
 }
 
 pub fn api_router(config: Arc<Config>) -> Router<Arc<AppState>> {
-    let config_for_middleware = config.clone();
+    let config_for_middleware = config;
 
     let router = Router::new()
         .merge(native::routes())

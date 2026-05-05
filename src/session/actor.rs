@@ -380,7 +380,7 @@ impl SessionActor {
         let actor = SessionActor {
             session_id: session_id.clone(),
             tmux_name: tmux_name.clone(),
-            config: config.clone(),
+            config,
             master: pair.master,
             writer,
             state_detector,
@@ -1364,7 +1364,7 @@ impl SessionActor {
                 session_started_at,
                 pane_tail: String::new(),
             };
-            let response_session_id = session_id.clone();
+            let response_session_id = session_id;
             default_artifact_registry()
                 .discover(ArtifactKind::Mermaid, &context)
                 .map(|artifact| {

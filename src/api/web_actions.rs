@@ -165,7 +165,6 @@ async fn render_mermaid_artifact_svg(
             "MERMAID_ARTIFACT_SOURCE_UNAVAILABLE",
             artifact
                 .error
-                .clone()
                 .or(Some("mermaid artifact source is unavailable".to_string())),
         ));
     };
@@ -212,7 +211,6 @@ async fn post_open_mermaid_artifact_with_opener<O: ArtifactOpener>(
             "MERMAID_ARTIFACT_PATH_UNAVAILABLE",
             artifact
                 .error
-                .clone()
                 .or(Some("mermaid artifact path is unavailable".to_string())),
         );
     };

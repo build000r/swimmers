@@ -254,7 +254,6 @@ fn apply_update<P: SessionProvider>(
     }
 
     let persisted_delivery = incoming_delivery
-        .clone()
         .or_else(|| current_delivery.cloned())
         .unwrap_or_default();
     delivery_states.insert(update.session_id.clone(), persisted_delivery.clone());

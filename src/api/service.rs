@@ -1571,7 +1571,7 @@ mod tests {
                 OverlayDirGroup {
                     name: "skills".into(),
                     paths: Vec::new(),
-                    dirs: vec![skills_root.clone()],
+                    dirs: vec![skills_root],
                 },
             ],
             launch: crate::session::overlay::OverlayLaunchConfig::local_only(),

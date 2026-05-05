@@ -393,7 +393,7 @@ mod tests {
         let group = OverlayDirGroup {
             name: "skills".into(),
             paths: Vec::new(),
-            dirs: vec![src_a.clone(), src_b.clone()],
+            dirs: vec![src_a.clone(), src_b],
         };
 
         let entries = list_group_entries_sync(&group);

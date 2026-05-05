@@ -1037,7 +1037,7 @@ fn group_header_row<C: TuiApi>(
     let label_before_plan = if send_session_ids.is_some() {
         format!("{base_label} {THOUGHT_SEND_LABEL}")
     } else {
-        base_label.clone()
+        base_label
     };
     let plan_start = plan
         .as_ref()
@@ -1397,7 +1397,7 @@ pub(crate) fn build_thought_panel<C: TuiApi>(
     let total_count = all_entries.len();
     let mode = thought_panel_display_mode(app, &all_entries);
     let entries = if mode.show_all {
-        all_entries.clone()
+        all_entries
     } else {
         all_entries
             .iter()

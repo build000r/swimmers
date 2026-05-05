@@ -1076,12 +1076,12 @@ dev_sanity:
         set_mtime(&draft_schema, earlier);
 
         let client = ClientOverlay {
-            client_dir: client_dir.clone(),
+            client_dir,
             label: "personal".to_string(),
             cwd_patterns: Vec::new(),
             cwd_match_count: 0,
-            plan_root: Some(released.clone()),
-            plan_draft: Some(draft.clone()),
+            plan_root: Some(released),
+            plan_draft: Some(draft),
             dir_config: None,
         };
         let overlay = SkillboxOverlay {

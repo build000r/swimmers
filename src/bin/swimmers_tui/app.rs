@@ -2298,7 +2298,7 @@ impl<C: TuiApi> App<C> {
                 };
                 let remove = match mode {
                     PickerGroupUpdateMode::Add => Vec::new(),
-                    PickerGroupUpdateMode::Remove => vec![target.clone()],
+                    PickerGroupUpdateMode::Remove => vec![target],
                     PickerGroupUpdateMode::Move => {
                         let mut remove = memberships
                             .into_iter()
@@ -3107,7 +3107,7 @@ impl<C: TuiApi> App<C> {
         let unsupported_reason = detect_mermaid_backend_support();
         self.fish_bowl_mode = FishBowlMode::Mermaid(MermaidViewerState {
             session_id,
-            tmux_name: slug.clone(),
+            tmux_name: slug,
             cwd,
             path: Some(schema_path),
             source,
