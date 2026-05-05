@@ -26,6 +26,8 @@ pub(crate) struct PickerState {
     pub(crate) current_group: Option<String>,
     /// Group names available from the overlay (shown as header buttons).
     pub(crate) available_groups: Vec<String>,
+    /// Group selected for add/remove/move edits from keyboard controls.
+    pub(crate) group_edit_target: Option<String>,
     /// Live filter query typed by the user; filters `entries` by substring.
     pub(crate) search: String,
     pub(crate) batch_exclude_mode: bool,
@@ -63,6 +65,7 @@ impl PickerState {
             selection: PickerSelection::SpawnHere,
             scroll: 0,
             current_group: None,
+            group_edit_target: response.groups.first().cloned(),
             available_groups: response.groups,
             search: String::new(),
             batch_exclude_mode: false,
@@ -166,6 +169,14 @@ impl PickerState {
         );
         if !response.groups.is_empty() {
             self.available_groups = response.groups;
+            if !self
+                .group_edit_target
+                .as_ref()
+                .map(|target| self.available_groups.iter().any(|group| group == target))
+                .unwrap_or(false)
+            {
+                self.group_edit_target = self.available_groups.first().cloned();
+            }
         }
         self.current_theme_color = None;
         self.entry_theme_colors.clear();
@@ -330,14 +341,37 @@ impl PickerState {
             .map(|target| target.label.clone())
             .unwrap_or_else(|| current.to_string())
     }
+
+    pub(crate) fn cycle_group_edit_target(&mut self) -> Option<String> {
+        if self.available_groups.is_empty() {
+            self.group_edit_target = None;
+            return None;
+        }
+        let current = self.group_edit_target.as_deref();
+        let index = current
+            .and_then(|target| {
+                self.available_groups
+                    .iter()
+                    .position(|group| group == target)
+            })
+            .unwrap_or(0);
+        let next = if current.is_some() {
+            (index + 1) % self.available_groups.len()
+        } else {
+            index
+        };
+        self.group_edit_target = Some(self.available_groups[next].clone());
+        self.group_edit_target.clone()
+    }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum PickerAction {
     Close,
     Up,
     ToggleManaged(bool),
     ActivateGroup(String),
+    CycleGroupEditTarget,
     ToggleTool,
     ToggleLaunchTarget,
     ToggleBatchExcludeMode,
@@ -357,6 +391,7 @@ pub(crate) struct PickerLayout {
     pub(crate) env_button: Rect,
     pub(crate) group_buttons: Vec<(String, Rect)>,
     pub(crate) all_button: Rect,
+    pub(crate) group_target_button: Option<Rect>,
     pub(crate) tool_button: Rect,
     pub(crate) launch_target_button: Rect,
     pub(crate) exclude_button: Rect,
@@ -726,6 +761,19 @@ pub(crate) fn picker_layout(picker: &PickerState, field: Rect) -> PickerLayout {
         width: 13,
         height: 1,
     };
+    let group_target_button = picker.group_edit_target.as_ref().map(|target| {
+        let label_width = format!("[target:{target}]").len() as u16;
+        let x = all_button
+            .right()
+            .saturating_add(1)
+            .min(content.right().saturating_sub(label_width));
+        Rect {
+            x,
+            y: content.y + 2,
+            width: label_width,
+            height: 1,
+        }
+    });
     let tool_label_width = tool_button_label(picker.spawn_tool).len() as u16;
     let tool_button = Rect {
         x: close_button.x.saturating_sub(tool_label_width + 1),
@@ -763,6 +811,7 @@ pub(crate) fn picker_layout(picker: &PickerState, field: Rect) -> PickerLayout {
         env_button,
         group_buttons,
         all_button,
+        group_target_button,
         tool_button,
         launch_target_button,
         exclude_button,
@@ -831,6 +880,13 @@ fn picker_filter_action_at(layout: &PickerLayout, x: u16, y: u16) -> Option<Pick
     }
     if layout.all_button.contains(x, y) {
         return Some(PickerAction::ToggleManaged(false));
+    }
+    if layout
+        .group_target_button
+        .map(|button| button.contains(x, y))
+        .unwrap_or(false)
+    {
+        return Some(PickerAction::CycleGroupEditTarget);
     }
     if layout.spawn_here_button.contains(x, y) {
         return Some(PickerAction::ActivateCurrentPath);
@@ -1010,6 +1066,10 @@ fn render_picker_filter_row(renderer: &mut Renderer, picker: &PickerState, layou
             Color::DarkGrey
         },
     );
+    if let (Some(target), Some(rect)) = (&picker.group_edit_target, layout.group_target_button) {
+        let label = format!("[target:{target}]");
+        renderer.draw_text(rect.x, rect.y, &label, Color::Yellow);
+    }
 }
 
 fn render_picker_spawn_row(renderer: &mut Renderer, picker: &PickerState, layout: &PickerLayout) {
@@ -1202,6 +1262,7 @@ pub(crate) fn render_initial_request(
     initial_request: &InitialRequestState,
     voice_state: &VoiceUiState,
     field: Rect,
+    group_context: Option<(&str, usize)>,
 ) {
     let layout = initial_request_layout(field);
     renderer.fill_rect(layout.frame, ' ', Color::Reset);
@@ -1209,11 +1270,17 @@ pub(crate) fn render_initial_request(
     renderer.draw_text(
         layout.content.x,
         layout.content.y,
-        "initial request",
+        if group_context.is_some() {
+            "send to school"
+        } else {
+            "initial request"
+        },
         Color::Cyan,
     );
 
-    let cwd_line = if let Some(dirs) = initial_request.batch_dirs.as_ref() {
+    let cwd_line = if let Some((label, count)) = group_context {
+        format!("school: {} ({} sessions)", label, count)
+    } else if let Some(dirs) = initial_request.batch_dirs.as_ref() {
         format!("batch: {} included dirs", dirs.len())
     } else {
         format!(
@@ -1233,15 +1300,19 @@ pub(crate) fn render_initial_request(
     renderer.draw_text(
         layout.content.x,
         layout.content.y + 2,
-        &format!(
-            "enter creates hidden swimmer{}  {}  esc cancels",
-            if initial_request.batch_dirs.is_some() {
-                "s"
-            } else {
-                ""
-            },
-            toggle_hint()
-        ),
+        &if group_context.is_some() {
+            format!("enter sends to school  {}  esc cancels", toggle_hint())
+        } else {
+            format!(
+                "enter creates hidden swimmer{}  {}  esc cancels",
+                if initial_request.batch_dirs.is_some() {
+                    "s"
+                } else {
+                    ""
+                },
+                toggle_hint()
+            )
+        },
         Color::DarkGrey,
     );
 

@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 use regex::Regex;
 use tracing::debug;
 
-use crate::types::SessionState;
+use crate::types::{SessionState, StateConfidence, StateEvidence};
 
 const ERROR_LINGER_MS: u64 = 4000;
 const ATTENTION_DELAY_MS: u64 = 300000;
@@ -22,6 +22,7 @@ pub type StateChangeCallback =
 pub struct StateDetector {
     state: SessionState,
     current_command: Option<String>,
+    state_evidence: StateEvidence,
     error_patterns: Vec<Regex>,
     escape_state: EscapeState,
     /// Deadline at which an active error state should auto-clear to idle.
@@ -42,6 +43,7 @@ impl StateDetector {
         Self {
             state: SessionState::Idle,
             current_command: None,
+            state_evidence: StateEvidence::unobserved("initial_state"),
             error_patterns: vec![
                 Regex::new(r"(?i)command not found").expect("error pattern is valid"),
                 Regex::new(r"(?i)Permission denied").expect("error pattern is valid"),
@@ -354,6 +356,17 @@ impl StateDetector {
                 debug!("process liveness: no children but state is busy, correcting to idle");
                 self.set_state(SessionState::Idle, Some(None), now, "liveness_no_children");
             }
+            SessionState::Busy
+                if has_children
+                    && !self.tui_tool_mode
+                    && self.state_evidence.confidence != StateConfidence::High =>
+            {
+                debug!(
+                    cause = %self.state_evidence.cause,
+                    "process liveness confirmed busy state"
+                );
+                self.set_state(SessionState::Busy, None, now, "liveness_has_children");
+            }
             SessionState::Idle | SessionState::Attention if has_children => {
                 if self.tui_tool_mode {
                     debug!(
@@ -375,6 +388,11 @@ impl StateDetector {
     /// Get the current state and command as a tuple.
     pub fn get_state(&self) -> (SessionState, Option<String>) {
         (self.state, self.current_command.clone())
+    }
+
+    /// Return evidence for the current state classification.
+    pub fn state_evidence(&self) -> StateEvidence {
+        self.state_evidence.clone()
     }
 
     /// Return the current session state.
@@ -714,13 +732,19 @@ impl StateDetector {
     }
 
     fn has_prompt_context(prefix: &str) -> bool {
-        prefix.contains('@')
-            || prefix.contains(':')
-            || prefix.contains('/')
-            || prefix.contains('~')
-            || prefix.contains('\\')
-            || prefix.ends_with(')')
-            || prefix.ends_with(']')
+        prefix.chars().any(Self::is_prompt_context_char)
+            || prefix
+                .chars()
+                .last()
+                .is_some_and(Self::is_prompt_context_suffix)
+    }
+
+    fn is_prompt_context_char(c: char) -> bool {
+        matches!(c, '@' | ':' | '/' | '~' | '\\')
+    }
+
+    fn is_prompt_context_suffix(c: char) -> bool {
+        matches!(c, ')' | ']')
     }
 
     fn log_excerpt(visible: &str) -> String {
@@ -754,6 +778,7 @@ impl StateDetector {
     ) {
         let prev = self.state;
         self.state = new_state;
+        self.state_evidence = StateEvidence::new(cause);
 
         if let Some(cmd) = command_update {
             self.current_command = cmd;
@@ -872,6 +897,8 @@ mod tests {
         let d = StateDetector::new();
         assert_eq!(d.get_state().0, SessionState::Idle);
         assert!(d.get_state().1.is_none());
+        assert_eq!(d.state_evidence().cause, "initial_state");
+        assert!(d.state_evidence().observed_at.is_none());
     }
 
     #[test]
@@ -893,16 +920,48 @@ mod tests {
         let (state, cmd) = d.get_state();
         assert_eq!(state, SessionState::Busy);
         assert_eq!(cmd.as_deref(), Some("cargo build"));
+        let evidence = d.state_evidence();
+        assert_eq!(evidence.cause, "osc133_command");
+        assert_eq!(evidence.confidence, StateConfidence::High);
+        assert!(evidence.observed_at.is_some());
+    }
+
+    #[test]
+    fn same_state_detection_refreshes_state_evidence() {
+        let mut d = StateDetector::new();
+        d.process_output(b"\x1b]133;A\x07");
+        assert_eq!(d.get_state().0, SessionState::Idle);
+        let evidence = d.state_evidence();
+        assert_eq!(evidence.cause, "osc133_prompt");
+        assert_eq!(evidence.confidence, StateConfidence::High);
+        assert!(evidence.observed_at.is_some());
+    }
+
+    #[test]
+    fn liveness_confirmation_upgrades_locally_inferred_busy_evidence() {
+        let mut d = StateDetector::new();
+        d.note_input();
+        assert_eq!(d.get_state().0, SessionState::Busy);
+        assert_eq!(d.state_evidence().cause, "local_input");
+        assert_eq!(d.state_evidence().confidence, StateConfidence::Medium);
+
+        d.apply_process_liveness(true);
+
+        assert_eq!(d.get_state().0, SessionState::Busy);
+        let evidence = d.state_evidence();
+        assert_eq!(evidence.cause, "liveness_has_children");
+        assert_eq!(evidence.confidence, StateConfidence::High);
+        assert!(evidence.observed_at.is_some());
     }
 
     #[test]
     fn consume_private_string_byte_handles_escape_and_st_terminators() {
         let mut esc_pending = false;
         let mut consumed = 0;
-        assert!(matches!(
-            StateDetector::consume_private_string_byte(0x1b, &mut esc_pending, &mut consumed),
-            None
-        ));
+        assert!(
+            StateDetector::consume_private_string_byte(0x1b, &mut esc_pending, &mut consumed)
+                .is_none()
+        );
         assert!(esc_pending);
         assert!(matches!(
             StateDetector::consume_private_string_byte(b'\\', &mut esc_pending, &mut consumed),
@@ -918,10 +977,10 @@ mod tests {
 
         esc_pending = true;
         consumed = 0;
-        assert!(matches!(
-            StateDetector::consume_private_string_byte(b'x', &mut esc_pending, &mut consumed),
-            None
-        ));
+        assert!(
+            StateDetector::consume_private_string_byte(b'x', &mut esc_pending, &mut consumed)
+                .is_none()
+        );
         assert!(!esc_pending);
     }
 
@@ -1476,6 +1535,22 @@ mod tests {
 
         d.apply_process_liveness(true);
         assert_eq!(d.state(), SessionState::Attention);
+    }
+
+    #[test]
+    fn tui_tool_mode_liveness_does_not_upgrade_busy_confidence_from_waiting_child() {
+        let mut d = StateDetector::new();
+        d.set_tui_tool_mode(true);
+
+        d.note_input();
+        assert_eq!(d.state(), SessionState::Busy);
+        assert_eq!(d.state_evidence().cause, "local_input");
+        assert_eq!(d.state_evidence().confidence, StateConfidence::Medium);
+
+        d.apply_process_liveness(true);
+        assert_eq!(d.state(), SessionState::Busy);
+        assert_eq!(d.state_evidence().cause, "local_input");
+        assert_eq!(d.state_evidence().confidence, StateConfidence::Medium);
     }
 
     // --- Process liveness reconciliation tests ---

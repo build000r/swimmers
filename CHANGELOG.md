@@ -4,10 +4,23 @@ All notable changes to swimmers are documented here. The format is based on [Kee
 
 ## [Unreleased]
 
+## [0.3.0] — 2026-05-02
+
+### Trustworthy glance state evidence
+
+- Added state evidence to session summaries and session-state events so TUI and web glances can distinguish observed high-confidence state from stale, cached, or locally inferred state.
+- Breaking Rust API note: `SessionSummary` and `SessionStatePayload` now include `state_evidence`. The crate version is advancing to `0.3.0` for this pre-1.0 public struct change; JSON consumers remain backward-compatible through serde defaults.
+
 ### Startup and embedded-mode parity follow-through
 
 - Wired embedded mode onto the deferred-init path for real. `AppState.daemon_defaults` and `AppState.file_store` now use `OnceLock`, `init_app_state_skeleton` can render the first frame without waiting on persistence/bootstrap work, and `spawn_deferred_init` now attaches the loaded defaults/store back into shared app state once they arrive.
 - Extracted the duplicated dirs/native helper stack into `src/api/service.rs` and repointed both the HTTP handlers and `InProcessApi` at it. `/v1/dirs`, native desktop status/open, and repo-action behavior now share one implementation instead of carrying `TODO(parity)` copies in the embedded client.
+
+### Operator action surfaces
+
+- Added `/v1/sessions/group-input` plus matching TUI and web affordances so one operator response can be sent to multiple ready sessions in the same batch while stale, disconnected, degraded, overloaded, exited, unbatched, mixed-batch, and attention-deep-sleep sessions are skipped or rejected explicitly.
+- Added editable directory group membership state for the create-session browser. `/v1/dirs` responses now expose effective group membership, `/v1/dirs/group-memberships` persists add/remove/move deltas in `dir_groups.json`, and the web/TUI directory pickers can move projects across groups without editing overlay config by hand.
+- Added `/v1/operator-pressure` and the web Trogdor atlas as a presentation layer over existing `SessionSummary`, `RestState`, `StateEvidence`, and action-cue facts, keeping operator-readiness scoring out of the session backend vocabulary.
 
 ### Release notes
 
@@ -133,7 +146,8 @@ The final stretch closed three publish blockers and nine should-fixes flagged by
 - Renamed throngterm → swimmers ([`5bc4c03`](https://github.com/build000r/swimmers/commit/5bc4c03))
 - Legacy Node.js stack removed and docs updated for the Rust/Preact world ([`5d9c3ed`](https://github.com/build000r/swimmers/commit/5d9c3ed))
 
-[Unreleased]: https://github.com/build000r/swimmers/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/build000r/swimmers/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/build000r/swimmers/releases/tag/v0.3.0
 [0.2.0]: https://github.com/build000r/swimmers/releases/tag/v0.2.0
 [0.1.3]: https://github.com/build000r/swimmers/releases/tag/v0.1.3
 [0.1.2]: https://github.com/build000r/swimmers/releases/tag/v0.1.2

@@ -103,6 +103,16 @@ handle_existing_listener() {
 main() {
   swimmers_require cargo
 
+  local web_features feature_args
+  web_features="${SWIMMERS_WEB_FEATURES-personal-workflows}"
+  feature_args=()
+  if [[ -n "${web_features}" ]]; then
+    feature_args=(--features "${web_features}")
+    printf 'swimmers web features: %s\n' "${web_features}"
+  else
+    printf 'swimmers web features: (none)\n'
+  fi
+
   local pkg_dir=""
   if pkg_dir="$(swimmers_resolve_frankentui_pkg_dir)"; then
     export SWIMMERS_FRANKENTUI_PKG_DIR="${pkg_dir}"
@@ -125,7 +135,7 @@ main() {
   fi
 
   cd "${ROOT_DIR}"
-  exec cargo run --bin swimmers
+  exec cargo run "${feature_args[@]}" --bin swimmers
 }
 
 main "$@"

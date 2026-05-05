@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
@@ -51,6 +51,78 @@ pub enum BubblePrecedence {
     ThoughtFirst,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ActionCue {
+    pub kind: ActionCueKind,
+    pub status: ActionCueStatus,
+    pub source: ActionCueSource,
+    pub confidence: ActionCueConfidence,
+    pub evidence: Vec<String>,
+}
+
+impl ActionCue {
+    pub fn expected_evidence(kind: ActionCueKind) -> &'static [&'static str] {
+        match kind {
+            ActionCueKind::AwaitingUser => &["awaiting_user_input"],
+            ActionCueKind::CommitReady => &[
+                "edit_seen",
+                "validation_succeeded",
+                "dirty_tree_checked_after_latest_edit",
+                "commit_not_seen_after_latest_edit",
+            ],
+            ActionCueKind::ValidationMissingAfterEdit => &[
+                "edit_seen",
+                "fresh_validation_not_seen",
+                "commit_not_seen_after_latest_edit",
+            ],
+            ActionCueKind::DirtyCheckMissing => &[
+                "edit_seen",
+                "validation_succeeded",
+                "dirty_tree_check_not_seen_after_latest_edit",
+                "commit_not_seen_after_latest_edit",
+            ],
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ActionCueKind {
+    AwaitingUser,
+    CommitReady,
+    ValidationMissingAfterEdit,
+    DirtyCheckMissing,
+}
+
+impl ActionCueKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::AwaitingUser => "awaiting_user",
+            Self::CommitReady => "commit_ready",
+            Self::ValidationMissingAfterEdit => "validation_missing_after_edit",
+            Self::DirtyCheckMissing => "dirty_check_missing",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ActionCueStatus {
+    Active,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ActionCueSource {
+    Transcript,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ActionCueConfidence {
+    Deterministic,
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TransportHealth {
@@ -59,6 +131,105 @@ pub enum TransportHealth {
     Degraded,
     Overloaded,
     Disconnected,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StateConfidence {
+    #[default]
+    Low,
+    Medium,
+    High,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct StateEvidence {
+    #[serde(default = "default_state_cause")]
+    pub cause: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observed_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub confidence: StateConfidence,
+}
+
+impl StateEvidence {
+    pub fn new(cause: impl Into<String>) -> Self {
+        Self::with_observed_at(cause, Some(Utc::now()))
+    }
+
+    pub fn unobserved(cause: impl Into<String>) -> Self {
+        Self::with_observed_at(cause, None)
+    }
+
+    pub fn with_observed_at(cause: impl Into<String>, observed_at: Option<DateTime<Utc>>) -> Self {
+        let cause = cause.into();
+        let confidence = Self::confidence_for_cause(&cause);
+        Self {
+            cause,
+            observed_at,
+            confidence,
+        }
+    }
+
+    pub fn unknown() -> Self {
+        Self {
+            cause: default_state_cause(),
+            observed_at: None,
+            confidence: StateConfidence::Low,
+        }
+    }
+
+    fn confidence_for_cause(cause: &str) -> StateConfidence {
+        match cause {
+            "osc133_command"
+            | "osc133_prompt"
+            | "error_pattern"
+            | "process_exit"
+            | "startup_missing_tmux"
+            | "liveness_no_children"
+            | "liveness_has_children" => StateConfidence::High,
+            "fallback_non_prompt_output"
+            | "fallback_prompt_detected"
+            | "output_silence_expired"
+            | "local_input"
+            | "dismiss_attention"
+            | "error_timer_expired"
+            | "attention_timer_expired" => StateConfidence::Medium,
+            _ => StateConfidence::Low,
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for StateEvidence {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct RawStateEvidence {
+            #[serde(default = "default_state_cause")]
+            cause: String,
+            #[serde(default)]
+            observed_at: Option<DateTime<Utc>>,
+            #[serde(default)]
+            confidence: Option<StateConfidence>,
+        }
+
+        let raw = RawStateEvidence::deserialize(deserializer)?;
+        Ok(Self {
+            confidence: raw
+                .confidence
+                .unwrap_or_else(|| Self::confidence_for_cause(&raw.cause)),
+            cause: raw.cause,
+            observed_at: raw.observed_at,
+        })
+    }
+}
+
+impl Default for StateEvidence {
+    fn default() -> Self {
+        Self::unknown()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -254,6 +425,8 @@ pub struct SessionSummary {
     pub tmux_name: String,
     pub state: SessionState,
     pub current_command: Option<String>,
+    #[serde(default)]
+    pub state_evidence: StateEvidence,
     pub cwd: String,
     pub tool: Option<String>,
     pub token_count: u64,
@@ -269,6 +442,8 @@ pub struct SessionSummary {
     pub rest_state: RestState,
     #[serde(default)]
     pub commit_candidate: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub action_cues: Vec<ActionCue>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub objective_changed_at: Option<DateTime<Utc>>,
     #[serde(default)]
@@ -441,6 +616,10 @@ pub struct DirEntry {
     /// When set, this entry represents a virtual directory group.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub group: Option<String>,
+    /// Effective directory groups this entry belongs to after overlay defaults
+    /// and operator-managed membership deltas have been merged.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub groups: Vec<String>,
     /// Explicit absolute path for entries whose parent differs from the
     /// response `path` (e.g. entries inside a group listing).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -465,6 +644,36 @@ pub struct DirListResponse {
     pub launch_targets: Vec<LaunchTargetSummary>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_launch_target: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DirGroupMemberships {
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub groups: BTreeMap<String, DirGroupMembershipDelta>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DirGroupMembershipDelta {
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub include_paths: BTreeSet<String>,
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub exclude_paths: BTreeSet<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DirGroupMembershipUpdateRequest {
+    pub path: String,
+    #[serde(default)]
+    pub add: Vec<String>,
+    #[serde(default)]
+    pub remove: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DirGroupMembershipUpdateResponse {
+    pub path: String,
+    pub groups: Vec<String>,
+    pub available_groups: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -541,12 +750,47 @@ pub struct ThoughtConfigResponse {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionInputRequest {
     pub text: String,
+    #[serde(default)]
+    pub submit: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionInputResponse {
     pub ok: bool,
     pub session_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionGroupInputRequest {
+    pub session_ids: Vec<String>,
+    pub text: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionGroupInputResult {
+    pub session_id: String,
+    pub ok: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<ErrorResponse>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionGroupInputResponse {
+    pub results: Vec<SessionGroupInputResult>,
+    pub delivered: usize,
+    pub skipped: usize,
+}
+
+impl SessionGroupInputResponse {
+    pub fn from_results(results: Vec<SessionGroupInputResult>) -> Self {
+        let delivered = results.iter().filter(|result| result.ok).count();
+        let skipped = results.len().saturating_sub(delivered);
+        Self {
+            results,
+            delivered,
+            skipped,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -578,6 +822,8 @@ pub struct SessionStatePayload {
     pub state: SessionState,
     pub previous_state: SessionState,
     pub current_command: Option<String>,
+    #[serde(default)]
+    pub state_evidence: StateEvidence,
     pub transport_health: TransportHealth,
     /// Reason for session exit: "process_exit", "startup_missing_tmux", or null
     /// for normal state transitions.
@@ -605,6 +851,8 @@ pub struct ThoughtUpdatePayload {
     pub rest_state: RestState,
     #[serde(default)]
     pub commit_candidate: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub action_cues: Vec<ActionCue>,
     #[serde(default)]
     pub objective_changed: bool,
     #[serde(default = "default_bubble_precedence")]
@@ -621,6 +869,10 @@ pub struct SessionSkillPayload {
 
 fn default_thought_state() -> ThoughtState {
     ThoughtState::Holding
+}
+
+fn default_state_cause() -> String {
+    "unknown".to_string()
 }
 
 fn default_thought_source() -> ThoughtSource {
@@ -974,6 +1226,24 @@ mod tests {
     use super::*;
 
     #[test]
+    fn state_evidence_deserializes_partial_payload_with_mapped_confidence() {
+        let evidence: StateEvidence = serde_json::from_str(r#"{"cause":"osc133_prompt"}"#).unwrap();
+
+        assert_eq!(evidence.cause, "osc133_prompt");
+        assert_eq!(evidence.confidence, StateConfidence::High);
+        assert!(evidence.observed_at.is_none());
+    }
+
+    #[test]
+    fn unobserved_state_evidence_omits_freshness() {
+        let evidence = StateEvidence::unobserved("persistence_stale");
+
+        assert_eq!(evidence.cause, "persistence_stale");
+        assert_eq!(evidence.confidence, StateConfidence::Low);
+        assert!(evidence.observed_at.is_none());
+    }
+
+    #[test]
     fn detect_tool_name_normalizes_aliases_and_paths() {
         assert_eq!(detect_tool_name("claude"), Some("Claude Code"));
         assert_eq!(detect_tool_name("CLAUDE"), Some("Claude Code"));
@@ -1019,6 +1289,7 @@ mod tests {
                 tmux_name: "1".into(),
                 state: SessionState::Idle,
                 current_command: None,
+                state_evidence: Default::default(),
                 cwd: "/tmp/proj".into(),
                 tool: None,
                 token_count: 0,
@@ -1029,6 +1300,7 @@ mod tests {
                 thought_updated_at: None,
                 rest_state: RestState::Drowsy,
                 commit_candidate: false,
+                action_cues: Vec::new(),
                 objective_changed_at: None,
                 last_skill: None,
                 is_stale: false,
@@ -1078,6 +1350,7 @@ mod tests {
                 tmux_name: "1".into(),
                 state: SessionState::Idle,
                 current_command: None,
+                state_evidence: Default::default(),
                 cwd: "/tmp".into(),
                 tool: None,
                 token_count: 0,
@@ -1088,6 +1361,7 @@ mod tests {
                 thought_updated_at: None,
                 rest_state: RestState::Drowsy,
                 commit_candidate: false,
+                action_cues: Vec::new(),
                 objective_changed_at: None,
                 last_skill: None,
                 is_stale: false,

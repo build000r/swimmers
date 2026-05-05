@@ -44,7 +44,7 @@ impl SpriteTheme {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum SpriteKind {
     Active,
     Busy,
@@ -61,18 +61,35 @@ impl SpriteKind {
         match session.state {
             SessionState::Error => Self::Error,
             SessionState::Exited => Self::Exited,
-            _ if session.rest_state == RestState::Sleeping => Self::Sleeping,
+            SessionState::Attention => Self::Attention,
             SessionState::Busy => Self::Busy,
-            SessionState::Idle | SessionState::Attention => match session.rest_state {
+            SessionState::Idle => match session.rest_state {
                 RestState::Sleeping => Self::Sleeping,
                 RestState::DeepSleep => Self::DeepSleep,
                 RestState::Drowsy => Self::Drowsy,
-                RestState::Active => match session.state {
-                    SessionState::Attention => Self::Attention,
-                    SessionState::Idle => Self::Active,
-                    _ => unreachable!("only idle/attention reach active rest-state branch"),
-                },
+                RestState::Active => Self::Active,
             },
+        }
+    }
+
+    pub(crate) fn state_label(self, unverified: bool) -> &'static str {
+        match (self, unverified) {
+            (Self::Error, false) => "error",
+            (Self::Error, true) => "error?",
+            (Self::Exited, false) => "exited",
+            (Self::Exited, true) => "exited?",
+            (Self::Sleeping, false) => "sleeping",
+            (Self::Sleeping, true) => "sleeping?",
+            (Self::Busy, false) => "busy",
+            (Self::Busy, true) => "busy?",
+            (Self::Attention, false) => "attention",
+            (Self::Attention, true) => "attention?",
+            (Self::Active, false) => "active",
+            (Self::Active, true) => "active?",
+            (Self::Drowsy, false) => "drowsy",
+            (Self::Drowsy, true) => "drowsy?",
+            (Self::DeepSleep, false) => "deep sleep",
+            (Self::DeepSleep, true) => "deep sleep?",
         }
     }
 

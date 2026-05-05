@@ -367,6 +367,12 @@ pub(crate) trait TuiApi: Send + Sync + 'static {
         managed_only: bool,
         group: Option<&str>,
     ) -> BoxFuture<'_, Result<DirListResponse, String>>;
+    fn update_dir_group_memberships(
+        &self,
+        path: &str,
+        add: Vec<String>,
+        remove: Vec<String>,
+    ) -> BoxFuture<'_, Result<DirGroupMembershipUpdateResponse, String>>;
     fn start_repo_action(
         &self,
         path: &str,
@@ -387,6 +393,11 @@ pub(crate) trait TuiApi: Send + Sync + 'static {
         launch_target: Option<String>,
         initial_request: Option<String>,
     ) -> BoxFuture<'_, Result<CreateSessionsBatchResponse, String>>;
+    fn send_group_input(
+        &self,
+        session_ids: Vec<String>,
+        text: String,
+    ) -> BoxFuture<'_, Result<SessionGroupInputResponse, String>>;
 }
 
 impl TuiApi for ApiClient {
@@ -726,7 +737,7 @@ impl TuiApi for ApiClient {
 
             if response.status() == reqwest::StatusCode::NOT_FOUND {
                 return Err(format!(
-                    "backend at {} does not expose /v1/dirs. Click-to-spawn directory browsing requires a `swimmers` build with `--features personal-workflows`; if this is your local server, relaunch via `make tui`.",
+                    "backend at {} does not expose /v1/dirs. Click-to-spawn directory browsing requires a `swimmers` build with `--features personal-workflows`; if this is your local server, relaunch via `make up` or `make tui`.",
                     self.base_url
                 ));
             }
@@ -760,7 +771,42 @@ impl TuiApi for ApiClient {
 
             if response.status() == reqwest::StatusCode::NOT_FOUND {
                 return Err(format!(
-                    "backend at {} does not expose /v1/dirs/actions. Repo actions require a `swimmers` build with `--features personal-workflows`; if this is your local server, relaunch via `make tui`.",
+                    "backend at {} does not expose /v1/dirs/actions. Repo actions require a `swimmers` build with `--features personal-workflows`; if this is your local server, relaunch via `make up` or `make tui`.",
+                    self.base_url
+                ));
+            }
+
+            Err(read_error(response).await)
+        })
+    }
+
+    fn update_dir_group_memberships(
+        &self,
+        path: &str,
+        add: Vec<String>,
+        remove: Vec<String>,
+    ) -> BoxFuture<'_, Result<DirGroupMembershipUpdateResponse, String>> {
+        let path = path.to_string();
+        Box::pin(async move {
+            let url = format!("{}/v1/dirs/group-memberships", self.base_url);
+            let response = self
+                .with_auth(self.http.post(url))
+                .timeout(API_DIRECTORY_ACTION_TIMEOUT)
+                .json(&DirGroupMembershipUpdateRequest { path, add, remove })
+                .send()
+                .await
+                .map_err(|err| self.transport_error("update directory groups", err))?;
+
+            if response.status().is_success() {
+                return response
+                    .json::<DirGroupMembershipUpdateResponse>()
+                    .await
+                    .map_err(|err| format!("failed to parse directory group response: {err}"));
+            }
+
+            if response.status() == reqwest::StatusCode::NOT_FOUND {
+                return Err(format!(
+                    "backend at {} does not expose /v1/dirs/group-memberships. Directory group editing requires a `swimmers` build with `--features personal-workflows`; if this is your local server, relaunch via `make up` or `make tui`.",
                     self.base_url
                 ));
             }
@@ -835,6 +881,32 @@ impl TuiApi for ApiClient {
                     .json::<CreateSessionsBatchResponse>()
                     .await
                     .map_err(|err| format!("failed to parse batch create response: {err}"));
+            }
+
+            Err(read_error(response).await)
+        })
+    }
+
+    fn send_group_input(
+        &self,
+        session_ids: Vec<String>,
+        text: String,
+    ) -> BoxFuture<'_, Result<SessionGroupInputResponse, String>> {
+        Box::pin(async move {
+            let url = format!("{}/v1/sessions/group-input", self.base_url);
+            let response = self
+                .with_auth(self.http.post(url))
+                .timeout(API_REQUEST_TIMEOUT)
+                .json(&SessionGroupInputRequest { session_ids, text })
+                .send()
+                .await
+                .map_err(|err| self.transport_error("send group input", err))?;
+
+            if response.status().is_success() {
+                return response
+                    .json::<SessionGroupInputResponse>()
+                    .await
+                    .map_err(|err| format!("failed to parse group input response: {err}"));
             }
 
             Err(read_error(response).await)

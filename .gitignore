@@ -15,6 +15,7 @@ data/
 /MODES_OF_REASONING_REPORT_AND_ANALYSIS_OF_PROJECT.md
 /MODE_OUTPUT_*.md
 /SMART_RECOMMENDATION_CHAIN.md
+/DUELING_WIZARDS_REPORT.md
 
 # Coverage artifacts
 lcov.info
@@ -22,3 +23,9 @@ lcov.info
 
 # Generated benchmark/profiling reports
 tests/artifacts/
+refactor/
+test-results/
+
+# Generated local visual references
+/assets/dragon/
+/scripts/extract-dragon-sprites.py

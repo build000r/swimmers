@@ -134,6 +134,8 @@ Set `SWIMMERS_TUI_URL` to run the API as a separate process (for multi-client ac
 SWIMMERS_TUI_URL=http://127.0.0.1:3210 swimmers-tui
 ```
 
+From a source checkout, use `make up` when you want the browser surface and the TUI attached to the same local backend. It builds the current checkout, requires resolvable FrankenTerm assets, replaces any existing local `swimmers` listener on `PORT` so stale code is not reused, prints the browser URLs, then launches the TUI with `SWIMMERS_TUI_URL` and `SWIMMERS_TUI_REUSE_SERVER=1` so it does not clear that backend. The launcher defaults to `--features personal-workflows` so click-to-spawn endpoints such as `/v1/dirs` are available; set `SWIMMERS_UP_FEATURES` to override the feature list.
+
 The `make tui` wrapper clears a stale loopback `swimmers` process on the target API port before launching, so local overlay edits are reread instead of silently reusing an old server. Set `SWIMMERS_TUI_REUSE_SERVER=1` to keep an existing local backend.
 
 To run the API explicitly as a standalone headless server:
@@ -236,10 +238,12 @@ The optional browser terminal renderer also honors `SWIMMERS_FRANKENTUI_PKG_DIR`
 If you are working from a source checkout, the Makefile has convenience targets:
 
 ```bash
+make up                 # Start the current-checkout backend, print browser URLs, and launch the TUI against it
 make tui                # Launch swimmers-tui (embedded mode by default)
 make web                # Start the standalone server and print local browser URLs
 make server             # Run only the standalone API server
 make tui-check          # Type-check the native TUI binary
+make up-smoke           # Run shell-level checks on the combined web+TUI launcher
 make tui-smoke          # Run shell-level bootstrap tests on the run-tui.sh shim
 make cargo-cov-lcov     # Generate lcov coverage report
 ```
@@ -354,20 +358,32 @@ Set `SWIMMERS_TUI_URL` to split the API into its own process. Multiple TUIs, hea
 | `GET` | `/v1/sessions` | List tmux sessions with state |
 | `POST` | `/v1/sessions` | Create a new tmux session |
 | `POST` | `/v1/sessions/batch` | Create one session per directory with the same initial request |
+| `POST` | `/v1/sessions/group-input` | Send the same text to ready sessions in one batch |
 | `DELETE` | `/v1/sessions/{id}` | Remove a session |
 | `GET` | `/v1/sessions/{id}/snapshot` | Capture visible screen text |
 | `GET` | `/v1/sessions/{id}/pane-tail` | Recent pane output |
+| `GET` | `/v1/sessions/{id}/mermaid-artifact` | Mermaid/plan artifact metadata and source |
+| `GET` | `/v1/sessions/{id}/plan-file` | Read a plan or repo-doc artifact file |
 | `POST` | `/v1/sessions/{id}/attention/dismiss` | Clear attention state |
 | `POST` | `/v1/sessions/{id}/input` | Send text input to a session |
 | `GET` | `/v1/selection` | Read the published selection |
 | `PUT` | `/v1/selection` | Publish the selected session |
+| `GET` | `/v1/operator-pressure` | Summarize action-readiness pressure across sessions |
 | `GET` | `/v1/native/status` | Native terminal support check |
+| `PUT` | `/v1/native/app` | Select the native terminal app |
+| `PUT` | `/v1/native/mode` | Select native terminal open behavior |
 | `POST` | `/v1/native/open` | Open session in desktop terminal |
 | `GET` | `/v1/dirs` | Repo/service directory browser |
 | `POST` | `/v1/dirs/restart` | Restart a mapped service |
-| `GET` | `/v1/skills/{tool}` | List available skills for a tool |
+| `POST` | `/v1/dirs/actions` | Start a mapped repo action such as commit assistance |
+| `POST` | `/v1/dirs/group-memberships` | Add, remove, or move a project in directory groups |
+| `GET` | `/v1/skills?tool=...` | List available skills for a tool |
 | `GET` | `/v1/thought-config` | Read thought runtime config |
 | `PUT` | `/v1/thought-config` | Update thought runtime config |
+| `GET` | `/v1/thought/sync-preview` | Preview thought synchronization without mutating state |
+| `GET` | `/health` | Health, thought bridge, and persistence status |
+| `GET` | `/readyz` | Startup readiness status |
+| `GET` | `/version` | Binary version metadata |
 | `GET` | `/metrics` | Prometheus metrics |
 
 ---

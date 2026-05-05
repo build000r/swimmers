@@ -88,6 +88,7 @@ async fn render_index(focus_layout: bool) -> impl IntoResponse {
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>swimmers</title>
+    <link rel="preload" href="{FRANKENTERM_FONT_ROUTE}" as="font" type="font/woff2" crossorigin />
     <link rel="stylesheet" href="{APP_CSS_ROUTE}" />
   </head>
   <body class="{body_class}">
@@ -101,15 +102,80 @@ async fn render_index(focus_layout: bool) -> impl IntoResponse {
       >
         <canvas class="terminal-canvas hidden" id="terminal-canvas"></canvas>
         <canvas class="hud-canvas hidden" id="hud-canvas" aria-hidden="true"></canvas>
-        <pre class="terminal-fallback hidden" id="terminal-fallback"></pre>
+        <pre
+          class="terminal-fallback hidden"
+          id="terminal-fallback"
+          tabindex="0"
+          aria-label="Live terminal text fallback"></pre>
+        <textarea
+          class="terminal-a11y-mirror"
+          id="terminal-a11y-mirror"
+          aria-label="Live terminal text mirror"
+          readonly
+          tabindex="-1"></textarea>
+        <div class="terminal-announcer" id="terminal-announcer" aria-live="polite" aria-atomic="false"></div>
+        <div class="terminal-status-strip" id="terminal-status-strip" aria-live="polite"></div>
+        <div class="terminal-link-tools hidden" id="terminal-link-tools" role="group" aria-label="Terminal link actions">
+          <span id="terminal-link-text"></span>
+          <button id="terminal-link-open" type="button">Open</button>
+          <button id="terminal-link-copy" type="button">Copy</button>
+        </div>
         <div class="loading-overlay visible" id="loading-overlay" aria-hidden="true">
           <div class="loading-label" id="loading-label">Loading FrankenTerm…</div>
           <div class="loading-bar"><div class="loading-bar-fill"></div></div>
         </div>
+        <section class="trogdor-surface hidden" id="trogdor-surface" aria-label="Trogdor repository atlas"></section>
       </main>
+      <textarea
+        class="mobile-kb-proxy"
+        id="mobile-kb-proxy"
+        aria-hidden="true"
+        tabindex="-1"
+        inputmode="text"
+        autocomplete="off"
+        autocorrect="off"
+        autocapitalize="off"
+        spellcheck="false"></textarea>
+      <div class="terminal-control-strip" id="terminal-control-strip" aria-label="Terminal viewer controls">
+        <button id="terminal-palette" type="button" title="Open command palette">K</button>
+        <button id="terminal-copy-frame" type="button" title="Copy visible terminal text">TXT</button>
+        <button id="terminal-zoom-out" type="button" title="Zoom out">A-</button>
+        <button id="terminal-zoom-reset" type="button" title="Reset terminal zoom">100%</button>
+        <button id="terminal-zoom-in" type="button" title="Zoom in">A+</button>
+        <button id="terminal-mobile-keyboard" type="button" title="Toggle mobile keyboard" aria-pressed="false">KB</button>
+      </div>
+      <form class="terminal-input-dock hidden" id="terminal-input-dock" aria-label="Terminal input">
+        <span class="terminal-input-prompt" aria-hidden="true">›</span>
+        <textarea
+          id="terminal-inline-input"
+          rows="1"
+          autocomplete="off"
+          autocorrect="off"
+          autocapitalize="off"
+          spellcheck="false"
+          aria-label="Terminal input"></textarea>
+        <button id="terminal-input-send" type="submit">Send</button>
+        <div class="terminal-input-echo" id="terminal-input-echo" aria-live="polite"></div>
+      </form>
+      <button class="trogdor-launcher hidden" id="trogdor-launcher" type="button">burninate!</button>
 
       <div class="modal-root" id="modal-root" aria-hidden="true">
         <div class="modal-backdrop" id="modal-backdrop"></div>
+
+        <section class="surface-sheet hidden palette-sheet" id="palette-sheet" aria-labelledby="palette-sheet-title">
+          <div class="sheet-header">
+            <p class="sheet-eyebrow">Terminal Actions</p>
+            <h2 id="palette-sheet-title">Command Palette</h2>
+          </div>
+          <label class="field">
+            <span>Command or session</span>
+            <input id="palette-search" type="search" placeholder="Search actions and sessions" autocomplete="off" />
+          </label>
+          <div class="palette-results" id="palette-results" role="listbox" aria-label="Command palette results"></div>
+          <div class="sheet-actions">
+            <button class="ghost-button" id="palette-close-button" type="button">Close</button>
+          </div>
+        </section>
 
         <section class="surface-sheet hidden" id="search-sheet" aria-labelledby="search-sheet-title">
           <div class="sheet-header">
@@ -202,9 +268,18 @@ async fn render_index(focus_layout: bool) -> impl IntoResponse {
           </div>
           <form class="sheet-form" id="send-form">
             <label class="field">
+              <span>Mode</span>
+              <select id="send-mode">
+                <option value="line">Send + Enter</option>
+                <option value="paste">Paste only</option>
+              </select>
+            </label>
+            <label class="field">
               <span>Input</span>
               <textarea id="send-input" rows="5" placeholder="Type a command or paste text. Send appends a newline."></textarea>
             </label>
+            <div class="send-history" id="send-history" aria-label="Recent sends"></div>
+            <div class="sheet-copy" id="send-hint">Send submits the text to the selected agent prompt. Paste only preserves text exactly for the selected live terminal.</div>
             <div class="sheet-actions">
               <button class="ghost-button" id="send-close-button" type="button">Cancel</button>
               <button id="send-submit-button" type="submit">Send</button>
@@ -233,14 +308,14 @@ async fn render_index(focus_layout: bool) -> impl IntoResponse {
           </div>
         </section>
 
-        <section class="surface-sheet hidden" id="create-sheet" aria-labelledby="create-sheet-title">
-          <div class="sheet-header">
-            <p class="sheet-eyebrow">Repository</p>
+        <section class="surface-sheet hidden create-sheet-burninate" id="create-sheet" aria-labelledby="create-sheet-title">
+          <div class="sheet-header create-sheet-header">
+            <p class="sheet-eyebrow">Repository Atlas</p>
             <h2 id="create-sheet-title">Create Session</h2>
           </div>
           <div class="sheet-copy" id="dirs-summary">Browse directories before creating a session.</div>
-          <div class="sheet-grid">
-            <section class="sheet-panel">
+          <div class="sheet-grid create-sheet-grid">
+            <section class="sheet-panel create-sheet-browser-panel">
               <div class="sheet-panel-header">
                 <h3>Directory Browser</h3>
                 <label class="toggle-row">
@@ -248,15 +323,31 @@ async fn render_index(focus_layout: bool) -> impl IntoResponse {
                   <span>Managed only</span>
                 </label>
               </div>
-              <div class="sheet-toolbar">
+              <div class="create-dir-controls">
+                <input id="dirs-search" type="search" placeholder="Search loaded directories" autocomplete="off" />
+                <button class="ghost-button" id="create-batch-visible" type="button">Batch visible</button>
+                <button class="ghost-button" id="dirs-spawn-here" type="button">Spawn here</button>
+              </div>
+              <div class="browser-list create-dir-list" id="dirs-list" role="list" aria-label="Directory entries"></div>
+              <div class="sheet-toolbar create-sheet-toolbar">
                 <input id="dirs-path" type="text" placeholder="/absolute/path" autocomplete="off" />
                 <button class="ghost-button" id="dirs-load-button" type="button">Load</button>
                 <button class="ghost-button" id="dirs-up-button" type="button">Up</button>
               </div>
-              <div class="browser-list" id="dirs-list" role="listbox" aria-label="Directory entries"></div>
+              <div class="batch-bar hidden" id="create-batch-bar" aria-live="polite">
+                <div class="batch-bar-copy">
+                  <span class="batch-count" id="create-batch-count">0 selected</span>
+                  <span class="batch-tool" id="create-batch-tool">tool: codex</span>
+                  <span class="batch-preview" id="create-batch-preview">request: (none)</span>
+                </div>
+                <div class="batch-actions">
+                  <button class="ghost-button batch-clear" id="create-batch-clear" type="button">Clear</button>
+                  <button class="batch-submit" id="create-batch-submit" type="submit" form="create-form">Batch send</button>
+                </div>
+              </div>
             </section>
 
-            <form class="sheet-form sheet-panel" id="create-form">
+            <form class="sheet-form sheet-panel create-sheet-form" id="create-form">
               <label class="field">
                 <span>Working Directory</span>
                 <input id="create-cwd" type="text" placeholder="/absolute/path" autocomplete="off" />
@@ -267,6 +358,10 @@ async fn render_index(focus_layout: bool) -> impl IntoResponse {
                   <option value="codex">Codex</option>
                   <option value="claude">Claude</option>
                 </select>
+              </label>
+              <label class="field">
+                <span>Launch Target</span>
+                <select id="create-launch-target"></select>
               </label>
               <label class="field">
                 <span>Initial Request</span>
@@ -288,6 +383,8 @@ async fn render_index(focus_layout: bool) -> impl IntoResponse {
           <div class="sheet-copy" id="mermaid-summary">Loading Mermaid artifact…</div>
           <div class="mermaid-preview" id="mermaid-preview" aria-live="polite"></div>
           <pre class="sheet-result" id="mermaid-source"></pre>
+          <div class="plan-tabs hidden" id="mermaid-plan-tabs" aria-label="Plan files"></div>
+          <pre class="sheet-result hidden" id="mermaid-plan-content"></pre>
           <div class="sheet-actions">
             <button class="ghost-button" id="mermaid-refresh-button" type="button">Refresh</button>
             <button class="ghost-button" id="mermaid-open-button" type="button">Open Host Artifact</button>
@@ -566,6 +663,7 @@ async fn handle_session_ws_event(
 #[serde(tag = "type", rename_all = "snake_case")]
 enum BrowserClientMessage {
     InputText { data: String },
+    SubmitLine { data: String },
     Resize { cols: u16, rows: u16 },
     Ping,
 }
@@ -626,6 +724,19 @@ fn decode_text_client_message(auth: &AuthInfo, text: &str) -> WsClientDecision {
                 WsClientDecision::Ignore
             } else {
                 WsClientDecision::Forward(SessionCommand::WriteInput(data.into_bytes()))
+            }
+        }
+        BrowserClientMessage::SubmitLine { data } => {
+            if !auth.has_scope(AuthScope::StreamWrite) {
+                return WsClientDecision::SendError {
+                    code: "READ_ONLY",
+                    message: "observer connections cannot submit terminal input".to_string(),
+                };
+            }
+            if data.trim().is_empty() {
+                WsClientDecision::Ignore
+            } else {
+                WsClientDecision::Forward(SessionCommand::SubmitLine(data))
             }
         }
         BrowserClientMessage::Resize { cols, rows } => {
@@ -856,8 +967,118 @@ mod tests {
         assert!(html.contains("thought-config-sheet"));
         assert!(html.contains("native-sheet"));
         assert!(html.contains("mermaid-sheet"));
+        assert!(html.contains("mermaid-plan-tabs"));
         assert!(html.contains("dirs-list"));
+        assert!(html.contains("dirs-search"));
+        assert!(html.contains("create-batch-visible"));
+        assert!(html.contains("dirs-spawn-here"));
+        assert!(html.contains("create-launch-target"));
+        assert!(html.contains("mobile-kb-proxy"));
+        assert!(html.contains("terminal-control-strip"));
+        assert!(html.contains("terminal-input-dock"));
+        assert!(html.contains("terminal-inline-input"));
+        assert!(html.contains("palette-sheet"));
+        assert!(html.contains("terminal-a11y-mirror"));
+        assert!(html.contains("terminal-status-strip"));
+        assert!(html.contains("terminal-link-tools"));
+        assert!(html.contains("send-mode"));
+        assert!(html.contains("send-history"));
+        assert!(html.contains(FRANKENTERM_FONT_ROUTE));
         assert!(html.contains("window.__SWIMMERS_BOOT__"));
+    }
+
+    #[test]
+    fn app_js_includes_overlay_filter_chip_logic() {
+        let js = include_str!("app.js");
+        assert!(js.contains("response?.overlay_label"));
+        assert!(js.contains("managedButton.dataset.filter = \"managed\""));
+        assert!(js.contains("allButton.textContent = \"all folders\""));
+        assert!(js.contains("filter === \"managed\" ? true"));
+    }
+
+    #[test]
+    fn app_js_retries_saved_out_of_base_dir_from_default_base() {
+        let js = include_str!("app.js");
+        assert!(js.contains("shouldRetryDirListingFromBase"));
+        assert!(js.contains("localStorage.removeItem(DIR_BROWSER_PATH_KEY)"));
+        assert!(
+            js.contains("return loadDirListing(\"\", managed, \"\", { retriedFromBase: true })")
+        );
+        assert!(js.contains("outside the allowed base directory"));
+        assert!(js.contains("rawStoredDirPath.trim() === \"/\" ? \"\" : rawStoredDirPath"));
+    }
+
+    #[test]
+    fn app_js_exposes_terminal_viewer_ergonomics() {
+        let js = include_str!("app.js");
+        assert!(js.contains("TERMINAL_ZOOM_STORAGE_KEY"));
+        assert!(js.contains("setZoom"));
+        assert!(js.contains("focusMobileKeyboard"));
+        assert!(js.contains("mobileKeyboardProxy"));
+        assert!(js.contains("function openCommandPalette()"));
+        assert!(js.contains("function syncTerminalAccessibilityMirror"));
+        assert!(js.contains("function drainTerminalLinkClicks()"));
+        assert!(js.contains("function rememberSendHistory(text)"));
+        assert!(js.contains("function syncTerminalStatusStrip()"));
+    }
+
+    #[test]
+    fn app_js_dedupes_surface_actions_and_stable_resizes() {
+        let js = include_str!("app.js");
+        assert!(js.contains("function stopSurfaceEvent(event)"));
+        assert!(js.contains("event.stopImmediatePropagation"));
+        assert!(js.contains(
+            "const dimensionsChanged = cols !== state.currentCols || rows !== state.currentRows"
+        ));
+        assert!(js.contains("if (!force && !dimensionsChanged)"));
+        assert!(js.contains("measureAndResizeSurface(true, false)"));
+    }
+
+    #[test]
+    fn app_js_hides_hud_when_live_terminal_is_focused() {
+        let js = include_str!("app.js");
+        assert!(js.contains("function syncTerminalPresentation()"));
+        assert!(js.contains("terminal-focus-mode"));
+        assert!(js.contains("el.hudCanvas.classList.toggle(\"hidden\", terminalFocusMode)"));
+        assert!(js.contains("el.hudCanvas.style.display = terminalFocusMode ? \"none\" : \"\""));
+        assert!(
+            js.contains("el.hudCanvas.style.visibility = terminalFocusMode ? \"hidden\" : \"\"")
+        );
+        assert!(js.contains("el.terminalCanvas.classList.toggle(\"hidden\", false)"));
+    }
+
+    #[test]
+    fn app_js_falls_back_when_live_terminal_canvas_does_not_paint() {
+        let js = include_str!("app.js");
+        assert!(js.contains("function feedTerminalBytes(bytes)"));
+        assert!(js.contains("flushEncodedInputBytes();"));
+        assert!(js.contains("function terminalCanvasHasVisiblePixels()"));
+        assert!(js.contains("function verifyTerminalPaintOrFallback()"));
+        assert!(js.contains("setTerminalTextFallbackActive(true, { clearText: false })"));
+        assert!(js.contains("function sendFallbackTerminalEvent(event)"));
+        assert!(js.contains("function updateTerminalFallbackText(text)"));
+        assert!(js.contains("function terminalFallbackOwnsPointer(event)"));
+        let css = include_str!("app.css");
+        assert!(css.contains("white-space: pre-wrap"));
+        assert!(css.contains("overflow-wrap: anywhere"));
+        assert!(css.contains("pointer-events: auto"));
+    }
+
+    #[test]
+    fn app_js_trogdor_agent_click_opens_terminal() {
+        let js = include_str!("app.js");
+        assert!(js.contains("function closeTrogdorAtlasForTerminal()"));
+        assert!(js.contains("async function openTrogdorAgentTerminal(sessionId)"));
+        assert!(js.contains("state.trogdorAtlasOpen = false"));
+        assert!(js.contains("state.hoveredTrogdorSessionId = null"));
+        assert!(js.contains("function applyTrogdorAtlasVisibility()"));
+        assert!(js.contains("el.trogdorSurface.style.display = visible ? \"\" : \"none\""));
+        assert!(js.contains("document.body.classList.toggle(\"trogdor-mode\", visible)"));
+        assert!(js.contains("closeTrogdorAtlasForTerminal();"));
+        assert!(js.contains("closeTrogdorAtlasForTerminal()"));
+        assert!(js.contains("await selectSession(normalized)"));
+        assert!(js.contains("focusTerminalInputSurface({ preventScroll: true })"));
+        assert!(js.contains("await openTrogdorAgentTerminal(zone.sessionId)"));
     }
 
     #[tokio::test]
@@ -967,6 +1188,35 @@ mod tests {
             }
             other => panic!("unexpected: {other:?}"),
         }
+    }
+
+    #[test]
+    fn decode_text_client_message_submit_line_without_scope_is_read_only() {
+        let json = r#"{"type":"submit_line","data":"hello"}"#;
+        match decode_text_client_message(&observer_auth(), json) {
+            WsClientDecision::SendError { code, .. } => assert_eq!(code, "READ_ONLY"),
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn decode_text_client_message_submit_line_forwards_submit_line() {
+        let json = r#"{"type":"submit_line","data":"hello"}"#;
+        match decode_text_client_message(&operator_auth(), json) {
+            WsClientDecision::Forward(SessionCommand::SubmitLine(data)) => {
+                assert_eq!(data, "hello")
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn decode_text_client_message_blank_submit_line_is_ignored() {
+        let json = r#"{"type":"submit_line","data":"   "}"#;
+        assert!(matches!(
+            decode_text_client_message(&operator_auth(), json),
+            WsClientDecision::Ignore
+        ));
     }
 
     #[test]

@@ -35,6 +35,7 @@ pub fn thought_config_probe_session(now: DateTime<Utc>) -> SessionInfo {
         thought_source: ThoughtSource::CarryForward,
         rest_state: RestState::Active,
         commit_candidate: false,
+        action_cues: Vec::new(),
         objective_fingerprint: None,
         thought_updated_at: None,
         token_count: 1_000,

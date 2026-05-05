@@ -2,6 +2,7 @@ pub mod dirs;
 pub mod envelope;
 pub mod health;
 pub mod native;
+pub mod operator_pressure;
 pub mod remote_sessions;
 pub mod selection;
 pub mod service;
@@ -101,6 +102,7 @@ pub fn api_router(config: Arc<Config>) -> Router<Arc<AppState>> {
 
     let router = Router::new()
         .merge(native::routes())
+        .merge(operator_pressure::routes())
         .merge(selection::routes())
         .merge(sessions::routes())
         .merge(thought_config::routes())

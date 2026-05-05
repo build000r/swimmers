@@ -124,6 +124,18 @@ impl TuiApi for TuiClient {
         }
     }
 
+    fn update_dir_group_memberships(
+        &self,
+        path: &str,
+        add: Vec<String>,
+        remove: Vec<String>,
+    ) -> BoxFuture<'_, Result<DirGroupMembershipUpdateResponse, String>> {
+        match self {
+            Self::Embedded(client) => client.update_dir_group_memberships(path, add, remove),
+            Self::External(client) => client.update_dir_group_memberships(path, add, remove),
+        }
+    }
+
     fn start_repo_action(
         &self,
         path: &str,
@@ -173,6 +185,17 @@ impl TuiApi for TuiClient {
             Self::External(client) => {
                 client.create_sessions_batch(dirs, spawn_tool, launch_target, initial_request)
             }
+        }
+    }
+
+    fn send_group_input(
+        &self,
+        session_ids: Vec<String>,
+        text: String,
+    ) -> BoxFuture<'_, Result<SessionGroupInputResponse, String>> {
+        match self {
+            Self::Embedded(client) => client.send_group_input(session_ids, text),
+            Self::External(client) => client.send_group_input(session_ids, text),
         }
     }
 }
@@ -323,6 +346,26 @@ fn handle_picker_priority_key<C: TuiApi>(
 
     if app.picker.is_some() && matches!(key.code, KeyCode::Char('X')) {
         app.handle_picker_action(PickerAction::ToggleBatchExcludeMode, layout.overview_field);
+        return Some(true);
+    }
+
+    if app.picker.is_some() && matches!(key.code, KeyCode::Char('G')) {
+        app.picker_cycle_group_edit_target();
+        return Some(true);
+    }
+
+    if app.picker.is_some() && matches!(key.code, KeyCode::Char('+') | KeyCode::Char('=')) {
+        app.picker_add_selected_to_group_target();
+        return Some(true);
+    }
+
+    if app.picker.is_some() && matches!(key.code, KeyCode::Char('-')) {
+        app.picker_remove_selected_from_group_target();
+        return Some(true);
+    }
+
+    if app.picker.is_some() && matches!(key.code, KeyCode::Char('M')) {
+        app.picker_move_selected_to_group_target();
         return Some(true);
     }
 

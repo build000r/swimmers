@@ -269,6 +269,7 @@ fn apply_update<P: SessionProvider>(
         update.thought_source,
         update.rest_state,
         update.commit_candidate,
+        update.action_cues.clone(),
         update.at,
         persisted_delivery,
         update.objective_changed.then_some(update.at),
@@ -283,6 +284,7 @@ fn apply_update<P: SessionProvider>(
         thought_source: update.thought_source,
         rest_state: update.rest_state,
         commit_candidate: update.commit_candidate,
+        action_cues: update.action_cues,
         objective_changed: update.objective_changed,
         bubble_precedence: update.bubble_precedence,
         at: update.at,
@@ -313,6 +315,7 @@ mod tests {
     use crate::thought::protocol::{SyncUpdate, ThoughtDeliveryState};
     use crate::thought::runtime_config::ThoughtConfig;
     use crate::types::{
+        ActionCue, ActionCueConfidence, ActionCueKind, ActionCueSource, ActionCueStatus,
         BubblePrecedence, RestState, SessionState, ThoughtSource, ThoughtState,
         ThoughtUpdatePayload,
     };
@@ -328,6 +331,7 @@ mod tests {
         thought_source: ThoughtSource,
         rest_state: RestState,
         commit_candidate: bool,
+        action_cues: Vec<ActionCue>,
         updated_at: DateTime<Utc>,
         delivery: ThoughtDeliveryState,
         objective_changed_at: Option<DateTime<Utc>>,
@@ -356,6 +360,7 @@ mod tests {
             thought_source: ThoughtSource,
             rest_state: RestState,
             commit_candidate: bool,
+            action_cues: Vec<ActionCue>,
             updated_at: DateTime<Utc>,
             delivery: ThoughtDeliveryState,
             objective_changed_at: Option<DateTime<Utc>>,
@@ -373,6 +378,7 @@ mod tests {
                     thought_source,
                     rest_state,
                     commit_candidate,
+                    action_cues,
                     updated_at,
                     delivery: delivery.clone(),
                     objective_changed_at,
@@ -389,6 +395,19 @@ mod tests {
                 .lock()
                 .expect("delivery_states mutex should lock")
                 .clone()
+        }
+    }
+
+    fn commit_ready_cue() -> ActionCue {
+        ActionCue {
+            kind: ActionCueKind::CommitReady,
+            status: ActionCueStatus::Active,
+            source: ActionCueSource::Transcript,
+            confidence: ActionCueConfidence::Deterministic,
+            evidence: ActionCue::expected_evidence(ActionCueKind::CommitReady)
+                .iter()
+                .map(|item| item.to_string())
+                .collect(),
         }
     }
 
@@ -412,6 +431,7 @@ mod tests {
                 thought_source: ThoughtSource::Llm,
                 rest_state: RestState::Active,
                 commit_candidate: true,
+                action_cues: vec![commit_ready_cue()],
                 objective_changed: true,
                 bubble_precedence: BubblePrecedence::ThoughtFirst,
                 at: now,
@@ -440,6 +460,7 @@ mod tests {
         assert_eq!(persisted[0].thought_source, ThoughtSource::Llm);
         assert_eq!(persisted[0].rest_state, RestState::Active);
         assert!(persisted[0].commit_candidate);
+        assert_eq!(persisted[0].action_cues, vec![commit_ready_cue()]);
         assert_eq!(persisted[0].updated_at, now);
         assert_eq!(persisted[0].objective_changed_at, Some(now));
         assert_eq!(
@@ -466,6 +487,7 @@ mod tests {
         assert_eq!(payload.thought_source, ThoughtSource::Llm);
         assert_eq!(payload.rest_state, RestState::Active);
         assert!(payload.commit_candidate);
+        assert_eq!(payload.action_cues, vec![commit_ready_cue()]);
         assert!(payload.objective_changed);
         assert_eq!(payload.bubble_precedence, BubblePrecedence::ThoughtFirst);
         assert_eq!(payload.at, now);
@@ -526,6 +548,7 @@ mod tests {
                 thought_source: ThoughtSource::CarryForward,
                 rest_state: RestState::Drowsy,
                 commit_candidate: false,
+                action_cues: Vec::new(),
                 objective_fingerprint: None,
                 thought_updated_at: None,
                 token_count: 0,
@@ -577,6 +600,7 @@ mod tests {
                     thought_source: ThoughtSource::Llm,
                     rest_state: RestState::Drowsy,
                     commit_candidate: false,
+                    action_cues: Vec::new(),
                     objective_changed: false,
                     bubble_precedence: BubblePrecedence::ThoughtFirst,
                     at: DateTime::parse_from_rfc3339("2026-03-08T14:00:07Z")
@@ -639,6 +663,7 @@ mod tests {
                     thought_source: ThoughtSource::Llm,
                     rest_state: RestState::Drowsy,
                     commit_candidate: false,
+                    action_cues: Vec::new(),
                     objective_changed: false,
                     bubble_precedence: BubblePrecedence::ThoughtFirst,
                     at: Utc::now(),
@@ -702,6 +727,7 @@ mod tests {
                     thought_source: ThoughtSource::Llm,
                     rest_state: RestState::Active,
                     commit_candidate: false,
+                    action_cues: Vec::new(),
                     objective_changed: true,
                     bubble_precedence: BubblePrecedence::ThoughtFirst,
                     at: now,
@@ -743,6 +769,7 @@ mod tests {
                 thought_source: ThoughtSource::Llm,
                 rest_state: RestState::Drowsy,
                 commit_candidate: false,
+                action_cues: Vec::new(),
                 objective_fingerprint: None,
                 thought_updated_at: Some(now),
                 token_count: 12,
@@ -775,6 +802,7 @@ mod tests {
                     thought_source: ThoughtSource::StaticSleeping,
                     rest_state: RestState::Sleeping,
                     commit_candidate: true,
+                    action_cues: Vec::new(),
                     objective_changed: false,
                     bubble_precedence: BubblePrecedence::ThoughtFirst,
                     at: now,
@@ -843,6 +871,7 @@ mod tests {
                     thought_source: ThoughtSource::Llm,
                     rest_state: RestState::Drowsy,
                     commit_candidate: false,
+                    action_cues: Vec::new(),
                     objective_changed: false,
                     bubble_precedence: BubblePrecedence::ThoughtFirst,
                     at: Utc::now(),
@@ -913,6 +942,7 @@ mod tests {
                     thought_source: ThoughtSource::Llm,
                     rest_state: RestState::Drowsy,
                     commit_candidate: false,
+                    action_cues: Vec::new(),
                     objective_changed: false,
                     bubble_precedence: BubblePrecedence::ThoughtFirst,
                     at: Utc::now(),

@@ -24,11 +24,18 @@ swimmers_resolve_frankentui_pkg_dir() {
     return 0
   fi
 
-  local candidate
+  if [[ "${SWIMMERS_FRANKENTUI_AUTO_DISCOVERY:-1}" == "0" ]]; then
+    return 1
+  fi
+
+  local root_dir candidate
+  root_dir="${ROOT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
   for candidate in \
-    "/Users/b/projects/frankentui/pkg" \
-    "/Users/b/repos/opensource/frankentui/pkg" \
-    "/Users/b/repos/frankentui/pkg"
+    "${root_dir}/../frankentui/pkg" \
+    "${root_dir}/../../frankentui/pkg" \
+    "${HOME:-}/projects/frankentui/pkg" \
+    "${HOME:-}/repos/opensource/frankentui/pkg" \
+    "${HOME:-}/repos/frankentui/pkg"
   do
     if swimmers_valid_frankentui_pkg_dir "${candidate}"; then
       printf '%s\n' "${candidate}"

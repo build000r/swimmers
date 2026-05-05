@@ -1,0 +1,361 @@
+<!-- mmdx
+{
+  "entry": "main",
+  "links": [
+    {
+      "from": "main",
+      "label": "P0 Reality Check",
+      "to": "reality-gap",
+      "title": "Open current reality and gap evidence"
+    },
+    {
+      "from": "main",
+      "label": "Wiki Direction",
+      "to": "wiki-guidance",
+      "title": "Open Trogdor wiki guidance"
+    },
+    {
+      "from": "main",
+      "label": "Build-vs-Clone Calls",
+      "to": "build-vs-clone",
+      "title": "Open reuse and placement calls"
+    },
+    {
+      "from": "main",
+      "label": "P0 Goal Contract",
+      "to": "goal-contract",
+      "title": "Open lofty goal contract"
+    },
+    {
+      "from": "main",
+      "label": "Workgraph",
+      "to": "workgraph",
+      "title": "Open Trogdor web workgraph"
+    },
+    {
+      "from": "main",
+      "label": "P0 Plan-Space Ambition",
+      "to": "ambition-loop",
+      "title": "Open ambition and refinement cadence"
+    },
+    {
+      "from": "main",
+      "label": "P1 Hardening 1",
+      "to": "hardening-loop",
+      "title": "Open recurring hardening loop"
+    },
+    {
+      "from": "main",
+      "label": "P2 UX Refinement",
+      "to": "ux-refinement",
+      "title": "Open user experience refinement loop"
+    },
+    {
+      "from": "main",
+      "label": "P2 Proof Gate",
+      "to": "proof-gate",
+      "title": "Open final proof gate"
+    }
+  ]
+}
+-->
+
+## chart main Smart Goal Gantt
+```mermaid
+gantt
+  title Smart Goal Tracker - Web-Only Trogdor Mode
+  dateFormat  YYYY-MM-DD
+  axisFormat  %b %d
+  todayMarker stroke-width:3px,stroke:#7c3aed,opacity:0.85
+
+  section Now: Reality
+  P0 Reality Check                    :done, reality, 2026-05-03, 1d
+  Wiki Direction                      :done, wiki, 2026-05-03, 1d
+  Build-vs-Clone Calls                :done, bvc, 2026-05-03, 1d
+  Smart Goal Tracker Baseline         :done, baseline-doc, 2026-05-03, 1d
+  Live Web Input Proof Gap Closed     :done, live-gap, 2026-05-03, 1d
+  Action Cues Surfaced                :done, cue-gap, 2026-05-03, 1d
+  Web Trogdor Atlas Slice             :done, web-atlas, 2026-05-03, 1d
+  Hover Speed Reader Slice            :done, hover-reader, 2026-05-03, 1d
+  Shared Operator Pressure Model      :done, pressure-model, 2026-05-03, 1d
+  Trogdor Action Controls             :done, action-controls, 2026-05-03, 1d
+  Web Plan File Reader                :done, plan-reader, 2026-05-03, 1d
+  Burninate Visual Pass               :done, visual-pass, 2026-05-03, 1d
+  Operator Doc                        :done, operator-doc, 2026-05-03, 1d
+  Workgraph Baseline                  :done, workgraph-doc, 2026-05-03, 1d
+
+  section Goal Contract
+  P0 Goal Contract                    :active, goal-contract, 2026-05-04, 1d
+  Success Criteria and Quality Bars   :criteria, after goal-contract, 1d
+  Tracker Baseline Accepted           :milestone, accepted, after criteria, 0d
+
+  section Plan Space
+  Describe Full Pressure View         :done, describe, 2026-05-03, 1d
+  P0 Plan-Space Ambition              :crit, ambition, after describe, 2d
+  Action Cue Import Plan              :done, cue-plan, 2026-05-03, 1d
+  Beads or Workgraph Baseline         :done, workgraph, 2026-05-03, 1d
+
+  section Execution Waves
+  P1 Surface clawgs action cues       :done, wave1, 2026-05-03, 1d
+  P1 Hardening 1                      :crit, harden1, after wave1, 2d
+  P1 Reality Recheck                  :milestone, recheck1, after harden1, 0d
+  P2 Shared pressure view             :done, wave2, 2026-05-03, 1d
+  P2 Web Trogdor HUD                  :active, hud, 2026-05-03, 5d
+  P2 UX Refinement                    :ux, after hud, 3d
+  P2 Hardening 2                      :crit, harden2, after ux, 2d
+  P2 Proof Gate                       :milestone, proof-gate, after harden2, 0d
+
+  section Finish
+  Docs and Operator Examples          :docs, after proof-gate, 2d
+  Final Polish Round                  :polish, after docs, 2d
+  Validate Commit Reality Check       :crit, final-check, after polish, 1d
+  Lofty Goal Met                      :milestone, goal-met, after final-check, 0d
+```
+
+## chart goal-contract Lofty Goal Contract
+```mermaid
+flowchart TD
+  current["current_reality: web FrankenTerm shell works, TUI thought rail exists, clawgs v2 cues flow into swimmers, shared operator pressure feeds Trogdor atlas"]
+  gaps["conditional_followup: post-commit reality check only if a commit is authorized"]
+  goal["lofty_end_goal: web-only Trogdor mode turns live sessions into a pressure-aware operator loop without new backend nouns"]
+  bars["non_negotiable_quality_bars: reuse contracts, TUI parity, web proof, hardening loop, docs, post-commit reality check"]
+  scope["out_of_scope: new Trogdor schema, raw transcript parser in swimmers, renamed villager_intent or burninate_command models"]
+  proof["proof_of_slice_done: action cues visible end-to-end, web atlas uses Rust operator_pressure model, live marker smoke passes, tests pass"]
+
+  current --> gaps --> goal --> bars --> proof
+  scope -. excluded .-> goal
+
+  classDef current fill:#e0f2fe,stroke:#0284c7,color:#0c4a6e,stroke-width:2px
+  classDef gap fill:#fee2e2,stroke:#dc2626,color:#7f1d1d,stroke-width:2px
+  classDef goal fill:#ede9fe,stroke:#7c3aed,color:#3b0764,stroke-width:2px
+  classDef proof fill:#dcfce7,stroke:#16a34a,color:#14532d,stroke-width:2px
+  class current current
+  class gaps,scope gap
+  class goal,bars goal
+  class proof proof
+```
+
+## chart reality-gap Current Reality and Gap Evidence
+```mermaid
+flowchart TD
+  docs["Docs and vision"] --> vision["OK: agent observability and local-first web control surface are real project intent"]
+  wiki["Wiki sweep"] --> essence["OK: Trogdor means attention race plus pause quality, not raw game mechanics"]
+  web["src/web"] --> shell["OK: web shell, FrankenTerm assets, selection follow, create, search, send, config, Mermaid sheets exist"]
+  tui["src/bin/swimmers_tui"] --> rail["OK: thought rail has needs-input, batch send, launch, commit, Mermaid, plans"]
+  clawgs["../clawgs"] --> cues["OK: clawgs.emit.v2 action_cues are canonical deterministic facts"]
+  tests["Verification"] --> unit["OK: Rust library, metamorphic, JS surface, and live web smoke tests passed"]
+  tests --> smoke["OK: scripts/test-web-live-terminal.sh proves marker round trip"]
+  protocol["src/thought/protocol.rs and src/types.rs"] --> drop["OK: swimmers carries clawgs-style action_cues into SessionSummary and thought payloads"]
+  plan["Planning state"] --> missing["OK: docs/TROGDOR_WEB_WORKGRAPH.md records completed work and deferred scope"]
+  game["Trogdor mode"] --> noimpl["OK: web atlas and hover speed-reader vertical slice exists"]
+  game --> sharedgap["OK: pressure derivation moved to src/operator_pressure.rs and /v1/operator-pressure"]
+  game --> actions["OK: hover panel can send, batch-send, launch, open Mermaid, and launch commit Codex"]
+  game --> plans["OK: Mermaid sheet exposes existing plan_files via /v1/sessions/{id}/plan-file"]
+  game --> visual["OK: atlas includes burninate banner, repo structures, burninating pressure rows, and agent glyphs"]
+  game --> operator_doc["OK: docs/TROGDOR_WEB.md explains controls and reuse contract"]
+
+  classDef ok fill:#dcfce7,stroke:#16a34a,color:#14532d,stroke-width:2px
+  classDef med fill:#fef3c7,stroke:#d97706,color:#78350f,stroke-width:2px
+  classDef high fill:#fee2e2,stroke:#dc2626,color:#7f1d1d,stroke-width:2px
+  classDef neutral fill:#f8fafc,stroke:#64748b,color:#0f172a
+  class docs,wiki,web,tui,clawgs,tests,protocol,plan,game neutral
+  class vision,essence,shell,rail,cues,unit,smoke,drop,noimpl,sharedgap,actions,plans,visual,operator_doc,missing ok
+```
+
+## chart routing Planning and Skill Routing
+```mermaid
+flowchart TD
+  start["Start from current reality"]
+  smart["smart goal tracker"]
+  wiki["wiki: Trogdor essence and quality gates"]
+  bvc["build-vs-clone: reuse swimmers and clawgs"]
+  describe{"Are pass/fail criteria sharp enough?"}
+  domain{"Does this require new cross-repo domain ownership?"}
+  spec["describe: define pressure view pass/fail cases"]
+  direct["direct swimmers implementation"]
+  clawgsroute["clawgs change only if existing action_cues are insufficient"]
+  workgraph["beads or WORKGRAPH after criteria are sharp"]
+  mmdx["mmdx tracker and proof gates"]
+
+  start --> smart --> wiki --> bvc --> describe
+  describe -->|no| spec --> workgraph
+  describe -->|yes| domain
+  domain -->|no| direct --> workgraph
+  domain -->|yes| clawgsroute --> workgraph
+  workgraph --> mmdx
+
+  classDef decision fill:#ede9fe,stroke:#7c3aed,color:#3b0764,stroke-width:2px
+  classDef action fill:#f8fafc,stroke:#64748b,color:#0f172a
+  classDef proof fill:#dcfce7,stroke:#16a34a,color:#14532d,stroke-width:2px
+  class describe,domain decision
+  class start,smart,wiki,bvc,spec,direct,clawgsroute,workgraph action
+  class mmdx proof
+```
+
+## chart workgraph Completed Workgraph
+```mermaid
+flowchart TD
+  wg1["WG-01 action_cues end-to-end"]
+  wg2["WG-02 shared Rust operator_pressure"]
+  wg3["WG-03 /v1/operator-pressure"]
+  wg4["WG-04 burninate atlas and hover reader"]
+  wg5["WG-05 atlas toggle after terminal selection"]
+  wg6["WG-06 send, batch, launch, Mermaid, plan files, commit"]
+  wg7["WG-07 live web input smoke hardening"]
+  wg8["WG-08 docs/TROGDOR_WEB.md and WORKGRAPH"]
+  verified["verified by cargo, node, metamorphic, and web smoke"]
+
+  wg1 --> wg2 --> wg3 --> wg4 --> wg5 --> wg6 --> wg7 --> wg8 --> verified
+
+  classDef done fill:#dcfce7,stroke:#16a34a,color:#14532d,stroke-width:2px
+  class wg1,wg2,wg3,wg4,wg5,wg6,wg7,wg8,verified done
+```
+
+## chart ambition-loop Plan-Space Ambition and Refinement
+```mermaid
+flowchart TD
+  baseline["Reality baseline"]
+  contract["First goal contract"]
+  ambition1["Ambition round 1: make pressure useful, not decorative"]
+  ambition2["Ambition round 2: remove invented backend nouns"]
+  ambition3["Ambition round 3: make pause quality measurable"]
+  depth["Domain depth: operator attention, batch triage, action cue trust"]
+  tasks["Beads or workgraph with dependencies"]
+  refine["Refinement rounds until no meaningful plan gaps remain"]
+  frontier["Ready implementation frontier"]
+
+  baseline --> contract --> ambition1 --> ambition2 --> ambition3 --> depth --> tasks --> refine --> frontier
+
+  classDef current fill:#e0f2fe,stroke:#0284c7,color:#0c4a6e,stroke-width:2px
+  classDef ambition fill:#ede9fe,stroke:#7c3aed,color:#3b0764,stroke-width:2px
+  classDef ready fill:#dcfce7,stroke:#16a34a,color:#14532d,stroke-width:2px
+  class baseline,contract current
+  class ambition1,ambition2,ambition3,depth,refine ambition
+  class tasks,frontier ready
+```
+
+## chart hardening-loop Recurring Smart Hardening Loop
+```mermaid
+stateDiagram-v2
+  [*] --> Describe
+  Describe --> Reproduce: define web and cue pass cases
+  Reproduce --> Implement: prove current failure first
+  Implement --> Tests: smallest reuse-first change
+  Tests --> RiskCheck: Rust and JS suites pass
+  RiskCheck --> RealityCheck: CRAP or mutation if scope is risky
+  RealityCheck --> NextWave: gaps remain
+  RealityCheck --> ProofGate: evidence passes
+  NextWave --> Describe
+  ProofGate --> [*]
+```
+
+## chart proof-gate Final Proof Gate
+```mermaid
+flowchart TD
+  cue["Action cues visible end-to-end from clawgs.emit.v2 to SessionSummary"]
+  slice["Current web slice: repo structures, agent glyphs, hover freeze, 200 wpm adjustable speed reader, action controls"]
+  parity["TUI thought rail and web pressure view agree on needs-input, batch sendability, launch, Mermaid, plan files, and commit controls"]
+  web["Web Trogdor HUD renders shared Rust model with keyboard and pointer hit zones"]
+  smoke["Live web terminal smoke proves input marker round trip"]
+  tests["cargo and node tests for touched Rust and JS paths pass"]
+  docs["README or docs explain web-only mode without new backend terminology"]
+  commit["Commit if authorized"]
+  reality["Post-commit reality-check-for-project agrees"]
+  done["LOFTY GOAL MET"]
+
+  cue --> slice --> parity --> web --> smoke --> tests --> docs --> commit --> reality --> done
+
+  classDef required fill:#fee2e2,stroke:#dc2626,color:#7f1d1d,stroke-width:2px
+  classDef done fill:#dcfce7,stroke:#16a34a,color:#14532d,stroke-width:3px
+  class cue,slice,smoke,tests done
+  class parity,web,docs,commit,reality required
+  class done done
+```
+
+## chart build-vs-clone Build-vs-Clone Reuse Assessment
+```mermaid
+flowchart TD
+  rule["Rule: do not reinvent hardened logic or rename backend concepts"] --> adopt["ADOPT existing contracts"]
+  rule --> extract["EXTRACT/BORROW hardened TUI backend logic"]
+  rule --> build["BUILD only missing web/game surface"]
+  rule --> avoid["DO NOT BUILD"]
+
+  adopt --> session["SessionSummary, SessionState, ThoughtState, RestState, StateEvidence"]
+  adopt --> selection["/v1/selection published follow"]
+  adopt --> clawgs["clawgs.emit.v2 action_cues"]
+
+  extract --> rail["TUI thought rail: needs-input, batch send, launch, commit, Mermaid, plans"]
+  extract --> shared["DONE slice: shared Rust operator pressure model consumed by web"]
+
+  build --> web["DONE slice: web rendering, hit zones, Trogdor presentation, and atlas toggle in rendered_surface.js/app.js"]
+  build --> api["DONE slice: narrow swimmers API fields for existing clawgs cues"]
+
+  avoid --> schema["No primary Trogdor event schema"]
+  avoid --> rename["No villager_intent or burninate_command backend nouns"]
+  avoid --> parser["No raw transcript parser in swimmers"]
+
+  session --> pressure["Pressure is a derived view"]
+  clawgs --> pressure
+  rail --> pressure
+  pressure --> web
+  pressure --> labels["Trogdor labels stay presentation-only"]
+
+  classDef avoid fill:#fee2e2,stroke:#dc2626,color:#7f1d1d,stroke-width:2px
+  classDef build fill:#fef3c7,stroke:#d97706,color:#78350f,stroke-width:2px
+  classDef reuse fill:#dcfce7,stroke:#16a34a,color:#14532d,stroke-width:2px
+  classDef neutral fill:#f8fafc,stroke:#64748b,color:#0f172a
+  class rule,pressure,labels neutral
+  class adopt,extract,session,selection,clawgs,rail,shared reuse
+  class build,web,api build
+  class avoid,schema,rename,parser avoid
+```
+
+## chart wiki-guidance Wiki Direction
+```mermaid
+flowchart TD
+  trogdor["Trogdor essence"] --> race["Attention race: notice blocked agents quickly"]
+  trogdor --> pause["Pause quality: fast is bad if it creates rushed human reasoning"]
+  observe["Agent observability"] --> metrics["Measure response latency, situation understanding time, and bad intervention rate"]
+  gates["Quality gates"] --> gatehabit["Avoid gate habituation"]
+  gates --> evidence["Require evidence before autonomy expands"]
+  loop["Admin-executor loop"] --> ledger["Actor, intent, gate, executor, command, artifact, follow-up ledger"]
+  local["Local-first ownership"] --> web["Browser frontend can be hosted, but backend truth stays local"]
+
+  race --> goal["Smart goal: pressure-aware web operator loop"]
+  pause --> goal
+  metrics --> goal
+  evidence --> goal
+  ledger --> goal
+  web --> goal
+
+  classDef source fill:#f8fafc,stroke:#64748b,color:#0f172a
+  classDef useful fill:#dcfce7,stroke:#16a34a,color:#14532d,stroke-width:2px
+  classDef caution fill:#fef3c7,stroke:#d97706,color:#78350f,stroke-width:2px
+  class trogdor,observe,gates,loop,local source
+  class race,metrics,evidence,ledger,web,goal useful
+  class pause,gatehabit caution
+```
+
+## chart ux-refinement User Experience Refinement Loop
+```mermaid
+flowchart TD
+  workflow["Target-user workflow: operator scans pressure, chooses session, acts or pauses"]
+  parity["TUI parity pass: web preserves sendable, sleeping, batch, commit, plan semantics"]
+  interaction["Interaction pass: keyboard focus, pointer zones, terminal handoff, follow selection"]
+  visual["Visual pass: dense terminal surface, readable pressure, no card-heavy dashboard drift"]
+  responsive["Responsive proof: desktop and narrow viewport stay usable"]
+  hover["Implemented slice: hover an agent freezes it and opens 200 wpm adjustable speed reader"]
+  controls["Implemented slice: reader exposes send, batch, launch, Mermaid, and commit actions"]
+  planfiles["Implemented slice: web Mermaid sheet reads plan sibling files through existing API"]
+  e2e["E2E or screenshot proof for full web HUD plus live terminal attach"]
+  recheck["Reality check UX claims"]
+
+  workflow --> parity --> interaction --> hover --> controls --> planfiles --> visual --> responsive --> e2e --> recheck
+
+  classDef current fill:#e0f2fe,stroke:#0284c7,color:#0c4a6e,stroke-width:2px
+  classDef proof fill:#dcfce7,stroke:#16a34a,color:#14532d,stroke-width:2px
+  classDef work fill:#f8fafc,stroke:#64748b,color:#0f172a
+  class workflow,parity current
+  class interaction,visual,responsive work
+  class hover,controls,planfiles,e2e,recheck proof
+```

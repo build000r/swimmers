@@ -20,9 +20,9 @@ use crate::thought::loop_runner::{SessionInfo, SessionProvider};
 use crate::thought::protocol::ThoughtDeliveryState;
 use crate::tmux_target::{exact_pane_target, exact_session_target};
 use crate::types::{
-    fallback_rest_state, ControlEvent, RepoTheme, RestState, SessionBatchMembership, SessionState,
-    SessionStatePayload, SessionSummary, TerminalSnapshot, ThoughtSource, ThoughtState,
-    TransportHealth,
+    fallback_rest_state, ActionCue, ControlEvent, RepoTheme, RestState, SessionBatchMembership,
+    SessionState, SessionStatePayload, SessionSummary, TerminalSnapshot, ThoughtSource,
+    ThoughtState, TransportHealth,
 };
 
 const PROCESS_EXIT_REAP_INTERVAL: Duration = Duration::from_millis(250);
@@ -58,6 +58,7 @@ fn merge_summary_with_thought_snapshot(
     summary.thought_updated_at = Some(thought_data.updated_at);
     summary.rest_state = thought_data.rest_state;
     summary.commit_candidate = thought_data.commit_candidate;
+    summary.action_cues = thought_data.action_cues.clone();
     summary.objective_changed_at = thought_data.objective_changed_at;
     if thought_data.token_count > 0 || summary.token_count == 0 {
         summary.token_count = thought_data.token_count;
@@ -84,6 +85,9 @@ fn persisted_session_from_summary(
         thought_updated_at: summary.thought_updated_at,
         rest_state: summary.rest_state,
         commit_candidate: summary.commit_candidate,
+        action_cues: thought_data
+            .map(|snapshot| snapshot.action_cues.clone())
+            .unwrap_or_else(|| summary.action_cues.clone()),
         objective_changed_at: summary.objective_changed_at,
         last_skill: summary.last_skill.clone(),
         objective_fingerprint: thought_data
@@ -345,6 +349,7 @@ impl SessionSupervisor {
                     tmux_name: ps.tmux_name.clone(),
                     state: crate::types::SessionState::Exited,
                     current_command: None,
+                    state_evidence: crate::types::StateEvidence::unobserved("persistence_stale"),
                     cwd: ps.cwd.clone(),
                     tool: ps.tool.clone(),
                     token_count: thought_data
@@ -371,6 +376,9 @@ impl SessionSupervisor {
                     commit_candidate: thought_data
                         .map(|t| t.commit_candidate)
                         .unwrap_or(ps.commit_candidate),
+                    action_cues: thought_data
+                        .map(|t| t.action_cues.clone())
+                        .unwrap_or_else(|| ps.action_cues.clone()),
                     objective_changed_at: thought_data
                         .and_then(|t| t.objective_changed_at)
                         .or(ps.objective_changed_at),
@@ -629,6 +637,7 @@ impl SessionSupervisor {
             state: SessionState::Exited,
             previous_state: summary.state,
             current_command: summary.current_command.clone(),
+            state_evidence: crate::types::StateEvidence::new("startup_missing_tmux"),
             transport_health: TransportHealth::Disconnected,
             exit_reason: Some("startup_missing_tmux".to_string()),
             at: Utc::now(),
@@ -986,6 +995,9 @@ impl SessionSupervisor {
                         return cached
                             .map(|mut summary| {
                                 summary.transport_health = TransportHealth::Disconnected;
+                                summary.state_evidence = crate::types::StateEvidence::unobserved(
+                                    "summary_cache_disconnected",
+                                );
                                 SummaryCollectOutcome::Fallback(summary)
                             })
                             .unwrap_or(SummaryCollectOutcome::Missing);
@@ -1000,6 +1012,10 @@ impl SessionSupervisor {
                             cached
                                 .map(|mut summary| {
                                     summary.transport_health = TransportHealth::Degraded;
+                                    summary.state_evidence =
+                                        crate::types::StateEvidence::unobserved(
+                                            "summary_cache_degraded",
+                                        );
                                     SummaryCollectOutcome::Fallback(summary)
                                 })
                                 .unwrap_or(SummaryCollectOutcome::Missing)
@@ -1009,6 +1025,10 @@ impl SessionSupervisor {
                             cached
                                 .map(|mut summary| {
                                     summary.transport_health = TransportHealth::Overloaded;
+                                    summary.state_evidence =
+                                        crate::types::StateEvidence::unobserved(
+                                            "summary_cache_overloaded",
+                                        );
                                     SummaryCollectOutcome::Fallback(summary)
                                 })
                                 .unwrap_or(SummaryCollectOutcome::Missing)
@@ -1211,6 +1231,9 @@ impl SessionSupervisor {
                 commit_candidate: thought_data
                     .map(|t| t.commit_candidate)
                     .unwrap_or(summary.commit_candidate),
+                action_cues: thought_data
+                    .map(|t| t.action_cues.clone())
+                    .unwrap_or_else(|| summary.action_cues.clone()),
                 thought: thought_data
                     .and_then(|t| t.thought.clone())
                     .or_else(|| summary.thought.clone()),
@@ -1354,6 +1377,7 @@ impl SessionSupervisor {
         thought_source: ThoughtSource,
         rest_state: RestState,
         commit_candidate: bool,
+        action_cues: Vec<ActionCue>,
         updated_at: DateTime<Utc>,
         delivery: ThoughtDeliveryState,
         objective_changed_at: Option<DateTime<Utc>>,
@@ -1374,6 +1398,7 @@ impl SessionSupervisor {
                     thought_source,
                     rest_state,
                     commit_candidate,
+                    action_cues: action_cues.clone(),
                     objective_changed_at,
                     objective_fingerprint: objective_fingerprint.clone(),
                     token_count,
@@ -1402,6 +1427,7 @@ impl SessionSupervisor {
                 thought_source,
                 rest_state,
                 commit_candidate,
+                action_cues,
                 updated_at,
                 delivery,
                 objective_changed_at,
@@ -1570,6 +1596,7 @@ impl SessionSupervisor {
             tmux_name: tmux_name.to_string(),
             state: crate::types::SessionState::Idle,
             current_command: None,
+            state_evidence: crate::types::StateEvidence::unobserved("supervisor_placeholder"),
             cwd: String::new(),
             tool: None,
             token_count: 0,
@@ -1580,6 +1607,7 @@ impl SessionSupervisor {
             thought_updated_at: None,
             rest_state: fallback_rest_state(SessionState::Idle, ThoughtState::Holding),
             commit_candidate: false,
+            action_cues: Vec::new(),
             objective_changed_at: None,
             last_skill: None,
             is_stale: false,
@@ -1616,6 +1644,7 @@ struct PersistThoughtRequest {
     thought_source: ThoughtSource,
     rest_state: RestState,
     commit_candidate: bool,
+    action_cues: Vec<ActionCue>,
     updated_at: DateTime<Utc>,
     delivery: ThoughtDeliveryState,
     objective_changed_at: Option<DateTime<Utc>>,
@@ -1640,6 +1669,7 @@ impl SupervisorProvider {
                         req.thought_source,
                         req.rest_state,
                         req.commit_candidate,
+                        req.action_cues,
                         req.updated_at,
                         req.delivery,
                         req.objective_changed_at,
@@ -1673,6 +1703,7 @@ impl SessionProvider for SupervisorProvider {
         thought_source: ThoughtSource,
         rest_state: RestState,
         commit_candidate: bool,
+        action_cues: Vec<ActionCue>,
         updated_at: DateTime<Utc>,
         delivery: ThoughtDeliveryState,
         objective_changed_at: Option<DateTime<Utc>>,
@@ -1690,6 +1721,7 @@ impl SessionProvider for SupervisorProvider {
                 thought_source,
                 rest_state,
                 commit_candidate,
+                action_cues,
                 updated_at,
                 delivery,
                 objective_changed_at,
@@ -2125,6 +2157,7 @@ fn ready_process_exit_ids(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::{ActionCueConfidence, ActionCueKind, ActionCueSource, ActionCueStatus};
     use chrono::{DateTime, Utc};
     use std::iter::FromIterator;
     use std::os::unix::fs::PermissionsExt;
@@ -2137,6 +2170,7 @@ mod tests {
             tmux_name: format!("tmux-{session_id}"),
             state,
             current_command: Some("cargo test".to_string()),
+            state_evidence: Default::default(),
             cwd: "/tmp/project".to_string(),
             tool: Some("Codex".to_string()),
             token_count: 0,
@@ -2147,6 +2181,7 @@ mod tests {
             thought_updated_at: None,
             rest_state: fallback_rest_state(state, ThoughtState::Holding),
             commit_candidate: false,
+            action_cues: Vec::new(),
             objective_changed_at: None,
             last_skill: None,
             is_stale: false,
@@ -2155,6 +2190,19 @@ mod tests {
             last_activity_at: Utc::now(),
             repo_theme_id: None,
             batch: None,
+        }
+    }
+
+    fn commit_ready_cue() -> ActionCue {
+        ActionCue {
+            kind: ActionCueKind::CommitReady,
+            status: ActionCueStatus::Active,
+            source: ActionCueSource::Transcript,
+            confidence: ActionCueConfidence::Deterministic,
+            evidence: ActionCue::expected_evidence(ActionCueKind::CommitReady)
+                .iter()
+                .map(|item| item.to_string())
+                .collect(),
         }
     }
 
@@ -2544,6 +2592,7 @@ mod tests {
                 ThoughtSource::CarryForward,
                 RestState::Drowsy,
                 false,
+                Vec::new(),
                 Utc::now(),
                 ThoughtDeliveryState::default(),
                 None,
@@ -2576,6 +2625,7 @@ mod tests {
                 thought_updated_at: None,
                 rest_state: RestState::Drowsy,
                 commit_candidate: false,
+                action_cues: Vec::new(),
                 objective_changed_at: None,
                 last_skill: None,
                 objective_fingerprint: None,
@@ -2610,6 +2660,7 @@ mod tests {
                 thought_updated_at: None,
                 rest_state: RestState::Drowsy,
                 commit_candidate: false,
+                action_cues: Vec::new(),
                 objective_changed_at: None,
                 last_skill: None,
                 objective_fingerprint: None,
@@ -2635,6 +2686,12 @@ mod tests {
         assert_eq!(batch.label, "auth-rebuild");
         assert_eq!(batch.index, 0);
         assert_eq!(batch.total, 2);
+        assert_eq!(stale[0].state_evidence.cause, "persistence_stale");
+        assert!(stale[0].state_evidence.observed_at.is_none());
+        assert_eq!(
+            stale[0].state_evidence.confidence,
+            crate::types::StateConfidence::Low
+        );
     }
 
     #[tokio::test]
@@ -2654,6 +2711,7 @@ mod tests {
                 ThoughtSource::Llm,
                 RestState::Drowsy,
                 false,
+                Vec::new(),
                 updated_at,
                 ThoughtDeliveryState::default(),
                 None,
@@ -2687,6 +2745,7 @@ mod tests {
                 ThoughtSource::Llm,
                 RestState::Active,
                 false,
+                Vec::new(),
                 shifted_at,
                 ThoughtDeliveryState::default(),
                 Some(shifted_at),
@@ -2703,6 +2762,7 @@ mod tests {
                 ThoughtSource::Llm,
                 RestState::Active,
                 false,
+                Vec::new(),
                 later_update,
                 ThoughtDeliveryState::default(),
                 None,
@@ -2782,6 +2842,7 @@ mod tests {
                 ThoughtSource::Llm,
                 RestState::Active,
                 true,
+                Vec::new(),
                 updated_at,
                 ThoughtDeliveryState::default(),
                 None,
@@ -2807,6 +2868,7 @@ mod tests {
             tmux_name: "work".to_string(),
             state: SessionState::Idle,
             current_command: None,
+            state_evidence: Default::default(),
             cwd: "/tmp".to_string(),
             tool: None,
             token_count: 0,
@@ -2817,6 +2879,7 @@ mod tests {
             thought_updated_at: None,
             rest_state: RestState::Drowsy,
             commit_candidate: false,
+            action_cues: Vec::new(),
             objective_changed_at: None,
             last_skill: None,
             is_stale: false,
@@ -2843,6 +2906,7 @@ mod tests {
                     thought_source: ThoughtSource::Llm,
                     rest_state: RestState::Drowsy,
                     commit_candidate: false,
+                    action_cues: Vec::new(),
                     objective_changed_at: None,
                     objective_fingerprint: None,
                     token_count: 10,
@@ -2862,6 +2926,7 @@ mod tests {
                     thought_source: ThoughtSource::Llm,
                     rest_state: RestState::Active,
                     commit_candidate: true,
+                    action_cues: Vec::new(),
                     objective_changed_at: None,
                     objective_fingerprint: None,
                     token_count: 10,
@@ -2889,6 +2954,7 @@ mod tests {
             tmux_name: "work".to_string(),
             state: SessionState::Idle,
             current_command: None,
+            state_evidence: Default::default(),
             cwd: "/tmp".to_string(),
             tool: None,
             token_count: 0,
@@ -2899,6 +2965,7 @@ mod tests {
             thought_updated_at: None,
             rest_state: RestState::Drowsy,
             commit_candidate: false,
+            action_cues: Vec::new(),
             objective_changed_at: None,
             last_skill: None,
             is_stale: false,
@@ -2918,6 +2985,7 @@ mod tests {
                     thought_source: ThoughtSource::Llm,
                     rest_state: RestState::Drowsy,
                     commit_candidate: false,
+                    action_cues: Vec::new(),
                     objective_changed_at: None,
                     objective_fingerprint: None,
                     token_count: 10,
@@ -2934,6 +3002,7 @@ mod tests {
                     thought_source: ThoughtSource::Llm,
                     rest_state: RestState::Active,
                     commit_candidate: true,
+                    action_cues: Vec::new(),
                     objective_changed_at: None,
                     objective_fingerprint: None,
                     token_count: 10,
@@ -2969,6 +3038,7 @@ mod tests {
                 thought_source: ThoughtSource::Llm,
                 rest_state: RestState::Active,
                 commit_candidate: true,
+                action_cues: vec![commit_ready_cue()],
                 objective_changed_at: Some(Utc::now()),
                 objective_fingerprint: None,
                 token_count: 44,
@@ -2984,6 +3054,7 @@ mod tests {
         assert_eq!(sessions[0].thought.as_deref(), Some("checking logs"));
         assert_eq!(sessions[0].thought_state, ThoughtState::Active);
         assert_eq!(sessions[0].token_count, 44);
+        assert_eq!(sessions[0].action_cues, vec![commit_ready_cue()]);
         assert!(sessions[0].objective_changed_at.is_some());
     }
 
@@ -3021,6 +3092,7 @@ mod tests {
                 ThoughtSource::CarryForward,
                 RestState::Sleeping,
                 false,
+                Vec::new(),
                 updated_at,
                 ThoughtDeliveryState::default(),
                 None,
@@ -3078,6 +3150,7 @@ esac
                 thought_source: ThoughtSource::Llm,
                 rest_state: RestState::Active,
                 commit_candidate: true,
+                action_cues: Vec::new(),
                 objective_changed_at: None,
                 objective_fingerprint: None,
                 token_count: 77,
@@ -3124,6 +3197,7 @@ exit 1
                 thought_source: ThoughtSource::Llm,
                 rest_state: RestState::Active,
                 commit_candidate: true,
+                action_cues: Vec::new(),
                 objective_changed_at: None,
                 objective_fingerprint: None,
                 token_count: 77,
@@ -3181,6 +3255,8 @@ exit 1
         assert_eq!(sessions[0].session_id, "sess-live");
         assert_eq!(sessions[0].tmux_name, "tmux-live");
         assert_eq!(sessions[0].transport_health, TransportHealth::Degraded);
+        assert_eq!(sessions[0].state_evidence.cause, "summary_cache_degraded");
+        assert!(sessions[0].state_evidence.observed_at.is_none());
         assert!(!sessions[0].is_stale);
     }
 
@@ -3211,6 +3287,8 @@ exit 1
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].session_id, "sess-timeout");
         assert_eq!(sessions[0].transport_health, TransportHealth::Overloaded);
+        assert_eq!(sessions[0].state_evidence.cause, "summary_cache_overloaded");
+        assert!(sessions[0].state_evidence.observed_at.is_none());
         assert!(!sessions[0].is_stale);
     }
 
@@ -3242,6 +3320,7 @@ exit 1
                 thought_source: ThoughtSource::Llm,
                 rest_state: RestState::Active,
                 commit_candidate: true,
+                action_cues: Vec::new(),
                 objective_changed_at: None,
                 objective_fingerprint: Some("obj-1".to_string()),
                 token_count: 55,
@@ -3298,6 +3377,7 @@ esac
                 thought_source: ThoughtSource::Llm,
                 rest_state: RestState::Active,
                 commit_candidate: true,
+                action_cues: Vec::new(),
                 objective_changed_at: None,
                 objective_fingerprint: Some("obj-pane".to_string()),
                 token_count: 88,

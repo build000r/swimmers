@@ -1,0 +1,317 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+source "${ROOT_DIR}/scripts/web-common.sh"
+cd "${ROOT_DIR}"
+
+PORT="${PORT:-3210}"
+BASE_URL="http://127.0.0.1:${PORT}"
+WEB_ROUTE_PATH="${WEB_ROUTE_PATH:-/app.js}"
+API_ROUTE_PATH="${API_ROUTE_PATH:-/v1/sessions}"
+DIRS_ROUTE_PATH="${DIRS_ROUTE_PATH:-/v1/dirs}"
+SERVER_LOG="${SWIMMERS_UP_SERVER_LOG:-${TMPDIR:-/tmp}/swimmers-up-${PORT}.log}"
+RUN_TUI="${SWIMMERS_UP_TUI_SHIM:-${ROOT_DIR}/scripts/run-tui.sh}"
+
+if [[ -n "${SWIMMERS_UP_FEATURES+x}" ]]; then
+  UP_FEATURES="${SWIMMERS_UP_FEATURES}"
+elif [[ -n "${SWIMMERS_TUI_FEATURES:-}" ]]; then
+  case ",${SWIMMERS_TUI_FEATURES}," in
+    *,personal-workflows,*) UP_FEATURES="${SWIMMERS_TUI_FEATURES}" ;;
+    *) UP_FEATURES="personal-workflows,${SWIMMERS_TUI_FEATURES}" ;;
+  esac
+else
+  UP_FEATURES="personal-workflows"
+fi
+
+feature_args=()
+if [[ -n "${UP_FEATURES}" ]]; then
+  feature_args=(--features "${UP_FEATURES}")
+fi
+
+announce_urls() {
+  printf 'swimmers shared backend\n'
+  printf '  tui api:  %s\n' "${BASE_URL}"
+  printf '  local:    http://127.0.0.1:%s/\n' "${PORT}"
+  printf '  selected: http://127.0.0.1:%s/selected\n' "${PORT}"
+
+  if command -v tailscale >/dev/null 2>&1; then
+    local tailnet_ip
+    tailnet_ip="$(tailscale ip -4 2>/dev/null | head -1 || true)"
+    if [[ -n "${tailnet_ip}" ]]; then
+      printf '  tailnet:  http://%s:%s/\n' "${tailnet_ip}" "${PORT}"
+      printf '  focused:  http://%s:%s/selected\n' "${tailnet_ip}" "${PORT}"
+    fi
+  fi
+
+  printf '\n'
+}
+
+status_for() {
+  local url="${1}"
+  curl -sS -o /dev/null -w '%{http_code}' \
+    --connect-timeout 1 \
+    --max-time 2 \
+    "${url}" \
+    2>/dev/null || true
+}
+
+web_route_status() {
+  status_for "${BASE_URL}${WEB_ROUTE_PATH}"
+}
+
+api_route_status() {
+  status_for "${BASE_URL}${API_ROUTE_PATH}"
+}
+
+dirs_route_status() {
+  status_for "${BASE_URL}${DIRS_ROUTE_PATH}"
+}
+
+api_status_looks_like_swimmers() {
+  case "${1:-}" in
+    2??|401|403) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+backend_is_ready() {
+  local web_status="${1:-}"
+  local api_status="${2:-}"
+  local dirs_status="${3:-}"
+
+  [[ "${web_status}" == "200" ]] \
+    && api_status_looks_like_swimmers "${api_status}" \
+    && api_status_looks_like_swimmers "${dirs_status}"
+}
+
+port_has_listener() {
+  if command -v lsof >/dev/null 2>&1 \
+    && lsof -nP -t -iTCP:"${PORT}" -sTCP:LISTEN >/dev/null 2>&1; then
+    return 0
+  fi
+
+  (: <"/dev/tcp/127.0.0.1/${PORT}") >/dev/null 2>&1
+}
+
+listener_summary() {
+  if ! command -v lsof >/dev/null 2>&1; then
+    printf 'unknown process'
+    return 0
+  fi
+
+  local pid command_line
+  pid="$(lsof -nP -t -iTCP:"${PORT}" -sTCP:LISTEN 2>/dev/null | head -1 || true)"
+  if [[ -z "${pid}" ]]; then
+    printf 'unknown process'
+    return 0
+  fi
+
+  command_line="$(ps -p "${pid}" -o command= 2>/dev/null || true)"
+  printf 'pid %s (%s)' "${pid}" "${command_line:-unknown command}"
+}
+
+listener_pid() {
+  if ! command -v lsof >/dev/null 2>&1; then
+    return 1
+  fi
+
+  lsof -nP -t -iTCP:"${PORT}" -sTCP:LISTEN 2>/dev/null | head -1 || true
+}
+
+listener_command() {
+  local pid="${1:-}"
+  [[ -n "${pid}" ]] || return 1
+  ps -p "${pid}" -o command= 2>/dev/null || true
+}
+
+is_swimmers_command() {
+  local command_line="${1:-}"
+  local argv0
+  argv0="${command_line%% *}"
+  [[ "${argv0##*/}" == "swimmers" ]]
+}
+
+wait_for_listener_to_stop() {
+  local _i
+  for _i in {1..50}; do
+    if ! port_has_listener; then
+      return 0
+    fi
+    sleep 0.1
+  done
+  return 1
+}
+
+stop_swimmers_listener() {
+  local pid="${1}"
+  printf 'Restarting incompatible local swimmers backend on 127.0.0.1:%s (pid %s)\n' \
+    "${PORT}" \
+    "${pid}"
+  kill "${pid}" 2>/dev/null || true
+  if wait_for_listener_to_stop; then
+    return 0
+  fi
+
+  printf 'listener on 127.0.0.1:%s did not stop after signal\n' "${PORT}" >&2
+  return 1
+}
+
+server_binary_path() {
+  local target_dir="${CARGO_TARGET_DIR:-target}"
+  if [[ "${target_dir}" != /* ]]; then
+    target_dir="${ROOT_DIR}/${target_dir}"
+  fi
+  if [[ -n "${CARGO_BUILD_TARGET:-}" ]]; then
+    target_dir="${target_dir%/}/${CARGO_BUILD_TARGET}"
+  fi
+
+  printf '%s/debug/swimmers\n' "${target_dir%/}"
+}
+
+resolve_server_binary() {
+  if [[ -n "${SWIMMERS_UP_SERVER_BIN:-}" ]]; then
+    if [[ ! -x "${SWIMMERS_UP_SERVER_BIN}" ]]; then
+      printf 'SWIMMERS_UP_SERVER_BIN is not executable: %s\n' "${SWIMMERS_UP_SERVER_BIN}" >&2
+      return 1
+    fi
+    printf '%s\n' "${SWIMMERS_UP_SERVER_BIN}"
+    return 0
+  fi
+
+  swimmers_require cargo
+  cargo build --bin swimmers "${feature_args[@]}"
+  local server_bin
+  server_bin="$(server_binary_path)"
+  if [[ ! -x "${server_bin}" ]]; then
+    printf 'expected built swimmers binary at %s\n' "${server_bin}" >&2
+    return 1
+  fi
+  printf '%s\n' "${server_bin}"
+}
+
+start_backend() {
+  local server_bin="${1:-}"
+  if [[ -z "${server_bin}" ]]; then
+    server_bin="$(resolve_server_binary)"
+  fi
+
+  printf 'Starting swimmers backend on %s\n' "${BASE_URL}"
+  printf '  log: %s\n' "${SERVER_LOG}"
+  mkdir -p "$(dirname "${SERVER_LOG}")"
+
+  PORT="${PORT}" nohup "${server_bin}" >"${SERVER_LOG}" 2>&1 &
+  local server_pid=$!
+  disown "${server_pid}" 2>/dev/null || true
+
+  wait_for_backend "${server_pid}"
+}
+
+wait_for_backend() {
+  local server_pid="${1}"
+  local deadline=$((SECONDS + ${SWIMMERS_UP_WAIT_SECONDS:-15}))
+  local web_status api_status dirs_status
+
+  while (( SECONDS <= deadline )); do
+    if ! kill -0 "${server_pid}" 2>/dev/null; then
+      printf 'swimmers backend exited before it was ready. See log: %s\n' "${SERVER_LOG}" >&2
+      return 1
+    fi
+
+    web_status="$(web_route_status)"
+    api_status="$(api_route_status)"
+    dirs_status="$(dirs_route_status)"
+    if backend_is_ready "${web_status}" "${api_status}" "${dirs_status}"; then
+      printf 'Backend ready on %s (pid %s)\n\n' "${BASE_URL}" "${server_pid}"
+      return 0
+    fi
+
+    sleep 0.25
+  done
+
+  printf 'Timed out waiting for swimmers backend on %s; last %s=%s, %s=%s, %s=%s. See log: %s\n' \
+    "${BASE_URL}" \
+    "${WEB_ROUTE_PATH}" \
+    "${web_status:-000}" \
+    "${API_ROUTE_PATH}" \
+    "${api_status:-000}" \
+    "${DIRS_ROUTE_PATH}" \
+    "${dirs_status:-000}" \
+    "${SERVER_LOG}" >&2
+  return 1
+}
+
+ensure_backend() {
+  local server_bin web_status api_status dirs_status
+  server_bin="$(resolve_server_binary)"
+
+  if ! port_has_listener; then
+    start_backend "${server_bin}"
+    return
+  fi
+
+  web_status="$(web_route_status)"
+  api_status="$(api_route_status)"
+  dirs_status="$(dirs_route_status)"
+
+  local pid command_line
+  pid="$(listener_pid)"
+  command_line="$(listener_command "${pid}")"
+  if [[ -n "${pid}" ]] && is_swimmers_command "${command_line}"; then
+    if backend_is_ready "${web_status}" "${api_status}" "${dirs_status}"; then
+      printf 'Existing swimmers backend on 127.0.0.1:%s may be stale; restarting it to use this checkout build.\n' \
+        "${PORT}"
+    else
+      printf 'Existing swimmers backend on 127.0.0.1:%s is missing required make up routes.\n' \
+        "${PORT}"
+      printf '  %s returned %s; %s returned %s; %s returned %s\n' \
+        "${WEB_ROUTE_PATH}" \
+        "${web_status:-000}" \
+        "${API_ROUTE_PATH}" \
+        "${api_status:-000}" \
+        "${DIRS_ROUTE_PATH}" \
+        "${dirs_status:-000}"
+    fi
+    stop_swimmers_listener "${pid}"
+    start_backend "${server_bin}"
+    return
+  fi
+
+  printf 'Port %s already has a listener (%s), but it is not this checkout'\''s swimmers backend.\n' \
+    "${PORT}" \
+    "$(listener_summary)" >&2
+  printf '  %s returned %s; %s returned %s; %s returned %s\n' \
+    "${WEB_ROUTE_PATH}" \
+    "${web_status:-000}" \
+    "${API_ROUTE_PATH}" \
+    "${api_status:-000}" \
+    "${DIRS_ROUTE_PATH}" \
+    "${dirs_status:-000}" >&2
+  printf 'make up will not restart or kill that listener. Stop it yourself or choose another PORT.\n' >&2
+  return 1
+}
+
+main() {
+  swimmers_require curl
+
+  local pkg_dir=""
+  if pkg_dir="$(swimmers_resolve_frankentui_pkg_dir)"; then
+    export SWIMMERS_FRANKENTUI_PKG_DIR="${pkg_dir}"
+    printf 'Using FrankenTerm assets from %s\n' "${SWIMMERS_FRANKENTUI_PKG_DIR}"
+  else
+    printf 'make up requires FrankenTerm assets for live browser terminal rendering.\n' >&2
+    printf 'Set SWIMMERS_FRANKENTUI_PKG_DIR=/path/to/frankentui/pkg or FRANKENTUI_PKG_DIR=/path/to/frankentui/pkg.\n' >&2
+    return 1
+  fi
+
+  announce_urls
+  ensure_backend
+
+  printf 'Launching TUI against %s\n\n' "${BASE_URL}"
+  SWIMMERS_TUI_URL="${BASE_URL}" \
+    SWIMMERS_TUI_REUSE_SERVER=1 \
+    SWIMMERS_TUI_FEATURES="${UP_FEATURES}" \
+    "${RUN_TUI}" "$@"
+}
+
+main "$@"

@@ -12,7 +12,8 @@ use tracing::{info, warn};
 
 use crate::thought::loop_runner::SessionInfo;
 use crate::thought::protocol::{
-    build_sync_request, DaemonInboundMessage, SyncRequestSequence, SyncResponse, EMIT_PROTOCOL_V1,
+    build_sync_request, DaemonInboundMessage, SyncRequestSequence, SyncResponse,
+    SUPPORTED_EMIT_PROTOCOLS, SUPPORTED_EMIT_PROTOCOLS_DISPLAY,
 };
 use crate::thought::runtime_config::{DaemonDefaults, ThoughtConfig};
 
@@ -506,9 +507,9 @@ fn parse_hello_line(line: &str) -> Result<(), EmitterClientError> {
 
     match message {
         DaemonInboundMessage::Hello { protocol } => {
-            if protocol != EMIT_PROTOCOL_V1 {
+            if !SUPPORTED_EMIT_PROTOCOLS.contains(&protocol.as_str()) {
                 return Err(EmitterClientError::HelloProtocolMismatch {
-                    expected: EMIT_PROTOCOL_V1,
+                    expected: SUPPORTED_EMIT_PROTOCOLS_DISPLAY,
                     actual: protocol,
                 });
             }
@@ -581,13 +582,20 @@ mod tests {
     }
 
     #[test]
+    fn parse_hello_accepts_current_protocol() {
+        let raw = r#"{"type":"hello","protocol":"clawgs.emit.v2","engine_version":"0.2.0"}"#;
+        let result = parse_hello_line(raw);
+        assert!(result.is_ok(), "expected valid hello, got: {result:?}");
+    }
+
+    #[test]
     fn parse_hello_rejects_unexpected_protocol() {
-        let raw = r#"{"type":"hello","protocol":"clawgs.emit.v2"}"#;
+        let raw = r#"{"type":"hello","protocol":"clawgs.emit.v3"}"#;
         let err = parse_hello_line(raw).expect_err("hello with wrong protocol should fail");
         match err {
             EmitterClientError::HelloProtocolMismatch { expected, actual } => {
-                assert_eq!(expected, EMIT_PROTOCOL_V1);
-                assert_eq!(actual, "clawgs.emit.v2");
+                assert_eq!(expected, SUPPORTED_EMIT_PROTOCOLS_DISPLAY);
+                assert_eq!(actual, "clawgs.emit.v3");
             }
             other => panic!("unexpected error variant: {other:?}"),
         }
@@ -687,6 +695,7 @@ mod tests {
             thought_source: ThoughtSource::Llm,
             rest_state: RestState::Drowsy,
             commit_candidate: false,
+            action_cues: Vec::new(),
             objective_fingerprint: Some("obj-1".to_string()),
             thought_updated_at: Some(Utc::now()),
             token_count: 55,

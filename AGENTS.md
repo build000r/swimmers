@@ -12,6 +12,7 @@
 - Run TUI: `make tui` or `cargo run --bin swimmers-tui`
 - Run server: `make server` or `cargo run --bin swimmers`
 - Run browser surface: `make web`
+- Run shared local backend plus browser URLs and TUI: `make up`
 - Type-check TUI: `make tui-check`
 - Rust tests: `cargo test`
 - Metamorphic integration tests: `cargo test --test metamorphic`

@@ -3,7 +3,10 @@ use std::fs;
 use std::io;
 use std::io::Write as _;
 use std::path::PathBuf;
-use std::sync::{Arc, OnceLock};
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    Arc, OnceLock,
+};
 use std::time::{Duration, Instant};
 
 use chrono::{TimeZone, Utc};
@@ -25,18 +28,22 @@ use crate::tmux_target::{exact_pane_target, exact_session_target};
 use crate::types::{
     ControlEvent, MermaidArtifactResponse, PlanFileResponse, SessionBatchMembership,
     SessionSkillPayload, SessionState, SessionStatePayload, SessionSummary, SessionTitlePayload,
-    TerminalSnapshot, TransportHealth,
+    StateEvidence, TerminalSnapshot, TransportHealth,
 };
 
 const CWD_REFRESH_MIN_INTERVAL: Duration = Duration::from_millis(750);
 const TOOL_REFRESH_MIN_INTERVAL: Duration = Duration::from_millis(1_000);
 const LIVENESS_CHECK_INTERVAL: Duration = Duration::from_millis(2_000);
 const TMUX_DISPLAY_MESSAGE_TIMEOUT: Duration = Duration::from_millis(500);
+const TMUX_SEND_KEYS_TIMEOUT: Duration = Duration::from_millis(500);
+const TMUX_PASTE_BUFFER_TIMEOUT: Duration = Duration::from_secs(2);
+const TMUX_AGENT_SUBMIT_DOUBLE_ENTER_DELAY: Duration = Duration::from_millis(75);
 const PROCESS_ENTRIES_QUERY_TIMEOUT: Duration = Duration::from_millis(750);
 const PROCESS_ENTRIES_CACHE_TTL: Duration = Duration::from_millis(1_500);
 const TMUX_NEW_SESSION_EXIT_GRACE: Duration = Duration::from_millis(50);
 const TMUX_FALLBACK_TERM: &str = "xterm-256color";
 const TMUX_FALLBACK_COLORTERM: &str = "truecolor";
+static NEXT_TMUX_SUBMIT_BUFFER_ID: AtomicU64 = AtomicU64::new(1);
 
 // ---------------------------------------------------------------------------
 // Public command enum -- sent to the actor over its mpsc channel
@@ -59,6 +66,9 @@ pub struct OutputFrame {
 pub enum SessionCommand {
     /// Write raw bytes to the PTY (user input).
     WriteInput(Vec<u8>),
+
+    /// Paste a prompt and submit it to an agent-style terminal prompt.
+    SubmitLine(String),
 
     /// Resize the PTY.
     Resize { cols: u16, rows: u16 },
@@ -365,6 +375,7 @@ impl SessionActor {
 
         let replay_ring = ReplayRing::new(config.replay_buffer_size);
         let initial_cwd = start_cwd.unwrap_or_default();
+        let state_detector = state_detector_for_initial_tool(initial_tool.as_deref());
 
         let actor = SessionActor {
             session_id: session_id.clone(),
@@ -372,7 +383,7 @@ impl SessionActor {
             config: config.clone(),
             master: pair.master,
             writer,
-            state_detector: StateDetector::new(),
+            state_detector,
             scroll_guard: ScrollGuard::new(),
             replay_ring,
             subscribers: HashMap::new(),
@@ -479,14 +490,19 @@ impl SessionActor {
         info!(session_id = %self.session_id, "PTY channel closed (process exit)");
         *pty_closed = true;
         let prev = self.state_detector.state();
+        let prev_evidence = self.state_detector.state_evidence();
         self.state_detector.mark_exited();
-        let _ =
-            self.maybe_emit_state_change_with_exit_reason(prev, Some("process_exit".to_string()));
+        let _ = self.maybe_emit_state_change_with_exit_reason(
+            prev,
+            prev_evidence,
+            Some("process_exit".to_string()),
+        );
     }
 
     async fn handle_command(&mut self, cmd: SessionCommand, pty_closed: bool) -> bool {
         match cmd {
-            SessionCommand::WriteInput(data) => self.handle_write_input(data, pty_closed),
+            SessionCommand::WriteInput(data) => self.handle_write_input(data, pty_closed).await,
+            SessionCommand::SubmitLine(text) => self.handle_submit_line(text, pty_closed).await,
             SessionCommand::Resize { cols, rows } => self.handle_resize(cols, rows),
             SessionCommand::DismissAttention => self.handle_dismiss_attention().await,
             SessionCommand::Subscribe {
@@ -559,7 +575,7 @@ impl SessionActor {
         true
     }
 
-    fn handle_write_input(&mut self, data: Vec<u8>, pty_closed: bool) {
+    async fn handle_write_input(&mut self, data: Vec<u8>, pty_closed: bool) {
         if pty_closed {
             debug!(session_id = %self.session_id, "ignoring write to exited PTY");
             return;
@@ -568,12 +584,63 @@ impl SessionActor {
         if write_input_counts_as_activity(&data) {
             self.scroll_guard.notify_input();
             let state_before = self.state_detector.state();
+            let evidence_before = self.state_detector.state_evidence();
             self.state_detector.note_input();
-            let _ = self.maybe_emit_state_change(state_before);
+            let _ = self.maybe_emit_state_change(state_before, evidence_before);
         }
         self.update_last_skill_from_input(&data);
+
+        if let Some(chunks) = tmux_input_chunks(&data) {
+            match send_tmux_input_chunks(&self.tmux_name, &chunks).await {
+                Ok(()) => return,
+                Err(err) => {
+                    warn!(
+                        session_id = %self.session_id,
+                        tmux_name = %self.tmux_name,
+                        "tmux send-keys input fallback failed: {err}"
+                    );
+                }
+            }
+        }
+
         if let Err(e) = write_and_flush_input(&mut self.writer, &data) {
             error!(session_id = %self.session_id, "PTY write error: {}", e);
+        }
+    }
+
+    async fn handle_submit_line(&mut self, text: String, pty_closed: bool) {
+        if pty_closed {
+            debug!(session_id = %self.session_id, "ignoring submit to exited PTY");
+            return;
+        }
+
+        let Some(text) = normalize_submit_line_text(&text) else {
+            return;
+        };
+        let fallback_input = submit_line_fallback_input(&text);
+
+        if write_input_counts_as_activity(&fallback_input) {
+            self.scroll_guard.notify_input();
+            let state_before = self.state_detector.state();
+            let evidence_before = self.state_detector.state_evidence();
+            self.state_detector.note_input();
+            let _ = self.maybe_emit_state_change(state_before, evidence_before);
+        }
+        self.update_last_skill_from_input(&fallback_input);
+
+        match send_tmux_submit_line(&self.tmux_name, &text).await {
+            Ok(()) => return,
+            Err(err) => {
+                warn!(
+                    session_id = %self.session_id,
+                    tmux_name = %self.tmux_name,
+                    "tmux submit-line fallback failed: {err}"
+                );
+            }
+        }
+
+        if let Err(e) = write_and_flush_input(&mut self.writer, &fallback_input) {
+            error!(session_id = %self.session_id, "PTY submit write error: {}", e);
         }
     }
 
@@ -593,9 +660,10 @@ impl SessionActor {
 
     async fn handle_dismiss_attention(&mut self) {
         let state_before = self.state_detector.state();
+        let evidence_before = self.state_detector.state_evidence();
         self.state_detector.dismiss_attention();
         if matches!(
-            self.maybe_emit_state_change(state_before),
+            self.maybe_emit_state_change(state_before, evidence_before),
             Some(SessionState::Idle)
         ) {
             self.maybe_refresh_cwd_from_tmux(false).await;
@@ -606,6 +674,17 @@ impl SessionActor {
         self.subscribers.remove(&client_id);
         debug!(session_id = %self.session_id, client_id, "client unsubscribed");
     }
+}
+
+fn state_detector_for_initial_tool(initial_tool: Option<&str>) -> StateDetector {
+    let mut detector = StateDetector::new();
+    if initial_tool
+        .and_then(crate::types::detect_tool_name)
+        .is_some()
+    {
+        detector.set_tui_tool_mode(true);
+    }
+    detector
 }
 
 async fn capture_pane_tail_or_empty(session_id: String, tmux_name: String, lines: usize) -> String {
@@ -711,13 +790,14 @@ impl SessionActor {
     async fn fire_timers(&mut self) {
         // Snapshot state before timers for change detection.
         let state_before = self.state_detector.state();
+        let evidence_before = self.state_detector.state_evidence();
 
         // Check state detector timers (error auto-clear, idle -> attention).
         self.state_detector.check_timers(Instant::now());
 
         // Emit state change event if timers caused a transition.
         if matches!(
-            self.maybe_emit_state_change(state_before),
+            self.maybe_emit_state_change(state_before, evidence_before),
             Some(SessionState::Idle)
         ) {
             self.maybe_refresh_cwd_from_tmux(false).await;
@@ -753,10 +833,11 @@ impl SessionActor {
 
     async fn process_output_chunk(&mut self, chunk: ScrollOutputChunk) {
         let state_before = self.state_detector.state();
+        let evidence_before = self.state_detector.state_evidence();
         self.state_detector.process_output(&chunk.data);
         self.maybe_update_tool_from_current_command();
         if matches!(
-            self.maybe_emit_state_change(state_before),
+            self.maybe_emit_state_change(state_before, evidence_before),
             Some(SessionState::Idle)
         ) {
             self.maybe_refresh_cwd_from_tmux(false).await;
@@ -931,30 +1012,28 @@ impl SessionActor {
     /// Periodically query the pane's process tree to reconcile state.
     /// Runs every LIVENESS_CHECK_INTERVAL (~2s). Skips if the session has exited.
     async fn maybe_check_liveness(&mut self) {
-        if self.state_detector.state() == SessionState::Exited {
-            return;
-        }
         let now = Instant::now();
-        if now.duration_since(self.last_liveness_check_at) < LIVENESS_CHECK_INTERVAL {
+        if !self.should_check_liveness(now) {
             return;
         }
         self.last_liveness_check_at = now;
+        self.query_and_reconcile_liveness().await;
+    }
 
+    fn should_check_liveness(&self, now: Instant) -> bool {
+        self.state_detector.state() != SessionState::Exited
+            && now.duration_since(self.last_liveness_check_at) >= LIVENESS_CHECK_INTERVAL
+    }
+
+    async fn query_and_reconcile_liveness(&mut self) {
         let tmux_name = self.tmux_name.clone();
         match query_pane_liveness(&tmux_name).await {
             Ok(liveness) => {
-                let state_before = self.state_detector.state();
-                self.state_detector
-                    .apply_process_liveness(liveness.has_children);
-                if matches!(
-                    self.maybe_emit_state_change(state_before),
-                    Some(SessionState::Idle)
-                ) {
+                let outcome = self.reconcile_liveness(liveness);
+                if outcome.refresh_cwd {
                     self.maybe_refresh_cwd_from_tmux(false).await;
                 }
-                // Also refresh tool detection when liveness discovers children,
-                // since a new tool may have started between tool refresh polls.
-                if liveness.has_children {
+                if outcome.refresh_tool {
                     self.maybe_refresh_tool_from_tmux(false).await;
                 }
             }
@@ -966,6 +1045,30 @@ impl SessionActor {
                     e
                 );
             }
+        }
+    }
+
+    fn reconcile_liveness(&mut self, liveness: PaneLiveness) -> LivenessReconciliation {
+        if !liveness.process_snapshot_fresh {
+            debug!(
+                session_id = %self.session_id,
+                tmux_name = %self.tmux_name,
+                "skipping liveness reconciliation from stale process snapshot"
+            );
+            return LivenessReconciliation::default();
+        }
+
+        let state_before = self.state_detector.state();
+        let evidence_before = self.state_detector.state_evidence();
+        self.state_detector
+            .apply_process_liveness(liveness.has_children);
+        let refresh_cwd = matches!(
+            self.maybe_emit_state_change(state_before, evidence_before),
+            Some(SessionState::Idle)
+        );
+        LivenessReconciliation {
+            refresh_cwd,
+            refresh_tool: liveness.has_children,
         }
     }
 
@@ -1018,25 +1121,35 @@ impl SessionActor {
         let _ = self.event_tx.send(event);
     }
 
-    /// Compare state before and after a detector operation. If the state changed,
+    /// Compare state/evidence before and after a detector operation. If either
+    /// changed,
     /// emit a `session_state` ControlEvent through the per-session broadcast channel.
-    fn maybe_emit_state_change(&self, previous_state: SessionState) -> Option<SessionState> {
-        self.maybe_emit_state_change_with_exit_reason(previous_state, None)
+    fn maybe_emit_state_change(
+        &self,
+        previous_state: SessionState,
+        previous_evidence: StateEvidence,
+    ) -> Option<SessionState> {
+        self.maybe_emit_state_change_with_exit_reason(previous_state, previous_evidence, None)
     }
 
-    /// Emit a `session_state` ControlEvent if the state changed, optionally
-    /// including an `exit_reason` for terminal exit events.
+    /// Emit a `session_state` ControlEvent if the state or its evidence changed,
+    /// optionally including an `exit_reason` for terminal exit events.
     fn maybe_emit_state_change_with_exit_reason(
         &self,
         previous_state: SessionState,
+        previous_evidence: StateEvidence,
         exit_reason: Option<String>,
     ) -> Option<SessionState> {
         let (current_state, current_command) = self.state_detector.get_state();
-        if current_state != previous_state {
+        let state_evidence = self.state_detector.state_evidence();
+        let state_changed = current_state != previous_state;
+        let evidence_changed = state_evidence != previous_evidence;
+        if state_changed || evidence_changed {
             let payload = SessionStatePayload {
                 state: current_state,
                 previous_state,
                 current_command,
+                state_evidence,
                 transport_health: TransportHealth::Healthy,
                 exit_reason,
                 at: Utc::now(),
@@ -1046,6 +1159,7 @@ impl SessionActor {
                 previous_state = ?payload.previous_state,
                 state = ?payload.state,
                 current_command = ?payload.current_command,
+                state_evidence = ?payload.state_evidence,
                 transport_health = ?payload.transport_health,
                 exit_reason = ?payload.exit_reason,
                 at = %payload.at,
@@ -1058,7 +1172,11 @@ impl SessionActor {
             };
             // If no receivers, send returns Err -- that's fine, nobody is listening.
             let _ = self.event_tx.send(event);
-            Some(current_state)
+            if state_changed {
+                Some(current_state)
+            } else {
+                None
+            }
         } else {
             None
         }
@@ -1197,12 +1315,14 @@ impl SessionActor {
     /// Build a summary snapshot of this session's current state.
     fn build_summary(&self) -> SessionSummary {
         let (state, current_command) = self.state_detector.get_state();
+        let state_evidence = self.state_detector.state_evidence();
         let context_limit = crate::types::context_limit_for_tool(self.tool.as_deref());
         SessionSummary {
             session_id: self.session_id.clone(),
             tmux_name: self.tmux_name.clone(),
             state,
             current_command,
+            state_evidence,
             cwd: self.cwd.clone(),
             tool: self.tool.clone(),
             token_count: 0,
@@ -1220,6 +1340,7 @@ impl SessionActor {
                 Utc::now(),
             ),
             commit_candidate: false,
+            action_cues: Vec::new(),
             objective_changed_at: None,
             last_skill: self.last_skill.clone(),
             last_activity_at: self.last_activity_at,
@@ -1406,6 +1527,178 @@ fn write_and_flush_input(
     writer.flush()
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum TmuxInputChunk {
+    Literal(String),
+    Enter,
+}
+
+fn tmux_input_chunks(data: &[u8]) -> Option<Vec<TmuxInputChunk>> {
+    let text = std::str::from_utf8(data).ok()?;
+    let mut chunks = Vec::new();
+    let mut literal = String::new();
+
+    for ch in text.chars() {
+        match ch {
+            '\r' | '\n' => {
+                if !literal.is_empty() {
+                    chunks.push(TmuxInputChunk::Literal(std::mem::take(&mut literal)));
+                }
+                chunks.push(TmuxInputChunk::Enter);
+            }
+            '\t' => {
+                return None;
+            }
+            ch if ch.is_control() => {
+                return None;
+            }
+            ch => literal.push(ch),
+        }
+    }
+
+    if !literal.is_empty() {
+        chunks.push(TmuxInputChunk::Literal(literal));
+    }
+
+    (!chunks.is_empty()).then_some(chunks)
+}
+
+fn normalize_submit_line_text(text: &str) -> Option<String> {
+    let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
+    let normalized = normalized.trim_end_matches('\n').to_string();
+    (!normalized.trim().is_empty()).then_some(normalized)
+}
+
+fn submit_line_fallback_input(text: &str) -> Vec<u8> {
+    let mut input = text.as_bytes().to_vec();
+    input.extend_from_slice(b"\r\r");
+    input
+}
+
+async fn send_tmux_input_chunks(tmux_name: &str, chunks: &[TmuxInputChunk]) -> anyhow::Result<()> {
+    let target = exact_pane_target(tmux_name);
+    let _ = send_tmux_keys(&target, &["-X", "cancel"]).await;
+    for chunk in chunks {
+        match chunk {
+            TmuxInputChunk::Literal(text) => {
+                send_tmux_keys(&target, &["-l", text]).await?;
+            }
+            TmuxInputChunk::Enter => {
+                send_tmux_keys(&target, &["Enter"]).await?;
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn send_tmux_submit_line(tmux_name: &str, text: &str) -> anyhow::Result<()> {
+    let target = exact_pane_target(tmux_name);
+    let _ = send_tmux_keys(&target, &["-X", "cancel"]).await;
+    let buffer_name = next_tmux_submit_buffer_name();
+    set_tmux_buffer(&buffer_name, text).await?;
+    paste_tmux_buffer(&target, &buffer_name).await?;
+    send_tmux_keys(&target, &["Enter"]).await?;
+    tokio::time::sleep(TMUX_AGENT_SUBMIT_DOUBLE_ENTER_DELAY).await;
+    send_tmux_keys(&target, &["Enter"]).await?;
+    Ok(())
+}
+
+fn next_tmux_submit_buffer_name() -> String {
+    let id = NEXT_TMUX_SUBMIT_BUFFER_ID.fetch_add(1, Ordering::Relaxed);
+    format!("swimmers-submit-{}-{id}", std::process::id())
+}
+
+async fn set_tmux_buffer(buffer_name: &str, text: &str) -> anyhow::Result<()> {
+    let mut command = Command::new("tmux");
+    command
+        .args(["set-buffer", "-b", buffer_name, "--", text])
+        .env_remove("TMUX")
+        .env_remove("TMUX_PANE")
+        .kill_on_drop(true);
+
+    let output = tokio::time::timeout(TMUX_PASTE_BUFFER_TIMEOUT, command.output())
+        .await
+        .map_err(|_| {
+            anyhow::anyhow!(
+                "tmux set-buffer timed out after {}ms",
+                TMUX_PASTE_BUFFER_TIMEOUT.as_millis()
+            )
+        })?
+        .map_err(|e| anyhow::anyhow!("failed to run tmux set-buffer: {e}"))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(anyhow::anyhow!(
+            "tmux set-buffer exited with status {}: {}",
+            output.status,
+            stderr.trim()
+        ));
+    }
+
+    Ok(())
+}
+
+async fn paste_tmux_buffer(target: &str, buffer_name: &str) -> anyhow::Result<()> {
+    let mut command = Command::new("tmux");
+    command
+        .args(["paste-buffer", "-dpr", "-b", buffer_name, "-t", target])
+        .env_remove("TMUX")
+        .env_remove("TMUX_PANE")
+        .kill_on_drop(true);
+
+    let output = tokio::time::timeout(TMUX_PASTE_BUFFER_TIMEOUT, command.output())
+        .await
+        .map_err(|_| {
+            anyhow::anyhow!(
+                "tmux paste-buffer timed out after {}ms",
+                TMUX_PASTE_BUFFER_TIMEOUT.as_millis()
+            )
+        })?
+        .map_err(|e| anyhow::anyhow!("failed to run tmux paste-buffer: {e}"))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(anyhow::anyhow!(
+            "tmux paste-buffer exited with status {}: {}",
+            output.status,
+            stderr.trim()
+        ));
+    }
+
+    Ok(())
+}
+
+async fn send_tmux_keys(target: &str, keys: &[&str]) -> anyhow::Result<()> {
+    let mut command = Command::new("tmux");
+    command
+        .args(["send-keys", "-t", target])
+        .args(keys)
+        .env_remove("TMUX")
+        .env_remove("TMUX_PANE")
+        .kill_on_drop(true);
+
+    let output = tokio::time::timeout(TMUX_SEND_KEYS_TIMEOUT, command.output())
+        .await
+        .map_err(|_| {
+            anyhow::anyhow!(
+                "tmux send-keys timed out after {}ms",
+                TMUX_SEND_KEYS_TIMEOUT.as_millis()
+            )
+        })?
+        .map_err(|e| anyhow::anyhow!("failed to run tmux send-keys: {e}"))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(anyhow::anyhow!(
+            "tmux send-keys exited with status {}: {}",
+            output.status,
+            stderr.trim()
+        ));
+    }
+
+    Ok(())
+}
+
 fn output_counts_as_meaningful_activity(
     previous_state: SessionState,
     current_state: SessionState,
@@ -1584,6 +1877,11 @@ struct ProcessEntriesCache {
     entries: Vec<ProcessEntry>,
 }
 
+struct ProcessEntriesSnapshot {
+    entries: Vec<ProcessEntry>,
+    fresh: bool,
+}
+
 static PROCESS_ENTRIES_CACHE: OnceLock<Mutex<ProcessEntriesCache>> = OnceLock::new();
 
 fn process_entries_cache() -> &'static Mutex<ProcessEntriesCache> {
@@ -1598,7 +1896,15 @@ async fn query_tool_from_tmux_process_tree(tmux_name: &str) -> anyhow::Result<Op
     }
 
     let pane_pid = query_tmux_pane_pid(tmux_name).await?;
-    let entries = query_process_entries().await?;
+    let snapshot = query_process_entries().await?;
+    if !snapshot.fresh {
+        debug!(
+            tmux_name,
+            "skipping tool detection from stale process snapshot"
+        );
+        return Ok(None);
+    }
+    let entries = snapshot.entries;
 
     let mut by_pid: HashMap<u32, ProcessEntry> = HashMap::new();
     let mut children: HashMap<u32, Vec<u32>> = HashMap::new();
@@ -1640,6 +1946,14 @@ struct PaneLiveness {
     /// Sum of `%cpu` across all descendant processes (excludes the shell itself).
     #[allow(dead_code)]
     descendant_cpu: f32,
+    /// True only when the process tree came from a fresh `ps` snapshot.
+    process_snapshot_fresh: bool,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct LivenessReconciliation {
+    refresh_cwd: bool,
+    refresh_tool: bool,
 }
 
 /// Query whether the pane's shell process has running children and their
@@ -1648,8 +1962,10 @@ struct PaneLiveness {
 /// the terminal output looks like.
 async fn query_pane_liveness(tmux_name: &str) -> anyhow::Result<PaneLiveness> {
     let pane_pid = query_tmux_pane_pid(tmux_name).await?;
-    let entries = query_process_entries().await?;
-    Ok(compute_pane_liveness(pane_pid, entries))
+    let snapshot = query_process_entries().await?;
+    let mut liveness = compute_pane_liveness(pane_pid, snapshot.entries);
+    liveness.process_snapshot_fresh = snapshot.fresh;
+    Ok(liveness)
 }
 
 /// Pure BFS over the process tree rooted at `pane_pid`. Exported for testing.
@@ -1693,6 +2009,7 @@ fn compute_pane_liveness(pane_pid: u32, entries: Vec<ProcessEntry>) -> PaneLiven
     PaneLiveness {
         has_children,
         descendant_cpu,
+        process_snapshot_fresh: true,
     }
 }
 
@@ -1713,28 +2030,37 @@ async fn query_tmux_pane_pid(tmux_name: &str) -> anyhow::Result<u32> {
     Ok(pane_pid)
 }
 
-async fn query_process_entries() -> anyhow::Result<Vec<ProcessEntry>> {
+async fn query_process_entries() -> anyhow::Result<ProcessEntriesSnapshot> {
     let mut cache = process_entries_cache().lock().await;
     if cache
         .fetched_at
         .map(|fetched_at| fetched_at.elapsed() <= PROCESS_ENTRIES_CACHE_TTL)
         .unwrap_or(false)
     {
-        return Ok(cache.entries.clone());
+        return Ok(ProcessEntriesSnapshot {
+            entries: cache.entries.clone(),
+            fresh: true,
+        });
     }
 
     match query_process_entries_uncached().await {
         Ok(entries) => {
             cache.fetched_at = Some(Instant::now());
             cache.entries = entries.clone();
-            Ok(entries)
+            Ok(ProcessEntriesSnapshot {
+                entries,
+                fresh: true,
+            })
         }
         Err(err) if !cache.entries.is_empty() => {
             debug!(
                 "using stale process snapshot after ps refresh failed: {}",
                 err
             );
-            Ok(cache.entries.clone())
+            Ok(ProcessEntriesSnapshot {
+                entries: cache.entries.clone(),
+                fresh: false,
+            })
         }
         Err(err) => Err(err),
     }
@@ -2195,19 +2521,21 @@ mod tests {
         capture_pane_tail_with_command, compute_pane_liveness, cwd_from_osc7_payload,
         detect_skill_from_input_line, detect_tool_from_command_line,
         detect_tool_from_process_entry, drain_completed_input_lines, extract_cwd_from_title,
-        find_osc_payload_end, line_looks_prompt_like, normalize_skill_name, osc_payloads,
-        output_counts_as_meaningful_activity, parse_process_entry, percent_decode,
-        query_tmux_session_created, query_tool_from_tmux_process_tree, resolve_tmux_terminal_env,
-        should_refresh_cwd_from_tmux, should_refresh_tool_from_tmux, visible_output_is_meaningful,
-        write_and_flush_input, write_input_counts_as_activity, ControlEvent, ProcessEntry,
-        SessionActor, SessionCommand, CWD_REFRESH_MIN_INTERVAL, TOOL_REFRESH_MIN_INTERVAL,
+        find_osc_payload_end, line_looks_prompt_like, normalize_skill_name,
+        normalize_submit_line_text, osc_payloads, output_counts_as_meaningful_activity,
+        parse_process_entry, percent_decode, process_entries_cache, query_tmux_session_created,
+        query_tool_from_tmux_process_tree, resolve_tmux_terminal_env, should_refresh_cwd_from_tmux,
+        should_refresh_tool_from_tmux, state_detector_for_initial_tool, submit_line_fallback_input,
+        tmux_input_chunks, visible_output_is_meaningful, write_and_flush_input,
+        write_input_counts_as_activity, ControlEvent, PaneLiveness, ProcessEntriesCache,
+        ProcessEntry, SessionActor, SessionCommand, TmuxInputChunk, CWD_REFRESH_MIN_INTERVAL,
+        PROCESS_ENTRIES_CACHE_TTL, TOOL_REFRESH_MIN_INTERVAL,
     };
     use crate::config::Config;
     use crate::scroll::guard::ScrollGuard;
     use crate::scroll::guard::ScrollOutputChunk;
     use crate::session::replay_ring::ReplayRing;
-    use crate::state::detector::StateDetector;
-    use crate::types::SessionState;
+    use crate::types::{SessionState, SessionStatePayload};
     use chrono::{TimeZone, Utc};
     use portable_pty::{native_pty_system, PtySize};
     use std::collections::HashMap;
@@ -2237,7 +2565,7 @@ mod tests {
             config: Arc::new(Config::default()),
             master: pair.master,
             writer,
-            state_detector: StateDetector::new(),
+            state_detector: state_detector_for_initial_tool(Some("Codex")),
             scroll_guard: ScrollGuard::new(),
             replay_ring: ReplayRing::new(512 * 1024),
             subscribers: HashMap::new(),
@@ -2257,6 +2585,85 @@ mod tests {
             session_started_at: Utc::now(),
             clear_replay_on_first_idle: false,
         }
+    }
+
+    async fn clear_process_entries_cache() {
+        let mut cache = process_entries_cache().lock().await;
+        *cache = ProcessEntriesCache::default();
+    }
+
+    async fn seed_process_entries_cache(entries: Vec<ProcessEntry>, fetched_at: Instant) {
+        let mut cache = process_entries_cache().lock().await;
+        cache.fetched_at = Some(fetched_at);
+        cache.entries = entries;
+    }
+
+    fn restore_path(previous_path: Option<std::ffi::OsString>) {
+        if let Some(value) = previous_path {
+            std::env::set_var("PATH", value);
+        } else {
+            std::env::remove_var("PATH");
+        }
+    }
+
+    fn make_executable(path: &std::path::Path) {
+        let mut perms = std::fs::metadata(path).expect("metadata").permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(path, perms).expect("chmod");
+    }
+
+    fn install_fake_tmux(script: &str) -> (tempfile::TempDir, Option<std::ffi::OsString>) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let bin_dir = dir.path().join("bin");
+        std::fs::create_dir_all(&bin_dir).expect("bin dir");
+        let tmux = bin_dir.join("tmux");
+        std::fs::write(&tmux, script).expect("tmux script");
+        make_executable(&tmux);
+        let previous_path = std::env::var_os("PATH");
+        std::env::set_var(
+            "PATH",
+            std::env::join_paths([bin_dir.as_path()]).expect("path"),
+        );
+        (dir, previous_path)
+    }
+
+    #[test]
+    fn evidence_refresh_emits_session_state_event_without_state_transition() {
+        let mut actor = test_actor();
+        let mut rx = actor.event_tx.subscribe();
+        let previous_state = actor.state_detector.state();
+        let previous_evidence = actor.state_detector.state_evidence();
+
+        actor.state_detector.process_output(b"\x1b]133;A\x07");
+        let result = actor.maybe_emit_state_change(previous_state, previous_evidence);
+
+        assert_eq!(result, None);
+        let event = rx.try_recv().expect("session_state event");
+        assert_eq!(event.event, "session_state");
+        let payload: SessionStatePayload =
+            serde_json::from_value(event.payload).expect("session_state payload");
+        assert_eq!(payload.state, SessionState::Idle);
+        assert_eq!(payload.previous_state, SessionState::Idle);
+        assert_eq!(payload.state_evidence.cause, "osc133_prompt");
+        assert_eq!(
+            payload.state_evidence.confidence,
+            crate::types::StateConfidence::High
+        );
+    }
+
+    #[test]
+    fn initial_tool_enables_tui_mode_before_liveness_reconciliation() {
+        let mut actor = test_actor();
+
+        actor.state_detector.note_input();
+        actor.reconcile_liveness(PaneLiveness {
+            has_children: true,
+            descendant_cpu: 0.0,
+            process_snapshot_fresh: true,
+        });
+
+        assert_eq!(actor.state_detector.state(), SessionState::Busy);
+        assert_eq!(actor.state_detector.state_evidence().cause, "local_input");
     }
 
     #[tokio::test]
@@ -2315,6 +2722,109 @@ mod tests {
         actor.maybe_check_liveness().await;
         // last_liveness_check_at is updated even on query failure
         assert!(actor.last_liveness_check_at.elapsed() < Duration::from_secs(1));
+    }
+
+    #[tokio::test]
+    async fn maybe_check_liveness_skips_stale_process_cache_that_would_mark_busy() {
+        let _guard = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        clear_process_entries_cache().await;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let bin_dir = dir.path().join("bin");
+        std::fs::create_dir_all(&bin_dir).expect("bin dir");
+        let tmux = bin_dir.join("tmux");
+        std::fs::write(
+            &tmux,
+            r##"#!/bin/sh
+if [ "${5-}" = "#{pane_pid}" ]; then
+  printf '101\n'
+elif [ "${5-}" = "#{pane_current_command}" ]; then
+  printf 'bash\n'
+else
+  printf '\n'
+fi
+"##,
+        )
+        .expect("tmux");
+        let ps = bin_dir.join("ps");
+        std::fs::write(&ps, "#!/bin/sh\nprintf 'ps unavailable\\n' >&2\nexit 1\n").expect("ps");
+        make_executable(&tmux);
+        make_executable(&ps);
+
+        let previous_path = std::env::var_os("PATH");
+        std::env::set_var(
+            "PATH",
+            std::env::join_paths([bin_dir.as_path()]).expect("path"),
+        );
+        seed_process_entries_cache(
+            vec![proc(101, 1, 0.0), proc(102, 101, 0.0)],
+            Instant::now() - PROCESS_ENTRIES_CACHE_TTL - Duration::from_millis(1),
+        )
+        .await;
+
+        let mut actor = test_actor();
+        actor.last_liveness_check_at = Instant::now() - Duration::from_secs(3);
+        actor.maybe_check_liveness().await;
+
+        assert_eq!(actor.state_detector.state(), SessionState::Idle);
+        assert_eq!(actor.state_detector.state_evidence().cause, "initial_state");
+
+        restore_path(previous_path);
+        clear_process_entries_cache().await;
+    }
+
+    #[tokio::test]
+    async fn maybe_check_liveness_skips_stale_process_cache_that_would_mark_idle() {
+        let _guard = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        clear_process_entries_cache().await;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let bin_dir = dir.path().join("bin");
+        std::fs::create_dir_all(&bin_dir).expect("bin dir");
+        let tmux = bin_dir.join("tmux");
+        std::fs::write(
+            &tmux,
+            r##"#!/bin/sh
+if [ "${5-}" = "#{pane_pid}" ]; then
+  printf '101\n'
+elif [ "${5-}" = "#{pane_current_command}" ]; then
+  printf 'bash\n'
+else
+  printf '\n'
+fi
+"##,
+        )
+        .expect("tmux");
+        let ps = bin_dir.join("ps");
+        std::fs::write(&ps, "#!/bin/sh\nprintf 'ps unavailable\\n' >&2\nexit 1\n").expect("ps");
+        make_executable(&tmux);
+        make_executable(&ps);
+
+        let previous_path = std::env::var_os("PATH");
+        std::env::set_var(
+            "PATH",
+            std::env::join_paths([bin_dir.as_path()]).expect("path"),
+        );
+        seed_process_entries_cache(
+            vec![proc(101, 1, 0.0)],
+            Instant::now() - PROCESS_ENTRIES_CACHE_TTL - Duration::from_millis(1),
+        )
+        .await;
+
+        let mut actor = test_actor();
+        actor.state_detector.note_input();
+        actor.last_liveness_check_at = Instant::now() - Duration::from_secs(3);
+        actor.maybe_check_liveness().await;
+
+        assert_eq!(actor.state_detector.state(), SessionState::Busy);
+        assert_eq!(actor.state_detector.state_evidence().cause, "local_input");
+
+        restore_path(previous_path);
+        clear_process_entries_cache().await;
     }
 
     #[test]
@@ -2547,6 +3057,7 @@ mod tests {
         let _guard = crate::test_support::ENV_LOCK
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
+        clear_process_entries_cache().await;
         let dir = tempfile::tempdir().expect("tempdir");
         let bin_dir = dir.path().join("bin");
         std::fs::create_dir_all(&bin_dir).expect("bin dir");
@@ -2591,6 +3102,69 @@ fi
         } else {
             std::env::remove_var("PATH");
         }
+        clear_process_entries_cache().await;
+    }
+
+    #[tokio::test]
+    async fn query_tool_from_tmux_process_tree_skips_stale_process_cache() {
+        let _guard = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        clear_process_entries_cache().await;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let bin_dir = dir.path().join("bin");
+        std::fs::create_dir_all(&bin_dir).expect("bin dir");
+
+        let tmux = bin_dir.join("tmux");
+        std::fs::write(
+            &tmux,
+            r##"#!/bin/sh
+if [ "${5-}" = "#{pane_current_command}" ]; then
+  printf 'bash\n'
+else
+  printf '101\n'
+fi
+"##,
+        )
+        .expect("tmux");
+        let ps = bin_dir.join("ps");
+        std::fs::write(&ps, "#!/bin/sh\nprintf 'ps unavailable\\n' >&2\nexit 1\n").expect("ps");
+        make_executable(&tmux);
+        make_executable(&ps);
+
+        let previous_path = std::env::var_os("PATH");
+        std::env::set_var(
+            "PATH",
+            std::env::join_paths([bin_dir.as_path()]).expect("path"),
+        );
+        seed_process_entries_cache(
+            vec![
+                ProcessEntry {
+                    pid: 101,
+                    ppid: 1,
+                    pcpu: 0.0,
+                    comm: "bash".to_string(),
+                    args: "bash".to_string(),
+                },
+                ProcessEntry {
+                    pid: 102,
+                    ppid: 101,
+                    pcpu: 0.0,
+                    comm: "node".to_string(),
+                    args: "/usr/local/bin/claude --print".to_string(),
+                },
+            ],
+            Instant::now() - PROCESS_ENTRIES_CACHE_TTL - Duration::from_millis(1),
+        )
+        .await;
+
+        let tool = query_tool_from_tmux_process_tree("demo")
+            .await
+            .expect("tool query");
+        assert_eq!(tool, None);
+
+        restore_path(previous_path);
+        clear_process_entries_cache().await;
     }
 
     #[tokio::test]
@@ -2706,6 +3280,14 @@ fi
         }
     }
 
+    fn set_tracking_writer(actor: &mut SessionActor) -> Arc<Mutex<TrackingWriterState>> {
+        let state = Arc::new(Mutex::new(TrackingWriterState::default()));
+        actor.writer = Box::new(TrackingWriter {
+            state: Arc::clone(&state),
+        });
+        state
+    }
+
     #[test]
     fn write_and_flush_input_flushes_pty_writer() {
         let state = Arc::new(Mutex::new(TrackingWriterState::default()));
@@ -2718,6 +3300,213 @@ fi
         let state = state.lock().unwrap_or_else(|poison| poison.into_inner());
         assert_eq!(state.writes, b"echo hi\r");
         assert_eq!(state.flushes, 1);
+    }
+
+    #[tokio::test]
+    async fn handle_write_input_ignores_closed_pty_without_activity() {
+        let mut actor = test_actor();
+        let writer_state = set_tracking_writer(&mut actor);
+        let mut rx = actor.event_tx.subscribe();
+
+        actor.handle_write_input(b"hello\r".to_vec(), true).await;
+
+        let writer_state = writer_state
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        assert!(writer_state.writes.is_empty());
+        assert_eq!(writer_state.flushes, 0);
+        assert_eq!(actor.state_detector.state(), SessionState::Idle);
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn handle_write_input_uses_tmux_send_keys_without_raw_writer_when_available() {
+        let _guard = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let tmux_log = tempfile::NamedTempFile::new().expect("tmux log");
+        std::env::set_var("TMUX_SEND_LOG", tmux_log.path());
+        let (_dir, previous_path) = install_fake_tmux(
+            r#"#!/bin/sh
+printf '%s\n' "$*" >> "$TMUX_SEND_LOG"
+exit 0
+"#,
+        );
+        let mut actor = test_actor();
+        let writer_state = set_tracking_writer(&mut actor);
+        let mut rx = actor.event_tx.subscribe();
+
+        actor.handle_write_input(b"hello\r".to_vec(), false).await;
+
+        let writer_state = writer_state
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        assert!(writer_state.writes.is_empty());
+        assert_eq!(writer_state.flushes, 0);
+        assert_eq!(actor.state_detector.state(), SessionState::Busy);
+        assert_eq!(actor.state_detector.state_evidence().cause, "local_input");
+        let event = rx.try_recv().expect("session_state event");
+        let payload: SessionStatePayload =
+            serde_json::from_value(event.payload).expect("session_state payload");
+        assert_eq!(payload.state, SessionState::Busy);
+        assert_eq!(payload.state_evidence.cause, "local_input");
+
+        let log = std::fs::read_to_string(tmux_log.path()).expect("tmux log");
+        assert!(log.contains("send-keys -t =demo: -X cancel"));
+        assert!(log.contains("send-keys -t =demo: -l hello"));
+        assert!(log.contains("send-keys -t =demo: Enter"));
+
+        std::env::remove_var("TMUX_SEND_LOG");
+        restore_path(previous_path);
+    }
+
+    #[tokio::test]
+    async fn handle_write_input_falls_back_to_raw_writer_when_tmux_send_keys_fails() {
+        let _guard = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let (_dir, previous_path) = install_fake_tmux(
+            r#"#!/bin/sh
+printf 'no such target\n' >&2
+exit 1
+"#,
+        );
+        let mut actor = test_actor();
+        let writer_state = set_tracking_writer(&mut actor);
+
+        actor.handle_write_input(b"hello\r".to_vec(), false).await;
+
+        let writer_state = writer_state
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        assert_eq!(writer_state.writes, b"hello\r");
+        assert_eq!(writer_state.flushes, 1);
+        assert_eq!(actor.state_detector.state(), SessionState::Busy);
+        assert_eq!(actor.state_detector.state_evidence().cause, "local_input");
+
+        restore_path(previous_path);
+    }
+
+    #[tokio::test]
+    async fn handle_write_input_preserves_control_byte_fallback_payloads() {
+        let mut actor = test_actor();
+        let writer_state = set_tracking_writer(&mut actor);
+
+        actor.handle_write_input(b"abc\t".to_vec(), false).await;
+
+        let writer_state = writer_state
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        assert_eq!(writer_state.writes, b"abc\t");
+        assert_eq!(writer_state.flushes, 1);
+        assert_eq!(actor.state_detector.state(), SessionState::Busy);
+    }
+
+    #[tokio::test]
+    async fn handle_submit_line_uses_tmux_paste_buffer_and_double_enter() {
+        let _guard = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let tmux_log = tempfile::NamedTempFile::new().expect("tmux log");
+        std::env::set_var("TMUX_SEND_LOG", tmux_log.path());
+        let (_dir, previous_path) = install_fake_tmux(
+            r#"#!/bin/sh
+printf '%s\n' "$*" >> "$TMUX_SEND_LOG"
+exit 0
+"#,
+        );
+        let mut actor = test_actor();
+        let writer_state = set_tracking_writer(&mut actor);
+        let mut rx = actor.event_tx.subscribe();
+
+        actor
+            .handle_submit_line("hello codex\n".to_string(), false)
+            .await;
+
+        let writer_state = writer_state
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        assert!(writer_state.writes.is_empty());
+        assert_eq!(writer_state.flushes, 0);
+        assert_eq!(actor.state_detector.state(), SessionState::Busy);
+        let event = rx.try_recv().expect("session_state event");
+        let payload: SessionStatePayload =
+            serde_json::from_value(event.payload).expect("session_state payload");
+        assert_eq!(payload.state, SessionState::Busy);
+
+        let log = std::fs::read_to_string(tmux_log.path()).expect("tmux log");
+        assert!(log.contains("send-keys -t =demo: -X cancel"));
+        assert!(log.contains("set-buffer -b swimmers-submit-"));
+        assert!(log.contains("-- hello codex"));
+        assert!(log.contains("paste-buffer -dpr -b swimmers-submit-"));
+        assert_eq!(
+            log.lines()
+                .filter(|line| *line == "send-keys -t =demo: Enter")
+                .count(),
+            2
+        );
+
+        std::env::remove_var("TMUX_SEND_LOG");
+        restore_path(previous_path);
+    }
+
+    #[tokio::test]
+    async fn handle_submit_line_falls_back_to_raw_writer_when_tmux_submit_fails() {
+        let _guard = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let (_dir, previous_path) = install_fake_tmux(
+            r#"#!/bin/sh
+printf 'no such target\n' >&2
+exit 1
+"#,
+        );
+        let mut actor = test_actor();
+        let writer_state = set_tracking_writer(&mut actor);
+
+        actor
+            .handle_submit_line("hello codex".to_string(), false)
+            .await;
+
+        let writer_state = writer_state
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        assert_eq!(writer_state.writes, b"hello codex\r\r");
+        assert_eq!(writer_state.flushes, 1);
+        assert_eq!(actor.state_detector.state(), SessionState::Busy);
+
+        restore_path(previous_path);
+    }
+
+    #[test]
+    fn tmux_input_chunks_splits_literal_text_and_enter() {
+        assert_eq!(
+            tmux_input_chunks(b"printf \"hello\\n\"\r"),
+            Some(vec![
+                TmuxInputChunk::Literal("printf \"hello\\n\"".to_string()),
+                TmuxInputChunk::Enter,
+            ])
+        );
+    }
+
+    #[test]
+    fn tmux_input_chunks_rejects_control_sequences() {
+        assert_eq!(tmux_input_chunks(b"\x1b[A"), None);
+        assert_eq!(tmux_input_chunks(b"abc\t"), None);
+    }
+
+    #[test]
+    fn normalize_submit_line_text_trims_trailing_newlines_only() {
+        assert_eq!(
+            normalize_submit_line_text("  hello codex  \n\n"),
+            Some("  hello codex  ".to_string())
+        );
+        assert_eq!(normalize_submit_line_text("\r\n"), None);
+    }
+
+    #[test]
+    fn submit_line_fallback_input_adds_double_enter() {
+        assert_eq!(submit_line_fallback_input("hello"), b"hello\r\r");
     }
 
     #[test]

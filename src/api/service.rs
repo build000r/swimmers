@@ -13,13 +13,15 @@ use crate::host_actions::{
     inspect_git_repo, RepoActionExecutor, RestartExecutor, SystemRepoActionExecutor,
 };
 use crate::native;
+use crate::persistence::file_store::FileStore;
 use crate::session::overlay::{
     default_overlay, OverlayDirConfig, OverlayDirGroup, OverlayServiceEntry,
 };
 use crate::types::{
-    DirEntry, DirListResponse, DirRepoActionResponse, DirRestartResponse, LaunchTargetSummary,
-    NativeDesktopApp, NativeDesktopOpenResponse, NativeDesktopStatusResponse, RepoActionKind,
-    RepoActionState, RepoActionStatus, SessionState,
+    DirEntry, DirGroupMembershipUpdateRequest, DirGroupMembershipUpdateResponse,
+    DirGroupMemberships, DirListResponse, DirRepoActionResponse, DirRestartResponse,
+    LaunchTargetSummary, NativeDesktopApp, NativeDesktopOpenResponse, NativeDesktopStatusResponse,
+    RepoActionKind, RepoActionState, RepoActionStatus, SessionState,
 };
 
 /// Max concurrent git probes per `list_dirs` call. Keeps a single listing from
@@ -376,6 +378,7 @@ pub fn list_group_entries_sync(group: &OverlayDirGroup) -> Vec<DirEntry> {
                 repo_dirty: None,
                 repo_action: None,
                 group: None,
+                groups: Vec::new(),
                 full_path: Some(full_path),
                 has_restart: None,
                 open_url: None,
@@ -435,6 +438,7 @@ pub fn list_group_entries_sync(group: &OverlayDirGroup) -> Vec<DirEntry> {
                     repo_dirty: None,
                     repo_action: None,
                     group: None,
+                    groups: Vec::new(),
                     full_path: Some(full_path),
                     has_restart: None,
                     open_url: None,
@@ -446,6 +450,153 @@ pub fn list_group_entries_sync(group: &OverlayDirGroup) -> Vec<DirEntry> {
 
     entries.sort_by(|(a, _), (b, _)| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
     entries.into_iter().map(|(entry, _)| entry).collect()
+}
+
+pub fn list_effective_group_entries_sync(
+    group: &OverlayDirGroup,
+    memberships: &DirGroupMemberships,
+) -> Vec<DirEntry> {
+    let Some(delta) = memberships.groups.get(&group.name) else {
+        return list_group_entries_sync(group);
+    };
+
+    let mut seen_names = BTreeSet::new();
+    let mut entries: Vec<(DirEntry, u64)> = list_group_entries_sync(group)
+        .into_iter()
+        .filter(|entry| {
+            entry
+                .full_path
+                .as_deref()
+                .map(|path| !delta.exclude_paths.contains(path))
+                .unwrap_or(true)
+        })
+        .map(|entry| {
+            seen_names.insert(entry.name.clone());
+            let modified_at = entry
+                .full_path
+                .as_deref()
+                .map(|path| modified_secs(Path::new(path)))
+                .unwrap_or(0);
+            (entry, modified_at)
+        })
+        .collect();
+
+    for raw_path in &delta.include_paths {
+        if delta.exclude_paths.contains(raw_path) {
+            continue;
+        }
+        let path = PathBuf::from(raw_path);
+        if !path.is_dir() {
+            continue;
+        }
+        let Some(name) = path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+        else {
+            continue;
+        };
+        if name.starts_with('.') || !seen_names.insert(name.clone()) {
+            continue;
+        }
+
+        entries.push((
+            DirEntry {
+                name,
+                has_children: false,
+                is_running: None,
+                repo_dirty: None,
+                repo_action: None,
+                group: None,
+                groups: Vec::new(),
+                full_path: Some(canonical_path_string(&path)),
+                has_restart: None,
+                open_url: None,
+            },
+            modified_secs(&path),
+        ));
+    }
+
+    entries.sort_by(|(a, _), (b, _)| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    entries.into_iter().map(|(entry, _)| entry).collect()
+}
+
+async fn list_effective_group_entries(
+    group: &OverlayDirGroup,
+    memberships: &DirGroupMemberships,
+) -> Vec<DirEntry> {
+    let group = group.clone();
+    let memberships = memberships.clone();
+    tokio::task::spawn_blocking(move || list_effective_group_entries_sync(&group, &memberships))
+        .await
+        .unwrap_or_default()
+}
+
+fn canonical_path_string(path: &Path) -> String {
+    path.canonicalize()
+        .unwrap_or_else(|_| path.to_path_buf())
+        .to_string_lossy()
+        .into_owned()
+}
+
+fn overlay_group_contains_path(group: &OverlayDirGroup, canonical_path: &Path) -> bool {
+    if group
+        .paths
+        .iter()
+        .any(|path| path.canonicalize().unwrap_or_else(|_| path.clone()) == canonical_path)
+    {
+        return true;
+    }
+
+    let Some(parent) = canonical_path.parent() else {
+        return false;
+    };
+    group
+        .dirs
+        .iter()
+        .any(|dir| dir.canonicalize().unwrap_or_else(|_| dir.clone()) == parent)
+}
+
+fn effective_groups_for_path(
+    config: &OverlayDirConfig,
+    memberships: &DirGroupMemberships,
+    path: &Path,
+) -> Vec<String> {
+    let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let normalized = canonical.to_string_lossy();
+    let mut groups = Vec::new();
+    for group in &config.groups {
+        let delta = memberships.groups.get(&group.name);
+        if delta
+            .map(|delta| delta.exclude_paths.contains(normalized.as_ref()))
+            .unwrap_or(false)
+        {
+            continue;
+        }
+        let overlay_member = overlay_group_contains_path(group, &canonical);
+        let user_member = delta
+            .map(|delta| delta.include_paths.contains(normalized.as_ref()))
+            .unwrap_or(false);
+        if overlay_member || user_member {
+            groups.push(group.name.clone());
+        }
+    }
+    groups
+}
+
+fn annotate_dir_entry_groups(
+    entries: &mut [DirEntry],
+    parent: &Path,
+    config: &OverlayDirConfig,
+    memberships: &DirGroupMemberships,
+) {
+    for entry in entries {
+        let path = entry
+            .full_path
+            .as_deref()
+            .map(PathBuf::from)
+            .unwrap_or_else(|| parent.join(&entry.name));
+        entry.groups = effective_groups_for_path(config, memberships, &path);
+    }
 }
 
 fn has_visible_child_dirs(path: &Path) -> bool {
@@ -581,6 +732,7 @@ fn build_dir_entries(
                     repo_dirty: candidate.repo_dirty,
                     repo_action: candidate.repo_action,
                     group: None,
+                    groups: Vec::new(),
                     full_path: candidate.full_path,
                     has_restart,
                     open_url,
@@ -691,6 +843,13 @@ pub async fn list_managed_service_entries(
     build_dir_entries(candidates, &health_map, &svc_meta)
 }
 
+async fn load_dir_group_memberships(state: &Arc<AppState>) -> DirGroupMemberships {
+    match state.current_file_store() {
+        Some(store) => store.load_dir_group_memberships().await,
+        None => DirGroupMemberships::default(),
+    }
+}
+
 pub async fn list_dirs(
     state: &Arc<AppState>,
     path: Option<&str>,
@@ -698,9 +857,10 @@ pub async fn list_dirs(
     group: Option<&str>,
 ) -> Result<DirListResponse, ApiServiceError> {
     let base = dirs_base_path();
+    let memberships = load_dir_group_memberships(state).await;
 
     if let Some(group_name) = group {
-        return list_group_dir_response(base, group_name).await;
+        return list_group_dir_response(base, group_name, &memberships).await;
     }
 
     let request_started = Instant::now();
@@ -716,6 +876,7 @@ pub async fn list_dirs(
         canonical_base.as_path(),
         canonical.as_path(),
         dir_config,
+        &memberships,
         managed_only,
         request_started,
     )
@@ -728,15 +889,188 @@ pub async fn list_dirs(
         state,
         canonical.as_path(),
         dir_config,
+        &memberships,
         managed_only,
         request_started,
     )
     .await
 }
 
+pub async fn update_dir_group_memberships(
+    state: Arc<AppState>,
+    body: DirGroupMembershipUpdateRequest,
+) -> Result<DirGroupMembershipUpdateResponse, ApiServiceError> {
+    let store = state.current_file_store().ok_or_else(|| {
+        ApiServiceError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "PERSISTENCE_UNAVAILABLE",
+            "directory group edits require file persistence",
+        )
+    })?;
+
+    let base = dirs_base_path();
+    let canonical_base = base.canonicalize().unwrap_or(base.clone());
+    let dir_config = resolve_dir_config(&canonical_base).ok_or_else(|| {
+        ApiServiceError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "OVERLAY_UNAVAILABLE",
+            "directory group edits require an overlay with directory groups",
+        )
+    })?;
+    if dir_config.groups.is_empty() {
+        return Err(ApiServiceError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "GROUPS_UNAVAILABLE",
+            "no directory groups are configured for this overlay",
+        ));
+    }
+
+    update_dir_group_memberships_with_config(store, &canonical_base, dir_config, body).await
+}
+
+async fn update_dir_group_memberships_with_config(
+    store: Arc<FileStore>,
+    canonical_base: &Path,
+    dir_config: &OverlayDirConfig,
+    body: DirGroupMembershipUpdateRequest,
+) -> Result<DirGroupMembershipUpdateResponse, ApiServiceError> {
+    let canonical_path = resolve_group_membership_path(canonical_base, &body.path, dir_config)?;
+    let available_groups = dir_groups(Some(dir_config));
+    let valid_groups = available_groups.iter().cloned().collect::<BTreeSet<_>>();
+    let add = normalize_group_update_names(&body.add, &valid_groups)?;
+    let remove = normalize_group_update_names(&body.remove, &valid_groups)?;
+    if add.is_empty() && remove.is_empty() {
+        return Err(ApiServiceError::new(
+            StatusCode::BAD_REQUEST,
+            "GROUP_UPDATE_EMPTY",
+            "at least one group must be added or removed",
+        ));
+    }
+
+    let path = canonical_path_string(&canonical_path);
+    let update_path = path.clone();
+    let memberships = store
+        .update_dir_group_memberships(move |memberships| {
+            apply_group_membership_update(memberships, &update_path, add, remove);
+        })
+        .await
+        .map_err(|error| {
+            ApiServiceError::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "GROUP_UPDATE_FAILED",
+                format!("failed to persist directory group edits: {error}"),
+            )
+        })?;
+
+    Ok(DirGroupMembershipUpdateResponse {
+        groups: effective_groups_for_path(dir_config, &memberships, &canonical_path),
+        available_groups,
+        path,
+    })
+}
+
+fn resolve_group_membership_path(
+    canonical_base: &Path,
+    raw_path: &str,
+    config: &OverlayDirConfig,
+) -> Result<PathBuf, ApiServiceError> {
+    let trimmed = raw_path.trim();
+    if trimmed.is_empty() {
+        return Err(ApiServiceError::new(
+            StatusCode::BAD_REQUEST,
+            "GROUP_PATH_REQUIRED",
+            "path is required",
+        ));
+    }
+    let path = PathBuf::from(trimmed);
+    let canonical = path.canonicalize().map_err(|_| {
+        ApiServiceError::new(
+            StatusCode::NOT_FOUND,
+            "DIR_NOT_FOUND",
+            format!("directory not found: {trimmed}"),
+        )
+    })?;
+    if !canonical.is_dir() {
+        return Err(ApiServiceError::new(
+            StatusCode::NOT_FOUND,
+            "DIR_NOT_FOUND",
+            format!("directory not found: {trimmed}"),
+        ));
+    }
+    if canonical.starts_with(canonical_base)
+        || config
+            .groups
+            .iter()
+            .any(|group| overlay_group_contains_path(group, &canonical))
+    {
+        return Ok(canonical);
+    }
+
+    Err(ApiServiceError::new(
+        StatusCode::FORBIDDEN,
+        "DIR_OUTSIDE_BASE",
+        "path is outside the allowed directory group roots",
+    ))
+}
+
+fn normalize_group_update_names(
+    groups: &[String],
+    valid_groups: &BTreeSet<String>,
+) -> Result<Vec<String>, ApiServiceError> {
+    let mut seen = BTreeSet::new();
+    let mut normalized = Vec::new();
+    for raw in groups {
+        let name = raw.trim();
+        if name.is_empty() {
+            return Err(ApiServiceError::new(
+                StatusCode::BAD_REQUEST,
+                "GROUP_NAME_REQUIRED",
+                "group names must not be empty",
+            ));
+        }
+        if !valid_groups.contains(name) {
+            return Err(ApiServiceError::new(
+                StatusCode::NOT_FOUND,
+                "GROUP_NOT_FOUND",
+                format!("no group named '{name}' in overlay"),
+            ));
+        }
+        if seen.insert(name.to_string()) {
+            normalized.push(name.to_string());
+        }
+    }
+    Ok(normalized)
+}
+
+fn prune_empty_group_deltas(memberships: &mut DirGroupMemberships) {
+    memberships
+        .groups
+        .retain(|_, delta| !delta.include_paths.is_empty() || !delta.exclude_paths.is_empty());
+}
+
+fn apply_group_membership_update(
+    memberships: &mut DirGroupMemberships,
+    path: &str,
+    add: Vec<String>,
+    remove: Vec<String>,
+) {
+    for group in remove {
+        let delta = memberships.groups.entry(group).or_default();
+        delta.include_paths.remove(path);
+        delta.exclude_paths.insert(path.to_string());
+    }
+    for group in add {
+        let delta = memberships.groups.entry(group).or_default();
+        delta.exclude_paths.remove(path);
+        delta.include_paths.insert(path.to_string());
+    }
+    prune_empty_group_deltas(memberships);
+}
+
 async fn list_group_dir_response(
     base: PathBuf,
     group_name: &str,
+    memberships: &DirGroupMemberships,
 ) -> Result<DirListResponse, ApiServiceError> {
     let canonical_base = base.canonicalize().unwrap_or(base.clone());
     let dir_config = resolve_dir_config(&canonical_base);
@@ -748,7 +1082,10 @@ async fn list_group_dir_response(
             format!("no group named '{group_name}' in overlay"),
         ));
     };
-    let entries = list_group_entries(group).await;
+    let mut entries = list_effective_group_entries(group, memberships).await;
+    if let Some(config) = dir_config {
+        annotate_dir_entry_groups(&mut entries, &canonical_base, config, memberships);
+    }
     Ok(DirListResponse {
         path: canonical_base.to_string_lossy().into_owned(),
         entries,
@@ -764,6 +1101,7 @@ async fn list_managed_root_response(
     canonical_base: &Path,
     canonical: &Path,
     dir_config: Option<&OverlayDirConfig>,
+    memberships: &DirGroupMemberships,
     managed_only: bool,
     request_started: Instant,
 ) -> Option<DirListResponse> {
@@ -773,7 +1111,8 @@ async fn list_managed_root_response(
 
     let config = dir_config.filter(|config| !config.services.is_empty())?;
     let pending_started = Instant::now();
-    let entries = list_managed_service_entries(state, config).await;
+    let mut entries = list_managed_service_entries(state, config).await;
+    annotate_dir_entry_groups(&mut entries, canonical_base, config, memberships);
     let total_ms = request_started.elapsed().as_millis() as u64;
     tracing::info!(
         target: "swimmers::api::dirs::timing",
@@ -799,6 +1138,7 @@ async fn list_regular_dir_response(
     state: &Arc<AppState>,
     canonical: &Path,
     dir_config: Option<&OverlayDirConfig>,
+    memberships: &DirGroupMemberships,
     managed_only: bool,
     request_started: Instant,
 ) -> Result<DirListResponse, ApiServiceError> {
@@ -847,7 +1187,10 @@ async fn list_regular_dir_response(
     let svc_meta = dir_config
         .map(|config| service_metadata_map(&config.services))
         .unwrap_or_default();
-    let entries = build_dir_entries(candidates, &health_map, &svc_meta);
+    let mut entries = build_dir_entries(candidates, &health_map, &svc_meta);
+    if let Some(config) = dir_config {
+        annotate_dir_entry_groups(&mut entries, canonical, config, memberships);
+    }
     let groups = dir_config
         .map(|config| {
             config
@@ -1197,6 +1540,348 @@ mod tests {
             )),
             repo_actions: crate::host_actions::RepoActionTracker::default(),
         })
+    }
+
+    #[test]
+    fn effective_groups_merge_overlay_includes_and_excludes() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let frontend = dir.path().join("frontend-app");
+        let backend = dir.path().join("backend-app");
+        let skills_root = dir.path().join("skills");
+        let skill = skills_root.join("alpha-skill");
+        std::fs::create_dir_all(&frontend).expect("frontend");
+        std::fs::create_dir_all(&backend).expect("backend");
+        std::fs::create_dir_all(&skill).expect("skill");
+
+        let config = OverlayDirConfig {
+            label: "test".into(),
+            base_path: dir.path().to_path_buf(),
+            services: Vec::new(),
+            groups: vec![
+                OverlayDirGroup {
+                    name: "frontend".into(),
+                    paths: vec![frontend.clone()],
+                    dirs: Vec::new(),
+                },
+                OverlayDirGroup {
+                    name: "backend".into(),
+                    paths: vec![backend.clone()],
+                    dirs: Vec::new(),
+                },
+                OverlayDirGroup {
+                    name: "skills".into(),
+                    paths: Vec::new(),
+                    dirs: vec![skills_root.clone()],
+                },
+            ],
+            launch: crate::session::overlay::OverlayLaunchConfig::local_only(),
+        };
+
+        let mut memberships = DirGroupMemberships::default();
+        memberships
+            .groups
+            .entry("frontend".into())
+            .or_default()
+            .include_paths
+            .insert(canonical_path_string(&backend));
+        memberships
+            .groups
+            .entry("backend".into())
+            .or_default()
+            .exclude_paths
+            .insert(canonical_path_string(&backend));
+        memberships
+            .groups
+            .entry("skills".into())
+            .or_default()
+            .exclude_paths
+            .insert(canonical_path_string(&skill));
+
+        assert_eq!(
+            effective_groups_for_path(&config, &memberships, &frontend),
+            vec!["frontend".to_string()]
+        );
+        assert_eq!(
+            effective_groups_for_path(&config, &memberships, &backend),
+            vec!["frontend".to_string()]
+        );
+        assert!(effective_groups_for_path(&config, &memberships, &skill).is_empty());
+    }
+
+    #[test]
+    fn list_effective_group_entries_applies_user_include_and_exclude_deltas() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let overlay_repo = dir.path().join("overlay-repo");
+        let user_repo = dir.path().join("user-repo");
+        let source = dir.path().join("source");
+        let source_child = source.join("source-child");
+        std::fs::create_dir_all(&overlay_repo).expect("overlay repo");
+        std::fs::create_dir_all(&user_repo).expect("user repo");
+        std::fs::create_dir_all(&source_child).expect("source child");
+
+        let group = OverlayDirGroup {
+            name: "frontend".into(),
+            paths: vec![overlay_repo.clone()],
+            dirs: vec![source],
+        };
+        let mut memberships = DirGroupMemberships::default();
+        let delta = memberships.groups.entry("frontend".into()).or_default();
+        delta
+            .exclude_paths
+            .insert(canonical_path_string(&overlay_repo));
+        delta
+            .include_paths
+            .insert(canonical_path_string(&user_repo));
+
+        let entries = list_effective_group_entries_sync(&group, &memberships);
+        let names = entries
+            .iter()
+            .map(|entry| entry.name.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(names, vec!["source-child", "user-repo"]);
+        assert!(entries.iter().all(|entry| entry.full_path.is_some()));
+    }
+
+    #[test]
+    fn normalize_group_update_names_deduplicates_and_rejects_unknown_groups() {
+        let valid = ["frontend".to_string(), "backend".to_string()]
+            .into_iter()
+            .collect::<BTreeSet<_>>();
+        let names = normalize_group_update_names(
+            &[
+                "frontend".to_string(),
+                " backend ".to_string(),
+                "frontend".to_string(),
+            ],
+            &valid,
+        )
+        .expect("valid names");
+        assert_eq!(names, vec!["frontend".to_string(), "backend".to_string()]);
+
+        let err = normalize_group_update_names(&["skills".to_string()], &valid)
+            .expect_err("unknown group");
+        assert_eq!(err.status, StatusCode::NOT_FOUND);
+        assert_eq!(err.code, "GROUP_NOT_FOUND");
+    }
+
+    #[test]
+    fn apply_group_membership_update_makes_add_win_over_remove_for_same_group() {
+        let path = "/tmp/repo";
+        let mut memberships = DirGroupMemberships::default();
+        apply_group_membership_update(
+            &mut memberships,
+            path,
+            vec!["frontend".to_string()],
+            vec!["backend".to_string(), "frontend".to_string()],
+        );
+
+        let frontend = memberships.groups.get("frontend").expect("frontend delta");
+        assert!(frontend.include_paths.contains(path));
+        assert!(!frontend.exclude_paths.contains(path));
+
+        let backend = memberships.groups.get("backend").expect("backend delta");
+        assert!(backend.exclude_paths.contains(path));
+        assert!(!backend.include_paths.contains(path));
+    }
+
+    fn test_group_config(
+        base: &Path,
+        frontend: PathBuf,
+        backend: PathBuf,
+        wildcard_root: PathBuf,
+    ) -> OverlayDirConfig {
+        OverlayDirConfig {
+            label: "test".into(),
+            base_path: base.to_path_buf(),
+            services: Vec::new(),
+            groups: vec![
+                OverlayDirGroup {
+                    name: "frontend".into(),
+                    paths: vec![frontend],
+                    dirs: Vec::new(),
+                },
+                OverlayDirGroup {
+                    name: "backend".into(),
+                    paths: vec![backend],
+                    dirs: Vec::new(),
+                },
+                OverlayDirGroup {
+                    name: "skills".into(),
+                    paths: Vec::new(),
+                    dirs: vec![wildcard_root],
+                },
+            ],
+            launch: crate::session::overlay::OverlayLaunchConfig::local_only(),
+        }
+    }
+
+    #[tokio::test]
+    async fn update_dir_group_memberships_persists_delta_and_returns_effective_groups() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let base = dir.path().join("repos");
+        let frontend = base.join("frontend-app");
+        let backend = base.join("backend-app");
+        let wildcard_root = dir.path().join("skills");
+        std::fs::create_dir_all(&frontend).expect("frontend");
+        std::fs::create_dir_all(&backend).expect("backend");
+        std::fs::create_dir_all(&wildcard_root).expect("wildcard");
+        let config = test_group_config(&base, frontend.clone(), backend.clone(), wildcard_root);
+        let store = FileStore::new(dir.path().join("store"))
+            .await
+            .expect("store");
+
+        let response = update_dir_group_memberships_with_config(
+            store.clone(),
+            &base.canonicalize().expect("base"),
+            &config,
+            DirGroupMembershipUpdateRequest {
+                path: backend.to_string_lossy().into_owned(),
+                add: vec!["frontend".into()],
+                remove: vec!["backend".into()],
+            },
+        )
+        .await
+        .expect("update groups");
+
+        let backend_path = canonical_path_string(&backend);
+        assert_eq!(response.path, backend_path);
+        assert_eq!(response.groups, vec!["frontend".to_string()]);
+        assert_eq!(
+            response.available_groups,
+            vec![
+                "frontend".to_string(),
+                "backend".to_string(),
+                "skills".to_string()
+            ]
+        );
+
+        let memberships = store.load_dir_group_memberships().await;
+        assert!(memberships
+            .groups
+            .get("frontend")
+            .expect("frontend delta")
+            .include_paths
+            .contains(&backend_path));
+        assert!(memberships
+            .groups
+            .get("backend")
+            .expect("backend delta")
+            .exclude_paths
+            .contains(&backend_path));
+    }
+
+    #[tokio::test]
+    async fn update_dir_group_memberships_rejects_unknown_and_empty_updates_before_persisting() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let base = dir.path().join("repos");
+        let frontend = base.join("frontend-app");
+        let backend = base.join("backend-app");
+        let wildcard_root = dir.path().join("skills");
+        std::fs::create_dir_all(&frontend).expect("frontend");
+        std::fs::create_dir_all(&backend).expect("backend");
+        std::fs::create_dir_all(&wildcard_root).expect("wildcard");
+        let config = test_group_config(&base, frontend.clone(), backend, wildcard_root);
+        let store = FileStore::new(dir.path().join("store"))
+            .await
+            .expect("store");
+
+        let unknown = update_dir_group_memberships_with_config(
+            store.clone(),
+            &base.canonicalize().expect("base"),
+            &config,
+            DirGroupMembershipUpdateRequest {
+                path: frontend.to_string_lossy().into_owned(),
+                add: vec!["missing".into()],
+                remove: Vec::new(),
+            },
+        )
+        .await
+        .expect_err("unknown group");
+        assert_eq!(unknown.status, StatusCode::NOT_FOUND);
+        assert_eq!(unknown.code, "GROUP_NOT_FOUND");
+
+        let empty = update_dir_group_memberships_with_config(
+            store.clone(),
+            &base.canonicalize().expect("base"),
+            &config,
+            DirGroupMembershipUpdateRequest {
+                path: frontend.to_string_lossy().into_owned(),
+                add: Vec::new(),
+                remove: Vec::new(),
+            },
+        )
+        .await
+        .expect_err("empty update");
+        assert_eq!(empty.status, StatusCode::BAD_REQUEST);
+        assert_eq!(empty.code, "GROUP_UPDATE_EMPTY");
+
+        assert!(store.load_dir_group_memberships().await.groups.is_empty());
+    }
+
+    #[tokio::test]
+    async fn update_dir_group_memberships_forbids_paths_outside_base_and_overlay_roots() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let base = dir.path().join("repos");
+        let frontend = base.join("frontend-app");
+        let backend = base.join("backend-app");
+        let wildcard_root = dir.path().join("skills");
+        let outside = dir.path().join("outside");
+        std::fs::create_dir_all(&frontend).expect("frontend");
+        std::fs::create_dir_all(&backend).expect("backend");
+        std::fs::create_dir_all(&wildcard_root).expect("wildcard");
+        std::fs::create_dir_all(&outside).expect("outside");
+        let config = test_group_config(&base, frontend, backend, wildcard_root);
+        let store = FileStore::new(dir.path().join("store"))
+            .await
+            .expect("store");
+
+        let err = update_dir_group_memberships_with_config(
+            store,
+            &base.canonicalize().expect("base"),
+            &config,
+            DirGroupMembershipUpdateRequest {
+                path: outside.to_string_lossy().into_owned(),
+                add: vec!["frontend".into()],
+                remove: Vec::new(),
+            },
+        )
+        .await
+        .expect_err("outside path");
+
+        assert_eq!(err.status, StatusCode::FORBIDDEN);
+        assert_eq!(err.code, "DIR_OUTSIDE_BASE");
+    }
+
+    #[tokio::test]
+    async fn update_dir_group_memberships_allows_overlay_group_roots_outside_base() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let base = dir.path().join("repos");
+        let frontend = base.join("frontend-app");
+        let backend = base.join("backend-app");
+        let wildcard_root = dir.path().join("skills");
+        let skill = wildcard_root.join("alpha-skill");
+        std::fs::create_dir_all(&frontend).expect("frontend");
+        std::fs::create_dir_all(&backend).expect("backend");
+        std::fs::create_dir_all(&skill).expect("skill");
+        let config = test_group_config(&base, frontend, backend, wildcard_root);
+        let store = FileStore::new(dir.path().join("store"))
+            .await
+            .expect("store");
+
+        let response = update_dir_group_memberships_with_config(
+            store,
+            &base.canonicalize().expect("base"),
+            &config,
+            DirGroupMembershipUpdateRequest {
+                path: skill.to_string_lossy().into_owned(),
+                add: vec!["frontend".into()],
+                remove: vec!["skills".into()],
+            },
+        )
+        .await
+        .expect("outside overlay path");
+
+        assert_eq!(response.groups, vec!["frontend".to_string()]);
     }
 
     #[tokio::test]

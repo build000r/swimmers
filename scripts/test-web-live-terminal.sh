@@ -119,7 +119,32 @@ let sawReady = false;
 let sawPong = false;
 let markerInFrame = false;
 let binaryFrames = 0;
-const deadline = Date.now() + 5000;
+let markerSent = false;
+const deadline = Date.now() + 8000;
+
+function terminalReplies(text) {
+  const replies = [];
+  if (text.includes('\x1b[c')) replies.push('\x1b[?1;2c');
+  if (text.includes('\x1b[>c')) replies.push('\x1b[>0;276;0c');
+  if (text.includes('\x1b[>q')) replies.push('\x1bP>|swimmers-web-smoke\x1b\\');
+  if (text.includes('\x1b[18t')) replies.push('\x1b[8;24;80t');
+  if (text.includes('\x1b[14t')) replies.push('\x1b[4;480;640t');
+  if (text.includes('\x1b]10;?\x1b\\')) replies.push('\x1b]10;rgb:ffff/ffff/ffff\x1b\\');
+  if (text.includes('\x1b]11;?\x1b\\')) replies.push('\x1b]11;rgb:0000/0000/0000\x1b\\');
+  return replies.join('');
+}
+
+async function sendMarkerOnce() {
+  if (markerSent) {
+    return;
+  }
+  markerSent = true;
+  await fetch(base + '/v1/sessions/' + sessionId + '/input', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ text: 'printf "' + marker + '\\n"\r' }),
+  });
+}
 
 const done = new Promise((resolve, reject) => {
   const timer = setInterval(() => {
@@ -140,11 +165,7 @@ const done = new Promise((resolve, reject) => {
       if (parsed.type === 'ready') {
         sawReady = true;
         ws.send(JSON.stringify({ type: 'ping' }));
-        await fetch(base + '/v1/sessions/' + sessionId + '/input', {
-          method: 'POST',
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ text: 'printf "' + marker + '\\n"\\n' }),
-        });
+        setTimeout(() => void sendMarkerOnce(), 500);
       }
       if (parsed.type === 'pong') {
         sawPong = true;
@@ -154,6 +175,10 @@ const done = new Promise((resolve, reject) => {
 
     binaryFrames += 1;
     const text = Buffer.from(await event.data.arrayBuffer()).toString('utf8');
+    const replies = terminalReplies(text);
+    if (replies) {
+      ws.send(Buffer.from(replies, 'utf8'));
+    }
     if (text.includes(marker)) {
       markerInFrame = true;
     }

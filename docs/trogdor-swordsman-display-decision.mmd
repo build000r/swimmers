@@ -1,0 +1,48 @@
+flowchart TD
+  title["Trogdor Swordsman Display Decision"]
+
+  start["Session enters Trogdor render"]
+  group["Group by repoKey, fullCwd, cwdLabel, or name"]
+  sort["Sort repo groups by pressure desc, then label"]
+  slot["Assign repo structure slot from TROGDOR_REPO_POSITIONS"]
+  ready{"Ready clawg?"}
+  burnt{"Temporarily burnt?"}
+  dismissed{"Clawg dismissed?"}
+  hidden["HIDDEN: quiet or dismissed session"]
+  visible["SHOW: swordsman near repo structure"]
+  offset["Place using TROGDOR_AGENT_OFFSETS by agent index"]
+  awaiting{"Awaiting user?"}
+  standing["SHOW: standing or walking swordsman"]
+  attacking["HIGH: attacking swordsman charges toward dragon"]
+  tone["Set glyph and tone from pressure/action cue"]
+  reader{"Hovered and readable?"}
+  speedread["SHOW: speed-reader text in banner"]
+  noReader["OK: banner stays generic"]
+
+  title --> start --> group --> sort --> slot --> ready
+  ready -- "yes: action cue, ready pressure reason, or attention state" --> dismissed
+  ready -- "no" --> burnt
+  burnt -- "yes" --> visible
+  burnt -- "no" --> hidden
+  dismissed -- "yes" --> hidden
+  dismissed -- "no" --> visible
+  visible --> offset --> awaiting
+  awaiting -- "yes and not dismissed/burnt" --> attacking
+  awaiting -- "no" --> standing
+  attacking --> tone
+  standing --> tone
+  tone --> reader
+  reader -- "yes" --> speedread
+  reader -- "no" --> noReader
+
+  classDef high fill:#fee2e2,stroke:#dc2626,color:#7f1d1d,stroke-width:2px
+  classDef ok fill:#dcfce7,stroke:#16a34a,color:#14532d
+  classDef hidden fill:#f3f4f6,stroke:#6b7280,color:#111827,stroke-dasharray: 4 3
+  classDef decision fill:#ede9fe,stroke:#7c3aed,color:#3b0764,stroke-width:2px
+  classDef neutral fill:#f8fafc,stroke:#64748b,color:#0f172a
+
+  class ready,burnt,dismissed,awaiting,reader decision
+  class attacking high
+  class standing,visible,speedread,noReader ok
+  class hidden hidden
+  class title,start,group,sort,slot,offset,tone neutral

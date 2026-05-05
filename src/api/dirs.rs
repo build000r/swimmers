@@ -3,11 +3,12 @@
 use crate::api::envelope::{error_response, success_json};
 use crate::api::service::{
     list_dirs as list_dirs_service, restart_dir_services as restart_dir_services_service,
-    start_dir_repo_action as start_dir_repo_action_service, ApiServiceError,
+    start_dir_repo_action as start_dir_repo_action_service,
+    update_dir_group_memberships as update_dir_group_memberships_service, ApiServiceError,
 };
 use crate::api::AppState;
 use crate::auth::{AuthInfo, AuthScope};
-use crate::types::{DirRepoActionRequest, DirRestartRequest};
+use crate::types::{DirGroupMembershipUpdateRequest, DirRepoActionRequest, DirRestartRequest};
 use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
@@ -81,11 +82,31 @@ async fn start_dir_repo_action(
     }
 }
 
+// POST /v1/dirs/group-memberships
+async fn update_dir_group_memberships(
+    Extension(auth): Extension<AuthInfo>,
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<DirGroupMembershipUpdateRequest>,
+) -> Response {
+    if let Err(resp) = auth.require_scope(AuthScope::SessionsWrite) {
+        return resp;
+    }
+
+    match update_dir_group_memberships_service(state, body).await {
+        Ok(response) => success_json(StatusCode::OK, &response),
+        Err(error) => service_error_response(error),
+    }
+}
+
 pub fn routes() -> Router<Arc<AppState>> {
     Router::new()
         .route("/v1/dirs", get(list_dirs))
         .route("/v1/dirs/restart", post(restart_dir_services))
         .route("/v1/dirs/actions", post(start_dir_repo_action))
+        .route(
+            "/v1/dirs/group-memberships",
+            post(update_dir_group_memberships),
+        )
 }
 
 #[cfg(test)]
@@ -97,7 +118,7 @@ mod tests {
         services_for_directory, start_repo_action_with_executor, OverlayServiceContext,
     };
     use crate::api::PublishedSelectionState;
-    use crate::auth::OPERATOR_SCOPES;
+    use crate::auth::{OBSERVER_SCOPES, OPERATOR_SCOPES};
     use crate::config::Config;
     use crate::host_actions::RepoActionExecutor;
     use crate::session::overlay::{
@@ -106,7 +127,7 @@ mod tests {
     use crate::session::supervisor::SessionSupervisor;
     use crate::thought::protocol::SyncRequestSequence;
     use crate::thought::runtime_config::ThoughtConfig;
-    use crate::types::RepoActionKind;
+    use crate::types::{DirGroupMembershipUpdateRequest, RepoActionKind};
     use axum::body::to_bytes;
     use axum::extract::{Json, Query, State};
     use axum::response::IntoResponse;
@@ -576,6 +597,23 @@ mod tests {
 
         // Without overlay, restart is unavailable.
         assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[tokio::test]
+    async fn update_group_memberships_requires_write_scope() {
+        let response = update_dir_group_memberships(
+            Extension(AuthInfo::new(OBSERVER_SCOPES.to_vec())),
+            State(test_state()),
+            Json(DirGroupMembershipUpdateRequest {
+                path: "/tmp".to_string(),
+                add: vec!["frontend".to_string()],
+                remove: Vec::new(),
+            }),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
     }
 
     #[tokio::test]

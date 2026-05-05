@@ -12,6 +12,10 @@ const COLORS = {
   success: rgba(139, 227, 191, 255),
   warning: rgba(255, 207, 122, 255),
   danger: rgba(255, 125, 148, 255),
+  parchment: rgba(221, 201, 166, 255),
+  ember: rgba(236, 105, 73, 255),
+  ink: rgba(11, 15, 17, 242),
+  agentBlue: rgba(132, 174, 231, 255),
   panelBg: rgba(10, 15, 19, 214),
   panelBgStrong: rgba(7, 11, 14, 236),
   panelBorder: rgba(120, 210, 255, 176),
@@ -153,7 +157,7 @@ function drawHeader(frame, layout, model) {
     }
     drawChip(frame, cursorX, chipY, chip.label, chip.fg, chip.bg);
     if (chip.zone) {
-      pushZone(frame, chip.zone, rect(cursorX, chipY, width, 1));
+      pushZone(frame, chip.zone, expandedRect(frame, cursorX, chipY, width, 1, 0, 1));
     }
     cursorX += width + 1;
   }
@@ -166,7 +170,7 @@ function drawHeader(frame, layout, model) {
   });
 
   const secondary = model?.currentSession
-    ? [model.currentSession.state, model.currentSession.toolLabel, model.currentSession.cwdLabel].filter(Boolean).join(" / ")
+    ? [stateDisplayLabel(model.currentSession), model.currentSession.toolLabel, model.currentSession.cwdLabel].filter(Boolean).join(" / ")
     : model?.frankenTermAvailable
       ? "rendered surface ready"
       : "FrankenTerm assets unavailable";
@@ -181,7 +185,7 @@ function drawSessionRail(frame, rail, model) {
   pushMask(frame, rail);
 
   const sessions = Array.isArray(model?.sessions) ? model.sessions : [];
-  if (!sessions.length) {
+  if (!sessions.length && !model?.trogdorAtlasOpen) {
     drawTextBlock(frame, rail.x + 2, rail.y + 2, rail.w - 4, 4, "No live sessions.\nCreate one from the rendered action rail.", {
       fg: COLORS.muted,
     });
@@ -208,8 +212,8 @@ function drawSessionRail(frame, rail, model) {
       attrs: STYLE_BOLD,
       width: rail.w - 4,
     });
-    drawText(frame, rail.x + 2, y + 1, truncate(`${session.state} / ${session.toolLabel}`, rail.w - 6), {
-      fg: session.transportLabel === "healthy" ? COLORS.muted : COLORS.warning,
+    drawText(frame, rail.x + 2, y + 1, truncate(`${stateDisplayLabel(session)} / ${session.toolLabel}`, rail.w - 6), {
+      fg: stateEvidenceIsUnverified(session) || session.transportLabel !== "healthy" ? COLORS.warning : COLORS.muted,
       width: rail.w - 4,
     });
     drawText(frame, rail.x + 2, y + 2, truncate(`${session.cwdLabel} :: ${session.thoughtLabel}`, rail.w - 6), {
@@ -252,7 +256,8 @@ function drawDetailRail(frame, rail, model) {
   }
 
   const lines = [
-    ["state", session.state],
+    ["state", stateDisplayLabel(session)],
+    ["evidence", session.stateTrustLabel],
     ["rest", session.restLabel],
     ["transport", session.transportLabel],
     ["tool", session.toolLabel],
@@ -306,7 +311,7 @@ function drawDetailRail(frame, rail, model) {
       attrs: STYLE_UNDERLINE,
       width: rail.w - 4,
     });
-    drawActionChipRow(frame, rail.x + 2, actionY + 1, rail.x + rail.w - 2, actions, "action");
+    drawActionChipRow(frame, rail.x + 2, actionY + 1, rail.x + rail.w - 2, actions, "action", { hitPadY: 1 });
     y = Math.max(y, actionY + 3);
   }
 
@@ -340,23 +345,24 @@ function drawFooter(frame, footer, model) {
   const actionY = footer.h >= 5 ? footer.y + 3 : footer.y + 2;
   const actions = [
     actionSpec("terminal", "terminal", "focus_terminal", Boolean(model?.currentSession)),
+    actionSpec(model?.trogdorAtlasOpen ? "trogdor on" : "trogdor", "trogdor", "toggle_trogdor_atlas", true),
+    actionSpec("new", "new", "open_create", !model?.readOnly),
+    actionSpec("config", "config", "open_config", true),
+    actionSpec("native", "native", "open_native", true),
+    actionSpec("auth", "auth", "open_auth", true),
+    actionSpec("refresh", "refresh", "refresh", true),
     actionSpec("search", "search", "open_search", Boolean(model?.terminalReady)),
     actionSpec("send", "send", "open_send", Boolean(model?.currentSession) && !model?.readOnly),
     actionSpec("mmd", "mmd", "open_mermaid", Boolean(model?.currentSession)),
     actionSpec("commit", "commit", "launch_commit", Boolean(model?.currentSession?.commitCandidate)),
-    actionSpec("config", "config", "open_config", true),
-    actionSpec("native", "native", "open_native", true),
     actionSpec(model?.followPublishedSelection ? "following" : "follow", "follow", "toggle_follow", true),
     actionSpec(model?.selectMode ? "select on" : "select", "select", "toggle_select", Boolean(model?.terminalReady)),
     actionSpec("copy", "copy", "copy_selection", Boolean(model?.terminalReady)),
-    actionSpec("new", "new", "open_create", !model?.readOnly),
-    actionSpec("auth", "auth", "open_auth", true),
-    actionSpec("refresh", "refresh", "refresh", true),
   ];
 
   let x = footer.x + 2;
   const limit = footer.x + footer.w - 2;
-  drawActionChipRow(frame, x, actionY, limit, actions, "action");
+  drawActionChipRow(frame, x, actionY, limit, actions, "action", { hitPadY: 1 });
 }
 
 function drawTerminalViewport(frame, center, model) {
@@ -371,7 +377,7 @@ function drawTerminalViewport(frame, center, model) {
 }
 
 function drawCenterOverlay(frame, center, model) {
-  if (model?.currentSession) {
+  if (model?.currentSession && !model?.trogdorAtlasOpen) {
     const messages = [];
     if (!model?.frankenTermAvailable) {
       messages.push("Snapshot fallback active. FrankenTerm assets are unavailable on this host.");
@@ -400,7 +406,7 @@ function drawCenterOverlay(frame, center, model) {
   }
 
   const sessions = Array.isArray(model?.sessions) ? model.sessions : [];
-  if (!sessions.length) {
+  if (!sessions.length && !model?.trogdorAtlasOpen) {
     const width = Math.min(center.w - 4, Math.max(28, Math.floor(center.w * 0.72)));
     const height = Math.min(center.h - 2, 6);
     const x = center.x + Math.max(0, Math.floor((center.w - width) / 2));
@@ -417,7 +423,9 @@ function drawCenterOverlay(frame, center, model) {
     return;
   }
 
-  const summary = summarizeSessions(sessions, model?.publishedSessionId, model?.selectedSessionId);
+  const summary = sessions.length
+    ? summarizeSessions(sessions, model?.publishedSessionId, model?.selectedSessionId)
+    : emptyTrogdorSummary();
   const overlay = rect(
     center.x + 1,
     center.y + 1,
@@ -429,62 +437,446 @@ function drawCenterOverlay(frame, center, model) {
     border: COLORS.panelBorderSoft,
   });
   pushMask(frame, overlay);
-  drawText(frame, overlay.x + 2, overlay.y + 1, "web-native aquarium / session atlas", {
+  const bannerWidth = Math.min(26, Math.max(14, Math.floor(overlay.w * 0.34)));
+  const bannerX = overlay.x + Math.max(2, Math.floor((overlay.w - bannerWidth) / 2));
+  fillRect(frame, bannerX, overlay.y + 1, bannerWidth, 1, COLORS.chipDangerBg);
+  drawTextCenter(frame, bannerX, overlay.y + 1, bannerWidth, "burninate!", {
+    fg: COLORS.parchment,
+    bg: COLORS.chipDangerBg,
+    attrs: STYLE_BOLD,
+  });
+  drawText(frame, overlay.x + 2, overlay.y + 2, "trogdor pressure / repo atlas", {
     fg: COLORS.accent,
     attrs: STYLE_BOLD,
     width: overlay.w - 4,
   });
-  drawText(frame, overlay.x + 2, overlay.y + 2, truncate(summary.subtitle, overlay.w - 4), {
+  drawText(frame, overlay.x + 2, overlay.y + 3, truncate(summary.subtitle, overlay.w - 4), {
     fg: COLORS.muted,
     width: overlay.w - 4,
   });
 
-  const cardY = overlay.y + 4;
-  const cardHeight = Math.min(7, Math.max(5, overlay.h - 6));
-  const cardCount = overlay.w >= 84 ? 3 : 2;
-  const cardGap = 1;
-  const cardWidth = Math.max(16, Math.floor((overlay.w - 4 - cardGap * (cardCount - 1)) / cardCount));
-  const cards = [
-    {
-      title: "live",
-      accent: COLORS.success,
-      lines: [
-        `busy ${summary.busy}`,
-        `attention ${summary.attention}`,
-        `commands ${summary.activeCommands}`,
-      ],
-    },
-    {
-      title: "rest",
-      accent: COLORS.warning,
-      lines: [
-        `idle ${summary.idle}`,
-        `exited ${summary.exited}`,
-        `stale ${summary.stale}`,
-      ],
-    },
-    {
-      title: "repo",
-      accent: COLORS.accent,
-      lines: [
-        `commit ${summary.commitCandidates}`,
-        `codex ${summary.codexCount}`,
-        `claude ${summary.claudeCount}`,
-      ],
-    },
-  ].slice(0, cardCount);
-
-  let cardX = overlay.x + 2;
-  for (const card of cards) {
-    drawOverviewCard(frame, rect(cardX, cardY, cardWidth, cardHeight), card.title, card.lines, card.accent);
-    cardX += cardWidth + cardGap;
-  }
+  drawTrogdorPressureAtlas(frame, overlay, sessions, model, summary);
 
   drawText(frame, overlay.x + 2, overlay.y + overlay.h - 2, truncate(summary.footer, overlay.w - 4), {
     fg: COLORS.muted,
     attrs: STYLE_ITALIC,
     width: overlay.w - 4,
   });
+}
+
+function drawTrogdorPressureAtlas(frame, overlay, sessions, model, summary) {
+  const repoGroups = buildTrogdorRepoGroups(sessions);
+  const atlasTop = overlay.y + 5;
+  const atlasBottom = overlay.y + overlay.h - 3;
+  const readerWidth = overlay.w >= 62 ? Math.min(40, Math.max(34, Math.floor(overlay.w * 0.44))) : 0;
+  const atlasWidth = overlay.w - 4 - (readerWidth ? readerWidth + 1 : 0);
+  const atlas = rect(overlay.x + 2, atlasTop, Math.max(22, atlasWidth), Math.max(4, atlasBottom - atlasTop));
+
+  drawText(frame, atlas.x, atlas.y, truncate(`cues ${summary.actionCues} / agents ${sessions.length} / level ${summary.pressure}`, atlas.w), {
+    fg: COLORS.warning,
+    attrs: STYLE_BOLD,
+    width: atlas.w,
+  });
+
+  const rowHeight = 4;
+  const visibleGroups = repoGroups.slice(0, Math.max(1, Math.floor((atlas.h - 2) / rowHeight)));
+  let y = atlas.y + 2;
+  if (!repoGroups.length) {
+    drawText(frame, atlas.x, y, truncate("      T>", atlas.w), {
+      fg: COLORS.ember,
+      attrs: STYLE_BOLD,
+      width: atlas.w,
+    });
+    drawText(frame, atlas.x, y + 1, truncate("    _/\\\\_      no repos", atlas.w), {
+      fg: COLORS.parchment,
+      width: atlas.w,
+    });
+    drawText(frame, atlas.x, y + 2, truncate("   /_  _/      launch agent", atlas.w), {
+      fg: COLORS.muted,
+      width: atlas.w,
+    });
+  }
+  for (const group of visibleGroups) {
+    drawTrogdorRepoRow(frame, atlas.x, y, atlas.w, group, model);
+    y += rowHeight;
+  }
+
+  if (repoGroups.length > visibleGroups.length) {
+    drawText(frame, atlas.x, atlas.y + atlas.h - 1, truncate(`more repos ${repoGroups.length - visibleGroups.length}`, atlas.w), {
+      fg: COLORS.muted,
+      attrs: STYLE_ITALIC,
+      width: atlas.w,
+    });
+  }
+
+  const hovered =
+    sessions.find((session) => session.sessionId === model?.hoveredTrogdorSessionId && sessionCanReadClawgs(session)) ||
+    null;
+  const readerHeight = Math.min(15, atlas.h);
+  if (hovered && readerWidth && readerHeight >= 14) {
+    const reader = rect(overlay.x + overlay.w - readerWidth - 2, atlasTop, readerWidth, readerHeight);
+    drawTrogdorSpeedReader(frame, reader, hovered, model);
+  }
+}
+
+function drawTrogdorRepoRow(frame, x, y, width, group, model) {
+  const pressure = group.pressure;
+  const accent = pressure >= 70 ? COLORS.danger : pressure >= 35 ? COLORS.warning : COLORS.success;
+  const labelWidth = Math.max(10, Math.min(18, Math.floor(width * 0.32)));
+  const roof = pressure >= 70 ? "/!\\ " : pressure >= 35 ? "/^\\ " : "/_\\ ";
+  drawText(frame, x, y, `${roof}${truncate(group.label, labelWidth)}`, {
+    fg: COLORS.parchment,
+    attrs: STYLE_BOLD,
+    width: Math.min(width, labelWidth + 4),
+  });
+  drawText(frame, x, y + 1, truncate(`|##| pressure ${pressure} ${group.reason}`, width), {
+    fg: accent,
+    width,
+  });
+  drawText(frame, x, y + 2, pressure >= 70 ? " burninating" : " structure", {
+    fg: pressure >= 70 ? COLORS.ember : COLORS.muted,
+    width: Math.min(width, labelWidth + 4),
+  });
+
+  let agentX = x + Math.min(width - 2, labelWidth + 6);
+  const swordsmen = group.sessions.filter(sessionSwordsmanVisible);
+  for (const session of swordsmen.slice(0, Math.max(1, width - labelWidth - 8))) {
+    const hovered = session.sessionId === model?.hoveredTrogdorSessionId;
+    const glyph = hovered ? "A" : agentGlyph(session);
+    const fg = hovered ? COLORS.ember : agentColor(session);
+    drawText(frame, agentX, y + 2, glyph, {
+      fg,
+      attrs: hovered ? STYLE_BOLD : 0,
+      width: 1,
+    });
+    if (hovered) {
+      drawText(frame, agentX, y + 3, "^", {
+        fg: COLORS.ember,
+        attrs: STYLE_BOLD,
+        width: 1,
+      });
+    }
+    pushZone(
+      frame,
+      {
+        type: "trogdor_agent",
+        sessionId: session.sessionId,
+      },
+      rect(agentX, y, 1, 4),
+    );
+    agentX += 2;
+    if (agentX >= x + width - 1) {
+      break;
+    }
+  }
+}
+
+function drawTrogdorSpeedReader(frame, panel, session, model) {
+  drawPanel(frame, panel, "speed read agent", {
+    bg: COLORS.ink,
+    border: COLORS.ember,
+  });
+  pushMask(frame, panel);
+  pushZone(
+    frame,
+    {
+      type: "trogdor_reader",
+      sessionId: session.sessionId,
+    },
+    panel,
+  );
+
+  const wpm = clampInt(model?.trogdorWpm, 200, 50, 800);
+  const word = speedReadWord(
+    session,
+    wpm,
+    model?.trogdorReaderElapsedMs,
+    model?.trogdorReading !== false,
+    model?.trogdorReaderStartIndex,
+  );
+  drawTextCenter(frame, panel.x + 1, panel.y + 2, panel.w - 2, word, {
+    fg: COLORS.parchment,
+    attrs: STYLE_BOLD,
+  });
+  drawTextCenter(frame, panel.x + 1, panel.y + 3, panel.w - 2, `${wpm} wpm`, {
+    fg: COLORS.warning,
+  });
+  drawText(frame, panel.x + 2, panel.y + 5, truncate(`${session.name} / ${stateDisplayLabel(session)}`, panel.w - 4), {
+    fg: COLORS.text,
+    width: panel.w - 4,
+  });
+  drawText(frame, panel.x + 2, panel.y + 6, truncate(`source ${primaryActionCueLabel(session) || "thought"} / ${session.restLabel}`, panel.w - 4), {
+    fg: COLORS.muted,
+    width: panel.w - 4,
+  });
+  drawText(frame, panel.x + 2, panel.y + 7, truncate(`repo ${session.repoLabel || repoLabel(session.fullCwd || session.cwdLabel)} / ${pressureReason(session)}`, panel.w - 4), {
+    fg: COLORS.muted,
+    width: panel.w - 4,
+  });
+
+  const readerActions = [
+    actionSpec(trogdorReadButtonLabel(session, model), "read", "trogdor_read_toggle", true),
+    actionSpec("-25", "slower", "trogdor_wpm_down", true),
+    actionSpec("+25", "faster", "trogdor_wpm_up", true),
+  ];
+  drawActionChipRow(frame, panel.x + 2, panel.y + panel.h - 6, panel.x + panel.w - 2, readerActions, "action");
+
+  const batchIds = Array.isArray(session.batchSendSessionIds) ? session.batchSendSessionIds : [];
+  const primarySessionActions = [
+    actionSpec("send", "send", "trogdor_send", !model?.readOnly, {
+      sessionId: session.sessionId,
+      label: session.name,
+    }),
+    actionSpec("batch", "batch", "trogdor_group_send", !model?.readOnly && batchIds.length > 1, {
+      sessionIds: batchIds,
+      label: `${batchIds.length} batch agents`,
+    }),
+    actionSpec("commit", "commit", "trogdor_commit", !model?.readOnly && sessionCommitReady(session), {
+      sessionId: session.sessionId,
+    }),
+  ];
+  const secondarySessionActions = [
+    actionSpec("launch", "launch", "trogdor_launch", !model?.readOnly && Boolean(session.fullCwd), {
+      cwd: session.fullCwd,
+    }),
+    actionSpec("mmd", "mmd", "trogdor_mermaid", true, {
+      sessionId: session.sessionId,
+    }),
+  ];
+  drawActionChipRow(frame, panel.x + 2, panel.y + panel.h - 4, panel.x + panel.w - 2, primarySessionActions, "action");
+  drawActionChipRow(frame, panel.x + 2, panel.y + panel.h - 2, panel.x + panel.w - 2, secondarySessionActions, "action");
+}
+
+function buildTrogdorRepoGroups(sessions) {
+  const groups = new Map();
+  for (const session of sessions) {
+    const key = safeLabel(session.repoKey || session.fullCwd || session.cwdLabel, session.cwdLabel || session.name);
+    const label = safeLabel(session.repoLabel, repoLabel(key));
+    const existing = groups.get(key) || {
+      key,
+      label,
+      sessions: [],
+      pressure: 0,
+      reason: "quiet",
+    };
+    existing.sessions.push(session);
+    const pressure = trogdorPressureScore(session);
+    if (pressure > existing.pressure) {
+      existing.pressure = pressure;
+      existing.reason = trogdorPressureReason(session);
+    }
+    groups.set(key, existing);
+  }
+  return Array.from(groups.values()).sort((left, right) => {
+    return right.pressure - left.pressure || left.label.localeCompare(right.label);
+  });
+}
+
+function repoLabel(value) {
+  const parts = String(value || "").split("/").filter(Boolean);
+  return parts[parts.length - 1] || String(value || "repo");
+}
+
+function trogdorPressureScore(session) {
+  const pressure = operatorPressure(session);
+  if (Number.isFinite(pressure.score)) {
+    return clampInt(pressure.score, 1, 1, 99);
+  }
+  let score = 0;
+  const state = String(session?.state || "").toLowerCase();
+  const rest = String(session?.restLabel || "").toLowerCase();
+  const transport = String(session?.transportLabel || "").toLowerCase();
+  if (hasActionCue(session, "awaiting_user")) score += 55;
+  if (hasActionCue(session, "commit_ready")) score += 45;
+  if (hasActionCue(session, "validation_missing_after_edit")) score += 40;
+  if (hasActionCue(session, "dirty_check_missing")) score += 35;
+  if (state === "attention") score += 45;
+  if (state === "busy") score += 12;
+  if (state === "error") score += 55;
+  if (rest === "sleeping") score += 35;
+  if (rest === "deep_sleep") score += 20;
+  if (session?.commitCandidate) score += 25;
+  if (stateEvidenceIsUnverified(session)) score += 15;
+  if (session?.isStale) score += 10;
+  if (transport && transport !== "healthy") score += 20;
+  return Math.max(1, Math.min(99, score));
+}
+
+function trogdorPressureReason(session) {
+  const reason = pressureReason(session);
+  if (reason) return reason;
+  const cue = primaryActionCueKind(session);
+  if (cue) return actionCueLabel(cue);
+  const state = String(session?.state || "").toLowerCase();
+  const rest = String(session?.restLabel || "").toLowerCase();
+  if (state === "attention") return "needs input";
+  if (state === "error") return "error";
+  if (session?.commitCandidate) return "commit ready";
+  if (rest === "sleeping") return "sleeping";
+  if (stateEvidenceIsUnverified(session)) return "untrusted";
+  return state || "idle";
+}
+
+function agentGlyph(session) {
+  const glyph = operatorPressure(session).glyph;
+  if (glyph) return truncate(glyph, 1);
+  const state = String(session?.state || "").toLowerCase();
+  if (hasActionCue(session, "awaiting_user")) return "!";
+  if (hasActionCue(session, "commit_ready")) return "$";
+  if (hasActionCue(session, "validation_missing_after_edit")) return "v";
+  if (hasActionCue(session, "dirty_check_missing")) return "d";
+  if (state === "attention") return "!";
+  if (state === "error") return "x";
+  if (session?.commitCandidate) return "$";
+  return "a";
+}
+
+function agentColor(session) {
+  switch (String(operatorPressure(session).tone || "").toLowerCase()) {
+    case "danger":
+      return COLORS.ember;
+    case "warning":
+      return COLORS.warning;
+    case "working":
+      return COLORS.accent;
+    case "quiet":
+      return COLORS.agentBlue;
+    default:
+      break;
+  }
+  const state = String(session?.state || "").toLowerCase();
+  if (primaryActionCueKind(session)) return COLORS.ember;
+  if (state === "attention" || state === "error") return COLORS.ember;
+  if (session?.commitCandidate) return COLORS.warning;
+  return COLORS.agentBlue;
+}
+
+function speedReadWord(session, wpm, elapsedMs = 0, reading = true, readerStartIndex = null) {
+  const words = clawgWords(session);
+  if (!words.length) {
+    return "waiting";
+  }
+  const baseIndex = Number.isFinite(readerStartIndex)
+    ? clampInt(readerStartIndex, 0, 0, words.length)
+    : clawgReadIndex(session);
+  if (baseIndex >= words.length) {
+    return "caught up";
+  }
+  if (!reading) {
+    return truncate(words[baseIndex], 18);
+  }
+  const msPerWord = Math.max(60, 60000 / Math.max(1, wpm));
+  const index = Math.min(words.length, baseIndex + Math.floor(Math.max(0, elapsedMs) / msPerWord));
+  if (index >= words.length) {
+    return "caught up";
+  }
+  return truncate(words[index], 18);
+}
+
+function clawgWords(session) {
+  return String(session?.clawgText || session?.thoughtLabel || session?.commandLabel || session?.name || "waiting")
+    .split(/\s+/)
+    .map((word) => word.trim())
+    .filter(Boolean);
+}
+
+function clawgReadIndex(session) {
+  return clampInt(session?.clawgReadIndex, 0, 0, clawgWords(session).length);
+}
+
+function clawgReadComplete(session) {
+  const words = clawgWords(session);
+  return words.length > 0 && clawgReadIndex(session) >= words.length;
+}
+
+function trogdorReadButtonLabel(session, model) {
+  if (session && clawgReadComplete(session) && model?.trogdorReading === false) {
+    return "Read again";
+  }
+  return model?.trogdorReading === false ? "Read" : "Pause";
+}
+
+function sessionAwaitingUser(session) {
+  const pressure = operatorPressure(session);
+  const reasonKind = String(pressure.reason_kind || "").toLowerCase();
+  const state = String(session?.state || "").toLowerCase();
+  return hasActionCue(session, "awaiting_user") || reasonKind === "awaiting_user" || state === "attention";
+}
+
+function sessionHasReadyClawg(session) {
+  const pressure = operatorPressure(session);
+  const reasonKind = String(pressure.reason_kind || "").toLowerCase();
+  return (
+    actionCueKinds(session).length > 0 ||
+    ["awaiting_user", "commit_ready", "validation_missing_after_edit", "dirty_check_missing"].includes(reasonKind) ||
+    String(session?.state || "").toLowerCase() === "attention"
+  );
+}
+
+function sessionSwordsmanVisible(session) {
+  return Boolean(session?.trogdorBurnt || (sessionHasReadyClawg(session) && !session?.trogdorDismissed));
+}
+
+function sessionCanReadClawgs(session) {
+  return Boolean(sessionHasReadyClawg(session) && !session?.trogdorBurnt && !session?.trogdorDismissed);
+}
+
+function actionCueKinds(session) {
+  const cues = Array.isArray(session?.actionCues) ? session.actionCues : [];
+  return cues.map((cue) => String(cue?.kind || "").toLowerCase()).filter(Boolean);
+}
+
+function hasActionCue(session, kind) {
+  return actionCueKinds(session).includes(kind);
+}
+
+function primaryActionCueKind(session) {
+  const kinds = actionCueKinds(session);
+  for (const kind of [
+    "awaiting_user",
+    "commit_ready",
+    "validation_missing_after_edit",
+    "dirty_check_missing",
+  ]) {
+    if (kinds.includes(kind)) {
+      return kind;
+    }
+  }
+  return "";
+}
+
+function actionCueLabel(kind) {
+  switch (kind) {
+    case "awaiting_user":
+      return "awaiting user";
+    case "commit_ready":
+      return "commit ready";
+    case "validation_missing_after_edit":
+      return "validate";
+    case "dirty_check_missing":
+      return "dirty check";
+    default:
+      return "";
+  }
+}
+
+function primaryActionCueLabel(session) {
+  return actionCueLabel(primaryActionCueKind(session));
+}
+
+function operatorPressure(session) {
+  return session?.operatorPressure && typeof session.operatorPressure === "object"
+    ? session.operatorPressure
+    : {};
+}
+
+function pressureReason(session) {
+  return String(operatorPressure(session).reason || "");
+}
+
+function sessionCommitReady(session) {
+  const pressure = operatorPressure(session);
+  return Boolean(pressure.commit_ready || session?.commitCandidate || hasActionCue(session, "commit_ready"));
 }
 
 function summarizeSessions(sessions, publishedSessionId, selectedSessionId) {
@@ -494,10 +886,13 @@ function summarizeSessions(sessions, publishedSessionId, selectedSessionId) {
     attention: 0,
     exited: 0,
     stale: 0,
+    untrusted: 0,
     commitCandidates: 0,
     codexCount: 0,
     claudeCount: 0,
     activeCommands: 0,
+    pressure: 0,
+    actionCues: 0,
     subtitle: "Select a session row on the left to attach its terminal.",
     footer: "Use the HUD to open config, native, Mermaid, or repo browser sheets.",
   };
@@ -520,6 +915,9 @@ function summarizeSessions(sessions, publishedSessionId, selectedSessionId) {
     if (session.isStale) {
       summary.stale += 1;
     }
+    if (stateEvidenceIsUnverified(session)) {
+      summary.untrusted += 1;
+    }
     const tool = String(session.toolLabel || session.tool || "").toLowerCase();
     if (tool.includes("codex")) {
       summary.codexCount += 1;
@@ -529,12 +927,14 @@ function summarizeSessions(sessions, publishedSessionId, selectedSessionId) {
     if (session.commandLabel && session.commandLabel !== "idle") {
       summary.activeCommands += 1;
     }
+    summary.actionCues += actionCueKinds(session).length;
+    summary.pressure = Math.max(summary.pressure, trogdorPressureScore(session));
   }
 
   const selected = sessions.find((session) => session.sessionId === selectedSessionId) || null;
   const published = sessions.find((session) => session.sessionId === publishedSessionId) || null;
   if (selected) {
-    summary.subtitle = `Selected ${selected.name} / ${selected.cwdLabel} / ${selected.state}`;
+    summary.subtitle = `Selected ${selected.name} / ${selected.cwdLabel} / ${stateDisplayLabel(selected)}`;
   } else if (published) {
     summary.subtitle = `Following published session ${published.name} / ${published.cwdLabel}.`;
   } else {
@@ -542,6 +942,15 @@ function summarizeSessions(sessions, publishedSessionId, selectedSessionId) {
   }
 
   return summary;
+}
+
+function emptyTrogdorSummary() {
+  return {
+    pressure: 0,
+    actionCues: 0,
+    subtitle: "No live sessions yet. The atlas is waiting for the first repository.",
+    footer: "Use new to launch the first agent.",
+  };
 }
 
 function terminalStateCopy(model) {
@@ -641,7 +1050,7 @@ function drawChip(frame, x, y, label, fg, bg) {
   });
 }
 
-function drawActionChipRow(frame, x, y, limit, actions, zoneType) {
+function drawActionChipRow(frame, x, y, limit, actions, zoneType, options = {}) {
   let cursor = x;
   for (const action of actions) {
     const width = action.label.length + 4;
@@ -662,8 +1071,10 @@ function drawActionChipRow(frame, x, y, limit, actions, zoneType) {
         type: zoneType,
         actionId: action.actionId,
         disabled: !action.enabled,
+        label: action.label,
+        ...action.zone,
       },
-      rect(cursor, y, width, 1),
+      expandedRect(frame, cursor, y, width, 1, options.hitPadX || 0, options.hitPadY || 0),
     );
     cursor += width + 1;
   }
@@ -697,6 +1108,15 @@ function drawTextRight(frame, rightX, y, text, options = {}) {
   const width = clampInt(options.width, String(text || "").length, 0, frame.cols);
   const content = truncate(String(text || ""), width);
   drawText(frame, rightX - content.length + 1, y, content, options);
+}
+
+function drawTextCenter(frame, x, y, width, text, options = {}) {
+  const content = truncate(String(text || ""), width);
+  const left = x + Math.max(0, Math.floor((width - content.length) / 2));
+  drawText(frame, left, y, content, {
+    ...options,
+    width: Math.max(0, width - Math.max(0, Math.floor((width - content.length) / 2))),
+  });
 }
 
 function drawTextBlock(frame, x, y, width, maxLines, text, options = {}) {
@@ -793,6 +1213,14 @@ function rect(x, y, w, h) {
   return { x, y, w, h };
 }
 
+function expandedRect(frame, x, y, w, h, padX = 0, padY = 0) {
+  const left = Math.max(0, x - padX);
+  const top = Math.max(0, y - padY);
+  const right = Math.min(frame.cols, x + w + padX);
+  const bottom = Math.min(frame.rows, y + h + padY);
+  return rect(left, top, Math.max(0, right - left), Math.max(0, bottom - top));
+}
+
 function cellInRect(cell, rectValue) {
   return (
     cell.x >= rectValue.x &&
@@ -806,11 +1234,12 @@ function chipSpec(label, fg, bg, zone = null) {
   return { label, fg, bg, zone };
 }
 
-function actionSpec(label, title, actionId, enabled) {
+function actionSpec(label, title, actionId, enabled, zone = {}) {
   return {
     label: label || title,
     actionId,
     enabled,
+    zone,
   };
 }
 
@@ -831,6 +1260,19 @@ function truncate(value, width) {
 function safeLabel(value, fallback) {
   const text = String(value || "").trim();
   return text || fallback;
+}
+
+function stateDisplayLabel(session) {
+  const label = safeLabel(session?.displayState, safeLabel(session?.state, "unknown"));
+  if (stateEvidenceIsUnverified(session) && !label.endsWith("?")) {
+    return `${label}?`;
+  }
+  return label;
+}
+
+function stateEvidenceIsUnverified(session) {
+  const confidence = String(session?.stateConfidence || "").toLowerCase();
+  return confidence !== "high" || session?.stateObserved === false;
 }
 
 function codePoint(char) {

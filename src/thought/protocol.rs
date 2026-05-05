@@ -6,13 +6,18 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::thought::loop_runner::SessionInfo;
 use crate::thought::runtime_config::ThoughtConfig;
-use crate::types::{BubblePrecedence, RestState, SessionState, ThoughtSource, ThoughtState};
+use crate::types::{
+    ActionCue, BubblePrecedence, RestState, SessionState, ThoughtSource, ThoughtState,
+};
 
 pub const HELLO_MESSAGE_TYPE: &str = "hello";
 pub const SYNC_MESSAGE_TYPE: &str = "sync";
 pub const SYNC_RESULT_MESSAGE_TYPE: &str = "sync_result";
 pub const SYNC_RESPONSE_MESSAGE_TYPE: &str = SYNC_RESULT_MESSAGE_TYPE;
 pub const EMIT_PROTOCOL_V1: &str = "clawgs.emit.v1";
+pub const EMIT_PROTOCOL_V2: &str = "clawgs.emit.v2";
+pub const SUPPORTED_EMIT_PROTOCOLS: &[&str] = &[EMIT_PROTOCOL_V1, EMIT_PROTOCOL_V2];
+pub const SUPPORTED_EMIT_PROTOCOLS_DISPLAY: &str = "clawgs.emit.v1 or clawgs.emit.v2";
 
 #[derive(Debug, Default)]
 pub struct SyncRequestSequence {
@@ -63,6 +68,8 @@ pub struct SyncUpdate {
     pub rest_state: RestState,
     #[serde(default)]
     pub commit_candidate: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub action_cues: Vec<ActionCue>,
     pub objective_changed: bool,
     pub bubble_precedence: BubblePrecedence,
     pub at: DateTime<Utc>,
@@ -101,6 +108,8 @@ pub struct SessionSnapshot {
     pub rest_state: RestState,
     #[serde(default)]
     pub commit_candidate: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub action_cues: Vec<ActionCue>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -349,6 +358,7 @@ fn session_snapshot_from_info(session: &SessionInfo) -> SessionSnapshot {
         context_limit: session.context_limit,
         last_activity_at: session.last_activity_at,
         commit_candidate: session.commit_candidate,
+        action_cues: session.action_cues.clone(),
     }
 }
 
@@ -374,6 +384,9 @@ fn default_sync_message_type() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::{
+        ActionCue, ActionCueConfidence, ActionCueKind, ActionCueSource, ActionCueStatus,
+    };
 
     fn sample_session() -> SessionInfo {
         let now = Utc::now();
@@ -389,11 +402,25 @@ mod tests {
             thought_source: ThoughtSource::CarryForward,
             rest_state: RestState::Drowsy,
             commit_candidate: false,
+            action_cues: Vec::new(),
             objective_fingerprint: Some("obj-1".to_string()),
             thought_updated_at: Some(now),
             token_count: 12,
             context_limit: 100,
             last_activity_at: now,
+        }
+    }
+
+    fn commit_ready_cue() -> ActionCue {
+        ActionCue {
+            kind: ActionCueKind::CommitReady,
+            status: ActionCueStatus::Active,
+            source: ActionCueSource::Transcript,
+            confidence: ActionCueConfidence::Deterministic,
+            evidence: ActionCue::expected_evidence(ActionCueKind::CommitReady)
+                .iter()
+                .map(|item| item.to_string())
+                .collect(),
         }
     }
 
@@ -413,6 +440,38 @@ mod tests {
         assert_eq!(json["config"]["terminal_prompt"], "");
         assert_eq!(json["sessions"][0]["session_id"], "sess-1");
         assert_eq!(json["sessions"][0]["state"], "busy");
+    }
+
+    #[test]
+    fn sync_request_serializes_action_cues_using_clawgs_names() {
+        let mut session = sample_session();
+        session.action_cues = vec![commit_ready_cue()];
+        let request =
+            build_sync_request_with_now(7, Utc::now(), &ThoughtConfig::default(), &[session]);
+        let json = serde_json::to_value(&request).expect("request should serialize");
+
+        assert_eq!(
+            json["sessions"][0]["action_cues"][0]["kind"],
+            "commit_ready"
+        );
+        assert_eq!(json["sessions"][0]["action_cues"][0]["status"], "active");
+        assert_eq!(
+            json["sessions"][0]["action_cues"][0]["source"],
+            "transcript"
+        );
+        assert_eq!(
+            json["sessions"][0]["action_cues"][0]["confidence"],
+            "deterministic"
+        );
+        assert_eq!(
+            json["sessions"][0]["action_cues"][0]["evidence"],
+            serde_json::json!([
+                "edit_seen",
+                "validation_succeeded",
+                "dirty_tree_checked_after_latest_edit",
+                "commit_not_seen_after_latest_edit"
+            ])
+        );
     }
 
     #[test]

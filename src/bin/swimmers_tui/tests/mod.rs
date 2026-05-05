@@ -13,10 +13,11 @@ use std::sync::{Arc, LazyLock, Mutex};
 
 use chrono::Utc;
 use proptest::prelude::*;
+use swimmers::api::remote_sessions;
 use swimmers::openrouter_models::default_openrouter_candidates;
 use swimmers::types::{
     CreateSessionsBatchResult, GhosttyOpenMode, RepoActionStatus, SessionBatchMembership,
-    ThoughtSource, ThoughtState, TransportHealth,
+    SessionGroupInputResult, StateEvidence, ThoughtSource, ThoughtState, TransportHealth,
 };
 use tempfile::tempdir;
 
@@ -63,10 +64,13 @@ struct MockApiState {
     publish_selection_results: VecDeque<Result<(), String>>,
     open_session_results: VecDeque<Result<NativeDesktopOpenResponse, String>>,
     list_dirs_results: VecDeque<Result<DirListResponse, String>>,
+    update_dir_group_memberships_results:
+        VecDeque<Result<DirGroupMembershipUpdateResponse, String>>,
     start_repo_action_results: VecDeque<Result<DirRepoActionResponse, String>>,
     overlay_plans_results: VecDeque<Result<Vec<PlanPanelEntry>, String>>,
     create_session_results: VecDeque<Result<CreateSessionResponse, String>>,
     create_sessions_batch_results: VecDeque<Result<CreateSessionsBatchResponse, String>>,
+    send_group_input_results: VecDeque<Result<SessionGroupInputResponse, String>>,
     update_thought_config_calls: Vec<ThoughtConfig>,
     test_thought_config_calls: Vec<ThoughtConfig>,
     mermaid_artifact_calls: Vec<String>,
@@ -76,9 +80,11 @@ struct MockApiState {
     publish_calls: Vec<Option<String>>,
     open_calls: Vec<String>,
     list_calls: Vec<(Option<String>, bool)>,
+    update_dir_group_memberships_calls: Vec<(String, Vec<String>, Vec<String>)>,
     start_repo_action_calls: Vec<(String, RepoActionKind)>,
     create_calls: Vec<(String, SpawnTool, Option<String>, Option<String>)>,
     create_batch_calls: Vec<(Vec<String>, SpawnTool, Option<String>, Option<String>)>,
+    send_group_input_calls: Vec<(Vec<String>, String)>,
 }
 
 #[derive(Clone, Default)]
@@ -179,6 +185,17 @@ impl MockApi {
             .push_back(result);
     }
 
+    fn push_update_dir_group_memberships(
+        &self,
+        result: Result<DirGroupMembershipUpdateResponse, String>,
+    ) {
+        self.state
+            .lock()
+            .unwrap()
+            .update_dir_group_memberships_results
+            .push_back(result);
+    }
+
     fn push_create_session(&self, result: Result<CreateSessionResponse, String>) {
         self.state
             .lock()
@@ -192,6 +209,14 @@ impl MockApi {
             .lock()
             .unwrap()
             .create_sessions_batch_results
+            .push_back(result);
+    }
+
+    fn push_send_group_input(&self, result: Result<SessionGroupInputResponse, String>) {
+        self.state
+            .lock()
+            .unwrap()
+            .send_group_input_results
             .push_back(result);
     }
 
@@ -249,6 +274,18 @@ impl MockApi {
             .iter()
             .map(|(dirs, tool, _target, request)| (dirs.clone(), *tool, request.clone()))
             .collect()
+    }
+
+    fn send_group_input_calls(&self) -> Vec<(Vec<String>, String)> {
+        self.state.lock().unwrap().send_group_input_calls.clone()
+    }
+
+    fn update_dir_group_memberships_calls(&self) -> Vec<(String, Vec<String>, Vec<String>)> {
+        self.state
+            .lock()
+            .unwrap()
+            .update_dir_group_memberships_calls
+            .clone()
     }
 
     fn create_calls_with_targets(
@@ -545,6 +582,26 @@ impl TuiApi for MockApi {
         })
     }
 
+    fn update_dir_group_memberships(
+        &self,
+        path: &str,
+        add: Vec<String>,
+        remove: Vec<String>,
+    ) -> BoxFuture<'_, Result<DirGroupMembershipUpdateResponse, String>> {
+        let state = self.state.clone();
+        let path = path.to_string();
+        Box::pin(async move {
+            let mut state = state.lock().unwrap();
+            state
+                .update_dir_group_memberships_calls
+                .push((path, add, remove));
+            state
+                .update_dir_group_memberships_results
+                .pop_front()
+                .unwrap_or_else(|| Err("unexpected update_dir_group_memberships".to_string()))
+        })
+    }
+
     fn start_repo_action(
         &self,
         path: &str,
@@ -612,6 +669,22 @@ impl TuiApi for MockApi {
                 .create_sessions_batch_results
                 .pop_front()
                 .unwrap_or_else(|| Err("unexpected create_sessions_batch".to_string()))
+        })
+    }
+
+    fn send_group_input(
+        &self,
+        session_ids: Vec<String>,
+        text: String,
+    ) -> BoxFuture<'_, Result<SessionGroupInputResponse, String>> {
+        let state = self.state.clone();
+        Box::pin(async move {
+            let mut state = state.lock().unwrap();
+            state.send_group_input_calls.push((session_ids, text));
+            state
+                .send_group_input_results
+                .pop_front()
+                .unwrap_or_else(|| Err("unexpected send_group_input".to_string()))
         })
     }
 }
@@ -2283,6 +2356,7 @@ fn session_summary(session_id: &str, tmux_name: &str, cwd: &str) -> SessionSumma
         tmux_name: tmux_name.to_string(),
         state: SessionState::Idle,
         current_command: None,
+        state_evidence: StateEvidence::new("osc133_prompt"),
         cwd: cwd.to_string(),
         tool: Some("Codex".to_string()),
         token_count: 0,
@@ -2293,6 +2367,7 @@ fn session_summary(session_id: &str, tmux_name: &str, cwd: &str) -> SessionSumma
         thought_updated_at: None,
         rest_state: RestState::Drowsy,
         commit_candidate: false,
+        action_cues: Vec::new(),
         objective_changed_at: None,
         last_skill: None,
         is_stale: false,
@@ -2340,6 +2415,19 @@ fn session_summary_with_thought(
     session.thought_state = ThoughtState::Active;
     session.rest_state = RestState::Active;
     session.thought_updated_at = Some(timestamp(updated_at));
+    session
+}
+
+fn sleeping_session_with_thought(
+    session_id: &str,
+    tmux_name: &str,
+    cwd: &str,
+    thought: &str,
+    updated_at: &str,
+) -> SessionSummary {
+    let mut session = session_summary_with_thought(session_id, tmux_name, cwd, thought, updated_at);
+    session.thought_state = ThoughtState::Sleeping;
+    session.rest_state = RestState::Sleeping;
     session
 }
 
@@ -2470,6 +2558,7 @@ fn dir_response(path: &str, names: &[(&str, bool)]) -> DirListResponse {
                 repo_dirty: None,
                 repo_action: None,
                 group: None,
+                groups: Vec::new(),
                 full_path: None,
                 has_restart: None,
                 open_url: None,
@@ -2499,6 +2588,16 @@ fn dir_response_with_launch_targets(path: &str, names: &[(&str, bool)]) -> DirLi
     response
 }
 
+fn dir_response_with_groups(
+    path: &str,
+    names: &[(&str, bool)],
+    groups: &[&str],
+) -> DirListResponse {
+    let mut response = dir_response(path, names);
+    response.groups = groups.iter().map(|group| (*group).to_string()).collect();
+    response
+}
+
 fn repo_dir_entry(
     name: &str,
     has_children: bool,
@@ -2512,6 +2611,7 @@ fn repo_dir_entry(
         repo_dirty,
         repo_action,
         group: None,
+        groups: Vec::new(),
         full_path: None,
         has_restart: None,
         open_url: None,
@@ -2669,6 +2769,63 @@ fn app_layout_hides_thought_rail_until_a_session_needs_input() {
     let attention_layout = app.layout_for_terminal(120, 32);
     assert!(attention_layout.thought_box.is_some());
     assert!(attention_layout.overview_box.x > attention_layout.workspace_box.x);
+}
+
+#[test]
+fn app_layout_shows_thought_rail_for_sendable_local_batch() {
+    let api = MockApi::new();
+    let mut app = App::new(test_runtime(), api);
+    let full_layout = WorkspaceLayout::for_terminal_without_thought_panel(120, 32);
+    let first = with_batch(
+        sleeping_session(
+            "sess-alpha",
+            "alpha",
+            TEST_REPO_ALPHA,
+            "2026-03-08T14:00:05Z",
+        ),
+        "batch-ui",
+        "ui-discovery",
+        0,
+        2,
+    );
+    let second = with_batch(
+        sleeping_session("sess-beta", "beta", TEST_REPO_BETA, "2026-03-08T14:00:06Z"),
+        "batch-ui",
+        "ui-discovery",
+        1,
+        2,
+    );
+
+    app.merge_sessions(vec![first, second], full_layout.overview_field);
+
+    let layout = app.layout_for_terminal(120, 32);
+    assert!(layout.thought_box.is_some());
+    assert!(layout.overview_box.x > layout.workspace_box.x);
+    let thought_content = layout
+        .thought_content
+        .expect("sendable batch opens thought rail");
+    let panel = build_thought_panel(&app, thought_content, layout.thought_entry_capacity());
+    assert_eq!(panel.rows[0].line, "v ui-discovery (2) [send]");
+    let send_rect = panel.rows[0].send_rect.expect("send badge");
+    let header_y = thought_content
+        .bottom()
+        .saturating_sub(panel.rows.len() as u16);
+    match thought_panel_action_at(
+        &app,
+        thought_content,
+        layout.thought_entry_capacity(),
+        send_rect.x,
+        header_y,
+    ) {
+        Some(ThoughtPanelAction::SendGroup { session_ids, label }) => {
+            assert_eq!(label, "ui-discovery");
+            assert_eq!(
+                session_ids,
+                vec!["sess-alpha".to_string(), "sess-beta".to_string()]
+            );
+        }
+        _ => panic!("expected clickable send action"),
+    }
 }
 
 #[test]
@@ -4191,7 +4348,7 @@ fn sleeping_entity_pins_to_bottom_left_grid_slot() {
 }
 
 #[test]
-fn attention_sleeping_entity_pins_to_bottom_left_grid_slot() {
+fn attention_sleeping_entity_keeps_attention_motion() {
     let api = MockApi::new();
     let field = test_field();
     let mut app = make_app(api);
@@ -4212,11 +4369,8 @@ fn attention_sleeping_entity_pins_to_bottom_left_grid_slot() {
         .iter()
         .find(|entity| entity.session.session_id == "sess-attn-sleep-1")
         .expect("entity should exist");
-    assert_eq!(entity.rest_anchor(), RestAnchor::Bottom);
-    assert_eq!(
-        entity_rect_for(&app, "sess-attn-sleep-1", field),
-        sleep_grid_rect(field, 0)
-    );
+    assert_eq!(entity.sprite_kind(), SpriteKind::Attention);
+    assert_eq!(entity.rest_anchor(), RestAnchor::FreeSwim);
 }
 
 #[test]
@@ -4248,7 +4402,7 @@ fn deep_sleep_entity_floats_to_top_left_grid_slot() {
 }
 
 #[test]
-fn attention_session_state_text_uses_rest_state() {
+fn attention_session_state_text_overrides_rest_state() {
     let active = attention_session(
         "sess-attn-active",
         "7",
@@ -4279,9 +4433,9 @@ fn attention_session_state_text_uses_rest_state() {
     );
 
     assert_eq!(session_state_text(&active), "attention");
-    assert_eq!(session_state_text(&drowsy), "drowsy");
-    assert_eq!(session_state_text(&sleeping), "sleeping");
-    assert_eq!(session_state_text(&deep_sleep), "deep sleep");
+    assert_eq!(session_state_text(&drowsy), "attention");
+    assert_eq!(session_state_text(&sleeping), "attention");
+    assert_eq!(session_state_text(&deep_sleep), "attention");
 }
 
 #[test]
@@ -4683,7 +4837,7 @@ fn render_initial_request_draws_placeholder_and_ready_voice_state() {
     let layout = initial_request_layout(field);
     let mut renderer = test_renderer(100, 30);
 
-    render_initial_request(&mut renderer, &request, &VoiceUiState::Ready, field);
+    render_initial_request(&mut renderer, &request, &VoiceUiState::Ready, field, None);
 
     let cursor_x = layout.content.x + 2;
     let (status_x, status_y) = find_text_position(&renderer, "voice: ready").expect("voice status");
@@ -4717,6 +4871,7 @@ fn render_initial_request_draws_typed_value_and_failed_voice_state() {
         &request,
         &VoiceUiState::Failed("microphone denied".to_string()),
         field,
+        None,
     );
 
     let (value_x, value_y) =
@@ -5167,7 +5322,7 @@ fn busy_entities_hold_horizontal_position() {
 }
 
 #[test]
-fn busy_sleeping_entities_anchor_to_bottom() {
+fn busy_sleeping_entities_keep_busy_motion() {
     let api = MockApi::new();
     let field = test_field();
     let mut app = make_app(api);
@@ -5187,10 +5342,13 @@ fn busy_sleeping_entities_anchor_to_bottom() {
 
     app.tick(field);
 
-    assert_eq!(
-        entity_rect_for(&app, "sess-busy-sleeping", field),
-        sleep_grid_rect(field, 0)
-    );
+    let entity = app
+        .entities
+        .iter()
+        .find(|entity| entity.session.session_id == "sess-busy-sleeping")
+        .expect("entity should exist");
+    assert_eq!(entity.sprite_kind(), SpriteKind::Busy);
+    assert_eq!(entity.rest_anchor(), RestAnchor::FreeSwim);
 }
 
 #[test]
@@ -5378,6 +5536,75 @@ fn picker_search_filters_without_changing_browsing_scope() {
     assert_eq!(picker.current_group.as_deref(), Some("work"));
     assert_eq!(picker.visible_entries(), vec![1]);
     assert!(api.list_calls().is_empty());
+}
+
+#[test]
+fn picker_group_target_cycles_across_available_groups() {
+    let mut picker = PickerState::new(
+        10,
+        10,
+        dir_response_with_groups(
+            TEST_REPOS_ROOT,
+            &[("alpha", true)],
+            &["frontend", "backend"],
+        ),
+        true,
+        SpawnTool::Codex,
+        None,
+    );
+
+    assert_eq!(picker.group_edit_target.as_deref(), Some("frontend"));
+    assert_eq!(picker.cycle_group_edit_target().as_deref(), Some("backend"));
+    assert_eq!(
+        picker.cycle_group_edit_target().as_deref(),
+        Some("frontend")
+    );
+}
+
+#[test]
+fn picker_add_selected_entry_to_group_target_updates_api_and_reloads() {
+    let api = MockApi::new();
+    api.push_update_dir_group_memberships(Ok(DirGroupMembershipUpdateResponse {
+        path: TEST_REPO_SWIMMERS.to_string(),
+        groups: vec!["frontend".to_string()],
+        available_groups: vec!["frontend".to_string(), "backend".to_string()],
+    }));
+    api.push_list_dirs(Ok(dir_response_with_groups(
+        TEST_REPOS_ROOT,
+        &[("swimmers", false)],
+        &["frontend", "backend"],
+    )));
+    let mut app = make_app(api.clone());
+    let mut picker = PickerState::new(
+        10,
+        10,
+        dir_response_with_groups(
+            TEST_REPOS_ROOT,
+            &[("swimmers", false)],
+            &["frontend", "backend"],
+        ),
+        true,
+        SpawnTool::Codex,
+        None,
+    );
+    picker.selection = PickerSelection::Entry(0);
+    app.picker = Some(picker);
+
+    app.picker_add_selected_to_group_target();
+    poll_until_interaction(&mut app);
+
+    assert_eq!(
+        api.update_dir_group_memberships_calls(),
+        vec![(
+            TEST_REPO_SWIMMERS.to_string(),
+            vec!["frontend".to_string()],
+            Vec::<String>::new()
+        )]
+    );
+    assert_eq!(
+        api.list_calls(),
+        vec![(Some(TEST_REPOS_ROOT.to_string()), true)]
+    );
 }
 
 #[test]
@@ -5594,6 +5821,8 @@ fn submitting_batch_initial_request_creates_visible_sessions_without_native_open
     ])));
     let field = test_field();
     let mut app = make_app(api.clone());
+    app.thought_group_by = ThoughtGroupBy::Pwd;
+    app.thought_show_all = false;
     app.picker = Some(PickerState::new(
         10,
         10,
@@ -5633,6 +5862,8 @@ fn submitting_batch_initial_request_creates_visible_sessions_without_native_open
     assert_eq!(app.selected_id.as_deref(), Some("sess-beta"));
     assert!(app.picker.is_none());
     assert!(app.initial_request.is_none());
+    assert_eq!(app.thought_group_by, ThoughtGroupBy::Batch);
+    assert!(app.thought_show_all);
     assert_eq!(
         app.message.as_ref().map(|(message, _)| message.as_str()),
         Some("created 2 sessions")
@@ -5645,6 +5876,162 @@ fn submitting_batch_initial_request_creates_visible_sessions_without_native_open
         .entities
         .iter()
         .any(|entity| entity.session.session_id == "sess-beta"));
+}
+
+#[test]
+fn submitting_group_input_sends_existing_sessions_without_spawning() {
+    let api = MockApi::new();
+    api.push_send_group_input(Ok(SessionGroupInputResponse::from_results(vec![
+        SessionGroupInputResult {
+            session_id: "sess-swimmers".to_string(),
+            ok: true,
+            error: None,
+        },
+        SessionGroupInputResult {
+            session_id: "sess-skills".to_string(),
+            ok: true,
+            error: None,
+        },
+    ])));
+    let field = test_field();
+    let mut app = make_app(api.clone());
+    app.group_input_targets = Some(GroupInputTargets {
+        session_ids: vec!["sess-swimmers".to_string(), "sess-skills".to_string()],
+        label: "auth-rebuild".to_string(),
+    });
+    app.initial_request = Some({
+        let mut state = InitialRequestState::new("auth-rebuild".to_string(), None);
+        state.value = "keep going, same patch direction".to_string();
+        state
+    });
+
+    app.submit_initial_request(field);
+    assert!(app.pending_interaction.is_some());
+    assert!(app.initial_request.is_some());
+
+    poll_until_interaction(&mut app);
+
+    assert_eq!(
+        api.send_group_input_calls(),
+        vec![(
+            vec!["sess-swimmers".to_string(), "sess-skills".to_string()],
+            "keep going, same patch direction".to_string(),
+        )]
+    );
+    assert!(api.create_calls().is_empty());
+    assert!(api.create_batch_calls().is_empty());
+    assert!(app.initial_request.is_none());
+    assert!(app.group_input_targets.is_none());
+    assert_eq!(
+        app.message.as_ref().map(|(message, _)| message.as_str()),
+        Some("sent to 2 sessions")
+    );
+}
+
+#[test]
+fn submitting_group_input_keeps_composer_when_all_sessions_skip() {
+    let api = MockApi::new();
+    api.push_send_group_input(Ok(SessionGroupInputResponse::from_results(vec![
+        SessionGroupInputResult {
+            session_id: "sess-swimmers".to_string(),
+            ok: false,
+            error: Some(ErrorResponse {
+                code: "SESSION_NOT_READY".to_string(),
+                message: Some("session is not waiting for input".to_string()),
+            }),
+        },
+        SessionGroupInputResult {
+            session_id: "sess-skills".to_string(),
+            ok: false,
+            error: Some(ErrorResponse {
+                code: "SESSION_NOT_READY".to_string(),
+                message: Some("session is not waiting for input".to_string()),
+            }),
+        },
+    ])));
+    let field = test_field();
+    let mut app = make_app(api.clone());
+    app.group_input_targets = Some(GroupInputTargets {
+        session_ids: vec!["sess-swimmers".to_string(), "sess-skills".to_string()],
+        label: "auth-rebuild".to_string(),
+    });
+    app.initial_request = Some({
+        let mut state = InitialRequestState::new("auth-rebuild".to_string(), None);
+        state.value = "retryable prompt".to_string();
+        state
+    });
+
+    app.submit_initial_request(field);
+    poll_until_interaction(&mut app);
+
+    assert_eq!(
+        api.send_group_input_calls(),
+        vec![(
+            vec!["sess-swimmers".to_string(), "sess-skills".to_string()],
+            "retryable prompt".to_string(),
+        )]
+    );
+    assert_eq!(
+        app.initial_request
+            .as_ref()
+            .map(|request| request.value.as_str()),
+        Some("retryable prompt")
+    );
+    assert!(app.group_input_targets.is_some());
+    assert_eq!(
+        app.message.as_ref().map(|(message, _)| message.as_str()),
+        Some("sent to 0/2; all skipped")
+    );
+}
+
+#[test]
+fn pressing_enter_submits_group_input_and_reports_partial_skips() {
+    let api = MockApi::new();
+    api.push_send_group_input(Ok(SessionGroupInputResponse::from_results(vec![
+        SessionGroupInputResult {
+            session_id: "sess-swimmers".to_string(),
+            ok: true,
+            error: None,
+        },
+        SessionGroupInputResult {
+            session_id: "sess-skills".to_string(),
+            ok: false,
+            error: Some(ErrorResponse {
+                code: "SESSION_NOT_READY".to_string(),
+                message: Some("session is not waiting for input".to_string()),
+            }),
+        },
+    ])));
+    let field = test_field();
+    let mut app = make_app(api.clone());
+    app.group_input_targets = Some(GroupInputTargets {
+        session_ids: vec!["sess-swimmers".to_string(), "sess-skills".to_string()],
+        label: "auth-rebuild".to_string(),
+    });
+    app.initial_request = Some({
+        let mut state = InitialRequestState::new("auth-rebuild".to_string(), None);
+        state.value = "ship the partial path".to_string();
+        state
+    });
+
+    app.handle_initial_request_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), field);
+    assert!(app.pending_interaction.is_some());
+
+    poll_until_interaction(&mut app);
+
+    assert_eq!(
+        api.send_group_input_calls(),
+        vec![(
+            vec!["sess-swimmers".to_string(), "sess-skills".to_string()],
+            "ship the partial path".to_string(),
+        )]
+    );
+    assert!(app.initial_request.is_none());
+    assert!(app.group_input_targets.is_none());
+    assert_eq!(
+        app.message.as_ref().map(|(message, _)| message.as_str()),
+        Some("sent to 1/2; 1 skipped")
+    );
 }
 
 #[test]
@@ -6206,15 +6593,13 @@ fn picker_action_at_resolves_controls_and_entries() {
         picker_action_at(&picker, &layout, layout.content.x, layout.first_entry_y),
         Some(PickerAction::ActivateEntry(0))
     ));
-    assert!(matches!(
-        picker_action_at(
-            &picker,
-            &layout,
-            layout.content.right(),
-            layout.first_entry_y
-        ),
-        None
-    ));
+    assert!(picker_action_at(
+        &picker,
+        &layout,
+        layout.content.right(),
+        layout.first_entry_y
+    )
+    .is_none());
     assert!(matches!(
         layout
             .back_button
@@ -7870,6 +8255,396 @@ fn thought_panel_keeps_plans_action_off_batch_group_headers() {
 }
 
 #[test]
+fn thought_panel_keeps_send_action_off_unbatched_batch_group() {
+    let api = MockApi::new();
+    let layout = test_layout(120, 32);
+    let thought_content = layout
+        .thought_content
+        .expect("wide layout enables thought rail");
+    let mut app = make_app(api);
+    app.thought_group_by = ThoughtGroupBy::Batch;
+
+    let first = sleeping_session_with_thought(
+        "sess-swimmers",
+        "7",
+        TEST_REPO_SWIMMERS,
+        "patching rail",
+        "2026-03-08T14:00:05Z",
+    );
+    let second = sleeping_session_with_thought(
+        "sess-skills",
+        "9",
+        TEST_REPO_SKILLS,
+        "checking docs",
+        "2026-03-08T14:00:06Z",
+    );
+    let batched = with_batch(
+        session_summary_with_thought(
+            "sess-alpha",
+            "2",
+            TEST_REPO_ALPHA,
+            "different batch",
+            "2026-03-08T14:00:07Z",
+        ),
+        "batch-alpha",
+        "alpha-work",
+        0,
+        1,
+    );
+    app.capture_thought_updates(&[first, second, batched], layout.thought_entry_capacity());
+
+    let panel = build_thought_panel(&app, thought_content, layout.thought_entry_capacity());
+    let unbatched_row = panel
+        .rows
+        .iter()
+        .find(|row| row.line == "v unbatched (2)")
+        .expect("unbatched header");
+    assert!(unbatched_row.send_rect.is_none());
+}
+
+#[test]
+fn thought_panel_keeps_send_action_off_remote_batch_groups() {
+    let api = MockApi::new();
+    let layout = test_layout(120, 32);
+    let thought_content = layout
+        .thought_content
+        .expect("wide layout enables thought rail");
+    let mut app = make_app(api);
+    app.thought_group_by = ThoughtGroupBy::Batch;
+
+    let local = with_batch(
+        sleeping_session_with_thought(
+            "sess-local",
+            "7",
+            TEST_REPO_SWIMMERS,
+            "patching rail",
+            "2026-03-08T14:00:05Z",
+        ),
+        "batch-remote",
+        "remote-school",
+        0,
+        2,
+    );
+    let remote = with_batch(
+        sleeping_session_with_thought(
+            &remote_sessions::namespace_session_id("jeremy-skillbox", "sess-remote"),
+            "[Jeremy] 9",
+            TEST_REPO_SKILLS,
+            "checking docs",
+            "2026-03-08T14:00:06Z",
+        ),
+        "batch-remote",
+        "remote-school",
+        1,
+        2,
+    );
+    app.capture_thought_updates(&[local, remote], layout.thought_entry_capacity());
+
+    let panel = build_thought_panel(&app, thought_content, layout.thought_entry_capacity());
+    assert_eq!(panel.rows[0].line, "v remote-school (2)");
+    assert!(panel.rows[0].send_rect.is_none());
+}
+
+#[test]
+fn thought_panel_keeps_send_action_off_active_batch_groups() {
+    let api = MockApi::new();
+    let layout = test_layout(120, 32);
+    let thought_content = layout
+        .thought_content
+        .expect("wide layout enables thought rail");
+    let mut app = make_app(api);
+    app.thought_group_by = ThoughtGroupBy::Batch;
+
+    let first = with_batch(
+        session_summary_with_thought(
+            "sess-active",
+            "7",
+            TEST_REPO_SWIMMERS,
+            "still working",
+            "2026-03-08T14:00:05Z",
+        ),
+        "batch-active",
+        "active-school",
+        0,
+        2,
+    );
+    let second = with_batch(
+        {
+            let mut session = session_summary_with_thought(
+                "sess-drowsy",
+                "9",
+                TEST_REPO_SKILLS,
+                "not waiting yet",
+                "2026-03-08T14:00:06Z",
+            );
+            session.rest_state = RestState::Drowsy;
+            session
+        },
+        "batch-active",
+        "active-school",
+        1,
+        2,
+    );
+    app.capture_thought_updates(&[first, second], layout.thought_entry_capacity());
+
+    let panel = build_thought_panel(&app, thought_content, layout.thought_entry_capacity());
+    assert_eq!(panel.rows[0].line, "v active-school (2)");
+    assert!(panel.rows[0].send_rect.is_none());
+}
+
+#[test]
+fn thought_panel_keeps_send_action_off_groups_without_two_ready_targets() {
+    let api = MockApi::new();
+    let layout = test_layout(160, 80);
+    let thought_content = layout
+        .thought_content
+        .expect("wide layout enables thought rail");
+    let mut app = make_app(api);
+    app.thought_group_by = ThoughtGroupBy::Batch;
+
+    let stale_ready = with_batch(
+        sleeping_session_with_thought(
+            "sess-stale-ready",
+            "1",
+            TEST_REPO_SWIMMERS,
+            "waiting",
+            "2026-03-08T14:00:01Z",
+        ),
+        "batch-stale",
+        "stale-school",
+        0,
+        2,
+    );
+    let stale_bad = with_batch(
+        {
+            let mut session = sleeping_session_with_thought(
+                "sess-stale-bad",
+                "2",
+                TEST_REPO_SKILLS,
+                "stale",
+                "2026-03-08T14:00:02Z",
+            );
+            session.is_stale = true;
+            session
+        },
+        "batch-stale",
+        "stale-school",
+        1,
+        2,
+    );
+    let disconnected_ready = with_batch(
+        sleeping_session_with_thought(
+            "sess-disconnected-ready",
+            "3",
+            TEST_REPO_SWIMMERS,
+            "waiting",
+            "2026-03-08T14:00:03Z",
+        ),
+        "batch-disconnected",
+        "disconnected-school",
+        0,
+        2,
+    );
+    let disconnected_bad = with_batch(
+        {
+            let mut session = sleeping_session_with_thought(
+                "sess-disconnected-bad",
+                "4",
+                TEST_REPO_SKILLS,
+                "disconnected",
+                "2026-03-08T14:00:04Z",
+            );
+            session.transport_health = TransportHealth::Disconnected;
+            session
+        },
+        "batch-disconnected",
+        "disconnected-school",
+        1,
+        2,
+    );
+    let exited_ready = with_batch(
+        sleeping_session_with_thought(
+            "sess-exited-ready",
+            "5",
+            TEST_REPO_SWIMMERS,
+            "waiting",
+            "2026-03-08T14:00:05Z",
+        ),
+        "batch-exited",
+        "exited-school",
+        0,
+        2,
+    );
+    let exited_bad = with_batch(
+        {
+            let mut session = sleeping_session_with_thought(
+                "sess-exited-bad",
+                "6",
+                TEST_REPO_SKILLS,
+                "exited",
+                "2026-03-08T14:00:06Z",
+            );
+            session.state = SessionState::Exited;
+            session
+        },
+        "batch-exited",
+        "exited-school",
+        1,
+        2,
+    );
+    let deep_ready = with_batch(
+        sleeping_session_with_thought(
+            "sess-deep-ready",
+            "7",
+            TEST_REPO_SWIMMERS,
+            "waiting",
+            "2026-03-08T14:00:07Z",
+        ),
+        "batch-deep",
+        "deep-school",
+        0,
+        2,
+    );
+    let deep_bad = with_batch(
+        {
+            let mut session = sleeping_session_with_thought(
+                "sess-deep-bad",
+                "8",
+                TEST_REPO_SKILLS,
+                "deep",
+                "2026-03-08T14:00:08Z",
+            );
+            session.rest_state = RestState::DeepSleep;
+            session
+        },
+        "batch-deep",
+        "deep-school",
+        1,
+        2,
+    );
+    let active_ready = with_batch(
+        sleeping_session_with_thought(
+            "sess-active-ready",
+            "9",
+            TEST_REPO_SWIMMERS,
+            "waiting",
+            "2026-03-08T14:00:09Z",
+        ),
+        "batch-one-ready",
+        "one-ready-school",
+        0,
+        2,
+    );
+    let active_bad = with_batch(
+        session_summary_with_thought(
+            "sess-active-bad",
+            "10",
+            TEST_REPO_SKILLS,
+            "working",
+            "2026-03-08T14:00:10Z",
+        ),
+        "batch-one-ready",
+        "one-ready-school",
+        1,
+        2,
+    );
+
+    app.capture_thought_updates(
+        &[
+            stale_ready,
+            stale_bad,
+            disconnected_ready,
+            disconnected_bad,
+            exited_ready,
+            exited_bad,
+            deep_ready,
+            deep_bad,
+            active_ready,
+            active_bad,
+        ],
+        layout.thought_entry_capacity(),
+    );
+
+    let panel = build_thought_panel(&app, thought_content, layout.thought_entry_capacity());
+    for label in [
+        "stale-school",
+        "disconnected-school",
+        "exited-school",
+        "deep-school",
+        "one-ready-school",
+    ] {
+        let header = format!("v {label} (2)");
+        let row = panel
+            .rows
+            .iter()
+            .find(|row| row.line == header)
+            .unwrap_or_else(|| panic!("missing header {header}"));
+        assert!(row.send_rect.is_none(), "{label} should not be sendable");
+    }
+}
+
+#[test]
+fn thought_panel_treats_attention_sessions_as_sendable() {
+    let api = MockApi::new();
+    let layout = test_layout(120, 32);
+    let thought_content = layout
+        .thought_content
+        .expect("wide layout enables thought rail");
+    let mut app = make_app(api);
+    app.thought_group_by = ThoughtGroupBy::Batch;
+
+    let first = with_batch(
+        {
+            let mut session = session_summary_with_thought(
+                "sess-attention-a",
+                "7",
+                TEST_REPO_SWIMMERS,
+                "needs input",
+                "2026-03-08T14:00:05Z",
+            );
+            session.state = SessionState::Attention;
+            session.rest_state = RestState::Drowsy;
+            session
+        },
+        "batch-attention",
+        "attention-school",
+        0,
+        2,
+    );
+    let second = with_batch(
+        {
+            let mut session = session_summary_with_thought(
+                "sess-attention-b",
+                "9",
+                TEST_REPO_SKILLS,
+                "also needs input",
+                "2026-03-08T14:00:06Z",
+            );
+            session.state = SessionState::Attention;
+            session.rest_state = RestState::Active;
+            session
+        },
+        "batch-attention",
+        "attention-school",
+        1,
+        2,
+    );
+    app.capture_thought_updates(&[first, second], layout.thought_entry_capacity());
+
+    let panel = build_thought_panel(&app, thought_content, layout.thought_entry_capacity());
+    assert_eq!(panel.rows[0].line, "v attention-school (2) [send]");
+    assert_eq!(
+        panel.rows[0].group_session_ids.as_deref(),
+        Some(
+            &[
+                "sess-attention-a".to_string(),
+                "sess-attention-b".to_string()
+            ][..]
+        )
+    );
+}
+
+#[test]
 fn thought_panel_defaults_to_stopped_only_and_counts_sleeping_agents() {
     let api = MockApi::new();
     let layout = test_layout(120, 32);
@@ -8083,6 +8858,74 @@ fn thought_panel_groups_by_batch_when_toggled() {
             "  routine update",
         ]
     );
+    assert!(panel.rows[0].send_rect.is_none());
+}
+
+#[test]
+fn clicking_thought_group_send_opens_group_composer() {
+    let api = MockApi::new();
+    let layout = test_layout(120, 32);
+    let thought_content = layout
+        .thought_content
+        .expect("wide layout enables thought rail");
+    let mut app = make_app(api.clone());
+    app.thought_group_by = ThoughtGroupBy::Batch;
+
+    let first = with_batch(
+        sleeping_session_with_thought(
+            "sess-swimmers",
+            "7",
+            TEST_REPO_SWIMMERS,
+            "patching rail",
+            "2026-03-08T14:00:05Z",
+        ),
+        "batch-auth",
+        "auth-rebuild",
+        0,
+        2,
+    );
+    let second = with_batch(
+        sleeping_session_with_thought(
+            "sess-skills",
+            "9",
+            TEST_REPO_SKILLS,
+            "checking docs",
+            "2026-03-08T14:00:06Z",
+        ),
+        "batch-auth",
+        "auth-rebuild",
+        1,
+        2,
+    );
+    app.capture_thought_updates(&[first, second], layout.thought_entry_capacity());
+
+    let panel = build_thought_panel(&app, thought_content, layout.thought_entry_capacity());
+    let send_rect = panel.rows[0].send_rect.expect("send badge");
+    let row_y = thought_content
+        .bottom()
+        .saturating_sub(panel.rows.len() as u16);
+
+    handle_workspace_click(
+        &mut app,
+        layout,
+        crossterm::event::MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: send_rect.x,
+            row: row_y,
+            modifiers: KeyModifiers::NONE,
+        },
+    );
+
+    let targets = app.group_input_targets.as_ref().expect("group targets");
+    assert_eq!(targets.label, "auth-rebuild");
+    assert_eq!(
+        targets.session_ids,
+        vec!["sess-swimmers".to_string(), "sess-skills".to_string()]
+    );
+    let request = app.initial_request.as_ref().expect("composer opened");
+    assert_eq!(request.cwd, "auth-rebuild");
+    assert!(api.create_calls().is_empty());
+    assert!(api.create_batch_calls().is_empty());
 }
 
 #[test]

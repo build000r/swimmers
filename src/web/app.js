@@ -1,5 +1,5 @@
-import { buildSurfaceFrame, surfaceActionAt, surfaceConsumesPointer } from "/rendered_surface.js";
-import { eventCell, shouldIgnoreSyntheticClick } from "/input_support.js";
+import { buildSurfaceFrame, surfaceActionAt, surfaceConsumesPointer } from "./rendered_surface.js";
+import { eventCell, shouldIgnoreSyntheticClick } from "./input_support.js";
 
 const boot = window.__SWIMMERS_BOOT__ ?? {
   franken_term_available: false,
@@ -13,9 +13,18 @@ const TOKEN_STORAGE_KEY = "swimmers.web.token";
 const SESSION_STORAGE_KEY = "swimmers.web.session";
 const DIR_BROWSER_PATH_KEY = "swimmers.web.dirs.path";
 const DIR_BROWSER_MANAGED_ONLY_KEY = "swimmers.web.dirs.managed";
+const TERMINAL_ZOOM_STORAGE_KEY = "swimmers.web.terminalZoom";
+const SEND_HISTORY_KEY = "swimmers.web.send.history";
 const SESSION_REFRESH_MS = 2500;
 const SNAPSHOT_REFRESH_MS = 900;
 const SURFACE_CLICK_SUPPRESS_MS = 450;
+const TROGDOR_READ_PROGRESS_KEY = "swimmers.web.trogdor.readProgress";
+const TROGDOR_BURN_MS = 1100;
+const TROGDOR_DRAGON_TARGET = { x: 56, y: 64 };
+const TERMINAL_ZOOM_MIN = 0.65;
+const TERMINAL_ZOOM_MAX = 2.4;
+const TERMINAL_ZOOM_STEP = 0.1;
+const SEND_HISTORY_LIMIT = 8;
 const FALLBACK_THOUGHT_BACKENDS = [
   { key: "", label: "auto" },
   { key: "openrouter", label: "openrouter" },
@@ -25,6 +34,7 @@ const FALLBACK_THOUGHT_BACKENDS = [
 const state = {
   token: "",
   sessions: [],
+  operatorPressureBySession: new Map(),
   selectedSessionId: null,
   publishedSelection: null,
   followPublishedSelection: Boolean(boot.follow_published_selection),
@@ -38,15 +48,26 @@ const state = {
   connectionGeneration: 0,
   refreshTimer: null,
   snapshotTimer: null,
+  terminalPaintProbeTimer: null,
   renderQueued: false,
+  terminalFallbackActive: false,
+  terminalFallbackAutoFollow: true,
+  terminalMirrorText: "",
+  terminalPaintVerified: false,
+  terminalFrameBytesSeen: 0,
   currentCols: 80,
   currentRows: 24,
+  terminalZoom: 1,
+  mobileKeyboardActive: false,
   searchQuery: "",
   searchState: null,
   selectMode: false,
   selectionAnchor: null,
   selectionFocus: null,
   hoveredLinkUrl: "",
+  sendHistory: [],
+  paletteItems: [],
+  paletteIndex: 0,
   utilityMessageTimer: null,
   connectionLabel: "disconnected",
   connectionMuted: false,
@@ -59,6 +80,20 @@ const state = {
   surfaceZones: [],
   surfaceMasks: [],
   surfaceClickSuppressUntil: 0,
+  hoveredTrogdorSessionId: null,
+  trogdorAtlasOpen: true,
+  trogdorWpm: 200,
+  trogdorReading: true,
+  trogdorReaderStartedAt: 0,
+  trogdorReaderStartIndex: 0,
+  trogdorReaderClawgKey: "",
+  trogdorReaderTimer: null,
+  trogdorSurfaceSignature: "",
+  trogdorReadProgress: {},
+  trogdorDismissedClawgs: {},
+  trogdorBurntSessions: new Map(),
+  trogdorAwaitingSessionIds: new Set(),
+  sendTarget: null,
   activeSheet: null,
   thoughtConfig: {
     loading: false,
@@ -78,6 +113,13 @@ const state = {
     path: "",
     managedOnly: false,
     entries: [],
+    groups: [],
+    group: "",
+    search: "",
+    overlayLabel: "",
+    launchTargets: [],
+    launchTarget: "local",
+    batchSelected: new Set(),
     status: "",
     error: "",
   },
@@ -87,20 +129,50 @@ const state = {
     artifact: null,
     svg: "",
     source: "",
+    planFiles: [],
+    activePlanFile: "",
+    planContent: "",
     status: "",
     error: "",
   },
 };
+
+const defaultDocumentTitle = document.title || "swimmers";
 
 const el = {
   terminalStage: document.getElementById("terminal-stage"),
   terminalCanvas: document.getElementById("terminal-canvas"),
   hudCanvas: document.getElementById("hud-canvas"),
   terminalFallback: document.getElementById("terminal-fallback"),
+  terminalA11yMirror: document.getElementById("terminal-a11y-mirror"),
+  terminalAnnouncer: document.getElementById("terminal-announcer"),
+  terminalStatusStrip: document.getElementById("terminal-status-strip"),
+  terminalLinkTools: document.getElementById("terminal-link-tools"),
+  terminalLinkText: document.getElementById("terminal-link-text"),
+  terminalLinkOpen: document.getElementById("terminal-link-open"),
+  terminalLinkCopy: document.getElementById("terminal-link-copy"),
   loadingOverlay: document.getElementById("loading-overlay"),
   loadingLabel: document.getElementById("loading-label"),
+  mobileKeyboardProxy: document.getElementById("mobile-kb-proxy"),
+  terminalControlStrip: document.getElementById("terminal-control-strip"),
+  terminalPalette: document.getElementById("terminal-palette"),
+  terminalCopyFrame: document.getElementById("terminal-copy-frame"),
+  terminalZoomOut: document.getElementById("terminal-zoom-out"),
+  terminalZoomReset: document.getElementById("terminal-zoom-reset"),
+  terminalZoomIn: document.getElementById("terminal-zoom-in"),
+  terminalMobileKeyboard: document.getElementById("terminal-mobile-keyboard"),
+  terminalInputDock: document.getElementById("terminal-input-dock"),
+  terminalInlineInput: document.getElementById("terminal-inline-input"),
+  terminalInputSend: document.getElementById("terminal-input-send"),
+  terminalInputEcho: document.getElementById("terminal-input-echo"),
+  trogdorSurface: document.getElementById("trogdor-surface"),
+  trogdorLauncher: document.getElementById("trogdor-launcher"),
   modalRoot: document.getElementById("modal-root"),
   modalBackdrop: document.getElementById("modal-backdrop"),
+  paletteSheet: document.getElementById("palette-sheet"),
+  paletteSearch: document.getElementById("palette-search"),
+  paletteResults: document.getElementById("palette-results"),
+  paletteCloseButton: document.getElementById("palette-close-button"),
   searchSheet: document.getElementById("search-sheet"),
   searchForm: document.getElementById("search-form"),
   terminalSearch: document.getElementById("terminal-search"),
@@ -132,8 +204,12 @@ const el = {
   nativeCloseButton: document.getElementById("native-close-button"),
   nativeSaveButton: document.getElementById("native-save-button"),
   sendSheet: document.getElementById("send-sheet"),
+  sendSheetTitle: document.getElementById("send-sheet-title"),
   sendForm: document.getElementById("send-form"),
+  sendMode: document.getElementById("send-mode"),
   sendInput: document.getElementById("send-input"),
+  sendHistory: document.getElementById("send-history"),
+  sendHint: document.getElementById("send-hint"),
   sendSubmitButton: document.getElementById("send-submit-button"),
   sendCloseButton: document.getElementById("send-close-button"),
   authSheet: document.getElementById("auth-sheet"),
@@ -145,19 +221,31 @@ const el = {
   createForm: document.getElementById("create-form"),
   createCwd: document.getElementById("create-cwd"),
   createTool: document.getElementById("create-tool"),
+  createLaunchTarget: document.getElementById("create-launch-target"),
   createRequest: document.getElementById("create-request"),
   createButton: document.getElementById("create-button"),
   createCloseButton: document.getElementById("create-close-button"),
   dirsSummary: document.getElementById("dirs-summary"),
   dirsManagedOnly: document.getElementById("dirs-managed-only"),
+  dirsSearch: document.getElementById("dirs-search"),
   dirsPath: document.getElementById("dirs-path"),
   dirsLoadButton: document.getElementById("dirs-load-button"),
   dirsUpButton: document.getElementById("dirs-up-button"),
+  dirsSpawnHere: document.getElementById("dirs-spawn-here"),
   dirsList: document.getElementById("dirs-list"),
+  createBatchBar: document.getElementById("create-batch-bar"),
+  createBatchCount: document.getElementById("create-batch-count"),
+  createBatchTool: document.getElementById("create-batch-tool"),
+  createBatchPreview: document.getElementById("create-batch-preview"),
+  createBatchClear: document.getElementById("create-batch-clear"),
+  createBatchVisible: document.getElementById("create-batch-visible"),
+  createBatchSubmit: document.getElementById("create-batch-submit"),
   mermaidSheet: document.getElementById("mermaid-sheet"),
   mermaidSummary: document.getElementById("mermaid-summary"),
   mermaidPreview: document.getElementById("mermaid-preview"),
   mermaidSource: document.getElementById("mermaid-source"),
+  mermaidPlanTabs: document.getElementById("mermaid-plan-tabs"),
+  mermaidPlanContent: document.getElementById("mermaid-plan-content"),
   mermaidRefreshButton: document.getElementById("mermaid-refresh-button"),
   mermaidOpenButton: document.getElementById("mermaid-open-button"),
   mermaidCloseButton: document.getElementById("mermaid-close-button"),
@@ -165,6 +253,18 @@ const el = {
 
 function currentSession() {
   return state.sessions.find((session) => session.session_id === state.selectedSessionId) ?? null;
+}
+
+function sessionDisplayName(session) {
+  return String(session?.tmux_name || session?.name || session?.session_id || "session");
+}
+
+function sessionNeedsAttention(session) {
+  if (!session) {
+    return false;
+  }
+  const stateLabel = String(session.state || "").toLowerCase();
+  return stateLabel === "attention" || rawSessionAwaitingUser(session);
 }
 
 function surfaceSupports(surface, methodName) {
@@ -294,19 +394,68 @@ function currentNativeModeLabel() {
 function setConnectionStatus(label, muted = false) {
   state.connectionLabel = label;
   state.connectionMuted = Boolean(muted);
+  syncTerminalStatusStrip();
   renderHudSurface();
 }
 
 function setModeStatus(label, muted = false) {
   state.modeLabel = label;
   state.modeMuted = Boolean(muted);
+  syncTerminalStatusStrip();
   renderHudSurface();
 }
 
 function setSearchStatus(label, muted = false) {
   state.searchLabel = label;
   state.searchMuted = Boolean(muted);
+  syncTerminalStatusStrip();
   renderHudSurface();
+}
+
+function terminalModeLabel() {
+  if (!currentSession()) {
+    return "no session";
+  }
+  if (state.terminalFallbackActive) {
+    return state.ws?.readyState === WebSocket.OPEN ? "fallback live" : "snapshot fallback";
+  }
+  if (state.terminal) {
+    return "FrankenTerm live";
+  }
+  return boot.franken_term_available ? "attaching renderer" : "snapshot mode";
+}
+
+function syncTerminalStatusStrip() {
+  const session = currentSession();
+  const pieces = [];
+  if (session) {
+    pieces.push(sessionDisplayName(session));
+    pieces.push(String(session.state || "unknown"));
+  }
+  pieces.push(state.connectionLabel || "disconnected");
+  pieces.push(state.readOnly ? "observer" : "operator");
+  pieces.push(terminalModeLabel());
+  if (state.searchQuery) {
+    pieces.push(state.searchLabel || "search active");
+  }
+  if (state.selectMode) {
+    pieces.push("selecting");
+  }
+  if (el.terminalStatusStrip) {
+    el.terminalStatusStrip.textContent = pieces.filter(Boolean).join("  |  ");
+  }
+  syncDocumentLifecycleSignal();
+}
+
+function syncDocumentLifecycleSignal() {
+  const session = currentSession();
+  const attention = sessionNeedsAttention(session);
+  document.body.classList.toggle("session-attention", attention);
+  if (attention && session) {
+    document.title = `(!) ${sessionDisplayName(session)} - swimmers`;
+  } else {
+    document.title = defaultDocumentTitle;
+  }
 }
 
 function clearUtilityStatusTimer() {
@@ -380,6 +529,7 @@ function persistSelectedSession(sessionId, options = {}) {
   state.selectedSessionId = normalized;
   if (normalized) {
     localStorage.setItem(SESSION_STORAGE_KEY, normalized);
+    closeTrogdorAtlasForTerminal();
   } else {
     localStorage.removeItem(SESSION_STORAGE_KEY);
   }
@@ -398,6 +548,159 @@ function setFollowPublishedSelection(enabled, options = {}) {
   renderHudSurface();
 }
 
+function terminalZoomSupported() {
+  return terminalSupports("setZoom") || surfaceSupports(state.hud, "setZoom");
+}
+
+function normalizeTerminalZoom(value) {
+  const numeric = Number.parseFloat(value);
+  if (!Number.isFinite(numeric)) {
+    return 1;
+  }
+  const stepped = Math.round(numeric / TERMINAL_ZOOM_STEP) * TERMINAL_ZOOM_STEP;
+  return Math.max(TERMINAL_ZOOM_MIN, Math.min(TERMINAL_ZOOM_MAX, stepped));
+}
+
+function loadTerminalZoom(url) {
+  const fromUrl = url.searchParams.get("zoom");
+  if (fromUrl !== null) {
+    return normalizeTerminalZoom(fromUrl);
+  }
+  return normalizeTerminalZoom(localStorage.getItem(TERMINAL_ZOOM_STORAGE_KEY) || "1");
+}
+
+function terminalZoomLabel() {
+  return `${Math.round(state.terminalZoom * 100)}%`;
+}
+
+function syncTerminalZoomControls() {
+  if (!el.terminalControlStrip) {
+    return;
+  }
+  const supported = terminalZoomSupported() || !state.terminal;
+  el.terminalZoomOut.disabled = !supported || state.terminalZoom <= TERMINAL_ZOOM_MIN + 0.001;
+  el.terminalZoomIn.disabled = !supported || state.terminalZoom >= TERMINAL_ZOOM_MAX - 0.001;
+  el.terminalZoomReset.disabled = !supported || Math.abs(state.terminalZoom - 1) < 0.001;
+  el.terminalZoomReset.textContent = terminalZoomLabel();
+  el.terminalMobileKeyboard.disabled = state.readOnly || !currentSession();
+  el.terminalMobileKeyboard.setAttribute("aria-pressed", state.mobileKeyboardActive ? "true" : "false");
+  syncTerminalInputDock();
+  if (el.terminalCopyFrame) {
+    el.terminalCopyFrame.disabled = !currentSession();
+  }
+}
+
+function terminalInputDockVisible() {
+  return Boolean(currentSession() && !state.trogdorAtlasOpen);
+}
+
+function syncTerminalInputDock() {
+  if (!el.terminalInputDock) {
+    return;
+  }
+  const visible = terminalInputDockVisible();
+  document.body.classList.toggle("terminal-input-dock-visible", visible);
+  el.terminalInputDock.classList.toggle("hidden", !visible);
+  el.terminalInputDock.setAttribute("aria-hidden", visible ? "false" : "true");
+  el.terminalInlineInput.disabled = !visible || state.readOnly;
+  const hasText = Boolean(String(el.terminalInlineInput.value || "").trim());
+  el.terminalInputSend.disabled = !visible || state.readOnly || !hasText;
+}
+
+function resizeTerminalInlineInput() {
+  if (!el.terminalInlineInput) {
+    return;
+  }
+  el.terminalInlineInput.style.height = "auto";
+  const nextHeight = Math.max(40, Math.min(86, el.terminalInlineInput.scrollHeight || 40));
+  el.terminalInlineInput.style.height = `${nextHeight}px`;
+}
+
+function setTerminalInputEcho(text) {
+  if (!el.terminalInputEcho) {
+    return;
+  }
+  const normalized = String(text || "").replace(/\r/g, "").replace(/\n+$/, "");
+  el.terminalInputEcho.textContent = normalized ? `› ${normalized.replace(/\s+/g, " ")}` : "";
+}
+
+function projectTerminalInputIntoFallback(text) {
+  if (!state.terminalFallbackActive || !el.terminalFallback) {
+    return;
+  }
+  const normalized = String(text || "").replace(/\r/g, "").replace(/\n+$/, "");
+  if (!normalized.trim()) {
+    return;
+  }
+  const existing = el.terminalFallback.textContent || "";
+  const separator = existing && !existing.endsWith("\n") ? "\n" : "";
+  updateTerminalFallbackText(`${existing}${separator}› ${normalized}\n`);
+}
+
+async function submitTerminalInputDock() {
+  if (state.readOnly || !currentSession()) {
+    return false;
+  }
+  const text = String(el.terminalInlineInput.value || "");
+  if (!text.trim()) {
+    syncTerminalInputDock();
+    return false;
+  }
+  setTerminalInputEcho(text);
+  projectTerminalInputIntoFallback(text);
+  await sendLineToSession(state.selectedSessionId, text);
+  rememberSendHistory(text);
+  el.terminalInlineInput.value = "";
+  resizeTerminalInlineInput();
+  syncTerminalInputDock();
+  void refreshSessions();
+  return true;
+}
+
+function applyZoomToSurface(surface) {
+  if (surfaceSupports(surface, "setZoom")) {
+    surface.setZoom(state.terminalZoom);
+    return true;
+  }
+  return false;
+}
+
+function persistTerminalZoomToUrl() {
+  const url = new URL(window.location.href);
+  if (Math.abs(state.terminalZoom - 1) < 0.001) {
+    url.searchParams.delete("zoom");
+  } else {
+    url.searchParams.set("zoom", state.terminalZoom.toFixed(2));
+  }
+  window.history.replaceState({}, "", url);
+}
+
+function applyTerminalZoom(options = {}) {
+  const previous = state.terminalZoom;
+  state.terminalZoom = normalizeTerminalZoom(state.terminalZoom);
+  const changed = Math.abs(previous - state.terminalZoom) > 0.001;
+  const applied = applyZoomToSurface(state.hud) || applyZoomToSurface(state.terminal);
+  if (state.terminal) {
+    applyZoomToSurface(state.terminal);
+  }
+  if (options.persist !== false) {
+    localStorage.setItem(TERMINAL_ZOOM_STORAGE_KEY, state.terminalZoom.toFixed(2));
+    persistTerminalZoomToUrl();
+  }
+  syncTerminalZoomControls();
+  if ((changed || options.forceResize) && (applied || state.terminal || state.hud)) {
+    measureAndResizeSurface(true, true);
+  }
+  if (options.announce) {
+    setUtilityStatus(`Terminal zoom ${terminalZoomLabel()}.`, false, 1600);
+  }
+}
+
+function setTerminalZoom(nextZoom, options = {}) {
+  state.terminalZoom = normalizeTerminalZoom(nextZoom);
+  applyTerminalZoom(options);
+}
+
 function syncTerminalTools() {
   const searchReady = terminalSupports("setSearchQuery");
   const selectionReady = terminalSupports("copySelection") || terminalSupports("extractSelectionText");
@@ -408,6 +711,9 @@ function syncTerminalTools() {
   el.searchNextButton.disabled = !searchReady;
   el.searchClearButton.disabled = !searchReady;
   el.sendInput.disabled = state.readOnly;
+  if (el.sendMode) {
+    el.sendMode.disabled = state.readOnly || state.sendTarget?.type === "group";
+  }
   el.sendSubmitButton.disabled = state.readOnly || !currentSession();
   Array.from(el.createForm.elements).forEach((element) => {
     element.disabled = state.readOnly;
@@ -415,6 +721,12 @@ function syncTerminalTools() {
 
   el.terminalStage.classList.toggle("select-mode", state.selectMode);
   el.terminalStage.classList.toggle("link-hot", Boolean(state.hoveredLinkUrl) && !state.selectMode);
+  syncTerminalZoomControls();
+  if ((state.readOnly || !currentSession()) && state.mobileKeyboardActive) {
+    closeMobileKeyboard();
+  }
+  syncLinkTools();
+  syncTerminalStatusStrip();
 
   if (!liveTerminal) {
     if (boot.franken_term_available) {
@@ -434,8 +746,22 @@ function syncSheetActionAvailability() {
   const writeDisabled = Boolean(state.readOnly);
   const nativeSupported = Boolean(state.nativeDesktop.status?.supported);
   const mermaidPath = state.mermaidArtifact.artifact?.path;
+  const batchCount = state.dirBrowser.batchSelected instanceof Set ? state.dirBrowser.batchSelected.size : 0;
+  const hasSinglePath = Boolean(el.createCwd.value.trim());
+  const batchReady = batchCount > 0;
+  const visibleSelectableCount = visibleSelectableDirPaths().length;
+  const hasBrowserPath = Boolean((state.dirBrowser.path || el.dirsPath.value || "").trim());
 
-  el.createButton.disabled = writeDisabled || !el.createCwd.value.trim();
+  el.createButton.disabled = writeDisabled || (!batchReady && !hasSinglePath);
+  if (el.createBatchSubmit) {
+    el.createBatchSubmit.disabled = writeDisabled || !batchReady;
+  }
+  if (el.createBatchVisible) {
+    el.createBatchVisible.disabled = writeDisabled || visibleSelectableCount < 1;
+  }
+  if (el.dirsSpawnHere) {
+    el.dirsSpawnHere.disabled = writeDisabled || !hasBrowserPath;
+  }
   el.thoughtConfigTestButton.disabled = writeDisabled || !state.thoughtConfig.config;
   el.thoughtConfigSaveButton.disabled = writeDisabled || !state.thoughtConfig.config;
   el.nativeSaveButton.disabled = writeDisabled || !state.nativeDesktop.status;
@@ -445,6 +771,12 @@ function syncSheetActionAvailability() {
   el.mermaidRefreshButton.disabled = !hasSession;
   el.dirsLoadButton.disabled = !el.dirsPath.value.trim();
   el.dirsUpButton.disabled = !parentDir(el.dirsPath.value.trim());
+  if (el.sendMode) {
+    el.sendMode.disabled = writeDisabled || state.sendTarget?.type === "group";
+  }
+  el.sendSubmitButton.disabled = writeDisabled || !sendTargetReady();
+  updateSendHint();
+  renderCreateBatchBar();
 }
 
 function loadInitialState() {
@@ -454,9 +786,16 @@ function loadInitialState() {
   const selectedFromUrl = url.searchParams.get("session");
   const selectedFromStorage = localStorage.getItem(SESSION_STORAGE_KEY);
   const followFromUrl = url.searchParams.get("follow") === "published";
-  const storedDirPath = localStorage.getItem(DIR_BROWSER_PATH_KEY) ?? "";
+  const rawStoredDirPath = localStorage.getItem(DIR_BROWSER_PATH_KEY) ?? "";
+  const storedDirPath = rawStoredDirPath.trim() === "/" ? "" : rawStoredDirPath;
   const storedManagedOnly = localStorage.getItem(DIR_BROWSER_MANAGED_ONLY_KEY) === "true";
+  if (rawStoredDirPath && !storedDirPath) {
+    localStorage.removeItem(DIR_BROWSER_PATH_KEY);
+  }
 
+  state.terminalZoom = loadTerminalZoom(url);
+  state.trogdorReadProgress = loadTrogdorReadProgress();
+  loadSendHistory();
   persistToken(queryToken || storedToken);
   setFollowPublishedSelection(boot.follow_published_selection || followFromUrl, { skipUrlSync: true });
   state.dirBrowser.path = storedDirPath;
@@ -468,6 +807,7 @@ function loadInitialState() {
     state.followPublishedSelection ? null : selectedFromUrl || selectedFromStorage || null,
     { syncUrl: false },
   );
+  state.trogdorAtlasOpen = !(state.followPublishedSelection || state.selectedSessionId);
   syncUrlState();
 }
 
@@ -481,6 +821,326 @@ function summarizeThought(session) {
     return "No thought snapshot yet.";
   }
   return thought.length > 110 ? `${thought.slice(0, 107)}...` : thought;
+}
+
+function loadTrogdorReadProgress() {
+  if (typeof localStorage === "undefined") {
+    return {};
+  }
+  try {
+    const parsed = JSON.parse(localStorage.getItem(TROGDOR_READ_PROGRESS_KEY) || "{}");
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return {};
+    }
+    const progress = {};
+    for (const [key, value] of Object.entries(parsed)) {
+      const index = Number(value);
+      if (key && Number.isFinite(index) && index >= 0) {
+        progress[key] = Math.floor(index);
+      }
+    }
+    return progress;
+  } catch (_error) {
+    return {};
+  }
+}
+
+function saveTrogdorReadProgress() {
+  if (typeof localStorage === "undefined") {
+    return;
+  }
+  try {
+    localStorage.setItem(TROGDOR_READ_PROGRESS_KEY, JSON.stringify(state.trogdorReadProgress || {}));
+  } catch (_error) {
+    // Best effort only; losing the cursor should not block the operator UI.
+  }
+}
+
+function stableTextHash(text) {
+  let hash = 5381;
+  for (let index = 0; index < text.length; index += 1) {
+    hash = ((hash << 5) + hash + text.charCodeAt(index)) >>> 0;
+  }
+  return hash.toString(36);
+}
+
+function rawActionCueKinds(session) {
+  return (Array.isArray(session?.action_cues) ? session.action_cues : [])
+    .map((cue) => String(cue?.kind || "").toLowerCase())
+    .filter(Boolean);
+}
+
+function rawHasActionCue(session, kind) {
+  return rawActionCueKinds(session).includes(kind);
+}
+
+function rawSessionAwaitingUser(session) {
+  const pressure = operatorPressureSnapshot(session?.session_id)?.pressure || {};
+  const reasonKind = String(pressure.reason_kind || "").toLowerCase();
+  const stateLabel = String(session?.state || "").toLowerCase();
+  return rawHasActionCue(session, "awaiting_user") || reasonKind === "awaiting_user" || stateLabel === "attention";
+}
+
+function trogdorClawgText(session) {
+  return String(session?.clawgText || session?.thoughtLabel || session?.commandLabel || session?.name || "waiting");
+}
+
+function trogdorClawgWords(session) {
+  return trogdorClawgText(session)
+    .split(/\s+/)
+    .map((word) => word.trim())
+    .filter(Boolean);
+}
+
+function trogdorClawgKey(session) {
+  const sessionId = String(session?.sessionId || "");
+  if (!sessionId) {
+    return "";
+  }
+  const updated = String(session?.thoughtUpdatedAt || session?.objectiveChangedAt || "");
+  const text = trogdorClawgText(session);
+  return `${sessionId}:${updated}:${stableTextHash(text)}`;
+}
+
+function trogdorClawgReadIndex(session) {
+  const words = trogdorClawgWords(session);
+  const key = trogdorClawgKey(session);
+  if (!key) {
+    return 0;
+  }
+  return clampInt(state.trogdorReadProgress?.[key], 0, 0, words.length);
+}
+
+function setTrogdorClawgReadIndex(session, index) {
+  const key = trogdorClawgKey(session);
+  if (!key) {
+    return false;
+  }
+  const words = trogdorClawgWords(session);
+  const nextIndex = clampInt(index, 0, 0, words.length);
+  if (state.trogdorReadProgress?.[key] === nextIndex) {
+    return false;
+  }
+  state.trogdorReadProgress = {
+    ...(state.trogdorReadProgress || {}),
+    [key]: nextIndex,
+  };
+  saveTrogdorReadProgress();
+  return true;
+}
+
+function markTrogdorClawgComplete(session) {
+  setTrogdorClawgReadIndex(session, trogdorClawgWords(session).length);
+}
+
+function trogdorClawgReadComplete(session) {
+  const words = trogdorClawgWords(session);
+  return words.length > 0 && trogdorClawgReadIndex(session) >= words.length;
+}
+
+function trogdorClawgDismissed(session) {
+  const key = trogdorClawgKey(session);
+  return Boolean(key && state.trogdorDismissedClawgs?.[key]);
+}
+
+function dismissTrogdorClawg(session) {
+  const key = trogdorClawgKey(session);
+  if (!key) {
+    return false;
+  }
+  state.trogdorDismissedClawgs = {
+    ...(state.trogdorDismissedClawgs || {}),
+    [key]: true,
+  };
+  return true;
+}
+
+function trogdorSessionBurnt(sessionOrId) {
+  const sessionId = typeof sessionOrId === "string" ? sessionOrId : sessionOrId?.sessionId;
+  const until = state.trogdorBurntSessions.get(String(sessionId || ""));
+  if (!until) {
+    return false;
+  }
+  if (until <= performance.now()) {
+    state.trogdorBurntSessions.delete(String(sessionId || ""));
+    return false;
+  }
+  return true;
+}
+
+function pruneTrogdorBurntSessions() {
+  const now = performance.now();
+  let changed = false;
+  for (const [sessionId, until] of state.trogdorBurntSessions.entries()) {
+    if (until <= now) {
+      state.trogdorBurntSessions.delete(sessionId);
+      changed = true;
+    }
+  }
+  return changed;
+}
+
+function markTrogdorSessionsBurnt(sessionIds, options = {}) {
+  const ids = Array.isArray(sessionIds) ? sessionIds.map(normalizeSessionId).filter(Boolean) : [];
+  if (!ids.length) {
+    return;
+  }
+  const until = performance.now() + TROGDOR_BURN_MS;
+  for (const sessionId of ids) {
+    state.trogdorBurntSessions.set(sessionId, until);
+  }
+  window.setTimeout(() => {
+    if (pruneTrogdorBurntSessions()) {
+      state.trogdorSurfaceSignature = "";
+      renderHudSurface();
+    }
+  }, TROGDOR_BURN_MS + 40);
+  if (options.render !== false) {
+    state.trogdorSurfaceSignature = "";
+    renderHudSurface();
+  }
+}
+
+function currentTrogdorSurfaceSession() {
+  const sessionId = normalizeSessionId(state.hoveredTrogdorSessionId);
+  if (!sessionId) {
+    return null;
+  }
+  const raw = state.sessions.find((item) => item.session_id === sessionId);
+  return raw ? surfaceSession(raw) : null;
+}
+
+function trogdorSessionAwaitingUser(session) {
+  const reasonKind = String(session?.operatorPressure?.reason_kind || "").toLowerCase();
+  const stateLabel = String(session?.state || "").toLowerCase();
+  return trogdorHasActionCue(session, "awaiting_user") || reasonKind === "awaiting_user" || stateLabel === "attention";
+}
+
+function trogdorSessionHasReadyClawg(session) {
+  const reasonKind = String(session?.operatorPressure?.reason_kind || "").toLowerCase();
+  return (
+    trogdorDomActionCueKinds(session).length > 0 ||
+    ["awaiting_user", "commit_ready", "validation_missing_after_edit", "dirty_check_missing"].includes(reasonKind) ||
+    String(session?.state || "").toLowerCase() === "attention"
+  );
+}
+
+function trogdorSwordsmanVisible(session) {
+  if (trogdorSessionBurnt(session)) {
+    return true;
+  }
+  return trogdorSessionHasReadyClawg(session) && !trogdorClawgDismissed(session);
+}
+
+function trogdorSessionCanRead(session) {
+  return trogdorSessionHasReadyClawg(session) && !trogdorSessionBurnt(session) && !trogdorClawgDismissed(session);
+}
+
+function trogdorReaderBaseIndex(session) {
+  const words = trogdorClawgWords(session);
+  const key = trogdorClawgKey(session);
+  if (key && key === state.trogdorReaderClawgKey) {
+    return clampInt(state.trogdorReaderStartIndex, 0, 0, words.length);
+  }
+  return trogdorClawgReadIndex(session);
+}
+
+function trogdorReaderWordIndex(session, wpm) {
+  const words = trogdorClawgWords(session);
+  if (!words.length) {
+    return -1;
+  }
+  const baseIndex = trogdorReaderBaseIndex(session);
+  if (baseIndex >= words.length) {
+    return words.length;
+  }
+  if (state.trogdorReading === false) {
+    return baseIndex;
+  }
+  const elapsed = state.hoveredTrogdorSessionId
+    ? Math.max(0, performance.now() - state.trogdorReaderStartedAt)
+    : 0;
+  const msPerWord = Math.max(60, 60000 / Math.max(1, wpm));
+  return Math.min(words.length, baseIndex + Math.floor(elapsed / msPerWord));
+}
+
+function advanceTrogdorReaderProgressForCurrentHover() {
+  const session = currentTrogdorSurfaceSession();
+  if (!session || !trogdorSessionCanRead(session)) {
+    return;
+  }
+  if (trogdorClawgKey(session) !== state.trogdorReaderClawgKey) {
+    startTrogdorReaderForSession(session);
+  }
+  if (state.trogdorReading === false) {
+    return;
+  }
+  const words = trogdorClawgWords(session);
+  if (!words.length) {
+    return;
+  }
+  const wordIndex = trogdorReaderWordIndex(session, state.trogdorWpm);
+  if (wordIndex < 0) {
+    return;
+  }
+  const nextReadIndex = Math.min(words.length, wordIndex + 1);
+  setTrogdorClawgReadIndex(session, nextReadIndex);
+  if (nextReadIndex >= words.length) {
+    state.trogdorReading = false;
+  }
+}
+
+function startTrogdorReaderForSession(session, options = {}) {
+  const words = trogdorClawgWords(session);
+  const key = trogdorClawgKey(session);
+  if (options.readAgain && key) {
+    const { [key]: _dismissed, ...remainingDismissed } = state.trogdorDismissedClawgs || {};
+    state.trogdorDismissedClawgs = remainingDismissed;
+    setTrogdorClawgReadIndex(session, 0);
+  }
+  const startIndex = options.readAgain ? 0 : trogdorClawgReadIndex(session);
+  state.trogdorReaderClawgKey = key;
+  state.trogdorReaderStartIndex = clampInt(startIndex, 0, 0, words.length);
+  state.trogdorReaderStartedAt = performance.now();
+  state.trogdorReading = state.trogdorReaderStartIndex < words.length;
+}
+
+function markTrogdorSessionsResponded(sessionIds) {
+  const ids = Array.isArray(sessionIds) ? sessionIds.map(normalizeSessionId).filter(Boolean) : [];
+  const burntIds = [];
+  for (const sessionId of ids) {
+    const raw = state.sessions.find((item) => item.session_id === sessionId);
+    if (!raw) {
+      continue;
+    }
+    const session = surfaceSession(raw);
+    if (!trogdorSessionAwaitingUser(session)) {
+      continue;
+    }
+    dismissTrogdorClawg(session);
+    markTrogdorClawgComplete(session);
+    burntIds.push(sessionId);
+  }
+  if (burntIds.length) {
+    if (burntIds.includes(normalizeSessionId(state.hoveredTrogdorSessionId))) {
+      state.hoveredTrogdorSessionId = null;
+      state.trogdorReaderStartedAt = 0;
+      state.trogdorReaderStartIndex = 0;
+      state.trogdorReaderClawgKey = "";
+      syncTrogdorReaderTimer();
+    }
+    markTrogdorSessionsBurnt(burntIds);
+  }
+}
+
+function keyBeginsTrogdorResponse(event) {
+  if (event.repeat || event.metaKey || event.ctrlKey || event.altKey) {
+    return false;
+  }
+  if (typeof event.key !== "string") {
+    return false;
+  }
+  return event.key.length === 1 || event.key === "Enter" || event.key === "Backspace";
 }
 
 function relativeCwd(cwd) {
@@ -509,24 +1169,118 @@ function shortenUrl(raw) {
   return raw.length > 72 ? `${raw.slice(0, 69)}...` : raw;
 }
 
+function sessionStateConfidence(session) {
+  return String(session?.state_evidence?.confidence || "low").toLowerCase();
+}
+
+function sessionStateObserved(session) {
+  return Boolean(session?.state_evidence?.observed_at);
+}
+
+function sessionStateDisplay(session) {
+  const label = String(session?.state || "unknown");
+  if (sessionStateConfidence(session) !== "high" || !sessionStateObserved(session)) {
+    return `${label}?`;
+  }
+  return label;
+}
+
+function sessionStateTrustLabel(session) {
+  const evidence = session?.state_evidence || {};
+  const confidence = sessionStateConfidence(session);
+  const freshness = sessionStateObserved(session) ? "observed" : "unobserved";
+  const cause = String(evidence.cause || "unknown");
+  return `${confidence} ${freshness} ${cause}`;
+}
+
 function surfaceSession(session, options = {}) {
-  return {
+  const operatorPressure = operatorPressureSnapshot(session.session_id);
+  const surface = {
     sessionId: session.session_id,
     name: session.tmux_name || session.session_id,
     state: String(session.state || "unknown"),
+    displayState: sessionStateDisplay(session),
+    stateTrustLabel: sessionStateTrustLabel(session),
+    stateConfidence: sessionStateConfidence(session),
+    stateObserved: sessionStateObserved(session),
     restLabel: String(session.rest_state || "unknown"),
     transportLabel: String(session.transport_health || "unknown"),
     toolLabel: session.tool || "shell",
     cwdLabel: relativeCwd(session.cwd),
     fullCwd: session.cwd || "",
     thoughtLabel: options.detail ? session.thought || "No thought snapshot yet." : summarizeThought(session),
+    clawgText: session.thought || "",
+    thoughtUpdatedAt: session.thought_updated_at || "",
+    objectiveChangedAt: session.objective_changed_at || "",
     contextLabel: `${session.token_count ?? 0} / ${session.context_limit ?? 0}`,
     skillLabel: session.last_skill || "none",
     activityLabel: formatTime(session.last_activity_at),
     commandLabel: session.current_command || "idle",
     attachedLabel: String(session.attached_clients ?? 0),
     commitCandidate: Boolean(session.commit_candidate),
+    actionCues: Array.isArray(session.action_cues) ? session.action_cues : [],
+    operatorPressure: operatorPressure?.pressure || null,
+    batchSendSessionIds: Array.isArray(operatorPressure?.batch_send_session_ids)
+      ? operatorPressure.batch_send_session_ids
+      : [],
+    repoKey: operatorPressure?.repo_key || session.cwd || "",
+    repoLabel: operatorPressure?.repo_label || relativeCwd(session.cwd),
+    isStale: Boolean(session.is_stale),
   };
+  surface.clawgReadIndex = trogdorClawgReadIndex(surface);
+  surface.clawgWordCount = trogdorClawgWords(surface).length;
+  surface.trogdorAwaitingUser = trogdorSessionAwaitingUser(surface);
+  surface.trogdorBurnt = trogdorSessionBurnt(surface);
+  surface.trogdorDismissed = trogdorClawgDismissed(surface);
+  surface.trogdorSwordsmanVisible = trogdorSwordsmanVisible(surface);
+  return surface;
+}
+
+function operatorPressureSnapshot(sessionId) {
+  return state.operatorPressureBySession.get(String(sessionId || "")) || null;
+}
+
+function applyOperatorPressure(payload) {
+  const map = new Map();
+  const sessions = Array.isArray(payload?.sessions) ? payload.sessions : [];
+  for (const session of sessions) {
+    if (session?.session_id) {
+      map.set(String(session.session_id), session);
+    }
+  }
+  state.operatorPressureBySession = map;
+}
+
+function syncTrogdorCueTransitions() {
+  const awaiting = new Set();
+  for (const session of state.sessions) {
+    if (rawSessionAwaitingUser(session)) {
+      awaiting.add(String(session.session_id));
+    }
+  }
+
+  const burnt = [];
+  for (const sessionId of state.trogdorAwaitingSessionIds) {
+    if (!awaiting.has(sessionId)) {
+      burnt.push(sessionId);
+    }
+  }
+  state.trogdorAwaitingSessionIds = awaiting;
+  if (burnt.length) {
+    markTrogdorSessionsBurnt(burnt, { render: false });
+  }
+
+  const hovered = normalizeSessionId(state.hoveredTrogdorSessionId);
+  if (hovered) {
+    const raw = state.sessions.find((session) => session.session_id === hovered);
+    if (!raw || (!rawSessionAwaitingUser(raw) && !trogdorSessionBurnt(hovered))) {
+      state.hoveredTrogdorSessionId = null;
+      state.trogdorReaderStartedAt = 0;
+      state.trogdorReaderStartIndex = 0;
+      state.trogdorReaderClawgKey = "";
+      syncTrogdorReaderTimer();
+    }
+  }
 }
 
 function parentDir(path) {
@@ -633,9 +1387,9 @@ function applyThoughtConfigToForm(payload) {
   el.thoughtConfigBackend.value = String(config?.backend || "");
   el.thoughtConfigModel.value = String(config?.model || "");
   renderThoughtConfigOptions();
-  const backend = selectedThoughtBackendMetadata();
-  el.thoughtConfigSummary.textContent = backend
-    ? `${backend.label || backend.key || "auto"} backend selected.`
+  const backendMetadata = selectedThoughtBackendMetadata();
+  el.thoughtConfigSummary.textContent = backendMetadata
+    ? `${backendMetadata.label || backendMetadata.key || "auto"} backend selected.`
     : "Thought config loaded.";
   const daemonBackend = normalizeBackendKey(daemonDefaults?.backend || "");
   el.thoughtConfigDaemon.textContent = daemonDefaults
@@ -673,42 +1427,355 @@ function renderNativeStatusForm(status) {
   syncSheetActionAvailability();
 }
 
+function ensureDirBrowserBatchSelection() {
+  if (!(state.dirBrowser.batchSelected instanceof Set)) {
+    state.dirBrowser.batchSelected = new Set();
+  }
+  return state.dirBrowser.batchSelected;
+}
+
+function dirEntryResolvedPath(basePath, entry) {
+  const explicit = String(entry?.full_path || "").trim();
+  if (explicit) {
+    return explicit;
+  }
+  return joinPath(basePath, entry?.name || "");
+}
+
+function dirEntryBatchSelectable(entry, resolvedPath) {
+  if (!resolvedPath) {
+    return false;
+  }
+  if (entry?.group && !entry?.full_path) {
+    return false;
+  }
+  return true;
+}
+
+function dirEntryGroups(entry) {
+  const groups = Array.isArray(entry?.groups) ? entry.groups : [];
+  const normalized = groups
+    .map((group) => String(group || "").trim())
+    .filter(Boolean);
+  if (entry?.group && !normalized.includes(String(entry.group))) {
+    normalized.push(String(entry.group));
+  }
+  return normalized;
+}
+
+function renderDirGroupActions(entry, entryPath, allGroups, activeGroup) {
+  const availableGroups = Array.isArray(allGroups) ? allGroups.map((group) => String(group || "").trim()).filter(Boolean) : [];
+  if (!entryPath || !availableGroups.length) {
+    return null;
+  }
+  const memberships = new Set(dirEntryGroups(entry));
+  const wrap = document.createElement("div");
+  wrap.className = "dir-row-group-actions";
+  wrap.setAttribute("aria-label", `Group actions for ${entry?.name || entryPath}`);
+
+  for (const groupName of availableGroups) {
+    const isMember = memberships.has(groupName);
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = `ghost-button dir-entry-group-action${isMember ? " is-member" : ""}`;
+    button.dataset.path = entryPath;
+    button.dataset.group = groupName;
+    button.dataset.action = isMember ? "remove" : activeGroup && memberships.has(activeGroup) ? "move" : "add";
+    if (button.dataset.action === "move") {
+      button.dataset.removeGroup = activeGroup;
+    }
+    button.disabled = state.readOnly;
+    button.textContent = isMember ? `remove ${groupName}` : button.dataset.action === "move" ? `move to ${groupName}` : `add ${groupName}`;
+    wrap.appendChild(button);
+  }
+
+  return wrap;
+}
+
+function normalizedDirSearch() {
+  return String(state.dirBrowser.search || "").trim().toLowerCase();
+}
+
+function dirEntryMatchesSearch(entry, resolvedPath) {
+  const search = normalizedDirSearch();
+  if (!search) {
+    return true;
+  }
+  const haystack = [
+    entry?.name,
+    resolvedPath,
+    entry?.group,
+    ...dirEntryGroups(entry),
+    entry?.has_children ? "directory" : "leaf repo",
+    entry?.is_running ? "running" : "",
+    entry?.repo_dirty ? "dirty" : "",
+  ]
+    .filter(Boolean)
+    .join(" ")
+    .toLowerCase();
+  return haystack.includes(search);
+}
+
+function visibleDirEntries(entries, basePath) {
+  return entries.filter((entry) => dirEntryMatchesSearch(entry, dirEntryResolvedPath(basePath, entry)));
+}
+
+function visibleSelectableDirPaths() {
+  return visibleDirEntries(state.dirBrowser.entries, state.dirBrowser.path)
+    .map((entry) => [entry, dirEntryResolvedPath(state.dirBrowser.path, entry)])
+    .filter(([entry, resolvedPath]) => dirEntryBatchSelectable(entry, resolvedPath))
+    .map(([, resolvedPath]) => resolvedPath);
+}
+
+function selectedLaunchTarget() {
+  const value = String(el.createLaunchTarget?.value || state.dirBrowser.launchTarget || "local").trim();
+  return value || "local";
+}
+
+function launchTargetPayload() {
+  const target = selectedLaunchTarget();
+  return target && target !== "local" ? target : null;
+}
+
+function renderLaunchTargetOptions(response) {
+  if (!el.createLaunchTarget) {
+    return;
+  }
+  const targets = Array.isArray(response?.launch_targets) && response.launch_targets.length
+    ? response.launch_targets
+    : [{ id: "local", label: "Local machine", kind: "local" }];
+  const defaultTarget = String(response?.default_launch_target || state.dirBrowser.launchTarget || "local").trim() || "local";
+  const hasDefault = targets.some((target) => String(target?.id || "") === defaultTarget);
+  state.dirBrowser.launchTargets = targets;
+  state.dirBrowser.launchTarget = hasDefault ? defaultTarget : String(targets[0]?.id || "local");
+  el.createLaunchTarget.innerHTML = "";
+  for (const target of targets) {
+    const option = document.createElement("option");
+    option.value = String(target?.id || "local");
+    option.textContent = String(target?.label || target?.id || "Local machine");
+    el.createLaunchTarget.appendChild(option);
+  }
+  el.createLaunchTarget.value = state.dirBrowser.launchTarget;
+}
+
+function createRequestPreviewText() {
+  const compact = String(el.createRequest?.value || "").replace(/\s+/g, " ").trim();
+  if (!compact) {
+    return "(none)";
+  }
+  if (compact.length > 72) {
+    return `${compact.slice(0, 69)}...`;
+  }
+  return compact;
+}
+
+function renderCreateBatchBar() {
+  const selected = ensureDirBrowserBatchSelection();
+  const count = selected.size;
+  if (el.createBatchBar) {
+    el.createBatchBar.classList.toggle("hidden", count < 1);
+  }
+  if (el.createBatchCount) {
+    el.createBatchCount.textContent = `${count} selected`;
+  }
+  if (el.createBatchTool) {
+    el.createBatchTool.textContent = `tool: ${String(el.createTool?.value || "codex").toLowerCase()} -> ${selectedLaunchTarget()}`;
+  }
+  if (el.createBatchPreview) {
+    el.createBatchPreview.textContent = `request: ${createRequestPreviewText()}`;
+  }
+}
+
+function clearCreateBatchSelection() {
+  const selected = ensureDirBrowserBatchSelection();
+  selected.clear();
+  renderCreateBatchBar();
+  syncSheetActionAvailability();
+}
+
 function renderDirEntries(response) {
-  const entries = Array.isArray(response?.entries) ? response.entries : [];
-  state.dirBrowser.entries = entries;
+  const rawEntries = Array.isArray(response?.entries) ? response.entries : [];
+  const groups = Array.isArray(response?.groups) ? response.groups : [];
+  const activeGroup = String(state.dirBrowser.group || "").trim();
+  const selected = ensureDirBrowserBatchSelection();
+  const selectablePaths = new Set();
+
+  state.dirBrowser.entries = rawEntries;
+  state.dirBrowser.groups = groups;
+  state.dirBrowser.overlayLabel = String(response?.overlay_label || "");
   const path = String(response?.path || el.createCwd.value || "").trim();
   state.dirBrowser.path = path;
   localStorage.setItem(DIR_BROWSER_PATH_KEY, path);
   localStorage.setItem(DIR_BROWSER_MANAGED_ONLY_KEY, String(Boolean(el.dirsManagedOnly.checked)));
   el.dirsPath.value = path;
-  el.createCwd.value = path;
+  if (!el.createCwd.value.trim() || !selected.size) {
+    el.createCwd.value = path;
+  }
+  renderLaunchTargetOptions(response);
   el.dirsList.innerHTML = "";
+
+  if (groups.length) {
+    const groupSection = document.createElement("section");
+    groupSection.className = "dir-section";
+    groupSection.innerHTML = `<div class="dir-section-header"><span>Groups</span></div>`;
+    const chips = document.createElement("div");
+    chips.className = "dir-group-chips";
+    const managed = Boolean(el.dirsManagedOnly.checked);
+    const overlayLabel = String(response?.overlay_label || "managed").trim().toLowerCase();
+
+    const managedButton = document.createElement("button");
+    managedButton.type = "button";
+    managedButton.className = "ghost-button dir-group-chip";
+    managedButton.dataset.filter = "managed";
+    managedButton.dataset.group = "";
+    managedButton.textContent = overlayLabel || "managed";
+    managedButton.classList.toggle("is-active", managed && !activeGroup);
+    chips.appendChild(managedButton);
+
+    const allButton = document.createElement("button");
+    allButton.type = "button";
+    allButton.className = "ghost-button dir-group-chip";
+    allButton.dataset.filter = "all";
+    allButton.dataset.group = "";
+    allButton.textContent = "all folders";
+    allButton.classList.toggle("is-active", !managed && !activeGroup);
+    chips.appendChild(allButton);
+
+    for (const groupName of groups) {
+      const chip = document.createElement("button");
+      chip.type = "button";
+      chip.className = "ghost-button dir-group-chip";
+      chip.dataset.filter = "group";
+      chip.dataset.group = String(groupName || "");
+      chip.textContent = String(groupName || "");
+      chip.classList.toggle("is-active", chip.dataset.group === activeGroup);
+      chips.appendChild(chip);
+    }
+    groupSection.appendChild(chips);
+    el.dirsList.appendChild(groupSection);
+  }
+
+  const entrySection = document.createElement("section");
+  entrySection.className = "dir-section";
+  const sectionLabel = activeGroup ? `Entries • ${activeGroup}` : "Entries";
+  entrySection.innerHTML = `<div class="dir-section-header"><span>${escapeHtml(sectionLabel)}</span></div>`;
+  const entries = visibleDirEntries(rawEntries, path);
 
   if (!entries.length) {
     const empty = document.createElement("div");
     empty.className = "browser-empty";
-    empty.textContent = "No child directories found.";
-    el.dirsList.appendChild(empty);
+    empty.textContent = normalizedDirSearch() ? "No directory matches." : "No child directories found.";
+    entrySection.appendChild(empty);
   } else {
     for (const entry of entries) {
-      const row = document.createElement("button");
-      row.type = "button";
-      row.className = "browser-entry";
-      row.dataset.path = joinPath(path, entry.name);
+      const entryPath = dirEntryResolvedPath(path, entry);
+      const selectable = dirEntryBatchSelectable(entry, entryPath);
+      const row = document.createElement("div");
+      row.className = "dir-row";
+      row.dataset.path = entryPath;
       row.dataset.hasChildren = String(Boolean(entry.has_children));
-      row.innerHTML = `
-        <span class="browser-entry-name">${escapeHtml(entry.name)}</span>
-        <span class="browser-entry-meta">${entry.has_children ? "dir" : "leaf"}${entry.is_running ? " · running" : ""}</span>
+      row.dataset.disabled = String(!selectable);
+      if (entry?.group) {
+        row.dataset.group = String(entry.group);
+      }
+      if (selectable) {
+        selectablePaths.add(entryPath);
+      }
+
+      const selectCell = document.createElement("div");
+      selectCell.className = "dir-select-cell";
+      const checkbox = document.createElement("input");
+      checkbox.type = "checkbox";
+      checkbox.className = "dir-row-check";
+      checkbox.dataset.path = entryPath;
+      checkbox.disabled = state.readOnly || !selectable;
+      checkbox.checked = selectable && selected.has(entryPath);
+      checkbox.setAttribute("aria-label", `Include ${entry.name} in batch send`);
+      selectCell.appendChild(checkbox);
+      row.appendChild(selectCell);
+
+      const main = document.createElement("button");
+      main.type = "button";
+      main.className = "dir-row-main";
+      main.dataset.path = entryPath;
+      main.dataset.hasChildren = String(Boolean(entry.has_children));
+      if (entry?.group) {
+        main.dataset.group = String(entry.group);
+      }
+      main.title = entryPath;
+      main.tabIndex = -1;
+      if (!entryPath) {
+        main.disabled = true;
+      }
+      const running = Boolean(entry?.is_running);
+      const dirty = Boolean(entry?.repo_dirty);
+      const memberships = dirEntryGroups(entry);
+      const managed = memberships.length > 0 || Boolean(entry?.group);
+      const managedLabel = memberships.length ? memberships.join(", ") : entry?.group ? String(entry.group) : "managed";
+      main.innerHTML = `
+        <span class="dir-row-eyebrow">${entry.has_children ? "directory" : "leaf repo"}</span>
+        <span class="dir-row-name">${escapeHtml(entry.name || "(unnamed)")}</span>
+        <span class="dir-row-path">${escapeHtml(entryPath || "(no path)")}</span>
       `;
-      el.dirsList.appendChild(row);
+      row.appendChild(main);
+
+      const meta = document.createElement("div");
+      meta.className = "dir-row-meta";
+      const badges = document.createElement("div");
+      badges.className = "dir-row-badges";
+      const managedBadge = document.createElement("span");
+      managedBadge.className = `dir-badge ${managed ? "is-managed" : "is-unmanaged"}`;
+      managedBadge.textContent = managed ? `managed:${managedLabel}` : "unmanaged";
+      badges.appendChild(managedBadge);
+      if (running) {
+        const runningBadge = document.createElement("span");
+        runningBadge.className = "dir-badge is-running";
+        runningBadge.textContent = "running";
+        badges.appendChild(runningBadge);
+      }
+      if (dirty) {
+        const dirtyBadge = document.createElement("span");
+        dirtyBadge.className = "dir-badge is-dirty";
+        dirtyBadge.textContent = "repo dirty";
+        badges.appendChild(dirtyBadge);
+      }
+      meta.appendChild(badges);
+      if (entry?.open_url) {
+        const openLink = document.createElement("a");
+        openLink.className = "dir-open-url";
+        openLink.href = String(entry.open_url);
+        openLink.target = "_blank";
+        openLink.rel = "noopener noreferrer";
+        openLink.textContent = "open url";
+        meta.appendChild(openLink);
+      }
+      const groupActions = renderDirGroupActions(entry, entryPath, groups, activeGroup);
+      if (groupActions) {
+        meta.appendChild(groupActions);
+      }
+      row.appendChild(meta);
+      entrySection.appendChild(row);
     }
   }
 
+  for (const selectedPath of Array.from(selected)) {
+    if (!selectablePaths.has(selectedPath)) {
+      selected.delete(selectedPath);
+    }
+  }
+
+  el.dirsList.appendChild(entrySection);
+
   const managed = Boolean(el.dirsManagedOnly.checked);
+  const shownCount = entries.length;
+  const totalCount = rawEntries.length;
+  const searchSuffix = normalizedDirSearch() ? ` · ${shownCount}/${totalCount} search matches` : "";
+  const targetSuffix = selectedLaunchTarget() !== "local" ? ` · target ${selectedLaunchTarget()}` : "";
   const summary = response?.path
-    ? `${entries.length} entries at ${response.path}${managed ? " (managed)" : ""}`
+    ? `${shownCount} entries at ${response.path}${managed ? " (managed only)" : ""}${activeGroup ? ` · group ${activeGroup}` : ""}${searchSuffix}${targetSuffix}`
     : "Select a directory to continue.";
   setDirStatus(summary);
+  renderCreateBatchBar();
   syncSheetActionAvailability();
 }
 
@@ -718,22 +1785,55 @@ function renderMermaidArtifact(payload) {
   const path = payload?.path || "(unknown path)";
   const updatedAt = payload?.updated_at ? formatTime(payload.updated_at) : "unknown";
   const source = payload?.source || "";
+  const planFiles = Array.isArray(payload?.plan_files) ? payload.plan_files : [];
   state.mermaidArtifact.source = source;
+  state.mermaidArtifact.planFiles = planFiles;
+  state.mermaidArtifact.activePlanFile = "";
+  state.mermaidArtifact.planContent = "";
   el.mermaidSource.textContent = source || "Mermaid source unavailable.";
   el.mermaidPreview.innerHTML = "";
+  el.mermaidPlanContent.textContent = "";
+  el.mermaidPlanContent.classList.add("hidden");
+  el.mermaidPlanContent.classList.remove("error");
 
   if (available && state.mermaidArtifact.svg) {
     el.mermaidPreview.innerHTML = state.mermaidArtifact.svg;
   }
 
+  renderMermaidPlanTabs();
   const lines = [
     `available: ${available}`,
     `path: ${path}`,
     `updated: ${updatedAt}`,
+    planFiles.length ? `plan files: ${planFiles.join(", ")}` : null,
     payload?.error ? `error: ${payload.error}` : null,
   ].filter(Boolean);
   setMermaidStatus(lines.join("\n"));
   syncSheetActionAvailability();
+}
+
+function planFileLabel(name) {
+  const stem = String(name || "").replace(/\.[^.]+$/, "");
+  return stem.replace(/[-_]+/g, " ") || name;
+}
+
+function renderMermaidPlanTabs() {
+  const files = state.mermaidArtifact.planFiles;
+  el.mermaidPlanTabs.innerHTML = "";
+  el.mermaidPlanTabs.classList.toggle("hidden", !files.length);
+  if (!files.length) {
+    return;
+  }
+
+  for (const name of files) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "ghost-button";
+    button.dataset.planFile = name;
+    button.textContent = planFileLabel(name);
+    button.classList.toggle("active", name === state.mermaidArtifact.activePlanFile);
+    el.mermaidPlanTabs.appendChild(button);
+  }
 }
 
 function joinPath(base, name) {
@@ -768,6 +1868,646 @@ function escapeHtml(text) {
         return char;
     }
   });
+}
+
+const TROGDOR_REPO_POSITIONS = [
+  { x: 18, y: 40, size: "small", variant: "hut" },
+  { x: 42, y: 32, size: "large", variant: "tower" },
+  { x: 78, y: 38, size: "small", variant: "hut" },
+  { x: 22, y: 78, size: "wide", variant: "burning_shack" },
+  { x: 88, y: 76, size: "small", variant: "hut" },
+  { x: 50, y: 84, size: "small", variant: "ruin" },
+  { x: 64, y: 22, size: "small", variant: "hut" },
+  { x: 12, y: 60, size: "small", variant: "hut" },
+];
+
+const TROGDOR_AGENT_OFFSETS = [
+  { x: -98, y: 30 },
+  { x: 96, y: 26 },
+  { x: -64, y: 92 },
+  { x: 64, y: 92 },
+  { x: 0, y: 106 },
+  { x: -110, y: 78 },
+  { x: 108, y: 78 },
+];
+
+function escapeAttr(text) {
+  return escapeHtml(text);
+}
+
+function renderTrogdorSurface() {
+  if (!el.trogdorSurface) {
+    return;
+  }
+
+  const visible = Boolean(state.trogdorAtlasOpen);
+  applyTrogdorAtlasVisibility();
+  if (!visible) {
+    return;
+  }
+
+  const sessions = state.sessions.map((session) => surfaceSession(session));
+  const groups = buildTrogdorDomGroups(sessions);
+  const hoveredCandidate = sessions.find((session) => session.sessionId === state.hoveredTrogdorSessionId) || null;
+  const hovered = hoveredCandidate && trogdorSessionCanRead(hoveredCandidate) ? hoveredCandidate : null;
+  const summary = summarizeTrogdorDom(groups, sessions);
+  const signature = trogdorSurfaceSignature(sessions, summary);
+  if (signature !== state.trogdorSurfaceSignature) {
+    state.trogdorSurfaceSignature = signature;
+    const wpm = clampInt(state.trogdorWpm, 200, 50, 800);
+    el.trogdorSurface.innerHTML = `
+      ${renderTrogdorPrintFilter()}
+      <div class="trogdor-frame">
+        <div class="trogdor-topbar">
+          <div class="trogdor-score"><span>score:</span><strong>${summary.score}</strong></div>
+          ${renderTrogdorReader(hovered)}
+          <div class="trogdor-level"><span>mans: ${sessions.length}</span><span>level: ${summary.level}</span></div>
+        </div>
+        <div class="trogdor-world" aria-label="Repository structures and agent swordsmen">
+          <div class="trogdor-sun-band" aria-hidden="true"></div>
+          <div class="trogdor-mountains" aria-hidden="true"></div>
+          <div class="trogdor-clouds" aria-hidden="true">
+            <span class="trogdor-cloud trogdor-cloud-a"></span>
+            <span class="trogdor-cloud trogdor-cloud-b"></span>
+          </div>
+          <div class="trogdor-props" aria-hidden="true">${renderTrogdorProps()}</div>
+          ${renderTrogdorDragon(summary)}
+          ${groups.length ? groups.map(renderTrogdorStructure).join("") : renderTrogdorEmptyField()}
+        </div>
+        <div class="trogdor-bottombar">
+          <div class="trogdor-wpm">
+            <button type="button" data-action="trogdor_read_toggle">${trogdorReadButtonLabel(hovered)}</button>
+            <button type="button" data-action="trogdor_wpm_down">-25</button>
+            <span class="trogdor-wpm-value" data-trogdor-wpm-value="true">${wpm} wpm</span>
+            <button type="button" data-action="trogdor_wpm_up">+25</button>
+          </div>
+          <div class="trogdor-actions">
+            <button type="button" data-action="focus_terminal">terminal</button>
+            <button type="button" data-action="open_create"${state.readOnly ? " disabled" : ""}>new agent</button>
+            <button type="button" data-action="open_config">config</button>
+            <button type="button" data-action="open_native">native</button>
+            <button type="button" data-action="open_auth">auth</button>
+            <button type="button" data-action="refresh">refresh</button>
+          </div>
+        </div>
+      </div>
+    `;
+  }
+  renderTrogdorReader(hovered);
+}
+
+function trogdorSurfaceSignature(sessions, summary) {
+  const sessionSignature = sessions.map((session) => {
+    return [
+      session.sessionId,
+      session.name,
+      session.repoKey,
+      session.repoLabel,
+      session.state,
+      session.restLabel,
+      session.thoughtLabel,
+      session.thoughtUpdatedAt,
+      session.trogdorAwaitingUser ? "awaiting" : "",
+      session.trogdorBurnt ? "burnt" : "",
+      session.trogdorDismissed ? "dismissed" : "",
+      trogdorDomPressure(session),
+      trogdorDomReason(session),
+      trogdorAgentGlyph(session),
+      (session.batchSendSessionIds || []).join(","),
+      session.commitCandidate ? "commit" : "",
+    ].join(":");
+  });
+  return JSON.stringify({
+    sessions: sessionSignature,
+    readOnly: state.readOnly,
+    score: summary.score,
+    level: summary.level,
+  });
+}
+
+function renderTrogdorReader(hoveredSession) {
+  const wpm = clampInt(state.trogdorWpm, 200, 50, 800);
+  const hovered = hoveredSession || null;
+  const bannerText = hovered ? trogdorSpeedReadWord(hovered, wpm) : "burninate!";
+  const readerMarkup = `<div class="trogdor-banner" data-trogdor-reader="true">${escapeHtml(bannerText)}</div>`;
+  if (!el.trogdorSurface) {
+    return readerMarkup;
+  }
+  const banner = el.trogdorSurface.querySelector("[data-trogdor-reader]");
+  if (banner) {
+    banner.textContent = bannerText;
+  }
+  const readToggle = el.trogdorSurface.querySelector('button[data-action="trogdor_read_toggle"]');
+  if (readToggle) {
+    readToggle.textContent = trogdorReadButtonLabel(hovered);
+  }
+  const wpmValue = el.trogdorSurface.querySelector("[data-trogdor-wpm-value]");
+  if (wpmValue) {
+    wpmValue.textContent = `${wpm} wpm`;
+  }
+  return readerMarkup;
+}
+
+function trogdorReadButtonLabel(session) {
+  if (session && trogdorClawgReadComplete(session) && state.trogdorReading === false) {
+    return "read again";
+  }
+  return state.trogdorReading === false ? "read" : "pause";
+}
+
+function buildTrogdorDomGroups(sessions) {
+  const groups = new Map();
+  for (const session of sessions) {
+    const key = session.repoKey || session.fullCwd || session.cwdLabel || session.name;
+    const existing = groups.get(key) || {
+      key,
+      label: session.repoLabel || relativeCwd(key),
+      sessions: [],
+      pressure: 0,
+      reason: "quiet",
+    };
+    existing.sessions.push(session);
+    const pressure = trogdorDomPressure(session);
+    if (pressure >= existing.pressure) {
+      existing.pressure = pressure;
+      existing.reason = trogdorDomReason(session);
+    }
+    groups.set(key, existing);
+  }
+  return Array.from(groups.values()).sort((left, right) => {
+    return right.pressure - left.pressure || left.label.localeCompare(right.label);
+  });
+}
+
+function summarizeTrogdorDom(groups, sessions) {
+  const maxPressure = groups.reduce((max, group) => Math.max(max, group.pressure), 0);
+  const actionCues = sessions.reduce((count, session) => count + trogdorDomActionCueKinds(session).length, 0);
+  return {
+    score: String(maxPressure * 100 + actionCues * 37).padStart(4, "0"),
+    level: maxPressure || 0,
+    actionCues,
+  };
+}
+
+function renderTrogdorPrintFilter() {
+  // Two filters: `trogdor-print` is a light displacement that nudges house/agent
+  // outlines so they read as hand-stamped instead of vector. `trogdor-stamp` adds
+  // heavier warp + fine speckle dropout for the dragon, flame, and ruin walls so
+  // those hero figures look like a worn woodcut block on rough paper.
+  return `
+    <svg class="trogdor-svg-defs" aria-hidden="true" focusable="false" width="0" height="0">
+      <defs>
+        <filter id="trogdor-print" x="-12%" y="-12%" width="124%" height="124%" color-interpolation-filters="sRGB">
+          <feTurbulence type="fractalNoise" baseFrequency="1.05" numOctaves="3" seed="7" result="warp" />
+          <feDisplacementMap in="SourceGraphic" in2="warp" scale="2.6" xChannelSelector="R" yChannelSelector="G" />
+        </filter>
+        <filter id="trogdor-stamp" x="-18%" y="-18%" width="136%" height="136%" color-interpolation-filters="sRGB">
+          <feTurbulence type="fractalNoise" baseFrequency="0.85" numOctaves="3" seed="13" result="warp" />
+          <feDisplacementMap in="SourceGraphic" in2="warp" scale="3.4" xChannelSelector="R" yChannelSelector="G" result="warped" />
+          <feTurbulence type="fractalNoise" baseFrequency="2.6" numOctaves="2" seed="5" result="grain" />
+          <feColorMatrix in="grain" type="matrix" values="0 0 0 0 0  0 0 0 0 0  0 0 0 0 0  0 0 0 7 -5.6" result="grainAlpha" />
+          <feComposite in="warped" in2="grainAlpha" operator="out" />
+        </filter>
+      </defs>
+    </svg>
+  `;
+}
+
+function renderTrogdorProps() {
+  // Sparse decorative props scattered on the playfield: a bone, a torch, a bottle.
+  // These do not affect any session — they sell the parchment-print aesthetic.
+  return `
+    <svg class="trogdor-prop trogdor-prop-bone" viewBox="0 0 60 24" aria-hidden="true" filter="url(#trogdor-print)">
+      <path d="M8 12 H52" />
+      <circle cx="8" cy="8" r="5" />
+      <circle cx="8" cy="16" r="5" />
+      <circle cx="52" cy="8" r="5" />
+      <circle cx="52" cy="16" r="5" />
+    </svg>
+    <svg class="trogdor-prop trogdor-prop-torch" viewBox="0 0 32 60" aria-hidden="true" filter="url(#trogdor-print)">
+      <path class="prop-torch-stem" d="M12 24 H20 V58 H12 Z" />
+      <path class="prop-torch-flame" d="M16 24 C8 14 14 12 12 2 C18 8 20 8 16 -2 C24 6 24 18 16 24 Z" />
+    </svg>
+    <svg class="trogdor-prop trogdor-prop-bottle" viewBox="0 0 24 40" aria-hidden="true" filter="url(#trogdor-print)">
+      <path d="M9 4 H15 V12 C19 14 19 20 19 38 H5 C5 20 5 14 9 12 Z" />
+      <path d="M9 22 H19" />
+    </svg>
+  `;
+}
+
+function renderTrogdorDragon(summary) {
+  const hot = summary.level >= 70;
+  // Trogdor silhouette: calligraphic figure-8 where the body line CROSSES
+  // itself at the chest pinch (~102,150). Upper loop bulges LEFT (back of S),
+  // lower loop bulges RIGHT (belly of S). A free-floating tail spiral coils
+  // off the upper-left behind the head; crown is 2 sharp horns (back taller);
+  // snout is a wide-open triangular maw firing a large angled jagged flame.
+  return `
+    <div class="trogdor-dragon ${hot ? "is-hot" : ""}" aria-hidden="true">
+      <svg viewBox="0 0 220 240" role="img">
+        <g class="dragon-ink" filter="url(#trogdor-stamp)">
+          <!-- TAIL SPIRAL: free-floating curl off the upper-left, behind head -->
+          <path class="dragon-stroke" d="M 70 70
+                                          C 52 56 26 64 24 92
+                                          C 22 116 50 124 58 108
+                                          C 64 96 48 86 42 96
+                                          C 38 104 50 108 52 100" />
+
+          <!-- CROWN: two sharp horns. Front horn (~88,18) shorter, back horn
+               (~108,4) taller; the path enters from the back of the neck on
+               the left and exits onto the forehead on the right. -->
+          <path class="dragon-stroke" d="M 70 70
+                                          L 78 56
+                                          L 88 18
+                                          L 96 50
+                                          L 108 4
+                                          L 122 54" />
+
+          <!-- HEAD / OPEN MAW: top jaw runs from forehead to snout tip; lower
+               jaw forms a wedge below it; the two meet at the snout tip on
+               the right. The triangular gap between them is the open mouth. -->
+          <path class="dragon-stroke" d="M 122 54 L 168 90" />
+          <path class="dragon-stroke" d="M 168 90 L 134 102" />
+          <path class="dragon-stroke" d="M 134 102 L 124 92" />
+
+          <!-- EYE: single dot, set back near the brow -->
+          <circle class="dragon-eye" cx="108" cy="74" r="2.6" />
+
+          <!-- WHISKERS / cheek hatches behind the mouth corner -->
+          <path class="dragon-stroke thin" d="M 122 92 L 132 96" />
+          <path class="dragon-stroke thin" d="M 124 84 L 134 88" />
+          <path class="dragon-stroke thin" d="M 120 100 L 130 102" />
+
+          <!-- UPPER LOOP (back of S): backwards-C bulging to the LEFT, from
+               under the chin down around to the chest pinch. -->
+          <path class="dragon-stroke" d="M 124 92
+                                          C 80 96 28 108 26 150
+                                          C 26 178 70 178 96 158
+                                          C 104 152 104 150 102 150" />
+
+          <!-- LOWER LOOP (belly of S): forward-C bulging to the RIGHT and
+               DOWN from the chest pinch, wrapping around a fat belly and
+               returning UP the LEFT side to re-cross the pinch. -->
+          <path class="dragon-stroke" d="M 102 150
+                                          C 156 146 200 168 192 208
+                                          C 184 240 110 238 80 224
+                                          C 50 210 48 178 92 162
+                                          C 100 158 102 152 102 150 Z" />
+
+          <!-- LEGS: tiny stubby chevron feet directly under the belly -->
+          <path class="dragon-stroke" d="M 90 222 L 86 234 L 100 234 L 102 224" />
+          <path class="dragon-stroke" d="M 144 226 L 142 236 L 156 236 L 158 226" />
+        </g>
+
+        <!-- FLAME: large jagged angled flame venting up-and-right from the
+             open mouth, with a single cream highlight cut near the throat. -->
+        <g class="dragon-flame ${hot ? "is-hot" : ""}" filter="url(#trogdor-stamp)">
+          <path class="dragon-fire" d="M 168 90
+                                        L 178 78 L 188 92
+                                        L 198 70 L 206 88
+                                        L 218 76 L 216 100
+                                        L 208 110 L 196 102
+                                        L 184 108 L 170 102
+                                        L 162 96 Z" />
+          <path class="dragon-fire-cut" d="M 184 92 L 200 80" />
+        </g>
+      </svg>
+    </div>
+  `;
+}
+
+function renderTrogdorStructure(group, index) {
+  const pos = TROGDOR_REPO_POSITIONS[index % TROGDOR_REPO_POSITIONS.length];
+  const pressure = clampInt(group.pressure, 0, 0, 99);
+  const pressureBurning = pressure >= 70;
+  const baseVariant = pos.variant || "hut";
+  // Slot variants `ruin` and `burning_shack` carry their own destruction story
+  // even when the repo is calm — the field should always show some destroyed
+  // structures. High pressure additionally collapses huts/towers into ruins.
+  const variant = pressureBurning && baseVariant !== "burning_shack" ? "ruin" : baseVariant;
+  // Flame overlay fires when pressure is high OR the slot is a burning shack.
+  const burning = pressureBurning || baseVariant === "burning_shack";
+  const warning = pressure >= 35 && !pressureBurning;
+  const classes = [
+    "trogdor-structure",
+    `is-${pos.size}`,
+    `is-variant-${variant}`,
+    burning ? "is-burning" : "",
+    warning ? "is-warning" : "",
+  ].filter(Boolean).join(" ");
+  const label = escapeHtml(group.label);
+  const reason = escapeHtml(group.reason);
+  const style = `--x:${pos.x}%; --y:${pos.y}%; --delay:${index * 130}ms;`;
+  const swordsmen = group.sessions.filter(trogdorSwordsmanVisible);
+
+  return `
+    <article class="${classes}" style="${style}" aria-label="${escapeAttr(group.label)} repository pressure ${pressure}">
+      ${renderStructureSvg(variant, burning)}
+      <div class="trogdor-repo-label">
+        <strong>${label}</strong>
+        <span>${pressure} / ${reason}</span>
+      </div>
+      <div class="trogdor-agent-pack">
+        ${swordsmen.map((session, agentIndex) => renderTrogdorAgent(session, agentIndex, pos)).join("")}
+      </div>
+    </article>
+  `;
+}
+
+function renderStructureSvg(variant, burning) {
+  // Each structure is a chunky outlined silhouette: thatched red roof + cream
+  // brick body + black arch door + crooked brick mortar lines. The roof and
+  // wall paths intentionally use slightly irregular control points so the
+  // silhouettes don't look like stamped-out vector copies — they should read
+  // as hand-cut woodblock prints with broken edges.
+  const filterAttr = ' filter="url(#trogdor-stamp)"';
+  let body = "";
+  switch (variant) {
+    case "tower":
+      // Square body, peaked triangular roof — taller proportions like a watchtower.
+      body = `
+        <path class="structure-roof" d="M14 70 L42 38 L78 12 L116 38 L146 70 L132 78 L116 56 L80 28 L46 58 L28 78 Z" />
+        <path class="structure-body" d="M26 68 L36 70 L70 68 L100 70 L132 68 L130 102 L132 130 L130 146 L94 144 L60 146 L28 144 L30 110 Z" />
+        <path class="structure-arch" d="M62 146 V112 C62 96 98 96 98 112 V146 Z" />
+        <g class="structure-bricks">
+          <path d="M28 88 L60 90 L100 88 L132 90" />
+          <path d="M28 110 L62 108 L100 110 L132 108" />
+          <path d="M28 130 L66 132 L102 130 L132 132" />
+          <path d="M48 70 L50 88 M80 68 L80 88 M112 70 L110 88" />
+          <path d="M40 90 L42 108 M70 88 L70 110 M100 90 L100 108 M124 90 L122 110" />
+          <path d="M56 110 L56 130 M104 108 L106 130" />
+        </g>
+        <rect class="structure-window" x="60" y="80" width="14" height="12" rx="1" />
+        <rect class="structure-window" x="86" y="80" width="14" height="12" rx="1" />
+      `;
+      break;
+    case "longhouse":
+      // Wider building with shallow gabled roof — village hall vibe.
+      body = `
+        <path class="structure-roof" d="M8 72 L24 50 L42 30 L78 28 L122 30 L138 50 L154 72 L138 76 L120 50 L78 42 L42 50 L22 76 Z" />
+        <path class="structure-body" d="M18 70 L52 68 L98 70 L142 68 L140 102 L142 130 L138 146 L100 144 L52 146 L18 144 L20 110 Z" />
+        <path class="structure-arch" d="M68 146 V112 C68 96 96 96 96 112 V146 Z" />
+        <g class="structure-bricks">
+          <path d="M18 88 L52 90 L100 88 L142 90" />
+          <path d="M18 108 L54 106 L100 108 L142 106" />
+          <path d="M18 128 L60 130 L100 128 L142 130" />
+          <path d="M40 70 L40 88 M70 68 L70 88 M100 70 L100 88 M126 70 L126 88" />
+          <path d="M30 88 L30 108 M58 90 L58 108 M84 88 L84 108 M114 88 L114 108 M134 90 L134 108" />
+          <path d="M44 108 L44 128 M118 108 L118 128" />
+        </g>
+        <rect class="structure-window" x="34" y="78" width="14" height="12" rx="1" />
+        <rect class="structure-window" x="112" y="78" width="14" height="12" rx="1" />
+      `;
+      break;
+    case "ruin":
+      // Half-collapsed wall: roof gone, jagged broken top, scattered rubble at base.
+      body = `
+        <path class="structure-body" d="M16 86 L24 76 L36 80 L46 70 L62 78 L72 70 L84 80 L98 72 L112 84 L126 78 L138 86 L146 76 L146 144 L120 146 L82 144 L42 146 L16 144 Z" />
+        <g class="structure-bricks">
+          <path d="M16 100 L40 102 L80 100 L120 102 L146 100" />
+          <path d="M16 118 L36 120 L80 118 L120 120 L146 118" />
+          <path d="M16 134 L42 132 L80 134 L120 132 L146 134" />
+          <path d="M30 86 L30 100 M52 78 L52 100 M78 80 L78 100 M104 84 L104 100 M128 86 L128 100" />
+          <path d="M22 100 L22 118 M44 100 L44 118 M68 100 L68 118 M92 100 L92 118 M118 100 L118 118 M138 100 L138 118" />
+          <path d="M36 118 L36 134 M76 118 L76 134 M114 118 L114 134" />
+        </g>
+        <path class="structure-debris" d="M-2 144 q5 -4 12 0 t12 0 M48 146 q4 -4 10 0 M82 144 q5 -4 12 0 M120 146 q5 -4 12 0 M150 144 q5 -4 12 0" />
+        <path class="structure-debris" d="M28 150 q3 -3 7 0 M104 150 q3 -3 7 0 M70 150 q3 -3 7 0" />
+      `;
+      break;
+    case "burning_shack":
+      // Low brick shed, roofless with a flame-licked broken upper edge.
+      // Always renders flames from the top regardless of pressure.
+      body = `
+        <path class="structure-body" d="M18 78 L26 68 L40 72 L52 64 L66 70 L82 62 L100 72 L120 66 L138 76 L146 68 L146 144 L118 146 L78 144 L40 146 L18 144 Z" />
+        <g class="structure-bricks">
+          <path d="M18 92 L40 94 L80 92 L118 94 L146 92" />
+          <path d="M18 110 L42 108 L80 110 L118 108 L146 110" />
+          <path d="M18 128 L46 130 L82 128 L120 130 L146 128" />
+          <path d="M36 78 L36 92 M58 70 L58 92 M82 64 L82 92 M104 74 L104 92 M126 72 L126 92" />
+          <path d="M28 92 L28 110 M50 92 L50 110 M70 92 L70 110 M94 92 L94 110 M114 92 L114 110 M134 92 L134 110" />
+          <path d="M40 110 L40 128 M100 110 L100 128 M124 110 L124 128" />
+        </g>
+        <path class="structure-arch" d="M64 146 V120 C64 108 96 108 96 120 V146 Z" />
+      `;
+      break;
+    case "hut":
+    default:
+      // Round hut with conical thatched roof, single arch door, two small windows.
+      body = `
+        <path class="structure-roof" d="M14 72 L34 48 L60 26 L80 14 L100 26 L126 48 L146 72 Q146 80 116 80 Q80 78 44 80 Q14 80 14 72 Z" />
+        <path class="structure-roof-thatch" d="M30 60 L78 22 M50 50 L78 28 M70 42 L80 30 M104 48 L82 24 M126 60 L82 22 M40 70 L60 40 M120 70 L100 40" />
+        <path class="structure-body" d="M22 78 Q22 66 50 66 Q80 64 110 66 Q138 68 138 78 L136 102 L138 130 L134 146 L98 144 L62 146 L26 144 L24 110 Z" />
+        <path class="structure-arch" d="M62 146 V112 C62 94 98 94 98 112 V146 Z" />
+        <g class="structure-bricks">
+          <path d="M22 92 L52 94 L100 92 L138 94" />
+          <path d="M22 110 L48 108 L100 110 L138 108" />
+          <path d="M22 128 L56 130 L100 128 L138 130" />
+          <path d="M44 76 L44 92 M76 76 L76 92 M108 76 L108 92" />
+          <path d="M34 92 L34 110 M62 92 L62 110 M98 92 L98 110 M126 92 L126 110" />
+          <path d="M50 110 L50 128 M110 110 L110 128" />
+        </g>
+        <rect class="structure-window" x="34" y="82" width="12" height="10" rx="1" />
+        <rect class="structure-window" x="114" y="82" width="12" height="10" rx="1" />
+      `;
+      break;
+  }
+
+  // Jagged flame tongues with cream negative-space cuts. Used by both the
+  // pressure-driven `is-burning` overlay and the always-burning shack variant.
+  const flames = burning
+    ? `
+        <path class="structure-flame" d="M22 64
+                                          L34 32 L40 56 L52 18 L58 56
+                                          L72 8 L76 54 L92 22 L96 56
+                                          L110 16 L116 56 L128 30 L132 60
+                                          L140 38 L142 62 Z" />
+        <path class="structure-flame hot" d="M48 60
+                                              L56 32 L62 56 L70 22 L76 56
+                                              L88 28 L92 56 L104 34 L110 58
+                                              L120 40 L124 60 Z" />
+        <path class="structure-flame-cut" d="M40 50 L48 32 M70 48 L80 28 M100 48 L110 28 M122 50 L132 36" />
+        <path class="structure-smoke" d="M38 -8 q10 -8 6 -18 M118 -12 q10 -8 6 -20 M78 -10 q8 -10 4 -20" />
+      `
+    : "";
+
+  return `
+    <svg class="structure-svg" viewBox="0 0 160 150" aria-hidden="true"${filterAttr}>
+      ${body}
+      ${flames}
+    </svg>
+  `;
+}
+
+function renderTrogdorAgent(session, index, structurePos = null) {
+  const offset = TROGDOR_AGENT_OFFSETS[index % TROGDOR_AGENT_OFFSETS.length];
+  const hovered = session.sessionId === state.hoveredTrogdorSessionId;
+  const glyph = escapeHtml(trogdorAgentGlyph(session));
+  const label = escapeAttr(`${session.name} ${trogdorDomReason(session)}`);
+  const tone = trogdorAgentTone(session);
+  const attacking = trogdorSessionAwaitingUser(session) && !trogdorClawgDismissed(session) && !session.trogdorBurnt;
+  const burnt = Boolean(session.trogdorBurnt);
+  const chargeX = structurePos ? (TROGDOR_DRAGON_TARGET.x - structurePos.x) * 0.82 : 0;
+  const chargeY = structurePos ? (TROGDOR_DRAGON_TARGET.y - structurePos.y) * 0.62 : 0;
+  const style = [
+    `--ax:${offset.x}px`,
+    `--ay:${offset.y}px`,
+    `--walk:${900 + index * 110}ms`,
+    `--charge:${22000 + index * 1200}ms`,
+    `--charge-x:${chargeX.toFixed(2)}vw`,
+    `--charge-y:${chargeY.toFixed(2)}vh`,
+  ].join("; ");
+  const classes = [
+    "trogdor-agent",
+    `is-${tone}`,
+    hovered ? "is-hovered" : "",
+    attacking ? "is-attacking" : "",
+    burnt ? "is-burnt" : "",
+  ].filter(Boolean).join(" ");
+  // Swordsman: chunky blue body with cream outline. Helmet has a tall curved plume,
+  // a thin visor slit, and the figure carries a tall sword on the right and a kite
+  // shield on the left. The action-cue glyph is overlaid on the shield.
+  return `
+    <button
+      type="button"
+      class="${classes}"
+      style="${style}"
+      data-trogdor-agent="true"
+      data-session-id="${escapeAttr(session.sessionId)}"
+      aria-label="${label}"
+    >
+      <svg viewBox="0 0 90 130" aria-hidden="true" filter="url(#trogdor-print)">
+        <!-- Plume on top of helmet, curved like a feather -->
+        <path class="agent-plume" d="M52 18
+                                      C56 4 70 0 78 8
+                                      C72 10 70 16 70 22
+                                      C66 18 60 18 56 22 Z" />
+        <!-- Sword: long blade pointing up with a small cross-guard and round pommel -->
+        <path class="agent-sword-blade" d="M76 30 L82 30 L80 84 L78 84 Z" />
+        <path class="agent-sword-guard" d="M70 84 H88" />
+        <circle class="agent-sword-pommel" cx="79" cy="92" r="3.6" />
+        <!-- Helmet: rounded top with a forward visor slit -->
+        <path class="agent-helm" d="M28 36
+                                     C28 18 64 18 64 36
+                                     L64 50
+                                     L28 50 Z" />
+        <path class="agent-helm-slit" d="M34 42 H58" />
+        <!-- Body: blocky tunic that flares slightly at the bottom -->
+        <path class="agent-body" d="M26 50
+                                     L66 50
+                                     L70 96
+                                     L62 96
+                                     L60 108
+                                     L32 108
+                                     L30 96
+                                     L22 96 Z" />
+        <!-- Belt -->
+        <path class="agent-belt" d="M26 88 H66" />
+        <!-- Shield: kite/hex shape held on the left -->
+        <path class="agent-shield" d="M2 56
+                                       L24 50
+                                       L26 78
+                                       L18 96
+                                       L10 96
+                                       L4 80 Z" />
+        <path class="agent-shield-rivet" d="M14 60 v22 M8 70 H22" />
+        <!-- Two stubby legs -->
+        <path class="agent-leg" d="M34 108 V124 H44 V112" />
+        <path class="agent-leg" d="M50 108 V124 H60 V112" />
+        <!-- Action-cue glyph centered on the shield -->
+        <text class="agent-glyph" x="14" y="76" text-anchor="middle">${glyph}</text>
+      </svg>
+    </button>
+  `;
+}
+
+function renderTrogdorEmptyField() {
+  return `
+    <div class="trogdor-empty-field">
+      <svg viewBox="0 0 240 180" aria-hidden="true">
+        <path class="empty-bone" d="M30 126h78M46 113c-13-13-29 6-15 16-15 11 7 31 18 15M90 113c13-13 29 6 15 16 15 11-7 31-18 15" />
+        <path class="empty-house" d="M142 84l40-30 42 30M152 84h62v52h-62zM174 136v-24c0-15 20-15 20 0v24" />
+      </svg>
+      <p>no repos</p>
+      <button type="button" data-action="open_create"${state.readOnly ? " disabled" : ""}>launch agent</button>
+    </div>
+  `;
+}
+
+function trogdorDomPressure(session) {
+  const pressure = session?.operatorPressure || {};
+  if (Number.isFinite(pressure.score)) {
+    return clampInt(pressure.score, 1, 0, 99);
+  }
+  let score = 0;
+  const stateLabel = String(session?.state || "").toLowerCase();
+  const rest = String(session?.restLabel || "").toLowerCase();
+  if (trogdorHasActionCue(session, "awaiting_user")) score += 55;
+  if (trogdorHasActionCue(session, "commit_ready")) score += 45;
+  if (trogdorHasActionCue(session, "validation_missing_after_edit")) score += 40;
+  if (stateLabel === "attention") score += 45;
+  if (stateLabel === "busy") score += 12;
+  if (stateLabel === "error") score += 55;
+  if (rest === "sleeping") score += 35;
+  if (session?.commitCandidate) score += 25;
+  return clampInt(score, 0, 0, 99);
+}
+
+function trogdorDomReason(session) {
+  const pressure = session?.operatorPressure || {};
+  if (pressure.reason) return String(pressure.reason);
+  const cue = trogdorPrimaryActionCue(session);
+  if (cue) return cue.replaceAll("_", " ");
+  if (session?.commitCandidate) return "commit ready";
+  return String(session?.state || "idle");
+}
+
+function trogdorAgentGlyph(session) {
+  const pressure = session?.operatorPressure || {};
+  if (pressure.glyph) return String(pressure.glyph).slice(0, 1);
+  if (trogdorHasActionCue(session, "awaiting_user")) return "!";
+  if (trogdorHasActionCue(session, "commit_ready") || session?.commitCandidate) return "$";
+  if (trogdorHasActionCue(session, "validation_missing_after_edit")) return "v";
+  if (String(session?.state || "").toLowerCase() === "error") return "x";
+  return "a";
+}
+
+function trogdorAgentTone(session) {
+  const tone = String(session?.operatorPressure?.tone || "").toLowerCase();
+  if (tone === "danger" || tone === "warning" || tone === "working" || tone === "quiet") {
+    return tone;
+  }
+  const pressure = trogdorDomPressure(session);
+  if (pressure >= 70) return "danger";
+  if (pressure >= 35) return "warning";
+  if (String(session?.state || "").toLowerCase() === "busy") return "working";
+  return "quiet";
+}
+
+function trogdorSpeedReadWord(session, wpm) {
+  const words = trogdorClawgWords(session);
+  if (!words.length) return "waiting";
+  const index = trogdorReaderWordIndex(session, wpm);
+  if (index >= words.length) return "caught up";
+  return words[Math.max(0, index)].slice(0, 22);
+}
+
+function trogdorDomActionCueKinds(session) {
+  return (Array.isArray(session?.actionCues) ? session.actionCues : [])
+    .map((cue) => String(cue?.kind || "").toLowerCase())
+    .filter(Boolean);
+}
+
+function trogdorHasActionCue(session, kind) {
+  return trogdorDomActionCueKinds(session).includes(kind);
+}
+
+function trogdorPrimaryActionCue(session) {
+  const kinds = trogdorDomActionCueKinds(session);
+  for (const kind of ["awaiting_user", "commit_ready", "validation_missing_after_edit", "dirty_check_missing"]) {
+    if (kinds.includes(kind)) return kind;
+  }
+  return "";
 }
 
 async function refreshThoughtConfig() {
@@ -914,33 +2654,102 @@ async function openSelectedNativeSession() {
   }
 }
 
-async function loadDirListing(path = el.dirsPath.value, managedOnly = el.dirsManagedOnly.checked) {
+async function loadDirListing(
+  path = el.dirsPath.value,
+  managedOnly = el.dirsManagedOnly.checked,
+  group = state.dirBrowser.group,
+  options = {},
+) {
   const targetPath = String(path || "").trim();
   const managed = Boolean(managedOnly);
-  if (!targetPath && !state.dirBrowser.path) {
-    return;
-  }
+  const groupName = String(group || "").trim();
 
   state.dirBrowser.loading = true;
   state.dirBrowser.managedOnly = managed;
+  state.dirBrowser.group = groupName;
   el.dirsManagedOnly.checked = managed;
-  localStorage.setItem(DIR_BROWSER_PATH_KEY, targetPath || state.dirBrowser.path || "");
   localStorage.setItem(DIR_BROWSER_MANAGED_ONLY_KEY, String(managed));
+  setDirStatus("Loading directories...");
   try {
     const url = new URL("/v1/dirs", window.location.origin);
     if (targetPath) {
       url.searchParams.set("path", targetPath);
     }
     url.searchParams.set("managed_only", String(managed));
+    if (groupName) {
+      url.searchParams.set("group", groupName);
+    }
     const response = await apiFetch(url.pathname + url.search);
     const payload = await response.json();
     renderDirEntries(payload);
   } catch (error) {
+    if (shouldRetryDirListingFromBase(error, targetPath, groupName, options)) {
+      localStorage.removeItem(DIR_BROWSER_PATH_KEY);
+      state.dirBrowser.path = "";
+      state.dirBrowser.group = "";
+      el.dirsPath.value = "";
+      el.createCwd.value = "";
+      setDirStatus("Saved directory was outside the repository root. Loading the default directory...");
+      return loadDirListing("", managed, "", { retriedFromBase: true });
+    }
     setDirStatus(`Failed to load directories: ${error.message}`, true);
   } finally {
     state.dirBrowser.loading = false;
     syncSheetActionAvailability();
   }
+}
+
+async function updateDirEntryGroupMembership(path, action, groupName, removeGroup = "") {
+  const targetPath = String(path || "").trim();
+  const targetGroup = String(groupName || "").trim();
+  const sourceGroup = String(removeGroup || "").trim();
+  if (!targetPath || !targetGroup || state.readOnly) {
+    return;
+  }
+
+  const add = [];
+  const remove = [];
+  if (action === "remove") {
+    remove.push(targetGroup);
+  } else {
+    add.push(targetGroup);
+    if (action === "move" && sourceGroup && sourceGroup !== targetGroup) {
+      remove.push(sourceGroup);
+    }
+  }
+
+  setDirStatus("Updating directory group...");
+  try {
+    await apiFetch("/v1/dirs/group-memberships", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ path: targetPath, add, remove }),
+    });
+    await loadDirListing(
+      state.dirBrowser.path || el.dirsPath.value,
+      state.dirBrowser.managedOnly,
+      state.dirBrowser.group,
+    );
+  } catch (error) {
+    setDirStatus(`Failed to update group: ${error.message}`, true);
+  }
+}
+
+function shouldRetryDirListingFromBase(error, targetPath, groupName, options = {}) {
+  if (options.retriedFromBase || !targetPath || groupName) {
+    return false;
+  }
+  if (error?.status !== 403) {
+    return false;
+  }
+  return String(error?.message || "").toLowerCase().includes("outside the allowed base directory");
+}
+
+async function warmDirBrowserOnStartup() {
+  if (state.dirBrowser.loading || state.dirBrowser.entries.length > 0) {
+    return;
+  }
+  await loadDirListing(state.dirBrowser.path || "", state.dirBrowser.managedOnly, state.dirBrowser.group);
 }
 
 async function refreshMermaidArtifact() {
@@ -996,6 +2805,37 @@ async function openMermaidArtifactHost() {
   }
 }
 
+async function loadMermaidPlanFile(name) {
+  const session = currentSession();
+  const fileName = String(name || "").trim();
+  if (!session || !fileName) {
+    return;
+  }
+
+  state.mermaidArtifact.activePlanFile = fileName;
+  state.mermaidArtifact.planContent = "";
+  renderMermaidPlanTabs();
+  el.mermaidPlanContent.classList.remove("hidden");
+  el.mermaidPlanContent.textContent = "Loading plan file...";
+  try {
+    const url = new URL(`/v1/sessions/${encodeURIComponent(session.session_id)}/plan-file`, window.location.origin);
+    url.searchParams.set("name", fileName);
+    const response = await apiMaybeFetch(url.pathname + url.search);
+    const payload = await responseJsonOrNull(response);
+    state.mermaidArtifact.planContent = payload?.content || "";
+    el.mermaidPlanContent.textContent =
+      payload?.content || payload?.error || `${fileName} is unavailable.`;
+    el.mermaidPlanContent.classList.toggle("error", Boolean(payload?.error));
+    setMermaidStatus(payload?.error ? `Plan file ${fileName}: ${payload.error}` : `Plan file loaded: ${fileName}`);
+  } catch (error) {
+    el.mermaidPlanContent.textContent = `Failed to load ${fileName}: ${error.message}`;
+    el.mermaidPlanContent.classList.add("error");
+    setMermaidStatus(`Failed to load plan file: ${error.message}`, true);
+  } finally {
+    syncSheetActionAvailability();
+  }
+}
+
 async function launchCommitCodex() {
   const session = currentSession();
   if (!session) {
@@ -1020,14 +2860,17 @@ async function launchCommitCodex() {
 
 async function refreshSessions() {
   try {
-    const requests = [apiFetch("/v1/sessions")];
+    const requests = [apiFetch("/v1/sessions"), apiMaybeFetch("/v1/operator-pressure")];
     if (state.followPublishedSelection) {
       requests.push(apiFetch("/v1/selection"));
     }
 
-    const [response, publishedResponse] = await Promise.all(requests);
+    const [response, pressureResponse, publishedResponse] = await Promise.all(requests);
     const payload = await response.json();
+    const pressurePayload = await responseJsonOrNull(pressureResponse);
     state.sessions = Array.isArray(payload.sessions) ? payload.sessions : [];
+    applyOperatorPressure(pressurePayload);
+    syncTrogdorCueTransitions();
 
     if (publishedResponse) {
       state.publishedSelection = await publishedResponse.json();
@@ -1040,7 +2883,8 @@ async function refreshSessions() {
     } else {
       state.publishedSelection = null;
       if (!state.selectedSessionId || !sessionExists(state.selectedSessionId)) {
-        persistSelectedSession(state.sessions[0]?.session_id ?? null);
+        const fallbackSessionId = state.trogdorAtlasOpen ? null : state.sessions[0]?.session_id ?? null;
+        persistSelectedSession(fallbackSessionId);
       }
     }
 
@@ -1056,6 +2900,7 @@ async function refreshSessions() {
     setModeStatus(state.readOnly ? "observer" : "operator", !state.token);
   } catch (error) {
     state.sessions = [];
+    state.operatorPressureBySession = new Map();
     state.publishedSelection = null;
     persistSelectedSession(null);
     renderHudSurface();
@@ -1110,6 +2955,7 @@ async function setupHudSurface() {
       reducedMotion: window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches ?? false,
     });
   }
+  applyZoomToSurface(state.hud);
   el.hudCanvas.classList.remove("hidden");
   measureAndResizeSurface(false, true);
   renderHudSurface();
@@ -1121,12 +2967,103 @@ function destroyTerminalInstance() {
   state.selectionAnchor = null;
   state.selectionFocus = null;
   clearHoveredLink(false);
+  clearTerminalPaintProbe();
   if (state.terminal) {
     state.terminal.destroy();
     state.terminal = null;
   }
   state.terminalSessionId = null;
+  state.terminalFallbackAutoFollow = true;
+  state.terminalMirrorText = "";
+  state.terminalPaintVerified = false;
+  state.terminalFrameBytesSeen = 0;
+  if (el.terminalA11yMirror) {
+    el.terminalA11yMirror.value = "";
+  }
   el.terminalCanvas.classList.add("hidden");
+}
+
+function clearTerminalPaintProbe() {
+  if (state.terminalPaintProbeTimer) {
+    window.clearTimeout(state.terminalPaintProbeTimer);
+    state.terminalPaintProbeTimer = null;
+  }
+}
+
+function setTerminalTextFallbackActive(active, options = {}) {
+  const wasActive = state.terminalFallbackActive;
+  state.terminalFallbackActive = Boolean(active && currentSession());
+  el.terminalFallback.classList.toggle("hidden", !state.terminalFallbackActive);
+  el.terminalFallback.setAttribute("aria-hidden", state.terminalFallbackActive ? "false" : "true");
+  if (state.terminalFallbackActive) {
+    state.terminalFallbackAutoFollow = wasActive ? terminalFallbackIsNearBottom() : true;
+    startSnapshotPolling();
+    if (!wasActive) {
+      focusTerminalInputSurface({ onlyIfSurfaceFocused: true, preventScroll: true });
+    }
+    syncTerminalStatusStrip();
+    return;
+  }
+
+  if (options.clearText !== false) {
+    el.terminalFallback.textContent = "";
+  }
+  if (state.terminal || !currentSession()) {
+    stopSnapshotPolling();
+  }
+  syncTerminalStatusStrip();
+}
+
+function terminalFallbackIsNearBottom() {
+  const maxScrollTop = Math.max(0, el.terminalFallback.scrollHeight - el.terminalFallback.clientHeight);
+  return maxScrollTop - el.terminalFallback.scrollTop < 48;
+}
+
+function updateTerminalFallbackText(text) {
+  const previousScrollTop = el.terminalFallback.scrollTop;
+  const shouldFollow = state.terminalFallbackAutoFollow || terminalFallbackIsNearBottom();
+  el.terminalFallback.textContent = text || "";
+  if (shouldFollow) {
+    el.terminalFallback.scrollTop = el.terminalFallback.scrollHeight;
+  } else {
+    el.terminalFallback.scrollTop = Math.min(previousScrollTop, Math.max(0, el.terminalFallback.scrollHeight - el.terminalFallback.clientHeight));
+  }
+  syncTerminalAccessibilityMirror(text || "");
+}
+
+function syncTerminalAccessibilityMirror(fallbackText = null) {
+  let mirrorText = "";
+  if (typeof fallbackText === "string") {
+    mirrorText = fallbackText;
+  } else if (terminalSupports("screenReaderMirrorText")) {
+    mirrorText = state.terminal.screenReaderMirrorText() || "";
+  } else if (terminalSupports("accessibilityDomSnapshot")) {
+    mirrorText = state.terminal.accessibilityDomSnapshot()?.value || "";
+  }
+  state.terminalMirrorText = mirrorText;
+  if (el.terminalA11yMirror) {
+    el.terminalA11yMirror.value = mirrorText;
+  }
+  if (terminalSupports("drainAccessibilityAnnouncements") && el.terminalAnnouncer) {
+    const announcements = state.terminal.drainAccessibilityAnnouncements();
+    if (Array.isArray(announcements) && announcements.length) {
+      el.terminalAnnouncer.textContent = announcements.join("\n");
+    }
+  }
+}
+
+function terminalMirrorTextFromRenderer() {
+  if (terminalSupports("screenReaderMirrorText")) {
+    return state.terminal.screenReaderMirrorText() || "";
+  }
+  if (terminalSupports("accessibilityDomSnapshot")) {
+    return state.terminal.accessibilityDomSnapshot()?.value || "";
+  }
+  return "";
+}
+
+function terminalTextHasContent(text) {
+  return /\S/.test(String(text || ""));
 }
 
 async function setupTerminalSurface() {
@@ -1141,16 +3078,16 @@ async function setupTerminalSurface() {
   const mod = await ensureFrankenTerm();
   if (!mod) {
     teardownTerminal();
-    el.terminalFallback.classList.remove("hidden");
+    setTerminalTextFallbackActive(true, { clearText: false });
     await refreshSnapshotFallback();
-    startSnapshotPolling();
     return;
   }
 
   if (state.terminal && state.terminalSessionId === session.session_id) {
     el.terminalCanvas.classList.remove("hidden");
-    el.terminalFallback.classList.add("hidden");
+    el.terminalFallback.classList.toggle("hidden", !state.terminalFallbackActive);
     refreshTerminalSearch();
+    syncTerminalAccessibilityMirror();
     syncTerminalTools();
     setLoadingState(false);
     return;
@@ -1159,8 +3096,20 @@ async function setupTerminalSurface() {
   destroyTerminalInstance();
   setLoadingState(true, "Initializing terminal...");
   state.terminal = new mod.FrankenTermWeb();
-  await state.terminal.init(el.terminalCanvas, undefined);
+  try {
+    await state.terminal.init(el.terminalCanvas, undefined);
+  } catch (error) {
+    destroyTerminalInstance();
+    setTerminalTextFallbackActive(true, { clearText: false });
+    await refreshSnapshotFallback();
+    setLoadingState(false);
+    setUtilityStatus(`Live terminal renderer unavailable: ${error.message}`, true, 3600);
+    return;
+  }
   state.terminalSessionId = session.session_id;
+  state.terminalPaintVerified = false;
+  state.terminalFrameBytesSeen = 0;
+  setTerminalTextFallbackActive(false);
   if (terminalSupports("setLinkOpenPolicy")) {
     state.terminal.setLinkOpenPolicy({
       allowHttp: true,
@@ -1170,12 +3119,14 @@ async function setupTerminalSurface() {
   if (terminalSupports("setAccessibility")) {
     state.terminal.setAccessibility({
       reducedMotion: window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches ?? false,
+      screenReader: true,
     });
   }
+  applyZoomToSurface(state.terminal);
   el.terminalCanvas.classList.remove("hidden");
-  el.terminalFallback.classList.add("hidden");
   clearTerminalSelection();
   refreshTerminalSearch();
+  syncTerminalAccessibilityMirror();
   syncTerminalTools();
   measureAndResizeSurface(true, true);
   setLoadingState(false);
@@ -1185,8 +3136,7 @@ function teardownTerminal() {
   disconnectSocket();
   stopSnapshotPolling();
   destroyTerminalInstance();
-  el.terminalFallback.classList.add("hidden");
-  el.terminalFallback.textContent = "";
+  setTerminalTextFallbackActive(false);
   syncTerminalTools();
   renderHudSurface();
 }
@@ -1240,8 +3190,9 @@ function measureAndResizeSurface(pushResize = false, force = false) {
   const geo = referenceSurface.fitToContainer(rect.width, rect.height, dpr);
   const cols = clampInt(geo?.cols, 80, 24, 240);
   const rows = clampInt(geo?.rows, 24, 12, 120);
+  const dimensionsChanged = cols !== state.currentCols || rows !== state.currentRows;
 
-  if (!force && cols === state.currentCols && rows === state.currentRows && !pushResize) {
+  if (!force && !dimensionsChanged) {
     return;
   }
 
@@ -1256,7 +3207,7 @@ function measureAndResizeSurface(pushResize = false, force = false) {
   renderHudSurface();
   scheduleRender();
 
-  if (pushResize) {
+  if (pushResize && (force || dimensionsChanged)) {
     sendResize();
   }
 }
@@ -1286,6 +3237,14 @@ function buildSurfaceModel() {
     snapshotFallback: !boot.franken_term_available,
     activeSheet: state.activeSheet,
     hoveredLinkUrl: state.hoveredLinkUrl,
+    hoveredTrogdorSessionId: state.hoveredTrogdorSessionId,
+    trogdorAtlasOpen: state.trogdorAtlasOpen,
+    trogdorWpm: state.trogdorWpm,
+    trogdorReading: state.trogdorReading,
+    trogdorReaderStartIndex: state.trogdorReaderStartIndex,
+    trogdorReaderElapsedMs: state.hoveredTrogdorSessionId
+      ? Math.max(0, performance.now() - state.trogdorReaderStartedAt)
+      : 0,
     sessions: surfaceSessions,
     selectedSessionId: state.selectedSessionId,
     publishedSessionId: normalizeSessionId(state.publishedSelection?.session_id),
@@ -1295,6 +3254,9 @@ function buildSurfaceModel() {
 }
 
 function renderHudSurface() {
+  advanceTrogdorReaderProgressForCurrentHover();
+  renderTrogdorSurface();
+  syncTerminalPresentation();
   if (!state.hud) {
     return;
   }
@@ -1303,6 +3265,24 @@ function renderHudSurface() {
   state.surfaceMasks = frame.masks ?? [];
   state.hud.applyPatchBatchFlat(frame.spans, frame.cells);
   scheduleRender();
+}
+
+function syncTerminalPresentation() {
+  const terminalFocusMode = Boolean(currentSession() && !state.trogdorAtlasOpen);
+  document.body.classList.toggle("terminal-focus-mode", terminalFocusMode);
+  el.terminalStage.classList.toggle("terminal-view-active", terminalFocusMode);
+  syncTerminalInputDock();
+  if (state.hud) {
+    el.hudCanvas.classList.toggle("hidden", terminalFocusMode);
+    el.hudCanvas.style.display = terminalFocusMode ? "none" : "";
+    el.hudCanvas.style.visibility = terminalFocusMode ? "hidden" : "";
+  }
+  if (state.terminal) {
+    el.terminalCanvas.classList.toggle("hidden", false);
+    el.terminalCanvas.style.display = "";
+    el.terminalCanvas.style.visibility = "";
+  }
+  el.terminalFallback.classList.toggle("hidden", !(terminalFocusMode && state.terminalFallbackActive));
 }
 
 async function connectSelectedSession() {
@@ -1315,7 +3295,7 @@ async function connectSelectedSession() {
   }
 
   await setupTerminalSurface();
-  if (!state.terminal) {
+  if (!state.terminal && !state.terminalFallbackActive) {
     return;
   }
 
@@ -1356,13 +3336,7 @@ async function connectSelectedSession() {
       return;
     }
 
-    if (state.terminal) {
-      state.terminal.feed(new Uint8Array(event.data));
-      if (state.searchQuery) {
-        refreshTerminalSearch();
-      }
-      scheduleRender();
-    }
+    feedTerminalBytes(new Uint8Array(event.data));
   };
 
   ws.onclose = () => {
@@ -1381,6 +3355,125 @@ async function connectSelectedSession() {
   ws.onerror = () => {
     setConnectionStatus("attach failed", true);
   };
+}
+
+function feedTerminalBytes(bytes) {
+  if (!state.terminal || !(bytes instanceof Uint8Array)) {
+    return false;
+  }
+
+  state.terminal.feed(bytes);
+  state.terminalFrameBytesSeen += bytes.byteLength;
+  flushEncodedInputBytes();
+  if (state.searchQuery) {
+    refreshTerminalSearch();
+  }
+  drainTerminalLinkClicks();
+  syncTerminalAccessibilityMirror();
+  syncTerminalFallbackFromLiveFrame();
+  scheduleRender();
+  scheduleTerminalPaintProbe();
+  return true;
+}
+
+function syncTerminalFallbackFromLiveFrame() {
+  if (!state.terminalFallbackActive || !state.terminal) {
+    return false;
+  }
+  const text = terminalMirrorTextFromRenderer();
+  if (!terminalTextHasContent(text) && terminalTextHasContent(el.terminalFallback.textContent)) {
+    return false;
+  }
+  if (!terminalTextHasContent(text)) {
+    return false;
+  }
+  updateTerminalFallbackText(text);
+  return true;
+}
+
+function scheduleTerminalPaintProbe() {
+  if (
+    state.terminalPaintVerified ||
+    state.terminalFallbackActive ||
+    state.terminalPaintProbeTimer ||
+    !state.terminal ||
+    !currentSession() ||
+    state.terminalFrameBytesSeen === 0
+  ) {
+    return;
+  }
+
+  state.terminalPaintProbeTimer = window.setTimeout(() => {
+    state.terminalPaintProbeTimer = null;
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        void verifyTerminalPaintOrFallback();
+      });
+    });
+  }, 180);
+}
+
+async function verifyTerminalPaintOrFallback() {
+  if (!state.terminal || state.terminalPaintVerified || state.terminalFallbackActive || !currentSession()) {
+    return;
+  }
+
+  if (terminalCanvasHasVisiblePixels()) {
+    state.terminalPaintVerified = true;
+    setTerminalTextFallbackActive(false);
+    return;
+  }
+
+  const hasSnapshotText = await refreshSnapshotFallback();
+  if (!state.terminal || state.terminalPaintVerified || state.terminalFallbackActive || !currentSession()) {
+    return;
+  }
+  if (terminalCanvasHasVisiblePixels()) {
+    state.terminalPaintVerified = true;
+    setTerminalTextFallbackActive(false);
+    return;
+  }
+  if (hasSnapshotText) {
+    setTerminalTextFallbackActive(true, { clearText: false });
+    syncTerminalPresentation();
+  }
+}
+
+function terminalCanvasHasVisiblePixels() {
+  const canvas = el.terminalCanvas;
+  if (!canvas || !canvas.width || !canvas.height) {
+    return false;
+  }
+
+  const sample = document.createElement("canvas");
+  sample.width = Math.min(180, canvas.width);
+  sample.height = Math.min(120, canvas.height);
+  if (!sample.width || !sample.height) {
+    return false;
+  }
+
+  const context = sample.getContext("2d", { willReadFrequently: true });
+  if (!context) {
+    return false;
+  }
+
+  try {
+    context.drawImage(canvas, 0, 0, sample.width, sample.height);
+    const pixels = context.getImageData(0, 0, sample.width, sample.height).data;
+    for (let index = 0; index < pixels.length; index += 4) {
+      const alpha = pixels[index + 3];
+      const red = pixels[index];
+      const green = pixels[index + 1];
+      const blue = pixels[index + 2];
+      if (alpha > 0 && (red > 32 || green > 32 || blue > 32)) {
+        return true;
+      }
+    }
+  } catch (_) {
+    return false;
+  }
+
+  return false;
 }
 
 function handleSocketText(raw) {
@@ -1422,7 +3515,7 @@ function mergeSummary(summary) {
 
 function syncWriteAccess() {
   el.sendInput.disabled = state.readOnly;
-  el.sendSubmitButton.disabled = state.readOnly;
+  el.sendSubmitButton.disabled = !sendTargetReady();
   el.createButton.disabled = state.readOnly || !el.createCwd.value.trim();
   el.thoughtConfigTestButton.disabled = state.readOnly || !state.thoughtConfig.config;
   el.thoughtConfigSaveButton.disabled = state.readOnly || !state.thoughtConfig.config;
@@ -1453,12 +3546,160 @@ function flushEncodedInputBytes() {
   }
 }
 
+function sendTerminalInputText(text) {
+  if (!text || !state.ws || state.ws.readyState !== WebSocket.OPEN || state.readOnly) {
+    return false;
+  }
+  state.ws.send(JSON.stringify({ type: "input_text", data: text }));
+  return true;
+}
+
+function fallbackTextForKeyEvent(event) {
+  if (!event || event.kind !== "key" || event.phase !== "down") {
+    return "";
+  }
+
+  const key = typeof event.key === "string" ? event.key : "";
+  const mods = Number(event.mods) || 0;
+  const shift = (mods & 1) !== 0;
+  const alt = (mods & 2) !== 0;
+  const ctrl = (mods & 4) !== 0;
+  const prefix = alt ? "\x1b" : "";
+
+  if (ctrl && key.length === 1) {
+    const upper = key.toUpperCase();
+    const code = upper.charCodeAt(0);
+    if (code >= 64 && code <= 95) {
+      return prefix + String.fromCharCode(code - 64);
+    }
+  }
+
+  if (!ctrl && key.length === 1) {
+    return prefix + key;
+  }
+
+  switch (key) {
+    case "Enter":
+      return "\r";
+    case "Backspace":
+      return "\x7f";
+    case "Delete":
+      return "\x1b[3~";
+    case "Tab":
+      return shift ? "\x1b[Z" : "\t";
+    case "Escape":
+      return "\x1b";
+    case "ArrowUp":
+      return "\x1b[A";
+    case "ArrowDown":
+      return "\x1b[B";
+    case "ArrowRight":
+      return "\x1b[C";
+    case "ArrowLeft":
+      return "\x1b[D";
+    case "Home":
+      return "\x1b[H";
+    case "End":
+      return "\x1b[F";
+    case "PageUp":
+      return "\x1b[5~";
+    case "PageDown":
+      return "\x1b[6~";
+    default:
+      return "";
+  }
+}
+
+function sendFallbackTerminalEvent(event) {
+  const text = fallbackTextForKeyEvent(event);
+  if (!text) {
+    return false;
+  }
+  return sendTerminalInputText(text);
+}
+
 function forwardTerminalEvent(event) {
+  if (state.terminalFallbackActive && sendFallbackTerminalEvent(event)) {
+    return;
+  }
   if (!state.terminal || state.readOnly) {
     return;
   }
   state.terminal.input(event);
   flushEncodedInputBytes();
+  drainTerminalLinkClicks();
+}
+
+function sendTerminalText(text) {
+  if (!text || state.readOnly || !currentSession()) {
+    return false;
+  }
+  markTrogdorSessionsResponded([state.selectedSessionId]);
+  if (state.terminalFallbackActive && sendTerminalInputText(text)) {
+    return true;
+  }
+  if (terminalSupports("pasteText")) {
+    state.terminal.pasteText(text);
+    flushEncodedInputBytes();
+    return true;
+  }
+  if (state.ws && state.ws.readyState === WebSocket.OPEN) {
+    state.ws.send(JSON.stringify({ type: "input_text", data: text }));
+    return true;
+  }
+  forwardTerminalEvent({ kind: "paste", data: text });
+  return true;
+}
+
+function isCoarsePointer() {
+  return window.matchMedia?.("(pointer: coarse)")?.matches ?? false;
+}
+
+function syncMobileKeyboardState() {
+  document.body.classList.toggle("mobile-keyboard-active", state.mobileKeyboardActive);
+  if (el.terminalMobileKeyboard) {
+    el.terminalMobileKeyboard.setAttribute("aria-pressed", state.mobileKeyboardActive ? "true" : "false");
+  }
+}
+
+function focusMobileKeyboard() {
+  if (state.readOnly || !currentSession()) {
+    return false;
+  }
+  state.mobileKeyboardActive = true;
+  syncMobileKeyboardState();
+  el.mobileKeyboardProxy.value = "";
+  el.mobileKeyboardProxy.focus({ preventScroll: true });
+  forwardTerminalEvent({ kind: "focus", focused: true });
+  return true;
+}
+
+function terminalInputSurfaceHasFocus() {
+  const active = document.activeElement;
+  return !active || active === document.body || active === el.terminalStage || active === el.terminalFallback;
+}
+
+function focusTerminalInputSurface(options = {}) {
+  if (state.activeSheet && !options.force) {
+    return false;
+  }
+  if (options.onlyIfSurfaceFocused && !terminalInputSurfaceHasFocus()) {
+    return false;
+  }
+  const target = state.terminalFallbackActive ? el.terminalFallback : el.terminalStage;
+  if (!target || typeof target.focus !== "function") {
+    return false;
+  }
+  target.focus({ preventScroll: Boolean(options.preventScroll) });
+  return document.activeElement === target;
+}
+
+function closeMobileKeyboard() {
+  state.mobileKeyboardActive = false;
+  syncMobileKeyboardState();
+  if (document.activeElement === el.mobileKeyboardProxy) {
+    el.mobileKeyboardProxy.blur();
+  }
 }
 
 function keyModifiers(event) {
@@ -1472,6 +3713,48 @@ function shouldCaptureKey(event) {
   if (event.metaKey) {
     return false;
   }
+  return true;
+}
+
+function handleTerminalFallbackKeyEvent(event) {
+  if (!state.terminalFallbackActive) {
+    return false;
+  }
+  if (handleGlobalShortcut(event)) {
+    event.preventDefault();
+    event.stopPropagation?.();
+    return true;
+  }
+  if (!shouldCaptureKey(event)) {
+    return false;
+  }
+  event.preventDefault();
+  event.stopPropagation?.();
+  if (keyBeginsTrogdorResponse(event)) {
+    markTrogdorSessionsResponded([state.selectedSessionId]);
+  }
+  forwardTerminalEvent({
+    kind: "key",
+    phase: "down",
+    key: typeof event.key === "string" ? event.key : "",
+    code: typeof event.code === "string" ? event.code : "",
+    mods: keyModifiers(event),
+    repeat: Boolean(event.repeat),
+  });
+  return true;
+}
+
+function handleTerminalFallbackPasteEvent(event) {
+  if (!state.terminalFallbackActive || state.readOnly || !currentSession()) {
+    return false;
+  }
+  const text = event.clipboardData?.getData("text") ?? "";
+  if (!text) {
+    return false;
+  }
+  event.preventDefault();
+  event.stopPropagation?.();
+  sendTerminalText(text);
   return true;
 }
 
@@ -1616,6 +3899,82 @@ function safeOpenUrl(rawUrl) {
   }
 }
 
+function syncLinkTools() {
+  if (!el.terminalLinkTools) {
+    return;
+  }
+  const visible = Boolean(state.hoveredLinkUrl && currentSession() && !state.activeSheet && !state.selectMode);
+  el.terminalLinkTools.classList.toggle("hidden", !visible);
+  if (el.terminalLinkText) {
+    el.terminalLinkText.textContent = visible ? shortenUrl(state.hoveredLinkUrl) : "";
+  }
+}
+
+async function copyHoveredLink() {
+  if (!state.hoveredLinkUrl) {
+    setUtilityStatus("No terminal link is currently hovered.", true, 2200);
+    return false;
+  }
+  if (!navigator.clipboard?.writeText) {
+    setUtilityStatus("Clipboard write is unavailable in this browser context.", true, 3000);
+    return false;
+  }
+  try {
+    await navigator.clipboard.writeText(state.hoveredLinkUrl);
+    setUtilityStatus(`Copied ${shortenUrl(state.hoveredLinkUrl)}.`, false, 2200);
+    return true;
+  } catch (error) {
+    setUtilityStatus(`Clipboard write failed: ${error.message}`, true, 3000);
+    return false;
+  }
+}
+
+function drainTerminalLinkClicks() {
+  if (!terminalSupports("drainLinkClicks")) {
+    return;
+  }
+  const clicks = state.terminal.drainLinkClicks();
+  if (!Array.isArray(clicks) || !clicks.length) {
+    return;
+  }
+  for (const click of clicks) {
+    const url = click?.url || click?.href || "";
+    if (!url) {
+      continue;
+    }
+    if (click.openAllowed === false) {
+      setUtilityStatus(click.openReason || `Blocked ${shortenUrl(url)}.`, true, 2600);
+      continue;
+    }
+    safeOpenUrl(url);
+  }
+}
+
+async function copyTerminalFrameText() {
+  const text =
+    state.terminalMirrorText ||
+    (terminalSupports("screenReaderMirrorText") && state.terminal.screenReaderMirrorText()) ||
+    (terminalSupports("accessibilityDomSnapshot") && state.terminal.accessibilityDomSnapshot()?.value) ||
+    el.terminalFallback.textContent ||
+    "";
+  if (!text.trim()) {
+    setUtilityStatus("No terminal text is available to copy.", true, 2400);
+    return false;
+  }
+  if (!navigator.clipboard?.writeText) {
+    setUtilityStatus("Clipboard write is unavailable in this browser context.", true, 3000);
+    return false;
+  }
+  try {
+    await navigator.clipboard.writeText(text);
+    setUtilityStatus(`Copied ${text.length} visible terminal characters.`, false, 2200);
+    return true;
+  } catch (error) {
+    setUtilityStatus(`Clipboard write failed: ${error.message}`, true, 3000);
+    return false;
+  }
+}
+
 function clearHoveredLink(updateUi = true) {
   state.hoveredLinkUrl = "";
   if (terminalSupports("setHoveredLinkId")) {
@@ -1626,6 +3985,7 @@ function clearHoveredLink(updateUi = true) {
     setUtilityStatus(defaultUtilityLabel(), true);
     syncTerminalTools();
   }
+  syncLinkTools();
 }
 
 function updateHoveredLink(event) {
@@ -1648,26 +4008,238 @@ function updateHoveredLink(event) {
   } else {
     setUtilityStatus("Cmd/Ctrl-click a terminal link to open it.", true);
   }
+  syncLinkTools();
   syncTerminalTools();
 }
 
 async function sendLine(text) {
-  if (!text || !currentSession()) {
+  return sendLineToSession(state.selectedSessionId, text);
+}
+
+function loadSendHistory() {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(SEND_HISTORY_KEY) || "[]");
+    state.sendHistory = Array.isArray(parsed)
+      ? parsed.map((item) => String(item || "")).filter(Boolean).slice(0, SEND_HISTORY_LIMIT)
+      : [];
+  } catch (_error) {
+    state.sendHistory = [];
+  }
+}
+
+function saveSendHistory() {
+  localStorage.setItem(SEND_HISTORY_KEY, JSON.stringify(state.sendHistory.slice(0, SEND_HISTORY_LIMIT)));
+}
+
+function rememberSendHistory(text) {
+  const normalized = String(text || "").trim();
+  if (!normalized) {
+    return;
+  }
+  state.sendHistory = [
+    normalized,
+    ...state.sendHistory.filter((item) => item !== normalized),
+  ].slice(0, SEND_HISTORY_LIMIT);
+  saveSendHistory();
+  renderSendHistory();
+}
+
+function renderSendHistory() {
+  if (!el.sendHistory) {
+    return;
+  }
+  const items = state.sendHistory.slice(0, 6);
+  el.sendHistory.innerHTML = items
+    .map((item, index) => {
+      const label = item.replace(/\s+/g, " ").trim();
+      return `<button class="ghost-button" type="button" data-send-history-index="${index}" title="${escapeHtml(label)}">${escapeHtml(label.length > 42 ? `${label.slice(0, 39)}...` : label)}</button>`;
+    })
+    .join("");
+}
+
+async function sendLineToSession(sessionId, text) {
+  const targetSessionId = normalizeSessionId(sessionId);
+  if (!text || !targetSessionId) {
     return;
   }
 
-  const payload = text.endsWith("\n") ? text : `${text}\n`;
-
-  if (state.ws && state.ws.readyState === WebSocket.OPEN && !state.readOnly) {
-    state.ws.send(JSON.stringify({ type: "input_text", data: payload }));
+  if (
+    state.ws &&
+    state.ws.readyState === WebSocket.OPEN &&
+    !state.readOnly &&
+    state.selectedSessionId === targetSessionId
+  ) {
+    state.ws.send(JSON.stringify({ type: "submit_line", data: text }));
+    markTrogdorSessionsResponded([targetSessionId]);
     return;
   }
 
-  await apiFetch(`/v1/sessions/${encodeURIComponent(state.selectedSessionId)}/input`, {
+  await apiFetch(`/v1/sessions/${encodeURIComponent(targetSessionId)}/input`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ text: payload }),
+    body: JSON.stringify({ text, submit: true }),
   });
+  markTrogdorSessionsResponded([targetSessionId]);
+}
+
+async function sendRawTextToSession(sessionId, text) {
+  const targetSessionId = normalizeSessionId(sessionId);
+  if (!text || !targetSessionId) {
+    return;
+  }
+  if (
+    state.ws &&
+    state.ws.readyState === WebSocket.OPEN &&
+    !state.readOnly &&
+    state.selectedSessionId === targetSessionId
+  ) {
+    sendTerminalText(text);
+    return;
+  }
+  await apiFetch(`/v1/sessions/${encodeURIComponent(targetSessionId)}/input`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ text }),
+  });
+  markTrogdorSessionsResponded([targetSessionId]);
+}
+
+async function sendGroupLine(sessionIds, text) {
+  const ids = Array.isArray(sessionIds)
+    ? sessionIds.map(normalizeSessionId).filter(Boolean)
+    : [];
+  if (!text || ids.length < 2) {
+    return;
+  }
+
+  await apiFetch("/v1/sessions/group-input", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ session_ids: ids, text }),
+  });
+  markTrogdorSessionsResponded(ids);
+}
+
+function sendModeValue() {
+  return String(el.sendMode?.value || "line") === "paste" ? "paste" : "line";
+}
+
+function updateSendHint() {
+  if (!el.sendHint) {
+    return;
+  }
+  if (state.sendTarget?.type === "group") {
+    el.sendHint.textContent = "Batch sends submit the shared text to every ready agent.";
+    return;
+  }
+  el.sendHint.textContent = sendModeValue() === "paste"
+    ? "Paste only preserves text exactly for the selected live terminal."
+    : "Send submits the text to the selected agent prompt.";
+}
+
+function sendTargetReady() {
+  if (state.readOnly) {
+    return false;
+  }
+  if (!state.sendTarget) {
+    return Boolean(currentSession());
+  }
+  if (state.sendTarget.type === "group") {
+    return Array.isArray(state.sendTarget.sessionIds) && state.sendTarget.sessionIds.length >= 2;
+  }
+  return Boolean(normalizeSessionId(state.sendTarget.sessionId));
+}
+
+function openSendSheet(target = null) {
+  state.sendTarget = target;
+  const label = target?.label || currentSession()?.tmux_name || currentSession()?.session_id || "selected session";
+  if (el.sendSheetTitle) {
+    el.sendSheetTitle.textContent = target?.type === "group" ? "Send Batch" : "Send To Terminal";
+  }
+  if (el.sendMode) {
+    el.sendMode.value = "line";
+    el.sendMode.disabled = target?.type === "group";
+  }
+  el.sendInput.value = "";
+  el.sendInput.placeholder =
+    target?.type === "group"
+      ? `Send to ${Array.isArray(target.sessionIds) ? target.sessionIds.length : 0} batch agents.`
+      : `Send to ${label}.`;
+  renderSendHistory();
+  updateSendHint();
+  openSheet("send");
+  syncSheetActionAvailability();
+}
+
+function openCreateSheetForCwd(cwd) {
+  const path = String(cwd || "").trim();
+  if (path) {
+    el.createCwd.value = path;
+    el.dirsPath.value = path;
+    state.dirBrowser.path = path;
+  }
+  state.dirBrowser.group = "";
+  clearCreateBatchSelection();
+  openSheet("create");
+}
+
+function selectedBatchDirs() {
+  return Array.from(ensureDirBrowserBatchSelection())
+    .map((dir) => String(dir || "").trim())
+    .filter(Boolean);
+}
+
+function batchFailureLines(results) {
+  return results
+    .filter((result) => !result?.ok)
+    .map((result) => {
+      const cwd = String(result?.cwd || "(unknown)");
+      const message = result?.error?.message || result?.error?.code || "unknown error";
+      return `${cwd} (${message})`;
+    });
+}
+
+async function createBatchSessionsFromSheet(dirs, spawnTool, initialRequest) {
+  const response = await apiFetch("/v1/sessions/batch", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      dirs,
+      spawn_tool: spawnTool || "codex",
+      launch_target: launchTargetPayload(),
+      initial_request: initialRequest || "",
+    }),
+  });
+  const payload = await response.json();
+  const results = Array.isArray(payload?.results) ? payload.results : [];
+  const total = dirs.length;
+  const successResults = results.filter((result) => result?.ok);
+  const successCount = successResults.length;
+  const failures = batchFailureLines(results);
+  const failCount = failures.length;
+
+  if (successCount > 0) {
+    closeSheets();
+    clearCreateBatchSelection();
+    await refreshSessions();
+    const firstSessionId = successResults.find((result) => result?.session?.session_id)?.session?.session_id;
+    if (firstSessionId) {
+      await selectSession(firstSessionId);
+    }
+  }
+
+  if (failCount > 0) {
+    const preview = failures.slice(0, 3).join("; ");
+    const overflow = failCount > 3 ? ` (+${failCount - 3} more)` : "";
+    const prefix = response.status === 207 ? "Batch send partial" : "Batch send failed";
+    setUtilityStatus(`${prefix}: ${successCount}/${total} created. Failed: ${preview}${overflow}`, true, 6200);
+    if (successCount === 0) {
+      setDirStatus(`Batch send failed for all ${total}: ${preview}${overflow}`, true);
+    }
+    return;
+  }
+
+  setUtilityStatus(`Batch send created ${successCount}/${total} sessions.`, false, 3600);
 }
 
 async function createSessionFromSheet() {
@@ -1675,9 +4247,15 @@ async function createSessionFromSheet() {
     return;
   }
 
+  const batchDirs = selectedBatchDirs();
   const cwd = el.createCwd.value.trim();
   const initialRequest = el.createRequest.value.trim();
   const spawnTool = el.createTool.value;
+
+  if (batchDirs.length > 0) {
+    await createBatchSessionsFromSheet(batchDirs, spawnTool, initialRequest);
+    return;
+  }
 
   const response = await apiFetch("/v1/sessions", {
     method: "POST",
@@ -1685,6 +4263,7 @@ async function createSessionFromSheet() {
     body: JSON.stringify({
       cwd: cwd || null,
       spawn_tool: spawnTool,
+      launch_target: launchTargetPayload(),
       initial_request: initialRequest || null,
     }),
   });
@@ -1701,16 +4280,18 @@ async function createSessionFromSheet() {
 async function refreshSnapshotFallback() {
   const session = currentSession();
   if (!session) {
-    return;
+    return false;
   }
 
   try {
     const response = await apiFetch(`/v1/sessions/${encodeURIComponent(session.session_id)}/snapshot`);
     const payload = await response.json();
-    el.terminalFallback.textContent = payload.screen_text || "";
+    updateTerminalFallbackText(payload.screen_text || "");
     syncTerminalTools();
+    return Boolean(payload.screen_text);
   } catch (error) {
-    el.terminalFallback.textContent = `Snapshot unavailable: ${error.message}`;
+    updateTerminalFallbackText(`Snapshot unavailable: ${error.message}`);
+    return false;
   }
 }
 
@@ -1729,14 +4310,31 @@ function stopSnapshotPolling() {
 async function openCreateSheet() {
   const selected = currentSession();
   const preferredPath = String(el.createCwd.value || state.dirBrowser.path || selected?.cwd || "").trim();
-  const initialPath = preferredPath || "/";
-  el.createCwd.value = initialPath;
-  el.dirsPath.value = initialPath;
+  const initialPath = preferredPath || state.dirBrowser.path || "";
+  ensureDirBrowserBatchSelection().clear();
+  state.dirBrowser.group = "";
+  if (initialPath) {
+    el.createCwd.value = initialPath;
+    el.dirsPath.value = initialPath;
+  }
   if (typeof state.dirBrowser.managedOnly !== "boolean") {
     state.dirBrowser.managedOnly = false;
   }
   el.dirsManagedOnly.checked = state.dirBrowser.managedOnly;
-  await loadDirListing(initialPath, state.dirBrowser.managedOnly);
+  renderCreateBatchBar();
+  if (!state.dirBrowser.entries.length || (initialPath && initialPath !== state.dirBrowser.path)) {
+    await loadDirListing(initialPath, state.dirBrowser.managedOnly, "");
+  } else {
+    renderDirEntries({
+      path: state.dirBrowser.path,
+      entries: state.dirBrowser.entries,
+      groups: state.dirBrowser.groups,
+      overlay_label: state.dirBrowser.overlayLabel || undefined,
+      launch_targets: state.dirBrowser.launchTargets,
+      default_launch_target: state.dirBrowser.launchTarget,
+    });
+  }
+  focusActiveSheet();
 }
 
 function openThoughtConfigSheet() {
@@ -1755,11 +4353,126 @@ function openMermaidSheet() {
   openSheet("mermaid");
 }
 
+function commandPaletteItems() {
+  const selected = currentSession();
+  const baseItems = [
+    { label: "Focus terminal", meta: "terminal", actionId: "focus_terminal", disabled: !selected },
+    { label: "Search terminal", meta: "Ctrl+Shift+F", actionId: "open_search", disabled: !selected },
+    { label: "Send to terminal", meta: "Ctrl+Shift+S", actionId: "open_send", disabled: state.readOnly || !selected },
+    { label: "Copy selection", meta: "Ctrl+Shift+C", actionId: "copy_selection", disabled: !selected },
+    { label: "Copy visible text", meta: "frame", action: copyTerminalFrameText, disabled: !selected },
+    { label: "Toggle select mode", meta: "Ctrl+Shift+V", actionId: "toggle_select", disabled: !selected },
+    { label: "Open native terminal", meta: "desktop", actionId: "open_native", disabled: !selected },
+    { label: "Open Mermaid artifacts", meta: "artifacts", actionId: "open_mermaid", disabled: !selected },
+    { label: "Create session", meta: "spawn", actionId: "open_create", disabled: state.readOnly },
+    { label: "Refresh sessions", meta: "sync", actionId: "refresh" },
+    { label: "Toggle follow published", meta: "selection", actionId: "toggle_follow" },
+    { label: "Thought config", meta: "policy", actionId: "open_config" },
+    { label: "Auth token", meta: "connection", actionId: "open_auth" },
+    { label: "Toggle Trogdor atlas", meta: "overview", actionId: "toggle_trogdor_atlas" },
+  ];
+  const sessionItems = state.sessions.map((session) => ({
+    label: `Switch to ${sessionDisplayName(session)}`,
+    meta: `${session.session_id}  ${session.state || ""}`,
+    sessionId: session.session_id,
+  }));
+  return [...baseItems, ...sessionItems];
+}
+
+function commandPaletteScore(item, query) {
+  const haystack = `${item.label} ${item.meta || ""}`.toLowerCase();
+  if (!query) {
+    return 1;
+  }
+  const exact = haystack.indexOf(query);
+  if (exact >= 0) {
+    return 1000 - exact;
+  }
+  let score = 0;
+  let cursor = 0;
+  for (const char of query) {
+    const next = haystack.indexOf(char, cursor);
+    if (next < 0) {
+      return 0;
+    }
+    score += Math.max(1, 40 - (next - cursor));
+    cursor = next + 1;
+  }
+  return score;
+}
+
+function filteredCommandPaletteItems() {
+  const query = String(el.paletteSearch?.value || "").trim().toLowerCase();
+  return commandPaletteItems()
+    .map((item) => ({ ...item, score: commandPaletteScore(item, query) }))
+    .filter((item) => !query || item.score > 0)
+    .sort((a, b) => b.score - a.score || a.label.localeCompare(b.label))
+    .slice(0, 18);
+}
+
+function renderCommandPalette() {
+  if (!el.paletteResults) {
+    return;
+  }
+  state.paletteItems = filteredCommandPaletteItems();
+  state.paletteIndex = clampInt(state.paletteIndex, 0, 0, Math.max(0, state.paletteItems.length - 1));
+  if (!state.paletteItems.length) {
+    el.paletteResults.innerHTML = `<div class="sheet-copy">No matching commands.</div>`;
+    return;
+  }
+  el.paletteResults.innerHTML = state.paletteItems
+    .map((item, index) => `
+      <button
+        class="palette-item${index === state.paletteIndex ? " is-active" : ""}"
+        type="button"
+        role="option"
+        aria-selected="${index === state.paletteIndex ? "true" : "false"}"
+        data-palette-index="${index}"
+        ${item.disabled ? "disabled" : ""}
+      >
+        <span class="palette-item-title">${escapeHtml(item.label)}</span>
+        <span class="palette-item-meta">${escapeHtml(item.disabled ? "unavailable" : item.meta || "")}</span>
+      </button>
+    `)
+    .join("");
+}
+
+async function runCommandPaletteItem(item = state.paletteItems[state.paletteIndex]) {
+  if (!item || item.disabled) {
+    return false;
+  }
+  closeSheets();
+  if (item.sessionId) {
+    await selectSession(item.sessionId);
+    return true;
+  }
+  if (typeof item.action === "function") {
+    await item.action();
+    return true;
+  }
+  if (item.actionId) {
+    await handleSurfaceAction({ type: "action", actionId: item.actionId });
+    return true;
+  }
+  return false;
+}
+
+function openCommandPalette() {
+  setActiveSheet("palette");
+  if (el.paletteSearch) {
+    el.paletteSearch.value = "";
+  }
+  state.paletteIndex = 0;
+  renderCommandPalette();
+  focusActiveSheet();
+}
+
 function setActiveSheet(sheetId) {
   state.activeSheet = sheetId;
   document.body.classList.toggle("sheet-open", Boolean(sheetId));
   el.modalRoot.classList.toggle("visible", Boolean(sheetId));
   el.modalRoot.setAttribute("aria-hidden", sheetId ? "false" : "true");
+  el.paletteSheet.classList.toggle("hidden", sheetId !== "palette");
   el.searchSheet.classList.toggle("hidden", sheetId !== "search");
   el.thoughtConfigSheet.classList.toggle("hidden", sheetId !== "thought-config");
   el.nativeSheet.classList.toggle("hidden", sheetId !== "native");
@@ -1774,6 +4487,10 @@ function setActiveSheet(sheetId) {
 function focusActiveSheet() {
   requestAnimationFrame(() => {
     switch (state.activeSheet) {
+      case "palette":
+        el.paletteSearch.focus();
+        el.paletteSearch.select();
+        break;
       case "search":
         el.terminalSearch.focus();
         el.terminalSearch.select();
@@ -1793,13 +4510,20 @@ function focusActiveSheet() {
         el.tokenInput.select();
         break;
       case "create":
-        el.createCwd.focus();
+        {
+          const firstCheckbox = el.dirsList.querySelector(".dir-row-check:not(:disabled)");
+          if (firstCheckbox) {
+            firstCheckbox.focus();
+          } else {
+            el.createCwd.focus();
+          }
+        }
         break;
       case "mermaid":
         el.mermaidRefreshButton.focus();
         break;
       default:
-        el.terminalStage.focus();
+        focusTerminalInputSurface({ preventScroll: true });
         break;
     }
   });
@@ -1807,6 +4531,9 @@ function focusActiveSheet() {
 
 function openSheet(sheetId) {
   setActiveSheet(sheetId);
+  if (sheetId === "palette") {
+    renderCommandPalette();
+  }
   if (sheetId === "search") {
     el.terminalSearch.value = state.searchQuery;
   }
@@ -1829,23 +4556,73 @@ function openSheet(sheetId) {
 }
 
 function closeSheets() {
+  if (state.activeSheet === "send") {
+    state.sendTarget = null;
+  }
+  if (state.activeSheet === "create") {
+    clearCreateBatchSelection();
+    state.dirBrowser.group = "";
+  }
   setActiveSheet(null);
-  el.terminalStage.focus();
+  focusTerminalInputSurface({ preventScroll: true });
+}
+
+function closeTrogdorAtlasForTerminal() {
+  state.trogdorAtlasOpen = false;
+  state.hoveredTrogdorSessionId = null;
+  state.trogdorReaderStartedAt = 0;
+  state.trogdorReaderStartIndex = 0;
+  state.trogdorReaderClawgKey = "";
+  state.trogdorSurfaceSignature = "";
+  syncTrogdorReaderTimer();
+  applyTrogdorAtlasVisibility();
+  syncTerminalPresentation();
+}
+
+function applyTrogdorAtlasVisibility() {
+  const visible = Boolean(state.trogdorAtlasOpen);
+  if (el.trogdorSurface) {
+    el.trogdorSurface.classList.toggle("hidden", !visible);
+    el.trogdorSurface.setAttribute("aria-hidden", visible ? "false" : "true");
+    el.trogdorSurface.style.display = visible ? "" : "none";
+  }
+  el.trogdorLauncher?.classList.toggle("hidden", visible || Boolean(state.activeSheet));
+  document.body.classList.toggle("trogdor-mode", visible);
 }
 
 async function selectSession(sessionId) {
-  if (!normalizeSessionId(sessionId)) {
+  const normalized = normalizeSessionId(sessionId);
+  if (!normalized) {
     return;
   }
+  closeTrogdorAtlasForTerminal();
   if (state.followPublishedSelection) {
     setFollowPublishedSelection(false);
   }
-  persistSelectedSession(sessionId);
+  persistSelectedSession(normalized);
   renderHudSurface();
   await connectSelectedSession();
   if (state.activeSheet === "mermaid") {
     await refreshMermaidArtifact();
   }
+}
+
+async function openTrogdorAgentTerminal(sessionId) {
+  const normalized = normalizeSessionId(sessionId);
+  if (!normalized) {
+    return;
+  }
+
+  await selectSession(normalized);
+  focusTerminalInputSurface({ preventScroll: true });
+  const session = currentSession();
+  setUtilityStatus(
+    session
+      ? `Opened terminal for ${session.tmux_name || session.session_id}.`
+      : "Opened terminal for agent.",
+    false,
+    2200,
+  );
 }
 
 async function toggleFollowPublished() {
@@ -1868,13 +4645,98 @@ async function handleSurfaceAction(zone) {
     return;
   }
 
+  if (zone.type === "trogdor_agent") {
+    await openTrogdorAgentTerminal(zone.sessionId);
+    return;
+  }
+
+  if (zone.type === "trogdor_reader") {
+    return;
+  }
+
   switch (zone.actionId) {
+    case "trogdor_read_toggle":
+    {
+      const wasReading = state.trogdorReading !== false;
+      advanceTrogdorReaderProgressForCurrentHover();
+      if (wasReading) {
+        state.trogdorReading = false;
+      } else {
+        const session = currentTrogdorSurfaceSession();
+        if (session) {
+          startTrogdorReaderForSession(session, { readAgain: trogdorClawgReadComplete(session) });
+        } else {
+          state.trogdorReading = true;
+        }
+        state.trogdorReaderStartedAt = performance.now();
+      }
+      renderHudSurface();
+      syncTrogdorReaderTimer();
+      break;
+    }
+    case "trogdor_wpm_down":
+    {
+      advanceTrogdorReaderProgressForCurrentHover();
+      state.trogdorWpm = clampInt(state.trogdorWpm - 25, 200, 50, 800);
+      const session = currentTrogdorSurfaceSession();
+      state.trogdorReaderStartIndex = session
+        ? trogdorClawgReadIndex(session)
+        : state.trogdorReaderStartIndex;
+      state.trogdorReaderStartedAt = performance.now();
+      renderHudSurface();
+      break;
+    }
+    case "trogdor_wpm_up":
+    {
+      advanceTrogdorReaderProgressForCurrentHover();
+      state.trogdorWpm = clampInt(state.trogdorWpm + 25, 200, 50, 800);
+      const session = currentTrogdorSurfaceSession();
+      state.trogdorReaderStartIndex = session
+        ? trogdorClawgReadIndex(session)
+        : state.trogdorReaderStartIndex;
+      state.trogdorReaderStartedAt = performance.now();
+      renderHudSurface();
+      break;
+    }
+    case "toggle_trogdor_atlas":
+      state.trogdorAtlasOpen = !state.trogdorAtlasOpen;
+      renderHudSurface();
+      break;
+    case "trogdor_send":
+      openSendSheet({
+        type: "session",
+        sessionId: zone.sessionId,
+        label: zone.label || zone.sessionId,
+      });
+      break;
+    case "trogdor_group_send":
+      openSendSheet({
+        type: "group",
+        sessionIds: Array.isArray(zone.sessionIds) ? zone.sessionIds : [],
+        label: zone.label || "batch agents",
+      });
+      break;
+    case "trogdor_launch":
+      openCreateSheetForCwd(zone.cwd);
+      break;
+    case "trogdor_mermaid":
+      await selectSession(zone.sessionId);
+      openMermaidSheet();
+      break;
+    case "trogdor_commit":
+      await selectSession(zone.sessionId);
+      await launchCommitCodex();
+      break;
     case "open_search":
       openSheet("search");
       break;
     case "open_send":
       if (!state.readOnly && currentSession()) {
-        openSheet("send");
+        openSendSheet({
+          type: "session",
+          sessionId: currentSession().session_id,
+          label: currentSession().tmux_name || currentSession().session_id,
+        });
       }
       break;
     case "open_auth":
@@ -1907,7 +4769,9 @@ async function handleSurfaceAction(zone) {
       await copyTerminalSelection();
       break;
     case "focus_terminal":
-      el.terminalStage.focus();
+      state.trogdorAtlasOpen = false;
+      renderHudSurface();
+      focusTerminalInputSurface({ preventScroll: true });
       setUtilityStatus(
         currentSession()
           ? "Terminal focused. Type directly or use the terminal actions below."
@@ -1933,10 +4797,264 @@ function surfaceHit(event) {
   };
 }
 
+function terminalFallbackOwnsPointer(event) {
+  return Boolean(
+    state.terminalFallbackActive &&
+      event.target instanceof Element &&
+      event.target.closest("#terminal-fallback"),
+  );
+}
+
+function captureSurfaceAction(event, phase) {
+  if (state.activeSheet) {
+    return false;
+  }
+  if (terminalFallbackOwnsPointer(event)) {
+    return false;
+  }
+  if (event.target instanceof Element && event.target.closest("#trogdor-surface, #trogdor-launcher")) {
+    return false;
+  }
+  const hit = surfaceHit(event);
+  if (!hit.action && !hit.consume) {
+    return false;
+  }
+
+  if (hit.action) {
+    if (phase === "wheel") {
+      event.preventDefault();
+      stopSurfaceEvent(event);
+      return true;
+    }
+    if (phase === "click" && shouldIgnoreSyntheticClick(performance.now(), state.surfaceClickSuppressUntil)) {
+      event.preventDefault();
+      stopSurfaceEvent(event);
+      return true;
+    }
+    if (phase === "down" || phase === "touch" || phase === "click") {
+      if (phase === "down" || phase === "touch") {
+        state.surfaceClickSuppressUntil = performance.now() + SURFACE_CLICK_SUPPRESS_MS;
+      }
+      event.preventDefault();
+      stopSurfaceEvent(event);
+      void handleSurfaceAction(hit.action);
+      return true;
+    }
+  }
+
+  if (hit.consume) {
+    event.preventDefault();
+    stopSurfaceEvent(event);
+    return true;
+  }
+
+  return false;
+}
+
+function stopSurfaceEvent(event) {
+  if (typeof event.stopImmediatePropagation === "function") {
+    event.stopImmediatePropagation();
+    return;
+  }
+  event.stopPropagation();
+}
+
+function updateHoveredTrogdorSurface(zone) {
+  const previousSessionId = state.hoveredTrogdorSessionId;
+  const nextSessionId =
+    zone?.type === "trogdor_agent" || zone?.type === "trogdor_reader"
+      ? zone.sessionId
+      : String(zone?.actionId || "").startsWith("trogdor_")
+        ? state.hoveredTrogdorSessionId
+      : null;
+  if (nextSessionId === previousSessionId) {
+    return;
+  }
+  state.hoveredTrogdorSessionId = nextSessionId;
+  state.trogdorReaderStartedAt = 0;
+  state.trogdorReaderStartIndex = 0;
+  state.trogdorReaderClawgKey = "";
+  if (el.trogdorSurface) {
+    const agents = el.trogdorSurface.querySelectorAll("[data-trogdor-agent]");
+    for (const agent of agents) {
+      agent.classList.toggle("is-hovered", Boolean(nextSessionId) && agent.dataset.sessionId === nextSessionId);
+    }
+  }
+  if (nextSessionId) {
+    const session = state.sessions.find((item) => item.session_id === nextSessionId);
+    if (session) {
+      startTrogdorReaderForSession(surfaceSession(session));
+    }
+    setUtilityStatus(
+      session
+        ? `Speed reading ${session.tmux_name || session.session_id} at ${state.trogdorWpm} wpm.`
+        : `Speed reading agent at ${state.trogdorWpm} wpm.`,
+      false,
+      1200,
+    );
+  }
+  renderHudSurface();
+  syncTrogdorReaderTimer();
+}
+
+function syncTrogdorReaderTimer() {
+  const session = currentTrogdorSurfaceSession();
+  const shouldRun = Boolean(
+    session && trogdorSessionCanRead(session) && state.trogdorReading && !trogdorClawgReadComplete(session),
+  );
+  if (shouldRun && !state.trogdorReaderTimer) {
+    state.trogdorReaderTimer = window.setInterval(() => {
+      renderHudSurface();
+    }, 120);
+    return;
+  }
+  if (!shouldRun && state.trogdorReaderTimer) {
+    window.clearInterval(state.trogdorReaderTimer);
+    state.trogdorReaderTimer = null;
+  }
+}
+
+async function handleTrogdorDomAction(button) {
+  if (!button || button.disabled) {
+    return;
+  }
+  const actionId = String(button.dataset.action || "");
+  const zone = {
+    type: "action",
+    actionId,
+  };
+  if (button.dataset.sessionId) {
+    zone.sessionId = button.dataset.sessionId;
+  }
+  if (button.dataset.label) {
+    zone.label = button.dataset.label;
+  }
+  if (button.dataset.cwd) {
+    zone.cwd = button.dataset.cwd;
+  }
+  if (button.dataset.sessionIds) {
+    try {
+      zone.sessionIds = JSON.parse(button.dataset.sessionIds);
+    } catch (_error) {
+      zone.sessionIds = [];
+    }
+  }
+  await handleSurfaceAction(zone);
+}
+
+function bindTrogdorEvents() {
+  if (el.trogdorLauncher) {
+    el.trogdorLauncher.addEventListener("click", (event) => {
+      event.preventDefault();
+      state.trogdorAtlasOpen = true;
+      renderHudSurface();
+    });
+  }
+
+  if (!el.trogdorSurface) {
+    return;
+  }
+
+  el.trogdorSurface.addEventListener("pointerdown", (event) => {
+    const agent = event.target instanceof Element ? event.target.closest("[data-trogdor-agent]") : null;
+    const sessionId = agent?.dataset?.sessionId || "";
+    if (!sessionId) {
+      return;
+    }
+    event.preventDefault();
+    event.stopPropagation();
+    void openTrogdorAgentTerminal(sessionId);
+  });
+
+  for (const eventName of ["mousedown", "mouseup", "mousemove", "touchend", "wheel"]) {
+    el.trogdorSurface.addEventListener(
+      eventName,
+      (event) => {
+        event.stopPropagation();
+      },
+      eventName === "wheel" || eventName === "touchend" ? { passive: false } : undefined,
+    );
+  }
+
+  el.trogdorSurface.addEventListener("click", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    const button = event.target instanceof Element ? event.target.closest("button[data-action]") : null;
+    if (button) {
+      void handleTrogdorDomAction(button);
+      return;
+    }
+    const agent = event.target instanceof Element ? event.target.closest("[data-trogdor-agent]") : null;
+    const sessionId = agent?.dataset?.sessionId || "";
+    if (sessionId) {
+      void handleSurfaceAction({ type: "trogdor_agent", sessionId });
+    }
+  });
+
+  el.trogdorSurface.addEventListener("mouseover", (event) => {
+    const target = event.target instanceof Element ? event.target : null;
+    const agent = target?.closest("[data-trogdor-agent]");
+    if (agent?.dataset?.sessionId) {
+      updateHoveredTrogdorSurface({ type: "trogdor_agent", sessionId: agent.dataset.sessionId });
+      return;
+    }
+    const action = target?.closest("button[data-action]");
+    if (action?.dataset?.action?.startsWith("trogdor_")) {
+      updateHoveredTrogdorSurface({ type: "action", actionId: action.dataset.action });
+    }
+  });
+
+  el.trogdorSurface.addEventListener("mouseleave", () => {
+    updateHoveredTrogdorSurface(null);
+  });
+
+  el.trogdorSurface.addEventListener("focusin", (event) => {
+    const target = event.target instanceof Element ? event.target : null;
+    const agent = target?.closest("[data-trogdor-agent]");
+    if (agent?.dataset?.sessionId) {
+      updateHoveredTrogdorSurface({ type: "trogdor_agent", sessionId: agent.dataset.sessionId });
+    }
+  });
+
+  el.trogdorSurface.addEventListener("focusout", (event) => {
+    const next = event.relatedTarget instanceof Element ? event.relatedTarget : null;
+    if (!next || !el.trogdorSurface.contains(next)) {
+      updateHoveredTrogdorSurface(null);
+    }
+  });
+}
+
 function handleGlobalShortcut(event) {
+  if ((event.ctrlKey || event.metaKey) && !event.altKey) {
+    switch (event.code) {
+      case "KeyK":
+        openCommandPalette();
+        return true;
+      case "Equal":
+      case "NumpadAdd":
+        setTerminalZoom(state.terminalZoom + TERMINAL_ZOOM_STEP, { announce: true });
+        return true;
+      case "Minus":
+      case "NumpadSubtract":
+        setTerminalZoom(state.terminalZoom - TERMINAL_ZOOM_STEP, { announce: true });
+        return true;
+      case "Digit0":
+      case "Numpad0":
+        setTerminalZoom(1, { announce: true });
+        return true;
+      default:
+        break;
+    }
+  }
+
   if (event.key === "Escape") {
     if (state.activeSheet) {
       closeSheets();
+      return true;
+    }
+    if (state.trogdorAtlasOpen) {
+      state.trogdorAtlasOpen = false;
+      renderHudSurface();
       return true;
     }
     if (state.selectMode) {
@@ -1985,6 +5103,11 @@ function handleGlobalShortcut(event) {
     case "KeyC":
       void copyTerminalSelection();
       return true;
+    case "KeyL":
+      if (state.hoveredLinkUrl) {
+        void copyHoveredLink();
+      }
+      return true;
     case "KeyR":
       void refreshSessions();
       return true;
@@ -1994,6 +5117,185 @@ function handleGlobalShortcut(event) {
 }
 
 function bindEvents() {
+  bindTrogdorEvents();
+  document.addEventListener?.("keydown", (event) => {
+    if ((event.ctrlKey || event.metaKey) && !event.altKey && event.code === "KeyK") {
+      event.preventDefault();
+      openCommandPalette();
+    }
+  });
+  el.terminalPalette.addEventListener("click", () => {
+    openCommandPalette();
+  });
+  el.terminalCopyFrame.addEventListener("click", () => {
+    void copyTerminalFrameText();
+  });
+  el.terminalLinkOpen.addEventListener("click", () => {
+    if (state.hoveredLinkUrl) {
+      safeOpenUrl(state.hoveredLinkUrl);
+    }
+  });
+  el.terminalLinkCopy.addEventListener("click", () => {
+    void copyHoveredLink();
+  });
+  el.terminalZoomOut.addEventListener("click", () => {
+    setTerminalZoom(state.terminalZoom - TERMINAL_ZOOM_STEP, { announce: true });
+    focusTerminalInputSurface({ preventScroll: true });
+  });
+  el.terminalZoomReset.addEventListener("click", () => {
+    setTerminalZoom(1, { announce: true });
+    focusTerminalInputSurface({ preventScroll: true });
+  });
+  el.terminalZoomIn.addEventListener("click", () => {
+    setTerminalZoom(state.terminalZoom + TERMINAL_ZOOM_STEP, { announce: true });
+    focusTerminalInputSurface({ preventScroll: true });
+  });
+  el.terminalMobileKeyboard.addEventListener("click", () => {
+    if (state.mobileKeyboardActive) {
+      closeMobileKeyboard();
+      focusTerminalInputSurface({ preventScroll: true });
+      return;
+    }
+    focusMobileKeyboard();
+  });
+  el.terminalInputDock.addEventListener("submit", (event) => {
+    event.preventDefault();
+    void submitTerminalInputDock();
+  });
+  el.terminalInlineInput.addEventListener("input", () => {
+    resizeTerminalInlineInput();
+    syncTerminalInputDock();
+  });
+  el.terminalInlineInput.addEventListener("keydown", (event) => {
+    if (event.key === "Enter" && !event.shiftKey) {
+      event.preventDefault();
+      void submitTerminalInputDock();
+    }
+    event.stopPropagation();
+  });
+  el.terminalInlineInput.addEventListener("focus", () => {
+    if (!state.activeSheet) {
+      forwardTerminalEvent({ kind: "focus", focused: true });
+    }
+  });
+  el.terminalFallback.addEventListener("mousedown", () => {
+    if (state.terminalFallbackActive && !state.activeSheet) {
+      requestAnimationFrame(() => {
+        focusTerminalInputSurface({ preventScroll: true });
+      });
+    }
+  });
+  el.terminalFallback.addEventListener("click", () => {
+    if (state.terminalFallbackActive && !state.activeSheet) {
+      focusTerminalInputSurface({ preventScroll: true });
+    }
+  });
+  el.terminalFallback.addEventListener("keydown", handleTerminalFallbackKeyEvent);
+  el.terminalFallback.addEventListener("paste", handleTerminalFallbackPasteEvent);
+  el.terminalFallback.addEventListener("focus", () => {
+    if (state.terminalFallbackActive && !state.activeSheet) {
+      forwardTerminalEvent({ kind: "focus", focused: true });
+    }
+  });
+  el.terminalFallback.addEventListener("blur", () => {
+    if (document.activeElement === el.mobileKeyboardProxy) {
+      return;
+    }
+    if (state.terminalFallbackActive) {
+      forwardTerminalEvent({ kind: "focus", focused: false });
+    }
+  });
+  el.terminalFallback.addEventListener("scroll", () => {
+    if (state.terminalFallbackActive) {
+      state.terminalFallbackAutoFollow = terminalFallbackIsNearBottom();
+    }
+  });
+  el.mobileKeyboardProxy.addEventListener("focus", () => {
+    state.mobileKeyboardActive = true;
+    syncMobileKeyboardState();
+    forwardTerminalEvent({ kind: "focus", focused: true });
+  });
+  el.mobileKeyboardProxy.addEventListener("blur", () => {
+    state.mobileKeyboardActive = false;
+    syncMobileKeyboardState();
+    forwardTerminalEvent({ kind: "focus", focused: false });
+  });
+  el.mobileKeyboardProxy.addEventListener("keydown", (event) => {
+    if (handleGlobalShortcut(event)) {
+      event.preventDefault();
+      return;
+    }
+    if (state.readOnly || !currentSession()) {
+      return;
+    }
+    const specialKeys = new Set([
+      "Backspace",
+      "Delete",
+      "Enter",
+      "Tab",
+      "Escape",
+      "ArrowUp",
+      "ArrowDown",
+      "ArrowLeft",
+      "ArrowRight",
+      "Home",
+      "End",
+      "PageUp",
+      "PageDown",
+    ]);
+    if (!specialKeys.has(event.key)) {
+      return;
+    }
+    event.preventDefault();
+    if (event.key === "Escape") {
+      closeMobileKeyboard();
+      focusTerminalInputSurface({ preventScroll: true });
+      return;
+    }
+    if (keyBeginsTrogdorResponse(event)) {
+      markTrogdorSessionsResponded([state.selectedSessionId]);
+    }
+    forwardTerminalEvent({
+      kind: "key",
+      phase: "down",
+      key: typeof event.key === "string" ? event.key : "",
+      code: typeof event.code === "string" ? event.code : "",
+      mods: keyModifiers(event),
+      repeat: Boolean(event.repeat),
+    });
+  });
+  el.mobileKeyboardProxy.addEventListener("input", (event) => {
+    if (state.readOnly || !currentSession()) {
+      el.mobileKeyboardProxy.value = "";
+      return;
+    }
+    const inputType = String(event.inputType || "");
+    const inserted = typeof event.data === "string" ? event.data : el.mobileKeyboardProxy.value;
+    el.mobileKeyboardProxy.value = "";
+    if (inputType === "deleteContentBackward") {
+      forwardTerminalEvent({
+        kind: "key",
+        phase: "down",
+        key: "Backspace",
+        code: "Backspace",
+        mods: 0,
+        repeat: false,
+      });
+      return;
+    }
+    if (inputType === "insertLineBreak") {
+      forwardTerminalEvent({
+        kind: "key",
+        phase: "down",
+        key: "Enter",
+        code: "Enter",
+        mods: 0,
+        repeat: false,
+      });
+      return;
+    }
+    sendTerminalText(inserted);
+  });
   el.modalBackdrop.addEventListener("click", closeSheets);
   el.modalRoot.addEventListener("keydown", (event) => {
     if (event.key === "Escape") {
@@ -2001,6 +5303,45 @@ function bindEvents() {
       closeSheets();
     }
   });
+  el.paletteSearch.addEventListener("input", () => {
+    state.paletteIndex = 0;
+    renderCommandPalette();
+  });
+  el.paletteSearch.addEventListener("keydown", (event) => {
+    if (event.key === "ArrowDown") {
+      event.preventDefault();
+      state.paletteIndex = Math.min(state.paletteItems.length - 1, state.paletteIndex + 1);
+      renderCommandPalette();
+      return;
+    }
+    if (event.key === "ArrowUp") {
+      event.preventDefault();
+      state.paletteIndex = Math.max(0, state.paletteIndex - 1);
+      renderCommandPalette();
+      return;
+    }
+    if (event.key === "Enter") {
+      event.preventDefault();
+      void runCommandPaletteItem();
+    }
+  });
+  el.paletteResults.addEventListener("mousemove", (event) => {
+    const item = event.target instanceof Element ? event.target.closest("[data-palette-index]") : null;
+    if (!item) {
+      return;
+    }
+    state.paletteIndex = clampInt(Number(item.dataset.paletteIndex), 0, 0, Math.max(0, state.paletteItems.length - 1));
+    renderCommandPalette();
+  });
+  el.paletteResults.addEventListener("click", (event) => {
+    const item = event.target instanceof Element ? event.target.closest("[data-palette-index]") : null;
+    if (!item) {
+      return;
+    }
+    state.paletteIndex = clampInt(Number(item.dataset.paletteIndex), 0, 0, Math.max(0, state.paletteItems.length - 1));
+    void runCommandPaletteItem();
+  });
+  el.paletteCloseButton.addEventListener("click", closeSheets);
 
   el.searchForm.addEventListener("submit", (event) => {
     event.preventDefault();
@@ -2020,6 +5361,7 @@ function bindEvents() {
     applySearchQuery("");
   });
   el.searchCloseButton.addEventListener("click", closeSheets);
+  el.sendMode.addEventListener("change", updateSendHint);
 
   el.thoughtConfigForm.addEventListener("submit", async (event) => {
     event.preventDefault();
@@ -2068,15 +5410,50 @@ function bindEvents() {
     if (state.readOnly) {
       return;
     }
-    const text = el.sendInput.value.trim();
-    if (!text) {
+    const text = el.sendInput.value;
+    if (!text.trim()) {
       return;
     }
-    await sendLine(text);
-    el.sendInput.value = "";
+    try {
+      rememberSendHistory(text);
+      if (state.sendTarget?.type === "group") {
+        await sendGroupLine(state.sendTarget.sessionIds, text);
+        setUtilityStatus(`Sent batch line to ${state.sendTarget.sessionIds.length} agents.`, false, 2400);
+      } else {
+        const targetSessionId = state.sendTarget?.sessionId || state.selectedSessionId;
+        if (sendModeValue() === "paste") {
+          await sendRawTextToSession(targetSessionId, text);
+          setUtilityStatus(`Pasted text to ${state.sendTarget?.label || targetSessionId}.`, false, 2200);
+        } else {
+          await sendLineToSession(targetSessionId, text);
+          setUtilityStatus(`Sent line to ${state.sendTarget?.label || targetSessionId}.`, false, 2200);
+        }
+      }
+      el.sendInput.value = "";
+      state.sendTarget = null;
+      closeSheets();
+      await refreshSessions();
+    } catch (error) {
+      setUtilityStatus(`Send failed: ${error.message}`, true, 3200);
+      syncSheetActionAvailability();
+    }
+  });
+  el.sendCloseButton.addEventListener("click", () => {
+    state.sendTarget = null;
     closeSheets();
   });
-  el.sendCloseButton.addEventListener("click", closeSheets);
+  el.sendHistory.addEventListener("click", (event) => {
+    const button = event.target instanceof Element ? event.target.closest("[data-send-history-index]") : null;
+    if (!button) {
+      return;
+    }
+    const index = Number(button.dataset.sendHistoryIndex);
+    const text = state.sendHistory[index] || "";
+    if (text) {
+      el.sendInput.value = text;
+      el.sendInput.focus();
+    }
+  });
 
   el.saveTokenButton.addEventListener("click", async () => {
     persistToken(el.tokenInput.value);
@@ -2097,9 +5474,57 @@ function bindEvents() {
     await createSessionFromSheet();
   });
   el.createCloseButton.addEventListener("click", closeSheets);
+  el.createTool.addEventListener("change", () => {
+    syncSheetActionAvailability();
+  });
+  el.createLaunchTarget.addEventListener("change", () => {
+    state.dirBrowser.launchTarget = selectedLaunchTarget();
+    renderCreateBatchBar();
+    syncSheetActionAvailability();
+  });
+  el.createRequest.addEventListener("input", () => {
+    syncSheetActionAvailability();
+  });
+  el.dirsSearch.addEventListener("input", () => {
+    state.dirBrowser.search = String(el.dirsSearch.value || "");
+    renderDirEntries({
+      path: state.dirBrowser.path,
+      entries: state.dirBrowser.entries,
+      groups: state.dirBrowser.groups,
+      overlay_label: state.dirBrowser.overlayLabel || undefined,
+      launch_targets: state.dirBrowser.launchTargets,
+      default_launch_target: state.dirBrowser.launchTarget,
+    });
+  });
+  el.createBatchVisible.addEventListener("click", () => {
+    const paths = visibleSelectableDirPaths();
+    const selected = ensureDirBrowserBatchSelection();
+    selected.clear();
+    for (const path of paths) {
+      selected.add(path);
+    }
+    const firstPath = paths[0] || state.dirBrowser.path || el.dirsPath.value;
+    if (firstPath) {
+      el.createCwd.value = firstPath;
+    }
+    renderDirEntries({
+      path: state.dirBrowser.path,
+      entries: state.dirBrowser.entries,
+      groups: state.dirBrowser.groups,
+      overlay_label: state.dirBrowser.overlayLabel || undefined,
+      launch_targets: state.dirBrowser.launchTargets,
+      default_launch_target: state.dirBrowser.launchTarget,
+    });
+    setDirStatus(paths.length ? `Batching ${paths.length} visible directories.` : "No visible directories to batch.", paths.length < 1);
+  });
+  if (el.createBatchClear) {
+    el.createBatchClear.addEventListener("click", () => {
+      clearCreateBatchSelection();
+      setDirStatus("Batch selection cleared.");
+    });
+  }
   el.createCwd.addEventListener("input", () => {
     el.dirsPath.value = el.createCwd.value;
-    localStorage.setItem(DIR_BROWSER_PATH_KEY, String(el.createCwd.value || "").trim());
     syncSheetActionAvailability();
   });
   el.dirsManagedOnly.addEventListener("change", () => {
@@ -2109,43 +5534,124 @@ function bindEvents() {
     void loadDirListing(el.dirsPath.value, state.dirBrowser.managedOnly);
   });
   el.dirsPath.addEventListener("input", () => {
-    localStorage.setItem(DIR_BROWSER_PATH_KEY, String(el.dirsPath.value || "").trim());
     syncSheetActionAvailability();
   });
   el.dirsPath.addEventListener("keydown", (event) => {
     if (event.key === "Enter") {
       event.preventDefault();
-      void loadDirListing(el.dirsPath.value, el.dirsManagedOnly.checked);
+      state.dirBrowser.group = "";
+      clearCreateBatchSelection();
+      void loadDirListing(el.dirsPath.value, el.dirsManagedOnly.checked, "");
     }
   });
   el.dirsLoadButton.addEventListener("click", async () => {
-    await loadDirListing(el.dirsPath.value, el.dirsManagedOnly.checked);
+    state.dirBrowser.group = "";
+    clearCreateBatchSelection();
+    await loadDirListing(el.dirsPath.value, el.dirsManagedOnly.checked, "");
+  });
+  el.dirsSpawnHere.addEventListener("click", async () => {
+    if (state.readOnly) {
+      return;
+    }
+    const path = String(state.dirBrowser.path || el.dirsPath.value || el.createCwd.value || "").trim();
+    if (!path) {
+      return;
+    }
+    clearCreateBatchSelection();
+    el.createCwd.value = path;
+    el.dirsPath.value = path;
+    try {
+      await createSessionFromSheet();
+    } catch (error) {
+      setDirStatus(`Failed to spawn here: ${error.message}`, true);
+      syncSheetActionAvailability();
+    }
   });
   el.dirsUpButton.addEventListener("click", async () => {
     const parent = parentDir(el.dirsPath.value);
     if (parent) {
+      state.dirBrowser.group = "";
+      clearCreateBatchSelection();
       el.dirsPath.value = parent;
       el.createCwd.value = parent;
-      await loadDirListing(parent, el.dirsManagedOnly.checked);
+      await loadDirListing(parent, el.dirsManagedOnly.checked, "");
     }
   });
-  el.dirsList.addEventListener("click", async (event) => {
-    const button = event.target instanceof Element ? event.target.closest(".browser-entry") : null;
-    if (!button) {
+  el.dirsList.addEventListener("change", (event) => {
+    const checkbox = event.target instanceof Element ? event.target.closest(".dir-row-check") : null;
+    if (!checkbox) {
       return;
     }
-    const path = String(button.dataset.path || "").trim();
+    const path = String(checkbox.dataset.path || "").trim();
+    if (!path) {
+      checkbox.checked = false;
+      return;
+    }
+    const selected = ensureDirBrowserBatchSelection();
+    if (checkbox.checked) {
+      selected.add(path);
+      el.createCwd.value = path;
+    } else {
+      selected.delete(path);
+    }
+    syncSheetActionAvailability();
+  });
+  el.dirsList.addEventListener("click", async (event) => {
+    const target = event.target instanceof Element ? event.target : null;
+    if (!target) {
+      return;
+    }
+    if (target.closest(".dir-open-url")) {
+      return;
+    }
+
+    const groupButton = target.closest(".dir-group-chip");
+    if (groupButton) {
+      const filter = String(groupButton.dataset.filter || "group");
+      const groupName = String(groupButton.dataset.group || "").trim();
+      const managedOnly = filter === "managed" ? true : filter === "all" ? false : el.dirsManagedOnly.checked;
+      state.dirBrowser.group = filter === "group" ? groupName : "";
+      state.dirBrowser.managedOnly = managedOnly;
+      el.dirsManagedOnly.checked = managedOnly;
+      localStorage.setItem(DIR_BROWSER_MANAGED_ONLY_KEY, String(managedOnly));
+      clearCreateBatchSelection();
+      await loadDirListing(
+        state.dirBrowser.path || el.dirsPath.value,
+        managedOnly,
+        state.dirBrowser.group,
+      );
+      return;
+    }
+
+    const groupActionButton = target.closest(".dir-entry-group-action");
+    if (groupActionButton) {
+      await updateDirEntryGroupMembership(
+        groupActionButton.dataset.path,
+        groupActionButton.dataset.action,
+        groupActionButton.dataset.group,
+        groupActionButton.dataset.removeGroup,
+      );
+      return;
+    }
+
+    const rowButton = target.closest(".dir-row-main");
+    if (!rowButton) {
+      return;
+    }
+    const path = String(rowButton.dataset.path || "").trim();
     if (!path) {
       return;
     }
     el.dirsPath.value = path;
     el.createCwd.value = path;
-    if (button.dataset.hasChildren === "true") {
-      await loadDirListing(path, el.dirsManagedOnly.checked);
-    } else {
-      setDirStatus(`Selected ${path}`);
-      syncSheetActionAvailability();
+    if (rowButton.dataset.hasChildren === "true") {
+      state.dirBrowser.group = "";
+      clearCreateBatchSelection();
+      await loadDirListing(path, el.dirsManagedOnly.checked, "");
+      return;
     }
+    setDirStatus(`Selected ${path}`);
+    syncSheetActionAvailability();
   });
 
   el.mermaidRefreshButton.addEventListener("click", async () => {
@@ -2154,9 +5660,51 @@ function bindEvents() {
   el.mermaidOpenButton.addEventListener("click", async () => {
     await openMermaidArtifactHost();
   });
+  el.mermaidPlanTabs.addEventListener("click", async (event) => {
+    const button = event.target instanceof Element ? event.target.closest("button[data-plan-file]") : null;
+    if (!button) {
+      return;
+    }
+    await loadMermaidPlanFile(button.dataset.planFile);
+  });
   el.mermaidCloseButton.addEventListener("click", closeSheets);
 
+  el.terminalStage.addEventListener(
+    "mousedown",
+    (event) => {
+      captureSurfaceAction(event, "down");
+    },
+    { capture: true },
+  );
+  el.terminalStage.addEventListener(
+    "click",
+    (event) => {
+      captureSurfaceAction(event, "click");
+    },
+    { capture: true },
+  );
+  el.terminalStage.addEventListener(
+    "touchend",
+    (event) => {
+      captureSurfaceAction(event, "touch");
+    },
+    { capture: true, passive: false },
+  );
+  el.terminalStage.addEventListener(
+    "wheel",
+    (event) => {
+      captureSurfaceAction(event, "wheel");
+    },
+    { capture: true, passive: false },
+  );
+
   el.terminalStage.addEventListener("click", (event) => {
+    if (terminalFallbackOwnsPointer(event)) {
+      if (!state.activeSheet) {
+        focusTerminalInputSurface({ preventScroll: true });
+      }
+      return;
+    }
     const hit = surfaceHit(event);
     if (hit.action) {
       if (shouldIgnoreSyntheticClick(performance.now(), state.surfaceClickSuppressUntil)) {
@@ -2168,13 +5716,16 @@ function bindEvents() {
       return;
     }
     if (!state.activeSheet) {
-      el.terminalStage.focus();
+      focusTerminalInputSurface({ preventScroll: true });
     }
   });
 
   el.terminalStage.addEventListener(
     "touchend",
     (event) => {
+      if (terminalFallbackOwnsPointer(event)) {
+        return;
+      }
       const hit = surfaceHit(event);
       if (hit.action) {
         state.surfaceClickSuppressUntil = performance.now() + SURFACE_CLICK_SUPPRESS_MS;
@@ -2187,7 +5738,9 @@ function bindEvents() {
         return;
       }
       if (!state.activeSheet) {
-        el.terminalStage.focus();
+        if (!isCoarsePointer() || !focusMobileKeyboard()) {
+          focusTerminalInputSurface({ preventScroll: true });
+        }
       }
     },
     { passive: false },
@@ -2202,6 +5755,9 @@ function bindEvents() {
       return;
     }
     event.preventDefault();
+    if (keyBeginsTrogdorResponse(event)) {
+      markTrogdorSessionsResponded([state.selectedSessionId]);
+    }
     forwardTerminalEvent({
       kind: "key",
       phase: "down",
@@ -2221,12 +5777,7 @@ function bindEvents() {
       return;
     }
     event.preventDefault();
-    if (terminalSupports("pasteText")) {
-      state.terminal.pasteText(text);
-      flushEncodedInputBytes();
-      return;
-    }
-    forwardTerminalEvent({ kind: "paste", data: text });
+    sendTerminalText(text);
   });
 
   el.terminalStage.addEventListener("focus", () => {
@@ -2236,10 +5787,16 @@ function bindEvents() {
   });
 
   el.terminalStage.addEventListener("blur", () => {
+    if (document.activeElement === el.mobileKeyboardProxy) {
+      return;
+    }
     forwardTerminalEvent({ kind: "focus", focused: false });
   });
 
   el.terminalStage.addEventListener("mousedown", (event) => {
+    if (terminalFallbackOwnsPointer(event)) {
+      return;
+    }
     const hit = surfaceHit(event);
     if (hit.action) {
       state.surfaceClickSuppressUntil = performance.now() + SURFACE_CLICK_SUPPRESS_MS;
@@ -2281,6 +5838,9 @@ function bindEvents() {
   });
 
   el.terminalStage.addEventListener("mouseup", (event) => {
+    if (terminalFallbackOwnsPointer(event)) {
+      return;
+    }
     const hit = surfaceHit(event);
     if (hit.action || hit.consume || !state.terminal) {
       if (hit.action || hit.consume) {
@@ -2319,7 +5879,11 @@ function bindEvents() {
   });
 
   el.terminalStage.addEventListener("mousemove", (event) => {
+    if (terminalFallbackOwnsPointer(event)) {
+      return;
+    }
     const hit = surfaceHit(event);
+    updateHoveredTrogdorSurface(hit.action);
     if (hit.consume || !state.terminal) {
       if (hit.consume) {
         clearHoveredLink(true);
@@ -2352,6 +5916,9 @@ function bindEvents() {
   el.terminalStage.addEventListener(
     "wheel",
     (event) => {
+      if (terminalFallbackOwnsPointer(event)) {
+        return;
+      }
       const hit = surfaceHit(event);
       if (hit.consume) {
         event.preventDefault();
@@ -2375,10 +5942,11 @@ function bindEvents() {
 
   el.terminalStage.addEventListener("mouseleave", () => {
     clearHoveredLink(true);
+    updateHoveredTrogdorSurface(null);
   });
 
   const resizeObserver = new ResizeObserver(() => {
-    measureAndResizeSurface(true, true);
+    measureAndResizeSurface(true, false);
   });
   resizeObserver.observe(el.terminalStage);
 }
@@ -2389,6 +5957,7 @@ async function init() {
   setUtilityStatus(defaultUtilityLabel(), true);
   syncWriteAccess();
   setLoadingState(boot.franken_term_available, boot.franken_term_available ? "Loading rendered control surface..." : "Snapshot fallback mode");
+  void warmDirBrowserOnStartup();
   await setupHudSurface();
   renderHudSurface();
   scheduleSessionRefresh();
@@ -2403,8 +5972,38 @@ function clampInt(value, fallback, min, max) {
   return Math.max(min, Math.min(max, numeric));
 }
 
-init().catch((error) => {
-  console.error("[swimmers-web] failed to initialize", error);
-  setConnectionStatus("init failed", true);
-  setLoadingState(false);
-});
+export const __swimmersWebTest = {
+  state,
+  el,
+  closeTrogdorAtlasForTerminal,
+  persistSelectedSession,
+  renderHudSurface,
+  syncTerminalPresentation,
+  feedTerminalBytes,
+  setTerminalTextFallbackActive,
+  updateTerminalFallbackText,
+  terminalFallbackOwnsPointer,
+  sendTerminalText,
+  handleTerminalFallbackKeyEvent,
+  handleTerminalFallbackPasteEvent,
+  focusTerminalInputSurface,
+  syncTerminalInputDock,
+  submitTerminalInputDock,
+  openCommandPalette,
+  renderCommandPalette,
+  runCommandPaletteItem,
+  rememberSendHistory,
+  renderSendHistory,
+  syncTerminalAccessibilityMirror,
+  syncTerminalStatusStrip,
+  copyTerminalFrameText,
+  syncLinkTools,
+};
+
+if (!window.__SWIMMERS_DISABLE_AUTO_INIT__) {
+  init().catch((error) => {
+    console.error("[swimmers-web] failed to initialize", error);
+    setConnectionStatus("init failed", true);
+    setLoadingState(false);
+  });
+}

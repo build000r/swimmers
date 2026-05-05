@@ -17,7 +17,7 @@ use crate::thought::emitter_client::EmitterClient;
 use crate::thought::health::BridgeHealthState;
 use crate::thought::protocol::{SyncRequestSequence, ThoughtDeliveryState};
 use crate::thought::runtime_config::ThoughtConfig;
-use crate::types::{ControlEvent, RestState, SessionState, ThoughtSource, ThoughtState};
+use crate::types::{ActionCue, ControlEvent, RestState, SessionState, ThoughtSource, ThoughtState};
 
 /// Snapshot of a single session's data, provided by the supervisor each tick.
 #[derive(Clone)]
@@ -41,6 +41,8 @@ pub struct SessionInfo {
     pub rest_state: RestState,
     /// Passive commit reminder state emitted by clawgs.
     pub commit_candidate: bool,
+    /// Deterministic transcript-backed action facts emitted by clawgs.
+    pub action_cues: Vec<ActionCue>,
     /// Last seen objective fingerprint used to avoid noisy rewrites.
     pub objective_fingerprint: Option<String>,
     /// Time of last persisted thought update.
@@ -78,6 +80,7 @@ pub trait SessionProvider: Send + Sync {
         _thought_source: ThoughtSource,
         _rest_state: RestState,
         _commit_candidate: bool,
+        _action_cues: Vec<ActionCue>,
         _updated_at: DateTime<Utc>,
         _delivery: ThoughtDeliveryState,
         _objective_changed_at: Option<DateTime<Utc>>,

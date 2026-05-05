@@ -1,8 +1,10 @@
 use super::*;
+use swimmers::api::remote_sessions;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 const THOUGHT_COMMIT_LABEL: &str = "[commit]";
 const THOUGHT_LAUNCH_LABEL: &str = "[launch]";
+const THOUGHT_SEND_LABEL: &str = "[send]";
 const THOUGHT_PLANS_LABEL: &str = "[plans]";
 
 pub(crate) struct ThoughtFingerprint {
@@ -164,11 +166,23 @@ pub(crate) enum ThoughtPanelAction {
     FilterByCwd(String),
     ToggleFilterOutMode,
     ToggleFilterOutCwd(String),
-    OpenSession { session_id: String, label: String },
-    OpenInitialRequest { cwd: String },
+    OpenSession {
+        session_id: String,
+        label: String,
+    },
+    OpenInitialRequest {
+        cwd: String,
+    },
+    SendGroup {
+        session_ids: Vec<String>,
+        label: String,
+    },
     LaunchCommitCodex(String),
     OpenMermaid(String),
-    OpenPlanFromDisk { schema_path: String, slug: String },
+    OpenPlanFromDisk {
+        schema_path: String,
+        slug: String,
+    },
     OpenRepoInEditor(String),
     ClearFilters,
 }
@@ -189,9 +203,11 @@ pub(crate) struct ThoughtRowLayout {
     pub(crate) mermaid_label: Option<String>,
     pub(crate) launch_rect: Option<Rect>,
     pub(crate) commit_rect: Option<Rect>,
+    pub(crate) send_rect: Option<Rect>,
     pub(crate) plan_rect: Option<Rect>,
     pub(crate) plan_schema_path: Option<String>,
     pub(crate) plan_slug: Option<String>,
+    pub(crate) group_session_ids: Option<Vec<String>>,
     pub(crate) session_id: String,
     pub(crate) cwd: String,
     pub(crate) label: String,
@@ -625,9 +641,15 @@ pub(crate) fn thought_panel_needs_input<C: TuiApi>(app: &App<C>) -> bool {
     if app.daemon_defaults_status.is_unavailable() {
         return true;
     }
-    build_thought_panel_entries(app)
+    let entries = build_thought_panel_entries(app);
+    entries.iter().any(thought_entry_needs_input)
+        || thought_panel_entries_have_sendable_batch(&entries)
+}
+
+fn thought_panel_entries_have_sendable_batch(entries: &[ThoughtPanelEntryView]) -> bool {
+    build_thought_groups(entries, ThoughtGroupBy::Batch)
         .iter()
-        .any(thought_entry_needs_input)
+        .any(|group| group_send_session_ids(ThoughtGroupBy::Batch, group).is_some())
 }
 
 pub(crate) const DARK_TERMINAL_BG_RGB: (u8, u8, u8) = (0x11, 0x11, 0x11);
@@ -722,8 +744,16 @@ pub(crate) fn session_display_color(
     session: &SessionSummary,
     repo_themes: &HashMap<String, RepoTheme>,
 ) -> Color {
+    if session_state_evidence_unverified(session) {
+        return Color::DarkGrey;
+    }
     session_theme_color(session, repo_themes)
         .unwrap_or_else(|| name_based_color(&session.tmux_name))
+}
+
+pub(crate) fn session_state_evidence_unverified(session: &SessionSummary) -> bool {
+    session.state_evidence.observed_at.is_none()
+        || session.state_evidence.confidence != StateConfidence::High
 }
 
 /// Deterministic color derived from the session name so that sessions without a
@@ -963,6 +993,35 @@ fn plan_for_group<C: TuiApi>(
         .or_else(|| cached_plan_for_group(group_by, group, &app.cached_plans))
 }
 
+fn thought_entry_is_group_input_ready(entry: &ThoughtPanelEntryView) -> bool {
+    !entry.is_stale
+        && entry.transport_health != TransportHealth::Disconnected
+        && entry.state != SessionState::Exited
+        && entry.rest_state != RestState::DeepSleep
+        && (entry.rest_state == RestState::Sleeping || entry.state == SessionState::Attention)
+}
+
+fn group_send_session_ids(group_by: ThoughtGroupBy, group: &ThoughtGroup) -> Option<Vec<String>> {
+    if group_by != ThoughtGroupBy::Batch || group.entries.iter().any(|entry| entry.batch.is_none())
+    {
+        return None;
+    }
+    if group
+        .entries
+        .iter()
+        .any(|entry| remote_sessions::split_remote_session_id(&entry.session_id).is_some())
+    {
+        return None;
+    }
+    let session_ids = group
+        .entries
+        .iter()
+        .filter(|entry| thought_entry_is_group_input_ready(entry))
+        .map(|entry| entry.session_id.clone())
+        .collect::<Vec<_>>();
+    (session_ids.len() > 1).then_some(session_ids)
+}
+
 fn group_header_row<C: TuiApi>(
     app: &App<C>,
     group: &ThoughtGroup,
@@ -971,16 +1030,33 @@ fn group_header_row<C: TuiApi>(
 ) -> ThoughtRowLayout {
     let plan = plan_for_group(app, group_by, group);
     let base_label = format!("v {} ({})", group.label, group.entries.len());
-    let label = if plan.is_some() {
-        format!("{base_label} {THOUGHT_PLANS_LABEL}")
+    let send_session_ids = group_send_session_ids(group_by, group);
+    let send_start = send_session_ids
+        .as_ref()
+        .map(|_| display_width(&base_label).saturating_add(1));
+    let label_before_plan = if send_session_ids.is_some() {
+        format!("{base_label} {THOUGHT_SEND_LABEL}")
     } else {
         base_label.clone()
     };
     let plan_start = plan
         .as_ref()
-        .map(|_| display_width(&base_label).saturating_add(1));
+        .map(|_| display_width(&label_before_plan).saturating_add(1));
+    let label = if plan.is_some() {
+        format!("{label_before_plan} {THOUGHT_PLANS_LABEL}")
+    } else {
+        label_before_plan
+    };
     let line = truncate_label(&label, thought_content.width as usize);
     let width = display_width(&line);
+    let send_rect = send_start.and_then(|start| {
+        visible_segment_rect(
+            thought_content.x,
+            start,
+            display_width(THOUGHT_SEND_LABEL),
+            width,
+        )
+    });
     let plan_rect = plan_start.and_then(|start| {
         visible_segment_rect(
             thought_content.x,
@@ -1001,9 +1077,11 @@ fn group_header_row<C: TuiApi>(
         mermaid_label: None,
         launch_rect: None,
         commit_rect: None,
+        send_rect,
         plan_rect,
         plan_schema_path: plan.as_ref().map(|plan| plan.schema_path.clone()),
         plan_slug: plan.as_ref().map(|plan| plan.slug.clone()),
+        group_session_ids: send_session_ids,
         session_id: String::new(),
         cwd: String::new(),
         label: group.label.clone(),
@@ -1164,9 +1242,11 @@ pub(crate) fn build_rows_for_panel_entry(
         mermaid_label: entry.mermaid_label.clone(),
         launch_rect,
         commit_rect,
+        send_rect: None,
         plan_rect: None,
         plan_schema_path: None,
         plan_slug: None,
+        group_session_ids: None,
         session_id: entry.session_id.clone(),
         cwd: entry.cwd.clone(),
         label: entry.label.clone(),
@@ -1193,9 +1273,11 @@ pub(crate) fn build_rows_for_panel_entry(
             mermaid_label: None,
             launch_rect: None,
             commit_rect: None,
+            send_rect: None,
             plan_rect: None,
             plan_schema_path: None,
             plan_slug: None,
+            group_session_ids: None,
             session_id: entry.session_id.clone(),
             cwd: entry.cwd.clone(),
             label: entry.label.clone(),
@@ -1208,30 +1290,19 @@ pub(crate) fn build_rows_for_panel_entry(
     rows
 }
 
-pub(crate) fn thought_panel_stopped_counts<C: TuiApi>(app: &App<C>) -> (usize, usize) {
+pub(crate) fn thought_panel_header<C: TuiApi>(app: &App<C>) -> String {
     let entries = build_thought_panel_entries(app);
     let stopped = entries
         .iter()
         .filter(|entry| thought_entry_needs_input(entry))
         .count();
-    (stopped, entries.len())
-}
-
-pub(crate) fn thought_panel_header<C: TuiApi>(app: &App<C>) -> String {
-    let (stopped, total) = thought_panel_stopped_counts(app);
-    let scope = if app.thought_show_all {
-        "all"
-    } else {
-        "asleep"
-    };
-    let toggle = if app.thought_show_all {
-        "> asleep"
-    } else {
-        "> all"
-    };
+    let total = entries.len();
+    let mode = thought_panel_display_mode(app, &entries);
+    let scope = if mode.show_all { "all" } else { "asleep" };
+    let toggle = if mode.show_all { "> asleep" } else { "> all" };
     format!(
         "clawgs / {} / {} · {}/{} asleep · {}",
-        app.thought_group_by.label(),
+        mode.group_by.label(),
         scope,
         stopped,
         total,
@@ -1294,6 +1365,14 @@ pub(crate) fn render_thought_panel<C: TuiApi>(
         if let Some(rect) = row.commit_rect {
             renderer.draw_text(rect.x, y, THOUGHT_COMMIT_LABEL, row.color);
         }
+        if let Some(rect) = row.send_rect {
+            renderer.draw_text(
+                rect.x,
+                y,
+                &truncate_label(THOUGHT_SEND_LABEL, rect.width as usize),
+                Color::Cyan,
+            );
+        }
         if let Some(rect) = row.plan_rect {
             renderer.draw_text(
                 rect.x,
@@ -1316,18 +1395,20 @@ pub(crate) fn build_thought_panel<C: TuiApi>(
 
     let all_entries = build_thought_panel_entries(app);
     let total_count = all_entries.len();
-    let entries = if app.thought_show_all {
-        all_entries
+    let mode = thought_panel_display_mode(app, &all_entries);
+    let entries = if mode.show_all {
+        all_entries.clone()
     } else {
         all_entries
-            .into_iter()
-            .filter(thought_entry_needs_input)
+            .iter()
+            .filter(|entry| thought_entry_needs_input(*entry))
+            .cloned()
             .collect::<Vec<_>>()
     };
     let empty_message = if entry_capacity == 0 {
         None
     } else if entries.is_empty() {
-        Some(if !app.thought_show_all && total_count > 0 {
+        Some(if !mode.show_all && total_count > 0 {
             if app.daemon_defaults_status.is_unavailable() {
                 "clawgs unavailable - run swimmers config doctor".to_string()
             } else {
@@ -1344,8 +1425,14 @@ pub(crate) fn build_thought_panel<C: TuiApi>(
         None
     };
 
-    let rows = if should_group_thought_entries(app, &entries) {
-        build_grouped_rows(&entries, app, thought_content, entry_capacity)
+    let rows = if should_group_thought_entries(app, mode.group_by, &entries) {
+        build_grouped_rows(
+            &entries,
+            app,
+            mode.group_by,
+            thought_content,
+            entry_capacity,
+        )
     } else {
         build_flat_rows(&entries, thought_content, entry_capacity)
     };
@@ -1355,11 +1442,35 @@ pub(crate) fn build_thought_panel<C: TuiApi>(
         empty_message,
     }
 }
-fn should_group_thought_entries<C: TuiApi>(
+
+#[derive(Clone, Copy)]
+struct ThoughtPanelDisplayMode {
+    group_by: ThoughtGroupBy,
+    show_all: bool,
+}
+
+fn thought_panel_display_mode<C: TuiApi>(
     app: &App<C>,
     entries: &[ThoughtPanelEntryView],
+) -> ThoughtPanelDisplayMode {
+    if thought_panel_entries_have_sendable_batch(entries) {
+        ThoughtPanelDisplayMode {
+            group_by: ThoughtGroupBy::Batch,
+            show_all: true,
+        }
+    } else {
+        ThoughtPanelDisplayMode {
+            group_by: app.thought_group_by,
+            show_all: app.thought_show_all,
+        }
+    }
+}
+
+fn should_group_thought_entries<C: TuiApi>(
+    app: &App<C>,
+    group_by: ThoughtGroupBy,
+    entries: &[ThoughtPanelEntryView],
 ) -> bool {
-    let group_by = app.thought_group_by;
     let groups = build_thought_groups(entries, group_by);
     groups.len() > 1
         || (group_by == ThoughtGroupBy::Batch && entries.iter().any(|entry| entry.batch.is_some()))
@@ -1397,6 +1508,7 @@ fn build_flat_rows(
 fn build_grouped_rows<C: TuiApi>(
     entries: &[ThoughtPanelEntryView],
     app: &App<C>,
+    group_by: ThoughtGroupBy,
     thought_content: Rect,
     entry_capacity: usize,
 ) -> Vec<ThoughtRowLayout> {
@@ -1404,15 +1516,10 @@ fn build_grouped_rows<C: TuiApi>(
         return Vec::new();
     }
 
-    let groups = build_thought_groups(entries, app.thought_group_by);
+    let groups = build_thought_groups(entries, group_by);
     let mut rows = Vec::new();
     for group in &groups {
-        rows.push(group_header_row(
-            app,
-            group,
-            app.thought_group_by,
-            thought_content,
-        ));
+        rows.push(group_header_row(app, group, group_by, thought_content));
         for entry in &group.entries {
             rows.extend(build_rows_for_panel_entry(entry, thought_content));
         }
@@ -1461,6 +1568,12 @@ pub(crate) fn thought_panel_action_at<C: TuiApi>(
             width: rect.width,
             height: rect.height,
         });
+        let send_rect = row.send_rect.map(|rect| Rect {
+            x: rect.x,
+            y: row_start_y + offset as u16,
+            width: rect.width,
+            height: rect.height,
+        });
         let mermaid_rect = row.mermaid_rect.map(|rect| Rect {
             x: rect.x,
             y: row_start_y + offset as u16,
@@ -1478,6 +1591,14 @@ pub(crate) fn thought_panel_action_at<C: TuiApi>(
                 return Some(ThoughtPanelAction::OpenPlanFromDisk {
                     schema_path: schema_path.clone(),
                     slug: slug.clone(),
+                });
+            }
+        }
+        if send_rect.map(|rect| rect.contains(x, y)).unwrap_or(false) {
+            if let Some(session_ids) = &row.group_session_ids {
+                return Some(ThoughtPanelAction::SendGroup {
+                    session_ids: session_ids.clone(),
+                    label: row.label.clone(),
                 });
             }
         }

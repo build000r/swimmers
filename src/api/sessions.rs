@@ -5,17 +5,20 @@ use axum::routing::{delete, get, post};
 use axum::{Extension, Json, Router};
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio::sync::oneshot;
 use uuid::Uuid;
 
 use crate::api::{fetch_live_summary, remote_sessions, AppState};
 use crate::auth::{AuthInfo, AuthScope};
+use crate::operator_pressure::session_ready_for_operator_group_input;
 use crate::session::actor::{ActorHandle, SessionCommand};
 use crate::types::{
     CreateSessionRequest, CreateSessionResponse, CreateSessionsBatchRequest,
     CreateSessionsBatchResponse, CreateSessionsBatchResult, ErrorResponse, MermaidArtifactResponse,
-    PlanFileResponse, RepoTheme, SessionBatchMembership, SessionInputRequest, SessionInputResponse,
+    PlanFileResponse, RepoTheme, SessionBatchMembership, SessionGroupInputRequest,
+    SessionGroupInputResponse, SessionGroupInputResult, SessionInputRequest, SessionInputResponse,
     SessionListResponse, SessionPaneTailResponse, SessionState, SessionSummary, TerminalSnapshot,
 };
 
@@ -417,6 +420,17 @@ async fn dismiss_attention(
 // POST /v1/sessions/{session_id}/input
 // ---------------------------------------------------------------------------
 
+fn validation_error(message: impl Into<String>) -> Response {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(ErrorResponse {
+            code: "VALIDATION_FAILED".to_string(),
+            message: Some(message.into()),
+        }),
+    )
+        .into_response()
+}
+
 async fn send_input(
     Extension(auth): Extension<AuthInfo>,
     State(state): State<Arc<AppState>>,
@@ -428,14 +442,7 @@ async fn send_input(
     }
 
     if body.text.is_empty() {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(ErrorResponse {
-                code: "VALIDATION_FAILED".to_string(),
-                message: Some("text must not be empty".to_string()),
-            }),
-        )
-            .into_response();
+        return validation_error("text must not be empty");
     }
 
     let summary = match fetch_live_summary(&state, &session_id).await {
@@ -488,10 +495,13 @@ async fn send_input(
         }
     };
 
-    if let Err(err) = handle
-        .send(SessionCommand::WriteInput(body.text.into_bytes()))
-        .await
-    {
+    let command = if body.submit {
+        SessionCommand::SubmitLine(body.text)
+    } else {
+        SessionCommand::WriteInput(body.text.into_bytes())
+    };
+
+    if let Err(err) = handle.send(command).await {
         tracing::error!("[session {session_id}] send_input failed: {err}");
         return (
             StatusCode::NOT_FOUND,
@@ -511,6 +521,188 @@ async fn send_input(
         }),
     )
         .into_response()
+}
+
+// ---------------------------------------------------------------------------
+// POST /v1/sessions/group-input
+// ---------------------------------------------------------------------------
+
+fn group_input_error_result(
+    session_id: String,
+    code: impl Into<String>,
+    message: Option<String>,
+) -> SessionGroupInputResult {
+    SessionGroupInputResult {
+        session_id,
+        ok: false,
+        error: Some(ErrorResponse {
+            code: code.into(),
+            message,
+        }),
+    }
+}
+
+fn session_ready_for_group_input(summary: &SessionSummary) -> bool {
+    session_ready_for_operator_group_input(summary)
+}
+
+fn group_input_batch_scope_error(summaries: &[SessionSummary]) -> Option<(&'static str, String)> {
+    if summaries.iter().any(|summary| summary.batch.is_none()) {
+        return Some((
+            "SESSION_NOT_IN_BATCH",
+            "session is not part of a batch".to_string(),
+        ));
+    }
+
+    let batch_ids = summaries
+        .iter()
+        .filter_map(|summary| summary.batch.as_ref().map(|batch| batch.id.as_str()))
+        .collect::<HashSet<_>>();
+    if batch_ids.len() > 1 {
+        return Some((
+            "SESSION_BATCH_MISMATCH",
+            "sessions are not in the same batch".to_string(),
+        ));
+    }
+
+    None
+}
+
+fn group_input_bytes(text: &str) -> Vec<u8> {
+    let mut bytes = text.as_bytes().to_vec();
+    bytes.extend_from_slice(b"\r\r");
+    bytes
+}
+
+async fn send_group_input_to_session(
+    state: &Arc<AppState>,
+    session_id: String,
+    summary: Option<SessionSummary>,
+    input: &[u8],
+) -> SessionGroupInputResult {
+    let Some(summary) = summary else {
+        return group_input_error_result(session_id, "SESSION_NOT_FOUND", None);
+    };
+
+    if summary.state == SessionState::Exited {
+        return group_input_error_result(
+            session_id,
+            "SESSION_EXITED",
+            Some("session has already exited".to_string()),
+        );
+    }
+
+    if !session_ready_for_group_input(&summary) {
+        return group_input_error_result(
+            session_id,
+            "SESSION_NOT_READY",
+            Some("session is not waiting for input".to_string()),
+        );
+    }
+
+    let handle = match state.supervisor.get_session(&session_id).await {
+        Some(handle) => handle,
+        None => return group_input_error_result(session_id, "SESSION_NOT_FOUND", None),
+    };
+
+    if let Err(err) = handle
+        .send(SessionCommand::WriteInput(input.to_vec()))
+        .await
+    {
+        tracing::error!("[session {session_id}] send_group_input failed: {err}");
+        return group_input_error_result(session_id, "SESSION_NOT_FOUND", Some(err.to_string()));
+    }
+
+    SessionGroupInputResult {
+        session_id,
+        ok: true,
+        error: None,
+    }
+}
+
+pub async fn send_group_input_service(
+    state: Arc<AppState>,
+    body: SessionGroupInputRequest,
+) -> Result<SessionGroupInputResponse, ErrorResponse> {
+    if body.session_ids.is_empty() {
+        return Err(ErrorResponse {
+            code: "VALIDATION_FAILED".to_string(),
+            message: Some("session_ids must not be empty".to_string()),
+        });
+    }
+    let text = body.text.trim().to_string();
+    if text.is_empty() {
+        return Err(ErrorResponse {
+            code: "VALIDATION_FAILED".to_string(),
+            message: Some("text must not be empty".to_string()),
+        });
+    }
+
+    let mut seen = HashSet::new();
+    let session_ids = body
+        .session_ids
+        .into_iter()
+        .filter(|session_id| seen.insert(session_id.clone()))
+        .collect::<Vec<_>>();
+    if session_ids.len() < 2 {
+        return Err(ErrorResponse {
+            code: "VALIDATION_FAILED".to_string(),
+            message: Some("session_ids must include at least two unique sessions".to_string()),
+        });
+    }
+    let summaries = state
+        .supervisor
+        .list_sessions()
+        .await
+        .into_iter()
+        .map(|summary| (summary.session_id.clone(), summary))
+        .collect::<HashMap<_, _>>();
+    let found_summaries = session_ids
+        .iter()
+        .filter_map(|session_id| summaries.get(session_id).cloned())
+        .collect::<Vec<_>>();
+    if let Some((code, message)) = group_input_batch_scope_error(&found_summaries) {
+        let results = session_ids
+            .into_iter()
+            .map(|session_id| {
+                if summaries.contains_key(&session_id) {
+                    group_input_error_result(session_id, code, Some(message.clone()))
+                } else {
+                    group_input_error_result(session_id, "SESSION_NOT_FOUND", None)
+                }
+            })
+            .collect::<Vec<_>>();
+        return Ok(SessionGroupInputResponse::from_results(results));
+    }
+    let input = group_input_bytes(&text);
+    let results = futures::future::join_all(session_ids.into_iter().map(|session_id| {
+        let summary = summaries.get(&session_id).cloned();
+        send_group_input_to_session(&state, session_id, summary, &input)
+    }))
+    .await;
+    Ok(SessionGroupInputResponse::from_results(results))
+}
+
+async fn send_group_input(
+    Extension(auth): Extension<AuthInfo>,
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<SessionGroupInputRequest>,
+) -> impl IntoResponse {
+    if let Err(resp) = auth.require_scope(AuthScope::SessionsWrite) {
+        return resp;
+    }
+
+    match send_group_input_service(state, body).await {
+        Ok(response) => {
+            let status = if response.skipped == 0 {
+                StatusCode::OK
+            } else {
+                StatusCode::MULTI_STATUS
+            };
+            (status, Json(response)).into_response()
+        }
+        Err(error) => (StatusCode::BAD_REQUEST, Json(error)).into_response(),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -859,6 +1051,7 @@ pub fn routes() -> Router<Arc<AppState>> {
     Router::new()
         .route("/v1/sessions", get(list_sessions).post(create_session))
         .route("/v1/sessions/batch", post(create_sessions_batch))
+        .route("/v1/sessions/group-input", post(send_group_input))
         .route("/v1/sessions/{session_id}", delete(delete_session))
         .route(
             "/v1/sessions/{session_id}/attention/dismiss",
@@ -882,9 +1075,9 @@ mod tests {
     use crate::config::Config;
     use crate::session::actor::ActorHandle;
     use crate::session::supervisor::SessionSupervisor;
-    use crate::thought::protocol::SyncRequestSequence;
+    use crate::thought::protocol::{SyncRequestSequence, ThoughtDeliveryState};
     use crate::thought::runtime_config::ThoughtConfig;
-    use crate::types::{ThoughtSource, ThoughtState, TransportHealth};
+    use crate::types::{RestState, StateEvidence, ThoughtSource, ThoughtState, TransportHealth};
     use axum::body::to_bytes;
     use axum::extract::{Json, Path, Query, State};
     use axum::response::IntoResponse;
@@ -922,11 +1115,17 @@ mod tests {
     }
 
     fn summary(session_id: &str, state: SessionState) -> crate::types::SessionSummary {
+        let state_evidence = match state {
+            SessionState::Busy => StateEvidence::new("osc133_command"),
+            SessionState::Exited => StateEvidence::new("process_exit"),
+            _ => StateEvidence::new("osc133_prompt"),
+        };
         crate::types::SessionSummary {
             session_id: session_id.to_string(),
             tmux_name: format!("tmux-{session_id}"),
             state,
             current_command: None,
+            state_evidence,
             cwd: "/tmp/project".to_string(),
             tool: Some("Codex".to_string()),
             token_count: 0,
@@ -937,6 +1136,7 @@ mod tests {
             thought_updated_at: None,
             rest_state: crate::types::fallback_rest_state(state, ThoughtState::Holding),
             commit_candidate: false,
+            action_cues: Vec::new(),
             objective_changed_at: None,
             last_skill: None,
             is_stale: false,
@@ -946,6 +1146,46 @@ mod tests {
             repo_theme_id: None,
             batch: None,
         }
+    }
+
+    fn with_test_batch(mut summary: SessionSummary, batch_id: &str) -> SessionSummary {
+        summary.batch = Some(session_batch_membership(
+            batch_id.to_string(),
+            "test batch".to_string(),
+            0,
+            2,
+            Utc::now(),
+            Some("continue".to_string()),
+        ));
+        summary
+    }
+
+    async fn insert_summary_test_handle(
+        state: &Arc<AppState>,
+        summary: SessionSummary,
+    ) -> mpsc::Receiver<Vec<u8>> {
+        let session_id = summary.session_id.clone();
+        let tmux_name = summary.tmux_name.clone();
+        let (cmd_tx, mut cmd_rx) = mpsc::channel(8);
+        let (write_tx, write_rx) = mpsc::channel(1);
+        state
+            .supervisor
+            .insert_test_handle(ActorHandle::test_handle(&session_id, &tmux_name, cmd_tx))
+            .await;
+        tokio::spawn(async move {
+            while let Some(cmd) = cmd_rx.recv().await {
+                match cmd {
+                    SessionCommand::GetSummary(reply) => {
+                        let _ = reply.send(summary.clone());
+                    }
+                    SessionCommand::WriteInput(bytes) => {
+                        let _ = write_tx.send(bytes).await;
+                    }
+                    _ => {}
+                }
+            }
+        });
+        write_rx
     }
 
     async fn response_json(response: axum::response::Response) -> Value {
@@ -1376,6 +1616,7 @@ esac
             Path("sess-1".to_string()),
             Json(SessionInputRequest {
                 text: String::new(),
+                submit: false,
             }),
         )
         .await
@@ -1414,6 +1655,7 @@ esac
             Path("sess-1".to_string()),
             Json(SessionInputRequest {
                 text: "status".to_string(),
+                submit: false,
             }),
         )
         .await
@@ -1421,6 +1663,510 @@ esac
 
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(worker.await.expect("worker"), b"status".to_vec());
+    }
+
+    #[tokio::test]
+    async fn send_input_submit_forwards_submit_line_to_session_actor() {
+        let state = test_state();
+        let (cmd_tx, mut cmd_rx) = mpsc::channel(8);
+        state
+            .supervisor
+            .insert_test_handle(ActorHandle::test_handle("sess-1", "tmux-1", cmd_tx))
+            .await;
+
+        let worker = tokio::spawn(async move {
+            while let Some(cmd) = cmd_rx.recv().await {
+                match cmd {
+                    SessionCommand::GetSummary(reply) => {
+                        let _ = reply.send(summary("sess-1", SessionState::Idle));
+                    }
+                    SessionCommand::SubmitLine(text) => return text,
+                    _ => {}
+                }
+            }
+            String::new()
+        });
+
+        let response = send_input(
+            Extension(AuthInfo::new(OPERATOR_SCOPES.to_vec())),
+            State(state),
+            Path("sess-1".to_string()),
+            Json(SessionInputRequest {
+                text: "status".to_string(),
+                submit: true,
+            }),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(worker.await.expect("worker"), "status");
+    }
+
+    #[tokio::test]
+    async fn send_group_input_rejects_empty_session_ids() {
+        let response = send_group_input(
+            Extension(AuthInfo::new(OPERATOR_SCOPES.to_vec())),
+            State(test_state()),
+            Json(SessionGroupInputRequest {
+                session_ids: Vec::new(),
+                text: "continue".to_string(),
+            }),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let json = response_json(response).await;
+        assert_eq!(json["code"], "VALIDATION_FAILED");
+        assert_eq!(json["message"], "session_ids must not be empty");
+    }
+
+    #[test]
+    fn group_input_bytes_appends_double_enter_for_agent_delivery() {
+        assert_eq!(group_input_bytes("ship it"), b"ship it\r\r");
+    }
+
+    #[tokio::test]
+    async fn send_group_input_rejects_fewer_than_two_unique_session_ids() {
+        let response = send_group_input(
+            Extension(AuthInfo::new(OPERATOR_SCOPES.to_vec())),
+            State(test_state()),
+            Json(SessionGroupInputRequest {
+                session_ids: vec!["only".to_string(), "only".to_string()],
+                text: "continue".to_string(),
+            }),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let json = response_json(response).await;
+        assert_eq!(json["code"], "VALIDATION_FAILED");
+        assert_eq!(
+            json["message"],
+            "session_ids must include at least two unique sessions"
+        );
+    }
+
+    #[tokio::test]
+    async fn send_group_input_sends_only_ready_sessions() {
+        let state = test_state();
+
+        let ready = with_test_batch(summary("ready", SessionState::Idle), "batch-group");
+        let mut busy = with_test_batch(summary("busy", SessionState::Busy), "batch-group");
+        busy.rest_state = RestState::Active;
+
+        let (ready_cmd_tx, mut ready_cmd_rx) = mpsc::channel(8);
+        let (ready_write_tx, mut ready_write_rx) = mpsc::channel(1);
+        state
+            .supervisor
+            .insert_test_handle(ActorHandle::test_handle(
+                "ready",
+                "tmux-ready",
+                ready_cmd_tx,
+            ))
+            .await;
+        tokio::spawn(async move {
+            while let Some(cmd) = ready_cmd_rx.recv().await {
+                match cmd {
+                    SessionCommand::GetSummary(reply) => {
+                        let _ = reply.send(ready.clone());
+                    }
+                    SessionCommand::WriteInput(bytes) => {
+                        let _ = ready_write_tx.send(bytes).await;
+                    }
+                    _ => {}
+                }
+            }
+        });
+
+        let (busy_cmd_tx, mut busy_cmd_rx) = mpsc::channel(8);
+        let (busy_write_tx, mut busy_write_rx) = mpsc::channel(1);
+        state
+            .supervisor
+            .insert_test_handle(ActorHandle::test_handle("busy", "tmux-busy", busy_cmd_tx))
+            .await;
+        tokio::spawn(async move {
+            while let Some(cmd) = busy_cmd_rx.recv().await {
+                match cmd {
+                    SessionCommand::GetSummary(reply) => {
+                        let _ = reply.send(busy.clone());
+                    }
+                    SessionCommand::WriteInput(bytes) => {
+                        let _ = busy_write_tx.send(bytes).await;
+                    }
+                    _ => {}
+                }
+            }
+        });
+
+        state
+            .supervisor
+            .persist_thought(
+                "ready",
+                Some("waiting for direction"),
+                0,
+                192_000,
+                ThoughtState::Sleeping,
+                ThoughtSource::Llm,
+                RestState::Sleeping,
+                false,
+                Vec::new(),
+                Utc::now(),
+                ThoughtDeliveryState::default(),
+                None,
+                None,
+            )
+            .await;
+
+        let response = send_group_input(
+            Extension(AuthInfo::new(OPERATOR_SCOPES.to_vec())),
+            State(state),
+            Json(SessionGroupInputRequest {
+                session_ids: vec![
+                    "ready".to_string(),
+                    "ready".to_string(),
+                    "busy".to_string(),
+                    "missing".to_string(),
+                    remote_sessions::namespace_session_id("jeremy-skillbox", "remote-ready"),
+                ],
+                text: "continue".to_string(),
+            }),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::MULTI_STATUS);
+        let json = response_json(response).await;
+        assert_eq!(json["delivered"], 1);
+        assert_eq!(json["skipped"], 3);
+        let results = json["results"].as_array().expect("results");
+        assert_eq!(results.len(), 4, "duplicate session IDs should be deduped");
+        assert_eq!(results[3]["session_id"], "jeremy-skillbox::remote-ready");
+        assert_eq!(results[3]["ok"], false);
+        assert_eq!(results[3]["error"]["code"], "SESSION_NOT_FOUND");
+        assert_eq!(
+            ready_write_rx.recv().await.expect("ready write"),
+            b"continue\r\r".to_vec()
+        );
+        let duplicate_ready_write =
+            tokio::time::timeout(Duration::from_millis(25), ready_write_rx.recv()).await;
+        assert!(
+            matches!(duplicate_ready_write, Err(_) | Ok(None)),
+            "duplicate session IDs must not receive duplicate group input"
+        );
+        let busy_write =
+            tokio::time::timeout(Duration::from_millis(25), busy_write_rx.recv()).await;
+        assert!(
+            matches!(busy_write, Err(_) | Ok(None)),
+            "busy sessions must not receive group input"
+        );
+    }
+
+    #[tokio::test]
+    async fn send_group_input_skips_stale_and_disconnected_sessions() {
+        let state = test_state();
+
+        let mut ready = with_test_batch(summary("ready", SessionState::Idle), "batch-group");
+        ready.rest_state = RestState::Sleeping;
+        let mut stale = with_test_batch(summary("stale", SessionState::Idle), "batch-group");
+        stale.rest_state = RestState::Sleeping;
+        stale.is_stale = true;
+        let mut disconnected =
+            with_test_batch(summary("disconnected", SessionState::Idle), "batch-group");
+        disconnected.rest_state = RestState::Sleeping;
+        disconnected.transport_health = TransportHealth::Disconnected;
+
+        let mut ready_write_rx = insert_summary_test_handle(&state, ready).await;
+        let mut stale_write_rx = insert_summary_test_handle(&state, stale).await;
+        let mut disconnected_write_rx = insert_summary_test_handle(&state, disconnected).await;
+
+        let response = send_group_input(
+            Extension(AuthInfo::new(OPERATOR_SCOPES.to_vec())),
+            State(state),
+            Json(SessionGroupInputRequest {
+                session_ids: vec![
+                    "ready".to_string(),
+                    "stale".to_string(),
+                    "disconnected".to_string(),
+                ],
+                text: "continue".to_string(),
+            }),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::MULTI_STATUS);
+        let json = response_json(response).await;
+        assert_eq!(json["delivered"], 1);
+        assert_eq!(json["skipped"], 2);
+        assert_eq!(json["results"][1]["error"]["code"], "SESSION_NOT_READY");
+        assert_eq!(json["results"][2]["error"]["code"], "SESSION_NOT_READY");
+        assert_eq!(
+            ready_write_rx.recv().await.expect("ready write"),
+            b"continue\r\r".to_vec()
+        );
+        let stale_write =
+            tokio::time::timeout(Duration::from_millis(25), stale_write_rx.recv()).await;
+        assert!(
+            matches!(stale_write, Err(_) | Ok(None)),
+            "stale sessions must not receive group input"
+        );
+        let disconnected_write =
+            tokio::time::timeout(Duration::from_millis(25), disconnected_write_rx.recv()).await;
+        assert!(
+            matches!(disconnected_write, Err(_) | Ok(None)),
+            "disconnected sessions must not receive group input"
+        );
+    }
+
+    #[tokio::test]
+    async fn send_group_input_skips_degraded_overloaded_and_unobserved_sessions() {
+        let state = test_state();
+
+        let mut ready = with_test_batch(summary("ready", SessionState::Idle), "batch-group");
+        ready.rest_state = RestState::Sleeping;
+        let mut degraded = with_test_batch(summary("degraded", SessionState::Idle), "batch-group");
+        degraded.rest_state = RestState::Sleeping;
+        degraded.transport_health = TransportHealth::Degraded;
+        degraded.state_evidence = StateEvidence::unobserved("summary_cache_degraded");
+        let mut overloaded = with_test_batch(
+            summary("overloaded", SessionState::Attention),
+            "batch-group",
+        );
+        overloaded.transport_health = TransportHealth::Overloaded;
+        overloaded.state_evidence = StateEvidence::unobserved("summary_cache_overloaded");
+        let mut unobserved =
+            with_test_batch(summary("unobserved", SessionState::Idle), "batch-group");
+        unobserved.rest_state = RestState::Sleeping;
+        unobserved.state_evidence = StateEvidence::unobserved("initial_state");
+
+        let mut ready_write_rx = insert_summary_test_handle(&state, ready).await;
+        let degraded_write_rx = insert_summary_test_handle(&state, degraded).await;
+        let overloaded_write_rx = insert_summary_test_handle(&state, overloaded).await;
+        let unobserved_write_rx = insert_summary_test_handle(&state, unobserved).await;
+
+        let response = send_group_input(
+            Extension(AuthInfo::new(OPERATOR_SCOPES.to_vec())),
+            State(state),
+            Json(SessionGroupInputRequest {
+                session_ids: vec![
+                    "ready".to_string(),
+                    "degraded".to_string(),
+                    "overloaded".to_string(),
+                    "unobserved".to_string(),
+                ],
+                text: "continue".to_string(),
+            }),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::MULTI_STATUS);
+        let json = response_json(response).await;
+        assert_eq!(json["delivered"], 1);
+        assert_eq!(json["skipped"], 3);
+        assert_eq!(json["results"][1]["error"]["code"], "SESSION_NOT_READY");
+        assert_eq!(json["results"][2]["error"]["code"], "SESSION_NOT_READY");
+        assert_eq!(json["results"][3]["error"]["code"], "SESSION_NOT_READY");
+        assert_eq!(
+            ready_write_rx.recv().await.expect("ready write"),
+            b"continue\r\r".to_vec()
+        );
+        for (mut rx, label) in [
+            (degraded_write_rx, "degraded"),
+            (overloaded_write_rx, "overloaded"),
+            (unobserved_write_rx, "unobserved"),
+        ] {
+            let write = tokio::time::timeout(Duration::from_millis(25), rx.recv()).await;
+            assert!(
+                matches!(write, Err(_) | Ok(None)),
+                "{label} sessions must not receive group input"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn send_group_input_rejects_attention_deep_sleep_sessions() {
+        let state = test_state();
+
+        let ready = with_test_batch(summary("ready", SessionState::Idle), "batch-group");
+        let mut deep_attention = with_test_batch(
+            summary("deep-attention", SessionState::Attention),
+            "batch-group",
+        );
+        deep_attention.rest_state = RestState::DeepSleep;
+
+        let (ready_cmd_tx, mut ready_cmd_rx) = mpsc::channel(8);
+        let (ready_write_tx, mut ready_write_rx) = mpsc::channel(1);
+        state
+            .supervisor
+            .insert_test_handle(ActorHandle::test_handle(
+                "ready",
+                "tmux-ready",
+                ready_cmd_tx,
+            ))
+            .await;
+        tokio::spawn(async move {
+            while let Some(cmd) = ready_cmd_rx.recv().await {
+                match cmd {
+                    SessionCommand::GetSummary(reply) => {
+                        let _ = reply.send(ready.clone());
+                    }
+                    SessionCommand::WriteInput(bytes) => {
+                        let _ = ready_write_tx.send(bytes).await;
+                    }
+                    _ => {}
+                }
+            }
+        });
+
+        let (deep_cmd_tx, mut deep_cmd_rx) = mpsc::channel(8);
+        let (deep_write_tx, mut deep_write_rx) = mpsc::channel(1);
+        state
+            .supervisor
+            .insert_test_handle(ActorHandle::test_handle(
+                "deep-attention",
+                "tmux-deep-attention",
+                deep_cmd_tx,
+            ))
+            .await;
+        tokio::spawn(async move {
+            while let Some(cmd) = deep_cmd_rx.recv().await {
+                match cmd {
+                    SessionCommand::GetSummary(reply) => {
+                        let _ = reply.send(deep_attention.clone());
+                    }
+                    SessionCommand::WriteInput(bytes) => {
+                        let _ = deep_write_tx.send(bytes).await;
+                    }
+                    _ => {}
+                }
+            }
+        });
+
+        state
+            .supervisor
+            .persist_thought(
+                "ready",
+                Some("waiting for direction"),
+                0,
+                192_000,
+                ThoughtState::Sleeping,
+                ThoughtSource::Llm,
+                RestState::Sleeping,
+                false,
+                Vec::new(),
+                Utc::now(),
+                ThoughtDeliveryState::default(),
+                None,
+                None,
+            )
+            .await;
+
+        let response = send_group_input(
+            Extension(AuthInfo::new(OPERATOR_SCOPES.to_vec())),
+            State(state),
+            Json(SessionGroupInputRequest {
+                session_ids: vec!["ready".to_string(), "deep-attention".to_string()],
+                text: "continue".to_string(),
+            }),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::MULTI_STATUS);
+        let json = response_json(response).await;
+        assert_eq!(json["delivered"], 1);
+        assert_eq!(json["skipped"], 1);
+        assert_eq!(json["results"][1]["session_id"], "deep-attention");
+        assert_eq!(json["results"][1]["ok"], false);
+        assert_eq!(json["results"][1]["error"]["code"], "SESSION_NOT_READY");
+        assert_eq!(
+            ready_write_rx.recv().await.expect("ready write"),
+            b"continue\r\r".to_vec()
+        );
+        let deep_write =
+            tokio::time::timeout(Duration::from_millis(25), deep_write_rx.recv()).await;
+        assert!(
+            matches!(deep_write, Err(_) | Ok(None)),
+            "deep sleep sessions must not receive group input"
+        );
+    }
+
+    #[tokio::test]
+    async fn send_group_input_rejects_unbatched_or_mixed_batch_groups() {
+        let state = test_state();
+
+        let unbatched = summary("unbatched", SessionState::Idle);
+        let batch_a = with_test_batch(summary("batch-a", SessionState::Idle), "batch-a");
+        let batch_b = with_test_batch(summary("batch-b", SessionState::Idle), "batch-b");
+
+        for (session_id, summary) in [
+            ("unbatched", unbatched),
+            ("batch-a", batch_a),
+            ("batch-b", batch_b),
+        ] {
+            let (cmd_tx, mut cmd_rx) = mpsc::channel(8);
+            state
+                .supervisor
+                .insert_test_handle(ActorHandle::test_handle(
+                    session_id,
+                    &format!("tmux-{session_id}"),
+                    cmd_tx,
+                ))
+                .await;
+            tokio::spawn(async move {
+                while let Some(cmd) = cmd_rx.recv().await {
+                    if let SessionCommand::GetSummary(reply) = cmd {
+                        let _ = reply.send(summary.clone());
+                    }
+                }
+            });
+        }
+
+        let unbatched_response = send_group_input(
+            Extension(AuthInfo::new(OPERATOR_SCOPES.to_vec())),
+            State(state.clone()),
+            Json(SessionGroupInputRequest {
+                session_ids: vec!["unbatched".to_string(), "batch-a".to_string()],
+                text: "continue".to_string(),
+            }),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(unbatched_response.status(), StatusCode::MULTI_STATUS);
+        let json = response_json(unbatched_response).await;
+        assert_eq!(json["delivered"], 0);
+        assert_eq!(json["skipped"], 2);
+        assert_eq!(json["results"][0]["error"]["code"], "SESSION_NOT_IN_BATCH");
+        assert_eq!(json["results"][1]["error"]["code"], "SESSION_NOT_IN_BATCH");
+
+        let mixed_response = send_group_input(
+            Extension(AuthInfo::new(OPERATOR_SCOPES.to_vec())),
+            State(state),
+            Json(SessionGroupInputRequest {
+                session_ids: vec!["batch-a".to_string(), "batch-b".to_string()],
+                text: "continue".to_string(),
+            }),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(mixed_response.status(), StatusCode::MULTI_STATUS);
+        let json = response_json(mixed_response).await;
+        assert_eq!(json["delivered"], 0);
+        assert_eq!(json["skipped"], 2);
+        assert_eq!(
+            json["results"][0]["error"]["code"],
+            "SESSION_BATCH_MISMATCH"
+        );
+        assert_eq!(
+            json["results"][1]["error"]["code"],
+            "SESSION_BATCH_MISMATCH"
+        );
     }
 
     #[tokio::test]

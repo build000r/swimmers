@@ -51,6 +51,15 @@ fn glance_product_test_state_to_sprite_label_mapping_is_canonical_and_distinct()
     assert_eq!(label, "attention");
     labels.insert(label);
 
+    let mut attention_sleeping = session_summary("glance-4b", "4b", TEST_REPO_SWIMMERS);
+    attention_sleeping.state = SessionState::Attention;
+    attention_sleeping.rest_state = RestState::Sleeping;
+    assert!(matches!(
+        SpriteKind::from_session(&attention_sleeping),
+        SpriteKind::Attention
+    ));
+    assert_eq!(session_state_text(&attention_sleeping), "attention");
+
     let mut busy = session_summary("glance-5", "5", TEST_REPO_SWIMMERS);
     busy.state = SessionState::Busy;
     busy.rest_state = RestState::Active;
@@ -65,10 +74,10 @@ fn glance_product_test_state_to_sprite_label_mapping_is_canonical_and_distinct()
     busy_sleeping.rest_state = RestState::Sleeping;
     assert!(matches!(
         SpriteKind::from_session(&busy_sleeping),
-        SpriteKind::Sleeping
+        SpriteKind::Busy
     ));
     let label = session_state_text(&busy_sleeping);
-    assert_eq!(label, "sleeping");
+    assert_eq!(label, "busy");
     labels.insert(label);
 
     let mut error = session_summary("glance-7", "7", TEST_REPO_SWIMMERS);
@@ -98,4 +107,24 @@ fn glance_product_test_state_to_sprite_label_mapping_is_canonical_and_distinct()
         7,
         "canonical glance labels must stay distinct; collapsing labels breaks Product Test readability"
     );
+}
+
+#[test]
+fn low_evidence_state_is_annotated_in_glance_label() {
+    let mut busy = session_summary("glance-low", "low", TEST_REPO_SWIMMERS);
+    busy.state = SessionState::Busy;
+    busy.rest_state = RestState::Active;
+    busy.state_evidence = StateEvidence::unobserved("summary_cache_degraded");
+
+    assert_eq!(session_state_text(&busy), "busy?");
+}
+
+#[test]
+fn medium_evidence_state_is_annotated_in_glance_label() {
+    let mut busy = session_summary("glance-medium", "medium", TEST_REPO_SWIMMERS);
+    busy.state = SessionState::Busy;
+    busy.rest_state = RestState::Active;
+    busy.state_evidence = StateEvidence::new("local_input");
+
+    assert_eq!(session_state_text(&busy), "busy?");
 }

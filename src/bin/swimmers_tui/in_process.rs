@@ -9,10 +9,11 @@ use swimmers::api::remote_sessions;
 use swimmers::api::service::{
     list_dirs as list_dirs_service, native_status_for_host as native_status_for_host_service,
     open_native_session_for_host, start_dir_repo_action as start_dir_repo_action_service,
-    NativeOpenServiceError,
+    update_dir_group_memberships as update_dir_group_memberships_service, NativeOpenServiceError,
 };
 use swimmers::api::sessions::{
-    create_sessions_batch_result, new_batch_context, session_batch_membership,
+    create_sessions_batch_result, new_batch_context, send_group_input_service,
+    session_batch_membership,
 };
 use swimmers::api::{AppState, PublishedSelectionState};
 use swimmers::openrouter_models::{
@@ -24,9 +25,10 @@ use swimmers::thought::runtime_config::ThoughtConfig;
 use swimmers::thought_ui::thought_config_ui_metadata;
 use swimmers::types::{
     CreateSessionRequest, CreateSessionResponse, CreateSessionsBatchRequest,
-    CreateSessionsBatchResponse, DirListResponse, DirRepoActionResponse, GhosttyOpenMode,
-    MermaidArtifactResponse, NativeDesktopApp, NativeDesktopOpenResponse,
-    NativeDesktopStatusResponse, PlanFileResponse, RepoActionKind, SessionSummary, SpawnTool,
+    CreateSessionsBatchResponse, DirGroupMembershipUpdateRequest, DirGroupMembershipUpdateResponse,
+    DirListResponse, DirRepoActionResponse, GhosttyOpenMode, MermaidArtifactResponse,
+    NativeDesktopApp, NativeDesktopOpenResponse, NativeDesktopStatusResponse, PlanFileResponse,
+    RepoActionKind, SessionGroupInputRequest, SessionGroupInputResponse, SessionSummary, SpawnTool,
 };
 
 use super::api::{ThoughtConfigTestResponse, TuiApi};
@@ -306,6 +308,24 @@ impl TuiApi for InProcessApi {
         })
     }
 
+    fn update_dir_group_memberships(
+        &self,
+        path: &str,
+        add: Vec<String>,
+        remove: Vec<String>,
+    ) -> BoxFuture<'_, Result<DirGroupMembershipUpdateResponse, String>> {
+        let state = self.state.clone();
+        let path = path.to_string();
+        Box::pin(async move {
+            update_dir_group_memberships_service(
+                state,
+                DirGroupMembershipUpdateRequest { path, add, remove },
+            )
+            .await
+            .map_err(|err| err.to_string())
+        })
+    }
+
     fn fetch_overlay_plans(&self) -> BoxFuture<'_, Result<Vec<PlanPanelEntry>, String>> {
         Box::pin(async move {
             tokio::task::spawn_blocking(load_overlay_plan_entries)
@@ -400,6 +420,19 @@ impl TuiApi for InProcessApi {
             Ok(CreateSessionsBatchResponse {
                 results: futures::future::join_all(tasks).await,
             })
+        })
+    }
+
+    fn send_group_input(
+        &self,
+        session_ids: Vec<String>,
+        text: String,
+    ) -> BoxFuture<'_, Result<SessionGroupInputResponse, String>> {
+        let state = self.state.clone();
+        Box::pin(async move {
+            send_group_input_service(state, SessionGroupInputRequest { session_ids, text })
+                .await
+                .map_err(|err| err.message.unwrap_or(err.code))
         })
     }
 }

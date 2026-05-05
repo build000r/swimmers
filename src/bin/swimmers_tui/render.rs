@@ -369,9 +369,10 @@ pub(crate) fn render_footer<C: TuiApi>(app: &App<C>, renderer: &mut Renderer, st
 
     if let Some(selected) = app.selected() {
         let state_line = format!(
-            "selected: {} [{}] {}",
+            "selected: {} [{}; {}] {}",
             selected.session.tmux_name,
             session_state_text(&selected.session),
+            session_state_evidence_text(&selected.session),
             shorten_path(&selected.session.cwd, 42)
         );
         renderer.draw_text(
@@ -615,22 +616,25 @@ pub(crate) fn shorten_path(path: &str, max_chars: usize) -> String {
 }
 
 pub(crate) fn session_state_text(session: &SessionSummary) -> &'static str {
-    match session.state {
-        SessionState::Error => "error",
-        SessionState::Exited => "exited",
-        _ if session.rest_state == RestState::Sleeping => "sleeping",
-        SessionState::Busy => "busy",
-        SessionState::Idle | SessionState::Attention => match session.rest_state {
-            RestState::Active => match session.state {
-                SessionState::Attention => "attention",
-                SessionState::Idle => "active",
-                _ => unreachable!("only idle/attention reach active rest-state branch"),
-            },
-            RestState::Drowsy => "drowsy",
-            RestState::Sleeping => "sleeping",
-            RestState::DeepSleep => "deep sleep",
-        },
-    }
+    let unverified = session_state_evidence_unverified(session);
+    SpriteKind::from_session(session).state_label(unverified)
+}
+
+pub(crate) fn session_state_evidence_text(session: &SessionSummary) -> String {
+    let confidence = match session.state_evidence.confidence {
+        StateConfidence::Low => "low",
+        StateConfidence::Medium => "medium",
+        StateConfidence::High => "high",
+    };
+    let freshness = if session.state_evidence.observed_at.is_some() {
+        "observed"
+    } else {
+        "unobserved"
+    };
+    format!(
+        "{} {} {}",
+        confidence, freshness, session.state_evidence.cause
+    )
 }
 
 pub(crate) fn selected_label(name: Option<&String>) -> String {

@@ -1,15 +1,17 @@
 SHELL := /bin/bash
 .DEFAULT_GOAL := help
 
-.PHONY: help server web web-smoke tui tui-check tui-smoke tui-stress ci-perf-gates cargo-cov-lcov
+.PHONY: help server up up-smoke web web-smoke tui tui-check tui-smoke tui-stress ci-perf-gates cargo-cov-lcov
 
 help:
 	@printf '%s\n' \
 	'swimmers commands' \
 	'' \
 	'  make server                  Run the Rust server on the configured port' \
+	'  make up                      Start current-checkout backend, then launch web URLs + TUI' \
+	'  make up-smoke                Run shell checks for the combined web+TUI launcher' \
 	'  make web                     Run the server and print the local/tailnet browser URL' \
-	'  make web-smoke              Verify live browser terminal attach on a fresh session' \
+	'  make web-smoke              Verify live browser terminal attach and visible browser output' \
 	'  make tui                     Clear stale local API, then launch the native TUI' \
 	'  make tui-check              Type-check the native TUI binary' \
 	'  make tui-smoke              Run shell checks for the TUI bootstrap helper' \
@@ -20,11 +22,18 @@ help:
 server:
 	cargo run --bin swimmers
 
+up:
+	bash ./scripts/run-up.sh
+
+up-smoke:
+	bash ./scripts/test-run-up.sh
+
 web:
 	bash ./scripts/run-web.sh
 
 web-smoke:
-	bash ./scripts/test-web-live-terminal.sh
+	PORT=3322 bash ./scripts/test-web-live-terminal.sh
+	PORT=3323 bash ./scripts/test-web-visible-terminal.sh
 
 tui:
 	bash ./scripts/run-tui.sh

@@ -19,7 +19,10 @@ use uuid::Uuid;
 
 use crate::thought::protocol::ThoughtDeliveryState;
 use crate::thought::runtime_config::ThoughtConfig;
-use crate::types::{RestState, SessionBatchMembership, SessionState, ThoughtSource, ThoughtState};
+use crate::types::{
+    ActionCue, DirGroupMemberships, RestState, SessionBatchMembership, SessionState, ThoughtSource,
+    ThoughtState,
+};
 
 // ---------------------------------------------------------------------------
 // Persisted data types
@@ -45,6 +48,8 @@ pub struct PersistedSession {
     pub rest_state: RestState,
     #[serde(default)]
     pub commit_candidate: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub action_cues: Vec<ActionCue>,
     #[serde(default)]
     pub objective_changed_at: Option<DateTime<Utc>>,
     #[serde(default)]
@@ -69,6 +74,8 @@ pub struct ThoughtSnapshot {
     pub rest_state: RestState,
     #[serde(default)]
     pub commit_candidate: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub action_cues: Vec<ActionCue>,
     #[serde(default)]
     pub objective_changed_at: Option<DateTime<Utc>>,
     #[serde(default)]
@@ -97,8 +104,12 @@ pub struct FileStore {
     thought_cache: RwLock<HashMap<String, ThoughtSnapshot>>,
     /// In-memory cache of daemon runtime thought config.
     thought_config_cache: RwLock<ThoughtConfig>,
+    /// In-memory cache of operator-managed directory group membership deltas.
+    dir_group_memberships_cache: RwLock<DirGroupMemberships>,
     /// Serialize thought writes to avoid stale read-modify-write races.
     thought_write_lock: Mutex<()>,
+    /// Serialize directory group writes to avoid stale read-modify-write races.
+    dir_group_write_lock: Mutex<()>,
 }
 
 #[derive(Debug, Error)]
@@ -139,13 +150,16 @@ impl FileStore {
             session_write_lock: Mutex::new(()),
             thought_cache: RwLock::new(HashMap::new()),
             thought_config_cache: RwLock::new(ThoughtConfig::default()),
+            dir_group_memberships_cache: RwLock::new(DirGroupMemberships::default()),
             thought_write_lock: Mutex::new(()),
+            dir_group_write_lock: Mutex::new(()),
         });
 
         // Load existing data into cache.
         let loaded = store.load_sessions_from_disk().await;
         let loaded_thoughts = store.load_thoughts_from_disk().await;
         let loaded_thought_config = store.load_thought_config_from_disk().await;
+        let loaded_dir_groups = store.load_dir_group_memberships_from_disk().await;
         {
             let mut cache = store.cache.write().await;
             *cache = loaded;
@@ -157,6 +171,10 @@ impl FileStore {
         {
             let mut thought_config_cache = store.thought_config_cache.write().await;
             *thought_config_cache = loaded_thought_config;
+        }
+        {
+            let mut dir_group_cache = store.dir_group_memberships_cache.write().await;
+            *dir_group_cache = loaded_dir_groups;
         }
 
         info!(
@@ -182,6 +200,11 @@ impl FileStore {
     /// Return the path to the daemon runtime thought config file.
     fn thought_config_path(&self) -> PathBuf {
         self.base_dir.join("thought_config.json")
+    }
+
+    /// Return the path to operator-managed directory group membership deltas.
+    fn dir_group_memberships_path(&self) -> PathBuf {
+        self.base_dir.join("dir_groups.json")
     }
 
     // -----------------------------------------------------------------------
@@ -262,6 +285,7 @@ impl FileStore {
         thought_source: ThoughtSource,
         rest_state: RestState,
         commit_candidate: bool,
+        action_cues: Vec<ActionCue>,
         updated_at: DateTime<Utc>,
         delivery: ThoughtDeliveryState,
         objective_changed_at: Option<DateTime<Utc>>,
@@ -284,6 +308,7 @@ impl FileStore {
                     thought_source,
                     rest_state,
                     commit_candidate,
+                    action_cues,
                     objective_changed_at,
                     objective_fingerprint,
                     token_count,
@@ -362,6 +387,83 @@ impl FileStore {
         Ok(())
     }
 
+    // -----------------------------------------------------------------------
+    // Directory group memberships
+    // -----------------------------------------------------------------------
+
+    /// Save operator-managed directory group membership deltas atomically.
+    pub async fn save_dir_group_memberships(
+        &self,
+        memberships: DirGroupMemberships,
+    ) -> anyhow::Result<()> {
+        let _global_write_guard = self.write_lock.lock().await;
+        let _write_guard = self.dir_group_write_lock.lock().await;
+        let data = serde_json::to_string_pretty(&memberships)
+            .map_err(|e| anyhow::anyhow!("failed to serialize directory groups: {e}"))?;
+        let path = self.dir_group_memberships_path();
+        atomic_write_blocking(path, data).await?;
+
+        {
+            let mut cache = self.dir_group_memberships_cache.write().await;
+            *cache = memberships;
+        }
+
+        debug!("persisted directory group memberships");
+        Ok(())
+    }
+
+    /// Apply an in-process read-modify-write to directory group membership
+    /// deltas and persist the resulting snapshot atomically.
+    pub async fn update_dir_group_memberships<F>(
+        &self,
+        update: F,
+    ) -> anyhow::Result<DirGroupMemberships>
+    where
+        F: FnOnce(&mut DirGroupMemberships),
+    {
+        let _global_write_guard = self.write_lock.lock().await;
+        let _write_guard = self.dir_group_write_lock.lock().await;
+
+        let mut memberships = self.dir_group_memberships_cache.read().await.clone();
+        update(&mut memberships);
+
+        let data = serde_json::to_string_pretty(&memberships)
+            .map_err(|e| anyhow::anyhow!("failed to serialize directory groups: {e}"))?;
+        let path = self.dir_group_memberships_path();
+        atomic_write_blocking(path, data).await?;
+
+        {
+            let mut cache = self.dir_group_memberships_cache.write().await;
+            *cache = memberships.clone();
+        }
+
+        debug!("persisted directory group memberships");
+        Ok(memberships)
+    }
+
+    /// Load directory group membership deltas from the in-memory cache.
+    pub async fn load_dir_group_memberships(&self) -> DirGroupMemberships {
+        self.dir_group_memberships_cache.read().await.clone()
+    }
+
+    async fn load_dir_group_memberships_from_disk(&self) -> DirGroupMemberships {
+        let path = self.dir_group_memberships_path();
+        match read_file_blocking(path).await {
+            Ok(Some(data)) => match serde_json::from_str::<DirGroupMemberships>(&data) {
+                Ok(groups) => groups,
+                Err(e) => {
+                    warn!("corrupt directory group memberships file, starting fresh: {e}");
+                    DirGroupMemberships::default()
+                }
+            },
+            Ok(None) => DirGroupMemberships::default(),
+            Err(e) => {
+                warn!("failed to read directory group memberships: {e}");
+                DirGroupMemberships::default()
+            }
+        }
+    }
+
     /// Sync persistence files and directory entries as a shutdown durability barrier.
     pub async fn flush_barrier(&self) -> anyhow::Result<()> {
         let _global_write_guard = self.write_lock.lock().await;
@@ -370,6 +472,7 @@ impl FileStore {
             self.registry_path(),
             self.thoughts_path(),
             self.thought_config_path(),
+            self.dir_group_memberships_path(),
         ];
         tokio::task::spawn_blocking(move || flush_barrier_blocking(&base_dir, &files))
             .await
@@ -558,6 +661,86 @@ fn sync_parent_dir(path: &Path) -> anyhow::Result<()> {
 mod tests {
     use super::*;
     use fs2::FileExt;
+
+    #[tokio::test]
+    async fn dir_group_memberships_round_trip_through_cache_and_disk() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = FileStore::new(dir.path()).await.expect("store");
+        let mut memberships = DirGroupMemberships::default();
+        memberships
+            .groups
+            .entry("frontend".to_string())
+            .or_default()
+            .include_paths
+            .insert("/tmp/frontend".to_string());
+        memberships
+            .groups
+            .entry("backend".to_string())
+            .or_default()
+            .exclude_paths
+            .insert("/tmp/backend".to_string());
+
+        store
+            .save_dir_group_memberships(memberships.clone())
+            .await
+            .expect("save memberships");
+        assert_eq!(store.load_dir_group_memberships().await, memberships);
+
+        let reopened = FileStore::new(dir.path()).await.expect("reopen store");
+        assert_eq!(reopened.load_dir_group_memberships().await, memberships);
+    }
+
+    #[tokio::test]
+    async fn dir_group_membership_updates_merge_concurrent_cache_writes() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = FileStore::new(dir.path()).await.expect("store");
+
+        let first_store = store.clone();
+        let second_store = store.clone();
+        let (first, second) = tokio::join!(
+            async move {
+                first_store
+                    .update_dir_group_memberships(|memberships| {
+                        memberships
+                            .groups
+                            .entry("frontend".to_string())
+                            .or_default()
+                            .include_paths
+                            .insert("/tmp/project-a".to_string());
+                    })
+                    .await
+            },
+            async move {
+                second_store
+                    .update_dir_group_memberships(|memberships| {
+                        memberships
+                            .groups
+                            .entry("backend".to_string())
+                            .or_default()
+                            .include_paths
+                            .insert("/tmp/project-b".to_string());
+                    })
+                    .await
+            }
+        );
+
+        first.expect("first update");
+        second.expect("second update");
+
+        let stored = store.load_dir_group_memberships().await;
+        assert!(stored
+            .groups
+            .get("frontend")
+            .expect("frontend delta")
+            .include_paths
+            .contains("/tmp/project-a"));
+        assert!(stored
+            .groups
+            .get("backend")
+            .expect("backend delta")
+            .include_paths
+            .contains("/tmp/project-b"));
+    }
 
     #[tokio::test]
     async fn read_file_blocking_reports_checksum_mismatch() {

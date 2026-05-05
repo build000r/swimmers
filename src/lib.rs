@@ -7,6 +7,7 @@ pub mod host_actions;
 pub mod metrics;
 pub mod native;
 pub mod openrouter_models;
+pub mod operator_pressure;
 pub mod persistence;
 pub mod repo_theme;
 pub mod scroll;

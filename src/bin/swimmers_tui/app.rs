@@ -119,6 +119,19 @@ pub(crate) struct ThoughtConfigActionOutcome {
     pub(crate) refresh_sessions: bool,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct GroupInputTargets {
+    pub(crate) session_ids: Vec<String>,
+    pub(crate) label: String,
+}
+
+#[derive(Clone, Copy)]
+enum PickerGroupUpdateMode {
+    Add,
+    Remove,
+    Move,
+}
+
 pub(crate) enum PendingInteractionResult {
     OpenPicker {
         x: u16,
@@ -145,6 +158,9 @@ pub(crate) enum PendingInteractionResult {
     CreateSessionsBatch {
         field: Rect,
         response: Result<CreateSessionsBatchResponse, String>,
+    },
+    SendGroupInput {
+        response: Result<SessionGroupInputResponse, String>,
     },
     OpenSession {
         label: String,
@@ -197,6 +213,7 @@ pub(crate) struct App<C: TuiApi> {
     pub(crate) spawn_tool: SpawnTool,
     pub(crate) launch_target: Option<String>,
     pub(crate) initial_request: Option<InitialRequestState>,
+    pub(crate) group_input_targets: Option<GroupInputTargets>,
     pub(crate) initial_request_generation: u64,
     pub(crate) voice_state: VoiceUiState,
     pub(crate) voice_recording: Option<VoiceRecording>,
@@ -274,6 +291,7 @@ impl<C: TuiApi> App<C> {
             spawn_tool: SpawnTool::Codex,
             launch_target: None,
             initial_request: None,
+            group_input_targets: None,
             initial_request_generation: 0,
             voice_state: default_ui_state(),
             voice_recording: None,
@@ -1348,6 +1366,10 @@ impl<C: TuiApi> App<C> {
                 Ok(response) => self.apply_batch_create_response(field, response),
                 Err(err) => self.set_message(err),
             },
+            PendingInteractionResult::SendGroupInput { response } => match response {
+                Ok(response) => self.apply_group_input_response(response),
+                Err(err) => self.set_message(err),
+            },
             PendingInteractionResult::OpenSession { label, response } => match response {
                 Ok(response) => {
                     self.set_message(format!("{} {}", response.status, label));
@@ -2236,6 +2258,107 @@ impl<C: TuiApi> App<C> {
         self.picker_reload(None, picker.managed_only, Some(name));
     }
 
+    pub(crate) fn picker_cycle_group_edit_target(&mut self) {
+        let Some(picker) = &mut self.picker else {
+            return;
+        };
+        match picker.cycle_group_edit_target() {
+            Some(target) => self.set_message(format!("directory group target: {target}")),
+            None => self.set_message("no directory groups available"),
+        }
+    }
+
+    pub(crate) fn picker_add_selected_to_group_target(&mut self) {
+        self.update_selected_picker_entry_groups(PickerGroupUpdateMode::Add);
+    }
+
+    pub(crate) fn picker_remove_selected_from_group_target(&mut self) {
+        self.update_selected_picker_entry_groups(PickerGroupUpdateMode::Remove);
+    }
+
+    pub(crate) fn picker_move_selected_to_group_target(&mut self) {
+        self.update_selected_picker_entry_groups(PickerGroupUpdateMode::Move);
+    }
+
+    fn update_selected_picker_entry_groups(&mut self, mode: PickerGroupUpdateMode) {
+        let Some((path, entry_label, add, remove, reload_path, managed_only, group)) =
+            self.picker.as_ref().and_then(|picker| {
+                let PickerSelection::Entry(index) = picker.selection else {
+                    return None;
+                };
+                let target = picker.group_edit_target.clone()?;
+                let entry = picker.entries.get(index)?;
+                let path = picker.path_for_entry(index)?;
+                let memberships = entry.groups.clone();
+                let add = match mode {
+                    PickerGroupUpdateMode::Add | PickerGroupUpdateMode::Move => {
+                        vec![target.clone()]
+                    }
+                    PickerGroupUpdateMode::Remove => Vec::new(),
+                };
+                let remove = match mode {
+                    PickerGroupUpdateMode::Add => Vec::new(),
+                    PickerGroupUpdateMode::Remove => vec![target.clone()],
+                    PickerGroupUpdateMode::Move => {
+                        let mut remove = memberships
+                            .into_iter()
+                            .filter(|group| group != &target)
+                            .collect::<Vec<_>>();
+                        if let Some(current) = &picker.current_group {
+                            if current != &target && !remove.iter().any(|group| group == current) {
+                                remove.push(current.clone());
+                            }
+                        }
+                        remove
+                    }
+                };
+                Some((
+                    path,
+                    entry.name.clone(),
+                    add,
+                    remove,
+                    picker.current_path.clone(),
+                    picker.managed_only,
+                    picker.current_group.clone(),
+                ))
+            })
+        else {
+            self.set_message("select a directory entry and group target first");
+            return;
+        };
+
+        if add.is_empty() && remove.is_empty() {
+            self.set_message("no directory group change selected");
+            return;
+        }
+
+        let Some(tx) = self.begin_pending_interaction() else {
+            return;
+        };
+
+        let client = Arc::clone(&self.client);
+        self.set_message(format!("updating groups for {entry_label}..."));
+        self.runtime.spawn(async move {
+            let response = match client
+                .update_dir_group_memberships(&path, add, remove)
+                .await
+            {
+                Ok(_) => {
+                    client
+                        .list_dirs(Some(&reload_path), managed_only, group.as_deref())
+                        .await
+                }
+                Err(err) => Err(err),
+            };
+            let _ = tx.send(PendingInteractionResult::ReloadPicker {
+                managed_only,
+                group,
+                preserve_selection: true,
+                response,
+            });
+        });
+    }
+
     pub(crate) fn start_picker_repo_action(&mut self, index: usize, kind: RepoActionKind) {
         // Open is handled client-side — no server round-trip.
         if kind == RepoActionKind::Open {
@@ -2315,6 +2438,7 @@ impl<C: TuiApi> App<C> {
     pub(crate) fn open_initial_request(&mut self, cwd: String, launch_target: Option<String>) {
         self.cancel_voice_recording();
         self.initial_request_generation = self.initial_request_generation.saturating_add(1);
+        self.group_input_targets = None;
         self.initial_request = Some(InitialRequestState::new(cwd, launch_target));
         self.voice_state = default_ui_state();
     }
@@ -2345,7 +2469,23 @@ impl<C: TuiApi> App<C> {
             .as_ref()
             .and_then(|picker| picker.launch_target.clone());
         self.launch_target = launch_target.clone();
+        self.group_input_targets = None;
         self.initial_request = Some(InitialRequestState::new_batch(dirs, launch_target));
+        self.voice_state = default_ui_state();
+    }
+
+    pub(crate) fn open_group_input_request(&mut self, session_ids: Vec<String>, label: String) {
+        if session_ids.is_empty() {
+            self.set_message("no sessions in this school");
+            return;
+        }
+        self.cancel_voice_recording();
+        self.initial_request_generation = self.initial_request_generation.saturating_add(1);
+        self.group_input_targets = Some(GroupInputTargets {
+            session_ids,
+            label: label.clone(),
+        });
+        self.initial_request = Some(InitialRequestState::new(label, None));
         self.voice_state = default_ui_state();
     }
 
@@ -2353,6 +2493,7 @@ impl<C: TuiApi> App<C> {
         self.cancel_voice_recording();
         self.initial_request_generation = self.initial_request_generation.saturating_add(1);
         self.initial_request = None;
+        self.group_input_targets = None;
     }
 
     pub(crate) fn handle_initial_request_key(&mut self, key: KeyEvent, field: Rect) {
@@ -2405,6 +2546,10 @@ impl<C: TuiApi> App<C> {
             self.set_message("enter an initial request");
             return;
         };
+        if let Some(targets) = self.group_input_targets.clone() {
+            self.send_group_input(targets.session_ids, initial_request);
+            return;
+        }
         let Some(cwd) = self.initial_request.as_ref().map(|state| state.cwd.clone()) else {
             return;
         };
@@ -2625,6 +2770,24 @@ impl<C: TuiApi> App<C> {
         });
     }
 
+    pub(crate) fn send_group_input(&mut self, session_ids: Vec<String>, text: String) {
+        let total = session_ids.len();
+        if total == 0 {
+            self.set_message("no sessions in this school");
+            return;
+        }
+        let Some(tx) = self.begin_pending_interaction() else {
+            return;
+        };
+
+        let client = Arc::clone(&self.client);
+        self.set_message(format!("sending to {total} sessions..."));
+        self.runtime.spawn(async move {
+            let response = client.send_group_input(session_ids, text).await;
+            let _ = tx.send(PendingInteractionResult::SendGroupInput { response });
+        });
+    }
+
     fn apply_batch_create_response(&mut self, field: Rect, response: CreateSessionsBatchResponse) {
         let total = response.results.len();
         let mut success_count = 0usize;
@@ -2658,6 +2821,10 @@ impl<C: TuiApi> App<C> {
 
         if success_count > 0 {
             self.close_picker();
+            if success_count > 1 {
+                self.thought_group_by = ThoughtGroupBy::Batch;
+                self.thought_show_all = true;
+            }
             if success_count == total {
                 match last_tmux_name {
                     Some(name) if success_count == 1 => self.set_message(format!("created {name}")),
@@ -2671,6 +2838,22 @@ impl<C: TuiApi> App<C> {
             }
         } else {
             self.set_message(first_error.unwrap_or_else(|| "batch create failed".to_string()));
+        }
+    }
+
+    fn apply_group_input_response(&mut self, response: SessionGroupInputResponse) {
+        let total = response.results.len();
+        if response.skipped == 0 {
+            self.close_initial_request();
+            self.set_message(format!("sent to {} sessions", response.delivered));
+        } else if response.delivered > 0 {
+            self.close_initial_request();
+            self.set_message(format!(
+                "sent to {}/{}; {} skipped",
+                response.delivered, total, response.skipped
+            ));
+        } else {
+            self.set_message(format!("sent to 0/{total}; all skipped"));
         }
     }
 
@@ -2737,6 +2920,9 @@ impl<C: TuiApi> App<C> {
             }
             ThoughtPanelAction::OpenInitialRequest { cwd } => {
                 self.open_initial_request(cwd, self.launch_target.clone());
+            }
+            ThoughtPanelAction::SendGroup { session_ids, label } => {
+                self.open_group_input_request(session_ids, label);
             }
             ThoughtPanelAction::LaunchCommitCodex(session_id) => {
                 self.launch_commit_codex_for_session(&session_id);
@@ -3418,6 +3604,13 @@ impl<C: TuiApi> App<C> {
             PickerAction::ActivateGroup(name) => {
                 self.picker_set_group(name);
             }
+            PickerAction::CycleGroupEditTarget => {
+                if let Some(picker) = &mut self.picker {
+                    if let Some(target) = picker.cycle_group_edit_target() {
+                        self.set_message(format!("directory group target: {target}"));
+                    }
+                }
+            }
             PickerAction::ToggleTool => {
                 self.spawn_tool = self.spawn_tool.toggle();
                 if let Some(picker) = &mut self.picker {
@@ -3656,11 +3849,16 @@ impl<C: TuiApi> App<C> {
             render_picker(renderer, picker, layout.overview_field);
         }
         if let Some(initial_request) = &self.initial_request {
+            let group_context = self
+                .group_input_targets
+                .as_ref()
+                .map(|targets| (targets.label.as_str(), targets.session_ids.len()));
             render_initial_request(
                 renderer,
                 initial_request,
                 &self.voice_state,
                 layout.overview_field,
+                group_context,
             );
         }
         if let Some(editor) = &self.thought_config_editor {
