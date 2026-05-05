@@ -277,7 +277,7 @@ test("selecting a Trogdor swordsman forces the terminal view, not just URL state
 test("Trogdor atlas renders dragon sprite assets and flames burnt swordsmen", () => {
   resetWebState();
   web.state.trogdorAtlasOpen = true;
-  web.state.trogdorBurntSessions.set("sess_0", performance.now() + 1000);
+  web.markTrogdorSessionsResponded(["sess_0"]);
 
   web.renderHudSurface();
 
@@ -285,6 +285,7 @@ test("Trogdor atlas renders dragon sprite assets and flames burnt swordsmen", ()
   assert.match(html, /class="[^"]*trogdor-dragon[^"]*is-firing/);
   assert.match(html, /\/assets\/dragon\/mouth-closed\/left\.png/);
   assert.match(html, /\/assets\/dragon\/fire-left-full\/left\.png/);
+  assert.equal(web.state.trogdorBurntSessions.has("sess_0"), true);
   assert.match(html, /agent-burn-flame/);
   assert.match(html, /agent-burn-smoke/);
 });

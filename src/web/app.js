@@ -6012,6 +6012,7 @@ export const __swimmersWebTest = {
   updateTerminalFallbackText,
   terminalFallbackOwnsPointer,
   sendTerminalText,
+  markTrogdorSessionsResponded,
   handleTerminalFallbackKeyEvent,
   handleTerminalFallbackPasteEvent,
   focusTerminalInputSurface,
