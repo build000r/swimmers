@@ -224,4 +224,25 @@ mod tests {
         assert_eq!(json["status"], "starting");
         assert_eq!(json["thought_bridge"]["status"], "starting");
     }
+
+    #[tokio::test]
+    async fn health_stays_available_while_readyz_reports_unhealthy_bridge() {
+        let bridge_health = Arc::new(BridgeHealthState::new_with_tick(Duration::from_secs(15)));
+        bridge_health.record_failure("timeout 1", Duration::from_secs(1));
+        bridge_health.record_failure("timeout 2", Duration::from_secs(1));
+        bridge_health.record_failure("timeout 3", Duration::from_secs(1));
+        let state = test_state(bridge_health);
+
+        let health_response = health(State(state.clone())).await.into_response();
+        assert_eq!(health_response.status(), StatusCode::OK);
+        let health_json = response_json(health_response).await;
+        assert_eq!(health_json["status"], "unhealthy");
+        assert_eq!(health_json["thought_bridge"]["status"], "unhealthy");
+
+        let readyz_response = readyz(State(state)).await.into_response();
+        assert_eq!(readyz_response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let readyz_json = response_json(readyz_response).await;
+        assert_eq!(readyz_json["status"], "unhealthy");
+        assert_eq!(readyz_json["thought_bridge"]["status"], "unhealthy");
+    }
 }

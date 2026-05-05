@@ -163,6 +163,7 @@ impl BridgeHealthState {
 
     pub fn record_success(&self, last_backend_error: Option<String>) {
         let mut inner = self.inner.lock().expect("bridge health mutex");
+        let clear_shutdown_request = inner.shutdown_reason.take().is_some();
         let now = Instant::now();
         inner.status = if last_backend_error.is_some() {
             BridgeStatus::Degraded
@@ -176,6 +177,11 @@ impl BridgeHealthState {
         inner.last_backend_error = last_backend_error;
         inner.next_retry_delay = Duration::ZERO;
         inner.unhealthy_since = None;
+        drop(inner);
+
+        if clear_shutdown_request {
+            self.shutdown_tx.send_replace(None);
+        }
     }
 
     pub fn record_failure(&self, error: impl Into<String>, retry_delay: Duration) {
@@ -308,6 +314,33 @@ mod tests {
 
         let reason = health.wait_for_shutdown_request().await;
         assert!(reason.contains("thought bridge unhealthy"));
+    }
+
+    #[tokio::test]
+    async fn success_clears_shutdown_request_after_self_fence() {
+        let timing = BridgeTiming {
+            tick: Duration::from_millis(5),
+            sync_timeout: Duration::from_millis(20),
+            min_failure_backoff: Duration::from_millis(5),
+            max_failure_backoff: Duration::from_millis(10),
+            unhealthy_after: Duration::from_millis(10),
+            self_fence_after: Duration::from_millis(15),
+        };
+        let health = BridgeHealthState::with_timing(timing);
+
+        health.record_failure("spawn failed", Duration::from_millis(5));
+        tokio::time::sleep(Duration::from_millis(12)).await;
+        health.record_failure("timeout", Duration::from_millis(10));
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        health.record_failure("still timing out", Duration::from_millis(10));
+        assert!(health.snapshot().shutdown_requested);
+
+        health.record_success(None);
+        let snapshot = health.snapshot();
+        assert_eq!(snapshot.status, BridgeStatus::Healthy);
+        assert!(!snapshot.shutdown_requested);
+        assert!(snapshot.shutdown_reason.is_none());
+        assert_eq!(snapshot.consecutive_failures, 0);
     }
 
     #[test]

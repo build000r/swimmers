@@ -434,7 +434,7 @@ pub async fn run_server(
     let port = config.port;
     let bind = config.bind.clone();
 
-    let (state, thought_backend, bridge_health) = init_app_state(config.clone()).await;
+    let (state, thought_backend, _bridge_health) = init_app_state(config.clone()).await;
     let supervisor = state.supervisor.clone();
     let file_store = state.current_file_store();
     let app = build_app_router(config, state, prom_handle);
@@ -451,22 +451,16 @@ pub async fn run_server(
         listener,
         app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
     )
-    .with_graceful_shutdown(shutdown_signal(bridge_health.clone()))
+    .with_graceful_shutdown(shutdown_signal())
     .await;
 
     finalize_shutdown(&supervisor, thought_backend, file_store).await?;
 
     server_result.map_err(|err| anyhow::anyhow!("server error: {err}"))?;
-    if let Some(reason) = bridge_health.shutdown_reason() {
-        return Err(anyhow::anyhow!(
-            "thought bridge requested shutdown: {reason}"
-        ));
-    }
-
     Ok(())
 }
 
-async fn shutdown_signal(bridge_health: Arc<BridgeHealthState>) {
+async fn shutdown_signal() {
     let ctrl_c = async {
         if let Err(err) = tokio::signal::ctrl_c().await {
             tracing::error!("failed to install Ctrl-C handler: {err}");
@@ -489,15 +483,20 @@ async fn shutdown_signal(bridge_health: Arc<BridgeHealthState>) {
     #[cfg(not(unix))]
     let terminate = std::future::pending::<()>();
 
-    let bridge_unhealthy = async move {
-        let reason = bridge_health.wait_for_shutdown_request().await;
-        tracing::error!(reason, "thought bridge requested process shutdown");
-    };
+    shutdown_signal_from(ctrl_c, terminate).await;
+}
+
+async fn shutdown_signal_from<C, T>(ctrl_c: C, terminate: T)
+where
+    C: std::future::Future<Output = ()>,
+    T: std::future::Future<Output = ()>,
+{
+    tokio::pin!(ctrl_c);
+    tokio::pin!(terminate);
 
     tokio::select! {
-        _ = ctrl_c => {},
-        _ = terminate => {},
-        _ = bridge_unhealthy => {},
+        _ = &mut ctrl_c => {},
+        _ = &mut terminate => {},
     }
 
     tracing::info!("received shutdown signal; draining");
@@ -513,6 +512,7 @@ mod tests {
     use tokio::sync::mpsc;
 
     use crate::session::actor::{ActorHandle, SessionCommand};
+    use crate::thought::health::BridgeTiming;
     use crate::thought::loop_runner::SessionProvider;
     use crate::thought::protocol::ThoughtDeliveryState;
     use crate::types::{
@@ -655,6 +655,49 @@ mod tests {
         assert_eq!(sessions[0].session_id, "sess_1");
         assert_eq!(sessions[0].thought.as_deref(), Some("queued thought"));
         assert_eq!(sessions[0].objective_fingerprint.as_deref(), Some("obj-1"));
+    }
+
+    #[tokio::test]
+    async fn shutdown_signal_returns_on_process_signal_future() {
+        tokio::time::timeout(
+            Duration::from_millis(25),
+            shutdown_signal_from(async {}, pending::<()>()),
+        )
+        .await
+        .expect("shutdown signal should complete when process signal future resolves");
+    }
+
+    #[tokio::test]
+    async fn bridge_self_fence_does_not_complete_server_shutdown_signal() {
+        let timing = BridgeTiming {
+            tick: Duration::from_millis(5),
+            sync_timeout: Duration::from_millis(20),
+            min_failure_backoff: Duration::from_millis(5),
+            max_failure_backoff: Duration::from_millis(10),
+            unhealthy_after: Duration::from_millis(10),
+            self_fence_after: Duration::from_millis(15),
+        };
+        let bridge_health = BridgeHealthState::with_timing(timing);
+
+        bridge_health.record_failure("spawn failed", Duration::from_millis(5));
+        tokio::time::sleep(Duration::from_millis(12)).await;
+        bridge_health.record_failure("timeout", Duration::from_millis(10));
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        bridge_health.record_failure("still timing out", Duration::from_millis(10));
+        assert!(
+            bridge_health.snapshot().shutdown_requested,
+            "setup should produce a thought bridge self-fence request"
+        );
+
+        let result = tokio::time::timeout(
+            Duration::from_millis(25),
+            shutdown_signal_from(pending::<()>(), pending::<()>()),
+        )
+        .await;
+        assert!(
+            result.is_err(),
+            "thought bridge self-fence must not stop the HTTP API"
+        );
     }
 
     #[tokio::test]
