@@ -3162,7 +3162,7 @@ impl<C: TuiApi> App<C> {
                 viewer
                     .plan_tabs
                     .as_ref()
-                    .map_or(false, |tabs| tabs.contains(&tab))
+                    .is_some_and(|tabs| tabs.contains(&tab))
                     && viewer.active_tab != tab
             }
             FishBowlMode::Aquarium => false,

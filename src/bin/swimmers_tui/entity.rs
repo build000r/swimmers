@@ -1,16 +1,11 @@
 use super::*;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) enum SpriteTheme {
     Fish,
+    #[default]
     Balls,
     Jelly,
-}
-
-impl Default for SpriteTheme {
-    fn default() -> Self {
-        Self::Balls
-    }
 }
 
 impl SpriteTheme {

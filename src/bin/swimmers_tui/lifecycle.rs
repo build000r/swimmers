@@ -203,7 +203,7 @@ fn resolve_override_binary_path(path: &Path) -> Result<PathBuf, String> {
             path.display()
         ));
     }
-    if !is_executable_file(&path) {
+    if !is_executable_file(path) {
         return Err(format!(
             "SWIMMERS_SERVER_BIN points to `{}` but it is not executable",
             path.display()

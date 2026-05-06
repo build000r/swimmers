@@ -541,11 +541,12 @@ mod tests {
     use super::*;
 
     fn cfg(bind: &str, mode: AuthMode, token: Option<&str>) -> Config {
-        let mut c = Config::default();
-        c.bind = bind.to_string();
-        c.auth_mode = mode;
-        c.auth_token = token.map(|s| s.to_string());
-        c
+        Config {
+            bind: bind.to_string(),
+            auth_mode: mode,
+            auth_token: token.map(|s| s.to_string()),
+            ..Config::default()
+        }
     }
 
     #[test]

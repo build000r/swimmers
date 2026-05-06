@@ -545,8 +545,9 @@ pub(crate) struct ThoughtGroup {
     pub(crate) entries: Vec<ThoughtPanelEntryView>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) enum ThoughtGroupBy {
+    #[default]
     Pwd,
     Batch,
 }
@@ -564,12 +565,6 @@ impl ThoughtGroupBy {
             Self::Pwd => Self::Batch,
             Self::Batch => Self::Pwd,
         }
-    }
-}
-
-impl Default for ThoughtGroupBy {
-    fn default() -> Self {
-        Self::Pwd
     }
 }
 
@@ -995,7 +990,7 @@ fn plan_for_group<C: TuiApi>(
 
 fn thought_entry_is_group_input_ready(entry: &ThoughtPanelEntryView) -> bool {
     !entry.is_stale
-        && entry.transport_health != TransportHealth::Disconnected
+        && entry.transport_health == TransportHealth::Healthy
         && entry.state != SessionState::Exited
         && entry.rest_state != RestState::DeepSleep
         && (entry.rest_state == RestState::Sleeping || entry.state == SessionState::Attention)
@@ -1401,7 +1396,7 @@ pub(crate) fn build_thought_panel<C: TuiApi>(
     } else {
         all_entries
             .iter()
-            .filter(|entry| thought_entry_needs_input(*entry))
+            .filter(|entry| thought_entry_needs_input(entry))
             .cloned()
             .collect::<Vec<_>>()
     };

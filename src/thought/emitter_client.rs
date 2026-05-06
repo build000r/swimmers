@@ -574,6 +574,21 @@ mod tests {
 
     static TEST_ENV_LOCK: LazyLock<StdMutex<()>> = LazyLock::new(|| StdMutex::new(()));
 
+    async fn wait_for_non_empty_file(path: &Path, timeout: Duration) -> String {
+        tokio::time::timeout(timeout, async {
+            loop {
+                if let Ok(contents) = fs::read_to_string(path) {
+                    if !contents.trim().is_empty() {
+                        return contents;
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("file should become non-empty")
+    }
+
     #[test]
     fn parse_hello_accepts_expected_protocol() {
         let raw = r#"{"type":"hello","protocol":"clawgs.emit.v1","engine_version":"0.1.0"}"#;
@@ -726,7 +741,7 @@ mod tests {
         let line = logged.lines().next().expect("spawned command line");
         assert_eq!(line, "emit --stdio");
 
-        let request_line = fs::read_to_string(&input_log).expect("read input log");
+        let request_line = wait_for_non_empty_file(&input_log, Duration::from_millis(500)).await;
         let request: Value =
             serde_json::from_str(request_line.lines().next().expect("first sync request"))
                 .expect("sync request json");
@@ -810,7 +825,7 @@ exec sleep 2
             other => panic!("unexpected error variant: {other:?}"),
         }
 
-        let request_line = fs::read_to_string(&input_log).expect("read input log");
+        let request_line = wait_for_non_empty_file(&input_log, Duration::from_millis(500)).await;
         let request: Value =
             serde_json::from_str(request_line.lines().next().expect("first sync request"))
                 .expect("sync request json");

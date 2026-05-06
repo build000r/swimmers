@@ -49,6 +49,8 @@ const EMBEDDED_FIRST_FRAME_BUDGET: Duration = Duration::from_millis(80);
 
 static TEST_ENV_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
+type CreateBatchCall = (Vec<String>, SpawnTool, Option<String>, Option<String>);
+
 #[derive(Default)]
 struct MockApiState {
     fetch_sessions_results: VecDeque<Result<Vec<SessionSummary>, String>>,
@@ -83,7 +85,7 @@ struct MockApiState {
     update_dir_group_memberships_calls: Vec<(String, Vec<String>, Vec<String>)>,
     start_repo_action_calls: Vec<(String, RepoActionKind)>,
     create_calls: Vec<(String, SpawnTool, Option<String>, Option<String>)>,
-    create_batch_calls: Vec<(Vec<String>, SpawnTool, Option<String>, Option<String>)>,
+    create_batch_calls: Vec<CreateBatchCall>,
     send_group_input_calls: Vec<(Vec<String>, String)>,
 }
 
@@ -294,9 +296,7 @@ impl MockApi {
         self.state.lock().unwrap().create_calls.clone()
     }
 
-    fn create_batch_calls_with_targets(
-        &self,
-    ) -> Vec<(Vec<String>, SpawnTool, Option<String>, Option<String>)> {
+    fn create_batch_calls_with_targets(&self) -> Vec<CreateBatchCall> {
         self.state.lock().unwrap().create_batch_calls.clone()
     }
 
@@ -428,21 +428,18 @@ impl TuiApi for MockApi {
         Box::pin(async move {
             let mut state = state.lock().unwrap();
             state.mermaid_artifact_calls.push(session_id.clone());
-            state
-                .mermaid_artifact_results
-                .pop_front()
-                .unwrap_or_else(|| {
-                    Ok(MermaidArtifactResponse {
-                        session_id,
-                        available: false,
-                        path: None,
-                        updated_at: None,
-                        source: None,
-                        error: None,
-                        slice_name: None,
-                        plan_files: None,
-                    })
+            state.mermaid_artifact_results.pop_front().unwrap_or({
+                Ok(MermaidArtifactResponse {
+                    session_id,
+                    available: false,
+                    path: None,
+                    updated_at: None,
+                    source: None,
+                    error: None,
+                    slice_name: None,
+                    plan_files: None,
                 })
+            })
         })
     }
 
@@ -7397,7 +7394,7 @@ fn thought_config_key_pending_action_blocks_edits_but_escape_closes() {
         Some("openrouter/free")
     );
     assert_eq!(
-        app.visible_message().as_deref(),
+        app.visible_message(),
         Some("wait for the current action to finish")
     );
 
@@ -8462,6 +8459,36 @@ fn thought_panel_keeps_send_action_off_groups_without_two_ready_targets() {
         1,
         2,
     );
+    let degraded_ready = with_batch(
+        sleeping_session_with_thought(
+            "sess-degraded-ready",
+            "4a",
+            TEST_REPO_SWIMMERS,
+            "waiting",
+            "2026-03-08T14:00:04Z",
+        ),
+        "batch-degraded",
+        "degraded-school",
+        0,
+        2,
+    );
+    let degraded_bad = with_batch(
+        {
+            let mut session = sleeping_session_with_thought(
+                "sess-degraded-bad",
+                "4b",
+                TEST_REPO_SKILLS,
+                "degraded",
+                "2026-03-08T14:00:04Z",
+            );
+            session.transport_health = TransportHealth::Degraded;
+            session
+        },
+        "batch-degraded",
+        "degraded-school",
+        1,
+        2,
+    );
     let exited_ready = with_batch(
         sleeping_session_with_thought(
             "sess-exited-ready",
@@ -8555,6 +8582,8 @@ fn thought_panel_keeps_send_action_off_groups_without_two_ready_targets() {
             stale_bad,
             disconnected_ready,
             disconnected_bad,
+            degraded_ready,
+            degraded_bad,
             exited_ready,
             exited_bad,
             deep_ready,
@@ -8569,6 +8598,7 @@ fn thought_panel_keeps_send_action_off_groups_without_two_ready_targets() {
     for label in [
         "stale-school",
         "disconnected-school",
+        "degraded-school",
         "exited-school",
         "deep-school",
         "one-ready-school",
@@ -12909,7 +12939,7 @@ fn handle_thought_config_paste_blocks_during_pending_interaction() {
         "paste must not modify state while an interaction is pending"
     );
     assert_eq!(
-        app.visible_message().as_deref(),
+        app.visible_message(),
         Some("wait for the current action to finish")
     );
 }

@@ -1142,7 +1142,7 @@ async fn list_regular_dir_response(
     managed_only: bool,
     request_started: Instant,
 ) -> Result<DirListResponse, ApiServiceError> {
-    let read_dir = std::fs::read_dir(&canonical).map_err(|error| {
+    let read_dir = std::fs::read_dir(canonical).map_err(|error| {
         ApiServiceError::new(
             StatusCode::INTERNAL_SERVER_ERROR,
             "DIR_READ_ERROR",

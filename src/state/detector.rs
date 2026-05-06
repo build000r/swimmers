@@ -881,8 +881,10 @@ mod tests {
     use super::*;
     use std::sync::{Arc, Mutex};
 
+    type StateChangeLog = Arc<Mutex<Vec<(SessionState, SessionState)>>>;
+
     /// Helper: create a detector with a recording callback.
-    fn detector_with_log() -> (StateDetector, Arc<Mutex<Vec<(SessionState, SessionState)>>>) {
+    fn detector_with_log() -> (StateDetector, StateChangeLog) {
         let log = Arc::new(Mutex::new(Vec::new()));
         let log2 = log.clone();
         let mut d = StateDetector::new();
@@ -1359,7 +1361,10 @@ mod tests {
     fn unterminated_osc_recovers_after_limit() {
         let mut d = StateDetector::new();
         let mut chunk = Vec::from(&b"\x1b]"[..]);
-        chunk.extend(std::iter::repeat(b'x').take(TERMINAL_STRING_RECOVERY_BYTES + 1));
+        chunk.extend(std::iter::repeat_n(
+            b'x',
+            TERMINAL_STRING_RECOVERY_BYTES + 1,
+        ));
         chunk.extend_from_slice(b"user@host:~$ ");
 
         d.process_output(b"Compiling...\r\n");
@@ -1373,7 +1378,10 @@ mod tests {
     fn unterminated_private_string_recovers_after_limit() {
         let mut d = StateDetector::new();
         let mut chunk = Vec::from(&b"\x1bP"[..]);
-        chunk.extend(std::iter::repeat(b'x').take(TERMINAL_STRING_RECOVERY_BYTES + 1));
+        chunk.extend(std::iter::repeat_n(
+            b'x',
+            TERMINAL_STRING_RECOVERY_BYTES + 1,
+        ));
         chunk.extend_from_slice(b"user@host:~$ ");
 
         d.process_output(b"Compiling...\r\n");
@@ -1391,7 +1399,10 @@ mod tests {
         // every byte, so the prompt that follows is never seen.
         let mut d = StateDetector::new();
         let mut chunk = Vec::from(&b"\x1b["[..]);
-        chunk.extend(std::iter::repeat(0x00u8).take(TERMINAL_STRING_RECOVERY_BYTES + 1));
+        chunk.extend(std::iter::repeat_n(
+            0x00u8,
+            TERMINAL_STRING_RECOVERY_BYTES + 1,
+        ));
         chunk.extend_from_slice(b"user@host:~$ ");
 
         d.process_output(b"Compiling...\r\n");
@@ -1408,7 +1419,10 @@ mod tests {
         // a return to Normal so subsequent prompt bytes are detected.
         let mut d = StateDetector::new();
         let mut chunk = Vec::from(&b"\x1b "[..]);
-        chunk.extend(std::iter::repeat(0x24u8).take(TERMINAL_STRING_RECOVERY_BYTES + 1));
+        chunk.extend(std::iter::repeat_n(
+            0x24u8,
+            TERMINAL_STRING_RECOVERY_BYTES + 1,
+        ));
         chunk.extend_from_slice(b"user@host:~$ ");
 
         d.process_output(b"Compiling...\r\n");

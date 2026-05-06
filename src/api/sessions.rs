@@ -2113,7 +2113,7 @@ esac
                 .supervisor
                 .insert_test_handle(ActorHandle::test_handle(
                     session_id,
-                    &format!("tmux-{session_id}"),
+                    format!("tmux-{session_id}"),
                     cmd_tx,
                 ))
                 .await;

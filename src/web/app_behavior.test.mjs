@@ -107,6 +107,7 @@ class MockElement {
 
 const elements = new Map();
 const storage = new Map();
+const originalFetch = globalThis.fetch;
 
 function element(id) {
   if (!elements.has(id)) {
@@ -250,6 +251,22 @@ function resetWebState() {
   web.state.paletteItems = [];
   web.state.paletteIndex = 0;
   web.state.activeSheet = null;
+  if (originalFetch) {
+    globalThis.fetch = originalFetch;
+  } else {
+    delete globalThis.fetch;
+  }
+}
+
+function jsonResponse(status, body) {
+  return {
+    ok: status >= 200 && status < 300,
+    status,
+    statusText: status === 207 ? "Multi-Status" : "OK",
+    async json() {
+      return body;
+    },
+  };
 }
 
 test("selecting a Trogdor swordsman forces the terminal view, not just URL state", () => {
@@ -597,6 +614,65 @@ test("send history stores multiline prompts for recall chips", () => {
   assert.deepEqual(web.state.sendHistory, ["status", "first line\nsecond line"]);
   assert.ok(web.el.sendHistory.innerHTML.includes("status"));
   assert.ok(web.el.sendHistory.innerHTML.includes("first line second line"));
+});
+
+test("batch send burns only successful group-input results", async () => {
+  resetWebState();
+  web.state.sessions = [
+    rawSession({ session_id: "ready", tmux_name: "ready" }),
+    rawSession({ session_id: "stale", tmux_name: "stale" }),
+  ];
+  const requests = [];
+  globalThis.fetch = async (path, init) => {
+    requests.push({ path, body: JSON.parse(init.body) });
+    return jsonResponse(207, {
+      delivered: 1,
+      skipped: 1,
+      results: [
+        { session_id: "ready", ok: true },
+        {
+          session_id: "stale",
+          ok: false,
+          error: { code: "SESSION_NOT_READY" },
+        },
+      ],
+    });
+  };
+
+  const result = await web.sendGroupLine(["ready", "stale"], "continue");
+
+  assert.deepEqual(requests, [
+    {
+      path: "/v1/sessions/group-input",
+      body: { session_ids: ["ready", "stale"], text: "continue" },
+    },
+  ]);
+  assert.deepEqual(result.deliveredSessionIds, ["ready"]);
+  assert.equal(result.delivered, 1);
+  assert.equal(result.skipped, 1);
+  assert.equal(result.total, 2);
+  assert.equal(web.state.trogdorBurntSessions.has("ready"), true);
+  assert.equal(web.state.trogdorBurntSessions.has("stale"), false);
+});
+
+test("paste-only HTTP sends stage text without burning Trogdor response state", async () => {
+  resetWebState();
+  web.state.sessions = [rawSession({ session_id: "sess_0" })];
+  const requests = [];
+  globalThis.fetch = async (path, init) => {
+    requests.push({ path, body: JSON.parse(init.body) });
+    return jsonResponse(200, { ok: true, session_id: "sess_0" });
+  };
+
+  await web.sendRawTextToSession("sess_0", "draft only");
+
+  assert.deepEqual(requests, [
+    {
+      path: "/v1/sessions/sess_0/input",
+      body: { text: "draft only" },
+    },
+  ]);
+  assert.equal(web.state.trogdorBurntSessions.has("sess_0"), false);
 });
 
 test("accessibility mirror syncs FrankenTerm screen-reader text and announcements", () => {

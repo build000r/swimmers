@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+use crate::api::remote_sessions;
 use crate::types::{
     ActionCueKind, RestState, SessionBatchMembership, SessionState, SessionSummary,
     StateConfidence, TransportHealth,
@@ -324,8 +325,7 @@ fn repo_key(session: &SessionSummary) -> String {
 fn repo_label(repo_key: &str) -> String {
     repo_key
         .split('/')
-        .filter(|part| !part.is_empty())
-        .next_back()
+        .rfind(|part| !part.is_empty())
         .unwrap_or(repo_key)
         .to_string()
 }
@@ -337,6 +337,9 @@ fn batch_send_session_map(sessions: &[SessionSummary]) -> HashMap<String, Vec<St
         let Some(batch) = session.batch.as_ref() else {
             continue;
         };
+        if remote_sessions::split_remote_session_id(&session.session_id).is_some() {
+            continue;
+        }
         if session_ready_for_operator_group_input(session) {
             batches
                 .entry(batch.id.clone())
@@ -484,5 +487,36 @@ mod tests {
         );
         assert!(busy.batch_send_session_ids.is_empty());
         assert_eq!(response.summary.batch_send_groups, 1);
+    }
+
+    #[test]
+    fn batch_send_ids_exclude_namespaced_remote_sessions() {
+        let created_at = Utc::now();
+        let mut local = summary("local", SessionState::Attention);
+        let mut remote = summary(
+            &remote_sessions::namespace_session_id("jeremy-skillbox", "remote"),
+            SessionState::Attention,
+        );
+        for (index, session) in [&mut local, &mut remote].into_iter().enumerate() {
+            session.batch = Some(SessionBatchMembership {
+                id: "batch-remote".to_string(),
+                label: "batch".to_string(),
+                index,
+                total: 2,
+                created_at,
+                prompt_excerpt: None,
+            });
+        }
+
+        let response = build_operator_pressure_response(&[local, remote]);
+
+        assert_eq!(response.summary.batch_send_groups, 0);
+        for session in response.sessions {
+            assert!(
+                session.batch_send_session_ids.is_empty(),
+                "remote-backed group input must not be advertised for {}",
+                session.session_id
+            );
+        }
     }
 }

@@ -597,8 +597,12 @@ impl SessionActor {
                     warn!(
                         session_id = %self.session_id,
                         tmux_name = %self.tmux_name,
-                        "tmux send-keys input fallback failed: {err}"
+                        delivered_chunks = err.delivered_chunks,
+                        "tmux send-keys input failed: {err}"
                     );
+                    if err.delivered_chunks > 0 {
+                        return;
+                    }
                 }
             }
         }
@@ -1533,6 +1537,24 @@ enum TmuxInputChunk {
     Enter,
 }
 
+#[derive(Debug)]
+struct TmuxInputSendError {
+    delivered_chunks: usize,
+    source: anyhow::Error,
+}
+
+impl std::fmt::Display for TmuxInputSendError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.source.fmt(f)
+    }
+}
+
+impl std::error::Error for TmuxInputSendError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        self.source.source()
+    }
+}
+
 fn tmux_input_chunks(data: &[u8]) -> Option<Vec<TmuxInputChunk>> {
     let text = std::str::from_utf8(data).ok()?;
     let mut chunks = Vec::new();
@@ -1575,16 +1597,25 @@ fn submit_line_fallback_input(text: &str) -> Vec<u8> {
     input
 }
 
-async fn send_tmux_input_chunks(tmux_name: &str, chunks: &[TmuxInputChunk]) -> anyhow::Result<()> {
+async fn send_tmux_input_chunks(
+    tmux_name: &str,
+    chunks: &[TmuxInputChunk],
+) -> Result<(), TmuxInputSendError> {
     let target = exact_pane_target(tmux_name);
     let _ = send_tmux_keys(&target, &["-X", "cancel"]).await;
+    let mut delivered_chunks = 0;
     for chunk in chunks {
-        match chunk {
-            TmuxInputChunk::Literal(text) => {
-                send_tmux_keys(&target, &["-l", text]).await?;
-            }
-            TmuxInputChunk::Enter => {
-                send_tmux_keys(&target, &["Enter"]).await?;
+        let result = match chunk {
+            TmuxInputChunk::Literal(text) => send_tmux_keys(&target, &["-l", text]).await,
+            TmuxInputChunk::Enter => send_tmux_keys(&target, &["Enter"]).await,
+        };
+        match result {
+            Ok(()) => delivered_chunks += 1,
+            Err(source) => {
+                return Err(TmuxInputSendError {
+                    delivered_chunks,
+                    source,
+                });
             }
         }
     }
@@ -3384,6 +3415,41 @@ exit 1
         assert_eq!(actor.state_detector.state(), SessionState::Busy);
         assert_eq!(actor.state_detector.state_evidence().cause, "local_input");
 
+        restore_path(previous_path);
+    }
+
+    #[tokio::test]
+    async fn handle_write_input_does_not_replay_raw_buffer_after_partial_tmux_delivery() {
+        let _guard = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let tmux_log = tempfile::NamedTempFile::new().expect("tmux log");
+        std::env::set_var("TMUX_SEND_LOG", tmux_log.path());
+        let (_dir, previous_path) = install_fake_tmux(
+            r#"#!/bin/sh
+printf '%s\n' "$*" >> "$TMUX_SEND_LOG"
+case "$*" in
+  *" Enter") exit 1 ;;
+  *) exit 0 ;;
+esac
+"#,
+        );
+        let mut actor = test_actor();
+        let writer_state = set_tracking_writer(&mut actor);
+
+        actor.handle_write_input(b"hello\r".to_vec(), false).await;
+
+        let writer_state = writer_state
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        assert!(writer_state.writes.is_empty());
+        assert_eq!(writer_state.flushes, 0);
+
+        let log = std::fs::read_to_string(tmux_log.path()).expect("tmux log");
+        assert!(log.contains("send-keys -t =demo: -l hello"));
+        assert!(log.contains("send-keys -t =demo: Enter"));
+
+        std::env::remove_var("TMUX_SEND_LOG");
         restore_path(previous_path);
     }
 

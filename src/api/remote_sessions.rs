@@ -80,9 +80,9 @@ pub fn namespace_session_summary(
     session
 }
 
-pub fn denamespace_for_target<'a>(
-    session_id: &'a str,
-) -> Result<Option<(LaunchTargetSummary, &'a str)>, RemoteSessionError> {
+pub fn denamespace_for_target(
+    session_id: &str,
+) -> Result<Option<(LaunchTargetSummary, &str)>, RemoteSessionError> {
     let Some((target_id, remote_session_id)) = split_remote_session_id(session_id) else {
         return Ok(None);
     };
@@ -746,8 +746,10 @@ mod tests {
 
     #[derive(Clone, Default)]
     struct CaptureState {
-        requests: Arc<Mutex<Vec<(Option<String>, CreateSessionRequest)>>>,
+        requests: Arc<Mutex<CapturedRequests>>,
     }
+
+    type CapturedRequests = Vec<(Option<String>, CreateSessionRequest)>;
 
     async fn capture_create_session(
         axum::extract::State(state): axum::extract::State<CaptureState>,

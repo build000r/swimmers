@@ -4129,7 +4129,16 @@ async function sendRawTextToSession(sessionId, text) {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ text }),
   });
-  markTrogdorSessionsResponded([targetSessionId]);
+}
+
+function deliveredGroupInputSessionIds(body) {
+  if (!Array.isArray(body?.results)) {
+    return [];
+  }
+  return body.results
+    .filter((result) => result?.ok)
+    .map((result) => normalizeSessionId(result?.session_id))
+    .filter(Boolean);
 }
 
 async function sendGroupLine(sessionIds, text) {
@@ -4140,12 +4149,23 @@ async function sendGroupLine(sessionIds, text) {
     return;
   }
 
-  await apiFetch("/v1/sessions/group-input", {
+  const response = await apiFetch("/v1/sessions/group-input", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ session_ids: ids, text }),
   });
-  markTrogdorSessionsResponded(ids);
+  const body = await responseJsonOrNull(response).catch(() => null);
+  const deliveredSessionIds = deliveredGroupInputSessionIds(body);
+  markTrogdorSessionsResponded(deliveredSessionIds);
+
+  const resultTotal = Array.isArray(body?.results) ? body.results.length : ids.length;
+  return {
+    delivered: deliveredSessionIds.length,
+    skipped: Math.max(0, resultTotal - deliveredSessionIds.length),
+    total: resultTotal,
+    deliveredSessionIds,
+    results: Array.isArray(body?.results) ? body.results : [],
+  };
 }
 
 function sendModeValue() {
@@ -5445,8 +5465,17 @@ function bindEvents() {
     try {
       rememberSendHistory(text);
       if (state.sendTarget?.type === "group") {
-        await sendGroupLine(state.sendTarget.sessionIds, text);
-        setUtilityStatus(`Sent batch line to ${state.sendTarget.sessionIds.length} agents.`, false, 2400);
+        const result = await sendGroupLine(state.sendTarget.sessionIds, text);
+        const total = result?.total || state.sendTarget.sessionIds.length;
+        const skipped = result?.skipped || 0;
+        const delivered = result?.delivered || 0;
+        setUtilityStatus(
+          skipped > 0
+            ? `Sent batch line to ${delivered} of ${total} agents.`
+            : `Sent batch line to ${delivered} agents.`,
+          delivered === 0,
+          skipped > 0 ? 3200 : 2400,
+        );
       } else {
         const targetSessionId = state.sendTarget?.sessionId || state.selectedSessionId;
         if (sendModeValue() === "paste") {
@@ -6012,6 +6041,8 @@ export const __swimmersWebTest = {
   updateTerminalFallbackText,
   terminalFallbackOwnsPointer,
   sendTerminalText,
+  sendRawTextToSession,
+  sendGroupLine,
   markTrogdorSessionsResponded,
   handleTerminalFallbackKeyEvent,
   handleTerminalFallbackPasteEvent,

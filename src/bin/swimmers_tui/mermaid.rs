@@ -785,7 +785,7 @@ pub(crate) fn mermaid_summary_subtokens(token: &str) -> Vec<String> {
     }
 
     mermaid_clean_summary_token(token)
-        .split(|ch: char| matches!(ch, '_' | '-' | '/'))
+        .split(['_', '-', '/'])
         .filter_map(|part| {
             let part = part.trim();
             (!part.is_empty()).then(|| part.to_string())
@@ -831,8 +831,7 @@ pub(crate) fn mermaid_compact_overview_text<'a>(
     let word_limit = if prefix.is_some() { 2 } else { 3 };
     let max_chars = 20usize;
     let mut out = prefix.unwrap_or_default();
-    let mut added = 0usize;
-    for token in source_tokens {
+    for (added, token) in source_tokens.into_iter().enumerate() {
         if added >= word_limit {
             break;
         }
@@ -845,7 +844,6 @@ pub(crate) fn mermaid_compact_overview_text<'a>(
             out.push(' ');
         }
         out.push_str(&token);
-        added += 1;
     }
 
     if out.is_empty() {
@@ -3991,7 +3989,7 @@ fn push_edge_label_block(
 
 /// Compact-row packing: group rows per owner so multi-line compact labels
 /// occupy consecutive rows starting from the owner's first occupied row.
-fn pack_compact_rows(candidates: &mut Vec<MermaidProjectedCandidate>, max_row: u16) {
+fn pack_compact_rows(candidates: &mut [MermaidProjectedCandidate], max_row: u16) {
     let mut compact_owner_rows = HashMap::<String, Vec<u16>>::new();
     for candidate in candidates.iter() {
         if !candidate.compact_rows {

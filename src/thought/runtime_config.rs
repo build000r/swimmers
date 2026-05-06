@@ -261,8 +261,10 @@ mod tests {
 
     #[test]
     fn hot_cadence_must_be_in_range() {
-        let mut config = ThoughtConfig::default();
-        config.cadence_hot_ms = CADENCE_HOT_MIN_MS - 1;
+        let config = ThoughtConfig {
+            cadence_hot_ms: CADENCE_HOT_MIN_MS - 1,
+            ..ThoughtConfig::default()
+        };
 
         let err = config
             .validate()
@@ -272,9 +274,11 @@ mod tests {
 
     #[test]
     fn warm_cadence_must_be_at_least_hot() {
-        let mut config = ThoughtConfig::default();
-        config.cadence_hot_ms = 10_000;
-        config.cadence_warm_ms = 9_999;
+        let config = ThoughtConfig {
+            cadence_hot_ms: 10_000,
+            cadence_warm_ms: 9_999,
+            ..ThoughtConfig::default()
+        };
 
         let err = config
             .validate()
@@ -284,9 +288,11 @@ mod tests {
 
     #[test]
     fn cold_cadence_must_be_at_least_warm() {
-        let mut config = ThoughtConfig::default();
-        config.cadence_warm_ms = 50_000;
-        config.cadence_cold_ms = 49_000;
+        let config = ThoughtConfig {
+            cadence_warm_ms: 50_000,
+            cadence_cold_ms: 49_000,
+            ..ThoughtConfig::default()
+        };
 
         let err = config
             .validate()
