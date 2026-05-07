@@ -30,6 +30,7 @@ const PROCESS_EXIT_DELETE_GRACE: Duration = Duration::ZERO;
 const PROCESS_EXIT_SUMMARY_TIMEOUT: Duration = Duration::from_millis(250);
 const ACTIVE_PANE_LOOKUP_TIMEOUT: Duration = Duration::from_millis(600);
 const ACTIVE_PANE_LOOKUP_WARN_THRESHOLD: Duration = Duration::from_millis(200);
+const TMUX_SEND_KEYS_TIMEOUT: Duration = Duration::from_millis(500);
 
 struct ListedTmuxSessions {
     reliable: bool,
@@ -386,6 +387,7 @@ impl SessionSupervisor {
                     batch: ps.batch.clone(),
                     is_stale: true,
                     attached_clients: 0,
+                    stale_attached_clients: 0,
                     transport_health: crate::types::TransportHealth::Disconnected,
                     last_activity_at: ps.last_activity_at,
                     repo_theme_id: None,
@@ -1612,6 +1614,7 @@ impl SessionSupervisor {
             last_skill: None,
             is_stale: false,
             attached_clients: 0,
+            stale_attached_clients: 0,
             transport_health: crate::types::TransportHealth::Healthy,
             last_activity_at: Utc::now(),
             repo_theme_id: None,
@@ -1873,7 +1876,7 @@ fn build_codex_prompt_file_command(initial_request: &str) -> io::Result<String> 
     let prompt_path = write_spawn_prompt_file(initial_request)?;
     let prompt_path = shell_single_quote(&prompt_path.to_string_lossy());
     Ok(format!(
-        "prompt_file={prompt_path}; if prompt=\"$(cat \"$prompt_file\")\"; then rm -f \"$prompt_file\"; if command -v codex-raw >/dev/null 2>&1; then codex-raw \"$prompt\"; else codex \"$prompt\"; fi; else rm -f \"$prompt_file\"; echo 'swimmers: failed to read initial request' >&2; fi"
+        "prompt_file={prompt_path}; if prompt=\"$(cat \"$prompt_file\")\"; then rm -f \"$prompt_file\"; if command -v caam >/dev/null 2>&1; then caam run codex -- \"$prompt\" || {{ echo 'swimmers: caam codex launch failed; falling back to raw codex' >&2; if command -v codex-raw >/dev/null 2>&1; then codex-raw \"$prompt\"; else command codex \"$prompt\"; fi; }}; else command codex \"$prompt\"; fi; else rm -f \"$prompt_file\"; echo 'swimmers: failed to read initial request' >&2; fi"
     ))
 }
 
@@ -1985,6 +1988,9 @@ async fn send_spawn_tool_command(
                         "failed to execute tmux Enter send-keys: {}",
                         e
                     );
+                    if is_tmux_send_keys_timeout(&e) {
+                        return Err(e);
+                    }
                 }
             },
             Err(e) => {
@@ -1996,6 +2002,9 @@ async fn send_spawn_tool_command(
                     "failed to execute tmux literal send-keys: {}",
                     e
                 );
+                if is_tmux_send_keys_timeout(&e) {
+                    return Err(e);
+                }
             }
         }
 
@@ -2009,15 +2018,28 @@ async fn send_spawn_tool_command(
     ))
 }
 
+fn is_tmux_send_keys_timeout(error: &anyhow::Error) -> bool {
+    error.to_string().contains("tmux send-keys timed out")
+}
+
 async fn tmux_send_keys(tmux_name: &str, key_args: &[&str]) -> anyhow::Result<()> {
     let target = exact_pane_target(tmux_name);
-    let output = Command::new("tmux")
+    let mut command = Command::new("tmux");
+    command
         .args(["send-keys", "-t", &target])
         .args(key_args)
         .env_remove("TMUX")
         .env_remove("TMUX_PANE")
-        .output()
+        .kill_on_drop(true);
+
+    let output = tokio::time::timeout(TMUX_SEND_KEYS_TIMEOUT, command.output())
         .await
+        .map_err(|_| {
+            anyhow::anyhow!(
+                "tmux send-keys timed out after {}ms",
+                TMUX_SEND_KEYS_TIMEOUT.as_millis()
+            )
+        })?
         .map_err(|e| anyhow::anyhow!("failed to execute tmux send-keys: {}", e))?;
 
     if output.status.success() {
@@ -2186,6 +2208,7 @@ mod tests {
             last_skill: None,
             is_stale: false,
             attached_clients: 0,
+            stale_attached_clients: 0,
             transport_health: TransportHealth::Healthy,
             last_activity_at: Utc::now(),
             repo_theme_id: None,
@@ -2449,7 +2472,7 @@ mod tests {
 
     fn prompt_file_from_spawn_command(command: &str) -> PathBuf {
         let prefix = "prompt_file='";
-        let suffix = "'; if prompt=\"$(cat \"$prompt_file\")\"; then rm -f \"$prompt_file\"; if command -v codex-raw >/dev/null 2>&1; then codex-raw \"$prompt\"; else codex \"$prompt\"; fi; else rm -f \"$prompt_file\"; echo 'swimmers: failed to read initial request' >&2; fi";
+        let suffix = "'; if prompt=\"$(cat \"$prompt_file\")\"; then rm -f \"$prompt_file\"; if command -v caam >/dev/null 2>&1; then caam run codex -- \"$prompt\" || { echo 'swimmers: caam codex launch failed; falling back to raw codex' >&2; if command -v codex-raw >/dev/null 2>&1; then codex-raw \"$prompt\"; else command codex \"$prompt\"; fi; }; else command codex \"$prompt\"; fi; else rm -f \"$prompt_file\"; echo 'swimmers: failed to read initial request' >&2; fi";
         assert!(command.starts_with(prefix), "unexpected command: {command}");
         assert!(command.ends_with(suffix), "unexpected command: {command}");
         PathBuf::from(&command[prefix.len()..command.len() - suffix.len()])
@@ -2520,10 +2543,9 @@ mod tests {
             "#!/usr/bin/env bash\nprintf '%s' \"$1\" > {}\n",
             shell_single_quote(&captured_prompt.to_string_lossy())
         );
-        write_executable(&bin_dir.join("codex-raw"), &capture_script);
+        write_executable(&bin_dir.join("codex"), &capture_script);
 
-        let original_path = std::env::var_os("PATH");
-        let test_path = test_path_with_prepend(&bin_dir, original_path.as_deref());
+        let test_path = test_path_with_prepend(&bin_dir, None);
 
         let prompt = "fix shell quoting\nwithout leaking prompt text";
         let command = build_spawn_tool_command(crate::types::SpawnTool::Codex, Some(prompt));
@@ -2542,6 +2564,117 @@ mod tests {
             prompt
         );
         assert!(!prompt_path.exists(), "prompt file should be removed");
+    }
+
+    #[test]
+    fn codex_prompt_command_prefers_caam_when_available() {
+        let temp = tempdir().expect("tempdir");
+        let bin_dir = temp.path().join("bin");
+        std::fs::create_dir_all(&bin_dir).expect("bin dir");
+        let captured_args = temp.path().join("caam-args.txt");
+        let caam_script = format!(
+            "#!/usr/bin/env bash\nprintf '%s\\n' \"$@\" > {}\n",
+            shell_single_quote(&captured_args.to_string_lossy())
+        );
+        write_executable(&bin_dir.join("caam"), &caam_script);
+        write_executable(
+            &bin_dir.join("codex"),
+            "#!/usr/bin/env bash\necho 'codex fallback should not run' >&2\nexit 99\n",
+        );
+
+        let test_path = test_path_with_prepend(&bin_dir, None);
+
+        let prompt = "route through caam";
+        let command = build_spawn_tool_command(crate::types::SpawnTool::Codex, Some(prompt));
+        let prompt_path = prompt_file_from_spawn_command(&command);
+        let shell = if cfg!(unix) { "/bin/sh" } else { "sh" };
+        let status = std::process::Command::new(shell)
+            .arg("-c")
+            .arg(&command)
+            .env("PATH", test_path)
+            .status()
+            .expect("run spawn command");
+
+        assert!(status.success());
+        assert_eq!(
+            std::fs::read_to_string(captured_args).expect("captured caam args"),
+            "run\ncodex\n--\nroute through caam\n"
+        );
+        assert!(!prompt_path.exists(), "prompt file should be removed");
+    }
+
+    #[test]
+    fn codex_prompt_command_falls_back_after_caam_failure() {
+        let temp = tempdir().expect("tempdir");
+        let bin_dir = temp.path().join("bin");
+        std::fs::create_dir_all(&bin_dir).expect("bin dir");
+        write_executable(&bin_dir.join("caam"), "#!/usr/bin/env bash\nexit 42\n");
+        let captured_prompt = temp.path().join("fallback-prompt.txt");
+        let fallback_script = format!(
+            "#!/usr/bin/env bash\nprintf '%s' \"$1\" > {}\n",
+            shell_single_quote(&captured_prompt.to_string_lossy())
+        );
+        write_executable(&bin_dir.join("codex-raw"), &fallback_script);
+
+        let test_path = test_path_with_prepend(&bin_dir, None);
+
+        let command = build_spawn_tool_command(crate::types::SpawnTool::Codex, Some("blocked"));
+        let prompt_path = prompt_file_from_spawn_command(&command);
+        let shell = if cfg!(unix) { "/bin/sh" } else { "sh" };
+        let output = std::process::Command::new(shell)
+            .arg("-c")
+            .arg(&command)
+            .env("PATH", test_path)
+            .output()
+            .expect("run spawn command");
+
+        assert!(output.status.success());
+        assert!(
+            String::from_utf8_lossy(&output.stderr)
+                .contains("swimmers: caam codex launch failed; falling back to raw codex"),
+            "stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            std::fs::read_to_string(captured_prompt).expect("captured fallback prompt"),
+            "blocked"
+        );
+        assert!(!prompt_path.exists(), "prompt file should be removed");
+    }
+
+    #[tokio::test]
+    async fn tmux_send_keys_times_out_stuck_tmux_process() {
+        let _guard = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let temp = tempdir().expect("tempdir");
+        let bin_dir = temp.path().join("bin");
+        std::fs::create_dir_all(&bin_dir).expect("bin dir");
+        write_executable(
+            &bin_dir.join("tmux"),
+            "#!/bin/sh\nsleep 5\nprintf 'late output\\n'\n",
+        );
+
+        let original_path = std::env::var_os("PATH");
+        std::env::set_var("PATH", test_path_with_prepend(&bin_dir, None));
+        let started = Instant::now();
+        let err = tmux_send_keys("stuck", &["Enter"])
+            .await
+            .expect_err("stuck tmux should time out");
+
+        match original_path {
+            Some(value) => std::env::set_var("PATH", value),
+            None => std::env::remove_var("PATH"),
+        }
+
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "timeout should not wait for fake tmux sleep"
+        );
+        assert!(
+            err.to_string().contains("tmux send-keys timed out"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
@@ -2884,6 +3017,7 @@ mod tests {
             last_skill: None,
             is_stale: false,
             attached_clients: 0,
+            stale_attached_clients: 0,
             transport_health: crate::types::TransportHealth::Healthy,
             last_activity_at: Utc::now(),
             repo_theme_id: None,
@@ -2970,6 +3104,7 @@ mod tests {
             last_skill: None,
             is_stale: false,
             attached_clients: 0,
+            stale_attached_clients: 0,
             transport_health: crate::types::TransportHealth::Healthy,
             last_activity_at: Utc::now(),
             repo_theme_id: None,
@@ -3459,7 +3594,14 @@ case "$cmd" in
       "#{window_index}.#{pane_index}:#{pane_id}") printf '0.0:%%1\n' ;;
     esac
     ;;
-  send-keys|kill-session)
+  send-keys)
+    if [ -n "${SWIMMERS_FAKE_TMUX_SEND_KEYS_LOG:-}" ]; then
+      shift
+      printf '%s\n' "$*" >> "${SWIMMERS_FAKE_TMUX_SEND_KEYS_LOG}"
+    fi
+    exit 0
+    ;;
+  kill-session)
     exit 0
     ;;
   capture-pane)
@@ -3479,9 +3621,12 @@ esac
         let original_path = std::env::var_os("PATH");
         let original_cwd = std::env::var_os("SWIMMERS_FAKE_TMUX_CWD");
         let original_cmd = std::env::var_os("SWIMMERS_FAKE_TMUX_COMMAND");
+        let original_send_keys_log = std::env::var_os("SWIMMERS_FAKE_TMUX_SEND_KEYS_LOG");
+        let send_keys_log = dir.path().join("send-keys.log");
         prepend_test_path(&bin_dir, original_path.as_deref());
         std::env::set_var("SWIMMERS_FAKE_TMUX_CWD", dir.path());
         std::env::set_var("SWIMMERS_FAKE_TMUX_COMMAND", "codex");
+        std::env::set_var("SWIMMERS_FAKE_TMUX_SEND_KEYS_LOG", &send_keys_log);
 
         let supervisor = SessionSupervisor::new(Arc::new(Config::default()));
         let created = supervisor
@@ -3506,11 +3651,25 @@ esac
             Some(value) => std::env::set_var("SWIMMERS_FAKE_TMUX_COMMAND", value),
             None => std::env::remove_var("SWIMMERS_FAKE_TMUX_COMMAND"),
         }
+        match original_send_keys_log {
+            Some(value) => std::env::set_var("SWIMMERS_FAKE_TMUX_SEND_KEYS_LOG", value),
+            None => std::env::remove_var("SWIMMERS_FAKE_TMUX_SEND_KEYS_LOG"),
+        }
 
         assert_eq!(created.0.session_id, "sess_0");
         assert_eq!(created.0.tmux_name, "0");
         assert_eq!(created.0.tool.as_deref(), Some("Codex"));
         assert_eq!(created.0.cwd, dir.path().to_string_lossy());
+        let send_keys_log = std::fs::read_to_string(send_keys_log).expect("send-keys log");
+        assert!(send_keys_log.contains("caam run codex -- \"$prompt\""));
+        assert!(send_keys_log.contains("falling back to raw codex"));
+        assert!(
+            send_keys_log
+                .find("caam run codex -- \"$prompt\"")
+                .expect("caam command")
+                < send_keys_log.find("codex-raw").expect("raw fallback"),
+            "caam must be attempted before raw fallback"
+        );
         supervisor
             .delete_session(
                 &created.0.session_id,

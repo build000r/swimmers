@@ -2,6 +2,8 @@
 //!
 //! Two modes:
 //! - `LocalTrust`: all requests pass through with full scopes (no overhead).
+//! - `TailnetTrust`: same request behavior as local trust, but startup only
+//!   allows it on Tailscale bind addresses.
 //! - `Token`: Bearer token required in `Authorization` header. A valid token
 //!   grants operator scopes (`sessions:read`, `sessions:write`, `stream:write`).
 
@@ -29,7 +31,7 @@ pub enum AuthScope {
     StreamWrite,
 }
 
-/// All operator scopes — granted to operator tokens and local-trust mode.
+/// All operator scopes — granted to operator tokens and trust modes.
 pub const OPERATOR_SCOPES: &[AuthScope] = &[
     AuthScope::SessionsRead,
     AuthScope::SessionsWrite,
@@ -134,15 +136,16 @@ fn bearer_tokens_eq(provided: &str, expected: &str) -> bool {
 /// Axum `from_fn` middleware that enforces authentication based on the
 /// application's [`Config::auth_mode`].
 ///
-/// In `LocalTrust` mode this is a transparent pass-through: an `AuthInfo` with
-/// all operator scopes is inserted and the request continues immediately.
+/// In `LocalTrust` and `TailnetTrust` modes this is a transparent pass-through:
+/// an `AuthInfo` with all operator scopes is inserted and the request continues
+/// immediately. Startup validation controls where those trust modes may bind.
 ///
 /// In `Token` mode the `Authorization: Bearer <token>` header is validated
 /// against [`Config::auth_token`]. A missing or invalid token results in a 401
 /// JSON response.
 pub async fn auth_middleware(config: Arc<Config>, mut request: Request, next: Next) -> Response {
     let auth_info = match config.auth_mode {
-        AuthMode::LocalTrust => AuthInfo::new(OPERATOR_SCOPES.to_vec()),
+        AuthMode::LocalTrust | AuthMode::TailnetTrust => AuthInfo::new(OPERATOR_SCOPES.to_vec()),
         AuthMode::Token => match token_mode_auth_info(&config, &request) {
             Ok(info) => info,
             Err(response) => return response,

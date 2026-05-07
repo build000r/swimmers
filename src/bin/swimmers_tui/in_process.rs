@@ -47,6 +47,10 @@ impl InProcessApi {
             .expect("failed to build reqwest client for in-process API");
         Self { state, http }
     }
+
+    fn fetch_local_sessions(&self) -> BoxFuture<'_, Result<Vec<SessionSummary>, String>> {
+        Box::pin(async move { Ok(self.state.supervisor.list_sessions().await) })
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -61,6 +65,12 @@ impl TuiApi for InProcessApi {
             sessions.extend(remote_sessions::list_remote_sessions().await);
             Ok(sessions)
         })
+    }
+
+    fn fetch_sessions_for_initial_frame(
+        &self,
+    ) -> BoxFuture<'_, Result<Vec<SessionSummary>, String>> {
+        self.fetch_local_sessions()
     }
 
     fn fetch_thought_config(&self) -> BoxFuture<'_, Result<ThoughtConfigResponse, String>> {

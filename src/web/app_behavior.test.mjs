@@ -192,6 +192,7 @@ function rawSession(overrides = {}) {
     thought: "waiting for operator input",
     action_cues: [{ kind: "awaiting_user" }],
     attached_clients: 1,
+    stale_attached_clients: 0,
     token_count: 0,
     context_limit: 0,
     ...overrides,
@@ -240,6 +241,26 @@ function resetWebState() {
   web.state.hud = null;
   web.state.terminal = null;
   web.state.ws = null;
+  web.state.reconnectTimer = null;
+  web.state.reconnectAttempt = 0;
+  web.state.pendingInputMessages = new Map();
+  web.state.terminalWorkbenchOpen = true;
+  web.state.agentContextSessionId = null;
+  web.state.agentContextLoading = false;
+  web.state.agentContextPayload = null;
+  web.state.agentContextError = "";
+  web.state.agentContextRequestSeq = 0;
+  web.state.agentContextLastLoadedAt = 0;
+  web.state.workbenchWidgets = {
+    sessionId: null,
+    loading: false,
+    paneTail: null,
+    artifact: null,
+    gitDiff: null,
+    error: "",
+    requestSeq: 0,
+    lastLoadedAt: 0,
+  };
   web.state.readOnly = false;
   web.state.terminalFallbackActive = false;
   web.state.terminalFallbackAutoFollow = true;
@@ -372,7 +393,9 @@ test("terminal text fallback keeps send input wired to the live websocket", () =
 
   assert.equal(web.sendTerminalText("hello"), true);
 
-  assert.deepEqual(sent, [{ type: "input_text", data: "hello" }]);
+  assert.equal(sent[0].type, "input_text");
+  assert.equal(sent[0].data, "hello");
+  assert.match(sent[0].clientMessageId, /^web-/);
 });
 
 test("terminal text fallback becomes the keyboard focus target", () => {
@@ -421,7 +444,9 @@ test("terminal text fallback keydown sends live websocket input once", () => {
 
   assert.equal(prevented, true);
   assert.equal(stopped, true);
-  assert.deepEqual(sent, [{ type: "input_text", data: "h" }]);
+  assert.equal(sent[0].type, "input_text");
+  assert.equal(sent[0].data, "h");
+  assert.match(sent[0].clientMessageId, /^web-/);
 });
 
 test("terminal text fallback paste sends live websocket input", () => {
@@ -453,7 +478,9 @@ test("terminal text fallback paste sends live websocket input", () => {
   );
 
   assert.equal(prevented, true);
-  assert.deepEqual(sent, [{ type: "input_text", data: "echo pasted" }]);
+  assert.equal(sent[0].type, "input_text");
+  assert.equal(sent[0].data, "echo pasted");
+  assert.match(sent[0].clientMessageId, /^web-/);
 });
 
 test("terminal status strip shows live input when renderer fallback is active", () => {
@@ -558,10 +585,243 @@ test("terminal input dock sends a line to tmux and keeps a local echo", async ()
 
   assert.equal(await web.submitTerminalInputDock(), true);
 
-  assert.deepEqual(sent, [{ type: "submit_line", data: "echo dock" }]);
+  assert.equal(sent[0].type, "submit_line");
+  assert.equal(sent[0].data, "echo dock");
+  assert.match(sent[0].clientMessageId, /^web-/);
   assert.equal(web.el.terminalInlineInput.value, "");
-  assert.equal(web.el.terminalInputEcho.textContent, "› echo dock");
+  assert.equal(web.el.terminalInputEcho.textContent, "› pending: echo dock");
   assert.ok(web.el.terminalFallback.textContent.includes("› echo dock"));
+});
+
+test("terminal key strip sends Ctrl-C and navigation bytes from the dock", () => {
+  resetWebState();
+  web.state.selectedSessionId = "sess_0";
+  web.state.trogdorAtlasOpen = false;
+  web.state.terminalFallbackActive = true;
+  const sent = [];
+  web.state.ws = {
+    readyState: WebSocket.OPEN,
+    send(payload) {
+      sent.push(JSON.parse(payload));
+    },
+  };
+
+  assert.equal(web.sendTerminalControlKey("ctrl-c"), true);
+  assert.equal(web.sendTerminalControlKey("arrow-up"), true);
+
+  assert.equal(sent[0].type, "input_text");
+  assert.equal(sent[0].data.charCodeAt(0), 3);
+  assert.equal(sent[1].type, "input_text");
+  assert.equal(sent[1].data, "\x1b[A");
+  assert.ok(web.el.terminalInputEcho.textContent.includes("sent: Up"));
+});
+
+test("terminal composer turns empty-field Ctrl-C and arrows into terminal controls", () => {
+  resetWebState();
+  web.state.selectedSessionId = "sess_0";
+  web.state.trogdorAtlasOpen = false;
+  web.el.terminalInlineInput.value = "";
+  web.el.terminalInlineInput.selectionStart = 0;
+  web.el.terminalInlineInput.selectionEnd = 0;
+
+  assert.equal(
+    web.terminalKeyActionForDomEvent({
+      key: "c",
+      ctrlKey: true,
+      metaKey: false,
+      altKey: false,
+    }),
+    "ctrl-c",
+  );
+  assert.equal(web.terminalKeyActionForDomEvent({ key: "ArrowUp", ctrlKey: false }), "arrow-up");
+
+  web.el.terminalInlineInput.value = "edit this text";
+  assert.equal(web.terminalKeyActionForDomEvent({ key: "ArrowUp", ctrlKey: false }), "");
+
+  web.el.terminalInlineInput.selectionStart = 0;
+  web.el.terminalInlineInput.selectionEnd = 4;
+  assert.equal(
+    web.terminalKeyActionForDomEvent({
+      key: "c",
+      ctrlKey: true,
+      metaKey: false,
+      altKey: false,
+    }),
+    "",
+  );
+});
+
+test("input ack updates pending terminal dock delivery status", async () => {
+  resetWebState();
+  web.state.selectedSessionId = "sess_0";
+  web.state.trogdorAtlasOpen = false;
+  web.el.terminalInlineInput.value = "echo acked";
+  const sent = [];
+  web.state.ws = {
+    readyState: WebSocket.OPEN,
+    send(payload) {
+      sent.push(JSON.parse(payload));
+    },
+  };
+
+  assert.equal(await web.submitTerminalInputDock(), true);
+  assert.ok(web.el.terminalInputEcho.textContent.includes("pending: echo acked"));
+
+  web.handleSocketText(JSON.stringify({
+    type: "input_ack",
+    clientMessageId: sent[0].clientMessageId,
+    delivered: true,
+    method: "tmux_submit_line",
+  }));
+
+  assert.ok(web.el.terminalInputEcho.textContent.includes("sent: echo acked"));
+});
+
+test("input ack failure keeps failed delivery visible", () => {
+  resetWebState();
+  const id = "web-test-1";
+  web.state.pendingInputMessages.set(id, { text: "lost message", status: "pending", detail: "" });
+
+  web.handleSocketText(JSON.stringify({
+    type: "input_ack",
+    clientMessageId: id,
+    delivered: false,
+    message: "tmux send-keys exited",
+  }));
+
+  assert.ok(web.el.terminalInputEcho.textContent.includes("failed: tmux send-keys exited"));
+});
+
+test("terminal workbench fetches and renders selected agent context", async () => {
+  resetWebState();
+  web.state.sessions = [rawSession({ tool: "Codex", cwd: "/tmp/project" })];
+  web.state.selectedSessionId = "sess_0";
+  web.state.trogdorAtlasOpen = false;
+  const requested = [];
+  globalThis.fetch = async (path) => {
+    requested.push(path);
+    return jsonResponse(200, {
+      session_id: "sess_0",
+      available: true,
+      tool: "Codex",
+      cwd: "/tmp/project",
+      user_task: "build the workbench",
+      current_tool: { tool: "exec", detail: "cargo test agent_context" },
+      recent_actions: [
+        { tool: "exec", detail: "cargo test agent_context" },
+        { tool: "read", detail: "src/web/app.js" },
+      ],
+      token_count: 777,
+      context_limit: 258400,
+    });
+  };
+
+  await web.refreshAgentContextForSelectedSession({ force: true });
+
+  assert.deepEqual(requested, ["/v1/sessions/sess_0/agent-context"]);
+  assert.equal(web.el.terminalWorkbenchTask.textContent, "build the workbench");
+  assert.ok(web.el.terminalWorkbenchCurrent.textContent.includes("cargo test agent_context"));
+  assert.ok(web.el.terminalWorkbenchPressure.textContent.includes("awaiting user"));
+  assert.ok(web.el.terminalWorkbenchPressure.textContent.includes("attention"));
+  assert.ok(web.el.terminalWorkbenchPressure.textContent.includes("0% context"));
+  assert.ok(web.el.terminalWorkbenchActions.innerHTML.includes("src/web/app.js"));
+});
+
+test("terminal workbench toggle controls the single-terminal panel", () => {
+  resetWebState();
+  web.state.selectedSessionId = "sess_0";
+  web.state.trogdorAtlasOpen = false;
+  web.state.terminalWorkbenchOpen = true;
+
+  web.syncTerminalWorkbench();
+
+  assert.equal(web.el.terminalWorkbench.classList.contains("hidden"), false);
+  assert.equal(web.el.terminalWorkbenchToggle.getAttribute("aria-pressed"), "true");
+
+  web.state.terminalWorkbenchOpen = false;
+  web.syncTerminalWorkbench();
+
+  assert.equal(web.el.terminalWorkbench.classList.contains("hidden"), true);
+  assert.equal(web.el.terminalWorkbenchToggle.getAttribute("aria-pressed"), "false");
+});
+
+test("terminal Trogdor back control returns to the atlas from the workbench", () => {
+  resetWebState();
+  web.state.selectedSessionId = "sess_0";
+  web.state.trogdorAtlasOpen = false;
+  web.state.terminalWorkbenchOpen = true;
+
+  web.syncTerminalPresentation();
+
+  assert.equal(web.el.terminalTrogdorBack.classList.contains("hidden"), false);
+  assert.equal(web.el.terminalTrogdorBack.disabled, false);
+  assert.equal(web.el.terminalTrogdorBack.getAttribute("aria-hidden"), "false");
+
+  web.openTrogdorAtlas();
+
+  assert.equal(web.state.trogdorAtlasOpen, true);
+  assert.equal(document.body.classList.contains("trogdor-mode"), true);
+  assert.equal(web.el.trogdorSurface.classList.contains("hidden"), false);
+  assert.equal(web.el.terminalTrogdorBack.classList.contains("hidden"), true);
+  assert.equal(web.el.terminalTrogdorBack.getAttribute("aria-hidden"), "true");
+  assert.equal(web.el.terminalWorkbench.classList.contains("hidden"), true);
+});
+
+test("terminal workbench pinned widgets render pane output and artifacts from session APIs", async () => {
+  resetWebState();
+  web.state.selectedSessionId = "sess_0";
+  web.state.trogdorAtlasOpen = false;
+  web.state.agentContextSessionId = "sess_0";
+  web.state.agentContextPayload = {
+    session_id: "sess_0",
+    available: true,
+    current_tool: { tool: "exec", detail: "cargo test" },
+    recent_actions: [{ tool: "read", detail: "src/web/app.js" }],
+  };
+  const requested = [];
+  globalThis.fetch = async (path) => {
+    requested.push(path);
+    if (String(path).endsWith("/pane-tail")) {
+      return jsonResponse(200, {
+        session_id: "sess_0",
+        text: "cargo test\nfinished green\n",
+      });
+    }
+    if (String(path).endsWith("/mermaid-artifact")) {
+      return jsonResponse(200, {
+        session_id: "sess_0",
+        available: true,
+        path: "/tmp/project/docs/plan.mmd",
+        source: "flowchart TD; A-->B",
+        plan_files: ["plan.md", "WORKGRAPH.md"],
+      });
+    }
+    if (String(path).endsWith("/git-diff")) {
+      return jsonResponse(200, {
+        session_id: "sess_0",
+        available: true,
+        cwd: "/tmp/project",
+        repo_root: "/tmp/project",
+        status_short: " M src/web/app.js",
+        unstaged_diff: "diff --git a/src/web/app.js b/src/web/app.js\n@@ -1 +1 @@\n-old\n+new\n",
+        staged_diff: "",
+        truncated: false,
+      });
+    }
+    return jsonResponse(404, { code: "missing" });
+  };
+
+  await web.refreshWorkbenchWidgetsForSelectedSession({ force: true });
+
+  assert.ok(requested.includes("/v1/sessions/sess_0/pane-tail"));
+  assert.ok(requested.includes("/v1/sessions/sess_0/mermaid-artifact"));
+  assert.ok(requested.includes("/v1/sessions/sess_0/git-diff"));
+  assert.ok(web.el.terminalWorkbenchWidgets.innerHTML.includes("finished green"));
+  assert.ok(web.el.terminalWorkbenchWidgets.innerHTML.includes("WORKGRAPH.md"));
+  assert.ok(web.el.terminalWorkbenchWidgets.innerHTML.includes("diff-line-add"));
+  assert.ok(web.el.terminalWorkbenchWidgets.innerHTML.includes("Tool calls"));
+  assert.ok(web.el.terminalWorkbenchWidgets.innerHTML.includes("src/web/app.js"));
+  assert.ok(web.el.terminalWorkbenchWidgets.innerHTML.includes("Open viewer"));
 });
 
 test("terminal text fallback follows the tail unless the user scrolled up", () => {

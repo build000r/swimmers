@@ -1,5 +1,7 @@
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
@@ -7,17 +9,21 @@ use axum::Json;
 use futures::future::join_all;
 use reqwest::Client;
 
+use crate::config::Config;
 use crate::session::overlay::default_overlay;
 use crate::types::{
     CreateSessionRequest, CreateSessionResponse, CreateSessionsBatchRequest,
     CreateSessionsBatchResponse, ErrorResponse, LaunchPathMapping, LaunchTargetSummary,
-    SessionListResponse, SessionSummary,
+    SessionAgentContextResponse, SessionGitDiffResponse, SessionListResponse, SessionSummary,
 };
 
 const REMOTE_LIST_TIMEOUT: Duration = Duration::from_millis(900);
 const REMOTE_CREATE_TIMEOUT: Duration = Duration::from_secs(20);
 const REMOTE_CONNECT_TIMEOUT: Duration = Duration::from_millis(500);
 const REMOTE_SESSION_SEPARATOR: &str = "::";
+const REMOTE_POLL_FAILURE_BACKOFF_MS: u64 = 10_000;
+
+static REMOTE_POLL_BACKOFF_UNTIL_MS: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug)]
 pub struct RemoteSessionError {
@@ -91,6 +97,15 @@ pub fn denamespace_for_target(
 }
 
 pub async fn list_remote_sessions() -> Vec<SessionSummary> {
+    #[cfg(test)]
+    if std::env::var_os("SWIMMERS_TEST_ENABLE_REMOTE_POLLING").is_none() {
+        return Vec::new();
+    }
+
+    if remote_poll_backoff_active() {
+        return Vec::new();
+    }
+
     let Some(overlay) = default_overlay() else {
         return Vec::new();
     };
@@ -98,6 +113,18 @@ pub async fn list_remote_sessions() -> Vec<SessionSummary> {
         .all_launch_targets()
         .into_iter()
         .filter(is_swimmers_api_target)
+        .filter(|target| {
+            if target_points_at_current_server(target, &Config::from_env()) {
+                tracing::debug!(
+                    target = %target.id,
+                    base_url = ?target.base_url,
+                    "skipping self-target remote session polling"
+                );
+                false
+            } else {
+                true
+            }
+        })
         .collect::<Vec<_>>();
     if targets.is_empty() {
         return Vec::new();
@@ -130,10 +157,29 @@ pub async fn list_remote_sessions() -> Vec<SessionSummary> {
             Ok(sessions) => sessions,
             Err(err) => {
                 tracing::warn!(error = %err.message(), "remote session list failed");
+                record_remote_poll_failure();
                 Vec::new()
             }
         })
         .collect()
+}
+
+fn remote_poll_backoff_active() -> bool {
+    now_ms() < REMOTE_POLL_BACKOFF_UNTIL_MS.load(Ordering::Acquire)
+}
+
+fn record_remote_poll_failure() {
+    REMOTE_POLL_BACKOFF_UNTIL_MS.store(
+        now_ms().saturating_add(REMOTE_POLL_FAILURE_BACKOFF_MS),
+        Ordering::Release,
+    );
+}
+
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
 }
 
 async fn list_remote_sessions_for_target(
@@ -371,6 +417,36 @@ pub async fn fetch_remote_plan_file(
     Ok(response)
 }
 
+pub async fn fetch_remote_agent_context(
+    target: &LaunchTargetSummary,
+    remote_session_id: &str,
+) -> Result<SessionAgentContextResponse, RemoteSessionError> {
+    get_remote_json(
+        target,
+        &format!("/v1/sessions/{remote_session_id}/agent-context"),
+    )
+    .await
+    .map(|mut response: SessionAgentContextResponse| {
+        response.session_id = namespace_session_id(&target.id, &response.session_id);
+        response
+    })
+}
+
+pub async fn fetch_remote_git_diff(
+    target: &LaunchTargetSummary,
+    remote_session_id: &str,
+) -> Result<SessionGitDiffResponse, RemoteSessionError> {
+    get_remote_json(
+        target,
+        &format!("/v1/sessions/{remote_session_id}/git-diff"),
+    )
+    .await
+    .map(|mut response: SessionGitDiffResponse| {
+        response.session_id = namespace_session_id(&target.id, &response.session_id);
+        response
+    })
+}
+
 async fn get_remote_json<T>(
     target: &LaunchTargetSummary,
     path: &str,
@@ -523,6 +599,31 @@ fn ensure_swimmers_api_target(target: &LaunchTargetSummary) -> Result<(), Remote
 
 fn is_swimmers_api_target(target: &LaunchTargetSummary) -> bool {
     target.kind == "swimmers_api"
+}
+
+fn target_points_at_current_server(target: &LaunchTargetSummary, config: &Config) -> bool {
+    let Some(base_url) = target
+        .base_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|url| !url.is_empty())
+    else {
+        return false;
+    };
+    let Ok(url) = reqwest::Url::parse(base_url) else {
+        return false;
+    };
+    let Some(host) = url.host_str() else {
+        return false;
+    };
+    let url_port = url.port_or_known_default().unwrap_or(80);
+    if url_port != config.port {
+        return false;
+    }
+    let bind_host = crate::cli::bind_host(&config.bind);
+    host.eq_ignore_ascii_case(bind_host)
+        || (crate::cli::is_loopback_bind(&config.bind)
+            && matches!(host, "127.0.0.1" | "localhost" | "::1"))
 }
 
 pub fn map_cwd_for_target(
@@ -737,6 +838,7 @@ mod tests {
             last_skill: None,
             is_stale: false,
             attached_clients: 0,
+            stale_attached_clients: 0,
             transport_health: TransportHealth::Healthy,
             last_activity_at: Utc::now(),
             repo_theme_id: None,
@@ -831,6 +933,31 @@ mod tests {
             namespace_session_id("jeremy-skillbox", "sess_0")
         );
         assert_eq!(session.tmux_name, "[Jeremy Skillbox] 7");
+    }
+
+    #[test]
+    fn target_points_at_current_server_matches_active_tailnet_bind_and_port() {
+        let mut config = Config::default();
+        config.bind = "100.86.253.9".to_string();
+        config.port = 3210;
+        let mut target = target();
+        target.base_url = Some("http://100.86.253.9:3210".to_string());
+
+        assert!(target_points_at_current_server(&target, &config));
+
+        target.base_url = Some("http://100.86.253.9:3211".to_string());
+        assert!(!target_points_at_current_server(&target, &config));
+    }
+
+    #[test]
+    fn target_points_at_current_server_matches_loopback_aliases() {
+        let mut config = Config::default();
+        config.bind = "127.0.0.1".to_string();
+        config.port = 3210;
+        let mut target = target();
+        target.base_url = Some("http://localhost:3210".to_string());
+
+        assert!(target_points_at_current_server(&target, &config));
     }
 
     #[tokio::test]

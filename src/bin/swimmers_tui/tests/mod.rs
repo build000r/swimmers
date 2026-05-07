@@ -1604,7 +1604,7 @@ fn refresh_skips_native_status_when_sessions_fail() {
     api.push_fetch_sessions(Err("timed out while trying to refresh sessions".to_string()));
     let mut app = make_app(api.clone());
 
-    app.refresh(layout);
+    app.refresh_initial_frame(layout);
 
     assert_eq!(
         api.native_status_calls(),
@@ -2369,6 +2369,7 @@ fn session_summary(session_id: &str, tmux_name: &str, cwd: &str) -> SessionSumma
         last_skill: None,
         is_stale: false,
         attached_clients: 0,
+        stale_attached_clients: 0,
         transport_health: TransportHealth::Healthy,
         last_activity_at: Utc::now(),
         repo_theme_id: None,
@@ -12760,7 +12761,7 @@ esac
     let mut app = App::new(runtime, client);
     let mut renderer = test_renderer(120, 32);
     let layout = app.layout_for_terminal(renderer.width(), renderer.height());
-    app.refresh(layout);
+    app.refresh_initial_frame(layout);
     prepare_frame(&mut app, &mut renderer);
     let elapsed = started.elapsed();
     let header_visible = find_text_position(&renderer, "swimmers tui").is_some();

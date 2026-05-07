@@ -154,9 +154,10 @@ When a `skillbox-config` client overlay declares `dev_sanity.agent_launch`,
 the directory picker shows a launch-target toggle next to the tool selector.
 `local` keeps the existing behavior. A `kind: swimmers_api` target maps the
 selected local cwd through its `path_mappings`, POSTs the create request to
-the target API with the token named by `auth_token_env`, and namespaces remote
-sessions as `target::session_id` so local and remote `sess_0` values cannot
-collide.
+the target API, and namespaces remote sessions as `target::session_id` so local
+and remote `sess_0` values cannot collide. Set `auth_token_env` only for target
+APIs running in `AUTH_MODE=token`; Tailnet-trusted targets do not need a
+browser or launch token.
 
 Remote targets are different from `SWIMMERS_TUI_URL`: `SWIMMERS_TUI_URL`
 points the entire TUI at one backend, while launch targets let one local TUI
@@ -180,29 +181,26 @@ SWIMMERS_TUI_URL=http://127.0.0.1:3210 swimmers-tui # opt into external HTTP tra
 
 ### External / Tailscale access
 
-Set `SWIMMERS_BIND` to expose the server on a non-loopback interface. The server refuses to start if you pair a non-loopback bind with `AUTH_MODE=local_trust`; for external exposure, switch to `AUTH_MODE=token` and set `AUTH_TOKEN`.
+Set `SWIMMERS_BIND` to expose the server on a non-loopback interface. The server refuses to start if `AUTH_MODE=local_trust` is paired with a non-loopback bind. For Tailscale-only exposure, bind to the machine's Tailscale IP and use `AUTH_MODE=tailnet_trust`; for other network exposure, use `AUTH_MODE=token` with `AUTH_TOKEN`.
 
 ```bash
-# Bind to all interfaces (e.g., for Tailscale access from another machine)
-SWIMMERS_BIND=0.0.0.0 \
-AUTH_MODE=token \
-AUTH_TOKEN=your-secret-token \
-swimmers
-
-# Bind to a specific Tailscale IP
+# Bind to a specific Tailscale IP, trusting Tailscale for access control
 SWIMMERS_BIND=100.101.123.63 \
-AUTH_MODE=token \
-AUTH_TOKEN=your-secret-token \
+AUTH_MODE=tailnet_trust \
 swimmers
 
 # Point the TUI at the remote server
 SWIMMERS_TUI_URL=http://100.101.123.63:3210 \
+swimmers-tui
+
+# Non-tailnet exposure still requires a bearer token
+SWIMMERS_BIND=0.0.0.0 \
 AUTH_MODE=token \
 AUTH_TOKEN=your-secret-token \
-swimmers-tui
+swimmers
 ```
 
-For any non-loopback bind, use `AUTH_MODE=token` with `AUTH_TOKEN`. `OBSERVER_TOKEN` is optional when you also want a read-only credential for browser or observer clients.
+`AUTH_MODE=tailnet_trust` is accepted only for Tailscale IP ranges (`100.64.0.0/10` or `fd7a:115c:a1e0::/48`). It does not add a second browser token; Tailnet membership is the access boundary. `OBSERVER_TOKEN` is optional only for token-auth deployments where you also want a read-only credential for browser or observer clients.
 
 ---
 
@@ -212,7 +210,7 @@ For any non-loopback bind, use `AUTH_MODE=token` with `AUTH_TOKEN`. `OBSERVER_TO
 |----------|---------|---------|
 | `SWIMMERS_BIND` | `127.0.0.1` | Server bind address (interface only, not `host:port`) |
 | `PORT` | `3210` | Server listen port |
-| `AUTH_MODE` | `local_trust` | Auth mode: `local_trust` or `token` |
+| `AUTH_MODE` | `local_trust` | Auth mode: `local_trust`, `tailnet_trust`, or `token` |
 | `AUTH_TOKEN` | `(unset)` | Bearer token when `AUTH_MODE=token` |
 | `OBSERVER_TOKEN` | `(unset)` | Read-only bearer token for token-auth deployments |
 | `SWIMMERS_NATIVE_APP` | `iterm` | Native desktop target: `iterm` or `ghostty` |
@@ -256,6 +254,11 @@ Swimmers reads all configuration from environment variables. There is no config 
 
 ```bash
 # Minimal local usage (everything defaults)
+swimmers
+
+# Tailscale-only remote access without a browser token
+SWIMMERS_BIND=100.101.123.63 \
+AUTH_MODE=tailnet_trust \
 swimmers
 
 # External access with token auth
@@ -496,7 +499,8 @@ If you want to avoid the external-mode setup entirely, unset `SWIMMERS_TUI_URL` 
 
 ### TUI gets 401 or 403
 
-The API is running with token auth. Set your credentials:
+The API is running with token auth. Set your credentials, or switch the remote
+server to `AUTH_MODE=tailnet_trust` when it is bound to a Tailscale IP:
 
 ```bash
 AUTH_MODE=token AUTH_TOKEN=your-token swimmers-tui
@@ -571,7 +575,7 @@ A side panel in the TUI that answers one question first: which agents are waitin
 
 ### Is `LocalTrust` auth safe?
 
-On loopback (`127.0.0.1`), yes — only processes on the same machine can reach the port. When you set `SWIMMERS_BIND` to a non-loopback address, the server refuses to start under `AUTH_MODE=local_trust`. Use `AUTH_MODE=token` with a strong `AUTH_TOKEN` for any external exposure.
+On loopback (`127.0.0.1`), yes — only processes on the same machine can reach the port. When you set `SWIMMERS_BIND` to a non-loopback address, the server refuses to start under `AUTH_MODE=local_trust`. Use `AUTH_MODE=tailnet_trust` only when binding to a Tailscale IP; use `AUTH_MODE=token` with a strong `AUTH_TOKEN` for non-tailnet exposure.
 
 ---
 

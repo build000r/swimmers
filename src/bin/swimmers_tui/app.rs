@@ -1135,8 +1135,13 @@ impl<C: TuiApi> App<C> {
         }
     }
 
+    #[allow(dead_code)]
     pub(crate) fn refresh(&mut self, layout: WorkspaceLayout) {
         self.refresh_with_feedback(layout, false);
+    }
+
+    pub(crate) fn refresh_initial_frame(&mut self, layout: WorkspaceLayout) {
+        self.refresh_with_feedback_with_mode(layout, false, true);
     }
 
     pub(crate) fn manual_refresh(&mut self, _layout: WorkspaceLayout) {
@@ -1144,12 +1149,29 @@ impl<C: TuiApi> App<C> {
         self.spawn_background_refresh_with_policy(true, true);
     }
 
+    #[allow(dead_code)]
     pub(crate) fn refresh_with_feedback(
         &mut self,
         layout: WorkspaceLayout,
         show_success_message: bool,
     ) {
-        let sessions_ok = match self.runtime.block_on(self.client.fetch_sessions()) {
+        self.refresh_with_feedback_with_mode(layout, show_success_message, false);
+    }
+
+    fn refresh_with_feedback_with_mode(
+        &mut self,
+        layout: WorkspaceLayout,
+        show_success_message: bool,
+        initial_frame: bool,
+    ) {
+        let sessions_result = if initial_frame {
+            self.runtime
+                .block_on(self.client.fetch_sessions_for_initial_frame())
+        } else {
+            self.runtime.block_on(self.client.fetch_sessions())
+        };
+
+        let sessions_ok = match sessions_result {
             Ok(sessions) => {
                 self.sync_repo_themes(&sessions, false);
                 self.refresh_mermaid_artifacts(&sessions);

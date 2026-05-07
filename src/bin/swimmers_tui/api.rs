@@ -44,7 +44,7 @@ impl ApiClient {
             .unwrap_or_else(|_| format!("http://127.0.0.1:{}", config.port));
         let auth_token = match config.auth_mode {
             AuthMode::Token => config.auth_token,
-            AuthMode::LocalTrust => None,
+            AuthMode::LocalTrust | AuthMode::TailnetTrust => None,
         };
         let http = Self::build_http_client(API_REQUEST_TIMEOUT)?;
         let startup_http = Self::build_http_client(API_STARTUP_REQUEST_TIMEOUT)?;
@@ -328,6 +328,11 @@ fn friendly_transport_error_with_detail(
 
 pub(crate) trait TuiApi: Send + Sync + 'static {
     fn fetch_sessions(&self) -> BoxFuture<'_, Result<Vec<SessionSummary>, String>>;
+    fn fetch_sessions_for_initial_frame(
+        &self,
+    ) -> BoxFuture<'_, Result<Vec<SessionSummary>, String>> {
+        self.fetch_sessions()
+    }
     fn fetch_thought_config(&self) -> BoxFuture<'_, Result<ThoughtConfigResponse, String>>;
     fn update_thought_config(
         &self,

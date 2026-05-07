@@ -449,6 +449,8 @@ pub struct SessionSummary {
     pub last_skill: Option<String>,
     pub is_stale: bool,
     pub attached_clients: u32,
+    #[serde(default)]
+    pub stale_attached_clients: u32,
     pub transport_health: TransportHealth,
     pub last_activity_at: DateTime<Utc>,
     /// Key into `SessionListResponse.repo_themes`; absent when no supported
@@ -471,6 +473,51 @@ pub struct TerminalSnapshot {
 pub struct SessionPaneTailResponse {
     pub session_id: String,
     pub text: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentContextActionSummary {
+    pub tool: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SessionAgentContextResponse {
+    pub session_id: String,
+    pub available: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool: Option<String>,
+    pub cwd: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_task: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_tool: Option<AgentContextActionSummary>,
+    #[serde(default)]
+    pub recent_actions: Vec<AgentContextActionSummary>,
+    pub token_count: u64,
+    pub context_limit: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SessionGitDiffResponse {
+    pub session_id: String,
+    pub available: bool,
+    pub cwd: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repo_root: Option<String>,
+    #[serde(default)]
+    pub status_short: String,
+    #[serde(default)]
+    pub unstaged_diff: String,
+    #[serde(default)]
+    pub staged_diff: String,
+    #[serde(default)]
+    pub truncated: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -757,6 +804,12 @@ pub struct SessionInputRequest {
 pub struct SessionInputResponse {
     pub ok: bool,
     pub session_id: String,
+    #[serde(default)]
+    pub delivered: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delivery_method: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1297,6 +1350,7 @@ mod tests {
                 last_skill: None,
                 is_stale: false,
                 attached_clients: 0,
+                stale_attached_clients: 0,
                 transport_health: TransportHealth::Healthy,
                 last_activity_at: chrono::Utc::now(),
                 repo_theme_id: Some("/tmp/proj".into()),
@@ -1358,6 +1412,7 @@ mod tests {
                 last_skill: None,
                 is_stale: false,
                 attached_clients: 0,
+                stale_attached_clients: 0,
                 transport_health: TransportHealth::Healthy,
                 last_activity_at: chrono::Utc::now(),
                 repo_theme_id: Some("/tmp".into()),

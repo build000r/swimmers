@@ -41,6 +41,7 @@ const TMUX_AGENT_SUBMIT_DOUBLE_ENTER_DELAY: Duration = Duration::from_millis(75)
 const PROCESS_ENTRIES_QUERY_TIMEOUT: Duration = Duration::from_millis(750);
 const PROCESS_ENTRIES_CACHE_TTL: Duration = Duration::from_millis(1_500);
 const TMUX_NEW_SESSION_EXIT_GRACE: Duration = Duration::from_millis(50);
+const MAX_OUTPUT_SUBSCRIBERS_PER_SESSION: usize = 16;
 const TMUX_FALLBACK_TERM: &str = "xterm-256color";
 const TMUX_FALLBACK_COLORTERM: &str = "truecolor";
 static NEXT_TMUX_SUBMIT_BUFFER_ID: AtomicU64 = AtomicU64::new(1);
@@ -67,8 +68,20 @@ pub enum SessionCommand {
     /// Write raw bytes to the PTY (user input).
     WriteInput(Vec<u8>),
 
+    /// Write raw bytes and acknowledge whether they reached tmux/the PTY.
+    WriteInputAck {
+        data: Vec<u8>,
+        ack: oneshot::Sender<InputDeliveryResult>,
+    },
+
     /// Paste a prompt and submit it to an agent-style terminal prompt.
     SubmitLine(String),
+
+    /// Paste and submit a prompt, acknowledging whether injection succeeded.
+    SubmitLineAck {
+        text: String,
+        ack: oneshot::Sender<InputDeliveryResult>,
+    },
 
     /// Resize the PTY.
     Resize { cols: u16, rows: u16 },
@@ -120,6 +133,9 @@ pub enum SessionCommand {
 #[derive(Debug)]
 pub enum SubscribeOutcome {
     Ok,
+    Rejected {
+        reason: String,
+    },
     ReplayTruncated {
         requested_resume_from_seq: u64,
         replay_window_start_seq: u64,
@@ -132,6 +148,32 @@ pub enum SubscribeOutcome {
 pub struct ReplayCursor {
     pub latest_seq: u64,
     pub replay_window_start_seq: u64,
+}
+
+/// Result of a browser/API input delivery attempt after actor-side injection.
+#[derive(Debug, Clone)]
+pub struct InputDeliveryResult {
+    pub delivered: bool,
+    pub method: &'static str,
+    pub message: Option<String>,
+}
+
+impl InputDeliveryResult {
+    fn delivered(method: &'static str) -> Self {
+        Self {
+            delivered: true,
+            method,
+            message: None,
+        }
+    }
+
+    fn failed(method: &'static str, message: impl Into<String>) -> Self {
+        Self {
+            delivered: false,
+            method,
+            message: Some(message.into()),
+        }
+    }
 }
 
 enum ReplayPlan {
@@ -501,8 +543,18 @@ impl SessionActor {
 
     async fn handle_command(&mut self, cmd: SessionCommand, pty_closed: bool) -> bool {
         match cmd {
-            SessionCommand::WriteInput(data) => self.handle_write_input(data, pty_closed).await,
-            SessionCommand::SubmitLine(text) => self.handle_submit_line(text, pty_closed).await,
+            SessionCommand::WriteInput(data) => {
+                let _ = self.handle_write_input(data, pty_closed).await;
+            }
+            SessionCommand::WriteInputAck { data, ack } => {
+                let _ = ack.send(self.handle_write_input(data, pty_closed).await);
+            }
+            SessionCommand::SubmitLine(text) => {
+                let _ = self.handle_submit_line(text, pty_closed).await;
+            }
+            SessionCommand::SubmitLineAck { text, ack } => {
+                let _ = ack.send(self.handle_submit_line(text, pty_closed).await);
+            }
             SessionCommand::Resize { cols, rows } => self.handle_resize(cols, rows),
             SessionCommand::DismissAttention => self.handle_dismiss_attention().await,
             SessionCommand::Subscribe {
@@ -575,10 +627,10 @@ impl SessionActor {
         true
     }
 
-    async fn handle_write_input(&mut self, data: Vec<u8>, pty_closed: bool) {
+    async fn handle_write_input(&mut self, data: Vec<u8>, pty_closed: bool) -> InputDeliveryResult {
         if pty_closed {
             debug!(session_id = %self.session_id, "ignoring write to exited PTY");
-            return;
+            return InputDeliveryResult::failed("none", "session process has exited");
         }
 
         if write_input_counts_as_activity(&data) {
@@ -592,7 +644,7 @@ impl SessionActor {
 
         if let Some(chunks) = tmux_input_chunks(&data) {
             match send_tmux_input_chunks(&self.tmux_name, &chunks).await {
-                Ok(()) => return,
+                Ok(()) => return InputDeliveryResult::delivered("tmux_send_keys"),
                 Err(err) => {
                     warn!(
                         session_id = %self.session_id,
@@ -601,25 +653,29 @@ impl SessionActor {
                         "tmux send-keys input failed: {err}"
                     );
                     if err.delivered_chunks > 0 {
-                        return;
+                        return InputDeliveryResult::delivered("tmux_send_keys_partial");
                     }
                 }
             }
         }
 
-        if let Err(e) = write_and_flush_input(&mut self.writer, &data) {
-            error!(session_id = %self.session_id, "PTY write error: {}", e);
+        match write_and_flush_input(&mut self.writer, &data) {
+            Ok(()) => InputDeliveryResult::delivered("pty_write"),
+            Err(e) => {
+                error!(session_id = %self.session_id, "PTY write error: {}", e);
+                InputDeliveryResult::failed("pty_write", e.to_string())
+            }
         }
     }
 
-    async fn handle_submit_line(&mut self, text: String, pty_closed: bool) {
+    async fn handle_submit_line(&mut self, text: String, pty_closed: bool) -> InputDeliveryResult {
         if pty_closed {
             debug!(session_id = %self.session_id, "ignoring submit to exited PTY");
-            return;
+            return InputDeliveryResult::failed("none", "session process has exited");
         }
 
         let Some(text) = normalize_submit_line_text(&text) else {
-            return;
+            return InputDeliveryResult::failed("none", "text must not be empty");
         };
         let fallback_input = submit_line_fallback_input(&text);
 
@@ -633,7 +689,7 @@ impl SessionActor {
         self.update_last_skill_from_input(&fallback_input);
 
         match send_tmux_submit_line(&self.tmux_name, &text).await {
-            Ok(()) => return,
+            Ok(()) => return InputDeliveryResult::delivered("tmux_submit_line"),
             Err(err) => {
                 warn!(
                     session_id = %self.session_id,
@@ -643,8 +699,12 @@ impl SessionActor {
             }
         }
 
-        if let Err(e) = write_and_flush_input(&mut self.writer, &fallback_input) {
-            error!(session_id = %self.session_id, "PTY submit write error: {}", e);
+        match write_and_flush_input(&mut self.writer, &fallback_input) {
+            Ok(()) => InputDeliveryResult::delivered("pty_write"),
+            Err(e) => {
+                error!(session_id = %self.session_id, "PTY submit write error: {}", e);
+                InputDeliveryResult::failed("pty_write", e.to_string())
+            }
         }
     }
 
@@ -1229,6 +1289,23 @@ impl SessionActor {
             "client subscribing"
         );
 
+        self.subscribers.retain(|_, tx| !tx.is_closed());
+        if self.subscribers.len() >= MAX_OUTPUT_SUBSCRIBERS_PER_SESSION {
+            warn!(
+                session_id = %self.session_id,
+                client_id,
+                subscribers = self.subscribers.len(),
+                "subscriber cap reached (SESSION_OVERLOADED), rejecting browser attach"
+            );
+            crate::metrics::increment_overload(&self.session_id);
+            return SubscribeOutcome::Rejected {
+                reason: format!(
+                    "session already has {} active browser subscribers",
+                    self.subscribers.len()
+                ),
+            };
+        }
+
         let outcome = replay_existing_frames(
             self.session_id.clone(),
             client_id,
@@ -1236,7 +1313,15 @@ impl SessionActor {
             self.replay_plan(resume_from_seq),
         )
         .await;
-        self.subscribers.insert(client_id, client_tx);
+        if client_tx.is_closed() {
+            debug!(
+                session_id = %self.session_id,
+                client_id,
+                "subscriber dropped during subscribe ack; not attaching"
+            );
+        } else {
+            self.subscribers.insert(client_id, client_tx);
+        }
         outcome
     }
 
@@ -1321,6 +1406,12 @@ impl SessionActor {
         let (state, current_command) = self.state_detector.get_state();
         let state_evidence = self.state_detector.state_evidence();
         let context_limit = crate::types::context_limit_for_tool(self.tool.as_deref());
+        let active_subscribers = self
+            .subscribers
+            .values()
+            .filter(|tx| !tx.is_closed())
+            .count();
+        let stale_subscribers = self.subscribers.len().saturating_sub(active_subscribers);
         SessionSummary {
             session_id: self.session_id.clone(),
             tmux_name: self.tmux_name.clone(),
@@ -1333,7 +1424,8 @@ impl SessionActor {
             context_limit,
             thought: None,
             is_stale: false,
-            attached_clients: self.subscribers.len() as u32,
+            attached_clients: active_subscribers as u32,
+            stale_attached_clients: stale_subscribers as u32,
             transport_health: TransportHealth::Healthy,
             thought_state: crate::types::ThoughtState::Holding,
             thought_source: crate::types::ThoughtSource::CarryForward,

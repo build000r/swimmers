@@ -50,7 +50,7 @@ const SECRET_VARS: &[&str] = &["AUTH_TOKEN", "OBSERVER_TOKEN"];
 const ENV_VAR_HELP: &str = "ENVIRONMENT VARIABLES:
   PORT                         Server listen port (default: 3210)
   SWIMMERS_BIND                Server bind address (default: 127.0.0.1)
-  AUTH_MODE                    'local_trust' or 'token' (default: local_trust)
+  AUTH_MODE                    'local_trust', 'tailnet_trust', or 'token' (default: local_trust)
   AUTH_TOKEN                   Bearer token when AUTH_MODE=token
   OBSERVER_TOKEN               Read-only bearer token (optional)
   SWIMMERS_NATIVE_APP          'iterm' or 'ghostty' (default: iterm)
@@ -65,7 +65,7 @@ Run `swimmers config doctor` to validate the active configuration.";
 
 const TUI_ENV_HELP: &str = "ENVIRONMENT VARIABLES:
   SWIMMERS_TUI_URL  API URL to connect to (default: http://127.0.0.1:3210)
-  AUTH_MODE         'local_trust' or 'token'
+  AUTH_MODE         'local_trust', 'tailnet_trust', or 'token'
   AUTH_TOKEN        Bearer token when AUTH_MODE=token
   CLAWGS_BIN        Override path to the clawgs binary in embedded mode";
 
@@ -105,7 +105,7 @@ pub enum ConfigAction {
     /// Run validation checks against the active environment.
     ///
     /// Exits 0 if all checks pass, 1 otherwise. Doctor is advisory — the
-    /// server itself also enforces the LocalTrust loopback gate at startup.
+    /// server itself also enforces trusted bind-address gates at startup.
     Doctor,
 }
 
@@ -167,6 +167,7 @@ fn default_for(name: &str, config: &Config) -> String {
         "SWIMMERS_BIND" => config.bind.clone(),
         "AUTH_MODE" => match config.auth_mode {
             AuthMode::LocalTrust => "local_trust".to_string(),
+            AuthMode::TailnetTrust => "tailnet_trust".to_string(),
             AuthMode::Token => "token".to_string(),
         },
         "AUTH_TOKEN" | "OBSERVER_TOKEN" => "(unset)".to_string(),
@@ -240,8 +241,9 @@ pub fn run_doctor_checks(
 ) -> Vec<DoctorFinding> {
     let mut findings = Vec::new();
 
-    // Check 1: LocalTrust + non-loopback bind
+    // Check 1: trusted auth modes must stay on their matching trusted network.
     let bind_loopback = is_loopback_bind(&config.bind);
+    let bind_tailnet = is_tailnet_bind(&config.bind);
     if matches!(config.auth_mode, AuthMode::LocalTrust) && !bind_loopback {
         findings.push(DoctorFinding {
             ok: false,
@@ -249,7 +251,19 @@ pub fn run_doctor_checks(
             detail: format!(
                 "SWIMMERS_BIND={} is non-loopback while AUTH_MODE=local_trust. \
                  This exposes the API to the network with no authentication. \
-                 Set AUTH_MODE=token AUTH_TOKEN=<secret> or bind to 127.0.0.1.",
+                 Bind to 127.0.0.1, use AUTH_MODE=tailnet_trust with a Tailscale bind address, \
+                 or set AUTH_MODE=token AUTH_TOKEN=<secret>.",
+                config.bind
+            ),
+        });
+    } else if matches!(config.auth_mode, AuthMode::TailnetTrust) && !bind_tailnet {
+        findings.push(DoctorFinding {
+            ok: false,
+            name: "auth/bind",
+            detail: format!(
+                "SWIMMERS_BIND={} is not a Tailscale address while AUTH_MODE=tailnet_trust. \
+                 Bind to a Tailscale IP in 100.64.0.0/10 or fd7a:115c:a1e0::/48, \
+                 or use AUTH_MODE=token AUTH_TOKEN=<secret> for non-tailnet exposure.",
                 config.bind
             ),
         });
@@ -262,6 +276,7 @@ pub fn run_doctor_checks(
                 config.bind,
                 match config.auth_mode {
                     AuthMode::LocalTrust => "local_trust",
+                    AuthMode::TailnetTrust => "tailnet_trust",
                     AuthMode::Token => "token",
                 }
             ),
@@ -280,7 +295,12 @@ pub fn run_doctor_checks(
         findings.push(DoctorFinding {
             ok: true,
             name: "auth/token",
-            detail: "token configuration ok".to_string(),
+            detail: match config.auth_mode {
+                AuthMode::Token => "token configuration ok",
+                AuthMode::TailnetTrust => "token not required in tailnet_trust mode",
+                AuthMode::LocalTrust => "token not required in local_trust mode",
+            }
+            .to_string(),
         });
     }
 
@@ -366,6 +386,22 @@ pub fn is_loopback_bind(bind: &str) -> bool {
     host.parse::<IpAddr>()
         .map(|ip| ip.is_loopback())
         .unwrap_or(false)
+}
+
+/// Returns true when `bind` is an IP literal from Tailscale's tailnet ranges.
+pub fn is_tailnet_bind(bind: &str) -> bool {
+    let host = bind_host(bind);
+    match host.parse::<IpAddr>() {
+        Ok(IpAddr::V4(ip)) => {
+            let octets = ip.octets();
+            octets[0] == 100 && (64..=127).contains(&octets[1])
+        }
+        Ok(IpAddr::V6(ip)) => {
+            let segments = ip.segments();
+            segments[0] == 0xfd7a && segments[1] == 0x115c && segments[2] == 0xa1e0
+        }
+        Err(_) => false,
+    }
 }
 
 /// Synchronously check whether `tmux` is on PATH.
@@ -515,25 +551,37 @@ fn print_doctor_summary(failed: usize) -> i32 {
 
 /// Sysexits-style exit code for configuration errors.
 ///
-/// Used by the server's startup gate when LocalTrust is paired with a
-/// non-loopback bind. Matches `EX_CONFIG` from `sysexits.h` so systemd and
-/// monitoring scripts can distinguish a config refusal from a generic crash.
+/// Used by the server's startup gate when auth mode and bind address are an
+/// unsafe pair. Matches `EX_CONFIG` from `sysexits.h` so systemd and monitoring
+/// scripts can distinguish a config refusal from a generic crash.
 pub const EXIT_CONFIG: i32 = 78;
 
 /// Returns `Err(message)` if the active configuration would expose the API
-/// to the network with no authentication. Used both by the server startup
-/// gate (which exits 78) and by `config doctor` (which exits 1).
-pub fn enforce_localtrust_loopback(config: &Config) -> Result<(), String> {
+/// outside the trusted network for the selected auth mode.
+pub fn enforce_trust_bind_safety(config: &Config) -> Result<(), String> {
     if matches!(config.auth_mode, AuthMode::LocalTrust) && !is_loopback_bind(&config.bind) {
-        Err(format!(
+        return Err(format!(
             "refusing to start: SWIMMERS_BIND={} is non-loopback while AUTH_MODE=local_trust. \
              This would expose the API to the network with no authentication. \
-             Set AUTH_MODE=token AUTH_TOKEN=<secret>, or bind to 127.0.0.1.",
+             Bind to 127.0.0.1, use AUTH_MODE=tailnet_trust with a Tailscale bind address, \
+             or set AUTH_MODE=token AUTH_TOKEN=<secret>.",
             config.bind
-        ))
-    } else {
-        Ok(())
+        ));
     }
+    if matches!(config.auth_mode, AuthMode::TailnetTrust) && !is_tailnet_bind(&config.bind) {
+        return Err(format!(
+            "refusing to start: SWIMMERS_BIND={} is not a Tailscale address while \
+             AUTH_MODE=tailnet_trust. Bind to a Tailscale IP in 100.64.0.0/10 or \
+             fd7a:115c:a1e0::/48, or use AUTH_MODE=token AUTH_TOKEN=<secret>.",
+            config.bind
+        ));
+    }
+    Ok(())
+}
+
+/// Backward-compatible wrapper for callers that still use the old gate name.
+pub fn enforce_localtrust_loopback(config: &Config) -> Result<(), String> {
+    enforce_trust_bind_safety(config)
 }
 
 #[cfg(test)]
@@ -565,6 +613,17 @@ mod tests {
         assert!(is_loopback_bind("127.0.0.1:3210"));
         assert!(is_loopback_bind("[::1]:3210"));
         assert!(!is_loopback_bind("0.0.0.0:3210"));
+    }
+
+    #[test]
+    fn tailnet_bind_detects_tailscale_ranges() {
+        assert!(is_tailnet_bind("100.64.0.1"));
+        assert!(is_tailnet_bind("100.86.253.9:3210"));
+        assert!(is_tailnet_bind("[fd7a:115c:a1e0::1]:3210"));
+        assert!(!is_tailnet_bind("100.63.255.255"));
+        assert!(!is_tailnet_bind("100.128.0.1"));
+        assert!(!is_tailnet_bind("10.0.0.1"));
+        assert!(!is_tailnet_bind("localhost"));
     }
 
     #[test]
@@ -657,15 +716,29 @@ mod tests {
     #[test]
     fn localtrust_non_loopback_refused() {
         let c = cfg("0.0.0.0", AuthMode::LocalTrust, None);
-        let err = enforce_localtrust_loopback(&c).unwrap_err();
+        let err = enforce_trust_bind_safety(&c).unwrap_err();
         assert!(err.contains("SWIMMERS_BIND=0.0.0.0"));
-        assert!(err.contains("AUTH_MODE=token"));
+        assert!(err.contains("AUTH_MODE=tailnet_trust"));
     }
 
     #[test]
     fn token_mode_non_loopback_allowed() {
         let c = cfg("0.0.0.0", AuthMode::Token, Some("secret"));
-        assert!(enforce_localtrust_loopback(&c).is_ok());
+        assert!(enforce_trust_bind_safety(&c).is_ok());
+    }
+
+    #[test]
+    fn tailnet_trust_tailscale_bind_allowed() {
+        let c = cfg("100.86.253.9", AuthMode::TailnetTrust, None);
+        assert!(enforce_trust_bind_safety(&c).is_ok());
+    }
+
+    #[test]
+    fn tailnet_trust_public_bind_refused() {
+        let c = cfg("0.0.0.0", AuthMode::TailnetTrust, None);
+        let err = enforce_trust_bind_safety(&c).unwrap_err();
+        assert!(err.contains("AUTH_MODE=tailnet_trust"));
+        assert!(err.contains("Tailscale"));
     }
 
     #[test]
@@ -694,6 +767,32 @@ mod tests {
         let auth_token = findings.iter().find(|f| f.name == "auth/token").unwrap();
         assert!(!auth_token.ok);
         assert!(auth_token.detail.contains("AUTH_TOKEN"));
+    }
+
+    #[test]
+    fn doctor_flags_tailnet_trust_without_tailnet_bind() {
+        let c = cfg("0.0.0.0", AuthMode::TailnetTrust, None);
+        let findings = run_doctor_checks(
+            &c,
+            true,
+            Ok("`clawgs defaults` ok".to_string()),
+            Ok(PathBuf::from("/tmp")),
+        );
+        let auth_bind = findings.iter().find(|f| f.name == "auth/bind").unwrap();
+        assert!(!auth_bind.ok);
+        assert!(auth_bind.detail.contains("tailnet_trust"));
+    }
+
+    #[test]
+    fn doctor_all_pass_with_tailnet_trust_tailscale_bind() {
+        let c = cfg("100.86.253.9", AuthMode::TailnetTrust, None);
+        let findings = run_doctor_checks(
+            &c,
+            true,
+            Ok("`clawgs defaults` ok".to_string()),
+            Ok(PathBuf::from("/tmp")),
+        );
+        assert!(findings.iter().all(|f| f.ok));
     }
 
     #[test]

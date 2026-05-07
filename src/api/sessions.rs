@@ -7,19 +7,25 @@ use chrono::{DateTime, Utc};
 use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use tokio::process::Command;
 use tokio::sync::oneshot;
 use uuid::Uuid;
 
 use crate::api::{fetch_live_summary, remote_sessions, AppState};
 use crate::auth::{AuthInfo, AuthScope};
 use crate::operator_pressure::session_ready_for_operator_group_input;
+#[cfg(test)]
+use crate::session::actor::InputDeliveryResult;
 use crate::session::actor::{ActorHandle, SessionCommand};
+use crate::thought::context::context_reader_for;
 use crate::types::{
-    CreateSessionRequest, CreateSessionResponse, CreateSessionsBatchRequest,
-    CreateSessionsBatchResponse, CreateSessionsBatchResult, ErrorResponse, MermaidArtifactResponse,
-    PlanFileResponse, RepoTheme, SessionBatchMembership, SessionGroupInputRequest,
-    SessionGroupInputResponse, SessionGroupInputResult, SessionInputRequest, SessionInputResponse,
-    SessionListResponse, SessionPaneTailResponse, SessionState, SessionSummary, TerminalSnapshot,
+    AgentContextActionSummary, CreateSessionRequest, CreateSessionResponse,
+    CreateSessionsBatchRequest, CreateSessionsBatchResponse, CreateSessionsBatchResult,
+    ErrorResponse, MermaidArtifactResponse, PlanFileResponse, RepoTheme,
+    SessionAgentContextResponse, SessionBatchMembership, SessionGitDiffResponse,
+    SessionGroupInputRequest, SessionGroupInputResponse, SessionGroupInputResult,
+    SessionInputRequest, SessionInputResponse, SessionListResponse, SessionPaneTailResponse,
+    SessionState, SessionSummary, TerminalSnapshot,
 };
 
 const BATCH_PROMPT_EXCERPT_MAX_CHARS: usize = 72;
@@ -27,6 +33,8 @@ const BATCH_LABEL_MAX_CHARS: usize = 28;
 const PANE_TAIL_LINES: usize = 300;
 const PANE_TAIL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 const PLAN_FILE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+const GIT_DIFF_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+const GIT_DIFF_MAX_BYTES: usize = 128 * 1024;
 
 // ---------------------------------------------------------------------------
 // GET /v1/sessions
@@ -495,10 +503,17 @@ async fn send_input(
         }
     };
 
+    let (ack_tx, ack_rx) = oneshot::channel();
     let command = if body.submit {
-        SessionCommand::SubmitLine(body.text)
+        SessionCommand::SubmitLineAck {
+            text: body.text,
+            ack: ack_tx,
+        }
     } else {
-        SessionCommand::WriteInput(body.text.into_bytes())
+        SessionCommand::WriteInputAck {
+            data: body.text.into_bytes(),
+            ack: ack_tx,
+        }
     };
 
     if let Err(err) = handle.send(command).await {
@@ -513,14 +528,438 @@ async fn send_input(
             .into_response();
     }
 
+    let delivery = match tokio::time::timeout(std::time::Duration::from_secs(2), ack_rx).await {
+        Ok(Ok(delivery)) => delivery,
+        Ok(Err(_)) => {
+            return (
+                StatusCode::BAD_GATEWAY,
+                Json(ErrorResponse {
+                    code: "INPUT_DELIVERY_UNKNOWN".to_string(),
+                    message: Some("session actor dropped input delivery ack".to_string()),
+                }),
+            )
+                .into_response();
+        }
+        Err(_) => {
+            return (
+                StatusCode::GATEWAY_TIMEOUT,
+                Json(ErrorResponse {
+                    code: "INPUT_DELIVERY_TIMEOUT".to_string(),
+                    message: Some("timed out waiting for input delivery confirmation".to_string()),
+                }),
+            )
+                .into_response();
+        }
+    };
+
+    if !delivery.delivered {
+        return (
+            StatusCode::BAD_GATEWAY,
+            Json(ErrorResponse {
+                code: "INPUT_DELIVERY_FAILED".to_string(),
+                message: delivery.message,
+            }),
+        )
+            .into_response();
+    }
+
     (
         StatusCode::OK,
         Json(SessionInputResponse {
             ok: true,
             session_id,
+            delivered: true,
+            delivery_method: Some(delivery.method.to_string()),
+            message: None,
         }),
     )
         .into_response()
+}
+
+// ---------------------------------------------------------------------------
+// GET /v1/sessions/{session_id}/agent-context
+// ---------------------------------------------------------------------------
+
+async fn get_agent_context(
+    Extension(auth): Extension<AuthInfo>,
+    State(state): State<Arc<AppState>>,
+    Path(session_id): Path<String>,
+) -> Response {
+    if let Err(resp) = auth.require_scope(AuthScope::SessionsRead) {
+        return resp;
+    }
+
+    fetch_agent_context_response(&state, &session_id).await
+}
+
+async fn fetch_agent_context_response(state: &Arc<AppState>, session_id: &str) -> Response {
+    match remote_sessions::denamespace_for_target(session_id) {
+        Ok(Some((target, remote_session_id))) => {
+            return match remote_sessions::fetch_remote_agent_context(&target, remote_session_id)
+                .await
+            {
+                Ok(response) => (StatusCode::OK, Json(response)).into_response(),
+                Err(err) => err.into_response(),
+            };
+        }
+        Ok(None) => {}
+        Err(err) => return err.into_response(),
+    }
+
+    let summary = match fetch_live_summary(state, session_id).await {
+        Ok(Some(summary)) => summary,
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse {
+                    code: "SESSION_NOT_FOUND".to_string(),
+                    message: None,
+                }),
+            )
+                .into_response();
+        }
+        Err(err) => {
+            tracing::error!("agent context summary lookup failed: {err}");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    code: "INTERNAL_ERROR".to_string(),
+                    message: Some(err.to_string()),
+                }),
+            )
+                .into_response();
+        }
+    };
+
+    match read_agent_context_for_summary(summary).await {
+        Ok(response) => (StatusCode::OK, Json(response)).into_response(),
+        Err(err) => {
+            tracing::error!("agent context read failed: {err}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    code: "INTERNAL_ERROR".to_string(),
+                    message: Some(err.to_string()),
+                }),
+            )
+                .into_response()
+        }
+    }
+}
+
+enum AgentContextReadResult {
+    Unsupported,
+    Missing,
+    Snapshot {
+        user_task: Option<String>,
+        current_tool: Option<AgentContextActionSummary>,
+        recent_actions: Vec<AgentContextActionSummary>,
+        token_count: u64,
+        context_limit: u64,
+    },
+}
+
+async fn read_agent_context_for_summary(
+    summary: SessionSummary,
+) -> anyhow::Result<SessionAgentContextResponse> {
+    let session_id = summary.session_id.clone();
+    let tool = summary.tool.clone();
+    let cwd = summary.cwd.clone();
+    let baseline_token_count = summary.token_count;
+    let baseline_context_limit = context_limit_for_agent_context(&tool, summary.context_limit);
+
+    let Some(tool_name) = tool.clone() else {
+        return Ok(agent_context_unavailable(
+            session_id,
+            tool,
+            cwd,
+            baseline_token_count,
+            baseline_context_limit,
+            "session tool is unknown",
+        ));
+    };
+
+    let reader_tool = tool_name.clone();
+    let reader_cwd = cwd.clone();
+    let read_result = tokio::task::spawn_blocking(move || {
+        let Some(mut reader) = context_reader_for(&reader_tool, &reader_cwd, &[]) else {
+            return AgentContextReadResult::Unsupported;
+        };
+
+        let Some(snapshot) = reader.read() else {
+            return AgentContextReadResult::Missing;
+        };
+
+        AgentContextReadResult::Snapshot {
+            user_task: snapshot.user_task,
+            current_tool: snapshot.current_tool.map(agent_action_summary),
+            recent_actions: snapshot
+                .recent_actions
+                .into_iter()
+                .map(agent_action_summary)
+                .collect(),
+            token_count: snapshot.token_count,
+            context_limit: snapshot.context_limit,
+        }
+    })
+    .await?;
+
+    Ok(match read_result {
+        AgentContextReadResult::Unsupported => agent_context_unavailable(
+            session_id,
+            tool,
+            cwd,
+            baseline_token_count,
+            baseline_context_limit,
+            format!("structured context is not supported for {tool_name}"),
+        ),
+        AgentContextReadResult::Missing => agent_context_unavailable(
+            session_id,
+            tool,
+            cwd,
+            baseline_token_count,
+            baseline_context_limit,
+            "no matching structured JSONL context was found",
+        ),
+        AgentContextReadResult::Snapshot {
+            user_task,
+            current_tool,
+            recent_actions,
+            token_count,
+            context_limit,
+        } => SessionAgentContextResponse {
+            session_id,
+            available: true,
+            tool,
+            cwd,
+            user_task,
+            current_tool,
+            recent_actions,
+            token_count,
+            context_limit: context_limit_for_agent_context(&Some(tool_name), context_limit),
+            message: None,
+        },
+    })
+}
+
+fn agent_action_summary(action: crate::thought::context::AgentAction) -> AgentContextActionSummary {
+    AgentContextActionSummary {
+        tool: action.tool,
+        detail: action.detail,
+    }
+}
+
+fn agent_context_unavailable(
+    session_id: String,
+    tool: Option<String>,
+    cwd: String,
+    token_count: u64,
+    context_limit: u64,
+    message: impl Into<String>,
+) -> SessionAgentContextResponse {
+    SessionAgentContextResponse {
+        session_id,
+        available: false,
+        tool,
+        cwd,
+        user_task: None,
+        current_tool: None,
+        recent_actions: Vec::new(),
+        token_count,
+        context_limit,
+        message: Some(message.into()),
+    }
+}
+
+fn context_limit_for_agent_context(tool: &Option<String>, context_limit: u64) -> u64 {
+    if context_limit > 0 {
+        context_limit
+    } else {
+        crate::types::context_limit_for_tool(tool.as_deref())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// GET /v1/sessions/{session_id}/git-diff
+// ---------------------------------------------------------------------------
+
+async fn get_git_diff(
+    Extension(auth): Extension<AuthInfo>,
+    State(state): State<Arc<AppState>>,
+    Path(session_id): Path<String>,
+) -> Response {
+    if let Err(resp) = auth.require_scope(AuthScope::SessionsRead) {
+        return resp;
+    }
+
+    fetch_git_diff_response(&state, &session_id).await
+}
+
+async fn fetch_git_diff_response(state: &Arc<AppState>, session_id: &str) -> Response {
+    match remote_sessions::denamespace_for_target(session_id) {
+        Ok(Some((target, remote_session_id))) => {
+            return match remote_sessions::fetch_remote_git_diff(&target, remote_session_id).await {
+                Ok(response) => (StatusCode::OK, Json(response)).into_response(),
+                Err(err) => err.into_response(),
+            };
+        }
+        Ok(None) => {}
+        Err(err) => return err.into_response(),
+    }
+
+    let summary = match fetch_live_summary(state, session_id).await {
+        Ok(Some(summary)) => summary,
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse {
+                    code: "SESSION_NOT_FOUND".to_string(),
+                    message: None,
+                }),
+            )
+                .into_response();
+        }
+        Err(err) => {
+            tracing::error!("git diff summary lookup failed: {err}");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    code: "INTERNAL_ERROR".to_string(),
+                    message: Some(err.to_string()),
+                }),
+            )
+                .into_response();
+        }
+    };
+
+    let response = read_git_diff_for_summary(summary).await;
+    (StatusCode::OK, Json(response)).into_response()
+}
+
+async fn read_git_diff_for_summary(summary: SessionSummary) -> SessionGitDiffResponse {
+    let repo_root = match run_git_capture(&summary.cwd, &["rev-parse", "--show-toplevel"]).await {
+        Ok(root) => root.trim().to_string(),
+        Err(message) => {
+            return git_diff_unavailable(
+                summary.session_id,
+                summary.cwd,
+                format!("git repo root unavailable: {message}"),
+            );
+        }
+    };
+
+    if repo_root.is_empty() {
+        return git_diff_unavailable(
+            summary.session_id,
+            summary.cwd,
+            "git repo root unavailable: empty git output",
+        );
+    }
+
+    let status_short = match run_git_capture(&repo_root, &["status", "--short"]).await {
+        Ok(output) => output,
+        Err(message) => {
+            return git_diff_unavailable(
+                summary.session_id,
+                summary.cwd,
+                format!("git status unavailable: {message}"),
+            );
+        }
+    };
+    let unstaged_raw =
+        match run_git_capture(&repo_root, &["diff", "--no-ext-diff", "--no-color"]).await {
+            Ok(output) => output,
+            Err(message) => {
+                return git_diff_unavailable(
+                    summary.session_id,
+                    summary.cwd,
+                    format!("git diff unavailable: {message}"),
+                );
+            }
+        };
+    let staged_raw = match run_git_capture(
+        &repo_root,
+        &["diff", "--cached", "--no-ext-diff", "--no-color"],
+    )
+    .await
+    {
+        Ok(output) => output,
+        Err(message) => {
+            return git_diff_unavailable(
+                summary.session_id,
+                summary.cwd,
+                format!("git diff --cached unavailable: {message}"),
+            );
+        }
+    };
+
+    let (unstaged_diff, unstaged_truncated) = truncate_git_output(unstaged_raw);
+    let (staged_diff, staged_truncated) = truncate_git_output(staged_raw);
+    SessionGitDiffResponse {
+        session_id: summary.session_id,
+        available: true,
+        cwd: summary.cwd,
+        repo_root: Some(repo_root),
+        status_short,
+        unstaged_diff,
+        staged_diff,
+        truncated: unstaged_truncated || staged_truncated,
+        message: None,
+    }
+}
+
+async fn run_git_capture(cwd: &str, args: &[&str]) -> Result<String, String> {
+    let output = tokio::time::timeout(
+        GIT_DIFF_TIMEOUT,
+        Command::new("git").arg("-C").arg(cwd).args(args).output(),
+    )
+    .await
+    .map_err(|_| format!("git {} timed out", args.join(" ")))?
+    .map_err(|err| err.to_string())?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        if stderr.is_empty() {
+            return Err(format!(
+                "git {} exited with {}",
+                args.join(" "),
+                output.status
+            ));
+        }
+        return Err(stderr);
+    }
+
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+fn truncate_git_output(output: String) -> (String, bool) {
+    if output.len() <= GIT_DIFF_MAX_BYTES {
+        return (output, false);
+    }
+
+    let mut end = GIT_DIFF_MAX_BYTES;
+    while end > 0 && !output.is_char_boundary(end) {
+        end -= 1;
+    }
+    (output[..end].to_string(), true)
+}
+
+fn git_diff_unavailable(
+    session_id: String,
+    cwd: String,
+    message: impl Into<String>,
+) -> SessionGitDiffResponse {
+    SessionGitDiffResponse {
+        session_id,
+        available: false,
+        cwd,
+        repo_root: None,
+        status_short: String::new(),
+        unstaged_diff: String::new(),
+        staged_diff: String::new(),
+        truncated: false,
+        message: Some(message.into()),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1058,6 +1497,11 @@ pub fn routes() -> Router<Arc<AppState>> {
             post(dismiss_attention),
         )
         .route("/v1/sessions/{session_id}/input", post(send_input))
+        .route(
+            "/v1/sessions/{session_id}/agent-context",
+            get(get_agent_context),
+        )
+        .route("/v1/sessions/{session_id}/git-diff", get(get_git_diff))
         .route("/v1/sessions/{session_id}/snapshot", get(get_snapshot))
         .route("/v1/sessions/{session_id}/pane-tail", get(get_pane_tail))
         .route(
@@ -1141,6 +1585,7 @@ mod tests {
             last_skill: None,
             is_stale: false,
             attached_clients: 0,
+            stale_attached_clients: 0,
             transport_health: TransportHealth::Healthy,
             last_activity_at: Utc::now(),
             repo_theme_id: None,
@@ -1203,6 +1648,29 @@ mod tests {
                 std::env::set_var("PATH", value);
             } else {
                 std::env::remove_var("PATH");
+            }
+        }
+    }
+
+    struct TestEnvVarGuard {
+        key: &'static str,
+        previous: Option<OsString>,
+    }
+
+    impl TestEnvVarGuard {
+        fn set_path(key: &'static str, value: &FsPath) -> Self {
+            let previous = std::env::var_os(key);
+            std::env::set_var(key, value);
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for TestEnvVarGuard {
+        fn drop(&mut self) {
+            if let Some(value) = self.previous.take() {
+                std::env::set_var(self.key, value);
+            } else {
+                std::env::remove_var(self.key);
             }
         }
     }
@@ -1642,7 +2110,14 @@ esac
                     SessionCommand::GetSummary(reply) => {
                         let _ = reply.send(summary("sess-1", SessionState::Idle));
                     }
-                    SessionCommand::WriteInput(bytes) => return bytes,
+                    SessionCommand::WriteInputAck { data, ack } => {
+                        let _ = ack.send(InputDeliveryResult {
+                            delivered: true,
+                            method: "test",
+                            message: None,
+                        });
+                        return data;
+                    }
                     _ => {}
                 }
             }
@@ -1680,7 +2155,14 @@ esac
                     SessionCommand::GetSummary(reply) => {
                         let _ = reply.send(summary("sess-1", SessionState::Idle));
                     }
-                    SessionCommand::SubmitLine(text) => return text,
+                    SessionCommand::SubmitLineAck { text, ack } => {
+                        let _ = ack.send(InputDeliveryResult {
+                            delivered: true,
+                            method: "test",
+                            message: None,
+                        });
+                        return text;
+                    }
                     _ => {}
                 }
             }
@@ -1701,6 +2183,168 @@ esac
 
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(worker.await.expect("worker"), "status");
+    }
+
+    #[tokio::test]
+    async fn get_agent_context_returns_codex_jsonl_snapshot() {
+        let _lock = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let tmp = tempdir().expect("tempdir");
+        let _home_guard = TestEnvVarGuard::set_path("HOME", tmp.path());
+        let sessions_dir = tmp
+            .path()
+            .join(".codex")
+            .join("sessions")
+            .join("2026")
+            .join("05")
+            .join("07");
+        std::fs::create_dir_all(&sessions_dir).expect("sessions dir");
+        std::fs::write(
+            sessions_dir.join("rollout-target.jsonl"),
+            concat!(
+                "{\"type\":\"session_meta\",\"payload\":{\"cwd\":\"/tmp/project\"}}\n",
+                "{\"type\":\"response_item\",\"payload\":{\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"build the workbench\"}]}}\n",
+                "{\"type\":\"response_item\",\"payload\":{\"type\":\"function_call\",\"name\":\"exec\",\"arguments\":\"{\\\"command\\\":\\\"cargo test agent_context\\\"}\"}}\n",
+                "{\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\",\"info\":{\"total_token_usage\":{\"input_tokens\":777}},\"model_context_window\":258400}}\n"
+            ),
+        )
+        .expect("target rollout");
+
+        let state = test_state();
+        let _write_rx =
+            insert_summary_test_handle(&state, summary("sess-context", SessionState::Idle)).await;
+
+        let response = get_agent_context(
+            Extension(AuthInfo::new(OPERATOR_SCOPES.to_vec())),
+            State(state),
+            Path("sess-context".to_string()),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let json = response_json(response).await;
+        assert_eq!(json["session_id"], "sess-context");
+        assert_eq!(json["available"], true);
+        assert_eq!(json["tool"], "Codex");
+        assert_eq!(json["cwd"], "/tmp/project");
+        assert_eq!(json["user_task"], "build the workbench");
+        assert_eq!(json["current_tool"]["tool"], "exec");
+        assert_eq!(json["current_tool"]["detail"], "cargo test agent_context");
+        assert_eq!(json["recent_actions"][0]["tool"], "exec");
+        assert_eq!(json["token_count"], 777);
+        assert_eq!(json["context_limit"], 258400);
+    }
+
+    #[tokio::test]
+    async fn get_agent_context_returns_unavailable_for_unsupported_tool() {
+        let state = test_state();
+        let mut unsupported = summary("sess-shell", SessionState::Idle);
+        unsupported.tool = Some("shell".to_string());
+        unsupported.context_limit = 0;
+        let _write_rx = insert_summary_test_handle(&state, unsupported).await;
+
+        let response = get_agent_context(
+            Extension(AuthInfo::new(OPERATOR_SCOPES.to_vec())),
+            State(state),
+            Path("sess-shell".to_string()),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let json = response_json(response).await;
+        assert_eq!(json["session_id"], "sess-shell");
+        assert_eq!(json["available"], false);
+        assert_eq!(json["tool"], "shell");
+        assert_eq!(json["recent_actions"].as_array().unwrap().len(), 0);
+        assert!(json["message"].as_str().unwrap().contains("not supported"));
+    }
+
+    #[tokio::test]
+    async fn get_agent_context_returns_not_found_for_missing_session() {
+        let response = get_agent_context(
+            Extension(AuthInfo::new(OPERATOR_SCOPES.to_vec())),
+            State(test_state()),
+            Path("missing-context".to_string()),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let json = response_json(response).await;
+        assert_eq!(json["code"], "SESSION_NOT_FOUND");
+    }
+
+    #[tokio::test]
+    async fn get_git_diff_returns_session_repo_diff() {
+        let _guard = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let repo = tempdir().expect("repo tempdir");
+        let init = std::process::Command::new("git")
+            .arg("-C")
+            .arg(repo.path())
+            .args(["init", "-q"])
+            .status()
+            .expect("git init");
+        assert!(init.success(), "git init should succeed");
+        std::fs::write(repo.path().join("app.txt"), "before\n").expect("write app");
+        let add = std::process::Command::new("git")
+            .arg("-C")
+            .arg(repo.path())
+            .args(["add", "app.txt"])
+            .status()
+            .expect("git add");
+        assert!(add.success(), "git add should succeed");
+        std::fs::write(repo.path().join("app.txt"), "before\nafter\n").expect("modify app");
+
+        let state = test_state();
+        let mut session = summary("sess-diff", SessionState::Idle);
+        session.cwd = repo.path().to_string_lossy().into_owned();
+        let _write_rx = insert_summary_test_handle(&state, session).await;
+
+        let response = get_git_diff(
+            Extension(AuthInfo::new(OPERATOR_SCOPES.to_vec())),
+            State(state),
+            Path("sess-diff".to_string()),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let json = response_json(response).await;
+        assert_eq!(json["session_id"], "sess-diff");
+        assert_eq!(json["available"], true);
+        let expected_root = std::fs::canonicalize(repo.path())
+            .unwrap_or_else(|_| repo.path().to_path_buf())
+            .to_string_lossy()
+            .into_owned();
+        assert_eq!(json["repo_root"].as_str().unwrap(), expected_root);
+        assert!(json["status_short"].as_str().unwrap().contains("app.txt"));
+        assert!(json["staged_diff"].as_str().unwrap().contains("new file"));
+        assert!(json["unstaged_diff"].as_str().unwrap().contains("+after"));
+    }
+
+    #[tokio::test]
+    async fn get_git_diff_returns_unavailable_for_non_repo() {
+        let state = test_state();
+        let mut session = summary("sess-no-repo", SessionState::Idle);
+        let tmp = tempdir().expect("tempdir");
+        session.cwd = tmp.path().to_string_lossy().into_owned();
+        let _write_rx = insert_summary_test_handle(&state, session).await;
+
+        let response = get_git_diff(
+            Extension(AuthInfo::new(OPERATOR_SCOPES.to_vec())),
+            State(state),
+            Path("sess-no-repo".to_string()),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let json = response_json(response).await;
+        assert_eq!(json["available"], false);
+        assert!(json["message"]
+            .as_str()
+            .unwrap()
+            .contains("repo root unavailable"));
     }
 
     #[tokio::test]

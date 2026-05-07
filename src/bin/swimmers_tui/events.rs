@@ -13,6 +13,15 @@ impl TuiApi for TuiClient {
         }
     }
 
+    fn fetch_sessions_for_initial_frame(
+        &self,
+    ) -> BoxFuture<'_, Result<Vec<SessionSummary>, String>> {
+        match self {
+            Self::Embedded(client) => client.fetch_sessions_for_initial_frame(),
+            Self::External(client) => client.fetch_sessions_for_initial_frame(),
+        }
+    }
+
     fn fetch_thought_config(&self) -> BoxFuture<'_, Result<ThoughtConfigResponse, String>> {
         match self {
             Self::Embedded(client) => client.fetch_thought_config(),
@@ -266,7 +275,7 @@ pub(crate) fn initialize_tui_app() -> Result<(App<TuiClient>, Renderer), Box<dyn
 
     let mut app = App::new(runtime, client);
     let initial_layout = app.layout_for_terminal(renderer.width(), renderer.height());
-    app.refresh(initial_layout);
+    app.refresh_initial_frame(initial_layout);
 
     Ok((app, renderer))
 }

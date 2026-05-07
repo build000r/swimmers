@@ -229,12 +229,12 @@ fn prepare_server_startup() -> (Arc<Config>, metrics_exporter_prometheus::Promet
     let prom_handle = metrics::init_metrics();
     let config = Config::from_env();
 
-    // Refuse to start if LocalTrust auth is paired with a non-loopback bind.
+    // Refuse trusted auth modes on bind addresses outside their trust boundary.
     // The pre-clap version only emitted a stderr warning here, which the
     // README's own external-access example silently relied on; that left
     // the API exposed to the network with no auth. Now we exit with
     // sysexits EX_CONFIG instead.
-    if let Err(msg) = cli::enforce_localtrust_loopback(&config) {
+    if let Err(msg) = cli::enforce_trust_bind_safety(&config) {
         eprintln!("swimmers: {msg}");
         std::process::exit(cli::EXIT_CONFIG);
     }

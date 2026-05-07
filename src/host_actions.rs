@@ -686,6 +686,7 @@ mod tests {
             last_skill: None,
             is_stale: false,
             attached_clients: 0,
+            stale_attached_clients: 0,
             transport_health: TransportHealth::Healthy,
             last_activity_at: Utc::now(),
             repo_theme_id: None,

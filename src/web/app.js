@@ -17,6 +17,7 @@ const TERMINAL_ZOOM_STORAGE_KEY = "swimmers.web.terminalZoom";
 const SEND_HISTORY_KEY = "swimmers.web.send.history";
 const SESSION_REFRESH_MS = 2500;
 const SNAPSHOT_REFRESH_MS = 900;
+const AGENT_CONTEXT_REFRESH_MS = 5000;
 const SURFACE_CLICK_SUPPRESS_MS = 450;
 const TROGDOR_READ_PROGRESS_KEY = "swimmers.web.trogdor.readProgress";
 const TROGDOR_BURN_MS = 1100;
@@ -48,6 +49,27 @@ const state = {
   terminalSessionId: null,
   ws: null,
   connectionGeneration: 0,
+  reconnectTimer: null,
+  reconnectAttempt: 0,
+  inputSequence: 0,
+  pendingInputMessages: new Map(),
+  terminalWorkbenchOpen: true,
+  agentContextSessionId: null,
+  agentContextLoading: false,
+  agentContextPayload: null,
+  agentContextError: "",
+  agentContextRequestSeq: 0,
+  agentContextLastLoadedAt: 0,
+  workbenchWidgets: {
+    sessionId: null,
+    loading: false,
+    paneTail: null,
+    artifact: null,
+    gitDiff: null,
+    error: "",
+    requestSeq: 0,
+    lastLoadedAt: 0,
+  },
   refreshTimer: null,
   snapshotTimer: null,
   terminalPaintProbeTimer: null,
@@ -163,10 +185,23 @@ const el = {
   terminalZoomReset: document.getElementById("terminal-zoom-reset"),
   terminalZoomIn: document.getElementById("terminal-zoom-in"),
   terminalMobileKeyboard: document.getElementById("terminal-mobile-keyboard"),
+  terminalTrogdorBack: document.getElementById("terminal-trogdor-back"),
+  terminalWorkbenchToggle: document.getElementById("terminal-workbench-toggle"),
+  terminalWorkbench: document.getElementById("terminal-workbench"),
+  terminalWorkbenchTitle: document.getElementById("terminal-workbench-title"),
+  terminalWorkbenchMeta: document.getElementById("terminal-workbench-meta"),
+  terminalWorkbenchStatus: document.getElementById("terminal-workbench-status"),
+  terminalWorkbenchTask: document.getElementById("terminal-workbench-task"),
+  terminalWorkbenchCurrent: document.getElementById("terminal-workbench-current"),
+  terminalWorkbenchPressure: document.getElementById("terminal-workbench-pressure"),
+  terminalWorkbenchActions: document.getElementById("terminal-workbench-actions"),
+  terminalWorkbenchWidgets: document.getElementById("terminal-workbench-widgets"),
+  terminalWorkbenchRefresh: document.getElementById("terminal-workbench-refresh"),
   terminalInputDock: document.getElementById("terminal-input-dock"),
   terminalInlineInput: document.getElementById("terminal-inline-input"),
   terminalInputSend: document.getElementById("terminal-input-send"),
   terminalInputEcho: document.getElementById("terminal-input-echo"),
+  terminalKeyStrip: document.getElementById("terminal-key-strip"),
   trogdorSurface: document.getElementById("trogdor-surface"),
   trogdorLauncher: document.getElementById("trogdor-launcher"),
   modalRoot: document.getElementById("modal-root"),
@@ -400,6 +435,40 @@ function setConnectionStatus(label, muted = false) {
   renderHudSurface();
 }
 
+function nextInputMessageId() {
+  state.inputSequence += 1;
+  return `web-${Date.now()}-${state.inputSequence}`;
+}
+
+function updateInputDeliveryStatus(id, status, detail = "") {
+  if (!id) {
+    return;
+  }
+  const pending = state.pendingInputMessages.get(id) ?? {};
+  state.pendingInputMessages.set(id, { ...pending, status, detail });
+  if (status === "pending") {
+    setTerminalInputEcho(`pending: ${pending.text || ""}`);
+    return;
+  }
+  if (status === "sent") {
+    setTerminalInputEcho(`sent: ${pending.text || ""}`);
+    return;
+  }
+  setTerminalInputEcho(`failed: ${detail || pending.text || "input not delivered"}`);
+}
+
+function clearReconnectTimer() {
+  if (state.reconnectTimer) {
+    window.clearTimeout(state.reconnectTimer);
+    state.reconnectTimer = null;
+  }
+}
+
+function reconnectDelayMs() {
+  const attempt = Math.max(0, state.reconnectAttempt);
+  return Math.min(10000, 1000 * 2 ** Math.min(attempt, 3));
+}
+
 function setModeStatus(label, muted = false) {
   state.modeLabel = label;
   state.modeMuted = Boolean(muted);
@@ -528,7 +597,12 @@ function syncUrlState() {
 
 function persistSelectedSession(sessionId, options = {}) {
   const normalized = normalizeSessionId(sessionId);
+  const previous = state.selectedSessionId;
   state.selectedSessionId = normalized;
+  if (previous !== normalized) {
+    resetAgentContextForSession(normalized);
+    resetWorkbenchWidgetsForSession(normalized);
+  }
   if (normalized) {
     localStorage.setItem(SESSION_STORAGE_KEY, normalized);
     closeTrogdorAtlasForTerminal();
@@ -605,6 +679,11 @@ function syncTerminalInputDock() {
   el.terminalInputDock.classList.toggle("hidden", !visible);
   el.terminalInputDock.setAttribute("aria-hidden", visible ? "false" : "true");
   el.terminalInlineInput.disabled = !visible || state.readOnly;
+  if (el.terminalKeyStrip) {
+    for (const button of el.terminalKeyStrip.querySelectorAll("button[data-terminal-key]")) {
+      button.disabled = !visible || state.readOnly;
+    }
+  }
   const hasText = Boolean(String(el.terminalInlineInput.value || "").trim());
   el.terminalInputSend.disabled = !visible || state.readOnly || !hasText;
 }
@@ -648,15 +727,473 @@ async function submitTerminalInputDock() {
     syncTerminalInputDock();
     return false;
   }
-  setTerminalInputEcho(text);
+  setTerminalInputEcho(`pending: ${text}`);
   projectTerminalInputIntoFallback(text);
-  await sendLineToSession(state.selectedSessionId, text);
-  rememberSendHistory(text);
-  el.terminalInlineInput.value = "";
-  resizeTerminalInlineInput();
-  syncTerminalInputDock();
-  void refreshSessions();
-  return true;
+  try {
+    await sendLineToSession(state.selectedSessionId, text);
+    rememberSendHistory(text);
+    el.terminalInlineInput.value = "";
+    resizeTerminalInlineInput();
+    syncTerminalInputDock();
+    void refreshSessions();
+    return true;
+  } catch (error) {
+    setTerminalInputEcho(`failed: ${error?.message || "input delivery failed"}`);
+    setConnectionStatus("input failed; stream may be disconnected", true);
+    return false;
+  }
+}
+
+function resetAgentContextForSession(sessionId) {
+  state.agentContextSessionId = normalizeSessionId(sessionId);
+  state.agentContextLoading = false;
+  state.agentContextPayload = null;
+  state.agentContextError = "";
+  state.agentContextLastLoadedAt = 0;
+  renderTerminalWorkbench();
+}
+
+function resetWorkbenchWidgetsForSession(sessionId) {
+  state.workbenchWidgets.sessionId = normalizeSessionId(sessionId);
+  state.workbenchWidgets.loading = false;
+  state.workbenchWidgets.paneTail = null;
+  state.workbenchWidgets.artifact = null;
+  state.workbenchWidgets.gitDiff = null;
+  state.workbenchWidgets.error = "";
+  state.workbenchWidgets.lastLoadedAt = 0;
+  renderWorkbenchWidgets();
+}
+
+function terminalWorkbenchVisible() {
+  return Boolean(currentSession() && !state.trogdorAtlasOpen && state.terminalWorkbenchOpen);
+}
+
+function syncTrogdorBackButton() {
+  if (!el.terminalTrogdorBack) {
+    return;
+  }
+  const visible = Boolean(currentSession() && !state.trogdorAtlasOpen);
+  el.terminalTrogdorBack.classList.toggle("hidden", !visible);
+  el.terminalTrogdorBack.disabled = !visible;
+  el.terminalTrogdorBack.setAttribute("aria-hidden", visible ? "false" : "true");
+}
+
+function syncTerminalWorkbench() {
+  const hasSession = Boolean(currentSession() && !state.trogdorAtlasOpen);
+  const visible = terminalWorkbenchVisible();
+  document.body.classList.toggle("terminal-workbench-open", visible);
+  if (el.terminalWorkbenchToggle) {
+    el.terminalWorkbenchToggle.disabled = !hasSession;
+    el.terminalWorkbenchToggle.setAttribute("aria-pressed", visible ? "true" : "false");
+  }
+  if (el.terminalWorkbench) {
+    el.terminalWorkbench.classList.toggle("hidden", !visible);
+    el.terminalWorkbench.setAttribute("aria-hidden", visible ? "false" : "true");
+  }
+  renderTerminalWorkbench();
+}
+
+function setTerminalWorkbenchOpen(open) {
+  state.terminalWorkbenchOpen = Boolean(open);
+  syncTerminalWorkbench();
+  if (state.terminalWorkbenchOpen) {
+    void refreshAgentContextForSelectedSession({ force: true });
+    void refreshWorkbenchWidgetsForSelectedSession({ force: true });
+  }
+}
+
+function selectedAgentContextPayload() {
+  return state.agentContextSessionId === state.selectedSessionId
+    ? state.agentContextPayload
+    : null;
+}
+
+function agentActionLabel(action) {
+  if (!action) {
+    return "";
+  }
+  const tool = String(action.tool || "action").trim() || "action";
+  const detail = String(action.detail || "").trim();
+  return detail ? `${tool}: ${detail}` : tool;
+}
+
+function truncateWorkbenchText(value, max = 180) {
+  const normalized = String(value || "").replace(/\s+/g, " ").trim();
+  if (normalized.length <= max) {
+    return normalized;
+  }
+  return `${normalized.slice(0, Math.max(0, max - 3))}...`;
+}
+
+function operatorPressureSummary(session, payload) {
+  if (!session) {
+    return "No pressure cues.";
+  }
+  const cues = [];
+  const actionCues = Array.isArray(session.action_cues) ? session.action_cues : [];
+  for (const cue of actionCues.slice(0, 3)) {
+    const kind = String(cue?.kind || "").replace(/_/g, " ").trim();
+    if (kind) {
+      cues.push(kind);
+    }
+  }
+  if (session.state && session.state !== "idle") {
+    cues.push(String(session.state).replace(/_/g, " "));
+  }
+  if (session.transport_health && session.transport_health !== "healthy") {
+    cues.push(`transport ${String(session.transport_health).replace(/_/g, " ")}`);
+  }
+  if (session.is_stale) {
+    cues.push("stale registry");
+  }
+  const attached = Number(session.attached_clients || 0);
+  const staleAttached = Number(session.stale_attached_clients || 0);
+  if (attached || staleAttached) {
+    cues.push(`${attached} attached${staleAttached ? `, ${staleAttached} stale` : ""}`);
+  }
+  const tokens = Number(payload?.token_count ?? session.token_count ?? 0);
+  const limit = Number(payload?.context_limit ?? session.context_limit ?? 0);
+  if (tokens > 0 && limit > 0) {
+    const pct = Math.min(999, Math.round((tokens / limit) * 100));
+    cues.push(`${pct}% context`);
+  }
+  return cues.length ? cues.slice(0, 5).join(" · ") : "No pressure cues.";
+}
+
+function renderTerminalWorkbench() {
+  if (!el.terminalWorkbench) {
+    return;
+  }
+
+  const session = currentSession();
+  const payload = selectedAgentContextPayload();
+  const tool = payload?.tool || session?.tool || "unknown";
+  const cwd = payload?.cwd || session?.cwd || "";
+  const status = state.agentContextLoading
+    ? "loading context"
+    : state.agentContextError
+      ? state.agentContextError
+      : payload?.available
+        ? "structured context"
+        : payload?.message || "waiting for context";
+  const task = payload?.user_task || summarizeThought(session);
+  const current = agentActionLabel(payload?.current_tool) || "No current action.";
+  const pressure = operatorPressureSummary(session, payload);
+  const actions = Array.isArray(payload?.recent_actions) ? payload.recent_actions : [];
+
+  el.terminalWorkbenchTitle.textContent = session ? sessionDisplayName(session) : "No session";
+  el.terminalWorkbenchMeta.textContent = session ? `${tool} · ${cwd}` : "";
+  el.terminalWorkbenchStatus.textContent = status;
+  el.terminalWorkbenchTask.textContent = truncateWorkbenchText(task || "No task context.");
+  el.terminalWorkbenchCurrent.textContent = truncateWorkbenchText(current, 140);
+  el.terminalWorkbenchPressure.textContent = truncateWorkbenchText(pressure, 160);
+  el.terminalWorkbenchRefresh.disabled = !session || state.agentContextLoading;
+
+  if (!actions.length) {
+    el.terminalWorkbenchActions.innerHTML = `<li class="workbench-action"><span class="workbench-action-detail">${escapeHtml(payload?.available ? "No recent actions." : "No structured actions.")}</span></li>`;
+    renderWorkbenchWidgets();
+    return;
+  }
+
+  el.terminalWorkbenchActions.innerHTML = actions
+    .slice(0, 6)
+    .map((action) => {
+      const toolLabel = truncateWorkbenchText(action?.tool || "action", 44);
+      const detail = truncateWorkbenchText(action?.detail || "", 160);
+      return `
+        <li class="workbench-action">
+          <span class="workbench-action-tool">${escapeHtml(toolLabel)}</span>
+          <span class="workbench-action-detail">${escapeHtml(detail || "No detail.")}</span>
+        </li>
+      `;
+    })
+    .join("");
+  renderWorkbenchWidgets();
+}
+
+async function refreshAgentContextForSelectedSession(options = {}) {
+  const session = currentSession();
+  if (!session || state.trogdorAtlasOpen) {
+    state.agentContextLoading = false;
+    renderTerminalWorkbench();
+    return;
+  }
+
+  const sessionId = session.session_id;
+  const now = Date.now();
+  const hasCurrentPayload =
+    state.agentContextSessionId === sessionId && Boolean(state.agentContextPayload);
+  if (
+    options.throttle &&
+    hasCurrentPayload &&
+    now - state.agentContextLastLoadedAt < AGENT_CONTEXT_REFRESH_MS
+  ) {
+    return;
+  }
+  if (state.agentContextLoading && !options.force) {
+    return;
+  }
+
+  const requestSeq = state.agentContextRequestSeq + 1;
+  state.agentContextRequestSeq = requestSeq;
+  state.agentContextSessionId = sessionId;
+  state.agentContextError = "";
+  state.agentContextLoading = !options.silent || !hasCurrentPayload;
+  renderTerminalWorkbench();
+
+  try {
+    const response = await apiFetch(`/v1/sessions/${encodeURIComponent(sessionId)}/agent-context`);
+    const payload = await response.json();
+    if (requestSeq !== state.agentContextRequestSeq || state.selectedSessionId !== sessionId) {
+      return;
+    }
+    state.agentContextPayload = payload;
+    state.agentContextError = "";
+    state.agentContextLastLoadedAt = Date.now();
+  } catch (error) {
+    if (requestSeq !== state.agentContextRequestSeq || state.selectedSessionId !== sessionId) {
+      return;
+    }
+    state.agentContextPayload = null;
+    state.agentContextError = error?.message || "context unavailable";
+  } finally {
+    if (requestSeq === state.agentContextRequestSeq) {
+      state.agentContextLoading = false;
+      renderTerminalWorkbench();
+    }
+  }
+}
+
+function selectedWorkbenchWidgets() {
+  return state.workbenchWidgets.sessionId === state.selectedSessionId
+    ? state.workbenchWidgets
+    : {
+        sessionId: null,
+        loading: false,
+        paneTail: null,
+        artifact: null,
+        gitDiff: null,
+        error: "",
+        requestSeq: state.workbenchWidgets.requestSeq,
+        lastLoadedAt: state.workbenchWidgets.lastLoadedAt,
+      };
+}
+
+function tailLineCount(text) {
+  const trimmed = String(text || "").trimEnd();
+  return trimmed ? trimmed.split(/\n/).length : 0;
+}
+
+function widgetTextExcerpt(text, max = 4200) {
+  const normalized = String(text || "").replace(/\r/g, "");
+  if (normalized.length <= max) {
+    return normalized;
+  }
+  return `... truncated ...\n${normalized.slice(-max)}`;
+}
+
+function renderDiffHtml(diffText) {
+  const text = widgetTextExcerpt(diffText, 6400);
+  if (!text.trim()) {
+    return "";
+  }
+  return text
+    .split("\n")
+    .map((line) => {
+      let klass = "diff-line";
+      if (line.startsWith("+") && !line.startsWith("+++")) {
+        klass += " diff-line-add";
+      } else if (line.startsWith("-") && !line.startsWith("---")) {
+        klass += " diff-line-del";
+      } else if (line.startsWith("@@")) {
+        klass += " diff-line-hunk";
+      }
+      return `<span class="${klass}">${escapeHtml(line || " ")}</span>`;
+    })
+    .join("\n");
+}
+
+function renderWorkbenchWidgets() {
+  if (!el.terminalWorkbenchWidgets) {
+    return;
+  }
+
+  const session = currentSession();
+  const widgets = selectedWorkbenchWidgets();
+  if (!session) {
+    el.terminalWorkbenchWidgets.innerHTML = `<div class="workbench-action-detail">No session selected.</div>`;
+    return;
+  }
+
+  const tailText = widgets.paneTail?.text || "";
+  const lines = tailLineCount(tailText);
+  const artifact = widgets.artifact;
+  const gitDiff = widgets.gitDiff;
+  const contextPayload = selectedAgentContextPayload();
+  const toolActions = [
+    contextPayload?.current_tool,
+    ...(Array.isArray(contextPayload?.recent_actions) ? contextPayload.recent_actions : []),
+  ].filter(Boolean);
+  const planFiles = Array.isArray(artifact?.plan_files) ? artifact.plan_files : [];
+  const artifactAvailable = Boolean(artifact?.available);
+  const artifactMeta = artifactAvailable
+    ? `${planFiles.length} plan file${planFiles.length === 1 ? "" : "s"}`
+    : "unavailable";
+  const diffAvailable = Boolean(gitDiff?.available);
+  const unstagedDiff = gitDiff?.unstaged_diff || "";
+  const stagedDiff = gitDiff?.staged_diff || "";
+  const diffText = [stagedDiff, unstagedDiff].filter((part) => String(part || "").trim()).join("\n");
+  const diffMeta = diffAvailable
+    ? diffText.trim()
+      ? gitDiff?.truncated
+        ? "truncated"
+        : "dirty"
+      : "clean"
+    : "unavailable";
+  const status = widgets.loading
+    ? `<div class="workbench-action-detail">Loading pinned widgets...</div>`
+    : widgets.error
+      ? `<div class="workbench-action-detail">${escapeHtml(widgets.error)}</div>`
+      : "";
+  const outputBody = tailText
+    ? `<pre>${escapeHtml(widgetTextExcerpt(tailText))}</pre>`
+    : `<div>No recent pane output.</div>`;
+  const artifactBody = artifactAvailable
+    ? `
+      <div>${escapeHtml(artifact.path || "Artifact path unavailable.")}</div>
+      ${planFiles.length ? `<div>${escapeHtml(planFiles.join(", "))}</div>` : `<div>No plan files advertised.</div>`}
+      <button class="workbench-widget-action" type="button" data-workbench-open-mermaid="true">Open viewer</button>
+    `
+    : `<div>${escapeHtml(artifact?.error || "No Mermaid or plan artifact found.")}</div>`;
+  const diffBody = diffAvailable
+    ? diffText.trim()
+      ? `
+        <div>${escapeHtml(gitDiff.status_short || "dirty tree")}</div>
+        <pre class="workbench-diff">${renderDiffHtml(diffText)}</pre>
+      `
+      : `<div>${escapeHtml(gitDiff.repo_root || gitDiff.cwd || "Repository")} is clean.</div>`
+    : `<div>${escapeHtml(gitDiff?.message || "No git diff available.")}</div>`;
+  const toolBody = toolActions.length
+    ? `
+      <ul class="workbench-actions">
+        ${toolActions
+          .slice(0, 8)
+          .map(
+            (action) => `
+              <li class="workbench-action">
+                <span class="workbench-action-tool">${escapeHtml(truncateWorkbenchText(action?.tool || "action", 44))}</span>
+                <span class="workbench-action-detail">${escapeHtml(truncateWorkbenchText(action?.detail || "No detail.", 180))}</span>
+              </li>
+            `,
+          )
+          .join("")}
+      </ul>
+    `
+    : `<div>No structured tool calls.</div>`;
+
+  el.terminalWorkbenchWidgets.innerHTML = `
+    ${status}
+    <details class="workbench-widget" ${diffAvailable && diffText.trim() ? "open" : ""}>
+      <summary>
+        <span class="workbench-widget-title">Diffs</span>
+        <span class="workbench-widget-meta">${escapeHtml(diffMeta)}</span>
+      </summary>
+      <div class="workbench-widget-body">${diffBody}</div>
+    </details>
+    <details class="workbench-widget" ${toolActions.length ? "open" : ""}>
+      <summary>
+        <span class="workbench-widget-title">Tool calls</span>
+        <span class="workbench-widget-meta">${toolActions.length ? `${toolActions.length} events` : "empty"}</span>
+      </summary>
+      <div class="workbench-widget-body">${toolBody}</div>
+    </details>
+    <details class="workbench-widget" open>
+      <summary>
+        <span class="workbench-widget-title">Recent output</span>
+        <span class="workbench-widget-meta">${lines ? `${lines} lines` : "empty"}</span>
+      </summary>
+      <div class="workbench-widget-body">${outputBody}</div>
+    </details>
+    <details class="workbench-widget">
+      <summary>
+        <span class="workbench-widget-title">Artifacts</span>
+        <span class="workbench-widget-meta">${escapeHtml(artifactMeta)}</span>
+      </summary>
+      <div class="workbench-widget-body">${artifactBody}</div>
+    </details>
+  `;
+}
+
+async function refreshWorkbenchWidgetsForSelectedSession(options = {}) {
+  const session = currentSession();
+  if (!session || state.trogdorAtlasOpen) {
+    state.workbenchWidgets.loading = false;
+    renderWorkbenchWidgets();
+    return;
+  }
+
+  const sessionId = session.session_id;
+  const now = Date.now();
+  const hasCurrentWidgets =
+    state.workbenchWidgets.sessionId === sessionId &&
+    (Boolean(state.workbenchWidgets.paneTail) || Boolean(state.workbenchWidgets.artifact));
+  if (
+    options.throttle &&
+    hasCurrentWidgets &&
+    now - state.workbenchWidgets.lastLoadedAt < AGENT_CONTEXT_REFRESH_MS
+  ) {
+    return;
+  }
+  if (state.workbenchWidgets.loading && !options.force) {
+    return;
+  }
+
+  const requestSeq = state.workbenchWidgets.requestSeq + 1;
+  state.workbenchWidgets.requestSeq = requestSeq;
+  state.workbenchWidgets.sessionId = sessionId;
+  state.workbenchWidgets.error = "";
+  state.workbenchWidgets.loading = !options.silent;
+  renderWorkbenchWidgets();
+
+  const tailPath = `/v1/sessions/${encodeURIComponent(sessionId)}/pane-tail`;
+  const artifactPath = `/v1/sessions/${encodeURIComponent(sessionId)}/mermaid-artifact`;
+  const diffPath = `/v1/sessions/${encodeURIComponent(sessionId)}/git-diff`;
+  const [tailResult, artifactResult, diffResult] = await Promise.allSettled([
+    apiMaybeFetch(tailPath).then(responseJsonOrNull),
+    apiMaybeFetch(artifactPath).then(responseJsonOrNull),
+    apiMaybeFetch(diffPath).then(responseJsonOrNull),
+  ]);
+
+  if (requestSeq !== state.workbenchWidgets.requestSeq || state.selectedSessionId !== sessionId) {
+    return;
+  }
+
+  const errors = [];
+  if (tailResult.status === "fulfilled") {
+    state.workbenchWidgets.paneTail = tailResult.value;
+  } else {
+    state.workbenchWidgets.paneTail = null;
+    errors.push(`output: ${tailResult.reason?.message || "unavailable"}`);
+  }
+
+  if (artifactResult.status === "fulfilled") {
+    state.workbenchWidgets.artifact = artifactResult.value;
+  } else {
+    state.workbenchWidgets.artifact = null;
+    errors.push(`artifacts: ${artifactResult.reason?.message || "unavailable"}`);
+  }
+
+  if (diffResult.status === "fulfilled") {
+    state.workbenchWidgets.gitDiff = diffResult.value;
+  } else {
+    state.workbenchWidgets.gitDiff = null;
+    errors.push(`diffs: ${diffResult.reason?.message || "unavailable"}`);
+  }
+
+  state.workbenchWidgets.error = errors.join("; ");
+  state.workbenchWidgets.loading = false;
+  state.workbenchWidgets.lastLoadedAt = Date.now();
+  renderWorkbenchWidgets();
 }
 
 function applyZoomToSurface(surface) {
@@ -796,6 +1333,7 @@ function loadInitialState() {
   }
 
   state.terminalZoom = loadTerminalZoom(url);
+  state.terminalWorkbenchOpen = !(window.matchMedia?.("(max-width: 700px)")?.matches ?? false);
   state.trogdorReadProgress = loadTrogdorReadProgress();
   loadSendHistory();
   persistToken(queryToken || storedToken);
@@ -2920,6 +3458,8 @@ async function refreshSessions() {
     renderHudSurface();
     syncTerminalTools();
     await connectSelectedSession();
+    void refreshAgentContextForSelectedSession({ throttle: true, silent: true });
+    void refreshWorkbenchWidgetsForSelectedSession({ throttle: true, silent: true });
     if (state.followPublishedSelection && !state.selectedSessionId) {
       setConnectionStatus("waiting", true);
     } else {
@@ -2931,6 +3471,8 @@ async function refreshSessions() {
     state.operatorPressureBySession = new Map();
     state.publishedSelection = null;
     persistSelectedSession(null);
+    resetAgentContextForSession(null);
+    resetWorkbenchWidgetsForSession(null);
     renderHudSurface();
     if (error?.status === 401 || error?.status === 403) {
       setConnectionStatus("auth required", true);
@@ -3171,6 +3713,7 @@ function teardownTerminal() {
 
 function disconnectSocket() {
   state.connectionGeneration += 1;
+  clearReconnectTimer();
   if (state.ws) {
     state.ws.onopen = null;
     state.ws.onmessage = null;
@@ -3300,6 +3843,8 @@ function syncTerminalPresentation() {
   document.body.classList.toggle("terminal-focus-mode", terminalFocusMode);
   el.terminalStage.classList.toggle("terminal-view-active", terminalFocusMode);
   syncTerminalInputDock();
+  syncTrogdorBackButton();
+  syncTerminalWorkbench();
   if (state.hud) {
     el.hudCanvas.classList.toggle("hidden", terminalFocusMode);
     el.hudCanvas.style.display = terminalFocusMode ? "none" : "";
@@ -3343,7 +3888,7 @@ async function connectSelectedSession() {
   ws.binaryType = "arraybuffer";
   ws.sessionId = session.session_id;
   state.ws = ws;
-  setConnectionStatus("connecting");
+  setConnectionStatus("connecting; input disabled");
 
   ws.onopen = () => {
     if (generation !== state.connectionGeneration || state.ws !== ws) {
@@ -3351,6 +3896,7 @@ async function connectSelectedSession() {
       return;
     }
     measureAndResizeSurface(true, true);
+    state.reconnectAttempt = 0;
     setConnectionStatus("attached");
   };
 
@@ -3371,17 +3917,20 @@ async function connectSelectedSession() {
     if (generation !== state.connectionGeneration) {
       return;
     }
-    setConnectionStatus("detached", true);
-    window.setTimeout(() => {
+    const delay = reconnectDelayMs();
+    state.reconnectAttempt += 1;
+    setConnectionStatus(`disconnected; input disabled; retrying in ${Math.ceil(delay / 1000)}s`, true);
+    state.reconnectTimer = window.setTimeout(() => {
+      state.reconnectTimer = null;
       if (generation !== state.connectionGeneration || !currentSession()) {
         return;
       }
       connectSelectedSession();
-    }, 1400);
+    }, delay);
   };
 
   ws.onerror = () => {
-    setConnectionStatus("attach failed", true);
+    setConnectionStatus("attach failed; input disabled", true);
   };
 }
 
@@ -3523,6 +4072,12 @@ function handleSocketText(raw) {
       case "error":
         setConnectionStatus(message.code || "error", true);
         break;
+      case "overloaded":
+        setConnectionStatus(`server overloaded; input disabled; retrying in ${Math.ceil((message.retryAfterMs || 4000) / 1000)}s`, true);
+        break;
+      case "input_ack":
+        handleInputAck(message);
+        break;
       case "pong":
         break;
       default:
@@ -3530,6 +4085,24 @@ function handleSocketText(raw) {
     }
   } catch (_) {
     // Ignore malformed transport diagnostics.
+  }
+}
+
+function handleInputAck(message) {
+  const id = message.clientMessageId || message.client_message_id || "";
+  if (!id) {
+    return;
+  }
+  if (message.delivered) {
+    updateInputDeliveryStatus(id, "sent", message.method || "");
+    window.setTimeout(() => {
+      const current = state.pendingInputMessages.get(id);
+      if (current?.status === "sent") {
+        state.pendingInputMessages.delete(id);
+      }
+    }, 2500);
+  } else {
+    updateInputDeliveryStatus(id, "failed", message.message || "input delivery failed");
   }
 }
 
@@ -3578,7 +4151,10 @@ function sendTerminalInputText(text) {
   if (!text || !state.ws || state.ws.readyState !== WebSocket.OPEN || state.readOnly) {
     return false;
   }
-  state.ws.send(JSON.stringify({ type: "input_text", data: text }));
+  const clientMessageId = nextInputMessageId();
+  state.pendingInputMessages.set(clientMessageId, { text, status: "pending", detail: "" });
+  updateInputDeliveryStatus(clientMessageId, "pending");
+  state.ws.send(JSON.stringify({ type: "input_text", data: text, clientMessageId }));
   return true;
 }
 
@@ -3638,6 +4214,111 @@ function fallbackTextForKeyEvent(event) {
   }
 }
 
+function terminalControlKeyEvent(actionId) {
+  switch (String(actionId || "")) {
+    case "ctrl-c":
+      return { key: "c", code: "KeyC", mods: 4, label: "Ctrl-C" };
+    case "escape":
+      return { key: "Escape", code: "Escape", mods: 0, label: "Esc" };
+    case "tab":
+      return { key: "Tab", code: "Tab", mods: 0, label: "Tab" };
+    case "arrow-up":
+      return { key: "ArrowUp", code: "ArrowUp", mods: 0, label: "Up" };
+    case "arrow-down":
+      return { key: "ArrowDown", code: "ArrowDown", mods: 0, label: "Down" };
+    case "arrow-left":
+      return { key: "ArrowLeft", code: "ArrowLeft", mods: 0, label: "Left" };
+    case "arrow-right":
+      return { key: "ArrowRight", code: "ArrowRight", mods: 0, label: "Right" };
+    case "home":
+      return { key: "Home", code: "Home", mods: 0, label: "Home" };
+    case "end":
+      return { key: "End", code: "End", mods: 0, label: "End" };
+    case "page-up":
+      return { key: "PageUp", code: "PageUp", mods: 0, label: "PgUp" };
+    case "page-down":
+      return { key: "PageDown", code: "PageDown", mods: 0, label: "PgDn" };
+    default:
+      return null;
+  }
+}
+
+function sendTerminalControlKey(actionId) {
+  if (state.readOnly || !currentSession()) {
+    return false;
+  }
+  const spec = terminalControlKeyEvent(actionId);
+  if (!spec) {
+    return false;
+  }
+  const event = {
+    kind: "key",
+    phase: "down",
+    key: spec.key,
+    code: spec.code,
+    mods: spec.mods,
+    repeat: false,
+  };
+
+  if ((state.terminalFallbackActive || !state.terminal) && sendFallbackTerminalEvent(event)) {
+    setTerminalInputEcho(`sent: ${spec.label}`);
+    return true;
+  }
+  if (state.terminalFallbackActive || !state.terminal) {
+    setTerminalInputEcho(`failed: ${spec.label}`);
+    return false;
+  }
+
+  forwardTerminalEvent(event);
+  setTerminalInputEcho(`sent: ${spec.label}`);
+  return true;
+}
+
+function terminalKeyActionForDomEvent(event) {
+  if (!event || event.metaKey || event.altKey) {
+    return "";
+  }
+  if (event.ctrlKey && String(event.key || "").toLowerCase() === "c") {
+    if (terminalInlineInputHasSelection()) {
+      return "";
+    }
+    return "ctrl-c";
+  }
+  if (String(el.terminalInlineInput?.value || "").length > 0) {
+    return "";
+  }
+  switch (event.key) {
+    case "Escape":
+      return "escape";
+    case "Tab":
+      return "tab";
+    case "ArrowUp":
+      return "arrow-up";
+    case "ArrowDown":
+      return "arrow-down";
+    case "ArrowLeft":
+      return "arrow-left";
+    case "ArrowRight":
+      return "arrow-right";
+    case "Home":
+      return "home";
+    case "End":
+      return "end";
+    case "PageUp":
+      return "page-up";
+    case "PageDown":
+      return "page-down";
+    default:
+      return "";
+  }
+}
+
+function terminalInlineInputHasSelection() {
+  const start = Number(el.terminalInlineInput?.selectionStart);
+  const end = Number(el.terminalInlineInput?.selectionEnd);
+  return Number.isFinite(start) && Number.isFinite(end) && start !== end;
+}
+
 function sendFallbackTerminalEvent(event) {
   const text = fallbackTextForKeyEvent(event);
   if (!text) {
@@ -3672,7 +4353,7 @@ function sendTerminalText(text) {
     return true;
   }
   if (state.ws && state.ws.readyState === WebSocket.OPEN) {
-    state.ws.send(JSON.stringify({ type: "input_text", data: text }));
+    sendTerminalInputText(text);
     return true;
   }
   forwardTerminalEvent({ kind: "paste", data: text });
@@ -4097,16 +4778,24 @@ async function sendLineToSession(sessionId, text) {
     !state.readOnly &&
     state.selectedSessionId === targetSessionId
   ) {
-    state.ws.send(JSON.stringify({ type: "submit_line", data: text }));
+    const clientMessageId = nextInputMessageId();
+    state.pendingInputMessages.set(clientMessageId, { text, status: "pending", detail: "" });
+    updateInputDeliveryStatus(clientMessageId, "pending");
+    state.ws.send(JSON.stringify({ type: "submit_line", data: text, clientMessageId }));
     markTrogdorSessionsResponded([targetSessionId]);
     return;
   }
 
-  await apiFetch(`/v1/sessions/${encodeURIComponent(targetSessionId)}/input`, {
+  const response = await apiFetch(`/v1/sessions/${encodeURIComponent(targetSessionId)}/input`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ text, submit: true }),
   });
+  const body = await responseJsonOrNull(response);
+  if (body?.delivered === false) {
+    throw new Error(body.message || "input delivery failed");
+  }
+  setTerminalInputEcho(`sent: ${text}`);
   markTrogdorSessionsResponded([targetSessionId]);
 }
 
@@ -4124,11 +4813,15 @@ async function sendRawTextToSession(sessionId, text) {
     sendTerminalText(text);
     return;
   }
-  await apiFetch(`/v1/sessions/${encodeURIComponent(targetSessionId)}/input`, {
+  const response = await apiFetch(`/v1/sessions/${encodeURIComponent(targetSessionId)}/input`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ text }),
   });
+  const body = await responseJsonOrNull(response);
+  if (body?.delivered === false) {
+    throw new Error(body.message || "input delivery failed");
+  }
 }
 
 function deliveredGroupInputSessionIds(body) {
@@ -4627,6 +5320,14 @@ function closeTrogdorAtlasForTerminal() {
   syncTerminalPresentation();
 }
 
+function openTrogdorAtlas() {
+  state.trogdorAtlasOpen = true;
+  state.trogdorSurfaceSignature = "";
+  closeMobileKeyboard();
+  renderHudSurface();
+  setUtilityStatus("Back to Trogdor atlas.", false, 1600);
+}
+
 function applyTrogdorAtlasVisibility() {
   const visible = Boolean(state.trogdorAtlasOpen);
   if (el.trogdorSurface) {
@@ -4650,6 +5351,8 @@ async function selectSession(sessionId) {
   persistSelectedSession(normalized);
   renderHudSurface();
   await connectSelectedSession();
+  void refreshAgentContextForSelectedSession({ force: true });
+  void refreshWorkbenchWidgetsForSelectedSession({ force: true });
   if (state.activeSheet === "mermaid") {
     await refreshMermaidArtifact();
   }
@@ -4994,8 +5697,7 @@ function bindTrogdorEvents() {
   if (el.trogdorLauncher) {
     el.trogdorLauncher.addEventListener("click", (event) => {
       event.preventDefault();
-      state.trogdorAtlasOpen = true;
-      renderHudSurface();
+      openTrogdorAtlas();
     });
   }
 
@@ -5206,6 +5908,27 @@ function bindEvents() {
     }
     focusMobileKeyboard();
   });
+  el.terminalTrogdorBack.addEventListener("click", (event) => {
+    event.preventDefault();
+    openTrogdorAtlas();
+  });
+  el.terminalWorkbenchToggle.addEventListener("click", () => {
+    setTerminalWorkbenchOpen(!state.terminalWorkbenchOpen);
+    focusTerminalInputSurface({ preventScroll: true });
+  });
+  el.terminalWorkbenchRefresh.addEventListener("click", () => {
+    void refreshAgentContextForSelectedSession({ force: true });
+    void refreshWorkbenchWidgetsForSelectedSession({ force: true });
+    focusTerminalInputSurface({ preventScroll: true });
+  });
+  el.terminalWorkbenchWidgets.addEventListener("click", (event) => {
+    const button = event.target?.closest?.("[data-workbench-open-mermaid]");
+    if (!button) {
+      return;
+    }
+    event.preventDefault();
+    openSheet("mermaid");
+  });
   el.terminalInputDock.addEventListener("submit", (event) => {
     event.preventDefault();
     void submitTerminalInputDock();
@@ -5218,8 +5941,23 @@ function bindEvents() {
     if (event.key === "Enter" && !event.shiftKey) {
       event.preventDefault();
       void submitTerminalInputDock();
+    } else {
+      const actionId = terminalKeyActionForDomEvent(event);
+      if (actionId) {
+        event.preventDefault();
+        sendTerminalControlKey(actionId);
+      }
     }
     event.stopPropagation();
+  });
+  el.terminalKeyStrip.addEventListener("click", (event) => {
+    const button = event.target instanceof Element ? event.target.closest("button[data-terminal-key]") : null;
+    if (!button || button.disabled) {
+      return;
+    }
+    event.preventDefault();
+    sendTerminalControlKey(button.dataset.terminalKey);
+    focusTerminalInputSurface({ preventScroll: true });
   });
   el.terminalInlineInput.addEventListener("focus", () => {
     if (!state.activeSheet) {
@@ -6033,6 +6771,7 @@ export const __swimmersWebTest = {
   state,
   el,
   closeTrogdorAtlasForTerminal,
+  openTrogdorAtlas,
   persistSelectedSession,
   renderHudSurface,
   syncTerminalPresentation,
@@ -6046,9 +6785,17 @@ export const __swimmersWebTest = {
   markTrogdorSessionsResponded,
   handleTerminalFallbackKeyEvent,
   handleTerminalFallbackPasteEvent,
+  sendTerminalControlKey,
+  terminalKeyActionForDomEvent,
   focusTerminalInputSurface,
   syncTerminalInputDock,
   submitTerminalInputDock,
+  handleSocketText,
+  syncTerminalWorkbench,
+  renderTerminalWorkbench,
+  refreshAgentContextForSelectedSession,
+  refreshWorkbenchWidgetsForSelectedSession,
+  setTerminalWorkbenchOpen,
   openCommandPalette,
   renderCommandPalette,
   runCommandPaletteItem,

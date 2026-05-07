@@ -1,9 +1,10 @@
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum AuthMode {
     LocalTrust,
+    TailnetTrust,
     Token,
 }
 
@@ -81,9 +82,11 @@ fn apply_env_port(config: &mut Config) {
 
 fn apply_env_auth_mode(config: &mut Config) {
     if let Ok(raw) = std::env::var("AUTH_MODE") {
-        if raw.trim().eq_ignore_ascii_case("token") {
-            config.auth_mode = AuthMode::Token;
-        }
+        config.auth_mode = match raw.trim().to_ascii_lowercase().as_str() {
+            "token" => AuthMode::Token,
+            "tailnet_trust" | "tailnet" | "tailscale" => AuthMode::TailnetTrust,
+            _ => AuthMode::LocalTrust,
+        };
     }
 }
 
@@ -153,6 +156,14 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Mutex, OnceLock};
+
+    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+            .lock()
+            .expect("env test lock")
+    }
 
     #[test]
     fn unknown_backend_defaults_to_daemon() {
@@ -177,6 +188,7 @@ mod tests {
 
     #[test]
     fn config_reads_thought_tick_from_env() {
+        let _guard = env_lock();
         std::env::set_var("SWIMMERS_THOUGHT_TICK_MS", "2500");
         let config = Config::from_env();
         std::env::remove_var("SWIMMERS_THOUGHT_TICK_MS");
@@ -202,8 +214,7 @@ mod tests {
 
     #[test]
     fn auth_mode_token_parsing_is_case_insensitive() {
-        // Lock the env mutation behind a serial guard so concurrent test
-        // cases can't observe each other's leaked AUTH_MODE.
+        let _guard = env_lock();
         for value in ["token", "Token", "TOKEN", "  token  "] {
             std::env::set_var("AUTH_MODE", value);
             let mut cfg = Config::default();
@@ -217,6 +228,21 @@ mod tests {
         let mut cfg = Config::default();
         apply_env_auth_mode(&mut cfg);
         assert!(matches!(cfg.auth_mode, AuthMode::LocalTrust));
+        std::env::remove_var("AUTH_MODE");
+    }
+
+    #[test]
+    fn auth_mode_tailnet_trust_parsing_accepts_aliases() {
+        let _guard = env_lock();
+        for value in ["tailnet_trust", "Tailnet_Trust", "tailnet", "tailscale"] {
+            std::env::set_var("AUTH_MODE", value);
+            let mut cfg = Config::default();
+            apply_env_auth_mode(&mut cfg);
+            assert!(
+                matches!(cfg.auth_mode, AuthMode::TailnetTrust),
+                "AUTH_MODE={value:?} should enable TailnetTrust mode"
+            );
+        }
         std::env::remove_var("AUTH_MODE");
     }
 }

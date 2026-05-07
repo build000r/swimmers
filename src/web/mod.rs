@@ -1,5 +1,5 @@
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -18,7 +18,7 @@ use crate::api::{fetch_live_summary, AppState};
 use crate::auth::{AuthInfo, AuthScope, OBSERVER_SCOPES, OPERATOR_SCOPES};
 use crate::config::{AuthMode, Config};
 use crate::session::actor::{
-    ActorHandle, OutputFrame, ReplayCursor, SessionCommand, SubscribeOutcome,
+    ActorHandle, InputDeliveryResult, OutputFrame, ReplayCursor, SessionCommand, SubscribeOutcome,
 };
 use crate::types::ErrorResponse;
 
@@ -32,9 +32,30 @@ const FRANKENTERM_FONT_ROUTE: &str = "/assets/frankenterm/pragmasevka-nf-subset.
 const TROGDOR_DRAGON_ASSET_ROUTE: &str = "/assets/dragon/{pose}/{frame}";
 const PUBLISHED_VIEW_ROUTE: &str = "/selected";
 const REPLY_TIMEOUT: Duration = Duration::from_secs(2);
+const MAX_BROWSER_WS_CONNECTIONS: usize = 64;
 const DEFAULT_FRANKENTUI_PKG_CANDIDATES: &[&str] = &[];
 
 static NEXT_WS_CLIENT_ID: AtomicU64 = AtomicU64::new(1);
+static ACTIVE_WS_CONNECTIONS: AtomicUsize = AtomicUsize::new(0);
+
+struct ActiveWsGuard;
+
+impl ActiveWsGuard {
+    fn try_acquire() -> Option<Self> {
+        ACTIVE_WS_CONNECTIONS
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+                (current < MAX_BROWSER_WS_CONNECTIONS).then_some(current + 1)
+            })
+            .ok()
+            .map(|_| Self)
+    }
+}
+
+impl Drop for ActiveWsGuard {
+    fn drop(&mut self) {
+        ACTIVE_WS_CONNECTIONS.fetch_sub(1, Ordering::AcqRel);
+    }
+}
 
 pub fn routes() -> Router<Arc<AppState>> {
     Router::new()
@@ -138,6 +159,13 @@ async fn render_index(focus_layout: bool) -> impl IntoResponse {
         autocorrect="off"
         autocapitalize="off"
         spellcheck="false"></textarea>
+      <button
+        class="terminal-trogdor-back hidden"
+        id="terminal-trogdor-back"
+        type="button"
+        title="Back to Trogdor atlas"
+        aria-label="Back to Trogdor atlas"
+        aria-hidden="true">Trogdor</button>
       <div class="terminal-control-strip" id="terminal-control-strip" aria-label="Terminal viewer controls">
         <button id="terminal-palette" type="button" title="Open command palette">K</button>
         <button id="terminal-copy-frame" type="button" title="Copy visible terminal text">TXT</button>
@@ -145,8 +173,53 @@ async fn render_index(focus_layout: bool) -> impl IntoResponse {
         <button id="terminal-zoom-reset" type="button" title="Reset terminal zoom">100%</button>
         <button id="terminal-zoom-in" type="button" title="Zoom in">A+</button>
         <button id="terminal-mobile-keyboard" type="button" title="Toggle mobile keyboard" aria-pressed="false">KB</button>
+        <button id="terminal-workbench-toggle" type="button" title="Toggle session workbench" aria-pressed="false">WB</button>
       </div>
+      <aside class="terminal-workbench hidden" id="terminal-workbench" aria-label="Session workbench" aria-hidden="true">
+        <div class="workbench-header">
+          <div class="workbench-heading">
+            <span class="workbench-kicker">Workbench</span>
+            <strong id="terminal-workbench-title">No session</strong>
+            <span id="terminal-workbench-meta"></span>
+          </div>
+          <button id="terminal-workbench-refresh" type="button" title="Refresh workbench context">Refresh</button>
+        </div>
+        <div class="workbench-status" id="terminal-workbench-status" aria-live="polite">idle</div>
+        <section class="workbench-section">
+          <span class="workbench-label">Task</span>
+          <p id="terminal-workbench-task">No task context.</p>
+        </section>
+        <section class="workbench-section">
+          <span class="workbench-label">Now</span>
+          <p id="terminal-workbench-current">No current action.</p>
+        </section>
+        <section class="workbench-section">
+          <span class="workbench-label">Pressure</span>
+          <p id="terminal-workbench-pressure">No pressure cues.</p>
+        </section>
+        <section class="workbench-section">
+          <span class="workbench-label">Recent</span>
+          <ul class="workbench-actions" id="terminal-workbench-actions"></ul>
+        </section>
+        <section class="workbench-section">
+          <span class="workbench-label">Pinned</span>
+          <div class="workbench-widgets" id="terminal-workbench-widgets"></div>
+        </section>
+      </aside>
       <form class="terminal-input-dock hidden" id="terminal-input-dock" aria-label="Terminal input">
+        <div class="terminal-key-strip" id="terminal-key-strip" aria-label="Terminal control keys">
+          <button type="button" data-terminal-key="ctrl-c" title="Send Ctrl-C">Ctrl-C</button>
+          <button type="button" data-terminal-key="escape" title="Send Escape">Esc</button>
+          <button type="button" data-terminal-key="tab" title="Send Tab">Tab</button>
+          <button type="button" data-terminal-key="arrow-left" title="Send Left">←</button>
+          <button type="button" data-terminal-key="arrow-down" title="Send Down">↓</button>
+          <button type="button" data-terminal-key="arrow-up" title="Send Up">↑</button>
+          <button type="button" data-terminal-key="arrow-right" title="Send Right">→</button>
+          <button type="button" data-terminal-key="home" title="Send Home">Home</button>
+          <button type="button" data-terminal-key="end" title="Send End">End</button>
+          <button type="button" data-terminal-key="page-up" title="Send Page Up">PgUp</button>
+          <button type="button" data-terminal-key="page-down" title="Send Page Down">PgDn</button>
+        </div>
         <span class="terminal-input-prompt" aria-hidden="true">›</span>
         <textarea
           id="terminal-inline-input"
@@ -633,6 +706,19 @@ async fn session_ws_inner(
     session_id: String,
     auth: AuthInfo,
 ) -> anyhow::Result<()> {
+    let Some(_ws_guard) = ActiveWsGuard::try_acquire() else {
+        let (mut sender, _) = socket.split();
+        let notice = serde_json::json!({
+            "type": "overloaded",
+            "code": "SERVER_OVERLOADED",
+            "message": "server has too many active browser terminal attachments",
+            "retryAfterMs": 5000,
+        });
+        sender
+            .send(Message::Text(notice.to_string().into()))
+            .await?;
+        return Ok(());
+    };
     let client_id = NEXT_WS_CLIENT_ID.fetch_add(1, Ordering::Relaxed);
     let replay_cursor = request_replay_cursor(&handle).await?;
     let resume_from_seq = replay_cursor.replay_window_start_seq.saturating_sub(1);
@@ -657,21 +743,35 @@ async fn session_ws_inner(
         .send(Message::Text(ready_payload.to_string().into()))
         .await?;
 
-    if let SubscribeOutcome::ReplayTruncated {
-        requested_resume_from_seq,
-        replay_window_start_seq,
-        latest_seq,
-    } = subscribe_outcome
-    {
-        let notice = serde_json::json!({
-            "type": "replay_truncated",
-            "requestedResumeFromSeq": requested_resume_from_seq,
-            "windowStartSeq": replay_window_start_seq,
-            "latestSeq": latest_seq,
-        });
-        sender
-            .send(Message::Text(notice.to_string().into()))
-            .await?;
+    match subscribe_outcome {
+        SubscribeOutcome::Ok => {}
+        SubscribeOutcome::Rejected { reason } => {
+            let notice = serde_json::json!({
+                "type": "overloaded",
+                "code": "SESSION_OVERLOADED",
+                "message": reason,
+                "retryAfterMs": 4000,
+            });
+            sender
+                .send(Message::Text(notice.to_string().into()))
+                .await?;
+            return Ok(());
+        }
+        SubscribeOutcome::ReplayTruncated {
+            requested_resume_from_seq,
+            replay_window_start_seq,
+            latest_seq,
+        } => {
+            let notice = serde_json::json!({
+                "type": "replay_truncated",
+                "requestedResumeFromSeq": requested_resume_from_seq,
+                "windowStartSeq": replay_window_start_seq,
+                "latestSeq": latest_seq,
+            });
+            sender
+                .send(Message::Text(notice.to_string().into()))
+                .await?;
+        }
     }
 
     while let Some(result) = tokio::select! {
@@ -713,9 +813,20 @@ async fn handle_session_ws_event(
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum BrowserClientMessage {
-    InputText { data: String },
-    SubmitLine { data: String },
-    Resize { cols: u16, rows: u16 },
+    InputText {
+        data: String,
+        #[serde(default, alias = "clientMessageId")]
+        client_message_id: Option<String>,
+    },
+    SubmitLine {
+        data: String,
+        #[serde(default, alias = "clientMessageId")]
+        client_message_id: Option<String>,
+    },
+    Resize {
+        cols: u16,
+        rows: u16,
+    },
     Ping,
 }
 
@@ -726,8 +837,14 @@ enum WsClientDecision {
     Ignore,
     SendPong(Vec<u8>),
     ReplyPong,
-    SendError { code: &'static str, message: String },
-    Forward(SessionCommand),
+    SendError {
+        code: &'static str,
+        message: String,
+    },
+    Forward {
+        cmd: SessionCommand,
+        client_message_id: Option<String>,
+    },
 }
 
 fn decode_client_message(auth: &AuthInfo, message: &Message) -> WsClientDecision {
@@ -745,7 +862,10 @@ fn decode_client_message(auth: &AuthInfo, message: &Message) -> WsClientDecision
             if bytes.is_empty() {
                 WsClientDecision::Ignore
             } else {
-                WsClientDecision::Forward(SessionCommand::WriteInput(bytes.to_vec()))
+                WsClientDecision::Forward {
+                    cmd: SessionCommand::WriteInput(bytes.to_vec()),
+                    client_message_id: None,
+                }
             }
         }
         Message::Text(text) => decode_text_client_message(auth, text.as_str()),
@@ -764,7 +884,10 @@ fn decode_text_client_message(auth: &AuthInfo, text: &str) -> WsClientDecision {
     };
     match parsed {
         BrowserClientMessage::Ping => WsClientDecision::ReplyPong,
-        BrowserClientMessage::InputText { data } => {
+        BrowserClientMessage::InputText {
+            data,
+            client_message_id,
+        } => {
             if !auth.has_scope(AuthScope::StreamWrite) {
                 return WsClientDecision::SendError {
                     code: "READ_ONLY",
@@ -774,10 +897,19 @@ fn decode_text_client_message(auth: &AuthInfo, text: &str) -> WsClientDecision {
             if data.is_empty() {
                 WsClientDecision::Ignore
             } else {
-                WsClientDecision::Forward(SessionCommand::WriteInput(data.into_bytes()))
+                WsClientDecision::Forward {
+                    cmd: SessionCommand::WriteInputAck {
+                        data: data.into_bytes(),
+                        ack: oneshot::channel().0,
+                    },
+                    client_message_id,
+                }
             }
         }
-        BrowserClientMessage::SubmitLine { data } => {
+        BrowserClientMessage::SubmitLine {
+            data,
+            client_message_id,
+        } => {
             if !auth.has_scope(AuthScope::StreamWrite) {
                 return WsClientDecision::SendError {
                     code: "READ_ONLY",
@@ -787,7 +919,13 @@ fn decode_text_client_message(auth: &AuthInfo, text: &str) -> WsClientDecision {
             if data.trim().is_empty() {
                 WsClientDecision::Ignore
             } else {
-                WsClientDecision::Forward(SessionCommand::SubmitLine(data))
+                WsClientDecision::Forward {
+                    cmd: SessionCommand::SubmitLineAck {
+                        text: data,
+                        ack: oneshot::channel().0,
+                    },
+                    client_message_id,
+                }
             }
         }
         BrowserClientMessage::Resize { cols, rows } => {
@@ -797,7 +935,10 @@ fn decode_text_client_message(auth: &AuthInfo, text: &str) -> WsClientDecision {
                     message: "observer connections cannot resize terminal sessions".to_string(),
                 };
             }
-            WsClientDecision::Forward(SessionCommand::Resize { cols, rows })
+            WsClientDecision::Forward {
+                cmd: SessionCommand::Resize { cols, rows },
+                client_message_id: None,
+            }
         }
     }
 }
@@ -822,15 +963,79 @@ async fn handle_client_message(
         WsClientDecision::SendError { code, message: msg } => {
             send_ws_error(sender, code, &msg).await?;
         }
-        WsClientDecision::Forward(cmd) => {
-            handle
-                .send(cmd)
-                .await
-                .map_err(|err| anyhow::anyhow!("failed to forward command: {err}"))?;
+        WsClientDecision::Forward {
+            cmd,
+            client_message_id,
+        } => {
+            forward_ws_command(handle, sender, cmd, client_message_id).await?;
         }
     }
 
     Ok(true)
+}
+
+async fn forward_ws_command(
+    handle: &ActorHandle,
+    sender: &mut futures::stream::SplitSink<WebSocket, Message>,
+    cmd: SessionCommand,
+    client_message_id: Option<String>,
+) -> anyhow::Result<()> {
+    match cmd {
+        SessionCommand::WriteInputAck { data, .. } => {
+            let (ack_tx, ack_rx) = oneshot::channel();
+            handle
+                .send(SessionCommand::WriteInputAck { data, ack: ack_tx })
+                .await
+                .map_err(|err| anyhow::anyhow!("failed to forward command: {err}"))?;
+            send_delivery_ack(sender, client_message_id, ack_rx).await?;
+        }
+        SessionCommand::SubmitLineAck { text, .. } => {
+            let (ack_tx, ack_rx) = oneshot::channel();
+            handle
+                .send(SessionCommand::SubmitLineAck { text, ack: ack_tx })
+                .await
+                .map_err(|err| anyhow::anyhow!("failed to forward command: {err}"))?;
+            send_delivery_ack(sender, client_message_id, ack_rx).await?;
+        }
+        other => {
+            handle
+                .send(other)
+                .await
+                .map_err(|err| anyhow::anyhow!("failed to forward command: {err}"))?;
+        }
+    }
+    Ok(())
+}
+
+async fn send_delivery_ack(
+    sender: &mut futures::stream::SplitSink<WebSocket, Message>,
+    client_message_id: Option<String>,
+    ack_rx: oneshot::Receiver<InputDeliveryResult>,
+) -> anyhow::Result<()> {
+    let delivery = match tokio::time::timeout(REPLY_TIMEOUT, ack_rx).await {
+        Ok(Ok(delivery)) => delivery,
+        Ok(Err(_)) => InputDeliveryResult {
+            delivered: false,
+            method: "unknown",
+            message: Some("session actor dropped input delivery ack".to_string()),
+        },
+        Err(_) => InputDeliveryResult {
+            delivered: false,
+            method: "timeout",
+            message: Some("timed out waiting for input delivery confirmation".to_string()),
+        },
+    };
+    let payload = serde_json::json!({
+        "type": "input_ack",
+        "clientMessageId": client_message_id,
+        "delivered": delivery.delivered,
+        "method": delivery.method,
+        "message": delivery.message,
+    });
+    sender
+        .send(Message::Text(payload.to_string().into()))
+        .await?;
+    Ok(())
 }
 
 async fn send_ws_error(
@@ -891,7 +1096,9 @@ async fn request_replay_cursor(handle: &ActorHandle) -> anyhow::Result<ReplayCur
 #[allow(clippy::result_large_err)]
 fn resolve_ws_auth(config: &Config, token: Option<&str>) -> Result<AuthInfo, Response> {
     match config.auth_mode {
-        AuthMode::LocalTrust => Ok(AuthInfo::new(OPERATOR_SCOPES.to_vec())),
+        AuthMode::LocalTrust | AuthMode::TailnetTrust => {
+            Ok(AuthInfo::new(OPERATOR_SCOPES.to_vec()))
+        }
         AuthMode::Token => {
             let Some(token) = token else {
                 return Err(json_error(
@@ -1026,8 +1233,17 @@ mod tests {
         assert!(html.contains("create-launch-target"));
         assert!(html.contains("mobile-kb-proxy"));
         assert!(html.contains("terminal-control-strip"));
+        assert!(html.contains("terminal-workbench"));
+        assert!(html.contains("terminal-workbench-toggle"));
+        assert!(html.contains("terminal-trogdor-back"));
+        assert!(html.contains("terminal-workbench-pressure"));
+        assert!(html.contains("terminal-workbench-actions"));
+        assert!(html.contains("terminal-workbench-widgets"));
         assert!(html.contains("terminal-input-dock"));
         assert!(html.contains("terminal-inline-input"));
+        assert!(html.contains("terminal-key-strip"));
+        assert!(html.contains("data-terminal-key=\"ctrl-c\""));
+        assert!(html.contains("data-terminal-key=\"arrow-up\""));
         assert!(html.contains("palette-sheet"));
         assert!(html.contains("terminal-a11y-mirror"));
         assert!(html.contains("terminal-status-strip"));
@@ -1107,6 +1323,16 @@ mod tests {
         assert!(js.contains("function drainTerminalLinkClicks()"));
         assert!(js.contains("function rememberSendHistory(text)"));
         assert!(js.contains("function syncTerminalStatusStrip()"));
+        assert!(js.contains("function refreshAgentContextForSelectedSession"));
+        assert!(js.contains("function refreshWorkbenchWidgetsForSelectedSession"));
+        assert!(js.contains("function operatorPressureSummary"));
+        assert!(js.contains("Tool calls"));
+        assert!(js.contains("/agent-context"));
+        assert!(js.contains("/pane-tail"));
+        assert!(js.contains("/mermaid-artifact"));
+        assert!(js.contains("/git-diff"));
+        assert!(js.contains("function renderDiffHtml"));
+        assert!(js.contains("function syncTerminalWorkbench()"));
     }
 
     #[test]
@@ -1155,8 +1381,13 @@ mod tests {
     fn app_js_trogdor_agent_click_opens_terminal() {
         let js = include_str!("app.js");
         assert!(js.contains("function closeTrogdorAtlasForTerminal()"));
+        assert!(js.contains("function openTrogdorAtlas()"));
+        assert!(js.contains("terminalTrogdorBack"));
+        assert!(js.contains("function sendTerminalControlKey(actionId)"));
+        assert!(js.contains("terminalKeyActionForDomEvent(event)"));
         assert!(js.contains("async function openTrogdorAgentTerminal(sessionId)"));
         assert!(js.contains("state.trogdorAtlasOpen = false"));
+        assert!(js.contains("state.trogdorAtlasOpen = true"));
         assert!(js.contains("state.hoveredTrogdorSessionId = null"));
         assert!(js.contains("function applyTrogdorAtlasVisibility()"));
         assert!(js.contains("el.trogdorSurface.style.display = visible ? \"\" : \"none\""));
@@ -1165,6 +1396,7 @@ mod tests {
         assert!(js.contains("closeTrogdorAtlasForTerminal()"));
         assert!(js.contains("await selectSession(normalized)"));
         assert!(js.contains("focusTerminalInputSurface({ preventScroll: true })"));
+        assert!(js.contains("refreshAgentContextForSelectedSession({ force: true })"));
         assert!(js.contains("await openTrogdorAgentTerminal(zone.sessionId)"));
     }
 
@@ -1225,7 +1457,10 @@ mod tests {
     fn decode_client_message_binary_with_write_scope_forwards_write_input() {
         let msg = Message::Binary(b"hello".to_vec().into());
         match decode_client_message(&operator_auth(), &msg) {
-            WsClientDecision::Forward(SessionCommand::WriteInput(data)) => {
+            WsClientDecision::Forward {
+                cmd: SessionCommand::WriteInput(data),
+                ..
+            } => {
                 assert_eq!(data, b"hello")
             }
             other => panic!("unexpected: {other:?}"),
@@ -1270,7 +1505,10 @@ mod tests {
     fn decode_text_client_message_input_text_forwards_write_input() {
         let json = r#"{"type":"input_text","data":"hello"}"#;
         match decode_text_client_message(&operator_auth(), json) {
-            WsClientDecision::Forward(SessionCommand::WriteInput(data)) => {
+            WsClientDecision::Forward {
+                cmd: SessionCommand::WriteInputAck { data, .. },
+                ..
+            } => {
                 assert_eq!(data, b"hello")
             }
             other => panic!("unexpected: {other:?}"),
@@ -1290,8 +1528,11 @@ mod tests {
     fn decode_text_client_message_submit_line_forwards_submit_line() {
         let json = r#"{"type":"submit_line","data":"hello"}"#;
         match decode_text_client_message(&operator_auth(), json) {
-            WsClientDecision::Forward(SessionCommand::SubmitLine(data)) => {
-                assert_eq!(data, "hello")
+            WsClientDecision::Forward {
+                cmd: SessionCommand::SubmitLineAck { text, .. },
+                ..
+            } => {
+                assert_eq!(text, "hello")
             }
             other => panic!("unexpected: {other:?}"),
         }
@@ -1319,7 +1560,10 @@ mod tests {
     fn decode_text_client_message_resize_forwards_resize_command() {
         let json = r#"{"type":"resize","cols":80,"rows":24}"#;
         match decode_text_client_message(&operator_auth(), json) {
-            WsClientDecision::Forward(SessionCommand::Resize { cols, rows }) => {
+            WsClientDecision::Forward {
+                cmd: SessionCommand::Resize { cols, rows },
+                ..
+            } => {
                 assert_eq!(cols, 80);
                 assert_eq!(rows, 24);
             }
