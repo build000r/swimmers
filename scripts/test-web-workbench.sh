@@ -11,6 +11,7 @@ SERVER_PID=""
 SESSION_ID="${SESSION_ID:-}"
 CREATED_SESSION=0
 REUSE_SERVER="${SWIMMERS_WORKBENCH_REUSE_SERVER:-0}"
+FEATURES="${SWIMMERS_WORKBENCH_FEATURES:-personal-workflows}"
 SCREENSHOT_PATH="${SWIMMERS_WORKBENCH_SCREENSHOT_PATH:-${ROOT_DIR}/tests/artifacts/web-workbench.png}"
 MOBILE_SCREENSHOT_PATH="${SWIMMERS_WORKBENCH_MOBILE_SCREENSHOT_PATH:-${ROOT_DIR}/tests/artifacts/web-workbench-mobile.png}"
 
@@ -87,7 +88,11 @@ fi
 cd "${ROOT_DIR}"
 
 if [[ "${REUSE_SERVER}" != "1" ]]; then
-  cargo build -q --bin swimmers >/dev/null
+  if [[ -n "${FEATURES}" && "${FEATURES}" != "none" ]]; then
+    cargo build -q --bin swimmers --features "${FEATURES}" >/dev/null
+  else
+    cargo build -q --bin swimmers >/dev/null
+  fi
   env PORT="${PORT}" target/debug/swimmers >"${LOG_FILE}" 2>&1 &
   SERVER_PID=$!
 fi
@@ -286,6 +291,16 @@ const stateExpression = `(() => {
   const backRect = back?.getBoundingClientRect();
   const widgetText = widgets?.innerText || "";
   const keyStripText = keyStrip?.innerText || "";
+  const requiredPanelLabels = ["Activity", "Diffs", "Logs", "Artifacts", "Skills"];
+  const panelNodes = [...(widgets?.querySelectorAll(".workbench-widget") || [])];
+  const panelByLabel = (label) => panelNodes.find((panel) => panel.querySelector(".workbench-widget-title")?.innerText?.trim() === label);
+  const hasRequiredPanels = requiredPanelLabels.every((label) => Boolean(panelByLabel(label)));
+  const panelsHaveContent = requiredPanelLabels.every((label) => {
+    const panel = panelByLabel(label);
+    const bodyText = panel?.querySelector(".workbench-widget-body")?.textContent?.trim() || "";
+    const summaryText = panel?.querySelector("summary")?.textContent?.trim() || "";
+    return bodyText.length > 0 || summaryText.length > label.length;
+  });
   const backVisible = Boolean(back && !back.classList.contains("hidden") && !back.disabled);
   const keyStripVisible = Boolean(keyStrip && !keyStrip.closest(".hidden") && keyStripText.includes("Ctrl-C") && keyStripText.includes("Esc"));
   const noDockOverlap = Boolean(workbenchRect && dockRect && workbenchRect.bottom <= dockRect.top + 1);
@@ -317,16 +332,17 @@ const stateExpression = `(() => {
       !workbench.classList.contains("hidden") &&
       backVisible &&
       keyStripVisible &&
-      widgetText.includes("Diffs") &&
-      widgetText.includes("Tool calls") &&
+      hasRequiredPanels &&
+      panelsHaveContent &&
       widgetText.includes("Recent output") &&
-      widgetText.includes("Artifacts") &&
       noDockOverlap &&
       noControlsDockOverlap &&
       noWorkbenchControlsOverlap &&
       noBackWorkbenchOverlap,
     bodyClass: document.body.className,
     widgetText,
+    hasRequiredPanels,
+    panelsHaveContent,
     backVisible,
     keyStripVisible,
     noDockOverlap,

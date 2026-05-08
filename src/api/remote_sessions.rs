@@ -15,6 +15,7 @@ use crate::types::{
     CreateSessionRequest, CreateSessionResponse, CreateSessionsBatchRequest,
     CreateSessionsBatchResponse, ErrorResponse, LaunchPathMapping, LaunchTargetSummary,
     SessionAgentContextResponse, SessionGitDiffResponse, SessionListResponse, SessionSummary,
+    SessionTimelineResponse,
 };
 
 const REMOTE_LIST_TIMEOUT: Duration = Duration::from_millis(900);
@@ -432,6 +433,21 @@ pub async fn fetch_remote_agent_context(
     })
 }
 
+pub async fn fetch_remote_timeline(
+    target: &LaunchTargetSummary,
+    remote_session_id: &str,
+) -> Result<SessionTimelineResponse, RemoteSessionError> {
+    get_remote_json(
+        target,
+        &format!("/v1/sessions/{remote_session_id}/timeline"),
+    )
+    .await
+    .map(|mut response: SessionTimelineResponse| {
+        response.session_id = namespace_session_id(&target.id, &response.session_id);
+        response
+    })
+}
+
 pub async fn fetch_remote_git_diff(
     target: &LaunchTargetSummary,
     remote_session_id: &str,
@@ -783,8 +799,8 @@ async fn remote_response_error(
 mod tests {
     use super::*;
     use crate::types::{
-        SessionBatchMembership, SessionState, SpawnTool, ThoughtSource, ThoughtState,
-        TransportHealth,
+        SessionBatchMembership, SessionState, SessionTimelinePinned, SessionTimelineResponse,
+        SpawnTool, ThoughtSource, ThoughtState, TransportHealth,
     };
     use axum::http::HeaderMap;
     use axum::routing::{get, post};
@@ -880,6 +896,18 @@ mod tests {
         })
     }
 
+    async fn capture_timeline() -> AxumJson<SessionTimelineResponse> {
+        AxumJson(SessionTimelineResponse {
+            session_id: "sess_2".to_string(),
+            available: true,
+            cwd: "/monoserver/opensource/swimmers".to_string(),
+            tool: Some("Codex".to_string()),
+            events: Vec::new(),
+            pinned: SessionTimelinePinned::default(),
+            message: None,
+        })
+    }
+
     async fn spawn_create_server() -> (String, tokio::task::JoinHandle<()>, CaptureState) {
         let state = CaptureState::default();
         let app = Router::new()
@@ -897,6 +925,18 @@ mod tests {
 
     async fn spawn_list_server() -> (String, tokio::task::JoinHandle<()>) {
         let app = Router::new().route("/v1/sessions", get(capture_list_sessions));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test server");
+        let addr = listener.local_addr().expect("local addr");
+        let handle = tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("serve test api");
+        });
+        (format!("http://{addr}"), handle)
+    }
+
+    async fn spawn_timeline_server() -> (String, tokio::task::JoinHandle<()>) {
+        let app = Router::new().route("/v1/sessions/sess_2/timeline", get(capture_timeline));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind test server");
@@ -1019,6 +1059,24 @@ mod tests {
             namespace_session_id("jeremy-skillbox", "sess_1")
         );
         assert_eq!(sessions[0].tmux_name, "[Jeremy Skillbox] 7");
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn fetch_remote_timeline_namespaces_response_session_id() {
+        let (base_url, handle) = spawn_timeline_server().await;
+        let mut target = target();
+        target.base_url = Some(base_url);
+
+        let response = fetch_remote_timeline(&target, "sess_2")
+            .await
+            .expect("remote timeline");
+
+        assert_eq!(
+            response.session_id,
+            namespace_session_id("jeremy-skillbox", "sess_2")
+        );
+        assert_eq!(response.available, true);
         handle.abort();
     }
 }

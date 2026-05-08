@@ -39,6 +39,7 @@ A terminal aquarium for your tmux sessions. Each session becomes an animated fis
 | **Aquarium view** | Sessions rendered as animated ASCII fish with state-driven sprites |
 | **Live state detection** | Idle, busy, error, attention, drowsy, sleeping, deep sleep, exited |
 | **Thought rail** | Side panel showing AI agent thought streams per session |
+| **Web Trogdor cockpit** | Browser single-session terminal with Activity, Diffs, Logs, Artifacts, and Skills panels backed by real session APIs |
 | **Native terminal handoff** | Open any session directly in iTerm or Ghostty from the TUI |
 | **Mermaid diagrams** | Render and zoom Mermaid artifacts inline in the terminal |
 | **Repo themes** | Per-repo colors plus default sprite overrides via `.swimmers/colors.json` |
@@ -135,6 +136,8 @@ SWIMMERS_TUI_URL=http://127.0.0.1:3210 swimmers-tui
 ```
 
 From a source checkout, use `make up` when you want the browser surface and the TUI attached to the same local backend. It builds the current checkout, requires resolvable FrankenTerm assets, replaces any existing local `swimmers` listener on `PORT` so stale code is not reused, prints the browser URLs, then launches the TUI with `SWIMMERS_TUI_URL` and `SWIMMERS_TUI_REUSE_SERVER=1` so it does not clear that backend. The launcher defaults to `--features personal-workflows` so click-to-spawn endpoints such as `/v1/dirs` are available; set `SWIMMERS_UP_FEATURES` to override the feature list.
+
+The browser Trogdor view is terminal-first. Selecting one agent opens a single-session cockpit: the live terminal remains the primary surface, the bottom composer sends input without covering model output, and the workbench panels read the session timeline, structured git diff, recent logs, Mermaid/plan artifacts, and passive Skillbox/SBP Skills results. The Skills panel identifies relevant skills when `personal-workflows` is enabled and `sbp` is available; it does not perform automatic skill hot-swap or mutate overlays.
 
 The `make tui` wrapper clears a stale loopback `swimmers` process on the target API port before launching, so local overlay edits are reread instead of silently reusing an old server. Set `SWIMMERS_TUI_REUSE_SERVER=1` to keep an existing local backend.
 
@@ -364,9 +367,12 @@ Set `SWIMMERS_TUI_URL` to split the API into its own process. Multiple TUIs, hea
 | `POST` | `/v1/sessions/group-input` | Send the same text to ready sessions in one batch |
 | `DELETE` | `/v1/sessions/{id}` | Remove a session |
 | `GET` | `/v1/sessions/{id}/snapshot` | Capture visible screen text |
+| `GET` | `/v1/sessions/{id}/timeline` | Ordered single-session timeline with pinned task, diff, log, and artifact summaries |
 | `GET` | `/v1/sessions/{id}/pane-tail` | Recent pane output |
+| `GET` | `/v1/sessions/{id}/git-diff` | Raw and structured git diff summaries |
 | `GET` | `/v1/sessions/{id}/mermaid-artifact` | Mermaid/plan artifact metadata and source |
 | `GET` | `/v1/sessions/{id}/plan-file` | Read a plan or repo-doc artifact file |
+| `GET` | `/v1/sessions/{id}/skills?source=sbp` | Passive session-scoped Skillbox/SBP Skills discovery when `personal-workflows` is enabled |
 | `POST` | `/v1/sessions/{id}/attention/dismiss` | Clear attention state |
 | `POST` | `/v1/sessions/{id}/input` | Send text input to a session |
 | `GET` | `/v1/selection` | Read the published selection |
@@ -534,7 +540,7 @@ cargo build --release
 ## Limitations
 
 - **tmux only** — swimmers does not manage screen, zellij, or plain terminal sessions
-- **Browser UI is terminal-first** — the web surface is for remote attach/control; the animated aquarium remains native-only
+- **Browser UI is terminal-first** — the web surface keeps the live terminal primary; Trogdor presentation and cockpit panels summarize existing backend facts rather than inventing new state
 - **Single-machine sessions** — the API manages tmux sessions on the machine it runs on; it does not aggregate sessions across multiple hosts
 - **No session templating** — swimmers discovers existing tmux sessions but does not define layouts or startup commands (use tmuxinator for that)
 - **macOS and Linux only** — tmux does not run on Windows, so neither does swimmers

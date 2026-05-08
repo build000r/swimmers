@@ -2,19 +2,25 @@
 
 use axum::extract::{Query, State};
 use axum::http::StatusCode;
-use axum::response::IntoResponse;
+use axum::response::{IntoResponse, Response};
 use axum::routing::get;
-use axum::{Extension, Router};
+use axum::{Extension, Json, Router};
+use serde_json::Value;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use tokio::process::Command;
 
 use crate::api::envelope::{api_error, success_json, INVALID_SKILL_TOOL};
-use crate::api::AppState;
+use crate::api::{fetch_live_summary, AppState};
 use crate::auth::{AuthInfo, AuthScope};
-use crate::types::{SkillListResponse, SkillSummary};
+use crate::types::{
+    ErrorResponse, SessionSkillIssue, SessionSkillListResponse, SessionSkillSummary,
+    SkillListResponse, SkillSummary,
+};
 
 const MAX_SCAN_DEPTH: usize = 6;
+const SBP_SKILLS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 #[derive(Clone, Copy)]
 enum SkillRegistryTool {
@@ -57,6 +63,12 @@ impl SkillRegistryTool {
 #[derive(serde::Deserialize)]
 struct SkillQuery {
     tool: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+struct SessionSkillQuery {
+    source: Option<String>,
+    q: Option<String>,
 }
 
 fn skill_root_for_tool(tool: SkillRegistryTool) -> Option<PathBuf> {
@@ -224,7 +236,310 @@ async fn list_skills(
 }
 
 pub fn routes() -> Router<Arc<AppState>> {
-    Router::new().route("/v1/skills", get(list_skills))
+    Router::new()
+        .route("/v1/skills", get(list_skills))
+        .route("/v1/sessions/{session_id}/skills", get(list_session_skills))
+}
+
+async fn list_session_skills(
+    Extension(auth): Extension<AuthInfo>,
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(session_id): axum::extract::Path<String>,
+    Query(query): Query<SessionSkillQuery>,
+) -> Response {
+    if let Err(resp) = auth.require_scope(AuthScope::SessionsRead) {
+        return resp;
+    }
+
+    let source = query
+        .source
+        .as_deref()
+        .map(str::trim)
+        .filter(|source| !source.is_empty())
+        .unwrap_or("sbp");
+    if source != "sbp" {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                code: "INVALID_SKILL_SOURCE".to_string(),
+                message: Some("session skills source must be sbp".to_string()),
+            }),
+        )
+            .into_response();
+    }
+
+    let summary = match fetch_live_summary(&state, &session_id).await {
+        Ok(Some(summary)) => summary,
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse {
+                    code: "SESSION_NOT_FOUND".to_string(),
+                    message: None,
+                }),
+            )
+                .into_response();
+        }
+        Err(err) => {
+            tracing::error!("session skills summary lookup failed: {err}");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    code: "INTERNAL_ERROR".to_string(),
+                    message: Some(err.to_string()),
+                }),
+            )
+                .into_response();
+        }
+    };
+
+    let response = read_sbp_session_skills(&session_id, &summary.cwd, query.q.as_deref()).await;
+    (StatusCode::OK, Json(response)).into_response()
+}
+
+async fn read_sbp_session_skills(
+    session_id: &str,
+    cwd: &str,
+    query: Option<&str>,
+) -> SessionSkillListResponse {
+    let Some(sbp) = resolve_sbp_command(cwd) else {
+        return unavailable_session_skills(
+            session_id,
+            cwd,
+            query,
+            "sbp command unavailable; set SWIMMERS_SBP or add sbp to PATH",
+        );
+    };
+
+    let mut command = Command::new(sbp);
+    command.args(["skills", "--format", "json", "--cwd", cwd]);
+    let output = match tokio::time::timeout(SBP_SKILLS_TIMEOUT, command.output()).await {
+        Ok(Ok(output)) => output,
+        Ok(Err(err)) => {
+            return unavailable_session_skills(
+                session_id,
+                cwd,
+                query,
+                redact_known_secrets(format!("sbp skills failed to start: {err}")),
+            );
+        }
+        Err(_) => {
+            return unavailable_session_skills(session_id, cwd, query, "sbp skills timed out");
+        }
+    };
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let message = if stderr.is_empty() {
+            format!("sbp skills exited with {}", output.status)
+        } else {
+            format!("sbp skills failed: {stderr}")
+        };
+        return unavailable_session_skills(session_id, cwd, query, redact_known_secrets(message));
+    }
+
+    match parse_sbp_session_skills(
+        session_id,
+        cwd,
+        query,
+        &String::from_utf8_lossy(&output.stdout),
+    ) {
+        Ok(response) => response,
+        Err(err) => unavailable_session_skills(
+            session_id,
+            cwd,
+            query,
+            redact_known_secrets(format!("sbp skills output could not be parsed: {err}")),
+        ),
+    }
+}
+
+fn resolve_sbp_command(cwd: &str) -> Option<PathBuf> {
+    if let Ok(value) = std::env::var("SWIMMERS_SBP") {
+        let trimmed = value.trim();
+        if !trimmed.is_empty() {
+            return Some(PathBuf::from(trimmed));
+        }
+    }
+
+    for ancestor in Path::new(cwd).ancestors() {
+        let sibling = ancestor.join("skillbox").join("scripts").join("sbp");
+        if sibling.is_file() {
+            return Some(sibling);
+        }
+        let nested = ancestor
+            .join("opensource")
+            .join("skillbox")
+            .join("scripts")
+            .join("sbp");
+        if nested.is_file() {
+            return Some(nested);
+        }
+    }
+
+    Some(PathBuf::from("sbp"))
+}
+
+fn parse_sbp_session_skills(
+    session_id: &str,
+    cwd: &str,
+    query: Option<&str>,
+    output: &str,
+) -> Result<SessionSkillListResponse, serde_json::Error> {
+    let value: Value = serde_json::from_str(output)?;
+    let query = query
+        .map(str::trim)
+        .filter(|query| !query.is_empty())
+        .map(str::to_string);
+    let query_lc = query.as_deref().map(str::to_ascii_lowercase);
+    let skills = value
+        .get("effective")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(session_skill_from_value)
+        .filter(|skill| match query_lc.as_deref() {
+            Some(query) => session_skill_matches(skill, query),
+            None => true,
+        })
+        .collect();
+    let issues = value
+        .get("recommendations")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .map(session_skill_issue_from_value)
+        .collect();
+
+    Ok(SessionSkillListResponse {
+        session_id: session_id.to_string(),
+        source: "sbp".to_string(),
+        cwd: value
+            .get("cwd")
+            .and_then(Value::as_str)
+            .unwrap_or(cwd)
+            .to_string(),
+        available: true,
+        query,
+        skills,
+        issues,
+        message: None,
+    })
+}
+
+fn session_skill_from_value(value: &Value) -> Option<SessionSkillSummary> {
+    Some(SessionSkillSummary {
+        name: value.get("name")?.as_str()?.to_string(),
+        description: value
+            .get("description")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        state: value
+            .get("state")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        availability: value
+            .get("availability")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        layer: value
+            .get("layer")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        source_bucket: value
+            .get("source_bucket")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        path: value
+            .get("path")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+    })
+}
+
+fn session_skill_matches(skill: &SessionSkillSummary, query: &str) -> bool {
+    skill.name.to_ascii_lowercase().contains(query)
+        || skill
+            .description
+            .as_deref()
+            .is_some_and(|value| value.to_ascii_lowercase().contains(query))
+        || skill
+            .source_bucket
+            .as_deref()
+            .is_some_and(|value| value.to_ascii_lowercase().contains(query))
+        || skill
+            .path
+            .as_deref()
+            .is_some_and(|value| value.to_ascii_lowercase().contains(query))
+}
+
+fn session_skill_issue_from_value(value: &Value) -> SessionSkillIssue {
+    let skill = value
+        .get("skill")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let action = value
+        .get("action")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let hint = value
+        .get("hint")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let source_path = value
+        .get("source_path")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let message = match (&skill, &action, &hint) {
+        (Some(skill), Some(action), Some(hint)) => format!("{skill}: {action}: {hint}"),
+        (Some(skill), Some(action), None) => format!("{skill}: {action}"),
+        (Some(skill), None, Some(hint)) => format!("{skill}: {hint}"),
+        (None, Some(action), Some(hint)) => format!("{action}: {hint}"),
+        (None, Some(action), None) => action.clone(),
+        (None, None, Some(hint)) => hint.clone(),
+        (Some(skill), None, None) => skill.clone(),
+        (None, None, None) => "sbp recommendation".to_string(),
+    };
+    SessionSkillIssue {
+        skill,
+        action,
+        hint,
+        source_path,
+        message,
+    }
+}
+
+fn unavailable_session_skills(
+    session_id: &str,
+    cwd: &str,
+    query: Option<&str>,
+    message: impl Into<String>,
+) -> SessionSkillListResponse {
+    SessionSkillListResponse {
+        session_id: session_id.to_string(),
+        source: "sbp".to_string(),
+        cwd: cwd.to_string(),
+        available: false,
+        query: query
+            .map(str::trim)
+            .filter(|query| !query.is_empty())
+            .map(str::to_string),
+        skills: Vec::new(),
+        issues: Vec::new(),
+        message: Some(redact_known_secrets(message.into())),
+    }
+}
+
+fn redact_known_secrets(mut message: String) -> String {
+    for key in ["AUTH_TOKEN", "OBSERVER_TOKEN"] {
+        if let Ok(secret) = std::env::var(key) {
+            let trimmed = secret.trim();
+            if !trimmed.is_empty() {
+                message = message.replace(trimmed, "[redacted]");
+            }
+        }
+    }
+    message
 }
 
 #[cfg(test)]
@@ -233,16 +548,22 @@ mod tests {
     use crate::api::PublishedSelectionState;
     use crate::auth::OPERATOR_SCOPES;
     use crate::config::Config;
+    use crate::session::actor::{ActorHandle, SessionCommand};
     use crate::session::supervisor::SessionSupervisor;
     use crate::thought::protocol::SyncRequestSequence;
     use crate::thought::runtime_config::ThoughtConfig;
+    use crate::types::{SessionState, StateEvidence, ThoughtSource, ThoughtState, TransportHealth};
     use axum::body::to_bytes;
     use axum::extract::{Query, State};
     use axum::response::IntoResponse;
+    use chrono::Utc;
     use serde_json::Value;
+    use std::ffi::OsString;
     use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::Path as FsPath;
     use std::sync::Arc;
-    use tokio::sync::RwLock;
+    use tokio::sync::{mpsc, RwLock};
 
     fn test_state() -> Arc<AppState> {
         let config = Arc::new(Config::default());
@@ -269,6 +590,89 @@ mod tests {
             .await
             .expect("response body");
         serde_json::from_slice(&body).expect("json body")
+    }
+
+    fn summary(session_id: &str, cwd: &str) -> crate::types::SessionSummary {
+        crate::types::SessionSummary {
+            session_id: session_id.to_string(),
+            tmux_name: format!("tmux-{session_id}"),
+            state: SessionState::Idle,
+            current_command: None,
+            state_evidence: StateEvidence::new("osc133_prompt"),
+            cwd: cwd.to_string(),
+            tool: Some("Codex".to_string()),
+            token_count: 0,
+            context_limit: 192_000,
+            thought: None,
+            thought_state: ThoughtState::Holding,
+            thought_source: ThoughtSource::CarryForward,
+            thought_updated_at: None,
+            rest_state: crate::types::fallback_rest_state(
+                SessionState::Idle,
+                ThoughtState::Holding,
+            ),
+            commit_candidate: false,
+            action_cues: Vec::new(),
+            objective_changed_at: None,
+            last_skill: None,
+            is_stale: false,
+            attached_clients: 0,
+            stale_attached_clients: 0,
+            transport_health: TransportHealth::Healthy,
+            last_activity_at: Utc::now(),
+            repo_theme_id: None,
+            batch: None,
+        }
+    }
+
+    async fn insert_summary_test_handle(
+        state: &Arc<AppState>,
+        summary: crate::types::SessionSummary,
+    ) {
+        let session_id = summary.session_id.clone();
+        let tmux_name = summary.tmux_name.clone();
+        let (cmd_tx, mut cmd_rx) = mpsc::channel(4);
+        state
+            .supervisor
+            .insert_test_handle(ActorHandle::test_handle(&session_id, &tmux_name, cmd_tx))
+            .await;
+        tokio::spawn(async move {
+            while let Some(cmd) = cmd_rx.recv().await {
+                if let SessionCommand::GetSummary(reply) = cmd {
+                    let _ = reply.send(summary.clone());
+                }
+            }
+        });
+    }
+
+    struct TestEnvGuard {
+        key: &'static str,
+        previous: Option<OsString>,
+    }
+
+    impl TestEnvGuard {
+        fn set(key: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
+            let previous = std::env::var_os(key);
+            std::env::set_var(key, value);
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for TestEnvGuard {
+        fn drop(&mut self) {
+            if let Some(value) = self.previous.take() {
+                std::env::set_var(self.key, value);
+            } else {
+                std::env::remove_var(self.key);
+            }
+        }
+    }
+
+    fn write_executable(path: &FsPath, contents: &str) {
+        fs::write(path, contents).expect("write executable");
+        let mut perms = fs::metadata(path).expect("metadata").permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(path, perms).expect("chmod");
     }
 
     #[test]
@@ -389,5 +793,120 @@ description: 'Review risky code paths'
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
         let json = response_json(response).await;
         assert_eq!(json["code"], "INVALID_SKILL_TOOL");
+    }
+
+    #[tokio::test]
+    async fn session_skills_reads_sbp_json_for_session_cwd() {
+        let _lock = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cwd = dir.path().join("project");
+        fs::create_dir_all(&cwd).expect("cwd");
+        let sbp = dir.path().join("sbp");
+        let args_log = dir.path().join("args.log");
+        let output_file = dir.path().join("skills.json");
+        fs::write(
+            &output_file,
+            format!(
+                r#"{{
+  "cwd": "{}",
+  "effective": [
+    {{"name":"ui","availability":"installed","state":"ok","layer":"global:claude","source_bucket":"opensource/skills","path":"/skills/ui"}},
+    {{"name":"smart","availability":"installed","state":"ok","layer":"global:claude","source_bucket":"skills-private","path":"/skills/smart"}}
+  ],
+  "recommendations": [
+    {{"skill":"ui","action":"move_global_to_project","hint":"project-specific UI skill","source_path":"/skills/ui"}}
+  ]
+}}"#,
+                cwd.to_string_lossy()
+            ),
+        )
+        .expect("sbp json");
+        write_executable(
+            &sbp,
+            r#"#!/bin/sh
+printf '%s\n' "$*" > "$SBP_ARGS_LOG"
+cat "$SBP_OUTPUT_FILE"
+"#,
+        );
+        let _sbp_guard = TestEnvGuard::set("SWIMMERS_SBP", sbp.as_os_str());
+        let _args_guard = TestEnvGuard::set("SBP_ARGS_LOG", args_log.as_os_str());
+        let _output_guard = TestEnvGuard::set("SBP_OUTPUT_FILE", output_file.as_os_str());
+
+        let state = test_state();
+        insert_summary_test_handle(&state, summary("sess-skills", &cwd.to_string_lossy())).await;
+
+        let response = list_session_skills(
+            Extension(AuthInfo::new(OPERATOR_SCOPES.to_vec())),
+            State(state),
+            axum::extract::Path("sess-skills".to_string()),
+            Query(SessionSkillQuery {
+                source: Some("sbp".to_string()),
+                q: Some("ui".to_string()),
+            }),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let json = response_json(response).await;
+        assert_eq!(json["session_id"], "sess-skills");
+        assert_eq!(json["source"], "sbp");
+        assert_eq!(json["cwd"], cwd.to_string_lossy().as_ref());
+        assert_eq!(json["available"], true);
+        assert_eq!(json["query"], "ui");
+        assert_eq!(json["skills"].as_array().unwrap().len(), 1);
+        assert_eq!(json["skills"][0]["name"], "ui");
+        assert_eq!(json["issues"][0]["skill"], "ui");
+
+        let args = fs::read_to_string(args_log).expect("args log");
+        assert!(args.contains("skills --format json --cwd"));
+        assert!(args.contains(cwd.to_string_lossy().as_ref()));
+        assert!(!args.contains("skill add"));
+        assert!(!args.contains("skill sync"));
+        assert!(!args.contains("skill prune"));
+    }
+
+    #[tokio::test]
+    async fn session_skills_redacts_sbp_failure_and_degrades() {
+        let _lock = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cwd = dir.path().join("project");
+        fs::create_dir_all(&cwd).expect("cwd");
+        let sbp = dir.path().join("sbp");
+        write_executable(
+            &sbp,
+            r#"#!/bin/sh
+printf 'failed with %s\n' "$AUTH_TOKEN" >&2
+exit 2
+"#,
+        );
+        let _sbp_guard = TestEnvGuard::set("SWIMMERS_SBP", sbp.as_os_str());
+        let _auth_guard = TestEnvGuard::set("AUTH_TOKEN", "secret-token");
+
+        let state = test_state();
+        insert_summary_test_handle(&state, summary("sess-skills-fail", &cwd.to_string_lossy()))
+            .await;
+
+        let response = list_session_skills(
+            Extension(AuthInfo::new(OPERATOR_SCOPES.to_vec())),
+            State(state),
+            axum::extract::Path("sess-skills-fail".to_string()),
+            Query(SessionSkillQuery {
+                source: Some("sbp".to_string()),
+                q: None,
+            }),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let json = response_json(response).await;
+        assert_eq!(json["available"], false);
+        assert_eq!(json["skills"].as_array().unwrap().len(), 0);
+        let message = json["message"].as_str().expect("message");
+        assert!(message.contains("[redacted]"));
+        assert!(!message.contains("secret-token"));
     }
 }

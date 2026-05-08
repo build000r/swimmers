@@ -502,6 +502,59 @@ pub struct SessionAgentContextResponse {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SessionTimelinePinnedItem {
+    pub title: String,
+    pub summary: String,
+    pub source: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub event_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct SessionTimelinePinned {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task: Option<SessionTimelinePinnedItem>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_action: Option<SessionTimelinePinnedItem>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diff: Option<SessionTimelinePinnedItem>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pane_tail: Option<SessionTimelinePinnedItem>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifact: Option<SessionTimelinePinnedItem>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SessionTimelineEvent {
+    pub id: String,
+    pub kind: String,
+    pub source: String,
+    pub title: String,
+    pub summary: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timestamp: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub order: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SessionTimelineResponse {
+    pub session_id: String,
+    pub available: bool,
+    pub cwd: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool: Option<String>,
+    #[serde(default)]
+    pub events: Vec<SessionTimelineEvent>,
+    #[serde(default)]
+    pub pinned: SessionTimelinePinned,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SessionGitDiffResponse {
     pub session_id: String,
     pub available: bool,
@@ -518,6 +571,30 @@ pub struct SessionGitDiffResponse {
     pub truncated: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
+    #[serde(default)]
+    pub files: Vec<SessionGitDiffFileSummary>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct SessionGitDiffFileSummary {
+    pub path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub old_path: Option<String>,
+    pub source: String,
+    pub change: String,
+    pub added_lines: u64,
+    pub removed_lines: u64,
+    #[serde(default)]
+    pub truncated: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hunks: Vec<SessionGitDiffHunkSummary>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct SessionGitDiffHunkSummary {
+    pub header: String,
+    pub added_lines: u64,
+    pub removed_lines: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -758,6 +835,52 @@ pub struct SkillSummary {
 pub struct SkillListResponse {
     pub tool: String,
     pub skills: Vec<SkillSummary>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SessionSkillSummary {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub availability: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub layer: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_bucket: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SessionSkillIssue {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skill: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub action: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hint: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_path: Option<String>,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SessionSkillListResponse {
+    pub session_id: String,
+    pub source: String,
+    pub cwd: String,
+    pub available: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub query: Option<String>,
+    #[serde(default)]
+    pub skills: Vec<SessionSkillSummary>,
+    #[serde(default)]
+    pub issues: Vec<SessionSkillIssue>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

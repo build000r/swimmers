@@ -254,6 +254,8 @@ function resetWebState() {
   web.state.workbenchWidgets = {
     sessionId: null,
     loading: false,
+    timeline: null,
+    skills: null,
     paneTail: null,
     artifact: null,
     gitDiff: null,
@@ -781,6 +783,31 @@ test("terminal workbench pinned widgets render pane output and artifacts from se
   const requested = [];
   globalThis.fetch = async (path) => {
     requested.push(path);
+    if (String(path).endsWith("/timeline")) {
+      return jsonResponse(200, {
+        session_id: "sess_0",
+        available: true,
+        cwd: "/tmp/project",
+        events: [
+          { id: "task", kind: "task", source: "agent-context", title: "Task", summary: "build the cockpit", order: 1 },
+          { id: "current-action", kind: "tool_call", source: "agent-context", title: "exec", summary: "cargo test", order: 2 },
+          { id: "pane-tail", kind: "pane_tail", source: "pane-tail", title: "Recent output", summary: "2 lines", detail: "cargo test\nfinished green\n", order: 3 },
+          { id: "git-diff", kind: "diff", source: "git-diff", title: "Diffs", summary: "dirty", order: 4 },
+          { id: "artifact", kind: "artifact", source: "mermaid-artifact", title: "Artifacts", summary: "2 plan files", order: 5 },
+        ],
+        pinned: {},
+      });
+    }
+    if (String(path).includes("/skills?source=sbp")) {
+      return jsonResponse(200, {
+        session_id: "sess_0",
+        source: "sbp",
+        cwd: "/tmp/project",
+        available: true,
+        skills: [{ name: "ui", state: "ok", source_bucket: "opensource/skills" }],
+        issues: [{ skill: "ui", action: "move_global_to_project", message: "ui: move_global_to_project" }],
+      });
+    }
     if (String(path).endsWith("/pane-tail")) {
       return jsonResponse(200, {
         session_id: "sess_0",
@@ -806,6 +833,16 @@ test("terminal workbench pinned widgets render pane output and artifacts from se
         unstaged_diff: "diff --git a/src/web/app.js b/src/web/app.js\n@@ -1 +1 @@\n-old\n+new\n",
         staged_diff: "",
         truncated: false,
+        files: [
+          {
+            path: "src/web/app.js",
+            source: "unstaged",
+            change: "modified",
+            added_lines: 1,
+            removed_lines: 1,
+            hunks: [{ header: "@@ -1 +1 @@", added_lines: 1, removed_lines: 1 }],
+          },
+        ],
       });
     }
     return jsonResponse(404, { code: "missing" });
@@ -813,14 +850,20 @@ test("terminal workbench pinned widgets render pane output and artifacts from se
 
   await web.refreshWorkbenchWidgetsForSelectedSession({ force: true });
 
+  assert.ok(requested.includes("/v1/sessions/sess_0/timeline"));
+  assert.ok(requested.includes("/v1/sessions/sess_0/skills?source=sbp"));
   assert.ok(requested.includes("/v1/sessions/sess_0/pane-tail"));
   assert.ok(requested.includes("/v1/sessions/sess_0/mermaid-artifact"));
   assert.ok(requested.includes("/v1/sessions/sess_0/git-diff"));
+  assert.ok(web.el.terminalWorkbenchWidgets.innerHTML.includes("Activity"));
   assert.ok(web.el.terminalWorkbenchWidgets.innerHTML.includes("finished green"));
   assert.ok(web.el.terminalWorkbenchWidgets.innerHTML.includes("WORKGRAPH.md"));
+  assert.ok(web.el.terminalWorkbenchWidgets.innerHTML.includes("unstaged modified +1/-1"));
   assert.ok(web.el.terminalWorkbenchWidgets.innerHTML.includes("diff-line-add"));
   assert.ok(web.el.terminalWorkbenchWidgets.innerHTML.includes("Tool calls"));
   assert.ok(web.el.terminalWorkbenchWidgets.innerHTML.includes("src/web/app.js"));
+  assert.ok(web.el.terminalWorkbenchWidgets.innerHTML.includes("Skills"));
+  assert.ok(web.el.terminalWorkbenchWidgets.innerHTML.includes("ui"));
   assert.ok(web.el.terminalWorkbenchWidgets.innerHTML.includes("Open viewer"));
 });
 

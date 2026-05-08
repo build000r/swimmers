@@ -63,6 +63,8 @@ const state = {
   workbenchWidgets: {
     sessionId: null,
     loading: false,
+    timeline: null,
+    skills: null,
     paneTail: null,
     artifact: null,
     gitDiff: null,
@@ -756,6 +758,8 @@ function resetAgentContextForSession(sessionId) {
 function resetWorkbenchWidgetsForSession(sessionId) {
   state.workbenchWidgets.sessionId = normalizeSessionId(sessionId);
   state.workbenchWidgets.loading = false;
+  state.workbenchWidgets.timeline = null;
+  state.workbenchWidgets.skills = null;
   state.workbenchWidgets.paneTail = null;
   state.workbenchWidgets.artifact = null;
   state.workbenchWidgets.gitDiff = null;
@@ -970,6 +974,8 @@ function selectedWorkbenchWidgets() {
     : {
         sessionId: null,
         loading: false,
+        timeline: null,
+        skills: null,
         paneTail: null,
         artifact: null,
         gitDiff: null,
@@ -1013,6 +1019,89 @@ function renderDiffHtml(diffText) {
     .join("\n");
 }
 
+function timelineEventsByKind(timeline, kinds) {
+  const wanted = new Set(Array.isArray(kinds) ? kinds : [kinds]);
+  return Array.isArray(timeline?.events)
+    ? timeline.events.filter((event) => wanted.has(event?.kind))
+    : [];
+}
+
+function renderTimelineEvents(events, emptyText = "No timeline events.") {
+  if (!events.length) {
+    return `<div>${escapeHtml(emptyText)}</div>`;
+  }
+  return `
+    <ul class="workbench-actions">
+      ${events
+        .slice(0, 8)
+        .map(
+          (event) => `
+            <li class="workbench-action">
+              <span class="workbench-action-tool">${escapeHtml(truncateWorkbenchText(event?.title || event?.kind || "event", 44))}</span>
+              <span class="workbench-action-detail">${escapeHtml(truncateWorkbenchText(event?.summary || "No summary.", 220))}</span>
+            </li>
+          `,
+        )
+        .join("")}
+    </ul>
+  `;
+}
+
+function renderDiffFileSummaries(files) {
+  if (!Array.isArray(files) || !files.length) {
+    return "";
+  }
+  return `
+    <ul class="workbench-actions workbench-diff-files">
+      ${files
+        .slice(0, 8)
+        .map((file) => {
+          const hunks = Array.isArray(file?.hunks) ? file.hunks.length : 0;
+          const meta = `${file?.source || "diff"} ${file?.change || "modified"} +${file?.added_lines || 0}/-${file?.removed_lines || 0}${hunks ? `, ${hunks} hunks` : ""}`;
+          return `
+            <li class="workbench-action">
+              <span class="workbench-action-tool">${escapeHtml(truncateWorkbenchText(file?.path || "unknown file", 72))}</span>
+              <span class="workbench-action-detail">${escapeHtml(meta)}</span>
+            </li>
+          `;
+        })
+        .join("")}
+    </ul>
+  `;
+}
+
+function renderSkillsPanel(skillsPayload) {
+  if (!skillsPayload) {
+    return `<div>Skillbox skills have not loaded.</div>`;
+  }
+  if (!skillsPayload.available) {
+    return `<div>${escapeHtml(skillsPayload.message || "Skillbox skills unavailable.")}</div>`;
+  }
+  const skills = Array.isArray(skillsPayload.skills) ? skillsPayload.skills : [];
+  const issues = Array.isArray(skillsPayload.issues) ? skillsPayload.issues : [];
+  const skillsHtml = skills.length
+    ? `
+      <ul class="workbench-actions">
+        ${skills
+          .slice(0, 8)
+          .map(
+            (skill) => `
+              <li class="workbench-action">
+                <span class="workbench-action-tool">${escapeHtml(truncateWorkbenchText(skill?.name || "skill", 44))}</span>
+                <span class="workbench-action-detail">${escapeHtml(truncateWorkbenchText(skill?.description || skill?.source_bucket || skill?.state || "available", 180))}</span>
+              </li>
+            `,
+          )
+          .join("")}
+      </ul>
+    `
+    : `<div>No matching skills.</div>`;
+  const issueHtml = issues.length
+    ? `<div class="workbench-action-detail">${escapeHtml(`${issues.length} policy issue${issues.length === 1 ? "" : "s"} reported`)}</div>`
+    : `<div class="workbench-action-detail">No policy issues reported.</div>`;
+  return `${skillsHtml}${issueHtml}`;
+}
+
 function renderWorkbenchWidgets() {
   if (!el.terminalWorkbenchWidgets) {
     return;
@@ -1025,7 +1114,12 @@ function renderWorkbenchWidgets() {
     return;
   }
 
-  const tailText = widgets.paneTail?.text || "";
+  const timeline = widgets.timeline;
+  const timelineEvents = Array.isArray(timeline?.events) ? timeline.events : [];
+  const paneEvent = timelineEventsByKind(timeline, "pane_tail")[0];
+  const artifactEvent = timelineEventsByKind(timeline, "artifact")[0];
+  const diffEvent = timelineEventsByKind(timeline, "diff")[0];
+  const tailText = widgets.paneTail?.text || paneEvent?.detail || "";
   const lines = tailLineCount(tailText);
   const artifact = widgets.artifact;
   const gitDiff = widgets.gitDiff;
@@ -1034,6 +1128,7 @@ function renderWorkbenchWidgets() {
     contextPayload?.current_tool,
     ...(Array.isArray(contextPayload?.recent_actions) ? contextPayload.recent_actions : []),
   ].filter(Boolean);
+  const activityEvents = timelineEventsByKind(timeline, ["task", "tool_call", "context"]);
   const planFiles = Array.isArray(artifact?.plan_files) ? artifact.plan_files : [];
   const artifactAvailable = Boolean(artifact?.available);
   const artifactMeta = artifactAvailable
@@ -1049,7 +1144,7 @@ function renderWorkbenchWidgets() {
         ? "truncated"
         : "dirty"
       : "clean"
-    : "unavailable";
+    : diffEvent?.summary || "unavailable";
   const status = widgets.loading
     ? `<div class="workbench-action-detail">Loading pinned widgets...</div>`
     : widgets.error
@@ -1058,41 +1153,56 @@ function renderWorkbenchWidgets() {
   const outputBody = tailText
     ? `<pre>${escapeHtml(widgetTextExcerpt(tailText))}</pre>`
     : `<div>No recent pane output.</div>`;
+  const activityBody = activityEvents.length
+    ? `${activityEvents.some((event) => event?.kind === "tool_call") ? `<div class="workbench-action-detail">Tool calls</div>` : ""}${renderTimelineEvents(activityEvents, "No structured activity.")}`
+    : toolActions.length
+      ? `
+        <div class="workbench-action-detail">Tool calls</div>
+        <ul class="workbench-actions">
+          ${toolActions
+            .slice(0, 8)
+            .map(
+              (action) => `
+                <li class="workbench-action">
+                  <span class="workbench-action-tool">${escapeHtml(truncateWorkbenchText(action?.tool || "action", 44))}</span>
+                  <span class="workbench-action-detail">${escapeHtml(truncateWorkbenchText(action?.detail || "No detail.", 180))}</span>
+                </li>
+              `,
+            )
+            .join("")}
+        </ul>
+      `
+      : `<div>No structured activity or Tool calls.</div>`;
   const artifactBody = artifactAvailable
     ? `
       <div>${escapeHtml(artifact.path || "Artifact path unavailable.")}</div>
       ${planFiles.length ? `<div>${escapeHtml(planFiles.join(", "))}</div>` : `<div>No plan files advertised.</div>`}
       <button class="workbench-widget-action" type="button" data-workbench-open-mermaid="true">Open viewer</button>
     `
-    : `<div>${escapeHtml(artifact?.error || "No Mermaid or plan artifact found.")}</div>`;
+    : `<div>${escapeHtml(artifact?.error || artifactEvent?.summary || "No Mermaid or plan artifact found.")}</div>`;
   const diffBody = diffAvailable
     ? diffText.trim()
       ? `
         <div>${escapeHtml(gitDiff.status_short || "dirty tree")}</div>
+        ${renderDiffFileSummaries(gitDiff.files)}
         <pre class="workbench-diff">${renderDiffHtml(diffText)}</pre>
       `
       : `<div>${escapeHtml(gitDiff.repo_root || gitDiff.cwd || "Repository")} is clean.</div>`
-    : `<div>${escapeHtml(gitDiff?.message || "No git diff available.")}</div>`;
-  const toolBody = toolActions.length
-    ? `
-      <ul class="workbench-actions">
-        ${toolActions
-          .slice(0, 8)
-          .map(
-            (action) => `
-              <li class="workbench-action">
-                <span class="workbench-action-tool">${escapeHtml(truncateWorkbenchText(action?.tool || "action", 44))}</span>
-                <span class="workbench-action-detail">${escapeHtml(truncateWorkbenchText(action?.detail || "No detail.", 180))}</span>
-              </li>
-            `,
-          )
-          .join("")}
-      </ul>
-    `
-    : `<div>No structured tool calls.</div>`;
+    : `<div>${escapeHtml(gitDiff?.message || diffEvent?.summary || "No git diff available.")}</div>`;
+  const skills = widgets.skills;
+  const skillsMeta = skills?.available
+    ? `${Array.isArray(skills.skills) ? skills.skills.length : 0} skills`
+    : "unavailable";
 
   el.terminalWorkbenchWidgets.innerHTML = `
     ${status}
+    <details class="workbench-widget" ${activityEvents.length || toolActions.length ? "open" : ""}>
+      <summary>
+        <span class="workbench-widget-title">Activity</span>
+        <span class="workbench-widget-meta">${timelineEvents.length ? `${timelineEvents.length} events` : "snapshot"}</span>
+      </summary>
+      <div class="workbench-widget-body">${activityBody}</div>
+    </details>
     <details class="workbench-widget" ${diffAvailable && diffText.trim() ? "open" : ""}>
       <summary>
         <span class="workbench-widget-title">Diffs</span>
@@ -1100,19 +1210,12 @@ function renderWorkbenchWidgets() {
       </summary>
       <div class="workbench-widget-body">${diffBody}</div>
     </details>
-    <details class="workbench-widget" ${toolActions.length ? "open" : ""}>
-      <summary>
-        <span class="workbench-widget-title">Tool calls</span>
-        <span class="workbench-widget-meta">${toolActions.length ? `${toolActions.length} events` : "empty"}</span>
-      </summary>
-      <div class="workbench-widget-body">${toolBody}</div>
-    </details>
     <details class="workbench-widget" open>
       <summary>
-        <span class="workbench-widget-title">Recent output</span>
+        <span class="workbench-widget-title">Logs</span>
         <span class="workbench-widget-meta">${lines ? `${lines} lines` : "empty"}</span>
       </summary>
-      <div class="workbench-widget-body">${outputBody}</div>
+      <div class="workbench-widget-body"><div class="workbench-action-detail">Recent output</div>${outputBody}</div>
     </details>
     <details class="workbench-widget">
       <summary>
@@ -1120,6 +1223,13 @@ function renderWorkbenchWidgets() {
         <span class="workbench-widget-meta">${escapeHtml(artifactMeta)}</span>
       </summary>
       <div class="workbench-widget-body">${artifactBody}</div>
+    </details>
+    <details class="workbench-widget">
+      <summary>
+        <span class="workbench-widget-title">Skills</span>
+        <span class="workbench-widget-meta">${escapeHtml(skillsMeta)}</span>
+      </summary>
+      <div class="workbench-widget-body">${renderSkillsPanel(skills)}</div>
     </details>
   `;
 }
@@ -1136,7 +1246,10 @@ async function refreshWorkbenchWidgetsForSelectedSession(options = {}) {
   const now = Date.now();
   const hasCurrentWidgets =
     state.workbenchWidgets.sessionId === sessionId &&
-    (Boolean(state.workbenchWidgets.paneTail) || Boolean(state.workbenchWidgets.artifact));
+    (Boolean(state.workbenchWidgets.timeline) ||
+      Boolean(state.workbenchWidgets.skills) ||
+      Boolean(state.workbenchWidgets.paneTail) ||
+      Boolean(state.workbenchWidgets.artifact));
   if (
     options.throttle &&
     hasCurrentWidgets &&
@@ -1155,10 +1268,14 @@ async function refreshWorkbenchWidgetsForSelectedSession(options = {}) {
   state.workbenchWidgets.loading = !options.silent;
   renderWorkbenchWidgets();
 
+  const timelinePath = `/v1/sessions/${encodeURIComponent(sessionId)}/timeline`;
+  const skillsPath = `/v1/sessions/${encodeURIComponent(sessionId)}/skills?source=sbp`;
   const tailPath = `/v1/sessions/${encodeURIComponent(sessionId)}/pane-tail`;
   const artifactPath = `/v1/sessions/${encodeURIComponent(sessionId)}/mermaid-artifact`;
   const diffPath = `/v1/sessions/${encodeURIComponent(sessionId)}/git-diff`;
-  const [tailResult, artifactResult, diffResult] = await Promise.allSettled([
+  const [timelineResult, skillsResult, tailResult, artifactResult, diffResult] = await Promise.allSettled([
+    apiMaybeFetch(timelinePath).then(responseJsonOrNull),
+    apiMaybeFetch(skillsPath).then(responseJsonOrNull),
     apiMaybeFetch(tailPath).then(responseJsonOrNull),
     apiMaybeFetch(artifactPath).then(responseJsonOrNull),
     apiMaybeFetch(diffPath).then(responseJsonOrNull),
@@ -1169,6 +1286,20 @@ async function refreshWorkbenchWidgetsForSelectedSession(options = {}) {
   }
 
   const errors = [];
+  if (timelineResult.status === "fulfilled") {
+    state.workbenchWidgets.timeline = timelineResult.value;
+  } else {
+    state.workbenchWidgets.timeline = null;
+    errors.push(`timeline: ${timelineResult.reason?.message || "unavailable"}`);
+  }
+
+  if (skillsResult.status === "fulfilled") {
+    state.workbenchWidgets.skills = skillsResult.value;
+  } else {
+    state.workbenchWidgets.skills = null;
+    errors.push(`skills: ${skillsResult.reason?.message || "unavailable"}`);
+  }
+
   if (tailResult.status === "fulfilled") {
     state.workbenchWidgets.paneTail = tailResult.value;
   } else {

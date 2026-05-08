@@ -14,18 +14,18 @@ use uuid::Uuid;
 use crate::api::{fetch_live_summary, remote_sessions, AppState};
 use crate::auth::{AuthInfo, AuthScope};
 use crate::operator_pressure::session_ready_for_operator_group_input;
-#[cfg(test)]
-use crate::session::actor::InputDeliveryResult;
-use crate::session::actor::{ActorHandle, SessionCommand};
+use crate::session::actor::{ActorHandle, InputDeliveryResult, SessionCommand};
 use crate::thought::context::context_reader_for;
 use crate::types::{
     AgentContextActionSummary, CreateSessionRequest, CreateSessionResponse,
     CreateSessionsBatchRequest, CreateSessionsBatchResponse, CreateSessionsBatchResult,
     ErrorResponse, MermaidArtifactResponse, PlanFileResponse, RepoTheme,
-    SessionAgentContextResponse, SessionBatchMembership, SessionGitDiffResponse,
-    SessionGroupInputRequest, SessionGroupInputResponse, SessionGroupInputResult,
-    SessionInputRequest, SessionInputResponse, SessionListResponse, SessionPaneTailResponse,
-    SessionState, SessionSummary, TerminalSnapshot,
+    SessionAgentContextResponse, SessionBatchMembership, SessionGitDiffFileSummary,
+    SessionGitDiffHunkSummary, SessionGitDiffResponse, SessionGroupInputRequest,
+    SessionGroupInputResponse, SessionGroupInputResult, SessionInputRequest, SessionInputResponse,
+    SessionListResponse, SessionPaneTailResponse, SessionState, SessionSummary,
+    SessionTimelineEvent, SessionTimelinePinned, SessionTimelinePinnedItem,
+    SessionTimelineResponse, TerminalSnapshot,
 };
 
 const BATCH_PROMPT_EXCERPT_MAX_CHARS: usize = 72;
@@ -429,11 +429,23 @@ async fn dismiss_attention(
 // ---------------------------------------------------------------------------
 
 fn validation_error(message: impl Into<String>) -> Response {
-    (
+    error_response(
         StatusCode::BAD_REQUEST,
+        "VALIDATION_FAILED",
+        Some(message.into()),
+    )
+}
+
+fn error_response(
+    status: StatusCode,
+    code: impl Into<String>,
+    message: Option<String>,
+) -> Response {
+    (
+        status,
         Json(ErrorResponse {
-            code: "VALIDATION_FAILED".to_string(),
-            message: Some(message.into()),
+            code: code.into(),
+            message,
         }),
     )
         .into_response()
@@ -444,7 +456,7 @@ async fn send_input(
     State(state): State<Arc<AppState>>,
     Path(session_id): Path<String>,
     Json(body): Json<SessionInputRequest>,
-) -> impl IntoResponse {
+) -> Response {
     if let Err(resp) = auth.require_scope(AuthScope::SessionsWrite) {
         return resp;
     }
@@ -453,114 +465,34 @@ async fn send_input(
         return validation_error("text must not be empty");
     }
 
-    let summary = match fetch_live_summary(&state, &session_id).await {
-        Ok(Some(summary)) => summary,
-        Ok(None) => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(ErrorResponse {
-                    code: "SESSION_NOT_FOUND".to_string(),
-                    message: None,
-                }),
-            )
-                .into_response();
-        }
-        Err(err) => {
-            tracing::error!("send_input summary lookup failed: {err}");
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    code: "INTERNAL_ERROR".to_string(),
-                    message: Some(err.to_string()),
-                }),
-            )
-                .into_response();
-        }
-    };
-
-    if summary.state == SessionState::Exited {
-        return (
-            StatusCode::CONFLICT,
-            Json(ErrorResponse {
-                code: "SESSION_EXITED".to_string(),
-                message: Some("session has already exited".to_string()),
-            }),
-        )
-            .into_response();
-    }
-
-    let handle = match state.supervisor.get_session(&session_id).await {
-        Some(handle) => handle,
-        None => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(ErrorResponse {
-                    code: "SESSION_NOT_FOUND".to_string(),
-                    message: None,
-                }),
-            )
-                .into_response();
-        }
+    let handle = match writable_session_handle(&state, &session_id).await {
+        Ok(handle) => handle,
+        Err(response) => return response,
     };
 
     let (ack_tx, ack_rx) = oneshot::channel();
-    let command = if body.submit {
-        SessionCommand::SubmitLineAck {
-            text: body.text,
-            ack: ack_tx,
-        }
-    } else {
-        SessionCommand::WriteInputAck {
-            data: body.text.into_bytes(),
-            ack: ack_tx,
-        }
-    };
+    let command = session_input_command(body, ack_tx);
 
     if let Err(err) = handle.send(command).await {
         tracing::error!("[session {session_id}] send_input failed: {err}");
-        return (
+        return error_response(
             StatusCode::NOT_FOUND,
-            Json(ErrorResponse {
-                code: "SESSION_NOT_FOUND".to_string(),
-                message: Some(err.to_string()),
-            }),
-        )
-            .into_response();
+            "SESSION_NOT_FOUND",
+            Some(err.to_string()),
+        );
     }
 
-    let delivery = match tokio::time::timeout(std::time::Duration::from_secs(2), ack_rx).await {
-        Ok(Ok(delivery)) => delivery,
-        Ok(Err(_)) => {
-            return (
-                StatusCode::BAD_GATEWAY,
-                Json(ErrorResponse {
-                    code: "INPUT_DELIVERY_UNKNOWN".to_string(),
-                    message: Some("session actor dropped input delivery ack".to_string()),
-                }),
-            )
-                .into_response();
-        }
-        Err(_) => {
-            return (
-                StatusCode::GATEWAY_TIMEOUT,
-                Json(ErrorResponse {
-                    code: "INPUT_DELIVERY_TIMEOUT".to_string(),
-                    message: Some("timed out waiting for input delivery confirmation".to_string()),
-                }),
-            )
-                .into_response();
-        }
+    let delivery = match wait_for_input_delivery(ack_rx).await {
+        Ok(delivery) => delivery,
+        Err(response) => return response,
     };
 
     if !delivery.delivered {
-        return (
+        return error_response(
             StatusCode::BAD_GATEWAY,
-            Json(ErrorResponse {
-                code: "INPUT_DELIVERY_FAILED".to_string(),
-                message: delivery.message,
-            }),
-        )
-            .into_response();
+            "INPUT_DELIVERY_FAILED",
+            delivery.message,
+        );
     }
 
     (
@@ -574,6 +506,79 @@ async fn send_input(
         }),
     )
         .into_response()
+}
+
+async fn writable_session_handle(
+    state: &Arc<AppState>,
+    session_id: &str,
+) -> Result<ActorHandle, Response> {
+    let summary = match fetch_live_summary(state, session_id).await {
+        Ok(Some(summary)) => summary,
+        Ok(None) => {
+            return Err(error_response(
+                StatusCode::NOT_FOUND,
+                "SESSION_NOT_FOUND",
+                None,
+            ))
+        }
+        Err(err) => {
+            tracing::error!("send_input summary lookup failed: {err}");
+            return Err(error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "INTERNAL_ERROR",
+                Some(err.to_string()),
+            ));
+        }
+    };
+
+    if summary.state == SessionState::Exited {
+        return Err(error_response(
+            StatusCode::CONFLICT,
+            "SESSION_EXITED",
+            Some("session has already exited".to_string()),
+        ));
+    }
+
+    state
+        .supervisor
+        .get_session(session_id)
+        .await
+        .ok_or_else(|| error_response(StatusCode::NOT_FOUND, "SESSION_NOT_FOUND", None))
+}
+
+fn session_input_command(
+    body: SessionInputRequest,
+    ack: oneshot::Sender<InputDeliveryResult>,
+) -> SessionCommand {
+    if body.submit {
+        SessionCommand::SubmitLineAck {
+            text: body.text,
+            ack,
+        }
+    } else {
+        SessionCommand::WriteInputAck {
+            data: body.text.into_bytes(),
+            ack,
+        }
+    }
+}
+
+async fn wait_for_input_delivery(
+    ack_rx: oneshot::Receiver<InputDeliveryResult>,
+) -> Result<InputDeliveryResult, Response> {
+    match tokio::time::timeout(std::time::Duration::from_secs(2), ack_rx).await {
+        Ok(Ok(delivery)) => Ok(delivery),
+        Ok(Err(_)) => Err(error_response(
+            StatusCode::BAD_GATEWAY,
+            "INPUT_DELIVERY_UNKNOWN",
+            Some("session actor dropped input delivery ack".to_string()),
+        )),
+        Err(_) => Err(error_response(
+            StatusCode::GATEWAY_TIMEOUT,
+            "INPUT_DELIVERY_TIMEOUT",
+            Some("timed out waiting for input delivery confirmation".to_string()),
+        )),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -780,6 +785,372 @@ fn context_limit_for_agent_context(tool: &Option<String>, context_limit: u64) ->
 }
 
 // ---------------------------------------------------------------------------
+// GET /v1/sessions/{session_id}/timeline
+// ---------------------------------------------------------------------------
+
+async fn get_timeline(
+    Extension(auth): Extension<AuthInfo>,
+    State(state): State<Arc<AppState>>,
+    Path(session_id): Path<String>,
+) -> Response {
+    if let Err(resp) = auth.require_scope(AuthScope::SessionsRead) {
+        return resp;
+    }
+
+    fetch_timeline_response(&state, &session_id).await
+}
+
+async fn fetch_timeline_response(state: &Arc<AppState>, session_id: &str) -> Response {
+    match remote_sessions::denamespace_for_target(session_id) {
+        Ok(Some((target, remote_session_id))) => {
+            return match remote_sessions::fetch_remote_timeline(&target, remote_session_id).await {
+                Ok(response) => (StatusCode::OK, Json(response)).into_response(),
+                Err(err) => err.into_response(),
+            };
+        }
+        Ok(None) => {}
+        Err(err) => return err.into_response(),
+    }
+
+    let summary = match fetch_live_summary(state, session_id).await {
+        Ok(Some(summary)) => summary,
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse {
+                    code: "SESSION_NOT_FOUND".to_string(),
+                    message: None,
+                }),
+            )
+                .into_response();
+        }
+        Err(err) => {
+            tracing::error!("timeline summary lookup failed: {err}");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    code: "INTERNAL_ERROR".to_string(),
+                    message: Some(err.to_string()),
+                }),
+            )
+                .into_response();
+        }
+    };
+
+    let response = build_timeline_response(state, summary).await;
+    (StatusCode::OK, Json(response)).into_response()
+}
+
+async fn build_timeline_response(
+    state: &Arc<AppState>,
+    summary: SessionSummary,
+) -> SessionTimelineResponse {
+    let session_id = summary.session_id.clone();
+    let cwd = summary.cwd.clone();
+    let tool = summary.tool.clone();
+    let context = read_agent_context_for_summary(summary.clone())
+        .await
+        .unwrap_or_else(|err| {
+            tracing::warn!("timeline context read failed: {err}");
+            agent_context_unavailable(
+                session_id.clone(),
+                tool.clone(),
+                cwd.clone(),
+                summary.token_count,
+                context_limit_for_agent_context(&tool, summary.context_limit),
+                "structured context could not be read",
+            )
+        });
+    let git_diff = read_git_diff_for_summary(summary.clone()).await;
+    let pane_tail = request_pane_tail(state, &session_id).await;
+    let artifact = fetch_mermaid_artifact_response(state, &session_id)
+        .await
+        .ok();
+
+    let mut builder = TimelineBuilder::default();
+    let mut pinned = SessionTimelinePinned::default();
+
+    append_context_events(&mut builder, &mut pinned, &context);
+    append_git_diff_event(&mut builder, &mut pinned, &git_diff);
+    append_pane_tail_event(&mut builder, &mut pinned, pane_tail);
+    append_artifact_event(&mut builder, &mut pinned, artifact.as_ref());
+
+    SessionTimelineResponse {
+        session_id,
+        available: true,
+        cwd,
+        tool,
+        events: builder.events,
+        pinned,
+        message: None,
+    }
+}
+
+#[derive(Default)]
+struct TimelineBuilder {
+    next_order: u64,
+    events: Vec<SessionTimelineEvent>,
+}
+
+impl TimelineBuilder {
+    fn push(
+        &mut self,
+        id: impl Into<String>,
+        kind: impl Into<String>,
+        source: impl Into<String>,
+        title: impl Into<String>,
+        summary: impl Into<String>,
+        detail: Option<String>,
+    ) -> String {
+        self.next_order += 1;
+        let id = id.into();
+        self.events.push(SessionTimelineEvent {
+            id: id.clone(),
+            kind: kind.into(),
+            source: source.into(),
+            title: title.into(),
+            summary: summary.into(),
+            timestamp: None,
+            order: Some(self.next_order),
+            detail,
+        });
+        id
+    }
+}
+
+fn pinned_item(
+    title: impl Into<String>,
+    summary: impl Into<String>,
+    source: impl Into<String>,
+    event_id: impl Into<String>,
+) -> SessionTimelinePinnedItem {
+    SessionTimelinePinnedItem {
+        title: title.into(),
+        summary: summary.into(),
+        source: source.into(),
+        event_id: Some(event_id.into()),
+    }
+}
+
+fn timeline_excerpt(text: &str, max_chars: usize) -> String {
+    let normalized = text.replace('\r', "").trim().to_string();
+    if normalized.chars().count() <= max_chars {
+        return normalized;
+    }
+    let mut excerpt = normalized.chars().take(max_chars).collect::<String>();
+    excerpt.push_str("...");
+    excerpt
+}
+
+fn append_context_events(
+    builder: &mut TimelineBuilder,
+    pinned: &mut SessionTimelinePinned,
+    context: &SessionAgentContextResponse,
+) {
+    if let Some(task) = context
+        .user_task
+        .as_deref()
+        .filter(|task| !task.trim().is_empty())
+    {
+        let summary = timeline_excerpt(task, 180);
+        let event_id = builder.push(
+            "task",
+            "task",
+            "agent-context",
+            "Task",
+            summary.clone(),
+            Some(task.to_string()),
+        );
+        pinned.task = Some(pinned_item("Task", summary, "agent-context", event_id));
+    }
+
+    if let Some(action) = context.current_tool.as_ref() {
+        let summary = action
+            .detail
+            .as_deref()
+            .filter(|detail| !detail.trim().is_empty())
+            .unwrap_or(&action.tool);
+        let summary = timeline_excerpt(summary, 180);
+        let event_id = builder.push(
+            "current-action",
+            "tool_call",
+            "agent-context",
+            action.tool.clone(),
+            summary.clone(),
+            action.detail.clone(),
+        );
+        pinned.current_action = Some(pinned_item(
+            action.tool.clone(),
+            summary,
+            "agent-context",
+            event_id,
+        ));
+    }
+
+    for (index, action) in context.recent_actions.iter().take(8).enumerate() {
+        let summary = action
+            .detail
+            .as_deref()
+            .filter(|detail| !detail.trim().is_empty())
+            .unwrap_or(&action.tool);
+        builder.push(
+            format!("recent-action-{}", index + 1),
+            "tool_call",
+            "agent-context",
+            action.tool.clone(),
+            timeline_excerpt(summary, 180),
+            action.detail.clone(),
+        );
+    }
+
+    if !context.available {
+        let message = context
+            .message
+            .as_deref()
+            .unwrap_or("structured context unavailable");
+        builder.push(
+            "context-unavailable",
+            "context",
+            "agent-context",
+            "Context unavailable",
+            timeline_excerpt(message, 180),
+            None,
+        );
+    }
+}
+
+fn append_git_diff_event(
+    builder: &mut TimelineBuilder,
+    pinned: &mut SessionTimelinePinned,
+    git_diff: &SessionGitDiffResponse,
+) {
+    let summary = git_diff_timeline_summary(git_diff);
+    let detail = git_diff_timeline_detail(git_diff);
+    let event_id = builder.push(
+        "git-diff",
+        "diff",
+        "git-diff",
+        "Diffs",
+        timeline_excerpt(&summary, 180),
+        detail,
+    );
+    pinned.diff = Some(pinned_item("Diffs", summary, "git-diff", event_id));
+}
+
+fn git_diff_timeline_summary(git_diff: &SessionGitDiffResponse) -> String {
+    if !git_diff.available {
+        return git_diff
+            .message
+            .clone()
+            .unwrap_or_else(|| "git diff unavailable".to_string());
+    }
+
+    if git_diff_has_no_changes(git_diff) {
+        return "clean".to_string();
+    }
+
+    if git_diff.truncated {
+        "dirty, truncated".to_string()
+    } else {
+        "dirty".to_string()
+    }
+}
+
+fn git_diff_has_no_changes(git_diff: &SessionGitDiffResponse) -> bool {
+    git_diff.status_short.trim().is_empty()
+        && git_diff.unstaged_diff.trim().is_empty()
+        && git_diff.staged_diff.trim().is_empty()
+}
+
+fn git_diff_timeline_detail(git_diff: &SessionGitDiffResponse) -> Option<String> {
+    let detail = [
+        git_diff.status_short.as_str(),
+        git_diff.staged_diff.as_str(),
+        git_diff.unstaged_diff.as_str(),
+    ]
+    .into_iter()
+    .filter(|part| !part.trim().is_empty())
+    .collect::<Vec<_>>()
+    .join("\n");
+
+    (!detail.is_empty()).then(|| timeline_excerpt(&detail, 1200))
+}
+
+fn append_pane_tail_event(
+    builder: &mut TimelineBuilder,
+    pinned: &mut SessionTimelinePinned,
+    pane_tail: Result<String, PaneTailError>,
+) {
+    let (summary, detail) = match pane_tail {
+        Ok(text) => {
+            let line_count = text.trim_end().lines().count();
+            let summary = if line_count == 0 {
+                "empty".to_string()
+            } else {
+                format!("{line_count} lines")
+            };
+            (
+                summary,
+                (!text.trim().is_empty()).then(|| timeline_excerpt(&text, 1200)),
+            )
+        }
+        Err(err) => (err.message().to_string(), None),
+    };
+    let event_id = builder.push(
+        "pane-tail",
+        "pane_tail",
+        "pane-tail",
+        "Recent output",
+        summary.clone(),
+        detail,
+    );
+    pinned.pane_tail = Some(pinned_item("Recent output", summary, "pane-tail", event_id));
+}
+
+fn append_artifact_event(
+    builder: &mut TimelineBuilder,
+    pinned: &mut SessionTimelinePinned,
+    artifact: Option<&MermaidArtifactResponse>,
+) {
+    let (summary, detail) = match artifact {
+        Some(artifact) if artifact.available => {
+            let plan_count = artifact.plan_files.as_ref().map_or(0, Vec::len);
+            let summary = if plan_count > 0 {
+                format!("{plan_count} plan files")
+            } else {
+                artifact
+                    .path
+                    .clone()
+                    .unwrap_or_else(|| "artifact available".to_string())
+            };
+            (summary, artifact.source.clone())
+        }
+        Some(artifact) => (
+            artifact
+                .error
+                .clone()
+                .unwrap_or_else(|| "artifact unavailable".to_string()),
+            None,
+        ),
+        None => ("artifact unavailable".to_string(), None),
+    };
+    let event_id = builder.push(
+        "artifact",
+        "artifact",
+        "mermaid-artifact",
+        "Artifacts",
+        timeline_excerpt(&summary, 180),
+        detail.map(|detail| timeline_excerpt(&detail, 1200)),
+    );
+    pinned.artifact = Some(pinned_item(
+        "Artifacts",
+        summary,
+        "mermaid-artifact",
+        event_id,
+    ));
+}
+
+// ---------------------------------------------------------------------------
 // GET /v1/sessions/{session_id}/git-diff
 // ---------------------------------------------------------------------------
 
@@ -895,6 +1266,11 @@ async fn read_git_diff_for_summary(summary: SessionSummary) -> SessionGitDiffRes
 
     let (unstaged_diff, unstaged_truncated) = truncate_git_output(unstaged_raw);
     let (staged_diff, staged_truncated) = truncate_git_output(staged_raw);
+    let files = summarize_git_diff_files(
+        &staged_diff,
+        &unstaged_diff,
+        staged_truncated || unstaged_truncated,
+    );
     SessionGitDiffResponse {
         session_id: summary.session_id,
         available: true,
@@ -905,6 +1281,7 @@ async fn read_git_diff_for_summary(summary: SessionSummary) -> SessionGitDiffRes
         staged_diff,
         truncated: unstaged_truncated || staged_truncated,
         message: None,
+        files,
     }
 }
 
@@ -944,6 +1321,149 @@ fn truncate_git_output(output: String) -> (String, bool) {
     (output[..end].to_string(), true)
 }
 
+fn summarize_git_diff_files(
+    staged_diff: &str,
+    unstaged_diff: &str,
+    truncated: bool,
+) -> Vec<SessionGitDiffFileSummary> {
+    let mut files = Vec::new();
+    files.extend(parse_git_diff_file_summaries(
+        "staged",
+        staged_diff,
+        truncated,
+    ));
+    files.extend(parse_git_diff_file_summaries(
+        "unstaged",
+        unstaged_diff,
+        truncated,
+    ));
+    files
+}
+
+fn parse_git_diff_file_summaries(
+    source: &str,
+    diff_text: &str,
+    truncated: bool,
+) -> Vec<SessionGitDiffFileSummary> {
+    let mut files = Vec::new();
+    let mut current: Option<SessionGitDiffFileSummary> = None;
+    let mut current_hunk: Option<SessionGitDiffHunkSummary> = None;
+
+    for line in diff_text.lines() {
+        if line.starts_with("diff --git ") {
+            push_diff_hunk(&mut current, &mut current_hunk);
+            if let Some(file) = current.take() {
+                files.push(file);
+            }
+            current = Some(SessionGitDiffFileSummary {
+                path: parse_diff_git_path(line).unwrap_or_else(|| "unknown".to_string()),
+                old_path: None,
+                source: source.to_string(),
+                change: "modified".to_string(),
+                added_lines: 0,
+                removed_lines: 0,
+                truncated,
+                hunks: Vec::new(),
+            });
+            continue;
+        }
+
+        let Some(file) = current.as_mut() else {
+            continue;
+        };
+
+        if line.starts_with("new file mode ") {
+            file.change = "added".to_string();
+            continue;
+        }
+        if line.starts_with("deleted file mode ") {
+            file.change = "deleted".to_string();
+            continue;
+        }
+        if let Some(path) = line.strip_prefix("rename from ") {
+            file.old_path = Some(path.to_string());
+            file.change = "renamed".to_string();
+            continue;
+        }
+        if let Some(path) = line.strip_prefix("rename to ") {
+            file.path = path.to_string();
+            file.change = "renamed".to_string();
+            continue;
+        }
+        if let Some(path) = line.strip_prefix("+++ ") {
+            if let Some(path) = normalize_diff_path(path) {
+                file.path = path;
+            }
+            continue;
+        }
+        if let Some(path) = line.strip_prefix("--- ") {
+            if let Some(path) = normalize_diff_path(path) {
+                file.old_path = Some(path);
+            }
+            continue;
+        }
+        if line.starts_with("@@") {
+            push_diff_hunk(&mut current, &mut current_hunk);
+            current_hunk = Some(SessionGitDiffHunkSummary {
+                header: line.to_string(),
+                added_lines: 0,
+                removed_lines: 0,
+            });
+            continue;
+        }
+
+        if line.starts_with('+') && !line.starts_with("+++") {
+            file.added_lines += 1;
+            if let Some(hunk) = current_hunk.as_mut() {
+                hunk.added_lines += 1;
+            }
+        } else if line.starts_with('-') && !line.starts_with("---") {
+            file.removed_lines += 1;
+            if let Some(hunk) = current_hunk.as_mut() {
+                hunk.removed_lines += 1;
+            }
+        }
+    }
+
+    push_diff_hunk(&mut current, &mut current_hunk);
+    if let Some(file) = current {
+        files.push(file);
+    }
+    files
+}
+
+fn push_diff_hunk(
+    current: &mut Option<SessionGitDiffFileSummary>,
+    current_hunk: &mut Option<SessionGitDiffHunkSummary>,
+) {
+    if let (Some(file), Some(hunk)) = (current.as_mut(), current_hunk.take()) {
+        file.hunks.push(hunk);
+    }
+}
+
+fn parse_diff_git_path(line: &str) -> Option<String> {
+    let mut parts = line.split_whitespace();
+    let _diff = parts.next()?;
+    let _git = parts.next()?;
+    let _old = parts.next()?;
+    let new = parts.next()?;
+    normalize_diff_path(new)
+}
+
+fn normalize_diff_path(path: &str) -> Option<String> {
+    let trimmed = path.trim();
+    if trimmed == "/dev/null" {
+        return None;
+    }
+    Some(
+        trimmed
+            .strip_prefix("a/")
+            .or_else(|| trimmed.strip_prefix("b/"))
+            .unwrap_or(trimmed)
+            .to_string(),
+    )
+}
+
 fn git_diff_unavailable(
     session_id: String,
     cwd: String,
@@ -959,6 +1479,7 @@ fn git_diff_unavailable(
         staged_diff: String::new(),
         truncated: false,
         message: Some(message.into()),
+        files: Vec::new(),
     }
 }
 
@@ -1233,6 +1754,17 @@ enum PaneTailError {
     TimedOut,
 }
 
+impl PaneTailError {
+    fn message(&self) -> &'static str {
+        match self {
+            PaneTailError::SessionNotFound => "session not found",
+            PaneTailError::ActorUnavailable => "session actor unavailable",
+            PaneTailError::ReplyDropped => "actor dropped pane tail reply",
+            PaneTailError::TimedOut => "pane tail request timed out",
+        }
+    }
+}
+
 async fn request_pane_tail(
     state: &Arc<AppState>,
     session_id: &str,
@@ -1501,6 +2033,7 @@ pub fn routes() -> Router<Arc<AppState>> {
             "/v1/sessions/{session_id}/agent-context",
             get(get_agent_context),
         )
+        .route("/v1/sessions/{session_id}/timeline", get(get_timeline))
         .route("/v1/sessions/{session_id}/git-diff", get(get_git_diff))
         .route("/v1/sessions/{session_id}/snapshot", get(get_snapshot))
         .route("/v1/sessions/{session_id}/pane-tail", get(get_pane_tail))
@@ -1528,7 +2061,7 @@ mod tests {
     use chrono::Utc;
     use proptest::strategy::{Strategy, ValueTree};
     use proptest::test_runner::TestRunner;
-    use serde_json::Value;
+    use serde_json::{json, Value};
     use std::collections::BTreeMap;
     use std::ffi::{OsStr, OsString};
     use std::os::unix::fs::PermissionsExt;
@@ -1631,6 +2164,38 @@ mod tests {
             }
         });
         write_rx
+    }
+
+    async fn insert_timeline_test_handle(
+        state: &Arc<AppState>,
+        summary: SessionSummary,
+        pane_tail: String,
+        artifact: MermaidArtifactResponse,
+    ) {
+        let session_id = summary.session_id.clone();
+        let tmux_name = summary.tmux_name.clone();
+        let (cmd_tx, mut cmd_rx) = mpsc::channel(8);
+        state
+            .supervisor
+            .insert_test_handle(ActorHandle::test_handle(&session_id, &tmux_name, cmd_tx))
+            .await;
+        tokio::spawn(async move {
+            while let Some(cmd) = cmd_rx.recv().await {
+                match cmd {
+                    SessionCommand::GetSummary(reply) => {
+                        let _ = reply.send(summary.clone());
+                    }
+                    SessionCommand::GetPaneTail { lines, reply } => {
+                        assert_eq!(lines, PANE_TAIL_LINES);
+                        let _ = reply.send(pane_tail.clone());
+                    }
+                    SessionCommand::GetMermaidArtifact(reply) => {
+                        let _ = reply.send(artifact.clone());
+                    }
+                    _ => {}
+                }
+            }
+        });
     }
 
     async fn response_json(response: axum::response::Response) -> Value {
@@ -2096,6 +2661,61 @@ esac
     }
 
     #[tokio::test]
+    async fn send_input_returns_not_found_for_missing_session() {
+        let response = send_input(
+            Extension(AuthInfo::new(OPERATOR_SCOPES.to_vec())),
+            State(test_state()),
+            Path("sess-missing".to_string()),
+            Json(SessionInputRequest {
+                text: "status".to_string(),
+                submit: false,
+            }),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let json = response_json(response).await;
+        assert_eq!(json["code"], "SESSION_NOT_FOUND");
+    }
+
+    #[tokio::test]
+    async fn send_input_rejects_exited_session() {
+        let state = test_state();
+        let (cmd_tx, mut cmd_rx) = mpsc::channel(8);
+        state
+            .supervisor
+            .insert_test_handle(ActorHandle::test_handle("sess-exited", "tmux-1", cmd_tx))
+            .await;
+
+        let worker = tokio::spawn(async move {
+            while let Some(cmd) = cmd_rx.recv().await {
+                if let SessionCommand::GetSummary(reply) = cmd {
+                    let _ = reply.send(summary("sess-exited", SessionState::Exited));
+                    return;
+                }
+            }
+        });
+
+        let response = send_input(
+            Extension(AuthInfo::new(OPERATOR_SCOPES.to_vec())),
+            State(state),
+            Path("sess-exited".to_string()),
+            Json(SessionInputRequest {
+                text: "status".to_string(),
+                submit: false,
+            }),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let json = response_json(response).await;
+        assert_eq!(json["code"], "SESSION_EXITED");
+        worker.await.expect("worker");
+    }
+
+    #[tokio::test]
     async fn send_input_forwards_text_to_session_actor() {
         let state = test_state();
         let (cmd_tx, mut cmd_rx) = mpsc::channel(8);
@@ -2183,6 +2803,95 @@ esac
 
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(worker.await.expect("worker"), "status");
+    }
+
+    #[tokio::test]
+    async fn send_input_reports_failed_delivery_ack() {
+        let state = test_state();
+        let (cmd_tx, mut cmd_rx) = mpsc::channel(8);
+        state
+            .supervisor
+            .insert_test_handle(ActorHandle::test_handle("sess-1", "tmux-1", cmd_tx))
+            .await;
+
+        let worker = tokio::spawn(async move {
+            while let Some(cmd) = cmd_rx.recv().await {
+                match cmd {
+                    SessionCommand::GetSummary(reply) => {
+                        let _ = reply.send(summary("sess-1", SessionState::Idle));
+                    }
+                    SessionCommand::WriteInputAck { ack, .. } => {
+                        let _ = ack.send(InputDeliveryResult {
+                            delivered: false,
+                            method: "test",
+                            message: Some("pty write failed".to_string()),
+                        });
+                        return;
+                    }
+                    _ => {}
+                }
+            }
+        });
+
+        let response = send_input(
+            Extension(AuthInfo::new(OPERATOR_SCOPES.to_vec())),
+            State(state),
+            Path("sess-1".to_string()),
+            Json(SessionInputRequest {
+                text: "status".to_string(),
+                submit: false,
+            }),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+        let json = response_json(response).await;
+        assert_eq!(json["code"], "INPUT_DELIVERY_FAILED");
+        assert_eq!(json["message"], "pty write failed");
+        worker.await.expect("worker");
+    }
+
+    #[tokio::test]
+    async fn send_input_reports_dropped_delivery_ack() {
+        let state = test_state();
+        let (cmd_tx, mut cmd_rx) = mpsc::channel(8);
+        state
+            .supervisor
+            .insert_test_handle(ActorHandle::test_handle("sess-1", "tmux-1", cmd_tx))
+            .await;
+
+        let worker = tokio::spawn(async move {
+            while let Some(cmd) = cmd_rx.recv().await {
+                match cmd {
+                    SessionCommand::GetSummary(reply) => {
+                        let _ = reply.send(summary("sess-1", SessionState::Idle));
+                    }
+                    SessionCommand::WriteInputAck { ack, .. } => {
+                        drop(ack);
+                        return;
+                    }
+                    _ => {}
+                }
+            }
+        });
+
+        let response = send_input(
+            Extension(AuthInfo::new(OPERATOR_SCOPES.to_vec())),
+            State(state),
+            Path("sess-1".to_string()),
+            Json(SessionInputRequest {
+                text: "status".to_string(),
+                submit: false,
+            }),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+        let json = response_json(response).await;
+        assert_eq!(json["code"], "INPUT_DELIVERY_UNKNOWN");
+        worker.await.expect("worker");
     }
 
     #[tokio::test]
@@ -2275,6 +2984,216 @@ esac
     }
 
     #[tokio::test]
+    async fn get_timeline_returns_ordered_events_and_pinned_summaries() {
+        let _lock = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let tmp = tempdir().expect("tempdir");
+        let _home_guard = TestEnvVarGuard::set_path("HOME", tmp.path());
+        let repo = tempdir().expect("repo tempdir");
+        let init = std::process::Command::new("git")
+            .arg("-C")
+            .arg(repo.path())
+            .args(["init", "-q"])
+            .status()
+            .expect("git init");
+        assert!(init.success(), "git init should succeed");
+        std::fs::write(repo.path().join("app.txt"), "before\n").expect("write app");
+        let add = std::process::Command::new("git")
+            .arg("-C")
+            .arg(repo.path())
+            .args(["add", "app.txt"])
+            .status()
+            .expect("git add");
+        assert!(add.success(), "git add should succeed");
+        std::fs::write(repo.path().join("app.txt"), "before\nafter\n").expect("modify app");
+
+        let cwd = repo.path().to_string_lossy().into_owned();
+        let sessions_dir = tmp
+            .path()
+            .join(".codex")
+            .join("sessions")
+            .join("2026")
+            .join("05")
+            .join("08");
+        std::fs::create_dir_all(&sessions_dir).expect("sessions dir");
+        let jsonl = [
+            json!({"type": "session_meta", "payload": {"cwd": cwd}}).to_string(),
+            json!({"type": "response_item", "payload": {"role": "user", "content": [{"type": "input_text", "text": "build the workbench"}]}}).to_string(),
+            json!({"type": "response_item", "payload": {"type": "function_call", "name": "exec", "arguments": "{\"command\":\"cargo test timeline\"}"}}).to_string(),
+        ]
+        .join("\n");
+        std::fs::write(
+            sessions_dir.join("rollout-timeline-target.jsonl"),
+            format!("{jsonl}\n"),
+        )
+        .expect("timeline jsonl");
+
+        let state = test_state();
+        let mut session = summary("sess-timeline", SessionState::Idle);
+        session.cwd = cwd.clone();
+        insert_timeline_test_handle(
+            &state,
+            session,
+            "cargo test\nfinished green\n".to_string(),
+            MermaidArtifactResponse {
+                session_id: "sess-timeline".to_string(),
+                available: true,
+                path: Some("/tmp/project/docs/plan.mmd".to_string()),
+                updated_at: Some(Utc::now()),
+                source: Some("flowchart TD; A-->B".to_string()),
+                error: None,
+                slice_name: None,
+                plan_files: Some(vec!["plan.md".to_string(), "WORKGRAPH.md".to_string()]),
+            },
+        )
+        .await;
+
+        let response = get_timeline(
+            Extension(AuthInfo::new(OPERATOR_SCOPES.to_vec())),
+            State(state),
+            Path("sess-timeline".to_string()),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let json = response_json(response).await;
+        assert_eq!(json["session_id"], "sess-timeline");
+        assert_eq!(json["available"], true);
+        assert_eq!(json["cwd"], cwd);
+        assert_eq!(json["pinned"]["task"]["summary"], "build the workbench");
+        assert_eq!(json["pinned"]["current_action"]["title"], "exec");
+        assert_eq!(json["pinned"]["diff"]["summary"], "dirty");
+        assert_eq!(json["pinned"]["pane_tail"]["summary"], "2 lines");
+        assert_eq!(json["pinned"]["artifact"]["summary"], "2 plan files");
+        let events = json["events"].as_array().expect("timeline events");
+        assert!(events.iter().any(|event| event["kind"] == "task"));
+        assert!(events.iter().any(|event| event["kind"] == "tool_call"));
+        assert!(events.iter().any(|event| event["kind"] == "diff"));
+        assert!(events.iter().any(|event| event["kind"] == "pane_tail"));
+        assert!(events.iter().any(|event| event["kind"] == "artifact"));
+        let orders = events
+            .iter()
+            .map(|event| event["order"].as_u64().expect("event order"))
+            .collect::<Vec<_>>();
+        let sorted = {
+            let mut sorted = orders.clone();
+            sorted.sort_unstable();
+            sorted
+        };
+        assert_eq!(orders, sorted);
+    }
+
+    #[test]
+    fn git_diff_timeline_summary_and_detail_cover_available_states() {
+        let response = |available: bool,
+                        status_short: &str,
+                        staged_diff: &str,
+                        unstaged_diff: &str,
+                        truncated: bool,
+                        message: Option<&str>| {
+            SessionGitDiffResponse {
+                session_id: "sess-diff".to_string(),
+                available,
+                cwd: "/tmp/project".to_string(),
+                repo_root: Some("/tmp/project".to_string()),
+                status_short: status_short.to_string(),
+                staged_diff: staged_diff.to_string(),
+                unstaged_diff: unstaged_diff.to_string(),
+                truncated,
+                message: message.map(str::to_string),
+                files: Vec::new(),
+            }
+        };
+
+        let clean = response(true, "", "", "", false, None);
+        assert_eq!(git_diff_timeline_summary(&clean), "clean");
+        assert_eq!(git_diff_timeline_detail(&clean), None);
+
+        let dirty = response(
+            true,
+            " M app.txt",
+            "",
+            "diff --git a/app.txt b/app.txt\n@@ -1 +1 @@\n-old\n+new\n",
+            false,
+            None,
+        );
+        assert_eq!(git_diff_timeline_summary(&dirty), "dirty");
+        let dirty_detail = git_diff_timeline_detail(&dirty).expect("dirty detail");
+        assert!(dirty_detail.contains("M app.txt"));
+        assert!(dirty_detail.contains("diff --git"));
+
+        let truncated = response(true, "", "diff --git a/lib.rs b/lib.rs\n", "", true, None);
+        assert_eq!(git_diff_timeline_summary(&truncated), "dirty, truncated");
+
+        let unavailable = response(false, "", "", "", false, Some("not a git repo"));
+        assert_eq!(git_diff_timeline_summary(&unavailable), "not a git repo");
+
+        let unavailable_default = response(false, "", "", "", false, None);
+        assert_eq!(
+            git_diff_timeline_summary(&unavailable_default),
+            "git diff unavailable"
+        );
+    }
+
+    #[tokio::test]
+    async fn get_timeline_keeps_working_without_structured_context() {
+        let state = test_state();
+        let tmp = tempdir().expect("tempdir");
+        let mut session = summary("sess-shell-timeline", SessionState::Idle);
+        session.cwd = tmp.path().to_string_lossy().into_owned();
+        session.tool = Some("shell".to_string());
+        insert_timeline_test_handle(
+            &state,
+            session,
+            "shell output\n".to_string(),
+            MermaidArtifactResponse {
+                session_id: "sess-shell-timeline".to_string(),
+                available: false,
+                path: None,
+                updated_at: None,
+                source: None,
+                error: Some("no artifact".to_string()),
+                slice_name: None,
+                plan_files: None,
+            },
+        )
+        .await;
+
+        let response = get_timeline(
+            Extension(AuthInfo::new(OPERATOR_SCOPES.to_vec())),
+            State(state),
+            Path("sess-shell-timeline".to_string()),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let json = response_json(response).await;
+        assert_eq!(json["available"], true);
+        assert_eq!(json["pinned"]["pane_tail"]["summary"], "1 lines");
+        let events = json["events"].as_array().expect("timeline events");
+        assert!(events
+            .iter()
+            .any(|event| event["id"] == "context-unavailable"));
+        assert!(events.iter().any(|event| event["kind"] == "diff"));
+        assert!(events.iter().any(|event| event["kind"] == "artifact"));
+    }
+
+    #[tokio::test]
+    async fn get_timeline_returns_not_found_for_missing_session() {
+        let response = get_timeline(
+            Extension(AuthInfo::new(OPERATOR_SCOPES.to_vec())),
+            State(test_state()),
+            Path("missing-timeline".to_string()),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let json = response_json(response).await;
+        assert_eq!(json["code"], "SESSION_NOT_FOUND");
+    }
+
+    #[tokio::test]
     async fn get_git_diff_returns_session_repo_diff() {
         let _guard = crate::test_support::ENV_LOCK
             .lock()
@@ -2321,6 +3240,48 @@ esac
         assert!(json["status_short"].as_str().unwrap().contains("app.txt"));
         assert!(json["staged_diff"].as_str().unwrap().contains("new file"));
         assert!(json["unstaged_diff"].as_str().unwrap().contains("+after"));
+        let files = json["files"].as_array().expect("structured diff files");
+        assert!(files.iter().any(|file| file["path"] == "app.txt"
+            && file["source"] == "staged"
+            && file["change"] == "added"
+            && file["added_lines"].as_u64().unwrap() >= 1
+            && !file["hunks"].as_array().unwrap().is_empty()));
+        assert!(files.iter().any(|file| file["path"] == "app.txt"
+            && file["source"] == "unstaged"
+            && file["change"] == "modified"
+            && file["added_lines"] == 1));
+    }
+
+    #[tokio::test]
+    async fn get_git_diff_returns_empty_structured_files_for_clean_repo() {
+        let repo = tempdir().expect("repo tempdir");
+        let init = std::process::Command::new("git")
+            .arg("-C")
+            .arg(repo.path())
+            .args(["init", "-q"])
+            .status()
+            .expect("git init");
+        assert!(init.success(), "git init should succeed");
+
+        let state = test_state();
+        let mut session = summary("sess-clean-diff", SessionState::Idle);
+        session.cwd = repo.path().to_string_lossy().into_owned();
+        let _write_rx = insert_summary_test_handle(&state, session).await;
+
+        let response = get_git_diff(
+            Extension(AuthInfo::new(OPERATOR_SCOPES.to_vec())),
+            State(state),
+            Path("sess-clean-diff".to_string()),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let json = response_json(response).await;
+        assert_eq!(json["available"], true);
+        assert_eq!(json["status_short"], "");
+        assert_eq!(json["staged_diff"], "");
+        assert_eq!(json["unstaged_diff"], "");
+        assert!(json["files"].as_array().expect("files").is_empty());
     }
 
     #[tokio::test]
