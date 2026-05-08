@@ -58,6 +58,25 @@ wait_for_api() {
   return 1
 }
 
+wait_for_session() {
+  local session_id="${1:-}"
+  local attempt status
+  for attempt in {1..20}; do
+    status="$(curl -sS -o /dev/null -w '%{http_code}' \
+      --connect-timeout 1 \
+      --max-time 2 \
+      "${BASE_URL}/v1/sessions/${session_id}/snapshot" 2>/dev/null || true)"
+    if [[ "${status}" == "200" ]]; then
+      return 0
+    fi
+    sleep 0.25
+  done
+
+  printf 'swimmers workbench smoke failed: session %s did not become attachable on %s\n' "${session_id}" "${BASE_URL}" >&2
+  tail -n 80 "${LOG_FILE}" >&2 || true
+  return 1
+}
+
 extract_json_field() {
   local expression="${1:-}"
   node -e '
@@ -99,10 +118,21 @@ fi
 
 wait_for_api
 
+SMOKE_LOG_COMMAND='printf "You ran smoke log\ncargo test\nerror: smoke status\n@@ -1 +1 @@\n+smoke diff\nplain output\n"'
+
 if [[ -z "${SESSION_ID}" ]]; then
-  CREATE_RESPONSE="$(curl -sS --fail --json "{\"cwd\":\"${ROOT_DIR}\"}" "${BASE_URL}/v1/sessions")"
+  CREATE_BODY="$(node -e 'process.stdout.write(JSON.stringify({ cwd: process.argv[1], initial_request: process.argv[2] }))' "${ROOT_DIR}" "${SMOKE_LOG_COMMAND}")"
+  CREATE_RESPONSE="$(curl -sS --fail --json "${CREATE_BODY}" "${BASE_URL}/v1/sessions")"
   SESSION_ID="$(printf '%s' "${CREATE_RESPONSE}" | extract_json_field 'payload.session.session_id')"
   CREATED_SESSION=1
+fi
+
+wait_for_session "${SESSION_ID}"
+
+if [[ "${CREATED_SESSION}" == "1" ]]; then
+  SMOKE_LOG_BODY="$(node -e 'process.stdout.write(JSON.stringify({ text: process.argv[1], submit: true }))' "${SMOKE_LOG_COMMAND}")"
+  curl -sS --fail --json "${SMOKE_LOG_BODY}" "${BASE_URL}/v1/sessions/${SESSION_ID}/input" >/dev/null
+  sleep 1
 fi
 
 BASE_URL="${BASE_URL}" SESSION_ID="${SESSION_ID}" SCREENSHOT_PATH="${SCREENSHOT_PATH}" MOBILE_SCREENSHOT_PATH="${MOBILE_SCREENSHOT_PATH}" node --input-type=module <<'EOF'
@@ -291,6 +321,10 @@ const stateExpression = `(() => {
   const backRect = back?.getBoundingClientRect();
   const widgetText = widgets?.innerText || "";
   const keyStripText = keyStrip?.innerText || "";
+  const logLens = widgets?.querySelector(".workbench-log-lens");
+  const logRawButton = widgets?.querySelector("[data-workbench-log-mode='raw']");
+  const logSearch = widgets?.querySelector("[data-workbench-log-search]");
+  const logFilter = widgets?.querySelector("[data-workbench-log-filter]");
   const requiredPanelLabels = ["Activity", "Diffs", "Logs", "Artifacts", "Skills"];
   const panelNodes = [...(widgets?.querySelectorAll(".workbench-widget") || [])];
   const panelByLabel = (label) => panelNodes.find((panel) => panel.querySelector(".workbench-widget-title")?.innerText?.trim() === label);
@@ -335,12 +369,20 @@ const stateExpression = `(() => {
       hasRequiredPanels &&
       panelsHaveContent &&
       widgetText.includes("Recent output") &&
+      logLens &&
+      logRawButton &&
+      logSearch &&
+      logFilter &&
       noDockOverlap &&
       noControlsDockOverlap &&
       noWorkbenchControlsOverlap &&
       noBackWorkbenchOverlap,
     bodyClass: document.body.className,
     widgetText,
+    hasLogLens: Boolean(logLens),
+    hasLogRawButton: Boolean(logRawButton),
+    hasLogSearch: Boolean(logSearch),
+    hasLogFilter: Boolean(logFilter),
     hasRequiredPanels,
     panelsHaveContent,
     backVisible,

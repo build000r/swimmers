@@ -72,6 +72,9 @@ const state = {
     requestSeq: 0,
     lastLoadedAt: 0,
   },
+  workbenchLogMode: "lens",
+  workbenchLogFilter: "all",
+  workbenchLogSearch: "",
   refreshTimer: null,
   snapshotTimer: null,
   terminalPaintProbeTimer: null,
@@ -765,6 +768,9 @@ function resetWorkbenchWidgetsForSession(sessionId) {
   state.workbenchWidgets.gitDiff = null;
   state.workbenchWidgets.error = "";
   state.workbenchWidgets.lastLoadedAt = 0;
+  state.workbenchLogMode = "lens";
+  state.workbenchLogFilter = "all";
+  state.workbenchLogSearch = "";
   renderWorkbenchWidgets();
 }
 
@@ -998,6 +1004,200 @@ function widgetTextExcerpt(text, max = 4200) {
   return `... truncated ...\n${normalized.slice(-max)}`;
 }
 
+const WORKBENCH_LOG_KIND_LABELS = {
+  all: "All",
+  operator: "Chat",
+  command: "Command",
+  status: "Status",
+  diff: "Diff",
+  output: "Output",
+  truncation: "Trimmed",
+};
+
+const WORKBENCH_LOG_FILTERS = ["all", "operator", "command", "status", "diff", "output", "truncation"];
+
+const WORKBENCH_LOG_COMMAND_RE =
+  /^(?:cargo|make|git|node|bun|npm|pnpm|yarn|python3?|pytest|uv|xcodebuild|swift|curl|tmux|cat|sed|rg|grep|ls|cd|cp|mv|mkdir|touch|chmod|ssh|docker|kubectl)\b/;
+
+function transcriptLineKind(line) {
+  const trimmed = String(line || "").trim();
+  if (!trimmed) {
+    return "output";
+  }
+  if (/^\.\.\. truncated \.\.\.$/i.test(trimmed) || /^truncated[:\s]/i.test(trimmed)) {
+    return "truncation";
+  }
+  if (/^(?:[•*]\s+|[-]\s+You\b|You ran\b|Using [a-z][\w-]*\b)/i.test(trimmed)) {
+    return "operator";
+  }
+  if (
+    /^(?:diff --git|index [0-9a-f]+\.\.|@@\s|---\s|\+\+\+\s)/.test(trimmed) ||
+    /^[+][^+]/.test(trimmed) ||
+    /^-[^\-\s]/.test(trimmed)
+  ) {
+    return "diff";
+  }
+  if (
+    /(?:\berror\b|\bfailed\b|\bfatal\b|\bpanic\b|\bwarning\b|\bdenied\b|\brefused\b|\btimed out\b|\bunavailable\b|\bblocked\b)/i.test(trimmed) ||
+    /^(?:Finished|Running|Compiling|Waiting|Worked for|Validation|Evidence|PASS|FAIL)\b/i.test(trimmed) ||
+    /^[-]\s+(?:Worked for|Evidence)\b/i.test(trimmed)
+  ) {
+    return "status";
+  }
+  if (/^(?:[$#❯>]\s+|[A-Za-z0-9_.~/-]+[$#]\s+)/.test(trimmed) || WORKBENCH_LOG_COMMAND_RE.test(trimmed)) {
+    return "command";
+  }
+  return "output";
+}
+
+function renderTranscriptBlocks(text) {
+  const lines = String(text || "").replace(/\r/g, "").split("\n");
+  const blocks = [];
+  let current = null;
+
+  lines.forEach((line, index) => {
+    if (!line.trim() && !current) {
+      return;
+    }
+    const kind = transcriptLineKind(line);
+    if (current && current.kind === kind) {
+      current.lines.push(line);
+      current.endLine = index + 1;
+      return;
+    }
+    current = {
+      kind,
+      label: WORKBENCH_LOG_KIND_LABELS[kind] || "Output",
+      lines: [line],
+      startLine: index + 1,
+      endLine: index + 1,
+    };
+    blocks.push(current);
+  });
+
+  return blocks.filter((block) => block.lines.some((line) => line.trim()));
+}
+
+function blockMatchesSearch(block, query) {
+  const needle = String(query || "").trim().toLowerCase();
+  if (!needle) {
+    return true;
+  }
+  return block.lines.join("\n").toLowerCase().includes(needle);
+}
+
+function renderHighlightedLogLine(line, query) {
+  const text = String(line || "");
+  const needle = String(query || "").trim();
+  if (!needle) {
+    return escapeHtml(text || " ");
+  }
+
+  const lower = text.toLowerCase();
+  const lowerNeedle = needle.toLowerCase();
+  let cursor = 0;
+  let html = "";
+  while (cursor < text.length) {
+    const index = lower.indexOf(lowerNeedle, cursor);
+    if (index < 0) {
+      html += escapeHtml(text.slice(cursor));
+      break;
+    }
+    html += escapeHtml(text.slice(cursor, index));
+    html += `<mark class="workbench-log-mark">${escapeHtml(text.slice(index, index + needle.length))}</mark>`;
+    cursor = index + needle.length;
+  }
+  return html || escapeHtml(text || " ");
+}
+
+function workbenchLogCounts(blocks) {
+  return blocks.reduce((counts, block) => {
+    counts[block.kind] = (counts[block.kind] || 0) + 1;
+    return counts;
+  }, {});
+}
+
+function renderWorkbenchLogLens(tailText) {
+  const excerpt = widgetTextExcerpt(tailText);
+  const hasText = Boolean(excerpt.trim());
+  const blocks = hasText ? renderTranscriptBlocks(excerpt) : [];
+  const counts = workbenchLogCounts(blocks);
+  const mode = state.workbenchLogMode === "raw" ? "raw" : "lens";
+  const filter = WORKBENCH_LOG_FILTERS.includes(state.workbenchLogFilter) ? state.workbenchLogFilter : "all";
+  const query = String(state.workbenchLogSearch || "");
+  const filteredBlocks = blocks.filter((block) => {
+    const kindMatches = filter === "all" || block.kind === filter;
+    return kindMatches && blockMatchesSearch(block, query);
+  });
+
+  const countChips = WORKBENCH_LOG_FILTERS.filter((kind) => kind !== "all" && counts[kind])
+    .map(
+      (kind) => `
+        <span class="workbench-log-chip workbench-log-chip-${kind}">
+          <span>${escapeHtml(WORKBENCH_LOG_KIND_LABELS[kind])}</span>
+          <span class="workbench-log-chip-count">${counts[kind]}</span>
+        </span>
+      `,
+    )
+    .join("");
+
+  const filterOptions = WORKBENCH_LOG_FILTERS.map(
+    (kind) => `<option value="${escapeHtml(kind)}" ${filter === kind ? "selected" : ""}>${escapeHtml(WORKBENCH_LOG_KIND_LABELS[kind])}</option>`,
+  ).join("");
+
+  const controls = `
+    <div class="workbench-log-toolbar">
+      <div class="workbench-log-view-toggle" role="group" aria-label="Log view">
+        <button type="button" class="workbench-log-view-button" data-workbench-log-mode="lens" aria-pressed="${mode === "lens" ? "true" : "false"}">Lens</button>
+        <button type="button" class="workbench-log-view-button" data-workbench-log-mode="raw" aria-pressed="${mode === "raw" ? "true" : "false"}">Raw</button>
+      </div>
+      <select class="workbench-log-filter" name="workbench-log-filter" aria-label="Filter log blocks" data-workbench-log-filter>
+        ${filterOptions}
+      </select>
+      <input class="workbench-log-search" type="search" name="workbench-log-search" aria-label="Search logs" placeholder="Search logs" value="${escapeHtml(query)}" data-workbench-log-search />
+    </div>
+  `;
+
+  if (mode === "raw") {
+    return `
+      <div class="workbench-action-detail">Recent output</div>
+      ${controls}
+      ${hasText ? `<pre class="workbench-log-raw">${escapeHtml(excerpt)}</pre>` : `<div>No recent pane output.</div>`}
+    `;
+  }
+
+  const blocksHtml = !hasText
+    ? `<div class="workbench-log-empty">No recent pane output.</div>`
+    : filteredBlocks.length
+    ? filteredBlocks
+        .map((block) => {
+          const lineRange = block.startLine === block.endLine ? `L${block.startLine}` : `L${block.startLine}-${block.endLine}`;
+          const lines = block.lines
+            .map((line) => `<div class="workbench-log-line">${renderHighlightedLogLine(line, query)}</div>`)
+            .join("");
+          return `
+            <article class="workbench-log-block workbench-log-block-${block.kind}" data-log-kind="${escapeHtml(block.kind)}">
+              <div class="workbench-log-block-header">
+                <span>${escapeHtml(block.label)}</span>
+                <span>${escapeHtml(lineRange)}</span>
+              </div>
+              <div class="workbench-log-block-body">${lines}</div>
+            </article>
+          `;
+        })
+        .join("")
+    : `<div class="workbench-log-empty">No log blocks match.</div>`;
+
+  return `
+    <div class="workbench-action-detail">Recent output</div>
+    <div class="workbench-log-lens">
+      ${controls}
+      ${countChips ? `<div class="workbench-log-chips">${countChips}</div>` : ""}
+      <div class="workbench-log-blocks">${blocksHtml}</div>
+    </div>
+  `;
+}
+
 function renderDiffHtml(diffText) {
   const text = widgetTextExcerpt(diffText, 6400);
   if (!text.trim()) {
@@ -1150,9 +1350,7 @@ function renderWorkbenchWidgets() {
     : widgets.error
       ? `<div class="workbench-action-detail">${escapeHtml(widgets.error)}</div>`
       : "";
-  const outputBody = tailText
-    ? `<pre>${escapeHtml(widgetTextExcerpt(tailText))}</pre>`
-    : `<div>No recent pane output.</div>`;
+  const outputBody = renderWorkbenchLogLens(tailText);
   const activityBody = activityEvents.length
     ? `${activityEvents.some((event) => event?.kind === "tool_call") ? `<div class="workbench-action-detail">Tool calls</div>` : ""}${renderTimelineEvents(activityEvents, "No structured activity.")}`
     : toolActions.length
@@ -1215,7 +1413,7 @@ function renderWorkbenchWidgets() {
         <span class="workbench-widget-title">Logs</span>
         <span class="workbench-widget-meta">${lines ? `${lines} lines` : "empty"}</span>
       </summary>
-      <div class="workbench-widget-body"><div class="workbench-action-detail">Recent output</div>${outputBody}</div>
+      <div class="workbench-widget-body">${outputBody}</div>
     </details>
     <details class="workbench-widget">
       <summary>
@@ -6053,12 +6251,37 @@ function bindEvents() {
     focusTerminalInputSurface({ preventScroll: true });
   });
   el.terminalWorkbenchWidgets.addEventListener("click", (event) => {
-    const button = event.target?.closest?.("[data-workbench-open-mermaid]");
-    if (!button) {
+    const logModeButton = event.target?.closest?.("[data-workbench-log-mode]");
+    if (logModeButton) {
+      event.preventDefault();
+      state.workbenchLogMode = logModeButton.dataset.workbenchLogMode === "raw" ? "raw" : "lens";
+      renderWorkbenchWidgets();
+      focusTerminalInputSurface({ preventScroll: true });
+      return;
+    }
+
+    const mermaidButton = event.target?.closest?.("[data-workbench-open-mermaid]");
+    if (!mermaidButton) {
       return;
     }
     event.preventDefault();
     openSheet("mermaid");
+  });
+  el.terminalWorkbenchWidgets.addEventListener("input", (event) => {
+    const target = event.target;
+    if (!target?.matches?.("[data-workbench-log-search]")) {
+      return;
+    }
+    state.workbenchLogSearch = target.value || "";
+    renderWorkbenchWidgets();
+  });
+  el.terminalWorkbenchWidgets.addEventListener("change", (event) => {
+    const target = event.target;
+    if (!target?.matches?.("[data-workbench-log-filter]")) {
+      return;
+    }
+    state.workbenchLogFilter = WORKBENCH_LOG_FILTERS.includes(target.value) ? target.value : "all";
+    renderWorkbenchWidgets();
   });
   el.terminalInputDock.addEventListener("submit", (event) => {
     event.preventDefault();
@@ -6924,6 +7147,8 @@ export const __swimmersWebTest = {
   handleSocketText,
   syncTerminalWorkbench,
   renderTerminalWorkbench,
+  renderWorkbenchWidgets,
+  renderTranscriptBlocks,
   refreshAgentContextForSelectedSession,
   refreshWorkbenchWidgetsForSelectedSession,
   setTerminalWorkbenchOpen,

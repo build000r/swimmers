@@ -25,7 +25,7 @@ Trogdor mode is the web operator view for live Swimmers sessions. It keeps the b
 6. Use the workbench panels for context:
    - `Activity`: session timeline events for task, current action, and tool calls.
    - `Diffs`: structured file/hunk git summaries plus raw diff fallback.
-   - `Logs`: recent pane output.
+   - `Logs`: recent pane output through a transcript lens with command/chat/status/diff blocks plus Raw fallback.
    - `Artifacts`: Mermaid and plan-file metadata from existing artifact endpoints.
    - `Skills`: passive Skillbox/SBP Skills discovery for the session cwd when `personal-workflows` and `sbp` are available.
 7. Use the hover panel actions:
@@ -39,7 +39,7 @@ Trogdor mode is the web operator view for live Swimmers sessions. It keeps the b
 
 ## Single-Session Cockpit
 
-The cockpit is a terminal-first workbench, not a replacement for the live terminal. It reads `/v1/sessions/{id}/timeline` for ordered session events and pinned summaries, then uses the existing pane-tail, git-diff, Mermaid artifact, and plan-file endpoints as concrete sources for expanded views.
+The cockpit is a terminal-first workbench, not a replacement for the live terminal. It reads `/v1/sessions/{id}/timeline` for ordered session events and pinned summaries, then uses the existing pane-tail, git-diff, Mermaid artifact, and plan-file endpoints as concrete sources for expanded views. The Logs panel classifies the existing pane-tail text in the browser for scanability and keeps Raw as the fallback truth source; it does not create a separate backend log model.
 
 `/v1/sessions/{id}/git-diff` includes structured file and hunk summaries so the browser can render a useful diff overview without reparsing patches. The raw diff fields remain available for compatibility and for expanded views.
 

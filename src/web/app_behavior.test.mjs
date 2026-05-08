@@ -263,6 +263,9 @@ function resetWebState() {
     requestSeq: 0,
     lastLoadedAt: 0,
   };
+  web.state.workbenchLogMode = "lens";
+  web.state.workbenchLogFilter = "all";
+  web.state.workbenchLogSearch = "";
   web.state.readOnly = false;
   web.state.terminalFallbackActive = false;
   web.state.terminalFallbackAutoFollow = true;
@@ -856,6 +859,8 @@ test("terminal workbench pinned widgets render pane output and artifacts from se
   assert.ok(requested.includes("/v1/sessions/sess_0/mermaid-artifact"));
   assert.ok(requested.includes("/v1/sessions/sess_0/git-diff"));
   assert.ok(web.el.terminalWorkbenchWidgets.innerHTML.includes("Activity"));
+  assert.ok(web.el.terminalWorkbenchWidgets.innerHTML.includes("workbench-log-lens"));
+  assert.ok(web.el.terminalWorkbenchWidgets.innerHTML.includes("data-log-kind=\"command\""));
   assert.ok(web.el.terminalWorkbenchWidgets.innerHTML.includes("finished green"));
   assert.ok(web.el.terminalWorkbenchWidgets.innerHTML.includes("WORKGRAPH.md"));
   assert.ok(web.el.terminalWorkbenchWidgets.innerHTML.includes("unstaged modified +1/-1"));
@@ -865,6 +870,66 @@ test("terminal workbench pinned widgets render pane output and artifacts from se
   assert.ok(web.el.terminalWorkbenchWidgets.innerHTML.includes("Skills"));
   assert.ok(web.el.terminalWorkbenchWidgets.innerHTML.includes("ui"));
   assert.ok(web.el.terminalWorkbenchWidgets.innerHTML.includes("Open viewer"));
+});
+
+test("workbench transcript lens classifies, filters, searches, and preserves raw logs", async () => {
+  resetWebState();
+  const tailText = [
+    "... truncated ...",
+    "• You ran cat makefile",
+    "cargo test",
+    "error: failed test",
+    "@@ -1 +1 @@",
+    "+new line",
+    "plain output",
+    "<secret>",
+  ].join("\n");
+
+  const blocks = web.renderTranscriptBlocks(tailText);
+  assert.deepEqual(
+    blocks.map((block) => block.kind),
+    ["truncation", "operator", "command", "status", "diff", "output"],
+  );
+  assert.equal(blocks.at(-1).lines.includes("<secret>"), true);
+
+  web.state.selectedSessionId = "sess_0";
+  web.state.trogdorAtlasOpen = false;
+  web.state.workbenchWidgets.sessionId = "sess_0";
+  web.state.workbenchWidgets.paneTail = { session_id: "sess_0", text: tailText };
+  web.state.workbenchWidgets.timeline = { events: [] };
+  web.renderWorkbenchWidgets();
+
+  let html = web.el.terminalWorkbenchWidgets.innerHTML;
+  assert.ok(html.includes("workbench-log-lens"));
+  assert.ok(html.includes("data-log-kind=\"truncation\""));
+  assert.ok(html.includes("data-log-kind=\"operator\""));
+  assert.ok(html.includes("data-log-kind=\"command\""));
+  assert.ok(html.includes("data-log-kind=\"status\""));
+  assert.ok(html.includes("data-log-kind=\"diff\""));
+  assert.ok(html.includes("data-log-kind=\"output\""));
+  assert.ok(html.includes("Search logs"));
+
+  web.state.workbenchLogFilter = "command";
+  web.renderWorkbenchWidgets();
+  html = web.el.terminalWorkbenchWidgets.innerHTML;
+  assert.ok(html.includes("data-log-kind=\"command\""));
+  assert.equal(html.includes("plain output"), false);
+
+  web.state.workbenchLogFilter = "all";
+  web.state.workbenchLogSearch = "cargo";
+  web.renderWorkbenchWidgets();
+  html = web.el.terminalWorkbenchWidgets.innerHTML;
+  assert.ok(html.includes("workbench-log-mark"));
+  assert.ok(html.includes("cargo"));
+  assert.equal(html.includes("plain output"), false);
+
+  web.state.workbenchLogSearch = "";
+  web.state.workbenchLogMode = "raw";
+  web.renderWorkbenchWidgets();
+  html = web.el.terminalWorkbenchWidgets.innerHTML;
+  assert.ok(html.includes("workbench-log-raw"));
+  assert.ok(html.includes("&lt;secret&gt;"));
+  assert.equal(html.includes("<secret>"), false);
 });
 
 test("terminal text fallback follows the tail unless the user scrolled up", () => {
