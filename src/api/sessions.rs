@@ -15,17 +15,21 @@ use crate::api::{fetch_live_summary, remote_sessions, AppState};
 use crate::auth::{AuthInfo, AuthScope};
 use crate::operator_pressure::session_ready_for_operator_group_input;
 use crate::session::actor::{ActorHandle, InputDeliveryResult, SessionCommand};
-use crate::thought::context::context_reader_for;
+use crate::thought::context::{
+    context_reader_for, AgentTranscriptRecord as ContextTranscriptRecord,
+    AgentUserTurn as ContextUserTurn,
+};
 use crate::types::{
     AgentContextActionSummary, CreateSessionRequest, CreateSessionResponse,
     CreateSessionsBatchRequest, CreateSessionsBatchResponse, CreateSessionsBatchResult,
     ErrorResponse, MermaidArtifactResponse, PlanFileResponse, RepoTheme,
-    SessionAgentContextResponse, SessionBatchMembership, SessionGitDiffFileSummary,
-    SessionGitDiffHunkSummary, SessionGitDiffResponse, SessionGroupInputRequest,
-    SessionGroupInputResponse, SessionGroupInputResult, SessionInputRequest, SessionInputResponse,
-    SessionListResponse, SessionPaneTailResponse, SessionState, SessionSummary,
-    SessionTimelineEvent, SessionTimelinePinned, SessionTimelinePinnedItem,
-    SessionTimelineResponse, TerminalSnapshot,
+    SessionAgentContextResponse, SessionAgentTurn, SessionBatchMembership,
+    SessionGitDiffFileSummary, SessionGitDiffHunkSummary, SessionGitDiffResponse,
+    SessionGroupInputRequest, SessionGroupInputResponse, SessionGroupInputResult,
+    SessionInputRequest, SessionInputResponse, SessionListResponse, SessionPaneTailResponse,
+    SessionState, SessionSummary, SessionTimelineEvent, SessionTimelinePinned,
+    SessionTimelinePinnedItem, SessionTimelineResponse, SessionTranscriptRecord,
+    SessionTranscriptResponse, TerminalSnapshot,
 };
 
 const BATCH_PROMPT_EXCERPT_MAX_CHARS: usize = 72;
@@ -657,6 +661,9 @@ enum AgentContextReadResult {
     Missing,
     Snapshot {
         user_task: Option<String>,
+        turns: Vec<SessionAgentTurn>,
+        transcript_records: Vec<SessionTranscriptRecord>,
+        source_size: u64,
         current_tool: Option<AgentContextActionSummary>,
         recent_actions: Vec<AgentContextActionSummary>,
         token_count: u64,
@@ -697,6 +704,17 @@ async fn read_agent_context_for_summary(
 
         AgentContextReadResult::Snapshot {
             user_task: snapshot.user_task,
+            turns: snapshot
+                .user_turns
+                .into_iter()
+                .map(agent_turn_summary)
+                .collect(),
+            transcript_records: snapshot
+                .transcript_records
+                .into_iter()
+                .map(transcript_record_summary)
+                .collect(),
+            source_size: snapshot.source_size,
             current_tool: snapshot.current_tool.map(agent_action_summary),
             recent_actions: snapshot
                 .recent_actions
@@ -728,6 +746,9 @@ async fn read_agent_context_for_summary(
         ),
         AgentContextReadResult::Snapshot {
             user_task,
+            turns,
+            transcript_records: _transcript_records,
+            source_size: _source_size,
             current_tool,
             recent_actions,
             token_count,
@@ -738,6 +759,7 @@ async fn read_agent_context_for_summary(
             tool,
             cwd,
             user_task,
+            turns,
             current_tool,
             recent_actions,
             token_count,
@@ -751,6 +773,33 @@ fn agent_action_summary(action: crate::thought::context::AgentAction) -> AgentCo
     AgentContextActionSummary {
         tool: action.tool,
         detail: action.detail,
+    }
+}
+
+fn agent_turn_summary(turn: ContextUserTurn) -> SessionAgentTurn {
+    SessionAgentTurn {
+        id: turn.id,
+        source: turn.source,
+        text: turn.text,
+        byte_start: turn.byte_start,
+        byte_end: turn.byte_end,
+        order: turn.order,
+        timestamp: turn.timestamp,
+    }
+}
+
+fn transcript_record_summary(record: ContextTranscriptRecord) -> SessionTranscriptRecord {
+    SessionTranscriptRecord {
+        id: record.id,
+        source: record.source,
+        kind: record.kind,
+        role: record.role,
+        summary: record.summary,
+        raw: record.raw,
+        byte_start: record.byte_start,
+        byte_end: record.byte_end,
+        timestamp: record.timestamp,
+        truncated: record.truncated,
     }
 }
 
@@ -768,6 +817,7 @@ fn agent_context_unavailable(
         tool,
         cwd,
         user_task: None,
+        turns: Vec::new(),
         current_tool: None,
         recent_actions: Vec::new(),
         token_count,
@@ -781,6 +831,242 @@ fn context_limit_for_agent_context(tool: &Option<String>, context_limit: u64) ->
         context_limit
     } else {
         crate::types::context_limit_for_tool(tool.as_deref())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// GET /v1/sessions/{session_id}/transcript
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Deserialize)]
+struct TranscriptQuery {
+    turn_id: Option<String>,
+    after: Option<u64>,
+    limit: Option<usize>,
+}
+
+async fn get_transcript(
+    Extension(auth): Extension<AuthInfo>,
+    State(state): State<Arc<AppState>>,
+    Path(session_id): Path<String>,
+    Query(query): Query<TranscriptQuery>,
+) -> Response {
+    if let Err(resp) = auth.require_scope(AuthScope::SessionsRead) {
+        return resp;
+    }
+
+    fetch_transcript_response(&state, &session_id, query).await
+}
+
+async fn fetch_transcript_response(
+    state: &Arc<AppState>,
+    session_id: &str,
+    query: TranscriptQuery,
+) -> Response {
+    match remote_sessions::denamespace_for_target(session_id) {
+        Ok(Some((target, remote_session_id))) => {
+            return match remote_sessions::fetch_remote_transcript(
+                &target,
+                remote_session_id,
+                query.turn_id.as_deref(),
+                query.after,
+                query.limit,
+            )
+            .await
+            {
+                Ok(response) => (StatusCode::OK, Json(response)).into_response(),
+                Err(err) => err.into_response(),
+            };
+        }
+        Ok(None) => {}
+        Err(err) => return err.into_response(),
+    }
+
+    let summary = match fetch_live_summary(state, session_id).await {
+        Ok(Some(summary)) => summary,
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse {
+                    code: "SESSION_NOT_FOUND".to_string(),
+                    message: None,
+                }),
+            )
+                .into_response();
+        }
+        Err(err) => {
+            tracing::error!("transcript summary lookup failed: {err}");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    code: "INTERNAL_ERROR".to_string(),
+                    message: Some(err.to_string()),
+                }),
+            )
+                .into_response();
+        }
+    };
+
+    match read_transcript_for_summary(summary, query).await {
+        Ok(response) => (StatusCode::OK, Json(response)).into_response(),
+        Err(err) => {
+            tracing::error!("transcript read failed: {err}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    code: "INTERNAL_ERROR".to_string(),
+                    message: Some(err.to_string()),
+                }),
+            )
+                .into_response()
+        }
+    }
+}
+
+async fn read_transcript_for_summary(
+    summary: SessionSummary,
+    query: TranscriptQuery,
+) -> anyhow::Result<SessionTranscriptResponse> {
+    let session_id = summary.session_id.clone();
+    let tool = summary.tool.clone();
+    let cwd = summary.cwd.clone();
+    let Some(tool_name) = tool.clone() else {
+        return Ok(transcript_unavailable(
+            session_id,
+            tool,
+            cwd,
+            "session tool is unknown",
+        ));
+    };
+
+    let reader_tool = tool_name.clone();
+    let reader_cwd = cwd.clone();
+    let read_result = tokio::task::spawn_blocking(move || {
+        let Some(mut reader) = context_reader_for(&reader_tool, &reader_cwd, &[]) else {
+            return AgentContextReadResult::Unsupported;
+        };
+
+        let Some(snapshot) = reader.read() else {
+            return AgentContextReadResult::Missing;
+        };
+
+        AgentContextReadResult::Snapshot {
+            user_task: snapshot.user_task,
+            turns: snapshot
+                .user_turns
+                .into_iter()
+                .map(agent_turn_summary)
+                .collect(),
+            transcript_records: snapshot
+                .transcript_records
+                .into_iter()
+                .map(transcript_record_summary)
+                .collect(),
+            source_size: snapshot.source_size,
+            current_tool: snapshot.current_tool.map(agent_action_summary),
+            recent_actions: snapshot
+                .recent_actions
+                .into_iter()
+                .map(agent_action_summary)
+                .collect(),
+            token_count: snapshot.token_count,
+            context_limit: snapshot.context_limit,
+        }
+    })
+    .await?;
+
+    Ok(match read_result {
+        AgentContextReadResult::Unsupported => transcript_unavailable(
+            session_id,
+            tool,
+            cwd,
+            format!("structured transcript is not supported for {tool_name}"),
+        ),
+        AgentContextReadResult::Missing => transcript_unavailable(
+            session_id,
+            tool,
+            cwd,
+            "no matching structured JSONL transcript was found",
+        ),
+        AgentContextReadResult::Snapshot {
+            turns,
+            transcript_records,
+            source_size,
+            ..
+        } => build_transcript_response(
+            session_id,
+            tool,
+            cwd,
+            turns,
+            transcript_records,
+            source_size,
+            query,
+        ),
+    })
+}
+
+fn build_transcript_response(
+    session_id: String,
+    tool: Option<String>,
+    cwd: String,
+    turns: Vec<SessionAgentTurn>,
+    transcript_records: Vec<SessionTranscriptRecord>,
+    source_size: u64,
+    query: TranscriptQuery,
+) -> SessionTranscriptResponse {
+    let selected_turn = query
+        .turn_id
+        .as_deref()
+        .and_then(|turn_id| turns.iter().find(|turn| turn.id == turn_id).cloned())
+        .or_else(|| turns.last().cloned());
+    let turn_cursor = selected_turn
+        .as_ref()
+        .map(|turn| turn.byte_end)
+        .unwrap_or(0);
+    let cursor = query.after.unwrap_or(turn_cursor).max(turn_cursor);
+    let limit = query.limit.unwrap_or(80).clamp(1, 240);
+    let records = transcript_records
+        .into_iter()
+        .filter(|record| record.byte_start >= cursor)
+        .take(limit)
+        .collect::<Vec<_>>();
+    let next_cursor = records
+        .iter()
+        .map(|record| record.byte_end)
+        .max()
+        .unwrap_or_else(|| source_size.max(cursor));
+
+    SessionTranscriptResponse {
+        session_id,
+        available: true,
+        tool,
+        cwd,
+        selected_turn_id: selected_turn.as_ref().map(|turn| turn.id.clone()),
+        selected_turn,
+        next_cursor,
+        records,
+        turns,
+        message: None,
+    }
+}
+
+fn transcript_unavailable(
+    session_id: String,
+    tool: Option<String>,
+    cwd: String,
+    message: impl Into<String>,
+) -> SessionTranscriptResponse {
+    SessionTranscriptResponse {
+        session_id,
+        available: false,
+        tool,
+        cwd,
+        selected_turn_id: None,
+        selected_turn: None,
+        next_cursor: 0,
+        records: Vec::new(),
+        turns: Vec::new(),
+        message: Some(message.into()),
     }
 }
 
@@ -2033,6 +2319,7 @@ pub fn routes() -> Router<Arc<AppState>> {
             "/v1/sessions/{session_id}/agent-context",
             get(get_agent_context),
         )
+        .route("/v1/sessions/{session_id}/transcript", get(get_transcript))
         .route("/v1/sessions/{session_id}/timeline", get(get_timeline))
         .route("/v1/sessions/{session_id}/git-diff", get(get_git_diff))
         .route("/v1/sessions/{session_id}/snapshot", get(get_snapshot))
@@ -2938,11 +3225,104 @@ esac
         assert_eq!(json["tool"], "Codex");
         assert_eq!(json["cwd"], "/tmp/project");
         assert_eq!(json["user_task"], "build the workbench");
+        assert_eq!(json["turns"].as_array().unwrap().len(), 1);
+        assert_eq!(json["turns"][0]["text"], "build the workbench");
         assert_eq!(json["current_tool"]["tool"], "exec");
         assert_eq!(json["current_tool"]["detail"], "cargo test agent_context");
         assert_eq!(json["recent_actions"][0]["tool"], "exec");
         assert_eq!(json["token_count"], 777);
         assert_eq!(json["context_limit"], 258400);
+    }
+
+    #[tokio::test]
+    async fn get_transcript_returns_records_after_selected_user_turn() {
+        let _lock = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let tmp = tempdir().expect("tempdir");
+        let _home_guard = TestEnvVarGuard::set_path("HOME", tmp.path());
+        let sessions_dir = tmp
+            .path()
+            .join(".codex")
+            .join("sessions")
+            .join("2026")
+            .join("05")
+            .join("10");
+        std::fs::create_dir_all(&sessions_dir).expect("sessions dir");
+        std::fs::write(
+            sessions_dir.join("rollout-transcript.jsonl"),
+            [
+                json!({"type": "session_meta", "payload": {"cwd": "/tmp/project"}}).to_string(),
+                json!({"type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "<environment_context>skip me</environment_context>"}]}}).to_string(),
+                json!({"type": "event_msg", "payload": {"type": "user_message", "message": "first turn"}}).to_string(),
+                json!({"type": "response_item", "payload": {"type": "function_call", "name": "exec", "arguments": "{\"command\":\"cargo test first\"}"}}).to_string(),
+                json!({"type": "event_msg", "payload": {"type": "user_message", "message": "second turn"}}).to_string(),
+                json!({"type": "event_msg", "payload": {"type": "agent_message", "message": "working after second"}}).to_string(),
+            ]
+            .join("\n")
+                + "\n",
+        )
+        .expect("target rollout");
+
+        let state = test_state();
+        let _write_rx =
+            insert_summary_test_handle(&state, summary("sess-transcript", SessionState::Idle))
+                .await;
+
+        let context_response = get_agent_context(
+            Extension(AuthInfo::new(OPERATOR_SCOPES.to_vec())),
+            State(state.clone()),
+            Path("sess-transcript".to_string()),
+        )
+        .await;
+        assert_eq!(context_response.status(), StatusCode::OK);
+        let context_json = response_json(context_response).await;
+        let turns = context_json["turns"].as_array().expect("turns");
+        assert_eq!(
+            turns
+                .iter()
+                .map(|turn| turn["text"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            vec!["first turn", "second turn"]
+        );
+        assert!(
+            !turns.iter().any(|turn| turn["text"]
+                .as_str()
+                .unwrap()
+                .contains("environment_context")),
+            "system/environment records must not appear as user turns"
+        );
+
+        let first_turn_id = turns[0]["id"].as_str().unwrap().to_string();
+        let response = get_transcript(
+            Extension(AuthInfo::new(OPERATOR_SCOPES.to_vec())),
+            State(state),
+            Path("sess-transcript".to_string()),
+            Query(TranscriptQuery {
+                turn_id: Some(first_turn_id),
+                after: None,
+                limit: Some(10),
+            }),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let json = response_json(response).await;
+        assert_eq!(json["available"], true);
+        assert_eq!(json["selected_turn"]["text"], "first turn");
+        let records = json["records"].as_array().expect("records");
+        assert_eq!(records[0]["kind"], "function_call");
+        assert!(records[0]["summary"]
+            .as_str()
+            .unwrap()
+            .contains("cargo test first"));
+        assert!(
+            records
+                .iter()
+                .any(|record| record["summary"].as_str().unwrap().contains("second turn")),
+            "stream should include later JSONL records after the selected turn"
+        );
+        assert!(json["next_cursor"].as_u64().unwrap() > turns[0]["byte_end"].as_u64().unwrap());
     }
 
     #[tokio::test]

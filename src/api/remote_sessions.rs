@@ -15,7 +15,7 @@ use crate::types::{
     CreateSessionRequest, CreateSessionResponse, CreateSessionsBatchRequest,
     CreateSessionsBatchResponse, ErrorResponse, LaunchPathMapping, LaunchTargetSummary,
     SessionAgentContextResponse, SessionGitDiffResponse, SessionListResponse, SessionSummary,
-    SessionTimelineResponse,
+    SessionTimelineResponse, SessionTranscriptResponse,
 };
 
 const REMOTE_LIST_TIMEOUT: Duration = Duration::from_millis(900);
@@ -446,6 +446,37 @@ pub async fn fetch_remote_timeline(
         response.session_id = namespace_session_id(&target.id, &response.session_id);
         response
     })
+}
+
+pub async fn fetch_remote_transcript(
+    target: &LaunchTargetSummary,
+    remote_session_id: &str,
+    turn_id: Option<&str>,
+    after: Option<u64>,
+    limit: Option<usize>,
+) -> Result<SessionTranscriptResponse, RemoteSessionError> {
+    let mut query = Vec::new();
+    if let Some(turn_id) = turn_id.filter(|turn_id| !turn_id.trim().is_empty()) {
+        query.push(("turn_id".to_string(), turn_id.to_string()));
+    }
+    if let Some(after) = after {
+        query.push(("after".to_string(), after.to_string()));
+    }
+    if let Some(limit) = limit {
+        query.push(("limit".to_string(), limit.to_string()));
+    }
+    let query_refs = query
+        .iter()
+        .map(|(key, value)| (key.as_str(), value.as_str()))
+        .collect::<Vec<_>>();
+    let mut response: SessionTranscriptResponse = get_remote_json_with_query(
+        target,
+        &format!("/v1/sessions/{remote_session_id}/transcript"),
+        &query_refs,
+    )
+    .await?;
+    response.session_id = namespace_session_id(&target.id, &response.session_id);
+    Ok(response)
 }
 
 pub async fn fetch_remote_git_diff(

@@ -2532,7 +2532,7 @@ fn is_probable_skill_name(raw: &str) -> bool {
 }
 
 fn is_builtin_skill_name(normalized: &str) -> bool {
-    matches!(normalized, "commit" | "describe" | "gog")
+    matches!(normalized, "commit" | "describe" | "domain-planner" | "gog")
 }
 
 fn installed_skill_names() -> Option<&'static HashSet<String>> {

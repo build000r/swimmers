@@ -137,7 +137,7 @@ SWIMMERS_TUI_URL=http://127.0.0.1:3210 swimmers-tui
 
 From a source checkout, use `make up` when you want the browser surface and the TUI attached to the same local backend. It builds the current checkout, requires resolvable FrankenTerm assets, replaces any existing local `swimmers` listener on `PORT` so stale code is not reused, prints the browser URLs, then launches the TUI with `SWIMMERS_TUI_URL` and `SWIMMERS_TUI_REUSE_SERVER=1` so it does not clear that backend. The launcher defaults to `--features personal-workflows` so click-to-spawn endpoints such as `/v1/dirs` are available; set `SWIMMERS_UP_FEATURES` to override the feature list.
 
-The browser Trogdor view is terminal-first. Selecting one agent opens a single-session cockpit: the live terminal remains the primary surface, the bottom composer sends input without covering model output, and the workbench panels read the session timeline, structured git diff, recent logs, Mermaid/plan artifacts, and passive Skillbox/SBP Skills results. The Skills panel identifies relevant skills when `personal-workflows` is enabled and `sbp` is available; it does not perform automatic skill hot-swap or mutate overlays.
+The browser Trogdor view is terminal-first. Selecting one agent opens a single-session cockpit: the live terminal remains the primary surface, the bottom composer sends input without covering model output, and the workbench panels read the session timeline, user-submitted turns, post-turn JSONL records, structured git diff, Mermaid/plan artifacts, and passive Skillbox/SBP Skills results. The Skills panel identifies relevant skills when `personal-workflows` is enabled and `sbp` is available; it does not perform automatic skill hot-swap or mutate overlays.
 
 The `make tui` wrapper clears a stale loopback `swimmers` process on the target API port before launching, so local overlay edits are reread instead of silently reusing an old server. Set `SWIMMERS_TUI_REUSE_SERVER=1` to keep an existing local backend.
 
@@ -368,6 +368,7 @@ Set `SWIMMERS_TUI_URL` to split the API into its own process. Multiple TUIs, hea
 | `DELETE` | `/v1/sessions/{id}` | Remove a session |
 | `GET` | `/v1/sessions/{id}/snapshot` | Capture visible screen text |
 | `GET` | `/v1/sessions/{id}/timeline` | Ordered single-session timeline with pinned task, diff, log, and artifact summaries |
+| `GET` | `/v1/sessions/{id}/transcript` | User turns and post-turn JSONL records for the latest or selected turn |
 | `GET` | `/v1/sessions/{id}/pane-tail` | Recent pane output |
 | `GET` | `/v1/sessions/{id}/git-diff` | Raw and structured git diff summaries |
 | `GET` | `/v1/sessions/{id}/mermaid-artifact` | Mermaid/plan artifact metadata and source |

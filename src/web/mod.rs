@@ -1408,6 +1408,10 @@ mod tests {
         assert!(js.contains("Tool calls"));
         assert!(js.contains("/agent-context"));
         assert!(js.contains("/pane-tail"));
+        assert!(js.contains("/transcript"));
+        assert!(js.contains("function renderTurnsPanel"));
+        assert!(js.contains("function flushPendingTerminalBytes"));
+        assert!(js.contains("Post-turn JSONL"));
         assert!(js.contains("/mermaid-artifact"));
         assert!(js.contains("/git-diff"));
         assert!(js.contains("function renderDiffHtml"));

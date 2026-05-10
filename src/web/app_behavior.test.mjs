@@ -242,6 +242,9 @@ function resetWebState() {
   web.state.trogdorAwaitingSessionIds = new Set();
   web.state.hud = null;
   web.state.terminal = null;
+  web.state.terminalAcceptsBytes = true;
+  web.state.pendingTerminalByteChunks = [];
+  web.state.pendingTerminalByteLength = 0;
   web.state.frankenModule = null;
   web.state.frankenInit = null;
   web.state.frankenFontInit = null;
@@ -264,6 +267,9 @@ function resetWebState() {
     timeline: null,
     skills: null,
     paneTail: null,
+    transcript: null,
+    transcriptTurnId: "",
+    transcriptNextCursor: 0,
     artifact: null,
     gitDiff: null,
     error: "",
@@ -273,6 +279,7 @@ function resetWebState() {
   web.state.workbenchLogMode = "lens";
   web.state.workbenchLogFilter = "all";
   web.state.workbenchLogSearch = "";
+  web.state.workbenchSelectedTurnId = "";
   web.state.readOnly = false;
   web.state.terminalFallbackActive = false;
   web.state.terminalFallbackAutoFollow = true;
@@ -621,6 +628,35 @@ test("terminal text fallback refreshes from live terminal frames", () => {
   assert.equal(web.el.terminalFallback.textContent, "$ echo hi");
 });
 
+test("terminal bytes are buffered until FrankenTerm accepts input", () => {
+  resetWebState();
+  web.state.selectedSessionId = "sess_0";
+  const received = [];
+  web.state.terminal = {
+    feed(bytes) {
+      received.push(new TextDecoder().decode(bytes));
+    },
+    drainEncodedInputBytes() {
+      return new Uint8Array();
+    },
+    screenReaderMirrorText() {
+      return received.join("");
+    },
+    render() {},
+  };
+  web.state.terminalAcceptsBytes = false;
+
+  assert.equal(web.feedTerminalBytes(new TextEncoder().encode("boot output")), true);
+  assert.equal(received.length, 0);
+  assert.equal(web.state.pendingTerminalByteLength, "boot output".length);
+
+  web.state.terminalAcceptsBytes = true;
+  assert.equal(web.flushPendingTerminalBytes(), true);
+
+  assert.deepEqual(received, ["boot output"]);
+  assert.equal(web.state.pendingTerminalByteLength, 0);
+});
+
 test("terminal text fallback does not replace a useful snapshot with blank live frames", () => {
   resetWebState();
   web.state.selectedSessionId = "sess_0";
@@ -801,6 +837,7 @@ test("terminal workbench fetches and renders selected agent context", async () =
       tool: "Codex",
       cwd: "/tmp/project",
       user_task: "build the workbench",
+      turns: [{ id: "codex-turn-10", source: "Codex", text: "build the workbench", order: 1, byte_start: 10, byte_end: 80 }],
       current_tool: { tool: "exec", detail: "cargo test agent_context" },
       recent_actions: [
         { tool: "exec", detail: "cargo test agent_context" },
@@ -870,6 +907,7 @@ test("terminal workbench pinned widgets render pane output and artifacts from se
   web.state.agentContextPayload = {
     session_id: "sess_0",
     available: true,
+    turns: [{ id: "codex-turn-10", source: "Codex", text: "build the cockpit", order: 1, byte_start: 10, byte_end: 80 }],
     current_tool: { tool: "exec", detail: "cargo test" },
     recent_actions: [{ tool: "read", detail: "src/web/app.js" }],
   };
@@ -905,6 +943,42 @@ test("terminal workbench pinned widgets render pane output and artifacts from se
       return jsonResponse(200, {
         session_id: "sess_0",
         text: "cargo test\nfinished green\n",
+      });
+    }
+    if (String(path).includes("/transcript?")) {
+      return jsonResponse(200, {
+        session_id: "sess_0",
+        available: true,
+        cwd: "/tmp/project",
+        tool: "Codex",
+        selected_turn_id: "codex-turn-10",
+        selected_turn: { id: "codex-turn-10", source: "Codex", text: "build the cockpit", order: 1, byte_start: 10, byte_end: 80 },
+        next_cursor: 240,
+        turns: [
+          { id: "codex-turn-10", source: "Codex", text: "build the cockpit", order: 1, byte_start: 10, byte_end: 80 },
+        ],
+        records: [
+          {
+            id: "codex-record-100",
+            source: "Codex",
+            kind: "function_call",
+            summary: "exec: cargo test",
+            raw: "{\"type\":\"response_item\",\"payload\":{\"type\":\"function_call\"}}",
+            byte_start: 100,
+            byte_end: 160,
+            truncated: false,
+          },
+          {
+            id: "codex-record-170",
+            source: "Codex",
+            kind: "agent_message",
+            summary: "finished green",
+            raw: "{\"type\":\"event_msg\",\"payload\":{\"type\":\"agent_message\",\"message\":\"finished green\"}}",
+            byte_start: 170,
+            byte_end: 240,
+            truncated: false,
+          },
+        ],
       });
     }
     if (String(path).endsWith("/mermaid-artifact")) {
@@ -946,8 +1020,12 @@ test("terminal workbench pinned widgets render pane output and artifacts from se
   assert.ok(requested.includes("/v1/sessions/sess_0/timeline"));
   assert.ok(requested.includes("/v1/sessions/sess_0/skills?source=sbp"));
   assert.ok(requested.includes("/v1/sessions/sess_0/pane-tail"));
+  assert.ok(requested.some((path) => String(path).startsWith("/v1/sessions/sess_0/transcript?")));
   assert.ok(requested.includes("/v1/sessions/sess_0/mermaid-artifact"));
   assert.ok(requested.includes("/v1/sessions/sess_0/git-diff"));
+  assert.ok(web.el.terminalWorkbenchWidgets.innerHTML.includes("Turns"));
+  assert.ok(web.el.terminalWorkbenchWidgets.innerHTML.includes("build the cockpit"));
+  assert.ok(web.el.terminalWorkbenchWidgets.innerHTML.includes("Post-turn JSONL"));
   assert.ok(web.el.terminalWorkbenchWidgets.innerHTML.includes("Activity"));
   assert.ok(web.el.terminalWorkbenchWidgets.innerHTML.includes("workbench-log-lens"));
   assert.ok(web.el.terminalWorkbenchWidgets.innerHTML.includes("data-log-kind=\"command\""));
@@ -1020,6 +1098,72 @@ test("workbench transcript lens classifies, filters, searches, and preserves raw
   assert.ok(html.includes("workbench-log-raw"));
   assert.ok(html.includes("&lt;secret&gt;"));
   assert.equal(html.includes("<secret>"), false);
+});
+
+test("workbench Turns panel is user-only and logs follow selected post-turn JSONL", () => {
+  resetWebState();
+  web.state.selectedSessionId = "sess_0";
+  web.state.trogdorAtlasOpen = false;
+  web.state.workbenchWidgets.sessionId = "sess_0";
+  web.state.agentContextSessionId = "sess_0";
+  web.state.agentContextPayload = {
+    available: true,
+    turns: [
+      { id: "turn-1", source: "Codex", text: "first user turn", order: 1, byte_start: 10, byte_end: 40 },
+      { id: "turn-2", source: "Codex", text: "second user turn", order: 2, byte_start: 90, byte_end: 130 },
+    ],
+    recent_actions: [{ tool: "exec", detail: "assistant tool call" }],
+  };
+  web.state.workbenchSelectedTurnId = "turn-1";
+  web.state.workbenchWidgets.transcript = {
+    session_id: "sess_0",
+    available: true,
+    selected_turn_id: "turn-1",
+    selected_turn: { id: "turn-1", source: "Codex", text: "first user turn", order: 1, byte_start: 10, byte_end: 40 },
+    next_cursor: 190,
+    turns: web.state.agentContextPayload.turns,
+    records: [
+      {
+        id: "record-50",
+        source: "Codex",
+        kind: "function_call",
+        role: null,
+        summary: "exec: cargo test selected turn",
+        raw: "{\"type\":\"response_item\",\"payload\":{\"type\":\"function_call\",\"name\":\"exec\"}}",
+        byte_start: 50,
+        byte_end: 90,
+        truncated: false,
+      },
+      {
+        id: "record-140",
+        source: "Codex",
+        kind: "agent_message",
+        role: null,
+        summary: "assistant after selected turn",
+        raw: "{\"type\":\"event_msg\",\"payload\":{\"type\":\"agent_message\",\"message\":\"assistant after selected turn\"}}",
+        byte_start: 140,
+        byte_end: 190,
+        truncated: false,
+      },
+    ],
+  };
+
+  web.renderWorkbenchWidgets();
+
+  let html = web.el.terminalWorkbenchWidgets.innerHTML;
+  assert.ok(html.includes("workbench-turn"));
+  assert.ok(html.includes("first user turn"));
+  assert.ok(html.includes("second user turn"));
+  const turnsSection = html.slice(html.indexOf("workbench-turn-list"), html.indexOf("Post-turn JSONL"));
+  assert.equal(turnsSection.includes("assistant tool call"), false);
+  assert.ok(html.includes("Post-turn JSONL"));
+  assert.ok(html.includes("cargo test selected turn"));
+
+  web.state.workbenchLogMode = "raw";
+  web.renderWorkbenchWidgets();
+  html = web.el.terminalWorkbenchWidgets.innerHTML;
+  assert.ok(html.includes("workbench-log-raw"));
+  assert.ok(html.includes("&quot;function_call&quot;"));
 });
 
 test("terminal text fallback follows the tail unless the user scrolled up", () => {

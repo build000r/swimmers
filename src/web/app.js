@@ -31,6 +31,7 @@ const TERMINAL_ZOOM_MAX = 2.4;
 const TERMINAL_ZOOM_STEP = 0.1;
 const SEND_HISTORY_LIMIT = 8;
 const MAX_TERMINAL_PASTE_BYTES = 786432;
+const MAX_PENDING_TERMINAL_BYTES = 524288;
 const FRANKENTERM_REQUIRED_INSTANCE_METHODS = [
   "init",
   "destroy",
@@ -69,8 +70,11 @@ const state = {
   frankenAssetSummary: "",
   hud: null,
   terminal: null,
+  terminalAcceptsBytes: true,
   terminalSessionId: null,
   ws: null,
+  pendingTerminalByteChunks: [],
+  pendingTerminalByteLength: 0,
   connectionGeneration: 0,
   reconnectTimer: null,
   reconnectAttempt: 0,
@@ -89,6 +93,9 @@ const state = {
     timeline: null,
     skills: null,
     paneTail: null,
+    transcript: null,
+    transcriptTurnId: "",
+    transcriptNextCursor: 0,
     artifact: null,
     gitDiff: null,
     error: "",
@@ -98,6 +105,7 @@ const state = {
   workbenchLogMode: "lens",
   workbenchLogFilter: "all",
   workbenchLogSearch: "",
+  workbenchSelectedTurnId: "",
   refreshTimer: null,
   snapshotTimer: null,
   terminalPaintProbeTimer: null,
@@ -883,6 +891,9 @@ function resetWorkbenchWidgetsForSession(sessionId) {
   state.workbenchWidgets.timeline = null;
   state.workbenchWidgets.skills = null;
   state.workbenchWidgets.paneTail = null;
+  state.workbenchWidgets.transcript = null;
+  state.workbenchWidgets.transcriptTurnId = "";
+  state.workbenchWidgets.transcriptNextCursor = 0;
   state.workbenchWidgets.artifact = null;
   state.workbenchWidgets.gitDiff = null;
   state.workbenchWidgets.error = "";
@@ -890,6 +901,7 @@ function resetWorkbenchWidgetsForSession(sessionId) {
   state.workbenchLogMode = "lens";
   state.workbenchLogFilter = "all";
   state.workbenchLogSearch = "";
+  state.workbenchSelectedTurnId = "";
   renderWorkbenchWidgets();
 }
 
@@ -1102,6 +1114,9 @@ function selectedWorkbenchWidgets() {
         timeline: null,
         skills: null,
         paneTail: null,
+        transcript: null,
+        transcriptTurnId: "",
+        transcriptNextCursor: 0,
         artifact: null,
         gitDiff: null,
         error: "",
@@ -1236,9 +1251,39 @@ function workbenchLogCounts(blocks) {
   }, {});
 }
 
-function renderWorkbenchLogLens(tailText) {
+function transcriptRecordsToLensText(records) {
+  if (!Array.isArray(records) || !records.length) {
+    return "";
+  }
+  return records
+    .map((record) => {
+      const kind = String(record?.kind || "record").replace(/_/g, " ");
+      const summary = String(record?.summary || "").trim();
+      if (/function call|tool call/i.test(kind) && /^exec:\s+/i.test(summary)) {
+        return summary.replace(/^exec:\s+/i, "");
+      }
+      return `${kind}: ${summary || "(empty record)"}`;
+    })
+    .join("\n");
+}
+
+function transcriptRecordsToRawText(records) {
+  if (!Array.isArray(records) || !records.length) {
+    return "";
+  }
+  return records
+    .map((record) => String(record?.raw || "").trim())
+    .filter(Boolean)
+    .join("\n");
+}
+
+function renderWorkbenchLogLens(tailText, options = {}) {
   const excerpt = widgetTextExcerpt(tailText);
+  const rawExcerpt = widgetTextExcerpt(options.rawText ?? tailText);
   const hasText = Boolean(excerpt.trim());
+  const rawHasText = Boolean(rawExcerpt.trim());
+  const title = options.title || "Recent output";
+  const emptyText = options.emptyText || "No recent pane output.";
   const blocks = hasText ? renderTranscriptBlocks(excerpt) : [];
   const counts = workbenchLogCounts(blocks);
   const mode = state.workbenchLogMode === "raw" ? "raw" : "lens";
@@ -1279,14 +1324,14 @@ function renderWorkbenchLogLens(tailText) {
 
   if (mode === "raw") {
     return `
-      <div class="workbench-action-detail">Recent output</div>
+      <div class="workbench-action-detail">${escapeHtml(title)}</div>
       ${controls}
-      ${hasText ? `<pre class="workbench-log-raw">${escapeHtml(excerpt)}</pre>` : `<div>No recent pane output.</div>`}
+      ${rawHasText ? `<pre class="workbench-log-raw">${escapeHtml(rawExcerpt)}</pre>` : `<div>${escapeHtml(emptyText)}</div>`}
     `;
   }
 
   const blocksHtml = !hasText
-    ? `<div class="workbench-log-empty">No recent pane output.</div>`
+    ? `<div class="workbench-log-empty">${escapeHtml(emptyText)}</div>`
     : filteredBlocks.length
     ? filteredBlocks
         .map((block) => {
@@ -1308,7 +1353,7 @@ function renderWorkbenchLogLens(tailText) {
     : `<div class="workbench-log-empty">No log blocks match.</div>`;
 
   return `
-    <div class="workbench-action-detail">Recent output</div>
+    <div class="workbench-action-detail">${escapeHtml(title)}</div>
     <div class="workbench-log-lens">
       ${controls}
       ${countChips ? `<div class="workbench-log-chips">${countChips}</div>` : ""}
@@ -1363,6 +1408,33 @@ function renderTimelineEvents(events, emptyText = "No timeline events.") {
         )
         .join("")}
     </ul>
+  `;
+}
+
+function renderTurnsPanel(turns, selectedTurnId) {
+  if (!Array.isArray(turns) || !turns.length) {
+    return `<div>No user-submitted turns found.</div>`;
+  }
+  return `
+    <div class="workbench-turn-list" role="list">
+      ${turns
+        .slice(-20)
+        .map((turn) => {
+          const id = String(turn?.id || "");
+          const selected = id && id === selectedTurnId;
+          const label = `Turn ${turn?.order || "?"}`;
+          const text = truncateWorkbenchText(turn?.text || "", 180);
+          const meta = [turn?.source, turn?.timestamp].filter(Boolean).join(" · ");
+          return `
+            <button class="workbench-turn ${selected ? "is-selected" : ""}" type="button" data-workbench-turn-id="${escapeHtml(id)}" aria-pressed="${selected ? "true" : "false"}">
+              <span class="workbench-turn-label">${escapeHtml(label)}</span>
+              <span class="workbench-turn-text">${escapeHtml(text || "Empty turn")}</span>
+              ${meta ? `<span class="workbench-turn-meta">${escapeHtml(meta)}</span>` : ""}
+            </button>
+          `;
+        })
+        .join("")}
+    </div>
   `;
 }
 
@@ -1439,10 +1511,26 @@ function renderWorkbenchWidgets() {
   const artifactEvent = timelineEventsByKind(timeline, "artifact")[0];
   const diffEvent = timelineEventsByKind(timeline, "diff")[0];
   const tailText = widgets.paneTail?.text || paneEvent?.detail || "";
-  const lines = tailLineCount(tailText);
+  const contextPayload = selectedAgentContextPayload();
+  const transcript = widgets.transcript;
+  const transcriptRecords = Array.isArray(transcript?.records) ? transcript.records : [];
+  const turns = Array.isArray(transcript?.turns) && transcript.turns.length
+    ? transcript.turns
+    : Array.isArray(contextPayload?.turns)
+      ? contextPayload.turns
+      : [];
+  const selectedTurnId =
+    state.workbenchSelectedTurnId ||
+    transcript?.selected_turn_id ||
+    turns.at(-1)?.id ||
+    "";
+  const transcriptAvailable = Boolean(transcript?.available);
+  const transcriptText = transcriptRecordsToLensText(transcriptRecords);
+  const transcriptRawText = transcriptRecordsToRawText(transcriptRecords);
+  const useTranscriptLogs = transcriptAvailable && (Boolean(transcript?.selected_turn) || transcriptRecords.length > 0);
+  const lines = useTranscriptLogs ? transcriptRecords.length : tailLineCount(tailText);
   const artifact = widgets.artifact;
   const gitDiff = widgets.gitDiff;
-  const contextPayload = selectedAgentContextPayload();
   const toolActions = [
     contextPayload?.current_tool,
     ...(Array.isArray(contextPayload?.recent_actions) ? contextPayload.recent_actions : []),
@@ -1469,7 +1557,13 @@ function renderWorkbenchWidgets() {
     : widgets.error
       ? `<div class="workbench-action-detail">${escapeHtml(widgets.error)}</div>`
       : "";
-  const outputBody = renderWorkbenchLogLens(tailText);
+  const outputBody = useTranscriptLogs
+    ? renderWorkbenchLogLens(transcriptText, {
+        title: "Post-turn JSONL",
+        rawText: transcriptRawText,
+        emptyText: "No JSONL records after this turn yet.",
+      })
+    : renderWorkbenchLogLens(tailText);
   const activityBody = activityEvents.length
     ? `${activityEvents.some((event) => event?.kind === "tool_call") ? `<div class="workbench-action-detail">Tool calls</div>` : ""}${renderTimelineEvents(activityEvents, "No structured activity.")}`
     : toolActions.length
@@ -1513,6 +1607,20 @@ function renderWorkbenchWidgets() {
 
   el.terminalWorkbenchWidgets.innerHTML = `
     ${status}
+    <details class="workbench-widget" open>
+      <summary>
+        <span class="workbench-widget-title">Turns</span>
+        <span class="workbench-widget-meta">${turns.length ? `${turns.length} user` : "empty"}</span>
+      </summary>
+      <div class="workbench-widget-body">${renderTurnsPanel(turns, selectedTurnId)}</div>
+    </details>
+    <details class="workbench-widget" open>
+      <summary>
+        <span class="workbench-widget-title">Logs</span>
+        <span class="workbench-widget-meta">${useTranscriptLogs ? `${lines} records` : lines ? `${lines} lines` : "empty"}</span>
+      </summary>
+      <div class="workbench-widget-body">${outputBody}</div>
+    </details>
     <details class="workbench-widget" ${activityEvents.length || toolActions.length ? "open" : ""}>
       <summary>
         <span class="workbench-widget-title">Activity</span>
@@ -1526,13 +1634,6 @@ function renderWorkbenchWidgets() {
         <span class="workbench-widget-meta">${escapeHtml(diffMeta)}</span>
       </summary>
       <div class="workbench-widget-body">${diffBody}</div>
-    </details>
-    <details class="workbench-widget" open>
-      <summary>
-        <span class="workbench-widget-title">Logs</span>
-        <span class="workbench-widget-meta">${lines ? `${lines} lines` : "empty"}</span>
-      </summary>
-      <div class="workbench-widget-body">${outputBody}</div>
     </details>
     <details class="workbench-widget">
       <summary>
@@ -1566,6 +1667,7 @@ async function refreshWorkbenchWidgetsForSelectedSession(options = {}) {
     (Boolean(state.workbenchWidgets.timeline) ||
       Boolean(state.workbenchWidgets.skills) ||
       Boolean(state.workbenchWidgets.paneTail) ||
+      Boolean(state.workbenchWidgets.transcript) ||
       Boolean(state.workbenchWidgets.artifact));
   if (
     options.throttle &&
@@ -1588,12 +1690,29 @@ async function refreshWorkbenchWidgetsForSelectedSession(options = {}) {
   const timelinePath = `/v1/sessions/${encodeURIComponent(sessionId)}/timeline`;
   const skillsPath = `/v1/sessions/${encodeURIComponent(sessionId)}/skills?source=sbp`;
   const tailPath = `/v1/sessions/${encodeURIComponent(sessionId)}/pane-tail`;
+  const transcriptParams = new URLSearchParams();
+  const requestedTurnId = state.workbenchSelectedTurnId || "";
+  const canDeltaTranscript =
+    !options.force &&
+    state.workbenchWidgets.sessionId === sessionId &&
+    state.workbenchWidgets.transcript &&
+    state.workbenchWidgets.transcriptTurnId === requestedTurnId &&
+    state.workbenchWidgets.transcriptNextCursor > 0;
+  if (requestedTurnId) {
+    transcriptParams.set("turn_id", requestedTurnId);
+  }
+  if (canDeltaTranscript) {
+    transcriptParams.set("after", String(state.workbenchWidgets.transcriptNextCursor));
+  }
+  transcriptParams.set("limit", canDeltaTranscript ? "80" : "160");
+  const transcriptPath = `/v1/sessions/${encodeURIComponent(sessionId)}/transcript?${transcriptParams.toString()}`;
   const artifactPath = `/v1/sessions/${encodeURIComponent(sessionId)}/mermaid-artifact`;
   const diffPath = `/v1/sessions/${encodeURIComponent(sessionId)}/git-diff`;
-  const [timelineResult, skillsResult, tailResult, artifactResult, diffResult] = await Promise.allSettled([
+  const [timelineResult, skillsResult, tailResult, transcriptResult, artifactResult, diffResult] = await Promise.allSettled([
     apiMaybeFetch(timelinePath).then(responseJsonOrNull),
     apiMaybeFetch(skillsPath).then(responseJsonOrNull),
     apiMaybeFetch(tailPath).then(responseJsonOrNull),
+    apiMaybeFetch(transcriptPath).then(responseJsonOrNull),
     apiMaybeFetch(artifactPath).then(responseJsonOrNull),
     apiMaybeFetch(diffPath).then(responseJsonOrNull),
   ]);
@@ -1622,6 +1741,45 @@ async function refreshWorkbenchWidgetsForSelectedSession(options = {}) {
   } else {
     state.workbenchWidgets.paneTail = null;
     errors.push(`output: ${tailResult.reason?.message || "unavailable"}`);
+  }
+
+  if (transcriptResult.status === "fulfilled") {
+    const nextTranscript = transcriptResult.value;
+    if (nextTranscript) {
+      const previous = state.workbenchWidgets.transcript;
+      const previousRecords = Array.isArray(previous?.records) ? previous.records : [];
+      const nextRecords = Array.isArray(nextTranscript?.records) ? nextTranscript.records : [];
+      const mergeDelta =
+        canDeltaTranscript &&
+        previous &&
+        (nextTranscript?.selected_turn_id || "") === (previous?.selected_turn_id || "");
+      if (mergeDelta) {
+        const byId = new Map();
+        for (const record of previousRecords.concat(nextRecords)) {
+          if (record?.id) {
+            byId.set(record.id, record);
+          }
+        }
+        nextTranscript.records = Array.from(byId.values())
+          .sort((left, right) => Number(left?.byte_start || 0) - Number(right?.byte_start || 0))
+          .slice(-240);
+      }
+      state.workbenchWidgets.transcript = nextTranscript;
+      state.workbenchWidgets.transcriptTurnId = requestedTurnId || nextTranscript?.selected_turn_id || "";
+      state.workbenchWidgets.transcriptNextCursor = Number(nextTranscript?.next_cursor || 0);
+      if (!state.workbenchSelectedTurnId && nextTranscript?.selected_turn_id) {
+        state.workbenchSelectedTurnId = nextTranscript.selected_turn_id;
+      }
+    } else {
+      state.workbenchWidgets.transcript = null;
+      state.workbenchWidgets.transcriptTurnId = "";
+      state.workbenchWidgets.transcriptNextCursor = 0;
+    }
+  } else {
+    state.workbenchWidgets.transcript = null;
+    state.workbenchWidgets.transcriptTurnId = "";
+    state.workbenchWidgets.transcriptNextCursor = 0;
+    errors.push(`transcript: ${transcriptResult.reason?.message || "unavailable"}`);
   }
 
   if (artifactResult.status === "fulfilled") {
@@ -4051,10 +4209,12 @@ function destroyTerminalInstance() {
   state.selectionFocus = null;
   clearHoveredLink(false);
   clearTerminalPaintProbe();
+  clearPendingTerminalBytes();
   if (state.terminal) {
     state.terminal.destroy();
     state.terminal = null;
   }
+  state.terminalAcceptsBytes = false;
   state.terminalSessionId = null;
   state.terminalFallbackAutoFollow = true;
   state.terminalMirrorText = "";
@@ -4064,6 +4224,41 @@ function destroyTerminalInstance() {
     el.terminalA11yMirror.value = "";
   }
   el.terminalCanvas.classList.add("hidden");
+}
+
+function clearPendingTerminalBytes() {
+  state.pendingTerminalByteChunks = [];
+  state.pendingTerminalByteLength = 0;
+}
+
+function bufferTerminalBytes(bytes) {
+  if (!(bytes instanceof Uint8Array) || bytes.byteLength === 0) {
+    return false;
+  }
+  const copy = new Uint8Array(bytes);
+  state.pendingTerminalByteChunks.push(copy);
+  state.pendingTerminalByteLength += copy.byteLength;
+  while (
+    state.pendingTerminalByteLength > MAX_PENDING_TERMINAL_BYTES &&
+    state.pendingTerminalByteChunks.length > 1
+  ) {
+    const dropped = state.pendingTerminalByteChunks.shift();
+    state.pendingTerminalByteLength -= dropped?.byteLength || 0;
+  }
+  setConnectionStatus("buffering terminal; renderer attaching");
+  return true;
+}
+
+function flushPendingTerminalBytes() {
+  if (!state.terminal || !state.pendingTerminalByteChunks.length) {
+    return false;
+  }
+  const chunks = state.pendingTerminalByteChunks;
+  clearPendingTerminalBytes();
+  for (const chunk of chunks) {
+    feedTerminalBytes(chunk);
+  }
+  return true;
 }
 
 function clearTerminalPaintProbe() {
@@ -4184,7 +4379,9 @@ async function setupTerminalSurface() {
       FRANKENTERM_TERMINAL_METHODS,
       "terminal renderer",
     );
+    state.terminalAcceptsBytes = false;
     await state.terminal.init(el.terminalCanvas, undefined);
+    state.terminalAcceptsBytes = true;
   } catch (error) {
     destroyTerminalInstance();
     setTerminalTextFallbackActive(true, { clearText: false });
@@ -4213,6 +4410,7 @@ async function setupTerminalSurface() {
   syncTerminalAccessibilityMirror();
   syncTerminalTools();
   measureAndResizeSurface(true, true);
+  flushPendingTerminalBytes();
   setLoadingState(false);
 }
 
@@ -4471,8 +4669,11 @@ async function connectSelectedSession() {
 }
 
 function feedTerminalBytes(bytes) {
-  if (!state.terminal || !(bytes instanceof Uint8Array)) {
+  if (!(bytes instanceof Uint8Array)) {
     return false;
+  }
+  if (!state.terminal || !state.terminalAcceptsBytes) {
+    return bufferTerminalBytes(bytes);
   }
 
   state.terminal.feed(bytes);
@@ -6470,6 +6671,19 @@ function bindEvents() {
     focusTerminalInputSurface({ preventScroll: true });
   });
   el.terminalWorkbenchWidgets.addEventListener("click", (event) => {
+    const turnButton = event.target?.closest?.("[data-workbench-turn-id]");
+    if (turnButton) {
+      event.preventDefault();
+      state.workbenchSelectedTurnId = String(turnButton.dataset.workbenchTurnId || "");
+      state.workbenchWidgets.transcript = null;
+      state.workbenchWidgets.transcriptTurnId = "";
+      state.workbenchWidgets.transcriptNextCursor = 0;
+      renderWorkbenchWidgets();
+      void refreshWorkbenchWidgetsForSelectedSession({ force: true, silent: true });
+      focusTerminalInputSurface({ preventScroll: true });
+      return;
+    }
+
     const logModeButton = event.target?.closest?.("[data-workbench-log-mode]");
     if (logModeButton) {
       event.preventDefault();
@@ -7349,6 +7563,7 @@ export const __swimmersWebTest = {
   renderHudSurface,
   syncTerminalPresentation,
   feedTerminalBytes,
+  flushPendingTerminalBytes,
   setTerminalTextFallbackActive,
   updateTerminalFallbackText,
   terminalFallbackOwnsPointer,

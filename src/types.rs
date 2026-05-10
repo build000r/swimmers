@@ -483,6 +483,34 @@ pub struct AgentContextActionSummary {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SessionAgentTurn {
+    pub id: String,
+    pub source: String,
+    pub text: String,
+    pub byte_start: u64,
+    pub byte_end: u64,
+    pub order: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timestamp: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SessionTranscriptRecord {
+    pub id: String,
+    pub source: String,
+    pub kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
+    pub summary: String,
+    pub raw: String,
+    pub byte_start: u64,
+    pub byte_end: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timestamp: Option<String>,
+    pub truncated: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SessionAgentContextResponse {
     pub session_id: String,
     pub available: bool,
@@ -491,12 +519,34 @@ pub struct SessionAgentContextResponse {
     pub cwd: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub user_task: Option<String>,
+    #[serde(default)]
+    pub turns: Vec<SessionAgentTurn>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub current_tool: Option<AgentContextActionSummary>,
     #[serde(default)]
     pub recent_actions: Vec<AgentContextActionSummary>,
     pub token_count: u64,
     pub context_limit: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SessionTranscriptResponse {
+    pub session_id: String,
+    pub available: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool: Option<String>,
+    pub cwd: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selected_turn_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selected_turn: Option<SessionAgentTurn>,
+    pub next_cursor: u64,
+    #[serde(default)]
+    pub records: Vec<SessionTranscriptRecord>,
+    #[serde(default)]
+    pub turns: Vec<SessionAgentTurn>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
 }

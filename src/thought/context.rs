@@ -22,6 +22,9 @@ use tracing::warn;
 #[derive(Debug, Clone)]
 pub struct ContextSnapshot {
     pub user_task: Option<String>,
+    pub user_turns: Vec<AgentUserTurn>,
+    pub transcript_records: Vec<AgentTranscriptRecord>,
+    pub source_size: u64,
     pub recent_actions: Vec<AgentAction>,
     pub current_tool: Option<AgentAction>,
     /// Most recent `input_tokens` from assistant message usage data.
@@ -36,6 +39,41 @@ pub struct ContextSnapshot {
 pub struct AgentAction {
     pub tool: String,
     pub detail: Option<String>,
+}
+
+/// A user-submitted turn found in an agent JSONL log.
+#[derive(Debug, Clone)]
+pub struct AgentUserTurn {
+    pub id: String,
+    pub source: String,
+    pub text: String,
+    pub byte_start: u64,
+    pub byte_end: u64,
+    pub order: u64,
+    pub timestamp: Option<String>,
+}
+
+/// A byte-addressed JSONL record in the agent transcript.
+#[derive(Debug, Clone)]
+pub struct AgentTranscriptRecord {
+    pub id: String,
+    pub source: String,
+    pub kind: String,
+    pub role: Option<String>,
+    pub summary: String,
+    pub raw: String,
+    pub byte_start: u64,
+    pub byte_end: u64,
+    pub timestamp: Option<String>,
+    pub truncated: bool,
+}
+
+#[derive(Debug, Clone)]
+struct JsonlEntry {
+    value: Value,
+    raw: String,
+    byte_start: u64,
+    byte_end: u64,
 }
 
 /// Trait implemented by each agent-specific reader.
@@ -73,7 +111,10 @@ pub fn context_reader_for(
 // Shared helpers
 // ---------------------------------------------------------------------------
 
-const BOOTSTRAP_MAX: u64 = 1024 * 1024; // 1 MB
+const BOOTSTRAP_MAX: u64 = 16 * 1024 * 1024; // 16 MB
+const USER_TURN_TEXT_MAX_CHARS: usize = 4000;
+const TRANSCRIPT_SUMMARY_MAX_CHARS: usize = 240;
+const TRANSCRIPT_RAW_MAX_CHARS: usize = 4000;
 
 /// Read a byte range `[start, end)` from a file.
 ///
@@ -98,16 +139,220 @@ fn read_range(path: &Path, start: u64, end: u64) -> std::io::Result<Vec<u8>> {
 
 /// Parse JSONL lines from a byte buffer, skipping malformed lines.
 fn parse_jsonl_lines(buf: &[u8]) -> Vec<Value> {
-    let text = String::from_utf8_lossy(buf);
-    text.lines()
-        .filter(|l| !l.is_empty())
-        .filter_map(|l| serde_json::from_str(l).ok())
+    parse_jsonl_entries(buf, 0)
+        .into_iter()
+        .map(|entry| entry.value)
         .collect()
+}
+
+/// Parse JSONL lines and preserve byte offsets relative to the original file.
+fn parse_jsonl_entries(buf: &[u8], base_offset: u64) -> Vec<JsonlEntry> {
+    let mut entries = Vec::new();
+    let mut cursor = 0usize;
+
+    for segment in buf.split_inclusive(|byte| *byte == b'\n') {
+        let segment_start = cursor;
+        cursor += segment.len();
+
+        let mut line = segment;
+        if line.ends_with(b"\n") {
+            line = &line[..line.len().saturating_sub(1)];
+        }
+        if line.ends_with(b"\r") {
+            line = &line[..line.len().saturating_sub(1)];
+        }
+        if line.is_empty() {
+            continue;
+        }
+
+        let raw = String::from_utf8_lossy(line).to_string();
+        let Ok(value) = serde_json::from_str::<Value>(&raw) else {
+            continue;
+        };
+        entries.push(JsonlEntry {
+            value,
+            raw,
+            byte_start: base_offset + segment_start as u64,
+            byte_end: base_offset + cursor as u64,
+        });
+    }
+
+    entries
 }
 
 /// Extract the basename from a path string (last component after `/`).
 fn basename(path_str: &str) -> &str {
     path_str.rsplit('/').next().unwrap_or(path_str)
+}
+
+fn truncate_with_flag(value: &str, max_chars: usize) -> (String, bool) {
+    let mut chars = value.chars();
+    let truncated = chars.by_ref().take(max_chars).collect::<String>();
+    if chars.next().is_some() {
+        (format!("{truncated}..."), true)
+    } else {
+        (truncated, false)
+    }
+}
+
+fn normalized_user_turn_text(text: &str, skip_xml_like: bool) -> Option<String> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if skip_xml_like && trimmed.starts_with('<') {
+        return None;
+    }
+    let (text, _) = truncate_with_flag(trimmed, USER_TURN_TEXT_MAX_CHARS);
+    Some(text)
+}
+
+fn entry_timestamp(entry: &Value) -> Option<String> {
+    entry
+        .get("timestamp")
+        .and_then(Value::as_str)
+        .filter(|timestamp| !timestamp.trim().is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn transcript_record_kind(
+    entry_type: &str,
+    payload: Option<&Value>,
+    message: Option<&Value>,
+) -> String {
+    if entry_type == "response_item" {
+        if let Some(payload_type) = payload
+            .and_then(|payload| payload.get("type"))
+            .and_then(Value::as_str)
+        {
+            return payload_type.to_string();
+        }
+        if let Some(role) = payload
+            .and_then(|payload| payload.get("role"))
+            .and_then(Value::as_str)
+        {
+            return format!("{role}_message");
+        }
+    }
+
+    if entry_type == "event_msg" {
+        if let Some(payload_type) = payload
+            .and_then(|payload| payload.get("type"))
+            .and_then(Value::as_str)
+        {
+            return payload_type.to_string();
+        }
+    }
+
+    if let Some(role) = message
+        .and_then(|message| message.get("role"))
+        .and_then(Value::as_str)
+    {
+        return format!("{role}_message");
+    }
+
+    entry_type.to_string()
+}
+
+fn transcript_record_role(payload: Option<&Value>, message: Option<&Value>) -> Option<String> {
+    payload
+        .and_then(|payload| payload.get("role"))
+        .and_then(Value::as_str)
+        .or_else(|| {
+            message
+                .and_then(|message| message.get("role"))
+                .and_then(Value::as_str)
+        })
+        .map(ToOwned::to_owned)
+}
+
+fn transcript_record_summary(
+    entry_type: &str,
+    payload: Option<&Value>,
+    message: Option<&Value>,
+    raw: &str,
+) -> String {
+    let text = if entry_type == "response_item" {
+        response_item_summary(payload)
+    } else if entry_type == "event_msg" {
+        event_msg_summary(payload)
+    } else {
+        claude_message_summary(message)
+    }
+    .unwrap_or_else(|| raw.to_string());
+
+    let normalized = text.replace('\r', "").replace('\n', " ");
+    truncate(normalized.trim(), TRANSCRIPT_SUMMARY_MAX_CHARS)
+}
+
+fn response_item_summary(payload: Option<&Value>) -> Option<String> {
+    let payload = payload?;
+    if payload.get("type").and_then(Value::as_str) == Some("function_call") {
+        let name = payload
+            .get("name")
+            .and_then(Value::as_str)
+            .unwrap_or("function_call");
+        let detail = payload
+            .get("arguments")
+            .and_then(Value::as_str)
+            .and_then(parse_codex_function_call_detail);
+        return Some(match detail {
+            Some(detail) => format!("{name}: {detail}"),
+            None => name.to_string(),
+        });
+    }
+
+    let content = payload.get("content")?;
+    content_text(content)
+}
+
+fn event_msg_summary(payload: Option<&Value>) -> Option<String> {
+    let payload = payload?;
+    payload
+        .get("message")
+        .and_then(Value::as_str)
+        .or_else(|| payload.get("text").and_then(Value::as_str))
+        .map(ToOwned::to_owned)
+        .or_else(|| {
+            payload
+                .get("type")
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned)
+        })
+}
+
+fn claude_message_summary(message: Option<&Value>) -> Option<String> {
+    let message = message?;
+    content_text(message.get("content")?)
+}
+
+fn content_text(content: &Value) -> Option<String> {
+    if let Some(text) = content.as_str() {
+        return Some(text.to_string());
+    }
+
+    let parts = content
+        .as_array()?
+        .iter()
+        .filter_map(|block| {
+            block
+                .get("text")
+                .and_then(Value::as_str)
+                .or_else(|| block.get("content").and_then(Value::as_str))
+        })
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .collect::<Vec<_>>();
+
+    (!parts.is_empty()).then(|| parts.join("\n"))
+}
+
+fn make_turn_id(source: &str, byte_start: u64) -> String {
+    format!("{source}-turn-{byte_start}")
+}
+
+fn make_record_id(source: &str, byte_start: u64) -> String {
+    format!("{source}-record-{byte_start}")
 }
 
 /// Claude JSONL can contain multiple record kinds; scan a small prefix for
@@ -159,9 +404,12 @@ pub struct ClaudeCodeReader {
     file_path: Option<PathBuf>,
     file_size: u64,
     user_task: Option<String>,
+    user_turns: Vec<AgentUserTurn>,
+    transcript_records: Vec<AgentTranscriptRecord>,
     recent_actions: Vec<AgentAction>,
     current_tool: Option<AgentAction>,
     bootstrapped: bool,
+    next_turn_order: u64,
     /// Most recent input_tokens from assistant message usage.
     token_count: u64,
     context_limit: u64,
@@ -177,9 +425,12 @@ impl ClaudeCodeReader {
             file_path: None,
             file_size: 0,
             user_task: None,
+            user_turns: Vec::new(),
+            transcript_records: Vec::new(),
             recent_actions: Vec::new(),
             current_tool: None,
             bootstrapped: false,
+            next_turn_order: 0,
             token_count: 0,
             context_limit: crate::types::context_limit_for_tool(Some("Claude Code")),
             excluded_paths: excluded.to_vec(),
@@ -211,16 +462,26 @@ impl ClaudeCodeReader {
     }
 
     /// Parse entries and update internal state.
-    fn parse_entries(&mut self, entries: &[Value]) {
+    fn parse_entries(&mut self, entries: &[JsonlEntry]) {
         for entry in entries {
-            let entry_type = entry.get("type").and_then(Value::as_str).unwrap_or("");
-            let msg = entry.get("message");
-            self.capture_claude_user_message(entry_type, msg);
+            let entry_type = entry
+                .value
+                .get("type")
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            let msg = entry.value.get("message");
+            self.record_transcript_entry(entry_type, msg, entry);
+            self.capture_claude_user_message(entry_type, msg, entry);
             self.capture_claude_assistant_message(entry_type, msg);
         }
     }
 
-    fn capture_claude_user_message(&mut self, entry_type: &str, msg: Option<&Value>) {
+    fn capture_claude_user_message(
+        &mut self,
+        entry_type: &str,
+        msg: Option<&Value>,
+        entry: &JsonlEntry,
+    ) {
         if entry_type != "user"
             || msg.and_then(|msg| msg.get("role").and_then(Value::as_str)) != Some("user")
         {
@@ -232,7 +493,7 @@ impl ClaudeCodeReader {
         };
 
         if let Some(text) = content.as_str() {
-            self.set_reader_user_task(text);
+            self.set_reader_user_task(text, entry);
             return;
         }
 
@@ -241,7 +502,7 @@ impl ClaudeCodeReader {
                 continue;
             }
             if let Some(text) = block.get("text").and_then(Value::as_str) {
-                self.set_reader_user_task(text);
+                self.set_reader_user_task(text, entry);
                 break;
             }
         }
@@ -303,12 +564,55 @@ impl ClaudeCodeReader {
         }
     }
 
-    fn set_reader_user_task(&mut self, text: &str) {
-        let trimmed = text.trim();
-        if trimmed.is_empty() {
+    fn set_reader_user_task(&mut self, text: &str, entry: &JsonlEntry) {
+        let Some(normalized) = normalized_user_turn_text(text, false) else {
+            return;
+        };
+        self.user_task = Some(truncate(&normalized, 300));
+        self.push_user_turn(normalized, entry);
+    }
+
+    fn push_user_turn(&mut self, text: String, entry: &JsonlEntry) {
+        if self
+            .user_turns
+            .iter()
+            .any(|turn| turn.byte_start == entry.byte_start)
+        {
             return;
         }
-        self.user_task = Some(truncate(trimmed, 300));
+        self.next_turn_order += 1;
+        self.user_turns.push(AgentUserTurn {
+            id: make_turn_id("claude", entry.byte_start),
+            source: "Claude Code".to_string(),
+            text,
+            byte_start: entry.byte_start,
+            byte_end: entry.byte_end,
+            order: self.next_turn_order,
+            timestamp: entry_timestamp(&entry.value),
+        });
+        cap_turns(&mut self.user_turns, 40);
+    }
+
+    fn record_transcript_entry(
+        &mut self,
+        entry_type: &str,
+        msg: Option<&Value>,
+        entry: &JsonlEntry,
+    ) {
+        let (raw, truncated) = truncate_with_flag(&entry.raw, TRANSCRIPT_RAW_MAX_CHARS);
+        self.transcript_records.push(AgentTranscriptRecord {
+            id: make_record_id("claude", entry.byte_start),
+            source: "Claude Code".to_string(),
+            kind: transcript_record_kind(entry_type, None, msg),
+            role: transcript_record_role(None, msg),
+            summary: transcript_record_summary(entry_type, None, msg, &entry.raw),
+            raw,
+            byte_start: entry.byte_start,
+            byte_end: entry.byte_end,
+            timestamp: entry_timestamp(&entry.value),
+            truncated,
+        });
+        cap_transcript_records(&mut self.transcript_records, 400);
     }
 
     fn record_reader_action(&mut self, action: AgentAction, set_current_tool: bool) {
@@ -352,9 +656,12 @@ impl ContextReader for ClaudeCodeReader {
             self.file_path = Some(file_path.clone());
             self.file_size = 0;
             self.user_task = None;
+            self.user_turns.clear();
+            self.transcript_records.clear();
             self.recent_actions.clear();
             self.current_tool = None;
             self.bootstrapped = false;
+            self.next_turn_order = 0;
             self.token_count = 0;
             self.context_limit = crate::types::context_limit_for_tool(Some("Claude Code"));
         }
@@ -364,7 +671,7 @@ impl ContextReader for ClaudeCodeReader {
             let start = current_size.saturating_sub(BOOTSTRAP_MAX);
             match read_range(&file_path, start, current_size) {
                 Ok(buf) => {
-                    let entries = parse_jsonl_lines(&buf);
+                    let entries = parse_jsonl_entries(&buf, start);
                     self.parse_entries(&entries);
                 }
                 Err(e) => {
@@ -378,7 +685,7 @@ impl ContextReader for ClaudeCodeReader {
             // Incremental: read only new bytes
             match read_range(&file_path, self.file_size, current_size) {
                 Ok(buf) => {
-                    let entries = parse_jsonl_lines(&buf);
+                    let entries = parse_jsonl_entries(&buf, self.file_size);
                     self.parse_entries(&entries);
                 }
                 Err(e) => {
@@ -391,6 +698,9 @@ impl ContextReader for ClaudeCodeReader {
 
         Some(ContextSnapshot {
             user_task: self.user_task.clone(),
+            user_turns: self.user_turns.clone(),
+            transcript_records: self.transcript_records.clone(),
+            source_size: current_size,
             recent_actions: last_n(&self.recent_actions, 5),
             current_tool: self.current_tool.clone(),
             token_count: self.token_count,
@@ -414,11 +724,14 @@ pub struct CodexReader {
     file_path: Option<PathBuf>,
     file_size: u64,
     user_task: Option<String>,
+    user_turns: Vec<AgentUserTurn>,
+    transcript_records: Vec<AgentTranscriptRecord>,
     recent_actions: Vec<AgentAction>,
     current_tool: Option<AgentAction>,
     bootstrapped: bool,
     token_count: u64,
     context_limit: u64,
+    next_turn_order: u64,
     /// File paths claimed by other readers — skip these during discovery
     /// to avoid two sessions reading the same JSONL file.
     excluded_paths: Vec<PathBuf>,
@@ -431,11 +744,14 @@ impl CodexReader {
             file_path: None,
             file_size: 0,
             user_task: None,
+            user_turns: Vec::new(),
+            transcript_records: Vec::new(),
             recent_actions: Vec::new(),
             current_tool: None,
             bootstrapped: false,
             token_count: 0,
             context_limit: crate::types::context_limit_for_tool(Some("Codex")),
+            next_turn_order: 0,
             excluded_paths: excluded.to_vec(),
         }
     }
@@ -484,17 +800,14 @@ impl CodexReader {
     /// whose `cwd` matches ours.
     fn matches_cwd(&self, path: &Path) -> bool {
         let result: std::io::Result<bool> = (|| {
-            use std::io::Read;
-            let mut f = fs::File::open(path)?;
-            let mut buf = vec![0u8; 2048];
-            let n = f.read(&mut buf)?;
-            buf.truncate(n);
-            let text = String::from_utf8_lossy(&buf);
-            let first_line = text.lines().next().unwrap_or("");
+            use std::io::BufRead;
+            let file = fs::File::open(path)?;
+            let mut lines = std::io::BufReader::new(file).lines();
+            let first_line = lines.next().transpose()?.unwrap_or_default();
             if first_line.is_empty() {
                 return Ok(false);
             }
-            let entry: Value = serde_json::from_str(first_line)
+            let entry: Value = serde_json::from_str(&first_line)
                 .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
             if entry.get("type").and_then(Value::as_str) == Some("session_meta") {
                 if let Some(payload) = entry.get("payload") {
@@ -507,15 +820,21 @@ impl CodexReader {
     }
 
     /// Parse entries and update internal state.
-    fn parse_entries(&mut self, entries: &[Value]) {
+    fn parse_entries(&mut self, entries: &[JsonlEntry]) {
         for entry in entries {
-            let entry_type = entry.get("type").and_then(Value::as_str).unwrap_or("");
+            let entry_type = entry
+                .value
+                .get("type")
+                .and_then(Value::as_str)
+                .unwrap_or("");
             let payload = entry
+                .value
                 .get("payload")
                 .cloned()
                 .unwrap_or(Value::Object(Default::default()));
-            self.capture_codex_response_item_user(entry_type, &payload);
-            self.capture_codex_user_message(entry_type, &payload);
+            self.record_transcript_entry(entry_type, &payload, entry);
+            self.capture_codex_response_item_user(entry_type, &payload, entry);
+            self.capture_codex_user_message(entry_type, &payload, entry);
             self.capture_codex_usage_response(entry_type, &payload);
             self.capture_codex_token_count(entry_type, &payload);
             self.capture_codex_function_call(entry_type, &payload);
@@ -524,7 +843,12 @@ impl CodexReader {
         }
     }
 
-    fn capture_codex_response_item_user(&mut self, entry_type: &str, payload: &Value) {
+    fn capture_codex_response_item_user(
+        &mut self,
+        entry_type: &str,
+        payload: &Value,
+        entry: &JsonlEntry,
+    ) {
         if entry_type != "response_item"
             || payload.get("role").and_then(Value::as_str) != Some("user")
         {
@@ -541,17 +865,22 @@ impl CodexReader {
                 continue;
             }
             if let Some(text) = block.get("text").and_then(Value::as_str) {
-                self.set_codex_user_task(text, true);
+                self.set_codex_user_task(text, true, entry);
             }
         }
     }
 
-    fn capture_codex_user_message(&mut self, entry_type: &str, payload: &Value) {
+    fn capture_codex_user_message(
+        &mut self,
+        entry_type: &str,
+        payload: &Value,
+        entry: &JsonlEntry,
+    ) {
         if entry_type == "event_msg"
             && payload.get("type").and_then(Value::as_str) == Some("user_message")
         {
             if let Some(message) = payload.get("message").and_then(Value::as_str) {
-                self.set_codex_user_task(message, false);
+                self.set_codex_user_task(message, false, entry);
             }
         }
     }
@@ -653,13 +982,50 @@ impl CodexReader {
         }
     }
 
-    fn set_codex_user_task(&mut self, text: &str, skip_xml_like: bool) {
-        let trimmed = text.trim();
-        let looks_like_system_prompt = skip_xml_like && trimmed.starts_with('<');
-        if trimmed.is_empty() || trimmed.len() >= 1000 || looks_like_system_prompt {
+    fn set_codex_user_task(&mut self, text: &str, skip_xml_like: bool, entry: &JsonlEntry) {
+        let Some(normalized) = normalized_user_turn_text(text, skip_xml_like) else {
+            return;
+        };
+        self.user_task = Some(truncate(&normalized, 300));
+        self.push_user_turn(normalized, entry);
+    }
+
+    fn push_user_turn(&mut self, text: String, entry: &JsonlEntry) {
+        if self
+            .user_turns
+            .iter()
+            .any(|turn| turn.byte_start == entry.byte_start)
+        {
             return;
         }
-        self.user_task = Some(truncate(trimmed, 300));
+        self.next_turn_order += 1;
+        self.user_turns.push(AgentUserTurn {
+            id: make_turn_id("codex", entry.byte_start),
+            source: "Codex".to_string(),
+            text,
+            byte_start: entry.byte_start,
+            byte_end: entry.byte_end,
+            order: self.next_turn_order,
+            timestamp: entry_timestamp(&entry.value),
+        });
+        cap_turns(&mut self.user_turns, 40);
+    }
+
+    fn record_transcript_entry(&mut self, entry_type: &str, payload: &Value, entry: &JsonlEntry) {
+        let (raw, truncated) = truncate_with_flag(&entry.raw, TRANSCRIPT_RAW_MAX_CHARS);
+        self.transcript_records.push(AgentTranscriptRecord {
+            id: make_record_id("codex", entry.byte_start),
+            source: "Codex".to_string(),
+            kind: transcript_record_kind(entry_type, Some(payload), None),
+            role: transcript_record_role(Some(payload), None),
+            summary: transcript_record_summary(entry_type, Some(payload), None, &entry.raw),
+            raw,
+            byte_start: entry.byte_start,
+            byte_end: entry.byte_end,
+            timestamp: entry_timestamp(&entry.value),
+            truncated,
+        });
+        cap_transcript_records(&mut self.transcript_records, 400);
     }
 
     fn set_codex_thinking(&mut self, text: &str) {
@@ -700,18 +1066,21 @@ impl ContextReader for CodexReader {
             self.file_path = Some(file_path.clone());
             self.file_size = 0;
             self.user_task = None;
+            self.user_turns.clear();
+            self.transcript_records.clear();
             self.recent_actions.clear();
             self.current_tool = None;
             self.bootstrapped = false;
             self.token_count = 0;
             self.context_limit = crate::types::context_limit_for_tool(Some("Codex"));
+            self.next_turn_order = 0;
         }
 
         if !self.bootstrapped {
             let start = current_size.saturating_sub(BOOTSTRAP_MAX);
             match read_range(&file_path, start, current_size) {
                 Ok(buf) => {
-                    let entries = parse_jsonl_lines(&buf);
+                    let entries = parse_jsonl_entries(&buf, start);
                     self.parse_entries(&entries);
                 }
                 Err(e) => {
@@ -724,7 +1093,7 @@ impl ContextReader for CodexReader {
         } else {
             match read_range(&file_path, self.file_size, current_size) {
                 Ok(buf) => {
-                    let entries = parse_jsonl_lines(&buf);
+                    let entries = parse_jsonl_entries(&buf, self.file_size);
                     self.parse_entries(&entries);
                 }
                 Err(e) => {
@@ -737,6 +1106,9 @@ impl ContextReader for CodexReader {
 
         Some(ContextSnapshot {
             user_task: self.user_task.clone(),
+            user_turns: self.user_turns.clone(),
+            transcript_records: self.transcript_records.clone(),
+            source_size: current_size,
             recent_actions: last_n(&self.recent_actions, 5),
             current_tool: self.current_tool.clone(),
             token_count: self.token_count,
@@ -790,6 +1162,20 @@ fn cap_actions(actions: &mut Vec<AgentAction>, cap: usize) {
     }
 }
 
+fn cap_turns(turns: &mut Vec<AgentUserTurn>, cap: usize) {
+    if turns.len() > cap {
+        let start = turns.len() - cap;
+        *turns = turns.split_off(start);
+    }
+}
+
+fn cap_transcript_records(records: &mut Vec<AgentTranscriptRecord>, cap: usize) {
+    if records.len() > cap {
+        let start = records.len() - cap;
+        *records = records.split_off(start);
+    }
+}
+
 /// Return the last `n` elements cloned.
 fn last_n(actions: &[AgentAction], n: usize) -> Vec<AgentAction> {
     let start = actions.len().saturating_sub(n);
@@ -832,6 +1218,22 @@ mod tests {
     use std::thread;
     use std::time::Duration;
 
+    fn test_entries(values: Vec<Value>) -> Vec<JsonlEntry> {
+        values
+            .into_iter()
+            .enumerate()
+            .map(|(index, value)| {
+                let raw = value.to_string();
+                JsonlEntry {
+                    value,
+                    raw,
+                    byte_start: index as u64 * 100,
+                    byte_end: index as u64 * 100 + 50,
+                }
+            })
+            .collect()
+    }
+
     #[test]
     fn parse_jsonl_lines_skips_bad() {
         let buf = b"{\"type\":\"user\"}\nnot json\n{\"type\":\"assistant\"}\n";
@@ -872,9 +1274,27 @@ mod tests {
     }
 
     #[test]
+    fn codex_reader_matches_cwd_with_large_session_meta_line() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("rollout-large-meta.jsonl");
+        let large_instructions = "x".repeat(4096);
+        fs::write(
+            &path,
+            format!(
+                "{{\"type\":\"session_meta\",\"payload\":{{\"cwd\":\"/tmp/project\",\"base_instructions\":{{\"text\":\"{}\"}}}}}}\n",
+                large_instructions
+            ),
+        )
+        .expect("write rollout");
+
+        let reader = CodexReader::new("/tmp/project", &[]);
+        assert!(reader.matches_cwd(&path));
+    }
+
+    #[test]
     fn codex_reader_consumes_token_count_event_and_context_window() {
         let mut reader = CodexReader::new("/tmp", &[]);
-        let entries = vec![serde_json::json!({
+        let entries = test_entries(vec![serde_json::json!({
             "type": "event_msg",
             "payload": {
                 "type": "token_count",
@@ -883,7 +1303,7 @@ mod tests {
                 },
                 "model_context_window": 258_400_u64
             }
-        })];
+        })]);
 
         reader.parse_entries(&entries);
 
@@ -895,7 +1315,7 @@ mod tests {
     fn codex_reader_keeps_previous_context_limit_when_event_lacks_window() {
         let mut reader = CodexReader::new("/tmp", &[]);
         let default_limit = reader.context_limit;
-        let entries = vec![serde_json::json!({
+        let entries = test_entries(vec![serde_json::json!({
             "type": "event_msg",
             "payload": {
                 "type": "token_count",
@@ -903,7 +1323,7 @@ mod tests {
                     "total_token_usage": { "input_tokens": 12_345_u64 }
                 }
             }
-        })];
+        })]);
 
         reader.parse_entries(&entries);
 
@@ -991,6 +1411,16 @@ mod tests {
         let mut reader = ClaudeCodeReader::new(cwd, &[]);
         let first = reader.read().expect("bootstrap snapshot");
         assert_eq!(first.user_task.as_deref(), Some("investigate startup"));
+        assert_eq!(first.user_turns.len(), 1);
+        assert_eq!(first.user_turns[0].text, "investigate startup");
+        assert_eq!(first.user_turns[0].source, "Claude Code");
+        assert!(
+            first
+                .transcript_records
+                .iter()
+                .any(|record| record.kind == "assistant_message"),
+            "assistant records should remain in the post-turn transcript source"
+        );
         assert_eq!(first.token_count, 321);
         assert_eq!(
             first.current_tool.as_ref().map(|tool| tool.tool.as_str()),
@@ -1013,6 +1443,7 @@ mod tests {
 
         let second = reader.read().expect("incremental snapshot");
         assert_eq!(second.user_task.as_deref(), Some("investigate startup"));
+        assert_eq!(second.user_turns.len(), 1);
         assert!(
             second
                 .recent_actions
@@ -1142,6 +1573,16 @@ mod tests {
         let mut reader = CodexReader::new("/tmp/project", &[]);
         let first = reader.read().expect("bootstrap snapshot");
         assert_eq!(first.user_task.as_deref(), Some("fix websocket bug"));
+        assert_eq!(first.user_turns.len(), 1);
+        assert_eq!(first.user_turns[0].text, "fix websocket bug");
+        assert_eq!(first.user_turns[0].source, "Codex");
+        assert!(
+            first
+                .transcript_records
+                .iter()
+                .any(|record| record.kind == "function_call"),
+            "tool records should remain transcript records but not turns"
+        );
         assert_eq!(first.token_count, 555);
         assert_eq!(first.context_limit, 258_400);
         assert_eq!(
@@ -1163,6 +1604,11 @@ mod tests {
 
         let second = reader.read().expect("incremental snapshot");
         assert_eq!(second.user_task.as_deref(), Some("tighten the retry path"));
+        assert_eq!(second.user_turns.len(), 2);
+        assert_eq!(
+            second.user_turns.last().map(|turn| turn.text.as_str()),
+            Some("tighten the retry path")
+        );
         assert!(
             reader.read().is_none(),
             "steady state should not re-emit snapshot"
