@@ -712,6 +712,7 @@ function trogdorPressureReason(session) {
   if (state === "attention") return "needs input";
   if (state === "error") return "error";
   if (session?.commitCandidate) return "commit ready";
+  if (rest === "deep_sleep") return "deep sleep";
   if (rest === "sleeping") return "sleeping";
   if (stateEvidenceIsUnverified(session)) return "untrusted";
   return state || "idle";
@@ -721,6 +722,7 @@ function agentGlyph(session) {
   const glyph = operatorPressure(session).glyph;
   if (glyph) return truncate(glyph, 1);
   const state = String(session?.state || "").toLowerCase();
+  const rest = String(session?.restLabel || "").toLowerCase();
   if (hasActionCue(session, "awaiting_user")) return "!";
   if (hasActionCue(session, "commit_ready")) return "$";
   if (hasActionCue(session, "validation_missing_after_edit")) return "v";
@@ -728,6 +730,7 @@ function agentGlyph(session) {
   if (state === "attention") return "!";
   if (state === "error") return "x";
   if (session?.commitCandidate) return "$";
+  if (rest === "sleeping" || rest === "deep_sleep") return "z";
   return "a";
 }
 
@@ -813,12 +816,25 @@ function sessionHasReadyClawg(session) {
   );
 }
 
+function sessionIsSleepingOrDeepSleep(session) {
+  const rest = String(session?.restLabel || "").toLowerCase();
+  return rest === "sleeping" || rest === "deep_sleep";
+}
+
 function sessionSwordsmanVisible(session) {
-  return Boolean(session?.trogdorBurnt || (sessionHasReadyClawg(session) && !session?.trogdorDismissed));
+  return Boolean(
+    session?.trogdorBurnt ||
+      (sessionHasReadyClawg(session) && !session?.trogdorDismissed) ||
+      sessionIsSleepingOrDeepSleep(session),
+  );
 }
 
 function sessionCanReadClawgs(session) {
-  return Boolean(sessionHasReadyClawg(session) && !session?.trogdorBurnt && !session?.trogdorDismissed);
+  return Boolean(
+    !session?.trogdorBurnt &&
+      ((sessionHasReadyClawg(session) && !session?.trogdorDismissed) ||
+        sessionIsSleepingOrDeepSleep(session)),
+  );
 }
 
 function actionCueKinds(session) {

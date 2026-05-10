@@ -5,6 +5,8 @@ const boot = window.__SWIMMERS_BOOT__ ?? {
   franken_term_available: false,
   franken_term_js_url: "",
   franken_term_wasm_url: "",
+  franken_term_font_url: "",
+  franken_term_asset_info: null,
   follow_published_selection: false,
   focus_layout: false,
 };
@@ -28,6 +30,24 @@ const TERMINAL_ZOOM_MIN = 0.65;
 const TERMINAL_ZOOM_MAX = 2.4;
 const TERMINAL_ZOOM_STEP = 0.1;
 const SEND_HISTORY_LIMIT = 8;
+const MAX_TERMINAL_PASTE_BYTES = 786432;
+const FRANKENTERM_REQUIRED_INSTANCE_METHODS = [
+  "init",
+  "destroy",
+  "fitToContainer",
+  "resize",
+  "render",
+];
+const FRANKENTERM_HUD_METHODS = [
+  ...FRANKENTERM_REQUIRED_INSTANCE_METHODS,
+  "applyPatchBatchFlat",
+];
+const FRANKENTERM_TERMINAL_METHODS = [
+  ...FRANKENTERM_REQUIRED_INSTANCE_METHODS,
+  "feed",
+  "input",
+  "drainEncodedInputBytes",
+];
 const FALLBACK_THOUGHT_BACKENDS = [
   { key: "", label: "auto" },
   { key: "openrouter", label: "openrouter" },
@@ -44,6 +64,9 @@ const state = {
   readOnly: false,
   frankenModule: null,
   frankenInit: null,
+  frankenFontInit: null,
+  frankenLoadError: "",
+  frankenAssetSummary: "",
   hud: null,
   terminal: null,
   terminalSessionId: null,
@@ -84,6 +107,9 @@ const state = {
   terminalMirrorText: "",
   terminalPaintVerified: false,
   terminalFrameBytesSeen: 0,
+  rendererDiagnosticSequence: 0,
+  lastRendererDiagnostic: null,
+  lastRendererDiagnosticError: "",
   currentCols: 80,
   currentRows: 24,
   terminalZoom: 1,
@@ -319,6 +345,99 @@ function terminalSupports(methodName) {
 
 function hasLiveTerminal() {
   return Boolean(state.terminal);
+}
+
+function assertFrankenTermModule(mod) {
+  if (!mod || typeof mod.default !== "function") {
+    throw new Error("FrankenTerm module is missing its wasm initializer");
+  }
+  if (typeof mod.FrankenTermWeb !== "function") {
+    throw new Error("FrankenTerm module is missing FrankenTermWeb");
+  }
+  return mod;
+}
+
+function validateFrankenTermSurface(surface, requiredMethods, label = "FrankenTerm surface") {
+  const missing = requiredMethods.filter((methodName) => !surfaceSupports(surface, methodName));
+  if (missing.length) {
+    throw new Error(`${label} missing methods: ${missing.join(", ")}`);
+  }
+  return surface;
+}
+
+function frankenTermAssetSummary() {
+  const info = boot.franken_term_asset_info;
+  if (!info || typeof info !== "object") {
+    return "";
+  }
+  const pieces = [];
+  for (const key of ["js", "wasm", "font"]) {
+    const item = info[key];
+    if (!item) {
+      continue;
+    }
+    const checksum = item.checksum ? ` ${item.checksum}` : "";
+    const size = Number.isFinite(item.size_bytes) ? ` ${item.size_bytes}b` : "";
+    pieces.push(`${key}${checksum}${size}`);
+  }
+  return pieces.join("; ");
+}
+
+function isLoopbackHostname(hostname) {
+  const host = String(hostname || "").trim().toLowerCase().replace(/^\[|\]$/g, "");
+  if (!host) {
+    return false;
+  }
+  if (host === "localhost" || host.endsWith(".localhost") || host === "::1") {
+    return true;
+  }
+  const ipv4 = host.split(".");
+  return (
+    ipv4.length === 4 &&
+    ipv4[0] === "127" &&
+    ipv4.every((part) => /^\d+$/.test(part) && Number(part) >= 0 && Number(part) <= 255)
+  );
+}
+
+function frankenTermLinkPolicy() {
+  return {
+    allowHttp: isLoopbackHostname(window.location?.hostname),
+    allowHttps: true,
+  };
+}
+
+function utf8ByteLength(text) {
+  const value = String(text ?? "");
+  if (typeof TextEncoder !== "undefined") {
+    return new TextEncoder().encode(value).byteLength;
+  }
+  let count = 0;
+  for (const char of value) {
+    const code = char.codePointAt(0);
+    if (code <= 0x7f) {
+      count += 1;
+    } else if (code <= 0x7ff) {
+      count += 2;
+    } else if (code <= 0xffff) {
+      count += 3;
+    } else {
+      count += 4;
+    }
+  }
+  return count;
+}
+
+function terminalTextWithinPasteBudget(text) {
+  return utf8ByteLength(text) <= MAX_TERMINAL_PASTE_BYTES;
+}
+
+function rejectOversizeTerminalText(text, label = "Paste") {
+  const bytes = utf8ByteLength(text);
+  if (bytes <= MAX_TERMINAL_PASTE_BYTES) {
+    return false;
+  }
+  setUtilityStatus(`${label} blocked: ${bytes} bytes exceeds ${MAX_TERMINAL_PASTE_BYTES}.`, true, 3200);
+  return true;
 }
 
 function apiHeaders(extra = {}) {
@@ -1750,6 +1869,11 @@ function rawSessionAwaitingUser(session) {
   return rawHasActionCue(session, "awaiting_user") || reasonKind === "awaiting_user" || stateLabel === "attention";
 }
 
+function rawSessionIsSleepingOrDeepSleep(session) {
+  const rest = String(session?.rest_state || "").toLowerCase();
+  return rest === "sleeping" || rest === "deep_sleep";
+}
+
 function trogdorClawgText(session) {
   return String(session?.clawgText || session?.thoughtLabel || session?.commandLabel || session?.name || "waiting");
 }
@@ -1894,15 +2018,29 @@ function trogdorSessionHasReadyClawg(session) {
   );
 }
 
+function trogdorSessionIsSleepingOrDeepSleep(session) {
+  const rest = String(session?.restLabel || "").toLowerCase();
+  return rest === "sleeping" || rest === "deep_sleep";
+}
+
 function trogdorSwordsmanVisible(session) {
   if (trogdorSessionBurnt(session)) {
     return true;
   }
-  return trogdorSessionHasReadyClawg(session) && !trogdorClawgDismissed(session);
+  return (
+    (trogdorSessionHasReadyClawg(session) && !trogdorClawgDismissed(session)) ||
+    trogdorSessionIsSleepingOrDeepSleep(session)
+  );
 }
 
 function trogdorSessionCanRead(session) {
-  return trogdorSessionHasReadyClawg(session) && !trogdorSessionBurnt(session) && !trogdorClawgDismissed(session);
+  return (
+    !trogdorSessionBurnt(session) &&
+    (
+      (trogdorSessionHasReadyClawg(session) && !trogdorClawgDismissed(session)) ||
+      trogdorSessionIsSleepingOrDeepSleep(session)
+    )
+  );
 }
 
 function trogdorReaderBaseIndex(session) {
@@ -2142,7 +2280,12 @@ function syncTrogdorCueTransitions() {
   const hovered = normalizeSessionId(state.hoveredTrogdorSessionId);
   if (hovered) {
     const raw = state.sessions.find((session) => session.session_id === hovered);
-    if (!raw || (!rawSessionAwaitingUser(raw) && !trogdorSessionBurnt(hovered))) {
+    if (
+      !raw ||
+      (!rawSessionAwaitingUser(raw) &&
+        !rawSessionIsSleepingOrDeepSleep(raw) &&
+        !trogdorSessionBurnt(hovered))
+    ) {
       state.hoveredTrogdorSessionId = null;
       state.trogdorReaderStartedAt = 0;
       state.trogdorReaderStartIndex = 0;
@@ -3344,6 +3487,7 @@ function trogdorDomPressure(session) {
   if (stateLabel === "busy") score += 12;
   if (stateLabel === "error") score += 55;
   if (rest === "sleeping") score += 35;
+  if (rest === "deep_sleep") score += 20;
   if (session?.commitCandidate) score += 25;
   return clampInt(score, 0, 0, 99);
 }
@@ -3354,6 +3498,9 @@ function trogdorDomReason(session) {
   const cue = trogdorPrimaryActionCue(session);
   if (cue) return cue.replaceAll("_", " ");
   if (session?.commitCandidate) return "commit ready";
+  const rest = String(session?.restLabel || "").toLowerCase();
+  if (rest === "deep_sleep") return "deep sleep";
+  if (rest === "sleeping") return "sleeping";
   return String(session?.state || "idle");
 }
 
@@ -3364,6 +3511,7 @@ function trogdorAgentGlyph(session) {
   if (trogdorHasActionCue(session, "commit_ready") || session?.commitCandidate) return "$";
   if (trogdorHasActionCue(session, "validation_missing_after_edit")) return "v";
   if (String(session?.state || "").toLowerCase() === "error") return "x";
+  if (trogdorSessionIsSleepingOrDeepSleep(session)) return "z";
   return "a";
 }
 
@@ -3820,16 +3968,48 @@ function scheduleSessionRefresh() {
   state.refreshTimer = window.setInterval(refreshSessions, SESSION_REFRESH_MS);
 }
 
+async function loadFrankenTermFont() {
+  if (!boot.franken_term_font_url || !document.fonts?.load) {
+    return null;
+  }
+  if (!state.frankenFontInit) {
+    state.frankenFontInit = document.fonts
+      .load('12px "Pragmasevka NF"')
+      .catch((error) => {
+        state.frankenLoadError = `font load failed: ${error?.message || String(error)}`;
+        state.frankenFontInit = null;
+        return null;
+      });
+  }
+  return state.frankenFontInit;
+}
+
 async function ensureFrankenTerm() {
   if (!boot.franken_term_available) {
     return null;
   }
 
   if (!state.frankenInit) {
-    state.frankenInit = import(boot.franken_term_js_url).then(async (mod) => {
-      await mod.default();
+    state.frankenInit = (async () => {
+      await loadFrankenTermFont();
+      const mod = assertFrankenTermModule(await import(boot.franken_term_js_url));
+      const wasmUrl = boot.franken_term_wasm_url
+        ? new URL(boot.franken_term_wasm_url, window.location.href)
+        : undefined;
+      if (wasmUrl) {
+        await mod.default(wasmUrl);
+      } else {
+        await mod.default();
+      }
       state.frankenModule = mod;
+      state.frankenLoadError = "";
+      state.frankenAssetSummary = frankenTermAssetSummary();
       return mod;
+    })().catch((error) => {
+      state.frankenInit = null;
+      state.frankenModule = null;
+      state.frankenLoadError = error?.message || String(error || "FrankenTerm load failed");
+      throw error;
     });
   }
 
@@ -3847,7 +4027,11 @@ async function setupHudSurface() {
   }
 
   setLoadingState(true, "Loading rendered control surface...");
-  state.hud = new mod.FrankenTermWeb();
+  state.hud = validateFrankenTermSurface(
+    new mod.FrankenTermWeb(),
+    FRANKENTERM_HUD_METHODS,
+    "HUD renderer",
+  );
   await state.hud.init(el.hudCanvas, undefined);
   if (surfaceSupports(state.hud, "setAccessibility")) {
     state.hud.setAccessibility({
@@ -3994,8 +4178,12 @@ async function setupTerminalSurface() {
 
   destroyTerminalInstance();
   setLoadingState(true, "Initializing terminal...");
-  state.terminal = new mod.FrankenTermWeb();
   try {
+    state.terminal = validateFrankenTermSurface(
+      new mod.FrankenTermWeb(),
+      FRANKENTERM_TERMINAL_METHODS,
+      "terminal renderer",
+    );
     await state.terminal.init(el.terminalCanvas, undefined);
   } catch (error) {
     destroyTerminalInstance();
@@ -4010,10 +4198,7 @@ async function setupTerminalSurface() {
   state.terminalFrameBytesSeen = 0;
   setTerminalTextFallbackActive(false);
   if (terminalSupports("setLinkOpenPolicy")) {
-    state.terminal.setLinkOpenPolicy({
-      allowHttp: true,
-      allowHttps: true,
-    });
+    state.terminal.setLinkOpenPolicy(frankenTermLinkPolicy());
   }
   if (terminalSupports("setAccessibility")) {
     state.terminal.setAccessibility({
@@ -4109,6 +4294,28 @@ function measureAndResizeSurface(pushResize = false, force = false) {
 
   if (pushResize && (force || dimensionsChanged)) {
     sendResize();
+  }
+  if (state.terminal && (force || dimensionsChanged)) {
+    captureTerminalRendererDiagnostic("resize");
+  }
+}
+
+function captureTerminalRendererDiagnostic(reason = "frame") {
+  if (!terminalSupports("snapshotResizeStormFrameJsonl")) {
+    return null;
+  }
+  const frameIndex = state.rendererDiagnosticSequence;
+  state.rendererDiagnosticSequence += 1;
+  const timestamp = new Date().toISOString();
+  try {
+    const line = state.terminal.snapshotResizeStormFrameJsonl("swimmers-web", 0, timestamp, frameIndex);
+    const parsed = JSON.parse(String(line || "{}"));
+    state.lastRendererDiagnostic = { reason, line, parsed };
+    state.lastRendererDiagnosticError = "";
+    return line;
+  } catch (error) {
+    state.lastRendererDiagnosticError = error?.message || String(error);
+    return null;
   }
 }
 
@@ -4326,6 +4533,7 @@ async function verifyTerminalPaintOrFallback() {
 
   if (terminalCanvasHasVisiblePixels()) {
     state.terminalPaintVerified = true;
+    captureTerminalRendererDiagnostic("painted");
     setTerminalTextFallbackActive(false);
     return;
   }
@@ -4336,6 +4544,7 @@ async function verifyTerminalPaintOrFallback() {
   }
   if (terminalCanvasHasVisiblePixels()) {
     state.terminalPaintVerified = true;
+    captureTerminalRendererDiagnostic("painted");
     setTerminalTextFallbackActive(false);
     return;
   }
@@ -4478,6 +4687,9 @@ function flushEncodedInputBytes() {
 
 function sendTerminalInputText(text) {
   if (!text || !state.ws || state.ws.readyState !== WebSocket.OPEN || state.readOnly) {
+    return false;
+  }
+  if (rejectOversizeTerminalText(text, "Input")) {
     return false;
   }
   const clientMessageId = nextInputMessageId();
@@ -4670,6 +4882,9 @@ function forwardTerminalEvent(event) {
 
 function sendTerminalText(text) {
   if (!text || state.readOnly || !currentSession()) {
+    return false;
+  }
+  if (rejectOversizeTerminalText(text, "Paste")) {
     return false;
   }
   markTrogdorSessionsResponded([state.selectedSessionId]);
@@ -4929,6 +5144,10 @@ function safeOpenUrl(rawUrl) {
     const url = new URL(rawUrl);
     if (url.protocol !== "http:" && url.protocol !== "https:") {
       setUtilityStatus(`Blocked unsupported link protocol: ${url.protocol}`, true, 2600);
+      return;
+    }
+    if (url.protocol === "http:" && !frankenTermLinkPolicy().allowHttp) {
+      setUtilityStatus(`Blocked non-local HTTP link: ${shortenUrl(url.toString())}`, true, 2600);
       return;
     }
     window.open(url.toString(), "_blank", "noopener,noreferrer");
@@ -7134,6 +7353,13 @@ export const __swimmersWebTest = {
   updateTerminalFallbackText,
   terminalFallbackOwnsPointer,
   sendTerminalText,
+  sendTerminalInputText,
+  utf8ByteLength,
+  terminalTextWithinPasteBudget,
+  frankenTermLinkPolicy,
+  isLoopbackHostname,
+  validateFrankenTermSurface,
+  captureTerminalRendererDiagnostic,
   sendRawTextToSession,
   sendGroupLine,
   markTrogdorSessionsResponded,

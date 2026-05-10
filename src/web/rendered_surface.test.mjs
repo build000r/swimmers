@@ -79,6 +79,60 @@ function frameText(frame) {
   return lines.join("\n");
 }
 
+function mixUint32(hash, value) {
+  let next = Number(value) >>> 0;
+  for (let byte = 0; byte < 4; byte += 1) {
+    hash ^= next & 0xff;
+    hash = Math.imul(hash, 0x01000193) >>> 0;
+    next >>>= 8;
+  }
+  return hash >>> 0;
+}
+
+function framePatchHash(frame) {
+  let hash = 0x811c9dc5;
+  for (const value of frame.spans) {
+    hash = mixUint32(hash, value);
+  }
+  for (const value of frame.cells) {
+    hash = mixUint32(hash, value);
+  }
+  return hash.toString(16).padStart(8, "0");
+}
+
+test("surface frame emits flat patch payload invariants", () => {
+  const frame = buildSurfaceFrame(baseModel());
+  const cellCount = frame.cols * frame.rows;
+
+  assert.ok(frame.spans instanceof Uint32Array);
+  assert.ok(frame.cells instanceof Uint32Array);
+  assert.deepEqual(Array.from(frame.spans), [0, cellCount]);
+  assert.equal(frame.cells.length, cellCount * 4);
+  assert.equal(frame.spans.length % 2, 0);
+  for (let index = 0; index < frame.spans.length; index += 2) {
+    const offset = frame.spans[index];
+    const len = frame.spans[index + 1];
+    assert.equal(Number.isInteger(offset), true);
+    assert.equal(Number.isInteger(len), true);
+    assert.equal(offset >= 0, true);
+    assert.equal(len >= 0, true);
+    assert.equal(offset + len <= cellCount, true);
+  }
+});
+
+test("surface frame patch hash is deterministic and model-sensitive", () => {
+  const frameA = buildSurfaceFrame(baseModel());
+  const frameB = buildSurfaceFrame(baseModel());
+  const changed = buildSurfaceFrame(
+    baseModel({
+      utilityLabel: "different utility status",
+    }),
+  );
+
+  assert.equal(framePatchHash(frameA), framePatchHash(frameB));
+  assert.notEqual(framePatchHash(frameA), framePatchHash(changed));
+});
+
 test("surface exposes parity actions for the selected session", () => {
   const frame = buildSurfaceFrame(baseModel());
   const actionIds = frame.zones
@@ -350,6 +404,39 @@ test("surface does not render quiet sessions as swordsmen", () => {
 
   assert.equal(frame.zones.some((zone) => zone.type === "trogdor_agent"), false);
   assert.doesNotMatch(frameText(frame), /speed read agent/i);
+});
+
+test("surface renders deep sleep sessions as hoverable swordsmen", () => {
+  const deepSleep = session({
+    sessionId: "agent-deep",
+    name: "agent-deep",
+    state: "idle",
+    displayState: "idle",
+    restLabel: "deep_sleep",
+    thoughtLabel: "parked until the operator launches it",
+    actionCues: [],
+    operatorPressure: null,
+    commitCandidate: false,
+  });
+  const frame = buildSurfaceFrame(
+    baseModel({
+      currentSession: null,
+      selectedSessionId: null,
+      sessions: [deepSleep],
+      hoveredTrogdorSessionId: "agent-deep",
+      trogdorAtlasOpen: true,
+    }),
+  );
+  const text = frameText(frame);
+  const actionIds = frame.zones.map((zone) => zone.actionId).filter(Boolean);
+
+  assert.equal(
+    frame.zones.some((zone) => zone.type === "trogdor_agent" && zone.sessionId === "agent-deep"),
+    true,
+  );
+  assert.match(text, /speed read agent/i);
+  assert.match(text, /deep_sleep/);
+  assert.ok(actionIds.includes("trogdor_launch"));
 });
 
 test("atlas toggle keeps trogdor available after a terminal is selected", () => {

@@ -148,6 +148,8 @@ globalThis.window = {
     franken_term_available: false,
     franken_term_js_url: "",
     franken_term_wasm_url: "",
+    franken_term_font_url: "",
+    franken_term_asset_info: null,
     follow_published_selection: false,
     focus_layout: false,
   },
@@ -240,6 +242,11 @@ function resetWebState() {
   web.state.trogdorAwaitingSessionIds = new Set();
   web.state.hud = null;
   web.state.terminal = null;
+  web.state.frankenModule = null;
+  web.state.frankenInit = null;
+  web.state.frankenFontInit = null;
+  web.state.frankenLoadError = "";
+  web.state.frankenAssetSummary = "";
   web.state.ws = null;
   web.state.reconnectTimer = null;
   web.state.reconnectAttempt = 0;
@@ -272,6 +279,9 @@ function resetWebState() {
   web.state.terminalMirrorText = "";
   web.state.terminalPaintVerified = false;
   web.state.terminalFrameBytesSeen = 0;
+  web.state.rendererDiagnosticSequence = 0;
+  web.state.lastRendererDiagnostic = null;
+  web.state.lastRendererDiagnosticError = "";
   web.state.hoveredLinkUrl = "";
   web.state.sendHistory = [];
   web.state.paletteItems = [];
@@ -331,6 +341,26 @@ test("Trogdor atlas renders dragon sprite assets and flames burnt swordsmen", ()
   assert.equal(web.state.trogdorBurntSessions.has("sess_0"), true);
   assert.match(html, /agent-burn-flame/);
   assert.match(html, /agent-burn-smoke/);
+});
+
+test("Trogdor atlas keeps deep sleep swordsmen visible and hoverable", () => {
+  resetWebState();
+  web.state.sessions = [
+    rawSession({
+      state: "idle",
+      rest_state: "deep_sleep",
+      thought: "parked until the operator launches it",
+      action_cues: [],
+    }),
+  ];
+  web.state.hoveredTrogdorSessionId = "sess_0";
+
+  web.renderHudSurface();
+
+  const html = web.el.trogdorSurface.innerHTML;
+  assert.match(html, /data-trogdor-agent="true"/);
+  assert.match(html, /data-session-id="sess_0"/);
+  assert.match(html, /parked/);
 });
 
 test("live terminal presentation hides the HUD canvas with class and inline state", () => {
@@ -401,6 +431,66 @@ test("terminal text fallback keeps send input wired to the live websocket", () =
   assert.equal(sent[0].type, "input_text");
   assert.equal(sent[0].data, "hello");
   assert.match(sent[0].clientMessageId, /^web-/);
+});
+
+test("terminal paste budget rejects oversized live paste", () => {
+  resetWebState();
+  web.state.selectedSessionId = "sess_0";
+  web.state.terminalFallbackActive = true;
+  const sent = [];
+  web.state.ws = {
+    readyState: WebSocket.OPEN,
+    send(payload) {
+      sent.push(payload);
+    },
+  };
+
+  assert.equal(web.sendTerminalText("x".repeat(786433)), false);
+
+  assert.equal(sent.length, 0);
+  assert.match(web.state.utilityLabel, /Paste blocked/);
+});
+
+test("FrankenTerm link policy only allows HTTP on loopback hosts", () => {
+  resetWebState();
+
+  window.location = new URL("http://127.0.0.1:3210/");
+  assert.deepEqual(web.frankenTermLinkPolicy(), { allowHttp: true, allowHttps: true });
+
+  window.location = new URL("http://localhost:3210/");
+  assert.deepEqual(web.frankenTermLinkPolicy(), { allowHttp: true, allowHttps: true });
+
+  window.location = new URL("http://100.64.0.1:3210/");
+  assert.deepEqual(web.frankenTermLinkPolicy(), { allowHttp: false, allowHttps: true });
+});
+
+test("FrankenTerm surface validation reports missing methods", () => {
+  assert.throws(
+    () => web.validateFrankenTermSurface({ init() {} }, ["init", "render"], "test renderer"),
+    /test renderer missing methods: render/,
+  );
+});
+
+test("renderer diagnostic stores JSONL line when supported", () => {
+  resetWebState();
+  web.state.terminal = {
+    snapshotResizeStormFrameJsonl(runId, seed, timestamp, frameIndex) {
+      return JSON.stringify({
+        run_id: runId,
+        seed,
+        timestamp,
+        frame_idx: frameIndex,
+        hash: "abc123",
+      });
+    },
+  };
+
+  const line = web.captureTerminalRendererDiagnostic("painted");
+
+  assert.match(line, /"hash":"abc123"/);
+  assert.equal(web.state.lastRendererDiagnostic.reason, "painted");
+  assert.equal(web.state.lastRendererDiagnostic.parsed.frame_idx, 0);
+  assert.equal(web.state.rendererDiagnosticSequence, 1);
 });
 
 test("terminal text fallback becomes the keyboard focus target", () => {

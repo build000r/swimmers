@@ -77,8 +77,24 @@ struct BootPayload {
     franken_term_available: bool,
     franken_term_js_url: &'static str,
     franken_term_wasm_url: &'static str,
+    franken_term_font_url: &'static str,
+    franken_term_asset_info: Option<FrankenTermAssetInfo>,
     follow_published_selection: bool,
     focus_layout: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct FrankenTermAssetInfo {
+    js: FrankenTermAssetFileInfo,
+    wasm: FrankenTermAssetFileInfo,
+    font: Option<FrankenTermAssetFileInfo>,
+}
+
+#[derive(Debug, Serialize)]
+struct FrankenTermAssetFileInfo {
+    route: &'static str,
+    size_bytes: u64,
+    checksum: String,
 }
 
 async fn index() -> impl IntoResponse {
@@ -94,6 +110,8 @@ async fn render_index(focus_layout: bool) -> impl IntoResponse {
         franken_term_available: resolve_frankentui_pkg_dir().is_some(),
         franken_term_js_url: FRANKENTERM_JS_ROUTE,
         franken_term_wasm_url: FRANKENTERM_WASM_ROUTE,
+        franken_term_font_url: FRANKENTERM_FONT_ROUTE,
+        franken_term_asset_info: franken_term_asset_info().await,
         follow_published_selection: focus_layout,
         focus_layout,
     };
@@ -654,6 +672,40 @@ async fn serve_frankentui_asset(file_name: &str, content_type: &'static str) -> 
             &format!("failed to read {file_name}: {err}"),
         ),
     }
+}
+
+async fn franken_term_asset_info() -> Option<FrankenTermAssetInfo> {
+    let pkg_dir = resolve_frankentui_pkg_dir()?;
+    let js_path = pkg_dir.join("FrankenTerm.js");
+    let wasm_path = pkg_dir.join("FrankenTerm_bg.wasm");
+    let js = franken_term_asset_file_info(&js_path, FRANKENTERM_JS_ROUTE).await?;
+    let wasm = franken_term_asset_file_info(&wasm_path, FRANKENTERM_WASM_ROUTE).await?;
+    let font = pkg_dir
+        .parent()
+        .map(|root| root.join("fonts").join("pragmasevka-nf-subset.woff2"))
+        .and_then(|path| {
+            std::fs::metadata(&path)
+                .ok()
+                .filter(|meta| meta.is_file())
+                .map(|_| path)
+        });
+    let font = match font {
+        Some(path) => franken_term_asset_file_info(&path, FRANKENTERM_FONT_ROUTE).await,
+        None => None,
+    };
+    Some(FrankenTermAssetInfo { js, wasm, font })
+}
+
+async fn franken_term_asset_file_info(
+    path: &Path,
+    route: &'static str,
+) -> Option<FrankenTermAssetFileInfo> {
+    let bytes = tokio::fs::read(path).await.ok()?;
+    Some(FrankenTermAssetFileInfo {
+        route,
+        size_bytes: bytes.len() as u64,
+        checksum: format!("crc32:{:08x}", crc32fast::hash(&bytes)),
+    })
 }
 
 #[derive(Debug, Deserialize)]
@@ -1252,6 +1304,33 @@ mod tests {
         assert!(html.contains("send-history"));
         assert!(html.contains(FRANKENTERM_FONT_ROUTE));
         assert!(html.contains("window.__SWIMMERS_BOOT__"));
+    }
+
+    #[tokio::test]
+    async fn index_boot_payload_includes_frankenterm_asset_manifest_fields() {
+        let html = html_string(render_index(false).await).await;
+        assert!(html.contains("\"franken_term_font_url\""));
+        assert!(html.contains("\"franken_term_asset_info\""));
+        assert!(html.contains(FRANKENTERM_FONT_ROUTE));
+    }
+
+    #[tokio::test]
+    async fn franken_term_asset_file_info_reports_size_and_crc() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("FrankenTerm.js");
+        let contents = b"export default async () => {}";
+        std::fs::write(&path, contents).expect("write asset");
+
+        let info = franken_term_asset_file_info(&path, FRANKENTERM_JS_ROUTE)
+            .await
+            .expect("asset info");
+
+        assert_eq!(info.route, FRANKENTERM_JS_ROUTE);
+        assert_eq!(info.size_bytes, contents.len() as u64);
+        assert_eq!(
+            info.checksum,
+            format!("crc32:{:08x}", crc32fast::hash(contents))
+        );
     }
 
     #[tokio::test]
