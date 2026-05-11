@@ -275,6 +275,7 @@ function resetWebState() {
     error: "",
     requestSeq: 0,
     lastLoadedAt: 0,
+    lastHtml: "",
   };
   web.state.workbenchLogMode = "lens";
   web.state.workbenchLogFilter = "all";
@@ -299,6 +300,15 @@ function resetWebState() {
   } else {
     delete globalThis.fetch;
   }
+}
+
+function mockWorkbenchDetails(title, open) {
+  return {
+    open,
+    querySelector(selector) {
+      return selector === ".workbench-widget-title" ? { textContent: title } : null;
+    },
+  };
 }
 
 function jsonResponse(status, body) {
@@ -1038,6 +1048,83 @@ test("terminal workbench pinned widgets render pane output and artifacts from se
   assert.ok(web.el.terminalWorkbenchWidgets.innerHTML.includes("Skills"));
   assert.ok(web.el.terminalWorkbenchWidgets.innerHTML.includes("ui"));
   assert.ok(web.el.terminalWorkbenchWidgets.innerHTML.includes("Open viewer"));
+});
+
+test("workbench rerender preserves parent scrollTop and skips identical writes", () => {
+  resetWebState();
+  web.state.selectedSessionId = "sess_0";
+  web.state.trogdorAtlasOpen = false;
+  web.state.workbenchWidgets.sessionId = "sess_0";
+  web.state.workbenchWidgets.timeline = { events: [] };
+  web.state.workbenchWidgets.paneTail = { text: "alpha\nbeta\n" };
+
+  web.renderWorkbenchWidgets();
+  const firstHtml = web.el.terminalWorkbenchWidgets.innerHTML;
+  assert.ok(firstHtml.length > 0, "first render writes initial HTML");
+  assert.equal(web.state.workbenchWidgets.lastHtml, firstHtml);
+
+  web.el.terminalWorkbench.scrollTop = 240;
+
+  web.el.terminalWorkbenchWidgets.innerHTML = "TAINTED";
+  web.renderWorkbenchWidgets();
+  assert.equal(
+    web.el.terminalWorkbenchWidgets.innerHTML,
+    "TAINTED",
+    "identical payload skips the innerHTML write so scroll/selection survive",
+  );
+  assert.equal(web.el.terminalWorkbench.scrollTop, 240);
+
+  web.el.terminalWorkbenchWidgets.innerHTML = firstHtml;
+  web.state.workbenchWidgets.paneTail = { text: "alpha\nbeta\ngamma\n" };
+  web.renderWorkbenchWidgets();
+  assert.notEqual(
+    web.el.terminalWorkbenchWidgets.innerHTML,
+    firstHtml,
+    "changed payload rewrites widget HTML",
+  );
+  assert.equal(
+    web.el.terminalWorkbench.scrollTop,
+    240,
+    "scrollTop on the overflow:auto parent is restored after the rerender",
+  );
+});
+
+test("workbench rerender restores details open state by title", () => {
+  resetWebState();
+  web.el.terminalWorkbench.scrollTop = 180;
+  web.state.workbenchWidgets.lastHtml = "<details>previous</details>";
+
+  const previousDetails = [
+    mockWorkbenchDetails("Turns", false),
+    mockWorkbenchDetails("Logs", true),
+    mockWorkbenchDetails("Skills", false),
+  ];
+  const nextDetails = [
+    mockWorkbenchDetails("Turns", true),
+    mockWorkbenchDetails("Logs", false),
+    mockWorkbenchDetails("Skills", true),
+    mockWorkbenchDetails("Artifacts", true),
+  ];
+  const originalQuerySelectorAll = web.el.terminalWorkbenchWidgets.querySelectorAll;
+  let calls = 0;
+  web.el.terminalWorkbenchWidgets.querySelectorAll = (selector) => {
+    assert.equal(selector, "details.workbench-widget");
+    calls += 1;
+    return calls === 1 ? previousDetails : nextDetails;
+  };
+
+  try {
+    web.writeWorkbenchWidgetsHtml("<details class=\"workbench-widget\">next</details>");
+  } finally {
+    web.el.terminalWorkbenchWidgets.querySelectorAll = originalQuerySelectorAll;
+  }
+
+  assert.equal(calls, 2, "snapshots old details and restores into new details");
+  assert.equal(nextDetails[0].open, false, "collapsed Turns remains collapsed");
+  assert.equal(nextDetails[1].open, true, "expanded Logs remains expanded");
+  assert.equal(nextDetails[2].open, false, "collapsed Skills remains collapsed");
+  assert.equal(nextDetails[3].open, true, "new widgets keep their rendered default");
+  assert.equal(web.el.terminalWorkbench.scrollTop, 180);
 });
 
 test("workbench transcript lens classifies, filters, searches, and preserves raw logs", async () => {

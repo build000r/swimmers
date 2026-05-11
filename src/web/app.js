@@ -101,6 +101,7 @@ const state = {
     error: "",
     requestSeq: 0,
     lastLoadedAt: 0,
+    lastHtml: "",
   },
   workbenchLogMode: "lens",
   workbenchLogFilter: "all",
@@ -898,6 +899,7 @@ function resetWorkbenchWidgetsForSession(sessionId) {
   state.workbenchWidgets.gitDiff = null;
   state.workbenchWidgets.error = "";
   state.workbenchWidgets.lastLoadedAt = 0;
+  state.workbenchWidgets.lastHtml = "";
   state.workbenchLogMode = "lens";
   state.workbenchLogFilter = "all";
   state.workbenchLogSearch = "";
@@ -1493,6 +1495,61 @@ function renderSkillsPanel(skillsPayload) {
   return `${skillsHtml}${issueHtml}`;
 }
 
+function writeWorkbenchWidgetsHtml(nextHtml) {
+  if (!el.terminalWorkbenchWidgets) {
+    return;
+  }
+  if (state.workbenchWidgets.lastHtml === nextHtml) {
+    // No payload change since the last render, so preserve scroll, selection,
+    // and user-controlled <details> state by avoiding the DOM swap entirely.
+    return;
+  }
+  const scroller = el.terminalWorkbench;
+  const prevScrollTop =
+    scroller && typeof scroller.scrollTop === "number" ? scroller.scrollTop : 0;
+  const openByTitle = new Map();
+  if (typeof el.terminalWorkbenchWidgets.querySelectorAll === "function") {
+    for (const node of el.terminalWorkbenchWidgets.querySelectorAll(
+      "details.workbench-widget",
+    )) {
+      const titleEl =
+        typeof node.querySelector === "function"
+          ? node.querySelector(".workbench-widget-title")
+          : null;
+      const key = titleEl ? titleEl.textContent ?? "" : "";
+      if (key) {
+        openByTitle.set(key, Boolean(node.open));
+      }
+    }
+  }
+  el.terminalWorkbenchWidgets.innerHTML = nextHtml;
+  state.workbenchWidgets.lastHtml = nextHtml;
+  if (
+    openByTitle.size &&
+    typeof el.terminalWorkbenchWidgets.querySelectorAll === "function"
+  ) {
+    for (const node of el.terminalWorkbenchWidgets.querySelectorAll(
+      "details.workbench-widget",
+    )) {
+      const titleEl =
+        typeof node.querySelector === "function"
+          ? node.querySelector(".workbench-widget-title")
+          : null;
+      const key = titleEl ? titleEl.textContent ?? "" : "";
+      if (openByTitle.has(key)) {
+        node.open = openByTitle.get(key);
+      }
+    }
+  }
+  if (scroller && typeof requestAnimationFrame === "function") {
+    requestAnimationFrame(() => {
+      scroller.scrollTop = prevScrollTop;
+    });
+  } else if (scroller) {
+    scroller.scrollTop = prevScrollTop;
+  }
+}
+
 function renderWorkbenchWidgets() {
   if (!el.terminalWorkbenchWidgets) {
     return;
@@ -1501,7 +1558,9 @@ function renderWorkbenchWidgets() {
   const session = currentSession();
   const widgets = selectedWorkbenchWidgets();
   if (!session) {
-    el.terminalWorkbenchWidgets.innerHTML = `<div class="workbench-action-detail">No session selected.</div>`;
+    writeWorkbenchWidgetsHtml(
+      `<div class="workbench-action-detail">No session selected.</div>`,
+    );
     return;
   }
 
@@ -1605,7 +1664,7 @@ function renderWorkbenchWidgets() {
     ? `${Array.isArray(skills.skills) ? skills.skills.length : 0} skills`
     : "unavailable";
 
-  el.terminalWorkbenchWidgets.innerHTML = `
+  writeWorkbenchWidgetsHtml(`
     ${status}
     <details class="workbench-widget" open>
       <summary>
@@ -1649,7 +1708,7 @@ function renderWorkbenchWidgets() {
       </summary>
       <div class="workbench-widget-body">${renderSkillsPanel(skills)}</div>
     </details>
-  `;
+  `);
 }
 
 async function refreshWorkbenchWidgetsForSelectedSession(options = {}) {
@@ -7589,6 +7648,7 @@ export const __swimmersWebTest = {
   syncTerminalWorkbench,
   renderTerminalWorkbench,
   renderWorkbenchWidgets,
+  writeWorkbenchWidgetsHtml,
   renderTranscriptBlocks,
   refreshAgentContextForSelectedSession,
   refreshWorkbenchWidgetsForSelectedSession,
