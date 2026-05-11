@@ -51,6 +51,14 @@ const THOUGHT_SUPPRESSIONS: &str = "swimmers_thought_suppressions_total";
 /// Thought generation latency (LLM path only).
 const THOUGHT_GENERATION_LATENCY: &str = "swimmers_thought_generation_seconds";
 
+/// Summary-collection fallback events by fallback reason (timeout / dropped /
+/// channel-closed / missing). When the supervisor cannot get a fresh summary
+/// from a session actor in time, it falls back to a cached value flagged with
+/// `state_evidence.observed_at = None`. Operators need a counter so they can
+/// alert on a rising fallback rate — silent fallbacks were the Rank 1 root
+/// cause of the dangling-ball "unreliable status" complaint.
+const SUMMARY_FALLBACK_EVENTS: &str = "swimmers_summary_fallback_events_total";
+
 // ---------------------------------------------------------------------------
 // Initialization
 // ---------------------------------------------------------------------------
@@ -96,6 +104,10 @@ pub fn init_metrics() -> PrometheusHandle {
     describe_histogram!(
         THOUGHT_GENERATION_LATENCY,
         "Thought generation latency by path and cadence tier"
+    );
+    describe_counter!(
+        SUMMARY_FALLBACK_EVENTS,
+        "Summary-collection fallback events by reason (timeout / dropped / channel-closed / missing)"
     );
 
     handle
@@ -177,6 +189,19 @@ pub fn increment_thought_suppression(session_id: &str, reason: &str, tier: &str)
         "tier" => tier.to_owned()
     )
     .increment(1);
+}
+
+/// Increment the summary-fallback counter for one supervisor fallback path.
+///
+/// Reasons currently emitted:
+/// * `"timeout"` — the actor did not reply within the live-summary timeout.
+/// * `"dropped"` — the actor dropped the reply channel.
+/// * `"channel_closed"` — the actor command channel was already closed.
+/// * `"missing"` — fallback was needed but no cached summary existed.
+///
+/// Call site: `src/session/supervisor.rs` (`collect_live_summaries`).
+pub fn increment_summary_fallback(reason: &str) {
+    counter!(SUMMARY_FALLBACK_EVENTS, "reason" => reason.to_owned()).increment(1);
 }
 
 /// Record thought generation latency by path/tier.

@@ -5081,6 +5081,92 @@ fn balls_theme_sags_sleepier_sessions_and_clamps_to_floor() {
 }
 
 #[test]
+fn balls_theme_slots_keep_natural_tmux_order_across_state_changes() {
+    let api = MockApi::new();
+    let layout = test_layout(140, 40);
+    let mut app = make_app(api);
+
+    app.merge_sessions(
+        vec![
+            session_summary("sess-alpha-10", "alpha-10", TEST_REPO_SWIMMERS),
+            attention_session(
+                "sess-10",
+                "10",
+                TEST_REPO_SWIMMERS,
+                RestState::Active,
+                "2026-03-08T12:30:00Z",
+            ),
+            session_summary("sess-alpha-2", "alpha-2", TEST_REPO_SWIMMERS),
+            deep_sleep_session("sess-2", "2", TEST_REPO_SWIMMERS, "2026-03-08T12:00:00Z"),
+        ],
+        layout.overview_field,
+    );
+
+    let visible = app.visible_entities();
+    let slots = balls_theme_slots(&visible, layout.overview_field);
+    let slot_order = |slots: &[BallsThemeSlot<'_>]| {
+        let mut ordered = slots.iter().collect::<Vec<_>>();
+        ordered.sort_by_key(|slot| slot.ball_x);
+        ordered
+            .into_iter()
+            .map(|slot| slot.entity.session.tmux_name.clone())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        slot_order(&slots),
+        vec!["2", "10", "alpha-2", "alpha-10"],
+        "ball slots should read left-to-right in natural tmux-name order"
+    );
+    let original_x_by_name = slots
+        .iter()
+        .map(|slot| (slot.entity.session.tmux_name.clone(), slot.ball_x))
+        .collect::<HashMap<_, _>>();
+
+    app.merge_sessions(
+        vec![
+            attention_session(
+                "sess-alpha-10",
+                "alpha-10",
+                TEST_REPO_SWIMMERS,
+                RestState::Active,
+                "2026-03-08T12:00:00Z",
+            ),
+            deep_sleep_session("sess-10", "10", TEST_REPO_SWIMMERS, "2026-03-08T12:10:00Z"),
+            sleeping_session(
+                "sess-alpha-2",
+                "alpha-2",
+                TEST_REPO_SWIMMERS,
+                "2026-03-08T12:20:00Z",
+            ),
+            attention_session(
+                "sess-2",
+                "2",
+                TEST_REPO_SWIMMERS,
+                RestState::Active,
+                "2026-03-08T12:30:00Z",
+            ),
+        ],
+        layout.overview_field,
+    );
+
+    let visible = app.visible_entities();
+    let slots_after_state_change = balls_theme_slots(&visible, layout.overview_field);
+    assert_eq!(
+        slot_order(&slots_after_state_change),
+        vec!["2", "10", "alpha-2", "alpha-10"],
+        "state and last-activity changes must not swap ball slots"
+    );
+    for slot in slots_after_state_change {
+        assert_eq!(
+            original_x_by_name.get(&slot.entity.session.tmux_name),
+            Some(&slot.ball_x),
+            "{} should keep its horizontal ball slot",
+            slot.entity.session.tmux_name
+        );
+    }
+}
+
+#[test]
 fn balls_theme_handles_very_narrow_fields() {
     let field = Rect {
         x: 7,
@@ -7294,7 +7380,7 @@ fn thought_config_editor_updates_backend_and_model_then_saves() {
     }));
     api.push_update_thought_config(Ok(ThoughtConfig {
         backend: "codex".to_string(),
-        model: "gpt-5.4".to_string(),
+        model: "gpt-5.4-mini".to_string(),
         ..ThoughtConfig::default()
     }));
     api.push_test_thought_config(Ok(ThoughtConfigTestResponse {
@@ -7322,13 +7408,6 @@ fn thought_config_editor_updates_backend_and_model_then_saves() {
         layout,
         KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
     );
-    for ch in "gpt-5.4".chars() {
-        handle_key_event(
-            &mut app,
-            layout,
-            KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE),
-        );
-    }
     handle_key_event(
         &mut app,
         layout,
@@ -7357,7 +7436,7 @@ fn thought_config_editor_updates_backend_and_model_then_saves() {
         .next()
         .expect("saved config");
     assert_eq!(saved.backend, "codex");
-    assert_eq!(saved.model, "gpt-5.4");
+    assert_eq!(saved.model, "gpt-5.4-mini");
     assert_eq!(api.test_thought_config_calls().len(), 1);
 }
 
@@ -7730,7 +7809,7 @@ fn thought_config_editor_clears_incompatible_model_when_backend_changes() {
 
     editor.cycle_backend(1);
     assert_eq!(editor.backend_label(), "codex");
-    assert!(editor.config.model.is_empty());
+    assert_eq!(editor.config.model, "gpt-5.4-mini");
 
     editor.config.model = "gpt-5.4".to_string();
     editor.cycle_backend(-1);

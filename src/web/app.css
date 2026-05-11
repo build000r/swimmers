@@ -654,7 +654,8 @@ body.mobile-keyboard-active .terminal-control-strip {
 }
 
 .workbench-log-lens,
-.workbench-log-blocks {
+.workbench-log-blocks,
+.workbench-log-records {
   display: grid;
   gap: 8px;
   min-width: 0;
@@ -711,6 +712,61 @@ body.mobile-keyboard-active .terminal-control-strip {
   color: rgba(183, 200, 203, 0.58);
 }
 
+.workbench-log-brief {
+  display: grid;
+  gap: 7px;
+  min-width: 0;
+  padding: 8px;
+  border: 1px solid rgba(139, 227, 191, 0.18);
+  border-radius: 8px;
+  background: rgba(18, 43, 47, 0.48);
+}
+
+.workbench-log-brief-title {
+  color: var(--accent-2);
+  font-size: 0.72rem;
+  line-height: 1.25;
+}
+
+.workbench-log-brief-items {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
+.workbench-log-brief-item {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+  padding-top: 6px;
+  border-top: 1px solid rgba(139, 227, 191, 0.1);
+}
+
+.workbench-log-brief-item:first-child {
+  padding-top: 0;
+  border-top: 0;
+}
+
+.workbench-log-brief-label {
+  color: #d6bf86;
+  font-size: 0.62rem;
+  line-height: 1.2;
+}
+
+.workbench-log-brief-value {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+  color: var(--text);
+  font-size: 0.7rem;
+  line-height: 1.35;
+}
+
+.workbench-log-brief-value span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
 .workbench-log-chips {
   display: flex;
   flex-wrap: wrap;
@@ -761,6 +817,38 @@ body.mobile-keyboard-active .terminal-control-strip {
   font-variant-numeric: tabular-nums;
 }
 
+.workbench-log-evidence {
+  min-width: 0;
+  overflow: hidden;
+  border: 1px solid rgba(120, 210, 255, 0.1);
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.18);
+}
+
+.workbench-log-evidence summary {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  min-height: 30px;
+  padding: 6px 7px;
+  cursor: pointer;
+  color: var(--muted);
+  font-size: 0.64rem;
+  line-height: 1.2;
+}
+
+.workbench-log-evidence summary span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.workbench-log-evidence .workbench-log-records {
+  padding: 0 7px 7px;
+}
+
 .workbench-log-block {
   min-width: 0;
   overflow: hidden;
@@ -771,12 +859,56 @@ body.mobile-keyboard-active .terminal-control-strip {
 
 .workbench-log-block-header {
   display: flex;
+  min-width: 0;
+  flex-wrap: wrap;
   justify-content: space-between;
   gap: 8px;
   padding: 5px 7px;
   border-bottom: 1px solid rgba(120, 210, 255, 0.08);
   font-size: 0.62rem;
   line-height: 1.2;
+}
+
+.workbench-log-block-header span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.workbench-log-fields {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  padding: 6px 7px 0;
+}
+
+.workbench-log-field {
+  display: inline-grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  max-width: 100%;
+  overflow: hidden;
+  border: 1px solid rgba(120, 210, 255, 0.1);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.03);
+  color: var(--muted);
+  font-size: 0.62rem;
+  line-height: 1.35;
+}
+
+.workbench-log-field-key,
+.workbench-log-field-value {
+  min-width: 0;
+  padding: 3px 5px;
+  overflow-wrap: anywhere;
+}
+
+.workbench-log-field-key {
+  border-right: 1px solid rgba(120, 210, 255, 0.1);
+  color: var(--accent-2);
+}
+
+.workbench-log-field-value {
+  color: var(--text);
+  font-family: "JetBrains Mono", "Fira Code", monospace;
 }
 
 .workbench-log-block-body {
@@ -801,6 +933,32 @@ body.mobile-keyboard-active .terminal-control-strip {
   border-radius: 3px;
   background: rgba(255, 211, 106, 0.28);
   color: var(--text);
+}
+
+.workbench-log-json {
+  border-top: 1px solid rgba(120, 210, 255, 0.08);
+  color: var(--muted);
+  font-size: 0.62rem;
+}
+
+.workbench-log-json summary {
+  min-height: 24px;
+  padding: 5px 7px;
+  cursor: pointer;
+}
+
+.workbench-log-json pre {
+  max-height: 180px;
+  margin: 0;
+  padding: 7px;
+  overflow: auto;
+  border-top: 1px solid rgba(120, 210, 255, 0.08);
+  color: var(--text);
+  font-family: "JetBrains Mono", "Fira Code", monospace;
+  font-size: 0.66rem;
+  line-height: 1.35;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 
 .workbench-log-empty {
@@ -1316,7 +1474,8 @@ body.mobile-keyboard-active .terminal-control-strip {
   opacity: 1;
 }
 
-.trogdor-dragon-fire {
+.trogdor-dragon-fire,
+.trogdor-dragon-open {
   opacity: 0;
 }
 
@@ -1331,16 +1490,24 @@ body.mobile-keyboard-active .terminal-control-strip {
   opacity: 0;
 }
 
+/* Four-stage fire cycle (mouth-open → short → mid → full), proportions taken
+   from the Dragon Walk-around prototype: 100/90/90/130 ms → 410 ms total.
+   Each stage owns its visibility window; all four sprites share the same
+   cycle so they stay in lock-step. */
+.trogdor-dragon.is-firing .trogdor-dragon-open {
+  animation: dragon-sprite-fire-open 410ms steps(1, end) infinite;
+}
+
 .trogdor-dragon.is-firing .trogdor-dragon-fire.is-short {
-  animation: dragon-sprite-fire 360ms steps(1, end) infinite;
+  animation: dragon-sprite-fire-short 410ms steps(1, end) infinite;
 }
 
 .trogdor-dragon.is-firing .trogdor-dragon-fire.is-mid {
-  animation: dragon-sprite-fire 360ms steps(1, end) infinite 120ms;
+  animation: dragon-sprite-fire-mid 410ms steps(1, end) infinite;
 }
 
 .trogdor-dragon.is-firing .trogdor-dragon-fire.is-full {
-  animation: dragon-sprite-fire 360ms steps(1, end) infinite 240ms;
+  animation: dragon-sprite-fire-full 410ms steps(1, end) infinite;
 }
 
 .empty-bone {
@@ -1742,8 +1909,21 @@ body.mobile-keyboard-active .terminal-control-strip {
   fill: #b94f39;
 }
 
-.trogdor-agent.is-warning .agent-shield {
-  fill: #b94f39;
+/*
+ * Visual hierarchy: gray (quiet) → blue (working) → amber (warning) → red (danger).
+ * Each tone gets a distinct hue AND opacity AND animation cue so the operator
+ * can tell working from quiet without relying on color alone (a11y + colorblind
+ * safety + the "I can't tell what these balls/fish are doing" complaint that
+ * triggered this work). Previously is-warning recolored only the shield while
+ * is-quiet and is-working both fell back to the same #5379a8 blue, collapsing
+ * those two states into a visually identical sprite.
+ */
+
+.trogdor-agent.is-warning .agent-body,
+.trogdor-agent.is-warning .agent-shield,
+.trogdor-agent.is-warning .agent-helm,
+.trogdor-agent.is-warning .agent-leg {
+  fill: #ffd36a;
 }
 
 .trogdor-agent.is-working .agent-body,
@@ -1753,11 +1933,29 @@ body.mobile-keyboard-active .terminal-control-strip {
   fill: #5379a8;
 }
 
+.trogdor-agent.is-working {
+  animation: trogdor-agent-working-pulse 2.4s ease-in-out infinite;
+}
+
+@keyframes trogdor-agent-working-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.78;
+  }
+}
+
 .trogdor-agent.is-quiet .agent-body,
 .trogdor-agent.is-quiet .agent-shield,
 .trogdor-agent.is-quiet .agent-helm,
 .trogdor-agent.is-quiet .agent-leg {
-  fill: #5379a8;
+  fill: #8d8d8d;
+}
+
+.trogdor-agent.is-quiet {
+  opacity: 0.68;
 }
 
 .trogdor-empty-field {
@@ -1937,15 +2135,63 @@ body.trogdor-mode .terminal-fallback {
   }
 }
 
-@keyframes dragon-sprite-fire {
+/* 100ms of a 410ms cycle = 24.4%. Each subsequent stage advances its window
+   by its own slice (90 / 90 / 130 ms). */
+@keyframes dragon-sprite-fire-open {
   0%,
-  33% {
+  24% {
     opacity: 1;
   }
 
-  34%,
+  24.01%,
   100% {
     opacity: 0;
+  }
+}
+
+@keyframes dragon-sprite-fire-short {
+  0%,
+  24% {
+    opacity: 0;
+  }
+
+  24.01%,
+  46% {
+    opacity: 1;
+  }
+
+  46.01%,
+  100% {
+    opacity: 0;
+  }
+}
+
+@keyframes dragon-sprite-fire-mid {
+  0%,
+  46% {
+    opacity: 0;
+  }
+
+  46.01%,
+  68% {
+    opacity: 1;
+  }
+
+  68.01%,
+  100% {
+    opacity: 0;
+  }
+}
+
+@keyframes dragon-sprite-fire-full {
+  0%,
+  68% {
+    opacity: 0;
+  }
+
+  68.01%,
+  100% {
+    opacity: 1;
   }
 }
 
@@ -2902,6 +3148,7 @@ body.trogdor-mode .terminal-fallback {
   .trogdor-dragon,
   .trogdor-dragon.is-firing,
   .trogdor-dragon.is-firing .trogdor-dragon-fire,
+  .trogdor-dragon.is-firing .trogdor-dragon-open,
   .trogdor-agent,
   .trogdor-agent.is-attacking,
   .trogdor-agent.is-burnt,
@@ -2909,6 +3156,10 @@ body.trogdor-mode .terminal-fallback {
   .agent-burn-smoke,
   .trogdor-structure.is-burning .structure-svg {
     animation: none;
+  }
+
+  .trogdor-dragon.is-firing .trogdor-dragon-open {
+    opacity: 0;
   }
 
   .trogdor-dragon.is-firing .trogdor-dragon-fire.is-full {

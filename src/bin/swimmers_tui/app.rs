@@ -1046,21 +1046,37 @@ impl<C: TuiApi> App<C> {
 
     pub(crate) fn refresh_mermaid_artifacts(&mut self, sessions: &[SessionSummary]) {
         self.retain_cached_assets(sessions);
-        for session in sessions {
-            let context = MermaidCacheContext::from_session(session);
-            let should_refresh = self
-                .session_mermaid_cache
-                .get(&session.session_id)
-                .map(|entry| entry.context != context)
-                .unwrap_or(true);
-            if !should_refresh {
-                continue;
-            }
+        // Fan out the per-session artifact fetches concurrently. The previous
+        // implementation `block_on`'d each session in sequence, so initial
+        // frame paint scaled as `N * fetch_mermaid_artifact_timeout`. With ~16
+        // sessions and a 5s per-call ceiling that pushed first paint past 30s,
+        // long enough that the TUI looked hung on the `Launching TUI` line.
+        // `spawn_background_refresh_with_policy` already uses this same
+        // `join_all` shape; we mirror it here so the initial frame matches.
+        let pending: Vec<&SessionSummary> = sessions
+            .iter()
+            .filter(|session| {
+                let context = MermaidCacheContext::from_session(session);
+                self.session_mermaid_cache
+                    .get(&session.session_id)
+                    .map(|entry| entry.context != context)
+                    .unwrap_or(true)
+            })
+            .collect();
 
-            let result = self
-                .runtime
-                .block_on(self.client.fetch_mermaid_artifact(&session.session_id));
-            self.apply_mermaid_artifact_result(session, result);
+        if !pending.is_empty() {
+            let client = &self.client;
+            let results = self.runtime.block_on(async {
+                futures::future::join_all(
+                    pending
+                        .iter()
+                        .map(|session| client.fetch_mermaid_artifact(&session.session_id)),
+                )
+                .await
+            });
+            for (session, result) in pending.iter().zip(results) {
+                self.apply_mermaid_artifact_result(session, result);
+            }
         }
         self.rebuild_mermaid_artifacts_from_cache();
     }
@@ -1569,7 +1585,7 @@ impl<C: TuiApi> App<C> {
             }
         }
 
-        next.sort_by(|a, b| a.session.tmux_name.cmp(&b.session.tmux_name));
+        next.sort_by(|a, b| compare_tmux_natural(&a.session, &b.session));
         self.entities = next;
         self.layout_resting_entities(field);
         self.reconcile_selection();

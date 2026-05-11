@@ -353,8 +353,15 @@ test("Trogdor atlas renders dragon sprite assets and flames burnt swordsmen", ()
 
   const html = web.el.trogdorSurface.innerHTML;
   assert.match(html, /class="[^"]*trogdor-dragon[^"]*is-firing/);
-  assert.match(html, /\/assets\/dragon\/mouth-closed\/left\.png/);
-  assert.match(html, /\/assets\/dragon\/fire-left-full\/left\.png/);
+  // sess_0 sits at TROGDOR_REPO_POSITIONS[0] = (18, 40); dragon lands at
+  // (38, 58), so the (target - dragon) vector points up-and-left, which the
+  // 8-way frame picker resolves to "back-left".
+  assert.match(html, /\/assets\/dragon\/mouth-closed\/back-left\.png/);
+  assert.match(html, /\/assets\/dragon\/mouth-open\/back-left\.png/);
+  assert.match(html, /\/assets\/dragon\/fire-left-full\/back-left\.png/);
+  // Flame direction stays 2-way; with target.x < dragon.x the dragon faces left.
+  assert.match(html, /class="[^"]*trogdor-dragon[^"]*is-left/);
+  assert.match(html, /data-dragon-frame="back-left"/);
   assert.equal(web.state.trogdorBurntSessions.has("sess_0"), true);
   assert.match(html, /agent-burn-flame/);
   assert.match(html, /agent-burn-smoke/);
@@ -1063,8 +1070,10 @@ test("workbench rerender preserves parent scrollTop and skips identical writes",
   assert.ok(firstHtml.length > 0, "first render writes initial HTML");
   assert.equal(web.state.workbenchWidgets.lastHtml, firstHtml);
 
+  // Operator scrolls the workbench down to read the lower widgets.
   web.el.terminalWorkbench.scrollTop = 240;
 
+  // Polling cadence rerenders with the same payload — must not touch the DOM.
   web.el.terminalWorkbenchWidgets.innerHTML = "TAINTED";
   web.renderWorkbenchWidgets();
   assert.equal(
@@ -1074,6 +1083,7 @@ test("workbench rerender preserves parent scrollTop and skips identical writes",
   );
   assert.equal(web.el.terminalWorkbench.scrollTop, 240);
 
+  // Real payload change rebuilds the DOM but restores the scroll position.
   web.el.terminalWorkbenchWidgets.innerHTML = firstHtml;
   web.state.workbenchWidgets.paneTail = { text: "alpha\nbeta\ngamma\n" };
   web.renderWorkbenchWidgets();
@@ -1251,6 +1261,184 @@ test("workbench Turns panel is user-only and logs follow selected post-turn JSON
   html = web.el.terminalWorkbenchWidgets.innerHTML;
   assert.ok(html.includes("workbench-log-raw"));
   assert.ok(html.includes("&quot;function_call&quot;"));
+});
+
+test("workbench JSONL records render parsed event fields", () => {
+  resetWebState();
+  web.state.selectedSessionId = "sess_0";
+  web.state.trogdorAtlasOpen = false;
+  web.state.workbenchWidgets.sessionId = "sess_0";
+  web.state.workbenchWidgets.timeline = { events: [] };
+  web.state.workbenchWidgets.transcript = {
+    session_id: "sess_0",
+    available: true,
+    selected_turn_id: "turn-1",
+    selected_turn: { id: "turn-1", source: "Codex", text: "run the checks", order: 1, byte_start: 10, byte_end: 40 },
+    records: [
+      {
+        id: "call-1",
+        source: "Codex",
+        kind: "function_call",
+        summary: "exec: cargo test --locked",
+        raw: JSON.stringify({
+          type: "response_item",
+          payload: {
+            type: "function_call",
+            name: "exec_command",
+            arguments: JSON.stringify({ cmd: "cargo test --locked", workdir: "/tmp/project" }),
+          },
+        }),
+        byte_start: 50,
+        byte_end: 130,
+        truncated: false,
+      },
+      {
+        id: "output-1",
+        source: "Codex",
+        kind: "function_call_output",
+        summary: "finished green",
+        raw: JSON.stringify({
+          type: "response_item",
+          payload: {
+            type: "function_call_output",
+            call_id: "call_1",
+            output: JSON.stringify({ output: "finished green\nResult file written at target/reports/WG-002_RESULT.md\n" }),
+          },
+        }),
+        byte_start: 131,
+        byte_end: 190,
+        truncated: false,
+      },
+      {
+        id: "tokens-1",
+        source: "Codex",
+        kind: "token_count",
+        summary: "usage update",
+        raw: JSON.stringify({
+          type: "event_msg",
+          payload: {
+            type: "token_count",
+            info: { total_token_usage: { input_tokens: 150, output_tokens: 20 } },
+            model_context_window: 258400,
+          },
+        }),
+        byte_start: 191,
+        byte_end: 240,
+        truncated: false,
+      },
+    ],
+  };
+
+  web.renderWorkbenchWidgets();
+
+  let html = web.el.terminalWorkbenchWidgets.innerHTML;
+  assert.ok(html.includes("workbench-log-record"));
+  assert.ok(html.includes("data-log-kind=\"command\""));
+  assert.ok(html.includes("data-log-kind=\"output\""));
+  assert.ok(html.includes("data-log-kind=\"status\""));
+  assert.ok(html.includes("exec_command"));
+  assert.ok(html.includes("cargo test --locked"));
+  assert.ok(html.includes("/tmp/project"));
+  assert.ok(html.includes("finished green"));
+  assert.ok(html.includes("Start here"));
+  assert.ok(html.includes("Outcome"));
+  assert.ok(html.includes("Tool actions"));
+  assert.ok(html.includes("Where to read"));
+  assert.ok(html.includes("target/reports/WG-002_RESULT.md"));
+  assert.ok(html.includes("Event stream"));
+  assert.ok(html.includes("call_1"));
+  assert.ok(html.includes("window"));
+  assert.ok(html.includes("258400"));
+  assert.ok(html.includes("<summary>JSON</summary>"));
+
+  web.state.workbenchLogFilter = "output";
+  web.renderWorkbenchWidgets();
+  html = web.el.terminalWorkbenchWidgets.innerHTML;
+  assert.ok(html.includes("data-log-kind=\"output\""));
+  assert.equal(html.includes("data-log-kind=\"command\""), false);
+  assert.equal(html.includes("cargo test --locked"), false);
+
+  web.state.workbenchLogFilter = "all";
+  web.state.workbenchLogSearch = "locked";
+  web.renderWorkbenchWidgets();
+  html = web.el.terminalWorkbenchWidgets.innerHTML;
+  assert.ok(html.includes("workbench-log-mark"));
+  assert.ok(html.includes("cargo test"));
+  assert.equal(html.includes("finished green"), false);
+});
+
+test("workbench Claude JSONL messages render readable content instead of raw envelopes", () => {
+  resetWebState();
+  web.state.selectedSessionId = "sess_0";
+  web.state.trogdorAtlasOpen = false;
+  web.state.workbenchWidgets.sessionId = "sess_0";
+  web.state.workbenchWidgets.timeline = { events: [] };
+  web.state.workbenchWidgets.transcript = {
+    session_id: "sess_0",
+    available: true,
+    selected_turn_id: "turn-1",
+    selected_turn: { id: "turn-1", source: "Claude Code", text: "build release packet", order: 1, byte_start: 10, byte_end: 40 },
+    records: [
+      {
+        id: "claude-record-1",
+        source: "Claude Code",
+        kind: "assistant_message",
+        role: "assistant",
+        summary: "{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\"}}",
+        raw: JSON.stringify({
+          type: "assistant",
+          message: {
+            role: "assistant",
+            content: [
+              {
+                type: "text",
+                text: "WG-002 implementation is complete. Result file written at target/reference-board-release-spine/WG-002_RESULT.md.",
+              },
+            ],
+          },
+        }),
+        byte_start: 50,
+        byte_end: 120,
+        truncated: false,
+      },
+      {
+        id: "claude-record-2",
+        source: "Claude Code",
+        kind: "assistant_message",
+        role: "assistant",
+        summary: "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"tool_use\"}]}}",
+        raw: JSON.stringify({
+          type: "assistant",
+          message: {
+            role: "assistant",
+            content: [
+              {
+                type: "tool_use",
+                id: "toolu_1",
+                name: "file-history-snapshot",
+                input: { path: "/Users/b/repos/pcbcd/src/release.rs" },
+              },
+            ],
+          },
+        }),
+        byte_start: 121,
+        byte_end: 180,
+        truncated: false,
+      },
+    ],
+  };
+
+  web.renderWorkbenchWidgets();
+
+  const html = web.el.terminalWorkbenchWidgets.innerHTML;
+  assert.ok(html.includes("build release packet"));
+  assert.ok(html.includes("WG-002 implementation is complete"));
+  assert.ok(html.includes("target/reference-board-release-spine/WG-002_RESULT.md"));
+  assert.ok(html.includes("file-history-snapshot"));
+  assert.ok(html.includes("/Users/b/repos/pcbcd/src/release.rs"));
+  assert.ok(html.includes("data-log-kind=\"command\""));
+  const briefHtml = html.slice(0, html.indexOf("Event stream"));
+  assert.equal(briefHtml.includes("&quot;type&quot;:&quot;assistant&quot;,&quot;message&quot;"), false);
 });
 
 test("terminal text fallback follows the tail unless the user scrolled up", () => {

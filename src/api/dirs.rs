@@ -270,8 +270,10 @@ mod tests {
         let base = dir.path();
         let finalreceipts = base.join("finalreceipts");
         let swimmers = base.join("opensource").join("swimmers");
+        let hard_repo = dir.path().join("hard").join("mmd-pcb");
         fs::create_dir_all(&finalreceipts).expect("finalreceipts");
         fs::create_dir_all(swimmers.join("src")).expect("swimmers");
+        fs::create_dir_all(&hard_repo).expect("hard repo");
         fs::create_dir_all(base.join("zeta")).expect("zeta");
 
         let config = OverlayDirConfig {
@@ -292,6 +294,13 @@ mod tests {
                     restart: None,
                     open_url: None,
                 },
+                OverlayServiceEntry {
+                    name: "mmd-pcb".into(),
+                    dir: hard_repo.to_string_lossy().into_owned(),
+                    health_url: None,
+                    restart: None,
+                    open_url: None,
+                },
             ],
             groups: Vec::new(),
             launch: OverlayLaunchConfig::local_only(),
@@ -302,6 +311,7 @@ mod tests {
 
         assert!(names.contains(&"finalreceipts"));
         assert!(names.contains(&"swimmers"));
+        assert!(names.contains(&"mmd-pcb"));
         assert!(!names.contains(&"opensource"));
         assert!(!names.contains(&"zeta"));
         assert!(entries.iter().all(|entry| !entry.has_children));
@@ -317,6 +327,18 @@ mod tests {
                 .and_then(|entry| entry.full_path.as_deref()),
             Some(swimmers_path.as_str())
         );
+        let hard_path = hard_repo
+            .canonicalize()
+            .expect("canonical hard repo")
+            .to_string_lossy()
+            .into_owned();
+        assert_eq!(
+            entries
+                .iter()
+                .find(|entry| entry.name == "mmd-pcb")
+                .and_then(|entry| entry.full_path.as_deref()),
+            Some(hard_path.as_str())
+        );
     }
 
     #[test]
@@ -325,6 +347,8 @@ mod tests {
         let base = dir.path();
         fs::create_dir_all(base.join("alpha")).expect("alpha");
         fs::create_dir_all(base.join("services").join("nested-app")).expect("nested");
+        let hard_repo = dir.path().join("..").join("hard").join("mmd-pcb");
+        fs::create_dir_all(&hard_repo).expect("hard repo");
 
         let context = OverlayServiceContext {
             base_path: base.to_path_buf(),
@@ -343,6 +367,13 @@ mod tests {
                     restart: None,
                     open_url: None,
                 },
+                OverlayServiceEntry {
+                    name: "mmd-pcb".into(),
+                    dir: hard_repo.to_string_lossy().into_owned(),
+                    health_url: None,
+                    restart: None,
+                    open_url: None,
+                },
             ],
         };
 
@@ -354,6 +385,9 @@ mod tests {
 
         let svcs = services_for_directory(&base.join("zeta"), &context);
         assert!(svcs.is_empty());
+
+        let svcs = services_for_directory(&hard_repo, &context);
+        assert_eq!(svcs, vec!["mmd-pcb"]);
     }
 
     #[tokio::test]

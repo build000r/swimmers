@@ -2,6 +2,7 @@
 // NOTE(2026-04-21): Keep this module focused on presentation-layer metadata and presets.
 
 use crate::openrouter_models::cached_or_default_openrouter_candidates;
+use crate::thought::runtime_config::DEFAULT_CODEX_MODEL;
 use crate::types::{ThoughtConfigBackendMetadata, ThoughtConfigUiMetadata};
 
 const THOUGHT_BACKEND_OPTIONS: [&str; 3] = ["", "openrouter", "codex"];
@@ -31,7 +32,7 @@ pub fn thought_backend_label(value: &str) -> &'static str {
 pub fn thought_model_presets_hint(value: &str) -> &'static str {
     match canonical_thought_backend_key(value) {
         "openrouter" => "presets: auto  router  cached free models",
-        "codex" => "presets: auto  5.1-mini  5.3-codex  5.4",
+        "codex" => "preset: gpt-5.4-mini",
         _ => "auto backend uses daemon default model",
     }
 }
@@ -47,18 +48,16 @@ pub fn thought_model_presets(value: &str, openrouter_model_presets: &[String]) -
             }
             values
         }
-        "codex" => vec![
-            String::new(),
-            "gpt-5.1-codex-mini".to_string(),
-            "gpt-5.3-codex".to_string(),
-            "gpt-5.4".to_string(),
-        ],
+        "codex" => vec![DEFAULT_CODEX_MODEL.to_string()],
         _ => vec![String::new()],
     }
 }
 
 pub fn normalize_thought_model_for_backend(backend: &str, model: &str) -> String {
     let trimmed = model.trim();
+    if canonical_thought_backend_key(backend) == "codex" && trimmed != DEFAULT_CODEX_MODEL {
+        return DEFAULT_CODEX_MODEL.to_string();
+    }
     if trimmed.is_empty() {
         return String::new();
     }
@@ -66,7 +65,7 @@ pub fn normalize_thought_model_for_backend(backend: &str, model: &str) -> String
     let keep = match canonical_thought_backend_key(backend) {
         "" => false,
         "openrouter" => trimmed.contains('/'),
-        "codex" => trimmed.starts_with("gpt-"),
+        "codex" => trimmed == DEFAULT_CODEX_MODEL,
         _ => true,
     };
 
@@ -125,10 +124,20 @@ mod tests {
     fn normalize_model_clears_incompatible_values() {
         assert!(normalize_thought_model_for_backend("claude", "haiku").is_empty());
         assert_eq!(
-            normalize_thought_model_for_backend("codex", "gpt-5.4"),
-            "gpt-5.4"
+            normalize_thought_model_for_backend("codex", "gpt-5.4-mini"),
+            "gpt-5.4-mini"
+        );
+        assert_eq!(
+            normalize_thought_model_for_backend("codex", "gpt-5.1-codex-mini"),
+            "gpt-5.4-mini"
         );
         assert!(normalize_thought_model_for_backend("", "haiku").is_empty());
+    }
+
+    #[test]
+    fn codex_presets_only_offer_current_low_cost_model() {
+        assert_eq!(thought_model_presets("codex", &[]), vec!["gpt-5.4-mini"]);
+        assert_eq!(thought_model_presets_hint("codex"), "preset: gpt-5.4-mini");
     }
 
     #[test]

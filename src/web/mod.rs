@@ -565,31 +565,48 @@ async fn trogdor_dragon_asset(AxumPath((pose, frame)): AxumPath<(String, String)
 }
 
 fn trogdor_dragon_asset_bytes(pose: &str, frame: &str) -> Option<&'static [u8]> {
-    match (pose, frame) {
-        ("mouth-closed", "left.png") => {
-            Some(include_bytes!("../../assets/dragon/mouth-closed/left.png"))
-        }
-        ("mouth-closed", "right.png") => {
-            Some(include_bytes!("../../assets/dragon/mouth-closed/right.png"))
-        }
-        ("fire-left-full", "left.png") => Some(include_bytes!(
-            "../../assets/dragon/fire-left-full/left.png"
-        )),
-        ("fire-left-mid", "left.png") => {
-            Some(include_bytes!("../../assets/dragon/fire-left-mid/left.png"))
-        }
-        ("fire-left-short", "left.png") => Some(include_bytes!(
-            "../../assets/dragon/fire-left-short/left.png"
-        )),
-        ("fire-right-full", "right.png") => Some(include_bytes!(
-            "../../assets/dragon/fire-right-full/right.png"
-        )),
-        ("fire-right-mid", "right.png") => Some(include_bytes!(
-            "../../assets/dragon/fire-right-mid/right.png"
-        )),
-        ("fire-right-short", "right.png") => Some(include_bytes!(
-            "../../assets/dragon/fire-right-short/right.png"
-        )),
+    // All eight body frames (8-way directional) shipped for every pose. Names
+    // match the on-disk filenames: cardinal directions plus 3/4 views.
+    macro_rules! frames_for {
+        ($pose:literal) => {
+            match frame {
+                "left.png" => {
+                    Some(&include_bytes!(concat!("../../assets/dragon/", $pose, "/left.png"))[..])
+                }
+                "right.png" => {
+                    Some(&include_bytes!(concat!("../../assets/dragon/", $pose, "/right.png"))[..])
+                }
+                "front.png" => {
+                    Some(&include_bytes!(concat!("../../assets/dragon/", $pose, "/front.png"))[..])
+                }
+                "back.png" => {
+                    Some(&include_bytes!(concat!("../../assets/dragon/", $pose, "/back.png"))[..])
+                }
+                "3q-left.png" => Some(
+                    &include_bytes!(concat!("../../assets/dragon/", $pose, "/3q-left.png"))[..],
+                ),
+                "3q-right.png" => Some(
+                    &include_bytes!(concat!("../../assets/dragon/", $pose, "/3q-right.png"))[..],
+                ),
+                "back-left.png" => Some(
+                    &include_bytes!(concat!("../../assets/dragon/", $pose, "/back-left.png"))[..],
+                ),
+                "back-right.png" => Some(
+                    &include_bytes!(concat!("../../assets/dragon/", $pose, "/back-right.png"))[..],
+                ),
+                _ => None,
+            }
+        };
+    }
+    match pose {
+        "mouth-closed" => frames_for!("mouth-closed"),
+        "mouth-open" => frames_for!("mouth-open"),
+        "fire-left-short" => frames_for!("fire-left-short"),
+        "fire-left-mid" => frames_for!("fire-left-mid"),
+        "fire-left-full" => frames_for!("fire-left-full"),
+        "fire-right-short" => frames_for!("fire-right-short"),
+        "fire-right-mid" => frames_for!("fire-right-mid"),
+        "fire-right-full" => frames_for!("fire-right-full"),
         _ => None,
     }
 }
@@ -1335,22 +1352,39 @@ mod tests {
 
     #[tokio::test]
     async fn trogdor_dragon_asset_route_serves_embedded_png() {
+        // Spot-check three combinations spanning the expanded 8 poses × 8 frames
+        // grid: the legacy mouth-closed/right pair, the newly-served mouth-open
+        // pose, and one of the previously-unreachable 3/4-view body frames.
+        let cases = [
+            ("mouth-closed", "right.png"),
+            ("mouth-open", "back-left.png"),
+            ("fire-right-mid", "3q-left.png"),
+        ];
+        for (pose, frame) in cases {
+            let response = trogdor_dragon_asset(AxumPath((pose.to_string(), frame.to_string())))
+                .await
+                .into_response();
+
+            assert_eq!(response.status(), StatusCode::OK, "{pose}/{frame}");
+            assert_eq!(
+                response.headers().get(header::CONTENT_TYPE).unwrap(),
+                "image/png",
+                "{pose}/{frame}"
+            );
+            let body = to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("dragon sprite body");
+            assert_eq!(&body[..8], b"\x89PNG\r\n\x1a\n", "{pose}/{frame}");
+        }
+
+        // Unknown frames still 404.
         let response = trogdor_dragon_asset(AxumPath((
             "mouth-closed".to_string(),
-            "right.png".to_string(),
+            "diagonal.png".to_string(),
         )))
         .await
         .into_response();
-
-        assert_eq!(response.status(), StatusCode::OK);
-        assert_eq!(
-            response.headers().get(header::CONTENT_TYPE).unwrap(),
-            "image/png"
-        );
-        let body = to_bytes(response.into_body(), usize::MAX)
-            .await
-            .expect("dragon sprite body");
-        assert_eq!(&body[..8], b"\x89PNG\r\n\x1a\n");
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 
     #[test]

@@ -65,33 +65,6 @@ fn balls_theme_body_rect(count: usize, field: Rect) -> Rect {
     }
 }
 
-fn balls_center_out_indices(count: usize) -> Vec<usize> {
-    if count == 0 {
-        return Vec::new();
-    }
-
-    let mut order = Vec::with_capacity(count);
-    let left_center = (count - 1) / 2;
-    let right_center = count / 2;
-    order.push(left_center);
-    if right_center != left_center {
-        order.push(right_center);
-    }
-
-    let mut offset = 1usize;
-    while order.len() < count {
-        if let Some(index) = left_center.checked_sub(offset) {
-            order.push(index);
-        }
-        let right = right_center + offset;
-        if right < count {
-            order.push(right);
-        }
-        offset += 1;
-    }
-    order
-}
-
 fn balls_theme_centers(count: usize, body: Rect) -> Vec<u16> {
     if count == 0 {
         return Vec::new();
@@ -146,8 +119,6 @@ pub(crate) fn balls_theme_slots<'a>(
 
     let body = balls_theme_body_rect(entities.len(), field);
     let centers = balls_theme_centers(entities.len(), body);
-    let placement = balls_center_out_indices(entities.len());
-
     // `balls_theme_centers` returns one entry per entity, so this should
     // always succeed for non-empty entities; fall back to the body x to keep
     // the `&centers[0]` indexing footgun out of the hot path entirely.
@@ -156,19 +127,27 @@ pub(crate) fn balls_theme_slots<'a>(
     };
 
     let mut ordered = entities.to_vec();
-    ordered.sort_by(|left, right| compare_sleepiness(&left.session, &right.session));
+    ordered.sort_by(|left, right| compare_tmux_natural(&left.session, &right.session));
+
+    let mut sleepiness_order = entities.to_vec();
+    sleepiness_order.sort_by(|left, right| compare_sleepiness(&left.session, &right.session));
+    let sleepiness_ranks = sleepiness_order
+        .iter()
+        .enumerate()
+        .map(|(rank, entity)| (entity.session.session_id.as_str(), rank))
+        .collect::<HashMap<_, _>>();
 
     let floor_y = field.bottom().saturating_sub(1);
     let cord_top_y = body.bottom();
     let mut slots = Vec::with_capacity(ordered.len());
-    for (age_rank, entity) in ordered.into_iter().enumerate() {
-        let placement_index = *placement.get(age_rank).unwrap_or(&age_rank);
-        let anchor_x = centers
-            .get(placement_index)
-            .copied()
-            .unwrap_or(first_center);
+    for (slot_index, entity) in ordered.into_iter().enumerate() {
+        let anchor_x = centers.get(slot_index).copied().unwrap_or(first_center);
         let kind = entity.sprite_kind();
         let ball_height = balls_theme_ball_height(kind);
+        let age_rank = sleepiness_ranks
+            .get(entity.session.session_id.as_str())
+            .copied()
+            .unwrap_or(slot_index);
         let mut drop =
             balls_theme_base_drop(kind) + balls_theme_age_bonus(age_rank, entities.len(), kind);
         if matches!(kind, SpriteKind::DeepSleep | SpriteKind::Exited) {

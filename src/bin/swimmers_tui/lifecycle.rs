@@ -128,7 +128,15 @@ async fn ensure_server_with_opts(
 }
 
 async fn quick_probe_alive(base_url: &str) -> bool {
-    let probe_url = format!("{}/v1/sessions", base_url.trim_end_matches('/'));
+    // Probe `/health` rather than `/v1/sessions`: the latter fans out to all
+    // configured remote launch targets (see `list_remote_sessions`) and can
+    // take 900ms+ when a tailnet peer is unreachable. With PROBE_TIMEOUT
+    // bounded at 500ms that race made the probe falsely conclude an existing
+    // backend was dead, after which the TUI would try to spawn a duplicate
+    // server, fail to bind the already-occupied port, and surface a confusing
+    // startup error. `/health` is unauthenticated, cheap, and only checks
+    // local subsystems.
+    let probe_url = format!("{}/health", base_url.trim_end_matches('/'));
     let client = match reqwest::Client::builder()
         .connect_timeout(PROBE_TIMEOUT)
         .timeout(PROBE_TIMEOUT)

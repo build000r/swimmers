@@ -566,8 +566,88 @@ pub(crate) fn top_rest_origin(field: Rect, slot: usize) -> (u16, u16) {
 pub(crate) fn compare_sleepiness(left: &SessionSummary, right: &SessionSummary) -> Ordering {
     left.last_activity_at
         .cmp(&right.last_activity_at)
-        .then_with(|| left.tmux_name.cmp(&right.tmux_name))
-        .then_with(|| left.session_id.cmp(&right.session_id))
+        .then_with(|| compare_tmux_natural(left, right))
+}
+
+pub(crate) fn compare_tmux_natural(left: &SessionSummary, right: &SessionSummary) -> Ordering {
+    natural_cmp(&left.tmux_name, &right.tmux_name)
+        .then_with(|| natural_cmp(&left.session_id, &right.session_id))
+}
+
+fn natural_cmp(left: &str, right: &str) -> Ordering {
+    let mut left_index = 0;
+    let mut right_index = 0;
+
+    loop {
+        match (
+            next_natural_chunk(left, left_index),
+            next_natural_chunk(right, right_index),
+        ) {
+            (None, None) => return Ordering::Equal,
+            (None, Some(_)) => return Ordering::Less,
+            (Some(_), None) => return Ordering::Greater,
+            (
+                Some((left_chunk, left_numeric, next_left)),
+                Some((right_chunk, right_numeric, next_right)),
+            ) => {
+                let chunk_order = match (left_numeric, right_numeric) {
+                    (true, true) => compare_numeric_chunk(left_chunk, right_chunk),
+                    (false, false) => compare_text_chunk(left_chunk, right_chunk),
+                    (true, false) => Ordering::Less,
+                    (false, true) => Ordering::Greater,
+                };
+                if chunk_order != Ordering::Equal {
+                    return chunk_order;
+                }
+                left_index = next_left;
+                right_index = next_right;
+            }
+        }
+    }
+}
+
+fn next_natural_chunk(value: &str, start: usize) -> Option<(&str, bool, usize)> {
+    if start >= value.len() {
+        return None;
+    }
+
+    let mut chars = value[start..].char_indices();
+    let (_, first) = chars.next()?;
+    let numeric = first.is_ascii_digit();
+    let mut end = value.len();
+    for (offset, ch) in chars {
+        if ch.is_ascii_digit() != numeric {
+            end = start + offset;
+            break;
+        }
+    }
+    Some((&value[start..end], numeric, end))
+}
+
+fn compare_text_chunk(left: &str, right: &str) -> Ordering {
+    let left_folded = left.to_ascii_lowercase();
+    let right_folded = right.to_ascii_lowercase();
+    left_folded.cmp(&right_folded).then_with(|| left.cmp(right))
+}
+
+fn compare_numeric_chunk(left: &str, right: &str) -> Ordering {
+    let left_significant = significant_number_chunk(left);
+    let right_significant = significant_number_chunk(right);
+    left_significant
+        .len()
+        .cmp(&right_significant.len())
+        .then_with(|| left_significant.cmp(right_significant))
+        .then_with(|| left.len().cmp(&right.len()))
+        .then_with(|| left.cmp(right))
+}
+
+fn significant_number_chunk(value: &str) -> &str {
+    let trimmed = value.trim_start_matches('0');
+    if trimmed.is_empty() {
+        "0"
+    } else {
+        trimmed
+    }
 }
 
 pub(crate) fn separate_from_fixed_entity(entity: &mut SessionEntity, obstacle: Rect, field: Rect) {

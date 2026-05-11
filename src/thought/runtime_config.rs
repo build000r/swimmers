@@ -11,6 +11,7 @@ pub const MODEL_MAX_CHARS: usize = 200;
 pub const PROMPT_MAX_CHARS: usize = 4_000;
 pub const DEFAULT_THOUGHT_BACKEND: &str = "openrouter";
 pub const DEFAULT_OPENROUTER_MODEL: &str = "openrouter/free";
+pub const DEFAULT_CODEX_MODEL: &str = "gpt-5.4-mini";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ThoughtConfig {
@@ -200,10 +201,10 @@ fn normalize_model_for_backend(backend: &str, model: &str) -> String {
             }
         }
         "codex" => {
-            if trimmed.starts_with("gpt-") {
+            if trimmed == DEFAULT_CODEX_MODEL {
                 trimmed.to_string()
             } else {
-                String::new()
+                DEFAULT_CODEX_MODEL.to_string()
             }
         }
         _ => trimmed.to_string(),
@@ -327,6 +328,22 @@ mod tests {
                 config.normalize_and_validate().is_ok(),
                 "{backend:?} should normalize"
             );
+        }
+    }
+
+    #[test]
+    fn normalize_codex_backend_uses_supported_default_model() {
+        for model in ["", "gpt-5.1-codex-mini", "gpt-5.3-codex", "gpt-5.4"] {
+            let config = ThoughtConfig {
+                backend: "codex".to_string(),
+                model: model.to_string(),
+                ..ThoughtConfig::default()
+            };
+            let normalized = config
+                .normalize_and_validate()
+                .expect("codex backend should normalize stale models");
+            assert_eq!(normalized.backend, "codex");
+            assert_eq!(normalized.model, DEFAULT_CODEX_MODEL);
         }
     }
 

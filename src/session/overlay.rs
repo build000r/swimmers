@@ -392,6 +392,8 @@ struct OverlayPlans {
 #[derive(Deserialize, Default)]
 struct RepoLandscape {
     #[serde(default)]
+    scan_roots: Vec<String>,
+    #[serde(default)]
     repos: Vec<RepoEntry>,
 }
 
@@ -507,7 +509,22 @@ fn parse_client_overlay(client_dir: &Path, overlay_path: &Path) -> Option<Client
     let cwd_match_count = context.cwd_match.len();
     let mut cwd_patterns: Vec<String> = context.cwd_match.iter().map(|p| expand_path(p)).collect();
 
+    let scan_roots: Vec<PathBuf> = context
+        .repo_landscape
+        .as_ref()
+        .map(|landscape| {
+            landscape
+                .scan_roots
+                .iter()
+                .map(|root| PathBuf::from(expand_path(root)))
+                .collect()
+        })
+        .unwrap_or_default();
+
     if let Some(landscape) = &context.repo_landscape {
+        for root in &landscape.scan_roots {
+            cwd_patterns.push(expand_path(root));
+        }
         for repo in &landscape.repos {
             if let Some(path) = &repo.path {
                 cwd_patterns.push(expand_path(path));
@@ -567,9 +584,10 @@ fn parse_client_overlay(client_dir: &Path, overlay_path: &Path) -> Option<Client
             .entries
             .into_iter()
             .filter_map(|entry| {
+                let dir = expand_path(&entry.dir?);
                 let entry = OverlayServiceEntry {
                     name: entry.name?,
-                    dir: entry.dir?,
+                    dir,
                     health_url: entry.health_url,
                     restart: entry.restart,
                     open_url: entry.open_url,
@@ -586,6 +604,13 @@ fn parse_client_overlay(client_dir: &Path, overlay_path: &Path) -> Option<Client
                 None
             }
         }));
+        for root in &scan_roots {
+            for entry in service_entries_from_scan_root(root, &base_path) {
+                if seen_service_dirs.insert(entry.dir.clone()) {
+                    services.push(entry);
+                }
+            }
+        }
         Some(OverlayDirConfig {
             label: client_label.clone(),
             base_path,
@@ -604,6 +629,44 @@ fn parse_client_overlay(client_dir: &Path, overlay_path: &Path) -> Option<Client
         plan_draft,
         dir_config,
     })
+}
+
+fn service_entries_from_scan_root(root: &Path, base_path: &Path) -> Vec<OverlayServiceEntry> {
+    let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    let base = base_path
+        .canonicalize()
+        .unwrap_or_else(|_| base_path.to_path_buf());
+    if root == base || root.starts_with(&base) {
+        return Vec::new();
+    }
+
+    let Ok(entries) = std::fs::read_dir(&root) else {
+        return Vec::new();
+    };
+    let mut services = Vec::new();
+    for entry in entries.flatten() {
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        if !file_type.is_dir() {
+            continue;
+        }
+        let path = entry.path();
+        let Some(name) = path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+        else {
+            continue;
+        };
+        if name.starts_with('.') || !path.join(".git").is_dir() {
+            continue;
+        }
+        if let Some(service) = service_entry_from_repo_path(None, path, base_path) {
+            services.push(service);
+        }
+    }
+    services.sort_by(|a, b| a.name.cmp(&b.name));
+    services
 }
 
 fn parse_agent_launch(section: Option<DevSanityAgentLaunch>) -> OverlayLaunchConfig {
@@ -670,8 +733,17 @@ fn service_entry_from_client_repo(
     }
 
     let repo_path = expand_repo_path(&repo.repo_path?, base_path);
-    let dir = relative_dir_from_base(base_path, &repo_path)?;
-    let name = repo.id.or_else(|| {
+    service_entry_from_repo_path(repo.id, repo_path, base_path)
+}
+
+fn service_entry_from_repo_path(
+    id: Option<String>,
+    repo_path: PathBuf,
+    base_path: &Path,
+) -> Option<OverlayServiceEntry> {
+    let dir = relative_dir_from_base(base_path, &repo_path)
+        .unwrap_or_else(|| repo_path.to_string_lossy().into_owned());
+    let name = id.or_else(|| {
         repo_path
             .file_name()
             .map(|name| name.to_string_lossy().into_owned())
@@ -995,6 +1067,11 @@ mod tests {
         std::fs::create_dir_all(&repo_base).expect("repo base");
         std::fs::create_dir_all(repo_base.join("finalreceipts")).expect("finalreceipts repo");
         std::fs::create_dir_all(repo_base.join("sweet-potato")).expect("sweet-potato repo");
+        let hard_root = tmp.path().join("hard");
+        let hard_repo = hard_root.join("mmd-pcb");
+        std::fs::create_dir_all(&hard_repo).expect("hard repo");
+        let scanned_hard_repo = hard_root.join("pcbcd");
+        std::fs::create_dir_all(scanned_hard_repo.join(".git")).expect("scanned hard repo");
         let overlay_path = client_dir.join("overlay.yaml");
         std::fs::write(
             &overlay_path,
@@ -1006,6 +1083,9 @@ client:
   context:
     cwd_match:
       - {repo_base}
+    repo_landscape:
+      scan_roots:
+        - {hard_root}
   repos:
     - id: finalreceipts
       kind: repo
@@ -1013,6 +1093,9 @@ client:
     - id: sweet-potato-dupe
       kind: repo
       repo_path: {repo_base}/sweet-potato
+    - id: mmd-pcb
+      kind: repo
+      repo_path: {hard_repo}
 dev_sanity:
   services:
     base_path: {repo_base}
@@ -1025,6 +1108,8 @@ dev_sanity:
       paths:
         - {repo_base}/finalreceipts
 "#,
+                hard_repo = hard_repo.display(),
+                hard_root = hard_root.display(),
                 repo_base = repo_base.display()
             ),
         )
@@ -1038,7 +1123,20 @@ dev_sanity:
             .map(|service| service.dir.as_str())
             .collect();
 
-        assert_eq!(service_dirs, vec!["sweet-potato", "finalreceipts"]);
+        let scanned_hard_path = scanned_hard_repo
+            .canonicalize()
+            .expect("canonical scanned hard path")
+            .to_string_lossy()
+            .into_owned();
+        assert_eq!(
+            service_dirs,
+            vec![
+                "sweet-potato",
+                "finalreceipts",
+                hard_repo.to_str().expect("hard path"),
+                scanned_hard_path.as_str()
+            ]
+        );
         assert!(config
             .services
             .iter()

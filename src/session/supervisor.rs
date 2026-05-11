@@ -994,15 +994,20 @@ impl SessionSupervisor {
                         .is_err()
                     {
                         warn!(session_id = %handle.session_id, "actor summary command channel closed");
-                        return cached
-                            .map(|mut summary| {
+                        return match cached {
+                            Some(mut summary) => {
+                                crate::metrics::increment_summary_fallback("channel_closed");
                                 summary.transport_health = TransportHealth::Disconnected;
                                 summary.state_evidence = crate::types::StateEvidence::unobserved(
                                     "summary_cache_disconnected",
                                 );
                                 SummaryCollectOutcome::Fallback(summary)
-                            })
-                            .unwrap_or(SummaryCollectOutcome::Missing);
+                            }
+                            None => {
+                                crate::metrics::increment_summary_fallback("missing");
+                                SummaryCollectOutcome::Missing
+                            }
+                        };
                     }
                     match tokio::time::timeout(timeout, rx).await {
                         Ok(Ok(summary)) if summary.state != SessionState::Exited => {
@@ -1011,29 +1016,39 @@ impl SessionSupervisor {
                         Ok(Ok(summary)) => SummaryCollectOutcome::Exited(summary.session_id),
                         Ok(Err(_)) => {
                             warn!(session_id = %handle.session_id, "actor dropped summary reply");
-                            cached
-                                .map(|mut summary| {
+                            match cached {
+                                Some(mut summary) => {
+                                    crate::metrics::increment_summary_fallback("dropped");
                                     summary.transport_health = TransportHealth::Degraded;
                                     summary.state_evidence =
                                         crate::types::StateEvidence::unobserved(
                                             "summary_cache_degraded",
                                         );
                                     SummaryCollectOutcome::Fallback(summary)
-                                })
-                                .unwrap_or(SummaryCollectOutcome::Missing)
+                                }
+                                None => {
+                                    crate::metrics::increment_summary_fallback("missing");
+                                    SummaryCollectOutcome::Missing
+                                }
+                            }
                         }
                         Err(_) => {
                             warn!(session_id = %handle.session_id, "summary request timed out");
-                            cached
-                                .map(|mut summary| {
+                            match cached {
+                                Some(mut summary) => {
+                                    crate::metrics::increment_summary_fallback("timeout");
                                     summary.transport_health = TransportHealth::Overloaded;
                                     summary.state_evidence =
                                         crate::types::StateEvidence::unobserved(
                                             "summary_cache_overloaded",
                                         );
                                     SummaryCollectOutcome::Fallback(summary)
-                                })
-                                .unwrap_or(SummaryCollectOutcome::Missing)
+                                }
+                                None => {
+                                    crate::metrics::increment_summary_fallback("missing");
+                                    SummaryCollectOutcome::Missing
+                                }
+                            }
                         }
                     }
                 }

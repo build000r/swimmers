@@ -26,6 +26,31 @@ const TROGDOR_BURN_MS = 1100;
 const TROGDOR_DRAGON_ASSET_BASE = "/assets/dragon";
 const TROGDOR_DRAGON_TARGET = { x: 56, y: 64 };
 const TROGDOR_DRAGON_FIRE_STAGES = ["short", "mid", "full"];
+// 8-way body sprite filenames (without `.png`). Match the on-disk assets.
+const TROGDOR_DRAGON_BODY_FRAMES = [
+  "front",
+  "3q-right",
+  "right",
+  "back-right",
+  "back",
+  "back-left",
+  "left",
+  "3q-left",
+];
+// atan2 sector → body frame. Sector 0 = +x (right), sector 2 = +y on canvas
+// (down / toward-camera = "front"). Two sectors map to "left" because the angle
+// ±π collapses. Mirrors the prototype's `dirIndexFromVec`.
+const TROGDOR_DRAGON_FRAME_BY_SECTOR = {
+  "2": "front",
+  "1": "3q-right",
+  "0": "right",
+  "-1": "back-right",
+  "-2": "back",
+  "-3": "back-left",
+  "-4": "left",
+  "4": "left",
+  "3": "3q-left",
+};
 const TERMINAL_ZOOM_MIN = 0.65;
 const TERMINAL_ZOOM_MAX = 2.4;
 const TERMINAL_ZOOM_STEP = 0.1;
@@ -1253,6 +1278,494 @@ function workbenchLogCounts(blocks) {
   }, {});
 }
 
+function parseJsonObject(text) {
+  try {
+    const parsed = JSON.parse(String(text || ""));
+    return parsed && typeof parsed === "object" ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function parseNestedJsonObject(value) {
+  if (value && typeof value === "object") {
+    return value;
+  }
+  if (typeof value !== "string" || !value.trim().startsWith("{")) {
+    return null;
+  }
+  return parseJsonObject(value);
+}
+
+function compactJsonValue(value, limit = 360) {
+  if (value === undefined || value === null) {
+    return "";
+  }
+  try {
+    const text = typeof value === "string" ? value : JSON.stringify(value);
+    return truncateWorkbenchText(String(text || "").replace(/\r/g, "").trim(), limit);
+  } catch {
+    return "";
+  }
+}
+
+function payloadTextContent(value) {
+  if (typeof value === "string") {
+    return value;
+  }
+  if (Array.isArray(value)) {
+    return value
+      .map((block) => {
+        if (typeof block === "string") {
+          return block;
+        }
+        if (block?.type === "tool_use") {
+          const input = compactJsonValue(block.input, 300);
+          return [block.name || "tool_use", input].filter(Boolean).join(": ");
+        }
+        if (block?.type === "tool_result") {
+          return payloadTextContent(block.content) || compactJsonValue(block, 300);
+        }
+        if (block?.type === "thinking") {
+          return block.thinking || "";
+        }
+        if (typeof block?.text === "string") {
+          return block.text;
+        }
+        if (typeof block?.content === "string") {
+          return block.content;
+        }
+        return payloadTextContent(block?.content);
+      })
+      .map((part) => String(part || "").trim())
+      .filter(Boolean)
+      .join("\n");
+  }
+  if (value && typeof value === "object") {
+    return compactJsonValue(value);
+  }
+  return "";
+}
+
+function transcriptRecordEnvelope(record) {
+  const raw = String(record?.raw || "").trim();
+  const parsed = parseJsonObject(raw);
+  const message = parsed?.message && typeof parsed.message === "object" ? parsed.message : null;
+  const payload = parsed?.payload && typeof parsed.payload === "object"
+    ? parsed.payload
+    : message || (parsed && typeof parsed === "object" ? parsed : {});
+  return { raw, parsed, payload, message };
+}
+
+function payloadToolUseBlock(payload) {
+  const content = Array.isArray(payload?.content) ? payload.content : [];
+  return content.find((block) => block && typeof block === "object" && block.type === "tool_use") || null;
+}
+
+function payloadToolResultBlock(payload) {
+  const content = Array.isArray(payload?.content) ? payload.content : [];
+  return content.find((block) => block && typeof block === "object" && block.type === "tool_result") || null;
+}
+
+function readableRecordSummary(record, raw) {
+  const summary = String(record?.summary || "").trim();
+  if (!summary || summary === raw || /^[\[{]/.test(summary)) {
+    return "";
+  }
+  return summary;
+}
+
+function compactRecordFields(value) {
+  if (!value || typeof value !== "object") {
+    return "";
+  }
+  const skipped = new Set(["payload", "message", "content", "signature", "thinking"]);
+  return Object.entries(value)
+    .filter(([key, entry]) => !skipped.has(key) && entry !== undefined && entry !== null && entry !== "")
+    .slice(0, 5)
+    .map(([key, entry]) => `${key}: ${compactJsonValue(entry, 160)}`)
+    .join("\n");
+}
+
+function payloadMessageText(payload) {
+  if (typeof payload?.message === "string") {
+    return payload.message;
+  }
+  if (payload?.message && typeof payload.message === "object") {
+    return payloadTextContent(payload.message.content) || compactRecordFields(payload.message);
+  }
+  return "";
+}
+
+function transcriptRecordIsCall(kind) {
+  return /^(function_call|custom_tool_call)$/.test(String(kind || ""));
+}
+
+function transcriptRecordIsCallOutput(kind) {
+  return /^(function_call_output|custom_tool_call_output)$/.test(String(kind || ""));
+}
+
+function transcriptRecordDisplayKind(record, payload) {
+  const kind = String(record?.kind || payload?.type || "record");
+  if (payloadToolResultBlock(payload)) {
+    return "output";
+  }
+  if (transcriptRecordIsCallOutput(kind)) {
+    return "output";
+  }
+  if (payloadToolUseBlock(payload)) {
+    return "command";
+  }
+  if (transcriptRecordIsCall(kind)) {
+    return "command";
+  }
+  if (/agent_message|assistant_message|message|user_message/.test(kind)) {
+    return "operator";
+  }
+  if (/token_count|session_meta|turn_context|compacted|patch_apply/.test(kind)) {
+    return "status";
+  }
+  if (/diff|patch/.test(kind)) {
+    return "diff";
+  }
+  if (record?.truncated) {
+    return "truncation";
+  }
+  return transcriptLineKind(record?.summary || record?.raw || "");
+}
+
+function transcriptRecordMeta(record, parsed) {
+  const pieces = [];
+  const source = String(record?.source || "").trim();
+  const rawType = String(parsed?.type || "").trim();
+  const cursor = Number(record?.byte_start || 0);
+  if (source) {
+    pieces.push(source);
+  }
+  if (rawType) {
+    pieces.push(rawType);
+  }
+  if (cursor > 0) {
+    pieces.push(`@${cursor}`);
+  }
+  if (record?.truncated) {
+    pieces.push("trimmed");
+  }
+  return pieces.join(" · ");
+}
+
+function transcriptRecordDisplay(record) {
+  const { raw, parsed, payload } = transcriptRecordEnvelope(record);
+  const kind = String(record?.kind || payload?.type || parsed?.type || "record");
+  const displayKind = transcriptRecordDisplayKind(record, payload);
+  const title = kind.replace(/_/g, " ");
+  const summary = readableRecordSummary(record, raw);
+  const role = record?.role || payload?.role || "";
+  const toolUse = payloadToolUseBlock(payload);
+  const toolResult = payloadToolResultBlock(payload);
+  const fields = [];
+  let body = "";
+
+  if (toolUse || transcriptRecordIsCall(kind)) {
+    const name = payload?.name || toolUse?.name || summary.split(":")[0] || "tool";
+    const args = parseNestedJsonObject(payload?.arguments || payload?.input || toolUse?.input);
+    const command = args?.cmd || args?.command || "";
+    const workdir = args?.workdir || args?.cwd || "";
+    body = command || payloadTextContent(payload?.input || toolUse?.input) || summary || name;
+    fields.push(["tool", name]);
+    if (workdir) {
+      fields.push(["cwd", workdir]);
+    }
+    if (toolUse?.id) {
+      fields.push(["call", toolUse.id]);
+    }
+  } else if (toolResult || transcriptRecordIsCallOutput(kind)) {
+    const output = parseNestedJsonObject(payload?.output || toolResult?.content);
+    body =
+      output?.output ||
+      output?.error ||
+      payloadTextContent(payload?.output || toolResult?.content) ||
+      summary ||
+      "Tool output";
+    if (payload?.call_id || toolResult?.tool_use_id) {
+      fields.push(["call", payload?.call_id || toolResult.tool_use_id]);
+    }
+  } else if (/agent_message|assistant_message|message|user_message/.test(kind)) {
+    body = payloadMessageText(payload) || payloadTextContent(payload?.content) || summary || "Message";
+    if (role) {
+      fields.push(["role", role]);
+    }
+  } else if (/token_count/.test(kind)) {
+    const usage = payload?.info?.total_token_usage || payload?.usage || {};
+    const contextWindow = payload?.model_context_window || payload?.info?.model_context_window;
+    if (usage?.input_tokens !== undefined) {
+      fields.push(["input", String(usage.input_tokens)]);
+    }
+    if (usage?.output_tokens !== undefined) {
+      fields.push(["output", String(usage.output_tokens)]);
+    }
+    if (contextWindow !== undefined) {
+      fields.push(["window", String(contextWindow)]);
+    }
+    body = summary || "Token usage update";
+  } else if (/patch_apply/.test(kind)) {
+    body = payloadMessageText(payload) || summary || kind.replace(/_/g, " ");
+  } else {
+    body = payloadMessageText(payload) || payloadTextContent(payload?.content) || summary || compactRecordFields(payload) || kind;
+  }
+
+  return {
+    id: record?.id || `${kind}-${record?.byte_start || 0}`,
+    kind: displayKind,
+    label: WORKBENCH_LOG_KIND_LABELS[displayKind] || "Output",
+    title,
+    meta: transcriptRecordMeta(record, parsed),
+    fields,
+    body: truncateWorkbenchText(String(body || "").replace(/\r/g, ""), 1400),
+    raw,
+  };
+}
+
+function recordMatchesSearch(record, query) {
+  const needle = String(query || "").trim().toLowerCase();
+  if (!needle) {
+    return true;
+  }
+  return [record.label, record.title, record.meta, record.body, record.raw]
+    .join("\n")
+    .toLowerCase()
+    .includes(needle);
+}
+
+const WORKBENCH_LOG_PATH_RE = /(?:^|[\s"'`([])((?:~\/|\.{1,2}\/|\/)?[A-Za-z0-9_@%+=:.-][A-Za-z0-9_@%+=:./-]*\.(?:c|cc|cpp|css|h|html|js|jsx|json|jsonl|lock|log|md|mjs|mmd|mmdx|py|rs|sh|toml|ts|tsx|txt|wasm|yaml|yml))(?:$|[\s"'`),\]])/g;
+
+function normalizeWorkbenchBriefText(text, limit = 260) {
+  return truncateWorkbenchText(String(text || "").replace(/\r/g, "").replace(/\s+/g, " ").trim(), limit);
+}
+
+function uniqueNonEmpty(values) {
+  const seen = new Set();
+  const result = [];
+  for (const value of values) {
+    const text = String(value || "").trim();
+    if (!text || seen.has(text)) {
+      continue;
+    }
+    seen.add(text);
+    result.push(text);
+  }
+  return result;
+}
+
+function extractWorkbenchPaths(text) {
+  const paths = [];
+  const source = String(text || "");
+  for (const match of source.matchAll(WORKBENCH_LOG_PATH_RE)) {
+    const path = String(match[1] || "").replace(/[;:.,]+$/, "");
+    if (path && !path.startsWith("http")) {
+      paths.push(path);
+    }
+  }
+  return paths;
+}
+
+function workbenchPathScore(path) {
+  const text = String(path || "").toLowerCase();
+  let score = 0;
+  if (text.includes("result")) {
+    score += 80;
+  }
+  if (text.endsWith(".md") || text.endsWith(".mmd") || text.endsWith(".mmdx")) {
+    score += 30;
+  }
+  if (text.startsWith("target/") || text.includes("/target/")) {
+    score += 20;
+  }
+  if (text.startsWith("/")) {
+    score += 10;
+  }
+  return score;
+}
+
+function workbenchRecordBody(record) {
+  const body = String(record?.body || "").trim();
+  if (!body || body === "Message" || body === "Tool output") {
+    return "";
+  }
+  return body;
+}
+
+function workbenchRecordRole(record) {
+  const roleField = record?.fields?.find?.(([key]) => key === "role");
+  return String(roleField?.[1] || "").trim();
+}
+
+function workbenchBriefItems(records, options = {}) {
+  const items = [];
+  const selectedTurnText = normalizeWorkbenchBriefText(options.selectedTurn?.text || "", 220);
+  const userRecord = [...records].reverse().find((record) => workbenchRecordRole(record) === "user");
+  const userText = selectedTurnText || normalizeWorkbenchBriefText(workbenchRecordBody(userRecord), 220);
+  const outcomeRecord = [...records].reverse().find((record) => {
+    const body = workbenchRecordBody(record);
+    return body && /baked|blocked|complete|done|error|fail|pass|result|summary|written/i.test(body);
+  });
+  const assistantRecord = [...records].reverse().find((record) => {
+    const role = workbenchRecordRole(record);
+    const body = workbenchRecordBody(record);
+    return body && (role === "assistant" || /assistant|agent/.test(record?.title || ""));
+  });
+  const fallbackRecord = [...records].reverse().find((record) => workbenchRecordBody(record));
+  const outcomeText = normalizeWorkbenchBriefText(
+    workbenchRecordBody(outcomeRecord) || workbenchRecordBody(assistantRecord) || workbenchRecordBody(fallbackRecord),
+    280,
+  );
+  const commands = uniqueNonEmpty(
+    records
+      .filter((record) => record.kind === "command")
+      .map((record) => normalizeWorkbenchBriefText(workbenchRecordBody(record), 120)),
+  ).slice(0, 3);
+  const paths = uniqueNonEmpty(
+    records.flatMap((record) => [
+      ...extractWorkbenchPaths(record.body),
+      ...extractWorkbenchPaths(record.raw),
+      ...(record.fields || []).flatMap(([, value]) => extractWorkbenchPaths(value)),
+    ]),
+  )
+    .sort((left, right) => workbenchPathScore(right) - workbenchPathScore(left))
+    .slice(0, 4);
+
+  if (userText) {
+    items.push(["User turn", userText]);
+  }
+  if (outcomeText) {
+    items.push(["Outcome", outcomeText]);
+  }
+  if (commands.length) {
+    items.push(["Tool actions", commands.join("\n")]);
+  }
+  if (paths.length) {
+    items.push(["Where to read", paths.join("\n")]);
+  }
+  return items;
+}
+
+function renderWorkbenchLogBrief(records, options = {}) {
+  const items = workbenchBriefItems(records, options);
+  if (!items.length) {
+    return "";
+  }
+  return `
+    <section class="workbench-log-brief" aria-label="Log summary">
+      <div class="workbench-log-brief-title">Start here</div>
+      <div class="workbench-log-brief-items">
+        ${items
+          .map(
+            ([label, value]) => `
+              <div class="workbench-log-brief-item">
+                <div class="workbench-log-brief-label">${escapeHtml(label)}</div>
+                <div class="workbench-log-brief-value">${String(value)
+                  .split("\n")
+                  .map((line) => `<span>${escapeHtml(line)}</span>`)
+                  .join("")}</div>
+              </div>
+            `,
+          )
+          .join("")}
+      </div>
+    </section>
+  `;
+}
+
+function renderWorkbenchRecordLens(records, options = {}) {
+  const parsedRecords = Array.isArray(records) ? records.map(transcriptRecordDisplay) : [];
+  const rawText = options.rawText ?? transcriptRecordsToRawText(records);
+  const rawExcerpt = widgetTextExcerpt(rawText);
+  const rawHasText = Boolean(rawExcerpt.trim());
+  const title = options.title || "Post-turn JSONL";
+  const emptyText = options.emptyText || "No JSONL records after this turn yet.";
+  const counts = workbenchLogCounts(parsedRecords);
+  const mode = state.workbenchLogMode === "raw" ? "raw" : "lens";
+  const filter = WORKBENCH_LOG_FILTERS.includes(state.workbenchLogFilter) ? state.workbenchLogFilter : "all";
+  const query = String(state.workbenchLogSearch || "");
+  const filteredRecords = parsedRecords.filter((record) => {
+    const kindMatches = filter === "all" || record.kind === filter;
+    return kindMatches && recordMatchesSearch(record, query);
+  });
+
+  const controls = renderWorkbenchLogControls(filter, query, mode);
+  if (mode === "raw") {
+    return `
+      <div class="workbench-action-detail">${escapeHtml(title)}</div>
+      ${controls}
+      ${rawHasText ? `<pre class="workbench-log-raw">${escapeHtml(rawExcerpt)}</pre>` : `<div>${escapeHtml(emptyText)}</div>`}
+    `;
+  }
+
+  const countChips = renderWorkbenchLogCountChips(counts);
+  const briefRecords = filter === "all" && !query.trim() ? parsedRecords : filteredRecords;
+  const briefHtml = renderWorkbenchLogBrief(briefRecords, options);
+  const recordsHtml = !parsedRecords.length
+    ? `<div class="workbench-log-empty">${escapeHtml(emptyText)}</div>`
+    : filteredRecords.length
+      ? filteredRecords.map((record) => renderWorkbenchLogRecord(record, query)).join("")
+      : `<div class="workbench-log-empty">No JSONL records match.</div>`;
+  const evidenceOpen = query.trim() || filter !== "all" ? "open" : "";
+  const evidenceMeta = parsedRecords.length
+    ? `${filteredRecords.length}/${parsedRecords.length} shown`
+    : "empty";
+
+  return `
+    <div class="workbench-action-detail">${escapeHtml(title)}</div>
+    <div class="workbench-log-lens">
+      ${briefHtml}
+      ${controls}
+      ${countChips ? `<div class="workbench-log-chips">${countChips}</div>` : ""}
+      <details class="workbench-log-evidence" ${evidenceOpen}>
+        <summary>
+          <span>Event stream</span>
+          <span>${escapeHtml(evidenceMeta)}</span>
+        </summary>
+        <div class="workbench-log-records">${recordsHtml}</div>
+      </details>
+    </div>
+  `;
+}
+
+function renderWorkbenchLogRecord(record, query) {
+  const fields = record.fields
+    .filter(([, value]) => String(value || "").trim())
+    .map(
+      ([key, value]) => `
+        <span class="workbench-log-field">
+          <span class="workbench-log-field-key">${escapeHtml(key)}</span>
+          <span class="workbench-log-field-value">${escapeHtml(String(value))}</span>
+        </span>
+      `,
+    )
+    .join("");
+  const bodyLines = String(record.body || "")
+    .split("\n")
+    .slice(0, 24)
+    .map((line) => `<div class="workbench-log-line">${renderHighlightedLogLine(line, query)}</div>`)
+    .join("");
+  return `
+    <article class="workbench-log-record workbench-log-block workbench-log-block-${record.kind}" data-log-kind="${escapeHtml(record.kind)}">
+      <div class="workbench-log-block-header">
+        <span>${escapeHtml(record.label)} · ${escapeHtml(record.title)}</span>
+        <span>${escapeHtml(record.meta)}</span>
+      </div>
+      ${fields ? `<div class="workbench-log-fields">${fields}</div>` : ""}
+      <div class="workbench-log-block-body">${bodyLines || `<div class="workbench-log-line">${escapeHtml(record.title)}</div>`}</div>
+      ${record.raw ? `
+        <details class="workbench-log-json">
+          <summary>JSON</summary>
+          <pre>${escapeHtml(widgetTextExcerpt(record.raw, 2200))}</pre>
+        </details>
+      ` : ""}
+    </article>
+  `;
+}
+
 function transcriptRecordsToLensText(records) {
   if (!Array.isArray(records) || !records.length) {
     return "";
@@ -1279,7 +1792,43 @@ function transcriptRecordsToRawText(records) {
     .join("\n");
 }
 
+function renderWorkbenchLogCountChips(counts) {
+  return WORKBENCH_LOG_FILTERS.filter((kind) => kind !== "all" && counts[kind])
+    .map(
+      (kind) => `
+        <span class="workbench-log-chip workbench-log-chip-${kind}">
+          <span>${escapeHtml(WORKBENCH_LOG_KIND_LABELS[kind])}</span>
+          <span class="workbench-log-chip-count">${counts[kind]}</span>
+        </span>
+      `,
+    )
+    .join("");
+}
+
+function renderWorkbenchLogControls(filter, query, mode) {
+  const filterOptions = WORKBENCH_LOG_FILTERS.map(
+    (kind) => `<option value="${escapeHtml(kind)}" ${filter === kind ? "selected" : ""}>${escapeHtml(WORKBENCH_LOG_KIND_LABELS[kind])}</option>`,
+  ).join("");
+
+  return `
+    <div class="workbench-log-toolbar">
+      <div class="workbench-log-view-toggle" role="group" aria-label="Log view">
+        <button type="button" class="workbench-log-view-button" data-workbench-log-mode="lens" aria-pressed="${mode === "lens" ? "true" : "false"}">Lens</button>
+        <button type="button" class="workbench-log-view-button" data-workbench-log-mode="raw" aria-pressed="${mode === "raw" ? "true" : "false"}">Raw</button>
+      </div>
+      <select class="workbench-log-filter" name="workbench-log-filter" aria-label="Filter log blocks" data-workbench-log-filter>
+        ${filterOptions}
+      </select>
+      <input class="workbench-log-search" type="search" name="workbench-log-search" aria-label="Search logs" placeholder="Search logs" value="${escapeHtml(query)}" data-workbench-log-search />
+    </div>
+  `;
+}
+
 function renderWorkbenchLogLens(tailText, options = {}) {
+  if (Array.isArray(options.records)) {
+    return renderWorkbenchRecordLens(options.records, options);
+  }
+
   const excerpt = widgetTextExcerpt(tailText);
   const rawExcerpt = widgetTextExcerpt(options.rawText ?? tailText);
   const hasText = Boolean(excerpt.trim());
@@ -1295,34 +1844,8 @@ function renderWorkbenchLogLens(tailText, options = {}) {
     const kindMatches = filter === "all" || block.kind === filter;
     return kindMatches && blockMatchesSearch(block, query);
   });
-
-  const countChips = WORKBENCH_LOG_FILTERS.filter((kind) => kind !== "all" && counts[kind])
-    .map(
-      (kind) => `
-        <span class="workbench-log-chip workbench-log-chip-${kind}">
-          <span>${escapeHtml(WORKBENCH_LOG_KIND_LABELS[kind])}</span>
-          <span class="workbench-log-chip-count">${counts[kind]}</span>
-        </span>
-      `,
-    )
-    .join("");
-
-  const filterOptions = WORKBENCH_LOG_FILTERS.map(
-    (kind) => `<option value="${escapeHtml(kind)}" ${filter === kind ? "selected" : ""}>${escapeHtml(WORKBENCH_LOG_KIND_LABELS[kind])}</option>`,
-  ).join("");
-
-  const controls = `
-    <div class="workbench-log-toolbar">
-      <div class="workbench-log-view-toggle" role="group" aria-label="Log view">
-        <button type="button" class="workbench-log-view-button" data-workbench-log-mode="lens" aria-pressed="${mode === "lens" ? "true" : "false"}">Lens</button>
-        <button type="button" class="workbench-log-view-button" data-workbench-log-mode="raw" aria-pressed="${mode === "raw" ? "true" : "false"}">Raw</button>
-      </div>
-      <select class="workbench-log-filter" name="workbench-log-filter" aria-label="Filter log blocks" data-workbench-log-filter>
-        ${filterOptions}
-      </select>
-      <input class="workbench-log-search" type="search" name="workbench-log-search" aria-label="Search logs" placeholder="Search logs" value="${escapeHtml(query)}" data-workbench-log-search />
-    </div>
-  `;
+  const countChips = renderWorkbenchLogCountChips(counts);
+  const controls = renderWorkbenchLogControls(filter, query, mode);
 
   if (mode === "raw") {
     return `
@@ -1500,8 +2023,9 @@ function writeWorkbenchWidgetsHtml(nextHtml) {
     return;
   }
   if (state.workbenchWidgets.lastHtml === nextHtml) {
-    // No payload change since the last render, so preserve scroll, selection,
-    // and user-controlled <details> state by avoiding the DOM swap entirely.
+    // No payload change since the last render — skip the DOM swap entirely so
+    // the operator's scroll position, text selection, and <details> toggles
+    // are not collateral damage of the polling cadence.
     return;
   }
   const scroller = el.terminalWorkbench;
@@ -1620,6 +2144,8 @@ function renderWorkbenchWidgets() {
     ? renderWorkbenchLogLens(transcriptText, {
         title: "Post-turn JSONL",
         rawText: transcriptRawText,
+        records: transcriptRecords,
+        selectedTurn: transcript?.selected_turn,
         emptyText: "No JSONL records after this turn yet.",
       })
     : renderWorkbenchLogLens(tailText);
@@ -3327,6 +3853,15 @@ function renderTrogdorProps() {
   `;
 }
 
+// 8-way body sprite from a (dx, dy) vector pointing dragon → target. Returns
+// the asset filename stem ("right", "back-left", "front", ...). Mirrors the
+// prototype's `dirIndexFromVec`: bin atan2 into pi/4 sectors, then map.
+function trogdorDragonFrameForVector(dx, dy, fallback = "right") {
+  if (!dx && !dy) return fallback;
+  const sector = Math.round(Math.atan2(dy, dx) / (Math.PI / 4));
+  return TROGDOR_DRAGON_FRAME_BY_SECTOR[String(sector)] ?? fallback;
+}
+
 function trogdorDragonPose(groups, summary) {
   let focusIndex = -1;
   let focusGroup = null;
@@ -3347,7 +3882,8 @@ function trogdorDragonPose(groups, summary) {
   const target = focusGroup ? TROGDOR_REPO_POSITIONS[focusIndex % TROGDOR_REPO_POSITIONS.length] : null;
   let x = TROGDOR_DRAGON_TARGET.x;
   let y = TROGDOR_DRAGON_TARGET.y;
-  let direction = "right";
+  let direction = "right";       // flame direction (L/R) — flame plumes stay 2-way.
+  let bodyFrame = "right";       // 8-way body sprite filename (sans `.png`).
   let walkX = "3.2vw";
   let walkY = "-1.2vh";
 
@@ -3358,12 +3894,14 @@ function trogdorDragonPose(groups, summary) {
     direction = target.x < x ? "left" : "right";
     walkX = direction === "left" ? "-3.2vw" : "3.2vw";
     walkY = target.y < y ? "-1.2vh" : "1.2vh";
+    bodyFrame = trogdorDragonFrameForVector(target.x - x, target.y - y, direction);
   }
 
   return {
     x,
     y,
     direction,
+    bodyFrame,
     walkX,
     walkY,
     heated: clampInt(summary?.level, 0, 0, 99) >= 70,
@@ -3371,16 +3909,20 @@ function trogdorDragonPose(groups, summary) {
   };
 }
 
-function trogdorDragonAsset(pose, direction) {
-  const frame = direction === "left" ? "left.png" : "right.png";
-  return `${TROGDOR_DRAGON_ASSET_BASE}/${pose}/${frame}`;
+function trogdorDragonAsset(pose, bodyFrame) {
+  const frame = TROGDOR_DRAGON_BODY_FRAMES.includes(bodyFrame) ? bodyFrame : "right";
+  return `${TROGDOR_DRAGON_ASSET_BASE}/${pose}/${frame}.png`;
 }
 
 function renderTrogdorDragon(pose) {
   const direction = pose?.direction === "left" ? "left" : "right";
+  const bodyFrame = TROGDOR_DRAGON_BODY_FRAMES.includes(pose?.bodyFrame)
+    ? pose.bodyFrame
+    : direction;
   const classes = [
     "trogdor-dragon",
     `is-${direction}`,
+    `is-frame-${bodyFrame}`,
     pose?.heated ? "is-heated" : "",
     pose?.firing ? "is-firing" : "",
   ].filter(Boolean).join(" ");
@@ -3390,9 +3932,12 @@ function renderTrogdorDragon(pose) {
     `--dragon-walk-x:${pose?.walkX || "3.2vw"}`,
     `--dragon-walk-y:${pose?.walkY || "-1.2vh"}`,
   ].join("; ");
-  const idleSrc = escapeAttr(trogdorDragonAsset("mouth-closed", direction));
+  const idleSrc = escapeAttr(trogdorDragonAsset("mouth-closed", bodyFrame));
+  const openSrc = escapeAttr(trogdorDragonAsset("mouth-open", bodyFrame));
+  // Prototype fire sequence: mouth-open → short → mid → full, each looping in
+  // the order it was drawn. Body frame stays 8-way; flame direction is L/R.
   const fireFrames = TROGDOR_DRAGON_FIRE_STAGES.map((stage) => {
-    const src = escapeAttr(trogdorDragonAsset(`fire-${direction}-${stage}`, direction));
+    const src = escapeAttr(trogdorDragonAsset(`fire-${direction}-${stage}`, bodyFrame));
     return `
       <img
         class="trogdor-dragon-sprite trogdor-dragon-fire is-${stage}"
@@ -3407,11 +3952,20 @@ function renderTrogdorDragon(pose) {
   }).join("");
 
   return `
-    <div class="${classes}" style="${style}" aria-hidden="true" data-dragon-direction="${direction}">
+    <div class="${classes}" style="${style}" aria-hidden="true" data-dragon-direction="${direction}" data-dragon-frame="${bodyFrame}">
       <span class="trogdor-dragon-sprite-stack">
         <img
           class="trogdor-dragon-sprite trogdor-dragon-idle"
           src="${idleSrc}"
+          alt=""
+          width="155"
+          height="147"
+          decoding="async"
+          draggable="false"
+        />
+        <img
+          class="trogdor-dragon-sprite trogdor-dragon-open"
+          src="${openSrc}"
           alt=""
           width="155"
           height="147"

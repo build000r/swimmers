@@ -166,7 +166,7 @@ pub fn managed_base_child_names(
 
     let mut children = BTreeSet::new();
     for service in &config.services {
-        let service_path = resolved_base.join(&service.dir);
+        let service_path = service_dir_path(&resolved_base, &service.dir);
         let Ok(canonical) = service_path.canonicalize() else {
             continue;
         };
@@ -189,31 +189,34 @@ pub fn managed_base_child_names(
     }
 }
 
-fn relative_repo_path(base: &Path, path: &Path) -> Option<String> {
-    let relative = path.strip_prefix(base).ok()?;
-    let components: Vec<String> = relative
-        .components()
-        .filter_map(|component| match component {
-            Component::Normal(name) => Some(name.to_string_lossy().into_owned()),
-            _ => None,
-        })
-        .collect();
-    Some(components.join("/"))
+fn service_dir_path(base: &Path, dir: &str) -> PathBuf {
+    let path = PathBuf::from(dir);
+    if path.is_absolute() {
+        path
+    } else {
+        base.join(path)
+    }
 }
 
 pub fn services_for_directory(path: &Path, context: &OverlayServiceContext) -> Vec<String> {
-    let Some(relative_path) = relative_repo_path(&context.base_path, path) else {
+    let target = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let canonical_base = context
+        .base_path
+        .canonicalize()
+        .unwrap_or_else(|_| context.base_path.clone());
+    if target == canonical_base {
         return Vec::new();
     };
-    if relative_path.is_empty() {
-        return Vec::new();
-    }
 
     let mut services = BTreeSet::new();
     for service in &context.services {
-        if service.dir == relative_path
-            || service.dir.starts_with(&format!("{relative_path}/"))
-            || relative_path.starts_with(&format!("{}/", service.dir))
+        let service_path = service_dir_path(&canonical_base, &service.dir);
+        let canonical_service = service_path
+            .canonicalize()
+            .unwrap_or_else(|_| service_path.clone());
+        if canonical_service == target
+            || canonical_service.starts_with(&target)
+            || target.starts_with(&canonical_service)
         {
             services.insert(service.name.clone());
         }
@@ -809,7 +812,7 @@ pub async fn list_managed_service_entries(
     let mut pending = Vec::new();
 
     for service in &config.services {
-        let raw_path = base_path.join(&service.dir);
+        let raw_path = service_dir_path(&base_path, &service.dir);
         let Ok(entry_path) = raw_path.canonicalize() else {
             continue;
         };
