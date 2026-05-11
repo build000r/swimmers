@@ -748,7 +748,8 @@ pub(crate) fn session_display_color(
 
 pub(crate) fn session_state_evidence_unverified(session: &SessionSummary) -> bool {
     session.state_evidence.observed_at.is_none()
-        || session.state_evidence.confidence != StateConfidence::High
+        || matches!(session.state_evidence.confidence, StateConfidence::Low)
+        || !matches!(session.transport_health, TransportHealth::Healthy)
 }
 
 /// Deterministic color derived from the session name so that sessions without a

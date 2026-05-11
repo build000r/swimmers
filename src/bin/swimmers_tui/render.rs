@@ -250,11 +250,23 @@ fn render_balls_theme_ball(
     color: Color,
 ) {
     let kind = slot.entity.sprite_kind();
-    let cord_char = match kind {
-        SpriteKind::Attention => '!',
-        SpriteKind::Busy => ':',
-        SpriteKind::Error | SpriteKind::Exited => 'x',
-        _ => '|',
+    // Whether to overlay an "uncertain" mark on the ball. We reuse the same
+    // predicate that already adds `?` to the text label so the visual signal
+    // and the label suffix stay in lock-step. Observed medium-confidence
+    // detector output is still useful live state; cache fallbacks and unhealthy
+    // transport are the cases where an operator should not trust a
+    // confident-looking ball.
+    let unverified = session_state_evidence_unverified(&slot.entity.session);
+    let cord_char = if unverified {
+        // Sparse/dashed cord; visually distinct from `|`, `:`, `!`, `x`.
+        '\''
+    } else {
+        match kind {
+            SpriteKind::Attention => '!',
+            SpriteKind::Busy => ':',
+            SpriteKind::Error | SpriteKind::Exited => 'x',
+            _ => '|',
+        }
     };
     let cord_color = if selected {
         Color::White
@@ -265,25 +277,33 @@ fn render_balls_theme_ball(
         renderer.draw_char(slot.anchor_x, y, cord_char, cord_color);
     }
 
-    let rows: &[&str] = match kind {
-        SpriteKind::Attention => &[" .-. ", "(_!_)"],
-        SpriteKind::Active => &[" .-. ", "(   )", " `-' "],
-        SpriteKind::Busy => &[" .-. ", "( * )", " `-' "],
-        SpriteKind::Error => &[" .-. ", "( x )", " `-' "],
-        SpriteKind::Drowsy => &[" .-. ", "(   )", "(   )", " `-' "],
-        SpriteKind::Sleeping => &[" .-. ", "( z )", "(   )", " `-' "],
-        SpriteKind::DeepSleep => {
-            if slot.on_floor {
-                &[" .-. ", "( z )", "(   )", "(___)"]
-            } else {
-                &[" .-. ", "( z )", "(   )", " `-' "]
+    let rows: &[&str] = if unverified {
+        // Ghost body — explicit `?` overlay so an unobserved ball cannot be
+        // mistaken for a confirmed one even when colors are hard to read. The
+        // drop distance is still per-kind, so the operator can see what the
+        // detector *thinks* the state is while also seeing it isn't trusted.
+        &[" .?. ", "( ? )", " `-' "]
+    } else {
+        match kind {
+            SpriteKind::Attention => &[" .-. ", "(_!_)"],
+            SpriteKind::Active => &[" .-. ", "(   )", " `-' "],
+            SpriteKind::Busy => &[" .-. ", "( * )", " `-' "],
+            SpriteKind::Error => &[" .-. ", "( x )", " `-' "],
+            SpriteKind::Drowsy => &[" .-. ", "(   )", "(   )", " `-' "],
+            SpriteKind::Sleeping => &[" .-. ", "( z )", "(   )", " `-' "],
+            SpriteKind::DeepSleep => {
+                if slot.on_floor {
+                    &[" .-. ", "( z )", "(   )", "(___)"]
+                } else {
+                    &[" .-. ", "( z )", "(   )", " `-' "]
+                }
             }
-        }
-        SpriteKind::Exited => {
-            if slot.on_floor {
-                &[" .-. ", "( x )", "(   )", "(___)"]
-            } else {
-                &[" .-. ", "( x )", "(   )", " `-' "]
+            SpriteKind::Exited => {
+                if slot.on_floor {
+                    &[" .-. ", "( x )", "(   )", "(___)"]
+                } else {
+                    &[" .-. ", "( x )", "(   )", " `-' "]
+                }
             }
         }
     };
@@ -348,6 +368,19 @@ pub(crate) fn render_entity_with_theme(
     let sprite = kind.frame_with_theme(tick, theme);
     for (dy, line) in sprite.iter().enumerate() {
         renderer.draw_text(rect.x, rect.y + dy as u16, line, color);
+    }
+
+    // Mirror the dangling-ball ghost mark on the fish/jelly themes. Every
+    // sprite frame is 12 cols wide and reserves the trailing column as
+    // breathing room (see entity.rs frame data), so overdrawing a `?` at the
+    // top-right corner is a safe, theme-agnostic uncertainty marker.
+    if session_state_evidence_unverified(&entity.session) {
+        renderer.draw_char(
+            rect.x + ENTITY_WIDTH.saturating_sub(2),
+            rect.y,
+            '?',
+            Color::DarkGrey,
+        );
     }
 
     if selected {
