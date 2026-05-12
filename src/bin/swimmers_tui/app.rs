@@ -216,6 +216,7 @@ pub(crate) struct App<C: TuiApi> {
     pub(crate) native_status: Option<NativeDesktopStatusResponse>,
     pub(crate) attention_group_session_ids: Vec<String>,
     pub(crate) last_attention_group_refresh: Option<Instant>,
+    pub(crate) attention_group_refresh_armed: bool,
     pub(crate) daemon_defaults_status: DaemonDefaultsStatus,
     pub(crate) thought_config_editor: Option<ThoughtConfigEditorState>,
     pub(crate) picker: Option<PickerState>,
@@ -296,6 +297,7 @@ impl<C: TuiApi> App<C> {
             native_status: None,
             attention_group_session_ids: Vec::new(),
             last_attention_group_refresh: None,
+            attention_group_refresh_armed: false,
             daemon_defaults_status: DaemonDefaultsStatus::Unknown,
             thought_config_editor: None,
             picker: None,
@@ -1490,6 +1492,7 @@ impl<C: TuiApi> App<C> {
                     let previous = self.attention_group_session_ids.clone();
                     self.attention_group_session_ids = response.session_ids.clone();
                     self.last_attention_group_refresh = Some(Instant::now());
+                    self.attention_group_refresh_armed = false;
                     if focus || previous != response.session_ids {
                         self.set_message(format!(
                             "{} attention group: {} sessions",
@@ -1498,6 +1501,7 @@ impl<C: TuiApi> App<C> {
                     }
                 }
                 Err(err) => {
+                    self.attention_group_refresh_armed = false;
                     if !focus {
                         self.attention_group_session_ids.clear();
                     }
@@ -1702,6 +1706,8 @@ impl<C: TuiApi> App<C> {
 
     fn maybe_refresh_attention_group(&mut self) {
         if self.attention_group_session_ids.is_empty()
+            || !self.attention_group_refresh_armed
+            || self.initial_request.is_some()
             || self.pending_interaction.is_some()
             || self
                 .last_attention_group_refresh
@@ -1723,6 +1729,7 @@ impl<C: TuiApi> App<C> {
                 .unwrap_or(true)
         });
         if visible_changed {
+            self.attention_group_refresh_armed = false;
             self.refresh_attention_group();
         }
     }
@@ -2635,6 +2642,7 @@ impl<C: TuiApi> App<C> {
             self.set_message("no sessions in this school");
             return;
         }
+        self.attention_group_refresh_armed = false;
         self.cancel_voice_recording();
         self.initial_request_generation = self.initial_request_generation.saturating_add(1);
         self.group_input_targets = Some(GroupInputTargets {
@@ -3000,15 +3008,18 @@ impl<C: TuiApi> App<C> {
     fn apply_group_input_response(&mut self, response: SessionGroupInputResponse) {
         let total = response.results.len();
         if response.skipped == 0 {
+            self.attention_group_refresh_armed = response.delivered > 0;
             self.close_initial_request();
             self.set_message(format!("sent to {} sessions", response.delivered));
         } else if response.delivered > 0 {
+            self.attention_group_refresh_armed = true;
             self.close_initial_request();
             self.set_message(format!(
                 "sent to {}/{}; {} skipped",
                 response.delivered, total, response.skipped
             ));
         } else {
+            self.attention_group_refresh_armed = false;
             self.set_message(format!("sent to 0/{total}; all skipped"));
         }
     }

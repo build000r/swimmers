@@ -6041,6 +6041,7 @@ fn submitting_group_input_sends_existing_sessions_without_spawning() {
     );
     assert!(api.create_calls().is_empty());
     assert!(api.create_batch_calls().is_empty());
+    assert!(app.attention_group_refresh_armed);
     assert!(app.initial_request.is_none());
     assert!(app.group_input_targets.is_none());
     assert_eq!(
@@ -6098,6 +6099,7 @@ fn submitting_group_input_keeps_composer_when_all_sessions_skip() {
             .map(|request| request.value.as_str()),
         Some("retryable prompt")
     );
+    assert!(!app.attention_group_refresh_armed);
     assert!(app.group_input_targets.is_some());
     assert_eq!(
         app.message.as_ref().map(|(message, _)| message.as_str()),
@@ -6149,10 +6151,128 @@ fn pressing_enter_submits_group_input_and_reports_partial_skips() {
     );
     assert!(app.initial_request.is_none());
     assert!(app.group_input_targets.is_none());
+    assert!(app.attention_group_refresh_armed);
     assert_eq!(
         app.message.as_ref().map(|(message, _)| message.as_str()),
         Some("sent to 1/2; 1 skipped")
     );
+}
+
+#[test]
+fn open_group_input_composer_blocks_attention_group_refresh_before_enter() {
+    let api = MockApi::new();
+    let layout = test_layout(120, 32);
+    let mut app = make_app(api.clone());
+    app.attention_group_session_ids = vec!["sess-visible".to_string(), "sess-cleared".to_string()];
+    app.last_attention_group_refresh =
+        Some(Instant::now() - Duration::from_secs(2) - Duration::from_millis(1));
+    app.attention_group_refresh_armed = true;
+    app.group_input_targets = Some(GroupInputTargets {
+        session_ids: vec!["sess-visible".to_string(), "sess-cleared".to_string()],
+        label: "auth-rebuild".to_string(),
+    });
+    app.initial_request = Some({
+        let mut state = InitialRequestState::new("auth-rebuild".to_string(), None);
+        state.value = "typed but not submitted yet".to_string();
+        state
+    });
+
+    let visible = session_summary("sess-visible", "7", TEST_REPO_SWIMMERS);
+    let mut cleared = session_summary_with_thought(
+        "sess-cleared",
+        "8",
+        TEST_REPO_SWIMMERS,
+        "running a tool",
+        "2026-05-12T20:00:00Z",
+    );
+    cleared.current_command = Some("cargo test".to_string());
+
+    app.merge_sessions(vec![visible, cleared], layout.overview_field);
+
+    assert!(app.pending_interaction.is_none());
+    assert!(api.open_attention_group_calls().is_empty());
+    assert_eq!(
+        app.initial_request
+            .as_ref()
+            .map(|request| request.value.as_str()),
+        Some("typed but not submitted yet")
+    );
+    assert!(app.group_input_targets.is_some());
+}
+
+#[test]
+fn successful_group_input_arms_next_attention_group_refresh() {
+    let api = MockApi::new();
+    api.push_send_group_input(Ok(SessionGroupInputResponse::from_results(vec![
+        SessionGroupInputResult {
+            session_id: "sess-visible".to_string(),
+            ok: true,
+            error: None,
+        },
+        SessionGroupInputResult {
+            session_id: "sess-cleared".to_string(),
+            ok: true,
+            error: None,
+        },
+    ])));
+    api.push_open_attention_group(Ok(NativeAttentionGroupOpenResponse {
+        session_id: "attention-group".to_string(),
+        tmux_name: "swimmers-attention".to_string(),
+        session_count: 2,
+        session_ids: vec!["sess-visible".to_string(), "sess-next".to_string()],
+        backlog_session_ids: vec!["sess-backlog".to_string()],
+        status: "refreshed".to_string(),
+        focused: false,
+        pane_id: None,
+    }));
+    let field = test_field();
+    let layout = test_layout(120, 32);
+    let mut app = make_app(api.clone());
+    app.attention_group_session_ids = vec!["sess-visible".to_string(), "sess-cleared".to_string()];
+    app.last_attention_group_refresh =
+        Some(Instant::now() - Duration::from_secs(2) - Duration::from_millis(1));
+    app.group_input_targets = Some(GroupInputTargets {
+        session_ids: vec!["sess-visible".to_string(), "sess-cleared".to_string()],
+        label: "auth-rebuild".to_string(),
+    });
+    app.initial_request = Some({
+        let mut state = InitialRequestState::new("auth-rebuild".to_string(), None);
+        state.value = "send this to the group".to_string();
+        state
+    });
+
+    app.handle_initial_request_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), field);
+    poll_until_interaction(&mut app);
+    assert!(app.attention_group_refresh_armed);
+
+    let visible = session_summary("sess-visible", "7", TEST_REPO_SWIMMERS);
+    let mut cleared = session_summary_with_thought(
+        "sess-cleared",
+        "8",
+        TEST_REPO_SWIMMERS,
+        "running a tool",
+        "2026-05-12T20:00:00Z",
+    );
+    cleared.current_command = Some("cargo test".to_string());
+    let next = session_summary("sess-next", "9", TEST_REPO_SWIMMERS);
+
+    app.merge_sessions(vec![visible, cleared, next], layout.overview_field);
+
+    assert!(app.pending_interaction.is_some());
+    poll_until_interaction(&mut app);
+    assert_eq!(
+        api.open_attention_group_calls(),
+        vec![(
+            6,
+            vec!["sess-visible".to_string(), "sess-cleared".to_string()],
+            false
+        )]
+    );
+    assert_eq!(
+        app.attention_group_session_ids,
+        vec!["sess-visible".to_string(), "sess-next".to_string()]
+    );
+    assert!(!app.attention_group_refresh_armed);
 }
 
 #[test]
@@ -8144,6 +8264,7 @@ fn attention_group_refreshes_without_focus_when_visible_session_clears() {
     app.attention_group_session_ids = vec!["sess-visible".to_string(), "sess-cleared".to_string()];
     app.last_attention_group_refresh =
         Some(Instant::now() - Duration::from_secs(2) - Duration::from_millis(1));
+    app.attention_group_refresh_armed = true;
     api.push_open_attention_group(Ok(NativeAttentionGroupOpenResponse {
         session_id: "attention-group".to_string(),
         tmux_name: "swimmers-attention".to_string(),
@@ -8196,6 +8317,7 @@ fn attention_group_refresh_clears_tracking_when_queue_drains() {
     app.attention_group_session_ids = vec!["sess-cleared".to_string()];
     app.last_attention_group_refresh =
         Some(Instant::now() - Duration::from_secs(2) - Duration::from_millis(1));
+    app.attention_group_refresh_armed = true;
     api.push_open_attention_group(Ok(NativeAttentionGroupOpenResponse {
         session_id: "attention-group".to_string(),
         tmux_name: "swimmers-attention".to_string(),
