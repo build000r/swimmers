@@ -53,3 +53,10 @@ test-results/
 !/assets/dragon/*/back-left.png
 !/assets/dragon/*/back-right.png
 /scripts/extract-dragon-sprites.py
+
+# bv (beads viewer) local config and caches
+.bv/
+
+# Local operational exports/backups
+/AGENTS.md.bak
+/beads_report_*.md
