@@ -3634,6 +3634,9 @@ esac
 
     #[tokio::test]
     async fn get_git_diff_returns_empty_structured_files_for_clean_repo() {
+        let _guard = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
         let repo = tempdir().expect("repo tempdir");
         let init = std::process::Command::new("git")
             .arg("-C")

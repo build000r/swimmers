@@ -28,7 +28,7 @@ use crate::types::{
 const PROCESS_EXIT_REAP_INTERVAL: Duration = Duration::from_millis(250);
 const PROCESS_EXIT_DELETE_GRACE: Duration = Duration::ZERO;
 const PROCESS_EXIT_SUMMARY_TIMEOUT: Duration = Duration::from_millis(250);
-const ACTIVE_PANE_LOOKUP_TIMEOUT: Duration = Duration::from_millis(600);
+const ACTIVE_PANE_LOOKUP_TIMEOUT: Duration = Duration::from_millis(350);
 const ACTIVE_PANE_LOOKUP_WARN_THRESHOLD: Duration = Duration::from_millis(200);
 const TMUX_SEND_KEYS_TIMEOUT: Duration = Duration::from_millis(500);
 
