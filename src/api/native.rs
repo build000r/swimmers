@@ -3,14 +3,14 @@ use crate::api::envelope::{
     SESSION_EXITED, SESSION_NOT_FOUND,
 };
 use crate::api::service::{
-    native_status_for_host as native_status_for_host_service, open_native_session_for_host,
-    NativeOpenServiceError,
+    native_status_for_host as native_status_for_host_service, open_native_attention_group_for_host,
+    open_native_session_for_host, NativeOpenServiceError,
 };
 use crate::api::{remote_sessions, AppState};
 use crate::auth::{AuthInfo, AuthScope};
 use crate::types::{
-    NativeDesktopConfigRequest, NativeDesktopModeRequest, NativeDesktopOpenRequest,
-    NativeDesktopStatusResponse,
+    NativeAttentionGroupOpenRequest, NativeDesktopConfigRequest, NativeDesktopModeRequest,
+    NativeDesktopOpenRequest, NativeDesktopStatusResponse,
 };
 use axum::extract::{ConnectInfo, State};
 use axum::http::StatusCode;
@@ -103,6 +103,38 @@ async fn native_open(
             let msg = reason.unwrap_or_else(|| NATIVE_DESKTOP_UNAVAILABLE.default_message.into());
             api_error_msg(&NATIVE_DESKTOP_UNAVAILABLE, msg)
         }
+        Err(NativeOpenServiceError::NoAttentionSessions) => api_error_msg(
+            &NATIVE_OPEN_FAILED,
+            "no sessions are waiting for operator input",
+        ),
+        Err(NativeOpenServiceError::SessionNotFound) => api_error(&SESSION_NOT_FOUND),
+        Err(NativeOpenServiceError::SessionExited) => api_error(&SESSION_EXITED),
+        Err(NativeOpenServiceError::Internal(err)) => api_error_msg(&NATIVE_OPEN_FAILED, err),
+    }
+}
+
+async fn native_open_attention_group(
+    Extension(auth): Extension<AuthInfo>,
+    State(state): State<Arc<AppState>>,
+    connect_info: ConnectInfo<SocketAddr>,
+    Json(body): Json<NativeAttentionGroupOpenRequest>,
+) -> impl IntoResponse {
+    if let Err(resp) = auth.require_scope(AuthScope::SessionsWrite) {
+        return resp;
+    }
+
+    let peer = request_peer(&connect_info);
+    match open_native_attention_group_for_host(&state, &peer, body.max_sessions.unwrap_or(6)).await
+    {
+        Ok(result) => success_json(StatusCode::OK, &result),
+        Err(NativeOpenServiceError::Unsupported { reason }) => {
+            let msg = reason.unwrap_or_else(|| NATIVE_DESKTOP_UNAVAILABLE.default_message.into());
+            api_error_msg(&NATIVE_DESKTOP_UNAVAILABLE, msg)
+        }
+        Err(NativeOpenServiceError::NoAttentionSessions) => api_error_msg(
+            &NATIVE_OPEN_FAILED,
+            "no sessions are waiting for operator input",
+        ),
         Err(NativeOpenServiceError::SessionNotFound) => api_error(&SESSION_NOT_FOUND),
         Err(NativeOpenServiceError::SessionExited) => api_error(&SESSION_EXITED),
         Err(NativeOpenServiceError::Internal(err)) => api_error_msg(&NATIVE_OPEN_FAILED, err),
@@ -115,6 +147,10 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/v1/native/app", put(set_native_app))
         .route("/v1/native/mode", put(set_native_mode))
         .route("/v1/native/open", post(native_open))
+        .route(
+            "/v1/native/attention-group/open",
+            post(native_open_attention_group),
+        )
 }
 
 #[cfg(test)]

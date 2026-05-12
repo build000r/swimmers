@@ -706,8 +706,25 @@ pub struct NativeDesktopOpenRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NativeAttentionGroupOpenRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_sessions: Option<usize>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NativeDesktopOpenResponse {
     pub session_id: String,
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pane_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NativeAttentionGroupOpenResponse {
+    pub session_id: String,
+    pub tmux_name: String,
+    pub session_count: usize,
+    pub session_ids: Vec<String>,
     pub status: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pane_id: Option<String>,

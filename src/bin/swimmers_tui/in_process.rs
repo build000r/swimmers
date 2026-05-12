@@ -8,7 +8,8 @@ use tokio::sync::oneshot;
 use swimmers::api::remote_sessions;
 use swimmers::api::service::{
     list_dirs as list_dirs_service, native_status_for_host as native_status_for_host_service,
-    open_native_session_for_host, start_dir_repo_action as start_dir_repo_action_service,
+    open_native_attention_group_for_host, open_native_session_for_host,
+    start_dir_repo_action as start_dir_repo_action_service,
     update_dir_group_memberships as update_dir_group_memberships_service, NativeOpenServiceError,
 };
 use swimmers::api::sessions::{
@@ -27,8 +28,9 @@ use swimmers::types::{
     CreateSessionRequest, CreateSessionResponse, CreateSessionsBatchRequest,
     CreateSessionsBatchResponse, DirGroupMembershipUpdateRequest, DirGroupMembershipUpdateResponse,
     DirListResponse, DirRepoActionResponse, GhosttyOpenMode, MermaidArtifactResponse,
-    NativeDesktopApp, NativeDesktopOpenResponse, NativeDesktopStatusResponse, PlanFileResponse,
-    RepoActionKind, SessionGroupInputRequest, SessionGroupInputResponse, SessionSummary, SpawnTool,
+    NativeAttentionGroupOpenResponse, NativeDesktopApp, NativeDesktopOpenResponse,
+    NativeDesktopStatusResponse, PlanFileResponse, RepoActionKind, SessionGroupInputRequest,
+    SessionGroupInputResponse, SessionSummary, SpawnTool,
 };
 
 use super::api::{ThoughtConfigTestResponse, TuiApi};
@@ -280,6 +282,32 @@ impl TuiApi for InProcessApi {
                 .map_err(|err| match err {
                     NativeOpenServiceError::Unsupported { reason } => {
                         reason.unwrap_or_else(|| "native desktop unavailable".to_string())
+                    }
+                    NativeOpenServiceError::NoAttentionSessions => {
+                        "no sessions are waiting for operator input".to_string()
+                    }
+                    NativeOpenServiceError::SessionNotFound => "session not found".to_string(),
+                    NativeOpenServiceError::SessionExited => {
+                        "session has already exited".to_string()
+                    }
+                    NativeOpenServiceError::Internal(message) => message,
+                })
+        })
+    }
+
+    fn open_attention_group(
+        &self,
+        max_sessions: usize,
+    ) -> BoxFuture<'_, Result<NativeAttentionGroupOpenResponse, String>> {
+        Box::pin(async move {
+            open_native_attention_group_for_host(&self.state, "localhost", max_sessions)
+                .await
+                .map_err(|error| match error {
+                    NativeOpenServiceError::Unsupported { reason } => {
+                        reason.unwrap_or_else(|| "native desktop unavailable".to_string())
+                    }
+                    NativeOpenServiceError::NoAttentionSessions => {
+                        "no sessions are waiting for operator input".to_string()
                     }
                     NativeOpenServiceError::SessionNotFound => "session not found".to_string(),
                     NativeOpenServiceError::SessionExited => {

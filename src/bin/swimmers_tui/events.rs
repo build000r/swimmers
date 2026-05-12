@@ -121,6 +121,16 @@ impl TuiApi for TuiClient {
         }
     }
 
+    fn open_attention_group(
+        &self,
+        max_sessions: usize,
+    ) -> BoxFuture<'_, Result<NativeAttentionGroupOpenResponse, String>> {
+        match self {
+            Self::Embedded(client) => client.open_attention_group(max_sessions),
+            Self::External(client) => client.open_attention_group(max_sessions),
+        }
+    }
+
     fn list_dirs(
         &self,
         path: Option<&str>,
@@ -820,6 +830,14 @@ pub(crate) fn handle_split_or_header_click<C: TuiApi>(
         .unwrap_or(false)
     {
         app.toggle_ghostty_mode();
+        return true;
+    }
+    if app
+        .attention_group_rect(width)
+        .map(|rect| rect.contains(mouse.column, mouse.row))
+        .unwrap_or(false)
+    {
+        app.open_attention_group();
         return true;
     }
     if app

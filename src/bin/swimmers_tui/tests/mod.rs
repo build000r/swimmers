@@ -65,6 +65,7 @@ struct MockApiState {
     set_native_mode_results: VecDeque<Result<NativeDesktopStatusResponse, String>>,
     publish_selection_results: VecDeque<Result<(), String>>,
     open_session_results: VecDeque<Result<NativeDesktopOpenResponse, String>>,
+    open_attention_group_results: VecDeque<Result<NativeAttentionGroupOpenResponse, String>>,
     list_dirs_results: VecDeque<Result<DirListResponse, String>>,
     update_dir_group_memberships_results:
         VecDeque<Result<DirGroupMembershipUpdateResponse, String>>,
@@ -81,6 +82,7 @@ struct MockApiState {
     set_native_mode_calls: Vec<GhosttyOpenMode>,
     publish_calls: Vec<Option<String>>,
     open_calls: Vec<String>,
+    open_attention_group_calls: Vec<usize>,
     list_calls: Vec<(Option<String>, bool)>,
     update_dir_group_memberships_calls: Vec<(String, Vec<String>, Vec<String>)>,
     start_repo_action_calls: Vec<(String, RepoActionKind)>,
@@ -246,6 +248,14 @@ impl MockApi {
             .push_back(result);
     }
 
+    fn push_open_attention_group(&self, result: Result<NativeAttentionGroupOpenResponse, String>) {
+        self.state
+            .lock()
+            .unwrap()
+            .open_attention_group_results
+            .push_back(result);
+    }
+
     fn push_publish_selection(&self, result: Result<(), String>) {
         self.state
             .lock()
@@ -310,6 +320,14 @@ impl MockApi {
 
     fn open_calls(&self) -> Vec<String> {
         self.state.lock().unwrap().open_calls.clone()
+    }
+
+    fn open_attention_group_calls(&self) -> Vec<usize> {
+        self.state
+            .lock()
+            .unwrap()
+            .open_attention_group_calls
+            .clone()
     }
 
     fn update_thought_config_calls(&self) -> Vec<ThoughtConfig> {
@@ -558,6 +576,21 @@ impl TuiApi for MockApi {
                 .open_session_results
                 .pop_front()
                 .unwrap_or_else(|| Err("unexpected open_session".to_string()))
+        })
+    }
+
+    fn open_attention_group(
+        &self,
+        max_sessions: usize,
+    ) -> BoxFuture<'_, Result<NativeAttentionGroupOpenResponse, String>> {
+        let state = self.state.clone();
+        Box::pin(async move {
+            let mut state = state.lock().unwrap();
+            state.open_attention_group_calls.push(max_sessions);
+            state
+                .open_attention_group_results
+                .pop_front()
+                .unwrap_or_else(|| Err("unexpected open_attention_group".to_string()))
         })
     }
 
@@ -8035,6 +8068,62 @@ fn clicking_ghostty_mode_label_toggles_preview_mode_live() {
             .as_ref()
             .and_then(|status| status.ghostty_mode),
         Some(GhosttyOpenMode::Add)
+    );
+}
+
+#[test]
+fn clicking_attention_group_label_opens_managed_group() {
+    let api = MockApi::new();
+    let layout = test_layout(120, 32);
+    let mut app = make_app(api.clone());
+    app.native_status = Some(NativeDesktopStatusResponse {
+        supported: true,
+        platform: Some("macos".to_string()),
+        app_id: Some(NativeDesktopApp::Ghostty),
+        ghostty_mode: Some(GhosttyOpenMode::Swap),
+        app: Some("Ghostty".to_string()),
+        reason: None,
+    });
+    api.push_open_attention_group(Ok(NativeAttentionGroupOpenResponse {
+        session_id: "attention-group".to_string(),
+        tmux_name: "swimmers-attention".to_string(),
+        session_count: 3,
+        session_ids: vec![
+            "sess-1".to_string(),
+            "sess-2".to_string(),
+            "sess-3".to_string(),
+        ],
+        status: "swapped".to_string(),
+        pane_id: Some("pane-attention".to_string()),
+    }));
+    let attention_rect = app
+        .attention_group_rect(120)
+        .expect("attention group should render in header");
+    let native_rect = app
+        .native_status_rect(120)
+        .expect("terminal handoff status should render in header");
+    assert!(
+        attention_rect.x >= native_rect.x.saturating_add(native_rect.width),
+        "attention group click target should not overlap terminal handoff target"
+    );
+
+    assert!(handle_split_or_header_click(
+        &mut app,
+        120,
+        layout,
+        crossterm::event::MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: attention_rect.x,
+            row: attention_rect.y,
+            modifiers: KeyModifiers::NONE,
+        },
+    ));
+    assert!(app.pending_interaction.is_some());
+    poll_until_interaction(&mut app);
+    assert_eq!(api.open_attention_group_calls(), vec![6]);
+    assert_eq!(
+        app.message.as_ref().map(|(message, _)| message.as_str()),
+        Some("swapped attention group: 3 sessions")
     );
 }
 

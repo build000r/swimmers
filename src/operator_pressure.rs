@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use crate::api::remote_sessions;
 use crate::types::{
     ActionCueKind, RestState, SessionBatchMembership, SessionState, SessionSummary,
-    StateConfidence, TransportHealth,
+    StateConfidence, ThoughtState, TransportHealth,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -81,9 +81,7 @@ pub struct OperatorPressureResponse {
 
 pub fn operator_pressure_for_session(session: &SessionSummary) -> OperatorPressure {
     let primary_cue = primary_action_cue_kind(session);
-    let needs_input = has_action_cue(session, ActionCueKind::AwaitingUser)
-        || session.rest_state == RestState::Sleeping
-        || session.state == SessionState::Attention;
+    let needs_input = session_has_operator_input_signal(session);
     let commit_ready =
         has_action_cue(session, ActionCueKind::CommitReady) || session.commit_candidate;
 
@@ -110,6 +108,9 @@ pub fn operator_pressure_for_session(session: &SessionSummary) -> OperatorPressu
         score += 55;
     }
     if session.rest_state == RestState::Sleeping {
+        score += 35;
+    }
+    if session_idle_agent_can_accept_operator_input(session) {
         score += 35;
     }
     if session.rest_state == RestState::DeepSleep {
@@ -219,7 +220,7 @@ pub fn session_ready_for_operator_group_input(session: &SessionSummary) -> bool 
         && session.state_evidence.observed_at.is_some()
         && session.state != SessionState::Exited
         && session.rest_state != RestState::DeepSleep
-        && (session.rest_state == RestState::Sleeping || session.state == SessionState::Attention)
+        && session_has_operator_input_signal(session)
 }
 
 fn primary_action_cue_kind(session: &SessionSummary) -> Option<ActionCueKind> {
@@ -235,6 +236,30 @@ fn primary_action_cue_kind(session: &SessionSummary) -> Option<ActionCueKind> {
 
 fn has_action_cue(session: &SessionSummary, kind: ActionCueKind) -> bool {
     session.action_cues.iter().any(|cue| cue.kind == kind)
+}
+
+fn session_has_operator_input_signal(session: &SessionSummary) -> bool {
+    has_action_cue(session, ActionCueKind::AwaitingUser)
+        || session.rest_state == RestState::Sleeping
+        || session.state == SessionState::Attention
+        || session_idle_agent_can_accept_operator_input(session)
+}
+
+fn session_idle_agent_can_accept_operator_input(session: &SessionSummary) -> bool {
+    session.state == SessionState::Idle
+        && session.current_command.is_none()
+        && session.thought_state != ThoughtState::Active
+        && session
+            .tool
+            .as_deref()
+            .is_some_and(agent_tool_accepts_input)
+}
+
+fn agent_tool_accepts_input(tool: &str) -> bool {
+    matches!(
+        tool,
+        "Codex" | "Claude Code" | "Amp" | "OpenCode" | "Aider" | "Goose" | "Cline" | "Cursor"
+    )
 }
 
 fn state_evidence_is_unverified(session: &SessionSummary) -> bool {
@@ -257,6 +282,9 @@ fn pressure_reason_kind(
         None if session.state == SessionState::Error => OperatorPressureReasonKind::Error,
         None if session.commit_candidate => OperatorPressureReasonKind::CommitReady,
         None if session.rest_state == RestState::Sleeping => OperatorPressureReasonKind::Sleeping,
+        None if session_idle_agent_can_accept_operator_input(session) => {
+            OperatorPressureReasonKind::NeedsInput
+        }
         None if state_evidence_is_unverified(session) => OperatorPressureReasonKind::UntrustedState,
         None if session.is_stale => OperatorPressureReasonKind::Stale,
         None if session.transport_health != TransportHealth::Healthy => {
@@ -291,6 +319,7 @@ fn pressure_glyph(session: &SessionSummary, primary_cue: Option<ActionCueKind>) 
         Some(ActionCueKind::ValidationMissingAfterEdit) => "v",
         Some(ActionCueKind::DirtyCheckMissing) => "d",
         None if session.state == SessionState::Attention => "!",
+        None if session_idle_agent_can_accept_operator_input(session) => "!",
         None if session.state == SessionState::Error => "x",
         None if session.commit_candidate => "$",
         None => "a",
@@ -304,7 +333,11 @@ fn pressure_tone(
 ) -> OperatorPressureTone {
     if primary_cue.is_some() || session.state == SessionState::Error || score >= 70 {
         OperatorPressureTone::Danger
-    } else if score >= 35 || session.commit_candidate || session.rest_state == RestState::Sleeping {
+    } else if score >= 35
+        || session.commit_candidate
+        || session.rest_state == RestState::Sleeping
+        || session_idle_agent_can_accept_operator_input(session)
+    {
         OperatorPressureTone::Warning
     } else if session.state == SessionState::Busy {
         OperatorPressureTone::Working
@@ -450,6 +483,38 @@ mod tests {
         );
         assert_eq!(pressure.glyph, "!");
         assert!(pressure.needs_input);
+    }
+
+    #[test]
+    fn idle_agent_without_active_thought_snapshot_is_group_input_ready() {
+        let session = summary("idle-codex", SessionState::Idle);
+
+        let pressure = operator_pressure_for_session(&session);
+
+        assert!(session_ready_for_operator_group_input(&session));
+        assert!(pressure.needs_input);
+        assert_eq!(pressure.reason_kind, OperatorPressureReasonKind::NeedsInput);
+        assert_eq!(pressure.glyph, "!");
+        assert_eq!(pressure.tone, OperatorPressureTone::Warning);
+    }
+
+    #[test]
+    fn active_thought_snapshot_prevents_idle_agent_group_input_fallback() {
+        let mut session = summary("thinking-codex", SessionState::Idle);
+        session.thought_state = ThoughtState::Active;
+
+        let pressure = operator_pressure_for_session(&session);
+
+        assert!(!session_ready_for_operator_group_input(&session));
+        assert!(!pressure.needs_input);
+    }
+
+    #[test]
+    fn idle_non_agent_shell_is_not_group_input_ready() {
+        let mut session = summary("shell", SessionState::Idle);
+        session.tool = None;
+
+        assert!(!session_ready_for_operator_group_input(&session));
     }
 
     #[test]

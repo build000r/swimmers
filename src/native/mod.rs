@@ -14,7 +14,8 @@ use tokio::sync::Mutex as AsyncMutex;
 use tokio::time::{sleep, timeout, Duration};
 
 use crate::types::{
-    GhosttyOpenMode, NativeDesktopApp, NativeDesktopOpenResponse, NativeDesktopStatusResponse,
+    GhosttyOpenMode, NativeAttentionGroupOpenResponse, NativeDesktopApp, NativeDesktopOpenResponse,
+    NativeDesktopStatusResponse, SessionSummary,
 };
 
 const NATIVE_APP_ENV: &str = "SWIMMERS_NATIVE_APP";
@@ -28,6 +29,8 @@ const GHOSTTY_SCRIPT_RELATIVE_PATH: &str = "scripts/ghostty-open.scpt";
 const GHOSTTY_MANAGED_TITLE_PREFIX: &str = "swimmers-preview :: ";
 const GHOSTTY_MIN_APPLESCRIPT_VERSION: [u64; 3] = [1, 3, 0];
 const GHOSTTY_MIN_APPLESCRIPT_VERSION_TEXT: &str = "1.3.0";
+const ATTENTION_GROUP_SESSION_ID: &str = "attention-group";
+const ATTENTION_GROUP_TMUX_NAME: &str = "swimmers-attention";
 // 5s bounds AppleScript hangs while still allowing normal local automation latency.
 const OSASCRIPT_TIMEOUT: Duration = Duration::from_secs(5);
 const OSASCRIPT_ARG_MAX_LEN: usize = 256;
@@ -159,6 +162,111 @@ pub async fn open_native_session(
             open_or_focus_ghostty_session(session_id, tmux_name, cwd, ghostty_mode).await
         }
     }
+}
+
+pub async fn open_native_attention_group(
+    app: NativeDesktopApp,
+    ghostty_mode: GhosttyOpenMode,
+    sessions: &[SessionSummary],
+) -> Result<NativeAttentionGroupOpenResponse> {
+    if sessions.is_empty() {
+        return Err(anyhow!("no sessions are waiting for operator input"));
+    }
+
+    let tmux_path = resolve_tmux_binary()?;
+    rebuild_attention_group_tmux_session(&tmux_path, sessions).await?;
+    let open_result = open_native_session(
+        app,
+        ghostty_mode,
+        ATTENTION_GROUP_SESSION_ID,
+        ATTENTION_GROUP_TMUX_NAME,
+        "",
+    )
+    .await?;
+
+    Ok(NativeAttentionGroupOpenResponse {
+        session_id: ATTENTION_GROUP_SESSION_ID.to_string(),
+        tmux_name: ATTENTION_GROUP_TMUX_NAME.to_string(),
+        session_count: sessions.len(),
+        session_ids: sessions
+            .iter()
+            .map(|session| session.session_id.clone())
+            .collect(),
+        status: open_result.status,
+        pane_id: open_result.pane_id,
+    })
+}
+
+async fn rebuild_attention_group_tmux_session(
+    tmux_path: &Path,
+    sessions: &[SessionSummary],
+) -> Result<()> {
+    let session_target = attention_group_session_target();
+    let pane_target = attention_group_pane_target();
+    let _ = run_tmux_status(tmux_path, &["kill-session", "-t", &session_target]).await;
+
+    let first = sessions
+        .first()
+        .ok_or_else(|| anyhow!("no sessions are waiting for operator input"))?;
+    run_tmux_status(
+        tmux_path,
+        &[
+            "new-session",
+            "-d",
+            "-s",
+            ATTENTION_GROUP_TMUX_NAME,
+            "-n",
+            "attention",
+            &build_attention_group_attach_command(&first.tmux_name, tmux_path),
+        ],
+    )
+    .await
+    .map_err(|err| anyhow!("failed to create tmux session {ATTENTION_GROUP_TMUX_NAME}: {err}"))?;
+
+    for session in sessions.iter().skip(1) {
+        run_tmux_status(
+            tmux_path,
+            &[
+                "split-window",
+                "-t",
+                &pane_target,
+                &build_attention_group_attach_command(&session.tmux_name, tmux_path),
+            ],
+        )
+        .await
+        .map_err(|err| {
+            anyhow!(
+                "failed to add {} to attention group: {err}",
+                session.tmux_name
+            )
+        })?;
+        tile_attention_group_tmux_session(tmux_path, &pane_target).await?;
+    }
+
+    tile_attention_group_tmux_session(tmux_path, &pane_target).await?;
+    Ok(())
+}
+
+async fn tile_attention_group_tmux_session(tmux_path: &Path, pane_target: &str) -> Result<()> {
+    run_tmux_status(tmux_path, &["select-layout", "-t", pane_target, "tiled"])
+        .await
+        .map_err(|err| anyhow!("failed to tile attention group panes: {err}"))
+}
+
+fn attention_group_session_target() -> String {
+    format!("={ATTENTION_GROUP_TMUX_NAME}")
+}
+
+fn attention_group_pane_target() -> String {
+    format!("={ATTENTION_GROUP_TMUX_NAME}:")
+}
+
+fn build_attention_group_attach_command(tmux_name: &str, tmux_path: &Path) -> String {
+    format!(
+        "exec env TMUX= {} attach-session -t {}",
+        shell_quote_token(&tmux_path.to_string_lossy()),
+        shell_quote_token(&format!("={tmux_name}"))
+    )
 }
 
 pub async fn open_or_focus_iterm_session(
@@ -532,6 +640,30 @@ async fn run_osascript_output(
     operation: &'static str,
 ) -> Result<std::process::Output> {
     run_osascript_output_with_timeout(command, operation, OSASCRIPT_TIMEOUT).await
+}
+
+async fn run_tmux_status(tmux_path: &Path, args: &[&str]) -> Result<()> {
+    let output = Command::new(tmux_path)
+        .args(args)
+        .env_remove("TMUX")
+        .env_remove("TMUX_PANE")
+        .output()
+        .await
+        .map_err(|err| anyhow!("failed to run tmux: {err}"))?;
+    if output.status.success() {
+        return Ok(());
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    Err(anyhow!(
+        "tmux exited with {}{}",
+        output.status,
+        if stderr.is_empty() {
+            String::new()
+        } else {
+            format!(": {stderr}")
+        }
+    ))
 }
 
 async fn run_osascript_output_with_timeout(
@@ -1189,6 +1321,21 @@ mod tests {
             command,
             "exec '/tmp/tmux builds/tmux' attach-session -t 'team session'"
         );
+    }
+
+    #[test]
+    fn build_attention_group_attach_command_unsets_nested_tmux_and_exact_targets() {
+        let command = build_attention_group_attach_command("team session", Path::new("/tmp/tmux"));
+        assert_eq!(
+            command,
+            "exec env TMUX= /tmp/tmux attach-session -t '=team session'"
+        );
+    }
+
+    #[test]
+    fn attention_group_uses_session_target_for_kill_and_pane_target_for_layout_commands() {
+        assert_eq!(attention_group_session_target(), "=swimmers-attention");
+        assert_eq!(attention_group_pane_target(), "=swimmers-attention:");
     }
 
     #[test]

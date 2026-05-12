@@ -13,6 +13,7 @@ use crate::host_actions::{
     inspect_git_repo, RepoActionExecutor, RestartExecutor, SystemRepoActionExecutor,
 };
 use crate::native;
+use crate::operator_pressure::session_ready_for_operator_group_input;
 use crate::persistence::file_store::FileStore;
 use crate::session::overlay::{
     default_overlay, OverlayDirConfig, OverlayDirGroup, OverlayServiceEntry,
@@ -20,14 +21,17 @@ use crate::session::overlay::{
 use crate::types::{
     DirEntry, DirGroupMembershipUpdateRequest, DirGroupMembershipUpdateResponse,
     DirGroupMemberships, DirListResponse, DirRepoActionResponse, DirRestartResponse,
-    LaunchTargetSummary, NativeDesktopApp, NativeDesktopOpenResponse, NativeDesktopStatusResponse,
-    RepoActionKind, RepoActionState, RepoActionStatus, SessionState,
+    LaunchTargetSummary, NativeAttentionGroupOpenResponse, NativeDesktopApp,
+    NativeDesktopOpenResponse, NativeDesktopStatusResponse, RepoActionKind, RepoActionState,
+    RepoActionStatus, SessionState, SessionSummary,
 };
 
 /// Max concurrent git probes per `list_dirs` call. Keeps a single listing from
 /// fork-bombing the system when a repos directory has many git subdirs, while
 /// still parallelizing enough to hide per-call git latency.
 const GIT_PROBE_CONCURRENCY: usize = 16;
+const NATIVE_ATTENTION_GROUP_SESSION_ID: &str = "attention-group";
+const NATIVE_ATTENTION_GROUP_TMUX_NAME: &str = "swimmers-attention";
 
 /// Check service health by sending HTTP GET requests to overlay-defined URLs.
 ///
@@ -108,6 +112,7 @@ impl std::error::Error for ApiServiceError {}
 #[derive(Debug)]
 pub enum NativeOpenServiceError {
     Unsupported { reason: Option<String> },
+    NoAttentionSessions,
     SessionNotFound,
     SessionExited,
     Internal(String),
@@ -119,6 +124,7 @@ impl std::fmt::Display for NativeOpenServiceError {
             Self::Unsupported { reason } => {
                 f.write_str(reason.as_deref().unwrap_or("native desktop unavailable"))
             }
+            Self::NoAttentionSessions => f.write_str("no sessions are waiting for operator input"),
             Self::SessionNotFound => f.write_str("session not found"),
             Self::SessionExited => f.write_str("session has already exited"),
             Self::Internal(message) => f.write_str(message),
@@ -1514,6 +1520,45 @@ pub async fn open_native_session_for_host(
     .map_err(|error| NativeOpenServiceError::Internal(error.to_string()))
 }
 
+pub async fn open_native_attention_group_for_host(
+    state: &Arc<AppState>,
+    host: &str,
+    max_sessions: usize,
+) -> Result<NativeAttentionGroupOpenResponse, NativeOpenServiceError> {
+    let app = *state.native_desktop_app.read().await;
+    let ghostty_mode = *state.ghostty_open_mode.read().await;
+    let status = native::support_for_host(host, app);
+    if !status.supported {
+        return Err(NativeOpenServiceError::Unsupported {
+            reason: status.reason,
+        });
+    }
+
+    let sessions =
+        select_attention_group_sessions(state.supervisor.list_sessions().await, max_sessions);
+    if sessions.is_empty() {
+        return Err(NativeOpenServiceError::NoAttentionSessions);
+    }
+
+    native::open_native_attention_group(app, ghostty_mode, &sessions)
+        .await
+        .map_err(|error| NativeOpenServiceError::Internal(error.to_string()))
+}
+
+fn select_attention_group_sessions(
+    mut sessions: Vec<SessionSummary>,
+    max_sessions: usize,
+) -> Vec<SessionSummary> {
+    sessions.retain(|session| {
+        session.session_id != NATIVE_ATTENTION_GROUP_SESSION_ID
+            && session.tmux_name != NATIVE_ATTENTION_GROUP_TMUX_NAME
+            && session_ready_for_operator_group_input(session)
+    });
+    sessions.sort_by(|a, b| b.last_activity_at.cmp(&a.last_activity_at));
+    sessions.truncate(max_sessions.clamp(1, 6));
+    sessions
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1522,6 +1567,8 @@ mod tests {
     use crate::thought::health::BridgeHealthState;
     use crate::thought::protocol::SyncRequestSequence;
     use crate::thought::runtime_config::ThoughtConfig;
+    use crate::types::{RestState, StateEvidence, ThoughtSource, ThoughtState, TransportHealth};
+    use chrono::Utc;
     use std::sync::Arc;
     use tokio::sync::RwLock;
 
@@ -1543,6 +1590,55 @@ mod tests {
             )),
             repo_actions: crate::host_actions::RepoActionTracker::default(),
         })
+    }
+
+    fn summary(session_id: &str, tmux_name: &str, state: SessionState) -> SessionSummary {
+        SessionSummary {
+            session_id: session_id.to_string(),
+            tmux_name: tmux_name.to_string(),
+            state,
+            current_command: None,
+            state_evidence: StateEvidence::new("test"),
+            cwd: "/tmp/repos/swimmers".to_string(),
+            tool: Some("Codex".to_string()),
+            token_count: 0,
+            context_limit: 192_000,
+            thought: None,
+            thought_state: ThoughtState::Holding,
+            thought_source: ThoughtSource::CarryForward,
+            thought_updated_at: None,
+            rest_state: RestState::Active,
+            commit_candidate: false,
+            action_cues: Vec::new(),
+            objective_changed_at: None,
+            last_skill: None,
+            is_stale: false,
+            attached_clients: 0,
+            stale_attached_clients: 0,
+            transport_health: TransportHealth::Healthy,
+            last_activity_at: Utc::now(),
+            repo_theme_id: None,
+            batch: None,
+        }
+    }
+
+    #[test]
+    fn attention_group_selection_includes_idle_agent_sessions_without_sleep_snapshot() {
+        let idle_agent = summary("sess-11", "11", SessionState::Idle);
+        let managed_group = summary(
+            NATIVE_ATTENTION_GROUP_SESSION_ID,
+            NATIVE_ATTENTION_GROUP_TMUX_NAME,
+            SessionState::Attention,
+        );
+        let mut shell = summary("shell", "shell", SessionState::Idle);
+        shell.tool = None;
+        let busy_agent = summary("busy", "busy", SessionState::Busy);
+
+        let selected =
+            select_attention_group_sessions(vec![shell, idle_agent, managed_group, busy_agent], 6);
+
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].tmux_name, "11");
     }
 
     #[test]

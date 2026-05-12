@@ -366,6 +366,10 @@ pub(crate) trait TuiApi: Send + Sync + 'static {
         &self,
         session_id: &str,
     ) -> BoxFuture<'_, Result<NativeDesktopOpenResponse, String>>;
+    fn open_attention_group(
+        &self,
+        max_sessions: usize,
+    ) -> BoxFuture<'_, Result<NativeAttentionGroupOpenResponse, String>>;
     fn list_dirs(
         &self,
         path: Option<&str>,
@@ -700,6 +704,33 @@ impl TuiApi for ApiClient {
                     .json::<NativeDesktopOpenResponse>()
                     .await
                     .map_err(|err| format!("failed to parse terminal handoff response: {err}"));
+            }
+
+            Err(read_error(response).await)
+        })
+    }
+
+    fn open_attention_group(
+        &self,
+        max_sessions: usize,
+    ) -> BoxFuture<'_, Result<NativeAttentionGroupOpenResponse, String>> {
+        Box::pin(async move {
+            let url = format!("{}/v1/native/attention-group/open", self.base_url);
+            let response = self
+                .with_auth(self.http.post(url))
+                .timeout(API_NATIVE_OPEN_TIMEOUT)
+                .json(&NativeAttentionGroupOpenRequest {
+                    max_sessions: Some(max_sessions),
+                })
+                .send()
+                .await
+                .map_err(|err| self.transport_error("open the attention group", err))?;
+
+            if response.status().is_success() {
+                return response
+                    .json::<NativeAttentionGroupOpenResponse>()
+                    .await
+                    .map_err(|err| format!("failed to parse attention group response: {err}"));
             }
 
             Err(read_error(response).await)

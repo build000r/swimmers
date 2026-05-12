@@ -8,6 +8,8 @@ const COLLISION_THROTTLE_ENTITY_THRESHOLD: usize = 50;
 const COLLISION_THROTTLE_PAIR_BUDGET: usize = 24;
 const API_FAILURE_BANNER_THRESHOLD: u8 = 3;
 const API_STALE_BANNER_TEXT: &str = "API disconnected - showing stale data";
+const ATTENTION_GROUP_LABEL: &str = "[attention group]";
+const ATTENTION_GROUP_MAX_SESSIONS: usize = 6;
 
 fn sprite_theme_option_width(theme: Option<SpriteTheme>) -> u16 {
     let label = format!("[{}]", SpriteTheme::override_label(theme));
@@ -165,6 +167,9 @@ pub(crate) enum PendingInteractionResult {
     OpenSession {
         label: String,
         response: Result<NativeDesktopOpenResponse, String>,
+    },
+    OpenAttentionGroup {
+        response: Result<NativeAttentionGroupOpenResponse, String>,
     },
     ToggleNativeApp {
         next_app: NativeDesktopApp,
@@ -445,11 +450,13 @@ impl<C: TuiApi> App<C> {
     }
 
     pub(crate) fn header_right_text(&self) -> String {
-        self.thought_filter
+        let native_text = self
+            .thought_filter
             .tmux_name
             .as_deref()
             .map(|tmux_name| format!("num={tmux_name} | {}", self.native_status_text()))
-            .unwrap_or_else(|| self.native_status_text())
+            .unwrap_or_else(|| self.native_status_text());
+        format!("{native_text} {ATTENTION_GROUP_LABEL}")
     }
 
     pub(crate) fn sprite_theme_rect(&self, _width: u16) -> Rect {
@@ -540,15 +547,36 @@ impl<C: TuiApi> App<C> {
     pub(crate) fn native_status_rect(&self, width: u16) -> Option<Rect> {
         let max_right_width = width.saturating_sub(22) as usize;
         let right_text = truncate_label(&self.header_right_text(), max_right_width);
-        let text_width = display_width(&right_text);
+        let text_width = right_text
+            .find(ATTENTION_GROUP_LABEL)
+            .map(|idx| display_width(right_text[..idx].trim_end()))
+            .unwrap_or_else(|| display_width(&right_text));
         if text_width == 0 {
             return None;
         }
 
+        let full_width = display_width(&right_text);
         Some(Rect {
-            x: width.saturating_sub(text_width).saturating_sub(2),
+            x: width.saturating_sub(full_width).saturating_sub(2),
             y: 1,
             width: text_width,
+            height: 1,
+        })
+    }
+
+    pub(crate) fn attention_group_rect(&self, width: u16) -> Option<Rect> {
+        let max_right_width = width.saturating_sub(22) as usize;
+        let right_text = truncate_label(&self.header_right_text(), max_right_width);
+        let marker_idx = right_text.find(ATTENTION_GROUP_LABEL)?;
+        let full_width = display_width(&right_text);
+        let x = width
+            .saturating_sub(full_width)
+            .saturating_sub(2)
+            .saturating_add(display_width(&right_text[..marker_idx]));
+        Some(Rect {
+            x,
+            y: 1,
+            width: display_width(ATTENTION_GROUP_LABEL),
             height: 1,
         })
     }
@@ -634,6 +662,21 @@ impl<C: TuiApi> App<C> {
                 next_mode,
                 response,
             });
+        });
+    }
+
+    pub(crate) fn open_attention_group(&mut self) {
+        let Some(tx) = self.begin_pending_interaction() else {
+            return;
+        };
+
+        let client = Arc::clone(&self.client);
+        self.set_message("opening attention group...");
+        self.runtime.spawn(async move {
+            let response = client
+                .open_attention_group(ATTENTION_GROUP_MAX_SESSIONS)
+                .await;
+            let _ = tx.send(PendingInteractionResult::OpenAttentionGroup { response });
         });
     }
 
@@ -1412,6 +1455,13 @@ impl<C: TuiApi> App<C> {
                 Ok(response) => {
                     self.set_message(format!("{} {}", response.status, label));
                 }
+                Err(err) => self.set_message(err),
+            },
+            PendingInteractionResult::OpenAttentionGroup { response } => match response {
+                Ok(response) => self.set_message(format!(
+                    "{} attention group: {} sessions",
+                    response.status, response.session_count
+                )),
                 Err(err) => self.set_message(err),
             },
             PendingInteractionResult::ToggleNativeApp { next_app, response } => match response {
