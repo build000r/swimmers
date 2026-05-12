@@ -10,6 +10,7 @@ const API_FAILURE_BANNER_THRESHOLD: u8 = 3;
 const API_STALE_BANNER_TEXT: &str = "API disconnected - showing stale data";
 const ATTENTION_GROUP_LABEL: &str = "[attention group]";
 const ATTENTION_GROUP_MAX_SESSIONS: usize = 6;
+const ATTENTION_GROUP_REFRESH_INTERVAL: Duration = Duration::from_secs(2);
 
 fn sprite_theme_option_width(theme: Option<SpriteTheme>) -> u16 {
     let label = format!("[{}]", SpriteTheme::override_label(theme));
@@ -169,6 +170,7 @@ pub(crate) enum PendingInteractionResult {
         response: Result<NativeDesktopOpenResponse, String>,
     },
     OpenAttentionGroup {
+        focus: bool,
         response: Result<NativeAttentionGroupOpenResponse, String>,
     },
     ToggleNativeApp {
@@ -212,6 +214,8 @@ pub(crate) struct App<C: TuiApi> {
     pub(crate) selected_id: Option<String>,
     pub(crate) published_selected_id: Option<String>,
     pub(crate) native_status: Option<NativeDesktopStatusResponse>,
+    pub(crate) attention_group_session_ids: Vec<String>,
+    pub(crate) last_attention_group_refresh: Option<Instant>,
     pub(crate) daemon_defaults_status: DaemonDefaultsStatus,
     pub(crate) thought_config_editor: Option<ThoughtConfigEditorState>,
     pub(crate) picker: Option<PickerState>,
@@ -290,6 +294,8 @@ impl<C: TuiApi> App<C> {
             selected_id: None,
             published_selected_id: None,
             native_status: None,
+            attention_group_session_ids: Vec::new(),
+            last_attention_group_refresh: None,
             daemon_defaults_status: DaemonDefaultsStatus::Unknown,
             thought_config_editor: None,
             picker: None,
@@ -666,17 +672,39 @@ impl<C: TuiApi> App<C> {
     }
 
     pub(crate) fn open_attention_group(&mut self) {
+        self.request_attention_group(Vec::new(), true, true);
+    }
+
+    fn refresh_attention_group(&mut self) {
+        let current_session_ids = self.attention_group_session_ids.clone();
+        if current_session_ids.is_empty() {
+            return;
+        }
+        self.request_attention_group(current_session_ids, false, false);
+    }
+
+    fn request_attention_group(
+        &mut self,
+        current_session_ids: Vec<String>,
+        focus: bool,
+        show_progress: bool,
+    ) {
         let Some(tx) = self.begin_pending_interaction() else {
             return;
         };
 
         let client = Arc::clone(&self.client);
-        self.set_message("opening attention group...");
+        if show_progress {
+            self.set_message("opening attention group...");
+        }
+        if !focus {
+            self.last_attention_group_refresh = Some(Instant::now());
+        }
         self.runtime.spawn(async move {
             let response = client
-                .open_attention_group(ATTENTION_GROUP_MAX_SESSIONS)
+                .open_attention_group(ATTENTION_GROUP_MAX_SESSIONS, current_session_ids, focus)
                 .await;
-            let _ = tx.send(PendingInteractionResult::OpenAttentionGroup { response });
+            let _ = tx.send(PendingInteractionResult::OpenAttentionGroup { focus, response });
         });
     }
 
@@ -1457,12 +1485,24 @@ impl<C: TuiApi> App<C> {
                 }
                 Err(err) => self.set_message(err),
             },
-            PendingInteractionResult::OpenAttentionGroup { response } => match response {
-                Ok(response) => self.set_message(format!(
-                    "{} attention group: {} sessions",
-                    response.status, response.session_count
-                )),
-                Err(err) => self.set_message(err),
+            PendingInteractionResult::OpenAttentionGroup { focus, response } => match response {
+                Ok(response) => {
+                    let previous = self.attention_group_session_ids.clone();
+                    self.attention_group_session_ids = response.session_ids.clone();
+                    self.last_attention_group_refresh = Some(Instant::now());
+                    if focus || previous != response.session_ids {
+                        self.set_message(format!(
+                            "{} attention group: {} sessions",
+                            response.status, response.session_count
+                        ));
+                    }
+                }
+                Err(err) => {
+                    if !focus {
+                        self.attention_group_session_ids.clear();
+                    }
+                    self.set_message(err);
+                }
             },
             PendingInteractionResult::ToggleNativeApp { next_app, response } => match response {
                 Ok(status) => {
@@ -1640,6 +1680,7 @@ impl<C: TuiApi> App<C> {
         self.layout_resting_entities(field);
         self.reconcile_selection();
         self.sync_selection_publication();
+        self.maybe_refresh_attention_group();
     }
 
     pub(crate) fn upsert_session(&mut self, session: SessionSummary, field: Rect) {
@@ -1657,6 +1698,33 @@ impl<C: TuiApi> App<C> {
             sessions.push(session);
         }
         self.merge_sessions(sessions, field);
+    }
+
+    fn maybe_refresh_attention_group(&mut self) {
+        if self.attention_group_session_ids.is_empty()
+            || self.pending_interaction.is_some()
+            || self
+                .last_attention_group_refresh
+                .map(|last| last.elapsed() < ATTENTION_GROUP_REFRESH_INTERVAL)
+                .unwrap_or(false)
+        {
+            return;
+        }
+
+        let sessions_by_id = self
+            .entities
+            .iter()
+            .map(|entity| (entity.session.session_id.as_str(), &entity.session))
+            .collect::<HashMap<_, _>>();
+        let visible_changed = self.attention_group_session_ids.iter().any(|session_id| {
+            sessions_by_id
+                .get(session_id.as_str())
+                .map(|session| !session_ready_for_operator_group_input(session))
+                .unwrap_or(true)
+        });
+        if visible_changed {
+            self.refresh_attention_group();
+        }
     }
 
     pub(crate) fn sync_repo_themes(&mut self, sessions: &[SessionSummary], force: bool) {

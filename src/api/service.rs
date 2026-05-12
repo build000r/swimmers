@@ -1,4 +1,4 @@
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::io;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
@@ -8,7 +8,7 @@ use axum::http::StatusCode;
 use futures::stream::{self, StreamExt};
 use tokio::process::Command;
 
-use super::{fetch_live_summary, AppState};
+use super::{fetch_live_summary, remote_sessions, AppState};
 use crate::host_actions::{
     inspect_git_repo, RepoActionExecutor, RestartExecutor, SystemRepoActionExecutor,
 };
@@ -21,9 +21,9 @@ use crate::session::overlay::{
 use crate::types::{
     DirEntry, DirGroupMembershipUpdateRequest, DirGroupMembershipUpdateResponse,
     DirGroupMemberships, DirListResponse, DirRepoActionResponse, DirRestartResponse,
-    LaunchTargetSummary, NativeAttentionGroupOpenResponse, NativeDesktopApp,
-    NativeDesktopOpenResponse, NativeDesktopStatusResponse, RepoActionKind, RepoActionState,
-    RepoActionStatus, SessionState, SessionSummary,
+    LaunchTargetSummary, NativeAttentionGroupOpenRequest, NativeAttentionGroupOpenResponse,
+    NativeDesktopApp, NativeDesktopOpenResponse, NativeDesktopStatusResponse, RepoActionKind,
+    RepoActionState, RepoActionStatus, SessionState, SessionSummary,
 };
 
 /// Max concurrent git probes per `list_dirs` call. Keeps a single listing from
@@ -1523,7 +1523,7 @@ pub async fn open_native_session_for_host(
 pub async fn open_native_attention_group_for_host(
     state: &Arc<AppState>,
     host: &str,
-    max_sessions: usize,
+    request: NativeAttentionGroupOpenRequest,
 ) -> Result<NativeAttentionGroupOpenResponse, NativeOpenServiceError> {
     let app = *state.native_desktop_app.read().await;
     let ghostty_mode = *state.ghostty_open_mode.read().await;
@@ -1534,29 +1534,265 @@ pub async fn open_native_attention_group_for_host(
         });
     }
 
-    let sessions =
-        select_attention_group_sessions(state.supervisor.list_sessions().await, max_sessions);
-    if sessions.is_empty() {
+    let plan = plan_attention_group_sessions(
+        state.supervisor.list_sessions().await,
+        request.max_sessions.unwrap_or(6),
+        &request.current_session_ids,
+    );
+    if plan.visible.is_empty() {
+        if !request.focus && !request.current_session_ids.is_empty() {
+            return native::clear_native_attention_group()
+                .await
+                .map_err(|error| NativeOpenServiceError::Internal(error.to_string()));
+        }
         return Err(NativeOpenServiceError::NoAttentionSessions);
     }
 
-    native::open_native_attention_group(app, ghostty_mode, &sessions)
-        .await
-        .map_err(|error| NativeOpenServiceError::Internal(error.to_string()))
+    let mut response =
+        native::open_native_attention_group(app, ghostty_mode, &plan.visible, request.focus)
+            .await
+            .map_err(|error| NativeOpenServiceError::Internal(error.to_string()))?;
+    response.backlog_session_ids = plan
+        .backlog
+        .iter()
+        .map(|session| session.session_id.clone())
+        .collect();
+    Ok(response)
 }
 
+#[derive(Debug, Clone)]
+struct AttentionGroupPlan {
+    visible: Vec<SessionSummary>,
+    backlog: Vec<SessionSummary>,
+}
+
+#[derive(Debug, Clone)]
+struct AttentionCandidate {
+    session: SessionSummary,
+    repo: String,
+    family: String,
+    batch: Option<String>,
+}
+
+fn plan_attention_group_sessions(
+    sessions: Vec<SessionSummary>,
+    max_sessions: usize,
+    current_session_ids: &[String],
+) -> AttentionGroupPlan {
+    let limit = max_sessions.clamp(1, 6);
+    let mut candidates = sessions
+        .into_iter()
+        .filter(attention_group_session_is_eligible)
+        .map(AttentionCandidate::from)
+        .collect::<Vec<_>>();
+    if candidates.is_empty() {
+        return AttentionGroupPlan {
+            visible: Vec::new(),
+            backlog: Vec::new(),
+        };
+    }
+
+    let current_ids = current_session_ids.iter().collect::<HashSet<_>>();
+    let mut visible = Vec::<AttentionCandidate>::new();
+    for session_id in current_session_ids {
+        if visible.len() >= limit {
+            break;
+        }
+        if let Some(index) = candidates
+            .iter()
+            .position(|candidate| candidate.session.session_id == *session_id)
+        {
+            visible.push(candidates.remove(index));
+        }
+    }
+
+    if visible.is_empty() {
+        let anchor_index = best_attention_anchor_index(&candidates);
+        visible.push(candidates.remove(anchor_index));
+    }
+
+    while visible.len() < limit && !candidates.is_empty() {
+        let next_index = best_attention_fill_index(&visible, &candidates);
+        visible.push(candidates.remove(next_index));
+    }
+
+    candidates.sort_by(|a, b| {
+        best_adjacency_to_group(b, &visible)
+            .cmp(&best_adjacency_to_group(a, &visible))
+            .then_with(|| b.session.last_activity_at.cmp(&a.session.last_activity_at))
+            .then_with(|| a.session.session_id.cmp(&b.session.session_id))
+    });
+
+    let visible_sessions = visible
+        .into_iter()
+        .map(|candidate| candidate.session)
+        .collect::<Vec<_>>();
+    let backlog_sessions = candidates
+        .into_iter()
+        .filter(|candidate| !current_ids.contains(&candidate.session.session_id))
+        .map(|candidate| candidate.session)
+        .collect::<Vec<_>>();
+
+    AttentionGroupPlan {
+        visible: visible_sessions,
+        backlog: backlog_sessions,
+    }
+}
+
+fn attention_group_session_is_eligible(session: &SessionSummary) -> bool {
+    session.session_id != NATIVE_ATTENTION_GROUP_SESSION_ID
+        && session.tmux_name != NATIVE_ATTENTION_GROUP_TMUX_NAME
+        && remote_sessions::split_remote_session_id(&session.session_id).is_none()
+        && session_ready_for_operator_group_input(session)
+}
+
+impl From<SessionSummary> for AttentionCandidate {
+    fn from(session: SessionSummary) -> Self {
+        let repo = attention_repo_key(&session.cwd);
+        let family = attention_project_family(&repo);
+        let batch = session.batch.as_ref().map(|batch| batch.id.clone());
+        Self {
+            session,
+            repo,
+            family,
+            batch,
+        }
+    }
+}
+
+fn best_attention_anchor_index(candidates: &[AttentionCandidate]) -> usize {
+    candidates
+        .iter()
+        .enumerate()
+        .max_by(|(_, a), (_, b)| {
+            attention_anchor_score(a, candidates)
+                .cmp(&attention_anchor_score(b, candidates))
+                .then_with(|| a.session.last_activity_at.cmp(&b.session.last_activity_at))
+                .then_with(|| b.session.session_id.cmp(&a.session.session_id))
+        })
+        .map(|(index, _)| index)
+        .unwrap_or(0)
+}
+
+fn attention_anchor_score(
+    candidate: &AttentionCandidate,
+    candidates: &[AttentionCandidate],
+) -> i32 {
+    candidates
+        .iter()
+        .filter(|other| other.session.session_id != candidate.session.session_id)
+        .map(|other| attention_adjacency_score(candidate, other))
+        .sum()
+}
+
+fn best_attention_fill_index(
+    visible: &[AttentionCandidate],
+    candidates: &[AttentionCandidate],
+) -> usize {
+    candidates
+        .iter()
+        .enumerate()
+        .max_by(|(_, a), (_, b)| {
+            best_adjacency_to_group(a, visible)
+                .cmp(&best_adjacency_to_group(b, visible))
+                .then_with(|| a.session.last_activity_at.cmp(&b.session.last_activity_at))
+                .then_with(|| b.session.session_id.cmp(&a.session.session_id))
+        })
+        .map(|(index, _)| index)
+        .unwrap_or(0)
+}
+
+fn best_adjacency_to_group(candidate: &AttentionCandidate, visible: &[AttentionCandidate]) -> i32 {
+    visible
+        .iter()
+        .map(|visible| attention_adjacency_score(candidate, visible))
+        .max()
+        .unwrap_or(0)
+}
+
+fn attention_adjacency_score(a: &AttentionCandidate, b: &AttentionCandidate) -> i32 {
+    if a.session.session_id == b.session.session_id {
+        return 0;
+    }
+    let mut score = 0;
+    if !a.repo.is_empty() && a.repo == b.repo {
+        score += 100;
+    }
+    if !a.family.is_empty() && a.family == b.family {
+        score += 70;
+    }
+    if a.batch.is_some() && a.batch == b.batch {
+        score += 50;
+    }
+    if a.session.tool.is_some() && a.session.tool == b.session.tool {
+        score += 5;
+    }
+    score
+}
+
+fn attention_repo_key(cwd: &str) -> String {
+    let parts = cwd_path_parts(cwd);
+    if parts.is_empty() {
+        return String::new();
+    }
+    if let Some(index) = parts.iter().position(|part| part == "repos") {
+        for part in parts.iter().skip(index + 1) {
+            if !matches!(
+                part.as_str(),
+                "opensource" | "clients" | "personal" | "work" | "projects"
+            ) {
+                return part.clone();
+            }
+        }
+    }
+    parts.last().cloned().unwrap_or_default()
+}
+
+fn cwd_path_parts(cwd: &str) -> Vec<String> {
+    Path::new(cwd)
+        .components()
+        .filter_map(|component| match component {
+            Component::Normal(value) => value
+                .to_str()
+                .map(|value| value.trim().to_ascii_lowercase()),
+            _ => None,
+        })
+        .filter(|value| !value.is_empty())
+        .collect()
+}
+
+fn attention_project_family(repo: &str) -> String {
+    let mut family = repo.trim().to_ascii_lowercase();
+    for suffix in [
+        "_server",
+        "-server",
+        "_backend",
+        "-backend",
+        "_frontend",
+        "-frontend",
+        "_client",
+        "-client",
+        "_web",
+        "-web",
+        "_api",
+        "-api",
+        "_core",
+        "-core",
+    ] {
+        if family.len() > suffix.len() && family.ends_with(suffix) {
+            family.truncate(family.len() - suffix.len());
+            break;
+        }
+    }
+    family
+}
+
+#[cfg(test)]
 fn select_attention_group_sessions(
-    mut sessions: Vec<SessionSummary>,
+    sessions: Vec<SessionSummary>,
     max_sessions: usize,
 ) -> Vec<SessionSummary> {
-    sessions.retain(|session| {
-        session.session_id != NATIVE_ATTENTION_GROUP_SESSION_ID
-            && session.tmux_name != NATIVE_ATTENTION_GROUP_TMUX_NAME
-            && session_ready_for_operator_group_input(session)
-    });
-    sessions.sort_by(|a, b| b.last_activity_at.cmp(&a.last_activity_at));
-    sessions.truncate(max_sessions.clamp(1, 6));
-    sessions
+    plan_attention_group_sessions(sessions, max_sessions, &[]).visible
 }
 
 #[cfg(test)]
@@ -1567,8 +1803,11 @@ mod tests {
     use crate::thought::health::BridgeHealthState;
     use crate::thought::protocol::SyncRequestSequence;
     use crate::thought::runtime_config::ThoughtConfig;
-    use crate::types::{RestState, StateEvidence, ThoughtSource, ThoughtState, TransportHealth};
-    use chrono::Utc;
+    use crate::types::{
+        RestState, SessionBatchMembership, StateEvidence, ThoughtSource, ThoughtState,
+        TransportHealth,
+    };
+    use chrono::{Duration as ChronoDuration, Utc};
     use std::sync::Arc;
     use tokio::sync::RwLock;
 
@@ -1622,6 +1861,41 @@ mod tests {
         }
     }
 
+    fn waiting_session(session_id: &str, cwd: &str, seconds_ago: i64) -> SessionSummary {
+        let mut session = summary(session_id, session_id, SessionState::Idle);
+        session.cwd = cwd.to_string();
+        session.last_activity_at = Utc::now() - ChronoDuration::seconds(seconds_ago);
+        session
+    }
+
+    fn batch_session(mut session: SessionSummary, batch_id: &str) -> SessionSummary {
+        session.batch = Some(SessionBatchMembership {
+            id: batch_id.to_string(),
+            label: batch_id.to_string(),
+            index: 0,
+            total: 2,
+            created_at: Utc::now(),
+            prompt_excerpt: None,
+        });
+        session
+    }
+
+    fn plan_ids(
+        sessions: Vec<SessionSummary>,
+        max_sessions: usize,
+        current_session_ids: &[&str],
+    ) -> Vec<String> {
+        let current = current_session_ids
+            .iter()
+            .map(|id| (*id).to_string())
+            .collect::<Vec<_>>();
+        plan_attention_group_sessions(sessions, max_sessions, &current)
+            .visible
+            .into_iter()
+            .map(|session| session.session_id)
+            .collect()
+    }
+
     #[test]
     fn attention_group_selection_includes_idle_agent_sessions_without_sleep_snapshot() {
         let idle_agent = summary("sess-11", "11", SessionState::Idle);
@@ -1639,6 +1913,87 @@ mod tests {
 
         assert_eq!(selected.len(), 1);
         assert_eq!(selected[0].tmux_name, "11");
+    }
+
+    #[test]
+    fn attention_queue_prefers_same_sweet_potato_project_over_newer_unrelated_sessions() {
+        let sweet_a = waiting_session("sweet-a", "/Users/b/repos/sweet-potato", 120);
+        let sweet_b = waiting_session("sweet-b", "/Users/b/repos/sweet-potato/packages/api", 90);
+        let newer_unrelated = waiting_session("newer", "/Users/b/repos/buildooor", 1);
+
+        let selected = plan_ids(vec![newer_unrelated, sweet_a, sweet_b], 2, &[]);
+
+        assert_eq!(selected, vec!["sweet-b", "sweet-a"]);
+    }
+
+    #[test]
+    fn attention_queue_treats_htma_and_htma_server_as_adjacent_siblings() {
+        let htma = waiting_session("htma-ui", "/Users/b/repos/htma", 80);
+        let htma_server = waiting_session("htma-api", "/Users/b/repos/htma_server", 70);
+        let unrelated = waiting_session("newer-unrelated", "/Users/b/repos/finalreceipts", 1);
+
+        let selected = plan_ids(vec![unrelated, htma, htma_server], 2, &[]);
+
+        assert_eq!(selected, vec!["htma-api", "htma-ui"]);
+    }
+
+    #[test]
+    fn attention_queue_uses_batch_before_recency_tie_break() {
+        let batch_a = batch_session(waiting_session("batch-a", "/Users/b/repos/alpha", 90), "b1");
+        let batch_b = batch_session(waiting_session("batch-b", "/Users/b/repos/beta", 80), "b1");
+        let newer_unrelated = waiting_session("newer", "/Users/b/repos/gamma", 1);
+
+        let selected = plan_ids(vec![newer_unrelated, batch_a, batch_b], 2, &[]);
+
+        assert_eq!(selected, vec!["batch-b", "batch-a"]);
+    }
+
+    #[test]
+    fn attention_queue_rotates_one_in_one_out_from_current_visible_set() {
+        let visible_a = waiting_session("visible-a", "/Users/b/repos/sweet-potato", 120);
+        let mut resolved_b = waiting_session("visible-b", "/Users/b/repos/sweet-potato", 110);
+        resolved_b.thought_state = ThoughtState::Active;
+        let visible_c = waiting_session("visible-c", "/Users/b/repos/sweet-potato", 100);
+        let next_d = waiting_session("next-d", "/Users/b/repos/sweet-potato/packages/api", 90);
+        let unrelated_newer = waiting_session("unrelated", "/Users/b/repos/buildooor", 1);
+
+        let selected = plan_ids(
+            vec![visible_a, resolved_b, visible_c, next_d, unrelated_newer],
+            3,
+            &["visible-a", "visible-b", "visible-c"],
+        );
+
+        assert_eq!(selected, vec!["visible-a", "visible-c", "next-d"]);
+    }
+
+    #[test]
+    fn attention_queue_excludes_unsafe_sessions() {
+        let ready = waiting_session("ready", "/Users/b/repos/swimmers", 1);
+        let mut stale = waiting_session("stale", "/Users/b/repos/swimmers", 1);
+        stale.is_stale = true;
+        let mut unhealthy = waiting_session("unhealthy", "/Users/b/repos/swimmers", 1);
+        unhealthy.transport_health = TransportHealth::Disconnected;
+        let mut unobserved = waiting_session("unobserved", "/Users/b/repos/swimmers", 1);
+        unobserved.state_evidence = StateEvidence::unobserved("test");
+        let exited = summary("exited", "exited", SessionState::Exited);
+        let mut deep_sleep = waiting_session("deep", "/Users/b/repos/swimmers", 1);
+        deep_sleep.rest_state = RestState::DeepSleep;
+        let remote = waiting_session("remote::sess", "/Users/b/repos/swimmers", 1);
+        let managed = summary(
+            NATIVE_ATTENTION_GROUP_SESSION_ID,
+            NATIVE_ATTENTION_GROUP_TMUX_NAME,
+            SessionState::Attention,
+        );
+
+        let selected = plan_ids(
+            vec![
+                ready, stale, unhealthy, unobserved, exited, deep_sleep, remote, managed,
+            ],
+            6,
+            &[],
+        );
+
+        assert_eq!(selected, vec!["ready"]);
     }
 
     #[test]

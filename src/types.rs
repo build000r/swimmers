@@ -705,10 +705,18 @@ pub struct NativeDesktopOpenRequest {
     pub session_id: String,
 }
 
+fn default_true() -> bool {
+    true
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NativeAttentionGroupOpenRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_sessions: Option<usize>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub current_session_ids: Vec<String>,
+    #[serde(default = "default_true")]
+    pub focus: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -725,7 +733,11 @@ pub struct NativeAttentionGroupOpenResponse {
     pub tmux_name: String,
     pub session_count: usize,
     pub session_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub backlog_session_ids: Vec<String>,
     pub status: String,
+    #[serde(default)]
+    pub focused: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pane_id: Option<String>,
 }

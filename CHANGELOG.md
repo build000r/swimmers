@@ -4,6 +4,10 @@ All notable changes to swimmers are documented here. The format is based on [Kee
 
 ## [Unreleased]
 
+### Native handoff
+
+- Added a managed `[attention group]` queue for the TUI that opens related local sessions together, prefers project adjacency over raw recency, and refreshes the `swimmers-attention` tmux group in place as visible panes stop waiting.
+
 ## [0.3.0] — 2026-05-02
 
 ### Trustworthy glance state evidence

@@ -28,9 +28,9 @@ use swimmers::types::{
     CreateSessionRequest, CreateSessionResponse, CreateSessionsBatchRequest,
     CreateSessionsBatchResponse, DirGroupMembershipUpdateRequest, DirGroupMembershipUpdateResponse,
     DirListResponse, DirRepoActionResponse, GhosttyOpenMode, MermaidArtifactResponse,
-    NativeAttentionGroupOpenResponse, NativeDesktopApp, NativeDesktopOpenResponse,
-    NativeDesktopStatusResponse, PlanFileResponse, RepoActionKind, SessionGroupInputRequest,
-    SessionGroupInputResponse, SessionSummary, SpawnTool,
+    NativeAttentionGroupOpenRequest, NativeAttentionGroupOpenResponse, NativeDesktopApp,
+    NativeDesktopOpenResponse, NativeDesktopStatusResponse, PlanFileResponse, RepoActionKind,
+    SessionGroupInputRequest, SessionGroupInputResponse, SessionSummary, SpawnTool,
 };
 
 use super::api::{ThoughtConfigTestResponse, TuiApi};
@@ -298,23 +298,31 @@ impl TuiApi for InProcessApi {
     fn open_attention_group(
         &self,
         max_sessions: usize,
+        current_session_ids: Vec<String>,
+        focus: bool,
     ) -> BoxFuture<'_, Result<NativeAttentionGroupOpenResponse, String>> {
         Box::pin(async move {
-            open_native_attention_group_for_host(&self.state, "localhost", max_sessions)
-                .await
-                .map_err(|error| match error {
-                    NativeOpenServiceError::Unsupported { reason } => {
-                        reason.unwrap_or_else(|| "native desktop unavailable".to_string())
-                    }
-                    NativeOpenServiceError::NoAttentionSessions => {
-                        "no sessions are waiting for operator input".to_string()
-                    }
-                    NativeOpenServiceError::SessionNotFound => "session not found".to_string(),
-                    NativeOpenServiceError::SessionExited => {
-                        "session has already exited".to_string()
-                    }
-                    NativeOpenServiceError::Internal(message) => message,
-                })
+            open_native_attention_group_for_host(
+                &self.state,
+                "localhost",
+                NativeAttentionGroupOpenRequest {
+                    max_sessions: Some(max_sessions),
+                    current_session_ids,
+                    focus,
+                },
+            )
+            .await
+            .map_err(|error| match error {
+                NativeOpenServiceError::Unsupported { reason } => {
+                    reason.unwrap_or_else(|| "native desktop unavailable".to_string())
+                }
+                NativeOpenServiceError::NoAttentionSessions => {
+                    "no sessions are waiting for operator input".to_string()
+                }
+                NativeOpenServiceError::SessionNotFound => "session not found".to_string(),
+                NativeOpenServiceError::SessionExited => "session has already exited".to_string(),
+                NativeOpenServiceError::Internal(message) => message,
+            })
         })
     }
 

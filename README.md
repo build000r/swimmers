@@ -230,6 +230,8 @@ When `SWIMMERS_NATIVE_APP=ghostty`, the API uses Ghostty's AppleScript support t
 
 While the TUI is running, press `n` or click the top-right native-open label to switch between `iTerm` and `Ghostty` without restarting the API.
 
+Click `[attention group]` in the TUI header to build a managed `swimmers-attention` tmux session from local sessions that are ready for operator input. The group prefers related project work over raw recency, then refreshes in place as visible panes stop waiting.
+
 The optional browser terminal renderer also honors `SWIMMERS_FRANKENTUI_PKG_DIR` (or `FRANKENTUI_PKG_DIR`) to override the auto-detected `frankentui/pkg` asset path.
 
 ---
@@ -383,6 +385,7 @@ Set `SWIMMERS_TUI_URL` to split the API into its own process. Multiple TUIs, hea
 | `PUT` | `/v1/native/app` | Select the native terminal app |
 | `PUT` | `/v1/native/mode` | Select native terminal open behavior |
 | `POST` | `/v1/native/open` | Open session in desktop terminal |
+| `POST` | `/v1/native/attention-group/open` | Open or refresh the managed native attention group |
 | `GET` | `/v1/dirs` | Repo/service directory browser |
 | `POST` | `/v1/dirs/restart` | Restart a mapped service |
 | `POST` | `/v1/dirs/actions` | Start a mapped repo action such as commit assistance |

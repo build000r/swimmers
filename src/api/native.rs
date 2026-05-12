@@ -124,8 +124,7 @@ async fn native_open_attention_group(
     }
 
     let peer = request_peer(&connect_info);
-    match open_native_attention_group_for_host(&state, &peer, body.max_sessions.unwrap_or(6)).await
-    {
+    match open_native_attention_group_for_host(&state, &peer, body).await {
         Ok(result) => success_json(StatusCode::OK, &result),
         Err(NativeOpenServiceError::Unsupported { reason }) => {
             let msg = reason.unwrap_or_else(|| NATIVE_DESKTOP_UNAVAILABLE.default_message.into());

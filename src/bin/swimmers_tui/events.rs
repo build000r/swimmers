@@ -124,10 +124,16 @@ impl TuiApi for TuiClient {
     fn open_attention_group(
         &self,
         max_sessions: usize,
+        current_session_ids: Vec<String>,
+        focus: bool,
     ) -> BoxFuture<'_, Result<NativeAttentionGroupOpenResponse, String>> {
         match self {
-            Self::Embedded(client) => client.open_attention_group(max_sessions),
-            Self::External(client) => client.open_attention_group(max_sessions),
+            Self::Embedded(client) => {
+                client.open_attention_group(max_sessions, current_session_ids, focus)
+            }
+            Self::External(client) => {
+                client.open_attention_group(max_sessions, current_session_ids, focus)
+            }
         }
     }
 
