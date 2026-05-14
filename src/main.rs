@@ -13,7 +13,6 @@ use tracing_subscriber::EnvFilter;
 use swimmers::api::AppState;
 use swimmers::cli::{self, ConfigAction, ServerCli, ServerCommand};
 use swimmers::config::Config;
-use swimmers::thought::health::BridgeHealthState;
 use swimmers::{env_bootstrap, metrics, startup};
 
 // 10s gives in-flight requests time to finish while preventing indefinite hangs.
@@ -23,7 +22,6 @@ const SHUTDOWN_PERSIST_TIMEOUT: Duration = Duration::from_secs(5);
 
 enum ShutdownTrigger {
     Signal(&'static str),
-    Bridge(String),
 }
 
 fn build_app_router(
@@ -39,39 +37,52 @@ fn build_app_router(
 }
 
 #[cfg(unix)]
-async fn wait_for_shutdown_trigger(bridge_health: Arc<BridgeHealthState>) -> ShutdownTrigger {
-    use tokio::signal::unix::{signal, SignalKind};
+async fn wait_for_shutdown_trigger() -> ShutdownTrigger {
+    shutdown_signal_from(wait_for_sigint(), wait_for_sigterm()).await
+}
 
-    let mut sigint = match signal(SignalKind::interrupt()) {
-        Ok(sig) => sig,
-        Err(err) => {
-            tracing::error!("failed to install SIGINT handler: {err}");
-            let reason = bridge_health.wait_for_shutdown_request().await;
-            return ShutdownTrigger::Bridge(reason);
+#[cfg(unix)]
+async fn wait_for_sigint() {
+    if let Err(err) = tokio::signal::ctrl_c().await {
+        tracing::error!("failed to install SIGINT handler: {err}");
+        std::future::pending::<()>().await;
+    }
+}
+
+#[cfg(unix)]
+async fn wait_for_sigterm() {
+    match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+        Ok(mut sigterm) => {
+            sigterm.recv().await;
         }
-    };
-    let mut sigterm = match signal(SignalKind::terminate()) {
-        Ok(sig) => sig,
         Err(err) => {
             tracing::error!("failed to install SIGTERM handler: {err}");
-            let reason = bridge_health.wait_for_shutdown_request().await;
-            return ShutdownTrigger::Bridge(reason);
+            std::future::pending::<()>().await;
         }
-    };
+    }
+}
 
+#[cfg(unix)]
+async fn shutdown_signal_from<S, T>(sigint: S, sigterm: T) -> ShutdownTrigger
+where
+    S: std::future::Future<Output = ()>,
+    T: std::future::Future<Output = ()>,
+{
+    tokio::pin!(sigint);
+    tokio::pin!(sigterm);
     tokio::select! {
-        _ = sigint.recv() => ShutdownTrigger::Signal("SIGINT"),
-        _ = sigterm.recv() => ShutdownTrigger::Signal("SIGTERM"),
-        reason = bridge_health.wait_for_shutdown_request() => ShutdownTrigger::Bridge(reason),
+        _ = &mut sigint => ShutdownTrigger::Signal("SIGINT"),
+        _ = &mut sigterm => ShutdownTrigger::Signal("SIGTERM"),
     }
 }
 
 #[cfg(not(unix))]
-async fn wait_for_shutdown_trigger(bridge_health: Arc<BridgeHealthState>) -> ShutdownTrigger {
-    tokio::select! {
-        _ = tokio::signal::ctrl_c() => ShutdownTrigger::Signal("SIGINT"),
-        reason = bridge_health.wait_for_shutdown_request() => ShutdownTrigger::Bridge(reason),
+async fn wait_for_shutdown_trigger() -> ShutdownTrigger {
+    if let Err(err) = tokio::signal::ctrl_c().await {
+        tracing::error!("failed to install SIGINT handler: {err}");
+        std::future::pending::<()>().await;
     }
+    ShutdownTrigger::Signal("SIGINT")
 }
 
 async fn finalize_persistence_shutdown(
@@ -106,9 +117,6 @@ fn log_shutdown_trigger(trigger: ShutdownTrigger) {
         ShutdownTrigger::Signal(signal) => {
             tracing::info!(signal, "received shutdown signal");
         }
-        ShutdownTrigger::Bridge(reason) => {
-            tracing::error!(reason, "thought bridge requested process shutdown");
-        }
     }
 }
 
@@ -140,7 +148,7 @@ async fn run_server_with_bounded_shutdown(
     let bind = config.bind.clone();
     let port = config.port;
 
-    let (state, thought_backend, bridge_health) = startup::init_app_state(config.clone()).await;
+    let (state, thought_backend, _bridge_health) = startup::init_app_state(config.clone()).await;
     let app = build_app_router(config, state.clone(), prom_handle);
     let listener = tokio::net::TcpListener::bind(startup::listener_addr(&bind, port))
         .await
@@ -173,7 +181,7 @@ async fn run_server_with_bounded_shutdown(
         result = &mut server_task => {
             map_server_join_result(result)
         }
-        trigger = wait_for_shutdown_trigger(bridge_health.clone()) => {
+        trigger = wait_for_shutdown_trigger() => {
             log_shutdown_trigger(trigger);
             drain_server_task(shutdown_tx, &mut server_task).await
         }
@@ -182,11 +190,52 @@ async fn run_server_with_bounded_shutdown(
     finalize_persistence_shutdown(&state, thought_backend).await?;
     server_result?;
 
-    if let Some(reason) = bridge_health.shutdown_reason() {
-        return Err(anyhow!("thought bridge requested shutdown: {reason}"));
+    Ok(())
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use std::future::pending;
+    use std::time::Duration;
+
+    #[tokio::test]
+    async fn shutdown_trigger_returns_sigint_future() {
+        let trigger = tokio::time::timeout(
+            Duration::from_millis(25),
+            shutdown_signal_from(async {}, pending::<()>()),
+        )
+        .await
+        .expect("sigint future should complete shutdown wait");
+
+        assert!(matches!(trigger, ShutdownTrigger::Signal("SIGINT")));
     }
 
-    Ok(())
+    #[tokio::test]
+    async fn shutdown_trigger_returns_sigterm_future() {
+        let trigger = tokio::time::timeout(
+            Duration::from_millis(25),
+            shutdown_signal_from(pending::<()>(), async {}),
+        )
+        .await
+        .expect("sigterm future should complete shutdown wait");
+
+        assert!(matches!(trigger, ShutdownTrigger::Signal("SIGTERM")));
+    }
+
+    #[tokio::test]
+    async fn shutdown_trigger_ignores_other_internal_conditions() {
+        let result = tokio::time::timeout(
+            Duration::from_millis(25),
+            shutdown_signal_from(pending::<()>(), pending::<()>()),
+        )
+        .await;
+
+        assert!(
+            result.is_err(),
+            "the standalone HTTP API should only stop for process signals"
+        );
+    }
 }
 
 fn run_config_subcommand(action: Option<ConfigAction>) -> i32 {

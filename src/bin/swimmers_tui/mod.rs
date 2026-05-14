@@ -1,6 +1,6 @@
 use std::cmp::Ordering;
 use std::collections::hash_map::DefaultHasher;
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::env;
 use std::error::Error as StdError;
 use std::f32::consts::TAU;
@@ -41,13 +41,14 @@ use swimmers::types::{
     CreateSessionRequest, CreateSessionResponse, CreateSessionsBatchRequest,
     CreateSessionsBatchResponse, DirEntry, DirGroupMembershipUpdateRequest,
     DirGroupMembershipUpdateResponse, DirListResponse, DirRepoActionRequest, DirRepoActionResponse,
-    ErrorResponse, GhosttyOpenMode, LaunchTargetSummary, MermaidArtifactResponse,
-    NativeAttentionGroupOpenRequest, NativeAttentionGroupOpenResponse, NativeDesktopApp,
-    NativeDesktopConfigRequest, NativeDesktopModeRequest, NativeDesktopOpenRequest,
-    NativeDesktopOpenResponse, NativeDesktopStatusResponse, PlanFileResponse,
-    PublishSelectionRequest, RepoActionKind, RepoActionState, RepoTheme, RestState,
-    SessionBatchMembership, SessionGroupInputRequest, SessionGroupInputResponse,
-    SessionListResponse, SessionState, SessionSummary, SpawnTool, StateConfidence, TransportHealth,
+    DirRepoSearchResponse, ErrorResponse, GhosttyOpenMode, LaunchTargetSummary,
+    MermaidArtifactResponse, NativeAttentionGroupOpenRequest, NativeAttentionGroupOpenResponse,
+    NativeDesktopApp, NativeDesktopConfigRequest, NativeDesktopModeRequest,
+    NativeDesktopOpenRequest, NativeDesktopOpenResponse, NativeDesktopStatusResponse,
+    PlanFileResponse, PublishSelectionRequest, RepoActionKind, RepoActionState, RepoTheme,
+    RestState, SessionBatchMembership, SessionGroupInputRequest, SessionGroupInputResponse,
+    SessionListResponse, SessionSkillListResponse, SessionSkillSummary, SessionState,
+    SessionSummary, SpawnTool, StateConfidence, TransportHealth,
 };
 
 const MIN_WIDTH: u16 = 70;
@@ -62,6 +63,7 @@ const API_CONNECT_TIMEOUT: Duration = Duration::from_millis(250);
 const API_REQUEST_TIMEOUT: Duration = Duration::from_millis(2_000);
 const API_SESSION_LIST_TIMEOUT: Duration = Duration::from_secs(5);
 const API_MERMAID_ARTIFACT_TIMEOUT: Duration = Duration::from_secs(5);
+const API_SESSION_SKILLS_TIMEOUT: Duration = Duration::from_secs(5);
 // /v1/dirs walks the configured base, runs git probes, and inspects services
 // per entry. On hosts with many managed repos that real cost runs 4-10 s, so
 // the 5 s ceiling we used to ship raced the work and surfaced false
@@ -69,6 +71,7 @@ const API_MERMAID_ARTIFACT_TIMEOUT: Duration = Duration::from_secs(5);
 // (parallel probes, caching), but until then keep the budget generous so
 // honest slow paths don't look like outages.
 const API_DIRECTORY_LIST_TIMEOUT: Duration = Duration::from_secs(20);
+const API_DIRECTORY_SEARCH_TIMEOUT: Duration = Duration::from_secs(5);
 const API_DIRECTORY_ACTION_TIMEOUT: Duration = Duration::from_secs(15);
 const API_CREATE_SESSION_TIMEOUT: Duration = Duration::from_secs(10);
 const API_STARTUP_REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
@@ -118,6 +121,7 @@ pub(crate) mod lifecycle;
 mod mermaid;
 mod picker;
 mod render;
+mod skill_panel;
 mod terminal;
 mod thought_config_editor;
 mod thoughts;
@@ -132,6 +136,7 @@ pub(crate) use layout::*;
 pub(crate) use mermaid::*;
 pub(crate) use picker::*;
 pub(crate) use render::*;
+pub(crate) use skill_panel::*;
 pub(crate) use terminal::*;
 pub(crate) use thought_config_editor::*;
 pub(crate) use thoughts::*;

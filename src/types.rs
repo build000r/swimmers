@@ -853,6 +853,13 @@ pub struct DirListResponse {
     pub default_launch_target: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DirRepoSearchResponse {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub roots: Vec<String>,
+    pub entries: Vec<DirEntry>,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DirGroupMemberships {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -934,6 +941,8 @@ pub struct SessionSkillSummary {
     pub layer: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_bucket: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
 }

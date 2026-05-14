@@ -297,7 +297,7 @@ async fn list_session_skills(
     (StatusCode::OK, Json(response)).into_response()
 }
 
-async fn read_sbp_session_skills(
+pub async fn read_sbp_session_skills(
     session_id: &str,
     cwd: &str,
     query: Option<&str>,
@@ -449,6 +449,11 @@ fn session_skill_from_value(value: &Value) -> Option<SessionSkillSummary> {
         source_bucket: value
             .get("source_bucket")
             .and_then(Value::as_str)
+            .map(str::to_string),
+        source: value
+            .get("source")
+            .and_then(Value::as_str)
+            .or_else(|| value.get("link_target").and_then(Value::as_str))
             .map(str::to_string),
         path: value
             .get("path")
@@ -812,8 +817,8 @@ description: 'Review risky code paths'
                 r#"{{
   "cwd": "{}",
   "effective": [
-    {{"name":"ui","availability":"installed","state":"ok","layer":"global:claude","source_bucket":"opensource/skills","path":"/skills/ui"}},
-    {{"name":"smart","availability":"installed","state":"ok","layer":"global:claude","source_bucket":"skills-private","path":"/skills/smart"}}
+    {{"name":"ui","availability":"installed","state":"ok","layer":"global:claude","source_bucket":"opensource/skills","source":"/src/opensource/skills/ui","path":"/skills/ui"}},
+    {{"name":"smart","availability":"installed","state":"ok","layer":"global:claude","source_bucket":"skills-private","source":"/src/skills-private/smart","path":"/skills/smart"}}
   ],
   "recommendations": [
     {{"skill":"ui","action":"move_global_to_project","hint":"project-specific UI skill","source_path":"/skills/ui"}}
@@ -857,6 +862,7 @@ cat "$SBP_OUTPUT_FILE"
         assert_eq!(json["query"], "ui");
         assert_eq!(json["skills"].as_array().unwrap().len(), 1);
         assert_eq!(json["skills"][0]["name"], "ui");
+        assert_eq!(json["skills"][0]["source"], "/src/opensource/skills/ui");
         assert_eq!(json["issues"][0]["skill"], "ui");
 
         let args = fs::read_to_string(args_log).expect("args log");

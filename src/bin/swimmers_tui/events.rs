@@ -66,6 +66,16 @@ impl TuiApi for TuiClient {
         }
     }
 
+    fn fetch_session_skills(
+        &self,
+        session_id: &str,
+    ) -> BoxFuture<'_, Result<SessionSkillListResponse, String>> {
+        match self {
+            Self::Embedded(client) => client.fetch_session_skills(session_id),
+            Self::External(client) => client.fetch_session_skills(session_id),
+        }
+    }
+
     fn fetch_plan_file(
         &self,
         session_id: &str,
@@ -146,6 +156,13 @@ impl TuiApi for TuiClient {
         match self {
             Self::Embedded(client) => client.list_dirs(path, managed_only, group),
             Self::External(client) => client.list_dirs(path, managed_only, group),
+        }
+    }
+
+    fn list_repo_dirs(&self) -> BoxFuture<'_, Result<DirRepoSearchResponse, String>> {
+        match self {
+            Self::Embedded(client) => client.list_repo_dirs(),
+            Self::External(client) => client.list_repo_dirs(),
         }
     }
 
@@ -313,7 +330,8 @@ pub(crate) fn prepare_frame<C: TuiApi>(
     if app.should_refresh() && app.pending_refresh.is_none() {
         app.spawn_background_refresh(false);
     }
-    app.tick(layout.overview_field);
+    let tank_field = build_skill_panel(app, layout.overview_field).tank_field;
+    app.tick(tank_field);
     app.render(renderer, layout);
     layout
 }
@@ -425,7 +443,7 @@ fn handle_picker_search_key<C: TuiApi>(app: &mut App<C>, key: KeyEvent) -> Optio
         let no_mods = key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT;
         if no_mods {
             if let KeyCode::Char(c) = key.code {
-                if !c.is_control() && picker_char_should_search(app, c) {
+                if !c.is_control() {
                     app.picker_search_push(c);
                     return Some(true);
                 }
@@ -752,36 +770,6 @@ fn handle_mermaid_diagram_key<C: TuiApi>(
         }
         _ => true,
     }
-}
-
-fn picker_char_should_search<C: TuiApi>(app: &App<C>, ch: char) -> bool {
-    let Some(picker) = app.picker.as_ref() else {
-        return false;
-    };
-    if !picker.search.is_empty() {
-        return true;
-    }
-
-    !matches!(
-        ch,
-        'q' | 'h'
-            | 'j'
-            | 'k'
-            | 'l'
-            | 'o'
-            | 'e'
-            | 'a'
-            | 'c'
-            | 'R'
-            | 'O'
-            | 'B'
-            | 'X'
-            | 'r'
-            | 'm'
-            | 't'
-            | 'n'
-            | 's'
-    )
 }
 
 pub(crate) fn handle_mouse_down<C: TuiApi>(

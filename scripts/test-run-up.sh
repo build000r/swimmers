@@ -87,6 +87,16 @@ class Handler(BaseHTTPRequestHandler):
                 self.end_headers()
             return
 
+        if self.path.startswith("/v1/skills"):
+            if mode == "ready":
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(b'{"skills":[]}')
+            else:
+                self.send_response(404)
+                self.end_headers()
+            return
+
         self.send_response(404)
         self.end_headers()
 
@@ -182,24 +192,26 @@ status_for() {
 wait_for_ready_backend() {
   local port="${1}"
   local log_file="${2:-}"
-  local web_status api_status dirs_status
+  local web_status api_status dirs_status skills_status
   local _i
 
   for _i in {1..60}; do
     web_status="$(status_for "http://127.0.0.1:${port}/app.js")"
     api_status="$(status_for "http://127.0.0.1:${port}/v1/sessions")"
     dirs_status="$(status_for "http://127.0.0.1:${port}/v1/dirs")"
-    if [[ "${web_status}" == "200" && "${api_status}" == "200" && "${dirs_status}" == "200" ]]; then
+    skills_status="$(status_for "http://127.0.0.1:${port}/v1/skills?tool=codex")"
+    if [[ "${web_status}" == "200" && "${api_status}" == "200" && "${dirs_status}" == "200" && "${skills_status}" == "200" ]]; then
       return 0
     fi
     sleep 0.25
   done
 
-  printf 'backend on %s did not become ready; last /app.js=%s /v1/sessions=%s /v1/dirs=%s\n' \
+  printf 'backend on %s did not become ready; last /app.js=%s /v1/sessions=%s /v1/dirs=%s /v1/skills=%s\n' \
     "${port}" \
     "${web_status:-000}" \
     "${api_status:-000}" \
-    "${dirs_status:-000}" >&2
+    "${dirs_status:-000}" \
+    "${skills_status:-000}" >&2
   if [[ -n "${log_file}" ]]; then
     tail -n 80 "${log_file}" >&2 || true
   fi
@@ -226,6 +238,7 @@ set -euo pipefail
   printf 'SWIMMERS_TUI_URL=%s\n' "${SWIMMERS_TUI_URL:-}"
   printf 'SWIMMERS_TUI_REUSE_SERVER=%s\n' "${SWIMMERS_TUI_REUSE_SERVER:-}"
   printf 'SWIMMERS_TUI_FEATURES=%s\n' "${SWIMMERS_TUI_FEATURES:-}"
+  printf 'CARGO_TARGET_DIR=%s\n' "${CARGO_TARGET_DIR:-}"
 } >"${SWIMMERS_UP_TEST_CAPTURE}"
 SH
   chmod +x "${stub}"
@@ -266,6 +279,7 @@ grep -q "Starting swimmers backend on http://127.0.0.1:${port}" "${tmp_dir}/fres
 grep -q "SWIMMERS_TUI_URL=http://127.0.0.1:${port}" "${capture}"
 grep -q "SWIMMERS_TUI_REUSE_SERVER=1" "${capture}"
 grep -q "SWIMMERS_TUI_FEATURES=personal-workflows" "${capture}"
+grep -q "CARGO_TARGET_DIR=${ROOT_DIR}/target/swimmers-up/personal-workflows" "${capture}"
 stop_port_listener "${port}"
 
 port="$(free_port)"
@@ -307,7 +321,7 @@ PORT="${stale_port}" \
   SWIMMERS_UP_TUI_SHIM="${TUI_STUB}" \
   SWIMMERS_UP_TEST_CAPTURE="${capture}" \
   "${RUN_UP}" >"${tmp_dir}/restart.out"
-grep -q "may be stale; restarting it to use this checkout build" "${tmp_dir}/restart.out"
+grep -q "may be stale; restarting it to use" "${tmp_dir}/restart.out"
 grep -q "SWIMMERS_TUI_URL=http://127.0.0.1:${stale_port}" "${capture}"
 if lsof -nP -t -iTCP:"${stale_port}" -sTCP:LISTEN 2>/dev/null | grep -qx "${fixture_pid}"; then
   printf 'expected stale swimmers listener to be stopped\n' >&2

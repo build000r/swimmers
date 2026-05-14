@@ -13,6 +13,7 @@ pub(crate) struct PickerState {
     pub(crate) base_path: String,
     pub(crate) current_path: String,
     pub(crate) entries: Vec<DirEntry>,
+    pub(crate) repo_search_entries: Vec<DirEntry>,
     pub(crate) current_theme_color: Option<Color>,
     pub(crate) entry_theme_colors: Vec<Option<Color>>,
     pub(crate) managed_only: bool,
@@ -55,6 +56,7 @@ impl PickerState {
             base_path: response.path.clone(),
             current_path: response.path,
             entries: response.entries,
+            repo_search_entries: Vec::new(),
             current_theme_color: None,
             entry_theme_colors: Vec::new(),
             managed_only,
@@ -78,12 +80,59 @@ impl PickerState {
             return (0..self.entries.len()).collect();
         }
         let needle = self.search.to_lowercase();
-        self.entries
-            .iter()
-            .enumerate()
-            .filter(|(_, entry)| entry.name.to_lowercase().contains(&needle))
-            .map(|(idx, _)| idx)
-            .collect()
+        let mut seen_local_paths = HashSet::new();
+        let mut visible = Vec::new();
+        for index in 0..self.entries.len() {
+            if let Some(path) = self.path_for_entry(index) {
+                seen_local_paths.insert(normalize_path(&path));
+            }
+            if self.entry_matches_search(index, &needle) {
+                visible.push(index);
+            }
+        }
+
+        for index in self.entries.len()..self.total_entry_count() {
+            let Some(path) = self.path_for_entry(index) else {
+                continue;
+            };
+            if seen_local_paths.contains(&normalize_path(&path)) {
+                continue;
+            }
+            if self.entry_matches_search(index, &needle) {
+                visible.push(index);
+            }
+        }
+
+        visible
+    }
+
+    pub(crate) fn total_entry_count(&self) -> usize {
+        self.entries.len() + self.repo_search_entries.len()
+    }
+
+    pub(crate) fn entry_at(&self, index: usize) -> Option<&DirEntry> {
+        if index < self.entries.len() {
+            self.entries.get(index)
+        } else {
+            self.repo_search_entries.get(index - self.entries.len())
+        }
+    }
+
+    fn entry_matches_search(&self, index: usize, needle: &str) -> bool {
+        let Some(entry) = self.entry_at(index) else {
+            return false;
+        };
+        entry.name.to_lowercase().contains(needle)
+            || self
+                .path_for_entry(index)
+                .map(|path| path.to_lowercase().contains(needle))
+                .unwrap_or(false)
+    }
+
+    pub(crate) fn set_repo_search_entries(&mut self, entries: Vec<DirEntry>) {
+        self.repo_search_entries = entries;
+        self.entry_theme_colors.clear();
+        self.snap_selection_to_visible();
     }
 
     pub(crate) fn snap_selection_to_visible(&mut self) {
@@ -138,7 +187,7 @@ impl PickerState {
     }
 
     fn retain_current_batch_exclusions(&mut self) {
-        let valid_paths = (0..self.entries.len())
+        let valid_paths = (0..self.total_entry_count())
             .filter_map(|index| self.path_for_entry(index))
             .map(|path| normalize_path(&path))
             .collect::<HashSet<_>>();
@@ -149,9 +198,9 @@ impl PickerState {
     pub(crate) fn apply_response(&mut self, response: DirListResponse, preserve_selection: bool) {
         let previous_selection = self.selection;
         let previous_scroll = self.scroll;
-        let selected_name = match previous_selection {
+        let selected_path = match previous_selection {
             PickerSelection::Entry(index) => {
-                self.entries.get(index).map(|entry| entry.name.clone())
+                self.path_for_entry(index).map(|path| normalize_path(&path))
             }
             PickerSelection::SpawnHere => None,
         };
@@ -181,20 +230,25 @@ impl PickerState {
         self.current_theme_color = None;
         self.entry_theme_colors.clear();
         if preserve_selection {
-            self.selection = selected_name
+            let total_entries = self.total_entry_count();
+            self.selection = selected_path
                 .as_ref()
-                .and_then(|name| self.entries.iter().position(|entry| &entry.name == name))
+                .and_then(|path| {
+                    (0..total_entries).find(|index| {
+                        self.path_for_entry(*index)
+                            .map(|candidate| normalize_path(&candidate) == *path)
+                            .unwrap_or(false)
+                    })
+                })
                 .map(PickerSelection::Entry)
                 .unwrap_or(match previous_selection {
                     PickerSelection::SpawnHere => PickerSelection::SpawnHere,
-                    PickerSelection::Entry(index) if self.entries.is_empty() => {
-                        PickerSelection::SpawnHere
-                    }
+                    PickerSelection::Entry(_) if total_entries == 0 => PickerSelection::SpawnHere,
                     PickerSelection::Entry(index) => {
-                        PickerSelection::Entry(index.min(self.entries.len().saturating_sub(1)))
+                        PickerSelection::Entry(index.min(total_entries.saturating_sub(1)))
                     }
                 });
-            self.scroll = previous_scroll.min(self.entries.len().saturating_sub(1));
+            self.scroll = previous_scroll.min(total_entries.saturating_sub(1));
         } else {
             self.selection = PickerSelection::SpawnHere;
             self.scroll = 0;
@@ -211,15 +265,20 @@ impl PickerState {
 
     pub(crate) fn sync_theme_colors(&mut self, repo_themes: &mut HashMap<String, RepoTheme>) {
         self.current_theme_color = picker_theme_color_for_path(&self.current_path, repo_themes);
-        self.entry_theme_colors = self
-            .entries
-            .iter()
-            .enumerate()
-            .map(|(index, _)| {
-                self.path_for_entry(index)
-                    .and_then(|path| picker_theme_color_for_path(&path, repo_themes))
-            })
-            .collect();
+        self.entry_theme_colors = vec![None; self.total_entry_count()];
+        let mut indices = (0..self.entries.len()).collect::<Vec<_>>();
+        if !self.search.is_empty() {
+            indices.extend(
+                self.visible_entries()
+                    .into_iter()
+                    .filter(|index| *index >= self.entries.len()),
+            );
+        }
+        for index in indices {
+            self.entry_theme_colors[index] = self
+                .path_for_entry(index)
+                .and_then(|path| picker_theme_color_for_path(&path, repo_themes));
+        }
     }
 
     pub(crate) fn at_root(&self) -> bool {
@@ -261,7 +320,7 @@ impl PickerState {
     }
 
     pub(crate) fn path_for_entry(&self, index: usize) -> Option<String> {
-        let entry = self.entries.get(index)?;
+        let entry = self.entry_at(index)?;
         if let Some(full_path) = &entry.full_path {
             return Some(full_path.clone());
         }
@@ -637,7 +696,7 @@ fn picker_entry_action_rects(
         return Vec::new();
     }
 
-    let Some(entry) = picker.entries.get(raw_index) else {
+    let Some(entry) = picker.entry_at(raw_index) else {
         return Vec::new();
     };
     let actions = picker_entry_actions(entry);
@@ -681,7 +740,7 @@ fn picker_batch_exclude_rect(
         return None;
     }
 
-    let entry = picker.entries.get(raw_index)?;
+    let entry = picker.entry_at(raw_index)?;
     let actions_width = picker_entry_actions_width(&picker_entry_actions(entry));
     let label = picker_batch_exclude_label(picker, raw_index);
     let label_width = label.len() as u16;
@@ -1158,7 +1217,9 @@ fn render_picker_entry_row(
     let Some(&index) = layout.visible_entries.get(visible_pos) else {
         return;
     };
-    let entry = &picker.entries[index];
+    let Some(entry) = picker.entry_at(index) else {
+        return;
+    };
     let marker = if picker.selection == PickerSelection::Entry(index) {
         ">"
     } else {

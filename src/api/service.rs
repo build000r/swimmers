@@ -1,7 +1,7 @@
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::io;
 use std::path::{Component, Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant, UNIX_EPOCH};
 
 use axum::http::StatusCode;
@@ -20,16 +20,21 @@ use crate::session::overlay::{
 };
 use crate::types::{
     DirEntry, DirGroupMembershipUpdateRequest, DirGroupMembershipUpdateResponse,
-    DirGroupMemberships, DirListResponse, DirRepoActionResponse, DirRestartResponse,
-    LaunchTargetSummary, NativeAttentionGroupOpenRequest, NativeAttentionGroupOpenResponse,
-    NativeDesktopApp, NativeDesktopOpenResponse, NativeDesktopStatusResponse, RepoActionKind,
-    RepoActionState, RepoActionStatus, SessionState, SessionSummary,
+    DirGroupMemberships, DirListResponse, DirRepoActionResponse, DirRepoSearchResponse,
+    DirRestartResponse, LaunchTargetSummary, NativeAttentionGroupOpenRequest,
+    NativeAttentionGroupOpenResponse, NativeDesktopApp, NativeDesktopOpenResponse,
+    NativeDesktopStatusResponse, RepoActionKind, RepoActionState, RepoActionStatus, SessionState,
+    SessionSummary,
 };
 
 /// Max concurrent git probes per `list_dirs` call. Keeps a single listing from
 /// fork-bombing the system when a repos directory has many git subdirs, while
 /// still parallelizing enough to hide per-call git latency.
 const GIT_PROBE_CONCURRENCY: usize = 16;
+const REPO_SEARCH_ROOTS_ENV: &str = "SWIMMERS_REPO_SEARCH_ROOTS";
+const REPO_SEARCH_MAX_DEPTH_ENV: &str = "SWIMMERS_REPO_SEARCH_MAX_DEPTH";
+const REPO_SEARCH_DEFAULT_MAX_DEPTH: usize = 8;
+const REPO_SEARCH_CACHE_TTL: Duration = Duration::from_secs(60);
 const NATIVE_ATTENTION_GROUP_SESSION_ID: &str = "attention-group";
 const NATIVE_ATTENTION_GROUP_TMUX_NAME: &str = "swimmers-attention";
 
@@ -71,6 +76,16 @@ struct PendingEntry {
 }
 
 type RepoProbe = (Option<bool>, Option<RepoActionStatus>);
+
+#[derive(Clone)]
+struct RepoSearchCacheEntry {
+    roots: Vec<PathBuf>,
+    max_depth: usize,
+    generated_at: Instant,
+    entries: Vec<DirEntry>,
+}
+
+static REPO_SEARCH_CACHE: OnceLock<Mutex<Option<RepoSearchCacheEntry>>> = OnceLock::new();
 
 #[derive(Debug, Clone)]
 pub struct ApiServiceError {
@@ -147,6 +162,223 @@ pub fn dirs_base_path() -> PathBuf {
     }
 
     cwd
+}
+
+fn repo_search_cache() -> &'static Mutex<Option<RepoSearchCacheEntry>> {
+    REPO_SEARCH_CACHE.get_or_init(|| Mutex::new(None))
+}
+
+#[cfg(test)]
+pub fn clear_repo_search_cache_for_tests() {
+    if let Ok(mut cache) = repo_search_cache().lock() {
+        *cache = None;
+    }
+}
+
+fn repo_search_roots() -> Vec<PathBuf> {
+    let configured = std::env::var_os(REPO_SEARCH_ROOTS_ENV)
+        .map(|value| std::env::split_paths(&value).collect::<Vec<_>>())
+        .unwrap_or_else(|| {
+            dirs::home_dir()
+                .map(|home| vec![home.join("repos"), home.join("hard")])
+                .unwrap_or_default()
+        });
+
+    let mut seen = BTreeSet::new();
+    configured
+        .into_iter()
+        .map(expand_repo_search_root)
+        .filter(|path| path.is_dir())
+        .filter_map(|path| {
+            let canonical = path.canonicalize().unwrap_or(path);
+            seen.insert(canonical.clone()).then_some(canonical)
+        })
+        .collect()
+}
+
+fn expand_repo_search_root(path: PathBuf) -> PathBuf {
+    let Some(raw) = path.to_str().map(|value| value.to_string()) else {
+        return path;
+    };
+    let Some(home) = dirs::home_dir() else {
+        return path;
+    };
+    if raw == "~" {
+        return home;
+    }
+    raw.strip_prefix("~/")
+        .map(|suffix| home.join(suffix))
+        .unwrap_or(path)
+}
+
+fn repo_search_max_depth() -> usize {
+    std::env::var(REPO_SEARCH_MAX_DEPTH_ENV)
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|depth| *depth > 0)
+        .unwrap_or(REPO_SEARCH_DEFAULT_MAX_DEPTH)
+}
+
+fn should_descend_for_repo_search(name: &str) -> bool {
+    if name.starts_with('.') {
+        return false;
+    }
+
+    !matches!(
+        name,
+        "node_modules"
+            | "target"
+            | "dist"
+            | "build"
+            | "DerivedData"
+            | "vendor"
+            | ".venv"
+            | "venv"
+            | "__pycache__"
+    )
+}
+
+fn compact_repo_search_path(path: &Path) -> String {
+    if let Some(home) = dirs::home_dir() {
+        if let Ok(suffix) = path.strip_prefix(&home) {
+            let suffix = suffix.to_string_lossy();
+            if suffix.is_empty() {
+                return "~".to_string();
+            }
+            return format!("~/{}", suffix.trim_start_matches('/'));
+        }
+    }
+    path.to_string_lossy().into_owned()
+}
+
+fn repo_search_entry(path: &Path) -> DirEntry {
+    let basename = path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.to_string_lossy().into_owned());
+    let compact = compact_repo_search_path(path);
+    let name = if compact.ends_with(&basename) {
+        format!("{basename}  {compact}")
+    } else {
+        basename
+    };
+    DirEntry {
+        name,
+        has_children: false,
+        is_running: None,
+        repo_dirty: None,
+        repo_action: None,
+        group: None,
+        groups: Vec::new(),
+        full_path: Some(path.to_string_lossy().into_owned()),
+        has_restart: None,
+        open_url: None,
+    }
+}
+
+fn scan_repo_search_roots_sync(roots: &[PathBuf], max_depth: usize) -> Vec<DirEntry> {
+    let mut queue = VecDeque::new();
+    for root in roots {
+        queue.push_back((root.clone(), 0usize));
+    }
+
+    let mut seen = BTreeSet::new();
+    let mut repos = Vec::new();
+    while let Some((path, depth)) = queue.pop_front() {
+        let canonical = path.canonicalize().unwrap_or(path);
+        if !seen.insert(canonical.clone()) {
+            continue;
+        }
+
+        if canonical.join(".git").exists() {
+            repos.push(repo_search_entry(&canonical));
+            continue;
+        }
+
+        if depth >= max_depth {
+            continue;
+        }
+
+        let Ok(read_dir) = std::fs::read_dir(&canonical) else {
+            continue;
+        };
+        for child in read_dir.flatten() {
+            let Ok(file_type) = child.file_type() else {
+                continue;
+            };
+            if !file_type.is_dir() {
+                continue;
+            }
+            let name = child.file_name().to_string_lossy().into_owned();
+            if !should_descend_for_repo_search(&name) {
+                continue;
+            }
+            queue.push_back((child.path(), depth + 1));
+        }
+    }
+
+    repos.sort_by(|left, right| {
+        left.name
+            .to_lowercase()
+            .cmp(&right.name.to_lowercase())
+            .then_with(|| left.full_path.cmp(&right.full_path))
+    });
+    repos
+}
+
+pub async fn list_repo_search_entries() -> Result<DirRepoSearchResponse, ApiServiceError> {
+    let roots = repo_search_roots();
+    let root_labels = roots
+        .iter()
+        .map(|root| root.to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
+    if roots.is_empty() {
+        return Ok(DirRepoSearchResponse {
+            roots: root_labels,
+            entries: Vec::new(),
+        });
+    }
+
+    let max_depth = repo_search_max_depth();
+    if let Ok(cache) = repo_search_cache().lock() {
+        if let Some(cache) = cache.as_ref() {
+            if cache.roots == roots
+                && cache.max_depth == max_depth
+                && cache.generated_at.elapsed() < REPO_SEARCH_CACHE_TTL
+            {
+                return Ok(DirRepoSearchResponse {
+                    roots: root_labels,
+                    entries: cache.entries.clone(),
+                });
+            }
+        }
+    }
+
+    let scan_roots = roots.clone();
+    let entries =
+        tokio::task::spawn_blocking(move || scan_repo_search_roots_sync(&scan_roots, max_depth))
+            .await
+            .map_err(|err| {
+                ApiServiceError::new(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "REPO_SEARCH_FAILED",
+                    format!("repository search task failed: {err}"),
+                )
+            })?;
+
+    if let Ok(mut cache) = repo_search_cache().lock() {
+        *cache = Some(RepoSearchCacheEntry {
+            roots: roots.clone(),
+            max_depth,
+            generated_at: Instant::now(),
+            entries: entries.clone(),
+        });
+    }
+
+    Ok(DirRepoSearchResponse {
+        roots: root_labels,
+        entries,
+    })
 }
 
 /// Resolve the overlay dir config for the given path.
@@ -1829,6 +2061,51 @@ mod tests {
             )),
             repo_actions: crate::host_actions::RepoActionTracker::default(),
         })
+    }
+
+    #[test]
+    fn scan_repo_search_roots_finds_git_repositories_under_roots() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let repos = dir.path().join("repos");
+        let hard = dir.path().join("hard");
+        let swimmers = repos.join("opensource").join("swimmers");
+        let pcbcd = hard.join("pcbcd");
+        let not_repo = repos.join("notes");
+        std::fs::create_dir_all(swimmers.join(".git")).expect("create swimmers git marker");
+        std::fs::create_dir_all(pcbcd.join(".git")).expect("create pcbcd git marker");
+        std::fs::create_dir_all(&not_repo).expect("create non repo");
+
+        let entries = scan_repo_search_roots_sync(&[repos, hard], REPO_SEARCH_DEFAULT_MAX_DEPTH);
+        let paths = entries
+            .iter()
+            .filter_map(|entry| entry.full_path.clone())
+            .collect::<BTreeSet<_>>();
+        let swimmers = swimmers.canonicalize().expect("canonical swimmers");
+        let pcbcd = pcbcd.canonicalize().expect("canonical pcbcd");
+        let not_repo = not_repo.canonicalize().expect("canonical non repo");
+
+        assert!(paths.contains(&swimmers.to_string_lossy().into_owned()));
+        assert!(paths.contains(&pcbcd.to_string_lossy().into_owned()));
+        assert!(!paths.contains(&not_repo.to_string_lossy().into_owned()));
+    }
+
+    #[test]
+    fn scan_repo_search_roots_prunes_inside_found_repositories() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let parent = dir.path().join("repos").join("parent");
+        let nested = parent.join("nested");
+        std::fs::create_dir_all(parent.join(".git")).expect("create parent git marker");
+        std::fs::create_dir_all(nested.join(".git")).expect("create nested git marker");
+
+        let entries =
+            scan_repo_search_roots_sync(&[dir.path().join("repos")], REPO_SEARCH_DEFAULT_MAX_DEPTH);
+        let paths = entries
+            .iter()
+            .filter_map(|entry| entry.full_path.clone())
+            .collect::<Vec<_>>();
+        let parent = parent.canonicalize().expect("canonical parent");
+
+        assert_eq!(paths, vec![parent.to_string_lossy().into_owned()]);
     }
 
     fn summary(session_id: &str, tmux_name: &str, state: SessionState) -> SessionSummary {

@@ -7,9 +7,9 @@ use tokio::sync::oneshot;
 
 use swimmers::api::remote_sessions;
 use swimmers::api::service::{
-    list_dirs as list_dirs_service, native_status_for_host as native_status_for_host_service,
-    open_native_attention_group_for_host, open_native_session_for_host,
-    start_dir_repo_action as start_dir_repo_action_service,
+    list_dirs as list_dirs_service, list_repo_search_entries as list_repo_search_entries_service,
+    native_status_for_host as native_status_for_host_service, open_native_attention_group_for_host,
+    open_native_session_for_host, start_dir_repo_action as start_dir_repo_action_service,
     update_dir_group_memberships as update_dir_group_memberships_service, NativeOpenServiceError,
 };
 use swimmers::api::sessions::{
@@ -27,10 +27,11 @@ use swimmers::thought_ui::thought_config_ui_metadata;
 use swimmers::types::{
     CreateSessionRequest, CreateSessionResponse, CreateSessionsBatchRequest,
     CreateSessionsBatchResponse, DirGroupMembershipUpdateRequest, DirGroupMembershipUpdateResponse,
-    DirListResponse, DirRepoActionResponse, GhosttyOpenMode, MermaidArtifactResponse,
-    NativeAttentionGroupOpenRequest, NativeAttentionGroupOpenResponse, NativeDesktopApp,
-    NativeDesktopOpenResponse, NativeDesktopStatusResponse, PlanFileResponse, RepoActionKind,
-    SessionGroupInputRequest, SessionGroupInputResponse, SessionSummary, SpawnTool,
+    DirListResponse, DirRepoActionResponse, DirRepoSearchResponse, GhosttyOpenMode,
+    MermaidArtifactResponse, NativeAttentionGroupOpenRequest, NativeAttentionGroupOpenResponse,
+    NativeDesktopApp, NativeDesktopOpenResponse, NativeDesktopStatusResponse, PlanFileResponse,
+    RepoActionKind, SessionGroupInputRequest, SessionGroupInputResponse, SessionSkillListResponse,
+    SessionSummary, SpawnTool,
 };
 
 use super::api::{ThoughtConfigTestResponse, TuiApi};
@@ -172,6 +173,41 @@ impl TuiApi for InProcessApi {
                 .await
                 .map_err(|_| "mermaid artifact request timed out".to_string())?
                 .map_err(|_| "actor dropped mermaid artifact reply".to_string())
+        })
+    }
+
+    fn fetch_session_skills(
+        &self,
+        session_id: &str,
+    ) -> BoxFuture<'_, Result<SessionSkillListResponse, String>> {
+        let session_id = session_id.to_string();
+        Box::pin(async move {
+            if remote_sessions::split_remote_session_id(&session_id).is_some() {
+                return Ok(SessionSkillListResponse {
+                    session_id,
+                    source: "sbp".to_string(),
+                    cwd: String::new(),
+                    available: false,
+                    query: None,
+                    skills: Vec::new(),
+                    issues: Vec::new(),
+                    message: Some(
+                        "remote session skills must be queried on the target host".to_string(),
+                    ),
+                });
+            }
+            let summary = self
+                .state
+                .supervisor
+                .list_sessions()
+                .await
+                .into_iter()
+                .find(|summary| summary.session_id == session_id)
+                .ok_or_else(|| "session not found".to_string())?;
+            Ok(
+                swimmers::api::skills::read_sbp_session_skills(&session_id, &summary.cwd, None)
+                    .await,
+            )
         })
     }
 
@@ -336,6 +372,14 @@ impl TuiApi for InProcessApi {
         let group = group.map(str::to_owned);
         Box::pin(async move {
             list_dirs_service(&self.state, path.as_deref(), managed_only, group.as_deref())
+                .await
+                .map_err(|err| err.to_string())
+        })
+    }
+
+    fn list_repo_dirs(&self) -> BoxFuture<'_, Result<DirRepoSearchResponse, String>> {
+        Box::pin(async move {
+            list_repo_search_entries_service()
                 .await
                 .map_err(|err| err.to_string())
         })

@@ -1,7 +1,7 @@
 use super::*;
 pub(crate) use swimmers::host_actions::{ArtifactOpener, SystemArtifactOpener};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum DomainPlanTab {
     Schema,
     Plan,
@@ -367,6 +367,7 @@ pub(crate) struct MermaidViewerState {
     // Domain plan tab state
     pub(crate) plan_tabs: Option<Vec<DomainPlanTab>>,
     pub(crate) active_tab: DomainPlanTab,
+    pub(crate) inline_plan_files: BTreeMap<DomainPlanTab, String>,
     pub(crate) plan_text_content: Option<String>,
     pub(crate) plan_text_lines: Vec<String>,
     pub(crate) plan_text_scroll: usize,

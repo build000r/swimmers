@@ -415,7 +415,7 @@ pub(crate) fn render_footer<C: TuiApi>(app: &App<C>, renderer: &mut Renderer, st
     } else if app.thought_config_editor.is_some() {
         "thought config: tab moves  arrows adjust  enter saves  esc cancels"
     } else if app.picker.is_some() {
-        "picker: enter/right select  B batch  X exclude  c commit  h/backspace up  e env  a all  esc close"
+        "picker: type repo/cwd search  enter/right select  B batch  X exclude  backspace edit/up  esc clear/close"
     } else {
         "click empty field spawn  click/enter open  arrows or hjkl move  n terminal target  m Ghostty placement  s sprite theme  t thought cfg  r refresh  q quit"
     };

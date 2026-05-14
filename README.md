@@ -119,7 +119,7 @@ After `cargo install swimmers`, both `swimmers` and `swimmers-tui` are on your P
 
 3. **Navigate** — arrow keys to select a fish, Enter to open the session in your terminal, `q` to quit the TUI.
 
-To start the same prompt in multiple directories from the TUI, click empty aquarium space to open the directory picker, optionally type to filter the visible rows, use `[exclude]` to mark any rows `[out]`, choose `[batch N]`, type the initial request once, and press Enter. The clawgs rail stays hidden until an agent is actually asleep/waiting for input, then shows those agents with a `[launch]` shortcut for starting the next prompt in the same repo; press `Tab` to toggle batch grouping and `>` to show all agents while the rail is open. If the rail reports `clawgs` as unavailable, run `swimmers config doctor` and set `CLAWGS_BIN=/path/to/clawgs` when the binary is not on `PATH`.
+To start the same prompt in multiple directories from the TUI, click empty aquarium space to open the directory picker, optionally type to filter the visible rows or jump to any indexed `.git` repo under `~/repos` and `~/hard`, use `[exclude]` to mark any rows `[out]`, choose `[batch N]`, type the initial request once, and press Enter. The clawgs rail stays hidden until an agent is actually asleep/waiting for input, then shows those agents with a `[launch]` shortcut for starting the next prompt in the same repo; press `Tab` to toggle batch grouping and `>` to show all agents while the rail is open. If the rail reports `clawgs` as unavailable, run `swimmers config doctor` and set `CLAWGS_BIN=/path/to/clawgs` when the binary is not on `PATH`.
 
 ### Experimental voice input
 
@@ -135,7 +135,7 @@ Set `SWIMMERS_TUI_URL` to run the API as a separate process (for multi-client ac
 SWIMMERS_TUI_URL=http://127.0.0.1:3210 swimmers-tui
 ```
 
-From a source checkout, use `make up` when you want the browser surface and the TUI attached to the same local backend. It builds the current checkout, requires resolvable FrankenTerm assets, replaces any existing local `swimmers` listener on `PORT` so stale code is not reused, prints the browser URLs, then launches the TUI with `SWIMMERS_TUI_URL` and `SWIMMERS_TUI_REUSE_SERVER=1` so it does not clear that backend. The launcher defaults to `--features personal-workflows` so click-to-spawn endpoints such as `/v1/dirs` are available; set `SWIMMERS_UP_FEATURES` to override the feature list.
+From a source checkout, use `make up` when you want the browser surface and the TUI attached to the same local backend. It builds the current checkout, requires resolvable FrankenTerm assets, replaces any stale local `swimmers` listener on `PORT`, prints the browser URLs, then launches the TUI with `SWIMMERS_TUI_URL` and `SWIMMERS_TUI_REUSE_SERVER=1` so it does not clear that backend. The launcher defaults to `--features personal-workflows` so click-to-spawn endpoints such as `/v1/dirs` and `/v1/sessions/{id}/skills` are available; set `SWIMMERS_UP_FEATURES` to override the feature list. To avoid feature-set collisions in Cargo's shared `target/debug` binary path, `make up` builds into `target/swimmers-up/<features>/` by default, skips the build only when that feature-specific binary is newer than the checkout inputs, and treats a listener as reusable only when it is the same executable and required routes (`/app.js`, `/v1/sessions`, `/v1/dirs`, `/v1/skills`) respond.
 
 The browser Trogdor view is terminal-first. Selecting one agent opens a single-session cockpit: the live terminal remains the primary surface, the bottom composer sends input without covering model output, and the workbench panels read the session timeline, user-submitted turns, post-turn JSONL records, structured git diff, Mermaid/plan artifacts, and passive Skillbox/SBP Skills results. The Skills panel identifies relevant skills when `personal-workflows` is enabled and `sbp` is available; it does not perform automatic skill hot-swap or mutate overlays.
 
@@ -224,6 +224,8 @@ swimmers
 | `SWIMMERS_DATA_DIR` | `(platform data dir)` | Override the persistence directory |
 | `SWIMMERS_TUI_URL` | `(unset)` | When set, the TUI uses HTTP transport against this URL instead of hosting the API in-process. Auto-spawns a local server for loopback URLs. |
 | `SWIMMERS_TUI_REUSE_SERVER` | `(unset)` | Set to `1` for `make tui` to keep an existing loopback `swimmers` backend instead of restarting it first. |
+| `SWIMMERS_REPO_SEARCH_ROOTS` | `~/repos:~/hard` | Path-list roots for the spawn picker’s cached `.git` repo search. |
+| `SWIMMERS_REPO_SEARCH_MAX_DEPTH` | `8` | Maximum directory depth scanned below each repo search root. |
 | `SWIMMERS_VOICE_MODEL` | `(unset)` | Path to a local Whisper `.bin` model used by the experimental `voice` feature. |
 | `SWIMMERS_VOICE_LANGUAGE` | `auto` | Optional language hint for the experimental `voice` feature (`en`, `fr`, `auto`, etc.). |
 

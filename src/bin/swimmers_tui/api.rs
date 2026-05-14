@@ -347,6 +347,10 @@ pub(crate) trait TuiApi: Send + Sync + 'static {
         &self,
         session_id: &str,
     ) -> BoxFuture<'_, Result<MermaidArtifactResponse, String>>;
+    fn fetch_session_skills(
+        &self,
+        session_id: &str,
+    ) -> BoxFuture<'_, Result<SessionSkillListResponse, String>>;
     fn fetch_plan_file(
         &self,
         session_id: &str,
@@ -378,6 +382,7 @@ pub(crate) trait TuiApi: Send + Sync + 'static {
         managed_only: bool,
         group: Option<&str>,
     ) -> BoxFuture<'_, Result<DirListResponse, String>>;
+    fn list_repo_dirs(&self) -> BoxFuture<'_, Result<DirRepoSearchResponse, String>>;
     fn update_dir_group_memberships(
         &self,
         path: &str,
@@ -552,6 +557,42 @@ impl TuiApi for ApiClient {
                     .json::<MermaidArtifactResponse>()
                     .await
                     .map_err(|err| format!("failed to parse mermaid artifact: {err}"));
+            }
+
+            Err(read_error(response).await)
+        })
+    }
+
+    fn fetch_session_skills(
+        &self,
+        session_id: &str,
+    ) -> BoxFuture<'_, Result<SessionSkillListResponse, String>> {
+        let session_id = session_id.to_string();
+        Box::pin(async move {
+            let url = format!("{}/v1/sessions/{}/skills", self.base_url, session_id);
+            let response = self
+                .with_auth(
+                    self.http
+                        .get(url)
+                        .query(&[("source", "sbp")])
+                        .timeout(API_SESSION_SKILLS_TIMEOUT),
+                )
+                .send()
+                .await
+                .map_err(|err| self.transport_error("fetch session skills", err))?;
+
+            if response.status().is_success() {
+                return response
+                    .json::<SessionSkillListResponse>()
+                    .await
+                    .map_err(|err| format!("failed to parse session skills: {err}"));
+            }
+
+            if response.status() == reqwest::StatusCode::NOT_FOUND {
+                return Err(format!(
+                    "backend at {} does not expose session skills. Skill context requires a `swimmers` build with `--features personal-workflows`; if this is your local server, relaunch via `make up` or `make tui`.",
+                    self.base_url
+                ));
             }
 
             Err(read_error(response).await)
@@ -780,6 +821,33 @@ impl TuiApi for ApiClient {
             if response.status() == reqwest::StatusCode::NOT_FOUND {
                 return Err(format!(
                     "backend at {} does not expose /v1/dirs. Click-to-spawn directory browsing requires a `swimmers` build with `--features personal-workflows`; if this is your local server, relaunch via `make up` or `make tui`.",
+                    self.base_url
+                ));
+            }
+
+            Err(read_error(response).await)
+        })
+    }
+
+    fn list_repo_dirs(&self) -> BoxFuture<'_, Result<DirRepoSearchResponse, String>> {
+        Box::pin(async move {
+            let url = format!("{}/v1/dirs/repositories", self.base_url);
+            let response = self
+                .with_auth(self.http.get(url).timeout(API_DIRECTORY_SEARCH_TIMEOUT))
+                .send()
+                .await
+                .map_err(|err| self.transport_error("search repositories", err))?;
+
+            if response.status().is_success() {
+                return response
+                    .json::<DirRepoSearchResponse>()
+                    .await
+                    .map_err(|err| format!("failed to parse repository search response: {err}"));
+            }
+
+            if response.status() == reqwest::StatusCode::NOT_FOUND {
+                return Err(format!(
+                    "backend at {} does not expose /v1/dirs/repositories. Repository search requires a `swimmers` build with `--features personal-workflows`; if this is your local server, relaunch via `make up` or `make tui`.",
                     self.base_url
                 ));
             }

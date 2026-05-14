@@ -315,6 +315,7 @@ impl SessionActor {
         attach: bool,
         start_cwd: Option<String>,
         initial_tool: Option<String>,
+        initial_command: Option<String>,
         config: Arc<Config>,
         last_activity_override: Option<chrono::DateTime<Utc>>,
         batch: Option<SessionBatchMembership>,
@@ -355,6 +356,9 @@ impl SessionActor {
             c.args(["new-session", "-s", &tmux_name]);
             if let Some(dir) = start_cwd.as_deref() {
                 c.args(["-c", dir]);
+            }
+            if let Some(command) = initial_command.as_deref() {
+                c.arg(command);
             }
             c
         };

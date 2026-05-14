@@ -59,6 +59,7 @@ struct MockApiState {
     test_thought_config_results: VecDeque<Result<ThoughtConfigTestResponse, String>>,
     refresh_openrouter_candidates_results: VecDeque<Result<Vec<String>, String>>,
     mermaid_artifact_results: VecDeque<Result<MermaidArtifactResponse, String>>,
+    session_skill_results: VecDeque<Result<SessionSkillListResponse, String>>,
     plan_file_results: VecDeque<Result<PlanFileResponse, String>>,
     native_status_results: VecDeque<Result<NativeDesktopStatusResponse, String>>,
     set_native_app_results: VecDeque<Result<NativeDesktopStatusResponse, String>>,
@@ -67,6 +68,7 @@ struct MockApiState {
     open_session_results: VecDeque<Result<NativeDesktopOpenResponse, String>>,
     open_attention_group_results: VecDeque<Result<NativeAttentionGroupOpenResponse, String>>,
     list_dirs_results: VecDeque<Result<DirListResponse, String>>,
+    list_repo_dirs_results: VecDeque<Result<DirRepoSearchResponse, String>>,
     update_dir_group_memberships_results:
         VecDeque<Result<DirGroupMembershipUpdateResponse, String>>,
     start_repo_action_results: VecDeque<Result<DirRepoActionResponse, String>>,
@@ -77,6 +79,7 @@ struct MockApiState {
     update_thought_config_calls: Vec<ThoughtConfig>,
     test_thought_config_calls: Vec<ThoughtConfig>,
     mermaid_artifact_calls: Vec<String>,
+    session_skill_calls: Vec<String>,
     native_status_calls: usize,
     set_native_app_calls: Vec<NativeDesktopApp>,
     set_native_mode_calls: Vec<GhosttyOpenMode>,
@@ -84,6 +87,7 @@ struct MockApiState {
     open_calls: Vec<String>,
     open_attention_group_calls: Vec<(usize, Vec<String>, bool)>,
     list_calls: Vec<(Option<String>, bool)>,
+    list_repo_dirs_calls: usize,
     update_dir_group_memberships_calls: Vec<(String, Vec<String>, Vec<String>)>,
     start_repo_action_calls: Vec<(String, RepoActionKind)>,
     create_calls: Vec<(String, SpawnTool, Option<String>, Option<String>)>,
@@ -114,6 +118,14 @@ impl MockApi {
             .lock()
             .unwrap()
             .mermaid_artifact_results
+            .push_back(result);
+    }
+
+    fn push_session_skills(&self, result: Result<SessionSkillListResponse, String>) {
+        self.state
+            .lock()
+            .unwrap()
+            .session_skill_results
             .push_back(result);
     }
 
@@ -186,6 +198,14 @@ impl MockApi {
             .lock()
             .unwrap()
             .list_dirs_results
+            .push_back(result);
+    }
+
+    fn push_list_repo_dirs(&self, result: Result<DirRepoSearchResponse, String>) {
+        self.state
+            .lock()
+            .unwrap()
+            .list_repo_dirs_results
             .push_back(result);
     }
 
@@ -268,6 +288,10 @@ impl MockApi {
         self.state.lock().unwrap().list_calls.clone()
     }
 
+    fn list_repo_dirs_calls(&self) -> usize {
+        self.state.lock().unwrap().list_repo_dirs_calls
+    }
+
     fn create_calls(&self) -> Vec<(String, SpawnTool, Option<String>)> {
         self.state
             .lock()
@@ -348,6 +372,10 @@ impl MockApi {
 
     fn mermaid_artifact_calls(&self) -> Vec<String> {
         self.state.lock().unwrap().mermaid_artifact_calls.clone()
+    }
+
+    fn session_skill_calls(&self) -> Vec<String> {
+        self.state.lock().unwrap().session_skill_calls.clone()
     }
 
     fn set_native_app_calls(&self) -> Vec<NativeDesktopApp> {
@@ -456,6 +484,30 @@ impl TuiApi for MockApi {
                     error: None,
                     slice_name: None,
                     plan_files: None,
+                })
+            })
+        })
+    }
+
+    fn fetch_session_skills(
+        &self,
+        session_id: &str,
+    ) -> BoxFuture<'_, Result<SessionSkillListResponse, String>> {
+        let state = self.state.clone();
+        let session_id = session_id.to_string();
+        Box::pin(async move {
+            let mut state = state.lock().unwrap();
+            state.session_skill_calls.push(session_id.clone());
+            state.session_skill_results.pop_front().unwrap_or({
+                Ok(SessionSkillListResponse {
+                    session_id,
+                    source: "sbp".to_string(),
+                    cwd: String::new(),
+                    available: false,
+                    query: None,
+                    skills: Vec::new(),
+                    issues: Vec::new(),
+                    message: Some("no mock result configured".to_string()),
                 })
             })
         })
@@ -613,6 +665,20 @@ impl TuiApi for MockApi {
                 .list_dirs_results
                 .pop_front()
                 .unwrap_or_else(|| Err("unexpected list_dirs".to_string()))
+        })
+    }
+
+    fn list_repo_dirs(&self) -> BoxFuture<'_, Result<DirRepoSearchResponse, String>> {
+        let state = self.state.clone();
+        Box::pin(async move {
+            let mut state = state.lock().unwrap();
+            state.list_repo_dirs_calls += 1;
+            state.list_repo_dirs_results.pop_front().unwrap_or_else(|| {
+                Ok(DirRepoSearchResponse {
+                    roots: Vec::new(),
+                    entries: Vec::new(),
+                })
+            })
         })
     }
 
@@ -2485,6 +2551,287 @@ fn mermaid_artifact(
     }
 }
 
+fn session_skill(name: &str, source_bucket: &str, source: &str, path: &str) -> SessionSkillSummary {
+    SessionSkillSummary {
+        name: name.to_string(),
+        description: Some(format!("{name} skill")),
+        state: Some("ok".to_string()),
+        availability: Some("installed".to_string()),
+        layer: Some("project:codex".to_string()),
+        source_bucket: Some(source_bucket.to_string()),
+        source: Some(source.to_string()),
+        path: Some(path.to_string()),
+    }
+}
+
+fn session_skill_response(
+    session_id: &str,
+    cwd: &str,
+    skills: Vec<SessionSkillSummary>,
+) -> SessionSkillListResponse {
+    SessionSkillListResponse {
+        session_id: session_id.to_string(),
+        source: "sbp".to_string(),
+        cwd: cwd.to_string(),
+        available: true,
+        query: None,
+        skills,
+        issues: Vec::new(),
+        message: None,
+    }
+}
+
+#[test]
+fn skill_panel_groups_available_skills_by_source_and_highlights_sbp() {
+    let api = MockApi::new();
+    let mut app = make_app(api);
+    let field = Rect {
+        x: 1,
+        y: 3,
+        width: 118,
+        height: 22,
+    };
+    let swimmers = session_summary("sess-swimmers", "1", TEST_REPO_SWIMMERS);
+    let skills_repo = session_summary("sess-skills", "2", TEST_REPO_SKILLS);
+    app.merge_sessions(vec![swimmers.clone(), skills_repo.clone()], field);
+    app.selected_id = Some("sess-swimmers".to_string());
+    app.session_skill_cache.insert(
+        swimmers.session_id.clone(),
+        SkillCacheEntry {
+            context: SkillCacheContext::from_session(&swimmers),
+            response: Some(session_skill_response(
+                &swimmers.session_id,
+                &swimmers.cwd,
+                vec![
+                    session_skill(
+                        "sbp",
+                        "skillbox",
+                        "/Users/tester/repos/skills-private/sbp",
+                        "/repo/.codex/skills/sbp",
+                    ),
+                    session_skill(
+                        "ui",
+                        "skills-private",
+                        "/Users/tester/repos/skills-private/ui",
+                        "/repo/.codex/skills/ui",
+                    ),
+                ],
+            )),
+        },
+    );
+    app.session_skill_cache.insert(
+        skills_repo.session_id.clone(),
+        SkillCacheEntry {
+            context: SkillCacheContext::from_session(&skills_repo),
+            response: Some(session_skill_response(
+                &skills_repo.session_id,
+                &skills_repo.cwd,
+                vec![session_skill(
+                    "ui",
+                    "skills-private",
+                    "/Users/tester/repos/skills-private/ui",
+                    "/repo/.codex/skills/ui",
+                )],
+            )),
+        },
+    );
+
+    let layout = build_skill_panel(&app, field);
+
+    assert!(layout.panel_rect.is_some());
+    assert!(layout.tank_field.width < field.width);
+    assert_eq!(layout.header, "skills via SBP");
+    assert!(layout.context_line.contains("swimmers*"));
+    assert!(layout.context_line.contains("skills"));
+    assert!(layout.status_line.contains("SBP active 2/2 repos"));
+
+    let sbp_row = layout
+        .rows
+        .iter()
+        .find_map(|row| match &row.kind {
+            SkillPanelRowKind::Skill(skill) if skill.name == "sbp" => Some((row, skill)),
+            _ => None,
+        })
+        .expect("sbp skill row");
+    assert_eq!(sbp_row.0.color, Color::Yellow);
+    assert!(sbp_row.1.sbp_highlight);
+    assert_eq!(sbp_row.1.contexts, vec!["swimmers"]);
+
+    let ui_row = layout
+        .rows
+        .iter()
+        .find_map(|row| match &row.kind {
+            SkillPanelRowKind::Skill(skill) if skill.name == "ui" => Some(skill),
+            _ => None,
+        })
+        .expect("ui skill row");
+    assert_eq!(ui_row.contexts, vec!["swimmers", "skills"]);
+    assert!(ui_row.source_label.ends_with("skills-private/ui"));
+}
+
+#[test]
+fn clicking_skill_panel_row_opens_plan_style_skill_atlas() {
+    let api = MockApi::new();
+    let mut app = make_app(api);
+    let field = Rect {
+        x: 1,
+        y: 3,
+        width: 118,
+        height: 22,
+    };
+    let swimmers = session_summary("sess-swimmers", "1", TEST_REPO_SWIMMERS);
+    app.merge_sessions(vec![swimmers.clone()], field);
+    app.selected_id = Some(swimmers.session_id.clone());
+    app.session_skill_cache.insert(
+        swimmers.session_id.clone(),
+        SkillCacheEntry {
+            context: SkillCacheContext::from_session(&swimmers),
+            response: Some(session_skill_response(
+                &swimmers.session_id,
+                &swimmers.cwd,
+                vec![session_skill(
+                    "ui",
+                    "skills-private",
+                    "/Users/tester/repos/skills-private/ui",
+                    "/repo/.codex/skills/ui",
+                )],
+            )),
+        },
+    );
+    let layout = build_skill_panel(&app, field);
+    let ui_rect = layout
+        .rows
+        .iter()
+        .find_map(|row| match &row.kind {
+            SkillPanelRowKind::Skill(skill) if skill.name == "ui" => Some(row.rect),
+            _ => None,
+        })
+        .expect("ui row rect");
+
+    app.handle_field_click(ui_rect.x, ui_rect.y, field);
+
+    let FishBowlMode::Mermaid(viewer) = &app.fish_bowl_mode else {
+        panic!("expected skill atlas viewer");
+    };
+    assert_eq!(viewer.tmux_name, "skill atlas: skill ui");
+    assert_eq!(viewer.zoom, 1.0);
+    assert_eq!((viewer.center_x, viewer.center_y), (0.0, 0.0));
+    assert_eq!(
+        viewer.plan_tabs,
+        Some(vec![DomainPlanTab::Schema, DomainPlanTab::Plan])
+    );
+    assert!(viewer.inline_plan_files.contains_key(&DomainPlanTab::Plan));
+    let source = viewer
+        .source
+        .as_deref()
+        .expect("skill atlas Mermaid source");
+    assert!(source.starts_with("flowchart TB"));
+    assert!(source.contains("Skill Atlas"));
+    assert!(source.contains("FOCUS\\nskill ui"));
+    assert!(source.contains("source directories"));
+    assert!(source.contains("ui"));
+
+    let mermaid_layout = WorkspaceLayout::for_terminal_without_thought_panel(120, 32);
+    let mut renderer = test_renderer(120, 32);
+    app.render(&mut renderer, mermaid_layout);
+    let FishBowlMode::Mermaid(viewer) = &app.fish_bowl_mode else {
+        panic!("expected skill atlas viewer");
+    };
+    assert!(viewer.render_error.is_none());
+
+    app.switch_plan_tab(DomainPlanTab::Plan);
+    let FishBowlMode::Mermaid(viewer) = &app.fish_bowl_mode else {
+        panic!("expected skill atlas viewer");
+    };
+    assert_eq!(viewer.active_tab, DomainPlanTab::Plan);
+    let plan = viewer
+        .plan_text_content
+        .as_deref()
+        .expect("inline skill atlas plan tab");
+    assert!(plan.contains("# Skill Atlas"));
+    assert!(plan.contains("Focus: skill ui"));
+    assert!(plan.contains("## Skills By Source Directory"));
+
+    app.switch_plan_tab(DomainPlanTab::Schema);
+    app.pan_mermaid_viewer(2.0, -1.0);
+    let before_scroll = match &app.fish_bowl_mode {
+        FishBowlMode::Mermaid(viewer) => (viewer.zoom, viewer.center_x, viewer.center_y),
+        FishBowlMode::Aquarium => panic!("expected skill atlas viewer"),
+    };
+    scroll_mermaid(&mut app, mermaid_layout, MermaidZoomDirection::In);
+    let FishBowlMode::Mermaid(viewer) = &app.fish_bowl_mode else {
+        panic!("expected skill atlas viewer");
+    };
+    assert!(viewer.zoom > before_scroll.0);
+    assert_ne!(
+        (viewer.center_x, viewer.center_y),
+        (before_scroll.1, before_scroll.2)
+    );
+    app.close_mermaid_viewer();
+    assert!(matches!(app.fish_bowl_mode, FishBowlMode::Aquarium));
+}
+
+#[test]
+fn clicking_skill_panel_source_row_opens_source_focused_atlas() {
+    let api = MockApi::new();
+    let mut app = make_app(api);
+    let field = Rect {
+        x: 1,
+        y: 3,
+        width: 118,
+        height: 22,
+    };
+    let swimmers = session_summary("sess-swimmers", "1", TEST_REPO_SWIMMERS);
+    app.merge_sessions(vec![swimmers.clone()], field);
+    app.selected_id = Some(swimmers.session_id.clone());
+    app.session_skill_cache.insert(
+        swimmers.session_id.clone(),
+        SkillCacheEntry {
+            context: SkillCacheContext::from_session(&swimmers),
+            response: Some(session_skill_response(
+                &swimmers.session_id,
+                &swimmers.cwd,
+                vec![
+                    session_skill(
+                        "sbp",
+                        "skillbox",
+                        "/Users/tester/repos/skills-private/sbp",
+                        "/repo/.codex/skills/sbp",
+                    ),
+                    session_skill(
+                        "ui",
+                        "skills-private",
+                        "/Users/tester/repos/skills-private/ui",
+                        "/repo/.codex/skills/ui",
+                    ),
+                ],
+            )),
+        },
+    );
+    let layout = build_skill_panel(&app, field);
+    let source_rect = layout
+        .rows
+        .iter()
+        .find_map(|row| match &row.kind {
+            SkillPanelRowKind::Source { label, .. } if label.ends_with("skills-private/sbp") => {
+                Some(row.rect)
+            }
+            _ => None,
+        })
+        .expect("source row rect");
+
+    app.handle_field_click(source_rect.x, source_rect.y, field);
+
+    let FishBowlMode::Mermaid(viewer) = &app.fish_bowl_mode else {
+        panic!("expected source atlas viewer");
+    };
+    assert!(viewer.tmux_name.starts_with("skill atlas: source "));
+    let source = viewer.source.as_deref().expect("source atlas Mermaid");
+    assert!(source.contains("FOCUS\\nsource "));
+    assert!(source.contains("[SBP] sbp"));
+    assert!(source.contains("active repo contexts"));
+}
+
 fn sleeping_session(
     session_id: &str,
     tmux_name: &str,
@@ -2650,6 +2997,36 @@ fn repo_dir_entry(
         full_path: None,
         has_restart: None,
         open_url: None,
+    }
+}
+
+fn repo_search_response(paths: &[&str]) -> DirRepoSearchResponse {
+    DirRepoSearchResponse {
+        roots: vec![
+            "/Users/tester/repos".to_string(),
+            "/Users/tester/hard".to_string(),
+        ],
+        entries: paths
+            .iter()
+            .map(|path| {
+                let name = Path::new(path)
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| (*path).to_string());
+                DirEntry {
+                    name: format!("{name}  {path}"),
+                    has_children: false,
+                    is_running: None,
+                    repo_dirty: None,
+                    repo_action: None,
+                    group: None,
+                    groups: Vec::new(),
+                    full_path: Some((*path).to_string()),
+                    has_restart: None,
+                    open_url: None,
+                }
+            })
+            .collect(),
     }
 }
 
@@ -5541,6 +5918,28 @@ fn empty_field_click_opens_picker_with_managed_order() {
 }
 
 #[test]
+fn opening_picker_loads_repo_search_entries() {
+    let api = MockApi::new();
+    api.push_list_dirs(Ok(dir_response(TEST_REPOS_ROOT, &[("opensource", true)])));
+    api.push_list_repo_dirs(Ok(repo_search_response(&["/Users/tester/hard/pcbcd"])));
+    let field = test_field();
+    let mut app = make_app(api.clone());
+
+    app.handle_field_click(10, 10, field);
+    poll_until_interaction(&mut app);
+
+    let picker = app.picker.as_mut().expect("picker should open");
+    picker.search = "pcbcd".to_string();
+    let visible = picker.visible_entries();
+    assert_eq!(visible.len(), 1);
+    assert_eq!(
+        picker.path_for_entry(visible[0]).as_deref(),
+        Some("/Users/tester/hard/pcbcd")
+    );
+    assert_eq!(api.list_repo_dirs_calls(), 1);
+}
+
+#[test]
 fn navigating_into_folder_opens_initial_request_composer() {
     let api = MockApi::new();
     api.push_list_dirs(Ok(dir_response(TEST_REPOS_ROOT, &[("opensource", true)])));
@@ -5657,6 +6056,74 @@ fn picker_search_filters_without_changing_browsing_scope() {
     assert_eq!(picker.current_group.as_deref(), Some("work"));
     assert_eq!(picker.visible_entries(), vec![1]);
     assert!(api.list_calls().is_empty());
+}
+
+#[test]
+fn picker_search_includes_repo_cwd_when_not_in_current_entries() {
+    let mut picker = PickerState::new(
+        0,
+        0,
+        dir_response(TEST_REPOS_ROOT, &[("alpha", true)]),
+        true,
+        SpawnTool::Codex,
+        None,
+    );
+    picker.set_repo_search_entries(
+        repo_search_response(&[
+            "/Users/tester/repos/opensource/swimmers",
+            "/Users/tester/hard/pcbcd",
+        ])
+        .entries,
+    );
+    picker.search = "swim".to_string();
+
+    let visible = picker.visible_entries();
+    assert_eq!(visible.len(), 1);
+    assert_eq!(
+        picker.path_for_entry(visible[0]).as_deref(),
+        Some("/Users/tester/repos/opensource/swimmers")
+    );
+}
+
+#[test]
+fn picker_search_deduplicates_repo_cwd_already_visible() {
+    let mut response = dir_response(TEST_REPOS_ROOT, &[("swimmers", true)]);
+    response.entries[0].full_path = Some("/Users/tester/repos/opensource/swimmers".to_string());
+    let mut picker = PickerState::new(0, 0, response, true, SpawnTool::Codex, None);
+    picker.set_repo_search_entries(
+        repo_search_response(&["/Users/tester/repos/opensource/swimmers"]).entries,
+    );
+    picker.search = "swim".to_string();
+
+    assert_eq!(picker.visible_entries(), vec![0]);
+}
+
+#[test]
+fn activating_repo_search_result_opens_initial_request_for_cwd() {
+    let api = MockApi::new();
+    let layout = test_layout(120, 32);
+    let mut app = make_app(api);
+    let mut picker = PickerState::new(
+        0,
+        0,
+        dir_response(TEST_REPOS_ROOT, &[("alpha", true)]),
+        true,
+        SpawnTool::Codex,
+        None,
+    );
+    picker.set_repo_search_entries(
+        repo_search_response(&["/Users/tester/repos/opensource/swimmers"]).entries,
+    );
+    picker.search = "swim".to_string();
+    picker.selection = PickerSelection::Entry(picker.visible_entries()[0]);
+    app.picker = Some(picker);
+
+    app.picker_activate_selection(layout.overview_field);
+
+    assert_eq!(
+        app.initial_request.as_ref().map(|state| state.cwd.as_str()),
+        Some("/Users/tester/repos/opensource/swimmers")
+    );
 }
 
 #[test]
@@ -7255,34 +7722,8 @@ fn handle_key_event_covers_initial_request_picker_and_quit_paths() {
 }
 
 #[test]
-fn handle_key_event_keeps_picker_hotkeys_before_live_search() {
+fn handle_key_event_routes_plain_picker_chars_to_search_before_hotkeys() {
     let api = MockApi::new();
-    api.push_start_repo_action(Ok(DirRepoActionResponse {
-        ok: true,
-        path: TEST_REPO_SWIMMERS.to_string(),
-        status: RepoActionStatus {
-            kind: RepoActionKind::Commit,
-            state: RepoActionState::Running,
-            detail: None,
-        },
-    }));
-    api.push_list_dirs(Ok(DirListResponse {
-        path: TEST_REPOS_ROOT.to_string(),
-        entries: vec![repo_dir_entry(
-            "swimmers",
-            true,
-            Some(true),
-            Some(RepoActionStatus {
-                kind: RepoActionKind::Commit,
-                state: RepoActionState::Running,
-                detail: None,
-            }),
-        )],
-        overlay_label: None,
-        groups: Vec::new(),
-        launch_targets: Vec::new(),
-        default_launch_target: None,
-    }));
     let layout = test_layout(120, 32);
     let mut app = make_app(api.clone());
     let mut picker = PickerState::new(
@@ -7290,7 +7731,7 @@ fn handle_key_event_keeps_picker_hotkeys_before_live_search() {
         3,
         DirListResponse {
             path: TEST_REPOS_ROOT.to_string(),
-            entries: vec![repo_dir_entry("swimmers", true, Some(true), None)],
+            entries: vec![repo_dir_entry("codex", true, Some(true), None)],
             overlay_label: None,
             groups: Vec::new(),
             launch_targets: Vec::new(),
@@ -7304,15 +7745,22 @@ fn handle_key_event_keeps_picker_hotkeys_before_live_search() {
     app.picker = Some(picker);
 
     assert!(handle_key_event(&mut app, layout, key(KeyCode::Char('c'))));
-    poll_until_interaction(&mut app);
 
-    assert_eq!(
-        api.start_repo_action_calls(),
-        vec![(TEST_REPO_SWIMMERS.to_string(), RepoActionKind::Commit)]
-    );
+    assert!(api.start_repo_action_calls().is_empty());
     assert_eq!(
         app.picker.as_ref().map(|picker| picker.search.as_str()),
-        Some("")
+        Some("c")
+    );
+    assert_eq!(
+        app.picker.as_ref().map(|picker| picker.visible_entries()),
+        Some(vec![0])
+    );
+
+    assert!(app.picker_search_clear());
+    assert!(handle_key_event(&mut app, layout, key(KeyCode::Char('q'))));
+    assert_eq!(
+        app.picker.as_ref().map(|picker| picker.search.as_str()),
+        Some("q")
     );
 }
 
@@ -12736,6 +13184,62 @@ fn background_refresh_fetches_mermaid_artifacts_concurrently() {
     );
     assert!(app.mermaid_artifacts.contains_key("s1"));
     assert!(app.mermaid_artifacts.contains_key("s2"));
+}
+
+#[test]
+fn background_refresh_fetches_session_skills_once_per_repo_context() {
+    let api = MockApi::new();
+    let layout = test_layout(120, 32);
+    api.push_fetch_sessions(Ok(vec![
+        session_summary("s1", "1", TEST_REPO_ALPHA),
+        session_summary("s2", "2", TEST_REPO_ALPHA),
+        session_summary("s3", "3", TEST_REPO_BETA),
+    ]));
+    api.push_session_skills(Ok(session_skill_response(
+        "s1",
+        TEST_REPO_ALPHA,
+        vec![session_skill(
+            "sbp",
+            "skillbox",
+            "/Users/tester/repos/skills-private/sbp",
+            "/repo-alpha/.codex/skills/sbp",
+        )],
+    )));
+    api.push_session_skills(Ok(session_skill_response(
+        "s3",
+        TEST_REPO_BETA,
+        vec![session_skill(
+            "ui",
+            "skills-private",
+            "/Users/tester/repos/skills-private/ui",
+            "/repo-beta/.codex/skills/ui",
+        )],
+    )));
+    let mut app = make_app(api.clone());
+
+    app.spawn_background_refresh(false);
+    poll_until_refresh(&mut app, layout);
+
+    assert_eq!(
+        api.session_skill_calls(),
+        vec!["s1".to_string(), "s3".to_string()]
+    );
+    assert_eq!(app.session_skill_cache.len(), 3);
+    assert_eq!(
+        app.session_skill_cache
+            .get("s2")
+            .and_then(|entry| entry.response.as_ref())
+            .map(|response| response.session_id.as_str()),
+        Some("s2")
+    );
+    assert_eq!(
+        app.session_skill_cache
+            .get("s2")
+            .and_then(|entry| entry.response.as_ref())
+            .and_then(|response| response.skills.first())
+            .map(|skill| skill.name.as_str()),
+        Some("sbp")
+    );
 }
 
 #[test]

@@ -18,7 +18,7 @@ use crate::repo_theme::discover_repo_theme;
 use crate::session::actor::{ActorHandle, SessionCommand};
 use crate::thought::loop_runner::{SessionInfo, SessionProvider};
 use crate::thought::protocol::ThoughtDeliveryState;
-use crate::tmux_target::{exact_pane_target, exact_session_target};
+use crate::tmux_target::exact_session_target;
 use crate::types::{
     fallback_rest_state, ActionCue, ControlEvent, RepoTheme, RestState, SessionBatchMembership,
     SessionState, SessionStatePayload, SessionSummary, TerminalSnapshot, ThoughtSource,
@@ -30,7 +30,6 @@ const PROCESS_EXIT_DELETE_GRACE: Duration = Duration::ZERO;
 const PROCESS_EXIT_SUMMARY_TIMEOUT: Duration = Duration::from_millis(250);
 const ACTIVE_PANE_LOOKUP_TIMEOUT: Duration = Duration::from_millis(350);
 const ACTIVE_PANE_LOOKUP_WARN_THRESHOLD: Duration = Duration::from_millis(200);
-const TMUX_SEND_KEYS_TIMEOUT: Duration = Duration::from_millis(500);
 
 struct ListedTmuxSessions {
     reliable: bool,
@@ -546,6 +545,7 @@ impl SessionSupervisor {
             true,
             None,
             None,
+            None,
             self.config.clone(),
             last_activity_override,
             batch,
@@ -733,12 +733,20 @@ impl SessionSupervisor {
         info!(session_id = %session_id, tmux_name = %tmux_name, "creating new session");
 
         let initial_tool = initial_tool_name(spawn_tool.as_ref());
+        let initial_command = spawn_tool.map(|tool| {
+            let command = build_spawn_tool_command(tool, initial_request.as_deref());
+            if spawn_tool_consumes_initial_request(tool) {
+                initial_request = None;
+            }
+            wrap_spawn_tool_command_for_tmux(&command)
+        });
         let handle = crate::session::actor::SessionActor::spawn(
             session_id.clone(),
             tmux_name.clone(),
             false, // create new
             start_cwd.clone(),
             initial_tool.clone(),
+            initial_command,
             self.config.clone(),
             None,
             batch.clone(),
@@ -757,14 +765,6 @@ impl SessionSupervisor {
             .await;
         let repo_theme = self.resolve_repo_theme_for_summary(&mut summary);
         let initial_request_delay = initial_request_delay(spawn_tool, initial_request.as_ref());
-        self.maybe_spawn_initial_tool(
-            &session_id,
-            &tmux_name,
-            &bootstrap_handle,
-            spawn_tool,
-            &mut initial_request,
-        )
-        .await;
         self.enqueue_initial_request_if_present(
             bootstrap_handle,
             &session_id,
@@ -809,65 +809,6 @@ impl SessionSupervisor {
         }
         summary.batch = batch;
         summary
-    }
-
-    async fn maybe_spawn_initial_tool(
-        &self,
-        session_id: &str,
-        tmux_name: &str,
-        bootstrap_handle: &ActorHandle,
-        spawn_tool: Option<crate::types::SpawnTool>,
-        initial_request: &mut Option<String>,
-    ) {
-        let Some(tool) = spawn_tool else {
-            return;
-        };
-
-        let spawn_command = build_spawn_tool_command(tool, initial_request.as_deref());
-        if spawn_tool_consumes_initial_request(tool) {
-            *initial_request = None;
-        }
-
-        if let Err(e) = send_spawn_tool_command(tmux_name, tool, &spawn_command).await {
-            warn!(
-                session_id = %session_id,
-                tmux_name = %tmux_name,
-                tool = ?tool,
-                "tmux send-keys failed, falling back to PTY input: {}",
-                e
-            );
-            self.enqueue_spawn_command_fallback(
-                session_id,
-                tmux_name,
-                tool,
-                bootstrap_handle,
-                spawn_command,
-            )
-            .await;
-        }
-    }
-
-    async fn enqueue_spawn_command_fallback(
-        &self,
-        session_id: &str,
-        tmux_name: &str,
-        tool: crate::types::SpawnTool,
-        bootstrap_handle: &ActorHandle,
-        mut spawn_command: String,
-    ) {
-        spawn_command.push('\n');
-        if let Err(e) = bootstrap_handle
-            .send(SessionCommand::WriteInput(spawn_command.into_bytes()))
-            .await
-        {
-            warn!(
-                session_id = %session_id,
-                tmux_name = %tmux_name,
-                tool = ?tool,
-                "failed to enqueue spawn command fallback: {}",
-                e
-            );
-        }
     }
 
     fn enqueue_initial_request_if_present(
@@ -1870,6 +1811,10 @@ fn build_spawn_tool_command_with_initial_request(
     format!("{} {}", tool.command(), shell_single_quote(initial_request))
 }
 
+fn wrap_spawn_tool_command_for_tmux(command: &str) -> String {
+    format!("{{ {command}; }}; exec \"${{SHELL:-/bin/sh}}\"")
+}
+
 fn build_codex_spawn_command_or_fallback(
     tool: crate::types::SpawnTool,
     initial_request: &str,
@@ -1980,93 +1925,6 @@ fn enqueue_initial_request_input(
             );
         }
     });
-}
-
-async fn send_spawn_tool_command(
-    tmux_name: &str,
-    tool: crate::types::SpawnTool,
-    command: &str,
-) -> anyhow::Result<()> {
-    const ATTEMPTS: usize = 8;
-    const RETRY_DELAY_MS: u64 = 75;
-
-    for attempt in 1..=ATTEMPTS {
-        match tmux_send_keys(tmux_name, &["-l", "--", command]).await {
-            Ok(()) => match tmux_send_keys(tmux_name, &["Enter"]).await {
-                Ok(()) => return Ok(()),
-                Err(e) => {
-                    debug!(
-                        tmux_name = %tmux_name,
-                        tool = ?tool,
-                        command,
-                        attempt,
-                        "failed to execute tmux Enter send-keys: {}",
-                        e
-                    );
-                    if is_tmux_send_keys_timeout(&e) {
-                        return Err(e);
-                    }
-                }
-            },
-            Err(e) => {
-                debug!(
-                    tmux_name = %tmux_name,
-                    tool = ?tool,
-                    command,
-                    attempt,
-                    "failed to execute tmux literal send-keys: {}",
-                    e
-                );
-                if is_tmux_send_keys_timeout(&e) {
-                    return Err(e);
-                }
-            }
-        }
-
-        if attempt < ATTEMPTS {
-            tokio::time::sleep(Duration::from_millis(RETRY_DELAY_MS)).await;
-        }
-    }
-
-    Err(anyhow::anyhow!(
-        "unable to inject spawn command via tmux send-keys"
-    ))
-}
-
-fn is_tmux_send_keys_timeout(error: &anyhow::Error) -> bool {
-    error.to_string().contains("tmux send-keys timed out")
-}
-
-async fn tmux_send_keys(tmux_name: &str, key_args: &[&str]) -> anyhow::Result<()> {
-    let target = exact_pane_target(tmux_name);
-    let mut command = Command::new("tmux");
-    command
-        .args(["send-keys", "-t", &target])
-        .args(key_args)
-        .env_remove("TMUX")
-        .env_remove("TMUX_PANE")
-        .kill_on_drop(true);
-
-    let output = tokio::time::timeout(TMUX_SEND_KEYS_TIMEOUT, command.output())
-        .await
-        .map_err(|_| {
-            anyhow::anyhow!(
-                "tmux send-keys timed out after {}ms",
-                TMUX_SEND_KEYS_TIMEOUT.as_millis()
-            )
-        })?
-        .map_err(|e| anyhow::anyhow!("failed to execute tmux send-keys: {}", e))?;
-
-    if output.status.success() {
-        return Ok(());
-    }
-
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    Err(anyhow::anyhow!(
-        "tmux send-keys failed (status {:?}): {}",
-        output.status,
-        stderr.trim()
-    ))
 }
 
 async fn kill_tmux_session(tmux_name: &str) -> anyhow::Result<()> {
@@ -2524,6 +2382,14 @@ mod tests {
         let _ = std::fs::remove_file(prompt_path);
     }
 
+    #[test]
+    fn wrap_spawn_tool_command_for_tmux_keeps_shell_after_tool_exits() {
+        assert_eq!(
+            wrap_spawn_tool_command_for_tmux("codex 'investigate tmux startup'"),
+            "{ codex 'investigate tmux startup'; }; exec \"${SHELL:-/bin/sh}\""
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn codex_prompt_file_is_private() {
@@ -2655,41 +2521,6 @@ mod tests {
             "blocked"
         );
         assert!(!prompt_path.exists(), "prompt file should be removed");
-    }
-
-    #[tokio::test]
-    async fn tmux_send_keys_times_out_stuck_tmux_process() {
-        let _guard = crate::test_support::ENV_LOCK
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
-        let temp = tempdir().expect("tempdir");
-        let bin_dir = temp.path().join("bin");
-        std::fs::create_dir_all(&bin_dir).expect("bin dir");
-        write_executable(
-            &bin_dir.join("tmux"),
-            "#!/bin/sh\nsleep 5\nprintf 'late output\\n'\n",
-        );
-
-        let original_path = std::env::var_os("PATH");
-        std::env::set_var("PATH", test_path_with_prepend(&bin_dir, None));
-        let started = Instant::now();
-        let err = tmux_send_keys("stuck", &["Enter"])
-            .await
-            .expect_err("stuck tmux should time out");
-
-        match original_path {
-            Some(value) => std::env::set_var("PATH", value),
-            None => std::env::remove_var("PATH"),
-        }
-
-        assert!(
-            started.elapsed() < Duration::from_secs(2),
-            "timeout should not wait for fake tmux sleep"
-        );
-        assert!(
-            err.to_string().contains("tmux send-keys timed out"),
-            "unexpected error: {err}"
-        );
     }
 
     #[test]
@@ -3597,6 +3428,9 @@ set -eu
 cmd="${1-}"
 case "$cmd" in
   new-session|attach-session)
+    if [ "$cmd" = "new-session" ] && [ -n "${SWIMMERS_FAKE_TMUX_NEW_SESSION_LOG:-}" ]; then
+      printf '%s\n' "$@" > "${SWIMMERS_FAKE_TMUX_NEW_SESSION_LOG}"
+    fi
     while IFS= read -r line; do
       printf '%s\r\n' "$line"
     done
@@ -3610,11 +3444,8 @@ case "$cmd" in
     esac
     ;;
   send-keys)
-    if [ -n "${SWIMMERS_FAKE_TMUX_SEND_KEYS_LOG:-}" ]; then
-      shift
-      printf '%s\n' "$*" >> "${SWIMMERS_FAKE_TMUX_SEND_KEYS_LOG}"
-    fi
-    exit 0
+    printf 'unexpected send-keys during spawn\n' >&2
+    exit 9
     ;;
   kill-session)
     exit 0
@@ -3636,12 +3467,12 @@ esac
         let original_path = std::env::var_os("PATH");
         let original_cwd = std::env::var_os("SWIMMERS_FAKE_TMUX_CWD");
         let original_cmd = std::env::var_os("SWIMMERS_FAKE_TMUX_COMMAND");
-        let original_send_keys_log = std::env::var_os("SWIMMERS_FAKE_TMUX_SEND_KEYS_LOG");
-        let send_keys_log = dir.path().join("send-keys.log");
+        let original_new_session_log = std::env::var_os("SWIMMERS_FAKE_TMUX_NEW_SESSION_LOG");
+        let new_session_log = dir.path().join("new-session.log");
         prepend_test_path(&bin_dir, original_path.as_deref());
         std::env::set_var("SWIMMERS_FAKE_TMUX_CWD", dir.path());
         std::env::set_var("SWIMMERS_FAKE_TMUX_COMMAND", "codex");
-        std::env::set_var("SWIMMERS_FAKE_TMUX_SEND_KEYS_LOG", &send_keys_log);
+        std::env::set_var("SWIMMERS_FAKE_TMUX_NEW_SESSION_LOG", &new_session_log);
 
         let supervisor = SessionSupervisor::new(Arc::new(Config::default()));
         let created = supervisor
@@ -3653,6 +3484,38 @@ esac
             )
             .await
             .expect("create session");
+
+        assert_eq!(created.0.session_id, "sess_0");
+        assert_eq!(created.0.tmux_name, "0");
+        assert_eq!(created.0.tool.as_deref(), Some("Codex"));
+        assert_eq!(created.0.cwd, dir.path().to_string_lossy());
+        for _ in 0..20 {
+            if new_session_log.exists() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        let new_session_log = std::fs::read_to_string(new_session_log).expect("new-session log");
+        assert!(new_session_log.contains("new-session\n-s\n0\n-c\n"));
+        assert!(new_session_log.contains("{ prompt_file="));
+        assert!(new_session_log.contains("caam run codex -- \"$prompt\""));
+        assert!(new_session_log.contains("falling back to raw codex"));
+        assert!(new_session_log.contains("exec \"${SHELL:-/bin/sh}\""));
+        assert!(!new_session_log.contains("investigate startup"));
+        assert!(
+            new_session_log
+                .find("caam run codex -- \"$prompt\"")
+                .expect("caam command")
+                < new_session_log.find("codex-raw").expect("raw fallback"),
+            "caam must be attempted before raw fallback"
+        );
+        supervisor
+            .delete_session(
+                &created.0.session_id,
+                crate::config::SessionDeleteMode::DetachBridge,
+            )
+            .await
+            .expect("cleanup session");
 
         match original_path {
             Some(value) => std::env::set_var("PATH", value),
@@ -3666,32 +3529,10 @@ esac
             Some(value) => std::env::set_var("SWIMMERS_FAKE_TMUX_COMMAND", value),
             None => std::env::remove_var("SWIMMERS_FAKE_TMUX_COMMAND"),
         }
-        match original_send_keys_log {
-            Some(value) => std::env::set_var("SWIMMERS_FAKE_TMUX_SEND_KEYS_LOG", value),
-            None => std::env::remove_var("SWIMMERS_FAKE_TMUX_SEND_KEYS_LOG"),
+        match original_new_session_log {
+            Some(value) => std::env::set_var("SWIMMERS_FAKE_TMUX_NEW_SESSION_LOG", value),
+            None => std::env::remove_var("SWIMMERS_FAKE_TMUX_NEW_SESSION_LOG"),
         }
-
-        assert_eq!(created.0.session_id, "sess_0");
-        assert_eq!(created.0.tmux_name, "0");
-        assert_eq!(created.0.tool.as_deref(), Some("Codex"));
-        assert_eq!(created.0.cwd, dir.path().to_string_lossy());
-        let send_keys_log = std::fs::read_to_string(send_keys_log).expect("send-keys log");
-        assert!(send_keys_log.contains("caam run codex -- \"$prompt\""));
-        assert!(send_keys_log.contains("falling back to raw codex"));
-        assert!(
-            send_keys_log
-                .find("caam run codex -- \"$prompt\"")
-                .expect("caam command")
-                < send_keys_log.find("codex-raw").expect("raw fallback"),
-            "caam must be attempted before raw fallback"
-        );
-        supervisor
-            .delete_session(
-                &created.0.session_id,
-                crate::config::SessionDeleteMode::DetachBridge,
-            )
-            .await
-            .expect("cleanup session");
     }
 
     #[tokio::test]

@@ -2,7 +2,8 @@
 
 use crate::api::envelope::{error_response, success_json};
 use crate::api::service::{
-    list_dirs as list_dirs_service, restart_dir_services as restart_dir_services_service,
+    list_dirs as list_dirs_service, list_repo_search_entries as list_repo_search_entries_service,
+    restart_dir_services as restart_dir_services_service,
     start_dir_repo_action as start_dir_repo_action_service,
     update_dir_group_memberships as update_dir_group_memberships_service, ApiServiceError,
 };
@@ -45,6 +46,18 @@ async fn list_dirs(
     )
     .await
     {
+        Ok(response) => success_json(StatusCode::OK, &response),
+        Err(error) => service_error_response(error),
+    }
+}
+
+// GET /v1/dirs/repositories
+async fn list_repo_search_entries(Extension(auth): Extension<AuthInfo>) -> impl IntoResponse {
+    if let Err(resp) = auth.require_scope(AuthScope::SessionsRead) {
+        return resp;
+    }
+
+    match list_repo_search_entries_service().await {
         Ok(response) => success_json(StatusCode::OK, &response),
         Err(error) => service_error_response(error),
     }
@@ -101,6 +114,7 @@ async fn update_dir_group_memberships(
 pub fn routes() -> Router<Arc<AppState>> {
     Router::new()
         .route("/v1/dirs", get(list_dirs))
+        .route("/v1/dirs/repositories", get(list_repo_search_entries))
         .route("/v1/dirs/restart", post(restart_dir_services))
         .route("/v1/dirs/actions", post(start_dir_repo_action))
         .route(

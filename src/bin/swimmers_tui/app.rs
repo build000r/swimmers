@@ -29,6 +29,7 @@ fn attention_group_session_is_eligible(session: &SessionSummary) -> bool {
 pub(crate) struct RefreshResult {
     pub(crate) sessions: Result<Vec<SessionSummary>, String>,
     pub(crate) mermaid_artifacts: Vec<(String, Result<MermaidArtifactResponse, String>)>,
+    pub(crate) session_skills: Vec<(String, Result<SessionSkillListResponse, String>)>,
     pub(crate) native_status: Option<Result<NativeDesktopStatusResponse, String>>,
     pub(crate) daemon_defaults_status: Option<DaemonDefaultsStatus>,
     pub(crate) show_success_message: bool,
@@ -149,6 +150,7 @@ pub(crate) enum PendingInteractionResult {
         x: u16,
         y: u16,
         response: Result<DirListResponse, String>,
+        repo_search: Result<DirRepoSearchResponse, String>,
     },
     ReloadPicker {
         managed_only: bool,
@@ -217,6 +219,7 @@ pub(crate) struct App<C: TuiApi> {
     pub(crate) thought_show_all: bool,
     pub(crate) last_logged_thoughts: HashMap<String, ThoughtFingerprint>,
     session_mermaid_cache: HashMap<String, MermaidCacheEntry>,
+    pub(crate) session_skill_cache: HashMap<String, SkillCacheEntry>,
     session_repo_theme_cache: HashMap<String, RepoThemeCacheEntry>,
     pub(crate) mermaid_artifacts: HashMap<String, MermaidArtifactResponse>,
     pub(crate) repo_themes: HashMap<String, RepoTheme>,
@@ -298,6 +301,7 @@ impl<C: TuiApi> App<C> {
             thought_show_all: false,
             last_logged_thoughts: HashMap::new(),
             session_mermaid_cache: HashMap::new(),
+            session_skill_cache: HashMap::new(),
             session_repo_theme_cache: HashMap::new(),
             mermaid_artifacts: HashMap::new(),
             repo_themes: HashMap::new(),
@@ -1013,6 +1017,8 @@ impl<C: TuiApi> App<C> {
         let active_session_ids = Self::active_session_ids(sessions);
         self.session_mermaid_cache
             .retain(|session_id, _| active_session_ids.contains(session_id.as_str()));
+        self.session_skill_cache
+            .retain(|session_id, _| active_session_ids.contains(session_id.as_str()));
         self.session_repo_theme_cache
             .retain(|session_id, _| active_session_ids.contains(session_id.as_str()));
     }
@@ -1076,6 +1082,22 @@ impl<C: TuiApi> App<C> {
             .unwrap_or(true)
     }
 
+    fn should_refresh_skills_with_contexts(
+        cached_contexts: &HashMap<String, SkillCacheContext>,
+        session: &SessionSummary,
+        force: bool,
+    ) -> bool {
+        if force {
+            return true;
+        }
+
+        let context = SkillCacheContext::from_session(session);
+        cached_contexts
+            .get(&session.session_id)
+            .map(|cached| cached != &context)
+            .unwrap_or(true)
+    }
+
     fn apply_mermaid_artifact_result(
         &mut self,
         session: &SessionSummary,
@@ -1104,6 +1126,36 @@ impl<C: TuiApi> App<C> {
         self.session_mermaid_cache.insert(
             session.session_id.clone(),
             MermaidCacheEntry { context, artifact },
+        );
+    }
+
+    fn apply_session_skill_result(
+        &mut self,
+        session: &SessionSummary,
+        result: Result<SessionSkillListResponse, String>,
+    ) {
+        let context = SkillCacheContext::from_session(session);
+        let previous = self.session_skill_cache.get(&session.session_id).cloned();
+        let preserve_cached = previous
+            .as_ref()
+            .map(|entry| entry.context == context)
+            .unwrap_or(false);
+
+        let response = match result {
+            Ok(response) => Some(response),
+            Err(err) => {
+                self.set_message(self.refresh_error_message(err));
+                if preserve_cached {
+                    previous.and_then(|entry| entry.response)
+                } else {
+                    None
+                }
+            }
+        };
+
+        self.session_skill_cache.insert(
+            session.session_id.clone(),
+            SkillCacheEntry { context, response },
         );
     }
 
@@ -1330,12 +1382,17 @@ impl<C: TuiApi> App<C> {
             .iter()
             .map(|(session_id, entry)| (session_id.clone(), entry.context.clone()))
             .collect::<HashMap<_, _>>();
+        let skill_contexts = self
+            .session_skill_cache
+            .iter()
+            .map(|(session_id, entry)| (session_id.clone(), entry.context.clone()))
+            .collect::<HashMap<_, _>>();
         let (tx, rx) = oneshot::channel();
         self.pending_refresh = Some(rx);
         self.runtime.spawn(async move {
             let sessions_result = client.fetch_sessions().await;
 
-            let (mermaid_artifacts, native_status) = match &sessions_result {
+            let (mermaid_artifacts, session_skills, native_status) = match &sessions_result {
                 Ok(sessions) => {
                     let mermaid_futs: Vec<_> = sessions
                         .iter()
@@ -1356,14 +1413,52 @@ impl<C: TuiApi> App<C> {
                         })
                         .collect();
 
-                    let (mermaid_results, native_result) = tokio::join!(
+                    let mut skill_groups = BTreeMap::<String, (String, Vec<String>)>::new();
+                    for session in sessions.iter().filter(|session| {
+                        Self::should_refresh_skills_with_contexts(
+                            &skill_contexts,
+                            session,
+                            force_asset_refresh,
+                        )
+                    }) {
+                        let cwd = normalize_path(&session.cwd);
+                        let entry = skill_groups
+                            .entry(cwd)
+                            .or_insert_with(|| (session.session_id.clone(), Vec::new()));
+                        entry.1.push(session.session_id.clone());
+                    }
+                    let skill_futs: Vec<_> = skill_groups
+                        .into_values()
+                        .map(|(representative_id, session_ids)| {
+                            let client = Arc::clone(&client);
+                            async move {
+                                let result = client.fetch_session_skills(&representative_id).await;
+                                let mut out = Vec::new();
+                                for session_id in session_ids {
+                                    let adjusted = result.clone().map(|mut response| {
+                                        response.session_id = session_id.clone();
+                                        response
+                                    });
+                                    out.push((session_id, adjusted));
+                                }
+                                out
+                            }
+                        })
+                        .collect();
+
+                    let (mermaid_results, skill_results, native_result) = tokio::join!(
                         futures::future::join_all(mermaid_futs),
+                        futures::future::join_all(skill_futs),
                         client.fetch_native_status(),
                     );
 
-                    (mermaid_results, Some(native_result))
+                    (
+                        mermaid_results,
+                        skill_results.into_iter().flatten().collect(),
+                        Some(native_result),
+                    )
                 }
-                Err(_) => (Vec::new(), None),
+                Err(_) => (Vec::new(), Vec::new(), None),
             };
 
             let daemon_defaults_status = if check_daemon_defaults {
@@ -1377,6 +1472,7 @@ impl<C: TuiApi> App<C> {
             let _ = tx.send(RefreshResult {
                 sessions: sessions_result,
                 mermaid_artifacts,
+                session_skills,
                 native_status,
                 daemon_defaults_status,
                 show_success_message,
@@ -1405,7 +1501,12 @@ impl<C: TuiApi> App<C> {
 
     fn apply_pending_interaction_result(&mut self, result: PendingInteractionResult) {
         match result {
-            PendingInteractionResult::OpenPicker { x, y, response } => match response {
+            PendingInteractionResult::OpenPicker {
+                x,
+                y,
+                response,
+                repo_search,
+            } => match response {
                 Ok(response) => {
                     let mut picker = PickerState::new(
                         x,
@@ -1415,10 +1516,20 @@ impl<C: TuiApi> App<C> {
                         self.spawn_tool,
                         self.launch_target.clone(),
                     );
+                    let repo_search_error = match repo_search {
+                        Ok(response) => {
+                            picker.set_repo_search_entries(response.entries);
+                            None
+                        }
+                        Err(err) => Some(err),
+                    };
                     self.launch_target = picker.launch_target.clone();
                     picker.sync_theme_colors(&mut self.repo_themes);
                     self.picker = Some(picker);
                     self.last_picker_refresh = Some(Instant::now());
+                    if let Some(err) = repo_search_error {
+                        self.set_message(format!("repository search unavailable: {err}"));
+                    }
                 }
                 Err(err) => {
                     self.set_message(err);
@@ -1632,6 +1743,11 @@ impl<C: TuiApi> App<C> {
                 for (session_id, artifact_result) in result.mermaid_artifacts {
                     if let Some(session) = sessions_by_id.get(session_id.as_str()) {
                         self.apply_mermaid_artifact_result(session, artifact_result);
+                    }
+                }
+                for (session_id, skills_result) in result.session_skills {
+                    if let Some(session) = sessions_by_id.get(session_id.as_str()) {
+                        self.apply_session_skill_result(session, skills_result);
                     }
                 }
                 self.rebuild_mermaid_artifacts_from_cache();
@@ -2364,8 +2480,14 @@ impl<C: TuiApi> App<C> {
         let client = Arc::clone(&self.client);
         self.set_message("loading directories...");
         self.runtime.spawn(async move {
-            let response = client.list_dirs(None, true, None).await;
-            let _ = tx.send(PendingInteractionResult::OpenPicker { x, y, response });
+            let (response, repo_search) =
+                tokio::join!(client.list_dirs(None, true, None), client.list_repo_dirs());
+            let _ = tx.send(PendingInteractionResult::OpenPicker {
+                x,
+                y,
+                response,
+                repo_search,
+            });
         });
     }
 
@@ -2480,7 +2602,7 @@ impl<C: TuiApi> App<C> {
                     return None;
                 };
                 let target = picker.group_edit_target.clone()?;
-                let entry = picker.entries.get(index)?;
+                let entry = picker.entry_at(index)?;
                 let path = picker.path_for_entry(index)?;
                 let memberships = entry.groups.clone();
                 let add = match mode {
@@ -2561,7 +2683,7 @@ impl<C: TuiApi> App<C> {
 
         let Some((entry_path, repo_label, reload_path, managed_only)) =
             self.picker.as_ref().and_then(|picker| {
-                let entry = picker.entries.get(index)?;
+                let entry = picker.entry_at(index)?;
                 let actions = picker_entry_actions(entry);
                 let has_action = actions.iter().any(|a| a.kind == kind && a.clickable);
                 if !has_action {
@@ -2601,7 +2723,7 @@ impl<C: TuiApi> App<C> {
         let Some(url) = self
             .picker
             .as_ref()
-            .and_then(|picker| picker.entries.get(index))
+            .and_then(|picker| picker.entry_at(index))
             .and_then(|entry| entry.open_url.clone())
         else {
             self.set_message("no open URL for this entry");
@@ -3189,6 +3311,57 @@ impl<C: TuiApi> App<C> {
         }
     }
 
+    fn mermaid_viewer_state(
+        session_id: String,
+        tmux_name: String,
+        cwd: String,
+        path: Option<String>,
+        source: Option<String>,
+        artifact_error: Option<String>,
+        plan_tabs: Option<Vec<DomainPlanTab>>,
+        disk_only: bool,
+        inline_plan_files: BTreeMap<DomainPlanTab, String>,
+    ) -> MermaidViewerState {
+        MermaidViewerState {
+            session_id,
+            tmux_name,
+            cwd,
+            path,
+            source,
+            artifact_error,
+            render_error: None,
+            unsupported_reason: detect_mermaid_backend_support(),
+            zoom: 1.0,
+            center_x: 0.0,
+            center_y: 0.0,
+            diagram_width: 0.0,
+            diagram_height: 0.0,
+            back_rect: None,
+            content_rect: None,
+            cached_rect: None,
+            cached_zoom: 1.0,
+            cached_center_x: 0.0,
+            cached_center_y: 0.0,
+            cached_lines: Vec::new(),
+            cached_background_cells: Vec::new(),
+            cached_semantic_lines: Vec::new(),
+            focused_source_index: None,
+            focus_status: None,
+            prepared_render: None,
+            source_prepare_count: 0,
+            viewport_render_count: 0,
+            plan_tabs,
+            active_tab: DomainPlanTab::Schema,
+            inline_plan_files,
+            plan_text_content: None,
+            plan_text_lines: Vec::new(),
+            plan_text_scroll: 0,
+            plan_text_cached_width: 0,
+            tab_rects: Vec::new(),
+            disk_only,
+        }
+    }
+
     pub(crate) fn open_mermaid_viewer(&mut self, session_id: String) {
         let Some(session) = self
             .entities
@@ -3211,7 +3384,6 @@ impl<C: TuiApi> App<C> {
             return;
         };
 
-        let unsupported_reason = detect_mermaid_backend_support();
         let plan_tabs = artifact.plan_files.and_then(|files| {
             let mut tabs = vec![DomainPlanTab::Schema];
             for name in &files {
@@ -3227,43 +3399,17 @@ impl<C: TuiApi> App<C> {
                 None
             }
         });
-        self.fish_bowl_mode = FishBowlMode::Mermaid(MermaidViewerState {
-            session_id: session.session_id.clone(),
-            tmux_name: session.tmux_name.clone(),
-            cwd: session.cwd.clone(),
-            path: artifact.path,
-            source: artifact.source,
-            artifact_error: artifact.error,
-            render_error: None,
-            unsupported_reason,
-            zoom: 1.0,
-            center_x: 0.0,
-            center_y: 0.0,
-            diagram_width: 0.0,
-            diagram_height: 0.0,
-            back_rect: None,
-            content_rect: None,
-            cached_rect: None,
-            cached_zoom: 1.0,
-            cached_center_x: 0.0,
-            cached_center_y: 0.0,
-            cached_lines: Vec::new(),
-            cached_background_cells: Vec::new(),
-            cached_semantic_lines: Vec::new(),
-            focused_source_index: None,
-            focus_status: None,
-            prepared_render: None,
-            source_prepare_count: 0,
-            viewport_render_count: 0,
+        self.fish_bowl_mode = FishBowlMode::Mermaid(Self::mermaid_viewer_state(
+            session.session_id.clone(),
+            session.tmux_name.clone(),
+            session.cwd.clone(),
+            artifact.path,
+            artifact.source,
+            artifact.error,
             plan_tabs,
-            active_tab: DomainPlanTab::Schema,
-            plan_text_content: None,
-            plan_text_lines: Vec::new(),
-            plan_text_scroll: 0,
-            plan_text_cached_width: 0,
-            tab_rects: Vec::new(),
-            disk_only: false,
-        });
+            false,
+            BTreeMap::new(),
+        ));
     }
 
     /// Open the Mermaid/plan viewer directly from a `schema.mmd` path on disk.
@@ -3301,44 +3447,40 @@ impl<C: TuiApi> App<C> {
             }
         };
 
-        let unsupported_reason = detect_mermaid_backend_support();
-        self.fish_bowl_mode = FishBowlMode::Mermaid(MermaidViewerState {
+        self.fish_bowl_mode = FishBowlMode::Mermaid(Self::mermaid_viewer_state(
             session_id,
-            tmux_name: slug,
+            slug,
             cwd,
-            path: Some(schema_path),
+            Some(schema_path),
             source,
             artifact_error,
-            render_error: None,
-            unsupported_reason,
-            zoom: 1.0,
-            center_x: 0.0,
-            center_y: 0.0,
-            diagram_width: 0.0,
-            diagram_height: 0.0,
-            back_rect: None,
-            content_rect: None,
-            cached_rect: None,
-            cached_zoom: 1.0,
-            cached_center_x: 0.0,
-            cached_center_y: 0.0,
-            cached_lines: Vec::new(),
-            cached_background_cells: Vec::new(),
-            cached_semantic_lines: Vec::new(),
-            focused_source_index: None,
-            focus_status: None,
-            prepared_render: None,
-            source_prepare_count: 0,
-            viewport_render_count: 0,
             plan_tabs,
-            active_tab: DomainPlanTab::Schema,
-            plan_text_content: None,
-            plan_text_lines: Vec::new(),
-            plan_text_scroll: 0,
-            plan_text_cached_width: 0,
-            tab_rects: Vec::new(),
-            disk_only: true,
-        });
+            true,
+            BTreeMap::new(),
+        ));
+    }
+
+    pub(crate) fn open_skill_atlas_viewer(&mut self, action: SkillPanelAction) {
+        let source = skill_atlas_mermaid_source(self, &action);
+        let plan_text = skill_atlas_plan_text(self, &action);
+        let cwd = self
+            .selected()
+            .map(|entity| entity.session.cwd.clone())
+            .unwrap_or_default();
+        let title = skill_atlas_focus_title(&action);
+        let mut inline_plan_files = BTreeMap::new();
+        inline_plan_files.insert(DomainPlanTab::Plan, plan_text);
+        self.fish_bowl_mode = FishBowlMode::Mermaid(Self::mermaid_viewer_state(
+            format!("skill-atlas::{title}"),
+            format!("skill atlas: {title}"),
+            cwd,
+            skill_atlas_focus_path(&action),
+            Some(source),
+            None,
+            Some(vec![DomainPlanTab::Schema, DomainPlanTab::Plan]),
+            true,
+            inline_plan_files,
+        ));
     }
 
     pub(crate) fn close_mermaid_viewer(&mut self) {
@@ -3369,11 +3511,23 @@ impl<C: TuiApi> App<C> {
         }
 
         if tab != DomainPlanTab::Schema {
-            let (session_id, schema_path, disk_only) = match &self.fish_bowl_mode {
-                FishBowlMode::Mermaid(v) => (v.session_id.clone(), v.path.clone(), v.disk_only),
+            let (session_id, schema_path, disk_only, inline_content) = match &self.fish_bowl_mode {
+                FishBowlMode::Mermaid(v) => (
+                    v.session_id.clone(),
+                    v.path.clone(),
+                    v.disk_only,
+                    v.inline_plan_files.get(&tab).cloned(),
+                ),
                 _ => return,
             };
-            let result = if disk_only {
+            let result = if let Some(content) = inline_content {
+                Ok(PlanFileResponse {
+                    session_id: session_id.clone(),
+                    name: tab.filename().to_string(),
+                    content: Some(content),
+                    error: None,
+                })
+            } else if disk_only {
                 read_plan_file_from_disk(schema_path.as_deref(), tab.filename())
             } else {
                 self.runtime
@@ -3767,14 +3921,24 @@ impl<C: TuiApi> App<C> {
             return;
         }
 
+        if let Some(action) = skill_panel_action_at(self, field, x, y) {
+            self.open_skill_atlas_viewer(action);
+            return;
+        }
+
+        let tank_field = build_skill_panel(self, field).tank_field;
+        if !tank_field.contains(x, y) {
+            return;
+        }
+
         let visible_entities = self.visible_entities();
         let hit = if self.uses_balls_scene(&visible_entities) {
-            balls_theme_hit_test(&visible_entities, field, x, y)
+            balls_theme_hit_test(&visible_entities, tank_field, x, y)
         } else {
             visible_entities
                 .iter()
                 .copied()
-                .find(|entity| entity.screen_rect(field).contains(x, y))
+                .find(|entity| entity.screen_rect(tank_field).contains(x, y))
         }
         .map(|entity| {
             (
@@ -3858,7 +4022,7 @@ impl<C: TuiApi> App<C> {
         let Some((path, has_children, managed_only)) = self.picker.as_ref().and_then(|picker| {
             Some((
                 picker.path_for_entry(index)?,
-                picker.entries.get(index)?.has_children,
+                picker.entry_at(index)?.has_children,
                 picker.managed_only,
             ))
         }) else {
@@ -3967,25 +4131,28 @@ impl<C: TuiApi> App<C> {
     }
 
     fn render_aquarium(&self, renderer: &mut Renderer, field: Rect) {
+        let skill_panel = build_skill_panel(self, field);
+        let tank_field = skill_panel.tank_field;
         let visible_entities = self.visible_entities();
         if visible_entities.is_empty() {
-            self.render_empty_aquarium_message(renderer, field);
+            self.render_empty_aquarium_message(renderer, tank_field);
         }
 
         if self.uses_balls_scene(&visible_entities) {
             render_balls_theme(
                 renderer,
-                field,
+                tank_field,
                 &visible_entities,
                 self.selected_id.as_deref(),
                 &self.repo_themes,
                 self.tick,
             );
         } else {
-            self.render_fish_scene(renderer, field, visible_entities);
+            self.render_fish_scene(renderer, tank_field, visible_entities);
         }
 
-        self.render_api_stale_banner(renderer, field);
+        render_skill_panel(self, renderer, field);
+        self.render_api_stale_banner(renderer, tank_field);
     }
 
     fn render_empty_aquarium_message(&self, renderer: &mut Renderer, field: Rect) {
