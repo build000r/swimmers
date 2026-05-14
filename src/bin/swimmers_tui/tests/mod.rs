@@ -8338,6 +8338,27 @@ fn attention_group_refresh_adds_new_ready_session_when_slot_is_open() {
 }
 
 #[test]
+fn attention_group_refresh_rate_limits_rapid_ready_churn() {
+    let api = MockApi::new();
+    let layout = test_layout(120, 32);
+    let mut app = make_app(api.clone());
+    app.attention_group_session_ids = vec!["sess-visible".to_string()];
+    app.last_attention_group_refresh = Some(Instant::now());
+
+    app.merge_sessions(
+        vec![
+            session_summary("sess-visible", "7", TEST_REPO_SWIMMERS),
+            session_summary("sess-new", "8", TEST_REPO_SWIMMERS),
+        ],
+        layout.overview_field,
+    );
+
+    assert!(app.pending_interaction.is_none());
+    assert!(api.open_attention_group_calls().is_empty());
+    assert_eq!(app.attention_group_session_ids, vec!["sess-visible"]);
+}
+
+#[test]
 fn attention_group_refreshes_without_focus_when_visible_session_clears() {
     let api = MockApi::new();
     let layout = test_layout(120, 32);

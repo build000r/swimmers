@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::ffi::OsString;
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
@@ -27,10 +27,12 @@ const ITERM_OPEN_RETRY_DELAY_MS: u64 = 150;
 const DEFAULT_ITERM_SESSION_NAME: &str = "Swimmers";
 const GHOSTTY_SCRIPT_RELATIVE_PATH: &str = "scripts/ghostty-open.scpt";
 const GHOSTTY_MANAGED_TITLE_PREFIX: &str = "swimmers-preview :: ";
+const GHOSTTY_ATTENTION_MANAGED_TITLE_PREFIX: &str = "swimmers-attention :: ";
 const GHOSTTY_MIN_APPLESCRIPT_VERSION: [u64; 3] = [1, 3, 0];
 const GHOSTTY_MIN_APPLESCRIPT_VERSION_TEXT: &str = "1.3.0";
 const ATTENTION_GROUP_SESSION_ID: &str = "attention-group";
 const ATTENTION_GROUP_TMUX_NAME: &str = "swimmers-attention";
+const ATTENTION_GROUP_PANE_TITLE_PREFIX: &str = "swimmers-attention:";
 // 5s bounds AppleScript hangs while still allowing normal local automation latency.
 const OSASCRIPT_TIMEOUT: Duration = Duration::from_secs(5);
 const OSASCRIPT_ARG_MAX_LEN: usize = 256;
@@ -262,11 +264,14 @@ async fn rebuild_attention_group_tmux_session(
     let first = sessions
         .first()
         .ok_or_else(|| anyhow!("no sessions are waiting for operator input"))?;
-    run_tmux_status(
+    let output = run_tmux_output(
         tmux_path,
         &[
             "new-session",
             "-d",
+            "-P",
+            "-F",
+            "#{pane_id}",
             "-s",
             ATTENTION_GROUP_TMUX_NAME,
             "-n",
@@ -276,24 +281,12 @@ async fn rebuild_attention_group_tmux_session(
     )
     .await
     .map_err(|err| anyhow!("failed to create tmux session {ATTENTION_GROUP_TMUX_NAME}: {err}"))?;
+    if let Some(pane_id) = first_output_line(output.stdout.as_slice())? {
+        set_attention_group_pane_title(tmux_path, &pane_id, &first.session_id).await?;
+    }
 
     for session in sessions.iter().skip(1) {
-        run_tmux_status(
-            tmux_path,
-            &[
-                "split-window",
-                "-t",
-                &pane_target,
-                &build_attention_group_attach_command(&session.tmux_name, tmux_path),
-            ],
-        )
-        .await
-        .map_err(|err| {
-            anyhow!(
-                "failed to add {} to attention group: {err}",
-                session.tmux_name
-            )
-        })?;
+        split_attention_group_pane(tmux_path, &pane_target, session).await?;
         tile_attention_group_tmux_session(tmux_path, &pane_target).await?;
     }
 
@@ -306,75 +299,208 @@ async fn replace_attention_group_tmux_panes(
     sessions: &[SessionSummary],
 ) -> Result<()> {
     let pane_target = attention_group_pane_target();
-    let pane_ids = list_attention_group_pane_ids(tmux_path, &pane_target).await?;
-    let first_pane = pane_ids
-        .first()
-        .ok_or_else(|| anyhow!("attention group has no panes"))?;
-    let first_session = sessions
-        .first()
-        .ok_or_else(|| anyhow!("no sessions are waiting for operator input"))?;
+    let panes = list_attention_group_panes(tmux_path, &pane_target).await?;
+    let desired = sessions
+        .iter()
+        .map(|session| {
+            (
+                session,
+                build_attention_group_attach_command(&session.tmux_name, tmux_path),
+            )
+        })
+        .collect::<Vec<_>>();
 
+    if panes.len() == desired.len()
+        && panes
+            .iter()
+            .zip(desired.iter())
+            .all(|(pane, (_, command))| pane.start_command == *command)
+    {
+        return Ok(());
+    }
+
+    let mut available = panes;
+    let mut missing = Vec::new();
+    for (session, command) in desired {
+        if let Some(index) = available
+            .iter()
+            .position(|pane| pane.start_command == command)
+        {
+            available.remove(index);
+        } else {
+            missing.push(session);
+        }
+    }
+
+    let mut stale_panes = VecDeque::from(available);
+    let mut changed = false;
+    for session in missing {
+        if let Some(pane) = stale_panes.pop_front() {
+            respawn_attention_group_pane(tmux_path, &pane.pane_id, session).await?;
+        } else {
+            split_attention_group_pane(tmux_path, &pane_target, session).await?;
+        }
+        changed = true;
+    }
+
+    for pane in stale_panes {
+        run_tmux_status(tmux_path, &["kill-pane", "-t", &pane.pane_id])
+            .await
+            .map_err(|err| anyhow!("failed to clear stale attention group pane: {err}"))?;
+        changed = true;
+    }
+
+    if changed {
+        tile_attention_group_tmux_session(tmux_path, &pane_target).await?;
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone)]
+struct AttentionGroupPane {
+    pane_id: String,
+    start_command: String,
+}
+
+async fn list_attention_group_panes(
+    tmux_path: &Path,
+    pane_target: &str,
+) -> Result<Vec<AttentionGroupPane>> {
+    let output = run_tmux_output(
+        tmux_path,
+        &[
+            "list-panes",
+            "-t",
+            pane_target,
+            "-F",
+            "#{pane_id}\t#{pane_start_command}",
+        ],
+    )
+    .await?;
+    let stdout = String::from_utf8(output.stdout)
+        .map_err(|err| anyhow!("tmux list-panes returned non-UTF-8 output: {err}"))?;
+    let panes = stdout
+        .lines()
+        .filter_map(parse_attention_group_pane_line)
+        .collect::<Vec<_>>();
+    if panes.is_empty() {
+        return Err(anyhow!("attention group has no panes"));
+    }
+    Ok(panes)
+}
+
+fn parse_attention_group_pane_line(line: &str) -> Option<AttentionGroupPane> {
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let (pane_id, start_command) = trimmed
+        .split_once('\t')
+        .map(|(pane_id, command)| (pane_id.trim(), command.trim()))
+        .unwrap_or((trimmed, ""));
+    if pane_id.is_empty() {
+        return None;
+    }
+    Some(AttentionGroupPane {
+        pane_id: pane_id.to_string(),
+        start_command: start_command.to_string(),
+    })
+}
+
+async fn respawn_attention_group_pane(
+    tmux_path: &Path,
+    pane_id: &str,
+    session: &SessionSummary,
+) -> Result<()> {
     run_tmux_status(
         tmux_path,
         &[
             "respawn-pane",
             "-k",
             "-t",
-            first_pane,
-            &build_attention_group_attach_command(&first_session.tmux_name, tmux_path),
+            pane_id,
+            &build_attention_group_attach_command(&session.tmux_name, tmux_path),
         ],
     )
     .await
-    .map_err(|err| anyhow!("failed to refresh first attention group pane: {err}"))?;
-
-    for pane_id in pane_ids.iter().skip(1) {
-        run_tmux_status(tmux_path, &["kill-pane", "-t", pane_id])
-            .await
-            .map_err(|err| anyhow!("failed to clear stale attention group pane: {err}"))?;
-    }
-
-    for session in sessions.iter().skip(1) {
-        run_tmux_status(
-            tmux_path,
-            &[
-                "split-window",
-                "-t",
-                &pane_target,
-                &build_attention_group_attach_command(&session.tmux_name, tmux_path),
-            ],
+    .map_err(|err| {
+        anyhow!(
+            "failed to refresh attention group pane for {}: {err}",
+            session.tmux_name
         )
-        .await
-        .map_err(|err| {
-            anyhow!(
-                "failed to add {} to attention group: {err}",
-                session.tmux_name
-            )
-        })?;
-        tile_attention_group_tmux_session(tmux_path, &pane_target).await?;
-    }
+    })?;
+    set_attention_group_pane_title(tmux_path, pane_id, &session.session_id).await
+}
 
-    tile_attention_group_tmux_session(tmux_path, &pane_target).await?;
+async fn split_attention_group_pane(
+    tmux_path: &Path,
+    pane_target: &str,
+    session: &SessionSummary,
+) -> Result<()> {
+    let output = run_tmux_output(
+        tmux_path,
+        &[
+            "split-window",
+            "-t",
+            pane_target,
+            "-P",
+            "-F",
+            "#{pane_id}",
+            &build_attention_group_attach_command(&session.tmux_name, tmux_path),
+        ],
+    )
+    .await
+    .map_err(|err| {
+        anyhow!(
+            "failed to add {} to attention group: {err}",
+            session.tmux_name
+        )
+    })?;
+    if let Some(pane_id) = first_output_line(output.stdout.as_slice())? {
+        set_attention_group_pane_title(tmux_path, &pane_id, &session.session_id).await?;
+    }
     Ok(())
 }
 
-async fn list_attention_group_pane_ids(tmux_path: &Path, pane_target: &str) -> Result<Vec<String>> {
-    let output = run_tmux_output(
+async fn set_attention_group_pane_title(
+    tmux_path: &Path,
+    pane_id: &str,
+    session_id: &str,
+) -> Result<()> {
+    run_tmux_status(
         tmux_path,
-        &["list-panes", "-t", pane_target, "-F", "#{pane_id}"],
+        &[
+            "select-pane",
+            "-t",
+            pane_id,
+            "-T",
+            &attention_group_pane_title(session_id),
+        ],
     )
-    .await?;
-    let stdout = String::from_utf8(output.stdout)
-        .map_err(|err| anyhow!("tmux list-panes returned non-UTF-8 output: {err}"))?;
-    let pane_ids = stdout
+    .await
+    .map_err(|err| anyhow!("failed to label attention group pane {pane_id}: {err}"))
+}
+
+fn first_output_line(stdout: &[u8]) -> Result<Option<String>> {
+    let stdout = String::from_utf8(stdout.to_vec())
+        .map_err(|err| anyhow!("tmux returned non-UTF-8 output: {err}"))?;
+    Ok(stdout
         .lines()
         .map(str::trim)
-        .filter(|pane_id| !pane_id.is_empty())
-        .map(ToOwned::to_owned)
-        .collect::<Vec<_>>();
-    if pane_ids.is_empty() {
-        return Err(anyhow!("attention group has no panes"));
-    }
-    Ok(pane_ids)
+        .find(|line| !line.is_empty())
+        .map(ToOwned::to_owned))
+}
+
+fn attention_group_pane_title(session_id: &str) -> String {
+    let sanitized = sanitize_tmux_pane_title(session_id);
+    format!("{ATTENTION_GROUP_PANE_TITLE_PREFIX}{sanitized}")
+}
+
+fn sanitize_tmux_pane_title(value: &str) -> String {
+    value
+        .chars()
+        .filter(|ch| !matches!(ch, '\0' | '\n' | '\r' | '\t'))
+        .collect()
 }
 
 async fn tile_attention_group_tmux_session(tmux_path: &Path, pane_target: &str) -> Result<()> {
@@ -475,7 +601,11 @@ async fn open_or_focus_ghostty_session(
     let resolved_cwd = tmux_cwd.as_deref().unwrap_or(cwd);
     let display_name = build_ghostty_display_name(resolved_cwd, tmux_name);
     let active_tab_id = query_front_ghostty_tab_id().await.unwrap_or(None);
-    let known_preview_id = cached_ghostty_preview_term_id(active_tab_id.as_deref());
+    let known_preview_id = if mode == GhosttyOpenMode::Swap {
+        cached_ghostty_preview_term_id(active_tab_id.as_deref())
+    } else {
+        None
+    };
 
     let result = run_ghostty_open_script(
         &script,
@@ -1127,6 +1257,7 @@ async fn run_ghostty_open_script(
     let safe_session_id = sanitize_osascript_text_arg(session_id);
     let safe_cwd = sanitize_osascript_text_arg(cwd);
     let safe_display_name = sanitize_osascript_text_arg(display_name);
+    let managed_title_prefix = ghostty_managed_title_prefix(session_id);
     let mut command = Command::new("osascript");
     command
         .arg(script)
@@ -1135,7 +1266,7 @@ async fn run_ghostty_open_script(
         .arg(&safe_cwd)
         .arg(attach_command)
         .arg(&safe_display_name)
-        .arg(GHOSTTY_MANAGED_TITLE_PREFIX)
+        .arg(managed_title_prefix)
         .arg(mode.label());
     if let Some(term_id) = known_preview_id.filter(|value| !value.is_empty()) {
         command.arg(term_id);
@@ -1157,6 +1288,14 @@ async fn run_ghostty_open_script(
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     parse_osascript_output(stdout.trim(), session_id)
+}
+
+fn ghostty_managed_title_prefix(session_id: &str) -> &'static str {
+    if session_id == ATTENTION_GROUP_SESSION_ID {
+        GHOSTTY_ATTENTION_MANAGED_TITLE_PREFIX
+    } else {
+        GHOSTTY_MANAGED_TITLE_PREFIX
+    }
 }
 
 fn parse_osascript_output(stdout: &str, session_id: &str) -> Result<NativeDesktopOpenResponse> {
@@ -1515,11 +1654,15 @@ mod tests {
         let temp = tempdir().unwrap();
         let fake_tmux = temp.path().join("tmux");
         let log_path = temp.path().join("tmux.log");
+        let first_command = build_attention_group_attach_command("new one", &fake_tmux);
+        let second_command = build_attention_group_attach_command("next one", &fake_tmux);
         std::fs::write(
             &fake_tmux,
             format!(
-                "#!/bin/sh\nset -eu\nfirst=1\nfor arg in \"$@\"; do\n  if [ \"$first\" -eq 1 ]; then\n    printf '%s' \"$arg\" >> \"{log}\"\n    first=0\n  else\n    printf '\\t%s' \"$arg\" >> \"{log}\"\n  fi\ndone\nprintf '\\n' >> \"{log}\"\ncase \"${{1-}}\" in\n  has-session)\n    exit 0\n    ;;\n  list-panes)\n    printf '%%1\\n%%2\\n'\n    exit 0\n    ;;\n  *)\n    exit 0\n    ;;\nesac\n",
-                log = log_path.display()
+                "#!/bin/sh\nset -eu\nfirst=1\nfor arg in \"$@\"; do\n  if [ \"$first\" -eq 1 ]; then\n    printf '%s' \"$arg\" >> \"{log}\"\n    first=0\n  else\n    printf '\\t%s' \"$arg\" >> \"{log}\"\n  fi\ndone\nprintf '\\n' >> \"{log}\"\ncase \"${{1-}}\" in\n  has-session)\n    exit 0\n    ;;\n  list-panes)\n    case \"$*\" in\n      *pane_start_command*)\n        printf '%%1\\t%s\\n%%2\\t%s\\n' \"{first_command}\" \"{second_command}\"\n        ;;\n      *)\n        printf '%%1\\n%%2\\n'\n        ;;\n    esac\n    exit 0\n    ;;\n  *)\n    exit 0\n    ;;\nesac\n",
+                log = log_path.display(),
+                first_command = first_command,
+                second_command = second_command
             ),
         )
         .unwrap();
@@ -1558,12 +1701,114 @@ mod tests {
             "no-focus refresh must not kill the attached attention tmux session: {log}"
         );
         assert!(log.contains("has-session\t-t\t=swimmers-attention"));
-        assert!(log.contains("list-panes\t-t\t=swimmers-attention:\t-F\t#{pane_id}"));
+        assert!(
+            !log.contains("respawn-pane\t-k"),
+            "unchanged no-focus refresh must not respawn already-correct panes: {log}"
+        );
+        assert!(
+            !log.contains("kill-pane"),
+            "unchanged no-focus refresh must not close already-correct panes: {log}"
+        );
+        assert!(
+            !log.contains("split-window"),
+            "unchanged no-focus refresh must not create duplicate panes: {log}"
+        );
+        assert!(
+            !log.contains("select-layout"),
+            "unchanged no-focus refresh must not retile unchanged panes: {log}"
+        );
+        assert!(log.contains(
+            "list-panes\t-t\t=swimmers-attention:\t-F\t#{pane_id}\t#{pane_start_command}"
+        ));
+    }
+
+    #[tokio::test]
+    async fn no_focus_attention_group_refresh_replaces_only_one_stale_pane() {
+        let _env_guard = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+
+        let temp = tempdir().unwrap();
+        let fake_tmux = temp.path().join("tmux");
+        let log_path = temp.path().join("tmux.log");
+        let old_command = build_attention_group_attach_command("old one", &fake_tmux);
+        let keep_1 = build_attention_group_attach_command("keep 1", &fake_tmux);
+        let keep_2 = build_attention_group_attach_command("keep 2", &fake_tmux);
+        let keep_3 = build_attention_group_attach_command("keep 3", &fake_tmux);
+        let keep_4 = build_attention_group_attach_command("keep 4", &fake_tmux);
+        let keep_5 = build_attention_group_attach_command("keep 5", &fake_tmux);
+        std::fs::write(
+            &fake_tmux,
+            format!(
+                "#!/bin/sh\nset -eu\nfirst=1\nfor arg in \"$@\"; do\n  if [ \"$first\" -eq 1 ]; then\n    printf '%s' \"$arg\" >> \"{log}\"\n    first=0\n  else\n    printf '\\t%s' \"$arg\" >> \"{log}\"\n  fi\ndone\nprintf '\\n' >> \"{log}\"\ncase \"${{1-}}\" in\n  has-session)\n    exit 0\n    ;;\n  list-panes)\n    printf '%%1\\t%s\\n%%2\\t%s\\n%%3\\t%s\\n%%4\\t%s\\n%%5\\t%s\\n%%6\\t%s\\n' \"{old}\" \"{keep_1}\" \"{keep_2}\" \"{keep_3}\" \"{keep_4}\" \"{keep_5}\"\n    exit 0\n    ;;\n  *)\n    exit 0\n    ;;\nesac\n",
+                log = log_path.display(),
+                old = old_command,
+                keep_1 = keep_1,
+                keep_2 = keep_2,
+                keep_3 = keep_3,
+                keep_4 = keep_4,
+                keep_5 = keep_5
+            ),
+        )
+        .unwrap();
+        let mut perms = std::fs::metadata(&fake_tmux).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&fake_tmux, perms).unwrap();
+
+        let original_tmux = std::env::var_os(TMUX_BIN_ENV);
+        std::env::set_var(TMUX_BIN_ENV, &fake_tmux);
+        let sessions = vec![
+            attention_group_summary("sess-keep-1", "keep 1"),
+            attention_group_summary("sess-keep-2", "keep 2"),
+            attention_group_summary("sess-keep-3", "keep 3"),
+            attention_group_summary("sess-keep-4", "keep 4"),
+            attention_group_summary("sess-keep-5", "keep 5"),
+            attention_group_summary("sess-new", "new one"),
+        ];
+
+        let response = open_native_attention_group(
+            NativeDesktopApp::Iterm,
+            GhosttyOpenMode::Swap,
+            &sessions,
+            false,
+        )
+        .await
+        .unwrap();
+
+        match original_tmux {
+            Some(value) => std::env::set_var(TMUX_BIN_ENV, value),
+            None => std::env::remove_var(TMUX_BIN_ENV),
+        }
+
+        assert_eq!(response.status, "refreshed");
+        assert_eq!(response.session_ids.len(), 6);
+
+        let log = std::fs::read_to_string(&log_path).unwrap();
+        assert!(
+            !log.lines().any(|line| line.starts_with("kill-session")),
+            "one-in-one-out refresh must preserve the attention tmux session: {log}"
+        );
+        assert_eq!(
+            log.matches("respawn-pane\t-k").count(),
+            1,
+            "one-in-one-out refresh should respawn exactly one stale pane: {log}"
+        );
         assert!(log.contains("respawn-pane\t-k\t-t\t%1\texec env TMUX="));
         assert!(log.contains("attach-session -t '=new one'"));
-        assert!(log.contains("kill-pane\t-t\t%2"));
-        assert!(log.contains("split-window\t-t\t=swimmers-attention:"));
-        assert!(log.contains("attach-session -t '=next one'"));
+        assert!(
+            !log.contains("kill-pane"),
+            "one-in-one-out refresh must not close preserved panes: {log}"
+        );
+        assert!(
+            !log.contains("split-window"),
+            "full one-in-one-out refresh must not create extra panes: {log}"
+        );
+        assert_eq!(
+            log.matches("select-layout\t-t\t=swimmers-attention:\ttiled")
+                .count(),
+            1,
+            "changed refresh should retile once: {log}"
+        );
     }
 
     #[tokio::test]
@@ -1606,7 +1851,7 @@ mod tests {
         }
 
         assert!(
-            format!("{err:#}").contains("failed to refresh first attention group pane"),
+            format!("{err:#}").contains("failed to refresh attention group pane for new one"),
             "unexpected error: {err:#}"
         );
         let log = std::fs::read_to_string(&log_path).unwrap();
@@ -1625,15 +1870,20 @@ mod tests {
         let _env_guard = crate::test_support::ENV_LOCK
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
+        clear_ghostty_preview_term_cache();
 
         let temp = tempdir().unwrap();
         let fake_tmux = temp.path().join("tmux");
         let tmux_log_path = temp.path().join("tmux.log");
+        let first_command = build_attention_group_attach_command("new one", &fake_tmux);
+        let second_command = build_attention_group_attach_command("next one", &fake_tmux);
         std::fs::write(
             &fake_tmux,
             format!(
-                "#!/bin/sh\nset -eu\nfirst=1\nfor arg in \"$@\"; do\n  if [ \"$first\" -eq 1 ]; then\n    printf '%s' \"$arg\" >> \"{log}\"\n    first=0\n  else\n    printf '\\t%s' \"$arg\" >> \"{log}\"\n  fi\ndone\nprintf '\\n' >> \"{log}\"\ncase \"${{1-}}\" in\n  has-session)\n    exit 0\n    ;;\n  list-panes)\n    printf '%%1\\n%%2\\n'\n    exit 0\n    ;;\n  display-message)\n    printf '%%14\\t/tmp/swimmers\\n'\n    exit 0\n    ;;\n  *)\n    exit 0\n    ;;\nesac\n",
-                log = tmux_log_path.display()
+                "#!/bin/sh\nset -eu\nfirst=1\nfor arg in \"$@\"; do\n  if [ \"$first\" -eq 1 ]; then\n    printf '%s' \"$arg\" >> \"{log}\"\n    first=0\n  else\n    printf '\\t%s' \"$arg\" >> \"{log}\"\n  fi\ndone\nprintf '\\n' >> \"{log}\"\ncase \"${{1-}}\" in\n  has-session)\n    exit 0\n    ;;\n  list-panes)\n    case \"$*\" in\n      *pane_start_command*)\n        printf '%%1\\t%s\\n%%2\\t%s\\n' \"{first_command}\" \"{second_command}\"\n        ;;\n      *)\n        printf '%%1\\n%%2\\n'\n        ;;\n    esac\n    exit 0\n    ;;\n  display-message)\n    printf '%%14\\t/tmp/swimmers\\n'\n    exit 0\n    ;;\n  *)\n    exit 0\n    ;;\nesac\n",
+                log = tmux_log_path.display(),
+                first_command = first_command,
+                second_command = second_command
             ),
         )
         .unwrap();
@@ -1664,6 +1914,7 @@ mod tests {
             std::env::join_paths([fake_osascript_dir.as_path()]).unwrap(),
         );
         std::env::set_var(TMUX_BIN_ENV, &fake_tmux);
+        remember_ghostty_preview_term_id(Some("ghostty-tab-main"), Some("generic-preview-pane"));
 
         let sessions = vec![
             attention_group_summary("sess-new", "new one"),
@@ -1686,6 +1937,7 @@ mod tests {
             Some(value) => std::env::set_var(TMUX_BIN_ENV, value),
             None => std::env::remove_var(TMUX_BIN_ENV),
         }
+        clear_ghostty_preview_term_cache();
 
         assert_eq!(response.status, "focused");
         assert!(response.focused);
@@ -1699,8 +1951,14 @@ mod tests {
             "focused refresh must preserve the managed attention tmux session: {tmux_log}"
         );
         assert!(tmux_log.contains("has-session\t-t\t=swimmers-attention"));
-        assert!(tmux_log.contains("respawn-pane\t-k\t-t\t%1\texec env TMUX="));
-        assert!(tmux_log.contains("kill-pane\t-t\t%2"));
+        assert!(
+            !tmux_log.contains("respawn-pane\t-k"),
+            "focused open must not respawn already-correct attention panes: {tmux_log}"
+        );
+        assert!(
+            !tmux_log.contains("kill-pane"),
+            "focused open must not close already-correct attention panes: {tmux_log}"
+        );
 
         let osa_log = std::fs::read_to_string(&osa_log_path).unwrap();
         let call = osa_log
@@ -1711,6 +1969,16 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(call[1], ATTENTION_GROUP_SESSION_ID);
         assert_eq!(call[2], ATTENTION_GROUP_TMUX_NAME);
+        assert_eq!(
+            call.len(),
+            8,
+            "attention window open must not pass a generic preview cached terminal id"
+        );
+        assert!(
+            call[6].starts_with("swimmers-attention :: "),
+            "attention windows must use a dedicated Ghostty title namespace, got {:?}",
+            call[6]
+        );
         assert_eq!(call[7], GhosttyOpenMode::Window.label());
     }
 
@@ -1754,6 +2022,11 @@ mod tests {
     fn ghostty_swap_script_replaces_managed_preview_in_place() {
         let script = std::fs::read_to_string(script_path_for_app(NativeDesktopApp::Ghostty))
             .expect("ghostty script should be present");
+        let focus_block = script
+            .split("on focusManagedWindowTerminal")
+            .nth(1)
+            .and_then(|tail| tail.split("end focusManagedWindowTerminal").next())
+            .expect("managed window focus handler should be present");
 
         assert!(script.contains("on managedTerminals(targetTab, managedTitlePrefix)"));
         assert!(script.contains("on closeManagedTerminals(targetTerms)"));
@@ -1767,12 +2040,19 @@ mod tests {
         assert!(
             script.contains("on managedTerminalAcrossWindows(knownManagedId, managedTitlePrefix)")
         );
+        assert!(script.contains(
+            "if (id of candidateTerm as text) is knownManagedId and termTitle starts with managedTitlePrefix then return candidateTerm"
+        ));
         assert!(script.contains("if openMode is \"window\" then"));
         assert!(script
             .contains("set newTerm to my createManagedWindow(cfg, managedTitle, attachCommand)"));
         assert!(script.contains(
             "set newTerm to my replacePreviewSplit(managedTerm, cfg, managedTitle, attachCommand)"
         ));
+        assert!(
+            !focus_block.contains("sendAttachCommand"),
+            "focusing an existing managed attention window must not send a duplicate tmux attach command"
+        );
         assert_eq!(script.match_indices("my resizePreview(").count(), 1);
     }
 
