@@ -359,12 +359,14 @@ impl NativeDesktopApp {
 pub enum GhosttyOpenMode {
     Swap,
     Add,
+    Window,
 }
 
 impl GhosttyOpenMode {
     pub fn from_env_value(value: &str) -> Self {
         match value.trim().to_ascii_lowercase().as_str() {
             "add" | "split" | "new" => Self::Add,
+            "window" | "new-window" => Self::Window,
             _ => Self::Swap,
         }
     }
@@ -373,6 +375,7 @@ impl GhosttyOpenMode {
         match self {
             Self::Swap => "swap",
             Self::Add => "add",
+            Self::Window => "window",
         }
     }
 
@@ -383,6 +386,7 @@ impl GhosttyOpenMode {
         match self {
             Self::Swap => "swap",
             Self::Add => "new split",
+            Self::Window => "new window",
         }
     }
 
@@ -391,7 +395,8 @@ impl GhosttyOpenMode {
     pub fn toggle(self) -> Self {
         match self {
             Self::Swap => Self::Add,
-            Self::Add => Self::Swap,
+            Self::Add => Self::Window,
+            Self::Window => Self::Swap,
         }
     }
 }

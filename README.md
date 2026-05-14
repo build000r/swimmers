@@ -217,6 +217,7 @@ swimmers
 | `AUTH_TOKEN` | `(unset)` | Bearer token when `AUTH_MODE=token` |
 | `OBSERVER_TOKEN` | `(unset)` | Read-only bearer token for token-auth deployments |
 | `SWIMMERS_NATIVE_APP` | `iterm` | Native desktop target: `iterm` or `ghostty` |
+| `SWIMMERS_GHOSTTY_MODE` | `swap` | Ghostty single-session placement: `swap`, `add`, or `window` |
 | `SWIMMERS_THOUGHT_BACKEND` | `daemon` | Thought subsystem backend: `daemon` or `inproc` |
 | `CLAWGS_BIN` | `(auto)` | Override path to the `clawgs` binary used by the thought rail |
 | `SWIMMERS_REPLAY_BUFFER_SIZE` | `524288` | Replay ring size in bytes (default 512 KB) |
@@ -226,11 +227,11 @@ swimmers
 | `SWIMMERS_VOICE_MODEL` | `(unset)` | Path to a local Whisper `.bin` model used by the experimental `voice` feature. |
 | `SWIMMERS_VOICE_LANGUAGE` | `auto` | Optional language hint for the experimental `voice` feature (`en`, `fr`, `auto`, etc.). |
 
-When `SWIMMERS_NATIVE_APP=ghostty`, the API uses Ghostty's AppleScript support to create or replace a left-side preview split for the selected tmux session. This path requires Ghostty 1.3.0+ on macOS with automation access enabled.
+When `SWIMMERS_NATIVE_APP=ghostty`, the API uses Ghostty's AppleScript support to place selected tmux sessions according to `SWIMMERS_GHOSTTY_MODE`; managed attention groups always use their own Ghostty window so they remain visible without clicking a hidden split. This path requires Ghostty 1.3.0+ on macOS with automation access enabled.
 
 While the TUI is running, press `n` or click the top-right native-open label to switch between `iTerm` and `Ghostty` without restarting the API.
 
-Click `[attention group]` in the TUI header to build a managed `swimmers-attention` tmux session from local sessions that are ready for operator input. The group prefers related project work over raw recency, then refreshes in place as visible panes stop waiting.
+Click `[attention group]` in the TUI header to build a managed `swimmers-attention` tmux session from local sessions that are ready for operator input. When Ghostty is the native target, Swimmers also opens the attention group automatically in its own managed Ghostty window as ready sessions appear. The group prefers related project work over raw recency, preserves the managed tmux session, and refreshes up to six panes in place as visible panes stop waiting or new ready panes can fit.
 
 The optional browser terminal renderer also honors `SWIMMERS_FRANKENTUI_PKG_DIR` (or `FRANKENTUI_PKG_DIR`) to override the auto-detected `frankentui/pkg` asset path.
 

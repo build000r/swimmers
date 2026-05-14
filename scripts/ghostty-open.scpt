@@ -86,6 +86,55 @@ on closeManagedTerminals(targetTerms)
 	end tell
 end closeManagedTerminals
 
+on managedTerminalAcrossWindows(knownManagedId, managedTitlePrefix)
+	tell application "Ghostty"
+		if knownManagedId is not "" then
+			repeat with candidateWindow in windows
+				repeat with candidateTab in tabs of candidateWindow
+					repeat with candidateTerm in terminals of candidateTab
+						try
+							if (id of candidateTerm as text) is knownManagedId then return candidateTerm
+						end try
+					end repeat
+				end repeat
+			end repeat
+		end if
+
+		repeat with candidateWindow in windows
+			repeat with candidateTab in tabs of candidateWindow
+				repeat with candidateTerm in terminals of candidateTab
+					try
+						set termTitle to name of candidateTerm
+						if termTitle starts with managedTitlePrefix then return candidateTerm
+					end try
+				end repeat
+			end repeat
+		end repeat
+	end tell
+
+	return missing value
+end managedTerminalAcrossWindows
+
+on createManagedWindow(cfg, managedTitle, attachCommand)
+	tell application "Ghostty"
+		set targetWindow to new window with configuration cfg
+		set targetTab to selected tab of targetWindow
+		set newTerm to focused terminal of targetTab
+	end tell
+
+	my labelManagedTerminal(newTerm, managedTitle)
+	my sendAttachCommand(newTerm, attachCommand)
+	tell application "Ghostty" to focus newTerm
+	return newTerm
+end createManagedWindow
+
+on focusManagedWindowTerminal(managedTerm, managedTitle, attachCommand)
+	my labelManagedTerminal(managedTerm, managedTitle)
+	my sendAttachCommand(managedTerm, attachCommand)
+	tell application "Ghostty" to focus managedTerm
+	return managedTerm
+end focusManagedWindowTerminal
+
 on anchorTerminalFor(targetTab, excludedIds)
 	tell application "Ghostty"
 		try
@@ -150,6 +199,16 @@ on run argv
 
 		set cfg to new surface configuration
 		if targetCwd is not "" then set initial working directory of cfg to targetCwd
+
+		if openMode is "window" then
+			set managedTerm to my managedTerminalAcrossWindows(knownManagedId, managedTitlePrefix)
+			if managedTerm is missing value then
+				set newTerm to my createManagedWindow(cfg, managedTitle, attachCommand)
+				return "created|" & (id of newTerm as text)
+			end if
+			set newTerm to my focusManagedWindowTerminal(managedTerm, managedTitle, attachCommand)
+			return "focused|" & (id of newTerm as text)
+		end if
 
 		if (count of windows) = 0 then
 			set targetWindow to new window with configuration cfg

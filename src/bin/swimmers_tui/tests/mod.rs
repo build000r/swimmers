@@ -8257,6 +8257,87 @@ fn clicking_attention_group_label_opens_managed_group() {
 }
 
 #[test]
+fn ghostty_auto_opens_attention_group_when_ready_sessions_appear() {
+    let api = MockApi::new();
+    let layout = test_layout(120, 32);
+    let mut app = make_app(api.clone());
+    app.native_status = Some(NativeDesktopStatusResponse {
+        supported: true,
+        platform: Some("macos".to_string()),
+        app_id: Some(NativeDesktopApp::Ghostty),
+        ghostty_mode: Some(GhosttyOpenMode::Swap),
+        app: Some("Ghostty".to_string()),
+        reason: None,
+    });
+    api.push_open_attention_group(Ok(NativeAttentionGroupOpenResponse {
+        session_id: "attention-group".to_string(),
+        tmux_name: "swimmers-attention".to_string(),
+        session_count: 1,
+        session_ids: vec!["sess-ready".to_string()],
+        backlog_session_ids: Vec::new(),
+        status: "created".to_string(),
+        focused: true,
+        pane_id: Some("pane-attention".to_string()),
+    }));
+
+    app.merge_sessions(
+        vec![session_summary("sess-ready", "7", TEST_REPO_SWIMMERS)],
+        layout.overview_field,
+    );
+
+    assert!(app.pending_interaction.is_some());
+    poll_until_interaction(&mut app);
+    assert_eq!(
+        api.open_attention_group_calls(),
+        vec![(6, Vec::<String>::new(), true)]
+    );
+    assert_eq!(app.attention_group_session_ids, vec!["sess-ready"]);
+    assert_eq!(
+        app.message.as_ref().map(|(message, _)| message.as_str()),
+        Some("created attention group: 1 sessions")
+    );
+}
+
+#[test]
+fn attention_group_refresh_adds_new_ready_session_when_slot_is_open() {
+    let api = MockApi::new();
+    let layout = test_layout(120, 32);
+    let mut app = make_app(api.clone());
+    app.attention_group_session_ids = vec!["sess-visible".to_string()];
+    app.last_attention_group_refresh =
+        Some(Instant::now() - Duration::from_secs(2) - Duration::from_millis(1));
+    api.push_open_attention_group(Ok(NativeAttentionGroupOpenResponse {
+        session_id: "attention-group".to_string(),
+        tmux_name: "swimmers-attention".to_string(),
+        session_count: 2,
+        session_ids: vec!["sess-visible".to_string(), "sess-new".to_string()],
+        backlog_session_ids: Vec::new(),
+        status: "refreshed".to_string(),
+        focused: false,
+        pane_id: None,
+    }));
+
+    app.merge_sessions(
+        vec![
+            session_summary("sess-visible", "7", TEST_REPO_SWIMMERS),
+            session_summary("sess-new", "8", TEST_REPO_SWIMMERS),
+        ],
+        layout.overview_field,
+    );
+
+    assert!(app.pending_interaction.is_some());
+    poll_until_interaction(&mut app);
+    assert_eq!(
+        api.open_attention_group_calls(),
+        vec![(6, vec!["sess-visible".to_string()], false)]
+    );
+    assert_eq!(
+        app.attention_group_session_ids,
+        vec!["sess-visible".to_string(), "sess-new".to_string()]
+    );
+}
+
+#[test]
 fn attention_group_refreshes_without_focus_when_visible_session_clears() {
     let api = MockApi::new();
     let layout = test_layout(120, 32);

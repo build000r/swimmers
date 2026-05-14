@@ -8,6 +8,8 @@ const COLLISION_THROTTLE_ENTITY_THRESHOLD: usize = 50;
 const COLLISION_THROTTLE_PAIR_BUDGET: usize = 24;
 const API_FAILURE_BANNER_THRESHOLD: u8 = 3;
 const API_STALE_BANNER_TEXT: &str = "API disconnected - showing stale data";
+const ATTENTION_GROUP_SESSION_ID: &str = "attention-group";
+const ATTENTION_GROUP_TMUX_NAME: &str = "swimmers-attention";
 const ATTENTION_GROUP_LABEL: &str = "[attention group]";
 const ATTENTION_GROUP_MAX_SESSIONS: usize = 6;
 const ATTENTION_GROUP_REFRESH_INTERVAL: Duration = Duration::from_secs(2);
@@ -15,6 +17,13 @@ const ATTENTION_GROUP_REFRESH_INTERVAL: Duration = Duration::from_secs(2);
 fn sprite_theme_option_width(theme: Option<SpriteTheme>) -> u16 {
     let label = format!("[{}]", SpriteTheme::override_label(theme));
     display_width(&label)
+}
+
+fn attention_group_session_is_eligible(session: &SessionSummary) -> bool {
+    session.session_id != ATTENTION_GROUP_SESSION_ID
+        && session.tmux_name != ATTENTION_GROUP_TMUX_NAME
+        && swimmers::api::remote_sessions::split_remote_session_id(&session.session_id).is_none()
+        && session_ready_for_operator_group_input(session)
 }
 
 pub(crate) struct RefreshResult {
@@ -699,9 +708,7 @@ impl<C: TuiApi> App<C> {
         if show_progress {
             self.set_message("opening attention group...");
         }
-        if !focus {
-            self.last_attention_group_refresh = Some(Instant::now());
-        }
+        self.last_attention_group_refresh = Some(Instant::now());
         self.runtime.spawn(async move {
             let response = client
                 .open_attention_group(ATTENTION_GROUP_MAX_SESSIONS, current_session_ids, focus)
@@ -1705,9 +1712,7 @@ impl<C: TuiApi> App<C> {
     }
 
     fn maybe_refresh_attention_group(&mut self) {
-        if self.attention_group_session_ids.is_empty()
-            || !self.attention_group_refresh_armed
-            || self.initial_request.is_some()
+        if self.initial_request.is_some()
             || self.pending_interaction.is_some()
             || self
                 .last_attention_group_refresh
@@ -1717,21 +1722,46 @@ impl<C: TuiApi> App<C> {
             return;
         }
 
-        let sessions_by_id = self
-            .entities
+        let ready_ids = self.ready_attention_group_session_ids();
+        if self.attention_group_session_ids.is_empty() {
+            if self.attention_group_auto_open_supported() && !ready_ids.is_empty() {
+                self.request_attention_group(Vec::new(), true, false);
+            }
+            return;
+        }
+
+        let ready_id_set = ready_ids.iter().collect::<HashSet<_>>();
+        let visible_has_unready = self
+            .attention_group_session_ids
             .iter()
-            .map(|entity| (entity.session.session_id.as_str(), &entity.session))
-            .collect::<HashMap<_, _>>();
-        let visible_changed = self.attention_group_session_ids.iter().any(|session_id| {
-            sessions_by_id
-                .get(session_id.as_str())
-                .map(|session| !session_ready_for_operator_group_input(session))
-                .unwrap_or(true)
-        });
-        if visible_changed {
+            .any(|session_id| !ready_id_set.contains(session_id));
+        let visible_has_room =
+            self.attention_group_session_ids.len() < ATTENTION_GROUP_MAX_SESSIONS;
+        let ready_waiting_offscreen = ready_ids
+            .iter()
+            .any(|session_id| !self.attention_group_session_ids.contains(session_id));
+
+        if visible_has_unready || (visible_has_room && ready_waiting_offscreen) {
             self.attention_group_refresh_armed = false;
             self.refresh_attention_group();
         }
+    }
+
+    fn attention_group_auto_open_supported(&self) -> bool {
+        self.native_status
+            .as_ref()
+            .map(|status| {
+                status.supported && self.current_native_app() == NativeDesktopApp::Ghostty
+            })
+            .unwrap_or(false)
+    }
+
+    fn ready_attention_group_session_ids(&self) -> Vec<String> {
+        self.entities
+            .iter()
+            .filter(|entity| attention_group_session_is_eligible(&entity.session))
+            .map(|entity| entity.session.session_id.clone())
+            .collect()
     }
 
     pub(crate) fn sync_repo_themes(&mut self, sessions: &[SessionSummary], force: bool) {

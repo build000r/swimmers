@@ -175,16 +175,12 @@ pub async fn open_native_attention_group(
     }
 
     let tmux_path = resolve_tmux_binary()?;
-    if focus {
-        rebuild_attention_group_tmux_session(&tmux_path, sessions).await?;
-    } else {
-        refresh_attention_group_tmux_session(&tmux_path, sessions).await?;
-    }
+    sync_attention_group_tmux_session(&tmux_path, sessions).await?;
     let open_result = if focus {
         Some(
             open_native_session(
                 app,
-                ghostty_mode,
+                attention_group_ghostty_mode(app, ghostty_mode),
                 ATTENTION_GROUP_SESSION_ID,
                 ATTENTION_GROUP_TMUX_NAME,
                 "",
@@ -228,6 +224,31 @@ pub async fn clear_native_attention_group() -> Result<NativeAttentionGroupOpenRe
         focused: false,
         pane_id: None,
     })
+}
+
+fn attention_group_ghostty_mode(
+    app: NativeDesktopApp,
+    configured_mode: GhosttyOpenMode,
+) -> GhosttyOpenMode {
+    match app {
+        NativeDesktopApp::Ghostty => GhosttyOpenMode::Window,
+        NativeDesktopApp::Iterm => configured_mode,
+    }
+}
+
+async fn sync_attention_group_tmux_session(
+    tmux_path: &Path,
+    sessions: &[SessionSummary],
+) -> Result<()> {
+    let session_target = attention_group_session_target();
+    if run_tmux_status(tmux_path, &["has-session", "-t", &session_target])
+        .await
+        .is_err()
+    {
+        return rebuild_attention_group_tmux_session(tmux_path, sessions).await;
+    }
+
+    replace_attention_group_tmux_panes(tmux_path, sessions).await
 }
 
 async fn rebuild_attention_group_tmux_session(
@@ -278,21 +299,6 @@ async fn rebuild_attention_group_tmux_session(
 
     tile_attention_group_tmux_session(tmux_path, &pane_target).await?;
     Ok(())
-}
-
-async fn refresh_attention_group_tmux_session(
-    tmux_path: &Path,
-    sessions: &[SessionSummary],
-) -> Result<()> {
-    let session_target = attention_group_session_target();
-    if run_tmux_status(tmux_path, &["has-session", "-t", &session_target])
-        .await
-        .is_err()
-    {
-        return rebuild_attention_group_tmux_session(tmux_path, sessions).await;
-    }
-
-    replace_attention_group_tmux_panes(tmux_path, sessions).await
 }
 
 async fn replace_attention_group_tmux_panes(
@@ -1321,6 +1327,10 @@ mod tests {
             GhosttyOpenMode::from_env_value("split"),
             GhosttyOpenMode::Add
         );
+        assert_eq!(
+            GhosttyOpenMode::from_env_value("window"),
+            GhosttyOpenMode::Window
+        );
     }
 
     #[test]
@@ -1610,6 +1620,100 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn focused_attention_group_reuses_tmux_session_and_opens_ghostty_window() {
+        let _env_guard = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+
+        let temp = tempdir().unwrap();
+        let fake_tmux = temp.path().join("tmux");
+        let tmux_log_path = temp.path().join("tmux.log");
+        std::fs::write(
+            &fake_tmux,
+            format!(
+                "#!/bin/sh\nset -eu\nfirst=1\nfor arg in \"$@\"; do\n  if [ \"$first\" -eq 1 ]; then\n    printf '%s' \"$arg\" >> \"{log}\"\n    first=0\n  else\n    printf '\\t%s' \"$arg\" >> \"{log}\"\n  fi\ndone\nprintf '\\n' >> \"{log}\"\ncase \"${{1-}}\" in\n  has-session)\n    exit 0\n    ;;\n  list-panes)\n    printf '%%1\\n%%2\\n'\n    exit 0\n    ;;\n  display-message)\n    printf '%%14\\t/tmp/swimmers\\n'\n    exit 0\n    ;;\n  *)\n    exit 0\n    ;;\nesac\n",
+                log = tmux_log_path.display()
+            ),
+        )
+        .unwrap();
+        let mut perms = std::fs::metadata(&fake_tmux).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&fake_tmux, perms).unwrap();
+
+        let fake_osascript_dir = temp.path().join("osa-bin");
+        std::fs::create_dir_all(&fake_osascript_dir).unwrap();
+        let fake_osascript = fake_osascript_dir.join("osascript");
+        let osa_log_path = temp.path().join("osascript.log");
+        std::fs::write(
+            &fake_osascript,
+            format!(
+                "#!/bin/sh\nset -eu\nif [ \"${{1-}}\" = \"-e\" ]; then\n  case \"${{2-}}\" in\n    *\"get version\"*) printf '1.3.1\\n' ;;\n    *) printf 'ghostty-tab-main\\n' ;;\n  esac\n  exit 0\nfi\nfirst=1\nfor arg in \"$@\"; do\n  if [ \"$first\" -eq 1 ]; then\n    printf '%s' \"$arg\" >> \"{log}\"\n    first=0\n  else\n    printf '\\t%s' \"$arg\" >> \"{log}\"\n  fi\ndone\nprintf '\\n' >> \"{log}\"\nprintf 'focused|attention-pane\\n'\n",
+                log = osa_log_path.display()
+            ),
+        )
+        .unwrap();
+        let mut perms = std::fs::metadata(&fake_osascript).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&fake_osascript, perms).unwrap();
+
+        let original_path = std::env::var_os("PATH");
+        let original_tmux = std::env::var_os(TMUX_BIN_ENV);
+        std::env::set_var(
+            "PATH",
+            std::env::join_paths([fake_osascript_dir.as_path()]).unwrap(),
+        );
+        std::env::set_var(TMUX_BIN_ENV, &fake_tmux);
+
+        let sessions = vec![
+            attention_group_summary("sess-new", "new one"),
+            attention_group_summary("sess-next", "next one"),
+        ];
+        let response = open_native_attention_group(
+            NativeDesktopApp::Ghostty,
+            GhosttyOpenMode::Swap,
+            &sessions,
+            true,
+        )
+        .await
+        .unwrap();
+
+        match original_path {
+            Some(value) => std::env::set_var("PATH", value),
+            None => std::env::remove_var("PATH"),
+        }
+        match original_tmux {
+            Some(value) => std::env::set_var(TMUX_BIN_ENV, value),
+            None => std::env::remove_var(TMUX_BIN_ENV),
+        }
+
+        assert_eq!(response.status, "focused");
+        assert!(response.focused);
+        assert_eq!(response.pane_id.as_deref(), Some("attention-pane"));
+
+        let tmux_log = std::fs::read_to_string(&tmux_log_path).unwrap();
+        assert!(
+            !tmux_log
+                .lines()
+                .any(|line| line.starts_with("kill-session")),
+            "focused refresh must preserve the managed attention tmux session: {tmux_log}"
+        );
+        assert!(tmux_log.contains("has-session\t-t\t=swimmers-attention"));
+        assert!(tmux_log.contains("respawn-pane\t-k\t-t\t%1\texec env TMUX="));
+        assert!(tmux_log.contains("kill-pane\t-t\t%2"));
+
+        let osa_log = std::fs::read_to_string(&osa_log_path).unwrap();
+        let call = osa_log
+            .lines()
+            .next()
+            .expect("ghostty script call")
+            .split('\t')
+            .collect::<Vec<_>>();
+        assert_eq!(call[1], ATTENTION_GROUP_SESSION_ID);
+        assert_eq!(call[2], ATTENTION_GROUP_TMUX_NAME);
+        assert_eq!(call[7], GhosttyOpenMode::Window.label());
+    }
+
     #[test]
     fn build_iterm_display_name_prefers_normalized_pane_id_and_cwd_basename() {
         assert_eq!(
@@ -1660,6 +1764,12 @@ mod tests {
             .contains("on replacePreviewSplit(managedTerm, cfg, managedTitle, attachCommand)"));
         assert!(script
             .contains("set newTerm to split managedTerm direction right with configuration cfg"));
+        assert!(
+            script.contains("on managedTerminalAcrossWindows(knownManagedId, managedTitlePrefix)")
+        );
+        assert!(script.contains("if openMode is \"window\" then"));
+        assert!(script
+            .contains("set newTerm to my createManagedWindow(cfg, managedTitle, attachCommand)"));
         assert!(script.contains(
             "set newTerm to my replacePreviewSplit(managedTerm, cfg, managedTitle, attachCommand)"
         ));
