@@ -8,22 +8,12 @@ const COLLISION_THROTTLE_ENTITY_THRESHOLD: usize = 50;
 const COLLISION_THROTTLE_PAIR_BUDGET: usize = 24;
 const API_FAILURE_BANNER_THRESHOLD: u8 = 3;
 const API_STALE_BANNER_TEXT: &str = "API disconnected - showing stale data";
-const ATTENTION_GROUP_SESSION_ID: &str = "attention-group";
-const ATTENTION_GROUP_TMUX_NAME: &str = "swimmers-attention";
 const ATTENTION_GROUP_LABEL: &str = "[attention group]";
 const ATTENTION_GROUP_MAX_SESSIONS: usize = 6;
-const ATTENTION_GROUP_REFRESH_INTERVAL: Duration = Duration::from_secs(2);
 
 fn sprite_theme_option_width(theme: Option<SpriteTheme>) -> u16 {
     let label = format!("[{}]", SpriteTheme::override_label(theme));
     display_width(&label)
-}
-
-fn attention_group_session_is_eligible(session: &SessionSummary) -> bool {
-    session.session_id != ATTENTION_GROUP_SESSION_ID
-        && session.tmux_name != ATTENTION_GROUP_TMUX_NAME
-        && swimmers::api::remote_sessions::split_remote_session_id(&session.session_id).is_none()
-        && session_ready_for_operator_group_input(session)
 }
 
 pub(crate) struct RefreshResult {
@@ -227,8 +217,6 @@ pub(crate) struct App<C: TuiApi> {
     pub(crate) published_selected_id: Option<String>,
     pub(crate) native_status: Option<NativeDesktopStatusResponse>,
     pub(crate) attention_group_session_ids: Vec<String>,
-    pub(crate) last_attention_group_refresh: Option<Instant>,
-    pub(crate) attention_group_refresh_armed: bool,
     pub(crate) daemon_defaults_status: DaemonDefaultsStatus,
     pub(crate) thought_config_editor: Option<ThoughtConfigEditorState>,
     pub(crate) picker: Option<PickerState>,
@@ -309,8 +297,6 @@ impl<C: TuiApi> App<C> {
             published_selected_id: None,
             native_status: None,
             attention_group_session_ids: Vec::new(),
-            last_attention_group_refresh: None,
-            attention_group_refresh_armed: false,
             daemon_defaults_status: DaemonDefaultsStatus::Unknown,
             thought_config_editor: None,
             picker: None,
@@ -690,14 +676,6 @@ impl<C: TuiApi> App<C> {
         self.request_attention_group(Vec::new(), true, true);
     }
 
-    fn refresh_attention_group(&mut self) {
-        let current_session_ids = self.attention_group_session_ids.clone();
-        if current_session_ids.is_empty() {
-            return;
-        }
-        self.request_attention_group(current_session_ids, false, false);
-    }
-
     fn request_attention_group(
         &mut self,
         current_session_ids: Vec<String>,
@@ -712,7 +690,6 @@ impl<C: TuiApi> App<C> {
         if show_progress {
             self.set_message("opening attention group...");
         }
-        self.last_attention_group_refresh = Some(Instant::now());
         self.runtime.spawn(async move {
             let response = client
                 .open_attention_group(ATTENTION_GROUP_MAX_SESSIONS, current_session_ids, focus)
@@ -1609,8 +1586,6 @@ impl<C: TuiApi> App<C> {
                 Ok(response) => {
                     let previous = self.attention_group_session_ids.clone();
                     self.attention_group_session_ids = response.session_ids.clone();
-                    self.last_attention_group_refresh = Some(Instant::now());
-                    self.attention_group_refresh_armed = false;
                     if focus || previous != response.session_ids {
                         self.set_message(format!(
                             "{} attention group: {} sessions",
@@ -1619,7 +1594,6 @@ impl<C: TuiApi> App<C> {
                     }
                 }
                 Err(err) => {
-                    self.attention_group_refresh_armed = false;
                     if !focus {
                         self.attention_group_session_ids.clear();
                     }
@@ -1807,7 +1781,6 @@ impl<C: TuiApi> App<C> {
         self.layout_resting_entities(field);
         self.reconcile_selection();
         self.sync_selection_publication();
-        self.maybe_refresh_attention_group();
     }
 
     pub(crate) fn upsert_session(&mut self, session: SessionSummary, field: Rect) {
@@ -1825,59 +1798,6 @@ impl<C: TuiApi> App<C> {
             sessions.push(session);
         }
         self.merge_sessions(sessions, field);
-    }
-
-    fn maybe_refresh_attention_group(&mut self) {
-        if self.initial_request.is_some()
-            || self.pending_interaction.is_some()
-            || self
-                .last_attention_group_refresh
-                .map(|last| last.elapsed() < ATTENTION_GROUP_REFRESH_INTERVAL)
-                .unwrap_or(false)
-        {
-            return;
-        }
-
-        let ready_ids = self.ready_attention_group_session_ids();
-        if self.attention_group_session_ids.is_empty() {
-            if self.attention_group_auto_open_supported() && !ready_ids.is_empty() {
-                self.request_attention_group(Vec::new(), true, false);
-            }
-            return;
-        }
-
-        let ready_id_set = ready_ids.iter().collect::<HashSet<_>>();
-        let visible_has_unready = self
-            .attention_group_session_ids
-            .iter()
-            .any(|session_id| !ready_id_set.contains(session_id));
-        let visible_has_room =
-            self.attention_group_session_ids.len() < ATTENTION_GROUP_MAX_SESSIONS;
-        let ready_waiting_offscreen = ready_ids
-            .iter()
-            .any(|session_id| !self.attention_group_session_ids.contains(session_id));
-
-        if visible_has_unready || (visible_has_room && ready_waiting_offscreen) {
-            self.attention_group_refresh_armed = false;
-            self.refresh_attention_group();
-        }
-    }
-
-    fn attention_group_auto_open_supported(&self) -> bool {
-        self.native_status
-            .as_ref()
-            .map(|status| {
-                status.supported && self.current_native_app() == NativeDesktopApp::Ghostty
-            })
-            .unwrap_or(false)
-    }
-
-    fn ready_attention_group_session_ids(&self) -> Vec<String> {
-        self.entities
-            .iter()
-            .filter(|entity| attention_group_session_is_eligible(&entity.session))
-            .map(|entity| entity.session.session_id.clone())
-            .collect()
     }
 
     pub(crate) fn sync_repo_themes(&mut self, sessions: &[SessionSummary], force: bool) {
@@ -2794,7 +2714,6 @@ impl<C: TuiApi> App<C> {
             self.set_message("no sessions in this school");
             return;
         }
-        self.attention_group_refresh_armed = false;
         self.cancel_voice_recording();
         self.initial_request_generation = self.initial_request_generation.saturating_add(1);
         self.group_input_targets = Some(GroupInputTargets {
@@ -3160,18 +3079,15 @@ impl<C: TuiApi> App<C> {
     fn apply_group_input_response(&mut self, response: SessionGroupInputResponse) {
         let total = response.results.len();
         if response.skipped == 0 {
-            self.attention_group_refresh_armed = response.delivered > 0;
             self.close_initial_request();
             self.set_message(format!("sent to {} sessions", response.delivered));
         } else if response.delivered > 0 {
-            self.attention_group_refresh_armed = true;
             self.close_initial_request();
             self.set_message(format!(
                 "sent to {}/{}; {} skipped",
                 response.delivered, total, response.skipped
             ));
         } else {
-            self.attention_group_refresh_armed = false;
             self.set_message(format!("sent to 0/{total}; all skipped"));
         }
     }

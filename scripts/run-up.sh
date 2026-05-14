@@ -217,12 +217,14 @@ binary_is_current() {
   local binary="${1:-}"
   [[ -x "${binary}" ]] || return 1
   build_stamp_matches || return 1
+  local stamp
+  stamp="$(build_stamp_path)"
 
   local inputs=(Cargo.toml Cargo.lock src)
   [[ -f build.rs ]] && inputs+=(build.rs)
   [[ -d .cargo ]] && inputs+=(.cargo)
 
-  [[ -z "$(find "${inputs[@]}" -type f -newer "${binary}" -print -quit)" ]]
+  [[ -z "$(find "${inputs[@]}" -type f -newer "${stamp}" -print -quit)" ]]
 }
 
 build_stamp_path() {

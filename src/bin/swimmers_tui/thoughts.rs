@@ -636,6 +636,9 @@ pub(crate) fn thought_panel_needs_input<C: TuiApi>(app: &App<C>) -> bool {
     if app.daemon_defaults_status.is_unavailable() {
         return true;
     }
+    if app.group_input_targets.is_some() {
+        return true;
+    }
     let entries = build_thought_panel_entries(app);
     entries.iter().any(thought_entry_needs_input)
         || thought_panel_entries_have_sendable_batch(&entries)
@@ -875,6 +878,18 @@ pub(crate) fn build_thought_panel_entries<C: TuiApi>(app: &App<C>) -> Vec<Though
 
     entries.sort_by(compare_thought_panel_entries);
     entries
+}
+
+fn scoped_thought_panel_entries<C: TuiApi>(app: &App<C>) -> Vec<ThoughtPanelEntryView> {
+    let entries = build_thought_panel_entries(app);
+    let Some(targets) = &app.group_input_targets else {
+        return entries;
+    };
+    let target_ids = targets.session_ids.iter().collect::<HashSet<_>>();
+    entries
+        .into_iter()
+        .filter(|entry| target_ids.contains(&entry.session_id))
+        .collect()
 }
 
 pub(crate) fn thought_group_label(
@@ -1287,7 +1302,15 @@ pub(crate) fn build_rows_for_panel_entry(
 }
 
 pub(crate) fn thought_panel_header<C: TuiApi>(app: &App<C>) -> String {
-    let entries = build_thought_panel_entries(app);
+    if let Some(targets) = &app.group_input_targets {
+        return format!(
+            "clawgs / group draft · {} · {} target{}",
+            targets.label,
+            targets.session_ids.len(),
+            pluralize(targets.session_ids.len())
+        );
+    }
+    let entries = scoped_thought_panel_entries(app);
     let stopped = entries
         .iter()
         .filter(|entry| thought_entry_needs_input(entry))
@@ -1389,7 +1412,7 @@ pub(crate) fn build_thought_panel<C: TuiApi>(
         return ThoughtPanelLayout::default();
     }
 
-    let all_entries = build_thought_panel_entries(app);
+    let all_entries = scoped_thought_panel_entries(app);
     let total_count = all_entries.len();
     let mode = thought_panel_display_mode(app, &all_entries);
     let entries = if mode.show_all {
@@ -1403,6 +1426,13 @@ pub(crate) fn build_thought_panel<C: TuiApi>(
     };
     let empty_message = if entry_capacity == 0 {
         None
+    } else if let Some(targets) = &app.group_input_targets {
+        Some(format!(
+            "drafting group input for {} ({} session{})",
+            targets.label,
+            targets.session_ids.len(),
+            pluralize(targets.session_ids.len())
+        ))
     } else if entries.is_empty() {
         Some(if !mode.show_all && total_count > 0 {
             if app.daemon_defaults_status.is_unavailable() {
@@ -1449,6 +1479,12 @@ fn thought_panel_display_mode<C: TuiApi>(
     app: &App<C>,
     entries: &[ThoughtPanelEntryView],
 ) -> ThoughtPanelDisplayMode {
+    if app.group_input_targets.is_some() {
+        return ThoughtPanelDisplayMode {
+            group_by: ThoughtGroupBy::Batch,
+            show_all: true,
+        };
+    }
     if thought_panel_entries_have_sendable_batch(entries) {
         ThoughtPanelDisplayMode {
             group_by: ThoughtGroupBy::Batch,

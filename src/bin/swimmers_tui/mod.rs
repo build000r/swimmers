@@ -34,7 +34,6 @@ use tokio::sync::oneshot;
 use usvg::Tree;
 
 use swimmers::config::{AuthMode, Config};
-use swimmers::operator_pressure::session_ready_for_operator_group_input;
 use swimmers::repo_theme::{discover_repo_theme, existing_repo_theme};
 use swimmers::thought::runtime_config::{DaemonDefaults, ThoughtConfig};
 use swimmers::types::{
