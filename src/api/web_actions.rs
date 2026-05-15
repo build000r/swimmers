@@ -20,7 +20,7 @@ use crate::types::SessionState;
 
 #[cfg(feature = "personal-workflows")]
 #[derive(Debug, serde::Serialize)]
-struct CommitCodexLaunchResponse {
+struct CommitGrokLaunchResponse {
     session_name: String,
     watch_command: String,
 }
@@ -44,10 +44,15 @@ pub fn routes() -> Router<Arc<AppState>> {
         );
 
     #[cfg(feature = "personal-workflows")]
-    let router = router.route(
-        "/v1/sessions/{session_id}/commit-codex",
-        post(post_commit_codex),
-    );
+    let router = router
+        .route(
+            "/v1/sessions/{session_id}/commit-grok",
+            post(post_commit_grok),
+        )
+        .route(
+            "/v1/sessions/{session_id}/commit-codex",
+            post(post_commit_grok),
+        );
 
     router
 }
@@ -67,7 +72,7 @@ fn json_error(status: StatusCode, code: &str, message: impl Into<Option<String>>
 }
 
 #[cfg(feature = "personal-workflows")]
-async fn post_commit_codex(
+async fn post_commit_grok(
     Extension(auth): Extension<AuthInfo>,
     State(state): State<Arc<AppState>>,
     Path(session_id): Path<String>,
@@ -76,11 +81,11 @@ async fn post_commit_codex(
         return resp;
     }
 
-    post_commit_codex_with_launcher(state, session_id, &SystemCommitLauncher).await
+    post_commit_grok_with_launcher(state, session_id, &SystemCommitLauncher).await
 }
 
 #[cfg(feature = "personal-workflows")]
-async fn post_commit_codex_with_launcher<L: CommitLauncher>(
+async fn post_commit_grok_with_launcher<L: CommitLauncher>(
     state: Arc<AppState>,
     session_id: String,
     launcher: &L,
@@ -111,7 +116,7 @@ async fn post_commit_codex_with_launcher<L: CommitLauncher>(
         Ok(launch) => (
             StatusCode::OK,
             Json(
-                serde_json::to_value(CommitCodexLaunchResponse {
+                serde_json::to_value(CommitGrokLaunchResponse {
                     session_name: launch.session_name,
                     watch_command: launch.watch_command,
                 })
@@ -121,7 +126,7 @@ async fn post_commit_codex_with_launcher<L: CommitLauncher>(
             .into_response(),
         Err(err) => json_error(
             StatusCode::INTERNAL_SERVER_ERROR,
-            "COMMIT_CODEX_LAUNCH_FAILED",
+            "COMMIT_GROK_LAUNCH_FAILED",
             Some(err.to_string()),
         ),
     }
@@ -251,7 +256,7 @@ mod tests {
     use crate::auth::OBSERVER_SCOPES;
     use crate::config::Config;
     #[cfg(feature = "personal-workflows")]
-    use crate::host_actions::CommitCodexLaunch;
+    use crate::host_actions::CommitGrokLaunch;
     use crate::session::actor::{ActorHandle, SessionCommand};
     use crate::session::supervisor::SessionSupervisor;
     use crate::thought::protocol::SyncRequestSequence;
@@ -372,8 +377,8 @@ mod tests {
 
     #[cfg(feature = "personal-workflows")]
     #[tokio::test]
-    async fn commit_codex_requires_write_scope() {
-        let response = post_commit_codex(
+    async fn commit_grok_requires_write_scope() {
+        let response = post_commit_grok(
             Extension(AuthInfo::new(OBSERVER_SCOPES.to_vec())),
             State(test_state()),
             Path("sess-1".to_string()),
@@ -386,11 +391,11 @@ mod tests {
 
     #[cfg(feature = "personal-workflows")]
     #[tokio::test]
-    async fn commit_codex_rejects_exited_session() {
+    async fn commit_grok_rejects_exited_session() {
         let state = test_state();
         install_summary_handle(&state, summary("sess-1", SessionState::Exited)).await;
 
-        let response = post_commit_codex_with_launcher(
+        let response = post_commit_grok_with_launcher(
             state,
             "sess-1".to_string(),
             &FakeCommitLauncher::default(),
@@ -404,13 +409,12 @@ mod tests {
 
     #[cfg(feature = "personal-workflows")]
     #[tokio::test]
-    async fn commit_codex_launches_with_session_summary() {
+    async fn commit_grok_launches_with_session_summary() {
         let state = test_state();
         install_summary_handle(&state, summary("sess-1", SessionState::Busy)).await;
         let launcher = FakeCommitLauncher::default();
 
-        let response =
-            post_commit_codex_with_launcher(state, "sess-1".to_string(), &launcher).await;
+        let response = post_commit_grok_with_launcher(state, "sess-1".to_string(), &launcher).await;
 
         assert_eq!(response.status(), StatusCode::OK);
         let json = response_json(response).await;
@@ -570,9 +574,9 @@ mod tests {
 
     #[cfg(feature = "personal-workflows")]
     impl CommitLauncher for FakeCommitLauncher {
-        fn launch(&self, session: &SessionSummary) -> io::Result<CommitCodexLaunch> {
+        fn launch(&self, session: &SessionSummary) -> io::Result<CommitGrokLaunch> {
             self.calls.lock().unwrap().push(session.session_id.clone());
-            Ok(CommitCodexLaunch {
+            Ok(CommitGrokLaunch {
                 session_name: "commit-7-123".to_string(),
                 watch_command: "tmux a -t commit-7-123".to_string(),
             })

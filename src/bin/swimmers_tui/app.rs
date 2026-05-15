@@ -300,7 +300,7 @@ impl<C: TuiApi> App<C> {
             daemon_defaults_status: DaemonDefaultsStatus::Unknown,
             thought_config_editor: None,
             picker: None,
-            spawn_tool: SpawnTool::Codex,
+            spawn_tool: SpawnTool::Grok,
             launch_target: None,
             initial_request: None,
             group_input_targets: None,
@@ -3178,13 +3178,13 @@ impl<C: TuiApi> App<C> {
             .find(|entity| entity.session.session_id == session_id)
             .map(|entity| entity.session.clone())
         else {
-            self.set_message("missing session for commit codex launch");
+            self.set_message("missing session for commit grok launch");
             return;
         };
 
         match self.commit_launcher.launch(&session) {
-            Ok(launch) => self.set_message(format!("commit codex: {}", launch.watch_command)),
-            Err(err) => self.set_message(format!("failed to launch commit codex: {err}")),
+            Ok(launch) => self.set_message(format!("commit grok: {}", launch.watch_command)),
+            Err(err) => self.set_message(format!("failed to launch commit grok: {err}")),
         }
     }
 

@@ -4,39 +4,39 @@ use std::collections::HashMap;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::process::{Command as ProcessCommand, Output, Stdio};
+use std::process::{Command as ProcessCommand, Stdio};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use tokio::sync::RwLock;
 use uuid::Uuid;
 
-use crate::types::{RepoActionKind, RepoActionState, RepoActionStatus, SessionSummary};
+use crate::launcher::{
+    prepare_private_dir, shell_single_quote, write_private_file, SpawnToolLauncher,
+};
+use crate::types::{RepoActionKind, RepoActionState, RepoActionStatus, SessionSummary, SpawnTool};
 
 const COMMIT_TMUX_PREFIX: &str = "commit";
 const COMMIT_TMUX_RUNTIME_DIR: &str = "swimmers-commit-tmux";
-const COMMIT_CODEX_RUNTIME_DIR: &str = "swimmers-commit-codex";
-const COMMIT_CODEX_MODEL: &str = "gpt-5.4";
-const COMMIT_CODEX_REASONING: &str = "low";
 const REPO_ACTION_STATUS_TTL: Duration = Duration::from_secs(15);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CommitCodexLaunch {
+pub struct CommitGrokLaunch {
     pub session_name: String,
     pub watch_command: String,
 }
 
 pub trait CommitLauncher: Send + Sync {
-    fn launch(&self, session: &SessionSummary) -> io::Result<CommitCodexLaunch>;
+    fn launch(&self, session: &SessionSummary) -> io::Result<CommitGrokLaunch>;
 }
 
 #[derive(Default)]
 pub struct SystemCommitLauncher;
 
 impl CommitLauncher for SystemCommitLauncher {
-    fn launch(&self, session: &SessionSummary) -> io::Result<CommitCodexLaunch> {
+    fn launch(&self, session: &SessionSummary) -> io::Result<CommitGrokLaunch> {
         let git_state = collect_git_state(&session.cwd)?;
-        launch_commit_codex_tmux(session, &git_state)
+        launch_commit_grok_for_session_tmux(session, &git_state)
     }
 }
 
@@ -56,7 +56,7 @@ pub struct SystemRepoActionExecutor;
 impl RepoActionExecutor for SystemRepoActionExecutor {
     fn execute(&self, repo_root: PathBuf, kind: RepoActionKind) -> io::Result<Option<String>> {
         match kind {
-            RepoActionKind::Commit => run_commit_codex_for_repo(&repo_root),
+            RepoActionKind::Commit => run_commit_grok_for_repo(&repo_root),
             RepoActionKind::Restart | RepoActionKind::Open => Err(io::Error::new(
                 io::ErrorKind::Unsupported,
                 format!("{kind:?} is not handled through the default executor"),
@@ -369,13 +369,25 @@ fn run_git_capture(repo_root: &Path, args: &[&str]) -> io::Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
-fn launch_commit_codex_tmux(
+fn launch_commit_grok_for_session_tmux(
     session: &SessionSummary,
     git_state: &GitStateSnapshot,
-) -> io::Result<CommitCodexLaunch> {
-    let session_name = commit_tmux_session_name(&session.tmux_name);
+) -> io::Result<CommitGrokLaunch> {
+    launch_commit_grok_tmux(
+        &session.tmux_name,
+        &git_state.repo_root,
+        build_commit_grok_prompt(session, git_state),
+    )
+}
+
+fn launch_commit_grok_tmux(
+    session_label: &str,
+    repo_root: &Path,
+    prompt: String,
+) -> io::Result<CommitGrokLaunch> {
+    let session_name = commit_tmux_session_name(session_label);
     let runtime_dir = std::env::temp_dir().join(COMMIT_TMUX_RUNTIME_DIR);
-    fs::create_dir_all(&runtime_dir)?;
+    prepare_private_dir(&runtime_dir)?;
 
     // The session name includes a millisecond timestamp, but two launches that
     // share `(tmux_name, ms)` would collide on the prompt/wrapper file paths
@@ -385,13 +397,13 @@ fn launch_commit_codex_tmux(
     let nonce = Uuid::new_v4();
     let prompt_path = runtime_dir.join(format!("{session_name}-{nonce}.prompt.md"));
     let wrapper_path = runtime_dir.join(format!("{session_name}-{nonce}.sh"));
-    fs::write(&prompt_path, build_commit_codex_prompt(session, git_state))?;
+    write_private_file(&prompt_path, &prompt)?;
     fs::write(
         &wrapper_path,
-        build_commit_tmux_wrapper(&session_name, &git_state.repo_root, &prompt_path),
+        build_commit_tmux_wrapper(&session_name, repo_root, &prompt_path),
     )?;
 
-    let repo_root = git_state.repo_root.to_string_lossy().into_owned();
+    let repo_root = repo_root.to_string_lossy().into_owned();
     let wrapper_command = format!(
         "bash {}",
         shell_single_quote(&wrapper_path.to_string_lossy())
@@ -401,6 +413,8 @@ fn launch_commit_codex_tmux(
         .arg(wrapper_command)
         .output()?;
     if !output.status.success() {
+        let _ = fs::remove_file(&prompt_path);
+        let _ = fs::remove_file(&wrapper_path);
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
         let detail = if stderr.is_empty() {
             format!("tmux exited with {}", output.status)
@@ -413,21 +427,45 @@ fn launch_commit_codex_tmux(
         )));
     }
 
-    Ok(CommitCodexLaunch {
+    Ok(CommitGrokLaunch {
         watch_command: format!("tmux a -t {session_name}"),
         session_name,
     })
 }
 
-fn run_commit_codex_for_repo(repo_root: &Path) -> io::Result<Option<String>> {
+fn run_commit_grok_for_repo(repo_root: &Path) -> io::Result<Option<String>> {
     let git_state = collect_git_state_from_root(repo_root)?;
-    let prompt = build_picker_commit_codex_prompt(&git_state);
-    run_commit_codex_command(repo_root, prompt, "picker")
+    let session_label = repo_root
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.trim().is_empty())
+        .unwrap_or("repo");
+    let launch = launch_commit_grok_tmux(
+        session_label,
+        &git_state.repo_root,
+        build_picker_commit_grok_prompt(&git_state),
+    )?;
+    Ok(Some(format!("commit grok: {}", launch.watch_command)))
 }
 
 fn build_commit_tmux_wrapper(session_name: &str, repo_root: &Path, prompt_path: &Path) -> String {
+    build_commit_tmux_wrapper_with_launcher(
+        session_name,
+        repo_root,
+        prompt_path,
+        SpawnToolLauncher::from_env(SpawnTool::Grok),
+    )
+}
+
+fn build_commit_tmux_wrapper_with_launcher(
+    session_name: &str,
+    repo_root: &Path,
+    prompt_path: &Path,
+    launcher: SpawnToolLauncher,
+) -> String {
     let repo_root = shell_single_quote(&repo_root.to_string_lossy());
     let prompt_path = shell_single_quote(&prompt_path.to_string_lossy());
+    let grok_program = launcher.shell_program();
 
     format!(
         "#!/bin/bash\n\
@@ -435,21 +473,26 @@ SESSION={session_name:?}\n\
 REPO_DIR={repo_root}\n\
 PROMPT_FILE={prompt_path}\n\
 \n\
-echo \"=== swimmers commit codex: $SESSION ===\"\n\
+cleanup_prompt() {{\n\
+  rm -f \"$PROMPT_FILE\"\n\
+}}\n\
+trap cleanup_prompt EXIT\n\
+\n\
+echo \"=== swimmers commit grok: $SESSION ===\"\n\
 echo \"Repo: $REPO_DIR\"\n\
 echo \"Started: $(date)\"\n\
 echo \"\"\n\
 \n\
 EXIT_CODE=0\n\
-codex exec \\\n\
-  -m {COMMIT_CODEX_MODEL} \\\n\
-  -c 'model_reasoning_effort=\"{COMMIT_CODEX_REASONING}\"' \\\n\
-  --dangerously-bypass-approvals-and-sandbox \\\n\
-  --cd \"$REPO_DIR\" \\\n\
-  - < \"$PROMPT_FILE\" || EXIT_CODE=$?\n\
+{grok_program} \\\n\
+  --prompt-file \"$PROMPT_FILE\" \\\n\
+  --cwd \"$REPO_DIR\" \\\n\
+  --always-approve \\\n\
+  --no-alt-screen || EXIT_CODE=$?\n\
+cleanup_prompt\n\
 \n\
 echo \"\"\n\
-echo \"Codex exited with code: $EXIT_CODE\"\n\
+echo \"Grok exited with code: $EXIT_CODE\"\n\
 \n\
 echo \"\"\n\
 if [ \"$EXIT_CODE\" -eq 0 ]; then\n\
@@ -464,7 +507,7 @@ read -r\n"
     )
 }
 
-fn build_commit_codex_prompt(session: &SessionSummary, git_state: &GitStateSnapshot) -> String {
+fn build_commit_grok_prompt(session: &SessionSummary, git_state: &GitStateSnapshot) -> String {
     let repo_root = git_state.repo_root.to_string_lossy();
     format!(
         "$commit\n\n\
@@ -476,7 +519,7 @@ Source session:\n\
 - cwd: {cwd}\n\
 - repo_root: {repo_root}\n\
 \n\
-Run as a fresh detached Codex commit helper. Use model `{COMMIT_CODEX_MODEL}` with `{COMMIT_CODEX_REASONING}` reasoning.\n\
+Run as a fresh detached Grok headless commit helper. Use the named Grok session for this one-shot commit task.\n\
 \n\
 {task_body}",
         tmux_name = session.tmux_name,
@@ -487,7 +530,7 @@ Run as a fresh detached Codex commit helper. Use model `{COMMIT_CODEX_MODEL}` wi
     )
 }
 
-fn build_picker_commit_codex_prompt(git_state: &GitStateSnapshot) -> String {
+fn build_picker_commit_grok_prompt(git_state: &GitStateSnapshot) -> String {
     let repo_root = git_state.repo_root.to_string_lossy();
     format!(
         "$commit\n\n\
@@ -496,7 +539,7 @@ You were launched from swimmers by clicking [commit] next to a repo in the picke
 Repo:\n\
 - repo_root: {repo_root}\n\
 \n\
-Run as a fresh detached Codex commit helper. Use model `{COMMIT_CODEX_MODEL}` with `{COMMIT_CODEX_REASONING}` reasoning.\n\
+Run as a fresh detached Grok headless commit helper. Use the named Grok session for this one-shot commit task.\n\
 \n\
 {task_body}",
         repo_root = repo_root,
@@ -548,52 +591,6 @@ fn build_commit_task_body(git_state: &GitStateSnapshot) -> String {
     )
 }
 
-fn run_commit_codex_command(
-    repo_root: &Path,
-    prompt: String,
-    label: &str,
-) -> io::Result<Option<String>> {
-    let runtime_dir = std::env::temp_dir().join(COMMIT_CODEX_RUNTIME_DIR);
-    fs::create_dir_all(&runtime_dir)?;
-    // RepoActionTracker only serializes starts on the same repo_root, so two
-    // picker [commit] clicks on different repos can race here. The millisecond
-    // timestamp alone is not enough entropy: a same-ms collision causes one
-    // call's `fs::write` to truncate the other's prompt before codex reads it,
-    // delivering the wrong commit context to one of the two repos. Add a
-    // per-call UUID so concurrent picker actions never share a path.
-    let nonce = Uuid::new_v4();
-    let prompt_path = runtime_dir.join(format!(
-        "{label}-{}-{nonce}.prompt.md",
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis()
-    ));
-    fs::write(&prompt_path, prompt)?;
-
-    let prompt_file = fs::File::open(&prompt_path)?;
-    let output = ProcessCommand::new("codex")
-        .arg("exec")
-        .arg("-m")
-        .arg(COMMIT_CODEX_MODEL)
-        .arg("-c")
-        .arg(format!(
-            "model_reasoning_effort=\"{COMMIT_CODEX_REASONING}\""
-        ))
-        .arg("--dangerously-bypass-approvals-and-sandbox")
-        .arg("--cd")
-        .arg(repo_root)
-        .arg("-")
-        .stdin(Stdio::from(prompt_file))
-        .output()?;
-
-    if output.status.success() {
-        Ok(command_success_detail(&output))
-    } else {
-        Err(io::Error::other(command_failure_detail(&output)))
-    }
-}
-
 fn display_git_output(output: &str) -> &str {
     let trimmed = output.trim_end();
     if trimmed.is_empty() {
@@ -601,33 +598,6 @@ fn display_git_output(output: &str) -> &str {
     } else {
         trimmed
     }
-}
-
-fn command_success_detail(output: &Output) -> Option<String> {
-    let detail = String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .rev()
-        .find(|line| !line.trim().is_empty())
-        .map(|line| line.trim().chars().take(300).collect::<String>());
-
-    detail.filter(|value| !value.is_empty())
-}
-
-fn command_failure_detail(output: &Output) -> String {
-    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-    if !stderr.is_empty() {
-        return stderr.chars().take(600).collect();
-    }
-
-    String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .rev()
-        .find(|line| !line.trim().is_empty())
-        .unwrap_or("repo action failed")
-        .trim()
-        .chars()
-        .take(600)
-        .collect()
 }
 
 fn commit_tmux_session_name(tmux_name: &str) -> String {
@@ -653,13 +623,12 @@ fn sanitize_tmux_name(tmux_name: &str) -> String {
     }
 }
 
-fn shell_single_quote(value: &str) -> String {
-    format!("'{}'", value.replace('\'', "'\\''"))
-}
-
 #[cfg(test)]
 mod tests {
     use chrono::Utc;
+    use std::ffi::OsString;
+    use std::os::unix::fs::PermissionsExt;
+    use tempfile::tempdir;
 
     use super::*;
     use crate::types::{RestState, SessionState, ThoughtSource, ThoughtState, TransportHealth};
@@ -694,9 +663,57 @@ mod tests {
         }
     }
 
+    fn write_executable(path: &Path, contents: &str) {
+        fs::write(path, contents).expect("write executable");
+        let mut perms = fs::metadata(path).expect("metadata").permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(path, perms).expect("chmod");
+    }
+
+    struct EnvVarGuard {
+        key: &'static str,
+        previous: Option<OsString>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: OsString) -> Self {
+            let previous = std::env::var_os(key);
+            std::env::set_var(key, value);
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            match self.previous.take() {
+                Some(value) => std::env::set_var(self.key, value),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
+
+    fn test_path_with_prepend(bin_dir: &Path) -> OsString {
+        let mut entries = vec![bin_dir.as_os_str().to_os_string()];
+        if let Some(existing) = std::env::var_os("PATH") {
+            entries.extend(std::env::split_paths(&existing).map(|path| path.into_os_string()));
+        }
+        std::env::join_paths(entries).expect("join PATH")
+    }
+
+    fn init_dirty_git_repo(path: &Path) {
+        fs::create_dir_all(path).expect("repo dir");
+        let status = ProcessCommand::new("git")
+            .args(["init", "-q"])
+            .current_dir(path)
+            .status()
+            .expect("git init");
+        assert!(status.success(), "git init should succeed");
+        fs::write(path.join("README.md"), "dirty\n").expect("write readme");
+    }
+
     #[test]
-    fn build_commit_codex_prompt_includes_preloaded_git_state() {
-        let prompt = build_commit_codex_prompt(
+    fn build_commit_grok_prompt_includes_preloaded_git_state() {
+        let prompt = build_commit_grok_prompt(
             &sample_session(),
             &GitStateSnapshot {
                 repo_root: PathBuf::from("/tmp/repos/swimmers"),
@@ -709,8 +726,7 @@ mod tests {
         );
 
         assert!(prompt.starts_with("$commit"));
-        assert!(prompt.contains("gpt-5.4"));
-        assert!(prompt.contains("`low` reasoning"));
+        assert!(prompt.contains("Grok headless commit helper"));
         assert!(prompt.contains("git status --short"));
         assert!(prompt.contains("M src/main.rs"));
         assert!(prompt.contains("git diff --cached"));
@@ -726,22 +742,15 @@ mod tests {
 
     #[test]
     fn commit_runtime_path_format_uses_uuid_to_avoid_concurrent_overwrite() {
-        // Regression: previously the path used only a millisecond timestamp,
-        // so two concurrent picker [commit] clicks on different repos that
-        // landed in the same millisecond would write to the same file and one
-        // call's codex stdin would read the other's prompt. The fix adds a
-        // per-call UUID, so even bit-for-bit identical timestamps cannot
-        // collide on a path. Mirror the production format here so future
-        // refactors that drop the UUID surface as a test failure.
-        let runtime_dir = std::env::temp_dir().join(COMMIT_CODEX_RUNTIME_DIR);
-        let ts = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis();
+        // Regression: two launches that shared `(tmux_name, millisecond)` used
+        // to share prompt/wrapper paths. A per-launch UUID keeps both files
+        // isolated even when the tmux session-name prefix collides.
+        let runtime_dir = std::env::temp_dir().join(COMMIT_TMUX_RUNTIME_DIR);
+        let session_name = "commit-picker-123";
         let nonce_a = Uuid::new_v4();
         let nonce_b = Uuid::new_v4();
-        let path_a = runtime_dir.join(format!("picker-{ts}-{nonce_a}.prompt.md"));
-        let path_b = runtime_dir.join(format!("picker-{ts}-{nonce_b}.prompt.md"));
+        let path_a = runtime_dir.join(format!("{session_name}-{nonce_a}.prompt.md"));
+        let path_b = runtime_dir.join(format!("{session_name}-{nonce_b}.prompt.md"));
         assert_ne!(
             nonce_a, nonce_b,
             "uuid::Uuid::new_v4 must produce distinct values"
@@ -760,8 +769,104 @@ mod tests {
             Path::new("/tmp/prompt.md"),
         );
 
-        assert!(wrapper.contains("Codex exited with code: $EXIT_CODE"));
+        assert!(wrapper.contains("grok \\"));
+        assert!(wrapper.contains("--prompt-file \"$PROMPT_FILE\""));
+        assert!(wrapper.contains("--cwd \"$REPO_DIR\""));
+        assert!(!wrapper.contains(r#"-p "$(cat "$PROMPT_FILE")""#));
+        assert!(!wrapper.contains("--session-id"));
+        assert!(!wrapper.contains("--output-format"));
+        assert!(!wrapper.contains("--max-turns"));
+        assert!(wrapper.contains("Grok exited with code: $EXIT_CODE"));
+        assert!(wrapper.contains("trap cleanup_prompt EXIT"));
+        assert!(wrapper.contains("rm -f \"$PROMPT_FILE\""));
+        assert!(
+            wrapper
+                .find("--no-alt-screen || EXIT_CODE=$?\ncleanup_prompt")
+                .expect("prompt cleanup after Grok exits")
+                < wrapper
+                    .find("Grok exited with code")
+                    .expect("exit status line"),
+            "prompt file should be removed before the inspectable-pane wait"
+        );
         assert!(wrapper.contains("Finished. Session stays alive for inspection."));
         assert!(wrapper.contains("Press enter to close, or Ctrl-C to keep session."));
+    }
+
+    #[test]
+    fn build_commit_tmux_wrapper_shell_quotes_grok_override() {
+        let wrapper = build_commit_tmux_wrapper_with_launcher(
+            "commit-7-123",
+            Path::new("/tmp/repos/swimmers"),
+            Path::new("/tmp/prompt.md"),
+            SpawnToolLauncher::with_program_override(
+                SpawnTool::Grok,
+                Some(std::ffi::OsString::from("/tmp/agent bins/grok wrapper")),
+            ),
+        );
+
+        assert!(wrapper.contains("'/tmp/agent bins/grok wrapper' \\"));
+        assert!(wrapper.contains("--prompt-file \"$PROMPT_FILE\""));
+    }
+
+    #[test]
+    fn picker_commit_action_launches_tmux_grok_helper() {
+        let _guard = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let temp = tempdir().expect("tempdir");
+        let repo = temp.path().join("swimmers");
+        init_dirty_git_repo(&repo);
+
+        let bin_dir = temp.path().join("bin");
+        fs::create_dir_all(&bin_dir).expect("bin dir");
+        let tmux_log = temp.path().join("tmux-args.txt");
+        write_executable(
+            &bin_dir.join("tmux"),
+            &format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$@\" > {}\n",
+                shell_single_quote(&tmux_log.to_string_lossy())
+            ),
+        );
+        let fake_grok = temp.path().join("agent bins").join("grok wrapper");
+        fs::create_dir_all(fake_grok.parent().expect("fake grok parent")).expect("fake grok dir");
+        write_executable(&fake_grok, "#!/bin/sh\nexit 0\n");
+        let _path_guard = EnvVarGuard::set("PATH", test_path_with_prepend(&bin_dir));
+        let _grok_guard = EnvVarGuard::set(
+            crate::launcher::SWIMMERS_GROK_BIN_ENV,
+            fake_grok.as_os_str().to_os_string(),
+        );
+
+        let detail = run_commit_grok_for_repo(&repo).expect("run picker commit helper");
+
+        let detail = detail.expect("watch command detail");
+        assert!(detail.starts_with("commit grok: tmux a -t commit-swimmers-"));
+        let tmux_args = fs::read_to_string(&tmux_log).expect("tmux args");
+        assert!(tmux_args.contains("new-session\n-d\n-s\ncommit-swimmers-"));
+        assert!(tmux_args.contains(&format!("-c\n{}\n", repo.to_string_lossy())));
+        let wrapper_command = tmux_args.lines().last().expect("wrapper command");
+        let wrapper_path = wrapper_command
+            .strip_prefix("bash '")
+            .and_then(|path| path.strip_suffix('\''))
+            .expect("quoted wrapper path");
+        let wrapper = fs::read_to_string(wrapper_path).expect("wrapper script");
+        assert!(wrapper.contains(&format!(
+            "{} \\",
+            shell_single_quote(&fake_grok.to_string_lossy())
+        )));
+        assert!(wrapper.contains("--prompt-file \"$PROMPT_FILE\""));
+        assert!(wrapper.contains("--cwd \"$REPO_DIR\""));
+        assert!(!wrapper.contains("--session-id"));
+        assert!(!wrapper.contains("--output-format"));
+        assert!(!wrapper.contains("--max-turns"));
+        let prompt_path = wrapper
+            .lines()
+            .find_map(|line| line.strip_prefix("PROMPT_FILE='"))
+            .and_then(|path| path.strip_suffix('\''))
+            .expect("prompt path");
+        let prompt = fs::read_to_string(prompt_path).expect("prompt file");
+        assert!(prompt.contains("You were launched from swimmers by clicking [commit]"));
+        assert!(prompt.contains("## git status --short"));
+        let _ = fs::remove_file(prompt_path);
+        let _ = fs::remove_file(wrapper_path);
     }
 }

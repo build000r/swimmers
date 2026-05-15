@@ -77,7 +77,7 @@ const FRANKENTERM_TERMINAL_METHODS = [
 const FALLBACK_THOUGHT_BACKENDS = [
   { key: "", label: "auto" },
   { key: "openrouter", label: "openrouter" },
-  { key: "codex", label: "codex" },
+  { key: "grok", label: "grok" },
 ];
 
 const state = {
@@ -530,13 +530,13 @@ function fallbackThoughtBackendMetadata() {
       ? "auto backend uses daemon default model"
       : backend.key === "openrouter"
         ? "presets: auto  router  cached free models"
-        : backend.key === "codex"
-          ? "presets: auto  5.1-mini  5.3-codex  5.4"
+        : backend.key === "grok"
+          ? "uses Grok CLI default unless a model is set"
           : "auto backend uses daemon default model",
     model_presets: backend.key === "openrouter"
       ? ["", "openrouter/free", "nvidia/nemotron-3-super-120b-a12b:free", "arcee-ai/trinity-large-preview:free"]
-      : backend.key === "codex"
-        ? ["", "gpt-5.1-codex-mini", "gpt-5.3-codex", "gpt-5.4"]
+      : backend.key === "grok"
+        ? [""]
         : [""],
   }));
 }
@@ -555,8 +555,8 @@ function selectedThoughtBackendMetadata() {
 function normalizeBackendKey(value) {
   const key = String(value || "").trim().toLowerCase();
   if (!key) return "";
-  if (key === "claude" || key === "claude-cli" || key === "claude_cli") return "openrouter";
-  if (key === "codex-cli" || key === "codex_cli") return "codex";
+  if (key === "claude" || key === "claude-cli" || key === "claude_cli") return "grok";
+  if (key === "codex" || key === "codex-cli" || key === "codex_cli") return "grok";
   return key;
 }
 
@@ -569,8 +569,8 @@ function normalizeThoughtModelForBackend(backend, model) {
   if (key === "openrouter") {
     return trimmed.includes("/") ? trimmed : "";
   }
-  if (key === "codex") {
-    return trimmed.startsWith("gpt-") ? trimmed : "";
+  if (key === "grok") {
+    return trimmed;
   }
   if (!key) {
     return "";
@@ -3334,7 +3334,7 @@ function renderCreateBatchBar() {
     el.createBatchCount.textContent = `${count} selected`;
   }
   if (el.createBatchTool) {
-    el.createBatchTool.textContent = `tool: ${String(el.createTool?.value || "codex").toLowerCase()} -> ${selectedLaunchTarget()}`;
+    el.createBatchTool.textContent = `tool: ${String(el.createTool?.value || "grok").toLowerCase()} -> ${selectedLaunchTarget()}`;
   }
   if (el.createBatchPreview) {
     el.createBatchPreview.textContent = `request: ${createRequestPreviewText()}`;
@@ -4650,25 +4650,25 @@ async function loadMermaidPlanFile(name) {
   }
 }
 
-async function launchCommitCodex() {
+async function launchCommitGrok() {
   const session = currentSession();
   if (!session) {
     return;
   }
 
-  setUtilityStatus(`Launching commit Codex for ${session.session_id}...`, false, 1800);
+  setUtilityStatus(`Launching commit Grok for ${session.session_id}...`, false, 1800);
   try {
-    const response = await apiFetch(`/v1/sessions/${encodeURIComponent(session.session_id)}/commit-codex`, {
+    const response = await apiFetch(`/v1/sessions/${encodeURIComponent(session.session_id)}/commit-grok`, {
       method: "POST",
     });
     const payload = await response.json();
     setUtilityStatus(
-      `Commit Codex launched: ${payload.session_name} / ${payload.watch_command}`,
+      `Commit Grok launched: ${payload.session_name} / ${payload.watch_command}`,
       false,
       3800,
     );
   } catch (error) {
-    setUtilityStatus(`Failed to launch commit Codex: ${error.message}`, true, 3800);
+    setUtilityStatus(`Failed to launch commit Grok: ${error.message}`, true, 3800);
   }
 }
 
@@ -6308,7 +6308,7 @@ async function createBatchSessionsFromSheet(dirs, spawnTool, initialRequest) {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       dirs,
-      spawn_tool: spawnTool || "codex",
+      spawn_tool: spawnTool || "grok",
       launch_target: launchTargetPayload(),
       initial_request: initialRequest || "",
     }),
@@ -6838,7 +6838,7 @@ async function handleSurfaceAction(zone) {
       break;
     case "trogdor_commit":
       await selectSession(zone.sessionId);
-      await launchCommitCodex();
+      await launchCommitGrok();
       break;
     case "open_search":
       openSheet("search");
@@ -6865,7 +6865,7 @@ async function handleSurfaceAction(zone) {
       openMermaidSheet();
       break;
     case "launch_commit":
-      await launchCommitCodex();
+      await launchCommitGrok();
       break;
     case "open_create":
       if (!state.readOnly) {

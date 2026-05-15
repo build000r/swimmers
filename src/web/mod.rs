@@ -430,7 +430,7 @@ async fn render_index(focus_layout: bool) -> impl IntoResponse {
               <div class="batch-bar hidden" id="create-batch-bar" aria-live="polite">
                 <div class="batch-bar-copy">
                   <span class="batch-count" id="create-batch-count">0 selected</span>
-                  <span class="batch-tool" id="create-batch-tool">tool: codex</span>
+                  <span class="batch-tool" id="create-batch-tool">tool: grok</span>
                   <span class="batch-preview" id="create-batch-preview">request: (none)</span>
                 </div>
                 <div class="batch-actions">
@@ -448,6 +448,7 @@ async fn render_index(focus_layout: bool) -> impl IntoResponse {
               <label class="field">
                 <span>Tool</span>
                 <select id="create-tool">
+                  <option value="grok">Grok</option>
                   <option value="codex">Codex</option>
                   <option value="claude">Claude</option>
                 </select>

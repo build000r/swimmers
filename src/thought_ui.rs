@@ -2,10 +2,9 @@
 // NOTE(2026-04-21): Keep this module focused on presentation-layer metadata and presets.
 
 use crate::openrouter_models::cached_or_default_openrouter_candidates;
-use crate::thought::runtime_config::DEFAULT_CODEX_MODEL;
 use crate::types::{ThoughtConfigBackendMetadata, ThoughtConfigUiMetadata};
 
-const THOUGHT_BACKEND_OPTIONS: [&str; 3] = ["", "openrouter", "codex"];
+const THOUGHT_BACKEND_OPTIONS: [&str; 3] = ["", "openrouter", "grok"];
 
 pub fn thought_backend_cycle_options() -> &'static [&'static str] {
     &THOUGHT_BACKEND_OPTIONS
@@ -14,8 +13,9 @@ pub fn thought_backend_cycle_options() -> &'static [&'static str] {
 pub fn canonical_thought_backend_key(value: &str) -> &'static str {
     match value.trim().to_ascii_lowercase().as_str() {
         "" => "",
-        "claude" | "claude-cli" | "claude_cli" | "openrouter" => "openrouter",
-        "codex" | "codex-cli" | "codex_cli" => "codex",
+        "openrouter" => "openrouter",
+        "grok" | "grok-cli" | "grok_cli" | "codex" | "codex-cli" | "codex_cli" | "claude"
+        | "claude-cli" | "claude_cli" => "grok",
         _ => "custom",
     }
 }
@@ -24,7 +24,7 @@ pub fn thought_backend_label(value: &str) -> &'static str {
     match canonical_thought_backend_key(value) {
         "" => "auto",
         "openrouter" => "openrouter",
-        "codex" => "codex",
+        "grok" => "grok",
         _ => "custom",
     }
 }
@@ -32,7 +32,7 @@ pub fn thought_backend_label(value: &str) -> &'static str {
 pub fn thought_model_presets_hint(value: &str) -> &'static str {
     match canonical_thought_backend_key(value) {
         "openrouter" => "presets: auto  router  cached free models",
-        "codex" => "preset: gpt-5.4-mini",
+        "grok" => "uses Grok CLI default unless a model is set",
         _ => "auto backend uses daemon default model",
     }
 }
@@ -48,16 +48,13 @@ pub fn thought_model_presets(value: &str, openrouter_model_presets: &[String]) -
             }
             values
         }
-        "codex" => vec![DEFAULT_CODEX_MODEL.to_string()],
+        "grok" => vec![String::new()],
         _ => vec![String::new()],
     }
 }
 
 pub fn normalize_thought_model_for_backend(backend: &str, model: &str) -> String {
     let trimmed = model.trim();
-    if canonical_thought_backend_key(backend) == "codex" && trimmed != DEFAULT_CODEX_MODEL {
-        return DEFAULT_CODEX_MODEL.to_string();
-    }
     if trimmed.is_empty() {
         return String::new();
     }
@@ -65,7 +62,7 @@ pub fn normalize_thought_model_for_backend(backend: &str, model: &str) -> String
     let keep = match canonical_thought_backend_key(backend) {
         "" => false,
         "openrouter" => trimmed.contains('/'),
-        "codex" => trimmed == DEFAULT_CODEX_MODEL,
+        "grok" => !trimmed.contains('/'),
         _ => true,
     };
 
@@ -98,10 +95,10 @@ pub fn thought_config_ui_metadata(openrouter_model_presets: &[String]) -> Though
                 model_presets: thought_model_presets("openrouter", &openrouter_model_presets),
             },
             ThoughtConfigBackendMetadata {
-                key: "codex".to_string(),
-                label: "codex".to_string(),
-                model_presets_hint: thought_model_presets_hint("codex").to_string(),
-                model_presets: thought_model_presets("codex", &[]),
+                key: "grok".to_string(),
+                label: "grok".to_string(),
+                model_presets_hint: thought_model_presets_hint("grok").to_string(),
+                model_presets: thought_model_presets("grok", &[]),
             },
         ],
     }
@@ -114,30 +111,37 @@ mod tests {
     #[test]
     fn canonical_backend_key_maps_aliases() {
         assert_eq!(canonical_thought_backend_key(""), "");
-        assert_eq!(canonical_thought_backend_key("claude-cli"), "openrouter");
-        assert_eq!(canonical_thought_backend_key("codex_cli"), "codex");
+        assert_eq!(canonical_thought_backend_key("claude-cli"), "grok");
+        assert_eq!(canonical_thought_backend_key("codex_cli"), "grok");
+        assert_eq!(canonical_thought_backend_key("grok_cli"), "grok");
         assert_eq!(canonical_thought_backend_key("openrouter"), "openrouter");
         assert_eq!(canonical_thought_backend_key("custom-backend"), "custom");
     }
 
     #[test]
     fn normalize_model_clears_incompatible_values() {
-        assert!(normalize_thought_model_for_backend("claude", "haiku").is_empty());
         assert_eq!(
-            normalize_thought_model_for_backend("codex", "gpt-5.4-mini"),
-            "gpt-5.4-mini"
+            normalize_thought_model_for_backend("grok", "grok-4"),
+            "grok-4"
         );
         assert_eq!(
-            normalize_thought_model_for_backend("codex", "gpt-5.1-codex-mini"),
-            "gpt-5.4-mini"
+            normalize_thought_model_for_backend("claude", "haiku"),
+            "haiku"
+        );
+        assert_eq!(
+            normalize_thought_model_for_backend("codex", "gpt-5.4"),
+            "gpt-5.4"
         );
         assert!(normalize_thought_model_for_backend("", "haiku").is_empty());
     }
 
     #[test]
-    fn codex_presets_only_offer_current_low_cost_model() {
-        assert_eq!(thought_model_presets("codex", &[]), vec!["gpt-5.4-mini"]);
-        assert_eq!(thought_model_presets_hint("codex"), "preset: gpt-5.4-mini");
+    fn grok_presets_use_cli_default_model() {
+        assert_eq!(thought_model_presets("grok", &[]), vec![""]);
+        assert_eq!(
+            thought_model_presets_hint("grok"),
+            "uses Grok CLI default unless a model is set"
+        );
     }
 
     #[test]

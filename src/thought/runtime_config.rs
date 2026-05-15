@@ -11,7 +11,7 @@ pub const MODEL_MAX_CHARS: usize = 200;
 pub const PROMPT_MAX_CHARS: usize = 4_000;
 pub const DEFAULT_THOUGHT_BACKEND: &str = "openrouter";
 pub const DEFAULT_OPENROUTER_MODEL: &str = "openrouter/free";
-pub const DEFAULT_CODEX_MODEL: &str = "gpt-5.4-mini";
+pub const DEFAULT_GROK_MODEL: &str = "";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ThoughtConfig {
@@ -64,7 +64,7 @@ impl ThoughtConfig {
             ));
         }
 
-        const VALID_BACKENDS: &[&str] = &["openrouter", "codex"];
+        const VALID_BACKENDS: &[&str] = &["openrouter", "grok"];
         if !VALID_BACKENDS
             .iter()
             .any(|v| v.eq_ignore_ascii_case(&self.backend))
@@ -72,7 +72,7 @@ impl ThoughtConfig {
             return Err(ThoughtConfigValidationError::new(
                 "backend",
                 format!(
-                    "unrecognized backend {:?}; expected one of: openrouter, codex",
+                    "unrecognized backend {:?}; expected one of: openrouter, grok",
                     self.backend
                 ),
             ));
@@ -184,8 +184,9 @@ fn normalize_optional_prompt(value: Option<String>) -> Option<String> {
 
 fn normalize_backend(value: &str) -> String {
     match value.trim().to_ascii_lowercase().as_str() {
-        "" | "openrouter" | "claude" | "claude_cli" | "claude-cli" => default_backend().to_string(),
-        "codex" | "codex_cli" | "codex-cli" => "codex".to_string(),
+        "" | "openrouter" => default_backend().to_string(),
+        "grok" | "grok_cli" | "grok-cli" | "codex" | "codex_cli" | "codex-cli" | "claude"
+        | "claude_cli" | "claude-cli" => "grok".to_string(),
         other => other.to_string(),
     }
 }
@@ -200,11 +201,11 @@ fn normalize_model_for_backend(backend: &str, model: &str) -> String {
                 default_model()
             }
         }
-        "codex" => {
-            if trimmed == DEFAULT_CODEX_MODEL {
-                trimmed.to_string()
+        "grok" => {
+            if trimmed.contains('/') {
+                DEFAULT_GROK_MODEL.to_string()
             } else {
-                DEFAULT_CODEX_MODEL.to_string()
+                trimmed.to_string()
             }
         }
         _ => trimmed.to_string(),
@@ -302,8 +303,29 @@ mod tests {
     }
 
     #[test]
-    fn normalize_migrates_empty_and_claude_backends_to_openrouter_defaults() {
-        for backend in ["", "claude", "claude_cli", "claude-cli"] {
+    fn normalize_migrates_empty_backend_to_openrouter_defaults() {
+        let config = ThoughtConfig {
+            backend: String::new(),
+            model: "haiku".to_string(),
+            ..ThoughtConfig::default()
+        };
+        let normalized = config
+            .normalize_and_validate()
+            .expect("empty backend should normalize");
+        assert_eq!(normalized.backend, "openrouter");
+        assert_eq!(normalized.model, "openrouter/free");
+    }
+
+    #[test]
+    fn normalize_migrates_legacy_cli_backends_to_grok() {
+        for backend in [
+            "claude",
+            "claude_cli",
+            "claude-cli",
+            "codex",
+            "codex_cli",
+            "codex-cli",
+        ] {
             let config = ThoughtConfig {
                 backend: backend.to_string(),
                 model: "haiku".to_string(),
@@ -312,14 +334,22 @@ mod tests {
             let normalized = config
                 .normalize_and_validate()
                 .expect("legacy backend should normalize");
-            assert_eq!(normalized.backend, "openrouter");
-            assert_eq!(normalized.model, "openrouter/free");
+            assert_eq!(normalized.backend, "grok");
+            assert_eq!(normalized.model, "haiku");
         }
     }
 
     #[test]
     fn backend_validation_accepts_supported_values_and_aliases() {
-        for backend in ["openrouter", "codex", "codex_cli", "codex-cli"] {
+        for backend in [
+            "openrouter",
+            "grok",
+            "grok_cli",
+            "grok-cli",
+            "codex",
+            "codex_cli",
+            "codex-cli",
+        ] {
             let config = ThoughtConfig {
                 backend: backend.to_string(),
                 ..ThoughtConfig::default()
@@ -332,19 +362,28 @@ mod tests {
     }
 
     #[test]
-    fn normalize_codex_backend_uses_supported_default_model() {
-        for model in ["", "gpt-5.1-codex-mini", "gpt-5.3-codex", "gpt-5.4"] {
+    fn normalize_grok_backend_keeps_model_override() {
+        for model in ["", "grok-4"] {
             let config = ThoughtConfig {
-                backend: "codex".to_string(),
+                backend: "grok".to_string(),
                 model: model.to_string(),
                 ..ThoughtConfig::default()
             };
             let normalized = config
                 .normalize_and_validate()
-                .expect("codex backend should normalize stale models");
-            assert_eq!(normalized.backend, "codex");
-            assert_eq!(normalized.model, DEFAULT_CODEX_MODEL);
+                .expect("grok backend should normalize");
+            assert_eq!(normalized.backend, "grok");
+            assert_eq!(normalized.model, model);
         }
+
+        let normalized = ThoughtConfig {
+            backend: "grok".to_string(),
+            model: "openrouter/free".to_string(),
+            ..ThoughtConfig::default()
+        }
+        .normalize_and_validate()
+        .expect("grok backend should clear router-shaped models");
+        assert!(normalized.model.is_empty());
     }
 
     #[test]

@@ -855,7 +855,7 @@ impl ArtifactOpener for MockArtifactOpener {
 #[derive(Default)]
 struct MockCommitLauncherState {
     calls: Vec<SessionSummary>,
-    result: Option<CommitCodexLaunch>,
+    result: Option<CommitGrokLaunch>,
     error: Option<String>,
 }
 
@@ -875,13 +875,13 @@ impl MockCommitLauncher {
 }
 
 impl CommitLauncher for MockCommitLauncher {
-    fn launch(&self, session: &SessionSummary) -> io::Result<CommitCodexLaunch> {
+    fn launch(&self, session: &SessionSummary) -> io::Result<CommitGrokLaunch> {
         let mut state = self.state.lock().unwrap();
         state.calls.push(session.clone());
         if let Some(message) = state.error.clone() {
             return Err(io::Error::other(message));
         }
-        Ok(state.result.clone().unwrap_or(CommitCodexLaunch {
+        Ok(state.result.clone().unwrap_or(CommitGrokLaunch {
             session_name: "commit-7-123".to_string(),
             watch_command: "tmux a -t commit-7-123".to_string(),
         }))
@@ -6497,7 +6497,7 @@ fn submitting_initial_request_creates_hidden_session_without_native_open() {
         api.create_calls(),
         vec![(
             TEST_REPO_SWIMMERS.to_string(),
-            SpawnTool::Codex,
+            SpawnTool::Grok,
             Some("add hidden spawn flow".to_string()),
         )]
     );
@@ -6531,7 +6531,7 @@ fn submitting_batch_initial_request_creates_visible_sessions_without_native_open
         10,
         dir_response(TEST_REPOS_ROOT, &[("alpha", true), ("beta", true)]),
         true,
-        SpawnTool::Codex,
+        SpawnTool::Grok,
         None,
     ));
     app.initial_request = Some({
@@ -6556,7 +6556,7 @@ fn submitting_batch_initial_request_creates_visible_sessions_without_native_open
         api.create_batch_calls(),
         vec![(
             vec![TEST_REPO_ALPHA.to_string(), TEST_REPO_BETA.to_string()],
-            SpawnTool::Codex,
+            SpawnTool::Grok,
             Some("refactor shared logger".to_string()),
         )]
     );
@@ -6883,7 +6883,7 @@ fn pressing_enter_after_pasting_initial_request_submits_once() {
         api.create_calls(),
         vec![(
             TEST_REPO_SWIMMERS.to_string(),
-            SpawnTool::Codex,
+            SpawnTool::Grok,
             Some(pasted.to_string()),
         )]
     );
@@ -7060,7 +7060,7 @@ fn session_create_failure_does_not_attempt_native_open() {
         api.create_calls(),
         vec![(
             TEST_REPO_SWIMMERS.to_string(),
-            SpawnTool::Codex,
+            SpawnTool::Grok,
             Some("fix tmux startup".to_string()),
         )]
     );
@@ -7127,7 +7127,7 @@ fn typing_initial_request_and_pressing_enter_still_creates_hidden_session() {
         api.create_calls(),
         vec![(
             TEST_REPO_SWIMMERS.to_string(),
-            SpawnTool::Codex,
+            SpawnTool::Grok,
             Some("add hidden spawn flow".to_string()),
         )]
     );
@@ -7520,10 +7520,10 @@ fn toggle_tool_switches_spawn_tool_and_persists_across_picker_reopen() {
     assert!(app.pending_interaction.is_some());
     poll_until_interaction(&mut app);
 
-    assert_eq!(app.spawn_tool, SpawnTool::Codex);
+    assert_eq!(app.spawn_tool, SpawnTool::Grok);
     assert_eq!(
         app.picker.as_ref().map(|p| p.spawn_tool),
-        Some(SpawnTool::Codex)
+        Some(SpawnTool::Grok)
     );
 
     app.handle_picker_action(PickerAction::ToggleTool, field);
@@ -7668,7 +7668,7 @@ fn spawn_session_sends_selected_launch_target() {
         api.create_calls_with_targets(),
         vec![(
             TEST_REPO_SWIMMERS.to_string(),
-            SpawnTool::Codex,
+            SpawnTool::Grok,
             Some("jeremy-skillbox".to_string()),
             Some("move this off laptop".to_string()),
         )]
@@ -7699,7 +7699,7 @@ fn spawn_batch_sends_selected_launch_target() {
         api.create_batch_calls_with_targets(),
         vec![(
             vec![TEST_REPO_ALPHA.to_string()],
-            SpawnTool::Codex,
+            SpawnTool::Grok,
             Some("jeremy-skillbox".to_string()),
             Some("fan out remotely".to_string()),
         )]
@@ -7963,8 +7963,8 @@ fn handle_key_event_opens_thought_config_editor() {
         .thought_config_editor
         .as_ref()
         .expect("thought config editor should open");
-    assert_eq!(editor.config.backend, "openrouter");
-    assert_eq!(editor.config.model, "openrouter/free");
+    assert_eq!(editor.config.backend, "grok");
+    assert_eq!(editor.config.model, "haiku");
 }
 
 #[test]
@@ -8075,8 +8075,8 @@ fn thought_config_editor_updates_backend_and_model_then_saves() {
         ui: swimmers::types::ThoughtConfigUiMetadata::default(),
     }));
     api.push_update_thought_config(Ok(ThoughtConfig {
-        backend: "codex".to_string(),
-        model: "gpt-5.4-mini".to_string(),
+        backend: "grok".to_string(),
+        model: String::new(),
         ..ThoughtConfig::default()
     }));
     api.push_test_thought_config(Ok(ThoughtConfigTestResponse {
@@ -8131,8 +8131,8 @@ fn thought_config_editor_updates_backend_and_model_then_saves() {
         .into_iter()
         .next()
         .expect("saved config");
-    assert_eq!(saved.backend, "codex");
-    assert_eq!(saved.model, "gpt-5.4-mini");
+    assert_eq!(saved.backend, "grok");
+    assert!(saved.model.is_empty());
     assert_eq!(api.test_thought_config_calls().len(), 1);
 }
 
@@ -8225,7 +8225,7 @@ fn thought_config_key_moves_focus_and_edits_fields() {
         app.thought_config_editor
             .as_ref()
             .map(|editor| editor.config.backend.as_str()),
-        Some("codex")
+        Some("grok")
     );
     app.handle_thought_config_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE), layout);
     assert_eq!(
@@ -8504,8 +8504,8 @@ fn thought_config_editor_clears_incompatible_model_when_backend_changes() {
     );
 
     editor.cycle_backend(1);
-    assert_eq!(editor.backend_label(), "codex");
-    assert_eq!(editor.config.model, "gpt-5.4-mini");
+    assert_eq!(editor.backend_label(), "grok");
+    assert!(editor.config.model.is_empty());
 
     editor.config.model = "gpt-5.4".to_string();
     editor.cycle_backend(-1);
@@ -8956,7 +8956,7 @@ fn clicking_commit_badge_launches_commit_codex_without_opening_session() {
     assert_eq!(launch_calls[0].tmux_name, session.tmux_name);
     assert_eq!(
         app.message.as_ref().map(|(message, _)| message.as_str()),
-        Some("commit codex: tmux a -t commit-7-123")
+        Some("commit grok: tmux a -t commit-7-123")
     );
 }
 
@@ -9002,7 +9002,7 @@ fn clicking_commit_badge_surfaces_commit_launch_errors() {
 
     assert_eq!(
         app.message.as_ref().map(|(message, _)| message.as_str()),
-        Some("failed to launch commit codex: tmux not found")
+        Some("failed to launch commit grok: tmux not found")
     );
 }
 
