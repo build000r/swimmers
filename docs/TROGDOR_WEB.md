@@ -34,7 +34,7 @@ Trogdor mode is the web operator view for live Swimmers sessions. It keeps the b
    - `batch`: send one line to ready sessions in the same existing batch.
    - `launch`: open the create-session sheet for the same repo.
    - `mmd`: open the Mermaid artifact sheet.
-   - `commit`: launch the existing commit Codex flow when the shared pressure model marks the session commit-ready.
+   - `commit`: launch the existing commit Grok flow when the shared pressure model marks the session commit-ready.
 8. When an operator response resolves an awaiting-user swordsman, the atlas briefly keeps that swordsman visible as burnt and moves the dragon into a fire pose aimed at the same repo slot. This is the visual close of the loop; it does not create a new backend state.
 9. In the Mermaid sheet, use plan-file tabs when the artifact reports `plan_files`; the web reads them through the existing `/v1/sessions/{id}/plan-file` API.
 

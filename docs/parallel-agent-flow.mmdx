@@ -1,0 +1,205 @@
+<!-- mmdx
+{
+  "entry": "main",
+  "links": [
+    {
+      "from": "main",
+      "label": "One Prompt Fanout",
+      "to": "fanout",
+      "title": "Open the one prompt, many cwd launch sequence"
+    },
+    {
+      "from": "main",
+      "label": "Context Contract",
+      "to": "context-contract",
+      "title": "Open the Skillbox and SBP context contract"
+    },
+    {
+      "from": "main",
+      "label": "Voice Entry",
+      "to": "voice-entry",
+      "title": "Open the voice and mobile entry path"
+    },
+    {
+      "from": "main",
+      "label": "Anonymized Example",
+      "to": "example",
+      "title": "Open an anonymized daily work example"
+    },
+    {
+      "from": "main",
+      "label": "Review Loop",
+      "to": "review-loop",
+      "title": "Open the monitor, steer, verify, and close loop"
+    }
+  ]
+}
+-->
+
+## chart main Daily Parallel Agent Operating Story
+```mermaid
+flowchart LR
+  intent["Operator intent\none clear request"]:::human
+  entry{"Choose entry surface"}:::decision
+  swimmers["Swimmers TUI or API\nrepo picker, batch, cockpit"]:::tool
+  voice["Voice Entry\nmacOS dictation or iOS relay"]:::tool
+  contract["Context Contract\nSkillbox focus + SBP cwd skills"]:::recommended
+  fanout["One Prompt Fanout\nsame request, many cwd agents"]:::recommended
+  fleet["Agent fleet\none tmux agent session per repo"]:::agent
+  observe["Swimmers aquarium\nstate, terminal, diffs, skills, artifacts"]:::tool
+  review["Review Loop\nattention, group input, evidence, closeout"]:::recommended
+  example["Anonymized Example\nAPI + web + mobile release slice"]:::artifact
+
+  intent --> entry
+  entry -->|typed once| swimmers
+  entry -->|spoken once| voice
+  voice --> swimmers
+  swimmers --> contract --> fanout --> fleet --> observe --> review
+  example -. demonstrates .-> fanout
+
+  classDef human fill:#e0f2fe,stroke:#0284c7,color:#0c4a6e,stroke-width:2px
+  classDef tool fill:#f8fafc,stroke:#64748b,color:#0f172a
+  classDef agent fill:#fef3c7,stroke:#d97706,color:#78350f,stroke-width:2px
+  classDef decision fill:#ede9fe,stroke:#7c3aed,color:#3b0764,stroke-width:2px
+  classDef recommended fill:#d1fae5,stroke:#059669,color:#064e3b,stroke-width:3px
+  classDef artifact fill:#f3f4f6,stroke:#6b7280,color:#111827
+```
+
+## chart fanout One Prompt Many CWD Launch Sequence
+```mermaid
+sequenceDiagram
+  autonumber
+  participant O as Operator
+  participant S as Swimmers
+  participant SBP as SBP
+  participant A as Agent: repo A
+  participant B as Agent: repo B
+  participant C as Agent: repo C
+  participant T as Tmux
+
+  O->>S: Select repo A, repo B, repo C
+  O->>S: Enter one initial request
+  S->>SBP: Resolve cwd-scoped skills for each repo
+  SBP-->>S: Skill visibility and prep receipts
+  S->>T: Create batch with shared prompt excerpt
+  par repo A
+    T->>A: Start selected agent in cwd A
+  and repo B
+    T->>B: Start selected agent in cwd B
+  and repo C
+    T->>C: Start selected agent in cwd C
+  end
+  A-->>S: State, transcript, diff, artifacts
+  B-->>S: State, transcript, diff, artifacts
+  C-->>S: State, transcript, diff, artifacts
+  O->>S: Send follow-up to ready sessions or inspect one cockpit
+```
+
+## chart context-contract Skillbox and SBP Context Contract
+```mermaid
+flowchart TD
+  skillbox["Skillbox runtime graph\nrepos, services, skills, checks"]:::source
+  focus["focus client/profile\nsync, bootstrap, up, collect, context"]:::process
+  generated["Generated AGENTS/CLAUDE context\nwhat exists and how to operate it"]:::artifact
+  sbp["SBP cwd read\nskills, MCP, beads, overlay state"]:::process
+  prep{"Skill requested?"}:::decision
+  activate["sbp skill activate --cwd\nrepo-local prep before launch"]:::recommended
+  swimmers["Swimmers session skills panel\npassive cwd visibility"]:::tool
+  prompt["Worker prompt\nselected_cwd, executor, matched skills, prep receipt"]:::artifact
+  agent["Agent starts with explicit repo contract"]:::agent
+
+  skillbox --> focus --> generated --> sbp --> prep
+  prep -->|yes| activate --> prompt
+  prep -->|no| prompt
+  sbp --> swimmers
+  prompt --> agent
+
+  classDef source fill:#e0f2fe,stroke:#0284c7,color:#0c4a6e,stroke-width:2px
+  classDef process fill:#f8fafc,stroke:#64748b,color:#0f172a
+  classDef decision fill:#ede9fe,stroke:#7c3aed,color:#3b0764,stroke-width:2px
+  classDef recommended fill:#d1fae5,stroke:#059669,color:#064e3b,stroke-width:3px
+  classDef artifact fill:#f3f4f6,stroke:#6b7280,color:#111827
+  classDef tool fill:#fef3c7,stroke:#d97706,color:#78350f,stroke-width:2px
+  classDef agent fill:#dcfce7,stroke:#16a34a,color:#14532d,stroke-width:2px
+```
+
+## chart voice-entry Voice and Mobile Entry Path
+```mermaid
+sequenceDiagram
+  autonumber
+  participant H as Human
+  participant Mac as voice-to-text
+  participant IOS as vtt-ios
+  participant Relay as Trusted relay
+  participant Router as cwd router
+  participant SBP as SBP prep
+  participant S as Swimmers
+
+  alt macOS dispatch mode
+    H->>Mac: Speak task once
+    Mac->>Router: Clean transcript and choose cwd
+  else iOS foreground note
+    H->>IOS: Record one voice note
+    IOS->>Relay: Upload audio with pairing token
+    Relay->>Router: Transcribe, clean, route
+  end
+  Router->>SBP: Activate requested skills for selected cwd
+  SBP-->>Router: Prep receipt
+  Router->>S: POST hidden session with worker prompt
+  S-->>H: Session appears in aquarium with status and artifacts
+```
+
+## chart example Anonymized Parallel Agent Example
+```mermaid
+flowchart TD
+  brief["Example prompt\nMake the beta release path real across API, web, mobile, and docs"]:::human
+  pick["Pick cwd set\nrepo-api, repo-web, repo-ios, repo-docs"]:::decision
+  batch["Swimmers batch\nsame mission, per-cwd execution"]:::recommended
+
+  api["repo-api agent\nrelay contract and server checks"]:::agent
+  web["repo-web agent\noperator cockpit and proof UI"]:::agent
+  ios["repo-ios agent\nclient smoke and redaction gates"]:::agent
+  docs["repo-docs agent\nrunbook and evidence worksheet"]:::agent
+
+  evidence["Shared evidence packet\ncommands, screenshots, logs, blocked gates"]:::artifact
+  merge{"Coordinator review"}:::decision
+  follow["Group follow-up\nsame correction to ready sessions"]:::recommended
+  close["Closeout\nbeads synced, tests named, residual risk explicit"]:::artifact
+
+  brief --> pick --> batch
+  batch --> api --> evidence
+  batch --> web --> evidence
+  batch --> ios --> evidence
+  batch --> docs --> evidence
+  evidence --> merge
+  merge -->|needs correction| follow --> api
+  merge -->|accepted| close
+
+  classDef human fill:#e0f2fe,stroke:#0284c7,color:#0c4a6e,stroke-width:2px
+  classDef decision fill:#ede9fe,stroke:#7c3aed,color:#3b0764,stroke-width:2px
+  classDef recommended fill:#d1fae5,stroke:#059669,color:#064e3b,stroke-width:3px
+  classDef agent fill:#fef3c7,stroke:#d97706,color:#78350f,stroke-width:2px
+  classDef artifact fill:#f3f4f6,stroke:#6b7280,color:#111827
+```
+
+## chart review-loop Monitor Steer Verify Close
+```mermaid
+stateDiagram-v2
+  [*] --> Launched
+  Launched --> Working: agent reads repo contract
+  Working --> Waiting: needs operator input
+  Working --> EvidenceReady: tests or proof produced
+  Waiting --> Steered: targeted input or batch group input
+  Steered --> Working
+  EvidenceReady --> Review: inspect diff, transcript, artifacts
+  Review --> Working: issue found
+  Review --> Verified: commands and proof pass
+  Verified --> Closed: bead or task closed and synced
+  Closed --> [*]
+
+  state Waiting {
+    [*] --> Attention
+    Attention --> LaunchNext: optional next prompt in same cwd
+    LaunchNext --> [*]
+  }
+```

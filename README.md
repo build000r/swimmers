@@ -216,6 +216,7 @@ swimmers
 | `AUTH_MODE` | `local_trust` | Auth mode: `local_trust`, `tailnet_trust`, or `token` |
 | `AUTH_TOKEN` | `(unset)` | Bearer token when `AUTH_MODE=token` |
 | `OBSERVER_TOKEN` | `(unset)` | Read-only bearer token for token-auth deployments |
+| `SWIMMERS_GROK_BIN` | `grok` | Override the Grok executable used by local spawn and commit-helper launchers |
 | `SWIMMERS_NATIVE_APP` | `iterm` | Native desktop target: `iterm` or `ghostty` |
 | `SWIMMERS_GHOSTTY_MODE` | `swap` | Ghostty single-session placement: `swap`, `add`, or `window` |
 | `SWIMMERS_THOUGHT_BACKEND` | `daemon` | Thought subsystem backend: `daemon` or `inproc` |

@@ -35,7 +35,7 @@
 
 ## Data, Config, State
 - Runtime config is environment-variable based; there is no committed config file.
-- Key env vars verified in README/code: `PORT`, `SWIMMERS_BIND`, `AUTH_MODE`, `AUTH_TOKEN`, `OBSERVER_TOKEN`, `SWIMMERS_DATA_DIR`, `SWIMMERS_TUI_URL`, `SWIMMERS_TUI_REUSE_SERVER`, `SWIMMERS_REPLAY_BUFFER_SIZE`, `SWIMMERS_THOUGHT_BACKEND`, `SWIMMERS_VOICE_MODEL`, `SWIMMERS_VOICE_LANGUAGE`.
+- Key env vars verified in README/code: `PORT`, `SWIMMERS_BIND`, `AUTH_MODE`, `AUTH_TOKEN`, `OBSERVER_TOKEN`, `SWIMMERS_GROK_BIN`, `SWIMMERS_DATA_DIR`, `SWIMMERS_TUI_URL`, `SWIMMERS_TUI_REUSE_SERVER`, `SWIMMERS_REPLAY_BUFFER_SIZE`, `SWIMMERS_THOUGHT_BACKEND`, `SWIMMERS_VOICE_MODEL`, `SWIMMERS_VOICE_LANGUAGE`.
 - Default server bind is `127.0.0.1:3210`; non-loopback `AUTH_MODE=local_trust` is refused at startup.
 - Data directory resolves from `SWIMMERS_DATA_DIR`, else platform data dir plus `swimmers`, else `./data/swimmers/`.
 - Persisted files include `session_registry.json`, `thoughts.json`, and `thought_config.json` under the data dir.

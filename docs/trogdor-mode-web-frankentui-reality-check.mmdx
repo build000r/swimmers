@@ -149,7 +149,7 @@ flowchart TD
   plan["Planning state"] --> missing["OK: docs/TROGDOR_WEB_WORKGRAPH.md records completed work and deferred scope"]
   game["Trogdor mode"] --> noimpl["OK: web atlas and hover speed-reader vertical slice exists"]
   game --> sharedgap["OK: pressure derivation moved to src/operator_pressure.rs and /v1/operator-pressure"]
-  game --> actions["OK: hover panel can send, batch-send, launch, open Mermaid, and launch commit Codex"]
+  game --> actions["OK: hover panel can send, batch-send, launch, open Mermaid, and launch commit Grok"]
   game --> plans["OK: Mermaid sheet exposes existing plan_files via /v1/sessions/{id}/plan-file"]
   game --> visual["OK: atlas includes burninate banner, repo structures, burninating pressure rows, and agent glyphs"]
   game --> operator_doc["OK: docs/TROGDOR_WEB.md explains controls and reuse contract"]
