@@ -237,6 +237,7 @@ impl Default for StateEvidence {
 pub enum SpawnTool {
     Claude,
     Codex,
+    Grok,
 }
 
 impl SpawnTool {
@@ -244,6 +245,7 @@ impl SpawnTool {
         match self {
             Self::Claude => "claude",
             Self::Codex => "codex",
+            Self::Grok => "grok",
         }
     }
 
@@ -253,6 +255,7 @@ impl SpawnTool {
         match self {
             Self::Claude => "claude",
             Self::Codex => "codex",
+            Self::Grok => "grok",
         }
     }
 
@@ -261,7 +264,8 @@ impl SpawnTool {
     pub fn toggle(self) -> Self {
         match self {
             Self::Claude => Self::Codex,
-            Self::Codex => Self::Claude,
+            Self::Codex => Self::Grok,
+            Self::Grok => Self::Claude,
         }
     }
 }
@@ -1472,6 +1476,7 @@ pub fn detect_tool_name(comm: &str) -> Option<&'static str> {
     match token.to_lowercase().as_str() {
         "claude" | "claude-code" | "claude_code" => Some("Claude Code"),
         "codex" | "codex-cli" | "codex_cli" => Some("Codex"),
+        "grok" | "grok-cli" | "grok_cli" => Some("Grok"),
         "amp" => Some("Amp"),
         "opencode" | "open-code" | "open_code" => Some("OpenCode"),
         "aider" => Some("Aider"),
@@ -1514,6 +1519,7 @@ mod tests {
         );
         assert_eq!(detect_tool_name("codex-cli"), Some("Codex"));
         assert_eq!(detect_tool_name("'codex'"), Some("Codex"));
+        assert_eq!(detect_tool_name("grok-cli"), Some("Grok"));
     }
 
     #[test]
@@ -1533,6 +1539,7 @@ mod tests {
     fn spawn_tool_commands_match_cli_entrypoints() {
         assert_eq!(SpawnTool::Claude.command(), "claude");
         assert_eq!(SpawnTool::Codex.command(), "codex");
+        assert_eq!(SpawnTool::Grok.command(), "grok");
     }
 
     #[test]

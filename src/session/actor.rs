@@ -2358,6 +2358,7 @@ fn detect_tool_from_title(title: &str) -> Option<String> {
     for (pattern, name) in &[
         ("claude", "Claude Code"),
         ("codex", "Codex"),
+        ("grok", "Grok"),
         ("aider", "Aider"),
         ("goose", "Goose"),
         ("cline", "Cline"),

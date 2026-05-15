@@ -4,6 +4,7 @@ pub mod cli;
 pub mod config;
 pub mod env_bootstrap;
 pub mod host_actions;
+pub mod launcher;
 pub mod metrics;
 pub mod native;
 pub mod openrouter_models;
