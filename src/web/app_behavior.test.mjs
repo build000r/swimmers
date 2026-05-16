@@ -53,6 +53,7 @@ class MockElement {
     this.disabled = false;
     this.textContent = "";
     this.innerHTML = "";
+    this.children = [];
     this.scrollTop = 0;
     this.scrollHeight = 0;
     this.clientHeight = 0;
@@ -83,6 +84,11 @@ class MockElement {
   }
 
   select() {}
+
+  appendChild(child) {
+    this.children.push(child);
+    return child;
+  }
 
   getBoundingClientRect() {
     return { left: 0, top: 0, width: 1280, height: 720 };
@@ -122,6 +128,9 @@ globalThis.document = {
   title: "swimmers",
   body: new MockElement("body"),
   getElementById: element,
+  createElement(tagName) {
+    return new MockElement(String(tagName));
+  },
 };
 if (!globalThis.navigator) {
   Object.defineProperty(globalThis, "navigator", {
@@ -206,6 +215,10 @@ function resetWebState() {
     clearInterval(web.state.snapshotTimer);
     web.state.snapshotTimer = null;
   }
+  if (web.state.refreshTimer) {
+    clearTimeout(web.state.refreshTimer);
+    web.state.refreshTimer = null;
+  }
   if (web.state.terminalPaintProbeTimer) {
     clearTimeout(web.state.terminalPaintProbeTimer);
     web.state.terminalPaintProbeTimer = null;
@@ -230,6 +243,7 @@ function resetWebState() {
   }
   web.state.sessions = [rawSession()];
   web.state.selectedSessionId = null;
+  web.state.followPublishedSelection = false;
   web.state.trogdorAtlasOpen = true;
   web.state.hoveredTrogdorSessionId = null;
   web.state.trogdorReaderStartedAt = 0;
@@ -251,6 +265,7 @@ function resetWebState() {
   web.state.frankenLoadError = "";
   web.state.frankenAssetSummary = "";
   web.state.ws = null;
+  web.state.lastTerminalSeqBySession = new Map();
   web.state.reconnectTimer = null;
   web.state.reconnectAttempt = 0;
   web.state.pendingInputMessages = new Map();
@@ -282,6 +297,7 @@ function resetWebState() {
   web.state.workbenchLogSearch = "";
   web.state.workbenchSelectedTurnId = "";
   web.state.readOnly = false;
+  web.state.backendHealth = null;
   web.state.terminalFallbackActive = false;
   web.state.terminalFallbackAutoFollow = true;
   web.state.terminalMirrorText = "";
@@ -295,6 +311,18 @@ function resetWebState() {
   web.state.paletteItems = [];
   web.state.paletteIndex = 0;
   web.state.activeSheet = null;
+  web.state.mermaidArtifact = {
+    loading: false,
+    sessionId: null,
+    artifact: null,
+    svg: "",
+    source: "",
+    planFiles: [],
+    activePlanFile: "",
+    planContent: "",
+    status: "",
+    error: "",
+  };
   if (originalFetch) {
     globalThis.fetch = originalFetch;
   } else {
@@ -436,6 +464,53 @@ test("replayed terminal bytes flush protocol replies back to tmux", () => {
   assert.deepEqual(fed, [65, 66]);
   assert.equal(sent.length, 1);
   assert.deepEqual(Array.from(sent[0]), [27, 91, 99]);
+});
+
+test("framed terminal output records sequence and returns payload", () => {
+  resetWebState();
+  const ws = { sessionId: "sess_0", framedOutput: true };
+  const frame = new Uint8Array([
+    0x11,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    5,
+    65,
+    66,
+  ]);
+
+  const payload = web.terminalPayloadFromSocketBytes(frame, ws);
+
+  assert.deepEqual(Array.from(payload), [65, 66]);
+  assert.equal(web.state.lastTerminalSeqBySession.get("sess_0"), "5");
+});
+
+test("raw terminal output remains unchanged without framed opt-in", () => {
+  resetWebState();
+  const raw = new Uint8Array([65, 66, 67]);
+
+  const payload = web.terminalPayloadFromSocketBytes(raw, { sessionId: "sess_0" });
+
+  assert.equal(payload, raw);
+  assert.equal(web.state.lastTerminalSeqBySession.has("sess_0"), false);
+});
+
+test("session websocket URL opts into framed resume protocol", () => {
+  resetWebState();
+  web.state.token = "observer-token";
+  web.state.lastTerminalSeqBySession.set("sess_0", "42");
+
+  const url = web.sessionSocketUrl(rawSession());
+
+  assert.equal(url.protocol, "ws:");
+  assert.equal(url.pathname, "/ws/sessions/sess_0");
+  assert.equal(url.searchParams.get("token"), "observer-token");
+  assert.equal(url.searchParams.get("framed"), "1");
+  assert.equal(url.searchParams.get("resume_from_seq"), "42");
 });
 
 test("terminal text fallback keeps send input wired to the live websocket", () => {
@@ -616,6 +691,59 @@ test("terminal status strip shows live input when renderer fallback is active", 
 
   assert.ok(web.el.terminalStatusStrip.textContent.includes("fallback live"));
   assert.equal(web.el.terminalStatusStrip.textContent.includes("snapshot fallback"), false);
+});
+
+test("terminal status strip renders backend health degradation and recovery", () => {
+  resetWebState();
+  web.state.selectedSessionId = "sess_0";
+  web.state.connectionLabel = "live";
+
+  web.applyBackendHealth({
+    status: "healthy",
+    thought_bridge: { status: "healthy" },
+    persistence: {
+      available: true,
+      ok: false,
+      consecutive_failures: 1,
+      last_failed_operation: "save_sessions",
+      last_error: "disk full",
+    },
+  });
+
+  assert.equal(
+    web.backendHealthWarningText(web.state.backendHealth),
+    "persistence degraded: save_sessions: disk full",
+  );
+  assert.ok(web.el.terminalStatusStrip.textContent.includes("persistence degraded: save_sessions: disk full"));
+  assert.equal(document.body.classList.contains("backend-health-degraded"), true);
+
+  web.applyBackendHealth({
+    status: "healthy",
+    thought_bridge: { status: "healthy" },
+    persistence: { available: true, ok: true, consecutive_failures: 0 },
+  });
+
+  assert.equal(web.backendHealthWarningText(web.state.backendHealth), "");
+  assert.equal(web.el.terminalStatusStrip.textContent.includes("persistence degraded"), false);
+  assert.equal(document.body.classList.contains("backend-health-degraded"), false);
+});
+
+test("terminal status strip renders thought bridge degradation", () => {
+  resetWebState();
+  web.applyBackendHealth({
+    status: "degraded",
+    thought_bridge: {
+      status: "degraded",
+      last_backend_error: "model timeout",
+    },
+    persistence: { available: true, ok: true },
+  });
+
+  assert.equal(
+    web.backendHealthWarningText(web.state.backendHealth),
+    "thought bridge degraded: model timeout",
+  );
+  assert.ok(web.el.terminalStatusStrip.textContent.includes("thought bridge degraded: model timeout"));
 });
 
 test("terminal text fallback refreshes from live terminal frames", () => {
@@ -840,6 +968,142 @@ test("input ack failure keeps failed delivery visible", () => {
   assert.ok(web.el.terminalInputEcho.textContent.includes("failed: tmux send-keys exited"));
 });
 
+test("websocket control events patch live session state", () => {
+  resetWebState();
+  web.state.sessions = [rawSession({ state: "idle", thought: null, token_count: 0 })];
+  web.state.selectedSessionId = "sess_0";
+
+  web.handleSocketText(JSON.stringify({
+    type: "control_event",
+    event: "session_state",
+    sessionId: "sess_0",
+    payload: {
+      state: "attention",
+      previous_state: "idle",
+      current_command: "cargo test",
+      state_evidence: { confidence: "high", observed_at: "2026-05-15T10:00:00Z", cause: "poll" },
+      transport_health: "degraded",
+      at: "2026-05-15T10:00:01Z",
+    },
+  }));
+  assert.equal(web.state.sessions[0].state, "attention");
+  assert.equal(web.state.sessions[0].current_command, "cargo test");
+  assert.equal(web.state.sessions[0].transport_health, "degraded");
+  assert.ok(web.el.terminalStatusStrip.textContent.includes("attention"));
+
+  web.handleSocketText(JSON.stringify({
+    type: "control_event",
+    event: "session_title",
+    sessionId: "sess_0",
+    payload: { title: "/tmp/new-project", at: "2026-05-15T10:00:02Z" },
+  }));
+  assert.equal(web.state.sessions[0].cwd, "/tmp/new-project");
+  assert.equal(web.state.sessions[0].terminal_title, "/tmp/new-project");
+
+  web.handleSocketText(JSON.stringify({
+    type: "control_event",
+    event: "session_skill",
+    sessionId: "sess_0",
+    payload: { last_skill: "ui", at: "2026-05-15T10:00:03Z" },
+  }));
+  assert.equal(web.state.sessions[0].last_skill, "ui");
+
+  web.handleSocketText(JSON.stringify({
+    type: "control_event",
+    event: "thought_update",
+    sessionId: "sess_0",
+    payload: {
+      thought: "operator response needed",
+      token_count: 64000,
+      context_limit: 128000,
+      rest_state: "waiting",
+      commit_candidate: true,
+      action_cues: [{ kind: "awaiting_user" }],
+      objective_changed: true,
+      at: "2026-05-15T10:00:04Z",
+    },
+  }));
+  assert.equal(web.state.sessions[0].thought, "operator response needed");
+  assert.equal(web.state.sessions[0].token_count, 64000);
+  assert.equal(web.state.sessions[0].commit_candidate, true);
+  assert.equal(web.state.sessions[0].objective_changed_at, "2026-05-15T10:00:04Z");
+});
+
+test("session refresh backs off while selected event stream is open", () => {
+  resetWebState();
+  web.state.selectedSessionId = "sess_0";
+  web.state.ws = { readyState: WebSocket.OPEN, sessionId: "sess_0" };
+
+  assert.equal(web.sessionEventStreamOpen(), true);
+  assert.equal(web.sessionRefreshDelayMs(), 10000);
+
+  web.state.ws = { readyState: WebSocket.OPEN, sessionId: "other" };
+  assert.equal(web.sessionEventStreamOpen(), false);
+  assert.equal(web.sessionRefreshDelayMs(), 2500);
+
+  web.state.ws = { readyState: WebSocket.OPEN, sessionId: "sess_0" };
+  web.state.followPublishedSelection = true;
+  assert.equal(web.sessionRefreshDelayMs(), 2500);
+});
+
+test("websocket control events refresh selected workbench sidecars", async () => {
+  resetWebState();
+  web.state.sessions = [rawSession({ state: "idle" })];
+  web.state.selectedSessionId = "sess_0";
+  web.state.trogdorAtlasOpen = false;
+  const calls = [];
+  globalThis.fetch = async (path) => {
+    calls.push(String(path));
+    return jsonResponse(200, {});
+  };
+
+  web.handleSocketText(JSON.stringify({
+    type: "control_event",
+    event: "session_state",
+    sessionId: "sess_0",
+    payload: {
+      state: "attention",
+      previous_state: "idle",
+      state_evidence: { confidence: "high", observed_at: "2026-05-15T10:00:00Z", cause: "event" },
+      transport_health: "healthy",
+      at: "2026-05-15T10:00:01Z",
+    },
+  }));
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  assert.ok(calls.some((path) => path.includes("/agent-context")));
+  assert.ok(calls.some((path) => path.includes("/pane-tail")));
+  assert.ok(!calls.some((path) => path === "/v1/sessions"));
+});
+
+test("websocket lifecycle events create and stale sessions", () => {
+  resetWebState();
+  web.state.selectedSessionId = "sess_0";
+
+  web.handleSocketText(JSON.stringify({
+    type: "lifecycle_event",
+    event: "session_created",
+    sessionId: "sess_1",
+    reason: "manual_tmux_adopt",
+    summary: rawSession({ session_id: "sess_1", tmux_name: "archer", cwd: "/tmp/archer" }),
+  }));
+  assert.equal(web.state.sessions.length, 2);
+  assert.equal(web.state.sessions[1].tmux_name, "archer");
+
+  web.handleSocketText(JSON.stringify({
+    type: "lifecycle_event",
+    event: "session_deleted",
+    sessionId: "sess_0",
+    reason: "tmux_reconcile_missing",
+    deleteMode: "detach_bridge",
+    tmuxSessionAlive: false,
+  }));
+  assert.equal(web.state.sessions[0].state, "exited");
+  assert.equal(web.state.sessions[0].is_stale, true);
+  assert.equal(web.state.sessions[0].transport_health, "disconnected");
+  assert.ok(web.el.terminalStatusStrip.textContent.includes("session ended"));
+});
+
 test("terminal workbench fetches and renders selected agent context", async () => {
   resetWebState();
   web.state.sessions = [rawSession({ tool: "Codex", cwd: "/tmp/project" })];
@@ -1055,6 +1319,57 @@ test("terminal workbench pinned widgets render pane output and artifacts from se
   assert.ok(web.el.terminalWorkbenchWidgets.innerHTML.includes("Skills"));
   assert.ok(web.el.terminalWorkbenchWidgets.innerHTML.includes("ui"));
   assert.ok(web.el.terminalWorkbenchWidgets.innerHTML.includes("Open viewer"));
+});
+
+test("Mermaid artifact renderer bounds source and advertised plan tabs", () => {
+  resetWebState();
+  const largeSource = `graph TD\n${"A-->B\n".repeat(14000)}`;
+  const manyPlanFiles = Array.from({ length: 40 }, (_value, index) => `plan-${index}.md`);
+
+  web.renderMermaidArtifact({
+    session_id: "sess_0",
+    available: true,
+    path: "/tmp/project/docs/huge.mmd",
+    source: largeSource,
+    plan_files: ["../secret.txt", "plan.md", "WORKGRAPH.md", ...manyPlanFiles],
+  });
+
+  assert.ok(web.state.mermaidArtifact.source.length < largeSource.length);
+  assert.ok(web.el.mermaidSource.textContent.includes("truncated after 64 KiB"));
+  assert.equal(web.state.mermaidArtifact.planFiles.length, 32);
+  assert.ok(!web.state.mermaidArtifact.planFiles.includes("../secret.txt"));
+  assert.ok(web.state.mermaidArtifact.planFiles.includes("WORKGRAPH.md"));
+  assert.ok(web.el.mermaidSummary.textContent.includes("showing first 32"));
+  assert.ok(web.el.mermaidSummary.textContent.includes("unsafe name"));
+});
+
+test("Mermaid plan loader rejects path-ish names and bounds huge content", async () => {
+  resetWebState();
+  web.state.sessions = [rawSession({ session_id: "sess_0" })];
+  web.state.selectedSessionId = "sess_0";
+  web.state.mermaidArtifact.planFiles = ["plan.md"];
+  const requested = [];
+  globalThis.fetch = async (path) => {
+    requested.push(path);
+    return jsonResponse(200, {
+      session_id: "sess_0",
+      name: "plan.md",
+      content: "x".repeat(140000),
+    });
+  };
+
+  await web.loadMermaidPlanFile("../secret.txt");
+  assert.equal(requested.length, 0);
+  assert.ok(web.el.mermaidPlanContent.textContent.includes("not allowed"));
+  assert.ok(web.el.mermaidPlanContent.classList.contains("error"));
+
+  await web.loadMermaidPlanFile("plan.md");
+  assert.equal(requested.length, 1);
+  assert.ok(String(requested[0]).includes("name=plan.md"));
+  assert.ok(web.state.mermaidArtifact.planContent.length < 140000);
+  assert.ok(web.el.mermaidPlanContent.textContent.includes("truncated after 128 KiB"));
+  assert.ok(web.el.mermaidSummary.textContent.includes("truncated to 128 KiB"));
+  assert.ok(!web.el.mermaidPlanContent.classList.contains("error"));
 });
 
 test("workbench rerender preserves parent scrollTop and skips identical writes", () => {

@@ -29,6 +29,7 @@ use mermaid_rs_renderer::{
 };
 use reqwest::Client;
 use resvg::tiny_skia::{Pixmap, Transform};
+use serde::Deserialize;
 use tokio::runtime::Runtime;
 use tokio::sync::oneshot;
 use usvg::Tree;
@@ -37,17 +38,17 @@ use swimmers::config::{AuthMode, Config};
 use swimmers::repo_theme::{discover_repo_theme, existing_repo_theme};
 use swimmers::thought::runtime_config::{DaemonDefaults, ThoughtConfig};
 use swimmers::types::{
-    CreateSessionRequest, CreateSessionResponse, CreateSessionsBatchRequest,
-    CreateSessionsBatchResponse, DirEntry, DirGroupMembershipUpdateRequest,
-    DirGroupMembershipUpdateResponse, DirListResponse, DirRepoActionRequest, DirRepoActionResponse,
-    DirRepoSearchResponse, ErrorResponse, GhosttyOpenMode, LaunchTargetSummary,
-    MermaidArtifactResponse, NativeAttentionGroupOpenRequest, NativeAttentionGroupOpenResponse,
-    NativeDesktopApp, NativeDesktopConfigRequest, NativeDesktopModeRequest,
-    NativeDesktopOpenRequest, NativeDesktopOpenResponse, NativeDesktopStatusResponse,
-    PlanFileResponse, PublishSelectionRequest, RepoActionKind, RepoActionState, RepoTheme,
-    RestState, SessionBatchMembership, SessionGroupInputRequest, SessionGroupInputResponse,
-    SessionListResponse, SessionSkillListResponse, SessionSkillSummary, SessionState,
-    SessionSummary, SpawnTool, StateConfidence, TransportHealth,
+    AdoptSessionRequest, AdoptSessionResponse, CreateSessionRequest, CreateSessionResponse,
+    CreateSessionsBatchRequest, CreateSessionsBatchResponse, DirEntry,
+    DirGroupMembershipUpdateRequest, DirGroupMembershipUpdateResponse, DirListResponse,
+    DirRepoActionRequest, DirRepoActionResponse, DirRepoSearchResponse, ErrorResponse,
+    GhosttyOpenMode, LaunchTargetSummary, MermaidArtifactResponse, NativeAttentionGroupOpenRequest,
+    NativeAttentionGroupOpenResponse, NativeDesktopApp, NativeDesktopConfigRequest,
+    NativeDesktopModeRequest, NativeDesktopOpenRequest, NativeDesktopOpenResponse,
+    NativeDesktopStatusResponse, PlanFileResponse, PublishSelectionRequest, RepoActionKind,
+    RepoActionState, RepoTheme, RestState, SessionBatchMembership, SessionGroupInputRequest,
+    SessionGroupInputResponse, SessionListResponse, SessionSkillListResponse, SessionSkillSummary,
+    SessionState, SessionSummary, SpawnTool, StateConfidence, TransportHealth,
 };
 
 const MIN_WIDTH: u16 = 70;
@@ -88,6 +89,48 @@ const SWIM_VERTICAL_DRIFT: f32 = 0.06;
 const SWIM_DRIFT_LIMIT: f32 = 1.0;
 const INITIAL_REQUEST_WIDTH: u16 = 58;
 const INITIAL_REQUEST_HEIGHT: u16 = 7;
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
+pub(crate) struct BackendHealthResponse {
+    #[serde(default)]
+    pub(crate) status: String,
+    #[serde(default)]
+    pub(crate) thought_bridge: BackendThoughtBridgeHealth,
+    #[serde(default)]
+    pub(crate) persistence: BackendPersistenceHealth,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
+pub(crate) struct BackendThoughtBridgeHealth {
+    #[serde(default)]
+    pub(crate) status: String,
+    #[serde(default)]
+    pub(crate) consecutive_failures: u32,
+    #[serde(default)]
+    pub(crate) last_error: Option<String>,
+    #[serde(default)]
+    pub(crate) last_backend_error: Option<String>,
+    #[serde(default)]
+    pub(crate) shutdown_requested: bool,
+    #[serde(default)]
+    pub(crate) shutdown_reason: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
+pub(crate) struct BackendPersistenceHealth {
+    #[serde(default)]
+    pub(crate) available: bool,
+    #[serde(default)]
+    pub(crate) ok: bool,
+    #[serde(default)]
+    pub(crate) consecutive_failures: u64,
+    #[serde(default)]
+    pub(crate) last_successful_operation: Option<String>,
+    #[serde(default)]
+    pub(crate) last_failed_operation: Option<String>,
+    #[serde(default)]
+    pub(crate) last_error: Option<String>,
+}
 const THOUGHT_RAIL_MIN_WIDTH: u16 = 100;
 const THOUGHT_RAIL_MIN_PANEL_WIDTH: u16 = 24;
 const THOUGHT_RAIL_GAP: u16 = 1;

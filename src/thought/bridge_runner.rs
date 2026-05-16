@@ -1,5 +1,5 @@
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use tokio::sync::broadcast;
 use tokio::sync::RwLock;
@@ -24,6 +24,59 @@ pub struct BridgeRunner {
     event_tx: broadcast::Sender<ControlEvent>,
     runtime_config: Arc<RwLock<ThoughtConfig>>,
     health: Arc<BridgeHealthState>,
+}
+
+trait ThoughtMetricRecorder {
+    fn set_lifecycle_state(&self, session_id: &str, state: &'static str);
+    fn increment_model_call(
+        &self,
+        session_id: &str,
+        path: &'static str,
+        tier: &'static str,
+        outcome: &'static str,
+        count: u64,
+    );
+    fn increment_suppression(&self, session_id: &str, reason: &'static str, tier: &'static str);
+    fn record_generation_latency(
+        &self,
+        session_id: &str,
+        path: &'static str,
+        tier: &'static str,
+        duration: Duration,
+    );
+}
+
+struct RuntimeThoughtMetricRecorder;
+
+impl ThoughtMetricRecorder for RuntimeThoughtMetricRecorder {
+    fn set_lifecycle_state(&self, session_id: &str, state: &'static str) {
+        crate::metrics::set_thought_lifecycle_state(session_id, state);
+    }
+
+    fn increment_model_call(
+        &self,
+        session_id: &str,
+        path: &'static str,
+        tier: &'static str,
+        outcome: &'static str,
+        count: u64,
+    ) {
+        crate::metrics::increment_thought_model_call_by(session_id, path, tier, outcome, count);
+    }
+
+    fn increment_suppression(&self, session_id: &str, reason: &'static str, tier: &'static str) {
+        crate::metrics::increment_thought_suppression(session_id, reason, tier);
+    }
+
+    fn record_generation_latency(
+        &self,
+        session_id: &str,
+        path: &'static str,
+        tier: &'static str,
+        duration: Duration,
+    ) {
+        crate::metrics::record_thought_generation_latency(session_id, path, tier, duration);
+    }
 }
 
 impl BridgeRunner {
@@ -78,9 +131,12 @@ impl BridgeRunner {
             );
 
             let mut delivery_states = provider.thought_delivery_states();
+            let metrics = RuntimeThoughtMetricRecorder;
             loop {
                 let runtime_config = self.runtime_config.read().await.clone();
                 let snapshots = provider.session_snapshots().await;
+                record_sync_attempt_metrics(&metrics, &runtime_config, &snapshots);
+                let sync_started = Instant::now();
                 match tokio::time::timeout(
                     timing.sync_timeout,
                     emitter_client.next_sync_response(&runtime_config, &snapshots),
@@ -88,6 +144,7 @@ impl BridgeRunner {
                 .await
                 {
                     Ok(Ok(response)) => {
+                        let sync_duration = sync_started.elapsed();
                         let last_backend_error = response.last_backend_error.clone();
                         self.health.record_success(last_backend_error.clone());
                         if let Some(error) = last_backend_error {
@@ -96,16 +153,19 @@ impl BridgeRunner {
                                 "clawgs emit daemon sync reported backend error"
                             );
                         }
-                        apply_sync_response(
+                        apply_sync_response_with_metrics(
                             provider.as_ref(),
                             &self.event_tx,
                             &mut delivery_states,
                             &snapshots,
                             response,
+                            &metrics,
+                            Some(sync_duration),
                         );
                         tokio::time::sleep(timing.tick).await;
                     }
                     Ok(Err(err)) => {
+                        record_bridge_model_error(&metrics, "error");
                         let retry_delay = self.health.next_retry_delay_for_failure();
                         let error_text = err.to_string();
                         self.health.record_failure(error_text.clone(), retry_delay);
@@ -117,6 +177,7 @@ impl BridgeRunner {
                         tokio::time::sleep(retry_delay).await;
                     }
                     Err(_) => {
+                        record_bridge_model_error(&metrics, "timeout");
                         let retry_delay = self.health.next_retry_delay_for_failure();
                         let mut error_text = format!(
                             "clawgs emit daemon sync timed out after {}ms",
@@ -139,6 +200,7 @@ impl BridgeRunner {
     }
 }
 
+#[cfg(test)]
 fn apply_sync_response<P: SessionProvider>(
     provider: &P,
     event_tx: &broadcast::Sender<ControlEvent>,
@@ -146,11 +208,33 @@ fn apply_sync_response<P: SessionProvider>(
     session_snapshots: &[SessionInfo],
     response: SyncResponse,
 ) {
+    apply_sync_response_with_metrics(
+        provider,
+        event_tx,
+        delivery_states,
+        session_snapshots,
+        response,
+        &RuntimeThoughtMetricRecorder,
+        None,
+    );
+}
+
+fn apply_sync_response_with_metrics<P: SessionProvider, M: ThoughtMetricRecorder>(
+    provider: &P,
+    event_tx: &broadcast::Sender<ControlEvent>,
+    delivery_states: &mut std::collections::HashMap<String, ThoughtDeliveryState>,
+    session_snapshots: &[SessionInfo],
+    response: SyncResponse,
+    metrics: &M,
+    generation_latency: Option<Duration>,
+) {
     debug!(
         request_id = %response.request_id,
         update_count = response.updates.len(),
         "applying thought updates from daemon"
     );
+
+    record_sync_response_metrics(metrics, session_snapshots, &response, generation_latency);
 
     let batch_stream_instance_id = response.stream_instance_id.clone();
     let mut prior_thoughts = session_snapshots
@@ -165,8 +249,133 @@ fn apply_sync_response<P: SessionProvider>(
             &mut prior_thoughts,
             batch_stream_instance_id.as_deref(),
             update,
+            session_snapshots,
+            metrics,
         );
     }
+}
+
+const BRIDGE_METRIC_SESSION_ID: &str = "__bridge__";
+const THOUGHT_METRIC_PATH_DAEMON: &str = "daemon";
+const THOUGHT_METRIC_TIER_BATCH: &str = "batch";
+
+fn thought_state_metric_label(state: crate::types::ThoughtState) -> &'static str {
+    match state {
+        crate::types::ThoughtState::Active => "active",
+        crate::types::ThoughtState::Holding => "holding",
+        crate::types::ThoughtState::Sleeping => "sleeping",
+    }
+}
+
+fn thought_source_suppression_reason(source: ThoughtSource) -> Option<&'static str> {
+    match source {
+        ThoughtSource::Llm => None,
+        ThoughtSource::CarryForward => Some("carry_forward"),
+        ThoughtSource::StaticSleeping => Some("static_sleeping"),
+    }
+}
+
+fn cadence_tier_for_session(session: &SessionInfo) -> &'static str {
+    match session.state {
+        crate::types::SessionState::Busy
+        | crate::types::SessionState::Attention
+        | crate::types::SessionState::Error => "hot",
+        crate::types::SessionState::Idle => "warm",
+        crate::types::SessionState::Exited => "cold",
+    }
+}
+
+fn cadence_tier_for_session_id(
+    session_snapshots: &[SessionInfo],
+    session_id: &str,
+) -> &'static str {
+    session_snapshots
+        .iter()
+        .find(|snapshot| snapshot.session_id == session_id)
+        .map(cadence_tier_for_session)
+        .unwrap_or("unknown")
+}
+
+fn record_sync_attempt_metrics<M: ThoughtMetricRecorder>(
+    metrics: &M,
+    runtime_config: &ThoughtConfig,
+    snapshots: &[SessionInfo],
+) {
+    if snapshots.is_empty() {
+        metrics.increment_suppression(
+            BRIDGE_METRIC_SESSION_ID,
+            "no_sessions",
+            THOUGHT_METRIC_TIER_BATCH,
+        );
+        return;
+    }
+
+    for snapshot in snapshots {
+        let tier = cadence_tier_for_session(snapshot);
+        metrics.set_lifecycle_state(
+            &snapshot.session_id,
+            thought_state_metric_label(snapshot.thought_state),
+        );
+        if !runtime_config.enabled {
+            metrics.increment_suppression(&snapshot.session_id, "disabled", tier);
+        }
+    }
+}
+
+fn record_sync_response_metrics<M: ThoughtMetricRecorder>(
+    metrics: &M,
+    snapshots: &[SessionInfo],
+    response: &SyncResponse,
+    generation_latency: Option<Duration>,
+) {
+    if response.llm_calls > 0 {
+        let outcome = if response.last_backend_error.is_some() {
+            "backend_error"
+        } else {
+            "success"
+        };
+        metrics.increment_model_call(
+            BRIDGE_METRIC_SESSION_ID,
+            THOUGHT_METRIC_PATH_DAEMON,
+            THOUGHT_METRIC_TIER_BATCH,
+            outcome,
+            response.llm_calls,
+        );
+        if let Some(duration) = generation_latency {
+            metrics.record_generation_latency(
+                BRIDGE_METRIC_SESSION_ID,
+                THOUGHT_METRIC_PATH_DAEMON,
+                THOUGHT_METRIC_TIER_BATCH,
+                duration,
+            );
+        }
+    } else if response.updates.is_empty() {
+        if snapshots.is_empty() {
+            metrics.increment_suppression(
+                BRIDGE_METRIC_SESSION_ID,
+                "no_updates",
+                THOUGHT_METRIC_TIER_BATCH,
+            );
+        } else {
+            for snapshot in snapshots {
+                metrics.increment_suppression(
+                    &snapshot.session_id,
+                    "no_updates",
+                    cadence_tier_for_session(snapshot),
+                );
+            }
+        }
+    }
+}
+
+fn record_bridge_model_error<M: ThoughtMetricRecorder>(metrics: &M, outcome: &'static str) {
+    metrics.increment_model_call(
+        BRIDGE_METRIC_SESSION_ID,
+        THOUGHT_METRIC_PATH_DAEMON,
+        THOUGHT_METRIC_TIER_BATCH,
+        outcome,
+        1,
+    );
 }
 
 fn is_sleeping_placeholder(thought: &str) -> bool {
@@ -245,12 +454,29 @@ fn apply_update<P: SessionProvider>(
     prior_thoughts: &mut std::collections::HashMap<String, Option<String>>,
     batch_stream_instance_id: Option<&str>,
     update: SyncUpdate,
+    session_snapshots: &[SessionInfo],
+    metrics: &impl ThoughtMetricRecorder,
 ) {
+    let original_thought_source = update.thought_source;
     let update = normalize_sleeping_update(update, prior_thoughts);
     let incoming_delivery = resolved_delivery_state(batch_stream_instance_id, &update);
     let current_delivery = delivery_states.get(&update.session_id);
     if !should_apply_delivery_state(current_delivery, incoming_delivery.as_ref()) {
+        metrics.increment_suppression(
+            &update.session_id,
+            "stale_delivery",
+            cadence_tier_for_session_id(session_snapshots, &update.session_id),
+        );
         return;
+    }
+
+    let tier = cadence_tier_for_session_id(session_snapshots, &update.session_id);
+    metrics.set_lifecycle_state(
+        &update.session_id,
+        thought_state_metric_label(update.thought_state),
+    );
+    if let Some(reason) = thought_source_suppression_reason(original_thought_source) {
+        metrics.increment_suppression(&update.session_id, reason, tier);
     }
 
     let persisted_delivery = incoming_delivery
@@ -397,6 +623,112 @@ mod tests {
         }
     }
 
+    #[derive(Debug, Clone, PartialEq)]
+    enum MetricRecord {
+        Lifecycle {
+            session_id: String,
+            state: &'static str,
+        },
+        ModelCall {
+            session_id: String,
+            path: &'static str,
+            tier: &'static str,
+            outcome: &'static str,
+            count: u64,
+        },
+        Suppression {
+            session_id: String,
+            reason: &'static str,
+            tier: &'static str,
+        },
+        Latency {
+            session_id: String,
+            path: &'static str,
+            tier: &'static str,
+            duration: Duration,
+        },
+    }
+
+    #[derive(Default)]
+    struct RecordingMetrics {
+        records: Mutex<Vec<MetricRecord>>,
+    }
+
+    impl RecordingMetrics {
+        fn records(&self) -> Vec<MetricRecord> {
+            self.records
+                .lock()
+                .expect("metrics mutex should lock")
+                .clone()
+        }
+    }
+
+    impl ThoughtMetricRecorder for RecordingMetrics {
+        fn set_lifecycle_state(&self, session_id: &str, state: &'static str) {
+            self.records
+                .lock()
+                .expect("metrics mutex should lock")
+                .push(MetricRecord::Lifecycle {
+                    session_id: session_id.to_string(),
+                    state,
+                });
+        }
+
+        fn increment_model_call(
+            &self,
+            session_id: &str,
+            path: &'static str,
+            tier: &'static str,
+            outcome: &'static str,
+            count: u64,
+        ) {
+            self.records
+                .lock()
+                .expect("metrics mutex should lock")
+                .push(MetricRecord::ModelCall {
+                    session_id: session_id.to_string(),
+                    path,
+                    tier,
+                    outcome,
+                    count,
+                });
+        }
+
+        fn increment_suppression(
+            &self,
+            session_id: &str,
+            reason: &'static str,
+            tier: &'static str,
+        ) {
+            self.records
+                .lock()
+                .expect("metrics mutex should lock")
+                .push(MetricRecord::Suppression {
+                    session_id: session_id.to_string(),
+                    reason,
+                    tier,
+                });
+        }
+
+        fn record_generation_latency(
+            &self,
+            session_id: &str,
+            path: &'static str,
+            tier: &'static str,
+            duration: Duration,
+        ) {
+            self.records
+                .lock()
+                .expect("metrics mutex should lock")
+                .push(MetricRecord::Latency {
+                    session_id: session_id.to_string(),
+                    path,
+                    tier,
+                    duration,
+                });
+        }
+    }
+
     fn commit_ready_cue() -> ActionCue {
         ActionCue {
             kind: ActionCueKind::CommitReady,
@@ -407,6 +739,32 @@ mod tests {
                 .iter()
                 .map(|item| item.to_string())
                 .collect(),
+        }
+    }
+
+    fn metric_session(
+        session_id: &str,
+        state: SessionState,
+        thought_state: ThoughtState,
+    ) -> SessionInfo {
+        SessionInfo {
+            session_id: session_id.to_string(),
+            state,
+            exited: state == SessionState::Exited,
+            tool: Some("Codex".to_string()),
+            cwd: "/tmp/project".to_string(),
+            replay_text: "cargo test".to_string(),
+            thought: Some("working".to_string()),
+            thought_state,
+            thought_source: ThoughtSource::CarryForward,
+            rest_state: RestState::Drowsy,
+            commit_candidate: false,
+            action_cues: Vec::new(),
+            objective_fingerprint: Some("obj-metric".to_string()),
+            thought_updated_at: None,
+            token_count: 42,
+            context_limit: 100,
+            last_activity_at: Utc::now(),
         }
     }
 
@@ -490,6 +848,243 @@ mod tests {
         assert!(payload.objective_changed);
         assert_eq!(payload.bubble_precedence, BubblePrecedence::ThoughtFirst);
         assert_eq!(payload.at, now);
+    }
+
+    #[test]
+    fn sync_response_records_lifecycle_model_and_latency_metrics() {
+        let provider = RecordingProvider {
+            snapshots: vec![metric_session(
+                "sess-bridge",
+                SessionState::Busy,
+                ThoughtState::Holding,
+            )],
+            persisted: Mutex::new(Vec::new()),
+            delivery_states: Mutex::new(HashMap::new()),
+        };
+        let (event_tx, _) = broadcast::channel::<ControlEvent>(8);
+        let metrics = RecordingMetrics::default();
+        let now = Utc::now();
+        let snapshots = provider.snapshots.clone();
+        let mut delivery_states = provider.thought_delivery_states();
+
+        record_sync_attempt_metrics(&metrics, &ThoughtConfig::default(), &snapshots);
+        apply_sync_response_with_metrics(
+            &provider,
+            &event_tx,
+            &mut delivery_states,
+            &snapshots,
+            SyncResponse {
+                request_id: "tmux-metrics".to_string(),
+                stream_instance_id: Some("stream-metrics".to_string()),
+                updates: vec![SyncUpdate {
+                    session_id: "sess-bridge".to_string(),
+                    stream_instance_id: None,
+                    emission_seq: Some(1),
+                    thought: Some("Thinking".to_string()),
+                    token_count: 64,
+                    context_limit: 128,
+                    thought_state: ThoughtState::Active,
+                    thought_source: ThoughtSource::Llm,
+                    rest_state: RestState::Active,
+                    commit_candidate: false,
+                    action_cues: Vec::new(),
+                    objective_changed: false,
+                    bubble_precedence: BubblePrecedence::ThoughtFirst,
+                    at: now,
+                    objective_fingerprint: None,
+                }],
+                llm_calls: 2,
+                last_backend_error: None,
+            },
+            &metrics,
+            Some(Duration::from_millis(42)),
+        );
+
+        let records = metrics.records();
+        assert!(records.contains(&MetricRecord::Lifecycle {
+            session_id: "sess-bridge".to_string(),
+            state: "holding",
+        }));
+        assert!(records.contains(&MetricRecord::Lifecycle {
+            session_id: "sess-bridge".to_string(),
+            state: "active",
+        }));
+        assert!(records.contains(&MetricRecord::ModelCall {
+            session_id: "__bridge__".to_string(),
+            path: "daemon",
+            tier: "batch",
+            outcome: "success",
+            count: 2,
+        }));
+        assert!(records.contains(&MetricRecord::Latency {
+            session_id: "__bridge__".to_string(),
+            path: "daemon",
+            tier: "batch",
+            duration: Duration::from_millis(42),
+        }));
+    }
+
+    #[test]
+    fn sync_metrics_record_suppression_reasons() {
+        let provider = RecordingProvider {
+            snapshots: vec![metric_session(
+                "sess-suppress",
+                SessionState::Idle,
+                ThoughtState::Holding,
+            )],
+            persisted: Mutex::new(Vec::new()),
+            delivery_states: Mutex::new(HashMap::new()),
+        };
+        let (event_tx, _) = broadcast::channel::<ControlEvent>(8);
+        let metrics = RecordingMetrics::default();
+        let mut config = ThoughtConfig::default();
+        config.enabled = false;
+        let snapshots = provider.snapshots.clone();
+        let now = Utc::now();
+        let mut delivery_states = provider.thought_delivery_states();
+
+        record_sync_attempt_metrics(&metrics, &config, &snapshots);
+        apply_sync_response_with_metrics(
+            &provider,
+            &event_tx,
+            &mut delivery_states,
+            &snapshots,
+            SyncResponse {
+                request_id: "tmux-suppression".to_string(),
+                stream_instance_id: Some("stream-suppression".to_string()),
+                updates: vec![SyncUpdate {
+                    session_id: "sess-suppress".to_string(),
+                    stream_instance_id: None,
+                    emission_seq: Some(1),
+                    thought: Some("Sleeping.".to_string()),
+                    token_count: 64,
+                    context_limit: 128,
+                    thought_state: ThoughtState::Sleeping,
+                    thought_source: ThoughtSource::StaticSleeping,
+                    rest_state: RestState::Sleeping,
+                    commit_candidate: false,
+                    action_cues: Vec::new(),
+                    objective_changed: false,
+                    bubble_precedence: BubblePrecedence::ThoughtFirst,
+                    at: now,
+                    objective_fingerprint: None,
+                }],
+                llm_calls: 0,
+                last_backend_error: None,
+            },
+            &metrics,
+            None,
+        );
+
+        let records = metrics.records();
+        assert!(records.contains(&MetricRecord::Suppression {
+            session_id: "sess-suppress".to_string(),
+            reason: "disabled",
+            tier: "warm",
+        }));
+        assert!(records.contains(&MetricRecord::Suppression {
+            session_id: "sess-suppress".to_string(),
+            reason: "static_sleeping",
+            tier: "warm",
+        }));
+    }
+
+    #[test]
+    fn stale_delivery_records_suppression_metric() {
+        let provider = RecordingProvider {
+            snapshots: vec![metric_session(
+                "sess-stale",
+                SessionState::Attention,
+                ThoughtState::Active,
+            )],
+            persisted: Mutex::new(Vec::new()),
+            delivery_states: Mutex::new(HashMap::new()),
+        };
+        provider
+            .delivery_states
+            .lock()
+            .expect("delivery states")
+            .insert(
+                "sess-stale".to_string(),
+                ThoughtDeliveryState {
+                    stream_instance_id: Some("stream-a".to_string()),
+                    emission_seq: 3,
+                },
+            );
+        let (event_tx, _) = broadcast::channel::<ControlEvent>(8);
+        let metrics = RecordingMetrics::default();
+        let snapshots = provider.snapshots.clone();
+        let mut delivery_states = provider.thought_delivery_states();
+
+        apply_sync_response_with_metrics(
+            &provider,
+            &event_tx,
+            &mut delivery_states,
+            &snapshots,
+            SyncResponse {
+                request_id: "tmux-stale".to_string(),
+                stream_instance_id: Some("stream-a".to_string()),
+                updates: vec![SyncUpdate {
+                    session_id: "sess-stale".to_string(),
+                    stream_instance_id: None,
+                    emission_seq: Some(2),
+                    thought: Some("Late update".to_string()),
+                    token_count: 64,
+                    context_limit: 128,
+                    thought_state: ThoughtState::Active,
+                    thought_source: ThoughtSource::Llm,
+                    rest_state: RestState::Active,
+                    commit_candidate: false,
+                    action_cues: Vec::new(),
+                    objective_changed: false,
+                    bubble_precedence: BubblePrecedence::ThoughtFirst,
+                    at: Utc::now(),
+                    objective_fingerprint: None,
+                }],
+                llm_calls: 0,
+                last_backend_error: None,
+            },
+            &metrics,
+            None,
+        );
+
+        assert!(metrics.records().contains(&MetricRecord::Suppression {
+            session_id: "sess-stale".to_string(),
+            reason: "stale_delivery",
+            tier: "hot",
+        }));
+    }
+
+    #[test]
+    fn backend_error_response_records_model_outcome() {
+        let metrics = RecordingMetrics::default();
+        record_sync_response_metrics(
+            &metrics,
+            &[],
+            &SyncResponse {
+                request_id: "tmux-error".to_string(),
+                stream_instance_id: None,
+                updates: Vec::new(),
+                llm_calls: 1,
+                last_backend_error: Some("rate limited".to_string()),
+            },
+            Some(Duration::from_millis(17)),
+        );
+
+        let records = metrics.records();
+        assert!(records.contains(&MetricRecord::ModelCall {
+            session_id: "__bridge__".to_string(),
+            path: "daemon",
+            tier: "batch",
+            outcome: "backend_error",
+            count: 1,
+        }));
+        assert!(records.contains(&MetricRecord::Latency {
+            session_id: "__bridge__".to_string(),
+            path: "daemon",
+            tier: "batch",
+            duration: Duration::from_millis(17),
+        }));
     }
 
     #[test]

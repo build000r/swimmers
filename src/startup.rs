@@ -266,6 +266,7 @@ pub async fn init_app_state(
 
     supervisor.spawn_persistence_checkpoint();
     supervisor.spawn_process_exit_reaper();
+    supervisor.spawn_tmux_reconcile_loop();
 
     let (thought_backend, bridge_health) = start_thought_backend(
         &config,
@@ -295,6 +296,7 @@ pub fn init_app_state_skeleton(config: Arc<Config>) -> Arc<AppState> {
     let supervisor = SessionSupervisor::new(config.clone());
     supervisor.spawn_persistence_checkpoint();
     supervisor.spawn_process_exit_reaper();
+    supervisor.spawn_tmux_reconcile_loop();
 
     Arc::new(AppState {
         supervisor,

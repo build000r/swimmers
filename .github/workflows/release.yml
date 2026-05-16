@@ -26,20 +26,22 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Build release binary
-        run: cargo build --release --bin swimmers
+      - name: Build release binaries
+        run: cargo build --release --bin swimmers --bin swimmers-tui
 
       - name: Package tarball
         run: |
           mkdir -p dist
           cp target/release/swimmers dist/swimmers-linux-amd64
-          chmod +x dist/swimmers-linux-amd64
+          cp target/release/swimmers-tui dist/swimmers-tui-linux-amd64
+          chmod +x dist/swimmers-linux-amd64 dist/swimmers-tui-linux-amd64
           cd dist
           sha256sum swimmers-linux-amd64 > swimmers-linux-amd64.sha256
+          sha256sum swimmers-tui-linux-amd64 > swimmers-tui-linux-amd64.sha256
 
       - uses: actions/upload-artifact@v4
         with:
-          name: swimmers-linux-amd64
+          name: swimmers-linux-amd64-binaries
           path: dist/*
 
   release:

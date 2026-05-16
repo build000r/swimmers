@@ -781,6 +781,21 @@ pub struct CreateSessionRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdoptSessionRequest {
+    pub tmux_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdoptSessionResponse {
+    pub session: SessionSummary,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repo_theme: Option<RepoTheme>,
+    pub reused_session_id: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateSessionsBatchRequest {
     pub dirs: Vec<String>,
     pub spawn_tool: Option<SpawnTool>,

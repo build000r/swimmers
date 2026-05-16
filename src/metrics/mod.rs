@@ -150,8 +150,6 @@ pub fn increment_overload(session_id: &str) {
 }
 
 /// Set per-session lifecycle state as a one-hot gauge by state label.
-// FIXME(2026-04-21): Thought loop does not emit lifecycle-state transitions into metrics yet.
-#[allow(dead_code)]
 pub fn set_thought_lifecycle_state(session_id: &str, state: &str) {
     for candidate in ["active", "holding", "sleeping"] {
         let value = if candidate == state { 1.0 } else { 0.0 };
@@ -165,9 +163,18 @@ pub fn set_thought_lifecycle_state(session_id: &str, state: &str) {
 }
 
 /// Increment thought model-call counters by path/tier/outcome.
-// FIXME(2026-04-21): Thought loop does not call this counter on model-attempt/result paths yet.
-#[allow(dead_code)]
 pub fn increment_thought_model_call(session_id: &str, path: &str, tier: &str, outcome: &str) {
+    increment_thought_model_call_by(session_id, path, tier, outcome, 1);
+}
+
+/// Increment thought model-call counters by path/tier/outcome with a count.
+pub fn increment_thought_model_call_by(
+    session_id: &str,
+    path: &str,
+    tier: &str,
+    outcome: &str,
+    count: u64,
+) {
     counter!(
         THOUGHT_MODEL_CALLS,
         "session_id" => session_id.to_owned(),
@@ -175,12 +182,10 @@ pub fn increment_thought_model_call(session_id: &str, path: &str, tier: &str, ou
         "tier" => tier.to_owned(),
         "outcome" => outcome.to_owned()
     )
-    .increment(1);
+    .increment(count);
 }
 
 /// Increment thought suppression counters by reason and cadence tier.
-// FIXME(2026-04-21): Suppression decisions are not yet wired to metrics emission.
-#[allow(dead_code)]
 pub fn increment_thought_suppression(session_id: &str, reason: &str, tier: &str) {
     counter!(
         THOUGHT_SUPPRESSIONS,
@@ -205,8 +210,6 @@ pub fn increment_summary_fallback(reason: &str) {
 }
 
 /// Record thought generation latency by path/tier.
-// FIXME(2026-04-21): Thought generation latency is not recorded from the loop execution path yet.
-#[allow(dead_code)]
 pub fn record_thought_generation_latency(
     session_id: &str,
     path: &str,

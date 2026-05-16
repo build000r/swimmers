@@ -266,6 +266,12 @@ body.session-attention .terminal-status-strip {
   background: rgba(38, 12, 18, 0.78);
 }
 
+body.backend-health-degraded:not(.session-attention) .terminal-status-strip {
+  border-color: rgba(255, 208, 125, 0.5);
+  color: #ffe2a8;
+  background: rgba(34, 25, 9, 0.78);
+}
+
 .terminal-link-tools {
   position: fixed;
   left: 50%;

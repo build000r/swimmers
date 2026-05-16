@@ -12,7 +12,7 @@ use axum::{Json, Router};
 use futures::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use subtle::ConstantTimeEq;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{broadcast, mpsc, oneshot};
 
 use crate::api::{fetch_live_summary, AppState};
 use crate::auth::{AuthInfo, AuthScope, OBSERVER_SCOPES, OPERATOR_SCOPES};
@@ -20,7 +20,8 @@ use crate::config::{AuthMode, Config};
 use crate::session::actor::{
     ActorHandle, InputDeliveryResult, OutputFrame, ReplayCursor, SessionCommand, SubscribeOutcome,
 };
-use crate::types::ErrorResponse;
+use crate::session::supervisor::LifecycleEvent;
+use crate::types::{opcodes, ControlEvent, ErrorResponse};
 
 const APP_JS_ROUTE: &str = "/app.js";
 const RENDERED_SURFACE_JS_ROUTE: &str = "/rendered_surface.js";
@@ -729,6 +730,14 @@ async fn franken_term_asset_file_info(
 #[derive(Debug, Deserialize)]
 struct WsQuery {
     token: Option<String>,
+    resume_from_seq: Option<u64>,
+    framed: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WsOutputMode {
+    Raw,
+    Framed,
 }
 
 async fn session_ws(
@@ -746,6 +755,13 @@ async fn session_ws(
         return response;
     }
 
+    let resume_from_seq = query.resume_from_seq;
+    let output_mode = if query_flag_enabled(query.framed.as_deref()) {
+        WsOutputMode::Framed
+    } else {
+        WsOutputMode::Raw
+    };
+
     let Some(handle) = state.supervisor.get_session(&session_id).await else {
         return json_error(
             StatusCode::NOT_FOUND,
@@ -754,7 +770,17 @@ async fn session_ws(
         );
     };
 
-    ws.on_upgrade(move |socket| handle_session_ws(socket, state, handle, session_id, auth))
+    ws.on_upgrade(move |socket| {
+        handle_session_ws(
+            socket,
+            state,
+            handle,
+            session_id,
+            auth,
+            resume_from_seq,
+            output_mode,
+        )
+    })
 }
 
 async fn handle_session_ws(
@@ -763,8 +789,20 @@ async fn handle_session_ws(
     handle: ActorHandle,
     session_id: String,
     auth: AuthInfo,
+    resume_from_seq: Option<u64>,
+    output_mode: WsOutputMode,
 ) {
-    if let Err(err) = session_ws_inner(socket, state, handle, session_id.clone(), auth).await {
+    if let Err(err) = session_ws_inner(
+        socket,
+        state,
+        handle,
+        session_id.clone(),
+        auth,
+        resume_from_seq,
+        output_mode,
+    )
+    .await
+    {
         tracing::warn!(session_id, "browser attach closed with error: {err}");
     }
 }
@@ -775,6 +813,8 @@ async fn session_ws_inner(
     handle: ActorHandle,
     session_id: String,
     auth: AuthInfo,
+    resume_from_seq: Option<u64>,
+    output_mode: WsOutputMode,
 ) -> anyhow::Result<()> {
     let Some(_ws_guard) = ActiveWsGuard::try_acquire() else {
         let (mut sender, _) = socket.split();
@@ -791,9 +831,13 @@ async fn session_ws_inner(
     };
     let client_id = NEXT_WS_CLIENT_ID.fetch_add(1, Ordering::Relaxed);
     let replay_cursor = request_replay_cursor(&handle).await?;
-    let resume_from_seq = replay_cursor.replay_window_start_seq.saturating_sub(1);
+    let requested_resume_from_seq =
+        resume_from_seq.unwrap_or_else(|| replay_cursor.replay_window_start_seq.saturating_sub(1));
     let (mut output_rx, subscribe_outcome) =
-        subscribe_to_output(&state, &handle, client_id, Some(resume_from_seq)).await?;
+        subscribe_to_output(&state, &handle, client_id, Some(requested_resume_from_seq)).await?;
+    let mut session_events = handle.subscribe_events();
+    let mut thought_events = state.supervisor.subscribe_thought_events();
+    let mut lifecycle_events = state.supervisor.subscribe_events();
     let summary = fetch_live_summary(&state, &session_id).await?;
     let can_write = auth.has_scope(AuthScope::StreamWrite);
 
@@ -806,6 +850,13 @@ async fn session_ws_inner(
         "replay": {
             "latestSeq": replay_cursor.latest_seq,
             "windowStartSeq": replay_cursor.replay_window_start_seq,
+            "resumeFromSeq": requested_resume_from_seq,
+        },
+        "protocol": {
+            "output": match output_mode {
+                WsOutputMode::Raw => "raw",
+                WsOutputMode::Framed => "framed_v1",
+            },
         },
         "summary": summary,
     });
@@ -844,11 +895,23 @@ async fn session_ws_inner(
         }
     }
 
-    while let Some(result) = tokio::select! {
-        maybe_message = receiver.next() => maybe_message.map(SessionWsEvent::Incoming),
-        maybe_frame = output_rx.recv() => maybe_frame.map(SessionWsEvent::Frame),
-    } {
-        if !handle_session_ws_event(&handle, &mut sender, &auth, result).await? {
+    loop {
+        let event = tokio::select! {
+            maybe_message = receiver.next() => match maybe_message {
+                Some(message) => SessionWsEvent::Incoming(message),
+                None => break,
+            },
+            maybe_frame = output_rx.recv() => match maybe_frame {
+                Some(frame) => SessionWsEvent::Frame(frame),
+                None => break,
+            },
+            event = session_events.recv() => SessionWsEvent::SessionControl(event),
+            event = thought_events.recv() => SessionWsEvent::ThoughtControl(event),
+            event = lifecycle_events.recv() => SessionWsEvent::Lifecycle(event),
+        };
+        if !handle_session_ws_event(&handle, &mut sender, &auth, output_mode, &session_id, event)
+            .await?
+        {
             break;
         }
     }
@@ -860,12 +923,17 @@ async fn session_ws_inner(
 enum SessionWsEvent {
     Incoming(Result<Message, axum::Error>),
     Frame(OutputFrame),
+    SessionControl(Result<ControlEvent, broadcast::error::RecvError>),
+    ThoughtControl(Result<ControlEvent, broadcast::error::RecvError>),
+    Lifecycle(Result<LifecycleEvent, broadcast::error::RecvError>),
 }
 
 async fn handle_session_ws_event(
     handle: &ActorHandle,
     sender: &mut futures::stream::SplitSink<WebSocket, Message>,
     auth: &AuthInfo,
+    output_mode: WsOutputMode,
+    session_id: &str,
     event: SessionWsEvent,
 ) -> anyhow::Result<bool> {
     match event {
@@ -873,9 +941,18 @@ async fn handle_session_ws_event(
             handle_client_message(handle, sender, auth, message).await
         }
         SessionWsEvent::Incoming(Err(err)) => Err(err.into()),
-        SessionWsEvent::Frame(OutputFrame { data, .. }) => {
-            sender.send(Message::Binary(data.into())).await?;
+        SessionWsEvent::Frame(frame) => {
+            send_output_frame(sender, frame, output_mode).await?;
             Ok(true)
+        }
+        SessionWsEvent::SessionControl(event) => {
+            send_control_event_if_relevant(sender, session_id, "session_events", event).await
+        }
+        SessionWsEvent::ThoughtControl(event) => {
+            send_control_event_if_relevant(sender, session_id, "thought_events", event).await
+        }
+        SessionWsEvent::Lifecycle(event) => {
+            send_lifecycle_event_if_relevant(sender, session_id, event).await
         }
     }
 }
@@ -1124,6 +1201,151 @@ async fn send_ws_error(
     Ok(())
 }
 
+async fn send_control_event_if_relevant(
+    sender: &mut futures::stream::SplitSink<WebSocket, Message>,
+    session_id: &str,
+    stream: &'static str,
+    event: Result<ControlEvent, broadcast::error::RecvError>,
+) -> anyhow::Result<bool> {
+    match event {
+        Ok(event) => {
+            if event.session_id == session_id {
+                send_ws_json(sender, control_event_ws_payload(&event)).await?;
+            }
+        }
+        Err(broadcast::error::RecvError::Lagged(skipped)) => {
+            send_ws_json(sender, event_stream_lagged_payload(stream, skipped)).await?;
+        }
+        Err(broadcast::error::RecvError::Closed) => {}
+    }
+    Ok(true)
+}
+
+async fn send_lifecycle_event_if_relevant(
+    sender: &mut futures::stream::SplitSink<WebSocket, Message>,
+    session_id: &str,
+    event: Result<LifecycleEvent, broadcast::error::RecvError>,
+) -> anyhow::Result<bool> {
+    match event {
+        Ok(event) => {
+            if lifecycle_event_session_id(&event) == session_id {
+                send_ws_json(sender, lifecycle_event_ws_payload(&event)).await?;
+            }
+        }
+        Err(broadcast::error::RecvError::Lagged(skipped)) => {
+            send_ws_json(
+                sender,
+                event_stream_lagged_payload("lifecycle_events", skipped),
+            )
+            .await?;
+        }
+        Err(broadcast::error::RecvError::Closed) => {}
+    }
+    Ok(true)
+}
+
+async fn send_ws_json(
+    sender: &mut futures::stream::SplitSink<WebSocket, Message>,
+    payload: serde_json::Value,
+) -> anyhow::Result<()> {
+    sender
+        .send(Message::Text(payload.to_string().into()))
+        .await?;
+    Ok(())
+}
+
+fn control_event_ws_payload(event: &ControlEvent) -> serde_json::Value {
+    serde_json::json!({
+        "type": "control_event",
+        "event": event.event,
+        "sessionId": event.session_id,
+        "payload": event.payload,
+    })
+}
+
+fn lifecycle_event_session_id(event: &LifecycleEvent) -> &str {
+    match event {
+        LifecycleEvent::Created { session_id, .. } | LifecycleEvent::Deleted { session_id, .. } => {
+            session_id
+        }
+    }
+}
+
+fn lifecycle_event_ws_payload(event: &LifecycleEvent) -> serde_json::Value {
+    match event {
+        LifecycleEvent::Created {
+            session_id,
+            summary,
+            reason,
+            repo_theme,
+        } => serde_json::json!({
+            "type": "lifecycle_event",
+            "event": "session_created",
+            "sessionId": session_id,
+            "reason": reason,
+            "summary": summary,
+            "repoTheme": repo_theme,
+        }),
+        LifecycleEvent::Deleted {
+            session_id,
+            reason,
+            delete_mode,
+            tmux_session_alive,
+        } => serde_json::json!({
+            "type": "lifecycle_event",
+            "event": "session_deleted",
+            "sessionId": session_id,
+            "reason": reason,
+            "deleteMode": delete_mode,
+            "tmuxSessionAlive": tmux_session_alive,
+        }),
+    }
+}
+
+fn event_stream_lagged_payload(stream: &str, skipped: u64) -> serde_json::Value {
+    serde_json::json!({
+        "type": "event_stream_lagged",
+        "stream": stream,
+        "skipped": skipped,
+    })
+}
+
+async fn send_output_frame(
+    sender: &mut futures::stream::SplitSink<WebSocket, Message>,
+    frame: OutputFrame,
+    output_mode: WsOutputMode,
+) -> anyhow::Result<()> {
+    match output_mode {
+        WsOutputMode::Raw => {
+            sender.send(Message::Binary(frame.data.into())).await?;
+        }
+        WsOutputMode::Framed => {
+            sender
+                .send(Message::Binary(encode_terminal_output_frame(frame).into()))
+                .await?;
+        }
+    }
+    Ok(())
+}
+
+fn encode_terminal_output_frame(frame: OutputFrame) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(1 + std::mem::size_of::<u64>() + frame.data.len());
+    bytes.push(opcodes::TERMINAL_OUTPUT);
+    bytes.extend_from_slice(&frame.seq.to_be_bytes());
+    bytes.extend_from_slice(&frame.data);
+    bytes
+}
+
+fn query_flag_enabled(value: Option<&str>) -> bool {
+    let Some(value) = value else {
+        return false;
+    };
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "1" | "true" | "yes" | "on" | "framed" | "framed_v1"
+    )
+}
+
 async fn subscribe_to_output(
     state: &Arc<AppState>,
     handle: &ActorHandle,
@@ -1287,6 +1509,82 @@ mod tests {
         let observer = resolve_ws_auth(&config, Some("observer")).expect("observer auth");
         assert!(observer.has_scope(AuthScope::SessionsRead));
         assert!(!observer.has_scope(AuthScope::StreamWrite));
+    }
+
+    #[test]
+    fn query_flag_enabled_accepts_framed_values_only() {
+        for value in ["1", "true", "yes", "on", "framed", "framed_v1"] {
+            assert!(query_flag_enabled(Some(value)), "{value}");
+        }
+        for value in [None, Some(""), Some("0"), Some("false"), Some("raw")] {
+            assert!(!query_flag_enabled(value), "{value:?}");
+        }
+    }
+
+    #[test]
+    fn framed_terminal_output_prefixes_opcode_and_sequence() {
+        let frame = OutputFrame {
+            seq: 0x0102_0304_0506_0708,
+            data: b"hello".to_vec(),
+        };
+
+        let encoded = encode_terminal_output_frame(frame);
+
+        assert_eq!(encoded[0], opcodes::TERMINAL_OUTPUT);
+        let seq = u64::from_be_bytes(encoded[1..9].try_into().expect("seq bytes"));
+        assert_eq!(seq, 0x0102_0304_0506_0708);
+        assert_eq!(&encoded[9..], b"hello");
+    }
+
+    #[test]
+    fn control_event_ws_payload_preserves_session_event_and_payload() {
+        let event = ControlEvent {
+            event: "session_state".to_string(),
+            session_id: "sess_0".to_string(),
+            payload: serde_json::json!({
+                "state": "attention",
+                "previous_state": "idle",
+                "current_command": "cargo test",
+                "transport_health": "healthy",
+            }),
+        };
+
+        let payload = control_event_ws_payload(&event);
+
+        assert_eq!(payload["type"], "control_event");
+        assert_eq!(payload["event"], "session_state");
+        assert_eq!(payload["sessionId"], "sess_0");
+        assert_eq!(payload["payload"]["state"], "attention");
+        assert_eq!(payload["payload"]["current_command"], "cargo test");
+    }
+
+    #[test]
+    fn lifecycle_event_ws_payload_reports_deleted_session() {
+        let event = LifecycleEvent::Deleted {
+            session_id: "sess_0".to_string(),
+            reason: "tmux_reconcile_missing".to_string(),
+            delete_mode: crate::config::SessionDeleteMode::DetachBridge,
+            tmux_session_alive: false,
+        };
+
+        let payload = lifecycle_event_ws_payload(&event);
+
+        assert_eq!(lifecycle_event_session_id(&event), "sess_0");
+        assert_eq!(payload["type"], "lifecycle_event");
+        assert_eq!(payload["event"], "session_deleted");
+        assert_eq!(payload["sessionId"], "sess_0");
+        assert_eq!(payload["reason"], "tmux_reconcile_missing");
+        assert_eq!(payload["deleteMode"], "detach_bridge");
+        assert_eq!(payload["tmuxSessionAlive"], false);
+    }
+
+    #[test]
+    fn event_stream_lagged_payload_keeps_replay_quality_visible() {
+        let payload = event_stream_lagged_payload("thought_events", 7);
+
+        assert_eq!(payload["type"], "event_stream_lagged");
+        assert_eq!(payload["stream"], "thought_events");
+        assert_eq!(payload["skipped"], 7);
     }
 
     #[tokio::test]

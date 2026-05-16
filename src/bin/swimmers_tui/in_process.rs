@@ -25,7 +25,7 @@ use swimmers::thought::probe::run_thought_config_probe;
 use swimmers::thought::runtime_config::ThoughtConfig;
 use swimmers::thought_ui::thought_config_ui_metadata;
 use swimmers::types::{
-    CreateSessionRequest, CreateSessionResponse, CreateSessionsBatchRequest,
+    AdoptSessionResponse, CreateSessionRequest, CreateSessionResponse, CreateSessionsBatchRequest,
     CreateSessionsBatchResponse, DirGroupMembershipUpdateRequest, DirGroupMembershipUpdateResponse,
     DirListResponse, DirRepoActionResponse, DirRepoSearchResponse, GhosttyOpenMode,
     MermaidArtifactResponse, NativeAttentionGroupOpenRequest, NativeAttentionGroupOpenResponse,
@@ -35,7 +35,10 @@ use swimmers::types::{
 };
 
 use super::api::{ThoughtConfigTestResponse, TuiApi};
-use super::{load_overlay_plan_entries, PlanPanelEntry};
+use super::{
+    load_overlay_plan_entries, BackendHealthResponse, BackendPersistenceHealth,
+    BackendThoughtBridgeHealth, PlanPanelEntry,
+};
 pub(crate) use swimmers::types::ThoughtConfigResponse;
 
 pub(crate) struct InProcessApi {
@@ -56,6 +59,16 @@ impl InProcessApi {
     }
 }
 
+fn bridge_status_label(status: swimmers::thought::health::BridgeStatus) -> String {
+    match status {
+        swimmers::thought::health::BridgeStatus::Starting => "starting",
+        swimmers::thought::health::BridgeStatus::Healthy => "healthy",
+        swimmers::thought::health::BridgeStatus::Degraded => "degraded",
+        swimmers::thought::health::BridgeStatus::Unhealthy => "unhealthy",
+    }
+    .to_string()
+}
+
 // ---------------------------------------------------------------------------
 // TuiApi implementation
 // ---------------------------------------------------------------------------
@@ -74,6 +87,42 @@ impl TuiApi for InProcessApi {
         &self,
     ) -> BoxFuture<'_, Result<Vec<SessionSummary>, String>> {
         self.fetch_local_sessions()
+    }
+
+    fn fetch_backend_health(&self) -> BoxFuture<'_, Result<BackendHealthResponse, String>> {
+        Box::pin(async move {
+            let thought_bridge = self.state.bridge_health.snapshot();
+            let persistence = self
+                .state
+                .current_file_store()
+                .map(|store| store.health_snapshot());
+            Ok(BackendHealthResponse {
+                status: bridge_status_label(thought_bridge.status),
+                thought_bridge: BackendThoughtBridgeHealth {
+                    status: bridge_status_label(thought_bridge.status),
+                    consecutive_failures: thought_bridge.consecutive_failures,
+                    last_error: thought_bridge.last_error,
+                    last_backend_error: thought_bridge.last_backend_error,
+                    shutdown_requested: thought_bridge.shutdown_requested,
+                    shutdown_reason: thought_bridge.shutdown_reason,
+                },
+                persistence: match persistence {
+                    Some(snapshot) => BackendPersistenceHealth {
+                        available: true,
+                        ok: snapshot.ok,
+                        consecutive_failures: snapshot.consecutive_failures,
+                        last_successful_operation: snapshot.last_successful_operation,
+                        last_failed_operation: snapshot.last_failed_operation,
+                        last_error: snapshot.last_error,
+                    },
+                    None => BackendPersistenceHealth {
+                        available: false,
+                        ok: false,
+                        ..BackendPersistenceHealth::default()
+                    },
+                },
+            })
+        })
     }
 
     fn fetch_thought_config(&self) -> BoxFuture<'_, Result<ThoughtConfigResponse, String>> {
@@ -454,6 +503,28 @@ impl TuiApi for InProcessApi {
             Ok(CreateSessionResponse {
                 session,
                 repo_theme,
+            })
+        })
+    }
+
+    fn adopt_session(
+        &self,
+        tmux_name: &str,
+        session_id: Option<&str>,
+    ) -> BoxFuture<'_, Result<AdoptSessionResponse, String>> {
+        let tmux_name = tmux_name.to_string();
+        let session_id = session_id.map(str::to_string);
+        Box::pin(async move {
+            let adopted = self
+                .state
+                .supervisor
+                .adopt_tmux_session(tmux_name, session_id)
+                .await
+                .map_err(|err| err.to_string())?;
+            Ok(AdoptSessionResponse {
+                session: adopted.session,
+                repo_theme: adopted.repo_theme,
+                reused_session_id: adopted.reused_session_id,
             })
         })
     }

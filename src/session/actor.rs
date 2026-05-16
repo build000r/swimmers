@@ -20,7 +20,8 @@ use crate::config::Config;
 use crate::scroll::guard::{ScrollGuard, ScrollOutputChunk};
 use crate::session::artifacts::{
     default_artifact_registry, extract_mmd_slice_name, list_plan_siblings, list_repo_docs,
-    resolve_viewer_text_path, ArtifactDiscoveryContext, ArtifactKind, VIEWER_TEXT_FILENAMES,
+    read_text_file_bounded, resolve_viewer_text_path, ArtifactDiscoveryContext, ArtifactKind,
+    VIEWER_TEXT_FILENAMES, VIEWER_TEXT_MAX_BYTES,
 };
 use crate::session::replay_ring::ReplayRing;
 use crate::state::detector::StateDetector;
@@ -198,8 +199,6 @@ pub struct ActorHandle {
     pub cmd_tx: mpsc::Sender<SessionCommand>,
     /// Per-session broadcast channel for ControlEvents (session_state, session_title).
     /// Multiple WS clients can subscribe to the same session's events.
-    // FIXME(2026-04-21): Web handlers do not expose per-session ControlEvent subscriptions yet.
-    #[allow(dead_code)]
     event_tx: broadcast::Sender<ControlEvent>,
 }
 
@@ -212,8 +211,6 @@ impl ActorHandle {
     }
 
     /// Subscribe to this session's control events (state changes, title updates).
-    // FIXME(2026-04-21): Reserved for future per-session event streams; current WS route does not call this.
-    #[allow(dead_code)]
     pub fn subscribe_events(&self) -> broadcast::Receiver<ControlEvent> {
         self.event_tx.subscribe()
     }
@@ -1551,7 +1548,7 @@ impl SessionActor {
                 };
             }
         };
-        match fs::read_to_string(&file_path) {
+        match read_text_file_bounded(&file_path, VIEWER_TEXT_MAX_BYTES, "artifact file") {
             Ok(content) => PlanFileResponse {
                 session_id,
                 name: name.to_string(),
@@ -1562,7 +1559,7 @@ impl SessionActor {
                 session_id,
                 name: name.to_string(),
                 content: None,
-                error: Some(format!("failed to read plan file: {err}")),
+                error: Some(err),
             },
         }
     }
@@ -2672,6 +2669,65 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
     use tokio::sync::{broadcast, mpsc, oneshot};
+
+    #[test]
+    fn plan_file_response_rejects_path_traversal_names() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            dir.path().join("Cargo.toml"),
+            "[package]\nname = \"demo\"\n",
+        )
+        .expect("write cargo");
+        let plan_dir = dir.path().join("plans").join("draft").join("slice");
+        std::fs::create_dir_all(&plan_dir).expect("create plan dir");
+        std::fs::write(plan_dir.join("schema.mmd"), "graph TD\nA-->B\n").expect("write schema");
+        std::fs::write(plan_dir.join("plan.md"), "# Plan\n").expect("write plan");
+
+        let response = SessionActor::build_plan_file_response(
+            "sess-path".to_string(),
+            dir.path().to_string_lossy().into_owned(),
+            Utc::now() - chrono::Duration::seconds(1),
+            "../secret.txt",
+        );
+
+        assert!(response.content.is_none());
+        assert_eq!(
+            response.error.as_deref(),
+            Some("artifact file name not allowed: ../secret.txt")
+        );
+    }
+
+    #[test]
+    fn plan_file_response_omits_oversized_content_with_clear_error() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            dir.path().join("Cargo.toml"),
+            "[package]\nname = \"demo\"\n",
+        )
+        .expect("write cargo");
+        let plan_dir = dir.path().join("plans").join("draft").join("huge");
+        std::fs::create_dir_all(&plan_dir).expect("create plan dir");
+        std::fs::write(plan_dir.join("schema.mmd"), "graph TD\nA-->B\n").expect("write schema");
+        std::fs::write(
+            plan_dir.join("plan.md"),
+            "x".repeat(crate::session::artifacts::VIEWER_TEXT_MAX_BYTES as usize + 1),
+        )
+        .expect("write oversized plan");
+
+        let response = SessionActor::build_plan_file_response(
+            "sess-plan".to_string(),
+            dir.path().to_string_lossy().into_owned(),
+            Utc::now() - chrono::Duration::seconds(1),
+            "plan.md",
+        );
+
+        assert!(response.content.is_none());
+        assert!(response
+            .error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("exceeds 128 KiB limit"));
+    }
 
     fn test_actor() -> SessionActor {
         let pty_system = native_pty_system();

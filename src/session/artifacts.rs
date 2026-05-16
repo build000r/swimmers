@@ -8,6 +8,10 @@ use walkdir::WalkDir;
 
 use crate::session::overlay::default_overlay;
 
+pub const MERMAID_SOURCE_MAX_BYTES: u64 = 64 * 1024;
+pub const VIEWER_TEXT_MAX_BYTES: u64 = 128 * 1024;
+pub const MERMAID_SCAN_MAX_FILES: usize = 512;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ArtifactKind {
     Mermaid,
@@ -75,6 +79,12 @@ struct MermaidCandidate {
     updated_at: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone, Default)]
+struct MermaidScanResult {
+    candidates: Vec<MermaidCandidate>,
+    truncated: bool,
+}
+
 impl ArtifactDetector for MermaidArtifactDetector {
     fn kind(&self) -> ArtifactKind {
         ArtifactKind::Mermaid
@@ -89,46 +99,57 @@ impl ArtifactDetector for MermaidArtifactDetector {
         // Phase 1: Try skillbox overlay plan directories (no time filter)
         if let Some(overlay) = default_overlay() {
             if let Some(plan_dirs) = overlay.find_plan_dirs(root) {
-                let mut overlay_candidates = Vec::new();
+                let mut overlay_scan = MermaidScanResult::default();
                 for dir in &plan_dirs {
-                    overlay_candidates.extend(scan_mermaid_candidates(&dir.to_string_lossy()));
+                    let scan = scan_mermaid_candidates(&dir.to_string_lossy());
+                    overlay_scan.truncated |= scan.truncated;
+                    overlay_scan.candidates.extend(scan.candidates);
+                    if overlay_scan.candidates.len() >= MERMAID_SCAN_MAX_FILES {
+                        overlay_scan.candidates.truncate(MERMAID_SCAN_MAX_FILES);
+                        overlay_scan.truncated = true;
+                        break;
+                    }
                 }
-                if let Some(best) = overlay_candidates
+                if let Some(best) = overlay_scan
+                    .candidates
                     .iter()
                     .max_by(|l, r| compare_mermaid_candidates(l, r))
                     .cloned()
                 {
-                    return Some(read_candidate_artifact(best));
+                    return Some(read_candidate_artifact(best, overlay_scan.truncated));
                 }
             }
         }
 
         // Phase 2: In-repo scan with relaxed time filter for plan directories
-        let candidates = scan_mermaid_candidates(root);
+        let scan = scan_mermaid_candidates(root);
 
         // Prefer: plan-directory candidates (no time filter), then time-filtered others
-        let plan_best = candidates
+        let plan_best = scan
+            .candidates
             .iter()
             .filter(|c| has_plan_siblings(&c.display_path))
             .max_by(|l, r| compare_mermaid_candidates(l, r))
             .cloned();
         if let Some(best) = plan_best {
-            return Some(read_candidate_artifact(best));
+            return Some(read_candidate_artifact(best, scan.truncated));
         }
 
         // Original: time-filtered non-plan candidates
-        let best = candidates
+        let best = scan
+            .candidates
             .iter()
             .filter(|candidate| candidate.updated_at >= context.session_started_at)
             .max_by(|left, right| compare_mermaid_candidates(left, right))
             .cloned()?;
 
-        Some(read_candidate_artifact(best))
+        Some(read_candidate_artifact(best, scan.truncated))
     }
 }
 
-fn scan_mermaid_candidates(root: &str) -> Vec<MermaidCandidate> {
+fn scan_mermaid_candidates(root: &str) -> MermaidScanResult {
     let mut candidates = Vec::new();
+    let mut truncated = false;
     for entry in WalkDir::new(root)
         .follow_links(false)
         .into_iter()
@@ -158,18 +179,35 @@ fn scan_mermaid_candidates(root: &str) -> Vec<MermaidCandidate> {
             display_path: path.to_path_buf(),
             updated_at: DateTime::<Utc>::from(modified),
         });
+        if candidates.len() >= MERMAID_SCAN_MAX_FILES {
+            truncated = true;
+            break;
+        }
     }
-    candidates
+    MermaidScanResult {
+        candidates,
+        truncated,
+    }
 }
 
-fn read_candidate_artifact(candidate: MermaidCandidate) -> DiscoveredArtifact {
-    let (source, error) = match fs::read_to_string(&candidate.display_path) {
+fn read_candidate_artifact(
+    candidate: MermaidCandidate,
+    scan_truncated: bool,
+) -> DiscoveredArtifact {
+    let scan_error = scan_truncated.then(|| {
+        format!(
+            "artifact scan reached {MERMAID_SCAN_MAX_FILES} Mermaid files; showing newest file from bounded scan"
+        )
+    });
+    let (source, read_error) = match read_text_file_bounded(
+        &candidate.display_path,
+        MERMAID_SOURCE_MAX_BYTES,
+        "Mermaid artifact",
+    ) {
         Ok(source) => (Some(source), None),
-        Err(err) => (
-            None,
-            Some(format!("failed to read Mermaid artifact: {err}")),
-        ),
+        Err(err) => (None, Some(err)),
     };
+    let error = join_artifact_errors([scan_error, read_error]);
     DiscoveredArtifact {
         kind: ArtifactKind::Mermaid,
         path: candidate.display_path.to_string_lossy().into_owned(),
@@ -177,6 +215,23 @@ fn read_candidate_artifact(candidate: MermaidCandidate) -> DiscoveredArtifact {
         source,
         error,
     }
+}
+
+pub fn read_text_file_bounded(path: &Path, max_bytes: u64, label: &str) -> Result<String, String> {
+    let metadata = fs::metadata(path).map_err(|err| format!("failed to inspect {label}: {err}"))?;
+    if metadata.len() > max_bytes {
+        return Err(format!(
+            "{label} exceeds {} KiB limit ({} bytes); content omitted",
+            max_bytes / 1024,
+            metadata.len()
+        ));
+    }
+    fs::read_to_string(path).map_err(|err| format!("failed to read {label}: {err}"))
+}
+
+fn join_artifact_errors(errors: impl IntoIterator<Item = Option<String>>) -> Option<String> {
+    let messages = errors.into_iter().flatten().collect::<Vec<_>>();
+    (!messages.is_empty()).then(|| messages.join("; "))
 }
 
 /// Returns true if the .mmd file's parent directory contains known plan sibling files.
@@ -541,6 +596,69 @@ mod tests {
         let schema_path = plan_dir.join("schema.mmd");
         let siblings = super::list_plan_siblings(&schema_path.to_string_lossy());
         assert!(siblings.is_empty());
+    }
+
+    #[test]
+    fn mermaid_discovery_omits_oversized_source_with_clear_error() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let plan_dir = dir.path().join("plans").join("draft").join("huge");
+        fs::create_dir_all(&plan_dir).expect("create plan dir");
+        let schema_path = plan_dir.join("schema.mmd");
+        fs::write(
+            &schema_path,
+            format!("graph TD\n{}", "A-->B\n".repeat(12_000)),
+        )
+        .expect("write large schema");
+        fs::write(plan_dir.join("plan.md"), "# Plan\n").expect("write plan sibling");
+
+        let artifact = discover_mermaid(&ArtifactDiscoveryContext {
+            session_id: "sess-huge".to_string(),
+            tmux_name: "12".to_string(),
+            cwd: dir.path().to_string_lossy().into_owned(),
+            session_started_at: Utc::now() + Duration::seconds(60),
+            pane_tail: String::new(),
+        })
+        .expect("artifact metadata should still be available");
+
+        assert_eq!(artifact.path, schema_path.to_string_lossy());
+        assert!(artifact.source.is_none());
+        assert!(artifact
+            .error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("exceeds 64 KiB limit"));
+    }
+
+    #[test]
+    fn mermaid_discovery_reports_bounded_scan_when_many_artifacts_exist() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let docs_dir = dir.path().join("docs");
+        fs::create_dir_all(&docs_dir).expect("create docs dir");
+        let session_started_at = Utc::now();
+        std::thread::sleep(std::time::Duration::from_millis(25));
+        for index in 0..(super::MERMAID_SCAN_MAX_FILES + 8) {
+            fs::write(
+                docs_dir.join(format!("diagram-{index:04}.mmd")),
+                format!("graph TD\nA{index}-->B{index}\n"),
+            )
+            .expect("write mmd");
+        }
+
+        let artifact = discover_mermaid(&ArtifactDiscoveryContext {
+            session_id: "sess-many".to_string(),
+            tmux_name: "18".to_string(),
+            cwd: dir.path().to_string_lossy().into_owned(),
+            session_started_at,
+            pane_tail: String::new(),
+        })
+        .expect("bounded scan still returns an artifact");
+
+        assert!(artifact.source.is_some());
+        assert!(artifact
+            .error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("scan reached"));
     }
 
     #[test]

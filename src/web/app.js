@@ -18,6 +18,7 @@ const DIR_BROWSER_MANAGED_ONLY_KEY = "swimmers.web.dirs.managed";
 const TERMINAL_ZOOM_STORAGE_KEY = "swimmers.web.terminalZoom";
 const SEND_HISTORY_KEY = "swimmers.web.send.history";
 const SESSION_REFRESH_MS = 2500;
+const SESSION_REFRESH_STREAMING_MS = 10000;
 const SNAPSHOT_REFRESH_MS = 900;
 const AGENT_CONTEXT_REFRESH_MS = 5000;
 const SURFACE_CLICK_SUPPRESS_MS = 450;
@@ -57,6 +58,10 @@ const TERMINAL_ZOOM_STEP = 0.1;
 const SEND_HISTORY_LIMIT = 8;
 const MAX_TERMINAL_PASTE_BYTES = 786432;
 const MAX_PENDING_TERMINAL_BYTES = 524288;
+const MERMAID_SOURCE_DISPLAY_MAX_CHARS = 64 * 1024;
+const MERMAID_PLAN_CONTENT_DISPLAY_MAX_CHARS = 128 * 1024;
+const MERMAID_PLAN_FILES_MAX = 32;
+const TERMINAL_OUTPUT_OPCODE = 0x11;
 const FRANKENTERM_REQUIRED_INSTANCE_METHODS = [
   "init",
   "destroy",
@@ -98,6 +103,7 @@ const state = {
   terminalAcceptsBytes: true,
   terminalSessionId: null,
   ws: null,
+  lastTerminalSeqBySession: new Map(),
   pendingTerminalByteChunks: [],
   pendingTerminalByteLength: 0,
   connectionGeneration: 0,
@@ -166,6 +172,7 @@ const state = {
   searchMuted: true,
   utilityLabel: "Cmd/Ctrl-click a terminal link to open it.",
   utilityMuted: true,
+  backendHealth: null,
   surfaceZones: [],
   surfaceMasks: [],
   surfaceClickSuppressUntil: 0,
@@ -670,10 +677,58 @@ function syncTerminalStatusStrip() {
   if (state.selectMode) {
     pieces.push("selecting");
   }
+  const healthWarning = backendHealthWarningText(state.backendHealth);
+  if (healthWarning) {
+    pieces.push(healthWarning);
+  }
   if (el.terminalStatusStrip) {
     el.terminalStatusStrip.textContent = pieces.filter(Boolean).join("  |  ");
   }
+  document.body.classList.toggle("backend-health-degraded", Boolean(healthWarning));
   syncDocumentLifecycleSignal();
+}
+
+function conciseHealthDetail(value) {
+  const text = String(value || "").trim();
+  if (!text) {
+    return "";
+  }
+  return text.length > 64 ? `${text.slice(0, 61)}...` : text;
+}
+
+function backendHealthWarningText(health) {
+  if (!health || typeof health !== "object") {
+    return "";
+  }
+  const persistence = health.persistence || {};
+  if (!persistence.available) {
+    return "persistence unavailable";
+  }
+  if (!persistence.ok) {
+    const operation = persistence.last_failed_operation || "write";
+    const detail = conciseHealthDetail(persistence.last_error);
+    return `persistence degraded: ${operation}${detail ? `: ${detail}` : ""}`;
+  }
+  const thought = health.thought_bridge || {};
+  const status = String(thought.status || "").toLowerCase();
+  if (!status || status === "healthy") {
+    return "";
+  }
+  if (status === "degraded") {
+    const detail = conciseHealthDetail(thought.last_backend_error || thought.last_error);
+    return `thought bridge degraded${detail ? `: ${detail}` : ""}`;
+  }
+  if (status === "unhealthy") {
+    const detail = conciseHealthDetail(thought.shutdown_reason || thought.last_error);
+    return `thought bridge unhealthy${detail ? `: ${detail}` : ""}`;
+  }
+  return `thought bridge ${status}`;
+}
+
+function applyBackendHealth(payload) {
+  state.backendHealth = payload && typeof payload === "object" ? payload : null;
+  syncTerminalStatusStrip();
+  renderHudSurface();
 }
 
 function syncDocumentLifecycleSignal() {
@@ -3539,8 +3594,14 @@ function renderMermaidArtifact(payload) {
   const available = Boolean(payload?.available);
   const path = payload?.path || "(unknown path)";
   const updatedAt = payload?.updated_at ? formatTime(payload.updated_at) : "unknown";
-  const source = payload?.source || "";
-  const planFiles = Array.isArray(payload?.plan_files) ? payload.plan_files : [];
+  const sourceResult = boundedArtifactText(
+    payload?.source || "",
+    MERMAID_SOURCE_DISPLAY_MAX_CHARS,
+    `Mermaid source truncated after ${MERMAID_SOURCE_DISPLAY_MAX_CHARS / 1024} KiB for browser display.`,
+  );
+  const source = sourceResult.text;
+  const planFileResult = sanitizeMermaidPlanFiles(payload?.plan_files);
+  const planFiles = planFileResult.files;
   state.mermaidArtifact.source = source;
   state.mermaidArtifact.planFiles = planFiles;
   state.mermaidArtifact.activePlanFile = "";
@@ -3561,10 +3622,58 @@ function renderMermaidArtifact(payload) {
     `path: ${path}`,
     `updated: ${updatedAt}`,
     planFiles.length ? `plan files: ${planFiles.join(", ")}` : null,
+    sourceResult.truncated ? `source: truncated to ${MERMAID_SOURCE_DISPLAY_MAX_CHARS / 1024} KiB for browser display` : null,
+    planFileResult.cappedCount ? `plan files: showing first ${MERMAID_PLAN_FILES_MAX}; ${planFileResult.cappedCount} hidden` : null,
+    planFileResult.hiddenCount ? `plan files: ${planFileResult.hiddenCount} unsafe name${planFileResult.hiddenCount === 1 ? "" : "s"} hidden` : null,
     payload?.error ? `error: ${payload.error}` : null,
   ].filter(Boolean);
   setMermaidStatus(lines.join("\n"));
   syncSheetActionAvailability();
+}
+
+function boundedArtifactText(value, maxChars, marker) {
+  const text = String(value || "");
+  if (text.length <= maxChars) {
+    return { text, truncated: false };
+  }
+  return {
+    text: `${text.slice(0, maxChars)}\n\n[${marker}]`,
+    truncated: true,
+  };
+}
+
+function isSafeMermaidPlanFileName(name) {
+  const value = String(name || "").trim();
+  return Boolean(
+    value
+      && value.length <= 96
+      && value !== "."
+      && value !== ".."
+      && !value.includes("..")
+      && /^[A-Za-z0-9._-]+$/.test(value),
+  );
+}
+
+function sanitizeMermaidPlanFiles(value) {
+  const input = Array.isArray(value) ? value : [];
+  const safe = [];
+  let hiddenCount = 0;
+  for (const rawName of input) {
+    const name = String(rawName || "").trim();
+    if (!isSafeMermaidPlanFileName(name)) {
+      hiddenCount += 1;
+      continue;
+    }
+    if (!safe.includes(name)) {
+      safe.push(name);
+    }
+  }
+  const files = safe.slice(0, MERMAID_PLAN_FILES_MAX);
+  return {
+    files,
+    hiddenCount,
+    cappedCount: safe.length - files.length,
+  };
 }
 
 function planFileLabel(name) {
@@ -4625,6 +4734,16 @@ async function loadMermaidPlanFile(name) {
   if (!session || !fileName) {
     return;
   }
+  if (!isSafeMermaidPlanFileName(fileName) || !state.mermaidArtifact.planFiles.includes(fileName)) {
+    const message = `Plan file name not allowed: ${fileName}`;
+    state.mermaidArtifact.planContent = "";
+    el.mermaidPlanContent.classList.remove("hidden");
+    el.mermaidPlanContent.textContent = message;
+    el.mermaidPlanContent.classList.add("error");
+    setMermaidStatus(message, true);
+    syncSheetActionAvailability();
+    return;
+  }
 
   state.mermaidArtifact.activePlanFile = fileName;
   state.mermaidArtifact.planContent = "";
@@ -4636,11 +4755,22 @@ async function loadMermaidPlanFile(name) {
     url.searchParams.set("name", fileName);
     const response = await apiMaybeFetch(url.pathname + url.search);
     const payload = await responseJsonOrNull(response);
-    state.mermaidArtifact.planContent = payload?.content || "";
+    const contentResult = boundedArtifactText(
+      payload?.content || "",
+      MERMAID_PLAN_CONTENT_DISPLAY_MAX_CHARS,
+      `Plan file truncated after ${MERMAID_PLAN_CONTENT_DISPLAY_MAX_CHARS / 1024} KiB for browser display.`,
+    );
+    state.mermaidArtifact.planContent = contentResult.text;
     el.mermaidPlanContent.textContent =
-      payload?.content || payload?.error || `${fileName} is unavailable.`;
+      contentResult.text || payload?.error || `${fileName} is unavailable.`;
     el.mermaidPlanContent.classList.toggle("error", Boolean(payload?.error));
-    setMermaidStatus(payload?.error ? `Plan file ${fileName}: ${payload.error}` : `Plan file loaded: ${fileName}`);
+    setMermaidStatus(
+      payload?.error
+        ? `Plan file ${fileName}: ${payload.error}`
+        : contentResult.truncated
+          ? `Plan file loaded: ${fileName} (truncated to ${MERMAID_PLAN_CONTENT_DISPLAY_MAX_CHARS / 1024} KiB for browser display)`
+          : `Plan file loaded: ${fileName}`,
+    );
   } catch (error) {
     el.mermaidPlanContent.textContent = `Failed to load ${fileName}: ${error.message}`;
     el.mermaidPlanContent.classList.add("error");
@@ -4674,16 +4804,19 @@ async function launchCommitGrok() {
 
 async function refreshSessions() {
   try {
-    const requests = [apiFetch("/v1/sessions"), apiMaybeFetch("/v1/operator-pressure")];
-    if (state.followPublishedSelection) {
-      requests.push(apiFetch("/v1/selection"));
-    }
-
-    const [response, pressureResponse, publishedResponse] = await Promise.all(requests);
+    const publishedRequest = state.followPublishedSelection ? apiFetch("/v1/selection") : Promise.resolve(null);
+    const [response, pressureResponse, healthResponse, publishedResponse] = await Promise.all([
+      apiFetch("/v1/sessions"),
+      apiMaybeFetch("/v1/operator-pressure"),
+      apiMaybeFetch("/health"),
+      publishedRequest,
+    ]);
     const payload = await response.json();
     const pressurePayload = await responseJsonOrNull(pressureResponse);
+    const healthPayload = await responseJsonOrNull(healthResponse);
     state.sessions = Array.isArray(payload.sessions) ? payload.sessions : [];
     applyOperatorPressure(pressurePayload);
+    applyBackendHealth(healthPayload);
     syncTrogdorCueTransitions();
 
     if (publishedResponse) {
@@ -4717,6 +4850,7 @@ async function refreshSessions() {
   } catch (error) {
     state.sessions = [];
     state.operatorPressureBySession = new Map();
+    state.backendHealth = null;
     state.publishedSelection = null;
     persistSelectedSession(null);
     resetAgentContextForSession(null);
@@ -4734,9 +4868,30 @@ async function refreshSessions() {
 
 function scheduleSessionRefresh() {
   if (state.refreshTimer) {
-    clearInterval(state.refreshTimer);
+    clearTimeout(state.refreshTimer);
   }
-  state.refreshTimer = window.setInterval(refreshSessions, SESSION_REFRESH_MS);
+  state.refreshTimer = window.setTimeout(async () => {
+    state.refreshTimer = null;
+    await refreshSessions();
+    scheduleSessionRefresh();
+  }, sessionRefreshDelayMs());
+}
+
+function sessionRefreshDelayMs() {
+  if (state.followPublishedSelection || !sessionEventStreamOpen()) {
+    return SESSION_REFRESH_MS;
+  }
+  return SESSION_REFRESH_STREAMING_MS;
+}
+
+function sessionEventStreamOpen() {
+  const session = currentSession();
+  return Boolean(
+    session &&
+      state.ws &&
+      state.ws.readyState === WebSocket.OPEN &&
+      state.ws.sessionId === session.session_id,
+  );
 }
 
 async function loadFrankenTermFont() {
@@ -5225,17 +5380,18 @@ async function connectSelectedSession() {
 
   disconnectSocket();
   const generation = state.connectionGeneration;
-  const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-  const url = new URL(`${protocol}//${window.location.host}/ws/sessions/${encodeURIComponent(session.session_id)}`);
-  if (state.token) {
-    url.searchParams.set("token", state.token);
-  }
+  const url = sessionSocketUrl(session);
+  const resumeFromSeq = url.searchParams.get("resume_from_seq") || "";
+  const framedOutput = url.searchParams.get("framed") === "1";
 
   const ws = new WebSocket(url);
   ws.binaryType = "arraybuffer";
   ws.sessionId = session.session_id;
+  ws.framedOutput = framedOutput;
   state.ws = ws;
-  setConnectionStatus("connecting; input disabled");
+  setConnectionStatus(
+    resumeFromSeq ? `connecting; resuming from seq ${resumeFromSeq}` : "connecting; input disabled",
+  );
 
   ws.onopen = () => {
     if (generation !== state.connectionGeneration || state.ws !== ws) {
@@ -5245,6 +5401,7 @@ async function connectSelectedSession() {
     measureAndResizeSurface(true, true);
     state.reconnectAttempt = 0;
     setConnectionStatus("attached");
+    scheduleSessionRefresh();
   };
 
   ws.onmessage = (event) => {
@@ -5257,7 +5414,8 @@ async function connectSelectedSession() {
       return;
     }
 
-    feedTerminalBytes(new Uint8Array(event.data));
+    const terminalBytes = terminalPayloadFromSocketBytes(new Uint8Array(event.data), ws);
+    feedTerminalBytes(terminalBytes);
   };
 
   ws.onclose = () => {
@@ -5267,6 +5425,7 @@ async function connectSelectedSession() {
     const delay = reconnectDelayMs();
     state.reconnectAttempt += 1;
     setConnectionStatus(`disconnected; input disabled; retrying in ${Math.ceil(delay / 1000)}s`, true);
+    scheduleSessionRefresh();
     state.reconnectTimer = window.setTimeout(() => {
       state.reconnectTimer = null;
       if (generation !== state.connectionGeneration || !currentSession()) {
@@ -5279,6 +5438,56 @@ async function connectSelectedSession() {
   ws.onerror = () => {
     setConnectionStatus("attach failed; input disabled", true);
   };
+}
+
+function sessionSocketUrl(session) {
+  const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+  const url = new URL(`${protocol}//${window.location.host}/ws/sessions/${encodeURIComponent(session.session_id)}`);
+  if (state.token) {
+    url.searchParams.set("token", state.token);
+  }
+  url.searchParams.set("framed", "1");
+  const resumeFromSeq = state.lastTerminalSeqBySession.get(session.session_id);
+  if (resumeFromSeq && /^\d+$/.test(String(resumeFromSeq)) && String(resumeFromSeq) !== "0") {
+    url.searchParams.set("resume_from_seq", String(resumeFromSeq));
+  }
+  return url;
+}
+
+function terminalPayloadFromSocketBytes(bytes, ws = state.ws) {
+  if (!(bytes instanceof Uint8Array) || !ws?.framedOutput) {
+    return bytes;
+  }
+  const frame = decodeTerminalOutputFrame(bytes);
+  if (!frame) {
+    return bytes;
+  }
+  if (ws.sessionId) {
+    state.lastTerminalSeqBySession.set(ws.sessionId, frame.seq);
+  }
+  return frame.payload;
+}
+
+function decodeTerminalOutputFrame(bytes) {
+  if (!(bytes instanceof Uint8Array) || bytes.byteLength < 9 || bytes[0] !== TERMINAL_OUTPUT_OPCODE) {
+    return null;
+  }
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const high = view.getUint32(1);
+  const low = view.getUint32(5);
+  const seq = readUint64Decimal(high, low);
+  return {
+    seq,
+    payload: bytes.slice(9),
+  };
+}
+
+function readUint64Decimal(high, low) {
+  if (typeof BigInt === "function") {
+    return ((BigInt(high) << 32n) | BigInt(low)).toString();
+  }
+  const numeric = high * 4294967296 + low;
+  return Number.isSafeInteger(numeric) ? String(numeric) : "";
 }
 
 function feedTerminalBytes(bytes) {
@@ -5417,6 +5626,7 @@ function handleSocketText(raw) {
         if (message.summary) {
           mergeSummary(message.summary);
         }
+        scheduleSessionRefresh();
         break;
       case "replay_truncated":
         setConnectionStatus("partial replay", true);
@@ -5430,6 +5640,16 @@ function handleSocketText(raw) {
       case "input_ack":
         handleInputAck(message);
         break;
+      case "control_event":
+        applyControlEvent(message);
+        break;
+      case "lifecycle_event":
+        applyLifecycleEvent(message);
+        break;
+      case "event_stream_lagged":
+        setConnectionStatus("event stream lagged", true);
+        void refreshSessions();
+        break;
       case "pong":
         break;
       default:
@@ -5438,6 +5658,110 @@ function handleSocketText(raw) {
   } catch (_) {
     // Ignore malformed transport diagnostics.
   }
+}
+
+function applyControlEvent(message) {
+  const sessionId = normalizeSessionId(message.sessionId || message.session_id);
+  if (!sessionId) {
+    return;
+  }
+  const index = state.sessions.findIndex((session) => session.session_id === sessionId);
+  if (index < 0) {
+    return;
+  }
+
+  const payload = message.payload && typeof message.payload === "object" ? message.payload : {};
+  const event = String(message.event || "");
+  const session = { ...state.sessions[index], last_control_event: event };
+
+  if (event === "session_state") {
+    if (payload.state) session.state = payload.state;
+    if ("previous_state" in payload) session.previous_state = payload.previous_state;
+    if ("current_command" in payload) session.current_command = payload.current_command;
+    if (payload.state_evidence && typeof payload.state_evidence === "object") {
+      session.state_evidence = payload.state_evidence;
+    }
+    if (payload.transport_health) session.transport_health = payload.transport_health;
+    if (payload.exit_reason) session.exit_reason = payload.exit_reason;
+    if (payload.at) session.last_activity_at = payload.at;
+  } else if (event === "session_title") {
+    const title = String(payload.title || "").trim();
+    if (title) {
+      session.terminal_title = title;
+      if (title.startsWith("/")) {
+        session.cwd = title;
+      }
+    }
+  } else if (event === "session_skill") {
+    if ("last_skill" in payload) {
+      session.last_skill = payload.last_skill;
+    }
+  } else if (event === "thought_update") {
+    if ("thought" in payload) session.thought = payload.thought;
+    if ("token_count" in payload) session.token_count = payload.token_count;
+    if ("context_limit" in payload) session.context_limit = payload.context_limit;
+    if ("thought_state" in payload) session.thought_state = payload.thought_state;
+    if ("thought_source" in payload) session.thought_source = payload.thought_source;
+    if ("rest_state" in payload) session.rest_state = payload.rest_state;
+    if ("commit_candidate" in payload) session.commit_candidate = Boolean(payload.commit_candidate);
+    if (Array.isArray(payload.action_cues)) session.action_cues = payload.action_cues;
+    if (payload.at) session.thought_updated_at = payload.at;
+    if (payload.objective_changed && payload.at) session.objective_changed_at = payload.at;
+  }
+
+  state.sessions[index] = session;
+  syncTrogdorCueTransitions();
+  syncTerminalStatusStrip();
+  renderHudSurface();
+  refreshSelectedSessionSidecarsFromEvent(sessionId, event);
+}
+
+function applyLifecycleEvent(message) {
+  const sessionId = normalizeSessionId(message.sessionId || message.session_id);
+  if (!sessionId) {
+    return;
+  }
+
+  if (message.event === "session_created" && message.summary) {
+    mergeSummary(message.summary);
+    return;
+  }
+
+  if (message.event !== "session_deleted") {
+    return;
+  }
+
+  const index = state.sessions.findIndex((session) => session.session_id === sessionId);
+  if (index < 0) {
+    return;
+  }
+
+  state.sessions[index] = {
+    ...state.sessions[index],
+    state: "exited",
+    is_stale: true,
+    transport_health: "disconnected",
+    delete_reason: message.reason || "",
+    delete_mode: message.deleteMode || message.delete_mode || "",
+    tmux_session_alive: Boolean(message.tmuxSessionAlive ?? message.tmux_session_alive),
+  };
+  if (state.selectedSessionId === sessionId) {
+    setConnectionStatus("session ended", true);
+  } else {
+    syncTerminalStatusStrip();
+    renderHudSurface();
+  }
+}
+
+function refreshSelectedSessionSidecarsFromEvent(sessionId, event) {
+  if (sessionId !== state.selectedSessionId) {
+    return;
+  }
+  if (!["session_state", "session_skill", "thought_update"].includes(event)) {
+    return;
+  }
+  void refreshAgentContextForSelectedSession({ throttle: true, silent: true });
+  void refreshWorkbenchWidgetsForSelectedSession({ throttle: true, silent: true });
 }
 
 function handleInputAck(message) {
@@ -5462,7 +5786,10 @@ function mergeSummary(summary) {
   const index = state.sessions.findIndex((session) => session.session_id === summary.session_id);
   if (index >= 0) {
     state.sessions[index] = summary;
+  } else if (summary?.session_id) {
+    state.sessions.push(summary);
   }
+  syncTerminalStatusStrip();
   renderHudSurface();
 }
 
@@ -8155,8 +8482,8 @@ async function init() {
   void warmDirBrowserOnStartup();
   await setupHudSurface();
   renderHudSurface();
-  scheduleSessionRefresh();
   await refreshSessions();
+  scheduleSessionRefresh();
   if (boot.franken_term_available) {
     setLoadingState(false);
   }
@@ -8175,6 +8502,11 @@ export const __swimmersWebTest = {
   persistSelectedSession,
   renderHudSurface,
   syncTerminalPresentation,
+  sessionSocketUrl,
+  terminalPayloadFromSocketBytes,
+  decodeTerminalOutputFrame,
+  sessionRefreshDelayMs,
+  sessionEventStreamOpen,
   feedTerminalBytes,
   flushPendingTerminalBytes,
   setTerminalTextFallbackActive,
@@ -8204,6 +8536,10 @@ export const __swimmersWebTest = {
   renderWorkbenchWidgets,
   writeWorkbenchWidgetsHtml,
   renderTranscriptBlocks,
+  renderMermaidArtifact,
+  loadMermaidPlanFile,
+  isSafeMermaidPlanFileName,
+  sanitizeMermaidPlanFiles,
   refreshAgentContextForSelectedSession,
   refreshWorkbenchWidgetsForSelectedSession,
   setTerminalWorkbenchOpen,
@@ -8214,6 +8550,8 @@ export const __swimmersWebTest = {
   renderSendHistory,
   syncTerminalAccessibilityMirror,
   syncTerminalStatusStrip,
+  backendHealthWarningText,
+  applyBackendHealth,
   copyTerminalFrameText,
   syncLinkTools,
 };

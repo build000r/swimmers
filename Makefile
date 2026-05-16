@@ -1,7 +1,7 @@
 SHELL := /bin/bash
 .DEFAULT_GOAL := help
 
-.PHONY: help server up up-smoke web web-smoke web-workbench-smoke tui tui-check tui-smoke tui-stress ci-perf-gates cargo-cov-lcov
+.PHONY: help server up up-smoke web web-smoke web-workbench-smoke tui tui-check tui-smoke tui-stress glance-smoke remote-auth-smoke ci-perf-gates cargo-cov-lcov
 
 help:
 	@printf '%s\n' \
@@ -17,6 +17,8 @@ help:
 	'  make tui-check              Type-check the native TUI binary' \
 	'  make tui-smoke              Run shell checks for the TUI bootstrap helper' \
 	'  make tui-stress             Concurrent-load regression smoke for /v1/dirs + POST /v1/sessions' \
+	'  make glance-smoke           Render the 10-session Glance fixture and write proof artifacts' \
+	'  make remote-auth-smoke      Verify fake remote API launch/read auth and redaction paths' \
 	'  make ci-perf-gates          Run perf/concurrency gates (the CI regression guard bundle)' \
 	'  make cargo-cov-lcov         Run Rust tests with lcov output for /crap'
 
@@ -50,6 +52,12 @@ tui-smoke:
 
 tui-stress:
 	bash ./scripts/stress-dirs-concurrency.sh
+
+glance-smoke:
+	bash ./scripts/test-glance-live.sh
+
+remote-auth-smoke:
+	bash ./scripts/test-remote-auth-smoke.sh
 
 ci-perf-gates:
 	bash ./scripts/ci-perf-gates.sh

@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::fmt;
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -29,6 +30,7 @@ use crate::types::{
 const PROCESS_EXIT_REAP_INTERVAL: Duration = Duration::from_millis(250);
 const PROCESS_EXIT_DELETE_GRACE: Duration = Duration::ZERO;
 const PROCESS_EXIT_SUMMARY_TIMEOUT: Duration = Duration::from_millis(250);
+const TMUX_REDISCOVERY_INTERVAL: Duration = Duration::from_secs(10);
 const ACTIVE_PANE_LOOKUP_TIMEOUT: Duration = Duration::from_millis(350);
 const ACTIVE_PANE_LOOKUP_WARN_THRESHOLD: Duration = Duration::from_millis(200);
 
@@ -235,6 +237,83 @@ pub enum LifecycleEvent {
         tmux_session_alive: bool,
     },
 }
+
+#[derive(Debug, Clone)]
+pub struct AdoptedTmuxSession {
+    pub session: SessionSummary,
+    pub repo_theme: Option<RepoTheme>,
+    pub reused_session_id: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TmuxAdoptError {
+    EmptyTmuxName,
+    DiscoveryUnavailable,
+    TargetNotFound {
+        tmux_name: String,
+    },
+    AmbiguousTarget {
+        tmux_name: String,
+        matches: usize,
+    },
+    AlreadyTracked {
+        tmux_name: String,
+        session_id: String,
+    },
+    StaleSessionNotFound {
+        session_id: String,
+    },
+    StaleSessionConflict {
+        session_id: String,
+        stale_tmux_name: String,
+        requested_tmux_name: String,
+    },
+    SpawnFailed {
+        tmux_name: String,
+        message: String,
+    },
+}
+
+impl fmt::Display for TmuxAdoptError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::EmptyTmuxName => write!(f, "tmux_name is required"),
+            Self::DiscoveryUnavailable => {
+                write!(f, "tmux session listing is unavailable; cannot safely adopt")
+            }
+            Self::TargetNotFound { tmux_name } => {
+                write!(f, "tmux session `{tmux_name}` was not found")
+            }
+            Self::AmbiguousTarget { tmux_name, matches } => write!(
+                f,
+                "tmux session `{tmux_name}` is ambiguous ({matches} matches)"
+            ),
+            Self::AlreadyTracked {
+                tmux_name,
+                session_id,
+            } => write!(
+                f,
+                "tmux session `{tmux_name}` is already tracked as `{session_id}`"
+            ),
+            Self::StaleSessionNotFound { session_id } => {
+                write!(f, "stale session `{session_id}` was not found")
+            }
+            Self::StaleSessionConflict {
+                session_id,
+                stale_tmux_name,
+                requested_tmux_name,
+            } => write!(
+                f,
+                "stale session `{session_id}` is bound to tmux `{stale_tmux_name}`, not `{requested_tmux_name}`"
+            ),
+            Self::SpawnFailed { tmux_name, message } => {
+                write!(f, "failed to adopt tmux session `{tmux_name}`: {message}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for TmuxAdoptError {}
 
 // ---------------------------------------------------------------------------
 // Session supervisor
@@ -482,6 +561,31 @@ impl SessionSupervisor {
             .collect()
     }
 
+    async fn active_session_id_for_tmux(&self, tmux_name: &str) -> Option<String> {
+        let sessions = self.sessions.read().await;
+        sessions
+            .values()
+            .find(|handle| handle.tmux_name == tmux_name)
+            .map(|handle| handle.session_id.clone())
+    }
+
+    async fn stale_summary_for_id(&self, session_id: &str) -> Option<SessionSummary> {
+        let stale = self.stale_sessions.read().await;
+        stale
+            .iter()
+            .find(|summary| summary.session_id == session_id)
+            .cloned()
+    }
+
+    async fn stale_summaries_for_tmux(&self, tmux_name: &str) -> Vec<SessionSummary> {
+        let stale = self.stale_sessions.read().await;
+        stale
+            .iter()
+            .filter(|summary| summary.tmux_name == tmux_name)
+            .cloned()
+            .collect()
+    }
+
     async fn stale_session_ids_by_tmux(&self) -> HashMap<String, String> {
         let stale = self.stale_sessions.read().await;
         let mut by_tmux = HashMap::new();
@@ -607,14 +711,14 @@ impl SessionSupervisor {
     async fn reconcile_stale_sessions_after_discovery(
         &self,
         discovery_reliable: bool,
-        listed_tmux_names: Vec<String>,
+        listed_tmux_names: &[String],
     ) {
         if !discovery_reliable {
             warn!("skipping stale reconciliation due unreliable tmux discovery");
             return;
         }
 
-        let discovered_tmux_names: HashSet<String> = listed_tmux_names.into_iter().collect();
+        let discovered_tmux_names: HashSet<String> = listed_tmux_names.iter().cloned().collect();
         let unresolved_stale = {
             let mut stale = self.stale_sessions.write().await;
             stale.retain(|summary| !discovered_tmux_names.contains(&summary.tmux_name));
@@ -631,18 +735,154 @@ impl SessionSupervisor {
         }
 
         for summary in unresolved_stale {
-            self.emit_startup_missing_tmux_events(summary);
+            let previous_state = summary.state;
+            self.emit_missing_tmux_events(summary, previous_state, "startup_missing_tmux");
         }
     }
 
-    fn emit_startup_missing_tmux_events(&self, summary: SessionSummary) {
+    async fn summary_for_missing_tracked_handle(
+        &self,
+        handle: &ActorHandle,
+        cached: Option<&SessionSummary>,
+    ) -> SessionSummary {
+        let (tx, rx) = oneshot::channel();
+        if handle
+            .cmd_tx
+            .send(SessionCommand::GetSummary(tx))
+            .await
+            .is_ok()
+        {
+            if let Ok(Ok(summary)) = tokio::time::timeout(PROCESS_EXIT_SUMMARY_TIMEOUT, rx).await {
+                return summary;
+            }
+        }
+
+        cached.cloned().unwrap_or_else(|| {
+            self.build_placeholder_summary(&handle.session_id, &handle.tmux_name)
+        })
+    }
+
+    fn mark_missing_tmux_summary(mut summary: SessionSummary) -> SessionSummary {
+        summary.state = SessionState::Exited;
+        summary.current_command = None;
+        summary.state_evidence = crate::types::StateEvidence::new("tmux_reconcile_missing");
+        summary.rest_state = fallback_rest_state(SessionState::Exited, summary.thought_state);
+        summary.is_stale = true;
+        summary.attached_clients = 0;
+        summary.stale_attached_clients = 0;
+        summary.transport_health = TransportHealth::Disconnected;
+        summary
+    }
+
+    async fn reconcile_tracked_sessions_after_discovery(
+        &self,
+        discovery_reliable: bool,
+        listed_tmux_names: &[String],
+    ) {
+        if !discovery_reliable {
+            return;
+        }
+
+        let listed_tmux_names = listed_tmux_names.iter().cloned().collect::<HashSet<_>>();
+        let missing_handles = {
+            let sessions = self.sessions.read().await;
+            sessions
+                .values()
+                .filter(|handle| !listed_tmux_names.contains(&handle.tmux_name))
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+        if missing_handles.is_empty() {
+            return;
+        }
+
+        let cached_summaries = self.summary_cache.read().await.clone();
+        let mut stale_summaries = Vec::with_capacity(missing_handles.len());
+        for handle in &missing_handles {
+            let summary = self
+                .summary_for_missing_tracked_handle(
+                    handle,
+                    cached_summaries.get(&handle.session_id),
+                )
+                .await;
+            let previous_state = summary.state;
+            stale_summaries.push((
+                handle.session_id.clone(),
+                previous_state,
+                Self::mark_missing_tmux_summary(summary),
+            ));
+        }
+
+        let removed_handles = {
+            let mut sessions = self.sessions.write().await;
+            let mut removed = Vec::with_capacity(missing_handles.len());
+            for handle in &missing_handles {
+                let still_missing = sessions
+                    .get(&handle.session_id)
+                    .map(|current| !listed_tmux_names.contains(&current.tmux_name))
+                    .unwrap_or(false);
+                if still_missing {
+                    if let Some(handle) = sessions.remove(&handle.session_id) {
+                        removed.push(handle);
+                    }
+                }
+            }
+            crate::metrics::set_active_sessions(sessions.len());
+            removed
+        };
+        if removed_handles.is_empty() {
+            return;
+        }
+
+        let removed_ids = removed_handles
+            .iter()
+            .map(|handle| handle.session_id.clone())
+            .collect::<HashSet<_>>();
+        {
+            let mut cache = self.summary_cache.write().await;
+            for session_id in &removed_ids {
+                cache.remove(session_id);
+            }
+        }
+        {
+            let mut stale = self.stale_sessions.write().await;
+            for (session_id, _, summary) in &stale_summaries {
+                if !removed_ids.contains(session_id) {
+                    continue;
+                }
+                stale.retain(|existing| {
+                    existing.session_id != summary.session_id
+                        && existing.tmux_name != summary.tmux_name
+                });
+                stale.push(summary.clone());
+            }
+        }
+
+        for handle in removed_handles {
+            let _ = handle.cmd_tx.send(SessionCommand::Shutdown).await;
+        }
+        for (session_id, previous_state, summary) in stale_summaries {
+            if removed_ids.contains(&session_id) {
+                self.emit_missing_tmux_events(summary, previous_state, "tmux_reconcile_missing");
+            }
+        }
+
+        self.persist_registry().await;
+    }
+
+    fn emit_missing_tmux_events(
+        &self,
+        summary: SessionSummary,
+        previous_state: SessionState,
+        reason: &'static str,
+    ) {
         let payload = SessionStatePayload {
             state: SessionState::Exited,
-            previous_state: summary.state,
+            previous_state,
             current_command: summary.current_command.clone(),
-            state_evidence: crate::types::StateEvidence::new("startup_missing_tmux"),
+            state_evidence: crate::types::StateEvidence::new(reason),
             transport_health: TransportHealth::Disconnected,
-            exit_reason: Some("startup_missing_tmux".to_string()),
+            exit_reason: Some(reason.to_string()),
             at: Utc::now(),
         };
         let event = ControlEvent {
@@ -654,7 +894,7 @@ impl SessionSupervisor {
 
         let _ = self.lifecycle_tx.send(LifecycleEvent::Deleted {
             session_id: summary.session_id,
-            reason: "startup_missing_tmux".to_string(),
+            reason: reason.to_string(),
             delete_mode: crate::config::SessionDeleteMode::DetachBridge,
             tmux_session_alive: false,
         });
@@ -671,6 +911,72 @@ impl SessionSupervisor {
         if discovery_reliable {
             self.persist_registry().await;
         }
+    }
+
+    async fn resolve_adopt_session_identity(
+        self: &Arc<Self>,
+        tmux_name: &str,
+        requested_session_id: Option<String>,
+    ) -> Result<(String, Option<SessionSummary>), TmuxAdoptError> {
+        if let Some(session_id) = requested_session_id {
+            if self.sessions.read().await.contains_key(&session_id) {
+                return Err(TmuxAdoptError::AlreadyTracked {
+                    tmux_name: tmux_name.to_string(),
+                    session_id,
+                });
+            }
+
+            let stale = self
+                .stale_summary_for_id(&session_id)
+                .await
+                .ok_or_else(|| TmuxAdoptError::StaleSessionNotFound {
+                    session_id: session_id.clone(),
+                })?;
+            if stale.tmux_name != tmux_name {
+                return Err(TmuxAdoptError::StaleSessionConflict {
+                    session_id,
+                    stale_tmux_name: stale.tmux_name,
+                    requested_tmux_name: tmux_name.to_string(),
+                });
+            }
+            return Ok((stale.session_id.clone(), Some(stale)));
+        }
+
+        let stale_matches = self.stale_summaries_for_tmux(tmux_name).await;
+        match stale_matches.len() {
+            0 => Ok((self.allocate_unique_session_id().await, None)),
+            1 => {
+                let stale = stale_matches.into_iter().next().expect("one stale match");
+                Ok((stale.session_id.clone(), Some(stale)))
+            }
+            count => Err(TmuxAdoptError::AmbiguousTarget {
+                tmux_name: tmux_name.to_string(),
+                matches: count,
+            }),
+        }
+    }
+
+    fn build_adopted_summary(
+        &self,
+        session_id: &str,
+        tmux_name: &str,
+        stale_seed: Option<SessionSummary>,
+        reason: &'static str,
+    ) -> (SessionSummary, Option<RepoTheme>) {
+        let mut summary =
+            stale_seed.unwrap_or_else(|| self.build_placeholder_summary(session_id, tmux_name));
+        summary.session_id = session_id.to_string();
+        summary.tmux_name = tmux_name.to_string();
+        summary.state = SessionState::Idle;
+        summary.current_command = None;
+        summary.state_evidence = crate::types::StateEvidence::unobserved(reason);
+        summary.rest_state = fallback_rest_state(SessionState::Idle, summary.thought_state);
+        summary.is_stale = false;
+        summary.attached_clients = 0;
+        summary.stale_attached_clients = 0;
+        summary.transport_health = TransportHealth::Healthy;
+        let repo_theme = self.resolve_repo_theme_for_summary(&mut summary);
+        (summary, repo_theme)
     }
 
     // -----------------------------------------------------------------------
@@ -693,12 +999,146 @@ impl SessionSupervisor {
         let _discovery_guard = self.discovery_lock.lock().await;
         let listed = self.list_tmux_session_names(reason).await;
         let highest_numeric = self.attach_discovered_sessions(reason, &listed.names).await;
-        self.reconcile_stale_sessions_after_discovery(listed.reliable, listed.names)
+        self.reconcile_stale_sessions_after_discovery(listed.reliable, &listed.names)
+            .await;
+        self.reconcile_tracked_sessions_after_discovery(listed.reliable, &listed.names)
             .await;
         self.finish_tmux_discovery(listed.reliable, highest_numeric)
             .await;
 
         Ok(())
+    }
+
+    /// Explicitly adopt a tmux session that already exists outside swimmers,
+    /// optionally reusing a stale swimmers session id when that binding is
+    /// unambiguous.
+    pub async fn adopt_tmux_session(
+        self: &Arc<Self>,
+        tmux_name: String,
+        session_id: Option<String>,
+    ) -> Result<AdoptedTmuxSession, TmuxAdoptError> {
+        let tmux_name = tmux_name.trim().to_string();
+        if tmux_name.is_empty() {
+            return Err(TmuxAdoptError::EmptyTmuxName);
+        }
+
+        let _discovery_guard = self.discovery_lock.lock().await;
+        if let Some(active_id) = self.active_session_id_for_tmux(&tmux_name).await {
+            return Err(TmuxAdoptError::AlreadyTracked {
+                tmux_name,
+                session_id: active_id,
+            });
+        }
+
+        let listed = self.list_tmux_session_names("manual_tmux_adopt").await;
+        if !listed.reliable {
+            return Err(TmuxAdoptError::DiscoveryUnavailable);
+        }
+
+        let target_matches = listed
+            .names
+            .iter()
+            .filter(|name| *name == &tmux_name)
+            .count();
+        match target_matches {
+            0 => {
+                return Err(TmuxAdoptError::TargetNotFound { tmux_name });
+            }
+            1 => {}
+            count => {
+                return Err(TmuxAdoptError::AmbiguousTarget {
+                    tmux_name,
+                    matches: count,
+                });
+            }
+        }
+
+        let (adopt_session_id, stale_seed) = self
+            .resolve_adopt_session_identity(&tmux_name, session_id)
+            .await?;
+        let reused_session_id = stale_seed.is_some();
+        if reused_session_id {
+            self.bump_id_counter_from_session_id(&adopt_session_id);
+        }
+
+        let last_activity_override = match stale_seed.as_ref() {
+            Some(summary) => Some(summary.last_activity_at),
+            None => self.persisted_last_activity(&adopt_session_id).await,
+        };
+        let batch = match stale_seed
+            .as_ref()
+            .and_then(|summary| summary.batch.clone())
+        {
+            Some(batch) => Some(batch),
+            None => self.persisted_batch(&adopt_session_id).await,
+        };
+
+        let handle = crate::session::actor::SessionActor::spawn(
+            adopt_session_id.clone(),
+            tmux_name.clone(),
+            true,
+            None,
+            None,
+            None,
+            self.config.clone(),
+            last_activity_override,
+            batch,
+        )
+        .map_err(|error| TmuxAdoptError::SpawnFailed {
+            tmux_name: tmux_name.clone(),
+            message: error.to_string(),
+        })?;
+
+        if !self
+            .insert_discovered_handle(adopt_session_id.clone(), tmux_name.clone(), handle)
+            .await
+        {
+            let active_id = self
+                .active_session_id_for_tmux(&tmux_name)
+                .await
+                .unwrap_or_else(|| "<unknown>".to_string());
+            return Err(TmuxAdoptError::AlreadyTracked {
+                tmux_name,
+                session_id: active_id,
+            });
+        }
+
+        let reason = if reused_session_id {
+            "manual_tmux_reattach"
+        } else {
+            "manual_tmux_adopt"
+        };
+        let (summary, repo_theme) =
+            self.build_adopted_summary(&adopt_session_id, &tmux_name, stale_seed, reason);
+        {
+            let mut stale = self.stale_sessions.write().await;
+            stale.retain(|existing| {
+                existing.session_id != adopt_session_id && existing.tmux_name != tmux_name
+            });
+        }
+        {
+            let mut cache = self.summary_cache.write().await;
+            cache.insert(adopt_session_id.clone(), summary.clone());
+        }
+        {
+            let sessions = self.sessions.read().await;
+            crate::metrics::set_active_sessions(sessions.len());
+        }
+
+        let _ = self.lifecycle_tx.send(LifecycleEvent::Created {
+            session_id: adopt_session_id,
+            summary: summary.clone(),
+            reason: reason.to_string(),
+            repo_theme: repo_theme.clone(),
+        });
+
+        self.persist_registry().await;
+
+        Ok(AdoptedTmuxSession {
+            session: summary,
+            repo_theme,
+            reused_session_id,
+        })
     }
 
     // -----------------------------------------------------------------------
@@ -1075,15 +1515,11 @@ impl SessionSupervisor {
     // -----------------------------------------------------------------------
 
     /// Subscribe to lifecycle events (session created/deleted).
-    // FIXME(2026-04-21): WebSocket transport does not subscribe to supervisor lifecycle broadcasts yet.
-    #[allow(dead_code)]
     pub fn subscribe_events(&self) -> broadcast::Receiver<LifecycleEvent> {
         self.lifecycle_tx.subscribe()
     }
 
     /// Subscribe to thought_update ControlEvents from the thought loop.
-    // FIXME(2026-04-21): No external consumer subscribes through this hook; startup uses `thought_event_sender`.
-    #[allow(dead_code)]
     pub fn subscribe_thought_events(&self) -> broadcast::Receiver<ControlEvent> {
         self.thought_tx.subscribe()
     }
@@ -1425,6 +1861,26 @@ impl SessionSupervisor {
             loop {
                 interval.tick().await;
                 supervisor.reap_exited_sessions().await;
+            }
+        });
+    }
+
+    /// Spawn a bounded background task that keeps in-memory actors reconciled
+    /// with tmux sessions created or removed outside swimmers after startup.
+    pub fn spawn_tmux_reconcile_loop(self: &Arc<Self>) {
+        let supervisor = self.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(TMUX_REDISCOVERY_INTERVAL);
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            interval.tick().await;
+            loop {
+                interval.tick().await;
+                if let Err(err) = supervisor
+                    .discover_tmux_sessions_with_reason("periodic_tmux_reconcile")
+                    .await
+                {
+                    warn!("periodic tmux reconcile failed: {err}");
+                }
             }
         });
     }
@@ -3849,6 +4305,293 @@ esac
         assert!(sessions
             .values()
             .any(|handle| handle.tmux_name == "workspace"));
+    }
+
+    #[tokio::test]
+    async fn discover_tmux_sessions_reconciles_external_create_remove_and_restart() {
+        let _guard = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let sessions_file;
+        let original_sessions = std::env::var_os("SWIMMERS_FAKE_TMUX_SESSIONS");
+        let (_dir, original_path) = install_fake_tmux(
+            r##"#!/bin/sh
+set -eu
+cmd="${1-}"
+case "$cmd" in
+  list-sessions)
+    while IFS= read -r line || [ -n "$line" ]; do
+      printf '%s\n' "$line"
+    done < "${SWIMMERS_FAKE_TMUX_SESSIONS}"
+    ;;
+  list-panes)
+    exit 0
+    ;;
+  attach-session|new-session)
+    while IFS= read -r line; do
+      printf '%s\r\n' "$line"
+    done
+    ;;
+  display-message)
+    case "${5-}" in
+      "#{pane_current_command}") printf 'codex\n' ;;
+      "#{pane_current_path}") printf '/tmp/project\n' ;;
+      "#{pane_pid}") printf '101\n' ;;
+      "#{window_index}.#{pane_index}:#{pane_id}") printf '0.0:%%1\n' ;;
+    esac
+    ;;
+  send-keys|kill-session|capture-pane)
+    exit 0
+    ;;
+esac
+"##,
+        );
+        sessions_file = _dir.path().join("sessions.txt");
+        std::env::set_var("SWIMMERS_FAKE_TMUX_SESSIONS", &sessions_file);
+
+        let supervisor = SessionSupervisor::new(Arc::new(Config::default()));
+        std::fs::write(&sessions_file, "alpha\nbeta\n").expect("initial sessions");
+        supervisor
+            .discover_tmux_sessions_with_reason("test_discovery")
+            .await
+            .expect("initial discover");
+        let first_ids = {
+            let sessions = supervisor.sessions.read().await;
+            sessions
+                .values()
+                .map(|handle| (handle.tmux_name.clone(), handle.session_id.clone()))
+                .collect::<HashMap<_, _>>()
+        };
+        assert_eq!(first_ids.len(), 2);
+        let alpha_id = first_ids.get("alpha").expect("alpha id").clone();
+        let beta_id = first_ids.get("beta").expect("beta id").clone();
+
+        std::fs::write(&sessions_file, "beta\ngamma\n").expect("updated sessions");
+        supervisor
+            .discover_tmux_sessions_with_reason("periodic_tmux_reconcile")
+            .await
+            .expect("rediscover after remove/create");
+        let after_remove = supervisor.list_sessions().await;
+        assert_eq!(after_remove.len(), 2);
+        assert!(after_remove
+            .iter()
+            .any(|summary| { summary.tmux_name == "beta" && summary.session_id == beta_id }));
+        assert!(after_remove
+            .iter()
+            .any(|summary| summary.tmux_name == "gamma"));
+        assert!(!after_remove
+            .iter()
+            .any(|summary| summary.tmux_name == "alpha"));
+        {
+            let stale = supervisor.stale_sessions.read().await;
+            let alpha = stale
+                .iter()
+                .find(|summary| summary.tmux_name == "alpha")
+                .expect("removed alpha should become stale");
+            assert_eq!(alpha.session_id, alpha_id);
+            assert_eq!(alpha.state, SessionState::Exited);
+            assert!(alpha.is_stale);
+            assert_eq!(alpha.transport_health, TransportHealth::Disconnected);
+        }
+
+        std::fs::write(&sessions_file, "alpha\nbeta\ngamma\n").expect("restarted sessions");
+        supervisor
+            .discover_tmux_sessions_with_reason("periodic_tmux_reconcile")
+            .await
+            .expect("rediscover after restart");
+        let after_restart = supervisor.list_sessions().await;
+        assert_eq!(after_restart.len(), 3);
+        assert!(after_restart
+            .iter()
+            .any(|summary| { summary.tmux_name == "alpha" && summary.session_id == alpha_id }));
+
+        supervisor
+            .discover_tmux_sessions_with_reason("periodic_tmux_reconcile")
+            .await
+            .expect("dedup rediscover");
+        let final_ids = {
+            let sessions = supervisor.sessions.read().await;
+            sessions
+                .values()
+                .map(|handle| (handle.tmux_name.clone(), handle.session_id.clone()))
+                .collect::<HashMap<_, _>>()
+        };
+        assert_eq!(final_ids.len(), 3);
+        assert_eq!(final_ids.get("alpha"), Some(&alpha_id));
+        assert_eq!(final_ids.get("beta"), Some(&beta_id));
+
+        restore_test_path(original_path);
+        match original_sessions {
+            Some(value) => std::env::set_var("SWIMMERS_FAKE_TMUX_SESSIONS", value),
+            None => std::env::remove_var("SWIMMERS_FAKE_TMUX_SESSIONS"),
+        }
+    }
+
+    #[tokio::test]
+    async fn adopt_tmux_session_reuses_stale_identity_and_rejects_duplicates() {
+        let _guard = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let original_sessions = std::env::var_os("SWIMMERS_FAKE_TMUX_SESSIONS");
+        let (_dir, original_path) = install_fake_tmux(
+            r##"#!/bin/sh
+set -eu
+cmd="${1-}"
+case "$cmd" in
+  list-sessions)
+    while IFS= read -r line || [ -n "$line" ]; do
+      printf '%s\n' "$line"
+    done < "${SWIMMERS_FAKE_TMUX_SESSIONS}"
+    ;;
+  list-panes)
+    exit 0
+    ;;
+  attach-session|new-session)
+    while IFS= read -r line; do
+      printf '%s\r\n' "$line"
+    done
+    ;;
+  display-message)
+    case "${5-}" in
+      "#{pane_current_command}") printf 'codex\n' ;;
+      "#{pane_current_path}") printf '/tmp/project\n' ;;
+      "#{pane_pid}") printf '101\n' ;;
+      "#{window_index}.#{pane_index}:#{pane_id}") printf '0.0:%%1\n' ;;
+    esac
+    ;;
+  send-keys|kill-session|capture-pane)
+    exit 0
+    ;;
+esac
+"##,
+        );
+        let sessions_file = _dir.path().join("sessions.txt");
+        std::fs::write(&sessions_file, "alpha\n").expect("sessions");
+        std::env::set_var("SWIMMERS_FAKE_TMUX_SESSIONS", &sessions_file);
+
+        let supervisor = SessionSupervisor::new(Arc::new(Config::default()));
+        let mut stale = supervisor.build_placeholder_summary("sess_42", "alpha");
+        stale.state = SessionState::Exited;
+        stale.is_stale = true;
+        stale.transport_health = TransportHealth::Disconnected;
+        stale.cwd = "/tmp/project".to_string();
+        supervisor.stale_sessions.write().await.push(stale);
+
+        let adopted = supervisor
+            .adopt_tmux_session("alpha".to_string(), None)
+            .await
+            .expect("adopt stale tmux session");
+        assert!(adopted.reused_session_id);
+        assert_eq!(adopted.session.session_id, "sess_42");
+        assert_eq!(adopted.session.tmux_name, "alpha");
+        assert!(!adopted.session.is_stale);
+
+        let active = supervisor.list_sessions().await;
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0].session_id, "sess_42");
+        assert!(supervisor.stale_sessions.read().await.is_empty());
+
+        let duplicate = supervisor
+            .adopt_tmux_session("alpha".to_string(), None)
+            .await
+            .expect_err("already tracked tmux should be rejected");
+        assert_eq!(
+            duplicate,
+            TmuxAdoptError::AlreadyTracked {
+                tmux_name: "alpha".to_string(),
+                session_id: "sess_42".to_string()
+            }
+        );
+
+        restore_test_path(original_path);
+        match original_sessions {
+            Some(value) => std::env::set_var("SWIMMERS_FAKE_TMUX_SESSIONS", value),
+            None => std::env::remove_var("SWIMMERS_FAKE_TMUX_SESSIONS"),
+        }
+    }
+
+    #[tokio::test]
+    async fn adopt_tmux_session_rejects_missing_ambiguous_and_conflicting_targets() {
+        let _guard = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let original_sessions = std::env::var_os("SWIMMERS_FAKE_TMUX_SESSIONS");
+        let (_dir, original_path) = install_fake_tmux(
+            r##"#!/bin/sh
+set -eu
+cmd="${1-}"
+case "$cmd" in
+  list-sessions)
+    while IFS= read -r line || [ -n "$line" ]; do
+      printf '%s\n' "$line"
+    done < "${SWIMMERS_FAKE_TMUX_SESSIONS}"
+    ;;
+  list-panes|send-keys|kill-session|capture-pane)
+    exit 0
+    ;;
+  attach-session|new-session)
+    while IFS= read -r line; do
+      printf '%s\r\n' "$line"
+    done
+    ;;
+  display-message)
+    case "${5-}" in
+      "#{pane_current_command}") printf 'codex\n' ;;
+      "#{pane_current_path}") printf '/tmp/project\n' ;;
+      "#{pane_pid}") printf '101\n' ;;
+      "#{window_index}.#{pane_index}:#{pane_id}") printf '0.0:%%1\n' ;;
+    esac
+    ;;
+esac
+"##,
+        );
+        let sessions_file = _dir.path().join("sessions.txt");
+        std::env::set_var("SWIMMERS_FAKE_TMUX_SESSIONS", &sessions_file);
+
+        let supervisor = SessionSupervisor::new(Arc::new(Config::default()));
+        std::fs::write(&sessions_file, "alpha\n").expect("sessions");
+        assert_eq!(
+            supervisor
+                .adopt_tmux_session("beta".to_string(), None)
+                .await
+                .expect_err("missing tmux target should be rejected"),
+            TmuxAdoptError::TargetNotFound {
+                tmux_name: "beta".to_string()
+            }
+        );
+
+        std::fs::write(&sessions_file, "alpha\nalpha\n").expect("duplicate sessions");
+        assert_eq!(
+            supervisor
+                .adopt_tmux_session("alpha".to_string(), None)
+                .await
+                .expect_err("ambiguous tmux target should be rejected"),
+            TmuxAdoptError::AmbiguousTarget {
+                tmux_name: "alpha".to_string(),
+                matches: 2
+            }
+        );
+
+        std::fs::write(&sessions_file, "alpha\n").expect("sessions");
+        let stale = supervisor.build_placeholder_summary("sess_7", "beta");
+        supervisor.stale_sessions.write().await.push(stale);
+        assert_eq!(
+            supervisor
+                .adopt_tmux_session("alpha".to_string(), Some("sess_7".to_string()))
+                .await
+                .expect_err("conflicting stale identity should be rejected"),
+            TmuxAdoptError::StaleSessionConflict {
+                session_id: "sess_7".to_string(),
+                stale_tmux_name: "beta".to_string(),
+                requested_tmux_name: "alpha".to_string()
+            }
+        );
+
+        restore_test_path(original_path);
+        match original_sessions {
+            Some(value) => std::env::set_var("SWIMMERS_FAKE_TMUX_SESSIONS", value),
+            None => std::env::remove_var("SWIMMERS_FAKE_TMUX_SESSIONS"),
+        }
     }
 
     #[test]

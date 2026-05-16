@@ -22,6 +22,13 @@ impl TuiApi for TuiClient {
         }
     }
 
+    fn fetch_backend_health(&self) -> BoxFuture<'_, Result<BackendHealthResponse, String>> {
+        match self {
+            Self::Embedded(client) => client.fetch_backend_health(),
+            Self::External(client) => client.fetch_backend_health(),
+        }
+    }
+
     fn fetch_thought_config(&self) -> BoxFuture<'_, Result<ThoughtConfigResponse, String>> {
         match self {
             Self::Embedded(client) => client.fetch_thought_config(),
@@ -210,6 +217,17 @@ impl TuiApi for TuiClient {
             Self::External(client) => {
                 client.create_session(cwd, spawn_tool, launch_target, initial_request)
             }
+        }
+    }
+
+    fn adopt_session(
+        &self,
+        tmux_name: &str,
+        session_id: Option<&str>,
+    ) -> BoxFuture<'_, Result<AdoptSessionResponse, String>> {
+        match self {
+            Self::Embedded(client) => client.adopt_session(tmux_name, session_id),
+            Self::External(client) => client.adopt_session(tmux_name, session_id),
         }
     }
 
@@ -468,7 +486,7 @@ fn handle_workspace_key<C: TuiApi>(
     if let Some(handled) = handle_picker_command_key(app, layout, key) {
         return handled;
     }
-    if let Some(handled) = handle_global_toggle_key(app, key) {
+    if let Some(handled) = handle_global_toggle_key(app, layout, key) {
         return handled;
     }
     true
@@ -581,7 +599,11 @@ fn handle_picker_command_key<C: TuiApi>(
     }
 }
 
-fn handle_global_toggle_key<C: TuiApi>(app: &mut App<C>, key: KeyEvent) -> Option<bool> {
+fn handle_global_toggle_key<C: TuiApi>(
+    app: &mut App<C>,
+    layout: WorkspaceLayout,
+    key: KeyEvent,
+) -> Option<bool> {
     match key.code {
         KeyCode::Char('m') => {
             app.toggle_ghostty_mode();
@@ -601,6 +623,10 @@ fn handle_global_toggle_key<C: TuiApi>(app: &mut App<C>, key: KeyEvent) -> Optio
         }
         KeyCode::Char('n') => {
             app.toggle_native_app();
+            Some(true)
+        }
+        KeyCode::Char('A') => {
+            app.reattach_selected_tmux_session(layout.overview_field);
             Some(true)
         }
         KeyCode::Char('s') => {

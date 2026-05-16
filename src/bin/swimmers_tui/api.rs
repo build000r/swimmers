@@ -333,6 +333,7 @@ pub(crate) trait TuiApi: Send + Sync + 'static {
     ) -> BoxFuture<'_, Result<Vec<SessionSummary>, String>> {
         self.fetch_sessions()
     }
+    fn fetch_backend_health(&self) -> BoxFuture<'_, Result<BackendHealthResponse, String>>;
     fn fetch_thought_config(&self) -> BoxFuture<'_, Result<ThoughtConfigResponse, String>>;
     fn update_thought_config(
         &self,
@@ -402,6 +403,11 @@ pub(crate) trait TuiApi: Send + Sync + 'static {
         launch_target: Option<String>,
         initial_request: Option<String>,
     ) -> BoxFuture<'_, Result<CreateSessionResponse, String>>;
+    fn adopt_session(
+        &self,
+        tmux_name: &str,
+        session_id: Option<&str>,
+    ) -> BoxFuture<'_, Result<AdoptSessionResponse, String>>;
     fn create_sessions_batch(
         &self,
         dirs: Vec<String>,
@@ -461,6 +467,28 @@ impl TuiApi for ApiClient {
                     .json::<ThoughtConfigResponse>()
                     .await
                     .map_err(|err| format!("failed to parse thought config: {err}"));
+            }
+
+            Err(read_error(response).await)
+        })
+    }
+
+    fn fetch_backend_health(&self) -> BoxFuture<'_, Result<BackendHealthResponse, String>> {
+        Box::pin(async move {
+            let url = format!("{}/health", self.base_url);
+            let response = self
+                .http
+                .get(url)
+                .timeout(API_REQUEST_TIMEOUT)
+                .send()
+                .await
+                .map_err(|err| self.transport_error("refresh backend health", err))?;
+
+            if response.status().is_success() {
+                return response
+                    .json::<BackendHealthResponse>()
+                    .await
+                    .map_err(|err| format!("failed to parse backend health response: {err}"));
             }
 
             Err(read_error(response).await)
@@ -991,6 +1019,37 @@ impl TuiApi for ApiClient {
                     .json::<CreateSessionsBatchResponse>()
                     .await
                     .map_err(|err| format!("failed to parse batch create response: {err}"));
+            }
+
+            Err(read_error(response).await)
+        })
+    }
+
+    fn adopt_session(
+        &self,
+        tmux_name: &str,
+        session_id: Option<&str>,
+    ) -> BoxFuture<'_, Result<AdoptSessionResponse, String>> {
+        let tmux_name = tmux_name.to_string();
+        let session_id = session_id.map(str::to_string);
+        Box::pin(async move {
+            let url = format!("{}/v1/sessions/adopt", self.base_url);
+            let response = self
+                .with_auth(self.http.post(url))
+                .timeout(API_CREATE_SESSION_TIMEOUT)
+                .json(&AdoptSessionRequest {
+                    tmux_name,
+                    session_id,
+                })
+                .send()
+                .await
+                .map_err(|err| self.transport_error("adopt a tmux session", err))?;
+
+            if response.status().is_success() {
+                return response
+                    .json::<AdoptSessionResponse>()
+                    .await
+                    .map_err(|err| format!("failed to parse adopt session response: {err}"));
             }
 
             Err(read_error(response).await)

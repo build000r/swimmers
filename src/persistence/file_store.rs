@@ -7,7 +7,7 @@
 use std::collections::HashMap;
 use std::fs::OpenOptions;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
 
 use chrono::{DateTime, Utc};
 use fs2::FileExt;
@@ -23,6 +23,11 @@ use crate::types::{
     ActionCue, DirGroupMemberships, RestState, SessionBatchMembership, SessionState, ThoughtSource,
     ThoughtState,
 };
+
+const OP_SESSION_REGISTRY: &str = "session_registry";
+const OP_THOUGHTS: &str = "thoughts";
+const OP_THOUGHT_CONFIG: &str = "thought_config";
+const OP_DIR_GROUPS: &str = "dir_groups";
 
 // ---------------------------------------------------------------------------
 // Persisted data types
@@ -94,6 +99,8 @@ pub struct ThoughtSnapshot {
 /// File-based persistence store. Thread-safe via internal RwLock on cached state.
 pub struct FileStore {
     base_dir: PathBuf,
+    /// Last observed write health for all flat-file persistence operations.
+    health: StdMutex<PersistenceHealthState>,
     /// Serialize all writes in-process before taking the cross-process lock.
     write_lock: Mutex<()>,
     /// In-memory cache of persisted sessions, synced to disk on mutation.
@@ -110,6 +117,56 @@ pub struct FileStore {
     thought_write_lock: Mutex<()>,
     /// Serialize directory group writes to avoid stale read-modify-write races.
     dir_group_write_lock: Mutex<()>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PersistenceHealthSnapshot {
+    pub ok: bool,
+    pub consecutive_failures: u64,
+    pub last_success_at: Option<DateTime<Utc>>,
+    pub last_successful_operation: Option<String>,
+    pub last_failure_at: Option<DateTime<Utc>>,
+    pub last_failed_operation: Option<String>,
+    pub last_error: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct PersistenceHealthState {
+    ok: bool,
+    consecutive_failures: u64,
+    last_success_at: Option<DateTime<Utc>>,
+    last_successful_operation: Option<String>,
+    last_failure_at: Option<DateTime<Utc>>,
+    last_failed_operation: Option<String>,
+    last_error: Option<String>,
+}
+
+impl Default for PersistenceHealthState {
+    fn default() -> Self {
+        Self {
+            ok: true,
+            consecutive_failures: 0,
+            last_success_at: None,
+            last_successful_operation: None,
+            last_failure_at: None,
+            last_failed_operation: None,
+            last_error: None,
+        }
+    }
+}
+
+impl From<&PersistenceHealthState> for PersistenceHealthSnapshot {
+    fn from(state: &PersistenceHealthState) -> Self {
+        Self {
+            ok: state.ok,
+            consecutive_failures: state.consecutive_failures,
+            last_success_at: state.last_success_at,
+            last_successful_operation: state.last_successful_operation.clone(),
+            last_failure_at: state.last_failure_at,
+            last_failed_operation: state.last_failed_operation.clone(),
+            last_error: state.last_error.clone(),
+        }
+    }
 }
 
 #[derive(Debug, Error)]
@@ -145,6 +202,7 @@ impl FileStore {
 
         let store = Arc::new(Self {
             base_dir,
+            health: StdMutex::new(PersistenceHealthState::default()),
             write_lock: Mutex::new(()),
             cache: RwLock::new(Vec::new()),
             session_write_lock: Mutex::new(()),
@@ -207,6 +265,38 @@ impl FileStore {
         self.base_dir.join("dir_groups.json")
     }
 
+    pub fn health_snapshot(&self) -> PersistenceHealthSnapshot {
+        let health = self
+            .health
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        PersistenceHealthSnapshot::from(&*health)
+    }
+
+    fn record_write_success(&self, operation: &'static str) {
+        let mut health = self
+            .health
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        health.ok = true;
+        health.consecutive_failures = 0;
+        health.last_success_at = Some(Utc::now());
+        health.last_successful_operation = Some(operation.to_string());
+        health.last_error = None;
+    }
+
+    fn record_write_failure(&self, operation: &'static str, error: impl std::fmt::Display) {
+        let mut health = self
+            .health
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        health.ok = false;
+        health.consecutive_failures = health.consecutive_failures.saturating_add(1);
+        health.last_failure_at = Some(Utc::now());
+        health.last_failed_operation = Some(operation.to_string());
+        health.last_error = Some(error.to_string());
+    }
+
     // -----------------------------------------------------------------------
     // Session registry
     // -----------------------------------------------------------------------
@@ -226,14 +316,17 @@ impl FileStore {
         let data = match serde_json::to_string_pretty(sessions) {
             Ok(d) => d,
             Err(e) => {
+                self.record_write_failure(OP_SESSION_REGISTRY, &e);
                 error!("failed to serialize session registry: {e}");
                 return;
             }
         };
 
         if let Err(e) = atomic_write_blocking(path, data).await {
+            self.record_write_failure(OP_SESSION_REGISTRY, &e);
             error!("failed to write session registry: {e}");
         } else {
+            self.record_write_success(OP_SESSION_REGISTRY);
             debug!(count = sessions.len(), "persisted session registry");
         }
     }
@@ -321,6 +414,7 @@ impl FileStore {
             match serde_json::to_string_pretty(&*thoughts) {
                 Ok(d) => d,
                 Err(e) => {
+                    self.record_write_failure(OP_THOUGHTS, &e);
                     error!("failed to serialize thoughts: {e}");
                     return;
                 }
@@ -329,8 +423,10 @@ impl FileStore {
 
         let path = self.thoughts_path();
         if let Err(e) = atomic_write_blocking(path, data).await {
+            self.record_write_failure(OP_THOUGHTS, &e);
             error!("failed to write thoughts: {e}");
         } else {
+            self.record_write_success(OP_THOUGHTS);
             debug!(session_id, "persisted thought snapshot");
         }
     }
@@ -374,15 +470,25 @@ impl FileStore {
             .map_err(|e| anyhow::anyhow!("invalid thought config: {e}"))?;
 
         let path = self.thought_config_path();
-        let data = serde_json::to_string_pretty(&normalized)
-            .map_err(|e| anyhow::anyhow!("failed to serialize thought config: {e}"))?;
-        atomic_write_blocking(path, data).await?;
+        let data = match serde_json::to_string_pretty(&normalized) {
+            Ok(data) => data,
+            Err(e) => {
+                let err = anyhow::anyhow!("failed to serialize thought config: {e}");
+                self.record_write_failure(OP_THOUGHT_CONFIG, &err);
+                return Err(err);
+            }
+        };
+        if let Err(err) = atomic_write_blocking(path, data).await {
+            self.record_write_failure(OP_THOUGHT_CONFIG, &err);
+            return Err(err);
+        }
 
         {
             let mut thought_config_cache = self.thought_config_cache.write().await;
             *thought_config_cache = normalized;
         }
 
+        self.record_write_success(OP_THOUGHT_CONFIG);
         debug!("persisted thought runtime config");
         Ok(())
     }
@@ -398,16 +504,26 @@ impl FileStore {
     ) -> anyhow::Result<()> {
         let _global_write_guard = self.write_lock.lock().await;
         let _write_guard = self.dir_group_write_lock.lock().await;
-        let data = serde_json::to_string_pretty(&memberships)
-            .map_err(|e| anyhow::anyhow!("failed to serialize directory groups: {e}"))?;
+        let data = match serde_json::to_string_pretty(&memberships) {
+            Ok(data) => data,
+            Err(e) => {
+                let err = anyhow::anyhow!("failed to serialize directory groups: {e}");
+                self.record_write_failure(OP_DIR_GROUPS, &err);
+                return Err(err);
+            }
+        };
         let path = self.dir_group_memberships_path();
-        atomic_write_blocking(path, data).await?;
+        if let Err(err) = atomic_write_blocking(path, data).await {
+            self.record_write_failure(OP_DIR_GROUPS, &err);
+            return Err(err);
+        }
 
         {
             let mut cache = self.dir_group_memberships_cache.write().await;
             *cache = memberships;
         }
 
+        self.record_write_success(OP_DIR_GROUPS);
         debug!("persisted directory group memberships");
         Ok(())
     }
@@ -427,16 +543,26 @@ impl FileStore {
         let mut memberships = self.dir_group_memberships_cache.read().await.clone();
         update(&mut memberships);
 
-        let data = serde_json::to_string_pretty(&memberships)
-            .map_err(|e| anyhow::anyhow!("failed to serialize directory groups: {e}"))?;
+        let data = match serde_json::to_string_pretty(&memberships) {
+            Ok(data) => data,
+            Err(e) => {
+                let err = anyhow::anyhow!("failed to serialize directory groups: {e}");
+                self.record_write_failure(OP_DIR_GROUPS, &err);
+                return Err(err);
+            }
+        };
         let path = self.dir_group_memberships_path();
-        atomic_write_blocking(path, data).await?;
+        if let Err(err) = atomic_write_blocking(path, data).await {
+            self.record_write_failure(OP_DIR_GROUPS, &err);
+            return Err(err);
+        }
 
         {
             let mut cache = self.dir_group_memberships_cache.write().await;
             *cache = memberships.clone();
         }
 
+        self.record_write_success(OP_DIR_GROUPS);
         debug!("persisted directory group memberships");
         Ok(memberships)
     }
@@ -740,6 +866,104 @@ mod tests {
             .expect("backend delta")
             .include_paths
             .contains("/tmp/project-b"));
+    }
+
+    #[tokio::test]
+    async fn save_sessions_failure_updates_health_and_later_success_recovers() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = FileStore::new(dir.path()).await.expect("store");
+        let registry_path = dir.path().join("session_registry.json");
+        std::fs::create_dir(&registry_path).expect("create directory at registry path");
+
+        store.save_sessions(&[]).await;
+
+        let failed = store.health_snapshot();
+        assert!(!failed.ok);
+        assert_eq!(failed.consecutive_failures, 1);
+        assert_eq!(
+            failed.last_failed_operation.as_deref(),
+            Some(OP_SESSION_REGISTRY)
+        );
+        assert!(failed.last_failure_at.is_some());
+        assert!(
+            failed
+                .last_error
+                .as_deref()
+                .unwrap_or_default()
+                .contains("rename failed"),
+            "unexpected error: {:?}",
+            failed.last_error
+        );
+
+        std::fs::remove_dir(&registry_path).expect("remove blocking directory");
+        store.save_sessions(&[]).await;
+
+        let recovered = store.health_snapshot();
+        assert!(recovered.ok);
+        assert_eq!(recovered.consecutive_failures, 0);
+        assert_eq!(
+            recovered.last_successful_operation.as_deref(),
+            Some(OP_SESSION_REGISTRY)
+        );
+        assert!(recovered.last_success_at.is_some());
+        assert_eq!(recovered.last_error, None);
+    }
+
+    #[tokio::test]
+    async fn save_thought_failure_updates_health() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = FileStore::new(dir.path()).await.expect("store");
+        std::fs::create_dir(dir.path().join("thoughts.json"))
+            .expect("create directory at thoughts path");
+
+        store
+            .save_thought(
+                "session-1",
+                Some("thinking"),
+                10,
+                100,
+                ThoughtState::Holding,
+                ThoughtSource::CarryForward,
+                RestState::Active,
+                false,
+                Vec::new(),
+                Utc::now(),
+                ThoughtDeliveryState::default(),
+                None,
+                None,
+            )
+            .await;
+
+        let failed = store.health_snapshot();
+        assert!(!failed.ok);
+        assert_eq!(failed.consecutive_failures, 1);
+        assert_eq!(failed.last_failed_operation.as_deref(), Some(OP_THOUGHTS));
+        assert!(failed.last_failure_at.is_some());
+        assert!(failed.last_error.is_some());
+    }
+
+    #[tokio::test]
+    async fn save_thought_config_failure_updates_health() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = FileStore::new(dir.path()).await.expect("store");
+        std::fs::create_dir(dir.path().join("thought_config.json"))
+            .expect("create directory at thought config path");
+
+        let err = store
+            .save_thought_config(&ThoughtConfig::default())
+            .await
+            .expect_err("directory at config path should fail write");
+
+        let failed = store.health_snapshot();
+        assert!(!failed.ok);
+        assert_eq!(failed.consecutive_failures, 1);
+        assert_eq!(
+            failed.last_failed_operation.as_deref(),
+            Some(OP_THOUGHT_CONFIG)
+        );
+        assert!(failed.last_failure_at.is_some());
+        let err_text = err.to_string();
+        assert_eq!(failed.last_error.as_deref(), Some(err_text.as_str()));
     }
 
     #[tokio::test]

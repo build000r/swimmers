@@ -49,11 +49,23 @@ const EMBEDDED_FIRST_FRAME_BUDGET: Duration = Duration::from_millis(80);
 
 static TEST_ENV_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
+fn p95_duration(mut samples: Vec<Duration>) -> Duration {
+    assert!(!samples.is_empty(), "p95 requires at least one sample");
+    samples.sort_unstable();
+    let index = samples
+        .len()
+        .saturating_mul(95)
+        .div_ceil(100)
+        .saturating_sub(1);
+    samples[index]
+}
+
 type CreateBatchCall = (Vec<String>, SpawnTool, Option<String>, Option<String>);
 
 #[derive(Default)]
 struct MockApiState {
     fetch_sessions_results: VecDeque<Result<Vec<SessionSummary>, String>>,
+    backend_health_results: VecDeque<Result<BackendHealthResponse, String>>,
     fetch_thought_config_results: VecDeque<Result<ThoughtConfigResponse, String>>,
     update_thought_config_results: VecDeque<Result<ThoughtConfig, String>>,
     test_thought_config_results: VecDeque<Result<ThoughtConfigTestResponse, String>>,
@@ -74,6 +86,7 @@ struct MockApiState {
     start_repo_action_results: VecDeque<Result<DirRepoActionResponse, String>>,
     overlay_plans_results: VecDeque<Result<Vec<PlanPanelEntry>, String>>,
     create_session_results: VecDeque<Result<CreateSessionResponse, String>>,
+    adopt_session_results: VecDeque<Result<AdoptSessionResponse, String>>,
     create_sessions_batch_results: VecDeque<Result<CreateSessionsBatchResponse, String>>,
     send_group_input_results: VecDeque<Result<SessionGroupInputResponse, String>>,
     update_thought_config_calls: Vec<ThoughtConfig>,
@@ -91,8 +104,10 @@ struct MockApiState {
     update_dir_group_memberships_calls: Vec<(String, Vec<String>, Vec<String>)>,
     start_repo_action_calls: Vec<(String, RepoActionKind)>,
     create_calls: Vec<(String, SpawnTool, Option<String>, Option<String>)>,
+    adopt_calls: Vec<(String, Option<String>)>,
     create_batch_calls: Vec<CreateBatchCall>,
     send_group_input_calls: Vec<(Vec<String>, String)>,
+    backend_health_calls: usize,
 }
 
 #[derive(Clone, Default)]
@@ -110,6 +125,14 @@ impl MockApi {
             .lock()
             .unwrap()
             .fetch_sessions_results
+            .push_back(result);
+    }
+
+    fn push_backend_health(&self, result: Result<BackendHealthResponse, String>) {
+        self.state
+            .lock()
+            .unwrap()
+            .backend_health_results
             .push_back(result);
     }
 
@@ -228,6 +251,14 @@ impl MockApi {
             .push_back(result);
     }
 
+    fn push_adopt_session(&self, result: Result<AdoptSessionResponse, String>) {
+        self.state
+            .lock()
+            .unwrap()
+            .adopt_session_results
+            .push_back(result);
+    }
+
     fn push_create_sessions_batch(&self, result: Result<CreateSessionsBatchResponse, String>) {
         self.state
             .lock()
@@ -330,6 +361,10 @@ impl MockApi {
         self.state.lock().unwrap().create_calls.clone()
     }
 
+    fn adopt_calls(&self) -> Vec<(String, Option<String>)> {
+        self.state.lock().unwrap().adopt_calls.clone()
+    }
+
     fn create_batch_calls_with_targets(&self) -> Vec<CreateBatchCall> {
         self.state.lock().unwrap().create_batch_calls.clone()
     }
@@ -370,6 +405,10 @@ impl MockApi {
         self.state.lock().unwrap().native_status_calls
     }
 
+    fn backend_health_calls(&self) -> usize {
+        self.state.lock().unwrap().backend_health_calls
+    }
+
     fn mermaid_artifact_calls(&self) -> Vec<String> {
         self.state.lock().unwrap().mermaid_artifact_calls.clone()
     }
@@ -397,6 +436,18 @@ impl TuiApi for MockApi {
                 .fetch_sessions_results
                 .pop_front()
                 .unwrap_or_else(|| Ok(Vec::new()))
+        })
+    }
+
+    fn fetch_backend_health(&self) -> BoxFuture<'_, Result<BackendHealthResponse, String>> {
+        let state = self.state.clone();
+        Box::pin(async move {
+            let mut state = state.lock().unwrap();
+            state.backend_health_calls += 1;
+            state
+                .backend_health_results
+                .pop_front()
+                .unwrap_or_else(|| Ok(healthy_backend_health()))
         })
     }
 
@@ -749,6 +800,24 @@ impl TuiApi for MockApi {
                 .create_session_results
                 .pop_front()
                 .unwrap_or_else(|| Err("unexpected create_session".to_string()))
+        })
+    }
+
+    fn adopt_session(
+        &self,
+        tmux_name: &str,
+        session_id: Option<&str>,
+    ) -> BoxFuture<'_, Result<AdoptSessionResponse, String>> {
+        let state = self.state.clone();
+        let tmux_name = tmux_name.to_string();
+        let session_id = session_id.map(str::to_string);
+        Box::pin(async move {
+            let mut state = state.lock().unwrap();
+            state.adopt_calls.push((tmux_name, session_id));
+            state
+                .adopt_session_results
+                .pop_front()
+                .unwrap_or_else(|| Err("unexpected adopt_session".to_string()))
         })
     }
 
@@ -1749,6 +1818,40 @@ fn refresh_calls_native_status_when_sessions_succeed() {
 }
 
 #[test]
+fn refresh_renders_backend_health_degraded_and_recovered_banner() {
+    let api = MockApi::new();
+    let mut degraded = healthy_backend_health();
+    degraded.persistence.ok = false;
+    degraded.persistence.consecutive_failures = 1;
+    degraded.persistence.last_failed_operation = Some("save_sessions".to_string());
+    degraded.persistence.last_error = Some("disk full".to_string());
+    api.push_fetch_sessions(Ok(vec![session_summary("sess-1", "1", TEST_REPO_SWIMMERS)]));
+    api.push_backend_health(Ok(degraded));
+
+    let layout = test_layout(120, 32);
+    let mut app = make_app(api.clone());
+    app.refresh_with_feedback(layout, false);
+
+    assert_eq!(api.backend_health_calls(), 1);
+    let mut renderer = test_renderer(120, 32);
+    app.render(&mut renderer, layout);
+    assert!(
+        find_text_position(&renderer, "persistence degraded: save_sessions: disk full").is_some()
+    );
+
+    api.push_fetch_sessions(Ok(vec![session_summary("sess-1", "1", TEST_REPO_SWIMMERS)]));
+    api.push_backend_health(Ok(healthy_backend_health()));
+    app.refresh_with_feedback(layout, false);
+
+    let mut renderer = test_renderer(120, 32);
+    app.render(&mut renderer, layout);
+    assert!(
+        find_text_position(&renderer, "persistence degraded").is_none(),
+        "healthy backend health should clear the degraded banner"
+    );
+}
+
+#[test]
 fn refresh_sessions_error_not_overwritten_by_native_status_error() {
     let api = MockApi::new();
     let layout = test_layout(120, 32);
@@ -2477,6 +2580,22 @@ fn session_summary(session_id: &str, tmux_name: &str, cwd: &str) -> SessionSumma
         last_activity_at: Utc::now(),
         repo_theme_id: None,
         batch: None,
+    }
+}
+
+fn healthy_backend_health() -> BackendHealthResponse {
+    BackendHealthResponse {
+        status: "healthy".to_string(),
+        thought_bridge: BackendThoughtBridgeHealth {
+            status: "healthy".to_string(),
+            ..BackendThoughtBridgeHealth::default()
+        },
+        persistence: BackendPersistenceHealth {
+            available: true,
+            ok: true,
+            last_successful_operation: Some("save_sessions".to_string()),
+            ..BackendPersistenceHealth::default()
+        },
     }
 }
 
@@ -6513,6 +6632,51 @@ fn submitting_initial_request_creates_hidden_session_without_native_open() {
         .entities
         .iter()
         .any(|entity| entity.session.session_id == "sess-55"));
+}
+
+#[test]
+fn adopt_tmux_session_reattaches_without_duplicate_entity() {
+    let api = MockApi::new();
+    let mut adopted = session_summary("sess-stale", "alpha", TEST_REPO_SWIMMERS);
+    adopted.is_stale = false;
+    adopted.transport_health = TransportHealth::Healthy;
+    api.push_adopt_session(Ok(AdoptSessionResponse {
+        session: adopted,
+        repo_theme: None,
+        reused_session_id: true,
+    }));
+
+    let layout = test_layout(100, 32);
+    let field = layout.overview_field;
+    let mut stale = session_summary("sess-stale", "alpha", TEST_REPO_SWIMMERS);
+    stale.is_stale = true;
+    stale.transport_health = TransportHealth::Disconnected;
+    let mut app = make_app(api.clone());
+    app.merge_sessions(vec![stale], field);
+
+    assert!(handle_key_event(
+        &mut app,
+        layout,
+        KeyEvent::new(KeyCode::Char('A'), KeyModifiers::SHIFT),
+    ));
+    assert!(app.pending_interaction.is_some());
+    poll_until_interaction(&mut app);
+
+    assert_eq!(
+        api.adopt_calls(),
+        vec![("alpha".to_string(), Some("sess-stale".to_string()))]
+    );
+    assert_eq!(visible_entity_ids(&app), vec!["sess-stale".to_string()]);
+    assert_eq!(app.selected_id.as_deref(), Some("sess-stale"));
+    assert_eq!(
+        app.message.as_ref().map(|(message, _)| message.as_str()),
+        Some("reattached alpha")
+    );
+    assert!(!app.entities[0].session.is_stale);
+    assert_eq!(
+        app.entities[0].session.transport_health,
+        TransportHealth::Healthy
+    );
 }
 
 #[test]
@@ -13759,41 +13923,52 @@ esac
 "#,
     );
 
-    let runtime = test_runtime();
-    let started = Instant::now();
-    let (client, deferred_init) = {
-        let _runtime_guard = runtime.enter();
-        build_embedded_client(&runtime)
-    };
-    let mut app = App::new(runtime, client);
-    let mut renderer = test_renderer(120, 32);
-    let layout = app.layout_for_terminal(renderer.width(), renderer.height());
-    app.refresh_initial_frame(layout);
-    prepare_frame(&mut app, &mut renderer);
-    let elapsed = started.elapsed();
-    let header_visible = find_text_position(&renderer, "swimmers tui").is_some();
-    let empty_state_visible = find_text_position(&renderer, "no tmux sessions found").is_some();
+    let mut samples = Vec::new();
+    for _ in 0..5 {
+        let runtime = test_runtime();
+        let started = Instant::now();
+        let (client, deferred_init) = {
+            let _runtime_guard = runtime.enter();
+            build_embedded_client(&runtime)
+        };
+        let mut app = App::new(runtime, client);
+        let mut renderer = test_renderer(120, 32);
+        let layout = app.layout_for_terminal(renderer.width(), renderer.height());
+        app.refresh_initial_frame(layout);
+        prepare_frame(&mut app, &mut renderer);
+        let elapsed = started.elapsed();
+        samples.push(elapsed);
+        let header_visible = find_text_position(&renderer, "swimmers tui").is_some();
+        let empty_state_visible = find_text_position(&renderer, "no tmux sessions found").is_some();
 
-    deferred_init.abort();
-    app.runtime.block_on(async {
-        tokio::task::yield_now().await;
-    });
+        deferred_init.abort();
+        app.runtime.block_on(async {
+            tokio::task::yield_now().await;
+        });
+
+        assert!(header_visible, "first frame should render the TUI header");
+        assert!(
+            empty_state_visible,
+            "first frame should render the empty aquarium state before deferred discovery completes"
+        );
+    }
 
     restore_os_env_var("PATH", original_path);
     restore_os_env_var("SWIMMERS_TUI_URL", original_tui_url);
     restore_os_env_var("SWIMMERS_DATA_DIR", original_data_dir);
     restore_os_env_var("CLAWGS_BIN", original_clawgs);
 
-    assert!(header_visible, "first frame should render the TUI header");
-    assert!(
-        empty_state_visible,
-        "first frame should render the empty aquarium state before deferred discovery completes"
+    let p95 = p95_duration(samples.clone());
+    eprintln!("embedded first-frame samples: {:?}", samples);
+    eprintln!(
+        "embedded first-frame p95: {:?} (budget {:?})",
+        p95, EMBEDDED_FIRST_FRAME_BUDGET
     );
     assert!(
-        elapsed < EMBEDDED_FIRST_FRAME_BUDGET,
-        "expected embedded first frame under {:?}, got {:?}",
+        p95 < EMBEDDED_FIRST_FRAME_BUDGET,
+        "expected embedded first-frame p95 under {:?}, got {:?}",
         EMBEDDED_FIRST_FRAME_BUDGET,
-        elapsed
+        p95
     );
 }
 

@@ -203,6 +203,7 @@ async fn list_remote_sessions_for_target(
 
     if !response.status().is_success() {
         return Err(remote_response_error(
+            &target,
             response,
             "REMOTE_SESSION_LIST_FAILED",
             format!("remote target '{}' rejected session listing", target.id),
@@ -270,6 +271,7 @@ pub async fn create_remote_session_on_target(
 
     if !response.status().is_success() {
         return Err(remote_response_error(
+            target,
             response,
             "REMOTE_LAUNCH_FAILED",
             format!("remote target '{}' rejected session creation", target.id),
@@ -357,6 +359,7 @@ pub async fn create_remote_sessions_batch_on_target(
 
     if !response.status().is_success() {
         return Err(remote_response_error(
+            target,
             response,
             "REMOTE_LAUNCH_FAILED",
             format!(
@@ -528,6 +531,7 @@ where
         })?;
     if !response.status().is_success() {
         return Err(remote_response_error(
+            target,
             response,
             "REMOTE_SESSION_REQUEST_FAILED",
             format!("remote target '{}' rejected session request", target.id),
@@ -810,6 +814,7 @@ fn remote_auth_token_for_polling(target: &LaunchTargetSummary) -> Option<Option<
 }
 
 async fn remote_response_error(
+    target: &LaunchTargetSummary,
     response: reqwest::Response,
     code: &'static str,
     fallback: String,
@@ -819,6 +824,7 @@ async fn remote_response_error(
         Ok(body) => body.message.unwrap_or(fallback),
         Err(_) => fallback,
     };
+    let message = redact_remote_secret_values(target, message);
     RemoteSessionError::new(
         StatusCode::BAD_GATEWAY,
         code,
@@ -826,12 +832,37 @@ async fn remote_response_error(
     )
 }
 
+fn redact_remote_secret_values(target: &LaunchTargetSummary, mut message: String) -> String {
+    if let Some(env_key) = target
+        .auth_token_env
+        .as_deref()
+        .map(str::trim)
+        .filter(|env_key| !env_key.is_empty())
+    {
+        redact_env_secret(&mut message, env_key);
+    }
+    for env_key in ["AUTH_TOKEN", "OBSERVER_TOKEN"] {
+        redact_env_secret(&mut message, env_key);
+    }
+    message
+}
+
+fn redact_env_secret(message: &mut String, env_key: &str) {
+    let Ok(secret) = std::env::var(env_key) else {
+        return;
+    };
+    let secret = secret.trim();
+    if !secret.is_empty() && message.contains(secret) {
+        *message = message.replace(secret, "[redacted]");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::types::{
-        SessionBatchMembership, SessionState, SessionTimelinePinned, SessionTimelineResponse,
-        SpawnTool, ThoughtSource, ThoughtState, TransportHealth,
+        CreateSessionsBatchResult, SessionBatchMembership, SessionState, SessionTimelinePinned,
+        SessionTimelineResponse, SpawnTool, ThoughtSource, ThoughtState, TransportHealth,
     };
     use axum::http::HeaderMap;
     use axum::routing::{get, post};
@@ -978,6 +1009,268 @@ mod tests {
         (format!("http://{addr}"), handle)
     }
 
+    const REMOTE_OPERATOR_TOKEN_ENV: &str = "SWIMMERS_REMOTE_SMOKE_OPERATOR_TOKEN";
+    const REMOTE_OBSERVER_TOKEN_ENV: &str = "SWIMMERS_REMOTE_SMOKE_OBSERVER_TOKEN";
+    const REMOTE_OPERATOR_TOKEN: &str = "operator-token-sensitive-remote-smoke";
+    const REMOTE_OBSERVER_TOKEN: &str = "observer-token-sensitive-remote-smoke";
+
+    #[derive(Debug, Clone)]
+    struct RemoteSmokeRequest {
+        method: &'static str,
+        path: String,
+        auth: Option<String>,
+        body: serde_json::Value,
+    }
+
+    #[derive(Clone, Default)]
+    struct RemoteSmokeState {
+        requests: Arc<Mutex<Vec<RemoteSmokeRequest>>>,
+    }
+
+    impl RemoteSmokeState {
+        async fn capture(
+            &self,
+            method: &'static str,
+            path: impl Into<String>,
+            headers: &HeaderMap,
+            body: serde_json::Value,
+        ) {
+            self.requests.lock().await.push(RemoteSmokeRequest {
+                method,
+                path: path.into(),
+                auth: headers
+                    .get("authorization")
+                    .and_then(|value| value.to_str().ok())
+                    .map(str::to_string),
+                body,
+            });
+        }
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum RemoteSmokeScope {
+        Operator,
+        Observer,
+        Unauthenticated,
+    }
+
+    fn remote_smoke_scope(headers: &HeaderMap) -> RemoteSmokeScope {
+        match remote_smoke_bearer(headers) {
+            Some(REMOTE_OPERATOR_TOKEN) => RemoteSmokeScope::Operator,
+            Some(REMOTE_OBSERVER_TOKEN) => RemoteSmokeScope::Observer,
+            _ => RemoteSmokeScope::Unauthenticated,
+        }
+    }
+
+    fn remote_smoke_bearer(headers: &HeaderMap) -> Option<&str> {
+        headers
+            .get("authorization")
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.strip_prefix("Bearer "))
+    }
+
+    fn remote_smoke_auth_error(headers: &HeaderMap, required_scope: &str) -> Response {
+        let token = remote_smoke_bearer(headers).unwrap_or("<missing>");
+        let status = match remote_smoke_scope(headers) {
+            RemoteSmokeScope::Unauthenticated => StatusCode::UNAUTHORIZED,
+            RemoteSmokeScope::Observer | RemoteSmokeScope::Operator => StatusCode::FORBIDDEN,
+        };
+        (
+            status,
+            AxumJson(ErrorResponse {
+                code: "REMOTE_AUTH_REJECTED".to_string(),
+                message: Some(format!(
+                    "token {token} lacks required {required_scope} scope"
+                )),
+            }),
+        )
+            .into_response()
+    }
+
+    async fn remote_smoke_list_sessions(
+        axum::extract::State(state): axum::extract::State<RemoteSmokeState>,
+        headers: HeaderMap,
+    ) -> Response {
+        state
+            .capture("GET", "/v1/sessions", &headers, serde_json::Value::Null)
+            .await;
+        match remote_smoke_scope(&headers) {
+            RemoteSmokeScope::Operator | RemoteSmokeScope::Observer => {
+                AxumJson(SessionListResponse {
+                    sessions: vec![summary("sess_list")],
+                    version: 0,
+                    repo_themes: Default::default(),
+                })
+                .into_response()
+            }
+            RemoteSmokeScope::Unauthenticated => remote_smoke_auth_error(&headers, "read"),
+        }
+    }
+
+    async fn remote_smoke_create_session(
+        axum::extract::State(state): axum::extract::State<RemoteSmokeState>,
+        headers: HeaderMap,
+        AxumJson(body): AxumJson<CreateSessionRequest>,
+    ) -> Response {
+        state
+            .capture(
+                "POST",
+                "/v1/sessions",
+                &headers,
+                serde_json::to_value(&body).expect("serialize create body"),
+            )
+            .await;
+        if remote_smoke_scope(&headers) != RemoteSmokeScope::Operator {
+            return remote_smoke_auth_error(&headers, "operator");
+        }
+        (
+            StatusCode::CREATED,
+            AxumJson(CreateSessionResponse {
+                session: summary("sess_create"),
+                repo_theme: None,
+            }),
+        )
+            .into_response()
+    }
+
+    async fn remote_smoke_create_batch(
+        axum::extract::State(state): axum::extract::State<RemoteSmokeState>,
+        headers: HeaderMap,
+        AxumJson(body): AxumJson<CreateSessionsBatchRequest>,
+    ) -> Response {
+        state
+            .capture(
+                "POST",
+                "/v1/sessions/batch",
+                &headers,
+                serde_json::to_value(&body).expect("serialize batch body"),
+            )
+            .await;
+        if remote_smoke_scope(&headers) != RemoteSmokeScope::Operator {
+            return remote_smoke_auth_error(&headers, "operator");
+        }
+        let results = body
+            .dirs
+            .into_iter()
+            .enumerate()
+            .map(|(index, cwd)| CreateSessionsBatchResult {
+                index,
+                cwd,
+                ok: true,
+                session: Some(summary(&format!("sess_batch_{index}"))),
+                repo_theme: None,
+                error: None,
+            })
+            .collect();
+        (
+            StatusCode::CREATED,
+            AxumJson(CreateSessionsBatchResponse { results }),
+        )
+            .into_response()
+    }
+
+    async fn remote_smoke_agent_context(
+        axum::extract::State(state): axum::extract::State<RemoteSmokeState>,
+        headers: HeaderMap,
+        axum::extract::Path(session_id): axum::extract::Path<String>,
+    ) -> Response {
+        let path = format!("/v1/sessions/{session_id}/agent-context");
+        state
+            .capture("GET", path, &headers, serde_json::Value::Null)
+            .await;
+        match remote_smoke_scope(&headers) {
+            RemoteSmokeScope::Operator | RemoteSmokeScope::Observer => {
+                AxumJson(SessionAgentContextResponse {
+                    session_id,
+                    available: true,
+                    tool: Some("Codex".to_string()),
+                    cwd: "/monoserver/opensource/swimmers".to_string(),
+                    user_task: Some("remote task".to_string()),
+                    turns: Vec::new(),
+                    current_tool: None,
+                    recent_actions: Vec::new(),
+                    token_count: 42,
+                    context_limit: 192_000,
+                    message: None,
+                })
+                .into_response()
+            }
+            RemoteSmokeScope::Unauthenticated => remote_smoke_auth_error(&headers, "read"),
+        }
+    }
+
+    async fn remote_smoke_git_diff(
+        axum::extract::State(state): axum::extract::State<RemoteSmokeState>,
+        headers: HeaderMap,
+        axum::extract::Path(session_id): axum::extract::Path<String>,
+    ) -> Response {
+        let path = format!("/v1/sessions/{session_id}/git-diff");
+        state
+            .capture("GET", path, &headers, serde_json::Value::Null)
+            .await;
+        match remote_smoke_scope(&headers) {
+            RemoteSmokeScope::Operator | RemoteSmokeScope::Observer => {
+                AxumJson(SessionGitDiffResponse {
+                    session_id,
+                    available: true,
+                    cwd: "/monoserver/opensource/swimmers".to_string(),
+                    repo_root: Some("/monoserver/opensource/swimmers".to_string()),
+                    status_short: " M src/lib.rs\n".to_string(),
+                    unstaged_diff: String::new(),
+                    staged_diff: String::new(),
+                    truncated: false,
+                    message: None,
+                    files: Vec::new(),
+                })
+                .into_response()
+            }
+            RemoteSmokeScope::Unauthenticated => remote_smoke_auth_error(&headers, "read"),
+        }
+    }
+
+    async fn spawn_remote_smoke_server() -> (String, tokio::task::JoinHandle<()>, RemoteSmokeState)
+    {
+        let state = RemoteSmokeState::default();
+        let app = Router::new()
+            .route(
+                "/v1/sessions",
+                get(remote_smoke_list_sessions).post(remote_smoke_create_session),
+            )
+            .route("/v1/sessions/batch", post(remote_smoke_create_batch))
+            .route(
+                "/v1/sessions/{session_id}/agent-context",
+                get(remote_smoke_agent_context),
+            )
+            .route(
+                "/v1/sessions/{session_id}/git-diff",
+                get(remote_smoke_git_diff),
+            )
+            .with_state(state.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind remote smoke server");
+        let addr = listener.local_addr().expect("local addr");
+        let handle = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve remote smoke api");
+        });
+        (format!("http://{addr}"), handle, state)
+    }
+
+    fn remote_smoke_target(base_url: &str, auth_token_env: &str) -> LaunchTargetSummary {
+        let mut target = target();
+        target.base_url = Some(base_url.to_string());
+        target.auth_token_env = Some(auth_token_env.to_string());
+        target
+    }
+
+    fn has_request(requests: &[RemoteSmokeRequest], method: &str, path: &str) -> bool {
+        requests
+            .iter()
+            .any(|request| request.method == method && request.path == path)
+    }
+
     #[test]
     fn map_path_uses_longest_matching_prefix() {
         let mapped = map_path_with_mappings(
@@ -1109,5 +1402,182 @@ mod tests {
         );
         assert_eq!(response.available, true);
         handle.abort();
+    }
+
+    #[tokio::test]
+    async fn remote_api_smoke_matrix_covers_launch_reads_scopes_and_redaction() {
+        let _guard = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        std::env::set_var(REMOTE_OPERATOR_TOKEN_ENV, REMOTE_OPERATOR_TOKEN);
+        std::env::set_var(REMOTE_OBSERVER_TOKEN_ENV, REMOTE_OBSERVER_TOKEN);
+
+        let (base_url, handle, state) = spawn_remote_smoke_server().await;
+        let operator_target = remote_smoke_target(&base_url, REMOTE_OPERATOR_TOKEN_ENV);
+        let observer_target = remote_smoke_target(&base_url, REMOTE_OBSERVER_TOKEN_ENV);
+        let client = http_client(REMOTE_LIST_TIMEOUT).expect("http client");
+
+        let listed = list_remote_sessions_for_target(
+            &client,
+            operator_target.clone(),
+            remote_auth_token(&operator_target).expect("operator token"),
+        )
+        .await
+        .expect("remote list with operator token");
+        assert_eq!(
+            listed[0].session_id,
+            namespace_session_id("jeremy-skillbox", "sess_list")
+        );
+
+        let created = create_remote_session_on_target(
+            &operator_target,
+            CreateSessionRequest {
+                name: Some("remote create".to_string()),
+                cwd: Some("/monoserver/opensource/swimmers".to_string()),
+                spawn_tool: Some(SpawnTool::Codex),
+                launch_target: Some("jeremy-skillbox".to_string()),
+                initial_request: Some("run remote tests".to_string()),
+            },
+        )
+        .await
+        .expect("remote create with operator token");
+        assert_eq!(
+            created.session.session_id,
+            namespace_session_id("jeremy-skillbox", "sess_create")
+        );
+
+        let batch = create_remote_sessions_batch_on_target(
+            &operator_target,
+            CreateSessionsBatchRequest {
+                dirs: vec![
+                    "/monoserver/opensource/swimmers".to_string(),
+                    "/monoserver/opensource/skillbox".to_string(),
+                ],
+                spawn_tool: Some(SpawnTool::Codex),
+                launch_target: Some("jeremy-skillbox".to_string()),
+                initial_request: Some("fan out".to_string()),
+            },
+        )
+        .await
+        .expect("remote batch with operator token");
+        assert_eq!(batch.success_count(), 2);
+        assert_eq!(
+            batch.results[1]
+                .session
+                .as_ref()
+                .expect("batch session")
+                .session_id,
+            namespace_session_id("jeremy-skillbox", "sess_batch_1")
+        );
+
+        let observer_listed = list_remote_sessions_for_target(
+            &client,
+            observer_target.clone(),
+            remote_auth_token(&observer_target).expect("observer token"),
+        )
+        .await
+        .expect("remote list with observer token");
+        assert_eq!(observer_listed.len(), 1);
+
+        let context = fetch_remote_agent_context(&observer_target, "sess_agent")
+            .await
+            .expect("observer can read agent context");
+        assert_eq!(
+            context.session_id,
+            namespace_session_id("jeremy-skillbox", "sess_agent")
+        );
+        assert_eq!(context.user_task.as_deref(), Some("remote task"));
+
+        let diff = fetch_remote_git_diff(&observer_target, "sess_diff")
+            .await
+            .expect("observer can read git diff");
+        assert_eq!(
+            diff.session_id,
+            namespace_session_id("jeremy-skillbox", "sess_diff")
+        );
+
+        let observer_create = create_remote_session_on_target(
+            &observer_target,
+            CreateSessionRequest {
+                name: None,
+                cwd: Some("/monoserver/opensource/swimmers".to_string()),
+                spawn_tool: Some(SpawnTool::Codex),
+                launch_target: None,
+                initial_request: None,
+            },
+        )
+        .await
+        .expect_err("observer token must not create sessions");
+        assert_eq!(observer_create.status, StatusCode::BAD_GATEWAY);
+        assert_eq!(observer_create.code, "REMOTE_LAUNCH_FAILED");
+        assert!(observer_create.message().contains("[redacted]"));
+        assert!(!observer_create.message().contains(REMOTE_OBSERVER_TOKEN));
+        assert!(observer_create
+            .message()
+            .contains("remote status 403 Forbidden"));
+
+        let observer_batch = create_remote_sessions_batch_on_target(
+            &observer_target,
+            CreateSessionsBatchRequest {
+                dirs: vec!["/monoserver/opensource/swimmers".to_string()],
+                spawn_tool: Some(SpawnTool::Codex),
+                launch_target: None,
+                initial_request: None,
+            },
+        )
+        .await
+        .expect_err("observer token must not batch-create sessions");
+        assert!(observer_batch.message().contains("[redacted]"));
+        assert!(!observer_batch.message().contains(REMOTE_OBSERVER_TOKEN));
+
+        let requests = state.requests.lock().await;
+        assert!(has_request(&requests, "GET", "/v1/sessions"));
+        assert!(has_request(&requests, "POST", "/v1/sessions"));
+        assert!(has_request(&requests, "POST", "/v1/sessions/batch"));
+        assert!(has_request(
+            &requests,
+            "GET",
+            "/v1/sessions/sess_agent/agent-context"
+        ));
+        assert!(has_request(
+            &requests,
+            "GET",
+            "/v1/sessions/sess_diff/git-diff"
+        ));
+
+        let operator_create = requests
+            .iter()
+            .find(|request| {
+                request.method == "POST"
+                    && request.path == "/v1/sessions"
+                    && request.auth.as_deref()
+                        == Some(format!("Bearer {REMOTE_OPERATOR_TOKEN}").as_str())
+            })
+            .expect("operator create request");
+        assert!(operator_create.body.get("launch_target").is_none());
+        assert_eq!(
+            operator_create.body["initial_request"].as_str(),
+            Some("run remote tests")
+        );
+
+        let operator_batch = requests
+            .iter()
+            .find(|request| {
+                request.method == "POST"
+                    && request.path == "/v1/sessions/batch"
+                    && request.auth.as_deref()
+                        == Some(format!("Bearer {REMOTE_OPERATOR_TOKEN}").as_str())
+            })
+            .expect("operator batch request");
+        assert!(operator_batch.body.get("launch_target").is_none());
+        assert_eq!(
+            operator_batch.body["dirs"].as_array().expect("dirs").len(),
+            2
+        );
+
+        drop(requests);
+        handle.abort();
+        std::env::remove_var(REMOTE_OPERATOR_TOKEN_ENV);
+        std::env::remove_var(REMOTE_OBSERVER_TOKEN_ENV);
     }
 }

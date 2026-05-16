@@ -155,6 +155,17 @@ mod tests {
     use std::time::Duration;
     use tokio::sync::RwLock;
 
+    fn p95_duration(mut samples: Vec<Duration>) -> Duration {
+        assert!(!samples.is_empty(), "p95 requires at least one sample");
+        samples.sort_unstable();
+        let index = samples
+            .len()
+            .saturating_mul(95)
+            .div_ceil(100)
+            .saturating_sub(1);
+        samples[index]
+    }
+
     struct EnvGuard {
         key: &'static str,
         previous: Option<OsString>,
@@ -844,27 +855,33 @@ esac
         }
         let _base_env = set_env_var("DIRS_BASE_PATH", base.as_os_str().to_os_string());
 
-        let started = std::time::Instant::now();
-        let response = list_dirs(
-            Extension(AuthInfo::new(OPERATOR_SCOPES.to_vec())),
-            State(test_state()),
-            Query(DirQuery {
-                path: None,
-                managed_only: Some(false),
-                group: None,
-            }),
-        )
-        .await
-        .into_response();
-        let elapsed = started.elapsed();
+        let mut samples = Vec::new();
+        for _ in 0..5 {
+            let started = std::time::Instant::now();
+            let response = list_dirs(
+                Extension(AuthInfo::new(OPERATOR_SCOPES.to_vec())),
+                State(test_state()),
+                Query(DirQuery {
+                    path: None,
+                    managed_only: Some(false),
+                    group: None,
+                }),
+            )
+            .await
+            .into_response();
+            let elapsed = started.elapsed();
+            samples.push(elapsed);
 
-        assert_eq!(response.status(), StatusCode::OK);
-        let json = response_json(response).await;
-        let entries = json["entries"].as_array().expect("entries array");
-        assert_eq!(entries.len(), 24, "all repo entries should be present");
+            assert_eq!(response.status(), StatusCode::OK);
+            let json = response_json(response).await;
+            let entries = json["entries"].as_array().expect("entries array");
+            assert_eq!(entries.len(), 24, "all repo entries should be present");
+        }
+        let p95 = p95_duration(samples);
+        eprintln!("/v1/dirs p95: {p95:?} (budget 2s)");
         assert!(
-            elapsed < Duration::from_secs(2),
-            "list_dirs must parallelize git probes; serial would be ~4.8s, got {elapsed:?}"
+            p95 < Duration::from_secs(2),
+            "list_dirs must parallelize git probes; serial p95 would be ~4.8s, got {p95:?}"
         );
     }
 }

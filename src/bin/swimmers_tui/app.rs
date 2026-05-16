@@ -20,6 +20,7 @@ pub(crate) struct RefreshResult {
     pub(crate) sessions: Result<Vec<SessionSummary>, String>,
     pub(crate) mermaid_artifacts: Vec<(String, Result<MermaidArtifactResponse, String>)>,
     pub(crate) session_skills: Vec<(String, Result<SessionSkillListResponse, String>)>,
+    pub(crate) backend_health: Result<BackendHealthResponse, String>,
     pub(crate) native_status: Option<Result<NativeDesktopStatusResponse, String>>,
     pub(crate) daemon_defaults_status: Option<DaemonDefaultsStatus>,
     pub(crate) show_success_message: bool,
@@ -92,6 +93,54 @@ impl ApiRefreshHealth {
     }
 }
 
+fn concise_health_detail(value: Option<&String>) -> Option<String> {
+    value
+        .map(|text| text.trim())
+        .filter(|text| !text.is_empty())
+        .map(|text| truncate_label(text, 64))
+}
+
+fn backend_health_warning_text(health: &BackendHealthResponse) -> Option<String> {
+    let persistence = &health.persistence;
+    if !persistence.available {
+        return Some("persistence unavailable".to_string());
+    }
+    if !persistence.ok {
+        let operation = persistence
+            .last_failed_operation
+            .as_deref()
+            .unwrap_or("write");
+        let detail = concise_health_detail(persistence.last_error.as_ref())
+            .map(|error| format!(": {error}"))
+            .unwrap_or_default();
+        return Some(format!("persistence degraded: {operation}{detail}"));
+    }
+
+    let thought = &health.thought_bridge;
+    match thought.status.as_str() {
+        "healthy" | "" => None,
+        "degraded" => {
+            let detail = concise_health_detail(thought.last_backend_error.as_ref())
+                .or_else(|| concise_health_detail(thought.last_error.as_ref()))
+                .map(|error| format!(": {error}"))
+                .unwrap_or_default();
+            Some(format!("thought bridge degraded{detail}"))
+        }
+        "unhealthy" => {
+            let detail = concise_health_detail(
+                thought
+                    .shutdown_reason
+                    .as_ref()
+                    .or(thought.last_error.as_ref()),
+            )
+            .map(|error| format!(": {error}"))
+            .unwrap_or_default();
+            Some(format!("thought bridge unhealthy{detail}"))
+        }
+        other => Some(format!("thought bridge {other}")),
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) enum DaemonDefaultsStatus {
     #[default]
@@ -159,6 +208,10 @@ pub(crate) enum PendingInteractionResult {
         field: Rect,
         response: Result<CreateSessionResponse, String>,
     },
+    AdoptSession {
+        field: Rect,
+        response: Result<AdoptSessionResponse, String>,
+    },
     CreateSessionsBatch {
         field: Rect,
         response: Result<CreateSessionsBatchResponse, String>,
@@ -216,6 +269,7 @@ pub(crate) struct App<C: TuiApi> {
     pub(crate) selected_id: Option<String>,
     pub(crate) published_selected_id: Option<String>,
     pub(crate) native_status: Option<NativeDesktopStatusResponse>,
+    pub(crate) backend_health: Option<BackendHealthResponse>,
     pub(crate) attention_group_session_ids: Vec<String>,
     pub(crate) daemon_defaults_status: DaemonDefaultsStatus,
     pub(crate) thought_config_editor: Option<ThoughtConfigEditorState>,
@@ -296,6 +350,7 @@ impl<C: TuiApi> App<C> {
             selected_id: None,
             published_selected_id: None,
             native_status: None,
+            backend_health: None,
             attention_group_session_ids: Vec::new(),
             daemon_defaults_status: DaemonDefaultsStatus::Unknown,
             thought_config_editor: None,
@@ -1320,6 +1375,9 @@ impl<C: TuiApi> App<C> {
         };
 
         if sessions_ok {
+            if let Ok(health) = self.runtime.block_on(self.client.fetch_backend_health()) {
+                self.backend_health = Some(health);
+            }
             match self.runtime.block_on(self.client.fetch_native_status()) {
                 Ok(status) => {
                     self.native_status = Some(status);
@@ -1368,6 +1426,7 @@ impl<C: TuiApi> App<C> {
         self.pending_refresh = Some(rx);
         self.runtime.spawn(async move {
             let sessions_result = client.fetch_sessions().await;
+            let backend_health = client.fetch_backend_health().await;
 
             let (mermaid_artifacts, session_skills, native_status) = match &sessions_result {
                 Ok(sessions) => {
@@ -1450,6 +1509,7 @@ impl<C: TuiApi> App<C> {
                 sessions: sessions_result,
                 mermaid_artifacts,
                 session_skills,
+                backend_health,
                 native_status,
                 daemon_defaults_status,
                 show_success_message,
@@ -1565,6 +1625,25 @@ impl<C: TuiApi> App<C> {
                     self.sync_selection_publication();
                     self.close_picker();
                     self.set_message(format!("created {tmux_name}"));
+                }
+                Err(err) => self.set_message(err),
+            },
+            PendingInteractionResult::AdoptSession { field, response } => match response {
+                Ok(response) => {
+                    let repo_theme = response.repo_theme.clone();
+                    let session = response.session;
+                    let session_id = session.session_id.clone();
+                    let tmux_name = session.tmux_name.clone();
+                    self.remember_repo_theme(&session, repo_theme);
+                    self.upsert_session(session, field);
+                    self.selected_id = Some(session_id);
+                    self.reconcile_selection();
+                    self.sync_selection_publication();
+                    if response.reused_session_id {
+                        self.set_message(format!("reattached {tmux_name}"));
+                    } else {
+                        self.set_message(format!("adopted {tmux_name}"));
+                    }
                 }
                 Err(err) => self.set_message(err),
             },
@@ -1752,6 +1831,9 @@ impl<C: TuiApi> App<C> {
                     self.set_message(self.refresh_error_message(err));
                 }
             }
+        }
+        if let Ok(health) = result.backend_health {
+            self.backend_health = Some(health);
         }
         if let Some(status) = result.daemon_defaults_status {
             self.daemon_defaults_status = status;
@@ -2977,6 +3059,49 @@ impl<C: TuiApi> App<C> {
         });
     }
 
+    pub(crate) fn adopt_tmux_session(
+        &mut self,
+        tmux_name: String,
+        session_id: Option<String>,
+        field: Rect,
+    ) {
+        let Some(tx) = self.begin_pending_interaction() else {
+            return;
+        };
+
+        let client = Arc::clone(&self.client);
+        let message_target = tmux_name.clone();
+        let session_id_for_call = session_id.clone();
+        if session_id.is_some() {
+            self.set_message(format!("reattaching {message_target}..."));
+        } else {
+            self.set_message(format!("adopting {message_target}..."));
+        }
+        self.runtime.spawn(async move {
+            let response = client
+                .adopt_session(&tmux_name, session_id_for_call.as_deref())
+                .await;
+            let _ = tx.send(PendingInteractionResult::AdoptSession { field, response });
+        });
+    }
+
+    pub(crate) fn reattach_selected_tmux_session(&mut self, field: Rect) {
+        let Some(session) = self.selected().map(|entity| entity.session.clone()) else {
+            self.set_message("no session selected");
+            return;
+        };
+        if !session.is_stale {
+            self.set_message("selected session is already live");
+            return;
+        }
+        if session.tmux_name.is_empty() {
+            self.set_message("selected session has no tmux name");
+            return;
+        }
+
+        self.adopt_tmux_session(session.tmux_name, Some(session.session_id), field);
+    }
+
     pub(crate) fn spawn_sessions_batch(
         &mut self,
         dirs: Vec<String>,
@@ -4121,6 +4246,17 @@ impl<C: TuiApi> App<C> {
                 &truncate_label(banner, field.width as usize),
                 Color::Red,
             );
+        } else if let Some(banner) = self
+            .backend_health
+            .as_ref()
+            .and_then(backend_health_warning_text)
+        {
+            renderer.draw_text(
+                field.x,
+                field.y,
+                &truncate_label(&banner, field.width as usize),
+                Color::Yellow,
+            );
         }
     }
 
@@ -4165,6 +4301,65 @@ mod tests {
 
         health.record_success();
         assert!(health.banner_text().is_none());
+    }
+
+    fn healthy_backend_health() -> BackendHealthResponse {
+        BackendHealthResponse {
+            status: "healthy".to_string(),
+            thought_bridge: BackendThoughtBridgeHealth {
+                status: "healthy".to_string(),
+                ..BackendThoughtBridgeHealth::default()
+            },
+            persistence: BackendPersistenceHealth {
+                available: true,
+                ok: true,
+                last_successful_operation: Some("save_sessions".to_string()),
+                ..BackendPersistenceHealth::default()
+            },
+        }
+    }
+
+    #[test]
+    fn backend_health_banner_covers_persistence_degraded_and_recovered() {
+        let mut health = healthy_backend_health();
+        assert!(backend_health_warning_text(&health).is_none());
+
+        health.persistence.ok = false;
+        health.persistence.consecutive_failures = 2;
+        health.persistence.last_failed_operation = Some("save_thought".to_string());
+        health.persistence.last_error = Some("permission denied".to_string());
+        assert_eq!(
+            backend_health_warning_text(&health),
+            Some("persistence degraded: save_thought: permission denied".to_string())
+        );
+
+        health.persistence.ok = true;
+        health.persistence.consecutive_failures = 0;
+        health.persistence.last_error = None;
+        assert!(backend_health_warning_text(&health).is_none());
+    }
+
+    #[test]
+    fn backend_health_banner_covers_thought_degraded_and_unhealthy() {
+        let mut health = healthy_backend_health();
+        health.thought_bridge.status = "degraded".to_string();
+        health.thought_bridge.last_backend_error = Some("model timeout".to_string());
+        assert_eq!(
+            backend_health_warning_text(&health),
+            Some("thought bridge degraded: model timeout".to_string())
+        );
+
+        health.thought_bridge.status = "unhealthy".to_string();
+        health.thought_bridge.last_backend_error = None;
+        health.thought_bridge.shutdown_reason = Some("self fence tripped".to_string());
+        assert_eq!(
+            backend_health_warning_text(&health),
+            Some("thought bridge unhealthy: self fence tripped".to_string())
+        );
+
+        health.thought_bridge.status = "healthy".to_string();
+        health.thought_bridge.shutdown_reason = None;
+        assert!(backend_health_warning_text(&health).is_none());
     }
 }
 

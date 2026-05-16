@@ -1,5 +1,176 @@
 use super::*;
+use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
+
+const GLANCE_STATE_COVERAGE_FIXTURE: &str =
+    include_str!("../../../../tests/fixtures/glance_state_coverage_10.json");
+
+#[derive(Debug, Deserialize)]
+struct GlanceFixtureManifest {
+    version: u64,
+    profile_id: String,
+    sessions: Vec<GlanceFixtureSession>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GlanceFixtureSession {
+    id: String,
+    tmux_name: String,
+    role: String,
+    state: SessionState,
+    rest_state: RestState,
+    thought_state: ThoughtState,
+    state_evidence: GlanceFixtureEvidence,
+    transport_health: TransportHealth,
+    current_command: Option<String>,
+    expected_sprite: String,
+    expected_label: String,
+    requires_name_for_glance: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct GlanceFixtureEvidence {
+    cause: String,
+    observed: bool,
+}
+
+fn sprite_kind_name(kind: SpriteKind) -> &'static str {
+    match kind {
+        SpriteKind::Active => "active",
+        SpriteKind::Busy => "busy",
+        SpriteKind::Drowsy => "drowsy",
+        SpriteKind::Sleeping => "sleeping",
+        SpriteKind::DeepSleep => "deep_sleep",
+        SpriteKind::Attention => "attention",
+        SpriteKind::Error => "error",
+        SpriteKind::Exited => "exited",
+    }
+}
+
+fn session_from_glance_fixture(fixture: &GlanceFixtureSession, tmux_name: &str) -> SessionSummary {
+    let mut session = session_summary(&fixture.id, tmux_name, TEST_REPO_SWIMMERS);
+    session.state = fixture.state;
+    session.rest_state = fixture.rest_state;
+    session.thought_state = fixture.thought_state;
+    session.state_evidence = StateEvidence::with_observed_at(
+        &fixture.state_evidence.cause,
+        fixture.state_evidence.observed.then(Utc::now),
+    );
+    session.transport_health = fixture.transport_health;
+    session.current_command = fixture.current_command.clone();
+    session
+}
+
+fn load_glance_fixture_manifest() -> GlanceFixtureManifest {
+    serde_json::from_str(GLANCE_STATE_COVERAGE_FIXTURE).expect("glance fixture manifest")
+}
+
+fn render_glance_fixture_frame(
+    manifest: &GlanceFixtureManifest,
+) -> (String, Vec<serde_json::Value>, u128) {
+    let started = std::time::Instant::now();
+    let field = Rect {
+        x: 0,
+        y: 0,
+        width: 100,
+        height: 32,
+    };
+    let mut renderer = test_renderer(field.width, field.height);
+    let sessions = manifest
+        .sessions
+        .iter()
+        .map(|fixture| session_from_glance_fixture(fixture, &fixture.tmux_name))
+        .collect::<Vec<_>>();
+    let entities = sessions
+        .into_iter()
+        .map(|session| SessionEntity::new(session, field))
+        .collect::<Vec<_>>();
+    let entity_refs = entities.iter().collect::<Vec<_>>();
+    let repo_themes: HashMap<String, RepoTheme> = HashMap::new();
+    render_balls_theme(&mut renderer, field, &entity_refs, None, &repo_themes, 0);
+    let frame = (0..field.height)
+        .map(|y| row_text(&renderer, y))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let elapsed_ms = started.elapsed().as_millis();
+    let observations = manifest
+        .sessions
+        .iter()
+        .zip(entities.iter())
+        .map(|(fixture, entity)| {
+            serde_json::json!({
+                "id": fixture.id,
+                "role": fixture.role,
+                "state": fixture.state,
+                "rest_state": fixture.rest_state,
+                "transport_health": fixture.transport_health,
+                "current_command": fixture.current_command,
+                "expected_sprite": fixture.expected_sprite,
+                "actual_sprite": sprite_kind_name(entity.sprite_kind()),
+                "expected_label": fixture.expected_label,
+                "actual_label": session_state_text(&entity.session),
+                "tmux_name_used_for_state": false
+            })
+        })
+        .collect::<Vec<_>>();
+
+    (frame, observations, elapsed_ms)
+}
+
+fn write_glance_artifacts(
+    manifest: &GlanceFixtureManifest,
+    frame: &str,
+    observations: &[serde_json::Value],
+    elapsed_ms: u128,
+) {
+    let Ok(artifact_dir) = std::env::var("SWIMMERS_GLANCE_ARTIFACT_DIR") else {
+        return;
+    };
+    let artifact_dir = std::path::PathBuf::from(artifact_dir);
+    std::fs::create_dir_all(&artifact_dir).expect("create glance artifact dir");
+
+    let raw_manifest: serde_json::Value =
+        serde_json::from_str(GLANCE_STATE_COVERAGE_FIXTURE).expect("raw manifest json");
+    std::fs::write(
+        artifact_dir.join("sessions.json"),
+        serde_json::to_vec_pretty(&raw_manifest["sessions"]).expect("serialize sessions artifact"),
+    )
+    .expect("write sessions artifact");
+    std::fs::write(artifact_dir.join("tui-frame.txt"), frame).expect("write TUI frame artifact");
+    std::fs::write(
+        artifact_dir.join("state-observations.json"),
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "profile_id": manifest.profile_id,
+            "session_count": manifest.sessions.len(),
+            "first_frame_elapsed_ms": elapsed_ms,
+            "observations": observations,
+        }))
+        .expect("serialize state observations"),
+    )
+    .expect("write state observations artifact");
+}
+
+fn write_native_handoff_artifact(payload: serde_json::Value) {
+    let Ok(artifact_dir) = std::env::var("SWIMMERS_GLANCE_ARTIFACT_DIR") else {
+        return;
+    };
+    let artifact_dir = std::path::PathBuf::from(artifact_dir);
+    std::fs::create_dir_all(&artifact_dir).expect("create glance artifact dir");
+    std::fs::write(
+        artifact_dir.join("native-open.json"),
+        serde_json::to_vec_pretty(&payload).expect("serialize native handoff artifact"),
+    )
+    .expect("write native handoff artifact");
+}
+
+fn fixture_id_for_role(manifest: &GlanceFixtureManifest, role: &str) -> String {
+    manifest
+        .sessions
+        .iter()
+        .find(|fixture| fixture.role == role)
+        .map(|fixture| fixture.id.clone())
+        .unwrap_or_else(|| panic!("missing fixture role {role}"))
+}
 
 // docs/VISION.md "Product Test" depends on these state->label mappings being
 // glance-distinct so users can identify status in seconds without reading text.
@@ -107,6 +278,222 @@ fn glance_product_test_state_to_sprite_label_mapping_is_canonical_and_distinct()
         7,
         "canonical glance labels must stay distinct; collapsing labels breaks Product Test readability"
     );
+}
+
+#[test]
+fn fixture_manifest_matches_source_state_predicates() {
+    let manifest = load_glance_fixture_manifest();
+    assert_eq!(manifest.version, 1);
+    assert_eq!(manifest.profile_id, "glance_state_coverage_10");
+    assert_eq!(
+        manifest.sessions.len(),
+        10,
+        "Vision Glance fixture must stay at exactly 10 sessions",
+    );
+
+    let mut ids = HashSet::new();
+    let mut roles = HashSet::new();
+    let mut busy_running = 0usize;
+    let mut idle_states = 0usize;
+
+    for (index, fixture) in manifest.sessions.iter().enumerate() {
+        assert!(ids.insert(fixture.id.as_str()), "duplicate fixture id");
+        roles.insert(fixture.role.as_str());
+        assert!(
+            !fixture.requires_name_for_glance,
+            "{} must not require reading names for state detection",
+            fixture.id,
+        );
+
+        let session = session_from_glance_fixture(fixture, &fixture.tmux_name);
+        assert_eq!(
+            sprite_kind_name(SpriteKind::from_session(&session)),
+            fixture.expected_sprite,
+            "{} sprite should come from SessionSummary fields",
+            fixture.id,
+        );
+        assert_eq!(
+            session_state_text(&session),
+            fixture.expected_label,
+            "{} label should come from source predicates",
+            fixture.id,
+        );
+
+        let renamed = session_from_glance_fixture(fixture, &format!("renamed-{index}"));
+        assert_eq!(
+            SpriteKind::from_session(&renamed),
+            SpriteKind::from_session(&session),
+            "{} sprite changed after tmux name rewrite",
+            fixture.id,
+        );
+        assert_eq!(
+            session_state_text(&renamed),
+            session_state_text(&session),
+            "{} label changed after tmux name rewrite",
+            fixture.id,
+        );
+
+        if fixture.state == SessionState::Busy && fixture.current_command.is_some() {
+            busy_running += 1;
+        }
+        if fixture.state == SessionState::Idle {
+            idle_states += 1;
+        }
+    }
+
+    for required_role in [
+        "ai_agent_compiling",
+        "running_tests",
+        "idle",
+        "awaiting_user",
+        "errored",
+        "exited",
+        "stale_degraded",
+    ] {
+        assert!(
+            roles.contains(required_role),
+            "fixture profile missing required role {required_role}",
+        );
+    }
+    assert!(
+        busy_running >= 4,
+        "fixture must include mixed running sessions, got {busy_running}",
+    );
+    assert_eq!(idle_states, 2, "fixture must include two idle states");
+}
+
+#[test]
+fn fixture_manifest_renders_first_frame_artifacts() {
+    let manifest = load_glance_fixture_manifest();
+    let (frame, observations, elapsed_ms) = render_glance_fixture_frame(&manifest);
+
+    assert!(
+        elapsed_ms <= 2_000,
+        "fixture first frame took {elapsed_ms}ms, above the 2s Glance target",
+    );
+    assert!(
+        frame.contains('*'),
+        "busy fixture state must be visible in first frame\n{frame}",
+    );
+    assert!(
+        frame.contains('!'),
+        "attention fixture state must be visible in first frame\n{frame}",
+    );
+    assert!(
+        frame.contains('x'),
+        "error/exited fixture states must be visible in first frame\n{frame}",
+    );
+    assert!(
+        frame.contains('z'),
+        "sleeping fixture state must be visible in first frame\n{frame}",
+    );
+    assert!(
+        frame.contains("( ? )") && frame.contains(".?."),
+        "stale/degraded fixture state must render the ghost overlay\n{frame}",
+    );
+
+    for observation in &observations {
+        assert_eq!(
+            observation["expected_sprite"], observation["actual_sprite"],
+            "sprite mismatch in glance observation: {observation}",
+        );
+        assert_eq!(
+            observation["expected_label"], observation["actual_label"],
+            "label mismatch in glance observation: {observation}",
+        );
+        assert_eq!(observation["tmux_name_used_for_state"], false);
+    }
+
+    write_glance_artifacts(&manifest, &frame, &observations, elapsed_ms);
+}
+
+#[test]
+fn fixture_manifest_native_handoff_targets_errored_and_attention_once() {
+    let manifest = load_glance_fixture_manifest();
+    let errored_id = fixture_id_for_role(&manifest, "errored");
+    let attention_id = fixture_id_for_role(&manifest, "awaiting_user");
+    let sessions = manifest
+        .sessions
+        .iter()
+        .map(|fixture| session_from_glance_fixture(fixture, &fixture.tmux_name))
+        .collect::<Vec<_>>();
+
+    let api = MockApi::new();
+    api.push_open_session(Ok(NativeDesktopOpenResponse {
+        session_id: errored_id.clone(),
+        status: "focused".to_string(),
+        pane_id: Some("%glance-error".to_string()),
+    }));
+    api.push_open_session(Ok(NativeDesktopOpenResponse {
+        session_id: attention_id.clone(),
+        status: "focused".to_string(),
+        pane_id: Some("%glance-attention".to_string()),
+    }));
+
+    let field = Rect {
+        x: 0,
+        y: 0,
+        width: 100,
+        height: 32,
+    };
+    let mut app = make_app(api.clone());
+    app.merge_sessions(sessions, field);
+    poll_until_selection_publication(&mut app);
+    let initial_publish_calls = api.publish_calls();
+
+    app.selected_id = Some(errored_id.clone());
+    app.open_selected();
+    assert!(app.pending_interaction.is_some());
+    app.open_selected();
+    assert_eq!(
+        app.message.as_ref().map(|(message, _)| message.as_str()),
+        Some("wait for the current action to finish"),
+        "duplicate open while pending should not churn focus",
+    );
+    poll_until_interaction(&mut app);
+    poll_until_selection_publication(&mut app);
+    assert_eq!(api.open_calls(), vec![errored_id.clone()]);
+
+    app.selected_id = Some(attention_id.clone());
+    app.open_selected();
+    assert!(app.pending_interaction.is_some());
+    poll_until_interaction(&mut app);
+    poll_until_selection_publication(&mut app);
+
+    assert_eq!(
+        api.open_calls(),
+        vec![errored_id.clone(), attention_id.clone()],
+        "native handoff should target selected errored and attention fixtures exactly once",
+    );
+    let expected_target_publications = [Some(errored_id.clone()), Some(attention_id.clone())];
+    assert!(
+        api.publish_calls().ends_with(&expected_target_publications),
+        "selection publication should track the exact handoff targets",
+    );
+
+    write_native_handoff_artifact(serde_json::json!({
+        "profile_id": manifest.profile_id,
+        "mode": "simulated_native_handoff",
+        "requires_real_iterm_or_ghostty": false,
+        "duplicate_pending_open_suppressed": true,
+        "targets": [
+            {
+                "role": "errored",
+                "session_id": errored_id,
+                "status": "focused",
+                "pane_id": "%glance-error"
+            },
+            {
+                "role": "awaiting_user",
+                "session_id": attention_id,
+                "status": "focused",
+                "pane_id": "%glance-attention"
+            }
+        ],
+        "open_calls": api.open_calls(),
+        "initial_publish_calls": initial_publish_calls,
+        "publish_calls": api.publish_calls()
+    }));
 }
 
 #[test]

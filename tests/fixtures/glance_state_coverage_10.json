@@ -1,0 +1,185 @@
+{
+  "version": 1,
+  "profile_id": "glance_state_coverage_10",
+  "source_backing": [
+    "docs/VISION.md Product Test",
+    "src/types.rs SessionSummary state fields",
+    "src/bin/swimmers_tui/entity.rs SpriteKind::from_session",
+    "src/bin/swimmers_tui/render.rs session_state_text",
+    "src/bin/swimmers_tui/tests/glance.rs fixture_manifest_matches_source_state_predicates"
+  ],
+  "non_destructive_tmux_rule": "Use a unique tmux session prefix and kill only sessions created by the fixture runner.",
+  "glance_rule": "Assertions must use state, rest_state, state_evidence, transport_health, and current_command. Session names are stable handles only.",
+  "sessions": [
+    {
+      "id": "compile-agent-a",
+      "tmux_name": "swimmers-glance-01",
+      "role": "ai_agent_compiling",
+      "state": "busy",
+      "rest_state": "active",
+      "thought_state": "active",
+      "state_evidence": {
+        "cause": "osc133_command",
+        "observed": true
+      },
+      "transport_health": "healthy",
+      "current_command": "cargo build --release",
+      "expected_sprite": "busy",
+      "expected_label": "busy",
+      "requires_name_for_glance": false
+    },
+    {
+      "id": "compile-agent-b",
+      "tmux_name": "swimmers-glance-02",
+      "role": "ai_agent_compiling",
+      "state": "busy",
+      "rest_state": "active",
+      "thought_state": "active",
+      "state_evidence": {
+        "cause": "osc133_command",
+        "observed": true
+      },
+      "transport_health": "healthy",
+      "current_command": "cargo check --lib",
+      "expected_sprite": "busy",
+      "expected_label": "busy",
+      "requires_name_for_glance": false
+    },
+    {
+      "id": "test-runner-a",
+      "tmux_name": "swimmers-glance-03",
+      "role": "running_tests",
+      "state": "busy",
+      "rest_state": "active",
+      "thought_state": "active",
+      "state_evidence": {
+        "cause": "osc133_command",
+        "observed": true
+      },
+      "transport_health": "healthy",
+      "current_command": "cargo test --lib",
+      "expected_sprite": "busy",
+      "expected_label": "busy",
+      "requires_name_for_glance": false
+    },
+    {
+      "id": "test-runner-b",
+      "tmux_name": "swimmers-glance-04",
+      "role": "running_tests",
+      "state": "busy",
+      "rest_state": "active",
+      "thought_state": "active",
+      "state_evidence": {
+        "cause": "osc133_command",
+        "observed": true
+      },
+      "transport_health": "healthy",
+      "current_command": "cargo test --test metamorphic",
+      "expected_sprite": "busy",
+      "expected_label": "busy",
+      "requires_name_for_glance": false
+    },
+    {
+      "id": "idle-drowsy",
+      "tmux_name": "swimmers-glance-05",
+      "role": "idle",
+      "state": "idle",
+      "rest_state": "drowsy",
+      "thought_state": "holding",
+      "state_evidence": {
+        "cause": "output_silence_expired",
+        "observed": true
+      },
+      "transport_health": "healthy",
+      "current_command": null,
+      "expected_sprite": "drowsy",
+      "expected_label": "drowsy",
+      "requires_name_for_glance": false
+    },
+    {
+      "id": "idle-sleeping",
+      "tmux_name": "swimmers-glance-06",
+      "role": "idle",
+      "state": "idle",
+      "rest_state": "sleeping",
+      "thought_state": "sleeping",
+      "state_evidence": {
+        "cause": "osc133_prompt",
+        "observed": true
+      },
+      "transport_health": "healthy",
+      "current_command": null,
+      "expected_sprite": "sleeping",
+      "expected_label": "sleeping",
+      "requires_name_for_glance": false
+    },
+    {
+      "id": "awaiting-user",
+      "tmux_name": "swimmers-glance-07",
+      "role": "awaiting_user",
+      "state": "attention",
+      "rest_state": "active",
+      "thought_state": "holding",
+      "state_evidence": {
+        "cause": "osc133_prompt",
+        "observed": true
+      },
+      "transport_health": "healthy",
+      "current_command": null,
+      "expected_sprite": "attention",
+      "expected_label": "attention",
+      "requires_name_for_glance": false
+    },
+    {
+      "id": "errored",
+      "tmux_name": "swimmers-glance-08",
+      "role": "errored",
+      "state": "error",
+      "rest_state": "active",
+      "thought_state": "holding",
+      "state_evidence": {
+        "cause": "error_pattern",
+        "observed": true
+      },
+      "transport_health": "healthy",
+      "current_command": "cargo test --lib",
+      "expected_sprite": "error",
+      "expected_label": "error",
+      "requires_name_for_glance": false
+    },
+    {
+      "id": "exited",
+      "tmux_name": "swimmers-glance-09",
+      "role": "exited",
+      "state": "exited",
+      "rest_state": "deep_sleep",
+      "thought_state": "sleeping",
+      "state_evidence": {
+        "cause": "process_exit",
+        "observed": true
+      },
+      "transport_health": "healthy",
+      "current_command": null,
+      "expected_sprite": "exited",
+      "expected_label": "exited",
+      "requires_name_for_glance": false
+    },
+    {
+      "id": "stale-degraded-busy",
+      "tmux_name": "swimmers-glance-10",
+      "role": "stale_degraded",
+      "state": "busy",
+      "rest_state": "active",
+      "thought_state": "active",
+      "state_evidence": {
+        "cause": "summary_cache_degraded",
+        "observed": false
+      },
+      "transport_health": "degraded",
+      "current_command": "cargo test --lib",
+      "expected_sprite": "busy",
+      "expected_label": "busy?",
+      "requires_name_for_glance": false
+    }
+  ]
+}

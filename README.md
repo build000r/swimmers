@@ -234,7 +234,9 @@ When `SWIMMERS_NATIVE_APP=ghostty`, the API uses Ghostty's AppleScript support t
 
 While the TUI is running, press `n` or click the top-right native-open label to switch between `iTerm` and `Ghostty` without restarting the API.
 
-Click `[attention group]` in the TUI header to build a managed `swimmers-attention` tmux session from local sessions that are ready for operator input. When Ghostty is the native target, Swimmers also opens the attention group automatically in its own managed Ghostty window as ready sessions appear. The group prefers related project work over raw recency, preserves the managed tmux session, and refreshes up to six panes in place as visible panes stop waiting or new ready panes can fit.
+When a selected session is stale because its tmux session disappeared, press `A` after recreating that exact tmux session to reattach the stale swimmers identity instead of creating a duplicate.
+
+Click `[attention group]` in the TUI header to build or refresh a managed `swimmers-attention` tmux session from local sessions that are ready for operator input. When Ghostty is the native target, that explicit action opens the attention group in its own managed Ghostty window. The group prefers related project work over raw recency, preserves the managed tmux session, and refreshes up to six panes in place as visible panes stop waiting or new ready panes can fit.
 
 The optional browser terminal renderer also honors `SWIMMERS_FRANKENTUI_PKG_DIR` (or `FRANKENTUI_PKG_DIR`) to override the auto-detected `frankentui/pkg` asset path.
 
@@ -252,6 +254,7 @@ make server             # Run only the standalone API server
 make tui-check          # Type-check the native TUI binary
 make up-smoke           # Run shell-level checks on the combined web+TUI launcher
 make tui-smoke          # Run shell-level bootstrap tests on the run-tui.sh shim
+make glance-smoke       # Render the 10-session Glance fixture and write proof artifacts
 make cargo-cov-lcov     # Generate lcov coverage report
 ```
 
@@ -369,11 +372,14 @@ Set `SWIMMERS_TUI_URL` to split the API into its own process. Multiple TUIs, hea
 |--------|------|---------|
 | `GET` | `/v1/sessions` | List tmux sessions with state |
 | `POST` | `/v1/sessions` | Create a new tmux session |
+| `POST` | `/v1/sessions/adopt` | Adopt an externally-created tmux session; optional `session_id` reattaches a stale swimmers identity |
+| `POST` | `/v1/sessions/reattach` | Alias for explicit stale-session reattachment by exact tmux name |
 | `POST` | `/v1/sessions/batch` | Create one session per directory with the same initial request |
 | `POST` | `/v1/sessions/group-input` | Send the same text to ready sessions in one batch |
 | `DELETE` | `/v1/sessions/{id}` | Remove a session |
 | `GET` | `/v1/sessions/{id}/snapshot` | Capture visible screen text |
 | `GET` | `/v1/sessions/{id}/timeline` | Ordered single-session timeline with pinned task, diff, log, and artifact summaries |
+| `GET` | `/v1/sessions/{id}/agent-context` | User-submitted turn metadata and current task/action context for the cockpit workbench |
 | `GET` | `/v1/sessions/{id}/transcript` | User turns and post-turn JSONL records for the latest or selected turn |
 | `GET` | `/v1/sessions/{id}/pane-tail` | Recent pane output |
 | `GET` | `/v1/sessions/{id}/git-diff` | Raw and structured git diff summaries |
@@ -581,7 +587,7 @@ Yes, via external mode. Run a standalone `swimmers` server and point each TUI at
 
 ### How does state detection work?
 
-The `SessionActor` monitors each session's PTY output and classifies it into states (idle, busy, error, attention) based on shell activity patterns. Rest states (drowsy, sleeping, deep sleep) layer on top based on inactivity duration.
+The `SessionActor` monitors each session's PTY output and classifies it into states (idle, busy, error, attention) based on shell activity patterns. Rest states layer on top: without transcript/thought-daemon input, elapsed idle time only ages a session into `drowsy`; `sleeping` and `deep sleep` are reserved for transcript-aware waiting/exited state.
 
 ### What is the thought rail?
 

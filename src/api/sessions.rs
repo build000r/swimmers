@@ -15,14 +15,15 @@ use crate::api::{fetch_live_summary, remote_sessions, AppState};
 use crate::auth::{AuthInfo, AuthScope};
 use crate::operator_pressure::session_ready_for_operator_group_input;
 use crate::session::actor::{ActorHandle, InputDeliveryResult, SessionCommand};
+use crate::session::supervisor::TmuxAdoptError;
 use crate::thought::context::{
     context_reader_for, AgentTranscriptRecord as ContextTranscriptRecord,
     AgentUserTurn as ContextUserTurn,
 };
 use crate::types::{
-    AgentContextActionSummary, CreateSessionRequest, CreateSessionResponse,
-    CreateSessionsBatchRequest, CreateSessionsBatchResponse, CreateSessionsBatchResult,
-    ErrorResponse, MermaidArtifactResponse, PlanFileResponse, RepoTheme,
+    AdoptSessionRequest, AdoptSessionResponse, AgentContextActionSummary, CreateSessionRequest,
+    CreateSessionResponse, CreateSessionsBatchRequest, CreateSessionsBatchResponse,
+    CreateSessionsBatchResult, ErrorResponse, MermaidArtifactResponse, PlanFileResponse, RepoTheme,
     SessionAgentContextResponse, SessionAgentTurn, SessionBatchMembership,
     SessionGitDiffFileSummary, SessionGitDiffHunkSummary, SessionGitDiffResponse,
     SessionGroupInputRequest, SessionGroupInputResponse, SessionGroupInputResult,
@@ -135,6 +136,71 @@ fn create_local_session_error_response(error: anyhow::Error) -> axum::response::
         )
             .into_response()
     }
+}
+
+// ---------------------------------------------------------------------------
+// POST /v1/sessions/adopt
+// ---------------------------------------------------------------------------
+
+async fn adopt_session(
+    Extension(auth): Extension<AuthInfo>,
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<AdoptSessionRequest>,
+) -> axum::response::Response {
+    if let Err(resp) = auth.require_scope(AuthScope::SessionsWrite) {
+        return resp;
+    }
+
+    match state
+        .supervisor
+        .adopt_tmux_session(body.tmux_name, body.session_id)
+        .await
+    {
+        Ok(adopted) => (
+            StatusCode::CREATED,
+            Json(AdoptSessionResponse {
+                session: adopted.session,
+                repo_theme: adopted.repo_theme,
+                reused_session_id: adopted.reused_session_id,
+            }),
+        )
+            .into_response(),
+        Err(error) => adopt_session_error_response(error),
+    }
+}
+
+fn adopt_session_error_response(error: TmuxAdoptError) -> axum::response::Response {
+    let (status, code) = match &error {
+        TmuxAdoptError::EmptyTmuxName => (StatusCode::BAD_REQUEST, "TMUX_NAME_REQUIRED"),
+        TmuxAdoptError::DiscoveryUnavailable => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "TMUX_DISCOVERY_UNAVAILABLE",
+        ),
+        TmuxAdoptError::TargetNotFound { .. } => (StatusCode::NOT_FOUND, "TMUX_SESSION_NOT_FOUND"),
+        TmuxAdoptError::AmbiguousTarget { .. } => (StatusCode::CONFLICT, "TMUX_SESSION_AMBIGUOUS"),
+        TmuxAdoptError::AlreadyTracked { .. } => {
+            (StatusCode::CONFLICT, "TMUX_SESSION_ALREADY_TRACKED")
+        }
+        TmuxAdoptError::StaleSessionNotFound { .. } => {
+            (StatusCode::NOT_FOUND, "STALE_SESSION_NOT_FOUND")
+        }
+        TmuxAdoptError::StaleSessionConflict { .. } => {
+            (StatusCode::CONFLICT, "STALE_SESSION_CONFLICT")
+        }
+        TmuxAdoptError::SpawnFailed { .. } => {
+            tracing::error!("adopt_session failed: {error}");
+            (StatusCode::INTERNAL_SERVER_ERROR, "TMUX_ADOPT_FAILED")
+        }
+    };
+
+    (
+        status,
+        Json(ErrorResponse {
+            code: code.to_string(),
+            message: Some(error.to_string()),
+        }),
+    )
+        .into_response()
 }
 
 // ---------------------------------------------------------------------------
@@ -2307,6 +2373,8 @@ fn plan_file_internal_error(message: &str) -> Response {
 pub fn routes() -> Router<Arc<AppState>> {
     Router::new()
         .route("/v1/sessions", get(list_sessions).post(create_session))
+        .route("/v1/sessions/adopt", post(adopt_session))
+        .route("/v1/sessions/reattach", post(adopt_session))
         .route("/v1/sessions/batch", post(create_sessions_batch))
         .route("/v1/sessions/group-input", post(send_group_input))
         .route("/v1/sessions/{session_id}", delete(delete_session))
@@ -2357,6 +2425,17 @@ mod tests {
     use std::time::{Duration, Instant};
     use tempfile::{tempdir, TempDir};
     use tokio::sync::{mpsc, RwLock};
+
+    fn p95_duration(mut samples: Vec<Duration>) -> Duration {
+        assert!(!samples.is_empty(), "p95 requires at least one sample");
+        samples.sort_unstable();
+        let index = samples
+            .len()
+            .saturating_mul(95)
+            .div_ceil(100)
+            .saturating_sub(1);
+        samples[index]
+    }
 
     fn test_state() -> Arc<AppState> {
         let config = Arc::new(Config::default());
@@ -2700,6 +2779,49 @@ esac
         .into_response();
 
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn adopt_session_requires_write_scope() {
+        let response = adopt_session(
+            Extension(AuthInfo::new(OBSERVER_SCOPES.to_vec())),
+            State(test_state()),
+            Json(AdoptSessionRequest {
+                tmux_name: "alpha".to_string(),
+                session_id: None,
+            }),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn adopt_session_rejects_already_tracked_tmux_without_duplication() {
+        let state = test_state();
+        let active = summary("sess-1", SessionState::Idle);
+        let tmux_name = active.tmux_name.clone();
+        let _rx = insert_summary_test_handle(&state, active.clone()).await;
+
+        let response = adopt_session(
+            Extension(AuthInfo::new(OPERATOR_SCOPES.to_vec())),
+            State(state),
+            Json(AdoptSessionRequest {
+                tmux_name,
+                session_id: None,
+            }),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let json = response_json(response).await;
+        assert_eq!(json["code"], "TMUX_SESSION_ALREADY_TRACKED");
+        assert!(json["message"]
+            .as_str()
+            .expect("message")
+            .contains("sess-1"));
     }
 
     #[tokio::test]
@@ -4238,29 +4360,35 @@ esac
                 .await;
             expected_ids.push(session_id);
         }
-
-        let started = Instant::now();
-        let Json(payload) = list_sessions(
-            Extension(AuthInfo::new(OBSERVER_SCOPES.to_vec())),
-            State(state),
-        )
-        .await
-        .expect("session list should succeed");
-        let elapsed = started.elapsed();
-
-        let mut actual_ids = payload
-            .sessions
-            .iter()
-            .map(|session| session.session_id.clone())
-            .collect::<Vec<_>>();
-        actual_ids.sort();
         expected_ids.sort();
 
-        assert_eq!(actual_ids, expected_ids);
+        let mut samples = Vec::new();
+        for _ in 0..5 {
+            let started = Instant::now();
+            let Json(payload) = list_sessions(
+                Extension(AuthInfo::new(OBSERVER_SCOPES.to_vec())),
+                State(state.clone()),
+            )
+            .await
+            .expect("session list should succeed");
+            let elapsed = started.elapsed();
+            samples.push(elapsed);
+
+            let mut actual_ids = payload
+                .sessions
+                .iter()
+                .map(|session| session.session_id.clone())
+                .collect::<Vec<_>>();
+            actual_ids.sort();
+            assert_eq!(actual_ids, expected_ids);
+        }
+
+        let p95 = p95_duration(samples);
+        eprintln!("/v1/sessions p95: {p95:?} (budget 500ms)");
         assert!(
-            elapsed < Duration::from_millis(500),
-            "expected /v1/sessions under 500ms, got {:?}",
-            elapsed
+            p95 < Duration::from_millis(500),
+            "expected /v1/sessions p95 under 500ms, got {:?}",
+            p95
         );
     }
 

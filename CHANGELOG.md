@@ -29,6 +29,8 @@ All notable changes to swimmers are documented here. The format is based on [Kee
 ### Release notes
 
 - The GitHub release workflow now renders release notes from the matching `CHANGELOG.md` version block and ships that body with each tag, instead of creating empty releases when the assets publish successfully.
+- The GitHub release workflow now publishes `swimmers-tui-linux-amd64` and its SHA-256 checksum alongside the standalone `swimmers-linux-amd64` server asset, matching the two-binary `cargo install swimmers` boundary.
+- The crate package boundary now excludes local Beads, Skillbox, Codex, and other operator-only state so crates.io payloads contain source, assets, tests, and public docs rather than workstation artifacts.
 
 ## [0.2.0] — 2026-04-16
 
