@@ -57,8 +57,7 @@ pub type ClientId = u64;
 /// A framed chunk of terminal output with its sequence number.
 #[derive(Debug, Clone)]
 pub struct OutputFrame {
-    // FIXME(2026-04-21): WebSocket transport still forwards bytes only; seq is retained for replay-aware client envelopes.
-    #[allow(dead_code)]
+    /// Monotonic output sequence used by replay-aware WebSocket clients.
     pub seq: u64,
     pub data: Vec<u8>,
 }
