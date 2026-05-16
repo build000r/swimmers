@@ -6,6 +6,7 @@ pending `v0.3.0` release.
 ## Version And Tag State
 
 - `Cargo.toml` package version: `0.3.0`.
+- Release commit checked during this pass: `dd9a1c9`.
 - Latest local release tag checked during this pass: `v0.2.0`.
 - `v0.3.0` tag state during this pass: absent locally.
 - Release notes source: `CHANGELOG.md` contains a `## [0.3.0]` section, and
@@ -32,19 +33,21 @@ agent orchestration artifacts such as:
 - `target/`
 - local audit/report scratch files
 
-Required pre-tag gates:
+Clean-tree pre-tag gates run from release commit `dd9a1c9`:
 
 ```bash
 cargo package --list
 cargo publish --dry-run --locked
 ```
 
-During the long-running Beads batch that introduced this file, Cargo refused
-the exact clean-tree commands because tracked files were intentionally
-uncommitted. The equivalent dirty-tree package inspection was run after the
-package exclusion repair to verify that local Beads/Skillbox/Codex state is no
-longer part of the crate payload. Rerun the exact commands above after the batch
-is committed and before tagging.
+Results:
+
+- `cargo package --list` returned 164 package entries.
+- The package filter found no local operator paths under `.beads/`,
+  `.buildooor/`, `.claude/`, `.codex/`, `.github/`, `.ntm/`, `data/`,
+  `scripts/`, `target/`, or `tests/artifacts/`.
+- `cargo publish --dry-run --locked` packaged 164 files, verified
+  `swimmers v0.3.0`, and aborted only because the command was a dry run.
 
 ## GitHub Release Assets
 
