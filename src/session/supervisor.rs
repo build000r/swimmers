@@ -132,13 +132,12 @@ fn tmux_query_command(args: &[&str]) -> Command {
     command
 }
 
-async fn query_tmux_active_pane_session_ids(
-    tmux_names: &HashSet<String>,
-) -> anyhow::Result<HashMap<String, String>> {
-    if tmux_names.is_empty() {
-        return Ok(HashMap::new());
-    }
-
+/// Runs `tmux list-panes -a` once and returns every session's active-pane id.
+/// Callers that only care about specific tmux session names should pair this
+/// with [`filter_active_panes_to_requested`]; keeping the query unfiltered
+/// lets the supervisor share one tmux call across callers within the cache
+/// TTL window.
+async fn query_all_active_pane_session_ids() -> anyhow::Result<HashMap<String, String>> {
     let started = Instant::now();
     let output = tokio::time::timeout(
         ACTIVE_PANE_LOOKUP_TIMEOUT,
@@ -169,7 +168,6 @@ async fn query_tmux_active_pane_session_ids(
         warn!(
             phase = "tmux_list_panes",
             elapsed_ms = elapsed.as_millis() as u64,
-            tmux_names = tmux_names.len(),
             "tmux active pane lookup completed slowly"
         );
     }
@@ -182,7 +180,7 @@ async fn query_tmux_active_pane_session_ids(
         let pane_active = fields.next().unwrap_or_default();
         let pane_selector = fields.next().unwrap_or_default();
 
-        if !tmux_names.contains(session_name)
+        if session_name.is_empty()
             || window_active != "1"
             || pane_active != "1"
             || pane_selector.is_empty()
@@ -199,21 +197,17 @@ async fn query_tmux_active_pane_session_ids(
     Ok(active_panes)
 }
 
-async fn active_pane_session_ids_or_empty(
+fn filter_active_panes_to_requested(
+    all: &HashMap<String, String>,
     tmux_names: &HashSet<String>,
-    reason: &'static str,
 ) -> HashMap<String, String> {
-    match query_tmux_active_pane_session_ids(tmux_names).await {
-        Ok(ids) => ids,
-        Err(err) => {
-            warn!(
-                reason,
-                tmux_names = tmux_names.len(),
-                "skipping tmux active pane lookup: {err}"
-            );
-            HashMap::new()
+    let mut out = HashMap::with_capacity(tmux_names.len().min(all.len()));
+    for name in tmux_names {
+        if let Some(id) = all.get(name) {
+            out.insert(name.clone(), id.clone());
         }
     }
+    out
 }
 
 // ---------------------------------------------------------------------------
@@ -364,7 +358,21 @@ pub struct SessionSupervisor {
     /// Serializes tmux discovery so concurrent callers cannot race and attach
     /// duplicate actors to the same tmux session.
     discovery_lock: Mutex<()>,
+
+    /// Memoizes `tmux list-panes -a` output so the TUI's polling cadence
+    /// (every ~1–2s) doesn't pay the subprocess fork+exec on every call.
+    /// Bounded staleness is 1s; active_pane_session_id only feeds the
+    /// thought-snapshot merge fallback, where it's tolerated.
+    active_pane_cache: Mutex<ActivePaneCache>,
 }
+
+#[derive(Default)]
+struct ActivePaneCache {
+    fetched_at: Option<Instant>,
+    panes: HashMap<String, String>,
+}
+
+const ACTIVE_PANE_CACHE_TTL: Duration = Duration::from_millis(1000);
 
 impl SessionSupervisor {
     pub fn new(config: Arc<Config>) -> Arc<Self> {
@@ -385,7 +393,51 @@ impl SessionSupervisor {
             pending_thought_persists_notify: Notify::new(),
             process_exit_seen_at: RwLock::new(HashMap::new()),
             discovery_lock: Mutex::new(()),
+            active_pane_cache: Mutex::new(ActivePaneCache::default()),
         })
+    }
+
+    /// Returns the active-pane session-id map for the requested `tmux_names`,
+    /// reusing a recent `tmux list-panes -a` result when it is within TTL.
+    async fn active_pane_session_ids_cached(
+        &self,
+        tmux_names: &HashSet<String>,
+        reason: &'static str,
+    ) -> HashMap<String, String> {
+        if tmux_names.is_empty() {
+            return HashMap::new();
+        }
+
+        {
+            let cache = self.active_pane_cache.lock().await;
+            if let Some(at) = cache.fetched_at {
+                if at.elapsed() < ACTIVE_PANE_CACHE_TTL {
+                    return filter_active_panes_to_requested(&cache.panes, tmux_names);
+                }
+            }
+        }
+
+        let fresh = match query_all_active_pane_session_ids().await {
+            Ok(panes) => panes,
+            Err(err) => {
+                warn!(
+                    reason,
+                    tmux_names = tmux_names.len(),
+                    "skipping tmux active pane lookup: {err}"
+                );
+                return HashMap::new();
+            }
+        };
+
+        let filtered = filter_active_panes_to_requested(&fresh, tmux_names);
+
+        {
+            let mut cache = self.active_pane_cache.lock().await;
+            cache.fetched_at = Some(Instant::now());
+            cache.panes = fresh;
+        }
+
+        filtered
     }
 
     fn resolve_repo_theme_for_summary(&self, summary: &mut SessionSummary) -> Option<RepoTheme> {
@@ -1482,8 +1534,9 @@ impl SessionSupervisor {
         let thought_snapshots = self.thought_snapshots.read().await.clone();
         let tmux_names =
             tmux_names_requiring_active_pane_lookup(summaries.iter(), &thought_snapshots);
-        let active_pane_session_ids =
-            active_pane_session_ids_or_empty(&tmux_names, "list_sessions").await;
+        let active_pane_session_ids = self
+            .active_pane_session_ids_cached(&tmux_names, "list_sessions")
+            .await;
         for summary in &mut summaries {
             let active_pane_session_id = if thought_snapshots.contains_key(&summary.session_id)
                 || summary.tmux_name.is_empty()
@@ -1597,8 +1650,9 @@ impl SessionSupervisor {
             summaries_with_replay.iter().map(|(summary, _)| summary),
             &thought_snapshots,
         );
-        let active_pane_session_ids =
-            active_pane_session_ids_or_empty(&tmux_names, "collect_session_infos").await;
+        let active_pane_session_ids = self
+            .active_pane_session_ids_cached(&tmux_names, "collect_session_infos")
+            .await;
 
         for (summary, replay_text) in summaries_with_replay {
             let session_id = summary.session_id.clone();
@@ -2808,12 +2862,11 @@ mod tests {
         let original_path = std::env::var_os("PATH");
         prepend_test_path(&bin_dir, original_path.as_deref());
 
-        let pane_ids = query_tmux_active_pane_session_ids(&HashSet::from_iter([
-            "0".to_string(),
-            "work".to_string(),
-        ]))
-        .await
-        .expect("active pane session ids");
+        let requested = HashSet::from_iter(["0".to_string(), "work".to_string()]);
+        let all = query_all_active_pane_session_ids()
+            .await
+            .expect("active pane session ids");
+        let pane_ids = filter_active_panes_to_requested(&all, &requested);
         assert_eq!(pane_ids.get("0").map(String::as_str), Some("tmux:0:0.0:%1"));
         assert_eq!(
             pane_ids.get("work").map(String::as_str),
