@@ -1,7 +1,7 @@
 SHELL := /bin/bash
 .DEFAULT_GOAL := help
 
-.PHONY: help server up up-smoke web web-smoke web-workbench-smoke tui tui-check tui-smoke tui-stress glance-smoke remote-auth-smoke ci-perf-gates cargo-cov-lcov
+.PHONY: help server up kill up-smoke web web-smoke web-workbench-smoke tui tui-check tui-smoke tui-stress glance-smoke remote-auth-smoke ci-perf-gates cargo-cov-lcov
 
 help:
 	@printf '%s\n' \
@@ -9,6 +9,7 @@ help:
 	'' \
 	'  make server                  Run the Rust server on the configured port' \
 	'  make up                      Start current-checkout backend, then launch web URLs + TUI' \
+	'  make kill                    Stop the swimmers backend listening on PORT (default 3210)' \
 	'  make up-smoke                Run shell checks for the combined web+TUI launcher' \
 	'  make web                     Run the server and print the local/tailnet browser URL' \
 	'  make web-smoke              Verify live browser terminal attach and visible browser output' \
@@ -27,6 +28,9 @@ server:
 
 up:
 	bash ./scripts/run-up.sh
+
+kill:
+	bash ./scripts/run-kill.sh
 
 up-smoke:
 	bash ./scripts/test-run-up.sh
