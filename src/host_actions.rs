@@ -268,23 +268,96 @@ struct GitStateSnapshot {
 /// blocking the caller indefinitely.
 const GIT_PROBE_TIMEOUT: Duration = Duration::from_secs(1);
 
+/// TTL for the `inspect_git_repo` per-path memo. `list_dirs` is the hot caller
+/// and the TUI's directory picker may refire it 2–5× per session as the user
+/// changes filters; reusing probes within the window cuts each retry to ~µs.
+/// Write paths (`start_dir_repo_action`) call [`invalidate_inspect_git_repo`]
+/// after kicking off a mutation so the next read sees fresh `dirty` state.
+const INSPECT_GIT_REPO_CACHE_TTL: Duration = Duration::from_secs(1);
+
+#[derive(Clone)]
+struct InspectGitRepoCacheEntry {
+    fetched_at: Instant,
+    summary: Option<GitRepoSummary>,
+}
+
+static INSPECT_GIT_REPO_CACHE: std::sync::OnceLock<
+    std::sync::Mutex<HashMap<PathBuf, InspectGitRepoCacheEntry>>,
+> = std::sync::OnceLock::new();
+
+fn inspect_git_repo_cache(
+) -> &'static std::sync::Mutex<HashMap<PathBuf, InspectGitRepoCacheEntry>> {
+    INSPECT_GIT_REPO_CACHE.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+}
+
+fn lookup_cached_inspect_git_repo(path: &Path) -> Option<Option<GitRepoSummary>> {
+    let guard = inspect_git_repo_cache().lock().ok()?;
+    let entry = guard.get(path)?;
+    if entry.fetched_at.elapsed() < INSPECT_GIT_REPO_CACHE_TTL {
+        Some(entry.summary.clone())
+    } else {
+        None
+    }
+}
+
+fn store_cached_inspect_git_repo(path: &Path, summary: &Option<GitRepoSummary>) {
+    if let Ok(mut guard) = inspect_git_repo_cache().lock() {
+        guard.insert(
+            path.to_path_buf(),
+            InspectGitRepoCacheEntry {
+                fetched_at: Instant::now(),
+                summary: summary.clone(),
+            },
+        );
+    }
+}
+
+/// Drops cached `inspect_git_repo` results for the given path. Call this after
+/// any mutation that may change the repo's dirty state (commit, reset, etc.)
+/// so the next read picks up the new status instead of the cached one.
+pub fn invalidate_inspect_git_repo(path: &Path) {
+    let Some(cache) = INSPECT_GIT_REPO_CACHE.get() else {
+        return;
+    };
+    if let Ok(mut guard) = cache.lock() {
+        guard.remove(path);
+    }
+}
+
 /// Async probe: offloads the blocking git subprocess calls to Tokio's blocking
 /// pool via `spawn_blocking`. Using `tokio::process::Command` with many
 /// concurrent children wedged the runtime on macOS (concurrent process-wait
 /// contention), so we go through the blocking pool instead — it's sized for
 /// exactly this pattern and keeps the main worker threads free.
+///
+/// Memoized for [`INSPECT_GIT_REPO_CACHE_TTL`]; mutating code paths must call
+/// [`invalidate_inspect_git_repo`] to clear stale `dirty` entries.
 pub async fn inspect_git_repo(path: &Path) -> io::Result<Option<GitRepoSummary>> {
-    let path = path.to_path_buf();
-    let join_handle = tokio::task::spawn_blocking(move || inspect_git_repo_sync(&path));
-    match tokio::time::timeout(GIT_PROBE_TIMEOUT, join_handle).await {
-        Ok(Ok(result)) => result,
-        Ok(Err(join_err)) => Err(io::Error::other(format!(
-            "inspect_git_repo task failed: {join_err}"
-        ))),
+    if let Some(cached) = lookup_cached_inspect_git_repo(path) {
+        return Ok(cached);
+    }
+
+    let owned_path = path.to_path_buf();
+    let join_handle = tokio::task::spawn_blocking({
+        let owned_path = owned_path.clone();
+        move || inspect_git_repo_sync(&owned_path)
+    });
+    let result = match tokio::time::timeout(GIT_PROBE_TIMEOUT, join_handle).await {
+        Ok(Ok(result)) => result?,
+        Ok(Err(join_err)) => {
+            return Err(io::Error::other(format!(
+                "inspect_git_repo task failed: {join_err}"
+            )))
+        }
         // Timed out: let the blocking task finish detached and report "no repo"
         // so the picker simply omits dirty/action indicators for this entry.
-        Err(_) => Ok(None),
-    }
+        // Don't cache timeouts — a hung git is likely transient and we want the
+        // next call to retry.
+        Err(_) => return Ok(None),
+    };
+
+    store_cached_inspect_git_repo(&owned_path, &result);
+    Ok(result)
 }
 
 fn inspect_git_repo_sync(path: &Path) -> io::Result<Option<GitRepoSummary>> {

@@ -1621,6 +1621,14 @@ pub async fn start_repo_action_with_executor(
         .await
         .map_err(|error| repo_action_error(&error))?;
 
+    // The action may flip the repo's dirty state. Drop the cached probe so
+    // the next `inspect_git_repo` call re-runs git instead of returning the
+    // pre-action snapshot.
+    crate::host_actions::invalidate_inspect_git_repo(&repo_summary.repo_root);
+    if canonical != repo_summary.repo_root {
+        crate::host_actions::invalidate_inspect_git_repo(&canonical);
+    }
+
     let status = state
         .repo_actions
         .status_for(&repo_summary.repo_root)
