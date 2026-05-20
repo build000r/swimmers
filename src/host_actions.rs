@@ -285,8 +285,8 @@ static INSPECT_GIT_REPO_CACHE: std::sync::OnceLock<
     std::sync::Mutex<HashMap<PathBuf, InspectGitRepoCacheEntry>>,
 > = std::sync::OnceLock::new();
 
-fn inspect_git_repo_cache(
-) -> &'static std::sync::Mutex<HashMap<PathBuf, InspectGitRepoCacheEntry>> {
+fn inspect_git_repo_cache() -> &'static std::sync::Mutex<HashMap<PathBuf, InspectGitRepoCacheEntry>>
+{
     INSPECT_GIT_REPO_CACHE.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
 }
 

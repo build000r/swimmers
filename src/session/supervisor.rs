@@ -33,6 +33,7 @@ const PROCESS_EXIT_SUMMARY_TIMEOUT: Duration = Duration::from_millis(250);
 const TMUX_REDISCOVERY_INTERVAL: Duration = Duration::from_secs(10);
 const ACTIVE_PANE_LOOKUP_TIMEOUT: Duration = Duration::from_millis(350);
 const ACTIVE_PANE_LOOKUP_WARN_THRESHOLD: Duration = Duration::from_millis(200);
+const PRELAUNCH_PROMPT_CLEANUP_DELAY: Duration = Duration::from_secs(30);
 
 struct ListedTmuxSessions {
     reliable: bool,
@@ -1223,6 +1224,14 @@ impl SessionSupervisor {
         let tmux_name = self.allocate_tmux_name(name);
         let session_id = self.allocate_unique_session_id().await;
 
+        if let Some(dir) = start_cwd.as_deref() {
+            if !Path::new(dir).is_dir() {
+                return Err(anyhow::anyhow!(
+                    "session cwd does not exist or is not a directory: {dir}"
+                ));
+            }
+        }
+
         info!(session_id = %session_id, tmux_name = %tmux_name, "creating new session");
 
         let initial_tool = initial_tool_name(spawn_tool.as_ref());
@@ -1249,7 +1258,7 @@ impl SessionSupervisor {
         ) {
             Ok(handle) => handle,
             Err(err) => {
-                cleanup_prelaunch_files(&prelaunch_cleanup_paths);
+                schedule_prelaunch_file_cleanup(prelaunch_cleanup_paths);
                 return Err(err);
             }
         };
@@ -2329,7 +2338,35 @@ impl PreparedSpawnToolCommand {
     }
 }
 
-fn cleanup_prelaunch_files(paths: &[PathBuf]) {
+fn schedule_prelaunch_file_cleanup(paths: Vec<PathBuf>) {
+    schedule_prelaunch_file_cleanup_after(paths, PRELAUNCH_PROMPT_CLEANUP_DELAY);
+}
+
+fn schedule_prelaunch_file_cleanup_after(paths: Vec<PathBuf>, delay: Duration) {
+    if paths.is_empty() {
+        return;
+    }
+
+    if delay.is_zero() {
+        cleanup_prelaunch_files_now(&paths);
+        return;
+    }
+
+    if let Err(err) = std::thread::Builder::new()
+        .name("swimmers-prelaunch-cleanup".to_string())
+        .spawn(move || {
+            std::thread::sleep(delay);
+            cleanup_prelaunch_files_now(&paths);
+        })
+    {
+        warn!(
+            "failed to schedule pre-launch prompt cleanup; leaving prompt file for OS temp cleanup: {}",
+            err
+        );
+    }
+}
+
+fn cleanup_prelaunch_files_now(paths: &[PathBuf]) {
     for path in paths {
         match fs::remove_file(path) {
             Ok(()) => {}
@@ -2467,7 +2504,7 @@ fn build_codex_prompt_file_command(initial_request: &str) -> io::Result<Prepared
     let prompt_path_arg = shell_single_quote(&prompt_path.to_string_lossy());
     Ok(PreparedSpawnToolCommand::with_cleanup(
         format!(
-        "prompt_file={prompt_path}; if prompt=\"$(cat \"$prompt_file\")\"; then rm -f \"$prompt_file\"; if command -v caam >/dev/null 2>&1; then caam run codex -- \"$prompt\" || {{ echo 'swimmers: caam codex launch failed; falling back to raw codex' >&2; if command -v codex-raw >/dev/null 2>&1; then codex-raw \"$prompt\"; else command codex \"$prompt\"; fi; }}; else command codex \"$prompt\"; fi; else rm -f \"$prompt_file\"; echo 'swimmers: failed to read initial request' >&2; fi"
+        "prompt_file={prompt_path}; if prompt=\"$(cat \"$prompt_file\")\"; then rm -f \"$prompt_file\"; if command -v caam >/dev/null 2>&1; then caam run codex -- \"$prompt\" || {{ echo 'swimmers: caam codex launch failed; falling back to raw codex' >&2; if command -v codex-raw >/dev/null 2>&1; then codex-raw \"$prompt\"; else command codex \"$prompt\"; fi; }}; else command codex \"$prompt\"; fi; else rm -f \"$prompt_file\"; echo 'swimmers: failed to read initial request' >&2; false; fi"
     ,
             prompt_path = prompt_path_arg
         ),
@@ -2942,7 +2979,7 @@ mod tests {
 
     fn prompt_file_from_spawn_command(command: &str) -> PathBuf {
         let prefix = "prompt_file='";
-        let suffix = "'; if prompt=\"$(cat \"$prompt_file\")\"; then rm -f \"$prompt_file\"; if command -v caam >/dev/null 2>&1; then caam run codex -- \"$prompt\" || { echo 'swimmers: caam codex launch failed; falling back to raw codex' >&2; if command -v codex-raw >/dev/null 2>&1; then codex-raw \"$prompt\"; else command codex \"$prompt\"; fi; }; else command codex \"$prompt\"; fi; else rm -f \"$prompt_file\"; echo 'swimmers: failed to read initial request' >&2; fi";
+        let suffix = "'; if prompt=\"$(cat \"$prompt_file\")\"; then rm -f \"$prompt_file\"; if command -v caam >/dev/null 2>&1; then caam run codex -- \"$prompt\" || { echo 'swimmers: caam codex launch failed; falling back to raw codex' >&2; if command -v codex-raw >/dev/null 2>&1; then codex-raw \"$prompt\"; else command codex \"$prompt\"; fi; }; else command codex \"$prompt\"; fi; else rm -f \"$prompt_file\"; echo 'swimmers: failed to read initial request' >&2; false; fi";
         assert!(command.starts_with(prefix), "unexpected command: {command}");
         assert!(command.ends_with(suffix), "unexpected command: {command}");
         PathBuf::from(&command[prefix.len()..command.len() - suffix.len()])
@@ -3119,6 +3156,97 @@ mod tests {
             prompt
         );
         let _ = std::fs::remove_file(prompt_path);
+    }
+
+    #[test]
+    fn codex_prompt_command_reports_missing_prelaunch_prompt_file() {
+        let command =
+            build_spawn_tool_command(crate::types::SpawnTool::Codex, None, Some("lost prompt"));
+        let prompt_path = prompt_file_from_spawn_command(&command);
+        std::fs::remove_file(&prompt_path).expect("remove prompt file before command runs");
+        let shell = if cfg!(unix) { "/bin/sh" } else { "sh" };
+        let output = std::process::Command::new(shell)
+            .arg("-c")
+            .arg(&command)
+            .output()
+            .expect("run spawn command");
+
+        assert!(!output.status.success());
+        assert!(
+            String::from_utf8_lossy(&output.stderr)
+                .contains("swimmers: failed to read initial request"),
+            "stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(!prompt_path.exists());
+    }
+
+    #[test]
+    fn delayed_prelaunch_cleanup_allows_codex_prompt_command_to_read_file() {
+        let temp = tempdir().expect("tempdir");
+        let bin_dir = temp.path().join("bin");
+        std::fs::create_dir_all(&bin_dir).expect("bin dir");
+        let captured_prompt = temp.path().join("captured-prompt.txt");
+        let capture_script = format!(
+            "#!/usr/bin/env bash\nprintf '%s' \"$1\" > {}\n",
+            shell_single_quote(&captured_prompt.to_string_lossy())
+        );
+        write_executable(&bin_dir.join("codex"), &capture_script);
+        let test_path = test_path_with_prepend(&bin_dir, None);
+
+        let prompt = "prompt survives delayed cleanup";
+        let command = build_spawn_tool_command(crate::types::SpawnTool::Codex, None, Some(prompt));
+        let prompt_path = prompt_file_from_spawn_command(&command);
+        schedule_prelaunch_file_cleanup_after(
+            vec![prompt_path.clone()],
+            Duration::from_millis(100),
+        );
+
+        assert!(
+            prompt_path.exists(),
+            "cleanup must not remove the handoff immediately"
+        );
+        let shell = if cfg!(unix) { "/bin/sh" } else { "sh" };
+        let output = std::process::Command::new(shell)
+            .arg("-c")
+            .arg(&command)
+            .env("PATH", test_path)
+            .output()
+            .expect("run spawn command");
+
+        assert!(
+            output.status.success(),
+            "stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            std::fs::read_to_string(captured_prompt).expect("captured prompt"),
+            prompt
+        );
+        assert!(
+            !prompt_path.exists(),
+            "prompt file should be removed by the command"
+        );
+    }
+
+    #[test]
+    fn delayed_prelaunch_cleanup_removes_unread_prompt_file() {
+        let temp = tempdir().expect("tempdir");
+        let prompt_path = temp.path().join("orphaned-prompt.txt");
+        std::fs::write(&prompt_path, "orphaned prompt").expect("prompt file");
+
+        schedule_prelaunch_file_cleanup_after(vec![prompt_path.clone()], Duration::from_millis(10));
+
+        for _ in 0..50 {
+            if !prompt_path.exists() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            !prompt_path.exists(),
+            "orphaned prompt file should be removed"
+        );
     }
 
     #[test]
