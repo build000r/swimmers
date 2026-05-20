@@ -52,6 +52,7 @@ write_server_fixture() {
   cat >"${server_py}" <<'PY'
 import os
 import sys
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -61,8 +62,18 @@ fixed_port = int(sys.argv[3]) if len(sys.argv) > 3 and sys.argv[3] else 0
 
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
+        if self.path.startswith("/health"):
+            if mode in ("ready", "slow-dirs", "missing-dirs"):
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(b'{"status":"healthy"}')
+            else:
+                self.send_response(404)
+                self.end_headers()
+            return
+
         if self.path.startswith("/app.js"):
-            if mode == "ready":
+            if mode in ("ready", "slow-dirs", "missing-dirs"):
                 self.send_response(200)
                 self.end_headers()
                 self.wfile.write(b"console.log('swimmers fixture');")
@@ -72,13 +83,22 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if self.path.startswith("/v1/sessions"):
-            self.send_response(200)
-            self.end_headers()
-            self.wfile.write(b'{"sessions":[]}')
+            if mode in ("ready", "slow-dirs", "missing-dirs"):
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(b'{"sessions":[]}')
+            else:
+                self.send_response(404)
+                self.end_headers()
             return
 
         if self.path.startswith("/v1/dirs"):
             if mode == "ready":
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(b'{"entries":[]}')
+            elif mode == "slow-dirs":
+                time.sleep(3)
                 self.send_response(200)
                 self.end_headers()
                 self.wfile.write(b'{"entries":[]}')
@@ -88,7 +108,7 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if self.path.startswith("/v1/skills"):
-            if mode == "ready":
+            if mode in ("ready", "slow-dirs", "missing-dirs"):
                 self.send_response(200)
                 self.end_headers()
                 self.wfile.write(b'{"skills":[]}')
@@ -223,7 +243,7 @@ make_server_bin_stub() {
   cat >"${stub}" <<SH
 #!/usr/bin/env bash
 set -euo pipefail
-exec -a swimmers python3 "${SERVER_FIXTURE}" ready "" "\${PORT:?PORT is required}"
+exec -a swimmers python3 "${SERVER_FIXTURE}" "\${SWIMMERS_UP_TEST_SERVER_MODE:-ready}" "" "\${PORT:?PORT is required}"
 SH
   chmod +x "${stub}"
   printf '%s\n' "${stub}"
@@ -280,6 +300,24 @@ grep -q "SWIMMERS_TUI_URL=http://127.0.0.1:${port}" "${capture}"
 grep -q "SWIMMERS_TUI_REUSE_SERVER=1" "${capture}"
 grep -q "SWIMMERS_TUI_FEATURES=personal-workflows" "${capture}"
 grep -q "CARGO_TARGET_DIR=${ROOT_DIR}/target/swimmers-up/personal-workflows" "${capture}"
+stop_port_listener "${port}"
+
+port="$(free_port)"
+SWIMMERS_UP_TEST_SERVER_MODE=slow-dirs \
+  run_up_for_port "${port}" "${capture}" "${tmp_dir}/slow-dirs.out"
+grep -q "Backend ready on http://127.0.0.1:${port}" "${tmp_dir}/slow-dirs.out"
+grep -q "note: /v1/dirs did not answer within the short startup probe" "${tmp_dir}/slow-dirs.out"
+grep -q "SWIMMERS_TUI_URL=http://127.0.0.1:${port}" "${capture}"
+stop_port_listener "${port}"
+
+port="$(free_port)"
+if SWIMMERS_UP_TEST_SERVER_MODE=missing-dirs \
+  run_up_for_port "${port}" "${capture}" "${tmp_dir}/missing-dirs.out" 2>"${tmp_dir}/missing-dirs.err"; then
+  printf 'expected run-up.sh to fail when /v1/dirs is explicitly missing\n' >&2
+  exit 1
+fi
+grep -q "required make up route is unavailable" "${tmp_dir}/missing-dirs.err"
+grep -q "/v1/dirs=404" "${tmp_dir}/missing-dirs.err"
 stop_port_listener "${port}"
 
 port="$(free_port)"

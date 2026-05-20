@@ -8,6 +8,7 @@ cd "${ROOT_DIR}"
 PORT="${PORT:-3210}"
 BASE_URL="http://127.0.0.1:${PORT}"
 WEB_ROUTE_PATH="${WEB_ROUTE_PATH:-/app.js}"
+HEALTH_ROUTE_PATH="${HEALTH_ROUTE_PATH:-/health}"
 API_ROUTE_PATH="${API_ROUTE_PATH:-/v1/sessions}"
 DIRS_ROUTE_PATH="${DIRS_ROUTE_PATH:-/v1/dirs}"
 SKILLS_ROUTE_PATH="${SKILLS_ROUTE_PATH:-/v1/skills?tool=codex}"
@@ -69,11 +70,16 @@ announce_urls() {
 
 status_for() {
   local url="${1}"
+  local max_time="${2:-2}"
   curl -sS -o /dev/null -w '%{http_code}' \
     --connect-timeout 1 \
-    --max-time 2 \
+    --max-time "${max_time}" \
     "${url}" \
     2>/dev/null || true
+}
+
+health_route_status() {
+  status_for "${BASE_URL}${HEALTH_ROUTE_PATH}"
 }
 
 web_route_status() {
@@ -104,11 +110,60 @@ backend_is_ready() {
   local api_status="${2:-}"
   local dirs_status="${3:-}"
   local skills_status="${4:-}"
+  local health_status="${5:-}"
 
-  [[ "${web_status}" == "200" ]] \
+  api_status_looks_like_swimmers "${health_status}" \
+    && [[ "${web_status}" == "200" ]] \
     && api_status_looks_like_swimmers "${api_status}" \
-    && api_status_looks_like_swimmers "${dirs_status}" \
+    && dirs_status_looks_compatible "${dirs_status}" \
     && api_status_looks_like_swimmers "${skills_status}"
+}
+
+dirs_status_looks_compatible() {
+  case "${1:-}" in
+    000) return 0 ;;
+    *) api_status_looks_like_swimmers "${1:-}" ;;
+  esac
+}
+
+status_is_explicit_failure() {
+  local status="${1:-}"
+  shift
+  case "${status}" in
+    ""|000) return 1 ;;
+  esac
+
+  local accepted
+  for accepted in "$@"; do
+    case "${accepted}" in
+      api)
+        api_status_looks_like_swimmers "${status}" && return 1
+        ;;
+      dirs)
+        dirs_status_looks_compatible "${status}" && return 1
+        ;;
+      exact:*)
+        [[ "${status}" == "${accepted#exact:}" ]] && return 1
+        ;;
+    esac
+  done
+
+  return 0
+}
+
+backend_has_explicit_route_failure() {
+  local web_status="${1:-}"
+  local api_status="${2:-}"
+  local dirs_status="${3:-}"
+  local skills_status="${4:-}"
+  local health_status="${5:-}"
+
+  api_status_looks_like_swimmers "${health_status}" || return 1
+  status_is_explicit_failure "${web_status}" exact:200 && return 0
+  status_is_explicit_failure "${api_status}" api && return 0
+  status_is_explicit_failure "${dirs_status}" dirs && return 0
+  status_is_explicit_failure "${skills_status}" api && return 0
+  return 1
 }
 
 port_has_listener() {
@@ -296,7 +351,7 @@ start_backend() {
 wait_for_backend() {
   local server_pid="${1}"
   local deadline=$((SECONDS + ${SWIMMERS_UP_WAIT_SECONDS:-15}))
-  local web_status api_status dirs_status skills_status
+  local health_status web_status api_status dirs_status skills_status
 
   while (( SECONDS <= deadline )); do
     if ! kill -0 "${server_pid}" 2>/dev/null; then
@@ -304,20 +359,45 @@ wait_for_backend() {
       return 1
     fi
 
+    health_status="$(health_route_status)"
     web_status="$(web_route_status)"
     api_status="$(api_route_status)"
     dirs_status="$(dirs_route_status)"
     skills_status="$(skills_route_status)"
-    if backend_is_ready "${web_status}" "${api_status}" "${dirs_status}" "${skills_status}"; then
+    if backend_is_ready "${web_status}" "${api_status}" "${dirs_status}" "${skills_status}" "${health_status}"; then
       printf 'Backend ready on %s (pid %s)\n\n' "${BASE_URL}" "${server_pid}"
+      if [[ "${dirs_status}" == "000" ]]; then
+        printf '  note: %s did not answer within the short startup probe; continuing because %s is healthy.\n\n' \
+          "${DIRS_ROUTE_PATH}" \
+          "${HEALTH_ROUTE_PATH}"
+      fi
       return 0
+    fi
+
+    if backend_has_explicit_route_failure "${web_status}" "${api_status}" "${dirs_status}" "${skills_status}" "${health_status}"; then
+      printf 'swimmers backend is running on %s, but a required make up route is unavailable; last %s=%s, %s=%s, %s=%s, %s=%s, %s=%s. See log: %s\n' \
+        "${BASE_URL}" \
+        "${HEALTH_ROUTE_PATH}" \
+        "${health_status:-000}" \
+        "${WEB_ROUTE_PATH}" \
+        "${web_status:-000}" \
+        "${API_ROUTE_PATH}" \
+        "${api_status:-000}" \
+        "${DIRS_ROUTE_PATH}" \
+        "${dirs_status:-000}" \
+        "${SKILLS_ROUTE_PATH}" \
+        "${skills_status:-000}" \
+        "${SERVER_LOG}" >&2
+      return 1
     fi
 
     sleep 0.25
   done
 
-  printf 'Timed out waiting for swimmers backend on %s; last %s=%s, %s=%s, %s=%s, %s=%s. See log: %s\n' \
+  printf 'Timed out waiting for swimmers backend on %s; last %s=%s, %s=%s, %s=%s, %s=%s, %s=%s. See log: %s\n' \
     "${BASE_URL}" \
+    "${HEALTH_ROUTE_PATH}" \
+    "${health_status:-000}" \
     "${WEB_ROUTE_PATH}" \
     "${web_status:-000}" \
     "${API_ROUTE_PATH}" \
@@ -331,7 +411,7 @@ wait_for_backend() {
 }
 
 ensure_backend() {
-  local server_bin web_status api_status dirs_status skills_status
+  local server_bin health_status web_status api_status dirs_status skills_status
   server_bin="$(resolve_server_binary)"
 
   if ! port_has_listener; then
@@ -339,6 +419,7 @@ ensure_backend() {
     return
   fi
 
+  health_status="$(health_route_status)"
   web_status="$(web_route_status)"
   api_status="$(api_route_status)"
   dirs_status="$(dirs_route_status)"
@@ -348,11 +429,16 @@ ensure_backend() {
   pid="$(listener_pid)"
   command_line="$(listener_command "${pid}")"
   if [[ -n "${pid}" ]] && is_swimmers_command "${command_line}"; then
-    if backend_is_ready "${web_status}" "${api_status}" "${dirs_status}" "${skills_status}"; then
+    if backend_is_ready "${web_status}" "${api_status}" "${dirs_status}" "${skills_status}" "${health_status}"; then
       if listener_matches_binary "${pid}" "${server_bin}"; then
         printf 'Existing swimmers backend on 127.0.0.1:%s is current; reusing pid %s.\n' \
           "${PORT}" \
           "${pid}"
+        if [[ "${dirs_status}" == "000" ]]; then
+          printf '  note: %s did not answer within the short startup probe; continuing because %s is healthy.\n' \
+            "${DIRS_ROUTE_PATH}" \
+            "${HEALTH_ROUTE_PATH}"
+        fi
         return
       fi
       printf 'Existing swimmers backend on 127.0.0.1:%s may be stale; restarting it to use %s.\n' \
@@ -361,7 +447,9 @@ ensure_backend() {
     else
       printf 'Existing swimmers backend on 127.0.0.1:%s is missing required make up routes.\n' \
         "${PORT}"
-      printf '  %s returned %s; %s returned %s; %s returned %s; %s returned %s\n' \
+      printf '  %s returned %s; %s returned %s; %s returned %s; %s returned %s; %s returned %s\n' \
+        "${HEALTH_ROUTE_PATH}" \
+        "${health_status:-000}" \
         "${WEB_ROUTE_PATH}" \
         "${web_status:-000}" \
         "${API_ROUTE_PATH}" \
@@ -379,7 +467,9 @@ ensure_backend() {
   printf 'Port %s already has a listener (%s), but it is not this checkout'\''s swimmers backend.\n' \
     "${PORT}" \
     "$(listener_summary)" >&2
-  printf '  %s returned %s; %s returned %s; %s returned %s; %s returned %s\n' \
+  printf '  %s returned %s; %s returned %s; %s returned %s; %s returned %s; %s returned %s\n' \
+    "${HEALTH_ROUTE_PATH}" \
+    "${health_status:-000}" \
     "${WEB_ROUTE_PATH}" \
     "${web_status:-000}" \
     "${API_ROUTE_PATH}" \
