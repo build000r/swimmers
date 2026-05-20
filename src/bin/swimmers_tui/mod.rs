@@ -38,8 +38,8 @@ use swimmers::config::{AuthMode, Config};
 use swimmers::repo_theme::{discover_repo_theme, existing_repo_theme};
 use swimmers::thought::runtime_config::{DaemonDefaults, ThoughtConfig};
 use swimmers::types::{
-    AdoptSessionRequest, AdoptSessionResponse, CreateSessionRequest, CreateSessionResponse,
-    CreateSessionsBatchRequest, CreateSessionsBatchResponse, DirEntry,
+    AdoptSessionRequest, AdoptSessionResponse, AttentionGroupLayout, CreateSessionRequest,
+    CreateSessionResponse, CreateSessionsBatchRequest, CreateSessionsBatchResponse, DirEntry,
     DirGroupMembershipUpdateRequest, DirGroupMembershipUpdateResponse, DirListResponse,
     DirRepoActionRequest, DirRepoActionResponse, DirRepoSearchResponse, ErrorResponse,
     GhosttyOpenMode, LaunchTargetSummary, MermaidArtifactResponse, NativeAttentionGroupOpenRequest,

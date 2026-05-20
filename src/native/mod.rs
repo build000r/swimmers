@@ -14,8 +14,8 @@ use tokio::sync::Mutex as AsyncMutex;
 use tokio::time::{sleep, timeout, Duration};
 
 use crate::types::{
-    GhosttyOpenMode, NativeAttentionGroupOpenResponse, NativeDesktopApp, NativeDesktopOpenResponse,
-    NativeDesktopStatusResponse, SessionSummary,
+    AttentionGroupLayout, GhosttyOpenMode, NativeAttentionGroupOpenResponse, NativeDesktopApp,
+    NativeDesktopOpenResponse, NativeDesktopStatusResponse, SessionSummary,
 };
 
 const NATIVE_APP_ENV: &str = "SWIMMERS_NATIVE_APP";
@@ -171,13 +171,14 @@ pub async fn open_native_attention_group(
     ghostty_mode: GhosttyOpenMode,
     sessions: &[SessionSummary],
     focus: bool,
+    layout: AttentionGroupLayout,
 ) -> Result<NativeAttentionGroupOpenResponse> {
     if sessions.is_empty() {
         return Err(anyhow!("no sessions are waiting for operator input"));
     }
 
     let tmux_path = resolve_tmux_binary()?;
-    sync_attention_group_tmux_session(&tmux_path, sessions).await?;
+    sync_attention_group_tmux_session(&tmux_path, sessions, layout).await?;
     let open_result = if focus {
         Some(
             open_native_session(
@@ -241,21 +242,23 @@ fn attention_group_ghostty_mode(
 async fn sync_attention_group_tmux_session(
     tmux_path: &Path,
     sessions: &[SessionSummary],
+    layout: AttentionGroupLayout,
 ) -> Result<()> {
     let session_target = attention_group_session_target();
     if run_tmux_status(tmux_path, &["has-session", "-t", &session_target])
         .await
         .is_err()
     {
-        return rebuild_attention_group_tmux_session(tmux_path, sessions).await;
+        return rebuild_attention_group_tmux_session(tmux_path, sessions, layout).await;
     }
 
-    replace_attention_group_tmux_panes(tmux_path, sessions).await
+    replace_attention_group_tmux_panes(tmux_path, sessions, layout).await
 }
 
 async fn rebuild_attention_group_tmux_session(
     tmux_path: &Path,
     sessions: &[SessionSummary],
+    layout: AttentionGroupLayout,
 ) -> Result<()> {
     let session_target = attention_group_session_target();
     let pane_target = attention_group_pane_target();
@@ -287,16 +290,17 @@ async fn rebuild_attention_group_tmux_session(
 
     for session in sessions.iter().skip(1) {
         split_attention_group_pane(tmux_path, &pane_target, session).await?;
-        tile_attention_group_tmux_session(tmux_path, &pane_target).await?;
+        tile_attention_group_tmux_session(tmux_path, &pane_target, layout).await?;
     }
 
-    tile_attention_group_tmux_session(tmux_path, &pane_target).await?;
+    tile_attention_group_tmux_session(tmux_path, &pane_target, layout).await?;
     Ok(())
 }
 
 async fn replace_attention_group_tmux_panes(
     tmux_path: &Path,
     sessions: &[SessionSummary],
+    layout: AttentionGroupLayout,
 ) -> Result<()> {
     let pane_target = attention_group_pane_target();
     let panes = list_attention_group_panes(tmux_path, &pane_target).await?;
@@ -351,7 +355,7 @@ async fn replace_attention_group_tmux_panes(
     }
 
     if changed {
-        tile_attention_group_tmux_session(tmux_path, &pane_target).await?;
+        tile_attention_group_tmux_session(tmux_path, &pane_target, layout).await?;
     }
     Ok(())
 }
@@ -503,10 +507,32 @@ fn sanitize_tmux_pane_title(value: &str) -> String {
         .collect()
 }
 
-async fn tile_attention_group_tmux_session(tmux_path: &Path, pane_target: &str) -> Result<()> {
-    run_tmux_status(tmux_path, &["select-layout", "-t", pane_target, "tiled"])
-        .await
-        .map_err(|err| anyhow!("failed to tile attention group panes: {err}"))
+async fn tile_attention_group_tmux_session(
+    tmux_path: &Path,
+    pane_target: &str,
+    layout: AttentionGroupLayout,
+) -> Result<()> {
+    run_tmux_status(
+        tmux_path,
+        &[
+            "select-layout",
+            "-t",
+            pane_target,
+            attention_group_tmux_layout(layout),
+        ],
+    )
+    .await
+    .map_err(|err| anyhow!("failed to tile attention group panes: {err}"))
+}
+
+fn attention_group_tmux_layout(layout: AttentionGroupLayout) -> &'static str {
+    match layout {
+        AttentionGroupLayout::Tiled => "tiled",
+        AttentionGroupLayout::EvenHorizontal => "even-horizontal",
+        AttentionGroupLayout::EvenVertical => "even-vertical",
+        AttentionGroupLayout::MainHorizontal => "main-horizontal",
+        AttentionGroupLayout::MainVertical => "main-vertical",
+    }
 }
 
 fn attention_group_session_target() -> String {
@@ -600,11 +626,15 @@ async fn open_or_focus_ghostty_session(
         .unwrap_or((None, None));
     let resolved_cwd = tmux_cwd.as_deref().unwrap_or(cwd);
     let display_name = build_ghostty_display_name(resolved_cwd, tmux_name);
-    let active_tab_id = query_front_ghostty_tab_id().await.unwrap_or(None);
-    let known_preview_id = if mode == GhosttyOpenMode::Swap {
-        cached_ghostty_preview_term_id(active_tab_id.as_deref())
+    let active_tab_id = if mode == GhosttyOpenMode::Swap {
+        query_front_ghostty_tab_id().await.unwrap_or(None)
     } else {
         None
+    };
+    let known_term_id = match mode {
+        GhosttyOpenMode::Swap => cached_ghostty_preview_term_id(active_tab_id.as_deref()),
+        GhosttyOpenMode::Window => cached_pane_id(session_id),
+        GhosttyOpenMode::Add => None,
     };
 
     let result = run_ghostty_open_script(
@@ -615,13 +645,15 @@ async fn open_or_focus_ghostty_session(
         &attach_command,
         &display_name,
         mode,
-        known_preview_id.as_deref(),
+        known_term_id.as_deref(),
     )
     .await?;
 
     if mode == GhosttyOpenMode::Swap {
         let resulting_tab_id = query_front_ghostty_tab_id().await.unwrap_or(active_tab_id);
         remember_ghostty_preview_term_id(resulting_tab_id.as_deref(), result.pane_id.as_deref());
+    } else if mode == GhosttyOpenMode::Window {
+        remember_pane_id(session_id, result.pane_id.as_deref());
     }
 
     Ok(result)
@@ -1249,7 +1281,7 @@ async fn run_ghostty_open_script(
     attach_command: &str,
     display_name: &str,
     mode: GhosttyOpenMode,
-    known_preview_id: Option<&str>,
+    known_term_id: Option<&str>,
 ) -> Result<NativeDesktopOpenResponse> {
     validate_osascript_script_arg("tmux_name", tmux_name)?;
     validate_osascript_script_arg("attach_command", attach_command)?;
@@ -1268,7 +1300,7 @@ async fn run_ghostty_open_script(
         .arg(&safe_display_name)
         .arg(managed_title_prefix)
         .arg(mode.label());
-    if let Some(term_id) = known_preview_id.filter(|value| !value.is_empty()) {
+    if let Some(term_id) = known_term_id.filter(|value| !value.is_empty()) {
         command.arg(term_id);
     }
 
@@ -1682,6 +1714,7 @@ mod tests {
             GhosttyOpenMode::Swap,
             &sessions,
             false,
+            AttentionGroupLayout::Tiled,
         )
         .await
         .unwrap();
@@ -1771,6 +1804,7 @@ mod tests {
             GhosttyOpenMode::Swap,
             &sessions,
             false,
+            AttentionGroupLayout::EvenVertical,
         )
         .await
         .unwrap();
@@ -1804,7 +1838,7 @@ mod tests {
             "full one-in-one-out refresh must not create extra panes: {log}"
         );
         assert_eq!(
-            log.matches("select-layout\t-t\t=swimmers-attention:\ttiled")
+            log.matches("select-layout\t-t\t=swimmers-attention:\teven-vertical")
                 .count(),
             1,
             "changed refresh should retile once: {log}"
@@ -1841,6 +1875,7 @@ mod tests {
             GhosttyOpenMode::Swap,
             &sessions,
             false,
+            AttentionGroupLayout::Tiled,
         )
         .await
         .unwrap_err();
@@ -1871,6 +1906,7 @@ mod tests {
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
         clear_ghostty_preview_term_cache();
+        remember_pane_id(ATTENTION_GROUP_SESSION_ID, None);
 
         let temp = tempdir().unwrap();
         let fake_tmux = temp.path().join("tmux");
@@ -1895,11 +1931,13 @@ mod tests {
         std::fs::create_dir_all(&fake_osascript_dir).unwrap();
         let fake_osascript = fake_osascript_dir.join("osascript");
         let osa_log_path = temp.path().join("osascript.log");
+        let osa_count_path = temp.path().join("osascript-count");
         std::fs::write(
             &fake_osascript,
             format!(
-                "#!/bin/sh\nset -eu\nif [ \"${{1-}}\" = \"-e\" ]; then\n  case \"${{2-}}\" in\n    *\"get version\"*) printf '1.3.1\\n' ;;\n    *) printf 'ghostty-tab-main\\n' ;;\n  esac\n  exit 0\nfi\nfirst=1\nfor arg in \"$@\"; do\n  if [ \"$first\" -eq 1 ]; then\n    printf '%s' \"$arg\" >> \"{log}\"\n    first=0\n  else\n    printf '\\t%s' \"$arg\" >> \"{log}\"\n  fi\ndone\nprintf '\\n' >> \"{log}\"\nprintf 'focused|attention-pane\\n'\n",
-                log = osa_log_path.display()
+                "#!/bin/sh\nset -eu\nif [ \"${{1-}}\" = \"-e\" ]; then\n  case \"${{2-}}\" in\n    *\"get version\"*) printf '1.3.1\\n' ;;\n    *) printf 'ghostty-tab-main\\n' ;;\n  esac\n  exit 0\nfi\nfirst=1\nfor arg in \"$@\"; do\n  if [ \"$first\" -eq 1 ]; then\n    printf '%s' \"$arg\" >> \"{log}\"\n    first=0\n  else\n    printf '\\t%s' \"$arg\" >> \"{log}\"\n  fi\ndone\nprintf '\\n' >> \"{log}\"\ncount=0\nif [ -f \"{counter}\" ]; then\n  IFS= read -r count < \"{counter}\" || true\nfi\ncount=$((count + 1))\nprintf '%s\\n' \"$count\" > \"{counter}\"\nif [ \"$count\" -eq 1 ]; then\n  printf 'created|attention-pane\\n'\nelse\n  known=\"${{9-}}\"\n  if [ -z \"$known\" ]; then\n    printf 'created|fresh-attention-pane\\n'\n  else\n    printf 'focused|%s\\n' \"$known\"\n  fi\nfi\n",
+                log = osa_log_path.display(),
+                counter = osa_count_path.display()
             ),
         )
         .unwrap();
@@ -1920,11 +1958,21 @@ mod tests {
             attention_group_summary("sess-new", "new one"),
             attention_group_summary("sess-next", "next one"),
         ];
-        let response = open_native_attention_group(
+        let first_response = open_native_attention_group(
             NativeDesktopApp::Ghostty,
             GhosttyOpenMode::Swap,
             &sessions,
             true,
+            AttentionGroupLayout::Tiled,
+        )
+        .await
+        .unwrap();
+        let second_response = open_native_attention_group(
+            NativeDesktopApp::Ghostty,
+            GhosttyOpenMode::Swap,
+            &sessions,
+            true,
+            AttentionGroupLayout::Tiled,
         )
         .await
         .unwrap();
@@ -1938,10 +1986,14 @@ mod tests {
             None => std::env::remove_var(TMUX_BIN_ENV),
         }
         clear_ghostty_preview_term_cache();
+        remember_pane_id(ATTENTION_GROUP_SESSION_ID, None);
 
-        assert_eq!(response.status, "focused");
-        assert!(response.focused);
-        assert_eq!(response.pane_id.as_deref(), Some("attention-pane"));
+        assert_eq!(first_response.status, "created");
+        assert!(first_response.focused);
+        assert_eq!(first_response.pane_id.as_deref(), Some("attention-pane"));
+        assert_eq!(second_response.status, "focused");
+        assert!(second_response.focused);
+        assert_eq!(second_response.pane_id.as_deref(), Some("attention-pane"));
 
         let tmux_log = std::fs::read_to_string(&tmux_log_path).unwrap();
         assert!(
@@ -1961,25 +2013,42 @@ mod tests {
         );
 
         let osa_log = std::fs::read_to_string(&osa_log_path).unwrap();
-        let call = osa_log
-            .lines()
+        let mut calls = osa_log.lines();
+        let first_call = calls
             .next()
             .expect("ghostty script call")
             .split('\t')
             .collect::<Vec<_>>();
-        assert_eq!(call[1], ATTENTION_GROUP_SESSION_ID);
-        assert_eq!(call[2], ATTENTION_GROUP_TMUX_NAME);
+        let second_call = calls
+            .next()
+            .expect("second ghostty script call")
+            .split('\t')
+            .collect::<Vec<_>>();
+        assert_eq!(first_call[1], ATTENTION_GROUP_SESSION_ID);
+        assert_eq!(first_call[2], ATTENTION_GROUP_TMUX_NAME);
         assert_eq!(
-            call.len(),
+            first_call.len(),
             8,
-            "attention window open must not pass a generic preview cached terminal id"
+            "first attention window open must not pass a generic preview cached terminal id"
         );
         assert!(
-            call[6].starts_with("swimmers-attention :: "),
+            first_call[6].starts_with("swimmers-attention :: "),
             "attention windows must use a dedicated Ghostty title namespace, got {:?}",
-            call[6]
+            first_call[6]
         );
-        assert_eq!(call[7], GhosttyOpenMode::Window.label());
+        assert_eq!(first_call[7], GhosttyOpenMode::Window.label());
+        assert_eq!(second_call[1], ATTENTION_GROUP_SESSION_ID);
+        assert_eq!(second_call[2], ATTENTION_GROUP_TMUX_NAME);
+        assert_eq!(second_call[7], GhosttyOpenMode::Window.label());
+        assert_eq!(
+            second_call.len(),
+            9,
+            "second attention click must pass the cached managed terminal id"
+        );
+        assert_eq!(
+            second_call[8], "attention-pane",
+            "repeat attention click should reuse the cached managed attention Ghostty terminal id"
+        );
     }
 
     #[test]
@@ -2041,7 +2110,7 @@ mod tests {
             script.contains("on managedTerminalAcrossWindows(knownManagedId, managedTitlePrefix)")
         );
         assert!(script.contains(
-            "if (id of candidateTerm as text) is knownManagedId and termTitle starts with managedTitlePrefix then return candidateTerm"
+            "if (id of candidateTerm as text) is knownManagedId then return candidateTerm"
         ));
         assert!(script.contains("if openMode is \"window\" then"));
         assert!(script

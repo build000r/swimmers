@@ -11,7 +11,7 @@ use tokio::time::timeout;
 use tracing_subscriber::EnvFilter;
 
 use swimmers::api::AppState;
-use swimmers::cli::{self, ConfigAction, ServerCli, ServerCommand};
+use swimmers::cli::{self, ConfigAction, ServerCli, ServerCommand, TmuxAction};
 use swimmers::config::Config;
 use swimmers::{env_bootstrap, metrics, startup};
 
@@ -260,6 +260,34 @@ fn run_config_subcommand(action: Option<ConfigAction>) -> i32 {
     }
 }
 
+fn run_tmux_subcommand(action: TmuxAction) -> i32 {
+    match action {
+        TmuxAction::NextName => match cli::next_numeric_tmux_name() {
+            Ok(name) => {
+                println!("{name}");
+                0
+            }
+            Err(err) => {
+                eprintln!("swimmers: {err}");
+                1
+            }
+        },
+        TmuxAction::New { cwd } => match cli::create_numbered_tmux_session(cwd.as_deref()) {
+            Ok(name) => match cli::attach_tmux_session(&name) {
+                Ok(code) => code,
+                Err(err) => {
+                    eprintln!("swimmers: created tmux session {name}, but attach failed: {err}");
+                    1
+                }
+            },
+            Err(err) => {
+                eprintln!("swimmers: {err}");
+                1
+            }
+        },
+    }
+}
+
 fn init_tracing() {
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -322,6 +350,9 @@ fn main() {
         }
         Some(ServerCommand::Config { action }) => {
             std::process::exit(run_config_subcommand(action));
+        }
+        Some(ServerCommand::Tmux { action }) => {
+            std::process::exit(run_tmux_subcommand(action));
         }
     }
 }

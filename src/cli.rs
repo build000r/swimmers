@@ -37,6 +37,9 @@ const ENV_VARS: &[&str] = &[
     "AUTH_TOKEN",
     "OBSERVER_TOKEN",
     "SWIMMERS_NATIVE_APP",
+    "SWIMMERS_ATTENTION_GROUP_SIZE",
+    "SWIMMERS_ATTENTION_GROUP_LAYOUT",
+    "SWIMMERS_ATTENTION_GROUP_INCLUDE_UNNUMBERED",
     "SWIMMERS_THOUGHT_BACKEND",
     "CLAWGS_BIN",
     "SWIMMERS_REPLAY_BUFFER_SIZE",
@@ -54,6 +57,12 @@ const ENV_VAR_HELP: &str = "ENVIRONMENT VARIABLES:
   AUTH_TOKEN                   Bearer token when AUTH_MODE=token
   OBSERVER_TOKEN               Read-only bearer token (optional)
   SWIMMERS_NATIVE_APP          'iterm' or 'ghostty' (default: iterm)
+  SWIMMERS_ATTENTION_GROUP_SIZE
+                               Number of panes in the attention group, 1-6 (default: 6)
+  SWIMMERS_ATTENTION_GROUP_LAYOUT
+                               tmux layout: tiled, even-horizontal, even-vertical, main-horizontal, main-vertical
+  SWIMMERS_ATTENTION_GROUP_INCLUDE_UNNUMBERED
+                               '1' to include non-numbered tmux sessions in attention groups
   SWIMMERS_THOUGHT_BACKEND     'daemon' or 'inproc' (default: daemon)
   CLAWGS_BIN                   Override path to the clawgs binary
   SWIMMERS_REPLAY_BUFFER_SIZE  Replay ring size in bytes (default: 524288)
@@ -98,6 +107,12 @@ pub enum ServerCommand {
         #[command(subcommand)]
         action: Option<ConfigAction>,
     },
+
+    /// Helpers for launching tmux sessions that follow Swimmers numeric names.
+    Tmux {
+        #[command(subcommand)]
+        action: TmuxAction,
+    },
 }
 
 #[derive(Subcommand, Debug, PartialEq, Eq)]
@@ -107,6 +122,19 @@ pub enum ConfigAction {
     /// Exits 0 if all checks pass, 1 otherwise. Doctor is advisory — the
     /// server itself also enforces trusted bind-address gates at startup.
     Doctor,
+}
+
+#[derive(Subcommand, Debug, PartialEq, Eq)]
+pub enum TmuxAction {
+    /// Print the next numeric tmux session name Swimmers would use.
+    NextName,
+
+    /// Create and attach a new tmux session with the next numeric name.
+    New {
+        /// Start the tmux session in this directory instead of the current directory.
+        #[arg(long)]
+        cwd: Option<PathBuf>,
+    },
 }
 
 /// Top-level CLI for the `swimmers-tui` client binary.
@@ -172,6 +200,9 @@ fn default_for(name: &str, config: &Config) -> String {
         },
         "AUTH_TOKEN" | "OBSERVER_TOKEN" => "(unset)".to_string(),
         "SWIMMERS_NATIVE_APP" => "iterm".to_string(),
+        "SWIMMERS_ATTENTION_GROUP_SIZE" => "6".to_string(),
+        "SWIMMERS_ATTENTION_GROUP_LAYOUT" => "tiled".to_string(),
+        "SWIMMERS_ATTENTION_GROUP_INCLUDE_UNNUMBERED" => "(unset)".to_string(),
         "SWIMMERS_THOUGHT_BACKEND" => "daemon".to_string(),
         "CLAWGS_BIN" => "(auto)".to_string(),
         "SWIMMERS_REPLAY_BUFFER_SIZE" => config.replay_buffer_size.to_string(),
@@ -411,6 +442,116 @@ pub fn tmux_on_path() -> bool {
         .output()
         .map(|out| out.status.success())
         .unwrap_or(false)
+}
+
+pub fn list_tmux_session_names() -> Result<Vec<String>, String> {
+    let output = tmux_command()
+        .args(["list-sessions", "-F", "#{session_name}"])
+        .output()
+        .map_err(|err| format!("failed to run `tmux list-sessions`: {err}"))?;
+
+    if output.status.success() {
+        return Ok(String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .map(ToOwned::to_owned)
+            .collect());
+    }
+
+    let stderr = compact_command_text(&output.stderr);
+    if tmux_list_has_no_server(&stderr) {
+        return Ok(Vec::new());
+    }
+
+    Err(format!("`tmux list-sessions` failed: {stderr}"))
+}
+
+pub fn next_numeric_tmux_name() -> Result<String, String> {
+    let names = list_tmux_session_names()?;
+    next_numeric_tmux_name_from_names(names.iter().map(String::as_str))
+}
+
+pub fn next_numeric_tmux_name_from_names<'a>(
+    names: impl IntoIterator<Item = &'a str>,
+) -> Result<String, String> {
+    let next = names
+        .into_iter()
+        .filter_map(numbered_tmux_name)
+        .max()
+        .map(|highest| {
+            highest
+                .checked_add(1)
+                .ok_or_else(|| "numeric tmux session counter exhausted".to_string())
+        })
+        .transpose()?
+        .unwrap_or(0);
+    Ok(next.to_string())
+}
+
+pub fn create_numbered_tmux_session(cwd: Option<&std::path::Path>) -> Result<String, String> {
+    const MAX_ATTEMPTS: usize = 64;
+
+    for _ in 0..MAX_ATTEMPTS {
+        let name = next_numeric_tmux_name()?;
+        let mut command = tmux_command();
+        command.args(["new-session", "-d", "-s", &name]);
+        if let Some(cwd) = cwd {
+            command.arg("-c").arg(cwd);
+        }
+
+        let output = command
+            .output()
+            .map_err(|err| format!("failed to run `tmux new-session`: {err}"))?;
+        if output.status.success() {
+            return Ok(name);
+        }
+
+        let stderr = compact_command_text(&output.stderr);
+        if tmux_session_already_exists(&stderr) {
+            continue;
+        }
+        return Err(format!("`tmux new-session` failed: {stderr}"));
+    }
+
+    Err(format!(
+        "failed to allocate a numeric tmux session after {MAX_ATTEMPTS} attempts"
+    ))
+}
+
+pub fn attach_tmux_session(tmux_name: &str) -> Result<i32, String> {
+    let target = format!("={tmux_name}");
+    let status = tmux_command()
+        .args(["attach-session", "-t", &target])
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .status()
+        .map_err(|err| format!("failed to run `tmux attach-session`: {err}"))?;
+    Ok(status.code().unwrap_or(1))
+}
+
+fn tmux_command() -> ProcessCommand {
+    let mut command = ProcessCommand::new("tmux");
+    command.env_remove("TMUX");
+    command.env_remove("TMUX_PANE");
+    command
+}
+
+fn numbered_tmux_name(value: &str) -> Option<u64> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() || !trimmed.chars().all(|ch| ch.is_ascii_digit()) {
+        return None;
+    }
+    trimmed.parse::<u64>().ok()
+}
+
+fn tmux_list_has_no_server(stderr: &str) -> bool {
+    stderr.contains("no server running") || stderr.contains("failed to connect to server")
+}
+
+fn tmux_session_already_exists(stderr: &str) -> bool {
+    stderr.contains("duplicate session") || stderr.contains("session exists")
 }
 
 /// Verify that the resolved `clawgs` binary can provide daemon defaults.
@@ -705,6 +846,56 @@ mod tests {
     fn parse_config_subcommand_without_action() {
         let cli = ServerCli::parse_from(["swimmers", "config"]);
         assert_eq!(cli.command, Some(ServerCommand::Config { action: None }));
+    }
+
+    #[test]
+    fn parse_tmux_next_name_subcommand() {
+        let cli = ServerCli::parse_from(["swimmers", "tmux", "next-name"]);
+        assert_eq!(
+            cli.command,
+            Some(ServerCommand::Tmux {
+                action: TmuxAction::NextName
+            })
+        );
+    }
+
+    #[test]
+    fn parse_tmux_new_subcommand_with_cwd() {
+        let cli = ServerCli::parse_from(["swimmers", "tmux", "new", "--cwd", "/tmp/project"]);
+        assert_eq!(
+            cli.command,
+            Some(ServerCommand::Tmux {
+                action: TmuxAction::New {
+                    cwd: Some(PathBuf::from("/tmp/project"))
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn next_numeric_tmux_name_uses_highest_existing_number_plus_one() {
+        let names = [
+            "6",
+            "8",
+            "dac-cyclechef-wave-01",
+            "swimmers-attention",
+            "08",
+        ];
+
+        assert_eq!(
+            next_numeric_tmux_name_from_names(names).expect("next numeric name"),
+            "9"
+        );
+    }
+
+    #[test]
+    fn next_numeric_tmux_name_starts_at_zero_without_numbered_sessions() {
+        let names = ["swimmers-attention", "dac-cyclechef-wave-01", "alpha"];
+
+        assert_eq!(
+            next_numeric_tmux_name_from_names(names).expect("next numeric name"),
+            "0"
+        );
     }
 
     #[test]

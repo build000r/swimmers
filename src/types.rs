@@ -405,6 +405,39 @@ impl GhosttyOpenMode {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum AttentionGroupLayout {
+    #[default]
+    Tiled,
+    EvenHorizontal,
+    EvenVertical,
+    MainHorizontal,
+    MainVertical,
+}
+
+impl AttentionGroupLayout {
+    pub fn from_env_value(value: &str) -> Self {
+        match value.trim().to_ascii_lowercase().replace('_', "-").as_str() {
+            "even-horizontal" | "horizontal" | "columns" | "side-by-side" => Self::EvenHorizontal,
+            "even-vertical" | "vertical" | "rows" | "stacked" => Self::EvenVertical,
+            "main-horizontal" | "main-top" | "main-bottom" => Self::MainHorizontal,
+            "main-vertical" | "main-left" | "main-right" => Self::MainVertical,
+            _ => Self::Tiled,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Tiled => "tiled",
+            Self::EvenHorizontal => "even-horizontal",
+            Self::EvenVertical => "even-vertical",
+            Self::MainHorizontal => "main-horizontal",
+            Self::MainVertical => "main-vertical",
+        }
+    }
+}
+
 /// Per-repository Swimmer palette used by the native TUI.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RepoTheme {
@@ -718,12 +751,20 @@ fn default_true() -> bool {
     true
 }
 
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NativeAttentionGroupOpenRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_sessions: Option<usize>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub current_session_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub include_unnumbered_sessions: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub layout: Option<AttentionGroupLayout>,
     #[serde(default = "default_true")]
     pub focus: bool,
 }
@@ -1555,6 +1596,30 @@ mod tests {
         assert_eq!(SpawnTool::Claude.command(), "claude");
         assert_eq!(SpawnTool::Codex.command(), "codex");
         assert_eq!(SpawnTool::Grok.command(), "grok");
+    }
+
+    #[test]
+    fn attention_group_layout_accepts_tmux_names_and_operator_aliases() {
+        assert_eq!(
+            AttentionGroupLayout::from_env_value("even-horizontal"),
+            AttentionGroupLayout::EvenHorizontal
+        );
+        assert_eq!(
+            AttentionGroupLayout::from_env_value("columns"),
+            AttentionGroupLayout::EvenHorizontal
+        );
+        assert_eq!(
+            AttentionGroupLayout::from_env_value("stacked"),
+            AttentionGroupLayout::EvenVertical
+        );
+        assert_eq!(
+            AttentionGroupLayout::from_env_value("main_left"),
+            AttentionGroupLayout::MainVertical
+        );
+        assert_eq!(
+            AttentionGroupLayout::from_env_value("unknown"),
+            AttentionGroupLayout::Tiled
+        );
     }
 
     #[test]

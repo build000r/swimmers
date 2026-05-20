@@ -10,6 +10,9 @@ const API_FAILURE_BANNER_THRESHOLD: u8 = 3;
 const API_STALE_BANNER_TEXT: &str = "API disconnected - showing stale data";
 const ATTENTION_GROUP_LABEL: &str = "[attention group]";
 const ATTENTION_GROUP_MAX_SESSIONS: usize = 6;
+const ATTENTION_GROUP_SIZE_ENV: &str = "SWIMMERS_ATTENTION_GROUP_SIZE";
+const ATTENTION_GROUP_LAYOUT_ENV: &str = "SWIMMERS_ATTENTION_GROUP_LAYOUT";
+const ATTENTION_GROUP_INCLUDE_UNNUMBERED_ENV: &str = "SWIMMERS_ATTENTION_GROUP_INCLUDE_UNNUMBERED";
 
 fn sprite_theme_option_width(theme: Option<SpriteTheme>) -> u16 {
     let label = format!("[{}]", SpriteTheme::override_label(theme));
@@ -742,12 +745,21 @@ impl<C: TuiApi> App<C> {
         };
 
         let client = Arc::clone(&self.client);
+        let max_sessions = attention_group_max_sessions();
+        let include_unnumbered_sessions = attention_group_include_unnumbered_sessions();
+        let layout = attention_group_layout();
         if show_progress {
             self.set_message("opening attention group...");
         }
         self.runtime.spawn(async move {
             let response = client
-                .open_attention_group(ATTENTION_GROUP_MAX_SESSIONS, current_session_ids, focus)
+                .open_attention_group(
+                    max_sessions,
+                    current_session_ids,
+                    focus,
+                    include_unnumbered_sessions,
+                    layout,
+                )
                 .await;
             let _ = tx.send(PendingInteractionResult::OpenAttentionGroup { focus, response });
         });
@@ -4281,6 +4293,35 @@ impl<C: TuiApi> App<C> {
             render_thought_config_editor(renderer, editor, layout.overview_field);
         }
     }
+}
+
+fn attention_group_max_sessions() -> usize {
+    std::env::var(ATTENTION_GROUP_SIZE_ENV)
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .map(|value| value.clamp(1, ATTENTION_GROUP_MAX_SESSIONS))
+        .unwrap_or(ATTENTION_GROUP_MAX_SESSIONS)
+}
+
+fn attention_group_layout() -> AttentionGroupLayout {
+    std::env::var(ATTENTION_GROUP_LAYOUT_ENV)
+        .ok()
+        .as_deref()
+        .map(AttentionGroupLayout::from_env_value)
+        .unwrap_or_default()
+}
+
+fn attention_group_include_unnumbered_sessions() -> bool {
+    env_bool(ATTENTION_GROUP_INCLUDE_UNNUMBERED_ENV)
+}
+
+fn env_bool(name: &str) -> bool {
+    std::env::var(name).ok().is_some_and(|value| {
+        matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        )
+    })
 }
 
 #[cfg(test)]

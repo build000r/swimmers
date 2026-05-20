@@ -25,13 +25,14 @@ use swimmers::thought::probe::run_thought_config_probe;
 use swimmers::thought::runtime_config::ThoughtConfig;
 use swimmers::thought_ui::thought_config_ui_metadata;
 use swimmers::types::{
-    AdoptSessionResponse, CreateSessionRequest, CreateSessionResponse, CreateSessionsBatchRequest,
-    CreateSessionsBatchResponse, DirGroupMembershipUpdateRequest, DirGroupMembershipUpdateResponse,
-    DirListResponse, DirRepoActionResponse, DirRepoSearchResponse, GhosttyOpenMode,
-    MermaidArtifactResponse, NativeAttentionGroupOpenRequest, NativeAttentionGroupOpenResponse,
-    NativeDesktopApp, NativeDesktopOpenResponse, NativeDesktopStatusResponse, PlanFileResponse,
-    RepoActionKind, SessionGroupInputRequest, SessionGroupInputResponse, SessionSkillListResponse,
-    SessionSummary, SpawnTool,
+    AdoptSessionResponse, AttentionGroupLayout, CreateSessionRequest, CreateSessionResponse,
+    CreateSessionsBatchRequest, CreateSessionsBatchResponse, DirGroupMembershipUpdateRequest,
+    DirGroupMembershipUpdateResponse, DirListResponse, DirRepoActionResponse,
+    DirRepoSearchResponse, GhosttyOpenMode, MermaidArtifactResponse,
+    NativeAttentionGroupOpenRequest, NativeAttentionGroupOpenResponse, NativeDesktopApp,
+    NativeDesktopOpenResponse, NativeDesktopStatusResponse, PlanFileResponse, RepoActionKind,
+    SessionGroupInputRequest, SessionGroupInputResponse, SessionSkillListResponse, SessionSummary,
+    SpawnTool,
 };
 
 use super::api::{ThoughtConfigTestResponse, TuiApi};
@@ -385,6 +386,8 @@ impl TuiApi for InProcessApi {
         max_sessions: usize,
         current_session_ids: Vec<String>,
         focus: bool,
+        include_unnumbered_sessions: bool,
+        layout: AttentionGroupLayout,
     ) -> BoxFuture<'_, Result<NativeAttentionGroupOpenResponse, String>> {
         Box::pin(async move {
             open_native_attention_group_for_host(
@@ -393,6 +396,8 @@ impl TuiApi for InProcessApi {
                 NativeAttentionGroupOpenRequest {
                     max_sessions: Some(max_sessions),
                     current_session_ids,
+                    include_unnumbered_sessions,
+                    layout: Some(layout),
                     focus,
                 },
             )

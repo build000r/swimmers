@@ -1778,6 +1778,7 @@ pub async fn open_native_attention_group_for_host(
         state.supervisor.list_sessions().await,
         request.max_sessions.unwrap_or(6),
         &request.current_session_ids,
+        request.include_unnumbered_sessions,
     );
     if plan.visible.is_empty() {
         if !request.focus && !request.current_session_ids.is_empty() {
@@ -1788,10 +1789,15 @@ pub async fn open_native_attention_group_for_host(
         return Err(NativeOpenServiceError::NoAttentionSessions);
     }
 
-    let mut response =
-        native::open_native_attention_group(app, ghostty_mode, &plan.visible, request.focus)
-            .await
-            .map_err(|error| NativeOpenServiceError::Internal(error.to_string()))?;
+    let mut response = native::open_native_attention_group(
+        app,
+        ghostty_mode,
+        &plan.visible,
+        request.focus,
+        request.layout.unwrap_or_default(),
+    )
+    .await
+    .map_err(|error| NativeOpenServiceError::Internal(error.to_string()))?;
     response.backlog_session_ids = plan
         .backlog
         .iter()
@@ -1818,11 +1824,13 @@ fn plan_attention_group_sessions(
     sessions: Vec<SessionSummary>,
     max_sessions: usize,
     current_session_ids: &[String],
+    include_unnumbered_sessions: bool,
 ) -> AttentionGroupPlan {
     let limit = max_sessions.clamp(1, 6);
     let mut candidates = sessions
         .into_iter()
         .filter(attention_group_session_is_eligible)
+        .filter(|session| include_unnumbered_sessions || tmux_name_is_numbered(&session.tmux_name))
         .map(AttentionCandidate::from)
         .collect::<Vec<_>>();
     if candidates.is_empty() {
@@ -1884,6 +1892,11 @@ fn attention_group_session_is_eligible(session: &SessionSummary) -> bool {
         && session.tmux_name != NATIVE_ATTENTION_GROUP_TMUX_NAME
         && remote_sessions::split_remote_session_id(&session.session_id).is_none()
         && session_ready_for_operator_group_input(session)
+}
+
+fn tmux_name_is_numbered(tmux_name: &str) -> bool {
+    let trimmed = tmux_name.trim();
+    !trimmed.is_empty() && trimmed.chars().all(|ch| ch.is_ascii_digit())
 }
 
 impl From<SessionSummary> for AttentionCandidate {
@@ -2032,7 +2045,7 @@ fn select_attention_group_sessions(
     sessions: Vec<SessionSummary>,
     max_sessions: usize,
 ) -> Vec<SessionSummary> {
-    plan_attention_group_sessions(sessions, max_sessions, &[]).visible
+    plan_attention_group_sessions(sessions, max_sessions, &[], false).visible
 }
 
 #[cfg(test)]
@@ -2153,6 +2166,17 @@ mod tests {
         session
     }
 
+    fn numbered_waiting_session(
+        session_id: &str,
+        tmux_name: &str,
+        cwd: &str,
+        seconds_ago: i64,
+    ) -> SessionSummary {
+        let mut session = waiting_session(session_id, cwd, seconds_ago);
+        session.tmux_name = tmux_name.to_string();
+        session
+    }
+
     fn batch_session(mut session: SessionSummary, batch_id: &str) -> SessionSummary {
         session.batch = Some(SessionBatchMembership {
             id: batch_id.to_string(),
@@ -2170,15 +2194,29 @@ mod tests {
         max_sessions: usize,
         current_session_ids: &[&str],
     ) -> Vec<String> {
+        plan_ids_with_unnumbered(sessions, max_sessions, current_session_ids, false)
+    }
+
+    fn plan_ids_with_unnumbered(
+        sessions: Vec<SessionSummary>,
+        max_sessions: usize,
+        current_session_ids: &[&str],
+        include_unnumbered_sessions: bool,
+    ) -> Vec<String> {
         let current = current_session_ids
             .iter()
             .map(|id| (*id).to_string())
             .collect::<Vec<_>>();
-        plan_attention_group_sessions(sessions, max_sessions, &current)
-            .visible
-            .into_iter()
-            .map(|session| session.session_id)
-            .collect()
+        plan_attention_group_sessions(
+            sessions,
+            max_sessions,
+            &current,
+            include_unnumbered_sessions,
+        )
+        .visible
+        .into_iter()
+        .map(|session| session.session_id)
+        .collect()
     }
 
     #[test]
@@ -2201,10 +2239,52 @@ mod tests {
     }
 
     #[test]
+    fn attention_group_selection_excludes_unnumbered_tmux_names_by_default() {
+        let numbered = summary("sess-8", "8", SessionState::Idle);
+        let wave = summary("sess-wave-01", "dac-cyclechef-wave-01", SessionState::Idle);
+        let named = summary("sess-named", "buildooor", SessionState::Attention);
+
+        let selected = plan_ids(vec![wave, named, numbered], 6, &[]);
+
+        assert_eq!(selected, vec!["sess-8"]);
+    }
+
+    #[test]
+    fn attention_group_refresh_drops_current_unnumbered_tmux_names_by_default() {
+        let numbered = summary("sess-8", "8", SessionState::Idle);
+        let current_wave = summary("sess-wave-01", "dac-cyclechef-wave-01", SessionState::Idle);
+        let next_numbered = summary("sess-9", "9", SessionState::Attention);
+
+        let selected = plan_ids(
+            vec![current_wave, numbered, next_numbered],
+            2,
+            &["sess-wave-01", "sess-8"],
+        );
+
+        assert_eq!(selected, vec!["sess-8", "sess-9"]);
+    }
+
+    #[test]
+    fn attention_group_can_include_unnumbered_tmux_names_when_opted_in() {
+        let numbered = summary("sess-8", "8", SessionState::Idle);
+        let wave = summary("sess-wave-01", "dac-cyclechef-wave-01", SessionState::Idle);
+
+        let selected = plan_ids_with_unnumbered(vec![numbered, wave], 2, &["sess-wave-01"], true);
+
+        assert_eq!(selected, vec!["sess-wave-01", "sess-8"]);
+    }
+
+    #[test]
     fn attention_queue_prefers_same_sweet_potato_project_over_newer_unrelated_sessions() {
-        let sweet_a = waiting_session("sweet-a", "/Users/b/repos/sweet-potato", 120);
-        let sweet_b = waiting_session("sweet-b", "/Users/b/repos/sweet-potato/packages/api", 90);
-        let newer_unrelated = waiting_session("newer", "/Users/b/repos/buildooor", 1);
+        let sweet_a = numbered_waiting_session("sweet-a", "21", "/Users/b/repos/sweet-potato", 120);
+        let sweet_b = numbered_waiting_session(
+            "sweet-b",
+            "22",
+            "/Users/b/repos/sweet-potato/packages/api",
+            90,
+        );
+        let newer_unrelated =
+            numbered_waiting_session("newer", "23", "/Users/b/repos/buildooor", 1);
 
         let selected = plan_ids(vec![newer_unrelated, sweet_a, sweet_b], 2, &[]);
 
@@ -2213,9 +2293,11 @@ mod tests {
 
     #[test]
     fn attention_queue_treats_htma_and_htma_server_as_adjacent_siblings() {
-        let htma = waiting_session("htma-ui", "/Users/b/repos/htma", 80);
-        let htma_server = waiting_session("htma-api", "/Users/b/repos/htma_server", 70);
-        let unrelated = waiting_session("newer-unrelated", "/Users/b/repos/finalreceipts", 1);
+        let htma = numbered_waiting_session("htma-ui", "31", "/Users/b/repos/htma", 80);
+        let htma_server =
+            numbered_waiting_session("htma-api", "32", "/Users/b/repos/htma_server", 70);
+        let unrelated =
+            numbered_waiting_session("newer-unrelated", "33", "/Users/b/repos/finalreceipts", 1);
 
         let selected = plan_ids(vec![unrelated, htma, htma_server], 2, &[]);
 
@@ -2224,9 +2306,15 @@ mod tests {
 
     #[test]
     fn attention_queue_uses_batch_before_recency_tie_break() {
-        let batch_a = batch_session(waiting_session("batch-a", "/Users/b/repos/alpha", 90), "b1");
-        let batch_b = batch_session(waiting_session("batch-b", "/Users/b/repos/beta", 80), "b1");
-        let newer_unrelated = waiting_session("newer", "/Users/b/repos/gamma", 1);
+        let batch_a = batch_session(
+            numbered_waiting_session("batch-a", "41", "/Users/b/repos/alpha", 90),
+            "b1",
+        );
+        let batch_b = batch_session(
+            numbered_waiting_session("batch-b", "42", "/Users/b/repos/beta", 80),
+            "b1",
+        );
+        let newer_unrelated = numbered_waiting_session("newer", "43", "/Users/b/repos/gamma", 1);
 
         let selected = plan_ids(vec![newer_unrelated, batch_a, batch_b], 2, &[]);
 
@@ -2235,12 +2323,21 @@ mod tests {
 
     #[test]
     fn attention_queue_rotates_one_in_one_out_from_current_visible_set() {
-        let visible_a = waiting_session("visible-a", "/Users/b/repos/sweet-potato", 120);
-        let mut resolved_b = waiting_session("visible-b", "/Users/b/repos/sweet-potato", 110);
+        let visible_a =
+            numbered_waiting_session("visible-a", "51", "/Users/b/repos/sweet-potato", 120);
+        let mut resolved_b =
+            numbered_waiting_session("visible-b", "52", "/Users/b/repos/sweet-potato", 110);
         resolved_b.thought_state = ThoughtState::Active;
-        let visible_c = waiting_session("visible-c", "/Users/b/repos/sweet-potato", 100);
-        let next_d = waiting_session("next-d", "/Users/b/repos/sweet-potato/packages/api", 90);
-        let unrelated_newer = waiting_session("unrelated", "/Users/b/repos/buildooor", 1);
+        let visible_c =
+            numbered_waiting_session("visible-c", "53", "/Users/b/repos/sweet-potato", 100);
+        let next_d = numbered_waiting_session(
+            "next-d",
+            "54",
+            "/Users/b/repos/sweet-potato/packages/api",
+            90,
+        );
+        let unrelated_newer =
+            numbered_waiting_session("unrelated", "55", "/Users/b/repos/buildooor", 1);
 
         let selected = plan_ids(
             vec![visible_a, resolved_b, visible_c, next_d, unrelated_newer],
@@ -2253,17 +2350,19 @@ mod tests {
 
     #[test]
     fn attention_queue_excludes_unsafe_sessions() {
-        let ready = waiting_session("ready", "/Users/b/repos/swimmers", 1);
-        let mut stale = waiting_session("stale", "/Users/b/repos/swimmers", 1);
+        let ready = numbered_waiting_session("ready", "61", "/Users/b/repos/swimmers", 1);
+        let mut stale = numbered_waiting_session("stale", "62", "/Users/b/repos/swimmers", 1);
         stale.is_stale = true;
-        let mut unhealthy = waiting_session("unhealthy", "/Users/b/repos/swimmers", 1);
+        let mut unhealthy =
+            numbered_waiting_session("unhealthy", "63", "/Users/b/repos/swimmers", 1);
         unhealthy.transport_health = TransportHealth::Disconnected;
-        let mut unobserved = waiting_session("unobserved", "/Users/b/repos/swimmers", 1);
+        let mut unobserved =
+            numbered_waiting_session("unobserved", "64", "/Users/b/repos/swimmers", 1);
         unobserved.state_evidence = StateEvidence::unobserved("test");
-        let exited = summary("exited", "exited", SessionState::Exited);
-        let mut deep_sleep = waiting_session("deep", "/Users/b/repos/swimmers", 1);
+        let exited = summary("exited", "65", SessionState::Exited);
+        let mut deep_sleep = numbered_waiting_session("deep", "66", "/Users/b/repos/swimmers", 1);
         deep_sleep.rest_state = RestState::DeepSleep;
-        let remote = waiting_session("remote::sess", "/Users/b/repos/swimmers", 1);
+        let remote = numbered_waiting_session("remote::sess", "67", "/Users/b/repos/swimmers", 1);
         let managed = summary(
             NATIVE_ATTENTION_GROUP_SESSION_ID,
             NATIVE_ATTENTION_GROUP_TMUX_NAME,

@@ -16,8 +16,9 @@ use proptest::prelude::*;
 use swimmers::api::remote_sessions;
 use swimmers::openrouter_models::default_openrouter_candidates;
 use swimmers::types::{
-    CreateSessionsBatchResult, GhosttyOpenMode, RepoActionStatus, SessionBatchMembership,
-    SessionGroupInputResult, StateEvidence, ThoughtSource, ThoughtState, TransportHealth,
+    AttentionGroupLayout, CreateSessionsBatchResult, GhosttyOpenMode, RepoActionStatus,
+    SessionBatchMembership, SessionGroupInputResult, StateEvidence, ThoughtSource, ThoughtState,
+    TransportHealth,
 };
 use tempfile::tempdir;
 
@@ -98,7 +99,7 @@ struct MockApiState {
     set_native_mode_calls: Vec<GhosttyOpenMode>,
     publish_calls: Vec<Option<String>>,
     open_calls: Vec<String>,
-    open_attention_group_calls: Vec<(usize, Vec<String>, bool)>,
+    open_attention_group_calls: Vec<(usize, Vec<String>, bool, bool, AttentionGroupLayout)>,
     list_calls: Vec<(Option<String>, bool)>,
     list_repo_dirs_calls: usize,
     update_dir_group_memberships_calls: Vec<(String, Vec<String>, Vec<String>)>,
@@ -381,7 +382,9 @@ impl MockApi {
         self.state.lock().unwrap().open_calls.clone()
     }
 
-    fn open_attention_group_calls(&self) -> Vec<(usize, Vec<String>, bool)> {
+    fn open_attention_group_calls(
+        &self,
+    ) -> Vec<(usize, Vec<String>, bool, bool, AttentionGroupLayout)> {
         self.state
             .lock()
             .unwrap()
@@ -687,13 +690,19 @@ impl TuiApi for MockApi {
         max_sessions: usize,
         current_session_ids: Vec<String>,
         focus: bool,
+        include_unnumbered_sessions: bool,
+        layout: AttentionGroupLayout,
     ) -> BoxFuture<'_, Result<NativeAttentionGroupOpenResponse, String>> {
         let state = self.state.clone();
         Box::pin(async move {
             let mut state = state.lock().unwrap();
-            state
-                .open_attention_group_calls
-                .push((max_sessions, current_session_ids, focus));
+            state.open_attention_group_calls.push((
+                max_sessions,
+                current_session_ids,
+                focus,
+                include_unnumbered_sessions,
+                layout,
+            ));
             state
                 .open_attention_group_results
                 .pop_front()
@@ -1021,6 +1030,31 @@ fn restore_env_var(key: &str, value: Option<String>) {
     match value {
         Some(value) => env::set_var(key, value),
         None => env::remove_var(key),
+    }
+}
+
+struct EnvVarGuard {
+    key: &'static str,
+    original: Option<String>,
+}
+
+impl EnvVarGuard {
+    fn set(key: &'static str, value: &str) -> Self {
+        let original = env::var(key).ok();
+        env::set_var(key, value);
+        Self { key, original }
+    }
+
+    fn remove(key: &'static str) -> Self {
+        let original = env::var(key).ok();
+        env::remove_var(key);
+        Self { key, original }
+    }
+}
+
+impl Drop for EnvVarGuard {
+    fn drop(&mut self) {
+        restore_env_var(self.key, self.original.take());
     }
 }
 
@@ -8900,6 +8934,11 @@ fn clicking_ghostty_mode_label_toggles_preview_mode_live() {
 
 #[test]
 fn clicking_attention_group_label_opens_managed_group() {
+    let _lock = TEST_ENV_LOCK.lock().expect("env lock");
+    let _size = EnvVarGuard::remove("SWIMMERS_ATTENTION_GROUP_SIZE");
+    let _layout_env = EnvVarGuard::remove("SWIMMERS_ATTENTION_GROUP_LAYOUT");
+    let _unnumbered = EnvVarGuard::remove("SWIMMERS_ATTENTION_GROUP_INCLUDE_UNNUMBERED");
+
     let api = MockApi::new();
     let layout = test_layout(120, 32);
     let mut app = make_app(api.clone());
@@ -8951,11 +8990,57 @@ fn clicking_attention_group_label_opens_managed_group() {
     poll_until_interaction(&mut app);
     assert_eq!(
         api.open_attention_group_calls(),
-        vec![(6, Vec::<String>::new(), true)]
+        vec![(
+            6,
+            Vec::<String>::new(),
+            true,
+            false,
+            AttentionGroupLayout::Tiled
+        )]
     );
     assert_eq!(
         app.message.as_ref().map(|(message, _)| message.as_str()),
         Some("swapped attention group: 3 sessions")
+    );
+}
+
+#[test]
+fn attention_group_click_uses_env_size_layout_and_unnumbered_policy() {
+    let _lock = TEST_ENV_LOCK.lock().expect("env lock");
+    let _size = EnvVarGuard::set("SWIMMERS_ATTENTION_GROUP_SIZE", "4");
+    let _layout = EnvVarGuard::set("SWIMMERS_ATTENTION_GROUP_LAYOUT", "main-left");
+    let _unnumbered = EnvVarGuard::set("SWIMMERS_ATTENTION_GROUP_INCLUDE_UNNUMBERED", "1");
+
+    let api = MockApi::new();
+    let mut app = make_app(api.clone());
+    api.push_open_attention_group(Ok(NativeAttentionGroupOpenResponse {
+        session_id: "attention-group".to_string(),
+        tmux_name: "swimmers-attention".to_string(),
+        session_count: 4,
+        session_ids: vec![
+            "sess-1".to_string(),
+            "sess-2".to_string(),
+            "sess-3".to_string(),
+            "sess-4".to_string(),
+        ],
+        backlog_session_ids: Vec::new(),
+        status: "refreshed".to_string(),
+        focused: true,
+        pane_id: Some("pane-attention".to_string()),
+    }));
+
+    app.open_attention_group();
+    poll_until_interaction(&mut app);
+
+    assert_eq!(
+        api.open_attention_group_calls(),
+        vec![(
+            4,
+            Vec::<String>::new(),
+            true,
+            true,
+            AttentionGroupLayout::MainVertical
+        )]
     );
 }
 

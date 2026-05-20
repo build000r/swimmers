@@ -376,6 +376,8 @@ pub(crate) trait TuiApi: Send + Sync + 'static {
         max_sessions: usize,
         current_session_ids: Vec<String>,
         focus: bool,
+        include_unnumbered_sessions: bool,
+        layout: AttentionGroupLayout,
     ) -> BoxFuture<'_, Result<NativeAttentionGroupOpenResponse, String>>;
     fn list_dirs(
         &self,
@@ -786,6 +788,8 @@ impl TuiApi for ApiClient {
         max_sessions: usize,
         current_session_ids: Vec<String>,
         focus: bool,
+        include_unnumbered_sessions: bool,
+        layout: AttentionGroupLayout,
     ) -> BoxFuture<'_, Result<NativeAttentionGroupOpenResponse, String>> {
         Box::pin(async move {
             let url = format!("{}/v1/native/attention-group/open", self.base_url);
@@ -795,6 +799,8 @@ impl TuiApi for ApiClient {
                 .json(&NativeAttentionGroupOpenRequest {
                     max_sessions: Some(max_sessions),
                     current_session_ids,
+                    include_unnumbered_sessions,
+                    layout: Some(layout),
                     focus,
                 })
                 .send()

@@ -93,8 +93,7 @@ on managedTerminalAcrossWindows(knownManagedId, managedTitlePrefix)
 				repeat with candidateTab in tabs of candidateWindow
 					repeat with candidateTerm in terminals of candidateTab
 						try
-							set termTitle to name of candidateTerm
-							if (id of candidateTerm as text) is knownManagedId and termTitle starts with managedTitlePrefix then return candidateTerm
+							if (id of candidateTerm as text) is knownManagedId then return candidateTerm
 						end try
 					end repeat
 				end repeat
