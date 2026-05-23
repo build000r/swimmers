@@ -1618,11 +1618,8 @@ async fn read_git_diff_for_summary(summary: SessionSummary) -> SessionGitDiffRes
 
     let (unstaged_diff, unstaged_truncated) = truncate_git_output(unstaged_raw);
     let (staged_diff, staged_truncated) = truncate_git_output(staged_raw);
-    let files = summarize_git_diff_files(
-        &staged_diff,
-        &unstaged_diff,
-        staged_truncated || unstaged_truncated,
-    );
+    let files =
+        summarize_git_diff_files(&staged_diff, staged_truncated, &unstaged_diff, unstaged_truncated);
     SessionGitDiffResponse {
         session_id: summary.session_id,
         available: true,
@@ -1675,19 +1672,22 @@ fn truncate_git_output(output: String) -> (String, bool) {
 
 fn summarize_git_diff_files(
     staged_diff: &str,
+    staged_truncated: bool,
     unstaged_diff: &str,
-    truncated: bool,
+    unstaged_truncated: bool,
 ) -> Vec<SessionGitDiffFileSummary> {
+    // Stamp each source with its own truncation flag: a staged file's summary
+    // must not be marked truncated just because the unstaged diff overflowed.
     let mut files = Vec::new();
     files.extend(parse_git_diff_file_summaries(
         "staged",
         staged_diff,
-        truncated,
+        staged_truncated,
     ));
     files.extend(parse_git_diff_file_summaries(
         "unstaged",
         unstaged_diff,
-        truncated,
+        unstaged_truncated,
     ));
     files
 }
@@ -3752,6 +3752,45 @@ esac
             && file["source"] == "unstaged"
             && file["change"] == "modified"
             && file["added_lines"] == 1));
+    }
+
+    #[test]
+    fn summarize_git_diff_files_marks_truncation_per_source() {
+        // A staged file's summary must reflect only the staged diff's
+        // truncation state, never the unstaged diff's (and vice versa).
+        let staged_diff = "diff --git a/staged.txt b/staged.txt\n\
+            new file mode 100644\n\
+            --- /dev/null\n\
+            +++ b/staged.txt\n\
+            @@ -0,0 +1 @@\n\
+            +hello\n";
+        let unstaged_diff = "diff --git a/unstaged.txt b/unstaged.txt\n\
+            --- a/unstaged.txt\n\
+            +++ b/unstaged.txt\n\
+            @@ -1 +1 @@\n\
+            -old\n\
+            +new\n";
+
+        // Only the unstaged diff overflowed.
+        let files = summarize_git_diff_files(staged_diff, false, unstaged_diff, true);
+
+        let staged = files
+            .iter()
+            .find(|f| f.source == "staged")
+            .expect("staged file summary");
+        let unstaged = files
+            .iter()
+            .find(|f| f.source == "unstaged")
+            .expect("unstaged file summary");
+
+        assert!(
+            !staged.truncated,
+            "staged file must not be marked truncated when only the unstaged diff overflowed"
+        );
+        assert!(
+            unstaged.truncated,
+            "unstaged file must reflect its own truncation"
+        );
     }
 
     #[tokio::test]
