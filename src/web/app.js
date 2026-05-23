@@ -5771,14 +5771,21 @@ function handleInputAck(message) {
   }
   if (message.delivered) {
     updateInputDeliveryStatus(id, "sent", message.method || "");
-    window.setTimeout(() => {
-      const current = state.pendingInputMessages.get(id);
-      if (current?.status === "sent") {
-        state.pendingInputMessages.delete(id);
-      }
-    }, 2500);
+    scheduleInputAckCleanup(id);
   } else {
     updateInputDeliveryStatus(id, "failed", message.message || "input delivery failed");
+  }
+}
+
+function scheduleInputAckCleanup(id) {
+  const timer = window.setTimeout(() => {
+    const current = state.pendingInputMessages.get(id);
+    if (current?.status === "sent") {
+      state.pendingInputMessages.delete(id);
+    }
+  }, 2500);
+  if (timer && typeof timer.unref === "function") {
+    timer.unref();
   }
 }
 

@@ -953,6 +953,44 @@ test("input ack updates pending terminal dock delivery status", async () => {
   assert.ok(web.el.terminalInputEcho.textContent.includes("sent: echo acked"));
 });
 
+test("input ack cleanup preserves sent echo without keeping Node alive", () => {
+  resetWebState();
+  const id = "web-test-ack-cleanup";
+  web.state.pendingInputMessages.set(id, { text: "cleanup me", status: "pending", detail: "" });
+  const originalSetTimeout = window.setTimeout;
+  let cleanupCallback = null;
+  let cleanupDelay = null;
+  let unrefCalled = false;
+  window.setTimeout = (callback, delay) => {
+    cleanupCallback = callback;
+    cleanupDelay = delay;
+    return {
+      unref() {
+        unrefCalled = true;
+      },
+    };
+  };
+
+  try {
+    web.handleSocketText(JSON.stringify({
+      type: "input_ack",
+      clientMessageId: id,
+      delivered: true,
+      method: "tmux_submit_line",
+    }));
+  } finally {
+    window.setTimeout = originalSetTimeout;
+  }
+
+  assert.equal(cleanupDelay, 2500);
+  assert.equal(unrefCalled, true);
+  assert.ok(web.el.terminalInputEcho.textContent.includes("sent: cleanup me"));
+  assert.equal(web.state.pendingInputMessages.get(id).status, "sent");
+
+  cleanupCallback();
+  assert.equal(web.state.pendingInputMessages.has(id), false);
+});
+
 test("input ack failure keeps failed delivery visible", () => {
   resetWebState();
   const id = "web-test-1";
