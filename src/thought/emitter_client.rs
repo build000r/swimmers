@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use thiserror::Error;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 use tracing::{info, warn};
 
@@ -21,6 +21,12 @@ const SYNC_RESULT_MESSAGE_TYPE: &str = "sync_result";
 const EXTERNAL_CMD_WARN_THRESHOLD: Duration = Duration::from_secs(2);
 const EMIT_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 const EMIT_RESPONSE_TIMEOUT: Duration = Duration::from_secs(30);
+/// Upper bound on a single line read from the daemon's stdout. The daemon is an
+/// external process (`clawgs emit --stdio`); a malformed or runaway emitter
+/// could otherwise stream an unbounded line and force this process to allocate
+/// without limit. Sync responses are small JSON objects, so 8 MiB is far above
+/// any legitimate payload while still bounding worst-case memory.
+const MAX_DAEMON_LINE_BYTES: u64 = 8 * 1024 * 1024;
 const DEFAULTS_COMMAND_TIMEOUT: Duration = Duration::from_secs(5);
 
 struct DaemonProcess {
@@ -31,14 +37,27 @@ struct DaemonProcess {
 
 impl DaemonProcess {
     async fn read_non_empty_line(&mut self) -> Result<Option<String>, io::Error> {
-        let mut line = String::new();
+        let mut buf = Vec::new();
         loop {
-            line.clear();
-            let read = self.stdout.read_line(&mut line).await?;
+            buf.clear();
+            // Bound the read so a daemon that never emits a newline cannot force
+            // an unbounded allocation. `take` caps this single line; the
+            // underlying buffered reader keeps its position across iterations.
+            let read = {
+                let mut limited = (&mut self.stdout).take(MAX_DAEMON_LINE_BYTES + 1);
+                limited.read_until(b'\n', &mut buf).await?
+            };
             if read == 0 {
                 return Ok(None);
             }
+            if buf.len() as u64 > MAX_DAEMON_LINE_BYTES {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "clawgs emit daemon line exceeded the size cap",
+                ));
+            }
 
+            let line = String::from_utf8_lossy(&buf);
             let trimmed = line.trim_end_matches(['\r', '\n']).trim();
             if !trimmed.is_empty() {
                 return Ok(Some(trimmed.to_string()));
