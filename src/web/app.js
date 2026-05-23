@@ -6032,6 +6032,28 @@ function forwardTerminalEvent(event) {
   drainTerminalLinkClicks();
 }
 
+function forwardTerminalKeyDown(event) {
+  forwardTerminalEvent({
+    kind: "key",
+    phase: "down",
+    key: typeof event.key === "string" ? event.key : "",
+    code: typeof event.code === "string" ? event.code : "",
+    mods: keyModifiers(event),
+    repeat: Boolean(event.repeat),
+  });
+}
+
+function forwardTerminalMouse(phase, button, hit, event) {
+  forwardTerminalEvent({
+    kind: "mouse",
+    phase,
+    button,
+    x: hit.cell.x,
+    y: hit.cell.y,
+    mods: keyModifiers(event),
+  });
+}
+
 function sendTerminalText(text) {
   if (!text || state.readOnly || !currentSession()) {
     return false;
@@ -6138,14 +6160,7 @@ function handleTerminalFallbackKeyEvent(event) {
   if (keyBeginsTrogdorResponse(event)) {
     markTrogdorSessionsResponded([state.selectedSessionId]);
   }
-  forwardTerminalEvent({
-    kind: "key",
-    phase: "down",
-    key: typeof event.key === "string" ? event.key : "",
-    code: typeof event.code === "string" ? event.code : "",
-    mods: keyModifiers(event),
-    repeat: Boolean(event.repeat),
-  });
+  forwardTerminalKeyDown(event);
   return true;
 }
 
@@ -7779,14 +7794,7 @@ function bindEvents() {
     if (keyBeginsTrogdorResponse(event)) {
       markTrogdorSessionsResponded([state.selectedSessionId]);
     }
-    forwardTerminalEvent({
-      kind: "key",
-      phase: "down",
-      key: typeof event.key === "string" ? event.key : "",
-      code: typeof event.code === "string" ? event.code : "",
-      mods: keyModifiers(event),
-      repeat: Boolean(event.repeat),
-    });
+    forwardTerminalKeyDown(event);
   });
   el.mobileKeyboardProxy.addEventListener("input", (event) => {
     if (state.readOnly || !currentSession()) {
@@ -8291,14 +8299,7 @@ function bindEvents() {
     if (keyBeginsTrogdorResponse(event)) {
       markTrogdorSessionsResponded([state.selectedSessionId]);
     }
-    forwardTerminalEvent({
-      kind: "key",
-      phase: "down",
-      key: typeof event.key === "string" ? event.key : "",
-      code: typeof event.code === "string" ? event.code : "",
-      mods: keyModifiers(event),
-      repeat: Boolean(event.repeat),
-    });
+    forwardTerminalKeyDown(event);
   });
 
   el.terminalStage.addEventListener("paste", (event) => {
@@ -8360,14 +8361,7 @@ function bindEvents() {
       return;
     }
 
-    forwardTerminalEvent({
-      kind: "mouse",
-      phase: "down",
-      button: clampInt(event.button, 0, 0, 2),
-      x: hit.cell.x,
-      y: hit.cell.y,
-      mods: keyModifiers(event),
-    });
+    forwardTerminalMouse("down", clampInt(event.button, 0, 0, 2), hit, event);
   });
 
   el.terminalStage.addEventListener("mouseup", (event) => {
@@ -8401,14 +8395,7 @@ function bindEvents() {
       return;
     }
 
-    forwardTerminalEvent({
-      kind: "mouse",
-      phase: "up",
-      button: clampInt(event.button, 0, 0, 2),
-      x: hit.cell.x,
-      y: hit.cell.y,
-      mods: keyModifiers(event),
-    });
+    forwardTerminalMouse("up", clampInt(event.button, 0, 0, 2), hit, event);
   });
 
   el.terminalStage.addEventListener("mousemove", (event) => {
@@ -8436,14 +8423,7 @@ function bindEvents() {
       return;
     }
 
-    forwardTerminalEvent({
-      kind: "mouse",
-      phase: "move",
-      button: 0,
-      x: hit.cell.x,
-      y: hit.cell.y,
-      mods: keyModifiers(event),
-    });
+    forwardTerminalMouse("move", 0, hit, event);
   });
 
   el.terminalStage.addEventListener(
