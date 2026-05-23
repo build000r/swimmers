@@ -5771,19 +5771,23 @@ function handleInputAck(message) {
   }
   if (message.delivered) {
     updateInputDeliveryStatus(id, "sent", message.method || "");
-    scheduleInputAckCleanup(id);
+    scheduleInputAckCleanup(id, "sent", 2500);
   } else {
     updateInputDeliveryStatus(id, "failed", message.message || "input delivery failed");
+    // Failed acks also need eviction, otherwise pendingInputMessages grows
+    // without bound over a long session. Keep the failure visible a bit longer
+    // than a success before clearing it.
+    scheduleInputAckCleanup(id, "failed", 8000);
   }
 }
 
-function scheduleInputAckCleanup(id) {
+function scheduleInputAckCleanup(id, expectedStatus, delayMs) {
   const timer = window.setTimeout(() => {
     const current = state.pendingInputMessages.get(id);
-    if (current?.status === "sent") {
+    if (current?.status === expectedStatus) {
       state.pendingInputMessages.delete(id);
     }
-  }, 2500);
+  }, delayMs);
   if (timer && typeof timer.unref === "function") {
     timer.unref();
   }
