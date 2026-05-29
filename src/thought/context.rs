@@ -145,29 +145,37 @@ fn parse_jsonl_lines(buf: &[u8]) -> Vec<Value> {
         .collect()
 }
 
-/// Parse JSONL lines and preserve byte offsets relative to the original file.
-fn parse_jsonl_entries(buf: &[u8], base_offset: u64) -> Vec<JsonlEntry> {
+fn parse_jsonl_entries_and_offset(buf: &[u8], base_offset: u64) -> (Vec<JsonlEntry>, u64) {
     let mut entries = Vec::new();
     let mut cursor = 0usize;
+    let mut consumed_offset = base_offset;
 
     for segment in buf.split_inclusive(|byte| *byte == b'\n') {
+        let complete_line = segment.ends_with(b"\n");
         let segment_start = cursor;
         cursor += segment.len();
 
         let mut line = segment;
-        if line.ends_with(b"\n") {
+        if complete_line {
             line = &line[..line.len().saturating_sub(1)];
         }
         if line.ends_with(b"\r") {
             line = &line[..line.len().saturating_sub(1)];
         }
         if line.is_empty() {
+            if complete_line {
+                consumed_offset = base_offset + cursor as u64;
+            }
             continue;
         }
 
         let raw = String::from_utf8_lossy(line).to_string();
         let Ok(value) = serde_json::from_str::<Value>(&raw) else {
-            continue;
+            if complete_line {
+                consumed_offset = base_offset + cursor as u64;
+                continue;
+            }
+            break;
         };
         entries.push(JsonlEntry {
             value,
@@ -175,9 +183,15 @@ fn parse_jsonl_entries(buf: &[u8], base_offset: u64) -> Vec<JsonlEntry> {
             byte_start: base_offset + segment_start as u64,
             byte_end: base_offset + cursor as u64,
         });
+        consumed_offset = base_offset + cursor as u64;
     }
 
-    entries
+    (entries, consumed_offset)
+}
+
+/// Parse JSONL lines and preserve byte offsets relative to the original file.
+fn parse_jsonl_entries(buf: &[u8], base_offset: u64) -> Vec<JsonlEntry> {
+    parse_jsonl_entries_and_offset(buf, base_offset).0
 }
 
 /// Extract the basename from a path string (last component after `/`).
@@ -671,7 +685,8 @@ impl ContextReader for ClaudeCodeReader {
             let start = current_size.saturating_sub(BOOTSTRAP_MAX);
             match read_range(&file_path, start, current_size) {
                 Ok(buf) => {
-                    let entries = parse_jsonl_entries(&buf, start);
+                    let (entries, consumed_offset) = parse_jsonl_entries_and_offset(&buf, start);
+                    self.file_size = consumed_offset;
                     self.parse_entries(&entries);
                 }
                 Err(e) => {
@@ -679,13 +694,14 @@ impl ContextReader for ClaudeCodeReader {
                     return None;
                 }
             }
-            self.file_size = current_size;
             self.bootstrapped = true;
         } else {
             // Incremental: read only new bytes
             match read_range(&file_path, self.file_size, current_size) {
                 Ok(buf) => {
-                    let entries = parse_jsonl_entries(&buf, self.file_size);
+                    let (entries, consumed_offset) =
+                        parse_jsonl_entries_and_offset(&buf, self.file_size);
+                    self.file_size = consumed_offset;
                     self.parse_entries(&entries);
                 }
                 Err(e) => {
@@ -693,7 +709,6 @@ impl ContextReader for ClaudeCodeReader {
                     return None;
                 }
             }
-            self.file_size = current_size;
         }
 
         Some(ContextSnapshot {
@@ -1046,7 +1061,13 @@ impl CodexReader {
 
 impl ContextReader for CodexReader {
     fn read(&mut self) -> Option<ContextSnapshot> {
-        let file_path = self.file_path.clone().or_else(|| self.discover_file())?;
+        let file_path = match self.file_path.clone() {
+            Some(p) if p.exists() => p,
+            _ => {
+                self.file_path = None;
+                self.discover_file()?
+            }
+        };
 
         let stat = fs::metadata(&file_path).ok()?;
         let current_size = stat.len();
@@ -1080,7 +1101,8 @@ impl ContextReader for CodexReader {
             let start = current_size.saturating_sub(BOOTSTRAP_MAX);
             match read_range(&file_path, start, current_size) {
                 Ok(buf) => {
-                    let entries = parse_jsonl_entries(&buf, start);
+                    let (entries, consumed_offset) = parse_jsonl_entries_and_offset(&buf, start);
+                    self.file_size = consumed_offset;
                     self.parse_entries(&entries);
                 }
                 Err(e) => {
@@ -1088,12 +1110,13 @@ impl ContextReader for CodexReader {
                     return None;
                 }
             }
-            self.file_size = current_size;
             self.bootstrapped = true;
         } else {
             match read_range(&file_path, self.file_size, current_size) {
                 Ok(buf) => {
-                    let entries = parse_jsonl_entries(&buf, self.file_size);
+                    let (entries, consumed_offset) =
+                        parse_jsonl_entries_and_offset(&buf, self.file_size);
+                    self.file_size = consumed_offset;
                     self.parse_entries(&entries);
                 }
                 Err(e) => {
@@ -1101,7 +1124,6 @@ impl ContextReader for CodexReader {
                     return None;
                 }
             }
-            self.file_size = current_size;
         }
 
         Some(ContextSnapshot {
@@ -1239,6 +1261,31 @@ mod tests {
         let buf = b"{\"type\":\"user\"}\nnot json\n{\"type\":\"assistant\"}\n";
         let entries = parse_jsonl_lines(buf);
         assert_eq!(entries.len(), 2);
+    }
+
+    #[test]
+    fn parse_jsonl_entries_keeps_incomplete_tail_unconsumed() {
+        let buf = b"{\"type\":\"event_msg\",\"payload\":{\"type\":\"user_message\",\"message\":\"first\"}}\n{\"type\":\"event_msg\"";
+        let (entries, consumed_offset) = parse_jsonl_entries_and_offset(buf, 10);
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].byte_start, 10);
+        assert_eq!(
+            entries[0].byte_end,
+            10 + b"{\"type\":\"event_msg\",\"payload\":{\"type\":\"user_message\",\"message\":\"first\"}}\n"
+                .len() as u64
+        );
+        assert_eq!(consumed_offset, entries[0].byte_end);
+    }
+
+    #[test]
+    fn parse_jsonl_entries_consumes_complete_malformed_lines() {
+        let buf = b"not json\n{\"type\":\"event_msg\",\"payload\":{\"type\":\"user_message\",\"message\":\"second\"}}";
+        let (entries, consumed_offset) = parse_jsonl_entries_and_offset(buf, 3);
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].byte_start, 3 + b"not json\n".len() as u64);
+        assert_eq!(consumed_offset, 3 + buf.len() as u64);
     }
 
     #[test]
@@ -1612,6 +1659,108 @@ mod tests {
         assert!(
             reader.read().is_none(),
             "steady state should not re-emit snapshot"
+        );
+
+        if let Some(prev) = previous_home {
+            std::env::set_var("HOME", prev);
+        } else {
+            std::env::remove_var("HOME");
+        }
+    }
+
+    #[test]
+    fn codex_reader_does_not_advance_past_partial_jsonl_tail() {
+        let _lock = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let sessions_dir = tmp
+            .path()
+            .join(".codex")
+            .join("sessions")
+            .join("2026")
+            .join("03")
+            .join("16");
+        fs::create_dir_all(&sessions_dir).expect("sessions dir");
+        let target = sessions_dir.join("rollout-partial.jsonl");
+        let prefix = concat!(
+            "{\"type\":\"session_meta\",\"payload\":{\"cwd\":\"/tmp/project\"}}\n",
+            "{\"type\":\"event_msg\",\"payload\":{\"type\":\"user_message\",\"message\":\"first\"}}\n"
+        );
+        let partial =
+            "{\"type\":\"event_msg\",\"payload\":{\"type\":\"user_message\",\"message\":\"second\"";
+        fs::write(&target, format!("{prefix}{partial}")).expect("partial rollout");
+
+        let previous_home = std::env::var_os("HOME");
+        std::env::set_var("HOME", tmp.path());
+
+        let mut reader = CodexReader::new("/tmp/project", &[]);
+        let first = reader.read().expect("first snapshot");
+        assert_eq!(first.user_task.as_deref(), Some("first"));
+
+        fs::write(&target, format!("{}{}{}\n", prefix, partial, "}}")).expect("complete rollout");
+        let second = reader.read().expect("completed tail snapshot");
+        assert_eq!(second.user_task.as_deref(), Some("second"));
+
+        if let Some(prev) = previous_home {
+            std::env::set_var("HOME", prev);
+        } else {
+            std::env::remove_var("HOME");
+        }
+    }
+
+    #[test]
+    fn codex_reader_rediscover_after_claimed_file_is_deleted() {
+        let _lock = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let sessions_dir = tmp
+            .path()
+            .join(".codex")
+            .join("sessions")
+            .join("2026")
+            .join("03")
+            .join("16");
+        fs::create_dir_all(&sessions_dir).expect("sessions dir");
+        let first_path = sessions_dir.join("rollout-a.jsonl");
+        fs::write(
+            &first_path,
+            concat!(
+                "{\"type\":\"session_meta\",\"payload\":{\"cwd\":\"/tmp/project\"}}\n",
+                "{\"type\":\"event_msg\",\"payload\":{\"type\":\"user_message\",\"message\":\"first\"}}\n"
+            ),
+        )
+        .expect("first rollout");
+
+        let previous_home = std::env::var_os("HOME");
+        std::env::set_var("HOME", tmp.path());
+
+        let mut reader = CodexReader::new("/tmp/project", &[]);
+        assert_eq!(
+            reader
+                .read()
+                .and_then(|snapshot| snapshot.user_task)
+                .as_deref(),
+            Some("first")
+        );
+        fs::remove_file(&first_path).expect("remove first rollout");
+        let second_path = sessions_dir.join("rollout-b.jsonl");
+        fs::write(
+            &second_path,
+            concat!(
+                "{\"type\":\"session_meta\",\"payload\":{\"cwd\":\"/tmp/project\"}}\n",
+                "{\"type\":\"event_msg\",\"payload\":{\"type\":\"user_message\",\"message\":\"second\"}}\n"
+            ),
+        )
+        .expect("second rollout");
+
+        assert_eq!(
+            reader
+                .read()
+                .and_then(|snapshot| snapshot.user_task)
+                .as_deref(),
+            Some("second")
         );
 
         if let Some(prev) = previous_home {

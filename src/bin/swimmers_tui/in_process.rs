@@ -3,6 +3,7 @@ use std::time::Duration;
 
 use chrono::Utc;
 use futures::future::BoxFuture;
+use futures::StreamExt;
 use tokio::sync::oneshot;
 
 use swimmers::api::remote_sessions;
@@ -14,7 +15,7 @@ use swimmers::api::service::{
 };
 use swimmers::api::sessions::{
     create_sessions_batch_result, new_batch_context, send_group_input_service,
-    session_batch_membership,
+    session_batch_membership, BATCH_CREATE_CONCURRENCY, BATCH_CREATE_MAX_DIRS,
 };
 use swimmers::api::{AppState, PublishedSelectionState};
 use swimmers::openrouter_models::{
@@ -556,6 +557,11 @@ impl TuiApi for InProcessApi {
             if dirs.is_empty() {
                 return Err("dirs must not be empty".to_string());
             }
+            if dirs.len() > BATCH_CREATE_MAX_DIRS {
+                return Err(format!(
+                    "dirs must include at most {BATCH_CREATE_MAX_DIRS} entries"
+                ));
+            }
             let total = dirs.len();
             let (batch_id, batch_label, batch_created_at, prompt_excerpt) =
                 new_batch_context(total, initial_request.as_deref());
@@ -583,9 +589,12 @@ impl TuiApi for InProcessApi {
                     create_sessions_batch_result(index, cwd, created)
                 }
             });
-            Ok(CreateSessionsBatchResponse {
-                results: futures::future::join_all(tasks).await,
-            })
+            let mut results: Vec<_> = futures::stream::iter(tasks)
+                .buffer_unordered(BATCH_CREATE_CONCURRENCY)
+                .collect()
+                .await;
+            results.sort_by_key(|result| result.index);
+            Ok(CreateSessionsBatchResponse { results })
         })
     }
 

@@ -36,7 +36,9 @@ const ENV_VARS: &[&str] = &[
     "AUTH_MODE",
     "AUTH_TOKEN",
     "OBSERVER_TOKEN",
+    "SWIMMERS_GROK_BIN",
     "SWIMMERS_NATIVE_APP",
+    "SWIMMERS_GHOSTTY_MODE",
     "SWIMMERS_ATTENTION_GROUP_SIZE",
     "SWIMMERS_ATTENTION_GROUP_LAYOUT",
     "SWIMMERS_ATTENTION_GROUP_INCLUDE_UNNUMBERED",
@@ -45,6 +47,11 @@ const ENV_VARS: &[&str] = &[
     "SWIMMERS_REPLAY_BUFFER_SIZE",
     "SWIMMERS_DATA_DIR",
     "SWIMMERS_TUI_URL",
+    "SWIMMERS_TUI_REUSE_SERVER",
+    "SWIMMERS_REPO_SEARCH_ROOTS",
+    "SWIMMERS_REPO_SEARCH_MAX_DEPTH",
+    "SWIMMERS_VOICE_MODEL",
+    "SWIMMERS_VOICE_LANGUAGE",
 ];
 
 /// Variables whose values must never be printed in plaintext.
@@ -56,7 +63,9 @@ const ENV_VAR_HELP: &str = "ENVIRONMENT VARIABLES:
   AUTH_MODE                    'local_trust', 'tailnet_trust', or 'token' (default: local_trust)
   AUTH_TOKEN                   Bearer token when AUTH_MODE=token
   OBSERVER_TOKEN               Read-only bearer token (optional)
+  SWIMMERS_GROK_BIN            Override the Grok executable (default: grok)
   SWIMMERS_NATIVE_APP          'iterm' or 'ghostty' (default: iterm)
+  SWIMMERS_GHOSTTY_MODE        'swap', 'add', or 'window' (default: swap)
   SWIMMERS_ATTENTION_GROUP_SIZE
                                Number of panes in the attention group, 1-6 (default: 6)
   SWIMMERS_ATTENTION_GROUP_LAYOUT
@@ -68,15 +77,25 @@ const ENV_VAR_HELP: &str = "ENVIRONMENT VARIABLES:
   SWIMMERS_REPLAY_BUFFER_SIZE  Replay ring size in bytes (default: 524288)
   SWIMMERS_DATA_DIR            Override the data directory
   SWIMMERS_TUI_URL             API URL the TUI connects to
+  SWIMMERS_TUI_REUSE_SERVER    '1' to keep an existing loopback backend
+  SWIMMERS_REPO_SEARCH_ROOTS   Path-list roots for repo search (default: ~/repos:~/hard)
+  SWIMMERS_REPO_SEARCH_MAX_DEPTH
+                               Max repo-search depth (default: 8)
+  SWIMMERS_VOICE_MODEL         Whisper model path for the voice feature
+  SWIMMERS_VOICE_LANGUAGE      Voice language hint (default: auto)
 
 Run `swimmers config` to see resolved values.
 Run `swimmers config doctor` to validate the active configuration.";
 
 const TUI_ENV_HELP: &str = "ENVIRONMENT VARIABLES:
-  SWIMMERS_TUI_URL  API URL to connect to (default: http://127.0.0.1:3210)
+  SWIMMERS_TUI_URL  API URL to connect to; unset uses embedded mode
   AUTH_MODE         'local_trust', 'tailnet_trust', or 'token'
   AUTH_TOKEN        Bearer token when AUTH_MODE=token
-  CLAWGS_BIN        Override path to the clawgs binary in embedded mode";
+  CLAWGS_BIN        Override path to the clawgs binary in embedded mode
+  SWIMMERS_VOICE_MODEL
+                   Whisper model path for the voice feature
+  SWIMMERS_VOICE_LANGUAGE
+                   Voice language hint (default: auto)";
 
 const CLAWGS_DEFAULTS_DOCTOR_TIMEOUT: Duration = Duration::from_secs(3);
 
@@ -199,7 +218,9 @@ fn default_for(name: &str, config: &Config) -> String {
             AuthMode::Token => "token".to_string(),
         },
         "AUTH_TOKEN" | "OBSERVER_TOKEN" => "(unset)".to_string(),
+        "SWIMMERS_GROK_BIN" => "grok".to_string(),
         "SWIMMERS_NATIVE_APP" => "iterm".to_string(),
+        "SWIMMERS_GHOSTTY_MODE" => "swap".to_string(),
         "SWIMMERS_ATTENTION_GROUP_SIZE" => "6".to_string(),
         "SWIMMERS_ATTENTION_GROUP_LAYOUT" => "tiled".to_string(),
         "SWIMMERS_ATTENTION_GROUP_INCLUDE_UNNUMBERED" => "(unset)".to_string(),
@@ -207,7 +228,12 @@ fn default_for(name: &str, config: &Config) -> String {
         "CLAWGS_BIN" => "(auto)".to_string(),
         "SWIMMERS_REPLAY_BUFFER_SIZE" => config.replay_buffer_size.to_string(),
         "SWIMMERS_DATA_DIR" => "(platform data dir)".to_string(),
-        "SWIMMERS_TUI_URL" => "http://127.0.0.1:3210".to_string(),
+        "SWIMMERS_TUI_URL" => "(unset)".to_string(),
+        "SWIMMERS_TUI_REUSE_SERVER" => "(unset)".to_string(),
+        "SWIMMERS_REPO_SEARCH_ROOTS" => "~/repos:~/hard".to_string(),
+        "SWIMMERS_REPO_SEARCH_MAX_DEPTH" => "8".to_string(),
+        "SWIMMERS_VOICE_MODEL" => "(unset)".to_string(),
+        "SWIMMERS_VOICE_LANGUAGE" => "auto".to_string(),
         _ => "(unknown)".to_string(),
     }
 }

@@ -33,6 +33,7 @@ const FRANKENTERM_FONT_ROUTE: &str = "/assets/frankenterm/pragmasevka-nf-subset.
 const TROGDOR_DRAGON_ASSET_ROUTE: &str = "/assets/dragon/{pose}/{frame}";
 const PUBLISHED_VIEW_ROUTE: &str = "/selected";
 const REPLY_TIMEOUT: Duration = Duration::from_secs(2);
+const MAX_WS_INPUT_BYTES: usize = 786_432;
 const MAX_BROWSER_WS_CONNECTIONS: usize = 64;
 const DEFAULT_FRANKENTUI_PKG_CANDIDATES: &[&str] = &[];
 
@@ -987,6 +988,7 @@ enum WsClientDecision {
     SendError {
         code: &'static str,
         message: String,
+        client_message_id: Option<String>,
     },
     Forward {
         cmd: SessionCommand,
@@ -1004,10 +1006,19 @@ fn decode_client_message(auth: &AuthInfo, message: &Message) -> WsClientDecision
                 return WsClientDecision::SendError {
                     code: "READ_ONLY",
                     message: "observer connections cannot send terminal input".to_string(),
+                    client_message_id: None,
                 };
             }
             if bytes.is_empty() {
                 WsClientDecision::Ignore
+            } else if bytes.len() > MAX_WS_INPUT_BYTES {
+                WsClientDecision::SendError {
+                    code: "INPUT_TOO_LARGE",
+                    message: format!(
+                        "terminal input frame exceeds {MAX_WS_INPUT_BYTES} byte limit"
+                    ),
+                    client_message_id: None,
+                }
             } else {
                 WsClientDecision::Forward {
                     cmd: SessionCommand::WriteInput(bytes.to_vec()),
@@ -1026,6 +1037,7 @@ fn decode_text_client_message(auth: &AuthInfo, text: &str) -> WsClientDecision {
             return WsClientDecision::SendError {
                 code: "INVALID_MESSAGE",
                 message: format!("invalid control message: {err}"),
+                client_message_id: None,
             }
         }
     };
@@ -1039,6 +1051,7 @@ fn decode_text_client_message(auth: &AuthInfo, text: &str) -> WsClientDecision {
                 return WsClientDecision::SendError {
                     code: "READ_ONLY",
                     message: "observer connections cannot send terminal input".to_string(),
+                    client_message_id,
                 };
             }
             if data.is_empty() {
@@ -1061,6 +1074,7 @@ fn decode_text_client_message(auth: &AuthInfo, text: &str) -> WsClientDecision {
                 return WsClientDecision::SendError {
                     code: "READ_ONLY",
                     message: "observer connections cannot submit terminal input".to_string(),
+                    client_message_id,
                 };
             }
             if data.trim().is_empty() {
@@ -1080,6 +1094,7 @@ fn decode_text_client_message(auth: &AuthInfo, text: &str) -> WsClientDecision {
                 return WsClientDecision::SendError {
                     code: "READ_ONLY",
                     message: "observer connections cannot resize terminal sessions".to_string(),
+                    client_message_id: None,
                 };
             }
             WsClientDecision::Forward {
@@ -1107,7 +1122,23 @@ async fn handle_client_message(
                 .send(Message::Text(r#"{"type":"pong"}"#.into()))
                 .await?;
         }
-        WsClientDecision::SendError { code, message: msg } => {
+        WsClientDecision::SendError {
+            code,
+            message: msg,
+            client_message_id,
+        } => {
+            if client_message_id.is_some() {
+                send_input_ack(
+                    sender,
+                    client_message_id,
+                    InputDeliveryResult {
+                        delivered: false,
+                        method: "rejected",
+                        message: Some(msg.clone()),
+                    },
+                )
+                .await?;
+            }
             send_ws_error(sender, code, &msg).await?;
         }
         WsClientDecision::Forward {
@@ -1172,6 +1203,14 @@ async fn send_delivery_ack(
             message: Some("timed out waiting for input delivery confirmation".to_string()),
         },
     };
+    send_input_ack(sender, client_message_id, delivery).await
+}
+
+async fn send_input_ack(
+    sender: &mut futures::stream::SplitSink<WebSocket, Message>,
+    client_message_id: Option<String>,
+    delivery: InputDeliveryResult,
+) -> anyhow::Result<()> {
     let payload = serde_json::json!({
         "type": "input_ack",
         "clientMessageId": client_message_id,

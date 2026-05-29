@@ -141,6 +141,8 @@ pub enum EmitterClientError {
         message: String,
         request_id: Option<String>,
     },
+    #[error("daemon sync response id mismatch: expected `{expected}`, got `{actual}`")]
+    ResponseRequestMismatch { expected: String, actual: String },
     #[error("unexpected daemon message `{found}` while waiting for `{expected}`: {line}")]
     UnexpectedResponseType {
         expected: &'static str,
@@ -280,7 +282,15 @@ impl EmitterClient {
                 }
             };
 
-        parse_sync_response_line(&response_line)
+        let response = parse_sync_response_line(&response_line)?;
+        let expected_request_id = request_id.to_string();
+        if response.request_id != expected_request_id {
+            return Err(EmitterClientError::ResponseRequestMismatch {
+                expected: expected_request_id,
+                actual: response.request_id,
+            });
+        }
+        Ok(response)
     }
 
     async fn ensure_running(&mut self) -> Result<(), EmitterClientError> {
@@ -820,7 +830,7 @@ printf '%s\n' "$*" >> "__ARGS_LOG__"
 printf '%s\n' '{"type":"hello","protocol":"clawgs.emit.v1","engine_version":"0.1.0"}'
 IFS= read -r line || exit 0
 printf '%s\n' "$line" >> "__INPUT_LOG__"
-exec sleep 2
+exec /bin/sleep 2
 "#
         .replace("__ARGS_LOG__", &args_log.display().to_string())
         .replace("__INPUT_LOG__", &input_log.display().to_string());
@@ -850,6 +860,40 @@ exec sleep 2
                 .expect("sync request json");
         assert_eq!(request["type"], "sync");
         assert_eq!(request["id"], "1");
+    }
+
+    #[tokio::test]
+    async fn sync_response_rejects_mismatched_request_id() {
+        let _lock = TEST_ENV_LOCK.lock().expect("env lock");
+        let temp = tempdir().expect("tempdir");
+        let script_path = temp.path().join("wrong-id-clawgs.sh");
+        let script = r#"#!/bin/sh
+printf '%s\n' '{"type":"hello","protocol":"clawgs.emit.v1","engine_version":"0.1.0"}'
+IFS= read -r line || exit 0
+printf '%s\n' '{"type":"sync_result","id":"stale-request","updates":[]}'
+"#;
+        fs::write(&script_path, script).expect("write wrong-id clawgs");
+        let mut perms = fs::metadata(&script_path).expect("metadata").permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&script_path, perms).expect("chmod wrong-id clawgs");
+
+        let mut client = EmitterClient::with_bin(script_path.to_string_lossy().into_owned());
+        let err = client
+            .next_sync_response_once_with_timeout(
+                &ThoughtConfig::default(),
+                &[sample_session_info()],
+                Duration::from_millis(500),
+            )
+            .await
+            .expect_err("mismatched response id should fail");
+
+        match err {
+            EmitterClientError::ResponseRequestMismatch { expected, actual } => {
+                assert_eq!(expected, "1");
+                assert_eq!(actual, "stale-request");
+            }
+            other => panic!("unexpected error variant: {other:?}"),
+        }
     }
 
     #[tokio::test]

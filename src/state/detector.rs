@@ -156,6 +156,9 @@ impl StateDetector {
                     "OSC 133 classified output as busy"
                 );
                 self.set_state(SessionState::Busy, Some(Some(cmd)), now, "osc133_command");
+                if self.apply_visible_error_pattern(&visible, now) {
+                    return;
+                }
             } else {
                 debug!(
                     prompt_idx = prompt_idx,
@@ -170,20 +173,7 @@ impl StateDetector {
         let looks_like_prompt = Self::looks_like_prompt(&visible);
 
         // Check for error patterns against visible text.
-        let mut found_error = false;
-        for pattern in &self.error_patterns {
-            if pattern.is_match(&visible) {
-                debug!(
-                    pattern = %pattern.as_str(),
-                    sample = %Self::log_excerpt(&visible),
-                    "error pattern matched visible output"
-                );
-                self.set_state(SessionState::Error, None, now, "error_pattern");
-                self.schedule_error_clear(now);
-                found_error = true;
-                break;
-            }
-        }
+        let found_error = self.apply_visible_error_pattern(&visible, now);
 
         // Heuristic fallback for shells without OSC 133:
         // if we're idle/attention and visible output is not a prompt,
@@ -287,6 +277,22 @@ impl StateDetector {
         .into_iter()
         .flatten()
         .min()
+    }
+
+    fn apply_visible_error_pattern(&mut self, visible: &str, now: Instant) -> bool {
+        for pattern in &self.error_patterns {
+            if pattern.is_match(visible) {
+                debug!(
+                    pattern = %pattern.as_str(),
+                    sample = %Self::log_excerpt(visible),
+                    "error pattern matched visible output"
+                );
+                self.set_state(SessionState::Error, None, now, "error_pattern");
+                self.schedule_error_clear(now);
+                return true;
+            }
+        }
+        false
     }
 
     /// Dismiss the attention state, returning to idle.
@@ -998,6 +1004,15 @@ mod tests {
         assert!(transitions
             .iter()
             .any(|(new, _)| *new == SessionState::Error));
+    }
+
+    #[test]
+    fn osc_command_and_error_text_in_same_chunk_enters_error() {
+        let mut d = StateDetector::new();
+
+        d.process_output(b"\x1b]133;C;cmd=foo\x07bash: foo: command not found\n");
+
+        assert_eq!(d.get_state().0, SessionState::Error);
     }
 
     #[test]

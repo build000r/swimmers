@@ -4,6 +4,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post};
 use axum::{Extension, Json, Router};
 use chrono::{DateTime, Utc};
+use futures::StreamExt;
 use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -35,6 +36,8 @@ use crate::types::{
 
 const BATCH_PROMPT_EXCERPT_MAX_CHARS: usize = 72;
 const BATCH_LABEL_MAX_CHARS: usize = 28;
+pub const BATCH_CREATE_MAX_DIRS: usize = 32;
+pub const BATCH_CREATE_CONCURRENCY: usize = 4;
 const PANE_TAIL_LINES: usize = 300;
 const PANE_TAIL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 const PLAN_FILE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
@@ -121,6 +124,15 @@ fn create_local_session_error_response(error: anyhow::Error) -> axum::response::
             StatusCode::CONFLICT,
             Json(ErrorResponse {
                 code: "SESSION_ALREADY_EXISTS".to_string(),
+                message: Some(msg),
+            }),
+        )
+            .into_response()
+    } else if msg.contains("cwd does not exist") {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                code: "VALIDATION_FAILED".to_string(),
                 message: Some(msg),
             }),
         )
@@ -226,6 +238,18 @@ async fn create_sessions_batch(
         )
             .into_response();
     }
+    if body.dirs.len() > BATCH_CREATE_MAX_DIRS {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                code: "VALIDATION_FAILED".to_string(),
+                message: Some(format!(
+                    "dirs must include at most {BATCH_CREATE_MAX_DIRS} entries"
+                )),
+            }),
+        )
+            .into_response();
+    }
 
     if remote_sessions::is_remote_launch_target(body.launch_target.as_deref()) {
         return match remote_sessions::create_remote_sessions_batch(body).await {
@@ -272,7 +296,11 @@ async fn create_sessions_batch(
         }
     });
 
-    let results: Vec<_> = futures::future::join_all(tasks).await;
+    let mut results: Vec<_> = futures::stream::iter(tasks)
+        .buffer_unordered(BATCH_CREATE_CONCURRENCY)
+        .collect()
+        .await;
+    results.sort_by_key(|result| result.index);
     let status = if results.iter().all(|result| result.ok) {
         StatusCode::CREATED
     } else {
@@ -1618,8 +1646,12 @@ async fn read_git_diff_for_summary(summary: SessionSummary) -> SessionGitDiffRes
 
     let (unstaged_diff, unstaged_truncated) = truncate_git_output(unstaged_raw);
     let (staged_diff, staged_truncated) = truncate_git_output(staged_raw);
-    let files =
-        summarize_git_diff_files(&staged_diff, staged_truncated, &unstaged_diff, unstaged_truncated);
+    let files = summarize_git_diff_files(
+        &staged_diff,
+        staged_truncated,
+        &unstaged_diff,
+        unstaged_truncated,
+    );
     SessionGitDiffResponse {
         session_id: summary.session_id,
         available: true,
@@ -1917,12 +1949,37 @@ async fn send_group_input_to_session(
         None => return group_input_error_result(session_id, "SESSION_NOT_FOUND", None),
     };
 
+    let (ack_tx, ack_rx) = oneshot::channel();
     if let Err(err) = handle
-        .send(SessionCommand::WriteInput(input.to_vec()))
+        .send(SessionCommand::WriteInputAck {
+            data: input.to_vec(),
+            ack: ack_tx,
+        })
         .await
     {
         tracing::error!("[session {session_id}] send_group_input failed: {err}");
         return group_input_error_result(session_id, "SESSION_NOT_FOUND", Some(err.to_string()));
+    }
+
+    match tokio::time::timeout(std::time::Duration::from_secs(2), ack_rx).await {
+        Ok(Ok(delivery)) if delivery.delivered => {}
+        Ok(Ok(delivery)) => {
+            return group_input_error_result(session_id, "INPUT_DELIVERY_FAILED", delivery.message);
+        }
+        Ok(Err(_)) => {
+            return group_input_error_result(
+                session_id,
+                "INPUT_DELIVERY_UNKNOWN",
+                Some("session actor dropped input delivery ack".to_string()),
+            );
+        }
+        Err(_) => {
+            return group_input_error_result(
+                session_id,
+                "INPUT_DELIVERY_TIMEOUT",
+                Some("timed out waiting for input delivery confirmation".to_string()),
+            );
+        }
     }
 
     SessionGroupInputResult {
@@ -2525,6 +2582,14 @@ mod tests {
                     SessionCommand::WriteInput(bytes) => {
                         let _ = write_tx.send(bytes).await;
                     }
+                    SessionCommand::WriteInputAck { data, ack } => {
+                        let _ = write_tx.send(data).await;
+                        let _ = ack.send(InputDeliveryResult {
+                            delivered: true,
+                            method: "test",
+                            message: None,
+                        });
+                    }
                     _ => {}
                 }
             }
@@ -2850,6 +2915,32 @@ esac
     }
 
     #[tokio::test]
+    async fn create_session_rejects_missing_cwd_as_validation_error() {
+        let missing = tempdir().expect("tempdir").path().join("missing");
+        let response = create_session(
+            Extension(AuthInfo::new(OPERATOR_SCOPES.to_vec())),
+            State(test_state()),
+            Json(CreateSessionRequest {
+                name: None,
+                cwd: Some(missing.to_string_lossy().into_owned()),
+                spawn_tool: None,
+                launch_target: None,
+                initial_request: None,
+            }),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let json = response_json(response).await;
+        assert_eq!(json["code"], "VALIDATION_FAILED");
+        assert!(json["message"]
+            .as_str()
+            .expect("message")
+            .contains("cwd does not exist"));
+    }
+
+    #[tokio::test]
     async fn create_sessions_batch_requires_write_scope() {
         let response = create_sessions_batch(
             Extension(AuthInfo::new(OBSERVER_SCOPES.to_vec())),
@@ -2886,6 +2977,32 @@ esac
         let json = response_json(response).await;
         assert_eq!(json["code"], "VALIDATION_FAILED");
         assert_eq!(json["message"], "dirs must not be empty");
+    }
+
+    #[tokio::test]
+    async fn create_sessions_batch_rejects_oversized_batches() {
+        let response = create_sessions_batch(
+            Extension(AuthInfo::new(OPERATOR_SCOPES.to_vec())),
+            State(test_state()),
+            Json(CreateSessionsBatchRequest {
+                dirs: (0..=BATCH_CREATE_MAX_DIRS)
+                    .map(|idx| format!("/tmp/project-{idx}"))
+                    .collect(),
+                spawn_tool: None,
+                launch_target: None,
+                initial_request: None,
+            }),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let json = response_json(response).await;
+        assert_eq!(json["code"], "VALIDATION_FAILED");
+        assert_eq!(
+            json["message"],
+            format!("dirs must include at most {BATCH_CREATE_MAX_DIRS} entries")
+        );
     }
 
     #[tokio::test]
@@ -3925,6 +4042,14 @@ esac
                     SessionCommand::WriteInput(bytes) => {
                         let _ = ready_write_tx.send(bytes).await;
                     }
+                    SessionCommand::WriteInputAck { data, ack } => {
+                        let _ = ready_write_tx.send(data).await;
+                        let _ = ack.send(InputDeliveryResult {
+                            delivered: true,
+                            method: "test",
+                            message: None,
+                        });
+                    }
                     _ => {}
                 }
             }
@@ -3944,6 +4069,14 @@ esac
                     }
                     SessionCommand::WriteInput(bytes) => {
                         let _ = busy_write_tx.send(bytes).await;
+                    }
+                    SessionCommand::WriteInputAck { data, ack } => {
+                        let _ = busy_write_tx.send(data).await;
+                        let _ = ack.send(InputDeliveryResult {
+                            delivered: true,
+                            method: "test",
+                            message: None,
+                        });
                     }
                     _ => {}
                 }
@@ -4166,6 +4299,14 @@ esac
                     SessionCommand::WriteInput(bytes) => {
                         let _ = ready_write_tx.send(bytes).await;
                     }
+                    SessionCommand::WriteInputAck { data, ack } => {
+                        let _ = ready_write_tx.send(data).await;
+                        let _ = ack.send(InputDeliveryResult {
+                            delivered: true,
+                            method: "test",
+                            message: None,
+                        });
+                    }
                     _ => {}
                 }
             }
@@ -4189,6 +4330,14 @@ esac
                     }
                     SessionCommand::WriteInput(bytes) => {
                         let _ = deep_write_tx.send(bytes).await;
+                    }
+                    SessionCommand::WriteInputAck { data, ack } => {
+                        let _ = deep_write_tx.send(data).await;
+                        let _ = ack.send(InputDeliveryResult {
+                            delivered: true,
+                            method: "test",
+                            message: None,
+                        });
                     }
                     _ => {}
                 }

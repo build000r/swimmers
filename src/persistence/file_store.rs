@@ -386,48 +386,34 @@ impl FileStore {
     ) {
         let _global_write_guard = self.write_lock.lock().await;
         let _write_guard = self.thought_write_lock.lock().await;
-        let data = {
-            let mut thoughts = self.thought_cache.write().await;
-            let objective_changed_at = objective_changed_at.or_else(|| {
-                thoughts
-                    .get(session_id)
-                    .and_then(|existing| existing.objective_changed_at)
-            });
-            thoughts.insert(
-                session_id.to_string(),
-                ThoughtSnapshot {
-                    thought: thought.map(|value| value.to_string()),
-                    thought_state,
-                    thought_source,
-                    rest_state,
-                    commit_candidate,
-                    action_cues,
-                    objective_changed_at,
-                    objective_fingerprint,
-                    token_count,
-                    context_limit,
-                    updated_at,
-                    delivery,
-                },
-            );
-
-            match serde_json::to_string_pretty(&*thoughts) {
-                Ok(d) => d,
-                Err(e) => {
-                    self.record_write_failure(OP_THOUGHTS, &e);
-                    error!("failed to serialize thoughts: {e}");
-                    return;
-                }
-            }
+        let path = self.thoughts_path();
+        let fallback = self.thought_cache.read().await.clone();
+        let snapshot = ThoughtSnapshot {
+            thought: thought.map(|value| value.to_string()),
+            thought_state,
+            thought_source,
+            rest_state,
+            commit_candidate,
+            action_cues,
+            objective_changed_at,
+            objective_fingerprint,
+            token_count,
+            context_limit,
+            updated_at,
+            delivery,
         };
 
-        let path = self.thoughts_path();
-        if let Err(e) = atomic_write_blocking(path, data).await {
-            self.record_write_failure(OP_THOUGHTS, &e);
-            error!("failed to write thoughts: {e}");
-        } else {
-            self.record_write_success(OP_THOUGHTS);
-            debug!(session_id, "persisted thought snapshot");
+        match merge_write_thought_blocking(path, session_id.to_string(), snapshot, fallback).await {
+            Ok(thoughts) => {
+                let mut cache = self.thought_cache.write().await;
+                *cache = thoughts;
+                self.record_write_success(OP_THOUGHTS);
+                debug!(session_id, "persisted thought snapshot");
+            }
+            Err(e) => {
+                self.record_write_failure(OP_THOUGHTS, &e);
+                error!("failed to write thoughts: {e}");
+            }
         }
     }
 
@@ -687,27 +673,81 @@ async fn atomic_write_blocking(path: PathBuf, data: String) -> anyhow::Result<()
             }
         }
 
-        let tmp_path = path.with_extension(format!("json.tmp.{}", Uuid::new_v4()));
-        let envelope = ChecksummedPayload {
-            checksum_crc32: crc32fast::hash(data.as_bytes()),
-            payload: data,
-        };
-        let encoded = serde_json::to_vec_pretty(&envelope)
-            .map_err(|e| anyhow::anyhow!("serialize checksummed payload failed: {e}"))?;
-        std::fs::write(&tmp_path, &encoded)
-            .map_err(|e| anyhow::anyhow!("write to tmp failed: {e}"))?;
-        std::fs::File::open(&tmp_path)
-            .and_then(|f| f.sync_all())
-            .map_err(|e| anyhow::anyhow!("sync tmp file failed: {e}"))?;
-        if let Err(e) = std::fs::rename(&tmp_path, &path) {
-            let _ = std::fs::remove_file(&tmp_path);
-            return Err(anyhow::anyhow!("rename failed: {e}"));
-        }
-        sync_parent_dir(&path)?;
-        Ok(())
+        write_checksummed_payload_locked(&path, data)
     })
     .await
     .map_err(|e| anyhow::anyhow!("spawn_blocking panicked: {e}"))?
+}
+
+async fn merge_write_thought_blocking(
+    path: PathBuf,
+    session_id: String,
+    mut snapshot: ThoughtSnapshot,
+    fallback: HashMap<String, ThoughtSnapshot>,
+) -> anyhow::Result<HashMap<String, ThoughtSnapshot>> {
+    tokio::task::spawn_blocking(move || {
+        ensure_parent(&path).map_err(|e| anyhow::anyhow!("ensure parent failed: {e}"))?;
+        let lock_path = lock_path_for(&path)?;
+        let lock_file = open_lock_file(&lock_path)?;
+        match lock_file.try_lock_exclusive() {
+            Ok(()) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                return Err(anyhow::Error::new(FileStoreIoError::LockBusy {
+                    path: lock_path,
+                }));
+            }
+            Err(err) => {
+                return Err(anyhow::anyhow!(
+                    "acquire lock {} failed: {err}",
+                    lock_path.display()
+                ));
+            }
+        }
+
+        let mut thoughts = match std::fs::read_to_string(&path) {
+            Ok(data) => {
+                let payload = decode_file_payload(path.clone(), data)?;
+                serde_json::from_str::<HashMap<String, ThoughtSnapshot>>(&payload)
+                    .map_err(|e| anyhow::anyhow!("decode thoughts failed: {e}"))?
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => fallback,
+            Err(err) => return Err(anyhow::anyhow!("read thoughts failed: {err}")),
+        };
+
+        if snapshot.objective_changed_at.is_none() {
+            snapshot.objective_changed_at = thoughts
+                .get(&session_id)
+                .and_then(|existing| existing.objective_changed_at);
+        }
+        thoughts.insert(session_id, snapshot);
+
+        let data = serde_json::to_string_pretty(&thoughts)
+            .map_err(|e| anyhow::anyhow!("serialize thoughts failed: {e}"))?;
+        write_checksummed_payload_locked(&path, data)?;
+        Ok(thoughts)
+    })
+    .await
+    .map_err(|e| anyhow::anyhow!("spawn_blocking panicked: {e}"))?
+}
+
+fn write_checksummed_payload_locked(path: &Path, data: String) -> anyhow::Result<()> {
+    let tmp_path = path.with_extension(format!("json.tmp.{}", Uuid::new_v4()));
+    let envelope = ChecksummedPayload {
+        checksum_crc32: crc32fast::hash(data.as_bytes()),
+        payload: data,
+    };
+    let encoded = serde_json::to_vec_pretty(&envelope)
+        .map_err(|e| anyhow::anyhow!("serialize checksummed payload failed: {e}"))?;
+    std::fs::write(&tmp_path, &encoded).map_err(|e| anyhow::anyhow!("write to tmp failed: {e}"))?;
+    std::fs::File::open(&tmp_path)
+        .and_then(|f| f.sync_all())
+        .map_err(|e| anyhow::anyhow!("sync tmp file failed: {e}"))?;
+    if let Err(e) = std::fs::rename(&tmp_path, path) {
+        let _ = std::fs::remove_file(&tmp_path);
+        return Err(anyhow::anyhow!("rename failed: {e}"));
+    }
+    sync_parent_dir(path)?;
+    Ok(())
 }
 
 /// Read a file's contents, returning None if the file does not exist.
@@ -940,6 +980,63 @@ mod tests {
         assert_eq!(failed.last_failed_operation.as_deref(), Some(OP_THOUGHTS));
         assert!(failed.last_failure_at.is_some());
         assert!(failed.last_error.is_some());
+    }
+
+    #[tokio::test]
+    async fn save_thought_merges_disk_state_from_other_store_instances() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let first = FileStore::new(dir.path()).await.expect("first store");
+        let second = FileStore::new(dir.path()).await.expect("second store");
+
+        first
+            .save_thought(
+                "session-a",
+                Some("first thought"),
+                10,
+                100,
+                ThoughtState::Holding,
+                ThoughtSource::CarryForward,
+                RestState::Active,
+                false,
+                Vec::new(),
+                Utc::now(),
+                ThoughtDeliveryState::default(),
+                None,
+                None,
+            )
+            .await;
+        second
+            .save_thought(
+                "session-b",
+                Some("second thought"),
+                20,
+                200,
+                ThoughtState::Holding,
+                ThoughtSource::CarryForward,
+                RestState::Active,
+                false,
+                Vec::new(),
+                Utc::now(),
+                ThoughtDeliveryState::default(),
+                None,
+                None,
+            )
+            .await;
+
+        let reopened = FileStore::new(dir.path()).await.expect("reopen store");
+        let thoughts = reopened.load_thoughts().await;
+        assert_eq!(
+            thoughts
+                .get("session-a")
+                .and_then(|entry| entry.thought.as_deref()),
+            Some("first thought")
+        );
+        assert_eq!(
+            thoughts
+                .get("session-b")
+                .and_then(|entry| entry.thought.as_deref()),
+            Some("second thought")
+        );
     }
 
     #[tokio::test]

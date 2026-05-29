@@ -427,7 +427,9 @@ fn should_apply_delivery_state(
     incoming: Option<&ThoughtDeliveryState>,
 ) -> bool {
     let Some(incoming) = incoming else {
-        return true;
+        return current
+            .and_then(|state| state.stream_instance_id.as_deref())
+            .is_none();
     };
     let Some(incoming_stream) = incoming.stream_instance_id.as_deref() else {
         return true;
@@ -482,10 +484,7 @@ fn apply_update<P: SessionProvider>(
     let persisted_delivery = incoming_delivery
         .or_else(|| current_delivery.cloned())
         .unwrap_or_default();
-    delivery_states.insert(update.session_id.clone(), persisted_delivery.clone());
-    prior_thoughts.insert(update.session_id.clone(), update.thought.clone());
-
-    provider.persist_thought(
+    if !provider.persist_thought(
         &update.session_id,
         update.thought.as_deref(),
         update.token_count,
@@ -496,10 +495,15 @@ fn apply_update<P: SessionProvider>(
         update.commit_candidate,
         update.action_cues.clone(),
         update.at,
-        persisted_delivery,
+        persisted_delivery.clone(),
         update.objective_changed.then_some(update.at),
         update.objective_fingerprint.clone(),
-    );
+    ) {
+        return;
+    }
+
+    delivery_states.insert(update.session_id.clone(), persisted_delivery);
+    prior_thoughts.insert(update.session_id.clone(), update.thought.clone());
 
     let payload = ThoughtUpdatePayload {
         thought: update.thought.clone(),
@@ -568,6 +572,7 @@ mod tests {
         snapshots: Vec<SessionInfo>,
         persisted: Mutex<Vec<PersistCall>>,
         delivery_states: Mutex<HashMap<String, ThoughtDeliveryState>>,
+        reject_persists: bool,
     }
 
     impl SessionProvider for RecordingProvider {
@@ -590,7 +595,10 @@ mod tests {
             delivery: ThoughtDeliveryState,
             objective_changed_at: Option<DateTime<Utc>>,
             objective_fingerprint: Option<String>,
-        ) {
+        ) -> bool {
+            if self.reject_persists {
+                return false;
+            }
             self.persisted
                 .lock()
                 .expect("persisted mutex should lock")
@@ -613,6 +621,7 @@ mod tests {
                 .lock()
                 .expect("delivery_states mutex should lock")
                 .insert(session_id.to_string(), delivery);
+            true
         }
 
         fn thought_delivery_states(&self) -> HashMap<String, ThoughtDeliveryState> {
@@ -851,6 +860,58 @@ mod tests {
     }
 
     #[test]
+    fn apply_sync_response_does_not_advance_state_when_persist_enqueue_fails() {
+        let provider = RecordingProvider {
+            reject_persists: true,
+            ..RecordingProvider::default()
+        };
+        let (event_tx, mut event_rx) = broadcast::channel::<ControlEvent>(8);
+        let mut delivery_states = provider.thought_delivery_states();
+
+        apply_sync_response(
+            &provider,
+            &event_tx,
+            &mut delivery_states,
+            &[],
+            SyncResponse {
+                request_id: "tmux-reject".to_string(),
+                stream_instance_id: Some("stream-reject".to_string()),
+                updates: vec![SyncUpdate {
+                    session_id: "sess-reject".to_string(),
+                    stream_instance_id: None,
+                    emission_seq: Some(1),
+                    thought: Some("Do not publish before persist".to_string()),
+                    token_count: 12,
+                    context_limit: 100,
+                    thought_state: ThoughtState::Active,
+                    thought_source: ThoughtSource::Llm,
+                    rest_state: RestState::Active,
+                    commit_candidate: false,
+                    action_cues: Vec::new(),
+                    objective_changed: false,
+                    bubble_precedence: BubblePrecedence::ThoughtFirst,
+                    at: Utc::now(),
+                    objective_fingerprint: None,
+                }],
+                llm_calls: 0,
+                last_backend_error: None,
+            },
+        );
+
+        assert!(provider.persisted.lock().expect("persisted").is_empty());
+        assert!(!delivery_states.contains_key("sess-reject"));
+        assert!(provider
+            .delivery_states
+            .lock()
+            .expect("delivery states")
+            .is_empty());
+        match event_rx.try_recv() {
+            Err(broadcast::error::TryRecvError::Empty) => {}
+            other => panic!("expected no event for rejected persist, got: {other:?}"),
+        }
+    }
+
+    #[test]
     fn sync_response_records_lifecycle_model_and_latency_metrics() {
         let provider = RecordingProvider {
             snapshots: vec![metric_session(
@@ -860,6 +921,7 @@ mod tests {
             )],
             persisted: Mutex::new(Vec::new()),
             delivery_states: Mutex::new(HashMap::new()),
+            reject_persists: false,
         };
         let (event_tx, _) = broadcast::channel::<ControlEvent>(8);
         let metrics = RecordingMetrics::default();
@@ -934,6 +996,7 @@ mod tests {
             )],
             persisted: Mutex::new(Vec::new()),
             delivery_states: Mutex::new(HashMap::new()),
+            reject_persists: false,
         };
         let (event_tx, _) = broadcast::channel::<ControlEvent>(8);
         let metrics = RecordingMetrics::default();
@@ -999,6 +1062,7 @@ mod tests {
             )],
             persisted: Mutex::new(Vec::new()),
             delivery_states: Mutex::new(HashMap::new()),
+            reject_persists: false,
         };
         provider
             .delivery_states
@@ -1151,6 +1215,7 @@ mod tests {
             }],
             persisted: Mutex::new(Vec::new()),
             delivery_states: Mutex::new(HashMap::new()),
+            reject_persists: false,
         };
 
         let snapshots = provider.session_snapshots().await;
@@ -1218,6 +1283,67 @@ mod tests {
         match event_rx.try_recv() {
             Err(broadcast::error::TryRecvError::Empty) => {}
             other => panic!("expected no event for duplicate update, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unsequenced_update_after_watermark_is_ignored() {
+        let provider = RecordingProvider::default();
+        provider
+            .delivery_states
+            .lock()
+            .expect("delivery states")
+            .insert(
+                "tmux:work:1.0:%1".to_string(),
+                ThoughtDeliveryState {
+                    stream_instance_id: Some("stream-a".to_string()),
+                    emission_seq: 2,
+                },
+            );
+        let (event_tx, mut event_rx) = broadcast::channel::<ControlEvent>(8);
+
+        let mut delivery_states = provider.thought_delivery_states();
+        apply_sync_response(
+            &provider,
+            &event_tx,
+            &mut delivery_states,
+            &[],
+            SyncResponse {
+                request_id: "tmux-unsequenced".to_string(),
+                stream_instance_id: Some("stream-a".to_string()),
+                updates: vec![SyncUpdate {
+                    session_id: "tmux:work:1.0:%1".to_string(),
+                    stream_instance_id: None,
+                    emission_seq: None,
+                    thought: Some("Late legacy update".to_string()),
+                    token_count: 10,
+                    context_limit: 100,
+                    thought_state: ThoughtState::Holding,
+                    thought_source: ThoughtSource::Llm,
+                    rest_state: RestState::Drowsy,
+                    commit_candidate: false,
+                    action_cues: Vec::new(),
+                    objective_changed: false,
+                    bubble_precedence: BubblePrecedence::ThoughtFirst,
+                    at: Utc::now(),
+                    objective_fingerprint: None,
+                }],
+                llm_calls: 0,
+                last_backend_error: None,
+            },
+        );
+
+        assert!(provider.persisted.lock().expect("persisted").is_empty());
+        assert_eq!(
+            delivery_states
+                .get("tmux:work:1.0:%1")
+                .expect("delivery state")
+                .emission_seq,
+            2
+        );
+        match event_rx.try_recv() {
+            Err(broadcast::error::TryRecvError::Empty) => {}
+            other => panic!("expected no event for unsequenced update, got: {other:?}"),
         }
     }
 
@@ -1372,6 +1498,7 @@ mod tests {
             }],
             persisted: Mutex::new(Vec::new()),
             delivery_states: Mutex::new(HashMap::new()),
+            reject_persists: false,
         };
         let (event_tx, mut event_rx) = broadcast::channel::<ControlEvent>(8);
         let mut delivery_states = provider.thought_delivery_states();

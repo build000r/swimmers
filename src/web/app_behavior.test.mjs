@@ -315,7 +315,7 @@ function resetWebState() {
     loading: false,
     sessionId: null,
     artifact: null,
-    svg: "",
+    svgUrl: "",
     source: "",
     planFiles: [],
     activePlanFile: "",
@@ -1379,6 +1379,24 @@ test("Mermaid artifact renderer bounds source and advertised plan tabs", () => {
   assert.ok(web.state.mermaidArtifact.planFiles.includes("WORKGRAPH.md"));
   assert.ok(web.el.mermaidSummary.textContent.includes("showing first 32"));
   assert.ok(web.el.mermaidSummary.textContent.includes("unsafe name"));
+});
+
+test("Mermaid artifact preview uses image URL instead of injected SVG markup", () => {
+  resetWebState();
+  web.state.mermaidArtifact.svgUrl = "blob:swimmers-test-svg";
+
+  web.renderMermaidArtifact({
+    session_id: "sess_0",
+    available: true,
+    path: "/tmp/project/docs/diagram.mmd",
+    source: "graph TD\nA-->B\n",
+    plan_files: [],
+  });
+
+  const img = web.el.mermaidPreview.children.find((child) => child.id === "img");
+  assert.ok(img, "preview should be rendered as an image");
+  assert.equal(img.src, "blob:swimmers-test-svg");
+  assert.ok(!web.el.mermaidPreview.innerHTML.includes("<script"));
 });
 
 test("Mermaid plan loader rejects path-ish names and bounds huge content", async () => {

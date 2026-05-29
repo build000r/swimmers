@@ -223,7 +223,7 @@ const state = {
     loading: false,
     sessionId: null,
     artifact: null,
-    svg: "",
+    svgUrl: "",
     source: "",
     planFiles: [],
     activePlanFile: "",
@@ -3612,8 +3612,12 @@ function renderMermaidArtifact(payload) {
   el.mermaidPlanContent.classList.add("hidden");
   el.mermaidPlanContent.classList.remove("error");
 
-  if (available && state.mermaidArtifact.svg) {
-    el.mermaidPreview.innerHTML = state.mermaidArtifact.svg;
+  if (available && state.mermaidArtifact.svgUrl) {
+    const img = document.createElement("img");
+    img.src = state.mermaidArtifact.svgUrl;
+    img.alt = "Mermaid artifact preview";
+    img.className = "mermaid-preview-image";
+    el.mermaidPreview.appendChild(img);
   }
 
   renderMermaidPlanTabs();
@@ -4684,7 +4688,7 @@ async function refreshMermaidArtifact() {
   state.mermaidArtifact.loading = true;
   state.mermaidArtifact.sessionId = session.session_id;
   state.mermaidArtifact.artifact = null;
-  state.mermaidArtifact.svg = "";
+  clearMermaidSvgUrl();
   state.mermaidArtifact.source = "";
   el.mermaidPreview.innerHTML = "";
   el.mermaidSource.textContent = "";
@@ -4695,12 +4699,12 @@ async function refreshMermaidArtifact() {
     if (artifact?.available) {
       const svgResponse = await apiMaybeFetch(`/v1/sessions/${encodeURIComponent(session.session_id)}/mermaid-artifact/svg`);
       if (svgResponse) {
-        state.mermaidArtifact.svg = await svgResponse.text();
+        setMermaidSvgUrl(URL.createObjectURL(await svgResponse.blob()));
       } else {
-        state.mermaidArtifact.svg = "";
+        clearMermaidSvgUrl();
       }
     } else {
-      state.mermaidArtifact.svg = "";
+      clearMermaidSvgUrl();
     }
     renderMermaidArtifact(artifact);
   } catch (error) {
@@ -4709,6 +4713,18 @@ async function refreshMermaidArtifact() {
     state.mermaidArtifact.loading = false;
     syncSheetActionAvailability();
   }
+}
+
+function clearMermaidSvgUrl() {
+  if (state.mermaidArtifact.svgUrl && typeof URL !== "undefined" && typeof URL.revokeObjectURL === "function") {
+    URL.revokeObjectURL(state.mermaidArtifact.svgUrl);
+  }
+  state.mermaidArtifact.svgUrl = "";
+}
+
+function setMermaidSvgUrl(url) {
+  clearMermaidSvgUrl();
+  state.mermaidArtifact.svgUrl = url || "";
 }
 
 async function openMermaidArtifactHost() {
@@ -5832,6 +5848,14 @@ function flushEncodedInputBytes() {
   for (const chunk of chunks) {
     const bytes = chunk instanceof Uint8Array ? chunk : new Uint8Array(chunk);
     if (bytes.byteLength > 0) {
+      if (bytes.byteLength > MAX_TERMINAL_PASTE_BYTES) {
+        setUtilityStatus(
+          `Input blocked: ${bytes.byteLength} bytes exceeds ${MAX_TERMINAL_PASTE_BYTES}.`,
+          true,
+          3200,
+        );
+        continue;
+      }
       state.ws.send(bytes);
     }
   }

@@ -31,7 +31,7 @@ const PROCESS_EXIT_REAP_INTERVAL: Duration = Duration::from_millis(250);
 const PROCESS_EXIT_DELETE_GRACE: Duration = Duration::ZERO;
 const PROCESS_EXIT_SUMMARY_TIMEOUT: Duration = Duration::from_millis(250);
 const TMUX_REDISCOVERY_INTERVAL: Duration = Duration::from_secs(10);
-const ACTIVE_PANE_LOOKUP_TIMEOUT: Duration = Duration::from_millis(350);
+const ACTIVE_PANE_LOOKUP_TIMEOUT: Duration = Duration::from_millis(500);
 const ACTIVE_PANE_LOOKUP_WARN_THRESHOLD: Duration = Duration::from_millis(200);
 const PRELAUNCH_PROMPT_CLEANUP_DELAY: Duration = Duration::from_secs(30);
 
@@ -2200,7 +2200,7 @@ impl SessionProvider for SupervisorProvider {
         delivery: ThoughtDeliveryState,
         objective_changed_at: Option<DateTime<Utc>>,
         objective_fingerprint: Option<String>,
-    ) {
+    ) -> bool {
         self.supervisor.begin_pending_thought_persist();
         if self
             .persist_tx
@@ -2226,7 +2226,9 @@ impl SessionProvider for SupervisorProvider {
                 session_id = %session_id,
                 "persist_thought queue full/closed; dropping thought snapshot"
             );
+            return false;
         }
+        true
     }
 
     fn thought_delivery_states(&self) -> HashMap<String, ThoughtDeliveryState> {
@@ -2398,6 +2400,7 @@ fn prepare_spawn_tool_command(
     prepare_spawn_tool_command_with_launcher(tool, cwd, initial_request, launcher)
 }
 
+#[cfg(test)]
 fn build_spawn_tool_command(
     tool: crate::types::SpawnTool,
     cwd: Option<&str>,
@@ -2406,6 +2409,7 @@ fn build_spawn_tool_command(
     prepare_spawn_tool_command(tool, cwd, initial_request).command
 }
 
+#[cfg(test)]
 fn build_spawn_tool_command_with_launcher(
     tool: crate::types::SpawnTool,
     cwd: Option<&str>,

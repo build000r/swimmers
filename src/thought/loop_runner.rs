@@ -85,7 +85,8 @@ pub trait SessionProvider: Send + Sync {
         _delivery: ThoughtDeliveryState,
         _objective_changed_at: Option<DateTime<Utc>>,
         _objective_fingerprint: Option<String>,
-    ) {
+    ) -> bool {
+        true
     }
 
     /// Return the last accepted stream/sequence watermark for each session.

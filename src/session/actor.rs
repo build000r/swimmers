@@ -2803,10 +2803,21 @@ mod tests {
         std::fs::write(&tmux, script).expect("tmux script");
         make_executable(&tmux);
         let previous_path = std::env::var_os("PATH");
-        std::env::set_var(
-            "PATH",
-            std::env::join_paths([bin_dir.as_path()]).expect("path"),
-        );
+        let mut entries = vec![bin_dir.as_os_str().to_os_string()];
+        if let Some(existing) = previous_path.as_ref() {
+            entries.extend(std::env::split_paths(existing).map(|path| path.into_os_string()));
+        }
+        for system_dir in ["/bin", "/usr/bin"] {
+            let system_dir = std::path::Path::new(system_dir);
+            if system_dir.is_dir()
+                && !entries
+                    .iter()
+                    .any(|entry| std::path::Path::new(entry) == system_dir)
+            {
+                entries.push(system_dir.as_os_str().to_os_string());
+            }
+        }
+        std::env::set_var("PATH", std::env::join_paths(entries).expect("path"));
         (dir, previous_path)
     }
 
@@ -2897,6 +2908,10 @@ mod tests {
 
     #[tokio::test]
     async fn maybe_check_liveness_runs_query_when_interval_elapsed() {
+        let _guard = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let (_dir, previous_path) = install_fake_tmux("#!/bin/sh\nexit 1\n");
         let mut actor = test_actor();
         // Push last_liveness_check_at far enough back to pass the interval guard.
         actor.last_liveness_check_at = Instant::now() - Duration::from_millis(2_100); // past LIVENESS_CHECK_INTERVAL (2s)
@@ -2905,6 +2920,7 @@ mod tests {
         actor.maybe_check_liveness().await;
         // last_liveness_check_at is updated even on query failure
         assert!(actor.last_liveness_check_at.elapsed() < Duration::from_secs(1));
+        restore_path(previous_path);
     }
 
     #[tokio::test]
