@@ -2896,7 +2896,16 @@ esac
             State(test_state()),
             Json(CreateSessionRequest {
                 name: None,
-                cwd: None,
+                // Remote launch now requires an explicit cwd; supply the current
+                // dir (what launch_cwd used to inject implicitly) so this test
+                // still reaches the unknown-launch-target check rather than the
+                // missing-cwd validation that would otherwise preempt it.
+                cwd: Some(
+                    std::env::current_dir()
+                        .expect("current dir")
+                        .to_string_lossy()
+                        .into_owned(),
+                ),
                 spawn_tool: None,
                 launch_target: Some("not-configured-target-for-test".to_string()),
                 initial_request: None,
