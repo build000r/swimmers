@@ -4727,6 +4727,18 @@ fn repo_theme_colors_override_state_colors_in_thought_history() {
 }
 
 #[test]
+fn parse_hex_rgb_accepts_valid_and_rejects_multibyte_without_panic() {
+    assert_eq!(parse_hex_rgb("#3930B5"), Some((0x39, 0x30, 0xB5)));
+    assert_eq!(parse_hex_rgb("  #FFFFFF  "), Some((0xFF, 0xFF, 0xFF)));
+    assert_eq!(parse_hex_rgb("3930B5"), None); // missing '#'
+    assert_eq!(parse_hex_rgb("#12345"), None); // too short
+    // 7-byte multibyte input must return None, not panic on a byte-slice that
+    // splits a multi-byte char ("€" is 3 bytes, so "#€abc" is exactly 7 bytes).
+    assert_eq!(parse_hex_rgb("#\u{20ac}abc"), None);
+    assert_eq!(parse_hex_rgb("#\u{e9}\u{e9}\u{e9}"), None);
+}
+
+#[test]
 fn low_contrast_repo_theme_color_is_adjusted_in_thought_history_and_header() {
     let api = MockApi::new();
     let layout = test_layout(120, 32);

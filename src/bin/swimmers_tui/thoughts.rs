@@ -656,7 +656,11 @@ pub(crate) const DARK_TERMINAL_COLOR_SEARCH_STEPS: usize = 12;
 
 pub(crate) fn parse_hex_rgb(value: &str) -> Option<(u8, u8, u8)> {
     let trimmed = value.trim();
-    if trimmed.len() != 7 || !trimmed.starts_with('#') {
+    // Require ASCII so the byte-index slices below always land on char
+    // boundaries: a 7-*byte* multibyte string (e.g. "#€abc") would otherwise
+    // panic when a slice splits a multi-byte char. Every valid #RRGGBB is
+    // ASCII, so this only rejects input that could never parse anyway.
+    if trimmed.len() != 7 || !trimmed.starts_with('#') || !trimmed.is_ascii() {
         return None;
     }
 
