@@ -762,8 +762,12 @@ impl StateDetector {
         if flat.is_empty() {
             return "<empty>".to_string();
         }
-        if flat.len() > 140 {
-            flat.truncate(140);
+        // Truncate by characters, not bytes: callers currently pass ASCII-only
+        // `visible` text, but a byte `truncate(140)` would panic if that ever
+        // changed and the 140th byte fell inside a multi-byte sequence. Char
+        // truncation is identical for ASCII and robust regardless.
+        if flat.chars().count() > 140 {
+            flat = flat.chars().take(140).collect();
             flat.push('…');
         }
         flat
@@ -1669,5 +1673,19 @@ mod tests {
         d.apply_process_liveness(true);
         assert_eq!(d.state(), SessionState::Busy);
         assert_eq!(log.lock().unwrap().len(), count_before);
+    }
+
+    #[test]
+    fn log_excerpt_truncates_multibyte_without_panic() {
+        // A byte-wise truncate(140) would panic if the 140th byte fell inside
+        // a multi-byte sequence. Char-aware truncation must stay panic-free and
+        // cap the result at 140 chars plus the ellipsis.
+        let multibyte = "é".repeat(200);
+        let excerpt = StateDetector::log_excerpt(&multibyte);
+        assert_eq!(excerpt.chars().count(), 141); // 140 chars + '…'
+        assert!(excerpt.ends_with('…'));
+
+        // Short ASCII input is returned verbatim (no ellipsis).
+        assert_eq!(StateDetector::log_excerpt("ready$"), "ready$");
     }
 }
