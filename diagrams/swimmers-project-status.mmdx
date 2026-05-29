@@ -5,6 +5,7 @@
   "links": [
     { "from": "main", "label": "Open proof status", "to": "proof-status", "title": "Open swimmers proof status" },
     { "from": "main", "label": "Open primary flows", "to": "primary-flows", "title": "Open swimmers primary flows" },
+    { "from": "main", "label": "Open epic status", "to": "epic-gantt", "title": "Open swimmers epic status" },
     { "from": "main", "label": "Open next move", "to": "next-move", "title": "Open swimmers next move" }
   ]
 }
@@ -14,14 +15,12 @@
 ```mermaid
 flowchart LR
   vision["swimmers: visual tmux aquarium and thought rail"]:::gray
-  tests["RED cargo test failed 2 grok prompt cleanup tests"]:::red
-  passing["GREEN 662 tests passed before the failure"]:::green
-  fix["YELLOW restricted PATH prompt cleanup fix: swimmers-portfolio-reality-idea-plan-0by.7"]:::yellow
-  smoke["YELLOW install and TUI API smoke: swimmers-portfolio-reality-idea-plan-0by.8"]:::yellow
-  perf["YELLOW fleet-scale profiling: swimmers-portfolio-reality-idea-plan-0by.9"]:::yellow
-  vision --> tests --> fix --> smoke
-  passing --> tests
-  smoke --> perf
+  suite["GREEN cargo test green 677 lib 3 main 358 tui 9 metamorphic"]:::green
+  install["GREEN cargo install proven swimmers and swimmers-tui 0.3.0"]:::green
+  smoke["GREEN fresh-server health and live tmux discovery smoke 0by.8"]:::green
+  perf["GREEN fleet list_sessions p95 375ms to 844us 0by.9"]:::green
+  publish["GREEN this status stack published 0by.6"]:::green
+  vision --> suite --> install --> smoke --> perf --> publish
   classDef green fill:#dff7df,stroke:#20833a,stroke-width:2px,color:#0f2f18
   classDef yellow fill:#fff3bf,stroke:#b7791f,stroke-width:2px,color:#3a2a00
   classDef red fill:#ffd6d6,stroke:#c53030,stroke-width:2px,color:#3a0505
@@ -31,30 +30,27 @@ flowchart LR
 ## chart epic-gantt Swimmers Epic Status
 ```mermaid
 gantt
-  title swimmers status as of 2026-05-28
+  title swimmers status as of 2026-05-29
   dateFormat YYYY-MM-DD
   section GREEN Proven
-  GREEN broad cargo test mostly passes :done, 2026-05-28, 1d
-  section RED Current Blocker
-  RED grok prompt cleanup tests fail :crit, 2026-05-28, 1d
-  section YELLOW Planned
-  YELLOW publish status 0by.6 :active, 2026-05-28, 1d
-  YELLOW restricted PATH fix 0by.7 :active, 2026-05-29, 1d
-  YELLOW install TUI API smoke 0by.8 :active, 2026-05-30, 2d
-  YELLOW profiling and spawn refactor 0by.9 0by.10 :active, 2026-06-01, 2d
+  GREEN full cargo test suite green :done, 2026-05-29, 1d
+  GREEN restricted PATH prompt cleanup fix 0by.7 :done, 2026-05-28, 1d
+  GREEN install and TUI API smoke 0by.8 :done, 2026-05-29, 1d
+  GREEN fleet-scale profiling 0by.9 :done, 2026-05-29, 1d
+  GREEN spawn prompt-file refactor 0by.10 :done, 2026-05-29, 1d
+  GREEN publish status stack 0by.6 :done, 2026-05-29, 1d
 ```
 
 ## chart epic-map Swimmers Dependency Map
 ```mermaid
 flowchart TD
-  api["GREEN API TUI thought bridge tests mostly pass"]:::green
-  fail["RED grok prompt cleanup tests fail when PATH lacks bash or rm"]:::red
-  fix["YELLOW prompt cleanup test repair 0by.7"]:::yellow
-  smoke["YELLOW cargo install swimmers-tui and local smoke depends on fix 0by.8"]:::yellow
-  perf["YELLOW list_sessions tmux thought profiling 0by.9"]:::yellow
-  refactor["YELLOW spawn prompt-file refactor 0by.10"]:::yellow
-  api --> fail --> fix --> smoke
-  smoke --> perf --> refactor
+  api["GREEN API TUI thought bridge suite green"]:::green
+  fix["GREEN DONE prompt cleanup test repair 0by.7"]:::green
+  smoke["GREEN DONE install and local smoke 0by.8"]:::green
+  perf["GREEN DONE list_sessions tmux thought profiling 0by.9"]:::green
+  refactor["GREEN DONE spawn prompt-file refactor 0by.10"]:::green
+  publish["GREEN DONE publish status stack 0by.6"]:::green
+  api --> fix --> smoke --> perf --> refactor --> publish
   classDef green fill:#dff7df,stroke:#20833a,stroke-width:2px,color:#0f2f18
   classDef yellow fill:#fff3bf,stroke:#b7791f,stroke-width:2px,color:#3a2a00
   classDef red fill:#ffd6d6,stroke:#c53030,stroke-width:2px,color:#3a0505
@@ -66,9 +62,9 @@ flowchart TD
   operator["Parallel-agent operator"]:::gray
   discover["GREEN discover tmux sessions"]:::green
   aquarium["GREEN TUI aquarium state model"]:::green
-  thought["GREEN clawgs thought bridge tests mostly pass"]:::green
-  launch["YELLOW install and launch smoke 0by.8"]:::yellow
-  fleet["YELLOW fleet scale profile 0by.9"]:::yellow
+  thought["GREEN thought bridge"]:::green
+  launch["GREEN install and launch smoke 0by.8"]:::green
+  fleet["GREEN fleet-scale list p95 844us 0by.9"]:::green
   operator --> discover --> aquarium --> thought --> launch --> fleet
   classDef green fill:#dff7df,stroke:#20833a,stroke-width:2px,color:#0f2f18
   classDef yellow fill:#fff3bf,stroke:#b7791f,stroke-width:2px,color:#3a2a00
@@ -79,28 +75,30 @@ flowchart TD
 ```mermaid
 flowchart TD
   read["GREEN README and VISION read"]:::green
-  cargo["RED cargo test exit 101"]:::red
-  detail["RED 2 failures in grok_prompt_command cleanup"]:::red
-  pass["GREEN 662 tests passed before failure"]:::green
-  fix["YELLOW covered by 0by.7"]:::yellow
-  smoke["YELLOW no clean install or TUI smoke yet 0by.8"]:::yellow
-  read --> cargo --> detail --> fix --> smoke
-  pass --> detail
+  cargo["GREEN cargo test exit 0 zero failures"]:::green
+  detail["GREEN grok cleanup unknown-target and concurrency tests pass"]:::green
+  install["GREEN cargo install --path . both bins run 0.3.0"]:::green
+  health["GREEN fresh server health and version ok no stale state"]:::green
+  discovery["GREEN GET v1 sessions discovered live tmux session"]:::green
+  perf["GREEN profiling artifacts 20260529T015943Z-xso"]:::green
+  caveat["GRAY interactive TUI not auto-driven needs PTY covered by run-tui.sh shim"]:::gray
+  read --> cargo --> detail --> install --> health --> discovery --> perf
+  discovery --> caveat
   classDef green fill:#dff7df,stroke:#20833a,stroke-width:2px,color:#0f2f18
   classDef yellow fill:#fff3bf,stroke:#b7791f,stroke-width:2px,color:#3a2a00
   classDef red fill:#ffd6d6,stroke:#c53030,stroke-width:2px,color:#3a0505
+  classDef gray fill:#eef2f7,stroke:#64748b,stroke-width:1px,color:#111827
 ```
 
 ## chart next-move Swimmers Next Move
 ```mermaid
 flowchart TD
-  rank["Power-map: customer is operator managing many tmux agents at a glance"]:::gray
-  one["1 repair restricted PATH prompt cleanup tests 0by.7"]:::yellow
-  two["2 prove install TUI API smoke 0by.8"]:::yellow
-  three["3 profile fleet scale session and thought paths 0by.9"]:::yellow
-  four["4 refactor spawn prompt-file construction 0by.10"]:::yellow
-  rank --> one --> two --> three --> four
+  rank["Power-map customer is operator managing many tmux agents at a glance"]:::gray
+  done["GREEN portfolio wave-3 follow-ups 0by.7 through 0by.10 all landed"]:::green
+  noopen["GREEN no open implementation beads remain after 0by.6"]:::green
+  next["GRAY next move mint fresh ideas via idea-wizard or cut a tagged 0.3.x release"]:::gray
+  rank --> done --> noopen --> next
+  classDef green fill:#dff7df,stroke:#20833a,stroke-width:2px,color:#0f2f18
   classDef yellow fill:#fff3bf,stroke:#b7791f,stroke-width:2px,color:#3a2a00
   classDef gray fill:#eef2f7,stroke:#64748b,stroke-width:1px,color:#111827
 ```
-
