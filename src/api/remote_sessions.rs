@@ -566,15 +566,11 @@ fn launch_cwd(cwd: Option<&str>) -> Result<String, RemoteSessionError> {
     if let Some(cwd) = cwd.map(str::trim).filter(|cwd| !cwd.is_empty()) {
         return Ok(cwd.to_string());
     }
-    std::env::current_dir()
-        .map(|cwd| cwd.to_string_lossy().into_owned())
-        .map_err(|err| {
-            RemoteSessionError::new(
-                StatusCode::BAD_REQUEST,
-                "VALIDATION_FAILED",
-                format!("cwd is required for remote launch and current dir is unavailable: {err}"),
-            )
-        })
+    Err(RemoteSessionError::new(
+        StatusCode::BAD_REQUEST,
+        "VALIDATION_FAILED",
+        "cwd is required for remote launch",
+    ))
 }
 
 fn resolve_launch_target_for_cwd(
@@ -1286,6 +1282,18 @@ mod tests {
         assert!(
             map_path_with_mappings("/workspace/repos2/swimmers", &target().path_mappings).is_none()
         );
+    }
+
+    #[test]
+    fn launch_cwd_rejects_missing_cwd() {
+        let err = launch_cwd(Some("   ")).expect_err("blank cwd should be invalid");
+        assert_eq!(err.status, StatusCode::BAD_REQUEST);
+        assert_eq!(err.code, "VALIDATION_FAILED");
+        assert!(err.message().contains("cwd is required"));
+
+        let err = launch_cwd(None).expect_err("missing cwd should be invalid");
+        assert_eq!(err.status, StatusCode::BAD_REQUEST);
+        assert_eq!(err.code, "VALIDATION_FAILED");
     }
 
     #[test]
