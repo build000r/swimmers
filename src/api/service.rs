@@ -478,7 +478,7 @@ pub async fn overlay_service_health_map(
         .build()
         .unwrap_or_default();
 
-    let mut handles = Vec::new();
+    let mut probes = Vec::new();
     for service in services {
         if !requested.contains(&service.name) {
             continue;
@@ -490,16 +490,20 @@ pub async fn overlay_service_health_map(
         let name = service.name.clone();
         let url = url.clone();
         let client = client.clone();
-        handles.push(tokio::spawn(async move {
+        probes.push(async move {
             let ok = client.get(&url).send().await.is_ok();
             (name, ok)
-        }));
+        });
     }
 
-    for handle in handles {
-        if let Ok((name, ok)) = handle.await {
-            map.insert(name, ok);
-        }
+    // Bound concurrency like the git-probe fan-out so a large mapped-service
+    // set cannot launch an unbounded burst of in-flight HTTP requests.
+    let results: Vec<(String, bool)> = stream::iter(probes)
+        .buffer_unordered(GIT_PROBE_CONCURRENCY)
+        .collect()
+        .await;
+    for (name, ok) in results {
+        map.insert(name, ok);
     }
 
     map
@@ -524,7 +528,15 @@ pub async fn restart_services(
         ran_command = true;
         let output = tokio::time::timeout(
             Duration::from_secs(240),
-            Command::new("sh").arg("-c").arg(cmd).output(),
+            // `kill_on_drop` ensures the timeout actually reaps the child: when
+            // the timeout fires the `output()` future is dropped, and without
+            // this the spawned `sh` (and its descendants' controlling process)
+            // would be orphaned and keep running past the deadline.
+            Command::new("sh")
+                .arg("-c")
+                .arg(cmd)
+                .kill_on_drop(true)
+                .output(),
         )
         .await
         .map_err(|_| format!("restart of {} timed out after 240s", service.name))?
