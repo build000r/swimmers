@@ -135,6 +135,13 @@ impl BridgeRunner {
             loop {
                 let runtime_config = self.runtime_config.read().await.clone();
                 let snapshots = provider.session_snapshots().await;
+                // Bound the delivery-watermark map to live sessions. It is seeded
+                // once before the loop and only ever inserted into, so without
+                // this prune it grows without bound across session churn (one
+                // entry per pane id the daemon ever reports). Dropping watermarks
+                // for sessions tmux no longer lists is safe: a stream restart
+                // re-establishes them via the emission_seq==1 path.
+                retain_live_delivery_states(&mut delivery_states, &snapshots);
                 record_sync_attempt_metrics(&metrics, &runtime_config, &snapshots);
                 let sync_started = Instant::now();
                 match tokio::time::timeout(
@@ -198,6 +205,21 @@ impl BridgeRunner {
             }
         })
     }
+}
+
+/// Drop delivery watermarks for sessions that are no longer present in the
+/// latest snapshot set, keeping the long-lived map bounded by the live session
+/// count rather than the cumulative count of every session ever observed.
+fn retain_live_delivery_states(
+    delivery_states: &mut std::collections::HashMap<String, ThoughtDeliveryState>,
+    snapshots: &[SessionInfo],
+) {
+    if delivery_states.is_empty() {
+        return;
+    }
+    let live: std::collections::HashSet<&str> =
+        snapshots.iter().map(|s| s.session_id.as_str()).collect();
+    delivery_states.retain(|id, _| live.contains(id.as_str()));
 }
 
 #[cfg(test)]
@@ -775,6 +797,30 @@ mod tests {
             context_limit: 100,
             last_activity_at: Utc::now(),
         }
+    }
+
+    #[test]
+    fn retain_live_delivery_states_drops_absent_sessions() {
+        let mut states: HashMap<String, ThoughtDeliveryState> = HashMap::new();
+        states.insert("sess_live".to_string(), ThoughtDeliveryState::default());
+        states.insert("sess_gone".to_string(), ThoughtDeliveryState::default());
+
+        let snapshots = vec![metric_session(
+            "sess_live",
+            SessionState::Busy,
+            ThoughtState::Active,
+        )];
+        retain_live_delivery_states(&mut states, &snapshots);
+
+        assert!(states.contains_key("sess_live"));
+        assert!(
+            !states.contains_key("sess_gone"),
+            "watermark for a session no longer in snapshots must be pruned"
+        );
+
+        // Empty snapshots clear the map entirely rather than panicking or leaking.
+        retain_live_delivery_states(&mut states, &[]);
+        assert!(states.is_empty());
     }
 
     #[tokio::test]
