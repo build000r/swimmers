@@ -113,6 +113,10 @@ fn tmux_names_requiring_active_pane_lookup<'a, I>(
 where
     I: IntoIterator<Item = &'a SessionSummary>,
 {
+    if thought_snapshots.is_empty() {
+        return HashSet::new();
+    }
+
     summaries
         .into_iter()
         .filter(|summary| {
@@ -2330,11 +2334,16 @@ impl PreparedSpawnToolCommand {
         }
     }
 
-    fn with_cleanup(command: String, cleanup_path: PathBuf) -> Self {
-        Self {
-            command,
-            cleanup_paths: vec![cleanup_path],
-        }
+    fn with_prompt_file(
+        initial_request: &str,
+        command: impl FnOnce(&str) -> String,
+    ) -> io::Result<Self> {
+        let prompt_path = write_spawn_prompt_file(initial_request)?;
+        let prompt_path_arg = shell_single_quote(&prompt_path.to_string_lossy());
+        Ok(Self {
+            command: command(&prompt_path_arg),
+            cleanup_paths: vec![prompt_path],
+        })
     }
 }
 
@@ -2485,31 +2494,28 @@ fn build_grok_prompt_file_command(
     initial_request: &str,
     launcher: SpawnToolLauncher,
 ) -> io::Result<PreparedSpawnToolCommand> {
-    let prompt_path = write_spawn_prompt_file(initial_request)?;
-    let prompt_path_arg = shell_single_quote(&prompt_path.to_string_lossy());
-    let cwd_arg = cwd
-        .map(|cwd| format!(" --cwd {}", shell_single_quote(cwd)))
-        .unwrap_or_default();
-    Ok(PreparedSpawnToolCommand::with_cleanup(
+    PreparedSpawnToolCommand::with_prompt_file(initial_request, |prompt_path_arg| {
+        let cwd_arg = cwd
+            .map(|cwd| format!(" --cwd {}", shell_single_quote(cwd)))
+            .unwrap_or_default();
+        let cleanup_command = prompt_file_cleanup_shell_command();
         format!(
-        "prompt_file={prompt_path_arg}; if [ -r \"$prompt_file\" ]; then {} --prompt-file \"$prompt_file\"{cwd_arg} --always-approve --no-alt-screen; launch_status=$?; rm -f \"$prompt_file\"; test \"$launch_status\" -eq 0; else rm -f \"$prompt_file\"; echo 'swimmers: failed to read Grok initial request' >&2; false; fi",
+        "prompt_file={prompt_path_arg}; if [ -r \"$prompt_file\" ]; then {} --prompt-file \"$prompt_file\"{cwd_arg} --always-approve --no-alt-screen; launch_status=$?; {cleanup_command}; test \"$launch_status\" -eq 0; else {cleanup_command}; echo 'swimmers: failed to read Grok initial request' >&2; false; fi",
         launcher.shell_program()
-    ),
-        prompt_path,
-    ))
+        )
+    })
+}
+
+fn prompt_file_cleanup_shell_command() -> &'static str {
+    "if [ -x /bin/rm ]; then /bin/rm -f \"$prompt_file\"; elif [ -x /usr/bin/rm ]; then /usr/bin/rm -f \"$prompt_file\"; else rm -f \"$prompt_file\"; fi"
 }
 
 fn build_codex_prompt_file_command(initial_request: &str) -> io::Result<PreparedSpawnToolCommand> {
-    let prompt_path = write_spawn_prompt_file(initial_request)?;
-    let prompt_path_arg = shell_single_quote(&prompt_path.to_string_lossy());
-    Ok(PreparedSpawnToolCommand::with_cleanup(
+    PreparedSpawnToolCommand::with_prompt_file(initial_request, |prompt_path| {
         format!(
         "prompt_file={prompt_path}; if prompt=\"$(cat \"$prompt_file\")\"; then rm -f \"$prompt_file\"; if command -v caam >/dev/null 2>&1; then caam run codex -- \"$prompt\" || {{ echo 'swimmers: caam codex launch failed; falling back to raw codex' >&2; if command -v codex-raw >/dev/null 2>&1; then codex-raw \"$prompt\"; else command codex \"$prompt\"; fi; }}; else command codex \"$prompt\"; fi; else rm -f \"$prompt_file\"; echo 'swimmers: failed to read initial request' >&2; false; fi"
-    ,
-            prompt_path = prompt_path_arg
-        ),
-        prompt_path,
-    ))
+        )
+    })
 }
 
 fn write_spawn_prompt_file(initial_request: &str) -> io::Result<PathBuf> {
@@ -2995,6 +3001,14 @@ mod tests {
         PathBuf::from(&command[prefix.len()..end])
     }
 
+    fn spawn_command_test_shell() -> &'static str {
+        if cfg!(unix) {
+            "/bin/sh"
+        } else {
+            "sh"
+        }
+    }
+
     #[test]
     fn build_spawn_tool_command_uses_prompt_file_for_grok_initial_request() {
         let prompt = "investigate Grok launch\nwithout argv prompt leaks";
@@ -3084,8 +3098,10 @@ mod tests {
         let temp = tempdir().expect("tempdir");
         let grok = temp.path().join("grok");
         let captured_prompt = temp.path().join("captured-prompt.txt");
+        let restricted_path = temp.path().join("restricted-path");
+        std::fs::create_dir_all(&restricted_path).expect("restricted path");
         let capture_script = format!(
-            "#!/usr/bin/env bash\nwhile [ \"$#\" -gt 0 ]; do\n  if [ \"$1\" = \"--prompt-file\" ]; then shift; cat \"$1\" > {}; fi\n  shift || true\ndone\nexit 0\n",
+            "#!/bin/sh\nprompt_file=\nwhile [ \"$#\" -gt 0 ]; do\n  if [ \"$1\" = \"--prompt-file\" ]; then shift; prompt_file=$1; fi\n  shift || true\ndone\nif [ -n \"$prompt_file\" ]; then\n  IFS= read -r prompt < \"$prompt_file\" || true\n  printf '%s' \"$prompt\" > {}\nfi\nexit 0\n",
             shell_single_quote(&captured_prompt.to_string_lossy())
         );
         write_executable(&grok, &capture_script);
@@ -3100,10 +3116,10 @@ mod tests {
             ),
         );
         let prompt_path = grok_prompt_file_from_spawn_command(&command);
-        let shell = if cfg!(unix) { "/bin/sh" } else { "sh" };
-        let status = std::process::Command::new(shell)
+        let status = std::process::Command::new(spawn_command_test_shell())
             .arg("-c")
             .arg(&command)
+            .env("PATH", &restricted_path)
             .status()
             .expect("run Grok spawn command");
 
@@ -3119,7 +3135,9 @@ mod tests {
     fn grok_prompt_command_removes_prompt_file_after_failure() {
         let temp = tempdir().expect("tempdir");
         let grok = temp.path().join("grok");
-        write_executable(&grok, "#!/usr/bin/env bash\nexit 42\n");
+        let restricted_path = temp.path().join("restricted-path");
+        std::fs::create_dir_all(&restricted_path).expect("restricted path");
+        write_executable(&grok, "#!/bin/sh\nexit 42\n");
 
         let command = build_spawn_tool_command_with_launcher(
             crate::types::SpawnTool::Grok,
@@ -3131,10 +3149,10 @@ mod tests {
             ),
         );
         let prompt_path = grok_prompt_file_from_spawn_command(&command);
-        let shell = if cfg!(unix) { "/bin/sh" } else { "sh" };
-        let status = std::process::Command::new(shell)
+        let status = std::process::Command::new(spawn_command_test_shell())
             .arg("-c")
             .arg(&command)
+            .env("PATH", &restricted_path)
             .status()
             .expect("run Grok spawn command");
 
@@ -3164,8 +3182,7 @@ mod tests {
             build_spawn_tool_command(crate::types::SpawnTool::Codex, None, Some("lost prompt"));
         let prompt_path = prompt_file_from_spawn_command(&command);
         std::fs::remove_file(&prompt_path).expect("remove prompt file before command runs");
-        let shell = if cfg!(unix) { "/bin/sh" } else { "sh" };
-        let output = std::process::Command::new(shell)
+        let output = std::process::Command::new(spawn_command_test_shell())
             .arg("-c")
             .arg(&command)
             .output()
@@ -3206,8 +3223,7 @@ mod tests {
             prompt_path.exists(),
             "cleanup must not remove the handoff immediately"
         );
-        let shell = if cfg!(unix) { "/bin/sh" } else { "sh" };
-        let output = std::process::Command::new(shell)
+        let output = std::process::Command::new(spawn_command_test_shell())
             .arg("-c")
             .arg(&command)
             .env("PATH", test_path)
@@ -3313,8 +3329,7 @@ mod tests {
         let prompt = "fix shell quoting\nwithout leaking prompt text";
         let command = build_spawn_tool_command(crate::types::SpawnTool::Codex, None, Some(prompt));
         let prompt_path = prompt_file_from_spawn_command(&command);
-        let shell = if cfg!(unix) { "/bin/sh" } else { "sh" };
-        let status = std::process::Command::new(shell)
+        let status = std::process::Command::new(spawn_command_test_shell())
             .arg("-c")
             .arg(&command)
             .env("PATH", test_path)
@@ -3350,8 +3365,7 @@ mod tests {
         let prompt = "route through caam";
         let command = build_spawn_tool_command(crate::types::SpawnTool::Codex, None, Some(prompt));
         let prompt_path = prompt_file_from_spawn_command(&command);
-        let shell = if cfg!(unix) { "/bin/sh" } else { "sh" };
-        let status = std::process::Command::new(shell)
+        let status = std::process::Command::new(spawn_command_test_shell())
             .arg("-c")
             .arg(&command)
             .env("PATH", test_path)
@@ -3384,8 +3398,7 @@ mod tests {
         let command =
             build_spawn_tool_command(crate::types::SpawnTool::Codex, None, Some("blocked"));
         let prompt_path = prompt_file_from_spawn_command(&command);
-        let shell = if cfg!(unix) { "/bin/sh" } else { "sh" };
-        let output = std::process::Command::new(shell)
+        let output = std::process::Command::new(spawn_command_test_shell())
             .arg("-c")
             .arg(&command)
             .env("PATH", test_path)
@@ -3879,6 +3892,19 @@ mod tests {
         ]);
 
         assert!(thought_snapshot_for_summary(&summary, None, &snapshots).is_none());
+    }
+
+    #[test]
+    fn active_pane_lookup_not_required_without_thought_snapshots() {
+        let summaries = [
+            test_summary("sess-live", SessionState::Idle),
+            test_summary("sess-busy", SessionState::Busy),
+        ];
+        let snapshots = HashMap::new();
+
+        let tmux_names = tmux_names_requiring_active_pane_lookup(summaries.iter(), &snapshots);
+
+        assert!(tmux_names.is_empty());
     }
 
     #[tokio::test]
