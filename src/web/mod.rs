@@ -1056,6 +1056,12 @@ fn decode_text_client_message(auth: &AuthInfo, text: &str) -> WsClientDecision {
             }
             if data.is_empty() {
                 WsClientDecision::Ignore
+            } else if data.len() > MAX_WS_INPUT_BYTES {
+                WsClientDecision::SendError {
+                    code: "INPUT_TOO_LARGE",
+                    message: format!("terminal input frame exceeds {MAX_WS_INPUT_BYTES} byte limit"),
+                    client_message_id,
+                }
             } else {
                 WsClientDecision::Forward {
                     cmd: SessionCommand::WriteInputAck {
@@ -1079,6 +1085,12 @@ fn decode_text_client_message(auth: &AuthInfo, text: &str) -> WsClientDecision {
             }
             if data.trim().is_empty() {
                 WsClientDecision::Ignore
+            } else if data.len() > MAX_WS_INPUT_BYTES {
+                WsClientDecision::SendError {
+                    code: "INPUT_TOO_LARGE",
+                    message: format!("terminal input frame exceeds {MAX_WS_INPUT_BYTES} byte limit"),
+                    client_message_id,
+                }
             } else {
                 WsClientDecision::Forward {
                     cmd: SessionCommand::SubmitLineAck {
@@ -1431,7 +1443,11 @@ fn resolve_ws_auth(config: &Config, token: Option<&str>) -> Result<AuthInfo, Res
             Ok(AuthInfo::new(OPERATOR_SCOPES.to_vec()))
         }
         AuthMode::Token => {
-            let Some(token) = token else {
+            // Reject a missing or empty token outright. Empty `AUTH_TOKEN`/
+            // `OBSERVER_TOKEN` are already filtered at config load, so this is
+            // defense-in-depth that mirrors the HTTP `extract_bearer_token`
+            // empty-token guard and keeps `?token=` from ever matching.
+            let Some(token) = token.filter(|t| !t.is_empty()) else {
                 return Err(json_error(
                     StatusCode::UNAUTHORIZED,
                     "NOT_AUTHENTICATED",
@@ -2000,6 +2016,40 @@ mod tests {
             decode_text_client_message(&operator_auth(), json),
             WsClientDecision::Ignore
         ));
+    }
+
+    #[test]
+    fn decode_text_client_message_oversized_input_text_is_rejected() {
+        let big = "x".repeat(MAX_WS_INPUT_BYTES + 1);
+        let json = format!(r#"{{"type":"input_text","data":"{big}"}}"#);
+        match decode_text_client_message(&operator_auth(), &json) {
+            WsClientDecision::SendError { code, .. } => assert_eq!(code, "INPUT_TOO_LARGE"),
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn decode_text_client_message_oversized_submit_line_is_rejected() {
+        let big = "x".repeat(MAX_WS_INPUT_BYTES + 1);
+        let json = format!(r#"{{"type":"submit_line","data":"{big}"}}"#);
+        match decode_text_client_message(&operator_auth(), &json) {
+            WsClientDecision::SendError { code, .. } => assert_eq!(code, "INPUT_TOO_LARGE"),
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resolve_ws_auth_rejects_empty_token_in_token_mode() {
+        let config = Config {
+            auth_mode: AuthMode::Token,
+            auth_token: Some("secret".to_string()),
+            ..Config::default()
+        };
+        // An explicit empty `?token=` must never authenticate, mirroring the
+        // HTTP bearer-token empty guard.
+        assert!(resolve_ws_auth(&config, Some("")).is_err());
+        assert!(resolve_ws_auth(&config, None).is_err());
+        assert!(resolve_ws_auth(&config, Some("secret")).is_ok());
     }
 
     #[test]
