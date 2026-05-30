@@ -1440,16 +1440,16 @@ pub(crate) fn build_thought_panel<C: TuiApi>(
     } else if entries.is_empty() {
         Some(if !mode.show_all && total_count > 0 {
             if app.daemon_defaults_status.is_unavailable() {
-                "clawgs unavailable - run swimmers config doctor".to_string()
+                "clawgs unavailable - press t to configure".to_string()
             } else {
                 format!("0 asleep / {total_count} working")
             }
         } else if app.thought_filter.is_active() {
             "no thoughts match filters".to_string()
         } else if app.daemon_defaults_status.is_unavailable() {
-            "clawgs unavailable - run swimmers config doctor".to_string()
+            "clawgs unavailable - press t to configure".to_string()
         } else {
-            "waiting for clawgs...".to_string()
+            "waiting for clawgs - press t to configure".to_string()
         })
     } else {
         None

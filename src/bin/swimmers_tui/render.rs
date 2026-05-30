@@ -374,6 +374,67 @@ pub(crate) fn render_entity_with_theme(
     }
 }
 
+pub(crate) fn render_help_overlay(renderer: &mut Renderer, field: Rect) {
+    let lines: &[(&str, &str)] = &[
+        ("arrows/hjkl", "move selection"),
+        ("enter/click", "open selected session"),
+        ("click field", "spawn new session"),
+        ("n", "cycle terminal handoff target"),
+        ("m", "cycle Ghostty placement"),
+        ("s", "cycle sprite theme"),
+        ("t", "thought config editor"),
+        ("tab", "toggle thought grouping"),
+        (">", "toggle asleep / all view"),
+        ("A", "reattach selected session"),
+        ("r", "refresh sessions"),
+        ("q / esc", "quit"),
+        ("?", "this help"),
+    ];
+
+    let key_col_width = 12u16;
+    let content_width = lines
+        .iter()
+        .fold(0u16, |acc, (_key, desc)| {
+            acc.max(key_col_width + display_width(desc))
+        })
+        .saturating_add(4);
+    let content_height = lines.len() as u16 + 4;
+
+    let overlay_width = content_width.min(field.width.saturating_sub(2));
+    let overlay_height = content_height.min(field.height.saturating_sub(2));
+    if overlay_width < 20 || overlay_height < 6 {
+        return;
+    }
+
+    let x = field.x + field.width.saturating_sub(overlay_width) / 2;
+    let y = field.y + field.height.saturating_sub(overlay_height) / 2;
+    let overlay = Rect {
+        x,
+        y,
+        width: overlay_width,
+        height: overlay_height,
+    };
+
+    renderer.fill_rect(overlay, ' ', Color::DarkGrey);
+    renderer.draw_box(overlay, Color::Cyan);
+    renderer.draw_text(x + 2, y + 1, "keybindings", Color::Cyan);
+
+    let max_desc_width = overlay_width.saturating_sub(key_col_width + 4) as usize;
+    for (row, (key, desc)) in lines.iter().enumerate() {
+        let row_y = y + 3 + row as u16;
+        if row_y >= overlay.bottom().saturating_sub(1) {
+            break;
+        }
+        renderer.draw_text(x + 2, row_y, key, Color::White);
+        renderer.draw_text(
+            x + 2 + key_col_width,
+            row_y,
+            &truncate_label(desc, max_desc_width),
+            Color::DarkGrey,
+        );
+    }
+}
+
 pub(crate) fn render_footer<C: TuiApi>(app: &App<C>, renderer: &mut Renderer, start_y: u16) {
     if start_y >= renderer.height() {
         return;
@@ -411,13 +472,19 @@ pub(crate) fn render_footer<C: TuiApi>(app: &App<C>, renderer: &mut Renderer, st
     }
 
     let help = if app.initial_request.is_some() {
-        "request: type prompt  ctrl-v voice  enter create hidden  backspace delete  esc cancel"
+        if matches!(app.voice_state, VoiceUiState::Unsupported) {
+            "request: type prompt  enter create  backspace delete  esc cancel"
+        } else {
+            "request: type prompt  ctrl-v voice  enter create  backspace delete  esc cancel"
+        }
     } else if app.thought_config_editor.is_some() {
         "thought config: tab moves  arrows adjust  enter saves  esc cancels"
     } else if app.picker.is_some() {
-        "picker: type repo/cwd search  enter/right select  B batch  X exclude  backspace edit/up  esc clear/close"
+        "picker: type search  enter/right select  B batch  X exclude  backspace up  esc close"
+    } else if app.show_help {
+        "press any key to dismiss help"
     } else {
-        "click empty field spawn  click/enter open  arrows or hjkl move  n terminal target  m Ghostty placement  s sprite theme  t thought cfg  r refresh  q quit"
+        "arrows/hjkl move  enter open  r refresh  t config  ? help  q quit"
     };
     renderer.draw_text(
         2,

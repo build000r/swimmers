@@ -400,6 +400,14 @@ fn handle_modal_key<C: TuiApi>(
     layout: WorkspaceLayout,
     key: KeyEvent,
 ) -> Option<bool> {
+    if app.show_help {
+        app.show_help = false;
+        if matches!(key.code, KeyCode::Char('q')) {
+            return Some(false);
+        }
+        return Some(true);
+    }
+
     if app.thought_config_editor.is_some() {
         app.handle_thought_config_key(key, layout);
         return Some(true);
@@ -655,6 +663,10 @@ fn handle_global_toggle_key<C: TuiApi>(
         }
         KeyCode::Char('s') => {
             app.toggle_sprite_theme();
+            Some(true)
+        }
+        KeyCode::Char('?') => {
+            app.show_help = true;
             Some(true)
         }
         _ => None,

@@ -309,6 +309,7 @@ pub(crate) struct App<C: TuiApi> {
     pub(crate) initial_request_generation: u64,
     pub(crate) voice_state: VoiceUiState,
     pub(crate) voice_recording: Option<VoiceRecording>,
+    pub(crate) show_help: bool,
     pub(crate) fish_bowl_mode: FishBowlMode,
     pub(crate) sprite_theme_override: Option<SpriteTheme>,
     pub(crate) mermaid_drag: Option<MermaidDragState>,
@@ -391,6 +392,7 @@ impl<C: TuiApi> App<C> {
             initial_request_generation: 0,
             voice_state: default_ui_state(),
             voice_recording: None,
+            show_help: false,
             fish_bowl_mode: FishBowlMode::Aquarium,
             sprite_theme_override: None,
             mermaid_drag: None,
@@ -4366,6 +4368,9 @@ impl<C: TuiApi> App<C> {
         }
         if let Some(editor) = &self.thought_config_editor {
             render_thought_config_editor(renderer, editor, layout.overview_field);
+        }
+        if self.show_help {
+            render_help_overlay(renderer, layout.overview_field);
         }
     }
 }
