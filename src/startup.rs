@@ -1,5 +1,5 @@
 use std::io::Write;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use axum::Router;
@@ -23,6 +23,72 @@ use crate::{api, web};
 
 const STARTUP_PHASE_WARN_THRESHOLD: Duration = Duration::from_secs(2);
 const SHUTDOWN_PERSIST_TIMEOUT: Duration = Duration::from_secs(5);
+const SHUTDOWN_REGISTRY_TIMEOUT: Duration = Duration::from_secs(5);
+const SHUTDOWN_FLUSH_TIMEOUT: Duration = Duration::from_secs(5);
+const SHUTDOWN_TASK_ABORT_TIMEOUT: Duration = Duration::from_secs(1);
+const EMBEDDED_DEFERRED_INIT_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
+
+#[derive(Clone, Copy)]
+struct ShutdownTimeouts {
+    pending_persists: Duration,
+    registry: Duration,
+    flush: Duration,
+    task_abort: Duration,
+    embedded_deferred_init: Duration,
+}
+
+impl Default for ShutdownTimeouts {
+    fn default() -> Self {
+        Self {
+            pending_persists: SHUTDOWN_PERSIST_TIMEOUT,
+            registry: SHUTDOWN_REGISTRY_TIMEOUT,
+            flush: SHUTDOWN_FLUSH_TIMEOUT,
+            task_abort: SHUTDOWN_TASK_ABORT_TIMEOUT,
+            embedded_deferred_init: EMBEDDED_DEFERRED_INIT_SHUTDOWN_TIMEOUT,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DeferredInitShutdown {
+    Completed,
+    Aborted,
+    Failed,
+    Missing,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PersistenceShutdownOutcome {
+    pending_thoughts_drained: bool,
+    registry_persisted: bool,
+    file_store_flushed: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct EmbeddedTuiShutdownOutcome {
+    deferred_init: DeferredInitShutdown,
+    thought_backend_aborted: bool,
+    persistence: PersistenceShutdownOutcome,
+}
+
+pub struct EmbeddedTuiShutdown {
+    state: Arc<AppState>,
+    deferred_init: Option<JoinHandle<()>>,
+    thought_backend: Arc<Mutex<Option<JoinHandle<()>>>>,
+}
+
+impl Drop for EmbeddedTuiShutdown {
+    fn drop(&mut self) {
+        if let Some(deferred_init) = self.deferred_init.take() {
+            deferred_init.abort();
+        }
+        if let Ok(mut thought_backend) = self.thought_backend.lock() {
+            if let Some(thought_backend) = thought_backend.take() {
+                thought_backend.abort();
+            }
+        }
+    }
+}
 
 pub fn resolve_data_dir() -> std::path::PathBuf {
     if let Ok(val) = std::env::var("SWIMMERS_DATA_DIR") {
@@ -52,6 +118,20 @@ fn log_startup_phase_complete(phase: &'static str, started: Instant) {
     }
 }
 
+async fn open_file_store_for_startup(
+    data_dir: std::path::PathBuf,
+) -> anyhow::Result<Arc<FileStore>> {
+    tokio::task::spawn_blocking(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|err| anyhow::anyhow!("failed to build file-store init runtime: {err}"))?;
+        runtime.block_on(FileStore::new(data_dir))
+    })
+    .await
+    .map_err(|err| anyhow::anyhow!("file-store init task failed: {err}"))?
+}
+
 async fn init_persistence_store(
     supervisor: &Arc<SessionSupervisor>,
     thought_config: &Arc<RwLock<ThoughtConfig>>,
@@ -63,7 +143,7 @@ async fn init_persistence_store(
     if let Err(err) = std::fs::create_dir_all(&data_dir) {
         tracing::error!(error = %err, dir = %data_dir.display(), "failed to create data dir");
     }
-    let store = match FileStore::new(&data_dir).await {
+    let store = match open_file_store_for_startup(data_dir.clone()).await {
         Ok(store) => {
             supervisor.init_persistence(store.clone()).await;
             let loaded_config = store.load_thought_config().await;
@@ -132,21 +212,154 @@ fn start_thought_backend(
     }
 }
 
+async fn abort_task(
+    mut handle: JoinHandle<()>,
+    timeout: Duration,
+    task_name: &'static str,
+) -> bool {
+    handle.abort();
+    match tokio::time::timeout(timeout, &mut handle).await {
+        Ok(Ok(())) => true,
+        Ok(Err(err)) => {
+            if !err.is_cancelled() {
+                tracing::warn!(task_name, error = %err, "shutdown task failed while aborting");
+            }
+            true
+        }
+        Err(_) => {
+            tracing::warn!(
+                task_name,
+                timeout_ms = timeout.as_millis() as u64,
+                "timed out waiting for shutdown task abort"
+            );
+            false
+        }
+    }
+}
+
+async fn run_persistence_shutdown_barrier(
+    supervisor: &Arc<SessionSupervisor>,
+    file_store: Option<Arc<FileStore>>,
+    timeouts: ShutdownTimeouts,
+) -> anyhow::Result<PersistenceShutdownOutcome> {
+    let pending_thoughts_drained = supervisor
+        .wait_for_pending_thought_persists(timeouts.pending_persists)
+        .await;
+
+    let registry_persisted =
+        match tokio::time::timeout(timeouts.registry, supervisor.persist_registry()).await {
+            Ok(()) => true,
+            Err(_) => {
+                tracing::warn!(
+                    timeout_ms = timeouts.registry.as_millis() as u64,
+                    "timed out persisting session registry during shutdown"
+                );
+                false
+            }
+        };
+
+    let mut file_store_flushed = false;
+    if let Some(store) = file_store {
+        match tokio::time::timeout(timeouts.flush, store.flush_barrier()).await {
+            Ok(Ok(())) => {
+                file_store_flushed = true;
+            }
+            Ok(Err(err)) => return Err(err),
+            Err(_) => {
+                return Err(anyhow::anyhow!(
+                    "timed out flushing persistence store during shutdown"
+                ));
+            }
+        }
+    }
+
+    Ok(PersistenceShutdownOutcome {
+        pending_thoughts_drained,
+        registry_persisted,
+        file_store_flushed,
+    })
+}
+
 async fn finalize_shutdown(
     supervisor: &Arc<SessionSupervisor>,
     thought_backend: JoinHandle<()>,
     file_store: Option<Arc<FileStore>>,
 ) -> anyhow::Result<()> {
-    thought_backend.abort();
-    let _ = thought_backend.await;
-    supervisor
-        .wait_for_pending_thought_persists(SHUTDOWN_PERSIST_TIMEOUT)
-        .await;
-    supervisor.persist_registry().await;
-    if let Some(store) = file_store {
-        store.flush_barrier().await?;
-    }
+    let timeouts = ShutdownTimeouts::default();
+    abort_task(
+        thought_backend,
+        timeouts.task_abort,
+        "standalone_thought_backend",
+    )
+    .await;
+    run_persistence_shutdown_barrier(supervisor, file_store, timeouts).await?;
     Ok(())
+}
+
+async fn await_or_abort_deferred_init(
+    shutdown: &mut EmbeddedTuiShutdown,
+    timeouts: ShutdownTimeouts,
+) -> DeferredInitShutdown {
+    let Some(mut deferred_init) = shutdown.deferred_init.take() else {
+        return DeferredInitShutdown::Missing;
+    };
+
+    match tokio::time::timeout(timeouts.embedded_deferred_init, &mut deferred_init).await {
+        Ok(Ok(())) => DeferredInitShutdown::Completed,
+        Ok(Err(err)) => {
+            if err.is_cancelled() {
+                DeferredInitShutdown::Aborted
+            } else {
+                tracing::warn!(error = %err, "embedded deferred init failed during shutdown");
+                DeferredInitShutdown::Failed
+            }
+        }
+        Err(_) => {
+            deferred_init.abort();
+            let aborted =
+                abort_task(deferred_init, timeouts.task_abort, "embedded_deferred_init").await;
+            if aborted {
+                DeferredInitShutdown::Aborted
+            } else {
+                DeferredInitShutdown::Failed
+            }
+        }
+    }
+}
+
+async fn finalize_embedded_tui_shutdown_with_timeouts(
+    mut shutdown: EmbeddedTuiShutdown,
+    timeouts: ShutdownTimeouts,
+) -> anyhow::Result<EmbeddedTuiShutdownOutcome> {
+    let deferred_init = await_or_abort_deferred_init(&mut shutdown, timeouts).await;
+    let thought_backend = shutdown
+        .thought_backend
+        .lock()
+        .map(|mut guard| guard.take())
+        .unwrap_or(None);
+    let thought_backend_aborted = match thought_backend {
+        Some(handle) => abort_task(handle, timeouts.task_abort, "embedded_thought_backend").await,
+        None => false,
+    };
+
+    let persistence = run_persistence_shutdown_barrier(
+        &shutdown.state.supervisor,
+        shutdown.state.current_file_store(),
+        timeouts,
+    )
+    .await?;
+
+    Ok(EmbeddedTuiShutdownOutcome {
+        deferred_init,
+        thought_backend_aborted,
+        persistence,
+    })
+}
+
+pub async fn finalize_embedded_tui_shutdown(shutdown: EmbeddedTuiShutdown) -> anyhow::Result<()> {
+    finalize_embedded_tui_shutdown_with_timeouts(shutdown, ShutdownTimeouts::default())
+        .await
+        .map(|_| ())
 }
 
 fn build_app_router(
@@ -410,22 +623,44 @@ fn start_deferred_thought_backend(state: &Arc<AppState>) -> JoinHandle<()> {
     }
 }
 
-pub fn spawn_deferred_init(state: Arc<AppState>) -> JoinHandle<()> {
-    tokio::task::spawn_blocking(move || {
-        let runtime = tokio::runtime::Handle::current();
-        runtime.block_on(async move {
-            tracing::info!(phase = "deferred_init", "startup phase begin");
-            let deferred_started = Instant::now();
+fn spawn_deferred_init_task(
+    state: Arc<AppState>,
+    thought_backend_slot: Option<Arc<Mutex<Option<JoinHandle<()>>>>>,
+) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        tracing::info!(phase = "deferred_init", "startup phase begin");
+        let deferred_started = Instant::now();
 
-            let (persistence_store, (), daemon_defaults) =
-                run_deferred_init_phases(state.supervisor.clone(), state.thought_config.clone())
-                    .await;
+        let (persistence_store, (), daemon_defaults) =
+            run_deferred_init_phases(state.supervisor.clone(), state.thought_config.clone()).await;
 
-            log_startup_phase_complete("deferred_init", deferred_started);
-            attach_deferred_init_results(&state, persistence_store, daemon_defaults);
-            drop(start_deferred_thought_backend(&state));
-        });
+        log_startup_phase_complete("deferred_init", deferred_started);
+        attach_deferred_init_results(&state, persistence_store, daemon_defaults);
+        let thought_backend = start_deferred_thought_backend(&state);
+        if let Some(slot) = thought_backend_slot {
+            if let Ok(mut slot) = slot.lock() {
+                *slot = Some(thought_backend);
+            } else {
+                thought_backend.abort();
+            }
+        } else {
+            drop(thought_backend);
+        }
     })
+}
+
+pub fn spawn_deferred_init(state: Arc<AppState>) -> JoinHandle<()> {
+    spawn_deferred_init_task(state, None)
+}
+
+pub fn spawn_deferred_init_for_embedded_tui(state: Arc<AppState>) -> EmbeddedTuiShutdown {
+    let thought_backend = Arc::new(Mutex::new(None));
+    let deferred_init = spawn_deferred_init_task(state.clone(), Some(thought_backend.clone()));
+    EmbeddedTuiShutdown {
+        state,
+        deferred_init: Some(deferred_init),
+        thought_backend,
+    }
 }
 
 pub async fn run_server(
@@ -658,6 +893,117 @@ mod tests {
         assert_eq!(sessions[0].session_id, "sess_1");
         assert_eq!(sessions[0].thought.as_deref(), Some("queued thought"));
         assert_eq!(sessions[0].objective_fingerprint.as_deref(), Some("obj-1"));
+    }
+
+    #[tokio::test]
+    async fn embedded_shutdown_cancels_deferred_init_and_runs_persistence_barrier() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = FileStore::new(dir.path()).await.expect("file store");
+        let state = init_app_state_skeleton(Arc::new(Config::default()));
+        state.supervisor.init_persistence(store.clone()).await;
+        assert!(state.set_file_store(store.clone()));
+
+        let summary = SessionSummary {
+            session_id: "sess_1".to_string(),
+            tmux_name: "work".to_string(),
+            state: SessionState::Idle,
+            current_command: Some("cargo test".to_string()),
+            state_evidence: Default::default(),
+            cwd: "/tmp/project".to_string(),
+            tool: Some("Codex".to_string()),
+            token_count: 0,
+            context_limit: 192_000,
+            thought: None,
+            thought_state: ThoughtState::Holding,
+            thought_source: ThoughtSource::CarryForward,
+            thought_updated_at: None,
+            rest_state: fallback_rest_state(SessionState::Idle, ThoughtState::Holding),
+            commit_candidate: false,
+            action_cues: Vec::new(),
+            objective_changed_at: None,
+            last_skill: None,
+            is_stale: false,
+            attached_clients: 0,
+            stale_attached_clients: 0,
+            transport_health: TransportHealth::Healthy,
+            last_activity_at: Utc::now(),
+            repo_theme_id: None,
+            batch: None,
+        };
+        state
+            .supervisor
+            .insert_test_handle(spawn_summary_handle(summary).await)
+            .await;
+
+        let provider = Arc::new(SupervisorProvider::new(state.supervisor.clone()));
+        provider.persist_thought(
+            "sess_1",
+            Some("embedded queued thought"),
+            17,
+            192_000,
+            ThoughtState::Active,
+            ThoughtSource::Llm,
+            RestState::Active,
+            true,
+            Vec::new(),
+            Utc::now(),
+            ThoughtDeliveryState::default(),
+            None,
+            Some("embedded-obj".to_string()),
+        );
+
+        let deferred_aborted = Arc::new(AtomicBool::new(false));
+        let deferred_flag = deferred_aborted.clone();
+        let deferred_init = tokio::spawn(async move {
+            let _flag = AbortFlag(deferred_flag);
+            pending::<()>().await;
+        });
+
+        let backend_aborted = Arc::new(AtomicBool::new(false));
+        let backend_flag = backend_aborted.clone();
+        let thought_backend = tokio::spawn(async move {
+            let _flag = AbortFlag(backend_flag);
+            pending::<()>().await;
+        });
+        drop(provider);
+
+        let shutdown = EmbeddedTuiShutdown {
+            state: state.clone(),
+            deferred_init: Some(deferred_init),
+            thought_backend: Arc::new(Mutex::new(Some(thought_backend))),
+        };
+
+        let outcome = finalize_embedded_tui_shutdown_with_timeouts(
+            shutdown,
+            ShutdownTimeouts {
+                pending_persists: Duration::from_secs(1),
+                registry: Duration::from_secs(1),
+                flush: Duration::from_secs(1),
+                task_abort: Duration::from_millis(100),
+                embedded_deferred_init: Duration::from_millis(25),
+            },
+        )
+        .await
+        .expect("embedded shutdown finalizer");
+
+        assert_eq!(outcome.deferred_init, DeferredInitShutdown::Aborted);
+        assert!(deferred_aborted.load(Ordering::SeqCst));
+        assert!(backend_aborted.load(Ordering::SeqCst));
+        assert!(outcome.thought_backend_aborted);
+        assert!(outcome.persistence.pending_thoughts_drained);
+        assert!(outcome.persistence.registry_persisted);
+        assert!(outcome.persistence.file_store_flushed);
+
+        let thoughts = store.load_thoughts().await;
+        let thought = thoughts.get("sess_1").expect("persisted thought");
+        assert_eq!(thought.thought.as_deref(), Some("embedded queued thought"));
+
+        let sessions = store.load_sessions().await;
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(
+            sessions[0].objective_fingerprint.as_deref(),
+            Some("embedded-obj")
+        );
     }
 
     #[tokio::test]

@@ -5,6 +5,22 @@ use serde::{Deserialize, Serialize};
 
 use crate::thought::runtime_config::{DaemonDefaults, ThoughtConfig};
 
+/// Browser-compatible minimum terminal columns accepted by resize messages.
+pub const TERMINAL_RESIZE_MIN_COLS: u16 = 24;
+/// Browser-compatible maximum terminal columns accepted by resize messages.
+pub const TERMINAL_RESIZE_MAX_COLS: u16 = 240;
+/// Browser-compatible minimum terminal rows accepted by resize messages.
+pub const TERMINAL_RESIZE_MIN_ROWS: u16 = 12;
+/// Browser-compatible maximum terminal rows accepted by resize messages.
+pub const TERMINAL_RESIZE_MAX_ROWS: u16 = 120;
+
+pub fn clamp_terminal_resize(cols: u16, rows: u16) -> (u16, u16) {
+    (
+        cols.clamp(TERMINAL_RESIZE_MIN_COLS, TERMINAL_RESIZE_MAX_COLS),
+        rows.clamp(TERMINAL_RESIZE_MIN_ROWS, TERMINAL_RESIZE_MAX_ROWS),
+    )
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SessionState {

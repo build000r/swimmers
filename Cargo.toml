@@ -39,7 +39,6 @@ exclude = [
     "MODES_OF_REASONING_REPORT_AND_ANALYSIS_OF_PROJECT.md",
     "QUICKSTART.md",
     "refactor/",
-    "scripts/",
     "SMART_RECOMMENDATION_CHAIN.md",
     "test-results/",
     "video/",
@@ -77,6 +76,7 @@ dirs = "6.0.0"
 clap = { version = "4", features = ["derive"] }
 open = "5"
 os_pipe = "1"
+libc = "0.2"
 crc32fast = "1.4"
 fs2 = "0.4"
 cpal = { version = "0.17", optional = true }

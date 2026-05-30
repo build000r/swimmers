@@ -75,7 +75,7 @@ async fn ensure_server_with_opts(
         let log_path = resolve_server_log_path(&parsed_url, opts.log_path_override.as_deref())?;
         let (reader, writer) =
             os_pipe::pipe().map_err(|err| format!("failed to create readiness pipe: {err}"))?;
-        let ready_fd = writer.as_raw_fd().to_string();
+        let ready_fd = writer.as_raw_fd();
 
         let mut child = spawn_server_process(&server_bin, &ready_fd, &log_path)?;
         let pid = child.id();
@@ -276,11 +276,14 @@ fn resolve_server_log_path(
     Ok(dir.join(format!("swimmers-tui-server-{port}.log")))
 }
 
+#[cfg(unix)]
 fn spawn_server_process(
     server_bin: &Path,
-    ready_fd: &str,
+    ready_fd: &i32,
     log_path: &Path,
 ) -> Result<Child, String> {
+    use std::os::unix::process::CommandExt;
+
     if let Some(parent) = log_path.parent() {
         fs::create_dir_all(parent).map_err(|err| {
             format!(
@@ -308,8 +311,19 @@ fn spawn_server_process(
         .try_clone()
         .map_err(|err| format!("failed to clone server log file handle: {err}"))?;
 
-    Command::new(server_bin)
-        .env("SWIMMERS_READY_FD", ready_fd)
+    let ready_fd_for_child = *ready_fd;
+    let ready_fd_env = ready_fd_for_child.to_string();
+    let mut command = Command::new(server_bin);
+
+    // os_pipe intentionally creates non-inheritable fds. The parent copy should
+    // stay close-on-exec; only the forked child copy is made inheritable so the
+    // server can consume SWIMMERS_READY_FD after exec.
+    unsafe {
+        command.pre_exec(move || clear_fd_cloexec(ready_fd_for_child));
+    }
+
+    command
+        .env("SWIMMERS_READY_FD", ready_fd_env)
         .stdin(Stdio::null())
         .stdout(Stdio::from(stdout))
         .stderr(Stdio::from(stderr))
@@ -321,6 +335,21 @@ fn spawn_server_process(
                 log_path.display()
             )
         })
+}
+
+#[cfg(unix)]
+fn clear_fd_cloexec(fd: i32) -> io::Result<()> {
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+    if flags == -1 {
+        return Err(io::Error::last_os_error());
+    }
+
+    let updated = flags & !libc::FD_CLOEXEC;
+    if unsafe { libc::fcntl(fd, libc::F_SETFD, updated) } == -1 {
+        return Err(io::Error::last_os_error());
+    }
+
+    Ok(())
 }
 
 fn read_ready_byte(mut reader: os_pipe::PipeReader) -> io::Result<u8> {
@@ -453,6 +482,36 @@ mod tests {
             err.contains(&override_log.display().to_string()),
             "error should include log path: {err}"
         );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn ensure_server_spawn_passes_ready_fd_to_child() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp_dir = tempdir().expect("temp dir");
+        let script_path = temp_dir.path().join("ready-server.sh");
+        fs::write(&script_path, "#!/bin/sh\nprintf R >&${SWIMMERS_READY_FD}\n")
+            .expect("write ready script");
+
+        let mut permissions = fs::metadata(&script_path)
+            .expect("ready script metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&script_path, permissions).expect("chmod ready script");
+
+        let override_log = temp_dir.path().join("server-ready.log");
+        let opts = EnsureServerOpts {
+            server_bin_override: Some(script_path),
+            log_path_override: Some(override_log),
+        };
+
+        let result =
+            ensure_server_with_opts(&closed_loopback_base_url(), Duration::from_secs(1), opts)
+                .await
+                .expect("ready script should inherit SWIMMERS_READY_FD and signal readiness");
+
+        assert!(matches!(result, ServerHandle::Managed { .. }));
     }
 
     #[tokio::test]

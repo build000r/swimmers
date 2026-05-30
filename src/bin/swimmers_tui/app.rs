@@ -302,6 +302,7 @@ pub(crate) struct App<C: TuiApi> {
     pub(crate) pending_selection_publication:
         Option<oneshot::Receiver<PendingSelectionPublicationResult>>,
     pub(crate) queued_selection_publication: Option<(Option<String>, bool)>,
+    embedded_shutdown: Option<swimmers::startup::EmbeddedTuiShutdown>,
 }
 
 impl<C: TuiApi> App<C> {
@@ -382,7 +383,27 @@ impl<C: TuiApi> App<C> {
             pending_interaction: None,
             pending_selection_publication: None,
             queued_selection_publication: None,
+            embedded_shutdown: None,
         }
+    }
+
+    pub(crate) fn set_embedded_shutdown(
+        &mut self,
+        shutdown: swimmers::startup::EmbeddedTuiShutdown,
+    ) {
+        self.embedded_shutdown = Some(shutdown);
+    }
+
+    pub(crate) fn has_embedded_shutdown(&self) -> bool {
+        self.embedded_shutdown.is_some()
+    }
+
+    pub(crate) fn shutdown_embedded(&mut self) -> anyhow::Result<()> {
+        let Some(shutdown) = self.embedded_shutdown.take() else {
+            return Ok(());
+        };
+        self.runtime
+            .block_on(swimmers::startup::finalize_embedded_tui_shutdown(shutdown))
     }
 
     pub(crate) fn layout_for_terminal(&self, width: u16, height: u16) -> WorkspaceLayout {

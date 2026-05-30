@@ -4732,8 +4732,8 @@ fn parse_hex_rgb_accepts_valid_and_rejects_multibyte_without_panic() {
     assert_eq!(parse_hex_rgb("  #FFFFFF  "), Some((0xFF, 0xFF, 0xFF)));
     assert_eq!(parse_hex_rgb("3930B5"), None); // missing '#'
     assert_eq!(parse_hex_rgb("#12345"), None); // too short
-    // 7-byte multibyte input must return None, not panic on a byte-slice that
-    // splits a multi-byte char ("€" is 3 bytes, so "#€abc" is exactly 7 bytes).
+                                               // 7-byte multibyte input must return None, not panic on a byte-slice that
+                                               // splits a multi-byte char ("€" is 3 bytes, so "#€abc" is exactly 7 bytes).
     assert_eq!(parse_hex_rgb("#\u{20ac}abc"), None);
     assert_eq!(parse_hex_rgb("#\u{e9}\u{e9}\u{e9}"), None);
 }
@@ -8019,6 +8019,19 @@ fn handle_key_event_covers_initial_request_picker_and_quit_paths() {
         &mut app,
         layout,
         KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE),
+    ));
+}
+
+#[test]
+fn ctrl_c_does_not_quit_without_embedded_shutdown() {
+    let api = MockApi::new();
+    let layout = test_layout(120, 32);
+    let mut app = make_app(api);
+
+    assert!(handle_key_event(
+        &mut app,
+        layout,
+        KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
     ));
 }
 
@@ -14024,11 +14037,12 @@ esac
     for _ in 0..5 {
         let runtime = test_runtime();
         let started = Instant::now();
-        let (client, deferred_init) = {
+        let (client, shutdown) = {
             let _runtime_guard = runtime.enter();
             build_embedded_client(&runtime)
         };
         let mut app = App::new(runtime, client);
+        app.set_embedded_shutdown(shutdown);
         let mut renderer = test_renderer(120, 32);
         let layout = app.layout_for_terminal(renderer.width(), renderer.height());
         app.refresh_initial_frame(layout);
@@ -14038,10 +14052,8 @@ esac
         let header_visible = find_text_position(&renderer, "swimmers tui").is_some();
         let empty_state_visible = find_text_position(&renderer, "no tmux sessions found").is_some();
 
-        deferred_init.abort();
-        app.runtime.block_on(async {
-            tokio::task::yield_now().await;
-        });
+        app.shutdown_embedded()
+            .expect("embedded shutdown should complete");
 
         assert!(header_visible, "first frame should render the TUI header");
         assert!(
@@ -14067,6 +14079,65 @@ esac
         EMBEDDED_FIRST_FRAME_BUDGET,
         p95
     );
+}
+
+#[test]
+fn embedded_mode_ctrl_c_requests_bounded_shutdown() {
+    let _lock = TEST_ENV_LOCK.lock().expect("env lock");
+    let original_clawgs = env::var_os("CLAWGS_BIN");
+    let original_data_dir = env::var_os("SWIMMERS_DATA_DIR");
+    let original_tui_url = env::var_os("SWIMMERS_TUI_URL");
+    let temp = tempdir().expect("tempdir");
+    let args_log = temp.path().join("args.log");
+    let input_log = temp.path().join("input.log");
+    let fake_clawgs = write_fake_clawgs_script(&args_log, &input_log, temp.path());
+    let data_dir = temp.path().join("data");
+
+    env::set_var("CLAWGS_BIN", fake_clawgs.as_os_str());
+    env::set_var("SWIMMERS_DATA_DIR", &data_dir);
+    env::remove_var("SWIMMERS_TUI_URL");
+
+    let (_tmux_dir, original_path) = install_fake_tmux(
+        r#"#!/bin/sh
+set -eu
+case "${1-}" in
+  list-sessions)
+    exit 0
+    ;;
+  *)
+    exit 0
+    ;;
+esac
+"#,
+    );
+
+    let runtime = test_runtime();
+    let (client, shutdown) = {
+        let _runtime_guard = runtime.enter();
+        build_embedded_client(&runtime)
+    };
+    let mut app = App::new(runtime, client);
+    app.set_embedded_shutdown(shutdown);
+    let layout = test_layout(120, 32);
+
+    assert!(!handle_key_event(
+        &mut app,
+        layout,
+        KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+    ));
+
+    let started = Instant::now();
+    app.shutdown_embedded()
+        .expect("embedded shutdown should complete");
+    assert!(
+        started.elapsed() < Duration::from_secs(3),
+        "embedded shutdown must stay bounded"
+    );
+
+    restore_os_env_var("PATH", original_path);
+    restore_os_env_var("SWIMMERS_TUI_URL", original_tui_url);
+    restore_os_env_var("SWIMMERS_DATA_DIR", original_data_dir);
+    restore_os_env_var("CLAWGS_BIN", original_clawgs);
 }
 
 #[test]

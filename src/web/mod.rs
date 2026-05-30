@@ -21,7 +21,7 @@ use crate::session::actor::{
     ActorHandle, InputDeliveryResult, OutputFrame, ReplayCursor, SessionCommand, SubscribeOutcome,
 };
 use crate::session::supervisor::LifecycleEvent;
-use crate::types::{opcodes, ControlEvent, ErrorResponse};
+use crate::types::{clamp_terminal_resize, opcodes, ControlEvent, ErrorResponse};
 
 const APP_JS_ROUTE: &str = "/app.js";
 const RENDERED_SURFACE_JS_ROUTE: &str = "/rendered_surface.js";
@@ -1059,7 +1059,9 @@ fn decode_text_client_message(auth: &AuthInfo, text: &str) -> WsClientDecision {
             } else if data.len() > MAX_WS_INPUT_BYTES {
                 WsClientDecision::SendError {
                     code: "INPUT_TOO_LARGE",
-                    message: format!("terminal input frame exceeds {MAX_WS_INPUT_BYTES} byte limit"),
+                    message: format!(
+                        "terminal input frame exceeds {MAX_WS_INPUT_BYTES} byte limit"
+                    ),
                     client_message_id,
                 }
             } else {
@@ -1088,7 +1090,9 @@ fn decode_text_client_message(auth: &AuthInfo, text: &str) -> WsClientDecision {
             } else if data.len() > MAX_WS_INPUT_BYTES {
                 WsClientDecision::SendError {
                     code: "INPUT_TOO_LARGE",
-                    message: format!("terminal input frame exceeds {MAX_WS_INPUT_BYTES} byte limit"),
+                    message: format!(
+                        "terminal input frame exceeds {MAX_WS_INPUT_BYTES} byte limit"
+                    ),
                     client_message_id,
                 }
             } else {
@@ -1109,6 +1113,7 @@ fn decode_text_client_message(auth: &AuthInfo, text: &str) -> WsClientDecision {
                     client_message_id: None,
                 };
             }
+            let (cols, rows) = clamp_terminal_resize(cols, rows);
             WsClientDecision::Forward {
                 cmd: SessionCommand::Resize { cols, rows },
                 client_message_id: None,
@@ -2071,6 +2076,36 @@ mod tests {
             } => {
                 assert_eq!(cols, 80);
                 assert_eq!(rows, 24);
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn decode_text_client_message_resize_clamps_tiny_payloads() {
+        let json = r#"{"type":"resize","cols":0,"rows":1}"#;
+        match decode_text_client_message(&operator_auth(), json) {
+            WsClientDecision::Forward {
+                cmd: SessionCommand::Resize { cols, rows },
+                ..
+            } => {
+                assert_eq!(cols, crate::types::TERMINAL_RESIZE_MIN_COLS);
+                assert_eq!(rows, crate::types::TERMINAL_RESIZE_MIN_ROWS);
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn decode_text_client_message_resize_clamps_huge_payloads() {
+        let json = r#"{"type":"resize","cols":65535,"rows":65535}"#;
+        match decode_text_client_message(&operator_auth(), json) {
+            WsClientDecision::Forward {
+                cmd: SessionCommand::Resize { cols, rows },
+                ..
+            } => {
+                assert_eq!(cols, crate::types::TERMINAL_RESIZE_MAX_COLS);
+                assert_eq!(rows, crate::types::TERMINAL_RESIZE_MAX_ROWS);
             }
             other => panic!("unexpected: {other:?}"),
         }

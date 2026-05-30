@@ -1,8 +1,10 @@
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::ffi::OsStr;
 use std::fs;
 use std::io;
 use std::io::Write as _;
 use std::path::PathBuf;
+use std::process::Output;
 use std::sync::{
     atomic::{AtomicU64, Ordering},
     Arc, OnceLock,
@@ -27,9 +29,9 @@ use crate::session::replay_ring::ReplayRing;
 use crate::state::detector::StateDetector;
 use crate::tmux_target::{exact_pane_target, exact_session_target};
 use crate::types::{
-    ControlEvent, MermaidArtifactResponse, PlanFileResponse, SessionBatchMembership,
-    SessionSkillPayload, SessionState, SessionStatePayload, SessionSummary, SessionTitlePayload,
-    StateEvidence, TerminalSnapshot, TransportHealth,
+    clamp_terminal_resize, ControlEvent, MermaidArtifactResponse, PlanFileResponse,
+    SessionBatchMembership, SessionSkillPayload, SessionState, SessionStatePayload, SessionSummary,
+    SessionTitlePayload, StateEvidence, TerminalSnapshot, TransportHealth,
 };
 
 const CWD_REFRESH_MIN_INTERVAL: Duration = Duration::from_millis(750);
@@ -38,6 +40,7 @@ const LIVENESS_CHECK_INTERVAL: Duration = Duration::from_millis(2_000);
 const TMUX_DISPLAY_MESSAGE_TIMEOUT: Duration = Duration::from_millis(500);
 const TMUX_SEND_KEYS_TIMEOUT: Duration = Duration::from_millis(500);
 const TMUX_PASTE_BUFFER_TIMEOUT: Duration = Duration::from_secs(2);
+const TMUX_CAPTURE_PANE_TIMEOUT: Duration = Duration::from_secs(1);
 const TMUX_AGENT_SUBMIT_DOUBLE_ENTER_DELAY: Duration = Duration::from_millis(75);
 const PROCESS_ENTRIES_QUERY_TIMEOUT: Duration = Duration::from_millis(750);
 const PROCESS_ENTRIES_CACHE_TTL: Duration = Duration::from_millis(1_500);
@@ -46,6 +49,81 @@ const MAX_OUTPUT_SUBSCRIBERS_PER_SESSION: usize = 16;
 const TMUX_FALLBACK_TERM: &str = "xterm-256color";
 const TMUX_FALLBACK_COLORTERM: &str = "truecolor";
 static NEXT_TMUX_SUBMIT_BUFFER_ID: AtomicU64 = AtomicU64::new(1);
+
+fn tmux_command(program: impl AsRef<OsStr>, args: &[&str]) -> Command {
+    let mut command = Command::new(program);
+    command
+        .args(args)
+        .env_remove("TMUX")
+        .env_remove("TMUX_PANE")
+        .kill_on_drop(true);
+    command
+}
+
+pub(crate) async fn run_bounded_tmux_command(
+    program: impl AsRef<OsStr>,
+    args: &[&str],
+    timeout_duration: Duration,
+    operation: &'static str,
+) -> anyhow::Result<Output> {
+    let started = Instant::now();
+    let mut command = tmux_command(program, args);
+    match tokio::time::timeout(timeout_duration, command.output()).await {
+        Ok(Ok(output)) => {
+            log_bounded_tmux_command_elapsed(
+                operation,
+                started.elapsed(),
+                timeout_duration,
+                Some(output.status.success()),
+            );
+            Ok(output)
+        }
+        Ok(Err(err)) => {
+            let elapsed = started.elapsed();
+            debug!(
+                operation,
+                elapsed_ms = elapsed.as_millis() as u64,
+                "tmux command failed to spawn: {}",
+                err
+            );
+            Err(anyhow::anyhow!("failed to run tmux {operation}: {err}"))
+        }
+        Err(_) => {
+            let elapsed = started.elapsed();
+            warn!(
+                operation,
+                elapsed_ms = elapsed.as_millis() as u64,
+                timeout_ms = timeout_duration.as_millis() as u64,
+                "tmux command timed out"
+            );
+            Err(anyhow::anyhow!(
+                "tmux {operation} timed out after {}ms",
+                timeout_duration.as_millis()
+            ))
+        }
+    }
+}
+
+fn log_bounded_tmux_command_elapsed(
+    operation: &'static str,
+    elapsed: Duration,
+    timeout_duration: Duration,
+    success: Option<bool>,
+) {
+    let elapsed_ms = elapsed.as_millis() as u64;
+    let timeout_ms = timeout_duration.as_millis() as u64;
+    if elapsed.as_millis() >= timeout_duration.as_millis().saturating_div(2) {
+        warn!(
+            operation,
+            elapsed_ms, timeout_ms, success, "bounded tmux command completed slowly"
+        );
+    } else {
+        debug!(
+            operation,
+            elapsed_ms, timeout_ms, success, "bounded tmux command completed"
+        );
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Public command enum -- sent to the actor over its mpsc channel
@@ -214,7 +292,7 @@ impl ActorHandle {
         self.event_tx.subscribe()
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, debug_assertions))]
     pub fn test_handle(
         session_id: impl Into<String>,
         tmux_name: impl Into<String>,
@@ -709,6 +787,7 @@ impl SessionActor {
     }
 
     fn handle_resize(&mut self, cols: u16, rows: u16) {
+        let (cols, rows) = clamp_terminal_resize(cols, rows);
         self.cols = cols;
         self.rows = rows;
         let size = PtySize {
@@ -1578,13 +1657,13 @@ async fn capture_pane_tail_with_command(
     let start = format!("-{lines}");
     let target = exact_pane_target(tmux_name);
 
-    let output = Command::new(tmux_command)
-        .args(["capture-pane", "-p", "-J", "-t", &target, "-S", &start])
-        .env_remove("TMUX")
-        .env_remove("TMUX_PANE")
-        .output()
-        .await
-        .map_err(|e| anyhow::anyhow!("failed to run tmux capture-pane: {}", e))?;
+    let output = run_bounded_tmux_command(
+        tmux_command,
+        &["capture-pane", "-p", "-J", "-t", &target, "-S", &start],
+        TMUX_CAPTURE_PANE_TIMEOUT,
+        "capture-pane",
+    )
+    .await?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -1732,22 +1811,13 @@ fn next_tmux_submit_buffer_name() -> String {
 }
 
 async fn set_tmux_buffer(buffer_name: &str, text: &str) -> anyhow::Result<()> {
-    let mut command = Command::new("tmux");
-    command
-        .args(["set-buffer", "-b", buffer_name, "--", text])
-        .env_remove("TMUX")
-        .env_remove("TMUX_PANE")
-        .kill_on_drop(true);
-
-    let output = tokio::time::timeout(TMUX_PASTE_BUFFER_TIMEOUT, command.output())
-        .await
-        .map_err(|_| {
-            anyhow::anyhow!(
-                "tmux set-buffer timed out after {}ms",
-                TMUX_PASTE_BUFFER_TIMEOUT.as_millis()
-            )
-        })?
-        .map_err(|e| anyhow::anyhow!("failed to run tmux set-buffer: {e}"))?;
+    let output = run_bounded_tmux_command(
+        "tmux",
+        &["set-buffer", "-b", buffer_name, "--", text],
+        TMUX_PASTE_BUFFER_TIMEOUT,
+        "set-buffer",
+    )
+    .await?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -1762,22 +1832,13 @@ async fn set_tmux_buffer(buffer_name: &str, text: &str) -> anyhow::Result<()> {
 }
 
 async fn paste_tmux_buffer(target: &str, buffer_name: &str) -> anyhow::Result<()> {
-    let mut command = Command::new("tmux");
-    command
-        .args(["paste-buffer", "-dpr", "-b", buffer_name, "-t", target])
-        .env_remove("TMUX")
-        .env_remove("TMUX_PANE")
-        .kill_on_drop(true);
-
-    let output = tokio::time::timeout(TMUX_PASTE_BUFFER_TIMEOUT, command.output())
-        .await
-        .map_err(|_| {
-            anyhow::anyhow!(
-                "tmux paste-buffer timed out after {}ms",
-                TMUX_PASTE_BUFFER_TIMEOUT.as_millis()
-            )
-        })?
-        .map_err(|e| anyhow::anyhow!("failed to run tmux paste-buffer: {e}"))?;
+    let output = run_bounded_tmux_command(
+        "tmux",
+        &["paste-buffer", "-dpr", "-b", buffer_name, "-t", target],
+        TMUX_PASTE_BUFFER_TIMEOUT,
+        "paste-buffer",
+    )
+    .await?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -1792,23 +1853,10 @@ async fn paste_tmux_buffer(target: &str, buffer_name: &str) -> anyhow::Result<()
 }
 
 async fn send_tmux_keys(target: &str, keys: &[&str]) -> anyhow::Result<()> {
-    let mut command = Command::new("tmux");
-    command
-        .args(["send-keys", "-t", target])
-        .args(keys)
-        .env_remove("TMUX")
-        .env_remove("TMUX_PANE")
-        .kill_on_drop(true);
-
-    let output = tokio::time::timeout(TMUX_SEND_KEYS_TIMEOUT, command.output())
-        .await
-        .map_err(|_| {
-            anyhow::anyhow!(
-                "tmux send-keys timed out after {}ms",
-                TMUX_SEND_KEYS_TIMEOUT.as_millis()
-            )
-        })?
-        .map_err(|e| anyhow::anyhow!("failed to run tmux send-keys: {e}"))?;
+    let mut args = vec!["send-keys", "-t", target];
+    args.extend_from_slice(keys);
+    let output =
+        run_bounded_tmux_command("tmux", &args, TMUX_SEND_KEYS_TIMEOUT, "send-keys").await?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -1939,22 +1987,13 @@ fn prefix_is_zsh_jobs_summary(prefix: &str) -> bool {
 /// Query tmux for the active pane cwd of a session.
 async fn query_tmux_display_message(tmux_name: &str, format: &str) -> anyhow::Result<String> {
     let target = exact_pane_target(tmux_name);
-    let mut command = Command::new("tmux");
-    command
-        .args(["display-message", "-p", "-t", &target, format])
-        .env_remove("TMUX")
-        .env_remove("TMUX_PANE")
-        .kill_on_drop(true);
-
-    let output = tokio::time::timeout(TMUX_DISPLAY_MESSAGE_TIMEOUT, command.output())
-        .await
-        .map_err(|_| {
-            anyhow::anyhow!(
-                "tmux display-message timed out after {}ms",
-                TMUX_DISPLAY_MESSAGE_TIMEOUT.as_millis()
-            )
-        })?
-        .map_err(|e| anyhow::anyhow!("failed to run tmux display-message: {}", e))?;
+    let output = run_bounded_tmux_command(
+        "tmux",
+        &["display-message", "-p", "-t", &target, format],
+        TMUX_DISPLAY_MESSAGE_TIMEOUT,
+        "display-message",
+    )
+    .await?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -2648,12 +2687,13 @@ mod tests {
         find_osc_payload_end, line_looks_prompt_like, normalize_skill_name,
         normalize_submit_line_text, osc_payloads, output_counts_as_meaningful_activity,
         parse_process_entry, percent_decode, process_entries_cache, query_tmux_session_created,
-        query_tool_from_tmux_process_tree, resolve_tmux_terminal_env, should_refresh_cwd_from_tmux,
-        should_refresh_tool_from_tmux, state_detector_for_initial_tool, submit_line_fallback_input,
-        tmux_input_chunks, visible_output_is_meaningful, write_and_flush_input,
-        write_input_counts_as_activity, ControlEvent, PaneLiveness, ProcessEntriesCache,
-        ProcessEntry, SessionActor, SessionCommand, TmuxInputChunk, CWD_REFRESH_MIN_INTERVAL,
-        PROCESS_ENTRIES_CACHE_TTL, TOOL_REFRESH_MIN_INTERVAL,
+        query_tool_from_tmux_process_tree, resolve_tmux_terminal_env, run_bounded_tmux_command,
+        should_refresh_cwd_from_tmux, should_refresh_tool_from_tmux,
+        state_detector_for_initial_tool, submit_line_fallback_input, tmux_input_chunks,
+        visible_output_is_meaningful, write_and_flush_input, write_input_counts_as_activity,
+        ControlEvent, PaneLiveness, ProcessEntriesCache, ProcessEntry, SessionActor,
+        SessionCommand, TmuxInputChunk, CWD_REFRESH_MIN_INTERVAL, PROCESS_ENTRIES_CACHE_TTL,
+        TOOL_REFRESH_MIN_INTERVAL,
     };
     use crate::config::Config;
     use crate::scroll::guard::ScrollGuard;
@@ -2896,6 +2936,26 @@ mod tests {
         let summary = actor.build_summary();
         assert_eq!(summary.state, crate::types::SessionState::Idle);
         assert_eq!(summary.rest_state, crate::types::RestState::Active);
+    }
+
+    #[test]
+    fn handle_resize_clamps_zero_and_one_cell_dimensions() {
+        let mut actor = test_actor();
+
+        actor.handle_resize(0, 1);
+
+        assert_eq!(actor.cols, crate::types::TERMINAL_RESIZE_MIN_COLS);
+        assert_eq!(actor.rows, crate::types::TERMINAL_RESIZE_MIN_ROWS);
+    }
+
+    #[test]
+    fn handle_resize_clamps_huge_dimensions() {
+        let mut actor = test_actor();
+
+        actor.handle_resize(u16::MAX, u16::MAX);
+
+        assert_eq!(actor.cols, crate::types::TERMINAL_RESIZE_MAX_COLS);
+        assert_eq!(actor.rows, crate::types::TERMINAL_RESIZE_MAX_ROWS);
     }
 
     #[tokio::test]
@@ -3905,6 +3965,53 @@ exit 1
         assert_eq!(
             std::fs::read_to_string(&target_file).expect("target file"),
             "=0:\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn bounded_tmux_command_scrubs_nested_tmux_env_vars() {
+        let _guard = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let dir = tempfile::tempdir().expect("tempdir");
+        let tmux = dir.path().join("tmux");
+        std::fs::write(
+            &tmux,
+            "#!/bin/sh\nprintf 'TMUX=%s\\nTMUX_PANE=%s\\n' \"${TMUX-unset}\" \"${TMUX_PANE-unset}\"\n",
+        )
+        .expect("tmux");
+        let mut perms = std::fs::metadata(&tmux).expect("metadata").permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&tmux, perms).expect("chmod");
+
+        let previous_tmux = std::env::var_os("TMUX");
+        let previous_tmux_pane = std::env::var_os("TMUX_PANE");
+        std::env::set_var("TMUX", "/tmp/tmux,123,0");
+        std::env::set_var("TMUX_PANE", "%1");
+
+        let output = run_bounded_tmux_command(
+            tmux.as_os_str(),
+            &["display-message"],
+            Duration::from_secs(2),
+            "test-env-scrub",
+        )
+        .await;
+
+        match previous_tmux {
+            Some(value) => std::env::set_var("TMUX", value),
+            None => std::env::remove_var("TMUX"),
+        }
+        match previous_tmux_pane {
+            Some(value) => std::env::set_var("TMUX_PANE", value),
+            None => std::env::remove_var("TMUX_PANE"),
+        }
+
+        let output = output.expect("tmux env probe");
+
+        assert!(output.status.success());
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout),
+            "TMUX=unset\nTMUX_PANE=unset\n"
         );
     }
 

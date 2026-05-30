@@ -21,7 +21,7 @@ use std::time::{Duration, Instant};
 
 use clap::{Parser, Subcommand};
 
-use crate::config::{AuthMode, Config};
+use crate::config::{AuthMode, Config, ConfigDiagnostic, ConfigDiagnosticLevel, ConfigLoad};
 use crate::thought::emitter_client::resolve_clawgs_bin;
 use crate::thought::runtime_config::DaemonDefaults;
 
@@ -44,6 +44,8 @@ const ENV_VARS: &[&str] = &[
     "SWIMMERS_ATTENTION_GROUP_INCLUDE_UNNUMBERED",
     "SWIMMERS_THOUGHT_BACKEND",
     "CLAWGS_BIN",
+    "SWIMMERS_THOUGHT_TICK_MS",
+    "SWIMMERS_OUTBOUND_QUEUE_BOUND",
     "SWIMMERS_REPLAY_BUFFER_SIZE",
     "SWIMMERS_DATA_DIR",
     "SWIMMERS_TUI_URL",
@@ -74,6 +76,9 @@ const ENV_VAR_HELP: &str = "ENVIRONMENT VARIABLES:
                                '1' to include non-numbered tmux sessions in attention groups
   SWIMMERS_THOUGHT_BACKEND     'daemon' or 'inproc' (default: daemon)
   CLAWGS_BIN                   Override path to the clawgs binary
+  SWIMMERS_THOUGHT_TICK_MS     Thought polling tick in milliseconds, 250-300000 (default: 15000)
+  SWIMMERS_OUTBOUND_QUEUE_BOUND
+                               WebSocket outbound queue bound, 64-65536 (default: 4096)
   SWIMMERS_REPLAY_BUFFER_SIZE  Replay ring size in bytes (default: 524288)
   SWIMMERS_DATA_DIR            Override the data directory
   SWIMMERS_TUI_URL             API URL the TUI connects to
@@ -176,28 +181,85 @@ pub struct EnvVarRow {
     pub source: &'static str,
 }
 
+fn has_diagnostic(
+    diagnostics: &[ConfigDiagnostic],
+    name: &str,
+    level: ConfigDiagnosticLevel,
+) -> bool {
+    diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.key == name && diagnostic.level == level)
+}
+
+fn source_for(name: &str, diagnostics: &[ConfigDiagnostic]) -> &'static str {
+    if std::env::var(name).is_err() {
+        return "default";
+    }
+    if has_diagnostic(diagnostics, name, ConfigDiagnosticLevel::Error) {
+        "env (error)"
+    } else if has_diagnostic(diagnostics, name, ConfigDiagnosticLevel::Warning) {
+        "env (warning)"
+    } else {
+        "env"
+    }
+}
+
+fn current_for(name: &str, load: &ConfigLoad) -> Option<String> {
+    match name {
+        "PORT" => Some(load.config.port.to_string()),
+        "SWIMMERS_BIND" => Some(load.config.bind.clone()),
+        "AUTH_MODE" => Some(load.config.auth_mode.as_env_value().to_string()),
+        "AUTH_TOKEN" => Some(
+            load.config
+                .auth_token
+                .as_ref()
+                .map(|_| "***")
+                .unwrap_or("(unset)")
+                .to_string(),
+        ),
+        "OBSERVER_TOKEN" => Some(
+            load.config
+                .observer_token
+                .as_ref()
+                .map(|_| "***")
+                .unwrap_or("(unset)")
+                .to_string(),
+        ),
+        "SWIMMERS_THOUGHT_BACKEND" => Some(load.config.thought_backend.as_env_value().to_string()),
+        "SWIMMERS_THOUGHT_TICK_MS" => Some(load.config.thought_tick_ms.to_string()),
+        "SWIMMERS_OUTBOUND_QUEUE_BOUND" => Some(load.config.outbound_queue_bound.to_string()),
+        "SWIMMERS_REPLAY_BUFFER_SIZE" => Some(load.config.replay_buffer_size.to_string()),
+        _ => None,
+    }
+}
+
 /// Build the `swimmers config` table from the current environment.
 ///
 /// Defaults are pulled from [`Config::default`] where possible so that the
 /// table cannot silently drift from runtime defaults. Secret variables are
 /// rendered as `***` when present.
 pub fn env_var_rows() -> Vec<EnvVarRow> {
+    let load = Config::from_env_report();
+    env_var_rows_from_load(&load)
+}
+
+pub fn env_var_rows_from_load(load: &ConfigLoad) -> Vec<EnvVarRow> {
     let defaults = Config::default();
     ENV_VARS
         .iter()
         .map(|name| {
             let default = default_for(name, &defaults);
-            let (current, source) = match std::env::var(name) {
+            let current = current_for(name, load).unwrap_or_else(|| match std::env::var(name) {
                 Ok(val) if !val.is_empty() => {
-                    let rendered = if SECRET_VARS.contains(name) {
+                    if SECRET_VARS.contains(name) {
                         "***".to_string()
                     } else {
                         val
-                    };
-                    (rendered, "env")
+                    }
                 }
-                _ => (default.clone(), "default"),
-            };
+                _ => default.clone(),
+            });
+            let source = source_for(name, &load.diagnostics);
             EnvVarRow {
                 name,
                 default,
@@ -226,6 +288,8 @@ fn default_for(name: &str, config: &Config) -> String {
         "SWIMMERS_ATTENTION_GROUP_INCLUDE_UNNUMBERED" => "(unset)".to_string(),
         "SWIMMERS_THOUGHT_BACKEND" => "daemon".to_string(),
         "CLAWGS_BIN" => "(auto)".to_string(),
+        "SWIMMERS_THOUGHT_TICK_MS" => config.thought_tick_ms.to_string(),
+        "SWIMMERS_OUTBOUND_QUEUE_BOUND" => config.outbound_queue_bound.to_string(),
         "SWIMMERS_REPLAY_BUFFER_SIZE" => config.replay_buffer_size.to_string(),
         "SWIMMERS_DATA_DIR" => "(platform data dir)".to_string(),
         "SWIMMERS_TUI_URL" => "(unset)".to_string(),
@@ -240,7 +304,13 @@ fn default_for(name: &str, config: &Config) -> String {
 
 /// Print the `swimmers config` table to stdout.
 pub fn print_config_table() {
-    let rows = env_var_rows();
+    let load = Config::from_env_report();
+    print_config_table_for_load(&load);
+    print_config_diagnostics(&load.diagnostics);
+}
+
+pub fn print_config_table_for_load(load: &ConfigLoad) {
+    let rows = env_var_rows_from_load(load);
     let name_w = rows.iter().map(|r| r.name.len()).max().unwrap_or(0).max(4);
     let default_w = rows
         .iter()
@@ -278,12 +348,39 @@ pub fn print_config_table() {
     }
 }
 
+pub fn print_config_diagnostics(diagnostics: &[ConfigDiagnostic]) {
+    for diagnostic in diagnostics {
+        eprintln!(
+            "config {}: {}: {}",
+            diagnostic.level.as_str(),
+            diagnostic.key,
+            diagnostic.message
+        );
+    }
+}
+
 /// Result of a single doctor check.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DoctorFinding {
     pub ok: bool,
     pub name: &'static str,
     pub detail: String,
+}
+
+pub fn config_diagnostic_findings(diagnostics: &[ConfigDiagnostic]) -> Vec<DoctorFinding> {
+    diagnostics
+        .iter()
+        .map(|diagnostic| DoctorFinding {
+            ok: !diagnostic.is_error(),
+            name: "config/env",
+            detail: format!(
+                "{}: {}: {}",
+                diagnostic.level.as_str(),
+                diagnostic.key,
+                diagnostic.message
+            ),
+        })
+        .collect()
 }
 
 /// Run all doctor checks. Returns one finding per check (passing or failing).
@@ -696,12 +793,20 @@ pub fn print_doctor_findings(findings: &[DoctorFinding]) -> i32 {
 }
 
 fn print_doctor_finding(finding: &DoctorFinding) -> bool {
-    let mark = if finding.ok { "ok " } else { "FAIL" };
-    let line = format!("[{mark}] {}: {}", finding.name, finding.detail);
-    if finding.ok {
-        println!("{line}");
+    let mark = if !finding.ok {
+        "FAIL"
+    } else if finding.detail.starts_with("warning:") {
+        "WARN"
     } else {
+        "ok "
+    };
+    let line = format!("[{mark}] {}: {}", finding.name, finding.detail);
+    if !finding.ok {
         eprintln!("{line}");
+    } else if mark == "WARN" {
+        eprintln!("{line}");
+    } else {
+        println!("{line}");
     }
     finding.ok
 }
@@ -725,6 +830,24 @@ pub const EXIT_CONFIG: i32 = 78;
 
 /// Returns `Err(message)` if the active configuration would expose the API
 /// outside the trusted network for the selected auth mode.
+pub fn enforce_startup_config(
+    config: &Config,
+    diagnostics: &[ConfigDiagnostic],
+) -> Result<(), String> {
+    let errors = diagnostics
+        .iter()
+        .filter(|diagnostic| diagnostic.is_error())
+        .map(|diagnostic| format!("{}: {}", diagnostic.key, diagnostic.message))
+        .collect::<Vec<_>>();
+    if !errors.is_empty() {
+        return Err(format!(
+            "refusing to start due to invalid configuration: {}",
+            errors.join("; ")
+        ));
+    }
+    enforce_trust_bind_safety(config)
+}
+
 pub fn enforce_trust_bind_safety(config: &Config) -> Result<(), String> {
     if matches!(config.auth_mode, AuthMode::LocalTrust) && !is_loopback_bind(&config.bind) {
         return Err(format!(
@@ -987,6 +1110,32 @@ mod tests {
     }
 
     #[test]
+    fn doctor_reports_config_warning_without_failing() {
+        let diagnostics = [ConfigDiagnostic {
+            level: ConfigDiagnosticLevel::Warning,
+            key: "PORT",
+            message: "value \"bad\" is not a valid port; using default 3210".to_string(),
+        }];
+        let findings = config_diagnostic_findings(&diagnostics);
+        assert_eq!(findings.len(), 1);
+        assert!(findings[0].ok);
+        assert!(findings[0].detail.starts_with("warning: PORT"));
+    }
+
+    #[test]
+    fn doctor_reports_config_error_as_failure() {
+        let diagnostics = [ConfigDiagnostic {
+            level: ConfigDiagnosticLevel::Error,
+            key: "AUTH_MODE",
+            message: "unsupported value \"open\"".to_string(),
+        }];
+        let findings = config_diagnostic_findings(&diagnostics);
+        assert_eq!(findings.len(), 1);
+        assert!(!findings[0].ok);
+        assert!(findings[0].detail.starts_with("error: AUTH_MODE"));
+    }
+
+    #[test]
     fn doctor_flags_tailnet_trust_without_tailnet_bind() {
         let c = cfg("0.0.0.0", AuthMode::TailnetTrust, None);
         let findings = run_doctor_checks(
@@ -1076,13 +1225,41 @@ mod tests {
 
     #[test]
     fn env_table_redacts_secrets() {
-        // Set then unset around the test to avoid polluting other tests.
-        std::env::set_var("AUTH_TOKEN", "supersecret");
-        let rows = env_var_rows();
+        let load = ConfigLoad {
+            config: Config {
+                auth_token: Some("supersecret".to_string()),
+                ..Config::default()
+            },
+            diagnostics: Vec::new(),
+        };
+        let rows = env_var_rows_from_load(&load);
         let auth = rows.iter().find(|r| r.name == "AUTH_TOKEN").unwrap();
         assert_eq!(auth.current, "***");
         assert_ne!(auth.current, "supersecret");
-        std::env::remove_var("AUTH_TOKEN");
+    }
+
+    #[test]
+    fn trust_startup_config_rejects_config_errors() {
+        let c = cfg("127.0.0.1", AuthMode::LocalTrust, None);
+        let diagnostics = [ConfigDiagnostic {
+            level: ConfigDiagnosticLevel::Error,
+            key: "AUTH_MODE",
+            message: "unsupported value \"open\"".to_string(),
+        }];
+        let err = enforce_startup_config(&c, &diagnostics).unwrap_err();
+        assert!(err.contains("invalid configuration"));
+        assert!(err.contains("AUTH_MODE"));
+    }
+
+    #[test]
+    fn trust_startup_config_allows_warnings_when_bind_is_safe() {
+        let c = cfg("127.0.0.1", AuthMode::LocalTrust, None);
+        let diagnostics = [ConfigDiagnostic {
+            level: ConfigDiagnosticLevel::Warning,
+            key: "PORT",
+            message: "using default 3210".to_string(),
+        }];
+        assert!(enforce_startup_config(&c, &diagnostics).is_ok());
     }
 
     fn fast_timeout() -> Duration {

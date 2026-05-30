@@ -3,28 +3,26 @@ use std::time::Duration;
 
 use chrono::Utc;
 use futures::future::BoxFuture;
-use futures::StreamExt;
 use tokio::sync::oneshot;
 
 use swimmers::api::remote_sessions;
 use swimmers::api::service::{
-    list_dirs as list_dirs_service, list_repo_search_entries as list_repo_search_entries_service,
+    create_local_sessions_batch, list_dirs as list_dirs_service,
+    list_repo_search_entries as list_repo_search_entries_service, list_sessions_for_client,
     native_status_for_host as native_status_for_host_service, open_native_attention_group_for_host,
-    open_native_session_for_host, start_dir_repo_action as start_dir_repo_action_service,
-    update_dir_group_memberships as update_dir_group_memberships_service, NativeOpenServiceError,
+    open_native_session_for_host, request_plan_file,
+    start_dir_repo_action as start_dir_repo_action_service,
+    test_thought_config as test_thought_config_service, thought_config_response,
+    update_dir_group_memberships as update_dir_group_memberships_service,
+    update_thought_config as update_thought_config_service, NativeOpenServiceError,
 };
-use swimmers::api::sessions::{
-    create_sessions_batch_result, new_batch_context, send_group_input_service,
-    session_batch_membership, BATCH_CREATE_CONCURRENCY, BATCH_CREATE_MAX_DIRS,
-};
+use swimmers::api::sessions::send_group_input_service;
 use swimmers::api::{AppState, PublishedSelectionState};
 use swimmers::openrouter_models::{
     cached_or_default_openrouter_candidates, refresh_openrouter_model_cache,
 };
 use swimmers::session::actor::SessionCommand;
-use swimmers::thought::probe::run_thought_config_probe;
 use swimmers::thought::runtime_config::ThoughtConfig;
-use swimmers::thought_ui::thought_config_ui_metadata;
 use swimmers::types::{
     AdoptSessionResponse, AttentionGroupLayout, CreateSessionRequest, CreateSessionResponse,
     CreateSessionsBatchRequest, CreateSessionsBatchResponse, DirGroupMembershipUpdateRequest,
@@ -57,7 +55,7 @@ impl InProcessApi {
     }
 
     fn fetch_local_sessions(&self) -> BoxFuture<'_, Result<Vec<SessionSummary>, String>> {
-        Box::pin(async move { Ok(self.state.supervisor.list_sessions().await) })
+        Box::pin(async move { Ok(list_sessions_for_client(&self.state, false).await) })
     }
 }
 
@@ -77,12 +75,7 @@ fn bridge_status_label(status: swimmers::thought::health::BridgeStatus) -> Strin
 
 impl TuiApi for InProcessApi {
     fn fetch_sessions(&self) -> BoxFuture<'_, Result<Vec<SessionSummary>, String>> {
-        // Mirrors: src/api/sessions.rs:23 (list_sessions)
-        Box::pin(async move {
-            let mut sessions = self.state.supervisor.list_sessions().await;
-            sessions.extend(remote_sessions::list_remote_sessions().await);
-            Ok(sessions)
-        })
+        Box::pin(async move { Ok(list_sessions_for_client(&self.state, true).await) })
     }
 
     fn fetch_sessions_for_initial_frame(
@@ -128,45 +121,17 @@ impl TuiApi for InProcessApi {
     }
 
     fn fetch_thought_config(&self) -> BoxFuture<'_, Result<ThoughtConfigResponse, String>> {
-        // Mirrors: src/api/thought_config.rs:19 (get_thought_config)
-        Box::pin(async move {
-            let config = self.state.thought_config.read().await.clone();
-            Ok(ThoughtConfigResponse {
-                config,
-                daemon_defaults: self.state.current_daemon_defaults(),
-                ui: thought_config_ui_metadata(&cached_or_default_openrouter_candidates()),
-            })
-        })
+        Box::pin(async move { Ok(thought_config_response(&self.state).await) })
     }
 
     fn update_thought_config(
         &self,
         config: ThoughtConfig,
     ) -> BoxFuture<'_, Result<ThoughtConfig, String>> {
-        // Mirrors: src/api/thought_config.rs:43 (put_thought_config)
         Box::pin(async move {
-            let config = config
-                .normalize_and_validate()
-                .map_err(|err| err.to_string())?;
-
-            let store = self
-                .state
-                .current_file_store()
-                .ok_or_else(|| "thought config persistence is unavailable".to_string())?;
-
-            // Hold the runtime-config write lock across the disk save and the
-            // in-memory update so disk and in-memory state cannot diverge under
-            // concurrent updaters: the last writer to land on disk is also the
-            // last writer to land in memory.
-            let mut runtime_config = self.state.thought_config.write().await;
-            store.save_thought_config(&config).await.map_err(|err| {
-                tracing::error!(error = %err, "failed to persist thought runtime config");
-                "failed to persist thought config".to_string()
-            })?;
-            *runtime_config = config.clone();
-            drop(runtime_config);
-
-            Ok(config)
+            update_thought_config_service(&self.state, config)
+                .await
+                .map_err(|err| err.message().to_string())
         })
     }
 
@@ -174,12 +139,10 @@ impl TuiApi for InProcessApi {
         &self,
         config: ThoughtConfig,
     ) -> BoxFuture<'_, Result<ThoughtConfigTestResponse, String>> {
-        // Mirrors: src/api/thought_config.rs:100 (post_thought_config_test)
         Box::pin(async move {
-            let config = config
-                .normalize_and_validate()
-                .map_err(|err| err.to_string())?;
-            Ok(run_thought_config_probe(&config).await)
+            test_thought_config_service(config)
+                .await
+                .map_err(|err| err.message().to_string())
         })
     }
 
@@ -267,33 +230,12 @@ impl TuiApi for InProcessApi {
         session_id: &str,
         name: &str,
     ) -> BoxFuture<'_, Result<PlanFileResponse, String>> {
-        // Mirrors: src/api/sessions.rs:502 (get_plan_file)
         let session_id = session_id.to_string();
         let name = name.to_string();
         Box::pin(async move {
-            if let Some((target, remote_session_id)) =
-                remote_sessions::denamespace_for_target(&session_id)
-                    .map_err(|err| err.message().to_string())?
-            {
-                return remote_sessions::fetch_remote_plan_file(&target, remote_session_id, &name)
-                    .await
-                    .map_err(|err| err.message().to_string());
-            }
-            let handle = self
-                .state
-                .supervisor
-                .get_session(&session_id)
+            request_plan_file(&self.state, &session_id, &name)
                 .await
-                .ok_or_else(|| "session not found".to_string())?;
-            let (tx, rx) = oneshot::channel();
-            handle
-                .send(SessionCommand::GetPlanFile { name, reply: tx })
-                .await
-                .map_err(|_| "session actor unavailable".to_string())?;
-            tokio::time::timeout(Duration::from_secs(5), rx)
-                .await
-                .map_err(|_| "plan file request timed out".to_string())?
-                .map_err(|_| "actor dropped plan file reply".to_string())
+                .map_err(|err| err.message())
         })
     }
 
@@ -554,47 +496,9 @@ impl TuiApi for InProcessApi {
                 .await
                 .map_err(|err| err.message().to_string());
             }
-            if dirs.is_empty() {
-                return Err("dirs must not be empty".to_string());
-            }
-            if dirs.len() > BATCH_CREATE_MAX_DIRS {
-                return Err(format!(
-                    "dirs must include at most {BATCH_CREATE_MAX_DIRS} entries"
-                ));
-            }
-            let total = dirs.len();
-            let (batch_id, batch_label, batch_created_at, prompt_excerpt) =
-                new_batch_context(total, initial_request.as_deref());
-            let tasks = dirs.into_iter().enumerate().map(|(index, cwd)| {
-                let supervisor = state.supervisor.clone();
-                let initial_request = initial_request.clone();
-                let batch = session_batch_membership(
-                    batch_id.clone(),
-                    batch_label.clone(),
-                    index,
-                    total,
-                    batch_created_at,
-                    prompt_excerpt.clone(),
-                );
-                async move {
-                    let created = supervisor
-                        .create_session_with_batch(
-                            None,
-                            Some(cwd.clone()),
-                            Some(spawn_tool),
-                            initial_request,
-                            Some(batch),
-                        )
-                        .await;
-                    create_sessions_batch_result(index, cwd, created)
-                }
-            });
-            let mut results: Vec<_> = futures::stream::iter(tasks)
-                .buffer_unordered(BATCH_CREATE_CONCURRENCY)
-                .collect()
-                .await;
-            results.sort_by_key(|result| result.index);
-            Ok(CreateSessionsBatchResponse { results })
+            create_local_sessions_batch(state, dirs, Some(spawn_tool), initial_request)
+                .await
+                .map_err(|err| err.message().to_string())
         })
     }
 
@@ -616,11 +520,22 @@ impl TuiApi for InProcessApi {
 mod tests {
     use super::*;
     use swimmers::config::Config;
+    use swimmers::persistence::file_store::FileStore;
+    use swimmers::session::actor::{ActorHandle, InputDeliveryResult};
     use swimmers::session::supervisor::SessionSupervisor;
     use swimmers::thought::protocol::SyncRequestSequence;
+    use swimmers::types::{
+        ErrorResponse, RestState, SessionGroupInputResult, SessionState, StateEvidence,
+        ThoughtSource, ThoughtState, TransportHealth,
+    };
+    use tokio::sync::mpsc;
     use tokio::sync::RwLock;
 
     fn test_state() -> Arc<AppState> {
+        test_state_with_store(None)
+    }
+
+    fn test_state_with_store(file_store: Option<Arc<FileStore>>) -> Arc<AppState> {
         let config = Arc::new(Config::default());
         let supervisor = SessionSupervisor::new(config.clone());
         Arc::new(AppState {
@@ -631,13 +546,76 @@ mod tests {
             ghostty_open_mode: Arc::new(RwLock::new(GhosttyOpenMode::Swap)),
             sync_request_sequence: Arc::new(SyncRequestSequence::new()),
             daemon_defaults: swimmers::api::once_lock_with(None),
-            file_store: swimmers::api::once_lock_with(None),
+            file_store: swimmers::api::once_lock_with(file_store),
             bridge_health: Arc::new(swimmers::thought::health::BridgeHealthState::new_with_tick(
                 Duration::from_secs(15),
             )),
             published_selection: Arc::new(RwLock::new(PublishedSelectionState::default())),
             repo_actions: swimmers::host_actions::RepoActionTracker::default(),
         })
+    }
+
+    fn summary(session_id: &str, state: SessionState) -> SessionSummary {
+        SessionSummary {
+            session_id: session_id.to_string(),
+            tmux_name: format!("tmux-{session_id}"),
+            state,
+            current_command: None,
+            state_evidence: StateEvidence::new("test"),
+            cwd: "/tmp/project".to_string(),
+            tool: Some("Codex".to_string()),
+            token_count: 0,
+            context_limit: 192_000,
+            thought: None,
+            thought_state: ThoughtState::Holding,
+            thought_source: ThoughtSource::CarryForward,
+            thought_updated_at: None,
+            rest_state: RestState::Sleeping,
+            commit_candidate: false,
+            action_cues: Vec::new(),
+            objective_changed_at: None,
+            last_skill: None,
+            is_stale: false,
+            attached_clients: 0,
+            stale_attached_clients: 0,
+            transport_health: TransportHealth::Healthy,
+            last_activity_at: Utc::now(),
+            repo_theme_id: None,
+            batch: None,
+        }
+    }
+
+    async fn insert_summary_test_handle(
+        state: &Arc<AppState>,
+        summary: SessionSummary,
+    ) -> mpsc::Receiver<Vec<u8>> {
+        let session_id = summary.session_id.clone();
+        let tmux_name = summary.tmux_name.clone();
+        let (cmd_tx, mut cmd_rx) = mpsc::channel(8);
+        let (write_tx, write_rx) = mpsc::channel(1);
+        state
+            .supervisor
+            .insert_test_handle(ActorHandle::test_handle(&session_id, &tmux_name, cmd_tx))
+            .await;
+        tokio::spawn(async move {
+            while let Some(cmd) = cmd_rx.recv().await {
+                match cmd {
+                    SessionCommand::GetSummary(reply) => {
+                        let _ = reply.send(summary.clone());
+                    }
+                    SessionCommand::WriteInputAck { data, ack } => {
+                        let _ = write_tx.send(data).await;
+                        let _ = ack.send(InputDeliveryResult {
+                            delivered: true,
+                            method: "test",
+                            message: None,
+                        });
+                    }
+                    _ => {}
+                }
+            }
+        });
+        write_rx
     }
 
     #[tokio::test]
@@ -649,10 +627,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn fetch_sessions_returns_local_sessions_without_http_envelope() {
+        let state = test_state();
+        let _write_rx =
+            insert_summary_test_handle(&state, summary("sess-1", SessionState::Idle)).await;
+        let api = InProcessApi::new(state);
+
+        let sessions = api.fetch_sessions().await.expect("sessions");
+
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].session_id, "sess-1");
+        // HTTP adapters wrap the same shared list in SessionListResponse and
+        // enforce auth; the embedded TUI adapter intentionally returns the
+        // route-independent Vec<SessionSummary> directly.
+    }
+
+    #[tokio::test]
     async fn fetch_native_status_returns_ok() {
         let api = InProcessApi::new(test_state());
         let result = api.fetch_native_status().await;
         assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn fetch_backend_health_matches_health_snapshot_shape() {
+        let state = test_state();
+        state.bridge_health.record_success(None);
+        let api = InProcessApi::new(state);
+
+        let health = api.fetch_backend_health().await.expect("backend health");
+
+        assert_eq!(health.status, "healthy");
+        assert_eq!(health.thought_bridge.status, "healthy");
+        assert!(!health.persistence.available);
+        assert!(!health.persistence.ok);
     }
 
     #[tokio::test]
@@ -685,5 +693,173 @@ mod tests {
         assert!(result.is_ok());
         let response = result.unwrap();
         assert!(response.daemon_defaults.is_none());
+    }
+
+    #[tokio::test]
+    async fn update_thought_config_rejects_invalid_payloads_like_http_service() {
+        let api = InProcessApi::new(test_state());
+
+        let err = api
+            .update_thought_config(ThoughtConfig {
+                cadence_hot_ms: 1,
+                ..ThoughtConfig::default()
+            })
+            .await
+            .expect_err("invalid config should fail");
+
+        assert!(err.contains("cadence_hot_ms"));
+        assert!(err.contains("must be between"));
+    }
+
+    #[tokio::test]
+    async fn update_thought_config_reports_persistence_failures_without_committing_memory() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = FileStore::new(dir.path()).await.expect("file store");
+        std::fs::create_dir(dir.path().join("thought_config.json"))
+            .expect("create directory at thought config path");
+        let state = test_state_with_store(Some(store));
+        let api = InProcessApi::new(state.clone());
+
+        let err = api
+            .update_thought_config(ThoughtConfig {
+                enabled: false,
+                ..ThoughtConfig::default()
+            })
+            .await
+            .expect_err("disk failure should fail");
+
+        assert_eq!(err, "failed to persist thought config");
+        assert!(state.thought_config.read().await.enabled);
+    }
+
+    #[tokio::test]
+    async fn fetch_plan_file_reports_actor_reply_errors_from_shared_service() {
+        let state = test_state();
+        let (cmd_tx, mut cmd_rx) = mpsc::channel(8);
+        state
+            .supervisor
+            .insert_test_handle(ActorHandle::test_handle("sess-plan", "tmux-plan", cmd_tx))
+            .await;
+        tokio::spawn(async move {
+            if let Some(SessionCommand::GetPlanFile { name, reply }) = cmd_rx.recv().await {
+                assert_eq!(name, "plan.md");
+                drop(reply);
+            }
+        });
+        let api = InProcessApi::new(state);
+
+        let err = api
+            .fetch_plan_file("sess-plan", "plan.md")
+            .await
+            .expect_err("dropped reply should fail");
+
+        assert_eq!(err, "actor dropped plan file reply");
+    }
+
+    #[tokio::test]
+    async fn open_session_keeps_remote_native_handoff_as_adapter_error_string() {
+        let api = InProcessApi::new(test_state());
+
+        let err = api
+            .open_session("target-host::sess-1")
+            .await
+            .expect_err("remote native open should fail locally");
+
+        assert_eq!(
+            err,
+            "remote sessions are visible locally, but native terminal handoff must be opened on the target host"
+        );
+    }
+
+    #[tokio::test]
+    async fn create_sessions_batch_reuses_api_validation_messages() {
+        let api = InProcessApi::new(test_state());
+
+        let err = api
+            .create_sessions_batch(Vec::new(), SpawnTool::Codex, None, None)
+            .await
+            .expect_err("empty batch should fail");
+
+        assert_eq!(err, "dirs must not be empty");
+    }
+
+    #[tokio::test]
+    async fn send_group_input_returns_service_validation_as_tui_error_string() {
+        let api = InProcessApi::new(test_state());
+
+        let err = api
+            .send_group_input(Vec::new(), "continue".to_string())
+            .await
+            .expect_err("empty group should fail");
+
+        assert_eq!(err, "session_ids must not be empty");
+    }
+
+    #[tokio::test]
+    async fn send_group_input_delivers_to_ready_batch_sessions() {
+        let state = test_state();
+        let batch_id = "batch-shared";
+        let mut first = summary("first", SessionState::Idle);
+        first.batch = Some(swimmers::api::sessions::session_batch_membership(
+            batch_id.to_string(),
+            "test batch".to_string(),
+            0,
+            2,
+            Utc::now(),
+            Some("continue".to_string()),
+        ));
+        let mut second = summary("second", SessionState::Idle);
+        second.batch = Some(swimmers::api::sessions::session_batch_membership(
+            batch_id.to_string(),
+            "test batch".to_string(),
+            1,
+            2,
+            Utc::now(),
+            Some("continue".to_string()),
+        ));
+        let mut first_writes = insert_summary_test_handle(&state, first).await;
+        let mut second_writes = insert_summary_test_handle(&state, second).await;
+        let api = InProcessApi::new(state);
+
+        let response = api
+            .send_group_input(
+                vec!["first".to_string(), "second".to_string()],
+                "continue".to_string(),
+            )
+            .await
+            .expect("group input response");
+
+        assert_eq!(response.delivered, 2);
+        assert_eq!(response.skipped, 0);
+        assert_eq!(
+            first_writes.recv().await.expect("first write"),
+            b"continue\r\r".to_vec()
+        );
+        assert_eq!(
+            second_writes.recv().await.expect("second write"),
+            b"continue\r\r".to_vec()
+        );
+    }
+
+    #[test]
+    fn group_input_response_counts_match_http_payload_semantics() {
+        let response = SessionGroupInputResponse::from_results(vec![
+            SessionGroupInputResult {
+                session_id: "ok".to_string(),
+                ok: true,
+                error: None,
+            },
+            SessionGroupInputResult {
+                session_id: "skipped".to_string(),
+                ok: false,
+                error: Some(ErrorResponse {
+                    code: "SESSION_NOT_READY".to_string(),
+                    message: Some("session is not waiting for input".to_string()),
+                }),
+            },
+        ]);
+
+        assert_eq!(response.delivered, 1);
+        assert_eq!(response.skipped, 1);
     }
 }

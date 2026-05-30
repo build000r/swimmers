@@ -545,9 +545,10 @@ fn build_commit_tmux_wrapper_with_launcher(
 SESSION={session_name:?}\n\
 REPO_DIR={repo_root}\n\
 PROMPT_FILE={prompt_path}\n\
+WRAPPER_FILE=$0\n\
 \n\
 cleanup_prompt() {{\n\
-  rm -f \"$PROMPT_FILE\"\n\
+  rm -f \"$PROMPT_FILE\" \"$WRAPPER_FILE\"\n\
 }}\n\
 trap cleanup_prompt EXIT\n\
 \n\
@@ -851,7 +852,8 @@ mod tests {
         assert!(!wrapper.contains("--max-turns"));
         assert!(wrapper.contains("Grok exited with code: $EXIT_CODE"));
         assert!(wrapper.contains("trap cleanup_prompt EXIT"));
-        assert!(wrapper.contains("rm -f \"$PROMPT_FILE\""));
+        assert!(wrapper.contains("WRAPPER_FILE=$0"));
+        assert!(wrapper.contains("rm -f \"$PROMPT_FILE\" \"$WRAPPER_FILE\""));
         assert!(
             wrapper
                 .find("--no-alt-screen || EXIT_CODE=$?\ncleanup_prompt")

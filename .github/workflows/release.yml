@@ -26,6 +26,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Smoke native packaged assets
+        run: ./scripts/smoke-native-assets-package.sh
+
       - name: Build release binaries
         run: cargo build --release --bin swimmers --bin swimmers-tui
 

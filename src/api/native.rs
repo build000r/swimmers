@@ -24,6 +24,19 @@ fn request_peer(ConnectInfo(addr): &ConnectInfo<SocketAddr>) -> String {
     addr.to_string()
 }
 
+fn reject_non_loopback_native_preference(
+    ConnectInfo(addr): &ConnectInfo<SocketAddr>,
+) -> Option<axum::response::Response> {
+    if addr.ip().is_loopback() {
+        return None;
+    }
+
+    Some(api_error_msg(
+        &NATIVE_DESKTOP_UNAVAILABLE,
+        "native terminal preferences can only be changed from localhost",
+    ))
+}
+
 async fn native_status_for_peer(
     state: &Arc<AppState>,
     connect_info: &ConnectInfo<SocketAddr>,
@@ -50,6 +63,9 @@ async fn set_native_app(
     if let Err(resp) = auth.require_scope(AuthScope::SessionsWrite) {
         return resp;
     }
+    if let Some(resp) = reject_non_loopback_native_preference(&connect_info) {
+        return resp;
+    }
 
     {
         let mut native_app = state.native_desktop_app.write().await;
@@ -67,6 +83,9 @@ async fn set_native_mode(
     Json(body): Json<NativeDesktopModeRequest>,
 ) -> impl IntoResponse {
     if let Err(resp) = auth.require_scope(AuthScope::SessionsWrite) {
+        return resp;
+    }
+    if let Some(resp) = reject_non_loopback_native_preference(&connect_info) {
         return resp;
     }
 
@@ -272,6 +291,29 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn set_native_app_rejects_non_loopback_peer_without_mutating() {
+        let state = test_state();
+
+        let response = set_native_app(
+            Extension(AuthInfo::new(OPERATOR_SCOPES.to_vec())),
+            State(state.clone()),
+            remote_peer(),
+            Json(NativeDesktopConfigRequest {
+                app: NativeDesktopApp::Ghostty,
+            }),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let json = response_json(response).await;
+        assert_eq!(json["code"], "NATIVE_DESKTOP_UNAVAILABLE");
+
+        let app = *state.native_desktop_app.read().await;
+        assert_eq!(app, NativeDesktopApp::Iterm);
+    }
+
+    #[tokio::test]
     async fn set_native_mode_updates_status_for_ghostty() {
         let state = test_state();
         {
@@ -304,5 +346,28 @@ mod tests {
         .expect("native status response");
         let json = serde_json::to_value(status.0).expect("status json");
         assert_eq!(json["ghostty_mode"], "add");
+    }
+
+    #[tokio::test]
+    async fn set_native_mode_rejects_non_loopback_peer_without_mutating() {
+        let state = test_state();
+
+        let response = set_native_mode(
+            Extension(AuthInfo::new(OPERATOR_SCOPES.to_vec())),
+            State(state.clone()),
+            remote_peer(),
+            Json(NativeDesktopModeRequest {
+                mode: GhosttyOpenMode::Add,
+            }),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let json = response_json(response).await;
+        assert_eq!(json["code"], "NATIVE_DESKTOP_UNAVAILABLE");
+
+        let mode = *state.ghostty_open_mode.read().await;
+        assert_eq!(mode, GhosttyOpenMode::Swap);
     }
 }

@@ -307,15 +307,17 @@ fn build_external_client(runtime: &Runtime) -> Result<TuiClient, io::Error> {
     Ok(TuiClient::External(client))
 }
 
-pub(crate) fn build_embedded_client(runtime: &Runtime) -> (TuiClient, tokio::task::JoinHandle<()>) {
+pub(crate) fn build_embedded_client(
+    runtime: &Runtime,
+) -> (TuiClient, swimmers::startup::EmbeddedTuiShutdown) {
     let config = Arc::new(Config::from_env());
     let _guard = runtime.enter();
     let state = swimmers::startup::init_app_state_skeleton(config);
-    let deferred_init = swimmers::startup::spawn_deferred_init(Arc::clone(&state));
+    let shutdown = swimmers::startup::spawn_deferred_init_for_embedded_tui(Arc::clone(&state));
     tracing::info!("embedded mode initialized with deferred startup");
     (
         TuiClient::Embedded(in_process::InProcessApi::new(state)),
-        deferred_init,
+        shutdown,
     )
 }
 
@@ -325,16 +327,19 @@ pub(crate) fn initialize_tui_app() -> Result<(App<TuiClient>, Renderer), Box<dyn
     swimmers::env_bootstrap::bootstrap_provider_env_from_shell();
 
     let runtime = Runtime::new()?;
-    let client = if external_mode_requested() {
-        build_external_client(&runtime)?
+    let (client, embedded_shutdown) = if external_mode_requested() {
+        (build_external_client(&runtime)?, None)
     } else {
-        let (client, _deferred_init) = build_embedded_client(&runtime);
-        client
+        let (client, shutdown) = build_embedded_client(&runtime);
+        (client, Some(shutdown))
     };
     let mut renderer = Renderer::new()?;
     renderer.init()?;
 
     let mut app = App::new(runtime, client);
+    if let Some(shutdown) = embedded_shutdown {
+        app.set_embedded_shutdown(shutdown);
+    }
     let initial_layout = app.layout_for_terminal(renderer.width(), renderer.height());
     app.refresh_initial_frame(initial_layout);
 
@@ -369,6 +374,9 @@ pub(crate) fn handle_key_event<C: TuiApi>(
     layout: WorkspaceLayout,
     key: KeyEvent,
 ) -> bool {
+    if is_embedded_ctrl_c_quit(app, key) {
+        return false;
+    }
     if let Some(handled) = handle_modal_key(app, layout, key) {
         return handled;
     }
@@ -379,6 +387,12 @@ pub(crate) fn handle_key_event<C: TuiApi>(
         return handled;
     }
     handle_workspace_key(app, layout, key)
+}
+
+fn is_embedded_ctrl_c_quit<C: TuiApi>(app: &App<C>, key: KeyEvent) -> bool {
+    app.has_embedded_shutdown()
+        && matches!(key.code, KeyCode::Char('c') | KeyCode::Char('C'))
+        && key.modifiers.contains(KeyModifiers::CONTROL)
 }
 
 fn handle_modal_key<C: TuiApi>(

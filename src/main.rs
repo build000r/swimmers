@@ -244,17 +244,28 @@ fn run_config_subcommand(action: Option<ConfigAction>) -> i32 {
 
     match action {
         None => {
-            cli::print_config_table();
-            0
+            let load = Config::from_env_report();
+            cli::print_config_table_for_load(&load);
+            cli::print_config_diagnostics(&load.diagnostics);
+            if load.has_errors() {
+                1
+            } else {
+                0
+            }
         }
         Some(ConfigAction::Doctor) => {
-            let config = Config::from_env();
+            let load = Config::from_env_report();
             let tmux_present = cli::tmux_on_path();
             let clawgs_defaults = cli::check_clawgs_defaults();
             let data_dir = startup::resolve_data_dir();
             let data_dir_writable = cli::check_data_dir_writable(&data_dir);
-            let findings =
-                cli::run_doctor_checks(&config, tmux_present, clawgs_defaults, data_dir_writable);
+            let mut findings = cli::config_diagnostic_findings(&load.diagnostics);
+            findings.extend(cli::run_doctor_checks(
+                &load.config,
+                tmux_present,
+                clawgs_defaults,
+                data_dir_writable,
+            ));
             cli::print_doctor_findings(&findings)
         }
     }
@@ -304,18 +315,20 @@ fn prepare_server_startup() -> (Arc<Config>, metrics_exporter_prometheus::Promet
     init_tracing();
 
     let prom_handle = metrics::init_metrics();
-    let config = Config::from_env();
+    let load = Config::from_env_report();
+    cli::print_config_diagnostics(&load.diagnostics);
 
     // Refuse trusted auth modes on bind addresses outside their trust boundary.
     // The pre-clap version only emitted a stderr warning here, which the
     // README's own external-access example silently relied on; that left
     // the API exposed to the network with no auth. Now we exit with
     // sysexits EX_CONFIG instead.
-    if let Err(msg) = cli::enforce_trust_bind_safety(&config) {
+    if let Err(msg) = cli::enforce_startup_config(&load.config, &load.diagnostics) {
         eprintln!("swimmers: {msg}");
         std::process::exit(cli::EXIT_CONFIG);
     }
 
+    let config = load.config;
     (Arc::new(config), prom_handle)
 }
 

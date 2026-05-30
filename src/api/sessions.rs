@@ -3,15 +3,19 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post};
 use axum::{Extension, Json, Router};
-use chrono::{DateTime, Utc};
-use futures::StreamExt;
 use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio::process::Command;
 use tokio::sync::oneshot;
-use uuid::Uuid;
 
+use crate::api::service::{
+    create_local_sessions_batch, list_sessions_for_client, request_plan_file, PlanFileServiceError,
+};
+pub use crate::api::service::{
+    create_sessions_batch_result, new_batch_context, session_batch_membership,
+    BATCH_CREATE_CONCURRENCY, BATCH_CREATE_MAX_DIRS,
+};
 use crate::api::{fetch_live_summary, remote_sessions, AppState};
 use crate::auth::{AuthInfo, AuthScope};
 use crate::operator_pressure::session_ready_for_operator_group_input;
@@ -23,24 +27,17 @@ use crate::thought::context::{
 };
 use crate::types::{
     AdoptSessionRequest, AdoptSessionResponse, AgentContextActionSummary, CreateSessionRequest,
-    CreateSessionResponse, CreateSessionsBatchRequest, CreateSessionsBatchResponse,
-    CreateSessionsBatchResult, ErrorResponse, MermaidArtifactResponse, PlanFileResponse, RepoTheme,
-    SessionAgentContextResponse, SessionAgentTurn, SessionBatchMembership,
-    SessionGitDiffFileSummary, SessionGitDiffHunkSummary, SessionGitDiffResponse,
-    SessionGroupInputRequest, SessionGroupInputResponse, SessionGroupInputResult,
-    SessionInputRequest, SessionInputResponse, SessionListResponse, SessionPaneTailResponse,
-    SessionState, SessionSummary, SessionTimelineEvent, SessionTimelinePinned,
-    SessionTimelinePinnedItem, SessionTimelineResponse, SessionTranscriptRecord,
-    SessionTranscriptResponse, TerminalSnapshot,
+    CreateSessionResponse, CreateSessionsBatchRequest, ErrorResponse, MermaidArtifactResponse,
+    SessionAgentContextResponse, SessionAgentTurn, SessionGitDiffFileSummary,
+    SessionGitDiffHunkSummary, SessionGitDiffResponse, SessionGroupInputRequest,
+    SessionGroupInputResponse, SessionGroupInputResult, SessionInputRequest, SessionInputResponse,
+    SessionListResponse, SessionPaneTailResponse, SessionState, SessionSummary,
+    SessionTimelineEvent, SessionTimelinePinned, SessionTimelinePinnedItem,
+    SessionTimelineResponse, SessionTranscriptRecord, SessionTranscriptResponse, TerminalSnapshot,
 };
 
-const BATCH_PROMPT_EXCERPT_MAX_CHARS: usize = 72;
-const BATCH_LABEL_MAX_CHARS: usize = 28;
-pub const BATCH_CREATE_MAX_DIRS: usize = 32;
-pub const BATCH_CREATE_CONCURRENCY: usize = 4;
 const PANE_TAIL_LINES: usize = 300;
 const PANE_TAIL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
-const PLAN_FILE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 const GIT_DIFF_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
 const GIT_DIFF_MAX_BYTES: usize = 128 * 1024;
 
@@ -53,11 +50,7 @@ async fn list_sessions(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<SessionListResponse>, axum::response::Response> {
     auth.require_scope(AuthScope::SessionsRead)?;
-    // Keep the hot polling path cheap. Bootstrap/startup populates repo assets
-    // and session discovery; repeated list calls should serve current in-memory
-    // state instead of re-running tmux discovery and asset collection.
-    let mut sessions = state.supervisor.list_sessions().await;
-    sessions.extend(remote_sessions::list_remote_sessions().await);
+    let sessions = list_sessions_for_client(&state, true).await;
     // The version counter is not tracked by the supervisor itself; we use 0
     // as a placeholder. A proper monotonic version can be added to the
     // supervisor later if clients need ETag-style cache validation.
@@ -228,29 +221,6 @@ async fn create_sessions_batch(
         return resp;
     }
 
-    if body.dirs.is_empty() {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(ErrorResponse {
-                code: "VALIDATION_FAILED".to_string(),
-                message: Some("dirs must not be empty".to_string()),
-            }),
-        )
-            .into_response();
-    }
-    if body.dirs.len() > BATCH_CREATE_MAX_DIRS {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(ErrorResponse {
-                code: "VALIDATION_FAILED".to_string(),
-                message: Some(format!(
-                    "dirs must include at most {BATCH_CREATE_MAX_DIRS} entries"
-                )),
-            }),
-        )
-            .into_response();
-    }
-
     if remote_sessions::is_remote_launch_target(body.launch_target.as_deref()) {
         return match remote_sessions::create_remote_sessions_batch(body).await {
             Ok(response) => {
@@ -265,154 +235,21 @@ async fn create_sessions_batch(
         };
     }
 
-    let total = body.dirs.len();
-    let spawn_tool = body.spawn_tool;
-    let initial_request = body.initial_request;
-    let (batch_id, batch_label, batch_created_at, prompt_excerpt) =
-        new_batch_context(total, initial_request.as_deref());
-    let supervisor = state.supervisor.clone();
-    let tasks = body.dirs.into_iter().enumerate().map(|(index, cwd)| {
-        let supervisor = supervisor.clone();
-        let initial_request = initial_request.clone();
-        let batch = session_batch_membership(
-            batch_id.clone(),
-            batch_label.clone(),
-            index,
-            total,
-            batch_created_at,
-            prompt_excerpt.clone(),
-        );
-        async move {
-            let created = supervisor
-                .create_session_with_batch(
-                    None,
-                    Some(cwd.clone()),
-                    spawn_tool,
-                    initial_request,
-                    Some(batch),
-                )
-                .await;
-            create_sessions_batch_result(index, cwd, created)
+    match create_local_sessions_batch(state, body.dirs, body.spawn_tool, body.initial_request).await
+    {
+        Ok(response) => {
+            let status = if response.results.iter().all(|result| result.ok) {
+                StatusCode::CREATED
+            } else {
+                StatusCode::MULTI_STATUS
+            };
+            (status, Json(response)).into_response()
         }
-    });
-
-    let mut results: Vec<_> = futures::stream::iter(tasks)
-        .buffer_unordered(BATCH_CREATE_CONCURRENCY)
-        .collect()
-        .await;
-    results.sort_by_key(|result| result.index);
-    let status = if results.iter().all(|result| result.ok) {
-        StatusCode::CREATED
-    } else {
-        StatusCode::MULTI_STATUS
-    };
-
-    (status, Json(CreateSessionsBatchResponse { results })).into_response()
-}
-
-pub fn session_batch_membership(
-    id: String,
-    label: String,
-    index: usize,
-    total: usize,
-    created_at: DateTime<Utc>,
-    prompt_excerpt: Option<String>,
-) -> SessionBatchMembership {
-    SessionBatchMembership {
-        id,
-        label,
-        index,
-        total,
-        created_at,
-        prompt_excerpt,
-    }
-}
-
-pub fn new_batch_context(
-    total: usize,
-    initial_request: Option<&str>,
-) -> (String, String, DateTime<Utc>, Option<String>) {
-    let batch_id = format!("batch-{}", Uuid::new_v4().simple());
-    let created_at = Utc::now();
-    let prompt_excerpt = prompt_excerpt(initial_request);
-    let label = batch_label(prompt_excerpt.as_deref(), &batch_id);
-    debug_assert!(total > 0);
-    (batch_id, label, created_at, prompt_excerpt)
-}
-
-fn prompt_excerpt(prompt: Option<&str>) -> Option<String> {
-    let normalized = prompt?.split_whitespace().collect::<Vec<_>>().join(" ");
-    let normalized = normalized.trim();
-    if normalized.is_empty() {
-        return None;
-    }
-    Some(truncate_chars(normalized, BATCH_PROMPT_EXCERPT_MAX_CHARS))
-}
-
-fn batch_label(prompt_excerpt: Option<&str>, batch_id: &str) -> String {
-    prompt_excerpt
-        .map(|excerpt| truncate_chars(excerpt, BATCH_LABEL_MAX_CHARS))
-        .unwrap_or_else(|| {
-            let suffix = batch_id
-                .strip_prefix("batch-")
-                .unwrap_or(batch_id)
-                .chars()
-                .take(8)
-                .collect::<String>();
-            format!("batch {suffix}")
-        })
-}
-
-fn truncate_chars(value: &str, max_chars: usize) -> String {
-    let mut chars = value.chars();
-    let truncated = chars.by_ref().take(max_chars).collect::<String>();
-    if chars.next().is_some() {
-        format!("{truncated}~")
-    } else {
-        truncated
-    }
-}
-
-pub fn create_sessions_batch_result(
-    index: usize,
-    cwd: String,
-    created: anyhow::Result<(SessionSummary, Option<RepoTheme>)>,
-) -> CreateSessionsBatchResult {
-    match created {
-        Ok((session, repo_theme)) => CreateSessionsBatchResult {
-            index,
-            cwd,
-            ok: true,
-            session: Some(session),
-            repo_theme,
-            error: None,
-        },
-        Err(err) => {
-            let msg = err.to_string();
-            CreateSessionsBatchResult {
-                index,
-                cwd,
-                ok: false,
-                session: None,
-                repo_theme: None,
-                error: Some(create_session_error(&msg)),
-            }
-        }
-    }
-}
-
-fn create_session_error(msg: &str) -> ErrorResponse {
-    let code = if msg.contains("already exists") || msg.contains("duplicate session") {
-        "SESSION_ALREADY_EXISTS"
-    } else if msg.contains("cwd does not exist") {
-        "VALIDATION_FAILED"
-    } else {
-        "INTERNAL_ERROR"
-    };
-
-    ErrorResponse {
-        code: code.to_string(),
-        message: Some(msg.to_string()),
+        Err(error) => error_response(
+            error.status(),
+            error.code(),
+            Some(error.message().to_string()),
+        ),
     }
 }
 
@@ -2344,61 +2181,10 @@ async fn fetch_plan_file_response(state: &Arc<AppState>, session_id: &str, name:
     }
 }
 
-enum PlanFileError {
-    Remote(remote_sessions::RemoteSessionError),
-    SessionNotFound,
-    ActorUnavailable,
-    ReplyDropped,
-    TimedOut,
-}
-
-async fn request_plan_file(
-    state: &Arc<AppState>,
-    session_id: &str,
-    name: &str,
-) -> Result<PlanFileResponse, PlanFileError> {
-    match remote_sessions::denamespace_for_target(session_id) {
-        Ok(Some((target, remote_session_id))) => {
-            return remote_sessions::fetch_remote_plan_file(&target, remote_session_id, name)
-                .await
-                .map_err(PlanFileError::Remote);
-        }
-        Ok(None) => {}
-        Err(err) => return Err(PlanFileError::Remote(err)),
-    }
-
-    let handle = state
-        .supervisor
-        .get_session(session_id)
-        .await
-        .ok_or(PlanFileError::SessionNotFound)?;
-    request_plan_file_from_actor(&handle, name.to_string()).await
-}
-
-async fn request_plan_file_from_actor(
-    handle: &ActorHandle,
-    name: String,
-) -> Result<PlanFileResponse, PlanFileError> {
-    let (tx, rx) = oneshot::channel::<PlanFileResponse>();
-    if handle
-        .send(SessionCommand::GetPlanFile { name, reply: tx })
-        .await
-        .is_err()
-    {
-        return Err(PlanFileError::ActorUnavailable);
-    }
-
-    match tokio::time::timeout(PLAN_FILE_TIMEOUT, rx).await {
-        Ok(Ok(response)) => Ok(response),
-        Ok(Err(_)) => Err(PlanFileError::ReplyDropped),
-        Err(_) => Err(PlanFileError::TimedOut),
-    }
-}
-
-fn plan_file_error_response(error: PlanFileError) -> Response {
+fn plan_file_error_response(error: PlanFileServiceError) -> Response {
     match error {
-        PlanFileError::Remote(err) => err.into_response(),
-        PlanFileError::SessionNotFound => (
+        PlanFileServiceError::Remote(err) => err.into_response(),
+        PlanFileServiceError::SessionNotFound => (
             StatusCode::NOT_FOUND,
             Json(ErrorResponse {
                 code: "SESSION_NOT_FOUND".to_string(),
@@ -2406,9 +2192,13 @@ fn plan_file_error_response(error: PlanFileError) -> Response {
             }),
         )
             .into_response(),
-        PlanFileError::ActorUnavailable => plan_file_internal_error("session actor unavailable"),
-        PlanFileError::ReplyDropped => plan_file_internal_error("actor dropped plan file reply"),
-        PlanFileError::TimedOut => plan_file_internal_error("plan file request timed out"),
+        PlanFileServiceError::ActorUnavailable => {
+            plan_file_internal_error("session actor unavailable")
+        }
+        PlanFileServiceError::ReplyDropped => {
+            plan_file_internal_error("actor dropped plan file reply")
+        }
+        PlanFileServiceError::TimedOut => plan_file_internal_error("plan file request timed out"),
     }
 }
 
@@ -2466,7 +2256,9 @@ mod tests {
     use crate::session::supervisor::SessionSupervisor;
     use crate::thought::protocol::{SyncRequestSequence, ThoughtDeliveryState};
     use crate::thought::runtime_config::ThoughtConfig;
-    use crate::types::{RestState, StateEvidence, ThoughtSource, ThoughtState, TransportHealth};
+    use crate::types::{
+        PlanFileResponse, RestState, StateEvidence, ThoughtSource, ThoughtState, TransportHealth,
+    };
     use axum::body::to_bytes;
     use axum::extract::{Json, Path, Query, State};
     use axum::response::IntoResponse;
@@ -4740,6 +4532,70 @@ esac
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
         let json = response_json(response).await;
         assert_eq!(json["code"], "SESSION_NOT_FOUND");
+    }
+
+    #[tokio::test]
+    async fn get_plan_file_returns_internal_error_when_actor_drops_reply() {
+        let state = test_state();
+        let (cmd_tx, mut cmd_rx) = mpsc::channel(8);
+        state
+            .supervisor
+            .insert_test_handle(ActorHandle::test_handle(
+                "sess-dropped-plan",
+                "tmux-dropped-plan",
+                cmd_tx,
+            ))
+            .await;
+
+        tokio::spawn(async move {
+            if let Some(SessionCommand::GetPlanFile { name, reply }) = cmd_rx.recv().await {
+                assert_eq!(name, "plan.md");
+                drop(reply);
+            }
+        });
+
+        let response = get_plan_file(
+            Extension(AuthInfo::new(OPERATOR_SCOPES.to_vec())),
+            State(state),
+            Path("sess-dropped-plan".to_string()),
+            Query(PlanFileQuery {
+                name: "plan.md".to_string(),
+            }),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let json = response_json(response).await;
+        assert_eq!(json["code"], "INTERNAL_ERROR");
+        assert_eq!(json["message"], "actor dropped plan file reply");
+    }
+
+    #[tokio::test]
+    async fn request_plan_file_service_reports_timeout_with_short_budget() {
+        let state = test_state();
+        let (cmd_tx, _cmd_rx) = mpsc::channel(8);
+        state
+            .supervisor
+            .insert_test_handle(ActorHandle::test_handle(
+                "sess-timeout-plan",
+                "tmux-timeout-plan",
+                cmd_tx,
+            ))
+            .await;
+
+        let err = crate::api::service::request_plan_file_with_timeout(
+            &state,
+            "sess-timeout-plan",
+            "plan.md",
+            Duration::from_millis(1),
+        )
+        .await
+        .expect_err("plan request should time out");
+
+        assert!(matches!(
+            err,
+            crate::api::service::PlanFileServiceError::TimedOut
+        ));
     }
 
     #[tokio::test]

@@ -5,32 +5,47 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant, UNIX_EPOCH};
 
 use axum::http::StatusCode;
+use chrono::{DateTime, Utc};
 use futures::stream::{self, StreamExt};
 use tokio::process::Command;
+use tokio::sync::oneshot;
+use uuid::Uuid;
 
 use super::{fetch_live_summary, remote_sessions, AppState};
 use crate::host_actions::{
     inspect_git_repo, RepoActionExecutor, RestartExecutor, SystemRepoActionExecutor,
 };
 use crate::native;
+use crate::openrouter_models::cached_or_default_openrouter_candidates;
 use crate::operator_pressure::session_ready_for_operator_group_input;
 use crate::persistence::file_store::FileStore;
+use crate::session::actor::{ActorHandle, SessionCommand};
 use crate::session::overlay::{
     default_overlay, OverlayDirConfig, OverlayDirGroup, OverlayServiceEntry,
 };
+use crate::thought::probe::{run_thought_config_probe, ThoughtConfigProbeResult};
+use crate::thought::runtime_config::ThoughtConfig;
+use crate::thought_ui::thought_config_ui_metadata;
 use crate::types::{
-    DirEntry, DirGroupMembershipUpdateRequest, DirGroupMembershipUpdateResponse,
-    DirGroupMemberships, DirListResponse, DirRepoActionResponse, DirRepoSearchResponse,
-    DirRestartResponse, LaunchTargetSummary, NativeAttentionGroupOpenRequest,
+    CreateSessionsBatchResponse, CreateSessionsBatchResult, DirEntry,
+    DirGroupMembershipUpdateRequest, DirGroupMembershipUpdateResponse, DirGroupMemberships,
+    DirListResponse, DirRepoActionResponse, DirRepoSearchResponse, DirRestartResponse,
+    ErrorResponse, LaunchTargetSummary, NativeAttentionGroupOpenRequest,
     NativeAttentionGroupOpenResponse, NativeDesktopApp, NativeDesktopOpenResponse,
-    NativeDesktopStatusResponse, RepoActionKind, RepoActionState, RepoActionStatus, SessionState,
-    SessionSummary,
+    NativeDesktopStatusResponse, PlanFileResponse, RepoActionKind, RepoActionState,
+    RepoActionStatus, RepoTheme, SessionBatchMembership, SessionState, SessionSummary, SpawnTool,
+    ThoughtConfigResponse,
 };
 
 /// Max concurrent git probes per `list_dirs` call. Keeps a single listing from
 /// fork-bombing the system when a repos directory has many git subdirs, while
 /// still parallelizing enough to hide per-call git latency.
 const GIT_PROBE_CONCURRENCY: usize = 16;
+const BATCH_PROMPT_EXCERPT_MAX_CHARS: usize = 72;
+const BATCH_LABEL_MAX_CHARS: usize = 28;
+pub const BATCH_CREATE_MAX_DIRS: usize = 32;
+pub const BATCH_CREATE_CONCURRENCY: usize = 4;
+pub const PLAN_FILE_TIMEOUT: Duration = Duration::from_secs(5);
 const REPO_SEARCH_ROOTS_ENV: &str = "SWIMMERS_REPO_SEARCH_ROOTS";
 const REPO_SEARCH_MAX_DEPTH_ENV: &str = "SWIMMERS_REPO_SEARCH_MAX_DEPTH";
 const REPO_SEARCH_DEFAULT_MAX_DEPTH: usize = 8;
@@ -162,6 +177,328 @@ pub fn dirs_base_path() -> PathBuf {
     }
 
     cwd
+}
+
+pub async fn list_sessions_for_client(
+    state: &Arc<AppState>,
+    include_remote: bool,
+) -> Vec<SessionSummary> {
+    let mut sessions = state.supervisor.list_sessions().await;
+    if include_remote {
+        sessions.extend(remote_sessions::list_remote_sessions().await);
+    }
+    sessions
+}
+
+pub async fn thought_config_response(state: &Arc<AppState>) -> ThoughtConfigResponse {
+    let config = state.thought_config.read().await.clone();
+    ThoughtConfigResponse {
+        config,
+        daemon_defaults: state.current_daemon_defaults(),
+        ui: thought_config_ui_metadata(&cached_or_default_openrouter_candidates()),
+    }
+}
+
+pub fn validate_thought_config(config: ThoughtConfig) -> Result<ThoughtConfig, ApiServiceError> {
+    config.normalize_and_validate().map_err(|err| {
+        ApiServiceError::new(
+            StatusCode::BAD_REQUEST,
+            "VALIDATION_FAILED",
+            err.to_string(),
+        )
+    })
+}
+
+pub async fn persist_validated_thought_config(
+    store: &Arc<FileStore>,
+    runtime_config: &mut ThoughtConfig,
+    config: ThoughtConfig,
+) -> Result<(), ApiServiceError> {
+    if let Err(err) = store.save_thought_config(&config).await {
+        tracing::error!(error = %err, "failed to persist thought runtime config");
+        return Err(ApiServiceError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "INTERNAL_ERROR",
+            "failed to persist thought config",
+        ));
+    }
+
+    *runtime_config = config;
+    Ok(())
+}
+
+pub async fn update_thought_config(
+    state: &Arc<AppState>,
+    config: ThoughtConfig,
+) -> Result<ThoughtConfig, ApiServiceError> {
+    let config = validate_thought_config(config)?;
+    let store = state.current_file_store().ok_or_else(|| {
+        ApiServiceError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "PERSISTENCE_UNAVAILABLE",
+            "thought config persistence is unavailable",
+        )
+    })?;
+
+    let mut runtime_config = state.thought_config.write().await;
+    persist_validated_thought_config(&store, &mut runtime_config, config.clone()).await?;
+    Ok(config)
+}
+
+pub async fn test_thought_config(
+    config: ThoughtConfig,
+) -> Result<ThoughtConfigProbeResult, ApiServiceError> {
+    let config = validate_thought_config(config)?;
+    Ok(run_thought_config_probe(&config).await)
+}
+
+pub fn validate_sessions_batch_dirs(dirs: &[String]) -> Result<(), ApiServiceError> {
+    if dirs.is_empty() {
+        return Err(ApiServiceError::new(
+            StatusCode::BAD_REQUEST,
+            "VALIDATION_FAILED",
+            "dirs must not be empty",
+        ));
+    }
+    if dirs.len() > BATCH_CREATE_MAX_DIRS {
+        return Err(ApiServiceError::new(
+            StatusCode::BAD_REQUEST,
+            "VALIDATION_FAILED",
+            format!("dirs must include at most {BATCH_CREATE_MAX_DIRS} entries"),
+        ));
+    }
+    Ok(())
+}
+
+pub async fn create_local_sessions_batch(
+    state: Arc<AppState>,
+    dirs: Vec<String>,
+    spawn_tool: Option<SpawnTool>,
+    initial_request: Option<String>,
+) -> Result<CreateSessionsBatchResponse, ApiServiceError> {
+    validate_sessions_batch_dirs(&dirs)?;
+    let total = dirs.len();
+    let (batch_id, batch_label, batch_created_at, prompt_excerpt) =
+        new_batch_context(total, initial_request.as_deref());
+    let tasks = dirs.into_iter().enumerate().map(|(index, cwd)| {
+        let supervisor = state.supervisor.clone();
+        let initial_request = initial_request.clone();
+        let batch = session_batch_membership(
+            batch_id.clone(),
+            batch_label.clone(),
+            index,
+            total,
+            batch_created_at,
+            prompt_excerpt.clone(),
+        );
+        async move {
+            let created = supervisor
+                .create_session_with_batch(
+                    None,
+                    Some(cwd.clone()),
+                    spawn_tool,
+                    initial_request,
+                    Some(batch),
+                )
+                .await;
+            create_sessions_batch_result(index, cwd, created)
+        }
+    });
+
+    let mut results: Vec<_> = stream::iter(tasks)
+        .buffer_unordered(BATCH_CREATE_CONCURRENCY)
+        .collect()
+        .await;
+    results.sort_by_key(|result| result.index);
+    Ok(CreateSessionsBatchResponse { results })
+}
+
+pub fn session_batch_membership(
+    id: String,
+    label: String,
+    index: usize,
+    total: usize,
+    created_at: DateTime<Utc>,
+    prompt_excerpt: Option<String>,
+) -> SessionBatchMembership {
+    SessionBatchMembership {
+        id,
+        label,
+        index,
+        total,
+        created_at,
+        prompt_excerpt,
+    }
+}
+
+pub fn new_batch_context(
+    total: usize,
+    initial_request: Option<&str>,
+) -> (String, String, DateTime<Utc>, Option<String>) {
+    let batch_id = format!("batch-{}", Uuid::new_v4().simple());
+    let created_at = Utc::now();
+    let prompt_excerpt = prompt_excerpt(initial_request);
+    let label = batch_label(prompt_excerpt.as_deref(), &batch_id);
+    debug_assert!(total > 0);
+    (batch_id, label, created_at, prompt_excerpt)
+}
+
+fn prompt_excerpt(prompt: Option<&str>) -> Option<String> {
+    let normalized = prompt?.split_whitespace().collect::<Vec<_>>().join(" ");
+    let normalized = normalized.trim();
+    if normalized.is_empty() {
+        return None;
+    }
+    Some(truncate_chars(normalized, BATCH_PROMPT_EXCERPT_MAX_CHARS))
+}
+
+fn batch_label(prompt_excerpt: Option<&str>, batch_id: &str) -> String {
+    prompt_excerpt
+        .map(|excerpt| truncate_chars(excerpt, BATCH_LABEL_MAX_CHARS))
+        .unwrap_or_else(|| {
+            let suffix = batch_id
+                .strip_prefix("batch-")
+                .unwrap_or(batch_id)
+                .chars()
+                .take(8)
+                .collect::<String>();
+            format!("batch {suffix}")
+        })
+}
+
+fn truncate_chars(value: &str, max_chars: usize) -> String {
+    let mut chars = value.chars();
+    let truncated = chars.by_ref().take(max_chars).collect::<String>();
+    if chars.next().is_some() {
+        format!("{truncated}~")
+    } else {
+        truncated
+    }
+}
+
+pub fn create_sessions_batch_result(
+    index: usize,
+    cwd: String,
+    created: anyhow::Result<(SessionSummary, Option<RepoTheme>)>,
+) -> CreateSessionsBatchResult {
+    match created {
+        Ok((session, repo_theme)) => CreateSessionsBatchResult {
+            index,
+            cwd,
+            ok: true,
+            session: Some(session),
+            repo_theme,
+            error: None,
+        },
+        Err(err) => {
+            let msg = err.to_string();
+            CreateSessionsBatchResult {
+                index,
+                cwd,
+                ok: false,
+                session: None,
+                repo_theme: None,
+                error: Some(create_session_error(&msg)),
+            }
+        }
+    }
+}
+
+fn create_session_error(msg: &str) -> ErrorResponse {
+    let code = if msg.contains("already exists") || msg.contains("duplicate session") {
+        "SESSION_ALREADY_EXISTS"
+    } else if msg.contains("cwd does not exist") {
+        "VALIDATION_FAILED"
+    } else {
+        "INTERNAL_ERROR"
+    };
+
+    ErrorResponse {
+        code: code.to_string(),
+        message: Some(msg.to_string()),
+    }
+}
+
+#[derive(Debug)]
+pub enum PlanFileServiceError {
+    Remote(remote_sessions::RemoteSessionError),
+    SessionNotFound,
+    ActorUnavailable,
+    ReplyDropped,
+    TimedOut,
+}
+
+impl PlanFileServiceError {
+    pub fn message(&self) -> String {
+        match self {
+            Self::Remote(err) => err.message().to_string(),
+            Self::SessionNotFound => "session not found".to_string(),
+            Self::ActorUnavailable => "session actor unavailable".to_string(),
+            Self::ReplyDropped => "actor dropped plan file reply".to_string(),
+            Self::TimedOut => "plan file request timed out".to_string(),
+        }
+    }
+}
+
+impl std::fmt::Display for PlanFileServiceError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message())
+    }
+}
+
+impl std::error::Error for PlanFileServiceError {}
+
+pub async fn request_plan_file(
+    state: &Arc<AppState>,
+    session_id: &str,
+    name: &str,
+) -> Result<PlanFileResponse, PlanFileServiceError> {
+    request_plan_file_with_timeout(state, session_id, name, PLAN_FILE_TIMEOUT).await
+}
+
+pub async fn request_plan_file_with_timeout(
+    state: &Arc<AppState>,
+    session_id: &str,
+    name: &str,
+    timeout: Duration,
+) -> Result<PlanFileResponse, PlanFileServiceError> {
+    match remote_sessions::denamespace_for_target(session_id) {
+        Ok(Some((target, remote_session_id))) => {
+            return remote_sessions::fetch_remote_plan_file(&target, remote_session_id, name)
+                .await
+                .map_err(PlanFileServiceError::Remote);
+        }
+        Ok(None) => {}
+        Err(err) => return Err(PlanFileServiceError::Remote(err)),
+    }
+
+    let handle = state
+        .supervisor
+        .get_session(session_id)
+        .await
+        .ok_or(PlanFileServiceError::SessionNotFound)?;
+    request_plan_file_from_actor(&handle, name.to_string(), timeout).await
+}
+
+async fn request_plan_file_from_actor(
+    handle: &ActorHandle,
+    name: String,
+    timeout: Duration,
+) -> Result<PlanFileResponse, PlanFileServiceError> {
+    let (tx, rx) = oneshot::channel::<PlanFileResponse>();
+    if handle
+        .send(SessionCommand::GetPlanFile { name, reply: tx })
+        .await
+        .is_err()
+    {
+        return Err(PlanFileServiceError::ActorUnavailable);
+    }
+
+    match tokio::time::timeout(timeout, rx).await {
+        Ok(Ok(response)) => Ok(response),
+        Ok(Err(_)) => Err(PlanFileServiceError::ReplyDropped),
+        Err(_) => Err(PlanFileServiceError::TimedOut),
+    }
 }
 
 fn repo_search_cache() -> &'static Mutex<Option<RepoSearchCacheEntry>> {

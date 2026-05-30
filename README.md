@@ -184,7 +184,7 @@ SWIMMERS_TUI_URL=http://127.0.0.1:3210 swimmers-tui # opt into external HTTP tra
 
 ### External / Tailscale access
 
-Set `SWIMMERS_BIND` to expose the server on a non-loopback interface. The server refuses to start if `AUTH_MODE=local_trust` is paired with a non-loopback bind. For Tailscale-only exposure, bind to the machine's Tailscale IP and use `AUTH_MODE=tailnet_trust`; for other network exposure, use `AUTH_MODE=token` with `AUTH_TOKEN`.
+Set `SWIMMERS_BIND` to expose the server on a non-loopback interface. The server refuses to start if `AUTH_MODE=local_trust` is paired with a non-loopback bind. For Tailscale-only exposure, bind to the machine's Tailscale IP and use `AUTH_MODE=tailnet_trust`; for other network exposure, use `AUTH_MODE=token` with `AUTH_TOKEN`. Unknown `AUTH_MODE` values and `AUTH_MODE=token` without `AUTH_TOKEN` are startup configuration errors.
 
 ```bash
 # Bind to a specific Tailscale IP, trusting Tailscale for access control
@@ -219,12 +219,15 @@ swimmers
 | `SWIMMERS_GROK_BIN` | `grok` | Override the Grok executable used by local spawn and commit-helper launchers |
 | `SWIMMERS_NATIVE_APP` | `iterm` | Native desktop target: `iterm` or `ghostty` |
 | `SWIMMERS_GHOSTTY_MODE` | `swap` | Ghostty single-session placement: `swap`, `add`, or `window` |
+| `SWIMMERS_NATIVE_SCRIPT_ROOT` | `(bundled)` | Override the root containing `scripts/iterm-focus.scpt` and `scripts/ghostty-open.scpt` for native handoff |
 | `SWIMMERS_ATTENTION_GROUP_SIZE` | `6` | Number of panes to place in the managed attention group; values are clamped to `1`-`6`. |
 | `SWIMMERS_ATTENTION_GROUP_LAYOUT` | `tiled` | tmux pane layout for the managed attention group: `tiled`, `even-horizontal`, `even-vertical`, `main-horizontal`, or `main-vertical`. Aliases such as `columns`, `stacked`, and `main-left` are accepted. |
 | `SWIMMERS_ATTENTION_GROUP_INCLUDE_UNNUMBERED` | `(unset)` | Set to `1` to let managed attention groups include ready tmux sessions whose names are not only digits. |
 | `SWIMMERS_THOUGHT_BACKEND` | `daemon` | Thought subsystem backend: `daemon` or `inproc` |
 | `CLAWGS_BIN` | `(auto)` | Override path to the `clawgs` binary used by the thought rail |
-| `SWIMMERS_REPLAY_BUFFER_SIZE` | `524288` | Replay ring size in bytes (default 512 KB) |
+| `SWIMMERS_THOUGHT_TICK_MS` | `15000` | Thought polling tick in milliseconds. Values below `250` or invalid values fall back to the default; values above `300000` are clamped. |
+| `SWIMMERS_OUTBOUND_QUEUE_BOUND` | `4096` | WebSocket outbound queue bound. Values below `64` or invalid values fall back to the default; values above `65536` are clamped. |
+| `SWIMMERS_REPLAY_BUFFER_SIZE` | `524288` | Replay ring size in bytes (default 512 KB). Values below `4096` or invalid values fall back to the default; values above `16777216` are clamped. |
 | `SWIMMERS_DATA_DIR` | `(platform data dir)` | Override the persistence directory |
 | `SWIMMERS_TUI_URL` | `(unset)` | When set, the TUI uses HTTP transport against this URL instead of hosting the API in-process. Auto-spawns a local server for loopback URLs. |
 | `SWIMMERS_TUI_REUSE_SERVER` | `(unset)` | Set to `1` for `make tui` to keep an existing loopback `swimmers` backend instead of restarting it first. |
@@ -235,9 +238,13 @@ swimmers
 
 When `SWIMMERS_NATIVE_APP=ghostty`, the API uses Ghostty's AppleScript support to place selected tmux sessions according to `SWIMMERS_GHOSTTY_MODE`; managed attention groups always use their own Ghostty window so they remain visible without clicking a hidden split. This path requires Ghostty 1.3.0+ on macOS with automation access enabled.
 
+Native handoff scripts are bundled into installed binaries and materialized under the Swimmers data directory when a source checkout is not present. Set `SWIMMERS_NATIVE_SCRIPT_ROOT` to point at an alternate checkout or patched script root.
+
 For Ghostty windows or splits you open outside the TUI, run `swimmers tmux new` as the terminal command to create and attach a new tmux session using the next Swimmers numeric name. Use `swimmers tmux next-name` to preview the next number. Unnumbered sessions such as `swimmers-attention`, wave sessions, and backend support sessions do not advance that counter.
 
 While the TUI is running, press `n` or click the top-right native-open label to switch between `iTerm` and `Ghostty` without restarting the API.
+
+`PORT` and resource-size environment variables are parsed by the same startup path used by `swimmers config` and `swimmers config doctor`. Invalid numeric values print a config warning and use the local-first default; oversized replay, outbound queue, and thought tick values print a warning and clamp to the documented maximum.
 
 When a selected session is stale because its tmux session disappeared, press `A` after recreating that exact tmux session to reattach the stale swimmers identity instead of creating a duplicate.
 

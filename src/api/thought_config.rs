@@ -6,19 +6,19 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Extension, Json, Router};
-use tracing::error;
 
 use crate::api::envelope::{
-    api_error, api_error_msg, parse_if_match_version, reserve_version_locked, success_json,
-    INTERNAL_ERROR, PERSISTENCE_UNAVAILABLE, VALIDATION_FAILED, VERSION_CONFLICT,
+    api_error, api_error_msg, error_response, parse_if_match_version, reserve_version_locked,
+    success_json, PERSISTENCE_UNAVAILABLE, VERSION_CONFLICT,
+};
+use crate::api::service::{
+    persist_validated_thought_config, test_thought_config as test_thought_config_service,
+    thought_config_response, validate_thought_config, ApiServiceError,
 };
 use crate::api::AppState;
 use crate::auth::{AuthInfo, AuthScope};
-use crate::openrouter_models::cached_or_default_openrouter_candidates;
-use crate::thought::probe::run_thought_config_probe;
 use crate::thought::protocol::{build_sync_request, SyncRequest};
 use crate::thought::runtime_config::ThoughtConfig;
-use crate::thought_ui::thought_config_ui_metadata;
 use crate::types::ThoughtConfigResponse;
 
 static THOUGHT_CONFIG_VERSION: AtomicU64 = AtomicU64::new(0);
@@ -28,12 +28,7 @@ async fn get_thought_config(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<ThoughtConfigResponse>, Response> {
     auth.require_scope(AuthScope::SessionsRead)?;
-    let config = state.thought_config.read().await.clone();
-    Ok(Json(ThoughtConfigResponse {
-        config,
-        daemon_defaults: state.current_daemon_defaults(),
-        ui: thought_config_ui_metadata(&cached_or_default_openrouter_candidates()),
-    }))
+    Ok(Json(thought_config_response(&state).await))
 }
 
 async fn get_thought_sync_preview(
@@ -57,9 +52,9 @@ async fn put_thought_config(
         return resp;
     }
 
-    let config = match body.normalize_and_validate() {
+    let config = match validate_thought_config(body) {
         Ok(config) => config,
-        Err(err) => return api_error_msg(&VALIDATION_FAILED, err.to_string()),
+        Err(err) => return api_service_error_response(err),
     };
 
     let store = match state.current_file_store() {
@@ -88,12 +83,12 @@ async fn put_thought_config(
         None => return api_error(&VERSION_CONFLICT),
     };
 
-    if let Err(err) = store.save_thought_config(&config).await {
-        error!(error = %err, "failed to persist thought runtime config");
-        return api_error_msg(&INTERNAL_ERROR, "failed to persist thought config");
+    if let Err(err) =
+        persist_validated_thought_config(&store, &mut runtime_config, config.clone()).await
+    {
+        return api_service_error_response(err);
     }
 
-    *runtime_config = config.clone();
     let new_version = reservation.commit();
     drop(runtime_config);
 
@@ -113,12 +108,16 @@ async fn post_thought_config_test(
         return resp;
     }
 
-    let config = match body.normalize_and_validate() {
-        Ok(config) => config,
-        Err(err) => return api_error_msg(&VALIDATION_FAILED, err.to_string()),
+    let result = match test_thought_config_service(body).await {
+        Ok(result) => result,
+        Err(err) => return api_service_error_response(err),
     };
 
-    success_json(StatusCode::OK, &run_thought_config_probe(&config).await)
+    success_json(StatusCode::OK, &result)
+}
+
+fn api_service_error_response(error: ApiServiceError) -> Response {
+    error_response(error.status(), error.code(), error.message())
 }
 
 pub fn routes() -> Router<Arc<AppState>> {

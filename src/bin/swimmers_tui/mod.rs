@@ -307,7 +307,10 @@ pub(crate) fn run() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     app.clear_published_selection();
-    renderer.cleanup()?;
+    let cleanup_result = renderer.cleanup();
+    let shutdown_result = app.shutdown_embedded();
+    cleanup_result?;
+    shutdown_result?;
     Ok(())
 }
 

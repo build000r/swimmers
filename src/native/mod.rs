@@ -13,6 +13,7 @@ use tokio::process::Command;
 use tokio::sync::Mutex as AsyncMutex;
 use tokio::time::{sleep, timeout, Duration};
 
+use crate::session::actor::run_bounded_tmux_command;
 use crate::types::{
     AttentionGroupLayout, GhosttyOpenMode, NativeAttentionGroupOpenResponse, NativeDesktopApp,
     NativeDesktopOpenResponse, NativeDesktopStatusResponse, SessionSummary,
@@ -22,10 +23,12 @@ const NATIVE_APP_ENV: &str = "SWIMMERS_NATIVE_APP";
 const GHOSTTY_MODE_ENV: &str = "SWIMMERS_GHOSTTY_MODE";
 const NATIVE_SCRIPT_ROOT_ENV: &str = "SWIMMERS_NATIVE_SCRIPT_ROOT";
 const ITERM_SCRIPT_RELATIVE_PATH: &str = "scripts/iterm-focus.scpt";
+const ITERM_SCRIPT_SOURCE: &str = include_str!("../../scripts/iterm-focus.scpt");
 const ITERM_OPEN_RETRY_ATTEMPTS: usize = 2;
 const ITERM_OPEN_RETRY_DELAY_MS: u64 = 150;
 const DEFAULT_ITERM_SESSION_NAME: &str = "Swimmers";
 const GHOSTTY_SCRIPT_RELATIVE_PATH: &str = "scripts/ghostty-open.scpt";
+const GHOSTTY_SCRIPT_SOURCE: &str = include_str!("../../scripts/ghostty-open.scpt");
 const GHOSTTY_MANAGED_TITLE_PREFIX: &str = "swimmers-preview :: ";
 const GHOSTTY_ATTENTION_MANAGED_TITLE_PREFIX: &str = "swimmers-attention :: ";
 const GHOSTTY_MIN_APPLESCRIPT_VERSION: [u64; 3] = [1, 3, 0];
@@ -35,6 +38,7 @@ const ATTENTION_GROUP_TMUX_NAME: &str = "swimmers-attention";
 const ATTENTION_GROUP_PANE_TITLE_PREFIX: &str = "swimmers-attention:";
 // 5s bounds AppleScript hangs while still allowing normal local automation latency.
 const OSASCRIPT_TIMEOUT: Duration = Duration::from_secs(5);
+const NATIVE_TMUX_COMMAND_TIMEOUT: Duration = Duration::from_secs(2);
 const OSASCRIPT_ARG_MAX_LEN: usize = 256;
 const TMUX_BIN_ENV: &str = "SWIMMERS_TMUX_BIN";
 const TMUX_BIN_FALLBACKS: &[&str] = &[
@@ -67,6 +71,13 @@ impl NativeDesktopApp {
             Self::Ghostty => GHOSTTY_SCRIPT_RELATIVE_PATH,
         }
     }
+
+    fn bundled_script_source(self) -> &'static str {
+        match self {
+            Self::Iterm => ITERM_SCRIPT_SOURCE,
+            Self::Ghostty => GHOSTTY_SCRIPT_SOURCE,
+        }
+    }
 }
 
 pub fn default_native_app() -> NativeDesktopApp {
@@ -86,25 +97,24 @@ pub fn default_ghostty_open_mode() -> GhosttyOpenMode {
 }
 
 pub fn support_for_host(host: &str, app: NativeDesktopApp) -> NativeDesktopStatusResponse {
-    let script_path = script_path_for_app(app);
     let app_unavailable_reason = match app {
         NativeDesktopApp::Iterm => None,
         NativeDesktopApp::Ghostty => ghostty_unavailable_reason(),
     };
-    support_for_host_with(
+    support_for_host_with_script_resolver(
         host,
         app,
         cfg!(target_os = "macos"),
-        &script_path,
+        || script_path_for_app(app),
         app_unavailable_reason,
     )
 }
 
-fn support_for_host_with(
+fn support_for_host_with_script_resolver(
     host: &str,
     app: NativeDesktopApp,
     is_macos: bool,
-    script_path: &Path,
+    resolve_script_path: impl FnOnce() -> Result<PathBuf>,
     app_unavailable_reason: Option<String>,
 ) -> NativeDesktopStatusResponse {
     let mut response = NativeDesktopStatusResponse {
@@ -131,6 +141,17 @@ fn support_for_host_with(
         ));
         return response;
     }
+
+    let script_path = match resolve_script_path() {
+        Ok(path) => path,
+        Err(err) => {
+            response.reason = Some(format!(
+                "native {} script unavailable: {err}",
+                app.display_name()
+            ));
+            return response;
+        }
+    };
 
     if !script_path.exists() {
         response.reason = Some(format!(
@@ -557,7 +578,7 @@ pub async fn open_or_focus_iterm_session(
     cwd: &str,
 ) -> Result<NativeDesktopOpenResponse> {
     let _guard = NATIVE_OPEN_LOCK.lock().await;
-    let script = script_path_for_app(NativeDesktopApp::Iterm);
+    let script = script_path_for_app(NativeDesktopApp::Iterm)?;
     if !script.exists() {
         return Err(anyhow!("native iTerm script missing: {}", script.display()));
     }
@@ -608,7 +629,7 @@ async fn open_or_focus_ghostty_session(
     mode: GhosttyOpenMode,
 ) -> Result<NativeDesktopOpenResponse> {
     let _guard = NATIVE_OPEN_LOCK.lock().await;
-    let script = script_path_for_app(NativeDesktopApp::Ghostty);
+    let script = script_path_for_app(NativeDesktopApp::Ghostty)?;
     if !script.exists() {
         return Err(anyhow!(
             "native Ghostty script missing: {}",
@@ -659,7 +680,7 @@ async fn open_or_focus_ghostty_session(
     Ok(result)
 }
 
-fn script_path_for_app(app: NativeDesktopApp) -> PathBuf {
+fn script_path_for_app(app: NativeDesktopApp) -> Result<PathBuf> {
     let override_root = std::env::var_os(NATIVE_SCRIPT_ROOT_ENV).map(PathBuf::from);
     let current_exe = std::env::current_exe().ok();
     let current_dir = std::env::current_dir().ok();
@@ -669,6 +690,8 @@ fn script_path_for_app(app: NativeDesktopApp) -> PathBuf {
         current_exe.as_deref(),
         current_dir.as_deref(),
         Path::new(env!("CARGO_MANIFEST_DIR")),
+        &bundled_script_root(),
+        app.bundled_script_source(),
     )
 }
 
@@ -678,11 +701,14 @@ fn resolve_script_path(
     current_exe: Option<&Path>,
     current_dir: Option<&Path>,
     manifest_dir: &Path,
-) -> PathBuf {
-    let mut roots = Vec::new();
+    bundled_root: &Path,
+    bundled_source: &str,
+) -> Result<PathBuf> {
     if let Some(root) = override_root {
-        push_unique_root(&mut roots, root);
+        return Ok(root.join(script_relative_path));
     }
+
+    let mut roots = Vec::new();
     if let Some(dir) = current_dir {
         push_ancestor_roots(&mut roots, dir);
     }
@@ -694,11 +720,66 @@ fn resolve_script_path(
     for root in roots {
         let candidate = root.join(script_relative_path);
         if candidate.is_file() {
-            return candidate;
+            return Ok(candidate);
         }
     }
 
-    manifest_dir.join(script_relative_path)
+    materialize_bundled_script(script_relative_path, bundled_root, bundled_source)
+}
+
+fn bundled_script_root() -> PathBuf {
+    let data_dir = match std::env::var_os("SWIMMERS_DATA_DIR") {
+        Some(value) if !value.is_empty() => PathBuf::from(value),
+        _ => dirs::data_dir()
+            .map(|base| base.join("swimmers"))
+            .unwrap_or_else(|| PathBuf::from("./data/swimmers/")),
+    };
+    data_dir
+        .join("native-scripts")
+        .join(env!("CARGO_PKG_VERSION"))
+}
+
+fn materialize_bundled_script(
+    script_relative_path: &str,
+    bundled_root: &Path,
+    bundled_source: &str,
+) -> Result<PathBuf> {
+    let target = bundled_root.join(script_relative_path);
+    if let Ok(existing) = std::fs::read_to_string(&target) {
+        if existing == bundled_source {
+            return Ok(target);
+        }
+    }
+
+    let parent = target
+        .parent()
+        .ok_or_else(|| anyhow!("native script path has no parent: {}", target.display()))?;
+    std::fs::create_dir_all(parent).with_context(|| {
+        format!(
+            "failed to create native script directory {}",
+            parent.display()
+        )
+    })?;
+
+    let file_name = target
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| anyhow!("native script path has no file name: {}", target.display()))?;
+    let tmp_path = target.with_file_name(format!("{file_name}.{}.tmp", std::process::id()));
+    std::fs::write(&tmp_path, bundled_source).with_context(|| {
+        format!(
+            "failed to write bundled native script {}",
+            tmp_path.display()
+        )
+    })?;
+    std::fs::rename(&tmp_path, &target).with_context(|| {
+        let _ = std::fs::remove_file(&tmp_path);
+        format!(
+            "failed to install bundled native script at {}",
+            target.display()
+        )
+    })?;
+    Ok(target)
 }
 
 fn push_ancestor_roots(roots: &mut Vec<PathBuf>, start: &Path) {
@@ -939,13 +1020,14 @@ async fn run_tmux_status(tmux_path: &Path, args: &[&str]) -> Result<()> {
 }
 
 async fn run_tmux_output(tmux_path: &Path, args: &[&str]) -> Result<std::process::Output> {
-    let output = Command::new(tmux_path)
-        .args(args)
-        .env_remove("TMUX")
-        .env_remove("TMUX_PANE")
-        .output()
-        .await
-        .map_err(|err| anyhow!("failed to run tmux: {err}"))?;
+    let output = run_bounded_tmux_command(
+        tmux_path.as_os_str(),
+        args,
+        NATIVE_TMUX_COMMAND_TIMEOUT,
+        "native",
+    )
+    .await
+    .map_err(|err| anyhow!("failed to run tmux: {err}"))?;
     if output.status.success() {
         return Ok(output);
     }
@@ -1091,19 +1173,20 @@ async fn query_tmux_pane_metadata(
     tmux_path: &Path,
     tmux_name: &str,
 ) -> Result<(Option<String>, Option<String>)> {
-    let output = Command::new(tmux_path)
-        .args([
+    let output = run_bounded_tmux_command(
+        tmux_path.as_os_str(),
+        &[
             "display-message",
             "-p",
             "-t",
             tmux_name,
             "#{pane_id}\t#{pane_current_path}",
-        ])
-        .env_remove("TMUX")
-        .env_remove("TMUX_PANE")
-        .output()
-        .await
-        .map_err(|e| anyhow!("failed to run tmux display-message: {e}"))?;
+        ],
+        NATIVE_TMUX_COMMAND_TIMEOUT,
+        "display-message",
+    )
+    .await
+    .map_err(|e| anyhow!("failed to run tmux display-message: {e}"))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
@@ -1390,6 +1473,22 @@ mod tests {
     use proptest::prelude::*;
     use std::os::unix::fs::PermissionsExt;
     use tempfile::tempdir;
+
+    fn support_for_host_with(
+        host: &str,
+        app: NativeDesktopApp,
+        is_macos: bool,
+        script_path: &std::path::Path,
+        app_unavailable_reason: Option<String>,
+    ) -> NativeDesktopStatusResponse {
+        support_for_host_with_script_resolver(
+            host,
+            app,
+            is_macos,
+            || Ok(script_path.to_path_buf()),
+            app_unavailable_reason,
+        )
+    }
 
     #[test]
     fn sanitize_osascript_text_arg_strips_corrupting_bytes_and_preserves_rest() {
@@ -2089,8 +2188,10 @@ mod tests {
 
     #[test]
     fn ghostty_swap_script_replaces_managed_preview_in_place() {
-        let script = std::fs::read_to_string(script_path_for_app(NativeDesktopApp::Ghostty))
-            .expect("ghostty script should be present");
+        let script = std::fs::read_to_string(
+            script_path_for_app(NativeDesktopApp::Ghostty).expect("script path should resolve"),
+        )
+        .expect("ghostty script should be present");
         let focus_block = script
             .split("on focusManagedWindowTerminal")
             .nth(1)
@@ -2170,6 +2271,25 @@ mod tests {
     }
 
     #[test]
+    fn support_for_host_with_reports_missing_script_path() {
+        let temp = tempdir().unwrap();
+        let script_path = temp.path().join("missing/iterm-focus.scpt");
+
+        let response = support_for_host_with(
+            "localhost:3210",
+            NativeDesktopApp::Iterm,
+            true,
+            &script_path,
+            None,
+        );
+
+        assert!(!response.supported);
+        let reason = response.reason.as_deref().unwrap_or_default();
+        assert!(reason.contains("native iTerm script missing:"));
+        assert!(reason.contains("missing/iterm-focus.scpt"));
+    }
+
+    #[test]
     fn resolve_script_path_prefers_override_root() {
         let temp = tempdir().unwrap();
         let override_root = temp.path().join("override");
@@ -2183,9 +2303,33 @@ mod tests {
             None,
             None,
             Path::new("/tmp/missing-manifest"),
-        );
+            temp.path(),
+            ITERM_SCRIPT_SOURCE,
+        )
+        .unwrap();
 
         assert_eq!(resolved, override_script);
+    }
+
+    #[test]
+    fn resolve_script_path_keeps_missing_override_visible() {
+        let temp = tempdir().unwrap();
+        let override_root = temp.path().join("override");
+        let override_script = override_root.join(ITERM_SCRIPT_RELATIVE_PATH);
+
+        let resolved = resolve_script_path(
+            ITERM_SCRIPT_RELATIVE_PATH,
+            Some(override_root.as_path()),
+            None,
+            None,
+            Path::new("/tmp/missing-manifest"),
+            temp.path(),
+            ITERM_SCRIPT_SOURCE,
+        )
+        .unwrap();
+
+        assert_eq!(resolved, override_script);
+        assert!(!resolved.exists());
     }
 
     #[test]
@@ -2204,9 +2348,35 @@ mod tests {
             Some(current_exe.as_path()),
             None,
             Path::new("/tmp/old/swimmers"),
-        );
+            temp.path(),
+            ITERM_SCRIPT_SOURCE,
+        )
+        .unwrap();
 
         assert_eq!(resolved, script_path);
+    }
+
+    #[test]
+    fn resolve_script_path_materializes_bundled_script_without_checkout() {
+        let temp = tempdir().unwrap();
+        let bundled_root = temp.path().join("installed-assets");
+
+        let resolved = resolve_script_path(
+            ITERM_SCRIPT_RELATIVE_PATH,
+            None,
+            Some(Path::new("/opt/swimmers/bin/swimmers")),
+            Some(Path::new("/Users/b")),
+            Path::new("/var/empty/swimmers"),
+            &bundled_root,
+            ITERM_SCRIPT_SOURCE,
+        )
+        .unwrap();
+
+        assert_eq!(resolved, bundled_root.join(ITERM_SCRIPT_RELATIVE_PATH));
+        assert_eq!(
+            std::fs::read_to_string(&resolved).unwrap(),
+            ITERM_SCRIPT_SOURCE
+        );
     }
 
     #[test]

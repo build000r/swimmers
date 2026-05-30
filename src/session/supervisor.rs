@@ -8,6 +8,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
+#[cfg(test)]
 use tokio::process::Command;
 use tokio::sync::{broadcast, mpsc, oneshot, Mutex, Notify, RwLock};
 use tracing::{debug, error, info, warn};
@@ -17,7 +18,7 @@ use crate::config::Config;
 use crate::launcher::{self, SpawnToolLauncher};
 use crate::persistence::file_store::{FileStore, PersistedSession, ThoughtSnapshot};
 use crate::repo_theme::discover_repo_theme;
-use crate::session::actor::{ActorHandle, SessionCommand};
+use crate::session::actor::{run_bounded_tmux_command, ActorHandle, SessionCommand};
 use crate::thought::loop_runner::{SessionInfo, SessionProvider};
 use crate::thought::protocol::ThoughtDeliveryState;
 use crate::tmux_target::exact_session_target;
@@ -31,6 +32,8 @@ const PROCESS_EXIT_REAP_INTERVAL: Duration = Duration::from_millis(250);
 const PROCESS_EXIT_DELETE_GRACE: Duration = Duration::ZERO;
 const PROCESS_EXIT_SUMMARY_TIMEOUT: Duration = Duration::from_millis(250);
 const TMUX_REDISCOVERY_INTERVAL: Duration = Duration::from_secs(10);
+const TMUX_LIST_SESSIONS_TIMEOUT: Duration = Duration::from_secs(2);
+const TMUX_KILL_SESSION_TIMEOUT: Duration = Duration::from_millis(500);
 const ACTIVE_PANE_LOOKUP_TIMEOUT: Duration = Duration::from_millis(500);
 const ACTIVE_PANE_LOOKUP_WARN_THRESHOLD: Duration = Duration::from_millis(200);
 const PRELAUNCH_PROMPT_CLEANUP_DELAY: Duration = Duration::from_secs(30);
@@ -128,12 +131,14 @@ where
         .collect()
 }
 
+#[cfg(test)]
 fn tmux_query_command(args: &[&str]) -> Command {
     let mut command = Command::new("tmux");
     command
         .args(args)
         .env_remove("TMUX")
-        .env_remove("TMUX_PANE");
+        .env_remove("TMUX_PANE")
+        .kill_on_drop(true);
     command
 }
 
@@ -144,24 +149,18 @@ fn tmux_query_command(args: &[&str]) -> Command {
 /// TTL window.
 async fn query_all_active_pane_session_ids() -> anyhow::Result<HashMap<String, String>> {
     let started = Instant::now();
-    let output = tokio::time::timeout(
-        ACTIVE_PANE_LOOKUP_TIMEOUT,
-        tmux_query_command(&[
+    let output = run_bounded_tmux_command(
+        "tmux",
+        &[
             "list-panes",
             "-a",
             "-F",
             "#{session_name}\t#{window_active}\t#{pane_active}\t#{window_index}.#{pane_index}:#{pane_id}",
-        ])
-        .output(),
+        ],
+        ACTIVE_PANE_LOOKUP_TIMEOUT,
+        "list-panes",
     )
-        .await
-        .map_err(|_| {
-            anyhow::anyhow!(
-                "tmux list-panes timed out after {}ms",
-                ACTIVE_PANE_LOOKUP_TIMEOUT.as_millis()
-            )
-        })?
-        .map_err(|e| anyhow::anyhow!("failed to run tmux list-panes: {}", e))?;
+    .await?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -552,9 +551,13 @@ impl SessionSupervisor {
             phase = "tmux_list_sessions",
             "running tmux list-sessions"
         );
-        let output = tmux_query_command(&["list-sessions", "-F", "#{session_name}"])
-            .output()
-            .await;
+        let output = run_bounded_tmux_command(
+            "tmux",
+            &["list-sessions", "-F", "#{session_name}"],
+            TMUX_LIST_SESSIONS_TIMEOUT,
+            "list-sessions",
+        )
+        .await;
 
         match output {
             Ok(output) if output.status.success() => {
@@ -1595,7 +1598,7 @@ impl SessionSupervisor {
         self.thought_tx.clone()
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, debug_assertions))]
     pub async fn insert_test_handle(&self, handle: ActorHandle) {
         let mut sessions = self.sessions.write().await;
         sessions.insert(handle.session_id.clone(), handle);
@@ -2573,13 +2576,13 @@ fn enqueue_initial_request_input(
 
 async fn kill_tmux_session(tmux_name: &str) -> anyhow::Result<()> {
     let target = exact_session_target(tmux_name);
-    let output = Command::new("tmux")
-        .args(["kill-session", "-t", &target])
-        .env_remove("TMUX")
-        .env_remove("TMUX_PANE")
-        .output()
-        .await
-        .map_err(|e| anyhow::anyhow!("failed to run tmux kill-session: {}", e))?;
+    let output = run_bounded_tmux_command(
+        "tmux",
+        &["kill-session", "-t", &target],
+        TMUX_KILL_SESSION_TIMEOUT,
+        "kill-session",
+    )
+    .await?;
 
     if output.status.success() {
         return Ok(());
@@ -2942,6 +2945,32 @@ mod tests {
             .get_envs()
             .find_map(|(key, value)| (key == std::ffi::OsStr::new("TMUX_PANE")).then_some(value));
         assert_eq!(tmux_pane_value, Some(None));
+    }
+
+    #[tokio::test]
+    async fn bounded_tmux_command_times_out_non_returning_fake_tmux() {
+        let dir = tempdir().expect("tempdir");
+        let fake_tmux = dir.path().join("tmux");
+        write_executable(&fake_tmux, "#!/bin/sh\nexec sleep 10\n");
+
+        let started = Instant::now();
+        let err = run_bounded_tmux_command(
+            fake_tmux.as_os_str(),
+            &["list-sessions", "-F", "#{session_name}"],
+            Duration::from_millis(25),
+            "test-hanging-list-sessions",
+        )
+        .await
+        .expect_err("hanging tmux should time out");
+
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "bounded tmux helper should not wait for the fake tmux sleep"
+        );
+        assert!(
+            err.to_string().contains("timed out after 25ms"),
+            "timeout error should mention the bounded wait: {err:#}"
+        );
     }
 
     #[test]
