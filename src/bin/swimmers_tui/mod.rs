@@ -98,6 +98,28 @@ pub(crate) struct BackendHealthResponse {
     pub(crate) thought_bridge: BackendThoughtBridgeHealth,
     #[serde(default)]
     pub(crate) persistence: BackendPersistenceHealth,
+    #[serde(default)]
+    pub(crate) dependencies: Option<BackendDependencyLedger>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
+pub(crate) struct BackendDependencyLedger {
+    #[serde(default)]
+    pub(crate) tmux_discovery: BackendDependencySnapshot,
+    #[serde(default)]
+    pub(crate) tmux_capture: BackendDependencySnapshot,
+    #[serde(default)]
+    pub(crate) native_scripts: BackendDependencySnapshot,
+    #[serde(default)]
+    pub(crate) remote_targets: BackendDependencySnapshot,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
+pub(crate) struct BackendDependencySnapshot {
+    #[serde(default)]
+    pub(crate) status: String,
+    #[serde(default)]
+    pub(crate) last_error: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]

@@ -9,13 +9,12 @@ use axum::{Extension, Json, Router};
 use chrono::Utc;
 
 use crate::api::envelope::{
-    api_error, parse_if_match_version, reserve_version_locked, success_json, VERSION_CONFLICT,
+    api_error, error_body_msg, parse_if_match_version, reserve_version_locked, success_json,
+    VERSION_CONFLICT,
 };
 use crate::api::{fetch_live_summary, AppState, PublishedSelectionState};
 use crate::auth::{AuthInfo, AuthScope};
-use crate::types::{
-    ErrorResponse, PublishSelectionRequest, PublishedSelectionResponse, SessionState,
-};
+use crate::types::{PublishSelectionRequest, PublishedSelectionResponse, SessionState};
 
 static SELECTION_VERSION: AtomicU64 = AtomicU64::new(0);
 
@@ -41,10 +40,10 @@ async fn get_published_selection(
                 session_id: Some(session_id),
                 session: Some(summary),
                 published_at: snapshot.published_at,
-                error: Some(ErrorResponse {
-                    code: "SESSION_EXITED".to_string(),
-                    message: Some("session has already exited".to_string()),
-                }),
+                error: Some(error_body_msg(
+                    "SESSION_EXITED",
+                    "session has already exited",
+                )),
             }))
         }
         Ok(Some(summary)) => Ok(Json(PublishedSelectionResponse {
@@ -57,17 +56,11 @@ async fn get_published_selection(
             session_id: Some(session_id),
             session: None,
             published_at: snapshot.published_at,
-            error: Some(ErrorResponse {
-                code: "SESSION_NOT_FOUND".to_string(),
-                message: Some("session not found".to_string()),
-            }),
+            error: Some(error_body_msg("SESSION_NOT_FOUND", "session not found")),
         })),
         Err(err) => Err((
             axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                code: "INTERNAL_ERROR".to_string(),
-                message: Some(err.to_string()),
-            }),
+            Json(error_body_msg("INTERNAL_ERROR", err.to_string())),
         )
             .into_response()),
     }

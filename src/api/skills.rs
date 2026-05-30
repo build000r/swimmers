@@ -11,12 +11,14 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::process::Command;
 
-use crate::api::envelope::{api_error, success_json, INVALID_SKILL_TOOL};
+use crate::api::envelope::{
+    api_error, error_body, error_body_msg, success_json, INVALID_SKILL_TOOL,
+};
 use crate::api::{fetch_live_summary, AppState};
 use crate::auth::{AuthInfo, AuthScope};
 use crate::types::{
-    ErrorResponse, SessionSkillIssue, SessionSkillListResponse, SessionSkillSummary,
-    SkillListResponse, SkillSummary,
+    SessionSkillIssue, SessionSkillListResponse, SessionSkillSummary, SkillListResponse,
+    SkillSummary,
 };
 
 const MAX_SCAN_DEPTH: usize = 6;
@@ -260,10 +262,10 @@ async fn list_session_skills(
     if source != "sbp" {
         return (
             StatusCode::BAD_REQUEST,
-            Json(ErrorResponse {
-                code: "INVALID_SKILL_SOURCE".to_string(),
-                message: Some("session skills source must be sbp".to_string()),
-            }),
+            Json(error_body_msg(
+                "INVALID_SKILL_SOURCE",
+                "session skills source must be sbp",
+            )),
         )
             .into_response();
     }
@@ -273,10 +275,7 @@ async fn list_session_skills(
         Ok(None) => {
             return (
                 StatusCode::NOT_FOUND,
-                Json(ErrorResponse {
-                    code: "SESSION_NOT_FOUND".to_string(),
-                    message: None,
-                }),
+                Json(error_body("SESSION_NOT_FOUND", None)),
             )
                 .into_response();
         }
@@ -284,10 +283,7 @@ async fn list_session_skills(
             tracing::error!("session skills summary lookup failed: {err}");
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    code: "INTERNAL_ERROR".to_string(),
-                    message: Some(err.to_string()),
-                }),
+                Json(error_body_msg("INTERNAL_ERROR", err.to_string())),
             )
                 .into_response();
         }

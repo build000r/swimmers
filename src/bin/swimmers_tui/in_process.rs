@@ -14,7 +14,8 @@ use swimmers::api::service::{
     start_dir_repo_action as start_dir_repo_action_service,
     test_thought_config as test_thought_config_service, thought_config_response,
     update_dir_group_memberships as update_dir_group_memberships_service,
-    update_thought_config as update_thought_config_service, NativeOpenServiceError,
+    update_thought_config as update_thought_config_service, ApiServiceError,
+    NativeOpenServiceError,
 };
 use swimmers::api::sessions::send_group_input_service;
 use swimmers::api::{AppState, PublishedSelectionState};
@@ -27,7 +28,7 @@ use swimmers::types::{
     AdoptSessionResponse, AttentionGroupLayout, CreateSessionRequest, CreateSessionResponse,
     CreateSessionsBatchRequest, CreateSessionsBatchResponse, DirGroupMembershipUpdateRequest,
     DirGroupMembershipUpdateResponse, DirListResponse, DirRepoActionResponse,
-    DirRepoSearchResponse, GhosttyOpenMode, MermaidArtifactResponse,
+    DirRepoSearchResponse, ErrorResponse, GhosttyOpenMode, MermaidArtifactResponse,
     NativeAttentionGroupOpenRequest, NativeAttentionGroupOpenResponse, NativeDesktopApp,
     NativeDesktopOpenResponse, NativeDesktopStatusResponse, PlanFileResponse, RepoActionKind,
     SessionGroupInputRequest, SessionGroupInputResponse, SessionSkillListResponse, SessionSummary,
@@ -36,8 +37,8 @@ use swimmers::types::{
 
 use super::api::{ThoughtConfigTestResponse, TuiApi};
 use super::{
-    load_overlay_plan_entries, BackendHealthResponse, BackendPersistenceHealth,
-    BackendThoughtBridgeHealth, PlanPanelEntry,
+    load_overlay_plan_entries, BackendDependencyLedger, BackendDependencySnapshot,
+    BackendHealthResponse, BackendPersistenceHealth, BackendThoughtBridgeHealth, PlanPanelEntry,
 };
 pub(crate) use swimmers::types::ThoughtConfigResponse;
 
@@ -69,6 +70,10 @@ fn bridge_status_label(status: swimmers::thought::health::BridgeStatus) -> Strin
     .to_string()
 }
 
+fn api_service_error_message(error: ApiServiceError) -> String {
+    ErrorResponse::with_message(error.code(), error.message()).display_message("in-process API")
+}
+
 // ---------------------------------------------------------------------------
 // TuiApi implementation
 // ---------------------------------------------------------------------------
@@ -91,6 +96,22 @@ impl TuiApi for InProcessApi {
                 .state
                 .current_file_store()
                 .map(|store| store.health_snapshot());
+            let tmux = self.state.supervisor.tmux_dependency_health_snapshot();
+            let native_app = *self.state.native_desktop_app.read().await;
+            let native_scripts_health = swimmers::native::script_dependency_health(native_app);
+            let remote_health = swimmers::session::overlay::remote_targets_health();
+            let status_label = |s: swimmers::types::DependencyHealthStatus| match s {
+                swimmers::types::DependencyHealthStatus::Unknown => "unknown",
+                swimmers::types::DependencyHealthStatus::Healthy => "healthy",
+                swimmers::types::DependencyHealthStatus::Degraded => "degraded",
+                swimmers::types::DependencyHealthStatus::Unavailable => "unavailable",
+                swimmers::types::DependencyHealthStatus::NotConfigured => "not_configured",
+            };
+            let dep_snap =
+                |h: swimmers::types::DependencyHealthSnapshot| BackendDependencySnapshot {
+                    status: status_label(h.status).to_string(),
+                    last_error: h.last_error,
+                };
             Ok(BackendHealthResponse {
                 status: bridge_status_label(thought_bridge.status),
                 thought_bridge: BackendThoughtBridgeHealth {
@@ -116,6 +137,12 @@ impl TuiApi for InProcessApi {
                         ..BackendPersistenceHealth::default()
                     },
                 },
+                dependencies: Some(BackendDependencyLedger {
+                    tmux_discovery: dep_snap(tmux.discovery),
+                    tmux_capture: dep_snap(tmux.capture),
+                    native_scripts: dep_snap(native_scripts_health),
+                    remote_targets: dep_snap(remote_health),
+                }),
             })
         })
     }
@@ -131,7 +158,7 @@ impl TuiApi for InProcessApi {
         Box::pin(async move {
             update_thought_config_service(&self.state, config)
                 .await
-                .map_err(|err| err.message().to_string())
+                .map_err(api_service_error_message)
         })
     }
 
@@ -142,7 +169,7 @@ impl TuiApi for InProcessApi {
         Box::pin(async move {
             test_thought_config_service(config)
                 .await
-                .map_err(|err| err.message().to_string())
+                .map_err(api_service_error_message)
         })
     }
 
@@ -498,7 +525,7 @@ impl TuiApi for InProcessApi {
             }
             create_local_sessions_batch(state, dirs, Some(spawn_tool), initial_request)
                 .await
-                .map_err(|err| err.message().to_string())
+                .map_err(api_service_error_message)
         })
     }
 
@@ -511,7 +538,7 @@ impl TuiApi for InProcessApi {
         Box::pin(async move {
             send_group_input_service(state, SessionGroupInputRequest { session_ids, text })
                 .await
-                .map_err(|err| err.message.unwrap_or(err.code))
+                .map_err(|err| err.display_message("in-process API"))
         })
     }
 }
@@ -728,7 +755,7 @@ mod tests {
             .await
             .expect_err("disk failure should fail");
 
-        assert_eq!(err, "failed to persist thought config");
+        assert_eq!(err, "INTERNAL_ERROR: failed to persist thought config");
         assert!(state.thought_config.read().await.enabled);
     }
 
@@ -780,7 +807,7 @@ mod tests {
             .await
             .expect_err("empty batch should fail");
 
-        assert_eq!(err, "dirs must not be empty");
+        assert_eq!(err, "VALIDATION_FAILED: dirs must not be empty");
     }
 
     #[tokio::test]
@@ -792,7 +819,7 @@ mod tests {
             .await
             .expect_err("empty group should fail");
 
-        assert_eq!(err, "session_ids must not be empty");
+        assert_eq!(err, "VALIDATION_FAILED: session_ids must not be empty");
     }
 
     #[tokio::test]

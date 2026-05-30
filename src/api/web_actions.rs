@@ -7,6 +7,7 @@ use axum::routing::{get, post};
 use axum::{Extension, Json, Router};
 use mermaid_rs_renderer::{compute_layout, parse_mermaid, render_svg, RenderOptions};
 
+use crate::api::envelope::error_body;
 #[cfg(feature = "personal-workflows")]
 use crate::api::fetch_live_summary;
 use crate::api::{sessions, AppState};
@@ -14,7 +15,6 @@ use crate::auth::{AuthInfo, AuthScope};
 use crate::host_actions::{ArtifactOpener, SystemArtifactOpener};
 #[cfg(feature = "personal-workflows")]
 use crate::host_actions::{CommitLauncher, SystemCommitLauncher};
-use crate::types::ErrorResponse;
 #[cfg(feature = "personal-workflows")]
 use crate::types::SessionState;
 
@@ -60,13 +60,7 @@ pub fn routes() -> Router<Arc<AppState>> {
 fn json_error(status: StatusCode, code: &str, message: impl Into<Option<String>>) -> Response {
     (
         status,
-        Json(
-            serde_json::to_value(ErrorResponse {
-                code: code.to_string(),
-                message: message.into(),
-            })
-            .unwrap(),
-        ),
+        Json(serde_json::to_value(error_body(code, message.into())).unwrap()),
     )
         .into_response()
 }

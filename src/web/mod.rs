@@ -17,6 +17,7 @@ use serde::{Deserialize, Serialize};
 use subtle::ConstantTimeEq;
 use tokio::sync::{broadcast, mpsc, oneshot};
 
+use crate::api::envelope::error_body_msg;
 use crate::api::{fetch_live_summary, AppState};
 use crate::auth::{AuthInfo, AuthScope, OBSERVER_SCOPES, OPERATOR_SCOPES};
 use crate::config::{AuthMode, Config};
@@ -24,7 +25,7 @@ use crate::session::actor::{
     ActorHandle, InputDeliveryResult, OutputFrame, ReplayCursor, SessionCommand, SubscribeOutcome,
 };
 use crate::session::supervisor::LifecycleEvent;
-use crate::types::{clamp_terminal_resize, opcodes, ControlEvent, ErrorResponse};
+use crate::types::{clamp_terminal_resize, opcodes, ControlEvent};
 
 const APP_JS_ROUTE: &str = "/app.js";
 const RENDERED_SURFACE_JS_ROUTE: &str = "/rendered_surface.js";
@@ -1500,11 +1501,12 @@ async fn send_ws_json(
 }
 
 fn control_event_ws_payload(event: &ControlEvent) -> serde_json::Value {
+    let contract = event.payload_contract();
     serde_json::json!({
         "type": "control_event",
-        "event": event.event,
+        "event": contract.event_name(),
         "sessionId": event.session_id,
-        "payload": event.payload,
+        "payload": contract.payload_value(),
     })
 }
 
@@ -1703,19 +1705,13 @@ fn valid_frankentui_pkg_dir(path: &Path) -> bool {
 }
 
 fn json_error(status: StatusCode, code: &str, message: &str) -> Response {
-    (
-        status,
-        Json(ErrorResponse {
-            code: code.to_string(),
-            message: Some(message.to_string()),
-        }),
-    )
-        .into_response()
+    (status, Json(error_body_msg(code, message))).into_response()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::{KnownControlEventPayload, SessionTitlePayload};
     use axum::body::to_bytes;
     use axum::response::IntoResponse;
     use tempfile::tempdir;
@@ -1830,6 +1826,7 @@ mod tests {
                 "previous_state": "idle",
                 "current_command": "cargo test",
                 "transport_health": "healthy",
+                "at": "2026-05-15T10:00:00Z",
             }),
         };
 
@@ -1840,6 +1837,74 @@ mod tests {
         assert_eq!(payload["sessionId"], "sess_0");
         assert_eq!(payload["payload"]["state"], "attention");
         assert_eq!(payload["payload"]["current_command"], "cargo test");
+    }
+
+    #[test]
+    fn control_event_ws_payload_serializes_title_and_thought_update_contracts() {
+        let title = ControlEvent {
+            event: "session_title".to_string(),
+            session_id: "sess_0".to_string(),
+            payload: serde_json::json!({
+                "title": "/tmp/swimmers",
+                "at": "2026-05-15T10:00:02Z",
+            }),
+        };
+        let title_payload = control_event_ws_payload(&title);
+        assert_eq!(title_payload["event"], "session_title");
+        assert_eq!(title_payload["payload"]["title"], "/tmp/swimmers");
+
+        let thought = ControlEvent {
+            event: "thought_update".to_string(),
+            session_id: "sess_0".to_string(),
+            payload: serde_json::json!({
+                "thought": "operator response needed",
+                "token_count": 64000,
+                "context_limit": 128000,
+                "thought_state": "holding",
+                "thought_source": "llm",
+                "rest_state": "active",
+                "commit_candidate": true,
+                "objective_changed": true,
+                "at": "2026-05-15T10:00:04Z",
+            }),
+        };
+        let thought_payload = control_event_ws_payload(&thought);
+        assert_eq!(thought_payload["event"], "thought_update");
+        assert_eq!(thought_payload["payload"]["token_count"], 64000);
+        assert_eq!(thought_payload["payload"]["commit_candidate"], true);
+    }
+
+    #[test]
+    fn control_event_payload_contract_preserves_unknown_events() {
+        let event = ControlEvent {
+            event: "future_event".to_string(),
+            session_id: "sess_future".to_string(),
+            payload: serde_json::json!({ "newField": true }),
+        };
+
+        let payload = control_event_ws_payload(&event);
+
+        assert_eq!(payload["type"], "control_event");
+        assert_eq!(payload["event"], "future_event");
+        assert_eq!(payload["sessionId"], "sess_future");
+        assert_eq!(payload["payload"]["newField"], true);
+    }
+
+    #[test]
+    fn known_control_event_payload_uses_tagged_serde_shape() {
+        let at = chrono::DateTime::parse_from_rfc3339("2026-05-15T10:00:02Z")
+            .expect("timestamp")
+            .with_timezone(&chrono::Utc);
+        let tagged = serde_json::to_value(KnownControlEventPayload::SessionTitle(
+            SessionTitlePayload {
+                title: "/tmp/swimmers".to_string(),
+                at,
+            },
+        ))
+        .expect("tagged control event");
+
+        assert_eq!(tagged["event"], "session_title");
+        assert_eq!(tagged["payload"]["title"], "/tmp/swimmers");
     }
 
     #[test]

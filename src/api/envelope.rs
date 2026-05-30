@@ -67,6 +67,14 @@ pub const VERSION_CONFLICT: ApiErrorDef = ApiErrorDef {
     default_message: "version mismatch",
 };
 
+pub fn error_body(code: impl Into<String>, message: Option<String>) -> ErrorResponse {
+    ErrorResponse::new(code, message)
+}
+
+pub fn error_body_msg(code: impl Into<String>, message: impl Into<String>) -> ErrorResponse {
+    ErrorResponse::with_message(code, message)
+}
+
 pub fn api_error(def: &ApiErrorDef) -> Response {
     error_response(def.status, def.code, def.default_message)
 }
@@ -76,11 +84,7 @@ pub fn api_error_msg(def: &ApiErrorDef, message: impl Into<String>) -> Response 
 }
 
 pub fn error_response(status: StatusCode, code: &str, message: impl Into<String>) -> Response {
-    let body = serde_json::to_value(ErrorResponse {
-        code: code.to_string(),
-        message: Some(message.into()),
-    })
-    .unwrap_or_else(|_| {
+    let body = serde_json::to_value(error_body_msg(code, message)).unwrap_or_else(|_| {
         serde_json::json!({
             "code": "internal_error",
             "message": "failed to serialize error response",

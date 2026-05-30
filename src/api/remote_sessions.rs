@@ -11,6 +11,7 @@ use chrono::{DateTime, Utc};
 use futures::future::join_all;
 use reqwest::Client;
 
+use crate::api::envelope::error_body_msg;
 use crate::config::Config;
 use crate::session::overlay::default_overlay;
 use crate::types::{
@@ -57,14 +58,7 @@ impl RemoteSessionError {
     }
 
     pub fn into_response(self) -> Response {
-        (
-            self.status,
-            Json(ErrorResponse {
-                code: self.code.to_string(),
-                message: Some(self.message),
-            }),
-        )
-            .into_response()
+        (self.status, Json(error_body_msg(self.code, self.message))).into_response()
     }
 }
 
@@ -1139,12 +1133,10 @@ mod tests {
         };
         (
             status,
-            AxumJson(ErrorResponse {
-                code: "REMOTE_AUTH_REJECTED".to_string(),
-                message: Some(format!(
-                    "token {token} lacks required {required_scope} scope"
-                )),
-            }),
+            AxumJson(error_body_msg(
+                "REMOTE_AUTH_REJECTED",
+                format!("token {token} lacks required {required_scope} scope"),
+            )),
         )
             .into_response()
     }

@@ -1435,6 +1435,29 @@ pub struct ErrorResponse {
     pub message: Option<String>,
 }
 
+impl ErrorResponse {
+    pub fn new(code: impl Into<String>, message: Option<String>) -> Self {
+        Self {
+            code: code.into(),
+            message,
+        }
+    }
+
+    pub fn with_message(code: impl Into<String>, message: impl Into<String>) -> Self {
+        Self::new(code, Some(message.into()))
+    }
+
+    pub fn display_message(&self, fallback: impl std::fmt::Display) -> String {
+        match (self.code.trim(), self.message.as_deref()) {
+            ("", Some(message)) => message.to_string(),
+            ("", None) => format!("request failed: {fallback}"),
+            (code, Some(message)) if message.trim().is_empty() => code.to_string(),
+            (code, Some(message)) => format!("{code}: {message}"),
+            (code, None) => format!("{code} ({fallback})"),
+        }
+    }
+}
+
 // --- Control Events (Server -> Client JSON) ---
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1442,6 +1465,81 @@ pub struct ControlEvent {
     pub event: String,
     pub session_id: String,
     pub payload: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "event", content = "payload", rename_all = "snake_case")]
+pub enum KnownControlEventPayload {
+    SessionState(SessionStatePayload),
+    SessionTitle(SessionTitlePayload),
+    SessionSkill(SessionSkillPayload),
+    ThoughtUpdate(ThoughtUpdatePayload),
+}
+
+#[derive(Debug, Clone)]
+pub enum ControlEventPayloadContract {
+    Known(KnownControlEventPayload),
+    Unknown {
+        event: String,
+        payload: serde_json::Value,
+    },
+}
+
+impl ControlEvent {
+    pub fn payload_contract(&self) -> ControlEventPayloadContract {
+        let known = match self.event.as_str() {
+            "session_state" => serde_json::from_value(self.payload.clone())
+                .ok()
+                .map(KnownControlEventPayload::SessionState),
+            "session_title" => serde_json::from_value(self.payload.clone())
+                .ok()
+                .map(KnownControlEventPayload::SessionTitle),
+            "session_skill" => serde_json::from_value(self.payload.clone())
+                .ok()
+                .map(KnownControlEventPayload::SessionSkill),
+            "thought_update" => serde_json::from_value(self.payload.clone())
+                .ok()
+                .map(KnownControlEventPayload::ThoughtUpdate),
+            _ => None,
+        };
+
+        known
+            .map(ControlEventPayloadContract::Known)
+            .unwrap_or_else(|| ControlEventPayloadContract::Unknown {
+                event: self.event.clone(),
+                payload: self.payload.clone(),
+            })
+    }
+}
+
+impl ControlEventPayloadContract {
+    pub fn event_name(&self) -> &str {
+        match self {
+            Self::Known(KnownControlEventPayload::SessionState(_)) => "session_state",
+            Self::Known(KnownControlEventPayload::SessionTitle(_)) => "session_title",
+            Self::Known(KnownControlEventPayload::SessionSkill(_)) => "session_skill",
+            Self::Known(KnownControlEventPayload::ThoughtUpdate(_)) => "thought_update",
+            Self::Unknown { event, .. } => event.as_str(),
+        }
+    }
+
+    pub fn payload_value(&self) -> serde_json::Value {
+        match self {
+            Self::Known(KnownControlEventPayload::SessionState(payload)) => {
+                serde_json::to_value(payload).unwrap_or(serde_json::Value::Null)
+            }
+            Self::Known(KnownControlEventPayload::SessionTitle(payload)) => {
+                serde_json::to_value(payload).unwrap_or(serde_json::Value::Null)
+            }
+            Self::Known(KnownControlEventPayload::SessionSkill(payload)) => {
+                serde_json::to_value(payload).unwrap_or(serde_json::Value::Null)
+            }
+            Self::Known(KnownControlEventPayload::ThoughtUpdate(payload)) => {
+                serde_json::to_value(payload).unwrap_or(serde_json::Value::Null)
+            }
+            Self::Unknown { payload, .. } => payload.clone(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

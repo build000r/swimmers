@@ -1092,9 +1092,7 @@ impl TuiApi for ApiClient {
 pub(crate) async fn read_error(response: reqwest::Response) -> String {
     let status = response.status();
     match response.json::<ErrorResponse>().await {
-        Ok(body) => body
-            .message
-            .unwrap_or_else(|| format!("request failed: {}", status)),
+        Ok(body) => body.display_message(status),
         Err(_) => format!("request failed: {}", status),
     }
 }

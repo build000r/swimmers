@@ -1077,6 +1077,32 @@ test("websocket control events patch live session state", () => {
   assert.equal(web.state.sessions[0].objective_changed_at, "2026-05-15T10:00:04Z");
 });
 
+test("websocket control events accept typed nested envelopes and unknown events", () => {
+  resetWebState();
+  web.state.sessions = [rawSession({ state: "idle", thought: null, token_count: 0 })];
+
+  web.handleSocketText(JSON.stringify({
+    type: "control_event",
+    controlEvent: {
+      event: "session_title",
+      session_id: "sess_0",
+      payload: { title: "/tmp/typed-envelope", at: "2026-05-15T10:00:02Z" },
+    },
+  }));
+  assert.equal(web.state.sessions[0].cwd, "/tmp/typed-envelope");
+  assert.equal(web.state.sessions[0].last_control_event, "session_title");
+
+  web.handleSocketText(JSON.stringify({
+    type: "control_event",
+    control_event: {
+      event: "future_event",
+      sessionId: "sess_0",
+      payload: { newField: true },
+    },
+  }));
+  assert.equal(web.state.sessions[0].last_control_event, "future_event");
+});
+
 test("session refresh backs off while selected event stream is open", () => {
   resetWebState();
   web.state.selectedSessionId = "sess_0";

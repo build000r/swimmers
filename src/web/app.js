@@ -5695,7 +5695,8 @@ function handleSocketText(raw) {
 }
 
 function applyControlEvent(message) {
-  const sessionId = normalizeSessionId(message.sessionId || message.session_id);
+  const envelope = message.controlEvent || message.control_event || message;
+  const sessionId = normalizeSessionId(message.sessionId || message.session_id || envelope.sessionId || envelope.session_id);
   if (!sessionId) {
     return;
   }
@@ -5704,8 +5705,8 @@ function applyControlEvent(message) {
     return;
   }
 
-  const payload = message.payload && typeof message.payload === "object" ? message.payload : {};
-  const event = String(message.event || "");
+  const payload = envelope.payload && typeof envelope.payload === "object" ? envelope.payload : {};
+  const event = String(envelope.event || "");
   const session = { ...state.sessions[index], last_control_event: event };
 
   if (event === "session_state") {

@@ -1262,6 +1262,45 @@ async fn api_client_transport_errors_are_actionable() {
 }
 
 #[tokio::test]
+async fn api_client_preserves_api_error_codes_in_messages() {
+    use axum::http::StatusCode;
+    use axum::routing::get;
+    use axum::{Json, Router};
+
+    async fn failing_sessions() -> (StatusCode, Json<swimmers::types::ErrorResponse>) {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(swimmers::types::ErrorResponse::with_message(
+                "VALIDATION_FAILED",
+                "bad sessions request",
+            )),
+        )
+    }
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind test server");
+    let addr = listener.local_addr().expect("server addr");
+    let handle = tokio::spawn(async move {
+        axum::serve(
+            listener,
+            Router::new().route("/v1/sessions", get(failing_sessions)),
+        )
+        .await
+        .expect("serve test api");
+    });
+    let client = test_api_client(format!("http://{addr}"), None);
+
+    let error = client
+        .fetch_sessions()
+        .await
+        .expect_err("server error should preserve response code");
+
+    handle.abort();
+    assert_eq!(error, "VALIDATION_FAILED: bad sessions request");
+}
+
+#[tokio::test]
 async fn api_client_test_thought_config_falls_back_when_local_backend_is_unreachable() {
     let _lock = TEST_ENV_LOCK.lock().expect("env lock");
     let original = env::var("CLAWGS_BIN").ok();
@@ -1882,6 +1921,74 @@ fn refresh_renders_backend_health_degraded_and_recovered_banner() {
     assert!(
         find_text_position(&renderer, "persistence degraded").is_none(),
         "healthy backend health should clear the degraded banner"
+    );
+}
+
+#[test]
+fn empty_aquarium_shows_tmux_unavailable_when_discovery_fails() {
+    let api = MockApi::new();
+    let mut health = healthy_backend_health();
+    health.dependencies.as_mut().unwrap().tmux_discovery.status = "unavailable".to_string();
+    api.push_fetch_sessions(Ok(vec![]));
+    api.push_backend_health(Ok(health));
+
+    let layout = test_layout(120, 32);
+    let mut app = make_app(api);
+    app.refresh_with_feedback(layout, false);
+
+    let mut renderer = test_renderer(120, 32);
+    app.render(&mut renderer, layout);
+    assert!(
+        find_text_position(&renderer, "tmux unavailable").is_some(),
+        "should show tmux unavailable message when discovery reports unavailable"
+    );
+}
+
+#[test]
+fn empty_aquarium_shows_normal_message_when_tmux_healthy() {
+    let api = MockApi::new();
+    api.push_fetch_sessions(Ok(vec![]));
+    api.push_backend_health(Ok(healthy_backend_health()));
+
+    let layout = test_layout(120, 32);
+    let mut app = make_app(api);
+    app.refresh_with_feedback(layout, false);
+
+    let mut renderer = test_renderer(120, 32);
+    app.render(&mut renderer, layout);
+    assert!(
+        find_text_position(&renderer, "no tmux sessions found").is_some(),
+        "should show normal empty message when tmux is healthy"
+    );
+    assert!(
+        find_text_position(&renderer, "tmux unavailable").is_none(),
+        "should not show tmux unavailable when tmux is healthy"
+    );
+}
+
+#[test]
+fn dependency_degradation_renders_in_banner() {
+    let api = MockApi::new();
+    let mut health = healthy_backend_health();
+    health.dependencies.as_mut().unwrap().remote_targets.status = "degraded".to_string();
+    health
+        .dependencies
+        .as_mut()
+        .unwrap()
+        .remote_targets
+        .last_error = Some("connection refused".to_string());
+    api.push_fetch_sessions(Ok(vec![session_summary("sess-1", "1", TEST_REPO_SWIMMERS)]));
+    api.push_backend_health(Ok(health));
+
+    let layout = test_layout(120, 32);
+    let mut app = make_app(api);
+    app.refresh_with_feedback(layout, false);
+
+    let mut renderer = test_renderer(120, 32);
+    app.render(&mut renderer, layout);
+    assert!(
+        find_text_position(&renderer, "remote targets degraded").is_some(),
+        "should show dependency degradation banner"
     );
 }
 
@@ -2630,6 +2737,24 @@ fn healthy_backend_health() -> BackendHealthResponse {
             last_successful_operation: Some("save_sessions".to_string()),
             ..BackendPersistenceHealth::default()
         },
+        dependencies: Some(BackendDependencyLedger {
+            tmux_discovery: BackendDependencySnapshot {
+                status: "healthy".to_string(),
+                last_error: None,
+            },
+            tmux_capture: BackendDependencySnapshot {
+                status: "healthy".to_string(),
+                last_error: None,
+            },
+            native_scripts: BackendDependencySnapshot {
+                status: "healthy".to_string(),
+                last_error: None,
+            },
+            remote_targets: BackendDependencySnapshot {
+                status: "not_configured".to_string(),
+                last_error: None,
+            },
+        }),
     }
 }
 

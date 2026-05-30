@@ -9,6 +9,7 @@ use std::sync::Arc;
 use tokio::process::Command;
 use tokio::sync::oneshot;
 
+use crate::api::envelope::error_body;
 use crate::api::service::{
     create_local_sessions_batch, list_sessions_for_client, request_plan_file, PlanFileServiceError,
 };
@@ -113,33 +114,16 @@ fn create_local_session_error_response(error: anyhow::Error) -> axum::response::
     // The supervisor returns anyhow errors. We detect specific failure modes by
     // inspecting the error message.
     if msg.contains("already exists") || msg.contains("duplicate session") {
-        (
-            StatusCode::CONFLICT,
-            Json(ErrorResponse {
-                code: "SESSION_ALREADY_EXISTS".to_string(),
-                message: Some(msg),
-            }),
-        )
-            .into_response()
+        error_response(StatusCode::CONFLICT, "SESSION_ALREADY_EXISTS", Some(msg))
     } else if msg.contains("cwd does not exist") {
-        (
-            StatusCode::BAD_REQUEST,
-            Json(ErrorResponse {
-                code: "VALIDATION_FAILED".to_string(),
-                message: Some(msg),
-            }),
-        )
-            .into_response()
+        validation_error(msg)
     } else {
         tracing::error!("create_session failed: {error}");
-        (
+        error_response(
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                code: "INTERNAL_ERROR".to_string(),
-                message: Some(msg),
-            }),
+            "INTERNAL_ERROR",
+            Some(msg),
         )
-            .into_response()
     }
 }
 
@@ -198,14 +182,7 @@ fn adopt_session_error_response(error: TmuxAdoptError) -> axum::response::Respon
         }
     };
 
-    (
-        status,
-        Json(ErrorResponse {
-            code: code.to_string(),
-            message: Some(error.to_string()),
-        }),
-    )
-        .into_response()
+    error_response(status, code, Some(error.to_string()))
 }
 
 // ---------------------------------------------------------------------------
@@ -275,14 +252,7 @@ async fn delete_session(
         None | Some("detach_bridge") => crate::config::SessionDeleteMode::DetachBridge,
         Some("kill_tmux") => crate::config::SessionDeleteMode::KillTmux,
         Some(other) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(ErrorResponse {
-                    code: "VALIDATION_FAILED".to_string(),
-                    message: Some(format!("invalid delete mode: {}", other)),
-                }),
-            )
-                .into_response();
+            return validation_error(format!("invalid delete mode: {other}"));
         }
     };
 
@@ -295,24 +265,14 @@ async fn delete_session(
         Err(e) => {
             let msg = e.to_string();
             if msg.contains("not found") {
-                (
-                    StatusCode::NOT_FOUND,
-                    Json(ErrorResponse {
-                        code: "SESSION_NOT_FOUND".to_string(),
-                        message: None,
-                    }),
-                )
-                    .into_response()
+                error_response(StatusCode::NOT_FOUND, "SESSION_NOT_FOUND", None)
             } else {
                 tracing::error!("delete_session failed: {e}");
-                (
+                error_response(
                     StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(ErrorResponse {
-                        code: "INTERNAL_ERROR".to_string(),
-                        message: Some(msg),
-                    }),
+                    "INTERNAL_ERROR",
+                    Some(msg),
                 )
-                    .into_response()
             }
         }
     }
@@ -333,27 +293,17 @@ async fn dismiss_attention(
     let handle = match state.supervisor.get_session(&session_id).await {
         Some(h) => h,
         None => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(ErrorResponse {
-                    code: "SESSION_NOT_FOUND".to_string(),
-                    message: None,
-                }),
-            )
-                .into_response();
+            return error_response(StatusCode::NOT_FOUND, "SESSION_NOT_FOUND", None);
         }
     };
 
     if let Err(e) = handle.send(SessionCommand::DismissAttention).await {
         tracing::error!("[session {session_id}] dismiss_attention send failed: {e}");
-        return (
+        return error_response(
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                code: "INTERNAL_ERROR".to_string(),
-                message: Some(e.to_string()),
-            }),
-        )
-            .into_response();
+            "INTERNAL_ERROR",
+            Some(e.to_string()),
+        );
     }
 
     (StatusCode::OK, Json(serde_json::json!({ "ok": true }))).into_response()
@@ -376,14 +326,7 @@ fn error_response(
     code: impl Into<String>,
     message: Option<String>,
 ) -> Response {
-    (
-        status,
-        Json(ErrorResponse {
-            code: code.into(),
-            message,
-        }),
-    )
-        .into_response()
+    (status, Json(error_body(code, message))).into_response()
 }
 
 async fn send_input(
@@ -549,25 +492,15 @@ async fn fetch_agent_context_response(state: &Arc<AppState>, session_id: &str) -
     let summary = match fetch_live_summary(state, session_id).await {
         Ok(Some(summary)) => summary,
         Ok(None) => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(ErrorResponse {
-                    code: "SESSION_NOT_FOUND".to_string(),
-                    message: None,
-                }),
-            )
-                .into_response();
+            return error_response(StatusCode::NOT_FOUND, "SESSION_NOT_FOUND", None);
         }
         Err(err) => {
             tracing::error!("agent context summary lookup failed: {err}");
-            return (
+            return error_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    code: "INTERNAL_ERROR".to_string(),
-                    message: Some(err.to_string()),
-                }),
-            )
-                .into_response();
+                "INTERNAL_ERROR",
+                Some(err.to_string()),
+            );
         }
     };
 
@@ -575,14 +508,11 @@ async fn fetch_agent_context_response(state: &Arc<AppState>, session_id: &str) -
         Ok(response) => (StatusCode::OK, Json(response)).into_response(),
         Err(err) => {
             tracing::error!("agent context read failed: {err}");
-            (
+            error_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    code: "INTERNAL_ERROR".to_string(),
-                    message: Some(err.to_string()),
-                }),
+                "INTERNAL_ERROR",
+                Some(err.to_string()),
             )
-                .into_response()
         }
     }
 }
@@ -816,25 +746,15 @@ async fn fetch_transcript_response(
     let summary = match fetch_live_summary(state, session_id).await {
         Ok(Some(summary)) => summary,
         Ok(None) => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(ErrorResponse {
-                    code: "SESSION_NOT_FOUND".to_string(),
-                    message: None,
-                }),
-            )
-                .into_response();
+            return error_response(StatusCode::NOT_FOUND, "SESSION_NOT_FOUND", None);
         }
         Err(err) => {
             tracing::error!("transcript summary lookup failed: {err}");
-            return (
+            return error_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    code: "INTERNAL_ERROR".to_string(),
-                    message: Some(err.to_string()),
-                }),
-            )
-                .into_response();
+                "INTERNAL_ERROR",
+                Some(err.to_string()),
+            );
         }
     };
 
@@ -842,14 +762,11 @@ async fn fetch_transcript_response(
         Ok(response) => (StatusCode::OK, Json(response)).into_response(),
         Err(err) => {
             tracing::error!("transcript read failed: {err}");
-            (
+            error_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    code: "INTERNAL_ERROR".to_string(),
-                    message: Some(err.to_string()),
-                }),
+                "INTERNAL_ERROR",
+                Some(err.to_string()),
             )
-                .into_response()
         }
     }
 }
@@ -1032,25 +949,15 @@ async fn fetch_timeline_response(state: &Arc<AppState>, session_id: &str) -> Res
     let summary = match fetch_live_summary(state, session_id).await {
         Ok(Some(summary)) => summary,
         Ok(None) => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(ErrorResponse {
-                    code: "SESSION_NOT_FOUND".to_string(),
-                    message: None,
-                }),
-            )
-                .into_response();
+            return error_response(StatusCode::NOT_FOUND, "SESSION_NOT_FOUND", None);
         }
         Err(err) => {
             tracing::error!("timeline summary lookup failed: {err}");
-            return (
+            return error_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    code: "INTERNAL_ERROR".to_string(),
-                    message: Some(err.to_string()),
-                }),
-            )
-                .into_response();
+                "INTERNAL_ERROR",
+                Some(err.to_string()),
+            );
         }
     };
 
@@ -1398,25 +1305,15 @@ async fn fetch_git_diff_response(state: &Arc<AppState>, session_id: &str) -> Res
     let summary = match fetch_live_summary(state, session_id).await {
         Ok(Some(summary)) => summary,
         Ok(None) => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(ErrorResponse {
-                    code: "SESSION_NOT_FOUND".to_string(),
-                    message: None,
-                }),
-            )
-                .into_response();
+            return error_response(StatusCode::NOT_FOUND, "SESSION_NOT_FOUND", None);
         }
         Err(err) => {
             tracing::error!("git diff summary lookup failed: {err}");
-            return (
+            return error_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    code: "INTERNAL_ERROR".to_string(),
-                    message: Some(err.to_string()),
-                }),
-            )
-                .into_response();
+                "INTERNAL_ERROR",
+                Some(err.to_string()),
+            );
         }
     };
 
@@ -1716,10 +1613,7 @@ fn group_input_error_result(
     SessionGroupInputResult {
         session_id,
         ok: false,
-        error: Some(ErrorResponse {
-            code: code.into(),
-            message,
-        }),
+        error: Some(error_body(code, message)),
     }
 }
 
@@ -1831,17 +1725,17 @@ pub async fn send_group_input_service(
     body: SessionGroupInputRequest,
 ) -> Result<SessionGroupInputResponse, ErrorResponse> {
     if body.session_ids.is_empty() {
-        return Err(ErrorResponse {
-            code: "VALIDATION_FAILED".to_string(),
-            message: Some("session_ids must not be empty".to_string()),
-        });
+        return Err(error_body(
+            "VALIDATION_FAILED",
+            Some("session_ids must not be empty".to_string()),
+        ));
     }
     let text = body.text.trim().to_string();
     if text.is_empty() {
-        return Err(ErrorResponse {
-            code: "VALIDATION_FAILED".to_string(),
-            message: Some("text must not be empty".to_string()),
-        });
+        return Err(error_body(
+            "VALIDATION_FAILED",
+            Some("text must not be empty".to_string()),
+        ));
     }
 
     let mut seen = HashSet::new();
@@ -1851,10 +1745,10 @@ pub async fn send_group_input_service(
         .filter(|session_id| seen.insert(session_id.clone()))
         .collect::<Vec<_>>();
     if session_ids.len() < 2 {
-        return Err(ErrorResponse {
-            code: "VALIDATION_FAILED".to_string(),
-            message: Some("session_ids must include at least two unique sessions".to_string()),
-        });
+        return Err(error_body(
+            "VALIDATION_FAILED",
+            Some("session_ids must include at least two unique sessions".to_string()),
+        ));
     }
     let summaries = state
         .supervisor
@@ -1926,47 +1820,31 @@ async fn get_snapshot(
     let handle = match state.supervisor.get_session(&session_id).await {
         Some(h) => h,
         None => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(ErrorResponse {
-                    code: "SESSION_NOT_FOUND".to_string(),
-                    message: None,
-                }),
-            )
-                .into_response();
+            return error_response(StatusCode::NOT_FOUND, "SESSION_NOT_FOUND", None);
         }
     };
 
     let (tx, rx) = oneshot::channel::<TerminalSnapshot>();
     if handle.send(SessionCommand::GetSnapshot(tx)).await.is_err() {
-        return (
+        return error_response(
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                code: "INTERNAL_ERROR".to_string(),
-                message: Some("session actor unavailable".to_string()),
-            }),
-        )
-            .into_response();
+            "INTERNAL_ERROR",
+            Some("session actor unavailable".to_string()),
+        );
     }
 
     match tokio::time::timeout(std::time::Duration::from_secs(5), rx).await {
         Ok(Ok(snapshot)) => (StatusCode::OK, Json(snapshot)).into_response(),
-        Ok(Err(_)) => (
+        Ok(Err(_)) => error_response(
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                code: "INTERNAL_ERROR".to_string(),
-                message: Some("actor dropped snapshot reply".to_string()),
-            }),
-        )
-            .into_response(),
-        Err(_) => (
+            "INTERNAL_ERROR",
+            Some("actor dropped snapshot reply".to_string()),
+        ),
+        Err(_) => error_response(
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                code: "INTERNAL_ERROR".to_string(),
-                message: Some("snapshot request timed out".to_string()),
-            }),
-        )
-            .into_response(),
+            "INTERNAL_ERROR",
+            Some("snapshot request timed out".to_string()),
+        ),
     }
 }
 
@@ -2045,14 +1923,9 @@ async fn request_pane_tail_from_actor(handle: &ActorHandle) -> Result<String, Pa
 
 fn pane_tail_error_response(error: PaneTailError) -> Response {
     match error {
-        PaneTailError::SessionNotFound => (
-            StatusCode::NOT_FOUND,
-            Json(ErrorResponse {
-                code: "SESSION_NOT_FOUND".to_string(),
-                message: None,
-            }),
-        )
-            .into_response(),
+        PaneTailError::SessionNotFound => {
+            error_response(StatusCode::NOT_FOUND, "SESSION_NOT_FOUND", None)
+        }
         PaneTailError::ActorUnavailable => pane_tail_internal_error("session actor unavailable"),
         PaneTailError::ReplyDropped => pane_tail_internal_error("actor dropped pane tail reply"),
         PaneTailError::TimedOut => pane_tail_internal_error("pane tail request timed out"),
@@ -2060,14 +1933,11 @@ fn pane_tail_error_response(error: PaneTailError) -> Response {
 }
 
 fn pane_tail_internal_error(message: &str) -> Response {
-    (
+    error_response(
         StatusCode::INTERNAL_SERVER_ERROR,
-        Json(ErrorResponse {
-            code: "INTERNAL_ERROR".to_string(),
-            message: Some(message.to_string()),
-        }),
+        "INTERNAL_ERROR",
+        Some(message.to_string()),
     )
-        .into_response()
 }
 
 // ---------------------------------------------------------------------------
@@ -2104,14 +1974,11 @@ pub(crate) async fn fetch_mermaid_artifact_response(
     let handle = match state.supervisor.get_session(session_id).await {
         Some(h) => h,
         None => {
-            return Err((
+            return Err(error_response(
                 StatusCode::NOT_FOUND,
-                Json(ErrorResponse {
-                    code: "SESSION_NOT_FOUND".to_string(),
-                    message: None,
-                }),
-            )
-                .into_response());
+                "SESSION_NOT_FOUND",
+                None,
+            ));
         }
     };
 
@@ -2121,34 +1988,25 @@ pub(crate) async fn fetch_mermaid_artifact_response(
         .await
         .is_err()
     {
-        return Err((
+        return Err(error_response(
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                code: "INTERNAL_ERROR".to_string(),
-                message: Some("session actor unavailable".to_string()),
-            }),
-        )
-            .into_response());
+            "INTERNAL_ERROR",
+            Some("session actor unavailable".to_string()),
+        ));
     }
 
     match tokio::time::timeout(std::time::Duration::from_secs(5), rx).await {
         Ok(Ok(artifact)) => Ok(artifact),
-        Ok(Err(_)) => Err((
+        Ok(Err(_)) => Err(error_response(
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                code: "INTERNAL_ERROR".to_string(),
-                message: Some("actor dropped mermaid artifact reply".to_string()),
-            }),
-        )
-            .into_response()),
-        Err(_) => Err((
+            "INTERNAL_ERROR",
+            Some("actor dropped mermaid artifact reply".to_string()),
+        )),
+        Err(_) => Err(error_response(
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                code: "INTERNAL_ERROR".to_string(),
-                message: Some("mermaid artifact request timed out".to_string()),
-            }),
-        )
-            .into_response()),
+            "INTERNAL_ERROR",
+            Some("mermaid artifact request timed out".to_string()),
+        )),
     }
 }
 
@@ -2184,14 +2042,9 @@ async fn fetch_plan_file_response(state: &Arc<AppState>, session_id: &str, name:
 fn plan_file_error_response(error: PlanFileServiceError) -> Response {
     match error {
         PlanFileServiceError::Remote(err) => err.into_response(),
-        PlanFileServiceError::SessionNotFound => (
-            StatusCode::NOT_FOUND,
-            Json(ErrorResponse {
-                code: "SESSION_NOT_FOUND".to_string(),
-                message: None,
-            }),
-        )
-            .into_response(),
+        PlanFileServiceError::SessionNotFound => {
+            error_response(StatusCode::NOT_FOUND, "SESSION_NOT_FOUND", None)
+        }
         PlanFileServiceError::ActorUnavailable => {
             plan_file_internal_error("session actor unavailable")
         }
@@ -2203,14 +2056,11 @@ fn plan_file_error_response(error: PlanFileServiceError) -> Response {
 }
 
 fn plan_file_internal_error(message: &str) -> Response {
-    (
+    error_response(
         StatusCode::INTERNAL_SERVER_ERROR,
-        Json(ErrorResponse {
-            code: "INTERNAL_ERROR".to_string(),
-            message: Some(message.to_string()),
-        }),
+        "INTERNAL_ERROR",
+        Some(message.to_string()),
     )
-        .into_response()
 }
 
 // ---------------------------------------------------------------------------

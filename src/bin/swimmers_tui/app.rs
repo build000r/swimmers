@@ -144,6 +144,31 @@ fn backend_health_warning_text(health: &BackendHealthResponse) -> Option<String>
     }
 }
 
+fn dependency_degradation_line(deps: &BackendDependencyLedger) -> Option<String> {
+    let checks: &[(&str, &BackendDependencySnapshot)] = &[
+        ("tmux capture", &deps.tmux_capture),
+        ("native scripts", &deps.native_scripts),
+        ("remote targets", &deps.remote_targets),
+    ];
+    let mut parts = Vec::new();
+    for &(label, snap) in checks {
+        let tag = match snap.status.as_str() {
+            "unavailable" => "unavailable",
+            "degraded" => "degraded",
+            _ => continue,
+        };
+        let detail = concise_health_detail(snap.last_error.as_ref())
+            .map(|error| format!(": {error}"))
+            .unwrap_or_default();
+        parts.push(format!("{label} {tag}{detail}"));
+    }
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join("  "))
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) enum DaemonDefaultsStatus {
     #[default]
@@ -4230,18 +4255,32 @@ impl<C: TuiApi> App<C> {
     }
 
     fn render_empty_aquarium_message(&self, renderer: &mut Renderer, field: Rect) {
-        let empty = if self.entities.is_empty() {
-            "no tmux sessions found - press r after starting one"
-        } else if self.thought_filter.is_active() {
-            "no swimmers match filters"
+        let (text, color) = if !self.entities.is_empty() && self.thought_filter.is_active() {
+            ("no swimmers match filters", Color::DarkGrey)
+        } else if self.tmux_dependency_unavailable() {
+            (
+                "tmux unavailable - run swimmers config doctor",
+                Color::Yellow,
+            )
         } else {
-            "no tmux sessions found - press r after starting one"
+            (
+                "no tmux sessions found - press r after starting one",
+                Color::DarkGrey,
+            )
         };
         let x = field
             .x
-            .saturating_add(field.width.saturating_sub(empty.len() as u16) / 2);
+            .saturating_add(field.width.saturating_sub(text.len() as u16) / 2);
         let y = field.y + field.height / 2;
-        renderer.draw_text(x, y, empty, Color::DarkGrey);
+        renderer.draw_text(x, y, text, color);
+    }
+
+    fn tmux_dependency_unavailable(&self) -> bool {
+        self.backend_health
+            .as_ref()
+            .and_then(|h| h.dependencies.as_ref())
+            .map(|deps| deps.tmux_discovery.status == "unavailable")
+            .unwrap_or(false)
     }
 
     fn render_fish_scene(
@@ -4272,24 +4311,39 @@ impl<C: TuiApi> App<C> {
     }
 
     fn render_api_stale_banner(&self, renderer: &mut Renderer, field: Rect) {
+        let max_width = field.width as usize;
+        let mut y = field.y;
         if let Some(banner) = self.api_refresh_health.banner_text() {
-            renderer.draw_text(
-                field.x,
-                field.y,
-                &truncate_label(banner, field.width as usize),
-                Color::Red,
-            );
-        } else if let Some(banner) = self
+            renderer.draw_text(field.x, y, &truncate_label(banner, max_width), Color::Red);
+            return;
+        }
+        if let Some(banner) = self
             .backend_health
             .as_ref()
             .and_then(backend_health_warning_text)
         {
             renderer.draw_text(
                 field.x,
-                field.y,
-                &truncate_label(&banner, field.width as usize),
+                y,
+                &truncate_label(&banner, max_width),
                 Color::Yellow,
             );
+            y = y.saturating_add(1);
+        }
+        if let Some(dep_line) = self
+            .backend_health
+            .as_ref()
+            .and_then(|h| h.dependencies.as_ref())
+            .and_then(dependency_degradation_line)
+        {
+            if y < field.bottom() {
+                renderer.draw_text(
+                    field.x,
+                    y,
+                    &truncate_label(&dep_line, max_width),
+                    Color::Yellow,
+                );
+            }
         }
     }
 
@@ -4378,6 +4432,28 @@ mod tests {
                 last_successful_operation: Some("save_sessions".to_string()),
                 ..BackendPersistenceHealth::default()
             },
+            dependencies: Some(healthy_dependency_ledger()),
+        }
+    }
+
+    fn healthy_dependency_ledger() -> BackendDependencyLedger {
+        BackendDependencyLedger {
+            tmux_discovery: BackendDependencySnapshot {
+                status: "healthy".to_string(),
+                last_error: None,
+            },
+            tmux_capture: BackendDependencySnapshot {
+                status: "healthy".to_string(),
+                last_error: None,
+            },
+            native_scripts: BackendDependencySnapshot {
+                status: "healthy".to_string(),
+                last_error: None,
+            },
+            remote_targets: BackendDependencySnapshot {
+                status: "not_configured".to_string(),
+                last_error: None,
+            },
         }
     }
 
@@ -4422,6 +4498,46 @@ mod tests {
         health.thought_bridge.status = "healthy".to_string();
         health.thought_bridge.shutdown_reason = None;
         assert!(backend_health_warning_text(&health).is_none());
+    }
+
+    #[test]
+    fn dependency_degradation_line_reports_degraded_and_unavailable() {
+        let mut ledger = healthy_dependency_ledger();
+        assert!(dependency_degradation_line(&ledger).is_none());
+
+        ledger.native_scripts.status = "unavailable".to_string();
+        ledger.native_scripts.last_error = Some("script not found".to_string());
+        assert_eq!(
+            dependency_degradation_line(&ledger),
+            Some("native scripts unavailable: script not found".to_string())
+        );
+
+        ledger.remote_targets.status = "degraded".to_string();
+        ledger.remote_targets.last_error = Some("timeout".to_string());
+        let line = dependency_degradation_line(&ledger).unwrap();
+        assert!(line.contains("native scripts unavailable"));
+        assert!(line.contains("remote targets degraded: timeout"));
+    }
+
+    #[test]
+    fn dependency_degradation_line_ignores_healthy_and_not_configured() {
+        let mut ledger = healthy_dependency_ledger();
+        ledger.remote_targets.status = "not_configured".to_string();
+        assert!(dependency_degradation_line(&ledger).is_none());
+    }
+
+    #[test]
+    fn tmux_unavailable_detected_from_dependency_ledger() {
+        let mut health = healthy_backend_health();
+        assert!(!tmux_unavailable_from_health(health.dependencies.as_ref()));
+
+        health.dependencies.as_mut().unwrap().tmux_discovery.status = "unavailable".to_string();
+        assert!(tmux_unavailable_from_health(health.dependencies.as_ref()));
+    }
+
+    fn tmux_unavailable_from_health(deps: Option<&BackendDependencyLedger>) -> bool {
+        deps.map(|d| d.tmux_discovery.status == "unavailable")
+            .unwrap_or(false)
     }
 }
 

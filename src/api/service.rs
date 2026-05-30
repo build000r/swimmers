@@ -413,10 +413,7 @@ fn create_session_error(msg: &str) -> ErrorResponse {
         "INTERNAL_ERROR"
     };
 
-    ErrorResponse {
-        code: code.to_string(),
-        message: Some(msg.to_string()),
-    }
+    ErrorResponse::with_message(code, msg)
 }
 
 #[derive(Debug)]
