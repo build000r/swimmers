@@ -242,6 +242,7 @@ function resetWebState() {
     node.clientHeight = 0;
   }
   web.state.sessions = [rawSession()];
+  web.state.token = "";
   web.state.selectedSessionId = null;
   web.state.followPublishedSelection = false;
   web.state.trogdorAtlasOpen = true;
@@ -499,18 +500,27 @@ test("raw terminal output remains unchanged without framed opt-in", () => {
   assert.equal(web.state.lastTerminalSeqBySession.has("sess_0"), false);
 });
 
-test("session websocket URL opts into framed resume protocol", () => {
+test("session websocket URL opts into framed resume protocol without bearer token", () => {
   resetWebState();
   web.state.token = "observer-token";
   web.state.lastTerminalSeqBySession.set("sess_0", "42");
 
   const url = web.sessionSocketUrl(rawSession());
+  const auth = JSON.parse(web.sessionSocketAuthMessage());
 
   assert.equal(url.protocol, "ws:");
   assert.equal(url.pathname, "/ws/sessions/sess_0");
-  assert.equal(url.searchParams.get("token"), "observer-token");
+  assert.equal(url.searchParams.get("token"), null);
+  assert.equal(url.toString().includes("observer-token"), false);
   assert.equal(url.searchParams.get("framed"), "1");
   assert.equal(url.searchParams.get("resume_from_seq"), "42");
+  assert.deepEqual(auth, { type: "auth", token: "observer-token" });
+});
+
+test("session websocket auth message is omitted without a token", () => {
+  resetWebState();
+
+  assert.equal(web.sessionSocketAuthMessage(), null);
 });
 
 test("terminal text fallback keeps send input wired to the live websocket", () => {

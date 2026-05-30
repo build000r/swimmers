@@ -5405,6 +5405,8 @@ async function connectSelectedSession() {
   ws.sessionId = session.session_id;
   ws.framedOutput = framedOutput;
   state.ws = ws;
+  state.readOnly = true;
+  syncWriteAccess();
   setConnectionStatus(
     resumeFromSeq ? `connecting; resuming from seq ${resumeFromSeq}` : "connecting; input disabled",
   );
@@ -5414,9 +5416,10 @@ async function connectSelectedSession() {
       ws.close();
       return;
     }
+    const sentAuth = sendSessionSocketAuth(ws);
     measureAndResizeSurface(true, true);
     state.reconnectAttempt = 0;
-    setConnectionStatus("attached");
+    setConnectionStatus(sentAuth ? "authenticating; input disabled" : "attached");
     scheduleSessionRefresh();
   };
 
@@ -5459,15 +5462,29 @@ async function connectSelectedSession() {
 function sessionSocketUrl(session) {
   const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
   const url = new URL(`${protocol}//${window.location.host}/ws/sessions/${encodeURIComponent(session.session_id)}`);
-  if (state.token) {
-    url.searchParams.set("token", state.token);
-  }
   url.searchParams.set("framed", "1");
   const resumeFromSeq = state.lastTerminalSeqBySession.get(session.session_id);
   if (resumeFromSeq && /^\d+$/.test(String(resumeFromSeq)) && String(resumeFromSeq) !== "0") {
     url.searchParams.set("resume_from_seq", String(resumeFromSeq));
   }
   return url;
+}
+
+function sessionSocketAuthMessage() {
+  const token = String(state.token || "").trim();
+  if (!token) {
+    return null;
+  }
+  return JSON.stringify({ type: "auth", token });
+}
+
+function sendSessionSocketAuth(ws) {
+  const message = sessionSocketAuthMessage();
+  if (!message || !ws || ws.readyState !== WebSocket.OPEN) {
+    return false;
+  }
+  ws.send(message);
+  return true;
 }
 
 function terminalPayloadFromSocketBytes(bytes, ws = state.ws) {
@@ -5636,6 +5653,7 @@ function handleSocketText(raw) {
     switch (message.type) {
       case "ready":
         state.readOnly = Boolean(message.readOnly);
+        setConnectionStatus("attached");
         setModeStatus(state.readOnly ? "observer" : "operator", !state.token);
         syncWriteAccess();
         syncTerminalTools();
@@ -8518,6 +8536,7 @@ export const __swimmersWebTest = {
   renderHudSurface,
   syncTerminalPresentation,
   sessionSocketUrl,
+  sessionSocketAuthMessage,
   terminalPayloadFromSocketBytes,
   decodeTerminalOutputFrame,
   sessionRefreshDelayMs,

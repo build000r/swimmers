@@ -205,6 +205,8 @@ swimmers
 
 `AUTH_MODE=tailnet_trust` is accepted only for Tailscale IP ranges (`100.64.0.0/10` or `fd7a:115c:a1e0::/48`). It does not add a second browser token; Tailnet membership is the access boundary. `OBSERVER_TOKEN` is optional only for token-auth deployments where you also want a read-only credential for browser or observer clients.
 
+In `AUTH_MODE=token`, browser HTTP requests use an `Authorization: Bearer ...` header, and browser terminal WebSockets authenticate with a first WebSocket message instead of a `?token=` URL parameter. This keeps long-lived operator and observer tokens out of WebSocket URLs, browser history, and proxy request lines; it does not encrypt the connection. Use HTTPS, SSH forwarding, or a Tailnet-only bind for non-loopback token deployments.
+
 ---
 
 ## Environment Variables

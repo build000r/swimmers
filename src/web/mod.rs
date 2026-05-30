@@ -9,7 +9,10 @@ use axum::http::{header, StatusCode};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
-use futures::{SinkExt, StreamExt};
+use futures::{
+    stream::{SplitSink, SplitStream},
+    SinkExt, StreamExt,
+};
 use serde::{Deserialize, Serialize};
 use subtle::ConstantTimeEq;
 use tokio::sync::{broadcast, mpsc, oneshot};
@@ -33,12 +36,16 @@ const FRANKENTERM_FONT_ROUTE: &str = "/assets/frankenterm/pragmasevka-nf-subset.
 const TROGDOR_DRAGON_ASSET_ROUTE: &str = "/assets/dragon/{pose}/{frame}";
 const PUBLISHED_VIEW_ROUTE: &str = "/selected";
 const REPLY_TIMEOUT: Duration = Duration::from_secs(2);
+const WS_AUTH_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_WS_INPUT_BYTES: usize = 786_432;
 const MAX_BROWSER_WS_CONNECTIONS: usize = 64;
 const DEFAULT_FRANKENTUI_PKG_CANDIDATES: &[&str] = &[];
 
 static NEXT_WS_CLIENT_ID: AtomicU64 = AtomicU64::new(1);
 static ACTIVE_WS_CONNECTIONS: AtomicUsize = AtomicUsize::new(0);
+
+type WsSender = SplitSink<WebSocket, Message>;
+type WsReceiver = SplitStream<WebSocket>;
 
 struct ActiveWsGuard;
 
@@ -747,41 +754,52 @@ async fn session_ws(
     Query(query): Query<WsQuery>,
     State(state): State<Arc<AppState>>,
 ) -> Response {
-    let auth = match resolve_ws_auth(&state.config, query.token.as_deref()) {
-        Ok(auth) => auth,
-        Err(response) => return response,
-    };
-
-    if let Err(response) = auth.require_scope(AuthScope::SessionsRead) {
-        return response;
+    if query.token.is_some() {
+        return json_error(
+            StatusCode::BAD_REQUEST,
+            "WS_QUERY_TOKEN_UNSUPPORTED",
+            "WebSocket token query parameters are not supported; send an auth message after opening the socket",
+        );
     }
 
-    let resume_from_seq = query.resume_from_seq;
     let output_mode = if query_flag_enabled(query.framed.as_deref()) {
         WsOutputMode::Framed
     } else {
         WsOutputMode::Raw
     };
+    let resume_from_seq = query.resume_from_seq;
 
-    let Some(handle) = state.supervisor.get_session(&session_id).await else {
-        return json_error(
-            StatusCode::NOT_FOUND,
-            "SESSION_NOT_FOUND",
-            "session not found",
-        );
-    };
+    match state.config.auth_mode {
+        AuthMode::LocalTrust | AuthMode::TailnetTrust => {
+            let auth = AuthInfo::new(OPERATOR_SCOPES.to_vec());
+            if let Err(response) = auth.require_scope(AuthScope::SessionsRead) {
+                return response;
+            }
 
-    ws.on_upgrade(move |socket| {
-        handle_session_ws(
-            socket,
-            state,
-            handle,
-            session_id,
-            auth,
-            resume_from_seq,
-            output_mode,
-        )
-    })
+            let Some(handle) = state.supervisor.get_session(&session_id).await else {
+                return json_error(
+                    StatusCode::NOT_FOUND,
+                    "SESSION_NOT_FOUND",
+                    "session not found",
+                );
+            };
+
+            ws.on_upgrade(move |socket| {
+                handle_session_ws(
+                    socket,
+                    state,
+                    handle,
+                    session_id,
+                    auth,
+                    resume_from_seq,
+                    output_mode,
+                )
+            })
+        }
+        AuthMode::Token => ws.on_upgrade(move |socket| {
+            handle_token_session_ws(socket, state, session_id, resume_from_seq, output_mode)
+        }),
+    }
 }
 
 async fn handle_session_ws(
@@ -808,6 +826,29 @@ async fn handle_session_ws(
     }
 }
 
+async fn handle_token_session_ws(
+    socket: WebSocket,
+    state: Arc<AppState>,
+    session_id: String,
+    resume_from_seq: Option<u64>,
+    output_mode: WsOutputMode,
+) {
+    if let Err(err) = token_session_ws_inner(
+        socket,
+        state,
+        session_id.clone(),
+        resume_from_seq,
+        output_mode,
+    )
+    .await
+    {
+        tracing::warn!(
+            session_id,
+            "token-auth browser attach closed with error: {err}"
+        );
+    }
+}
+
 async fn session_ws_inner(
     socket: WebSocket,
     state: Arc<AppState>,
@@ -817,7 +858,70 @@ async fn session_ws_inner(
     resume_from_seq: Option<u64>,
     output_mode: WsOutputMode,
 ) -> anyhow::Result<()> {
-    let Some(_ws_guard) = ActiveWsGuard::try_acquire() else {
+    let Some((_ws_guard, sender, receiver)) = split_limited_socket(socket).await? else {
+        return Ok(());
+    };
+    session_ws_authenticated_inner(
+        sender,
+        receiver,
+        state,
+        handle,
+        session_id,
+        auth,
+        resume_from_seq,
+        output_mode,
+    )
+    .await
+}
+
+async fn token_session_ws_inner(
+    socket: WebSocket,
+    state: Arc<AppState>,
+    session_id: String,
+    resume_from_seq: Option<u64>,
+    output_mode: WsOutputMode,
+) -> anyhow::Result<()> {
+    let Some((_ws_guard, mut sender, mut receiver)) = split_limited_socket(socket).await? else {
+        return Ok(());
+    };
+
+    let Some(auth) = authenticate_session_ws(&state.config, &mut sender, &mut receiver).await?
+    else {
+        return Ok(());
+    };
+
+    if !auth.has_scope(AuthScope::SessionsRead) {
+        send_ws_error(
+            &mut sender,
+            "NOT_AUTHORIZED",
+            "Insufficient scope for this action",
+        )
+        .await?;
+        return Ok(());
+    }
+
+    let Some(handle) = state.supervisor.get_session(&session_id).await else {
+        send_ws_error(&mut sender, "SESSION_NOT_FOUND", "session not found").await?;
+        return Ok(());
+    };
+
+    session_ws_authenticated_inner(
+        sender,
+        receiver,
+        state,
+        handle,
+        session_id,
+        auth,
+        resume_from_seq,
+        output_mode,
+    )
+    .await
+}
+
+async fn split_limited_socket(
+    socket: WebSocket,
+) -> anyhow::Result<Option<(ActiveWsGuard, WsSender, WsReceiver)>> {
+    let Some(ws_guard) = ActiveWsGuard::try_acquire() else {
         let (mut sender, _) = socket.split();
         let notice = serde_json::json!({
             "type": "overloaded",
@@ -828,8 +932,22 @@ async fn session_ws_inner(
         sender
             .send(Message::Text(notice.to_string().into()))
             .await?;
-        return Ok(());
+        return Ok(None);
     };
+    let (sender, receiver) = socket.split();
+    Ok(Some((ws_guard, sender, receiver)))
+}
+
+async fn session_ws_authenticated_inner(
+    mut sender: WsSender,
+    mut receiver: WsReceiver,
+    state: Arc<AppState>,
+    handle: ActorHandle,
+    session_id: String,
+    auth: AuthInfo,
+    resume_from_seq: Option<u64>,
+    output_mode: WsOutputMode,
+) -> anyhow::Result<()> {
     let client_id = NEXT_WS_CLIENT_ID.fetch_add(1, Ordering::Relaxed);
     let replay_cursor = request_replay_cursor(&handle).await?;
     let requested_resume_from_seq =
@@ -841,8 +959,6 @@ async fn session_ws_inner(
     let mut lifecycle_events = state.supervisor.subscribe_events();
     let summary = fetch_live_summary(&state, &session_id).await?;
     let can_write = auth.has_scope(AuthScope::StreamWrite);
-
-    let (mut sender, mut receiver) = socket.split();
 
     let ready_payload = serde_json::json!({
         "type": "ready",
@@ -961,6 +1077,9 @@ async fn handle_session_ws_event(
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum BrowserClientMessage {
+    Auth {
+        token: String,
+    },
     InputText {
         data: String,
         #[serde(default, alias = "clientMessageId")]
@@ -976,6 +1095,12 @@ enum BrowserClientMessage {
         rows: u16,
     },
     Ping,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum BrowserWsAuthMessage {
+    Auth { token: String },
 }
 
 /// Pure routing decision derived from an incoming WebSocket message. No I/O.
@@ -1043,6 +1168,7 @@ fn decode_text_client_message(auth: &AuthInfo, text: &str) -> WsClientDecision {
     };
     match parsed {
         BrowserClientMessage::Ping => WsClientDecision::ReplyPong,
+        BrowserClientMessage::Auth { token: _token } => WsClientDecision::Ignore,
         BrowserClientMessage::InputText {
             data,
             client_message_id,
@@ -1241,11 +1367,7 @@ async fn send_input_ack(
     Ok(())
 }
 
-async fn send_ws_error(
-    sender: &mut futures::stream::SplitSink<WebSocket, Message>,
-    code: &str,
-    message: &str,
-) -> anyhow::Result<()> {
+async fn send_ws_error(sender: &mut WsSender, code: &str, message: &str) -> anyhow::Result<()> {
     let payload = serde_json::json!({
         "type": "error",
         "code": code,
@@ -1255,6 +1377,73 @@ async fn send_ws_error(
         .send(Message::Text(payload.to_string().into()))
         .await?;
     Ok(())
+}
+
+#[derive(Debug)]
+enum WsAuthDecision {
+    Authenticated(AuthInfo),
+    Close,
+    Reject {
+        code: &'static str,
+        message: &'static str,
+    },
+}
+
+async fn authenticate_session_ws(
+    config: &Config,
+    sender: &mut WsSender,
+    receiver: &mut WsReceiver,
+) -> anyhow::Result<Option<AuthInfo>> {
+    let decision = match tokio::time::timeout(WS_AUTH_TIMEOUT, receiver.next()).await {
+        Ok(Some(Ok(message))) => decode_ws_auth_message(config, &message),
+        Ok(Some(Err(err))) => return Err(err.into()),
+        Ok(None) => WsAuthDecision::Close,
+        Err(_) => WsAuthDecision::Reject {
+            code: "WS_AUTH_TIMEOUT",
+            message: "token-mode WebSocket connections must authenticate before terminal traffic",
+        },
+    };
+
+    match decision {
+        WsAuthDecision::Authenticated(auth) => Ok(Some(auth)),
+        WsAuthDecision::Close => Ok(None),
+        WsAuthDecision::Reject { code, message } => {
+            send_ws_error(sender, code, message).await?;
+            Ok(None)
+        }
+    }
+}
+
+fn decode_ws_auth_message(config: &Config, message: &Message) -> WsAuthDecision {
+    let Message::Text(text) = message else {
+        return WsAuthDecision::Reject {
+            code: "WS_AUTH_REQUIRED",
+            message:
+                "token-mode WebSocket connections must send an auth message before terminal traffic",
+        };
+    };
+
+    let parsed: BrowserWsAuthMessage = match serde_json::from_str(text.as_str()) {
+        Ok(message) => message,
+        Err(_) => {
+            return WsAuthDecision::Reject {
+                code: "WS_AUTH_REQUIRED",
+                message:
+                    "token-mode WebSocket connections must send an auth message before terminal traffic",
+            };
+        }
+    };
+
+    match parsed {
+        BrowserWsAuthMessage::Auth { token } => match resolve_ws_auth(config, Some(token.as_str()))
+        {
+            Ok(auth) => WsAuthDecision::Authenticated(auth),
+            Err(_) => WsAuthDecision::Reject {
+                code: "NOT_AUTHENTICATED",
+                message: "Missing or invalid authentication token",
+            },
+        },
+    }
 }
 
 async fn send_control_event_if_relevant(
@@ -1451,7 +1640,8 @@ fn resolve_ws_auth(config: &Config, token: Option<&str>) -> Result<AuthInfo, Res
             // Reject a missing or empty token outright. Empty `AUTH_TOKEN`/
             // `OBSERVER_TOKEN` are already filtered at config load, so this is
             // defense-in-depth that mirrors the HTTP `extract_bearer_token`
-            // empty-token guard and keeps `?token=` from ever matching.
+            // empty-token guard and keeps empty WebSocket auth frames from
+            // ever matching.
             let Some(token) = token.filter(|t| !t.is_empty()) else {
                 return Err(json_error(
                     StatusCode::UNAUTHORIZED,
@@ -1555,7 +1745,7 @@ mod tests {
     }
 
     #[test]
-    fn websocket_auth_accepts_observer_and_operator_tokens() {
+    fn websocket_first_message_auth_accepts_observer_and_operator_tokens() {
         let config = Config {
             auth_mode: AuthMode::Token,
             auth_token: Some("operator".into()),
@@ -1563,12 +1753,46 @@ mod tests {
             ..Config::default()
         };
 
-        let operator = resolve_ws_auth(&config, Some("operator")).expect("operator auth");
-        assert!(operator.has_scope(AuthScope::StreamWrite));
+        let operator_msg = Message::Text(r#"{"type":"auth","token":"operator"}"#.into());
+        match decode_ws_auth_message(&config, &operator_msg) {
+            WsAuthDecision::Authenticated(operator) => {
+                assert!(operator.has_scope(AuthScope::StreamWrite));
+            }
+            other => panic!("unexpected operator auth decision: {other:?}"),
+        }
 
-        let observer = resolve_ws_auth(&config, Some("observer")).expect("observer auth");
-        assert!(observer.has_scope(AuthScope::SessionsRead));
-        assert!(!observer.has_scope(AuthScope::StreamWrite));
+        let observer_msg = Message::Text(r#"{"type":"auth","token":"observer"}"#.into());
+        match decode_ws_auth_message(&config, &observer_msg) {
+            WsAuthDecision::Authenticated(observer) => {
+                assert!(observer.has_scope(AuthScope::SessionsRead));
+                assert!(!observer.has_scope(AuthScope::StreamWrite));
+            }
+            other => panic!("unexpected observer auth decision: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn websocket_first_message_auth_rejects_invalid_and_non_auth_messages() {
+        let config = Config {
+            auth_mode: AuthMode::Token,
+            auth_token: Some("operator".into()),
+            observer_token: Some("observer".into()),
+            ..Config::default()
+        };
+
+        for msg in [
+            Message::Text(r#"{"type":"ping"}"#.into()),
+            Message::Text(r#"{"type":"auth","token":""}"#.into()),
+            Message::Binary(b"operator".to_vec().into()),
+        ] {
+            assert!(
+                matches!(
+                    decode_ws_auth_message(&config, &msg),
+                    WsAuthDecision::Reject { .. }
+                ),
+                "{msg:?}"
+            );
+        }
     }
 
     #[test]
@@ -1969,6 +2193,14 @@ mod tests {
     }
 
     #[test]
+    fn decode_text_client_message_auth_after_ready_is_ignored() {
+        assert!(matches!(
+            decode_text_client_message(&operator_auth(), r#"{"type":"auth","token":"secret"}"#),
+            WsClientDecision::Ignore
+        ));
+    }
+
+    #[test]
     fn decode_text_client_message_input_text_without_scope_is_read_only() {
         let json = r#"{"type":"input_text","data":"hello"}"#;
         match decode_text_client_message(&observer_auth(), json) {
@@ -2050,8 +2282,8 @@ mod tests {
             auth_token: Some("secret".to_string()),
             ..Config::default()
         };
-        // An explicit empty `?token=` must never authenticate, mirroring the
-        // HTTP bearer-token empty guard.
+        // An explicit empty auth-frame token must never authenticate, mirroring
+        // the HTTP bearer-token empty guard.
         assert!(resolve_ws_auth(&config, Some("")).is_err());
         assert!(resolve_ws_auth(&config, None).is_err());
         assert!(resolve_ws_auth(&config, Some("secret")).is_ok());
