@@ -4,7 +4,7 @@ use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
@@ -23,9 +23,9 @@ use crate::thought::loop_runner::{SessionInfo, SessionProvider};
 use crate::thought::protocol::ThoughtDeliveryState;
 use crate::tmux_target::exact_session_target;
 use crate::types::{
-    fallback_rest_state, ActionCue, ControlEvent, RepoTheme, RestState, SessionBatchMembership,
-    SessionState, SessionStatePayload, SessionSummary, TerminalSnapshot, ThoughtSource,
-    ThoughtState, TransportHealth,
+    fallback_rest_state, ActionCue, ControlEvent, DependencyHealthSnapshot, RepoTheme, RestState,
+    SessionBatchMembership, SessionState, SessionStatePayload, SessionSummary, TerminalSnapshot,
+    ThoughtSource, ThoughtState, TransportHealth,
 };
 
 const PROCESS_EXIT_REAP_INTERVAL: Duration = Duration::from_millis(250);
@@ -41,6 +41,29 @@ const PRELAUNCH_PROMPT_CLEANUP_DELAY: Duration = Duration::from_secs(30);
 struct ListedTmuxSessions {
     reliable: bool,
     names: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct TmuxDependencyHealthSnapshot {
+    pub discovery: DependencyHealthSnapshot,
+    pub capture: DependencyHealthSnapshot,
+}
+
+struct TmuxDependencyHealthState {
+    discovery: DependencyHealthSnapshot,
+    capture: DependencyHealthSnapshot,
+}
+
+impl Default for TmuxDependencyHealthState {
+    fn default() -> Self {
+        let now = Utc::now();
+        Self {
+            discovery: DependencyHealthSnapshot::unknown(now)
+                .with_detail("dependency", "tmux_discovery"),
+            capture: DependencyHealthSnapshot::unknown(now)
+                .with_detail("dependency", "tmux_capture"),
+        }
+    }
 }
 
 fn thought_snapshot_for_summary<'a>(
@@ -368,6 +391,9 @@ pub struct SessionSupervisor {
     /// Bounded staleness is 1s; active_pane_session_id only feeds the
     /// thought-snapshot merge fallback, where it's tolerated.
     active_pane_cache: Mutex<ActivePaneCache>,
+
+    /// Latest tmux dependency observations for /health.
+    tmux_dependency_health: StdMutex<TmuxDependencyHealthState>,
 }
 
 #[derive(Default)]
@@ -398,7 +424,61 @@ impl SessionSupervisor {
             process_exit_seen_at: RwLock::new(HashMap::new()),
             discovery_lock: Mutex::new(()),
             active_pane_cache: Mutex::new(ActivePaneCache::default()),
+            tmux_dependency_health: StdMutex::new(TmuxDependencyHealthState::default()),
         })
+    }
+
+    pub fn tmux_dependency_health_snapshot(&self) -> TmuxDependencyHealthSnapshot {
+        let health = self
+            .tmux_dependency_health
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        TmuxDependencyHealthSnapshot {
+            discovery: health.discovery.clone(),
+            capture: health.capture.clone(),
+        }
+    }
+
+    fn record_tmux_discovery_success(&self, reason: &'static str, session_count: usize) {
+        let now = Utc::now();
+        let mut health = self
+            .tmux_dependency_health
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        health.discovery = DependencyHealthSnapshot::healthy(now)
+            .with_detail("reason", reason)
+            .with_detail("session_count", session_count.to_string());
+    }
+
+    fn record_tmux_discovery_failure(&self, reason: &'static str, error: impl Into<String>) {
+        let now = Utc::now();
+        let mut health = self
+            .tmux_dependency_health
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        health.discovery =
+            DependencyHealthSnapshot::unavailable(now, error).with_detail("reason", reason);
+    }
+
+    fn record_tmux_capture_success(&self, reason: &'static str, pane_count: usize) {
+        let now = Utc::now();
+        let mut health = self
+            .tmux_dependency_health
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        health.capture = DependencyHealthSnapshot::healthy(now)
+            .with_detail("reason", reason)
+            .with_detail("pane_count", pane_count.to_string());
+    }
+
+    fn record_tmux_capture_failure(&self, reason: &'static str, error: impl Into<String>) {
+        let now = Utc::now();
+        let mut health = self
+            .tmux_dependency_health
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        health.capture =
+            DependencyHealthSnapshot::degraded(now, error).with_detail("reason", reason);
     }
 
     /// Returns the active-pane session-id map for the requested `tmux_names`,
@@ -422,8 +502,12 @@ impl SessionSupervisor {
         }
 
         let fresh = match query_all_active_pane_session_ids().await {
-            Ok(panes) => panes,
+            Ok(panes) => {
+                self.record_tmux_capture_success(reason, panes.len());
+                panes
+            }
             Err(err) => {
+                self.record_tmux_capture_failure(reason, err.to_string());
                 warn!(
                     reason,
                     tmux_names = tmux_names.len(),
@@ -563,6 +647,7 @@ impl SessionSupervisor {
             Ok(output) if output.status.success() => {
                 let names = parse_tmux_session_names(&output.stdout);
                 log_tmux_list_success(reason, list_started.elapsed(), names.len());
+                self.record_tmux_discovery_success(reason, names.len());
                 ListedTmuxSessions {
                     reliable: true,
                     names,
@@ -578,6 +663,7 @@ impl SessionSupervisor {
                         elapsed_ms = elapsed.as_millis() as u64,
                         "no existing tmux sessions found"
                     );
+                    self.record_tmux_discovery_success(reason, 0);
                     ListedTmuxSessions {
                         reliable: true,
                         names: Vec::new(),
@@ -590,6 +676,7 @@ impl SessionSupervisor {
                         "tmux list-sessions returned error: {}",
                         stderr
                     );
+                    self.record_tmux_discovery_failure(reason, stderr.trim().to_string());
                     ListedTmuxSessions {
                         reliable: false,
                         names: Vec::new(),
@@ -605,6 +692,7 @@ impl SessionSupervisor {
                     "tmux list-sessions failed: {}",
                     error
                 );
+                self.record_tmux_discovery_failure(reason, error.to_string());
                 ListedTmuxSessions {
                     reliable: false,
                     names: Vec::new(),

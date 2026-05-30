@@ -10,8 +10,10 @@ use chrono::{DateTime, Utc};
 use serde::Serialize;
 
 use crate::api::AppState;
-use crate::persistence::file_store::PersistenceHealthSnapshot;
+use crate::persistence::file_store::{PersistenceHealthSnapshot, PersistenceLoadSnapshot};
+use crate::session::overlay::{default_overlay_health, remote_targets_health};
 use crate::thought::health::{BridgeHealthSnapshot, BridgeStatus};
+use crate::types::{DependencyHealthLedger, DependencyHealthSnapshot, DependencyHealthStatus};
 
 #[derive(Debug, Serialize)]
 struct PersistenceHealth {
@@ -23,6 +25,7 @@ struct PersistenceHealth {
     last_failure_at: Option<DateTime<Utc>>,
     last_failed_operation: Option<String>,
     last_error: Option<String>,
+    load_outcomes: std::collections::BTreeMap<String, PersistenceLoadSnapshot>,
 }
 
 impl PersistenceHealth {
@@ -36,6 +39,7 @@ impl PersistenceHealth {
             last_failure_at: None,
             last_failed_operation: None,
             last_error: None,
+            load_outcomes: std::collections::BTreeMap::new(),
         }
     }
 
@@ -49,6 +53,7 @@ impl PersistenceHealth {
             last_failure_at: snapshot.last_failure_at,
             last_failed_operation: snapshot.last_failed_operation,
             last_error: snapshot.last_error,
+            load_outcomes: snapshot.load_outcomes,
         }
     }
 
@@ -63,6 +68,7 @@ struct HealthResponse {
     uptime_secs: u64,
     thought_bridge: BridgeHealthSnapshot,
     persistence: PersistenceHealth,
+    dependencies: DependencyHealthLedger,
 }
 
 #[derive(Debug, Serialize)]
@@ -85,33 +91,146 @@ fn process_start() -> Instant {
 // GET /health
 // ---------------------------------------------------------------------------
 
-fn health_response(state: &Arc<AppState>) -> HealthResponse {
+async fn health_response(state: &Arc<AppState>) -> HealthResponse {
     let uptime_secs = process_start().elapsed().as_secs();
     let thought_bridge = state.bridge_health.snapshot();
-    let persistence = state
+    let persistence_snapshot = state
         .current_file_store()
-        .map(|store| PersistenceHealth::from_snapshot(store.health_snapshot()))
+        .map(|store| store.health_snapshot());
+    let persistence = persistence_snapshot
+        .clone()
+        .map(PersistenceHealth::from_snapshot)
         .unwrap_or_else(PersistenceHealth::unavailable);
+    let native_app = *state.native_desktop_app.read().await;
+    let dependencies = dependency_ledger(state, &thought_bridge, persistence_snapshot, native_app);
     HealthResponse {
         status: thought_bridge.status,
         uptime_secs,
         thought_bridge,
         persistence,
+        dependencies,
     }
 }
 
 async fn health(State(state): State<Arc<AppState>>) -> Json<HealthResponse> {
-    Json(health_response(&state))
+    Json(health_response(&state).await)
 }
 
 async fn readyz(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let response = health_response(&state);
+    let response = health_response(&state).await;
     let status = if response.thought_bridge.is_ready() && response.persistence.is_ready() {
         StatusCode::OK
     } else {
         StatusCode::SERVICE_UNAVAILABLE
     };
     (status, Json(response))
+}
+
+fn dependency_ledger(
+    state: &Arc<AppState>,
+    thought_bridge: &BridgeHealthSnapshot,
+    persistence: Option<PersistenceHealthSnapshot>,
+    native_app: crate::types::NativeDesktopApp,
+) -> DependencyHealthLedger {
+    let tmux = state.supervisor.tmux_dependency_health_snapshot();
+    DependencyHealthLedger {
+        tmux_discovery: tmux.discovery,
+        tmux_capture: tmux.capture,
+        persistence: persistence_dependency_health(persistence),
+        thought_bridge: thought_bridge_dependency_health(thought_bridge),
+        native_scripts: crate::native::script_dependency_health(native_app),
+        overlay: default_overlay_health(),
+        remote_targets: remote_targets_health(),
+    }
+}
+
+fn persistence_dependency_health(
+    snapshot: Option<PersistenceHealthSnapshot>,
+) -> DependencyHealthSnapshot {
+    let now = Utc::now();
+    match snapshot {
+        Some(snapshot) if snapshot.ok => DependencyHealthSnapshot::healthy(now)
+            .with_detail("available", "true")
+            .with_detail("load_outcomes", snapshot.load_outcomes.len().to_string()),
+        Some(snapshot) => {
+            let mut health = DependencyHealthSnapshot::degraded(
+                now,
+                sanitize_health_error(snapshot.last_error.as_deref().unwrap_or("degraded")),
+            )
+            .with_detail("available", "true")
+            .with_detail("load_outcomes", snapshot.load_outcomes.len().to_string())
+            .with_detail(
+                "consecutive_failures",
+                snapshot.consecutive_failures.to_string(),
+            );
+            health.last_seen_at = snapshot.last_success_at;
+            health.freshness_ms = snapshot
+                .last_success_at
+                .and_then(|seen| now.signed_duration_since(seen).to_std().ok())
+                .map(|duration| duration.as_millis().min(u128::from(u64::MAX)) as u64);
+            health.last_error_at = snapshot.last_failure_at;
+            health
+        }
+        None => DependencyHealthSnapshot::unavailable(now, "file store unavailable")
+            .with_detail("available", "false"),
+    }
+}
+
+fn thought_bridge_dependency_health(snapshot: &BridgeHealthSnapshot) -> DependencyHealthSnapshot {
+    let now = Utc::now();
+    let status = match snapshot.status {
+        BridgeStatus::Starting => DependencyHealthStatus::Unknown,
+        BridgeStatus::Healthy => DependencyHealthStatus::Healthy,
+        BridgeStatus::Degraded => DependencyHealthStatus::Degraded,
+        BridgeStatus::Unhealthy => DependencyHealthStatus::Unavailable,
+    };
+    let mut health = match status {
+        DependencyHealthStatus::Healthy => DependencyHealthSnapshot::healthy(now),
+        DependencyHealthStatus::Degraded => DependencyHealthSnapshot::degraded(
+            now,
+            sanitize_health_error(
+                snapshot
+                    .last_backend_error
+                    .as_deref()
+                    .or(snapshot.last_error.as_deref())
+                    .unwrap_or("degraded"),
+            ),
+        ),
+        DependencyHealthStatus::Unavailable => DependencyHealthSnapshot::unavailable(
+            now,
+            sanitize_health_error(snapshot.last_error.as_deref().unwrap_or("unhealthy")),
+        ),
+        _ => DependencyHealthSnapshot::unknown(now),
+    }
+    .with_detail(
+        "consecutive_failures",
+        snapshot.consecutive_failures.to_string(),
+    )
+    .with_detail("tick_ms", snapshot.tick_ms.to_string());
+    health.last_seen_at = snapshot.last_success_at;
+    health.freshness_ms = snapshot
+        .last_success_at
+        .and_then(|seen| now.signed_duration_since(seen).to_std().ok())
+        .map(|duration| duration.as_millis().min(u128::from(u64::MAX)) as u64);
+    health.last_error_at = snapshot.last_failure_at;
+    health
+}
+
+fn sanitize_health_error(error: &str) -> String {
+    let mut sanitized = error.to_string();
+    for key in ["AUTH_TOKEN", "OBSERVER_TOKEN"] {
+        if let Ok(value) = std::env::var(key) {
+            if !value.is_empty() {
+                sanitized = sanitized.replace(&value, "<redacted>");
+            }
+        }
+    }
+    const MAX_ERROR_LEN: usize = 512;
+    if sanitized.len() > MAX_ERROR_LEN {
+        sanitized.truncate(MAX_ERROR_LEN);
+        sanitized.push_str("...");
+    }
+    sanitized
 }
 
 // ---------------------------------------------------------------------------
@@ -220,6 +339,13 @@ mod tests {
         );
         assert_eq!(json["persistence"]["available"], false);
         assert_eq!(json["persistence"]["consecutive_failures"], 0);
+        assert!(
+            json["dependencies"].is_object(),
+            "dependencies ledger should be present"
+        );
+        assert_eq!(json["dependencies"]["persistence"]["status"], "unavailable");
+        assert_eq!(json["dependencies"]["thought_bridge"]["status"], "healthy");
+        assert!(json["dependencies"]["native_scripts"]["last_checked_at"].is_string());
     }
 
     #[tokio::test]
@@ -238,6 +364,11 @@ mod tests {
         assert_eq!(json["persistence"]["available"], true);
         assert_eq!(json["persistence"]["ok"], true);
         assert_eq!(json["persistence"]["consecutive_failures"], 0);
+        assert_eq!(
+            json["persistence"]["load_outcomes"]["session_registry"]["status"],
+            "missing"
+        );
+        assert_eq!(json["dependencies"]["persistence"]["status"], "healthy");
     }
 
     #[tokio::test]
@@ -264,6 +395,35 @@ mod tests {
         );
         assert!(json["persistence"]["last_failure_at"].is_string());
         assert!(json["persistence"]["last_error"].is_string());
+        assert_eq!(json["dependencies"]["persistence"]["status"], "degraded");
+
+        let readyz_response = readyz(State(state)).await.into_response();
+        assert_eq!(readyz_response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[tokio::test]
+    async fn health_reports_persistence_load_decode_failure_without_erasing_outcome() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        tokio::fs::write(dir.path().join("session_registry.json"), "{not json")
+            .await
+            .expect("write corrupt registry");
+        let store = FileStore::new(dir.path()).await.expect("file store");
+
+        let bridge_health = Arc::new(BridgeHealthState::new_with_tick(Duration::from_secs(15)));
+        bridge_health.record_success(None);
+        let state = test_state_with_store(bridge_health, Some(store));
+
+        let response = health(State(state.clone())).await.into_response();
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let json = response_json(response).await;
+        assert_eq!(json["persistence"]["available"], true);
+        assert_eq!(json["persistence"]["ok"], false);
+        assert_eq!(
+            json["persistence"]["load_outcomes"]["session_registry"]["status"],
+            "decode_failed"
+        );
+        assert!(json["persistence"]["load_outcomes"]["session_registry"]["last_error"].is_string());
+        assert_eq!(json["dependencies"]["persistence"]["status"], "degraded");
 
         let readyz_response = readyz(State(state)).await.into_response();
         assert_eq!(readyz_response.status(), StatusCode::SERVICE_UNAVAILABLE);

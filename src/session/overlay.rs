@@ -3,9 +3,10 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::OnceLock;
 use std::time::SystemTime;
 
+use chrono::{DateTime, Utc};
 use serde::Deserialize;
 
-use crate::types::{LaunchPathMapping, LaunchTargetSummary};
+use crate::types::{DependencyHealthSnapshot, LaunchPathMapping, LaunchTargetSummary};
 
 /// Cached skillbox overlay, loaded once from disk.
 pub fn default_overlay() -> Option<&'static SkillboxOverlay> {
@@ -13,8 +14,29 @@ pub fn default_overlay() -> Option<&'static SkillboxOverlay> {
     OVERLAY.get_or_init(SkillboxOverlay::load).as_ref()
 }
 
+pub fn default_overlay_health() -> DependencyHealthSnapshot {
+    let now = Utc::now();
+    default_overlay().map_or_else(
+        || DependencyHealthSnapshot::unavailable(now, "skillbox overlay unavailable"),
+        SkillboxOverlay::health_snapshot,
+    )
+}
+
+pub fn remote_targets_health() -> DependencyHealthSnapshot {
+    let now = Utc::now();
+    default_overlay().map_or_else(
+        || {
+            DependencyHealthSnapshot::unknown(now)
+                .with_detail("configured_targets", "unknown")
+                .with_detail("probe", "overlay_unavailable")
+        },
+        SkillboxOverlay::remote_targets_health_snapshot,
+    )
+}
+
 pub struct SkillboxOverlay {
     clients: Vec<ClientOverlay>,
+    loaded_at: DateTime<Utc>,
 }
 
 /// A service entry declared in the overlay's `dev_sanity.services` section.
@@ -137,8 +159,42 @@ impl SkillboxOverlay {
         if clients.is_empty() {
             None
         } else {
-            Some(Self { clients })
+            Some(Self {
+                clients,
+                loaded_at: Utc::now(),
+            })
         }
+    }
+
+    pub fn health_snapshot(&self) -> DependencyHealthSnapshot {
+        let now = Utc::now();
+        DependencyHealthSnapshot::healthy(now)
+            .with_last_seen(self.loaded_at)
+            .with_detail("client_count", self.clients.len().to_string())
+            .with_detail(
+                "launch_target_count",
+                self.all_launch_targets().len().to_string(),
+            )
+    }
+
+    pub fn remote_targets_health_snapshot(&self) -> DependencyHealthSnapshot {
+        let now = Utc::now();
+        let configured_targets = self
+            .all_launch_targets()
+            .into_iter()
+            .filter(|target| target.kind == "swimmers_api")
+            .count();
+
+        if configured_targets == 0 {
+            return DependencyHealthSnapshot::not_configured(now)
+                .with_last_seen(self.loaded_at)
+                .with_detail("configured_targets", "0");
+        }
+
+        DependencyHealthSnapshot::unknown(now)
+            .with_last_seen(self.loaded_at)
+            .with_detail("configured_targets", configured_targets.to_string())
+            .with_detail("probe", "not_run_by_health")
     }
 
     /// Find the overlay client whose `dev_sanity.services.base_path` is an
@@ -1184,6 +1240,7 @@ dev_sanity:
         };
         let overlay = SkillboxOverlay {
             clients: vec![client],
+            loaded_at: Utc::now(),
         };
         let plans = overlay.list_all_plans();
         assert_eq!(
@@ -1220,10 +1277,63 @@ dev_sanity:
         };
         let overlay = SkillboxOverlay {
             clients: vec![client],
+            loaded_at: Utc::now(),
         };
         let plans = overlay.list_all_plans();
         assert_eq!(plans.len(), 1);
         assert_eq!(plans[0].slug, "live_plan");
+    }
+
+    #[test]
+    fn overlay_health_reports_load_age_and_remote_target_count_without_probe() {
+        let remote = LaunchTargetSummary {
+            id: "remote-skillbox".to_string(),
+            label: "Remote".to_string(),
+            kind: "swimmers_api".to_string(),
+            base_url: Some("http://example.test:3210".to_string()),
+            auth_token_env: Some("REMOTE_TOKEN".to_string()),
+            path_mappings: Vec::new(),
+        };
+        let client = ClientOverlay {
+            client_dir: PathBuf::from("/tmp/overlay_health"),
+            label: "health".to_string(),
+            cwd_patterns: Vec::new(),
+            cwd_match_count: 0,
+            plan_root: None,
+            plan_draft: None,
+            dir_config: Some(OverlayDirConfig {
+                label: "health".to_string(),
+                base_path: PathBuf::from("/tmp"),
+                services: Vec::new(),
+                groups: Vec::new(),
+                launch: OverlayLaunchConfig {
+                    default_target: "local".to_string(),
+                    targets: vec![LaunchTargetSummary::local(), remote],
+                    group_defaults: BTreeMap::new(),
+                },
+            }),
+        };
+        let overlay = SkillboxOverlay {
+            clients: vec![client],
+            loaded_at: Utc::now() - chrono::Duration::seconds(1),
+        };
+
+        let health = overlay.health_snapshot();
+        assert_eq!(health.status, crate::types::DependencyHealthStatus::Healthy);
+        assert_eq!(health.details["client_count"], "1");
+        assert!(health.freshness_ms.is_some());
+
+        let remote = overlay.remote_targets_health_snapshot();
+        assert_eq!(remote.status, crate::types::DependencyHealthStatus::Unknown);
+        assert_eq!(remote.details["configured_targets"], "1");
+        assert_eq!(remote.details["probe"], "not_run_by_health");
+        assert!(
+            !remote
+                .details
+                .values()
+                .any(|value| value.contains("REMOTE_TOKEN")),
+            "health details must not leak token env names or values"
+        );
     }
 
     #[test]
@@ -1249,6 +1359,7 @@ dev_sanity:
     fn find_plan_dirs_overlay(client: ClientOverlay) -> SkillboxOverlay {
         SkillboxOverlay {
             clients: vec![client],
+            loaded_at: Utc::now(),
         }
     }
 

@@ -7,6 +7,7 @@ use std::sync::{LazyLock, Mutex};
 use std::time::Instant;
 
 use anyhow::{anyhow, Context, Result};
+use chrono::Utc;
 use thiserror::Error;
 use tokio::io::AsyncReadExt;
 use tokio::process::Command;
@@ -15,8 +16,9 @@ use tokio::time::{sleep, timeout, Duration};
 
 use crate::session::actor::run_bounded_tmux_command;
 use crate::types::{
-    AttentionGroupLayout, GhosttyOpenMode, NativeAttentionGroupOpenResponse, NativeDesktopApp,
-    NativeDesktopOpenResponse, NativeDesktopStatusResponse, SessionSummary,
+    AttentionGroupLayout, DependencyHealthSnapshot, GhosttyOpenMode,
+    NativeAttentionGroupOpenResponse, NativeDesktopApp, NativeDesktopOpenResponse,
+    NativeDesktopStatusResponse, SessionSummary,
 };
 
 const NATIVE_APP_ENV: &str = "SWIMMERS_NATIVE_APP";
@@ -108,6 +110,28 @@ pub fn support_for_host(host: &str, app: NativeDesktopApp) -> NativeDesktopStatu
         || script_path_for_app(app),
         app_unavailable_reason,
     )
+}
+
+pub fn script_dependency_health(app: NativeDesktopApp) -> DependencyHealthSnapshot {
+    let now = Utc::now();
+    let path = script_path_for_app_without_materializing(app);
+    match path {
+        Ok(path) if path.is_file() => DependencyHealthSnapshot::healthy(now)
+            .with_detail("app", app.display_name())
+            .with_detail("script_path", path.to_string_lossy().into_owned()),
+        Ok(path) => DependencyHealthSnapshot::unavailable(
+            now,
+            format!(
+                "native {} script missing: {}",
+                app.display_name(),
+                path.display()
+            ),
+        )
+        .with_detail("app", app.display_name())
+        .with_detail("script_path", path.to_string_lossy().into_owned()),
+        Err(err) => DependencyHealthSnapshot::unavailable(now, err.to_string())
+            .with_detail("app", app.display_name()),
+    }
 }
 
 fn support_for_host_with_script_resolver(
@@ -695,6 +719,20 @@ fn script_path_for_app(app: NativeDesktopApp) -> Result<PathBuf> {
     )
 }
 
+fn script_path_for_app_without_materializing(app: NativeDesktopApp) -> Result<PathBuf> {
+    let override_root = std::env::var_os(NATIVE_SCRIPT_ROOT_ENV).map(PathBuf::from);
+    let current_exe = std::env::current_exe().ok();
+    let current_dir = std::env::current_dir().ok();
+    resolve_script_path_without_materializing(
+        app.script_relative_path(),
+        override_root.as_deref(),
+        current_exe.as_deref(),
+        current_dir.as_deref(),
+        Path::new(env!("CARGO_MANIFEST_DIR")),
+        &bundled_script_root(),
+    )
+}
+
 fn resolve_script_path(
     script_relative_path: &str,
     override_root: Option<&Path>,
@@ -725,6 +763,38 @@ fn resolve_script_path(
     }
 
     materialize_bundled_script(script_relative_path, bundled_root, bundled_source)
+}
+
+fn resolve_script_path_without_materializing(
+    script_relative_path: &str,
+    override_root: Option<&Path>,
+    current_exe: Option<&Path>,
+    current_dir: Option<&Path>,
+    manifest_dir: &Path,
+    bundled_root: &Path,
+) -> Result<PathBuf> {
+    if let Some(root) = override_root {
+        return Ok(root.join(script_relative_path));
+    }
+
+    let mut roots = Vec::new();
+    if let Some(dir) = current_dir {
+        push_ancestor_roots(&mut roots, dir);
+    }
+    if let Some(exe_dir) = current_exe.and_then(Path::parent) {
+        push_ancestor_roots(&mut roots, exe_dir);
+    }
+    push_unique_root(&mut roots, manifest_dir);
+    push_unique_root(&mut roots, bundled_root);
+
+    for root in roots {
+        let candidate = root.join(script_relative_path);
+        if candidate.is_file() {
+            return Ok(candidate);
+        }
+    }
+
+    Ok(bundled_root.join(script_relative_path))
 }
 
 fn bundled_script_root() -> PathBuf {
@@ -2330,6 +2400,35 @@ mod tests {
 
         assert_eq!(resolved, override_script);
         assert!(!resolved.exists());
+    }
+
+    #[test]
+    fn script_dependency_health_reports_missing_override_without_materializing() {
+        let _env_guard = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let temp = tempdir().unwrap();
+        let override_root = temp.path().join("missing-root");
+        let original = std::env::var_os(NATIVE_SCRIPT_ROOT_ENV);
+        std::env::set_var(NATIVE_SCRIPT_ROOT_ENV, &override_root);
+
+        let health = script_dependency_health(NativeDesktopApp::Iterm);
+
+        match original {
+            Some(value) => std::env::set_var(NATIVE_SCRIPT_ROOT_ENV, value),
+            None => std::env::remove_var(NATIVE_SCRIPT_ROOT_ENV),
+        }
+
+        assert_eq!(
+            health.status,
+            crate::types::DependencyHealthStatus::Unavailable
+        );
+        assert!(health
+            .last_error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("script missing"));
+        assert!(!override_root.exists());
     }
 
     #[test]

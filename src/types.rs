@@ -149,6 +149,97 @@ pub enum TransportHealth {
     Disconnected,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DependencyHealthStatus {
+    Unknown,
+    Healthy,
+    Degraded,
+    Unavailable,
+    NotConfigured,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DependencyHealthSnapshot {
+    pub status: DependencyHealthStatus,
+    pub last_checked_at: DateTime<Utc>,
+    pub last_seen_at: Option<DateTime<Utc>>,
+    pub last_error_at: Option<DateTime<Utc>>,
+    pub last_error: Option<String>,
+    pub freshness_ms: Option<u64>,
+    pub details: BTreeMap<String, String>,
+}
+
+impl DependencyHealthSnapshot {
+    pub fn unknown(now: DateTime<Utc>) -> Self {
+        Self::new(DependencyHealthStatus::Unknown, now)
+    }
+
+    pub fn healthy(now: DateTime<Utc>) -> Self {
+        Self::new(DependencyHealthStatus::Healthy, now).with_last_seen(now)
+    }
+
+    pub fn degraded(now: DateTime<Utc>, error: impl Into<String>) -> Self {
+        Self::new(DependencyHealthStatus::Degraded, now).with_error(now, error)
+    }
+
+    pub fn unavailable(now: DateTime<Utc>, error: impl Into<String>) -> Self {
+        Self::new(DependencyHealthStatus::Unavailable, now).with_error(now, error)
+    }
+
+    pub fn not_configured(now: DateTime<Utc>) -> Self {
+        Self::new(DependencyHealthStatus::NotConfigured, now)
+    }
+
+    pub fn with_last_seen(mut self, at: DateTime<Utc>) -> Self {
+        self.last_seen_at = Some(at);
+        self.freshness_ms = freshness_ms(at, self.last_checked_at);
+        self
+    }
+
+    pub fn with_error(mut self, at: DateTime<Utc>, error: impl Into<String>) -> Self {
+        self.last_error_at = Some(at);
+        self.last_error = Some(error.into());
+        self
+    }
+
+    pub fn with_detail(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+        self.details.insert(key.into(), value.into());
+        self
+    }
+
+    fn new(status: DependencyHealthStatus, now: DateTime<Utc>) -> Self {
+        Self {
+            status,
+            last_checked_at: now,
+            last_seen_at: None,
+            last_error_at: None,
+            last_error: None,
+            freshness_ms: None,
+            details: BTreeMap::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DependencyHealthLedger {
+    pub tmux_discovery: DependencyHealthSnapshot,
+    pub tmux_capture: DependencyHealthSnapshot,
+    pub persistence: DependencyHealthSnapshot,
+    pub thought_bridge: DependencyHealthSnapshot,
+    pub native_scripts: DependencyHealthSnapshot,
+    pub overlay: DependencyHealthSnapshot,
+    pub remote_targets: DependencyHealthSnapshot,
+}
+
+fn freshness_ms(seen_at: DateTime<Utc>, checked_at: DateTime<Utc>) -> Option<u64> {
+    checked_at
+        .signed_duration_since(seen_at)
+        .to_std()
+        .ok()
+        .map(|duration| duration.as_millis().min(u128::from(u64::MAX)) as u64)
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum StateConfidence {
@@ -1599,6 +1690,29 @@ mod tests {
         assert_eq!(detect_tool_name("zsh"), None);
         assert_eq!(detect_tool_name("node"), None);
         assert_eq!(detect_tool_name(""), None);
+    }
+
+    #[test]
+    fn dependency_health_snapshot_serializes_stable_shape() {
+        let checked_at = DateTime::parse_from_rfc3339("2026-05-30T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let seen_at = DateTime::parse_from_rfc3339("2026-05-29T23:59:59Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let health = DependencyHealthSnapshot::healthy(checked_at)
+            .with_last_seen(seen_at)
+            .with_detail("dependency", "tmux_discovery");
+
+        let json = serde_json::to_value(&health).expect("serialize health");
+
+        assert_eq!(json["status"], "healthy");
+        assert_eq!(json["last_checked_at"], "2026-05-30T00:00:00Z");
+        assert_eq!(json["last_seen_at"], "2026-05-29T23:59:59Z");
+        assert_eq!(json["last_error_at"], serde_json::Value::Null);
+        assert_eq!(json["last_error"], serde_json::Value::Null);
+        assert_eq!(json["freshness_ms"], 1000);
+        assert_eq!(json["details"]["dependency"], "tmux_discovery");
     }
 
     #[test]

@@ -4,7 +4,7 @@
 //! blocking the async runtime. Writes use atomic rename (write to temp file,
 //! then rename) for crash safety.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs::OpenOptions;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex as StdMutex};
@@ -128,6 +128,25 @@ pub struct PersistenceHealthSnapshot {
     pub last_failure_at: Option<DateTime<Utc>>,
     pub last_failed_operation: Option<String>,
     pub last_error: Option<String>,
+    pub load_outcomes: BTreeMap<String, PersistenceLoadSnapshot>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PersistenceLoadStatus {
+    Loaded,
+    Missing,
+    DecodeFailed,
+    Invalid,
+    ReadFailed,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PersistenceLoadSnapshot {
+    pub status: PersistenceLoadStatus,
+    pub checked_at: DateTime<Utc>,
+    pub records: Option<u64>,
+    pub last_error: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -139,6 +158,7 @@ struct PersistenceHealthState {
     last_failure_at: Option<DateTime<Utc>>,
     last_failed_operation: Option<String>,
     last_error: Option<String>,
+    load_outcomes: BTreeMap<String, PersistenceLoadSnapshot>,
 }
 
 impl Default for PersistenceHealthState {
@@ -151,6 +171,7 @@ impl Default for PersistenceHealthState {
             last_failure_at: None,
             last_failed_operation: None,
             last_error: None,
+            load_outcomes: BTreeMap::new(),
         }
     }
 }
@@ -165,6 +186,7 @@ impl From<&PersistenceHealthState> for PersistenceHealthSnapshot {
             last_failure_at: state.last_failure_at,
             last_failed_operation: state.last_failed_operation.clone(),
             last_error: state.last_error.clone(),
+            load_outcomes: state.load_outcomes.clone(),
         }
     }
 }
@@ -297,6 +319,86 @@ impl FileStore {
         health.last_error = Some(error.to_string());
     }
 
+    fn record_load_success(&self, operation: &'static str, records: u64) {
+        let now = Utc::now();
+        let mut health = self
+            .health
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        health.load_outcomes.insert(
+            operation.to_string(),
+            PersistenceLoadSnapshot {
+                status: PersistenceLoadStatus::Loaded,
+                checked_at: now,
+                records: Some(records),
+                last_error: None,
+            },
+        );
+        health.ok = !health
+            .load_outcomes
+            .values()
+            .any(|outcome| load_status_is_failure(outcome.status));
+        if health.ok {
+            health.consecutive_failures = 0;
+        }
+        health.last_success_at = Some(now);
+        health.last_successful_operation = Some(operation.to_string());
+        if health.ok {
+            health.last_error = None;
+        }
+    }
+
+    fn record_load_missing(&self, operation: &'static str) {
+        let mut health = self
+            .health
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        health.load_outcomes.insert(
+            operation.to_string(),
+            PersistenceLoadSnapshot {
+                status: PersistenceLoadStatus::Missing,
+                checked_at: Utc::now(),
+                records: Some(0),
+                last_error: None,
+            },
+        );
+        health.ok = !health
+            .load_outcomes
+            .values()
+            .any(|outcome| load_status_is_failure(outcome.status));
+        if health.ok {
+            health.last_error = None;
+        }
+    }
+
+    fn record_load_failure(
+        &self,
+        operation: &'static str,
+        status: PersistenceLoadStatus,
+        error: impl std::fmt::Display,
+    ) {
+        let now = Utc::now();
+        let error = error.to_string();
+        let mut health = self
+            .health
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        health.load_outcomes.insert(
+            operation.to_string(),
+            PersistenceLoadSnapshot {
+                status,
+                checked_at: now,
+                records: None,
+                last_error: Some(error.clone()),
+            },
+        );
+        health.ok = false;
+        health.consecutive_failures = health.consecutive_failures.saturating_add(1);
+        health.last_failure_at = Some(now);
+        health.last_failed_operation = Some(operation.to_string());
+        health.last_error = Some(error);
+    }
+
     // -----------------------------------------------------------------------
     // Session registry
     // -----------------------------------------------------------------------
@@ -337,19 +439,31 @@ impl FileStore {
         match read_file_blocking(path).await {
             Ok(Some(data)) => match serde_json::from_str::<Vec<PersistedSession>>(&data) {
                 Ok(sessions) => {
+                    self.record_load_success(OP_SESSION_REGISTRY, sessions.len() as u64);
                     info!(count = sessions.len(), "loaded persisted session registry");
                     sessions
                 }
                 Err(e) => {
+                    self.record_load_failure(
+                        OP_SESSION_REGISTRY,
+                        PersistenceLoadStatus::DecodeFailed,
+                        &e,
+                    );
                     warn!("corrupt session registry, starting fresh: {e}");
                     Vec::new()
                 }
             },
             Ok(None) => {
+                self.record_load_missing(OP_SESSION_REGISTRY);
                 debug!("no persisted session registry found");
                 Vec::new()
             }
             Err(e) => {
+                self.record_load_failure(
+                    OP_SESSION_REGISTRY,
+                    load_failure_status(&e),
+                    format!("{e:#}"),
+                );
                 warn!("failed to read session registry: {e}");
                 Vec::new()
             }
@@ -428,15 +542,27 @@ impl FileStore {
         match read_file_blocking(path).await {
             Ok(Some(data)) => {
                 match serde_json::from_str::<HashMap<String, ThoughtSnapshot>>(&data) {
-                    Ok(thoughts) => thoughts,
+                    Ok(thoughts) => {
+                        self.record_load_success(OP_THOUGHTS, thoughts.len() as u64);
+                        thoughts
+                    }
                     Err(e) => {
+                        self.record_load_failure(
+                            OP_THOUGHTS,
+                            PersistenceLoadStatus::DecodeFailed,
+                            &e,
+                        );
                         warn!("corrupt thoughts file, starting fresh: {e}");
                         HashMap::new()
                     }
                 }
             }
-            Ok(None) => HashMap::new(),
+            Ok(None) => {
+                self.record_load_missing(OP_THOUGHTS);
+                HashMap::new()
+            }
             Err(e) => {
+                self.record_load_failure(OP_THOUGHTS, load_failure_status(&e), format!("{e:#}"));
                 warn!("failed to read thoughts: {e}");
                 HashMap::new()
             }
@@ -562,14 +688,26 @@ impl FileStore {
         let path = self.dir_group_memberships_path();
         match read_file_blocking(path).await {
             Ok(Some(data)) => match serde_json::from_str::<DirGroupMemberships>(&data) {
-                Ok(groups) => groups,
+                Ok(groups) => {
+                    self.record_load_success(OP_DIR_GROUPS, groups.groups.len() as u64);
+                    groups
+                }
                 Err(e) => {
+                    self.record_load_failure(
+                        OP_DIR_GROUPS,
+                        PersistenceLoadStatus::DecodeFailed,
+                        &e,
+                    );
                     warn!("corrupt directory group memberships file, starting fresh: {e}");
                     DirGroupMemberships::default()
                 }
             },
-            Ok(None) => DirGroupMemberships::default(),
+            Ok(None) => {
+                self.record_load_missing(OP_DIR_GROUPS);
+                DirGroupMemberships::default()
+            }
             Err(e) => {
+                self.record_load_failure(OP_DIR_GROUPS, load_failure_status(&e), format!("{e:#}"));
                 warn!("failed to read directory group memberships: {e}");
                 DirGroupMemberships::default()
             }
@@ -602,19 +740,40 @@ impl FileStore {
         match read_file_blocking(path).await {
             Ok(Some(data)) => match serde_json::from_str::<ThoughtConfig>(&data) {
                 Ok(config) => match config.normalize_and_validate() {
-                    Ok(config) => config,
+                    Ok(config) => {
+                        self.record_load_success(OP_THOUGHT_CONFIG, 1);
+                        config
+                    }
                     Err(e) => {
+                        self.record_load_failure(
+                            OP_THOUGHT_CONFIG,
+                            PersistenceLoadStatus::Invalid,
+                            &e,
+                        );
                         warn!("invalid thought config file, using defaults: {e}");
                         ThoughtConfig::default()
                     }
                 },
                 Err(e) => {
+                    self.record_load_failure(
+                        OP_THOUGHT_CONFIG,
+                        PersistenceLoadStatus::DecodeFailed,
+                        &e,
+                    );
                     warn!("corrupt thought config file, using defaults: {e}");
                     ThoughtConfig::default()
                 }
             },
-            Ok(None) => ThoughtConfig::default(),
+            Ok(None) => {
+                self.record_load_missing(OP_THOUGHT_CONFIG);
+                ThoughtConfig::default()
+            }
             Err(e) => {
+                self.record_load_failure(
+                    OP_THOUGHT_CONFIG,
+                    load_failure_status(&e),
+                    format!("{e:#}"),
+                );
                 warn!("failed to read thought config file, using defaults: {e}");
                 ThoughtConfig::default()
             }
@@ -625,6 +784,27 @@ impl FileStore {
 // ---------------------------------------------------------------------------
 // Blocking I/O helpers (run inside spawn_blocking)
 // ---------------------------------------------------------------------------
+
+fn load_failure_status(error: &anyhow::Error) -> PersistenceLoadStatus {
+    if error.downcast_ref::<FileStoreIoError>().is_some()
+        || error
+            .to_string()
+            .contains("decode checksummed payload failed")
+    {
+        PersistenceLoadStatus::DecodeFailed
+    } else {
+        PersistenceLoadStatus::ReadFailed
+    }
+}
+
+fn load_status_is_failure(status: PersistenceLoadStatus) -> bool {
+    matches!(
+        status,
+        PersistenceLoadStatus::DecodeFailed
+            | PersistenceLoadStatus::Invalid
+            | PersistenceLoadStatus::ReadFailed
+    )
+}
 
 fn flush_barrier_blocking(base_dir: &Path, files: &[PathBuf]) -> anyhow::Result<()> {
     for path in files {
@@ -906,6 +1086,49 @@ mod tests {
             .expect("backend delta")
             .include_paths
             .contains("/tmp/project-b"));
+    }
+
+    #[tokio::test]
+    async fn startup_load_outcomes_distinguish_missing_and_corrupt_files() {
+        let missing_dir = tempfile::tempdir().expect("missing tempdir");
+        let missing_store = FileStore::new(missing_dir.path())
+            .await
+            .expect("missing store");
+        let missing = missing_store.health_snapshot();
+        assert!(missing.ok);
+        assert_eq!(
+            missing.load_outcomes[OP_SESSION_REGISTRY].status,
+            PersistenceLoadStatus::Missing
+        );
+        assert_eq!(
+            missing.load_outcomes[OP_THOUGHTS].status,
+            PersistenceLoadStatus::Missing
+        );
+
+        let corrupt_dir = tempfile::tempdir().expect("corrupt tempdir");
+        tokio::fs::write(
+            corrupt_dir.path().join("session_registry.json"),
+            "{not json",
+        )
+        .await
+        .expect("write corrupt registry");
+        let corrupt_store = FileStore::new(corrupt_dir.path())
+            .await
+            .expect("corrupt store still initializes with empty cache");
+        let corrupt = corrupt_store.health_snapshot();
+
+        assert!(!corrupt.ok);
+        assert_eq!(
+            corrupt.load_outcomes[OP_SESSION_REGISTRY].status,
+            PersistenceLoadStatus::DecodeFailed
+        );
+        assert!(corrupt.load_outcomes[OP_SESSION_REGISTRY]
+            .last_error
+            .is_some());
+        assert_eq!(
+            corrupt.last_failed_operation.as_deref(),
+            Some(OP_SESSION_REGISTRY)
+        );
     }
 
     #[tokio::test]
