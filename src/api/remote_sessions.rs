@@ -17,7 +17,7 @@ use crate::types::{
     CreateSessionRequest, CreateSessionResponse, CreateSessionsBatchRequest,
     CreateSessionsBatchResponse, ErrorResponse, LaunchPathMapping, LaunchTargetSummary,
     SessionAgentContextResponse, SessionGitDiffResponse, SessionListResponse, SessionSummary,
-    SessionTimelineResponse, SessionTranscriptResponse, StateEvidence, TransportHealth,
+    SessionTimelineResponse, SessionTranscriptResponse,
 };
 
 const REMOTE_LIST_TIMEOUT: Duration = Duration::from_millis(900);
@@ -250,13 +250,7 @@ fn stale_sessions_from_cache(entry: &RemoteTargetSessionCache) -> Vec<SessionSum
         .sessions
         .iter()
         .cloned()
-        .map(|mut session| {
-            session.is_stale = true;
-            session.transport_health = TransportHealth::Degraded;
-            session.state_evidence =
-                StateEvidence::with_observed_at("remote_poll_degraded", entry.last_seen_at);
-            session
-        })
+        .map(|session| session.into_remote_poll_degraded(entry.last_seen_at))
         .collect()
 }
 
@@ -943,7 +937,8 @@ mod tests {
     use super::*;
     use crate::types::{
         CreateSessionsBatchResult, SessionBatchMembership, SessionState, SessionTimelinePinned,
-        SessionTimelineResponse, SpawnTool, ThoughtSource, ThoughtState, TransportHealth,
+        SessionTimelineResponse, SpawnTool, ThoughtState, TransportHealth,
+        SUMMARY_CAUSE_REMOTE_POLL_DEGRADED,
     };
     use axum::http::HeaderMap;
     use axum::routing::{get, post};
@@ -973,36 +968,22 @@ mod tests {
     }
 
     fn summary(session_id: &str) -> SessionSummary {
-        SessionSummary {
-            session_id: session_id.to_string(),
-            tmux_name: "7".to_string(),
-            state: SessionState::Idle,
-            current_command: None,
-            state_evidence: Default::default(),
-            cwd: "/monoserver/opensource/swimmers".to_string(),
-            tool: Some("Codex".to_string()),
-            token_count: 0,
-            context_limit: 192_000,
-            thought: None,
-            thought_state: ThoughtState::Holding,
-            thought_source: ThoughtSource::CarryForward,
-            thought_updated_at: None,
-            rest_state: crate::types::fallback_rest_state(
-                SessionState::Idle,
-                ThoughtState::Holding,
-            ),
-            commit_candidate: false,
-            action_cues: Vec::new(),
-            objective_changed_at: None,
-            last_skill: None,
-            is_stale: false,
-            attached_clients: 0,
-            stale_attached_clients: 0,
-            transport_health: TransportHealth::Healthy,
-            last_activity_at: Utc::now(),
-            repo_theme_id: None,
-            batch: None::<SessionBatchMembership>,
-        }
+        let mut summary = SessionSummary::live(
+            session_id,
+            "7",
+            SessionState::Idle,
+            None,
+            Default::default(),
+            "/monoserver/opensource/swimmers",
+            Some("Codex".to_string()),
+            0,
+            0,
+            Utc::now(),
+        );
+        summary.rest_state =
+            crate::types::fallback_rest_state(SessionState::Idle, ThoughtState::Holding);
+        summary.batch = None::<SessionBatchMembership>;
+        summary
     }
 
     #[derive(Clone, Default)]
@@ -1508,7 +1489,10 @@ mod tests {
         );
         assert!(stale[0].is_stale);
         assert_eq!(stale[0].transport_health, TransportHealth::Degraded);
-        assert_eq!(stale[0].state_evidence.cause, "remote_poll_degraded");
+        assert_eq!(
+            stale[0].state_evidence.cause,
+            SUMMARY_CAUSE_REMOTE_POLL_DEGRADED
+        );
         assert!(stale[0].state_evidence.observed_at.is_some());
 
         bad_handle.abort();

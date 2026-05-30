@@ -1484,44 +1484,27 @@ impl SessionActor {
     fn build_summary(&self) -> SessionSummary {
         let (state, current_command) = self.state_detector.get_state();
         let state_evidence = self.state_detector.state_evidence();
-        let context_limit = crate::types::context_limit_for_tool(self.tool.as_deref());
         let active_subscribers = self
             .subscribers
             .values()
             .filter(|tx| !tx.is_closed())
             .count();
         let stale_subscribers = self.subscribers.len().saturating_sub(active_subscribers);
-        SessionSummary {
-            session_id: self.session_id.clone(),
-            tmux_name: self.tmux_name.clone(),
+        let mut summary = SessionSummary::live(
+            self.session_id.clone(),
+            self.tmux_name.clone(),
             state,
             current_command,
             state_evidence,
-            cwd: self.cwd.clone(),
-            tool: self.tool.clone(),
-            token_count: 0,
-            context_limit,
-            thought: None,
-            is_stale: false,
-            attached_clients: active_subscribers as u32,
-            stale_attached_clients: stale_subscribers as u32,
-            transport_health: TransportHealth::Healthy,
-            thought_state: crate::types::ThoughtState::Holding,
-            thought_source: crate::types::ThoughtSource::CarryForward,
-            thought_updated_at: None,
-            rest_state: crate::types::rest_state_from_idle(
-                state,
-                self.last_activity_at,
-                Utc::now(),
-            ),
-            commit_candidate: false,
-            action_cues: Vec::new(),
-            objective_changed_at: None,
-            last_skill: self.last_skill.clone(),
-            last_activity_at: self.last_activity_at,
-            repo_theme_id: None,
-            batch: self.batch.clone(),
-        }
+            self.cwd.clone(),
+            self.tool.clone(),
+            active_subscribers as u32,
+            stale_subscribers as u32,
+            self.last_activity_at,
+        );
+        summary.last_skill = self.last_skill.clone();
+        summary.batch = self.batch.clone();
+        summary
     }
 
     async fn build_mermaid_artifact(

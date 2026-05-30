@@ -26,11 +26,21 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Smoke native packaged assets
-        run: ./scripts/smoke-native-assets-package.sh
+      - name: Install release smoke dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends curl tmux
 
       - name: Build release binaries
         run: cargo build --release --bin swimmers --bin swimmers-tui
+
+      - name: Smoke native packaged assets
+        run: ./scripts/release-acceptance-smoke.sh native-assets
+
+      - name: Smoke default release binaries
+        run: ./scripts/release-acceptance-smoke.sh default-installed
+        env:
+          SWIMMERS_ACCEPTANCE_BIN_DIR: ${{ github.workspace }}/target/release
 
       - name: Package tarball
         run: |

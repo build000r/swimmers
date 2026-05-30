@@ -1,7 +1,7 @@
 SHELL := /bin/bash
 .DEFAULT_GOAL := help
 
-.PHONY: help server up kill up-smoke web web-smoke web-workbench-smoke tui tui-check tui-smoke tui-stress glance-smoke remote-auth-smoke ci-perf-gates cargo-cov-lcov
+.PHONY: help server up kill up-smoke web web-smoke web-workbench-smoke tui tui-check tui-smoke tui-stress glance-smoke remote-auth-smoke release-acceptance release-acceptance-default release-acceptance-source release-acceptance-native release-acceptance-thought release-acceptance-voice release-acceptance-all ci-perf-gates cargo-cov-lcov
 
 help:
 	@printf '%s\n' \
@@ -20,6 +20,9 @@ help:
 	'  make tui-stress             Concurrent-load regression smoke for /v1/dirs + POST /v1/sessions' \
 	'  make glance-smoke           Render the 10-session Glance fixture and write proof artifacts' \
 	'  make remote-auth-smoke      Verify fake remote API launch/read auth and redaction paths' \
+	'  make release-acceptance     Verify default installed-binary release smoke' \
+	'  make release-acceptance-all Run default, source, native asset, and thought profiles' \
+	'  make release-acceptance-voice Run optional voice-feature acceptance profile' \
 	'  make ci-perf-gates          Run perf/concurrency gates (the CI regression guard bundle)' \
 	'  make cargo-cov-lcov         Run Rust tests with lcov output for /crap'
 
@@ -62,6 +65,26 @@ glance-smoke:
 
 remote-auth-smoke:
 	bash ./scripts/test-remote-auth-smoke.sh
+
+release-acceptance: release-acceptance-default
+
+release-acceptance-default:
+	bash ./scripts/release-acceptance-smoke.sh default-installed
+
+release-acceptance-source:
+	bash ./scripts/release-acceptance-smoke.sh source-personal
+
+release-acceptance-native:
+	bash ./scripts/release-acceptance-smoke.sh native-assets
+
+release-acceptance-thought:
+	bash ./scripts/release-acceptance-smoke.sh thought
+
+release-acceptance-voice:
+	bash ./scripts/release-acceptance-smoke.sh voice
+
+release-acceptance-all:
+	bash ./scripts/release-acceptance-smoke.sh all
 
 ci-perf-gates:
 	bash ./scripts/ci-perf-gates.sh

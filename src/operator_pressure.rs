@@ -405,7 +405,7 @@ mod tests {
 
     use crate::types::{
         ActionCue, ActionCueConfidence, ActionCueSource, ActionCueStatus, StateEvidence,
-        ThoughtSource, ThoughtState,
+        ThoughtState,
     };
 
     fn cue(kind: ActionCueKind) -> ActionCue {
@@ -422,33 +422,18 @@ mod tests {
     }
 
     fn summary(id: &str, state: SessionState) -> SessionSummary {
-        SessionSummary {
-            session_id: id.to_string(),
-            tmux_name: id.to_string(),
+        SessionSummary::live(
+            id,
+            id,
             state,
-            current_command: None,
-            state_evidence: StateEvidence::new("test"),
-            cwd: "/tmp/repos/swimmers".to_string(),
-            tool: Some("Codex".to_string()),
-            token_count: 0,
-            context_limit: 200_000,
-            thought: None,
-            thought_state: ThoughtState::Holding,
-            thought_source: ThoughtSource::CarryForward,
-            thought_updated_at: None,
-            rest_state: RestState::Active,
-            commit_candidate: false,
-            action_cues: Vec::new(),
-            objective_changed_at: None,
-            last_skill: None,
-            is_stale: false,
-            attached_clients: 0,
-            stale_attached_clients: 0,
-            transport_health: TransportHealth::Healthy,
-            last_activity_at: Utc::now(),
-            repo_theme_id: None,
-            batch: None,
-        }
+            None,
+            StateEvidence::new("test"),
+            "/tmp/repos/swimmers",
+            Some("Codex".to_string()),
+            0,
+            0,
+            Utc::now(),
+        )
     }
 
     #[test]
@@ -507,6 +492,14 @@ mod tests {
 
         assert!(!session_ready_for_operator_group_input(&session));
         assert!(!pressure.needs_input);
+    }
+
+    #[test]
+    fn stale_summary_helper_disables_operator_group_input() {
+        let session =
+            summary("stale-codex", SessionState::Idle).into_remote_poll_degraded(Some(Utc::now()));
+
+        assert!(!session_ready_for_operator_group_input(&session));
     }
 
     #[test]

@@ -24,8 +24,10 @@ use crate::thought::protocol::ThoughtDeliveryState;
 use crate::tmux_target::exact_session_target;
 use crate::types::{
     fallback_rest_state, ActionCue, ControlEvent, DependencyHealthSnapshot, RepoTheme, RestState,
-    SessionBatchMembership, SessionState, SessionStatePayload, SessionSummary, TerminalSnapshot,
-    ThoughtPersistenceBackpressureSnapshot, ThoughtSource, ThoughtState, TransportHealth,
+    SessionBatchMembership, SessionState, SessionStatePayload, SessionSummary,
+    SummaryFallbackReason, TerminalSnapshot, ThoughtPersistenceBackpressureSnapshot, ThoughtSource,
+    ThoughtState, TransportHealth, SUMMARY_CAUSE_PERSISTENCE_STALE,
+    SUMMARY_CAUSE_STARTUP_MISSING_TMUX, SUMMARY_CAUSE_TMUX_RECONCILE_MISSING,
 };
 
 const PROCESS_EXIT_REAP_INTERVAL: Duration = Duration::from_millis(250);
@@ -584,53 +586,48 @@ impl SessionSupervisor {
             let mut stale = Vec::new();
             for ps in &persisted {
                 let thought_data = thoughts.get(&ps.session_id);
-                let mut summary = SessionSummary {
-                    session_id: ps.session_id.clone(),
-                    tmux_name: ps.tmux_name.clone(),
-                    state: crate::types::SessionState::Exited,
-                    current_command: None,
-                    state_evidence: crate::types::StateEvidence::unobserved("persistence_stale"),
-                    cwd: ps.cwd.clone(),
-                    tool: ps.tool.clone(),
-                    token_count: thought_data
-                        .map(|t| t.token_count)
-                        .unwrap_or(ps.token_count),
-                    context_limit: thought_data
-                        .map(|t| t.context_limit)
-                        .unwrap_or(ps.context_limit),
-                    thought: thought_data
-                        .and_then(|t| t.thought.clone())
-                        .or_else(|| ps.thought.clone()),
-                    thought_state: thought_data
-                        .map(|t| t.thought_state)
-                        .unwrap_or(ps.thought_state),
-                    thought_source: thought_data
-                        .map(|t| t.thought_source)
-                        .unwrap_or(ps.thought_source),
-                    thought_updated_at: thought_data
-                        .map(|t| t.updated_at)
-                        .or(ps.thought_updated_at),
-                    rest_state: thought_data.map(|t| t.rest_state).unwrap_or_else(|| {
-                        fallback_rest_state(SessionState::Exited, ps.thought_state)
-                    }),
-                    commit_candidate: thought_data
-                        .map(|t| t.commit_candidate)
-                        .unwrap_or(ps.commit_candidate),
-                    action_cues: thought_data
-                        .map(|t| t.action_cues.clone())
-                        .unwrap_or_else(|| ps.action_cues.clone()),
-                    objective_changed_at: thought_data
-                        .and_then(|t| t.objective_changed_at)
-                        .or(ps.objective_changed_at),
-                    last_skill: ps.last_skill.clone(),
-                    batch: ps.batch.clone(),
-                    is_stale: true,
-                    attached_clients: 0,
-                    stale_attached_clients: 0,
-                    transport_health: crate::types::TransportHealth::Disconnected,
-                    last_activity_at: ps.last_activity_at,
-                    repo_theme_id: None,
-                };
+                let thought_state = thought_data
+                    .map(|t| t.thought_state)
+                    .unwrap_or(ps.thought_state);
+                let rest_state = thought_data
+                    .map(|t| t.rest_state)
+                    .unwrap_or_else(|| fallback_rest_state(SessionState::Exited, ps.thought_state));
+                let mut summary =
+                    SessionSummary::placeholder(&ps.session_id, &ps.tmux_name, ps.last_activity_at);
+                summary.cwd = ps.cwd.clone();
+                summary.tool = ps.tool.clone();
+                summary.context_limit = thought_data
+                    .map(|t| t.context_limit)
+                    .unwrap_or(ps.context_limit);
+                summary.token_count = thought_data
+                    .map(|t| t.token_count)
+                    .unwrap_or(ps.token_count);
+                summary.thought = thought_data
+                    .and_then(|t| t.thought.clone())
+                    .or_else(|| ps.thought.clone());
+                summary.thought_state = thought_state;
+                summary.thought_source = thought_data
+                    .map(|t| t.thought_source)
+                    .unwrap_or(ps.thought_source);
+                summary.thought_updated_at =
+                    thought_data.map(|t| t.updated_at).or(ps.thought_updated_at);
+                summary.commit_candidate = thought_data
+                    .map(|t| t.commit_candidate)
+                    .unwrap_or(ps.commit_candidate);
+                summary.action_cues = thought_data
+                    .map(|t| t.action_cues.clone())
+                    .unwrap_or_else(|| ps.action_cues.clone());
+                summary.objective_changed_at = thought_data
+                    .and_then(|t| t.objective_changed_at)
+                    .or(ps.objective_changed_at);
+                summary.last_skill = ps.last_skill.clone();
+                summary.batch = ps.batch.clone();
+                let mut summary = summary.into_stale_exited_with_rest_state(
+                    SUMMARY_CAUSE_PERSISTENCE_STALE,
+                    None,
+                    TransportHealth::Disconnected,
+                    rest_state,
+                );
                 self.resolve_repo_theme_for_summary(&mut summary);
                 stale.push(summary);
             }
@@ -904,7 +901,11 @@ impl SessionSupervisor {
 
         for summary in unresolved_stale {
             let previous_state = summary.state;
-            self.emit_missing_tmux_events(summary, previous_state, "startup_missing_tmux");
+            self.emit_missing_tmux_events(
+                summary,
+                previous_state,
+                SUMMARY_CAUSE_STARTUP_MISSING_TMUX,
+            );
         }
     }
 
@@ -930,16 +931,8 @@ impl SessionSupervisor {
         })
     }
 
-    fn mark_missing_tmux_summary(mut summary: SessionSummary) -> SessionSummary {
-        summary.state = SessionState::Exited;
-        summary.current_command = None;
-        summary.state_evidence = crate::types::StateEvidence::new("tmux_reconcile_missing");
-        summary.rest_state = fallback_rest_state(SessionState::Exited, summary.thought_state);
-        summary.is_stale = true;
-        summary.attached_clients = 0;
-        summary.stale_attached_clients = 0;
-        summary.transport_health = TransportHealth::Disconnected;
-        summary
+    fn mark_missing_tmux_summary(summary: SessionSummary) -> SessionSummary {
+        summary.into_missing_tmux_stale(SUMMARY_CAUSE_TMUX_RECONCILE_MISSING)
     }
 
     async fn reconcile_tracked_sessions_after_discovery(
@@ -1031,7 +1024,11 @@ impl SessionSupervisor {
         }
         for (session_id, previous_state, summary) in stale_summaries {
             if removed_ids.contains(&session_id) {
-                self.emit_missing_tmux_events(summary, previous_state, "tmux_reconcile_missing");
+                self.emit_missing_tmux_events(
+                    summary,
+                    previous_state,
+                    SUMMARY_CAUSE_TMUX_RECONCILE_MISSING,
+                );
             }
         }
 
@@ -1131,18 +1128,9 @@ impl SessionSupervisor {
         stale_seed: Option<SessionSummary>,
         reason: &'static str,
     ) -> (SessionSummary, Option<RepoTheme>) {
-        let mut summary =
-            stale_seed.unwrap_or_else(|| self.build_placeholder_summary(session_id, tmux_name));
-        summary.session_id = session_id.to_string();
-        summary.tmux_name = tmux_name.to_string();
-        summary.state = SessionState::Idle;
-        summary.current_command = None;
-        summary.state_evidence = crate::types::StateEvidence::unobserved(reason);
-        summary.rest_state = fallback_rest_state(SessionState::Idle, summary.thought_state);
-        summary.is_stale = false;
-        summary.attached_clients = 0;
-        summary.stale_attached_clients = 0;
-        summary.transport_health = TransportHealth::Healthy;
+        let mut summary = stale_seed
+            .unwrap_or_else(|| self.build_placeholder_summary(session_id, tmux_name))
+            .revive_from_stale(session_id, tmux_name, reason);
         let repo_theme = self.resolve_repo_theme_for_summary(&mut summary);
         (summary, repo_theme)
     }
@@ -1562,16 +1550,17 @@ impl SessionSupervisor {
                     {
                         warn!(session_id = %handle.session_id, "actor summary command channel closed");
                         return match cached {
-                            Some(mut summary) => {
-                                crate::metrics::increment_summary_fallback("channel_closed");
-                                summary.transport_health = TransportHealth::Disconnected;
-                                summary.state_evidence = crate::types::StateEvidence::unobserved(
-                                    "summary_cache_disconnected",
-                                );
-                                SummaryCollectOutcome::Fallback(summary)
+                            Some(summary) => {
+                                let reason = SummaryFallbackReason::ChannelClosed;
+                                crate::metrics::increment_summary_fallback(reason);
+                                SummaryCollectOutcome::Fallback(
+                                    summary.into_cached_collection_fallback(reason),
+                                )
                             }
                             None => {
-                                crate::metrics::increment_summary_fallback("missing");
+                                crate::metrics::increment_summary_fallback(
+                                    SummaryFallbackReason::Missing,
+                                );
                                 SummaryCollectOutcome::Missing
                             }
                         };
@@ -1584,17 +1573,17 @@ impl SessionSupervisor {
                         Ok(Err(_)) => {
                             warn!(session_id = %handle.session_id, "actor dropped summary reply");
                             match cached {
-                                Some(mut summary) => {
-                                    crate::metrics::increment_summary_fallback("dropped");
-                                    summary.transport_health = TransportHealth::Degraded;
-                                    summary.state_evidence =
-                                        crate::types::StateEvidence::unobserved(
-                                            "summary_cache_degraded",
-                                        );
-                                    SummaryCollectOutcome::Fallback(summary)
+                                Some(summary) => {
+                                    let reason = SummaryFallbackReason::Dropped;
+                                    crate::metrics::increment_summary_fallback(reason);
+                                    SummaryCollectOutcome::Fallback(
+                                        summary.into_cached_collection_fallback(reason),
+                                    )
                                 }
                                 None => {
-                                    crate::metrics::increment_summary_fallback("missing");
+                                    crate::metrics::increment_summary_fallback(
+                                        SummaryFallbackReason::Missing,
+                                    );
                                     SummaryCollectOutcome::Missing
                                 }
                             }
@@ -1602,17 +1591,17 @@ impl SessionSupervisor {
                         Err(_) => {
                             warn!(session_id = %handle.session_id, "summary request timed out");
                             match cached {
-                                Some(mut summary) => {
-                                    crate::metrics::increment_summary_fallback("timeout");
-                                    summary.transport_health = TransportHealth::Overloaded;
-                                    summary.state_evidence =
-                                        crate::types::StateEvidence::unobserved(
-                                            "summary_cache_overloaded",
-                                        );
-                                    SummaryCollectOutcome::Fallback(summary)
+                                Some(summary) => {
+                                    let reason = SummaryFallbackReason::Timeout;
+                                    crate::metrics::increment_summary_fallback(reason);
+                                    SummaryCollectOutcome::Fallback(
+                                        summary.into_cached_collection_fallback(reason),
+                                    )
                                 }
                                 None => {
-                                    crate::metrics::increment_summary_fallback("missing");
+                                    crate::metrics::increment_summary_fallback(
+                                        SummaryFallbackReason::Missing,
+                                    );
                                     SummaryCollectOutcome::Missing
                                 }
                             }
@@ -2269,33 +2258,7 @@ impl SessionSupervisor {
     /// actor via `GetSummary`, but we need something for lifecycle events that
     /// fire before the actor has processed any output.
     fn build_placeholder_summary(&self, session_id: &str, tmux_name: &str) -> SessionSummary {
-        SessionSummary {
-            session_id: session_id.to_string(),
-            tmux_name: tmux_name.to_string(),
-            state: crate::types::SessionState::Idle,
-            current_command: None,
-            state_evidence: crate::types::StateEvidence::unobserved("supervisor_placeholder"),
-            cwd: String::new(),
-            tool: None,
-            token_count: 0,
-            context_limit: 128_000,
-            thought: None,
-            thought_state: ThoughtState::Holding,
-            thought_source: ThoughtSource::CarryForward,
-            thought_updated_at: None,
-            rest_state: fallback_rest_state(SessionState::Idle, ThoughtState::Holding),
-            commit_candidate: false,
-            action_cues: Vec::new(),
-            objective_changed_at: None,
-            last_skill: None,
-            is_stale: false,
-            attached_clients: 0,
-            stale_attached_clients: 0,
-            transport_health: crate::types::TransportHealth::Healthy,
-            last_activity_at: Utc::now(),
-            repo_theme_id: None,
-            batch: None,
-        }
+        SessionSummary::placeholder(session_id, tmux_name, Utc::now())
     }
 }
 
@@ -3009,33 +2972,42 @@ mod tests {
     use tokio::sync::mpsc;
 
     fn test_summary(session_id: &str, state: SessionState) -> SessionSummary {
-        SessionSummary {
-            session_id: session_id.to_string(),
-            tmux_name: format!("tmux-{session_id}"),
+        let mut summary = SessionSummary::live(
+            session_id,
+            format!("tmux-{session_id}"),
             state,
-            current_command: Some("cargo test".to_string()),
-            state_evidence: Default::default(),
-            cwd: "/tmp/project".to_string(),
-            tool: Some("Codex".to_string()),
-            token_count: 0,
-            context_limit: 192_000,
-            thought: None,
-            thought_state: ThoughtState::Holding,
-            thought_source: ThoughtSource::CarryForward,
-            thought_updated_at: None,
-            rest_state: fallback_rest_state(state, ThoughtState::Holding),
-            commit_candidate: false,
-            action_cues: Vec::new(),
-            objective_changed_at: None,
-            last_skill: None,
-            is_stale: false,
-            attached_clients: 0,
-            stale_attached_clients: 0,
-            transport_health: TransportHealth::Healthy,
-            last_activity_at: Utc::now(),
-            repo_theme_id: None,
-            batch: None,
-        }
+            Some("cargo test".to_string()),
+            Default::default(),
+            "/tmp/project",
+            Some("Codex".to_string()),
+            0,
+            0,
+            Utc::now(),
+        );
+        summary.rest_state = fallback_rest_state(state, ThoughtState::Holding);
+        summary
+    }
+
+    #[test]
+    fn summary_lifecycle_helpers_use_shared_fallback_causes() {
+        let supervisor = SessionSupervisor::new(Arc::new(Config::default()));
+
+        let placeholder = supervisor.build_placeholder_summary("sess_1", "work");
+        assert_eq!(
+            placeholder.state_evidence.cause,
+            crate::types::SUMMARY_CAUSE_SUPERVISOR_PLACEHOLDER
+        );
+        assert_eq!(placeholder.transport_health, TransportHealth::Healthy);
+        assert!(!placeholder.is_stale);
+
+        let missing = SessionSupervisor::mark_missing_tmux_summary(placeholder);
+        assert_eq!(
+            missing.state_evidence.cause,
+            SUMMARY_CAUSE_TMUX_RECONCILE_MISSING
+        );
+        assert_eq!(missing.state, SessionState::Exited);
+        assert_eq!(missing.transport_health, TransportHealth::Disconnected);
+        assert!(missing.is_stale);
     }
 
     fn commit_ready_cue() -> ActionCue {
@@ -3897,7 +3869,10 @@ mod tests {
         assert_eq!(batch.label, "auth-rebuild");
         assert_eq!(batch.index, 0);
         assert_eq!(batch.total, 2);
-        assert_eq!(stale[0].state_evidence.cause, "persistence_stale");
+        assert_eq!(
+            stale[0].state_evidence.cause,
+            SUMMARY_CAUSE_PERSISTENCE_STALE
+        );
         assert!(stale[0].state_evidence.observed_at.is_none());
         assert_eq!(
             stale[0].state_evidence.confidence,
@@ -4588,7 +4563,12 @@ exit 1
         assert_eq!(sessions[0].session_id, "sess-live");
         assert_eq!(sessions[0].tmux_name, "tmux-live");
         assert_eq!(sessions[0].transport_health, TransportHealth::Degraded);
-        assert_eq!(sessions[0].state_evidence.cause, "summary_cache_degraded");
+        assert_eq!(
+            sessions[0].state_evidence.cause,
+            SummaryFallbackReason::Dropped
+                .cached_state_cause()
+                .expect("dropped fallback cause")
+        );
         assert!(sessions[0].state_evidence.observed_at.is_none());
         assert!(!sessions[0].is_stale);
     }
@@ -4620,7 +4600,12 @@ exit 1
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].session_id, "sess-timeout");
         assert_eq!(sessions[0].transport_health, TransportHealth::Overloaded);
-        assert_eq!(sessions[0].state_evidence.cause, "summary_cache_overloaded");
+        assert_eq!(
+            sessions[0].state_evidence.cause,
+            SummaryFallbackReason::Timeout
+                .cached_state_cause()
+                .expect("timeout fallback cause")
+        );
         assert!(sessions[0].state_evidence.observed_at.is_none());
         assert!(!sessions[0].is_stale);
     }

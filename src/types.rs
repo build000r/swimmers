@@ -260,6 +260,52 @@ pub enum StateConfidence {
     High,
 }
 
+pub const SUMMARY_CAUSE_PERSISTENCE_STALE: &str = "persistence_stale";
+pub const SUMMARY_CAUSE_STARTUP_MISSING_TMUX: &str = "startup_missing_tmux";
+pub const SUMMARY_CAUSE_TMUX_RECONCILE_MISSING: &str = "tmux_reconcile_missing";
+pub const SUMMARY_CAUSE_SUPERVISOR_PLACEHOLDER: &str = "supervisor_placeholder";
+pub const SUMMARY_CAUSE_REMOTE_POLL_DEGRADED: &str = "remote_poll_degraded";
+pub const SUMMARY_CAUSE_CACHE_DISCONNECTED: &str = "summary_cache_disconnected";
+pub const SUMMARY_CAUSE_CACHE_DEGRADED: &str = "summary_cache_degraded";
+pub const SUMMARY_CAUSE_CACHE_OVERLOADED: &str = "summary_cache_overloaded";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SummaryFallbackReason {
+    ChannelClosed,
+    Dropped,
+    Missing,
+    Timeout,
+}
+
+impl SummaryFallbackReason {
+    pub const fn metric_label(self) -> &'static str {
+        match self {
+            Self::ChannelClosed => "channel_closed",
+            Self::Dropped => "dropped",
+            Self::Missing => "missing",
+            Self::Timeout => "timeout",
+        }
+    }
+
+    pub const fn cached_state_cause(self) -> Option<&'static str> {
+        match self {
+            Self::ChannelClosed => Some(SUMMARY_CAUSE_CACHE_DISCONNECTED),
+            Self::Dropped => Some(SUMMARY_CAUSE_CACHE_DEGRADED),
+            Self::Timeout => Some(SUMMARY_CAUSE_CACHE_OVERLOADED),
+            Self::Missing => None,
+        }
+    }
+
+    pub const fn cached_transport_health(self) -> Option<TransportHealth> {
+        match self {
+            Self::ChannelClosed => Some(TransportHealth::Disconnected),
+            Self::Dropped => Some(TransportHealth::Degraded),
+            Self::Timeout => Some(TransportHealth::Overloaded),
+            Self::Missing => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct StateEvidence {
     #[serde(default = "default_state_cause")]
@@ -303,7 +349,7 @@ impl StateEvidence {
             | "osc133_prompt"
             | "error_pattern"
             | "process_exit"
-            | "startup_missing_tmux"
+            | SUMMARY_CAUSE_STARTUP_MISSING_TMUX
             | "liveness_no_children"
             | "liveness_has_children" => StateConfidence::High,
             "fallback_non_prompt_output"
@@ -619,6 +665,141 @@ pub struct SessionSummary {
     pub repo_theme_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub batch: Option<SessionBatchMembership>,
+}
+
+impl SessionSummary {
+    pub fn live(
+        session_id: impl Into<String>,
+        tmux_name: impl Into<String>,
+        state: SessionState,
+        current_command: Option<String>,
+        state_evidence: StateEvidence,
+        cwd: impl Into<String>,
+        tool: Option<String>,
+        attached_clients: u32,
+        stale_attached_clients: u32,
+        last_activity_at: DateTime<Utc>,
+    ) -> Self {
+        let context_limit = context_limit_for_tool(tool.as_deref());
+        Self {
+            session_id: session_id.into(),
+            tmux_name: tmux_name.into(),
+            state,
+            current_command,
+            state_evidence,
+            cwd: cwd.into(),
+            tool,
+            token_count: 0,
+            context_limit,
+            thought: None,
+            thought_state: ThoughtState::Holding,
+            thought_source: ThoughtSource::CarryForward,
+            thought_updated_at: None,
+            rest_state: rest_state_from_idle(state, last_activity_at, Utc::now()),
+            commit_candidate: false,
+            action_cues: Vec::new(),
+            objective_changed_at: None,
+            last_skill: None,
+            is_stale: false,
+            attached_clients,
+            stale_attached_clients,
+            transport_health: TransportHealth::Healthy,
+            last_activity_at,
+            repo_theme_id: None,
+            batch: None,
+        }
+    }
+
+    pub fn placeholder(
+        session_id: impl Into<String>,
+        tmux_name: impl Into<String>,
+        last_activity_at: DateTime<Utc>,
+    ) -> Self {
+        let mut summary = Self::live(
+            session_id,
+            tmux_name,
+            SessionState::Idle,
+            None,
+            StateEvidence::unobserved(SUMMARY_CAUSE_SUPERVISOR_PLACEHOLDER),
+            String::new(),
+            None,
+            0,
+            0,
+            last_activity_at,
+        );
+        summary.rest_state = fallback_rest_state(SessionState::Idle, ThoughtState::Holding);
+        summary
+    }
+
+    pub fn into_stale_exited(
+        self,
+        cause: &'static str,
+        observed_at: Option<DateTime<Utc>>,
+        transport_health: TransportHealth,
+    ) -> Self {
+        let rest_state = fallback_rest_state(SessionState::Exited, self.thought_state);
+        self.into_stale_exited_with_rest_state(cause, observed_at, transport_health, rest_state)
+    }
+
+    pub fn into_stale_exited_with_rest_state(
+        mut self,
+        cause: &'static str,
+        observed_at: Option<DateTime<Utc>>,
+        transport_health: TransportHealth,
+        rest_state: RestState,
+    ) -> Self {
+        self.state = SessionState::Exited;
+        self.current_command = None;
+        self.state_evidence = StateEvidence::with_observed_at(cause, observed_at);
+        self.rest_state = rest_state;
+        self.is_stale = true;
+        self.attached_clients = 0;
+        self.stale_attached_clients = 0;
+        self.transport_health = transport_health;
+        self
+    }
+
+    pub fn into_missing_tmux_stale(self, cause: &'static str) -> Self {
+        self.into_stale_exited(cause, Some(Utc::now()), TransportHealth::Disconnected)
+    }
+
+    pub fn into_cached_collection_fallback(mut self, reason: SummaryFallbackReason) -> Self {
+        if let (Some(cause), Some(transport_health)) = (
+            reason.cached_state_cause(),
+            reason.cached_transport_health(),
+        ) {
+            self.transport_health = transport_health;
+            self.state_evidence = StateEvidence::unobserved(cause);
+        }
+        self
+    }
+
+    pub fn into_remote_poll_degraded(mut self, last_seen_at: Option<DateTime<Utc>>) -> Self {
+        self.is_stale = true;
+        self.transport_health = TransportHealth::Degraded;
+        self.state_evidence =
+            StateEvidence::with_observed_at(SUMMARY_CAUSE_REMOTE_POLL_DEGRADED, last_seen_at);
+        self
+    }
+
+    pub fn revive_from_stale(
+        mut self,
+        session_id: impl Into<String>,
+        tmux_name: impl Into<String>,
+        cause: &'static str,
+    ) -> Self {
+        self.session_id = session_id.into();
+        self.tmux_name = tmux_name.into();
+        self.state = SessionState::Idle;
+        self.current_command = None;
+        self.state_evidence = StateEvidence::unobserved(cause);
+        self.rest_state = fallback_rest_state(SessionState::Idle, self.thought_state);
+        self.is_stale = false;
+        self.attached_clients = 0;
+        self.stale_attached_clients = 0;
+        self.transport_health = TransportHealth::Healthy;
+        self
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1678,11 +1859,104 @@ mod tests {
 
     #[test]
     fn unobserved_state_evidence_omits_freshness() {
-        let evidence = StateEvidence::unobserved("persistence_stale");
+        let evidence = StateEvidence::unobserved(SUMMARY_CAUSE_PERSISTENCE_STALE);
 
-        assert_eq!(evidence.cause, "persistence_stale");
+        assert_eq!(evidence.cause, SUMMARY_CAUSE_PERSISTENCE_STALE);
         assert_eq!(evidence.confidence, StateConfidence::Low);
         assert!(evidence.observed_at.is_none());
+    }
+
+    #[test]
+    fn session_summary_placeholder_uses_shared_lifecycle_contract() {
+        let at = DateTime::parse_from_rfc3339("2026-05-30T01:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+
+        let summary = SessionSummary::placeholder("sess_1", "work", at);
+
+        assert_eq!(summary.session_id, "sess_1");
+        assert_eq!(summary.tmux_name, "work");
+        assert_eq!(summary.state, SessionState::Idle);
+        assert_eq!(
+            summary.state_evidence.cause,
+            SUMMARY_CAUSE_SUPERVISOR_PLACEHOLDER
+        );
+        assert!(summary.state_evidence.observed_at.is_none());
+        assert_eq!(summary.transport_health, TransportHealth::Healthy);
+        assert!(!summary.is_stale);
+        assert_eq!(summary.rest_state, RestState::Drowsy);
+        assert_eq!(summary.context_limit, 128_000);
+    }
+
+    #[test]
+    fn session_summary_fallback_reason_parity_is_shared() {
+        let at = DateTime::parse_from_rfc3339("2026-05-30T01:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let summary = SessionSummary::live(
+            "sess_1",
+            "work",
+            SessionState::Busy,
+            Some("cargo test".to_string()),
+            StateEvidence::new("osc133_command"),
+            "/tmp/swimmers",
+            Some("Codex".to_string()),
+            1,
+            2,
+            at,
+        );
+
+        let dropped = summary
+            .clone()
+            .into_cached_collection_fallback(SummaryFallbackReason::Dropped);
+        assert_eq!(SummaryFallbackReason::Dropped.metric_label(), "dropped");
+        assert_eq!(dropped.state_evidence.cause, SUMMARY_CAUSE_CACHE_DEGRADED);
+        assert_eq!(dropped.transport_health, TransportHealth::Degraded);
+        assert!(!dropped.is_stale);
+
+        let timeout = summary.into_cached_collection_fallback(SummaryFallbackReason::Timeout);
+        assert_eq!(SummaryFallbackReason::Timeout.metric_label(), "timeout");
+        assert_eq!(timeout.state_evidence.cause, SUMMARY_CAUSE_CACHE_OVERLOADED);
+        assert_eq!(timeout.transport_health, TransportHealth::Overloaded);
+    }
+
+    #[test]
+    fn session_summary_stale_and_remote_helpers_preserve_wire_shape() {
+        let at = DateTime::parse_from_rfc3339("2026-05-30T01:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let live = SessionSummary::placeholder("sess_1", "work", at);
+
+        let missing = live
+            .clone()
+            .into_missing_tmux_stale(SUMMARY_CAUSE_TMUX_RECONCILE_MISSING);
+        assert_eq!(missing.state, SessionState::Exited);
+        assert_eq!(
+            missing.state_evidence.cause,
+            SUMMARY_CAUSE_TMUX_RECONCILE_MISSING
+        );
+        assert!(missing.is_stale);
+        assert_eq!(missing.transport_health, TransportHealth::Disconnected);
+        assert_eq!(missing.rest_state, RestState::DeepSleep);
+
+        let remote = live.into_remote_poll_degraded(Some(at));
+        assert_eq!(
+            remote.state_evidence.cause,
+            SUMMARY_CAUSE_REMOTE_POLL_DEGRADED
+        );
+        assert_eq!(remote.state, SessionState::Idle);
+        assert!(remote.is_stale);
+        assert_eq!(remote.transport_health, TransportHealth::Degraded);
+
+        let json = serde_json::to_value(&remote).expect("serialize session summary");
+        assert_eq!(json["session_id"], "sess_1");
+        assert_eq!(json["tmux_name"], "work");
+        assert_eq!(json["is_stale"], true);
+        assert_eq!(json["transport_health"], "degraded");
+        assert!(
+            json.get("fallback_reason").is_none(),
+            "helper must not introduce a new wire field"
+        );
     }
 
     #[test]

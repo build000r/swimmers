@@ -269,8 +269,25 @@ make tui-check          # Type-check the native TUI binary
 make up-smoke           # Run shell-level checks on the combined web+TUI launcher
 make tui-smoke          # Run shell-level bootstrap tests on the run-tui.sh shim
 make glance-smoke       # Render the 10-session Glance fixture and write proof artifacts
+make release-acceptance # Run the default installed-binary release smoke
+make release-acceptance-all
+                        # Run default, source, native asset, and thought profiles
 make cargo-cov-lcov     # Generate lcov coverage report
 ```
+
+### Release acceptance profiles
+
+Release proof is split into profiles so optional local features do not block the default installed-binary contract:
+
+| Profile | Command | What it proves |
+|---------|---------|----------------|
+| Default installed binaries | `make release-acceptance` | Installs from the checkout unless `SWIMMERS_ACCEPTANCE_BIN_DIR` is set, checks `swimmers --help`, `swimmers-tui --help`, `swimmers-tui --version`, starts a loopback `swimmers` server with an isolated data dir, and verifies `/health` plus `/v1/sessions`. |
+| Source checkout personal workflows | `make release-acceptance-source` | Runs the source `make up` launcher smoke with the `personal-workflows` feature path separate from crates.io/default install proof. |
+| Native packaged assets | `make release-acceptance-native` | Verifies the native handoff scripts are present in the Cargo package. |
+| Thought bridge | `make release-acceptance-thought` | Runs thought bridge and fake-emitter contract tests without requiring `clawgs` on the operator PATH. |
+| Voice feature | `make release-acceptance-voice` | Compiles the optional `voice` TUI path; requires CMake and the voice feature build dependencies. Runtime voice use still requires `SWIMMERS_VOICE_MODEL`. |
+
+Use `SWIMMERS_ACCEPTANCE_ARTIFACT_DIR=/path/to/evidence` to keep profile logs and HTTP payloads with a release run. The GitHub release workflow runs the native asset and default release-binary profiles for published artifacts; source, thought, and voice profiles remain explicit local/CI choices.
 
 ---
 

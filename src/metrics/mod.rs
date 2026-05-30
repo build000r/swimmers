@@ -5,9 +5,9 @@
 //!
 //! # Architecture
 //!
-//! This module is intentionally self-contained — it has **no imports** from
-//! other swimmers modules. Other modules call the recording helper functions
-//! defined here; the module never reaches into actor or handler internals.
+//! This module only imports shared value contracts from other swimmers modules.
+//! Runtime modules call the recording helper functions defined here; the module
+//! never reaches into actor or handler internals.
 //!
 //! # Initialization
 //!
@@ -22,6 +22,8 @@ use std::time::Duration;
 
 use metrics::{counter, describe_counter, describe_gauge, describe_histogram, gauge, histogram};
 use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
+
+use crate::types::SummaryFallbackReason;
 
 // ---------------------------------------------------------------------------
 // Metric names (constants to avoid typos)
@@ -198,15 +200,9 @@ pub fn increment_thought_suppression(session_id: &str, reason: &str, tier: &str)
 
 /// Increment the summary-fallback counter for one supervisor fallback path.
 ///
-/// Reasons currently emitted:
-/// * `"timeout"` — the actor did not reply within the live-summary timeout.
-/// * `"dropped"` — the actor dropped the reply channel.
-/// * `"channel_closed"` — the actor command channel was already closed.
-/// * `"missing"` — fallback was needed but no cached summary existed.
-///
 /// Call site: `src/session/supervisor.rs` (`collect_live_summaries`).
-pub fn increment_summary_fallback(reason: &str) {
-    counter!(SUMMARY_FALLBACK_EVENTS, "reason" => reason.to_owned()).increment(1);
+pub fn increment_summary_fallback(reason: SummaryFallbackReason) {
+    counter!(SUMMARY_FALLBACK_EVENTS, "reason" => reason.metric_label()).increment(1);
 }
 
 /// Record thought generation latency by path/tier.
