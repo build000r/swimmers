@@ -213,7 +213,7 @@ In `AUTH_MODE=token`, browser HTTP requests use an `Authorization: Bearer ...` h
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
-| `SWIMMERS_BIND` | `127.0.0.1` | Server bind address (interface only, not `host:port`) |
+| `SWIMMERS_BIND` | `127.0.0.1` | Server bind interface. A `host:port` form is accepted, but the port is ignored — use `PORT` to set the listen port. |
 | `PORT` | `3210` | Server listen port |
 | `AUTH_MODE` | `local_trust` | Auth mode: `local_trust`, `tailnet_trust`, or `token` |
 | `AUTH_TOKEN` | `(unset)` | Bearer token when `AUTH_MODE=token` |

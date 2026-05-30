@@ -310,7 +310,22 @@ fn build_external_client(runtime: &Runtime) -> Result<TuiClient, io::Error> {
 pub(crate) fn build_embedded_client(
     runtime: &Runtime,
 ) -> (TuiClient, swimmers::startup::EmbeddedTuiShutdown) {
-    let config = Arc::new(Config::from_env());
+    // Mirror the standalone server's startup gate (main.rs `prepare_server_startup`):
+    // load config WITH diagnostics, surface them, and refuse to start on any
+    // config error or unsafe trust/bind pairing. `Config::from_env()` discards
+    // these diagnostics, which would let a misconfigured auth setup (e.g.
+    // AUTH_MODE=token without AUTH_TOKEN, an unknown AUTH_MODE, or a non-loopback
+    // local_trust bind) silently run insecure under the embedded TUI. We enforce
+    // BEFORE init_app_state_skeleton, exiting with the same EX_CONFIG code the
+    // standalone server uses so the failure is indistinguishable to supervisors.
+    let load = Config::from_env_report();
+    swimmers::cli::print_config_diagnostics(&load.diagnostics);
+    if let Err(msg) = swimmers::cli::enforce_startup_config(&load.config, &load.diagnostics) {
+        eprintln!("swimmers: {msg}");
+        std::process::exit(swimmers::cli::EXIT_CONFIG);
+    }
+
+    let config = Arc::new(load.config);
     let _guard = runtime.enter();
     let state = swimmers::startup::init_app_state_skeleton(config);
     let shutdown = swimmers::startup::spawn_deferred_init_for_embedded_tui(Arc::clone(&state));

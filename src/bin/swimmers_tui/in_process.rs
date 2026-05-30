@@ -96,22 +96,17 @@ impl TuiApi for InProcessApi {
                 .state
                 .current_file_store()
                 .map(|store| store.health_snapshot());
-            let tmux = self.state.supervisor.tmux_dependency_health_snapshot();
-            let native_app = *self.state.native_desktop_app.read().await;
-            let native_scripts_health = swimmers::native::script_dependency_health(native_app);
-            let remote_health = swimmers::session::overlay::remote_targets_health();
-            let status_label = |s: swimmers::types::DependencyHealthStatus| match s {
-                swimmers::types::DependencyHealthStatus::Unknown => "unknown",
-                swimmers::types::DependencyHealthStatus::Healthy => "healthy",
-                swimmers::types::DependencyHealthStatus::Degraded => "degraded",
-                swimmers::types::DependencyHealthStatus::Unavailable => "unavailable",
-                swimmers::types::DependencyHealthStatus::NotConfigured => "not_configured",
+            // Share the HTTP /health surface's ledger builder so the embedded
+            // adapter never re-derives dependency statuses on its own. The
+            // builder produces the COMPLETE server ledger; we then project it
+            // onto the four-field shape this surface's BackendDependencyLedger
+            // deserialize type carries (the same projection serde performs when
+            // the external client parses the /health JSON over the wire).
+            let ledger = swimmers::api::health::build_dependency_ledger(&self.state).await;
+            let dep_snap = |h: &swimmers::types::DependencyHealthSnapshot| BackendDependencySnapshot {
+                status: swimmers::api::health::dependency_status_label(h.status).to_string(),
+                last_error: h.last_error.clone(),
             };
-            let dep_snap =
-                |h: swimmers::types::DependencyHealthSnapshot| BackendDependencySnapshot {
-                    status: status_label(h.status).to_string(),
-                    last_error: h.last_error,
-                };
             Ok(BackendHealthResponse {
                 status: bridge_status_label(thought_bridge.status),
                 thought_bridge: BackendThoughtBridgeHealth {
@@ -138,10 +133,10 @@ impl TuiApi for InProcessApi {
                     },
                 },
                 dependencies: Some(BackendDependencyLedger {
-                    tmux_discovery: dep_snap(tmux.discovery),
-                    tmux_capture: dep_snap(tmux.capture),
-                    native_scripts: dep_snap(native_scripts_health),
-                    remote_targets: dep_snap(remote_health),
+                    tmux_discovery: dep_snap(&ledger.tmux_discovery),
+                    tmux_capture: dep_snap(&ledger.tmux_capture),
+                    native_scripts: dep_snap(&ledger.native_scripts),
+                    remote_targets: dep_snap(&ledger.remote_targets),
                 }),
             })
         })
@@ -688,6 +683,27 @@ mod tests {
         assert_eq!(health.thought_bridge.status, "healthy");
         assert!(!health.persistence.available);
         assert!(!health.persistence.ok);
+
+        // Dependency statuses now come from the shared health.rs builder /
+        // label helper rather than an inline mapping, so the embedded surface
+        // labels each dependency exactly as the HTTP /health JSON would.
+        let dependencies = health
+            .dependencies
+            .as_ref()
+            .expect("embedded health should expose the dependency ledger");
+        let expected = swimmers::api::health::build_dependency_ledger(&api.state).await;
+        assert_eq!(
+            dependencies.tmux_discovery.status,
+            swimmers::api::health::dependency_status_label(expected.tmux_discovery.status)
+        );
+        assert_eq!(
+            dependencies.remote_targets.status,
+            swimmers::api::health::dependency_status_label(expected.remote_targets.status)
+        );
+        assert_eq!(
+            dependencies.native_scripts.status,
+            swimmers::api::health::dependency_status_label(expected.native_scripts.status)
+        );
     }
 
     #[tokio::test]

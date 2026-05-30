@@ -295,16 +295,31 @@ impl FileStore {
         PersistenceHealthSnapshot::from(&*health)
     }
 
+    /// Recompute `ok` by folding the latest write outcome with all recorded
+    /// load outcomes. A successful write must not clear a known corrupt-load
+    /// condition (e.g. a startup decode failure), so the health state stays
+    /// degraded until the failing load is re-resolved.
+    fn recompute_ok(health: &mut PersistenceHealthState) {
+        health.ok = !health
+            .load_outcomes
+            .values()
+            .any(|outcome| load_status_is_failure(outcome.status));
+    }
+
     fn record_write_success(&self, operation: &'static str) {
         let mut health = self
             .health
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        health.ok = true;
-        health.consecutive_failures = 0;
+        Self::recompute_ok(&mut health);
+        if health.ok {
+            health.consecutive_failures = 0;
+        }
         health.last_success_at = Some(Utc::now());
         health.last_successful_operation = Some(operation.to_string());
-        health.last_error = None;
+        if health.ok {
+            health.last_error = None;
+        }
     }
 
     fn record_write_failure(&self, operation: &'static str, error: impl std::fmt::Display) {
@@ -334,10 +349,7 @@ impl FileStore {
                 last_error: None,
             },
         );
-        health.ok = !health
-            .load_outcomes
-            .values()
-            .any(|outcome| load_status_is_failure(outcome.status));
+        Self::recompute_ok(&mut health);
         if health.ok {
             health.consecutive_failures = 0;
         }
@@ -362,10 +374,7 @@ impl FileStore {
                 last_error: None,
             },
         );
-        health.ok = !health
-            .load_outcomes
-            .values()
-            .any(|outcome| load_status_is_failure(outcome.status));
+        Self::recompute_ok(&mut health);
         if health.ok {
             health.last_error = None;
         }
@@ -408,12 +417,6 @@ impl FileStore {
         let _global_write_guard = self.write_lock.lock().await;
         let _write_guard = self.session_write_lock.lock().await;
 
-        // Update the in-memory cache.
-        {
-            let mut cache = self.cache.write().await;
-            *cache = sessions.to_vec();
-        }
-
         let path = self.registry_path();
         let data = match serde_json::to_string_pretty(sessions) {
             Ok(d) => d,
@@ -424,10 +427,16 @@ impl FileStore {
             }
         };
 
+        // Only commit the in-memory cache after the durable write succeeds, so
+        // `current_sessions()` never reports state that did not persist.
         if let Err(e) = atomic_write_blocking(path, data).await {
             self.record_write_failure(OP_SESSION_REGISTRY, &e);
             error!("failed to write session registry: {e}");
         } else {
+            {
+                let mut cache = self.cache.write().await;
+                *cache = sessions.to_vec();
+            }
             self.record_write_success(OP_SESSION_REGISTRY);
             debug!(count = sessions.len(), "persisted session registry");
         }
@@ -786,14 +795,21 @@ impl FileStore {
 // ---------------------------------------------------------------------------
 
 fn load_failure_status(error: &anyhow::Error) -> PersistenceLoadStatus {
-    if error.downcast_ref::<FileStoreIoError>().is_some()
-        || error
-            .to_string()
-            .contains("decode checksummed payload failed")
-    {
-        PersistenceLoadStatus::DecodeFailed
-    } else {
-        PersistenceLoadStatus::ReadFailed
+    match error.downcast_ref::<FileStoreIoError>() {
+        // A genuine on-disk corruption: the checksum envelope did not verify.
+        Some(FileStoreIoError::ChecksumMismatch { .. }) => PersistenceLoadStatus::DecodeFailed,
+        // A transient cross-process lock contention is not permanent corruption.
+        Some(FileStoreIoError::LockBusy { .. }) => PersistenceLoadStatus::ReadFailed,
+        None => {
+            if error
+                .to_string()
+                .contains("decode checksummed payload failed")
+            {
+                PersistenceLoadStatus::DecodeFailed
+            } else {
+                PersistenceLoadStatus::ReadFailed
+            }
+        }
     }
 }
 
@@ -1170,6 +1186,80 @@ mod tests {
         );
         assert!(recovered.last_success_at.is_some());
         assert_eq!(recovered.last_error, None);
+    }
+
+    #[tokio::test]
+    async fn write_success_does_not_clear_corrupt_load_condition() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        tokio::fs::write(dir.path().join("session_registry.json"), "{not json")
+            .await
+            .expect("write corrupt registry");
+
+        let store = FileStore::new(dir.path())
+            .await
+            .expect("store initializes with corrupt registry");
+
+        let after_load = store.health_snapshot();
+        assert!(
+            !after_load.ok,
+            "corrupt startup load should leave health degraded"
+        );
+        assert_eq!(
+            after_load.load_outcomes[OP_SESSION_REGISTRY].status,
+            PersistenceLoadStatus::DecodeFailed
+        );
+
+        // A successful write to a *different* file must not mask the corrupt
+        // session registry that was observed at startup. The 30s checkpoint
+        // must keep reporting the degraded condition until it is re-resolved.
+        store
+            .save_thought_config(&ThoughtConfig::default())
+            .await
+            .expect("thought config write succeeds");
+
+        let after_write = store.health_snapshot();
+        assert!(
+            !after_write.ok,
+            "a successful write must not clear a known corrupt-load condition"
+        );
+        assert_eq!(
+            after_write.load_outcomes[OP_SESSION_REGISTRY].status,
+            PersistenceLoadStatus::DecodeFailed
+        );
+    }
+
+    #[test]
+    fn load_failure_status_classifies_transient_and_corrupt_errors() {
+        let lock_busy = anyhow::Error::new(FileStoreIoError::LockBusy {
+            path: PathBuf::from("/tmp/.lock"),
+        });
+        assert_eq!(
+            load_failure_status(&lock_busy),
+            PersistenceLoadStatus::ReadFailed,
+            "a transient lock should not be reported as permanent corruption"
+        );
+
+        let checksum = anyhow::Error::new(FileStoreIoError::ChecksumMismatch {
+            path: PathBuf::from("/tmp/session_registry.json"),
+            expected: 1,
+            actual: 2,
+        });
+        assert_eq!(
+            load_failure_status(&checksum),
+            PersistenceLoadStatus::DecodeFailed
+        );
+
+        let decode = anyhow::anyhow!("decode checksummed payload failed: trailing data");
+        assert_eq!(
+            load_failure_status(&decode),
+            PersistenceLoadStatus::DecodeFailed
+        );
+
+        let read = anyhow::anyhow!("read failed: permission denied");
+        assert_eq!(
+            load_failure_status(&read),
+            PersistenceLoadStatus::ReadFailed
+        );
     }
 
     #[tokio::test]

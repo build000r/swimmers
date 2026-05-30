@@ -755,14 +755,6 @@ async fn session_ws(
     Query(query): Query<WsQuery>,
     State(state): State<Arc<AppState>>,
 ) -> Response {
-    if query.token.is_some() {
-        return json_error(
-            StatusCode::BAD_REQUEST,
-            "WS_QUERY_TOKEN_UNSUPPORTED",
-            "WebSocket token query parameters are not supported; send an auth message after opening the socket",
-        );
-    }
-
     let output_mode = if query_flag_enabled(query.framed.as_deref()) {
         WsOutputMode::Framed
     } else {
@@ -797,9 +789,19 @@ async fn session_ws(
                 )
             })
         }
-        AuthMode::Token => ws.on_upgrade(move |socket| {
-            handle_token_session_ws(socket, state, session_id, resume_from_seq, output_mode)
-        }),
+        AuthMode::Token => {
+            if query.token.is_some() {
+                return json_error(
+                    StatusCode::BAD_REQUEST,
+                    "WS_QUERY_TOKEN_UNSUPPORTED",
+                    "WebSocket token query parameters are not supported; send an auth message after opening the socket",
+                );
+            }
+
+            ws.on_upgrade(move |socket| {
+                handle_token_session_ws(socket, state, session_id, resume_from_seq, output_mode)
+            })
+        }
     }
 }
 
@@ -882,9 +884,10 @@ async fn token_session_ws_inner(
     resume_from_seq: Option<u64>,
     output_mode: WsOutputMode,
 ) -> anyhow::Result<()> {
-    let Some((_ws_guard, mut sender, mut receiver)) = split_limited_socket(socket).await? else {
-        return Ok(());
-    };
+    // Do not consume a connection slot for the unauthenticated handshake: the
+    // global cap is reserved for live attaches so a flood of pre-auth sockets
+    // cannot starve legitimate clients while they sit in `WS_AUTH_TIMEOUT`.
+    let (mut sender, mut receiver) = socket.split();
 
     let Some(auth) = authenticate_session_ws(&state.config, &mut sender, &mut receiver).await?
     else {
@@ -900,6 +903,12 @@ async fn token_session_ws_inner(
         .await?;
         return Ok(());
     }
+
+    // Acquire the connection slot only now that the client is authenticated, so
+    // the post-auth cap semantics still hold for live attaches.
+    let Some(_ws_guard) = acquire_ws_slot(&mut sender).await? else {
+        return Ok(());
+    };
 
     let Some(handle) = state.supervisor.get_session(&session_id).await else {
         send_ws_error(&mut sender, "SESSION_NOT_FOUND", "session not found").await?;
@@ -922,8 +931,18 @@ async fn token_session_ws_inner(
 async fn split_limited_socket(
     socket: WebSocket,
 ) -> anyhow::Result<Option<(ActiveWsGuard, WsSender, WsReceiver)>> {
+    let (mut sender, receiver) = socket.split();
+    let Some(ws_guard) = acquire_ws_slot(&mut sender).await? else {
+        return Ok(None);
+    };
+    Ok(Some((ws_guard, sender, receiver)))
+}
+
+/// Acquire a post-auth connection slot against the global cap. When the cap is
+/// exhausted, notify the client and return `None` without consuming a slot so
+/// the caller can close cleanly.
+async fn acquire_ws_slot(sender: &mut WsSender) -> anyhow::Result<Option<ActiveWsGuard>> {
     let Some(ws_guard) = ActiveWsGuard::try_acquire() else {
-        let (mut sender, _) = socket.split();
         let notice = serde_json::json!({
             "type": "overloaded",
             "code": "SERVER_OVERLOADED",
@@ -935,8 +954,7 @@ async fn split_limited_socket(
             .await?;
         return Ok(None);
     };
-    let (sender, receiver) = socket.split();
-    Ok(Some((ws_guard, sender, receiver)))
+    Ok(Some(ws_guard))
 }
 
 async fn session_ws_authenticated_inner(
@@ -1156,6 +1174,14 @@ fn decode_client_message(auth: &AuthInfo, message: &Message) -> WsClientDecision
     }
 }
 
+fn oversized_input_error(client_message_id: Option<String>) -> WsClientDecision {
+    WsClientDecision::SendError {
+        code: "INPUT_TOO_LARGE",
+        message: format!("terminal input frame exceeds {MAX_WS_INPUT_BYTES} byte limit"),
+        client_message_id,
+    }
+}
+
 fn decode_text_client_message(auth: &AuthInfo, text: &str) -> WsClientDecision {
     let parsed: BrowserClientMessage = match serde_json::from_str(text) {
         Ok(m) => m,
@@ -1184,13 +1210,7 @@ fn decode_text_client_message(auth: &AuthInfo, text: &str) -> WsClientDecision {
             if data.is_empty() {
                 WsClientDecision::Ignore
             } else if data.len() > MAX_WS_INPUT_BYTES {
-                WsClientDecision::SendError {
-                    code: "INPUT_TOO_LARGE",
-                    message: format!(
-                        "terminal input frame exceeds {MAX_WS_INPUT_BYTES} byte limit"
-                    ),
-                    client_message_id,
-                }
+                oversized_input_error(client_message_id)
             } else {
                 WsClientDecision::Forward {
                     cmd: SessionCommand::WriteInputAck {
@@ -1215,13 +1235,7 @@ fn decode_text_client_message(auth: &AuthInfo, text: &str) -> WsClientDecision {
             if data.trim().is_empty() {
                 WsClientDecision::Ignore
             } else if data.len() > MAX_WS_INPUT_BYTES {
-                WsClientDecision::SendError {
-                    code: "INPUT_TOO_LARGE",
-                    message: format!(
-                        "terminal input frame exceeds {MAX_WS_INPUT_BYTES} byte limit"
-                    ),
-                    client_message_id,
-                }
+                oversized_input_error(client_message_id)
             } else {
                 WsClientDecision::Forward {
                     cmd: SessionCommand::SubmitLineAck {

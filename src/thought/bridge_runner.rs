@@ -525,7 +525,14 @@ fn apply_update<P: SessionProvider>(
         metrics.increment_suppression(&update.session_id, "persistence_degraded", tier);
     }
 
-    delivery_states.insert(update.session_id.clone(), persisted_delivery);
+    // Only advance the delivery watermark once the update has durably
+    // persisted. If persistence is degraded we still broadcast for the live UI
+    // below, but leaving the watermark unadvanced ensures a daemon resync /
+    // stream restart re-delivers this update rather than treating a
+    // never-persisted update as already delivered (silent loss).
+    if !persistence_degraded {
+        delivery_states.insert(update.session_id.clone(), persisted_delivery);
+    }
     prior_thoughts.insert(update.session_id.clone(), update.thought.clone());
 
     let payload = ThoughtUpdatePayload {
@@ -909,7 +916,7 @@ mod tests {
     }
 
     #[test]
-    fn apply_sync_response_broadcasts_degraded_update_when_persist_enqueue_fails() {
+    fn apply_sync_response_broadcasts_degraded_update_without_advancing_watermark() {
         let provider = RecordingProvider {
             reject_persists: true,
             ..RecordingProvider::default()
@@ -948,7 +955,13 @@ mod tests {
         );
 
         assert!(provider.persisted.lock().expect("persisted").is_empty());
-        assert!(delivery_states.contains_key("sess-reject"));
+        // The update was never persisted, so the in-memory delivery watermark
+        // must NOT advance. Leaving it absent ensures a stream restart / daemon
+        // resync re-delivers this update instead of silently dropping it.
+        assert!(
+            !delivery_states.contains_key("sess-reject"),
+            "degraded persistence must not advance the delivery watermark"
+        );
         assert!(provider
             .delivery_states
             .lock()

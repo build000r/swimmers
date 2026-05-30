@@ -39,7 +39,15 @@ impl ApiClient {
     }
 
     pub(crate) fn from_env() -> Result<Self, String> {
-        let config = Config::from_env();
+        // External mode targets a separate server that runs its own startup
+        // enforcement (main.rs `prepare_server_startup`), so we do NOT exit here
+        // on config errors — a token-auth remote backend is a valid target. But
+        // `Config::from_env()` silently discarded the diagnostics, hiding e.g.
+        // an unknown AUTH_MODE or a token mode missing AUTH_TOKEN. Surface them
+        // so the operator sees the same warnings the standalone server prints.
+        let load = Config::from_env_report();
+        swimmers::cli::print_config_diagnostics(&load.diagnostics);
+        let config = load.config;
         let base_url = std::env::var("SWIMMERS_TUI_URL")
             .unwrap_or_else(|_| format!("http://127.0.0.1:{}", config.port));
         let auth_token = match config.auth_mode {

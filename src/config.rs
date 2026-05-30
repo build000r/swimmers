@@ -1,3 +1,6 @@
+use std::fmt::Display;
+use std::str::FromStr;
+
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -59,7 +62,6 @@ impl ThoughtBackend {
 }
 
 pub const MIN_PORT: u16 = 1;
-pub const MAX_PORT: u16 = u16::MAX;
 pub const MIN_THOUGHT_TICK_MS: u64 = 250;
 pub const MAX_THOUGHT_TICK_MS: u64 = 300_000;
 pub const MIN_OUTBOUND_QUEUE_BOUND: usize = 64;
@@ -138,17 +140,9 @@ pub struct Config {
     pub auth_token: Option<String>,
     pub observer_token: Option<String>,
     pub thought_tick_ms: u64,
-    #[allow(dead_code)]
-    // FIXME(2026-04-21): Session-level thought defaults are not yet surfaced in API payloads.
-    pub thoughts_enabled_default: bool,
-    #[allow(dead_code)]
-    // FIXME(2026-04-21): API delete flows still use a fixed mode and do not expose this field.
-    pub session_delete_mode: SessionDeleteMode,
     pub replay_buffer_size: usize,
     pub outbound_queue_bound: usize,
     pub thought_backend: ThoughtBackend,
-    #[allow(dead_code)]
-    pub overload_window_ms: u64,
 }
 
 impl Default for Config {
@@ -160,13 +154,10 @@ impl Default for Config {
             auth_token: None,
             observer_token: None,
             thought_tick_ms: 15000,
-            thoughts_enabled_default: true,
-            session_delete_mode: SessionDeleteMode::DetachBridge,
             replay_buffer_size: 512 * 1024, // 512KB replay ring
             // NOTE: empirical default — sized well above the 600-frame burst floor verified in tests.
             outbound_queue_bound: 4096,
             thought_backend: ThoughtBackend::Daemon,
-            overload_window_ms: 1000,
         }
     }
 }
@@ -212,7 +203,7 @@ fn apply_env_port(load: &mut ConfigLoad) {
             load,
             "PORT",
             format!(
-                "value {trimmed:?} is not a valid port in {MIN_PORT}-{MAX_PORT}; using default {}",
+                "value {trimmed:?} is not a valid port (must be at least {MIN_PORT}); using default {}",
                 Config::default().port
             ),
         ),
@@ -249,56 +240,19 @@ fn parse_env_non_empty_string(load: &mut ConfigLoad, key: &'static str) -> Optio
     }
 }
 
-fn parse_env_usize_bounded(
+fn parse_env_bounded<T>(
     load: &mut ConfigLoad,
     key: &'static str,
-    default: usize,
-    min: usize,
-    max: usize,
-) -> Option<usize> {
+    default: T,
+    min: T,
+    max: T,
+) -> Option<T>
+where
+    T: FromStr + Ord + Display + Copy,
+{
     let raw = env_value(load, key)?;
     let trimmed = raw.trim();
-    match trimmed.parse::<usize>() {
-        Ok(value) if (min..=max).contains(&value) => Some(value),
-        Ok(value) if value < min => {
-            push_warning(
-                load,
-                key,
-                format!("value {value} is below the minimum {min}; using default {default}"),
-            );
-            None
-        }
-        Ok(value) => {
-            push_warning(
-                load,
-                key,
-                format!("value {value} exceeds the maximum {max}; clamping to {max}"),
-            );
-            Some(max)
-        }
-        Err(_) => {
-            push_warning(
-                load,
-                key,
-                format!(
-                    "value {trimmed:?} is not a valid positive integer; using default {default}"
-                ),
-            );
-            None
-        }
-    }
-}
-
-fn parse_env_u64_bounded(
-    load: &mut ConfigLoad,
-    key: &'static str,
-    default: u64,
-    min: u64,
-    max: u64,
-) -> Option<u64> {
-    let raw = env_value(load, key)?;
-    let trimmed = raw.trim();
-    match trimmed.parse::<u64>() {
+    match trimmed.parse::<T>() {
         Ok(value) if (min..=max).contains(&value) => Some(value),
         Ok(value) if value < min => {
             push_warning(
@@ -365,7 +319,7 @@ impl Config {
             }
         }
 
-        if let Some(value) = parse_env_u64_bounded(
+        if let Some(value) = parse_env_bounded(
             &mut load,
             "SWIMMERS_THOUGHT_TICK_MS",
             defaults.thought_tick_ms,
@@ -374,7 +328,7 @@ impl Config {
         ) {
             load.config.thought_tick_ms = value;
         }
-        if let Some(value) = parse_env_usize_bounded(
+        if let Some(value) = parse_env_bounded(
             &mut load,
             "SWIMMERS_OUTBOUND_QUEUE_BOUND",
             defaults.outbound_queue_bound,
@@ -383,7 +337,7 @@ impl Config {
         ) {
             load.config.outbound_queue_bound = value;
         }
-        if let Some(value) = parse_env_usize_bounded(
+        if let Some(value) = parse_env_bounded(
             &mut load,
             "SWIMMERS_REPLAY_BUFFER_SIZE",
             defaults.replay_buffer_size,
@@ -398,6 +352,19 @@ impl Config {
                 &mut load,
                 "AUTH_TOKEN",
                 "AUTH_MODE=token requires AUTH_TOKEN=<secret>; refusing token mode without an operator token",
+            );
+        }
+
+        if load.config.observer_token.is_some()
+            && !matches!(load.config.auth_mode, AuthMode::Token)
+        {
+            let mode = load.config.auth_mode.as_env_value();
+            push_warning(
+                &mut load,
+                "OBSERVER_TOKEN",
+                format!(
+                    "OBSERVER_TOKEN is set but AUTH_MODE={mode} ignores it; observer tokens apply only in token mode"
+                ),
             );
         }
 
@@ -564,6 +531,31 @@ mod tests {
         let diagnostic = diagnostic_for(&load, "AUTH_TOKEN");
         assert_eq!(diagnostic.level, ConfigDiagnosticLevel::Error);
         assert!(diagnostic.message.contains("requires AUTH_TOKEN"));
+    }
+
+    #[test]
+    fn observer_token_outside_token_mode_warns_without_failing() {
+        let load = load_with_env(&[
+            ("AUTH_MODE", "local_trust"),
+            ("OBSERVER_TOKEN", "read-only"),
+        ]);
+        assert!(matches!(load.config.auth_mode, AuthMode::LocalTrust));
+        assert_eq!(load.config.observer_token.as_deref(), Some("read-only"));
+        assert!(!load.has_errors());
+        let diagnostic = diagnostic_for(&load, "OBSERVER_TOKEN");
+        assert_eq!(diagnostic.level, ConfigDiagnosticLevel::Warning);
+        assert!(diagnostic.message.contains("token mode"));
+    }
+
+    #[test]
+    fn observer_token_in_token_mode_is_silent() {
+        let load = load_with_env(&[
+            ("AUTH_MODE", "token"),
+            ("AUTH_TOKEN", "operator"),
+            ("OBSERVER_TOKEN", "read-only"),
+        ]);
+        assert!(matches!(load.config.auth_mode, AuthMode::Token));
+        assert!(load.diagnostics.is_empty());
     }
 
     #[test]

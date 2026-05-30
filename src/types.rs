@@ -287,20 +287,16 @@ impl SummaryFallbackReason {
         }
     }
 
-    pub const fn cached_state_cause(self) -> Option<&'static str> {
+    /// Cached-summary fallback cause/transport-health pair for this reason, or
+    /// `None` for `Missing` (which has no cached fallback). Both projections are
+    /// derived from the same match so they can never disagree.
+    pub const fn cached_fallback(self) -> Option<(&'static str, TransportHealth)> {
         match self {
-            Self::ChannelClosed => Some(SUMMARY_CAUSE_CACHE_DISCONNECTED),
-            Self::Dropped => Some(SUMMARY_CAUSE_CACHE_DEGRADED),
-            Self::Timeout => Some(SUMMARY_CAUSE_CACHE_OVERLOADED),
-            Self::Missing => None,
-        }
-    }
-
-    pub const fn cached_transport_health(self) -> Option<TransportHealth> {
-        match self {
-            Self::ChannelClosed => Some(TransportHealth::Disconnected),
-            Self::Dropped => Some(TransportHealth::Degraded),
-            Self::Timeout => Some(TransportHealth::Overloaded),
+            Self::ChannelClosed => {
+                Some((SUMMARY_CAUSE_CACHE_DISCONNECTED, TransportHealth::Disconnected))
+            }
+            Self::Dropped => Some((SUMMARY_CAUSE_CACHE_DEGRADED, TransportHealth::Degraded)),
+            Self::Timeout => Some((SUMMARY_CAUSE_CACHE_OVERLOADED, TransportHealth::Overloaded)),
             Self::Missing => None,
         }
     }
@@ -764,10 +760,7 @@ impl SessionSummary {
     }
 
     pub fn into_cached_collection_fallback(mut self, reason: SummaryFallbackReason) -> Self {
-        if let (Some(cause), Some(transport_health)) = (
-            reason.cached_state_cause(),
-            reason.cached_transport_health(),
-        ) {
+        if let Some((cause, transport_health)) = reason.cached_fallback() {
             self.transport_health = transport_health;
             self.state_evidence = StateEvidence::unobserved(cause);
         }
@@ -1524,18 +1517,26 @@ impl ControlEventPayloadContract {
     }
 
     pub fn payload_value(&self) -> serde_json::Value {
+        // Every Known arm serializes its wrapped payload identically; only the
+        // concrete inner type differs, so bind it once via a macro to avoid four
+        // copy-pasted `to_value(..).unwrap_or(Null)` arms.
+        macro_rules! known_payload_value {
+            ($payload:expr) => {
+                serde_json::to_value($payload).unwrap_or(serde_json::Value::Null)
+            };
+        }
         match self {
             Self::Known(KnownControlEventPayload::SessionState(payload)) => {
-                serde_json::to_value(payload).unwrap_or(serde_json::Value::Null)
+                known_payload_value!(payload)
             }
             Self::Known(KnownControlEventPayload::SessionTitle(payload)) => {
-                serde_json::to_value(payload).unwrap_or(serde_json::Value::Null)
+                known_payload_value!(payload)
             }
             Self::Known(KnownControlEventPayload::SessionSkill(payload)) => {
-                serde_json::to_value(payload).unwrap_or(serde_json::Value::Null)
+                known_payload_value!(payload)
             }
             Self::Known(KnownControlEventPayload::ThoughtUpdate(payload)) => {
-                serde_json::to_value(payload).unwrap_or(serde_json::Value::Null)
+                known_payload_value!(payload)
             }
             Self::Unknown { payload, .. } => payload.clone(),
         }

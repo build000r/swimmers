@@ -138,6 +138,48 @@ async fn readyz(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     (status, Json(response))
 }
 
+/// Canonical string label for a dependency-health status.
+///
+/// Mirrors the `#[serde(rename_all = "snake_case")]` wire encoding of
+/// [`DependencyHealthStatus`] so the embedded in-process surface labels each
+/// dependency exactly as the HTTP `/health` JSON would, without a second
+/// hand-maintained match. Keep this in sync with the enum's serde attribute.
+pub fn dependency_status_label(status: DependencyHealthStatus) -> &'static str {
+    match status {
+        DependencyHealthStatus::Unknown => "unknown",
+        DependencyHealthStatus::Healthy => "healthy",
+        DependencyHealthStatus::Degraded => "degraded",
+        DependencyHealthStatus::Unavailable => "unavailable",
+        DependencyHealthStatus::NotConfigured => "not_configured",
+    }
+}
+
+/// Assemble the complete dependency-health ledger from live state.
+///
+/// This is the single source of truth for the dependency ledger. Both the HTTP
+/// `/health` surface and the embedded in-process TUI adapter call it so the two
+/// surfaces never drift in which dependencies they report or how each
+/// dependency's status is derived. It fetches every input itself (bridge,
+/// persistence, thought-persistence backpressure, native app) so callers that
+/// only need the ledger have a single entry point; `health_response` keeps its
+/// already-fetched snapshots and calls the lower-level `dependency_ledger`
+/// directly to avoid re-reading them.
+pub async fn build_dependency_ledger(state: &Arc<AppState>) -> DependencyHealthLedger {
+    let thought_bridge = state.bridge_health.snapshot();
+    let persistence = state
+        .current_file_store()
+        .map(|store| store.health_snapshot());
+    let thought_persistence = state.supervisor.thought_persistence_backpressure_snapshot();
+    let native_app = *state.native_desktop_app.read().await;
+    dependency_ledger(
+        state,
+        &thought_bridge,
+        persistence,
+        &thought_persistence,
+        native_app,
+    )
+}
+
 fn dependency_ledger(
     state: &Arc<AppState>,
     thought_bridge: &BridgeHealthSnapshot,
@@ -526,6 +568,52 @@ mod tests {
 
         let readyz_response = readyz(State(state)).await.into_response();
         assert_eq!(readyz_response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[test]
+    fn dependency_status_label_matches_serde_wire_encoding() {
+        for status in [
+            DependencyHealthStatus::Unknown,
+            DependencyHealthStatus::Healthy,
+            DependencyHealthStatus::Degraded,
+            DependencyHealthStatus::Unavailable,
+            DependencyHealthStatus::NotConfigured,
+        ] {
+            let serialized = serde_json::to_value(status).expect("serialize status");
+            assert_eq!(
+                Value::String(dependency_status_label(status).to_string()),
+                serialized,
+                "label must match the snake_case serde encoding for {status:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn build_dependency_ledger_reports_complete_set() {
+        let bridge_health = Arc::new(BridgeHealthState::new_with_tick(Duration::from_secs(15)));
+        bridge_health.record_success(None);
+        let state = test_state(bridge_health);
+
+        let ledger = build_dependency_ledger(&state).await;
+        // The unified builder must populate the full ledger — including the
+        // persistence/thought_bridge/overlay entries the embedded surface used
+        // to omit — so both surfaces report the same dependency set.
+        let json = serde_json::to_value(&ledger).expect("serialize ledger");
+        for key in [
+            "tmux_discovery",
+            "tmux_capture",
+            "persistence",
+            "thought_bridge",
+            "native_scripts",
+            "overlay",
+            "remote_targets",
+        ] {
+            assert!(json.get(key).is_some(), "ledger should expose {key}");
+        }
+        assert_eq!(
+            json["thought_bridge"]["status"],
+            dependency_status_label(ledger.thought_bridge.status)
+        );
     }
 
     #[tokio::test]

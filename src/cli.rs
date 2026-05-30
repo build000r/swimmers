@@ -25,39 +25,175 @@ use crate::config::{AuthMode, Config, ConfigDiagnostic, ConfigDiagnosticLevel, C
 use crate::thought::emitter_client::resolve_clawgs_bin;
 use crate::thought::runtime_config::DaemonDefaults;
 
+/// Single source of truth for a documented environment variable.
+///
+/// The config table (names, secrets, defaults, and resolved current values) is
+/// derived from `ENV_VAR_SPECS` so adding a variable is one entry rather than
+/// several parallel edits. The `current` hook is `Some(..)` only for variables
+/// whose resolved value lives on [`Config`]; the rest fall back to the raw env
+/// value (or default) in [`env_var_rows_from_load`], matching prior behavior.
+/// `ENV_VAR_HELP` below is kept as a hand-reviewed literal mirror of this list
+/// so clap's `after_help` can stay a `&'static str`.
+struct EnvVarSpec {
+    name: &'static str,
+    secret: bool,
+    default: fn(&Config) -> String,
+    current: Option<fn(&ConfigLoad) -> String>,
+}
+
 /// Documented environment variables exposed via `swimmers config`.
 ///
-/// Order matches the README env-var table so the two cannot drift in
-/// presentation. Defaults are pulled from [`Config::default`] (or other
-/// well-known defaults) so the table also cannot drift from runtime.
-const ENV_VARS: &[&str] = &[
-    "PORT",
-    "SWIMMERS_BIND",
-    "AUTH_MODE",
-    "AUTH_TOKEN",
-    "OBSERVER_TOKEN",
-    "SWIMMERS_GROK_BIN",
-    "SWIMMERS_NATIVE_APP",
-    "SWIMMERS_GHOSTTY_MODE",
-    "SWIMMERS_ATTENTION_GROUP_SIZE",
-    "SWIMMERS_ATTENTION_GROUP_LAYOUT",
-    "SWIMMERS_ATTENTION_GROUP_INCLUDE_UNNUMBERED",
-    "SWIMMERS_THOUGHT_BACKEND",
-    "CLAWGS_BIN",
-    "SWIMMERS_THOUGHT_TICK_MS",
-    "SWIMMERS_OUTBOUND_QUEUE_BOUND",
-    "SWIMMERS_REPLAY_BUFFER_SIZE",
-    "SWIMMERS_DATA_DIR",
-    "SWIMMERS_TUI_URL",
-    "SWIMMERS_TUI_REUSE_SERVER",
-    "SWIMMERS_REPO_SEARCH_ROOTS",
-    "SWIMMERS_REPO_SEARCH_MAX_DEPTH",
-    "SWIMMERS_VOICE_MODEL",
-    "SWIMMERS_VOICE_LANGUAGE",
+/// Order matches the README env-var table (and `ENV_VAR_HELP`) so the surfaces
+/// cannot drift in presentation. Defaults are pulled from [`Config::default`]
+/// (or other well-known defaults) so the table also cannot drift from runtime.
+const ENV_VAR_SPECS: &[EnvVarSpec] = &[
+    EnvVarSpec {
+        name: "PORT",
+        secret: false,
+        default: |config| config.port.to_string(),
+        current: Some(|load| load.config.port.to_string()),
+    },
+    EnvVarSpec {
+        name: "SWIMMERS_BIND",
+        secret: false,
+        default: |config| config.bind.clone(),
+        current: Some(|load| load.config.bind.clone()),
+    },
+    EnvVarSpec {
+        name: "AUTH_MODE",
+        secret: false,
+        default: |config| config.auth_mode.as_env_value().to_string(),
+        current: Some(|load| load.config.auth_mode.as_env_value().to_string()),
+    },
+    EnvVarSpec {
+        name: "AUTH_TOKEN",
+        secret: true,
+        default: |_| "(unset)".to_string(),
+        current: Some(|load| redacted_token(load.config.auth_token.as_ref())),
+    },
+    EnvVarSpec {
+        name: "OBSERVER_TOKEN",
+        secret: true,
+        default: |_| "(unset)".to_string(),
+        current: Some(|load| redacted_token(load.config.observer_token.as_ref())),
+    },
+    EnvVarSpec {
+        name: "SWIMMERS_GROK_BIN",
+        secret: false,
+        default: |_| "grok".to_string(),
+        current: None,
+    },
+    EnvVarSpec {
+        name: "SWIMMERS_NATIVE_APP",
+        secret: false,
+        default: |_| "iterm".to_string(),
+        current: None,
+    },
+    EnvVarSpec {
+        name: "SWIMMERS_GHOSTTY_MODE",
+        secret: false,
+        default: |_| "swap".to_string(),
+        current: None,
+    },
+    EnvVarSpec {
+        name: "SWIMMERS_ATTENTION_GROUP_SIZE",
+        secret: false,
+        default: |_| "6".to_string(),
+        current: None,
+    },
+    EnvVarSpec {
+        name: "SWIMMERS_ATTENTION_GROUP_LAYOUT",
+        secret: false,
+        default: |_| "tiled".to_string(),
+        current: None,
+    },
+    EnvVarSpec {
+        name: "SWIMMERS_ATTENTION_GROUP_INCLUDE_UNNUMBERED",
+        secret: false,
+        default: |_| "(unset)".to_string(),
+        current: None,
+    },
+    EnvVarSpec {
+        name: "SWIMMERS_THOUGHT_BACKEND",
+        secret: false,
+        default: |_| "daemon".to_string(),
+        current: Some(|load| load.config.thought_backend.as_env_value().to_string()),
+    },
+    EnvVarSpec {
+        name: "CLAWGS_BIN",
+        secret: false,
+        default: |_| "(auto)".to_string(),
+        current: None,
+    },
+    EnvVarSpec {
+        name: "SWIMMERS_THOUGHT_TICK_MS",
+        secret: false,
+        default: |config| config.thought_tick_ms.to_string(),
+        current: Some(|load| load.config.thought_tick_ms.to_string()),
+    },
+    EnvVarSpec {
+        name: "SWIMMERS_OUTBOUND_QUEUE_BOUND",
+        secret: false,
+        default: |config| config.outbound_queue_bound.to_string(),
+        current: Some(|load| load.config.outbound_queue_bound.to_string()),
+    },
+    EnvVarSpec {
+        name: "SWIMMERS_REPLAY_BUFFER_SIZE",
+        secret: false,
+        default: |config| config.replay_buffer_size.to_string(),
+        current: Some(|load| load.config.replay_buffer_size.to_string()),
+    },
+    EnvVarSpec {
+        name: "SWIMMERS_DATA_DIR",
+        secret: false,
+        default: |_| "(platform data dir)".to_string(),
+        current: None,
+    },
+    EnvVarSpec {
+        name: "SWIMMERS_TUI_URL",
+        secret: false,
+        default: |_| "(unset)".to_string(),
+        current: None,
+    },
+    EnvVarSpec {
+        name: "SWIMMERS_TUI_REUSE_SERVER",
+        secret: false,
+        default: |_| "(unset)".to_string(),
+        current: None,
+    },
+    EnvVarSpec {
+        name: "SWIMMERS_REPO_SEARCH_ROOTS",
+        secret: false,
+        default: |_| "~/repos:~/hard".to_string(),
+        current: None,
+    },
+    EnvVarSpec {
+        name: "SWIMMERS_REPO_SEARCH_MAX_DEPTH",
+        secret: false,
+        default: |_| "8".to_string(),
+        current: None,
+    },
+    EnvVarSpec {
+        name: "SWIMMERS_VOICE_MODEL",
+        secret: false,
+        default: |_| "(unset)".to_string(),
+        current: None,
+    },
+    EnvVarSpec {
+        name: "SWIMMERS_VOICE_LANGUAGE",
+        secret: false,
+        default: |_| "auto".to_string(),
+        current: None,
+    },
 ];
 
-/// Variables whose values must never be printed in plaintext.
-const SECRET_VARS: &[&str] = &["AUTH_TOKEN", "OBSERVER_TOKEN"];
+fn redacted_token(token: Option<&String>) -> String {
+    token.map(|_| "***").unwrap_or("(unset)").to_string()
+}
+
+fn env_var_spec(name: &str) -> Option<&'static EnvVarSpec> {
+    ENV_VAR_SPECS.iter().find(|spec| spec.name == name)
+}
 
 const ENV_VAR_HELP: &str = "ENVIRONMENT VARIABLES:
   PORT                         Server listen port (default: 3210)
@@ -205,32 +341,8 @@ fn source_for(name: &str, diagnostics: &[ConfigDiagnostic]) -> &'static str {
 }
 
 fn current_for(name: &str, load: &ConfigLoad) -> Option<String> {
-    match name {
-        "PORT" => Some(load.config.port.to_string()),
-        "SWIMMERS_BIND" => Some(load.config.bind.clone()),
-        "AUTH_MODE" => Some(load.config.auth_mode.as_env_value().to_string()),
-        "AUTH_TOKEN" => Some(
-            load.config
-                .auth_token
-                .as_ref()
-                .map(|_| "***")
-                .unwrap_or("(unset)")
-                .to_string(),
-        ),
-        "OBSERVER_TOKEN" => Some(
-            load.config
-                .observer_token
-                .as_ref()
-                .map(|_| "***")
-                .unwrap_or("(unset)")
-                .to_string(),
-        ),
-        "SWIMMERS_THOUGHT_BACKEND" => Some(load.config.thought_backend.as_env_value().to_string()),
-        "SWIMMERS_THOUGHT_TICK_MS" => Some(load.config.thought_tick_ms.to_string()),
-        "SWIMMERS_OUTBOUND_QUEUE_BOUND" => Some(load.config.outbound_queue_bound.to_string()),
-        "SWIMMERS_REPLAY_BUFFER_SIZE" => Some(load.config.replay_buffer_size.to_string()),
-        _ => None,
-    }
+    let current = env_var_spec(name)?.current?;
+    Some(current(load))
 }
 
 /// Build the `swimmers config` table from the current environment.
@@ -245,13 +357,14 @@ pub fn env_var_rows() -> Vec<EnvVarRow> {
 
 pub fn env_var_rows_from_load(load: &ConfigLoad) -> Vec<EnvVarRow> {
     let defaults = Config::default();
-    ENV_VARS
+    ENV_VAR_SPECS
         .iter()
-        .map(|name| {
+        .map(|spec| {
+            let name = spec.name;
             let default = default_for(name, &defaults);
             let current = current_for(name, load).unwrap_or_else(|| match std::env::var(name) {
                 Ok(val) if !val.is_empty() => {
-                    if SECRET_VARS.contains(name) {
+                    if spec.secret {
                         "***".to_string()
                     } else {
                         val
@@ -271,34 +384,9 @@ pub fn env_var_rows_from_load(load: &ConfigLoad) -> Vec<EnvVarRow> {
 }
 
 fn default_for(name: &str, config: &Config) -> String {
-    match name {
-        "PORT" => config.port.to_string(),
-        "SWIMMERS_BIND" => config.bind.clone(),
-        "AUTH_MODE" => match config.auth_mode {
-            AuthMode::LocalTrust => "local_trust".to_string(),
-            AuthMode::TailnetTrust => "tailnet_trust".to_string(),
-            AuthMode::Token => "token".to_string(),
-        },
-        "AUTH_TOKEN" | "OBSERVER_TOKEN" => "(unset)".to_string(),
-        "SWIMMERS_GROK_BIN" => "grok".to_string(),
-        "SWIMMERS_NATIVE_APP" => "iterm".to_string(),
-        "SWIMMERS_GHOSTTY_MODE" => "swap".to_string(),
-        "SWIMMERS_ATTENTION_GROUP_SIZE" => "6".to_string(),
-        "SWIMMERS_ATTENTION_GROUP_LAYOUT" => "tiled".to_string(),
-        "SWIMMERS_ATTENTION_GROUP_INCLUDE_UNNUMBERED" => "(unset)".to_string(),
-        "SWIMMERS_THOUGHT_BACKEND" => "daemon".to_string(),
-        "CLAWGS_BIN" => "(auto)".to_string(),
-        "SWIMMERS_THOUGHT_TICK_MS" => config.thought_tick_ms.to_string(),
-        "SWIMMERS_OUTBOUND_QUEUE_BOUND" => config.outbound_queue_bound.to_string(),
-        "SWIMMERS_REPLAY_BUFFER_SIZE" => config.replay_buffer_size.to_string(),
-        "SWIMMERS_DATA_DIR" => "(platform data dir)".to_string(),
-        "SWIMMERS_TUI_URL" => "(unset)".to_string(),
-        "SWIMMERS_TUI_REUSE_SERVER" => "(unset)".to_string(),
-        "SWIMMERS_REPO_SEARCH_ROOTS" => "~/repos:~/hard".to_string(),
-        "SWIMMERS_REPO_SEARCH_MAX_DEPTH" => "8".to_string(),
-        "SWIMMERS_VOICE_MODEL" => "(unset)".to_string(),
-        "SWIMMERS_VOICE_LANGUAGE" => "auto".to_string(),
-        _ => "(unknown)".to_string(),
+    match env_var_spec(name) {
+        Some(spec) => (spec.default)(config),
+        None => "(unknown)".to_string(),
     }
 }
 
@@ -359,10 +447,23 @@ pub fn print_config_diagnostics(diagnostics: &[ConfigDiagnostic]) {
     }
 }
 
+/// Severity of a single doctor finding.
+///
+/// Carried structurally so rendering does not have to sniff the detail string
+/// for a `warning:` prefix. `Warn` findings are advisory: they still count as
+/// passing (`ok`) but render with a distinct `WARN` marker on stderr.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DoctorLevel {
+    Ok,
+    Warn,
+    Fail,
+}
+
 /// Result of a single doctor check.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DoctorFinding {
     pub ok: bool,
+    pub level: DoctorLevel,
     pub name: &'static str,
     pub detail: String,
 }
@@ -370,15 +471,23 @@ pub struct DoctorFinding {
 pub fn config_diagnostic_findings(diagnostics: &[ConfigDiagnostic]) -> Vec<DoctorFinding> {
     diagnostics
         .iter()
-        .map(|diagnostic| DoctorFinding {
-            ok: !diagnostic.is_error(),
-            name: "config/env",
-            detail: format!(
-                "{}: {}: {}",
-                diagnostic.level.as_str(),
-                diagnostic.key,
-                diagnostic.message
-            ),
+        .map(|diagnostic| {
+            let level = if diagnostic.is_error() {
+                DoctorLevel::Fail
+            } else {
+                DoctorLevel::Warn
+            };
+            DoctorFinding {
+                ok: !diagnostic.is_error(),
+                level,
+                name: "config/env",
+                detail: format!(
+                    "{}: {}: {}",
+                    diagnostic.level.as_str(),
+                    diagnostic.key,
+                    diagnostic.message
+                ),
+            }
         })
         .collect()
 }
@@ -401,6 +510,7 @@ pub fn run_doctor_checks(
     if matches!(config.auth_mode, AuthMode::LocalTrust) && !bind_loopback {
         findings.push(DoctorFinding {
             ok: false,
+            level: DoctorLevel::Fail,
             name: "auth/bind",
             detail: format!(
                 "SWIMMERS_BIND={} is non-loopback while AUTH_MODE=local_trust. \
@@ -413,6 +523,7 @@ pub fn run_doctor_checks(
     } else if matches!(config.auth_mode, AuthMode::TailnetTrust) && !bind_tailnet {
         findings.push(DoctorFinding {
             ok: false,
+            level: DoctorLevel::Fail,
             name: "auth/bind",
             detail: format!(
                 "SWIMMERS_BIND={} is not a Tailscale address while AUTH_MODE=tailnet_trust. \
@@ -424,15 +535,12 @@ pub fn run_doctor_checks(
     } else {
         findings.push(DoctorFinding {
             ok: true,
+            level: DoctorLevel::Ok,
             name: "auth/bind",
             detail: format!(
                 "bind={} auth_mode={} (safe)",
                 config.bind,
-                match config.auth_mode {
-                    AuthMode::LocalTrust => "local_trust",
-                    AuthMode::TailnetTrust => "tailnet_trust",
-                    AuthMode::Token => "token",
-                }
+                config.auth_mode.as_env_value()
             ),
         });
     }
@@ -441,6 +549,7 @@ pub fn run_doctor_checks(
     if matches!(config.auth_mode, AuthMode::Token) && config.auth_token.is_none() {
         findings.push(DoctorFinding {
             ok: false,
+            level: DoctorLevel::Fail,
             name: "auth/token",
             detail: "AUTH_MODE=token but AUTH_TOKEN is not set. Set AUTH_TOKEN=<secret>."
                 .to_string(),
@@ -448,6 +557,7 @@ pub fn run_doctor_checks(
     } else {
         findings.push(DoctorFinding {
             ok: true,
+            level: DoctorLevel::Ok,
             name: "auth/token",
             detail: match config.auth_mode {
                 AuthMode::Token => "token configuration ok",
@@ -462,12 +572,14 @@ pub fn run_doctor_checks(
     if tmux_present {
         findings.push(DoctorFinding {
             ok: true,
+            level: DoctorLevel::Ok,
             name: "tmux",
             detail: "tmux found on PATH".to_string(),
         });
     } else {
         findings.push(DoctorFinding {
             ok: false,
+            level: DoctorLevel::Fail,
             name: "tmux",
             detail: "tmux not found on PATH. Install with: brew install tmux (macOS) \
                      or apt install tmux (Debian/Ubuntu)."
@@ -479,11 +591,13 @@ pub fn run_doctor_checks(
     match clawgs_defaults {
         Ok(detail) => findings.push(DoctorFinding {
             ok: true,
+            level: DoctorLevel::Ok,
             name: "clawgs",
             detail,
         }),
         Err(reason) => findings.push(DoctorFinding {
             ok: false,
+            level: DoctorLevel::Fail,
             name: "clawgs",
             detail: reason,
         }),
@@ -493,11 +607,13 @@ pub fn run_doctor_checks(
     match data_dir_writable {
         Ok(path) => findings.push(DoctorFinding {
             ok: true,
+            level: DoctorLevel::Ok,
             name: "data_dir",
             detail: format!("writable: {}", path.display()),
         }),
         Err(reason) => findings.push(DoctorFinding {
             ok: false,
+            level: DoctorLevel::Fail,
             name: "data_dir",
             detail: format!("data dir not writable: {reason}"),
         }),
@@ -793,20 +909,15 @@ pub fn print_doctor_findings(findings: &[DoctorFinding]) -> i32 {
 }
 
 fn print_doctor_finding(finding: &DoctorFinding) -> bool {
-    let mark = if !finding.ok {
-        "FAIL"
-    } else if finding.detail.starts_with("warning:") {
-        "WARN"
-    } else {
-        "ok "
+    let mark = match finding.level {
+        DoctorLevel::Fail => "FAIL",
+        DoctorLevel::Warn => "WARN",
+        DoctorLevel::Ok => "ok ",
     };
     let line = format!("[{mark}] {}: {}", finding.name, finding.detail);
-    if !finding.ok {
-        eprintln!("{line}");
-    } else if mark == "WARN" {
-        eprintln!("{line}");
-    } else {
-        println!("{line}");
+    match finding.level {
+        DoctorLevel::Fail | DoctorLevel::Warn => eprintln!("{line}"),
+        DoctorLevel::Ok => println!("{line}"),
     }
     finding.ok
 }
@@ -1218,8 +1329,25 @@ mod tests {
     #[test]
     fn env_table_includes_all_documented_vars() {
         let rows = env_var_rows();
-        for name in ENV_VARS {
-            assert!(rows.iter().any(|r| r.name == *name), "missing {name}");
+        for spec in ENV_VAR_SPECS {
+            assert!(
+                rows.iter().any(|r| r.name == spec.name),
+                "missing {}",
+                spec.name
+            );
+        }
+    }
+
+    #[test]
+    fn env_var_help_mirrors_every_spec() {
+        // ENV_VAR_HELP is a hand-maintained literal; guard it against drifting
+        // from the ENV_VAR_SPECS source of truth.
+        for spec in ENV_VAR_SPECS {
+            assert!(
+                ENV_VAR_HELP.contains(spec.name),
+                "ENV_VAR_HELP is missing a line for {}",
+                spec.name
+            );
         }
     }
 

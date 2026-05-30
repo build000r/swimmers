@@ -3,8 +3,9 @@ use std::ffi::OsString;
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::process::{Command as ProcessCommand, Output, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{LazyLock, Mutex};
-use std::time::Instant;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, Context, Result};
 use chrono::Utc;
@@ -809,6 +810,20 @@ fn bundled_script_root() -> PathBuf {
         .join(env!("CARGO_PKG_VERSION"))
 }
 
+/// Builds a per-call unique suffix for atomic temp-file writes so that two
+/// concurrent in-process callers (reachable from the unsynchronized
+/// native-status endpoint) never share a tmp path and race on the same file.
+fn unique_tmp_suffix() -> String {
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let counter = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_nanos())
+        .unwrap_or(0);
+    format!("{:?}.{counter}.{nanos}", std::thread::current().id())
+        .replace(|c: char| !c.is_ascii_alphanumeric() && c != '.', "")
+}
+
 fn materialize_bundled_script(
     script_relative_path: &str,
     bundled_root: &Path,
@@ -835,7 +850,11 @@ fn materialize_bundled_script(
         .file_name()
         .and_then(|name| name.to_str())
         .ok_or_else(|| anyhow!("native script path has no file name: {}", target.display()))?;
-    let tmp_path = target.with_file_name(format!("{file_name}.{}.tmp", std::process::id()));
+    let tmp_path = target.with_file_name(format!(
+        "{file_name}.{}.{}.tmp",
+        std::process::id(),
+        unique_tmp_suffix()
+    ));
     std::fs::write(&tmp_path, bundled_source).with_context(|| {
         format!(
             "failed to write bundled native script {}",
@@ -2476,6 +2495,66 @@ mod tests {
             std::fs::read_to_string(&resolved).unwrap(),
             ITERM_SCRIPT_SOURCE
         );
+    }
+
+    #[test]
+    fn unique_tmp_suffix_never_repeats_across_threads() {
+        use std::collections::HashSet;
+        use std::sync::{Arc, Mutex};
+
+        let seen = Arc::new(Mutex::new(HashSet::new()));
+        let handles: Vec<_> = (0..8)
+            .map(|_| {
+                let seen = Arc::clone(&seen);
+                std::thread::spawn(move || {
+                    for _ in 0..256 {
+                        let suffix = unique_tmp_suffix();
+                        let mut guard = seen.lock().unwrap();
+                        assert!(
+                            guard.insert(suffix.clone()),
+                            "duplicate tmp suffix produced: {suffix}"
+                        );
+                    }
+                })
+            })
+            .collect();
+
+        for handle in handles {
+            handle.join().unwrap();
+        }
+
+        assert_eq!(seen.lock().unwrap().len(), 8 * 256);
+    }
+
+    #[test]
+    fn concurrent_materialize_does_not_collide_on_tmp_path() {
+        use std::sync::Arc;
+
+        let temp = tempdir().unwrap();
+        let bundled_root = Arc::new(temp.path().join("installed-assets"));
+
+        let handles: Vec<_> = (0..8)
+            .map(|_| {
+                let bundled_root = Arc::clone(&bundled_root);
+                std::thread::spawn(move || {
+                    materialize_bundled_script(
+                        ITERM_SCRIPT_RELATIVE_PATH,
+                        &bundled_root,
+                        ITERM_SCRIPT_SOURCE,
+                    )
+                    .expect("concurrent materialize should not fail on tmp collision")
+                })
+            })
+            .collect();
+
+        for handle in handles {
+            let resolved = handle.join().unwrap();
+            assert_eq!(resolved, bundled_root.join(ITERM_SCRIPT_RELATIVE_PATH));
+            assert_eq!(
+                std::fs::read_to_string(&resolved).unwrap(),
+                ITERM_SCRIPT_SOURCE
+            );
+        }
     }
 
     #[test]

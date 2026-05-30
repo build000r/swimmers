@@ -378,6 +378,12 @@ pub struct SessionSupervisor {
     /// Number of accepted thought-persist writes still queued or in flight.
     pending_thought_persists: AtomicUsize,
 
+    /// Configured capacity of the bounded thought-persist channel. Defaults to
+    /// `THOUGHT_PERSIST_QUEUE_CAP` but may differ when the provider is built via
+    /// `with_persist_queue_capacity`; used for both the depth clamp and the
+    /// backpressure snapshot so neither lies about a non-default capacity.
+    thought_persist_queue_capacity: AtomicUsize,
+
     /// Last observed bounded thought-persist queue depth.
     thought_persist_queue_depth: AtomicUsize,
 
@@ -437,6 +443,7 @@ impl SessionSupervisor {
             persistence: RwLock::new(None),
             thought_snapshots: RwLock::new(HashMap::new()),
             pending_thought_persists: AtomicUsize::new(0),
+            thought_persist_queue_capacity: AtomicUsize::new(THOUGHT_PERSIST_QUEUE_CAP),
             thought_persist_queue_depth: AtomicUsize::new(0),
             thought_persist_overflow_slots: AtomicUsize::new(0),
             thought_persist_queue_full_count: AtomicU64::new(0),
@@ -1896,44 +1903,61 @@ impl SessionSupervisor {
         self.pending_thought_persists_notify.notify_waiters();
     }
 
+    fn set_thought_persist_queue_capacity(&self, capacity: usize) {
+        self.thought_persist_queue_capacity
+            .store(capacity, Ordering::SeqCst);
+    }
+
+    fn thought_persist_queue_capacity(&self) -> usize {
+        self.thought_persist_queue_capacity.load(Ordering::SeqCst)
+    }
+
     fn record_thought_persist_queue_depth(&self, depth: usize) {
+        let cap = self.thought_persist_queue_capacity();
         self.thought_persist_queue_depth
-            .store(depth.min(THOUGHT_PERSIST_QUEUE_CAP), Ordering::SeqCst);
+            .store(depth.min(cap), Ordering::SeqCst);
     }
 
     fn set_thought_persist_overflow_slots(&self, slots: usize) {
+        // This only updates the overflow-slot gauge; it does not change the
+        // `pending_thought_persists` counter that shutdown waiters re-read in
+        // `wait_for_pending_thought_persists`, so waking them here would be a
+        // spurious wakeup. The real counter changes notify waiters themselves.
         self.thought_persist_overflow_slots
             .store(slots, Ordering::SeqCst);
-        self.pending_thought_persists_notify.notify_waiters();
+    }
+
+    fn record_thought_persist_suppression(
+        &self,
+        counter: &AtomicU64,
+        session_id: &str,
+        label: &'static str,
+    ) {
+        counter.fetch_add(1, Ordering::SeqCst);
+        crate::metrics::increment_thought_suppression(session_id, label, "persistence");
     }
 
     fn record_thought_persist_queue_full(&self, session_id: &str) {
-        self.thought_persist_queue_full_count
-            .fetch_add(1, Ordering::SeqCst);
-        crate::metrics::increment_thought_suppression(
+        self.record_thought_persist_suppression(
+            &self.thought_persist_queue_full_count,
             session_id,
             "persistence_queue_full",
-            "persistence",
         );
     }
 
     fn record_thought_persist_coalesced(&self, session_id: &str) {
-        self.thought_persist_coalesced_count
-            .fetch_add(1, Ordering::SeqCst);
-        crate::metrics::increment_thought_suppression(
+        self.record_thought_persist_suppression(
+            &self.thought_persist_coalesced_count,
             session_id,
             "persistence_coalesced",
-            "persistence",
         );
     }
 
     fn record_thought_persist_dropped(&self, session_id: &str) {
-        self.thought_persist_dropped_count
-            .fetch_add(1, Ordering::SeqCst);
-        crate::metrics::increment_thought_suppression(
+        self.record_thought_persist_suppression(
+            &self.thought_persist_dropped_count,
             session_id,
             "persistence_dropped",
-            "persistence",
         );
     }
 
@@ -1941,7 +1965,7 @@ impl SessionSupervisor {
         &self,
     ) -> ThoughtPersistenceBackpressureSnapshot {
         ThoughtPersistenceBackpressureSnapshot {
-            queue_capacity: THOUGHT_PERSIST_QUEUE_CAP,
+            queue_capacity: self.thought_persist_queue_capacity(),
             queue_depth: self.thought_persist_queue_depth.load(Ordering::SeqCst),
             pending_count: self.pending_thought_persists.load(Ordering::SeqCst),
             overflow_slots: self.thought_persist_overflow_slots.load(Ordering::SeqCst),
@@ -2339,6 +2363,7 @@ impl SupervisorProvider {
         queue_capacity: usize,
     ) -> Self {
         let handle = tokio::runtime::Handle::current();
+        supervisor.set_thought_persist_queue_capacity(queue_capacity);
         let (persist_tx, mut persist_rx) = mpsc::channel::<PersistThoughtRequest>(queue_capacity);
         let persist_supervisor = supervisor.clone();
         let persist_overflow = Arc::new(ThoughtPersistOverflow::default());
@@ -3987,6 +4012,10 @@ mod tests {
         );
 
         let pressure = supervisor.thought_persistence_backpressure_snapshot();
+        assert_eq!(
+            pressure.queue_capacity, 1,
+            "snapshot must report the configured queue capacity, not the default"
+        );
         assert_eq!(pressure.queue_depth, 1);
         assert_eq!(pressure.pending_count, 2);
         assert_eq!(pressure.overflow_slots, 1);
@@ -4566,8 +4595,9 @@ exit 1
         assert_eq!(
             sessions[0].state_evidence.cause,
             SummaryFallbackReason::Dropped
-                .cached_state_cause()
+                .cached_fallback()
                 .expect("dropped fallback cause")
+                .0
         );
         assert!(sessions[0].state_evidence.observed_at.is_none());
         assert!(!sessions[0].is_stale);
@@ -4603,8 +4633,9 @@ exit 1
         assert_eq!(
             sessions[0].state_evidence.cause,
             SummaryFallbackReason::Timeout
-                .cached_state_cause()
+                .cached_fallback()
                 .expect("timeout fallback cause")
+                .0
         );
         assert!(sessions[0].state_evidence.observed_at.is_none());
         assert!(!sessions[0].is_stale);
