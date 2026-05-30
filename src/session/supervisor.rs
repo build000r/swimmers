@@ -25,7 +25,7 @@ use crate::tmux_target::exact_session_target;
 use crate::types::{
     fallback_rest_state, ActionCue, ControlEvent, DependencyHealthSnapshot, RepoTheme, RestState,
     SessionBatchMembership, SessionState, SessionStatePayload, SessionSummary, TerminalSnapshot,
-    ThoughtSource, ThoughtState, TransportHealth,
+    ThoughtPersistenceBackpressureSnapshot, ThoughtSource, ThoughtState, TransportHealth,
 };
 
 const PROCESS_EXIT_REAP_INTERVAL: Duration = Duration::from_millis(250);
@@ -376,6 +376,21 @@ pub struct SessionSupervisor {
     /// Number of accepted thought-persist writes still queued or in flight.
     pending_thought_persists: AtomicUsize,
 
+    /// Last observed bounded thought-persist queue depth.
+    thought_persist_queue_depth: AtomicUsize,
+
+    /// Number of per-session overwrite slots currently holding coalesced writes.
+    thought_persist_overflow_slots: AtomicUsize,
+
+    /// Number of times the bounded thought-persist queue was full.
+    thought_persist_queue_full_count: AtomicU64,
+
+    /// Number of queued overflow writes replaced by a newer write for the same session.
+    thought_persist_coalesced_count: AtomicU64,
+
+    /// Number of thought writes that could not be queued or coalesced.
+    thought_persist_dropped_count: AtomicU64,
+
     /// Wakes shutdown waiters when the pending thought-persist count changes.
     pending_thought_persists_notify: Notify,
 
@@ -420,6 +435,11 @@ impl SessionSupervisor {
             persistence: RwLock::new(None),
             thought_snapshots: RwLock::new(HashMap::new()),
             pending_thought_persists: AtomicUsize::new(0),
+            thought_persist_queue_depth: AtomicUsize::new(0),
+            thought_persist_overflow_slots: AtomicUsize::new(0),
+            thought_persist_queue_full_count: AtomicU64::new(0),
+            thought_persist_coalesced_count: AtomicU64::new(0),
+            thought_persist_dropped_count: AtomicU64::new(0),
             pending_thought_persists_notify: Notify::new(),
             process_exit_seen_at: RwLock::new(HashMap::new()),
             discovery_lock: Mutex::new(()),
@@ -1887,6 +1907,82 @@ impl SessionSupervisor {
         self.pending_thought_persists_notify.notify_waiters();
     }
 
+    fn record_thought_persist_queue_depth(&self, depth: usize) {
+        self.thought_persist_queue_depth
+            .store(depth.min(THOUGHT_PERSIST_QUEUE_CAP), Ordering::SeqCst);
+    }
+
+    fn set_thought_persist_overflow_slots(&self, slots: usize) {
+        self.thought_persist_overflow_slots
+            .store(slots, Ordering::SeqCst);
+        self.pending_thought_persists_notify.notify_waiters();
+    }
+
+    fn record_thought_persist_queue_full(&self, session_id: &str) {
+        self.thought_persist_queue_full_count
+            .fetch_add(1, Ordering::SeqCst);
+        crate::metrics::increment_thought_suppression(
+            session_id,
+            "persistence_queue_full",
+            "persistence",
+        );
+    }
+
+    fn record_thought_persist_coalesced(&self, session_id: &str) {
+        self.thought_persist_coalesced_count
+            .fetch_add(1, Ordering::SeqCst);
+        crate::metrics::increment_thought_suppression(
+            session_id,
+            "persistence_coalesced",
+            "persistence",
+        );
+    }
+
+    fn record_thought_persist_dropped(&self, session_id: &str) {
+        self.thought_persist_dropped_count
+            .fetch_add(1, Ordering::SeqCst);
+        crate::metrics::increment_thought_suppression(
+            session_id,
+            "persistence_dropped",
+            "persistence",
+        );
+    }
+
+    pub fn thought_persistence_backpressure_snapshot(
+        &self,
+    ) -> ThoughtPersistenceBackpressureSnapshot {
+        ThoughtPersistenceBackpressureSnapshot {
+            queue_capacity: THOUGHT_PERSIST_QUEUE_CAP,
+            queue_depth: self.thought_persist_queue_depth.load(Ordering::SeqCst),
+            pending_count: self.pending_thought_persists.load(Ordering::SeqCst),
+            overflow_slots: self.thought_persist_overflow_slots.load(Ordering::SeqCst),
+            queue_full_count: self.thought_persist_queue_full_count.load(Ordering::SeqCst),
+            coalesced_count: self.thought_persist_coalesced_count.load(Ordering::SeqCst),
+            dropped_count: self.thought_persist_dropped_count.load(Ordering::SeqCst),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_thought_persistence_backpressure_for_test(
+        &self,
+        queue_depth: usize,
+        overflow_slots: usize,
+        queue_full_count: u64,
+        coalesced_count: u64,
+        dropped_count: u64,
+    ) {
+        self.thought_persist_queue_depth
+            .store(queue_depth, Ordering::SeqCst);
+        self.thought_persist_overflow_slots
+            .store(overflow_slots, Ordering::SeqCst);
+        self.thought_persist_queue_full_count
+            .store(queue_full_count, Ordering::SeqCst);
+        self.thought_persist_coalesced_count
+            .store(coalesced_count, Ordering::SeqCst);
+        self.thought_persist_dropped_count
+            .store(dropped_count, Ordering::SeqCst);
+    }
+
     pub async fn wait_for_pending_thought_persists(&self, timeout: Duration) -> bool {
         let deadline = Instant::now() + timeout;
         loop {
@@ -2216,6 +2312,7 @@ pub struct SupervisorProvider {
     supervisor: Arc<SessionSupervisor>,
     handle: tokio::runtime::Handle,
     persist_tx: mpsc::Sender<PersistThoughtRequest>,
+    persist_overflow: Arc<ThoughtPersistOverflow>,
 }
 
 struct PersistThoughtRequest {
@@ -2234,32 +2331,73 @@ struct PersistThoughtRequest {
     objective_fingerprint: Option<String>,
 }
 
+struct ThoughtPersistOverflow {
+    slots: StdMutex<HashMap<String, PersistThoughtRequest>>,
+    notify: Notify,
+}
+
+impl Default for ThoughtPersistOverflow {
+    fn default() -> Self {
+        Self {
+            slots: StdMutex::new(HashMap::new()),
+            notify: Notify::new(),
+        }
+    }
+}
+
+impl ThoughtPersistOverflow {
+    fn insert_latest(&self, req: PersistThoughtRequest) -> (bool, usize) {
+        let mut slots = self
+            .slots
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let replaced = slots.insert(req.session_id.clone(), req).is_some();
+        (replaced, slots.len())
+    }
+
+    fn pop_next(&self) -> (Option<PersistThoughtRequest>, usize) {
+        let mut slots = self
+            .slots
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let next_key = slots.keys().next().cloned();
+        let req = next_key.and_then(|key| slots.remove(&key));
+        (req, slots.len())
+    }
+}
+
 impl SupervisorProvider {
     pub fn new(supervisor: Arc<SessionSupervisor>) -> Self {
+        Self::with_persist_queue_capacity(supervisor, THOUGHT_PERSIST_QUEUE_CAP)
+    }
+
+    fn with_persist_queue_capacity(
+        supervisor: Arc<SessionSupervisor>,
+        queue_capacity: usize,
+    ) -> Self {
         let handle = tokio::runtime::Handle::current();
-        let (persist_tx, mut persist_rx) =
-            mpsc::channel::<PersistThoughtRequest>(THOUGHT_PERSIST_QUEUE_CAP);
+        let (persist_tx, mut persist_rx) = mpsc::channel::<PersistThoughtRequest>(queue_capacity);
         let persist_supervisor = supervisor.clone();
+        let persist_overflow = Arc::new(ThoughtPersistOverflow::default());
+        let worker_overflow = persist_overflow.clone();
         handle.spawn(async move {
-            while let Some(req) = persist_rx.recv().await {
-                persist_supervisor
-                    .persist_thought(
-                        &req.session_id,
-                        req.thought.as_deref(),
-                        req.token_count,
-                        req.context_limit,
-                        req.thought_state,
-                        req.thought_source,
-                        req.rest_state,
-                        req.commit_candidate,
-                        req.action_cues,
-                        req.updated_at,
-                        req.delivery,
-                        req.objective_changed_at,
-                        req.objective_fingerprint,
-                    )
-                    .await;
-                persist_supervisor.finish_pending_thought_persist();
+            loop {
+                tokio::select! {
+                    req = persist_rx.recv() => {
+                        let Some(req) = req else {
+                            drain_coalesced_persist_requests(&persist_supervisor, &worker_overflow).await;
+                            break;
+                        };
+                        persist_thought_request(&persist_supervisor, req).await;
+                        persist_supervisor.record_thought_persist_queue_depth(persist_rx.len());
+                        drain_coalesced_persist_requests(&persist_supervisor, &worker_overflow).await;
+                    }
+                    _ = worker_overflow.notify.notified() => {
+                        if persist_rx.len() == 0 {
+                            drain_coalesced_persist_requests(&persist_supervisor, &worker_overflow).await;
+                        }
+                    }
+                }
             }
         });
 
@@ -2267,7 +2405,59 @@ impl SupervisorProvider {
             supervisor,
             handle,
             persist_tx,
+            persist_overflow,
         }
+    }
+
+    #[cfg(test)]
+    fn new_with_persist_queue_capacity(
+        supervisor: Arc<SessionSupervisor>,
+        queue_capacity: usize,
+    ) -> Self {
+        Self::with_persist_queue_capacity(supervisor, queue_capacity)
+    }
+
+    fn record_queue_depth(&self) {
+        let depth = self
+            .persist_tx
+            .max_capacity()
+            .saturating_sub(self.persist_tx.capacity());
+        self.supervisor.record_thought_persist_queue_depth(depth);
+    }
+}
+
+async fn persist_thought_request(supervisor: &Arc<SessionSupervisor>, req: PersistThoughtRequest) {
+    supervisor
+        .persist_thought(
+            &req.session_id,
+            req.thought.as_deref(),
+            req.token_count,
+            req.context_limit,
+            req.thought_state,
+            req.thought_source,
+            req.rest_state,
+            req.commit_candidate,
+            req.action_cues,
+            req.updated_at,
+            req.delivery,
+            req.objective_changed_at,
+            req.objective_fingerprint,
+        )
+        .await;
+    supervisor.finish_pending_thought_persist();
+}
+
+async fn drain_coalesced_persist_requests(
+    supervisor: &Arc<SessionSupervisor>,
+    overflow: &Arc<ThoughtPersistOverflow>,
+) {
+    loop {
+        let (req, slots) = overflow.pop_next();
+        supervisor.set_thought_persist_overflow_slots(slots);
+        let Some(req) = req else {
+            return;
+        };
+        persist_thought_request(supervisor, req).await;
     }
 }
 
@@ -2293,33 +2483,57 @@ impl SessionProvider for SupervisorProvider {
         objective_fingerprint: Option<String>,
     ) -> bool {
         self.supervisor.begin_pending_thought_persist();
-        if self
-            .persist_tx
-            .try_send(PersistThoughtRequest {
-                session_id: session_id.to_string(),
-                thought: thought.map(|value| value.to_string()),
-                token_count,
-                context_limit,
-                thought_state,
-                thought_source,
-                rest_state,
-                commit_candidate,
-                action_cues,
-                updated_at,
-                delivery,
-                objective_changed_at,
-                objective_fingerprint,
-            })
-            .is_err()
-        {
-            self.supervisor.finish_pending_thought_persist();
-            warn!(
-                session_id = %session_id,
-                "persist_thought queue full/closed; dropping thought snapshot"
-            );
-            return false;
+        let req = PersistThoughtRequest {
+            session_id: session_id.to_string(),
+            thought: thought.map(|value| value.to_string()),
+            token_count,
+            context_limit,
+            thought_state,
+            thought_source,
+            rest_state,
+            commit_candidate,
+            action_cues,
+            updated_at,
+            delivery,
+            objective_changed_at,
+            objective_fingerprint,
+        };
+
+        match self.persist_tx.try_send(req) {
+            Ok(()) => {
+                self.record_queue_depth();
+                true
+            }
+            Err(mpsc::error::TrySendError::Full(req)) => {
+                self.supervisor
+                    .record_thought_persist_queue_full(session_id);
+                let (replaced, slots) = self.persist_overflow.insert_latest(req);
+                self.supervisor.set_thought_persist_overflow_slots(slots);
+                if replaced {
+                    self.supervisor.record_thought_persist_coalesced(session_id);
+                    self.supervisor.finish_pending_thought_persist();
+                }
+                self.persist_overflow.notify.notify_one();
+                self.record_queue_depth();
+                warn!(
+                    session_id = %session_id,
+                    overflow_slots = slots,
+                    coalesced = replaced,
+                    "persist_thought queue full; coalescing latest thought snapshot"
+                );
+                false
+            }
+            Err(mpsc::error::TrySendError::Closed(_req)) => {
+                self.supervisor.finish_pending_thought_persist();
+                self.supervisor.record_thought_persist_dropped(session_id);
+                self.record_queue_depth();
+                warn!(
+                    session_id = %session_id,
+                    "persist_thought queue closed; dropping thought snapshot"
+                );
+                false
+            }
         }
-        true
     }
 
     fn thought_delivery_states(&self) -> HashMap<String, ThoughtDeliveryState> {
@@ -3720,6 +3934,113 @@ mod tests {
         let snapshot = thoughts.get("sess_1").expect("snapshot should exist");
         assert_eq!(snapshot.updated_at, updated_at);
         assert_eq!(snapshot.thought.as_deref(), Some("reading logs"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn supervisor_provider_coalesces_latest_thought_when_persist_queue_is_full() {
+        let supervisor = SessionSupervisor::new(Arc::new(Config::default()));
+        let provider = SupervisorProvider::new_with_persist_queue_capacity(supervisor.clone(), 1);
+        let first_at = DateTime::parse_from_rfc3339("2026-03-08T14:00:01Z")
+            .expect("timestamp should parse")
+            .with_timezone(&Utc);
+        let second_at = DateTime::parse_from_rfc3339("2026-03-08T14:00:02Z")
+            .expect("timestamp should parse")
+            .with_timezone(&Utc);
+        let third_at = DateTime::parse_from_rfc3339("2026-03-08T14:00:03Z")
+            .expect("timestamp should parse")
+            .with_timezone(&Utc);
+
+        assert!(provider.persist_thought(
+            "sess_1",
+            Some("first queued"),
+            1,
+            192_000,
+            ThoughtState::Active,
+            ThoughtSource::Llm,
+            RestState::Active,
+            false,
+            Vec::new(),
+            first_at,
+            ThoughtDeliveryState {
+                stream_instance_id: Some("stream-a".to_string()),
+                emission_seq: 1,
+            },
+            None,
+            Some("obj-1".to_string()),
+        ));
+        assert!(
+            !provider.persist_thought(
+                "sess_1",
+                Some("second overflow"),
+                2,
+                192_000,
+                ThoughtState::Active,
+                ThoughtSource::Llm,
+                RestState::Active,
+                false,
+                Vec::new(),
+                second_at,
+                ThoughtDeliveryState {
+                    stream_instance_id: Some("stream-a".to_string()),
+                    emission_seq: 2,
+                },
+                None,
+                Some("obj-2".to_string()),
+            ),
+            "queue-full writes should be accepted for coalesced persistence but reported as degraded"
+        );
+        assert!(
+            !provider.persist_thought(
+                "sess_1",
+                Some("third latest"),
+                3,
+                192_000,
+                ThoughtState::Active,
+                ThoughtSource::Llm,
+                RestState::Active,
+                false,
+                Vec::new(),
+                third_at,
+                ThoughtDeliveryState {
+                    stream_instance_id: Some("stream-a".to_string()),
+                    emission_seq: 3,
+                },
+                None,
+                Some("obj-3".to_string()),
+            ),
+            "overwriting an overflow slot remains a degraded durability path"
+        );
+
+        let pressure = supervisor.thought_persistence_backpressure_snapshot();
+        assert_eq!(pressure.queue_depth, 1);
+        assert_eq!(pressure.pending_count, 2);
+        assert_eq!(pressure.overflow_slots, 1);
+        assert_eq!(pressure.queue_full_count, 2);
+        assert_eq!(pressure.coalesced_count, 1);
+        assert_eq!(pressure.dropped_count, 0);
+
+        assert!(
+            supervisor
+                .wait_for_pending_thought_persists(Duration::from_secs(1))
+                .await,
+            "queued and coalesced thought writes should drain"
+        );
+
+        let thoughts = supervisor.thought_snapshots.read().await;
+        let snapshot = thoughts.get("sess_1").expect("snapshot should exist");
+        assert_eq!(snapshot.thought.as_deref(), Some("third latest"));
+        assert_eq!(snapshot.token_count, 3);
+        assert_eq!(snapshot.updated_at, third_at);
+        assert_eq!(snapshot.delivery.emission_seq, 3);
+        assert_eq!(
+            snapshot.delivery.stream_instance_id.as_deref(),
+            Some("stream-a")
+        );
+        drop(thoughts);
+
+        let drained = supervisor.thought_persistence_backpressure_snapshot();
+        assert_eq!(drained.pending_count, 0);
+        assert_eq!(drained.overflow_slots, 0);
     }
 
     #[tokio::test]

@@ -13,7 +13,10 @@ use crate::api::AppState;
 use crate::persistence::file_store::{PersistenceHealthSnapshot, PersistenceLoadSnapshot};
 use crate::session::overlay::{default_overlay_health, remote_targets_health};
 use crate::thought::health::{BridgeHealthSnapshot, BridgeStatus};
-use crate::types::{DependencyHealthLedger, DependencyHealthSnapshot, DependencyHealthStatus};
+use crate::types::{
+    DependencyHealthLedger, DependencyHealthSnapshot, DependencyHealthStatus,
+    ThoughtPersistenceBackpressureSnapshot,
+};
 
 #[derive(Debug, Serialize)]
 struct PersistenceHealth {
@@ -67,6 +70,7 @@ struct HealthResponse {
     status: BridgeStatus,
     uptime_secs: u64,
     thought_bridge: BridgeHealthSnapshot,
+    thought_persistence: ThoughtPersistenceBackpressureSnapshot,
     persistence: PersistenceHealth,
     dependencies: DependencyHealthLedger,
 }
@@ -101,12 +105,20 @@ async fn health_response(state: &Arc<AppState>) -> HealthResponse {
         .clone()
         .map(PersistenceHealth::from_snapshot)
         .unwrap_or_else(PersistenceHealth::unavailable);
+    let thought_persistence = state.supervisor.thought_persistence_backpressure_snapshot();
     let native_app = *state.native_desktop_app.read().await;
-    let dependencies = dependency_ledger(state, &thought_bridge, persistence_snapshot, native_app);
+    let dependencies = dependency_ledger(
+        state,
+        &thought_bridge,
+        persistence_snapshot,
+        &thought_persistence,
+        native_app,
+    );
     HealthResponse {
         status: thought_bridge.status,
         uptime_secs,
         thought_bridge,
+        thought_persistence,
         persistence,
         dependencies,
     }
@@ -130,13 +142,14 @@ fn dependency_ledger(
     state: &Arc<AppState>,
     thought_bridge: &BridgeHealthSnapshot,
     persistence: Option<PersistenceHealthSnapshot>,
+    thought_persistence: &ThoughtPersistenceBackpressureSnapshot,
     native_app: crate::types::NativeDesktopApp,
 ) -> DependencyHealthLedger {
     let tmux = state.supervisor.tmux_dependency_health_snapshot();
     DependencyHealthLedger {
         tmux_discovery: tmux.discovery,
         tmux_capture: tmux.capture,
-        persistence: persistence_dependency_health(persistence),
+        persistence: persistence_dependency_health(persistence, thought_persistence),
         thought_bridge: thought_bridge_dependency_health(thought_bridge),
         native_scripts: crate::native::script_dependency_health(native_app),
         overlay: default_overlay_health(),
@@ -146,9 +159,10 @@ fn dependency_ledger(
 
 fn persistence_dependency_health(
     snapshot: Option<PersistenceHealthSnapshot>,
+    thought_persistence: &ThoughtPersistenceBackpressureSnapshot,
 ) -> DependencyHealthSnapshot {
     let now = Utc::now();
-    match snapshot {
+    let mut health = match snapshot {
         Some(snapshot) if snapshot.ok => DependencyHealthSnapshot::healthy(now)
             .with_detail("available", "true")
             .with_detail("load_outcomes", snapshot.load_outcomes.len().to_string()),
@@ -173,7 +187,45 @@ fn persistence_dependency_health(
         }
         None => DependencyHealthSnapshot::unavailable(now, "file store unavailable")
             .with_detail("available", "false"),
+    };
+
+    health = health
+        .with_detail(
+            "thought_queue_capacity",
+            thought_persistence.queue_capacity.to_string(),
+        )
+        .with_detail(
+            "thought_queue_depth",
+            thought_persistence.queue_depth.to_string(),
+        )
+        .with_detail(
+            "thought_pending_count",
+            thought_persistence.pending_count.to_string(),
+        )
+        .with_detail(
+            "thought_overflow_slots",
+            thought_persistence.overflow_slots.to_string(),
+        )
+        .with_detail(
+            "thought_queue_full_count",
+            thought_persistence.queue_full_count.to_string(),
+        )
+        .with_detail(
+            "thought_coalesced_count",
+            thought_persistence.coalesced_count.to_string(),
+        )
+        .with_detail(
+            "thought_dropped_count",
+            thought_persistence.dropped_count.to_string(),
+        );
+    if thought_persistence.overflow_slots > 0
+        && matches!(health.status, DependencyHealthStatus::Healthy)
+    {
+        health.status = DependencyHealthStatus::Degraded;
+        health.last_error_at = Some(now);
+        health.last_error = Some("thought persistence backpressure".to_string());
     }
+    health
 }
 
 fn thought_bridge_dependency_health(snapshot: &BridgeHealthSnapshot) -> DependencyHealthSnapshot {
@@ -344,6 +396,12 @@ mod tests {
             "dependencies ledger should be present"
         );
         assert_eq!(json["dependencies"]["persistence"]["status"], "unavailable");
+        assert_eq!(json["thought_persistence"]["queue_depth"], 0);
+        assert_eq!(json["thought_persistence"]["overflow_slots"], 0);
+        assert_eq!(
+            json["dependencies"]["persistence"]["details"]["thought_queue_depth"],
+            "0"
+        );
         assert_eq!(json["dependencies"]["thought_bridge"]["status"], "healthy");
         assert!(json["dependencies"]["native_scripts"]["last_checked_at"].is_string());
     }
@@ -369,6 +427,47 @@ mod tests {
             "missing"
         );
         assert_eq!(json["dependencies"]["persistence"]["status"], "healthy");
+        assert_eq!(
+            json["dependencies"]["persistence"]["details"]["thought_queue_full_count"],
+            "0"
+        );
+    }
+
+    #[tokio::test]
+    async fn health_marks_persistence_dependency_degraded_for_thought_backpressure() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = FileStore::new(dir.path()).await.expect("file store");
+
+        let bridge_health = Arc::new(BridgeHealthState::new_with_tick(Duration::from_secs(15)));
+        bridge_health.record_success(None);
+
+        let state = test_state_with_store(bridge_health, Some(store));
+        state
+            .supervisor
+            .set_thought_persistence_backpressure_for_test(1, 1, 3, 2, 0);
+
+        let response = health(State(state)).await.into_response();
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let json = response_json(response).await;
+
+        assert_eq!(json["persistence"]["ok"], true);
+        assert_eq!(json["thought_persistence"]["queue_depth"], 1);
+        assert_eq!(json["thought_persistence"]["overflow_slots"], 1);
+        assert_eq!(json["thought_persistence"]["queue_full_count"], 3);
+        assert_eq!(json["thought_persistence"]["coalesced_count"], 2);
+        assert_eq!(json["dependencies"]["persistence"]["status"], "degraded");
+        assert_eq!(
+            json["dependencies"]["persistence"]["last_error"],
+            "thought persistence backpressure"
+        );
+        assert_eq!(
+            json["dependencies"]["persistence"]["details"]["thought_overflow_slots"],
+            "1"
+        );
+        assert_eq!(
+            json["dependencies"]["persistence"]["details"]["thought_coalesced_count"],
+            "2"
+        );
     }
 
     #[tokio::test]

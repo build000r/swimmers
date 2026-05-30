@@ -232,6 +232,17 @@ pub struct DependencyHealthLedger {
     pub remote_targets: DependencyHealthSnapshot,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ThoughtPersistenceBackpressureSnapshot {
+    pub queue_capacity: usize,
+    pub queue_depth: usize,
+    pub pending_count: usize,
+    pub overflow_slots: usize,
+    pub queue_full_count: u64,
+    pub coalesced_count: u64,
+    pub dropped_count: u64,
+}
+
 fn freshness_ms(seen_at: DateTime<Utc>, checked_at: DateTime<Utc>) -> Option<u64> {
     checked_at
         .signed_duration_since(seen_at)
@@ -1292,6 +1303,8 @@ pub struct ThoughtUpdatePayload {
     pub objective_changed: bool,
     #[serde(default = "default_bubble_precedence")]
     pub bubble_precedence: BubblePrecedence,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub persistence_degraded: bool,
     pub at: DateTime<Utc>,
 }
 

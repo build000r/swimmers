@@ -506,7 +506,7 @@ fn apply_update<P: SessionProvider>(
     let persisted_delivery = incoming_delivery
         .or_else(|| current_delivery.cloned())
         .unwrap_or_default();
-    if !provider.persist_thought(
+    let persistence_degraded = !provider.persist_thought(
         &update.session_id,
         update.thought.as_deref(),
         update.token_count,
@@ -520,8 +520,9 @@ fn apply_update<P: SessionProvider>(
         persisted_delivery.clone(),
         update.objective_changed.then_some(update.at),
         update.objective_fingerprint.clone(),
-    ) {
-        return;
+    );
+    if persistence_degraded {
+        metrics.increment_suppression(&update.session_id, "persistence_degraded", tier);
     }
 
     delivery_states.insert(update.session_id.clone(), persisted_delivery);
@@ -538,6 +539,7 @@ fn apply_update<P: SessionProvider>(
         action_cues: update.action_cues,
         objective_changed: update.objective_changed,
         bubble_precedence: update.bubble_precedence,
+        persistence_degraded,
         at: update.at,
     };
 
@@ -902,11 +904,12 @@ mod tests {
         assert_eq!(payload.action_cues, vec![commit_ready_cue()]);
         assert!(payload.objective_changed);
         assert_eq!(payload.bubble_precedence, BubblePrecedence::ThoughtFirst);
+        assert!(!payload.persistence_degraded);
         assert_eq!(payload.at, now);
     }
 
     #[test]
-    fn apply_sync_response_does_not_advance_state_when_persist_enqueue_fails() {
+    fn apply_sync_response_broadcasts_degraded_update_when_persist_enqueue_fails() {
         let provider = RecordingProvider {
             reject_persists: true,
             ..RecordingProvider::default()
@@ -945,16 +948,24 @@ mod tests {
         );
 
         assert!(provider.persisted.lock().expect("persisted").is_empty());
-        assert!(!delivery_states.contains_key("sess-reject"));
+        assert!(delivery_states.contains_key("sess-reject"));
         assert!(provider
             .delivery_states
             .lock()
             .expect("delivery states")
             .is_empty());
-        match event_rx.try_recv() {
-            Err(broadcast::error::TryRecvError::Empty) => {}
-            other => panic!("expected no event for rejected persist, got: {other:?}"),
-        }
+        let event = event_rx
+            .try_recv()
+            .expect("degraded event should broadcast");
+        assert_eq!(event.event, "thought_update");
+        assert_eq!(event.session_id, "sess-reject");
+        let payload: ThoughtUpdatePayload =
+            serde_json::from_value(event.payload).expect("payload should deserialize");
+        assert_eq!(
+            payload.thought.as_deref(),
+            Some("Do not publish before persist")
+        );
+        assert!(payload.persistence_degraded);
     }
 
     #[test]

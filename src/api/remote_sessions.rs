@@ -1,11 +1,13 @@
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
+use chrono::{DateTime, Utc};
 use futures::future::join_all;
 use reqwest::Client;
 
@@ -15,7 +17,7 @@ use crate::types::{
     CreateSessionRequest, CreateSessionResponse, CreateSessionsBatchRequest,
     CreateSessionsBatchResponse, ErrorResponse, LaunchPathMapping, LaunchTargetSummary,
     SessionAgentContextResponse, SessionGitDiffResponse, SessionListResponse, SessionSummary,
-    SessionTimelineResponse, SessionTranscriptResponse,
+    SessionTimelineResponse, SessionTranscriptResponse, StateEvidence, TransportHealth,
 };
 
 const REMOTE_LIST_TIMEOUT: Duration = Duration::from_millis(900);
@@ -24,7 +26,15 @@ const REMOTE_CONNECT_TIMEOUT: Duration = Duration::from_millis(500);
 const REMOTE_SESSION_SEPARATOR: &str = "::";
 const REMOTE_POLL_FAILURE_BACKOFF_MS: u64 = 10_000;
 
-static REMOTE_POLL_BACKOFF_UNTIL_MS: AtomicU64 = AtomicU64::new(0);
+#[derive(Clone, Debug)]
+struct RemoteTargetSessionCache {
+    sessions: Vec<SessionSummary>,
+    last_seen_at: Option<DateTime<Utc>>,
+    backoff_until_ms: u64,
+}
+
+static REMOTE_TARGET_SESSION_CACHE: OnceLock<Mutex<HashMap<String, RemoteTargetSessionCache>>> =
+    OnceLock::new();
 
 #[derive(Debug)]
 pub struct RemoteSessionError {
@@ -103,10 +113,6 @@ pub async fn list_remote_sessions() -> Vec<SessionSummary> {
         return Vec::new();
     }
 
-    if remote_poll_backoff_active() {
-        return Vec::new();
-    }
-
     let Some(overlay) = default_overlay() else {
         return Vec::new();
     };
@@ -131,49 +137,142 @@ pub async fn list_remote_sessions() -> Vec<SessionSummary> {
         return Vec::new();
     }
 
+    list_remote_sessions_for_targets(targets).await
+}
+
+async fn list_remote_sessions_for_targets(
+    targets: Vec<LaunchTargetSummary>,
+) -> Vec<SessionSummary> {
     let client = match http_client(REMOTE_LIST_TIMEOUT) {
         Ok(client) => client,
         Err(err) => {
             tracing::warn!(error = %err.message(), "remote session aggregation disabled");
-            return Vec::new();
+            return targets
+                .into_iter()
+                .flat_map(|target| record_remote_poll_failure(&target.id))
+                .collect();
         }
     };
 
-    let results = join_all(
-        targets
-            .into_iter()
-            .filter_map(|target| {
-                remote_auth_token_for_polling(&target).map(|token| (target, token))
-            })
-            .map(|(target, token)| {
-                let client = client.clone();
-                async move { list_remote_sessions_for_target(&client, target, token).await }
-            }),
-    )
+    let results = join_all(targets.into_iter().map(|target| {
+        let client = client.clone();
+        async move { list_remote_sessions_for_poll_target(&client, target).await }
+    }))
     .await;
 
-    results
-        .into_iter()
-        .flat_map(|sessions| match sessions {
-            Ok(sessions) => sessions,
-            Err(err) => {
-                tracing::warn!(error = %err.message(), "remote session list failed");
-                record_remote_poll_failure();
-                Vec::new()
-            }
+    results.into_iter().flatten().collect()
+}
+
+async fn list_remote_sessions_for_poll_target(
+    client: &Client,
+    target: LaunchTargetSummary,
+) -> Vec<SessionSummary> {
+    let target_id = target.id.clone();
+    if remote_poll_backoff_active(&target_id) {
+        return cached_stale_sessions_for_target(&target_id);
+    }
+
+    let auth_token = match remote_auth_token(&target) {
+        Ok(token) => token,
+        Err(err) => {
+            tracing::debug!(
+                target = %target.id,
+                error = %err.message(),
+                "skipping remote session polling"
+            );
+            return record_remote_poll_failure(&target_id);
+        }
+    };
+
+    match list_remote_sessions_for_target(client, target, auth_token).await {
+        Ok(sessions) => {
+            record_remote_poll_success(&target_id, &sessions);
+            sessions
+        }
+        Err(err) => {
+            tracing::warn!(
+                target = %target_id,
+                error = %err.message(),
+                "remote session list failed"
+            );
+            record_remote_poll_failure(&target_id)
+        }
+    }
+}
+
+fn remote_poll_backoff_active(target_id: &str) -> bool {
+    let now = now_ms();
+    with_remote_target_session_cache(|cache| {
+        cache
+            .get(target_id)
+            .is_some_and(|entry| now < entry.backoff_until_ms)
+    })
+}
+
+fn record_remote_poll_success(target_id: &str, sessions: &[SessionSummary]) {
+    let entry = RemoteTargetSessionCache {
+        sessions: sessions.to_vec(),
+        last_seen_at: Some(Utc::now()),
+        backoff_until_ms: 0,
+    };
+    with_remote_target_session_cache(|cache| {
+        cache.insert(target_id.to_string(), entry);
+    });
+}
+
+fn record_remote_poll_failure(target_id: &str) -> Vec<SessionSummary> {
+    let backoff_until_ms = now_ms().saturating_add(REMOTE_POLL_FAILURE_BACKOFF_MS);
+    with_remote_target_session_cache(|cache| {
+        let entry =
+            cache
+                .entry(target_id.to_string())
+                .or_insert_with(|| RemoteTargetSessionCache {
+                    sessions: Vec::new(),
+                    last_seen_at: None,
+                    backoff_until_ms: 0,
+                });
+        entry.backoff_until_ms = backoff_until_ms;
+        stale_sessions_from_cache(entry)
+    })
+}
+
+fn cached_stale_sessions_for_target(target_id: &str) -> Vec<SessionSummary> {
+    with_remote_target_session_cache(|cache| {
+        cache
+            .get(target_id)
+            .map(stale_sessions_from_cache)
+            .unwrap_or_default()
+    })
+}
+
+fn stale_sessions_from_cache(entry: &RemoteTargetSessionCache) -> Vec<SessionSummary> {
+    entry
+        .sessions
+        .iter()
+        .cloned()
+        .map(|mut session| {
+            session.is_stale = true;
+            session.transport_health = TransportHealth::Degraded;
+            session.state_evidence =
+                StateEvidence::with_observed_at("remote_poll_degraded", entry.last_seen_at);
+            session
         })
         .collect()
 }
 
-fn remote_poll_backoff_active() -> bool {
-    now_ms() < REMOTE_POLL_BACKOFF_UNTIL_MS.load(Ordering::Acquire)
+fn with_remote_target_session_cache<R>(
+    f: impl FnOnce(&mut HashMap<String, RemoteTargetSessionCache>) -> R,
+) -> R {
+    let mut cache = REMOTE_TARGET_SESSION_CACHE
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    f(&mut cache)
 }
 
-fn record_remote_poll_failure() {
-    REMOTE_POLL_BACKOFF_UNTIL_MS.store(
-        now_ms().saturating_add(REMOTE_POLL_FAILURE_BACKOFF_MS),
-        Ordering::Release,
-    );
+#[cfg(test)]
+fn reset_remote_target_session_cache_for_tests() {
+    with_remote_target_session_cache(|cache| cache.clear());
 }
 
 fn now_ms() -> u64 {
@@ -795,20 +894,6 @@ fn remote_auth_token(target: &LaunchTargetSummary) -> Result<Option<String>, Rem
     Ok(Some(token))
 }
 
-fn remote_auth_token_for_polling(target: &LaunchTargetSummary) -> Option<Option<String>> {
-    match remote_auth_token(target) {
-        Ok(token) => Some(token),
-        Err(err) => {
-            tracing::debug!(
-                target = %target.id,
-                error = %err.message(),
-                "skipping remote session polling"
-            );
-            None
-        }
-    }
-}
-
 async fn remote_response_error(
     target: &LaunchTargetSummary,
     response: reqwest::Response,
@@ -1392,6 +1477,94 @@ mod tests {
         );
         assert_eq!(sessions[0].tmux_name, "[Jeremy Skillbox] 7");
         handle.abort();
+    }
+
+    #[tokio::test]
+    async fn remote_poll_failure_returns_cached_stale_sessions_with_degraded_metadata() {
+        let _guard = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        reset_remote_target_session_cache_for_tests();
+        let client = http_client(REMOTE_LIST_TIMEOUT).expect("http client");
+
+        let (base_url, handle) = spawn_list_server().await;
+        let mut target = target();
+        target.base_url = Some(base_url);
+
+        let initial = list_remote_sessions_for_poll_target(&client, target.clone()).await;
+        assert_eq!(initial.len(), 1);
+        assert_eq!(initial[0].transport_health, TransportHealth::Healthy);
+        assert!(!initial[0].is_stale);
+        handle.abort();
+
+        let (bad_base_url, bad_handle) = spawn_timeline_server().await;
+        target.base_url = Some(bad_base_url);
+        let stale = list_remote_sessions_for_poll_target(&client, target).await;
+
+        assert_eq!(stale.len(), 1);
+        assert_eq!(
+            stale[0].session_id,
+            namespace_session_id("jeremy-skillbox", "sess_1")
+        );
+        assert!(stale[0].is_stale);
+        assert_eq!(stale[0].transport_health, TransportHealth::Degraded);
+        assert_eq!(stale[0].state_evidence.cause, "remote_poll_degraded");
+        assert!(stale[0].state_evidence.observed_at.is_some());
+
+        bad_handle.abort();
+        reset_remote_target_session_cache_for_tests();
+    }
+
+    #[tokio::test]
+    async fn one_failed_remote_target_does_not_hide_other_targets() {
+        let _guard = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        reset_remote_target_session_cache_for_tests();
+        let client = http_client(REMOTE_LIST_TIMEOUT).expect("http client");
+
+        let (alpha_base_url, alpha_handle) = spawn_list_server().await;
+        let mut alpha = target();
+        alpha.id = "alpha".to_string();
+        alpha.label = "Alpha".to_string();
+        alpha.base_url = Some(alpha_base_url);
+
+        let initial_alpha = list_remote_sessions_for_poll_target(&client, alpha.clone()).await;
+        assert_eq!(
+            initial_alpha[0].session_id,
+            namespace_session_id("alpha", "sess_1")
+        );
+        alpha_handle.abort();
+
+        let (bad_base_url, bad_handle) = spawn_timeline_server().await;
+        let mut failed_alpha = alpha;
+        failed_alpha.base_url = Some(bad_base_url);
+
+        let (beta_base_url, beta_handle) = spawn_list_server().await;
+        let mut beta = target();
+        beta.id = "beta".to_string();
+        beta.label = "Beta".to_string();
+        beta.base_url = Some(beta_base_url);
+
+        let sessions = list_remote_sessions_for_targets(vec![failed_alpha, beta]).await;
+        assert_eq!(sessions.len(), 2);
+        let alpha = sessions
+            .iter()
+            .find(|session| session.session_id == namespace_session_id("alpha", "sess_1"))
+            .expect("stale alpha session remains visible");
+        let beta = sessions
+            .iter()
+            .find(|session| session.session_id == namespace_session_id("beta", "sess_1"))
+            .expect("healthy beta session remains visible");
+
+        assert!(alpha.is_stale);
+        assert_eq!(alpha.transport_health, TransportHealth::Degraded);
+        assert!(!beta.is_stale);
+        assert_eq!(beta.transport_health, TransportHealth::Healthy);
+
+        bad_handle.abort();
+        beta_handle.abort();
+        reset_remote_target_session_cache_for_tests();
     }
 
     #[tokio::test]
