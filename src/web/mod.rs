@@ -25,7 +25,7 @@ use crate::session::actor::{
     ActorHandle, InputDeliveryResult, OutputFrame, ReplayCursor, SessionCommand, SubscribeOutcome,
 };
 use crate::session::supervisor::LifecycleEvent;
-use crate::types::{clamp_terminal_resize, opcodes, ControlEvent};
+use crate::types::{clamp_terminal_resize, opcodes, ControlEvent, SessionSummary};
 
 const APP_JS_ROUTE: &str = "/app.js";
 const RENDERED_SURFACE_JS_ROUTE: &str = "/rendered_surface.js";
@@ -979,55 +979,24 @@ async fn session_ws_authenticated_inner(
     let summary = fetch_live_summary(&state, &session_id).await?;
     let can_write = auth.has_scope(AuthScope::StreamWrite);
 
-    let ready_payload = serde_json::json!({
-        "type": "ready",
-        "sessionId": session_id,
-        "readOnly": !can_write,
-        "replay": {
-            "latestSeq": replay_cursor.latest_seq,
-            "windowStartSeq": replay_cursor.replay_window_start_seq,
-            "resumeFromSeq": requested_resume_from_seq,
-        },
-        "protocol": {
-            "output": match output_mode {
-                WsOutputMode::Raw => "raw",
-                WsOutputMode::Framed => "framed_v1",
-            },
-        },
-        "summary": summary,
-    });
+    let ready_payload = build_ready_payload(
+        &session_id,
+        can_write,
+        replay_cursor,
+        requested_resume_from_seq,
+        output_mode,
+        &summary,
+    );
     sender
         .send(Message::Text(ready_payload.to_string().into()))
         .await?;
 
-    match subscribe_outcome {
-        SubscribeOutcome::Ok => {}
-        SubscribeOutcome::Rejected { reason } => {
-            let notice = serde_json::json!({
-                "type": "overloaded",
-                "code": "SESSION_OVERLOADED",
-                "message": reason,
-                "retryAfterMs": 4000,
-            });
-            sender
-                .send(Message::Text(notice.to_string().into()))
-                .await?;
+    if let Some((notice, should_close)) = subscribe_outcome_notice(&subscribe_outcome) {
+        sender
+            .send(Message::Text(notice.to_string().into()))
+            .await?;
+        if should_close {
             return Ok(());
-        }
-        SubscribeOutcome::ReplayTruncated {
-            requested_resume_from_seq,
-            replay_window_start_seq,
-            latest_seq,
-        } => {
-            let notice = serde_json::json!({
-                "type": "replay_truncated",
-                "requestedResumeFromSeq": requested_resume_from_seq,
-                "windowStartSeq": replay_window_start_seq,
-                "latestSeq": latest_seq,
-            });
-            sender
-                .send(Message::Text(notice.to_string().into()))
-                .await?;
         }
     }
 
@@ -1054,6 +1023,68 @@ async fn session_ws_authenticated_inner(
 
     let _ = handle.send(SessionCommand::Unsubscribe { client_id }).await;
     Ok(())
+}
+
+/// Build the `ready` handshake payload sent immediately after a client
+/// authenticates. Pure; no I/O. `readOnly` mirrors the absence of write scope
+/// and `protocol.output` reflects the negotiated output mode.
+fn build_ready_payload(
+    session_id: &str,
+    can_write: bool,
+    replay_cursor: ReplayCursor,
+    requested_resume_from_seq: u64,
+    output_mode: WsOutputMode,
+    summary: &Option<SessionSummary>,
+) -> serde_json::Value {
+    serde_json::json!({
+        "type": "ready",
+        "sessionId": session_id,
+        "readOnly": !can_write,
+        "replay": {
+            "latestSeq": replay_cursor.latest_seq,
+            "windowStartSeq": replay_cursor.replay_window_start_seq,
+            "resumeFromSeq": requested_resume_from_seq,
+        },
+        "protocol": {
+            "output": match output_mode {
+                WsOutputMode::Raw => "raw",
+                WsOutputMode::Framed => "framed_v1",
+            },
+        },
+        "summary": summary,
+    })
+}
+
+/// Pure mapping from a subscribe outcome to the notice payload to send (if any)
+/// and whether the connection should close after sending it. No I/O. `Ok` sends
+/// nothing; `Rejected` emits an overloaded notice and closes; `ReplayTruncated`
+/// emits a notice and keeps streaming.
+fn subscribe_outcome_notice(outcome: &SubscribeOutcome) -> Option<(serde_json::Value, bool)> {
+    match outcome {
+        SubscribeOutcome::Ok => None,
+        SubscribeOutcome::Rejected { reason } => Some((
+            serde_json::json!({
+                "type": "overloaded",
+                "code": "SESSION_OVERLOADED",
+                "message": reason,
+                "retryAfterMs": 4000,
+            }),
+            true,
+        )),
+        SubscribeOutcome::ReplayTruncated {
+            requested_resume_from_seq,
+            replay_window_start_seq,
+            latest_seq,
+        } => Some((
+            serde_json::json!({
+                "type": "replay_truncated",
+                "requestedResumeFromSeq": requested_resume_from_seq,
+                "windowStartSeq": replay_window_start_seq,
+                "latestSeq": latest_seq,
+            }),
+            false,
+        )),
+    }
 }
 
 enum SessionWsEvent {
@@ -2194,6 +2225,75 @@ mod tests {
 
     fn observer_auth() -> AuthInfo {
         AuthInfo::new(OBSERVER_SCOPES.to_vec())
+    }
+
+    // --- build_ready_payload / subscribe_outcome_notice (handshake branches) ---
+
+    #[test]
+    fn build_ready_payload_observer_is_read_only_with_framed_protocol() {
+        let cursor = ReplayCursor {
+            latest_seq: 42,
+            replay_window_start_seq: 10,
+        };
+        let payload = build_ready_payload("sess-1", false, cursor, 7, WsOutputMode::Framed, &None);
+        assert_eq!(payload["type"], "ready");
+        assert_eq!(payload["sessionId"], "sess-1");
+        assert_eq!(payload["readOnly"], true);
+        assert_eq!(payload["replay"]["latestSeq"], 42);
+        assert_eq!(payload["replay"]["windowStartSeq"], 10);
+        assert_eq!(payload["replay"]["resumeFromSeq"], 7);
+        assert_eq!(payload["protocol"]["output"], "framed_v1");
+        assert_eq!(payload["summary"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn build_ready_payload_writer_is_not_read_only_with_raw_protocol() {
+        let cursor = ReplayCursor {
+            latest_seq: 1,
+            replay_window_start_seq: 0,
+        };
+        let payload = build_ready_payload("s", true, cursor, 0, WsOutputMode::Raw, &None);
+        assert_eq!(payload["readOnly"], false);
+        assert_eq!(payload["protocol"]["output"], "raw");
+    }
+
+    #[test]
+    fn subscribe_outcome_notice_ok_sends_nothing() {
+        assert!(subscribe_outcome_notice(&SubscribeOutcome::Ok).is_none());
+    }
+
+    #[test]
+    fn subscribe_outcome_notice_rejected_overloads_and_closes() {
+        let (notice, should_close) = subscribe_outcome_notice(&SubscribeOutcome::Rejected {
+            reason: "session is busy".to_string(),
+        })
+        .expect("rejected outcome should produce a notice");
+        assert!(
+            should_close,
+            "a rejected subscription must close the socket"
+        );
+        assert_eq!(notice["type"], "overloaded");
+        assert_eq!(notice["code"], "SESSION_OVERLOADED");
+        assert_eq!(notice["message"], "session is busy");
+        assert_eq!(notice["retryAfterMs"], 4000);
+    }
+
+    #[test]
+    fn subscribe_outcome_notice_replay_truncated_notifies_and_continues() {
+        let (notice, should_close) = subscribe_outcome_notice(&SubscribeOutcome::ReplayTruncated {
+            requested_resume_from_seq: 5,
+            replay_window_start_seq: 9,
+            latest_seq: 20,
+        })
+        .expect("replay-truncated outcome should produce a notice");
+        assert!(
+            !should_close,
+            "replay-truncated must keep streaming, not close"
+        );
+        assert_eq!(notice["type"], "replay_truncated");
+        assert_eq!(notice["requestedResumeFromSeq"], 5);
+        assert_eq!(notice["windowStartSeq"], 9);
+        assert_eq!(notice["latestSeq"], 20);
     }
 
     #[test]
