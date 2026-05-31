@@ -1534,7 +1534,16 @@ impl SessionSupervisor {
             .iter()
             .map(|handle| handle.session_id.clone())
             .collect::<HashSet<_>>();
-        let cached_summaries = self.summary_cache.read().await.clone();
+        let handles_with_cached = {
+            let cache = self.summary_cache.read().await;
+            handles
+                .into_iter()
+                .map(|handle| {
+                    let cached = cache.get(&handle.session_id).cloned();
+                    (handle, cached)
+                })
+                .collect::<Vec<_>>()
+        };
 
         enum SummaryCollectOutcome {
             Live(SessionSummary),
@@ -1543,22 +1552,43 @@ impl SessionSupervisor {
             Missing,
         }
 
-        let futs: Vec<_> = handles
+        let futs: Vec<_> = handles_with_cached
             .into_iter()
-            .map(|handle| {
-                let cached = cached_summaries.get(&handle.session_id).cloned();
-                async move {
-                    let (tx, rx) = oneshot::channel();
-                    if handle
-                        .cmd_tx
-                        .send(SessionCommand::GetSummary(tx))
-                        .await
-                        .is_err()
-                    {
-                        warn!(session_id = %handle.session_id, "actor summary command channel closed");
-                        return match cached {
+            .map(|(handle, cached)| async move {
+                let (tx, rx) = oneshot::channel();
+                if handle
+                    .cmd_tx
+                    .send(SessionCommand::GetSummary(tx))
+                    .await
+                    .is_err()
+                {
+                    warn!(session_id = %handle.session_id, "actor summary command channel closed");
+                    return match cached {
+                        Some(summary) => {
+                            let reason = SummaryFallbackReason::ChannelClosed;
+                            crate::metrics::increment_summary_fallback(reason);
+                            SummaryCollectOutcome::Fallback(
+                                summary.into_cached_collection_fallback(reason),
+                            )
+                        }
+                        None => {
+                            crate::metrics::increment_summary_fallback(
+                                SummaryFallbackReason::Missing,
+                            );
+                            SummaryCollectOutcome::Missing
+                        }
+                    };
+                }
+                match tokio::time::timeout(timeout, rx).await {
+                    Ok(Ok(summary)) if summary.state != SessionState::Exited => {
+                        SummaryCollectOutcome::Live(summary)
+                    }
+                    Ok(Ok(summary)) => SummaryCollectOutcome::Exited(summary.session_id),
+                    Ok(Err(_)) => {
+                        warn!(session_id = %handle.session_id, "actor dropped summary reply");
+                        match cached {
                             Some(summary) => {
-                                let reason = SummaryFallbackReason::ChannelClosed;
+                                let reason = SummaryFallbackReason::Dropped;
                                 crate::metrics::increment_summary_fallback(reason);
                                 SummaryCollectOutcome::Fallback(
                                     summary.into_cached_collection_fallback(reason),
@@ -1570,47 +1600,23 @@ impl SessionSupervisor {
                                 );
                                 SummaryCollectOutcome::Missing
                             }
-                        };
+                        }
                     }
-                    match tokio::time::timeout(timeout, rx).await {
-                        Ok(Ok(summary)) if summary.state != SessionState::Exited => {
-                            SummaryCollectOutcome::Live(summary)
-                        }
-                        Ok(Ok(summary)) => SummaryCollectOutcome::Exited(summary.session_id),
-                        Ok(Err(_)) => {
-                            warn!(session_id = %handle.session_id, "actor dropped summary reply");
-                            match cached {
-                                Some(summary) => {
-                                    let reason = SummaryFallbackReason::Dropped;
-                                    crate::metrics::increment_summary_fallback(reason);
-                                    SummaryCollectOutcome::Fallback(
-                                        summary.into_cached_collection_fallback(reason),
-                                    )
-                                }
-                                None => {
-                                    crate::metrics::increment_summary_fallback(
-                                        SummaryFallbackReason::Missing,
-                                    );
-                                    SummaryCollectOutcome::Missing
-                                }
+                    Err(_) => {
+                        warn!(session_id = %handle.session_id, "summary request timed out");
+                        match cached {
+                            Some(summary) => {
+                                let reason = SummaryFallbackReason::Timeout;
+                                crate::metrics::increment_summary_fallback(reason);
+                                SummaryCollectOutcome::Fallback(
+                                    summary.into_cached_collection_fallback(reason),
+                                )
                             }
-                        }
-                        Err(_) => {
-                            warn!(session_id = %handle.session_id, "summary request timed out");
-                            match cached {
-                                Some(summary) => {
-                                    let reason = SummaryFallbackReason::Timeout;
-                                    crate::metrics::increment_summary_fallback(reason);
-                                    SummaryCollectOutcome::Fallback(
-                                        summary.into_cached_collection_fallback(reason),
-                                    )
-                                }
-                                None => {
-                                    crate::metrics::increment_summary_fallback(
-                                        SummaryFallbackReason::Missing,
-                                    );
-                                    SummaryCollectOutcome::Missing
-                                }
+                            None => {
+                                crate::metrics::increment_summary_fallback(
+                                    SummaryFallbackReason::Missing,
+                                );
+                                SummaryCollectOutcome::Missing
                             }
                         }
                     }
