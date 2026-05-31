@@ -662,6 +662,18 @@ fn scan_repo_search_roots_sync(roots: &[PathBuf], max_depth: usize) -> Vec<DirEn
 
 pub async fn list_repo_search_entries() -> Result<DirRepoSearchResponse, ApiServiceError> {
     let roots = repo_search_roots();
+    let max_depth = repo_search_max_depth();
+    list_repo_search_entries_inner(roots, max_depth).await
+}
+
+/// Core of [`list_repo_search_entries`] with the env-derived `roots`/`max_depth`
+/// injected, so the empty-roots short-circuit, cache-hit, and rescan branches
+/// are testable without touching process env. The outer wrapper only resolves
+/// the configured roots and depth before delegating here.
+async fn list_repo_search_entries_inner(
+    roots: Vec<PathBuf>,
+    max_depth: usize,
+) -> Result<DirRepoSearchResponse, ApiServiceError> {
     let root_labels = roots
         .iter()
         .map(|root| root.to_string_lossy().into_owned())
@@ -673,7 +685,6 @@ pub async fn list_repo_search_entries() -> Result<DirRepoSearchResponse, ApiServ
         });
     }
 
-    let max_depth = repo_search_max_depth();
     if let Ok(cache) = repo_search_cache().lock() {
         if let Some(cache) = cache.as_ref() {
             if cache.roots == roots
@@ -2473,6 +2484,81 @@ mod tests {
         let parent = parent.canonicalize().expect("canonical parent");
 
         assert_eq!(paths, vec![parent.to_string_lossy().into_owned()]);
+    }
+
+    // Empty roots short-circuit before any cache access, so this test never
+    // touches the global repo-search cache — keeping it race-free alongside the
+    // scan/cache test below, which is the sole cache mutator.
+    #[tokio::test]
+    async fn list_repo_search_entries_inner_returns_empty_for_no_roots() {
+        let response = list_repo_search_entries_inner(Vec::new(), REPO_SEARCH_DEFAULT_MAX_DEPTH)
+            .await
+            .expect("empty roots should not error");
+        assert!(response.roots.is_empty(), "no roots should yield no labels");
+        assert!(
+            response.entries.is_empty(),
+            "no roots should yield no entries"
+        );
+    }
+
+    // Exercises the rescan-and-populate branch followed by the cache-hit branch.
+    // Removing the repo from disk between calls proves the second call serves the
+    // cached entries rather than rescanning. This is the only test that mutates
+    // the process-global repo-search cache.
+    #[tokio::test]
+    async fn list_repo_search_entries_inner_scans_then_serves_cache() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().join("repos");
+        let repo = root.join("alpha");
+        std::fs::create_dir_all(repo.join(".git")).expect("create git marker");
+
+        clear_repo_search_cache_for_tests();
+        let scanned =
+            list_repo_search_entries_inner(vec![root.clone()], REPO_SEARCH_DEFAULT_MAX_DEPTH)
+                .await
+                .expect("fresh scan should succeed");
+        let repo_canon = repo.canonicalize().expect("canonical repo");
+        assert!(
+            scanned.entries.iter().any(|entry| {
+                entry.full_path.as_deref() == Some(repo_canon.to_string_lossy().as_ref())
+            }),
+            "fresh scan should find the alpha repo, got {:?}",
+            scanned.entries
+        );
+        assert_eq!(
+            scanned.roots,
+            vec![root.to_string_lossy().into_owned()],
+            "roots label should echo the requested root"
+        );
+
+        // Delete the repo from disk; a cache hit within the TTL must still
+        // return the previously scanned entries instead of rescanning. A rescan
+        // now would find nothing, so finding alpha proves the cache served it.
+        std::fs::remove_dir_all(&repo).expect("remove repo");
+        let cached =
+            list_repo_search_entries_inner(vec![root.clone()], REPO_SEARCH_DEFAULT_MAX_DEPTH)
+                .await
+                .expect("cache hit should succeed");
+        let cached_paths = cached
+            .entries
+            .iter()
+            .filter_map(|entry| entry.full_path.clone())
+            .collect::<Vec<_>>();
+        let scanned_paths = scanned
+            .entries
+            .iter()
+            .filter_map(|entry| entry.full_path.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            cached_paths, scanned_paths,
+            "second call within TTL should serve cached entries, not rescan"
+        );
+        assert!(
+            cached_paths.contains(&repo_canon.to_string_lossy().into_owned()),
+            "cache hit should still surface the now-deleted repo (a rescan would not)"
+        );
+
+        clear_repo_search_cache_for_tests();
     }
 
     fn summary(session_id: &str, tmux_name: &str, state: SessionState) -> SessionSummary {
