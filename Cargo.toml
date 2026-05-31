@@ -85,6 +85,7 @@ whisper-rs = { version = "0.16", optional = true }
 [dev-dependencies]
 proptest = "1"
 tempfile = "3"
+tokio-tungstenite = "0.28"
 
 [features]
 # Personal workstation workflow endpoints (overlay-driven directory browsing,

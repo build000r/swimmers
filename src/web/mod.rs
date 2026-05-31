@@ -2296,6 +2296,107 @@ mod tests {
         assert_eq!(notice["latestSeq"], 20);
     }
 
+    // --- session_ws_authenticated_inner live-socket integration ---
+
+    fn test_state() -> Arc<AppState> {
+        use tokio::sync::RwLock;
+        let config = Arc::new(Config::default());
+        let supervisor = crate::session::supervisor::SessionSupervisor::new(config.clone());
+        Arc::new(AppState {
+            supervisor,
+            config,
+            thought_config: Arc::new(RwLock::new(
+                crate::thought::runtime_config::ThoughtConfig::default(),
+            )),
+            native_desktop_app: Arc::new(RwLock::new(crate::types::NativeDesktopApp::Iterm)),
+            ghostty_open_mode: Arc::new(RwLock::new(crate::types::GhosttyOpenMode::Swap)),
+            sync_request_sequence: Arc::new(crate::thought::protocol::SyncRequestSequence::new()),
+            daemon_defaults: crate::api::once_lock_with(None),
+            file_store: crate::api::once_lock_with(None),
+            bridge_health: Arc::new(crate::thought::health::BridgeHealthState::new_with_tick(
+                std::time::Duration::from_secs(15),
+            )),
+            published_selection: Arc::new(RwLock::new(
+                crate::api::PublishedSelectionState::default(),
+            )),
+            repo_actions: crate::host_actions::RepoActionTracker::default(),
+        })
+    }
+
+    // Drives the real authenticated WS loop end-to-end over a live socket. Under
+    // LocalTrust there is no first-frame handshake, so connecting to a live
+    // session exercises session_ws_authenticated_inner through the replay-cursor
+    // request, output subscribe (Ok), summary fetch, ready payload, and teardown.
+    // A minimal fake actor answers the three handshake commands the path needs.
+    #[tokio::test]
+    async fn session_ws_authenticated_inner_streams_ready_payload_over_live_socket() {
+        use tokio_tungstenite::tungstenite::Message as ClientMessage;
+
+        let (cmd_tx, mut cmd_rx) = mpsc::channel::<SessionCommand>(16);
+        tokio::spawn(async move {
+            while let Some(cmd) = cmd_rx.recv().await {
+                match cmd {
+                    SessionCommand::GetReplayCursor(reply) => {
+                        let _ = reply.send(ReplayCursor {
+                            latest_seq: 5,
+                            replay_window_start_seq: 1,
+                        });
+                    }
+                    SessionCommand::Subscribe { ack, .. } => {
+                        let _ = ack.send(SubscribeOutcome::Ok);
+                    }
+                    SessionCommand::GetSummary(reply) => {
+                        let _ = reply.send(SessionSummary::placeholder(
+                            "ws-sess",
+                            "ws-sess",
+                            chrono::Utc::now(),
+                        ));
+                    }
+                    _ => {}
+                }
+            }
+        });
+
+        let state = test_state();
+        let handle = ActorHandle::test_handle("ws-sess", "ws-sess", cmd_tx);
+        state.supervisor.insert_test_handle(handle).await;
+
+        let app = routes().with_state(state.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind ws test server");
+        let addr = listener.local_addr().expect("server addr");
+        let server = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        let url = format!("ws://{addr}/ws/sessions/ws-sess");
+        let (mut ws, _resp) = tokio_tungstenite::connect_async(url)
+            .await
+            .expect("ws connect");
+
+        let first = tokio::time::timeout(Duration::from_secs(5), ws.next())
+            .await
+            .expect("ready payload within timeout")
+            .expect("ws stream item")
+            .expect("ws message");
+        let text = match first {
+            ClientMessage::Text(text) => text,
+            other => panic!("expected text ready frame, got {other:?}"),
+        };
+        let payload: serde_json::Value =
+            serde_json::from_str(&text).expect("ready payload is json");
+        assert_eq!(payload["type"], "ready");
+        assert_eq!(payload["sessionId"], "ws-sess");
+        // LocalTrust grants operator scopes, so the stream is writable.
+        assert_eq!(payload["readOnly"], false);
+        assert_eq!(payload["replay"]["latestSeq"], 5);
+        assert_eq!(payload["replay"]["windowStartSeq"], 1);
+
+        let _ = ws.close(None).await;
+        server.abort();
+    }
+
     #[test]
     fn decode_client_message_close_returns_close() {
         let msg = Message::Close(None);
