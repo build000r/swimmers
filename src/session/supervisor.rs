@@ -1722,55 +1722,70 @@ impl SessionSupervisor {
     /// Collect session snapshots (summary + replay text) for all live sessions.
     /// Used by the thought loop to generate thoughts.
     pub async fn collect_session_snapshots(&self) -> Vec<SessionInfo> {
-        let sessions = self.sessions.read().await;
+        self.collect_session_snapshots_with_timeout(Duration::from_secs(2))
+            .await
+    }
+
+    async fn collect_session_snapshots_with_timeout(&self, timeout: Duration) -> Vec<SessionInfo> {
+        let handles: Vec<ActorHandle> = {
+            let sessions = self.sessions.read().await;
+            sessions.values().cloned().collect()
+        };
         let thought_snapshots = self.thought_snapshots.read().await.clone();
-        let mut infos = Vec::with_capacity(sessions.len());
-        let mut summaries_with_replay = Vec::with_capacity(sessions.len());
 
-        for (_, handle) in sessions.iter() {
-            // Request summary and snapshot from the actor.
-            let (sum_tx, sum_rx) = oneshot::channel();
-            let (snap_tx, snap_rx) = oneshot::channel();
+        let futs: Vec<_> = handles
+            .into_iter()
+            .map(|handle| async move {
+                let (sum_tx, sum_rx) = oneshot::channel();
+                let (snap_tx, snap_rx) = oneshot::channel();
 
-            let summary_sent = handle
-                .cmd_tx
-                .send(SessionCommand::GetSummary(sum_tx))
-                .await
-                .is_ok();
-            let snapshot_sent = handle
-                .cmd_tx
-                .send(SessionCommand::GetSnapshot(snap_tx))
-                .await
-                .is_ok();
+                let summary_sent = handle
+                    .cmd_tx
+                    .send(SessionCommand::GetSummary(sum_tx))
+                    .await
+                    .is_ok();
+                let snapshot_sent = handle
+                    .cmd_tx
+                    .send(SessionCommand::GetSnapshot(snap_tx))
+                    .await
+                    .is_ok();
 
-            if !summary_sent || !snapshot_sent {
-                continue;
-            }
+                if !summary_sent || !snapshot_sent {
+                    return None;
+                }
 
-            let timeout = std::time::Duration::from_secs(2);
-            let summary: Option<SessionSummary> = match tokio::time::timeout(timeout, sum_rx).await
-            {
-                Ok(Ok(s)) => Some(s),
-                _ => None,
-            };
-            let snapshot: Option<TerminalSnapshot> =
-                match tokio::time::timeout(timeout, snap_rx).await {
+                let (summary, snapshot) = tokio::join!(
+                    tokio::time::timeout(timeout, sum_rx),
+                    tokio::time::timeout(timeout, snap_rx)
+                );
+                let summary: Option<SessionSummary> = match summary {
+                    Ok(Ok(s)) => Some(s),
+                    _ => None,
+                };
+                let snapshot: Option<TerminalSnapshot> = match snapshot {
                     Ok(Ok(s)) => Some(s),
                     _ => None,
                 };
 
-            if let Some(summary) = summary {
-                let replay_text = snapshot
-                    .map(|s| {
-                        // Take last ~500 chars of screen text.
-                        let chars: Vec<char> = s.screen_text.chars().collect();
-                        let start = chars.len().saturating_sub(500);
-                        chars[start..].iter().collect()
-                    })
-                    .unwrap_or_default();
-                summaries_with_replay.push((summary, replay_text));
-            }
-        }
+                summary.map(|summary| {
+                    let replay_text = snapshot
+                        .map(|s| {
+                            // Take last ~500 chars of screen text.
+                            let chars: Vec<char> = s.screen_text.chars().collect();
+                            let start = chars.len().saturating_sub(500);
+                            chars[start..].iter().collect()
+                        })
+                        .unwrap_or_default();
+                    (summary, replay_text)
+                })
+            })
+            .collect();
+
+        let summaries_with_replay: Vec<(SessionSummary, String)> = futures::future::join_all(futs)
+            .await
+            .into_iter()
+            .flatten()
+            .collect();
 
         let tmux_names = tmux_names_requiring_active_pane_lookup(
             summaries_with_replay.iter().map(|(summary, _)| summary),
@@ -1780,6 +1795,7 @@ impl SessionSupervisor {
             .active_pane_session_ids_cached(&tmux_names, "collect_session_infos")
             .await;
 
+        let mut infos = Vec::with_capacity(summaries_with_replay.len());
         for (summary, replay_text) in summaries_with_replay {
             let session_id = summary.session_id.clone();
             let active_pane_session_id = if thought_snapshots.contains_key(&summary.session_id)
@@ -3119,6 +3135,30 @@ mod tests {
             while let Some(cmd) = cmd_rx.recv().await {
                 match cmd {
                     SessionCommand::GetSummary(reply) => {
+                        held_replies.push(reply);
+                    }
+                    SessionCommand::Shutdown => break,
+                    _ => {}
+                }
+            }
+        });
+        handle
+    }
+
+    async fn spawn_observed_hung_summary_handle(
+        session_id: &str,
+        tmux_name: &str,
+        observed_tx: mpsc::UnboundedSender<String>,
+    ) -> ActorHandle {
+        let (cmd_tx, mut cmd_rx) = mpsc::channel(8);
+        let handle = ActorHandle::test_handle(session_id, tmux_name, cmd_tx);
+        let session_id = session_id.to_string();
+        tokio::spawn(async move {
+            let mut held_replies = Vec::new();
+            while let Some(cmd) = cmd_rx.recv().await {
+                match cmd {
+                    SessionCommand::GetSummary(reply) => {
+                        let _ = observed_tx.send(session_id.clone());
                         held_replies.push(reply);
                     }
                     SessionCommand::Shutdown => break,
@@ -4752,6 +4792,49 @@ esac
         assert_eq!(infos[0].rest_state, RestState::Active);
         assert_eq!(infos[0].objective_fingerprint.as_deref(), Some("obj-pane"));
         assert_eq!(infos[0].token_count, 88);
+    }
+
+    #[tokio::test]
+    async fn collect_session_snapshots_fans_out_actor_requests_before_timeouts() {
+        let supervisor = SessionSupervisor::new(Arc::new(Config::default()));
+        let (observed_tx, mut observed_rx) = mpsc::unbounded_channel();
+
+        for session_id in ["sess-a", "sess-b", "sess-c"] {
+            supervisor
+                .insert_test_handle(
+                    spawn_observed_hung_summary_handle(session_id, "", observed_tx.clone()).await,
+                )
+                .await;
+        }
+        drop(observed_tx);
+
+        let collect = supervisor.collect_session_snapshots_with_timeout(Duration::from_secs(10));
+        tokio::pin!(collect);
+        let observations = async {
+            let mut observed = Vec::new();
+            for _ in 0..3 {
+                observed.push(observed_rx.recv().await.expect("observed summary request"));
+            }
+            observed
+        };
+        tokio::pin!(observations);
+
+        let observed = tokio::time::timeout(Duration::from_secs(1), async {
+            tokio::select! {
+                _ = &mut collect => panic!("hung actors should keep collection pending"),
+                observed = &mut observations => observed,
+            }
+        })
+        .await
+        .expect("snapshot collection should request every actor before the first timeout");
+
+        let observed: HashSet<_> = observed.into_iter().collect();
+        let expected = HashSet::from_iter([
+            "sess-a".to_string(),
+            "sess-b".to_string(),
+            "sess-c".to_string(),
+        ]);
+        assert_eq!(observed, expected);
     }
 
     #[tokio::test]
