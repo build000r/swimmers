@@ -240,6 +240,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn native_open_attention_group_rejects_non_loopback_peer() {
+        let response = native_open_attention_group(
+            Extension(AuthInfo::new(OPERATOR_SCOPES.to_vec())),
+            State(test_state()),
+            remote_peer(),
+            Json(NativeAttentionGroupOpenRequest {
+                max_sessions: Some(3),
+                current_session_ids: Vec::new(),
+                include_unnumbered_sessions: false,
+                layout: None,
+                focus: true,
+            }),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let json = response_json(response).await;
+        assert_eq!(json["code"], "NATIVE_DESKTOP_UNAVAILABLE");
+    }
+
+    #[tokio::test]
     async fn native_open_returns_not_found_for_missing_session() {
         let response = native_open(
             Extension(AuthInfo::new(OPERATOR_SCOPES.to_vec())),

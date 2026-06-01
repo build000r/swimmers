@@ -729,32 +729,58 @@ pub fn next_numeric_tmux_name_from_names<'a>(
 }
 
 pub fn create_numbered_tmux_session(cwd: Option<&std::path::Path>) -> Result<String, String> {
-    const MAX_ATTEMPTS: usize = 64;
+    create_numbered_tmux_session_with(cwd, 64, next_numeric_tmux_name, run_tmux_new_session)
+}
 
-    for _ in 0..MAX_ATTEMPTS {
-        let name = next_numeric_tmux_name()?;
-        let mut command = tmux_command();
-        command.args(["new-session", "-d", "-s", &name]);
-        if let Some(cwd) = cwd {
-            command.arg("-c").arg(cwd);
-        }
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum TmuxNewSessionError {
+    AlreadyExists,
+    Failed(String),
+}
 
-        let output = command
-            .output()
-            .map_err(|err| format!("failed to run `tmux new-session`: {err}"))?;
-        if output.status.success() {
-            return Ok(name);
-        }
+fn run_tmux_new_session(
+    name: &str,
+    cwd: Option<&std::path::Path>,
+) -> Result<(), TmuxNewSessionError> {
+    let mut command = tmux_command();
+    command.args(["new-session", "-d", "-s", name]);
+    if let Some(cwd) = cwd {
+        command.arg("-c").arg(cwd);
+    }
 
-        let stderr = compact_command_text(&output.stderr);
-        if tmux_session_already_exists(&stderr) {
-            continue;
+    let output = command.output().map_err(|err| {
+        TmuxNewSessionError::Failed(format!("failed to run `tmux new-session`: {err}"))
+    })?;
+    if output.status.success() {
+        return Ok(());
+    }
+
+    let stderr = compact_command_text(&output.stderr);
+    if tmux_session_already_exists(&stderr) {
+        return Err(TmuxNewSessionError::AlreadyExists);
+    }
+    Err(TmuxNewSessionError::Failed(format!(
+        "`tmux new-session` failed: {stderr}"
+    )))
+}
+
+fn create_numbered_tmux_session_with(
+    cwd: Option<&std::path::Path>,
+    max_attempts: usize,
+    mut next_name: impl FnMut() -> Result<String, String>,
+    mut create_session: impl FnMut(&str, Option<&std::path::Path>) -> Result<(), TmuxNewSessionError>,
+) -> Result<String, String> {
+    for _ in 0..max_attempts {
+        let name = next_name()?;
+        match create_session(&name, cwd) {
+            Ok(()) => return Ok(name),
+            Err(TmuxNewSessionError::AlreadyExists) => continue,
+            Err(TmuxNewSessionError::Failed(err)) => return Err(err),
         }
-        return Err(format!("`tmux new-session` failed: {stderr}"));
     }
 
     Err(format!(
-        "failed to allocate a numeric tmux session after {MAX_ATTEMPTS} attempts"
+        "failed to allocate a numeric tmux session after {max_attempts} attempts"
     ))
 }
 
@@ -1155,6 +1181,153 @@ mod tests {
         assert_eq!(
             next_numeric_tmux_name_from_names(names).expect("next numeric name"),
             "0"
+        );
+    }
+
+    #[test]
+    fn create_numbered_tmux_session_retries_name_collisions() {
+        let cwd = PathBuf::from("/tmp/project");
+        let mut names = ["2".to_string(), "3".to_string()].into_iter();
+        let mut calls = Vec::new();
+
+        let created = create_numbered_tmux_session_with(
+            Some(&cwd),
+            64,
+            || names.next().ok_or_else(|| "out of names".to_string()),
+            |name, cwd_arg| {
+                calls.push((name.to_string(), cwd_arg.map(|path| path.to_path_buf())));
+                if name == "2" {
+                    Err(TmuxNewSessionError::AlreadyExists)
+                } else {
+                    Ok(())
+                }
+            },
+        )
+        .expect("second name should be created");
+
+        assert_eq!(created, "3");
+        assert_eq!(
+            calls,
+            vec![
+                ("2".to_string(), Some(cwd.clone())),
+                ("3".to_string(), Some(cwd))
+            ]
+        );
+    }
+
+    #[test]
+    fn create_numbered_tmux_session_stops_on_non_collision_error() {
+        let err = create_numbered_tmux_session_with(
+            None,
+            64,
+            || Ok("4".to_string()),
+            |_, _| Err(TmuxNewSessionError::Failed("permission denied".to_string())),
+        )
+        .expect_err("non-collision tmux failure should stop retries");
+
+        assert_eq!(err, "permission denied");
+    }
+
+    #[test]
+    fn create_numbered_tmux_session_reports_exhaustion() {
+        let mut attempts = 0;
+        let err = create_numbered_tmux_session_with(
+            None,
+            2,
+            || {
+                attempts += 1;
+                Ok(attempts.to_string())
+            },
+            |_, _| Err(TmuxNewSessionError::AlreadyExists),
+        )
+        .expect_err("persistent name collisions should exhaust attempts");
+
+        assert_eq!(attempts, 2);
+        assert_eq!(
+            err,
+            "failed to allocate a numeric tmux session after 2 attempts"
+        );
+    }
+
+    struct EnvVarGuard {
+        key: &'static str,
+        previous: Option<std::ffi::OsString>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: std::ffi::OsString) -> Self {
+            let previous = std::env::var_os(key);
+            std::env::set_var(key, value);
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            match self.previous.take() {
+                Some(value) => std::env::set_var(self.key, value),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
+
+    fn test_path_with_prepend(bin_dir: &std::path::Path) -> std::ffi::OsString {
+        let mut entries = vec![bin_dir.as_os_str().to_os_string()];
+        if let Some(existing) = std::env::var_os("PATH") {
+            entries.extend(std::env::split_paths(&existing).map(|path| path.into_os_string()));
+        }
+        std::env::join_paths(entries).expect("join PATH")
+    }
+
+    #[test]
+    fn create_numbered_tmux_session_uses_real_tmux_wrapper_with_fake_tmux() {
+        let _guard = crate::test_support::ENV_LOCK
+            .lock()
+            .expect("env lock poisoned");
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let created_file = tmp.path().join("created-name");
+        let cwd_file = tmp.path().join("created-cwd");
+        let script = format!(
+            r#"#!/bin/sh
+set -eu
+case "${{1:-}}" in
+  list-sessions)
+    printf '0\n7\nnot-numbered\n'
+    ;;
+  new-session)
+    if [ "${{2:-}}" != "-d" ] || [ "${{3:-}}" != "-s" ]; then
+      printf 'unexpected tmux new-session flags\n' >&2
+      exit 64
+    fi
+    printf '%s\n' "$4" > "{created_file}"
+    if [ "${{5:-}}" = "-c" ]; then
+      printf '%s\n' "$6" > "{cwd_file}"
+    fi
+    ;;
+  *)
+    printf 'unexpected tmux command: %s\n' "${{1:-}}" >&2
+    exit 64
+    ;;
+esac
+"#,
+            created_file = created_file.display(),
+            cwd_file = cwd_file.display()
+        );
+        write_executable_script(tmp.path(), "tmux", &script);
+        let _path_guard = EnvVarGuard::set("PATH", test_path_with_prepend(tmp.path()));
+        let cwd = tmp.path().join("launch");
+        std::fs::create_dir(&cwd).expect("create cwd");
+
+        let created = create_numbered_tmux_session(Some(&cwd)).expect("create session");
+
+        assert_eq!(created, "8");
+        assert_eq!(
+            std::fs::read_to_string(created_file).expect("created file"),
+            "8\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(cwd_file).expect("cwd file"),
+            format!("{}\n", cwd.display())
         );
     }
 
