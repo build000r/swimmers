@@ -2316,7 +2316,7 @@ fn cwd_from_osc7_payload(payload: &str) -> Option<String> {
 
 /// Decode percent-encoded characters in a URI path (e.g. `%20` -> ` `).
 fn percent_decode(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
+    let mut out = Vec::with_capacity(s.len());
     let mut chars = s.bytes();
     while let Some(b) = chars.next() {
         if b == b'%' {
@@ -2326,17 +2326,17 @@ fn percent_decode(s: &str) -> String {
                 let hex = [h, l];
                 if let Ok(s) = std::str::from_utf8(&hex) {
                     if let Ok(val) = u8::from_str_radix(s, 16) {
-                        out.push(val as char);
+                        out.push(val);
                         continue;
                     }
                 }
             }
-            out.push(b as char);
+            out.push(b);
         } else {
-            out.push(b as char);
+            out.push(b);
         }
     }
-    out
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 /// Try to extract a cwd path from an OSC 0/2 window title.
@@ -3162,6 +3162,7 @@ fi
     #[test]
     fn percent_decode_decodes_hex_sequences_and_keeps_invalid_ones() {
         assert_eq!(percent_decode("/tmp/My%20Repo"), "/tmp/My Repo");
+        assert_eq!(percent_decode("/tmp/caf%C3%A9"), "/tmp/caf\u{e9}");
         assert_eq!(percent_decode("%ZZ/path"), "%/path");
     }
 
@@ -3203,6 +3204,10 @@ fi
         assert_eq!(
             cwd_from_osc7_payload("file://host/tmp/My%20Repo"),
             Some("/tmp/My Repo".to_string())
+        );
+        assert_eq!(
+            cwd_from_osc7_payload("file://host/tmp/caf%C3%A9"),
+            Some("/tmp/caf\u{e9}".to_string())
         );
     }
 
