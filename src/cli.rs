@@ -699,7 +699,6 @@ pub fn list_tmux_session_names() -> Result<Vec<String>, String> {
     if output.status.success() {
         return Ok(String::from_utf8_lossy(&output.stdout)
             .lines()
-            .map(str::trim)
             .filter(|line| !line.is_empty())
             .map(ToOwned::to_owned)
             .collect());
@@ -811,11 +810,10 @@ fn tmux_command() -> ProcessCommand {
 }
 
 fn numbered_tmux_name(value: &str) -> Option<u64> {
-    let trimmed = value.trim();
-    if trimmed.is_empty() || !trimmed.chars().all(|ch| ch.is_ascii_digit()) {
+    if value.is_empty() || !value.chars().all(|ch| ch.is_ascii_digit()) {
         return None;
     }
-    trimmed.parse::<u64>().ok()
+    value.parse::<u64>().ok()
 }
 
 fn tmux_list_has_no_server(stderr: &str) -> bool {
@@ -1192,6 +1190,16 @@ mod tests {
     }
 
     #[test]
+    fn next_numeric_tmux_name_requires_exact_numeric_names() {
+        let names = [" 8 ", "\t9", "10"];
+
+        assert_eq!(
+            next_numeric_tmux_name_from_names(names).expect("next numeric name"),
+            "11"
+        );
+    }
+
+    #[test]
     fn create_numbered_tmux_session_retries_name_collisions() {
         let cwd = PathBuf::from("/tmp/project");
         let mut names = ["2".to_string(), "3".to_string()].into_iter();
@@ -1335,6 +1343,40 @@ esac
         assert_eq!(
             std::fs::read_to_string(cwd_file).expect("cwd file"),
             format!("{}\n", cwd.display())
+        );
+    }
+
+    #[test]
+    fn list_tmux_session_names_preserves_exact_tmux_names() {
+        let _guard = crate::test_support::ENV_LOCK
+            .lock()
+            .expect("env lock poisoned");
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let script = r#"#!/bin/sh
+set -eu
+case "${1:-}" in
+  list-sessions)
+    printf 'alpha\n  padded  \n\tindented\n\nbeta\n'
+    ;;
+  *)
+    printf 'unexpected tmux command: %s\n' "${1:-}" >&2
+    exit 64
+    ;;
+esac
+"#;
+        write_executable_script(tmp.path(), "tmux", script);
+        let _path_guard = EnvVarGuard::set("PATH", test_path_with_prepend(tmp.path()));
+
+        let names = list_tmux_session_names().expect("tmux session names");
+
+        assert_eq!(
+            names,
+            vec![
+                "alpha".to_string(),
+                "  padded  ".to_string(),
+                "\tindented".to_string(),
+                "beta".to_string()
+            ]
         );
     }
 
