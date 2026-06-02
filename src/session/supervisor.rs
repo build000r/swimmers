@@ -39,6 +39,7 @@ const TMUX_KILL_SESSION_TIMEOUT: Duration = Duration::from_millis(500);
 const ACTIVE_PANE_LOOKUP_TIMEOUT: Duration = Duration::from_millis(500);
 const ACTIVE_PANE_LOOKUP_WARN_THRESHOLD: Duration = Duration::from_millis(200);
 const PRELAUNCH_PROMPT_CLEANUP_DELAY: Duration = Duration::from_secs(30);
+const TMUX_LIST_PANES_FIELD_SEPARATOR: char = '\x1f';
 
 struct ListedTmuxSessions {
     reliable: bool,
@@ -174,14 +175,13 @@ fn tmux_query_command(args: &[&str]) -> Command {
 /// TTL window.
 async fn query_all_active_pane_session_ids() -> anyhow::Result<HashMap<String, String>> {
     let started = Instant::now();
+    let pane_format = format!(
+        "#{{session_name}}{sep}#{{window_active}}{sep}#{{pane_active}}{sep}#{{window_index}}.#{{pane_index}}:#{{pane_id}}",
+        sep = TMUX_LIST_PANES_FIELD_SEPARATOR
+    );
     let output = run_bounded_tmux_command(
         "tmux",
-        &[
-            "list-panes",
-            "-a",
-            "-F",
-            "#{session_name}\t#{window_active}\t#{pane_active}\t#{window_index}.#{pane_index}:#{pane_id}",
-        ],
+        &["list-panes", "-a", "-F", pane_format.as_str()],
         ACTIVE_PANE_LOOKUP_TIMEOUT,
         "list-panes",
     )
@@ -201,9 +201,13 @@ async fn query_all_active_pane_session_ids() -> anyhow::Result<HashMap<String, S
         );
     }
 
+    Ok(parse_active_pane_session_ids(&output.stdout))
+}
+
+fn parse_active_pane_session_ids(stdout: &[u8]) -> HashMap<String, String> {
     let mut active_panes = HashMap::new();
-    for line in String::from_utf8_lossy(&output.stdout).lines() {
-        let mut fields = line.splitn(4, '\t');
+    for line in String::from_utf8_lossy(stdout).lines() {
+        let mut fields = line.splitn(4, TMUX_LIST_PANES_FIELD_SEPARATOR);
         let session_name = fields.next().unwrap_or_default();
         let window_active = fields.next().unwrap_or_default();
         let pane_active = fields.next().unwrap_or_default();
@@ -223,7 +227,7 @@ async fn query_all_active_pane_session_ids() -> anyhow::Result<HashMap<String, S
         );
     }
 
-    Ok(active_panes)
+    active_panes
 }
 
 fn filter_active_panes_to_requested(
@@ -3248,7 +3252,7 @@ mod tests {
         write_executable(
             &bin_dir.join("tmux"),
             &format!(
-                "#!/bin/sh\nset -eu\nprintf '%s\\n' \"$1\" > \"{}\"\ncat <<'EOF'\n0\t1\t1\t0.0:%1\nwork\t0\t1\t1.0:%9\nwork\t1\t1\t1.1:%2\nEOF\n",
+                "#!/bin/sh\nset -eu\nprintf '%s\\n' \"$1\" > \"{}\"\nsep=$(printf '\\037')\nprintf '0%s1%s1%s0.0:%%1\\n' \"$sep\" \"$sep\" \"$sep\"\nprintf 'work%s0%s1%s1.0:%%9\\n' \"$sep\" \"$sep\" \"$sep\"\nprintf 'work%s1%s1%s1.1:%%2\\n' \"$sep\" \"$sep\" \"$sep\"\n",
                 command_file.display()
             ),
         );
@@ -4382,6 +4386,19 @@ mod tests {
         ]);
 
         assert!(thought_snapshot_for_summary(&summary, None, &snapshots).is_none());
+    }
+
+    #[test]
+    fn parse_active_pane_session_ids_preserves_tabs_in_session_names() {
+        let stdout = b"work\tspace\x1f1\x1f1\x1f1.1:%2\nother\x1f1\x1f0\x1f1.0:%1\n";
+
+        let panes = parse_active_pane_session_ids(stdout);
+
+        assert_eq!(
+            panes.get("work\tspace").map(String::as_str),
+            Some("tmux:work\tspace:1.1:%2")
+        );
+        assert!(!panes.contains_key("other"));
     }
 
     #[test]
