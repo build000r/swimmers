@@ -129,17 +129,17 @@ impl StateDetector {
         if !markers.is_empty() {
             let prompt_idx = markers
                 .iter()
-                .rposition(|m| matches!(m, Osc133Marker::Prompt));
+                .rposition(|m| matches!(m.marker, Osc133Marker::Prompt));
             let command = markers
                 .iter()
                 .enumerate()
                 .rev()
-                .find_map(|(idx, marker)| match marker {
-                    Osc133Marker::Command(cmd) => Some((idx, cmd.clone())),
+                .find_map(|(idx, marker)| match &marker.marker {
+                    Osc133Marker::Command(cmd) => Some((idx, marker.visible_offset, cmd.clone())),
                     Osc133Marker::Prompt => None,
                 });
             let command_wins = match (prompt_idx, command.as_ref()) {
-                (Some(prompt_marker_idx), Some((cmd_marker_idx, _))) => {
+                (Some(prompt_marker_idx), Some((cmd_marker_idx, _, _))) => {
                     *cmd_marker_idx >= prompt_marker_idx
                 }
                 (None, Some(_)) => true,
@@ -147,7 +147,7 @@ impl StateDetector {
             };
             self.clear_error_timer();
             if command_wins {
-                let (command_idx, cmd) =
+                let (command_idx, command_visible_offset, cmd) =
                     command.expect("command_wins implies command marker exists");
                 debug!(
                     prompt_idx = prompt_idx,
@@ -156,13 +156,13 @@ impl StateDetector {
                     "OSC 133 classified output as busy"
                 );
                 self.set_state(SessionState::Busy, Some(Some(cmd)), now, "osc133_command");
-                if self.apply_visible_error_pattern(&visible, now) {
+                if self.apply_visible_error_pattern(&visible[command_visible_offset..], now) {
                     return;
                 }
             } else {
                 debug!(
                     prompt_idx = prompt_idx,
-                    command_idx = command.as_ref().map(|(idx, _)| *idx),
+                    command_idx = command.as_ref().map(|(idx, _, _)| *idx),
                     "OSC 133 classified output as idle"
                 );
                 self.set_state(SessionState::Idle, Some(None), now, "osc133_prompt");
@@ -425,7 +425,7 @@ impl StateDetector {
 
     fn parse_chunk(&mut self, data: &[u8]) -> ParsedChunk {
         let mut visible: Vec<u8> = Vec::with_capacity(data.len());
-        let mut markers: Vec<Osc133Marker> = Vec::new();
+        let mut markers: Vec<PositionedOsc133Marker> = Vec::new();
 
         for &b in data {
             self.consume_chunk_byte(b, &mut visible, &mut markers);
@@ -441,7 +441,7 @@ impl StateDetector {
         &mut self,
         b: u8,
         visible: &mut Vec<u8>,
-        markers: &mut Vec<Osc133Marker>,
+        markers: &mut Vec<PositionedOsc133Marker>,
     ) {
         match &mut self.escape_state {
             EscapeState::Normal => self.consume_normal_byte(b, visible),
@@ -462,7 +462,7 @@ impl StateDetector {
                 consumed,
             } => {
                 if let Some(next_state) =
-                    Self::consume_osc_byte(b, buf, esc_pending, consumed, markers)
+                    Self::consume_osc_byte(b, visible.len(), buf, esc_pending, consumed, markers)
                 {
                     self.escape_state = next_state;
                 }
@@ -562,10 +562,11 @@ impl StateDetector {
 
     fn consume_osc_byte(
         b: u8,
+        visible_offset: usize,
         buf: &mut Vec<u8>,
         esc_pending: &mut bool,
         consumed: &mut usize,
-        markers: &mut Vec<Osc133Marker>,
+        markers: &mut Vec<PositionedOsc133Marker>,
     ) -> Option<EscapeState> {
         *consumed += 1;
         if *consumed > TERMINAL_STRING_RECOVERY_BYTES {
@@ -573,12 +574,12 @@ impl StateDetector {
         }
 
         if *esc_pending {
-            return Self::consume_pending_osc_escape(b, buf, esc_pending, markers);
+            return Self::consume_pending_osc_escape(b, visible_offset, buf, esc_pending, markers);
         }
 
         match b {
             0x07 | 0x9c => {
-                Self::push_osc_marker(buf, markers);
+                Self::push_osc_marker(buf, visible_offset, markers);
                 return Some(EscapeState::Normal);
             }
             0x1b => {
@@ -593,12 +594,13 @@ impl StateDetector {
 
     fn consume_pending_osc_escape(
         b: u8,
+        visible_offset: usize,
         buf: &mut Vec<u8>,
         esc_pending: &mut bool,
-        markers: &mut Vec<Osc133Marker>,
+        markers: &mut Vec<PositionedOsc133Marker>,
     ) -> Option<EscapeState> {
         if b == b'\\' {
-            Self::push_osc_marker(buf, markers);
+            Self::push_osc_marker(buf, visible_offset, markers);
             return Some(EscapeState::Normal);
         }
 
@@ -650,9 +652,16 @@ impl StateDetector {
         state
     }
 
-    fn push_osc_marker(buf: &[u8], markers: &mut Vec<Osc133Marker>) {
+    fn push_osc_marker(
+        buf: &[u8],
+        visible_offset: usize,
+        markers: &mut Vec<PositionedOsc133Marker>,
+    ) {
         if let Some(marker) = Self::parse_osc133(buf) {
-            markers.push(marker);
+            markers.push(PositionedOsc133Marker {
+                marker,
+                visible_offset,
+            });
         }
     }
 
@@ -845,7 +854,13 @@ impl StateDetector {
 #[derive(Debug)]
 struct ParsedChunk {
     visible: String,
-    markers: Vec<Osc133Marker>,
+    markers: Vec<PositionedOsc133Marker>,
+}
+
+#[derive(Debug)]
+struct PositionedOsc133Marker {
+    marker: Osc133Marker,
+    visible_offset: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -1039,6 +1054,19 @@ mod tests {
         d.process_output(b"\x1b]133;C;cmd=foo\x07bash: foo: command not found\n\x1b]133;A\x07");
 
         assert_eq!(d.get_state().0, SessionState::Error);
+    }
+
+    #[test]
+    fn osc_new_command_after_prompt_ignores_prior_error_text_in_same_chunk() {
+        let mut d = StateDetector::new();
+
+        d.process_output(
+            b"\x1b]133;C;cmd=foo\x07bash: foo: command not found\n\x1b]133;A\x07user@host:~$ foo\n\x1b]133;C;cmd=bar\x07",
+        );
+
+        let (state, cmd) = d.get_state();
+        assert_eq!(state, SessionState::Busy);
+        assert_eq!(cmd.as_deref(), Some("bar"));
     }
 
     #[test]
