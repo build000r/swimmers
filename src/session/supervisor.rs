@@ -5268,6 +5268,7 @@ esac
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
         let original_sessions = std::env::var_os("SWIMMERS_FAKE_TMUX_SESSIONS");
+        let original_attach_log = std::env::var_os("SWIMMERS_FAKE_TMUX_ATTACH_LOG");
         let (_dir, original_path) = install_fake_tmux(
             r##"#!/bin/sh
 set -eu
@@ -5278,7 +5279,13 @@ case "$cmd" in
       printf '%s\n' "$line"
     done < "${SWIMMERS_FAKE_TMUX_SESSIONS}"
     ;;
-  attach-session|list-panes|send-keys|kill-session|capture-pane)
+  attach-session)
+    if [ -n "${SWIMMERS_FAKE_TMUX_ATTACH_LOG:-}" ]; then
+      printf '%s\n' "$@" > "${SWIMMERS_FAKE_TMUX_ATTACH_LOG}"
+    fi
+    exit 0
+    ;;
+  list-panes|send-keys|kill-session|capture-pane)
     exit 0
     ;;
   display-message)
@@ -5293,7 +5300,9 @@ esac
 "##,
         );
         let sessions_file = _dir.path().join("sessions.txt");
+        let attach_log = _dir.path().join("attach.log");
         std::env::set_var("SWIMMERS_FAKE_TMUX_SESSIONS", &sessions_file);
+        std::env::set_var("SWIMMERS_FAKE_TMUX_ATTACH_LOG", &attach_log);
 
         let supervisor = SessionSupervisor::new(Arc::new(Config::default()));
         assert_eq!(
@@ -5315,6 +5324,15 @@ esac
         assert!(adopted.reused_session_id);
         assert_eq!(adopted.session.session_id, "sess_7");
         assert_eq!(adopted.session.tmux_name, "  padded  ");
+        let attach_args = (0..20)
+            .find_map(|_| {
+                std::fs::read_to_string(&attach_log).ok().or_else(|| {
+                    std::thread::sleep(Duration::from_millis(10));
+                    None
+                })
+            })
+            .expect("attach log");
+        assert_eq!(attach_args, "attach-session\n-t\n=  padded  \n");
 
         let missing_trimmed = supervisor
             .adopt_tmux_session("padded".to_string(), None)
@@ -5331,6 +5349,10 @@ esac
         match original_sessions {
             Some(value) => std::env::set_var("SWIMMERS_FAKE_TMUX_SESSIONS", value),
             None => std::env::remove_var("SWIMMERS_FAKE_TMUX_SESSIONS"),
+        }
+        match original_attach_log {
+            Some(value) => std::env::set_var("SWIMMERS_FAKE_TMUX_ATTACH_LOG", value),
+            None => std::env::remove_var("SWIMMERS_FAKE_TMUX_ATTACH_LOG"),
         }
     }
 
