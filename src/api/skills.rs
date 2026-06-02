@@ -920,6 +920,47 @@ cat "$SBP_OUTPUT_FILE"
     }
 
     #[tokio::test]
+    async fn session_skills_route_degrades_encoded_remote_namespaced_sessions() {
+        let remote_id =
+            crate::api::remote_sessions::namespace_session_id("remote-target", "sess/weird?x#frag");
+        let encoded_id = crate::api::remote_sessions::encode_path_segment(&remote_id);
+        let app = routes()
+            .layer(Extension(AuthInfo::new(OPERATOR_SCOPES.to_vec())))
+            .with_state(test_state());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind skills route test server");
+        let addr = listener.local_addr().expect("skills route test addr");
+        let handle = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve skills route test server");
+        });
+
+        let response = reqwest::get(format!(
+            "http://{addr}/v1/sessions/{encoded_id}/skills?source=sbp&q=remote"
+        ))
+        .await
+        .expect("session skills route response");
+
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        let json = response.json::<Value>().await.expect("session skills json");
+        assert_eq!(json["session_id"], remote_id);
+        assert_eq!(json["source"], "sbp");
+        assert_eq!(json["cwd"], "");
+        assert_eq!(json["available"], false);
+        assert_eq!(json["query"], "remote");
+        assert_eq!(json["skills"].as_array().unwrap().len(), 0);
+        assert_eq!(json["issues"].as_array().unwrap().len(), 0);
+        assert_eq!(
+            json["message"],
+            "remote session skills must be queried on the target host"
+        );
+
+        handle.abort();
+    }
+
+    #[tokio::test]
     async fn session_skills_redacts_sbp_failure_and_degrades() {
         let _lock = crate::test_support::ENV_LOCK
             .lock()
