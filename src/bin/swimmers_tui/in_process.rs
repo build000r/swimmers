@@ -103,10 +103,11 @@ impl TuiApi for InProcessApi {
             // deserialize type carries (the same projection serde performs when
             // the external client parses the /health JSON over the wire).
             let ledger = swimmers::api::health::build_dependency_ledger(&self.state).await;
-            let dep_snap = |h: &swimmers::types::DependencyHealthSnapshot| BackendDependencySnapshot {
-                status: swimmers::api::health::dependency_status_label(h.status).to_string(),
-                last_error: h.last_error.clone(),
-            };
+            let dep_snap =
+                |h: &swimmers::types::DependencyHealthSnapshot| BackendDependencySnapshot {
+                    status: swimmers::api::health::dependency_status_label(h.status).to_string(),
+                    last_error: h.last_error.clone(),
+                };
             Ok(BackendHealthResponse {
                 status: bridge_status_label(thought_bridge.status),
                 thought_bridge: BackendThoughtBridgeHealth {

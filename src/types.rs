@@ -292,9 +292,10 @@ impl SummaryFallbackReason {
     /// derived from the same match so they can never disagree.
     pub const fn cached_fallback(self) -> Option<(&'static str, TransportHealth)> {
         match self {
-            Self::ChannelClosed => {
-                Some((SUMMARY_CAUSE_CACHE_DISCONNECTED, TransportHealth::Disconnected))
-            }
+            Self::ChannelClosed => Some((
+                SUMMARY_CAUSE_CACHE_DISCONNECTED,
+                TransportHealth::Disconnected,
+            )),
             Self::Dropped => Some((SUMMARY_CAUSE_CACHE_DEGRADED, TransportHealth::Degraded)),
             Self::Timeout => Some((SUMMARY_CAUSE_CACHE_OVERLOADED, TransportHealth::Overloaded)),
             Self::Missing => None,
