@@ -683,7 +683,7 @@ async fn open_or_focus_ghostty_session(
         GhosttyOpenMode::Add => None,
     };
 
-    let result = run_ghostty_open_script(
+    let mut result = run_ghostty_open_script(
         &script,
         session_id,
         tmux_name,
@@ -694,10 +694,22 @@ async fn open_or_focus_ghostty_session(
         known_term_id.as_deref(),
     )
     .await?;
+    let is_stale_swap_fallback =
+        mode == GhosttyOpenMode::Swap && known_term_id.is_some() && result.status == "created";
+    if is_stale_swap_fallback {
+        result.status = "fallback_created".to_string();
+    }
 
     if mode == GhosttyOpenMode::Swap {
         let resulting_tab_id = query_front_ghostty_tab_id().await.unwrap_or(active_tab_id);
-        remember_ghostty_preview_term_id(resulting_tab_id.as_deref(), result.pane_id.as_deref());
+        if result.status == "fallback_created" {
+            remember_ghostty_preview_term_id(resulting_tab_id.as_deref(), None);
+        } else {
+            remember_ghostty_preview_term_id(
+                resulting_tab_id.as_deref(),
+                result.pane_id.as_deref(),
+            );
+        }
     } else if mode == GhosttyOpenMode::Window {
         remember_pane_id(session_id, result.pane_id.as_deref());
     }
@@ -1518,7 +1530,7 @@ fn parse_osascript_output(stdout: &str, session_id: &str) -> Result<NativeDeskto
         .map(ToOwned::to_owned);
 
     match status.as_str() {
-        "created" | "focused" | "swapped" => Ok(NativeDesktopOpenResponse {
+        "created" | "focused" | "swapped" | "fallback_created" => Ok(NativeDesktopOpenResponse {
             session_id: session_id.to_string(),
             status,
             pane_id,
@@ -1746,6 +1758,10 @@ mod tests {
         let swapped = parse_osascript_output("swapped|pane-3", "sess-3").unwrap();
         assert_eq!(swapped.status, "swapped");
         assert_eq!(swapped.pane_id.as_deref(), Some("pane-3"));
+
+        let fallback = parse_osascript_output("fallback_created|pane-4", "sess-4").unwrap();
+        assert_eq!(fallback.status, "fallback_created");
+        assert_eq!(fallback.pane_id.as_deref(), Some("pane-4"));
     }
 
     #[test]
@@ -3191,7 +3207,7 @@ mod tests {
     //   - describe-tmux-resolution.md     (4 cases)
     //
     // These tests characterize current behavior. Tests suffixed
-    // `_documents_bug` intentionally assert the *buggy* observable state
+    // `_documents_bug` intentionally assert remaining *buggy* observable state
     // so the behavior regresses loudly if someone changes it.
     // ------------------------------------------------------------------
 
@@ -3216,6 +3232,15 @@ mod tests {
         tab_id_err_exit: bool,
         pane_prefix: &str,
     ) -> GhosttyFakes {
+        write_ghostty_fakes_with_status(tab_id_stdout, tab_id_err_exit, pane_prefix, "created")
+    }
+
+    fn write_ghostty_fakes_with_status(
+        tab_id_stdout: &str,
+        tab_id_err_exit: bool,
+        pane_prefix: &str,
+        result_status: &str,
+    ) -> GhosttyFakes {
         let temp = tempdir().unwrap();
         let fake_bin_dir = temp.path().join("tmux-bin");
         std::fs::create_dir_all(&fake_bin_dir).unwrap();
@@ -3238,12 +3263,13 @@ mod tests {
         std::fs::write(
             &fake_osascript,
             format!(
-                "#!/bin/sh\nset -eu\nif [ \"${{1-}}\" = \"-e\" ]; then\n  case \"${{2-}}\" in\n    *\"get version\"*)\n      printf '1.3.1\\n'\n      ;;\n    *)\n      if [ \"{tab_err}\" = \"1\" ]; then\n        printf 'ghostty tab query failed\\n' >&2\n        exit 1\n      fi\n      printf '{tab}\\n'\n      ;;\n  esac\n  exit 0\nfi\nfirst=1\nfor arg in \"$@\"; do\n  if [ \"$first\" -eq 1 ]; then\n    printf '%s' \"$arg\" >> \"{log}\"\n    first=0\n  else\n    printf '\\t%s' \"$arg\" >> \"{log}\"\n  fi\ndone\nprintf '\\n' >> \"{log}\"\ncount=0\nif [ -f \"{counter}\" ]; then\n  IFS= read -r count < \"{counter}\" || true\nfi\ncount=$((count + 1))\nprintf '%s\\n' \"$count\" > \"{counter}\"\nprintf 'created|{prefix}%s\\n' \"$count\"\n",
+                "#!/bin/sh\nset -eu\nif [ \"${{1-}}\" = \"-e\" ]; then\n  case \"${{2-}}\" in\n    *\"get version\"*)\n      printf '1.3.1\\n'\n      ;;\n    *)\n      if [ \"{tab_err}\" = \"1\" ]; then\n        printf 'ghostty tab query failed\\n' >&2\n        exit 1\n      fi\n      printf '{tab}\\n'\n      ;;\n  esac\n  exit 0\nfi\nfirst=1\nfor arg in \"$@\"; do\n  if [ \"$first\" -eq 1 ]; then\n    printf '%s' \"$arg\" >> \"{log}\"\n    first=0\n  else\n    printf '\\t%s' \"$arg\" >> \"{log}\"\n  fi\ndone\nprintf '\\n' >> \"{log}\"\ncount=0\nif [ -f \"{counter}\" ]; then\n  IFS= read -r count < \"{counter}\" || true\nfi\ncount=$((count + 1))\nprintf '%s\\n' \"$count\" > \"{counter}\"\nprintf '{status}|{prefix}%s\\n' \"$count\"\n",
                 tab = tab_id_stdout,
                 tab_err = tab_err,
                 log = log_path.display(),
                 counter = counter_path.display(),
                 prefix = pane_prefix,
+                status = result_status,
             ),
         )
         .unwrap();
@@ -3350,7 +3376,7 @@ mod tests {
         .await
         .unwrap();
 
-        assert_eq!(result.status, "created");
+        assert_eq!(result.status, "fallback_created");
         let log = std::fs::read_to_string(&fakes.log_path).unwrap();
         let call: Vec<_> = log.lines().next().unwrap().split('\t').collect();
         assert_eq!(
@@ -3359,22 +3385,21 @@ mod tests {
             "stale cache entry should be forwarded as arg 8"
         );
         assert_eq!(call[8], "term-stale");
+        assert!(cached_ghostty_preview_term_id(Some("ghostty-tab-main")).is_none());
 
         clear_ghostty_preview_term_cache();
     }
 
-    // TC-3 / TC-4: From the Rust layer, a "create-new-fallback" from the
-    // AppleScript is indistinguishable from a real swap — the response status
-    // is still "created" and the cache is overwritten. This test documents that
-    // invariant (and is the bug's blast radius at the Rust boundary).
+    // TC-3 / TC-4: A stale known preview id that falls back to create-new is
+    // surfaced distinctly and does not overwrite the preview cache.
     #[tokio::test]
-    async fn swap_fallback_tc3_tc4_silent_create_new_looks_like_success_documents_bug() {
+    async fn swap_fallback_tc3_tc4_stale_create_new_is_reported_and_not_cached() {
         let _env_guard = crate::test_support::ENV_LOCK
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
         clear_ghostty_preview_term_cache();
+        remember_ghostty_preview_term_id(Some("ghostty-tab-main"), Some("term-stale"));
         // Simulate the script choosing to createPreviewSplit instead of swap.
-        // From Rust, the observable output is identical.
         let fakes = write_ghostty_fakes("ghostty-tab-main", false, "fresh-pane-");
         let _env = EnvSwap::install(&fakes);
 
@@ -3388,16 +3413,11 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            result.status, "created",
-            "bug: silent create-new is indistinguishable from swap at the Rust layer"
+            result.status, "fallback_created",
+            "stale-id create-new fallback should be visible to callers"
         );
         assert_eq!(result.pane_id.as_deref(), Some("fresh-pane-1"));
-        // Cache was overwritten with the new pane id — masking the "silent
-        // fallback" history from future calls.
-        assert_eq!(
-            cached_ghostty_preview_term_id(Some("ghostty-tab-main")).as_deref(),
-            Some("fresh-pane-1"),
-        );
+        assert!(cached_ghostty_preview_term_id(Some("ghostty-tab-main")).is_none());
 
         clear_ghostty_preview_term_cache();
     }
@@ -3410,7 +3430,8 @@ mod tests {
             .unwrap_or_else(|poison| poison.into_inner());
         clear_ghostty_preview_term_cache();
         remember_ghostty_preview_term_id(Some("ghostty-tab-main"), Some("term-preview"));
-        let fakes = write_ghostty_fakes("ghostty-tab-main", false, "new-preview-");
+        let fakes =
+            write_ghostty_fakes_with_status("ghostty-tab-main", false, "new-preview-", "swapped");
         let _env = EnvSwap::install(&fakes);
 
         let result = open_or_focus_ghostty_session(
