@@ -573,6 +573,17 @@ test("FrankenTerm link policy only allows HTTP on loopback hosts", () => {
   assert.deepEqual(web.frankenTermLinkPolicy(), { allowHttp: false, allowHttps: true });
 });
 
+test("safe anchor href rejects active-content directory URLs", () => {
+  resetWebState();
+  window.location = new URL("http://swimmers.test/base/");
+
+  assert.equal(web.safeAnchorHref("https://example.com/repo"), "https://example.com/repo");
+  assert.equal(web.safeAnchorHref("/local/repo"), "http://swimmers.test/local/repo");
+  assert.equal(web.safeAnchorHref("javascript:alert(1)"), "");
+  assert.equal(web.safeAnchorHref("data:text/html,pwned"), "");
+  assert.equal(web.safeAnchorHref("http://[::1"), "");
+});
+
 test("FrankenTerm surface validation reports missing methods", () => {
   assert.throws(
     () => web.validateFrankenTermSurface({ init() {} }, ["init", "render"], "test renderer"),

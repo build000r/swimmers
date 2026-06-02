@@ -447,6 +447,18 @@ function frankenTermLinkPolicy() {
   };
 }
 
+function safeAnchorHref(rawUrl) {
+  try {
+    const url = new URL(String(rawUrl || ""), window.location.href);
+    if (url.protocol !== "http:" && url.protocol !== "https:") {
+      return "";
+    }
+    return url.toString();
+  } catch (_) {
+    return "";
+  }
+}
+
 function utf8ByteLength(text) {
   const value = String(text ?? "");
   if (typeof TextEncoder !== "undefined") {
@@ -3550,10 +3562,11 @@ function renderDirEntries(response) {
         badges.appendChild(dirtyBadge);
       }
       meta.appendChild(badges);
-      if (entry?.open_url) {
+      const openHref = safeAnchorHref(entry?.open_url);
+      if (openHref) {
         const openLink = document.createElement("a");
         openLink.className = "dir-open-url";
-        openLink.href = String(entry.open_url);
+        openLink.href = openHref;
         openLink.target = "_blank";
         openLink.rel = "noopener noreferrer";
         openLink.textContent = "open url";
@@ -8551,6 +8564,7 @@ export const __swimmersWebTest = {
   utf8ByteLength,
   terminalTextWithinPasteBudget,
   frankenTermLinkPolicy,
+  safeAnchorHref,
   isLoopbackHostname,
   validateFrankenTermSurface,
   captureTerminalRendererDiagnostic,
