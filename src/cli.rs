@@ -96,6 +96,12 @@ const ENV_VAR_SPECS: &[EnvVarSpec] = &[
         current: None,
     },
     EnvVarSpec {
+        name: "SWIMMERS_NATIVE_SCRIPT_ROOT",
+        secret: false,
+        default: |_| "(bundled)".to_string(),
+        current: None,
+    },
+    EnvVarSpec {
         name: "SWIMMERS_ATTENTION_GROUP_SIZE",
         secret: false,
         default: |_| "6".to_string(),
@@ -204,6 +210,7 @@ const ENV_VAR_HELP: &str = "ENVIRONMENT VARIABLES:
   SWIMMERS_GROK_BIN            Override the Grok executable (default: grok)
   SWIMMERS_NATIVE_APP          'iterm' or 'ghostty' (default: iterm)
   SWIMMERS_GHOSTTY_MODE        'swap', 'add', or 'window' (default: swap)
+  SWIMMERS_NATIVE_SCRIPT_ROOT  Override bundled native handoff script root
   SWIMMERS_ATTENTION_GROUP_SIZE
                                Number of panes in the attention group, 1-6 (default: 6)
   SWIMMERS_ATTENTION_GROUP_LAYOUT
@@ -1537,6 +1544,31 @@ esac
         let auth = rows.iter().find(|r| r.name == "AUTH_TOKEN").unwrap();
         assert_eq!(auth.current, "***");
         assert_ne!(auth.current, "supersecret");
+    }
+
+    #[test]
+    fn env_table_exposes_native_script_root_override() {
+        let _guard = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let _native_root = EnvVarGuard::set(
+            "SWIMMERS_NATIVE_SCRIPT_ROOT",
+            std::ffi::OsString::from("/tmp/swimmers-native-scripts"),
+        );
+        let load = ConfigLoad {
+            config: Config::default(),
+            diagnostics: Vec::new(),
+        };
+
+        let rows = env_var_rows_from_load(&load);
+        let native_root = rows
+            .iter()
+            .find(|r| r.name == "SWIMMERS_NATIVE_SCRIPT_ROOT")
+            .expect("native script root row");
+
+        assert_eq!(native_root.default, "(bundled)");
+        assert_eq!(native_root.current, "/tmp/swimmers-native-scripts");
+        assert_eq!(native_root.source, "env");
     }
 
     #[test]
