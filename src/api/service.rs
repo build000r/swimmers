@@ -836,7 +836,12 @@ pub async fn overlay_service_health_map(
         let url = url.clone();
         let client = client.clone();
         probes.push(async move {
-            let ok = client.get(&url).send().await.is_ok();
+            let ok = client
+                .get(&url)
+                .send()
+                .await
+                .map(|response| response.status().is_success())
+                .unwrap_or(false);
             (name, ok)
         });
     }

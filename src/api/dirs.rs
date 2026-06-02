@@ -439,6 +439,35 @@ mod tests {
         assert_eq!(map.get("svc-bad-url"), Some(&false));
     }
 
+    #[tokio::test]
+    async fn overlay_health_map_treats_failed_http_status_as_not_running() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test health server");
+        let addr = listener.local_addr().expect("local addr");
+        let app = axum::Router::new().route(
+            "/health",
+            axum::routing::get(|| async { StatusCode::INTERNAL_SERVER_ERROR }),
+        );
+        tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve test health server");
+        });
+
+        let services = vec![OverlayServiceEntry {
+            name: "svc-failing".into(),
+            dir: "x".into(),
+            health_url: Some(format!("http://{addr}/health")),
+            restart: None,
+            open_url: None,
+        }];
+        let requested = vec!["svc-failing".to_string()];
+
+        let map = overlay_service_health_map(&services, &requested).await;
+        assert_eq!(map.get("svc-failing"), Some(&false));
+    }
+
     #[test]
     fn list_group_entries_sync_merges_sources_and_preserves_full_paths() {
         let dir = tempfile::tempdir().expect("tempdir");
