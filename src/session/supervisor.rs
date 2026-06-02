@@ -4521,10 +4521,10 @@ mod tests {
 set -eu
 case "${1-}" in
   list-panes)
-    cat <<'EOF'
-work	0	1	1.0:%1
-work	1	1	1.1:%2
-EOF
+    sep=$(printf '\037')
+    name=$(printf 'work\tspace')
+    printf '%s%s0%s1%s1.0:%%1\n' "$name" "$sep" "$sep" "$sep"
+    printf '%s%s1%s1%s1.1:%%2\n' "$name" "$sep" "$sep" "$sep"
     ;;
   *)
     printf 'unexpected tmux command: %s\n' "${1-}" >&2
@@ -4536,12 +4536,12 @@ esac
 
         let supervisor = SessionSupervisor::new(Arc::new(Config::default()));
         let mut summary = test_summary("sess-live", SessionState::Idle);
-        summary.tmux_name = "work".to_string();
+        summary.tmux_name = "work\tspace".to_string();
         supervisor
             .insert_test_handle(spawn_summary_handle(summary).await)
             .await;
         supervisor.thought_snapshots.write().await.insert(
-            "tmux:work:1.1:%2".to_string(),
+            "tmux:work\tspace:1.1:%2".to_string(),
             ThoughtSnapshot {
                 thought: Some("pane two".to_string()),
                 thought_state: ThoughtState::Active,
@@ -4760,10 +4760,10 @@ exit 1
 set -eu
 case "${1-}" in
   list-panes)
-    cat <<'EOF'
-work	0	1	1.0:%1
-work	1	1	1.1:%2
-EOF
+    sep=$(printf '\037')
+    name=$(printf 'work\tspace')
+    printf '%s%s0%s1%s1.0:%%1\n' "$name" "$sep" "$sep" "$sep"
+    printf '%s%s1%s1%s1.1:%%2\n' "$name" "$sep" "$sep" "$sep"
     ;;
   *)
     printf 'unexpected tmux command: %s\n' "${1-}" >&2
@@ -4775,12 +4775,12 @@ esac
 
         let supervisor = SessionSupervisor::new(Arc::new(Config::default()));
         let mut summary = test_summary("sess-live", SessionState::Busy);
-        summary.tmux_name = "work".to_string();
+        summary.tmux_name = "work\tspace".to_string();
         supervisor
             .insert_test_handle(spawn_summary_handle(summary).await)
             .await;
         supervisor.thought_snapshots.write().await.insert(
-            "tmux:work:1.1:%2".to_string(),
+            "tmux:work\tspace:1.1:%2".to_string(),
             ThoughtSnapshot {
                 thought: Some("pane two".to_string()),
                 thought_state: ThoughtState::Active,
