@@ -100,7 +100,9 @@ pub fn namespace_session_summary(
     target: &LaunchTargetSummary,
     mut session: SessionSummary,
 ) -> SessionSummary {
-    if split_remote_session_id(&session.session_id).is_none() {
+    let already_namespaced_for_target = split_remote_session_id(&session.session_id)
+        .is_some_and(|(target_id, _)| target_id == target.id);
+    if !already_namespaced_for_target {
         session.session_id = namespace_session_id(&target.id, &session.session_id);
     }
     if !session.tmux_name.starts_with('[') {
@@ -1380,6 +1382,25 @@ mod tests {
             namespace_session_id("jeremy-skillbox", "sess_0")
         );
         assert_eq!(session.tmux_name, "[Jeremy Skillbox] 7");
+    }
+
+    #[test]
+    fn namespace_session_summary_preserves_current_target_namespace_only() {
+        let target = target();
+
+        let same_target =
+            namespace_session_summary(&target, summary("jeremy-skillbox::sess_nested"));
+        assert_eq!(same_target.session_id, "jeremy-skillbox::sess_nested");
+
+        let other_target = namespace_session_summary(&target, summary("other-target::sess_nested"));
+        assert_eq!(
+            other_target.session_id,
+            "jeremy-skillbox::other-target::sess_nested"
+        );
+        assert_eq!(
+            split_remote_session_id(&other_target.session_id),
+            Some(("jeremy-skillbox", "other-target::sess_nested"))
+        );
     }
 
     #[test]
