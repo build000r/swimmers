@@ -166,6 +166,9 @@ impl StateDetector {
                     "OSC 133 classified output as idle"
                 );
                 self.set_state(SessionState::Idle, Some(None), now, "osc133_prompt");
+                if self.apply_visible_error_pattern(&visible, now) {
+                    return;
+                }
             }
             return;
         }
@@ -1025,6 +1028,15 @@ mod tests {
         let mut d = StateDetector::new();
 
         d.process_output(b"\x1b]133;C;cmd=foo\x07bash: foo: command not found\n");
+
+        assert_eq!(d.get_state().0, SessionState::Error);
+    }
+
+    #[test]
+    fn osc_command_error_and_prompt_in_same_chunk_enters_error() {
+        let mut d = StateDetector::new();
+
+        d.process_output(b"\x1b]133;C;cmd=foo\x07bash: foo: command not found\n\x1b]133;A\x07");
 
         assert_eq!(d.get_state().0, SessionState::Error);
     }
