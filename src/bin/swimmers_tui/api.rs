@@ -1,4 +1,5 @@
 use super::*;
+use swimmers::api::remote_sessions::encode_path_segment;
 use swimmers::openrouter_models::{
     cached_or_default_openrouter_candidates, refresh_openrouter_model_cache,
 };
@@ -580,6 +581,7 @@ impl TuiApi for ApiClient {
     ) -> BoxFuture<'_, Result<MermaidArtifactResponse, String>> {
         let session_id = session_id.to_string();
         Box::pin(async move {
+            let session_id = encode_path_segment(&session_id);
             let url = format!(
                 "{}/v1/sessions/{}/mermaid-artifact",
                 self.base_url, session_id
@@ -607,6 +609,7 @@ impl TuiApi for ApiClient {
     ) -> BoxFuture<'_, Result<SessionSkillListResponse, String>> {
         let session_id = session_id.to_string();
         Box::pin(async move {
+            let session_id = encode_path_segment(&session_id);
             let url = format!("{}/v1/sessions/{}/skills", self.base_url, session_id);
             let response = self
                 .with_auth(
@@ -645,6 +648,7 @@ impl TuiApi for ApiClient {
         let session_id = session_id.to_string();
         let name = name.to_string();
         Box::pin(async move {
+            let session_id = encode_path_segment(&session_id);
             let url = format!("{}/v1/sessions/{}/plan-file", self.base_url, session_id);
             let response = self
                 .with_auth(self.http.get(url))

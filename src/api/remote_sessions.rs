@@ -78,6 +78,24 @@ pub fn namespace_session_id(target_id: &str, remote_session_id: &str) -> String 
     format!("{target_id}{REMOTE_SESSION_SEPARATOR}{remote_session_id}")
 }
 
+pub fn encode_path_segment(segment: &str) -> String {
+    let mut encoded = String::with_capacity(segment.len());
+    for byte in segment.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                encoded.push(byte as char);
+            }
+            _ => {
+                const HEX: &[u8; 16] = b"0123456789ABCDEF";
+                encoded.push('%');
+                encoded.push(HEX[(byte >> 4) as usize] as char);
+                encoded.push(HEX[(byte & 0x0F) as usize] as char);
+            }
+        }
+    }
+    encoded
+}
+
 pub fn namespace_session_summary(
     target: &LaunchTargetSummary,
     mut session: SessionSummary,
@@ -482,9 +500,10 @@ pub async fn fetch_remote_mermaid_artifact(
     target: &LaunchTargetSummary,
     remote_session_id: &str,
 ) -> Result<crate::types::MermaidArtifactResponse, RemoteSessionError> {
+    let session_id = encode_path_segment(remote_session_id);
     get_remote_json(
         target,
-        &format!("/v1/sessions/{remote_session_id}/mermaid-artifact"),
+        &format!("/v1/sessions/{session_id}/mermaid-artifact"),
     )
     .await
     .map(|mut response: crate::types::MermaidArtifactResponse| {
@@ -498,9 +517,10 @@ pub async fn fetch_remote_plan_file(
     remote_session_id: &str,
     name: &str,
 ) -> Result<crate::types::PlanFileResponse, RemoteSessionError> {
+    let session_id = encode_path_segment(remote_session_id);
     let mut response: crate::types::PlanFileResponse = get_remote_json_with_query(
         target,
-        &format!("/v1/sessions/{remote_session_id}/plan-file"),
+        &format!("/v1/sessions/{session_id}/plan-file"),
         &[("name", name)],
     )
     .await?;
@@ -512,30 +532,26 @@ pub async fn fetch_remote_agent_context(
     target: &LaunchTargetSummary,
     remote_session_id: &str,
 ) -> Result<SessionAgentContextResponse, RemoteSessionError> {
-    get_remote_json(
-        target,
-        &format!("/v1/sessions/{remote_session_id}/agent-context"),
-    )
-    .await
-    .map(|mut response: SessionAgentContextResponse| {
-        response.session_id = namespace_session_id(&target.id, &response.session_id);
-        response
-    })
+    let session_id = encode_path_segment(remote_session_id);
+    get_remote_json(target, &format!("/v1/sessions/{session_id}/agent-context"))
+        .await
+        .map(|mut response: SessionAgentContextResponse| {
+            response.session_id = namespace_session_id(&target.id, &response.session_id);
+            response
+        })
 }
 
 pub async fn fetch_remote_timeline(
     target: &LaunchTargetSummary,
     remote_session_id: &str,
 ) -> Result<SessionTimelineResponse, RemoteSessionError> {
-    get_remote_json(
-        target,
-        &format!("/v1/sessions/{remote_session_id}/timeline"),
-    )
-    .await
-    .map(|mut response: SessionTimelineResponse| {
-        response.session_id = namespace_session_id(&target.id, &response.session_id);
-        response
-    })
+    let session_id = encode_path_segment(remote_session_id);
+    get_remote_json(target, &format!("/v1/sessions/{session_id}/timeline"))
+        .await
+        .map(|mut response: SessionTimelineResponse| {
+            response.session_id = namespace_session_id(&target.id, &response.session_id);
+            response
+        })
 }
 
 pub async fn fetch_remote_transcript(
@@ -555,13 +571,14 @@ pub async fn fetch_remote_transcript(
     if let Some(limit) = limit {
         query.push(("limit".to_string(), limit.to_string()));
     }
+    let session_id = encode_path_segment(remote_session_id);
     let query_refs = query
         .iter()
         .map(|(key, value)| (key.as_str(), value.as_str()))
         .collect::<Vec<_>>();
     let mut response: SessionTranscriptResponse = get_remote_json_with_query(
         target,
-        &format!("/v1/sessions/{remote_session_id}/transcript"),
+        &format!("/v1/sessions/{session_id}/transcript"),
         &query_refs,
     )
     .await?;
@@ -573,15 +590,13 @@ pub async fn fetch_remote_git_diff(
     target: &LaunchTargetSummary,
     remote_session_id: &str,
 ) -> Result<SessionGitDiffResponse, RemoteSessionError> {
-    get_remote_json(
-        target,
-        &format!("/v1/sessions/{remote_session_id}/git-diff"),
-    )
-    .await
-    .map(|mut response: SessionGitDiffResponse| {
-        response.session_id = namespace_session_id(&target.id, &response.session_id);
-        response
-    })
+    let session_id = encode_path_segment(remote_session_id);
+    get_remote_json(target, &format!("/v1/sessions/{session_id}/git-diff"))
+        .await
+        .map(|mut response: SessionGitDiffResponse| {
+            response.session_id = namespace_session_id(&target.id, &response.session_id);
+            response
+        })
 }
 
 async fn get_remote_json<T>(
@@ -1014,9 +1029,11 @@ mod tests {
         })
     }
 
-    async fn capture_timeline() -> AxumJson<SessionTimelineResponse> {
+    async fn capture_timeline(
+        axum::extract::Path(session_id): axum::extract::Path<String>,
+    ) -> AxumJson<SessionTimelineResponse> {
         AxumJson(SessionTimelineResponse {
-            session_id: "sess_2".to_string(),
+            session_id,
             available: true,
             cwd: "/monoserver/opensource/swimmers".to_string(),
             tool: Some("Codex".to_string()),
@@ -1054,7 +1071,7 @@ mod tests {
     }
 
     async fn spawn_timeline_server() -> (String, tokio::task::JoinHandle<()>) {
-        let app = Router::new().route("/v1/sessions/sess_2/timeline", get(capture_timeline));
+        let app = Router::new().route("/v1/sessions/{session_id}/timeline", get(capture_timeline));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind test server");
@@ -1366,6 +1383,15 @@ mod tests {
     }
 
     #[test]
+    fn encode_path_segment_escapes_reserved_url_characters() {
+        assert_eq!(
+            encode_path_segment("target::sess/weird?x#frag"),
+            "target%3A%3Asess%2Fweird%3Fx%23frag"
+        );
+        assert_eq!(encode_path_segment("sess_2-okay.~"), "sess_2-okay.~");
+    }
+
+    #[test]
     fn target_points_at_current_server_matches_active_tailnet_bind_and_port() {
         let mut config = Config::default();
         config.bind = "100.86.253.9".to_string();
@@ -1558,6 +1584,23 @@ mod tests {
             namespace_session_id("jeremy-skillbox", "sess_2")
         );
         assert_eq!(response.available, true);
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn fetch_remote_timeline_encodes_reserved_session_id_path_segment() {
+        let (base_url, handle) = spawn_timeline_server().await;
+        let mut target = target();
+        target.base_url = Some(base_url);
+
+        let response = fetch_remote_timeline(&target, "sess/weird?x#frag")
+            .await
+            .expect("remote timeline with reserved characters");
+
+        assert_eq!(
+            response.session_id,
+            namespace_session_id("jeremy-skillbox", "sess/weird?x#frag")
+        );
         handle.abort();
     }
 
