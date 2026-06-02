@@ -14,7 +14,7 @@ use tokio::process::Command;
 use crate::api::envelope::{
     api_error, error_body, error_body_msg, success_json, INVALID_SKILL_TOOL,
 };
-use crate::api::{fetch_live_summary, AppState};
+use crate::api::{fetch_live_summary, remote_sessions, AppState};
 use crate::auth::{AuthInfo, AuthScope};
 use crate::types::{
     SessionSkillIssue, SessionSkillListResponse, SessionSkillSummary, SkillListResponse,
@@ -266,6 +266,25 @@ async fn list_session_skills(
                 "INVALID_SKILL_SOURCE",
                 "session skills source must be sbp",
             )),
+        )
+            .into_response();
+    }
+
+    if remote_sessions::split_remote_session_id(&session_id).is_some() {
+        return (
+            StatusCode::OK,
+            Json(SessionSkillListResponse {
+                session_id,
+                source: "sbp".to_string(),
+                cwd: String::new(),
+                available: false,
+                query: query.q,
+                skills: Vec::new(),
+                issues: Vec::new(),
+                message: Some(
+                    "remote session skills must be queried on the target host".to_string(),
+                ),
+            }),
         )
             .into_response();
     }
@@ -867,6 +886,37 @@ cat "$SBP_OUTPUT_FILE"
         assert!(!args.contains("skill add"));
         assert!(!args.contains("skill sync"));
         assert!(!args.contains("skill prune"));
+    }
+
+    #[tokio::test]
+    async fn session_skills_degrades_remote_namespaced_sessions() {
+        let remote_id =
+            crate::api::remote_sessions::namespace_session_id("remote-target", "sess/weird?x#frag");
+
+        let response = list_session_skills(
+            Extension(AuthInfo::new(OPERATOR_SCOPES.to_vec())),
+            State(test_state()),
+            axum::extract::Path(remote_id.clone()),
+            Query(SessionSkillQuery {
+                source: Some("sbp".to_string()),
+                q: Some("remote".to_string()),
+            }),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let json = response_json(response).await;
+        assert_eq!(json["session_id"], remote_id);
+        assert_eq!(json["source"], "sbp");
+        assert_eq!(json["cwd"], "");
+        assert_eq!(json["available"], false);
+        assert_eq!(json["query"], "remote");
+        assert_eq!(json["skills"].as_array().unwrap().len(), 0);
+        assert_eq!(json["issues"].as_array().unwrap().len(), 0);
+        assert_eq!(
+            json["message"],
+            "remote session skills must be queried on the target host"
+        );
     }
 
     #[tokio::test]
