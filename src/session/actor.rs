@@ -23,7 +23,7 @@ use crate::scroll::guard::{ScrollGuard, ScrollOutputChunk};
 use crate::session::artifacts::{
     default_artifact_registry, extract_mmd_slice_name, list_plan_siblings, list_repo_docs,
     read_text_file_bounded, resolve_viewer_text_path, ArtifactDiscoveryContext, ArtifactKind,
-    VIEWER_TEXT_FILENAMES, VIEWER_TEXT_MAX_BYTES,
+    PLAN_SIBLING_FILENAMES, VIEWER_TEXT_FILENAMES, VIEWER_TEXT_MAX_BYTES,
 };
 use crate::session::replay_ring::ReplayRing;
 use crate::state::detector::StateDetector;
@@ -1581,24 +1581,29 @@ impl SessionActor {
             };
         }
 
-        // Discover the mermaid artifact to find the schema.mmd path
-        let context = ArtifactDiscoveryContext {
-            session_id: session_id.clone(),
-            tmux_name: String::new(),
-            cwd: cwd.clone(),
-            session_started_at,
-            pane_tail: String::new(),
-        };
-        let Some(artifact) = default_artifact_registry().discover(ArtifactKind::Mermaid, &context)
-        else {
-            return PlanFileResponse {
-                session_id,
-                name: name.to_string(),
-                content: None,
-                error: Some("no mermaid artifact found".to_string()),
+        let schema_path = if PLAN_SIBLING_FILENAMES.contains(&name) {
+            let context = ArtifactDiscoveryContext {
+                session_id: session_id.clone(),
+                tmux_name: String::new(),
+                cwd: cwd.clone(),
+                session_started_at,
+                pane_tail: String::new(),
             };
+            let Some(artifact) =
+                default_artifact_registry().discover(ArtifactKind::Mermaid, &context)
+            else {
+                return PlanFileResponse {
+                    session_id,
+                    name: name.to_string(),
+                    content: None,
+                    error: Some("no mermaid artifact found".to_string()),
+                };
+            };
+            Some(artifact.path)
+        } else {
+            None
         };
-        let file_path = match resolve_viewer_text_path(&cwd, Some(&artifact.path), name) {
+        let file_path = match resolve_viewer_text_path(&cwd, schema_path.as_deref(), name) {
             Some(path) => path,
             None => {
                 return PlanFileResponse {
@@ -2717,6 +2722,59 @@ mod tests {
             response.error.as_deref(),
             Some("artifact file name not allowed: ../secret.txt")
         );
+    }
+
+    #[test]
+    fn plan_file_response_reads_repo_docs_without_mermaid_artifact() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            dir.path().join("Cargo.toml"),
+            "[package]\nname = \"demo\"\n",
+        )
+        .expect("write cargo");
+        std::fs::write(dir.path().join("README.md"), "# Demo\n").expect("write readme");
+        std::fs::create_dir_all(dir.path().join("docs")).expect("create docs");
+        std::fs::write(dir.path().join("docs").join("VISION.md"), "# Vision\n")
+            .expect("write vision");
+
+        let readme = SessionActor::build_plan_file_response(
+            "sess-docs".to_string(),
+            dir.path().to_string_lossy().into_owned(),
+            Utc::now(),
+            "README.md",
+        );
+        let vision = SessionActor::build_plan_file_response(
+            "sess-docs".to_string(),
+            dir.path().to_string_lossy().into_owned(),
+            Utc::now(),
+            "VISION.md",
+        );
+
+        assert_eq!(readme.content.as_deref(), Some("# Demo\n"));
+        assert!(readme.error.is_none());
+        assert_eq!(vision.content.as_deref(), Some("# Vision\n"));
+        assert!(vision.error.is_none());
+    }
+
+    #[test]
+    fn plan_file_response_still_requires_mermaid_artifact_for_plan_siblings() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            dir.path().join("Cargo.toml"),
+            "[package]\nname = \"demo\"\n",
+        )
+        .expect("write cargo");
+        std::fs::write(dir.path().join("plan.md"), "# Root plan\n").expect("write root plan");
+
+        let response = SessionActor::build_plan_file_response(
+            "sess-plan".to_string(),
+            dir.path().to_string_lossy().into_owned(),
+            Utc::now(),
+            "plan.md",
+        );
+
+        assert!(response.content.is_none());
+        assert_eq!(response.error.as_deref(), Some("no mermaid artifact found"));
     }
 
     #[test]
