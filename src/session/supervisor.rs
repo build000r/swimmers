@@ -2955,7 +2955,6 @@ fn plan_tmux_discovery_candidates(
 fn parse_tmux_session_names(stdout: &[u8]) -> Vec<String> {
     String::from_utf8_lossy(stdout)
         .lines()
-        .map(str::trim)
         .filter(|name| !name.is_empty())
         .map(str::to_string)
         .collect()
@@ -5394,11 +5393,26 @@ esac
         let listed = vec!["".to_string(), "  ".to_string(), "".to_string()];
         let (candidates, highest_numeric) =
             plan_tmux_discovery_candidates(&listed, &HashSet::new(), &HashMap::new());
-        // Empty strings pass the is_empty() guard; whitespace names do not parse as u64
-        // and are not empty so they become candidates — but "" is skipped
+        // Empty strings are not valid discovery candidates; whitespace names
+        // are preserved because tmux session names are exact targets.
         assert_eq!(highest_numeric, 0);
         assert_eq!(candidates.len(), 1); // "  " is non-empty, not tracked
         assert_eq!(candidates[0].tmux_name, "  ");
+    }
+
+    #[test]
+    fn parse_tmux_session_names_preserves_exact_names() {
+        let names = parse_tmux_session_names(b"alpha\n  padded  \n\tindented\n\nbeta\n");
+
+        assert_eq!(
+            names,
+            vec![
+                "alpha".to_string(),
+                "  padded  ".to_string(),
+                "\tindented".to_string(),
+                "beta".to_string(),
+            ]
+        );
     }
 
     #[test]
