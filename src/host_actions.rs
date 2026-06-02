@@ -1,5 +1,3 @@
-#![cfg_attr(not(feature = "personal-workflows"), allow(dead_code))]
-
 use std::collections::HashMap;
 use std::fs;
 use std::io;

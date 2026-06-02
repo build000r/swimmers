@@ -258,6 +258,7 @@ set -euo pipefail
   printf 'SWIMMERS_TUI_URL=%s\n' "${SWIMMERS_TUI_URL:-}"
   printf 'SWIMMERS_TUI_REUSE_SERVER=%s\n' "${SWIMMERS_TUI_REUSE_SERVER:-}"
   printf 'SWIMMERS_TUI_FEATURES=%s\n' "${SWIMMERS_TUI_FEATURES:-}"
+  printf 'SWIMMERS_PERSONAL_WORKFLOWS=%s\n' "${SWIMMERS_PERSONAL_WORKFLOWS:-}"
   printf 'CARGO_TARGET_DIR=%s\n' "${CARGO_TARGET_DIR:-}"
 } >"${SWIMMERS_UP_TEST_CAPTURE}"
 SH
@@ -298,8 +299,9 @@ grep -q "Using FrankenTerm assets from ${FRANKENTERM_PKG}" "${tmp_dir}/fresh.out
 grep -q "Starting swimmers backend on http://127.0.0.1:${port}" "${tmp_dir}/fresh.out"
 grep -q "SWIMMERS_TUI_URL=http://127.0.0.1:${port}" "${capture}"
 grep -q "SWIMMERS_TUI_REUSE_SERVER=1" "${capture}"
-grep -q "SWIMMERS_TUI_FEATURES=personal-workflows" "${capture}"
-grep -q "CARGO_TARGET_DIR=${ROOT_DIR}/target/swimmers-up/personal-workflows" "${capture}"
+grep -q "SWIMMERS_TUI_FEATURES=" "${capture}"
+grep -q "SWIMMERS_PERSONAL_WORKFLOWS=1" "${capture}"
+grep -q "CARGO_TARGET_DIR=${ROOT_DIR}/target/swimmers-up/default" "${capture}"
 stop_port_listener "${port}"
 
 port="$(free_port)"
@@ -321,9 +323,18 @@ grep -q "/v1/dirs=404" "${tmp_dir}/missing-dirs.err"
 stop_port_listener "${port}"
 
 port="$(free_port)"
+SWIMMERS_PERSONAL_WORKFLOWS=0 \
+  SWIMMERS_UP_TEST_SERVER_MODE=missing-dirs \
+  run_up_for_port "${port}" "${capture}" "${tmp_dir}/missing-dirs-disabled.out"
+grep -q "Backend ready on http://127.0.0.1:${port}" "${tmp_dir}/missing-dirs-disabled.out"
+grep -q "SWIMMERS_PERSONAL_WORKFLOWS=0" "${capture}"
+stop_port_listener "${port}"
+
+port="$(free_port)"
 SWIMMERS_TUI_FEATURES=voice \
   run_up_for_port "${port}" "${capture}" "${tmp_dir}/fresh-with-voice.out"
-grep -q "SWIMMERS_TUI_FEATURES=personal-workflows,voice" "${capture}"
+grep -q "SWIMMERS_TUI_FEATURES=voice" "${capture}"
+grep -q "SWIMMERS_PERSONAL_WORKFLOWS=1" "${capture}"
 stop_port_listener "${port}"
 
 start_fixture ready python-fixture
@@ -342,11 +353,12 @@ grep -q "not this checkout's swimmers backend" "${tmp_dir}/non-swimmers.err"
 kill -0 "${fixture_pid}" 2>/dev/null
 stop_fixture
 
-cargo build -q --bin swimmers --features personal-workflows
+cargo build -q --bin swimmers
 stale_port="$(free_port)"
 real_server_log="${tmp_dir}/real-swimmers-${stale_port}.log"
 SWIMMERS_DATA_DIR="${tmp_dir}/real-data" \
   SWIMMERS_FRANKENTUI_PKG_DIR="${FRANKENTERM_PKG}" \
+  SWIMMERS_PERSONAL_WORKFLOWS=1 \
   PORT="${stale_port}" \
   "${ROOT_DIR}/target/debug/swimmers" >"${real_server_log}" 2>&1 &
 fixture_pid=$!

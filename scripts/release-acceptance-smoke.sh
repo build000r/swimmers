@@ -15,7 +15,7 @@ Usage: scripts/release-acceptance-smoke.sh <profile>
 Profiles:
   default-installed  Install or use default binaries, then check --help,
                      loopback server, /health, /v1/sessions, and TUI CLI boot.
-  source-personal    Run the source-checkout personal-workflows launcher smoke.
+  source-personal    Run the source-checkout personal workflow launcher smoke.
   native-assets      Check native handoff scripts are packaged.
   thought            Run thought bridge/fake-emitter contract tests.
   voice              Compile the optional voice-enabled TUI path.

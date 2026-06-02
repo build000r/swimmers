@@ -88,9 +88,9 @@ tempfile = "3"
 tokio-tungstenite = "0.28"
 
 [features]
-# Personal workstation workflow endpoints (overlay-driven directory browsing,
-# skill scanning, clawgs commit helpers). Off by default so the crates.io
-# build is lean; enable with `--features personal-workflows` when building
-# from source for the maintainer's local workflow.
+# Compatibility switch for source workflows: the local repo/skill/commit-helper
+# routes are now compiled into normal builds and controlled at runtime by
+# SWIMMERS_PERSONAL_WORKFLOWS. This feature only changes their default from off
+# to on for older source-build wrappers.
 personal-workflows = []
 voice = ["dep:cpal", "dep:whisper-rs"]

@@ -97,8 +97,8 @@ while [ "$i" -le "${NUM_REPOS}" ]; do
 done
 printf '[stress] built %s git repos\n' "${NUM_REPOS}"
 
-printf '[stress] building swimmers (personal-workflows)\n'
-(cd "${REPO_ROOT}" && cargo build --bin swimmers --features personal-workflows >/dev/null)
+printf '[stress] building swimmers\n'
+(cd "${REPO_ROOT}" && cargo build --bin swimmers >/dev/null)
 
 server_bin="${REPO_ROOT}/target/debug/swimmers"
 if [ ! -x "${server_bin}" ]; then
@@ -110,6 +110,7 @@ fi
 # with any swimmers instance the developer already has running locally.
 DIRS_BASE_PATH="${STRESS_REPOS_ROOT}" \
 PORT="${STRESS_PORT}" \
+SWIMMERS_PERSONAL_WORKFLOWS=1 \
   "${server_bin}" </dev/null >"${STRESS_LOG}" 2>&1 &
 STRESS_SERVER_PID=$!
 printf '[stress] started server pid=%s on port=%s\n' "${STRESS_SERVER_PID}" "${STRESS_PORT}"

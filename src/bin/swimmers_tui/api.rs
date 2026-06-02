@@ -631,7 +631,7 @@ impl TuiApi for ApiClient {
 
             if response.status() == reqwest::StatusCode::NOT_FOUND {
                 return Err(format!(
-                    "backend at {} does not expose session skills. Skill context requires a `swimmers` build with `--features personal-workflows`; if this is your local server, relaunch via `make up` or `make tui`.",
+                    "backend at {} does not expose session skills. Skill context requires SWIMMERS_PERSONAL_WORKFLOWS=1 on the target backend; if this is your local server, relaunch via `make up` or `make tui`.",
                     self.base_url
                 ));
             }
@@ -866,7 +866,7 @@ impl TuiApi for ApiClient {
 
             if response.status() == reqwest::StatusCode::NOT_FOUND {
                 return Err(format!(
-                    "backend at {} does not expose /v1/dirs. Click-to-spawn directory browsing requires a `swimmers` build with `--features personal-workflows`; if this is your local server, relaunch via `make up` or `make tui`.",
+                    "backend at {} does not expose /v1/dirs. Click-to-spawn directory browsing requires SWIMMERS_PERSONAL_WORKFLOWS=1 on the target backend; if this is your local server, relaunch via `make up` or `make tui`.",
                     self.base_url
                 ));
             }
@@ -893,7 +893,7 @@ impl TuiApi for ApiClient {
 
             if response.status() == reqwest::StatusCode::NOT_FOUND {
                 return Err(format!(
-                    "backend at {} does not expose /v1/dirs/repositories. Repository search requires a `swimmers` build with `--features personal-workflows`; if this is your local server, relaunch via `make up` or `make tui`.",
+                    "backend at {} does not expose /v1/dirs/repositories. Repository search requires SWIMMERS_PERSONAL_WORKFLOWS=1 on the target backend; if this is your local server, relaunch via `make up` or `make tui`.",
                     self.base_url
                 ));
             }
@@ -927,7 +927,7 @@ impl TuiApi for ApiClient {
 
             if response.status() == reqwest::StatusCode::NOT_FOUND {
                 return Err(format!(
-                    "backend at {} does not expose /v1/dirs/actions. Repo actions require a `swimmers` build with `--features personal-workflows`; if this is your local server, relaunch via `make up` or `make tui`.",
+                    "backend at {} does not expose /v1/dirs/actions. Repo actions require SWIMMERS_PERSONAL_WORKFLOWS=1 on the target backend; if this is your local server, relaunch via `make up` or `make tui`.",
                     self.base_url
                 ));
             }
@@ -962,7 +962,7 @@ impl TuiApi for ApiClient {
 
             if response.status() == reqwest::StatusCode::NOT_FOUND {
                 return Err(format!(
-                    "backend at {} does not expose /v1/dirs/group-memberships. Directory group editing requires a `swimmers` build with `--features personal-workflows`; if this is your local server, relaunch via `make up` or `make tui`.",
+                    "backend at {} does not expose /v1/dirs/group-memberships. Directory group editing requires SWIMMERS_PERSONAL_WORKFLOWS=1 on the target backend; if this is your local server, relaunch via `make up` or `make tui`.",
                     self.base_url
                 ));
             }

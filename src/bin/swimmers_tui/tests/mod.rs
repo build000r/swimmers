@@ -1640,11 +1640,11 @@ async fn api_client_list_dirs_reports_feature_hint_on_404() {
     let error = client
         .list_dirs(None, true, None)
         .await
-        .expect_err("missing route should explain the required feature");
+        .expect_err("missing route should explain the required runtime switch");
 
     handle.abort();
     assert!(error.contains("does not expose /v1/dirs"));
-    assert!(error.contains("personal-workflows"));
+    assert!(error.contains("SWIMMERS_PERSONAL_WORKFLOWS=1"));
     assert!(error.contains("make tui"));
 }
 

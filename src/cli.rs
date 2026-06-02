@@ -21,7 +21,9 @@ use std::time::{Duration, Instant};
 
 use clap::{Parser, Subcommand};
 
-use crate::config::{AuthMode, Config, ConfigDiagnostic, ConfigDiagnosticLevel, ConfigLoad};
+use crate::config::{
+    bool_env_value, AuthMode, Config, ConfigDiagnostic, ConfigDiagnosticLevel, ConfigLoad,
+};
 use crate::thought::emitter_client::resolve_clawgs_bin;
 use crate::thought::runtime_config::DaemonDefaults;
 
@@ -82,6 +84,12 @@ const ENV_VAR_SPECS: &[EnvVarSpec] = &[
         secret: false,
         default: |_| "grok".to_string(),
         current: None,
+    },
+    EnvVarSpec {
+        name: "SWIMMERS_PERSONAL_WORKFLOWS",
+        secret: false,
+        default: |config| bool_env_value(config.personal_workflows_enabled).to_string(),
+        current: Some(|load| bool_env_value(load.config.personal_workflows_enabled).to_string()),
     },
     EnvVarSpec {
         name: "SWIMMERS_NATIVE_APP",
@@ -208,6 +216,7 @@ const ENV_VAR_HELP: &str = "ENVIRONMENT VARIABLES:
   AUTH_TOKEN                   Bearer token when AUTH_MODE=token
   OBSERVER_TOKEN               Read-only bearer token (optional)
   SWIMMERS_GROK_BIN            Override the Grok executable (default: grok)
+  SWIMMERS_PERSONAL_WORKFLOWS  '1' to expose local repo, skill, and commit-helper routes
   SWIMMERS_NATIVE_APP          'iterm' or 'ghostty' (default: iterm)
   SWIMMERS_GHOSTTY_MODE        'swap', 'add', or 'window' (default: swap)
   SWIMMERS_NATIVE_SCRIPT_ROOT  Override bundled native handoff script root
@@ -1611,6 +1620,29 @@ esac
         assert_eq!(native_root.default, "(bundled)");
         assert_eq!(native_root.current, "/tmp/swimmers-native-scripts");
         assert_eq!(native_root.source, "env");
+    }
+
+    #[test]
+    fn env_table_exposes_personal_workflow_runtime_switch() {
+        let load = ConfigLoad {
+            config: Config {
+                personal_workflows_enabled: true,
+                ..Config::default()
+            },
+            diagnostics: Vec::new(),
+        };
+
+        let rows = env_var_rows_from_load(&load);
+        let personal = rows
+            .iter()
+            .find(|r| r.name == "SWIMMERS_PERSONAL_WORKFLOWS")
+            .expect("personal workflow row");
+
+        assert_eq!(
+            personal.default,
+            bool_env_value(Config::default().personal_workflows_enabled)
+        );
+        assert_eq!(personal.current, "1");
     }
 
     #[test]

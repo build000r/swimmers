@@ -135,9 +135,9 @@ Set `SWIMMERS_TUI_URL` to run the API as a separate process (for multi-client ac
 SWIMMERS_TUI_URL=http://127.0.0.1:3210 swimmers-tui
 ```
 
-From a source checkout, use `make up` when you want the browser surface and the TUI attached to the same local backend. It builds the current checkout, requires resolvable FrankenTerm assets, replaces any stale local `swimmers` listener on `PORT`, prints the browser URLs, then launches the TUI with `SWIMMERS_TUI_URL` and `SWIMMERS_TUI_REUSE_SERVER=1` so it does not clear that backend. The launcher defaults to `--features personal-workflows` so click-to-spawn endpoints such as `/v1/dirs` and `/v1/sessions/{id}/skills` are available; set `SWIMMERS_UP_FEATURES` to override the feature list. To avoid feature-set collisions in Cargo's shared `target/debug` binary path, `make up` builds into `target/swimmers-up/<features>/` by default, skips the build only when that feature-specific binary is newer than the checkout inputs, and treats a listener as reusable only when it is the same executable, `/health` says the process is alive, cheap required routes respond, and personal-workflows routes are not explicitly missing. A cold `/v1/dirs` inventory can exceed the short startup probe; that is reported as a note rather than mistaken for a dead backend.
+From a source checkout, use `make up` when you want the browser surface and the TUI attached to the same local backend. It builds the current checkout, requires resolvable FrankenTerm assets, replaces any stale local `swimmers` listener on `PORT`, prints the browser URLs, sets `SWIMMERS_PERSONAL_WORKFLOWS=1`, then launches the TUI with `SWIMMERS_TUI_URL` and `SWIMMERS_TUI_REUSE_SERVER=1` so it does not clear that backend. That runtime switch exposes click-to-spawn endpoints such as `/v1/dirs` and `/v1/sessions/{id}/skills`; set it to `0` to hide those local workflow routes without rebuilding. Set `SWIMMERS_UP_FEATURES` only for actual Cargo features such as `voice`. To avoid feature-set collisions in Cargo's shared `target/debug` binary path, `make up` builds into `target/swimmers-up/<features>/` by default, skips the build only when that feature-specific binary is newer than the checkout inputs, and treats a listener as reusable only when it is the same executable, `/health` says the process is alive, cheap required routes respond, and personal workflow routes are not explicitly missing. A cold `/v1/dirs` inventory can exceed the short startup probe; that is reported as a note rather than mistaken for a dead backend.
 
-The browser Trogdor view is terminal-first. Selecting one agent opens a single-session cockpit: the live terminal remains the primary surface, the bottom composer sends input without covering model output, and the workbench panels read the session timeline, user-submitted turns, post-turn JSONL records, structured git diff, Mermaid/plan artifacts, and passive Skillbox/SBP Skills results. The Skills panel identifies relevant skills when `personal-workflows` is enabled and `sbp` is available; it does not perform automatic skill hot-swap or mutate overlays.
+The browser Trogdor view is terminal-first. Selecting one agent opens a single-session cockpit: the live terminal remains the primary surface, the bottom composer sends input without covering model output, and the workbench panels read the session timeline, user-submitted turns, post-turn JSONL records, structured git diff, Mermaid/plan artifacts, and passive Skillbox/SBP Skills results. The Skills panel identifies relevant skills when `SWIMMERS_PERSONAL_WORKFLOWS=1` and `sbp` is available; it does not perform automatic skill hot-swap or mutate overlays.
 
 The `make tui` wrapper clears a stale loopback `swimmers` process on the target API port before launching, so local overlay edits are reread instead of silently reusing an old server. Set `SWIMMERS_TUI_REUSE_SERVER=1` to keep an existing local backend.
 
@@ -219,6 +219,7 @@ In `AUTH_MODE=token`, browser HTTP requests use an `Authorization: Bearer ...` h
 | `AUTH_TOKEN` | `(unset)` | Bearer token when `AUTH_MODE=token` |
 | `OBSERVER_TOKEN` | `(unset)` | Read-only bearer token for token-auth deployments |
 | `SWIMMERS_GROK_BIN` | `grok` | Override the Grok executable used by local spawn and commit-helper launchers |
+| `SWIMMERS_PERSONAL_WORKFLOWS` | `0` | Set to `1` to expose local repo browsing, skill discovery, group editing, and commit-helper routes. Source builds made with `--features personal-workflows` default this to `1`, but the env var can still disable it. |
 | `SWIMMERS_NATIVE_APP` | `iterm` | Native desktop target: `iterm` or `ghostty` |
 | `SWIMMERS_GHOSTTY_MODE` | `swap` | Ghostty single-session placement: `swap`, `add`, or `window` |
 | `SWIMMERS_NATIVE_SCRIPT_ROOT` | `(bundled)` | Override the root containing `scripts/iterm-focus.scpt` and `scripts/ghostty-open.scpt` for native handoff |
@@ -282,7 +283,7 @@ Release proof is split into profiles so optional local features do not block the
 | Profile | Command | What it proves |
 |---------|---------|----------------|
 | Default installed binaries | `make release-acceptance` | Installs from the checkout unless `SWIMMERS_ACCEPTANCE_BIN_DIR` is set, checks `swimmers --help`, `swimmers-tui --help`, `swimmers-tui --version`, starts a loopback `swimmers` server with an isolated data dir, and verifies `/health` plus `/v1/sessions`. |
-| Source checkout personal workflows | `make release-acceptance-source` | Runs the source `make up` launcher smoke with the `personal-workflows` feature path separate from crates.io/default install proof. |
+| Source checkout personal workflows | `make release-acceptance-source` | Runs the source `make up` launcher smoke with `SWIMMERS_PERSONAL_WORKFLOWS=1` separate from crates.io/default install proof. |
 | Native packaged assets | `make release-acceptance-native` | Verifies the native handoff scripts are present in the Cargo package. |
 | Thought bridge | `make release-acceptance-thought` | Runs thought bridge and fake-emitter contract tests without requiring `clawgs` on the operator PATH. |
 | Voice feature | `make release-acceptance-voice` | Compiles the optional `voice` TUI path; requires CMake and the voice feature build dependencies. Runtime voice use still requires `SWIMMERS_VOICE_MODEL`. |
@@ -416,7 +417,7 @@ Set `SWIMMERS_TUI_URL` to split the API into its own process. Multiple TUIs, hea
 | `GET` | `/v1/sessions/{id}/git-diff` | Raw and structured git diff summaries |
 | `GET` | `/v1/sessions/{id}/mermaid-artifact` | Mermaid/plan artifact metadata and source |
 | `GET` | `/v1/sessions/{id}/plan-file` | Read a plan or repo-doc artifact file |
-| `GET` | `/v1/sessions/{id}/skills?source=sbp` | Passive session-scoped Skillbox/SBP Skills discovery when `personal-workflows` is enabled |
+| `GET` | `/v1/sessions/{id}/skills?source=sbp` | Passive session-scoped Skillbox/SBP Skills discovery when `SWIMMERS_PERSONAL_WORKFLOWS=1` |
 | `POST` | `/v1/sessions/{id}/attention/dismiss` | Clear attention state |
 | `POST` | `/v1/sessions/{id}/input` | Send text input to a session |
 | `GET` | `/v1/selection` | Read the published selection |

@@ -139,6 +139,7 @@ pub struct Config {
     pub auth_mode: AuthMode,
     pub auth_token: Option<String>,
     pub observer_token: Option<String>,
+    pub personal_workflows_enabled: bool,
     pub thought_tick_ms: u64,
     pub replay_buffer_size: usize,
     pub outbound_queue_bound: usize,
@@ -153,6 +154,7 @@ impl Default for Config {
             auth_mode: AuthMode::LocalTrust,
             auth_token: None,
             observer_token: None,
+            personal_workflows_enabled: cfg!(feature = "personal-workflows"),
             thought_tick_ms: 15000,
             replay_buffer_size: 512 * 1024, // 512KB replay ring
             // NOTE: empirical default — sized well above the 600-frame burst floor verified in tests.
@@ -241,6 +243,46 @@ fn parse_env_non_empty_string(load: &mut ConfigLoad, key: &'static str) -> Optio
     }
 }
 
+fn parse_env_bool(load: &mut ConfigLoad, key: &'static str, default: bool) -> Option<bool> {
+    let raw = env_value(load, key)?;
+    let trimmed = raw.trim().to_ascii_lowercase();
+    match trimmed.as_str() {
+        "1" | "true" | "yes" | "on" | "enabled" => Some(true),
+        "0" | "false" | "no" | "off" | "disabled" => Some(false),
+        "" => {
+            push_warning(
+                load,
+                key,
+                format!(
+                    "empty value ignored; using default {}",
+                    bool_env_value(default)
+                ),
+            );
+            None
+        }
+        _ => {
+            push_warning(
+                load,
+                key,
+                format!(
+                    "unsupported value {:?}; use 1/true/on or 0/false/off; using default {}",
+                    raw.trim(),
+                    bool_env_value(default)
+                ),
+            );
+            None
+        }
+    }
+}
+
+pub fn bool_env_value(value: bool) -> &'static str {
+    if value {
+        "1"
+    } else {
+        "0"
+    }
+}
+
 fn parse_env_bounded<T>(
     load: &mut ConfigLoad,
     key: &'static str,
@@ -302,6 +344,13 @@ impl Config {
         }
         if let Some(addr) = parse_env_non_empty_string(&mut load, "SWIMMERS_BIND") {
             load.config.bind = addr;
+        }
+        if let Some(enabled) = parse_env_bool(
+            &mut load,
+            "SWIMMERS_PERSONAL_WORKFLOWS",
+            defaults.personal_workflows_enabled,
+        ) {
+            load.config.personal_workflows_enabled = enabled;
         }
 
         if let Some(backend) = env_value(&mut load, "SWIMMERS_THOUGHT_BACKEND") {
@@ -383,6 +432,7 @@ mod tests {
         "AUTH_TOKEN",
         "OBSERVER_TOKEN",
         "SWIMMERS_BIND",
+        "SWIMMERS_PERSONAL_WORKFLOWS",
         "SWIMMERS_THOUGHT_BACKEND",
         "SWIMMERS_THOUGHT_TICK_MS",
         "SWIMMERS_OUTBOUND_QUEUE_BOUND",
@@ -467,6 +517,32 @@ mod tests {
         let load = load_with_env(&[("SWIMMERS_THOUGHT_TICK_MS", "2500")]);
         assert_eq!(load.config.thought_tick_ms, 2500);
         assert!(load.diagnostics.is_empty());
+    }
+
+    #[test]
+    fn personal_workflows_can_be_enabled_at_runtime() {
+        let load = load_with_env(&[("SWIMMERS_PERSONAL_WORKFLOWS", "true")]);
+        assert!(load.config.personal_workflows_enabled);
+        assert!(load.diagnostics.is_empty());
+    }
+
+    #[test]
+    fn personal_workflows_can_be_disabled_at_runtime() {
+        let load = load_with_env(&[("SWIMMERS_PERSONAL_WORKFLOWS", "0")]);
+        assert!(!load.config.personal_workflows_enabled);
+        assert!(load.diagnostics.is_empty());
+    }
+
+    #[test]
+    fn invalid_personal_workflows_value_keeps_default_with_warning() {
+        let load = load_with_env(&[("SWIMMERS_PERSONAL_WORKFLOWS", "sometimes")]);
+        assert_eq!(
+            load.config.personal_workflows_enabled,
+            Config::default().personal_workflows_enabled
+        );
+        let diagnostic = diagnostic_for(&load, "SWIMMERS_PERSONAL_WORKFLOWS");
+        assert_eq!(diagnostic.level, ConfigDiagnosticLevel::Warning);
+        assert!(diagnostic.message.contains("unsupported value"));
     }
 
     #[test]

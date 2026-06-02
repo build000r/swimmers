@@ -11,7 +11,7 @@ SERVER_PID=""
 SESSION_ID="${SESSION_ID:-}"
 CREATED_SESSION=0
 REUSE_SERVER="${SWIMMERS_WORKBENCH_REUSE_SERVER:-0}"
-FEATURES="${SWIMMERS_WORKBENCH_FEATURES:-personal-workflows}"
+FEATURES="${SWIMMERS_WORKBENCH_FEATURES:-}"
 SCREENSHOT_PATH="${SWIMMERS_WORKBENCH_SCREENSHOT_PATH:-${ROOT_DIR}/tests/artifacts/web-workbench.png}"
 MOBILE_SCREENSHOT_PATH="${SWIMMERS_WORKBENCH_MOBILE_SCREENSHOT_PATH:-${ROOT_DIR}/tests/artifacts/web-workbench-mobile.png}"
 
@@ -112,7 +112,7 @@ if [[ "${REUSE_SERVER}" != "1" ]]; then
   else
     cargo build -q --bin swimmers >/dev/null
   fi
-  env PORT="${PORT}" target/debug/swimmers >"${LOG_FILE}" 2>&1 &
+  env PORT="${PORT}" SWIMMERS_PERSONAL_WORKFLOWS="${SWIMMERS_PERSONAL_WORKFLOWS:-1}" target/debug/swimmers >"${LOG_FILE}" 2>&1 &
   SERVER_PID=$!
 fi
 

@@ -8,17 +8,14 @@ use axum::{Extension, Json, Router};
 use mermaid_rs_renderer::{compute_layout, parse_mermaid, render_svg, RenderOptions};
 
 use crate::api::envelope::error_body;
-#[cfg(feature = "personal-workflows")]
 use crate::api::fetch_live_summary;
 use crate::api::{sessions, AppState};
 use crate::auth::{AuthInfo, AuthScope};
-use crate::host_actions::{ArtifactOpener, SystemArtifactOpener};
-#[cfg(feature = "personal-workflows")]
-use crate::host_actions::{CommitLauncher, SystemCommitLauncher};
-#[cfg(feature = "personal-workflows")]
+use crate::host_actions::{
+    ArtifactOpener, CommitLauncher, SystemArtifactOpener, SystemCommitLauncher,
+};
 use crate::types::SessionState;
 
-#[cfg(feature = "personal-workflows")]
 #[derive(Debug, serde::Serialize)]
 struct CommitGrokLaunchResponse {
     session_name: String,
@@ -32,7 +29,7 @@ struct MermaidArtifactOpenResponse {
     path: String,
 }
 
-pub fn routes() -> Router<Arc<AppState>> {
+pub fn routes(personal_workflows_enabled: bool) -> Router<Arc<AppState>> {
     let router = Router::new()
         .route(
             "/v1/sessions/{session_id}/mermaid-artifact/svg",
@@ -43,18 +40,19 @@ pub fn routes() -> Router<Arc<AppState>> {
             post(post_open_mermaid_artifact),
         );
 
-    #[cfg(feature = "personal-workflows")]
-    let router = router
-        .route(
-            "/v1/sessions/{session_id}/commit-grok",
-            post(post_commit_grok),
-        )
-        .route(
-            "/v1/sessions/{session_id}/commit-codex",
-            post(post_commit_grok),
-        );
-
-    router
+    if personal_workflows_enabled {
+        router
+            .route(
+                "/v1/sessions/{session_id}/commit-grok",
+                post(post_commit_grok),
+            )
+            .route(
+                "/v1/sessions/{session_id}/commit-codex",
+                post(post_commit_grok),
+            )
+    } else {
+        router
+    }
 }
 
 fn json_error(status: StatusCode, code: &str, message: impl Into<Option<String>>) -> Response {
@@ -65,7 +63,6 @@ fn json_error(status: StatusCode, code: &str, message: impl Into<Option<String>>
         .into_response()
 }
 
-#[cfg(feature = "personal-workflows")]
 async fn post_commit_grok(
     Extension(auth): Extension<AuthInfo>,
     State(state): State<Arc<AppState>>,
@@ -78,7 +75,6 @@ async fn post_commit_grok(
     post_commit_grok_with_launcher(state, session_id, &SystemCommitLauncher).await
 }
 
-#[cfg(feature = "personal-workflows")]
 async fn post_commit_grok_with_launcher<L: CommitLauncher>(
     state: Arc<AppState>,
     session_id: String,
@@ -243,13 +239,11 @@ fn render_mermaid_svg(source: &str) -> Result<String, String> {
 }
 
 #[cfg(test)]
-#[allow(dead_code)] // test helpers are feature-gated at their call sites
 mod tests {
     use super::*;
     use crate::api::PublishedSelectionState;
     use crate::auth::OBSERVER_SCOPES;
     use crate::config::Config;
-    #[cfg(feature = "personal-workflows")]
     use crate::host_actions::CommitGrokLaunch;
     use crate::session::actor::{ActorHandle, SessionCommand};
     use crate::session::supervisor::SessionSupervisor;
@@ -369,7 +363,6 @@ mod tests {
         serde_json::from_slice(&body).expect("json body")
     }
 
-    #[cfg(feature = "personal-workflows")]
     #[tokio::test]
     async fn commit_grok_requires_write_scope() {
         let response = post_commit_grok(
@@ -383,7 +376,6 @@ mod tests {
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
     }
 
-    #[cfg(feature = "personal-workflows")]
     #[tokio::test]
     async fn commit_grok_rejects_exited_session() {
         let state = test_state();
@@ -401,7 +393,6 @@ mod tests {
         assert_eq!(json["code"], "SESSION_EXITED");
     }
 
-    #[cfg(feature = "personal-workflows")]
     #[tokio::test]
     async fn commit_grok_launches_with_session_summary() {
         let state = test_state();
@@ -560,13 +551,11 @@ mod tests {
         assert_eq!(json["code"], "MERMAID_ARTIFACT_PATH_UNAVAILABLE");
     }
 
-    #[cfg(feature = "personal-workflows")]
     #[derive(Default)]
     struct FakeCommitLauncher {
         calls: Arc<Mutex<Vec<String>>>,
     }
 
-    #[cfg(feature = "personal-workflows")]
     impl CommitLauncher for FakeCommitLauncher {
         fn launch(&self, session: &SessionSummary) -> io::Result<CommitGrokLaunch> {
             self.calls.lock().unwrap().push(session.session_id.clone());

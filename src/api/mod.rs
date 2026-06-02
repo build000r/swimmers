@@ -98,6 +98,7 @@ pub(crate) async fn fetch_live_summary(
 }
 
 pub fn api_router(config: Arc<Config>) -> Router<Arc<AppState>> {
+    let personal_workflows_enabled = config.personal_workflows_enabled;
     let config_for_middleware = config;
 
     let router = Router::new()
@@ -106,13 +107,13 @@ pub fn api_router(config: Arc<Config>) -> Router<Arc<AppState>> {
         .merge(selection::routes())
         .merge(sessions::routes())
         .merge(thought_config::routes())
-        .merge(web_actions::routes());
+        .merge(web_actions::routes(personal_workflows_enabled));
 
-    #[cfg(feature = "personal-workflows")]
-    let router = router.merge(dirs::routes());
-
-    #[cfg(feature = "personal-workflows")]
-    let router = router.merge(skills::routes());
+    let router = if personal_workflows_enabled {
+        router.merge(dirs::routes()).merge(skills::routes())
+    } else {
+        router
+    };
 
     router
         .layer(middleware::from_fn(move |request, next| {

@@ -104,7 +104,7 @@ main() {
   swimmers_require cargo
 
   local web_features feature_args
-  web_features="${SWIMMERS_WEB_FEATURES-personal-workflows}"
+  web_features="${SWIMMERS_WEB_FEATURES-}"
   feature_args=()
   if [[ -n "${web_features}" ]]; then
     feature_args=(--features "${web_features}")
@@ -123,6 +123,7 @@ main() {
   fi
 
   announce_urls
+  export SWIMMERS_PERSONAL_WORKFLOWS="${SWIMMERS_PERSONAL_WORKFLOWS:-1}"
 
   if handle_existing_listener; then
     :

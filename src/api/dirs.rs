@@ -1,5 +1,3 @@
-#![cfg_attr(not(feature = "personal-workflows"), allow(dead_code))]
-
 use crate::api::envelope::{error_response, success_json};
 use crate::api::service::{
     list_dirs as list_dirs_service, list_repo_search_entries as list_repo_search_entries_service,

@@ -18,12 +18,9 @@ RUN_TUI="${SWIMMERS_UP_TUI_SHIM:-${ROOT_DIR}/scripts/run-tui.sh}"
 if [[ -n "${SWIMMERS_UP_FEATURES+x}" ]]; then
   UP_FEATURES="${SWIMMERS_UP_FEATURES}"
 elif [[ -n "${SWIMMERS_TUI_FEATURES:-}" ]]; then
-  case ",${SWIMMERS_TUI_FEATURES}," in
-    *,personal-workflows,*) UP_FEATURES="${SWIMMERS_TUI_FEATURES}" ;;
-    *) UP_FEATURES="personal-workflows,${SWIMMERS_TUI_FEATURES}" ;;
-  esac
+  UP_FEATURES="${SWIMMERS_TUI_FEATURES}"
 else
-  UP_FEATURES="personal-workflows"
+  UP_FEATURES=""
 fi
 
 feature_args=()
@@ -105,6 +102,13 @@ api_status_looks_like_swimmers() {
   esac
 }
 
+personal_workflows_enabled() {
+  case "${SWIMMERS_PERSONAL_WORKFLOWS:-1}" in
+    0|false|FALSE|False|no|NO|No|off|OFF|Off|disabled|DISABLED|Disabled) return 1 ;;
+    *) return 0 ;;
+  esac
+}
+
 backend_is_ready() {
   local web_status="${1:-}"
   local api_status="${2:-}"
@@ -114,9 +118,14 @@ backend_is_ready() {
 
   api_status_looks_like_swimmers "${health_status}" \
     && [[ "${web_status}" == "200" ]] \
-    && api_status_looks_like_swimmers "${api_status}" \
-    && dirs_status_looks_compatible "${dirs_status}" \
-    && api_status_looks_like_swimmers "${skills_status}"
+    && api_status_looks_like_swimmers "${api_status}" || return 1
+
+  if personal_workflows_enabled; then
+    dirs_status_looks_compatible "${dirs_status}" \
+      && api_status_looks_like_swimmers "${skills_status}"
+  else
+    return 0
+  fi
 }
 
 dirs_status_looks_compatible() {
@@ -161,8 +170,10 @@ backend_has_explicit_route_failure() {
   api_status_looks_like_swimmers "${health_status}" || return 1
   status_is_explicit_failure "${web_status}" exact:200 && return 0
   status_is_explicit_failure "${api_status}" api && return 0
-  status_is_explicit_failure "${dirs_status}" dirs && return 0
-  status_is_explicit_failure "${skills_status}" api && return 0
+  if personal_workflows_enabled; then
+    status_is_explicit_failure "${dirs_status}" dirs && return 0
+    status_is_explicit_failure "${skills_status}" api && return 0
+  fi
   return 1
 }
 
@@ -366,7 +377,7 @@ wait_for_backend() {
     skills_status="$(skills_route_status)"
     if backend_is_ready "${web_status}" "${api_status}" "${dirs_status}" "${skills_status}" "${health_status}"; then
       printf 'Backend ready on %s (pid %s)\n\n' "${BASE_URL}" "${server_pid}"
-      if [[ "${dirs_status}" == "000" ]]; then
+      if personal_workflows_enabled && [[ "${dirs_status}" == "000" ]]; then
         printf '  note: %s did not answer within the short startup probe; continuing because %s is healthy.\n\n' \
           "${DIRS_ROUTE_PATH}" \
           "${HEALTH_ROUTE_PATH}"
@@ -434,7 +445,7 @@ ensure_backend() {
         printf 'Existing swimmers backend on 127.0.0.1:%s is current; reusing pid %s.\n' \
           "${PORT}" \
           "${pid}"
-        if [[ "${dirs_status}" == "000" ]]; then
+        if personal_workflows_enabled && [[ "${dirs_status}" == "000" ]]; then
           printf '  note: %s did not answer within the short startup probe; continuing because %s is healthy.\n' \
             "${DIRS_ROUTE_PATH}" \
             "${HEALTH_ROUTE_PATH}"
@@ -496,6 +507,7 @@ main() {
   fi
 
   announce_urls
+  export SWIMMERS_PERSONAL_WORKFLOWS="${SWIMMERS_PERSONAL_WORKFLOWS:-1}"
   ensure_backend
 
   printf 'Launching TUI against %s\n\n' "${BASE_URL}"
