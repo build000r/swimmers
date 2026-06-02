@@ -48,7 +48,7 @@ impl StateDetector {
                 Regex::new(r"(?i)command not found").expect("error pattern is valid"),
                 Regex::new(r"(?i)Permission denied").expect("error pattern is valid"),
                 Regex::new(r"(?i)segmentation fault").expect("error pattern is valid"),
-                Regex::new(r"panic:").expect("error pattern is valid"),
+                Regex::new(r"(?i)\bpanic:|\bpanicked at\b").expect("error pattern is valid"),
             ],
             escape_state: EscapeState::Normal,
             error_deadline: None,
@@ -1008,6 +1008,16 @@ mod tests {
         assert!(transitions
             .iter()
             .any(|(new, _)| *new == SessionState::Error));
+    }
+
+    #[test]
+    fn rust_panic_output_enters_error_state() {
+        let mut d = StateDetector::new();
+        d.process_output(b"\x1b]133;C;cmd=cargo run\x07");
+
+        d.process_output(b"thread 'main' panicked at src/main.rs:2:5:\nboom\n");
+
+        assert_eq!(d.get_state().0, SessionState::Error);
     }
 
     #[test]
