@@ -2252,8 +2252,7 @@ fn attention_group_session_is_eligible(session: &SessionSummary) -> bool {
 }
 
 fn tmux_name_is_numbered(tmux_name: &str) -> bool {
-    let trimmed = tmux_name.trim();
-    !trimmed.is_empty() && trimmed.chars().all(|ch| ch.is_ascii_digit())
+    !tmux_name.is_empty() && tmux_name.chars().all(|ch| ch.is_ascii_digit())
 }
 
 impl From<SessionSummary> for AttentionCandidate {
@@ -2677,6 +2676,16 @@ mod tests {
         let named = summary("sess-named", "buildooor", SessionState::Attention);
 
         let selected = plan_ids(vec![wave, named, numbered], 6, &[]);
+
+        assert_eq!(selected, vec!["sess-8"]);
+    }
+
+    #[test]
+    fn attention_group_selection_requires_exact_numeric_tmux_names() {
+        let numbered = summary("sess-8", "8", SessionState::Idle);
+        let padded_numeric = summary("sess-padded-9", " 9 ", SessionState::Attention);
+
+        let selected = plan_ids(vec![padded_numeric, numbered], 6, &[]);
 
         assert_eq!(selected, vec!["sess-8"]);
     }
