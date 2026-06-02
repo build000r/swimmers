@@ -16,6 +16,7 @@ use tokio::sync::Mutex as AsyncMutex;
 use tokio::time::{sleep, timeout, Duration};
 
 use crate::session::actor::run_bounded_tmux_command;
+use crate::tmux_target::{exact_pane_target, exact_session_target};
 use crate::types::{
     AttentionGroupLayout, DependencyHealthSnapshot, GhosttyOpenMode,
     NativeAttentionGroupOpenResponse, NativeDesktopApp, NativeDesktopOpenResponse,
@@ -582,18 +583,18 @@ fn attention_group_tmux_layout(layout: AttentionGroupLayout) -> &'static str {
 }
 
 fn attention_group_session_target() -> String {
-    format!("={ATTENTION_GROUP_TMUX_NAME}")
+    exact_session_target(ATTENTION_GROUP_TMUX_NAME)
 }
 
 fn attention_group_pane_target() -> String {
-    format!("={ATTENTION_GROUP_TMUX_NAME}:")
+    exact_pane_target(ATTENTION_GROUP_TMUX_NAME)
 }
 
 fn build_attention_group_attach_command(tmux_name: &str, tmux_path: &Path) -> String {
     format!(
         "exec env TMUX= {} attach-session -t {}",
         shell_quote_token(&tmux_path.to_string_lossy()),
-        shell_quote_token(&format!("={tmux_name}"))
+        shell_quote_token(&exact_session_target(tmux_name))
     )
 }
 
@@ -1274,13 +1275,14 @@ async fn query_tmux_pane_metadata(
     tmux_path: &Path,
     tmux_name: &str,
 ) -> Result<(Option<String>, Option<String>)> {
+    let target = exact_pane_target(tmux_name);
     let output = run_bounded_tmux_command(
         tmux_path.as_os_str(),
         &[
             "display-message",
             "-p",
             "-t",
-            tmux_name,
+            &target,
             "#{pane_id}\t#{pane_current_path}",
         ],
         NATIVE_TMUX_COMMAND_TIMEOUT,
@@ -1386,7 +1388,7 @@ fn build_iterm_attach_command(tmux_name: &str, tmux_path: &Path) -> String {
     format!(
         "exec {} attach-session -t {}",
         shell_quote_token(&tmux_path.to_string_lossy()),
-        shell_quote_token(tmux_name)
+        shell_quote_token(&exact_session_target(tmux_name))
     )
 }
 
@@ -1394,7 +1396,7 @@ fn build_ghostty_attach_command(tmux_name: &str, tmux_path: &Path) -> String {
     format!(
         "exec {} attach-session -t {}",
         shell_quote_token(&tmux_path.to_string_lossy()),
-        shell_quote_token(tmux_name)
+        shell_quote_token(&exact_session_target(tmux_name))
     )
 }
 
@@ -1439,7 +1441,7 @@ fn validate_osascript_script_arg(field: &'static str, value: &str) -> Result<()>
     if let Some(invalid) = value.chars().find(|ch| {
         !(ch.is_ascii_alphanumeric()
             || matches!(ch, '_' | '-' | '.' | '/' | ' ')
-            || (allow_shell_quotes && matches!(ch, '\'')))
+            || (allow_shell_quotes && matches!(ch, '\'' | '=')))
     }) {
         return Err(anyhow::Error::new(NativeScriptError::InvalidOsaScriptArg {
             field,
@@ -1653,7 +1655,7 @@ mod tests {
     fn validate_osascript_script_arg_allows_shell_quoted_attach_command() {
         validate_osascript_script_arg(
             "attach_command",
-            "exec '/tmp/tmux builds/tmux' attach-session -t 'team session'",
+            "exec '/tmp/tmux builds/tmux' attach-session -t '=team session'",
         )
         .expect("single-quoted shell words should be accepted for attach_command");
     }
@@ -1794,7 +1796,7 @@ mod tests {
 
         assert_eq!(
             command,
-            "exec /opt/homebrew/bin/tmux attach-session -t main"
+            "exec /opt/homebrew/bin/tmux attach-session -t '=main'"
         );
     }
 
@@ -1803,7 +1805,7 @@ mod tests {
         let command = build_iterm_attach_command("team-session", Path::new("/tmp/tmux/tmux"));
         assert_eq!(
             command,
-            "exec /tmp/tmux/tmux attach-session -t team-session"
+            "exec /tmp/tmux/tmux attach-session -t '=team-session'"
         );
     }
 
@@ -1812,7 +1814,7 @@ mod tests {
         let command = build_ghostty_attach_command("team-session", Path::new("/tmp/tmux/tmux"));
         assert_eq!(
             command,
-            "exec /tmp/tmux/tmux attach-session -t team-session"
+            "exec /tmp/tmux/tmux attach-session -t '=team-session'"
         );
     }
 
@@ -1822,7 +1824,7 @@ mod tests {
             build_iterm_attach_command("team session", Path::new("/tmp/tmux builds/tmux"));
         assert_eq!(
             command,
-            "exec '/tmp/tmux builds/tmux' attach-session -t 'team session'"
+            "exec '/tmp/tmux builds/tmux' attach-session -t '=team session'"
         );
     }
 
@@ -1832,7 +1834,7 @@ mod tests {
             build_ghostty_attach_command("team session", Path::new("/tmp/tmux builds/tmux"));
         assert_eq!(
             command,
-            "exec '/tmp/tmux builds/tmux' attach-session -t 'team session'"
+            "exec '/tmp/tmux builds/tmux' attach-session -t '=team session'"
         );
     }
 
@@ -1842,6 +1844,41 @@ mod tests {
         assert_eq!(
             command,
             "exec env TMUX= /tmp/tmux attach-session -t '=team session'"
+        );
+    }
+
+    #[tokio::test]
+    async fn query_tmux_pane_metadata_uses_exact_pane_target_for_numeric_names() {
+        let temp = tempdir().unwrap();
+        let fake_tmux = temp.path().join("tmux");
+        let log_path = temp.path().join("tmux-args.log");
+        std::fs::write(
+            &fake_tmux,
+            format!(
+                "#!/bin/sh\nset -eu\nfor arg in \"$@\"; do\n  printf '%s\\n' \"$arg\" >> \"{log}\"\ndone\nif [ \"${{1-}}\" = \"display-message\" ]; then\n  printf '%%7\\t/tmp/project\\n'\n  exit 0\nfi\nexit 64\n",
+                log = log_path.display()
+            ),
+        )
+        .unwrap();
+        let mut perms = std::fs::metadata(&fake_tmux).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&fake_tmux, perms).unwrap();
+
+        let (pane_id, cwd) = query_tmux_pane_metadata(&fake_tmux, "7").await.unwrap();
+
+        assert_eq!(pane_id.as_deref(), Some("7"));
+        assert_eq!(cwd.as_deref(), Some("/tmp/project"));
+        let args = std::fs::read_to_string(&log_path).unwrap();
+        let lines = args.lines().collect::<Vec<_>>();
+        assert_eq!(
+            lines,
+            vec![
+                "display-message",
+                "-p",
+                "-t",
+                "=7:",
+                "#{pane_id}\t#{pane_current_path}"
+            ]
         );
     }
 
@@ -2720,7 +2757,10 @@ mod tests {
         assert_eq!(first_call[2], "tmux-cache");
         assert_eq!(
             first_call[3],
-            format!("exec {} attach-session -t tmux-cache", fake_tmux.display())
+            format!(
+                "exec {} attach-session -t '=tmux-cache'",
+                fake_tmux.display()
+            )
         );
         assert_eq!(first_call[4], "12 swimmers");
         assert_eq!(first_call.len(), 5);
@@ -2917,7 +2957,7 @@ mod tests {
         assert_eq!(
             call[4],
             format!(
-                "exec '{}' attach-session -t tmux-ghostty",
+                "exec '{}' attach-session -t '=tmux-ghostty'",
                 fake_tmux.display()
             )
         );
