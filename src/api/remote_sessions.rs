@@ -78,6 +78,13 @@ pub fn namespace_session_id(target_id: &str, remote_session_id: &str) -> String 
     format!("{target_id}{REMOTE_SESSION_SEPARATOR}{remote_session_id}")
 }
 
+fn session_id_has_target_namespace(session_id: &str, target_id: &str) -> bool {
+    session_id
+        .strip_prefix(target_id)
+        .and_then(|suffix| suffix.strip_prefix(REMOTE_SESSION_SEPARATOR))
+        .is_some_and(|remote_session_id| !remote_session_id.is_empty())
+}
+
 pub fn encode_path_segment(segment: &str) -> String {
     let mut encoded = String::with_capacity(segment.len());
     for byte in segment.bytes() {
@@ -100,9 +107,7 @@ pub fn namespace_session_summary(
     target: &LaunchTargetSummary,
     mut session: SessionSummary,
 ) -> SessionSummary {
-    let already_namespaced_for_target = split_remote_session_id(&session.session_id)
-        .is_some_and(|(target_id, _)| target_id == target.id);
-    if !already_namespaced_for_target {
+    if !session_id_has_target_namespace(&session.session_id, &target.id) {
         session.session_id = namespace_session_id(&target.id, &session.session_id);
     }
     if !session.tmux_name.starts_with('[') {
@@ -114,11 +119,58 @@ pub fn namespace_session_summary(
 pub fn denamespace_for_target(
     session_id: &str,
 ) -> Result<Option<(LaunchTargetSummary, &str)>, RemoteSessionError> {
-    let Some((target_id, remote_session_id)) = split_remote_session_id(session_id) else {
+    let Some((target, remote_session_id)) = denamespace_for_configured_target(session_id)? else {
         return Ok(None);
     };
-    let target = resolve_launch_target_by_id(target_id)?;
     Ok(Some((target, remote_session_id)))
+}
+
+fn denamespace_for_configured_target(
+    session_id: &str,
+) -> Result<Option<(LaunchTargetSummary, &str)>, RemoteSessionError> {
+    let Some(overlay) = default_overlay() else {
+        return split_remote_session_id(session_id)
+            .map(|(target_id, _)| {
+                Err(RemoteSessionError::new(
+                    StatusCode::BAD_REQUEST,
+                    "LAUNCH_TARGET_UNKNOWN",
+                    format!("remote session target '{target_id}' is not configured"),
+                ))
+            })
+            .transpose();
+    };
+
+    denamespace_for_configured_targets(session_id, overlay.all_launch_targets())
+}
+
+fn denamespace_for_configured_targets<'a>(
+    session_id: &'a str,
+    targets: Vec<LaunchTargetSummary>,
+) -> Result<Option<(LaunchTargetSummary, &'a str)>, RemoteSessionError> {
+    let mut targets = targets
+        .into_iter()
+        .filter_map(|target| {
+            session_id
+                .strip_prefix(&target.id)
+                .and_then(|suffix| suffix.strip_prefix(REMOTE_SESSION_SEPARATOR))
+                .filter(|remote_session_id| !remote_session_id.is_empty())
+                .map(|remote_session_id| (target, remote_session_id))
+        })
+        .collect::<Vec<_>>();
+    targets.sort_by_key(|(target, _)| std::cmp::Reverse(target.id.len()));
+    if let Some((target, remote_session_id)) = targets.into_iter().next() {
+        ensure_swimmers_api_target(&target)?;
+        return Ok(Some((target, remote_session_id)));
+    }
+
+    let Some((target_id, _)) = split_remote_session_id(session_id) else {
+        return Ok(None);
+    };
+    Err(RemoteSessionError::new(
+        StatusCode::BAD_REQUEST,
+        "LAUNCH_TARGET_UNKNOWN",
+        format!("remote session target '{target_id}' is not configured"),
+    ))
 }
 
 pub async fn list_remote_sessions() -> Vec<SessionSummary> {
@@ -698,25 +750,6 @@ fn resolve_launch_target_for_cwd(
                 format!("launch target '{target_id}' is not configured"),
             )
         })?;
-    ensure_swimmers_api_target(&target)?;
-    Ok(target)
-}
-
-fn resolve_launch_target_by_id(target_id: &str) -> Result<LaunchTargetSummary, RemoteSessionError> {
-    let Some(overlay) = default_overlay() else {
-        return Err(RemoteSessionError::new(
-            StatusCode::BAD_REQUEST,
-            "LAUNCH_TARGET_UNKNOWN",
-            "no skillbox-config overlay is available for remote session targets",
-        ));
-    };
-    let target = overlay.launch_target_by_id(target_id).ok_or_else(|| {
-        RemoteSessionError::new(
-            StatusCode::BAD_REQUEST,
-            "LAUNCH_TARGET_UNKNOWN",
-            format!("remote session target '{target_id}' is not configured"),
-        )
-    })?;
     ensure_swimmers_api_target(&target)?;
     Ok(target)
 }
@@ -1401,6 +1434,41 @@ mod tests {
             split_remote_session_id(&other_target.session_id),
             Some(("jeremy-skillbox", "other-target::sess_nested"))
         );
+    }
+
+    #[test]
+    fn namespace_session_summary_matches_full_target_id_with_separator() {
+        let mut target = target();
+        target.id = "zone::west".to_string();
+        target.label = "West Zone".to_string();
+
+        let same_target = namespace_session_summary(&target, summary("zone::west::sess_nested"));
+        assert_eq!(same_target.session_id, "zone::west::sess_nested");
+
+        let other_target = namespace_session_summary(&target, summary("zone::east::sess_nested"));
+        assert_eq!(
+            other_target.session_id,
+            "zone::west::zone::east::sess_nested"
+        );
+    }
+
+    #[test]
+    fn denamespace_uses_longest_configured_target_prefix() {
+        let mut short = target();
+        short.id = "zone".to_string();
+        short.label = "Zone".to_string();
+
+        let mut long = target();
+        long.id = "zone::west".to_string();
+        long.label = "West Zone".to_string();
+
+        let (target, remote_session_id) =
+            denamespace_for_configured_targets("zone::west::other::sess", vec![short, long])
+                .expect("denamespace succeeds")
+                .expect("remote session");
+
+        assert_eq!(target.id, "zone::west");
+        assert_eq!(remote_session_id, "other::sess");
     }
 
     #[test]
