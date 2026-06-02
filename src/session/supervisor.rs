@@ -1180,7 +1180,6 @@ impl SessionSupervisor {
         tmux_name: String,
         session_id: Option<String>,
     ) -> Result<AdoptedTmuxSession, TmuxAdoptError> {
-        let tmux_name = tmux_name.trim().to_string();
         if tmux_name.is_empty() {
             return Err(TmuxAdoptError::EmptyTmuxName);
         }
@@ -5253,6 +5252,78 @@ esac
             TmuxAdoptError::AlreadyTracked {
                 tmux_name: "alpha".to_string(),
                 session_id: "sess_42".to_string()
+            }
+        );
+
+        restore_test_path(original_path);
+        match original_sessions {
+            Some(value) => std::env::set_var("SWIMMERS_FAKE_TMUX_SESSIONS", value),
+            None => std::env::remove_var("SWIMMERS_FAKE_TMUX_SESSIONS"),
+        }
+    }
+
+    #[tokio::test]
+    async fn adopt_tmux_session_preserves_exact_whitespace_padded_name() {
+        let _guard = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let original_sessions = std::env::var_os("SWIMMERS_FAKE_TMUX_SESSIONS");
+        let (_dir, original_path) = install_fake_tmux(
+            r##"#!/bin/sh
+set -eu
+cmd="${1-}"
+case "$cmd" in
+  list-sessions)
+    while IFS= read -r line || [ -n "$line" ]; do
+      printf '%s\n' "$line"
+    done < "${SWIMMERS_FAKE_TMUX_SESSIONS}"
+    ;;
+  attach-session|list-panes|send-keys|kill-session|capture-pane)
+    exit 0
+    ;;
+  display-message)
+    case "${5-}" in
+      "#{pane_current_command}") printf 'codex\n' ;;
+      "#{pane_current_path}") printf '/tmp/project\n' ;;
+      "#{pane_pid}") printf '101\n' ;;
+      "#{window_index}.#{pane_index}:#{pane_id}") printf '0.0:%%1\n' ;;
+    esac
+    ;;
+esac
+"##,
+        );
+        let sessions_file = _dir.path().join("sessions.txt");
+        std::env::set_var("SWIMMERS_FAKE_TMUX_SESSIONS", &sessions_file);
+
+        let supervisor = SessionSupervisor::new(Arc::new(Config::default()));
+        assert_eq!(
+            supervisor
+                .adopt_tmux_session(String::new(), None)
+                .await
+                .expect_err("empty tmux target should still be rejected"),
+            TmuxAdoptError::EmptyTmuxName
+        );
+
+        std::fs::write(&sessions_file, "  padded  \n").expect("sessions");
+        let stale = supervisor.build_placeholder_summary("sess_7", "  padded  ");
+        supervisor.stale_sessions.write().await.push(stale);
+
+        let adopted = supervisor
+            .adopt_tmux_session("  padded  ".to_string(), Some("sess_7".to_string()))
+            .await
+            .expect("exact whitespace-padded tmux target should be adopted");
+        assert!(adopted.reused_session_id);
+        assert_eq!(adopted.session.session_id, "sess_7");
+        assert_eq!(adopted.session.tmux_name, "  padded  ");
+
+        let missing_trimmed = supervisor
+            .adopt_tmux_session("padded".to_string(), None)
+            .await
+            .expect_err("trimmed spelling should not match exact tmux target");
+        assert_eq!(
+            missing_trimmed,
+            TmuxAdoptError::TargetNotFound {
+                tmux_name: "padded".to_string()
             }
         );
 
