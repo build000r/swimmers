@@ -1440,7 +1440,7 @@ fn validate_osascript_script_arg(field: &'static str, value: &str) -> Result<()>
 
     if let Some(invalid) = value.chars().find(|ch| {
         !(ch.is_ascii_alphanumeric()
-            || matches!(ch, '_' | '-' | '.' | '/' | ' ')
+            || matches!(ch, '_' | '-' | '.' | '/' | ':' | ' ')
             || (allow_shell_quotes && matches!(ch, '\'' | '=')))
     }) {
         return Err(anyhow::Error::new(NativeScriptError::InvalidOsaScriptArg {
@@ -1836,6 +1836,21 @@ mod tests {
             command,
             "exec '/tmp/tmux builds/tmux' attach-session -t '=team session'"
         );
+    }
+
+    #[test]
+    fn native_attach_commands_accept_tmux_names_with_colons() {
+        let iterm = build_iterm_attach_command("team:api", Path::new("/tmp/tmux"));
+        let ghostty = build_ghostty_attach_command("team:api", Path::new("/tmp/tmux"));
+
+        assert_eq!(iterm, "exec /tmp/tmux attach-session -t '=team:api'");
+        assert_eq!(ghostty, "exec /tmp/tmux attach-session -t '=team:api'");
+        validate_osascript_script_arg("tmux_name", "team:api")
+            .expect("tmux permits colons in session names");
+        validate_osascript_script_arg("attach_command", &iterm)
+            .expect("generated iTerm attach command should validate");
+        validate_osascript_script_arg("attach_command", &ghostty)
+            .expect("generated Ghostty attach command should validate");
     }
 
     #[test]
