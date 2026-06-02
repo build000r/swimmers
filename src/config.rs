@@ -232,11 +232,12 @@ fn parse_env_non_empty_string(load: &mut ConfigLoad, key: &'static str) -> Optio
     let Some(value) = env_value(load, key) else {
         return None;
     };
-    if value.is_empty() {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
         push_warning(load, key, "empty value ignored; using the default");
         None
     } else {
-        Some(value)
+        Some(trimmed.to_string())
     }
 }
 
@@ -355,8 +356,7 @@ impl Config {
             );
         }
 
-        if load.config.observer_token.is_some()
-            && !matches!(load.config.auth_mode, AuthMode::Token)
+        if load.config.observer_token.is_some() && !matches!(load.config.auth_mode, AuthMode::Token)
         {
             let mode = load.config.auth_mode.as_env_value();
             push_warning(
@@ -531,6 +531,38 @@ mod tests {
         let diagnostic = diagnostic_for(&load, "AUTH_TOKEN");
         assert_eq!(diagnostic.level, ConfigDiagnosticLevel::Error);
         assert!(diagnostic.message.contains("requires AUTH_TOKEN"));
+    }
+
+    #[test]
+    fn token_mode_with_whitespace_only_auth_token_is_a_config_error() {
+        let load = load_with_env(&[("AUTH_MODE", "token"), ("AUTH_TOKEN", "   ")]);
+        assert!(matches!(load.config.auth_mode, AuthMode::Token));
+        assert_eq!(load.config.auth_token, None);
+        assert!(load.has_errors());
+        assert_eq!(
+            diagnostic_for(&load, "AUTH_TOKEN").level,
+            ConfigDiagnosticLevel::Warning
+        );
+        assert!(load
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.key == "AUTH_TOKEN"
+                && diagnostic.level == ConfigDiagnosticLevel::Error
+                && diagnostic.message.contains("requires AUTH_TOKEN")));
+    }
+
+    #[test]
+    fn string_config_values_are_trimmed_before_use() {
+        let load = load_with_env(&[
+            ("AUTH_MODE", "token"),
+            ("AUTH_TOKEN", "  operator  "),
+            ("OBSERVER_TOKEN", "\tobserver\n"),
+            ("SWIMMERS_BIND", "  127.0.0.1:9999  "),
+        ]);
+        assert_eq!(load.config.auth_token.as_deref(), Some("operator"));
+        assert_eq!(load.config.observer_token.as_deref(), Some("observer"));
+        assert_eq!(load.config.bind, "127.0.0.1:9999");
+        assert!(load.diagnostics.is_empty());
     }
 
     #[test]
