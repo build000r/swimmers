@@ -158,16 +158,24 @@ pub async fn auth_middleware(config: Arc<Config>, mut request: Request, next: Ne
 
 /// Extract a bearer token from the `Authorization` header.
 ///
-/// Returns `None` for missing, non-UTF-8, non-`Bearer ` prefixed, or empty
+/// Returns `None` for missing, non-UTF-8, non-bearer-scheme, or empty
 /// tokens. The empty-token guard makes a misconfigured `AUTH_TOKEN=""` (or a
 /// header literally `Bearer `) impossible to authenticate, defense-in-depth
 /// for the constant-time compare in `bearer_tokens_eq`.
 fn extract_bearer_token(request: &Request) -> Option<&str> {
-    let token = request
+    let header = request
         .headers()
         .get("authorization")
         .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "))?;
+        .map(str::trim)?;
+    let (scheme_end, separator) = header
+        .char_indices()
+        .find(|(_, ch)| ch.is_ascii_whitespace())?;
+    let scheme = &header[..scheme_end];
+    if !scheme.eq_ignore_ascii_case("Bearer") {
+        return None;
+    }
+    let token = header[scheme_end + separator.len_utf8()..].trim_start_matches(char::is_whitespace);
     if token.is_empty() {
         return None;
     }
@@ -213,6 +221,42 @@ mod tests {
         );
 
         assert_eq!(extract_bearer_token(&request), Some("my-secret-token"));
+    }
+
+    #[test]
+    fn extract_bearer_scheme_is_case_insensitive() {
+        use axum::http::HeaderValue;
+
+        for value in ["bearer lower-token", "bEaReR mixed-token"] {
+            let mut request = Request::builder()
+                .uri("/test")
+                .body(axum::body::Body::empty())
+                .unwrap();
+            request
+                .headers_mut()
+                .insert("authorization", HeaderValue::from_static(value));
+
+            assert_eq!(
+                extract_bearer_token(&request),
+                value.split_once(' ').map(|(_, token)| token)
+            );
+        }
+    }
+
+    #[test]
+    fn extract_bearer_accepts_extra_separator_whitespace() {
+        use axum::http::HeaderValue;
+
+        let mut request = Request::builder()
+            .uri("/test")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        request.headers_mut().insert(
+            "authorization",
+            HeaderValue::from_static("Bearer   spaced-token"),
+        );
+
+        assert_eq!(extract_bearer_token(&request), Some("spaced-token"));
     }
 
     #[test]
