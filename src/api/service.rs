@@ -819,6 +819,7 @@ pub async fn overlay_service_health_map(
 
     let client = reqwest::Client::builder()
         .connect_timeout(HEALTH_PROBE_CONNECT_TIMEOUT)
+        .redirect(reqwest::redirect::Policy::none())
         .timeout(HEALTH_PROBE_TOTAL_TIMEOUT)
         .build()
         .unwrap_or_default();

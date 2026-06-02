@@ -468,6 +468,67 @@ mod tests {
         assert_eq!(map.get("svc-failing"), Some(&false));
     }
 
+    #[tokio::test]
+    async fn overlay_health_map_uses_configured_url_status_without_redirects() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test health server");
+        let addr = listener.local_addr().expect("local addr");
+        let app = axum::Router::new()
+            .route(
+                "/health/empty",
+                axum::routing::get(|| async { StatusCode::NO_CONTENT }),
+            )
+            .route(
+                "/health/auth",
+                axum::routing::get(|| async { StatusCode::UNAUTHORIZED }),
+            )
+            .route(
+                "/health/redirect",
+                axum::routing::get(|| async { axum::response::Redirect::temporary("/login") }),
+            )
+            .route("/login", axum::routing::get(|| async { StatusCode::OK }));
+        tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve test health server");
+        });
+
+        let services = vec![
+            OverlayServiceEntry {
+                name: "svc-empty".into(),
+                dir: "empty".into(),
+                health_url: Some(format!("http://{addr}/health/empty")),
+                restart: None,
+                open_url: None,
+            },
+            OverlayServiceEntry {
+                name: "svc-auth".into(),
+                dir: "auth".into(),
+                health_url: Some(format!("http://{addr}/health/auth")),
+                restart: None,
+                open_url: None,
+            },
+            OverlayServiceEntry {
+                name: "svc-redirect".into(),
+                dir: "redirect".into(),
+                health_url: Some(format!("http://{addr}/health/redirect")),
+                restart: None,
+                open_url: None,
+            },
+        ];
+        let requested = vec![
+            "svc-empty".to_string(),
+            "svc-auth".to_string(),
+            "svc-redirect".to_string(),
+        ];
+
+        let map = overlay_service_health_map(&services, &requested).await;
+        assert_eq!(map.get("svc-empty"), Some(&true));
+        assert_eq!(map.get("svc-auth"), Some(&false));
+        assert_eq!(map.get("svc-redirect"), Some(&false));
+    }
+
     #[test]
     fn list_group_entries_sync_merges_sources_and_preserves_full_paths() {
         let dir = tempfile::tempdir().expect("tempdir");
