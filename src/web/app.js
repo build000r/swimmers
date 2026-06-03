@@ -7,6 +7,7 @@ import {
   shouldIgnoreSyntheticClick,
   terminalComposerControlAction, terminalKeyStripClickPlan,
 } from "./input_support.js";
+import { sendSheetFailureStatus, sendSheetSubmitPlan, sendSheetSuccessStatus } from "./send_sheet.js";
 import {
   MERMAID_PLAN_CONTENT_DISPLAY_MAX_CHARS,
   buildMermaidArtifactView,
@@ -4279,6 +4280,38 @@ function updateSendHint() {
     : "Send submits the text to the selected agent prompt.";
 }
 
+async function handleSendFormSubmit(event) {
+  event.preventDefault();
+  const plan = sendSheetSubmitPlan({
+    readOnly: state.readOnly,
+    text: el.sendInput.value,
+    sendTarget: state.sendTarget,
+    selectedSessionId: state.selectedSessionId,
+    sendMode: sendModeValue(),
+  });
+  if (plan.type === "ignore") {
+    return false;
+  }
+  try {
+    rememberSendHistory(plan.text);
+    const result = plan.type === "group"
+      ? await sendGroupLine(plan.sessionIds, plan.text)
+      : await (plan.type === "paste" ? sendRawTextToSession : sendLineToSession)(plan.sessionId, plan.text);
+    const status = sendSheetSuccessStatus(plan, result);
+    setUtilityStatus(status.label, status.muted, status.ttlMs);
+    el.sendInput.value = "";
+    state.sendTarget = null;
+    closeSheets();
+    await refreshSessions();
+    return true;
+  } catch (error) {
+    const status = sendSheetFailureStatus(error);
+    setUtilityStatus(status.label, status.muted, status.ttlMs);
+    syncSheetActionAvailability();
+    return false;
+  }
+}
+
 function sendTargetReady() {
   if (state.readOnly) {
     return false;
@@ -5428,48 +5461,7 @@ function bindEvents() {
     syncSheetActionAvailability();
   });
 
-  el.sendForm.addEventListener("submit", async (event) => {
-    event.preventDefault();
-    if (state.readOnly) {
-      return;
-    }
-    const text = el.sendInput.value;
-    if (!text.trim()) {
-      return;
-    }
-    try {
-      rememberSendHistory(text);
-      if (state.sendTarget?.type === "group") {
-        const result = await sendGroupLine(state.sendTarget.sessionIds, text);
-        const total = result?.total || state.sendTarget.sessionIds.length;
-        const skipped = result?.skipped || 0;
-        const delivered = result?.delivered || 0;
-        setUtilityStatus(
-          skipped > 0
-            ? `Sent batch line to ${delivered} of ${total} agents.`
-            : `Sent batch line to ${delivered} agents.`,
-          delivered === 0,
-          skipped > 0 ? 3200 : 2400,
-        );
-      } else {
-        const targetSessionId = state.sendTarget?.sessionId || state.selectedSessionId;
-        if (sendModeValue() === "paste") {
-          await sendRawTextToSession(targetSessionId, text);
-          setUtilityStatus(`Pasted text to ${state.sendTarget?.label || targetSessionId}.`, false, 2200);
-        } else {
-          await sendLineToSession(targetSessionId, text);
-          setUtilityStatus(`Sent line to ${state.sendTarget?.label || targetSessionId}.`, false, 2200);
-        }
-      }
-      el.sendInput.value = "";
-      state.sendTarget = null;
-      closeSheets();
-      await refreshSessions();
-    } catch (error) {
-      setUtilityStatus(`Send failed: ${error.message}`, true, 3200);
-      syncSheetActionAvailability();
-    }
-  });
+  el.sendForm.addEventListener("submit", handleSendFormSubmit);
   el.sendCloseButton.addEventListener("click", () => {
     state.sendTarget = null;
     closeSheets();
@@ -6018,6 +6010,7 @@ export const __swimmersWebTest = {
   sendTerminalControlKey,
   terminalKeyActionForDomEvent,
   handleTerminalInlineInputKeydown,
+  handleSendFormSubmit,
   focusTerminalInputSurface,
   syncTerminalInputDock,
   submitTerminalInputDock,

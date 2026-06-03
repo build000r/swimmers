@@ -2290,6 +2290,48 @@ test("send history stores multiline prompts for recall chips", () => {
   assert.ok(web.el.sendHistory.innerHTML.includes("first line second line"));
 });
 
+test("send form submit handler preserves line send side effects and cleanup", async () => {
+  resetWebState();
+  web.state.trogdorAtlasOpen = false;
+  web.state.selectedSessionId = "sess_0";
+  web.state.activeSheet = "send";
+  web.el.sendInput.value = "continue\n";
+  web.el.sendMode.value = "line";
+
+  const requests = [];
+  globalThis.fetch = async (path, init = {}) => {
+    requests.push({ path, body: init.body ? JSON.parse(init.body) : null });
+    if (path === "/v1/sessions/sess_0/input") {
+      return jsonResponse(200, { ok: true, delivered: true });
+    }
+    if (path === "/v1/sessions") {
+      return jsonResponse(200, { sessions: [rawSession({ session_id: "sess_0" })] });
+    }
+    return jsonResponse(404, { message: "not found" });
+  };
+
+  let prevented = 0;
+  assert.equal(await web.handleSendFormSubmit({
+    preventDefault() {
+      prevented += 1;
+    },
+  }), true);
+
+  assert.equal(prevented, 1);
+  assert.deepEqual(requests[0], {
+    path: "/v1/sessions/sess_0/input",
+    body: { text: "continue\n", submit: true },
+  });
+  assert.deepEqual(web.state.sendHistory, ["continue"]);
+  assert.equal(web.el.sendInput.value, "");
+  assert.equal(web.state.sendTarget, null);
+  assert.equal(web.state.activeSheet, null);
+  assert.equal(web.state.utilityLabel, "Sent line to sess_0.");
+  assert.equal(web.state.utilityMuted, false);
+  clearTimeout(web.state.utilityMessageTimer);
+  web.state.utilityMessageTimer = null;
+});
+
 test("batch send burns only successful group-input results", async () => {
   resetWebState();
   web.state.sessions = [
