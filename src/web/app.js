@@ -5342,80 +5342,59 @@ function handleCommandPaletteEvent(event) {
   return true;
 }
 
+function handleDocumentCommandPaletteShortcut(event) { if ((event.ctrlKey || event.metaKey) && !event.altKey && event.code === "KeyK") { event.preventDefault(); openCommandPalette(); } }
+
+function handleTerminalPaletteClick() { openCommandPalette(); }
+
+function handleTerminalCopyFrameClick() { void copyTerminalFrameText(); }
+
+function handleTerminalLinkOpenClick() { if (state.hoveredLinkUrl) safeOpenUrl(state.hoveredLinkUrl); }
+
+function handleTerminalLinkCopyClick() { void copyHoveredLink(); }
+
+function setTerminalZoomAndRefocus(nextZoom) { setTerminalZoom(nextZoom, { announce: true }); focusTerminalInputSurface({ preventScroll: true }); }
+
+function handleTerminalZoomOutClick() { setTerminalZoomAndRefocus(state.terminalZoom - TERMINAL_ZOOM_STEP); }
+
+function handleTerminalZoomResetClick() { setTerminalZoomAndRefocus(1); }
+
+function handleTerminalZoomInClick() { setTerminalZoomAndRefocus(state.terminalZoom + TERMINAL_ZOOM_STEP); }
+
+function handleTerminalMobileKeyboardClick() { if (state.mobileKeyboardActive) { closeMobileKeyboard(); focusTerminalInputSurface({ preventScroll: true }); return; } focusMobileKeyboard(); }
+
+function handleTerminalTrogdorBackClick(event) { event.preventDefault(); openTrogdorAtlas(); }
+
+function handleTerminalWorkbenchToggleClick() { setTerminalWorkbenchOpen(!state.terminalWorkbenchOpen); focusTerminalInputSurface({ preventScroll: true }); }
+
+function handleTerminalWorkbenchRefreshClick() { void refreshAgentContextForSelectedSession({ force: true }); void refreshWorkbenchWidgetsForSelectedSession({ force: true }); focusTerminalInputSurface({ preventScroll: true }); }
+
+function handleTerminalInputDockSubmit(event) { event.preventDefault(); void submitTerminalInputDock(); }
+
+function handleTerminalInlineInputInput() { resizeTerminalInlineInput(); syncTerminalInputDock(); }
+
+function handleTerminalKeyStripClick(event) { const action = terminalKeyStripClickExecutorPlan(terminalKeyStripClickPlan(event.type, event.target)); if (!action.sendKey) return; if (action.preventDefault) event.preventDefault(); sendTerminalControlKey(action.actionId); focusTerminalInputSurface({ preventScroll: true }); }
+
 function bindEvents() {
   bindTrogdorEvents();
-  document.addEventListener?.("keydown", (event) => {
-    if ((event.ctrlKey || event.metaKey) && !event.altKey && event.code === "KeyK") {
-      event.preventDefault();
-      openCommandPalette();
-    }
-  });
-  el.terminalPalette.addEventListener("click", () => {
-    openCommandPalette();
-  });
-  el.terminalCopyFrame.addEventListener("click", () => {
-    void copyTerminalFrameText();
-  });
-  el.terminalLinkOpen.addEventListener("click", () => {
-    if (state.hoveredLinkUrl) {
-      safeOpenUrl(state.hoveredLinkUrl);
-    }
-  });
-  el.terminalLinkCopy.addEventListener("click", () => {
-    void copyHoveredLink();
-  });
-  el.terminalZoomOut.addEventListener("click", () => {
-    setTerminalZoom(state.terminalZoom - TERMINAL_ZOOM_STEP, { announce: true });
-    focusTerminalInputSurface({ preventScroll: true });
-  });
-  el.terminalZoomReset.addEventListener("click", () => {
-    setTerminalZoom(1, { announce: true });
-    focusTerminalInputSurface({ preventScroll: true });
-  });
-  el.terminalZoomIn.addEventListener("click", () => {
-    setTerminalZoom(state.terminalZoom + TERMINAL_ZOOM_STEP, { announce: true });
-    focusTerminalInputSurface({ preventScroll: true });
-  });
-  el.terminalMobileKeyboard.addEventListener("click", () => {
-    if (state.mobileKeyboardActive) {
-      closeMobileKeyboard();
-      focusTerminalInputSurface({ preventScroll: true });
-      return;
-    }
-    focusMobileKeyboard();
-  });
-  el.terminalTrogdorBack.addEventListener("click", (event) => {
-    event.preventDefault();
-    openTrogdorAtlas();
-  });
-  el.terminalWorkbenchToggle.addEventListener("click", () => {
-    setTerminalWorkbenchOpen(!state.terminalWorkbenchOpen);
-    focusTerminalInputSurface({ preventScroll: true });
-  });
-  el.terminalWorkbenchRefresh.addEventListener("click", () => {
-    void refreshAgentContextForSelectedSession({ force: true });
-    void refreshWorkbenchWidgetsForSelectedSession({ force: true });
-    focusTerminalInputSurface({ preventScroll: true });
-  });
+  document.addEventListener?.("keydown", handleDocumentCommandPaletteShortcut);
+  el.terminalPalette.addEventListener("click", handleTerminalPaletteClick);
+  el.terminalCopyFrame.addEventListener("click", handleTerminalCopyFrameClick);
+  el.terminalLinkOpen.addEventListener("click", handleTerminalLinkOpenClick);
+  el.terminalLinkCopy.addEventListener("click", handleTerminalLinkCopyClick);
+  el.terminalZoomOut.addEventListener("click", handleTerminalZoomOutClick);
+  el.terminalZoomReset.addEventListener("click", handleTerminalZoomResetClick);
+  el.terminalZoomIn.addEventListener("click", handleTerminalZoomInClick);
+  el.terminalMobileKeyboard.addEventListener("click", handleTerminalMobileKeyboardClick);
+  el.terminalTrogdorBack.addEventListener("click", handleTerminalTrogdorBackClick);
+  el.terminalWorkbenchToggle.addEventListener("click", handleTerminalWorkbenchToggleClick);
+  el.terminalWorkbenchRefresh.addEventListener("click", handleTerminalWorkbenchRefreshClick);
   el.terminalWorkbenchWidgets.addEventListener("click", handleTerminalWorkbenchWidgetsClick);
   el.terminalWorkbenchWidgets.addEventListener("input", handleTerminalWorkbenchWidgetsLogEvent);
   el.terminalWorkbenchWidgets.addEventListener("change", handleTerminalWorkbenchWidgetsLogEvent);
-  el.terminalInputDock.addEventListener("submit", (event) => {
-    event.preventDefault();
-    void submitTerminalInputDock();
-  });
-  el.terminalInlineInput.addEventListener("input", () => {
-    resizeTerminalInlineInput();
-    syncTerminalInputDock();
-  });
+  el.terminalInputDock.addEventListener("submit", handleTerminalInputDockSubmit);
+  el.terminalInlineInput.addEventListener("input", handleTerminalInlineInputInput);
   el.terminalInlineInput.addEventListener("keydown", handleTerminalInlineInputKeydown);
-  el.terminalKeyStrip.addEventListener("click", (event) => {
-    const action = terminalKeyStripClickExecutorPlan(terminalKeyStripClickPlan(event.type, event.target));
-    if (!action.sendKey) return;
-    if (action.preventDefault) event.preventDefault();
-    sendTerminalControlKey(action.actionId);
-    focusTerminalInputSurface({ preventScroll: true });
-  });
+  el.terminalKeyStrip.addEventListener("click", handleTerminalKeyStripClick);
   el.terminalInlineInput.addEventListener("focus", handleTerminalInlineInputFocus);
   el.terminalFallback.addEventListener("mousedown", () => handleTerminalFallbackPointerFocus("mousedown"));
   el.terminalFallback.addEventListener("click", () => handleTerminalFallbackPointerFocus("click"));
