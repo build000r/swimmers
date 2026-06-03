@@ -10,6 +10,7 @@ import {
   shouldIgnoreSyntheticClick,
   terminalComposerControlAction,
   terminalKeyStripClickPlan,
+  terminalStageCaptureBindings,
 } from "./input_support.js";
 
 test("eventClientPoint uses direct pointer coordinates when present", () => {
@@ -257,4 +258,13 @@ test("terminalKeyStripClickPlan preserves target, disabled, and action dispatch 
     disabled: false,
     dataset: { terminalKey: "arrow-up" },
   })), { type: "send_key", actionId: "arrow-up" });
+});
+
+test("terminalStageCaptureBindings preserves stage event labels and options", () => {
+  assert.deepEqual(terminalStageCaptureBindings(), [
+    { eventType: "mousedown", action: "down", options: { capture: true } },
+    { eventType: "click", action: "click", options: { capture: true } },
+    { eventType: "touchend", action: "touch", options: { capture: true, passive: false } },
+    { eventType: "wheel", action: "wheel", options: { capture: true, passive: false } },
+  ]);
 });

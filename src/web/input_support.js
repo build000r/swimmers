@@ -221,6 +221,15 @@ export function terminalComposerControlAction(event, context = {}) {
   }
 }
 
+export function terminalStageCaptureBindings() {
+  return [
+    { eventType: "mousedown", action: "down", options: { capture: true } },
+    { eventType: "click", action: "click", options: { capture: true } },
+    { eventType: "touchend", action: "touch", options: { capture: true, passive: false } },
+    { eventType: "wheel", action: "wheel", options: { capture: true, passive: false } },
+  ];
+}
+
 function clampInt(value, fallback, min, max) {
   const numeric = Number.isFinite(value) ? Math.trunc(value) : fallback;
   return Math.max(min, Math.min(max, numeric));

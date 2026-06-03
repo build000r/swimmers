@@ -2,7 +2,7 @@ import { buildSurfaceFrame, surfaceActionAt, surfaceConsumesPointer } from "./re
 import {
   authTokenButtonPlan, eventCell, globalShortcutPlan, mobileKeyboardInputPlan,
   mobileKeyboardKeyPlan, shouldIgnoreSyntheticClick,
-  terminalComposerControlAction, terminalKeyStripClickPlan,
+  terminalComposerControlAction, terminalKeyStripClickPlan, terminalStageCaptureBindings,
 } from "./input_support.js";
 import { sendHistoryClickPlan, sendSheetFailureStatus, sendSheetSubmitPlan, sendSheetSuccessStatus } from "./send_sheet.js";
 import {
@@ -5672,34 +5672,13 @@ function bindEvents() {
   });
   el.mermaidCloseButton.addEventListener("click", closeSheets);
 
-  el.terminalStage.addEventListener(
-    "mousedown",
-    (event) => {
-      captureSurfaceAction(event, "down");
-    },
-    { capture: true },
-  );
-  el.terminalStage.addEventListener(
-    "click",
-    (event) => {
-      captureSurfaceAction(event, "click");
-    },
-    { capture: true },
-  );
-  el.terminalStage.addEventListener(
-    "touchend",
-    (event) => {
-      captureSurfaceAction(event, "touch");
-    },
-    { capture: true, passive: false },
-  );
-  el.terminalStage.addEventListener(
-    "wheel",
-    (event) => {
-      captureSurfaceAction(event, "wheel");
-    },
-    { capture: true, passive: false },
-  );
+  for (const binding of terminalStageCaptureBindings()) {
+    el.terminalStage.addEventListener(
+      binding.eventType,
+      (event) => captureSurfaceAction(event, binding.action),
+      binding.options,
+    );
+  }
 
   el.terminalStage.addEventListener("click", (event) => {
     if (terminalFallbackOwnsPointer(event)) {
