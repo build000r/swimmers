@@ -1,3 +1,4 @@
+use std::cmp::Reverse;
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::io;
 use std::path::{Component, Path, PathBuf};
@@ -1925,17 +1926,29 @@ fn best_attention_fill_index(
     visible: &[AttentionCandidate],
     candidates: &[AttentionCandidate],
 ) -> usize {
+    best_attention_fill_choice(visible, candidates).unwrap_or(0)
+}
+
+fn best_attention_fill_choice(
+    visible: &[AttentionCandidate],
+    candidates: &[AttentionCandidate],
+) -> Option<usize> {
     candidates
         .iter()
         .enumerate()
-        .max_by(|(_, a), (_, b)| {
-            best_adjacency_to_group(a, visible)
-                .cmp(&best_adjacency_to_group(b, visible))
-                .then_with(|| a.session.last_activity_at.cmp(&b.session.last_activity_at))
-                .then_with(|| b.session.session_id.cmp(&a.session.session_id))
-        })
+        .max_by_key(|(_, candidate)| attention_fill_rank(candidate, visible))
         .map(|(index, _)| index)
-        .unwrap_or(0)
+}
+
+fn attention_fill_rank(
+    candidate: &AttentionCandidate,
+    visible: &[AttentionCandidate],
+) -> (i32, DateTime<Utc>, Reverse<String>) {
+    (
+        best_adjacency_to_group(candidate, visible),
+        candidate.session.last_activity_at,
+        Reverse(candidate.session.session_id.clone()),
+    )
 }
 
 fn best_adjacency_to_group(candidate: &AttentionCandidate, visible: &[AttentionCandidate]) -> i32 {
@@ -2441,6 +2454,86 @@ mod tests {
             ),
             0
         );
+    }
+
+    #[test]
+    fn attention_fill_prefers_best_adjacency_to_visible_group() {
+        let visible = vec![AttentionCandidate::from(numbered_waiting_session(
+            "visible-alpha",
+            "48",
+            "/Users/b/repos/alpha",
+            60,
+        ))];
+        let unrelated_newer = AttentionCandidate::from(numbered_waiting_session(
+            "unrelated-newer",
+            "49",
+            "/Users/b/repos/gamma",
+            1,
+        ));
+        let same_repo_older = AttentionCandidate::from(numbered_waiting_session(
+            "same-repo-older",
+            "50",
+            "/Users/b/repos/alpha",
+            120,
+        ));
+
+        assert_eq!(
+            best_attention_fill_index(&visible, &[unrelated_newer, same_repo_older]),
+            1
+        );
+    }
+
+    #[test]
+    fn attention_fill_uses_recency_then_session_id_for_equal_scores() {
+        let visible = vec![AttentionCandidate::from(numbered_waiting_session(
+            "visible-alpha",
+            "56",
+            "/Users/b/repos/alpha",
+            60,
+        ))];
+        let older = AttentionCandidate::from(numbered_waiting_session(
+            "older-alpha",
+            "57",
+            "/Users/b/repos/alpha",
+            120,
+        ));
+        let newer = AttentionCandidate::from(numbered_waiting_session(
+            "newer-alpha",
+            "58",
+            "/Users/b/repos/alpha",
+            30,
+        ));
+
+        assert_eq!(best_attention_fill_index(&visible, &[older, newer]), 1);
+
+        let tied_at = Utc::now();
+        let mut later_id = numbered_waiting_session("tie-b", "59", "/Users/b/repos/alpha", 30);
+        later_id.last_activity_at = tied_at;
+        let mut earlier_id = numbered_waiting_session("tie-a", "60", "/Users/b/repos/alpha", 30);
+        earlier_id.last_activity_at = tied_at;
+
+        assert_eq!(
+            best_attention_fill_index(
+                &visible,
+                &[
+                    AttentionCandidate::from(later_id),
+                    AttentionCandidate::from(earlier_id)
+                ]
+            ),
+            1
+        );
+    }
+
+    #[test]
+    fn attention_fill_returns_zero_when_candidates_are_empty() {
+        let visible = vec![AttentionCandidate::from(numbered_waiting_session(
+            "visible-alpha",
+            "68",
+            "/Users/b/repos/alpha",
+            60,
+        ))];
+
+        assert_eq!(best_attention_fill_index(&visible, &[]), 0);
     }
 
     #[test]
