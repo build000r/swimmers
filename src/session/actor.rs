@@ -1,9 +1,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::ffi::OsStr;
-use std::fs;
 use std::io;
 use std::io::Write as _;
-use std::path::PathBuf;
 use std::process::Output;
 use std::sync::{
     atomic::{AtomicU64, Ordering},
@@ -13,7 +11,6 @@ use std::time::{Duration, Instant};
 
 use chrono::{TimeZone, Utc};
 use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
-use regex::Regex;
 use tokio::process::Command;
 use tokio::sync::{broadcast, mpsc, oneshot, Mutex};
 use tracing::{debug, error, info, warn};
@@ -26,6 +23,7 @@ use crate::session::artifacts::{
     PLAN_SIBLING_FILENAMES, VIEWER_TEXT_FILENAMES, VIEWER_TEXT_MAX_BYTES,
 };
 use crate::session::replay_ring::ReplayRing;
+use crate::session::skill_detection::{detect_skill_from_input_line, drain_completed_input_lines};
 use crate::state::detector::StateDetector;
 use crate::tmux_target::{exact_pane_target, exact_session_target};
 use crate::types::{
@@ -2416,219 +2414,6 @@ fn resolve_tmux_terminal_env(
     (resolved_term, colorterm, needs_term_fallback)
 }
 
-fn detect_skill_from_input_line(line: &str) -> Option<String> {
-    extract_skill_from_xml_block(line)
-        .or_else(|| extract_skill_from_dollar_token(line))
-        .or_else(|| extract_skill_from_slash_token(line))
-        .or_else(|| extract_skill_from_using_marker(line))
-}
-
-fn drain_completed_input_lines(buffer: &mut String, data: &[u8]) -> Vec<String> {
-    let mut completed = Vec::new();
-    if data.is_empty() {
-        return completed;
-    }
-
-    let text = String::from_utf8_lossy(data);
-    for ch in text.chars() {
-        match ch {
-            '\r' | '\n' => {
-                let line = buffer.trim().to_string();
-                buffer.clear();
-                if !line.is_empty() {
-                    completed.push(line);
-                }
-            }
-            // Ctrl+C/Ctrl+D should discard any partially typed command line.
-            '\u{3}' | '\u{4}' => {
-                buffer.clear();
-            }
-            '\u{8}' | '\u{7f}' => {
-                buffer.pop();
-            }
-            _ if ch.is_control() => {}
-            _ => {
-                buffer.push(ch);
-                if buffer.len() > 8_192 {
-                    buffer.clear();
-                }
-            }
-        }
-    }
-
-    completed
-}
-
-fn extract_skill_from_xml_block(text: &str) -> Option<String> {
-    static SKILL_XML_RE: OnceLock<Regex> = OnceLock::new();
-    let re = SKILL_XML_RE.get_or_init(|| {
-        Regex::new(
-            r"(?is)<skill\b[^>]*>.*?<name>\s*([A-Za-z][A-Za-z0-9._/-]{0,63})\s*</name>.*?</skill>",
-        )
-        .expect("valid skill xml regex")
-    });
-
-    re.captures_iter(text)
-        .filter_map(|caps| caps.get(1).map(|m| m.as_str()))
-        .filter_map(normalize_skill_name)
-        .last()
-}
-
-fn extract_skill_from_dollar_token(text: &str) -> Option<String> {
-    static DOLLAR_SKILL_RE: OnceLock<Regex> = OnceLock::new();
-    let re = DOLLAR_SKILL_RE.get_or_init(|| {
-        Regex::new(r"\$([A-Za-z][A-Za-z0-9_-]{0,63})").expect("valid dollar skill regex")
-    });
-
-    re.captures_iter(text)
-        .filter_map(|caps| caps.get(1).map(|m| m.as_str()))
-        .filter(|value| is_probable_skill_name(value))
-        .filter_map(normalize_skill_name)
-        .last()
-}
-
-fn extract_skill_from_slash_token(text: &str) -> Option<String> {
-    static SLASH_SKILL_RE: OnceLock<Regex> = OnceLock::new();
-    let re = SLASH_SKILL_RE.get_or_init(|| {
-        Regex::new(r#"^\s*/([A-Za-z][A-Za-z0-9._-]{0,63})(?:\s|$)"#)
-            .expect("valid slash skill regex")
-    });
-
-    re.captures_iter(text)
-        .filter_map(|caps| caps.get(1).map(|m| m.as_str()))
-        .filter(|value| is_probable_skill_name(value))
-        .filter(|value| !is_common_filesystem_root_name(value))
-        .filter_map(normalize_skill_name)
-        .last()
-}
-
-fn extract_skill_from_using_marker(text: &str) -> Option<String> {
-    static USING_SKILL_RE: OnceLock<Regex> = OnceLock::new();
-    let re = USING_SKILL_RE.get_or_init(|| {
-        Regex::new(
-            r#"(?i)\busing\s+(?:the\s+)?skill\s+[`"']?([A-Za-z][A-Za-z0-9._/-]{0,63})[`"']?(?:\s+skill)?\b"#,
-        )
-        .expect("valid using skill regex")
-    });
-
-    re.captures_iter(text)
-        .filter_map(|caps| caps.get(1).map(|m| m.as_str()))
-        .filter(|value| is_probable_skill_name(value))
-        .filter_map(normalize_skill_name)
-        .last()
-}
-
-fn normalize_skill_name(raw: &str) -> Option<String> {
-    let trimmed = raw.trim();
-    is_valid_skill_name_token(trimmed).then(|| trimmed.to_ascii_lowercase())
-}
-
-fn is_valid_skill_name_token(value: &str) -> bool {
-    !value.is_empty() && value.bytes().all(is_skill_name_byte)
-}
-
-fn is_skill_name_byte(byte: u8) -> bool {
-    byte.is_ascii_alphanumeric() || b"-_./".contains(&byte)
-}
-
-fn is_probable_skill_name(raw: &str) -> bool {
-    if raw.is_empty() {
-        return false;
-    }
-
-    let normalized = raw.trim().to_ascii_lowercase();
-    if normalized.is_empty() {
-        return false;
-    }
-
-    if is_builtin_skill_name(&normalized) {
-        return true;
-    }
-
-    if let Some(installed) = installed_skill_names() {
-        // Only enforce strict membership when the discovered registry looks
-        // complete enough to trust; tiny registries are often partial.
-        if installed.len() >= 5 {
-            return installed.contains(&normalized);
-        }
-        if installed.contains(&normalized) {
-            return true;
-        }
-    }
-
-    false
-}
-
-fn is_builtin_skill_name(normalized: &str) -> bool {
-    matches!(normalized, "commit" | "describe" | "domain-planner" | "gog")
-}
-
-fn installed_skill_names() -> Option<&'static HashSet<String>> {
-    static INSTALLED_SKILLS: OnceLock<Option<HashSet<String>>> = OnceLock::new();
-    INSTALLED_SKILLS
-        .get_or_init(load_installed_skill_names)
-        .as_ref()
-}
-
-fn load_installed_skill_names() -> Option<HashSet<String>> {
-    let home = std::env::var("HOME").ok()?;
-    let mut names = HashSet::new();
-
-    for rel_root in [".codex/skills", ".claude/skills"] {
-        let root = PathBuf::from(&home).join(rel_root);
-        let entries = match fs::read_dir(root) {
-            Ok(entries) => entries,
-            Err(_) => continue,
-        };
-
-        for entry in entries.flatten() {
-            let Ok(file_type) = entry.file_type() else {
-                continue;
-            };
-            let path = entry.path();
-            let is_skill_dir = file_type.is_dir() || (file_type.is_symlink() && path.is_dir());
-            if !is_skill_dir {
-                continue;
-            }
-
-            let name = entry.file_name();
-            let name = name.to_string_lossy();
-            if let Some(normalized) = normalize_skill_name(&name) {
-                names.insert(normalized);
-            }
-        }
-    }
-
-    if names.is_empty() {
-        None
-    } else {
-        Some(names)
-    }
-}
-
-fn is_common_filesystem_root_name(raw: &str) -> bool {
-    matches!(
-        raw.to_ascii_lowercase().as_str(),
-        "bin"
-            | "dev"
-            | "etc"
-            | "home"
-            | "lib"
-            | "lib64"
-            | "mnt"
-            | "opt"
-            | "private"
-            | "proc"
-            | "sbin"
-            | "sys"
-            | "tmp"
-            | "usr"
-            | "users"
-            | "var"
-            | "volumes"
-    )
-}
-
 // ---------------------------------------------------------------------------
 // Blocking PTY reader (runs in spawn_blocking)
 // ---------------------------------------------------------------------------
@@ -2670,18 +2455,16 @@ fn pty_read_loop(
 mod tests {
     use super::{
         capture_pane_tail_with_command, compute_pane_liveness, cwd_from_osc7_payload,
-        detect_skill_from_input_line, detect_tool_from_command_line,
-        detect_tool_from_process_entry, drain_completed_input_lines, extract_cwd_from_title,
-        find_osc_payload_end, line_looks_prompt_like, normalize_skill_name,
-        normalize_submit_line_text, osc_payloads, output_counts_as_meaningful_activity,
-        parse_process_entry, percent_decode, process_entries_cache, query_tmux_session_created,
-        query_tool_from_tmux_process_tree, resolve_tmux_terminal_env, run_bounded_tmux_command,
-        should_refresh_cwd_from_tmux, should_refresh_tool_from_tmux,
-        state_detector_for_initial_tool, submit_line_fallback_input, tmux_input_chunks,
-        visible_output_is_meaningful, write_and_flush_input, write_input_counts_as_activity,
-        ControlEvent, PaneLiveness, ProcessEntriesCache, ProcessEntry, SessionActor,
-        SessionCommand, TmuxInputChunk, CWD_REFRESH_MIN_INTERVAL, PROCESS_ENTRIES_CACHE_TTL,
-        TOOL_REFRESH_MIN_INTERVAL,
+        detect_tool_from_command_line, detect_tool_from_process_entry, extract_cwd_from_title,
+        find_osc_payload_end, line_looks_prompt_like, normalize_submit_line_text, osc_payloads,
+        output_counts_as_meaningful_activity, parse_process_entry, percent_decode,
+        process_entries_cache, query_tmux_session_created, query_tool_from_tmux_process_tree,
+        resolve_tmux_terminal_env, run_bounded_tmux_command, should_refresh_cwd_from_tmux,
+        should_refresh_tool_from_tmux, state_detector_for_initial_tool, submit_line_fallback_input,
+        tmux_input_chunks, visible_output_is_meaningful, write_and_flush_input,
+        write_input_counts_as_activity, ControlEvent, PaneLiveness, ProcessEntriesCache,
+        ProcessEntry, SessionActor, SessionCommand, TmuxInputChunk, CWD_REFRESH_MIN_INTERVAL,
+        PROCESS_ENTRIES_CACHE_TTL, TOOL_REFRESH_MIN_INTERVAL,
     };
     use crate::config::Config;
     use crate::scroll::guard::ScrollGuard;
@@ -3225,31 +3008,6 @@ fi
     }
 
     #[test]
-    fn normalize_skill_name_rejects_blank_and_invalid_values() {
-        assert_eq!(normalize_skill_name("  "), None);
-        assert_eq!(normalize_skill_name("bad!skill"), None);
-        assert_eq!(normalize_skill_name(" Commit "), Some("commit".to_string()));
-    }
-
-    #[test]
-    fn normalize_skill_name_preserves_existing_character_policy() {
-        let cases = [
-            ("skill-name", Some("skill-name")),
-            ("skill_name", Some("skill_name")),
-            ("skill.name", Some("skill.name")),
-            ("path/to-skill", Some("path/to-skill")),
-            ("UPPER/Case_1", Some("upper/case_1")),
-            ("bad skill", None),
-            ("skill:bad", None),
-            ("skíll", None),
-        ];
-
-        for (raw, expected) in cases {
-            assert_eq!(normalize_skill_name(raw).as_deref(), expected, "{raw}");
-        }
-    }
-
-    #[test]
     fn osc_payload_helpers_extract_bel_and_st_terminated_sequences() {
         let text = "\x1b]7;file://host/tmp/project\x1b\\ middle \x1b]2;codex\x07";
         assert_eq!(find_osc_payload_end("title\x07tail"), Some((5, 1)));
@@ -3519,40 +3277,6 @@ fi
         } else {
             std::env::remove_var("PATH");
         }
-    }
-
-    #[test]
-    fn detect_skill_prefers_explicit_skill_block() {
-        let line = r#"send <skill><name>describe</name></skill> and $fallback"#;
-        assert_eq!(
-            detect_skill_from_input_line(line),
-            Some("describe".to_string())
-        );
-    }
-
-    #[test]
-    fn detect_skill_falls_back_to_dollar_token() {
-        let line = "please run $domain-planner for this slice";
-        assert_eq!(
-            detect_skill_from_input_line(line),
-            Some("domain-planner".to_string())
-        );
-    }
-
-    #[test]
-    fn detect_skill_records_full_commit_name() {
-        let line = "$commit";
-        assert_eq!(
-            detect_skill_from_input_line(line),
-            Some("commit".to_string())
-        );
-    }
-
-    #[test]
-    fn detect_skill_ignores_short_partial_dollar_tokens() {
-        assert_eq!(detect_skill_from_input_line("$c"), None);
-        assert_eq!(detect_skill_from_input_line("$com"), None);
-        assert_eq!(detect_skill_from_input_line("$comm"), None);
     }
 
     #[derive(Default)]
@@ -3847,58 +3571,6 @@ exit 1
     #[test]
     fn submit_line_fallback_input_adds_double_enter() {
         assert_eq!(submit_line_fallback_input("hello"), b"hello\r\r");
-    }
-
-    #[test]
-    fn detect_skill_falls_back_to_slash_token() {
-        let line = "/describe";
-        assert_eq!(
-            detect_skill_from_input_line(line),
-            Some("describe".to_string())
-        );
-    }
-
-    #[test]
-    fn detect_skill_ignores_common_root_path_slash_token() {
-        let line = "/tmp";
-        assert_eq!(detect_skill_from_input_line(line), None);
-    }
-
-    #[test]
-    fn detect_skill_ignores_common_shell_env_vars() {
-        let line = "echo $HOME && echo $PATH";
-        assert_eq!(detect_skill_from_input_line(line), None);
-    }
-
-    #[test]
-    fn detect_skill_ignores_unknown_dollar_token() {
-        let line = "please run $notarealskillzzzzz";
-        assert_eq!(detect_skill_from_input_line(line), None);
-    }
-
-    #[test]
-    fn detect_skill_ignores_generic_using_phrase_without_skill_keyword() {
-        let line = "using decision heuristics for this pass";
-        assert_eq!(detect_skill_from_input_line(line), None);
-    }
-
-    #[test]
-    fn completed_lines_drop_partial_skill_on_ctrl_c_carriage_return() {
-        let mut buffer = String::new();
-        assert!(drain_completed_input_lines(&mut buffer, b"$c").is_empty());
-        assert_eq!(buffer, "$c");
-
-        let lines = drain_completed_input_lines(&mut buffer, b"\x03\r");
-        assert!(lines.is_empty());
-        assert!(buffer.is_empty());
-    }
-
-    #[test]
-    fn completed_lines_emit_full_skill_after_chunked_input() {
-        let mut buffer = String::new();
-        assert!(drain_completed_input_lines(&mut buffer, b"$com").is_empty());
-        let lines = drain_completed_input_lines(&mut buffer, b"mit\r");
-        assert_eq!(lines, vec!["$commit".to_string()]);
     }
 
     #[test]
