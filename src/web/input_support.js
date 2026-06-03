@@ -492,6 +492,21 @@ export function terminalInputDockPlan(context = {}) {
   };
 }
 
+export function terminalZoomPercentLabel(zoom) {
+  return `${Math.round(zoom * 100)}%`;
+}
+
+export function terminalZoomControlsPlan(context = {}) {
+  const supported = Boolean(context.zoomSupported || !context.hasTerminal);
+  return {
+    supported,
+    zoomOutDisabled: !supported || context.zoom <= context.minZoom + 0.001,
+    zoomInDisabled: !supported || context.zoom >= context.maxZoom - 0.001,
+    zoomResetDisabled: !supported || Math.abs(context.zoom - 1) < 0.001,
+    zoomResetLabel: terminalZoomPercentLabel(context.zoom),
+  };
+}
+
 export function terminalFallbackPointerFocusPlan(eventType, context = {}) {
   if (!context.terminalFallbackActive || context.activeSheet) {
     return { type: "ignore", focusTerminal: false, scheduleFrame: false };

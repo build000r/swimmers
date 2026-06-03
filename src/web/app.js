@@ -3,7 +3,7 @@ import {
   authTokenButtonPlan, eventCell, globalShortcutPlan, mobileKeyboardInputExecutorPlan, mobileKeyboardInputPlan,
   mobileKeyboardKeydownPlan, mobileKeyboardKeyPlan, shouldIgnoreSyntheticClick,
   terminalComposerControlAction, terminalDestroyStatePatch, terminalFallbackActivationPlan, terminalFallbackFocusPlan, terminalFallbackKeydownPlan, terminalFallbackPastePlan, terminalFallbackPointerFocusPlan, terminalInlineInputKeydownPlan, terminalKeyStripClickExecutorPlan, terminalKeyStripClickPlan, terminalStageCaptureBindings, terminalStageFocusExecutorPlan, terminalStageFocusPlan,
-  terminalFallbackScrollPlan, terminalFallbackTextScrollPlan, terminalInputDockPlan, terminalLiveFrameFallbackPlan, terminalPaintProbeSchedulePlan, terminalPaintVerificationPlan, terminalPendingByteBufferPlan, terminalPresentationPlan, terminalResizeGeometryPlan, terminalStageKeydownPlan, terminalStagePasteExecutorPlan, terminalStagePastePlan,
+  terminalFallbackScrollPlan, terminalFallbackTextScrollPlan, terminalInputDockPlan, terminalLiveFrameFallbackPlan, terminalPaintProbeSchedulePlan, terminalPaintVerificationPlan, terminalPendingByteBufferPlan, terminalPresentationPlan, terminalResizeGeometryPlan, terminalStageKeydownPlan, terminalStagePasteExecutorPlan, terminalStagePastePlan, terminalZoomControlsPlan, terminalZoomPercentLabel,
 } from "./input_support.js";
 import { sendHistoryClickPlan, sendSheetFailureStatus, sendSheetSubmitPlan, sendSheetSuccessStatus } from "./send_sheet.js";
 import {
@@ -885,19 +885,15 @@ function loadTerminalZoom(url) {
   return normalizeTerminalZoom(localStorage.getItem(TERMINAL_ZOOM_STORAGE_KEY) || "1");
 }
 
-function terminalZoomLabel() {
-  return `${Math.round(state.terminalZoom * 100)}%`;
-}
-
 function syncTerminalZoomControls() {
   if (!el.terminalControlStrip) {
     return;
   }
-  const supported = terminalZoomSupported() || !state.terminal;
-  el.terminalZoomOut.disabled = !supported || state.terminalZoom <= TERMINAL_ZOOM_MIN + 0.001;
-  el.terminalZoomIn.disabled = !supported || state.terminalZoom >= TERMINAL_ZOOM_MAX - 0.001;
-  el.terminalZoomReset.disabled = !supported || Math.abs(state.terminalZoom - 1) < 0.001;
-  el.terminalZoomReset.textContent = terminalZoomLabel();
+  const plan = terminalZoomControlsPlan({ zoomSupported: terminalZoomSupported(), hasTerminal: Boolean(state.terminal), zoom: state.terminalZoom, minZoom: TERMINAL_ZOOM_MIN, maxZoom: TERMINAL_ZOOM_MAX });
+  el.terminalZoomOut.disabled = plan.zoomOutDisabled;
+  el.terminalZoomIn.disabled = plan.zoomInDisabled;
+  el.terminalZoomReset.disabled = plan.zoomResetDisabled;
+  el.terminalZoomReset.textContent = plan.zoomResetLabel;
   el.terminalMobileKeyboard.disabled = state.readOnly || !currentSession();
   el.terminalMobileKeyboard.setAttribute("aria-pressed", state.mobileKeyboardActive ? "true" : "false");
   syncTerminalInputDock();
@@ -1311,7 +1307,7 @@ function applyTerminalZoom(options = {}) {
     measureAndResizeSurface(true, true);
   }
   if (options.announce) {
-    setUtilityStatus(`Terminal zoom ${terminalZoomLabel()}.`, false, 1600);
+    setUtilityStatus(`Terminal zoom ${terminalZoomPercentLabel(state.terminalZoom)}.`, false, 1600);
   }
 }
 

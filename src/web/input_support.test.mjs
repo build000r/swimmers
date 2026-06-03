@@ -35,6 +35,8 @@ import {
   terminalStageKeydownPlan,
   terminalStagePasteExecutorPlan,
   terminalStagePastePlan,
+  terminalZoomControlsPlan,
+  terminalZoomPercentLabel,
 } from "./input_support.js";
 
 test("eventClientPoint uses direct pointer coordinates when present", () => {
@@ -898,6 +900,56 @@ test("terminalInputDockPlan preserves visibility and disabled state decisions", 
     readOnly: true,
     inputValue: "pwd",
   }).sendDisabled, true);
+});
+
+test("terminalZoomControlsPlan preserves support gates, bounds, and labels", () => {
+  assert.equal(terminalZoomPercentLabel(1.25), "125%");
+  assert.deepEqual(terminalZoomControlsPlan({
+    zoomSupported: true,
+    hasTerminal: true,
+    zoom: 1,
+    minZoom: 0.5,
+    maxZoom: 2,
+  }), {
+    supported: true,
+    zoomOutDisabled: false,
+    zoomInDisabled: false,
+    zoomResetDisabled: true,
+    zoomResetLabel: "100%",
+  });
+  assert.deepEqual(terminalZoomControlsPlan({
+    zoomSupported: false,
+    hasTerminal: true,
+    zoom: 1.5,
+    minZoom: 0.5,
+    maxZoom: 2,
+  }), {
+    supported: false,
+    zoomOutDisabled: true,
+    zoomInDisabled: true,
+    zoomResetDisabled: true,
+    zoomResetLabel: "150%",
+  });
+  assert.deepEqual(terminalZoomControlsPlan({
+    zoomSupported: false,
+    hasTerminal: false,
+    zoom: 0.5,
+    minZoom: 0.5,
+    maxZoom: 2,
+  }), {
+    supported: true,
+    zoomOutDisabled: true,
+    zoomInDisabled: false,
+    zoomResetDisabled: false,
+    zoomResetLabel: "50%",
+  });
+  assert.equal(terminalZoomControlsPlan({
+    zoomSupported: true,
+    hasTerminal: true,
+    zoom: 2,
+    minZoom: 0.5,
+    maxZoom: 2,
+  }).zoomInDisabled, true);
 });
 
 test("terminalFallbackPointerFocusPlan preserves scheduled and immediate focus gates", () => {
