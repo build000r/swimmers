@@ -1323,24 +1323,38 @@ impl SessionActor {
 
     async fn query_and_reconcile_liveness(&mut self) {
         let tmux_name = self.tmux_name.clone();
-        match query_pane_liveness(&tmux_name).await {
-            Ok(liveness) => {
-                let outcome = self.reconcile_liveness(liveness);
-                if outcome.refresh_cwd {
-                    self.maybe_refresh_cwd_from_tmux(false).await;
-                }
-                if outcome.refresh_tool {
-                    self.maybe_refresh_tool_from_tmux(false).await;
-                }
-            }
+        let outcome = self.reconcile_liveness_query(query_pane_liveness(&tmux_name).await);
+        for refresh in outcome.refresh_actions() {
+            self.apply_liveness_refresh(refresh).await;
+        }
+    }
+
+    fn reconcile_liveness_query(
+        &mut self,
+        query_result: anyhow::Result<PaneLiveness>,
+    ) -> LivenessReconciliation {
+        match query_result {
+            Ok(liveness) => self.reconcile_liveness(liveness),
             Err(e) => {
-                debug!(
-                    session_id = %self.session_id,
-                    tmux_name = %self.tmux_name,
-                    "liveness check failed: {}",
-                    e
-                );
+                self.log_liveness_query_error(e);
+                LivenessReconciliation::default()
             }
+        }
+    }
+
+    fn log_liveness_query_error(&self, error: anyhow::Error) {
+        debug!(
+            session_id = %self.session_id,
+            tmux_name = %self.tmux_name,
+            "liveness check failed: {}",
+            error
+        );
+    }
+
+    async fn apply_liveness_refresh(&mut self, refresh: LivenessRefresh) {
+        match refresh {
+            LivenessRefresh::Cwd => self.maybe_refresh_cwd_from_tmux(false).await,
+            LivenessRefresh::Tool => self.maybe_refresh_tool_from_tmux(false).await,
         }
     }
 
@@ -2050,6 +2064,23 @@ struct LivenessReconciliation {
     refresh_tool: bool,
 }
 
+impl LivenessReconciliation {
+    fn refresh_actions(self) -> impl Iterator<Item = LivenessRefresh> {
+        [
+            (self.refresh_cwd, LivenessRefresh::Cwd),
+            (self.refresh_tool, LivenessRefresh::Tool),
+        ]
+        .into_iter()
+        .filter_map(|(enabled, refresh)| enabled.then_some(refresh))
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LivenessRefresh {
+    Cwd,
+    Tool,
+}
+
 /// Query whether the pane's shell process has running children and their
 /// aggregate CPU usage. This is the ground-truth signal for idle vs busy:
 /// if the shell is the leaf process, no command is running regardless of what
@@ -2414,9 +2445,9 @@ mod tests {
         should_refresh_cwd_from_tmux, should_refresh_tool_from_tmux,
         state_detector_for_initial_tool, submit_line_fallback_input, tmux_input_chunks,
         visible_output_is_meaningful, write_and_flush_input, write_input_counts_as_activity,
-        ControlEvent, OutputFrame, PaneLiveness, ProcessEntriesCache, ProcessEntry, SessionActor,
-        SessionCommand, TmuxInputChunk, CWD_REFRESH_MIN_INTERVAL, PROCESS_ENTRIES_CACHE_TTL,
-        TOOL_REFRESH_MIN_INTERVAL,
+        ControlEvent, LivenessReconciliation, LivenessRefresh, OutputFrame, PaneLiveness,
+        ProcessEntriesCache, ProcessEntry, SessionActor, SessionCommand, TmuxInputChunk,
+        CWD_REFRESH_MIN_INTERVAL, PROCESS_ENTRIES_CACHE_TTL, TOOL_REFRESH_MIN_INTERVAL,
     };
     use crate::config::Config;
     use crate::scroll::guard::ScrollGuard;
@@ -2650,6 +2681,34 @@ mod tests {
         );
 
         assert_eq!(result, Some(SessionState::Exited));
+    }
+
+    #[test]
+    fn liveness_refresh_actions_preserve_cwd_then_tool_order() {
+        let actions: Vec<_> = LivenessReconciliation {
+            refresh_cwd: true,
+            refresh_tool: true,
+        }
+        .refresh_actions()
+        .collect();
+
+        assert_eq!(actions, vec![LivenessRefresh::Cwd, LivenessRefresh::Tool]);
+    }
+
+    #[test]
+    fn liveness_refresh_actions_skip_disabled_refreshes() {
+        let no_actions: Vec<_> = LivenessReconciliation::default()
+            .refresh_actions()
+            .collect();
+        assert!(no_actions.is_empty());
+
+        let tool_only: Vec<_> = LivenessReconciliation {
+            refresh_cwd: false,
+            refresh_tool: true,
+        }
+        .refresh_actions()
+        .collect();
+        assert_eq!(tool_only, vec![LivenessRefresh::Tool]);
     }
 
     #[test]
