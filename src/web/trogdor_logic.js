@@ -286,6 +286,24 @@ export function trogdorReaderToggleAction(
   };
 }
 
+export function trogdorReaderWpmForAction(
+  actionId,
+  wpm,
+  {
+    step = 25,
+    fallback = 200,
+    min = 50,
+    max = 800,
+  } = {},
+) {
+  return clampInt(
+    actionId === "trogdor_wpm_down" ? wpm - step : wpm + step,
+    fallback,
+    min,
+    max,
+  );
+}
+
 export function trogdorReaderProgressAdvanceForSession(
   session,
   {

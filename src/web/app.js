@@ -62,6 +62,7 @@ import {
   trogdorReaderStateForWpmChange,
   trogdorReaderTimerAction,
   trogdorReaderToggleAction,
+  trogdorReaderWpmForAction,
   trogdorReaderWordIndexForProgress,
   trogdorRawSessionForHover,
   trogdorSessionCanReadForState,
@@ -4828,17 +4829,10 @@ async function handleSurfaceAction(zone) {
       break;
     }
     case "trogdor_wpm_down":
-    {
-      advanceTrogdorReaderProgressForCurrentHover();
-      state.trogdorWpm = clampInt(state.trogdorWpm - 25, 200, 50, 800);
-      resetTrogdorReaderAfterWpmChange();
-      renderHudSurface();
-      break;
-    }
     case "trogdor_wpm_up":
     {
       advanceTrogdorReaderProgressForCurrentHover();
-      state.trogdorWpm = clampInt(state.trogdorWpm + 25, 200, 50, 800);
+      state.trogdorWpm = trogdorReaderWpmForAction(zone.actionId, state.trogdorWpm);
       resetTrogdorReaderAfterWpmChange();
       renderHudSurface();
       break;

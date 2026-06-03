@@ -43,6 +43,7 @@ import {
   trogdorReaderStateForWpmChange,
   trogdorReaderTimerAction,
   trogdorReaderToggleAction,
+  trogdorReaderWpmForAction,
   trogdorReaderWordIndexForProgress,
   trogdorRawSessionForHover,
   trogdorSessionCanReadForState,
@@ -490,6 +491,27 @@ test("Trogdor reader toggle action preserves pause, resume, and read-again decis
     restartClock: true,
   });
   assert.deepEqual(calls, ["agent-1", "done"]);
+});
+
+test("Trogdor reader WPM action preserves step, bounds, and JS arithmetic semantics", () => {
+  assert.equal(trogdorReaderWpmForAction("trogdor_wpm_down", 200), 175);
+  assert.equal(trogdorReaderWpmForAction("trogdor_wpm_up", 200), 225);
+  assert.equal(trogdorReaderWpmForAction("trogdor_wpm_down", 50), 50);
+  assert.equal(trogdorReaderWpmForAction("trogdor_wpm_up", 800), 800);
+  assert.equal(trogdorReaderWpmForAction("trogdor_wpm_down", undefined), 200);
+  assert.equal(trogdorReaderWpmForAction("trogdor_wpm_up", undefined), 200);
+  assert.equal(trogdorReaderWpmForAction("trogdor_wpm_down", "200"), 175);
+  assert.equal(trogdorReaderWpmForAction("trogdor_wpm_up", "200"), 200);
+  assert.equal(trogdorReaderWpmForAction("trogdor_wpm_down", 105, {
+    step: 10,
+    min: 100,
+    max: 210,
+  }), 100);
+  assert.equal(trogdorReaderWpmForAction("trogdor_wpm_up", 205, {
+    step: 10,
+    min: 100,
+    max: 210,
+  }), 210);
 });
 
 test("Trogdor reader advancement helpers clamp progress and preserve WPM restart state", () => {
