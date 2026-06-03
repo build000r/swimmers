@@ -442,6 +442,63 @@ export function terminalStageMouseUpPlan(context = {}) {
   return { ...terminalStageMouseIgnore("forward_mouse", "up"), forwardMouse: true };
 }
 
+function terminalStageMouseMoveIgnore(type = "ignore") {
+  return {
+    type,
+    preventDefault: false,
+    updateTrogdorSurface: false,
+    trogdorZone: null,
+    clearHoveredLink: false,
+    updateHoveredLink: false,
+    updateSelectionRange: false,
+    forwardMouse: false,
+  };
+}
+
+export function terminalStageMouseMovePlan(context = {}) {
+  const hit = context.hit || {};
+  if (context.fallbackOwnsPointer) {
+    return terminalStageMouseMoveIgnore("fallback_pointer");
+  }
+  const base = {
+    ...terminalStageMouseMoveIgnore("hover_update"),
+    updateTrogdorSurface: true,
+    trogdorZone: hit.action,
+  };
+  if (hit.consume || !context.hasTerminal) {
+    return { ...base, type: "blocked", clearHoveredLink: Boolean(hit.consume) };
+  }
+  if (context.selectMode && context.selectionAnchor !== null && (context.buttons & 1) === 1) {
+    return { ...base, type: "select_drag", preventDefault: true, updateSelectionRange: true };
+  }
+  if (context.readOnly) {
+    return { ...base, type: "read_only", updateHoveredLink: true };
+  }
+  return { ...base, type: "forward_mouse", updateHoveredLink: true, forwardMouse: true };
+}
+
+function terminalStageWheelIgnore(type = "ignore") {
+  return {
+    type,
+    preventDefault: false,
+    forwardWheel: false,
+  };
+}
+
+export function terminalStageWheelPlan(context = {}) {
+  const hit = context.hit || {};
+  if (context.fallbackOwnsPointer) {
+    return terminalStageWheelIgnore("fallback_pointer");
+  }
+  if (hit.consume) {
+    return { ...terminalStageWheelIgnore("consume"), preventDefault: true };
+  }
+  if (context.readOnly || !context.hasTerminal || context.selectMode) {
+    return terminalStageWheelIgnore("blocked");
+  }
+  return { ...terminalStageWheelIgnore("forward_wheel"), preventDefault: true, forwardWheel: true };
+}
+
 export function terminalStagePastePlan(readOnly, text) {
   if (readOnly || !text) {
     return { type: "ignore" };

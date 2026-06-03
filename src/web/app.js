@@ -4,7 +4,7 @@ import {
   sheetActionAvailabilityPlan,
   mobileKeyboardKeydownPlan, mobileKeyboardKeyPlan, shouldIgnoreSyntheticClick,
   terminalComposerControlAction, terminalDestroyStatePatch, terminalFallbackActivationPlan, terminalFallbackFocusPlan, terminalFallbackKeydownPlan, terminalFallbackPastePlan, terminalFallbackPointerFocusPlan, terminalInlineInputKeydownPlan, terminalKeyStripClickExecutorPlan, terminalKeyStripClickPlan, terminalStageCaptureBindings, terminalStageClickPlan, terminalStageFocusExecutorPlan, terminalStageFocusPlan,
-  normalizeTerminalZoomValue, terminalAuxiliaryControlsPlan, terminalFallbackScrollPlan, terminalFallbackTextScrollPlan, terminalInputDockPlan, terminalLiveFrameFallbackPlan, terminalPaintProbeSchedulePlan, terminalPaintVerificationPlan, terminalPendingByteBufferPlan, terminalPresentationPlan, terminalResizeGeometryPlan, terminalStageKeydownPlan, terminalStageMouseDownPlan, terminalStageMouseUpPlan, terminalStagePasteExecutorPlan, terminalStagePastePlan, terminalStageTouchEndPlan, terminalToolsAvailabilityPlan, terminalZoomControlsPlan, terminalZoomLoadValue, terminalZoomPercentLabel, terminalZoomPersistencePlan,
+  normalizeTerminalZoomValue, terminalAuxiliaryControlsPlan, terminalFallbackScrollPlan, terminalFallbackTextScrollPlan, terminalInputDockPlan, terminalLiveFrameFallbackPlan, terminalPaintProbeSchedulePlan, terminalPaintVerificationPlan, terminalPendingByteBufferPlan, terminalPresentationPlan, terminalResizeGeometryPlan, terminalStageKeydownPlan, terminalStageMouseDownPlan, terminalStageMouseMovePlan, terminalStageMouseUpPlan, terminalStagePasteExecutorPlan, terminalStagePastePlan, terminalStageTouchEndPlan, terminalStageWheelPlan, terminalToolsAvailabilityPlan, terminalZoomControlsPlan, terminalZoomLoadValue, terminalZoomPercentLabel, terminalZoomPersistencePlan,
 } from "./input_support.js";
 import { sendHistoryClickPlan, sendSheetFailureStatus, sendSheetSubmitPlan, sendSheetSuccessStatus } from "./send_sheet.js";
 import {
@@ -4966,6 +4966,51 @@ function applyTerminalStageMousePlan(event, plan, hit) {
   }
 }
 
+function handleTerminalStageMouseMove(event) {
+  const fallbackOwnsPointer = terminalFallbackOwnsPointer(event);
+  const hit = fallbackOwnsPointer ? {} : surfaceHit(event);
+  const plan = terminalStageMouseMovePlan({
+    fallbackOwnsPointer, hit, hasTerminal: Boolean(state.terminal), selectMode: state.selectMode,
+    selectionAnchor: state.selectionAnchor, buttons: event.buttons, readOnly: state.readOnly,
+  });
+  applyTerminalStageMouseMovePlan(event, plan, hit);
+}
+
+function applyTerminalStageMouseMovePlan(event, plan, hit) {
+  if (plan.updateTrogdorSurface) updateHoveredTrogdorSurface(plan.trogdorZone);
+  if (plan.clearHoveredLink) clearHoveredLink(true);
+  if (plan.preventDefault) event.preventDefault();
+  if (plan.updateSelectionRange) {
+    setTerminalSelectionRange(state.selectionAnchor, cellOffset(hit.cell));
+  }
+  if (plan.updateHoveredLink) updateHoveredLink(event);
+  if (plan.forwardMouse) forwardTerminalMouse("move", 0, hit, event);
+}
+
+function handleTerminalStageWheel(event) {
+  const fallbackOwnsPointer = terminalFallbackOwnsPointer(event);
+  const hit = fallbackOwnsPointer ? {} : surfaceHit(event);
+  const plan = terminalStageWheelPlan({
+    fallbackOwnsPointer, hit, hasTerminal: Boolean(state.terminal),
+    readOnly: state.readOnly, selectMode: state.selectMode,
+  });
+  applyTerminalStageWheelPlan(event, plan, hit);
+}
+
+function applyTerminalStageWheelPlan(event, plan, hit) {
+  if (plan.preventDefault) event.preventDefault();
+  if (plan.forwardWheel) {
+    forwardTerminalEvent({
+      kind: "wheel",
+      x: hit.cell.x,
+      y: hit.cell.y,
+      dx: Math.round(event.deltaX),
+      dy: Math.round(event.deltaY),
+      mods: keyModifiers(event),
+    });
+  }
+}
+
 function updateHoveredTrogdorSurface(zone) {
   const previousSessionId = state.hoveredTrogdorSessionId;
   const nextSessionId = trogdorHoverSessionIdForZone(zone, previousSessionId);
@@ -5630,58 +5675,11 @@ function bindEvents() {
   el.terminalStage.addEventListener("mousedown", handleTerminalStageMouseDown);
   el.terminalStage.addEventListener("mouseup", handleTerminalStageMouseUp);
 
-  el.terminalStage.addEventListener("mousemove", (event) => {
-    if (terminalFallbackOwnsPointer(event)) {
-      return;
-    }
-    const hit = surfaceHit(event);
-    updateHoveredTrogdorSurface(hit.action);
-    if (hit.consume || !state.terminal) {
-      if (hit.consume) {
-        clearHoveredLink(true);
-      }
-      return;
-    }
-
-    if (state.selectMode && state.selectionAnchor !== null && (event.buttons & 1) === 1) {
-      event.preventDefault();
-      setTerminalSelectionRange(state.selectionAnchor, cellOffset(hit.cell));
-      return;
-    }
-
-    updateHoveredLink(event);
-
-    if (state.readOnly) {
-      return;
-    }
-
-    forwardTerminalMouse("move", 0, hit, event);
-  });
+  el.terminalStage.addEventListener("mousemove", handleTerminalStageMouseMove);
 
   el.terminalStage.addEventListener(
     "wheel",
-    (event) => {
-      if (terminalFallbackOwnsPointer(event)) {
-        return;
-      }
-      const hit = surfaceHit(event);
-      if (hit.consume) {
-        event.preventDefault();
-        return;
-      }
-      if (state.readOnly || !state.terminal || state.selectMode) {
-        return;
-      }
-      event.preventDefault();
-      forwardTerminalEvent({
-        kind: "wheel",
-        x: hit.cell.x,
-        y: hit.cell.y,
-        dx: Math.round(event.deltaX),
-        dy: Math.round(event.deltaY),
-        mods: keyModifiers(event),
-      });
-    },
+    handleTerminalStageWheel,
     { passive: false },
   );
 

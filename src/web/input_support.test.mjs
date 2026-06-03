@@ -39,10 +39,12 @@ import {
   terminalStageFocusPlan,
   terminalStageKeydownPlan,
   terminalStageMouseDownPlan,
+  terminalStageMouseMovePlan,
   terminalStageMouseUpPlan,
   terminalStagePasteExecutorPlan,
   terminalStagePastePlan,
   terminalStageTouchEndPlan,
+  terminalStageWheelPlan,
   terminalAuxiliaryControlsPlan,
   normalizeTerminalZoomValue,
   terminalZoomControlsPlan,
@@ -707,6 +709,100 @@ test("terminalStageMouseUpPlan preserves blocked, link, selection, and forwardin
     ...ignored,
     type: "forward_mouse",
     forwardMouse: true,
+  });
+});
+
+test("terminalStageMouseMovePlan preserves hover, selection, read-only, and forwarding decisions", () => {
+  const action = { type: "trogdor_agent", sessionId: "sess-1" };
+  const ignored = {
+    type: "fallback_pointer",
+    preventDefault: false,
+    updateTrogdorSurface: false,
+    trogdorZone: null,
+    clearHoveredLink: false,
+    updateHoveredLink: false,
+    updateSelectionRange: false,
+    forwardMouse: false,
+  };
+  const hoverBase = {
+    ...ignored,
+    type: "hover_update",
+    updateTrogdorSurface: true,
+    trogdorZone: undefined,
+  };
+
+  assert.deepEqual(terminalStageMouseMovePlan({ fallbackOwnsPointer: true, hit: { action } }), ignored);
+  assert.deepEqual(terminalStageMouseMovePlan({ hit: { consume: true }, hasTerminal: true }), {
+    ...hoverBase,
+    type: "blocked",
+    clearHoveredLink: true,
+  });
+  assert.deepEqual(terminalStageMouseMovePlan({ hit: {}, hasTerminal: false }), {
+    ...hoverBase,
+    type: "blocked",
+  });
+  assert.deepEqual(terminalStageMouseMovePlan({
+    hit: { action },
+    hasTerminal: true,
+    selectMode: true,
+    selectionAnchor: 12,
+    buttons: 1,
+  }), {
+    ...hoverBase,
+    type: "select_drag",
+    trogdorZone: action,
+    preventDefault: true,
+    updateSelectionRange: true,
+  });
+  assert.deepEqual(terminalStageMouseMovePlan({ hit: {}, hasTerminal: true, readOnly: true }), {
+    ...hoverBase,
+    type: "read_only",
+    updateHoveredLink: true,
+  });
+  assert.deepEqual(terminalStageMouseMovePlan({
+    hit: {},
+    hasTerminal: true,
+    selectMode: true,
+    selectionAnchor: null,
+    buttons: 1,
+  }), {
+    ...hoverBase,
+    type: "forward_mouse",
+    updateHoveredLink: true,
+    forwardMouse: true,
+  });
+});
+
+test("terminalStageWheelPlan preserves fallback, consume, blocked, and forwarding decisions", () => {
+  const ignored = {
+    type: "fallback_pointer",
+    preventDefault: false,
+    forwardWheel: false,
+  };
+
+  assert.deepEqual(terminalStageWheelPlan({ fallbackOwnsPointer: true, hit: { consume: true } }), ignored);
+  assert.deepEqual(terminalStageWheelPlan({ hit: { consume: true }, hasTerminal: true }), {
+    ...ignored,
+    type: "consume",
+    preventDefault: true,
+  });
+  assert.deepEqual(terminalStageWheelPlan({ hit: {}, hasTerminal: true, readOnly: true }), {
+    ...ignored,
+    type: "blocked",
+  });
+  assert.deepEqual(terminalStageWheelPlan({ hit: {}, hasTerminal: false }), {
+    ...ignored,
+    type: "blocked",
+  });
+  assert.deepEqual(terminalStageWheelPlan({ hit: {}, hasTerminal: true, selectMode: true }), {
+    ...ignored,
+    type: "blocked",
+  });
+  assert.deepEqual(terminalStageWheelPlan({ hit: {}, hasTerminal: true }), {
+    ...ignored,
+    type: "forward_wheel",
+    preventDefault: true,
+    forwardWheel: true,
   });
 });
 
