@@ -2,6 +2,25 @@ export function commandPaletteSessionDisplayName(session) {
   return String(session?.tmux_name || session?.name || session?.session_id || "session");
 }
 
+function escapeHtml(text) {
+  return String(text || "").replace(/[&<>"']/g, (char) => {
+    switch (char) {
+      case "&":
+        return "&amp;";
+      case "<":
+        return "&lt;";
+      case ">":
+        return "&gt;";
+      case '"':
+        return "&quot;";
+      case "'":
+        return "&#39;";
+      default:
+        return char;
+    }
+  });
+}
+
 export function buildCommandPaletteItems({
   selectedSession = null,
   readOnly = false,
@@ -77,4 +96,25 @@ export function filteredCommandPaletteItemsForState({
     query,
     limit,
   );
+}
+
+export function renderCommandPaletteResultsHtml(items = [], activeIndex = 0) {
+  if (!items.length) {
+    return `<div class="sheet-copy">No matching commands.</div>`;
+  }
+  return items
+    .map((item, index) => `
+      <button
+        class="palette-item${index === activeIndex ? " is-active" : ""}"
+        type="button"
+        role="option"
+        aria-selected="${index === activeIndex ? "true" : "false"}"
+        data-palette-index="${index}"
+        ${item.disabled ? "disabled" : ""}
+      >
+        <span class="palette-item-title">${escapeHtml(item.label)}</span>
+        <span class="palette-item-meta">${escapeHtml(item.disabled ? "unavailable" : item.meta || "")}</span>
+      </button>
+    `)
+    .join("");
 }

@@ -7,6 +7,7 @@ import {
   commandPaletteSessionDisplayName,
   filterCommandPaletteItems,
   filteredCommandPaletteItemsForState,
+  renderCommandPaletteResultsHtml,
 } from "./command_palette.js";
 
 function session(overrides = {}) {
@@ -85,4 +86,27 @@ test("command palette state helper combines built-in commands, sessions, and sco
   assert.equal(items[0].label, "Switch to beta");
   assert.equal(items[0].sessionId, "sess_1");
   assert.ok(items[0].score > 0);
+});
+
+test("command palette result markup helper preserves escaping, active state, and disabled copy", () => {
+  assert.equal(
+    renderCommandPaletteResultsHtml([], 0),
+    `<div class="sheet-copy">No matching commands.</div>`,
+  );
+
+  const html = renderCommandPaletteResultsHtml([
+    { label: "Alpha <one>", meta: "ready & waiting" },
+    { label: "Send \"quote\"", meta: "unsafe", disabled: true },
+  ], 1);
+
+  assert.match(html, /class="palette-item"/);
+  assert.match(html, /class="palette-item is-active"/);
+  assert.match(html, /aria-selected="false"/);
+  assert.match(html, /aria-selected="true"/);
+  assert.match(html, /data-palette-index="1"/);
+  assert.match(html, /disabled/);
+  assert.match(html, /Alpha &lt;one&gt;/);
+  assert.match(html, /ready &amp; waiting/);
+  assert.match(html, /Send &quot;quote&quot;/);
+  assert.match(html, /palette-item-meta">unavailable</);
 });

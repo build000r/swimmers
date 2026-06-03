@@ -32,7 +32,10 @@ import {
   selectedLaunchTarget as dirBrowserSelectedLaunchTarget,
   visibleSelectableDirPaths as dirBrowserVisibleSelectableDirPaths,
 } from "./dir_browser.js";
-import { filteredCommandPaletteItemsForState } from "./command_palette.js";
+import {
+  filteredCommandPaletteItemsForState,
+  renderCommandPaletteResultsHtml,
+} from "./command_palette.js";
 import {
   TROGDOR_DRAGON_TARGET,
   buildTrogdorDomGroups,
@@ -4529,25 +4532,7 @@ function renderCommandPalette() {
   }
   state.paletteItems = filteredCommandPaletteItems();
   state.paletteIndex = clampInt(state.paletteIndex, 0, 0, Math.max(0, state.paletteItems.length - 1));
-  if (!state.paletteItems.length) {
-    el.paletteResults.innerHTML = `<div class="sheet-copy">No matching commands.</div>`;
-    return;
-  }
-  el.paletteResults.innerHTML = state.paletteItems
-    .map((item, index) => `
-      <button
-        class="palette-item${index === state.paletteIndex ? " is-active" : ""}"
-        type="button"
-        role="option"
-        aria-selected="${index === state.paletteIndex ? "true" : "false"}"
-        data-palette-index="${index}"
-        ${item.disabled ? "disabled" : ""}
-      >
-        <span class="palette-item-title">${escapeHtml(item.label)}</span>
-        <span class="palette-item-meta">${escapeHtml(item.disabled ? "unavailable" : item.meta || "")}</span>
-      </button>
-    `)
-    .join("");
+  el.paletteResults.innerHTML = renderCommandPaletteResultsHtml(state.paletteItems, state.paletteIndex);
 }
 
 async function runCommandPaletteItem(item = state.paletteItems[state.paletteIndex]) {
