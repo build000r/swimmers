@@ -3,12 +3,19 @@ import assert from "node:assert/strict";
 
 import {
   agentActionLabel,
+  applyWorkbenchWidgetResults,
+  buildWorkbenchWidgetRequestPlan,
   buildWorkbenchWidgetsHtml,
+  emptyWorkbenchWidgets,
+  resetWorkbenchWidgetsState,
   operatorPressureSummary,
   renderTerminalWorkbenchActions,
   renderTranscriptBlocks,
   renderWorkbenchLogLens,
+  selectedWorkbenchWidgetsSnapshot,
+  shouldThrottleWorkbenchWidgets,
   truncateWorkbenchText,
+  workbenchWidgetsHaveCurrentPayload,
 } from "./workbench_render.js";
 
 test("workbench text and action summaries stay compact", () => {
@@ -103,4 +110,99 @@ test("workbench widget renderer composes turns, JSONL, diff, artifacts, and skil
   assert.match(html, /data-workbench-open-mermaid="true"/);
   assert.match(html, /workbench-diff/);
   assert.match(html, /describe/);
+});
+
+test("workbench refresh helpers plan delta fetches and merge transcript pages", () => {
+  const widgets = emptyWorkbenchWidgets({
+    sessionId: "sess_0",
+    timeline: { events: [] },
+    transcript: {
+      selected_turn_id: "turn-1",
+      records: [{ id: "old", byte_start: 10, text: "old" }],
+    },
+    transcriptTurnId: "turn-1",
+    transcriptNextCursor: 42,
+    lastLoadedAt: 1000,
+  });
+
+  assert.equal(workbenchWidgetsHaveCurrentPayload(widgets, "sess_0"), true);
+  assert.equal(
+    shouldThrottleWorkbenchWidgets({
+      options: { throttle: true },
+      widgets,
+      sessionId: "sess_0",
+      now: 1200,
+      throttleMs: 5000,
+    }),
+    true,
+  );
+  assert.equal(selectedWorkbenchWidgetsSnapshot(widgets, "other").sessionId, null);
+
+  const plan = buildWorkbenchWidgetRequestPlan({
+    sessionId: "sess_0",
+    selectedTurnId: "turn-1",
+    widgets,
+  });
+  assert.equal(plan.canDeltaTranscript, true);
+  assert.match(plan.paths.skills, /source=sbp$/);
+  assert.match(plan.paths.transcript, /turn_id=turn-1/);
+  assert.match(plan.paths.transcript, /after=42/);
+  assert.match(plan.paths.transcript, /limit=80/);
+
+  const applied = applyWorkbenchWidgetResults(
+    widgets,
+    {
+      timelineResult: { status: "fulfilled", value: { events: [{ kind: "diff" }] } },
+      skillsResult: { status: "rejected", reason: new Error("skills unavailable") },
+      tailResult: { status: "fulfilled", value: { text: "tail" } },
+      transcriptResult: {
+        status: "fulfilled",
+        value: {
+          selected_turn_id: "turn-1",
+          next_cursor: 64,
+          records: [
+            { id: "new", byte_start: 20, text: "new" },
+            { id: "old", byte_start: 10, text: "old updated" },
+          ],
+        },
+      },
+      artifactResult: { status: "fulfilled", value: { available: true } },
+      diffResult: { status: "rejected", reason: new Error("diff unavailable") },
+    },
+    {
+      canDeltaTranscript: plan.canDeltaTranscript,
+      requestedTurnId: plan.requestedTurnId,
+      selectedTurnId: "turn-1",
+    },
+  );
+
+  assert.equal(applied.selectedTurnId, "turn-1");
+  assert.equal(widgets.loading, false);
+  assert.equal(widgets.skills, null);
+  assert.deepEqual(
+    widgets.transcript.records.map((record) => record.id),
+    ["old", "new"],
+  );
+  assert.equal(widgets.transcript.records[0].text, "old updated");
+  assert.equal(widgets.transcriptNextCursor, 64);
+  assert.match(widgets.error, /skills: skills unavailable/);
+  assert.match(widgets.error, /diffs: diff unavailable/);
+});
+
+test("workbench widget reset preserves request sequence and clears payload", () => {
+  const widgets = emptyWorkbenchWidgets({
+    sessionId: "sess_old",
+    loading: true,
+    timeline: { events: [{ kind: "tool_call" }] },
+    requestSeq: 7,
+    lastHtml: "<details>old</details>",
+  });
+
+  resetWorkbenchWidgetsState(widgets, "sess_new");
+
+  assert.equal(widgets.sessionId, "sess_new");
+  assert.equal(widgets.requestSeq, 7);
+  assert.equal(widgets.loading, false);
+  assert.equal(widgets.timeline, null);
+  assert.equal(widgets.lastHtml, "");
 });

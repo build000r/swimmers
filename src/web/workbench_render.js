@@ -118,6 +118,195 @@ const WORKBENCH_LOG_KIND_LABELS = {
 
 export const WORKBENCH_LOG_FILTERS = ["all", "operator", "command", "status", "diff", "output", "truncation"];
 
+export function emptyWorkbenchWidgets(overrides = {}) {
+  return {
+    sessionId: null,
+    loading: false,
+    timeline: null,
+    skills: null,
+    paneTail: null,
+    transcript: null,
+    transcriptTurnId: "",
+    transcriptNextCursor: 0,
+    artifact: null,
+    gitDiff: null,
+    error: "",
+    requestSeq: 0,
+    lastLoadedAt: 0,
+    lastHtml: "",
+    ...overrides,
+  };
+}
+
+export function resetWorkbenchWidgetsState(widgets, sessionId) {
+  Object.assign(
+    widgets,
+    emptyWorkbenchWidgets({
+      sessionId,
+      requestSeq: Number(widgets?.requestSeq || 0),
+    }),
+  );
+  return widgets;
+}
+
+export function selectedWorkbenchWidgetsSnapshot(widgets, selectedSessionId) {
+  if (widgets?.sessionId === selectedSessionId) {
+    return widgets;
+  }
+  return emptyWorkbenchWidgets({
+    requestSeq: Number(widgets?.requestSeq || 0),
+    lastLoadedAt: Number(widgets?.lastLoadedAt || 0),
+  });
+}
+
+export function workbenchWidgetsHaveCurrentPayload(widgets, sessionId) {
+  return Boolean(
+    widgets?.sessionId === sessionId &&
+      (widgets.timeline ||
+        widgets.skills ||
+        widgets.paneTail ||
+        widgets.transcript ||
+        widgets.artifact),
+  );
+}
+
+export function shouldThrottleWorkbenchWidgets({
+  options = {},
+  widgets,
+  sessionId,
+  now = Date.now(),
+  throttleMs,
+} = {}) {
+  return Boolean(
+    options.throttle &&
+      workbenchWidgetsHaveCurrentPayload(widgets, sessionId) &&
+      now - Number(widgets?.lastLoadedAt || 0) < throttleMs,
+  );
+}
+
+export function buildWorkbenchWidgetRequestPlan({
+  sessionId,
+  selectedTurnId = "",
+  widgets,
+  force = false,
+} = {}) {
+  const encodedSessionId = encodeURIComponent(sessionId || "");
+  const requestedTurnId = String(selectedTurnId || "");
+  const canDeltaTranscript = Boolean(
+    !force &&
+      widgets?.sessionId === sessionId &&
+      widgets?.transcript &&
+      widgets?.transcriptTurnId === requestedTurnId &&
+      Number(widgets?.transcriptNextCursor || 0) > 0,
+  );
+  const transcriptParams = new URLSearchParams();
+  if (requestedTurnId) {
+    transcriptParams.set("turn_id", requestedTurnId);
+  }
+  if (canDeltaTranscript) {
+    transcriptParams.set("after", String(widgets.transcriptNextCursor));
+  }
+  transcriptParams.set("limit", canDeltaTranscript ? "80" : "160");
+
+  return {
+    requestedTurnId,
+    canDeltaTranscript,
+    paths: {
+      timeline: `/v1/sessions/${encodedSessionId}/timeline`,
+      skills: `/v1/sessions/${encodedSessionId}/skills?source=sbp`,
+      paneTail: `/v1/sessions/${encodedSessionId}/pane-tail`,
+      transcript: `/v1/sessions/${encodedSessionId}/transcript?${transcriptParams.toString()}`,
+      artifact: `/v1/sessions/${encodedSessionId}/mermaid-artifact`,
+      gitDiff: `/v1/sessions/${encodedSessionId}/git-diff`,
+    },
+  };
+}
+
+export function mergeWorkbenchTranscriptPage({
+  previous,
+  nextTranscript,
+  canDeltaTranscript = false,
+  requestedTurnId = "",
+  selectedTurnId = "",
+} = {}) {
+  if (!nextTranscript) {
+    return {
+      transcript: null,
+      transcriptTurnId: "",
+      transcriptNextCursor: 0,
+      selectedTurnId,
+    };
+  }
+
+  const transcript = { ...nextTranscript };
+  const previousRecords = Array.isArray(previous?.records) ? previous.records : [];
+  const nextRecords = Array.isArray(transcript.records) ? transcript.records : [];
+  const mergeDelta =
+    canDeltaTranscript &&
+    previous &&
+    (transcript?.selected_turn_id || "") === (previous?.selected_turn_id || "");
+  if (mergeDelta) {
+    const byId = new Map();
+    for (const record of previousRecords.concat(nextRecords)) {
+      if (record?.id) {
+        byId.set(record.id, record);
+      }
+    }
+    transcript.records = Array.from(byId.values())
+      .sort((left, right) => Number(left?.byte_start || 0) - Number(right?.byte_start || 0))
+      .slice(-240);
+  }
+
+  return {
+    transcript,
+    transcriptTurnId: requestedTurnId || transcript?.selected_turn_id || "",
+    transcriptNextCursor: Number(transcript?.next_cursor || 0),
+    selectedTurnId: selectedTurnId || transcript?.selected_turn_id || "",
+  };
+}
+
+function applySettledWidgetResult(widgets, field, result, errorLabel, errors) {
+  if (result?.status === "fulfilled") {
+    widgets[field] = result.value;
+  } else {
+    widgets[field] = null;
+    errors.push(`${errorLabel}: ${result?.reason?.message || "unavailable"}`);
+  }
+}
+
+export function applyWorkbenchWidgetResults(widgets, results = {}, options = {}) {
+  const errors = [];
+  let selectedTurnId = String(options.selectedTurnId || "");
+  applySettledWidgetResult(widgets, "timeline", results.timelineResult, "timeline", errors);
+  applySettledWidgetResult(widgets, "skills", results.skillsResult, "skills", errors);
+  applySettledWidgetResult(widgets, "paneTail", results.tailResult, "output", errors);
+
+  if (results.transcriptResult?.status === "fulfilled") {
+    const merged = mergeWorkbenchTranscriptPage({
+      previous: widgets.transcript,
+      nextTranscript: results.transcriptResult.value,
+      canDeltaTranscript: options.canDeltaTranscript,
+      requestedTurnId: options.requestedTurnId,
+      selectedTurnId,
+    });
+    widgets.transcript = merged.transcript;
+    widgets.transcriptTurnId = merged.transcriptTurnId;
+    widgets.transcriptNextCursor = merged.transcriptNextCursor;
+    selectedTurnId = merged.selectedTurnId;
+  } else {
+    widgets.transcript = null;
+    widgets.transcriptTurnId = "";
+    widgets.transcriptNextCursor = 0;
+    errors.push(`transcript: ${results.transcriptResult?.reason?.message || "unavailable"}`);
+  }
+
+  applySettledWidgetResult(widgets, "artifact", results.artifactResult, "artifacts", errors);
+  applySettledWidgetResult(widgets, "gitDiff", results.diffResult, "diffs", errors);
+  widgets.error = errors.join("; ");
+  widgets.loading = false;
+  return { selectedTurnId, error: widgets.error };
+}
+
 const WORKBENCH_LOG_COMMAND_RE =
   /^(?:cargo|make|git|node|bun|npm|pnpm|yarn|python3?|pytest|uv|xcodebuild|swift|curl|tmux|cat|sed|rg|grep|ls|cd|cp|mv|mkdir|touch|chmod|ssh|docker|kubectl)\b/;
 

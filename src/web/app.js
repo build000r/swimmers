@@ -57,10 +57,16 @@ import {
 import {
   WORKBENCH_LOG_FILTERS,
   agentActionLabel,
+  applyWorkbenchWidgetResults,
+  buildWorkbenchWidgetRequestPlan,
   buildWorkbenchWidgetsHtml,
+  emptyWorkbenchWidgets,
   operatorPressureSummary,
   renderTerminalWorkbenchActions,
   renderTranscriptBlocks,
+  resetWorkbenchWidgetsState,
+  selectedWorkbenchWidgetsSnapshot,
+  shouldThrottleWorkbenchWidgets,
   truncateWorkbenchText,
 } from "./workbench_render.js";
 
@@ -148,22 +154,7 @@ const state = {
   agentContextError: "",
   agentContextRequestSeq: 0,
   agentContextLastLoadedAt: 0,
-  workbenchWidgets: {
-    sessionId: null,
-    loading: false,
-    timeline: null,
-    skills: null,
-    paneTail: null,
-    transcript: null,
-    transcriptTurnId: "",
-    transcriptNextCursor: 0,
-    artifact: null,
-    gitDiff: null,
-    error: "",
-    requestSeq: 0,
-    lastLoadedAt: 0,
-    lastHtml: "",
-  },
+  workbenchWidgets: emptyWorkbenchWidgets(),
   workbenchLogMode: "lens",
   workbenchLogFilter: "all",
   workbenchLogSearch: "",
@@ -958,19 +949,7 @@ function resetAgentContextForSession(sessionId) {
 }
 
 function resetWorkbenchWidgetsForSession(sessionId) {
-  state.workbenchWidgets.sessionId = normalizeSessionId(sessionId);
-  state.workbenchWidgets.loading = false;
-  state.workbenchWidgets.timeline = null;
-  state.workbenchWidgets.skills = null;
-  state.workbenchWidgets.paneTail = null;
-  state.workbenchWidgets.transcript = null;
-  state.workbenchWidgets.transcriptTurnId = "";
-  state.workbenchWidgets.transcriptNextCursor = 0;
-  state.workbenchWidgets.artifact = null;
-  state.workbenchWidgets.gitDiff = null;
-  state.workbenchWidgets.error = "";
-  state.workbenchWidgets.lastLoadedAt = 0;
-  state.workbenchWidgets.lastHtml = "";
+  resetWorkbenchWidgetsState(state.workbenchWidgets, normalizeSessionId(sessionId));
   state.workbenchLogMode = "lens";
   state.workbenchLogFilter = "all";
   state.workbenchLogSearch = "";
@@ -1109,23 +1088,7 @@ async function refreshAgentContextForSelectedSession(options = {}) {
 }
 
 function selectedWorkbenchWidgets() {
-  return state.workbenchWidgets.sessionId === state.selectedSessionId
-    ? state.workbenchWidgets
-    : {
-        sessionId: null,
-        loading: false,
-        timeline: null,
-        skills: null,
-        paneTail: null,
-        transcript: null,
-        transcriptTurnId: "",
-        transcriptNextCursor: 0,
-        artifact: null,
-        gitDiff: null,
-        error: "",
-        requestSeq: state.workbenchWidgets.requestSeq,
-        lastLoadedAt: state.workbenchWidgets.lastLoadedAt,
-      };
+  return selectedWorkbenchWidgetsSnapshot(state.workbenchWidgets, state.selectedSessionId);
 }
 
 function writeWorkbenchWidgetsHtml(nextHtml) {
@@ -1220,19 +1183,12 @@ async function refreshWorkbenchWidgetsForSelectedSession(options = {}) {
   }
 
   const sessionId = session.session_id;
-  const now = Date.now();
-  const hasCurrentWidgets =
-    state.workbenchWidgets.sessionId === sessionId &&
-    (Boolean(state.workbenchWidgets.timeline) ||
-      Boolean(state.workbenchWidgets.skills) ||
-      Boolean(state.workbenchWidgets.paneTail) ||
-      Boolean(state.workbenchWidgets.transcript) ||
-      Boolean(state.workbenchWidgets.artifact));
-  if (
-    options.throttle &&
-    hasCurrentWidgets &&
-    now - state.workbenchWidgets.lastLoadedAt < AGENT_CONTEXT_REFRESH_MS
-  ) {
+  if (shouldThrottleWorkbenchWidgets({
+    options,
+    widgets: state.workbenchWidgets,
+    sessionId,
+    throttleMs: AGENT_CONTEXT_REFRESH_MS,
+  })) {
     return;
   }
   if (state.workbenchWidgets.loading && !options.force) {
@@ -1246,117 +1202,36 @@ async function refreshWorkbenchWidgetsForSelectedSession(options = {}) {
   state.workbenchWidgets.loading = !options.silent;
   renderWorkbenchWidgets();
 
-  const timelinePath = `/v1/sessions/${encodeURIComponent(sessionId)}/timeline`;
-  const skillsPath = `/v1/sessions/${encodeURIComponent(sessionId)}/skills?source=sbp`;
-  const tailPath = `/v1/sessions/${encodeURIComponent(sessionId)}/pane-tail`;
-  const transcriptParams = new URLSearchParams();
-  const requestedTurnId = state.workbenchSelectedTurnId || "";
-  const canDeltaTranscript =
-    !options.force &&
-    state.workbenchWidgets.sessionId === sessionId &&
-    state.workbenchWidgets.transcript &&
-    state.workbenchWidgets.transcriptTurnId === requestedTurnId &&
-    state.workbenchWidgets.transcriptNextCursor > 0;
-  if (requestedTurnId) {
-    transcriptParams.set("turn_id", requestedTurnId);
-  }
-  if (canDeltaTranscript) {
-    transcriptParams.set("after", String(state.workbenchWidgets.transcriptNextCursor));
-  }
-  transcriptParams.set("limit", canDeltaTranscript ? "80" : "160");
-  const transcriptPath = `/v1/sessions/${encodeURIComponent(sessionId)}/transcript?${transcriptParams.toString()}`;
-  const artifactPath = `/v1/sessions/${encodeURIComponent(sessionId)}/mermaid-artifact`;
-  const diffPath = `/v1/sessions/${encodeURIComponent(sessionId)}/git-diff`;
+  const requestPlan = buildWorkbenchWidgetRequestPlan({
+    sessionId,
+    selectedTurnId: state.workbenchSelectedTurnId,
+    widgets: state.workbenchWidgets,
+    force: Boolean(options.force),
+  });
+  const { paths } = requestPlan;
   const [timelineResult, skillsResult, tailResult, transcriptResult, artifactResult, diffResult] = await Promise.allSettled([
-    apiMaybeFetch(timelinePath).then(responseJsonOrNull),
-    apiMaybeFetch(skillsPath).then(responseJsonOrNull),
-    apiMaybeFetch(tailPath).then(responseJsonOrNull),
-    apiMaybeFetch(transcriptPath).then(responseJsonOrNull),
-    apiMaybeFetch(artifactPath).then(responseJsonOrNull),
-    apiMaybeFetch(diffPath).then(responseJsonOrNull),
+    apiMaybeFetch(paths.timeline).then(responseJsonOrNull),
+    apiMaybeFetch(paths.skills).then(responseJsonOrNull),
+    apiMaybeFetch(paths.paneTail).then(responseJsonOrNull),
+    apiMaybeFetch(paths.transcript).then(responseJsonOrNull),
+    apiMaybeFetch(paths.artifact).then(responseJsonOrNull),
+    apiMaybeFetch(paths.gitDiff).then(responseJsonOrNull),
   ]);
 
   if (requestSeq !== state.workbenchWidgets.requestSeq || state.selectedSessionId !== sessionId) {
     return;
   }
 
-  const errors = [];
-  if (timelineResult.status === "fulfilled") {
-    state.workbenchWidgets.timeline = timelineResult.value;
-  } else {
-    state.workbenchWidgets.timeline = null;
-    errors.push(`timeline: ${timelineResult.reason?.message || "unavailable"}`);
-  }
-
-  if (skillsResult.status === "fulfilled") {
-    state.workbenchWidgets.skills = skillsResult.value;
-  } else {
-    state.workbenchWidgets.skills = null;
-    errors.push(`skills: ${skillsResult.reason?.message || "unavailable"}`);
-  }
-
-  if (tailResult.status === "fulfilled") {
-    state.workbenchWidgets.paneTail = tailResult.value;
-  } else {
-    state.workbenchWidgets.paneTail = null;
-    errors.push(`output: ${tailResult.reason?.message || "unavailable"}`);
-  }
-
-  if (transcriptResult.status === "fulfilled") {
-    const nextTranscript = transcriptResult.value;
-    if (nextTranscript) {
-      const previous = state.workbenchWidgets.transcript;
-      const previousRecords = Array.isArray(previous?.records) ? previous.records : [];
-      const nextRecords = Array.isArray(nextTranscript?.records) ? nextTranscript.records : [];
-      const mergeDelta =
-        canDeltaTranscript &&
-        previous &&
-        (nextTranscript?.selected_turn_id || "") === (previous?.selected_turn_id || "");
-      if (mergeDelta) {
-        const byId = new Map();
-        for (const record of previousRecords.concat(nextRecords)) {
-          if (record?.id) {
-            byId.set(record.id, record);
-          }
-        }
-        nextTranscript.records = Array.from(byId.values())
-          .sort((left, right) => Number(left?.byte_start || 0) - Number(right?.byte_start || 0))
-          .slice(-240);
-      }
-      state.workbenchWidgets.transcript = nextTranscript;
-      state.workbenchWidgets.transcriptTurnId = requestedTurnId || nextTranscript?.selected_turn_id || "";
-      state.workbenchWidgets.transcriptNextCursor = Number(nextTranscript?.next_cursor || 0);
-      if (!state.workbenchSelectedTurnId && nextTranscript?.selected_turn_id) {
-        state.workbenchSelectedTurnId = nextTranscript.selected_turn_id;
-      }
-    } else {
-      state.workbenchWidgets.transcript = null;
-      state.workbenchWidgets.transcriptTurnId = "";
-      state.workbenchWidgets.transcriptNextCursor = 0;
-    }
-  } else {
-    state.workbenchWidgets.transcript = null;
-    state.workbenchWidgets.transcriptTurnId = "";
-    state.workbenchWidgets.transcriptNextCursor = 0;
-    errors.push(`transcript: ${transcriptResult.reason?.message || "unavailable"}`);
-  }
-
-  if (artifactResult.status === "fulfilled") {
-    state.workbenchWidgets.artifact = artifactResult.value;
-  } else {
-    state.workbenchWidgets.artifact = null;
-    errors.push(`artifacts: ${artifactResult.reason?.message || "unavailable"}`);
-  }
-
-  if (diffResult.status === "fulfilled") {
-    state.workbenchWidgets.gitDiff = diffResult.value;
-  } else {
-    state.workbenchWidgets.gitDiff = null;
-    errors.push(`diffs: ${diffResult.reason?.message || "unavailable"}`);
-  }
-
-  state.workbenchWidgets.error = errors.join("; ");
-  state.workbenchWidgets.loading = false;
+  const applied = applyWorkbenchWidgetResults(
+    state.workbenchWidgets,
+    { timelineResult, skillsResult, tailResult, transcriptResult, artifactResult, diffResult },
+    {
+      canDeltaTranscript: requestPlan.canDeltaTranscript,
+      requestedTurnId: requestPlan.requestedTurnId,
+      selectedTurnId: state.workbenchSelectedTurnId,
+    },
+  );
+  state.workbenchSelectedTurnId = applied.selectedTurnId;
   state.workbenchWidgets.lastLoadedAt = Date.now();
   renderWorkbenchWidgets();
 }
