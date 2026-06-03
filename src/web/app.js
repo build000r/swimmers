@@ -1,5 +1,5 @@
 import { buildSurfaceFrame, surfaceActionAt, surfaceConsumesPointer } from "./rendered_surface.js";
-import { eventCell, shouldIgnoreSyntheticClick } from "./input_support.js";
+import { eventCell, globalShortcutPlan, shouldIgnoreSyntheticClick } from "./input_support.js";
 import {
   MERMAID_PLAN_CONTENT_DISPLAY_MAX_CHARS,
   buildMermaidArtifactView,
@@ -5060,95 +5060,71 @@ function bindTrogdorEvents() {
 }
 
 function handleGlobalShortcut(event) {
-  if ((event.ctrlKey || event.metaKey) && !event.altKey) {
-    switch (event.code) {
-      case "KeyK":
-        openCommandPalette();
-        return true;
-      case "Equal":
-      case "NumpadAdd":
-        setTerminalZoom(state.terminalZoom + TERMINAL_ZOOM_STEP, { announce: true });
-        return true;
-      case "Minus":
-      case "NumpadSubtract":
-        setTerminalZoom(state.terminalZoom - TERMINAL_ZOOM_STEP, { announce: true });
-        return true;
-      case "Digit0":
-      case "Numpad0":
-        setTerminalZoom(1, { announce: true });
-        return true;
-      default:
-        break;
-    }
+  const plan = globalShortcutPlan(event, {
+    activeSheet: state.activeSheet,
+    trogdorAtlasOpen: state.trogdorAtlasOpen,
+    selectMode: state.selectMode,
+    readOnly: state.readOnly,
+    hasCurrentSession: Boolean(currentSession()),
+    hoveredLinkUrl: state.hoveredLinkUrl,
+  });
+  if (plan.type === "unhandled") {
+    return false;
   }
-
-  if (event.key === "Escape") {
-    if (state.activeSheet) {
+  switch (plan.type) {
+    case "open_palette":
+      openCommandPalette();
+      break;
+    case "zoom_in":
+      setTerminalZoom(state.terminalZoom + TERMINAL_ZOOM_STEP, { announce: true });
+      break;
+    case "zoom_out":
+      setTerminalZoom(state.terminalZoom - TERMINAL_ZOOM_STEP, { announce: true });
+      break;
+    case "zoom_reset":
+      setTerminalZoom(1, { announce: true });
+      break;
+    case "close_sheets":
       closeSheets();
-      return true;
-    }
-    if (state.trogdorAtlasOpen) {
+      break;
+    case "close_trogdor_atlas":
       Object.assign(state, trogdorAtlasTransitionState("close"));
       renderHudSurface();
-      return true;
-    }
-    if (state.selectMode) {
+      break;
+    case "exit_select_mode":
       setSelectMode(false);
-      return true;
-    }
-    return false;
-  }
-
-  if (!(event.ctrlKey && event.shiftKey) || event.metaKey || event.altKey) {
-    return false;
-  }
-
-  switch (event.code) {
-    case "KeyF":
-      openSheet("search");
-      return true;
-    case "KeyS":
-      if (!state.readOnly && currentSession()) {
-        openSheet("send");
-      }
-      return true;
-    case "KeyA":
-      openSheet("auth");
-      return true;
-    case "KeyT":
+      break;
+    case "open_sheet":
+      openSheet(plan.sheetId);
+      break;
+    case "open_thought_config":
       openThoughtConfigSheet();
-      return true;
-    case "KeyO":
+      break;
+    case "open_native":
       openNativeSheet();
-      return true;
-    case "KeyN":
-      if (!state.readOnly) {
-        openSheet("create");
-      }
-      return true;
-    case "KeyM":
+      break;
+    case "open_mermaid":
       openMermaidSheet();
-      return true;
-    case "KeyP":
+      break;
+    case "toggle_follow":
       void toggleFollowPublished();
-      return true;
-    case "KeyV":
+      break;
+    case "toggle_select":
       setSelectMode(!state.selectMode);
-      return true;
-    case "KeyC":
+      break;
+    case "copy_selection":
       void copyTerminalSelection();
-      return true;
-    case "KeyL":
-      if (state.hoveredLinkUrl) {
-        void copyHoveredLink();
-      }
-      return true;
-    case "KeyR":
+      break;
+    case "copy_hovered_link":
+      void copyHoveredLink();
+      break;
+    case "refresh_sessions":
       void refreshSessions();
-      return true;
+      break;
     default:
-      return false;
+      break;
   }
+  return true;
 }
 
 function bindEvents() {
@@ -6091,6 +6067,7 @@ export const __swimmersWebTest = {
   markTrogdorSessionsResponded,
   handleTerminalFallbackKeyEvent,
   handleTerminalFallbackPasteEvent,
+  handleGlobalShortcut,
   sendTerminalControlKey,
   terminalKeyActionForDomEvent,
   focusTerminalInputSurface,

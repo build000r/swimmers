@@ -1983,6 +1983,43 @@ test("command palette run path preserves disabled no-op, actions, and actionId d
   assert.equal(web.state.activeSheet, "auth");
 });
 
+test("global shortcut handler preserves side effects and handled no-ops", () => {
+  resetWebState();
+  web.state.trogdorAtlasOpen = false;
+  web.state.terminalZoom = 1;
+
+  assert.equal(web.handleGlobalShortcut({ ctrlKey: true, code: "KeyK" }), true);
+  assert.equal(web.state.activeSheet, "palette");
+
+  assert.equal(web.handleGlobalShortcut({ ctrlKey: true, code: "Equal" }), true);
+  assert.equal(web.state.terminalZoom, 1.1);
+
+  web.state.activeSheet = "auth";
+  assert.equal(web.handleGlobalShortcut({ key: "Escape" }), true);
+  assert.equal(web.state.activeSheet, null);
+
+  web.state.trogdorAtlasOpen = true;
+  assert.equal(web.handleGlobalShortcut({ key: "Escape" }), true);
+  assert.equal(web.state.trogdorAtlasOpen, false);
+
+  web.el.createForm.elements = [];
+  web.state.selectMode = true;
+  assert.equal(web.handleGlobalShortcut({ key: "Escape" }), true);
+  assert.equal(web.state.selectMode, false);
+
+  web.state.selectedSessionId = "sess_0";
+  web.state.readOnly = true;
+  assert.equal(web.handleGlobalShortcut({ ctrlKey: true, shiftKey: true, code: "KeyS" }), true);
+  assert.equal(web.state.activeSheet, null);
+
+  web.state.readOnly = false;
+  assert.equal(web.handleGlobalShortcut({ ctrlKey: true, shiftKey: true, code: "KeyS" }), true);
+  assert.equal(web.state.activeSheet, "send");
+
+  web.state.activeSheet = null;
+  assert.equal(web.handleGlobalShortcut({ ctrlKey: true, shiftKey: true, code: "KeyZ" }), false);
+});
+
 test("send history stores multiline prompts for recall chips", () => {
   resetWebState();
 
