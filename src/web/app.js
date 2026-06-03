@@ -2,7 +2,7 @@ import { buildSurfaceFrame, surfaceActionAt, surfaceConsumesPointer } from "./re
 import {
   authTokenButtonPlan, eventCell, globalShortcutPlan, mobileKeyboardInputPlan,
   mobileKeyboardKeydownPlan, mobileKeyboardKeyPlan, shouldIgnoreSyntheticClick,
-  terminalComposerControlAction, terminalFallbackKeydownPlan, terminalKeyStripClickPlan, terminalStageCaptureBindings, terminalStageFocusPlan,
+  terminalComposerControlAction, terminalFallbackKeydownPlan, terminalFallbackPastePlan, terminalKeyStripClickPlan, terminalStageCaptureBindings, terminalStageFocusPlan,
   terminalStageKeydownPlan, terminalStagePastePlan,
 } from "./input_support.js";
 import { sendHistoryClickPlan, sendSheetFailureStatus, sendSheetSubmitPlan, sendSheetSuccessStatus } from "./send_sheet.js";
@@ -3877,17 +3877,14 @@ function handleTerminalFallbackKeyEvent(event) {
 }
 
 function handleTerminalFallbackPasteEvent(event) {
-  if (!state.terminalFallbackActive || state.readOnly || !currentSession()) {
-    return false;
-  }
-  const text = event.clipboardData?.getData("text") ?? "";
-  if (!text) {
-    return false;
-  }
-  event.preventDefault();
-  event.stopPropagation?.();
-  sendTerminalText(text);
-  return true;
+  const plan = terminalFallbackPastePlan({
+    terminalFallbackActive: state.terminalFallbackActive, readOnly: state.readOnly,
+    hasCurrentSession: Boolean(currentSession()), text: event.clipboardData?.getData("text") ?? "",
+  });
+  if (plan.preventDefault) event.preventDefault();
+  if (plan.stopPropagation) event.stopPropagation?.();
+  if (plan.sendText) sendTerminalText(plan.text);
+  return plan.handled;
 }
 
 function mouseCell(event) {

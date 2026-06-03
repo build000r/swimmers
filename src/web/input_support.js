@@ -261,6 +261,20 @@ export function terminalStagePastePlan(readOnly, text) {
   return { type: "send_text", text };
 }
 
+export function terminalFallbackPastePlan(context = {}) {
+  if (!context.terminalFallbackActive || context.readOnly || !context.hasCurrentSession || !context.text) {
+    return { type: "ignore", handled: false, preventDefault: false, stopPropagation: false, sendText: false, text: "" };
+  }
+  return {
+    type: "send_text",
+    handled: true,
+    preventDefault: true,
+    stopPropagation: true,
+    sendText: true,
+    text: context.text,
+  };
+}
+
 export function terminalStageFocusPlan(eventType, context = {}) {
   if (eventType === "focus") {
     return context.activeSheet

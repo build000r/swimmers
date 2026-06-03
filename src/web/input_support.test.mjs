@@ -11,6 +11,7 @@ import {
   shouldIgnoreSyntheticClick,
   terminalComposerControlAction,
   terminalFallbackKeydownPlan,
+  terminalFallbackPastePlan,
   terminalKeyStripClickPlan,
   terminalStageCaptureBindings,
   terminalStageFocusPlan,
@@ -356,6 +357,54 @@ test("terminalStagePastePlan preserves read-only, empty, and raw text decisions"
   assert.deepEqual(terminalStagePastePlan(false, ""), { type: "ignore" });
   assert.deepEqual(terminalStagePastePlan(false, " paste me\n"), {
     type: "send_text",
+    text: " paste me\n",
+  });
+});
+
+test("terminalFallbackPastePlan preserves gating, propagation, and exact text", () => {
+  const ignored = {
+    type: "ignore",
+    handled: false,
+    preventDefault: false,
+    stopPropagation: false,
+    sendText: false,
+    text: "",
+  };
+  assert.deepEqual(terminalFallbackPastePlan({
+    terminalFallbackActive: false,
+    readOnly: false,
+    hasCurrentSession: true,
+    text: "paste",
+  }), ignored);
+  assert.deepEqual(terminalFallbackPastePlan({
+    terminalFallbackActive: true,
+    readOnly: true,
+    hasCurrentSession: true,
+    text: "paste",
+  }), ignored);
+  assert.deepEqual(terminalFallbackPastePlan({
+    terminalFallbackActive: true,
+    readOnly: false,
+    hasCurrentSession: false,
+    text: "paste",
+  }), ignored);
+  assert.deepEqual(terminalFallbackPastePlan({
+    terminalFallbackActive: true,
+    readOnly: false,
+    hasCurrentSession: true,
+    text: "",
+  }), ignored);
+  assert.deepEqual(terminalFallbackPastePlan({
+    terminalFallbackActive: true,
+    readOnly: false,
+    hasCurrentSession: true,
+    text: " paste me\n",
+  }), {
+    type: "send_text",
+    handled: true,
+    preventDefault: true,
+    stopPropagation: true,
+    sendText: true,
     text: " paste me\n",
   });
 });
