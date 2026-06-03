@@ -458,42 +458,68 @@ pub async fn create_remote_session_on_target(
 pub async fn create_remote_sessions_batch(
     body: CreateSessionsBatchRequest,
 ) -> Result<CreateSessionsBatchResponse, RemoteSessionError> {
-    let target_id = required_target_id(body.launch_target.as_deref())?;
-    let first_cwd = body
-        .dirs
-        .first()
-        .ok_or_else(|| {
-            RemoteSessionError::new(
-                StatusCode::BAD_REQUEST,
-                "VALIDATION_FAILED",
-                "dirs must not be empty",
-            )
-        })?
-        .clone();
-    let target = resolve_launch_target_for_cwd(&first_cwd, target_id)?;
-    let original_dirs = body.dirs;
-    let remote_dirs = original_dirs
-        .iter()
-        .map(|cwd| map_cwd_for_target(&target, cwd))
-        .collect::<Result<Vec<_>, _>>()?;
+    let batch = prepare_remote_sessions_batch(body)?;
+    let mut response =
+        create_remote_sessions_batch_on_target(&batch.target, batch.remote_body).await?;
+    restore_original_batch_cwds(&mut response, &batch.original_dirs);
+    Ok(response)
+}
 
-    let mut response = create_remote_sessions_batch_on_target(
-        &target,
-        CreateSessionsBatchRequest {
+struct PreparedRemoteSessionsBatch {
+    target: LaunchTargetSummary,
+    original_dirs: Vec<String>,
+    remote_body: CreateSessionsBatchRequest,
+}
+
+fn prepare_remote_sessions_batch(
+    body: CreateSessionsBatchRequest,
+) -> Result<PreparedRemoteSessionsBatch, RemoteSessionError> {
+    let target_id = required_target_id(body.launch_target.as_deref())?;
+    let original_dirs = require_batch_dirs(body.dirs)?;
+    let target = resolve_launch_target_for_cwd(&original_dirs[0], target_id)?;
+    let remote_dirs = map_batch_cwds_for_target(&target, &original_dirs)?;
+
+    Ok(PreparedRemoteSessionsBatch {
+        target,
+        original_dirs,
+        remote_body: CreateSessionsBatchRequest {
             dirs: remote_dirs,
             spawn_tool: body.spawn_tool,
             launch_target: None,
             initial_request: body.initial_request,
         },
-    )
-    .await?;
+    })
+}
 
+fn require_batch_dirs(dirs: Vec<String>) -> Result<Vec<String>, RemoteSessionError> {
+    if dirs.is_empty() {
+        return Err(RemoteSessionError::new(
+            StatusCode::BAD_REQUEST,
+            "VALIDATION_FAILED",
+            "dirs must not be empty",
+        ));
+    }
+    Ok(dirs)
+}
+
+fn map_batch_cwds_for_target(
+    target: &LaunchTargetSummary,
+    dirs: &[String],
+) -> Result<Vec<String>, RemoteSessionError> {
+    dirs.iter()
+        .map(|cwd| map_cwd_for_target(target, cwd))
+        .collect()
+}
+
+fn restore_original_batch_cwds(
+    response: &mut CreateSessionsBatchResponse,
+    original_dirs: &[String],
+) {
     for result in &mut response.results {
         if let Some(original) = original_dirs.get(result.index) {
             result.cwd = original.clone();
         }
     }
-    Ok(response)
 }
 
 pub async fn create_remote_sessions_batch_on_target(
@@ -615,21 +641,9 @@ pub async fn fetch_remote_transcript(
     after: Option<u64>,
     limit: Option<usize>,
 ) -> Result<SessionTranscriptResponse, RemoteSessionError> {
-    let mut query = Vec::new();
-    if let Some(turn_id) = turn_id.filter(|turn_id| !turn_id.trim().is_empty()) {
-        query.push(("turn_id".to_string(), turn_id.to_string()));
-    }
-    if let Some(after) = after {
-        query.push(("after".to_string(), after.to_string()));
-    }
-    if let Some(limit) = limit {
-        query.push(("limit".to_string(), limit.to_string()));
-    }
     let session_id = encode_path_segment(remote_session_id);
-    let query_refs = query
-        .iter()
-        .map(|(key, value)| (key.as_str(), value.as_str()))
-        .collect::<Vec<_>>();
+    let query = remote_transcript_query(turn_id, after, limit);
+    let query_refs = query_string_refs(&query);
     let mut response: SessionTranscriptResponse = get_remote_json_with_query(
         target,
         &format!("/v1/sessions/{session_id}/transcript"),
@@ -638,6 +652,27 @@ pub async fn fetch_remote_transcript(
     .await?;
     response.session_id = namespace_session_id(&target.id, &response.session_id);
     Ok(response)
+}
+
+fn remote_transcript_query(
+    turn_id: Option<&str>,
+    after: Option<u64>,
+    limit: Option<usize>,
+) -> Vec<(String, String)> {
+    let mut query = Vec::new();
+    if let Some(turn_id) = turn_id.filter(|turn_id| !turn_id.trim().is_empty()) {
+        query.push(("turn_id".to_string(), turn_id.to_string()));
+    }
+    query.extend(after.map(|after| ("after".to_string(), after.to_string())));
+    query.extend(limit.map(|limit| ("limit".to_string(), limit.to_string())));
+    query
+}
+
+fn query_string_refs(query: &[(String, String)]) -> Vec<(&str, &str)> {
+    query
+        .iter()
+        .map(|(key, value)| (key.as_str(), value.as_str()))
+        .collect()
 }
 
 pub async fn fetch_remote_git_diff(
@@ -1404,6 +1439,86 @@ mod tests {
         let err = launch_cwd(None).expect_err("missing cwd should be invalid");
         assert_eq!(err.status, StatusCode::BAD_REQUEST);
         assert_eq!(err.code, "VALIDATION_FAILED");
+    }
+
+    #[test]
+    fn require_batch_dirs_rejects_empty_dirs() {
+        let err = require_batch_dirs(Vec::new()).expect_err("empty batch dirs should be invalid");
+        assert_eq!(err.status, StatusCode::BAD_REQUEST);
+        assert_eq!(err.code, "VALIDATION_FAILED");
+        assert_eq!(err.message(), "dirs must not be empty");
+    }
+
+    #[test]
+    fn map_batch_cwds_for_target_maps_each_dir() {
+        let mapped = map_batch_cwds_for_target(
+            &target(),
+            &[
+                "/workspace/repos/opensource/swimmers".to_string(),
+                "/workspace/repos/tools".to_string(),
+            ],
+        )
+        .expect("mapped batch dirs");
+
+        assert_eq!(
+            mapped,
+            vec![
+                "/monoserver/opensource/swimmers".to_string(),
+                "/monoserver/tools".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn restore_original_batch_cwds_uses_result_index() {
+        let original_dirs = vec![
+            "/workspace/repos/first".to_string(),
+            "/workspace/repos/second".to_string(),
+        ];
+        let mut response = CreateSessionsBatchResponse {
+            results: vec![
+                CreateSessionsBatchResult {
+                    index: 1,
+                    cwd: "/monoserver/second".to_string(),
+                    ok: true,
+                    session: None,
+                    repo_theme: None,
+                    error: None,
+                },
+                CreateSessionsBatchResult {
+                    index: 9,
+                    cwd: "/monoserver/unmatched".to_string(),
+                    ok: false,
+                    session: None,
+                    repo_theme: None,
+                    error: None,
+                },
+            ],
+        };
+
+        restore_original_batch_cwds(&mut response, &original_dirs);
+
+        assert_eq!(response.results[0].cwd, "/workspace/repos/second");
+        assert_eq!(response.results[1].cwd, "/monoserver/unmatched");
+    }
+
+    #[test]
+    fn remote_transcript_query_omits_blank_turn_and_keeps_numeric_params() {
+        assert_eq!(
+            remote_transcript_query(Some("  "), Some(42), Some(100)),
+            vec![
+                ("after".to_string(), "42".to_string()),
+                ("limit".to_string(), "100".to_string()),
+            ]
+        );
+
+        assert_eq!(
+            remote_transcript_query(Some("turn-7"), None, Some(20)),
+            vec![
+                ("turn_id".to_string(), "turn-7".to_string()),
+                ("limit".to_string(), "20".to_string()),
+            ]
+        );
     }
 
     #[test]
