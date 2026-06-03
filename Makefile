@@ -90,6 +90,14 @@ ci-perf-gates:
 	bash ./scripts/ci-perf-gates.sh
 
 cargo-cov-lcov:
-	@llvm_cov="$${LLVM_COV:-$$(command -v llvm-cov || xcrun --find llvm-cov)}"; \
-	llvm_profdata="$${LLVM_PROFDATA:-$$(command -v llvm-profdata || xcrun --find llvm-profdata)}"; \
-	LLVM_COV="$$llvm_cov" LLVM_PROFDATA="$$llvm_profdata" cargo llvm-cov --lcov --output-path lcov.info
+	@llvm_cov="$${LLVM_COV:-$$(command -v llvm-cov || true)}"; \
+	llvm_profdata="$${LLVM_PROFDATA:-$$(command -v llvm-profdata || true)}"; \
+	cargo_target_dir="$${CARGO_TARGET_DIR:-}"; \
+	cargo_llvm_cov_flags=""; \
+	zig_bin="$${ZIG:-$$(command -v zig || true)}"; \
+	if [ -z "$$cargo_target_dir" ] && [ -d target ] && [ ! -w target ]; then cargo_target_dir="/tmp/swimmers-llvm-cov-target"; cargo_llvm_cov_flags="--no-clean"; fi; \
+	if [ -z "$${CC:-}" ] && [ -n "$$zig_bin" ]; then export CC="$(CURDIR)/scripts/zig-cc-rust-coverage.sh"; if [ -z "$${CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER:-}" ]; then export CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER="$(CURDIR)/scripts/zig-cc-rust-coverage.sh"; fi; fi; \
+	if [ -n "$$llvm_cov" ]; then export LLVM_COV="$$llvm_cov"; fi; \
+	if [ -n "$$llvm_profdata" ]; then export LLVM_PROFDATA="$$llvm_profdata"; fi; \
+	if [ -n "$$cargo_target_dir" ]; then export CARGO_TARGET_DIR="$$cargo_target_dir"; fi; \
+	cargo llvm-cov $$cargo_llvm_cov_flags --lcov --output-path lcov.info -- --test-threads=1

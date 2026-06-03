@@ -3002,7 +3002,10 @@ mod tests {
     async fn bounded_tmux_command_times_out_non_returning_fake_tmux() {
         let dir = tempdir().expect("tempdir");
         let fake_tmux = dir.path().join("tmux");
-        write_executable(&fake_tmux, "#!/bin/sh\nexec sleep 10\n");
+        write_executable(
+            &fake_tmux,
+            "#!/bin/sh\nif [ -x /bin/sleep ]; then exec /bin/sleep 10; fi\nexec sleep 10\n",
+        );
 
         let started = Instant::now();
         let err = run_bounded_tmux_command(

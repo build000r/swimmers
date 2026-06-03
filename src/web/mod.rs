@@ -584,10 +584,7 @@ async fn input_support_js() -> impl IntoResponse {
             ),
             (header::CACHE_CONTROL, "no-store"),
         ],
-        dev_asset(
-            "src/web/input_support.js",
-            include_str!("input_support.js"),
-        ),
+        dev_asset("src/web/input_support.js", include_str!("input_support.js")),
     )
 }
 
@@ -2128,11 +2125,14 @@ mod tests {
     #[test]
     fn app_js_and_css_wire_trogdor_sprite_burn_loop() {
         let js = include_str!("app.js");
-        assert!(js.contains("TROGDOR_DRAGON_ASSET_BASE = \"/assets/dragon\""));
-        assert!(js.contains("function trogdorDragonPose(groups, summary)"));
-        assert!(js.contains("trogdor-dragon-sprite"));
-        assert!(js.contains("agent-burn-flame"));
-        assert!(js.contains("const dragonTarget = dragonPose || TROGDOR_DRAGON_TARGET"));
+        let trogdor_logic = include_str!("trogdor_logic.js");
+        let trogdor_render = include_str!("trogdor_render.js");
+        assert!(trogdor_render.contains("TROGDOR_DRAGON_ASSET_BASE = \"/assets/dragon\""));
+        assert!(trogdor_logic.contains("export function trogdorDragonPose(groups, summary"));
+        assert!(trogdor_render.contains("trogdor-dragon-sprite"));
+        assert!(trogdor_render.contains("agent-burn-flame"));
+        assert!(trogdor_render.contains("const dragonTarget = dragonPose || TROGDOR_DRAGON_TARGET"));
+        assert!(js.contains("renderTrogdorSurfaceFrame"));
 
         let css = include_str!("app.css");
         assert!(css.contains("@keyframes dragon-walk-around"));
@@ -2165,6 +2165,7 @@ mod tests {
     #[test]
     fn app_js_exposes_terminal_viewer_ergonomics() {
         let js = include_str!("app.js");
+        let workbench_render = include_str!("workbench_render.js");
         assert!(js.contains("TERMINAL_ZOOM_STORAGE_KEY"));
         assert!(js.contains("setZoom"));
         assert!(js.contains("focusMobileKeyboard"));
@@ -2176,17 +2177,17 @@ mod tests {
         assert!(js.contains("function syncTerminalStatusStrip()"));
         assert!(js.contains("function refreshAgentContextForSelectedSession"));
         assert!(js.contains("function refreshWorkbenchWidgetsForSelectedSession"));
-        assert!(js.contains("function operatorPressureSummary"));
-        assert!(js.contains("Tool calls"));
+        assert!(workbench_render.contains("export function operatorPressureSummary"));
+        assert!(workbench_render.contains("Tool calls"));
         assert!(js.contains("/agent-context"));
         assert!(js.contains("/pane-tail"));
         assert!(js.contains("/transcript"));
-        assert!(js.contains("function renderTurnsPanel"));
+        assert!(workbench_render.contains("function renderTurnsPanel"));
         assert!(js.contains("function flushPendingTerminalBytes"));
-        assert!(js.contains("Post-turn JSONL"));
+        assert!(workbench_render.contains("Post-turn JSONL"));
         assert!(js.contains("/mermaid-artifact"));
         assert!(js.contains("/git-diff"));
-        assert!(js.contains("function renderDiffHtml"));
+        assert!(workbench_render.contains("function renderDiffHtml"));
         assert!(js.contains("function syncTerminalWorkbench()"));
     }
 

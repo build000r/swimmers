@@ -259,7 +259,10 @@ mod tests {
         assert_eq!(response.status(), NATIVE_OPEN_FAILED.status);
         let json = response_json(response).await;
         assert_eq!(json["code"], NATIVE_OPEN_FAILED.code);
-        assert_eq!(json["message"], "no sessions are waiting for operator input");
+        assert_eq!(
+            json["message"],
+            "no sessions are waiting for operator input"
+        );
     }
 
     #[tokio::test]
@@ -275,9 +278,15 @@ mod tests {
         .await
         .into_response();
 
+        #[cfg(target_os = "macos")]
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        #[cfg(not(target_os = "macos"))]
+        assert_eq!(response.status(), NATIVE_DESKTOP_UNAVAILABLE.status);
         let json = response_json(response).await;
+        #[cfg(target_os = "macos")]
         assert_eq!(json["code"], "SESSION_NOT_FOUND");
+        #[cfg(not(target_os = "macos"))]
+        assert_eq!(json["code"], NATIVE_DESKTOP_UNAVAILABLE.code);
     }
 
     #[tokio::test]

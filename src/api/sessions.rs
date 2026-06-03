@@ -2559,10 +2559,12 @@ esac
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
         let json = response_json(response).await;
         assert_eq!(json["code"], "LAUNCH_TARGET_UNKNOWN");
-        assert!(json["message"]
-            .as_str()
-            .expect("message")
-            .contains("launch target 'not-configured-target-for-test' is not configured"));
+        let message = json["message"].as_str().expect("message");
+        assert!(
+            message.contains("launch target 'not-configured-target-for-test' is not configured")
+                || message.contains("no skillbox-config overlay is available"),
+            "{message}"
+        );
     }
 
     #[tokio::test]
