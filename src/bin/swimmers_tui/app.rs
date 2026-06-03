@@ -67,6 +67,17 @@ struct ApiRefreshHealth {
     consecutive_errors: u8,
 }
 
+enum PickerActivationPlan {
+    OpenInitialRequest {
+        path: String,
+        launch_target: Option<String>,
+    },
+    ReloadDirectory {
+        path: String,
+        managed_only: bool,
+    },
+}
+
 impl ApiRefreshHealth {
     fn record_success(&mut self) {
         self.consecutive_errors = 0;
@@ -3014,53 +3025,7 @@ impl<C: TuiApi> App<C> {
     }
 
     pub(crate) fn picker_activate_selection(&mut self, _field: Rect) {
-        let Some((selection, current_path, entry_path, has_children)) =
-            self.picker.as_ref().map(|picker| match picker.selection {
-                PickerSelection::SpawnHere => (
-                    PickerSelection::SpawnHere,
-                    picker.current_path.clone(),
-                    None,
-                    false,
-                ),
-                PickerSelection::Entry(index) => (
-                    PickerSelection::Entry(index),
-                    picker.current_path.clone(),
-                    picker.path_for_entry(index),
-                    picker
-                        .entries
-                        .get(index)
-                        .map(|entry| entry.has_children)
-                        .unwrap_or(false),
-                ),
-            })
-        else {
-            return;
-        };
-
-        let launch_target = self
-            .picker
-            .as_ref()
-            .and_then(|picker| picker.launch_target.clone());
-        self.launch_target = launch_target.clone();
-
-        match selection {
-            PickerSelection::SpawnHere => self.open_initial_request(current_path, launch_target),
-            PickerSelection::Entry(_) if has_children => {
-                if let Some(path) = entry_path {
-                    let managed_only = self
-                        .picker
-                        .as_ref()
-                        .map(|picker| picker.managed_only)
-                        .unwrap_or(true);
-                    self.picker_reload(Some(path), managed_only, None);
-                }
-            }
-            PickerSelection::Entry(_) => {
-                if let Some(path) = entry_path {
-                    self.open_initial_request(path, launch_target);
-                }
-            }
-        }
+        self.dispatch_picker_activation(self.selected_picker_activation());
     }
 
     pub(crate) fn picker_start_action_for_selection(&mut self, kind: RepoActionKind) {
@@ -3493,41 +3458,58 @@ impl<C: TuiApi> App<C> {
     }
 
     pub(crate) fn spawn_session_from_picker(&mut self, _field: Rect) {
-        let Some(path) = self
-            .picker
-            .as_ref()
-            .map(|picker| picker.current_path.clone())
-        else {
-            return;
-        };
-        let launch_target = self
-            .picker
-            .as_ref()
-            .and_then(|picker| picker.launch_target.clone());
-        self.launch_target = launch_target.clone();
-        self.open_initial_request(path, launch_target);
+        self.dispatch_picker_activation(self.current_path_picker_activation());
     }
 
     pub(crate) fn activate_picker_entry(&mut self, index: usize, _field: Rect) {
-        let Some((path, has_children, managed_only)) = self.picker.as_ref().and_then(|picker| {
-            Some((
-                picker.path_for_entry(index)?,
-                picker.entry_at(index)?.has_children,
-                picker.managed_only,
-            ))
-        }) else {
-            return;
-        };
+        self.dispatch_picker_activation(self.entry_picker_activation(index));
+    }
 
-        if has_children {
-            self.picker_reload(Some(path), managed_only, None);
+    fn selected_picker_activation(&self) -> Option<PickerActivationPlan> {
+        let picker = self.picker.as_ref()?;
+        match picker.selection {
+            PickerSelection::SpawnHere => self.current_path_picker_activation(),
+            PickerSelection::Entry(index) => self.entry_picker_activation(index),
+        }
+    }
+
+    fn current_path_picker_activation(&self) -> Option<PickerActivationPlan> {
+        let picker = self.picker.as_ref()?;
+        Some(PickerActivationPlan::OpenInitialRequest {
+            path: picker.current_path.clone(),
+            launch_target: picker.launch_target.clone(),
+        })
+    }
+
+    fn entry_picker_activation(&self, index: usize) -> Option<PickerActivationPlan> {
+        let picker = self.picker.as_ref()?;
+        let path = picker.path_for_entry(index)?;
+        if picker.entry_at(index)?.has_children {
+            Some(PickerActivationPlan::ReloadDirectory {
+                path,
+                managed_only: picker.managed_only,
+            })
         } else {
-            let launch_target = self
-                .picker
-                .as_ref()
-                .and_then(|picker| picker.launch_target.clone());
-            self.launch_target = launch_target.clone();
-            self.open_initial_request(path, launch_target);
+            Some(PickerActivationPlan::OpenInitialRequest {
+                path,
+                launch_target: picker.launch_target.clone(),
+            })
+        }
+    }
+
+    fn dispatch_picker_activation(&mut self, plan: Option<PickerActivationPlan>) {
+        match plan {
+            Some(PickerActivationPlan::OpenInitialRequest {
+                path,
+                launch_target,
+            }) => {
+                self.launch_target = launch_target.clone();
+                self.open_initial_request(path, launch_target);
+            }
+            Some(PickerActivationPlan::ReloadDirectory { path, managed_only }) => {
+                self.picker_reload(Some(path), managed_only, None);
+            }
+            None => {}
         }
     }
 
