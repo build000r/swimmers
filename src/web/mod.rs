@@ -30,6 +30,14 @@ use crate::types::{clamp_terminal_resize, opcodes, ControlEvent, SessionSummary}
 const APP_JS_ROUTE: &str = "/app.js";
 const RENDERED_SURFACE_JS_ROUTE: &str = "/rendered_surface.js";
 const INPUT_SUPPORT_JS_ROUTE: &str = "/input_support.js";
+const MERMAID_ARTIFACT_JS_ROUTE: &str = "/mermaid_artifact.js";
+const TERMINAL_SAFETY_JS_ROUTE: &str = "/terminal_safety.js";
+const TERMINAL_PROTOCOL_JS_ROUTE: &str = "/terminal_protocol.js";
+const DIR_BROWSER_JS_ROUTE: &str = "/dir_browser.js";
+const TROGDOR_LOGIC_JS_ROUTE: &str = "/trogdor_logic.js";
+const TROGDOR_RENDER_JS_ROUTE: &str = "/trogdor_render.js";
+const WORKBENCH_RENDER_JS_ROUTE: &str = "/workbench_render.js";
+const WORKBENCH_RECORDS_JS_ROUTE: &str = "/workbench_records.js";
 const APP_CSS_ROUTE: &str = "/app.css";
 const FRANKENTERM_JS_ROUTE: &str = "/assets/frankenterm/FrankenTerm.js";
 const FRANKENTERM_WASM_ROUTE: &str = "/assets/frankenterm/FrankenTerm_bg.wasm";
@@ -74,6 +82,14 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route(APP_JS_ROUTE, get(app_js))
         .route(RENDERED_SURFACE_JS_ROUTE, get(rendered_surface_js))
         .route(INPUT_SUPPORT_JS_ROUTE, get(input_support_js))
+        .route(MERMAID_ARTIFACT_JS_ROUTE, get(mermaid_artifact_js))
+        .route(TERMINAL_SAFETY_JS_ROUTE, get(terminal_safety_js))
+        .route(TERMINAL_PROTOCOL_JS_ROUTE, get(terminal_protocol_js))
+        .route(DIR_BROWSER_JS_ROUTE, get(dir_browser_js))
+        .route(TROGDOR_LOGIC_JS_ROUTE, get(trogdor_logic_js))
+        .route(TROGDOR_RENDER_JS_ROUTE, get(trogdor_render_js))
+        .route(WORKBENCH_RENDER_JS_ROUTE, get(workbench_render_js))
+        .route(WORKBENCH_RECORDS_JS_ROUTE, get(workbench_records_js))
         .route(APP_CSS_ROUTE, get(app_css))
         .route(FRANKENTERM_JS_ROUTE, get(franken_term_js))
         .route(FRANKENTERM_WASM_ROUTE, get(franken_term_wasm))
@@ -546,7 +562,7 @@ fn dev_asset(_relative: &str, baked: &'static str) -> &'static str {
     baked
 }
 
-async fn app_js() -> impl IntoResponse {
+fn javascript_asset(relative: &str, baked: &'static str) -> Response {
     (
         [
             (
@@ -555,36 +571,73 @@ async fn app_js() -> impl IntoResponse {
             ),
             (header::CACHE_CONTROL, "no-store"),
         ],
-        dev_asset("src/web/app.js", include_str!("app.js")),
+        dev_asset(relative, baked),
+    )
+        .into_response()
+}
+
+async fn app_js() -> Response {
+    javascript_asset("src/web/app.js", include_str!("app.js"))
+}
+
+async fn rendered_surface_js() -> Response {
+    javascript_asset(
+        "src/web/rendered_surface.js",
+        include_str!("rendered_surface.js"),
     )
 }
 
-async fn rendered_surface_js() -> impl IntoResponse {
-    (
-        [
-            (
-                header::CONTENT_TYPE,
-                "application/javascript; charset=utf-8",
-            ),
-            (header::CACHE_CONTROL, "no-store"),
-        ],
-        dev_asset(
-            "src/web/rendered_surface.js",
-            include_str!("rendered_surface.js"),
-        ),
+async fn input_support_js() -> Response {
+    javascript_asset("src/web/input_support.js", include_str!("input_support.js"))
+}
+
+async fn mermaid_artifact_js() -> Response {
+    javascript_asset(
+        "src/web/mermaid_artifact.js",
+        include_str!("mermaid_artifact.js"),
     )
 }
 
-async fn input_support_js() -> impl IntoResponse {
-    (
-        [
-            (
-                header::CONTENT_TYPE,
-                "application/javascript; charset=utf-8",
-            ),
-            (header::CACHE_CONTROL, "no-store"),
-        ],
-        dev_asset("src/web/input_support.js", include_str!("input_support.js")),
+async fn terminal_safety_js() -> Response {
+    javascript_asset(
+        "src/web/terminal_safety.js",
+        include_str!("terminal_safety.js"),
+    )
+}
+
+async fn terminal_protocol_js() -> Response {
+    javascript_asset(
+        "src/web/terminal_protocol.js",
+        include_str!("terminal_protocol.js"),
+    )
+}
+
+async fn dir_browser_js() -> Response {
+    javascript_asset("src/web/dir_browser.js", include_str!("dir_browser.js"))
+}
+
+async fn trogdor_logic_js() -> Response {
+    javascript_asset("src/web/trogdor_logic.js", include_str!("trogdor_logic.js"))
+}
+
+async fn trogdor_render_js() -> Response {
+    javascript_asset(
+        "src/web/trogdor_render.js",
+        include_str!("trogdor_render.js"),
+    )
+}
+
+async fn workbench_render_js() -> Response {
+    javascript_asset(
+        "src/web/workbench_render.js",
+        include_str!("workbench_render.js"),
+    )
+}
+
+async fn workbench_records_js() -> Response {
+    javascript_asset(
+        "src/web/workbench_records.js",
+        include_str!("workbench_records.js"),
     )
 }
 
@@ -2067,6 +2120,77 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn browser_js_asset_handlers_cover_app_module_graph() {
+        let assets = [
+            (APP_JS_ROUTE, app_js().await, "from \"./dir_browser.js\""),
+            (
+                RENDERED_SURFACE_JS_ROUTE,
+                rendered_surface_js().await,
+                "export function buildSurfaceFrame",
+            ),
+            (
+                INPUT_SUPPORT_JS_ROUTE,
+                input_support_js().await,
+                "export function eventCell",
+            ),
+            (
+                MERMAID_ARTIFACT_JS_ROUTE,
+                mermaid_artifact_js().await,
+                "export function boundedArtifactText",
+            ),
+            (
+                TERMINAL_SAFETY_JS_ROUTE,
+                terminal_safety_js().await,
+                "export function safeAnchorHref",
+            ),
+            (
+                TERMINAL_PROTOCOL_JS_ROUTE,
+                terminal_protocol_js().await,
+                "export function buildSessionSocketUrl",
+            ),
+            (
+                DIR_BROWSER_JS_ROUTE,
+                dir_browser_js().await,
+                "export function renderDirEntries",
+            ),
+            (
+                TROGDOR_LOGIC_JS_ROUTE,
+                trogdor_logic_js().await,
+                "export function trogdorDragonPose",
+            ),
+            (
+                TROGDOR_RENDER_JS_ROUTE,
+                trogdor_render_js().await,
+                "export function renderTrogdorSurfaceFrame",
+            ),
+            (
+                WORKBENCH_RENDER_JS_ROUTE,
+                workbench_render_js().await,
+                "export function buildWorkbenchWidgetsHtml",
+            ),
+            (
+                WORKBENCH_RECORDS_JS_ROUTE,
+                workbench_records_js().await,
+                "export function transcriptRecordDisplay",
+            ),
+        ];
+
+        for (route, response, needle) in assets {
+            assert_eq!(response.status(), StatusCode::OK, "{route}");
+            assert_eq!(
+                response.headers().get(header::CONTENT_TYPE).unwrap(),
+                "application/javascript; charset=utf-8",
+                "{route}"
+            );
+            let body = to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("js body");
+            let text = String::from_utf8(body.to_vec()).expect("utf8 js asset");
+            assert!(text.contains(needle), "{route} did not contain {needle}");
+        }
+    }
+
+    #[tokio::test]
     async fn franken_term_asset_file_info_reports_size_and_crc() {
         let dir = tempdir().expect("tempdir");
         let path = dir.path().join("FrankenTerm.js");
@@ -2142,11 +2266,12 @@ mod tests {
     }
 
     #[test]
-    fn app_js_includes_overlay_filter_chip_logic() {
+    fn directory_browser_modules_include_overlay_filter_chip_logic() {
         let js = include_str!("app.js");
-        assert!(js.contains("response?.overlay_label"));
-        assert!(js.contains("managedButton.dataset.filter = \"managed\""));
-        assert!(js.contains("allButton.textContent = \"all folders\""));
+        let dir_browser = include_str!("dir_browser.js");
+        assert!(dir_browser.contains("response?.overlay_label"));
+        assert!(dir_browser.contains("managedButton.dataset.filter = \"managed\""));
+        assert!(dir_browser.contains("allButton.textContent = \"all folders\""));
         assert!(js.contains("filter === \"managed\" ? true"));
     }
 
