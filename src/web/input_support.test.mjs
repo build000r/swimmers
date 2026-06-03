@@ -15,6 +15,7 @@ import {
   terminalFallbackPastePlan,
   terminalKeyStripClickPlan,
   terminalStageCaptureBindings,
+  terminalStageFocusExecutorPlan,
   terminalStageFocusPlan,
   terminalStageKeydownPlan,
   terminalStagePasteExecutorPlan,
@@ -465,6 +466,19 @@ test("terminalStageFocusPlan preserves focus, blur, and ignore decisions", () =>
     event: { kind: "focus", focused: false },
   });
   assert.deepEqual(terminalStageFocusPlan("click"), { type: "ignore" });
+});
+
+test("terminalStageFocusExecutorPlan preserves ignore, forward, and unknown decisions", () => {
+  const event = { kind: "focus", focused: true };
+  const ignored = { type: "ignore", forwardEvent: false, event: null };
+
+  assert.deepEqual(terminalStageFocusExecutorPlan({ type: "ignore" }), ignored);
+  assert.deepEqual(terminalStageFocusExecutorPlan({ type: "forward_event", event }), {
+    type: "forward_event",
+    forwardEvent: true,
+    event,
+  });
+  assert.deepEqual(terminalStageFocusExecutorPlan({ type: "unknown", event }), ignored);
 });
 
 test("terminalStageKeydownPlan preserves shortcut, capture, and response decisions", () => {

@@ -2,7 +2,7 @@ import { buildSurfaceFrame, surfaceActionAt, surfaceConsumesPointer } from "./re
 import {
   authTokenButtonPlan, eventCell, globalShortcutPlan, mobileKeyboardInputExecutorPlan, mobileKeyboardInputPlan,
   mobileKeyboardKeydownPlan, mobileKeyboardKeyPlan, shouldIgnoreSyntheticClick,
-  terminalComposerControlAction, terminalFallbackKeydownPlan, terminalFallbackPastePlan, terminalKeyStripClickPlan, terminalStageCaptureBindings, terminalStageFocusPlan,
+  terminalComposerControlAction, terminalFallbackKeydownPlan, terminalFallbackPastePlan, terminalKeyStripClickPlan, terminalStageCaptureBindings, terminalStageFocusExecutorPlan, terminalStageFocusPlan,
   terminalStageKeydownPlan, terminalStagePasteExecutorPlan, terminalStagePastePlan,
 } from "./input_support.js";
 import { sendHistoryClickPlan, sendSheetFailureStatus, sendSheetSubmitPlan, sendSheetSuccessStatus } from "./send_sheet.js";
@@ -3887,6 +3887,11 @@ function handleTerminalFallbackPasteEvent(event) {
   return plan.handled;
 }
 
+function runTerminalStageFocusAction(plan) {
+  const action = terminalStageFocusExecutorPlan(plan);
+  if (action.forwardEvent) forwardTerminalEvent(action.event);
+}
+
 function mouseCell(event) {
   const rect = el.terminalStage.getBoundingClientRect();
   return eventCell(event, rect, state.currentCols, state.currentRows);
@@ -5731,15 +5736,8 @@ function bindEvents() {
     if (action.sendText) sendTerminalText(action.text);
   });
 
-  el.terminalStage.addEventListener("focus", () => {
-    const plan = terminalStageFocusPlan("focus", { activeSheet: state.activeSheet });
-    if (plan.type === "forward_event") forwardTerminalEvent(plan.event);
-  });
-
-  el.terminalStage.addEventListener("blur", () => {
-    const plan = terminalStageFocusPlan("blur", { mobileKeyboardOwnsFocus: document.activeElement === el.mobileKeyboardProxy });
-    if (plan.type === "forward_event") forwardTerminalEvent(plan.event);
-  });
+  el.terminalStage.addEventListener("focus", () => runTerminalStageFocusAction(terminalStageFocusPlan("focus", { activeSheet: state.activeSheet })));
+  el.terminalStage.addEventListener("blur", () => runTerminalStageFocusAction(terminalStageFocusPlan("blur", { mobileKeyboardOwnsFocus: document.activeElement === el.mobileKeyboardProxy })));
 
   el.terminalStage.addEventListener("mousedown", (event) => {
     if (terminalFallbackOwnsPointer(event)) {

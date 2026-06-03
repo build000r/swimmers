@@ -309,6 +309,13 @@ export function terminalStageFocusPlan(eventType, context = {}) {
   return { type: "ignore" };
 }
 
+export function terminalStageFocusExecutorPlan(plan = {}) {
+  if (plan.type !== "forward_event") {
+    return { type: "ignore", forwardEvent: false, event: null };
+  }
+  return { type: "forward_event", forwardEvent: true, event: plan.event };
+}
+
 export function terminalStageKeydownPlan(context = {}) {
   if (context.globalShortcutHandled) {
     return { type: "prevent_default", preventDefault: true, markResponse: false, forwardKey: false };
