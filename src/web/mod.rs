@@ -1406,32 +1406,39 @@ fn decode_client_message(auth: &AuthInfo, message: &Message) -> WsClientDecision
         Message::Close(_) => WsClientDecision::Close,
         Message::Pong(_) => WsClientDecision::Ignore,
         Message::Ping(bytes) => WsClientDecision::SendPong(bytes.to_vec()),
-        Message::Binary(bytes) => {
-            if !auth.has_scope(AuthScope::StreamWrite) {
-                return WsClientDecision::SendError {
-                    code: "READ_ONLY",
-                    message: "observer connections cannot send terminal input".to_string(),
-                    client_message_id: None,
-                };
-            }
-            if bytes.is_empty() {
-                WsClientDecision::Ignore
-            } else if bytes.len() > MAX_WS_INPUT_BYTES {
-                WsClientDecision::SendError {
-                    code: "INPUT_TOO_LARGE",
-                    message: format!(
-                        "terminal input frame exceeds {MAX_WS_INPUT_BYTES} byte limit"
-                    ),
-                    client_message_id: None,
-                }
-            } else {
-                WsClientDecision::Forward {
-                    cmd: SessionCommand::WriteInput(bytes.to_vec()),
-                    client_message_id: None,
-                }
-            }
-        }
+        Message::Binary(bytes) => decode_binary_client_message(auth, bytes),
         Message::Text(text) => decode_text_client_message(auth, text.as_str()),
+    }
+}
+
+fn decode_binary_client_message(auth: &AuthInfo, bytes: &[u8]) -> WsClientDecision {
+    if !auth.has_scope(AuthScope::StreamWrite) {
+        return read_only_terminal_error("observer connections cannot send terminal input", None);
+    }
+    decode_binary_input(bytes)
+}
+
+fn decode_binary_input(bytes: &[u8]) -> WsClientDecision {
+    if bytes.is_empty() {
+        WsClientDecision::Ignore
+    } else if bytes.len() > MAX_WS_INPUT_BYTES {
+        oversized_input_error(None)
+    } else {
+        WsClientDecision::Forward {
+            cmd: SessionCommand::WriteInput(bytes.to_vec()),
+            client_message_id: None,
+        }
+    }
+}
+
+fn read_only_terminal_error(
+    message: &'static str,
+    client_message_id: Option<String>,
+) -> WsClientDecision {
+    WsClientDecision::SendError {
+        code: "READ_ONLY",
+        message: message.to_string(),
+        client_message_id,
     }
 }
 
@@ -1443,84 +1450,114 @@ fn oversized_input_error(client_message_id: Option<String>) -> WsClientDecision 
     }
 }
 
+fn invalid_client_message_error(err: serde_json::Error) -> WsClientDecision {
+    WsClientDecision::SendError {
+        code: "INVALID_MESSAGE",
+        message: format!("invalid control message: {err}"),
+        client_message_id: None,
+    }
+}
+
+fn parse_browser_client_message(text: &str) -> Result<BrowserClientMessage, WsClientDecision> {
+    serde_json::from_str(text).map_err(invalid_client_message_error)
+}
+
 fn decode_text_client_message(auth: &AuthInfo, text: &str) -> WsClientDecision {
-    let parsed: BrowserClientMessage = match serde_json::from_str(text) {
-        Ok(m) => m,
-        Err(err) => {
-            return WsClientDecision::SendError {
-                code: "INVALID_MESSAGE",
-                message: format!("invalid control message: {err}"),
-                client_message_id: None,
-            }
-        }
-    };
+    parse_browser_client_message(text)
+        .map(|parsed| decode_browser_client_message(auth, parsed))
+        .unwrap_or_else(|decision| decision)
+}
+
+fn decode_browser_client_message(
+    auth: &AuthInfo,
+    parsed: BrowserClientMessage,
+) -> WsClientDecision {
     match parsed {
         BrowserClientMessage::Ping => WsClientDecision::ReplyPong,
         BrowserClientMessage::Auth { token: _token } => WsClientDecision::Ignore,
         BrowserClientMessage::InputText {
             data,
             client_message_id,
-        } => {
-            if !auth.has_scope(AuthScope::StreamWrite) {
-                return WsClientDecision::SendError {
-                    code: "READ_ONLY",
-                    message: "observer connections cannot send terminal input".to_string(),
-                    client_message_id,
-                };
-            }
-            if data.is_empty() {
-                WsClientDecision::Ignore
-            } else if data.len() > MAX_WS_INPUT_BYTES {
-                oversized_input_error(client_message_id)
-            } else {
-                WsClientDecision::Forward {
-                    cmd: SessionCommand::WriteInputAck {
-                        data: data.into_bytes(),
-                        ack: oneshot::channel().0,
-                    },
-                    client_message_id,
-                }
-            }
-        }
+        } => decode_input_text_message(auth, data, client_message_id),
         BrowserClientMessage::SubmitLine {
             data,
             client_message_id,
-        } => {
-            if !auth.has_scope(AuthScope::StreamWrite) {
-                return WsClientDecision::SendError {
-                    code: "READ_ONLY",
-                    message: "observer connections cannot submit terminal input".to_string(),
-                    client_message_id,
-                };
-            }
-            if data.trim().is_empty() {
-                WsClientDecision::Ignore
-            } else if data.len() > MAX_WS_INPUT_BYTES {
-                oversized_input_error(client_message_id)
-            } else {
-                WsClientDecision::Forward {
-                    cmd: SessionCommand::SubmitLineAck {
-                        text: data,
-                        ack: oneshot::channel().0,
-                    },
-                    client_message_id,
-                }
-            }
+        } => decode_submit_line_message(auth, data, client_message_id),
+        BrowserClientMessage::Resize { cols, rows } => decode_resize_message(auth, cols, rows),
+    }
+}
+
+fn decode_input_text_message(
+    auth: &AuthInfo,
+    data: String,
+    client_message_id: Option<String>,
+) -> WsClientDecision {
+    if !auth.has_scope(AuthScope::StreamWrite) {
+        return read_only_terminal_error(
+            "observer connections cannot send terminal input",
+            client_message_id,
+        );
+    }
+    decode_input_text(data, client_message_id)
+}
+
+fn decode_input_text(data: String, client_message_id: Option<String>) -> WsClientDecision {
+    if data.is_empty() {
+        WsClientDecision::Ignore
+    } else if data.len() > MAX_WS_INPUT_BYTES {
+        oversized_input_error(client_message_id)
+    } else {
+        WsClientDecision::Forward {
+            cmd: SessionCommand::WriteInputAck {
+                data: data.into_bytes(),
+                ack: oneshot::channel().0,
+            },
+            client_message_id,
         }
-        BrowserClientMessage::Resize { cols, rows } => {
-            if !auth.has_scope(AuthScope::StreamWrite) {
-                return WsClientDecision::SendError {
-                    code: "READ_ONLY",
-                    message: "observer connections cannot resize terminal sessions".to_string(),
-                    client_message_id: None,
-                };
-            }
-            let (cols, rows) = clamp_terminal_resize(cols, rows);
-            WsClientDecision::Forward {
-                cmd: SessionCommand::Resize { cols, rows },
-                client_message_id: None,
-            }
+    }
+}
+
+fn decode_submit_line_message(
+    auth: &AuthInfo,
+    data: String,
+    client_message_id: Option<String>,
+) -> WsClientDecision {
+    if !auth.has_scope(AuthScope::StreamWrite) {
+        return read_only_terminal_error(
+            "observer connections cannot submit terminal input",
+            client_message_id,
+        );
+    }
+    decode_submit_line(data, client_message_id)
+}
+
+fn decode_submit_line(data: String, client_message_id: Option<String>) -> WsClientDecision {
+    if data.trim().is_empty() {
+        WsClientDecision::Ignore
+    } else if data.len() > MAX_WS_INPUT_BYTES {
+        oversized_input_error(client_message_id)
+    } else {
+        WsClientDecision::Forward {
+            cmd: SessionCommand::SubmitLineAck {
+                text: data,
+                ack: oneshot::channel().0,
+            },
+            client_message_id,
         }
+    }
+}
+
+fn decode_resize_message(auth: &AuthInfo, cols: u16, rows: u16) -> WsClientDecision {
+    if !auth.has_scope(AuthScope::StreamWrite) {
+        return read_only_terminal_error(
+            "observer connections cannot resize terminal sessions",
+            None,
+        );
+    }
+    let (cols, rows) = clamp_terminal_resize(cols, rows);
+    WsClientDecision::Forward {
+        cmd: SessionCommand::Resize { cols, rows },
+        client_message_id: None,
     }
 }
 
@@ -2497,13 +2534,12 @@ mod tests {
         assert!(js.contains("createDirBrowserController"));
         assert!(dir_browser_controller.contains("shouldRetryDirListingFromBase"));
         assert!(dir_browser_controller.contains("storage.removeItem(pathStorageKey)"));
-        assert!(
-            dir_browser_controller
-                .contains("return loadDirListing(\"\", managed, \"\", { retriedFromBase: true })")
-        );
+        assert!(dir_browser_controller
+            .contains("return loadDirListing(\"\", managed, \"\", { retriedFromBase: true })"));
         assert!(dir_browser_controller.contains("outside the allowed base directory"));
-        assert!(input_support
-            .contains("rawStoredDirPath.trim() === \"/\" ? \"\" : rawStoredDirPath"));
+        assert!(
+            input_support.contains("rawStoredDirPath.trim() === \"/\" ? \"\" : rawStoredDirPath")
+        );
     }
 
     #[test]
@@ -2877,22 +2913,30 @@ mod tests {
 
     #[test]
     fn decode_text_client_message_input_text_without_scope_is_read_only() {
-        let json = r#"{"type":"input_text","data":"hello"}"#;
+        let json = r#"{"type":"input_text","data":"hello","clientMessageId":"ro-1"}"#;
         match decode_text_client_message(&observer_auth(), json) {
-            WsClientDecision::SendError { code, .. } => assert_eq!(code, "READ_ONLY"),
+            WsClientDecision::SendError {
+                code,
+                client_message_id,
+                ..
+            } => {
+                assert_eq!(code, "READ_ONLY");
+                assert_eq!(client_message_id.as_deref(), Some("ro-1"));
+            }
             other => panic!("unexpected: {other:?}"),
         }
     }
 
     #[test]
     fn decode_text_client_message_input_text_forwards_write_input() {
-        let json = r#"{"type":"input_text","data":"hello"}"#;
+        let json = r#"{"type":"input_text","data":"hello","client_message_id":"ack-1"}"#;
         match decode_text_client_message(&operator_auth(), json) {
             WsClientDecision::Forward {
                 cmd: SessionCommand::WriteInputAck { data, .. },
-                ..
+                client_message_id,
             } => {
-                assert_eq!(data, b"hello")
+                assert_eq!(data, b"hello");
+                assert_eq!(client_message_id.as_deref(), Some("ack-1"));
             }
             other => panic!("unexpected: {other:?}"),
         }
@@ -2909,13 +2953,14 @@ mod tests {
 
     #[test]
     fn decode_text_client_message_submit_line_forwards_submit_line() {
-        let json = r#"{"type":"submit_line","data":"hello"}"#;
+        let json = r#"{"type":"submit_line","data":"hello","clientMessageId":"line-1"}"#;
         match decode_text_client_message(&operator_auth(), json) {
             WsClientDecision::Forward {
                 cmd: SessionCommand::SubmitLineAck { text, .. },
-                ..
+                client_message_id,
             } => {
-                assert_eq!(text, "hello")
+                assert_eq!(text, "hello");
+                assert_eq!(client_message_id.as_deref(), Some("line-1"));
             }
             other => panic!("unexpected: {other:?}"),
         }
@@ -2943,9 +2988,17 @@ mod tests {
     #[test]
     fn decode_text_client_message_oversized_submit_line_is_rejected() {
         let big = "x".repeat(MAX_WS_INPUT_BYTES + 1);
-        let json = format!(r#"{{"type":"submit_line","data":"{big}"}}"#);
+        let json =
+            format!(r#"{{"type":"submit_line","data":"{big}","client_message_id":"big-1"}}"#);
         match decode_text_client_message(&operator_auth(), &json) {
-            WsClientDecision::SendError { code, .. } => assert_eq!(code, "INPUT_TOO_LARGE"),
+            WsClientDecision::SendError {
+                code,
+                client_message_id,
+                ..
+            } => {
+                assert_eq!(code, "INPUT_TOO_LARGE");
+                assert_eq!(client_message_id.as_deref(), Some("big-1"));
+            }
             other => panic!("unexpected: {other:?}"),
         }
     }
