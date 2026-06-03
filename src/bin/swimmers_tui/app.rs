@@ -1493,199 +1493,341 @@ impl<C: TuiApi> App<C> {
 
     fn apply_pending_interaction_result(&mut self, result: PendingInteractionResult) {
         match result {
-            PendingInteractionResult::OpenPicker { x, y, response } => match response {
-                Ok(response) => {
-                    let mut picker = PickerState::new(
-                        x,
-                        y,
-                        response,
-                        true,
-                        self.spawn_tool,
-                        self.launch_target.clone(),
-                    );
-                    self.launch_target = picker.launch_target.clone();
-                    picker.sync_theme_colors(&mut self.repo_themes);
-                    self.picker = Some(picker);
-                    self.last_picker_refresh = Some(Instant::now());
-                    self.start_picker_repo_search();
-                }
-                Err(err) => {
-                    self.set_message(err);
-                    self.picker = None;
-                    self.last_picker_refresh = None;
-                }
-            },
+            PendingInteractionResult::OpenPicker { x, y, response } => {
+                self.apply_open_picker_result(x, y, response);
+            }
             PendingInteractionResult::ReloadPicker {
                 managed_only,
                 group,
                 preserve_selection,
                 response,
-            } => match response {
-                Ok(response) => {
-                    if let Some(picker) = &mut self.picker {
-                        picker.managed_only = managed_only;
-                        picker.current_group = group;
-                        picker.apply_response(response, preserve_selection);
-                        self.launch_target = picker.launch_target.clone();
-                        picker.sync_theme_colors(&mut self.repo_themes);
-                        self.last_picker_refresh = Some(Instant::now());
-                    }
-                }
-                Err(err) => self.set_message(err),
-            },
+            } => self.apply_reload_picker_result(managed_only, group, preserve_selection, response),
             PendingInteractionResult::StartRepoAction {
                 repo_label,
                 kind,
                 reload_path,
                 managed_only,
                 response,
-            } => match response {
-                Ok(_) => {
-                    self.set_message(format!("{} started for {repo_label}", kind_label(kind)));
-                    let group = self.picker.as_ref().and_then(|p| p.current_group.clone());
-                    self.picker_reload_with_options(
-                        Some(reload_path),
-                        managed_only,
-                        group,
-                        false,
-                        true,
-                    );
-                }
-                Err(err) => self.set_message(err),
-            },
-            PendingInteractionResult::CreateSession { field, response } => match response {
-                Ok(response) => {
-                    let repo_theme = response.repo_theme.clone();
-                    let session = response.session;
-                    let session_id = session.session_id.clone();
-                    let tmux_name = session.tmux_name.clone();
-                    self.remember_repo_theme(&session, repo_theme);
-                    self.upsert_session(session, field);
-                    self.selected_id = Some(session_id);
-                    self.reconcile_selection();
-                    self.sync_selection_publication();
-                    self.close_picker();
-                    self.set_message(format!("created {tmux_name}"));
-                }
-                Err(err) => self.set_message(err),
-            },
-            PendingInteractionResult::AdoptSession { field, response } => match response {
-                Ok(response) => {
-                    let repo_theme = response.repo_theme.clone();
-                    let session = response.session;
-                    let session_id = session.session_id.clone();
-                    let tmux_name = session.tmux_name.clone();
-                    self.remember_repo_theme(&session, repo_theme);
-                    self.upsert_session(session, field);
-                    self.selected_id = Some(session_id);
-                    self.reconcile_selection();
-                    self.sync_selection_publication();
-                    if response.reused_session_id {
-                        self.set_message(format!("reattached {tmux_name}"));
-                    } else {
-                        self.set_message(format!("adopted {tmux_name}"));
-                    }
-                }
-                Err(err) => self.set_message(err),
-            },
-            PendingInteractionResult::CreateSessionsBatch { field, response } => match response {
-                Ok(response) => self.apply_batch_create_response(field, response),
-                Err(err) => self.set_message(err),
-            },
-            PendingInteractionResult::SendGroupInput { response } => match response {
-                Ok(response) => self.apply_group_input_response(response),
-                Err(err) => self.set_message(err),
-            },
-            PendingInteractionResult::OpenSession { label, response } => match response {
-                Ok(response) => {
-                    self.set_message(format!("{} {}", response.status, label));
-                }
-                Err(err) => self.set_message(err),
-            },
-            PendingInteractionResult::OpenAttentionGroup { focus, response } => match response {
-                Ok(response) => {
-                    let previous = self.attention_group_session_ids.clone();
-                    self.attention_group_session_ids = response.session_ids.clone();
-                    if focus || previous != response.session_ids {
-                        let mut message = format!(
-                            "{} attention group: {} sessions",
-                            response.status, response.session_count
-                        );
-                        if focus && !response.focused {
-                            if let Some(command) = response.attach_command.as_deref() {
-                                message.push_str(" | ");
-                                message.push_str(command);
-                            }
-                        }
-                        self.set_message(message);
-                    }
-                }
-                Err(err) => {
-                    if !focus {
-                        self.attention_group_session_ids.clear();
-                    }
-                    self.set_message(err);
-                }
-            },
-            PendingInteractionResult::ToggleNativeApp { next_app, response } => match response {
-                Ok(status) => {
-                    self.native_status = Some(status.clone());
-                    self.set_message(Self::native_status_message(&status, next_app));
-                }
-                Err(err) => self.set_message(err),
-            },
+            } => self.apply_start_repo_action_result(
+                repo_label,
+                kind,
+                reload_path,
+                managed_only,
+                response,
+            ),
+            PendingInteractionResult::CreateSession { field, response } => {
+                self.apply_create_session_result(field, response);
+            }
+            PendingInteractionResult::AdoptSession { field, response } => {
+                self.apply_adopt_session_result(field, response);
+            }
+            PendingInteractionResult::CreateSessionsBatch { field, response } => {
+                self.apply_create_sessions_batch_result(field, response);
+            }
+            PendingInteractionResult::SendGroupInput { response } => {
+                self.apply_group_input_result(response);
+            }
+            PendingInteractionResult::OpenSession { label, response } => {
+                self.apply_open_session_result(label, response);
+            }
+            PendingInteractionResult::OpenAttentionGroup { focus, response } => {
+                self.apply_attention_group_result(focus, response);
+            }
+            PendingInteractionResult::ToggleNativeApp { next_app, response } => {
+                self.apply_toggle_native_app_result(next_app, response);
+            }
             PendingInteractionResult::ToggleGhosttyMode {
                 next_mode,
                 response,
-            } => match response {
-                Ok(status) => {
-                    self.native_status = Some(status);
-                    self.set_message(format!("Ghostty placement: {}", next_mode.display_label()));
-                }
-                Err(err) => self.set_message(err),
-            },
-            PendingInteractionResult::OpenThoughtConfig { response } => match response {
-                Ok(response) => {
-                    self.daemon_defaults_status =
-                        DaemonDefaultsStatus::from_defaults(response.daemon_defaults.as_ref());
-                    self.thought_config_editor = Some(ThoughtConfigEditorState::new(
-                        response.config,
-                        response.daemon_defaults,
-                    ));
-                }
-                Err(err) => self.set_message(err),
-            },
+            } => self.apply_toggle_ghostty_mode_result(next_mode, response),
+            PendingInteractionResult::OpenThoughtConfig { response } => {
+                self.apply_open_thought_config_result(response);
+            }
             PendingInteractionResult::TestThoughtConfig { outcome }
             | PendingInteractionResult::SaveThoughtConfig { outcome } => {
-                if let Some(candidates) = outcome.openrouter_candidates {
-                    if let Some(editor) = &mut self.thought_config_editor {
-                        editor.replace_openrouter_model_presets(candidates);
-                    }
-                }
-                if let Some(config) = outcome.updated_config {
-                    if let Some(editor) = &mut self.thought_config_editor {
-                        editor.config = config;
-                    }
-                }
-                if outcome.close_editor {
-                    self.close_thought_config_editor();
-                }
-                if outcome.refresh_sessions {
-                    self.pending_refresh = None;
-                    self.spawn_background_refresh(false);
-                }
-                self.set_message(outcome.message);
+                self.apply_thought_config_action_outcome(outcome);
             }
             PendingInteractionResult::VoiceTranscription {
                 generation,
                 response,
-            } => match response {
-                Ok(transcript) => self.insert_voice_transcript(generation, transcript),
-                Err(err) => {
-                    self.voice_state = VoiceUiState::Failed(err.clone());
-                    self.set_message(err);
+            } => self.apply_voice_transcription_result(generation, response),
+        }
+    }
+
+    fn apply_open_picker_result(
+        &mut self,
+        x: u16,
+        y: u16,
+        response: Result<DirListResponse, String>,
+    ) {
+        match response {
+            Ok(response) => {
+                let mut picker = PickerState::new(
+                    x,
+                    y,
+                    response,
+                    true,
+                    self.spawn_tool,
+                    self.launch_target.clone(),
+                );
+                self.launch_target = picker.launch_target.clone();
+                picker.sync_theme_colors(&mut self.repo_themes);
+                self.picker = Some(picker);
+                self.last_picker_refresh = Some(Instant::now());
+                self.start_picker_repo_search();
+            }
+            Err(err) => {
+                self.set_message(err);
+                self.picker = None;
+                self.last_picker_refresh = None;
+            }
+        }
+    }
+
+    fn apply_reload_picker_result(
+        &mut self,
+        managed_only: bool,
+        group: Option<String>,
+        preserve_selection: bool,
+        response: Result<DirListResponse, String>,
+    ) {
+        match response {
+            Ok(response) => {
+                if let Some(picker) = &mut self.picker {
+                    picker.managed_only = managed_only;
+                    picker.current_group = group;
+                    picker.apply_response(response, preserve_selection);
+                    self.launch_target = picker.launch_target.clone();
+                    picker.sync_theme_colors(&mut self.repo_themes);
+                    self.last_picker_refresh = Some(Instant::now());
                 }
-            },
+            }
+            Err(err) => self.set_message(err),
+        }
+    }
+
+    fn apply_start_repo_action_result(
+        &mut self,
+        repo_label: String,
+        kind: RepoActionKind,
+        reload_path: String,
+        managed_only: bool,
+        response: Result<DirRepoActionResponse, String>,
+    ) {
+        match response {
+            Ok(_) => {
+                self.set_message(format!("{} started for {repo_label}", kind_label(kind)));
+                let group = self.picker.as_ref().and_then(|p| p.current_group.clone());
+                self.picker_reload_with_options(
+                    Some(reload_path),
+                    managed_only,
+                    group,
+                    false,
+                    true,
+                );
+            }
+            Err(err) => self.set_message(err),
+        }
+    }
+
+    fn apply_create_session_result(
+        &mut self,
+        field: Rect,
+        response: Result<CreateSessionResponse, String>,
+    ) {
+        match response {
+            Ok(response) => {
+                let tmux_name = self.remember_and_upsert_pending_session(
+                    field,
+                    response.session,
+                    response.repo_theme,
+                );
+                self.close_picker();
+                self.set_message(format!("created {tmux_name}"));
+            }
+            Err(err) => self.set_message(err),
+        }
+    }
+
+    fn apply_adopt_session_result(
+        &mut self,
+        field: Rect,
+        response: Result<AdoptSessionResponse, String>,
+    ) {
+        match response {
+            Ok(response) => {
+                let reused_session_id = response.reused_session_id;
+                let tmux_name = self.remember_and_upsert_pending_session(
+                    field,
+                    response.session,
+                    response.repo_theme,
+                );
+                if reused_session_id {
+                    self.set_message(format!("reattached {tmux_name}"));
+                } else {
+                    self.set_message(format!("adopted {tmux_name}"));
+                }
+            }
+            Err(err) => self.set_message(err),
+        }
+    }
+
+    fn remember_and_upsert_pending_session(
+        &mut self,
+        field: Rect,
+        session: SessionSummary,
+        repo_theme: Option<RepoTheme>,
+    ) -> String {
+        let session_id = session.session_id.clone();
+        let tmux_name = session.tmux_name.clone();
+        self.remember_repo_theme(&session, repo_theme);
+        self.upsert_session(session, field);
+        self.selected_id = Some(session_id);
+        self.reconcile_selection();
+        self.sync_selection_publication();
+        tmux_name
+    }
+
+    fn apply_create_sessions_batch_result(
+        &mut self,
+        field: Rect,
+        response: Result<CreateSessionsBatchResponse, String>,
+    ) {
+        match response {
+            Ok(response) => self.apply_batch_create_response(field, response),
+            Err(err) => self.set_message(err),
+        }
+    }
+
+    fn apply_group_input_result(&mut self, response: Result<SessionGroupInputResponse, String>) {
+        match response {
+            Ok(response) => self.apply_group_input_response(response),
+            Err(err) => self.set_message(err),
+        }
+    }
+
+    fn apply_open_session_result(
+        &mut self,
+        label: String,
+        response: Result<NativeDesktopOpenResponse, String>,
+    ) {
+        match response {
+            Ok(response) => {
+                self.set_message(format!("{} {}", response.status, label));
+            }
+            Err(err) => self.set_message(err),
+        }
+    }
+
+    fn apply_attention_group_result(
+        &mut self,
+        focus: bool,
+        response: Result<NativeAttentionGroupOpenResponse, String>,
+    ) {
+        match response {
+            Ok(response) => {
+                let previous = self.attention_group_session_ids.clone();
+                self.attention_group_session_ids = response.session_ids.clone();
+                if focus || previous != response.session_ids {
+                    let mut message = format!(
+                        "{} attention group: {} sessions",
+                        response.status, response.session_count
+                    );
+                    if focus && !response.focused {
+                        if let Some(command) = response.attach_command.as_deref() {
+                            message.push_str(" | ");
+                            message.push_str(command);
+                        }
+                    }
+                    self.set_message(message);
+                }
+            }
+            Err(err) => {
+                if !focus {
+                    self.attention_group_session_ids.clear();
+                }
+                self.set_message(err);
+            }
+        }
+    }
+
+    fn apply_toggle_native_app_result(
+        &mut self,
+        next_app: NativeDesktopApp,
+        response: Result<NativeDesktopStatusResponse, String>,
+    ) {
+        match response {
+            Ok(status) => {
+                self.native_status = Some(status.clone());
+                self.set_message(Self::native_status_message(&status, next_app));
+            }
+            Err(err) => self.set_message(err),
+        }
+    }
+
+    fn apply_toggle_ghostty_mode_result(
+        &mut self,
+        next_mode: GhosttyOpenMode,
+        response: Result<NativeDesktopStatusResponse, String>,
+    ) {
+        match response {
+            Ok(status) => {
+                self.native_status = Some(status);
+                self.set_message(format!("Ghostty placement: {}", next_mode.display_label()));
+            }
+            Err(err) => self.set_message(err),
+        }
+    }
+
+    fn apply_open_thought_config_result(
+        &mut self,
+        response: Result<ThoughtConfigResponse, String>,
+    ) {
+        match response {
+            Ok(response) => {
+                self.daemon_defaults_status =
+                    DaemonDefaultsStatus::from_defaults(response.daemon_defaults.as_ref());
+                self.thought_config_editor = Some(ThoughtConfigEditorState::new(
+                    response.config,
+                    response.daemon_defaults,
+                ));
+            }
+            Err(err) => self.set_message(err),
+        }
+    }
+
+    fn apply_thought_config_action_outcome(&mut self, outcome: ThoughtConfigActionOutcome) {
+        if let Some(candidates) = outcome.openrouter_candidates {
+            if let Some(editor) = &mut self.thought_config_editor {
+                editor.replace_openrouter_model_presets(candidates);
+            }
+        }
+        if let Some(config) = outcome.updated_config {
+            if let Some(editor) = &mut self.thought_config_editor {
+                editor.config = config;
+            }
+        }
+        if outcome.close_editor {
+            self.close_thought_config_editor();
+        }
+        if outcome.refresh_sessions {
+            self.pending_refresh = None;
+            self.spawn_background_refresh(false);
+        }
+        self.set_message(outcome.message);
+    }
+
+    fn apply_voice_transcription_result(
+        &mut self,
+        generation: u64,
+        response: Result<String, String>,
+    ) {
+        match response {
+            Ok(transcript) => self.insert_voice_transcript(generation, transcript),
+            Err(err) => {
+                self.voice_state = VoiceUiState::Failed(err.clone());
+                self.set_message(err);
+            }
         }
     }
 
