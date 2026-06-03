@@ -2,8 +2,14 @@ use super::*;
 
 #[path = "events_mermaid.rs"]
 mod events_mermaid;
+#[path = "events_picker.rs"]
+mod events_picker;
 
 use events_mermaid::handle_mermaid_key;
+use events_picker::{
+    handle_picker_command_key, handle_picker_priority_key, handle_picker_search_key,
+    handle_selection_key,
+};
 
 pub(crate) enum TuiClient {
     Embedded(in_process::InProcessApi),
@@ -446,85 +452,6 @@ fn handle_modal_key<C: TuiApi>(
     None
 }
 
-fn handle_picker_priority_key<C: TuiApi>(
-    app: &mut App<C>,
-    layout: WorkspaceLayout,
-    key: KeyEvent,
-) -> Option<bool> {
-    app.picker.as_ref()?;
-
-    if app.picker.is_some() && matches!(key.code, KeyCode::Char('B')) {
-        app.open_batch_initial_request_for_visible_entries();
-        return Some(true);
-    }
-
-    if app.picker.is_some() && matches!(key.code, KeyCode::Char('X')) {
-        app.handle_picker_action(PickerAction::ToggleBatchExcludeMode, layout.overview_field);
-        return Some(true);
-    }
-
-    if app.picker.is_some() && matches!(key.code, KeyCode::Char('G')) {
-        app.picker_cycle_group_edit_target();
-        return Some(true);
-    }
-
-    if app.picker.is_some() && matches!(key.code, KeyCode::Char('+') | KeyCode::Char('=')) {
-        app.picker_add_selected_to_group_target();
-        return Some(true);
-    }
-
-    if app.picker.is_some() && matches!(key.code, KeyCode::Char('-')) {
-        app.picker_remove_selected_from_group_target();
-        return Some(true);
-    }
-
-    if app.picker.is_some() && matches!(key.code, KeyCode::Char('M')) {
-        app.picker_move_selected_to_group_target();
-        return Some(true);
-    }
-
-    if app
-        .picker
-        .as_ref()
-        .map(|picker| picker.batch_exclude_mode)
-        .unwrap_or(false)
-        && matches!(key.code, KeyCode::Char(' '))
-    {
-        if let Some(index) = app
-            .picker
-            .as_ref()
-            .and_then(|picker| match picker.selection {
-                PickerSelection::Entry(index) => Some(index),
-                PickerSelection::SpawnHere => None,
-            })
-        {
-            app.handle_picker_action(
-                PickerAction::ToggleBatchExclude(index),
-                layout.overview_field,
-            );
-        }
-        return Some(true);
-    }
-
-    None
-}
-
-fn handle_picker_search_key<C: TuiApi>(app: &mut App<C>, key: KeyEvent) -> Option<bool> {
-    if app.picker.is_some() {
-        let no_mods = key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT;
-        if no_mods {
-            if let KeyCode::Char(c) = key.code {
-                if !c.is_control() {
-                    app.picker_search_push(c);
-                    return Some(true);
-                }
-            }
-        }
-    }
-
-    None
-}
-
 fn handle_workspace_key<C: TuiApi>(
     app: &mut App<C>,
     layout: WorkspaceLayout,
@@ -558,95 +485,6 @@ fn handle_quit_or_escape_key<C: TuiApi>(app: &mut App<C>, key: KeyEvent) -> Opti
             } else {
                 Some(false)
             }
-        }
-        _ => None,
-    }
-}
-
-fn handle_selection_key<C: TuiApi>(
-    app: &mut App<C>,
-    layout: WorkspaceLayout,
-    key: KeyEvent,
-) -> Option<bool> {
-    match key.code {
-        KeyCode::Backspace => {
-            if app.picker_search_pop() {
-                return Some(true);
-            }
-            if app.picker.is_some() {
-                app.picker_up();
-            } else {
-                app.move_selection(-1, layout.overview_field);
-            }
-            Some(true)
-        }
-        KeyCode::Left | KeyCode::Char('h') => {
-            if app.picker.is_some() {
-                app.picker_up();
-            } else {
-                app.move_selection(-1, layout.overview_field);
-            }
-            Some(true)
-        }
-        KeyCode::Up | KeyCode::Char('k') => {
-            app.move_selection(-1, layout.overview_field);
-            Some(true)
-        }
-        KeyCode::Down | KeyCode::Char('j') => {
-            app.move_selection(1, layout.overview_field);
-            Some(true)
-        }
-        KeyCode::Right | KeyCode::Char('l') | KeyCode::Enter | KeyCode::Char('o') => {
-            if app.picker.is_some() {
-                app.picker_activate_selection(layout.overview_field);
-            } else {
-                app.open_selected();
-            }
-            Some(true)
-        }
-        _ => None,
-    }
-}
-
-fn handle_picker_command_key<C: TuiApi>(
-    app: &mut App<C>,
-    layout: WorkspaceLayout,
-    key: KeyEvent,
-) -> Option<bool> {
-    match key.code {
-        KeyCode::Char('e') => {
-            app.picker_set_managed_only(true);
-            Some(true)
-        }
-        KeyCode::Char('a') => {
-            app.picker_set_managed_only(false);
-            Some(true)
-        }
-        KeyCode::Char('c') if app.picker.is_some() => {
-            app.picker_start_action_for_selection(RepoActionKind::Commit);
-            Some(true)
-        }
-        KeyCode::Char('R') if app.picker.is_some() => {
-            app.picker_start_action_for_selection(RepoActionKind::Restart);
-            Some(true)
-        }
-        KeyCode::Char('O') if app.picker.is_some() => {
-            app.picker_open_url_for_selection();
-            Some(true)
-        }
-        KeyCode::Char('r') => {
-            if let Some((path, managed_only, group)) = app.picker.as_ref().map(|picker| {
-                (
-                    picker.current_path.clone(),
-                    picker.managed_only,
-                    picker.current_group.clone(),
-                )
-            }) {
-                app.picker_reload(Some(path), managed_only, group);
-            } else {
-                app.manual_refresh(layout);
-            }
-            Some(true)
         }
         _ => None,
     }
