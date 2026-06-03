@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 
 import {
   buildCommandPaletteItems,
+  commandPaletteExecutionPlan,
   commandPaletteScore,
   commandPaletteSessionDisplayName,
   filterCommandPaletteItems,
@@ -109,4 +110,24 @@ test("command palette result markup helper preserves escaping, active state, and
   assert.match(html, /ready &amp; waiting/);
   assert.match(html, /Send &quot;quote&quot;/);
   assert.match(html, /palette-item-meta">unavailable</);
+});
+
+test("command palette execution plan helper preserves no-ops and dispatch ordering", () => {
+  const action = () => "copied";
+
+  assert.deepEqual(commandPaletteExecutionPlan(null), { type: "none" });
+  assert.deepEqual(commandPaletteExecutionPlan({ disabled: true, action }), { type: "none" });
+  assert.deepEqual(commandPaletteExecutionPlan({ label: "Inert" }), { type: "none" });
+  assert.deepEqual(
+    commandPaletteExecutionPlan({ sessionId: "sess_1", action, actionId: "refresh" }),
+    { type: "selectSession", sessionId: "sess_1" },
+  );
+  assert.deepEqual(commandPaletteExecutionPlan({ actionId: "refresh" }), {
+    type: "dispatchAction",
+    actionId: "refresh",
+  });
+
+  const plan = commandPaletteExecutionPlan({ action });
+  assert.equal(plan.type, "invokeAction");
+  assert.equal(plan.action, action);
 });

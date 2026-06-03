@@ -98,6 +98,22 @@ export function filteredCommandPaletteItemsForState({
   );
 }
 
+export function commandPaletteExecutionPlan(item) {
+  if (!item || item.disabled) {
+    return { type: "none" };
+  }
+  if (item.sessionId) {
+    return { type: "selectSession", sessionId: item.sessionId };
+  }
+  if (typeof item.action === "function") {
+    return { type: "invokeAction", action: item.action };
+  }
+  if (item.actionId) {
+    return { type: "dispatchAction", actionId: item.actionId };
+  }
+  return { type: "none" };
+}
+
 export function renderCommandPaletteResultsHtml(items = [], activeIndex = 0) {
   if (!items.length) {
     return `<div class="sheet-copy">No matching commands.</div>`;

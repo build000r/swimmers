@@ -33,6 +33,7 @@ import {
   visibleSelectableDirPaths as dirBrowserVisibleSelectableDirPaths,
 } from "./dir_browser.js";
 import {
+  commandPaletteExecutionPlan,
   filteredCommandPaletteItemsForState,
   renderCommandPaletteResultsHtml,
 } from "./command_palette.js";
@@ -4536,23 +4537,21 @@ function renderCommandPalette() {
 }
 
 async function runCommandPaletteItem(item = state.paletteItems[state.paletteIndex]) {
-  if (!item || item.disabled) {
+  const plan = commandPaletteExecutionPlan(item);
+  if (plan.type === "none") {
     return false;
   }
   closeSheets();
-  if (item.sessionId) {
-    await selectSession(item.sessionId);
-    return true;
+  if (plan.type === "selectSession") {
+    await selectSession(plan.sessionId);
+  } else if (plan.type === "invokeAction") {
+    await plan.action();
+  } else if (plan.type === "dispatchAction") {
+    await handleSurfaceAction({ type: "action", actionId: plan.actionId });
+  } else {
+    return false;
   }
-  if (typeof item.action === "function") {
-    await item.action();
-    return true;
-  }
-  if (item.actionId) {
-    await handleSurfaceAction({ type: "action", actionId: item.actionId });
-    return true;
-  }
-  return false;
+  return true;
 }
 
 function openCommandPalette() {

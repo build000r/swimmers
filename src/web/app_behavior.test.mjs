@@ -1963,6 +1963,26 @@ test("command palette filters existing actions without touching terminal input",
   assert.equal(web.el.terminalStage.classList.contains("terminal-view-active"), true);
 });
 
+test("command palette run path preserves disabled no-op, actions, and actionId dispatch", async () => {
+  resetWebState();
+  web.state.selectedSessionId = "sess_0";
+  web.state.trogdorAtlasOpen = false;
+  web.state.activeSheet = "palette";
+  let actionCalls = 0;
+
+  assert.equal(await web.runCommandPaletteItem({ disabled: true, action: () => { actionCalls += 1; } }), false);
+  assert.equal(actionCalls, 0);
+  assert.equal(web.state.activeSheet, "palette");
+
+  assert.equal(await web.runCommandPaletteItem({ action: async () => { actionCalls += 1; } }), true);
+  assert.equal(actionCalls, 1);
+  assert.equal(web.state.activeSheet, null);
+
+  web.state.activeSheet = "palette";
+  assert.equal(await web.runCommandPaletteItem({ actionId: "open_auth" }), true);
+  assert.equal(web.state.activeSheet, "auth");
+});
+
 test("send history stores multiline prompts for recall chips", () => {
   resetWebState();
 
