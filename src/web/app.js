@@ -1,10 +1,7 @@
 import { buildSurfaceFrame, surfaceActionAt, surfaceConsumesPointer } from "./rendered_surface.js";
 import {
-  eventCell,
-  globalShortcutPlan,
-  mobileKeyboardInputPlan,
-  mobileKeyboardKeyPlan,
-  shouldIgnoreSyntheticClick,
+  authTokenButtonPlan, eventCell, globalShortcutPlan, mobileKeyboardInputPlan,
+  mobileKeyboardKeyPlan, shouldIgnoreSyntheticClick,
   terminalComposerControlAction, terminalKeyStripClickPlan,
 } from "./input_support.js";
 import { sendHistoryClickPlan, sendSheetFailureStatus, sendSheetSubmitPlan, sendSheetSuccessStatus } from "./send_sheet.js";
@@ -4312,6 +4309,18 @@ async function handleSendFormSubmit(event) {
   }
 }
 
+async function handleAuthTokenButtonAction(action) {
+  const plan = authTokenButtonPlan(action, el.tokenInput.value);
+  if (plan.type === "ignore") return false;
+  persistToken(plan.token);
+  if (plan.resetReadOnly) {
+    state.readOnly = false;
+    syncWriteAccess();
+  }
+  closeSheets();
+  return refreshSessions().then(() => true);
+}
+
 function sendTargetReady() {
   if (state.readOnly) {
     return false;
@@ -5475,18 +5484,8 @@ function bindEvents() {
     }
   });
 
-  el.saveTokenButton.addEventListener("click", async () => {
-    persistToken(el.tokenInput.value);
-    closeSheets();
-    await refreshSessions();
-  });
-  el.clearTokenButton.addEventListener("click", async () => {
-    persistToken("");
-    state.readOnly = false;
-    syncWriteAccess();
-    closeSheets();
-    await refreshSessions();
-  });
+  el.saveTokenButton.addEventListener("click", () => handleAuthTokenButtonAction("save"));
+  el.clearTokenButton.addEventListener("click", () => handleAuthTokenButtonAction("clear"));
   el.authCloseButton.addEventListener("click", closeSheets);
 
   el.createForm.addEventListener("submit", async (event) => {
@@ -6006,7 +6005,7 @@ export const __swimmersWebTest = {
   sendTerminalControlKey,
   terminalKeyActionForDomEvent,
   handleTerminalInlineInputKeydown,
-  handleSendFormSubmit,
+  handleSendFormSubmit, handleAuthTokenButtonAction,
   focusTerminalInputSurface,
   syncTerminalInputDock,
   submitTerminalInputDock,

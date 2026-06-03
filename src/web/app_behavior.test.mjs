@@ -2290,6 +2290,39 @@ test("send history stores multiline prompts for recall chips", () => {
   assert.ok(web.el.sendHistory.innerHTML.includes("first line second line"));
 });
 
+test("auth token button action preserves save, clear, and refresh side effects", async () => {
+  resetWebState();
+  const requests = [];
+  globalThis.fetch = async (path, init = {}) => {
+    requests.push({ path: String(path), authorization: init.headers?.Authorization ?? null });
+    return path === "/v1/sessions"
+      ? jsonResponse(200, { sessions: [rawSession()] })
+      : jsonResponse(404, { message: "not found" });
+  };
+
+  web.state.activeSheet = "auth";
+  web.el.tokenInput.value = " operator-token ";
+  assert.equal(await web.handleAuthTokenButtonAction("save"), true);
+  assert.equal(web.state.token, "operator-token");
+  assert.equal(web.el.tokenInput.value, "operator-token");
+  assert.equal(storage.get("swimmers.web.token"), "operator-token");
+  assert.equal(web.state.activeSheet, null);
+  assert.equal(requests.find((request) => request.path === "/v1/sessions")?.authorization, "Bearer operator-token");
+
+  requests.length = 0;
+  web.state.activeSheet = "auth";
+  web.state.readOnly = true;
+  web.el.sendInput.disabled = true;
+  web.el.tokenInput.value = "ignored";
+  assert.equal(await web.handleAuthTokenButtonAction("clear"), true);
+  assert.equal(web.state.token, "");
+  assert.equal(storage.has("swimmers.web.token"), false);
+  assert.equal(web.state.readOnly, false);
+  assert.equal(web.el.sendInput.disabled, false);
+  assert.equal(web.state.activeSheet, null);
+  assert.equal(requests.find((request) => request.path === "/v1/sessions")?.authorization, null);
+});
+
 test("send form submit handler preserves line send side effects and cleanup", async () => {
   resetWebState();
   web.state.trogdorAtlasOpen = false;

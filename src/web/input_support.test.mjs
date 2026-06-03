@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
-  eventCell,
+  authTokenButtonPlan, eventCell,
   eventClientPoint,
   globalShortcutPlan,
   mobileKeyboardInputPlan,
@@ -46,6 +46,20 @@ test("eventCell maps touch coordinates into the rendered grid", () => {
 test("shouldIgnoreSyntheticClick suppresses the follow-up click after a handled press", () => {
   assert.equal(shouldIgnoreSyntheticClick(100, 120), true);
   assert.equal(shouldIgnoreSyntheticClick(140, 120), false);
+});
+
+test("authTokenButtonPlan preserves save, clear, and ignored actions", () => {
+  assert.deepEqual(authTokenButtonPlan("save", " token\n"), {
+    type: "persist",
+    token: " token\n",
+    resetReadOnly: false,
+  });
+  assert.deepEqual(authTokenButtonPlan("clear", "ignored"), {
+    type: "persist",
+    token: "",
+    resetReadOnly: true,
+  });
+  assert.deepEqual(authTokenButtonPlan("unknown", "secret"), { type: "ignore" });
 });
 
 test("globalShortcutPlan preserves modifier precedence and escape ordering", () => {

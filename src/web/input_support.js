@@ -37,6 +37,17 @@ export function shouldIgnoreSyntheticClick(nowMs, suppressUntilMs) {
   return Number.isFinite(suppressUntilMs) && nowMs <= suppressUntilMs;
 }
 
+export function authTokenButtonPlan(action, tokenValue = "") {
+  switch (action) {
+    case "save":
+      return { type: "persist", token: String(tokenValue ?? ""), resetReadOnly: false };
+    case "clear":
+      return { type: "persist", token: "", resetReadOnly: true };
+    default:
+      return { type: "ignore" };
+  }
+}
+
 export function globalShortcutPlan(event, context = {}) {
   if ((event?.ctrlKey || event?.metaKey) && !event?.altKey) {
     switch (event.code) {
