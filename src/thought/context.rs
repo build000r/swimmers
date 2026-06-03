@@ -976,24 +976,12 @@ impl CodexReader {
     }
 
     fn capture_codex_reasoning_summary(&mut self, entry_type: &str, payload: &Value) {
-        if entry_type != "response_item"
-            || payload.get("type").and_then(Value::as_str) != Some("reasoning")
-        {
+        if !is_codex_reasoning_response_item(entry_type, payload) {
             return;
         }
 
-        for summary in payload
-            .get("summary")
-            .and_then(Value::as_array)
-            .into_iter()
-            .flatten()
-        {
-            if summary.get("type").and_then(Value::as_str) != Some("summary_text") {
-                continue;
-            }
-            if let Some(text) = summary.get("text").and_then(Value::as_str) {
-                self.set_codex_thinking(text);
-            }
+        for text in codex_reasoning_summary_texts(payload) {
+            self.set_codex_thinking(text);
         }
     }
 
@@ -1234,6 +1222,26 @@ fn parse_codex_function_call_detail(args_str: &str) -> Option<String> {
         })
 }
 
+fn is_codex_reasoning_response_item(entry_type: &str, payload: &Value) -> bool {
+    entry_type == "response_item"
+        && payload.get("type").and_then(Value::as_str) == Some("reasoning")
+}
+
+fn codex_reasoning_summary_texts(payload: &Value) -> impl Iterator<Item = &str> {
+    payload
+        .get("summary")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(codex_reasoning_summary_text)
+}
+
+fn codex_reasoning_summary_text(summary: &Value) -> Option<&str> {
+    (summary.get("type").and_then(Value::as_str) == Some("summary_text"))
+        .then(|| summary.get("text").and_then(Value::as_str))
+        .flatten()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1376,6 +1384,77 @@ mod tests {
 
         assert_eq!(reader.token_count, 12_345);
         assert_eq!(reader.context_limit, default_limit);
+    }
+
+    #[test]
+    fn codex_reader_captures_last_reasoning_summary_text() {
+        let mut reader = CodexReader::new("/tmp", &[]);
+        let entries = test_entries(vec![serde_json::json!({
+            "type": "response_item",
+            "payload": {
+                "type": "reasoning",
+                "summary": [
+                    { "type": "other", "text": "ignored" },
+                    { "type": "summary_text", "text": "first summary" },
+                    { "type": "summary_text" },
+                    { "type": "summary_text", "text": "final summary" }
+                ]
+            }
+        })]);
+
+        reader.parse_entries(&entries);
+
+        let current_tool = reader
+            .current_tool
+            .expect("summary should set thinking tool");
+        assert_eq!(current_tool.tool, "thinking");
+        assert_eq!(current_tool.detail.as_deref(), Some("final summary"));
+    }
+
+    #[test]
+    fn codex_reader_ignores_non_reasoning_summary_payloads() {
+        let mut reader = CodexReader::new("/tmp", &[]);
+        let entries = test_entries(vec![
+            serde_json::json!({
+                "type": "event_msg",
+                "payload": {
+                    "type": "reasoning",
+                    "summary": [{ "type": "summary_text", "text": "wrong entry type" }]
+                }
+            }),
+            serde_json::json!({
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "summary": [{ "type": "summary_text", "text": "wrong payload type" }]
+                }
+            }),
+        ]);
+
+        reader.parse_entries(&entries);
+
+        assert!(reader.current_tool.is_none());
+    }
+
+    #[test]
+    fn codex_reader_truncates_reasoning_summary_thinking_detail() {
+        let mut reader = CodexReader::new("/tmp", &[]);
+        let long_summary = "x".repeat(120);
+        let entries = test_entries(vec![serde_json::json!({
+            "type": "response_item",
+            "payload": {
+                "type": "reasoning",
+                "summary": [{ "type": "summary_text", "text": long_summary }]
+            }
+        })]);
+
+        reader.parse_entries(&entries);
+
+        let current_tool = reader
+            .current_tool
+            .expect("summary should set thinking tool");
+        let expected = "x".repeat(100);
+        assert_eq!(current_tool.detail.as_deref(), Some(expected.as_str()));
     }
 
     #[test]
