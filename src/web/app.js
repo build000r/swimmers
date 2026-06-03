@@ -5390,6 +5390,24 @@ function handleSearchClearButtonClick() { el.terminalSearch.value = ""; applySea
 
 function handleSendModeChange() { updateSendHint(); }
 
+async function handleThoughtConfigFormSubmit(event) { event.preventDefault(); await saveThoughtConfig(); }
+
+function handleThoughtConfigBackendChange() { el.thoughtConfigModel.value = normalizeThoughtModelForBackend(el.thoughtConfigBackend.value, el.thoughtConfigModel.value); renderThoughtConfigOptions(); syncSheetActionAvailability(); }
+
+function handleThoughtConfigOptionChange() { syncSheetActionAvailability(); }
+
+async function handleThoughtConfigTestButtonClick() { await testThoughtConfig(); }
+
+async function handleNativeFormSubmit(event) { event.preventDefault(); await saveNativeSettings(); }
+
+async function handleNativeRefreshButtonClick() { await refreshNativeStatus(); }
+
+async function handleNativeOpenButtonClick() { await openSelectedNativeSession(); }
+
+function handleNativeAppChange() { el.nativeMode.disabled = String(el.nativeApp.value).toLowerCase() !== "ghostty"; syncSheetActionAvailability(); }
+
+function handleNativeModeChange() { syncSheetActionAvailability(); }
+
 function bindEvents() {
   bindTrogdorEvents();
   document.addEventListener?.("keydown", handleDocumentCommandPaletteShortcut);
@@ -5439,47 +5457,19 @@ function bindEvents() {
   el.searchCloseButton.addEventListener("click", closeSheets);
   el.sendMode.addEventListener("change", handleSendModeChange);
 
-  el.thoughtConfigForm.addEventListener("submit", async (event) => {
-    event.preventDefault();
-    await saveThoughtConfig();
-  });
-  el.thoughtConfigBackend.addEventListener("change", () => {
-    el.thoughtConfigModel.value = normalizeThoughtModelForBackend(
-      el.thoughtConfigBackend.value,
-      el.thoughtConfigModel.value,
-    );
-    renderThoughtConfigOptions();
-    syncSheetActionAvailability();
-  });
-  el.thoughtConfigModel.addEventListener("input", () => {
-    syncSheetActionAvailability();
-  });
-  el.thoughtConfigEnabled.addEventListener("change", () => {
-    syncSheetActionAvailability();
-  });
-  el.thoughtConfigTestButton.addEventListener("click", async () => {
-    await testThoughtConfig();
-  });
+  el.thoughtConfigForm.addEventListener("submit", handleThoughtConfigFormSubmit);
+  el.thoughtConfigBackend.addEventListener("change", handleThoughtConfigBackendChange);
+  el.thoughtConfigModel.addEventListener("input", handleThoughtConfigOptionChange);
+  el.thoughtConfigEnabled.addEventListener("change", handleThoughtConfigOptionChange);
+  el.thoughtConfigTestButton.addEventListener("click", handleThoughtConfigTestButtonClick);
   el.thoughtConfigCloseButton.addEventListener("click", closeSheets);
 
-  el.nativeForm.addEventListener("submit", async (event) => {
-    event.preventDefault();
-    await saveNativeSettings();
-  });
-  el.nativeRefreshButton.addEventListener("click", async () => {
-    await refreshNativeStatus();
-  });
-  el.nativeOpenButton.addEventListener("click", async () => {
-    await openSelectedNativeSession();
-  });
+  el.nativeForm.addEventListener("submit", handleNativeFormSubmit);
+  el.nativeRefreshButton.addEventListener("click", handleNativeRefreshButtonClick);
+  el.nativeOpenButton.addEventListener("click", handleNativeOpenButtonClick);
   el.nativeCloseButton.addEventListener("click", closeSheets);
-  el.nativeApp.addEventListener("change", () => {
-    el.nativeMode.disabled = String(el.nativeApp.value).toLowerCase() !== "ghostty";
-    syncSheetActionAvailability();
-  });
-  el.nativeMode.addEventListener("change", () => {
-    syncSheetActionAvailability();
-  });
+  el.nativeApp.addEventListener("change", handleNativeAppChange);
+  el.nativeMode.addEventListener("change", handleNativeModeChange);
 
   el.sendForm.addEventListener("submit", handleSendFormSubmit);
   el.sendCloseButton.addEventListener("click", () => {
