@@ -2105,61 +2105,113 @@ impl<C: TuiApi> App<C> {
 
     pub(crate) fn apply_refresh_result(&mut self, result: RefreshResult, layout: WorkspaceLayout) {
         match result.sessions {
-            Ok(sessions) => {
-                self.sync_repo_themes(&sessions, result.force_asset_refresh);
-
-                self.retain_cached_assets(&sessions);
-                let sessions_by_id = sessions
-                    .iter()
-                    .map(|session| (session.session_id.as_str(), session))
-                    .collect::<HashMap<_, _>>();
-                for (session_id, artifact_result) in result.mermaid_artifacts {
-                    if let Some(session) = sessions_by_id.get(session_id.as_str()) {
-                        self.apply_mermaid_artifact_result(session, artifact_result);
-                    }
-                }
-                for (session_id, skills_result) in result.session_skills {
-                    if let Some(session) = sessions_by_id.get(session_id.as_str()) {
-                        self.apply_session_skill_result(session, skills_result);
-                    }
-                }
-                self.rebuild_mermaid_artifacts_from_cache();
-
-                self.reconcile_thought_log_sessions(&sessions);
-                self.capture_thought_updates(&sessions, layout.thought_entry_capacity());
-                self.merge_sessions(sessions, layout.overview_field);
-                self.last_successful_refresh = Some(Instant::now());
-                self.api_refresh_health.record_success();
-
-                if result.show_success_message {
-                    let count = self.entities.len();
-                    self.set_message(format!("refreshed {count} session{}", pluralize(count)));
-                }
-            }
+            Ok(sessions) => self.apply_successful_refresh(
+                sessions,
+                result.mermaid_artifacts,
+                result.session_skills,
+                result.force_asset_refresh,
+                result.show_success_message,
+                layout,
+            ),
             Err(err) => {
                 self.set_message(self.refresh_error_message(err));
                 self.api_refresh_health.record_failure();
             }
         }
 
-        if let Some(native_result) = result.native_status {
-            match native_result {
-                Ok(status) => {
-                    self.native_status = Some(status);
-                }
-                Err(err) => {
-                    self.set_message(self.refresh_error_message(err));
-                }
+        self.apply_refresh_metadata(
+            result.native_status,
+            result.backend_health,
+            result.daemon_defaults_status,
+        );
+        self.last_refresh = Some(Instant::now());
+    }
+
+    fn apply_successful_refresh(
+        &mut self,
+        sessions: Vec<SessionSummary>,
+        mermaid_artifacts: Vec<(String, Result<MermaidArtifactResponse, String>)>,
+        session_skills: Vec<(String, Result<SessionSkillListResponse, String>)>,
+        force_asset_refresh: bool,
+        show_success_message: bool,
+        layout: WorkspaceLayout,
+    ) {
+        self.sync_repo_themes(&sessions, force_asset_refresh);
+        self.apply_refresh_assets(&sessions, mermaid_artifacts, session_skills);
+        self.reconcile_thought_log_sessions(&sessions);
+        self.capture_thought_updates(&sessions, layout.thought_entry_capacity());
+        self.merge_sessions(sessions, layout.overview_field);
+        self.last_successful_refresh = Some(Instant::now());
+        self.api_refresh_health.record_success();
+        self.maybe_show_refresh_success_message(show_success_message);
+    }
+
+    fn apply_refresh_assets(
+        &mut self,
+        sessions: &[SessionSummary],
+        mermaid_artifacts: Vec<(String, Result<MermaidArtifactResponse, String>)>,
+        session_skills: Vec<(String, Result<SessionSkillListResponse, String>)>,
+    ) {
+        self.retain_cached_assets(sessions);
+        let sessions_by_id = sessions
+            .iter()
+            .map(|session| (session.session_id.as_str(), session))
+            .collect::<HashMap<_, _>>();
+        for (session_id, artifact_result) in mermaid_artifacts {
+            if let Some(session) = sessions_by_id.get(session_id.as_str()) {
+                self.apply_mermaid_artifact_result(session, artifact_result);
             }
         }
-        if let Ok(health) = result.backend_health {
+        for (session_id, skills_result) in session_skills {
+            if let Some(session) = sessions_by_id.get(session_id.as_str()) {
+                self.apply_session_skill_result(session, skills_result);
+            }
+        }
+        self.rebuild_mermaid_artifacts_from_cache();
+    }
+
+    fn maybe_show_refresh_success_message(&mut self, show_success_message: bool) {
+        if show_success_message {
+            let count = self.entities.len();
+            self.set_message(format!("refreshed {count} session{}", pluralize(count)));
+        }
+    }
+
+    fn apply_refresh_metadata(
+        &mut self,
+        native_status: Option<Result<NativeDesktopStatusResponse, String>>,
+        backend_health: Result<BackendHealthResponse, String>,
+        daemon_defaults_status: Option<DaemonDefaultsStatus>,
+    ) {
+        self.apply_refresh_native_status(native_status);
+        self.apply_refresh_backend_health(backend_health);
+        self.apply_refresh_daemon_defaults_status(daemon_defaults_status);
+    }
+
+    fn apply_refresh_native_status(
+        &mut self,
+        native_status: Option<Result<NativeDesktopStatusResponse, String>>,
+    ) {
+        match native_status {
+            Some(Ok(status)) => self.native_status = Some(status),
+            Some(Err(err)) => self.set_message(self.refresh_error_message(err)),
+            None => {}
+        }
+    }
+
+    fn apply_refresh_backend_health(
+        &mut self,
+        backend_health: Result<BackendHealthResponse, String>,
+    ) {
+        if let Ok(health) = backend_health {
             self.backend_health = Some(health);
         }
-        if let Some(status) = result.daemon_defaults_status {
+    }
+
+    fn apply_refresh_daemon_defaults_status(&mut self, status: Option<DaemonDefaultsStatus>) {
+        if let Some(status) = status {
             self.daemon_defaults_status = status;
         }
-
-        self.last_refresh = Some(Instant::now());
     }
 
     pub(crate) fn merge_sessions(&mut self, sessions: Vec<SessionSummary>, field: Rect) {
@@ -2190,31 +2242,60 @@ impl<C: TuiApi> App<C> {
         self.retain_cached_assets(sessions);
         let cached_themes = self.repo_themes.clone();
         for session in sessions {
-            let context = RepoThemeCacheContext::from_session(session);
-            let reuse_cached = !force
-                && self
-                    .session_repo_theme_cache
-                    .get(&session.session_id)
-                    .map(|entry| entry.context == context)
-                    .unwrap_or(false);
-            if reuse_cached {
+            let Some(entry) = self.next_repo_theme_cache_entry(session, force, &cached_themes)
+            else {
                 continue;
-            }
-
-            let resolved = discover_repo_theme(&session.cwd).or_else(|| {
-                if force {
-                    return None;
-                }
-                let theme_id = session.repo_theme_id.as_ref()?;
-                let theme = cached_themes.get(theme_id)?.clone();
-                Some((theme_id.clone(), theme))
-            });
-            self.session_repo_theme_cache.insert(
-                session.session_id.clone(),
-                RepoThemeCacheEntry { context, resolved },
-            );
+            };
+            self.session_repo_theme_cache
+                .insert(session.session_id.clone(), entry);
         }
         self.rebuild_repo_themes_from_cache();
+    }
+
+    fn next_repo_theme_cache_entry(
+        &self,
+        session: &SessionSummary,
+        force: bool,
+        cached_themes: &HashMap<String, RepoTheme>,
+    ) -> Option<RepoThemeCacheEntry> {
+        let context = RepoThemeCacheContext::from_session(session);
+        if self.should_reuse_repo_theme_cache(session, &context, force) {
+            return None;
+        }
+
+        Some(RepoThemeCacheEntry {
+            context,
+            resolved: Self::resolve_repo_theme_for_sync(session, force, cached_themes),
+        })
+    }
+
+    fn should_reuse_repo_theme_cache(
+        &self,
+        session: &SessionSummary,
+        context: &RepoThemeCacheContext,
+        force: bool,
+    ) -> bool {
+        !force
+            && self
+                .session_repo_theme_cache
+                .get(&session.session_id)
+                .map(|entry| entry.context == *context)
+                .unwrap_or(false)
+    }
+
+    fn resolve_repo_theme_for_sync(
+        session: &SessionSummary,
+        force: bool,
+        cached_themes: &HashMap<String, RepoTheme>,
+    ) -> Option<(String, RepoTheme)> {
+        discover_repo_theme(&session.cwd).or_else(|| {
+            if force {
+                return None;
+            }
+            let theme_id = session.repo_theme_id.as_ref()?;
+            let theme = cached_themes.get(theme_id)?.clone();
+            Some((theme_id.clone(), theme))
+        })
     }
 
     pub(crate) fn remember_repo_theme(
@@ -2637,7 +2718,7 @@ impl<C: TuiApi> App<C> {
         }
     }
 
-    async fn run_thought_config_save_action(
+    pub(crate) async fn run_thought_config_save_action(
         client: Arc<C>,
         config: ThoughtConfig,
         daemon_defaults: Option<DaemonDefaults>,
@@ -2645,49 +2726,61 @@ impl<C: TuiApi> App<C> {
         match client.update_thought_config(config).await {
             Ok(saved) => {
                 let save_summary = Self::thought_config_target_summary(&saved);
-                let maybe_rotation = match client.test_thought_config(saved.clone()).await {
-                    Ok(test) if test.ok => None,
-                    Ok(test) => Self::try_openrouter_rotation(
-                        Arc::clone(&client),
-                        &saved,
-                        daemon_defaults,
-                        true,
-                        save_summary.clone(),
-                        test.message.clone(),
-                    )
+                Self::thought_config_save_test_outcome(client, saved, daemon_defaults, save_summary)
                     .await
-                    .or_else(|| {
-                        Some(ThoughtConfigActionOutcome {
-                            message: format!("saved {save_summary} | {}", test.message),
-                            updated_config: None,
-                            openrouter_candidates: None,
-                            close_editor: true,
-                            refresh_sessions: true,
-                        })
-                    }),
-                    Err(err) => Some(ThoughtConfigActionOutcome {
-                        message: format!("saved {save_summary} | test error: {err}"),
-                        updated_config: None,
-                        openrouter_candidates: None,
-                        close_editor: true,
-                        refresh_sessions: true,
-                    }),
-                };
-                maybe_rotation.unwrap_or(ThoughtConfigActionOutcome {
-                    message: format!("saved {save_summary} | test ok"),
-                    updated_config: None,
-                    openrouter_candidates: None,
-                    close_editor: true,
-                    refresh_sessions: true,
-                })
             }
-            Err(err) => ThoughtConfigActionOutcome {
-                message: err,
-                updated_config: None,
-                openrouter_candidates: None,
-                close_editor: false,
-                refresh_sessions: false,
-            },
+            Err(err) => Self::thought_config_save_failed_outcome(err),
+        }
+    }
+
+    async fn thought_config_save_test_outcome(
+        client: Arc<C>,
+        saved: ThoughtConfig,
+        daemon_defaults: Option<DaemonDefaults>,
+        save_summary: String,
+    ) -> ThoughtConfigActionOutcome {
+        match client.test_thought_config(saved.clone()).await {
+            Ok(test) if test.ok => Self::thought_config_save_complete_outcome(format!(
+                "saved {save_summary} | test ok"
+            )),
+            Ok(test) => Self::try_openrouter_rotation(
+                Arc::clone(&client),
+                &saved,
+                daemon_defaults,
+                true,
+                save_summary.clone(),
+                test.message.clone(),
+            )
+            .await
+            .unwrap_or_else(|| {
+                Self::thought_config_save_complete_outcome(format!(
+                    "saved {save_summary} | {}",
+                    test.message
+                ))
+            }),
+            Err(err) => Self::thought_config_save_complete_outcome(format!(
+                "saved {save_summary} | test error: {err}"
+            )),
+        }
+    }
+
+    fn thought_config_save_complete_outcome(message: String) -> ThoughtConfigActionOutcome {
+        ThoughtConfigActionOutcome {
+            message,
+            updated_config: None,
+            openrouter_candidates: None,
+            close_editor: true,
+            refresh_sessions: true,
+        }
+    }
+
+    fn thought_config_save_failed_outcome(message: String) -> ThoughtConfigActionOutcome {
+        ThoughtConfigActionOutcome {
+            message,
+            updated_config: None,
+            openrouter_candidates: None,
+            close_editor: false,
+            refresh_sessions: false,
         }
     }
 
@@ -2836,20 +2929,28 @@ impl<C: TuiApi> App<C> {
                 .is_some_and(|defaults| Self::is_openrouter_backend(&defaults.backend))
     }
 
-    fn thought_config_target_summary(config: &ThoughtConfig) -> String {
+    pub(crate) fn thought_config_target_summary(config: &ThoughtConfig) -> String {
         format!(
             "{} / {}",
-            if config.backend.trim().is_empty() {
-                "auto"
-            } else {
-                config.backend.as_str()
-            },
-            if config.model.trim().is_empty() {
-                "daemon default"
-            } else {
-                config.model.as_str()
-            }
+            Self::thought_config_backend_summary(config),
+            Self::thought_config_model_summary(config)
         )
+    }
+
+    fn thought_config_backend_summary(config: &ThoughtConfig) -> &str {
+        if config.backend.trim().is_empty() {
+            "auto"
+        } else {
+            config.backend.as_str()
+        }
+    }
+
+    fn thought_config_model_summary(config: &ThoughtConfig) -> &str {
+        if config.model.trim().is_empty() {
+            "daemon default"
+        } else {
+            config.model.as_str()
+        }
     }
 
     pub(crate) fn open_picker(&mut self, x: u16, y: u16) {
