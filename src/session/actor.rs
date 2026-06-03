@@ -1245,14 +1245,19 @@ impl SessionActor {
     }
 
     fn clear_startup_replay_if_idle(&mut self) {
-        if self.clear_replay_on_first_idle && self.state_detector.state() == SessionState::Idle {
-            self.clear_replay_on_first_idle = false;
-            self.replay_ring.clear();
-            debug!(
-                session_id = %self.session_id,
-                "cleared replay ring on first idle (startup garbage removed)"
-            );
+        if !should_clear_startup_replay(
+            self.clear_replay_on_first_idle,
+            self.state_detector.state(),
+        ) {
+            return;
         }
+
+        self.clear_replay_on_first_idle = false;
+        self.replay_ring.clear();
+        debug!(
+            session_id = %self.session_id,
+            "cleared replay ring on first idle (startup garbage removed)"
+        );
     }
 
     fn total_subscriber_queue_depth(&self) -> usize {
@@ -1350,36 +1355,56 @@ impl SessionActor {
     }
 
     async fn maybe_refresh_tool_from_tmux(&mut self, force: bool) {
-        if !should_refresh_tool_from_tmux(
+        let now = Instant::now();
+        if !self.should_refresh_tool_from_tmux_at(force, now) {
+            return;
+        }
+
+        self.last_tool_refresh_at = now;
+
+        let tmux_name = self.tmux_name.clone();
+        let result = query_tool_from_tmux_process_tree(&tmux_name).await;
+        self.apply_tmux_tool_refresh_result(&tmux_name, result);
+    }
+
+    fn should_refresh_tool_from_tmux_at(&self, force: bool, now: Instant) -> bool {
+        should_refresh_tool_from_tmux(
             force,
             self.state_detector.state(),
             self.tool.as_deref(),
             self.last_tool_refresh_at,
-            Instant::now(),
-        ) {
+            now,
+        )
+    }
+
+    fn apply_tmux_tool_refresh_result(
+        &mut self,
+        tmux_name: &str,
+        result: anyhow::Result<Option<String>>,
+    ) {
+        match result {
+            Ok(Some(tool)) => self.apply_detected_tmux_tool(tool),
+            Ok(None) => {}
+            Err(e) => self.log_tool_refresh_failure(tmux_name, e),
+        }
+    }
+
+    fn apply_detected_tmux_tool(&mut self, tool: String) {
+        if !tool_refresh_changes_tool(self.tool.as_deref(), &tool) {
             return;
         }
 
-        self.last_tool_refresh_at = Instant::now();
+        self.tool = Some(tool);
+        self.state_detector.set_tui_tool_mode(true);
+    }
 
-        let tmux_name = self.tmux_name.clone();
-        match query_tool_from_tmux_process_tree(&tmux_name).await {
-            Ok(Some(tool)) => {
-                if self.tool.as_deref() != Some(tool.as_str()) {
-                    self.tool = Some(tool);
-                    self.state_detector.set_tui_tool_mode(true);
-                }
-            }
-            Ok(None) => {}
-            Err(e) => {
-                debug!(
-                    session_id = %self.session_id,
-                    tmux_name = %tmux_name,
-                    "tmux tool refresh failed: {}",
-                    e
-                );
-            }
-        }
+    fn log_tool_refresh_failure(&self, tmux_name: &str, error: anyhow::Error) {
+        debug!(
+            session_id = %self.session_id,
+            tmux_name,
+            "tmux tool refresh failed: {}",
+            error
+        );
     }
 
     async fn maybe_refresh_session_started_at(&mut self) {
@@ -1834,6 +1859,10 @@ fn output_transition_finished_busy_work(
     !matches!(previous_state, SessionState::Idle) && matches!(current_state, SessionState::Idle)
 }
 
+fn should_clear_startup_replay(clear_on_first_idle: bool, state: SessionState) -> bool {
+    clear_on_first_idle && state == SessionState::Idle
+}
+
 fn should_refresh_cwd_from_tmux(
     force: bool,
     state: SessionState,
@@ -1861,6 +1890,10 @@ fn should_refresh_tool_from_tmux(
     }
 
     !(tool.is_some() && state == SessionState::Idle)
+}
+
+fn tool_refresh_changes_tool(current_tool: Option<&str>, detected_tool: &str) -> bool {
+    current_tool != Some(detected_tool)
 }
 
 fn visible_output_is_meaningful(data: &[u8]) -> bool {
@@ -2378,13 +2411,13 @@ fn osc_payloads<'a>(text: &'a str, prefix: &str) -> Vec<&'a str> {
 }
 
 fn find_osc_payload_end(text: &str) -> Option<(usize, usize)> {
-    let bel = text.find('\x07').map(|offset| (offset, 1));
-    let st = text.find("\x1b\\").map(|offset| (offset, 2));
-    match (bel, st) {
-        (Some(left), Some(right)) => Some(if left.0 <= right.0 { left } else { right }),
-        (Some(end), None) | (None, Some(end)) => Some(end),
-        (None, None) => None,
-    }
+    [
+        text.find('\x07').map(|offset| (offset, 1)),
+        text.find("\x1b\\").map(|offset| (offset, 2)),
+    ]
+    .into_iter()
+    .flatten()
+    .min_by_key(|(offset, _)| *offset)
 }
 
 fn cwd_from_osc7_payload(payload: &str) -> Option<String> {
@@ -2557,14 +2590,14 @@ mod tests {
         output_counts_as_meaningful_activity, parse_process_entry, percent_decode,
         process_entries_cache, query_tmux_session_created, query_tool_from_tmux_process_tree,
         resolve_tmux_colorterm, resolve_tmux_term, resolve_tmux_terminal_env,
-        run_bounded_tmux_command, should_refresh_cwd_from_tmux, should_refresh_tool_from_tmux,
-        state_detector_for_initial_tool, submit_line_fallback_input, subscriber_cap_rejection,
-        title_cwd_update, title_tool_update, tmux_input_chunks, visible_output_is_meaningful,
-        write_and_flush_input, write_input_counts_as_activity, ControlEvent,
-        LivenessReconciliation, LivenessRefresh, OutputFrame, PaneLiveness, ProcessEntriesCache,
-        ProcessEntry, SessionActor, SessionCommand, SubscribeOutcome, TmuxInputChunk,
-        CWD_REFRESH_MIN_INTERVAL, MAX_OUTPUT_SUBSCRIBERS_PER_SESSION, PROCESS_ENTRIES_CACHE_TTL,
-        TOOL_REFRESH_MIN_INTERVAL,
+        run_bounded_tmux_command, should_clear_startup_replay, should_refresh_cwd_from_tmux,
+        should_refresh_tool_from_tmux, state_detector_for_initial_tool, submit_line_fallback_input,
+        subscriber_cap_rejection, title_cwd_update, title_tool_update, tmux_input_chunks,
+        tool_refresh_changes_tool, visible_output_is_meaningful, write_and_flush_input,
+        write_input_counts_as_activity, ControlEvent, LivenessReconciliation, LivenessRefresh,
+        OutputFrame, PaneLiveness, ProcessEntriesCache, ProcessEntry, SessionActor, SessionCommand,
+        SubscribeOutcome, TmuxInputChunk, CWD_REFRESH_MIN_INTERVAL,
+        MAX_OUTPUT_SUBSCRIBERS_PER_SESSION, PROCESS_ENTRIES_CACHE_TTL, TOOL_REFRESH_MIN_INTERVAL,
     };
     use crate::config::Config;
     use crate::scroll::guard::ScrollGuard;
@@ -3337,6 +3370,15 @@ fi
         assert_eq!(find_osc_payload_end("title\x07tail"), Some((5, 1)));
         assert_eq!(find_osc_payload_end("title\x1b\\tail"), Some((5, 2)));
         assert_eq!(
+            find_osc_payload_end("title\x07before-st\x1b\\tail"),
+            Some((5, 1))
+        );
+        assert_eq!(
+            find_osc_payload_end("title\x1b\\before-bel\x07tail"),
+            Some((5, 2))
+        );
+        assert_eq!(find_osc_payload_end("unterminated title"), None);
+        assert_eq!(
             osc_payloads(text, "\x1b]7;"),
             vec!["file://host/tmp/project"]
         );
@@ -3349,6 +3391,42 @@ fi
             cwd_from_osc7_payload("file://host/tmp/caf%C3%A9"),
             Some("/tmp/caf\u{e9}".to_string())
         );
+    }
+
+    #[test]
+    fn startup_replay_clears_once_after_first_idle() {
+        let mut actor = test_actor();
+        actor.clear_replay_on_first_idle = true;
+        actor.state_detector.note_input();
+        actor.replay_ring.push(b"startup noise");
+
+        assert!(!should_clear_startup_replay(
+            true,
+            actor.state_detector.state()
+        ));
+        assert_eq!(actor.state_detector.state(), SessionState::Busy);
+
+        actor.clear_startup_replay_if_idle();
+        assert!(actor.clear_replay_on_first_idle);
+        assert_eq!(actor.replay_ring.snapshot(), "startup noise");
+
+        actor.state_detector.process_output(b"\x1b]133;A\x07");
+        actor.clear_startup_replay_if_idle();
+
+        assert!(!actor.clear_replay_on_first_idle);
+        assert_eq!(actor.replay_ring.snapshot(), "");
+
+        actor.replay_ring.push(b"real output");
+        actor.clear_startup_replay_if_idle();
+        assert_eq!(actor.replay_ring.snapshot(), "real output");
+    }
+
+    #[test]
+    fn startup_replay_clear_predicate_requires_flag_and_idle_state() {
+        assert!(should_clear_startup_replay(true, SessionState::Idle));
+        assert!(!should_clear_startup_replay(false, SessionState::Idle));
+        assert!(!should_clear_startup_replay(true, SessionState::Busy));
+        assert!(!should_clear_startup_replay(true, SessionState::Exited));
     }
 
     #[test]
@@ -3401,6 +3479,38 @@ fi
             now - TOOL_REFRESH_MIN_INTERVAL,
             now
         ));
+    }
+
+    #[test]
+    fn tmux_tool_refresh_result_applies_only_detected_changes() {
+        let mut actor = test_actor();
+
+        actor.apply_tmux_tool_refresh_result("demo", Ok(None));
+        assert_eq!(actor.tool.as_deref(), Some("Codex"));
+
+        assert!(!tool_refresh_changes_tool(Some("Codex"), "Codex"));
+        actor.apply_tmux_tool_refresh_result("demo", Ok(Some("Codex".to_string())));
+        assert_eq!(actor.tool.as_deref(), Some("Codex"));
+
+        assert!(tool_refresh_changes_tool(Some("Codex"), "Claude Code"));
+        actor.apply_tmux_tool_refresh_result("demo", Ok(Some("Claude Code".to_string())));
+        assert_eq!(actor.tool.as_deref(), Some("Claude Code"));
+
+        actor.apply_tmux_tool_refresh_result("demo", Err(anyhow::anyhow!("tmux failed")));
+        assert_eq!(actor.tool.as_deref(), Some("Claude Code"));
+    }
+
+    #[test]
+    fn actor_tool_refresh_predicate_uses_current_actor_state() {
+        let mut actor = test_actor();
+        let now = Instant::now();
+        actor.last_tool_refresh_at = now - TOOL_REFRESH_MIN_INTERVAL;
+
+        assert!(!actor.should_refresh_tool_from_tmux_at(false, now));
+
+        actor.state_detector.note_input();
+        assert!(actor.should_refresh_tool_from_tmux_at(false, now));
+        assert!(actor.should_refresh_tool_from_tmux_at(true, now));
     }
 
     #[tokio::test]

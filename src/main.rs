@@ -1,5 +1,5 @@
 use std::future::IntoFuture;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -13,7 +13,7 @@ use tracing_subscriber::EnvFilter;
 
 use swimmers::api::AppState;
 use swimmers::cli::{self, ConfigAction, ServerCli, ServerCommand, TmuxAction};
-use swimmers::config::Config;
+use swimmers::config::{Config, ConfigLoad};
 use swimmers::{env_bootstrap, metrics, startup};
 
 // 10s gives in-flight requests time to finish while preventing indefinite hangs.
@@ -243,32 +243,170 @@ fn run_config_subcommand(action: Option<ConfigAction>) -> i32 {
     // Load .env so subcommands see the same environment the server would.
     let _ = dotenvy::dotenv();
 
-    match action {
-        None => {
-            let load = Config::from_env_report();
-            cli::print_config_table_for_load(&load);
-            cli::print_config_diagnostics(&load.diagnostics);
-            if load.has_errors() {
-                1
-            } else {
-                0
-            }
+    config_subcommand_runner(action)(Config::from_env_report())
+}
+
+type ConfigSubcommandRunner = fn(ConfigLoad) -> i32;
+const CONFIG_SUBCOMMAND_RUNNERS: [ConfigSubcommandRunner; 2] =
+    [run_config_report, run_config_doctor];
+
+fn config_subcommand_runner(action: Option<ConfigAction>) -> ConfigSubcommandRunner {
+    CONFIG_SUBCOMMAND_RUNNERS[matches!(action, Some(ConfigAction::Doctor)) as usize]
+}
+
+fn run_config_report(load: ConfigLoad) -> i32 {
+    cli::print_config_table_for_load(&load);
+    cli::print_config_diagnostics(&load.diagnostics);
+    config_report_exit_code(load.has_errors())
+}
+
+fn config_report_exit_code(has_errors: bool) -> i32 {
+    has_errors as i32
+}
+
+fn run_config_doctor(load: ConfigLoad) -> i32 {
+    let tmux_present = cli::tmux_on_path();
+    let clawgs_defaults = cli::check_clawgs_defaults();
+    let data_dir = startup::resolve_data_dir();
+    let data_dir_writable = cli::check_data_dir_writable(&data_dir);
+    let findings = config_doctor_findings(&load, tmux_present, clawgs_defaults, data_dir_writable);
+    let printed_code = cli::print_doctor_findings(&findings);
+    debug_assert_eq!(printed_code, config_doctor_exit_code(&findings));
+    printed_code
+}
+
+fn config_doctor_findings(
+    load: &ConfigLoad,
+    tmux_present: bool,
+    clawgs_defaults: Result<String, String>,
+    data_dir_writable: Result<PathBuf, String>,
+) -> Vec<cli::DoctorFinding> {
+    let mut findings = cli::config_diagnostic_findings(&load.diagnostics);
+    findings.extend(cli::run_doctor_checks(
+        &load.config,
+        tmux_present,
+        clawgs_defaults,
+        data_dir_writable,
+    ));
+    findings
+}
+
+fn config_doctor_exit_code(findings: &[cli::DoctorFinding]) -> i32 {
+    findings.iter().any(|finding| !finding.ok) as i32
+}
+
+#[cfg(test)]
+mod config_subcommand_tests {
+    use super::*;
+    use swimmers::config::{ConfigDiagnostic, ConfigDiagnosticLevel};
+
+    fn config_load_with_diagnostics(diagnostics: Vec<ConfigDiagnostic>) -> ConfigLoad {
+        ConfigLoad {
+            config: Config::default(),
+            diagnostics,
         }
-        Some(ConfigAction::Doctor) => {
-            let load = Config::from_env_report();
-            let tmux_present = cli::tmux_on_path();
-            let clawgs_defaults = cli::check_clawgs_defaults();
-            let data_dir = startup::resolve_data_dir();
-            let data_dir_writable = cli::check_data_dir_writable(&data_dir);
-            let mut findings = cli::config_diagnostic_findings(&load.diagnostics);
-            findings.extend(cli::run_doctor_checks(
-                &load.config,
-                tmux_present,
-                clawgs_defaults,
-                data_dir_writable,
-            ));
-            cli::print_doctor_findings(&findings)
+    }
+
+    fn config_warning() -> ConfigDiagnostic {
+        ConfigDiagnostic {
+            level: ConfigDiagnosticLevel::Warning,
+            key: "PORT",
+            message: "ignored for test".to_string(),
         }
+    }
+
+    fn config_error() -> ConfigDiagnostic {
+        ConfigDiagnostic {
+            level: ConfigDiagnosticLevel::Error,
+            key: "AUTH_TOKEN",
+            message: "missing for test".to_string(),
+        }
+    }
+
+    fn doctor_finding(ok: bool, level: cli::DoctorLevel) -> cli::DoctorFinding {
+        cli::DoctorFinding {
+            ok,
+            level,
+            name: "test",
+            detail: "test finding".to_string(),
+        }
+    }
+
+    #[test]
+    fn config_subcommand_none_selects_report_runner() {
+        assert_eq!(
+            config_subcommand_runner(None) as *const (),
+            run_config_report as *const ()
+        );
+    }
+
+    #[test]
+    fn config_subcommand_doctor_selects_doctor_runner() {
+        assert_eq!(
+            config_subcommand_runner(Some(ConfigAction::Doctor)) as *const (),
+            run_config_doctor as *const ()
+        );
+    }
+
+    #[test]
+    fn config_report_exit_code_returns_zero_without_errors() {
+        assert_eq!(config_report_exit_code(false), 0);
+    }
+
+    #[test]
+    fn config_report_exit_code_returns_one_with_errors() {
+        assert_eq!(config_report_exit_code(true), 1);
+    }
+
+    #[test]
+    fn config_doctor_exit_code_allows_warnings_and_successes() {
+        let findings = [
+            doctor_finding(true, cli::DoctorLevel::Ok),
+            cli::DoctorFinding {
+                ok: true,
+                level: cli::DoctorLevel::Warn,
+                name: "warning",
+                detail: "warning finding".to_string(),
+            },
+        ];
+
+        assert_eq!(config_doctor_exit_code(&findings), 0);
+    }
+
+    #[test]
+    fn config_doctor_exit_code_fails_on_any_failed_finding() {
+        let findings = [
+            doctor_finding(true, cli::DoctorLevel::Ok),
+            doctor_finding(false, cli::DoctorLevel::Fail),
+        ];
+
+        assert_eq!(config_doctor_exit_code(&findings), 1);
+    }
+
+    #[test]
+    fn config_doctor_findings_keeps_config_diagnostics_before_doctor_checks() {
+        let load = config_load_with_diagnostics(vec![config_warning(), config_error()]);
+
+        let findings = config_doctor_findings(
+            &load,
+            true,
+            Ok("clawgs defaults ok".to_string()),
+            Ok(PathBuf::from("/tmp/swimmers-test")),
+        );
+
+        let names: Vec<_> = findings.iter().map(|finding| finding.name).collect();
+        assert_eq!(
+            names,
+            vec![
+                "config/env",
+                "config/env",
+                "auth/bind",
+                "auth/token",
+                "tmux",
+                "clawgs",
+                "data_dir"
+            ]
+        );
     }
 }
 

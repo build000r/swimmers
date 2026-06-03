@@ -4,6 +4,7 @@ use std::process::Command;
 
 const SHELL_CAPTURE_START: &str = "__SWIMMERS_ENV_CAPTURE_START__";
 const SHELL_CAPTURE_END: &str = "__SWIMMERS_ENV_CAPTURE_END__";
+const FALLBACK_SHELLS: &[&str] = &["/bin/zsh", "/bin/bash"];
 const PROVIDER_ENV_VARS: &[&str] = &["OPENROUTER_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY"];
 
 pub fn bootstrap_provider_env_from_shell() {
@@ -27,11 +28,31 @@ fn env_value_present(key: &str) -> bool {
 }
 
 fn detect_interactive_shell() -> Option<PathBuf> {
-    env::var_os("SHELL")
-        .map(PathBuf::from)
-        .filter(|path| path.is_file())
-        .or_else(|| fallback_shell("/bin/zsh"))
-        .or_else(|| fallback_shell("/bin/bash"))
+    select_interactive_shell(
+        env::var_os("SHELL").map(PathBuf::from),
+        fallback_shell_candidates(),
+        Path::is_file,
+    )
+}
+
+fn fallback_shell_candidates() -> impl Iterator<Item = PathBuf> {
+    FALLBACK_SHELLS.iter().map(PathBuf::from)
+}
+
+fn select_interactive_shell<I, F>(
+    shell_env: Option<PathBuf>,
+    fallback_shells: I,
+    is_file: F,
+) -> Option<PathBuf>
+where
+    I: IntoIterator<Item = PathBuf>,
+    F: Fn(&Path) -> bool,
+{
+    if let Some(shell) = shell_env.filter(|path| is_file(path)) {
+        return Some(shell);
+    }
+
+    fallback_shells.into_iter().find(|path| is_file(path))
 }
 
 fn missing_provider_env_vars() -> impl Iterator<Item = &'static str> {
@@ -53,11 +74,6 @@ fn provider_assignment_from_shell(shell: &Path, key: &str) -> Option<String> {
 
 fn assignable_env_value(value: Option<String>) -> Option<String> {
     value.filter(|value| !value.trim().is_empty())
-}
-
-fn fallback_shell(path: &str) -> Option<PathBuf> {
-    let shell = PathBuf::from(path);
-    shell.is_file().then_some(shell)
 }
 
 fn read_env_var_from_interactive_shell(shell: &Path, key: &str) -> Option<String> {
@@ -126,5 +142,79 @@ mod tests {
             assignable_env_value(Some(" sk-test ".to_string())).as_deref(),
             Some(" sk-test ")
         );
+    }
+
+    #[test]
+    fn select_interactive_shell_prefers_valid_shell_env() {
+        let shell_env = PathBuf::from("/custom/shell");
+        let selected = select_interactive_shell(
+            Some(shell_env.clone()),
+            [
+                PathBuf::from("/fallback/zsh"),
+                PathBuf::from("/fallback/bash"),
+            ],
+            |path| path == shell_env,
+        );
+
+        assert_eq!(selected.as_deref(), Some(shell_env.as_path()));
+    }
+
+    #[test]
+    fn select_interactive_shell_rejects_missing_shell_env() {
+        let fallback = PathBuf::from("/fallback/zsh");
+        let selected = select_interactive_shell(
+            Some(PathBuf::from("/custom/missing")),
+            [fallback.clone()],
+            |path| path == fallback,
+        );
+
+        assert_eq!(selected.as_deref(), Some(fallback.as_path()));
+    }
+
+    #[test]
+    fn select_interactive_shell_rejects_non_file_shell_env() {
+        let fallback = PathBuf::from("/fallback/bash");
+        let selected = select_interactive_shell(
+            Some(PathBuf::from("/custom/directory")),
+            [fallback.clone()],
+            |path| path == fallback,
+        );
+
+        assert_eq!(selected.as_deref(), Some(fallback.as_path()));
+    }
+
+    #[test]
+    fn select_interactive_shell_uses_first_available_fallback() {
+        let zsh = PathBuf::from("/fallback/zsh");
+        let bash = PathBuf::from("/fallback/bash");
+        let selected = select_interactive_shell(None, [zsh.clone(), bash], |path| path == zsh);
+
+        assert_eq!(selected.as_deref(), Some(zsh.as_path()));
+    }
+
+    #[test]
+    fn select_interactive_shell_tries_later_fallbacks_when_first_is_missing() {
+        let bash = PathBuf::from("/fallback/bash");
+        let selected = select_interactive_shell(
+            None,
+            [PathBuf::from("/fallback/zsh"), bash.clone()],
+            |path| path == bash,
+        );
+
+        assert_eq!(selected.as_deref(), Some(bash.as_path()));
+    }
+
+    #[test]
+    fn select_interactive_shell_returns_none_without_valid_candidates() {
+        let selected = select_interactive_shell(
+            Some(PathBuf::from("/custom/missing")),
+            [
+                PathBuf::from("/fallback/zsh"),
+                PathBuf::from("/fallback/bash"),
+            ],
+            |_| false,
+        );
+
+        assert_eq!(selected, None);
     }
 }

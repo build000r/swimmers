@@ -438,6 +438,60 @@ fn plan_initial_request_submission(
     })
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ThoughtConfigPasteAction {
+    WaitForPendingAction,
+    AppendToModel,
+    Ignore,
+}
+
+fn route_thought_config_paste(
+    has_pending_action: bool,
+    focus: Option<ThoughtConfigEditorField>,
+) -> ThoughtConfigPasteAction {
+    if has_pending_action {
+        return ThoughtConfigPasteAction::WaitForPendingAction;
+    }
+
+    match focus {
+        Some(ThoughtConfigEditorField::Model) => ThoughtConfigPasteAction::AppendToModel,
+        _ => ThoughtConfigPasteAction::Ignore,
+    }
+}
+
+fn merge_session_entities(
+    entities: Vec<SessionEntity>,
+    sessions: Vec<SessionSummary>,
+    field: Rect,
+) -> Vec<SessionEntity> {
+    let mut existing = existing_entities_by_session_id(entities);
+    let mut next = sessions
+        .into_iter()
+        .map(|session| merge_session_entity(session, &mut existing, field))
+        .collect::<Vec<_>>();
+    next.sort_by(|a, b| compare_tmux_natural(&a.session, &b.session));
+    next
+}
+
+fn existing_entities_by_session_id(entities: Vec<SessionEntity>) -> HashMap<String, SessionEntity> {
+    entities
+        .into_iter()
+        .map(|entity| (entity.session.session_id.clone(), entity))
+        .collect()
+}
+
+fn merge_session_entity(
+    session: SessionSummary,
+    existing: &mut HashMap<String, SessionEntity>,
+    field: Rect,
+) -> SessionEntity {
+    let Some(mut entity) = existing.remove(&session.session_id) else {
+        return SessionEntity::new(session, field);
+    };
+    entity.session = session;
+    entity
+}
+
 pub(crate) struct App<C: TuiApi> {
     pub(crate) runtime: Runtime,
     pub(crate) client: Arc<C>,
@@ -2109,23 +2163,7 @@ impl<C: TuiApi> App<C> {
     }
 
     pub(crate) fn merge_sessions(&mut self, sessions: Vec<SessionSummary>, field: Rect) {
-        let mut existing = HashMap::new();
-        for entity in self.entities.drain(..) {
-            existing.insert(entity.session.session_id.clone(), entity);
-        }
-
-        let mut next = Vec::with_capacity(sessions.len());
-        for session in sessions {
-            if let Some(mut entity) = existing.remove(&session.session_id) {
-                entity.session = session;
-                next.push(entity);
-            } else {
-                next.push(SessionEntity::new(session, field));
-            }
-        }
-
-        next.sort_by(|a, b| compare_tmux_natural(&a.session, &b.session));
-        self.entities = next;
+        self.entities = merge_session_entities(std::mem::take(&mut self.entities), sessions, field);
         self.layout_resting_entities(field);
         self.reconcile_selection();
         self.sync_selection_publication();
@@ -2447,14 +2485,22 @@ impl<C: TuiApi> App<C> {
     }
 
     pub(crate) fn handle_thought_config_paste(&mut self, text: &str) {
-        if self.pending_interaction.is_some() {
-            self.set_message("wait for the current action to finish");
-            return;
-        }
-        if let Some(editor) = &mut self.thought_config_editor {
-            if editor.focus == ThoughtConfigEditorField::Model {
+        match route_thought_config_paste(
+            self.pending_interaction.is_some(),
+            self.thought_config_editor
+                .as_ref()
+                .map(|editor| editor.focus),
+        ) {
+            ThoughtConfigPasteAction::WaitForPendingAction => {
+                self.set_message("wait for the current action to finish");
+            }
+            ThoughtConfigPasteAction::AppendToModel => {
+                let Some(editor) = &mut self.thought_config_editor else {
+                    return;
+                };
                 editor.config.model.push_str(text);
             }
+            ThoughtConfigPasteAction::Ignore => {}
         }
     }
 
@@ -4430,6 +4476,96 @@ mod tests {
                 text: "start here".to_string(),
             })
         );
+    }
+
+    #[test]
+    fn thought_config_paste_routing_waits_when_action_is_pending() {
+        assert_eq!(
+            route_thought_config_paste(true, Some(ThoughtConfigEditorField::Model)),
+            ThoughtConfigPasteAction::WaitForPendingAction
+        );
+    }
+
+    #[test]
+    fn thought_config_paste_routing_appends_only_to_model_field() {
+        assert_eq!(
+            route_thought_config_paste(false, Some(ThoughtConfigEditorField::Model)),
+            ThoughtConfigPasteAction::AppendToModel
+        );
+        assert_eq!(
+            route_thought_config_paste(false, Some(ThoughtConfigEditorField::Backend)),
+            ThoughtConfigPasteAction::Ignore
+        );
+        assert_eq!(
+            route_thought_config_paste(false, None),
+            ThoughtConfigPasteAction::Ignore
+        );
+    }
+
+    fn app_test_session(session_id: &str, tmux_name: &str) -> SessionSummary {
+        SessionSummary::placeholder(session_id, tmux_name, Utc::now())
+    }
+
+    #[test]
+    fn merge_session_entities_reuses_existing_entity_state_and_updates_summary() {
+        let field = Rect {
+            x: 0,
+            y: 0,
+            width: 80,
+            height: 24,
+        };
+        let mut existing = SessionEntity::new(app_test_session("s1", "swimmers-1"), field);
+        existing.x = 12.0;
+        existing.y = 5.0;
+        existing.vx = -0.25;
+        existing.vy = 0.75;
+        existing.swim_anchor_x = 13.0;
+        existing.swim_anchor_y = 6.0;
+        existing.swim_center_y = 7.0;
+        existing.bob_phase = 1.25;
+
+        let merged = merge_session_entities(
+            vec![existing],
+            vec![app_test_session("s1", "swimmers-01-renamed")],
+            field,
+        );
+
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].session.tmux_name, "swimmers-01-renamed");
+        assert_eq!(merged[0].x, 12.0);
+        assert_eq!(merged[0].y, 5.0);
+        assert_eq!(merged[0].vx, -0.25);
+        assert_eq!(merged[0].vy, 0.75);
+        assert_eq!(merged[0].swim_anchor_x, 13.0);
+        assert_eq!(merged[0].swim_anchor_y, 6.0);
+        assert_eq!(merged[0].swim_center_y, 7.0);
+        assert_eq!(merged[0].bob_phase, 1.25);
+    }
+
+    #[test]
+    fn merge_session_entities_drops_absent_sessions_and_sorts_refresh_result() {
+        let field = Rect {
+            x: 0,
+            y: 0,
+            width: 80,
+            height: 24,
+        };
+        let removed = SessionEntity::new(app_test_session("old", "swimmers-1"), field);
+
+        let merged = merge_session_entities(
+            vec![removed],
+            vec![
+                app_test_session("s10", "swimmers-10"),
+                app_test_session("s2", "swimmers-2"),
+            ],
+            field,
+        );
+
+        let ids = merged
+            .iter()
+            .map(|entity| entity.session.session_id.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(ids, vec!["s2", "s10"]);
     }
 }
 
