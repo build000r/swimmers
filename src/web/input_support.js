@@ -496,6 +496,19 @@ export function terminalZoomPercentLabel(zoom) {
   return `${Math.round(zoom * 100)}%`;
 }
 
+export function normalizeTerminalZoomValue(value, config = {}) {
+  const numeric = Number.parseFloat(value);
+  if (!Number.isFinite(numeric)) {
+    return 1;
+  }
+  const stepped = Math.round(numeric / config.step) * config.step;
+  return Math.max(config.minZoom, Math.min(config.maxZoom, stepped));
+}
+
+export function terminalZoomLoadValue(context = {}, config = {}) {
+  return normalizeTerminalZoomValue(context.urlZoom !== null ? context.urlZoom : context.storedZoom || "1", config);
+}
+
 export function terminalZoomControlsPlan(context = {}) {
   const supported = Boolean(context.zoomSupported || !context.hasTerminal);
   return {

@@ -3,7 +3,7 @@ import {
   authTokenButtonPlan, eventCell, globalShortcutPlan, mobileKeyboardInputExecutorPlan, mobileKeyboardInputPlan,
   mobileKeyboardKeydownPlan, mobileKeyboardKeyPlan, shouldIgnoreSyntheticClick,
   terminalComposerControlAction, terminalDestroyStatePatch, terminalFallbackActivationPlan, terminalFallbackFocusPlan, terminalFallbackKeydownPlan, terminalFallbackPastePlan, terminalFallbackPointerFocusPlan, terminalInlineInputKeydownPlan, terminalKeyStripClickExecutorPlan, terminalKeyStripClickPlan, terminalStageCaptureBindings, terminalStageFocusExecutorPlan, terminalStageFocusPlan,
-  terminalAuxiliaryControlsPlan, terminalFallbackScrollPlan, terminalFallbackTextScrollPlan, terminalInputDockPlan, terminalLiveFrameFallbackPlan, terminalPaintProbeSchedulePlan, terminalPaintVerificationPlan, terminalPendingByteBufferPlan, terminalPresentationPlan, terminalResizeGeometryPlan, terminalStageKeydownPlan, terminalStagePasteExecutorPlan, terminalStagePastePlan, terminalZoomControlsPlan, terminalZoomPercentLabel, terminalZoomPersistencePlan,
+  normalizeTerminalZoomValue, terminalAuxiliaryControlsPlan, terminalFallbackScrollPlan, terminalFallbackTextScrollPlan, terminalInputDockPlan, terminalLiveFrameFallbackPlan, terminalPaintProbeSchedulePlan, terminalPaintVerificationPlan, terminalPendingByteBufferPlan, terminalPresentationPlan, terminalResizeGeometryPlan, terminalStageKeydownPlan, terminalStagePasteExecutorPlan, terminalStagePastePlan, terminalZoomControlsPlan, terminalZoomLoadValue, terminalZoomPercentLabel, terminalZoomPersistencePlan,
 } from "./input_support.js";
 import { sendHistoryClickPlan, sendSheetFailureStatus, sendSheetSubmitPlan, sendSheetSuccessStatus } from "./send_sheet.js";
 import {
@@ -869,20 +869,11 @@ function terminalZoomSupported() {
 }
 
 function normalizeTerminalZoom(value) {
-  const numeric = Number.parseFloat(value);
-  if (!Number.isFinite(numeric)) {
-    return 1;
-  }
-  const stepped = Math.round(numeric / TERMINAL_ZOOM_STEP) * TERMINAL_ZOOM_STEP;
-  return Math.max(TERMINAL_ZOOM_MIN, Math.min(TERMINAL_ZOOM_MAX, stepped));
+  return normalizeTerminalZoomValue(value, { minZoom: TERMINAL_ZOOM_MIN, maxZoom: TERMINAL_ZOOM_MAX, step: TERMINAL_ZOOM_STEP });
 }
 
 function loadTerminalZoom(url) {
-  const fromUrl = url.searchParams.get("zoom");
-  if (fromUrl !== null) {
-    return normalizeTerminalZoom(fromUrl);
-  }
-  return normalizeTerminalZoom(localStorage.getItem(TERMINAL_ZOOM_STORAGE_KEY) || "1");
+  return terminalZoomLoadValue({ urlZoom: url.searchParams.get("zoom"), storedZoom: localStorage.getItem(TERMINAL_ZOOM_STORAGE_KEY) }, { minZoom: TERMINAL_ZOOM_MIN, maxZoom: TERMINAL_ZOOM_MAX, step: TERMINAL_ZOOM_STEP });
 }
 
 function syncTerminalZoomControls() {

@@ -36,7 +36,9 @@ import {
   terminalStagePasteExecutorPlan,
   terminalStagePastePlan,
   terminalAuxiliaryControlsPlan,
+  normalizeTerminalZoomValue,
   terminalZoomControlsPlan,
+  terminalZoomLoadValue,
   terminalZoomPercentLabel,
   terminalZoomPersistencePlan,
 } from "./input_support.js";
@@ -952,6 +954,23 @@ test("terminalZoomControlsPlan preserves support gates, bounds, and labels", () 
     minZoom: 0.5,
     maxZoom: 2,
   }).zoomInDisabled, true);
+});
+
+test("normalizeTerminalZoomValue preserves parse, step, and clamp behavior", () => {
+  const config = { minZoom: 0.5, maxZoom: 2, step: 0.1 };
+  assert.equal(normalizeTerminalZoomValue("nope", config), 1);
+  assert.equal(normalizeTerminalZoomValue("1.26", config), 1.3);
+  assert.equal(normalizeTerminalZoomValue("1.24", config), 1.2000000000000002);
+  assert.equal(normalizeTerminalZoomValue("3", config), 2);
+  assert.equal(normalizeTerminalZoomValue("0.1", config), 0.5);
+});
+
+test("terminalZoomLoadValue preserves URL precedence over stored zoom", () => {
+  const config = { minZoom: 0.5, maxZoom: 2, step: 0.1 };
+  assert.equal(terminalZoomLoadValue({ urlZoom: "1.6", storedZoom: "0.7" }, config), 1.6);
+  assert.equal(terminalZoomLoadValue({ urlZoom: null, storedZoom: "0.7" }, config), 0.7000000000000001);
+  assert.equal(terminalZoomLoadValue({ urlZoom: null, storedZoom: "" }, config), 1);
+  assert.equal(terminalZoomLoadValue({ urlZoom: "bad", storedZoom: "0.7" }, config), 1);
 });
 
 test("terminalZoomPersistencePlan preserves URL and storage values", () => {
