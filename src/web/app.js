@@ -3,7 +3,7 @@ import {
   authTokenButtonPlan, eventCell, globalShortcutPlan, mobileKeyboardInputExecutorPlan, mobileKeyboardInputPlan,
   mobileKeyboardKeydownPlan, mobileKeyboardKeyPlan, shouldIgnoreSyntheticClick,
   terminalComposerControlAction, terminalFallbackKeydownPlan, terminalFallbackPastePlan, terminalKeyStripClickPlan, terminalStageCaptureBindings, terminalStageFocusPlan,
-  terminalStageKeydownPlan, terminalStagePastePlan,
+  terminalStageKeydownPlan, terminalStagePasteExecutorPlan, terminalStagePastePlan,
 } from "./input_support.js";
 import { sendHistoryClickPlan, sendSheetFailureStatus, sendSheetSubmitPlan, sendSheetSuccessStatus } from "./send_sheet.js";
 import {
@@ -5726,10 +5726,9 @@ function bindEvents() {
   });
 
   el.terminalStage.addEventListener("paste", (event) => {
-    const plan = terminalStagePastePlan(state.readOnly, event.clipboardData?.getData("text") ?? "");
-    if (plan.type !== "send_text") return;
-    event.preventDefault();
-    sendTerminalText(plan.text);
+    const action = terminalStagePasteExecutorPlan(terminalStagePastePlan(state.readOnly, event.clipboardData?.getData("text") ?? ""));
+    if (action.preventDefault) event.preventDefault();
+    if (action.sendText) sendTerminalText(action.text);
   });
 
   el.terminalStage.addEventListener("focus", () => {

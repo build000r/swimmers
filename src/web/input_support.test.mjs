@@ -17,6 +17,7 @@ import {
   terminalStageCaptureBindings,
   terminalStageFocusPlan,
   terminalStageKeydownPlan,
+  terminalStagePasteExecutorPlan,
   terminalStagePastePlan,
 } from "./input_support.js";
 
@@ -389,6 +390,19 @@ test("terminalStagePastePlan preserves read-only, empty, and raw text decisions"
     type: "send_text",
     text: " paste me\n",
   });
+});
+
+test("terminalStagePasteExecutorPlan preserves ignore, send, and unknown decisions", () => {
+  const ignored = { type: "ignore", preventDefault: false, sendText: false, text: "" };
+
+  assert.deepEqual(terminalStagePasteExecutorPlan({ type: "ignore" }), ignored);
+  assert.deepEqual(terminalStagePasteExecutorPlan({ type: "send_text", text: " paste me\n" }), {
+    type: "send_text",
+    preventDefault: true,
+    sendText: true,
+    text: " paste me\n",
+  });
+  assert.deepEqual(terminalStagePasteExecutorPlan({ type: "unknown", text: "ignored" }), ignored);
 });
 
 test("terminalFallbackPastePlan preserves gating, propagation, and exact text", () => {

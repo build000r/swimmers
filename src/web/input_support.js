@@ -274,6 +274,13 @@ export function terminalStagePastePlan(readOnly, text) {
   return { type: "send_text", text };
 }
 
+export function terminalStagePasteExecutorPlan(plan = {}) {
+  if (plan.type !== "send_text") {
+    return { type: "ignore", preventDefault: false, sendText: false, text: "" };
+  }
+  return { type: "send_text", preventDefault: true, sendText: true, text: plan.text };
+}
+
 export function terminalFallbackPastePlan(context = {}) {
   if (!context.terminalFallbackActive || context.readOnly || !context.hasCurrentSession || !context.text) {
     return { type: "ignore", handled: false, preventDefault: false, stopPropagation: false, sendText: false, text: "" };
