@@ -385,6 +385,23 @@ export function terminalFallbackActivationPlan(context = {}) {
   };
 }
 
+export function terminalPendingByteBufferPlan(context = {}) {
+  const pendingChunkByteLengths = Array.isArray(context.pendingChunkByteLengths) ? context.pendingChunkByteLengths : [];
+  const currentLength = Number.isFinite(context.pendingByteLength) ? context.pendingByteLength : 0;
+  const byteLength = Number.isFinite(context.byteLength) ? context.byteLength : 0;
+  if (!context.isUint8Array || byteLength === 0) {
+    return { type: "ignore", accept: false, dropCount: 0, finalPendingByteLength: currentLength, status: "" };
+  }
+  const maxPendingBytes = Number.isFinite(context.maxPendingBytes) ? context.maxPendingBytes : Number.POSITIVE_INFINITY;
+  let finalPendingByteLength = currentLength + byteLength;
+  let dropCount = 0;
+  while (finalPendingByteLength > maxPendingBytes && pendingChunkByteLengths.length + 1 - dropCount > 1) {
+    finalPendingByteLength -= pendingChunkByteLengths[dropCount] || 0;
+    dropCount += 1;
+  }
+  return { type: "buffer", accept: true, dropCount, finalPendingByteLength, status: "buffering terminal; renderer attaching" };
+}
+
 export function terminalFallbackPointerFocusPlan(eventType, context = {}) {
   if (!context.terminalFallbackActive || context.activeSheet) {
     return { type: "ignore", focusTerminal: false, scheduleFrame: false };

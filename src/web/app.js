@@ -3,7 +3,7 @@ import {
   authTokenButtonPlan, eventCell, globalShortcutPlan, mobileKeyboardInputExecutorPlan, mobileKeyboardInputPlan,
   mobileKeyboardKeydownPlan, mobileKeyboardKeyPlan, shouldIgnoreSyntheticClick,
   terminalComposerControlAction, terminalDestroyStatePatch, terminalFallbackActivationPlan, terminalFallbackFocusPlan, terminalFallbackKeydownPlan, terminalFallbackPastePlan, terminalFallbackPointerFocusPlan, terminalInlineInputKeydownPlan, terminalKeyStripClickExecutorPlan, terminalKeyStripClickPlan, terminalStageCaptureBindings, terminalStageFocusExecutorPlan, terminalStageFocusPlan,
-  terminalFallbackScrollPlan, terminalFallbackTextScrollPlan, terminalStageKeydownPlan, terminalStagePasteExecutorPlan, terminalStagePastePlan,
+  terminalFallbackScrollPlan, terminalFallbackTextScrollPlan, terminalPendingByteBufferPlan, terminalStageKeydownPlan, terminalStagePasteExecutorPlan, terminalStagePastePlan,
 } from "./input_support.js";
 import { sendHistoryClickPlan, sendSheetFailureStatus, sendSheetSubmitPlan, sendSheetSuccessStatus } from "./send_sheet.js";
 import {
@@ -2695,20 +2695,17 @@ function clearPendingTerminalBytes() {
 }
 
 function bufferTerminalBytes(bytes) {
-  if (!(bytes instanceof Uint8Array) || bytes.byteLength === 0) {
-    return false;
-  }
+  const isUint8Array = bytes instanceof Uint8Array;
+  const plan = terminalPendingByteBufferPlan({ isUint8Array, byteLength: isUint8Array ? bytes.byteLength : 0, pendingByteLength: state.pendingTerminalByteLength, pendingChunkByteLengths: state.pendingTerminalByteChunks.map((chunk) => chunk?.byteLength || 0), maxPendingBytes: MAX_PENDING_TERMINAL_BYTES });
+  if (!plan.accept) return false;
   const copy = new Uint8Array(bytes);
   state.pendingTerminalByteChunks.push(copy);
   state.pendingTerminalByteLength += copy.byteLength;
-  while (
-    state.pendingTerminalByteLength > MAX_PENDING_TERMINAL_BYTES &&
-    state.pendingTerminalByteChunks.length > 1
-  ) {
+  for (let index = 0; index < plan.dropCount; index += 1) {
     const dropped = state.pendingTerminalByteChunks.shift();
     state.pendingTerminalByteLength -= dropped?.byteLength || 0;
   }
-  setConnectionStatus("buffering terminal; renderer attaching");
+  setConnectionStatus(plan.status);
   return true;
 }
 

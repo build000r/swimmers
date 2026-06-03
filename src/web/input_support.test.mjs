@@ -22,6 +22,7 @@ import {
   terminalInlineInputKeydownPlan,
   terminalKeyStripClickExecutorPlan,
   terminalKeyStripClickPlan,
+  terminalPendingByteBufferPlan,
   terminalStageCaptureBindings,
   terminalStageFocusExecutorPlan,
   terminalStageFocusPlan,
@@ -580,6 +581,59 @@ test("terminalFallbackActivationPlan preserves fallback activation side-effect d
     syncStatus: true,
   });
   assert.equal(terminalFallbackActivationPlan({ active: true, hasCurrentSession: false }).terminalFallbackActive, false);
+});
+
+test("terminalPendingByteBufferPlan preserves pending byte acceptance and drops", () => {
+  const ignored = { type: "ignore", accept: false, dropCount: 0, finalPendingByteLength: 5, status: "" };
+
+  assert.deepEqual(terminalPendingByteBufferPlan({ isUint8Array: false, byteLength: 5, pendingByteLength: 5 }), ignored);
+  assert.deepEqual(terminalPendingByteBufferPlan({ isUint8Array: true, byteLength: 0, pendingByteLength: 5 }), ignored);
+  assert.deepEqual(terminalPendingByteBufferPlan({
+    isUint8Array: true,
+    byteLength: 5,
+    pendingByteLength: 10,
+    pendingChunkByteLengths: [4, 6],
+    maxPendingBytes: 20,
+  }), {
+    type: "buffer",
+    accept: true,
+    dropCount: 0,
+    finalPendingByteLength: 15,
+    status: "buffering terminal; renderer attaching",
+  });
+  assert.deepEqual(terminalPendingByteBufferPlan({
+    isUint8Array: true,
+    byteLength: 5,
+    pendingByteLength: 18,
+    pendingChunkByteLengths: [8, 10],
+    maxPendingBytes: 20,
+  }), {
+    type: "buffer",
+    accept: true,
+    dropCount: 1,
+    finalPendingByteLength: 15,
+    status: "buffering terminal; renderer attaching",
+  });
+  assert.equal(terminalPendingByteBufferPlan({
+    isUint8Array: true,
+    byteLength: 8,
+    pendingByteLength: 25,
+    pendingChunkByteLengths: [8, 7, 10],
+    maxPendingBytes: 20,
+  }).dropCount, 2);
+  assert.deepEqual(terminalPendingByteBufferPlan({
+    isUint8Array: true,
+    byteLength: 25,
+    pendingByteLength: 0,
+    pendingChunkByteLengths: [],
+    maxPendingBytes: 20,
+  }), {
+    type: "buffer",
+    accept: true,
+    dropCount: 0,
+    finalPendingByteLength: 25,
+    status: "buffering terminal; renderer attaching",
+  });
 });
 
 test("terminalFallbackPointerFocusPlan preserves scheduled and immediate focus gates", () => {
