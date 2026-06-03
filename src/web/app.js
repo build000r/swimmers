@@ -1,6 +1,6 @@
 import { buildSurfaceFrame, surfaceActionAt, surfaceConsumesPointer } from "./rendered_surface.js";
 import {
-  authTokenButtonPlan, controlEventSessionPatchPlan, eventCell, globalShortcutPlan, initialStateBootPlan, inputAckActionPlan, lifecycleDeletedSessionPatchPlan, mobileKeyboardInputExecutorPlan, mobileKeyboardInputPlan,
+  appEventListenerBindingPlan, authTokenButtonPlan, controlEventSessionPatchPlan, eventCell, globalShortcutPlan, initialStateBootPlan, inputAckActionPlan, lifecycleDeletedSessionPatchPlan, mobileKeyboardInputExecutorPlan, mobileKeyboardInputPlan,
   sheetActionAvailabilityPlan,
   mobileKeyboardKeydownPlan, mobileKeyboardKeyPlan, shouldIgnoreSyntheticClick, surfaceActionDispatchContextPlan, surfaceActionDispatchPlan, surfaceActionExecutionContextPlan, surfaceActionExecutionPlan, surfaceActionFocusTerminalExecutionPlan, surfaceActionTrogdorReaderExecutionPlan,
   terminalComposerControlAction, terminalDestroyStatePatch, terminalFallbackActivationPlan, terminalFallbackFocusPlan, terminalFallbackKeydownPlan, terminalFallbackPastePlan, terminalFallbackPointerFocusPlan, terminalInlineInputKeydownPlan, terminalKeyStripClickExecutorPlan, terminalKeyStripClickPlan, terminalStageCaptureBindings, terminalStageClickPlan, terminalStageFocusExecutorPlan, terminalStageFocusPlan,
@@ -5476,126 +5476,40 @@ function handleTerminalStageMouseleave() { clearHoveredLink(true); updateHovered
 
 function installTerminalStageResizeObserver() { const resizeObserver = new ResizeObserver(() => { queueMeasureAndResizeSurface(true, false); }); resizeObserver.observe(el.terminalStage); }
 
+const eventListenerHandlers = {
+  closeSheets, handleClearTokenButtonClick, handleCommandPaletteEvent, handleCreateBatchClearClick, handleCreateBatchVisibleAction, handleCreateCwdInput, handleCreateFormSubmit, handleCreateLaunchTargetChange, handleCreateRequestInput, handleCreateToolChange,
+  handleDirCheckboxChange, handleDirsListClick, handleDirsLoadButtonClick, handleDirsManagedOnlyChange, handleDirsPathInput, handleDirsPathKeydown, handleDirsSearchInput, handleDirsSpawnHereClick, handleDirsUpButtonClick, handleDocumentCommandPaletteShortcut,
+  handleMermaidOpenButtonClick, handleMermaidPlanTabsClick, handleMermaidRefreshButtonClick, handleMobileKeyboardProxyBlur, handleMobileKeyboardProxyFocus, handleMobileKeyboardProxyInput, handleMobileKeyboardProxyKeydown, handleModalRootKeydown,
+  handleNativeAppChange, handleNativeFormSubmit, handleNativeModeChange, handleNativeOpenButtonClick, handleNativeRefreshButtonClick, handlePaletteSearchInput, handleSaveTokenButtonClick, handleSearchClearButtonClick, handleSearchFormSubmit, handleSearchNextButtonClick, handleSearchPrevButtonClick,
+  handleSendCloseButtonClick, handleSendFormSubmit, handleSendHistoryClick, handleSendModeChange, handleTerminalCopyFrameClick, handleTerminalFallbackBlur, handleTerminalFallbackClick, handleTerminalFallbackFocus, handleTerminalFallbackKeyEvent, handleTerminalFallbackMousedown,
+  handleTerminalFallbackPasteEvent, handleTerminalFallbackScroll, handleTerminalInlineInputFocus, handleTerminalInlineInputInput, handleTerminalInlineInputKeydown, handleTerminalInputDockSubmit, handleTerminalKeyStripClick, handleTerminalLinkCopyClick, handleTerminalLinkOpenClick,
+  handleTerminalMobileKeyboardClick, handleTerminalPaletteClick, handleTerminalSearchInput, handleTerminalStageBlur, handleTerminalStageClick, handleTerminalStageFocus, handleTerminalStageKeydown, handleTerminalStageMouseDown, handleTerminalStageMouseMove, handleTerminalStageMouseUp,
+  handleTerminalStageMouseleave, handleTerminalStagePaste, handleTerminalStageTouchEnd, handleTerminalStageWheel, handleTerminalTrogdorBackClick, handleTerminalWorkbenchRefreshClick, handleTerminalWorkbenchToggleClick, handleTerminalWorkbenchWidgetsClick,
+  handleTerminalWorkbenchWidgetsLogEvent, handleTerminalZoomInClick, handleTerminalZoomOutClick, handleTerminalZoomResetClick, handleThoughtConfigBackendChange, handleThoughtConfigFormSubmit, handleThoughtConfigOptionChange, handleThoughtConfigTestButtonClick,
+};
+
+function installEventListenerBinding(binding) {
+  const target = binding.target === "document" ? document : el[binding.target];
+  if (binding.optionalTarget && !target) return;
+  const handler = eventListenerHandlers[binding.handler];
+  if (!handler) throw new Error(`Missing event listener handler: ${binding.handler}`);
+  if (binding.optionalListener) {
+    target.addEventListener?.(binding.eventType, handler, binding.options);
+    return;
+  }
+  target.addEventListener(binding.eventType, handler, binding.options);
+}
+
+function installEventListenerBindings(bindings) {
+  for (const binding of bindings) installEventListenerBinding(binding);
+}
+
 function bindEvents() {
   bindTrogdorEvents();
-  document.addEventListener?.("keydown", handleDocumentCommandPaletteShortcut);
-  el.terminalPalette.addEventListener("click", handleTerminalPaletteClick);
-  el.terminalCopyFrame.addEventListener("click", handleTerminalCopyFrameClick);
-  el.terminalLinkOpen.addEventListener("click", handleTerminalLinkOpenClick);
-  el.terminalLinkCopy.addEventListener("click", handleTerminalLinkCopyClick);
-  el.terminalZoomOut.addEventListener("click", handleTerminalZoomOutClick);
-  el.terminalZoomReset.addEventListener("click", handleTerminalZoomResetClick);
-  el.terminalZoomIn.addEventListener("click", handleTerminalZoomInClick);
-  el.terminalMobileKeyboard.addEventListener("click", handleTerminalMobileKeyboardClick);
-  el.terminalTrogdorBack.addEventListener("click", handleTerminalTrogdorBackClick);
-  el.terminalWorkbenchToggle.addEventListener("click", handleTerminalWorkbenchToggleClick);
-  el.terminalWorkbenchRefresh.addEventListener("click", handleTerminalWorkbenchRefreshClick);
-  el.terminalWorkbenchWidgets.addEventListener("click", handleTerminalWorkbenchWidgetsClick);
-  el.terminalWorkbenchWidgets.addEventListener("input", handleTerminalWorkbenchWidgetsLogEvent);
-  el.terminalWorkbenchWidgets.addEventListener("change", handleTerminalWorkbenchWidgetsLogEvent);
-  el.terminalInputDock.addEventListener("submit", handleTerminalInputDockSubmit);
-  el.terminalInlineInput.addEventListener("input", handleTerminalInlineInputInput);
-  el.terminalInlineInput.addEventListener("keydown", handleTerminalInlineInputKeydown);
-  el.terminalKeyStrip.addEventListener("click", handleTerminalKeyStripClick);
-  el.terminalInlineInput.addEventListener("focus", handleTerminalInlineInputFocus);
-  el.terminalFallback.addEventListener("mousedown", handleTerminalFallbackMousedown);
-  el.terminalFallback.addEventListener("click", handleTerminalFallbackClick);
-  el.terminalFallback.addEventListener("keydown", handleTerminalFallbackKeyEvent);
-  el.terminalFallback.addEventListener("paste", handleTerminalFallbackPasteEvent);
-  el.terminalFallback.addEventListener("focus", handleTerminalFallbackFocus);
-  el.terminalFallback.addEventListener("blur", handleTerminalFallbackBlur);
-  el.terminalFallback.addEventListener("scroll", handleTerminalFallbackScroll);
-  el.mobileKeyboardProxy.addEventListener("focus", handleMobileKeyboardProxyFocus);
-  el.mobileKeyboardProxy.addEventListener("blur", handleMobileKeyboardProxyBlur);
-  el.mobileKeyboardProxy.addEventListener("keydown", handleMobileKeyboardProxyKeydown);
-  el.mobileKeyboardProxy.addEventListener("input", handleMobileKeyboardProxyInput);
-  el.modalBackdrop.addEventListener("click", closeSheets);
-  el.modalRoot.addEventListener("keydown", handleModalRootKeydown);
-  el.paletteSearch.addEventListener("input", handlePaletteSearchInput);
-  el.paletteSearch.addEventListener("keydown", handleCommandPaletteEvent);
-  el.paletteResults.addEventListener("mousemove", handleCommandPaletteEvent);
-  el.paletteResults.addEventListener("click", handleCommandPaletteEvent);
-  el.paletteCloseButton.addEventListener("click", closeSheets);
-
-  el.searchForm.addEventListener("submit", handleSearchFormSubmit);
-  el.terminalSearch.addEventListener("input", handleTerminalSearchInput);
-  el.searchPrevButton.addEventListener("click", handleSearchPrevButtonClick);
-  el.searchNextButton.addEventListener("click", handleSearchNextButtonClick);
-  el.searchClearButton.addEventListener("click", handleSearchClearButtonClick);
-  el.searchCloseButton.addEventListener("click", closeSheets);
-  el.sendMode.addEventListener("change", handleSendModeChange);
-
-  el.thoughtConfigForm.addEventListener("submit", handleThoughtConfigFormSubmit);
-  el.thoughtConfigBackend.addEventListener("change", handleThoughtConfigBackendChange);
-  el.thoughtConfigModel.addEventListener("input", handleThoughtConfigOptionChange);
-  el.thoughtConfigEnabled.addEventListener("change", handleThoughtConfigOptionChange);
-  el.thoughtConfigTestButton.addEventListener("click", handleThoughtConfigTestButtonClick);
-  el.thoughtConfigCloseButton.addEventListener("click", closeSheets);
-
-  el.nativeForm.addEventListener("submit", handleNativeFormSubmit);
-  el.nativeRefreshButton.addEventListener("click", handleNativeRefreshButtonClick);
-  el.nativeOpenButton.addEventListener("click", handleNativeOpenButtonClick);
-  el.nativeCloseButton.addEventListener("click", closeSheets);
-  el.nativeApp.addEventListener("change", handleNativeAppChange);
-  el.nativeMode.addEventListener("change", handleNativeModeChange);
-
-  el.sendForm.addEventListener("submit", handleSendFormSubmit);
-  el.sendCloseButton.addEventListener("click", handleSendCloseButtonClick);
-  el.sendHistory.addEventListener("click", handleSendHistoryClick);
-
-  el.saveTokenButton.addEventListener("click", handleSaveTokenButtonClick);
-  el.clearTokenButton.addEventListener("click", handleClearTokenButtonClick);
-  el.authCloseButton.addEventListener("click", closeSheets);
-
-  el.createForm.addEventListener("submit", handleCreateFormSubmit);
-  el.createCloseButton.addEventListener("click", closeSheets);
-  el.createTool.addEventListener("change", handleCreateToolChange);
-  el.createLaunchTarget.addEventListener("change", handleCreateLaunchTargetChange);
-  el.createRequest.addEventListener("input", handleCreateRequestInput);
-  el.dirsSearch.addEventListener("input", handleDirsSearchInput);
-  el.createBatchVisible.addEventListener("click", handleCreateBatchVisibleAction);
-  if (el.createBatchClear) {
-    el.createBatchClear.addEventListener("click", handleCreateBatchClearClick);
-  }
-  el.createCwd.addEventListener("input", handleCreateCwdInput);
-  el.dirsManagedOnly.addEventListener("change", handleDirsManagedOnlyChange);
-  el.dirsPath.addEventListener("input", handleDirsPathInput);
-  el.dirsPath.addEventListener("keydown", handleDirsPathKeydown);
-  el.dirsLoadButton.addEventListener("click", handleDirsLoadButtonClick);
-  el.dirsSpawnHere.addEventListener("click", handleDirsSpawnHereClick);
-  el.dirsUpButton.addEventListener("click", handleDirsUpButtonClick);
-  el.dirsList.addEventListener("change", handleDirCheckboxChange);
-  el.dirsList.addEventListener("click", handleDirsListClick);
-
-  el.mermaidRefreshButton.addEventListener("click", handleMermaidRefreshButtonClick);
-  el.mermaidOpenButton.addEventListener("click", handleMermaidOpenButtonClick);
-  el.mermaidPlanTabs.addEventListener("click", handleMermaidPlanTabsClick);
-  el.mermaidCloseButton.addEventListener("click", closeSheets);
-
+  const bindingPlan = appEventListenerBindingPlan();
+  installEventListenerBindings(bindingPlan.beforeTerminalStageCapture);
   installTerminalStageCaptureBindings();
-
-  el.terminalStage.addEventListener("click", handleTerminalStageClick);
-
-  el.terminalStage.addEventListener("touchend", handleTerminalStageTouchEnd, { passive: false });
-
-  el.terminalStage.addEventListener("keydown", handleTerminalStageKeydown);
-  el.terminalStage.addEventListener("paste", handleTerminalStagePaste);
-  el.terminalStage.addEventListener("focus", handleTerminalStageFocus);
-  el.terminalStage.addEventListener("blur", handleTerminalStageBlur);
-
-  el.terminalStage.addEventListener("mousedown", handleTerminalStageMouseDown);
-  el.terminalStage.addEventListener("mouseup", handleTerminalStageMouseUp);
-
-  el.terminalStage.addEventListener("mousemove", handleTerminalStageMouseMove);
-
-  el.terminalStage.addEventListener(
-    "wheel",
-    handleTerminalStageWheel,
-    { passive: false },
-  );
-
-  el.terminalStage.addEventListener("mouseleave", handleTerminalStageMouseleave);
-
+  installEventListenerBindings(bindingPlan.afterTerminalStageCapture);
   installTerminalStageResizeObserver();
 }
 
