@@ -35,6 +35,7 @@ import {
   renderCreateBatchBar as renderDirBrowserCreateBatchBar,
   renderDirEntries as renderDirBrowserEntries,
   selectedLaunchTarget as dirBrowserSelectedLaunchTarget,
+  visibleDirBatchPlan as dirBrowserVisibleDirBatchPlan,
   visibleSelectableDirPaths as dirBrowserVisibleSelectableDirPaths,
 } from "./dir_browser.js";
 import {
@@ -1912,12 +1913,33 @@ function renderCreateBatchBar() {
   renderDirBrowserCreateBatchBar({ el, dirBrowser: state.dirBrowser });
 }
 
+function currentDirListingPayload() {
+  return {
+    path: state.dirBrowser.path,
+    entries: state.dirBrowser.entries,
+    groups: state.dirBrowser.groups,
+    overlay_label: state.dirBrowser.overlayLabel || undefined,
+    launch_targets: state.dirBrowser.launchTargets,
+    default_launch_target: state.dirBrowser.launchTarget,
+  };
+}
+
 function clearCreateBatchSelection() {
   clearDirBrowserBatchSelection({
     el,
     dirBrowser: state.dirBrowser,
     syncSheetActionAvailability,
   });
+}
+
+function handleCreateBatchVisibleAction() {
+  const plan = dirBrowserVisibleDirBatchPlan(visibleSelectableDirPaths(), state.dirBrowser.path, el.dirsPath.value);
+  const selected = ensureDirBrowserBatchSelection();
+  selected.clear();
+  for (const path of plan.paths) selected.add(path);
+  if (plan.firstPath) el.createCwd.value = plan.firstPath;
+  renderDirEntries(currentDirListingPayload());
+  setDirStatus(plan.statusLabel, plan.statusMuted);
 }
 
 function renderDirEntries(response) {
@@ -5506,36 +5528,9 @@ function bindEvents() {
   });
   el.dirsSearch.addEventListener("input", () => {
     state.dirBrowser.search = String(el.dirsSearch.value || "");
-    renderDirEntries({
-      path: state.dirBrowser.path,
-      entries: state.dirBrowser.entries,
-      groups: state.dirBrowser.groups,
-      overlay_label: state.dirBrowser.overlayLabel || undefined,
-      launch_targets: state.dirBrowser.launchTargets,
-      default_launch_target: state.dirBrowser.launchTarget,
-    });
+    renderDirEntries(currentDirListingPayload());
   });
-  el.createBatchVisible.addEventListener("click", () => {
-    const paths = visibleSelectableDirPaths();
-    const selected = ensureDirBrowserBatchSelection();
-    selected.clear();
-    for (const path of paths) {
-      selected.add(path);
-    }
-    const firstPath = paths[0] || state.dirBrowser.path || el.dirsPath.value;
-    if (firstPath) {
-      el.createCwd.value = firstPath;
-    }
-    renderDirEntries({
-      path: state.dirBrowser.path,
-      entries: state.dirBrowser.entries,
-      groups: state.dirBrowser.groups,
-      overlay_label: state.dirBrowser.overlayLabel || undefined,
-      launch_targets: state.dirBrowser.launchTargets,
-      default_launch_target: state.dirBrowser.launchTarget,
-    });
-    setDirStatus(paths.length ? `Batching ${paths.length} visible directories.` : "No visible directories to batch.", paths.length < 1);
-  });
+  el.createBatchVisible.addEventListener("click", handleCreateBatchVisibleAction);
   if (el.createBatchClear) {
     el.createBatchClear.addEventListener("click", () => {
       clearCreateBatchSelection();
@@ -6005,7 +6000,7 @@ export const __swimmersWebTest = {
   sendTerminalControlKey,
   terminalKeyActionForDomEvent,
   handleTerminalInlineInputKeydown,
-  handleSendFormSubmit, handleAuthTokenButtonAction,
+  handleSendFormSubmit, handleAuthTokenButtonAction, handleCreateBatchVisibleAction,
   focusTerminalInputSurface,
   syncTerminalInputDock,
   submitTerminalInputDock,

@@ -326,6 +326,21 @@ function resetWebState() {
   web.state.paletteItems = [];
   web.state.paletteIndex = 0;
   web.state.activeSheet = null;
+  web.state.dirBrowser = {
+    loading: false,
+    path: "",
+    managedOnly: false,
+    entries: [],
+    groups: [],
+    group: "",
+    search: "",
+    overlayLabel: "",
+    launchTargets: [],
+    launchTarget: "local",
+    batchSelected: new Set(),
+    status: "",
+    error: "",
+  };
   web.state.mermaidArtifact = {
     loading: false,
     sessionId: null,
@@ -2321,6 +2336,43 @@ test("auth token button action preserves save, clear, and refresh side effects",
   assert.equal(web.el.sendInput.disabled, false);
   assert.equal(web.state.activeSheet, null);
   assert.equal(requests.find((request) => request.path === "/v1/sessions")?.authorization, null);
+});
+
+test("visible directory batch action preserves selection, cwd fallback, and status", () => {
+  resetWebState();
+  Object.assign(web.state.dirBrowser, {
+    path: "/srv/repos",
+    search: "dirty",
+    overlayLabel: "managed",
+    entries: [
+      { name: "swimmers", repo_dirty: true },
+      { name: "other", repo_dirty: true },
+      { name: "clients", group: "clients", repo_dirty: true },
+      { name: "clean" },
+    ],
+    batchSelected: new Set(["/old"]),
+  });
+  web.el.dirsPath.value = "/typed";
+  web.el.createCwd.value = "";
+
+  web.handleCreateBatchVisibleAction();
+
+  assert.deepEqual(Array.from(web.state.dirBrowser.batchSelected), ["/srv/repos/swimmers", "/srv/repos/other"]);
+  assert.equal(web.el.createCwd.value, "/srv/repos/swimmers");
+  assert.equal(web.state.dirBrowser.status, "Batching 2 visible directories.");
+  assert.equal(web.state.dirBrowser.error, "");
+  assert.equal(web.el.createBatchCount.textContent, "2 selected");
+
+  web.state.dirBrowser.search = "missing";
+  web.state.dirBrowser.batchSelected = new Set(["/old"]);
+  web.el.createCwd.value = "";
+
+  web.handleCreateBatchVisibleAction();
+
+  assert.equal(web.state.dirBrowser.batchSelected.size, 0);
+  assert.equal(web.el.createCwd.value, "/srv/repos");
+  assert.equal(web.state.dirBrowser.status, "No visible directories to batch.");
+  assert.equal(web.state.dirBrowser.error, "No visible directories to batch.");
 });
 
 test("send form submit handler preserves line send side effects and cleanup", async () => {

@@ -134,6 +134,16 @@ export function visibleSelectableDirPaths(dirBrowser) {
     .map(([, resolvedPath]) => resolvedPath);
 }
 
+export function visibleDirBatchPlan(paths = [], currentPath = "", inputPath = "") {
+  const selectedPaths = Array.isArray(paths) ? paths : [];
+  return {
+    paths: selectedPaths,
+    firstPath: selectedPaths[0] || currentPath || inputPath,
+    statusLabel: selectedPaths.length ? `Batching ${selectedPaths.length} visible directories.` : "No visible directories to batch.",
+    statusMuted: selectedPaths.length < 1,
+  };
+}
+
 export function selectedLaunchTarget(el, dirBrowser) {
   const value = String(el.createLaunchTarget?.value || dirBrowser.launchTarget || "local").trim();
   return value || "local";

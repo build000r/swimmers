@@ -11,6 +11,7 @@ import {
   launchTargetPayload,
   renderCreateBatchBar,
   selectedLaunchTarget,
+  visibleDirBatchPlan,
   visibleDirEntries,
   visibleSelectableDirPaths,
 } from "./dir_browser.js";
@@ -85,6 +86,27 @@ test("visible selectable paths respects search and virtual group rows", () => {
   };
 
   assert.deepEqual(visibleSelectableDirPaths(dirBrowser), ["/srv/repos/swimmers"]);
+});
+
+test("visibleDirBatchPlan preserves paths, fallbacks, and status copy", () => {
+  assert.deepEqual(visibleDirBatchPlan(["/srv/repos/a", "/srv/repos/b"], "/current", "/typed"), {
+    paths: ["/srv/repos/a", "/srv/repos/b"],
+    firstPath: "/srv/repos/a",
+    statusLabel: "Batching 2 visible directories.",
+    statusMuted: false,
+  });
+  assert.deepEqual(visibleDirBatchPlan([], "", "/typed"), {
+    paths: [],
+    firstPath: "/typed",
+    statusLabel: "No visible directories to batch.",
+    statusMuted: true,
+  });
+  assert.deepEqual(visibleDirBatchPlan([], "", ""), {
+    paths: [],
+    firstPath: "",
+    statusLabel: "No visible directories to batch.",
+    statusMuted: true,
+  });
 });
 
 test("launch target and batch bar helpers preserve payload and label semantics", () => {
