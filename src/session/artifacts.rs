@@ -96,55 +96,41 @@ impl ArtifactDetector for MermaidArtifactDetector {
             return None;
         }
 
-        // Phase 1: Try skillbox overlay plan directories (no time filter)
-        if let Some(overlay) = default_overlay() {
-            if let Some(plan_dirs) = overlay.find_plan_dirs(root) {
-                let mut overlay_scan = MermaidScanResult::default();
-                for dir in &plan_dirs {
-                    let scan = scan_mermaid_candidates(&dir.to_string_lossy());
-                    overlay_scan.truncated |= scan.truncated;
-                    overlay_scan.candidates.extend(scan.candidates);
-                    if overlay_scan.candidates.len() >= MERMAID_SCAN_MAX_FILES {
-                        overlay_scan.candidates.truncate(MERMAID_SCAN_MAX_FILES);
-                        overlay_scan.truncated = true;
-                        break;
-                    }
-                }
-                if let Some(best) = overlay_scan
-                    .candidates
-                    .iter()
-                    .max_by(|l, r| compare_mermaid_candidates(l, r))
-                    .cloned()
-                {
-                    return Some(read_candidate_artifact(best, overlay_scan.truncated));
-                }
-            }
+        if let Some(artifact) = discover_overlay_mermaid_artifact(root) {
+            return Some(artifact);
         }
 
-        // Phase 2: In-repo scan with relaxed time filter for plan directories
         let scan = scan_mermaid_candidates(root);
-
-        // Prefer: plan-directory candidates (no time filter), then time-filtered others
-        let plan_best = scan
-            .candidates
-            .iter()
-            .filter(|c| has_plan_siblings(&c.display_path))
-            .max_by(|l, r| compare_mermaid_candidates(l, r))
-            .cloned();
-        if let Some(best) = plan_best {
-            return Some(read_candidate_artifact(best, scan.truncated));
-        }
-
-        // Original: time-filtered non-plan candidates
-        let best = scan
-            .candidates
-            .iter()
-            .filter(|candidate| candidate.updated_at >= context.session_started_at)
-            .max_by(|left, right| compare_mermaid_candidates(left, right))
-            .cloned()?;
-
-        Some(read_candidate_artifact(best, scan.truncated))
+        select_repo_mermaid_candidate(&scan, context.session_started_at)
+            .map(|best| read_candidate_artifact(best, scan.truncated))
     }
+}
+
+fn discover_overlay_mermaid_artifact(root: &str) -> Option<DiscoveredArtifact> {
+    let scan = scan_overlay_plan_dirs(root)?;
+    select_best_mermaid_candidate(scan.candidates.iter())
+        .map(|best| read_candidate_artifact(best, scan.truncated))
+}
+
+fn scan_overlay_plan_dirs(root: &str) -> Option<MermaidScanResult> {
+    let overlay = default_overlay()?;
+    let plan_dirs = overlay.find_plan_dirs(root)?;
+    Some(scan_bounded_mermaid_dirs(&plan_dirs))
+}
+
+fn scan_bounded_mermaid_dirs(plan_dirs: &[PathBuf]) -> MermaidScanResult {
+    let mut overlay_scan = MermaidScanResult::default();
+    for dir in plan_dirs {
+        let scan = scan_mermaid_candidates(&dir.to_string_lossy());
+        overlay_scan.truncated |= scan.truncated;
+        overlay_scan.candidates.extend(scan.candidates);
+        if overlay_scan.candidates.len() >= MERMAID_SCAN_MAX_FILES {
+            overlay_scan.candidates.truncate(MERMAID_SCAN_MAX_FILES);
+            overlay_scan.truncated = true;
+            break;
+        }
+    }
+    overlay_scan
 }
 
 fn scan_mermaid_candidates(root: &str) -> MermaidScanResult {
@@ -188,6 +174,35 @@ fn scan_mermaid_candidates(root: &str) -> MermaidScanResult {
         candidates,
         truncated,
     }
+}
+
+fn select_repo_mermaid_candidate(
+    scan: &MermaidScanResult,
+    session_started_at: DateTime<Utc>,
+) -> Option<MermaidCandidate> {
+    select_plan_mermaid_candidate(scan.candidates.iter()).or_else(|| {
+        select_best_mermaid_candidate(
+            scan.candidates
+                .iter()
+                .filter(|candidate| candidate.updated_at >= session_started_at),
+        )
+    })
+}
+
+fn select_plan_mermaid_candidate<'a>(
+    candidates: impl Iterator<Item = &'a MermaidCandidate>,
+) -> Option<MermaidCandidate> {
+    select_best_mermaid_candidate(
+        candidates.filter(|candidate| has_plan_siblings(&candidate.display_path)),
+    )
+}
+
+fn select_best_mermaid_candidate<'a>(
+    candidates: impl Iterator<Item = &'a MermaidCandidate>,
+) -> Option<MermaidCandidate> {
+    candidates
+        .max_by(|left, right| compare_mermaid_candidates(left, right))
+        .cloned()
 }
 
 fn read_candidate_artifact(
