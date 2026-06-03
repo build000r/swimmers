@@ -20,7 +20,9 @@ use crate::openrouter_models::cached_or_default_openrouter_candidates;
 use crate::operator_pressure::session_ready_for_operator_group_input;
 use crate::persistence::file_store::FileStore;
 use crate::session::actor::{ActorHandle, SessionCommand};
-use crate::session::overlay::{OverlayDirConfig, OverlayDirGroup, OverlayServiceEntry};
+#[cfg(test)]
+use crate::session::overlay::OverlayDirGroup;
+use crate::session::overlay::{OverlayDirConfig, OverlayServiceEntry};
 use crate::thought::probe::{run_thought_config_probe, ThoughtConfigProbeResult};
 use crate::thought::runtime_config::ThoughtConfig;
 use crate::thought_ui::thought_config_ui_metadata;

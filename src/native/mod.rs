@@ -16,9 +16,11 @@ use tokio::time::{sleep, timeout, Duration};
 
 use crate::session::actor::run_bounded_tmux_command;
 use crate::tmux_target::{exact_pane_target, exact_session_target};
+#[cfg(test)]
+use crate::types::{AttentionGroupLayout, SessionSummary};
 use crate::types::{
-    AttentionGroupLayout, DependencyHealthSnapshot, GhosttyOpenMode, NativeDesktopApp,
-    NativeDesktopOpenResponse, NativeDesktopStatusResponse, SessionSummary,
+    DependencyHealthSnapshot, GhosttyOpenMode, NativeDesktopApp, NativeDesktopOpenResponse,
+    NativeDesktopStatusResponse,
 };
 
 mod attention_group;
@@ -27,16 +29,18 @@ mod script_path;
 
 #[cfg(test)]
 use attention_group::build_attention_group_attach_command;
+use attention_group::ATTENTION_GROUP_SESSION_ID;
+#[cfg(test)]
+use attention_group::ATTENTION_GROUP_TMUX_NAME;
 pub use attention_group::{
     attention_group_attach_command, clear_native_attention_group, open_native_attention_group,
 };
-use attention_group::{ATTENTION_GROUP_SESSION_ID, ATTENTION_GROUP_TMUX_NAME};
-use ghostty_open::open_or_focus_ghostty_session;
 #[cfg(test)]
 use ghostty_open::{
-    cached_ghostty_preview_term_id, clear_ghostty_preview_term_cache, parse_osascript_output,
+    cached_ghostty_preview_term_id, clear_ghostty_preview_term_cache,
     remember_ghostty_preview_term_id,
 };
+use ghostty_open::{open_or_focus_ghostty_session, parse_osascript_output};
 #[cfg(test)]
 use script_path::{materialize_bundled_script, resolve_script_path, unique_tmp_suffix};
 use script_path::{script_path_for_app, script_path_for_app_without_materializing};
