@@ -6,6 +6,7 @@ pub mod operator_pressure;
 pub mod remote_sessions;
 pub mod selection;
 pub mod service;
+pub(crate) mod session_git_diff;
 pub mod sessions;
 pub mod skills;
 pub mod thought_config;
