@@ -677,6 +677,73 @@ export function trogdorDomActionZoneForDataset(dataset = {}) {
   return zone;
 }
 
+function closestFromTarget(target, selector) {
+  return target && typeof target.closest === "function" ? target.closest(selector) : null;
+}
+
+export function trogdorSurfacePassthroughBindings() {
+  return ["mousedown", "mouseup", "mousemove", "touchend", "wheel"].map((eventName) => ({
+    eventName,
+    options: eventName === "wheel" || eventName === "touchend" ? { passive: false } : undefined,
+  }));
+}
+
+export function trogdorSurfacePointerDownPlan(target) {
+  const agent = closestFromTarget(target, "[data-trogdor-agent]");
+  const sessionId = agent?.dataset?.sessionId || "";
+  if (!sessionId) {
+    return { type: "ignore" };
+  }
+  return { type: "open_agent_terminal", sessionId, preventDefault: true, stopPropagation: true };
+}
+
+export function trogdorSurfaceClickPlan(target) {
+  const button = closestFromTarget(target, "button[data-action]");
+  if (button) {
+    return { type: "dom_action", button, preventDefault: true, stopPropagation: true };
+  }
+  const agent = closestFromTarget(target, "[data-trogdor-agent]");
+  const sessionId = agent?.dataset?.sessionId || "";
+  if (sessionId) {
+    return {
+      type: "surface_action",
+      zone: { type: "trogdor_agent", sessionId },
+      preventDefault: true,
+      stopPropagation: true,
+    };
+  }
+  return { type: "ignore", preventDefault: true, stopPropagation: true };
+}
+
+export function trogdorSurfaceMouseoverPlan(target) {
+  const agent = closestFromTarget(target, "[data-trogdor-agent]");
+  if (agent?.dataset?.sessionId) {
+    return { type: "hover", hover: { type: "trogdor_agent", sessionId: agent.dataset.sessionId } };
+  }
+  const action = closestFromTarget(target, "button[data-action]");
+  const actionId = action?.dataset?.action || "";
+  if (actionId.startsWith("trogdor_")) {
+    return { type: "hover", hover: { type: "action", actionId } };
+  }
+  return { type: "ignore" };
+}
+
+export function trogdorSurfaceMouseleavePlan() {
+  return { type: "clear_hover", hover: null };
+}
+
+export function trogdorSurfaceFocusInPlan(target) {
+  const agent = closestFromTarget(target, "[data-trogdor-agent]");
+  if (agent?.dataset?.sessionId) {
+    return { type: "hover", hover: { type: "trogdor_agent", sessionId: agent.dataset.sessionId } };
+  }
+  return { type: "ignore" };
+}
+
+export function trogdorSurfaceFocusOutPlan({ relatedTargetInsideSurface = false } = {}) {
+  return relatedTargetInsideSurface ? { type: "ignore" } : { type: "clear_hover", hover: null };
+}
+
 export function trogdorHoverSessionIdForZone(zone, previousSessionId = null) {
   if (zone?.type === "trogdor_agent" || zone?.type === "trogdor_reader") {
     return zone.sessionId;

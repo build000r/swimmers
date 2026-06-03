@@ -53,6 +53,13 @@ import {
   trogdorSessionBurntInMap,
   trogdorSessionAwaitingUser,
   trogdorSessionHasReadyClawg,
+  trogdorSurfaceClickPlan,
+  trogdorSurfaceFocusInPlan,
+  trogdorSurfaceFocusOutPlan,
+  trogdorSurfaceMouseleavePlan,
+  trogdorSurfaceMouseoverPlan,
+  trogdorSurfacePassthroughBindings,
+  trogdorSurfacePointerDownPlan,
   trogdorSurfaceSessionTrogdorState,
   trogdorSwordsmanVisibleForState,
   trogdorTerminalFocusStatus,
@@ -72,6 +79,14 @@ function session(overrides = {}) {
     operatorPressure: null,
     commitCandidate: false,
     ...overrides,
+  };
+}
+
+function closestTarget(matches = {}) {
+  return {
+    closest(selector) {
+      return matches[selector] ?? null;
+    },
   };
 }
 
@@ -458,6 +473,76 @@ test("Trogdor DOM action zone helper preserves dataset parsing semantics", () =>
     type: "action",
     actionId: "trogdor_send",
   });
+});
+
+test("Trogdor DOM event planners preserve pointer, click, and passthrough semantics", () => {
+  const agent = { dataset: { sessionId: "agent-1" } };
+  const blankAgent = { dataset: { sessionId: "" } };
+  const button = { dataset: { action: "trogdor_send" } };
+  const agentTarget = closestTarget({ "[data-trogdor-agent]": agent });
+  const buttonTarget = closestTarget({ "button[data-action]": button, "[data-trogdor-agent]": agent });
+
+  assert.deepEqual(trogdorSurfacePointerDownPlan(null), { type: "ignore" });
+  assert.deepEqual(trogdorSurfacePointerDownPlan(closestTarget({ "[data-trogdor-agent]": blankAgent })), { type: "ignore" });
+  assert.deepEqual(trogdorSurfacePointerDownPlan(agentTarget), {
+    type: "open_agent_terminal",
+    sessionId: "agent-1",
+    preventDefault: true,
+    stopPropagation: true,
+  });
+
+  assert.deepEqual(trogdorSurfacePassthroughBindings(), [
+    { eventName: "mousedown", options: undefined },
+    { eventName: "mouseup", options: undefined },
+    { eventName: "mousemove", options: undefined },
+    { eventName: "touchend", options: { passive: false } },
+    { eventName: "wheel", options: { passive: false } },
+  ]);
+
+  assert.deepEqual(trogdorSurfaceClickPlan(buttonTarget), {
+    type: "dom_action",
+    button,
+    preventDefault: true,
+    stopPropagation: true,
+  });
+  assert.deepEqual(trogdorSurfaceClickPlan(agentTarget), {
+    type: "surface_action",
+    zone: { type: "trogdor_agent", sessionId: "agent-1" },
+    preventDefault: true,
+    stopPropagation: true,
+  });
+  assert.deepEqual(trogdorSurfaceClickPlan(null), {
+    type: "ignore",
+    preventDefault: true,
+    stopPropagation: true,
+  });
+});
+
+test("Trogdor DOM event planners preserve hover and focus semantics", () => {
+  const agent = { dataset: { sessionId: "agent-1" } };
+  const action = { dataset: { action: "trogdor_commit" } };
+  const ignoredAction = { dataset: { action: "refresh" } };
+
+  assert.deepEqual(trogdorSurfaceMouseoverPlan(closestTarget({ "[data-trogdor-agent]": agent })), {
+    type: "hover",
+    hover: { type: "trogdor_agent", sessionId: "agent-1" },
+  });
+  assert.deepEqual(trogdorSurfaceMouseoverPlan(closestTarget({ "button[data-action]": action })), {
+    type: "hover",
+    hover: { type: "action", actionId: "trogdor_commit" },
+  });
+  assert.deepEqual(trogdorSurfaceMouseoverPlan(closestTarget({ "button[data-action]": ignoredAction })), {
+    type: "ignore",
+  });
+  assert.deepEqual(trogdorSurfaceMouseleavePlan(), { type: "clear_hover", hover: null });
+  assert.deepEqual(trogdorSurfaceFocusInPlan(closestTarget({ "[data-trogdor-agent]": agent })), {
+    type: "hover",
+    hover: { type: "trogdor_agent", sessionId: "agent-1" },
+  });
+  assert.deepEqual(trogdorSurfaceFocusInPlan(closestTarget({ "button[data-action]": action })), { type: "ignore" });
+  assert.deepEqual(trogdorSurfaceFocusOutPlan({ relatedTargetInsideSurface: true }), { type: "ignore" });
+  assert.deepEqual(trogdorSurfaceFocusOutPlan({ relatedTargetInsideSurface: false }), { type: "clear_hover", hover: null });
+  assert.deepEqual(trogdorSurfaceFocusOutPlan(), { type: "clear_hover", hover: null });
 });
 
 test("Trogdor reader base index prefers active reader key over persisted progress", () => {

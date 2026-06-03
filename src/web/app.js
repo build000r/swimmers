@@ -91,6 +91,8 @@ import {
   trogdorSessionCanReadForState,
   trogdorSessionBurntInMap,
   trogdorSessionAwaitingUser,
+  trogdorSurfaceClickPlan, trogdorSurfaceFocusInPlan, trogdorSurfaceFocusOutPlan, trogdorSurfaceMouseleavePlan,
+  trogdorSurfaceMouseoverPlan, trogdorSurfacePassthroughBindings, trogdorSurfacePointerDownPlan,
   trogdorSurfaceSessionTrogdorState,
   trogdorSwordsmanVisibleForState,
   trogdorTerminalFocusStatus,
@@ -5090,85 +5092,81 @@ async function handleTrogdorDomAction(button) {
   await handleSurfaceAction(trogdorDomActionZoneForDataset(button.dataset));
 }
 
+function trogdorEventTarget(event) { return event.target instanceof Element ? event.target : null; }
+
+function trogdorRelatedTarget(event) { return event.relatedTarget instanceof Element ? event.relatedTarget : null; }
+
+function handleTrogdorLauncherClick(event) { event.preventDefault(); openTrogdorAtlas(); }
+
+function handleTrogdorSurfacePointerDown(event) {
+  const plan = trogdorSurfacePointerDownPlan(trogdorEventTarget(event));
+  if (plan.type !== "open_agent_terminal") {
+    return;
+  }
+  if (plan.preventDefault) event.preventDefault();
+  if (plan.stopPropagation) event.stopPropagation();
+  void openTrogdorAgentTerminal(plan.sessionId);
+}
+
+function handleTrogdorSurfacePassthrough(event) { event.stopPropagation(); }
+
+function installTrogdorSurfacePassthroughBindings() {
+  for (const binding of trogdorSurfacePassthroughBindings()) {
+    el.trogdorSurface.addEventListener(binding.eventName, handleTrogdorSurfacePassthrough, binding.options);
+  }
+}
+
+function handleTrogdorSurfaceClick(event) {
+  const plan = trogdorSurfaceClickPlan(trogdorEventTarget(event));
+  if (plan.preventDefault) event.preventDefault();
+  if (plan.stopPropagation) event.stopPropagation();
+  if (plan.type === "dom_action") {
+    void handleTrogdorDomAction(plan.button);
+    return;
+  }
+  if (plan.type === "surface_action") {
+    void handleSurfaceAction(plan.zone);
+  }
+}
+
+function handleTrogdorSurfaceMouseover(event) {
+  const plan = trogdorSurfaceMouseoverPlan(trogdorEventTarget(event));
+  if (plan.type === "hover") updateHoveredTrogdorSurface(plan.hover);
+}
+
+function handleTrogdorSurfaceMouseleave() {
+  updateHoveredTrogdorSurface(trogdorSurfaceMouseleavePlan().hover);
+}
+
+function handleTrogdorSurfaceFocusIn(event) {
+  const plan = trogdorSurfaceFocusInPlan(trogdorEventTarget(event));
+  if (plan.type === "hover") updateHoveredTrogdorSurface(plan.hover);
+}
+
+function handleTrogdorSurfaceFocusOut(event) {
+  const next = trogdorRelatedTarget(event);
+  const plan = trogdorSurfaceFocusOutPlan({
+    relatedTargetInsideSurface: Boolean(next && el.trogdorSurface.contains(next)),
+  });
+  if (plan.type === "clear_hover") updateHoveredTrogdorSurface(plan.hover);
+}
+
 function bindTrogdorEvents() {
   if (el.trogdorLauncher) {
-    el.trogdorLauncher.addEventListener("click", (event) => {
-      event.preventDefault();
-      openTrogdorAtlas();
-    });
+    el.trogdorLauncher.addEventListener("click", handleTrogdorLauncherClick);
   }
 
   if (!el.trogdorSurface) {
     return;
   }
 
-  el.trogdorSurface.addEventListener("pointerdown", (event) => {
-    const agent = event.target instanceof Element ? event.target.closest("[data-trogdor-agent]") : null;
-    const sessionId = agent?.dataset?.sessionId || "";
-    if (!sessionId) {
-      return;
-    }
-    event.preventDefault();
-    event.stopPropagation();
-    void openTrogdorAgentTerminal(sessionId);
-  });
-
-  for (const eventName of ["mousedown", "mouseup", "mousemove", "touchend", "wheel"]) {
-    el.trogdorSurface.addEventListener(
-      eventName,
-      (event) => {
-        event.stopPropagation();
-      },
-      eventName === "wheel" || eventName === "touchend" ? { passive: false } : undefined,
-    );
-  }
-
-  el.trogdorSurface.addEventListener("click", (event) => {
-    event.preventDefault();
-    event.stopPropagation();
-    const button = event.target instanceof Element ? event.target.closest("button[data-action]") : null;
-    if (button) {
-      void handleTrogdorDomAction(button);
-      return;
-    }
-    const agent = event.target instanceof Element ? event.target.closest("[data-trogdor-agent]") : null;
-    const sessionId = agent?.dataset?.sessionId || "";
-    if (sessionId) {
-      void handleSurfaceAction({ type: "trogdor_agent", sessionId });
-    }
-  });
-
-  el.trogdorSurface.addEventListener("mouseover", (event) => {
-    const target = event.target instanceof Element ? event.target : null;
-    const agent = target?.closest("[data-trogdor-agent]");
-    if (agent?.dataset?.sessionId) {
-      updateHoveredTrogdorSurface({ type: "trogdor_agent", sessionId: agent.dataset.sessionId });
-      return;
-    }
-    const action = target?.closest("button[data-action]");
-    if (action?.dataset?.action?.startsWith("trogdor_")) {
-      updateHoveredTrogdorSurface({ type: "action", actionId: action.dataset.action });
-    }
-  });
-
-  el.trogdorSurface.addEventListener("mouseleave", () => {
-    updateHoveredTrogdorSurface(null);
-  });
-
-  el.trogdorSurface.addEventListener("focusin", (event) => {
-    const target = event.target instanceof Element ? event.target : null;
-    const agent = target?.closest("[data-trogdor-agent]");
-    if (agent?.dataset?.sessionId) {
-      updateHoveredTrogdorSurface({ type: "trogdor_agent", sessionId: agent.dataset.sessionId });
-    }
-  });
-
-  el.trogdorSurface.addEventListener("focusout", (event) => {
-    const next = event.relatedTarget instanceof Element ? event.relatedTarget : null;
-    if (!next || !el.trogdorSurface.contains(next)) {
-      updateHoveredTrogdorSurface(null);
-    }
-  });
+  el.trogdorSurface.addEventListener("pointerdown", handleTrogdorSurfacePointerDown);
+  installTrogdorSurfacePassthroughBindings();
+  el.trogdorSurface.addEventListener("click", handleTrogdorSurfaceClick);
+  el.trogdorSurface.addEventListener("mouseover", handleTrogdorSurfaceMouseover);
+  el.trogdorSurface.addEventListener("mouseleave", handleTrogdorSurfaceMouseleave);
+  el.trogdorSurface.addEventListener("focusin", handleTrogdorSurfaceFocusIn);
+  el.trogdorSurface.addEventListener("focusout", handleTrogdorSurfaceFocusOut);
 }
 
 function handleGlobalShortcut(event) {
