@@ -653,6 +653,30 @@ export function trogdorTerminalFocusStatus(selectedSession) {
   };
 }
 
+export function trogdorDomActionZoneForDataset(dataset = {}) {
+  const zone = {
+    type: "action",
+    actionId: String(dataset?.action || ""),
+  };
+  if (dataset?.sessionId) {
+    zone.sessionId = dataset.sessionId;
+  }
+  if (dataset?.label) {
+    zone.label = dataset.label;
+  }
+  if (dataset?.cwd) {
+    zone.cwd = dataset.cwd;
+  }
+  if (dataset?.sessionIds) {
+    try {
+      zone.sessionIds = JSON.parse(dataset.sessionIds);
+    } catch (_error) {
+      zone.sessionIds = [];
+    }
+  }
+  return zone;
+}
+
 export function trogdorHoverSessionIdForZone(zone, previousSessionId = null) {
   if (zone?.type === "trogdor_agent" || zone?.type === "trogdor_reader") {
     return zone.sessionId;

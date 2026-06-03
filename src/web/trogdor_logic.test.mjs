@@ -36,6 +36,7 @@ import {
   trogdorAtlasTransitionState,
   trogdorCueTransitionState,
   trogdorCurrentSurfaceSessionForHover,
+  trogdorDomActionZoneForDataset,
   trogdorHoverReaderResetState,
   trogdorHoverSessionIdForZone,
   trogdorReadableHoveredSurfaceSession,
@@ -409,6 +410,53 @@ test("Trogdor action payload helpers preserve zone defaults and terminal copy", 
     message: "Select a session row to attach its terminal first.",
     error: true,
     timeoutMs: 2200,
+  });
+});
+
+test("Trogdor DOM action zone helper preserves dataset parsing semantics", () => {
+  assert.deepEqual(trogdorDomActionZoneForDataset(), {
+    type: "action",
+    actionId: "",
+  });
+  assert.deepEqual(trogdorDomActionZoneForDataset({
+    action: "trogdor_group_send",
+    sessionId: "agent-1",
+    label: "Batch",
+    cwd: "/tmp/repos/swimmers",
+    sessionIds: "[\"agent-1\",\"agent-2\"]",
+  }), {
+    type: "action",
+    actionId: "trogdor_group_send",
+    sessionId: "agent-1",
+    label: "Batch",
+    cwd: "/tmp/repos/swimmers",
+    sessionIds: ["agent-1", "agent-2"],
+  });
+  assert.deepEqual(trogdorDomActionZoneForDataset({
+    action: "trogdor_group_send",
+    sessionIds: "not-json",
+  }), {
+    type: "action",
+    actionId: "trogdor_group_send",
+    sessionIds: [],
+  });
+  assert.deepEqual(trogdorDomActionZoneForDataset({
+    action: "trogdor_group_send",
+    sessionIds: "\"agent-1\"",
+  }), {
+    type: "action",
+    actionId: "trogdor_group_send",
+    sessionIds: "agent-1",
+  });
+  assert.deepEqual(trogdorDomActionZoneForDataset({
+    action: "trogdor_send",
+    sessionId: "",
+    label: "",
+    cwd: "",
+    sessionIds: "",
+  }), {
+    type: "action",
+    actionId: "trogdor_send",
   });
 });
 

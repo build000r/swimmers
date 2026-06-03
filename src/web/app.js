@@ -56,6 +56,7 @@ import {
   trogdorAtlasTransitionState,
   trogdorCueTransitionState,
   trogdorCurrentSurfaceSessionForHover,
+  trogdorDomActionZoneForDataset,
   trogdorHoverReaderResetState,
   trogdorHoverSessionIdForZone,
   trogdorReadableHoveredSurfaceSession,
@@ -5036,28 +5037,7 @@ async function handleTrogdorDomAction(button) {
   if (!button || button.disabled) {
     return;
   }
-  const actionId = String(button.dataset.action || "");
-  const zone = {
-    type: "action",
-    actionId,
-  };
-  if (button.dataset.sessionId) {
-    zone.sessionId = button.dataset.sessionId;
-  }
-  if (button.dataset.label) {
-    zone.label = button.dataset.label;
-  }
-  if (button.dataset.cwd) {
-    zone.cwd = button.dataset.cwd;
-  }
-  if (button.dataset.sessionIds) {
-    try {
-      zone.sessionIds = JSON.parse(button.dataset.sessionIds);
-    } catch (_error) {
-      zone.sessionIds = [];
-    }
-  }
-  await handleSurfaceAction(zone);
+  await handleSurfaceAction(trogdorDomActionZoneForDataset(button.dataset));
 }
 
 function bindTrogdorEvents() {
