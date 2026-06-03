@@ -37,7 +37,9 @@ import {
   trogdorHoverReaderResetState,
   trogdorHoverSessionIdForZone,
   trogdorReadableHoveredSurfaceSession,
+  trogdorReaderProgressAdvanceForSession,
   trogdorReaderBaseIndexForProgress,
+  trogdorReaderStateForWpmChange,
   trogdorReaderWordIndexForProgress,
   trogdorRawSessionForHover,
   trogdorSessionCanReadForState,
@@ -377,6 +379,75 @@ test("Trogdor reader word index advances by elapsed WPM and respects pause/compl
     hoveredSessionId: item.sessionId,
     now: 3_000,
   }), 4);
+});
+
+test("Trogdor reader advancement helpers clamp progress and preserve WPM restart state", () => {
+  const item = session();
+  const key = trogdorClawgKey(item);
+  const progress = { [key]: 2 };
+
+  assert.deepEqual(trogdorReaderProgressAdvanceForSession(item, {
+    wordIndex: 1,
+    reading: true,
+  }), {
+    shouldAdvance: true,
+    nextReadIndex: 2,
+    reading: true,
+    complete: false,
+  });
+  assert.deepEqual(trogdorReaderProgressAdvanceForSession(item, {
+    wordIndex: 99,
+    reading: true,
+  }), {
+    shouldAdvance: true,
+    nextReadIndex: 4,
+    reading: false,
+    complete: true,
+  });
+  assert.deepEqual(trogdorReaderProgressAdvanceForSession(item, {
+    wordIndex: 1,
+    reading: false,
+  }), {
+    shouldAdvance: false,
+    nextReadIndex: 0,
+    reading: false,
+    complete: false,
+  });
+  assert.deepEqual(trogdorReaderProgressAdvanceForSession(session({ clawgText: " " }), {
+    wordIndex: 1,
+    reading: true,
+  }), {
+    shouldAdvance: false,
+    nextReadIndex: 0,
+    reading: true,
+    complete: false,
+  });
+  assert.deepEqual(trogdorReaderProgressAdvanceForSession(item, {
+    wordIndex: -1,
+    reading: true,
+  }), {
+    shouldAdvance: false,
+    nextReadIndex: 0,
+    reading: true,
+    complete: false,
+  });
+
+  assert.deepEqual(trogdorReaderStateForWpmChange(item, {
+    currentStartIndex: 1,
+    progress,
+    now: 12_345,
+  }), {
+    trogdorReaderStartIndex: 2,
+    trogdorReaderStartedAt: 12_345,
+  });
+  assert.deepEqual(trogdorReaderStateForWpmChange(null, {
+    currentStartIndex: 3,
+    progress,
+    now: 12_345,
+  }), {
+    trogdorReaderStartIndex: 3,
+    trogdorReaderStartedAt: 12_345,
+  });
 });
 
 test("Trogdor reader start state resumes progress and read-again resets progress", () => {

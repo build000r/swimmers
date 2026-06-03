@@ -221,6 +221,48 @@ export function trogdorReaderWordIndexForProgress(
   return Math.min(words.length, baseIndex + Math.floor(elapsed / msPerWord));
 }
 
+export function trogdorReaderProgressAdvanceForSession(
+  session,
+  {
+    wordIndex = -1,
+    reading = true,
+  } = {},
+) {
+  const words = trogdorClawgWords(session);
+  if (reading === false || !words.length || wordIndex < 0) {
+    return {
+      shouldAdvance: false,
+      nextReadIndex: 0,
+      reading,
+      complete: false,
+    };
+  }
+  const nextReadIndex = Math.min(words.length, wordIndex + 1);
+  const complete = nextReadIndex >= words.length;
+  return {
+    shouldAdvance: true,
+    nextReadIndex,
+    reading: complete ? false : reading,
+    complete,
+  };
+}
+
+export function trogdorReaderStateForWpmChange(
+  session,
+  {
+    currentStartIndex = 0,
+    progress = {},
+    now = 0,
+  } = {},
+) {
+  return {
+    trogdorReaderStartIndex: session
+      ? trogdorClawgReadIndexForProgress(session, progress)
+      : currentStartIndex,
+    trogdorReaderStartedAt: now,
+  };
+}
+
 export function startTrogdorReaderStateForSession(
   session,
   {

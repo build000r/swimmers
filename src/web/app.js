@@ -48,7 +48,6 @@ import {
   trogdorClawgKey,
   trogdorClawgDismissedForMap,
   trogdorClawgReadCompleteForProgress,
-  trogdorClawgReadIndexForProgress,
   trogdorClawgWords,
   trogdorDomActionCueKinds,
   trogdorDragonPose as buildTrogdorDragonPose,
@@ -59,6 +58,8 @@ import {
   trogdorHoverReaderResetState,
   trogdorHoverSessionIdForZone,
   trogdorReadableHoveredSurfaceSession,
+  trogdorReaderProgressAdvanceForSession,
+  trogdorReaderStateForWpmChange,
   trogdorReaderWordIndexForProgress,
   trogdorRawSessionForHover,
   trogdorSessionCanReadForState,
@@ -1424,10 +1425,6 @@ function rawSessionAwaitingUser(session) {
   return rawTrogdorSessionAwaitingUser(session, operatorPressureSnapshot(session?.session_id));
 }
 
-function trogdorClawgReadIndex(session) {
-  return trogdorClawgReadIndexForProgress(session, state.trogdorReadProgress);
-}
-
 function setTrogdorClawgReadIndex(session, index) {
   const next = setTrogdorClawgReadIndexForProgress(
     state.trogdorReadProgress || {},
@@ -1533,19 +1530,23 @@ function advanceTrogdorReaderProgressForCurrentHover() {
   if (state.trogdorReading === false) {
     return;
   }
-  const words = trogdorClawgWords(session);
-  if (!words.length) {
+  const next = trogdorReaderProgressAdvanceForSession(session, {
+    wordIndex: trogdorReaderWordIndex(session, state.trogdorWpm),
+    reading: state.trogdorReading,
+  });
+  if (!next.shouldAdvance) {
     return;
   }
-  const wordIndex = trogdorReaderWordIndex(session, state.trogdorWpm);
-  if (wordIndex < 0) {
-    return;
-  }
-  const nextReadIndex = Math.min(words.length, wordIndex + 1);
-  setTrogdorClawgReadIndex(session, nextReadIndex);
-  if (nextReadIndex >= words.length) {
-    state.trogdorReading = false;
-  }
+  setTrogdorClawgReadIndex(session, next.nextReadIndex);
+  state.trogdorReading = next.reading;
+}
+
+function resetTrogdorReaderAfterWpmChange() {
+  Object.assign(state, trogdorReaderStateForWpmChange(currentTrogdorSurfaceSession(), {
+    currentStartIndex: state.trogdorReaderStartIndex,
+    progress: state.trogdorReadProgress,
+    now: performance.now(),
+  }));
 }
 
 function startTrogdorReaderForSession(session, options = {}) {
@@ -4840,11 +4841,7 @@ async function handleSurfaceAction(zone) {
     {
       advanceTrogdorReaderProgressForCurrentHover();
       state.trogdorWpm = clampInt(state.trogdorWpm - 25, 200, 50, 800);
-      const session = currentTrogdorSurfaceSession();
-      state.trogdorReaderStartIndex = session
-        ? trogdorClawgReadIndex(session)
-        : state.trogdorReaderStartIndex;
-      state.trogdorReaderStartedAt = performance.now();
+      resetTrogdorReaderAfterWpmChange();
       renderHudSurface();
       break;
     }
@@ -4852,11 +4849,7 @@ async function handleSurfaceAction(zone) {
     {
       advanceTrogdorReaderProgressForCurrentHover();
       state.trogdorWpm = clampInt(state.trogdorWpm + 25, 200, 50, 800);
-      const session = currentTrogdorSurfaceSession();
-      state.trogdorReaderStartIndex = session
-        ? trogdorClawgReadIndex(session)
-        : state.trogdorReaderStartIndex;
-      state.trogdorReaderStartedAt = performance.now();
+      resetTrogdorReaderAfterWpmChange();
       renderHudSurface();
       break;
     }
