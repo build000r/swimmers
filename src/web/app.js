@@ -5438,6 +5438,63 @@ function handleDirsPathKeydown(event) { if (event.key === "Enter") { event.preve
 
 async function handleDirsLoadButtonClick() { state.dirBrowser.group = ""; clearCreateBatchSelection(); await loadDirListing(el.dirsPath.value, el.dirsManagedOnly.checked, ""); }
 
+async function handleDirsSpawnHereClick() {
+  if (state.readOnly) {
+    return;
+  }
+  const path = String(state.dirBrowser.path || el.dirsPath.value || el.createCwd.value || "").trim();
+  if (!path) {
+    return;
+  }
+  clearCreateBatchSelection();
+  el.createCwd.value = path;
+  el.dirsPath.value = path;
+  try {
+    await createSessionFromSheet();
+  } catch (error) {
+    setDirStatus(`Failed to spawn here: ${error.message}`, true);
+    syncSheetActionAvailability();
+  }
+}
+
+async function handleDirsUpButtonClick() { const parent = parentDir(el.dirsPath.value); if (parent) { state.dirBrowser.group = ""; clearCreateBatchSelection(); el.dirsPath.value = parent; el.createCwd.value = parent; await loadDirListing(parent, el.dirsManagedOnly.checked, ""); } }
+
+async function handleDirsListClick(event) {
+  const target = event.target instanceof Element ? event.target : null;
+  if (!target) {
+    return;
+  }
+  if (target.closest(".dir-open-url")) {
+    return;
+  }
+
+  if (await handleDirGroupChipClick(event, target)) {
+    return;
+  }
+
+  const groupActionPlan = dirBrowserGroupMembershipClickPlan(event.type, target);
+  if (groupActionPlan.type === "membership") {
+    await updateDirEntryGroupMembership(groupActionPlan.path, groupActionPlan.action, groupActionPlan.group, groupActionPlan.removeGroup);
+    return;
+  }
+
+  const rowPlan = dirBrowserRowClickPlan(event.type, target);
+  if (rowPlan.type !== "row") {
+    return;
+  }
+  const path = rowPlan.path;
+  el.dirsPath.value = path;
+  el.createCwd.value = path;
+  if (rowPlan.hasChildren) {
+    state.dirBrowser.group = "";
+    clearCreateBatchSelection();
+    await loadDirListing(path, el.dirsManagedOnly.checked, "");
+    return;
+  }
+  setDirStatus(`Selected ${path}`);
+  syncSheetActionAvailability();
+}
+
 function bindEvents() {
   bindTrogdorEvents();
   document.addEventListener?.("keydown", handleDocumentCommandPaletteShortcut);
@@ -5524,70 +5581,10 @@ function bindEvents() {
   el.dirsPath.addEventListener("input", handleDirsPathInput);
   el.dirsPath.addEventListener("keydown", handleDirsPathKeydown);
   el.dirsLoadButton.addEventListener("click", handleDirsLoadButtonClick);
-  el.dirsSpawnHere.addEventListener("click", async () => {
-    if (state.readOnly) {
-      return;
-    }
-    const path = String(state.dirBrowser.path || el.dirsPath.value || el.createCwd.value || "").trim();
-    if (!path) {
-      return;
-    }
-    clearCreateBatchSelection();
-    el.createCwd.value = path;
-    el.dirsPath.value = path;
-    try {
-      await createSessionFromSheet();
-    } catch (error) {
-      setDirStatus(`Failed to spawn here: ${error.message}`, true);
-      syncSheetActionAvailability();
-    }
-  });
-  el.dirsUpButton.addEventListener("click", async () => {
-    const parent = parentDir(el.dirsPath.value);
-    if (parent) {
-      state.dirBrowser.group = "";
-      clearCreateBatchSelection();
-      el.dirsPath.value = parent;
-      el.createCwd.value = parent;
-      await loadDirListing(parent, el.dirsManagedOnly.checked, "");
-    }
-  });
+  el.dirsSpawnHere.addEventListener("click", handleDirsSpawnHereClick);
+  el.dirsUpButton.addEventListener("click", handleDirsUpButtonClick);
   el.dirsList.addEventListener("change", handleDirCheckboxChange);
-  el.dirsList.addEventListener("click", async (event) => {
-    const target = event.target instanceof Element ? event.target : null;
-    if (!target) {
-      return;
-    }
-    if (target.closest(".dir-open-url")) {
-      return;
-    }
-
-    if (await handleDirGroupChipClick(event, target)) {
-      return;
-    }
-
-    const groupActionPlan = dirBrowserGroupMembershipClickPlan(event.type, target);
-    if (groupActionPlan.type === "membership") {
-      await updateDirEntryGroupMembership(groupActionPlan.path, groupActionPlan.action, groupActionPlan.group, groupActionPlan.removeGroup);
-      return;
-    }
-
-    const rowPlan = dirBrowserRowClickPlan(event.type, target);
-    if (rowPlan.type !== "row") {
-      return;
-    }
-    const path = rowPlan.path;
-    el.dirsPath.value = path;
-    el.createCwd.value = path;
-    if (rowPlan.hasChildren) {
-      state.dirBrowser.group = "";
-      clearCreateBatchSelection();
-      await loadDirListing(path, el.dirsManagedOnly.checked, "");
-      return;
-    }
-    setDirStatus(`Selected ${path}`);
-    syncSheetActionAvailability();
-  });
+  el.dirsList.addEventListener("click", handleDirsListClick);
 
   el.mermaidRefreshButton.addEventListener("click", async () => {
     await refreshMermaidArtifact();
