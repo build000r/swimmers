@@ -3,7 +3,7 @@ import {
   authTokenButtonPlan, eventCell, globalShortcutPlan, mobileKeyboardInputExecutorPlan, mobileKeyboardInputPlan,
   mobileKeyboardKeydownPlan, mobileKeyboardKeyPlan, shouldIgnoreSyntheticClick,
   terminalComposerControlAction, terminalFallbackFocusPlan, terminalFallbackKeydownPlan, terminalFallbackPastePlan, terminalFallbackPointerFocusPlan, terminalInlineInputKeydownPlan, terminalKeyStripClickExecutorPlan, terminalKeyStripClickPlan, terminalStageCaptureBindings, terminalStageFocusExecutorPlan, terminalStageFocusPlan,
-  terminalFallbackScrollPlan, terminalStageKeydownPlan, terminalStagePasteExecutorPlan, terminalStagePastePlan,
+  terminalFallbackScrollPlan, terminalFallbackTextScrollPlan, terminalStageKeydownPlan, terminalStagePasteExecutorPlan, terminalStagePastePlan,
 } from "./input_support.js";
 import { sendHistoryClickPlan, sendSheetFailureStatus, sendSheetSubmitPlan, sendSheetSuccessStatus } from "./send_sheet.js";
 import {
@@ -2767,14 +2767,12 @@ function terminalFallbackIsNearBottom() {
 
 function updateTerminalFallbackText(text) {
   const previousScrollTop = el.terminalFallback.scrollTop;
-  const shouldFollow = state.terminalFallbackAutoFollow || terminalFallbackIsNearBottom();
-  el.terminalFallback.textContent = text || "";
-  if (shouldFollow) {
-    el.terminalFallback.scrollTop = el.terminalFallback.scrollHeight;
-  } else {
-    el.terminalFallback.scrollTop = Math.min(previousScrollTop, Math.max(0, el.terminalFallback.scrollHeight - el.terminalFallback.clientHeight));
-  }
-  syncTerminalAccessibilityMirror(text || "");
+  const nearBottom = state.terminalFallbackAutoFollow ? false : terminalFallbackIsNearBottom();
+  const fallbackText = text || "";
+  el.terminalFallback.textContent = fallbackText;
+  const scrollPlan = terminalFallbackTextScrollPlan({ terminalFallbackAutoFollow: state.terminalFallbackAutoFollow, nearBottom, previousScrollTop, scrollHeight: el.terminalFallback.scrollHeight, clientHeight: el.terminalFallback.clientHeight });
+  el.terminalFallback.scrollTop = scrollPlan.scrollTop;
+  syncTerminalAccessibilityMirror(fallbackText);
 }
 
 function syncTerminalAccessibilityMirror(fallbackText = null) {

@@ -388,6 +388,16 @@ export function terminalFallbackScrollPlan(eventType, context = {}) {
   return { type: "set_auto_follow", updateAutoFollow: true, autoFollow: context.nearBottom };
 }
 
+export function terminalFallbackTextScrollPlan(context = {}) {
+  if (context.terminalFallbackAutoFollow || context.nearBottom) {
+    return { type: "follow", scrollTop: context.scrollHeight };
+  }
+  return {
+    type: "preserve",
+    scrollTop: Math.min(context.previousScrollTop, Math.max(0, context.scrollHeight - context.clientHeight)),
+  };
+}
+
 export function terminalStageFocusExecutorPlan(plan = {}) {
   if (plan.type !== "forward_event") {
     return { type: "ignore", forwardEvent: false, event: null };

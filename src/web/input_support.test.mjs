@@ -16,6 +16,7 @@ import {
   terminalFallbackPastePlan,
   terminalFallbackPointerFocusPlan,
   terminalFallbackScrollPlan,
+  terminalFallbackTextScrollPlan,
   terminalInlineInputKeydownPlan,
   terminalKeyStripClickExecutorPlan,
   terminalKeyStripClickPlan,
@@ -569,6 +570,44 @@ test("terminalFallbackScrollPlan preserves auto-follow gates and values", () => 
   assert.deepEqual(terminalFallbackScrollPlan("scroll", { terminalFallbackActive: true }), ignored);
   assert.deepEqual(terminalFallbackScrollPlan("resize", { terminalFallbackActive: true, nearBottom: true }), ignored);
   assert.deepEqual(terminalFallbackScrollPlan(), ignored);
+});
+
+test("terminalFallbackTextScrollPlan preserves follow and scroll clamp decisions", () => {
+  assert.deepEqual(terminalFallbackTextScrollPlan({
+    terminalFallbackAutoFollow: true,
+    nearBottom: false,
+    previousScrollTop: 40,
+    scrollHeight: 200,
+    clientHeight: 50,
+  }), { type: "follow", scrollTop: 200 });
+  assert.deepEqual(terminalFallbackTextScrollPlan({
+    terminalFallbackAutoFollow: false,
+    nearBottom: true,
+    previousScrollTop: 40,
+    scrollHeight: 180,
+    clientHeight: 50,
+  }), { type: "follow", scrollTop: 180 });
+  assert.deepEqual(terminalFallbackTextScrollPlan({
+    terminalFallbackAutoFollow: false,
+    nearBottom: false,
+    previousScrollTop: 80,
+    scrollHeight: 200,
+    clientHeight: 50,
+  }), { type: "preserve", scrollTop: 80 });
+  assert.deepEqual(terminalFallbackTextScrollPlan({
+    terminalFallbackAutoFollow: false,
+    nearBottom: false,
+    previousScrollTop: 180,
+    scrollHeight: 200,
+    clientHeight: 50,
+  }), { type: "preserve", scrollTop: 150 });
+  assert.deepEqual(terminalFallbackTextScrollPlan({
+    terminalFallbackAutoFollow: false,
+    nearBottom: false,
+    previousScrollTop: 10,
+    scrollHeight: 20,
+    clientHeight: 50,
+  }), { type: "preserve", scrollTop: 0 });
 });
 
 test("terminalStageFocusExecutorPlan preserves ignore, forward, and unknown decisions", () => {
