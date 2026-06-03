@@ -1344,66 +1344,92 @@ pub(crate) fn render_thought_panel<C: TuiApi>(
     }
 
     let panel = build_thought_panel(app, thought_content, entry_capacity);
+    render_thought_panel_header(app, renderer, thought_content);
 
+    if entry_capacity == 0 || render_thought_panel_empty_message(renderer, thought_content, &panel)
+    {
+        return;
+    }
+
+    render_thought_panel_rows(renderer, thought_content, &panel.rows);
+}
+
+fn render_thought_panel_header<C: TuiApi>(
+    app: &App<C>,
+    renderer: &mut Renderer,
+    thought_content: Rect,
+) {
     renderer.draw_text(
         thought_content.x,
         thought_content.y,
         &truncate_label(&thought_panel_header(app), thought_content.width as usize),
         Color::Cyan,
     );
+}
 
-    if entry_capacity == 0 {
-        return;
-    }
+fn render_thought_panel_empty_message(
+    renderer: &mut Renderer,
+    thought_content: Rect,
+    panel: &ThoughtPanelLayout,
+) -> bool {
+    let Some(message) = panel.empty_message.as_deref() else {
+        return false;
+    };
 
-    if let Some(message) = panel.empty_message.as_deref() {
-        renderer.draw_text(
-            thought_content.x,
-            thought_content.y + THOUGHT_RAIL_HEADER_ROWS,
-            &truncate_label(message, thought_content.width as usize),
-            Color::DarkGrey,
-        );
-        return;
-    }
+    renderer.draw_text(
+        thought_content.x,
+        thought_content.y + THOUGHT_RAIL_HEADER_ROWS,
+        &truncate_label(message, thought_content.width as usize),
+        Color::DarkGrey,
+    );
+    true
+}
 
-    let start_y = thought_content
-        .bottom()
-        .saturating_sub(panel.rows.len() as u16);
-    for (offset, row) in panel.rows.iter().enumerate() {
+fn render_thought_panel_rows(
+    renderer: &mut Renderer,
+    thought_content: Rect,
+    rows: &[ThoughtRowLayout],
+) {
+    let start_y = thought_content.bottom().saturating_sub(rows.len() as u16);
+    for (offset, row) in rows.iter().enumerate() {
         let y = start_y + offset as u16;
-        if let (Some(rect), Some(label)) = (row.mermaid_rect, &row.mermaid_label) {
-            renderer.draw_text(rect.x, y, label, row.color);
-        }
-        if let Some(rect) = row.text_rect {
-            renderer.draw_text(rect.x, y, &row.line, row.color);
-        }
-        if let Some(rect) = row.launch_rect {
-            renderer.draw_text(
-                rect.x,
-                y,
-                &truncate_label(THOUGHT_LAUNCH_LABEL, rect.width as usize),
-                Color::Cyan,
-            );
-        }
-        if let Some(rect) = row.commit_rect {
-            renderer.draw_text(rect.x, y, THOUGHT_COMMIT_LABEL, row.color);
-        }
-        if let Some(rect) = row.send_rect {
-            renderer.draw_text(
-                rect.x,
-                y,
-                &truncate_label(THOUGHT_SEND_LABEL, rect.width as usize),
-                Color::Cyan,
-            );
-        }
-        if let Some(rect) = row.plan_rect {
-            renderer.draw_text(
-                rect.x,
-                y,
-                &truncate_label(THOUGHT_PLANS_LABEL, rect.width as usize),
-                Color::Cyan,
-            );
-        }
+        render_thought_panel_row(renderer, row, y);
+    }
+}
+
+fn render_thought_panel_row(renderer: &mut Renderer, row: &ThoughtRowLayout, y: u16) {
+    if let (Some(rect), Some(label)) = (row.mermaid_rect, &row.mermaid_label) {
+        renderer.draw_text(rect.x, y, label, row.color);
+    }
+    if let Some(rect) = row.text_rect {
+        renderer.draw_text(rect.x, y, &row.line, row.color);
+    }
+    if let Some(rect) = row.launch_rect {
+        renderer.draw_text(
+            rect.x,
+            y,
+            &truncate_label(THOUGHT_LAUNCH_LABEL, rect.width as usize),
+            Color::Cyan,
+        );
+    }
+    if let Some(rect) = row.commit_rect {
+        renderer.draw_text(rect.x, y, THOUGHT_COMMIT_LABEL, row.color);
+    }
+    if let Some(rect) = row.send_rect {
+        renderer.draw_text(
+            rect.x,
+            y,
+            &truncate_label(THOUGHT_SEND_LABEL, rect.width as usize),
+            Color::Cyan,
+        );
+    }
+    if let Some(rect) = row.plan_rect {
+        renderer.draw_text(
+            rect.x,
+            y,
+            &truncate_label(THOUGHT_PLANS_LABEL, rect.width as usize),
+            Color::Cyan,
+        );
     }
 }
 
@@ -1419,57 +1445,98 @@ pub(crate) fn build_thought_panel<C: TuiApi>(
     let all_entries = scoped_thought_panel_entries(app);
     let total_count = all_entries.len();
     let mode = thought_panel_display_mode(app, &all_entries);
-    let entries = if mode.show_all {
-        all_entries
-    } else {
-        all_entries
-            .iter()
-            .filter(|entry| thought_entry_needs_input(entry))
-            .cloned()
-            .collect::<Vec<_>>()
-    };
-    let empty_message = if entry_capacity == 0 {
-        None
-    } else if let Some(targets) = &app.group_input_targets {
-        Some(format!(
-            "drafting group input for {} ({} session{})",
-            targets.label,
-            targets.session_ids.len(),
-            pluralize(targets.session_ids.len())
-        ))
-    } else if entries.is_empty() {
-        Some(if !mode.show_all && total_count > 0 {
-            if app.daemon_defaults_status.is_unavailable() {
-                "clawgs unavailable - press t to configure".to_string()
-            } else {
-                format!("0 asleep / {total_count} working")
-            }
-        } else if app.thought_filter.is_active() {
-            "no thoughts match filters".to_string()
-        } else if app.daemon_defaults_status.is_unavailable() {
-            "clawgs unavailable - press t to configure".to_string()
-        } else {
-            "waiting for clawgs - press t to configure".to_string()
-        })
-    } else {
-        None
-    };
-
-    let rows = if should_group_thought_entries(app, mode.group_by, &entries) {
-        build_grouped_rows(
-            &entries,
-            app,
-            mode.group_by,
-            thought_content,
-            entry_capacity,
-        )
-    } else {
-        build_flat_rows(&entries, thought_content, entry_capacity)
-    };
+    let entries = thought_panel_visible_entries(all_entries, mode);
+    let empty_message =
+        thought_panel_empty_message(app, entry_capacity, &entries, total_count, mode);
+    let rows = build_thought_panel_rows(app, &entries, mode, thought_content, entry_capacity);
 
     ThoughtPanelLayout {
         rows,
         empty_message,
+    }
+}
+
+fn thought_panel_visible_entries(
+    all_entries: Vec<ThoughtPanelEntryView>,
+    mode: ThoughtPanelDisplayMode,
+) -> Vec<ThoughtPanelEntryView> {
+    if mode.show_all {
+        return all_entries;
+    }
+
+    all_entries
+        .iter()
+        .filter(|entry| thought_entry_needs_input(entry))
+        .cloned()
+        .collect()
+}
+
+fn thought_panel_empty_message<C: TuiApi>(
+    app: &App<C>,
+    entry_capacity: usize,
+    entries: &[ThoughtPanelEntryView],
+    total_count: usize,
+    mode: ThoughtPanelDisplayMode,
+) -> Option<String> {
+    if entry_capacity == 0 {
+        return None;
+    }
+    if let Some(targets) = &app.group_input_targets {
+        return Some(group_input_empty_message(targets));
+    }
+    if entries.is_empty() {
+        return Some(empty_thought_panel_message(app, total_count, mode));
+    }
+
+    None
+}
+
+fn group_input_empty_message(targets: &GroupInputTargets) -> String {
+    format!(
+        "drafting group input for {} ({} session{})",
+        targets.label,
+        targets.session_ids.len(),
+        pluralize(targets.session_ids.len())
+    )
+}
+
+fn empty_thought_panel_message<C: TuiApi>(
+    app: &App<C>,
+    total_count: usize,
+    mode: ThoughtPanelDisplayMode,
+) -> String {
+    if !mode.show_all && total_count > 0 {
+        return asleep_filter_empty_message(app, total_count);
+    }
+    if app.thought_filter.is_active() {
+        return "no thoughts match filters".to_string();
+    }
+    if app.daemon_defaults_status.is_unavailable() {
+        return "clawgs unavailable - press t to configure".to_string();
+    }
+
+    "waiting for clawgs - press t to configure".to_string()
+}
+
+fn asleep_filter_empty_message<C: TuiApi>(app: &App<C>, total_count: usize) -> String {
+    if app.daemon_defaults_status.is_unavailable() {
+        "clawgs unavailable - press t to configure".to_string()
+    } else {
+        format!("0 asleep / {total_count} working")
+    }
+}
+
+fn build_thought_panel_rows<C: TuiApi>(
+    app: &App<C>,
+    entries: &[ThoughtPanelEntryView],
+    mode: ThoughtPanelDisplayMode,
+    thought_content: Rect,
+    entry_capacity: usize,
+) -> Vec<ThoughtRowLayout> {
+    if should_group_thought_entries(app, mode.group_by, entries) {
+        build_grouped_rows(entries, app, mode.group_by, thought_content, entry_capacity)
+    } else {
+        build_flat_rows(entries, thought_content, entry_capacity)
     }
 }
 
