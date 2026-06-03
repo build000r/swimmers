@@ -3,8 +3,8 @@ import {
   authTokenButtonPlan, controlEventSessionPatchPlan, eventCell, globalShortcutPlan, initialStateBootPlan, inputAckActionPlan, lifecycleDeletedSessionPatchPlan, mobileKeyboardInputExecutorPlan, mobileKeyboardInputPlan,
   sheetActionAvailabilityPlan,
   mobileKeyboardKeydownPlan, mobileKeyboardKeyPlan, shouldIgnoreSyntheticClick,
-  terminalComposerControlAction, terminalDestroyStatePatch, terminalFallbackActivationPlan, terminalFallbackFocusPlan, terminalFallbackKeydownPlan, terminalFallbackPastePlan, terminalFallbackPointerFocusPlan, terminalInlineInputKeydownPlan, terminalKeyStripClickExecutorPlan, terminalKeyStripClickPlan, terminalStageCaptureBindings, terminalStageFocusExecutorPlan, terminalStageFocusPlan,
-  normalizeTerminalZoomValue, terminalAuxiliaryControlsPlan, terminalFallbackScrollPlan, terminalFallbackTextScrollPlan, terminalInputDockPlan, terminalLiveFrameFallbackPlan, terminalPaintProbeSchedulePlan, terminalPaintVerificationPlan, terminalPendingByteBufferPlan, terminalPresentationPlan, terminalResizeGeometryPlan, terminalStageKeydownPlan, terminalStagePasteExecutorPlan, terminalStagePastePlan, terminalToolsAvailabilityPlan, terminalZoomControlsPlan, terminalZoomLoadValue, terminalZoomPercentLabel, terminalZoomPersistencePlan,
+  terminalComposerControlAction, terminalDestroyStatePatch, terminalFallbackActivationPlan, terminalFallbackFocusPlan, terminalFallbackKeydownPlan, terminalFallbackPastePlan, terminalFallbackPointerFocusPlan, terminalInlineInputKeydownPlan, terminalKeyStripClickExecutorPlan, terminalKeyStripClickPlan, terminalStageCaptureBindings, terminalStageClickPlan, terminalStageFocusExecutorPlan, terminalStageFocusPlan,
+  normalizeTerminalZoomValue, terminalAuxiliaryControlsPlan, terminalFallbackScrollPlan, terminalFallbackTextScrollPlan, terminalInputDockPlan, terminalLiveFrameFallbackPlan, terminalPaintProbeSchedulePlan, terminalPaintVerificationPlan, terminalPendingByteBufferPlan, terminalPresentationPlan, terminalResizeGeometryPlan, terminalStageKeydownPlan, terminalStagePasteExecutorPlan, terminalStagePastePlan, terminalStageTouchEndPlan, terminalToolsAvailabilityPlan, terminalZoomControlsPlan, terminalZoomLoadValue, terminalZoomPercentLabel, terminalZoomPersistencePlan,
 } from "./input_support.js";
 import { sendHistoryClickPlan, sendSheetFailureStatus, sendSheetSubmitPlan, sendSheetSuccessStatus } from "./send_sheet.js";
 import {
@@ -4874,6 +4874,44 @@ function stopSurfaceEvent(event) {
   event.stopPropagation();
 }
 
+function applyTerminalStagePointerPlan(event, plan) {
+  if (plan.suppressClick) state.surfaceClickSuppressUntil = performance.now() + SURFACE_CLICK_SUPPRESS_MS;
+  if (plan.preventDefault) event.preventDefault();
+  if (plan.handleAction) {
+    void handleSurfaceAction(plan.action);
+    return;
+  }
+  if (plan.focusMobileThenTerminal) {
+    if (!isCoarsePointer() || !focusMobileKeyboard()) {
+      focusTerminalInputSurface({ preventScroll: true });
+    }
+    return;
+  }
+  if (plan.focusTerminal) focusTerminalInputSurface({ preventScroll: true });
+}
+
+function handleTerminalStageClick(event) {
+  const fallbackOwnsPointer = terminalFallbackOwnsPointer(event);
+  const hit = fallbackOwnsPointer ? {} : surfaceHit(event);
+  const plan = terminalStageClickPlan({
+    fallbackOwnsPointer,
+    hit,
+    activeSheet: state.activeSheet,
+    ignoreSyntheticClick: hit.action ? shouldIgnoreSyntheticClick(performance.now(), state.surfaceClickSuppressUntil) : false,
+  });
+  applyTerminalStagePointerPlan(event, plan);
+}
+
+function handleTerminalStageTouchEnd(event) {
+  const fallbackOwnsPointer = terminalFallbackOwnsPointer(event);
+  const plan = terminalStageTouchEndPlan({
+    fallbackOwnsPointer,
+    hit: fallbackOwnsPointer ? {} : surfaceHit(event),
+    activeSheet: state.activeSheet,
+  });
+  applyTerminalStagePointerPlan(event, plan);
+}
+
 function updateHoveredTrogdorSurface(zone) {
   const previousSessionId = state.hoveredTrogdorSessionId;
   const nextSessionId = trogdorHoverSessionIdForZone(zone, previousSessionId);
@@ -5509,53 +5547,9 @@ function bindEvents() {
     );
   }
 
-  el.terminalStage.addEventListener("click", (event) => {
-    if (terminalFallbackOwnsPointer(event)) {
-      if (!state.activeSheet) {
-        focusTerminalInputSurface({ preventScroll: true });
-      }
-      return;
-    }
-    const hit = surfaceHit(event);
-    if (hit.action) {
-      if (shouldIgnoreSyntheticClick(performance.now(), state.surfaceClickSuppressUntil)) {
-        event.preventDefault();
-        return;
-      }
-      event.preventDefault();
-      void handleSurfaceAction(hit.action);
-      return;
-    }
-    if (!state.activeSheet) {
-      focusTerminalInputSurface({ preventScroll: true });
-    }
-  });
+  el.terminalStage.addEventListener("click", handleTerminalStageClick);
 
-  el.terminalStage.addEventListener(
-    "touchend",
-    (event) => {
-      if (terminalFallbackOwnsPointer(event)) {
-        return;
-      }
-      const hit = surfaceHit(event);
-      if (hit.action) {
-        state.surfaceClickSuppressUntil = performance.now() + SURFACE_CLICK_SUPPRESS_MS;
-        event.preventDefault();
-        void handleSurfaceAction(hit.action);
-        return;
-      }
-      if (hit.consume) {
-        event.preventDefault();
-        return;
-      }
-      if (!state.activeSheet) {
-        if (!isCoarsePointer() || !focusMobileKeyboard()) {
-          focusTerminalInputSurface({ preventScroll: true });
-        }
-      }
-    },
-    { passive: false },
-  );
+  el.terminalStage.addEventListener("touchend", handleTerminalStageTouchEnd, { passive: false });
 
   el.terminalStage.addEventListener("keydown", (event) => {
     const globalShortcutHandled = handleGlobalShortcut(event);

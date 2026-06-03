@@ -34,11 +34,13 @@ import {
   terminalPresentationPlan,
   terminalResizeGeometryPlan,
   terminalStageCaptureBindings,
+  terminalStageClickPlan,
   terminalStageFocusExecutorPlan,
   terminalStageFocusPlan,
   terminalStageKeydownPlan,
   terminalStagePasteExecutorPlan,
   terminalStagePastePlan,
+  terminalStageTouchEndPlan,
   terminalAuxiliaryControlsPlan,
   normalizeTerminalZoomValue,
   terminalZoomControlsPlan,
@@ -454,6 +456,126 @@ test("terminalStageCaptureBindings preserves stage event labels and options", ()
     { eventType: "touchend", action: "touch", options: { capture: true, passive: false } },
     { eventType: "wheel", action: "wheel", options: { capture: true, passive: false } },
   ]);
+});
+
+test("terminalStageClickPlan preserves fallback, action, suppression, and focus decisions", () => {
+  const action = { type: "action", actionId: "terminal" };
+  const ignored = {
+    type: "synthetic_click_ignored",
+    preventDefault: true,
+    handleAction: false,
+    action: null,
+    focusTerminal: false,
+    focusMobileThenTerminal: false,
+    suppressClick: false,
+  };
+
+  assert.deepEqual(terminalStageClickPlan({
+    fallbackOwnsPointer: true,
+    activeSheet: "",
+  }), {
+    type: "fallback_pointer",
+    preventDefault: false,
+    handleAction: false,
+    action: null,
+    focusTerminal: true,
+    focusMobileThenTerminal: false,
+    suppressClick: false,
+  });
+  assert.deepEqual(terminalStageClickPlan({
+    fallbackOwnsPointer: true,
+    activeSheet: "send",
+  }).focusTerminal, false);
+  assert.deepEqual(terminalStageClickPlan({
+    hit: { action },
+    ignoreSyntheticClick: true,
+  }), ignored);
+  assert.deepEqual(terminalStageClickPlan({
+    hit: { action },
+    ignoreSyntheticClick: false,
+  }), {
+    type: "surface_action",
+    preventDefault: true,
+    handleAction: true,
+    action,
+    focusTerminal: false,
+    focusMobileThenTerminal: false,
+    suppressClick: false,
+  });
+  assert.deepEqual(terminalStageClickPlan({
+    hit: { consume: true },
+    activeSheet: "",
+  }), {
+    type: "focus_terminal",
+    preventDefault: false,
+    handleAction: false,
+    action: null,
+    focusTerminal: true,
+    focusMobileThenTerminal: false,
+    suppressClick: false,
+  });
+  assert.deepEqual(terminalStageClickPlan({
+    hit: {},
+    activeSheet: "send",
+  }).type, "ignore");
+});
+
+test("terminalStageTouchEndPlan preserves fallback, action, consume, and focus decisions", () => {
+  const action = { type: "trogdor_agent", sessionId: "sess_1" };
+
+  assert.deepEqual(terminalStageTouchEndPlan({
+    fallbackOwnsPointer: true,
+    hit: { action },
+    activeSheet: "",
+  }), {
+    type: "fallback_pointer",
+    preventDefault: false,
+    handleAction: false,
+    action: null,
+    focusTerminal: false,
+    focusMobileThenTerminal: false,
+    suppressClick: false,
+  });
+  assert.deepEqual(terminalStageTouchEndPlan({
+    hit: { action },
+    activeSheet: "",
+  }), {
+    type: "surface_action",
+    preventDefault: true,
+    handleAction: true,
+    action,
+    focusTerminal: false,
+    focusMobileThenTerminal: false,
+    suppressClick: true,
+  });
+  assert.deepEqual(terminalStageTouchEndPlan({
+    hit: { consume: true },
+    activeSheet: "",
+  }), {
+    type: "consume",
+    preventDefault: true,
+    handleAction: false,
+    action: null,
+    focusTerminal: false,
+    focusMobileThenTerminal: false,
+    suppressClick: false,
+  });
+  assert.deepEqual(terminalStageTouchEndPlan({
+    hit: {},
+    activeSheet: "",
+  }), {
+    type: "focus_mobile_then_terminal",
+    preventDefault: false,
+    handleAction: false,
+    action: null,
+    focusTerminal: false,
+    focusMobileThenTerminal: true,
+    suppressClick: false,
+  });
+  assert.deepEqual(terminalStageTouchEndPlan({
+    hit: {},
+    activeSheet: "send",
+  }).type, "ignore");
 });
 
 test("terminalStagePastePlan preserves read-only, empty, and raw text decisions", () => {

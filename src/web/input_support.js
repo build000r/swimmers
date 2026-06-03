@@ -309,6 +309,72 @@ export function terminalStageCaptureBindings() {
   ];
 }
 
+function terminalStagePointerIgnore(type = "ignore") {
+  return {
+    type,
+    preventDefault: false,
+    handleAction: false,
+    action: null,
+    focusTerminal: false,
+    focusMobileThenTerminal: false,
+    suppressClick: false,
+  };
+}
+
+export function terminalStageClickPlan(context = {}) {
+  const hit = context.hit || {};
+  if (context.fallbackOwnsPointer) {
+    return {
+      ...terminalStagePointerIgnore("fallback_pointer"),
+      focusTerminal: !context.activeSheet,
+    };
+  }
+  if (hit.action) {
+    if (context.ignoreSyntheticClick) {
+      return {
+        ...terminalStagePointerIgnore("synthetic_click_ignored"),
+        preventDefault: true,
+      };
+    }
+    return {
+      ...terminalStagePointerIgnore("surface_action"),
+      preventDefault: true,
+      handleAction: true,
+      action: hit.action,
+    };
+  }
+  return {
+    ...terminalStagePointerIgnore(context.activeSheet ? "ignore" : "focus_terminal"),
+    focusTerminal: !context.activeSheet,
+  };
+}
+
+export function terminalStageTouchEndPlan(context = {}) {
+  const hit = context.hit || {};
+  if (context.fallbackOwnsPointer) {
+    return terminalStagePointerIgnore("fallback_pointer");
+  }
+  if (hit.action) {
+    return {
+      ...terminalStagePointerIgnore("surface_action"),
+      preventDefault: true,
+      handleAction: true,
+      action: hit.action,
+      suppressClick: true,
+    };
+  }
+  if (hit.consume) {
+    return {
+      ...terminalStagePointerIgnore("consume"),
+      preventDefault: true,
+    };
+  }
+  return {
+    ...terminalStagePointerIgnore(context.activeSheet ? "ignore" : "focus_mobile_then_terminal"),
+    focusMobileThenTerminal: !context.activeSheet,
+  };
+}
+
 export function terminalStagePastePlan(readOnly, text) {
   if (readOnly || !text) {
     return { type: "ignore" };
