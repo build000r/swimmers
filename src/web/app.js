@@ -2,7 +2,7 @@ import { buildSurfaceFrame, surfaceActionAt, surfaceConsumesPointer } from "./re
 import {
   authTokenButtonPlan, controlEventSessionPatchPlan, eventCell, globalShortcutPlan, initialStateBootPlan, inputAckActionPlan, lifecycleDeletedSessionPatchPlan, mobileKeyboardInputExecutorPlan, mobileKeyboardInputPlan,
   sheetActionAvailabilityPlan,
-  mobileKeyboardKeydownPlan, mobileKeyboardKeyPlan, shouldIgnoreSyntheticClick, surfaceActionDispatchPlan,
+  mobileKeyboardKeydownPlan, mobileKeyboardKeyPlan, shouldIgnoreSyntheticClick, surfaceActionDispatchContextPlan, surfaceActionDispatchPlan, surfaceActionTrogdorReaderExecutionPlan,
   terminalComposerControlAction, terminalDestroyStatePatch, terminalFallbackActivationPlan, terminalFallbackFocusPlan, terminalFallbackKeydownPlan, terminalFallbackPastePlan, terminalFallbackPointerFocusPlan, terminalInlineInputKeydownPlan, terminalKeyStripClickExecutorPlan, terminalKeyStripClickPlan, terminalStageCaptureBindings, terminalStageClickPlan, terminalStageFocusExecutorPlan, terminalStageFocusPlan,
   normalizeTerminalZoomValue, terminalAuxiliaryControlsPlan, terminalFallbackScrollPlan, terminalFallbackTextScrollPlan, terminalInputDockPlan, terminalLiveFrameFallbackPlan, terminalPaintProbeSchedulePlan, terminalPaintVerificationPlan, terminalPendingByteBufferPlan, terminalPresentationPlan, terminalResizeGeometryPlan, terminalStageKeydownPlan, terminalStageMouseDownPlan, terminalStageMouseMovePlan, terminalStageMouseUpPlan, terminalStagePasteExecutorPlan, terminalStagePastePlan, terminalStageTouchEndPlan, terminalStageWheelPlan, terminalToolsAvailabilityPlan, terminalZoomControlsPlan, terminalZoomLoadValue, terminalZoomPercentLabel, terminalZoomPersistencePlan,
 } from "./input_support.js";
@@ -4692,14 +4692,13 @@ async function toggleFollowPublished() {
 }
 
 async function handleSurfaceAction(zone) {
-  const directZoneType =
-    zone?.type === "session" || zone?.type === "trogdor_agent" || zone?.type === "trogdor_reader";
+  const contextPlan = surfaceActionDispatchContextPlan(zone);
   const planContext = {};
-  if (zone && !zone.disabled && !directZoneType && zone.actionId === "open_send") {
+  if (contextPlan.includeReadOnly) {
     planContext.readOnly = state.readOnly;
+  }
+  if (contextPlan.includeCurrentSession) {
     planContext.currentSession = currentSession();
-  } else if (zone && !zone.disabled && !directZoneType && zone.actionId === "open_create") {
-    planContext.readOnly = state.readOnly;
   }
   const plan = surfaceActionDispatchPlan(zone, planContext);
 
@@ -4711,22 +4710,18 @@ async function handleSurfaceAction(zone) {
       await openTrogdorAgentTerminal(plan.sessionId);
       break;
     case "trogdor_read_toggle":
-    {
-      advanceTrogdorReaderProgressForCurrentHover();
-      const toggle = trogdorReaderToggleAction(state.trogdorReading, currentTrogdorSurfaceSession(), trogdorClawgReadComplete);
-      if (toggle.session) startTrogdorReaderForSession(toggle.session, { readAgain: toggle.readAgain });
-      if (toggle.reading !== null) state.trogdorReading = toggle.reading;
-      if (toggle.restartClock) state.trogdorReaderStartedAt = performance.now();
-      renderHudSurface();
-      syncTrogdorReaderTimer();
-      break;
-    }
     case "trogdor_wpm":
     {
       advanceTrogdorReaderProgressForCurrentHover();
-      state.trogdorWpm = trogdorReaderWpmForAction(plan.actionId, state.trogdorWpm);
-      resetTrogdorReaderAfterWpmChange();
+      const readerPlan = surfaceActionTrogdorReaderExecutionPlan(plan, plan.type === "trogdor_read_toggle"
+        ? { toggle: trogdorReaderToggleAction(state.trogdorReading, currentTrogdorSurfaceSession(), trogdorClawgReadComplete) }
+        : { nextWpm: trogdorReaderWpmForAction(plan.actionId, state.trogdorWpm) });
+      if (readerPlan.session) startTrogdorReaderForSession(readerPlan.session, { readAgain: readerPlan.readAgain });
+      Object.assign(state, readerPlan.statePatch);
+      if (readerPlan.restartClock) state.trogdorReaderStartedAt = performance.now();
+      if (readerPlan.resetAfterWpmChange) resetTrogdorReaderAfterWpmChange();
       renderHudSurface();
+      if (readerPlan.syncReaderTimer) syncTrogdorReaderTimer();
       break;
     }
     case "toggle_trogdor_atlas":

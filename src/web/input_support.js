@@ -1038,6 +1038,52 @@ export function surfaceActionDispatchPlan(zone, context = {}) {
   }
 }
 
+export function surfaceActionDispatchContextPlan(zone) {
+  const directZoneType =
+    zone?.type === "session" || zone?.type === "trogdor_agent" || zone?.type === "trogdor_reader";
+  if (!zone || zone.disabled || directZoneType) {
+    return { includeReadOnly: false, includeCurrentSession: false };
+  }
+  if (zone.actionId === "open_send") {
+    return { includeReadOnly: true, includeCurrentSession: true };
+  }
+  if (zone.actionId === "open_create") {
+    return { includeReadOnly: true, includeCurrentSession: false };
+  }
+  return { includeReadOnly: false, includeCurrentSession: false };
+}
+
+export function surfaceActionTrogdorReaderExecutionPlan(plan = {}, context = {}) {
+  if (plan.type === "trogdor_read_toggle") {
+    const toggle = context.toggle || {};
+    const statePatch = {};
+    if (Object.prototype.hasOwnProperty.call(toggle, "reading") && toggle.reading !== null) {
+      statePatch.trogdorReading = toggle.reading;
+    }
+    return {
+      type: "apply_trogdor_reader",
+      session: toggle.session || null,
+      readAgain: toggle.readAgain,
+      statePatch,
+      restartClock: Boolean(toggle.restartClock),
+      resetAfterWpmChange: false,
+      syncReaderTimer: true,
+    };
+  }
+  if (plan.type === "trogdor_wpm") {
+    return {
+      type: "apply_trogdor_reader",
+      session: null,
+      readAgain: false,
+      statePatch: { trogdorWpm: context.nextWpm },
+      restartClock: false,
+      resetAfterWpmChange: true,
+      syncReaderTimer: false,
+    };
+  }
+  return { type: "ignore" };
+}
+
 function clampInt(value, fallback, min, max) {
   const numeric = Number.isFinite(value) ? Math.trunc(value) : fallback;
   return Math.max(min, Math.min(max, numeric));

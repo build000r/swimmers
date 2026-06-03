@@ -14,7 +14,9 @@ import {
   mobileKeyboardKeydownPlan,
   mobileKeyboardKeyPlan,
   shouldIgnoreSyntheticClick,
+  surfaceActionDispatchContextPlan,
   surfaceActionDispatchPlan,
+  surfaceActionTrogdorReaderExecutionPlan,
   terminalComposerControlAction,
   terminalDestroyStatePatch,
   terminalFallbackActivationPlan,
@@ -282,6 +284,68 @@ test("surfaceActionDispatchPlan preserves open_send and open_create gates", () =
     sheetId: "create",
   });
   assert.deepEqual(surfaceActionDispatchPlan({ actionId: "open_create" }, { readOnly: true }), { type: "ignore" });
+});
+
+test("surfaceActionDispatchContextPlan preserves direct-zone and sheet context gates", () => {
+  const emptyContext = { includeReadOnly: false, includeCurrentSession: false };
+  assert.deepEqual(surfaceActionDispatchContextPlan(null), emptyContext);
+  assert.deepEqual(surfaceActionDispatchContextPlan({ disabled: true, actionId: "open_send" }), emptyContext);
+  assert.deepEqual(surfaceActionDispatchContextPlan({ type: "session", actionId: "open_send" }), emptyContext);
+  assert.deepEqual(surfaceActionDispatchContextPlan({ type: "trogdor_agent", actionId: "open_create" }), emptyContext);
+  assert.deepEqual(surfaceActionDispatchContextPlan({ type: "trogdor_reader", actionId: "open_send" }), emptyContext);
+  assert.deepEqual(surfaceActionDispatchContextPlan({ actionId: "open_send" }), {
+    includeReadOnly: true,
+    includeCurrentSession: true,
+  });
+  assert.deepEqual(surfaceActionDispatchContextPlan({ actionId: "open_create" }), {
+    includeReadOnly: true,
+    includeCurrentSession: false,
+  });
+  assert.deepEqual(surfaceActionDispatchContextPlan({ actionId: "refresh" }), emptyContext);
+});
+
+test("surfaceActionTrogdorReaderExecutionPlan preserves toggle side-effect decisions", () => {
+  const session = { session_id: "agent-1" };
+  assert.deepEqual(surfaceActionTrogdorReaderExecutionPlan(
+    { type: "trogdor_read_toggle" },
+    { toggle: { session, reading: null, readAgain: true, restartClock: true } },
+  ), {
+    type: "apply_trogdor_reader",
+    session,
+    readAgain: true,
+    statePatch: {},
+    restartClock: true,
+    resetAfterWpmChange: false,
+    syncReaderTimer: true,
+  });
+  assert.deepEqual(surfaceActionTrogdorReaderExecutionPlan(
+    { type: "trogdor_read_toggle" },
+    { toggle: { session: null, reading: false, readAgain: false, restartClock: false } },
+  ), {
+    type: "apply_trogdor_reader",
+    session: null,
+    readAgain: false,
+    statePatch: { trogdorReading: false },
+    restartClock: false,
+    resetAfterWpmChange: false,
+    syncReaderTimer: true,
+  });
+});
+
+test("surfaceActionTrogdorReaderExecutionPlan preserves WPM and ignore decisions", () => {
+  assert.deepEqual(surfaceActionTrogdorReaderExecutionPlan(
+    { type: "trogdor_wpm", actionId: "trogdor_wpm_up" },
+    { nextWpm: 225 },
+  ), {
+    type: "apply_trogdor_reader",
+    session: null,
+    readAgain: false,
+    statePatch: { trogdorWpm: 225 },
+    restartClock: false,
+    resetAfterWpmChange: true,
+    syncReaderTimer: false,
+  });
+  assert.deepEqual(surfaceActionTrogdorReaderExecutionPlan({ type: "refresh" }), { type: "ignore" });
 });
 
 test("mobileKeyboardKeyPlan preserves special-key forwarding and no-op gates", () => {
