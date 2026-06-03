@@ -449,6 +449,22 @@ export function terminalPaintVerificationPlan(context = {}) {
   return { type: "ignore", done: true };
 }
 
+export function terminalResizeGeometryPlan(context = {}) {
+  const cols = clampInt(context.cols, 80, 24, 240);
+  const rows = clampInt(context.rows, 24, 12, 120);
+  const dimensionsChanged = cols !== context.currentCols || rows !== context.currentRows;
+  const shouldResize = Boolean(context.force || dimensionsChanged);
+  return {
+    cols,
+    rows,
+    dimensionsChanged,
+    shouldResize,
+    sendResize: Boolean(context.pushResize && shouldResize),
+    captureDiagnostic: Boolean(context.hasTerminal && shouldResize),
+    diagnosticReason: "resize",
+  };
+}
+
 export function terminalFallbackPointerFocusPlan(eventType, context = {}) {
   if (!context.terminalFallbackActive || context.activeSheet) {
     return { type: "ignore", focusTerminal: false, scheduleFrame: false };

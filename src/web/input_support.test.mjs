@@ -26,6 +26,7 @@ import {
   terminalPaintVerificationPlan,
   terminalPendingByteBufferPlan,
   terminalPresentationPlan,
+  terminalResizeGeometryPlan,
   terminalStageCaptureBindings,
   terminalStageFocusExecutorPlan,
   terminalStageFocusPlan,
@@ -754,6 +755,60 @@ test("terminalPaintVerificationPlan preserves verify, refresh, and fallback deci
     canvasHasVisiblePixels: false,
     hasSnapshotText: false,
   }), { type: "ignore", done: true });
+});
+
+test("terminalResizeGeometryPlan preserves resize geometry and side-effect decisions", () => {
+  assert.deepEqual(terminalResizeGeometryPlan({
+    cols: 90.9,
+    rows: 30.2,
+    currentCols: 80,
+    currentRows: 24,
+    pushResize: true,
+    force: false,
+    hasTerminal: true,
+  }), {
+    cols: 90,
+    rows: 30,
+    dimensionsChanged: true,
+    shouldResize: true,
+    sendResize: true,
+    captureDiagnostic: true,
+    diagnosticReason: "resize",
+  });
+  assert.deepEqual(terminalResizeGeometryPlan({
+    cols: 80,
+    rows: 24,
+    currentCols: 80,
+    currentRows: 24,
+    pushResize: true,
+    force: false,
+    hasTerminal: true,
+  }), {
+    cols: 80,
+    rows: 24,
+    dimensionsChanged: false,
+    shouldResize: false,
+    sendResize: false,
+    captureDiagnostic: false,
+    diagnosticReason: "resize",
+  });
+  assert.deepEqual(terminalResizeGeometryPlan({
+    cols: 999,
+    rows: 1,
+    currentCols: 240,
+    currentRows: 12,
+    pushResize: false,
+    force: true,
+    hasTerminal: false,
+  }), {
+    cols: 240,
+    rows: 12,
+    dimensionsChanged: false,
+    shouldResize: true,
+    sendResize: false,
+    captureDiagnostic: false,
+    diagnosticReason: "resize",
+  });
 });
 
 test("terminalFallbackPointerFocusPlan preserves scheduled and immediate focus gates", () => {

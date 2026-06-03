@@ -3,7 +3,7 @@ import {
   authTokenButtonPlan, eventCell, globalShortcutPlan, mobileKeyboardInputExecutorPlan, mobileKeyboardInputPlan,
   mobileKeyboardKeydownPlan, mobileKeyboardKeyPlan, shouldIgnoreSyntheticClick,
   terminalComposerControlAction, terminalDestroyStatePatch, terminalFallbackActivationPlan, terminalFallbackFocusPlan, terminalFallbackKeydownPlan, terminalFallbackPastePlan, terminalFallbackPointerFocusPlan, terminalInlineInputKeydownPlan, terminalKeyStripClickExecutorPlan, terminalKeyStripClickPlan, terminalStageCaptureBindings, terminalStageFocusExecutorPlan, terminalStageFocusPlan,
-  terminalFallbackScrollPlan, terminalFallbackTextScrollPlan, terminalPaintProbeSchedulePlan, terminalPaintVerificationPlan, terminalPendingByteBufferPlan, terminalPresentationPlan, terminalStageKeydownPlan, terminalStagePasteExecutorPlan, terminalStagePastePlan,
+  terminalFallbackScrollPlan, terminalFallbackTextScrollPlan, terminalPaintProbeSchedulePlan, terminalPaintVerificationPlan, terminalPendingByteBufferPlan, terminalPresentationPlan, terminalResizeGeometryPlan, terminalStageKeydownPlan, terminalStagePasteExecutorPlan, terminalStagePastePlan,
 } from "./input_support.js";
 import { sendHistoryClickPlan, sendSheetFailureStatus, sendSheetSubmitPlan, sendSheetSuccessStatus } from "./send_sheet.js";
 import {
@@ -3027,21 +3027,17 @@ function measureAndResizeSurface(pushResize = false, force = false) {
     queueMeasureAndResizeSurface(pushResize, force);
     return;
   }
-  const geo = fit.value;
-  const cols = clampInt(geo?.cols, 80, 24, 240);
-  const rows = clampInt(geo?.rows, 24, 12, 120);
-  const dimensionsChanged = cols !== state.currentCols || rows !== state.currentRows;
-
-  if (!force && !dimensionsChanged) {
+  const resizePlan = terminalResizeGeometryPlan({ cols: fit.value?.cols, rows: fit.value?.rows, currentCols: state.currentCols, currentRows: state.currentRows, force, pushResize, hasTerminal: Boolean(state.terminal) });
+  if (!resizePlan.shouldResize) {
     return;
   }
 
   const resized = withSurfaceOperation("resize", () => {
     if (state.hud) {
-      state.hud.resize(cols, rows);
+      state.hud.resize(resizePlan.cols, resizePlan.rows);
     }
     if (state.terminal) {
-      state.terminal.resize(cols, rows);
+      state.terminal.resize(resizePlan.cols, resizePlan.rows);
     }
   });
   if (resized.deferred) {
@@ -3049,16 +3045,16 @@ function measureAndResizeSurface(pushResize = false, force = false) {
     return;
   }
 
-  state.currentCols = cols;
-  state.currentRows = rows;
+  state.currentCols = resizePlan.cols;
+  state.currentRows = resizePlan.rows;
   renderHudSurface();
   scheduleRender();
 
-  if (pushResize && (force || dimensionsChanged)) {
+  if (resizePlan.sendResize) {
     sendResize();
   }
-  if (state.terminal && (force || dimensionsChanged)) {
-    captureTerminalRendererDiagnostic("resize");
+  if (resizePlan.captureDiagnostic) {
+    captureTerminalRendererDiagnostic(resizePlan.diagnosticReason);
   }
 }
 

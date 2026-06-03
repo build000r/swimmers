@@ -2321,10 +2321,9 @@ mod tests {
         let js = include_str!("app.js");
         assert!(js.contains("function stopSurfaceEvent(event)"));
         assert!(js.contains("event.stopImmediatePropagation"));
-        assert!(js.contains(
-            "const dimensionsChanged = cols !== state.currentCols || rows !== state.currentRows"
-        ));
-        assert!(js.contains("if (!force && !dimensionsChanged)"));
+        assert!(js
+            .contains("terminalResizeGeometryPlan({ cols: fit.value?.cols, rows: fit.value?.rows"));
+        assert!(js.contains("if (!resizePlan.shouldResize)"));
         assert!(js.contains("queueMeasureAndResizeSurface(true, false)"));
     }
 
