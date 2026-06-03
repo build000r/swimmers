@@ -5,6 +5,7 @@ import {
   mobileKeyboardInputPlan,
   mobileKeyboardKeyPlan,
   shouldIgnoreSyntheticClick,
+  terminalComposerControlAction,
 } from "./input_support.js";
 import {
   MERMAID_PLAN_CONTENT_DISPLAY_MAX_CHARS,
@@ -3663,42 +3664,10 @@ function sendTerminalControlKey(actionId) {
 }
 
 function terminalKeyActionForDomEvent(event) {
-  if (!event || event.metaKey || event.altKey) {
-    return "";
-  }
-  if (event.ctrlKey && String(event.key || "").toLowerCase() === "c") {
-    if (terminalInlineInputHasSelection()) {
-      return "";
-    }
-    return "ctrl-c";
-  }
-  if (String(el.terminalInlineInput?.value || "").length > 0) {
-    return "";
-  }
-  switch (event.key) {
-    case "Escape":
-      return "escape";
-    case "Tab":
-      return "tab";
-    case "ArrowUp":
-      return "arrow-up";
-    case "ArrowDown":
-      return "arrow-down";
-    case "ArrowLeft":
-      return "arrow-left";
-    case "ArrowRight":
-      return "arrow-right";
-    case "Home":
-      return "home";
-    case "End":
-      return "end";
-    case "PageUp":
-      return "page-up";
-    case "PageDown":
-      return "page-down";
-    default:
-      return "";
-  }
+  return terminalComposerControlAction(event, {
+    hasSelection: terminalInlineInputHasSelection(),
+    inputValue: el.terminalInlineInput?.value,
+  });
 }
 
 function terminalInlineInputHasSelection() {
@@ -5176,6 +5145,24 @@ function handleMobileKeyboardProxyInput(event) {
   return true;
 }
 
+function handleTerminalInlineInputKeydown(event) {
+  let handled = false;
+  if (event.key === "Enter" && !event.shiftKey) {
+    event.preventDefault();
+    void submitTerminalInputDock();
+    handled = true;
+  } else {
+    const actionId = terminalKeyActionForDomEvent(event);
+    if (actionId) {
+      event.preventDefault();
+      sendTerminalControlKey(actionId);
+      handled = true;
+    }
+  }
+  event.stopPropagation();
+  return handled;
+}
+
 function bindEvents() {
   bindTrogdorEvents();
   document.addEventListener?.("keydown", (event) => {
@@ -5285,19 +5272,7 @@ function bindEvents() {
     resizeTerminalInlineInput();
     syncTerminalInputDock();
   });
-  el.terminalInlineInput.addEventListener("keydown", (event) => {
-    if (event.key === "Enter" && !event.shiftKey) {
-      event.preventDefault();
-      void submitTerminalInputDock();
-    } else {
-      const actionId = terminalKeyActionForDomEvent(event);
-      if (actionId) {
-        event.preventDefault();
-        sendTerminalControlKey(actionId);
-      }
-    }
-    event.stopPropagation();
-  });
+  el.terminalInlineInput.addEventListener("keydown", handleTerminalInlineInputKeydown);
   el.terminalKeyStrip.addEventListener("click", (event) => {
     const button = event.target instanceof Element ? event.target.closest("button[data-terminal-key]") : null;
     if (!button || button.disabled) {
@@ -6054,6 +6029,7 @@ export const __swimmersWebTest = {
   handleMobileKeyboardProxyInput,
   sendTerminalControlKey,
   terminalKeyActionForDomEvent,
+  handleTerminalInlineInputKeydown,
   focusTerminalInputSurface,
   syncTerminalInputDock,
   submitTerminalInputDock,

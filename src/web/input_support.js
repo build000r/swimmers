@@ -162,6 +162,43 @@ export function mobileKeyboardInputPlan(event, context = {}) {
   return { type: "send_text", text };
 }
 
+export function terminalComposerControlAction(event, context = {}) {
+  if (!event || event.metaKey || event.altKey) {
+    return "";
+  }
+  const key = String(event.key || "");
+  if (event.ctrlKey && key.toLowerCase() === "c") {
+    return context.hasSelection ? "" : "ctrl-c";
+  }
+  if (String(context.inputValue || "").length > 0) {
+    return "";
+  }
+  switch (key) {
+    case "Escape":
+      return "escape";
+    case "Tab":
+      return "tab";
+    case "ArrowUp":
+      return "arrow-up";
+    case "ArrowDown":
+      return "arrow-down";
+    case "ArrowLeft":
+      return "arrow-left";
+    case "ArrowRight":
+      return "arrow-right";
+    case "Home":
+      return "home";
+    case "End":
+      return "end";
+    case "PageUp":
+      return "page-up";
+    case "PageDown":
+      return "page-down";
+    default:
+      return "";
+  }
+}
+
 function clampInt(value, fallback, min, max) {
   const numeric = Number.isFinite(value) ? Math.trunc(value) : fallback;
   return Math.max(min, Math.min(max, numeric));

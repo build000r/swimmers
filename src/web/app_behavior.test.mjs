@@ -1037,6 +1037,52 @@ test("terminal composer turns empty-field Ctrl-C and arrows into terminal contro
   );
 });
 
+test("terminal composer keydown handler preserves control sends and propagation", () => {
+  resetWebState();
+  web.state.selectedSessionId = "sess_0";
+  web.state.trogdorAtlasOpen = false;
+  web.state.terminalFallbackActive = true;
+  web.el.terminalInlineInput.value = "";
+  const sent = [];
+  web.state.ws = {
+    readyState: WebSocket.OPEN,
+    send(payload) {
+      sent.push(JSON.parse(payload));
+    },
+  };
+
+  let prevented = 0;
+  let stopped = 0;
+  assert.equal(web.handleTerminalInlineInputKeydown({
+    key: "ArrowUp",
+    preventDefault() {
+      prevented += 1;
+    },
+    stopPropagation() {
+      stopped += 1;
+    },
+  }), true);
+  assert.equal(prevented, 1);
+  assert.equal(stopped, 1);
+  assert.equal(sent.at(-1).type, "input_text");
+  assert.equal(sent.at(-1).data, "\x1b[A");
+
+  web.el.terminalInlineInput.value = "edit this text";
+  prevented = 0;
+  stopped = 0;
+  assert.equal(web.handleTerminalInlineInputKeydown({
+    key: "ArrowUp",
+    preventDefault() {
+      prevented += 1;
+    },
+    stopPropagation() {
+      stopped += 1;
+    },
+  }), false);
+  assert.equal(prevented, 0);
+  assert.equal(stopped, 1);
+});
+
 test("input ack updates pending terminal dock delivery status", async () => {
   resetWebState();
   web.state.selectedSessionId = "sess_0";

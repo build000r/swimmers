@@ -8,6 +8,7 @@ import {
   mobileKeyboardInputPlan,
   mobileKeyboardKeyPlan,
   shouldIgnoreSyntheticClick,
+  terminalComposerControlAction,
 } from "./input_support.js";
 
 test("eventClientPoint uses direct pointer coordinates when present", () => {
@@ -199,4 +200,25 @@ test("mobileKeyboardInputPlan preserves clear, control, and inserted text decisi
     { inputType: "insertText", data: null },
     { hasCurrentSession: true, proxyValue: "fallback" },
   ), { type: "send_text", text: "fallback" });
+});
+
+test("terminalComposerControlAction preserves modifier, selection, and empty-input gates", () => {
+  assert.equal(terminalComposerControlAction(null), "");
+  assert.equal(terminalComposerControlAction({ key: "ArrowUp", metaKey: true }), "");
+  assert.equal(terminalComposerControlAction({ key: "ArrowUp", altKey: true }), "");
+  assert.equal(terminalComposerControlAction({ key: "c", ctrlKey: true }, { hasSelection: true }), "");
+  assert.equal(terminalComposerControlAction({ key: "C", ctrlKey: true }, { hasSelection: false }), "ctrl-c");
+  assert.equal(terminalComposerControlAction({ key: "ArrowUp" }, { inputValue: "edit this text" }), "");
+
+  assert.equal(terminalComposerControlAction({ key: "Escape" }), "escape");
+  assert.equal(terminalComposerControlAction({ key: "Tab" }), "tab");
+  assert.equal(terminalComposerControlAction({ key: "ArrowUp" }), "arrow-up");
+  assert.equal(terminalComposerControlAction({ key: "ArrowDown" }), "arrow-down");
+  assert.equal(terminalComposerControlAction({ key: "ArrowLeft" }), "arrow-left");
+  assert.equal(terminalComposerControlAction({ key: "ArrowRight" }), "arrow-right");
+  assert.equal(terminalComposerControlAction({ key: "Home" }), "home");
+  assert.equal(terminalComposerControlAction({ key: "End" }), "end");
+  assert.equal(terminalComposerControlAction({ key: "PageUp" }), "page-up");
+  assert.equal(terminalComposerControlAction({ key: "PageDown" }), "page-down");
+  assert.equal(terminalComposerControlAction({ key: "F1" }), "");
 });
