@@ -11,6 +11,7 @@ import {
   mobileKeyboardKeyPlan,
   shouldIgnoreSyntheticClick,
   terminalComposerControlAction,
+  terminalDestroyStatePatch,
   terminalFallbackFocusPlan,
   terminalFallbackKeydownPlan,
   terminalFallbackPastePlan,
@@ -608,6 +609,28 @@ test("terminalFallbackTextScrollPlan preserves follow and scroll clamp decisions
     scrollHeight: 20,
     clientHeight: 50,
   }), { type: "preserve", scrollTop: 0 });
+});
+
+test("terminalDestroyStatePatch returns exact fresh terminal teardown state", () => {
+  const expected = {
+    selectionAnchor: null,
+    selectionFocus: null,
+    terminal: null,
+    terminalAcceptsBytes: false,
+    terminalSessionId: null,
+    terminalFallbackAutoFollow: true,
+    terminalMirrorText: "",
+    terminalPaintVerified: false,
+    terminalFrameBytesSeen: 0,
+  };
+  const first = terminalDestroyStatePatch();
+  const second = terminalDestroyStatePatch();
+
+  assert.deepEqual(first, expected);
+  assert.deepEqual(Object.keys(first), Object.keys(expected));
+  assert.notStrictEqual(first, second);
+  first.terminalMirrorText = "changed";
+  assert.deepEqual(second, expected);
 });
 
 test("terminalStageFocusExecutorPlan preserves ignore, forward, and unknown decisions", () => {

@@ -2,7 +2,7 @@ import { buildSurfaceFrame, surfaceActionAt, surfaceConsumesPointer } from "./re
 import {
   authTokenButtonPlan, eventCell, globalShortcutPlan, mobileKeyboardInputExecutorPlan, mobileKeyboardInputPlan,
   mobileKeyboardKeydownPlan, mobileKeyboardKeyPlan, shouldIgnoreSyntheticClick,
-  terminalComposerControlAction, terminalFallbackFocusPlan, terminalFallbackKeydownPlan, terminalFallbackPastePlan, terminalFallbackPointerFocusPlan, terminalInlineInputKeydownPlan, terminalKeyStripClickExecutorPlan, terminalKeyStripClickPlan, terminalStageCaptureBindings, terminalStageFocusExecutorPlan, terminalStageFocusPlan,
+  terminalComposerControlAction, terminalDestroyStatePatch, terminalFallbackFocusPlan, terminalFallbackKeydownPlan, terminalFallbackPastePlan, terminalFallbackPointerFocusPlan, terminalInlineInputKeydownPlan, terminalKeyStripClickExecutorPlan, terminalKeyStripClickPlan, terminalStageCaptureBindings, terminalStageFocusExecutorPlan, terminalStageFocusPlan,
   terminalFallbackScrollPlan, terminalFallbackTextScrollPlan, terminalStageKeydownPlan, terminalStagePasteExecutorPlan, terminalStagePastePlan,
 } from "./input_support.js";
 import { sendHistoryClickPlan, sendSheetFailureStatus, sendSheetSubmitPlan, sendSheetSuccessStatus } from "./send_sheet.js";
@@ -2673,21 +2673,16 @@ async function setupHudSurface() {
 }
 
 function destroyTerminalInstance() {
-  state.selectionAnchor = null;
-  state.selectionFocus = null;
+  const destroyPatch = terminalDestroyStatePatch();
+  state.selectionAnchor = destroyPatch.selectionAnchor;
+  state.selectionFocus = destroyPatch.selectionFocus;
   clearHoveredLink(false);
   clearTerminalPaintProbe();
   clearPendingTerminalBytes();
   if (state.terminal) {
     state.terminal.destroy();
-    state.terminal = null;
   }
-  state.terminalAcceptsBytes = false;
-  state.terminalSessionId = null;
-  state.terminalFallbackAutoFollow = true;
-  state.terminalMirrorText = "";
-  state.terminalPaintVerified = false;
-  state.terminalFrameBytesSeen = 0;
+  Object.assign(state, destroyPatch);
   if (el.terminalA11yMirror) {
     el.terminalA11yMirror.value = "";
   }

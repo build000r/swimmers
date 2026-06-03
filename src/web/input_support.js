@@ -398,6 +398,20 @@ export function terminalFallbackTextScrollPlan(context = {}) {
   };
 }
 
+export function terminalDestroyStatePatch() {
+  return {
+    selectionAnchor: null,
+    selectionFocus: null,
+    terminal: null,
+    terminalAcceptsBytes: false,
+    terminalSessionId: null,
+    terminalFallbackAutoFollow: true,
+    terminalMirrorText: "",
+    terminalPaintVerified: false,
+    terminalFrameBytesSeen: 0,
+  };
+}
+
 export function terminalStageFocusExecutorPlan(plan = {}) {
   if (plan.type !== "forward_event") {
     return { type: "ignore", forwardEvent: false, event: null };
