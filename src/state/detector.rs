@@ -717,59 +717,83 @@ impl StateDetector {
     /// We intentionally avoid classifying generic values like "42%" as prompts
     /// to prevent busy/idle oscillation during progress output.
     fn looks_like_prompt(visible: &str) -> bool {
-        let line = visible
-            .split(['\n', '\r'])
-            .rev()
-            .map(str::trim_end)
-            .find(|line| !line.is_empty());
-        let Some(line) = line else {
+        let Some((prefix, marker)) = Self::prompt_candidate(visible) else {
             return false;
         };
 
-        let mut chars = line.chars();
-        let Some(marker @ ('$' | '%' | '#' | '>')) = chars.next_back() else {
-            return false;
-        };
-        let prefix = chars.as_str().trim_end();
         if prefix.is_empty() {
             return true;
         }
 
         if Self::has_prompt_context(prefix) {
-            if marker == '%' {
-                let compact = prefix.replace(',', "");
-                if compact
-                    .chars()
-                    .all(|c| c.is_ascii_digit() || c == '.' || c.is_ascii_whitespace())
-                {
-                    return false;
-                }
-            }
-            return true;
+            return Self::context_prompt_allowed(prefix, marker);
         }
 
-        // Minimal prompts like "project$", "host%", etc.
-        // Keep this strict so generic output lines do not masquerade as prompts.
-        if prefix.len() > 32 {
-            return false;
-        }
-        if prefix.chars().any(|c| c.is_whitespace()) {
-            return false;
-        }
-        if prefix
+        Self::minimal_prompt_allowed(prefix, marker)
+    }
+
+    fn prompt_candidate(visible: &str) -> Option<(&str, char)> {
+        let line = visible
+            .split(['\n', '\r'])
+            .rev()
+            .map(str::trim_end)
+            .find(|line| !line.is_empty())?;
+
+        let mut chars = line.chars();
+        let marker = match chars.next_back()? {
+            marker @ ('$' | '%' | '#' | '>') => marker,
+            _ => return None,
+        };
+        let prefix = chars.as_str().trim_end();
+
+        Some((prefix, marker))
+    }
+
+    fn context_prompt_allowed(prefix: &str, marker: char) -> bool {
+        marker != '%' || !Self::is_numeric_percent_context(prefix)
+    }
+
+    fn is_numeric_percent_context(prefix: &str) -> bool {
+        prefix
+            .replace(',', "")
             .chars()
-            .all(|c| c.is_ascii_digit() || c == '.' || c == ',')
-        {
-            return false;
-        }
-        if !prefix
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
-        {
+            .all(Self::is_digit_dot_or_whitespace)
+    }
+
+    fn is_digit_dot_or_whitespace(c: char) -> bool {
+        c.is_ascii_digit() || c == '.' || c.is_ascii_whitespace()
+    }
+
+    fn minimal_prompt_allowed(prefix: &str, marker: char) -> bool {
+        if !Self::minimal_prompt_prefix_allowed(prefix) {
             return false;
         }
 
         matches!(marker, '$' | '#' | '%')
+    }
+
+    fn minimal_prompt_prefix_allowed(prefix: &str) -> bool {
+        // Minimal prompts like "project$", "host%", etc.
+        // Keep this strict so generic output lines do not masquerade as prompts.
+        Self::minimal_prompt_prefix_shape_allowed(prefix)
+            && !Self::is_numeric_minimal_prompt_prefix(prefix)
+            && Self::minimal_prompt_prefix_chars_allowed(prefix)
+    }
+
+    fn minimal_prompt_prefix_shape_allowed(prefix: &str) -> bool {
+        prefix.len() <= 32 && !prefix.chars().any(|c| c.is_whitespace())
+    }
+
+    fn is_numeric_minimal_prompt_prefix(prefix: &str) -> bool {
+        prefix
+            .chars()
+            .all(|c| c.is_ascii_digit() || c == '.' || c == ',')
+    }
+
+    fn minimal_prompt_prefix_chars_allowed(prefix: &str) -> bool {
+        prefix
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
     }
 
     fn has_prompt_context(prefix: &str) -> bool {
