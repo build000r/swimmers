@@ -67,25 +67,48 @@ pub fn should_rotate_openrouter_model(message: &str) -> bool {
 pub async fn refresh_openrouter_model_cache(
     client: &reqwest::Client,
 ) -> Result<OpenRouterModelCache, String> {
+    let payload = fetch_openrouter_model_catalog(client).await?;
+    let cache = build_openrouter_model_cache(payload, current_epoch_ms());
+    persist_openrouter_model_cache(&cache)?;
+    Ok(cache)
+}
+
+async fn fetch_openrouter_model_catalog(
+    client: &reqwest::Client,
+) -> Result<OpenRouterModelsResponse, String> {
     let response = client
         .get(OPENROUTER_MODELS_URL)
         .send()
         .await
         .map_err(|err| format!("failed to fetch OpenRouter model catalog: {err}"))?;
-    let status = response.status();
-    if !status.is_success() {
-        return Err(format!(
-            "failed to fetch OpenRouter model catalog: request failed: {status}"
-        ));
-    }
-
-    let payload = response
+    ensure_openrouter_catalog_success(response.status())?;
+    response
         .json::<OpenRouterModelsResponse>()
         .await
-        .map_err(|err| format!("failed to parse OpenRouter model catalog: {err}"))?;
+        .map_err(|err| format!("failed to parse OpenRouter model catalog: {err}"))
+}
 
-    let mut models = payload
-        .data
+fn ensure_openrouter_catalog_success(status: reqwest::StatusCode) -> Result<(), String> {
+    if status.is_success() {
+        return Ok(());
+    }
+    Err(format!(
+        "failed to fetch OpenRouter model catalog: request failed: {status}"
+    ))
+}
+
+fn build_openrouter_model_cache(
+    payload: OpenRouterModelsResponse,
+    generated_at_epoch_ms: u64,
+) -> OpenRouterModelCache {
+    OpenRouterModelCache {
+        generated_at_epoch_ms,
+        models: ordered_openrouter_rotator_models(payload.data),
+    }
+}
+
+fn ordered_openrouter_rotator_models(entries: Vec<OpenRouterModelEntry>) -> Vec<String> {
+    let mut models = entries
         .into_iter()
         .filter(is_rotator_candidate)
         .collect::<Vec<_>>();
@@ -103,16 +126,14 @@ pub async fn refresh_openrouter_model_cache(
             ordered.push(entry.id);
         }
     }
+    ordered
+}
 
-    let cache = OpenRouterModelCache {
-        generated_at_epoch_ms: SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|duration| duration.as_millis() as u64)
-            .unwrap_or_default(),
-        models: ordered,
-    };
-    persist_openrouter_model_cache(&cache)?;
-    Ok(cache)
+fn current_epoch_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or_default()
 }
 
 pub fn load_openrouter_model_cache() -> Option<OpenRouterModelCache> {
@@ -275,5 +296,65 @@ mod tests {
     fn default_candidates_start_with_router_alias() {
         let models = default_openrouter_candidates();
         assert_eq!(models.first().map(String::as_str), Some("openrouter/free"));
+    }
+
+    #[test]
+    fn ordered_rotator_models_keep_alias_first_and_deduplicate() {
+        let models = ordered_openrouter_rotator_models(vec![
+            entry("zeta/large-70b:free", Some("Large 70B")),
+            entry("alpha/small-3b:free", Some("Small 3B duplicate")),
+            entry("alpha/small-3b:free", Some("Small 3B")),
+        ]);
+
+        assert_eq!(
+            models,
+            vec![
+                "openrouter/free".to_string(),
+                "alpha/small-3b:free".to_string(),
+                "zeta/large-70b:free".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn ordered_rotator_models_filter_vision_and_put_preview_after_stable() {
+        let models = ordered_openrouter_rotator_models(vec![
+            entry("vendor/preview-1b:free", Some("Preview 1B")),
+            entry("vendor/stable-3b:free", Some("Stable 3B")),
+            entry("vendor/image-1b:free", Some("Image Model")),
+            entry("vendor/vision-vl:free", Some("Text Vision")),
+        ]);
+
+        assert_eq!(
+            models,
+            vec![
+                "openrouter/free".to_string(),
+                "vendor/stable-3b:free".to_string(),
+                "vendor/preview-1b:free".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn build_cache_uses_supplied_timestamp_and_ordered_models() {
+        let cache = build_openrouter_model_cache(
+            OpenRouterModelsResponse {
+                data: vec![
+                    entry("vendor/large-70b:free", Some("Large 70B")),
+                    entry("vendor/small-1b:free", Some("Small 1B")),
+                ],
+            },
+            42,
+        );
+
+        assert_eq!(cache.generated_at_epoch_ms, 42);
+        assert_eq!(
+            cache.models,
+            vec![
+                "openrouter/free".to_string(),
+                "vendor/small-1b:free".to_string(),
+                "vendor/large-70b:free".to_string(),
+            ]
+        );
     }
 }
