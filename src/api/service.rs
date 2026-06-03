@@ -1947,23 +1947,49 @@ fn best_adjacency_to_group(candidate: &AttentionCandidate, visible: &[AttentionC
 }
 
 fn attention_adjacency_score(a: &AttentionCandidate, b: &AttentionCandidate) -> i32 {
-    if a.session.session_id == b.session.session_id {
-        return 0;
+    if attention_candidates_are_same_session(a, b) {
+        return attention_self_adjacency_score();
     }
-    let mut score = 0;
-    if !a.repo.is_empty() && a.repo == b.repo {
-        score += 100;
+    attention_relationship_score(a, b)
+}
+
+fn attention_candidates_are_same_session(a: &AttentionCandidate, b: &AttentionCandidate) -> bool {
+    a.session.session_id == b.session.session_id
+}
+
+fn attention_self_adjacency_score() -> i32 {
+    0
+}
+
+fn attention_relationship_score(a: &AttentionCandidate, b: &AttentionCandidate) -> i32 {
+    attention_weight_if(attention_repos_match(a, b), 100)
+        + attention_weight_if(attention_families_match(a, b), 70)
+        + attention_weight_if(attention_batches_match(a, b), 50)
+        + attention_weight_if(attention_tools_match(a, b), 5)
+}
+
+fn attention_weight_if(matched: bool, weight: i32) -> i32 {
+    if matched {
+        weight
+    } else {
+        0
     }
-    if !a.family.is_empty() && a.family == b.family {
-        score += 70;
-    }
-    if a.batch.is_some() && a.batch == b.batch {
-        score += 50;
-    }
-    if a.session.tool.is_some() && a.session.tool == b.session.tool {
-        score += 5;
-    }
-    score
+}
+
+fn attention_repos_match(a: &AttentionCandidate, b: &AttentionCandidate) -> bool {
+    !a.repo.is_empty() && a.repo == b.repo
+}
+
+fn attention_families_match(a: &AttentionCandidate, b: &AttentionCandidate) -> bool {
+    !a.family.is_empty() && a.family == b.family
+}
+
+fn attention_batches_match(a: &AttentionCandidate, b: &AttentionCandidate) -> bool {
+    a.batch.is_some() && a.batch == b.batch
+}
+
+fn attention_tools_match(a: &AttentionCandidate, b: &AttentionCandidate) -> bool {
+    a.session.tool.is_some() && a.session.tool == b.session.tool
 }
 
 fn attention_repo_key(cwd: &str) -> String {
@@ -2387,6 +2413,34 @@ mod tests {
         let selected = plan_ids(vec![newer_unrelated, batch_a, batch_b], 2, &[]);
 
         assert_eq!(selected, vec!["batch-b", "batch-a"]);
+    }
+
+    #[test]
+    fn attention_adjacency_score_weights_only_present_matching_relationships() {
+        let alpha_a = AttentionCandidate::from(batch_session(
+            numbered_waiting_session("alpha-a", "44", "/Users/b/repos/alpha", 20),
+            "b1",
+        ));
+        let alpha_b = AttentionCandidate::from(batch_session(
+            numbered_waiting_session("alpha-b", "45", "/Users/b/repos/alpha", 10),
+            "b1",
+        ));
+
+        assert_eq!(attention_adjacency_score(&alpha_a, &alpha_b), 225);
+        assert_eq!(attention_adjacency_score(&alpha_a, &alpha_a), 0);
+
+        let mut missing_a = numbered_waiting_session("missing-a", "46", "", 20);
+        missing_a.tool = None;
+        let mut missing_b = numbered_waiting_session("missing-b", "47", "", 10);
+        missing_b.tool = None;
+
+        assert_eq!(
+            attention_adjacency_score(
+                &AttentionCandidate::from(missing_a),
+                &AttentionCandidate::from(missing_b)
+            ),
+            0
+        );
     }
 
     #[test]
