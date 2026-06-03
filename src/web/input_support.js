@@ -640,6 +640,33 @@ export function lifecycleDeletedSessionPatchPlan(session = {}, message = {}) {
   };
 }
 
+export function inputAckActionPlan(message = {}) {
+  const id = message.clientMessageId || message.client_message_id || "";
+  if (!id) {
+    return { action: "ignore", id: "", status: "", detail: "", expectedStatus: "", delayMs: 0 };
+  }
+
+  if (message.delivered) {
+    return {
+      action: "update",
+      id,
+      status: "sent",
+      detail: message.method || "",
+      expectedStatus: "sent",
+      delayMs: 2500,
+    };
+  }
+
+  return {
+    action: "update",
+    id,
+    status: "failed",
+    detail: message.message || "input delivery failed",
+    expectedStatus: "failed",
+    delayMs: 8000,
+  };
+}
+
 export function sheetActionAvailabilityPlan(context = {}) {
   const writeDisabled = Boolean(context.writeDisabled);
   const hasSession = Boolean(context.hasSession);

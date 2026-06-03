@@ -1,6 +1,6 @@
 import { buildSurfaceFrame, surfaceActionAt, surfaceConsumesPointer } from "./rendered_surface.js";
 import {
-  authTokenButtonPlan, controlEventSessionPatchPlan, eventCell, globalShortcutPlan, initialStateBootPlan, lifecycleDeletedSessionPatchPlan, mobileKeyboardInputExecutorPlan, mobileKeyboardInputPlan,
+  authTokenButtonPlan, controlEventSessionPatchPlan, eventCell, globalShortcutPlan, initialStateBootPlan, inputAckActionPlan, lifecycleDeletedSessionPatchPlan, mobileKeyboardInputExecutorPlan, mobileKeyboardInputPlan,
   sheetActionAvailabilityPlan,
   mobileKeyboardKeydownPlan, mobileKeyboardKeyPlan, shouldIgnoreSyntheticClick,
   terminalComposerControlAction, terminalDestroyStatePatch, terminalFallbackActivationPlan, terminalFallbackFocusPlan, terminalFallbackKeydownPlan, terminalFallbackPastePlan, terminalFallbackPointerFocusPlan, terminalInlineInputKeydownPlan, terminalKeyStripClickExecutorPlan, terminalKeyStripClickPlan, terminalStageCaptureBindings, terminalStageFocusExecutorPlan, terminalStageFocusPlan,
@@ -3470,20 +3470,12 @@ function refreshSelectedSessionSidecarsFromEvent(sessionId, event) {
 }
 
 function handleInputAck(message) {
-  const id = message.clientMessageId || message.client_message_id || "";
-  if (!id) {
+  const plan = inputAckActionPlan(message);
+  if (plan.action === "ignore") {
     return;
   }
-  if (message.delivered) {
-    updateInputDeliveryStatus(id, "sent", message.method || "");
-    scheduleInputAckCleanup(id, "sent", 2500);
-  } else {
-    updateInputDeliveryStatus(id, "failed", message.message || "input delivery failed");
-    // Failed acks also need eviction, otherwise pendingInputMessages grows
-    // without bound over a long session. Keep the failure visible a bit longer
-    // than a success before clearing it.
-    scheduleInputAckCleanup(id, "failed", 8000);
-  }
+  updateInputDeliveryStatus(plan.id, plan.status, plan.detail);
+  scheduleInputAckCleanup(plan.id, plan.expectedStatus, plan.delayMs);
 }
 
 function scheduleInputAckCleanup(id, expectedStatus, delayMs) {

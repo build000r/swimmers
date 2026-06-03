@@ -6,6 +6,7 @@ import {
   eventClientPoint,
   globalShortcutPlan,
   initialStateBootPlan,
+  inputAckActionPlan,
   lifecycleDeletedSessionPatchPlan,
   mobileKeyboardInputExecutorPlan,
   mobileKeyboardInputPlan,
@@ -1359,6 +1360,91 @@ test("lifecycleDeletedSessionPatchPlan preserves fallback and default deleted-se
     delete_reason: "",
     delete_mode: "",
     tmux_session_alive: false,
+  });
+});
+
+test("inputAckActionPlan preserves delivered ack semantics", () => {
+  assert.deepEqual(inputAckActionPlan({
+    clientMessageId: "client-1",
+    client_message_id: "fallback",
+    delivered: true,
+    method: "send_keys",
+    message: "ignored",
+  }), {
+    action: "update",
+    id: "client-1",
+    status: "sent",
+    detail: "send_keys",
+    expectedStatus: "sent",
+    delayMs: 2500,
+  });
+
+  assert.deepEqual(inputAckActionPlan({
+    client_message_id: "client-2",
+    delivered: 1,
+    method: "",
+  }), {
+    action: "update",
+    id: "client-2",
+    status: "sent",
+    detail: "",
+    expectedStatus: "sent",
+    delayMs: 2500,
+  });
+});
+
+test("inputAckActionPlan preserves failed ack semantics", () => {
+  assert.deepEqual(inputAckActionPlan({
+    clientMessageId: "client-3",
+    delivered: false,
+    message: "not attached",
+  }), {
+    action: "update",
+    id: "client-3",
+    status: "failed",
+    detail: "not attached",
+    expectedStatus: "failed",
+    delayMs: 8000,
+  });
+
+  assert.deepEqual(inputAckActionPlan({
+    client_message_id: "client-4",
+    delivered: 0,
+    message: "",
+  }), {
+    action: "update",
+    id: "client-4",
+    status: "failed",
+    detail: "input delivery failed",
+    expectedStatus: "failed",
+    delayMs: 8000,
+  });
+});
+
+test("inputAckActionPlan preserves missing id ignore semantics", () => {
+  assert.deepEqual(inputAckActionPlan({
+    delivered: true,
+    method: "send_keys",
+  }), {
+    action: "ignore",
+    id: "",
+    status: "",
+    detail: "",
+    expectedStatus: "",
+    delayMs: 0,
+  });
+
+  assert.deepEqual(inputAckActionPlan({
+    clientMessageId: 0,
+    client_message_id: "",
+    delivered: false,
+  }), {
+    action: "ignore",
+    id: "",
+    status: "",
+    detail: "",
+    expectedStatus: "",
+    delayMs: 0,
   });
 });
 
