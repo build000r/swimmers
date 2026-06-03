@@ -5,6 +5,7 @@ import {
   authTokenButtonPlan, eventCell,
   eventClientPoint,
   globalShortcutPlan,
+  initialStateBootPlan,
   mobileKeyboardInputExecutorPlan,
   mobileKeyboardInputPlan,
   sheetActionAvailabilityPlan,
@@ -1085,6 +1086,78 @@ test("terminalToolsAvailabilityPlan preserves control disabled states", () => {
     sendTargetType: "group",
     hasCurrentSession: true,
   }).sendModeDisabled, true);
+});
+
+test("initialStateBootPlan preserves token, session, directory, and desktop defaults", () => {
+  assert.deepEqual(initialStateBootPlan({
+    searchParams: new URLSearchParams("token=query-token&session=url-session"),
+    storedToken: "stored-token",
+    selectedFromStorage: "stored-session",
+    rawStoredDirPath: "/repo/swimmers",
+    rawStoredManagedOnly: "true",
+    bootFollowPublishedSelection: false,
+    terminalWorkbenchMobile: false,
+  }), {
+    queryToken: "query-token",
+    tokenToPersist: "query-token",
+    selectedSessionId: "url-session",
+    followFromUrl: false,
+    followPublishedSelection: false,
+    storedDirPath: "/repo/swimmers",
+    clearStoredDirPath: false,
+    storedManagedOnly: true,
+    terminalWorkbenchOpen: true,
+  });
+});
+
+test("initialStateBootPlan preserves stored fallbacks and root directory cleanup", () => {
+  assert.deepEqual(initialStateBootPlan({
+    searchParams: new URLSearchParams(""),
+    storedToken: "stored-token",
+    selectedFromStorage: "stored-session",
+    rawStoredDirPath: "/",
+    rawStoredManagedOnly: "false",
+    bootFollowPublishedSelection: false,
+    terminalWorkbenchMobile: true,
+  }), {
+    queryToken: "",
+    tokenToPersist: "stored-token",
+    selectedSessionId: "stored-session",
+    followFromUrl: false,
+    followPublishedSelection: false,
+    storedDirPath: "",
+    clearStoredDirPath: true,
+    storedManagedOnly: false,
+    terminalWorkbenchOpen: false,
+  });
+});
+
+test("initialStateBootPlan preserves follow-published selection override", () => {
+  assert.deepEqual(initialStateBootPlan({
+    searchParams: new URLSearchParams("follow=published&session=url-session"),
+    storedToken: "",
+    selectedFromStorage: "stored-session",
+    rawStoredDirPath: " / ",
+    rawStoredManagedOnly: null,
+    bootFollowPublishedSelection: false,
+    terminalWorkbenchMobile: false,
+  }), {
+    queryToken: "",
+    tokenToPersist: "",
+    selectedSessionId: null,
+    followFromUrl: true,
+    followPublishedSelection: true,
+    storedDirPath: "",
+    clearStoredDirPath: true,
+    storedManagedOnly: false,
+    terminalWorkbenchOpen: true,
+  });
+
+  assert.equal(initialStateBootPlan({
+    searchParams: new URLSearchParams("session=url-session"),
+    selectedFromStorage: "stored-session",
+    bootFollowPublishedSelection: true,
+  }).selectedSessionId, null);
 });
 
 test("sheetActionAvailabilityPlan preserves enabled action state", () => {

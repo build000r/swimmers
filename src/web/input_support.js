@@ -563,6 +563,28 @@ export function terminalToolsAvailabilityPlan(context = {}) {
   };
 }
 
+export function initialStateBootPlan(context = {}) {
+  const param = (name, fallback = null) => context.searchParams?.get?.(name) ?? fallback;
+  const queryToken = param("token", "");
+  const selectedFromUrl = param("session");
+  const selectedFromStorage = context.selectedFromStorage ?? null;
+  const followFromUrl = param("follow") === "published";
+  const rawStoredDirPath = context.rawStoredDirPath ?? "";
+  const storedDirPath = rawStoredDirPath.trim() === "/" ? "" : rawStoredDirPath;
+  const followPublishedSelection = Boolean(context.bootFollowPublishedSelection || followFromUrl);
+  return {
+    queryToken,
+    tokenToPersist: queryToken || (context.storedToken ?? ""),
+    selectedSessionId: followPublishedSelection ? null : selectedFromUrl || selectedFromStorage || null,
+    followFromUrl,
+    followPublishedSelection,
+    storedDirPath,
+    clearStoredDirPath: Boolean(rawStoredDirPath && !storedDirPath),
+    storedManagedOnly: context.rawStoredManagedOnly === "true",
+    terminalWorkbenchOpen: !Boolean(context.terminalWorkbenchMobile),
+  };
+}
+
 export function sheetActionAvailabilityPlan(context = {}) {
   const writeDisabled = Boolean(context.writeDisabled);
   const hasSession = Boolean(context.hasSession);

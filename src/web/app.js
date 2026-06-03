@@ -1,6 +1,6 @@
 import { buildSurfaceFrame, surfaceActionAt, surfaceConsumesPointer } from "./rendered_surface.js";
 import {
-  authTokenButtonPlan, eventCell, globalShortcutPlan, mobileKeyboardInputExecutorPlan, mobileKeyboardInputPlan,
+  authTokenButtonPlan, eventCell, globalShortcutPlan, initialStateBootPlan, mobileKeyboardInputExecutorPlan, mobileKeyboardInputPlan,
   sheetActionAvailabilityPlan,
   mobileKeyboardKeydownPlan, mobileKeyboardKeyPlan, shouldIgnoreSyntheticClick,
   terminalComposerControlAction, terminalDestroyStatePatch, terminalFallbackActivationPlan, terminalFallbackFocusPlan, terminalFallbackKeydownPlan, terminalFallbackPastePlan, terminalFallbackPointerFocusPlan, terminalInlineInputKeydownPlan, terminalKeyStripClickExecutorPlan, terminalKeyStripClickPlan, terminalStageCaptureBindings, terminalStageFocusExecutorPlan, terminalStageFocusPlan,
@@ -1374,33 +1374,30 @@ function syncSheetActionAvailability() {
 
 function loadInitialState() {
   const url = new URL(window.location.href);
-  const queryToken = url.searchParams.get("token") ?? "";
-  const storedToken = localStorage.getItem(TOKEN_STORAGE_KEY) ?? "";
-  const selectedFromUrl = url.searchParams.get("session");
-  const selectedFromStorage = localStorage.getItem(SESSION_STORAGE_KEY);
-  const followFromUrl = url.searchParams.get("follow") === "published";
-  const rawStoredDirPath = localStorage.getItem(DIR_BROWSER_PATH_KEY) ?? "";
-  const storedDirPath = rawStoredDirPath.trim() === "/" ? "" : rawStoredDirPath;
-  const storedManagedOnly = localStorage.getItem(DIR_BROWSER_MANAGED_ONLY_KEY) === "true";
-  if (rawStoredDirPath && !storedDirPath) {
+  const plan = initialStateBootPlan({
+    searchParams: url.searchParams, storedToken: localStorage.getItem(TOKEN_STORAGE_KEY) ?? "",
+    selectedFromStorage: localStorage.getItem(SESSION_STORAGE_KEY),
+    rawStoredDirPath: localStorage.getItem(DIR_BROWSER_PATH_KEY) ?? "",
+    rawStoredManagedOnly: localStorage.getItem(DIR_BROWSER_MANAGED_ONLY_KEY),
+    bootFollowPublishedSelection: boot.follow_published_selection,
+    terminalWorkbenchMobile: window.matchMedia?.("(max-width: 700px)")?.matches ?? false,
+  });
+  if (plan.clearStoredDirPath) {
     localStorage.removeItem(DIR_BROWSER_PATH_KEY);
   }
 
   state.terminalZoom = loadTerminalZoom(url);
-  state.terminalWorkbenchOpen = !(window.matchMedia?.("(max-width: 700px)")?.matches ?? false);
+  state.terminalWorkbenchOpen = plan.terminalWorkbenchOpen;
   state.trogdorReadProgress = loadTrogdorReadProgress();
   loadSendHistory();
-  persistToken(queryToken || storedToken);
-  setFollowPublishedSelection(boot.follow_published_selection || followFromUrl, { skipUrlSync: true });
-  state.dirBrowser.path = storedDirPath;
-  state.dirBrowser.managedOnly = storedManagedOnly;
-  el.dirsPath.value = storedDirPath;
-  el.dirsManagedOnly.checked = storedManagedOnly;
-  el.createCwd.value = storedDirPath;
-  persistSelectedSession(
-    state.followPublishedSelection ? null : selectedFromUrl || selectedFromStorage || null,
-    { syncUrl: false },
-  );
+  persistToken(plan.tokenToPersist);
+  setFollowPublishedSelection(plan.followPublishedSelection, { skipUrlSync: true });
+  state.dirBrowser.path = plan.storedDirPath;
+  state.dirBrowser.managedOnly = plan.storedManagedOnly;
+  el.dirsPath.value = plan.storedDirPath;
+  el.dirsManagedOnly.checked = plan.storedManagedOnly;
+  el.createCwd.value = plan.storedDirPath;
+  persistSelectedSession(plan.selectedSessionId, { syncUrl: false });
   state.trogdorAtlasOpen = !(state.followPublishedSelection || state.selectedSessionId);
   syncUrlState();
 }
