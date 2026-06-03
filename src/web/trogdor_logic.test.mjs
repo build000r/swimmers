@@ -3,13 +3,23 @@ import assert from "node:assert/strict";
 
 import {
   buildTrogdorDomGroups,
+  clearTrogdorDismissedClawgInMap,
+  dismissTrogdorClawgInMap,
+  loadTrogdorReadProgress,
+  parseTrogdorReadProgress,
   rawActionCueKinds,
   rawSessionIsSleepingOrDeepSleep,
+  saveTrogdorReadProgress,
+  serializeTrogdorReadProgress,
+  setTrogdorClawgReadIndexForProgress,
   stableTextHash,
   summarizeTrogdorDom,
   trogdorAgentGlyph,
   trogdorAgentTone,
+  trogdorClawgDismissedForMap,
   trogdorClawgKey,
+  trogdorClawgReadCompleteForProgress,
+  trogdorClawgReadIndexForProgress,
   trogdorClawgWords,
   trogdorDomPressure,
   trogdorDomReason,
@@ -51,6 +61,66 @@ test("Trogdor action cues, clawg keys, and raw rest detection are stable", () =>
   assert.equal(trogdorPrimaryActionCue(item), "awaiting_user");
   assert.equal(trogdorSessionAwaitingUser(item), true);
   assert.equal(trogdorSessionHasReadyClawg(item), true);
+});
+
+test("Trogdor read progress helpers sanitize, clamp, complete, and serialize", () => {
+  const item = session();
+  const key = trogdorClawgKey(item);
+  const parsed = parseTrogdorReadProgress(JSON.stringify({
+    [key]: 2.8,
+    negative: -1,
+    bad: "nope",
+    zero: 0,
+  }));
+
+  assert.deepEqual(parsed, { [key]: 2, zero: 0 });
+  assert.deepEqual(parseTrogdorReadProgress("[1,2]"), {});
+  assert.deepEqual(parseTrogdorReadProgress("{"), {});
+  assert.equal(trogdorClawgReadIndexForProgress(item, parsed), 2);
+
+  const advanced = setTrogdorClawgReadIndexForProgress(parsed, item, 99);
+  assert.equal(advanced.changed, true);
+  assert.equal(advanced.progress[key], trogdorClawgWords(item).length);
+  assert.equal(trogdorClawgReadCompleteForProgress(item, advanced.progress), true);
+
+  const unchanged = setTrogdorClawgReadIndexForProgress(advanced.progress, item, 99);
+  assert.equal(unchanged.changed, false);
+  assert.equal(serializeTrogdorReadProgress({ [key]: 3.4, ignored: -2 }), `{"${key}":3}`);
+});
+
+test("Trogdor read progress storage helpers are best-effort and injectable", () => {
+  const writes = new Map();
+  const storage = {
+    getItem(key) {
+      return key === "progress" ? "{\"a\":2,\"bad\":-1}" : "{";
+    },
+    setItem(key, value) {
+      writes.set(key, value);
+    },
+  };
+
+  assert.deepEqual(loadTrogdorReadProgress(storage, "progress"), { a: 2 });
+  assert.deepEqual(loadTrogdorReadProgress(storage, "broken"), {});
+  assert.equal(saveTrogdorReadProgress({ a: 2.9, bad: -1 }, storage, "progress"), true);
+  assert.equal(writes.get("progress"), "{\"a\":2}");
+  assert.equal(saveTrogdorReadProgress({ a: 1 }, { setItem() { throw new Error("full"); } }, "progress"), false);
+});
+
+test("Trogdor dismissed clawg helpers set and clear by current clawg key", () => {
+  const item = session();
+  const key = trogdorClawgKey(item);
+
+  const dismissed = dismissTrogdorClawgInMap({}, item);
+  assert.equal(dismissed.changed, true);
+  assert.equal(dismissed.dismissedClawgs[key], true);
+  assert.equal(trogdorClawgDismissedForMap(item, dismissed.dismissedClawgs), true);
+
+  const repeated = dismissTrogdorClawgInMap(dismissed.dismissedClawgs, item);
+  assert.equal(repeated.changed, false);
+
+  const cleared = clearTrogdorDismissedClawgInMap(dismissed.dismissedClawgs, item);
+  assert.equal(cleared.changed, true);
+  assert.equal(trogdorClawgDismissedForMap(item, cleared.dismissedClawgs), false);
 });
 
 test("Trogdor pressure, reason, glyph, and tone prefer operator pressure when present", () => {

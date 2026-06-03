@@ -1,4 +1,5 @@
 export const TROGDOR_DRAGON_TARGET = { x: 56, y: 64 };
+export const TROGDOR_READ_PROGRESS_STORAGE_KEY = "swimmers.web.trogdor.readProgress";
 
 const TROGDOR_DRAGON_FRAME_BY_SECTOR = {
   "2": "front",
@@ -66,6 +67,126 @@ export function trogdorClawgKey(session) {
   const updated = String(session?.thoughtUpdatedAt || session?.objectiveChangedAt || "");
   const text = trogdorClawgText(session);
   return `${sessionId}:${updated}:${stableTextHash(text)}`;
+}
+
+export function parseTrogdorReadProgress(raw) {
+  try {
+    const parsed = typeof raw === "string" ? JSON.parse(raw || "{}") : raw;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return {};
+    }
+    const progress = {};
+    for (const [key, value] of Object.entries(parsed)) {
+      const index = Number(value);
+      if (key && Number.isFinite(index) && index >= 0) {
+        progress[key] = Math.floor(index);
+      }
+    }
+    return progress;
+  } catch (_error) {
+    return {};
+  }
+}
+
+export function serializeTrogdorReadProgress(progress) {
+  return JSON.stringify(parseTrogdorReadProgress(progress || {}));
+}
+
+export function loadTrogdorReadProgress(
+  storage = globalThis.localStorage,
+  key = TROGDOR_READ_PROGRESS_STORAGE_KEY,
+) {
+  if (!storage) {
+    return {};
+  }
+  try {
+    return parseTrogdorReadProgress(storage.getItem(key));
+  } catch (_error) {
+    return {};
+  }
+}
+
+export function saveTrogdorReadProgress(
+  progress,
+  storage = globalThis.localStorage,
+  key = TROGDOR_READ_PROGRESS_STORAGE_KEY,
+) {
+  if (!storage) {
+    return false;
+  }
+  try {
+    storage.setItem(key, serializeTrogdorReadProgress(progress || {}));
+    return true;
+  } catch (_error) {
+    return false;
+  }
+}
+
+export function trogdorClawgReadIndexForProgress(session, progress = {}) {
+  const words = trogdorClawgWords(session);
+  const key = trogdorClawgKey(session);
+  if (!key) {
+    return 0;
+  }
+  return clampInt(progress?.[key], 0, 0, words.length);
+}
+
+export function setTrogdorClawgReadIndexForProgress(progress = {}, session, index) {
+  const key = trogdorClawgKey(session);
+  if (!key) {
+    return { progress: progress || {}, changed: false, index: 0 };
+  }
+  const words = trogdorClawgWords(session);
+  const nextIndex = clampInt(index, 0, 0, words.length);
+  if (progress?.[key] === nextIndex) {
+    return { progress, changed: false, index: nextIndex };
+  }
+  return {
+    progress: {
+      ...(progress || {}),
+      [key]: nextIndex,
+    },
+    changed: true,
+    index: nextIndex,
+  };
+}
+
+export function trogdorClawgReadCompleteForProgress(session, progress = {}) {
+  const words = trogdorClawgWords(session);
+  return words.length > 0 && trogdorClawgReadIndexForProgress(session, progress) >= words.length;
+}
+
+export function trogdorClawgDismissedForMap(session, dismissedClawgs = {}) {
+  const key = trogdorClawgKey(session);
+  return Boolean(key && dismissedClawgs?.[key]);
+}
+
+export function dismissTrogdorClawgInMap(dismissedClawgs = {}, session) {
+  const key = trogdorClawgKey(session);
+  if (!key) {
+    return { dismissedClawgs: dismissedClawgs || {}, changed: false, key: "" };
+  }
+  return {
+    dismissedClawgs: {
+      ...(dismissedClawgs || {}),
+      [key]: true,
+    },
+    changed: !dismissedClawgs?.[key],
+    key,
+  };
+}
+
+export function clearTrogdorDismissedClawgInMap(dismissedClawgs = {}, session) {
+  const key = trogdorClawgKey(session);
+  if (!key) {
+    return { dismissedClawgs: dismissedClawgs || {}, changed: false, key: "" };
+  }
+  const { [key]: _dismissed, ...remainingDismissed } = dismissedClawgs || {};
+  return {
+    dismissedClawgs: remainingDismissed,
+    changed: Boolean(dismissedClawgs?.[key]),
+    key,
+  };
 }
 
 export function trogdorSessionAwaitingUser(session) {

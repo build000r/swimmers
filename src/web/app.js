@@ -35,10 +35,18 @@ import {
 import {
   TROGDOR_DRAGON_TARGET,
   buildTrogdorDomGroups,
+  clearTrogdorDismissedClawgInMap,
+  dismissTrogdorClawgInMap,
+  loadTrogdorReadProgress,
   rawHasActionCue,
   rawSessionIsSleepingOrDeepSleep,
+  saveTrogdorReadProgress,
+  setTrogdorClawgReadIndexForProgress,
   summarizeTrogdorDom,
   trogdorClawgKey,
+  trogdorClawgDismissedForMap,
+  trogdorClawgReadCompleteForProgress,
+  trogdorClawgReadIndexForProgress,
   trogdorClawgWords,
   trogdorDomActionCueKinds,
   trogdorDragonPose as buildTrogdorDragonPose,
@@ -91,7 +99,6 @@ const SESSION_REFRESH_STREAMING_MS = 10000;
 const SNAPSHOT_REFRESH_MS = 900;
 const AGENT_CONTEXT_REFRESH_MS = 5000;
 const SURFACE_CLICK_SUPPRESS_MS = 450;
-const TROGDOR_READ_PROGRESS_KEY = "swimmers.web.trogdor.readProgress";
 const TROGDOR_BURN_MS = 1100;
 const TERMINAL_ZOOM_MIN = 0.65;
 const TERMINAL_ZOOM_MAX = 2.4;
@@ -1403,39 +1410,6 @@ function summarizeThought(session) {
   return thought.length > 110 ? `${thought.slice(0, 107)}...` : thought;
 }
 
-function loadTrogdorReadProgress() {
-  if (typeof localStorage === "undefined") {
-    return {};
-  }
-  try {
-    const parsed = JSON.parse(localStorage.getItem(TROGDOR_READ_PROGRESS_KEY) || "{}");
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-      return {};
-    }
-    const progress = {};
-    for (const [key, value] of Object.entries(parsed)) {
-      const index = Number(value);
-      if (key && Number.isFinite(index) && index >= 0) {
-        progress[key] = Math.floor(index);
-      }
-    }
-    return progress;
-  } catch (_error) {
-    return {};
-  }
-}
-
-function saveTrogdorReadProgress() {
-  if (typeof localStorage === "undefined") {
-    return;
-  }
-  try {
-    localStorage.setItem(TROGDOR_READ_PROGRESS_KEY, JSON.stringify(state.trogdorReadProgress || {}));
-  } catch (_error) {
-    // Best effort only; losing the cursor should not block the operator UI.
-  }
-}
-
 function rawSessionAwaitingUser(session) {
   const pressure = operatorPressureSnapshot(session?.session_id)?.pressure || {};
   const reasonKind = String(pressure.reason_kind || "").toLowerCase();
@@ -1444,29 +1418,20 @@ function rawSessionAwaitingUser(session) {
 }
 
 function trogdorClawgReadIndex(session) {
-  const words = trogdorClawgWords(session);
-  const key = trogdorClawgKey(session);
-  if (!key) {
-    return 0;
-  }
-  return clampInt(state.trogdorReadProgress?.[key], 0, 0, words.length);
+  return trogdorClawgReadIndexForProgress(session, state.trogdorReadProgress);
 }
 
 function setTrogdorClawgReadIndex(session, index) {
-  const key = trogdorClawgKey(session);
-  if (!key) {
+  const next = setTrogdorClawgReadIndexForProgress(
+    state.trogdorReadProgress || {},
+    session,
+    index,
+  );
+  if (!next.changed) {
     return false;
   }
-  const words = trogdorClawgWords(session);
-  const nextIndex = clampInt(index, 0, 0, words.length);
-  if (state.trogdorReadProgress?.[key] === nextIndex) {
-    return false;
-  }
-  state.trogdorReadProgress = {
-    ...(state.trogdorReadProgress || {}),
-    [key]: nextIndex,
-  };
-  saveTrogdorReadProgress();
+  state.trogdorReadProgress = next.progress;
+  saveTrogdorReadProgress(state.trogdorReadProgress);
   return true;
 }
 
@@ -1475,25 +1440,20 @@ function markTrogdorClawgComplete(session) {
 }
 
 function trogdorClawgReadComplete(session) {
-  const words = trogdorClawgWords(session);
-  return words.length > 0 && trogdorClawgReadIndex(session) >= words.length;
+  return trogdorClawgReadCompleteForProgress(session, state.trogdorReadProgress);
 }
 
 function trogdorClawgDismissed(session) {
-  const key = trogdorClawgKey(session);
-  return Boolean(key && state.trogdorDismissedClawgs?.[key]);
+  return trogdorClawgDismissedForMap(session, state.trogdorDismissedClawgs);
 }
 
 function dismissTrogdorClawg(session) {
-  const key = trogdorClawgKey(session);
-  if (!key) {
+  const next = dismissTrogdorClawgInMap(state.trogdorDismissedClawgs || {}, session);
+  if (!next.key) {
     return false;
   }
-  state.trogdorDismissedClawgs = {
-    ...(state.trogdorDismissedClawgs || {}),
-    [key]: true,
-  };
-  return true;
+  state.trogdorDismissedClawgs = next.dismissedClawgs;
+  return next.changed;
 }
 
 function trogdorSessionBurnt(sessionOrId) {
@@ -1629,8 +1589,10 @@ function startTrogdorReaderForSession(session, options = {}) {
   const words = trogdorClawgWords(session);
   const key = trogdorClawgKey(session);
   if (options.readAgain && key) {
-    const { [key]: _dismissed, ...remainingDismissed } = state.trogdorDismissedClawgs || {};
-    state.trogdorDismissedClawgs = remainingDismissed;
+    state.trogdorDismissedClawgs = clearTrogdorDismissedClawgInMap(
+      state.trogdorDismissedClawgs || {},
+      session,
+    ).dismissedClawgs;
     setTrogdorClawgReadIndex(session, 0);
   }
   const startIndex = options.readAgain ? 0 : trogdorClawgReadIndex(session);
