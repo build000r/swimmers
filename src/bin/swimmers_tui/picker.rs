@@ -35,6 +35,151 @@ pub(crate) struct PickerState {
     pub(crate) batch_excluded_paths: HashSet<String>,
 }
 
+#[derive(Clone, Copy)]
+pub(crate) enum PickerGroupUpdateMode {
+    Add,
+    Remove,
+    Move,
+}
+
+pub(crate) struct PickerReloadPlan {
+    pub(crate) path: Option<String>,
+    pub(crate) managed_only: bool,
+    pub(crate) group: Option<String>,
+}
+
+struct PickerGroupSelection {
+    path: String,
+    entry_label: String,
+    target: String,
+    memberships: Vec<String>,
+    current_group: Option<String>,
+}
+
+pub(crate) struct PickerGroupMembershipDelta {
+    pub(crate) add: Vec<String>,
+    pub(crate) remove: Vec<String>,
+}
+
+impl PickerGroupMembershipDelta {
+    pub(crate) fn has_changes(&self) -> bool {
+        !self.add.is_empty() || !self.remove.is_empty()
+    }
+}
+
+pub(crate) struct PickerGroupUpdatePlan {
+    pub(crate) path: String,
+    pub(crate) entry_label: String,
+    pub(crate) delta: PickerGroupMembershipDelta,
+    pub(crate) reload_path: String,
+    pub(crate) managed_only: bool,
+    pub(crate) group: Option<String>,
+}
+
+pub(crate) fn picker_managed_only_reload_plan(
+    picker: &PickerState,
+    managed_only: bool,
+) -> Option<PickerReloadPlan> {
+    if picker.managed_only == managed_only && picker.current_group.is_none() {
+        return None;
+    }
+    Some(PickerReloadPlan {
+        path: picker
+            .current_group
+            .is_none()
+            .then(|| picker.current_path.clone()),
+        managed_only,
+        group: None,
+    })
+}
+
+pub(crate) fn picker_group_update_plan(
+    picker: &PickerState,
+    mode: PickerGroupUpdateMode,
+) -> Option<PickerGroupUpdatePlan> {
+    let selection = selected_picker_group_entry(picker)?;
+    let delta = picker_group_membership_delta(mode, &selection);
+    Some(PickerGroupUpdatePlan {
+        path: selection.path,
+        entry_label: selection.entry_label,
+        delta,
+        reload_path: picker.current_path.clone(),
+        managed_only: picker.managed_only,
+        group: picker.current_group.clone(),
+    })
+}
+
+fn selected_picker_group_entry(picker: &PickerState) -> Option<PickerGroupSelection> {
+    let PickerSelection::Entry(index) = picker.selection else {
+        return None;
+    };
+    let target = picker.group_edit_target.clone()?;
+    let entry = picker.entry_at(index)?;
+    Some(PickerGroupSelection {
+        path: picker.path_for_entry(index)?,
+        entry_label: entry.name.clone(),
+        target,
+        memberships: entry.groups.clone(),
+        current_group: picker.current_group.clone(),
+    })
+}
+
+fn picker_group_membership_delta(
+    mode: PickerGroupUpdateMode,
+    selection: &PickerGroupSelection,
+) -> PickerGroupMembershipDelta {
+    PickerGroupMembershipDelta {
+        add: picker_group_memberships_to_add(mode, &selection.target),
+        remove: picker_group_memberships_to_remove(
+            mode,
+            &selection.target,
+            &selection.memberships,
+            selection.current_group.as_deref(),
+        ),
+    }
+}
+
+fn picker_group_memberships_to_add(mode: PickerGroupUpdateMode, target: &str) -> Vec<String> {
+    match mode {
+        PickerGroupUpdateMode::Add | PickerGroupUpdateMode::Move => vec![target.to_string()],
+        PickerGroupUpdateMode::Remove => Vec::new(),
+    }
+}
+
+fn picker_group_memberships_to_remove(
+    mode: PickerGroupUpdateMode,
+    target: &str,
+    memberships: &[String],
+    current_group: Option<&str>,
+) -> Vec<String> {
+    match mode {
+        PickerGroupUpdateMode::Add => Vec::new(),
+        PickerGroupUpdateMode::Remove => vec![target.to_string()],
+        PickerGroupUpdateMode::Move => {
+            picker_group_move_removals(target, memberships, current_group)
+        }
+    }
+}
+
+fn picker_group_move_removals(
+    target: &str,
+    memberships: &[String],
+    current_group: Option<&str>,
+) -> Vec<String> {
+    let mut remove = memberships
+        .iter()
+        .filter(|group| group.as_str() != target)
+        .cloned()
+        .collect::<Vec<_>>();
+    if let Some(current) = current_group {
+        let removes_current = remove.iter().any(|group| group == current);
+        if current != target && !removes_current {
+            remove.push(current.to_string());
+        }
+    }
+    remove
+}
+
 impl PickerState {
     pub(crate) fn new(
         anchor_x: u16,

@@ -190,13 +190,6 @@ pub(crate) struct GroupInputTargets {
     pub(crate) label: String,
 }
 
-#[derive(Clone, Copy)]
-enum PickerGroupUpdateMode {
-    Add,
-    Remove,
-    Move,
-}
-
 pub(crate) enum PendingInteractionResult {
     OpenPicker {
         x: u16,
@@ -2636,18 +2629,13 @@ impl<C: TuiApi> App<C> {
     }
 
     pub(crate) fn picker_set_managed_only(&mut self, managed_only: bool) {
-        let Some(picker) = &self.picker else {
-            return;
-        };
-        if picker.managed_only == managed_only && picker.current_group.is_none() {
-            return;
+        if let Some(plan) = self
+            .picker
+            .as_ref()
+            .and_then(|picker| picker_managed_only_reload_plan(picker, managed_only))
+        {
+            self.picker_reload(plan.path, plan.managed_only, plan.group);
         }
-        let path = if picker.current_group.is_some() {
-            None
-        } else {
-            Some(picker.current_path.clone())
-        };
-        self.picker_reload(path, managed_only, None);
     }
 
     pub(crate) fn picker_set_group(&mut self, name: String) {
@@ -2683,53 +2671,16 @@ impl<C: TuiApi> App<C> {
     }
 
     fn update_selected_picker_entry_groups(&mut self, mode: PickerGroupUpdateMode) {
-        let Some((path, entry_label, add, remove, reload_path, managed_only, group)) =
-            self.picker.as_ref().and_then(|picker| {
-                let PickerSelection::Entry(index) = picker.selection else {
-                    return None;
-                };
-                let target = picker.group_edit_target.clone()?;
-                let entry = picker.entry_at(index)?;
-                let path = picker.path_for_entry(index)?;
-                let memberships = entry.groups.clone();
-                let add = match mode {
-                    PickerGroupUpdateMode::Add | PickerGroupUpdateMode::Move => {
-                        vec![target.clone()]
-                    }
-                    PickerGroupUpdateMode::Remove => Vec::new(),
-                };
-                let remove = match mode {
-                    PickerGroupUpdateMode::Add => Vec::new(),
-                    PickerGroupUpdateMode::Remove => vec![target],
-                    PickerGroupUpdateMode::Move => {
-                        let mut remove = memberships
-                            .into_iter()
-                            .filter(|group| group != &target)
-                            .collect::<Vec<_>>();
-                        if let Some(current) = &picker.current_group {
-                            if current != &target && !remove.iter().any(|group| group == current) {
-                                remove.push(current.clone());
-                            }
-                        }
-                        remove
-                    }
-                };
-                Some((
-                    path,
-                    entry.name.clone(),
-                    add,
-                    remove,
-                    picker.current_path.clone(),
-                    picker.managed_only,
-                    picker.current_group.clone(),
-                ))
-            })
+        let Some(plan) = self
+            .picker
+            .as_ref()
+            .and_then(|picker| picker_group_update_plan(picker, mode))
         else {
             self.set_message("select a directory entry and group target first");
             return;
         };
 
-        if add.is_empty() && remove.is_empty() {
+        if !plan.delta.has_changes() {
             self.set_message("no directory group change selected");
             return;
         }
@@ -2739,10 +2690,18 @@ impl<C: TuiApi> App<C> {
         };
 
         let client = Arc::clone(&self.client);
+        let PickerGroupUpdatePlan {
+            path,
+            entry_label,
+            delta,
+            reload_path,
+            managed_only,
+            group,
+        } = plan;
         self.set_message(format!("updating groups for {entry_label}..."));
         self.runtime.spawn(async move {
             let response = match client
-                .update_dir_group_memberships(&path, add, remove)
+                .update_dir_group_memberships(&path, delta.add, delta.remove)
                 .await
             {
                 Ok(_) => {
