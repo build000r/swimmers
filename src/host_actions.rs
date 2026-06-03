@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::process::{Command as ProcessCommand, Stdio};
+use std::process::{Command as ProcessCommand, Output, Stdio};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -53,13 +53,7 @@ pub struct SystemRepoActionExecutor;
 
 impl RepoActionExecutor for SystemRepoActionExecutor {
     fn execute(&self, repo_root: PathBuf, kind: RepoActionKind) -> io::Result<Option<String>> {
-        match kind {
-            RepoActionKind::Commit => run_commit_grok_for_repo(&repo_root),
-            RepoActionKind::Restart | RepoActionKind::Open => Err(io::Error::new(
-                io::ErrorKind::Unsupported,
-                format!("{kind:?} is not handled through the default executor"),
-            )),
-        }
+        execute_system_repo_action(&repo_root, classify_system_repo_action(kind))
     }
 }
 
@@ -71,35 +65,100 @@ pub struct RestartExecutor {
 
 impl RepoActionExecutor for RestartExecutor {
     fn execute(&self, _repo_root: PathBuf, _kind: RepoActionKind) -> io::Result<Option<String>> {
-        for (service_name, cmd) in &self.commands {
-            let output = ProcessCommand::new("sh")
-                .arg("-c")
-                .arg(cmd)
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .output()?;
-
-            if !output.status.success() {
-                let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-                let detail: String = if stderr.is_empty() {
-                    String::from_utf8_lossy(&output.stdout)
-                        .lines()
-                        .rev()
-                        .find(|line| !line.trim().is_empty())
-                        .unwrap_or("restart failed")
-                        .trim()
-                        .chars()
-                        .take(600)
-                        .collect()
-                } else {
-                    stderr.chars().take(600).collect()
-                };
-                return Err(io::Error::other(format!("{service_name}: {detail}")));
-            }
-        }
-        let names: Vec<&str> = self.commands.iter().map(|(n, _)| n.as_str()).collect();
-        Ok(Some(format!("restarted {}", names.join(", "))))
+        execute_restart_commands(&self.commands)
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SystemRepoAction {
+    Commit,
+    Unsupported(RepoActionKind),
+}
+
+fn classify_system_repo_action(kind: RepoActionKind) -> SystemRepoAction {
+    match kind {
+        RepoActionKind::Commit => SystemRepoAction::Commit,
+        RepoActionKind::Restart | RepoActionKind::Open => SystemRepoAction::Unsupported(kind),
+    }
+}
+
+fn execute_system_repo_action(
+    repo_root: &Path,
+    action: SystemRepoAction,
+) -> io::Result<Option<String>> {
+    match action {
+        SystemRepoAction::Commit => run_commit_grok_for_repo(repo_root),
+        SystemRepoAction::Unsupported(kind) => Err(unsupported_repo_action_error(kind)),
+    }
+}
+
+fn unsupported_repo_action_error(kind: RepoActionKind) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::Unsupported,
+        format!("{kind:?} is not handled through the default executor"),
+    )
+}
+
+fn execute_restart_commands(commands: &[(String, String)]) -> io::Result<Option<String>> {
+    for (service_name, shell_command) in commands {
+        handle_restart_output(service_name, run_restart_command(shell_command)?)?;
+    }
+
+    Ok(Some(restart_success_detail(commands)))
+}
+
+fn run_restart_command(shell_command: &str) -> io::Result<Output> {
+    build_restart_process_command(shell_command).output()
+}
+
+fn build_restart_process_command(shell_command: &str) -> ProcessCommand {
+    let mut command = ProcessCommand::new("sh");
+    command
+        .arg("-c")
+        .arg(shell_command)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    command
+}
+
+fn handle_restart_output(service_name: &str, output: Output) -> io::Result<()> {
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(io::Error::other(format!(
+            "{service_name}: {}",
+            restart_failure_detail(&output)
+        )))
+    }
+}
+
+fn restart_failure_detail(output: &Output) -> String {
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    if stderr.is_empty() {
+        restart_stdout_failure_detail(&output.stdout)
+    } else {
+        stderr.chars().take(600).collect()
+    }
+}
+
+fn restart_stdout_failure_detail(stdout: &[u8]) -> String {
+    String::from_utf8_lossy(stdout)
+        .lines()
+        .rev()
+        .find(|line| !line.trim().is_empty())
+        .unwrap_or("restart failed")
+        .trim()
+        .chars()
+        .take(600)
+        .collect()
+}
+
+fn restart_success_detail(commands: &[(String, String)]) -> String {
+    let names: Vec<&str> = commands
+        .iter()
+        .map(|(service_name, _)| service_name.as_str())
+        .collect();
+    format!("restarted {}", names.join(", "))
 }
 
 #[derive(Clone, Default)]
@@ -792,6 +851,65 @@ mod tests {
             .expect("git init");
         assert!(status.success(), "git init should succeed");
         fs::write(path.join("README.md"), "dirty\n").expect("write readme");
+    }
+
+    #[test]
+    fn classify_system_repo_action_only_allows_commit() {
+        assert_eq!(
+            classify_system_repo_action(RepoActionKind::Commit),
+            SystemRepoAction::Commit
+        );
+        assert_eq!(
+            classify_system_repo_action(RepoActionKind::Restart),
+            SystemRepoAction::Unsupported(RepoActionKind::Restart)
+        );
+        assert_eq!(
+            classify_system_repo_action(RepoActionKind::Open),
+            SystemRepoAction::Unsupported(RepoActionKind::Open)
+        );
+    }
+
+    #[test]
+    fn unsupported_repo_action_error_preserves_status_and_message() {
+        let err = unsupported_repo_action_error(RepoActionKind::Restart);
+
+        assert_eq!(err.kind(), io::ErrorKind::Unsupported);
+        assert_eq!(
+            err.to_string(),
+            "Restart is not handled through the default executor"
+        );
+    }
+
+    #[test]
+    fn restart_failure_detail_prefers_trimmed_stderr() {
+        let output = ProcessCommand::new("sh")
+            .arg("-c")
+            .arg("printf 'ignored stdout\\n'; printf ' stderr wins \\n' >&2; exit 7")
+            .output()
+            .expect("run failing shell");
+
+        assert_eq!(restart_failure_detail(&output), "stderr wins");
+    }
+
+    #[test]
+    fn restart_failure_detail_falls_back_to_last_stdout_line() {
+        let output = ProcessCommand::new("sh")
+            .arg("-c")
+            .arg("printf 'first\\n\\n last detail \\n'; exit 7")
+            .output()
+            .expect("run failing shell");
+
+        assert_eq!(restart_failure_detail(&output), "last detail");
+    }
+
+    #[test]
+    fn restart_success_detail_joins_service_names_in_order() {
+        let commands = vec![
+            ("api".to_string(), "true".to_string()),
+            ("worker".to_string(), "true".to_string()),
+        ];
+
+        assert_eq!(restart_success_detail(&commands), "restarted api, worker");
     }
 
     #[test]
