@@ -18,10 +18,9 @@ import { runSessionRefresh } from "./session_refresh.js";
 import { runWorkbenchWidgetRefresh } from "./workbench_refresh.js";
 import { writeWorkbenchWidgetsHtmlToDom } from "./workbench_dom.js";
 import {
-  MERMAID_PLAN_CONTENT_DISPLAY_MAX_CHARS,
   buildMermaidArtifactView,
-  boundedArtifactText,
   isSafeMermaidPlanFileName,
+  loadMermaidPlanFileWithRuntime,
   mermaidPlanTabClickPlan,
   planFileLabel,
   sanitizeMermaidPlanFiles,
@@ -530,6 +529,18 @@ const workbenchRefreshRuntime = {
   renderWorkbenchWidgets,
   apiMaybeFetch,
   responseJsonOrNull,
+};
+
+const mermaidPlanFileRuntime = {
+  mermaidArtifact: () => state.mermaidArtifact,
+  mermaidPlanContent: el.mermaidPlanContent,
+  currentSession,
+  renderMermaidPlanTabs,
+  setMermaidStatus,
+  syncSheetActionAvailability,
+  apiMaybeFetch,
+  responseJsonOrNull,
+  locationOrigin: () => window.location.origin,
 };
 
 function currentSession() {
@@ -2382,55 +2393,7 @@ async function openMermaidArtifactHost() {
 }
 
 async function loadMermaidPlanFile(name) {
-  const session = currentSession();
-  const fileName = String(name || "").trim();
-  if (!session || !fileName) {
-    return;
-  }
-  if (!isSafeMermaidPlanFileName(fileName) || !state.mermaidArtifact.planFiles.includes(fileName)) {
-    const message = `Plan file name not allowed: ${fileName}`;
-    state.mermaidArtifact.planContent = "";
-    el.mermaidPlanContent.classList.remove("hidden");
-    el.mermaidPlanContent.textContent = message;
-    el.mermaidPlanContent.classList.add("error");
-    setMermaidStatus(message, true);
-    syncSheetActionAvailability();
-    return;
-  }
-
-  state.mermaidArtifact.activePlanFile = fileName;
-  state.mermaidArtifact.planContent = "";
-  renderMermaidPlanTabs();
-  el.mermaidPlanContent.classList.remove("hidden");
-  el.mermaidPlanContent.textContent = "Loading plan file...";
-  try {
-    const url = new URL(`/v1/sessions/${encodeURIComponent(session.session_id)}/plan-file`, window.location.origin);
-    url.searchParams.set("name", fileName);
-    const response = await apiMaybeFetch(url.pathname + url.search);
-    const payload = await responseJsonOrNull(response);
-    const contentResult = boundedArtifactText(
-      payload?.content || "",
-      MERMAID_PLAN_CONTENT_DISPLAY_MAX_CHARS,
-      `Plan file truncated after ${MERMAID_PLAN_CONTENT_DISPLAY_MAX_CHARS / 1024} KiB for browser display.`,
-    );
-    state.mermaidArtifact.planContent = contentResult.text;
-    el.mermaidPlanContent.textContent =
-      contentResult.text || payload?.error || `${fileName} is unavailable.`;
-    el.mermaidPlanContent.classList.toggle("error", Boolean(payload?.error));
-    setMermaidStatus(
-      payload?.error
-        ? `Plan file ${fileName}: ${payload.error}`
-        : contentResult.truncated
-          ? `Plan file loaded: ${fileName} (truncated to ${MERMAID_PLAN_CONTENT_DISPLAY_MAX_CHARS / 1024} KiB for browser display)`
-          : `Plan file loaded: ${fileName}`,
-    );
-  } catch (error) {
-    el.mermaidPlanContent.textContent = `Failed to load ${fileName}: ${error.message}`;
-    el.mermaidPlanContent.classList.add("error");
-    setMermaidStatus(`Failed to load plan file: ${error.message}`, true);
-  } finally {
-    syncSheetActionAvailability();
-  }
+  await loadMermaidPlanFileWithRuntime(name, mermaidPlanFileRuntime);
 }
 
 async function launchCommitGrok() {

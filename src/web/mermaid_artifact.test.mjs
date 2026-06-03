@@ -2,14 +2,80 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  MERMAID_PLAN_CONTENT_DISPLAY_MAX_CHARS,
   MERMAID_PLAN_FILES_MAX,
   boundedArtifactText,
   buildMermaidArtifactView,
   isSafeMermaidPlanFileName,
+  loadMermaidPlanFileWithRuntime,
   mermaidPlanTabClickPlan,
   planFileLabel,
   sanitizeMermaidPlanFiles,
 } from "./mermaid_artifact.js";
+
+function createClassList(initial = []) {
+  const classes = new Set(initial);
+  return {
+    add(...names) {
+      for (const name of names) classes.add(name);
+    },
+    remove(...names) {
+      for (const name of names) classes.delete(name);
+    },
+    toggle(name, force) {
+      const enabled = force === undefined ? !classes.has(name) : Boolean(force);
+      if (enabled) {
+        classes.add(name);
+      } else {
+        classes.delete(name);
+      }
+      return enabled;
+    },
+    contains(name) {
+      return classes.has(name);
+    },
+  };
+}
+
+function createPlanFileRuntime(options = {}) {
+  const calls = [];
+  const artifact = {
+    planFiles: options.planFiles ?? ["plan.md"],
+    activePlanFile: options.activePlanFile ?? "",
+    planContent: options.planContent ?? "stale",
+  };
+  const content = {
+    textContent: options.textContent ?? "stale content",
+    classList: createClassList(options.classes ?? ["hidden", "error"]),
+  };
+  const session = Object.prototype.hasOwnProperty.call(options, "session")
+    ? options.session
+    : { session_id: "sess/0" };
+  const payload = Object.prototype.hasOwnProperty.call(options, "payload")
+    ? options.payload
+    : { content: "loaded plan" };
+  const runtime = {
+    mermaidArtifact: artifact,
+    mermaidPlanContent: content,
+    currentSession: () => {
+      calls.push(["currentSession"]);
+      return session;
+    },
+    renderMermaidPlanTabs: () => calls.push(["renderTabs", artifact.activePlanFile, artifact.planContent]),
+    setMermaidStatus: (message, isError = false) => calls.push(["status", message, Boolean(isError)]),
+    syncSheetActionAvailability: () => calls.push(["sync"]),
+    apiMaybeFetch: async (path) => {
+      calls.push(["fetch", path]);
+      return { path };
+    },
+    responseJsonOrNull: async (response) => {
+      calls.push(["json", response?.path]);
+      return payload;
+    },
+    locationOrigin: options.locationOrigin ?? "http://swimmers.test",
+  };
+  return { artifact, calls, content, runtime };
+}
 
 test("boundedArtifactText appends a truncation marker without changing short text", () => {
   assert.deepEqual(boundedArtifactText("short", 12, "truncated"), {
@@ -72,6 +138,93 @@ test("mermaidPlanTabClickPlan preserves target matching and dataset forwarding",
     type: "load_plan_file",
     planFile: undefined,
   });
+});
+
+test("loadMermaidPlanFileWithRuntime no-ops without a session or trimmed file name", async () => {
+  const withoutSession = createPlanFileRuntime({ session: null });
+  await loadMermaidPlanFileWithRuntime("plan.md", withoutSession.runtime);
+  assert.deepEqual(withoutSession.calls, [["currentSession"]]);
+  assert.equal(withoutSession.artifact.planContent, "stale");
+  assert.equal(withoutSession.content.textContent, "stale content");
+
+  const withoutName = createPlanFileRuntime();
+  await loadMermaidPlanFileWithRuntime("   ", withoutName.runtime);
+  assert.deepEqual(withoutName.calls, [["currentSession"]]);
+  assert.equal(withoutName.artifact.planContent, "stale");
+  assert.equal(withoutName.content.textContent, "stale content");
+});
+
+test("loadMermaidPlanFileWithRuntime rejects unsafe or unlisted names without fetching", async () => {
+  for (const fileName of ["../secret.txt", "notes.md"]) {
+    const env = createPlanFileRuntime({ planFiles: ["plan.md"] });
+    await loadMermaidPlanFileWithRuntime(fileName, env.runtime);
+
+    const message = `Plan file name not allowed: ${fileName}`;
+    assert.equal(env.calls.some(([kind]) => kind === "fetch"), false);
+    assert.equal(env.calls.some(([kind]) => kind === "json"), false);
+    assert.equal(env.artifact.planContent, "");
+    assert.equal(env.content.textContent, message);
+    assert.equal(env.content.classList.contains("hidden"), false);
+    assert.equal(env.content.classList.contains("error"), true);
+    assert.deepEqual(env.calls.slice(-2), [["status", message, true], ["sync"]]);
+  }
+});
+
+test("loadMermaidPlanFileWithRuntime loads valid files with exact path and truncation status", async () => {
+  const hugeContent = "x".repeat(MERMAID_PLAN_CONTENT_DISPLAY_MAX_CHARS + 4096);
+  const env = createPlanFileRuntime({ payload: { content: hugeContent } });
+  env.runtime.apiMaybeFetch = async (path) => {
+    env.calls.push(["fetch", path]);
+    assert.equal(path, "/v1/sessions/sess%2F0/plan-file?name=plan.md");
+    assert.equal(env.artifact.activePlanFile, "plan.md");
+    assert.equal(env.artifact.planContent, "");
+    assert.equal(env.content.textContent, "Loading plan file...");
+    assert.equal(env.content.classList.contains("hidden"), false);
+    assert.deepEqual(env.calls.slice(0, 2), [["currentSession"], ["renderTabs", "plan.md", ""]]);
+    return { path };
+  };
+
+  await loadMermaidPlanFileWithRuntime(" plan.md ", env.runtime);
+
+  assert.equal(env.artifact.planContent.length < hugeContent.length, true);
+  assert.match(env.content.textContent, /Plan file truncated after 128 KiB for browser display\./);
+  assert.equal(env.content.classList.contains("error"), false);
+  assert.deepEqual(env.calls.slice(-2), [
+    ["status", "Plan file loaded: plan.md (truncated to 128 KiB for browser display)", false],
+    ["sync"],
+  ]);
+});
+
+test("loadMermaidPlanFileWithRuntime preserves payload error status copy", async () => {
+  const env = createPlanFileRuntime({ payload: { error: "not readable" } });
+  await loadMermaidPlanFileWithRuntime("plan.md", env.runtime);
+
+  assert.equal(env.artifact.planContent, "");
+  assert.equal(env.content.textContent, "not readable");
+  assert.equal(env.content.classList.contains("error"), true);
+  assert.deepEqual(env.calls.slice(-2), [
+    ["status", "Plan file plan.md: not readable", false],
+    ["sync"],
+  ]);
+});
+
+test("loadMermaidPlanFileWithRuntime reports fetch failures and syncs in finally", async () => {
+  const env = createPlanFileRuntime();
+  env.runtime.apiMaybeFetch = async (path) => {
+    env.calls.push(["fetch", path]);
+    throw new Error("network down");
+  };
+
+  await loadMermaidPlanFileWithRuntime("plan.md", env.runtime);
+
+  assert.equal(env.artifact.planContent, "");
+  assert.equal(env.content.textContent, "Failed to load plan.md: network down");
+  assert.equal(env.content.classList.contains("error"), true);
+  assert.equal(env.calls.some(([kind]) => kind === "json"), false);
+  assert.deepEqual(env.calls.slice(-2), [
+    ["status", "Failed to load plan file: network down", true],
+    ["sync"],
+  ]);
 });
 
 test("buildMermaidArtifactView produces source, plan files, and status text", () => {

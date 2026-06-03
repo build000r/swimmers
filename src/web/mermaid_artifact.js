@@ -63,6 +63,63 @@ export function mermaidPlanTabClickPlan(eventType, target) {
   return { type: "load_plan_file", planFile: button.dataset?.planFile };
 }
 
+export async function loadMermaidPlanFileWithRuntime(name, runtime) {
+  const session = runtime.currentSession();
+  const fileName = String(name || "").trim();
+  if (!session || !fileName) {
+    return;
+  }
+  const artifactState = typeof runtime.mermaidArtifact === "function"
+    ? runtime.mermaidArtifact()
+    : runtime.mermaidArtifact;
+  const contentElement = runtime.mermaidPlanContent;
+  if (!isSafeMermaidPlanFileName(fileName) || !artifactState.planFiles.includes(fileName)) {
+    const message = `Plan file name not allowed: ${fileName}`;
+    artifactState.planContent = "";
+    contentElement.classList.remove("hidden");
+    contentElement.textContent = message;
+    contentElement.classList.add("error");
+    runtime.setMermaidStatus(message, true);
+    runtime.syncSheetActionAvailability();
+    return;
+  }
+
+  artifactState.activePlanFile = fileName;
+  artifactState.planContent = "";
+  runtime.renderMermaidPlanTabs();
+  contentElement.classList.remove("hidden");
+  contentElement.textContent = "Loading plan file...";
+  try {
+    const origin = typeof runtime.locationOrigin === "function" ? runtime.locationOrigin() : runtime.locationOrigin;
+    const url = new URL(`/v1/sessions/${encodeURIComponent(session.session_id)}/plan-file`, origin);
+    url.searchParams.set("name", fileName);
+    const response = await runtime.apiMaybeFetch(url.pathname + url.search);
+    const payload = await runtime.responseJsonOrNull(response);
+    const contentResult = boundedArtifactText(
+      payload?.content || "",
+      MERMAID_PLAN_CONTENT_DISPLAY_MAX_CHARS,
+      `Plan file truncated after ${MERMAID_PLAN_CONTENT_DISPLAY_MAX_CHARS / 1024} KiB for browser display.`,
+    );
+    artifactState.planContent = contentResult.text;
+    contentElement.textContent =
+      contentResult.text || payload?.error || `${fileName} is unavailable.`;
+    contentElement.classList.toggle("error", Boolean(payload?.error));
+    runtime.setMermaidStatus(
+      payload?.error
+        ? `Plan file ${fileName}: ${payload.error}`
+        : contentResult.truncated
+          ? `Plan file loaded: ${fileName} (truncated to ${MERMAID_PLAN_CONTENT_DISPLAY_MAX_CHARS / 1024} KiB for browser display)`
+          : `Plan file loaded: ${fileName}`,
+    );
+  } catch (error) {
+    contentElement.textContent = `Failed to load ${fileName}: ${error.message}`;
+    contentElement.classList.add("error");
+    runtime.setMermaidStatus(`Failed to load plan file: ${error.message}`, true);
+  } finally {
+    runtime.syncSheetActionAvailability();
+  }
+}
+
 export function buildMermaidArtifactView(payload, options = {}) {
   const sourceMaxChars = options.sourceMaxChars ?? MERMAID_SOURCE_DISPLAY_MAX_CHARS;
   const planFilesMax = options.planFilesMax ?? MERMAID_PLAN_FILES_MAX;
