@@ -80,66 +80,18 @@ pub struct OperatorPressureResponse {
 }
 
 pub fn operator_pressure_for_session(session: &SessionSummary) -> OperatorPressure {
-    let primary_cue = primary_action_cue_kind(session);
-    let needs_input = session_has_operator_input_signal(session);
-    let commit_ready =
-        has_action_cue(session, ActionCueKind::CommitReady) || session.commit_candidate;
-
-    let mut score: u16 = 0;
-    if has_action_cue(session, ActionCueKind::AwaitingUser) {
-        score += 55;
-    }
-    if has_action_cue(session, ActionCueKind::CommitReady) {
-        score += 45;
-    }
-    if has_action_cue(session, ActionCueKind::ValidationMissingAfterEdit) {
-        score += 40;
-    }
-    if has_action_cue(session, ActionCueKind::DirtyCheckMissing) {
-        score += 35;
-    }
-    if session.state == SessionState::Attention {
-        score += 45;
-    }
-    if session.state == SessionState::Busy {
-        score += 12;
-    }
-    if session.state == SessionState::Error {
-        score += 55;
-    }
-    if session.rest_state == RestState::Sleeping {
-        score += 35;
-    }
-    if session_idle_agent_can_accept_operator_input(session) {
-        score += 35;
-    }
-    if session.rest_state == RestState::DeepSleep {
-        score += 20;
-    }
-    if session.commit_candidate {
-        score += 25;
-    }
-    if state_evidence_is_unverified(session) {
-        score += 15;
-    }
-    if session.is_stale {
-        score += 10;
-    }
-    if session.transport_health != TransportHealth::Healthy {
-        score += 20;
-    }
-
-    let reason_kind = pressure_reason_kind(session, primary_cue);
-    let score = score.clamp(1, 99) as u8;
+    let signals = OperatorPressureSignals::collect(session);
+    let reason_kind = pressure_reason_kind(session, signals.primary_cue);
+    let score = pressure_score(&signals);
     OperatorPressure {
         score,
         reason: pressure_reason_label(reason_kind).to_string(),
         reason_kind,
-        glyph: pressure_glyph(session, primary_cue).to_string(),
-        tone: pressure_tone(session, score, primary_cue),
-        needs_input,
-        launch_ready: needs_input,
-        commit_ready,
+        glyph: pressure_glyph(session, signals.primary_cue).to_string(),
+        tone: pressure_tone(session, score, signals.primary_cue),
+        needs_input: signals.needs_input,
+        launch_ready: signals.needs_input,
+        commit_ready: signals.commit_ready,
         action_cue_count: session.action_cues.len(),
     }
 }
@@ -232,6 +184,86 @@ fn primary_action_cue_kind(session: &SessionSummary) -> Option<ActionCueKind> {
     ]
     .into_iter()
     .find(|kind| has_action_cue(session, *kind))
+}
+
+#[derive(Debug, Clone, Copy)]
+struct OperatorPressureSignals {
+    primary_cue: Option<ActionCueKind>,
+    needs_input: bool,
+    commit_ready: bool,
+    awaiting_user_cue: bool,
+    commit_ready_cue: bool,
+    validation_missing_after_edit_cue: bool,
+    dirty_check_missing_cue: bool,
+    attention_state: bool,
+    busy_state: bool,
+    error_state: bool,
+    sleeping: bool,
+    idle_agent_input_ready: bool,
+    deep_sleep: bool,
+    commit_candidate: bool,
+    unverified_state_evidence: bool,
+    stale: bool,
+    transport_unhealthy: bool,
+}
+
+impl OperatorPressureSignals {
+    fn collect(session: &SessionSummary) -> Self {
+        let primary_cue = primary_action_cue_kind(session);
+        let commit_ready_cue = has_action_cue(session, ActionCueKind::CommitReady);
+        let commit_candidate = session.commit_candidate;
+        Self {
+            primary_cue,
+            needs_input: session_has_operator_input_signal(session),
+            commit_ready: commit_ready_cue || commit_candidate,
+            awaiting_user_cue: has_action_cue(session, ActionCueKind::AwaitingUser),
+            commit_ready_cue,
+            validation_missing_after_edit_cue: has_action_cue(
+                session,
+                ActionCueKind::ValidationMissingAfterEdit,
+            ),
+            dirty_check_missing_cue: has_action_cue(session, ActionCueKind::DirtyCheckMissing),
+            attention_state: session.state == SessionState::Attention,
+            busy_state: session.state == SessionState::Busy,
+            error_state: session.state == SessionState::Error,
+            sleeping: session.rest_state == RestState::Sleeping,
+            idle_agent_input_ready: session_idle_agent_can_accept_operator_input(session),
+            deep_sleep: session.rest_state == RestState::DeepSleep,
+            commit_candidate,
+            unverified_state_evidence: state_evidence_is_unverified(session),
+            stale: session.is_stale,
+            transport_unhealthy: session.transport_health != TransportHealth::Healthy,
+        }
+    }
+}
+
+fn pressure_score(signals: &OperatorPressureSignals) -> u8 {
+    pressure_score_raw(signals).clamp(1, 99) as u8
+}
+
+fn pressure_score_raw(signals: &OperatorPressureSignals) -> u16 {
+    pressure_contribution(signals.awaiting_user_cue, 55)
+        + pressure_contribution(signals.commit_ready_cue, 45)
+        + pressure_contribution(signals.validation_missing_after_edit_cue, 40)
+        + pressure_contribution(signals.dirty_check_missing_cue, 35)
+        + pressure_contribution(signals.attention_state, 45)
+        + pressure_contribution(signals.busy_state, 12)
+        + pressure_contribution(signals.error_state, 55)
+        + pressure_contribution(signals.sleeping, 35)
+        + pressure_contribution(signals.idle_agent_input_ready, 35)
+        + pressure_contribution(signals.deep_sleep, 20)
+        + pressure_contribution(signals.commit_candidate, 25)
+        + pressure_contribution(signals.unverified_state_evidence, 15)
+        + pressure_contribution(signals.stale, 10)
+        + pressure_contribution(signals.transport_unhealthy, 20)
+}
+
+fn pressure_contribution(present: bool, weight: u16) -> u16 {
+    if present {
+        weight
+    } else {
+        0
+    }
 }
 
 fn has_action_cue(session: &SessionSummary, kind: ActionCueKind) -> bool {
