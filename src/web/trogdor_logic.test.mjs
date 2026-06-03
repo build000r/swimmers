@@ -12,6 +12,7 @@ import {
   saveTrogdorReadProgress,
   serializeTrogdorReadProgress,
   setTrogdorClawgReadIndexForProgress,
+  startTrogdorReaderStateForSession,
   stableTextHash,
   summarizeTrogdorDom,
   trogdorAgentGlyph,
@@ -26,6 +27,8 @@ import {
   trogdorDragonFrameForVector,
   trogdorDragonPose,
   trogdorPrimaryActionCue,
+  trogdorReaderBaseIndexForProgress,
+  trogdorReaderWordIndexForProgress,
   trogdorSessionAwaitingUser,
   trogdorSessionHasReadyClawg,
 } from "./trogdor_logic.js";
@@ -121,6 +124,102 @@ test("Trogdor dismissed clawg helpers set and clear by current clawg key", () =>
   const cleared = clearTrogdorDismissedClawgInMap(dismissed.dismissedClawgs, item);
   assert.equal(cleared.changed, true);
   assert.equal(trogdorClawgDismissedForMap(item, cleared.dismissedClawgs), false);
+});
+
+test("Trogdor reader base index prefers active reader key over persisted progress", () => {
+  const item = session();
+  const key = trogdorClawgKey(item);
+  const progress = { [key]: 3 };
+
+  assert.equal(trogdorReaderBaseIndexForProgress(item, {
+    readerClawgKey: key,
+    readerStartIndex: 1,
+    progress,
+  }), 1);
+  assert.equal(trogdorReaderBaseIndexForProgress(item, {
+    readerClawgKey: "other",
+    readerStartIndex: 1,
+    progress,
+  }), 3);
+  assert.equal(trogdorReaderBaseIndexForProgress(item, {
+    readerClawgKey: key,
+    readerStartIndex: 99,
+    progress,
+  }), 4);
+});
+
+test("Trogdor reader word index advances by elapsed WPM and respects pause/complete states", () => {
+  const item = session();
+  const key = trogdorClawgKey(item);
+  const base = {
+    readerClawgKey: key,
+    readerStartIndex: 1,
+    progress: {},
+    hoveredSessionId: item.sessionId,
+    readerStartedAt: 1_000,
+  };
+
+  assert.equal(trogdorReaderWordIndexForProgress(item, {
+    ...base,
+    wpm: 120,
+    now: 2_100,
+  }), 3);
+  assert.equal(trogdorReaderWordIndexForProgress(item, {
+    ...base,
+    wpm: 120,
+    reading: false,
+    now: 3_000,
+  }), 1);
+  assert.equal(trogdorReaderWordIndexForProgress(item, {
+    ...base,
+    wpm: 120,
+    hoveredSessionId: "",
+    now: 3_000,
+  }), 1);
+  assert.equal(trogdorReaderWordIndexForProgress(session({ clawgText: "   " }), { now: 3_000 }), -1);
+  assert.equal(trogdorReaderWordIndexForProgress(item, {
+    readerClawgKey: key,
+    readerStartIndex: 4,
+    wpm: 120,
+    hoveredSessionId: item.sessionId,
+    now: 3_000,
+  }), 4);
+});
+
+test("Trogdor reader start state resumes progress and read-again resets progress", () => {
+  const item = session();
+  const key = trogdorClawgKey(item);
+  const dismissed = { [key]: true };
+  const progress = { [key]: 3 };
+
+  const resumed = startTrogdorReaderStateForSession(item, {
+    dismissedClawgs: dismissed,
+    progress,
+    now: 10_000,
+  });
+  assert.deepEqual(resumed, {
+    readerClawgKey: key,
+    readerStartIndex: 3,
+    readerStartedAt: 10_000,
+    reading: true,
+    dismissedClawgs: dismissed,
+    progress,
+    progressChanged: false,
+  });
+
+  const reset = startTrogdorReaderStateForSession(item, {
+    readAgain: true,
+    dismissedClawgs: dismissed,
+    progress,
+    now: 12_000,
+  });
+  assert.equal(reset.readerClawgKey, key);
+  assert.equal(reset.readerStartIndex, 0);
+  assert.equal(reset.readerStartedAt, 12_000);
+  assert.equal(reset.reading, true);
+  assert.deepEqual(reset.dismissedClawgs, {});
+  assert.deepEqual(reset.progress, { [key]: 0 });
+  assert.equal(reset.progressChanged, true);
 });
 
 test("Trogdor pressure, reason, glyph, and tone prefer operator pressure when present", () => {

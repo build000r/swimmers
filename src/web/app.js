@@ -35,13 +35,13 @@ import {
 import {
   TROGDOR_DRAGON_TARGET,
   buildTrogdorDomGroups,
-  clearTrogdorDismissedClawgInMap,
   dismissTrogdorClawgInMap,
   loadTrogdorReadProgress,
   rawHasActionCue,
   rawSessionIsSleepingOrDeepSleep,
   saveTrogdorReadProgress,
   setTrogdorClawgReadIndexForProgress,
+  startTrogdorReaderStateForSession,
   summarizeTrogdorDom,
   trogdorClawgKey,
   trogdorClawgDismissedForMap,
@@ -52,6 +52,7 @@ import {
   trogdorDragonPose as buildTrogdorDragonPose,
   trogdorHasActionCue,
   trogdorPrimaryActionCue,
+  trogdorReaderWordIndexForProgress,
   trogdorSessionAwaitingUser,
   trogdorSessionHasReadyClawg,
   trogdorSessionIsSleepingOrDeepSleep,
@@ -1531,32 +1532,17 @@ function trogdorSessionCanRead(session) {
   );
 }
 
-function trogdorReaderBaseIndex(session) {
-  const words = trogdorClawgWords(session);
-  const key = trogdorClawgKey(session);
-  if (key && key === state.trogdorReaderClawgKey) {
-    return clampInt(state.trogdorReaderStartIndex, 0, 0, words.length);
-  }
-  return trogdorClawgReadIndex(session);
-}
-
 function trogdorReaderWordIndex(session, wpm) {
-  const words = trogdorClawgWords(session);
-  if (!words.length) {
-    return -1;
-  }
-  const baseIndex = trogdorReaderBaseIndex(session);
-  if (baseIndex >= words.length) {
-    return words.length;
-  }
-  if (state.trogdorReading === false) {
-    return baseIndex;
-  }
-  const elapsed = state.hoveredTrogdorSessionId
-    ? Math.max(0, performance.now() - state.trogdorReaderStartedAt)
-    : 0;
-  const msPerWord = Math.max(60, 60000 / Math.max(1, wpm));
-  return Math.min(words.length, baseIndex + Math.floor(elapsed / msPerWord));
+  return trogdorReaderWordIndexForProgress(session, {
+    wpm,
+    readerClawgKey: state.trogdorReaderClawgKey,
+    readerStartIndex: state.trogdorReaderStartIndex,
+    progress: state.trogdorReadProgress,
+    reading: state.trogdorReading,
+    hoveredSessionId: state.hoveredTrogdorSessionId,
+    readerStartedAt: state.trogdorReaderStartedAt,
+    now: performance.now(),
+  });
 }
 
 function advanceTrogdorReaderProgressForCurrentHover() {
@@ -1586,20 +1572,21 @@ function advanceTrogdorReaderProgressForCurrentHover() {
 }
 
 function startTrogdorReaderForSession(session, options = {}) {
-  const words = trogdorClawgWords(session);
-  const key = trogdorClawgKey(session);
-  if (options.readAgain && key) {
-    state.trogdorDismissedClawgs = clearTrogdorDismissedClawgInMap(
-      state.trogdorDismissedClawgs || {},
-      session,
-    ).dismissedClawgs;
-    setTrogdorClawgReadIndex(session, 0);
+  const next = startTrogdorReaderStateForSession(session, {
+    readAgain: Boolean(options.readAgain),
+    dismissedClawgs: state.trogdorDismissedClawgs || {},
+    progress: state.trogdorReadProgress || {},
+    now: performance.now(),
+  });
+  state.trogdorDismissedClawgs = next.dismissedClawgs;
+  if (next.progressChanged) {
+    state.trogdorReadProgress = next.progress;
+    saveTrogdorReadProgress(state.trogdorReadProgress);
   }
-  const startIndex = options.readAgain ? 0 : trogdorClawgReadIndex(session);
-  state.trogdorReaderClawgKey = key;
-  state.trogdorReaderStartIndex = clampInt(startIndex, 0, 0, words.length);
-  state.trogdorReaderStartedAt = performance.now();
-  state.trogdorReading = state.trogdorReaderStartIndex < words.length;
+  state.trogdorReaderClawgKey = next.readerClawgKey;
+  state.trogdorReaderStartIndex = next.readerStartIndex;
+  state.trogdorReaderStartedAt = next.readerStartedAt;
+  state.trogdorReading = next.reading;
 }
 
 function markTrogdorSessionsResponded(sessionIds) {

@@ -156,6 +156,90 @@ export function trogdorClawgReadCompleteForProgress(session, progress = {}) {
   return words.length > 0 && trogdorClawgReadIndexForProgress(session, progress) >= words.length;
 }
 
+export function trogdorReaderBaseIndexForProgress(
+  session,
+  {
+    readerClawgKey = "",
+    readerStartIndex = 0,
+    progress = {},
+  } = {},
+) {
+  const words = trogdorClawgWords(session);
+  const key = trogdorClawgKey(session);
+  if (key && key === readerClawgKey) {
+    return clampInt(readerStartIndex, 0, 0, words.length);
+  }
+  return trogdorClawgReadIndexForProgress(session, progress);
+}
+
+export function trogdorReaderWordIndexForProgress(
+  session,
+  {
+    wpm = 200,
+    readerClawgKey = "",
+    readerStartIndex = 0,
+    progress = {},
+    reading = true,
+    hoveredSessionId = "",
+    readerStartedAt = 0,
+    now = 0,
+  } = {},
+) {
+  const words = trogdorClawgWords(session);
+  if (!words.length) {
+    return -1;
+  }
+  const baseIndex = trogdorReaderBaseIndexForProgress(session, {
+    readerClawgKey,
+    readerStartIndex,
+    progress,
+  });
+  if (baseIndex >= words.length) {
+    return words.length;
+  }
+  if (reading === false) {
+    return baseIndex;
+  }
+  const elapsed = hoveredSessionId ? Math.max(0, now - readerStartedAt) : 0;
+  const msPerWord = Math.max(60, 60000 / Math.max(1, wpm));
+  return Math.min(words.length, baseIndex + Math.floor(elapsed / msPerWord));
+}
+
+export function startTrogdorReaderStateForSession(
+  session,
+  {
+    readAgain = false,
+    dismissedClawgs = {},
+    progress = {},
+    now = 0,
+  } = {},
+) {
+  const words = trogdorClawgWords(session);
+  const key = trogdorClawgKey(session);
+  let nextDismissedClawgs = dismissedClawgs || {};
+  let nextProgress = progress || {};
+  let progressChanged = false;
+
+  if (readAgain && key) {
+    nextDismissedClawgs = clearTrogdorDismissedClawgInMap(nextDismissedClawgs, session).dismissedClawgs;
+    const nextReadIndex = setTrogdorClawgReadIndexForProgress(nextProgress, session, 0);
+    nextProgress = nextReadIndex.progress;
+    progressChanged = nextReadIndex.changed;
+  }
+
+  const startIndex = readAgain ? 0 : trogdorClawgReadIndexForProgress(session, nextProgress);
+  const readerStartIndex = clampInt(startIndex, 0, 0, words.length);
+  return {
+    readerClawgKey: key,
+    readerStartIndex,
+    readerStartedAt: now,
+    reading: readerStartIndex < words.length,
+    dismissedClawgs: nextDismissedClawgs,
+    progress: nextProgress,
+    progressChanged,
+  };
+}
+
 export function trogdorClawgDismissedForMap(session, dismissedClawgs = {}) {
   const key = trogdorClawgKey(session);
   return Boolean(key && dismissedClawgs?.[key]);
