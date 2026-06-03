@@ -906,6 +906,89 @@ fn replay_truncated_outcome(
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum BroadcastRemovalReason {
+    Overloaded,
+    Closed,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum BroadcastSendOutcome {
+    Delivered,
+    Remove(BroadcastRemovalReason),
+}
+
+impl BroadcastSendOutcome {
+    fn removal_reason(self) -> Option<BroadcastRemovalReason> {
+        match self {
+            Self::Delivered => None,
+            Self::Remove(reason) => Some(reason),
+        }
+    }
+}
+
+fn classify_broadcast_send_error(
+    err: mpsc::error::TrySendError<OutputFrame>,
+) -> BroadcastSendOutcome {
+    match err {
+        mpsc::error::TrySendError::Full(_) => {
+            BroadcastSendOutcome::Remove(BroadcastRemovalReason::Overloaded)
+        }
+        mpsc::error::TrySendError::Closed(_) => {
+            BroadcastSendOutcome::Remove(BroadcastRemovalReason::Closed)
+        }
+    }
+}
+
+fn try_send_broadcast_frame(
+    tx: &mpsc::Sender<OutputFrame>,
+    frame: &OutputFrame,
+) -> BroadcastSendOutcome {
+    tx.try_send(frame.clone())
+        .map(|()| BroadcastSendOutcome::Delivered)
+        .unwrap_or_else(classify_broadcast_send_error)
+}
+
+fn broadcast_removal_for_subscriber(
+    session_id: &str,
+    client_id: ClientId,
+    tx: &mpsc::Sender<OutputFrame>,
+    frame: &OutputFrame,
+) -> Option<ClientId> {
+    let reason = try_send_broadcast_frame(tx, frame).removal_reason()?;
+    note_broadcast_removal(session_id, client_id, reason);
+    Some(client_id)
+}
+
+fn note_broadcast_removal(session_id: &str, client_id: ClientId, reason: BroadcastRemovalReason) {
+    match reason {
+        BroadcastRemovalReason::Overloaded => note_overloaded_subscriber(session_id, client_id),
+        BroadcastRemovalReason::Closed => note_closed_subscriber(session_id, client_id),
+    }
+}
+
+fn note_overloaded_subscriber(session_id: &str, client_id: ClientId) {
+    warn!(
+        session_id = %session_id,
+        client_id,
+        "subscriber channel full (SESSION_OVERLOADED), dropping client"
+    );
+    crate::metrics::increment_overload(session_id);
+}
+
+fn note_closed_subscriber(session_id: &str, client_id: ClientId) {
+    debug!(session_id = %session_id, client_id, "subscriber channel closed");
+}
+
+fn remove_broadcast_subscribers(
+    subscribers: &mut HashMap<ClientId, mpsc::Sender<OutputFrame>>,
+    client_ids: Vec<ClientId>,
+) {
+    for id in client_ids {
+        subscribers.remove(&id);
+    }
+}
+
 impl SessionActor {
     fn replay_cursor(&self) -> ReplayCursor {
         ReplayCursor {
@@ -1345,30 +1428,14 @@ impl SessionActor {
     /// Send a frame to all subscribers. Detects overloaded subscribers whose
     /// channels are full, and removes them.
     async fn broadcast(&mut self, frame: OutputFrame) {
-        let mut to_remove: Vec<ClientId> = Vec::new();
-
-        for (&client_id, tx) in &self.subscribers {
-            match tx.try_send(frame.clone()) {
-                Ok(()) => {}
-                Err(mpsc::error::TrySendError::Full(_)) => {
-                    warn!(
-                        session_id = %self.session_id,
-                        client_id,
-                        "subscriber channel full (SESSION_OVERLOADED), dropping client"
-                    );
-                    crate::metrics::increment_overload(&self.session_id);
-                    to_remove.push(client_id);
-                }
-                Err(mpsc::error::TrySendError::Closed(_)) => {
-                    debug!(session_id = %self.session_id, client_id, "subscriber channel closed");
-                    to_remove.push(client_id);
-                }
-            }
-        }
-
-        for id in to_remove {
-            self.subscribers.remove(&id);
-        }
+        let to_remove = self
+            .subscribers
+            .iter()
+            .filter_map(|(&client_id, tx)| {
+                broadcast_removal_for_subscriber(&self.session_id, client_id, tx, &frame)
+            })
+            .collect();
+        remove_broadcast_subscribers(&mut self.subscribers, to_remove);
     }
 
     /// Handle a new subscriber, including replay of buffered frames.
@@ -2289,9 +2356,9 @@ mod tests {
         resolve_tmux_terminal_env, run_bounded_tmux_command, should_refresh_cwd_from_tmux,
         should_refresh_tool_from_tmux, state_detector_for_initial_tool, submit_line_fallback_input,
         tmux_input_chunks, visible_output_is_meaningful, write_and_flush_input,
-        write_input_counts_as_activity, ControlEvent, PaneLiveness, ProcessEntriesCache,
-        ProcessEntry, SessionActor, SessionCommand, TmuxInputChunk, CWD_REFRESH_MIN_INTERVAL,
-        PROCESS_ENTRIES_CACHE_TTL, TOOL_REFRESH_MIN_INTERVAL,
+        write_input_counts_as_activity, ControlEvent, OutputFrame, PaneLiveness,
+        ProcessEntriesCache, ProcessEntry, SessionActor, SessionCommand, TmuxInputChunk,
+        CWD_REFRESH_MIN_INTERVAL, PROCESS_ENTRIES_CACHE_TTL, TOOL_REFRESH_MIN_INTERVAL,
     };
     use crate::config::Config;
     use crate::scroll::guard::ScrollGuard;
@@ -2346,6 +2413,13 @@ mod tests {
             last_activity_at: Utc::now(),
             session_started_at: Utc::now(),
             clear_replay_on_first_idle: false,
+        }
+    }
+
+    fn output_frame(seq: u64, data: &[u8]) -> OutputFrame {
+        OutputFrame {
+            seq,
+            data: data.to_vec(),
         }
     }
 
@@ -2495,6 +2569,55 @@ mod tests {
 
         assert_eq!(actor.cols, crate::types::TERMINAL_RESIZE_MAX_COLS);
         assert_eq!(actor.rows, crate::types::TERMINAL_RESIZE_MAX_ROWS);
+    }
+
+    #[tokio::test]
+    async fn broadcast_delivers_frame_to_active_subscribers() {
+        let mut actor = test_actor();
+        let (client_one_tx, mut client_one_rx) = mpsc::channel(1);
+        let (client_two_tx, mut client_two_rx) = mpsc::channel(1);
+        actor.subscribers.insert(11, client_one_tx);
+        actor.subscribers.insert(22, client_two_tx);
+
+        actor.broadcast(output_frame(7, b"hello")).await;
+
+        let client_one_frame = client_one_rx.try_recv().expect("client one frame");
+        assert_eq!(client_one_frame.seq, 7);
+        assert_eq!(client_one_frame.data, b"hello".to_vec());
+        let client_two_frame = client_two_rx.try_recv().expect("client two frame");
+        assert_eq!(client_two_frame.seq, 7);
+        assert_eq!(client_two_frame.data, b"hello".to_vec());
+        assert_eq!(actor.subscribers.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn broadcast_removes_full_subscriber_without_replacing_queued_frame() {
+        let mut actor = test_actor();
+        let (client_tx, mut client_rx) = mpsc::channel(1);
+        client_tx
+            .try_send(output_frame(1, b"queued"))
+            .expect("prefill subscriber channel");
+        actor.subscribers.insert(33, client_tx);
+
+        actor.broadcast(output_frame(2, b"new")).await;
+
+        assert!(!actor.subscribers.contains_key(&33));
+        let queued_frame = client_rx.try_recv().expect("queued frame");
+        assert_eq!(queued_frame.seq, 1);
+        assert_eq!(queued_frame.data, b"queued".to_vec());
+        assert!(client_rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn broadcast_removes_closed_subscriber() {
+        let mut actor = test_actor();
+        let (client_tx, client_rx) = mpsc::channel(1);
+        drop(client_rx);
+        actor.subscribers.insert(44, client_tx);
+
+        actor.broadcast(output_frame(3, b"closed")).await;
+
+        assert!(!actor.subscribers.contains_key(&44));
     }
 
     #[tokio::test]
