@@ -559,50 +559,143 @@ pub(crate) fn handle_split_or_header_click<C: TuiApi>(
     layout: WorkspaceLayout,
     mouse: crossterm::event::MouseEvent,
 ) -> bool {
-    if layout
+    let Some(action) = split_or_header_click_action(app, width, layout, mouse) else {
+        return false;
+    };
+    dispatch_split_or_header_click(app, width, layout, mouse, action);
+    true
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SplitOrHeaderClickAction {
+    SplitDrag,
+    HeaderFilter,
+    SpriteTheme,
+    GhosttyMode,
+    AttentionGroup,
+    NativeStatus,
+}
+
+fn split_or_header_click_action<C: TuiApi>(
+    app: &App<C>,
+    width: u16,
+    layout: WorkspaceLayout,
+    mouse: crossterm::event::MouseEvent,
+) -> Option<SplitOrHeaderClickAction> {
+    let hit_tests: [SplitOrHeaderHitTest<C>; 6] = [
+        split_drag_click_action,
+        header_filter_click_action,
+        sprite_theme_click_action,
+        ghostty_mode_click_action,
+        attention_group_click_action,
+        native_status_click_action,
+    ];
+
+    hit_tests
+        .into_iter()
+        .find_map(|hit_test| hit_test(app, width, layout, mouse))
+}
+
+type SplitOrHeaderHitTest<C> = fn(
+    &App<C>,
+    u16,
+    WorkspaceLayout,
+    crossterm::event::MouseEvent,
+) -> Option<SplitOrHeaderClickAction>;
+
+fn split_drag_click_action<C: TuiApi>(
+    _app: &App<C>,
+    _width: u16,
+    layout: WorkspaceLayout,
+    mouse: crossterm::event::MouseEvent,
+) -> Option<SplitOrHeaderClickAction> {
+    layout
         .split_hitbox
-        .map(|hitbox| hitbox.contains(mouse.column, mouse.row))
-        .unwrap_or(false)
-    {
-        app.start_split_drag(layout, mouse.column);
-        return true;
-    }
-    if header_filter_action_at(app, width, mouse.column, mouse.row).is_some() {
-        app.handle_header_filter_click(width, mouse.column, mouse.row);
-        return true;
-    }
-    if app
-        .sprite_theme_rect(width)
+        .filter(|hitbox| hitbox.contains(mouse.column, mouse.row))
+        .map(|_| SplitOrHeaderClickAction::SplitDrag)
+}
+
+fn header_filter_click_action<C: TuiApi>(
+    app: &App<C>,
+    width: u16,
+    _layout: WorkspaceLayout,
+    mouse: crossterm::event::MouseEvent,
+) -> Option<SplitOrHeaderClickAction> {
+    header_filter_action_at(app, width, mouse.column, mouse.row)
+        .map(|_| SplitOrHeaderClickAction::HeaderFilter)
+}
+
+fn sprite_theme_click_action<C: TuiApi>(
+    app: &App<C>,
+    width: u16,
+    _layout: WorkspaceLayout,
+    mouse: crossterm::event::MouseEvent,
+) -> Option<SplitOrHeaderClickAction> {
+    app.sprite_theme_rect(width)
         .contains(mouse.column, mouse.row)
-    {
-        app.set_sprite_theme_from_click(mouse.column);
-        return true;
+        .then_some(SplitOrHeaderClickAction::SpriteTheme)
+}
+
+fn ghostty_mode_click_action<C: TuiApi>(
+    app: &App<C>,
+    width: u16,
+    _layout: WorkspaceLayout,
+    mouse: crossterm::event::MouseEvent,
+) -> Option<SplitOrHeaderClickAction> {
+    app.ghostty_mode_rect(width)
+        .filter(|rect| rect.contains(mouse.column, mouse.row))
+        .map(|_| SplitOrHeaderClickAction::GhosttyMode)
+}
+
+fn attention_group_click_action<C: TuiApi>(
+    app: &App<C>,
+    width: u16,
+    _layout: WorkspaceLayout,
+    mouse: crossterm::event::MouseEvent,
+) -> Option<SplitOrHeaderClickAction> {
+    app.attention_group_rect(width)
+        .filter(|rect| rect.contains(mouse.column, mouse.row))
+        .map(|_| SplitOrHeaderClickAction::AttentionGroup)
+}
+
+fn native_status_click_action<C: TuiApi>(
+    app: &App<C>,
+    width: u16,
+    _layout: WorkspaceLayout,
+    mouse: crossterm::event::MouseEvent,
+) -> Option<SplitOrHeaderClickAction> {
+    app.native_status_rect(width)
+        .filter(|rect| rect.contains(mouse.column, mouse.row))
+        .map(|_| SplitOrHeaderClickAction::NativeStatus)
+}
+
+fn dispatch_split_or_header_click<C: TuiApi>(
+    app: &mut App<C>,
+    width: u16,
+    layout: WorkspaceLayout,
+    mouse: crossterm::event::MouseEvent,
+    action: SplitOrHeaderClickAction,
+) {
+    match action {
+        SplitOrHeaderClickAction::SplitDrag => {
+            app.start_split_drag(layout, mouse.column);
+        }
+        SplitOrHeaderClickAction::HeaderFilter => {
+            app.handle_header_filter_click(width, mouse.column, mouse.row);
+        }
+        SplitOrHeaderClickAction::SpriteTheme => {
+            app.set_sprite_theme_from_click(mouse.column);
+        }
+        SplitOrHeaderClickAction::GhosttyMode => {
+            app.toggle_ghostty_mode();
+        }
+        SplitOrHeaderClickAction::AttentionGroup => {
+            app.open_attention_group();
+        }
+        SplitOrHeaderClickAction::NativeStatus => {
+            app.toggle_native_app();
+        }
     }
-    if app
-        .ghostty_mode_rect(width)
-        .map(|rect| rect.contains(mouse.column, mouse.row))
-        .unwrap_or(false)
-    {
-        app.toggle_ghostty_mode();
-        return true;
-    }
-    if app
-        .attention_group_rect(width)
-        .map(|rect| rect.contains(mouse.column, mouse.row))
-        .unwrap_or(false)
-    {
-        app.open_attention_group();
-        return true;
-    }
-    if app
-        .native_status_rect(width)
-        .map(|rect| rect.contains(mouse.column, mouse.row))
-        .unwrap_or(false)
-    {
-        app.toggle_native_app();
-        return true;
-    }
-    false
 }
 
 pub(crate) fn handle_workspace_click<C: TuiApi>(
@@ -634,47 +727,135 @@ pub(crate) fn handle_tui_event<C: TuiApi>(
     layout: WorkspaceLayout,
     event: Event,
 ) -> io::Result<bool> {
+    dispatch_tui_event(app, renderer, layout, classify_tui_event(&event))
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TuiEventAction<'a> {
+    Key(KeyEvent),
+    Paste(&'a str),
+    Mouse(MouseEventAction),
+    Resize(u16, u16),
+    Ignore,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum MouseEventAction {
+    LeftDown(crossterm::event::MouseEvent),
+    LeftDrag(crossterm::event::MouseEvent),
+    LeftUp,
+    ScrollIn(crossterm::event::MouseEvent),
+    ScrollOut(crossterm::event::MouseEvent),
+    Ignore,
+}
+
+fn classify_tui_event(event: &Event) -> TuiEventAction<'_> {
     match event {
-        Event::Key(key) if key.kind == KeyEventKind::Press => {
-            Ok(handle_key_event(app, layout, key))
-        }
-        Event::Paste(text) => {
-            app.handle_paste(&text);
+        Event::Key(key) if key.kind == KeyEventKind::Press => TuiEventAction::Key(*key),
+        Event::Paste(text) => TuiEventAction::Paste(text),
+        Event::Mouse(mouse) => TuiEventAction::Mouse(classify_mouse_event(*mouse)),
+        Event::Resize(width, height) => TuiEventAction::Resize(*width, *height),
+        _ => TuiEventAction::Ignore,
+    }
+}
+
+fn classify_mouse_event(mouse: crossterm::event::MouseEvent) -> MouseEventAction {
+    match mouse.kind {
+        MouseEventKind::Down(MouseButton::Left) => MouseEventAction::LeftDown(mouse),
+        MouseEventKind::Drag(MouseButton::Left) => MouseEventAction::LeftDrag(mouse),
+        MouseEventKind::Up(MouseButton::Left) => MouseEventAction::LeftUp,
+        MouseEventKind::ScrollUp => MouseEventAction::ScrollIn(mouse),
+        MouseEventKind::ScrollDown => MouseEventAction::ScrollOut(mouse),
+        _ => MouseEventAction::Ignore,
+    }
+}
+
+fn dispatch_tui_event<C: TuiApi>(
+    app: &mut App<C>,
+    renderer: &mut Renderer,
+    layout: WorkspaceLayout,
+    action: TuiEventAction<'_>,
+) -> io::Result<bool> {
+    match action {
+        TuiEventAction::Key(key) => Ok(handle_key_event(app, layout, key)),
+        TuiEventAction::Paste(text) => {
+            app.handle_paste(text);
             Ok(true)
         }
-        Event::Mouse(mouse) if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) => {
-            handle_mouse_down(app, renderer, layout, mouse);
-            Ok(true)
+        TuiEventAction::Mouse(mouse_action) => {
+            dispatch_mouse_event(app, renderer, layout, mouse_action)
         }
-        Event::Mouse(mouse) if matches!(mouse.kind, MouseEventKind::Drag(MouseButton::Left)) => {
-            if app.drag_split(layout, mouse.column) {
-                return Ok(true);
-            }
-            if app.handle_mermaid_mouse_drag(layout.overview_field, mouse) {
-                return Ok(true);
-            }
-            Ok(true)
-        }
-        Event::Mouse(mouse) if matches!(mouse.kind, MouseEventKind::Up(MouseButton::Left)) => {
-            app.stop_split_drag();
-            app.handle_mermaid_mouse_up();
-            Ok(true)
-        }
-        Event::Mouse(mouse) if matches!(mouse.kind, MouseEventKind::ScrollUp) => {
-            let _ =
-                app.handle_mermaid_scroll(layout.overview_field, mouse, MermaidZoomDirection::In);
-            Ok(true)
-        }
-        Event::Mouse(mouse) if matches!(mouse.kind, MouseEventKind::ScrollDown) => {
-            let _ =
-                app.handle_mermaid_scroll(layout.overview_field, mouse, MermaidZoomDirection::Out);
-            Ok(true)
-        }
-        Event::Resize(width, height) => {
+        TuiEventAction::Resize(width, height) => {
             app.stop_split_drag();
             renderer.manual_resize(width, height)?;
             Ok(true)
         }
-        _ => Ok(true),
+        TuiEventAction::Ignore => Ok(true),
     }
+}
+
+fn dispatch_mouse_event<C: TuiApi>(
+    app: &mut App<C>,
+    renderer: &Renderer,
+    layout: WorkspaceLayout,
+    action: MouseEventAction,
+) -> io::Result<bool> {
+    match action {
+        MouseEventAction::LeftDown(mouse) => handle_left_mouse_down(app, renderer, layout, mouse),
+        MouseEventAction::LeftDrag(mouse) => Ok(handle_left_mouse_drag(app, layout, mouse)),
+        MouseEventAction::LeftUp => Ok(handle_left_mouse_up(app)),
+        MouseEventAction::ScrollIn(mouse) => Ok(handle_mermaid_mouse_scroll(
+            app,
+            layout,
+            mouse,
+            MermaidZoomDirection::In,
+        )),
+        MouseEventAction::ScrollOut(mouse) => Ok(handle_mermaid_mouse_scroll(
+            app,
+            layout,
+            mouse,
+            MermaidZoomDirection::Out,
+        )),
+        MouseEventAction::Ignore => Ok(true),
+    }
+}
+
+fn handle_left_mouse_down<C: TuiApi>(
+    app: &mut App<C>,
+    renderer: &Renderer,
+    layout: WorkspaceLayout,
+    mouse: crossterm::event::MouseEvent,
+) -> io::Result<bool> {
+    handle_mouse_down(app, renderer, layout, mouse);
+    Ok(true)
+}
+
+fn handle_left_mouse_drag<C: TuiApi>(
+    app: &mut App<C>,
+    layout: WorkspaceLayout,
+    mouse: crossterm::event::MouseEvent,
+) -> bool {
+    if app.drag_split(layout, mouse.column) {
+        return true;
+    }
+    if app.handle_mermaid_mouse_drag(layout.overview_field, mouse) {
+        return true;
+    }
+    true
+}
+
+fn handle_left_mouse_up<C: TuiApi>(app: &mut App<C>) -> bool {
+    app.stop_split_drag();
+    app.handle_mermaid_mouse_up();
+    true
+}
+
+fn handle_mermaid_mouse_scroll<C: TuiApi>(
+    app: &mut App<C>,
+    layout: WorkspaceLayout,
+    mouse: crossterm::event::MouseEvent,
+    direction: MermaidZoomDirection,
+) -> bool {
+    let _ = app.handle_mermaid_scroll(layout.overview_field, mouse, direction);
+    true
 }
