@@ -16,6 +16,7 @@ import { runTerminalSurfaceResize } from "./terminal_resize.js";
 import { runGlobalShortcutAction } from "./global_shortcut_dispatch.js";
 import { runSessionRefresh } from "./session_refresh.js";
 import { runWorkbenchWidgetRefresh } from "./workbench_refresh.js";
+import { writeWorkbenchWidgetsHtmlToDom } from "./workbench_dom.js";
 import {
   MERMAID_PLAN_CONTENT_DISPLAY_MAX_CHARS,
   buildMermaidArtifactView,
@@ -1213,59 +1214,14 @@ function selectedWorkbenchWidgets() {
 }
 
 function writeWorkbenchWidgetsHtml(nextHtml) {
-  if (!el.terminalWorkbenchWidgets) {
-    return;
-  }
-  if (state.workbenchWidgets.lastHtml === nextHtml) {
-    // No payload change since the last render — skip the DOM swap entirely so
-    // the operator's scroll position, text selection, and <details> toggles
-    // are not collateral damage of the polling cadence.
-    return;
-  }
-  const scroller = el.terminalWorkbench;
-  const prevScrollTop =
-    scroller && typeof scroller.scrollTop === "number" ? scroller.scrollTop : 0;
-  const openByTitle = new Map();
-  if (typeof el.terminalWorkbenchWidgets.querySelectorAll === "function") {
-    for (const node of el.terminalWorkbenchWidgets.querySelectorAll(
-      "details.workbench-widget",
-    )) {
-      const titleEl =
-        typeof node.querySelector === "function"
-          ? node.querySelector(".workbench-widget-title")
-          : null;
-      const key = titleEl ? titleEl.textContent ?? "" : "";
-      if (key) {
-        openByTitle.set(key, Boolean(node.open));
-      }
-    }
-  }
-  el.terminalWorkbenchWidgets.innerHTML = nextHtml;
-  state.workbenchWidgets.lastHtml = nextHtml;
-  if (
-    openByTitle.size &&
-    typeof el.terminalWorkbenchWidgets.querySelectorAll === "function"
-  ) {
-    for (const node of el.terminalWorkbenchWidgets.querySelectorAll(
-      "details.workbench-widget",
-    )) {
-      const titleEl =
-        typeof node.querySelector === "function"
-          ? node.querySelector(".workbench-widget-title")
-          : null;
-      const key = titleEl ? titleEl.textContent ?? "" : "";
-      if (openByTitle.has(key)) {
-        node.open = openByTitle.get(key);
-      }
-    }
-  }
-  if (scroller && typeof requestAnimationFrame === "function") {
-    requestAnimationFrame(() => {
-      scroller.scrollTop = prevScrollTop;
-    });
-  } else if (scroller) {
-    scroller.scrollTop = prevScrollTop;
-  }
+  writeWorkbenchWidgetsHtmlToDom(nextHtml, {
+    container: el.terminalWorkbenchWidgets,
+    scroller: el.terminalWorkbench,
+    widgets: state.workbenchWidgets,
+    requestAnimationFrame: typeof requestAnimationFrame === "function"
+      ? (callback) => requestAnimationFrame(callback)
+      : null,
+  });
 }
 
 function renderWorkbenchWidgets() {
