@@ -33,6 +33,7 @@ const RENDERED_SURFACE_DRAW_JS_ROUTE: &str = "/rendered_surface_draw.js";
 const INPUT_SUPPORT_JS_ROUTE: &str = "/input_support.js";
 const SURFACE_ACTION_PLANS_JS_ROUTE: &str = "/surface_action_plans.js";
 const SEND_SHEET_JS_ROUTE: &str = "/send_sheet.js";
+const SEND_CONTROLLER_JS_ROUTE: &str = "/send_controller.js";
 const THOUGHT_CONFIG_SHEET_JS_ROUTE: &str = "/thought_config_sheet.js";
 const NATIVE_DESKTOP_SHEET_JS_ROUTE: &str = "/native_desktop_sheet.js";
 const TERMINAL_SURFACE_SETUP_JS_ROUTE: &str = "/terminal_surface_setup.js";
@@ -106,6 +107,7 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route(INPUT_SUPPORT_JS_ROUTE, get(input_support_js))
         .route(SURFACE_ACTION_PLANS_JS_ROUTE, get(surface_action_plans_js))
         .route(SEND_SHEET_JS_ROUTE, get(send_sheet_js))
+        .route(SEND_CONTROLLER_JS_ROUTE, get(send_controller_js))
         .route(THOUGHT_CONFIG_SHEET_JS_ROUTE, get(thought_config_sheet_js))
         .route(NATIVE_DESKTOP_SHEET_JS_ROUTE, get(native_desktop_sheet_js))
         .route(
@@ -664,6 +666,13 @@ async fn surface_action_plans_js() -> Response {
 
 async fn send_sheet_js() -> Response {
     javascript_asset("src/web/send_sheet.js", include_str!("send_sheet.js"))
+}
+
+async fn send_controller_js() -> Response {
+    javascript_asset(
+        "src/web/send_controller.js",
+        include_str!("send_controller.js"),
+    )
 }
 
 async fn thought_config_sheet_js() -> Response {
@@ -2336,6 +2345,16 @@ mod tests {
     #[tokio::test]
     async fn browser_js_asset_handlers_cover_app_module_graph() {
         let assets = [
+            (
+                APP_JS_ROUTE,
+                app_js().await,
+                "from \"./send_controller.js\"",
+            ),
+            (
+                SEND_CONTROLLER_JS_ROUTE,
+                send_controller_js().await,
+                "from \"./send_sheet.js\"",
+            ),
             (
                 APP_JS_ROUTE,
                 app_js().await,

@@ -6,7 +6,7 @@ import {
   terminalComposerControlAction, terminalDestroyStatePatch, terminalFallbackActivationPlan, terminalFallbackFocusPlan, terminalFallbackKeydownPlan, terminalFallbackPastePlan, terminalFallbackPointerFocusPlan, terminalInlineInputKeydownPlan, terminalKeyStripClickExecutorPlan, terminalKeyStripClickPlan, terminalStageCaptureBindings, terminalStageClickPlan, terminalStageFocusExecutorPlan, terminalStageFocusPlan,
   normalizeTerminalZoomValue, terminalAuxiliaryControlsPlan, terminalFallbackScrollPlan, terminalFallbackTextScrollPlan, terminalInputDockPlan, terminalLiveFrameFallbackPlan, terminalPaintProbeSchedulePlan, terminalPaintVerificationPlan, terminalPendingByteBufferPlan, terminalPresentationPlan, terminalStageKeydownPlan, terminalStageMouseDownPlan, terminalStageMouseMovePlan, terminalStageMouseUpPlan, terminalStagePasteExecutorPlan, terminalStagePastePlan, terminalStageTouchEndPlan, terminalStageWheelPlan, terminalSurfaceRendererPlan, terminalSurfaceSessionPlan, terminalToolsAvailabilityPlan, terminalZoomControlsPlan, terminalZoomLoadValue, terminalZoomPercentLabel, terminalZoomPersistencePlan,
 } from "./input_support.js";
-import { sendHistoryClickPlan, sendSheetFailureStatus, sendSheetSubmitPlan, sendSheetSuccessStatus } from "./send_sheet.js";
+import { createSendController } from "./send_controller.js";
 import {
   createThoughtConfigSheetController,
 } from "./thought_config_sheet.js";
@@ -2996,194 +2996,47 @@ function cellOffset(cell) {
   return cell.y * Math.max(1, state.currentCols) + cell.x;
 }
 
-async function sendLine(text) {
-  return sendLineToSession(state.selectedSessionId, text);
-}
+const sendController = createSendController({
+  state,
+  el,
+  apiFetch,
+  responseJsonOrNull,
+  currentSession,
+  normalizeSessionId,
+  nextInputMessageId,
+  updateInputDeliveryStatus,
+  sendTerminalText,
+  setTerminalInputEcho,
+  markTrogdorSessionsResponded,
+  setUtilityStatus,
+  closeSheets,
+  openSheet,
+  refreshSessions,
+  syncSheetActionAvailability,
+  escapeHtml,
+  storage: localStorage,
+  WebSocketClass: WebSocket,
+  sendHistoryKey: SEND_HISTORY_KEY,
+  sendHistoryLimit: SEND_HISTORY_LIMIT,
+  ElementClass: Element,
+});
 
-function loadSendHistory() {
-  try {
-    const parsed = JSON.parse(localStorage.getItem(SEND_HISTORY_KEY) || "[]");
-    state.sendHistory = Array.isArray(parsed)
-      ? parsed.map((item) => String(item || "")).filter(Boolean).slice(0, SEND_HISTORY_LIMIT)
-      : [];
-  } catch (_error) {
-    state.sendHistory = [];
-  }
-}
-
-function saveSendHistory() {
-  localStorage.setItem(SEND_HISTORY_KEY, JSON.stringify(state.sendHistory.slice(0, SEND_HISTORY_LIMIT)));
-}
-
-function rememberSendHistory(text) {
-  const normalized = String(text || "").trim();
-  if (!normalized) {
-    return;
-  }
-  state.sendHistory = [
-    normalized,
-    ...state.sendHistory.filter((item) => item !== normalized),
-  ].slice(0, SEND_HISTORY_LIMIT);
-  saveSendHistory();
-  renderSendHistory();
-}
-
-function renderSendHistory() {
-  if (!el.sendHistory) {
-    return;
-  }
-  const items = state.sendHistory.slice(0, 6);
-  el.sendHistory.innerHTML = items
-    .map((item, index) => {
-      const label = item.replace(/\s+/g, " ").trim();
-      return `<button class="ghost-button" type="button" data-send-history-index="${index}" title="${escapeHtml(label)}">${escapeHtml(label.length > 42 ? `${label.slice(0, 39)}...` : label)}</button>`;
-    })
-    .join("");
-}
-
-async function sendLineToSession(sessionId, text) {
-  const targetSessionId = normalizeSessionId(sessionId);
-  if (!text || !targetSessionId) {
-    return;
-  }
-
-  if (
-    state.ws &&
-    state.ws.readyState === WebSocket.OPEN &&
-    !state.readOnly &&
-    state.selectedSessionId === targetSessionId
-  ) {
-    const clientMessageId = nextInputMessageId();
-    state.pendingInputMessages.set(clientMessageId, { text, status: "pending", detail: "" });
-    updateInputDeliveryStatus(clientMessageId, "pending");
-    state.ws.send(JSON.stringify({ type: "submit_line", data: text, clientMessageId }));
-    markTrogdorSessionsResponded([targetSessionId]);
-    return;
-  }
-
-  const response = await apiFetch(`/v1/sessions/${encodeURIComponent(targetSessionId)}/input`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ text, submit: true }),
-  });
-  const body = await responseJsonOrNull(response);
-  if (body?.delivered === false) {
-    throw new Error(body.message || "input delivery failed");
-  }
-  setTerminalInputEcho(`sent: ${text}`);
-  markTrogdorSessionsResponded([targetSessionId]);
-}
-
-async function sendRawTextToSession(sessionId, text) {
-  const targetSessionId = normalizeSessionId(sessionId);
-  if (!text || !targetSessionId) {
-    return;
-  }
-  if (
-    state.ws &&
-    state.ws.readyState === WebSocket.OPEN &&
-    !state.readOnly &&
-    state.selectedSessionId === targetSessionId
-  ) {
-    sendTerminalText(text);
-    return;
-  }
-  const response = await apiFetch(`/v1/sessions/${encodeURIComponent(targetSessionId)}/input`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ text }),
-  });
-  const body = await responseJsonOrNull(response);
-  if (body?.delivered === false) {
-    throw new Error(body.message || "input delivery failed");
-  }
-}
-
-function deliveredGroupInputSessionIds(body) {
-  if (!Array.isArray(body?.results)) {
-    return [];
-  }
-  return body.results
-    .filter((result) => result?.ok)
-    .map((result) => normalizeSessionId(result?.session_id))
-    .filter(Boolean);
-}
-
-async function sendGroupLine(sessionIds, text) {
-  const ids = Array.isArray(sessionIds)
-    ? sessionIds.map(normalizeSessionId).filter(Boolean)
-    : [];
-  if (!text || ids.length < 2) {
-    return;
-  }
-
-  const response = await apiFetch("/v1/sessions/group-input", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ session_ids: ids, text }),
-  });
-  const body = await responseJsonOrNull(response).catch(() => null);
-  const deliveredSessionIds = deliveredGroupInputSessionIds(body);
-  markTrogdorSessionsResponded(deliveredSessionIds);
-
-  const resultTotal = Array.isArray(body?.results) ? body.results.length : ids.length;
-  return {
-    delivered: deliveredSessionIds.length,
-    skipped: Math.max(0, resultTotal - deliveredSessionIds.length),
-    total: resultTotal,
-    deliveredSessionIds,
-    results: Array.isArray(body?.results) ? body.results : [],
-  };
-}
-
-function sendModeValue() {
-  return String(el.sendMode?.value || "line") === "paste" ? "paste" : "line";
-}
-
-function updateSendHint() {
-  if (!el.sendHint) {
-    return;
-  }
-  if (state.sendTarget?.type === "group") {
-    el.sendHint.textContent = "Batch sends submit the shared text to every ready agent.";
-    return;
-  }
-  el.sendHint.textContent = sendModeValue() === "paste"
-    ? "Paste only preserves text exactly for the selected live terminal."
-    : "Send submits the text to the selected agent prompt.";
-}
-
-async function handleSendFormSubmit(event) {
-  event.preventDefault();
-  const plan = sendSheetSubmitPlan({
-    readOnly: state.readOnly,
-    text: el.sendInput.value,
-    sendTarget: state.sendTarget,
-    selectedSessionId: state.selectedSessionId,
-    sendMode: sendModeValue(),
-  });
-  if (plan.type === "ignore") {
-    return false;
-  }
-  try {
-    rememberSendHistory(plan.text);
-    const result = plan.type === "group"
-      ? await sendGroupLine(plan.sessionIds, plan.text)
-      : await (plan.type === "paste" ? sendRawTextToSession : sendLineToSession)(plan.sessionId, plan.text);
-    const status = sendSheetSuccessStatus(plan, result);
-    setUtilityStatus(status.label, status.muted, status.ttlMs);
-    el.sendInput.value = "";
-    state.sendTarget = null;
-    closeSheets();
-    await refreshSessions();
-    return true;
-  } catch (error) {
-    const status = sendSheetFailureStatus(error);
-    setUtilityStatus(status.label, status.muted, status.ttlMs);
-    syncSheetActionAvailability();
-    return false;
-  }
-}
+const {
+  handleSendFormSubmit,
+  handleSendHistoryClick,
+  loadSendHistory,
+  openSendSheet,
+  rememberSendHistory,
+  renderSendHistory,
+  saveSendHistory,
+  sendGroupLine,
+  sendLine,
+  sendLineToSession,
+  sendModeValue,
+  sendRawTextToSession,
+  sendTargetReady,
+  updateSendHint,
+} = sendController;
 
 async function handleAuthTokenButtonAction(action) {
   const plan = authTokenButtonPlan(action, el.tokenInput.value);
@@ -3195,40 +3048,6 @@ async function handleAuthTokenButtonAction(action) {
   }
   closeSheets();
   return refreshSessions().then(() => true);
-}
-
-function sendTargetReady() {
-  if (state.readOnly) {
-    return false;
-  }
-  if (!state.sendTarget) {
-    return Boolean(currentSession());
-  }
-  if (state.sendTarget.type === "group") {
-    return Array.isArray(state.sendTarget.sessionIds) && state.sendTarget.sessionIds.length >= 2;
-  }
-  return Boolean(normalizeSessionId(state.sendTarget.sessionId));
-}
-
-function openSendSheet(target = null) {
-  state.sendTarget = target;
-  const label = target?.label || currentSession()?.tmux_name || currentSession()?.session_id || "selected session";
-  if (el.sendSheetTitle) {
-    el.sendSheetTitle.textContent = target?.type === "group" ? "Send Batch" : "Send To Terminal";
-  }
-  if (el.sendMode) {
-    el.sendMode.value = "line";
-    el.sendMode.disabled = target?.type === "group";
-  }
-  el.sendInput.value = "";
-  el.sendInput.placeholder =
-    target?.type === "group"
-      ? `Send to ${Array.isArray(target.sessionIds) ? target.sessionIds.length : 0} batch agents.`
-      : `Send to ${label}.`;
-  renderSendHistory();
-  updateSendHint();
-  openSheet("send");
-  syncSheetActionAvailability();
 }
 
 async function refreshSnapshotFallback() {
@@ -4105,8 +3924,6 @@ function handleNativeAppChange() { nativeDesktopSheet.handleNativeAppChange(); }
 function handleNativeModeChange() { nativeDesktopSheet.handleNativeModeChange(); }
 
 function handleSendCloseButtonClick() { state.sendTarget = null; closeSheets(); }
-
-function handleSendHistoryClick(event) { const target = event.target instanceof Element ? event.target : null; const plan = sendHistoryClickPlan(event.type, target, state.sendHistory); if (plan.type === "use_history") { el.sendInput.value = plan.text; el.sendInput.focus(); } }
 
 function handleSaveTokenButtonClick() { return handleAuthTokenButtonAction("save"); }
 
