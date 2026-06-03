@@ -1642,11 +1642,7 @@ impl<C: TuiApi> App<C> {
 
     fn apply_pending_interaction_result(&mut self, result: PendingInteractionResult) {
         match result {
-            PendingInteractionResult::OpenPicker {
-                x,
-                y,
-                response,
-            } => match response {
+            PendingInteractionResult::OpenPicker { x, y, response } => match response {
                 Ok(response) => {
                     let mut picker = PickerState::new(
                         x,
@@ -2585,11 +2581,7 @@ impl<C: TuiApi> App<C> {
         self.set_message("loading directories...");
         self.runtime.spawn(async move {
             let response = client.list_dirs(None, true, None).await;
-            let _ = tx.send(PendingInteractionResult::OpenPicker {
-                x,
-                y,
-                response,
-            });
+            let _ = tx.send(PendingInteractionResult::OpenPicker { x, y, response });
         });
     }
 

@@ -495,7 +495,7 @@ mod tests {
             &script_path,
             "#!/bin/sh\nprintf R >\"/dev/fd/${SWIMMERS_READY_FD}\"\n",
         )
-            .expect("write ready script");
+        .expect("write ready script");
 
         let mut permissions = fs::metadata(&script_path)
             .expect("ready script metadata")
