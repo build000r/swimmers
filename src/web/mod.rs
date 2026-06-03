@@ -41,6 +41,7 @@ const GLOBAL_SHORTCUT_DISPATCH_JS_ROUTE: &str = "/global_shortcut_dispatch.js";
 const SESSION_REFRESH_JS_ROUTE: &str = "/session_refresh.js";
 const AGENT_CONTEXT_REFRESH_JS_ROUTE: &str = "/agent_context_refresh.js";
 const MERMAID_ARTIFACT_JS_ROUTE: &str = "/mermaid_artifact.js";
+const MERMAID_ARTIFACT_CONTROLLER_JS_ROUTE: &str = "/mermaid_artifact_controller.js";
 const TERMINAL_SAFETY_JS_ROUTE: &str = "/terminal_safety.js";
 const TERMINAL_PROTOCOL_JS_ROUTE: &str = "/terminal_protocol.js";
 const DIR_BROWSER_JS_ROUTE: &str = "/dir_browser.js";
@@ -121,6 +122,10 @@ pub fn routes() -> Router<Arc<AppState>> {
             get(agent_context_refresh_js),
         )
         .route(MERMAID_ARTIFACT_JS_ROUTE, get(mermaid_artifact_js))
+        .route(
+            MERMAID_ARTIFACT_CONTROLLER_JS_ROUTE,
+            get(mermaid_artifact_controller_js),
+        )
         .route(TERMINAL_SAFETY_JS_ROUTE, get(terminal_safety_js))
         .route(TERMINAL_PROTOCOL_JS_ROUTE, get(terminal_protocol_js))
         .route(DIR_BROWSER_JS_ROUTE, get(dir_browser_js))
@@ -709,6 +714,13 @@ async fn mermaid_artifact_js() -> Response {
     javascript_asset(
         "src/web/mermaid_artifact.js",
         include_str!("mermaid_artifact.js"),
+    )
+}
+
+async fn mermaid_artifact_controller_js() -> Response {
+    javascript_asset(
+        "src/web/mermaid_artifact_controller.js",
+        include_str!("mermaid_artifact_controller.js"),
     )
 }
 
@@ -2323,6 +2335,11 @@ mod tests {
                 "from \"./native_desktop_sheet.js\"",
             ),
             (
+                APP_JS_ROUTE,
+                app_js().await,
+                "from \"./mermaid_artifact_controller.js\"",
+            ),
+            (
                 RENDERED_SURFACE_JS_ROUTE,
                 rendered_surface_js().await,
                 "export function buildSurfaceFrame",
@@ -2386,6 +2403,11 @@ mod tests {
                 MERMAID_ARTIFACT_JS_ROUTE,
                 mermaid_artifact_js().await,
                 "export function boundedArtifactText",
+            ),
+            (
+                MERMAID_ARTIFACT_CONTROLLER_JS_ROUTE,
+                mermaid_artifact_controller_js().await,
+                "export function createMermaidArtifactController",
             ),
             (
                 TERMINAL_SAFETY_JS_ROUTE,
@@ -2578,7 +2600,9 @@ mod tests {
     #[test]
     fn app_js_exposes_terminal_viewer_ergonomics() {
         let js = include_str!("app.js");
+        let agent_context_refresh = include_str!("agent_context_refresh.js");
         let workbench_render = include_str!("workbench_render.js");
+        let mermaid_artifact_controller = include_str!("mermaid_artifact_controller.js");
         assert!(js.contains("TERMINAL_ZOOM_STORAGE_KEY"));
         assert!(js.contains("setZoom"));
         assert!(js.contains("focusMobileKeyboard"));
@@ -2592,14 +2616,14 @@ mod tests {
         assert!(js.contains("function refreshWorkbenchWidgetsForSelectedSession"));
         assert!(workbench_render.contains("export function operatorPressureSummary"));
         assert!(workbench_render.contains("Tool calls"));
-        assert!(js.contains("/agent-context"));
-        assert!(js.contains("/pane-tail"));
-        assert!(js.contains("/transcript"));
+        assert!(agent_context_refresh.contains("/agent-context"));
+        assert!(workbench_render.contains("/pane-tail"));
+        assert!(workbench_render.contains("/transcript"));
         assert!(workbench_render.contains("function renderTurnsPanel"));
         assert!(js.contains("function flushPendingTerminalBytes"));
         assert!(workbench_render.contains("Post-turn JSONL"));
-        assert!(js.contains("/mermaid-artifact"));
-        assert!(js.contains("/git-diff"));
+        assert!(mermaid_artifact_controller.contains("/mermaid-artifact"));
+        assert!(workbench_render.contains("/git-diff"));
         assert!(workbench_render.contains("function renderDiffHtml"));
         assert!(js.contains("function syncTerminalWorkbench()"));
     }

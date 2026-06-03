@@ -12,6 +12,9 @@ import {
   planFileLabel,
   sanitizeMermaidPlanFiles,
 } from "./mermaid_artifact.js";
+import {
+  createMermaidArtifactController,
+} from "./mermaid_artifact_controller.js";
 
 function createClassList(initial = []) {
   const classes = new Set(initial);
@@ -33,6 +36,23 @@ function createClassList(initial = []) {
     },
     contains(name) {
       return classes.has(name);
+    },
+  };
+}
+
+function createMockElement(id) {
+  return {
+    id,
+    type: "",
+    className: "",
+    dataset: {},
+    textContent: "",
+    innerHTML: "",
+    children: [],
+    classList: createClassList(),
+    appendChild(child) {
+      this.children.push(child);
+      return child;
     },
   };
 }
@@ -250,4 +270,97 @@ test("buildMermaidArtifactView produces source, plan files, and status text", ()
   assert.match(view.status, /plan files: 1 unsafe name hidden/);
   assert.match(view.status, /error: render warning/);
   assert.equal(planFileLabel("alpha-plan.mmdx"), "alpha plan");
+});
+
+test("Mermaid artifact controller refresh owns blob lifecycle and DOM preview", async () => {
+  const calls = [];
+  const state = {
+    mermaidArtifact: {
+      loading: false,
+      sessionId: null,
+      artifact: null,
+      svgUrl: "blob:old",
+      source: "stale",
+      planFiles: [],
+      activePlanFile: "",
+      planContent: "",
+      status: "",
+      error: "",
+    },
+  };
+  const el = {
+    mermaidSummary: createMockElement("summary"),
+    mermaidPreview: createMockElement("preview"),
+    mermaidSource: createMockElement("source"),
+    mermaidPlanTabs: createMockElement("tabs"),
+    mermaidPlanContent: createMockElement("content"),
+  };
+  const controller = createMermaidArtifactController({
+    state,
+    el,
+    currentSession: () => ({ session_id: "sess/0" }),
+    apiFetch: async () => {
+      throw new Error("not used");
+    },
+    apiMaybeFetch: async (path) => {
+      calls.push(["fetch", path]);
+      if (path.endsWith("/mermaid-artifact")) {
+        return { kind: "artifact" };
+      }
+      if (path.endsWith("/mermaid-artifact/svg")) {
+        return {
+          async blob() {
+            calls.push(["blob"]);
+            return { kind: "svg" };
+          },
+        };
+      }
+      return null;
+    },
+    responseJsonOrNull: async (response) => {
+      calls.push(["json", response?.kind]);
+      return {
+        available: true,
+        path: "/tmp/diagram.mmd",
+        updated_at: "2026-06-03T00:00:00Z",
+        source: "graph TD\nA-->B",
+        plan_files: ["plan.md"],
+      };
+    },
+    syncSheetActionAvailability: () => calls.push(["sync"]),
+    formatTime: (value) => `formatted ${value}`,
+    documentRef: { createElement: createMockElement },
+    ElementClass: null,
+    URLImpl: {
+      revokeObjectURL: (url) => calls.push(["revoke", url]),
+      createObjectURL: (blob) => {
+        calls.push(["create", blob.kind]);
+        return "blob:new";
+      },
+    },
+    locationOrigin: "http://swimmers.test",
+  });
+
+  await controller.refresh();
+
+  assert.equal(state.mermaidArtifact.loading, false);
+  assert.equal(state.mermaidArtifact.sessionId, "sess/0");
+  assert.equal(state.mermaidArtifact.svgUrl, "blob:new");
+  assert.equal(state.mermaidArtifact.source, "graph TD\nA-->B");
+  assert.deepEqual(state.mermaidArtifact.planFiles, ["plan.md"]);
+  assert.match(el.mermaidSummary.textContent, /path: \/tmp\/diagram\.mmd/);
+  assert.match(el.mermaidSummary.textContent, /updated: formatted 2026-06-03T00:00:00Z/);
+  assert.equal(el.mermaidPreview.children[0].src, "blob:new");
+  assert.equal(el.mermaidPreview.children[0].alt, "Mermaid artifact preview");
+  assert.equal(el.mermaidPlanTabs.children[0].dataset.planFile, "plan.md");
+  assert.deepEqual(calls, [
+    ["revoke", "blob:old"],
+    ["fetch", "/v1/sessions/sess%2F0/mermaid-artifact"],
+    ["json", "artifact"],
+    ["fetch", "/v1/sessions/sess%2F0/mermaid-artifact/svg"],
+    ["blob"],
+    ["create", "svg"],
+    ["sync"],
+    ["sync"],
+  ]);
 });

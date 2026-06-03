@@ -25,13 +25,12 @@ import { runAgentContextRefresh } from "./agent_context_refresh.js";
 import { runWorkbenchWidgetRefresh } from "./workbench_refresh.js";
 import { writeWorkbenchWidgetsHtmlToDom } from "./workbench_dom.js";
 import {
-  buildMermaidArtifactView,
   isSafeMermaidPlanFileName,
-  loadMermaidPlanFileWithRuntime,
-  mermaidPlanTabClickPlan,
-  planFileLabel,
   sanitizeMermaidPlanFiles,
 } from "./mermaid_artifact.js";
+import {
+  createMermaidArtifactController,
+} from "./mermaid_artifact_controller.js";
 import {
   MAX_TERMINAL_PASTE_BYTES,
   frankenTermLinkPolicy,
@@ -539,17 +538,20 @@ const workbenchRefreshRuntime = {
   responseJsonOrNull,
 };
 
-const mermaidPlanFileRuntime = {
-  mermaidArtifact: () => state.mermaidArtifact,
-  mermaidPlanContent: el.mermaidPlanContent,
+const mermaidArtifactController = createMermaidArtifactController({
+  state,
+  el,
   currentSession,
-  renderMermaidPlanTabs,
-  setMermaidStatus,
-  syncSheetActionAvailability,
+  apiFetch,
   apiMaybeFetch,
   responseJsonOrNull,
+  syncSheetActionAvailability,
+  formatTime,
+  documentRef: document,
+  ElementClass: Element,
+  URLImpl: globalThis.URL,
   locationOrigin: () => window.location.origin,
-};
+});
 
 function currentSession() {
   return state.sessions.find((session) => session.session_id === state.selectedSessionId) ?? null;
@@ -1645,15 +1647,6 @@ function setDirStatus(message, isError = false) {
   }
 }
 
-function setMermaidStatus(message, isError = false) {
-  state.mermaidArtifact.status = message;
-  state.mermaidArtifact.error = isError ? message : "";
-  if (el.mermaidSummary) {
-    el.mermaidSummary.textContent = message || "";
-    el.mermaidSummary.classList.toggle("error", Boolean(isError));
-  }
-}
-
 const dirBrowserController = createDirBrowserController({
   state,
   el,
@@ -1699,51 +1692,7 @@ const {
   warmDirBrowserOnStartup,
 } = dirBrowserController;
 
-function renderMermaidArtifact(payload) {
-  state.mermaidArtifact.artifact = payload;
-  const view = buildMermaidArtifactView(payload, { formatTime });
-  state.mermaidArtifact.source = view.source;
-  const planFiles = view.planFiles;
-  state.mermaidArtifact.planFiles = planFiles;
-  state.mermaidArtifact.activePlanFile = "";
-  state.mermaidArtifact.planContent = "";
-  el.mermaidSource.textContent = view.source || "Mermaid source unavailable.";
-  el.mermaidPreview.innerHTML = "";
-  el.mermaidPlanContent.textContent = "";
-  el.mermaidPlanContent.classList.add("hidden");
-  el.mermaidPlanContent.classList.remove("error");
-
-  if (view.available && state.mermaidArtifact.svgUrl) {
-    const img = document.createElement("img");
-    img.src = state.mermaidArtifact.svgUrl;
-    img.alt = "Mermaid artifact preview";
-    img.className = "mermaid-preview-image";
-    el.mermaidPreview.appendChild(img);
-  }
-
-  renderMermaidPlanTabs();
-  setMermaidStatus(view.status);
-  syncSheetActionAvailability();
-}
-
-function renderMermaidPlanTabs() {
-  const files = state.mermaidArtifact.planFiles;
-  el.mermaidPlanTabs.innerHTML = "";
-  el.mermaidPlanTabs.classList.toggle("hidden", !files.length);
-  if (!files.length) {
-    return;
-  }
-
-  for (const name of files) {
-    const button = document.createElement("button");
-    button.type = "button";
-    button.className = "ghost-button";
-    button.dataset.planFile = name;
-    button.textContent = planFileLabel(name);
-    button.classList.toggle("active", name === state.mermaidArtifact.activePlanFile);
-    el.mermaidPlanTabs.appendChild(button);
-  }
-}
+function renderMermaidArtifact(payload) { mermaidArtifactController.renderArtifact(payload); }
 
 function escapeHtml(text) {
   return String(text || "").replace(/[&<>"']/g, (char) => {
@@ -1832,74 +1781,11 @@ async function refreshThoughtConfig() { await thoughtConfigSheet.refresh(); }
 
 async function refreshNativeStatus() { await nativeDesktopSheet.refreshNativeStatus(); }
 
-async function refreshMermaidArtifact() {
-  const session = currentSession();
-  if (!session) {
-    return;
-  }
+async function refreshMermaidArtifact() { await mermaidArtifactController.refresh(); }
 
-  state.mermaidArtifact.loading = true;
-  state.mermaidArtifact.sessionId = session.session_id;
-  state.mermaidArtifact.artifact = null;
-  clearMermaidSvgUrl();
-  state.mermaidArtifact.source = "";
-  el.mermaidPreview.innerHTML = "";
-  el.mermaidSource.textContent = "";
-  try {
-    const artifactResponse = await apiMaybeFetch(`/v1/sessions/${encodeURIComponent(session.session_id)}/mermaid-artifact`);
-    const artifact = await responseJsonOrNull(artifactResponse);
-    state.mermaidArtifact.artifact = artifact;
-    if (artifact?.available) {
-      const svgResponse = await apiMaybeFetch(`/v1/sessions/${encodeURIComponent(session.session_id)}/mermaid-artifact/svg`);
-      if (svgResponse) {
-        setMermaidSvgUrl(URL.createObjectURL(await svgResponse.blob()));
-      } else {
-        clearMermaidSvgUrl();
-      }
-    } else {
-      clearMermaidSvgUrl();
-    }
-    renderMermaidArtifact(artifact);
-  } catch (error) {
-    setMermaidStatus(`Failed to load Mermaid artifact: ${error.message}`, true);
-  } finally {
-    state.mermaidArtifact.loading = false;
-    syncSheetActionAvailability();
-  }
-}
+async function openMermaidArtifactHost() { await mermaidArtifactController.openHost(); }
 
-function clearMermaidSvgUrl() {
-  if (state.mermaidArtifact.svgUrl && typeof URL !== "undefined" && typeof URL.revokeObjectURL === "function") {
-    URL.revokeObjectURL(state.mermaidArtifact.svgUrl);
-  }
-  state.mermaidArtifact.svgUrl = "";
-}
-
-function setMermaidSvgUrl(url) {
-  clearMermaidSvgUrl();
-  state.mermaidArtifact.svgUrl = url || "";
-}
-
-async function openMermaidArtifactHost() {
-  const session = currentSession();
-  if (!session) {
-    return;
-  }
-
-  try {
-    const response = await apiFetch(`/v1/sessions/${encodeURIComponent(session.session_id)}/mermaid-artifact/open`, {
-      method: "POST",
-    });
-    const payload = await response.json();
-    setMermaidStatus(`Opened Mermaid artifact${payload?.path ? `: ${payload.path}` : ""}.`);
-  } catch (error) {
-    setMermaidStatus(`Failed to open Mermaid artifact: ${error.message}`, true);
-  }
-}
-
-async function loadMermaidPlanFile(name) {
-  await loadMermaidPlanFileWithRuntime(name, mermaidPlanFileRuntime);
-}
+async function loadMermaidPlanFile(name) { await mermaidArtifactController.loadPlanFile(name); }
 
 async function launchCommitGrok() {
   const session = currentSession();
@@ -4464,7 +4350,7 @@ async function handleMermaidRefreshButtonClick() { await refreshMermaidArtifact(
 
 async function handleMermaidOpenButtonClick() { await openMermaidArtifactHost(); }
 
-async function handleMermaidPlanTabsClick(event) { const plan = mermaidPlanTabClickPlan(event.type, event.target instanceof Element ? event.target : null); if (plan.type === "load_plan_file") await loadMermaidPlanFile(plan.planFile); }
+async function handleMermaidPlanTabsClick(event) { await mermaidArtifactController.handlePlanTabsClick(event); }
 
 function terminalStageCaptureHandler(action) { return (event) => captureSurfaceAction(event, action); }
 
