@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path, PathBuf};
 use std::sync::OnceLock;
 use std::time::SystemTime;
@@ -135,27 +135,7 @@ struct ClientOverlay {
 impl SkillboxOverlay {
     fn load() -> Option<Self> {
         let config_root = resolve_skillbox_config_root()?;
-        let clients_dir = config_root.join("clients");
-        if !clients_dir.is_dir() {
-            return None;
-        }
-
-        let mut clients = Vec::new();
-        let entries = std::fs::read_dir(&clients_dir).ok()?;
-        for entry in entries.filter_map(Result::ok) {
-            let client_dir = entry.path();
-            if !client_dir.is_dir() {
-                continue;
-            }
-            let overlay_path = client_dir.join("overlay.yaml");
-            if !overlay_path.is_file() {
-                continue;
-            }
-            if let Some(client) = parse_client_overlay(&client_dir, &overlay_path) {
-                clients.push(client);
-            }
-        }
-
+        let clients = load_client_overlays(&config_root)?;
         if clients.is_empty() {
             None
         } else {
@@ -332,6 +312,42 @@ impl SkillboxOverlay {
         });
         entries
     }
+}
+
+fn load_client_overlays(config_root: &Path) -> Option<Vec<ClientOverlay>> {
+    let clients_dir = config_root.join("clients");
+    if !clients_dir.is_dir() {
+        return None;
+    }
+
+    client_overlay_paths(&clients_dir).map(|paths| {
+        paths
+            .into_iter()
+            .filter_map(|(client_dir, overlay_path)| {
+                parse_client_overlay(&client_dir, &overlay_path)
+            })
+            .collect()
+    })
+}
+
+fn client_overlay_paths(clients_dir: &Path) -> Option<Vec<(PathBuf, PathBuf)>> {
+    let entries = std::fs::read_dir(clients_dir).ok()?;
+    let mut paths = Vec::new();
+    for entry in entries.flatten() {
+        let client_dir = entry.path();
+        if let Some(overlay_path) = overlay_file_in_client_dir(&client_dir) {
+            paths.push((client_dir, overlay_path));
+        }
+    }
+    Some(paths)
+}
+
+fn overlay_file_in_client_dir(client_dir: &Path) -> Option<PathBuf> {
+    if !client_dir.is_dir() {
+        return None;
+    }
+    let overlay_path = client_dir.join("overlay.yaml");
+    overlay_path.is_file().then_some(overlay_path)
 }
 
 fn client_display_label(client: &ClientOverlay) -> String {
@@ -546,135 +562,18 @@ struct DevSanityServiceEntry {
 }
 
 fn parse_client_overlay(client_dir: &Path, overlay_path: &Path) -> Option<ClientOverlay> {
-    let content = std::fs::read_to_string(overlay_path).ok()?;
-    let file: OverlayFile = serde_yaml::from_str(&content).ok()?;
+    let file = read_overlay_file(overlay_path)?;
     let client = file.client?;
-    let client_label = client
-        .label
-        .clone()
-        .or_else(|| client.id.clone())
-        .unwrap_or_else(|| {
-            client_dir
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_else(|| "overlay".to_string())
-        });
+    let client_label = resolve_client_label(&client, client_dir);
     let client_repos = client.repos;
     let context = client.context?;
-
     let cwd_match_count = context.cwd_match.len();
-    let mut cwd_patterns: Vec<String> = context.cwd_match.iter().map(|p| expand_path(p)).collect();
-
-    let scan_roots: Vec<PathBuf> = context
-        .repo_landscape
-        .as_ref()
-        .map(|landscape| {
-            landscape
-                .scan_roots
-                .iter()
-                .map(|root| PathBuf::from(expand_path(root)))
-                .collect()
-        })
-        .unwrap_or_default();
-
-    if let Some(landscape) = &context.repo_landscape {
-        for root in &landscape.scan_roots {
-            cwd_patterns.push(expand_path(root));
-        }
-        for repo in &landscape.repos {
-            if let Some(path) = &repo.path {
-                cwd_patterns.push(expand_path(path));
-            }
-        }
-    }
-
-    let plans = context.plans;
-    let plan_root = plans
-        .as_ref()
-        .and_then(|p| p.plan_root.as_deref())
-        .map(|rel| client_dir.join(rel));
-    let plan_draft = plans
-        .as_ref()
-        .and_then(|p| p.plan_draft.as_deref())
-        .map(|rel| client_dir.join(rel));
-
-    let dir_config = file.dev_sanity.and_then(|ds| {
-        let launch = parse_agent_launch(ds.agent_launch);
-        let groups: Vec<OverlayDirGroup> = ds
-            .groups
-            .into_iter()
-            .filter_map(|g| {
-                let name = g.name?;
-                let mut paths: Vec<PathBuf> = Vec::new();
-                let mut dirs: Vec<PathBuf> = Vec::new();
-                let mut seen: std::collections::BTreeSet<PathBuf> =
-                    std::collections::BTreeSet::new();
-                for raw in &g.paths {
-                    for path in expand_exact_group_path(raw) {
-                        if seen.insert(path.clone()) {
-                            paths.push(path);
-                        }
-                    }
-                }
-                for raw in &g.dirs {
-                    for path in expand_group_dir(raw) {
-                        if seen.insert(path.clone()) {
-                            dirs.push(path);
-                        }
-                    }
-                }
-                if paths.is_empty() && dirs.is_empty() {
-                    return None;
-                }
-                Some(OverlayDirGroup { name, paths, dirs })
-            })
-            .collect();
-
-        let svc = ds.services?;
-        let base_path = svc
-            .base_path
-            .as_deref()
-            .map(|p| PathBuf::from(expand_path(p)))?;
-        let mut seen_service_dirs = std::collections::BTreeSet::<String>::new();
-        let mut services: Vec<OverlayServiceEntry> = svc
-            .entries
-            .into_iter()
-            .filter_map(|entry| {
-                let dir = expand_path(&entry.dir?);
-                let entry = OverlayServiceEntry {
-                    name: entry.name?,
-                    dir,
-                    health_url: entry.health_url,
-                    restart: entry.restart,
-                    open_url: entry.open_url,
-                };
-                seen_service_dirs.insert(entry.dir.clone());
-                Some(entry)
-            })
-            .collect();
-        services.extend(client_repos.into_iter().filter_map(|repo| {
-            let entry = service_entry_from_client_repo(repo, &base_path)?;
-            if seen_service_dirs.insert(entry.dir.clone()) {
-                Some(entry)
-            } else {
-                None
-            }
-        }));
-        for root in &scan_roots {
-            for entry in service_entries_from_scan_root(root, &base_path) {
-                if seen_service_dirs.insert(entry.dir.clone()) {
-                    services.push(entry);
-                }
-            }
-        }
-        Some(OverlayDirConfig {
-            label: client_label.clone(),
-            base_path,
-            services,
-            groups,
-            launch,
-        })
-    });
+    let cwd_patterns = cwd_patterns_from_context(&context);
+    let scan_roots = scan_roots_from_context(&context);
+    let (plan_root, plan_draft) = plan_dirs_from_context(client_dir, context.plans);
+    let dir_config = file
+        .dev_sanity
+        .and_then(|ds| parse_dir_config(ds, &client_label, client_repos, &scan_roots));
 
     Some(ClientOverlay {
         client_dir: client_dir.to_path_buf(),
@@ -685,6 +584,207 @@ fn parse_client_overlay(client_dir: &Path, overlay_path: &Path) -> Option<Client
         plan_draft,
         dir_config,
     })
+}
+
+fn read_overlay_file(overlay_path: &Path) -> Option<OverlayFile> {
+    let content = std::fs::read_to_string(overlay_path).ok()?;
+    serde_yaml::from_str(&content).ok()
+}
+
+fn resolve_client_label(client: &OverlayClient, client_dir: &Path) -> String {
+    client
+        .label
+        .clone()
+        .or_else(|| client.id.clone())
+        .unwrap_or_else(|| fallback_client_label(client_dir))
+}
+
+fn fallback_client_label(client_dir: &Path) -> String {
+    client_dir
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "overlay".to_string())
+}
+
+fn cwd_patterns_from_context(context: &OverlayContext) -> Vec<String> {
+    let mut patterns: Vec<String> = context.cwd_match.iter().map(|p| expand_path(p)).collect();
+    if let Some(landscape) = &context.repo_landscape {
+        patterns.extend(landscape.scan_roots.iter().map(|root| expand_path(root)));
+        patterns.extend(
+            landscape
+                .repos
+                .iter()
+                .filter_map(|repo| repo.path.as_deref())
+                .map(expand_path),
+        );
+    }
+    patterns
+}
+
+fn scan_roots_from_context(context: &OverlayContext) -> Vec<PathBuf> {
+    context
+        .repo_landscape
+        .as_ref()
+        .map(|landscape| {
+            landscape
+                .scan_roots
+                .iter()
+                .map(|root| PathBuf::from(expand_path(root)))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn plan_dirs_from_context(
+    client_dir: &Path,
+    plans: Option<OverlayPlans>,
+) -> (Option<PathBuf>, Option<PathBuf>) {
+    let plan_root = plans
+        .as_ref()
+        .and_then(|p| p.plan_root.as_deref())
+        .map(|rel| client_dir.join(rel));
+    let plan_draft = plans
+        .as_ref()
+        .and_then(|p| p.plan_draft.as_deref())
+        .map(|rel| client_dir.join(rel));
+    (plan_root, plan_draft)
+}
+
+fn parse_dir_config(
+    section: DevSanitySection,
+    client_label: &str,
+    client_repos: Vec<ClientRepoEntry>,
+    scan_roots: &[PathBuf],
+) -> Option<OverlayDirConfig> {
+    let launch = parse_agent_launch(section.agent_launch);
+    let groups = parse_dir_groups(section.groups);
+    let services = section.services?;
+    let base_path = services
+        .base_path
+        .as_deref()
+        .map(|p| PathBuf::from(expand_path(p)))?;
+    let services = parse_services(services.entries, client_repos, scan_roots, &base_path);
+
+    Some(OverlayDirConfig {
+        label: client_label.to_string(),
+        base_path,
+        services,
+        groups,
+        launch,
+    })
+}
+
+fn parse_dir_groups(groups: Vec<DevSanityGroup>) -> Vec<OverlayDirGroup> {
+    groups.into_iter().filter_map(parse_dir_group).collect()
+}
+
+fn parse_dir_group(group: DevSanityGroup) -> Option<OverlayDirGroup> {
+    let name = group.name?;
+    let mut paths = Vec::new();
+    let mut dirs = Vec::new();
+    let mut seen = BTreeSet::new();
+
+    extend_unique_paths(
+        &mut paths,
+        &mut seen,
+        group.paths.iter(),
+        expand_exact_group_path,
+    );
+    extend_unique_paths(&mut dirs, &mut seen, group.dirs.iter(), expand_group_dir);
+
+    if paths.is_empty() && dirs.is_empty() {
+        return None;
+    }
+    Some(OverlayDirGroup { name, paths, dirs })
+}
+
+fn extend_unique_paths<'a, I, F>(
+    output: &mut Vec<PathBuf>,
+    seen: &mut BTreeSet<PathBuf>,
+    raw_paths: I,
+    expand: F,
+) where
+    I: IntoIterator<Item = &'a String>,
+    F: Fn(&str) -> Vec<PathBuf>,
+{
+    for raw in raw_paths {
+        for path in expand(raw) {
+            if seen.insert(path.clone()) {
+                output.push(path);
+            }
+        }
+    }
+}
+
+fn parse_services(
+    entries: Vec<DevSanityServiceEntry>,
+    client_repos: Vec<ClientRepoEntry>,
+    scan_roots: &[PathBuf],
+    base_path: &Path,
+) -> Vec<OverlayServiceEntry> {
+    let mut seen_dirs = BTreeSet::new();
+    let mut services: Vec<OverlayServiceEntry> = entries
+        .into_iter()
+        .filter_map(parse_service_entry)
+        .inspect(|entry| {
+            seen_dirs.insert(entry.dir.clone());
+        })
+        .collect();
+
+    append_client_repo_services(&mut services, &mut seen_dirs, client_repos, base_path);
+    append_scan_root_services(&mut services, &mut seen_dirs, scan_roots, base_path);
+    services
+}
+
+fn parse_service_entry(entry: DevSanityServiceEntry) -> Option<OverlayServiceEntry> {
+    Some(OverlayServiceEntry {
+        name: entry.name?,
+        dir: expand_path(&entry.dir?),
+        health_url: entry.health_url,
+        restart: entry.restart,
+        open_url: entry.open_url,
+    })
+}
+
+fn append_client_repo_services(
+    services: &mut Vec<OverlayServiceEntry>,
+    seen_dirs: &mut BTreeSet<String>,
+    client_repos: Vec<ClientRepoEntry>,
+    base_path: &Path,
+) {
+    for repo in client_repos {
+        append_service_if_new(
+            services,
+            seen_dirs,
+            service_entry_from_client_repo(repo, base_path),
+        );
+    }
+}
+
+fn append_scan_root_services(
+    services: &mut Vec<OverlayServiceEntry>,
+    seen_dirs: &mut BTreeSet<String>,
+    scan_roots: &[PathBuf],
+    base_path: &Path,
+) {
+    for root in scan_roots {
+        for entry in service_entries_from_scan_root(root, base_path) {
+            append_service_if_new(services, seen_dirs, Some(entry));
+        }
+    }
+}
+
+fn append_service_if_new(
+    services: &mut Vec<OverlayServiceEntry>,
+    seen_dirs: &mut BTreeSet<String>,
+    entry: Option<OverlayServiceEntry>,
+) {
+    let Some(entry) = entry else {
+        return;
+    };
+    if seen_dirs.insert(entry.dir.clone()) {
+        services.push(entry);
+    }
 }
 
 fn service_entries_from_scan_root(root: &Path, base_path: &Path) -> Vec<OverlayServiceEntry> {
@@ -733,51 +833,69 @@ fn parse_agent_launch(section: Option<DevSanityAgentLaunch>) -> OverlayLaunchCon
     let mut targets: Vec<LaunchTargetSummary> = section
         .targets
         .into_iter()
-        .filter_map(|target| {
-            let id = target.id?;
-            let label = target.label.unwrap_or_else(|| id.clone());
-            let kind = target.kind.unwrap_or_else(|| "local".to_string());
-            let path_mappings = target
-                .path_mappings
-                .into_iter()
-                .filter_map(|mapping| {
-                    Some(LaunchPathMapping {
-                        local_prefix: expand_path(&mapping.local_prefix?),
-                        remote_prefix: expand_path(&mapping.remote_prefix?),
-                    })
-                })
-                .collect();
-            Some(LaunchTargetSummary {
-                id,
-                label,
-                kind,
-                base_url: target.base_url,
-                auth_token_env: target.auth_token_env,
-                path_mappings,
-            })
-        })
+        .filter_map(parse_launch_target)
         .collect();
-
-    if !targets.iter().any(|target| target.id == "local") {
-        targets.insert(0, LaunchTargetSummary::local());
-    }
-
-    let default_target = section
-        .default_target
-        .filter(|target| targets.iter().any(|candidate| candidate.id == *target))
-        .unwrap_or_else(|| "local".to_string());
-
-    let group_defaults = section
-        .group_defaults
-        .into_iter()
-        .filter(|(_, target)| targets.iter().any(|candidate| candidate.id == *target))
-        .collect();
+    ensure_local_launch_target(&mut targets);
+    let default_target = valid_default_target(section.default_target, &targets);
+    let group_defaults = valid_group_defaults(section.group_defaults, &targets);
 
     OverlayLaunchConfig {
         default_target,
         targets,
         group_defaults,
     }
+}
+
+fn parse_launch_target(target: DevSanityLaunchTarget) -> Option<LaunchTargetSummary> {
+    let id = target.id?;
+    Some(LaunchTargetSummary {
+        label: target.label.unwrap_or_else(|| id.clone()),
+        kind: target.kind.unwrap_or_else(|| "local".to_string()),
+        id,
+        base_url: target.base_url,
+        auth_token_env: target.auth_token_env,
+        path_mappings: parse_launch_path_mappings(target.path_mappings),
+    })
+}
+
+fn parse_launch_path_mappings(mappings: Vec<DevSanityLaunchPathMapping>) -> Vec<LaunchPathMapping> {
+    mappings
+        .into_iter()
+        .filter_map(parse_launch_path_mapping)
+        .collect()
+}
+
+fn parse_launch_path_mapping(mapping: DevSanityLaunchPathMapping) -> Option<LaunchPathMapping> {
+    Some(LaunchPathMapping {
+        local_prefix: expand_path(&mapping.local_prefix?),
+        remote_prefix: expand_path(&mapping.remote_prefix?),
+    })
+}
+
+fn ensure_local_launch_target(targets: &mut Vec<LaunchTargetSummary>) {
+    if !target_exists(targets, "local") {
+        targets.insert(0, LaunchTargetSummary::local());
+    }
+}
+
+fn valid_default_target(default_target: Option<String>, targets: &[LaunchTargetSummary]) -> String {
+    default_target
+        .filter(|target| target_exists(targets, target))
+        .unwrap_or_else(|| "local".to_string())
+}
+
+fn valid_group_defaults(
+    group_defaults: BTreeMap<String, String>,
+    targets: &[LaunchTargetSummary],
+) -> BTreeMap<String, String> {
+    group_defaults
+        .into_iter()
+        .filter(|(_, target)| target_exists(targets, target))
+        .collect()
+}
+
+fn target_exists(targets: &[LaunchTargetSummary], id: &str) -> bool {
+    targets.iter().any(|target| target.id == id)
 }
 
 fn service_entry_from_client_repo(
@@ -1112,6 +1230,69 @@ mod tests {
         assert_eq!(results.len(), 2);
         assert!(results.iter().any(|p| p.ends_with("alpha/skills")));
         assert!(results.iter().any(|p| p.ends_with("beta/skills")));
+    }
+
+    #[test]
+    fn load_client_overlays_returns_none_when_clients_dir_is_missing() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        assert!(load_client_overlays(tmp.path()).is_none());
+    }
+
+    #[test]
+    fn load_client_overlays_returns_empty_when_clients_dir_has_no_overlay_files() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let clients_dir = tmp.path().join("clients");
+        std::fs::create_dir_all(clients_dir.join("empty-client")).expect("client dir");
+        std::fs::write(clients_dir.join("not-a-client"), "x").expect("file");
+
+        let clients = load_client_overlays(tmp.path()).expect("scan clients");
+
+        assert!(clients.is_empty());
+    }
+
+    #[test]
+    fn parse_agent_launch_injects_local_and_filters_unknown_defaults() {
+        let mut group_defaults = BTreeMap::new();
+        group_defaults.insert("known".to_string(), "remote".to_string());
+        group_defaults.insert("unknown".to_string(), "missing".to_string());
+
+        let launch = parse_agent_launch(Some(DevSanityAgentLaunch {
+            default_target: Some("missing".to_string()),
+            targets: vec![DevSanityLaunchTarget {
+                id: Some("remote".to_string()),
+                label: None,
+                kind: Some("swimmers_api".to_string()),
+                base_url: Some("http://remote.test:3210".to_string()),
+                auth_token_env: Some("REMOTE_TOKEN".to_string()),
+                path_mappings: vec![DevSanityLaunchPathMapping {
+                    local_prefix: Some("/local".to_string()),
+                    remote_prefix: Some("/remote".to_string()),
+                }],
+            }],
+            group_defaults,
+        }));
+
+        assert_eq!(launch.default_target, "local");
+        assert_eq!(
+            launch
+                .targets
+                .iter()
+                .map(|target| target.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["local", "remote"]
+        );
+        assert_eq!(launch.default_for_group(Some("known")), "remote");
+        assert_eq!(launch.default_for_group(Some("unknown")), "local");
+
+        let remote = launch
+            .targets
+            .iter()
+            .find(|target| target.id == "remote")
+            .expect("remote target");
+        assert_eq!(remote.label, "remote");
+        assert_eq!(remote.kind, "swimmers_api");
+        assert_eq!(remote.path_mappings[0].local_prefix, "/local");
+        assert_eq!(remote.path_mappings[0].remote_prefix, "/remote");
     }
 
     #[test]
