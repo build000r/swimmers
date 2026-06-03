@@ -43,6 +43,13 @@ export function rawHasActionCue(session, kind) {
   return rawActionCueKinds(session).includes(kind);
 }
 
+export function rawTrogdorSessionAwaitingUser(session, operatorPressure = null) {
+  const pressure = operatorPressure?.pressure || operatorPressure || {};
+  const reasonKind = String(pressure.reason_kind || "").toLowerCase();
+  const stateLabel = String(session?.state || "").toLowerCase();
+  return rawHasActionCue(session, "awaiting_user") || reasonKind === "awaiting_user" || stateLabel === "attention";
+}
+
 export function rawSessionIsSleepingOrDeepSleep(session) {
   const rest = String(session?.rest_state || "").toLowerCase();
   return rest === "sleeping" || rest === "deep_sleep";
@@ -373,6 +380,44 @@ export function markTrogdorBurntSessionsInMap(
     nextBurntSessions.set(sessionId, until);
   }
   return { ids, burntSessions: nextBurntSessions, changed: true, until };
+}
+
+export function trogdorCueTransitionState({
+  sessions = [],
+  previousAwaitingSessionIds = new Set(),
+  hoveredSessionId = "",
+  rawAwaitingUser = rawTrogdorSessionAwaitingUser,
+  rawSleepingOrDeepSleep = rawSessionIsSleepingOrDeepSleep,
+  sessionBurnt = () => false,
+} = {}) {
+  const awaitingSessionIds = new Set();
+  for (const session of sessions) {
+    if (rawAwaitingUser(session)) {
+      awaitingSessionIds.add(String(session.session_id));
+    }
+  }
+
+  const burntIds = [];
+  for (const sessionId of previousAwaitingSessionIds || []) {
+    if (!awaitingSessionIds.has(sessionId)) {
+      burntIds.push(sessionId);
+    }
+  }
+
+  const hovered = normalizeTrogdorSessionId(hoveredSessionId);
+  let resetReader = false;
+  if (hovered) {
+    const raw = sessions.find((session) => session.session_id === hovered);
+    resetReader =
+      !raw ||
+      (!rawAwaitingUser(raw) && !rawSleepingOrDeepSleep(raw) && !sessionBurnt(hovered));
+  }
+
+  return {
+    awaitingSessionIds,
+    burntIds,
+    resetReader,
+  };
 }
 
 export function trogdorSessionAwaitingUser(session) {

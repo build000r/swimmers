@@ -40,8 +40,7 @@ import {
   markTrogdorSessionsRespondedState,
   normalizeTrogdorSessionId,
   pruneTrogdorBurntSessionMap,
-  rawHasActionCue,
-  rawSessionIsSleepingOrDeepSleep,
+  rawTrogdorSessionAwaitingUser,
   saveTrogdorReadProgress,
   setTrogdorClawgReadIndexForProgress,
   startTrogdorReaderStateForSession,
@@ -55,6 +54,7 @@ import {
   trogdorDragonPose as buildTrogdorDragonPose,
   trogdorHasActionCue,
   trogdorPrimaryActionCue,
+  trogdorCueTransitionState,
   trogdorReaderWordIndexForProgress,
   trogdorSessionBurntInMap,
   trogdorSessionAwaitingUser,
@@ -1415,10 +1415,7 @@ function summarizeThought(session) {
 }
 
 function rawSessionAwaitingUser(session) {
-  const pressure = operatorPressureSnapshot(session?.session_id)?.pressure || {};
-  const reasonKind = String(pressure.reason_kind || "").toLowerCase();
-  const stateLabel = String(session?.state || "").toLowerCase();
-  return rawHasActionCue(session, "awaiting_user") || reasonKind === "awaiting_user" || stateLabel === "attention";
+  return rawTrogdorSessionAwaitingUser(session, operatorPressureSnapshot(session?.session_id));
 }
 
 function trogdorClawgReadIndex(session) {
@@ -1717,39 +1714,24 @@ function applyOperatorPressure(payload) {
 }
 
 function syncTrogdorCueTransitions() {
-  const awaiting = new Set();
-  for (const session of state.sessions) {
-    if (rawSessionAwaitingUser(session)) {
-      awaiting.add(String(session.session_id));
-    }
+  const next = trogdorCueTransitionState({
+    sessions: state.sessions,
+    previousAwaitingSessionIds: state.trogdorAwaitingSessionIds,
+    hoveredSessionId: state.hoveredTrogdorSessionId,
+    rawAwaitingUser: rawSessionAwaitingUser,
+    sessionBurnt: trogdorSessionBurnt,
+  });
+  state.trogdorAwaitingSessionIds = next.awaitingSessionIds;
+  if (next.burntIds.length) {
+    markTrogdorSessionsBurnt(next.burntIds, { render: false });
   }
 
-  const burnt = [];
-  for (const sessionId of state.trogdorAwaitingSessionIds) {
-    if (!awaiting.has(sessionId)) {
-      burnt.push(sessionId);
-    }
-  }
-  state.trogdorAwaitingSessionIds = awaiting;
-  if (burnt.length) {
-    markTrogdorSessionsBurnt(burnt, { render: false });
-  }
-
-  const hovered = normalizeSessionId(state.hoveredTrogdorSessionId);
-  if (hovered) {
-    const raw = state.sessions.find((session) => session.session_id === hovered);
-    if (
-      !raw ||
-      (!rawSessionAwaitingUser(raw) &&
-        !rawSessionIsSleepingOrDeepSleep(raw) &&
-        !trogdorSessionBurnt(hovered))
-    ) {
-      state.hoveredTrogdorSessionId = null;
-      state.trogdorReaderStartedAt = 0;
-      state.trogdorReaderStartIndex = 0;
-      state.trogdorReaderClawgKey = "";
-      syncTrogdorReaderTimer();
-    }
+  if (next.resetReader) {
+    state.hoveredTrogdorSessionId = null;
+    state.trogdorReaderStartedAt = 0;
+    state.trogdorReaderStartIndex = 0;
+    state.trogdorReaderClawgKey = "";
+    syncTrogdorReaderTimer();
   }
 }
 

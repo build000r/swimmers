@@ -13,6 +13,7 @@ import {
   pruneTrogdorBurntSessionMap,
   rawActionCueKinds,
   rawSessionIsSleepingOrDeepSleep,
+  rawTrogdorSessionAwaitingUser,
   saveTrogdorReadProgress,
   serializeTrogdorReadProgress,
   setTrogdorClawgReadIndexForProgress,
@@ -31,6 +32,7 @@ import {
   trogdorDragonFrameForVector,
   trogdorDragonPose,
   trogdorPrimaryActionCue,
+  trogdorCueTransitionState,
   trogdorReaderBaseIndexForProgress,
   trogdorReaderWordIndexForProgress,
   trogdorSessionBurntInMap,
@@ -66,6 +68,8 @@ test("Trogdor action cues, clawg keys, and raw rest detection are stable", () =>
   assert.equal(rawSessionIsSleepingOrDeepSleep(raw), true);
   assert.deepEqual(trogdorClawgWords(item), ["approve", "migration", "before", "commit"]);
   assert.equal(trogdorClawgKey(item), `agent-1:2026-06-03T00:00:00Z:${stableTextHash(item.thoughtLabel)}`);
+  assert.equal(rawTrogdorSessionAwaitingUser({ state: "idle", action_cues: [] }), false);
+  assert.equal(rawTrogdorSessionAwaitingUser({ state: "idle", action_cues: [] }, { pressure: { reason_kind: "awaiting_user" } }), true);
   assert.equal(trogdorPrimaryActionCue(item), "awaiting_user");
   assert.equal(trogdorSessionAwaitingUser(item), true);
   assert.equal(trogdorSessionHasReadyClawg(item), true);
@@ -185,6 +189,39 @@ test("Trogdor burn helpers mark, check, and prune expired sessions immutably", (
   const pruned = pruneTrogdorBurntSessionMap(marked.burntSessions, 1000);
   assert.equal(pruned.changed, true);
   assert.deepEqual(Array.from(pruned.burntSessions.keys()), []);
+});
+
+test("Trogdor cue transition helpers derive awaiting, burns, and hover reset", () => {
+  const sessions = [
+    { session_id: "still", state: "attention", rest_state: "active", action_cues: [] },
+    { session_id: "sleepy", state: "idle", rest_state: "deep_sleep", action_cues: [] },
+    { session_id: "quiet", state: "idle", rest_state: "active", action_cues: [] },
+    { session_id: "burnt", state: "idle", rest_state: "active", action_cues: [] },
+  ];
+  const transition = trogdorCueTransitionState({
+    sessions,
+    previousAwaitingSessionIds: new Set(["still", "gone"]),
+    hoveredSessionId: "quiet",
+    sessionBurnt: (sessionId) => sessionId === "burnt",
+  });
+
+  assert.deepEqual(Array.from(transition.awaitingSessionIds), ["still"]);
+  assert.deepEqual(transition.burntIds, ["gone"]);
+  assert.equal(transition.resetReader, true);
+
+  assert.equal(trogdorCueTransitionState({
+    sessions,
+    hoveredSessionId: "sleepy",
+  }).resetReader, false);
+  assert.equal(trogdorCueTransitionState({
+    sessions,
+    hoveredSessionId: "burnt",
+    sessionBurnt: (sessionId) => sessionId === "burnt",
+  }).resetReader, false);
+  assert.equal(trogdorCueTransitionState({
+    sessions,
+    hoveredSessionId: "missing",
+  }).resetReader, true);
 });
 
 test("Trogdor reader base index prefers active reader key over persisted progress", () => {
