@@ -926,17 +926,22 @@ fn compact_command_text(bytes: &[u8]) -> String {
 
 /// Try to create the resolved data dir and write a temp file in it.
 pub fn check_data_dir_writable(path: &std::path::Path) -> Result<PathBuf, String> {
-    if let Err(err) = std::fs::create_dir_all(path) {
-        return Err(format!("create_dir_all({}) failed: {err}", path.display()));
-    }
+    create_data_dir(path)?;
+    write_data_dir_probe(path)?;
+    Ok(path.to_path_buf())
+}
+
+fn create_data_dir(path: &std::path::Path) -> Result<(), String> {
+    std::fs::create_dir_all(path)
+        .map_err(|err| format!("create_dir_all({}) failed: {err}", path.display()))
+}
+
+fn write_data_dir_probe(path: &std::path::Path) -> Result<(), String> {
     let probe = path.join(".swimmers-doctor-probe");
-    match std::fs::write(&probe, b"ok") {
-        Ok(()) => {
-            let _ = std::fs::remove_file(&probe);
-            Ok(path.to_path_buf())
-        }
-        Err(err) => Err(format!("write {} failed: {err}", probe.display())),
-    }
+    std::fs::write(&probe, b"ok")
+        .map_err(|err| format!("write {} failed: {err}", probe.display()))?;
+    let _ = std::fs::remove_file(&probe);
+    Ok(())
 }
 
 /// Format and print doctor findings, returning the appropriate exit code.
@@ -949,17 +954,42 @@ pub fn print_doctor_findings(findings: &[DoctorFinding]) -> i32 {
 }
 
 fn print_doctor_finding(finding: &DoctorFinding) -> bool {
-    let mark = match finding.level {
+    let line = format_doctor_finding(finding);
+    match doctor_output_stream(finding.level) {
+        DoctorOutputStream::Stderr => eprintln!("{line}"),
+        DoctorOutputStream::Stdout => println!("{line}"),
+    }
+    finding.ok
+}
+
+fn format_doctor_finding(finding: &DoctorFinding) -> String {
+    format!(
+        "[{}] {}: {}",
+        doctor_level_mark(finding.level),
+        finding.name,
+        finding.detail
+    )
+}
+
+fn doctor_level_mark(level: DoctorLevel) -> &'static str {
+    match level {
         DoctorLevel::Fail => "FAIL",
         DoctorLevel::Warn => "WARN",
         DoctorLevel::Ok => "ok ",
-    };
-    let line = format!("[{mark}] {}: {}", finding.name, finding.detail);
-    match finding.level {
-        DoctorLevel::Fail | DoctorLevel::Warn => eprintln!("{line}"),
-        DoctorLevel::Ok => println!("{line}"),
     }
-    finding.ok
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DoctorOutputStream {
+    Stdout,
+    Stderr,
+}
+
+fn doctor_output_stream(level: DoctorLevel) -> DoctorOutputStream {
+    match level {
+        DoctorLevel::Fail | DoctorLevel::Warn => DoctorOutputStream::Stderr,
+        DoctorLevel::Ok => DoctorOutputStream::Stdout,
+    }
 }
 
 fn print_doctor_summary(failed: usize) -> i32 {
@@ -1543,6 +1573,89 @@ esac
         let dd = findings.iter().find(|f| f.name == "data_dir").unwrap();
         assert!(!dd.ok);
         assert!(dd.detail.contains("permission denied"));
+    }
+
+    #[test]
+    fn check_data_dir_writable_creates_dir_writes_probe_and_cleans_it_up() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let data_dir = tmp.path().join("nested").join("swimmers");
+
+        let checked = check_data_dir_writable(&data_dir).expect("writable data dir");
+
+        assert_eq!(checked, data_dir);
+        assert!(checked.is_dir());
+        assert!(!checked.join(".swimmers-doctor-probe").exists());
+    }
+
+    #[test]
+    fn create_data_dir_reports_create_dir_all_failures_with_path() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let file_path = tmp.path().join("not-a-dir");
+        std::fs::write(&file_path, b"file").expect("write regular file");
+
+        let err = create_data_dir(&file_path).expect_err("regular file is not a directory");
+
+        assert!(err.starts_with(&format!("create_dir_all({}) failed: ", file_path.display())));
+    }
+
+    #[test]
+    fn write_data_dir_probe_reports_write_failures_with_probe_path() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let file_path = tmp.path().join("not-a-dir");
+        std::fs::write(&file_path, b"file").expect("write regular file");
+        let probe = file_path.join(".swimmers-doctor-probe");
+
+        let err = write_data_dir_probe(&file_path).expect_err("probe under file fails");
+
+        assert!(err.starts_with(&format!("write {} failed: ", probe.display())));
+    }
+
+    #[test]
+    fn doctor_finding_format_preserves_status_markers() {
+        let fail = DoctorFinding {
+            ok: false,
+            level: DoctorLevel::Fail,
+            name: "auth/bind",
+            detail: "unsafe bind".to_string(),
+        };
+        let warn = DoctorFinding {
+            ok: true,
+            level: DoctorLevel::Warn,
+            name: "config/env",
+            detail: "warning: PORT".to_string(),
+        };
+        let ok = DoctorFinding {
+            ok: true,
+            level: DoctorLevel::Ok,
+            name: "tmux",
+            detail: "tmux found on PATH".to_string(),
+        };
+
+        assert_eq!(
+            format_doctor_finding(&fail),
+            "[FAIL] auth/bind: unsafe bind"
+        );
+        assert_eq!(
+            format_doctor_finding(&warn),
+            "[WARN] config/env: warning: PORT"
+        );
+        assert_eq!(format_doctor_finding(&ok), "[ok ] tmux: tmux found on PATH");
+    }
+
+    #[test]
+    fn doctor_finding_stream_routes_failures_and_warnings_to_stderr() {
+        assert_eq!(
+            doctor_output_stream(DoctorLevel::Fail),
+            DoctorOutputStream::Stderr
+        );
+        assert_eq!(
+            doctor_output_stream(DoctorLevel::Warn),
+            DoctorOutputStream::Stderr
+        );
+        assert_eq!(
+            doctor_output_stream(DoctorLevel::Ok),
+            DoctorOutputStream::Stdout
+        );
     }
 
     #[test]

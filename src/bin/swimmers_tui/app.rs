@@ -374,6 +374,31 @@ enum InitialRequestSubmission {
     },
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum InitialRequestKeyAction {
+    Close,
+    Submit,
+    ToggleVoice,
+    Backspace,
+    InsertChar(char),
+    Ignore,
+}
+
+fn classify_initial_request_key(key: KeyEvent) -> InitialRequestKeyAction {
+    match key.code {
+        KeyCode::Esc => InitialRequestKeyAction::Close,
+        KeyCode::Enter => InitialRequestKeyAction::Submit,
+        KeyCode::Char('v') if key.modifiers == KeyModifiers::CONTROL => {
+            InitialRequestKeyAction::ToggleVoice
+        }
+        KeyCode::Backspace => InitialRequestKeyAction::Backspace,
+        KeyCode::Char(ch) if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT => {
+            InitialRequestKeyAction::InsertChar(ch)
+        }
+        _ => InitialRequestKeyAction::Ignore,
+    }
+}
+
 fn plan_initial_request_submission(
     initial_request: Option<&InitialRequestState>,
     group_input_targets: Option<&GroupInputTargets>,
@@ -3020,25 +3045,21 @@ impl<C: TuiApi> App<C> {
     }
 
     pub(crate) fn handle_initial_request_key(&mut self, key: KeyEvent, field: Rect) {
-        match key.code {
-            KeyCode::Esc => self.close_initial_request(),
-            KeyCode::Enter => self.submit_initial_request(field),
-            KeyCode::Char('v') if key.modifiers == KeyModifiers::CONTROL => {
-                self.toggle_voice_recording();
-            }
-            KeyCode::Backspace => {
+        match classify_initial_request_key(key) {
+            InitialRequestKeyAction::Close => self.close_initial_request(),
+            InitialRequestKeyAction::Submit => self.submit_initial_request(field),
+            InitialRequestKeyAction::ToggleVoice => self.toggle_voice_recording(),
+            InitialRequestKeyAction::Backspace => {
                 if let Some(initial_request) = &mut self.initial_request {
                     initial_request.value.pop();
                 }
             }
-            KeyCode::Char(ch)
-                if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT =>
-            {
+            InitialRequestKeyAction::InsertChar(ch) => {
                 if let Some(initial_request) = &mut self.initial_request {
                     initial_request.value.push(ch);
                 }
             }
-            _ => {}
+            InitialRequestKeyAction::Ignore => {}
         }
     }
 
@@ -4112,6 +4133,46 @@ mod tests {
         let mut ledger = healthy_dependency_ledger();
         ledger.remote_targets.status = "not_configured".to_string();
         assert!(dependency_degradation_line(&ledger).is_none());
+    }
+
+    #[test]
+    fn initial_request_key_classifier_routes_control_actions() {
+        assert_eq!(
+            classify_initial_request_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+            InitialRequestKeyAction::Close
+        );
+        assert_eq!(
+            classify_initial_request_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            InitialRequestKeyAction::Submit
+        );
+        assert_eq!(
+            classify_initial_request_key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::CONTROL)),
+            InitialRequestKeyAction::ToggleVoice
+        );
+        assert_eq!(
+            classify_initial_request_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE)),
+            InitialRequestKeyAction::Backspace
+        );
+    }
+
+    #[test]
+    fn initial_request_key_classifier_routes_text_and_ignored_keys() {
+        assert_eq!(
+            classify_initial_request_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE)),
+            InitialRequestKeyAction::InsertChar('a')
+        );
+        assert_eq!(
+            classify_initial_request_key(KeyEvent::new(KeyCode::Char('A'), KeyModifiers::SHIFT)),
+            InitialRequestKeyAction::InsertChar('A')
+        );
+        assert_eq!(
+            classify_initial_request_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL)),
+            InitialRequestKeyAction::Ignore
+        );
+        assert_eq!(
+            classify_initial_request_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE)),
+            InitialRequestKeyAction::Ignore
+        );
     }
 
     #[test]

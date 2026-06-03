@@ -924,23 +924,33 @@ async fn franken_term_wasm() -> Response {
 }
 
 async fn franken_term_font() -> Response {
-    let Some(pkg_dir) = resolve_frankentui_pkg_dir() else {
-        return json_error(
-            StatusCode::NOT_FOUND,
-            "FRANKENTERM_ASSET_UNAVAILABLE",
-            "FrankenTerm package assets are not available on this host",
-        );
+    serve_franken_term_font(franken_term_font_path(resolve_frankentui_pkg_dir())).await
+}
+
+#[derive(Debug)]
+enum FrankenTermFontPath {
+    Available(PathBuf),
+    AssetsUnavailable,
+    RootUnavailable,
+}
+
+fn franken_term_font_path(pkg_dir: Option<PathBuf>) -> FrankenTermFontPath {
+    let Some(pkg_dir) = pkg_dir else {
+        return FrankenTermFontPath::AssetsUnavailable;
     };
 
     let Some(root_dir) = pkg_dir.parent() else {
-        return json_error(
-            StatusCode::NOT_FOUND,
-            "FRANKENTERM_FONT_UNAVAILABLE",
-            "FrankenTerm root directory could not be resolved",
-        );
+        return FrankenTermFontPath::RootUnavailable;
     };
 
-    let path = root_dir.join("fonts").join("pragmasevka-nf-subset.woff2");
+    FrankenTermFontPath::Available(root_dir.join("fonts").join("pragmasevka-nf-subset.woff2"))
+}
+
+async fn serve_franken_term_font(font_path: FrankenTermFontPath) -> Response {
+    let FrankenTermFontPath::Available(path) = font_path else {
+        return franken_term_font_path_error(font_path);
+    };
+
     match tokio::fs::read(&path).await {
         Ok(bytes) => (
             [
@@ -960,6 +970,22 @@ async fn franken_term_font() -> Response {
             "FRANKENTERM_FONT_READ_FAILED",
             &format!("failed to read font asset: {err}"),
         ),
+    }
+}
+
+fn franken_term_font_path_error(font_path: FrankenTermFontPath) -> Response {
+    match font_path {
+        FrankenTermFontPath::AssetsUnavailable => json_error(
+            StatusCode::NOT_FOUND,
+            "FRANKENTERM_ASSET_UNAVAILABLE",
+            "FrankenTerm package assets are not available on this host",
+        ),
+        FrankenTermFontPath::RootUnavailable => json_error(
+            StatusCode::NOT_FOUND,
+            "FRANKENTERM_FONT_UNAVAILABLE",
+            "FrankenTerm root directory could not be resolved",
+        ),
+        FrankenTermFontPath::Available(_) => unreachable!("available font paths are served first"),
     }
 }
 
@@ -2099,6 +2125,13 @@ mod tests {
         String::from_utf8(body.to_vec()).expect("utf8 html")
     }
 
+    async fn response_json(response: Response) -> serde_json::Value {
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("json body");
+        serde_json::from_slice(&body).expect("json response")
+    }
+
     #[test]
     fn valid_pkg_dir_requires_js_and_wasm() {
         let dir = tempdir().expect("tempdir");
@@ -2568,6 +2601,83 @@ mod tests {
         );
     }
 
+    #[test]
+    fn franken_term_font_path_resolves_availability_states() {
+        assert!(matches!(
+            franken_term_font_path(None),
+            FrankenTermFontPath::AssetsUnavailable
+        ));
+        assert!(matches!(
+            franken_term_font_path(Some(PathBuf::from("/"))),
+            FrankenTermFontPath::RootUnavailable
+        ));
+
+        let dir = tempdir().expect("tempdir");
+        let pkg_dir = dir.path().join("pkg");
+        let expected = dir.path().join("fonts").join("pragmasevka-nf-subset.woff2");
+        match franken_term_font_path(Some(pkg_dir)) {
+            FrankenTermFontPath::Available(path) => assert_eq!(path, expected),
+            other => panic!("unexpected font path state: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn serve_franken_term_font_reports_unavailable_path_states() {
+        let response = serve_franken_term_font(FrankenTermFontPath::AssetsUnavailable)
+            .await
+            .into_response();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let body = response_json(response).await;
+        assert_eq!(body["code"], "FRANKENTERM_ASSET_UNAVAILABLE");
+
+        let response = serve_franken_term_font(FrankenTermFontPath::RootUnavailable)
+            .await
+            .into_response();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let body = response_json(response).await;
+        assert_eq!(body["code"], "FRANKENTERM_FONT_UNAVAILABLE");
+    }
+
+    #[tokio::test]
+    async fn serve_franken_term_font_serves_font_bytes_and_error_payloads() {
+        let dir = tempdir().expect("tempdir");
+        let font_path = dir.path().join("pragmasevka-nf-subset.woff2");
+        std::fs::write(&font_path, b"font-bytes").expect("write font");
+
+        let response = serve_franken_term_font(FrankenTermFontPath::Available(font_path.clone()))
+            .await
+            .into_response();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers().get(header::CONTENT_TYPE).unwrap(),
+            "font/woff2"
+        );
+        assert_eq!(
+            response.headers().get(header::CACHE_CONTROL).unwrap(),
+            "no-store"
+        );
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("font body");
+        assert_eq!(&body[..], b"font-bytes");
+
+        let response = serve_franken_term_font(FrankenTermFontPath::Available(
+            dir.path().join("missing.woff2"),
+        ))
+        .await
+        .into_response();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let body = response_json(response).await;
+        assert_eq!(body["code"], "FRANKENTERM_FONT_UNAVAILABLE");
+
+        let response = serve_franken_term_font(FrankenTermFontPath::Available(dir.path().into()))
+            .await
+            .into_response();
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body = response_json(response).await;
+        assert_eq!(body["code"], "FRANKENTERM_FONT_READ_FAILED");
+    }
+
     #[tokio::test]
     async fn trogdor_dragon_asset_route_serves_embedded_png() {
         // Spot-check three combinations spanning the expanded 8 poses × 8 frames
@@ -3020,6 +3130,35 @@ mod tests {
     }
 
     #[test]
+    fn decode_binary_input_covers_empty_oversized_and_forwarded_frames() {
+        assert!(matches!(decode_binary_input(&[]), WsClientDecision::Ignore));
+
+        let oversized = vec![b'x'; MAX_WS_INPUT_BYTES + 1];
+        match decode_binary_input(&oversized) {
+            WsClientDecision::SendError {
+                code,
+                client_message_id,
+                ..
+            } => {
+                assert_eq!(code, "INPUT_TOO_LARGE");
+                assert_eq!(client_message_id, None);
+            }
+            other => panic!("unexpected oversized decision: {other:?}"),
+        }
+
+        match decode_binary_input(b"\xff\x00input") {
+            WsClientDecision::Forward {
+                cmd: SessionCommand::WriteInput(data),
+                client_message_id,
+            } => {
+                assert_eq!(data, b"\xff\x00input");
+                assert_eq!(client_message_id, None);
+            }
+            other => panic!("unexpected forwarded decision: {other:?}"),
+        }
+    }
+
+    #[test]
     fn decode_text_client_message_invalid_json_sends_error() {
         match decode_text_client_message(&operator_auth(), "not-json") {
             WsClientDecision::SendError { code, .. } => assert_eq!(code, "INVALID_MESSAGE"),
@@ -3114,6 +3253,38 @@ mod tests {
         match decode_text_client_message(&operator_auth(), &json) {
             WsClientDecision::SendError { code, .. } => assert_eq!(code, "INPUT_TOO_LARGE"),
             other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn decode_input_text_covers_empty_oversized_and_forwarded_text() {
+        assert!(matches!(
+            decode_input_text(String::new(), Some("empty-1".to_string())),
+            WsClientDecision::Ignore
+        ));
+
+        let oversized = "x".repeat(MAX_WS_INPUT_BYTES + 1);
+        match decode_input_text(oversized, Some("big-1".to_string())) {
+            WsClientDecision::SendError {
+                code,
+                client_message_id,
+                ..
+            } => {
+                assert_eq!(code, "INPUT_TOO_LARGE");
+                assert_eq!(client_message_id.as_deref(), Some("big-1"));
+            }
+            other => panic!("unexpected oversized decision: {other:?}"),
+        }
+
+        match decode_input_text("λ\n".to_string(), Some("ack-1".to_string())) {
+            WsClientDecision::Forward {
+                cmd: SessionCommand::WriteInputAck { data, .. },
+                client_message_id,
+            } => {
+                assert_eq!(data, "λ\n".as_bytes());
+                assert_eq!(client_message_id.as_deref(), Some("ack-1"));
+            }
+            other => panic!("unexpected forwarded decision: {other:?}"),
         }
     }
 

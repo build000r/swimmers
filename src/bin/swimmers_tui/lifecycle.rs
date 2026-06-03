@@ -1,3 +1,4 @@
+use std::ffi::{OsStr, OsString};
 use std::fs::{self, OpenOptions};
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
@@ -259,14 +260,13 @@ fn is_executable_file(path: &Path) -> bool {
 }
 
 fn find_binary_on_path(binary: &str) -> Option<PathBuf> {
-    let path = std::env::var_os("PATH")?;
-    for candidate_dir in std::env::split_paths(&path) {
-        let candidate = candidate_dir.join(binary);
-        if is_executable_file(&candidate) {
-            return Some(candidate);
-        }
-    }
-    None
+    std::env::var_os("PATH").and_then(|path| find_binary_in_path_value(binary, &path))
+}
+
+fn find_binary_in_path_value(binary: &str, path: &OsStr) -> Option<PathBuf> {
+    std::env::split_paths(path)
+        .map(|candidate_dir| candidate_dir.join(binary))
+        .find(|candidate| is_executable_file(candidate))
 }
 
 fn resolve_server_log_path(
@@ -288,8 +288,19 @@ fn explicit_server_log_path(log_override: Option<&Path>) -> Option<PathBuf> {
 }
 
 fn default_server_log_dir() -> PathBuf {
-    std::env::var_os("TUI_SERVER_LOG_DIR")
-        .or_else(|| std::env::var_os("TMPDIR"))
+    default_server_log_dir_from(
+        std::env::var_os("TUI_SERVER_LOG_DIR"),
+        std::env::var_os("TMPDIR"),
+    )
+}
+
+fn default_server_log_dir_from(
+    tui_server_log_dir: Option<impl Into<OsString>>,
+    tmpdir: Option<impl Into<OsString>>,
+) -> PathBuf {
+    tui_server_log_dir
+        .map(Into::into)
+        .or_else(|| tmpdir.map(Into::into))
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("/tmp"))
 }
@@ -648,6 +659,44 @@ mod tests {
         });
     }
 
+    #[test]
+    fn find_binary_on_path_returns_none_when_path_is_missing() {
+        with_env_var_removed("PATH", || {
+            assert_eq!(find_binary_on_path("swimmers"), None);
+        });
+    }
+
+    #[test]
+    fn find_binary_on_path_skips_missing_and_non_executable_candidates() {
+        let first_dir = tempdir().expect("first temp dir");
+        let second_dir = tempdir().expect("second temp dir");
+        let third_dir = tempdir().expect("third temp dir");
+
+        fs::write(first_dir.path().join("swimmers"), "#!/bin/sh\nexit 1\n")
+            .expect("write non-executable candidate");
+        let executable = second_dir.path().join("swimmers");
+        write_executable_fixture(&executable);
+
+        let path = std::env::join_paths([first_dir.path(), third_dir.path(), second_dir.path()])
+            .expect("join fixture PATH");
+
+        with_env_var("PATH", path, || {
+            assert_eq!(find_binary_on_path("swimmers"), Some(executable));
+        });
+    }
+
+    #[test]
+    fn find_binary_in_path_value_returns_none_without_executable_candidate() {
+        let first_dir = tempdir().expect("first temp dir");
+        let second_dir = tempdir().expect("second temp dir");
+        fs::write(second_dir.path().join("swimmers"), "#!/bin/sh\nexit 1\n")
+            .expect("write non-executable candidate");
+        let path =
+            std::env::join_paths([first_dir.path(), second_dir.path()]).expect("join fixture PATH");
+
+        assert_eq!(find_binary_in_path_value("swimmers", &path), None);
+    }
+
     fn with_env_var_removed<T>(key: &str, run: impl FnOnce() -> T) -> T {
         let previous = std::env::var_os(key);
         std::env::remove_var(key);
@@ -701,6 +750,46 @@ mod tests {
                 assert_eq!(path, temp_dir.path().join("swimmers-tui-server-4321.log"));
             });
         });
+    }
+
+    #[test]
+    fn default_server_log_dir_prefers_tui_dir_then_tmpdir_then_tmp() {
+        with_env_var("TUI_SERVER_LOG_DIR", "/tmp/tui-log-dir", || {
+            with_env_var("TMPDIR", "/tmp/tmpdir-log-dir", || {
+                assert_eq!(default_server_log_dir(), PathBuf::from("/tmp/tui-log-dir"));
+            });
+        });
+
+        with_env_var_removed("TUI_SERVER_LOG_DIR", || {
+            with_env_var("TMPDIR", "/tmp/tmpdir-log-dir", || {
+                assert_eq!(
+                    default_server_log_dir(),
+                    PathBuf::from("/tmp/tmpdir-log-dir")
+                );
+            });
+        });
+
+        with_env_var_removed("TUI_SERVER_LOG_DIR", || {
+            with_env_var_removed("TMPDIR", || {
+                assert_eq!(default_server_log_dir(), PathBuf::from("/tmp"));
+            });
+        });
+    }
+
+    #[test]
+    fn default_server_log_dir_from_preserves_precedence() {
+        assert_eq!(
+            default_server_log_dir_from(Some("/tmp/tui"), Some("/tmp/tmpdir")),
+            PathBuf::from("/tmp/tui")
+        );
+        assert_eq!(
+            default_server_log_dir_from(None::<OsString>, Some("/tmp/tmpdir")),
+            PathBuf::from("/tmp/tmpdir")
+        );
+        assert_eq!(
+            default_server_log_dir_from(None::<OsString>, None::<OsString>),
+            PathBuf::from("/tmp")
+        );
     }
 
     #[test]
