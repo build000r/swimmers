@@ -170,6 +170,17 @@ pub(crate) fn render_thought_config_editor(
     field: Rect,
 ) {
     let layout = thought_config_editor_layout(field);
+    render_editor_frame(renderer, editor, &layout);
+    render_config_fields(renderer, editor, &layout);
+    render_status_help(renderer, editor, &layout);
+    render_action_buttons(renderer, editor, &layout);
+}
+
+fn render_editor_frame(
+    renderer: &mut Renderer,
+    editor: &ThoughtConfigEditorState,
+    layout: &ThoughtConfigEditorLayout,
+) {
     renderer.fill_rect(layout.frame, ' ', Color::Reset);
     renderer.draw_box(layout.frame, Color::White);
     renderer.draw_text(
@@ -184,57 +195,77 @@ pub(crate) fn render_thought_config_editor(
         &truncate_label(&editor.daemon_label(), layout.content.width as usize),
         Color::DarkGrey,
     );
+}
 
-    let enabled_prefix = if editor.focus == ThoughtConfigEditorField::Enabled {
-        ">"
-    } else {
-        " "
-    };
+fn render_config_fields(
+    renderer: &mut Renderer,
+    editor: &ThoughtConfigEditorState,
+    layout: &ThoughtConfigEditorLayout,
+) {
     let enabled_label = if editor.config.enabled { "on" } else { "off" };
-    renderer.draw_text(
-        layout.content.x,
+    render_field_row(
+        renderer,
+        layout,
         layout.enabled_y,
-        &format!("{enabled_prefix} enabled: {enabled_label}"),
-        if editor.focus == ThoughtConfigEditorField::Enabled {
-            Color::White
-        } else {
-            Color::DarkGrey
-        },
+        ThoughtConfigEditorField::Enabled,
+        &format!("enabled: {enabled_label}"),
+        editor.focus,
     );
-
-    let backend_prefix = if editor.focus == ThoughtConfigEditorField::Backend {
-        ">"
-    } else {
-        " "
-    };
-    renderer.draw_text(
-        layout.content.x,
+    render_field_row(
+        renderer,
+        layout,
         layout.backend_y,
-        &format!("{backend_prefix} backend: {}", editor.backend_label()),
-        if editor.focus == ThoughtConfigEditorField::Backend {
-            Color::White
-        } else {
-            Color::DarkGrey
-        },
+        ThoughtConfigEditorField::Backend,
+        &format!("backend: {}", editor.backend_label()),
+        editor.focus,
     );
+    render_model_row(renderer, editor, layout);
+}
 
-    let model_prefix = if editor.focus == ThoughtConfigEditorField::Model {
-        ">"
+fn render_field_row(
+    renderer: &mut Renderer,
+    layout: &ThoughtConfigEditorLayout,
+    y: u16,
+    field: ThoughtConfigEditorField,
+    text: &str,
+    focus: ThoughtConfigEditorField,
+) {
+    let (prefix, color) = selected_row_style(focus == field);
+    renderer.draw_text(layout.content.x, y, &format!("{prefix} {text}"), color);
+}
+
+fn selected_row_style(is_selected: bool) -> (&'static str, Color) {
+    if is_selected {
+        (">", Color::White)
     } else {
-        " "
-    };
+        (" ", Color::DarkGrey)
+    }
+}
+
+fn render_model_row(
+    renderer: &mut Renderer,
+    editor: &ThoughtConfigEditorState,
+    layout: &ThoughtConfigEditorLayout,
+) {
     let input_x = layout.content.x;
+    let is_selected = editor.focus == ThoughtConfigEditorField::Model;
+    let (model_prefix, label_color) = selected_row_style(is_selected);
     renderer.draw_text(
         input_x,
         layout.model_y,
         &format!("{model_prefix} model: "),
-        if editor.focus == ThoughtConfigEditorField::Model {
-            Color::White
-        } else {
-            Color::DarkGrey
-        },
+        label_color,
     );
-    let model_x = input_x + 9;
+    render_model_value(renderer, editor, layout, input_x + 9, is_selected);
+}
+
+fn render_model_value(
+    renderer: &mut Renderer,
+    editor: &ThoughtConfigEditorState,
+    layout: &ThoughtConfigEditorLayout,
+    model_x: u16,
+    is_selected: bool,
+) {
     let available = layout.content.right().saturating_sub(model_x) as usize;
     let (model_text, model_color) = if editor.config.model.is_empty() {
         ("daemon default".to_string(), Color::DarkGrey)
@@ -243,17 +274,39 @@ pub(crate) fn render_thought_config_editor(
     };
     let visible = truncate_label(&model_text, available);
     renderer.draw_text(model_x, layout.model_y, &visible, model_color);
-    if editor.focus == ThoughtConfigEditorField::Model {
-        let cursor_x = if editor.config.model.is_empty() {
-            model_x
-        } else {
-            model_x + visible.chars().count() as u16
-        };
-        if cursor_x < layout.content.right() {
-            renderer.draw_char(cursor_x, layout.model_y, '|', Color::Yellow);
-        }
-    }
+    render_model_cursor(renderer, editor, layout, model_x, &visible, is_selected);
+}
 
+fn render_model_cursor(
+    renderer: &mut Renderer,
+    editor: &ThoughtConfigEditorState,
+    layout: &ThoughtConfigEditorLayout,
+    model_x: u16,
+    visible: &str,
+    is_selected: bool,
+) {
+    if !is_selected {
+        return;
+    }
+    let cursor_x = model_cursor_x(editor, model_x, visible);
+    if cursor_x < layout.content.right() {
+        renderer.draw_char(cursor_x, layout.model_y, '|', Color::Yellow);
+    }
+}
+
+fn model_cursor_x(editor: &ThoughtConfigEditorState, model_x: u16, visible: &str) -> u16 {
+    if editor.config.model.is_empty() {
+        model_x
+    } else {
+        model_x + visible.chars().count() as u16
+    }
+}
+
+fn render_status_help(
+    renderer: &mut Renderer,
+    editor: &ThoughtConfigEditorState,
+    layout: &ThoughtConfigEditorLayout,
+) {
     renderer.draw_text(
         layout.content.x,
         layout.model_y + 1,
@@ -269,28 +322,37 @@ pub(crate) fn render_thought_config_editor(
         "tab moves  arrows adjust  enter acts  esc cancels",
         Color::DarkGrey,
     );
+}
 
-    let test_color = if editor.focus == ThoughtConfigEditorField::Test {
-        Color::White
-    } else {
-        Color::DarkGrey
-    };
-    let save_color = if editor.focus == ThoughtConfigEditorField::Save {
-        Color::White
-    } else {
-        Color::DarkGrey
-    };
-    let cancel_color = if editor.focus == ThoughtConfigEditorField::Cancel {
-        Color::White
-    } else {
-        Color::DarkGrey
-    };
-    renderer.draw_text(layout.content.x, layout.buttons_y, "[test]", test_color);
-    renderer.draw_text(layout.content.x + 8, layout.buttons_y, "[save]", save_color);
+fn render_action_buttons(
+    renderer: &mut Renderer,
+    editor: &ThoughtConfigEditorState,
+    layout: &ThoughtConfigEditorLayout,
+) {
+    renderer.draw_text(
+        layout.content.x,
+        layout.buttons_y,
+        "[test]",
+        button_color(editor, ThoughtConfigEditorField::Test),
+    );
+    renderer.draw_text(
+        layout.content.x + 8,
+        layout.buttons_y,
+        "[save]",
+        button_color(editor, ThoughtConfigEditorField::Save),
+    );
     renderer.draw_text(
         layout.content.x + 16,
         layout.buttons_y,
         "[cancel]",
-        cancel_color,
+        button_color(editor, ThoughtConfigEditorField::Cancel),
     );
+}
+
+fn button_color(editor: &ThoughtConfigEditorState, field: ThoughtConfigEditorField) -> Color {
+    if editor.focus == field {
+        Color::White
+    } else {
+        Color::DarkGrey
+    }
 }
