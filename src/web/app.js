@@ -1,6 +1,6 @@
 import { buildSurfaceFrame, surfaceActionAt, surfaceConsumesPointer } from "./rendered_surface.js";
 import {
-  authTokenButtonPlan, eventCell, globalShortcutPlan, initialStateBootPlan, mobileKeyboardInputExecutorPlan, mobileKeyboardInputPlan,
+  authTokenButtonPlan, controlEventSessionPatchPlan, eventCell, globalShortcutPlan, initialStateBootPlan, mobileKeyboardInputExecutorPlan, mobileKeyboardInputPlan,
   sheetActionAvailabilityPlan,
   mobileKeyboardKeydownPlan, mobileKeyboardKeyPlan, shouldIgnoreSyntheticClick,
   terminalComposerControlAction, terminalDestroyStatePatch, terminalFallbackActivationPlan, terminalFallbackFocusPlan, terminalFallbackKeydownPlan, terminalFallbackPastePlan, terminalFallbackPointerFocusPlan, terminalInlineInputKeydownPlan, terminalKeyStripClickExecutorPlan, terminalKeyStripClickPlan, terminalStageCaptureBindings, terminalStageFocusExecutorPlan, terminalStageFocusPlan,
@@ -3421,50 +3421,12 @@ function applyControlEvent(message) {
     return;
   }
 
-  const payload = message.payload && typeof message.payload === "object" ? message.payload : {};
-  const event = String(message.event || "");
-  const session = { ...state.sessions[index], last_control_event: event };
-
-  if (event === "session_state") {
-    if (payload.state) session.state = payload.state;
-    if ("previous_state" in payload) session.previous_state = payload.previous_state;
-    if ("current_command" in payload) session.current_command = payload.current_command;
-    if (payload.state_evidence && typeof payload.state_evidence === "object") {
-      session.state_evidence = payload.state_evidence;
-    }
-    if (payload.transport_health) session.transport_health = payload.transport_health;
-    if (payload.exit_reason) session.exit_reason = payload.exit_reason;
-    if (payload.at) session.last_activity_at = payload.at;
-  } else if (event === "session_title") {
-    const title = String(payload.title || "").trim();
-    if (title) {
-      session.terminal_title = title;
-      if (title.startsWith("/")) {
-        session.cwd = title;
-      }
-    }
-  } else if (event === "session_skill") {
-    if ("last_skill" in payload) {
-      session.last_skill = payload.last_skill;
-    }
-  } else if (event === "thought_update") {
-    if ("thought" in payload) session.thought = payload.thought;
-    if ("token_count" in payload) session.token_count = payload.token_count;
-    if ("context_limit" in payload) session.context_limit = payload.context_limit;
-    if ("thought_state" in payload) session.thought_state = payload.thought_state;
-    if ("thought_source" in payload) session.thought_source = payload.thought_source;
-    if ("rest_state" in payload) session.rest_state = payload.rest_state;
-    if ("commit_candidate" in payload) session.commit_candidate = Boolean(payload.commit_candidate);
-    if (Array.isArray(payload.action_cues)) session.action_cues = payload.action_cues;
-    if (payload.at) session.thought_updated_at = payload.at;
-    if (payload.objective_changed && payload.at) session.objective_changed_at = payload.at;
-  }
-
-  state.sessions[index] = session;
+  const plan = controlEventSessionPatchPlan(state.sessions[index], message);
+  state.sessions[index] = plan.session;
   syncTrogdorCueTransitions();
   syncTerminalStatusStrip();
   renderHudSurface();
-  refreshSelectedSessionSidecarsFromEvent(sessionId, event);
+  refreshSelectedSessionSidecarsFromEvent(sessionId, plan.event);
 }
 
 function applyLifecycleEvent(message) {

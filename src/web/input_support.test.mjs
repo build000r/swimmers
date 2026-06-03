@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
-  authTokenButtonPlan, eventCell,
+  authTokenButtonPlan, controlEventSessionPatchPlan, eventCell,
   eventClientPoint,
   globalShortcutPlan,
   initialStateBootPlan,
@@ -1158,6 +1158,145 @@ test("initialStateBootPlan preserves follow-published selection override", () =>
     selectedFromStorage: "stored-session",
     bootFollowPublishedSelection: true,
   }).selectedSessionId, null);
+});
+
+test("controlEventSessionPatchPlan preserves session_state payload semantics", () => {
+  const evidence = { source: "bridge" };
+  const session = { session_id: "sess_1", state: "idle", cwd: "/old" };
+  const plan = controlEventSessionPatchPlan(session, {
+    event: "session_state",
+    payload: {
+      state: "busy",
+      previous_state: null,
+      current_command: "",
+      state_evidence: evidence,
+      transport_health: "healthy",
+      exit_reason: "done",
+      at: "2026-06-03T13:00:00Z",
+    },
+  });
+
+  assert.equal(plan.event, "session_state");
+  assert.deepEqual(plan.session, {
+    session_id: "sess_1",
+    state: "busy",
+    cwd: "/old",
+    last_control_event: "session_state",
+    previous_state: null,
+    current_command: "",
+    state_evidence: evidence,
+    transport_health: "healthy",
+    exit_reason: "done",
+    last_activity_at: "2026-06-03T13:00:00Z",
+  });
+  assert.notEqual(plan.session, session);
+});
+
+test("controlEventSessionPatchPlan preserves title and skill event semantics", () => {
+  assert.deepEqual(controlEventSessionPatchPlan({
+    session_id: "sess_1",
+    cwd: "/old",
+  }, {
+    event: "session_title",
+    payload: { title: " /repo/swimmers " },
+  }).session, {
+    session_id: "sess_1",
+    cwd: "/repo/swimmers",
+    last_control_event: "session_title",
+    terminal_title: "/repo/swimmers",
+  });
+
+  assert.deepEqual(controlEventSessionPatchPlan({
+    session_id: "sess_1",
+    cwd: "/old",
+  }, {
+    event: "session_title",
+    payload: { title: "agent shell" },
+  }).session, {
+    session_id: "sess_1",
+    cwd: "/old",
+    last_control_event: "session_title",
+    terminal_title: "agent shell",
+  });
+
+  assert.deepEqual(controlEventSessionPatchPlan({
+    session_id: "sess_1",
+    last_skill: "old",
+  }, {
+    event: "session_skill",
+    payload: { last_skill: null },
+  }).session, {
+    session_id: "sess_1",
+    last_skill: null,
+    last_control_event: "session_skill",
+  });
+});
+
+test("controlEventSessionPatchPlan preserves thought update payload semantics", () => {
+  const actionCues = ["needs_input"];
+  assert.deepEqual(controlEventSessionPatchPlan({
+    session_id: "sess_1",
+    commit_candidate: false,
+  }, {
+    event: "thought_update",
+    payload: {
+      thought: "",
+      token_count: 0,
+      context_limit: null,
+      thought_state: "ready",
+      thought_source: "daemon",
+      rest_state: "awake",
+      commit_candidate: "yes",
+      action_cues: actionCues,
+      at: "2026-06-03T13:01:00Z",
+      objective_changed: true,
+    },
+  }).session, {
+    session_id: "sess_1",
+    commit_candidate: true,
+    last_control_event: "thought_update",
+    thought: "",
+    token_count: 0,
+    context_limit: null,
+    thought_state: "ready",
+    thought_source: "daemon",
+    rest_state: "awake",
+    action_cues: actionCues,
+    thought_updated_at: "2026-06-03T13:01:00Z",
+    objective_changed_at: "2026-06-03T13:01:00Z",
+  });
+});
+
+test("controlEventSessionPatchPlan preserves unknown event and non-object payload behavior", () => {
+  assert.deepEqual(controlEventSessionPatchPlan({
+    session_id: "sess_1",
+    state: "old",
+  }, {
+    event: "mystery",
+    payload: "not an object",
+  }).session, {
+    session_id: "sess_1",
+    state: "old",
+    last_control_event: "mystery",
+  });
+
+  assert.deepEqual(controlEventSessionPatchPlan({
+    session_id: "sess_1",
+    state: "old",
+  }, {
+    event: "session_state",
+    payload: {
+      state: "",
+      state_evidence: null,
+      transport_health: "",
+      exit_reason: "",
+      at: "",
+    },
+  }).session, {
+    session_id: "sess_1",
+    state: "old",
+    last_control_event: "session_state",
+  });
 });
 
 test("sheetActionAvailabilityPlan preserves enabled action state", () => {

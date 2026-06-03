@@ -585,6 +585,49 @@ export function initialStateBootPlan(context = {}) {
   };
 }
 
+export function controlEventSessionPatchPlan(session = {}, message = {}) {
+  const payload = message.payload && typeof message.payload === "object" ? message.payload : {};
+  const event = String(message.event || "");
+  const nextSession = { ...session, last_control_event: event };
+
+  if (event === "session_state") {
+    if (payload.state) nextSession.state = payload.state;
+    if ("previous_state" in payload) nextSession.previous_state = payload.previous_state;
+    if ("current_command" in payload) nextSession.current_command = payload.current_command;
+    if (payload.state_evidence && typeof payload.state_evidence === "object") {
+      nextSession.state_evidence = payload.state_evidence;
+    }
+    if (payload.transport_health) nextSession.transport_health = payload.transport_health;
+    if (payload.exit_reason) nextSession.exit_reason = payload.exit_reason;
+    if (payload.at) nextSession.last_activity_at = payload.at;
+  } else if (event === "session_title") {
+    const title = String(payload.title || "").trim();
+    if (title) {
+      nextSession.terminal_title = title;
+      if (title.startsWith("/")) {
+        nextSession.cwd = title;
+      }
+    }
+  } else if (event === "session_skill") {
+    if ("last_skill" in payload) {
+      nextSession.last_skill = payload.last_skill;
+    }
+  } else if (event === "thought_update") {
+    if ("thought" in payload) nextSession.thought = payload.thought;
+    if ("token_count" in payload) nextSession.token_count = payload.token_count;
+    if ("context_limit" in payload) nextSession.context_limit = payload.context_limit;
+    if ("thought_state" in payload) nextSession.thought_state = payload.thought_state;
+    if ("thought_source" in payload) nextSession.thought_source = payload.thought_source;
+    if ("rest_state" in payload) nextSession.rest_state = payload.rest_state;
+    if ("commit_candidate" in payload) nextSession.commit_candidate = Boolean(payload.commit_candidate);
+    if (Array.isArray(payload.action_cues)) nextSession.action_cues = payload.action_cues;
+    if (payload.at) nextSession.thought_updated_at = payload.at;
+    if (payload.objective_changed && payload.at) nextSession.objective_changed_at = payload.at;
+  }
+
+  return { event, session: nextSession };
+}
+
 export function sheetActionAvailabilityPlan(context = {}) {
   const writeDisabled = Boolean(context.writeDisabled);
   const hasSession = Boolean(context.hasSession);
