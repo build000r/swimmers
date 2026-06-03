@@ -3766,17 +3766,17 @@ function runTerminalFallbackPointerFocusAction(plan) {
   if (plan.scheduleFrame) requestAnimationFrame(focus);
   else focus();
 }
-
 function handleTerminalInlineInputFocus() { runTerminalFocusAction(terminalStageFocusPlan("focus", { activeSheet: state.activeSheet })); }
-
 function handleTerminalFallbackPointerFocus(eventType) { runTerminalFallbackPointerFocusAction(terminalFallbackPointerFocusPlan(eventType, { terminalFallbackActive: state.terminalFallbackActive, activeSheet: state.activeSheet })); }
-
 function handleTerminalFallbackFocusEvent(eventType) { runTerminalFocusAction(terminalFallbackFocusPlan(eventType, eventType === "focus" ? { terminalFallbackActive: state.terminalFallbackActive, activeSheet: state.activeSheet } : { terminalFallbackActive: state.terminalFallbackActive, mobileKeyboardOwnsFocus: document.activeElement === el.mobileKeyboardProxy })); }
-
 function handleTerminalFallbackScroll() { const plan = terminalFallbackScrollPlan("scroll", { terminalFallbackActive: state.terminalFallbackActive, nearBottom: state.terminalFallbackActive ? terminalFallbackIsNearBottom() : false }); if (plan.updateAutoFollow) state.terminalFallbackAutoFollow = plan.autoFollow; }
-
 function handleMobileKeyboardProxyFocusEvent(focused) { state.mobileKeyboardActive = focused; syncMobileKeyboardState(); forwardTerminalEvent({ kind: "focus", focused }); }
-
+function handleTerminalFallbackMousedown() { handleTerminalFallbackPointerFocus("mousedown"); }
+function handleTerminalFallbackClick() { handleTerminalFallbackPointerFocus("click"); }
+function handleTerminalFallbackFocus() { handleTerminalFallbackFocusEvent("focus"); }
+function handleTerminalFallbackBlur() { handleTerminalFallbackFocusEvent("blur"); }
+function handleMobileKeyboardProxyFocus() { handleMobileKeyboardProxyFocusEvent(true); }
+function handleMobileKeyboardProxyBlur() { handleMobileKeyboardProxyFocusEvent(false); }
 function mouseCell(event) {
   const rect = el.terminalStage.getBoundingClientRect();
   return eventCell(event, rect, state.currentCols, state.currentRows);
@@ -5535,15 +5535,15 @@ function bindEvents() {
   el.terminalInlineInput.addEventListener("keydown", handleTerminalInlineInputKeydown);
   el.terminalKeyStrip.addEventListener("click", handleTerminalKeyStripClick);
   el.terminalInlineInput.addEventListener("focus", handleTerminalInlineInputFocus);
-  el.terminalFallback.addEventListener("mousedown", () => handleTerminalFallbackPointerFocus("mousedown"));
-  el.terminalFallback.addEventListener("click", () => handleTerminalFallbackPointerFocus("click"));
+  el.terminalFallback.addEventListener("mousedown", handleTerminalFallbackMousedown);
+  el.terminalFallback.addEventListener("click", handleTerminalFallbackClick);
   el.terminalFallback.addEventListener("keydown", handleTerminalFallbackKeyEvent);
   el.terminalFallback.addEventListener("paste", handleTerminalFallbackPasteEvent);
-  el.terminalFallback.addEventListener("focus", () => handleTerminalFallbackFocusEvent("focus"));
-  el.terminalFallback.addEventListener("blur", () => handleTerminalFallbackFocusEvent("blur"));
+  el.terminalFallback.addEventListener("focus", handleTerminalFallbackFocus);
+  el.terminalFallback.addEventListener("blur", handleTerminalFallbackBlur);
   el.terminalFallback.addEventListener("scroll", handleTerminalFallbackScroll);
-  el.mobileKeyboardProxy.addEventListener("focus", () => handleMobileKeyboardProxyFocusEvent(true));
-  el.mobileKeyboardProxy.addEventListener("blur", () => handleMobileKeyboardProxyFocusEvent(false));
+  el.mobileKeyboardProxy.addEventListener("focus", handleMobileKeyboardProxyFocus);
+  el.mobileKeyboardProxy.addEventListener("blur", handleMobileKeyboardProxyBlur);
   el.mobileKeyboardProxy.addEventListener("keydown", handleMobileKeyboardProxyKeydown);
   el.mobileKeyboardProxy.addEventListener("input", handleMobileKeyboardProxyInput);
   el.modalBackdrop.addEventListener("click", closeSheets);
