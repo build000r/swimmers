@@ -11,18 +11,12 @@ pub fn bootstrap_provider_env_from_shell() {
         return;
     };
 
-    for key in PROVIDER_ENV_VARS {
-        if env_value_present(key) {
-            continue;
-        }
+    assign_missing_provider_env_from_shell(&shell);
+}
 
-        let Some(value) = read_env_var_from_interactive_shell(&shell, key) else {
-            continue;
-        };
-
-        if !value.trim().is_empty() {
-            env::set_var(key, value);
-        }
+fn assign_missing_provider_env_from_shell(shell: &Path) {
+    for key in missing_provider_env_vars() {
+        assign_provider_env_from_shell(shell, key);
     }
 }
 
@@ -38,6 +32,27 @@ fn detect_interactive_shell() -> Option<PathBuf> {
         .filter(|path| path.is_file())
         .or_else(|| fallback_shell("/bin/zsh"))
         .or_else(|| fallback_shell("/bin/bash"))
+}
+
+fn missing_provider_env_vars() -> impl Iterator<Item = &'static str> {
+    PROVIDER_ENV_VARS
+        .iter()
+        .copied()
+        .filter(|key| !env_value_present(key))
+}
+
+fn assign_provider_env_from_shell(shell: &Path, key: &str) {
+    if let Some(value) = provider_assignment_from_shell(shell, key) {
+        env::set_var(key, value);
+    }
+}
+
+fn provider_assignment_from_shell(shell: &Path, key: &str) -> Option<String> {
+    assignable_env_value(read_env_var_from_interactive_shell(shell, key))
+}
+
+fn assignable_env_value(value: Option<String>) -> Option<String> {
+    value.filter(|value| !value.trim().is_empty())
 }
 
 fn fallback_shell(path: &str) -> Option<PathBuf> {
@@ -90,5 +105,26 @@ mod tests {
     #[test]
     fn parse_marked_value_ignores_missing_capture() {
         assert_eq!(parse_marked_value("no markers"), None);
+    }
+
+    #[test]
+    fn assignable_env_value_keeps_non_blank_values() {
+        assert_eq!(
+            assignable_env_value(Some("sk-test".to_string())).as_deref(),
+            Some("sk-test")
+        );
+    }
+
+    #[test]
+    fn assignable_env_value_rejects_blank_values() {
+        assert_eq!(assignable_env_value(Some(" \t ".to_string())), None);
+    }
+
+    #[test]
+    fn assignable_env_value_preserves_value_whitespace_when_non_blank() {
+        assert_eq!(
+            assignable_env_value(Some(" sk-test ".to_string())).as_deref(),
+            Some(" sk-test ")
+        );
     }
 }
