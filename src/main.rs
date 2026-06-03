@@ -1,4 +1,5 @@
 use std::future::IntoFuture;
+use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -272,30 +273,227 @@ fn run_config_subcommand(action: Option<ConfigAction>) -> i32 {
 }
 
 fn run_tmux_subcommand(action: TmuxAction) -> i32 {
+    run_tmux_subcommand_with(
+        action,
+        cli::next_numeric_tmux_name,
+        cli::create_numbered_tmux_session,
+        cli::attach_tmux_session,
+        |line| println!("{line}"),
+        |line| eprintln!("{line}"),
+    )
+}
+
+fn run_tmux_subcommand_with<NextName, CreateSession, AttachSession, Stdout, Stderr>(
+    action: TmuxAction,
+    mut next_name: NextName,
+    mut create_session: CreateSession,
+    mut attach_session: AttachSession,
+    mut stdout: Stdout,
+    mut stderr: Stderr,
+) -> i32
+where
+    NextName: FnMut() -> Result<String, String>,
+    CreateSession: FnMut(Option<&Path>) -> Result<String, String>,
+    AttachSession: FnMut(&str) -> Result<i32, String>,
+    Stdout: FnMut(&str),
+    Stderr: FnMut(&str),
+{
     match action {
-        TmuxAction::NextName => match cli::next_numeric_tmux_name() {
-            Ok(name) => {
-                println!("{name}");
-                0
-            }
-            Err(err) => {
-                eprintln!("swimmers: {err}");
-                1
-            }
-        },
-        TmuxAction::New { cwd } => match cli::create_numbered_tmux_session(cwd.as_deref()) {
-            Ok(name) => match cli::attach_tmux_session(&name) {
-                Ok(code) => code,
-                Err(err) => {
-                    eprintln!("swimmers: created tmux session {name}, but attach failed: {err}");
-                    1
-                }
+        TmuxAction::NextName => run_tmux_next_name(&mut next_name, &mut stdout, &mut stderr),
+        TmuxAction::New { cwd } => run_tmux_new(
+            cwd.as_deref(),
+            &mut create_session,
+            &mut attach_session,
+            &mut stderr,
+        ),
+    }
+}
+
+fn run_tmux_next_name(
+    next_name: &mut impl FnMut() -> Result<String, String>,
+    stdout: &mut impl FnMut(&str),
+    stderr: &mut impl FnMut(&str),
+) -> i32 {
+    match next_name() {
+        Ok(name) => {
+            stdout(&name);
+            0
+        }
+        Err(err) => emit_tmux_generic_error(&err, stderr),
+    }
+}
+
+fn run_tmux_new(
+    cwd: Option<&Path>,
+    create_session: &mut impl FnMut(Option<&Path>) -> Result<String, String>,
+    attach_session: &mut impl FnMut(&str) -> Result<i32, String>,
+    stderr: &mut impl FnMut(&str),
+) -> i32 {
+    let name = match create_session(cwd) {
+        Ok(name) => name,
+        Err(err) => return emit_tmux_generic_error(&err, stderr),
+    };
+
+    attach_created_tmux_session(&name, attach_session, stderr)
+}
+
+fn attach_created_tmux_session(
+    name: &str,
+    attach_session: &mut impl FnMut(&str) -> Result<i32, String>,
+    stderr: &mut impl FnMut(&str),
+) -> i32 {
+    match attach_session(name) {
+        Ok(code) => code,
+        Err(err) => {
+            stderr(&format!(
+                "swimmers: created tmux session {name}, but attach failed: {err}"
+            ));
+            1
+        }
+    }
+}
+
+fn emit_tmux_generic_error(err: &str, stderr: &mut impl FnMut(&str)) -> i32 {
+    stderr(&format!("swimmers: {err}"));
+    1
+}
+
+#[cfg(test)]
+mod tmux_subcommand_tests {
+    use super::*;
+    use std::cell::RefCell;
+    use std::path::PathBuf;
+
+    fn unused_next_name() -> Result<String, String> {
+        panic!("next-name operation should not be called")
+    }
+
+    fn unused_create_session(_: Option<&Path>) -> Result<String, String> {
+        panic!("create-session operation should not be called")
+    }
+
+    fn unused_attach_session(_: &str) -> Result<i32, String> {
+        panic!("attach-session operation should not be called")
+    }
+
+    #[test]
+    fn tmux_next_name_success_prints_name_and_returns_zero() {
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+
+        let code = run_tmux_subcommand_with(
+            TmuxAction::NextName,
+            || Ok("7".to_string()),
+            unused_create_session,
+            unused_attach_session,
+            |line| stdout.push(line.to_string()),
+            |line| stderr.push(line.to_string()),
+        );
+
+        assert_eq!(code, 0);
+        assert_eq!(stdout, vec!["7"]);
+        assert!(stderr.is_empty());
+    }
+
+    #[test]
+    fn tmux_next_name_failure_prints_generic_error_and_returns_one() {
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+
+        let code = run_tmux_subcommand_with(
+            TmuxAction::NextName,
+            || Err("tmux unavailable".to_string()),
+            unused_create_session,
+            unused_attach_session,
+            |line| stdout.push(line.to_string()),
+            |line| stderr.push(line.to_string()),
+        );
+
+        assert_eq!(code, 1);
+        assert!(stdout.is_empty());
+        assert_eq!(stderr, vec!["swimmers: tmux unavailable"]);
+    }
+
+    #[test]
+    fn tmux_new_success_creates_then_attaches_and_returns_attach_code() {
+        let cwd = PathBuf::from("/tmp/project");
+        let calls = RefCell::new(Vec::new());
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+
+        let code = run_tmux_subcommand_with(
+            TmuxAction::New {
+                cwd: Some(cwd.clone()),
             },
-            Err(err) => {
-                eprintln!("swimmers: {err}");
-                1
-            }
-        },
+            unused_next_name,
+            |cwd_arg| {
+                calls.borrow_mut().push(format!(
+                    "create:{}",
+                    cwd_arg.expect("cwd should be forwarded").display()
+                ));
+                Ok("8".to_string())
+            },
+            |name| {
+                calls.borrow_mut().push(format!("attach:{name}"));
+                Ok(23)
+            },
+            |line| stdout.push(line.to_string()),
+            |line| stderr.push(line.to_string()),
+        );
+
+        assert_eq!(code, 23);
+        assert!(stdout.is_empty());
+        assert!(stderr.is_empty());
+        assert_eq!(
+            calls.into_inner(),
+            vec![format!("create:{}", cwd.display()), "attach:8".to_string()]
+        );
+    }
+
+    #[test]
+    fn tmux_new_create_failure_prints_generic_error_and_returns_one() {
+        let attached = RefCell::new(false);
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+
+        let code = run_tmux_subcommand_with(
+            TmuxAction::New { cwd: None },
+            unused_next_name,
+            |_| Err("cannot allocate".to_string()),
+            |_| {
+                *attached.borrow_mut() = true;
+                Ok(0)
+            },
+            |line| stdout.push(line.to_string()),
+            |line| stderr.push(line.to_string()),
+        );
+
+        assert_eq!(code, 1);
+        assert!(stdout.is_empty());
+        assert_eq!(stderr, vec!["swimmers: cannot allocate"]);
+        assert!(!attached.into_inner());
+    }
+
+    #[test]
+    fn tmux_new_attach_failure_prints_created_error_and_returns_one() {
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+
+        let code = run_tmux_subcommand_with(
+            TmuxAction::New { cwd: None },
+            unused_next_name,
+            |_| Ok("9".to_string()),
+            |_| Err("terminal refused".to_string()),
+            |line| stdout.push(line.to_string()),
+            |line| stderr.push(line.to_string()),
+        );
+
+        assert_eq!(code, 1);
+        assert!(stdout.is_empty());
+        assert_eq!(
+            stderr,
+            vec!["swimmers: created tmux session 9, but attach failed: terminal refused"]
+        );
     }
 }
 
