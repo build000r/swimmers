@@ -23,6 +23,7 @@ use crate::types::{
 };
 
 mod attention_group;
+mod ghostty_open;
 
 #[cfg(test)]
 use attention_group::build_attention_group_attach_command;
@@ -30,6 +31,12 @@ pub use attention_group::{
     attention_group_attach_command, clear_native_attention_group, open_native_attention_group,
 };
 use attention_group::{ATTENTION_GROUP_SESSION_ID, ATTENTION_GROUP_TMUX_NAME};
+use ghostty_open::open_or_focus_ghostty_session;
+#[cfg(test)]
+use ghostty_open::{
+    cached_ghostty_preview_term_id, clear_ghostty_preview_term_cache, parse_osascript_output,
+    remember_ghostty_preview_term_id,
+};
 
 const NATIVE_APP_ENV: &str = "SWIMMERS_NATIVE_APP";
 const GHOSTTY_MODE_ENV: &str = "SWIMMERS_GHOSTTY_MODE";
@@ -266,76 +273,6 @@ pub async fn open_or_focus_iterm_session(
     }
 
     unreachable!("native iTerm open loop should always return or error")
-}
-
-async fn open_or_focus_ghostty_session(
-    session_id: &str,
-    tmux_name: &str,
-    cwd: &str,
-    mode: GhosttyOpenMode,
-) -> Result<NativeDesktopOpenResponse> {
-    let _guard = NATIVE_OPEN_LOCK.lock().await;
-    let script = script_path_for_app(NativeDesktopApp::Ghostty)?;
-    if !script.exists() {
-        return Err(anyhow!(
-            "native Ghostty script missing: {}",
-            script.display()
-        ));
-    }
-    if let Some(reason) = ghostty_unavailable_reason() {
-        return Err(anyhow!(reason));
-    }
-
-    let tmux_path = resolve_tmux_binary()?;
-    let attach_command = build_ghostty_attach_command(tmux_name, &tmux_path);
-    let (_, tmux_cwd) = query_tmux_pane_metadata(&tmux_path, tmux_name)
-        .await
-        .unwrap_or((None, None));
-    let resolved_cwd = tmux_cwd.as_deref().unwrap_or(cwd);
-    let display_name = build_ghostty_display_name(resolved_cwd, tmux_name);
-    let active_tab_id = if mode == GhosttyOpenMode::Swap {
-        query_front_ghostty_tab_id().await.unwrap_or(None)
-    } else {
-        None
-    };
-    let known_term_id = match mode {
-        GhosttyOpenMode::Swap => cached_ghostty_preview_term_id(active_tab_id.as_deref()),
-        GhosttyOpenMode::Window => cached_pane_id(session_id),
-        GhosttyOpenMode::Add => None,
-    };
-
-    let mut result = run_ghostty_open_script(
-        &script,
-        session_id,
-        tmux_name,
-        resolved_cwd,
-        &attach_command,
-        &display_name,
-        mode,
-        known_term_id.as_deref(),
-    )
-    .await?;
-    let is_stale_swap_fallback =
-        mode == GhosttyOpenMode::Swap && known_term_id.is_some() && result.status == "created";
-    if is_stale_swap_fallback {
-        result.status = "fallback_created".to_string();
-    }
-
-    if mode == GhosttyOpenMode::Swap {
-        let resulting_tab_id = query_front_ghostty_tab_id().await.unwrap_or(active_tab_id);
-        if result.status == "fallback_created" {
-            remember_ghostty_preview_term_id(resulting_tab_id.as_deref(), None);
-        } else {
-            remember_ghostty_preview_term_id(
-                resulting_tab_id.as_deref(),
-                result.pane_id.as_deref(),
-            );
-        }
-    } else if mode == GhosttyOpenMode::Window {
-        remember_pane_id(session_id, result.pane_id.as_deref());
-    }
-
-    Ok(result)
 }
 
 fn script_path_for_app(app: NativeDesktopApp) -> Result<PathBuf> {
@@ -665,38 +602,6 @@ fn cached_pane_id(session_id: &str) -> Option<String> {
     SESSION_PANE_CACHE.lock().unwrap().get(session_id).cloned()
 }
 
-async fn query_front_ghostty_tab_id() -> Result<Option<String>> {
-    let mut command = Command::new("osascript");
-    command.args([
-        "-e",
-        "tell application \"Ghostty\"\nif (count of windows) = 0 then return \"\"\nreturn (id of selected tab of front window) as text\nend tell",
-    ]);
-    let output = run_osascript_output(&mut command, "querying Ghostty front tab")
-        .await
-        .map_err(|err| anyhow!("failed to query Ghostty front tab: {err}"))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        let message = if stderr.is_empty() {
-            "Ghostty tab query returned a non-zero exit status".to_string()
-        } else {
-            stderr
-        };
-        return Err(anyhow!(message));
-    }
-
-    Ok(non_empty_trimmed(String::from_utf8_lossy(&output.stdout).trim()).map(ToOwned::to_owned))
-}
-
-fn cached_ghostty_preview_term_id(tab_id: Option<&str>) -> Option<String> {
-    let tab_id = tab_id.and_then(non_empty_trimmed)?;
-    GHOSTTY_PREVIEW_TERM_IDS
-        .lock()
-        .unwrap()
-        .get(tab_id)
-        .cloned()
-}
-
 fn remember_pane_id(session_id: &str, pane_id: Option<&str>) {
     let mut cache = SESSION_PANE_CACHE.lock().unwrap();
     match pane_id.filter(|value| !value.is_empty()) {
@@ -707,27 +612,6 @@ fn remember_pane_id(session_id: &str, pane_id: Option<&str>) {
             cache.remove(session_id);
         }
     }
-}
-
-fn remember_ghostty_preview_term_id(tab_id: Option<&str>, term_id: Option<&str>) {
-    let Some(tab_id) = tab_id.and_then(non_empty_trimmed) else {
-        return;
-    };
-
-    let mut cache = GHOSTTY_PREVIEW_TERM_IDS.lock().unwrap();
-    match term_id.filter(|value| !value.is_empty()) {
-        Some(term_id) => {
-            cache.insert(tab_id.to_string(), term_id.to_string());
-        }
-        None => {
-            cache.remove(tab_id);
-        }
-    }
-}
-
-#[cfg(test)]
-fn clear_ghostty_preview_term_cache() {
-    GHOSTTY_PREVIEW_TERM_IDS.lock().unwrap().clear();
 }
 
 async fn run_osascript_output(
@@ -1079,90 +963,6 @@ fn is_transient_iterm_open_error(err: &anyhow::Error) -> bool {
     (message.contains("session 1 of missing value") && message.contains("(-1728)"))
         || (message.contains("unable to resolve iTerm session after tab creation")
             && message.contains("(-2700)"))
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn run_ghostty_open_script(
-    script: &Path,
-    session_id: &str,
-    tmux_name: &str,
-    cwd: &str,
-    attach_command: &str,
-    display_name: &str,
-    mode: GhosttyOpenMode,
-    known_term_id: Option<&str>,
-) -> Result<NativeDesktopOpenResponse> {
-    validate_osascript_script_arg("tmux_name", tmux_name)?;
-    validate_osascript_script_arg("attach_command", attach_command)?;
-
-    let safe_session_id = sanitize_osascript_text_arg(session_id);
-    let safe_cwd = sanitize_osascript_text_arg(cwd);
-    let safe_display_name = sanitize_osascript_text_arg(display_name);
-    let managed_title_prefix = ghostty_managed_title_prefix(session_id);
-    let mut command = Command::new("osascript");
-    command
-        .arg(script)
-        .arg(&safe_session_id)
-        .arg(tmux_name)
-        .arg(&safe_cwd)
-        .arg(attach_command)
-        .arg(&safe_display_name)
-        .arg(managed_title_prefix)
-        .arg(mode.label());
-    if let Some(term_id) = known_term_id.filter(|value| !value.is_empty()) {
-        command.arg(term_id);
-    }
-
-    let output = run_osascript_output(&mut command, "opening/focusing Ghostty session")
-        .await
-        .with_context(|| format!("failed to run {}", script.display()))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        let message = if stderr.is_empty() {
-            "osascript returned a non-zero exit status".to_string()
-        } else {
-            stderr
-        };
-        return Err(anyhow!(message));
-    }
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    parse_osascript_output(stdout.trim(), session_id)
-}
-
-fn ghostty_managed_title_prefix(session_id: &str) -> &'static str {
-    if session_id == ATTENTION_GROUP_SESSION_ID {
-        GHOSTTY_ATTENTION_MANAGED_TITLE_PREFIX
-    } else {
-        GHOSTTY_MANAGED_TITLE_PREFIX
-    }
-}
-
-fn parse_osascript_output(stdout: &str, session_id: &str) -> Result<NativeDesktopOpenResponse> {
-    let mut parts = stdout
-        .split_once('|')
-        .map(|(status, pane_id)| vec![status, pane_id])
-        .unwrap_or_else(|| stdout.split('\t').collect());
-    if parts.is_empty() {
-        return Err(anyhow!("osascript returned an empty response"));
-    }
-    let status = parts.remove(0).trim().to_string();
-    let pane_id = parts
-        .first()
-        .map(|value| value.trim())
-        .filter(|value| !value.is_empty())
-        .map(ToOwned::to_owned);
-
-    match status.as_str() {
-        "created" | "focused" | "swapped" | "fallback_created" => Ok(NativeDesktopOpenResponse {
-            session_id: session_id.to_string(),
-            status,
-            pane_id,
-        }),
-        other if !other.is_empty() => Err(anyhow!("unexpected osascript status: {other}")),
-        _ => Err(anyhow!("osascript returned an empty response")),
-    }
 }
 
 fn host_is_loopback(host: &str) -> bool {
