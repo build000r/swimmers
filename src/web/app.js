@@ -35,8 +35,11 @@ import {
 import {
   TROGDOR_DRAGON_TARGET,
   buildTrogdorDomGroups,
-  dismissTrogdorClawgInMap,
   loadTrogdorReadProgress,
+  markTrogdorBurntSessionsInMap,
+  markTrogdorSessionsRespondedState,
+  normalizeTrogdorSessionId,
+  pruneTrogdorBurntSessionMap,
   rawHasActionCue,
   rawSessionIsSleepingOrDeepSleep,
   saveTrogdorReadProgress,
@@ -53,6 +56,7 @@ import {
   trogdorHasActionCue,
   trogdorPrimaryActionCue,
   trogdorReaderWordIndexForProgress,
+  trogdorSessionBurntInMap,
   trogdorSessionAwaitingUser,
   trogdorSessionHasReadyClawg,
   trogdorSessionIsSleepingOrDeepSleep,
@@ -773,8 +777,7 @@ function persistToken(token) {
 }
 
 function normalizeSessionId(sessionId) {
-  const trimmed = typeof sessionId === "string" ? sessionId.trim() : "";
-  return trimmed || null;
+  return normalizeTrogdorSessionId(sessionId);
 }
 
 function syncUrlState() {
@@ -1436,10 +1439,6 @@ function setTrogdorClawgReadIndex(session, index) {
   return true;
 }
 
-function markTrogdorClawgComplete(session) {
-  setTrogdorClawgReadIndex(session, trogdorClawgWords(session).length);
-}
-
 function trogdorClawgReadComplete(session) {
   return trogdorClawgReadCompleteForProgress(session, state.trogdorReadProgress);
 }
@@ -1448,49 +1447,33 @@ function trogdorClawgDismissed(session) {
   return trogdorClawgDismissedForMap(session, state.trogdorDismissedClawgs);
 }
 
-function dismissTrogdorClawg(session) {
-  const next = dismissTrogdorClawgInMap(state.trogdorDismissedClawgs || {}, session);
-  if (!next.key) {
-    return false;
-  }
-  state.trogdorDismissedClawgs = next.dismissedClawgs;
-  return next.changed;
-}
-
 function trogdorSessionBurnt(sessionOrId) {
-  const sessionId = typeof sessionOrId === "string" ? sessionOrId : sessionOrId?.sessionId;
-  const until = state.trogdorBurntSessions.get(String(sessionId || ""));
-  if (!until) {
-    return false;
-  }
-  if (until <= performance.now()) {
-    state.trogdorBurntSessions.delete(String(sessionId || ""));
-    return false;
-  }
-  return true;
+  const next = trogdorSessionBurntInMap(
+    state.trogdorBurntSessions,
+    sessionOrId,
+    performance.now(),
+  );
+  state.trogdorBurntSessions = next.burntSessions;
+  return next.burnt;
 }
 
 function pruneTrogdorBurntSessions() {
-  const now = performance.now();
-  let changed = false;
-  for (const [sessionId, until] of state.trogdorBurntSessions.entries()) {
-    if (until <= now) {
-      state.trogdorBurntSessions.delete(sessionId);
-      changed = true;
-    }
-  }
-  return changed;
+  const next = pruneTrogdorBurntSessionMap(state.trogdorBurntSessions, performance.now());
+  state.trogdorBurntSessions = next.burntSessions;
+  return next.changed;
 }
 
 function markTrogdorSessionsBurnt(sessionIds, options = {}) {
-  const ids = Array.isArray(sessionIds) ? sessionIds.map(normalizeSessionId).filter(Boolean) : [];
-  if (!ids.length) {
+  const next = markTrogdorBurntSessionsInMap(
+    state.trogdorBurntSessions,
+    sessionIds,
+    performance.now(),
+    TROGDOR_BURN_MS,
+  );
+  if (!next.ids.length) {
     return;
   }
-  const until = performance.now() + TROGDOR_BURN_MS;
-  for (const sessionId of ids) {
-    state.trogdorBurntSessions.set(sessionId, until);
-  }
+  state.trogdorBurntSessions = next.burntSessions;
   window.setTimeout(() => {
     if (pruneTrogdorBurntSessions()) {
       state.trogdorSurfaceSignature = "";
@@ -1590,30 +1573,28 @@ function startTrogdorReaderForSession(session, options = {}) {
 }
 
 function markTrogdorSessionsResponded(sessionIds) {
-  const ids = Array.isArray(sessionIds) ? sessionIds.map(normalizeSessionId).filter(Boolean) : [];
-  const burntIds = [];
-  for (const sessionId of ids) {
-    const raw = state.sessions.find((item) => item.session_id === sessionId);
-    if (!raw) {
-      continue;
-    }
-    const session = surfaceSession(raw);
-    if (!trogdorSessionAwaitingUser(session)) {
-      continue;
-    }
-    dismissTrogdorClawg(session);
-    markTrogdorClawgComplete(session);
-    burntIds.push(sessionId);
+  const next = markTrogdorSessionsRespondedState({
+    sessionIds,
+    sessions: state.sessions,
+    toSurfaceSession: surfaceSession,
+    dismissedClawgs: state.trogdorDismissedClawgs || {},
+    progress: state.trogdorReadProgress || {},
+    hoveredSessionId: state.hoveredTrogdorSessionId,
+  });
+  state.trogdorDismissedClawgs = next.dismissedClawgs;
+  if (next.progressChanged) {
+    state.trogdorReadProgress = next.progress;
+    saveTrogdorReadProgress(state.trogdorReadProgress);
   }
-  if (burntIds.length) {
-    if (burntIds.includes(normalizeSessionId(state.hoveredTrogdorSessionId))) {
+  if (next.burntIds.length) {
+    if (next.resetReader) {
       state.hoveredTrogdorSessionId = null;
       state.trogdorReaderStartedAt = 0;
       state.trogdorReaderStartIndex = 0;
       state.trogdorReaderClawgKey = "";
       syncTrogdorReaderTimer();
     }
-    markTrogdorSessionsBurnt(burntIds);
+    markTrogdorSessionsBurnt(next.burntIds);
   }
 }
 

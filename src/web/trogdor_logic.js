@@ -156,6 +156,15 @@ export function trogdorClawgReadCompleteForProgress(session, progress = {}) {
   return words.length > 0 && trogdorClawgReadIndexForProgress(session, progress) >= words.length;
 }
 
+export function normalizeTrogdorSessionId(sessionId) {
+  const trimmed = typeof sessionId === "string" ? sessionId.trim() : "";
+  return trimmed || null;
+}
+
+export function normalizeTrogdorSessionIds(sessionIds) {
+  return Array.isArray(sessionIds) ? sessionIds.map(normalizeTrogdorSessionId).filter(Boolean) : [];
+}
+
 export function trogdorReaderBaseIndexForProgress(
   session,
   {
@@ -271,6 +280,99 @@ export function clearTrogdorDismissedClawgInMap(dismissedClawgs = {}, session) {
     changed: Boolean(dismissedClawgs?.[key]),
     key,
   };
+}
+
+export function markTrogdorSessionsRespondedState({
+  sessionIds = [],
+  sessions = [],
+  toSurfaceSession = (session) => session,
+  dismissedClawgs = {},
+  progress = {},
+  hoveredSessionId = "",
+} = {}) {
+  const ids = normalizeTrogdorSessionIds(sessionIds);
+  let nextDismissedClawgs = dismissedClawgs || {};
+  let nextProgress = progress || {};
+  let progressChanged = false;
+  const burntIds = [];
+
+  for (const sessionId of ids) {
+    const raw = sessions.find((item) => item?.session_id === sessionId);
+    if (!raw) {
+      continue;
+    }
+    const session = toSurfaceSession(raw);
+    if (!trogdorSessionAwaitingUser(session)) {
+      continue;
+    }
+
+    nextDismissedClawgs = dismissTrogdorClawgInMap(nextDismissedClawgs, session).dismissedClawgs;
+    const completed = setTrogdorClawgReadIndexForProgress(
+      nextProgress,
+      session,
+      trogdorClawgWords(session).length,
+    );
+    nextProgress = completed.progress;
+    progressChanged = progressChanged || completed.changed;
+    burntIds.push(sessionId);
+  }
+
+  return {
+    burntIds,
+    dismissedClawgs: nextDismissedClawgs,
+    progress: nextProgress,
+    progressChanged,
+    resetReader: burntIds.includes(normalizeTrogdorSessionId(hoveredSessionId)),
+  };
+}
+
+export function trogdorSessionBurntInMap(burntSessions = new Map(), sessionOrId, now = 0) {
+  const sessionId = normalizeTrogdorSessionId(
+    typeof sessionOrId === "string" ? sessionOrId : sessionOrId?.sessionId,
+  );
+  const until = sessionId ? burntSessions.get(sessionId) : null;
+  if (!until) {
+    return { burnt: false, burntSessions, changed: false };
+  }
+  if (until <= now) {
+    const nextBurntSessions = new Map(burntSessions);
+    nextBurntSessions.delete(sessionId);
+    return { burnt: false, burntSessions: nextBurntSessions, changed: true };
+  }
+  return { burnt: true, burntSessions, changed: false };
+}
+
+export function pruneTrogdorBurntSessionMap(burntSessions = new Map(), now = 0) {
+  let nextBurntSessions = burntSessions;
+  let changed = false;
+  for (const [sessionId, until] of burntSessions.entries()) {
+    if (until <= now) {
+      if (!changed) {
+        nextBurntSessions = new Map(burntSessions);
+      }
+      nextBurntSessions.delete(sessionId);
+      changed = true;
+    }
+  }
+  return { burntSessions: nextBurntSessions, changed };
+}
+
+export function markTrogdorBurntSessionsInMap(
+  burntSessions = new Map(),
+  sessionIds = [],
+  now = 0,
+  burnMs = 0,
+) {
+  const ids = normalizeTrogdorSessionIds(sessionIds);
+  if (!ids.length) {
+    return { ids, burntSessions, changed: false, until: now + burnMs };
+  }
+  const nextBurntSessions = new Map(burntSessions);
+  const until = now + burnMs;
+  for (const sessionId of ids) {
+    nextBurntSessions.set(sessionId, until);
+  }
+  return { ids, burntSessions: nextBurntSessions, changed: true, until };
 }
 
 export function trogdorSessionAwaitingUser(session) {

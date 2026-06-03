@@ -6,7 +6,11 @@ import {
   clearTrogdorDismissedClawgInMap,
   dismissTrogdorClawgInMap,
   loadTrogdorReadProgress,
+  markTrogdorBurntSessionsInMap,
+  markTrogdorSessionsRespondedState,
+  normalizeTrogdorSessionIds,
   parseTrogdorReadProgress,
+  pruneTrogdorBurntSessionMap,
   rawActionCueKinds,
   rawSessionIsSleepingOrDeepSleep,
   saveTrogdorReadProgress,
@@ -29,6 +33,7 @@ import {
   trogdorPrimaryActionCue,
   trogdorReaderBaseIndexForProgress,
   trogdorReaderWordIndexForProgress,
+  trogdorSessionBurntInMap,
   trogdorSessionAwaitingUser,
   trogdorSessionHasReadyClawg,
 } from "./trogdor_logic.js";
@@ -124,6 +129,62 @@ test("Trogdor dismissed clawg helpers set and clear by current clawg key", () =>
   const cleared = clearTrogdorDismissedClawgInMap(dismissed.dismissedClawgs, item);
   assert.equal(cleared.changed, true);
   assert.equal(trogdorClawgDismissedForMap(item, cleared.dismissedClawgs), false);
+});
+
+test("Trogdor response helpers normalize ids and update only awaiting sessions", () => {
+  const ready = session({ sessionId: "ready" });
+  const idle = session({
+    sessionId: "idle",
+    state: "idle",
+    actionCues: [],
+    operatorPressure: null,
+  });
+  const readyKey = trogdorClawgKey(ready);
+  const idleKey = trogdorClawgKey(idle);
+
+  const next = markTrogdorSessionsRespondedState({
+    sessionIds: [" ready ", "missing", "idle", "", null],
+    sessions: [
+      { session_id: "ready", surface: ready },
+      { session_id: "idle", surface: idle },
+    ],
+    toSurfaceSession: (raw) => raw.surface,
+    dismissedClawgs: {},
+    progress: {},
+    hoveredSessionId: "ready",
+  });
+
+  assert.deepEqual(normalizeTrogdorSessionIds([" a ", "", null, "b"]), ["a", "b"]);
+  assert.deepEqual(next.burntIds, ["ready"]);
+  assert.equal(next.dismissedClawgs[readyKey], true);
+  assert.equal(next.dismissedClawgs[idleKey], undefined);
+  assert.equal(next.progress[readyKey], trogdorClawgWords(ready).length);
+  assert.equal(next.progress[idleKey], undefined);
+  assert.equal(next.progressChanged, true);
+  assert.equal(next.resetReader, true);
+});
+
+test("Trogdor burn helpers mark, check, and prune expired sessions immutably", () => {
+  const marked = markTrogdorBurntSessionsInMap(new Map([["old", 50]]), [" new ", "", "other"], 100, 900);
+  assert.deepEqual(marked.ids, ["new", "other"]);
+  assert.equal(marked.burntSessions.get("old"), 50);
+  assert.equal(marked.burntSessions.get("new"), 1000);
+  assert.equal(marked.burntSessions.get("other"), 1000);
+  assert.equal(marked.changed, true);
+
+  const active = trogdorSessionBurntInMap(marked.burntSessions, { sessionId: "new" }, 999);
+  assert.equal(active.burnt, true);
+  assert.equal(active.changed, false);
+
+  const expired = trogdorSessionBurntInMap(marked.burntSessions, "old", 100);
+  assert.equal(expired.burnt, false);
+  assert.equal(expired.changed, true);
+  assert.equal(expired.burntSessions.has("old"), false);
+  assert.equal(marked.burntSessions.has("old"), true);
+
+  const pruned = pruneTrogdorBurntSessionMap(marked.burntSessions, 1000);
+  assert.equal(pruned.changed, true);
+  assert.deepEqual(Array.from(pruned.burntSessions.keys()), []);
 });
 
 test("Trogdor reader base index prefers active reader key over persisted progress", () => {
