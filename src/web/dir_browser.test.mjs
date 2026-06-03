@@ -19,6 +19,10 @@ import {
   visibleDirEntries,
   visibleSelectableDirPaths,
 } from "./dir_browser.js";
+import {
+  batchFailureLines,
+  shouldRetryDirListingFromBase,
+} from "./dir_browser_controller.js";
 
 function element(value = "") {
   const classes = new Set();
@@ -303,4 +307,42 @@ test("launch target and batch bar helpers preserve payload and label semantics",
   assert.equal(el.createBatchTool.textContent, "tool: codex -> remote-a");
   assert.equal(el.createBatchPreview.textContent, "request: run the smoke tests with extra spacing");
   assert.equal(createRequestPreviewText({ createRequest: element("") }), "(none)");
+});
+
+test("directory browser controller helpers preserve retry gate and batch failure copy", () => {
+  assert.equal(
+    shouldRetryDirListingFromBase(
+      { status: 403, message: "Path is outside the allowed base directory" },
+      "/old",
+      "",
+      {},
+    ),
+    true,
+  );
+  assert.equal(
+    shouldRetryDirListingFromBase(
+      { status: 403, message: "Path is outside the allowed base directory" },
+      "/old",
+      "clients",
+      {},
+    ),
+    false,
+  );
+  assert.equal(
+    shouldRetryDirListingFromBase(
+      { status: 403, message: "Path is outside the allowed base directory" },
+      "/old",
+      "",
+      { retriedFromBase: true },
+    ),
+    false,
+  );
+  assert.deepEqual(
+    batchFailureLines([
+      { ok: true, cwd: "/srv/repos/ok" },
+      { ok: false, cwd: "/srv/repos/missing", error: { code: "NOPE" } },
+      { ok: false, error: { message: "permission denied" } },
+    ]),
+    ["/srv/repos/missing (NOPE)", "(unknown) (permission denied)"],
+  );
 });

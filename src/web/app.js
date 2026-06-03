@@ -42,18 +42,8 @@ import {
   terminalControlKeyEvent,
 } from "./terminal_protocol.js";
 import {
-  clearCreateBatchSelection as clearDirBrowserBatchSelection,
-  dirCheckboxChangePlan as dirBrowserCheckboxChangePlan,
-  dirGroupChipClickPlan as dirBrowserGroupChipClickPlan,
-  dirGroupMembershipClickPlan as dirBrowserGroupMembershipClickPlan,
-  dirRowClickPlan as dirBrowserRowClickPlan,
-  launchTargetPayload as dirBrowserLaunchTargetPayload,
-  renderCreateBatchBar as renderDirBrowserCreateBatchBar,
-  renderDirEntries as renderDirBrowserEntries,
-  selectedLaunchTarget as dirBrowserSelectedLaunchTarget,
-  visibleDirBatchPlan as dirBrowserVisibleDirBatchPlan,
-  visibleSelectableDirPaths as dirBrowserVisibleSelectableDirPaths,
-} from "./dir_browser.js";
+  createDirBrowserController,
+} from "./dir_browser_controller.js";
 import {
   commandPaletteExecutionPlan,
   commandPaletteResultEventPlan,
@@ -1825,95 +1815,50 @@ function renderNativeStatusForm(status) {
   syncSheetActionAvailability();
 }
 
-function ensureDirBrowserBatchSelection() {
-  return state.dirBrowser.batchSelected instanceof Set
-    ? state.dirBrowser.batchSelected
-    : (state.dirBrowser.batchSelected = new Set());
-}
+const dirBrowserController = createDirBrowserController({
+  state,
+  el,
+  apiFetch,
+  setDirStatus,
+  syncSheetActionAvailability,
+  currentSession,
+  closeSheets,
+  refreshSessions,
+  selectSession,
+  setUtilityStatus,
+  openSheet,
+  focusActiveSheet,
+  parentDir,
+  storage: localStorage,
+  location: window.location,
+  ElementClass: Element,
+  pathStorageKey: DIR_BROWSER_PATH_KEY,
+  managedOnlyStorageKey: DIR_BROWSER_MANAGED_ONLY_KEY,
+});
 
-function visibleSelectableDirPaths() {
-  return dirBrowserVisibleSelectableDirPaths(state.dirBrowser);
-}
-
-function selectedLaunchTarget() {
-  return dirBrowserSelectedLaunchTarget(el, state.dirBrowser);
-}
-
-function launchTargetPayload() {
-  return dirBrowserLaunchTargetPayload(el, state.dirBrowser);
-}
-
-function renderCreateBatchBar() {
-  renderDirBrowserCreateBatchBar({ el, dirBrowser: state.dirBrowser });
-}
-
-function currentDirListingPayload() {
-  return {
-    path: state.dirBrowser.path,
-    entries: state.dirBrowser.entries,
-    groups: state.dirBrowser.groups,
-    overlay_label: state.dirBrowser.overlayLabel || undefined,
-    launch_targets: state.dirBrowser.launchTargets,
-    default_launch_target: state.dirBrowser.launchTarget,
-  };
-}
-
-function clearCreateBatchSelection() {
-  clearDirBrowserBatchSelection({
-    el,
-    dirBrowser: state.dirBrowser,
-    syncSheetActionAvailability,
-  });
-}
-
-function handleCreateBatchVisibleAction() {
-  const plan = dirBrowserVisibleDirBatchPlan(visibleSelectableDirPaths(), state.dirBrowser.path, el.dirsPath.value);
-  const selected = ensureDirBrowserBatchSelection();
-  selected.clear();
-  for (const path of plan.paths) selected.add(path);
-  if (plan.firstPath) el.createCwd.value = plan.firstPath;
-  renderDirEntries(currentDirListingPayload());
-  setDirStatus(plan.statusLabel, plan.statusMuted);
-}
-
-function handleDirCheckboxChange(event) {
-  const target = event.target instanceof Element ? event.target : null;
-  const plan = dirBrowserCheckboxChangePlan(event.type, target);
-  if (plan.type === "ignore") return false;
-  if (plan.type === "reset_checkbox") {
-    plan.checkbox.checked = false;
-    return true;
-  }
-  const selected = ensureDirBrowserBatchSelection();
-  (plan.type === "add" ? selected.add : selected.delete).call(selected, plan.path);
-  if (plan.type === "add") el.createCwd.value = plan.path;
-  syncSheetActionAvailability();
-  return true;
-}
-
-async function handleDirGroupChipClick(event, target = event.target instanceof Element ? event.target : null) {
-  const plan = dirBrowserGroupChipClickPlan(event.type, target, el.dirsManagedOnly.checked, state.dirBrowser.path, el.dirsPath.value);
-  if (plan.type !== "filter") return false;
-  state.dirBrowser.group = plan.group;
-  state.dirBrowser.managedOnly = plan.managedOnly;
-  el.dirsManagedOnly.checked = plan.managedOnly;
-  localStorage.setItem(DIR_BROWSER_MANAGED_ONLY_KEY, String(plan.managedOnly));
-  clearCreateBatchSelection();
-  await loadDirListing(plan.path, plan.managedOnly, plan.group);
-  return true;
-}
-
-function renderDirEntries(response) {
-  renderDirBrowserEntries(response, {
-    el,
-    dirBrowser: state.dirBrowser,
-    readOnly: state.readOnly,
-    pathStorageKey: DIR_BROWSER_PATH_KEY,
-    managedOnlyStorageKey: DIR_BROWSER_MANAGED_ONLY_KEY,
-    setDirStatus,
-    syncSheetActionAvailability,
-  });
-}
+const {
+  clearCreateBatchSelection,
+  handleCreateBatchClearClick,
+  handleCreateBatchVisibleAction,
+  handleCreateCwdInput,
+  handleCreateFormSubmit,
+  handleCreateLaunchTargetChange,
+  handleDirCheckboxChange,
+  handleDirGroupChipClick,
+  handleDirsListClick,
+  handleDirsLoadButtonClick,
+  handleDirsManagedOnlyChange,
+  handleDirsPathInput,
+  handleDirsPathKeydown,
+  handleDirsSearchInput,
+  handleDirsSpawnHereClick,
+  handleDirsUpButtonClick,
+  openCreateSheet,
+  openCreateSheetForCwd,
+  renderCreateBatchBar,
+  visibleSelectableDirPaths,
+  warmDirBrowserOnStartup,
+} = dirBrowserController;
 
 function renderMermaidArtifact(payload) {
   state.mermaidArtifact.artifact = payload;
@@ -2186,104 +2131,6 @@ async function openSelectedNativeSession() {
   } finally {
     syncSheetActionAvailability();
   }
-}
-
-async function loadDirListing(
-  path = el.dirsPath.value,
-  managedOnly = el.dirsManagedOnly.checked,
-  group = state.dirBrowser.group,
-  options = {},
-) {
-  const targetPath = String(path || "").trim();
-  const managed = Boolean(managedOnly);
-  const groupName = String(group || "").trim();
-
-  state.dirBrowser.loading = true;
-  state.dirBrowser.managedOnly = managed;
-  state.dirBrowser.group = groupName;
-  el.dirsManagedOnly.checked = managed;
-  localStorage.setItem(DIR_BROWSER_MANAGED_ONLY_KEY, String(managed));
-  setDirStatus("Loading directories...");
-  try {
-    const url = new URL("/v1/dirs", window.location.origin);
-    if (targetPath) {
-      url.searchParams.set("path", targetPath);
-    }
-    url.searchParams.set("managed_only", String(managed));
-    if (groupName) {
-      url.searchParams.set("group", groupName);
-    }
-    const response = await apiFetch(url.pathname + url.search);
-    const payload = await response.json();
-    renderDirEntries(payload);
-  } catch (error) {
-    if (shouldRetryDirListingFromBase(error, targetPath, groupName, options)) {
-      localStorage.removeItem(DIR_BROWSER_PATH_KEY);
-      state.dirBrowser.path = "";
-      state.dirBrowser.group = "";
-      el.dirsPath.value = "";
-      el.createCwd.value = "";
-      setDirStatus("Saved directory was outside the repository root. Loading the default directory...");
-      return loadDirListing("", managed, "", { retriedFromBase: true });
-    }
-    setDirStatus(`Failed to load directories: ${error.message}`, true);
-  } finally {
-    state.dirBrowser.loading = false;
-    syncSheetActionAvailability();
-  }
-}
-
-async function updateDirEntryGroupMembership(path, action, groupName, removeGroup = "") {
-  const targetPath = String(path || "").trim();
-  const targetGroup = String(groupName || "").trim();
-  const sourceGroup = String(removeGroup || "").trim();
-  if (!targetPath || !targetGroup || state.readOnly) {
-    return;
-  }
-
-  const add = [];
-  const remove = [];
-  if (action === "remove") {
-    remove.push(targetGroup);
-  } else {
-    add.push(targetGroup);
-    if (action === "move" && sourceGroup && sourceGroup !== targetGroup) {
-      remove.push(sourceGroup);
-    }
-  }
-
-  setDirStatus("Updating directory group...");
-  try {
-    await apiFetch("/v1/dirs/group-memberships", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ path: targetPath, add, remove }),
-    });
-    await loadDirListing(
-      state.dirBrowser.path || el.dirsPath.value,
-      state.dirBrowser.managedOnly,
-      state.dirBrowser.group,
-    );
-  } catch (error) {
-    setDirStatus(`Failed to update group: ${error.message}`, true);
-  }
-}
-
-function shouldRetryDirListingFromBase(error, targetPath, groupName, options = {}) {
-  if (options.retriedFromBase || !targetPath || groupName) {
-    return false;
-  }
-  if (error?.status !== 403) {
-    return false;
-  }
-  return String(error?.message || "").toLowerCase().includes("outside the allowed base directory");
-}
-
-async function warmDirBrowserOnStartup() {
-  if (state.dirBrowser.loading || state.dirBrowser.entries.length > 0) {
-    return;
-  }
-  await loadDirListing(state.dirBrowser.path || "", state.dirBrowser.managedOnly, state.dirBrowser.group);
 }
 
 async function refreshMermaidArtifact() {
@@ -4029,112 +3876,6 @@ function openSendSheet(target = null) {
   syncSheetActionAvailability();
 }
 
-function openCreateSheetForCwd(cwd) {
-  const path = String(cwd || "").trim();
-  if (path) {
-    el.createCwd.value = path;
-    el.dirsPath.value = path;
-    state.dirBrowser.path = path;
-  }
-  state.dirBrowser.group = "";
-  clearCreateBatchSelection();
-  openSheet("create");
-}
-
-function selectedBatchDirs() {
-  return Array.from(ensureDirBrowserBatchSelection())
-    .map((dir) => String(dir || "").trim())
-    .filter(Boolean);
-}
-
-function batchFailureLines(results) {
-  return results
-    .filter((result) => !result?.ok)
-    .map((result) => {
-      const cwd = String(result?.cwd || "(unknown)");
-      const message = result?.error?.message || result?.error?.code || "unknown error";
-      return `${cwd} (${message})`;
-    });
-}
-
-async function createBatchSessionsFromSheet(dirs, spawnTool, initialRequest) {
-  const response = await apiFetch("/v1/sessions/batch", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      dirs,
-      spawn_tool: spawnTool || "grok",
-      launch_target: launchTargetPayload(),
-      initial_request: initialRequest || "",
-    }),
-  });
-  const payload = await response.json();
-  const results = Array.isArray(payload?.results) ? payload.results : [];
-  const total = dirs.length;
-  const successResults = results.filter((result) => result?.ok);
-  const successCount = successResults.length;
-  const failures = batchFailureLines(results);
-  const failCount = failures.length;
-
-  if (successCount > 0) {
-    closeSheets();
-    clearCreateBatchSelection();
-    await refreshSessions();
-    const firstSessionId = successResults.find((result) => result?.session?.session_id)?.session?.session_id;
-    if (firstSessionId) {
-      await selectSession(firstSessionId);
-    }
-  }
-
-  if (failCount > 0) {
-    const preview = failures.slice(0, 3).join("; ");
-    const overflow = failCount > 3 ? ` (+${failCount - 3} more)` : "";
-    const prefix = response.status === 207 ? "Batch send partial" : "Batch send failed";
-    setUtilityStatus(`${prefix}: ${successCount}/${total} created. Failed: ${preview}${overflow}`, true, 6200);
-    if (successCount === 0) {
-      setDirStatus(`Batch send failed for all ${total}: ${preview}${overflow}`, true);
-    }
-    return;
-  }
-
-  setUtilityStatus(`Batch send created ${successCount}/${total} sessions.`, false, 3600);
-}
-
-async function createSessionFromSheet() {
-  if (state.readOnly) {
-    return;
-  }
-
-  const batchDirs = selectedBatchDirs();
-  const cwd = el.createCwd.value.trim();
-  const initialRequest = el.createRequest.value.trim();
-  const spawnTool = el.createTool.value;
-
-  if (batchDirs.length > 0) {
-    await createBatchSessionsFromSheet(batchDirs, spawnTool, initialRequest);
-    return;
-  }
-
-  const response = await apiFetch("/v1/sessions", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      cwd: cwd || null,
-      spawn_tool: spawnTool,
-      launch_target: launchTargetPayload(),
-      initial_request: initialRequest || null,
-    }),
-  });
-
-  const payload = await response.json();
-  const created = payload?.session;
-  if (created?.session_id) {
-    closeSheets();
-    await refreshSessions();
-    await selectSession(created.session_id);
-  }
-}
-
 async function refreshSnapshotFallback() {
   const session = currentSession();
   if (!session) {
@@ -4163,36 +3904,6 @@ function stopSnapshotPolling() {
     clearInterval(state.snapshotTimer);
     state.snapshotTimer = null;
   }
-}
-
-async function openCreateSheet() {
-  const selected = currentSession();
-  const preferredPath = String(el.createCwd.value || state.dirBrowser.path || selected?.cwd || "").trim();
-  const initialPath = preferredPath || state.dirBrowser.path || "";
-  ensureDirBrowserBatchSelection().clear();
-  state.dirBrowser.group = "";
-  if (initialPath) {
-    el.createCwd.value = initialPath;
-    el.dirsPath.value = initialPath;
-  }
-  if (typeof state.dirBrowser.managedOnly !== "boolean") {
-    state.dirBrowser.managedOnly = false;
-  }
-  el.dirsManagedOnly.checked = state.dirBrowser.managedOnly;
-  renderCreateBatchBar();
-  if (!state.dirBrowser.entries.length || (initialPath && initialPath !== state.dirBrowser.path)) {
-    await loadDirListing(initialPath, state.dirBrowser.managedOnly, "");
-  } else {
-    renderDirEntries({
-      path: state.dirBrowser.path,
-      entries: state.dirBrowser.entries,
-      groups: state.dirBrowser.groups,
-      overlay_label: state.dirBrowser.overlayLabel || undefined,
-      launch_targets: state.dirBrowser.launchTargets,
-      default_launch_target: state.dirBrowser.launchTarget,
-    });
-  }
-  focusActiveSheet();
 }
 
 function openThoughtConfigSheet() {
@@ -5046,84 +4757,9 @@ function handleSaveTokenButtonClick() { return handleAuthTokenButtonAction("save
 
 function handleClearTokenButtonClick() { return handleAuthTokenButtonAction("clear"); }
 
-async function handleCreateFormSubmit(event) { event.preventDefault(); await createSessionFromSheet(); }
-
 function handleCreateToolChange() { syncSheetActionAvailability(); }
 
-function handleCreateLaunchTargetChange() { state.dirBrowser.launchTarget = selectedLaunchTarget(); renderCreateBatchBar(); syncSheetActionAvailability(); }
-
 function handleCreateRequestInput() { syncSheetActionAvailability(); }
-
-function handleDirsSearchInput() { state.dirBrowser.search = String(el.dirsSearch.value || ""); renderDirEntries(currentDirListingPayload()); }
-
-function handleCreateBatchClearClick() { clearCreateBatchSelection(); setDirStatus("Batch selection cleared."); }
-
-function handleCreateCwdInput() { el.dirsPath.value = el.createCwd.value; syncSheetActionAvailability(); }
-
-function handleDirsManagedOnlyChange() { state.dirBrowser.managedOnly = Boolean(el.dirsManagedOnly.checked); localStorage.setItem(DIR_BROWSER_MANAGED_ONLY_KEY, String(state.dirBrowser.managedOnly)); syncSheetActionAvailability(); void loadDirListing(el.dirsPath.value, state.dirBrowser.managedOnly); }
-
-function handleDirsPathInput() { syncSheetActionAvailability(); }
-
-function handleDirsPathKeydown(event) { if (event.key === "Enter") { event.preventDefault(); state.dirBrowser.group = ""; clearCreateBatchSelection(); void loadDirListing(el.dirsPath.value, el.dirsManagedOnly.checked, ""); } }
-
-async function handleDirsLoadButtonClick() { state.dirBrowser.group = ""; clearCreateBatchSelection(); await loadDirListing(el.dirsPath.value, el.dirsManagedOnly.checked, ""); }
-
-async function handleDirsSpawnHereClick() {
-  if (state.readOnly) {
-    return;
-  }
-  const path = String(state.dirBrowser.path || el.dirsPath.value || el.createCwd.value || "").trim();
-  if (!path) {
-    return;
-  }
-  clearCreateBatchSelection();
-  el.createCwd.value = path;
-  el.dirsPath.value = path;
-  try {
-    await createSessionFromSheet();
-  } catch (error) {
-    setDirStatus(`Failed to spawn here: ${error.message}`, true);
-    syncSheetActionAvailability();
-  }
-}
-
-async function handleDirsUpButtonClick() { const parent = parentDir(el.dirsPath.value); if (parent) { state.dirBrowser.group = ""; clearCreateBatchSelection(); el.dirsPath.value = parent; el.createCwd.value = parent; await loadDirListing(parent, el.dirsManagedOnly.checked, ""); } }
-
-async function handleDirsListClick(event) {
-  const target = event.target instanceof Element ? event.target : null;
-  if (!target) {
-    return;
-  }
-  if (target.closest(".dir-open-url")) {
-    return;
-  }
-
-  if (await handleDirGroupChipClick(event, target)) {
-    return;
-  }
-
-  const groupActionPlan = dirBrowserGroupMembershipClickPlan(event.type, target);
-  if (groupActionPlan.type === "membership") {
-    await updateDirEntryGroupMembership(groupActionPlan.path, groupActionPlan.action, groupActionPlan.group, groupActionPlan.removeGroup);
-    return;
-  }
-
-  const rowPlan = dirBrowserRowClickPlan(event.type, target);
-  if (rowPlan.type !== "row") {
-    return;
-  }
-  const path = rowPlan.path;
-  el.dirsPath.value = path;
-  el.createCwd.value = path;
-  if (rowPlan.hasChildren) {
-    state.dirBrowser.group = "";
-    clearCreateBatchSelection();
-    await loadDirListing(path, el.dirsManagedOnly.checked, "");
-    return;
-  }
-  setDirStatus(`Selected ${path}`);
-  syncSheetActionAvailability();
-}
 
 async function handleMermaidRefreshButtonClick() { await refreshMermaidArtifact(); }
 

@@ -42,6 +42,7 @@ const MERMAID_ARTIFACT_JS_ROUTE: &str = "/mermaid_artifact.js";
 const TERMINAL_SAFETY_JS_ROUTE: &str = "/terminal_safety.js";
 const TERMINAL_PROTOCOL_JS_ROUTE: &str = "/terminal_protocol.js";
 const DIR_BROWSER_JS_ROUTE: &str = "/dir_browser.js";
+const DIR_BROWSER_CONTROLLER_JS_ROUTE: &str = "/dir_browser_controller.js";
 const COMMAND_PALETTE_JS_ROUTE: &str = "/command_palette.js";
 const TROGDOR_LOGIC_JS_ROUTE: &str = "/trogdor_logic.js";
 const TROGDOR_DOM_LOGIC_JS_ROUTE: &str = "/trogdor_dom_logic.js";
@@ -119,6 +120,10 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route(TERMINAL_SAFETY_JS_ROUTE, get(terminal_safety_js))
         .route(TERMINAL_PROTOCOL_JS_ROUTE, get(terminal_protocol_js))
         .route(DIR_BROWSER_JS_ROUTE, get(dir_browser_js))
+        .route(
+            DIR_BROWSER_CONTROLLER_JS_ROUTE,
+            get(dir_browser_controller_js),
+        )
         .route(COMMAND_PALETTE_JS_ROUTE, get(command_palette_js))
         .route(TROGDOR_LOGIC_JS_ROUTE, get(trogdor_logic_js))
         .route(TROGDOR_DOM_LOGIC_JS_ROUTE, get(trogdor_dom_logic_js))
@@ -705,6 +710,13 @@ async fn terminal_protocol_js() -> Response {
 
 async fn dir_browser_js() -> Response {
     javascript_asset("src/web/dir_browser.js", include_str!("dir_browser.js"))
+}
+
+async fn dir_browser_controller_js() -> Response {
+    javascript_asset(
+        "src/web/dir_browser_controller.js",
+        include_str!("dir_browser_controller.js"),
+    )
 }
 
 async fn command_palette_js() -> Response {
@@ -2245,7 +2257,11 @@ mod tests {
     #[tokio::test]
     async fn browser_js_asset_handlers_cover_app_module_graph() {
         let assets = [
-            (APP_JS_ROUTE, app_js().await, "from \"./dir_browser.js\""),
+            (
+                APP_JS_ROUTE,
+                app_js().await,
+                "from \"./dir_browser_controller.js\"",
+            ),
             (
                 RENDERED_SURFACE_JS_ROUTE,
                 rendered_surface_js().await,
@@ -2315,6 +2331,11 @@ mod tests {
                 DIR_BROWSER_JS_ROUTE,
                 dir_browser_js().await,
                 "export function renderDirEntries",
+            ),
+            (
+                DIR_BROWSER_CONTROLLER_JS_ROUTE,
+                dir_browser_controller_js().await,
+                "from \"./dir_browser.js\"",
             ),
             (
                 COMMAND_PALETTE_JS_ROUTE,
@@ -2459,22 +2480,30 @@ mod tests {
     fn directory_browser_modules_include_overlay_filter_chip_logic() {
         let js = include_str!("app.js");
         let dir_browser = include_str!("dir_browser.js");
+        let dir_browser_controller = include_str!("dir_browser_controller.js");
         assert!(dir_browser.contains("response?.overlay_label"));
         assert!(dir_browser.contains("managedButton.dataset.filter = \"managed\""));
         assert!(dir_browser.contains("allButton.textContent = \"all folders\""));
-        assert!(js.contains("filter === \"managed\" ? true"));
+        assert!(js.contains("createDirBrowserController"));
+        assert!(dir_browser_controller.contains("dirGroupChipClickPlan"));
+        assert!(dir_browser_controller.contains("managedOnlyStorageKey"));
     }
 
     #[test]
     fn app_js_retries_saved_out_of_base_dir_from_default_base() {
         let js = include_str!("app.js");
-        assert!(js.contains("shouldRetryDirListingFromBase"));
-        assert!(js.contains("localStorage.removeItem(DIR_BROWSER_PATH_KEY)"));
+        let dir_browser_controller = include_str!("dir_browser_controller.js");
+        let input_support = include_str!("input_support.js");
+        assert!(js.contains("createDirBrowserController"));
+        assert!(dir_browser_controller.contains("shouldRetryDirListingFromBase"));
+        assert!(dir_browser_controller.contains("storage.removeItem(pathStorageKey)"));
         assert!(
-            js.contains("return loadDirListing(\"\", managed, \"\", { retriedFromBase: true })")
+            dir_browser_controller
+                .contains("return loadDirListing(\"\", managed, \"\", { retriedFromBase: true })")
         );
-        assert!(js.contains("outside the allowed base directory"));
-        assert!(js.contains("rawStoredDirPath.trim() === \"/\" ? \"\" : rawStoredDirPath"));
+        assert!(dir_browser_controller.contains("outside the allowed base directory"));
+        assert!(input_support
+            .contains("rawStoredDirPath.trim() === \"/\" ? \"\" : rawStoredDirPath"));
     }
 
     #[test]
