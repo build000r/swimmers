@@ -326,6 +326,14 @@ pub(crate) fn skill_atlas_mermaid_source<C: TuiApi>(
 ) -> String {
     let skills = collect_skill_views(app);
     let contexts = skill_panel_contexts(app);
+    let mut source = skill_atlas_mermaid_header(focus);
+    append_skill_atlas_repo_nodes(&mut source, &contexts);
+    let source_indexes = append_skill_atlas_source_nodes(&mut source, &skills, focus);
+    append_skill_atlas_skill_nodes(&mut source, &skills, &source_indexes, focus);
+    source
+}
+
+fn skill_atlas_mermaid_header(focus: &SkillPanelAction) -> String {
     let focus_title = mermaid_label(&skill_atlas_focus_title(focus));
     let mut source = String::from("flowchart TB\n");
     source.push_str("  atlas[\"Skill Atlas\\nSBP skill context\"]\n");
@@ -335,75 +343,156 @@ pub(crate) fn skill_atlas_mermaid_source<C: TuiApi>(
     source.push_str("  atlas --> focus\n");
     source.push_str("  atlas --> repos\n");
     source.push_str("  atlas --> sources\n");
+    source
+}
 
+fn append_skill_atlas_repo_nodes(source: &mut String, contexts: &[SkillPanelContext]) {
     for (idx, context) in contexts.iter().enumerate().take(8) {
-        let selected = if context.selected { " *" } else { "" };
-        let label = mermaid_label(&format!(
-            "{}{}\\n{} session{}",
-            context.label,
-            selected,
-            context.count,
-            if context.count == 1 { "" } else { "s" }
-        ));
-        source.push_str(&format!("  repo{idx}[\"{label}\"]\n"));
-        source.push_str(&format!("  repos --> repo{idx}\n"));
+        append_skill_atlas_repo_node(source, idx, context);
     }
-    if contexts.len() > 8 {
+    append_skill_atlas_repo_overflow(source, contexts.len());
+}
+
+fn append_skill_atlas_repo_node(source: &mut String, idx: usize, context: &SkillPanelContext) {
+    let label = mermaid_label(&skill_atlas_repo_label(context));
+    source.push_str(&format!("  repo{idx}[\"{label}\"]\n"));
+    source.push_str(&format!("  repos --> repo{idx}\n"));
+}
+
+fn append_skill_atlas_repo_overflow(source: &mut String, context_count: usize) {
+    if context_count > 8 {
         source.push_str(&format!(
             "  repo_more[\"+{} more repo contexts\"]\n  repos --> repo_more\n",
-            contexts.len() - 8
+            context_count - 8
         ));
     }
+}
 
+fn skill_atlas_repo_label(context: &SkillPanelContext) -> String {
+    let selected = if context.selected { " *" } else { "" };
+    format!(
+        "{}{}\\n{} session{}",
+        context.label,
+        selected,
+        context.count,
+        skill_atlas_plural_suffix(context.count)
+    )
+}
+
+fn append_skill_atlas_source_nodes(
+    source: &mut String,
+    skills: &[SkillPanelSkillView],
+    focus: &SkillPanelAction,
+) -> BTreeMap<String, usize> {
     let mut source_indexes = BTreeMap::<String, usize>::new();
-    for skill in &skills {
-        if !source_indexes.contains_key(&skill.source_dir) {
-            let idx = source_indexes.len();
-            source_indexes.insert(skill.source_dir.clone(), idx);
-            let label = mermaid_label(&skill.source_label);
-            source.push_str(&format!("  src{idx}[\"{label}\"]\n"));
-            source.push_str(&format!("  sources --> src{idx}\n"));
-            if matches!(focus, SkillPanelAction::Source { source_dir, .. } if source_dir == &skill.source_dir)
-            {
-                source.push_str(&format!("  focus --> src{idx}\n"));
-            }
+    for skill in skills {
+        if source_indexes.contains_key(&skill.source_dir) {
+            continue;
         }
+        let idx = source_indexes.len();
+        source_indexes.insert(skill.source_dir.clone(), idx);
+        append_skill_atlas_source_node(source, idx, skill, focus);
     }
+    source_indexes
+}
 
-    for (idx, skill) in skills.iter().enumerate().take(48) {
-        let marker = if skill.sbp_highlight { "[SBP] " } else { "" };
-        let selected = if skill.selected_context { " *" } else { "" };
-        let state = skill
-            .state
-            .as_deref()
-            .or(skill.availability.as_deref())
-            .unwrap_or("ok");
-        let contexts = if skill.contexts.is_empty() {
-            "no active repo".to_string()
-        } else {
-            skill.contexts.join(", ")
-        };
-        let label = mermaid_label(&format!(
-            "{marker}{}{}\\n{}\\n{}",
-            skill.name, selected, state, contexts
-        ));
-        source.push_str(&format!("  skill{idx}[\"{label}\"]\n"));
-        if let Some(source_idx) = source_indexes.get(&skill.source_dir) {
-            source.push_str(&format!("  src{source_idx} --> skill{idx}\n"));
-        }
-        if matches!(focus, SkillPanelAction::Skill(focused) if focused.name == skill.name && focused.source_dir == skill.source_dir)
-        {
-            source.push_str(&format!("  focus --> skill{idx}\n"));
-        }
+fn append_skill_atlas_source_node(
+    source: &mut String,
+    idx: usize,
+    skill: &SkillPanelSkillView,
+    focus: &SkillPanelAction,
+) {
+    let label = mermaid_label(&skill.source_label);
+    source.push_str(&format!("  src{idx}[\"{label}\"]\n"));
+    source.push_str(&format!("  sources --> src{idx}\n"));
+    if skill_atlas_focus_matches_source(focus, &skill.source_dir) {
+        source.push_str(&format!("  focus --> src{idx}\n"));
     }
-    if skills.len() > 48 {
+}
+
+fn append_skill_atlas_skill_nodes(
+    source: &mut String,
+    skills: &[SkillPanelSkillView],
+    source_indexes: &BTreeMap<String, usize>,
+    focus: &SkillPanelAction,
+) {
+    for (idx, skill) in skills.iter().enumerate().take(48) {
+        append_skill_atlas_skill_node(source, idx, skill, source_indexes, focus);
+    }
+    append_skill_atlas_skill_overflow(source, skills.len());
+}
+
+fn append_skill_atlas_skill_node(
+    source: &mut String,
+    idx: usize,
+    skill: &SkillPanelSkillView,
+    source_indexes: &BTreeMap<String, usize>,
+    focus: &SkillPanelAction,
+) {
+    let label = mermaid_label(&skill_atlas_skill_label(skill));
+    source.push_str(&format!("  skill{idx}[\"{label}\"]\n"));
+    if let Some(source_idx) = source_indexes.get(&skill.source_dir) {
+        source.push_str(&format!("  src{source_idx} --> skill{idx}\n"));
+    }
+    if skill_atlas_focus_matches_skill(focus, skill) {
+        source.push_str(&format!("  focus --> skill{idx}\n"));
+    }
+}
+
+fn append_skill_atlas_skill_overflow(source: &mut String, skill_count: usize) {
+    if skill_count > 48 {
         source.push_str(&format!(
             "  skill_more[\"+{} more skills\"]\n  sources --> skill_more\n",
-            skills.len() - 48
+            skill_count - 48
         ));
     }
+}
 
-    source
+fn skill_atlas_skill_label(skill: &SkillPanelSkillView) -> String {
+    let marker = if skill.sbp_highlight { "[SBP] " } else { "" };
+    let selected = if skill.selected_context { " *" } else { "" };
+    format!(
+        "{marker}{}{}\\n{}\\n{}",
+        skill.name,
+        selected,
+        skill_atlas_skill_state(skill),
+        skill_atlas_skill_contexts_label(skill)
+    )
+}
+
+fn skill_atlas_skill_state(skill: &SkillPanelSkillView) -> &str {
+    skill
+        .state
+        .as_deref()
+        .or(skill.availability.as_deref())
+        .unwrap_or("ok")
+}
+
+fn skill_atlas_skill_contexts_label(skill: &SkillPanelSkillView) -> String {
+    if skill.contexts.is_empty() {
+        "no active repo".to_string()
+    } else {
+        skill.contexts.join(", ")
+    }
+}
+
+fn skill_atlas_plural_suffix(count: usize) -> &'static str {
+    if count == 1 {
+        ""
+    } else {
+        "s"
+    }
+}
+
+fn skill_atlas_focus_matches_source(focus: &SkillPanelAction, candidate_source_dir: &str) -> bool {
+    matches!(focus, SkillPanelAction::Source { source_dir, .. } if source_dir == candidate_source_dir)
+}
+
+fn skill_atlas_focus_matches_skill(
+    focus: &SkillPanelAction,
+    candidate: &SkillPanelSkillView,
+) -> bool {
+    matches!(focus, SkillPanelAction::Skill(focused) if focused.name == candidate.name && focused.source_dir == candidate.source_dir)
 }
 
 pub(crate) fn skill_atlas_plan_text<C: TuiApi>(app: &App<C>, focus: &SkillPanelAction) -> String {
