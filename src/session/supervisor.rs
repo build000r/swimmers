@@ -72,6 +72,14 @@ struct MissingTrackedSessionSummary {
     summary: SessionSummary,
 }
 
+struct AdoptSessionPlan {
+    session_id: String,
+    stale_seed: Option<SessionSummary>,
+    reused_session_id: bool,
+    last_activity_override: Option<chrono::DateTime<Utc>>,
+    batch: Option<SessionBatchMembership>,
+}
+
 #[derive(Debug, Clone)]
 pub struct TmuxDependencyHealthSnapshot {
     pub discovery: DependencyHealthSnapshot,
@@ -1201,6 +1209,105 @@ impl SessionSupervisor {
         }
     }
 
+    async fn reject_already_tracked_adopt_target(
+        &self,
+        tmux_name: &str,
+    ) -> Result<(), TmuxAdoptError> {
+        if let Some(active_id) = self.active_session_id_for_tmux(tmux_name).await {
+            return Err(TmuxAdoptError::AlreadyTracked {
+                tmux_name: tmux_name.to_string(),
+                session_id: active_id,
+            });
+        }
+
+        Ok(())
+    }
+
+    async fn verify_adopt_target_exists(&self, tmux_name: &str) -> Result<(), TmuxAdoptError> {
+        let listed = self.list_tmux_session_names("manual_tmux_adopt").await;
+        if !listed.reliable {
+            return Err(TmuxAdoptError::DiscoveryUnavailable);
+        }
+
+        Self::reject_missing_or_ambiguous_adopt_target(tmux_name, &listed.names)
+    }
+
+    fn reject_missing_or_ambiguous_adopt_target(
+        tmux_name: &str,
+        listed_tmux_names: &[String],
+    ) -> Result<(), TmuxAdoptError> {
+        match listed_tmux_names
+            .iter()
+            .filter(|name| *name == tmux_name)
+            .count()
+        {
+            0 => Err(TmuxAdoptError::TargetNotFound {
+                tmux_name: tmux_name.to_string(),
+            }),
+            1 => Ok(()),
+            matches => Err(TmuxAdoptError::AmbiguousTarget {
+                tmux_name: tmux_name.to_string(),
+                matches,
+            }),
+        }
+    }
+
+    async fn prepare_adopt_session_plan(
+        self: &Arc<Self>,
+        tmux_name: &str,
+        requested_session_id: Option<String>,
+    ) -> Result<AdoptSessionPlan, TmuxAdoptError> {
+        let (session_id, stale_seed) = self
+            .resolve_adopt_session_identity(tmux_name, requested_session_id)
+            .await?;
+        let reused_session_id = stale_seed.is_some();
+        if reused_session_id {
+            self.bump_id_counter_from_session_id(&session_id);
+        }
+
+        let last_activity_override = match stale_seed.as_ref() {
+            Some(summary) => Some(summary.last_activity_at),
+            None => self.persisted_last_activity(&session_id).await,
+        };
+        let batch = match stale_seed
+            .as_ref()
+            .and_then(|summary| summary.batch.clone())
+        {
+            Some(batch) => Some(batch),
+            None => self.persisted_batch(&session_id).await,
+        };
+
+        Ok(AdoptSessionPlan {
+            session_id,
+            stale_seed,
+            reused_session_id,
+            last_activity_override,
+            batch,
+        })
+    }
+
+    fn spawn_adopted_tmux_actor(
+        &self,
+        tmux_name: &str,
+        plan: &AdoptSessionPlan,
+    ) -> Result<ActorHandle, TmuxAdoptError> {
+        crate::session::actor::SessionActor::spawn(
+            plan.session_id.clone(),
+            tmux_name.to_string(),
+            true,
+            None,
+            None,
+            None,
+            self.config.clone(),
+            plan.last_activity_override,
+            plan.batch.clone(),
+        )
+        .map_err(|error| TmuxAdoptError::SpawnFailed {
+            tmux_name: tmux_name.to_string(),
+            message: error.to_string(),
+        })
+    }
+
     fn build_adopted_summary(
         &self,
         session_id: &str,
@@ -1213,6 +1320,98 @@ impl SessionSupervisor {
             .revive_from_stale(session_id, tmux_name, reason);
         let repo_theme = self.resolve_repo_theme_for_summary(&mut summary);
         (summary, repo_theme)
+    }
+
+    async fn insert_adopted_handle(
+        &self,
+        tmux_name: &str,
+        session_id: &str,
+        handle: ActorHandle,
+    ) -> Result<(), TmuxAdoptError> {
+        if self
+            .insert_discovered_handle(session_id.to_string(), tmux_name.to_string(), handle)
+            .await
+        {
+            return Ok(());
+        }
+
+        let active_id = self
+            .active_session_id_for_tmux(tmux_name)
+            .await
+            .unwrap_or_else(|| "<unknown>".to_string());
+        Err(TmuxAdoptError::AlreadyTracked {
+            tmux_name: tmux_name.to_string(),
+            session_id: active_id,
+        })
+    }
+
+    async fn finish_adopted_tmux_session(
+        &self,
+        tmux_name: &str,
+        plan: AdoptSessionPlan,
+        handle: ActorHandle,
+    ) -> Result<AdoptedTmuxSession, TmuxAdoptError> {
+        self.insert_adopted_handle(tmux_name, &plan.session_id, handle)
+            .await?;
+
+        let reason = if plan.reused_session_id {
+            "manual_tmux_reattach"
+        } else {
+            "manual_tmux_adopt"
+        };
+        let (summary, repo_theme) =
+            self.build_adopted_summary(&plan.session_id, tmux_name, plan.stale_seed, reason);
+
+        self.retain_non_adopted_stale_summaries(&plan.session_id, tmux_name)
+            .await;
+        self.cache_adopted_summary(&plan.session_id, summary.clone())
+            .await;
+        self.update_active_session_metric().await;
+        self.emit_adopted_created_event(
+            plan.session_id,
+            summary.clone(),
+            reason,
+            repo_theme.clone(),
+        );
+        self.persist_registry().await;
+
+        Ok(AdoptedTmuxSession {
+            session: summary,
+            repo_theme,
+            reused_session_id: plan.reused_session_id,
+        })
+    }
+
+    async fn retain_non_adopted_stale_summaries(&self, session_id: &str, tmux_name: &str) {
+        let mut stale = self.stale_sessions.write().await;
+        stale.retain(|existing| {
+            existing.session_id != session_id && existing.tmux_name != tmux_name
+        });
+    }
+
+    async fn cache_adopted_summary(&self, session_id: &str, summary: SessionSummary) {
+        let mut cache = self.summary_cache.write().await;
+        cache.insert(session_id.to_string(), summary);
+    }
+
+    async fn update_active_session_metric(&self) {
+        let sessions = self.sessions.read().await;
+        crate::metrics::set_active_sessions(sessions.len());
+    }
+
+    fn emit_adopted_created_event(
+        &self,
+        session_id: String,
+        summary: SessionSummary,
+        reason: &'static str,
+        repo_theme: Option<RepoTheme>,
+    ) {
+        let _ = self.lifecycle_tx.send(LifecycleEvent::Created {
+            session_id,
+            summary,
+            reason: reason.to_string(),
+            repo_theme,
+        });
     }
 
     // -----------------------------------------------------------------------
@@ -1258,122 +1457,14 @@ impl SessionSupervisor {
         }
 
         let _discovery_guard = self.discovery_lock.lock().await;
-        if let Some(active_id) = self.active_session_id_for_tmux(&tmux_name).await {
-            return Err(TmuxAdoptError::AlreadyTracked {
-                tmux_name,
-                session_id: active_id,
-            });
-        }
-
-        let listed = self.list_tmux_session_names("manual_tmux_adopt").await;
-        if !listed.reliable {
-            return Err(TmuxAdoptError::DiscoveryUnavailable);
-        }
-
-        let target_matches = listed
-            .names
-            .iter()
-            .filter(|name| *name == &tmux_name)
-            .count();
-        match target_matches {
-            0 => {
-                return Err(TmuxAdoptError::TargetNotFound { tmux_name });
-            }
-            1 => {}
-            count => {
-                return Err(TmuxAdoptError::AmbiguousTarget {
-                    tmux_name,
-                    matches: count,
-                });
-            }
-        }
-
-        let (adopt_session_id, stale_seed) = self
-            .resolve_adopt_session_identity(&tmux_name, session_id)
+        self.reject_already_tracked_adopt_target(&tmux_name).await?;
+        self.verify_adopt_target_exists(&tmux_name).await?;
+        let plan = self
+            .prepare_adopt_session_plan(&tmux_name, session_id)
             .await?;
-        let reused_session_id = stale_seed.is_some();
-        if reused_session_id {
-            self.bump_id_counter_from_session_id(&adopt_session_id);
-        }
-
-        let last_activity_override = match stale_seed.as_ref() {
-            Some(summary) => Some(summary.last_activity_at),
-            None => self.persisted_last_activity(&adopt_session_id).await,
-        };
-        let batch = match stale_seed
-            .as_ref()
-            .and_then(|summary| summary.batch.clone())
-        {
-            Some(batch) => Some(batch),
-            None => self.persisted_batch(&adopt_session_id).await,
-        };
-
-        let handle = crate::session::actor::SessionActor::spawn(
-            adopt_session_id.clone(),
-            tmux_name.clone(),
-            true,
-            None,
-            None,
-            None,
-            self.config.clone(),
-            last_activity_override,
-            batch,
-        )
-        .map_err(|error| TmuxAdoptError::SpawnFailed {
-            tmux_name: tmux_name.clone(),
-            message: error.to_string(),
-        })?;
-
-        if !self
-            .insert_discovered_handle(adopt_session_id.clone(), tmux_name.clone(), handle)
+        let handle = self.spawn_adopted_tmux_actor(&tmux_name, &plan)?;
+        self.finish_adopted_tmux_session(&tmux_name, plan, handle)
             .await
-        {
-            let active_id = self
-                .active_session_id_for_tmux(&tmux_name)
-                .await
-                .unwrap_or_else(|| "<unknown>".to_string());
-            return Err(TmuxAdoptError::AlreadyTracked {
-                tmux_name,
-                session_id: active_id,
-            });
-        }
-
-        let reason = if reused_session_id {
-            "manual_tmux_reattach"
-        } else {
-            "manual_tmux_adopt"
-        };
-        let (summary, repo_theme) =
-            self.build_adopted_summary(&adopt_session_id, &tmux_name, stale_seed, reason);
-        {
-            let mut stale = self.stale_sessions.write().await;
-            stale.retain(|existing| {
-                existing.session_id != adopt_session_id && existing.tmux_name != tmux_name
-            });
-        }
-        {
-            let mut cache = self.summary_cache.write().await;
-            cache.insert(adopt_session_id.clone(), summary.clone());
-        }
-        {
-            let sessions = self.sessions.read().await;
-            crate::metrics::set_active_sessions(sessions.len());
-        }
-
-        let _ = self.lifecycle_tx.send(LifecycleEvent::Created {
-            session_id: adopt_session_id,
-            summary: summary.clone(),
-            reason: reason.to_string(),
-            repo_theme: repo_theme.clone(),
-        });
-
-        self.persist_registry().await;
-
-        Ok(AdoptedTmuxSession {
-            session: summary,
-            repo_theme,
-            reused_session_id,
-        })
     }
 
     // -----------------------------------------------------------------------
