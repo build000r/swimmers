@@ -2760,14 +2760,7 @@ function updateTerminalFallbackText(text) {
 }
 
 function syncTerminalAccessibilityMirror(fallbackText = null) {
-  let mirrorText = "";
-  if (typeof fallbackText === "string") {
-    mirrorText = fallbackText;
-  } else if (terminalSupports("screenReaderMirrorText")) {
-    mirrorText = state.terminal.screenReaderMirrorText() || "";
-  } else if (terminalSupports("accessibilityDomSnapshot")) {
-    mirrorText = state.terminal.accessibilityDomSnapshot()?.value || "";
-  }
+  const mirrorText = typeof fallbackText === "string" ? fallbackText : terminalMirrorTextFromRenderer();
   state.terminalMirrorText = mirrorText;
   if (el.terminalA11yMirror) {
     el.terminalA11yMirror.value = mirrorText;

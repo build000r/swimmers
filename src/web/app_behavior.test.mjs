@@ -2050,6 +2050,8 @@ test("terminal text fallback follows the tail unless the user scrolled up", () =
 
   assert.equal(web.el.terminalFallback.textContent, "line 1\nline 2");
   assert.equal(web.el.terminalFallback.scrollTop, 500);
+  assert.equal(web.state.terminalMirrorText, "line 1\nline 2");
+  assert.equal(web.el.terminalA11yMirror.value, "line 1\nline 2");
 
   web.state.terminalFallbackAutoFollow = false;
   web.el.terminalFallback.scrollTop = 120;
@@ -2059,6 +2061,8 @@ test("terminal text fallback follows the tail unless the user scrolled up", () =
 
   assert.equal(web.el.terminalFallback.textContent, "line 3");
   assert.equal(web.el.terminalFallback.scrollTop, 120);
+  assert.equal(web.state.terminalMirrorText, "line 3");
+  assert.equal(web.el.terminalA11yMirror.value, "line 3");
 });
 
 test("command palette filters existing actions without touching terminal input", () => {
