@@ -32,6 +32,7 @@ const RENDERED_SURFACE_JS_ROUTE: &str = "/rendered_surface.js";
 const INPUT_SUPPORT_JS_ROUTE: &str = "/input_support.js";
 const SEND_SHEET_JS_ROUTE: &str = "/send_sheet.js";
 const TERMINAL_SURFACE_SETUP_JS_ROUTE: &str = "/terminal_surface_setup.js";
+const TERMINAL_RESIZE_JS_ROUTE: &str = "/terminal_resize.js";
 const GLOBAL_SHORTCUT_DISPATCH_JS_ROUTE: &str = "/global_shortcut_dispatch.js";
 const SESSION_REFRESH_JS_ROUTE: &str = "/session_refresh.js";
 const MERMAID_ARTIFACT_JS_ROUTE: &str = "/mermaid_artifact.js";
@@ -93,6 +94,7 @@ pub fn routes() -> Router<Arc<AppState>> {
             TERMINAL_SURFACE_SETUP_JS_ROUTE,
             get(terminal_surface_setup_js),
         )
+        .route(TERMINAL_RESIZE_JS_ROUTE, get(terminal_resize_js))
         .route(
             GLOBAL_SHORTCUT_DISPATCH_JS_ROUTE,
             get(global_shortcut_dispatch_js),
@@ -617,6 +619,13 @@ async fn terminal_surface_setup_js() -> Response {
     javascript_asset(
         "src/web/terminal_surface_setup.js",
         include_str!("terminal_surface_setup.js"),
+    )
+}
+
+async fn terminal_resize_js() -> Response {
+    javascript_asset(
+        "src/web/terminal_resize.js",
+        include_str!("terminal_resize.js"),
     )
 }
 
@@ -2201,6 +2210,11 @@ mod tests {
                 "export async function initializeTerminalSurface",
             ),
             (
+                TERMINAL_RESIZE_JS_ROUTE,
+                terminal_resize_js().await,
+                "export function runTerminalSurfaceResize",
+            ),
+            (
                 GLOBAL_SHORTCUT_DISPATCH_JS_ROUTE,
                 global_shortcut_dispatch_js().await,
                 "export function runGlobalShortcutAction",
@@ -2406,11 +2420,14 @@ mod tests {
     #[test]
     fn app_js_dedupes_surface_actions_and_stable_resizes() {
         let js = include_str!("app.js");
+        let resize = include_str!("terminal_resize.js");
         assert!(js.contains("function stopSurfaceEvent(event)"));
         assert!(js.contains("event.stopImmediatePropagation"));
-        assert!(js
-            .contains("terminalResizeGeometryPlan({ cols: fit.value?.cols, rows: fit.value?.rows"));
-        assert!(js.contains("if (!resizePlan.shouldResize)"));
+        assert!(
+            js.contains("runTerminalSurfaceResize({ pushResize, force }, terminalResizeRuntime)")
+        );
+        assert!(resize.contains("terminalResizeGeometryPlan({"));
+        assert!(resize.contains("if (!resizePlan.shouldResize)"));
         assert!(js.contains("queueMeasureAndResizeSurface(true, false)"));
     }
 

@@ -4,7 +4,7 @@ import {
   sheetActionAvailabilityPlan,
   mobileKeyboardKeydownPlan, mobileKeyboardKeyPlan, shouldIgnoreSyntheticClick, surfaceActionDispatchContextPlan, surfaceActionDispatchPlan, surfaceActionExecutionContextPlan, surfaceActionExecutionPlan, surfaceActionFocusTerminalExecutionPlan, surfaceActionTrogdorReaderExecutionPlan,
   terminalComposerControlAction, terminalDestroyStatePatch, terminalFallbackActivationPlan, terminalFallbackFocusPlan, terminalFallbackKeydownPlan, terminalFallbackPastePlan, terminalFallbackPointerFocusPlan, terminalInlineInputKeydownPlan, terminalKeyStripClickExecutorPlan, terminalKeyStripClickPlan, terminalStageCaptureBindings, terminalStageClickPlan, terminalStageFocusExecutorPlan, terminalStageFocusPlan,
-  normalizeTerminalZoomValue, terminalAuxiliaryControlsPlan, terminalFallbackScrollPlan, terminalFallbackTextScrollPlan, terminalInputDockPlan, terminalLiveFrameFallbackPlan, terminalPaintProbeSchedulePlan, terminalPaintVerificationPlan, terminalPendingByteBufferPlan, terminalPresentationPlan, terminalResizeGeometryPlan, terminalStageKeydownPlan, terminalStageMouseDownPlan, terminalStageMouseMovePlan, terminalStageMouseUpPlan, terminalStagePasteExecutorPlan, terminalStagePastePlan, terminalStageTouchEndPlan, terminalStageWheelPlan, terminalSurfaceRendererPlan, terminalSurfaceSessionPlan, terminalToolsAvailabilityPlan, terminalZoomControlsPlan, terminalZoomLoadValue, terminalZoomPercentLabel, terminalZoomPersistencePlan,
+  normalizeTerminalZoomValue, terminalAuxiliaryControlsPlan, terminalFallbackScrollPlan, terminalFallbackTextScrollPlan, terminalInputDockPlan, terminalLiveFrameFallbackPlan, terminalPaintProbeSchedulePlan, terminalPaintVerificationPlan, terminalPendingByteBufferPlan, terminalPresentationPlan, terminalStageKeydownPlan, terminalStageMouseDownPlan, terminalStageMouseMovePlan, terminalStageMouseUpPlan, terminalStagePasteExecutorPlan, terminalStagePastePlan, terminalStageTouchEndPlan, terminalStageWheelPlan, terminalSurfaceRendererPlan, terminalSurfaceSessionPlan, terminalToolsAvailabilityPlan, terminalZoomControlsPlan, terminalZoomLoadValue, terminalZoomPercentLabel, terminalZoomPersistencePlan,
 } from "./input_support.js";
 import { sendHistoryClickPlan, sendSheetFailureStatus, sendSheetSubmitPlan, sendSheetSuccessStatus } from "./send_sheet.js";
 import {
@@ -12,6 +12,7 @@ import {
   initializeTerminalSurface,
   reuseTerminalSurface,
 } from "./terminal_surface_setup.js";
+import { runTerminalSurfaceResize } from "./terminal_resize.js";
 import { runGlobalShortcutAction } from "./global_shortcut_dispatch.js";
 import { runSessionRefresh } from "./session_refresh.js";
 import { runWorkbenchWidgetRefresh } from "./workbench_refresh.js";
@@ -464,6 +465,19 @@ const terminalSurfaceRuntime = {
   measureAndResizeSurface,
   flushPendingTerminalBytes,
   prefersReducedMotion: () => window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches ?? false,
+};
+
+const terminalResizeRuntime = {
+  state,
+  el,
+  surfaceBusy,
+  queueMeasureAndResizeSurface,
+  withSurfaceOperation,
+  renderHudSurface,
+  scheduleRender,
+  sendResize,
+  captureTerminalRendererDiagnostic,
+  devicePixelRatio: () => window.devicePixelRatio || 1,
 };
 
 const globalShortcutRuntime = {
@@ -2867,61 +2881,7 @@ function sendResize() {
 }
 
 function measureAndResizeSurface(pushResize = false, force = false) {
-  const referenceSurface = state.terminal || state.hud;
-  if (!referenceSurface) {
-    return;
-  }
-
-  // `fitToContainer()`/`resize()` take `&mut self` in wasm; invoking them while a
-  // surface `init()` is still awaiting (e.g. from the ResizeObserver that fires
-  // when init sets the canvas CSS size) re-enters the held borrow and panics.
-  // Defer the measurement until init settles instead.
-  if (surfaceBusy()) {
-    queueMeasureAndResizeSurface(pushResize, force);
-    return;
-  }
-  state.resizeQueued = false;
-  state.resizePushResize = false;
-  state.resizeForce = false;
-
-  const rect = el.terminalStage.getBoundingClientRect();
-  const dpr = window.devicePixelRatio || 1;
-  const fit = withSurfaceOperation("fitToContainer", () =>
-    referenceSurface.fitToContainer(rect.width, rect.height, dpr),
-  );
-  if (fit.deferred) {
-    queueMeasureAndResizeSurface(pushResize, force);
-    return;
-  }
-  const resizePlan = terminalResizeGeometryPlan({ cols: fit.value?.cols, rows: fit.value?.rows, currentCols: state.currentCols, currentRows: state.currentRows, force, pushResize, hasTerminal: Boolean(state.terminal) });
-  if (!resizePlan.shouldResize) {
-    return;
-  }
-
-  const resized = withSurfaceOperation("resize", () => {
-    if (state.hud) {
-      state.hud.resize(resizePlan.cols, resizePlan.rows);
-    }
-    if (state.terminal) {
-      state.terminal.resize(resizePlan.cols, resizePlan.rows);
-    }
-  });
-  if (resized.deferred) {
-    queueMeasureAndResizeSurface(pushResize, force);
-    return;
-  }
-
-  state.currentCols = resizePlan.cols;
-  state.currentRows = resizePlan.rows;
-  renderHudSurface();
-  scheduleRender();
-
-  if (resizePlan.sendResize) {
-    sendResize();
-  }
-  if (resizePlan.captureDiagnostic) {
-    captureTerminalRendererDiagnostic(resizePlan.diagnosticReason);
-  }
+  runTerminalSurfaceResize({ pushResize, force }, terminalResizeRuntime);
 }
 
 function captureTerminalRendererDiagnostic(reason = "frame") {
