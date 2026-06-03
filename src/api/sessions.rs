@@ -9,9 +9,7 @@ use std::sync::Arc;
 use tokio::sync::oneshot;
 
 use crate::api::envelope::error_body;
-use crate::api::service::{
-    create_local_sessions_batch, list_sessions_for_client, request_plan_file, PlanFileServiceError,
-};
+use crate::api::service::{create_local_sessions_batch, list_sessions_for_client};
 pub use crate::api::service::{
     create_sessions_batch_result, new_batch_context, session_batch_membership,
     BATCH_CREATE_CONCURRENCY, BATCH_CREATE_MAX_DIRS,
@@ -39,6 +37,12 @@ use crate::types::{
 
 const PANE_TAIL_LINES: usize = 300;
 const PANE_TAIL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+#[path = "session_mermaid.rs"]
+mod session_mermaid;
+
+pub(crate) use self::session_mermaid::fetch_mermaid_artifact_response;
+use self::session_mermaid::{get_mermaid_artifact, get_plan_file};
 
 // ---------------------------------------------------------------------------
 // GET /v1/sessions
@@ -1616,129 +1620,6 @@ fn pane_tail_internal_error(message: &str) -> Response {
 }
 
 // ---------------------------------------------------------------------------
-// GET /v1/sessions/{session_id}/mermaid-artifact
-// ---------------------------------------------------------------------------
-
-async fn get_mermaid_artifact(
-    Extension(auth): Extension<AuthInfo>,
-    State(state): State<Arc<AppState>>,
-    Path(session_id): Path<String>,
-) -> impl IntoResponse {
-    if let Err(resp) = auth.require_scope(AuthScope::SessionsRead) {
-        return resp;
-    }
-
-    match fetch_mermaid_artifact_response(&state, &session_id).await {
-        Ok(artifact) => (StatusCode::OK, Json(artifact)).into_response(),
-        Err(resp) => resp,
-    }
-}
-
-pub(crate) async fn fetch_mermaid_artifact_response(
-    state: &Arc<AppState>,
-    session_id: &str,
-) -> Result<MermaidArtifactResponse, axum::response::Response> {
-    if let Some((target, remote_session_id)) =
-        remote_sessions::denamespace_for_target(session_id).map_err(|err| err.into_response())?
-    {
-        return remote_sessions::fetch_remote_mermaid_artifact(&target, remote_session_id)
-            .await
-            .map_err(|err| err.into_response());
-    }
-
-    let handle = match state.supervisor.get_session(session_id).await {
-        Some(h) => h,
-        None => {
-            return Err(error_response(
-                StatusCode::NOT_FOUND,
-                "SESSION_NOT_FOUND",
-                None,
-            ));
-        }
-    };
-
-    let (tx, rx) = oneshot::channel::<MermaidArtifactResponse>();
-    if handle
-        .send(SessionCommand::GetMermaidArtifact(tx))
-        .await
-        .is_err()
-    {
-        return Err(error_response(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "INTERNAL_ERROR",
-            Some("session actor unavailable".to_string()),
-        ));
-    }
-
-    match tokio::time::timeout(std::time::Duration::from_secs(5), rx).await {
-        Ok(Ok(artifact)) => Ok(artifact),
-        Ok(Err(_)) => Err(error_response(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "INTERNAL_ERROR",
-            Some("actor dropped mermaid artifact reply".to_string()),
-        )),
-        Err(_) => Err(error_response(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "INTERNAL_ERROR",
-            Some("mermaid artifact request timed out".to_string()),
-        )),
-    }
-}
-
-// ---------------------------------------------------------------------------
-// GET /v1/sessions/{session_id}/plan-file?name=plan.md
-// ---------------------------------------------------------------------------
-
-#[derive(Deserialize)]
-struct PlanFileQuery {
-    name: String,
-}
-
-async fn get_plan_file(
-    Extension(auth): Extension<AuthInfo>,
-    State(state): State<Arc<AppState>>,
-    Path(session_id): Path<String>,
-    Query(query): Query<PlanFileQuery>,
-) -> Response {
-    if let Err(resp) = auth.require_scope(AuthScope::SessionsRead) {
-        return resp;
-    }
-
-    fetch_plan_file_response(&state, &session_id, &query.name).await
-}
-
-async fn fetch_plan_file_response(state: &Arc<AppState>, session_id: &str, name: &str) -> Response {
-    match request_plan_file(state, session_id, name).await {
-        Ok(response) => (StatusCode::OK, Json(response)).into_response(),
-        Err(error) => plan_file_error_response(error),
-    }
-}
-
-fn plan_file_error_response(error: PlanFileServiceError) -> Response {
-    match error {
-        PlanFileServiceError::Remote(err) => err.into_response(),
-        PlanFileServiceError::SessionNotFound => {
-            error_response(StatusCode::NOT_FOUND, "SESSION_NOT_FOUND", None)
-        }
-        PlanFileServiceError::ActorUnavailable => {
-            plan_file_internal_error("session actor unavailable")
-        }
-        PlanFileServiceError::ReplyDropped => {
-            plan_file_internal_error("actor dropped plan file reply")
-        }
-        PlanFileServiceError::TimedOut => plan_file_internal_error("plan file request timed out"),
-    }
-}
-
-fn plan_file_internal_error(message: &str) -> Response {
-    error_response(
-        StatusCode::INTERNAL_SERVER_ERROR,
-        "INTERNAL_ERROR",
-        Some(message.to_string()),
-    )
-}
-
-// ---------------------------------------------------------------------------
 // Router
 // ---------------------------------------------------------------------------
 
@@ -1781,9 +1662,7 @@ mod tests {
     use crate::session::supervisor::SessionSupervisor;
     use crate::thought::protocol::{SyncRequestSequence, ThoughtDeliveryState};
     use crate::thought::runtime_config::ThoughtConfig;
-    use crate::types::{
-        PlanFileResponse, RestState, StateEvidence, ThoughtSource, ThoughtState, TransportHealth,
-    };
+    use crate::types::{RestState, StateEvidence, ThoughtSource, ThoughtState, TransportHealth};
     use axum::body::to_bytes;
     use axum::extract::{Json, Path, Query, State};
     use axum::response::IntoResponse;
@@ -3962,175 +3841,6 @@ esac
         let json = response_json(response).await;
         assert_eq!(json["session_id"], "sess-tail");
         assert_eq!(json["text"], "recent pane output");
-    }
-
-    #[tokio::test]
-    async fn get_plan_file_returns_actor_payload() {
-        let state = test_state();
-        let (cmd_tx, mut cmd_rx) = mpsc::channel(8);
-        state
-            .supervisor
-            .insert_test_handle(ActorHandle::test_handle("sess-plan", "tmux-plan", cmd_tx))
-            .await;
-
-        tokio::spawn(async move {
-            while let Some(cmd) = cmd_rx.recv().await {
-                if let SessionCommand::GetPlanFile { name, reply } = cmd {
-                    assert_eq!(name, "plan.md");
-                    let _ = reply.send(PlanFileResponse {
-                        session_id: "sess-plan".to_string(),
-                        name,
-                        content: Some("# Plan\n".to_string()),
-                        error: None,
-                    });
-                    break;
-                }
-            }
-        });
-
-        let response = get_plan_file(
-            Extension(AuthInfo::new(OPERATOR_SCOPES.to_vec())),
-            State(state),
-            Path("sess-plan".to_string()),
-            Query(PlanFileQuery {
-                name: "plan.md".to_string(),
-            }),
-        )
-        .await;
-
-        assert_eq!(response.status(), StatusCode::OK);
-        let json = response_json(response).await;
-        assert_eq!(json["session_id"], "sess-plan");
-        assert_eq!(json["name"], "plan.md");
-        assert_eq!(json["content"], "# Plan\n");
-    }
-
-    #[tokio::test]
-    async fn get_plan_file_returns_not_found_for_missing_session() {
-        let response = get_plan_file(
-            Extension(AuthInfo::new(OPERATOR_SCOPES.to_vec())),
-            State(test_state()),
-            Path("missing-plan".to_string()),
-            Query(PlanFileQuery {
-                name: "plan.md".to_string(),
-            }),
-        )
-        .await;
-
-        assert_eq!(response.status(), StatusCode::NOT_FOUND);
-        let json = response_json(response).await;
-        assert_eq!(json["code"], "SESSION_NOT_FOUND");
-    }
-
-    #[tokio::test]
-    async fn get_plan_file_returns_internal_error_when_actor_drops_reply() {
-        let state = test_state();
-        let (cmd_tx, mut cmd_rx) = mpsc::channel(8);
-        state
-            .supervisor
-            .insert_test_handle(ActorHandle::test_handle(
-                "sess-dropped-plan",
-                "tmux-dropped-plan",
-                cmd_tx,
-            ))
-            .await;
-
-        tokio::spawn(async move {
-            if let Some(SessionCommand::GetPlanFile { name, reply }) = cmd_rx.recv().await {
-                assert_eq!(name, "plan.md");
-                drop(reply);
-            }
-        });
-
-        let response = get_plan_file(
-            Extension(AuthInfo::new(OPERATOR_SCOPES.to_vec())),
-            State(state),
-            Path("sess-dropped-plan".to_string()),
-            Query(PlanFileQuery {
-                name: "plan.md".to_string(),
-            }),
-        )
-        .await;
-
-        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
-        let json = response_json(response).await;
-        assert_eq!(json["code"], "INTERNAL_ERROR");
-        assert_eq!(json["message"], "actor dropped plan file reply");
-    }
-
-    #[tokio::test]
-    async fn request_plan_file_service_reports_timeout_with_short_budget() {
-        let state = test_state();
-        let (cmd_tx, _cmd_rx) = mpsc::channel(8);
-        state
-            .supervisor
-            .insert_test_handle(ActorHandle::test_handle(
-                "sess-timeout-plan",
-                "tmux-timeout-plan",
-                cmd_tx,
-            ))
-            .await;
-
-        let err = crate::api::service::request_plan_file_with_timeout(
-            &state,
-            "sess-timeout-plan",
-            "plan.md",
-            Duration::from_millis(1),
-        )
-        .await
-        .expect_err("plan request should time out");
-
-        assert!(matches!(
-            err,
-            crate::api::service::PlanFileServiceError::TimedOut
-        ));
-    }
-
-    #[tokio::test]
-    async fn get_mermaid_artifact_returns_actor_payload() {
-        let state = test_state();
-        let (cmd_tx, mut cmd_rx) = mpsc::channel(8);
-        state
-            .supervisor
-            .insert_test_handle(ActorHandle::test_handle(
-                "sess-mermaid",
-                "tmux-mermaid",
-                cmd_tx,
-            ))
-            .await;
-
-        tokio::spawn(async move {
-            while let Some(cmd) = cmd_rx.recv().await {
-                if let SessionCommand::GetMermaidArtifact(reply) = cmd {
-                    let _ = reply.send(MermaidArtifactResponse {
-                        session_id: "sess-mermaid".to_string(),
-                        available: true,
-                        path: Some("/tmp/project/diagram.mmd".to_string()),
-                        updated_at: Some(Utc::now()),
-                        source: Some("graph TD\nA-->B\n".to_string()),
-                        error: None,
-                        slice_name: None,
-                        plan_files: None,
-                    });
-                    break;
-                }
-            }
-        });
-
-        let response = get_mermaid_artifact(
-            Extension(AuthInfo::new(OPERATOR_SCOPES.to_vec())),
-            State(state),
-            Path("sess-mermaid".to_string()),
-        )
-        .await
-        .into_response();
-
-        assert_eq!(response.status(), StatusCode::OK);
-        let json = response_json(response).await;
-        assert_eq!(json["session_id"], "sess-mermaid");
-        assert_eq!(json["available"], true);
-        assert_eq!(json["path"], "/tmp/project/diagram.mmd");
-        assert_eq!(json["source"], "graph TD\nA-->B\n");
     }
 
     #[tokio::test]
