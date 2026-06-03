@@ -12,6 +12,7 @@ import {
   initializeTerminalSurface,
   reuseTerminalSurface,
 } from "./terminal_surface_setup.js";
+import { runGlobalShortcutAction } from "./global_shortcut_dispatch.js";
 import {
   MERMAID_PLAN_CONTENT_DISPLAY_MAX_CHARS,
   buildMermaidArtifactView,
@@ -464,6 +465,25 @@ const terminalSurfaceRuntime = {
   measureAndResizeSurface,
   flushPendingTerminalBytes,
   prefersReducedMotion: () => window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches ?? false,
+};
+
+const globalShortcutRuntime = {
+  state,
+  terminalZoomStep: TERMINAL_ZOOM_STEP,
+  openCommandPalette,
+  setTerminalZoom,
+  closeSheets,
+  trogdorAtlasTransitionState,
+  renderHudSurface,
+  setSelectMode,
+  openSheet,
+  openThoughtConfigSheet,
+  openNativeSheet,
+  openMermaidSheet,
+  toggleFollowPublished,
+  copyTerminalSelection,
+  copyHoveredLink,
+  refreshSessions,
 };
 
 function currentSession() {
@@ -5094,59 +5114,7 @@ function handleGlobalShortcut(event) {
   if (plan.type === "unhandled") {
     return false;
   }
-  switch (plan.type) {
-    case "open_palette":
-      openCommandPalette();
-      break;
-    case "zoom_in":
-      setTerminalZoom(state.terminalZoom + TERMINAL_ZOOM_STEP, { announce: true });
-      break;
-    case "zoom_out":
-      setTerminalZoom(state.terminalZoom - TERMINAL_ZOOM_STEP, { announce: true });
-      break;
-    case "zoom_reset":
-      setTerminalZoom(1, { announce: true });
-      break;
-    case "close_sheets":
-      closeSheets();
-      break;
-    case "close_trogdor_atlas":
-      Object.assign(state, trogdorAtlasTransitionState("close"));
-      renderHudSurface();
-      break;
-    case "exit_select_mode":
-      setSelectMode(false);
-      break;
-    case "open_sheet":
-      openSheet(plan.sheetId);
-      break;
-    case "open_thought_config":
-      openThoughtConfigSheet();
-      break;
-    case "open_native":
-      openNativeSheet();
-      break;
-    case "open_mermaid":
-      openMermaidSheet();
-      break;
-    case "toggle_follow":
-      void toggleFollowPublished();
-      break;
-    case "toggle_select":
-      setSelectMode(!state.selectMode);
-      break;
-    case "copy_selection":
-      void copyTerminalSelection();
-      break;
-    case "copy_hovered_link":
-      void copyHoveredLink();
-      break;
-    case "refresh_sessions":
-      void refreshSessions();
-      break;
-    default:
-      break;
-  }
+  runGlobalShortcutAction(plan, globalShortcutRuntime);
   return true;
 }
 
