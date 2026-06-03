@@ -46,6 +46,7 @@ const TMUX_NEW_SESSION_EXIT_GRACE: Duration = Duration::from_millis(50);
 const MAX_OUTPUT_SUBSCRIBERS_PER_SESSION: usize = 16;
 const TMUX_FALLBACK_TERM: &str = "xterm-256color";
 const TMUX_FALLBACK_COLORTERM: &str = "truecolor";
+const TMUX_UNSUPPORTED_TERMS: [&str; 3] = ["", "dumb", "unknown"];
 
 fn tmux_command(program: impl AsRef<OsStr>, args: &[&str]) -> Command {
     let mut command = Command::new(program);
@@ -2377,23 +2378,35 @@ fn resolve_tmux_terminal_env(
     inherited_term: Option<&str>,
     inherited_colorterm: Option<&str>,
 ) -> (String, String, bool) {
-    let term = inherited_term.map(str::trim).unwrap_or_default();
-    let needs_term_fallback = term.is_empty()
-        || term.eq_ignore_ascii_case("dumb")
-        || term.eq_ignore_ascii_case("unknown");
-    let resolved_term = if needs_term_fallback {
-        TMUX_FALLBACK_TERM.to_string()
-    } else {
-        term.to_string()
-    };
+    let (resolved_term, needs_term_fallback) = resolve_tmux_term(inherited_term);
+    let colorterm = resolve_tmux_colorterm(inherited_colorterm);
 
-    let colorterm = inherited_colorterm
+    (resolved_term, colorterm, needs_term_fallback)
+}
+
+fn resolve_tmux_term(inherited_term: Option<&str>) -> (String, bool) {
+    let term = inherited_term.map(str::trim).unwrap_or_default();
+    let needs_term_fallback = tmux_term_needs_fallback(term);
+    let resolved_term = needs_term_fallback
+        .then_some(TMUX_FALLBACK_TERM)
+        .unwrap_or(term)
+        .to_string();
+
+    (resolved_term, needs_term_fallback)
+}
+
+fn tmux_term_needs_fallback(term: &str) -> bool {
+    TMUX_UNSUPPORTED_TERMS
+        .iter()
+        .any(|unsupported| term.eq_ignore_ascii_case(unsupported))
+}
+
+fn resolve_tmux_colorterm(inherited_colorterm: Option<&str>) -> String {
+    inherited_colorterm
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .unwrap_or(TMUX_FALLBACK_COLORTERM)
-        .to_string();
-
-    (resolved_term, colorterm, needs_term_fallback)
+        .to_string()
 }
 
 // ---------------------------------------------------------------------------
@@ -2441,13 +2454,14 @@ mod tests {
         extract_cwd_from_title, find_osc_payload_end, line_looks_prompt_like,
         normalize_submit_line_text, osc_payloads, output_counts_as_meaningful_activity,
         parse_process_entry, percent_decode, process_entries_cache, query_tmux_session_created,
-        query_tool_from_tmux_process_tree, resolve_tmux_terminal_env, run_bounded_tmux_command,
-        should_refresh_cwd_from_tmux, should_refresh_tool_from_tmux,
-        state_detector_for_initial_tool, submit_line_fallback_input, tmux_input_chunks,
-        visible_output_is_meaningful, write_and_flush_input, write_input_counts_as_activity,
-        ControlEvent, LivenessReconciliation, LivenessRefresh, OutputFrame, PaneLiveness,
-        ProcessEntriesCache, ProcessEntry, SessionActor, SessionCommand, TmuxInputChunk,
-        CWD_REFRESH_MIN_INTERVAL, PROCESS_ENTRIES_CACHE_TTL, TOOL_REFRESH_MIN_INTERVAL,
+        query_tool_from_tmux_process_tree, resolve_tmux_colorterm, resolve_tmux_term,
+        resolve_tmux_terminal_env, run_bounded_tmux_command, should_refresh_cwd_from_tmux,
+        should_refresh_tool_from_tmux, state_detector_for_initial_tool, submit_line_fallback_input,
+        tmux_input_chunks, visible_output_is_meaningful, write_and_flush_input,
+        write_input_counts_as_activity, ControlEvent, LivenessReconciliation, LivenessRefresh,
+        OutputFrame, PaneLiveness, ProcessEntriesCache, ProcessEntry, SessionActor, SessionCommand,
+        TmuxInputChunk, CWD_REFRESH_MIN_INTERVAL, PROCESS_ENTRIES_CACHE_TTL,
+        TOOL_REFRESH_MIN_INTERVAL,
     };
     use crate::config::Config;
     use crate::scroll::guard::ScrollGuard;
@@ -3641,10 +3655,28 @@ exit 1
     #[test]
     fn resolve_tmux_terminal_env_preserves_valid_term() {
         let (term, colorterm, fallback) =
-            resolve_tmux_terminal_env(Some("screen-256color"), Some("truecolor"));
+            resolve_tmux_terminal_env(Some("  screen-256color  "), Some("truecolor"));
         assert_eq!(term, "screen-256color");
         assert_eq!(colorterm, "truecolor");
         assert!(!fallback);
+    }
+
+    #[test]
+    fn resolve_tmux_term_falls_back_for_unknown_and_blank_values() {
+        for inherited_term in [Some("unknown"), Some("  UNKNOWN  "), Some("   ")] {
+            let (term, fallback) = resolve_tmux_term(inherited_term);
+            assert_eq!(term, "xterm-256color");
+            assert!(fallback);
+        }
+    }
+
+    #[test]
+    fn resolve_tmux_colorterm_trims_or_uses_default() {
+        assert_eq!(resolve_tmux_colorterm(Some("  truecolor  ")), "truecolor");
+
+        for inherited_colorterm in [None, Some(""), Some("   ")] {
+            assert_eq!(resolve_tmux_colorterm(inherited_colorterm), "truecolor");
+        }
     }
 
     #[test]

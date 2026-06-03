@@ -14,7 +14,9 @@ use crate::api::envelope::{
 };
 use crate::api::{fetch_live_summary, AppState, PublishedSelectionState};
 use crate::auth::{AuthInfo, AuthScope};
-use crate::types::{PublishSelectionRequest, PublishedSelectionResponse, SessionState};
+use crate::types::{
+    PublishSelectionRequest, PublishedSelectionResponse, SessionState, SessionSummary,
+};
 
 static SELECTION_VERSION: AtomicU64 = AtomicU64::new(0);
 
@@ -25,44 +27,64 @@ async fn get_published_selection(
     auth.require_scope(AuthScope::SessionsRead)?;
 
     let snapshot = state.published_selection.read().await.clone();
-    let Some(session_id) = snapshot.session_id.clone() else {
-        return Ok(Json(PublishedSelectionResponse {
-            session_id: None,
-            session: None,
-            published_at: snapshot.published_at,
-            error: None,
-        }));
+    let summary = fetch_published_selection_summary(&state, &snapshot).await?;
+
+    Ok(Json(published_selection_response(snapshot, summary)))
+}
+
+async fn fetch_published_selection_summary(
+    state: &Arc<AppState>,
+    snapshot: &PublishedSelectionState,
+) -> Result<Option<SessionSummary>, axum::response::Response> {
+    let Some(session_id) = snapshot.session_id.as_deref() else {
+        return Ok(None);
     };
 
-    match fetch_live_summary(&state, &session_id).await {
-        Ok(Some(summary)) if summary.state == SessionState::Exited => {
-            Ok(Json(PublishedSelectionResponse {
-                session_id: Some(session_id),
-                session: Some(summary),
-                published_at: snapshot.published_at,
-                error: Some(error_body_msg(
-                    "SESSION_EXITED",
-                    "session has already exited",
-                )),
-            }))
-        }
-        Ok(Some(summary)) => Ok(Json(PublishedSelectionResponse {
-            session_id: Some(session_id),
-            session: Some(summary),
-            published_at: snapshot.published_at,
-            error: None,
-        })),
-        Ok(None) => Ok(Json(PublishedSelectionResponse {
-            session_id: Some(session_id),
-            session: None,
-            published_at: snapshot.published_at,
-            error: Some(error_body_msg("SESSION_NOT_FOUND", "session not found")),
-        })),
+    match fetch_live_summary(state, session_id).await {
+        Ok(summary) => Ok(summary),
         Err(err) => Err((
             axum::http::StatusCode::INTERNAL_SERVER_ERROR,
             Json(error_body_msg("INTERNAL_ERROR", err.to_string())),
         )
             .into_response()),
+    }
+}
+
+fn published_selection_response(
+    snapshot: PublishedSelectionState,
+    summary: Option<SessionSummary>,
+) -> PublishedSelectionResponse {
+    let Some(session_id) = snapshot.session_id else {
+        return PublishedSelectionResponse {
+            session_id: None,
+            session: None,
+            published_at: snapshot.published_at,
+            error: None,
+        };
+    };
+
+    match summary {
+        Some(summary) if summary.state == SessionState::Exited => PublishedSelectionResponse {
+            session_id: Some(session_id),
+            session: Some(summary),
+            published_at: snapshot.published_at,
+            error: Some(error_body_msg(
+                "SESSION_EXITED",
+                "session has already exited",
+            )),
+        },
+        Some(summary) => PublishedSelectionResponse {
+            session_id: Some(session_id),
+            session: Some(summary),
+            published_at: snapshot.published_at,
+            error: None,
+        },
+        None => PublishedSelectionResponse {
+            session_id: Some(session_id),
+            session: None,
+            published_at: snapshot.published_at,
+            error: Some(error_body_msg("SESSION_NOT_FOUND", "session not found")),
+        },
     }
 }
 
@@ -122,6 +144,7 @@ mod tests {
     use crate::session::supervisor::SessionSupervisor;
     use crate::thought::protocol::SyncRequestSequence;
     use crate::thought::runtime_config::ThoughtConfig;
+    use crate::types::StateEvidence;
     use axum::body::to_bytes;
     use axum::extract::{Json, State};
     use axum::http::HeaderMap;
@@ -153,6 +176,28 @@ mod tests {
         })
     }
 
+    fn selected_snapshot() -> PublishedSelectionState {
+        PublishedSelectionState {
+            session_id: Some("sess-1".to_string()),
+            published_at: Some(Utc::now()),
+        }
+    }
+
+    fn summary(session_id: &str, state: SessionState) -> SessionSummary {
+        SessionSummary::live(
+            session_id,
+            format!("tmux-{session_id}"),
+            state,
+            None,
+            StateEvidence::new("test"),
+            "/tmp/project",
+            Some("Codex".to_string()),
+            0,
+            0,
+            Utc::now(),
+        )
+    }
+
     async fn response_json(response: axum::response::Response) -> Value {
         let body = to_bytes(response.into_body(), usize::MAX)
             .await
@@ -182,6 +227,110 @@ mod tests {
         )
         .await;
         result.unwrap_or_else(|resp| resp)
+    }
+
+    #[tokio::test]
+    async fn get_published_selection_requires_sessions_read_scope() {
+        let state = test_state();
+
+        let response = get_published_selection(Extension(AuthInfo::new(Vec::new())), State(state))
+            .await
+            .expect_err("missing read scope should fail");
+
+        assert_eq!(response.status(), axum::http::StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn get_published_selection_returns_empty_selection_without_live_lookup() {
+        let state = test_state();
+
+        let Json(response) = get_published_selection(
+            Extension(AuthInfo::new(OPERATOR_SCOPES.to_vec())),
+            State(state),
+        )
+        .await
+        .expect("empty selection should succeed");
+
+        assert!(response.session_id.is_none());
+        assert!(response.session.is_none());
+        assert!(response.published_at.is_none());
+        assert!(response.error.is_none());
+    }
+
+    #[tokio::test]
+    async fn fetch_published_selection_summary_skips_live_lookup_when_empty() {
+        let state = test_state();
+        let snapshot = PublishedSelectionState::default();
+
+        let summary = fetch_published_selection_summary(&state, &snapshot)
+            .await
+            .expect("empty selection should not fail");
+
+        assert!(summary.is_none());
+    }
+
+    #[tokio::test]
+    async fn fetch_published_selection_summary_returns_none_for_missing_session() {
+        let state = test_state();
+        let snapshot = selected_snapshot();
+
+        let summary = fetch_published_selection_summary(&state, &snapshot)
+            .await
+            .expect("missing selected session should not fail");
+
+        assert!(summary.is_none());
+    }
+
+    #[test]
+    fn published_selection_response_includes_live_session() {
+        let snapshot = selected_snapshot();
+        let published_at = snapshot.published_at;
+
+        let response =
+            published_selection_response(snapshot, Some(summary("sess-1", SessionState::Idle)));
+
+        assert_eq!(response.session_id.as_deref(), Some("sess-1"));
+        assert_eq!(response.published_at, published_at);
+        assert_eq!(
+            response
+                .session
+                .as_ref()
+                .map(|session| session.session_id.as_str()),
+            Some("sess-1")
+        );
+        assert!(response.error.is_none());
+    }
+
+    #[test]
+    fn published_selection_response_marks_exited_session() {
+        let response = published_selection_response(
+            selected_snapshot(),
+            Some(summary("sess-1", SessionState::Exited)),
+        );
+
+        assert_eq!(response.session_id.as_deref(), Some("sess-1"));
+        assert_eq!(
+            response.session.as_ref().map(|session| session.state),
+            Some(SessionState::Exited)
+        );
+        let error = response
+            .error
+            .expect("exited selection should include error");
+        assert_eq!(error.code, "SESSION_EXITED");
+        assert_eq!(error.message.as_deref(), Some("session has already exited"));
+    }
+
+    #[test]
+    fn published_selection_response_marks_missing_session() {
+        let response = published_selection_response(selected_snapshot(), None);
+
+        assert_eq!(response.session_id.as_deref(), Some("sess-1"));
+        assert!(response.session.is_none());
+        let error = response
+            .error
+            .expect("missing selection should include error");
+        assert_eq!(error.code, "SESSION_NOT_FOUND");
+        assert_eq!(error.message.as_deref(), Some("session not found"));
     }
 
     #[tokio::test]

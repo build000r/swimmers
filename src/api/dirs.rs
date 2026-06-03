@@ -51,6 +51,10 @@ async fn list_dirs(
 
 // GET /v1/dirs/repositories
 async fn list_repo_search_entries(Extension(auth): Extension<AuthInfo>) -> impl IntoResponse {
+    list_repo_search_entries_response(auth).await
+}
+
+async fn list_repo_search_entries_response(auth: AuthInfo) -> Response {
     if let Err(resp) = auth.require_scope(AuthScope::SessionsRead) {
         return resp;
     }
@@ -82,6 +86,14 @@ async fn start_dir_repo_action(
     Extension(auth): Extension<AuthInfo>,
     State(state): State<Arc<AppState>>,
     Json(body): Json<DirRepoActionRequest>,
+) -> Response {
+    start_dir_repo_action_response(auth, state, body).await
+}
+
+async fn start_dir_repo_action_response(
+    auth: AuthInfo,
+    state: Arc<AppState>,
+    body: DirRepoActionRequest,
 ) -> Response {
     if let Err(resp) = auth.require_scope(AuthScope::SessionsWrite) {
         return resp;
@@ -761,6 +773,78 @@ mod tests {
         .into_response();
 
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn list_repo_search_entries_requires_read_scope() {
+        let response = list_repo_search_entries(Extension(AuthInfo::new(Vec::new())))
+            .await
+            .into_response();
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let json = response_json(response).await;
+        assert_eq!(json["code"], "NOT_AUTHORIZED");
+    }
+
+    #[tokio::test]
+    async fn list_repo_search_entries_returns_empty_search_response() {
+        let _lock = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        crate::api::service::clear_repo_search_cache_for_tests();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let missing_root = dir.path().join("missing-root");
+        let _roots_env = set_env_var(
+            "SWIMMERS_REPO_SEARCH_ROOTS",
+            missing_root.as_os_str().to_os_string(),
+        );
+
+        let response = list_repo_search_entries(Extension(AuthInfo::new(OPERATOR_SCOPES.to_vec())))
+            .await
+            .into_response();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let json = response_json(response).await;
+        assert_eq!(json["entries"].as_array().expect("entries").len(), 0);
+        assert!(json
+            .get("roots")
+            .and_then(|roots| roots.as_array())
+            .is_none_or(|roots| roots.is_empty()));
+    }
+
+    #[tokio::test]
+    async fn start_dir_repo_action_requires_write_scope() {
+        let response = start_dir_repo_action(
+            Extension(AuthInfo::new(OBSERVER_SCOPES.to_vec())),
+            State(test_state()),
+            Json(DirRepoActionRequest {
+                path: "/tmp".to_string(),
+                kind: RepoActionKind::Commit,
+            }),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let json = response_json(response).await;
+        assert_eq!(json["code"], "NOT_AUTHORIZED");
+    }
+
+    #[tokio::test]
+    async fn start_dir_repo_action_returns_service_error_response() {
+        let response = start_dir_repo_action(
+            Extension(AuthInfo::new(OPERATOR_SCOPES.to_vec())),
+            State(test_state()),
+            Json(DirRepoActionRequest {
+                path: "/tmp".to_string(),
+                kind: RepoActionKind::Open,
+            }),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let json = response_json(response).await;
+        assert_eq!(json["code"], "CLIENT_ONLY");
+        assert_eq!(json["message"], "open actions are handled client-side");
     }
 
     #[tokio::test]
