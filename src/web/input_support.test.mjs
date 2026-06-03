@@ -9,6 +9,7 @@ import {
   mobileKeyboardKeyPlan,
   shouldIgnoreSyntheticClick,
   terminalComposerControlAction,
+  terminalFallbackKeydownPlan,
   terminalKeyStripClickPlan,
   terminalStageCaptureBindings,
   terminalStageFocusPlan,
@@ -316,4 +317,72 @@ test("terminalStageKeydownPlan preserves shortcut, capture, and response decisio
     shouldCaptureKey: true,
     beginsResponse: true,
   }), { type: "forward_key", preventDefault: true, markResponse: true, forwardKey: true });
+});
+
+test("terminalFallbackKeydownPlan preserves active, shortcut, capture, and response decisions", () => {
+  assert.deepEqual(terminalFallbackKeydownPlan({
+    terminalFallbackActive: false,
+    globalShortcutHandled: true,
+    shouldCaptureKey: true,
+    beginsResponse: true,
+  }), {
+    type: "ignore",
+    handled: false,
+    preventDefault: false,
+    stopPropagation: false,
+    markResponse: false,
+    forwardKey: false,
+  });
+  assert.deepEqual(terminalFallbackKeydownPlan({
+    terminalFallbackActive: true,
+    globalShortcutHandled: true,
+    shouldCaptureKey: true,
+    beginsResponse: true,
+  }), {
+    type: "prevent_default",
+    preventDefault: true,
+    markResponse: false,
+    forwardKey: false,
+    handled: true,
+    stopPropagation: true,
+  });
+  assert.deepEqual(terminalFallbackKeydownPlan({
+    terminalFallbackActive: true,
+    globalShortcutHandled: false,
+    shouldCaptureKey: false,
+    beginsResponse: true,
+  }), {
+    type: "ignore",
+    preventDefault: false,
+    markResponse: false,
+    forwardKey: false,
+    handled: false,
+    stopPropagation: false,
+  });
+  assert.deepEqual(terminalFallbackKeydownPlan({
+    terminalFallbackActive: true,
+    globalShortcutHandled: false,
+    shouldCaptureKey: true,
+    beginsResponse: false,
+  }), {
+    type: "forward_key",
+    preventDefault: true,
+    markResponse: false,
+    forwardKey: true,
+    handled: true,
+    stopPropagation: true,
+  });
+  assert.deepEqual(terminalFallbackKeydownPlan({
+    terminalFallbackActive: true,
+    globalShortcutHandled: false,
+    shouldCaptureKey: true,
+    beginsResponse: true,
+  }), {
+    type: "forward_key",
+    preventDefault: true,
+    markResponse: true,
+    forwardKey: true,
+    handled: true,
+    stopPropagation: true,
+  });
 });

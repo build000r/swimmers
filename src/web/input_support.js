@@ -266,6 +266,25 @@ export function terminalStageKeydownPlan(context = {}) {
   };
 }
 
+export function terminalFallbackKeydownPlan(context = {}) {
+  if (!context.terminalFallbackActive) {
+    return {
+      type: "ignore",
+      handled: false,
+      preventDefault: false,
+      stopPropagation: false,
+      markResponse: false,
+      forwardKey: false,
+    };
+  }
+  const plan = terminalStageKeydownPlan(context);
+  return {
+    ...plan,
+    handled: plan.type !== "ignore",
+    stopPropagation: Boolean(plan.preventDefault),
+  };
+}
+
 function clampInt(value, fallback, min, max) {
   const numeric = Number.isFinite(value) ? Math.trunc(value) : fallback;
   return Math.max(min, Math.min(max, numeric));

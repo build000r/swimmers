@@ -2,7 +2,7 @@ import { buildSurfaceFrame, surfaceActionAt, surfaceConsumesPointer } from "./re
 import {
   authTokenButtonPlan, eventCell, globalShortcutPlan, mobileKeyboardInputPlan,
   mobileKeyboardKeyPlan, shouldIgnoreSyntheticClick,
-  terminalComposerControlAction, terminalKeyStripClickPlan, terminalStageCaptureBindings, terminalStageFocusPlan,
+  terminalComposerControlAction, terminalFallbackKeydownPlan, terminalKeyStripClickPlan, terminalStageCaptureBindings, terminalStageFocusPlan,
   terminalStageKeydownPlan, terminalStagePastePlan,
 } from "./input_support.js";
 import { sendHistoryClickPlan, sendSheetFailureStatus, sendSheetSubmitPlan, sendSheetSuccessStatus } from "./send_sheet.js";
@@ -3860,24 +3860,20 @@ function shouldCaptureKey(event) {
 }
 
 function handleTerminalFallbackKeyEvent(event) {
-  if (!state.terminalFallbackActive) {
-    return false;
-  }
-  if (handleGlobalShortcut(event)) {
-    event.preventDefault();
-    event.stopPropagation?.();
-    return true;
-  }
-  if (!shouldCaptureKey(event)) {
-    return false;
-  }
-  event.preventDefault();
-  event.stopPropagation?.();
-  if (keyBeginsTrogdorResponse(event)) {
-    markTrogdorSessionsResponded([state.selectedSessionId]);
-  }
-  forwardTerminalKeyDown(event);
-  return true;
+  const fallbackActive = state.terminalFallbackActive;
+  const globalShortcutHandled = fallbackActive && handleGlobalShortcut(event);
+  const shouldCaptureTerminalKey = fallbackActive && !globalShortcutHandled && shouldCaptureKey(event);
+  const plan = terminalFallbackKeydownPlan({
+    terminalFallbackActive: fallbackActive,
+    globalShortcutHandled,
+    shouldCaptureKey: shouldCaptureTerminalKey,
+    beginsResponse: shouldCaptureTerminalKey && keyBeginsTrogdorResponse(event),
+  });
+  if (plan.preventDefault) event.preventDefault();
+  if (plan.stopPropagation) event.stopPropagation?.();
+  if (plan.markResponse) markTrogdorSessionsResponded([state.selectedSessionId]);
+  if (plan.forwardKey) forwardTerminalKeyDown(event);
+  return plan.handled;
 }
 
 function handleTerminalFallbackPasteEvent(event) {
