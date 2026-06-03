@@ -478,6 +478,20 @@ export function terminalLiveFrameFallbackPlan(context = {}) {
   return { type: "update", update: true, text: liveText, preserveExistingFallback: false };
 }
 
+export function terminalInputDockPlan(context = {}) {
+  const visible = Boolean(context.hasCurrentSession && !context.trogdorAtlasOpen);
+  const controlsDisabled = !visible || Boolean(context.readOnly);
+  const hasText = Boolean(String(context.inputValue || "").trim());
+  return {
+    visible,
+    hidden: !visible,
+    ariaHidden: visible ? "false" : "true",
+    inputDisabled: controlsDisabled,
+    keyStripButtonDisabled: controlsDisabled,
+    sendDisabled: controlsDisabled || !hasText,
+  };
+}
+
 export function terminalFallbackPointerFocusPlan(eventType, context = {}) {
   if (!context.terminalFallbackActive || context.activeSheet) {
     return { type: "ignore", focusTerminal: false, scheduleFrame: false };

@@ -3,7 +3,7 @@ import {
   authTokenButtonPlan, eventCell, globalShortcutPlan, mobileKeyboardInputExecutorPlan, mobileKeyboardInputPlan,
   mobileKeyboardKeydownPlan, mobileKeyboardKeyPlan, shouldIgnoreSyntheticClick,
   terminalComposerControlAction, terminalDestroyStatePatch, terminalFallbackActivationPlan, terminalFallbackFocusPlan, terminalFallbackKeydownPlan, terminalFallbackPastePlan, terminalFallbackPointerFocusPlan, terminalInlineInputKeydownPlan, terminalKeyStripClickExecutorPlan, terminalKeyStripClickPlan, terminalStageCaptureBindings, terminalStageFocusExecutorPlan, terminalStageFocusPlan,
-  terminalFallbackScrollPlan, terminalFallbackTextScrollPlan, terminalLiveFrameFallbackPlan, terminalPaintProbeSchedulePlan, terminalPaintVerificationPlan, terminalPendingByteBufferPlan, terminalPresentationPlan, terminalResizeGeometryPlan, terminalStageKeydownPlan, terminalStagePasteExecutorPlan, terminalStagePastePlan,
+  terminalFallbackScrollPlan, terminalFallbackTextScrollPlan, terminalInputDockPlan, terminalLiveFrameFallbackPlan, terminalPaintProbeSchedulePlan, terminalPaintVerificationPlan, terminalPendingByteBufferPlan, terminalPresentationPlan, terminalResizeGeometryPlan, terminalStageKeydownPlan, terminalStagePasteExecutorPlan, terminalStagePastePlan,
 } from "./input_support.js";
 import { sendHistoryClickPlan, sendSheetFailureStatus, sendSheetSubmitPlan, sendSheetSuccessStatus } from "./send_sheet.js";
 import {
@@ -906,26 +906,21 @@ function syncTerminalZoomControls() {
   }
 }
 
-function terminalInputDockVisible() {
-  return Boolean(currentSession() && !state.trogdorAtlasOpen);
-}
-
 function syncTerminalInputDock() {
   if (!el.terminalInputDock) {
     return;
   }
-  const visible = terminalInputDockVisible();
-  document.body.classList.toggle("terminal-input-dock-visible", visible);
-  el.terminalInputDock.classList.toggle("hidden", !visible);
-  el.terminalInputDock.setAttribute("aria-hidden", visible ? "false" : "true");
-  el.terminalInlineInput.disabled = !visible || state.readOnly;
+  const plan = terminalInputDockPlan({ hasCurrentSession: Boolean(currentSession()), trogdorAtlasOpen: state.trogdorAtlasOpen, readOnly: state.readOnly, inputValue: el.terminalInlineInput.value });
+  document.body.classList.toggle("terminal-input-dock-visible", plan.visible);
+  el.terminalInputDock.classList.toggle("hidden", plan.hidden);
+  el.terminalInputDock.setAttribute("aria-hidden", plan.ariaHidden);
+  el.terminalInlineInput.disabled = plan.inputDisabled;
   if (el.terminalKeyStrip) {
     for (const button of el.terminalKeyStrip.querySelectorAll("button[data-terminal-key]")) {
-      button.disabled = !visible || state.readOnly;
+      button.disabled = plan.keyStripButtonDisabled;
     }
   }
-  const hasText = Boolean(String(el.terminalInlineInput.value || "").trim());
-  el.terminalInputSend.disabled = !visible || state.readOnly || !hasText;
+  el.terminalInputSend.disabled = plan.sendDisabled;
 }
 
 function resizeTerminalInlineInput() {

@@ -20,6 +20,7 @@ import {
   terminalFallbackScrollPlan,
   terminalFallbackTextScrollPlan,
   terminalInlineInputKeydownPlan,
+  terminalInputDockPlan,
   terminalKeyStripClickExecutorPlan,
   terminalKeyStripClickPlan,
   terminalLiveFrameFallbackPlan,
@@ -843,6 +844,60 @@ test("terminalLiveFrameFallbackPlan preserves live-frame fallback update decisio
     liveText: "$ cargo test",
     existingFallbackText: "snapshot prompt",
   }), { type: "update", update: true, text: "$ cargo test", preserveExistingFallback: false });
+});
+
+test("terminalInputDockPlan preserves visibility and disabled state decisions", () => {
+  assert.deepEqual(terminalInputDockPlan({
+    hasCurrentSession: true,
+    trogdorAtlasOpen: false,
+    readOnly: false,
+    inputValue: " pwd ",
+  }), {
+    visible: true,
+    hidden: false,
+    ariaHidden: "false",
+    inputDisabled: false,
+    keyStripButtonDisabled: false,
+    sendDisabled: false,
+  });
+  assert.deepEqual(terminalInputDockPlan({
+    hasCurrentSession: true,
+    trogdorAtlasOpen: false,
+    readOnly: false,
+    inputValue: "  ",
+  }), {
+    visible: true,
+    hidden: false,
+    ariaHidden: "false",
+    inputDisabled: false,
+    keyStripButtonDisabled: false,
+    sendDisabled: true,
+  });
+  assert.deepEqual(terminalInputDockPlan({
+    hasCurrentSession: false,
+    trogdorAtlasOpen: false,
+    readOnly: false,
+    inputValue: "pwd",
+  }), {
+    visible: false,
+    hidden: true,
+    ariaHidden: "true",
+    inputDisabled: true,
+    keyStripButtonDisabled: true,
+    sendDisabled: true,
+  });
+  assert.equal(terminalInputDockPlan({
+    hasCurrentSession: true,
+    trogdorAtlasOpen: true,
+    readOnly: false,
+    inputValue: "pwd",
+  }).visible, false);
+  assert.equal(terminalInputDockPlan({
+    hasCurrentSession: true,
+    trogdorAtlasOpen: false,
+    readOnly: true,
+    inputValue: "pwd",
+  }).sendDisabled, true);
 });
 
 test("terminalFallbackPointerFocusPlan preserves scheduled and immediate focus gates", () => {
