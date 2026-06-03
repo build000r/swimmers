@@ -49,6 +49,7 @@ const TERMINAL_PROTOCOL_JS_ROUTE: &str = "/terminal_protocol.js";
 const DIR_BROWSER_JS_ROUTE: &str = "/dir_browser.js";
 const DIR_BROWSER_CONTROLLER_JS_ROUTE: &str = "/dir_browser_controller.js";
 const COMMAND_PALETTE_JS_ROUTE: &str = "/command_palette.js";
+const COMMAND_PALETTE_CONTROLLER_JS_ROUTE: &str = "/command_palette_controller.js";
 const TROGDOR_LOGIC_JS_ROUTE: &str = "/trogdor_logic.js";
 const TROGDOR_DOM_LOGIC_JS_ROUTE: &str = "/trogdor_dom_logic.js";
 const TROGDOR_RENDER_JS_ROUTE: &str = "/trogdor_render.js";
@@ -141,6 +142,10 @@ pub fn routes() -> Router<Arc<AppState>> {
             get(dir_browser_controller_js),
         )
         .route(COMMAND_PALETTE_JS_ROUTE, get(command_palette_js))
+        .route(
+            COMMAND_PALETTE_CONTROLLER_JS_ROUTE,
+            get(command_palette_controller_js),
+        )
         .route(TROGDOR_LOGIC_JS_ROUTE, get(trogdor_logic_js))
         .route(TROGDOR_DOM_LOGIC_JS_ROUTE, get(trogdor_dom_logic_js))
         .route(TROGDOR_RENDER_JS_ROUTE, get(trogdor_render_js))
@@ -774,6 +779,13 @@ async fn command_palette_js() -> Response {
     javascript_asset(
         "src/web/command_palette.js",
         include_str!("command_palette.js"),
+    )
+}
+
+async fn command_palette_controller_js() -> Response {
+    javascript_asset(
+        "src/web/command_palette_controller.js",
+        include_str!("command_palette_controller.js"),
     )
 }
 
@@ -2371,6 +2383,11 @@ mod tests {
                 "from \"./mermaid_artifact_controller.js\"",
             ),
             (
+                APP_JS_ROUTE,
+                app_js().await,
+                "from \"./command_palette_controller.js\"",
+            ),
+            (
                 RENDERED_SURFACE_JS_ROUTE,
                 rendered_surface_js().await,
                 "export function buildSurfaceFrame",
@@ -2469,6 +2486,11 @@ mod tests {
                 COMMAND_PALETTE_JS_ROUTE,
                 command_palette_js().await,
                 "export function commandPaletteExecutionPlan",
+            ),
+            (
+                COMMAND_PALETTE_CONTROLLER_JS_ROUTE,
+                command_palette_controller_js().await,
+                "from \"./command_palette.js\"",
             ),
             (
                 TROGDOR_LOGIC_JS_ROUTE,
