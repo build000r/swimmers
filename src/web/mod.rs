@@ -31,6 +31,7 @@ const APP_JS_ROUTE: &str = "/app.js";
 const RENDERED_SURFACE_JS_ROUTE: &str = "/rendered_surface.js";
 const RENDERED_SURFACE_DRAW_JS_ROUTE: &str = "/rendered_surface_draw.js";
 const INPUT_SUPPORT_JS_ROUTE: &str = "/input_support.js";
+const SURFACE_ACTION_PLANS_JS_ROUTE: &str = "/surface_action_plans.js";
 const SEND_SHEET_JS_ROUTE: &str = "/send_sheet.js";
 const TERMINAL_SURFACE_SETUP_JS_ROUTE: &str = "/terminal_surface_setup.js";
 const TERMINAL_RESIZE_JS_ROUTE: &str = "/terminal_resize.js";
@@ -43,6 +44,7 @@ const TERMINAL_PROTOCOL_JS_ROUTE: &str = "/terminal_protocol.js";
 const DIR_BROWSER_JS_ROUTE: &str = "/dir_browser.js";
 const COMMAND_PALETTE_JS_ROUTE: &str = "/command_palette.js";
 const TROGDOR_LOGIC_JS_ROUTE: &str = "/trogdor_logic.js";
+const TROGDOR_DOM_LOGIC_JS_ROUTE: &str = "/trogdor_dom_logic.js";
 const TROGDOR_RENDER_JS_ROUTE: &str = "/trogdor_render.js";
 const WORKBENCH_DOM_JS_ROUTE: &str = "/workbench_dom.js";
 const WORKBENCH_RENDER_JS_ROUTE: &str = "/workbench_render.js";
@@ -97,6 +99,7 @@ pub fn routes() -> Router<Arc<AppState>> {
             get(rendered_surface_draw_js),
         )
         .route(INPUT_SUPPORT_JS_ROUTE, get(input_support_js))
+        .route(SURFACE_ACTION_PLANS_JS_ROUTE, get(surface_action_plans_js))
         .route(SEND_SHEET_JS_ROUTE, get(send_sheet_js))
         .route(
             TERMINAL_SURFACE_SETUP_JS_ROUTE,
@@ -118,6 +121,7 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route(DIR_BROWSER_JS_ROUTE, get(dir_browser_js))
         .route(COMMAND_PALETTE_JS_ROUTE, get(command_palette_js))
         .route(TROGDOR_LOGIC_JS_ROUTE, get(trogdor_logic_js))
+        .route(TROGDOR_DOM_LOGIC_JS_ROUTE, get(trogdor_dom_logic_js))
         .route(TROGDOR_RENDER_JS_ROUTE, get(trogdor_render_js))
         .route(WORKBENCH_DOM_JS_ROUTE, get(workbench_dom_js))
         .route(WORKBENCH_RENDER_JS_ROUTE, get(workbench_render_js))
@@ -632,6 +636,13 @@ async fn input_support_js() -> Response {
     javascript_asset("src/web/input_support.js", include_str!("input_support.js"))
 }
 
+async fn surface_action_plans_js() -> Response {
+    javascript_asset(
+        "src/web/surface_action_plans.js",
+        include_str!("surface_action_plans.js"),
+    )
+}
+
 async fn send_sheet_js() -> Response {
     javascript_asset("src/web/send_sheet.js", include_str!("send_sheet.js"))
 }
@@ -705,6 +716,13 @@ async fn command_palette_js() -> Response {
 
 async fn trogdor_logic_js() -> Response {
     javascript_asset("src/web/trogdor_logic.js", include_str!("trogdor_logic.js"))
+}
+
+async fn trogdor_dom_logic_js() -> Response {
+    javascript_asset(
+        "src/web/trogdor_dom_logic.js",
+        include_str!("trogdor_dom_logic.js"),
+    )
 }
 
 async fn trogdor_render_js() -> Response {
@@ -2244,6 +2262,11 @@ mod tests {
                 "export function eventCell",
             ),
             (
+                SURFACE_ACTION_PLANS_JS_ROUTE,
+                surface_action_plans_js().await,
+                "export function surfaceActionDispatchPlan",
+            ),
+            (
                 SEND_SHEET_JS_ROUTE,
                 send_sheet_js().await,
                 "export function sendSheetSubmitPlan",
@@ -2301,6 +2324,11 @@ mod tests {
             (
                 TROGDOR_LOGIC_JS_ROUTE,
                 trogdor_logic_js().await,
+                "from \"./trogdor_dom_logic.js\"",
+            ),
+            (
+                TROGDOR_DOM_LOGIC_JS_ROUTE,
+                trogdor_dom_logic_js().await,
                 "export function trogdorDragonPose",
             ),
             (
@@ -2410,9 +2438,11 @@ mod tests {
     fn app_js_and_css_wire_trogdor_sprite_burn_loop() {
         let js = include_str!("app.js");
         let trogdor_logic = include_str!("trogdor_logic.js");
+        let trogdor_dom_logic = include_str!("trogdor_dom_logic.js");
         let trogdor_render = include_str!("trogdor_render.js");
         assert!(trogdor_render.contains("TROGDOR_DRAGON_ASSET_BASE = \"/assets/dragon\""));
-        assert!(trogdor_logic.contains("export function trogdorDragonPose(groups, summary"));
+        assert!(trogdor_logic.contains("from \"./trogdor_dom_logic.js\""));
+        assert!(trogdor_dom_logic.contains("export function trogdorDragonPose(groups, summary"));
         assert!(trogdor_render.contains("trogdor-dragon-sprite"));
         assert!(trogdor_render.contains("agent-burn-flame"));
         assert!(trogdor_render.contains("const dragonTarget = dragonPose || TROGDOR_DRAGON_TARGET"));
