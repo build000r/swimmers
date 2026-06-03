@@ -14,6 +14,7 @@ import {
   terminalFallbackFocusPlan,
   terminalFallbackKeydownPlan,
   terminalFallbackPastePlan,
+  terminalFallbackPointerFocusPlan,
   terminalKeyStripClickExecutorPlan,
   terminalKeyStripClickPlan,
   terminalStageCaptureBindings,
@@ -496,6 +497,24 @@ test("terminalFallbackFocusPlan preserves fallback focus, blur, and no-op gates"
     event: { kind: "focus", focused: false },
   });
   assert.deepEqual(terminalFallbackFocusPlan("click", { terminalFallbackActive: true }), { type: "ignore" });
+});
+
+test("terminalFallbackPointerFocusPlan preserves scheduled and immediate focus gates", () => {
+  const ignored = { type: "ignore", focusTerminal: false, scheduleFrame: false };
+
+  assert.deepEqual(terminalFallbackPointerFocusPlan("mousedown", { terminalFallbackActive: false, activeSheet: "" }), ignored);
+  assert.deepEqual(terminalFallbackPointerFocusPlan("click", { terminalFallbackActive: true, activeSheet: "send" }), ignored);
+  assert.deepEqual(terminalFallbackPointerFocusPlan("mousedown", { terminalFallbackActive: true, activeSheet: "" }), {
+    type: "focus_terminal",
+    focusTerminal: true,
+    scheduleFrame: true,
+  });
+  assert.deepEqual(terminalFallbackPointerFocusPlan("click", { terminalFallbackActive: true, activeSheet: "" }), {
+    type: "focus_terminal",
+    focusTerminal: true,
+    scheduleFrame: false,
+  });
+  assert.deepEqual(terminalFallbackPointerFocusPlan("touchend", { terminalFallbackActive: true, activeSheet: "" }), ignored);
 });
 
 test("terminalStageFocusExecutorPlan preserves ignore, forward, and unknown decisions", () => {

@@ -2,7 +2,7 @@ import { buildSurfaceFrame, surfaceActionAt, surfaceConsumesPointer } from "./re
 import {
   authTokenButtonPlan, eventCell, globalShortcutPlan, mobileKeyboardInputExecutorPlan, mobileKeyboardInputPlan,
   mobileKeyboardKeydownPlan, mobileKeyboardKeyPlan, shouldIgnoreSyntheticClick,
-  terminalComposerControlAction, terminalFallbackFocusPlan, terminalFallbackKeydownPlan, terminalFallbackPastePlan, terminalKeyStripClickExecutorPlan, terminalKeyStripClickPlan, terminalStageCaptureBindings, terminalStageFocusExecutorPlan, terminalStageFocusPlan,
+  terminalComposerControlAction, terminalFallbackFocusPlan, terminalFallbackKeydownPlan, terminalFallbackPastePlan, terminalFallbackPointerFocusPlan, terminalKeyStripClickExecutorPlan, terminalKeyStripClickPlan, terminalStageCaptureBindings, terminalStageFocusExecutorPlan, terminalStageFocusPlan,
   terminalStageKeydownPlan, terminalStagePasteExecutorPlan, terminalStagePastePlan,
 } from "./input_support.js";
 import { sendHistoryClickPlan, sendSheetFailureStatus, sendSheetSubmitPlan, sendSheetSuccessStatus } from "./send_sheet.js";
@@ -3892,6 +3892,13 @@ function runTerminalFocusAction(plan) {
   if (action.forwardEvent) forwardTerminalEvent(action.event);
 }
 
+function runTerminalFallbackPointerFocusAction(plan) {
+  if (!plan.focusTerminal) return;
+  const focus = () => focusTerminalInputSurface({ preventScroll: true });
+  if (plan.scheduleFrame) requestAnimationFrame(focus);
+  else focus();
+}
+
 function mouseCell(event) {
   const rect = el.terminalStage.getBoundingClientRect();
   return eventCell(event, rect, state.currentCols, state.currentRows);
@@ -5390,18 +5397,8 @@ function bindEvents() {
       forwardTerminalEvent({ kind: "focus", focused: true });
     }
   });
-  el.terminalFallback.addEventListener("mousedown", () => {
-    if (state.terminalFallbackActive && !state.activeSheet) {
-      requestAnimationFrame(() => {
-        focusTerminalInputSurface({ preventScroll: true });
-      });
-    }
-  });
-  el.terminalFallback.addEventListener("click", () => {
-    if (state.terminalFallbackActive && !state.activeSheet) {
-      focusTerminalInputSurface({ preventScroll: true });
-    }
-  });
+  el.terminalFallback.addEventListener("mousedown", () => runTerminalFallbackPointerFocusAction(terminalFallbackPointerFocusPlan("mousedown", { terminalFallbackActive: state.terminalFallbackActive, activeSheet: state.activeSheet })));
+  el.terminalFallback.addEventListener("click", () => runTerminalFallbackPointerFocusAction(terminalFallbackPointerFocusPlan("click", { terminalFallbackActive: state.terminalFallbackActive, activeSheet: state.activeSheet })));
   el.terminalFallback.addEventListener("keydown", handleTerminalFallbackKeyEvent);
   el.terminalFallback.addEventListener("paste", handleTerminalFallbackPasteEvent);
   el.terminalFallback.addEventListener("focus", () => runTerminalFocusAction(terminalFallbackFocusPlan("focus", { terminalFallbackActive: state.terminalFallbackActive, activeSheet: state.activeSheet })));

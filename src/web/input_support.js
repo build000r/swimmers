@@ -333,6 +333,19 @@ export function terminalFallbackFocusPlan(eventType, context = {}) {
   return { type: "ignore" };
 }
 
+export function terminalFallbackPointerFocusPlan(eventType, context = {}) {
+  if (!context.terminalFallbackActive || context.activeSheet) {
+    return { type: "ignore", focusTerminal: false, scheduleFrame: false };
+  }
+  if (eventType === "mousedown") {
+    return { type: "focus_terminal", focusTerminal: true, scheduleFrame: true };
+  }
+  if (eventType === "click") {
+    return { type: "focus_terminal", focusTerminal: true, scheduleFrame: false };
+  }
+  return { type: "ignore", focusTerminal: false, scheduleFrame: false };
+}
+
 export function terminalStageFocusExecutorPlan(plan = {}) {
   if (plan.type !== "forward_event") {
     return { type: "ignore", forwardEvent: false, event: null };
