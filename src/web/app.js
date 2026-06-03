@@ -4690,92 +4690,72 @@ async function toggleFollowPublished() {
 }
 
 async function handleSurfaceAction(zone) {
+  const plan = surfaceActionPlan(zone);
+  if (plan.type === "select_session") return selectSession(plan.sessionId);
+  if (plan.type === "open_trogdor_agent_terminal") return openTrogdorAgentTerminal(plan.sessionId);
+  if (plan.type === "trogdor_read_toggle" || plan.type === "trogdor_wpm") return runTrogdorReaderSurfaceAction(plan);
+  if (plan.type === "toggle_trogdor_atlas") return toggleTrogdorAtlasSurfaceAction();
+  if (plan.type === "focus_terminal") return focusTerminalSurfaceAction();
+  return runSurfaceActionExecution(surfaceActionExecutionForZone(plan, zone));
+}
+
+function surfaceActionPlan(zone) {
   const contextPlan = surfaceActionDispatchContextPlan(zone);
   const planContext = {};
-  if (contextPlan.includeReadOnly) {
-    planContext.readOnly = state.readOnly;
-  }
-  if (contextPlan.includeCurrentSession) {
-    planContext.currentSession = currentSession();
-  }
-  const plan = surfaceActionDispatchPlan(zone, planContext);
+  if (contextPlan.includeReadOnly) planContext.readOnly = state.readOnly;
+  if (contextPlan.includeCurrentSession) planContext.currentSession = currentSession();
+  return surfaceActionDispatchPlan(zone, planContext);
+}
 
-  switch (plan.type) {
-    case "select_session":
-      await selectSession(plan.sessionId);
-      break;
-    case "open_trogdor_agent_terminal":
-      await openTrogdorAgentTerminal(plan.sessionId);
-      break;
-    case "trogdor_read_toggle":
-    case "trogdor_wpm":
-    {
-      advanceTrogdorReaderProgressForCurrentHover();
-      const readerPlan = surfaceActionTrogdorReaderExecutionPlan(plan, plan.type === "trogdor_read_toggle"
-        ? { toggle: trogdorReaderToggleAction(state.trogdorReading, currentTrogdorSurfaceSession(), trogdorClawgReadComplete) }
-        : { nextWpm: trogdorReaderWpmForAction(plan.actionId, state.trogdorWpm) });
-      if (readerPlan.session) startTrogdorReaderForSession(readerPlan.session, { readAgain: readerPlan.readAgain });
-      Object.assign(state, readerPlan.statePatch);
-      if (readerPlan.restartClock) state.trogdorReaderStartedAt = performance.now();
-      if (readerPlan.resetAfterWpmChange) resetTrogdorReaderAfterWpmChange();
-      renderHudSurface();
-      if (readerPlan.syncReaderTimer) syncTrogdorReaderTimer();
-      break;
-    }
-    case "toggle_trogdor_atlas":
-      Object.assign(state, trogdorAtlasTransitionState("toggle", state.trogdorAtlasOpen));
-      renderHudSurface();
-      break;
-    case "open_send_sheet_for_zone":
-    case "open_create_sheet_for_zone_cwd":
-    case "select_then_open_mermaid_for_zone":
-    case "select_then_launch_commit_for_zone":
-    case "open_sheet":
-    case "open_send_sheet_for_current_session":
-    case "open_thought_config":
-    case "open_native":
-    case "open_mermaid":
-    case "launch_commit":
-    case "toggle_follow":
-    case "toggle_select":
-    case "copy_selection":
-    case "refresh":
-    {
-      const executionContext = surfaceActionExecutionContextPlan(plan);
-      const action = surfaceActionExecutionPlan(plan, executionContext.includeZonePayload
-        ? { zonePayload: trogdorActionPayloadForZone(zone) }
-        : {});
-      if (action.type === "open_send_sheet") openSendSheet(action.payload);
-      else if (action.type === "open_create_sheet_for_cwd") openCreateSheetForCwd(action.cwd);
-      else if (action.type === "select_then_open_mermaid") {
-        await selectSession(action.sessionId);
-        openMermaidSheet();
-      } else if (action.type === "select_then_launch_commit") {
-        await selectSession(action.sessionId);
-        await launchCommitGrok();
-      } else if (action.type === "open_sheet") openSheet(action.sheetId);
-      else if (action.type === "open_thought_config") openThoughtConfigSheet();
-      else if (action.type === "open_native") openNativeSheet();
-      else if (action.type === "open_mermaid") openMermaidSheet();
-      else if (action.type === "launch_commit") await launchCommitGrok();
-      else if (action.type === "toggle_follow") await toggleFollowPublished();
-      else if (action.type === "toggle_select") setSelectMode(!state.selectMode);
-      else if (action.type === "copy_selection") await copyTerminalSelection();
-      else if (action.type === "refresh") await refreshSessions();
-      break;
-    }
-    case "focus_terminal":
-    {
-      const focusPlan = surfaceActionFocusTerminalExecutionPlan(trogdorTerminalFocusStatus(currentSession()));
-      Object.assign(state, trogdorAtlasTransitionState(focusPlan.atlasTransitionAction));
-      renderHudSurface();
-      focusTerminalInputSurface(focusPlan.focusOptions);
-      setUtilityStatus(focusPlan.statusMessage, focusPlan.statusError, focusPlan.statusTimeoutMs);
-      break;
-    }
-    default:
-      break;
-  }
+function runTrogdorReaderSurfaceAction(plan) {
+  advanceTrogdorReaderProgressForCurrentHover();
+  const readerPlan = surfaceActionTrogdorReaderExecutionPlan(plan, plan.type === "trogdor_read_toggle"
+    ? { toggle: trogdorReaderToggleAction(state.trogdorReading, currentTrogdorSurfaceSession(), trogdorClawgReadComplete) }
+    : { nextWpm: trogdorReaderWpmForAction(plan.actionId, state.trogdorWpm) });
+  if (readerPlan.session) startTrogdorReaderForSession(readerPlan.session, { readAgain: readerPlan.readAgain });
+  Object.assign(state, readerPlan.statePatch);
+  if (readerPlan.restartClock) state.trogdorReaderStartedAt = performance.now();
+  if (readerPlan.resetAfterWpmChange) resetTrogdorReaderAfterWpmChange();
+  renderHudSurface();
+  if (readerPlan.syncReaderTimer) syncTrogdorReaderTimer();
+}
+
+function toggleTrogdorAtlasSurfaceAction() {
+  Object.assign(state, trogdorAtlasTransitionState("toggle", state.trogdorAtlasOpen));
+  renderHudSurface();
+}
+
+function surfaceActionExecutionForZone(plan, zone) {
+  const executionContext = surfaceActionExecutionContextPlan(plan);
+  return surfaceActionExecutionPlan(plan, executionContext.includeZonePayload ? { zonePayload: trogdorActionPayloadForZone(zone) } : {});
+}
+
+const surfaceActionExecutors = {
+  open_send_sheet: (action) => openSendSheet(action.payload),
+  open_create_sheet_for_cwd: (action) => openCreateSheetForCwd(action.cwd),
+  select_then_open_mermaid: async (action) => { await selectSession(action.sessionId); openMermaidSheet(); },
+  select_then_launch_commit: async (action) => { await selectSession(action.sessionId); await launchCommitGrok(); },
+  open_sheet: (action) => openSheet(action.sheetId),
+  open_thought_config: () => openThoughtConfigSheet(),
+  open_native: () => openNativeSheet(),
+  open_mermaid: () => openMermaidSheet(),
+  launch_commit: () => launchCommitGrok(),
+  toggle_follow: () => toggleFollowPublished(),
+  toggle_select: () => setSelectMode(!state.selectMode),
+  copy_selection: () => copyTerminalSelection(),
+  refresh: () => refreshSessions(),
+};
+
+function runSurfaceActionExecution(action) {
+  return surfaceActionExecutors[action.type]?.(action);
+}
+
+function focusTerminalSurfaceAction() {
+  const focusPlan = surfaceActionFocusTerminalExecutionPlan(trogdorTerminalFocusStatus(currentSession()));
+  Object.assign(state, trogdorAtlasTransitionState(focusPlan.atlasTransitionAction));
+  renderHudSurface();
+  focusTerminalInputSurface(focusPlan.focusOptions);
+  setUtilityStatus(focusPlan.statusMessage, focusPlan.statusError, focusPlan.statusTimeoutMs);
 }
 
 function surfaceHit(event) {
