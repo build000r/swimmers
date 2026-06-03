@@ -964,6 +964,80 @@ export function terminalFallbackKeydownPlan(context = {}) {
   };
 }
 
+export function surfaceActionDispatchPlan(zone, context = {}) {
+  if (!zone || zone.disabled) {
+    return { type: "ignore" };
+  }
+
+  switch (zone.type) {
+    case "session":
+      return { type: "select_session", sessionId: zone.sessionId };
+    case "trogdor_agent":
+      return { type: "open_trogdor_agent_terminal", sessionId: zone.sessionId };
+    case "trogdor_reader":
+      return { type: "ignore" };
+    default:
+      break;
+  }
+
+  switch (zone.actionId) {
+    case "trogdor_read_toggle":
+      return { type: "trogdor_read_toggle" };
+    case "trogdor_wpm_down":
+    case "trogdor_wpm_up":
+      return { type: "trogdor_wpm", actionId: zone.actionId };
+    case "toggle_trogdor_atlas":
+      return { type: "toggle_trogdor_atlas" };
+    case "trogdor_send":
+    case "trogdor_group_send":
+      return { type: "open_send_sheet_for_zone" };
+    case "trogdor_launch":
+      return { type: "open_create_sheet_for_zone_cwd" };
+    case "trogdor_mermaid":
+      return { type: "select_then_open_mermaid_for_zone" };
+    case "trogdor_commit":
+      return { type: "select_then_launch_commit_for_zone" };
+    case "open_search":
+      return { type: "open_sheet", sheetId: "search" };
+    case "open_send":
+      if (context.readOnly || !context.currentSession) {
+        return { type: "ignore" };
+      }
+      return {
+        type: "open_send_sheet_for_current_session",
+        payload: {
+          type: "session",
+          sessionId: context.currentSession.session_id,
+          label: context.currentSession.tmux_name || context.currentSession.session_id,
+        },
+      };
+    case "open_auth":
+      return { type: "open_sheet", sheetId: "auth" };
+    case "open_config":
+      return { type: "open_thought_config" };
+    case "open_native":
+      return { type: "open_native" };
+    case "open_mermaid":
+      return { type: "open_mermaid" };
+    case "launch_commit":
+      return { type: "launch_commit" };
+    case "open_create":
+      return context.readOnly ? { type: "ignore" } : { type: "open_sheet", sheetId: "create" };
+    case "toggle_follow":
+      return { type: "toggle_follow" };
+    case "toggle_select":
+      return { type: "toggle_select" };
+    case "copy_selection":
+      return { type: "copy_selection" };
+    case "focus_terminal":
+      return { type: "focus_terminal" };
+    case "refresh":
+      return { type: "refresh" };
+    default:
+      return { type: "ignore" };
+  }
+}
+
 function clampInt(value, fallback, min, max) {
   const numeric = Number.isFinite(value) ? Math.trunc(value) : fallback;
   return Math.max(min, Math.min(max, numeric));

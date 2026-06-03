@@ -2,7 +2,7 @@ import { buildSurfaceFrame, surfaceActionAt, surfaceConsumesPointer } from "./re
 import {
   authTokenButtonPlan, controlEventSessionPatchPlan, eventCell, globalShortcutPlan, initialStateBootPlan, inputAckActionPlan, lifecycleDeletedSessionPatchPlan, mobileKeyboardInputExecutorPlan, mobileKeyboardInputPlan,
   sheetActionAvailabilityPlan,
-  mobileKeyboardKeydownPlan, mobileKeyboardKeyPlan, shouldIgnoreSyntheticClick,
+  mobileKeyboardKeydownPlan, mobileKeyboardKeyPlan, shouldIgnoreSyntheticClick, surfaceActionDispatchPlan,
   terminalComposerControlAction, terminalDestroyStatePatch, terminalFallbackActivationPlan, terminalFallbackFocusPlan, terminalFallbackKeydownPlan, terminalFallbackPastePlan, terminalFallbackPointerFocusPlan, terminalInlineInputKeydownPlan, terminalKeyStripClickExecutorPlan, terminalKeyStripClickPlan, terminalStageCaptureBindings, terminalStageClickPlan, terminalStageFocusExecutorPlan, terminalStageFocusPlan,
   normalizeTerminalZoomValue, terminalAuxiliaryControlsPlan, terminalFallbackScrollPlan, terminalFallbackTextScrollPlan, terminalInputDockPlan, terminalLiveFrameFallbackPlan, terminalPaintProbeSchedulePlan, terminalPaintVerificationPlan, terminalPendingByteBufferPlan, terminalPresentationPlan, terminalResizeGeometryPlan, terminalStageKeydownPlan, terminalStageMouseDownPlan, terminalStageMouseMovePlan, terminalStageMouseUpPlan, terminalStagePasteExecutorPlan, terminalStagePastePlan, terminalStageTouchEndPlan, terminalStageWheelPlan, terminalToolsAvailabilityPlan, terminalZoomControlsPlan, terminalZoomLoadValue, terminalZoomPercentLabel, terminalZoomPersistencePlan,
 } from "./input_support.js";
@@ -4697,25 +4697,24 @@ async function toggleFollowPublished() {
 }
 
 async function handleSurfaceAction(zone) {
-  if (!zone || zone.disabled) {
-    return;
+  const directZoneType =
+    zone?.type === "session" || zone?.type === "trogdor_agent" || zone?.type === "trogdor_reader";
+  const planContext = {};
+  if (zone && !zone.disabled && !directZoneType && zone.actionId === "open_send") {
+    planContext.readOnly = state.readOnly;
+    planContext.currentSession = currentSession();
+  } else if (zone && !zone.disabled && !directZoneType && zone.actionId === "open_create") {
+    planContext.readOnly = state.readOnly;
   }
+  const plan = surfaceActionDispatchPlan(zone, planContext);
 
-  if (zone.type === "session") {
-    await selectSession(zone.sessionId);
-    return;
-  }
-
-  if (zone.type === "trogdor_agent") {
-    await openTrogdorAgentTerminal(zone.sessionId);
-    return;
-  }
-
-  if (zone.type === "trogdor_reader") {
-    return;
-  }
-
-  switch (zone.actionId) {
+  switch (plan.type) {
+    case "select_session":
+      await selectSession(plan.sessionId);
+      break;
+    case "open_trogdor_agent_terminal":
+      await openTrogdorAgentTerminal(plan.sessionId);
+      break;
     case "trogdor_read_toggle":
     {
       advanceTrogdorReaderProgressForCurrentHover();
@@ -4727,11 +4726,10 @@ async function handleSurfaceAction(zone) {
       syncTrogdorReaderTimer();
       break;
     }
-    case "trogdor_wpm_down":
-    case "trogdor_wpm_up":
+    case "trogdor_wpm":
     {
       advanceTrogdorReaderProgressForCurrentHover();
-      state.trogdorWpm = trogdorReaderWpmForAction(zone.actionId, state.trogdorWpm);
+      state.trogdorWpm = trogdorReaderWpmForAction(plan.actionId, state.trogdorWpm);
       resetTrogdorReaderAfterWpmChange();
       renderHudSurface();
       break;
@@ -4740,39 +4738,27 @@ async function handleSurfaceAction(zone) {
       Object.assign(state, trogdorAtlasTransitionState("toggle", state.trogdorAtlasOpen));
       renderHudSurface();
       break;
-    case "trogdor_send":
+    case "open_send_sheet_for_zone":
       openSendSheet(trogdorActionPayloadForZone(zone));
       break;
-    case "trogdor_group_send":
-      openSendSheet(trogdorActionPayloadForZone(zone));
-      break;
-    case "trogdor_launch":
+    case "open_create_sheet_for_zone_cwd":
       openCreateSheetForCwd(trogdorActionPayloadForZone(zone).cwd);
       break;
-    case "trogdor_mermaid":
+    case "select_then_open_mermaid_for_zone":
       await selectSession(trogdorActionPayloadForZone(zone).sessionId);
       openMermaidSheet();
       break;
-    case "trogdor_commit":
+    case "select_then_launch_commit_for_zone":
       await selectSession(trogdorActionPayloadForZone(zone).sessionId);
       await launchCommitGrok();
       break;
-    case "open_search":
-      openSheet("search");
+    case "open_sheet":
+      openSheet(plan.sheetId);
       break;
-    case "open_send":
-      if (!state.readOnly && currentSession()) {
-        openSendSheet({
-          type: "session",
-          sessionId: currentSession().session_id,
-          label: currentSession().tmux_name || currentSession().session_id,
-        });
-      }
+    case "open_send_sheet_for_current_session":
+      openSendSheet(plan.payload);
       break;
-    case "open_auth":
-      openSheet("auth");
-      break;
-    case "open_config":
+    case "open_thought_config":
       openThoughtConfigSheet();
       break;
     case "open_native":
@@ -4783,11 +4769,6 @@ async function handleSurfaceAction(zone) {
       break;
     case "launch_commit":
       await launchCommitGrok();
-      break;
-    case "open_create":
-      if (!state.readOnly) {
-        openSheet("create");
-      }
       break;
     case "toggle_follow":
       await toggleFollowPublished();

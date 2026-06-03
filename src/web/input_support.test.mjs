@@ -14,6 +14,7 @@ import {
   mobileKeyboardKeydownPlan,
   mobileKeyboardKeyPlan,
   shouldIgnoreSyntheticClick,
+  surfaceActionDispatchPlan,
   terminalComposerControlAction,
   terminalDestroyStatePatch,
   terminalFallbackActivationPlan,
@@ -180,6 +181,107 @@ test("globalShortcutPlan preserves ctrl-shift commands and gated handled no-ops"
   assert.deepEqual(globalShortcutPlan({ ctrlKey: true, shiftKey: true, altKey: true, code: "KeyF" }), {
     type: "unhandled",
   });
+});
+
+test("surfaceActionDispatchPlan preserves ignored and direct zone routes", () => {
+  assert.deepEqual(surfaceActionDispatchPlan(null), { type: "ignore" });
+  assert.deepEqual(surfaceActionDispatchPlan({ disabled: true, actionId: "refresh" }), { type: "ignore" });
+  assert.deepEqual(surfaceActionDispatchPlan({ type: "session", sessionId: "agent-1" }), {
+    type: "select_session",
+    sessionId: "agent-1",
+  });
+  assert.deepEqual(surfaceActionDispatchPlan({ type: "trogdor_agent", sessionId: "agent-2" }), {
+    type: "open_trogdor_agent_terminal",
+    sessionId: "agent-2",
+  });
+  assert.deepEqual(surfaceActionDispatchPlan({ type: "trogdor_reader", actionId: "open_send" }), { type: "ignore" });
+});
+
+test("surfaceActionDispatchPlan preserves Trogdor reader and atlas action routes", () => {
+  assert.deepEqual(surfaceActionDispatchPlan({ actionId: "trogdor_read_toggle" }), {
+    type: "trogdor_read_toggle",
+  });
+  assert.deepEqual(surfaceActionDispatchPlan({ actionId: "trogdor_wpm_down" }), {
+    type: "trogdor_wpm",
+    actionId: "trogdor_wpm_down",
+  });
+  assert.deepEqual(surfaceActionDispatchPlan({ actionId: "trogdor_wpm_up" }), {
+    type: "trogdor_wpm",
+    actionId: "trogdor_wpm_up",
+  });
+  assert.deepEqual(surfaceActionDispatchPlan({ actionId: "toggle_trogdor_atlas" }), {
+    type: "toggle_trogdor_atlas",
+  });
+});
+
+test("surfaceActionDispatchPlan preserves Trogdor surface action routes", () => {
+  assert.deepEqual(surfaceActionDispatchPlan({ actionId: "trogdor_send" }), {
+    type: "open_send_sheet_for_zone",
+  });
+  assert.deepEqual(surfaceActionDispatchPlan({ actionId: "trogdor_group_send" }), {
+    type: "open_send_sheet_for_zone",
+  });
+  assert.deepEqual(surfaceActionDispatchPlan({ actionId: "trogdor_launch" }), {
+    type: "open_create_sheet_for_zone_cwd",
+  });
+  assert.deepEqual(surfaceActionDispatchPlan({ actionId: "trogdor_mermaid" }), {
+    type: "select_then_open_mermaid_for_zone",
+  });
+  assert.deepEqual(surfaceActionDispatchPlan({ actionId: "trogdor_commit" }), {
+    type: "select_then_launch_commit_for_zone",
+  });
+});
+
+test("surfaceActionDispatchPlan preserves sheet, utility, and refresh routes", () => {
+  assert.deepEqual(surfaceActionDispatchPlan({ actionId: "open_search" }), {
+    type: "open_sheet",
+    sheetId: "search",
+  });
+  assert.deepEqual(surfaceActionDispatchPlan({ actionId: "open_auth" }), {
+    type: "open_sheet",
+    sheetId: "auth",
+  });
+  assert.deepEqual(surfaceActionDispatchPlan({ actionId: "open_config" }), { type: "open_thought_config" });
+  assert.deepEqual(surfaceActionDispatchPlan({ actionId: "open_native" }), { type: "open_native" });
+  assert.deepEqual(surfaceActionDispatchPlan({ actionId: "open_mermaid" }), { type: "open_mermaid" });
+  assert.deepEqual(surfaceActionDispatchPlan({ actionId: "launch_commit" }), { type: "launch_commit" });
+  assert.deepEqual(surfaceActionDispatchPlan({ actionId: "toggle_follow" }), { type: "toggle_follow" });
+  assert.deepEqual(surfaceActionDispatchPlan({ actionId: "toggle_select" }), { type: "toggle_select" });
+  assert.deepEqual(surfaceActionDispatchPlan({ actionId: "copy_selection" }), { type: "copy_selection" });
+  assert.deepEqual(surfaceActionDispatchPlan({ actionId: "focus_terminal" }), { type: "focus_terminal" });
+  assert.deepEqual(surfaceActionDispatchPlan({ actionId: "refresh" }), { type: "refresh" });
+  assert.deepEqual(surfaceActionDispatchPlan({ actionId: "unknown" }), { type: "ignore" });
+});
+
+test("surfaceActionDispatchPlan preserves open_send and open_create gates", () => {
+  const session = { session_id: "agent-1", tmux_name: "codex-main" };
+  assert.deepEqual(surfaceActionDispatchPlan({ actionId: "open_send" }, {
+    readOnly: false,
+    currentSession: session,
+  }), {
+    type: "open_send_sheet_for_current_session",
+    payload: { type: "session", sessionId: "agent-1", label: "codex-main" },
+  });
+  assert.deepEqual(surfaceActionDispatchPlan({ actionId: "open_send" }, {
+    readOnly: false,
+    currentSession: { session_id: "agent-2", tmux_name: "" },
+  }), {
+    type: "open_send_sheet_for_current_session",
+    payload: { type: "session", sessionId: "agent-2", label: "agent-2" },
+  });
+  assert.deepEqual(surfaceActionDispatchPlan({ actionId: "open_send" }, {
+    readOnly: true,
+    currentSession: session,
+  }), { type: "ignore" });
+  assert.deepEqual(surfaceActionDispatchPlan({ actionId: "open_send" }, {
+    readOnly: false,
+    currentSession: null,
+  }), { type: "ignore" });
+  assert.deepEqual(surfaceActionDispatchPlan({ actionId: "open_create" }, { readOnly: false }), {
+    type: "open_sheet",
+    sheetId: "create",
+  });
+  assert.deepEqual(surfaceActionDispatchPlan({ actionId: "open_create" }, { readOnly: true }), { type: "ignore" });
 });
 
 test("mobileKeyboardKeyPlan preserves special-key forwarding and no-op gates", () => {
