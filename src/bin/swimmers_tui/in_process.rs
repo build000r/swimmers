@@ -20,7 +20,7 @@ use swimmers::api::service::{
 use swimmers::api::sessions::send_group_input_service;
 use swimmers::api::{AppState, PublishedSelectionState};
 use swimmers::openrouter_models::{
-    cached_or_default_openrouter_candidates, refresh_openrouter_model_cache,
+    cached_or_default_openrouter_candidates, refresh_openrouter_model_cache, OpenRouterModelCache,
 };
 use swimmers::session::actor::SessionCommand;
 use swimmers::thought::runtime_config::ThoughtConfig;
@@ -72,6 +72,103 @@ fn bridge_status_label(status: swimmers::thought::health::BridgeStatus) -> Strin
 
 fn api_service_error_message(error: ApiServiceError) -> String {
     ErrorResponse::with_message(error.code(), error.message()).display_message("in-process API")
+}
+
+fn openrouter_candidates_from_refresh_result(
+    result: Result<OpenRouterModelCache, String>,
+) -> Result<Vec<String>, String> {
+    match result {
+        Ok(cache) if !cache.models.is_empty() => Ok(cache.models),
+        Ok(_) => Ok(cached_or_default_openrouter_candidates()),
+        Err(err) => Err(err),
+    }
+}
+
+fn native_open_error_message(error: NativeOpenServiceError) -> String {
+    match error {
+        NativeOpenServiceError::Unsupported { reason } => {
+            reason.unwrap_or_else(|| "native desktop unavailable".to_string())
+        }
+        NativeOpenServiceError::NoAttentionSessions => {
+            "no sessions are waiting for operator input".to_string()
+        }
+        NativeOpenServiceError::SessionNotFound => "session not found".to_string(),
+        NativeOpenServiceError::SessionExited => "session has already exited".to_string(),
+        NativeOpenServiceError::Internal(message) => message,
+    }
+}
+
+fn remote_session_skills_response(session_id: String) -> SessionSkillListResponse {
+    SessionSkillListResponse {
+        session_id,
+        source: "sbp".to_string(),
+        cwd: String::new(),
+        available: false,
+        query: None,
+        skills: Vec::new(),
+        issues: Vec::new(),
+        message: Some("remote session skills must be queried on the target host".to_string()),
+    }
+}
+
+async fn fetch_mermaid_artifact_for_session(
+    state: Arc<AppState>,
+    session_id: String,
+) -> Result<MermaidArtifactResponse, String> {
+    if let Some((target, remote_session_id)) = remote_sessions::denamespace_for_target(&session_id)
+        .map_err(|err| err.message().to_string())?
+    {
+        return remote_sessions::fetch_remote_mermaid_artifact(&target, remote_session_id)
+            .await
+            .map_err(|err| err.message().to_string());
+    }
+    let handle = state
+        .supervisor
+        .get_session(&session_id)
+        .await
+        .ok_or_else(|| "session not found".to_string())?;
+    let (tx, rx) = oneshot::channel();
+    handle
+        .send(SessionCommand::GetMermaidArtifact(tx))
+        .await
+        .map_err(|_| "session actor unavailable".to_string())?;
+    tokio::time::timeout(Duration::from_secs(5), rx)
+        .await
+        .map_err(|_| "mermaid artifact request timed out".to_string())?
+        .map_err(|_| "actor dropped mermaid artifact reply".to_string())
+}
+
+async fn fetch_session_skills_for_session(
+    state: Arc<AppState>,
+    session_id: String,
+) -> Result<SessionSkillListResponse, String> {
+    if remote_sessions::split_remote_session_id(&session_id).is_some() {
+        return Ok(remote_session_skills_response(session_id));
+    }
+    let summary = state
+        .supervisor
+        .list_sessions()
+        .await
+        .into_iter()
+        .find(|summary| summary.session_id == session_id)
+        .ok_or_else(|| "session not found".to_string())?;
+    Ok(swimmers::api::skills::read_sbp_session_skills(&session_id, &summary.cwd, None).await)
+}
+
+fn native_attention_group_request(
+    max_sessions: usize,
+    current_session_ids: Vec<String>,
+    focus: bool,
+    include_unnumbered_sessions: bool,
+    layout: AttentionGroupLayout,
+) -> NativeAttentionGroupOpenRequest {
+    NativeAttentionGroupOpenRequest {
+        max_sessions: Some(max_sessions),
+        current_session_ids,
+        include_unnumbered_sessions,
+        layout: Some(layout),
+        focus,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -172,11 +269,9 @@ impl TuiApi for InProcessApi {
     fn refresh_openrouter_candidates(&self) -> BoxFuture<'_, Result<Vec<String>, String>> {
         // Mirrors: src/bin/swimmers_tui/api.rs:493 (ApiClient::refresh_openrouter_candidates)
         Box::pin(async move {
-            match refresh_openrouter_model_cache(&self.http).await {
-                Ok(cache) if !cache.models.is_empty() => Ok(cache.models),
-                Ok(_) => Ok(cached_or_default_openrouter_candidates()),
-                Err(err) => Err(err),
-            }
+            openrouter_candidates_from_refresh_result(
+                refresh_openrouter_model_cache(&self.http).await,
+            )
         })
     }
 
@@ -186,31 +281,8 @@ impl TuiApi for InProcessApi {
     ) -> BoxFuture<'_, Result<MermaidArtifactResponse, String>> {
         // Mirrors: src/api/sessions.rs:434 (get_mermaid_artifact)
         let session_id = session_id.to_string();
-        Box::pin(async move {
-            if let Some((target, remote_session_id)) =
-                remote_sessions::denamespace_for_target(&session_id)
-                    .map_err(|err| err.message().to_string())?
-            {
-                return remote_sessions::fetch_remote_mermaid_artifact(&target, remote_session_id)
-                    .await
-                    .map_err(|err| err.message().to_string());
-            }
-            let handle = self
-                .state
-                .supervisor
-                .get_session(&session_id)
-                .await
-                .ok_or_else(|| "session not found".to_string())?;
-            let (tx, rx) = oneshot::channel();
-            handle
-                .send(SessionCommand::GetMermaidArtifact(tx))
-                .await
-                .map_err(|_| "session actor unavailable".to_string())?;
-            tokio::time::timeout(Duration::from_secs(5), rx)
-                .await
-                .map_err(|_| "mermaid artifact request timed out".to_string())?
-                .map_err(|_| "actor dropped mermaid artifact reply".to_string())
-        })
+        let state = self.state.clone();
+        Box::pin(async move { fetch_mermaid_artifact_for_session(state, session_id).await })
     }
 
     fn fetch_session_skills(
@@ -218,34 +290,8 @@ impl TuiApi for InProcessApi {
         session_id: &str,
     ) -> BoxFuture<'_, Result<SessionSkillListResponse, String>> {
         let session_id = session_id.to_string();
-        Box::pin(async move {
-            if remote_sessions::split_remote_session_id(&session_id).is_some() {
-                return Ok(SessionSkillListResponse {
-                    session_id,
-                    source: "sbp".to_string(),
-                    cwd: String::new(),
-                    available: false,
-                    query: None,
-                    skills: Vec::new(),
-                    issues: Vec::new(),
-                    message: Some(
-                        "remote session skills must be queried on the target host".to_string(),
-                    ),
-                });
-            }
-            let summary = self
-                .state
-                .supervisor
-                .list_sessions()
-                .await
-                .into_iter()
-                .find(|summary| summary.session_id == session_id)
-                .ok_or_else(|| "session not found".to_string())?;
-            Ok(
-                swimmers::api::skills::read_sbp_session_skills(&session_id, &summary.cwd, None)
-                    .await,
-            )
-        })
+        let state = self.state.clone();
+        Box::pin(async move { fetch_session_skills_for_session(state, session_id).await })
     }
 
     fn fetch_plan_file(
@@ -331,19 +377,7 @@ impl TuiApi for InProcessApi {
             }
             open_native_session_for_host(&self.state, "localhost", &session_id)
                 .await
-                .map_err(|err| match err {
-                    NativeOpenServiceError::Unsupported { reason } => {
-                        reason.unwrap_or_else(|| "native desktop unavailable".to_string())
-                    }
-                    NativeOpenServiceError::NoAttentionSessions => {
-                        "no sessions are waiting for operator input".to_string()
-                    }
-                    NativeOpenServiceError::SessionNotFound => "session not found".to_string(),
-                    NativeOpenServiceError::SessionExited => {
-                        "session has already exited".to_string()
-                    }
-                    NativeOpenServiceError::Internal(message) => message,
-                })
+                .map_err(native_open_error_message)
         })
     }
 
@@ -355,30 +389,17 @@ impl TuiApi for InProcessApi {
         include_unnumbered_sessions: bool,
         layout: AttentionGroupLayout,
     ) -> BoxFuture<'_, Result<NativeAttentionGroupOpenResponse, String>> {
+        let request = native_attention_group_request(
+            max_sessions,
+            current_session_ids,
+            focus,
+            include_unnumbered_sessions,
+            layout,
+        );
         Box::pin(async move {
-            open_native_attention_group_for_host(
-                &self.state,
-                "localhost",
-                NativeAttentionGroupOpenRequest {
-                    max_sessions: Some(max_sessions),
-                    current_session_ids,
-                    include_unnumbered_sessions,
-                    layout: Some(layout),
-                    focus,
-                },
-            )
-            .await
-            .map_err(|error| match error {
-                NativeOpenServiceError::Unsupported { reason } => {
-                    reason.unwrap_or_else(|| "native desktop unavailable".to_string())
-                }
-                NativeOpenServiceError::NoAttentionSessions => {
-                    "no sessions are waiting for operator input".to_string()
-                }
-                NativeOpenServiceError::SessionNotFound => "session not found".to_string(),
-                NativeOpenServiceError::SessionExited => "session has already exited".to_string(),
-                NativeOpenServiceError::Internal(message) => message,
-            })
+            open_native_attention_group_for_host(&self.state, "localhost", request)
+                .await
+                .map_err(native_open_error_message)
         })
     }
 
@@ -800,6 +821,155 @@ mod tests {
         assert_eq!(err, "actor dropped plan file reply");
     }
 
+    #[test]
+    fn openrouter_refresh_result_preserves_cache_error_and_fallback_semantics() {
+        let models = openrouter_candidates_from_refresh_result(Ok(OpenRouterModelCache {
+            generated_at_epoch_ms: 7,
+            models: vec!["provider/model".to_string()],
+        }))
+        .expect("non-empty cache should return models");
+        assert_eq!(models, vec!["provider/model"]);
+
+        let fallback = openrouter_candidates_from_refresh_result(Ok(OpenRouterModelCache {
+            generated_at_epoch_ms: 8,
+            models: Vec::new(),
+        }))
+        .expect("empty cache should fall back");
+        assert_eq!(fallback, cached_or_default_openrouter_candidates());
+
+        let err = openrouter_candidates_from_refresh_result(Err("catalog unavailable".to_string()))
+            .expect_err("refresh errors should pass through");
+        assert_eq!(err, "catalog unavailable");
+    }
+
+    #[test]
+    fn native_open_error_message_matches_api_error_strings() {
+        assert_eq!(
+            native_open_error_message(NativeOpenServiceError::Unsupported { reason: None }),
+            "native desktop unavailable"
+        );
+        assert_eq!(
+            native_open_error_message(NativeOpenServiceError::Unsupported {
+                reason: Some("not on this host".to_string())
+            }),
+            "not on this host"
+        );
+        assert_eq!(
+            native_open_error_message(NativeOpenServiceError::NoAttentionSessions),
+            "no sessions are waiting for operator input"
+        );
+        assert_eq!(
+            native_open_error_message(NativeOpenServiceError::SessionNotFound),
+            "session not found"
+        );
+        assert_eq!(
+            native_open_error_message(NativeOpenServiceError::SessionExited),
+            "session has already exited"
+        );
+        assert_eq!(
+            native_open_error_message(NativeOpenServiceError::Internal("boom".to_string())),
+            "boom"
+        );
+    }
+
+    #[tokio::test]
+    async fn fetch_mermaid_artifact_reports_missing_local_session() {
+        let api = InProcessApi::new(test_state());
+
+        let err = api
+            .fetch_mermaid_artifact("missing")
+            .await
+            .expect_err("missing local session should fail");
+
+        assert_eq!(err, "session not found");
+    }
+
+    #[tokio::test]
+    async fn fetch_mermaid_artifact_returns_actor_payload() {
+        let state = test_state();
+        let (cmd_tx, mut cmd_rx) = mpsc::channel(8);
+        state
+            .supervisor
+            .insert_test_handle(ActorHandle::test_handle("sess-art", "tmux-art", cmd_tx))
+            .await;
+        tokio::spawn(async move {
+            if let Some(SessionCommand::GetMermaidArtifact(reply)) = cmd_rx.recv().await {
+                let _ = reply.send(MermaidArtifactResponse {
+                    session_id: "sess-art".to_string(),
+                    available: true,
+                    path: Some("/tmp/project/diagram.mmd".to_string()),
+                    updated_at: None,
+                    source: Some("flowchart TD".to_string()),
+                    error: None,
+                    slice_name: Some("slice".to_string()),
+                    plan_files: Some(vec!["PLAN.md".to_string()]),
+                });
+            }
+        });
+        let api = InProcessApi::new(state);
+
+        let artifact = api
+            .fetch_mermaid_artifact("sess-art")
+            .await
+            .expect("actor artifact");
+
+        assert!(artifact.available);
+        assert_eq!(artifact.session_id, "sess-art");
+        assert_eq!(artifact.path.as_deref(), Some("/tmp/project/diagram.mmd"));
+        assert_eq!(artifact.source.as_deref(), Some("flowchart TD"));
+        assert_eq!(artifact.slice_name.as_deref(), Some("slice"));
+        assert_eq!(artifact.plan_files, Some(vec!["PLAN.md".to_string()]));
+    }
+
+    #[tokio::test]
+    async fn fetch_session_skills_reports_remote_sessions_as_target_host_work() {
+        let api = InProcessApi::new(test_state());
+
+        let skills = api
+            .fetch_session_skills("target-host::sess-1")
+            .await
+            .expect("remote skills response");
+
+        assert_eq!(skills.session_id, "target-host::sess-1");
+        assert_eq!(skills.source, "sbp");
+        assert!(!skills.available);
+        assert_eq!(skills.cwd, "");
+        assert_eq!(skills.skills.len(), 0);
+        assert_eq!(
+            skills.message.as_deref(),
+            Some("remote session skills must be queried on the target host")
+        );
+    }
+
+    #[tokio::test]
+    async fn fetch_session_skills_reports_missing_local_session() {
+        let api = InProcessApi::new(test_state());
+
+        let err = api
+            .fetch_session_skills("missing")
+            .await
+            .expect_err("missing local session should fail");
+
+        assert_eq!(err, "session not found");
+    }
+
+    #[tokio::test]
+    async fn fetch_session_skills_reads_local_summary_cwd() {
+        let state = test_state();
+        let _write_rx =
+            insert_summary_test_handle(&state, summary("sess-skills", SessionState::Idle)).await;
+        let api = InProcessApi::new(state);
+
+        let skills = api
+            .fetch_session_skills("sess-skills")
+            .await
+            .expect("local skills response");
+
+        assert_eq!(skills.session_id, "sess-skills");
+        assert_eq!(skills.cwd, "/tmp/project");
+        assert_eq!(skills.source, "sbp");
+    }
+
     #[tokio::test]
     async fn open_session_keeps_remote_native_handoff_as_adapter_error_string() {
         let api = InProcessApi::new(test_state());
@@ -813,6 +983,35 @@ mod tests {
             err,
             "remote sessions are visible locally, but native terminal handoff must be opened on the target host"
         );
+    }
+
+    #[tokio::test]
+    async fn open_attention_group_reports_empty_native_attention_plan() {
+        let api = InProcessApi::new(test_state());
+
+        let err = api
+            .open_attention_group(6, Vec::new(), true, false, AttentionGroupLayout::Tiled)
+            .await
+            .expect_err("empty attention group should fail");
+
+        assert_eq!(err, "no sessions are waiting for operator input");
+    }
+
+    #[test]
+    fn native_attention_group_request_preserves_tui_options() {
+        let request = native_attention_group_request(
+            3,
+            vec!["current".to_string()],
+            false,
+            true,
+            AttentionGroupLayout::MainVertical,
+        );
+
+        assert_eq!(request.max_sessions, Some(3));
+        assert_eq!(request.current_session_ids, vec!["current"]);
+        assert!(!request.focus);
+        assert!(request.include_unnumbered_sessions);
+        assert_eq!(request.layout, Some(AttentionGroupLayout::MainVertical));
     }
 
     #[tokio::test]

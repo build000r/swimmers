@@ -665,19 +665,51 @@ pub(crate) fn separate_from_fixed_entity(entity: &mut SessionEntity, obstacle: R
 
     entity.vx = -entity.vx;
     entity.vy = -entity.vy;
-    entity.x = if entity_center_x < obstacle_center_x {
-        obstacle_rel_x.saturating_sub(ENTITY_WIDTH) as f32
-    } else {
-        obstacle_rel_right.min(max_x) as f32
-    };
-    entity.y = if entity_center_y < obstacle_center_y {
-        obstacle_rel_y.saturating_sub(ENTITY_HEIGHT) as f32
-    } else {
-        obstacle_rel_bottom.min(max_y) as f32
-    };
+    entity.x = fixed_obstacle_separation_x(
+        entity_center_x,
+        obstacle_center_x,
+        obstacle_rel_x,
+        obstacle_rel_right,
+        max_x,
+    );
+    entity.y = fixed_obstacle_separation_y(
+        entity_center_y,
+        obstacle_center_y,
+        obstacle_rel_y,
+        obstacle_rel_bottom,
+        max_y,
+    );
     entity.swim_anchor_x = entity.x;
     entity.swim_anchor_y = entity.y;
     entity.swim_center_y = entity.y;
+}
+
+fn fixed_obstacle_separation_x(
+    entity_center_x: u32,
+    obstacle_center_x: u32,
+    obstacle_rel_x: u16,
+    obstacle_rel_right: u16,
+    max_x: u16,
+) -> f32 {
+    if entity_center_x < obstacle_center_x {
+        obstacle_rel_x.saturating_sub(ENTITY_WIDTH) as f32
+    } else {
+        obstacle_rel_right.min(max_x) as f32
+    }
+}
+
+fn fixed_obstacle_separation_y(
+    entity_center_y: u32,
+    obstacle_center_y: u32,
+    obstacle_rel_y: u16,
+    obstacle_rel_bottom: u16,
+    max_y: u16,
+) -> f32 {
+    if entity_center_y < obstacle_center_y {
+        obstacle_rel_y.saturating_sub(ENTITY_HEIGHT) as f32
+    } else {
+        obstacle_rel_bottom.min(max_y) as f32
+    }
 }
 
 pub(crate) fn swim_speed(hash: u64) -> f32 {
@@ -701,4 +733,106 @@ pub(crate) fn bob_phase(hash: u64) -> f32 {
 
 pub(crate) fn intersects(a: Rect, b: Rect) -> bool {
     a.x < b.right() && a.right() > b.x && a.y < b.bottom() && a.bottom() > b.y
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use swimmers::types::{StateEvidence, ThoughtSource, ThoughtState};
+
+    fn test_session() -> SessionSummary {
+        SessionSummary {
+            session_id: "session-1".to_string(),
+            tmux_name: "session-1".to_string(),
+            state: SessionState::Idle,
+            current_command: None,
+            state_evidence: StateEvidence::new("test"),
+            cwd: "/tmp".to_string(),
+            tool: None,
+            token_count: 0,
+            context_limit: 0,
+            thought: None,
+            thought_state: ThoughtState::Holding,
+            thought_source: ThoughtSource::CarryForward,
+            thought_updated_at: None,
+            rest_state: RestState::Active,
+            commit_candidate: false,
+            action_cues: Vec::new(),
+            objective_changed_at: None,
+            last_skill: None,
+            is_stale: false,
+            attached_clients: 0,
+            stale_attached_clients: 0,
+            transport_health: TransportHealth::Healthy,
+            last_activity_at: Utc::now(),
+            repo_theme_id: None,
+            batch: None,
+        }
+    }
+
+    fn entity_at(field: Rect, x: f32, y: f32) -> SessionEntity {
+        let mut entity = SessionEntity::new(test_session(), field);
+        entity.x = x;
+        entity.y = y;
+        entity.vx = 0.25;
+        entity.vy = -0.5;
+        entity.swim_anchor_x = x;
+        entity.swim_anchor_y = y;
+        entity.swim_center_y = y;
+        entity
+    }
+
+    #[test]
+    fn separate_from_fixed_entity_pushes_left_and_up_with_saturating_bounds() {
+        let field = Rect {
+            x: 5,
+            y: 7,
+            width: 60,
+            height: 30,
+        };
+        let obstacle = Rect {
+            x: field.x + 8,
+            y: field.y + 3,
+            width: 10,
+            height: 4,
+        };
+        let mut entity = entity_at(field, 0.0, 0.0);
+
+        separate_from_fixed_entity(&mut entity, obstacle, field);
+
+        assert_eq!(entity.x, 0.0);
+        assert_eq!(entity.y, 0.0);
+        assert_eq!(entity.vx, -0.25);
+        assert_eq!(entity.vy, 0.5);
+        assert_eq!(entity.swim_anchor_x, entity.x);
+        assert_eq!(entity.swim_anchor_y, entity.y);
+        assert_eq!(entity.swim_center_y, entity.y);
+    }
+
+    #[test]
+    fn separate_from_fixed_entity_pushes_right_and_down_with_field_clamping() {
+        let field = Rect {
+            x: 2,
+            y: 3,
+            width: 30,
+            height: 12,
+        };
+        let obstacle = Rect {
+            x: field.x + 20,
+            y: field.y + 8,
+            width: 20,
+            height: 10,
+        };
+        let mut entity = entity_at(field, 25.0, 14.0);
+
+        separate_from_fixed_entity(&mut entity, obstacle, field);
+
+        assert_eq!(entity.x, field.width.saturating_sub(ENTITY_WIDTH) as f32);
+        assert_eq!(entity.y, field.height.saturating_sub(ENTITY_HEIGHT) as f32);
+        assert_eq!(entity.vx, -0.25);
+        assert_eq!(entity.vy, 0.5);
+        assert_eq!(entity.swim_anchor_x, entity.x);
+        assert_eq!(entity.swim_anchor_y, entity.y);
+        assert_eq!(entity.swim_center_y, entity.y);
+    }
 }

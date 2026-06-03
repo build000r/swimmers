@@ -22,6 +22,11 @@ enum StartupAccessError {
     Fatal(String),
 }
 
+enum ThoughtConfigTestRemoteError {
+    LocalFallback,
+    Message(String),
+}
+
 impl StartupAccessError {
     fn into_string(self) -> String {
         match self {
@@ -299,6 +304,45 @@ impl ApiClient {
             .map(|cache| cache.models)
     }
 
+    async fn send_thought_config_test(
+        &self,
+        config: &ThoughtConfig,
+    ) -> Result<reqwest::Response, ThoughtConfigTestRemoteError> {
+        let url = format!("{}/v1/thought-config/test", self.base_url);
+        self.with_auth(self.http.post(url))
+            .json(config)
+            .send()
+            .await
+            .map_err(|err| {
+                if self.targets_local_backend() {
+                    ThoughtConfigTestRemoteError::LocalFallback
+                } else {
+                    ThoughtConfigTestRemoteError::Message(
+                        self.transport_error("test thought config", err),
+                    )
+                }
+            })
+    }
+
+    async fn decode_thought_config_test_response(
+        &self,
+        response: reqwest::Response,
+        config: ThoughtConfig,
+    ) -> Result<ThoughtConfigTestResponse, String> {
+        if response.status().is_success() {
+            return response
+                .json::<ThoughtConfigTestResponse>()
+                .await
+                .map_err(|err| format!("failed to parse thought config test: {err}"));
+        }
+
+        if response.status() == reqwest::StatusCode::NOT_FOUND && self.targets_local_backend() {
+            return self.local_test_thought_config(config).await;
+        }
+
+        Err(read_error(response).await)
+    }
+
     fn personal_workflows_route_missing_message(&self, route: &str, feature: &str) -> String {
         format!(
             "backend at {} does not expose {route}. {feature} requires SWIMMERS_PERSONAL_WORKFLOWS=1 on the target backend; if this is your local server, relaunch via `make up` or `make tui`.",
@@ -344,6 +388,24 @@ fn refreshed_openrouter_candidates_or_fallback(
         return Ok(cached_or_default_openrouter_candidates());
     }
     Ok(models)
+}
+
+fn dir_list_query_params(
+    path: Option<&str>,
+    managed_only: bool,
+    group: Option<&str>,
+) -> Vec<(&'static str, String)> {
+    let mut query = Vec::new();
+    if let Some(path) = path {
+        query.push(("path", path.to_string()));
+    }
+    if managed_only {
+        query.push(("managed_only", true.to_string()));
+    }
+    if let Some(group) = group {
+        query.push(("group", group.to_string()));
+    }
+    query
 }
 
 pub(crate) fn root_error_message(err: &(dyn StdError + 'static)) -> String {
@@ -581,33 +643,15 @@ impl TuiApi for ApiClient {
         config: ThoughtConfig,
     ) -> BoxFuture<'_, Result<ThoughtConfigTestResponse, String>> {
         Box::pin(async move {
-            let url = format!("{}/v1/thought-config/test", self.base_url);
-            let response = self
-                .with_auth(self.http.post(url))
-                .json(&config)
-                .send()
-                .await;
-
-            let response = match response {
+            let response = match self.send_thought_config_test(&config).await {
                 Ok(response) => response,
-                Err(_err) if self.targets_local_backend() => {
+                Err(ThoughtConfigTestRemoteError::LocalFallback) => {
                     return self.local_test_thought_config(config).await;
                 }
-                Err(err) => return Err(self.transport_error("test thought config", err)),
+                Err(ThoughtConfigTestRemoteError::Message(message)) => return Err(message),
             };
-
-            if response.status().is_success() {
-                return response
-                    .json::<ThoughtConfigTestResponse>()
-                    .await
-                    .map_err(|err| format!("failed to parse thought config test: {err}"));
-            }
-
-            if response.status() == reqwest::StatusCode::NOT_FOUND && self.targets_local_backend() {
-                return self.local_test_thought_config(config).await;
-            }
-
-            Err(read_error(response).await)
+            self.decode_thought_config_test_response(response, config)
+                .await
         })
     }
 
@@ -875,16 +919,8 @@ impl TuiApi for ApiClient {
         let group = group.map(|value| value.to_string());
         Box::pin(async move {
             let url = format!("{}/v1/dirs", self.base_url);
-            let mut request = self.http.get(url);
-            if let Some(path) = path {
-                request = request.query(&[("path", path)]);
-            }
-            if managed_only {
-                request = request.query(&[("managed_only", true)]);
-            }
-            if let Some(group) = group {
-                request = request.query(&[("group", group)]);
-            }
+            let query = dir_list_query_params(path.as_deref(), managed_only, group.as_deref());
+            let request = self.http.get(url).query(&query);
 
             let response = self
                 .with_auth(request.timeout(API_DIRECTORY_LIST_TIMEOUT))
@@ -892,21 +928,15 @@ impl TuiApi for ApiClient {
                 .await
                 .map_err(|err| self.transport_error("list directories", err))?;
 
-            if response.status().is_success() {
-                return response
-                    .json::<DirListResponse>()
-                    .await
-                    .map_err(|err| format!("failed to parse dirs response: {err}"));
-            }
-
-            if response.status() == reqwest::StatusCode::NOT_FOUND {
-                return Err(format!(
+            decode_personal_workflows_response(
+                response,
+                "failed to parse dirs response",
+                format!(
                     "backend at {} does not expose /v1/dirs. Click-to-spawn directory browsing requires SWIMMERS_PERSONAL_WORKFLOWS=1 on the target backend; if this is your local server, relaunch via `make up` or `make tui`.",
                     self.base_url
-                ));
-            }
-
-            Err(read_error(response).await)
+                ),
+            )
+            .await
         })
     }
 
@@ -1127,6 +1157,18 @@ pub(crate) async fn read_error(response: reqwest::Response) -> String {
 mod response_tests {
     use super::*;
 
+    fn test_api_client(base_url: &str) -> ApiClient {
+        ApiClient {
+            http: ApiClient::build_http_client(API_REQUEST_TIMEOUT).expect("test http client"),
+            startup_http: ApiClient::build_http_client(API_STARTUP_REQUEST_TIMEOUT)
+                .expect("test startup http client"),
+            base_url: base_url.to_string(),
+            auth_token: None,
+            startup_wait_timeout: API_STARTUP_WAIT_TIMEOUT,
+            startup_retry_interval: API_STARTUP_RETRY_INTERVAL,
+        }
+    }
+
     async fn response_with(
         status: axum::http::StatusCode,
         content_type: &'static str,
@@ -1278,5 +1320,99 @@ mod response_tests {
             .expect_err("refresh errors should pass through");
 
         assert_eq!(error, "network down");
+    }
+
+    #[test]
+    fn dir_list_query_params_preserve_path_managed_and_group_semantics() {
+        let query = dir_list_query_params(Some("/srv/repos"), true, Some("core"));
+
+        assert_eq!(
+            query,
+            vec![
+                ("path", "/srv/repos".to_string()),
+                ("managed_only", "true".to_string()),
+                ("group", "core".to_string())
+            ]
+        );
+    }
+
+    #[test]
+    fn dir_list_query_params_omit_absent_and_false_filters() {
+        assert!(dir_list_query_params(None, false, None).is_empty());
+        assert_eq!(
+            dir_list_query_params(Some("/srv/repos"), false, None),
+            vec![("path", "/srv/repos".to_string())]
+        );
+        assert_eq!(
+            dir_list_query_params(None, false, Some("personal")),
+            vec![("group", "personal".to_string())]
+        );
+    }
+
+    #[tokio::test]
+    async fn thought_config_test_response_decodes_success_json() {
+        let response = response_with(
+            axum::http::StatusCode::OK,
+            "application/json",
+            serde_json::to_string(&ThoughtConfigTestResponse {
+                ok: true,
+                message: "probe succeeded".to_string(),
+                last_backend_error: None,
+                llm_calls: 1,
+            })
+            .expect("serialize thought config probe result"),
+        )
+        .await;
+        let client = test_api_client("http://100.64.0.1:3210");
+
+        let decoded = client
+            .decode_thought_config_test_response(response, ThoughtConfig::default())
+            .await
+            .expect("success response should decode");
+
+        assert!(decoded.ok);
+        assert_eq!(decoded.message, "probe succeeded");
+        assert_eq!(decoded.llm_calls, 1);
+    }
+
+    #[tokio::test]
+    async fn thought_config_test_response_reports_parse_error_shape() {
+        let response = response_with(
+            axum::http::StatusCode::OK,
+            "application/json",
+            "not json".to_string(),
+        )
+        .await;
+        let client = test_api_client("http://100.64.0.1:3210");
+
+        let error = client
+            .decode_thought_config_test_response(response, ThoughtConfig::default())
+            .await
+            .expect_err("invalid success JSON should report parse error");
+
+        assert!(error.starts_with("failed to parse thought config test:"));
+    }
+
+    #[tokio::test]
+    async fn thought_config_test_response_preserves_generic_api_error_body() {
+        let body = serde_json::to_string(&ErrorResponse::with_message(
+            "VALIDATION_FAILED",
+            "bad thought config",
+        ))
+        .expect("serialize error body");
+        let response = response_with(
+            axum::http::StatusCode::BAD_REQUEST,
+            "application/json",
+            body,
+        )
+        .await;
+        let client = test_api_client("http://100.64.0.1:3210");
+
+        let error = client
+            .decode_thought_config_test_response(response, ThoughtConfig::default())
+            .await
+            .expect_err("generic error should preserve API body");
+
+        assert_eq!(error, "VALIDATION_FAILED: bad thought config");
     }
 }

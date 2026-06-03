@@ -2634,13 +2634,23 @@ impl<C: TuiApi> App<C> {
         config: &ThoughtConfig,
         daemon_defaults: Option<&DaemonDefaults>,
     ) -> bool {
-        if config.backend.eq_ignore_ascii_case("openrouter") {
+        if Self::is_openrouter_backend(&config.backend) {
             return true;
         }
+        Self::uses_openrouter_daemon_default(config, daemon_defaults)
+    }
+
+    fn is_openrouter_backend(backend: &str) -> bool {
+        backend.eq_ignore_ascii_case("openrouter")
+    }
+
+    fn uses_openrouter_daemon_default(
+        config: &ThoughtConfig,
+        daemon_defaults: Option<&DaemonDefaults>,
+    ) -> bool {
         config.backend.trim().is_empty()
             && daemon_defaults
-                .map(|defaults| defaults.backend.eq_ignore_ascii_case("openrouter"))
-                .unwrap_or(false)
+                .is_some_and(|defaults| Self::is_openrouter_backend(&defaults.backend))
     }
 
     fn thought_config_target_summary(config: &ThoughtConfig) -> String {
@@ -3887,6 +3897,67 @@ mod tests {
 
         health.record_success();
         assert!(health.banner_text().is_none());
+    }
+
+    fn thought_config_with_backend(backend: &str) -> ThoughtConfig {
+        ThoughtConfig {
+            backend: backend.to_string(),
+            ..ThoughtConfig::default()
+        }
+    }
+
+    fn daemon_defaults_with_backend(backend: &str) -> DaemonDefaults {
+        DaemonDefaults {
+            backend: backend.to_string(),
+            ..DaemonDefaults::default()
+        }
+    }
+
+    #[test]
+    fn effective_openrouter_backend_detects_explicit_backend_case_insensitively() {
+        let config = thought_config_with_backend("OpenRouter");
+        let defaults = daemon_defaults_with_backend("grok");
+
+        assert!(App::<ApiClient>::is_effective_openrouter_backend(
+            &config,
+            Some(&defaults)
+        ));
+    }
+
+    #[test]
+    fn effective_openrouter_backend_uses_openrouter_daemon_default_for_blank_backend() {
+        let config = thought_config_with_backend("  ");
+        let defaults = daemon_defaults_with_backend("OPENROUTER");
+
+        assert!(App::<ApiClient>::is_effective_openrouter_backend(
+            &config,
+            Some(&defaults)
+        ));
+    }
+
+    #[test]
+    fn effective_openrouter_backend_rejects_blank_backend_without_openrouter_default() {
+        let config = thought_config_with_backend("");
+        let grok_defaults = daemon_defaults_with_backend("grok");
+
+        assert!(!App::<ApiClient>::is_effective_openrouter_backend(
+            &config,
+            Some(&grok_defaults)
+        ));
+        assert!(!App::<ApiClient>::is_effective_openrouter_backend(
+            &config, None
+        ));
+    }
+
+    #[test]
+    fn effective_openrouter_backend_rejects_nonblank_non_openrouter_override() {
+        let config = thought_config_with_backend("grok");
+        let defaults = daemon_defaults_with_backend("openrouter");
+
+        assert!(!App::<ApiClient>::is_effective_openrouter_backend(
+            &config,
+            Some(&defaults)
+        ));
     }
 
     fn healthy_backend_health() -> BackendHealthResponse {
