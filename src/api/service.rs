@@ -886,7 +886,10 @@ fn dir_group_from_exact_paths(name: String, paths: Vec<PathBuf>) -> Option<Overl
 
 fn merge_dir_groups(target: &mut Vec<OverlayDirGroup>, additions: Vec<OverlayDirGroup>) {
     for mut group in additions {
-        if let Some(existing) = target.iter_mut().find(|existing| existing.name == group.name) {
+        if let Some(existing) = target
+            .iter_mut()
+            .find(|existing| existing.name == group.name)
+        {
             extend_unique_paths(&mut existing.paths, std::mem::take(&mut group.paths));
             extend_unique_paths(&mut existing.dirs, std::mem::take(&mut group.dirs));
         } else {
@@ -2756,10 +2759,13 @@ mod tests {
         std::fs::create_dir_all(&workspaces).expect("workspaces");
         write_workspace_yaml(&workspaces.join("orchestration.yaml"), &repo);
 
-        let response =
-            list_group_dir_response(base.clone(), "orchestration", &DirGroupMemberships::default())
-                .await
-                .expect("workspace group response");
+        let response = list_group_dir_response(
+            base.clone(),
+            "orchestration",
+            &DirGroupMemberships::default(),
+        )
+        .await
+        .expect("workspace group response");
 
         assert_eq!(response.groups, vec!["orchestration".to_string()]);
         assert_eq!(response.entries.len(), 1);
