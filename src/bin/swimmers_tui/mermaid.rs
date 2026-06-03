@@ -318,6 +318,27 @@ pub(crate) struct MermaidPackedDetailOwner {
     pub(crate) lines: Vec<MermaidPackedDetailLine>,
 }
 
+#[derive(Clone, Copy)]
+struct MermaidPackedDetailBoxSize {
+    outer_width: u16,
+    outer_height: u16,
+}
+
+#[derive(Clone, Copy)]
+struct MermaidPackedDetailViewport {
+    width: u16,
+    height: u16,
+    gap_x: u16,
+    gap_y: u16,
+}
+
+struct MermaidPackedDetailLayout {
+    column_count: usize,
+    row_widths: Vec<u16>,
+    row_heights: Vec<u16>,
+    cluster_height: u16,
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct MermaidViewerState {
     pub(crate) session_id: String,
@@ -877,173 +898,155 @@ pub(crate) fn mermaid_build_packed_detail_owners(
     owners
 }
 
+fn mermaid_measure_packed_detail_box(
+    owner: &MermaidPackedDetailOwner,
+    viewport: MermaidPackedDetailViewport,
+) -> MermaidPackedDetailBoxSize {
+    let inner_width = owner
+        .lines
+        .iter()
+        .map(|line| display_width(&line.text))
+        .max()
+        .unwrap_or(1)
+        .min(viewport.width.saturating_sub(2).max(1));
+    let inner_height = owner.lines.len().max(1) as u16;
+
+    MermaidPackedDetailBoxSize {
+        outer_width: inner_width.saturating_add(2).min(viewport.width.max(1)),
+        outer_height: inner_height.saturating_add(2).min(viewport.height.max(1)),
+    }
+}
+
+fn mermaid_measure_packed_detail_boxes(
+    owners: &[MermaidPackedDetailOwner],
+    viewport: MermaidPackedDetailViewport,
+) -> Vec<MermaidPackedDetailBoxSize> {
+    owners
+        .iter()
+        .map(|owner| mermaid_measure_packed_detail_box(owner, viewport))
+        .collect()
+}
+
+fn mermaid_measure_packed_detail_row(
+    row: &[MermaidPackedDetailBoxSize],
+    gap_x: u16,
+) -> Option<(u16, u16)> {
+    let row_width = row
+        .iter()
+        .map(|spec| spec.outer_width)
+        .sum::<u16>()
+        .saturating_add(gap_x.saturating_mul(row.len().saturating_sub(1) as u16));
+    let row_height = row.iter().map(|spec| spec.outer_height).max()?;
+
+    Some((row_width, row_height))
+}
+
+fn mermaid_packed_detail_rows_fit(
+    specs: &[MermaidPackedDetailBoxSize],
+    viewport: MermaidPackedDetailViewport,
+    column_count: usize,
+) -> Option<(Vec<u16>, Vec<u16>)> {
+    let mut row_widths = Vec::new();
+    let mut row_heights = Vec::new();
+
+    for row in specs.chunks(column_count) {
+        let (row_width, row_height) = mermaid_measure_packed_detail_row(row, viewport.gap_x)?;
+        if row_width > viewport.width || row_height > viewport.height {
+            return None;
+        }
+        row_widths.push(row_width);
+        row_heights.push(row_height);
+    }
+
+    (!row_widths.is_empty()).then_some((row_widths, row_heights))
+}
+
+fn mermaid_packed_detail_cluster_height(row_heights: &[u16], gap_y: u16) -> u16 {
+    row_heights
+        .iter()
+        .copied()
+        .sum::<u16>()
+        .saturating_add(gap_y.saturating_mul(row_heights.len().saturating_sub(1) as u16))
+}
+
+fn mermaid_score_packed_detail_layout(
+    viewport: MermaidPackedDetailViewport,
+    cluster_width: u16,
+    cluster_height: u16,
+) -> f32 {
+    let target_aspect = viewport.width as f32 / viewport.height as f32;
+    let width_util = cluster_width as f32 / viewport.width as f32;
+    let height_util = cluster_height as f32 / viewport.height as f32;
+    let area_util = width_util * height_util;
+    let aspect = cluster_width as f32 / cluster_height.max(1) as f32;
+    let aspect_penalty = (aspect - target_aspect).abs();
+
+    width_util.min(height_util) * 1000.0 + area_util * 400.0 - aspect_penalty * 40.0
+}
+
+fn mermaid_packed_detail_cluster_fits(
+    viewport: MermaidPackedDetailViewport,
+    cluster_width: u16,
+    cluster_height: u16,
+) -> bool {
+    cluster_width <= viewport.width && cluster_height <= viewport.height
+}
+
+fn mermaid_build_packed_detail_layout(
+    column_count: usize,
+    row_widths: Vec<u16>,
+    row_heights: Vec<u16>,
+    cluster_height: u16,
+) -> MermaidPackedDetailLayout {
+    MermaidPackedDetailLayout {
+        column_count,
+        row_widths,
+        row_heights,
+        cluster_height,
+    }
+}
+
+fn mermaid_packed_detail_layout_for_columns(
+    specs: &[MermaidPackedDetailBoxSize],
+    viewport: MermaidPackedDetailViewport,
+    column_count: usize,
+) -> Option<(MermaidPackedDetailLayout, f32)> {
+    let (row_widths, row_heights) = mermaid_packed_detail_rows_fit(specs, viewport, column_count)?;
+    let cluster_width = row_widths.iter().copied().max().unwrap_or(0);
+    let cluster_height = mermaid_packed_detail_cluster_height(&row_heights, viewport.gap_y);
+
+    mermaid_packed_detail_cluster_fits(viewport, cluster_width, cluster_height).then(|| {
+        (
+            mermaid_build_packed_detail_layout(
+                column_count,
+                row_widths,
+                row_heights,
+                cluster_height,
+            ),
+            mermaid_score_packed_detail_layout(viewport, cluster_width, cluster_height),
+        )
+    })
+}
+
 pub(crate) fn mermaid_pack_detail_box_rects(
     content_rect: Rect,
     owners: &[MermaidPackedDetailOwner],
 ) -> HashMap<String, MermaidOutlineLabelRect> {
-    #[derive(Clone, Copy)]
-    struct BoxSize {
-        outer_width: u16,
-        outer_height: u16,
-    }
-
-    let specs = owners
-        .iter()
-        .map(|owner| {
-            let inner_width = owner
-                .lines
-                .iter()
-                .map(|line| display_width(&line.text))
-                .max()
-                .unwrap_or(1)
-                .min(content_rect.width.saturating_sub(2).max(1));
-            let inner_height = owner.lines.len().max(1) as u16;
-            BoxSize {
-                outer_width: inner_width.saturating_add(2).min(content_rect.width.max(1)),
-                outer_height: inner_height
-                    .saturating_add(2)
-                    .min(content_rect.height.max(1)),
-            }
-        })
-        .collect::<Vec<_>>();
+    let viewport = MermaidPackedDetailViewport {
+        width: content_rect.width.max(1),
+        height: content_rect.height.max(1),
+        gap_x: 2,
+        gap_y: 1,
+    };
+    let specs = mermaid_measure_packed_detail_boxes(owners, viewport);
     if specs.is_empty() {
         return HashMap::new();
     }
 
-    let gap_x = 2u16;
-    let gap_y = 1u16;
-    let viewport_width = content_rect.width.max(1);
-    let viewport_height = content_rect.height.max(1);
-    let target_aspect = viewport_width as f32 / viewport_height as f32;
+    let layout = mermaid_best_packed_detail_layout(&specs, viewport)
+        .unwrap_or_else(|| mermaid_fallback_packed_detail_layout(&specs, viewport));
 
-    let mut best_layout = None::<(usize, Vec<u16>, Vec<u16>, u16, u16, f32)>;
-    for column_count in 1..=owners.len() {
-        let mut row_widths = Vec::new();
-        let mut row_heights = Vec::new();
-        let mut row_start = 0usize;
-        let mut fits = true;
-        while row_start < specs.len() {
-            let row = &specs[row_start..(row_start + column_count).min(specs.len())];
-            let row_width = row
-                .iter()
-                .map(|spec| spec.outer_width)
-                .sum::<u16>()
-                .saturating_add(gap_x.saturating_mul(row.len().saturating_sub(1) as u16));
-            let row_height = row.iter().map(|spec| spec.outer_height).max().unwrap_or(0);
-            if row_width > viewport_width || row_height > viewport_height {
-                fits = false;
-                break;
-            }
-            row_widths.push(row_width);
-            row_heights.push(row_height);
-            row_start += column_count;
-        }
-        if !fits || row_widths.is_empty() {
-            continue;
-        }
-
-        let cluster_width = row_widths.iter().copied().max().unwrap_or(0);
-        let cluster_height = row_heights
-            .iter()
-            .copied()
-            .sum::<u16>()
-            .saturating_add(gap_y.saturating_mul(row_heights.len().saturating_sub(1) as u16));
-        if cluster_width > viewport_width || cluster_height > viewport_height {
-            continue;
-        }
-
-        let width_util = cluster_width as f32 / viewport_width as f32;
-        let height_util = cluster_height as f32 / viewport_height as f32;
-        let area_util = width_util * height_util;
-        let aspect = cluster_width as f32 / cluster_height.max(1) as f32;
-        let aspect_penalty = (aspect - target_aspect).abs();
-        let score =
-            width_util.min(height_util) * 1000.0 + area_util * 400.0 - aspect_penalty * 40.0;
-
-        match best_layout {
-            Some((_, _, _, _, _, best_score)) if best_score >= score => {}
-            _ => {
-                best_layout = Some((
-                    column_count,
-                    row_widths,
-                    row_heights,
-                    cluster_width,
-                    cluster_height,
-                    score,
-                ));
-            }
-        }
-    }
-
-    let (column_count, row_widths, row_heights, _cluster_width, cluster_height, _) = best_layout
-        .unwrap_or_else(|| {
-            let row_widths = specs
-                .iter()
-                .map(|spec| spec.outer_width)
-                .collect::<Vec<_>>();
-            let row_heights = specs
-                .iter()
-                .map(|spec| spec.outer_height)
-                .collect::<Vec<_>>();
-            let cluster_width = row_widths
-                .iter()
-                .copied()
-                .max()
-                .unwrap_or(0)
-                .min(viewport_width);
-            let cluster_height = row_heights
-                .iter()
-                .copied()
-                .sum::<u16>()
-                .saturating_add(gap_y.saturating_mul(row_heights.len().saturating_sub(1) as u16))
-                .min(viewport_height);
-            (
-                1,
-                row_widths,
-                row_heights,
-                cluster_width,
-                cluster_height,
-                0.0,
-            )
-        });
-
-    let start_y = content_rect
-        .y
-        .saturating_add(viewport_height.saturating_sub(cluster_height) / 2);
-
-    let mut rects = HashMap::new();
-    let mut row_top = start_y;
-    let mut owner_index = 0usize;
-    for (row_index, row_width) in row_widths.iter().enumerate() {
-        let row = &owners[owner_index..(owner_index + column_count).min(owners.len())];
-        let row_left = content_rect
-            .x
-            .saturating_add(viewport_width.saturating_sub(*row_width) / 2);
-        let mut column_left = row_left;
-        for owner in row {
-            let spec = specs[owner_index];
-            rects.insert(
-                owner.owner_key.clone(),
-                MermaidOutlineLabelRect {
-                    left: column_left as i32,
-                    right: column_left
-                        .saturating_add(spec.outer_width)
-                        .saturating_sub(1) as i32,
-                    top: row_top as i32,
-                    bottom: row_top.saturating_add(spec.outer_height).saturating_sub(1) as i32,
-                },
-            );
-            column_left = column_left
-                .saturating_add(spec.outer_width)
-                .saturating_add(gap_x);
-            owner_index += 1;
-        }
-        row_top = row_top
-            .saturating_add(row_heights[row_index])
-            .saturating_add(gap_y);
-    }
-
-    rects
+    mermaid_place_packed_detail_box_rects(content_rect, owners, &specs, viewport, layout)
 }
 
 pub(crate) fn mermaid_project_packed_detail_lines(
@@ -1752,4 +1755,114 @@ pub(crate) fn render_mermaid_viewer(
 
     render_mermaid_cached_background(renderer, content_rect, viewer);
     render_mermaid_cached_semantic_lines(renderer, viewer);
+}
+
+fn mermaid_best_packed_detail_layout(
+    specs: &[MermaidPackedDetailBoxSize],
+    viewport: MermaidPackedDetailViewport,
+) -> Option<MermaidPackedDetailLayout> {
+    let mut best_layout = None::<(MermaidPackedDetailLayout, f32)>;
+
+    for column_count in 1..=specs.len() {
+        let Some(candidate) =
+            mermaid_packed_detail_layout_for_columns(specs, viewport, column_count)
+        else {
+            continue;
+        };
+
+        match best_layout {
+            Some((_, best_score)) if best_score >= candidate.1 => {}
+            _ => best_layout = Some(candidate),
+        }
+    }
+
+    best_layout.map(|(layout, _)| layout)
+}
+
+fn mermaid_fallback_packed_detail_layout(
+    specs: &[MermaidPackedDetailBoxSize],
+    viewport: MermaidPackedDetailViewport,
+) -> MermaidPackedDetailLayout {
+    let row_widths = specs
+        .iter()
+        .map(|spec| spec.outer_width)
+        .collect::<Vec<_>>();
+    let row_heights = specs
+        .iter()
+        .map(|spec| spec.outer_height)
+        .collect::<Vec<_>>();
+    let cluster_height =
+        mermaid_packed_detail_cluster_height(&row_heights, viewport.gap_y).min(viewport.height);
+
+    mermaid_build_packed_detail_layout(1, row_widths, row_heights, cluster_height)
+}
+
+fn mermaid_pack_detail_box_row_rects(
+    rects: &mut HashMap<String, MermaidOutlineLabelRect>,
+    row: &[MermaidPackedDetailOwner],
+    specs: &[MermaidPackedDetailBoxSize],
+    owner_index: &mut usize,
+    row_top: u16,
+    row_left: u16,
+    gap_x: u16,
+) {
+    let mut column_left = row_left;
+
+    for owner in row {
+        let spec = specs[*owner_index];
+        rects.insert(
+            owner.owner_key.clone(),
+            MermaidOutlineLabelRect {
+                left: column_left as i32,
+                right: column_left
+                    .saturating_add(spec.outer_width)
+                    .saturating_sub(1) as i32,
+                top: row_top as i32,
+                bottom: row_top.saturating_add(spec.outer_height).saturating_sub(1) as i32,
+            },
+        );
+        column_left = column_left
+            .saturating_add(spec.outer_width)
+            .saturating_add(gap_x);
+        *owner_index += 1;
+    }
+}
+
+fn mermaid_place_packed_detail_box_rects(
+    content_rect: Rect,
+    owners: &[MermaidPackedDetailOwner],
+    specs: &[MermaidPackedDetailBoxSize],
+    viewport: MermaidPackedDetailViewport,
+    layout: MermaidPackedDetailLayout,
+) -> HashMap<String, MermaidOutlineLabelRect> {
+    let start_y = content_rect
+        .y
+        .saturating_add(viewport.height.saturating_sub(layout.cluster_height) / 2);
+
+    let mut rects = HashMap::new();
+    let mut row_top = start_y;
+    let mut owner_index = 0usize;
+
+    for (row_index, row_width) in layout.row_widths.iter().enumerate() {
+        let row = &owners[owner_index..(owner_index + layout.column_count).min(owners.len())];
+        let row_left = content_rect
+            .x
+            .saturating_add(viewport.width.saturating_sub(*row_width) / 2);
+
+        mermaid_pack_detail_box_row_rects(
+            &mut rects,
+            row,
+            specs,
+            &mut owner_index,
+            row_top,
+            row_left,
+            viewport.gap_x,
+        );
+
+        row_top = row_top
+            .saturating_add(layout.row_heights[row_index])
+            .saturating_add(viewport.gap_y);
+    }
+
+    rects
 }
