@@ -38,6 +38,7 @@ import {
   terminalAuxiliaryControlsPlan,
   terminalZoomControlsPlan,
   terminalZoomPercentLabel,
+  terminalZoomPersistencePlan,
 } from "./input_support.js";
 
 test("eventClientPoint uses direct pointer coordinates when present", () => {
@@ -951,6 +952,29 @@ test("terminalZoomControlsPlan preserves support gates, bounds, and labels", () 
     minZoom: 0.5,
     maxZoom: 2,
   }).zoomInDisabled, true);
+});
+
+test("terminalZoomPersistencePlan preserves URL and storage values", () => {
+  assert.deepEqual(terminalZoomPersistencePlan(1), {
+    storageValue: "1.00",
+    urlParamAction: "delete",
+    urlParamValue: "",
+  });
+  assert.deepEqual(terminalZoomPersistencePlan(0.9995), {
+    storageValue: "1.00",
+    urlParamAction: "delete",
+    urlParamValue: "",
+  });
+  assert.deepEqual(terminalZoomPersistencePlan(1.25), {
+    storageValue: "1.25",
+    urlParamAction: "set",
+    urlParamValue: "1.25",
+  });
+  assert.deepEqual(terminalZoomPersistencePlan(0.5), {
+    storageValue: "0.50",
+    urlParamAction: "set",
+    urlParamValue: "0.50",
+  });
 });
 
 test("terminalAuxiliaryControlsPlan preserves mobile keyboard and copy-frame gates", () => {

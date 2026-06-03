@@ -3,7 +3,7 @@ import {
   authTokenButtonPlan, eventCell, globalShortcutPlan, mobileKeyboardInputExecutorPlan, mobileKeyboardInputPlan,
   mobileKeyboardKeydownPlan, mobileKeyboardKeyPlan, shouldIgnoreSyntheticClick,
   terminalComposerControlAction, terminalDestroyStatePatch, terminalFallbackActivationPlan, terminalFallbackFocusPlan, terminalFallbackKeydownPlan, terminalFallbackPastePlan, terminalFallbackPointerFocusPlan, terminalInlineInputKeydownPlan, terminalKeyStripClickExecutorPlan, terminalKeyStripClickPlan, terminalStageCaptureBindings, terminalStageFocusExecutorPlan, terminalStageFocusPlan,
-  terminalAuxiliaryControlsPlan, terminalFallbackScrollPlan, terminalFallbackTextScrollPlan, terminalInputDockPlan, terminalLiveFrameFallbackPlan, terminalPaintProbeSchedulePlan, terminalPaintVerificationPlan, terminalPendingByteBufferPlan, terminalPresentationPlan, terminalResizeGeometryPlan, terminalStageKeydownPlan, terminalStagePasteExecutorPlan, terminalStagePastePlan, terminalZoomControlsPlan, terminalZoomPercentLabel,
+  terminalAuxiliaryControlsPlan, terminalFallbackScrollPlan, terminalFallbackTextScrollPlan, terminalInputDockPlan, terminalLiveFrameFallbackPlan, terminalPaintProbeSchedulePlan, terminalPaintVerificationPlan, terminalPendingByteBufferPlan, terminalPresentationPlan, terminalResizeGeometryPlan, terminalStageKeydownPlan, terminalStagePasteExecutorPlan, terminalStagePastePlan, terminalZoomControlsPlan, terminalZoomPercentLabel, terminalZoomPersistencePlan,
 } from "./input_support.js";
 import { sendHistoryClickPlan, sendSheetFailureStatus, sendSheetSubmitPlan, sendSheetSuccessStatus } from "./send_sheet.js";
 import {
@@ -1279,13 +1279,10 @@ function applyZoomToSurface(surface) {
   return false;
 }
 
-function persistTerminalZoomToUrl() {
+function persistTerminalZoomToUrl(plan) {
   const url = new URL(window.location.href);
-  if (Math.abs(state.terminalZoom - 1) < 0.001) {
-    url.searchParams.delete("zoom");
-  } else {
-    url.searchParams.set("zoom", state.terminalZoom.toFixed(2));
-  }
+  if (plan.urlParamAction === "delete") url.searchParams.delete("zoom");
+  else url.searchParams.set("zoom", plan.urlParamValue);
   window.history.replaceState({}, "", url);
 }
 
@@ -1298,8 +1295,9 @@ function applyTerminalZoom(options = {}) {
     applyZoomToSurface(state.terminal);
   }
   if (options.persist !== false) {
-    localStorage.setItem(TERMINAL_ZOOM_STORAGE_KEY, state.terminalZoom.toFixed(2));
-    persistTerminalZoomToUrl();
+    const persistencePlan = terminalZoomPersistencePlan(state.terminalZoom);
+    localStorage.setItem(TERMINAL_ZOOM_STORAGE_KEY, persistencePlan.storageValue);
+    persistTerminalZoomToUrl(persistencePlan);
   }
   syncTerminalZoomControls();
   if ((changed || options.forceResize) && (applied || state.terminal || state.hud)) {

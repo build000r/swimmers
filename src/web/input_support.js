@@ -507,6 +507,16 @@ export function terminalZoomControlsPlan(context = {}) {
   };
 }
 
+export function terminalZoomPersistencePlan(zoom) {
+  const zoomValue = zoom.toFixed(2);
+  const deleteUrlParam = Math.abs(zoom - 1) < 0.001;
+  return {
+    storageValue: zoomValue,
+    urlParamAction: deleteUrlParam ? "delete" : "set",
+    urlParamValue: deleteUrlParam ? "" : zoomValue,
+  };
+}
+
 export function terminalAuxiliaryControlsPlan(context = {}) {
   const hasCurrentSession = Boolean(context.hasCurrentSession);
   const copyFrameAvailable = Boolean(context.hasCopyFrame);
