@@ -1094,28 +1094,36 @@ fn picker_top_control_action_at(layout: &PickerLayout, x: u16, y: u16) -> Option
 }
 
 fn picker_filter_action_at(layout: &PickerLayout, x: u16, y: u16) -> Option<PickerAction> {
-    if layout.env_button.contains(x, y) {
-        return Some(PickerAction::ToggleManaged(true));
+    picker_filter_control_at(layout, x, y).map(picker_filter_control_action)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PickerFilterControl<'a> {
+    ManagedOnly,
+    Group(&'a str),
+    AllFolders,
+    GroupEditTarget,
+    SpawnHere,
+}
+
+fn picker_filter_control_at<'a>(
+    layout: &'a PickerLayout,
+    x: u16,
+    y: u16,
+) -> Option<PickerFilterControl<'a>> {
+    picker_filter_ordered_controls(layout)
+        .into_iter()
+        .find_map(|(rect, control)| rect.contains(x, y).then_some(control))
+}
+
+fn picker_filter_control_action(control: PickerFilterControl<'_>) -> PickerAction {
+    match control {
+        PickerFilterControl::ManagedOnly => PickerAction::ToggleManaged(true),
+        PickerFilterControl::Group(name) => PickerAction::ActivateGroup(name.to_string()),
+        PickerFilterControl::AllFolders => PickerAction::ToggleManaged(false),
+        PickerFilterControl::GroupEditTarget => PickerAction::CycleGroupEditTarget,
+        PickerFilterControl::SpawnHere => PickerAction::ActivateCurrentPath,
     }
-    for (name, rect) in &layout.group_buttons {
-        if rect.contains(x, y) {
-            return Some(PickerAction::ActivateGroup(name.clone()));
-        }
-    }
-    if layout.all_button.contains(x, y) {
-        return Some(PickerAction::ToggleManaged(false));
-    }
-    if layout
-        .group_target_button
-        .map(|button| button.contains(x, y))
-        .unwrap_or(false)
-    {
-        return Some(PickerAction::CycleGroupEditTarget);
-    }
-    if layout.spawn_here_button.contains(x, y) {
-        return Some(PickerAction::ActivateCurrentPath);
-    }
-    None
 }
 
 fn picker_entry_action_at(
@@ -1208,6 +1216,25 @@ fn picker_repo_action_kind_at(
     picker_entry_action_rects(picker, layout, visible_pos, raw_index)
         .into_iter()
         .find_map(|(rect, kind)| rect.contains(x, y).then_some(kind))
+}
+
+fn picker_filter_ordered_controls(layout: &PickerLayout) -> Vec<(Rect, PickerFilterControl<'_>)> {
+    let mut controls = Vec::with_capacity(layout.group_buttons.len() + 4);
+    controls.push((layout.env_button, PickerFilterControl::ManagedOnly));
+    controls.extend(
+        layout
+            .group_buttons
+            .iter()
+            .map(|(name, rect)| (*rect, PickerFilterControl::Group(name.as_str()))),
+    );
+    controls.push((layout.all_button, PickerFilterControl::AllFolders));
+    controls.extend(
+        layout
+            .group_target_button
+            .map(|rect| (rect, PickerFilterControl::GroupEditTarget)),
+    );
+    controls.push((layout.spawn_here_button, PickerFilterControl::SpawnHere));
+    controls
 }
 
 pub(crate) fn picker_theme_color_for_path(
@@ -1745,4 +1772,122 @@ pub(crate) fn render_initial_request(
             VoiceUiState::Ready => Color::Cyan,
         },
     );
+}
+
+#[cfg(test)]
+mod tests {
+    mod picker {
+        use super::super::*;
+
+        fn rect(x: u16, y: u16, width: u16) -> Rect {
+            Rect {
+                x,
+                y,
+                width,
+                height: 1,
+            }
+        }
+
+        fn filter_test_layout() -> PickerLayout {
+            PickerLayout {
+                frame: rect(0, 0, 80),
+                content: rect(1, 1, 78),
+                back_button: None,
+                close_button: rect(76, 1, 3),
+                env_button: rect(2, 3, 9),
+                group_buttons: vec![
+                    ("alpha".to_string(), rect(12, 3, 7)),
+                    ("beta".to_string(), rect(20, 3, 6)),
+                ],
+                all_button: rect(28, 3, 13),
+                group_target_button: Some(rect(42, 3, 14)),
+                tool_button: rect(60, 1, 7),
+                launch_target_button: rect(48, 1, 11),
+                exclude_button: rect(36, 1, 9),
+                batch_button: rect(26, 1, 9),
+                spawn_here_button: rect(2, 4, 76),
+                first_entry_y: 5,
+                visible_entry_rows: 1,
+                visible_entries: vec![0],
+            }
+        }
+
+        #[test]
+        fn picker_filter_hit_test_maps_controls_to_actions() {
+            let layout = filter_test_layout();
+
+            assert_eq!(
+                picker_filter_action_at(&layout, 2, 3),
+                Some(PickerAction::ToggleManaged(true))
+            );
+            assert_eq!(
+                picker_filter_action_at(&layout, 12, 3),
+                Some(PickerAction::ActivateGroup("alpha".to_string()))
+            );
+            assert_eq!(
+                picker_filter_action_at(&layout, 20, 3),
+                Some(PickerAction::ActivateGroup("beta".to_string()))
+            );
+            assert_eq!(
+                picker_filter_action_at(&layout, 28, 3),
+                Some(PickerAction::ToggleManaged(false))
+            );
+            assert_eq!(
+                picker_filter_action_at(&layout, 42, 3),
+                Some(PickerAction::CycleGroupEditTarget)
+            );
+            assert_eq!(
+                picker_filter_action_at(&layout, 2, 4),
+                Some(PickerAction::ActivateCurrentPath)
+            );
+        }
+
+        #[test]
+        fn picker_filter_hit_test_preserves_order_for_overlapping_controls() {
+            let mut layout = filter_test_layout();
+            layout.env_button = rect(10, 3, 8);
+            layout.group_buttons = vec![("work".to_string(), rect(10, 3, 8))];
+            layout.all_button = rect(10, 3, 8);
+            layout.group_target_button = Some(rect(10, 3, 8));
+            layout.spawn_here_button = rect(10, 3, 8);
+
+            assert_eq!(
+                picker_filter_action_at(&layout, 10, 3),
+                Some(PickerAction::ToggleManaged(true))
+            );
+
+            layout.env_button = rect(2, 3, 8);
+            assert_eq!(
+                picker_filter_action_at(&layout, 10, 3),
+                Some(PickerAction::ActivateGroup("work".to_string()))
+            );
+
+            layout.group_buttons.clear();
+            assert_eq!(
+                picker_filter_action_at(&layout, 10, 3),
+                Some(PickerAction::ToggleManaged(false))
+            );
+
+            layout.all_button = rect(20, 3, 8);
+            assert_eq!(
+                picker_filter_action_at(&layout, 10, 3),
+                Some(PickerAction::CycleGroupEditTarget)
+            );
+
+            layout.group_target_button = None;
+            assert_eq!(
+                picker_filter_action_at(&layout, 10, 3),
+                Some(PickerAction::ActivateCurrentPath)
+            );
+        }
+
+        #[test]
+        fn picker_filter_hit_test_ignores_invalid_coordinates() {
+            let layout = filter_test_layout();
+
+            assert_eq!(picker_filter_action_at(&layout, 0, 0), None);
+            assert_eq!(picker_filter_action_at(&layout, 2, 2), None);
+            assert_eq!(picker_filter_action_at(&layout, 78, 4), None);
+        }
+    }
 }
