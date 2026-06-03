@@ -7,7 +7,7 @@ import {
   shouldIgnoreSyntheticClick,
   terminalComposerControlAction, terminalKeyStripClickPlan,
 } from "./input_support.js";
-import { sendSheetFailureStatus, sendSheetSubmitPlan, sendSheetSuccessStatus } from "./send_sheet.js";
+import { sendHistoryClickPlan, sendSheetFailureStatus, sendSheetSubmitPlan, sendSheetSuccessStatus } from "./send_sheet.js";
 import {
   MERMAID_PLAN_CONTENT_DISPLAY_MAX_CHARS,
   buildMermaidArtifactView,
@@ -5467,14 +5467,10 @@ function bindEvents() {
     closeSheets();
   });
   el.sendHistory.addEventListener("click", (event) => {
-    const button = event.target instanceof Element ? event.target.closest("[data-send-history-index]") : null;
-    if (!button) {
-      return;
-    }
-    const index = Number(button.dataset.sendHistoryIndex);
-    const text = state.sendHistory[index] || "";
-    if (text) {
-      el.sendInput.value = text;
+    const target = event.target instanceof Element ? event.target : null;
+    const plan = sendHistoryClickPlan(event.type, target, state.sendHistory);
+    if (plan.type === "use_history") {
+      el.sendInput.value = plan.text;
       el.sendInput.focus();
     }
   });

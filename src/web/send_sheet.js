@@ -54,3 +54,15 @@ export function sendSheetFailureStatus(error) {
     ttlMs: 3200,
   };
 }
+
+export function sendHistoryClickPlan(eventType, target, sendHistory = []) {
+  if (eventType !== "click") {
+    return { type: "ignore" };
+  }
+  const button = target?.closest?.("[data-send-history-index]") ?? null;
+  if (!button) {
+    return { type: "ignore" };
+  }
+  const text = sendHistory[Number(button.dataset.sendHistoryIndex)] || "";
+  return text ? { type: "use_history", text } : { type: "ignore" };
+}

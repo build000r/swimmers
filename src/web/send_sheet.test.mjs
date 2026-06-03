@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  sendHistoryClickPlan,
   sendSheetFailureStatus,
   sendSheetSubmitPlan,
   sendSheetSuccessStatus,
@@ -96,5 +97,22 @@ test("sendSheetFailureStatus preserves failure status copy", () => {
     label: "Send failed: input delivery failed",
     muted: true,
     ttlMs: 3200,
+  });
+});
+
+test("sendHistoryClickPlan preserves target, index, and empty-history gates", () => {
+  const targetFor = (rawIndex) => ({
+    closest(selector) {
+      return selector === "[data-send-history-index]"
+        ? { dataset: { sendHistoryIndex: rawIndex } }
+        : null;
+    },
+  });
+  assert.deepEqual(sendHistoryClickPlan("mousemove", targetFor("1"), ["one", "two"]), { type: "ignore" });
+  assert.deepEqual(sendHistoryClickPlan("click", null, ["one"]), { type: "ignore" });
+  assert.deepEqual(sendHistoryClickPlan("click", targetFor("bad"), ["one"]), { type: "ignore" });
+  assert.deepEqual(sendHistoryClickPlan("click", targetFor("1"), ["one", "two"]), {
+    type: "use_history",
+    text: "two",
   });
 });
