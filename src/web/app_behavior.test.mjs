@@ -2087,6 +2087,49 @@ test("mobile keyboard key handler preserves shortcut precedence, close, and forw
   assert.equal(web.state.trogdorBurntSessions.has("sess_0"), true);
 });
 
+test("mobile keyboard input handler preserves clears, control events, and text sends", () => {
+  resetWebState();
+  web.state.selectedSessionId = "sess_0";
+  web.state.terminalFallbackActive = true;
+  const sent = [];
+  web.state.ws = {
+    readyState: WebSocket.OPEN,
+    send(payload) {
+      sent.push(JSON.parse(payload));
+    },
+  };
+
+  web.state.readOnly = true;
+  web.el.mobileKeyboardProxy.value = "stale";
+  assert.equal(web.handleMobileKeyboardProxyInput({ inputType: "insertText", data: "ignored" }), false);
+  assert.equal(web.el.mobileKeyboardProxy.value, "");
+  assert.equal(sent.length, 0);
+
+  web.state.readOnly = false;
+  web.el.mobileKeyboardProxy.value = "delete sentinel";
+  assert.equal(web.handleMobileKeyboardProxyInput({ inputType: "deleteContentBackward", data: null }), true);
+  assert.equal(web.el.mobileKeyboardProxy.value, "");
+  assert.equal(sent.at(-1).type, "input_text");
+  assert.equal(sent.at(-1).data, "\x7f");
+
+  web.el.mobileKeyboardProxy.value = "newline sentinel";
+  assert.equal(web.handleMobileKeyboardProxyInput({ inputType: "insertLineBreak", data: null }), true);
+  assert.equal(sent.at(-1).type, "input_text");
+  assert.equal(sent.at(-1).data, "\r");
+
+  web.el.mobileKeyboardProxy.value = "fallback";
+  assert.equal(web.handleMobileKeyboardProxyInput({ inputType: "insertText", data: "typed" }), true);
+  assert.equal(web.el.mobileKeyboardProxy.value, "");
+  assert.equal(sent.at(-1).type, "input_text");
+  assert.equal(sent.at(-1).data, "typed");
+  assert.equal(web.state.trogdorBurntSessions.has("sess_0"), true);
+
+  web.el.mobileKeyboardProxy.value = "fallback";
+  assert.equal(web.handleMobileKeyboardProxyInput({ inputType: "insertText", data: null }), true);
+  assert.equal(sent.at(-1).type, "input_text");
+  assert.equal(sent.at(-1).data, "fallback");
+});
+
 test("send history stores multiline prompts for recall chips", () => {
   resetWebState();
 

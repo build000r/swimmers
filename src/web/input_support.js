@@ -136,6 +136,32 @@ export function mobileKeyboardKeyPlan(event, context = {}) {
   return { type: "forward_key" };
 }
 
+function mobileKeyboardInputKeyEvent(key) {
+  return {
+    kind: "key",
+    phase: "down",
+    key,
+    code: key,
+    mods: 0,
+    repeat: false,
+  };
+}
+
+export function mobileKeyboardInputPlan(event, context = {}) {
+  if (context.readOnly || !context.hasCurrentSession) {
+    return { type: "clear" };
+  }
+  const inputType = String(event?.inputType || "");
+  const text = typeof event?.data === "string" ? event.data : String(context.proxyValue ?? "");
+  if (inputType === "deleteContentBackward") {
+    return { type: "forward_event", event: mobileKeyboardInputKeyEvent("Backspace") };
+  }
+  if (inputType === "insertLineBreak") {
+    return { type: "forward_event", event: mobileKeyboardInputKeyEvent("Enter") };
+  }
+  return { type: "send_text", text };
+}
+
 function clampInt(value, fallback, min, max) {
   const numeric = Number.isFinite(value) ? Math.trunc(value) : fallback;
   return Math.max(min, Math.min(max, numeric));

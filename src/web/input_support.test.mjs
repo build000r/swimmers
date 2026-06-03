@@ -5,6 +5,7 @@ import {
   eventCell,
   eventClientPoint,
   globalShortcutPlan,
+  mobileKeyboardInputPlan,
   mobileKeyboardKeyPlan,
   shouldIgnoreSyntheticClick,
 } from "./input_support.js";
@@ -151,4 +152,51 @@ test("mobileKeyboardKeyPlan preserves special-key forwarding and no-op gates", (
   ]) {
     assert.deepEqual(mobileKeyboardKeyPlan({ key }, { hasCurrentSession: true }), { type: "forward_key" });
   }
+});
+
+test("mobileKeyboardInputPlan preserves clear, control, and inserted text decisions", () => {
+  assert.deepEqual(mobileKeyboardInputPlan(
+    { inputType: "insertText", data: "x" },
+    { readOnly: true, hasCurrentSession: true, proxyValue: "ignored" },
+  ), { type: "clear" });
+  assert.deepEqual(mobileKeyboardInputPlan(
+    { inputType: "insertText", data: "x" },
+    { readOnly: false, hasCurrentSession: false, proxyValue: "ignored" },
+  ), { type: "clear" });
+  assert.deepEqual(mobileKeyboardInputPlan(
+    { inputType: "deleteContentBackward" },
+    { hasCurrentSession: true },
+  ), {
+    type: "forward_event",
+    event: {
+      kind: "key",
+      phase: "down",
+      key: "Backspace",
+      code: "Backspace",
+      mods: 0,
+      repeat: false,
+    },
+  });
+  assert.deepEqual(mobileKeyboardInputPlan(
+    { inputType: "insertLineBreak" },
+    { hasCurrentSession: true },
+  ), {
+    type: "forward_event",
+    event: {
+      kind: "key",
+      phase: "down",
+      key: "Enter",
+      code: "Enter",
+      mods: 0,
+      repeat: false,
+    },
+  });
+  assert.deepEqual(mobileKeyboardInputPlan(
+    { inputType: "insertText", data: "typed" },
+    { hasCurrentSession: true, proxyValue: "fallback" },
+  ), { type: "send_text", text: "typed" });
+  assert.deepEqual(mobileKeyboardInputPlan(
+    { inputType: "insertText", data: null },
+    { hasCurrentSession: true, proxyValue: "fallback" },
+  ), { type: "send_text", text: "fallback" });
 });

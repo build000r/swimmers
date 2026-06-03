@@ -2,6 +2,7 @@ import { buildSurfaceFrame, surfaceActionAt, surfaceConsumesPointer } from "./re
 import {
   eventCell,
   globalShortcutPlan,
+  mobileKeyboardInputPlan,
   mobileKeyboardKeyPlan,
   shouldIgnoreSyntheticClick,
 } from "./input_support.js";
@@ -5157,6 +5158,24 @@ function handleMobileKeyboardProxyKeydown(event) {
   return true;
 }
 
+function handleMobileKeyboardProxyInput(event) {
+  const plan = mobileKeyboardInputPlan(event, {
+    readOnly: state.readOnly,
+    hasCurrentSession: Boolean(currentSession()),
+    proxyValue: el.mobileKeyboardProxy.value,
+  });
+  el.mobileKeyboardProxy.value = "";
+  if (plan.type === "clear") {
+    return false;
+  }
+  if (plan.type === "forward_event") {
+    forwardTerminalEvent(plan.event);
+    return true;
+  }
+  sendTerminalText(plan.text);
+  return true;
+}
+
 function bindEvents() {
   bindTrogdorEvents();
   document.addEventListener?.("keydown", (event) => {
@@ -5336,38 +5355,7 @@ function bindEvents() {
     forwardTerminalEvent({ kind: "focus", focused: false });
   });
   el.mobileKeyboardProxy.addEventListener("keydown", handleMobileKeyboardProxyKeydown);
-  el.mobileKeyboardProxy.addEventListener("input", (event) => {
-    if (state.readOnly || !currentSession()) {
-      el.mobileKeyboardProxy.value = "";
-      return;
-    }
-    const inputType = String(event.inputType || "");
-    const inserted = typeof event.data === "string" ? event.data : el.mobileKeyboardProxy.value;
-    el.mobileKeyboardProxy.value = "";
-    if (inputType === "deleteContentBackward") {
-      forwardTerminalEvent({
-        kind: "key",
-        phase: "down",
-        key: "Backspace",
-        code: "Backspace",
-        mods: 0,
-        repeat: false,
-      });
-      return;
-    }
-    if (inputType === "insertLineBreak") {
-      forwardTerminalEvent({
-        kind: "key",
-        phase: "down",
-        key: "Enter",
-        code: "Enter",
-        mods: 0,
-        repeat: false,
-      });
-      return;
-    }
-    sendTerminalText(inserted);
-  });
+  el.mobileKeyboardProxy.addEventListener("input", handleMobileKeyboardProxyInput);
   el.modalBackdrop.addEventListener("click", closeSheets);
   el.modalRoot.addEventListener("keydown", (event) => {
     if (event.key === "Escape") {
@@ -6063,6 +6051,7 @@ export const __swimmersWebTest = {
   handleTerminalFallbackPasteEvent,
   handleGlobalShortcut,
   handleMobileKeyboardProxyKeydown,
+  handleMobileKeyboardProxyInput,
   sendTerminalControlKey,
   terminalKeyActionForDomEvent,
   focusTerminalInputSurface,
