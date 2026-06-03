@@ -5384,11 +5384,7 @@ function bindEvents() {
     sendTerminalControlKey(action.actionId);
     focusTerminalInputSurface({ preventScroll: true });
   });
-  el.terminalInlineInput.addEventListener("focus", () => {
-    if (!state.activeSheet) {
-      forwardTerminalEvent({ kind: "focus", focused: true });
-    }
-  });
+  el.terminalInlineInput.addEventListener("focus", () => runTerminalFocusAction(terminalStageFocusPlan("focus", { activeSheet: state.activeSheet })));
   el.terminalFallback.addEventListener("mousedown", () => runTerminalFallbackPointerFocusAction(terminalFallbackPointerFocusPlan("mousedown", { terminalFallbackActive: state.terminalFallbackActive, activeSheet: state.activeSheet })));
   el.terminalFallback.addEventListener("click", () => runTerminalFallbackPointerFocusAction(terminalFallbackPointerFocusPlan("click", { terminalFallbackActive: state.terminalFallbackActive, activeSheet: state.activeSheet })));
   el.terminalFallback.addEventListener("keydown", handleTerminalFallbackKeyEvent);
