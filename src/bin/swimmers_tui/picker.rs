@@ -1407,88 +1407,199 @@ fn render_picker_entry_row(
     layout: &PickerLayout,
     row: usize,
 ) {
-    let visible_pos = picker.scroll + row;
-    let Some(&index) = layout.visible_entries.get(visible_pos) else {
+    let Some(row) = picker_entry_row_render_model(picker, layout, row) else {
         return;
     };
-    let Some(entry) = picker.entry_at(index) else {
-        return;
-    };
-    let marker = if picker.selection == PickerSelection::Entry(index) {
+
+    render_picker_entry_label(renderer, layout, &row);
+    render_picker_entry_exclude_badge(renderer, layout, &row);
+    render_picker_entry_action_badges(renderer, layout, &row);
+}
+
+struct PickerEntryRowRenderModel {
+    y: u16,
+    line: String,
+    text_width: usize,
+    color: Color,
+    excluded: bool,
+    exclude_label: Option<&'static str>,
+    actions: Vec<ActionLabel>,
+    actions_width: u16,
+}
+
+fn picker_entry_row_render_model(
+    picker: &PickerState,
+    layout: &PickerLayout,
+    row: usize,
+) -> Option<PickerEntryRowRenderModel> {
+    let index = picker_entry_row_index(picker, layout, row)?;
+    let entry = picker.entry_at(index)?;
+    let actions = picker_entry_actions(entry);
+    let actions_width = picker_entry_actions_width(&actions);
+    let exclude_label = picker_entry_row_exclude_label(picker, index);
+    let reserved = picker_entry_row_reserved_width(actions_width, exclude_label);
+    let excluded = picker.batch_entry_is_excluded(index);
+
+    Some(PickerEntryRowRenderModel {
+        y: layout.first_entry_y + row as u16,
+        line: picker_entry_row_line(picker, index, entry),
+        text_width: layout.content.width.saturating_sub(reserved) as usize,
+        color: picker_entry_row_color(picker, index, entry, excluded),
+        excluded,
+        exclude_label,
+        actions,
+        actions_width,
+    })
+}
+
+fn picker_entry_row_index(
+    picker: &PickerState,
+    layout: &PickerLayout,
+    row: usize,
+) -> Option<usize> {
+    layout.visible_entries.get(picker.scroll + row).copied()
+}
+
+fn picker_entry_row_line(picker: &PickerState, index: usize, entry: &DirEntry) -> String {
+    format!(
+        "{} {} {}{}",
+        picker_entry_row_marker(picker, index),
+        picker_entry_row_icon(entry),
+        entry.name,
+        picker_entry_row_running_suffix(entry)
+    )
+}
+
+fn picker_entry_row_marker(picker: &PickerState, index: usize) -> &'static str {
+    if picker.selection == PickerSelection::Entry(index) {
         ">"
     } else {
         " "
-    };
-    let icon = if entry.has_children { ">" } else { "+" };
-    let running = match entry.is_running {
+    }
+}
+
+fn picker_entry_row_icon(entry: &DirEntry) -> &'static str {
+    if entry.has_children {
+        ">"
+    } else {
+        "+"
+    }
+}
+
+fn picker_entry_row_running_suffix(entry: &DirEntry) -> &'static str {
+    match entry.is_running {
         Some(true) => " *",
         Some(false) => " -",
         None => "",
-    };
-    let line = format!("{marker} {icon} {}{}", entry.name, running);
-    let actions = picker_entry_actions(entry);
-    let actions_width = picker_entry_actions_width(&actions);
-    let exclude_label = picker
+    }
+}
+
+fn picker_entry_row_exclude_label(picker: &PickerState, index: usize) -> Option<&'static str> {
+    picker
         .batch_exclude_mode
-        .then(|| picker_batch_exclude_label(picker, index));
-    let exclude_width = exclude_label
-        .map(|label| label.len() as u16 + if actions_width > 0 { 1 } else { 0 })
-        .unwrap_or(0);
-    let reserved = if actions_width > 0 {
+        .then(|| picker_batch_exclude_label(picker, index))
+}
+
+fn picker_entry_row_reserved_width(actions_width: u16, exclude_label: Option<&str>) -> u16 {
+    let exclude_width = picker_entry_row_exclude_width(actions_width, exclude_label);
+    if actions_width > 0 {
         actions_width + 1 + exclude_width
     } else if exclude_width > 0 {
         exclude_width + 1
     } else {
         0
-    };
-    let text_width = layout.content.width.saturating_sub(reserved) as usize;
+    }
+}
+
+fn picker_entry_row_exclude_width(actions_width: u16, exclude_label: Option<&str>) -> u16 {
+    exclude_label
+        .map(|label| label.len() as u16 + u16::from(actions_width > 0))
+        .unwrap_or(0)
+}
+
+fn picker_entry_row_color(
+    picker: &PickerState,
+    index: usize,
+    entry: &DirEntry,
+    excluded: bool,
+) -> Color {
     let themed_color = picker.entry_theme_colors.get(index).copied().flatten();
-    let excluded = picker.batch_entry_is_excluded(index);
-    let color = if excluded {
+    if excluded {
         Color::DarkGrey
     } else if picker.selection == PickerSelection::Entry(index) {
         themed_color.unwrap_or(Color::White)
-    } else if let Some(theme_color) = themed_color {
-        theme_color
-    } else if entry.has_children {
+    } else {
+        themed_color.unwrap_or_else(|| picker_entry_row_default_color(entry))
+    }
+}
+
+fn picker_entry_row_default_color(entry: &DirEntry) -> Color {
+    if entry.has_children {
         Color::Cyan
     } else {
         Color::DarkGrey
-    };
+    }
+}
+
+fn render_picker_entry_label(
+    renderer: &mut Renderer,
+    layout: &PickerLayout,
+    row: &PickerEntryRowRenderModel,
+) {
     renderer.draw_text(
         layout.content.x,
-        layout.first_entry_y + row as u16,
-        &truncate_label(&line, text_width),
-        color,
+        row.y,
+        &truncate_label(&row.line, row.text_width),
+        row.color,
     );
-    if let Some(label) = exclude_label {
-        let actions_padding = if actions_width > 0 {
-            actions_width + 1
-        } else {
-            0
-        };
-        let x = layout
-            .content
-            .right()
-            .saturating_sub(actions_padding + label.len() as u16);
-        renderer.draw_text(
-            x,
-            layout.first_entry_y + row as u16,
-            label,
-            if excluded { Color::Cyan } else { Color::Yellow },
-        );
+}
+
+fn render_picker_entry_exclude_badge(
+    renderer: &mut Renderer,
+    layout: &PickerLayout,
+    row: &PickerEntryRowRenderModel,
+) {
+    let Some(label) = row.exclude_label else {
+        return;
+    };
+    let actions_padding = picker_entry_row_actions_padding(row.actions_width);
+    let x = layout
+        .content
+        .right()
+        .saturating_sub(actions_padding + label.len() as u16);
+    renderer.draw_text(
+        x,
+        row.y,
+        label,
+        picker_entry_row_exclude_color(row.excluded),
+    );
+}
+
+fn picker_entry_row_actions_padding(actions_width: u16) -> u16 {
+    if actions_width > 0 {
+        actions_width + 1
+    } else {
+        0
     }
-    if !actions.is_empty() {
-        let mut ax = layout.content.right().saturating_sub(actions_width);
-        for action in &actions {
-            renderer.draw_text(
-                ax,
-                layout.first_entry_y + row as u16,
-                &action.text,
-                action.color,
-            );
-            ax += action.text.len() as u16 + 1;
-        }
+}
+
+fn picker_entry_row_exclude_color(excluded: bool) -> Color {
+    if excluded {
+        Color::Cyan
+    } else {
+        Color::Yellow
+    }
+}
+
+fn render_picker_entry_action_badges(
+    renderer: &mut Renderer,
+    layout: &PickerLayout,
+    row: &PickerEntryRowRenderModel,
+) {
+    let mut x = layout.content.right().saturating_sub(row.actions_width);
+    for action in &row.actions {
+        renderer.draw_text(x, row.y, &action.text, action.color);
+        x += action.text.len() as u16 + 1;
     }
 }
 
