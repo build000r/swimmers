@@ -94,7 +94,6 @@ import {
   trogdorSurfaceSignature,
 } from "./trogdor_render.js";
 import {
-  WORKBENCH_LOG_FILTERS,
   agentActionLabel,
   applyWorkbenchWidgetResults,
   buildWorkbenchWidgetRequestPlan,
@@ -107,6 +106,8 @@ import {
   selectedWorkbenchWidgetsSnapshot,
   shouldThrottleWorkbenchWidgets,
   truncateWorkbenchText,
+  workbenchWidgetClickPlan,
+  workbenchWidgetLogPlan,
 } from "./workbench_render.js";
 
 const boot = window.__SWIMMERS_BOOT__ ?? {
@@ -5163,6 +5164,44 @@ function handleTerminalInlineInputKeydown(event) {
   return handled;
 }
 
+function handleTerminalWorkbenchWidgetsClick(event) {
+  const plan = workbenchWidgetClickPlan(event.target);
+  if (plan.type === "ignore") {
+    return false;
+  }
+  event.preventDefault();
+  if (plan.type === "open_mermaid") {
+    openSheet("mermaid");
+    return;
+  }
+  const refreshWidgets = plan.type === "select_turn";
+  if (refreshWidgets) {
+    state.workbenchSelectedTurnId = plan.turnId;
+    state.workbenchWidgets.transcript = null;
+    state.workbenchWidgets.transcriptTurnId = "";
+    state.workbenchWidgets.transcriptNextCursor = 0;
+  } else {
+    state.workbenchLogMode = plan.mode;
+  }
+  renderWorkbenchWidgets();
+  if (refreshWidgets) {
+    void refreshWorkbenchWidgetsForSelectedSession({ force: true, silent: true });
+  }
+  focusTerminalInputSurface({ preventScroll: true });
+}
+
+function handleTerminalWorkbenchWidgetsLogEvent(event) {
+  const plan = workbenchWidgetLogPlan(event.type, event.target);
+  if (plan.type === "set_log_search") {
+    state.workbenchLogSearch = plan.query;
+  } else if (plan.type === "set_log_filter") {
+    state.workbenchLogFilter = plan.filter;
+  } else {
+    return;
+  }
+  renderWorkbenchWidgets();
+}
+
 function bindEvents() {
   bindTrogdorEvents();
   document.addEventListener?.("keydown", (event) => {
@@ -5218,52 +5257,9 @@ function bindEvents() {
     void refreshWorkbenchWidgetsForSelectedSession({ force: true });
     focusTerminalInputSurface({ preventScroll: true });
   });
-  el.terminalWorkbenchWidgets.addEventListener("click", (event) => {
-    const turnButton = event.target?.closest?.("[data-workbench-turn-id]");
-    if (turnButton) {
-      event.preventDefault();
-      state.workbenchSelectedTurnId = String(turnButton.dataset.workbenchTurnId || "");
-      state.workbenchWidgets.transcript = null;
-      state.workbenchWidgets.transcriptTurnId = "";
-      state.workbenchWidgets.transcriptNextCursor = 0;
-      renderWorkbenchWidgets();
-      void refreshWorkbenchWidgetsForSelectedSession({ force: true, silent: true });
-      focusTerminalInputSurface({ preventScroll: true });
-      return;
-    }
-
-    const logModeButton = event.target?.closest?.("[data-workbench-log-mode]");
-    if (logModeButton) {
-      event.preventDefault();
-      state.workbenchLogMode = logModeButton.dataset.workbenchLogMode === "raw" ? "raw" : "lens";
-      renderWorkbenchWidgets();
-      focusTerminalInputSurface({ preventScroll: true });
-      return;
-    }
-
-    const mermaidButton = event.target?.closest?.("[data-workbench-open-mermaid]");
-    if (!mermaidButton) {
-      return;
-    }
-    event.preventDefault();
-    openSheet("mermaid");
-  });
-  el.terminalWorkbenchWidgets.addEventListener("input", (event) => {
-    const target = event.target;
-    if (!target?.matches?.("[data-workbench-log-search]")) {
-      return;
-    }
-    state.workbenchLogSearch = target.value || "";
-    renderWorkbenchWidgets();
-  });
-  el.terminalWorkbenchWidgets.addEventListener("change", (event) => {
-    const target = event.target;
-    if (!target?.matches?.("[data-workbench-log-filter]")) {
-      return;
-    }
-    state.workbenchLogFilter = WORKBENCH_LOG_FILTERS.includes(target.value) ? target.value : "all";
-    renderWorkbenchWidgets();
-  });
+  el.terminalWorkbenchWidgets.addEventListener("click", handleTerminalWorkbenchWidgetsClick);
+  el.terminalWorkbenchWidgets.addEventListener("input", handleTerminalWorkbenchWidgetsLogEvent);
+  el.terminalWorkbenchWidgets.addEventListener("change", handleTerminalWorkbenchWidgetsLogEvent);
   el.terminalInputDock.addEventListener("submit", (event) => {
     event.preventDefault();
     void submitTerminalInputDock();
@@ -6037,6 +6033,7 @@ export const __swimmersWebTest = {
   syncTerminalWorkbench,
   renderTerminalWorkbench,
   renderWorkbenchWidgets,
+  handleTerminalWorkbenchWidgetsClick,
   writeWorkbenchWidgetsHtml,
   renderTranscriptBlocks,
   renderMermaidArtifact,

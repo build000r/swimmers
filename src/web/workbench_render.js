@@ -118,6 +118,41 @@ const WORKBENCH_LOG_KIND_LABELS = {
 
 export const WORKBENCH_LOG_FILTERS = ["all", "operator", "command", "status", "diff", "output", "truncation"];
 
+export function workbenchWidgetClickPlan(target) {
+  const turnButton = target?.closest?.("[data-workbench-turn-id]");
+  if (turnButton) {
+    return {
+      type: "select_turn",
+      turnId: String(turnButton.dataset?.workbenchTurnId || ""),
+    };
+  }
+
+  const logModeButton = target?.closest?.("[data-workbench-log-mode]");
+  if (logModeButton) {
+    return {
+      type: "set_log_mode",
+      mode: logModeButton.dataset?.workbenchLogMode === "raw" ? "raw" : "lens",
+    };
+  }
+
+  return target?.closest?.("[data-workbench-open-mermaid]")
+    ? { type: "open_mermaid" }
+    : { type: "ignore" };
+}
+
+export function workbenchWidgetLogPlan(eventType, target, filters = WORKBENCH_LOG_FILTERS) {
+  if (eventType === "input" && target?.matches?.("[data-workbench-log-search]")) {
+    return { type: "set_log_search", query: target.value || "" };
+  }
+  if (eventType === "change" && target?.matches?.("[data-workbench-log-filter]")) {
+    return {
+      type: "set_log_filter",
+      filter: filters.includes(target.value) ? target.value : "all",
+    };
+  }
+  return { type: "ignore" };
+}
+
 export function emptyWorkbenchWidgets(overrides = {}) {
   return {
     sessionId: null,

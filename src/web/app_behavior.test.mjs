@@ -1515,6 +1515,61 @@ test("terminal workbench pinned widgets render pane output and artifacts from se
   assert.ok(web.el.terminalWorkbenchWidgets.innerHTML.includes("Open viewer"));
 });
 
+test("terminal workbench widget event handlers preserve selection, filters, and sheets", () => {
+  resetWebState();
+  web.state.selectedSessionId = "sess_0";
+  web.state.trogdorAtlasOpen = false;
+  web.state.workbenchWidgets.transcript = { records: [{ id: "old" }] };
+  web.state.workbenchWidgets.transcriptTurnId = "old-turn";
+  web.state.workbenchWidgets.transcriptNextCursor = 42;
+
+  const target = (matches, options = {}) => ({
+    value: options.value,
+    closest(selector) {
+      return matches[selector] ?? null;
+    },
+    matches(selector) {
+      return Boolean(matches[selector]);
+    },
+  });
+  const eventFor = (eventTarget) => {
+    let prevented = 0;
+    return {
+      target: eventTarget,
+      preventDefault() {
+        prevented += 1;
+      },
+      get prevented() {
+        return prevented;
+      },
+    };
+  };
+
+  const turnEvent = eventFor(target({
+    "[data-workbench-turn-id]": { dataset: { workbenchTurnId: "turn-2" } },
+  }));
+  web.handleTerminalWorkbenchWidgetsClick(turnEvent);
+  assert.equal(turnEvent.prevented, 1);
+  assert.equal(web.state.workbenchSelectedTurnId, "turn-2");
+  assert.equal(web.state.workbenchWidgets.transcript, null);
+  assert.equal(web.state.workbenchWidgets.transcriptTurnId, "");
+  assert.equal(web.state.workbenchWidgets.transcriptNextCursor, 0);
+
+  const logModeEvent = eventFor(target({
+    "[data-workbench-log-mode]": { dataset: { workbenchLogMode: "raw" } },
+  }));
+  web.handleTerminalWorkbenchWidgetsClick(logModeEvent);
+  assert.equal(logModeEvent.prevented, 1);
+  assert.equal(web.state.workbenchLogMode, "raw");
+
+  const mermaidEvent = eventFor(target({ "[data-workbench-open-mermaid]": {} }));
+  web.handleTerminalWorkbenchWidgetsClick(mermaidEvent);
+  assert.equal(mermaidEvent.prevented, 1);
+  assert.equal(web.state.activeSheet, "mermaid");
+
+  assert.equal(web.handleTerminalWorkbenchWidgetsClick({ target: target({}), preventDefault() {} }), false);
+});
+
 test("Mermaid artifact renderer bounds source and advertised plan tabs", () => {
   resetWebState();
   const largeSource = `graph TD\n${"A-->B\n".repeat(14000)}`;

@@ -15,6 +15,8 @@ import {
   selectedWorkbenchWidgetsSnapshot,
   shouldThrottleWorkbenchWidgets,
   truncateWorkbenchText,
+  workbenchWidgetClickPlan,
+  workbenchWidgetLogPlan,
   workbenchWidgetsHaveCurrentPayload,
 } from "./workbench_render.js";
 
@@ -110,6 +112,52 @@ test("workbench widget renderer composes turns, JSONL, diff, artifacts, and skil
   assert.match(html, /data-workbench-open-mermaid="true"/);
   assert.match(html, /workbench-diff/);
   assert.match(html, /describe/);
+});
+
+test("workbench widget event planners classify click, input, and change targets", () => {
+  const clickTarget = (matches) => ({
+    closest(selector) {
+      return matches[selector] ?? null;
+    },
+  });
+  const matchingTarget = (selector, value) => ({
+    value,
+    matches(query) {
+      return query === selector;
+    },
+  });
+
+  assert.deepEqual(workbenchWidgetClickPlan(null), { type: "ignore" });
+  assert.deepEqual(workbenchWidgetClickPlan(clickTarget({
+    "[data-workbench-turn-id]": { dataset: { workbenchTurnId: "turn-7" } },
+    "[data-workbench-log-mode]": { dataset: { workbenchLogMode: "raw" } },
+  })), { type: "select_turn", turnId: "turn-7" });
+  assert.deepEqual(workbenchWidgetClickPlan(clickTarget({
+    "[data-workbench-log-mode]": { dataset: { workbenchLogMode: "raw" } },
+  })), { type: "set_log_mode", mode: "raw" });
+  assert.deepEqual(workbenchWidgetClickPlan(clickTarget({
+    "[data-workbench-log-mode]": { dataset: { workbenchLogMode: "unknown" } },
+  })), { type: "set_log_mode", mode: "lens" });
+  assert.deepEqual(workbenchWidgetClickPlan(clickTarget({
+    "[data-workbench-open-mermaid]": {},
+  })), { type: "open_mermaid" });
+
+  assert.deepEqual(workbenchWidgetLogPlan("input", matchingTarget("[data-workbench-log-search]", "cargo")), {
+    type: "set_log_search",
+    query: "cargo",
+  });
+  assert.deepEqual(workbenchWidgetLogPlan("input", matchingTarget("[data-other]", "cargo")), { type: "ignore" });
+
+  assert.deepEqual(workbenchWidgetLogPlan("change", matchingTarget("[data-workbench-log-filter]", "diff")), {
+    type: "set_log_filter",
+    filter: "diff",
+  });
+  assert.deepEqual(workbenchWidgetLogPlan("change", matchingTarget("[data-workbench-log-filter]", "invalid")), {
+    type: "set_log_filter",
+    filter: "all",
+  });
+  assert.deepEqual(workbenchWidgetLogPlan("change", matchingTarget("[data-other]", "diff")), { type: "ignore" });
+  assert.deepEqual(workbenchWidgetLogPlan("click", matchingTarget("[data-workbench-log-filter]", "diff")), { type: "ignore" });
 });
 
 test("workbench refresh helpers plan delta fetches and merge transcript pages", () => {
