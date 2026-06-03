@@ -3,7 +3,7 @@ import {
   authTokenButtonPlan, eventCell, globalShortcutPlan, mobileKeyboardInputExecutorPlan, mobileKeyboardInputPlan,
   mobileKeyboardKeydownPlan, mobileKeyboardKeyPlan, shouldIgnoreSyntheticClick,
   terminalComposerControlAction, terminalDestroyStatePatch, terminalFallbackActivationPlan, terminalFallbackFocusPlan, terminalFallbackKeydownPlan, terminalFallbackPastePlan, terminalFallbackPointerFocusPlan, terminalInlineInputKeydownPlan, terminalKeyStripClickExecutorPlan, terminalKeyStripClickPlan, terminalStageCaptureBindings, terminalStageFocusExecutorPlan, terminalStageFocusPlan,
-  normalizeTerminalZoomValue, terminalAuxiliaryControlsPlan, terminalFallbackScrollPlan, terminalFallbackTextScrollPlan, terminalInputDockPlan, terminalLiveFrameFallbackPlan, terminalPaintProbeSchedulePlan, terminalPaintVerificationPlan, terminalPendingByteBufferPlan, terminalPresentationPlan, terminalResizeGeometryPlan, terminalStageKeydownPlan, terminalStagePasteExecutorPlan, terminalStagePastePlan, terminalZoomControlsPlan, terminalZoomLoadValue, terminalZoomPercentLabel, terminalZoomPersistencePlan,
+  normalizeTerminalZoomValue, terminalAuxiliaryControlsPlan, terminalFallbackScrollPlan, terminalFallbackTextScrollPlan, terminalInputDockPlan, terminalLiveFrameFallbackPlan, terminalPaintProbeSchedulePlan, terminalPaintVerificationPlan, terminalPendingByteBufferPlan, terminalPresentationPlan, terminalResizeGeometryPlan, terminalStageKeydownPlan, terminalStagePasteExecutorPlan, terminalStagePastePlan, terminalToolsAvailabilityPlan, terminalZoomControlsPlan, terminalZoomLoadValue, terminalZoomPercentLabel, terminalZoomPersistencePlan,
 } from "./input_support.js";
 import { sendHistoryClickPlan, sendSheetFailureStatus, sendSheetSubmitPlan, sendSheetSuccessStatus } from "./send_sheet.js";
 import {
@@ -1308,18 +1308,19 @@ function syncTerminalTools() {
   const searchReady = terminalSupports("setSearchQuery");
   const selectionReady = terminalSupports("copySelection") || terminalSupports("extractSelectionText");
   const liveTerminal = hasLiveTerminal();
+  const plan = terminalToolsAvailabilityPlan({ searchReady, liveTerminal, frankenTermAvailable: boot.franken_term_available, searchQuery: state.searchQuery, readOnly: state.readOnly, sendTargetType: state.sendTarget?.type, hasCurrentSession: Boolean(currentSession()) });
 
-  el.terminalSearch.disabled = !searchReady;
-  el.searchPrevButton.disabled = !searchReady;
-  el.searchNextButton.disabled = !searchReady;
-  el.searchClearButton.disabled = !searchReady;
-  el.sendInput.disabled = state.readOnly;
+  el.terminalSearch.disabled = plan.searchDisabled;
+  el.searchPrevButton.disabled = plan.searchDisabled;
+  el.searchNextButton.disabled = plan.searchDisabled;
+  el.searchClearButton.disabled = plan.searchDisabled;
+  el.sendInput.disabled = plan.sendInputDisabled;
   if (el.sendMode) {
-    el.sendMode.disabled = state.readOnly || state.sendTarget?.type === "group";
+    el.sendMode.disabled = plan.sendModeDisabled;
   }
-  el.sendSubmitButton.disabled = state.readOnly || !currentSession();
+  el.sendSubmitButton.disabled = plan.sendSubmitDisabled;
   Array.from(el.createForm.elements).forEach((element) => {
-    element.disabled = state.readOnly;
+    element.disabled = plan.createFormElementsDisabled;
   });
 
   el.terminalStage.classList.toggle("select-mode", state.selectMode);
@@ -1331,17 +1332,7 @@ function syncTerminalTools() {
   syncLinkTools();
   syncTerminalStatusStrip();
 
-  if (!liveTerminal) {
-    if (boot.franken_term_available) {
-      setSearchStatus("Search waits for terminal attach", true);
-    } else {
-      setSearchStatus("Search needs FrankenTerm assets", true);
-    }
-  } else if (!searchReady) {
-    setSearchStatus("Search unavailable in this FrankenTerm build", true);
-  } else if (!state.searchQuery) {
-    setSearchStatus("Search idle", true);
-  }
+  if (plan.searchStatus) setSearchStatus(plan.searchStatus.label, plan.searchStatus.muted);
 }
 
 function syncSheetActionAvailability() {

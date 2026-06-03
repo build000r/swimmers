@@ -41,6 +41,7 @@ import {
   terminalZoomLoadValue,
   terminalZoomPercentLabel,
   terminalZoomPersistencePlan,
+  terminalToolsAvailabilityPlan,
 } from "./input_support.js";
 
 test("eventClientPoint uses direct pointer coordinates when present", () => {
@@ -1041,6 +1042,69 @@ test("terminalAuxiliaryControlsPlan preserves mobile keyboard and copy-frame gat
     copyFrameAvailable: false,
     copyFrameDisabled: true,
   });
+});
+
+test("terminalToolsAvailabilityPlan preserves control disabled states", () => {
+  assert.deepEqual(terminalToolsAvailabilityPlan({
+    searchReady: true,
+    liveTerminal: true,
+    frankenTermAvailable: true,
+    searchQuery: "needle",
+    readOnly: false,
+    sendTargetType: "session",
+    hasCurrentSession: true,
+  }), {
+    searchDisabled: false,
+    sendInputDisabled: false,
+    sendModeDisabled: false,
+    sendSubmitDisabled: false,
+    createFormElementsDisabled: false,
+    searchStatus: null,
+  });
+  assert.deepEqual(terminalToolsAvailabilityPlan({
+    searchReady: false,
+    liveTerminal: true,
+    frankenTermAvailable: true,
+    searchQuery: "",
+    readOnly: true,
+    sendTargetType: "group",
+    hasCurrentSession: false,
+  }), {
+    searchDisabled: true,
+    sendInputDisabled: true,
+    sendModeDisabled: true,
+    sendSubmitDisabled: true,
+    createFormElementsDisabled: true,
+    searchStatus: { label: "Search unavailable in this FrankenTerm build", muted: true },
+  });
+  assert.equal(terminalToolsAvailabilityPlan({
+    searchReady: true,
+    liveTerminal: true,
+    readOnly: false,
+    sendTargetType: "group",
+    hasCurrentSession: true,
+  }).sendModeDisabled, true);
+});
+
+test("terminalToolsAvailabilityPlan preserves search status copy", () => {
+  assert.deepEqual(terminalToolsAvailabilityPlan({
+    searchReady: true,
+    liveTerminal: false,
+    frankenTermAvailable: true,
+    searchQuery: "",
+  }).searchStatus, { label: "Search waits for terminal attach", muted: true });
+  assert.deepEqual(terminalToolsAvailabilityPlan({
+    searchReady: true,
+    liveTerminal: false,
+    frankenTermAvailable: false,
+    searchQuery: "",
+  }).searchStatus, { label: "Search needs FrankenTerm assets", muted: true });
+  assert.deepEqual(terminalToolsAvailabilityPlan({
+    searchReady: true,
+    liveTerminal: true,
+    frankenTermAvailable: true,
+    searchQuery: "",
+  }).searchStatus, { label: "Search idle", muted: true });
 });
 
 test("terminalFallbackPointerFocusPlan preserves scheduled and immediate focus gates", () => {

@@ -541,6 +541,28 @@ export function terminalAuxiliaryControlsPlan(context = {}) {
   };
 }
 
+export function terminalToolsAvailabilityPlan(context = {}) {
+  let searchStatus = null;
+  if (!context.liveTerminal) {
+    searchStatus = {
+      label: context.frankenTermAvailable ? "Search waits for terminal attach" : "Search needs FrankenTerm assets",
+      muted: true,
+    };
+  } else if (!context.searchReady) {
+    searchStatus = { label: "Search unavailable in this FrankenTerm build", muted: true };
+  } else if (!context.searchQuery) {
+    searchStatus = { label: "Search idle", muted: true };
+  }
+  return {
+    searchDisabled: !context.searchReady,
+    sendInputDisabled: Boolean(context.readOnly),
+    sendModeDisabled: Boolean(context.readOnly) || context.sendTargetType === "group",
+    sendSubmitDisabled: Boolean(context.readOnly) || !context.hasCurrentSession,
+    createFormElementsDisabled: Boolean(context.readOnly),
+    searchStatus,
+  };
+}
+
 export function terminalFallbackPointerFocusPlan(eventType, context = {}) {
   if (!context.terminalFallbackActive || context.activeSheet) {
     return { type: "ignore", focusTerminal: false, scheduleFrame: false };
