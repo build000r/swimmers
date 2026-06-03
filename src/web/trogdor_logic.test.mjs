@@ -37,6 +37,7 @@ import {
   trogdorHoverReaderResetState,
   trogdorHoverSessionIdForZone,
   trogdorReadableHoveredSurfaceSession,
+  trogdorReaderDisplayState,
   trogdorReaderProgressAdvanceForSession,
   trogdorReaderBaseIndexForProgress,
   trogdorReaderStateForWpmChange,
@@ -379,6 +380,43 @@ test("Trogdor reader word index advances by elapsed WPM and respects pause/compl
     hoveredSessionId: item.sessionId,
     now: 3_000,
   }), 4);
+});
+
+test("Trogdor reader display state formats banners and read-complete state", () => {
+  const longWord = "supercalifragilisticexpialidocious";
+  const item = session({ clawgText: `first ${longWord} final` });
+  const key = trogdorClawgKey(item);
+
+  assert.deepEqual(trogdorReaderDisplayState(null), {
+    bannerText: "burninate!",
+    readComplete: false,
+  });
+  assert.deepEqual(trogdorReaderDisplayState(session({ clawgText: "   " })), {
+    bannerText: "waiting",
+    readComplete: false,
+  });
+  assert.deepEqual(trogdorReaderDisplayState(item, { wordIndex: -1 }), {
+    bannerText: "first",
+    readComplete: false,
+  });
+  assert.deepEqual(trogdorReaderDisplayState(item, {
+    wordIndex: 1,
+    progress: { [key]: 3 },
+  }), {
+    bannerText: longWord.slice(0, 22),
+    readComplete: true,
+  });
+  assert.deepEqual(trogdorReaderDisplayState(item, {
+    wordIndex: 99,
+    progress: { [key]: 2 },
+  }), {
+    bannerText: "caught up",
+    readComplete: false,
+  });
+  assert.equal(
+    trogdorReaderDisplayState(item, { wordIndex: 1, maxWordChars: 8 }).bannerText,
+    longWord.slice(0, 8),
+  );
 });
 
 test("Trogdor reader advancement helpers clamp progress and preserve WPM restart state", () => {

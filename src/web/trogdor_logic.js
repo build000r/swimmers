@@ -221,6 +221,33 @@ export function trogdorReaderWordIndexForProgress(
   return Math.min(words.length, baseIndex + Math.floor(elapsed / msPerWord));
 }
 
+export function trogdorReaderDisplayState(
+  session,
+  {
+    wordIndex = -1,
+    progress = {},
+    emptyText = "burninate!",
+    waitingText = "waiting",
+    caughtUpText = "caught up",
+    maxWordChars = 22,
+  } = {},
+) {
+  if (!session) {
+    return { bannerText: emptyText, readComplete: false };
+  }
+  const words = trogdorClawgWords(session);
+  if (!words.length) {
+    return { bannerText: waitingText, readComplete: false };
+  }
+  const index = clampInt(wordIndex, 0, 0, words.length);
+  return {
+    bannerText: index >= words.length
+      ? caughtUpText
+      : words[index].slice(0, clampInt(maxWordChars, 22, 1, 200)),
+    readComplete: trogdorClawgReadCompleteForProgress(session, progress),
+  };
+}
+
 export function trogdorReaderProgressAdvanceForSession(
   session,
   {

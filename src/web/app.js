@@ -48,7 +48,6 @@ import {
   trogdorClawgKey,
   trogdorClawgDismissedForMap,
   trogdorClawgReadCompleteForProgress,
-  trogdorClawgWords,
   trogdorDomActionCueKinds,
   trogdorDragonPose as buildTrogdorDragonPose,
   trogdorHasActionCue,
@@ -58,6 +57,7 @@ import {
   trogdorHoverReaderResetState,
   trogdorHoverSessionIdForZone,
   trogdorReadableHoveredSurfaceSession,
+  trogdorReaderDisplayState,
   trogdorReaderProgressAdvanceForSession,
   trogdorReaderStateForWpmChange,
   trogdorReaderWordIndexForProgress,
@@ -2017,7 +2017,11 @@ function renderTrogdorSurface() {
 function renderTrogdorReader(hoveredSession) {
   const wpm = clampInt(state.trogdorWpm, 200, 50, 800);
   const hovered = hoveredSession || null;
-  const bannerText = hovered ? trogdorSpeedReadWord(hovered, wpm) : "burninate!";
+  const readerState = trogdorReaderDisplayState(hovered, {
+    wordIndex: hovered ? trogdorReaderWordIndex(hovered, wpm) : -1,
+    progress: state.trogdorReadProgress,
+  });
+  const bannerText = readerState.bannerText;
   const readerMarkup = `<div class="trogdor-banner" data-trogdor-reader="true">${escapeHtml(bannerText)}</div>`;
   if (!el.trogdorSurface) {
     return readerMarkup;
@@ -2028,21 +2032,13 @@ function renderTrogdorReader(hoveredSession) {
   }
   const readToggle = el.trogdorSurface.querySelector('button[data-action="trogdor_read_toggle"]');
   if (readToggle) {
-    readToggle.textContent = trogdorReadButtonLabel(state.trogdorReading, Boolean(hovered && trogdorClawgReadComplete(hovered)));
+    readToggle.textContent = trogdorReadButtonLabel(state.trogdorReading, readerState.readComplete);
   }
   const wpmValue = el.trogdorSurface.querySelector("[data-trogdor-wpm-value]");
   if (wpmValue) {
     wpmValue.textContent = `${wpm} wpm`;
   }
   return readerMarkup;
-}
-
-function trogdorSpeedReadWord(session, wpm) {
-  const words = trogdorClawgWords(session);
-  if (!words.length) return "waiting";
-  const index = trogdorReaderWordIndex(session, wpm);
-  if (index >= words.length) return "caught up";
-  return words[Math.max(0, index)].slice(0, 22);
 }
 
 async function refreshThoughtConfig() {
