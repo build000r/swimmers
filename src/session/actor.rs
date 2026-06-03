@@ -843,36 +843,66 @@ async fn replay_existing_frames(
     match replay_plan {
         ReplayPlan::None => SubscribeOutcome::Ok,
         ReplayPlan::Frames(frames) => {
-            for (seq, data) in frames {
-                if client_tx.send(OutputFrame { seq, data }).await.is_err() {
-                    warn!(
-                        session_id = %session_id,
-                        client_id,
-                        "subscriber dropped during replay"
-                    );
-                    return SubscribeOutcome::Ok;
-                }
-            }
-            SubscribeOutcome::Ok
+            replay_buffered_frames(&session_id, client_id, client_tx, frames).await
         }
         ReplayPlan::Truncated {
             requested_resume_from_seq,
             replay_window_start_seq,
             latest_seq,
-        } => {
-            warn!(
-                session_id = %session_id,
-                client_id,
-                requested_resume_from_seq,
-                window_start = replay_window_start_seq,
-                "replay truncated, client needs full refresh"
-            );
-            SubscribeOutcome::ReplayTruncated {
-                requested_resume_from_seq,
-                replay_window_start_seq,
-                latest_seq,
-            }
-        }
+        } => replay_truncated_outcome(
+            &session_id,
+            client_id,
+            requested_resume_from_seq,
+            replay_window_start_seq,
+            latest_seq,
+        ),
+    }
+}
+
+async fn replay_buffered_frames(
+    session_id: &str,
+    client_id: ClientId,
+    client_tx: &mpsc::Sender<OutputFrame>,
+    frames: Vec<(u64, Vec<u8>)>,
+) -> SubscribeOutcome {
+    if send_replay_frames(client_tx, frames).await.is_none() {
+        warn!(
+            session_id = %session_id,
+            client_id,
+            "subscriber dropped during replay"
+        );
+    }
+    SubscribeOutcome::Ok
+}
+
+async fn send_replay_frames(
+    client_tx: &mpsc::Sender<OutputFrame>,
+    frames: Vec<(u64, Vec<u8>)>,
+) -> Option<()> {
+    for (seq, data) in frames {
+        client_tx.send(OutputFrame { seq, data }).await.ok()?;
+    }
+    Some(())
+}
+
+fn replay_truncated_outcome(
+    session_id: &str,
+    client_id: ClientId,
+    requested_resume_from_seq: u64,
+    replay_window_start_seq: u64,
+    latest_seq: u64,
+) -> SubscribeOutcome {
+    warn!(
+        session_id = %session_id,
+        client_id,
+        requested_resume_from_seq,
+        window_start = replay_window_start_seq,
+        "replay truncated, client needs full refresh"
+    );
+    SubscribeOutcome::ReplayTruncated {
+        requested_resume_from_seq,
+        replay_window_start_seq,
+        latest_seq,
     }
 }
 
@@ -1079,17 +1109,15 @@ impl SessionActor {
     }
 
     fn maybe_update_tool_from_current_command(&mut self) {
-        let current = match self.state_detector.current_command() {
-            Some(cmd) => cmd,
-            None => return,
+        let current_command = self.state_detector.current_command();
+        let Some(tool) =
+            current_command_tool_update(current_command.as_deref(), self.tool.as_deref())
+        else {
+            return;
         };
 
-        if let Some(tool) = detect_tool_from_command_line(&current) {
-            if self.tool.as_deref() != Some(tool) {
-                self.tool = Some(tool.to_string());
-                self.state_detector.set_tui_tool_mode(true);
-            }
-        }
+        self.tool = Some(tool.to_string());
+        self.state_detector.set_tui_tool_mode(true);
     }
 
     async fn maybe_refresh_tool_from_tmux(&mut self, force: bool) {
@@ -1535,15 +1563,35 @@ fn output_counts_as_meaningful_activity(
     current_state: SessionState,
     chunk: &ScrollOutputChunk,
 ) -> bool {
+    meaningful_output_activity_reason(previous_state, current_state, chunk).is_some()
+}
+
+enum MeaningfulOutputActivity {
+    BusyBecameIdle,
+    VisibleOutput,
+}
+
+fn meaningful_output_activity_reason(
+    previous_state: SessionState,
+    current_state: SessionState,
+    chunk: &ScrollOutputChunk,
+) -> Option<MeaningfulOutputActivity> {
     if chunk.coalesced_redraw {
-        return false;
+        return None;
     }
 
-    if previous_state != SessionState::Idle && current_state == SessionState::Idle {
-        return true;
+    if output_transition_finished_busy_work(previous_state, current_state) {
+        return Some(MeaningfulOutputActivity::BusyBecameIdle);
     }
 
-    visible_output_is_meaningful(&chunk.data)
+    visible_output_is_meaningful(&chunk.data).then_some(MeaningfulOutputActivity::VisibleOutput)
+}
+
+fn output_transition_finished_busy_work(
+    previous_state: SessionState,
+    current_state: SessionState,
+) -> bool {
+    !matches!(previous_state, SessionState::Idle) && matches!(current_state, SessionState::Idle)
 }
 
 fn should_refresh_cwd_from_tmux(
@@ -1581,67 +1629,167 @@ fn visible_output_is_meaningful(data: &[u8]) -> bool {
     visible
         .lines()
         .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .any(|line| {
-            if line_looks_prompt_like(line) {
-                return false;
-            }
+        .any(trimmed_line_counts_as_meaningful_output)
+}
 
-            let non_whitespace = line.chars().filter(|c| !c.is_whitespace()).count();
-            non_whitespace >= 3 && line.chars().any(|c| c.is_alphanumeric())
-        })
+fn trimmed_line_counts_as_meaningful_output(line: &str) -> bool {
+    if line_looks_prompt_like(line) {
+        return false;
+    }
+
+    line_has_substantive_text(line)
+}
+
+fn line_has_substantive_text(line: &str) -> bool {
+    line_has_enough_visible_chars(line) && line_has_alphanumeric_char(line)
+}
+
+fn line_has_enough_visible_chars(line: &str) -> bool {
+    line.chars().filter(|c| !c.is_whitespace()).count() >= 3
+}
+
+fn line_has_alphanumeric_char(line: &str) -> bool {
+    line.chars().any(|c| c.is_alphanumeric())
 }
 
 fn line_looks_prompt_like(line: &str) -> bool {
+    prompt_candidate(line)
+        .map(prompt_candidate_looks_prompt_like)
+        .unwrap_or(false)
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PromptCandidate<'a> {
+    prefix: &'a str,
+    marker: char,
+}
+
+fn prompt_candidate(line: &str) -> Option<PromptCandidate<'_>> {
     let line = line.trim_end();
     let mut chars = line.chars();
-    let Some(marker @ ('$' | '%' | '#' | '>')) = chars.next_back() else {
-        return false;
-    };
-    let prefix = chars.as_str().trim_end();
-    if prefix.is_empty() {
+    let marker = chars.next_back()?;
+    is_shell_prompt_marker(marker).then_some(PromptCandidate {
+        prefix: chars.as_str().trim_end(),
+        marker,
+    })
+}
+
+fn is_shell_prompt_marker(marker: char) -> bool {
+    matches!(marker, '$' | '%' | '#' | '>')
+}
+
+fn prompt_candidate_looks_prompt_like(candidate: PromptCandidate<'_>) -> bool {
+    if candidate.prefix.is_empty() {
         return true;
     }
 
-    if prefix_has_path_or_user_marker(prefix) {
-        return !(marker == '%' && prefix_is_zsh_jobs_summary(prefix));
+    match prompt_prefix_class(candidate.prefix) {
+        PromptPrefixClass::PathOrUser => {
+            path_prompt_marker_allowed(candidate.marker, candidate.prefix)
+        }
+        PromptPrefixClass::Plain => plain_prompt_marker_allowed(candidate.marker),
+        PromptPrefixClass::Other => false,
     }
+}
 
-    if prefix.len() > 32 || prefix.chars().any(|c| c.is_whitespace()) {
-        return false;
-    }
-    if prefix
-        .chars()
-        .all(|c| c.is_ascii_digit() || c == '.' || c == ',')
-    {
-        return false;
-    }
-    if !prefix
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
-    {
-        return false;
-    }
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PromptPrefixClass {
+    PathOrUser,
+    Plain,
+    Other,
+}
 
+fn prompt_prefix_class(prefix: &str) -> PromptPrefixClass {
+    path_prompt_prefix_class(prefix).unwrap_or_else(|| plain_prompt_prefix_class(prefix))
+}
+
+fn path_prompt_prefix_class(prefix: &str) -> Option<PromptPrefixClass> {
+    prefix_has_path_or_user_marker(prefix).then_some(PromptPrefixClass::PathOrUser)
+}
+
+fn plain_prompt_prefix_class(prefix: &str) -> PromptPrefixClass {
+    if plain_prefix_looks_prompt_like(prefix) {
+        PromptPrefixClass::Plain
+    } else {
+        PromptPrefixClass::Other
+    }
+}
+
+fn path_prompt_marker_allowed(marker: char, prefix: &str) -> bool {
+    !path_prompt_is_zsh_jobs_summary(marker, prefix)
+}
+
+fn path_prompt_is_zsh_jobs_summary(marker: char, prefix: &str) -> bool {
+    matches!(marker, '%') && prefix_is_zsh_jobs_summary(prefix)
+}
+
+fn plain_prompt_marker_allowed(marker: char) -> bool {
     matches!(marker, '$' | '#' | '%')
 }
 
+type PrefixRejector = fn(&str) -> bool;
+
+const PLAIN_PROMPT_PREFIX_REJECTORS: [PrefixRejector; 4] = [
+    plain_prefix_is_too_long,
+    plain_prefix_has_whitespace,
+    plain_prefix_is_numeric_progress,
+    plain_prefix_has_invalid_chars,
+];
+
+fn plain_prefix_looks_prompt_like(prefix: &str) -> bool {
+    !PLAIN_PROMPT_PREFIX_REJECTORS
+        .iter()
+        .any(|reject| reject(prefix))
+}
+
+fn plain_prefix_is_too_long(prefix: &str) -> bool {
+    prefix.len() > 32
+}
+
+fn plain_prefix_has_whitespace(prefix: &str) -> bool {
+    prefix.chars().any(|c| c.is_whitespace())
+}
+
+fn plain_prefix_is_numeric_progress(prefix: &str) -> bool {
+    prefix.chars().all(is_numeric_progress_char)
+}
+
+fn is_numeric_progress_char(c: char) -> bool {
+    matches!(c, '0'..='9' | '.' | ',')
+}
+
+fn plain_prefix_has_invalid_chars(prefix: &str) -> bool {
+    !prefix.chars().all(is_plain_prompt_char)
+}
+
+fn is_plain_prompt_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.')
+}
+
 fn prefix_has_path_or_user_marker(prefix: &str) -> bool {
-    prefix.contains('@')
-        || prefix.contains(':')
-        || prefix.contains('/')
-        || prefix.contains('~')
-        || prefix.contains('\\')
-        || prefix.ends_with(')')
-        || prefix.ends_with(']')
+    prefix_contains_path_or_user_char(prefix) || prefix_has_prompt_wrapper_suffix(prefix)
+}
+
+fn prefix_contains_path_or_user_char(prefix: &str) -> bool {
+    prefix.chars().any(is_path_or_user_char)
+}
+
+fn is_path_or_user_char(c: char) -> bool {
+    matches!(c, '@' | ':' | '/' | '~' | '\\')
+}
+
+fn prefix_has_prompt_wrapper_suffix(prefix: &str) -> bool {
+    matches!(prefix.chars().last(), Some(')' | ']'))
 }
 
 fn prefix_is_zsh_jobs_summary(prefix: &str) -> bool {
     // zsh's `%` jobs summary line ends in `... 12.34%`; reject those.
     let compact = prefix.replace(',', "");
-    compact
-        .chars()
-        .all(|c| c.is_ascii_digit() || c == '.' || c.is_ascii_whitespace())
+    compact.chars().all(is_zsh_jobs_summary_char)
+}
+
+fn is_zsh_jobs_summary_char(c: char) -> bool {
+    c.is_ascii_digit() || c == '.' || c.is_ascii_whitespace()
 }
 
 /// Query tmux for the active pane cwd of a session.
@@ -1942,12 +2090,17 @@ fn detect_tool_from_process_entry(entry: &ProcessEntry) -> Option<&'static str> 
 }
 
 fn detect_tool_from_command_line(command: &str) -> Option<&'static str> {
-    for token in command.split_whitespace() {
-        if let Some(tool) = crate::types::detect_tool_name(token) {
-            return Some(tool);
-        }
-    }
-    None
+    command
+        .split_whitespace()
+        .find_map(crate::types::detect_tool_name)
+}
+
+fn current_command_tool_update(
+    current_command: Option<&str>,
+    current_tool: Option<&str>,
+) -> Option<&'static str> {
+    let tool = current_command.and_then(detect_tool_from_command_line)?;
+    (current_tool != Some(tool)).then_some(tool)
 }
 
 fn osc_payloads<'a>(text: &'a str, prefix: &str) -> Vec<&'a str> {
