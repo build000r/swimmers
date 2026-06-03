@@ -381,6 +381,13 @@ export function terminalFallbackPointerFocusPlan(eventType, context = {}) {
   return { type: "ignore", focusTerminal: false, scheduleFrame: false };
 }
 
+export function terminalFallbackScrollPlan(eventType, context = {}) {
+  if (eventType !== "scroll" || !context.terminalFallbackActive || typeof context.nearBottom !== "boolean") {
+    return { type: "ignore", updateAutoFollow: false, autoFollow: null };
+  }
+  return { type: "set_auto_follow", updateAutoFollow: true, autoFollow: context.nearBottom };
+}
+
 export function terminalStageFocusExecutorPlan(plan = {}) {
   if (plan.type !== "forward_event") {
     return { type: "ignore", forwardEvent: false, event: null };

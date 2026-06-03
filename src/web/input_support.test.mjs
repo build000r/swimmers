@@ -15,6 +15,7 @@ import {
   terminalFallbackKeydownPlan,
   terminalFallbackPastePlan,
   terminalFallbackPointerFocusPlan,
+  terminalFallbackScrollPlan,
   terminalInlineInputKeydownPlan,
   terminalKeyStripClickExecutorPlan,
   terminalKeyStripClickPlan,
@@ -549,6 +550,25 @@ test("terminalFallbackPointerFocusPlan preserves scheduled and immediate focus g
     scheduleFrame: false,
   });
   assert.deepEqual(terminalFallbackPointerFocusPlan("touchend", { terminalFallbackActive: true, activeSheet: "" }), ignored);
+});
+
+test("terminalFallbackScrollPlan preserves auto-follow gates and values", () => {
+  const ignored = { type: "ignore", updateAutoFollow: false, autoFollow: null };
+
+  assert.deepEqual(terminalFallbackScrollPlan("scroll", { terminalFallbackActive: false, nearBottom: true }), ignored);
+  assert.deepEqual(terminalFallbackScrollPlan("scroll", { terminalFallbackActive: true, nearBottom: true }), {
+    type: "set_auto_follow",
+    updateAutoFollow: true,
+    autoFollow: true,
+  });
+  assert.deepEqual(terminalFallbackScrollPlan("scroll", { terminalFallbackActive: true, nearBottom: false }), {
+    type: "set_auto_follow",
+    updateAutoFollow: true,
+    autoFollow: false,
+  });
+  assert.deepEqual(terminalFallbackScrollPlan("scroll", { terminalFallbackActive: true }), ignored);
+  assert.deepEqual(terminalFallbackScrollPlan("resize", { terminalFallbackActive: true, nearBottom: true }), ignored);
+  assert.deepEqual(terminalFallbackScrollPlan(), ignored);
 });
 
 test("terminalStageFocusExecutorPlan preserves ignore, forward, and unknown decisions", () => {
