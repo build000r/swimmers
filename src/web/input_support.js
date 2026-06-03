@@ -465,6 +465,19 @@ export function terminalResizeGeometryPlan(context = {}) {
   };
 }
 
+export function terminalLiveFrameFallbackPlan(context = {}) {
+  if (!context.terminalFallbackActive || !context.hasTerminal) {
+    return { type: "ignore", update: false, text: "", preserveExistingFallback: false };
+  }
+  const liveText = String(context.liveText || "");
+  const liveTextHasContent = textHasContent(liveText);
+  const existingFallbackHasContent = textHasContent(context.existingFallbackText);
+  if (!liveTextHasContent) {
+    return { type: "ignore", update: false, text: "", preserveExistingFallback: existingFallbackHasContent };
+  }
+  return { type: "update", update: true, text: liveText, preserveExistingFallback: false };
+}
+
 export function terminalFallbackPointerFocusPlan(eventType, context = {}) {
   if (!context.terminalFallbackActive || context.activeSheet) {
     return { type: "ignore", focusTerminal: false, scheduleFrame: false };
@@ -553,4 +566,8 @@ export function terminalFallbackKeydownPlan(context = {}) {
 function clampInt(value, fallback, min, max) {
   const numeric = Number.isFinite(value) ? Math.trunc(value) : fallback;
   return Math.max(min, Math.min(max, numeric));
+}
+
+function textHasContent(text) {
+  return /\S/.test(String(text || ""));
 }

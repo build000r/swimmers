@@ -3,7 +3,7 @@ import {
   authTokenButtonPlan, eventCell, globalShortcutPlan, mobileKeyboardInputExecutorPlan, mobileKeyboardInputPlan,
   mobileKeyboardKeydownPlan, mobileKeyboardKeyPlan, shouldIgnoreSyntheticClick,
   terminalComposerControlAction, terminalDestroyStatePatch, terminalFallbackActivationPlan, terminalFallbackFocusPlan, terminalFallbackKeydownPlan, terminalFallbackPastePlan, terminalFallbackPointerFocusPlan, terminalInlineInputKeydownPlan, terminalKeyStripClickExecutorPlan, terminalKeyStripClickPlan, terminalStageCaptureBindings, terminalStageFocusExecutorPlan, terminalStageFocusPlan,
-  terminalFallbackScrollPlan, terminalFallbackTextScrollPlan, terminalPaintProbeSchedulePlan, terminalPaintVerificationPlan, terminalPendingByteBufferPlan, terminalPresentationPlan, terminalResizeGeometryPlan, terminalStageKeydownPlan, terminalStagePasteExecutorPlan, terminalStagePastePlan,
+  terminalFallbackScrollPlan, terminalFallbackTextScrollPlan, terminalLiveFrameFallbackPlan, terminalPaintProbeSchedulePlan, terminalPaintVerificationPlan, terminalPendingByteBufferPlan, terminalPresentationPlan, terminalResizeGeometryPlan, terminalStageKeydownPlan, terminalStagePasteExecutorPlan, terminalStagePastePlan,
 } from "./input_support.js";
 import { sendHistoryClickPlan, sendSheetFailureStatus, sendSheetSubmitPlan, sendSheetSuccessStatus } from "./send_sheet.js";
 import {
@@ -2783,10 +2783,6 @@ function terminalMirrorTextFromRenderer() {
   return "";
 }
 
-function terminalTextHasContent(text) {
-  return /\S/.test(String(text || ""));
-}
-
 async function setupTerminalSurface() {
   stopSnapshotPolling();
 
@@ -3310,17 +3306,12 @@ function feedTerminalBytes(bytes) {
 }
 
 function syncTerminalFallbackFromLiveFrame() {
-  if (!state.terminalFallbackActive || !state.terminal) {
+  const canReadLiveText = state.terminalFallbackActive && state.terminal;
+  const plan = terminalLiveFrameFallbackPlan({ terminalFallbackActive: state.terminalFallbackActive, hasTerminal: Boolean(state.terminal), liveText: canReadLiveText ? terminalMirrorTextFromRenderer() : "", existingFallbackText: el.terminalFallback.textContent });
+  if (!plan.update) {
     return false;
   }
-  const text = terminalMirrorTextFromRenderer();
-  if (!terminalTextHasContent(text) && terminalTextHasContent(el.terminalFallback.textContent)) {
-    return false;
-  }
-  if (!terminalTextHasContent(text)) {
-    return false;
-  }
-  updateTerminalFallbackText(text);
+  updateTerminalFallbackText(plan.text);
   return true;
 }
 

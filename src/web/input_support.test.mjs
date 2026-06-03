@@ -22,6 +22,7 @@ import {
   terminalInlineInputKeydownPlan,
   terminalKeyStripClickExecutorPlan,
   terminalKeyStripClickPlan,
+  terminalLiveFrameFallbackPlan,
   terminalPaintProbeSchedulePlan,
   terminalPaintVerificationPlan,
   terminalPendingByteBufferPlan,
@@ -809,6 +810,39 @@ test("terminalResizeGeometryPlan preserves resize geometry and side-effect decis
     captureDiagnostic: false,
     diagnosticReason: "resize",
   });
+});
+
+test("terminalLiveFrameFallbackPlan preserves live-frame fallback update decisions", () => {
+  assert.deepEqual(terminalLiveFrameFallbackPlan({
+    terminalFallbackActive: false,
+    hasTerminal: true,
+    liveText: "prompt",
+    existingFallbackText: "",
+  }), { type: "ignore", update: false, text: "", preserveExistingFallback: false });
+  assert.deepEqual(terminalLiveFrameFallbackPlan({
+    terminalFallbackActive: true,
+    hasTerminal: false,
+    liveText: "prompt",
+    existingFallbackText: "",
+  }), { type: "ignore", update: false, text: "", preserveExistingFallback: false });
+  assert.deepEqual(terminalLiveFrameFallbackPlan({
+    terminalFallbackActive: true,
+    hasTerminal: true,
+    liveText: "   \n",
+    existingFallbackText: "snapshot prompt",
+  }), { type: "ignore", update: false, text: "", preserveExistingFallback: true });
+  assert.deepEqual(terminalLiveFrameFallbackPlan({
+    terminalFallbackActive: true,
+    hasTerminal: true,
+    liveText: "",
+    existingFallbackText: "",
+  }), { type: "ignore", update: false, text: "", preserveExistingFallback: false });
+  assert.deepEqual(terminalLiveFrameFallbackPlan({
+    terminalFallbackActive: true,
+    hasTerminal: true,
+    liveText: "$ cargo test",
+    existingFallbackText: "snapshot prompt",
+  }), { type: "update", update: true, text: "$ cargo test", preserveExistingFallback: false });
 });
 
 test("terminalFallbackPointerFocusPlan preserves scheduled and immediate focus gates", () => {
