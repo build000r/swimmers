@@ -491,7 +491,10 @@ mod tests {
 
         let temp_dir = tempdir().expect("temp dir");
         let script_path = temp_dir.path().join("ready-server.sh");
-        fs::write(&script_path, "#!/bin/sh\nprintf R >&${SWIMMERS_READY_FD}\n")
+        fs::write(
+            &script_path,
+            "#!/bin/sh\nprintf R >\"/dev/fd/${SWIMMERS_READY_FD}\"\n",
+        )
             .expect("write ready script");
 
         let mut permissions = fs::metadata(&script_path)

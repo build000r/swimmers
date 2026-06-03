@@ -544,7 +544,7 @@ impl TuiApi for ApiClient {
 
             let response = match response {
                 Ok(response) => response,
-                Err(err) if self.targets_local_backend() => {
+                Err(_err) if self.targets_local_backend() => {
                     return self.local_test_thought_config(config).await;
                 }
                 Err(err) => return Err(self.transport_error("test thought config", err)),
