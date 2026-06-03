@@ -32,6 +32,7 @@ import {
   trogdorDragonFrameForVector,
   trogdorDragonPose,
   trogdorPrimaryActionCue,
+  trogdorAtlasTransitionState,
   trogdorCueTransitionState,
   trogdorCurrentSurfaceSessionForHover,
   trogdorHoverReaderResetState,
@@ -323,6 +324,25 @@ test("Trogdor hover helpers preserve current session and reader reset decisions"
   assert.equal(trogdorReadableHoveredSurfaceSession(surfaceSessions, " agent-1 ", {
     sessionCanRead: () => true,
   }), null);
+});
+
+test("Trogdor atlas transition helpers preserve path-specific state patches", () => {
+  assert.deepEqual(trogdorAtlasTransitionState("open"), {
+    trogdorAtlasOpen: true,
+    trogdorSurfaceSignature: "",
+  });
+  assert.deepEqual(trogdorAtlasTransitionState("close_terminal"), {
+    trogdorAtlasOpen: false,
+    hoveredTrogdorSessionId: null,
+    trogdorReaderStartedAt: 0,
+    trogdorReaderStartIndex: 0,
+    trogdorReaderClawgKey: "",
+    trogdorSurfaceSignature: "",
+  });
+  assert.deepEqual(trogdorAtlasTransitionState("toggle", true), { trogdorAtlasOpen: false });
+  assert.deepEqual(trogdorAtlasTransitionState("toggle", false), { trogdorAtlasOpen: true });
+  assert.deepEqual(trogdorAtlasTransitionState("close"), { trogdorAtlasOpen: false });
+  assert.deepEqual(trogdorAtlasTransitionState("unknown", "yes"), { trogdorAtlasOpen: true });
 });
 
 test("Trogdor reader base index prefers active reader key over persisted progress", () => {

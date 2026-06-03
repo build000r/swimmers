@@ -600,6 +600,25 @@ export function trogdorHoverReaderResetState(hoveredSessionId = null) {
   };
 }
 
+export function trogdorAtlasTransitionState(action, atlasOpen = false) {
+  switch (action) {
+    case "open":
+      return { trogdorAtlasOpen: true, trogdorSurfaceSignature: "" };
+    case "close_terminal":
+      return {
+        trogdorAtlasOpen: false,
+        ...trogdorHoverReaderResetState(),
+        trogdorSurfaceSignature: "",
+      };
+    case "toggle":
+      return { trogdorAtlasOpen: !atlasOpen };
+    case "close":
+      return { trogdorAtlasOpen: false };
+    default:
+      return { trogdorAtlasOpen: Boolean(atlasOpen) };
+  }
+}
+
 export function trogdorHoverSessionIdForZone(zone, previousSessionId = null) {
   if (zone?.type === "trogdor_agent" || zone?.type === "trogdor_reader") {
     return zone.sessionId;

@@ -52,6 +52,7 @@ import {
   trogdorDragonPose as buildTrogdorDragonPose,
   trogdorHasActionCue,
   trogdorPrimaryActionCue,
+  trogdorAtlasTransitionState,
   trogdorCueTransitionState,
   trogdorCurrentSurfaceSessionForHover,
   trogdorHoverReaderResetState,
@@ -4723,17 +4724,14 @@ function closeSheets() {
 }
 
 function closeTrogdorAtlasForTerminal() {
-  state.trogdorAtlasOpen = false;
-  Object.assign(state, trogdorHoverReaderResetState());
-  state.trogdorSurfaceSignature = "";
+  Object.assign(state, trogdorAtlasTransitionState("close_terminal"));
   syncTrogdorReaderTimer();
   applyTrogdorAtlasVisibility();
   syncTerminalPresentation();
 }
 
 function openTrogdorAtlas() {
-  state.trogdorAtlasOpen = true;
-  state.trogdorSurfaceSignature = "";
+  Object.assign(state, trogdorAtlasTransitionState("open"));
   closeMobileKeyboard();
   renderHudSurface();
   setUtilityStatus("Back to Trogdor atlas.", false, 1600);
@@ -4838,7 +4836,7 @@ async function handleSurfaceAction(zone) {
       break;
     }
     case "toggle_trogdor_atlas":
-      state.trogdorAtlasOpen = !state.trogdorAtlasOpen;
+      Object.assign(state, trogdorAtlasTransitionState("toggle", state.trogdorAtlasOpen));
       renderHudSurface();
       break;
     case "trogdor_send":
@@ -4908,7 +4906,7 @@ async function handleSurfaceAction(zone) {
       await copyTerminalSelection();
       break;
     case "focus_terminal":
-      state.trogdorAtlasOpen = false;
+      Object.assign(state, trogdorAtlasTransitionState("close"));
       renderHudSurface();
       focusTerminalInputSurface({ preventScroll: true });
       setUtilityStatus(
@@ -5181,7 +5179,7 @@ function handleGlobalShortcut(event) {
       return true;
     }
     if (state.trogdorAtlasOpen) {
-      state.trogdorAtlasOpen = false;
+      Object.assign(state, trogdorAtlasTransitionState("close"));
       renderHudSurface();
       return true;
     }
