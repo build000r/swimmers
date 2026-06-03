@@ -995,60 +995,89 @@ fn expand_exact_group_path(raw: &str) -> Vec<PathBuf> {
 
 fn expand_existing_dirs(raw: &str) -> Vec<PathBuf> {
     let expanded = expand_path(raw);
-    if !expanded.contains('*') {
-        let path = PathBuf::from(expanded);
-        return if path.is_dir() {
-            vec![path]
-        } else {
-            Vec::new()
-        };
-    }
-
-    let Some(star_idx) = expanded.find('*') else {
-        return Vec::new();
-    };
-    let before = &expanded[..star_idx];
-    let after = &expanded[star_idx + 1..];
-
-    // Only support full-component wildcards: the `*` must be bounded by `/`
-    // on both sides (or be at the start/end of the string).
-    if !before.is_empty() && !before.ends_with('/') {
-        return Vec::new();
-    }
-    if !after.is_empty() && !after.starts_with('/') {
-        return Vec::new();
-    }
-    // Reject multi-star patterns for now.
-    if after.contains('*') {
-        return Vec::new();
-    }
-
-    let root = PathBuf::from(before.trim_end_matches('/'));
-    let suffix = after.trim_start_matches('/').to_string();
-
-    let Ok(entries) = std::fs::read_dir(&root) else {
+    let Some(pattern) = ExistingDirPattern::parse(&expanded) else {
         return Vec::new();
     };
 
-    let mut results: Vec<PathBuf> = Vec::new();
-    for entry in entries.flatten() {
-        let Ok(file_type) = entry.file_type() else {
-            continue;
-        };
-        if !file_type.is_dir() {
-            continue;
-        }
-        let candidate = if suffix.is_empty() {
-            entry.path()
-        } else {
-            entry.path().join(&suffix)
-        };
-        if candidate.is_dir() {
-            results.push(candidate);
+    pattern.expand()
+}
+
+enum ExistingDirPattern {
+    Literal(PathBuf),
+    Wildcard(WildcardDirPattern),
+}
+
+impl ExistingDirPattern {
+    fn parse(expanded: &str) -> Option<Self> {
+        match expanded.find('*') {
+            Some(star_idx) => WildcardDirPattern::parse(expanded, star_idx).map(Self::Wildcard),
+            None => Some(Self::Literal(PathBuf::from(expanded))),
         }
     }
-    results.sort();
-    results
+
+    fn expand(self) -> Vec<PathBuf> {
+        match self {
+            Self::Literal(path) => existing_literal_dir(path),
+            Self::Wildcard(pattern) => pattern.expand(),
+        }
+    }
+}
+
+struct WildcardDirPattern {
+    root: PathBuf,
+    suffix: String,
+}
+
+impl WildcardDirPattern {
+    fn parse(expanded: &str, star_idx: usize) -> Option<Self> {
+        let before = &expanded[..star_idx];
+        let after = &expanded[star_idx + 1..];
+
+        is_single_component_wildcard(before, after).then(|| Self {
+            root: PathBuf::from(before.trim_end_matches('/')),
+            suffix: after.trim_start_matches('/').to_string(),
+        })
+    }
+
+    fn expand(self) -> Vec<PathBuf> {
+        let Ok(entries) = std::fs::read_dir(&self.root) else {
+            return Vec::new();
+        };
+
+        let mut results: Vec<PathBuf> = entries
+            .flatten()
+            .filter_map(|entry| wildcard_candidate_dir(entry, &self.suffix))
+            .collect();
+        results.sort();
+        results
+    }
+}
+
+fn existing_literal_dir(path: PathBuf) -> Vec<PathBuf> {
+    if path.is_dir() {
+        vec![path]
+    } else {
+        Vec::new()
+    }
+}
+
+fn is_single_component_wildcard(before: &str, after: &str) -> bool {
+    let starts_on_boundary = before.is_empty() || before.ends_with('/');
+    let ends_on_boundary = after.is_empty() || after.starts_with('/');
+    starts_on_boundary && ends_on_boundary && !after.contains('*')
+}
+
+fn wildcard_candidate_dir(entry: std::fs::DirEntry, suffix: &str) -> Option<PathBuf> {
+    if !entry.file_type().ok()?.is_dir() {
+        return None;
+    }
+
+    let candidate = if suffix.is_empty() {
+        entry.path()
+    } else {
+        entry.path().join(suffix)
+    };
+    candidate.is_dir().then_some(candidate)
 }
 
 /// Expand `~` and `${VAR}` in path strings.
