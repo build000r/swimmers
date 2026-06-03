@@ -380,6 +380,26 @@ where
     Err(read_error(response).await)
 }
 
+async fn decode_native_mode_response(
+    response: reqwest::Response,
+    base_url: &str,
+) -> Result<NativeDesktopStatusResponse, String> {
+    if response.status().is_success() {
+        return response
+            .json::<NativeDesktopStatusResponse>()
+            .await
+            .map_err(|err| format!("failed to parse terminal handoff status: {err}"));
+    }
+
+    if response.status() == reqwest::StatusCode::NOT_FOUND {
+        return Err(format!(
+            "backend at {base_url} does not support runtime Ghostty handoff placement switching yet. If this is your local server, restart `swimmers` or relaunch via `make tui`."
+        ));
+    }
+
+    Err(read_error(response).await)
+}
+
 fn refreshed_openrouter_candidates_or_fallback(
     result: Result<Vec<String>, String>,
 ) -> Result<Vec<String>, String> {
@@ -811,21 +831,7 @@ impl TuiApi for ApiClient {
                 .await
                 .map_err(|err| self.transport_error("switch the Ghostty handoff placement", err))?;
 
-            if response.status().is_success() {
-                return response
-                    .json::<NativeDesktopStatusResponse>()
-                    .await
-                    .map_err(|err| format!("failed to parse terminal handoff status: {err}"));
-            }
-
-            if response.status() == reqwest::StatusCode::NOT_FOUND {
-                return Err(format!(
-                    "backend at {} does not support runtime Ghostty handoff placement switching yet. If this is your local server, restart `swimmers` or relaunch via `make tui`.",
-                    self.base_url
-                ));
-            }
-
-            Err(read_error(response).await)
+            decode_native_mode_response(response, &self.base_url).await
         })
     }
 
@@ -1294,6 +1300,90 @@ mod response_tests {
         .expect_err("generic error should preserve API body");
 
         assert_eq!(error, "VALIDATION_FAILED: bad repo action");
+    }
+
+    #[tokio::test]
+    async fn native_mode_response_decodes_success_json() {
+        let response = response_with(
+            axum::http::StatusCode::OK,
+            "application/json",
+            serde_json::to_string(&NativeDesktopStatusResponse {
+                supported: true,
+                platform: Some("macos".to_string()),
+                app_id: Some(NativeDesktopApp::Ghostty),
+                ghostty_mode: Some(GhosttyOpenMode::Add),
+                app: Some("Ghostty".to_string()),
+                reason: None,
+            })
+            .expect("serialize native status"),
+        )
+        .await;
+
+        let decoded = decode_native_mode_response(response, "http://127.0.0.1:3210")
+            .await
+            .expect("success response should decode");
+
+        assert!(decoded.supported);
+        assert_eq!(decoded.app_id, Some(NativeDesktopApp::Ghostty));
+        assert_eq!(decoded.ghostty_mode, Some(GhosttyOpenMode::Add));
+        assert_eq!(decoded.app.as_deref(), Some("Ghostty"));
+    }
+
+    #[tokio::test]
+    async fn native_mode_response_reports_parse_error_shape() {
+        let response = response_with(
+            axum::http::StatusCode::OK,
+            "application/json",
+            "not json".to_string(),
+        )
+        .await;
+
+        let error = decode_native_mode_response(response, "http://127.0.0.1:3210")
+            .await
+            .expect_err("invalid success JSON should report parse error");
+
+        assert!(error.starts_with("failed to parse terminal handoff status:"));
+    }
+
+    #[tokio::test]
+    async fn native_mode_response_reports_restart_hint_on_404() {
+        let response = response_with(
+            axum::http::StatusCode::NOT_FOUND,
+            "application/json",
+            String::new(),
+        )
+        .await;
+
+        let error = decode_native_mode_response(response, "http://127.0.0.1:3210")
+            .await
+            .expect_err("missing native mode route should return restart hint");
+
+        assert!(error.contains(
+            "backend at http://127.0.0.1:3210 does not support runtime Ghostty handoff placement switching yet"
+        ));
+        assert!(error.contains("restart `swimmers`"));
+        assert!(error.contains("make tui"));
+    }
+
+    #[tokio::test]
+    async fn native_mode_response_preserves_generic_api_error_body() {
+        let body = serde_json::to_string(&ErrorResponse::with_message(
+            "VALIDATION_FAILED",
+            "bad native mode",
+        ))
+        .expect("serialize error body");
+        let response = response_with(
+            axum::http::StatusCode::BAD_REQUEST,
+            "application/json",
+            body,
+        )
+        .await;
+
+        let error = decode_native_mode_response(response, "http://127.0.0.1:3210")
+            .await
+            .expect_err("generic error should preserve API body");
+
+        assert_eq!(error, "VALIDATION_FAILED: bad native mode");
     }
 
     #[test]

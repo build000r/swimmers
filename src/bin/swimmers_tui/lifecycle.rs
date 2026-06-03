@@ -182,12 +182,27 @@ fn resolve_server_binary(override_path: Option<&Path>) -> Result<PathBuf, String
 }
 
 fn resolve_default_server_binary() -> Result<PathBuf, String> {
-    current_exe_sibling_server_binary()?
-        .or_else(|| find_binary_on_path("swimmers"))
-        .ok_or_else(|| {
-            "could not locate `swimmers` server binary; set SWIMMERS_SERVER_BIN to an absolute executable path"
-                .to_string()
-        })
+    current_exe_sibling_server_binary().and_then(resolve_default_server_binary_with_sibling)
+}
+
+fn resolve_default_server_binary_with_sibling(
+    current_exe_sibling: Option<PathBuf>,
+) -> Result<PathBuf, String> {
+    resolve_default_server_binary_from(current_exe_sibling, || find_binary_on_path("swimmers"))
+}
+
+fn resolve_default_server_binary_from(
+    current_exe_sibling: Option<PathBuf>,
+    path_search: impl FnOnce() -> Option<PathBuf>,
+) -> Result<PathBuf, String> {
+    current_exe_sibling
+        .or_else(path_search)
+        .ok_or_else(default_server_binary_not_found_error)
+}
+
+fn default_server_binary_not_found_error() -> String {
+    "could not locate `swimmers` server binary; set SWIMMERS_SERVER_BIN to an absolute executable path"
+        .to_string()
 }
 
 fn current_exe_sibling_server_binary() -> Result<Option<PathBuf>, String> {
@@ -569,6 +584,68 @@ mod tests {
         let missing = resolve_override_binary_path(Path::new("/definitely/missing/swimmers"))
             .expect_err("missing override should fail");
         assert!(missing.contains("does not exist"));
+    }
+
+    fn write_executable_fixture(path: &Path) {
+        fs::write(path, "#!/bin/sh\nexit 0\n").expect("write executable fixture");
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            let mut permissions = fs::metadata(path)
+                .expect("executable fixture metadata")
+                .permissions();
+            permissions.set_mode(0o755);
+            fs::set_permissions(path, permissions).expect("chmod executable fixture");
+        }
+    }
+
+    #[test]
+    fn resolve_default_server_binary_prefers_current_exe_sibling() {
+        let sibling = PathBuf::from("/tmp/current-exe-sibling-swimmers");
+        let resolved = resolve_default_server_binary_from(Some(sibling.clone()), || {
+            panic!("PATH search should not run when current-exe sibling exists")
+        })
+        .expect("sibling candidate should resolve");
+
+        assert_eq!(resolved, sibling);
+    }
+
+    #[test]
+    fn resolve_default_server_binary_falls_back_to_path_search() {
+        let path_binary = PathBuf::from("/tmp/path-swimmers");
+        let resolved = resolve_default_server_binary_from(None, || Some(path_binary.clone()))
+            .expect("PATH candidate should resolve");
+
+        assert_eq!(resolved, path_binary);
+    }
+
+    #[test]
+    fn resolve_default_server_binary_reports_missing_candidates() {
+        let err = resolve_default_server_binary_from(None, || None)
+            .expect_err("missing candidates should fail");
+
+        assert_eq!(
+            err,
+            "could not locate `swimmers` server binary; set SWIMMERS_SERVER_BIN to an absolute executable path"
+        );
+    }
+
+    #[test]
+    fn resolve_default_server_binary_uses_path_when_no_sibling_exists() {
+        let temp_dir = tempdir().expect("temp dir");
+        let path_binary = temp_dir.path().join("swimmers");
+        write_executable_fixture(&path_binary);
+
+        let current_sibling =
+            current_exe_sibling_server_binary().expect("current executable path should resolve");
+
+        with_env_var("PATH", temp_dir.path().as_os_str(), || {
+            let resolved =
+                resolve_default_server_binary().expect("default server binary should resolve");
+            assert_eq!(resolved, current_sibling.unwrap_or(path_binary));
+        });
     }
 
     fn with_env_var_removed<T>(key: &str, run: impl FnOnce() -> T) -> T {

@@ -1169,27 +1169,37 @@ fn picker_entry_pointer_action(
     x: u16,
     y: u16,
 ) -> PickerAction {
-    if let Some(action) =
-        picker_batch_exclude_action_at(picker, layout, visible_pos, raw_index, x, y)
-    {
-        return action;
+    match picker_entry_pointer_target(picker, layout, visible_pos, raw_index, x, y) {
+        PickerEntryPointerTarget::BatchExclude => PickerAction::ToggleBatchExclude(raw_index),
+        PickerEntryPointerTarget::RepoAction(kind) => {
+            PickerAction::StartRepoAction(raw_index, kind)
+        }
+        PickerEntryPointerTarget::Entry => PickerAction::ActivateEntry(raw_index),
     }
-    if let Some(kind) = picker_repo_action_kind_at(picker, layout, visible_pos, raw_index, x, y) {
-        return PickerAction::StartRepoAction(raw_index, kind);
-    }
-    PickerAction::ActivateEntry(raw_index)
 }
 
-fn picker_batch_exclude_action_at(
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PickerEntryPointerTarget {
+    BatchExclude,
+    RepoAction(RepoActionKind),
+    Entry,
+}
+
+fn picker_entry_pointer_target(
     picker: &PickerState,
     layout: &PickerLayout,
     visible_pos: usize,
     raw_index: usize,
     x: u16,
     y: u16,
-) -> Option<PickerAction> {
-    picker_batch_exclude_contains(picker, layout, visible_pos, raw_index, x, y)
-        .then_some(PickerAction::ToggleBatchExclude(raw_index))
+) -> PickerEntryPointerTarget {
+    if picker_batch_exclude_contains(picker, layout, visible_pos, raw_index, x, y) {
+        return PickerEntryPointerTarget::BatchExclude;
+    }
+    if let Some(kind) = picker_repo_action_kind_at(picker, layout, visible_pos, raw_index, x, y) {
+        return PickerEntryPointerTarget::RepoAction(kind);
+    }
+    PickerEntryPointerTarget::Entry
 }
 
 fn picker_batch_exclude_contains(
@@ -1788,6 +1798,15 @@ mod tests {
             }
         }
 
+        fn field_rect() -> Rect {
+            Rect {
+                x: 0,
+                y: 0,
+                width: 80,
+                height: 20,
+            }
+        }
+
         fn filter_test_layout() -> PickerLayout {
             PickerLayout {
                 frame: rect(0, 0, 80),
@@ -1810,6 +1829,41 @@ mod tests {
                 visible_entry_rows: 1,
                 visible_entries: vec![0],
             }
+        }
+
+        fn pointer_test_entry() -> DirEntry {
+            DirEntry {
+                name: "swimmers".to_string(),
+                has_children: true,
+                is_running: None,
+                repo_dirty: Some(true),
+                repo_action: None,
+                group: None,
+                groups: Vec::new(),
+                full_path: None,
+                has_restart: Some(true),
+                open_url: Some("http://127.0.0.1:3210".to_string()),
+            }
+        }
+
+        fn pointer_test_picker(batch_exclude_mode: bool) -> PickerState {
+            let mut picker = PickerState::new(
+                0,
+                0,
+                DirListResponse {
+                    path: "/tmp".to_string(),
+                    entries: vec![pointer_test_entry()],
+                    overlay_label: None,
+                    groups: Vec::new(),
+                    launch_targets: Vec::new(),
+                    default_launch_target: None,
+                },
+                true,
+                SpawnTool::Codex,
+                None,
+            );
+            picker.batch_exclude_mode = batch_exclude_mode;
+            picker
         }
 
         #[test]
@@ -1888,6 +1942,53 @@ mod tests {
             assert_eq!(picker_filter_action_at(&layout, 0, 0), None);
             assert_eq!(picker_filter_action_at(&layout, 2, 2), None);
             assert_eq!(picker_filter_action_at(&layout, 78, 4), None);
+        }
+
+        #[test]
+        fn picker_entry_pointer_action_toggles_batch_exclude_target_first() {
+            let picker = pointer_test_picker(true);
+            let layout = picker_layout(&picker, field_rect());
+            let exclude_rect =
+                picker_batch_exclude_rect(&picker, &layout, 0, 0).expect("exclude rect");
+
+            assert_eq!(
+                picker_entry_pointer_action(&picker, &layout, 0, 0, exclude_rect.x, exclude_rect.y),
+                PickerAction::ToggleBatchExclude(0)
+            );
+        }
+
+        #[test]
+        fn picker_entry_pointer_action_starts_repo_action_target() {
+            let picker = pointer_test_picker(false);
+            let layout = picker_layout(&picker, field_rect());
+            let (commit_rect, kind) = picker_entry_action_rects(&picker, &layout, 0, 0)
+                .into_iter()
+                .next()
+                .expect("commit rect");
+
+            assert_eq!(kind, RepoActionKind::Commit);
+            assert_eq!(
+                picker_entry_pointer_action(&picker, &layout, 0, 0, commit_rect.x, commit_rect.y),
+                PickerAction::StartRepoAction(0, RepoActionKind::Commit)
+            );
+        }
+
+        #[test]
+        fn picker_entry_pointer_action_activates_entry_outside_row_targets() {
+            let picker = pointer_test_picker(true);
+            let layout = picker_layout(&picker, field_rect());
+
+            assert_eq!(
+                picker_entry_pointer_action(
+                    &picker,
+                    &layout,
+                    0,
+                    0,
+                    layout.content.x,
+                    layout.first_entry_y
+                ),
+                PickerAction::ActivateEntry(0)
+            );
         }
     }
 }

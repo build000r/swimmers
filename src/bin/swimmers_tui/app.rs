@@ -356,6 +356,57 @@ pub(crate) enum PendingInteractionResult {
     },
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum InitialRequestSubmission {
+    GroupInput {
+        session_ids: Vec<String>,
+        text: String,
+    },
+    Batch {
+        dirs: Vec<String>,
+        launch_target: Option<String>,
+        text: String,
+    },
+    Single {
+        cwd: String,
+        launch_target: Option<String>,
+        text: String,
+    },
+}
+
+fn plan_initial_request_submission(
+    initial_request: Option<&InitialRequestState>,
+    group_input_targets: Option<&GroupInputTargets>,
+) -> Result<InitialRequestSubmission, &'static str> {
+    let Some(state) = initial_request else {
+        return Err("enter an initial request");
+    };
+    let Some(text) = state.trimmed_value() else {
+        return Err("enter an initial request");
+    };
+
+    if let Some(targets) = group_input_targets {
+        return Ok(InitialRequestSubmission::GroupInput {
+            session_ids: targets.session_ids.clone(),
+            text,
+        });
+    }
+
+    if let Some(dirs) = state.batch_dirs.clone() {
+        return Ok(InitialRequestSubmission::Batch {
+            dirs,
+            launch_target: state.launch_target.clone(),
+            text,
+        });
+    }
+
+    Ok(InitialRequestSubmission::Single {
+        cwd: state.cwd.clone(),
+        launch_target: state.launch_target.clone(),
+        text,
+    })
+}
+
 pub(crate) struct App<C: TuiApi> {
     pub(crate) runtime: Runtime,
     pub(crate) client: Arc<C>,
@@ -3002,46 +3053,42 @@ impl<C: TuiApi> App<C> {
     }
 
     pub(crate) fn submit_initial_request(&mut self, field: Rect) {
+        if let Some(message) = self.initial_request_submission_blocker() {
+            self.set_message(message);
+            return;
+        }
+
+        match plan_initial_request_submission(
+            self.initial_request.as_ref(),
+            self.group_input_targets.as_ref(),
+        ) {
+            Ok(InitialRequestSubmission::GroupInput { session_ids, text }) => {
+                self.send_group_input(session_ids, text);
+            }
+            Ok(InitialRequestSubmission::Batch {
+                dirs,
+                launch_target,
+                text,
+            }) => {
+                self.spawn_sessions_batch(dirs, launch_target, Some(text), field);
+            }
+            Ok(InitialRequestSubmission::Single {
+                cwd,
+                launch_target,
+                text,
+            }) => {
+                self.spawn_session(&cwd, launch_target, Some(text), field);
+            }
+            Err(message) => self.set_message(message),
+        }
+    }
+
+    fn initial_request_submission_blocker(&self) -> Option<&'static str> {
         if self.voice_recording.is_some() {
-            self.set_message("stop voice recording before creating a swimmer");
-            return;
+            return Some("stop voice recording before creating a swimmer");
         }
-        if matches!(self.voice_state, VoiceUiState::Transcribing) {
-            self.set_message("wait for voice transcription to finish");
-            return;
-        }
-        let Some(initial_request) = self
-            .initial_request
-            .as_ref()
-            .and_then(InitialRequestState::trimmed_value)
-        else {
-            self.set_message("enter an initial request");
-            return;
-        };
-        if let Some(targets) = self.group_input_targets.clone() {
-            self.send_group_input(targets.session_ids, initial_request);
-            return;
-        }
-        let Some(cwd) = self.initial_request.as_ref().map(|state| state.cwd.clone()) else {
-            return;
-        };
-        if let Some(dirs) = self
-            .initial_request
-            .as_ref()
-            .and_then(|state| state.batch_dirs.clone())
-        {
-            let launch_target = self
-                .initial_request
-                .as_ref()
-                .and_then(|state| state.launch_target.clone());
-            self.spawn_sessions_batch(dirs, launch_target, Some(initial_request), field);
-        } else {
-            let launch_target = self
-                .initial_request
-                .as_ref()
-                .and_then(|state| state.launch_target.clone());
-            self.spawn_session(&cwd, launch_target, Some(initial_request), field);
-        }
+        matches!(self.voice_state, VoiceUiState::Transcribing)
+            .then_some("wait for voice transcription to finish")
     }
 
     pub(crate) fn toggle_voice_recording(&mut self) {
@@ -4079,6 +4126,72 @@ mod tests {
     fn tmux_unavailable_from_health(deps: Option<&BackendDependencyLedger>) -> bool {
         deps.map(|d| d.tmux_discovery.status == "unavailable")
             .unwrap_or(false)
+    }
+
+    #[test]
+    fn initial_request_submission_requires_nonblank_text() {
+        assert_eq!(
+            plan_initial_request_submission(None, None),
+            Err("enter an initial request")
+        );
+
+        let mut request = InitialRequestState::new("/repo".to_string(), None);
+        request.value = " \n\t ".to_string();
+        assert_eq!(
+            plan_initial_request_submission(Some(&request), None),
+            Err("enter an initial request")
+        );
+    }
+
+    #[test]
+    fn initial_request_submission_routes_to_group_input() {
+        let mut request = InitialRequestState::new("/repo".to_string(), Some("main".to_string()));
+        request.value = "  please review  ".to_string();
+        let targets = GroupInputTargets {
+            session_ids: vec!["s1".to_string(), "s2".to_string()],
+            label: "school".to_string(),
+        };
+
+        assert_eq!(
+            plan_initial_request_submission(Some(&request), Some(&targets)),
+            Ok(InitialRequestSubmission::GroupInput {
+                session_ids: vec!["s1".to_string(), "s2".to_string()],
+                text: "please review".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn initial_request_submission_routes_to_batch_create() {
+        let mut request = InitialRequestState::new_batch(
+            vec!["/repo/a".to_string(), "/repo/b".to_string()],
+            Some("feature".to_string()),
+        );
+        request.value = "\nship it\n".to_string();
+
+        assert_eq!(
+            plan_initial_request_submission(Some(&request), None),
+            Ok(InitialRequestSubmission::Batch {
+                dirs: vec!["/repo/a".to_string(), "/repo/b".to_string()],
+                launch_target: Some("feature".to_string()),
+                text: "ship it".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn initial_request_submission_routes_to_single_create() {
+        let mut request = InitialRequestState::new("/repo".to_string(), Some("main".to_string()));
+        request.value = "start here".to_string();
+
+        assert_eq!(
+            plan_initial_request_submission(Some(&request), None),
+            Ok(InitialRequestSubmission::Single {
+                cwd: "/repo".to_string(),
+                launch_target: Some("main".to_string()),
+                text: "start here".to_string(),
+            })
+        );
     }
 }
 
