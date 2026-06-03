@@ -217,7 +217,6 @@ pub(crate) enum PendingInteractionResult {
         x: u16,
         y: u16,
         response: Result<DirListResponse, String>,
-        repo_search: Result<DirRepoSearchResponse, String>,
     },
     ReloadPicker {
         managed_only: bool,
@@ -325,6 +324,8 @@ pub(crate) struct App<C: TuiApi> {
     pub(crate) tick: u64,
     pub(crate) pending_refresh: Option<oneshot::Receiver<RefreshResult>>,
     pub(crate) pending_interaction: Option<oneshot::Receiver<PendingInteractionResult>>,
+    pub(crate) pending_picker_repo_search:
+        Option<oneshot::Receiver<Result<DirRepoSearchResponse, String>>>,
     pub(crate) pending_selection_publication:
         Option<oneshot::Receiver<PendingSelectionPublicationResult>>,
     pub(crate) queued_selection_publication: Option<(Option<String>, bool)>,
@@ -408,6 +409,7 @@ impl<C: TuiApi> App<C> {
             tick: 0,
             pending_refresh: None,
             pending_interaction: None,
+            pending_picker_repo_search: None,
             pending_selection_publication: None,
             queued_selection_publication: None,
             embedded_shutdown: None,
@@ -1596,13 +1598,54 @@ impl<C: TuiApi> App<C> {
         self.apply_pending_interaction_result(result);
     }
 
+    fn start_picker_repo_search(&mut self) {
+        if self.picker.is_none() || self.pending_picker_repo_search.is_some() {
+            return;
+        }
+
+        let client = Arc::clone(&self.client);
+        let (tx, rx) = oneshot::channel();
+        self.pending_picker_repo_search = Some(rx);
+        self.runtime.spawn(async move {
+            let response = client.list_repo_dirs().await;
+            let _ = tx.send(response);
+        });
+    }
+
+    pub(crate) fn poll_pending_picker_repo_search(&mut self) {
+        let Some(rx) = &mut self.pending_picker_repo_search else {
+            return;
+        };
+
+        let result = match rx.try_recv() {
+            Ok(result) => result,
+            Err(oneshot::error::TryRecvError::Empty) => return,
+            Err(oneshot::error::TryRecvError::Closed) => {
+                self.pending_picker_repo_search = None;
+                return;
+            }
+        };
+
+        self.pending_picker_repo_search = None;
+        let Some(picker) = &mut self.picker else {
+            return;
+        };
+
+        match result {
+            Ok(response) => {
+                picker.set_repo_search_entries(response.entries);
+                picker.sync_theme_colors(&mut self.repo_themes);
+            }
+            Err(err) => self.set_message(format!("repository search unavailable: {err}")),
+        }
+    }
+
     fn apply_pending_interaction_result(&mut self, result: PendingInteractionResult) {
         match result {
             PendingInteractionResult::OpenPicker {
                 x,
                 y,
                 response,
-                repo_search,
             } => match response {
                 Ok(response) => {
                     let mut picker = PickerState::new(
@@ -1613,20 +1656,11 @@ impl<C: TuiApi> App<C> {
                         self.spawn_tool,
                         self.launch_target.clone(),
                     );
-                    let repo_search_error = match repo_search {
-                        Ok(response) => {
-                            picker.set_repo_search_entries(response.entries);
-                            None
-                        }
-                        Err(err) => Some(err),
-                    };
                     self.launch_target = picker.launch_target.clone();
                     picker.sync_theme_colors(&mut self.repo_themes);
                     self.picker = Some(picker);
                     self.last_picker_refresh = Some(Instant::now());
-                    if let Some(err) = repo_search_error {
-                        self.set_message(format!("repository search unavailable: {err}"));
-                    }
+                    self.start_picker_repo_search();
                 }
                 Err(err) => {
                     self.set_message(err);
@@ -2140,6 +2174,7 @@ impl<C: TuiApi> App<C> {
 
     pub(crate) fn close_picker(&mut self) {
         self.picker = None;
+        self.pending_picker_repo_search = None;
         self.close_initial_request();
         self.last_picker_refresh = None;
     }
@@ -2549,13 +2584,11 @@ impl<C: TuiApi> App<C> {
         let client = Arc::clone(&self.client);
         self.set_message("loading directories...");
         self.runtime.spawn(async move {
-            let (response, repo_search) =
-                tokio::join!(client.list_dirs(None, true, None), client.list_repo_dirs());
+            let response = client.list_dirs(None, true, None).await;
             let _ = tx.send(PendingInteractionResult::OpenPicker {
                 x,
                 y,
                 response,
-                repo_search,
             });
         });
     }

@@ -372,6 +372,7 @@ pub(crate) fn prepare_frame<C: TuiApi>(
     app.trim_thought_log(layout.thought_entry_capacity());
     app.poll_pending_selection_publication();
     app.poll_pending_interaction();
+    app.poll_pending_picker_repo_search();
     app.poll_refresh(layout);
     app.maybe_refresh_picker();
     app.maybe_refresh_plans();

@@ -82,6 +82,7 @@ struct MockApiState {
     open_attention_group_results: VecDeque<Result<NativeAttentionGroupOpenResponse, String>>,
     list_dirs_results: VecDeque<Result<DirListResponse, String>>,
     list_repo_dirs_results: VecDeque<Result<DirRepoSearchResponse, String>>,
+    list_repo_dirs_delay: Option<Duration>,
     update_dir_group_memberships_results:
         VecDeque<Result<DirGroupMembershipUpdateResponse, String>>,
     start_repo_action_results: VecDeque<Result<DirRepoActionResponse, String>>,
@@ -231,6 +232,10 @@ impl MockApi {
             .unwrap()
             .list_repo_dirs_results
             .push_back(result);
+    }
+
+    fn set_list_repo_dirs_delay(&self, delay: Duration) {
+        self.state.lock().unwrap().list_repo_dirs_delay = Some(delay);
     }
 
     fn push_update_dir_group_memberships(
@@ -731,14 +736,23 @@ impl TuiApi for MockApi {
     fn list_repo_dirs(&self) -> BoxFuture<'_, Result<DirRepoSearchResponse, String>> {
         let state = self.state.clone();
         Box::pin(async move {
-            let mut state = state.lock().unwrap();
-            state.list_repo_dirs_calls += 1;
-            state.list_repo_dirs_results.pop_front().unwrap_or_else(|| {
-                Ok(DirRepoSearchResponse {
-                    roots: Vec::new(),
-                    entries: Vec::new(),
-                })
-            })
+            let (delay, result) = {
+                let mut state = state.lock().unwrap();
+                state.list_repo_dirs_calls += 1;
+                (
+                    state.list_repo_dirs_delay,
+                    state.list_repo_dirs_results.pop_front().unwrap_or_else(|| {
+                        Ok(DirRepoSearchResponse {
+                            roots: Vec::new(),
+                            entries: Vec::new(),
+                        })
+                    }),
+                )
+            };
+            if let Some(delay) = delay {
+                tokio::time::sleep(delay).await;
+            }
+            result
         })
     }
 
@@ -1140,6 +1154,17 @@ fn poll_until_interaction(app: &mut App<MockApi>) {
         std::thread::sleep(Duration::from_millis(5));
     }
     panic!("background interaction did not complete within timeout");
+}
+
+fn poll_until_picker_repo_search(app: &mut App<MockApi>) {
+    for _ in 0..200 {
+        app.poll_pending_picker_repo_search();
+        if app.pending_picker_repo_search.is_none() {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    panic!("picker repository search did not complete within timeout");
 }
 
 /// Poll selection publication until there is no in-flight or queued publish left.
@@ -6332,6 +6357,7 @@ fn opening_picker_loads_repo_search_entries() {
 
     app.handle_field_click(10, 10, field);
     poll_until_interaction(&mut app);
+    poll_until_picker_repo_search(&mut app);
 
     let picker = app.picker.as_mut().expect("picker should open");
     picker.search = "pcbcd".to_string();
@@ -6339,6 +6365,44 @@ fn opening_picker_loads_repo_search_entries() {
     assert_eq!(visible.len(), 1);
     assert_eq!(
         picker.path_for_entry(visible[0]).as_deref(),
+        Some("/Users/tester/hard/pcbcd")
+    );
+    assert_eq!(api.list_repo_dirs_calls(), 1);
+}
+
+#[test]
+fn opening_picker_does_not_wait_for_slow_repo_search() {
+    let api = MockApi::new();
+    api.push_list_dirs(Ok(dir_response(TEST_REPOS_ROOT, &[("opensource", true)])));
+    api.push_list_repo_dirs(Ok(repo_search_response(&["/Users/tester/hard/pcbcd"])));
+    api.set_list_repo_dirs_delay(Duration::from_millis(150));
+    let field = test_field();
+    let mut app = make_app(api.clone());
+
+    let started = Instant::now();
+    app.handle_field_click(10, 10, field);
+    poll_until_interaction(&mut app);
+    let visible_elapsed = started.elapsed();
+
+    assert!(
+        visible_elapsed < Duration::from_millis(100),
+        "picker should become visible after list_dirs, not wait for slow repo search; elapsed {visible_elapsed:?}"
+    );
+    let picker = app.picker.as_ref().expect("picker should open");
+    assert!(
+        picker.repo_search_entries.is_empty(),
+        "repo search entries should arrive after the initial picker frame"
+    );
+    assert!(
+        app.pending_picker_repo_search.is_some(),
+        "repo search should continue in the background"
+    );
+
+    poll_until_picker_repo_search(&mut app);
+
+    let picker = app.picker.as_ref().expect("picker should stay open");
+    assert_eq!(
+        picker.repo_search_entries.first().and_then(|entry| entry.full_path.as_deref()),
         Some("/Users/tester/hard/pcbcd")
     );
     assert_eq!(api.list_repo_dirs_calls(), 1);
