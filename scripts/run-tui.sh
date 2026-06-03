@@ -178,12 +178,67 @@ tui_binary_is_current() {
   [[ -z "$(find "${inputs[@]}" -type f -newer "${binary}" -print -quit)" ]]
 }
 
+package_version() {
+  awk -F '"' '/^version = "/ { print $2; exit }' Cargo.toml
+}
+
+print_tui_help_or_version() {
+  if ! direct_binary_supported; then
+    return 1
+  fi
+
+  local arg
+  for arg in "$@"; do
+    case "${arg}" in
+      -h|--help)
+        cat <<'EOF'
+Terminal UI client for the swimmers API server
+
+Usage: swimmers-tui
+
+Options:
+  -h, --help     Print help
+  -V, --version  Print version
+
+ENVIRONMENT VARIABLES:
+  SWIMMERS_TUI_URL  API URL to connect to; unset uses embedded mode
+  AUTH_MODE         'local_trust', 'tailnet_trust', or 'token'
+  AUTH_TOKEN        Bearer token when AUTH_MODE=token
+  CLAWGS_BIN        Override path to the clawgs binary in embedded mode
+  SWIMMERS_VOICE_MODEL
+                   Whisper model path for the voice feature
+  SWIMMERS_VOICE_LANGUAGE
+                   Voice language hint (default: auto)
+EOF
+        return 0
+        ;;
+    esac
+  done
+
+  for arg in "$@"; do
+    case "${arg}" in
+      -V|--version)
+        local version
+        version="$(package_version)"
+        [[ -n "${version}" ]] || return 1
+        printf 'swimmers-tui %s\n' "${version}"
+        return 0
+        ;;
+    esac
+  done
+
+  return 1
+}
+
 exec_tui() {
   if direct_binary_supported; then
     local binary
     binary="$(tui_binary_path)"
     if tui_binary_is_current "${binary}"; then
       exec "${binary}" "$@"
+    fi
+    if is_help_or_version "$@" && print_tui_help_or_version "$@"; then
+      exit 0
     fi
   fi
 
