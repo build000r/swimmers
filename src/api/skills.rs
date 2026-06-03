@@ -126,24 +126,29 @@ fn parse_skill_md(path: &Path, fallback_name: &str) -> SkillSummary {
     SkillSummary { name, description }
 }
 
-fn collect_skill_summaries(root: &Path) -> Vec<SkillSummary> {
-    if !root.exists() {
-        return Vec::new();
-    }
+enum SkillSource {
+    Directory { skill_md: PathBuf, fallback: String },
+    Package { path: PathBuf, fallback: String },
+}
 
-    let mut summaries = Vec::new();
-    let mut seen_names = HashSet::new();
+fn collect_skill_summaries(root: &Path) -> Vec<SkillSummary> {
+    let mut summaries = unique_skill_summaries(discover_skill_sources(root));
+    sort_skill_summaries(&mut summaries);
+    summaries
+}
+
+fn discover_skill_sources(root: &Path) -> Vec<SkillSource> {
+    let Some(mut stack) = scan_stack_for_root(root) else {
+        return Vec::new();
+    };
+
     let mut visited_dirs = HashSet::new();
-    let mut stack = vec![(root.to_path_buf(), 0usize)];
+    let mut sources = Vec::new();
 
     while let Some((dir, depth)) = stack.pop() {
-        let canonical = match dir.canonicalize() {
-            Ok(path) => path,
-            Err(_) => continue,
-        };
-        if !visited_dirs.insert(canonical.clone()) {
+        let Some(canonical) = canonical_unvisited_dir(&dir, &mut visited_dirs) else {
             continue;
-        }
+        };
 
         let Ok(entries) = std::fs::read_dir(&canonical) else {
             continue;
@@ -152,59 +157,121 @@ fn collect_skill_summaries(root: &Path) -> Vec<SkillSummary> {
         for entry in entries.flatten() {
             let path = entry.path();
             let entry_name = entry.file_name().to_string_lossy().into_owned();
-            if entry_name.starts_with('.') && entry_name != ".system" {
+            if is_ignored_skill_entry(&entry_name) {
                 continue;
             }
 
-            if path.is_dir() {
-                let skill_md = path.join("SKILL.md");
-                if skill_md.is_file() {
-                    let parsed = parse_skill_md(&skill_md, &entry_name);
-                    let dedupe_key = parsed.name.to_ascii_lowercase();
-                    if seen_names.insert(dedupe_key) {
-                        summaries.push(parsed);
-                    }
-                    continue;
-                }
-
-                if depth < MAX_SCAN_DEPTH {
-                    stack.push((path, depth + 1));
-                }
-                continue;
-            }
-
-            let is_packaged_skill = path
-                .extension()
-                .and_then(|ext| ext.to_str())
-                .map(|ext| ext.eq_ignore_ascii_case("skill"))
-                .unwrap_or(false);
-            if !is_packaged_skill {
-                continue;
-            }
-
-            let name = path
-                .file_stem()
-                .and_then(|stem| stem.to_str())
-                .map(|stem| stem.trim().to_string())
-                .filter(|stem| !stem.is_empty())
-                .unwrap_or(entry_name);
-
-            let dedupe_key = name.to_ascii_lowercase();
-            if seen_names.insert(dedupe_key) {
-                summaries.push(SkillSummary {
-                    name,
-                    description: None,
-                });
-            }
+            collect_entry_source(path, entry_name, depth, &mut stack, &mut sources);
         }
     }
 
+    sources
+}
+
+fn scan_stack_for_root(root: &Path) -> Option<Vec<(PathBuf, usize)>> {
+    root.exists().then(|| vec![(root.to_path_buf(), 0)])
+}
+
+fn canonical_unvisited_dir(dir: &Path, visited_dirs: &mut HashSet<PathBuf>) -> Option<PathBuf> {
+    let canonical = dir.canonicalize().ok()?;
+    visited_dirs.insert(canonical.clone()).then_some(canonical)
+}
+
+fn is_ignored_skill_entry(entry_name: &str) -> bool {
+    entry_name.starts_with('.') && entry_name != ".system"
+}
+
+fn collect_entry_source(
+    path: PathBuf,
+    entry_name: String,
+    depth: usize,
+    stack: &mut Vec<(PathBuf, usize)>,
+    sources: &mut Vec<SkillSource>,
+) {
+    if path.is_dir() {
+        collect_directory_source(path, entry_name, depth, stack, sources);
+    } else if is_packaged_skill_path(&path) {
+        sources.push(SkillSource::Package {
+            path,
+            fallback: entry_name,
+        });
+    }
+}
+
+fn collect_directory_source(
+    path: PathBuf,
+    entry_name: String,
+    depth: usize,
+    stack: &mut Vec<(PathBuf, usize)>,
+    sources: &mut Vec<SkillSource>,
+) {
+    let skill_md = path.join("SKILL.md");
+    if skill_md.is_file() {
+        sources.push(SkillSource::Directory {
+            skill_md,
+            fallback: entry_name,
+        });
+    } else if depth < MAX_SCAN_DEPTH {
+        stack.push((path, depth + 1));
+    }
+}
+
+fn is_packaged_skill_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| ext.eq_ignore_ascii_case("skill"))
+        .unwrap_or(false)
+}
+
+fn unique_skill_summaries(sources: Vec<SkillSource>) -> Vec<SkillSummary> {
+    let mut summaries = Vec::new();
+    let mut seen_names = HashSet::new();
+
+    for source in sources {
+        push_unique_summary(
+            skill_summary_from_source(source),
+            &mut seen_names,
+            &mut summaries,
+        );
+    }
+
+    summaries
+}
+
+fn skill_summary_from_source(source: SkillSource) -> SkillSummary {
+    match source {
+        SkillSource::Directory { skill_md, fallback } => parse_skill_md(&skill_md, &fallback),
+        SkillSource::Package { path, fallback } => SkillSummary {
+            name: packaged_skill_name(&path, fallback),
+            description: None,
+        },
+    }
+}
+
+fn packaged_skill_name(path: &Path, fallback: String) -> String {
+    path.file_stem()
+        .and_then(|stem| stem.to_str())
+        .map(|stem| stem.trim().to_string())
+        .filter(|stem| !stem.is_empty())
+        .unwrap_or(fallback)
+}
+
+fn push_unique_summary(
+    summary: SkillSummary,
+    seen_names: &mut HashSet<String>,
+    summaries: &mut Vec<SkillSummary>,
+) {
+    if seen_names.insert(summary.name.to_ascii_lowercase()) {
+        summaries.push(summary);
+    }
+}
+
+fn sort_skill_summaries(summaries: &mut [SkillSummary]) {
     summaries.sort_by(|a, b| {
         a.name
             .to_ascii_lowercase()
             .cmp(&b.name.to_ascii_lowercase())
     });
-    summaries
 }
 
 async fn list_skills(
