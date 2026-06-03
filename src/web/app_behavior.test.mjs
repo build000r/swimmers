@@ -2375,6 +2375,32 @@ test("visible directory batch action preserves selection, cwd fallback, and stat
   assert.equal(web.state.dirBrowser.error, "No visible directories to batch.");
 });
 
+test("directory checkbox change action preserves add, remove, reset, and ignore paths", () => {
+  resetWebState();
+  const checkbox = (path, checked = true) => {
+    const node = new MockElement("dir-checkbox");
+    node.dataset.path = path;
+    node.checked = checked;
+    node.closest = (selector) => selector === ".dir-row-check" ? node : null;
+    return node;
+  };
+
+  const added = checkbox("/srv/repos/added", true);
+  assert.equal(web.handleDirCheckboxChange({ type: "change", target: added }), true);
+  assert.deepEqual(Array.from(web.state.dirBrowser.batchSelected), ["/srv/repos/added"]);
+  assert.equal(web.el.createCwd.value, "/srv/repos/added");
+
+  const removed = checkbox("/srv/repos/added", false);
+  assert.equal(web.handleDirCheckboxChange({ type: "change", target: removed }), true);
+  assert.equal(web.state.dirBrowser.batchSelected.size, 0);
+  assert.equal(web.el.createCwd.value, "/srv/repos/added");
+
+  const invalid = checkbox(" ", true);
+  assert.equal(web.handleDirCheckboxChange({ type: "change", target: invalid }), true);
+  assert.equal(invalid.checked, false);
+  assert.equal(web.handleDirCheckboxChange({ type: "change", target: new MockElement("ignored") }), false);
+});
+
 test("send form submit handler preserves line send side effects and cleanup", async () => {
   resetWebState();
   web.state.trogdorAtlasOpen = false;

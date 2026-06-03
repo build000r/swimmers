@@ -31,6 +31,7 @@ import {
 } from "./terminal_protocol.js";
 import {
   clearCreateBatchSelection as clearDirBrowserBatchSelection,
+  dirCheckboxChangePlan as dirBrowserCheckboxChangePlan,
   launchTargetPayload as dirBrowserLaunchTargetPayload,
   renderCreateBatchBar as renderDirBrowserCreateBatchBar,
   renderDirEntries as renderDirBrowserEntries,
@@ -1940,6 +1941,21 @@ function handleCreateBatchVisibleAction() {
   if (plan.firstPath) el.createCwd.value = plan.firstPath;
   renderDirEntries(currentDirListingPayload());
   setDirStatus(plan.statusLabel, plan.statusMuted);
+}
+
+function handleDirCheckboxChange(event) {
+  const target = event.target instanceof Element ? event.target : null;
+  const plan = dirBrowserCheckboxChangePlan(event.type, target);
+  if (plan.type === "ignore") return false;
+  if (plan.type === "reset_checkbox") {
+    plan.checkbox.checked = false;
+    return true;
+  }
+  const selected = ensureDirBrowserBatchSelection();
+  (plan.type === "add" ? selected.add : selected.delete).call(selected, plan.path);
+  if (plan.type === "add") el.createCwd.value = plan.path;
+  syncSheetActionAvailability();
+  return true;
 }
 
 function renderDirEntries(response) {
@@ -5591,25 +5607,7 @@ function bindEvents() {
       await loadDirListing(parent, el.dirsManagedOnly.checked, "");
     }
   });
-  el.dirsList.addEventListener("change", (event) => {
-    const checkbox = event.target instanceof Element ? event.target.closest(".dir-row-check") : null;
-    if (!checkbox) {
-      return;
-    }
-    const path = String(checkbox.dataset.path || "").trim();
-    if (!path) {
-      checkbox.checked = false;
-      return;
-    }
-    const selected = ensureDirBrowserBatchSelection();
-    if (checkbox.checked) {
-      selected.add(path);
-      el.createCwd.value = path;
-    } else {
-      selected.delete(path);
-    }
-    syncSheetActionAvailability();
-  });
+  el.dirsList.addEventListener("change", handleDirCheckboxChange);
   el.dirsList.addEventListener("click", async (event) => {
     const target = event.target instanceof Element ? event.target : null;
     if (!target) {
@@ -6000,7 +5998,7 @@ export const __swimmersWebTest = {
   sendTerminalControlKey,
   terminalKeyActionForDomEvent,
   handleTerminalInlineInputKeydown,
-  handleSendFormSubmit, handleAuthTokenButtonAction, handleCreateBatchVisibleAction,
+  handleSendFormSubmit, handleAuthTokenButtonAction, handleCreateBatchVisibleAction, handleDirCheckboxChange,
   focusTerminalInputSurface,
   syncTerminalInputDock,
   submitTerminalInputDock,

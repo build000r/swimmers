@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 
 import {
   createRequestPreviewText,
+  dirCheckboxChangePlan,
   dirEntryBatchSelectable,
   dirEntryGroups,
   dirEntryMatchesSearch,
@@ -106,6 +107,34 @@ test("visibleDirBatchPlan preserves paths, fallbacks, and status copy", () => {
     firstPath: "",
     statusLabel: "No visible directories to batch.",
     statusMuted: true,
+  });
+});
+
+test("dirCheckboxChangePlan preserves ignored, reset, add, and remove decisions", () => {
+  const checkboxFor = (path, checked = true) => {
+    const checkbox = { checked, dataset: { path } };
+    return {
+      checkbox,
+      target: {
+        closest(selector) {
+          return selector === ".dir-row-check" ? checkbox : null;
+        },
+      },
+    };
+  };
+  const blank = checkboxFor(" ");
+  assert.deepEqual(dirCheckboxChangePlan("click", checkboxFor("/srv/repos/a").target), { type: "ignore" });
+  assert.deepEqual(dirCheckboxChangePlan("change", { closest: () => null }), { type: "ignore" });
+  const resetPlan = dirCheckboxChangePlan("change", blank.target);
+  assert.equal(resetPlan.type, "reset_checkbox");
+  assert.equal(resetPlan.checkbox, blank.checkbox);
+  assert.deepEqual(dirCheckboxChangePlan("change", checkboxFor("/srv/repos/a", true).target), {
+    type: "add",
+    path: "/srv/repos/a",
+  });
+  assert.deepEqual(dirCheckboxChangePlan("change", checkboxFor("/srv/repos/a", false).target), {
+    type: "remove",
+    path: "/srv/repos/a",
   });
 });
 

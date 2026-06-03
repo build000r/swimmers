@@ -144,6 +144,21 @@ export function visibleDirBatchPlan(paths = [], currentPath = "", inputPath = ""
   };
 }
 
+export function dirCheckboxChangePlan(eventType, target) {
+  if (eventType !== "change") {
+    return { type: "ignore" };
+  }
+  const checkbox = target?.closest?.(".dir-row-check") ?? null;
+  if (!checkbox) {
+    return { type: "ignore" };
+  }
+  const path = String(checkbox.dataset.path || "").trim();
+  if (!path) {
+    return { type: "reset_checkbox", checkbox };
+  }
+  return checkbox.checked ? { type: "add", path } : { type: "remove", path };
+}
+
 export function selectedLaunchTarget(el, dirBrowser) {
   const value = String(el.createLaunchTarget?.value || dirBrowser.launchTarget || "local").trim();
   return value || "local";
