@@ -375,6 +375,73 @@ export function terminalStageTouchEndPlan(context = {}) {
   };
 }
 
+function terminalStageMouseIgnore(type = "ignore", mouseKind = "") {
+  return {
+    type,
+    preventDefault: false,
+    suppressClick: false,
+    handleAction: false,
+    action: null,
+    openHoveredLink: false,
+    startSelection: false,
+    completeSelection: false,
+    forwardMouse: false,
+    mouseKind,
+  };
+}
+
+export function terminalStageMouseDownPlan(context = {}) {
+  const hit = context.hit || {};
+  if (context.fallbackOwnsPointer) {
+    return terminalStageMouseIgnore("fallback_pointer", "down");
+  }
+  if (hit.action) {
+    return {
+      ...terminalStageMouseIgnore("surface_action", "down"),
+      preventDefault: true,
+      suppressClick: true,
+      handleAction: true,
+      action: hit.action,
+    };
+  }
+  if (hit.consume || !context.hasTerminal) {
+    return { ...terminalStageMouseIgnore("blocked", "down"), preventDefault: true };
+  }
+  if (context.modifierKey && context.hoveredLinkUrl) {
+    return { ...terminalStageMouseIgnore("link_modifier", "down"), preventDefault: true };
+  }
+  if (context.selectMode && context.button === 0) {
+    return { ...terminalStageMouseIgnore("select_start", "down"), preventDefault: true, startSelection: true };
+  }
+  if (context.readOnly) {
+    return terminalStageMouseIgnore("read_only", "down");
+  }
+  return { ...terminalStageMouseIgnore("forward_mouse", "down"), forwardMouse: true };
+}
+
+export function terminalStageMouseUpPlan(context = {}) {
+  const hit = context.hit || {};
+  if (context.fallbackOwnsPointer) {
+    return terminalStageMouseIgnore("fallback_pointer", "up");
+  }
+  if (hit.action || hit.consume || !context.hasTerminal) {
+    return {
+      ...terminalStageMouseIgnore("blocked", "up"),
+      preventDefault: Boolean(hit.action || hit.consume),
+    };
+  }
+  if (context.modifierKey && context.hoveredLinkUrl) {
+    return { ...terminalStageMouseIgnore("link_modifier", "up"), preventDefault: true, openHoveredLink: true };
+  }
+  if (context.selectMode && context.selectionAnchor !== null && context.button === 0) {
+    return { ...terminalStageMouseIgnore("select_complete", "up"), preventDefault: true, completeSelection: true };
+  }
+  if (context.readOnly) {
+    return terminalStageMouseIgnore("read_only", "up");
+  }
+  return { ...terminalStageMouseIgnore("forward_mouse", "up"), forwardMouse: true };
+}
+
 export function terminalStagePastePlan(readOnly, text) {
   if (readOnly || !text) {
     return { type: "ignore" };

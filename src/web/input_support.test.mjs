@@ -38,6 +38,8 @@ import {
   terminalStageFocusExecutorPlan,
   terminalStageFocusPlan,
   terminalStageKeydownPlan,
+  terminalStageMouseDownPlan,
+  terminalStageMouseUpPlan,
   terminalStagePasteExecutorPlan,
   terminalStagePastePlan,
   terminalStageTouchEndPlan,
@@ -576,6 +578,136 @@ test("terminalStageTouchEndPlan preserves fallback, action, consume, and focus d
     hit: {},
     activeSheet: "send",
   }).type, "ignore");
+});
+
+test("terminalStageMouseDownPlan preserves action, link, selection, and forwarding decisions", () => {
+  const action = { type: "action", actionId: "terminal" };
+  const ignored = {
+    type: "fallback_pointer",
+    preventDefault: false,
+    suppressClick: false,
+    handleAction: false,
+    action: null,
+    openHoveredLink: false,
+    startSelection: false,
+    completeSelection: false,
+    forwardMouse: false,
+    mouseKind: "down",
+  };
+
+  assert.deepEqual(terminalStageMouseDownPlan({ fallbackOwnsPointer: true, hit: { action } }), ignored);
+  assert.deepEqual(terminalStageMouseDownPlan({ hit: { action }, hasTerminal: true }), {
+    ...ignored,
+    type: "surface_action",
+    preventDefault: true,
+    suppressClick: true,
+    handleAction: true,
+    action,
+  });
+  assert.deepEqual(terminalStageMouseDownPlan({ hit: { consume: true }, hasTerminal: true }), {
+    ...ignored,
+    type: "blocked",
+    preventDefault: true,
+  });
+  assert.deepEqual(terminalStageMouseDownPlan({ hit: {}, hasTerminal: false }), {
+    ...ignored,
+    type: "blocked",
+    preventDefault: true,
+  });
+  assert.deepEqual(terminalStageMouseDownPlan({
+    hit: {},
+    hasTerminal: true,
+    modifierKey: true,
+    hoveredLinkUrl: "https://example.test",
+  }), {
+    ...ignored,
+    type: "link_modifier",
+    preventDefault: true,
+  });
+  assert.deepEqual(terminalStageMouseDownPlan({
+    hit: {},
+    hasTerminal: true,
+    selectMode: true,
+    button: 0,
+  }), {
+    ...ignored,
+    type: "select_start",
+    preventDefault: true,
+    startSelection: true,
+  });
+  assert.deepEqual(terminalStageMouseDownPlan({ hit: {}, hasTerminal: true, readOnly: true }), {
+    ...ignored,
+    type: "read_only",
+  });
+  assert.deepEqual(terminalStageMouseDownPlan({ hit: {}, hasTerminal: true, button: 2 }), {
+    ...ignored,
+    type: "forward_mouse",
+    forwardMouse: true,
+  });
+});
+
+test("terminalStageMouseUpPlan preserves blocked, link, selection, and forwarding decisions", () => {
+  const action = { type: "action", actionId: "terminal" };
+  const ignored = {
+    type: "fallback_pointer",
+    preventDefault: false,
+    suppressClick: false,
+    handleAction: false,
+    action: null,
+    openHoveredLink: false,
+    startSelection: false,
+    completeSelection: false,
+    forwardMouse: false,
+    mouseKind: "up",
+  };
+
+  assert.deepEqual(terminalStageMouseUpPlan({ fallbackOwnsPointer: true, hit: { action } }), ignored);
+  assert.deepEqual(terminalStageMouseUpPlan({ hit: { action }, hasTerminal: true }), {
+    ...ignored,
+    type: "blocked",
+    preventDefault: true,
+  });
+  assert.deepEqual(terminalStageMouseUpPlan({ hit: { consume: true }, hasTerminal: true }), {
+    ...ignored,
+    type: "blocked",
+    preventDefault: true,
+  });
+  assert.deepEqual(terminalStageMouseUpPlan({ hit: {}, hasTerminal: false }), {
+    ...ignored,
+    type: "blocked",
+  });
+  assert.deepEqual(terminalStageMouseUpPlan({
+    hit: {},
+    hasTerminal: true,
+    modifierKey: true,
+    hoveredLinkUrl: "https://example.test",
+  }), {
+    ...ignored,
+    type: "link_modifier",
+    preventDefault: true,
+    openHoveredLink: true,
+  });
+  assert.deepEqual(terminalStageMouseUpPlan({
+    hit: {},
+    hasTerminal: true,
+    selectMode: true,
+    selectionAnchor: 12,
+    button: 0,
+  }), {
+    ...ignored,
+    type: "select_complete",
+    preventDefault: true,
+    completeSelection: true,
+  });
+  assert.deepEqual(terminalStageMouseUpPlan({ hit: {}, hasTerminal: true, readOnly: true }), {
+    ...ignored,
+    type: "read_only",
+  });
+  assert.deepEqual(terminalStageMouseUpPlan({ hit: {}, hasTerminal: true, button: 2 }), {
+    ...ignored,
+    type: "forward_mouse",
+    forwardMouse: true,
+  });
 });
 
 test("terminalStagePastePlan preserves read-only, empty, and raw text decisions", () => {

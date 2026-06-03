@@ -4,7 +4,7 @@ import {
   sheetActionAvailabilityPlan,
   mobileKeyboardKeydownPlan, mobileKeyboardKeyPlan, shouldIgnoreSyntheticClick,
   terminalComposerControlAction, terminalDestroyStatePatch, terminalFallbackActivationPlan, terminalFallbackFocusPlan, terminalFallbackKeydownPlan, terminalFallbackPastePlan, terminalFallbackPointerFocusPlan, terminalInlineInputKeydownPlan, terminalKeyStripClickExecutorPlan, terminalKeyStripClickPlan, terminalStageCaptureBindings, terminalStageClickPlan, terminalStageFocusExecutorPlan, terminalStageFocusPlan,
-  normalizeTerminalZoomValue, terminalAuxiliaryControlsPlan, terminalFallbackScrollPlan, terminalFallbackTextScrollPlan, terminalInputDockPlan, terminalLiveFrameFallbackPlan, terminalPaintProbeSchedulePlan, terminalPaintVerificationPlan, terminalPendingByteBufferPlan, terminalPresentationPlan, terminalResizeGeometryPlan, terminalStageKeydownPlan, terminalStagePasteExecutorPlan, terminalStagePastePlan, terminalStageTouchEndPlan, terminalToolsAvailabilityPlan, terminalZoomControlsPlan, terminalZoomLoadValue, terminalZoomPercentLabel, terminalZoomPersistencePlan,
+  normalizeTerminalZoomValue, terminalAuxiliaryControlsPlan, terminalFallbackScrollPlan, terminalFallbackTextScrollPlan, terminalInputDockPlan, terminalLiveFrameFallbackPlan, terminalPaintProbeSchedulePlan, terminalPaintVerificationPlan, terminalPendingByteBufferPlan, terminalPresentationPlan, terminalResizeGeometryPlan, terminalStageKeydownPlan, terminalStageMouseDownPlan, terminalStageMouseUpPlan, terminalStagePasteExecutorPlan, terminalStagePastePlan, terminalStageTouchEndPlan, terminalToolsAvailabilityPlan, terminalZoomControlsPlan, terminalZoomLoadValue, terminalZoomPercentLabel, terminalZoomPersistencePlan,
 } from "./input_support.js";
 import { sendHistoryClickPlan, sendSheetFailureStatus, sendSheetSubmitPlan, sendSheetSuccessStatus } from "./send_sheet.js";
 import {
@@ -4912,6 +4912,60 @@ function handleTerminalStageTouchEnd(event) {
   applyTerminalStagePointerPlan(event, plan);
 }
 
+function handleTerminalStageMouseDown(event) {
+  const fallbackOwnsPointer = terminalFallbackOwnsPointer(event);
+  const hit = fallbackOwnsPointer ? {} : surfaceHit(event);
+  if (!fallbackOwnsPointer && !hit.action && !hit.consume && state.terminal) updateHoveredLink(event);
+  const plan = terminalStageMouseDownPlan({
+    fallbackOwnsPointer,
+    hit,
+    hasTerminal: Boolean(state.terminal),
+    modifierKey: event.metaKey || event.ctrlKey,
+    hoveredLinkUrl: state.hoveredLinkUrl,
+    selectMode: state.selectMode,
+    button: event.button,
+    readOnly: state.readOnly,
+  });
+  applyTerminalStageMousePlan(event, plan, hit);
+}
+
+function handleTerminalStageMouseUp(event) {
+  const fallbackOwnsPointer = terminalFallbackOwnsPointer(event);
+  const hit = fallbackOwnsPointer ? {} : surfaceHit(event);
+  if (!fallbackOwnsPointer && !hit.action && !hit.consume && state.terminal) updateHoveredLink(event);
+  const plan = terminalStageMouseUpPlan({
+    fallbackOwnsPointer,
+    hit,
+    hasTerminal: Boolean(state.terminal),
+    modifierKey: event.metaKey || event.ctrlKey,
+    hoveredLinkUrl: state.hoveredLinkUrl,
+    selectMode: state.selectMode,
+    selectionAnchor: state.selectionAnchor,
+    button: event.button,
+    readOnly: state.readOnly,
+  });
+  applyTerminalStageMousePlan(event, plan, hit);
+}
+
+function applyTerminalStageMousePlan(event, plan, hit) {
+  if (plan.suppressClick) state.surfaceClickSuppressUntil = performance.now() + SURFACE_CLICK_SUPPRESS_MS;
+  if (plan.preventDefault) event.preventDefault();
+  if (plan.handleAction) {
+    void handleSurfaceAction(plan.action);
+  } else if (plan.openHoveredLink) {
+    safeOpenUrl(state.hoveredLinkUrl);
+  } else if (plan.startSelection) {
+    const anchor = cellOffset(hit.cell);
+    state.selectionAnchor = anchor;
+    setTerminalSelectionRange(anchor, anchor);
+  } else if (plan.completeSelection) {
+    setTerminalSelectionRange(state.selectionAnchor, cellOffset(hit.cell));
+    state.selectionAnchor = null;
+  } else if (plan.forwardMouse) {
+    forwardTerminalMouse(plan.mouseKind, clampInt(event.button, 0, 0, 2), hit, event);
+  }
+}
+
 function updateHoveredTrogdorSurface(zone) {
   const previousSessionId = state.hoveredTrogdorSessionId;
   const nextSessionId = trogdorHoverSessionIdForZone(zone, previousSessionId);
@@ -5573,76 +5627,8 @@ function bindEvents() {
   el.terminalStage.addEventListener("focus", () => runTerminalFocusAction(terminalStageFocusPlan("focus", { activeSheet: state.activeSheet })));
   el.terminalStage.addEventListener("blur", () => runTerminalFocusAction(terminalStageFocusPlan("blur", { mobileKeyboardOwnsFocus: document.activeElement === el.mobileKeyboardProxy })));
 
-  el.terminalStage.addEventListener("mousedown", (event) => {
-    if (terminalFallbackOwnsPointer(event)) {
-      return;
-    }
-    const hit = surfaceHit(event);
-    if (hit.action) {
-      state.surfaceClickSuppressUntil = performance.now() + SURFACE_CLICK_SUPPRESS_MS;
-      event.preventDefault();
-      void handleSurfaceAction(hit.action);
-      return;
-    }
-    if (hit.consume || !state.terminal) {
-      event.preventDefault();
-      return;
-    }
-
-    updateHoveredLink(event);
-    if ((event.metaKey || event.ctrlKey) && state.hoveredLinkUrl) {
-      event.preventDefault();
-      return;
-    }
-
-    if (state.selectMode && event.button === 0) {
-      event.preventDefault();
-      const anchor = cellOffset(hit.cell);
-      state.selectionAnchor = anchor;
-      setTerminalSelectionRange(anchor, anchor);
-      return;
-    }
-
-    if (state.readOnly) {
-      return;
-    }
-
-    forwardTerminalMouse("down", clampInt(event.button, 0, 0, 2), hit, event);
-  });
-
-  el.terminalStage.addEventListener("mouseup", (event) => {
-    if (terminalFallbackOwnsPointer(event)) {
-      return;
-    }
-    const hit = surfaceHit(event);
-    if (hit.action || hit.consume || !state.terminal) {
-      if (hit.action || hit.consume) {
-        event.preventDefault();
-      }
-      return;
-    }
-
-    updateHoveredLink(event);
-    if ((event.metaKey || event.ctrlKey) && state.hoveredLinkUrl) {
-      event.preventDefault();
-      safeOpenUrl(state.hoveredLinkUrl);
-      return;
-    }
-
-    if (state.selectMode && state.selectionAnchor !== null && event.button === 0) {
-      event.preventDefault();
-      const focus = cellOffset(hit.cell);
-      setTerminalSelectionRange(state.selectionAnchor, focus);
-      state.selectionAnchor = null;
-      return;
-    }
-
-    if (state.readOnly) {
-      return;
-    }
-
-    forwardTerminalMouse("up", clampInt(event.button, 0, 0, 2), hit, event);
-  });
+  el.terminalStage.addEventListener("mousedown", handleTerminalStageMouseDown);
+  el.terminalStage.addEventListener("mouseup", handleTerminalStageMouseUp);
 
   el.terminalStage.addEventListener("mousemove", (event) => {
     if (terminalFallbackOwnsPointer(event)) {
