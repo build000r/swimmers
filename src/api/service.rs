@@ -40,7 +40,7 @@ use crate::types::{
 /// Max concurrent git probes per `list_dirs` call. Keeps a single listing from
 /// fork-bombing the system when a repos directory has many git subdirs, while
 /// still parallelizing enough to hide per-call git latency.
-const GIT_PROBE_CONCURRENCY: usize = 16;
+const GIT_PROBE_CONCURRENCY: usize = 32;
 const BATCH_PROMPT_EXCERPT_MAX_CHARS: usize = 72;
 const BATCH_LABEL_MAX_CHARS: usize = 28;
 pub const BATCH_CREATE_MAX_DIRS: usize = 32;

@@ -359,7 +359,11 @@ pub async fn inspect_git_repo(path: &Path) -> io::Result<Option<GitRepoSummary>>
 }
 
 fn inspect_git_repo_sync(path: &Path) -> io::Result<Option<GitRepoSummary>> {
-    let Some(repo_root) = try_resolve_repo_root(path)? else {
+    let repo_root = match direct_repo_root(path)? {
+        Some(repo_root) => Some(repo_root),
+        None => try_resolve_repo_root(path)?,
+    };
+    let Some(repo_root) = repo_root else {
         return Ok(None);
     };
 
@@ -368,6 +372,13 @@ fn inspect_git_repo_sync(path: &Path) -> io::Result<Option<GitRepoSummary>> {
         repo_root,
         dirty: !status_short.trim().is_empty(),
     }))
+}
+
+fn direct_repo_root(path: &Path) -> io::Result<Option<PathBuf>> {
+    if !path.join(".git").exists() {
+        return Ok(None);
+    }
+    path.canonicalize().map(Some)
 }
 
 fn collect_git_state(cwd: &str) -> io::Result<GitStateSnapshot> {
@@ -781,6 +792,55 @@ mod tests {
             .expect("git init");
         assert!(status.success(), "git init should succeed");
         fs::write(path.join("README.md"), "dirty\n").expect("write readme");
+    }
+
+    #[test]
+    fn inspect_git_repo_skips_rev_parse_for_direct_repo_root() {
+        let _guard = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let temp = tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(repo.join(".git")).expect("direct git marker");
+
+        let bin_dir = temp.path().join("bin");
+        fs::create_dir_all(&bin_dir).expect("bin dir");
+        let git_log = temp.path().join("git.log");
+        write_executable(
+            &bin_dir.join("git"),
+            &format!(
+                r#"#!/bin/sh
+printf '%s\n' "$*" >> {}
+if [ "${{1-}}" = "-C" ]; then
+  shift 2
+fi
+case "${{1-}}" in
+  status)
+    printf ' M README.md\n'
+    ;;
+  rev-parse)
+    printf 'unexpected rev-parse\n' >&2
+    exit 44
+    ;;
+esac
+"#,
+                shell_single_quote(&git_log.to_string_lossy())
+            ),
+        );
+        let _path_guard = EnvVarGuard::set("PATH", test_path_with_prepend(&bin_dir));
+
+        let summary = inspect_git_repo_sync(&repo)
+            .expect("inspect direct repo")
+            .expect("repo summary");
+
+        assert_eq!(
+            summary.repo_root,
+            repo.canonicalize().expect("canonical repo")
+        );
+        assert!(summary.dirty);
+        let git_log = fs::read_to_string(git_log).expect("git log");
+        assert!(git_log.contains("status --short"));
+        assert!(!git_log.contains("rev-parse"));
     }
 
     #[test]

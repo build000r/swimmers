@@ -972,4 +972,55 @@ esac
             "list_dirs must parallelize git probes; serial p95 would be ~4.8s, got {p95:?}"
         );
     }
+
+    /// Direct repo-root entries should skip the `rev-parse` probe and only ask
+    /// git for dirty status. With 24 fake repos × 200ms per git process, a
+    /// two-process path would still sit around 400ms even at full fan-out.
+    #[tokio::test]
+    async fn list_dirs_skips_rev_parse_for_direct_git_roots() {
+        let _lock = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+
+        let (_fake_git_dir, _path_guard) = install_fake_slow_git(200);
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let base = tmp.path().join("repos");
+        std::fs::create_dir_all(&base).expect("repos base");
+        for i in 0..24 {
+            std::fs::create_dir_all(base.join(format!("repo-{i:02}")).join(".git"))
+                .expect("direct git repo subdir");
+        }
+        let _base_env = set_env_var("DIRS_BASE_PATH", base.as_os_str().to_os_string());
+
+        let mut samples = Vec::new();
+        for _ in 0..5 {
+            let started = std::time::Instant::now();
+            let response = list_dirs(
+                Extension(AuthInfo::new(OPERATOR_SCOPES.to_vec())),
+                State(test_state()),
+                Query(DirQuery {
+                    path: None,
+                    managed_only: Some(false),
+                    group: None,
+                }),
+            )
+            .await
+            .into_response();
+            let elapsed = started.elapsed();
+            samples.push(elapsed);
+
+            assert_eq!(response.status(), StatusCode::OK);
+            let json = response_json(response).await;
+            let entries = json["entries"].as_array().expect("entries array");
+            assert_eq!(entries.len(), 24, "all repo entries should be present");
+        }
+
+        let p95 = p95_duration(samples);
+        eprintln!("/v1/dirs direct repo p95: {p95:?} (budget 350ms)");
+        assert!(
+            p95 < Duration::from_millis(350),
+            "direct repo roots should skip rev-parse and only pay one slow git status wave, got {p95:?}"
+        );
+    }
 }
