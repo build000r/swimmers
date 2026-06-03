@@ -183,6 +183,7 @@ pub(crate) mod in_process;
 mod layout;
 pub(crate) mod lifecycle;
 mod mermaid;
+mod mermaid_ascii;
 mod picker;
 mod render;
 mod skill_panel;
