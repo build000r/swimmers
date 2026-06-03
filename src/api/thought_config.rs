@@ -103,17 +103,12 @@ async fn post_thought_config_test(
     Extension(auth): Extension<AuthInfo>,
     State(_state): State<Arc<AppState>>,
     Json(body): Json<ThoughtConfig>,
-) -> impl IntoResponse {
-    if let Err(resp) = auth.require_scope(AuthScope::SessionsWrite) {
-        return resp;
-    }
-
-    let result = match test_thought_config_service(body).await {
-        Ok(result) => result,
-        Err(err) => return api_service_error_response(err),
-    };
-
-    success_json(StatusCode::OK, &result)
+) -> Result<Response, Response> {
+    auth.require_scope(AuthScope::SessionsWrite)?;
+    let result = test_thought_config_service(body)
+        .await
+        .map_err(api_service_error_response)?;
+    Ok(success_json(StatusCode::OK, &result))
 }
 
 fn api_service_error_response(error: ApiServiceError) -> Response {
@@ -269,6 +264,62 @@ mod tests {
         assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
         let json = response_json(response).await;
         assert_eq!(json["code"], "PERSISTENCE_UNAVAILABLE");
+    }
+
+    #[tokio::test]
+    async fn post_thought_config_test_requires_write_scope() {
+        let response = post_thought_config_test(
+            Extension(AuthInfo::new(OBSERVER_SCOPES.to_vec())),
+            State(test_state(None)),
+            Json(ThoughtConfig::default()),
+        )
+        .await
+        .expect_err("probe test should require write scope");
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn post_thought_config_test_rejects_invalid_payloads() {
+        let response = post_thought_config_test(
+            Extension(AuthInfo::new(OPERATOR_SCOPES.to_vec())),
+            State(test_state(None)),
+            Json(ThoughtConfig {
+                backend: "gemini".to_string(),
+                ..ThoughtConfig::default()
+            }),
+        )
+        .await
+        .expect_err("invalid probe config should be rejected");
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let json = response_json(response).await;
+        assert_eq!(json["code"], "VALIDATION_FAILED");
+        assert_eq!(
+            json["message"],
+            "backend unrecognized backend \"gemini\"; expected one of: openrouter, grok"
+        );
+    }
+
+    #[tokio::test]
+    async fn post_thought_config_test_returns_probe_result() {
+        let response = post_thought_config_test(
+            Extension(AuthInfo::new(OPERATOR_SCOPES.to_vec())),
+            State(test_state(None)),
+            Json(ThoughtConfig::default()),
+        )
+        .await
+        .expect("valid probe config should return a probe result");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let json = response_json(response).await;
+        assert!(json["ok"].is_boolean());
+        assert!(json["message"].as_str().is_some_and(|message| {
+            message == "probe succeeded"
+                || message == "probe inconclusive: no llm call was made"
+                || message.starts_with("probe failed:")
+        }));
+        assert!(json["llm_calls"].as_u64().is_some());
     }
 
     #[tokio::test]

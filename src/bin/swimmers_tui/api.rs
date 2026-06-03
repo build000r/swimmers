@@ -298,6 +298,52 @@ impl ApiClient {
             .await
             .map(|cache| cache.models)
     }
+
+    fn personal_workflows_route_missing_message(&self, route: &str, feature: &str) -> String {
+        format!(
+            "backend at {} does not expose {route}. {feature} requires SWIMMERS_PERSONAL_WORKFLOWS=1 on the target backend; if this is your local server, relaunch via `make up` or `make tui`.",
+            self.base_url
+        )
+    }
+
+    fn session_skills_missing_message(&self) -> String {
+        format!(
+            "backend at {} does not expose session skills. Skill context requires SWIMMERS_PERSONAL_WORKFLOWS=1 on the target backend; if this is your local server, relaunch via `make up` or `make tui`.",
+            self.base_url
+        )
+    }
+}
+
+async fn decode_personal_workflows_response<T>(
+    response: reqwest::Response,
+    parse_error: &str,
+    missing_route_message: String,
+) -> Result<T, String>
+where
+    T: serde::de::DeserializeOwned,
+{
+    if response.status().is_success() {
+        return response
+            .json::<T>()
+            .await
+            .map_err(|err| format!("{parse_error}: {err}"));
+    }
+
+    if response.status() == reqwest::StatusCode::NOT_FOUND {
+        return Err(missing_route_message);
+    }
+
+    Err(read_error(response).await)
+}
+
+fn refreshed_openrouter_candidates_or_fallback(
+    result: Result<Vec<String>, String>,
+) -> Result<Vec<String>, String> {
+    let models = result?;
+    if models.is_empty() {
+        return Ok(cached_or_default_openrouter_candidates());
+    }
+    Ok(models)
 }
 
 pub(crate) fn root_error_message(err: &(dyn StdError + 'static)) -> String {
@@ -567,11 +613,9 @@ impl TuiApi for ApiClient {
 
     fn refresh_openrouter_candidates(&self) -> BoxFuture<'_, Result<Vec<String>, String>> {
         Box::pin(async move {
-            match self.refresh_openrouter_candidates_inner().await {
-                Ok(models) if !models.is_empty() => Ok(models),
-                Ok(_) => Ok(cached_or_default_openrouter_candidates()),
-                Err(err) => Err(err),
-            }
+            refreshed_openrouter_candidates_or_fallback(
+                self.refresh_openrouter_candidates_inner().await,
+            )
         })
     }
 
@@ -622,21 +666,12 @@ impl TuiApi for ApiClient {
                 .await
                 .map_err(|err| self.transport_error("fetch session skills", err))?;
 
-            if response.status().is_success() {
-                return response
-                    .json::<SessionSkillListResponse>()
-                    .await
-                    .map_err(|err| format!("failed to parse session skills: {err}"));
-            }
-
-            if response.status() == reqwest::StatusCode::NOT_FOUND {
-                return Err(format!(
-                    "backend at {} does not expose session skills. Skill context requires SWIMMERS_PERSONAL_WORKFLOWS=1 on the target backend; if this is your local server, relaunch via `make up` or `make tui`.",
-                    self.base_url
-                ));
-            }
-
-            Err(read_error(response).await)
+            decode_personal_workflows_response(
+                response,
+                "failed to parse session skills",
+                self.session_skills_missing_message(),
+            )
+            .await
         })
     }
 
@@ -884,21 +919,15 @@ impl TuiApi for ApiClient {
                 .await
                 .map_err(|err| self.transport_error("search repositories", err))?;
 
-            if response.status().is_success() {
-                return response
-                    .json::<DirRepoSearchResponse>()
-                    .await
-                    .map_err(|err| format!("failed to parse repository search response: {err}"));
-            }
-
-            if response.status() == reqwest::StatusCode::NOT_FOUND {
-                return Err(format!(
-                    "backend at {} does not expose /v1/dirs/repositories. Repository search requires SWIMMERS_PERSONAL_WORKFLOWS=1 on the target backend; if this is your local server, relaunch via `make up` or `make tui`.",
-                    self.base_url
-                ));
-            }
-
-            Err(read_error(response).await)
+            decode_personal_workflows_response(
+                response,
+                "failed to parse repository search response",
+                self.personal_workflows_route_missing_message(
+                    "/v1/dirs/repositories",
+                    "Repository search",
+                ),
+            )
+            .await
         })
     }
 
@@ -918,21 +947,12 @@ impl TuiApi for ApiClient {
                 .await
                 .map_err(|err| self.transport_error("start the repo action", err))?;
 
-            if response.status().is_success() {
-                return response
-                    .json::<DirRepoActionResponse>()
-                    .await
-                    .map_err(|err| format!("failed to parse repo action response: {err}"));
-            }
-
-            if response.status() == reqwest::StatusCode::NOT_FOUND {
-                return Err(format!(
-                    "backend at {} does not expose /v1/dirs/actions. Repo actions require SWIMMERS_PERSONAL_WORKFLOWS=1 on the target backend; if this is your local server, relaunch via `make up` or `make tui`.",
-                    self.base_url
-                ));
-            }
-
-            Err(read_error(response).await)
+            decode_personal_workflows_response(
+                response,
+                "failed to parse repo action response",
+                self.personal_workflows_route_missing_message("/v1/dirs/actions", "Repo actions"),
+            )
+            .await
         })
     }
 
@@ -953,21 +973,15 @@ impl TuiApi for ApiClient {
                 .await
                 .map_err(|err| self.transport_error("update directory groups", err))?;
 
-            if response.status().is_success() {
-                return response
-                    .json::<DirGroupMembershipUpdateResponse>()
-                    .await
-                    .map_err(|err| format!("failed to parse directory group response: {err}"));
-            }
-
-            if response.status() == reqwest::StatusCode::NOT_FOUND {
-                return Err(format!(
-                    "backend at {} does not expose /v1/dirs/group-memberships. Directory group editing requires SWIMMERS_PERSONAL_WORKFLOWS=1 on the target backend; if this is your local server, relaunch via `make up` or `make tui`.",
-                    self.base_url
-                ));
-            }
-
-            Err(read_error(response).await)
+            decode_personal_workflows_response(
+                response,
+                "failed to parse directory group response",
+                self.personal_workflows_route_missing_message(
+                    "/v1/dirs/group-memberships",
+                    "Directory group editing",
+                ),
+            )
+            .await
         })
     }
 
@@ -1106,5 +1120,163 @@ pub(crate) async fn read_error(response: reqwest::Response) -> String {
     match response.json::<ErrorResponse>().await {
         Ok(body) => body.display_message(status),
         Err(_) => format!("request failed: {}", status),
+    }
+}
+
+#[cfg(test)]
+mod response_tests {
+    use super::*;
+
+    async fn response_with(
+        status: axum::http::StatusCode,
+        content_type: &'static str,
+        body: String,
+    ) -> reqwest::Response {
+        use axum::response::{IntoResponse, Response};
+        use axum::routing::get;
+        use axum::Router;
+
+        let app = Router::new().route(
+            "/",
+            get(move || async move {
+                let mut response: Response = body.into_response();
+                *response.status_mut() = status;
+                response.headers_mut().insert(
+                    axum::http::header::CONTENT_TYPE,
+                    content_type.parse().unwrap(),
+                );
+                response
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind response helper server");
+        let addr = listener.local_addr().expect("response helper addr");
+        let handle = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve response helper");
+        });
+        let response = reqwest::Client::new()
+            .get(format!("http://{addr}/"))
+            .send()
+            .await
+            .expect("fetch helper response");
+
+        handle.abort();
+        response
+    }
+
+    #[tokio::test]
+    async fn personal_workflows_response_decodes_success_json() {
+        let response = response_with(
+            axum::http::StatusCode::OK,
+            "application/json",
+            r#"{"repositories":[]}"#.to_string(),
+        )
+        .await;
+
+        let decoded = decode_personal_workflows_response::<serde_json::Value>(
+            response,
+            "failed to parse repository search response",
+            "missing route".to_string(),
+        )
+        .await
+        .expect("success response should decode");
+
+        assert_eq!(decoded["repositories"], serde_json::json!([]));
+    }
+
+    #[tokio::test]
+    async fn personal_workflows_response_reports_parse_error_shape() {
+        let response = response_with(
+            axum::http::StatusCode::OK,
+            "application/json",
+            "not json".to_string(),
+        )
+        .await;
+
+        let error = decode_personal_workflows_response::<serde_json::Value>(
+            response,
+            "failed to parse repository search response",
+            "missing route".to_string(),
+        )
+        .await
+        .expect_err("invalid success JSON should report parse error");
+
+        assert!(error.starts_with("failed to parse repository search response:"));
+    }
+
+    #[tokio::test]
+    async fn personal_workflows_response_uses_feature_hint_for_404() {
+        let response = response_with(
+            axum::http::StatusCode::NOT_FOUND,
+            "application/json",
+            String::new(),
+        )
+        .await;
+
+        let error = decode_personal_workflows_response::<serde_json::Value>(
+            response,
+            "failed to parse repository search response",
+            "backend at http://127.0.0.1:3210 does not expose /v1/dirs/repositories. Repository search requires SWIMMERS_PERSONAL_WORKFLOWS=1 on the target backend; if this is your local server, relaunch via `make up` or `make tui`.".to_string(),
+        )
+        .await
+        .expect_err("missing route should return feature hint");
+
+        assert!(error.contains("does not expose /v1/dirs/repositories"));
+        assert!(error.contains("SWIMMERS_PERSONAL_WORKFLOWS=1"));
+        assert!(error.contains("make tui"));
+    }
+
+    #[tokio::test]
+    async fn personal_workflows_response_preserves_generic_api_error_body() {
+        let body = serde_json::to_string(&ErrorResponse::with_message(
+            "VALIDATION_FAILED",
+            "bad repo action",
+        ))
+        .expect("serialize error body");
+        let response = response_with(
+            axum::http::StatusCode::BAD_REQUEST,
+            "application/json",
+            body,
+        )
+        .await;
+
+        let error = decode_personal_workflows_response::<serde_json::Value>(
+            response,
+            "failed to parse repo action response",
+            "missing route".to_string(),
+        )
+        .await
+        .expect_err("generic error should preserve API body");
+
+        assert_eq!(error, "VALIDATION_FAILED: bad repo action");
+    }
+
+    #[test]
+    fn openrouter_candidates_keep_non_empty_refresh_result() {
+        let models =
+            refreshed_openrouter_candidates_or_fallback(Ok(vec!["openrouter/test".to_string()]))
+                .expect("non-empty models");
+
+        assert_eq!(models, vec!["openrouter/test"]);
+    }
+
+    #[test]
+    fn openrouter_candidates_fall_back_when_refresh_is_empty() {
+        let models =
+            refreshed_openrouter_candidates_or_fallback(Ok(Vec::new())).expect("fallback models");
+
+        assert!(!models.is_empty());
+        assert_eq!(models, cached_or_default_openrouter_candidates());
+    }
+
+    #[test]
+    fn openrouter_candidates_preserve_refresh_errors() {
+        let error = refreshed_openrouter_candidates_or_fallback(Err("network down".to_string()))
+            .expect_err("refresh errors should pass through");
+
+        assert_eq!(error, "network down");
     }
 }

@@ -780,9 +780,17 @@ fn git_diff_timeline_summary(git_diff: &SessionGitDiffResponse) -> String {
 }
 
 fn git_diff_has_no_changes(git_diff: &SessionGitDiffResponse) -> bool {
-    git_diff.status_short.trim().is_empty()
-        && git_diff.unstaged_diff.trim().is_empty()
-        && git_diff.staged_diff.trim().is_empty()
+    [
+        git_diff.status_short.as_str(),
+        git_diff.unstaged_diff.as_str(),
+        git_diff.staged_diff.as_str(),
+    ]
+    .into_iter()
+    .all(str_is_blank)
+}
+
+fn str_is_blank(value: &str) -> bool {
+    value.trim().is_empty()
 }
 
 fn git_diff_timeline_detail(git_diff: &SessionGitDiffResponse) -> Option<String> {
@@ -898,25 +906,50 @@ fn session_ready_for_group_input(summary: &SessionSummary) -> bool {
 }
 
 fn group_input_batch_scope_error(summaries: &[SessionSummary]) -> Option<(&'static str, String)> {
-    if summaries.iter().any(|summary| summary.batch.is_none()) {
-        return Some((
-            "SESSION_NOT_IN_BATCH",
-            "session is not part of a batch".to_string(),
-        ));
-    }
-
     let batch_ids = summaries
         .iter()
-        .filter_map(|summary| summary.batch.as_ref().map(|batch| batch.id.as_str()))
-        .collect::<HashSet<_>>();
-    if batch_ids.len() > 1 {
-        return Some((
-            "SESSION_BATCH_MISMATCH",
-            "sessions are not in the same batch".to_string(),
-        ));
+        .map(|summary| summary.batch.as_ref().map(|batch| batch.id.as_str()));
+    GroupInputBatchScope::from_batch_ids(batch_ids).error()
+}
+
+#[derive(Default)]
+struct GroupInputBatchScope<'a> {
+    has_unbatched: bool,
+    first_batch_id: Option<&'a str>,
+    has_batch_mismatch: bool,
+}
+
+impl<'a> GroupInputBatchScope<'a> {
+    fn from_batch_ids(batch_ids: impl IntoIterator<Item = Option<&'a str>>) -> Self {
+        batch_ids
+            .into_iter()
+            .fold(Self::default(), Self::with_batch_id)
     }
 
-    None
+    fn with_batch_id(mut self, batch_id: Option<&'a str>) -> Self {
+        self.has_unbatched |= batch_id.is_none();
+        self.has_batch_mismatch |= self
+            .first_batch_id
+            .zip(batch_id)
+            .is_some_and(|(first, current)| first != current);
+        self.first_batch_id = self.first_batch_id.or(batch_id);
+        self
+    }
+
+    fn error(self) -> Option<(&'static str, String)> {
+        [
+            self.has_unbatched
+                .then_some(("SESSION_NOT_IN_BATCH", "session is not part of a batch")),
+            self.has_batch_mismatch.then_some((
+                "SESSION_BATCH_MISMATCH",
+                "sessions are not in the same batch",
+            )),
+        ]
+        .into_iter()
+        .flatten()
+        .next()
+        .map(|(code, message)| (code, message.to_string()))
+    }
 }
 
 fn group_input_bytes(text: &str) -> Vec<u8> {
@@ -2559,6 +2592,45 @@ esac
         );
     }
 
+    #[test]
+    fn git_diff_has_no_changes_treats_whitespace_only_fields_as_clean() {
+        let response = SessionGitDiffResponse {
+            session_id: "sess-diff".to_string(),
+            available: true,
+            cwd: "/tmp/project".to_string(),
+            repo_root: Some("/tmp/project".to_string()),
+            status_short: " \n\t".to_string(),
+            staged_diff: "\n".to_string(),
+            unstaged_diff: "\t".to_string(),
+            truncated: false,
+            message: None,
+            files: Vec::new(),
+        };
+
+        assert!(git_diff_has_no_changes(&response));
+    }
+
+    #[test]
+    fn git_diff_has_no_changes_detects_each_dirty_field() {
+        let response =
+            |status_short: &str, staged_diff: &str, unstaged_diff: &str| SessionGitDiffResponse {
+                session_id: "sess-diff".to_string(),
+                available: true,
+                cwd: "/tmp/project".to_string(),
+                repo_root: Some("/tmp/project".to_string()),
+                status_short: status_short.to_string(),
+                staged_diff: staged_diff.to_string(),
+                unstaged_diff: unstaged_diff.to_string(),
+                truncated: false,
+                message: None,
+                files: Vec::new(),
+            };
+
+        assert!(!git_diff_has_no_changes(&response(" M app.txt", "", "")));
+        assert!(!git_diff_has_no_changes(&response("", "diff --git", "")));
+        assert!(!git_diff_has_no_changes(&response("", "", "diff --git")));
+    }
+
     #[tokio::test]
     async fn get_timeline_keeps_working_without_structured_context() {
         let state = test_state();
@@ -2756,6 +2828,41 @@ esac
     #[test]
     fn group_input_bytes_appends_double_enter_for_agent_delivery() {
         assert_eq!(group_input_bytes("ship it"), b"ship it\r\r");
+    }
+
+    #[test]
+    fn group_input_batch_scope_error_accepts_single_batch() {
+        let summaries = vec![
+            with_test_batch(summary("batch-a-1", SessionState::Idle), "batch-a"),
+            with_test_batch(summary("batch-a-2", SessionState::Idle), "batch-a"),
+        ];
+
+        assert_eq!(group_input_batch_scope_error(&summaries), None);
+    }
+
+    #[test]
+    fn group_input_batch_scope_error_rejects_unbatched_sessions_first() {
+        let summaries = vec![
+            summary("unbatched", SessionState::Idle),
+            with_test_batch(summary("batch-a", SessionState::Idle), "batch-a"),
+            with_test_batch(summary("batch-b", SessionState::Idle), "batch-b"),
+        ];
+
+        let (code, message) = group_input_batch_scope_error(&summaries).expect("scope error");
+        assert_eq!(code, "SESSION_NOT_IN_BATCH");
+        assert_eq!(message, "session is not part of a batch");
+    }
+
+    #[test]
+    fn group_input_batch_scope_error_rejects_mixed_batches() {
+        let summaries = vec![
+            with_test_batch(summary("batch-a", SessionState::Idle), "batch-a"),
+            with_test_batch(summary("batch-b", SessionState::Idle), "batch-b"),
+        ];
+
+        let (code, message) = group_input_batch_scope_error(&summaries).expect("scope error");
+        assert_eq!(code, "SESSION_BATCH_MISMATCH");
+        assert_eq!(message, "sessions are not in the same batch");
     }
 
     #[tokio::test]

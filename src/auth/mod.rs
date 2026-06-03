@@ -129,6 +129,16 @@ fn token_mode_auth_info(config: &Config, request: &Request) -> Result<AuthInfo, 
     Err(not_authenticated_response())
 }
 
+#[allow(clippy::result_large_err)]
+fn auth_info_for_request(config: &Config, request: &Request) -> Result<AuthInfo, Response> {
+    match config.auth_mode {
+        AuthMode::LocalTrust | AuthMode::TailnetTrust => {
+            Ok(AuthInfo::new(OPERATOR_SCOPES.to_vec()))
+        }
+        AuthMode::Token => token_mode_auth_info(config, request),
+    }
+}
+
 fn bearer_tokens_eq(provided: &str, expected: &str) -> bool {
     provided.as_bytes().ct_eq(expected.as_bytes()).into()
 }
@@ -144,12 +154,9 @@ fn bearer_tokens_eq(provided: &str, expected: &str) -> bool {
 /// against [`Config::auth_token`]. A missing or invalid token results in a 401
 /// JSON response.
 pub async fn auth_middleware(config: Arc<Config>, mut request: Request, next: Next) -> Response {
-    let auth_info = match config.auth_mode {
-        AuthMode::LocalTrust | AuthMode::TailnetTrust => AuthInfo::new(OPERATOR_SCOPES.to_vec()),
-        AuthMode::Token => match token_mode_auth_info(&config, &request) {
-            Ok(info) => info,
-            Err(response) => return response,
-        },
+    let auth_info = match auth_info_for_request(&config, &request) {
+        Ok(info) => info,
+        Err(response) => return response,
     };
 
     request.extensions_mut().insert(auth_info);
@@ -373,5 +380,49 @@ mod tests {
         let observer = token_mode_auth_info(&config, &observer_request).expect("observer auth");
         assert!(observer.has_scope(AuthScope::SessionsRead));
         assert!(!observer.has_scope(AuthScope::SessionsWrite));
+    }
+
+    #[test]
+    fn auth_info_for_request_trust_modes_grant_operator_scopes() {
+        let request = Request::builder()
+            .uri("/test")
+            .body(axum::body::Body::empty())
+            .unwrap();
+
+        for auth_mode in [AuthMode::LocalTrust, AuthMode::TailnetTrust] {
+            let config = Config {
+                auth_mode,
+                ..Config::default()
+            };
+            let info = auth_info_for_request(&config, &request).expect("trust mode auth");
+
+            assert!(info.has_scope(AuthScope::SessionsRead));
+            assert!(info.has_scope(AuthScope::SessionsWrite));
+            assert!(info.has_scope(AuthScope::StreamWrite));
+        }
+    }
+
+    #[test]
+    fn auth_info_for_request_token_mode_delegates_to_token_validation() {
+        let mut request = Request::builder()
+            .uri("/test")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        request.headers_mut().insert(
+            "authorization",
+            axum::http::HeaderValue::from_static("Bearer observer"),
+        );
+        let config = Config {
+            auth_mode: AuthMode::Token,
+            auth_token: Some("secret".to_string()),
+            observer_token: Some("observer".to_string()),
+            ..Config::default()
+        };
+
+        let info = auth_info_for_request(&config, &request).expect("observer auth");
+
+        assert!(info.has_scope(AuthScope::SessionsRead));
+        assert!(!info.has_scope(AuthScope::SessionsWrite));
+        assert!(!info.has_scope(AuthScope::StreamWrite));
     }
 }
