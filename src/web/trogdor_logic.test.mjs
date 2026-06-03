@@ -42,6 +42,7 @@ import {
   trogdorReaderBaseIndexForProgress,
   trogdorReaderStateForWpmChange,
   trogdorReaderTimerAction,
+  trogdorReaderToggleAction,
   trogdorReaderWordIndexForProgress,
   trogdorRawSessionForHover,
   trogdorSessionCanReadForState,
@@ -448,6 +449,47 @@ test("Trogdor reader timer action preserves run-state decisions and short-circui
     ["canRead", "agent-1"],
     ["canRead", "agent-1"],
   ]);
+});
+
+test("Trogdor reader toggle action preserves pause, resume, and read-again decisions", () => {
+  const item = session();
+  const calls = [];
+  const readComplete = (value) => {
+    calls.push(value.sessionId);
+    return value.sessionId === "done";
+  };
+
+  assert.deepEqual(trogdorReaderToggleAction(true, item, readComplete), {
+    session: null,
+    reading: false,
+    readAgain: false,
+    restartClock: false,
+  });
+  assert.deepEqual(trogdorReaderToggleAction(undefined, item, readComplete), {
+    session: null,
+    reading: false,
+    readAgain: false,
+    restartClock: false,
+  });
+  assert.deepEqual(trogdorReaderToggleAction(false, null, readComplete), {
+    session: null,
+    reading: true,
+    readAgain: false,
+    restartClock: true,
+  });
+  assert.deepEqual(trogdorReaderToggleAction(false, item, readComplete), {
+    session: item,
+    reading: null,
+    readAgain: false,
+    restartClock: true,
+  });
+  assert.deepEqual(trogdorReaderToggleAction(false, session({ sessionId: "done" }), readComplete), {
+    session: session({ sessionId: "done" }),
+    reading: null,
+    readAgain: true,
+    restartClock: true,
+  });
+  assert.deepEqual(calls, ["agent-1", "done"]);
 });
 
 test("Trogdor reader advancement helpers clamp progress and preserve WPM restart state", () => {

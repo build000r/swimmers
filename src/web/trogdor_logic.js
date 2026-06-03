@@ -267,6 +267,25 @@ export function trogdorReaderTimerAction(
   return "keep";
 }
 
+export function trogdorReaderToggleAction(
+  reading = true,
+  session = null,
+  readComplete = () => false,
+) {
+  if (reading !== false) {
+    return { session: null, reading: false, readAgain: false, restartClock: false };
+  }
+  if (!session) {
+    return { session: null, reading: true, readAgain: false, restartClock: true };
+  }
+  return {
+    session,
+    reading: null,
+    readAgain: Boolean(readComplete(session)),
+    restartClock: true,
+  };
+}
+
 export function trogdorReaderProgressAdvanceForSession(
   session,
   {

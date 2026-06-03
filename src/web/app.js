@@ -61,6 +61,7 @@ import {
   trogdorReaderProgressAdvanceForSession,
   trogdorReaderStateForWpmChange,
   trogdorReaderTimerAction,
+  trogdorReaderToggleAction,
   trogdorReaderWordIndexForProgress,
   trogdorRawSessionForHover,
   trogdorSessionCanReadForState,
@@ -4817,19 +4818,11 @@ async function handleSurfaceAction(zone) {
   switch (zone.actionId) {
     case "trogdor_read_toggle":
     {
-      const wasReading = state.trogdorReading !== false;
       advanceTrogdorReaderProgressForCurrentHover();
-      if (wasReading) {
-        state.trogdorReading = false;
-      } else {
-        const session = currentTrogdorSurfaceSession();
-        if (session) {
-          startTrogdorReaderForSession(session, { readAgain: trogdorClawgReadComplete(session) });
-        } else {
-          state.trogdorReading = true;
-        }
-        state.trogdorReaderStartedAt = performance.now();
-      }
+      const toggle = trogdorReaderToggleAction(state.trogdorReading, currentTrogdorSurfaceSession(), trogdorClawgReadComplete);
+      if (toggle.session) startTrogdorReaderForSession(toggle.session, { readAgain: toggle.readAgain });
+      if (toggle.reading !== null) state.trogdorReading = toggle.reading;
+      if (toggle.restartClock) state.trogdorReaderStartedAt = performance.now();
       renderHudSurface();
       syncTrogdorReaderTimer();
       break;
