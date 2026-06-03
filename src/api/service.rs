@@ -21,7 +21,7 @@ use crate::operator_pressure::session_ready_for_operator_group_input;
 use crate::persistence::file_store::FileStore;
 use crate::session::actor::{ActorHandle, SessionCommand};
 use crate::session::overlay::{
-    default_overlay, OverlayDirConfig, OverlayDirGroup, OverlayServiceEntry,
+    default_overlay, OverlayDirConfig, OverlayDirGroup, OverlayLaunchConfig, OverlayServiceEntry,
 };
 use crate::thought::probe::{run_thought_config_probe, ThoughtConfigProbeResult};
 use crate::thought::runtime_config::ThoughtConfig;
@@ -50,6 +50,7 @@ const REPO_SEARCH_ROOTS_ENV: &str = "SWIMMERS_REPO_SEARCH_ROOTS";
 const REPO_SEARCH_MAX_DEPTH_ENV: &str = "SWIMMERS_REPO_SEARCH_MAX_DEPTH";
 const REPO_SEARCH_DEFAULT_MAX_DEPTH: usize = 8;
 const REPO_SEARCH_CACHE_TTL: Duration = Duration::from_secs(60);
+const BV_WORKSPACES_DIR: &str = "workspaces";
 const NATIVE_ATTENTION_GROUP_SESSION_ID: &str = "attention-group";
 const NATIVE_ATTENTION_GROUP_TMUX_NAME: &str = "swimmers-attention";
 
@@ -98,6 +99,18 @@ struct RepoSearchCacheEntry {
     max_depth: usize,
     generated_at: Instant,
     entries: Vec<DirEntry>,
+}
+
+#[derive(serde::Deserialize)]
+struct BvWorkspaceFile {
+    #[serde(default)]
+    repos: Vec<BvWorkspaceRepo>,
+}
+
+#[derive(serde::Deserialize)]
+struct BvWorkspaceRepo {
+    #[serde(default)]
+    path: Option<String>,
 }
 
 static REPO_SEARCH_CACHE: OnceLock<Mutex<Option<RepoSearchCacheEntry>>> = OnceLock::new();
@@ -730,6 +743,198 @@ async fn list_repo_search_entries_inner(
 pub fn resolve_dir_config(path: &Path) -> Option<&'static OverlayDirConfig> {
     let overlay = default_overlay()?;
     overlay.find_dir_config(&path.to_string_lossy())
+}
+
+fn effective_dir_config_for_base(base: &Path) -> Option<OverlayDirConfig> {
+    let workspace_groups = workspace_dir_groups_for_base(base);
+    if let Some(mut config) = resolve_dir_config(base).cloned() {
+        if !workspace_groups.is_empty() {
+            let overlay_groups = std::mem::take(&mut config.groups);
+            config.groups = workspace_groups;
+            merge_dir_groups(&mut config.groups, overlay_groups);
+        }
+        return Some(config);
+    }
+
+    (!workspace_groups.is_empty()).then(|| OverlayDirConfig {
+        label: "workspaces".to_string(),
+        base_path: base.to_path_buf(),
+        services: Vec::new(),
+        groups: workspace_groups,
+        launch: OverlayLaunchConfig::local_only(),
+    })
+}
+
+fn workspace_dir_groups_for_base(base: &Path) -> Vec<OverlayDirGroup> {
+    let mut groups = Vec::new();
+    for root in workspace_roots_for_base(base) {
+        merge_dir_groups(&mut groups, workspace_yaml_groups(base, &root));
+        merge_dir_groups(&mut groups, plain_workspace_folder_groups(&root));
+    }
+    groups
+}
+
+fn workspace_roots_for_base(base: &Path) -> Vec<PathBuf> {
+    let candidates = [
+        base.join(".bv").join(BV_WORKSPACES_DIR),
+        base.join(BV_WORKSPACES_DIR),
+    ];
+    let mut seen = BTreeSet::new();
+    candidates
+        .into_iter()
+        .filter(|path| path.is_dir())
+        .filter_map(|path| {
+            let canonical = path.canonicalize().unwrap_or(path);
+            seen.insert(canonical.clone()).then_some(canonical)
+        })
+        .collect()
+}
+
+fn workspace_yaml_groups(base: &Path, root: &Path) -> Vec<OverlayDirGroup> {
+    let Ok(read_dir) = std::fs::read_dir(root) else {
+        return Vec::new();
+    };
+
+    let mut groups = Vec::new();
+    for entry in read_dir.flatten() {
+        let path = entry.path();
+        if !path.is_file() || !is_yaml_path(&path) {
+            continue;
+        }
+        let Some(name) = path
+            .file_stem()
+            .map(|name| name.to_string_lossy().into_owned())
+            .filter(|name| !name.starts_with('.'))
+        else {
+            continue;
+        };
+        let Ok(content) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let Ok(workspace) = serde_yaml::from_str::<BvWorkspaceFile>(&content) else {
+            continue;
+        };
+        let paths = workspace
+            .repos
+            .into_iter()
+            .filter_map(|repo| repo.path)
+            .map(|path| expand_workspace_repo_path(base, &path))
+            .filter(|path| path.is_dir())
+            .collect::<Vec<_>>();
+        if let Some(group) = dir_group_from_exact_paths(name, paths) {
+            groups.push(group);
+        }
+    }
+    groups.sort_by(|left, right| left.name.cmp(&right.name));
+    groups
+}
+
+fn plain_workspace_folder_groups(root: &Path) -> Vec<OverlayDirGroup> {
+    let Ok(read_dir) = std::fs::read_dir(root) else {
+        return Vec::new();
+    };
+
+    let mut groups = Vec::new();
+    for entry in read_dir.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let Some(name) = path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .filter(|name| !name.starts_with('.'))
+        else {
+            continue;
+        };
+        let paths = workspace_folder_entry_paths(&path);
+        if let Some(group) = dir_group_from_exact_paths(name, paths) {
+            groups.push(group);
+        }
+    }
+    groups.sort_by(|left, right| left.name.cmp(&right.name));
+    groups
+}
+
+fn workspace_folder_entry_paths(root: &Path) -> Vec<PathBuf> {
+    let Ok(read_dir) = std::fs::read_dir(root) else {
+        return Vec::new();
+    };
+
+    read_dir
+        .flatten()
+        .filter_map(|entry| {
+            let path = entry.path();
+            let name = path.file_name()?.to_string_lossy();
+            (!name.starts_with('.') && path.is_dir()).then_some(path)
+        })
+        .collect()
+}
+
+fn dir_group_from_exact_paths(name: String, paths: Vec<PathBuf>) -> Option<OverlayDirGroup> {
+    let mut seen = BTreeSet::new();
+    let paths = paths
+        .into_iter()
+        .filter(|path| seen.insert(path.canonicalize().unwrap_or_else(|_| path.clone())))
+        .collect::<Vec<_>>();
+    (!paths.is_empty()).then_some(OverlayDirGroup {
+        name,
+        paths,
+        dirs: Vec::new(),
+    })
+}
+
+fn merge_dir_groups(target: &mut Vec<OverlayDirGroup>, additions: Vec<OverlayDirGroup>) {
+    for mut group in additions {
+        if let Some(existing) = target.iter_mut().find(|existing| existing.name == group.name) {
+            extend_unique_paths(&mut existing.paths, std::mem::take(&mut group.paths));
+            extend_unique_paths(&mut existing.dirs, std::mem::take(&mut group.dirs));
+        } else {
+            target.push(group);
+        }
+    }
+}
+
+fn extend_unique_paths(target: &mut Vec<PathBuf>, additions: Vec<PathBuf>) {
+    let mut seen = target
+        .iter()
+        .map(|path| path.canonicalize().unwrap_or_else(|_| path.clone()))
+        .collect::<BTreeSet<_>>();
+    for path in additions {
+        let key = path.canonicalize().unwrap_or_else(|_| path.clone());
+        if seen.insert(key) {
+            target.push(path);
+        }
+    }
+}
+
+fn expand_workspace_repo_path(base: &Path, raw: &str) -> PathBuf {
+    let expanded = expand_workspace_path(raw.trim());
+    let path = PathBuf::from(expanded);
+    if path.is_absolute() {
+        path
+    } else {
+        base.join(path)
+    }
+}
+
+fn expand_workspace_path(raw: &str) -> String {
+    let Some(home) = dirs::home_dir() else {
+        return raw.to_string();
+    };
+    if raw == "~" {
+        return home.to_string_lossy().into_owned();
+    }
+    raw.strip_prefix("~/")
+        .map(|suffix| home.join(suffix).to_string_lossy().into_owned())
+        .unwrap_or_else(|| raw.to_string())
+}
+
+fn is_yaml_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .map(|extension| matches!(extension, "yaml" | "yml"))
+        .unwrap_or(false)
 }
 
 /// Compute which top-level children of `base` are "managed" by the overlay.
@@ -1474,12 +1679,12 @@ pub async fn list_dirs(
         .unwrap_or_else(|| base.clone());
 
     let (canonical_base, canonical) = resolve_target_path(base, target)?;
-    let dir_config = resolve_dir_config(&canonical_base);
+    let dir_config = effective_dir_config_for_base(&canonical_base);
     if let Some(response) = list_managed_root_response(
         state,
         canonical_base.as_path(),
         canonical.as_path(),
-        dir_config,
+        dir_config.as_ref(),
         &memberships,
         managed_only,
         request_started,
@@ -1492,7 +1697,7 @@ pub async fn list_dirs(
     list_regular_dir_response(
         state,
         canonical.as_path(),
-        dir_config,
+        dir_config.as_ref(),
         &memberships,
         managed_only,
         request_started,
@@ -1514,22 +1719,22 @@ pub async fn update_dir_group_memberships(
 
     let base = dirs_base_path();
     let canonical_base = base.canonicalize().unwrap_or(base.clone());
-    let dir_config = resolve_dir_config(&canonical_base).ok_or_else(|| {
+    let dir_config = effective_dir_config_for_base(&canonical_base).ok_or_else(|| {
         ApiServiceError::new(
             StatusCode::SERVICE_UNAVAILABLE,
             "OVERLAY_UNAVAILABLE",
-            "directory group edits require an overlay with directory groups",
+            "directory group edits require a configured directory group source",
         )
     })?;
     if dir_config.groups.is_empty() {
         return Err(ApiServiceError::new(
             StatusCode::SERVICE_UNAVAILABLE,
             "GROUPS_UNAVAILABLE",
-            "no directory groups are configured for this overlay",
+            "no directory groups are configured",
         ));
     }
 
-    update_dir_group_memberships_with_config(store, &canonical_base, dir_config, body).await
+    update_dir_group_memberships_with_config(store, &canonical_base, &dir_config, body).await
 }
 
 async fn update_dir_group_memberships_with_config(
@@ -1677,8 +1882,10 @@ async fn list_group_dir_response(
     memberships: &DirGroupMemberships,
 ) -> Result<DirListResponse, ApiServiceError> {
     let canonical_base = base.canonicalize().unwrap_or(base.clone());
-    let dir_config = resolve_dir_config(&canonical_base);
-    let group = dir_config.and_then(|config| config.groups.iter().find(|g| g.name == group_name));
+    let dir_config = effective_dir_config_for_base(&canonical_base);
+    let group = dir_config
+        .as_ref()
+        .and_then(|config| config.groups.iter().find(|g| g.name == group_name));
     let Some(group) = group else {
         return Err(ApiServiceError::new(
             StatusCode::NOT_FOUND,
@@ -1687,16 +1894,16 @@ async fn list_group_dir_response(
         ));
     };
     let mut entries = list_effective_group_entries(group, memberships).await;
-    if let Some(config) = dir_config {
+    if let Some(config) = dir_config.as_ref() {
         annotate_dir_entry_groups(&mut entries, &canonical_base, config, memberships);
     }
     Ok(DirListResponse {
         path: canonical_base.to_string_lossy().into_owned(),
         entries,
-        overlay_label: dir_config.map(|c| c.label.clone()),
-        groups: dir_groups(dir_config),
-        launch_targets: launch_targets_for(dir_config),
-        default_launch_target: default_launch_target_for(dir_config, Some(group_name)),
+        overlay_label: dir_config.as_ref().map(|c| c.label.clone()),
+        groups: dir_groups(dir_config.as_ref()),
+        launch_targets: launch_targets_for(dir_config.as_ref()),
+        default_launch_target: default_launch_target_for(dir_config.as_ref(), Some(group_name)),
     })
 }
 
@@ -2131,11 +2338,7 @@ pub async fn open_native_attention_group_for_host(
     let app = *state.native_desktop_app.read().await;
     let ghostty_mode = *state.ghostty_open_mode.read().await;
     let status = native::support_for_host(host, app);
-    if !status.supported {
-        return Err(NativeOpenServiceError::Unsupported {
-            reason: status.reason,
-        });
-    }
+    let focus_native_desktop = request.focus && status.supported;
 
     let plan = plan_attention_group_sessions(
         state.supervisor.list_sessions().await,
@@ -2156,7 +2359,7 @@ pub async fn open_native_attention_group_for_host(
         app,
         ghostty_mode,
         &plan.visible,
-        request.focus,
+        focus_native_desktop,
         request.layout.unwrap_or_default(),
     )
     .await
@@ -2444,6 +2647,148 @@ mod tests {
             )),
             repo_actions: crate::host_actions::RepoActionTracker::default(),
         })
+    }
+
+    fn write_workspace_yaml(path: &Path, repo: &Path) {
+        std::fs::write(
+            path,
+            format!(
+                "---\nrepos:\n- name: swimmers\n  path: \"{}\"\n  prefix: swimmers\n",
+                repo.to_string_lossy()
+            ),
+        )
+        .expect("write workspace yaml");
+    }
+
+    #[test]
+    fn bv_workspace_yaml_files_become_exact_groups_and_skip_invalid_files() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let base = dir.path().join("repos");
+        let repo = base.join("opensource").join("swimmers");
+        let workspaces = base.join(".bv").join(BV_WORKSPACES_DIR);
+        std::fs::create_dir_all(&repo).expect("repo");
+        std::fs::create_dir_all(&workspaces).expect("workspaces");
+        write_workspace_yaml(&workspaces.join("orchestration.yaml"), &repo);
+        std::fs::write(workspaces.join("broken.yaml"), "repos: [").expect("broken yaml");
+
+        let groups = workspace_dir_groups_for_base(&base);
+        let names = groups
+            .iter()
+            .map(|group| group.name.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(names, vec!["orchestration"]);
+
+        let entries = list_group_entries_sync(
+            groups
+                .iter()
+                .find(|group| group.name == "orchestration")
+                .expect("orchestration group"),
+        );
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].name, "swimmers");
+        assert_eq!(
+            entries[0].full_path.as_deref(),
+            Some(
+                repo.canonicalize()
+                    .expect("canonical repo")
+                    .to_string_lossy()
+                    .as_ref()
+            )
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bv_workspace_root_may_be_symlinked() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let base = dir.path().join("repos");
+        let repo = base.join("opensource").join("skillbox");
+        let target = dir.path().join("shared-workspaces");
+        std::fs::create_dir_all(&repo).expect("repo");
+        std::fs::create_dir_all(&target).expect("target workspaces");
+        std::fs::create_dir_all(base.join(".bv")).expect("bv dir");
+        write_workspace_yaml(&target.join("skillbox.yaml"), &repo);
+        std::os::unix::fs::symlink(&target, base.join(".bv").join(BV_WORKSPACES_DIR))
+            .expect("workspace symlink");
+
+        let groups = workspace_dir_groups_for_base(&base);
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].name, "skillbox");
+        assert_eq!(
+            groups[0].paths,
+            vec![repo.canonicalize().expect("canonical repo")]
+        );
+    }
+
+    #[test]
+    fn plain_workspaces_folder_subdirs_become_groups() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let base = dir.path().join("repos");
+        let repo = base.join(BV_WORKSPACES_DIR).join("mobile").join("ios-app");
+        std::fs::create_dir_all(&repo).expect("repo");
+
+        let groups = workspace_dir_groups_for_base(&base);
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].name, "mobile");
+
+        let entries = list_group_entries_sync(&groups[0]);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].name, "ios-app");
+        assert!(!entries[0].has_children);
+        assert_eq!(
+            entries[0].full_path.as_deref(),
+            Some(
+                repo.canonicalize()
+                    .expect("canonical repo")
+                    .to_string_lossy()
+                    .as_ref()
+            )
+        );
+    }
+
+    #[tokio::test]
+    async fn list_group_dir_response_uses_bv_workspace_groups_without_overlay() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let base = dir.path().join("repos");
+        let repo = dir.path().join("outside").join("swimmers");
+        let workspaces = base.join(".bv").join(BV_WORKSPACES_DIR);
+        std::fs::create_dir_all(&repo).expect("repo");
+        std::fs::create_dir_all(&workspaces).expect("workspaces");
+        write_workspace_yaml(&workspaces.join("orchestration.yaml"), &repo);
+
+        let response =
+            list_group_dir_response(base.clone(), "orchestration", &DirGroupMemberships::default())
+                .await
+                .expect("workspace group response");
+
+        assert_eq!(response.groups, vec!["orchestration".to_string()]);
+        assert_eq!(response.entries.len(), 1);
+        assert_eq!(response.entries[0].name, "swimmers");
+        assert_eq!(
+            response.entries[0].groups,
+            vec!["orchestration".to_string()]
+        );
+    }
+
+    #[test]
+    fn workspace_group_paths_are_allowed_for_membership_updates_outside_base() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let base = dir.path().join("repos");
+        let repo = dir.path().join("outside").join("swimmers");
+        let workspaces = base.join(".bv").join(BV_WORKSPACES_DIR);
+        std::fs::create_dir_all(&repo).expect("repo");
+        std::fs::create_dir_all(&workspaces).expect("workspaces");
+        write_workspace_yaml(&workspaces.join("orchestration.yaml"), &repo);
+        let config = effective_dir_config_for_base(&base).expect("workspace config");
+
+        let resolved = resolve_group_membership_path(
+            &base.canonicalize().expect("canonical base"),
+            &repo.to_string_lossy(),
+            &config,
+        )
+        .expect("workspace repo path allowed");
+
+        assert_eq!(resolved, repo.canonicalize().expect("canonical repo"));
     }
 
     #[test]

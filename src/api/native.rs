@@ -240,7 +240,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn native_open_attention_group_rejects_non_loopback_peer() {
+    async fn native_open_attention_group_uses_tmux_fallback_for_non_loopback_peer() {
         let response = native_open_attention_group(
             Extension(AuthInfo::new(OPERATOR_SCOPES.to_vec())),
             State(test_state()),
@@ -256,9 +256,10 @@ mod tests {
         .await
         .into_response();
 
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(response.status(), NATIVE_OPEN_FAILED.status);
         let json = response_json(response).await;
-        assert_eq!(json["code"], "NATIVE_DESKTOP_UNAVAILABLE");
+        assert_eq!(json["code"], NATIVE_OPEN_FAILED.code);
+        assert_eq!(json["message"], "no sessions are waiting for operator input");
     }
 
     #[tokio::test]

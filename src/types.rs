@@ -1083,6 +1083,8 @@ pub struct NativeAttentionGroupOpenResponse {
     pub focused: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pane_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attach_command: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

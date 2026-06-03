@@ -6,7 +6,93 @@ source "${ROOT_DIR}/scripts/web-common.sh"
 cd "${ROOT_DIR}"
 
 PORT="${PORT:-3210}"
-BASE_URL="http://127.0.0.1:${PORT}"
+
+trim_value() {
+  local value="${1:-}"
+  value="${value#"${value%%[![:space:]]*}"}"
+  value="${value%"${value##*[![:space:]]}"}"
+  printf '%s\n' "${value}"
+}
+
+bind_host() {
+  local bind
+  bind="$(trim_value "${1:-}")"
+  if [[ -z "${bind}" ]]; then
+    printf '127.0.0.1\n'
+    return 0
+  fi
+
+  if [[ "${bind}" == \[*\]* ]]; then
+    bind="${bind#\[}"
+    printf '%s\n' "${bind%%\]*}"
+    return 0
+  fi
+
+  if [[ "${bind}" =~ ^([^:]+):[0-9]+$ ]]; then
+    printf '%s\n' "${BASH_REMATCH[1]}"
+    return 0
+  fi
+
+  printf '%s\n' "${bind}"
+}
+
+url_host_for_bind_host() {
+  local host="${1:-127.0.0.1}"
+  case "${host}" in
+    ""|0.0.0.0)
+      printf '127.0.0.1\n'
+      ;;
+    ::)
+      printf '[::1]\n'
+      ;;
+    *:*)
+      printf '[%s]\n' "${host}"
+      ;;
+    *)
+      printf '%s\n' "${host}"
+      ;;
+  esac
+}
+
+connect_host_for_bind_host() {
+  local host="${1:-127.0.0.1}"
+  case "${host}" in
+    ""|0.0.0.0)
+      printf '127.0.0.1\n'
+      ;;
+    ::)
+      printf '::1\n'
+      ;;
+    *)
+      printf '%s\n' "${host}"
+      ;;
+  esac
+}
+
+host_is_loopback() {
+  case "${1:-}" in
+    localhost|127.*|::1) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+host_is_wildcard() {
+  case "${1:-}" in
+    0.0.0.0|::) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+tailscale_ipv4() {
+  if command -v tailscale >/dev/null 2>&1; then
+    tailscale ip -4 2>/dev/null | head -1 || true
+  fi
+}
+
+BIND_HOST="$(bind_host "${SWIMMERS_BIND:-127.0.0.1}")"
+URL_HOST="$(url_host_for_bind_host "${BIND_HOST}")"
+CONNECT_HOST="$(connect_host_for_bind_host "${BIND_HOST}")"
+BASE_URL="http://${URL_HOST}:${PORT}"
 WEB_ROUTE_PATH="${WEB_ROUTE_PATH:-/app.js}"
 HEALTH_ROUTE_PATH="${HEALTH_ROUTE_PATH:-/health}"
 API_ROUTE_PATH="${API_ROUTE_PATH:-/v1/sessions}"
@@ -50,15 +136,22 @@ fi
 announce_urls() {
   printf 'swimmers shared backend\n'
   printf '  tui api:  %s\n' "${BASE_URL}"
-  printf '  local:    http://127.0.0.1:%s/\n' "${PORT}"
-  printf '  selected: http://127.0.0.1:%s/selected\n' "${PORT}"
+  if host_is_loopback "${BIND_HOST}" || host_is_wildcard "${BIND_HOST}"; then
+    printf '  local:    http://127.0.0.1:%s/\n' "${PORT}"
+    printf '  selected: http://127.0.0.1:%s/selected\n' "${PORT}"
+  else
+    printf '  local:    not exposed (backend bound to %s)\n' "${BIND_HOST}"
+  fi
 
-  if command -v tailscale >/dev/null 2>&1; then
-    local tailnet_ip
-    tailnet_ip="$(tailscale ip -4 2>/dev/null | head -1 || true)"
-    if [[ -n "${tailnet_ip}" ]]; then
+  local tailnet_ip
+  tailnet_ip="$(tailscale_ipv4)"
+  if [[ -n "${tailnet_ip}" ]]; then
+    if [[ "${BIND_HOST}" == "${tailnet_ip}" ]] || host_is_wildcard "${BIND_HOST}"; then
       printf '  tailnet:  http://%s:%s/\n' "${tailnet_ip}" "${PORT}"
       printf '  focused:  http://%s:%s/selected\n' "${tailnet_ip}" "${PORT}"
+    else
+      printf '  tailnet:  not exposed (set SWIMMERS_BIND=%s AUTH_MODE=tailnet_trust)\n' \
+        "${tailnet_ip}"
     fi
   fi
 
@@ -69,6 +162,7 @@ status_for() {
   local url="${1}"
   local max_time="${2:-2}"
   curl -sS -o /dev/null -w '%{http_code}' \
+    --noproxy '*' \
     --connect-timeout 1 \
     --max-time "${max_time}" \
     "${url}" \
@@ -102,13 +196,6 @@ api_status_looks_like_swimmers() {
   esac
 }
 
-personal_workflows_enabled() {
-  case "${SWIMMERS_PERSONAL_WORKFLOWS:-1}" in
-    0|false|FALSE|False|no|NO|No|off|OFF|Off|disabled|DISABLED|Disabled) return 1 ;;
-    *) return 0 ;;
-  esac
-}
-
 backend_is_ready() {
   local web_status="${1:-}"
   local api_status="${2:-}"
@@ -118,14 +205,9 @@ backend_is_ready() {
 
   api_status_looks_like_swimmers "${health_status}" \
     && [[ "${web_status}" == "200" ]] \
-    && api_status_looks_like_swimmers "${api_status}" || return 1
-
-  if personal_workflows_enabled; then
-    dirs_status_looks_compatible "${dirs_status}" \
-      && api_status_looks_like_swimmers "${skills_status}"
-  else
-    return 0
-  fi
+    && api_status_looks_like_swimmers "${api_status}" \
+    && dirs_status_looks_compatible "${dirs_status}" \
+    && api_status_looks_like_swimmers "${skills_status}"
 }
 
 dirs_status_looks_compatible() {
@@ -170,10 +252,8 @@ backend_has_explicit_route_failure() {
   api_status_looks_like_swimmers "${health_status}" || return 1
   status_is_explicit_failure "${web_status}" exact:200 && return 0
   status_is_explicit_failure "${api_status}" api && return 0
-  if personal_workflows_enabled; then
-    status_is_explicit_failure "${dirs_status}" dirs && return 0
-    status_is_explicit_failure "${skills_status}" api && return 0
-  fi
+  status_is_explicit_failure "${dirs_status}" dirs && return 0
+  status_is_explicit_failure "${skills_status}" api && return 0
   return 1
 }
 
@@ -183,7 +263,7 @@ port_has_listener() {
     return 0
   fi
 
-  (: <"/dev/tcp/127.0.0.1/${PORT}") >/dev/null 2>&1
+  (: <"/dev/tcp/${CONNECT_HOST}/${PORT}") >/dev/null 2>&1
 }
 
 listener_summary() {
@@ -258,15 +338,15 @@ wait_for_listener_to_stop() {
 
 stop_swimmers_listener() {
   local pid="${1}"
-  printf 'Restarting incompatible local swimmers backend on 127.0.0.1:%s (pid %s)\n' \
-    "${PORT}" \
+  printf 'Restarting incompatible swimmers backend on %s (pid %s)\n' \
+    "${BASE_URL}" \
     "${pid}"
   kill "${pid}" 2>/dev/null || true
   if wait_for_listener_to_stop; then
     return 0
   fi
 
-  printf 'listener on 127.0.0.1:%s did not stop after signal\n' "${PORT}" >&2
+  printf 'listener on %s did not stop after signal\n' "${BASE_URL}" >&2
   return 1
 }
 
@@ -377,7 +457,7 @@ wait_for_backend() {
     skills_status="$(skills_route_status)"
     if backend_is_ready "${web_status}" "${api_status}" "${dirs_status}" "${skills_status}" "${health_status}"; then
       printf 'Backend ready on %s (pid %s)\n\n' "${BASE_URL}" "${server_pid}"
-      if personal_workflows_enabled && [[ "${dirs_status}" == "000" ]]; then
+      if [[ "${dirs_status}" == "000" ]]; then
         printf '  note: %s did not answer within the short startup probe; continuing because %s is healthy.\n\n' \
           "${DIRS_ROUTE_PATH}" \
           "${HEALTH_ROUTE_PATH}"
@@ -442,22 +522,22 @@ ensure_backend() {
   if [[ -n "${pid}" ]] && is_swimmers_command "${command_line}"; then
     if backend_is_ready "${web_status}" "${api_status}" "${dirs_status}" "${skills_status}" "${health_status}"; then
       if listener_matches_binary "${pid}" "${server_bin}"; then
-        printf 'Existing swimmers backend on 127.0.0.1:%s is current; reusing pid %s.\n' \
-          "${PORT}" \
+        printf 'Existing swimmers backend on %s is current; reusing pid %s.\n' \
+          "${BASE_URL}" \
           "${pid}"
-        if personal_workflows_enabled && [[ "${dirs_status}" == "000" ]]; then
+        if [[ "${dirs_status}" == "000" ]]; then
           printf '  note: %s did not answer within the short startup probe; continuing because %s is healthy.\n' \
             "${DIRS_ROUTE_PATH}" \
             "${HEALTH_ROUTE_PATH}"
         fi
         return
       fi
-      printf 'Existing swimmers backend on 127.0.0.1:%s may be stale; restarting it to use %s.\n' \
-        "${PORT}" \
+      printf 'Existing swimmers backend on %s may be stale; restarting it to use %s.\n' \
+        "${BASE_URL}" \
         "${server_bin}"
     else
-      printf 'Existing swimmers backend on 127.0.0.1:%s is missing required make up routes.\n' \
-        "${PORT}"
+      printf 'Existing swimmers backend on %s is missing required make up routes.\n' \
+        "${BASE_URL}"
       printf '  %s returned %s; %s returned %s; %s returned %s; %s returned %s; %s returned %s\n' \
         "${HEALTH_ROUTE_PATH}" \
         "${health_status:-000}" \

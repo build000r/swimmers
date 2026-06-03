@@ -226,6 +226,7 @@ pub async fn open_native_attention_group(
 
     let tmux_path = resolve_tmux_binary()?;
     sync_attention_group_tmux_session(&tmux_path, sessions, layout).await?;
+    let attach_command = attention_group_attach_command();
     let open_result = if focus {
         Some(
             open_native_session(
@@ -256,6 +257,7 @@ pub async fn open_native_attention_group(
             .unwrap_or_else(|| "refreshed".to_string()),
         focused: focus,
         pane_id: open_result.and_then(|result| result.pane_id),
+        attach_command: Some(attach_command),
     })
 }
 
@@ -273,7 +275,12 @@ pub async fn clear_native_attention_group() -> Result<NativeAttentionGroupOpenRe
         status: "cleared".to_string(),
         focused: false,
         pane_id: None,
+        attach_command: Some(attention_group_attach_command()),
     })
+}
+
+pub fn attention_group_attach_command() -> String {
+    format!("tmux attach -t {ATTENTION_GROUP_TMUX_NAME}")
 }
 
 fn attention_group_ghostty_mode(
@@ -1983,6 +1990,10 @@ mod tests {
         assert_eq!(response.status, "refreshed");
         assert!(!response.focused);
         assert_eq!(response.session_ids, vec!["sess-new", "sess-next"]);
+        assert_eq!(
+            response.attach_command.as_deref(),
+            Some("tmux attach -t swimmers-attention")
+        );
 
         let log = std::fs::read_to_string(&log_path).unwrap();
         assert!(

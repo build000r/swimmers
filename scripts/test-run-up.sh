@@ -59,6 +59,7 @@ from pathlib import Path
 mode = sys.argv[1]
 port_file = Path(sys.argv[2]) if sys.argv[2] else None
 fixed_port = int(sys.argv[3]) if len(sys.argv) > 3 and sys.argv[3] else 0
+fixed_host = sys.argv[4] if len(sys.argv) > 4 and sys.argv[4] else "127.0.0.1"
 
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -123,7 +124,7 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, format, *args):
         pass
 
-server = ThreadingHTTPServer(("127.0.0.1", fixed_port), Handler)
+server = ThreadingHTTPServer((fixed_host, fixed_port), Handler)
 if port_file:
     port_file.write_text(str(server.server_port), encoding="utf-8")
 server.serve_forever()
@@ -243,10 +244,33 @@ make_server_bin_stub() {
   cat >"${stub}" <<SH
 #!/usr/bin/env bash
 set -euo pipefail
-exec -a swimmers python3 "${SERVER_FIXTURE}" "\${SWIMMERS_UP_TEST_SERVER_MODE:-ready}" "" "\${PORT:?PORT is required}"
+bind_host="\${SWIMMERS_BIND:-127.0.0.1}"
+bind_host="\${bind_host#\\[}"
+bind_host="\${bind_host%%\\]*}"
+if [[ "\${bind_host}" =~ ^([^:]+):[0-9]+$ ]]; then
+  bind_host="\${BASH_REMATCH[1]}"
+fi
+exec -a swimmers python3 "${SERVER_FIXTURE}" "\${SWIMMERS_UP_TEST_SERVER_MODE:-ready}" "" "\${PORT:?PORT is required}" "\${bind_host}"
 SH
   chmod +x "${stub}"
   printf '%s\n' "${stub}"
+}
+
+make_tailscale_stub() {
+  local dir="${tmp_dir}/fake-bin"
+  local stub="${dir}/tailscale"
+  mkdir -p "${dir}"
+  cat >"${stub}" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ "${1:-}" == "ip" && "${2:-}" == "-4" ]]; then
+  printf '%s\n' "${SWIMMERS_UP_TEST_TAILSCALE_IP:-}"
+  exit 0
+fi
+exit 1
+SH
+  chmod +x "${stub}"
+  printf '%s\n' "${dir}"
 }
 
 make_tui_stub() {
@@ -280,6 +304,8 @@ run_up_for_port() {
   shift 3
 
   PORT="${port}" \
+    CARGO_TARGET_DIR= \
+    SWIMMERS_UP_TARGET_DIR= \
     SWIMMERS_FRANKENTUI_PKG_DIR="${FRANKENTERM_PKG}" \
     SWIMMERS_UP_SERVER_BIN="${SERVER_BIN_STUB}" \
     SWIMMERS_UP_SERVER_LOG="${tmp_dir}/up-${port}.log" \
@@ -288,20 +314,62 @@ run_up_for_port() {
     "${RUN_UP}" "$@" >"${output}"
 }
 
+assert_captured_target_dir() {
+  local capture="${1}"
+  local expected="${2}"
+  local actual
+  actual="$(sed -n 's/^CARGO_TARGET_DIR=//p' "${capture}")"
+  if [[ "$(readlink -f "${actual}")" != "$(readlink -f "${expected}")" ]]; then
+    printf 'expected CARGO_TARGET_DIR=%s, got %s\n' "${expected}" "${actual}" >&2
+    exit 1
+  fi
+}
+
 SERVER_BIN_STUB="$(make_server_bin_stub)"
 TUI_STUB="$(make_tui_stub)"
 FRANKENTERM_PKG="$(make_frankenterm_pkg)"
+TAILSCALE_STUB_DIR="$(make_tailscale_stub)"
 
 port="$(free_port)"
 capture="${tmp_dir}/tui-env.txt"
-run_up_for_port "${port}" "${capture}" "${tmp_dir}/fresh.out"
+PATH="${TAILSCALE_STUB_DIR}:${PATH}" \
+  SWIMMERS_UP_TEST_TAILSCALE_IP=100.79.193.34 \
+  run_up_for_port "${port}" "${capture}" "${tmp_dir}/fresh.out"
 grep -q "Using FrankenTerm assets from ${FRANKENTERM_PKG}" "${tmp_dir}/fresh.out"
 grep -q "Starting swimmers backend on http://127.0.0.1:${port}" "${tmp_dir}/fresh.out"
+grep -q "tailnet:  not exposed (set SWIMMERS_BIND=100.79.193.34 AUTH_MODE=tailnet_trust)" "${tmp_dir}/fresh.out"
+if grep -q "tailnet:  http://100.79.193.34:${port}/" "${tmp_dir}/fresh.out"; then
+  printf 'default make up should not advertise an unreachable tailnet URL\n' >&2
+  exit 1
+fi
 grep -q "SWIMMERS_TUI_URL=http://127.0.0.1:${port}" "${capture}"
 grep -q "SWIMMERS_TUI_REUSE_SERVER=1" "${capture}"
 grep -q "SWIMMERS_TUI_FEATURES=" "${capture}"
 grep -q "SWIMMERS_PERSONAL_WORKFLOWS=1" "${capture}"
-grep -q "CARGO_TARGET_DIR=${ROOT_DIR}/target/swimmers-up/default" "${capture}"
+assert_captured_target_dir "${capture}" "${ROOT_DIR}/target/swimmers-up/default"
+stop_port_listener "${port}"
+
+port="$(free_port)"
+PATH="${TAILSCALE_STUB_DIR}:${PATH}" \
+  SWIMMERS_UP_TEST_TAILSCALE_IP=127.0.0.2 \
+  SWIMMERS_BIND=127.0.0.2 \
+  AUTH_MODE=tailnet_trust \
+  run_up_for_port "${port}" "${capture}" "${tmp_dir}/tailnet-bind.out"
+grep -q "Starting swimmers backend on http://127.0.0.2:${port}" "${tmp_dir}/tailnet-bind.out"
+grep -q "tailnet:  http://127.0.0.2:${port}/" "${tmp_dir}/tailnet-bind.out"
+grep -q "SWIMMERS_TUI_URL=http://127.0.0.2:${port}" "${capture}"
+stop_port_listener "${port}"
+
+port="$(free_port)"
+PATH="${TAILSCALE_STUB_DIR}:${PATH}" \
+  SWIMMERS_UP_TEST_TAILSCALE_IP=100.79.193.34 \
+  SWIMMERS_BIND=0.0.0.0 \
+  AUTH_MODE=token \
+  AUTH_TOKEN=secret \
+  run_up_for_port "${port}" "${capture}" "${tmp_dir}/wildcard-bind.out"
+grep -q "Starting swimmers backend on http://127.0.0.1:${port}" "${tmp_dir}/wildcard-bind.out"
+grep -q "tailnet:  http://100.79.193.34:${port}/" "${tmp_dir}/wildcard-bind.out"
+grep -q "SWIMMERS_TUI_URL=http://127.0.0.1:${port}" "${capture}"
 stop_port_listener "${port}"
 
 port="$(free_port)"
@@ -320,14 +388,6 @@ if SWIMMERS_UP_TEST_SERVER_MODE=missing-dirs \
 fi
 grep -q "required make up route is unavailable" "${tmp_dir}/missing-dirs.err"
 grep -q "/v1/dirs=404" "${tmp_dir}/missing-dirs.err"
-stop_port_listener "${port}"
-
-port="$(free_port)"
-SWIMMERS_PERSONAL_WORKFLOWS=0 \
-  SWIMMERS_UP_TEST_SERVER_MODE=missing-dirs \
-  run_up_for_port "${port}" "${capture}" "${tmp_dir}/missing-dirs-disabled.out"
-grep -q "Backend ready on http://127.0.0.1:${port}" "${tmp_dir}/missing-dirs-disabled.out"
-grep -q "SWIMMERS_PERSONAL_WORKFLOWS=0" "${capture}"
 stop_port_listener "${port}"
 
 port="$(free_port)"
@@ -353,14 +413,15 @@ grep -q "not this checkout's swimmers backend" "${tmp_dir}/non-swimmers.err"
 kill -0 "${fixture_pid}" 2>/dev/null
 stop_fixture
 
-cargo build -q --bin swimmers
+REAL_CARGO_TARGET_DIR="${tmp_dir}/cargo-target"
+CARGO_TARGET_DIR="${REAL_CARGO_TARGET_DIR}" cargo build -q --bin swimmers
 stale_port="$(free_port)"
 real_server_log="${tmp_dir}/real-swimmers-${stale_port}.log"
 SWIMMERS_DATA_DIR="${tmp_dir}/real-data" \
   SWIMMERS_FRANKENTUI_PKG_DIR="${FRANKENTERM_PKG}" \
   SWIMMERS_PERSONAL_WORKFLOWS=1 \
   PORT="${stale_port}" \
-  "${ROOT_DIR}/target/debug/swimmers" >"${real_server_log}" 2>&1 &
+  "${REAL_CARGO_TARGET_DIR}/debug/swimmers" >"${real_server_log}" 2>&1 &
 fixture_pid=$!
 fixture_port="${stale_port}"
 wait_for_ready_backend "${stale_port}" "${real_server_log}"

@@ -9180,6 +9180,7 @@ fn clicking_attention_group_label_opens_managed_group() {
         status: "swapped".to_string(),
         focused: true,
         pane_id: Some("pane-attention".to_string()),
+        attach_command: Some("tmux attach -t swimmers-attention".to_string()),
     }));
     let attention_rect = app
         .attention_group_rect(120)
@@ -9244,6 +9245,7 @@ fn attention_group_click_uses_env_size_layout_and_unnumbered_policy() {
         status: "refreshed".to_string(),
         focused: true,
         pane_id: Some("pane-attention".to_string()),
+        attach_command: Some("tmux attach -t swimmers-attention".to_string()),
     }));
 
     app.open_attention_group();
@@ -9258,6 +9260,31 @@ fn attention_group_click_uses_env_size_layout_and_unnumbered_policy() {
             true,
             AttentionGroupLayout::MainVertical
         )]
+    );
+}
+
+#[test]
+fn attention_group_click_shows_attach_command_when_native_focus_is_unavailable() {
+    let api = MockApi::new();
+    let mut app = make_app(api.clone());
+    api.push_open_attention_group(Ok(NativeAttentionGroupOpenResponse {
+        session_id: "attention-group".to_string(),
+        tmux_name: "swimmers-attention".to_string(),
+        session_count: 1,
+        session_ids: vec!["sess-1".to_string()],
+        backlog_session_ids: Vec::new(),
+        status: "refreshed".to_string(),
+        focused: false,
+        pane_id: None,
+        attach_command: Some("tmux attach -t swimmers-attention".to_string()),
+    }));
+
+    app.open_attention_group();
+    poll_until_interaction(&mut app);
+
+    assert_eq!(
+        app.message.as_ref().map(|(message, _)| message.as_str()),
+        Some("refreshed attention group: 1 sessions | tmux attach -t swimmers-attention")
     );
 }
 

@@ -1726,10 +1726,17 @@ impl<C: TuiApi> App<C> {
                     let previous = self.attention_group_session_ids.clone();
                     self.attention_group_session_ids = response.session_ids.clone();
                     if focus || previous != response.session_ids {
-                        self.set_message(format!(
+                        let mut message = format!(
                             "{} attention group: {} sessions",
                             response.status, response.session_count
-                        ));
+                        );
+                        if focus && !response.focused {
+                            if let Some(command) = response.attach_command.as_deref() {
+                                message.push_str(" | ");
+                                message.push_str(command);
+                            }
+                        }
+                        self.set_message(message);
                     }
                 }
                 Err(err) => {
