@@ -4912,6 +4912,23 @@ function handleTerminalStageTouchEnd(event) {
   applyTerminalStagePointerPlan(event, plan);
 }
 
+function handleTerminalStageKeydown(event) {
+  const globalShortcutHandled = handleGlobalShortcut(event);
+  const shouldCaptureTerminalKey = !globalShortcutHandled && shouldCaptureKey(event);
+  const plan = terminalStageKeydownPlan({ globalShortcutHandled, shouldCaptureKey: shouldCaptureTerminalKey, beginsResponse: shouldCaptureTerminalKey && keyBeginsTrogdorResponse(event) });
+  if (plan.preventDefault) event.preventDefault();
+  if (plan.markResponse) markTrogdorSessionsResponded([state.selectedSessionId]);
+  if (plan.forwardKey) forwardTerminalKeyDown(event);
+}
+
+function handleTerminalStagePaste(event) {
+  const action = terminalStagePasteExecutorPlan(terminalStagePastePlan(state.readOnly, event.clipboardData?.getData("text") ?? ""));
+  if (action.preventDefault) event.preventDefault();
+  if (action.sendText) sendTerminalText(action.text);
+}
+
+function handleTerminalStageFocusEvent(eventType) { runTerminalFocusAction(terminalStageFocusPlan(eventType, eventType === "focus" ? { activeSheet: state.activeSheet } : { mobileKeyboardOwnsFocus: document.activeElement === el.mobileKeyboardProxy })); }
+
 function handleTerminalStageMouseDown(event) {
   const fallbackOwnsPointer = terminalFallbackOwnsPointer(event);
   const hit = fallbackOwnsPointer ? {} : surfaceHit(event);
@@ -5650,27 +5667,10 @@ function bindEvents() {
 
   el.terminalStage.addEventListener("touchend", handleTerminalStageTouchEnd, { passive: false });
 
-  el.terminalStage.addEventListener("keydown", (event) => {
-    const globalShortcutHandled = handleGlobalShortcut(event);
-    const shouldCaptureTerminalKey = !globalShortcutHandled && shouldCaptureKey(event);
-    const plan = terminalStageKeydownPlan({
-      globalShortcutHandled,
-      shouldCaptureKey: shouldCaptureTerminalKey,
-      beginsResponse: shouldCaptureTerminalKey && keyBeginsTrogdorResponse(event),
-    });
-    if (plan.preventDefault) event.preventDefault();
-    if (plan.markResponse) markTrogdorSessionsResponded([state.selectedSessionId]);
-    if (plan.forwardKey) forwardTerminalKeyDown(event);
-  });
-
-  el.terminalStage.addEventListener("paste", (event) => {
-    const action = terminalStagePasteExecutorPlan(terminalStagePastePlan(state.readOnly, event.clipboardData?.getData("text") ?? ""));
-    if (action.preventDefault) event.preventDefault();
-    if (action.sendText) sendTerminalText(action.text);
-  });
-
-  el.terminalStage.addEventListener("focus", () => runTerminalFocusAction(terminalStageFocusPlan("focus", { activeSheet: state.activeSheet })));
-  el.terminalStage.addEventListener("blur", () => runTerminalFocusAction(terminalStageFocusPlan("blur", { mobileKeyboardOwnsFocus: document.activeElement === el.mobileKeyboardProxy })));
+  el.terminalStage.addEventListener("keydown", handleTerminalStageKeydown);
+  el.terminalStage.addEventListener("paste", handleTerminalStagePaste);
+  el.terminalStage.addEventListener("focus", () => handleTerminalStageFocusEvent("focus"));
+  el.terminalStage.addEventListener("blur", () => handleTerminalStageFocusEvent("blur"));
 
   el.terminalStage.addEventListener("mousedown", handleTerminalStageMouseDown);
   el.terminalStage.addEventListener("mouseup", handleTerminalStageMouseUp);
