@@ -20,19 +20,13 @@ use crate::auth::{AuthInfo, AuthScope};
 use crate::operator_pressure::session_ready_for_operator_group_input;
 use crate::session::actor::{ActorHandle, InputDeliveryResult, SessionCommand};
 use crate::session::supervisor::TmuxAdoptError;
-use crate::thought::context::{
-    context_reader_for, AgentTranscriptRecord as ContextTranscriptRecord,
-    AgentUserTurn as ContextUserTurn,
-};
 use crate::types::{
-    AdoptSessionRequest, AdoptSessionResponse, AgentContextActionSummary, CreateSessionRequest,
-    CreateSessionResponse, CreateSessionsBatchRequest, ErrorResponse, MermaidArtifactResponse,
-    SessionAgentContextResponse, SessionAgentTurn, SessionGitDiffResponse,
+    AdoptSessionRequest, AdoptSessionResponse, CreateSessionRequest, CreateSessionResponse,
+    CreateSessionsBatchRequest, ErrorResponse, MermaidArtifactResponse, SessionGitDiffResponse,
     SessionGroupInputRequest, SessionGroupInputResponse, SessionGroupInputResult,
     SessionInputRequest, SessionInputResponse, SessionListResponse, SessionPaneTailResponse,
     SessionState, SessionSummary, SessionTimelineEvent, SessionTimelinePinned,
-    SessionTimelinePinnedItem, SessionTimelineResponse, SessionTranscriptRecord,
-    SessionTranscriptResponse, TerminalSnapshot,
+    SessionTimelinePinnedItem, SessionTimelineResponse, TerminalSnapshot,
 };
 
 const PANE_TAIL_LINES: usize = 300;
@@ -40,9 +34,14 @@ const PANE_TAIL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5)
 
 #[path = "session_mermaid.rs"]
 mod session_mermaid;
+mod structured_context;
 
 pub(crate) use self::session_mermaid::fetch_mermaid_artifact_response;
 use self::session_mermaid::{get_mermaid_artifact, get_plan_file};
+use self::structured_context::{
+    agent_context_unavailable, append_context_events, context_limit_for_agent_context,
+    read_agent_context_for_summary, read_transcript_for_summary,
+};
 
 // ---------------------------------------------------------------------------
 // GET /v1/sessions
@@ -519,184 +518,6 @@ async fn fetch_agent_context_response(state: &Arc<AppState>, session_id: &str) -
     }
 }
 
-enum AgentContextReadResult {
-    Unsupported,
-    Missing,
-    Snapshot {
-        user_task: Option<String>,
-        turns: Vec<SessionAgentTurn>,
-        transcript_records: Vec<SessionTranscriptRecord>,
-        source_size: u64,
-        current_tool: Option<AgentContextActionSummary>,
-        recent_actions: Vec<AgentContextActionSummary>,
-        token_count: u64,
-        context_limit: u64,
-    },
-}
-
-async fn read_agent_context_for_summary(
-    summary: SessionSummary,
-) -> anyhow::Result<SessionAgentContextResponse> {
-    let session_id = summary.session_id.clone();
-    let tool = summary.tool.clone();
-    let cwd = summary.cwd.clone();
-    let baseline_token_count = summary.token_count;
-    let baseline_context_limit = context_limit_for_agent_context(&tool, summary.context_limit);
-
-    let Some(tool_name) = tool.clone() else {
-        return Ok(agent_context_unavailable(
-            session_id,
-            tool,
-            cwd,
-            baseline_token_count,
-            baseline_context_limit,
-            "session tool is unknown",
-        ));
-    };
-
-    let reader_tool = tool_name.clone();
-    let reader_cwd = cwd.clone();
-    let read_result = tokio::task::spawn_blocking(move || {
-        let Some(mut reader) = context_reader_for(&reader_tool, &reader_cwd, &[]) else {
-            return AgentContextReadResult::Unsupported;
-        };
-
-        let Some(snapshot) = reader.read() else {
-            return AgentContextReadResult::Missing;
-        };
-
-        AgentContextReadResult::Snapshot {
-            user_task: snapshot.user_task,
-            turns: snapshot
-                .user_turns
-                .into_iter()
-                .map(agent_turn_summary)
-                .collect(),
-            transcript_records: snapshot
-                .transcript_records
-                .into_iter()
-                .map(transcript_record_summary)
-                .collect(),
-            source_size: snapshot.source_size,
-            current_tool: snapshot.current_tool.map(agent_action_summary),
-            recent_actions: snapshot
-                .recent_actions
-                .into_iter()
-                .map(agent_action_summary)
-                .collect(),
-            token_count: snapshot.token_count,
-            context_limit: snapshot.context_limit,
-        }
-    })
-    .await?;
-
-    Ok(match read_result {
-        AgentContextReadResult::Unsupported => agent_context_unavailable(
-            session_id,
-            tool,
-            cwd,
-            baseline_token_count,
-            baseline_context_limit,
-            format!("structured context is not supported for {tool_name}"),
-        ),
-        AgentContextReadResult::Missing => agent_context_unavailable(
-            session_id,
-            tool,
-            cwd,
-            baseline_token_count,
-            baseline_context_limit,
-            "no matching structured JSONL context was found",
-        ),
-        AgentContextReadResult::Snapshot {
-            user_task,
-            turns,
-            transcript_records: _transcript_records,
-            source_size: _source_size,
-            current_tool,
-            recent_actions,
-            token_count,
-            context_limit,
-        } => SessionAgentContextResponse {
-            session_id,
-            available: true,
-            tool,
-            cwd,
-            user_task,
-            turns,
-            current_tool,
-            recent_actions,
-            token_count,
-            context_limit: context_limit_for_agent_context(&Some(tool_name), context_limit),
-            message: None,
-        },
-    })
-}
-
-fn agent_action_summary(action: crate::thought::context::AgentAction) -> AgentContextActionSummary {
-    AgentContextActionSummary {
-        tool: action.tool,
-        detail: action.detail,
-    }
-}
-
-fn agent_turn_summary(turn: ContextUserTurn) -> SessionAgentTurn {
-    SessionAgentTurn {
-        id: turn.id,
-        source: turn.source,
-        text: turn.text,
-        byte_start: turn.byte_start,
-        byte_end: turn.byte_end,
-        order: turn.order,
-        timestamp: turn.timestamp,
-    }
-}
-
-fn transcript_record_summary(record: ContextTranscriptRecord) -> SessionTranscriptRecord {
-    SessionTranscriptRecord {
-        id: record.id,
-        source: record.source,
-        kind: record.kind,
-        role: record.role,
-        summary: record.summary,
-        raw: record.raw,
-        byte_start: record.byte_start,
-        byte_end: record.byte_end,
-        timestamp: record.timestamp,
-        truncated: record.truncated,
-    }
-}
-
-fn agent_context_unavailable(
-    session_id: String,
-    tool: Option<String>,
-    cwd: String,
-    token_count: u64,
-    context_limit: u64,
-    message: impl Into<String>,
-) -> SessionAgentContextResponse {
-    SessionAgentContextResponse {
-        session_id,
-        available: false,
-        tool,
-        cwd,
-        user_task: None,
-        turns: Vec::new(),
-        current_tool: None,
-        recent_actions: Vec::new(),
-        token_count,
-        context_limit,
-        message: Some(message.into()),
-    }
-}
-
-fn context_limit_for_agent_context(tool: &Option<String>, context_limit: u64) -> u64 {
-    if context_limit > 0 {
-        context_limit
-    } else {
-        crate::types::context_limit_for_tool(tool.as_deref())
-    }
-}
-
 // ---------------------------------------------------------------------------
 // GET /v1/sessions/{session_id}/transcript
 // ---------------------------------------------------------------------------
@@ -770,153 +591,6 @@ async fn fetch_transcript_response(
                 Some(err.to_string()),
             )
         }
-    }
-}
-
-async fn read_transcript_for_summary(
-    summary: SessionSummary,
-    query: TranscriptQuery,
-) -> anyhow::Result<SessionTranscriptResponse> {
-    let session_id = summary.session_id.clone();
-    let tool = summary.tool.clone();
-    let cwd = summary.cwd.clone();
-    let Some(tool_name) = tool.clone() else {
-        return Ok(transcript_unavailable(
-            session_id,
-            tool,
-            cwd,
-            "session tool is unknown",
-        ));
-    };
-
-    let reader_tool = tool_name.clone();
-    let reader_cwd = cwd.clone();
-    let read_result = tokio::task::spawn_blocking(move || {
-        let Some(mut reader) = context_reader_for(&reader_tool, &reader_cwd, &[]) else {
-            return AgentContextReadResult::Unsupported;
-        };
-
-        let Some(snapshot) = reader.read() else {
-            return AgentContextReadResult::Missing;
-        };
-
-        AgentContextReadResult::Snapshot {
-            user_task: snapshot.user_task,
-            turns: snapshot
-                .user_turns
-                .into_iter()
-                .map(agent_turn_summary)
-                .collect(),
-            transcript_records: snapshot
-                .transcript_records
-                .into_iter()
-                .map(transcript_record_summary)
-                .collect(),
-            source_size: snapshot.source_size,
-            current_tool: snapshot.current_tool.map(agent_action_summary),
-            recent_actions: snapshot
-                .recent_actions
-                .into_iter()
-                .map(agent_action_summary)
-                .collect(),
-            token_count: snapshot.token_count,
-            context_limit: snapshot.context_limit,
-        }
-    })
-    .await?;
-
-    Ok(match read_result {
-        AgentContextReadResult::Unsupported => transcript_unavailable(
-            session_id,
-            tool,
-            cwd,
-            format!("structured transcript is not supported for {tool_name}"),
-        ),
-        AgentContextReadResult::Missing => transcript_unavailable(
-            session_id,
-            tool,
-            cwd,
-            "no matching structured JSONL transcript was found",
-        ),
-        AgentContextReadResult::Snapshot {
-            turns,
-            transcript_records,
-            source_size,
-            ..
-        } => build_transcript_response(
-            session_id,
-            tool,
-            cwd,
-            turns,
-            transcript_records,
-            source_size,
-            query,
-        ),
-    })
-}
-
-fn build_transcript_response(
-    session_id: String,
-    tool: Option<String>,
-    cwd: String,
-    turns: Vec<SessionAgentTurn>,
-    transcript_records: Vec<SessionTranscriptRecord>,
-    source_size: u64,
-    query: TranscriptQuery,
-) -> SessionTranscriptResponse {
-    let selected_turn = query
-        .turn_id
-        .as_deref()
-        .and_then(|turn_id| turns.iter().find(|turn| turn.id == turn_id).cloned())
-        .or_else(|| turns.last().cloned());
-    let turn_cursor = selected_turn
-        .as_ref()
-        .map(|turn| turn.byte_end)
-        .unwrap_or(0);
-    let cursor = query.after.unwrap_or(turn_cursor).max(turn_cursor);
-    let limit = query.limit.unwrap_or(80).clamp(1, 240);
-    let records = transcript_records
-        .into_iter()
-        .filter(|record| record.byte_start >= cursor)
-        .take(limit)
-        .collect::<Vec<_>>();
-    let next_cursor = records
-        .iter()
-        .map(|record| record.byte_end)
-        .max()
-        .unwrap_or_else(|| source_size.max(cursor));
-
-    SessionTranscriptResponse {
-        session_id,
-        available: true,
-        tool,
-        cwd,
-        selected_turn_id: selected_turn.as_ref().map(|turn| turn.id.clone()),
-        selected_turn,
-        next_cursor,
-        records,
-        turns,
-        message: None,
-    }
-}
-
-fn transcript_unavailable(
-    session_id: String,
-    tool: Option<String>,
-    cwd: String,
-    message: impl Into<String>,
-) -> SessionTranscriptResponse {
-    SessionTranscriptResponse {
-        session_id,
-        available: false,
-        tool,
-        cwd,
-        selected_turn_id: None,
-        selected_turn: None,
-        next_cursor: 0,
-        records: Vec::new(),
-        turns: Vec::new(),
-        message: Some(message.into()),
     }
 }
 
@@ -1066,83 +740,6 @@ fn timeline_excerpt(text: &str, max_chars: usize) -> String {
     let mut excerpt = normalized.chars().take(max_chars).collect::<String>();
     excerpt.push_str("...");
     excerpt
-}
-
-fn append_context_events(
-    builder: &mut TimelineBuilder,
-    pinned: &mut SessionTimelinePinned,
-    context: &SessionAgentContextResponse,
-) {
-    if let Some(task) = context
-        .user_task
-        .as_deref()
-        .filter(|task| !task.trim().is_empty())
-    {
-        let summary = timeline_excerpt(task, 180);
-        let event_id = builder.push(
-            "task",
-            "task",
-            "agent-context",
-            "Task",
-            summary.clone(),
-            Some(task.to_string()),
-        );
-        pinned.task = Some(pinned_item("Task", summary, "agent-context", event_id));
-    }
-
-    if let Some(action) = context.current_tool.as_ref() {
-        let summary = action
-            .detail
-            .as_deref()
-            .filter(|detail| !detail.trim().is_empty())
-            .unwrap_or(&action.tool);
-        let summary = timeline_excerpt(summary, 180);
-        let event_id = builder.push(
-            "current-action",
-            "tool_call",
-            "agent-context",
-            action.tool.clone(),
-            summary.clone(),
-            action.detail.clone(),
-        );
-        pinned.current_action = Some(pinned_item(
-            action.tool.clone(),
-            summary,
-            "agent-context",
-            event_id,
-        ));
-    }
-
-    for (index, action) in context.recent_actions.iter().take(8).enumerate() {
-        let summary = action
-            .detail
-            .as_deref()
-            .filter(|detail| !detail.trim().is_empty())
-            .unwrap_or(&action.tool);
-        builder.push(
-            format!("recent-action-{}", index + 1),
-            "tool_call",
-            "agent-context",
-            action.tool.clone(),
-            timeline_excerpt(summary, 180),
-            action.detail.clone(),
-        );
-    }
-
-    if !context.available {
-        let message = context
-            .message
-            .as_deref()
-            .unwrap_or("structured context unavailable");
-        builder.push(
-            "context-unavailable",
-            "context",
-            "agent-context",
-            "Context unavailable",
-            timeline_excerpt(message, 180),
-            None,
-        );
-    }
 }
 
 fn append_git_diff_event(
