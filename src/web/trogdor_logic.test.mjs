@@ -33,8 +33,13 @@ import {
   trogdorDragonPose,
   trogdorPrimaryActionCue,
   trogdorCueTransitionState,
+  trogdorCurrentSurfaceSessionForHover,
+  trogdorHoverReaderResetState,
+  trogdorHoverSessionIdForZone,
+  trogdorReadableHoveredSurfaceSession,
   trogdorReaderBaseIndexForProgress,
   trogdorReaderWordIndexForProgress,
+  trogdorRawSessionForHover,
   trogdorSessionCanReadForState,
   trogdorSessionBurntInMap,
   trogdorSessionAwaitingUser,
@@ -266,6 +271,52 @@ test("Trogdor visibility helpers preserve burnt, dismissed, and rest-state rules
     trogdorDismissed: true,
     trogdorSwordsmanVisible: false,
   });
+});
+
+test("Trogdor hover helpers preserve current session and reader reset decisions", () => {
+  const rawSessions = [
+    { session_id: "agent-1", tmux_name: "one" },
+    { session_id: "agent-2", tmux_name: "two" },
+  ];
+  const surfaceSessions = [
+    session({ sessionId: "agent-1" }),
+    session({ sessionId: "agent-2", actionCues: [], operatorPressure: null }),
+  ];
+
+  assert.deepEqual(trogdorHoverReaderResetState("agent-1"), {
+    hoveredTrogdorSessionId: "agent-1",
+    trogdorReaderStartedAt: 0,
+    trogdorReaderStartIndex: 0,
+    trogdorReaderClawgKey: "",
+  });
+  assert.equal(trogdorHoverSessionIdForZone({ type: "trogdor_agent", sessionId: "agent-1" }, "old"), "agent-1");
+  assert.equal(trogdorHoverSessionIdForZone({ type: "trogdor_reader", sessionId: "agent-2" }, "old"), "agent-2");
+  assert.equal(trogdorHoverSessionIdForZone({ type: "action", actionId: "trogdor_wpm_up" }, "old"), "old");
+  assert.equal(trogdorHoverSessionIdForZone({ type: "action", actionId: "refresh" }, "old"), null);
+  assert.equal(trogdorHoverSessionIdForZone(null, "old"), null);
+
+  assert.equal(trogdorRawSessionForHover(rawSessions, " agent-1 "), rawSessions[0]);
+  assert.equal(trogdorRawSessionForHover(rawSessions, " agent-1 ", { normalize: false }), null);
+  assert.equal(trogdorRawSessionForHover(rawSessions, "missing"), null);
+  assert.deepEqual(trogdorCurrentSurfaceSessionForHover({
+    sessions: rawSessions,
+    hoveredSessionId: "agent-2",
+    toSurfaceSession: (raw) => ({ sessionId: raw.session_id, label: raw.tmux_name }),
+  }), { sessionId: "agent-2", label: "two" });
+  assert.equal(trogdorCurrentSurfaceSessionForHover({
+    sessions: rawSessions,
+    hoveredSessionId: "",
+  }), null);
+
+  assert.equal(trogdorReadableHoveredSurfaceSession(surfaceSessions, "agent-1", {
+    sessionCanRead: (item) => item.sessionId === "agent-1",
+  }), surfaceSessions[0]);
+  assert.equal(trogdorReadableHoveredSurfaceSession(surfaceSessions, "agent-2", {
+    sessionCanRead: (item) => item.sessionId === "agent-1",
+  }), null);
+  assert.equal(trogdorReadableHoveredSurfaceSession(surfaceSessions, " agent-1 ", {
+    sessionCanRead: () => true,
+  }), null);
 });
 
 test("Trogdor reader base index prefers active reader key over persisted progress", () => {

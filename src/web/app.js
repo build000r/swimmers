@@ -55,7 +55,12 @@ import {
   trogdorHasActionCue,
   trogdorPrimaryActionCue,
   trogdorCueTransitionState,
+  trogdorCurrentSurfaceSessionForHover,
+  trogdorHoverReaderResetState,
+  trogdorHoverSessionIdForZone,
+  trogdorReadableHoveredSurfaceSession,
   trogdorReaderWordIndexForProgress,
+  trogdorRawSessionForHover,
   trogdorSessionCanReadForState,
   trogdorSessionBurntInMap,
   trogdorSessionAwaitingUser,
@@ -1485,12 +1490,11 @@ function markTrogdorSessionsBurnt(sessionIds, options = {}) {
 }
 
 function currentTrogdorSurfaceSession() {
-  const sessionId = normalizeSessionId(state.hoveredTrogdorSessionId);
-  if (!sessionId) {
-    return null;
-  }
-  const raw = state.sessions.find((item) => item.session_id === sessionId);
-  return raw ? surfaceSession(raw) : null;
+  return trogdorCurrentSurfaceSessionForHover({
+    sessions: state.sessions,
+    hoveredSessionId: state.hoveredTrogdorSessionId,
+    toSurfaceSession: surfaceSession,
+  });
 }
 
 function trogdorSwordsmanVisible(session) {
@@ -1578,10 +1582,7 @@ function markTrogdorSessionsResponded(sessionIds) {
   }
   if (next.burntIds.length) {
     if (next.resetReader) {
-      state.hoveredTrogdorSessionId = null;
-      state.trogdorReaderStartedAt = 0;
-      state.trogdorReaderStartIndex = 0;
-      state.trogdorReaderClawgKey = "";
+      Object.assign(state, trogdorHoverReaderResetState());
       syncTrogdorReaderTimer();
     }
     markTrogdorSessionsBurnt(next.burntIds);
@@ -1719,10 +1720,7 @@ function syncTrogdorCueTransitions() {
   }
 
   if (next.resetReader) {
-    state.hoveredTrogdorSessionId = null;
-    state.trogdorReaderStartedAt = 0;
-    state.trogdorReaderStartIndex = 0;
-    state.trogdorReaderClawgKey = "";
+    Object.assign(state, trogdorHoverReaderResetState());
     syncTrogdorReaderTimer();
   }
 }
@@ -1991,8 +1989,9 @@ function renderTrogdorSurface() {
 
   const sessions = state.sessions.map((session) => surfaceSession(session));
   const groups = buildTrogdorDomGroups(sessions);
-  const hoveredCandidate = sessions.find((session) => session.sessionId === state.hoveredTrogdorSessionId) || null;
-  const hovered = hoveredCandidate && trogdorSessionCanRead(hoveredCandidate) ? hoveredCandidate : null;
+  const hovered = trogdorReadableHoveredSurfaceSession(sessions, state.hoveredTrogdorSessionId, {
+    sessionCanRead: trogdorSessionCanRead,
+  });
   const summary = summarizeTrogdorDom(groups, sessions);
   const dragonPose = buildTrogdorDragonPose(groups, summary, TROGDOR_REPO_POSITIONS);
   const signature = trogdorSurfaceSignature(sessions, summary, state.readOnly);
@@ -4725,10 +4724,7 @@ function closeSheets() {
 
 function closeTrogdorAtlasForTerminal() {
   state.trogdorAtlasOpen = false;
-  state.hoveredTrogdorSessionId = null;
-  state.trogdorReaderStartedAt = 0;
-  state.trogdorReaderStartIndex = 0;
-  state.trogdorReaderClawgKey = "";
+  Object.assign(state, trogdorHoverReaderResetState());
   state.trogdorSurfaceSignature = "";
   syncTrogdorReaderTimer();
   applyTrogdorAtlasVisibility();
@@ -5027,19 +5023,11 @@ function stopSurfaceEvent(event) {
 
 function updateHoveredTrogdorSurface(zone) {
   const previousSessionId = state.hoveredTrogdorSessionId;
-  const nextSessionId =
-    zone?.type === "trogdor_agent" || zone?.type === "trogdor_reader"
-      ? zone.sessionId
-      : String(zone?.actionId || "").startsWith("trogdor_")
-        ? state.hoveredTrogdorSessionId
-      : null;
+  const nextSessionId = trogdorHoverSessionIdForZone(zone, previousSessionId);
   if (nextSessionId === previousSessionId) {
     return;
   }
-  state.hoveredTrogdorSessionId = nextSessionId;
-  state.trogdorReaderStartedAt = 0;
-  state.trogdorReaderStartIndex = 0;
-  state.trogdorReaderClawgKey = "";
+  Object.assign(state, trogdorHoverReaderResetState(nextSessionId));
   if (el.trogdorSurface) {
     const agents = el.trogdorSurface.querySelectorAll("[data-trogdor-agent]");
     for (const agent of agents) {
@@ -5047,7 +5035,7 @@ function updateHoveredTrogdorSurface(zone) {
     }
   }
   if (nextSessionId) {
-    const session = state.sessions.find((item) => item.session_id === nextSessionId);
+    const session = trogdorRawSessionForHover(state.sessions, nextSessionId, { normalize: false });
     if (session) {
       startTrogdorReaderForSession(surfaceSession(session));
     }

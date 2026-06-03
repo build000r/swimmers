@@ -466,6 +466,60 @@ export function trogdorSessionCanReadForState(
   return !burnt && trogdorSwordsmanVisibleForState(session, { burnt, dismissed });
 }
 
+export function trogdorHoverReaderResetState(hoveredSessionId = null) {
+  return {
+    hoveredTrogdorSessionId: hoveredSessionId,
+    trogdorReaderStartedAt: 0,
+    trogdorReaderStartIndex: 0,
+    trogdorReaderClawgKey: "",
+  };
+}
+
+export function trogdorHoverSessionIdForZone(zone, previousSessionId = null) {
+  if (zone?.type === "trogdor_agent" || zone?.type === "trogdor_reader") {
+    return zone.sessionId;
+  }
+  if (String(zone?.actionId || "").startsWith("trogdor_")) {
+    return previousSessionId;
+  }
+  return null;
+}
+
+export function trogdorRawSessionForHover(
+  sessions,
+  hoveredSessionId,
+  {
+    normalize = true,
+  } = {},
+) {
+  const sessionId = normalize ? normalizeTrogdorSessionId(hoveredSessionId) : hoveredSessionId;
+  if (!sessionId) {
+    return null;
+  }
+  return (Array.isArray(sessions) ? sessions : []).find((session) => session?.session_id === sessionId) || null;
+}
+
+export function trogdorCurrentSurfaceSessionForHover({
+  sessions = [],
+  hoveredSessionId = null,
+  toSurfaceSession = (session) => session,
+} = {}) {
+  const raw = trogdorRawSessionForHover(sessions, hoveredSessionId);
+  return raw ? toSurfaceSession(raw) : null;
+}
+
+export function trogdorReadableHoveredSurfaceSession(
+  sessions,
+  hoveredSessionId,
+  {
+    sessionCanRead = () => true,
+  } = {},
+) {
+  const hovered = (Array.isArray(sessions) ? sessions : [])
+    .find((session) => session?.sessionId === hoveredSessionId) || null;
+  return hovered && sessionCanRead(hovered) ? hovered : null;
+}
+
 export function trogdorSurfaceSessionTrogdorState(
   session,
   {
