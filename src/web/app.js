@@ -2,7 +2,7 @@ import { buildSurfaceFrame, surfaceActionAt, surfaceConsumesPointer } from "./re
 import {
   authTokenButtonPlan, controlEventSessionPatchPlan, eventCell, globalShortcutPlan, initialStateBootPlan, inputAckActionPlan, lifecycleDeletedSessionPatchPlan, mobileKeyboardInputExecutorPlan, mobileKeyboardInputPlan,
   sheetActionAvailabilityPlan,
-  mobileKeyboardKeydownPlan, mobileKeyboardKeyPlan, shouldIgnoreSyntheticClick, surfaceActionDispatchContextPlan, surfaceActionDispatchPlan, surfaceActionTrogdorReaderExecutionPlan,
+  mobileKeyboardKeydownPlan, mobileKeyboardKeyPlan, shouldIgnoreSyntheticClick, surfaceActionDispatchContextPlan, surfaceActionDispatchPlan, surfaceActionExecutionContextPlan, surfaceActionExecutionPlan, surfaceActionFocusTerminalExecutionPlan, surfaceActionTrogdorReaderExecutionPlan,
   terminalComposerControlAction, terminalDestroyStatePatch, terminalFallbackActivationPlan, terminalFallbackFocusPlan, terminalFallbackKeydownPlan, terminalFallbackPastePlan, terminalFallbackPointerFocusPlan, terminalInlineInputKeydownPlan, terminalKeyStripClickExecutorPlan, terminalKeyStripClickPlan, terminalStageCaptureBindings, terminalStageClickPlan, terminalStageFocusExecutorPlan, terminalStageFocusPlan,
   normalizeTerminalZoomValue, terminalAuxiliaryControlsPlan, terminalFallbackScrollPlan, terminalFallbackTextScrollPlan, terminalInputDockPlan, terminalLiveFrameFallbackPlan, terminalPaintProbeSchedulePlan, terminalPaintVerificationPlan, terminalPendingByteBufferPlan, terminalPresentationPlan, terminalResizeGeometryPlan, terminalStageKeydownPlan, terminalStageMouseDownPlan, terminalStageMouseMovePlan, terminalStageMouseUpPlan, terminalStagePasteExecutorPlan, terminalStagePastePlan, terminalStageTouchEndPlan, terminalStageWheelPlan, terminalToolsAvailabilityPlan, terminalZoomControlsPlan, terminalZoomLoadValue, terminalZoomPercentLabel, terminalZoomPersistencePlan,
 } from "./input_support.js";
@@ -4729,58 +4729,52 @@ async function handleSurfaceAction(zone) {
       renderHudSurface();
       break;
     case "open_send_sheet_for_zone":
-      openSendSheet(trogdorActionPayloadForZone(zone));
-      break;
     case "open_create_sheet_for_zone_cwd":
-      openCreateSheetForCwd(trogdorActionPayloadForZone(zone).cwd);
-      break;
     case "select_then_open_mermaid_for_zone":
-      await selectSession(trogdorActionPayloadForZone(zone).sessionId);
-      openMermaidSheet();
-      break;
     case "select_then_launch_commit_for_zone":
-      await selectSession(trogdorActionPayloadForZone(zone).sessionId);
-      await launchCommitGrok();
-      break;
     case "open_sheet":
-      openSheet(plan.sheetId);
-      break;
     case "open_send_sheet_for_current_session":
-      openSendSheet(plan.payload);
-      break;
     case "open_thought_config":
-      openThoughtConfigSheet();
-      break;
     case "open_native":
-      openNativeSheet();
-      break;
     case "open_mermaid":
-      openMermaidSheet();
-      break;
     case "launch_commit":
-      await launchCommitGrok();
-      break;
     case "toggle_follow":
-      await toggleFollowPublished();
-      break;
     case "toggle_select":
-      setSelectMode(!state.selectMode);
-      break;
     case "copy_selection":
-      await copyTerminalSelection();
-      break;
-    case "focus_terminal":
+    case "refresh":
     {
-      const focusStatus = trogdorTerminalFocusStatus(currentSession());
-      Object.assign(state, trogdorAtlasTransitionState("close"));
-      renderHudSurface();
-      focusTerminalInputSurface({ preventScroll: true });
-      setUtilityStatus(focusStatus.message, focusStatus.error, focusStatus.timeoutMs);
+      const executionContext = surfaceActionExecutionContextPlan(plan);
+      const action = surfaceActionExecutionPlan(plan, executionContext.includeZonePayload
+        ? { zonePayload: trogdorActionPayloadForZone(zone) }
+        : {});
+      if (action.type === "open_send_sheet") openSendSheet(action.payload);
+      else if (action.type === "open_create_sheet_for_cwd") openCreateSheetForCwd(action.cwd);
+      else if (action.type === "select_then_open_mermaid") {
+        await selectSession(action.sessionId);
+        openMermaidSheet();
+      } else if (action.type === "select_then_launch_commit") {
+        await selectSession(action.sessionId);
+        await launchCommitGrok();
+      } else if (action.type === "open_sheet") openSheet(action.sheetId);
+      else if (action.type === "open_thought_config") openThoughtConfigSheet();
+      else if (action.type === "open_native") openNativeSheet();
+      else if (action.type === "open_mermaid") openMermaidSheet();
+      else if (action.type === "launch_commit") await launchCommitGrok();
+      else if (action.type === "toggle_follow") await toggleFollowPublished();
+      else if (action.type === "toggle_select") setSelectMode(!state.selectMode);
+      else if (action.type === "copy_selection") await copyTerminalSelection();
+      else if (action.type === "refresh") await refreshSessions();
       break;
     }
-    case "refresh":
-      await refreshSessions();
+    case "focus_terminal":
+    {
+      const focusPlan = surfaceActionFocusTerminalExecutionPlan(trogdorTerminalFocusStatus(currentSession()));
+      Object.assign(state, trogdorAtlasTransitionState(focusPlan.atlasTransitionAction));
+      renderHudSurface();
+      focusTerminalInputSurface(focusPlan.focusOptions);
+      setUtilityStatus(focusPlan.statusMessage, focusPlan.statusError, focusPlan.statusTimeoutMs);
       break;
+    }
     default:
       break;
   }

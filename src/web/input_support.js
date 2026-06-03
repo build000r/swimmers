@@ -1084,6 +1084,57 @@ export function surfaceActionTrogdorReaderExecutionPlan(plan = {}, context = {})
   return { type: "ignore" };
 }
 
+export function surfaceActionExecutionContextPlan(plan = {}) {
+  switch (plan.type) {
+    case "open_send_sheet_for_zone":
+    case "open_create_sheet_for_zone_cwd":
+    case "select_then_open_mermaid_for_zone":
+    case "select_then_launch_commit_for_zone":
+      return { includeZonePayload: true };
+    default:
+      return { includeZonePayload: false };
+  }
+}
+
+export function surfaceActionExecutionPlan(plan = {}, context = {}) {
+  switch (plan.type) {
+    case "open_send_sheet_for_zone":
+      return { type: "open_send_sheet", payload: context.zonePayload };
+    case "open_create_sheet_for_zone_cwd":
+      return { type: "open_create_sheet_for_cwd", cwd: context.zonePayload?.cwd };
+    case "select_then_open_mermaid_for_zone":
+      return { type: "select_then_open_mermaid", sessionId: context.zonePayload?.sessionId };
+    case "select_then_launch_commit_for_zone":
+      return { type: "select_then_launch_commit", sessionId: context.zonePayload?.sessionId };
+    case "open_sheet":
+      return { type: "open_sheet", sheetId: plan.sheetId };
+    case "open_send_sheet_for_current_session":
+      return { type: "open_send_sheet", payload: plan.payload };
+    case "open_thought_config":
+    case "open_native":
+    case "open_mermaid":
+    case "launch_commit":
+    case "toggle_follow":
+    case "toggle_select":
+    case "copy_selection":
+    case "refresh":
+      return { type: plan.type };
+    default:
+      return { type: "ignore" };
+  }
+}
+
+export function surfaceActionFocusTerminalExecutionPlan(status = {}) {
+  return {
+    type: "focus_terminal",
+    atlasTransitionAction: "close",
+    focusOptions: { preventScroll: true },
+    statusMessage: status.message,
+    statusError: status.error,
+    statusTimeoutMs: status.timeoutMs,
+  };
+}
+
 function clampInt(value, fallback, min, max) {
   const numeric = Number.isFinite(value) ? Math.trunc(value) : fallback;
   return Math.max(min, Math.min(max, numeric));

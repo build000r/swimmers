@@ -16,6 +16,9 @@ import {
   shouldIgnoreSyntheticClick,
   surfaceActionDispatchContextPlan,
   surfaceActionDispatchPlan,
+  surfaceActionExecutionContextPlan,
+  surfaceActionExecutionPlan,
+  surfaceActionFocusTerminalExecutionPlan,
   surfaceActionTrogdorReaderExecutionPlan,
   terminalComposerControlAction,
   terminalDestroyStatePatch,
@@ -346,6 +349,79 @@ test("surfaceActionTrogdorReaderExecutionPlan preserves WPM and ignore decisions
     syncReaderTimer: false,
   });
   assert.deepEqual(surfaceActionTrogdorReaderExecutionPlan({ type: "refresh" }), { type: "ignore" });
+});
+
+test("surfaceActionExecutionContextPlan requests zone payloads only for zone-derived actions", () => {
+  const payloadContext = { includeZonePayload: true };
+  const emptyContext = { includeZonePayload: false };
+  assert.deepEqual(surfaceActionExecutionContextPlan({ type: "open_send_sheet_for_zone" }), payloadContext);
+  assert.deepEqual(surfaceActionExecutionContextPlan({ type: "open_create_sheet_for_zone_cwd" }), payloadContext);
+  assert.deepEqual(surfaceActionExecutionContextPlan({ type: "select_then_open_mermaid_for_zone" }), payloadContext);
+  assert.deepEqual(surfaceActionExecutionContextPlan({ type: "select_then_launch_commit_for_zone" }), payloadContext);
+  assert.deepEqual(surfaceActionExecutionContextPlan({ type: "open_sheet" }), emptyContext);
+  assert.deepEqual(surfaceActionExecutionContextPlan({ type: "focus_terminal" }), emptyContext);
+});
+
+test("surfaceActionExecutionPlan preserves zone payload execution decisions", () => {
+  assert.deepEqual(
+    surfaceActionExecutionPlan(
+      { type: "open_send_sheet_for_zone" },
+      { zonePayload: { type: "session", sessionId: "agent-1", label: "codex-main" } },
+    ),
+    { type: "open_send_sheet", payload: { type: "session", sessionId: "agent-1", label: "codex-main" } },
+  );
+  assert.deepEqual(
+    surfaceActionExecutionPlan({ type: "open_create_sheet_for_zone_cwd" }, { zonePayload: { cwd: "/repo" } }),
+    { type: "open_create_sheet_for_cwd", cwd: "/repo" },
+  );
+  assert.deepEqual(
+    surfaceActionExecutionPlan({ type: "select_then_open_mermaid_for_zone" }, { zonePayload: { sessionId: "agent-2" } }),
+    { type: "select_then_open_mermaid", sessionId: "agent-2" },
+  );
+  assert.deepEqual(
+    surfaceActionExecutionPlan({ type: "select_then_launch_commit_for_zone" }, { zonePayload: { sessionId: "agent-3" } }),
+    { type: "select_then_launch_commit", sessionId: "agent-3" },
+  );
+});
+
+test("surfaceActionExecutionPlan preserves simple sheet, utility, and refresh decisions", () => {
+  const payload = { type: "session", sessionId: "agent-1", label: "agent-1" };
+  assert.deepEqual(surfaceActionExecutionPlan({ type: "open_sheet", sheetId: "search" }), {
+    type: "open_sheet",
+    sheetId: "search",
+  });
+  assert.deepEqual(surfaceActionExecutionPlan({ type: "open_send_sheet_for_current_session", payload }), {
+    type: "open_send_sheet",
+    payload,
+  });
+  for (const type of [
+    "open_thought_config",
+    "open_native",
+    "open_mermaid",
+    "launch_commit",
+    "toggle_follow",
+    "toggle_select",
+    "copy_selection",
+    "refresh",
+  ]) {
+    assert.deepEqual(surfaceActionExecutionPlan({ type }), { type });
+  }
+  assert.deepEqual(surfaceActionExecutionPlan({ type: "focus_terminal" }), { type: "ignore" });
+});
+
+test("surfaceActionFocusTerminalExecutionPlan preserves focus side-effect data", () => {
+  assert.deepEqual(surfaceActionFocusTerminalExecutionPlan({
+    message: "Terminal focused.",
+    error: false,
+    timeoutMs: 2200,
+  }), {
+    type: "focus_terminal",
+    atlasTransitionAction: "close",
+    focusOptions: { preventScroll: true },
+    statusMessage: "Terminal focused.",
+    statusError: false,
+    statusTimeoutMs: 2200,
+  });
 });
 
 test("mobileKeyboardKeyPlan preserves special-key forwarding and no-op gates", () => {
