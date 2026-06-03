@@ -171,21 +171,25 @@ fn openrouter_model_cache_path() -> Option<PathBuf> {
 }
 
 fn is_rotator_candidate(entry: &OpenRouterModelEntry) -> bool {
-    if !entry.id.ends_with(":free") {
-        return false;
-    }
+    is_free_model_id(&entry.id) && !is_vision_model(entry)
+}
 
-    let lowered_id = entry.id.to_ascii_lowercase();
-    let lowered_name = entry
-        .name
-        .as_deref()
-        .unwrap_or_default()
-        .to_ascii_lowercase();
+fn is_free_model_id(id: &str) -> bool {
+    id.ends_with(":free")
+}
 
-    !lowered_id.contains("-vl")
-        && !lowered_id.contains(":vl")
-        && !lowered_name.contains("vision")
-        && !lowered_name.contains("image")
+fn is_vision_model(entry: &OpenRouterModelEntry) -> bool {
+    id_has_vision_marker(&entry.id) || name_has_vision_marker(entry.name.as_deref())
+}
+
+fn id_has_vision_marker(id: &str) -> bool {
+    let lowered = id.to_ascii_lowercase();
+    lowered.contains("-vl") || lowered.contains(":vl")
+}
+
+fn name_has_vision_marker(name: Option<&str>) -> bool {
+    let lowered = name.unwrap_or_default().to_ascii_lowercase();
+    lowered.contains("vision") || lowered.contains("image")
 }
 
 fn compare_rotator_candidates(
