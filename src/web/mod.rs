@@ -43,6 +43,7 @@ const AGENT_CONTEXT_REFRESH_JS_ROUTE: &str = "/agent_context_refresh.js";
 const MERMAID_ARTIFACT_JS_ROUTE: &str = "/mermaid_artifact.js";
 const MERMAID_ARTIFACT_CONTROLLER_JS_ROUTE: &str = "/mermaid_artifact_controller.js";
 const TERMINAL_SAFETY_JS_ROUTE: &str = "/terminal_safety.js";
+const TERMINAL_SEARCH_LINKS_JS_ROUTE: &str = "/terminal_search_links.js";
 const TERMINAL_PROTOCOL_JS_ROUTE: &str = "/terminal_protocol.js";
 const DIR_BROWSER_JS_ROUTE: &str = "/dir_browser.js";
 const DIR_BROWSER_CONTROLLER_JS_ROUTE: &str = "/dir_browser_controller.js";
@@ -127,6 +128,10 @@ pub fn routes() -> Router<Arc<AppState>> {
             get(mermaid_artifact_controller_js),
         )
         .route(TERMINAL_SAFETY_JS_ROUTE, get(terminal_safety_js))
+        .route(
+            TERMINAL_SEARCH_LINKS_JS_ROUTE,
+            get(terminal_search_links_js),
+        )
         .route(TERMINAL_PROTOCOL_JS_ROUTE, get(terminal_protocol_js))
         .route(DIR_BROWSER_JS_ROUTE, get(dir_browser_js))
         .route(
@@ -728,6 +733,13 @@ async fn terminal_safety_js() -> Response {
     javascript_asset(
         "src/web/terminal_safety.js",
         include_str!("terminal_safety.js"),
+    )
+}
+
+async fn terminal_search_links_js() -> Response {
+    javascript_asset(
+        "src/web/terminal_search_links.js",
+        include_str!("terminal_search_links.js"),
     )
 }
 
@@ -2415,6 +2427,11 @@ mod tests {
                 "export function safeAnchorHref",
             ),
             (
+                TERMINAL_SEARCH_LINKS_JS_ROUTE,
+                terminal_search_links_js().await,
+                "export function createTerminalSearchLinksController",
+            ),
+            (
                 TERMINAL_PROTOCOL_JS_ROUTE,
                 terminal_protocol_js().await,
                 "export function buildSessionSocketUrl",
@@ -2600,6 +2617,7 @@ mod tests {
     #[test]
     fn app_js_exposes_terminal_viewer_ergonomics() {
         let js = include_str!("app.js");
+        let terminal_search_links = include_str!("terminal_search_links.js");
         let agent_context_refresh = include_str!("agent_context_refresh.js");
         let workbench_render = include_str!("workbench_render.js");
         let mermaid_artifact_controller = include_str!("mermaid_artifact_controller.js");
@@ -2609,7 +2627,8 @@ mod tests {
         assert!(js.contains("mobileKeyboardProxy"));
         assert!(js.contains("function openCommandPalette()"));
         assert!(js.contains("function syncTerminalAccessibilityMirror"));
-        assert!(js.contains("function drainTerminalLinkClicks()"));
+        assert!(js.contains("createTerminalSearchLinksController"));
+        assert!(terminal_search_links.contains("function drainTerminalLinkClicks()"));
         assert!(js.contains("function rememberSendHistory(text)"));
         assert!(js.contains("function syncTerminalStatusStrip()"));
         assert!(js.contains("function refreshAgentContextForSelectedSession"));
