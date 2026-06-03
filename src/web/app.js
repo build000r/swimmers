@@ -34,6 +34,7 @@ import {
   dirCheckboxChangePlan as dirBrowserCheckboxChangePlan,
   dirGroupChipClickPlan as dirBrowserGroupChipClickPlan,
   dirGroupMembershipClickPlan as dirBrowserGroupMembershipClickPlan,
+  dirRowClickPlan as dirBrowserRowClickPlan,
   launchTargetPayload as dirBrowserLaunchTargetPayload,
   renderCreateBatchBar as renderDirBrowserCreateBatchBar,
   renderDirEntries as renderDirBrowserEntries,
@@ -5641,17 +5642,14 @@ function bindEvents() {
       return;
     }
 
-    const rowButton = target.closest(".dir-row-main");
-    if (!rowButton) {
+    const rowPlan = dirBrowserRowClickPlan(event.type, target);
+    if (rowPlan.type !== "row") {
       return;
     }
-    const path = String(rowButton.dataset.path || "").trim();
-    if (!path) {
-      return;
-    }
+    const path = rowPlan.path;
     el.dirsPath.value = path;
     el.createCwd.value = path;
-    if (rowButton.dataset.hasChildren === "true") {
+    if (rowPlan.hasChildren) {
       state.dirBrowser.group = "";
       clearCreateBatchSelection();
       await loadDirListing(path, el.dirsManagedOnly.checked, "");

@@ -185,6 +185,21 @@ export function dirGroupMembershipClickPlan(eventType, target) {
   return { type: "membership", path: dataset.path, action: dataset.action, group: dataset.group, removeGroup: dataset.removeGroup };
 }
 
+export function dirRowClickPlan(eventType, target) {
+  if (eventType !== "click") {
+    return { type: "ignore" };
+  }
+  const row = target?.closest?.(".dir-row-main") ?? null;
+  if (!row) {
+    return { type: "ignore" };
+  }
+  const path = String(row.dataset.path || "").trim();
+  if (!path) {
+    return { type: "ignore" };
+  }
+  return { type: "row", path, hasChildren: row.dataset.hasChildren === "true" };
+}
+
 export function selectedLaunchTarget(el, dirBrowser) {
   const value = String(el.createLaunchTarget?.value || dirBrowser.launchTarget || "local").trim();
   return value || "local";

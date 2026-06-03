@@ -10,6 +10,7 @@ import {
   dirEntryResolvedPath,
   dirGroupChipClickPlan,
   dirGroupMembershipClickPlan,
+  dirRowClickPlan,
   joinPath,
   launchTargetPayload,
   renderCreateBatchBar,
@@ -231,6 +232,50 @@ test("dirGroupMembershipClickPlan preserves action dataset forwarding and ignore
     action: undefined,
     group: undefined,
     removeGroup: undefined,
+  });
+});
+
+test("dirRowClickPlan preserves row path trimming, child detection, and ignores", () => {
+  const rowFor = (dataset) => {
+    const row = { dataset };
+    return {
+      row,
+      target: {
+        closest(selector) {
+          return selector === ".dir-row-main" ? row : null;
+        },
+      },
+    };
+  };
+
+  assert.deepEqual(dirRowClickPlan("keydown", rowFor({ path: "/srv/repos/a", hasChildren: "true" }).target), {
+    type: "ignore",
+  });
+  assert.deepEqual(dirRowClickPlan("click", { closest: () => null }), {
+    type: "ignore",
+  });
+  assert.deepEqual(dirRowClickPlan("click", rowFor({ path: " " }).target), {
+    type: "ignore",
+  });
+  assert.deepEqual(dirRowClickPlan("click", rowFor({ path: " /srv/repos/a ", hasChildren: "true" }).target), {
+    type: "row",
+    path: "/srv/repos/a",
+    hasChildren: true,
+  });
+  assert.deepEqual(dirRowClickPlan("click", rowFor({ path: "/srv/repos/a", hasChildren: "false" }).target), {
+    type: "row",
+    path: "/srv/repos/a",
+    hasChildren: false,
+  });
+  assert.deepEqual(dirRowClickPlan("click", rowFor({ path: "/srv/repos/a", hasChildren: true }).target), {
+    type: "row",
+    path: "/srv/repos/a",
+    hasChildren: false,
+  });
+  assert.deepEqual(dirRowClickPlan("click", rowFor({ path: "/srv/repos/a" }).target), {
+    type: "row",
+    path: "/srv/repos/a",
+    hasChildren: false,
   });
 });
 
