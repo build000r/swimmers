@@ -2,7 +2,7 @@ import { buildSurfaceFrame, surfaceActionAt, surfaceConsumesPointer } from "./re
 import {
   authTokenButtonPlan, eventCell, globalShortcutPlan, mobileKeyboardInputExecutorPlan, mobileKeyboardInputPlan,
   mobileKeyboardKeydownPlan, mobileKeyboardKeyPlan, shouldIgnoreSyntheticClick,
-  terminalComposerControlAction, terminalDestroyStatePatch, terminalFallbackFocusPlan, terminalFallbackKeydownPlan, terminalFallbackPastePlan, terminalFallbackPointerFocusPlan, terminalInlineInputKeydownPlan, terminalKeyStripClickExecutorPlan, terminalKeyStripClickPlan, terminalStageCaptureBindings, terminalStageFocusExecutorPlan, terminalStageFocusPlan,
+  terminalComposerControlAction, terminalDestroyStatePatch, terminalFallbackActivationPlan, terminalFallbackFocusPlan, terminalFallbackKeydownPlan, terminalFallbackPastePlan, terminalFallbackPointerFocusPlan, terminalInlineInputKeydownPlan, terminalKeyStripClickExecutorPlan, terminalKeyStripClickPlan, terminalStageCaptureBindings, terminalStageFocusExecutorPlan, terminalStageFocusPlan,
   terminalFallbackScrollPlan, terminalFallbackTextScrollPlan, terminalStageKeydownPlan, terminalStagePasteExecutorPlan, terminalStagePastePlan,
 } from "./input_support.js";
 import { sendHistoryClickPlan, sendSheetFailureStatus, sendSheetSubmitPlan, sendSheetSuccessStatus } from "./send_sheet.js";
@@ -2732,26 +2732,18 @@ function clearTerminalPaintProbe() {
 }
 
 function setTerminalTextFallbackActive(active, options = {}) {
+  const hasCurrentSession = Boolean(currentSession());
   const wasActive = state.terminalFallbackActive;
-  state.terminalFallbackActive = Boolean(active && currentSession());
-  el.terminalFallback.classList.toggle("hidden", !state.terminalFallbackActive);
-  el.terminalFallback.setAttribute("aria-hidden", state.terminalFallbackActive ? "false" : "true");
-  if (state.terminalFallbackActive) {
-    state.terminalFallbackAutoFollow = wasActive ? terminalFallbackIsNearBottom() : true;
-    startSnapshotPolling();
-    if (!wasActive) {
-      focusTerminalInputSurface({ onlyIfSurfaceFocused: true, preventScroll: true });
-    }
-    syncTerminalStatusStrip();
-    return;
-  }
-
-  if (options.clearText !== false) {
-    el.terminalFallback.textContent = "";
-  }
-  if (state.terminal || !currentSession()) {
-    stopSnapshotPolling();
-  }
+  const nextActive = Boolean(active && hasCurrentSession);
+  const plan = terminalFallbackActivationPlan({ active, hasCurrentSession, wasActive, hasTerminal: Boolean(state.terminal), clearText: options.clearText !== false, nearBottom: nextActive && wasActive ? terminalFallbackIsNearBottom() : false });
+  state.terminalFallbackActive = plan.terminalFallbackActive;
+  el.terminalFallback.classList.toggle("hidden", plan.hidden);
+  el.terminalFallback.setAttribute("aria-hidden", plan.ariaHidden);
+  if (plan.updateAutoFollow) state.terminalFallbackAutoFollow = plan.autoFollow;
+  if (plan.clearText) el.terminalFallback.textContent = "";
+  if (plan.startSnapshotPolling) startSnapshotPolling();
+  if (plan.focusTerminal) focusTerminalInputSurface({ onlyIfSurfaceFocused: true, preventScroll: true });
+  if (plan.stopSnapshotPolling) stopSnapshotPolling();
   syncTerminalStatusStrip();
 }
 

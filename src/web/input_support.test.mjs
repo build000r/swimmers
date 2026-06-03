@@ -12,6 +12,7 @@ import {
   shouldIgnoreSyntheticClick,
   terminalComposerControlAction,
   terminalDestroyStatePatch,
+  terminalFallbackActivationPlan,
   terminalFallbackFocusPlan,
   terminalFallbackKeydownPlan,
   terminalFallbackPastePlan,
@@ -534,6 +535,51 @@ test("terminalFallbackFocusPlan preserves fallback focus, blur, and no-op gates"
     event: { kind: "focus", focused: false },
   });
   assert.deepEqual(terminalFallbackFocusPlan("click", { terminalFallbackActive: true }), { type: "ignore" });
+});
+
+test("terminalFallbackActivationPlan preserves fallback activation side-effect decisions", () => {
+  assert.deepEqual(terminalFallbackActivationPlan({ active: true, hasCurrentSession: true, wasActive: false, hasTerminal: true }), {
+    type: "activate",
+    terminalFallbackActive: true,
+    hidden: false,
+    ariaHidden: "false",
+    updateAutoFollow: true,
+    autoFollow: true,
+    startSnapshotPolling: true,
+    focusTerminal: true,
+    clearText: false,
+    stopSnapshotPolling: false,
+    syncStatus: true,
+  });
+  assert.equal(terminalFallbackActivationPlan({ active: true, hasCurrentSession: true, wasActive: true, nearBottom: true }).autoFollow, true);
+  assert.equal(terminalFallbackActivationPlan({ active: true, hasCurrentSession: true, wasActive: true, nearBottom: false }).autoFollow, false);
+  assert.deepEqual(terminalFallbackActivationPlan({ active: false, hasCurrentSession: false, hasTerminal: true }), {
+    type: "deactivate",
+    terminalFallbackActive: false,
+    hidden: true,
+    ariaHidden: "true",
+    updateAutoFollow: false,
+    autoFollow: null,
+    startSnapshotPolling: false,
+    focusTerminal: false,
+    clearText: true,
+    stopSnapshotPolling: true,
+    syncStatus: true,
+  });
+  assert.deepEqual(terminalFallbackActivationPlan({ active: false, hasCurrentSession: true, hasTerminal: false, clearText: false }), {
+    type: "deactivate",
+    terminalFallbackActive: false,
+    hidden: true,
+    ariaHidden: "true",
+    updateAutoFollow: false,
+    autoFollow: null,
+    startSnapshotPolling: false,
+    focusTerminal: false,
+    clearText: false,
+    stopSnapshotPolling: false,
+    syncStatus: true,
+  });
+  assert.equal(terminalFallbackActivationPlan({ active: true, hasCurrentSession: false }).terminalFallbackActive, false);
 });
 
 test("terminalFallbackPointerFocusPlan preserves scheduled and immediate focus gates", () => {

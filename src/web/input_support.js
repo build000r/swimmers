@@ -368,6 +368,23 @@ export function terminalFallbackFocusPlan(eventType, context = {}) {
   return { type: "ignore" };
 }
 
+export function terminalFallbackActivationPlan(context = {}) {
+  const terminalFallbackActive = Boolean(context.active && context.hasCurrentSession);
+  return {
+    type: terminalFallbackActive ? "activate" : "deactivate",
+    terminalFallbackActive,
+    hidden: !terminalFallbackActive,
+    ariaHidden: terminalFallbackActive ? "false" : "true",
+    updateAutoFollow: terminalFallbackActive,
+    autoFollow: terminalFallbackActive ? (context.wasActive ? context.nearBottom : true) : null,
+    startSnapshotPolling: terminalFallbackActive,
+    focusTerminal: terminalFallbackActive && !context.wasActive,
+    clearText: !terminalFallbackActive && context.clearText !== false,
+    stopSnapshotPolling: !terminalFallbackActive && (context.hasTerminal || !context.hasCurrentSession),
+    syncStatus: true,
+  };
+}
+
 export function terminalFallbackPointerFocusPlan(eventType, context = {}) {
   if (!context.terminalFallbackActive || context.activeSheet) {
     return { type: "ignore", focusTerminal: false, scheduleFrame: false };
