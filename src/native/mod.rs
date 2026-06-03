@@ -3,9 +3,8 @@ use std::ffi::OsString;
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::process::{Command as ProcessCommand, Output, Stdio};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{LazyLock, Mutex};
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::Instant;
 
 use anyhow::{anyhow, Context, Result};
 use chrono::Utc;
@@ -24,6 +23,7 @@ use crate::types::{
 
 mod attention_group;
 mod ghostty_open;
+mod script_path;
 
 #[cfg(test)]
 use attention_group::build_attention_group_attach_command;
@@ -37,6 +37,9 @@ use ghostty_open::{
     cached_ghostty_preview_term_id, clear_ghostty_preview_term_cache, parse_osascript_output,
     remember_ghostty_preview_term_id,
 };
+#[cfg(test)]
+use script_path::{materialize_bundled_script, resolve_script_path, unique_tmp_suffix};
+use script_path::{script_path_for_app, script_path_for_app_without_materializing};
 
 const NATIVE_APP_ENV: &str = "SWIMMERS_NATIVE_APP";
 const GHOSTTY_MODE_ENV: &str = "SWIMMERS_GHOSTTY_MODE";
@@ -273,188 +276,6 @@ pub async fn open_or_focus_iterm_session(
     }
 
     unreachable!("native iTerm open loop should always return or error")
-}
-
-fn script_path_for_app(app: NativeDesktopApp) -> Result<PathBuf> {
-    let override_root = std::env::var_os(NATIVE_SCRIPT_ROOT_ENV).map(PathBuf::from);
-    let current_exe = std::env::current_exe().ok();
-    let current_dir = std::env::current_dir().ok();
-    resolve_script_path(
-        app.script_relative_path(),
-        override_root.as_deref(),
-        current_exe.as_deref(),
-        current_dir.as_deref(),
-        Path::new(env!("CARGO_MANIFEST_DIR")),
-        &bundled_script_root(),
-        app.bundled_script_source(),
-    )
-}
-
-fn script_path_for_app_without_materializing(app: NativeDesktopApp) -> Result<PathBuf> {
-    let override_root = std::env::var_os(NATIVE_SCRIPT_ROOT_ENV).map(PathBuf::from);
-    let current_exe = std::env::current_exe().ok();
-    let current_dir = std::env::current_dir().ok();
-    resolve_script_path_without_materializing(
-        app.script_relative_path(),
-        override_root.as_deref(),
-        current_exe.as_deref(),
-        current_dir.as_deref(),
-        Path::new(env!("CARGO_MANIFEST_DIR")),
-        &bundled_script_root(),
-    )
-}
-
-fn resolve_script_path(
-    script_relative_path: &str,
-    override_root: Option<&Path>,
-    current_exe: Option<&Path>,
-    current_dir: Option<&Path>,
-    manifest_dir: &Path,
-    bundled_root: &Path,
-    bundled_source: &str,
-) -> Result<PathBuf> {
-    if let Some(root) = override_root {
-        return Ok(root.join(script_relative_path));
-    }
-
-    let mut roots = Vec::new();
-    if let Some(dir) = current_dir {
-        push_ancestor_roots(&mut roots, dir);
-    }
-    if let Some(exe_dir) = current_exe.and_then(Path::parent) {
-        push_ancestor_roots(&mut roots, exe_dir);
-    }
-    push_unique_root(&mut roots, manifest_dir);
-
-    for root in roots {
-        let candidate = root.join(script_relative_path);
-        if candidate.is_file() {
-            return Ok(candidate);
-        }
-    }
-
-    materialize_bundled_script(script_relative_path, bundled_root, bundled_source)
-}
-
-fn resolve_script_path_without_materializing(
-    script_relative_path: &str,
-    override_root: Option<&Path>,
-    current_exe: Option<&Path>,
-    current_dir: Option<&Path>,
-    manifest_dir: &Path,
-    bundled_root: &Path,
-) -> Result<PathBuf> {
-    if let Some(root) = override_root {
-        return Ok(root.join(script_relative_path));
-    }
-
-    let mut roots = Vec::new();
-    if let Some(dir) = current_dir {
-        push_ancestor_roots(&mut roots, dir);
-    }
-    if let Some(exe_dir) = current_exe.and_then(Path::parent) {
-        push_ancestor_roots(&mut roots, exe_dir);
-    }
-    push_unique_root(&mut roots, manifest_dir);
-    push_unique_root(&mut roots, bundled_root);
-
-    for root in roots {
-        let candidate = root.join(script_relative_path);
-        if candidate.is_file() {
-            return Ok(candidate);
-        }
-    }
-
-    Ok(bundled_root.join(script_relative_path))
-}
-
-fn bundled_script_root() -> PathBuf {
-    let data_dir = match std::env::var_os("SWIMMERS_DATA_DIR") {
-        Some(value) if !value.is_empty() => PathBuf::from(value),
-        _ => dirs::data_dir()
-            .map(|base| base.join("swimmers"))
-            .unwrap_or_else(|| PathBuf::from("./data/swimmers/")),
-    };
-    data_dir
-        .join("native-scripts")
-        .join(env!("CARGO_PKG_VERSION"))
-}
-
-/// Builds a per-call unique suffix for atomic temp-file writes so that two
-/// concurrent in-process callers (reachable from the unsynchronized
-/// native-status endpoint) never share a tmp path and race on the same file.
-fn unique_tmp_suffix() -> String {
-    static COUNTER: AtomicU64 = AtomicU64::new(0);
-    let counter = COUNTER.fetch_add(1, Ordering::Relaxed);
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|elapsed| elapsed.as_nanos())
-        .unwrap_or(0);
-    format!("{:?}.{counter}.{nanos}", std::thread::current().id())
-        .replace(|c: char| !c.is_ascii_alphanumeric() && c != '.', "")
-}
-
-fn materialize_bundled_script(
-    script_relative_path: &str,
-    bundled_root: &Path,
-    bundled_source: &str,
-) -> Result<PathBuf> {
-    let target = bundled_root.join(script_relative_path);
-    if let Ok(existing) = std::fs::read_to_string(&target) {
-        if existing == bundled_source {
-            return Ok(target);
-        }
-    }
-
-    let parent = target
-        .parent()
-        .ok_or_else(|| anyhow!("native script path has no parent: {}", target.display()))?;
-    std::fs::create_dir_all(parent).with_context(|| {
-        format!(
-            "failed to create native script directory {}",
-            parent.display()
-        )
-    })?;
-
-    let file_name = target
-        .file_name()
-        .and_then(|name| name.to_str())
-        .ok_or_else(|| anyhow!("native script path has no file name: {}", target.display()))?;
-    let tmp_path = target.with_file_name(format!(
-        "{file_name}.{}.{}.tmp",
-        std::process::id(),
-        unique_tmp_suffix()
-    ));
-    std::fs::write(&tmp_path, bundled_source).with_context(|| {
-        format!(
-            "failed to write bundled native script {}",
-            tmp_path.display()
-        )
-    })?;
-    std::fs::rename(&tmp_path, &target).with_context(|| {
-        let _ = std::fs::remove_file(&tmp_path);
-        format!(
-            "failed to install bundled native script at {}",
-            target.display()
-        )
-    })?;
-    Ok(target)
-}
-
-fn push_ancestor_roots(roots: &mut Vec<PathBuf>, start: &Path) {
-    for ancestor in start.ancestors() {
-        push_unique_root(roots, ancestor);
-    }
-}
-
-fn push_unique_root(roots: &mut Vec<PathBuf>, candidate: &Path) {
-    if candidate.as_os_str().is_empty() {
-        return;
-    }
-    if roots.iter().any(|existing| existing == candidate) {
-        return;
-    }
-    roots.push(candidate.to_path_buf());
 }
 
 fn ghostty_unavailable_reason() -> Option<String> {
