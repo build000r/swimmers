@@ -9,6 +9,7 @@ import {
   mobileKeyboardKeyPlan,
   shouldIgnoreSyntheticClick,
   terminalComposerControlAction,
+  terminalKeyStripClickPlan,
 } from "./input_support.js";
 
 test("eventClientPoint uses direct pointer coordinates when present", () => {
@@ -221,4 +222,25 @@ test("terminalComposerControlAction preserves modifier, selection, and empty-inp
   assert.equal(terminalComposerControlAction({ key: "PageUp" }), "page-up");
   assert.equal(terminalComposerControlAction({ key: "PageDown" }), "page-down");
   assert.equal(terminalComposerControlAction({ key: "F1" }), "");
+});
+
+test("terminalKeyStripClickPlan preserves target, disabled, and action dispatch gates", () => {
+  const targetFor = (button) => ({
+    closest(selector) {
+      return selector === "button[data-terminal-key]" ? button : null;
+    },
+  });
+  assert.deepEqual(terminalKeyStripClickPlan("mousemove", targetFor({
+    disabled: false,
+    dataset: { terminalKey: "ctrl-c" },
+  })), { type: "ignore" });
+  assert.deepEqual(terminalKeyStripClickPlan("click", null), { type: "ignore" });
+  assert.deepEqual(terminalKeyStripClickPlan("click", targetFor({
+    disabled: true,
+    dataset: { terminalKey: "ctrl-c" },
+  })), { type: "ignore" });
+  assert.deepEqual(terminalKeyStripClickPlan("click", targetFor({
+    disabled: false,
+    dataset: { terminalKey: "arrow-up" },
+  })), { type: "send_key", actionId: "arrow-up" });
 });

@@ -162,6 +162,17 @@ export function mobileKeyboardInputPlan(event, context = {}) {
   return { type: "send_text", text };
 }
 
+export function terminalKeyStripClickPlan(eventType, target) {
+  if (eventType !== "click") {
+    return { type: "ignore" };
+  }
+  const button = target?.closest?.("button[data-terminal-key]") ?? null;
+  if (!button || button.disabled) {
+    return { type: "ignore" };
+  }
+  return { type: "send_key", actionId: button.dataset.terminalKey };
+}
+
 export function terminalComposerControlAction(event, context = {}) {
   if (!event || event.metaKey || event.altKey) {
     return "";

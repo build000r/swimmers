@@ -5,7 +5,7 @@ import {
   mobileKeyboardInputPlan,
   mobileKeyboardKeyPlan,
   shouldIgnoreSyntheticClick,
-  terminalComposerControlAction,
+  terminalComposerControlAction, terminalKeyStripClickPlan,
 } from "./input_support.js";
 import {
   MERMAID_PLAN_CONTENT_DISPLAY_MAX_CHARS,
@@ -5294,13 +5294,12 @@ function bindEvents() {
   });
   el.terminalInlineInput.addEventListener("keydown", handleTerminalInlineInputKeydown);
   el.terminalKeyStrip.addEventListener("click", (event) => {
-    const button = event.target instanceof Element ? event.target.closest("button[data-terminal-key]") : null;
-    if (!button || button.disabled) {
-      return;
+    const plan = terminalKeyStripClickPlan(event.type, event.target);
+    if (plan.type === "send_key") {
+      event.preventDefault();
+      sendTerminalControlKey(plan.actionId);
+      focusTerminalInputSurface({ preventScroll: true });
     }
-    event.preventDefault();
-    sendTerminalControlKey(button.dataset.terminalKey);
-    focusTerminalInputSurface({ preventScroll: true });
   });
   el.terminalInlineInput.addEventListener("focus", () => {
     if (!state.activeSheet) {
