@@ -15,6 +15,7 @@ import {
   terminalFallbackKeydownPlan,
   terminalFallbackPastePlan,
   terminalFallbackPointerFocusPlan,
+  terminalInlineInputKeydownPlan,
   terminalKeyStripClickExecutorPlan,
   terminalKeyStripClickPlan,
   terminalStageCaptureBindings,
@@ -355,6 +356,39 @@ test("terminalComposerControlAction preserves modifier, selection, and empty-inp
   assert.equal(terminalComposerControlAction({ key: "PageUp" }), "page-up");
   assert.equal(terminalComposerControlAction({ key: "PageDown" }), "page-down");
   assert.equal(terminalComposerControlAction({ key: "F1" }), "");
+});
+
+test("terminalInlineInputKeydownPlan preserves submit, send, and ignored key handling", () => {
+  const ignored = {
+    type: "ignore",
+    handled: false,
+    preventDefault: false,
+    stopPropagation: true,
+    submit: false,
+    sendKey: false,
+    actionId: "",
+  };
+
+  assert.deepEqual(terminalInlineInputKeydownPlan({ key: "Enter", shiftKey: false }), {
+    type: "submit",
+    handled: true,
+    preventDefault: true,
+    stopPropagation: true,
+    submit: true,
+    sendKey: false,
+    actionId: "",
+  });
+  assert.deepEqual(terminalInlineInputKeydownPlan({ key: "Enter", shiftKey: true }), ignored);
+  assert.deepEqual(terminalInlineInputKeydownPlan({ key: "ArrowUp" }, "arrow-up"), {
+    type: "send_key",
+    handled: true,
+    preventDefault: true,
+    stopPropagation: true,
+    submit: false,
+    sendKey: true,
+    actionId: "arrow-up",
+  });
+  assert.deepEqual(terminalInlineInputKeydownPlan({ key: "a" }, ""), ignored);
 });
 
 test("terminalKeyStripClickPlan preserves target, disabled, and action dispatch gates", () => {

@@ -2,7 +2,7 @@ import { buildSurfaceFrame, surfaceActionAt, surfaceConsumesPointer } from "./re
 import {
   authTokenButtonPlan, eventCell, globalShortcutPlan, mobileKeyboardInputExecutorPlan, mobileKeyboardInputPlan,
   mobileKeyboardKeydownPlan, mobileKeyboardKeyPlan, shouldIgnoreSyntheticClick,
-  terminalComposerControlAction, terminalFallbackFocusPlan, terminalFallbackKeydownPlan, terminalFallbackPastePlan, terminalFallbackPointerFocusPlan, terminalKeyStripClickExecutorPlan, terminalKeyStripClickPlan, terminalStageCaptureBindings, terminalStageFocusExecutorPlan, terminalStageFocusPlan,
+  terminalComposerControlAction, terminalFallbackFocusPlan, terminalFallbackKeydownPlan, terminalFallbackPastePlan, terminalFallbackPointerFocusPlan, terminalInlineInputKeydownPlan, terminalKeyStripClickExecutorPlan, terminalKeyStripClickPlan, terminalStageCaptureBindings, terminalStageFocusExecutorPlan, terminalStageFocusPlan,
   terminalStageKeydownPlan, terminalStagePasteExecutorPlan, terminalStagePastePlan,
 } from "./input_support.js";
 import { sendHistoryClickPlan, sendSheetFailureStatus, sendSheetSubmitPlan, sendSheetSuccessStatus } from "./send_sheet.js";
@@ -5241,21 +5241,13 @@ function handleMobileKeyboardProxyInput(event) {
 }
 
 function handleTerminalInlineInputKeydown(event) {
-  let handled = false;
-  if (event.key === "Enter" && !event.shiftKey) {
-    event.preventDefault();
-    void submitTerminalInputDock();
-    handled = true;
-  } else {
-    const actionId = terminalKeyActionForDomEvent(event);
-    if (actionId) {
-      event.preventDefault();
-      sendTerminalControlKey(actionId);
-      handled = true;
-    }
-  }
-  event.stopPropagation();
-  return handled;
+  const actionId = event.key === "Enter" && !event.shiftKey ? "" : terminalKeyActionForDomEvent(event);
+  const plan = terminalInlineInputKeydownPlan(event, actionId);
+  if (plan.preventDefault) event.preventDefault();
+  if (plan.submit) void submitTerminalInputDock();
+  if (plan.sendKey) sendTerminalControlKey(plan.actionId);
+  if (plan.stopPropagation) event.stopPropagation();
+  return plan.handled;
 }
 
 function handleTerminalWorkbenchWidgetsClick(event) {

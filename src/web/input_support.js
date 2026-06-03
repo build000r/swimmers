@@ -265,6 +265,41 @@ export function terminalComposerControlAction(event, context = {}) {
   }
 }
 
+export function terminalInlineInputKeydownPlan(event, actionId = "") {
+  const normalizedActionId = String(actionId || "");
+  if (event?.key === "Enter" && !event?.shiftKey) {
+    return {
+      type: "submit",
+      handled: true,
+      preventDefault: true,
+      stopPropagation: true,
+      submit: true,
+      sendKey: false,
+      actionId: "",
+    };
+  }
+  if (normalizedActionId) {
+    return {
+      type: "send_key",
+      handled: true,
+      preventDefault: true,
+      stopPropagation: true,
+      submit: false,
+      sendKey: true,
+      actionId: normalizedActionId,
+    };
+  }
+  return {
+    type: "ignore",
+    handled: false,
+    preventDefault: false,
+    stopPropagation: true,
+    submit: false,
+    sendKey: false,
+    actionId: "",
+  };
+}
+
 export function terminalStageCaptureBindings() {
   return [
     { eventType: "mousedown", action: "down", options: { capture: true } },
