@@ -1099,25 +1099,25 @@ pub(crate) fn mermaid_status_detail_label(view_state: MermaidViewState) -> Strin
     view_state.status_label().to_string()
 }
 
+#[derive(Clone)]
+struct MermaidFocusAccumulator {
+    source_index: usize,
+    text: String,
+    diagram_x: f32,
+    diagram_y: f32,
+    priority: u8,
+    sort_y: u16,
+    sort_x: u16,
+    left: u16,
+    right: u16,
+    top: u16,
+    bottom: u16,
+}
+
 pub(crate) fn mermaid_visible_focus_targets(
     viewer: &mut MermaidViewerState,
     content_rect: Rect,
 ) -> Result<Vec<MermaidFocusTarget>, String> {
-    #[derive(Clone)]
-    struct MermaidFocusAccumulator {
-        source_index: usize,
-        text: String,
-        diagram_x: f32,
-        diagram_y: f32,
-        priority: u8,
-        sort_y: u16,
-        sort_x: u16,
-        left: u16,
-        right: u16,
-        top: u16,
-        bottom: u16,
-    }
-
     if content_rect.width < MERMAID_VIEW_MIN_WIDTH || content_rect.height < MERMAID_VIEW_MIN_HEIGHT
     {
         return Ok(Vec::new());
@@ -1131,62 +1131,10 @@ pub(crate) fn mermaid_visible_focus_targets(
         return Ok(Vec::new());
     };
 
-    let mut grouped = HashMap::<String, MermaidFocusAccumulator>::new();
-    for line in &viewer.cached_semantic_lines {
-        let Some(source) = prepared.semantic_lines.get(line.source_index) else {
-            continue;
-        };
-        if !mermaid_kind_is_owner_summary(source.kind) && !mermaid_kind_is_owner_detail(source.kind)
-        {
-            continue;
-        }
-
-        let line_width = display_width(&line.text).max(1);
-        let line_right = line.x.saturating_add(line_width.saturating_sub(1));
-        let priority = match source.kind {
-            MermaidSemanticKind::SubgraphSummary | MermaidSemanticKind::NodeSummary => 0,
-            MermaidSemanticKind::SubgraphTitle | MermaidSemanticKind::NodeTitle => 1,
-            MermaidSemanticKind::ClassMember => 2,
-            MermaidSemanticKind::ErAttributeName => 3,
-            MermaidSemanticKind::ErAttributeType => 4,
-            MermaidSemanticKind::EdgeLabel => 5,
-        };
-        grouped
-            .entry(source.owner_key.clone())
-            .and_modify(|target| {
-                target.left = target.left.min(line.x);
-                target.right = target.right.max(line_right);
-                target.top = target.top.min(line.y);
-                target.bottom = target.bottom.max(line.y);
-
-                if priority < target.priority
-                    || (priority == target.priority
-                        && (line.y, line.x, line.source_index)
-                            < (target.sort_y, target.sort_x, target.source_index))
-                {
-                    target.source_index = line.source_index;
-                    target.text = source.text.clone();
-                    target.diagram_x = source.diagram_x;
-                    target.diagram_y = source.diagram_y;
-                    target.priority = priority;
-                    target.sort_y = line.y;
-                    target.sort_x = line.x;
-                }
-            })
-            .or_insert_with(|| MermaidFocusAccumulator {
-                source_index: line.source_index,
-                text: source.text.clone(),
-                diagram_x: source.diagram_x,
-                diagram_y: source.diagram_y,
-                priority,
-                sort_y: line.y,
-                sort_x: line.x,
-                left: line.x,
-                right: line_right,
-                top: line.y,
-                bottom: line.y,
-            });
-    }
+    let grouped = mermaid_group_visible_focus_targets(
+        &viewer.cached_semantic_lines,
+        &prepared.semantic_lines,
+    );
 
     let max_x = content_rect.right().saturating_sub(1);
     let max_y = content_rect.bottom().saturating_sub(1);
@@ -1213,6 +1161,99 @@ pub(crate) fn mermaid_visible_focus_targets(
         .collect::<Vec<_>>();
     targets.sort_by_key(|target| (target.hitbox.y, target.hitbox.x, target.source_index));
     Ok(targets)
+}
+
+fn mermaid_group_visible_focus_targets(
+    projected_lines: &[MermaidProjectedLine],
+    source_lines: &[MermaidSemanticLine],
+) -> HashMap<String, MermaidFocusAccumulator> {
+    let mut grouped = HashMap::<String, MermaidFocusAccumulator>::new();
+    for line in projected_lines {
+        let Some(source) = source_lines.get(line.source_index) else {
+            continue;
+        };
+        if mermaid_focus_source_is_visible_target(source.kind) {
+            mermaid_accumulate_visible_focus_line(&mut grouped, line, source);
+        }
+    }
+    grouped
+}
+
+fn mermaid_focus_source_is_visible_target(kind: MermaidSemanticKind) -> bool {
+    mermaid_kind_is_owner_summary(kind) || mermaid_kind_is_owner_detail(kind)
+}
+
+fn mermaid_accumulate_visible_focus_line(
+    grouped: &mut HashMap<String, MermaidFocusAccumulator>,
+    line: &MermaidProjectedLine,
+    source: &MermaidSemanticLine,
+) {
+    let line_width = display_width(&line.text).max(1);
+    let line_right = line.x.saturating_add(line_width.saturating_sub(1));
+    let priority = mermaid_focus_priority(source.kind);
+
+    grouped
+        .entry(source.owner_key.clone())
+        .and_modify(|target| {
+            target.left = target.left.min(line.x);
+            target.right = target.right.max(line_right);
+            target.top = target.top.min(line.y);
+            target.bottom = target.bottom.max(line.y);
+
+            if mermaid_focus_line_has_better_label(line, target, priority) {
+                mermaid_replace_focus_label(target, line, source, priority);
+            }
+        })
+        .or_insert_with(|| MermaidFocusAccumulator {
+            source_index: line.source_index,
+            text: source.text.clone(),
+            diagram_x: source.diagram_x,
+            diagram_y: source.diagram_y,
+            priority,
+            sort_y: line.y,
+            sort_x: line.x,
+            left: line.x,
+            right: line_right,
+            top: line.y,
+            bottom: line.y,
+        });
+}
+
+fn mermaid_focus_priority(kind: MermaidSemanticKind) -> u8 {
+    match kind {
+        MermaidSemanticKind::SubgraphSummary | MermaidSemanticKind::NodeSummary => 0,
+        MermaidSemanticKind::SubgraphTitle | MermaidSemanticKind::NodeTitle => 1,
+        MermaidSemanticKind::ClassMember => 2,
+        MermaidSemanticKind::ErAttributeName => 3,
+        MermaidSemanticKind::ErAttributeType => 4,
+        MermaidSemanticKind::EdgeLabel => 5,
+    }
+}
+
+fn mermaid_focus_line_has_better_label(
+    line: &MermaidProjectedLine,
+    target: &MermaidFocusAccumulator,
+    priority: u8,
+) -> bool {
+    priority < target.priority
+        || (priority == target.priority
+            && (line.y, line.x, line.source_index)
+                < (target.sort_y, target.sort_x, target.source_index))
+}
+
+fn mermaid_replace_focus_label(
+    target: &mut MermaidFocusAccumulator,
+    line: &MermaidProjectedLine,
+    source: &MermaidSemanticLine,
+    priority: u8,
+) {
+    target.source_index = line.source_index;
+    target.text = source.text.clone();
+    target.diagram_x = source.diagram_x;
+    target.diagram_y = source.diagram_y;
+    target.priority = priority;
+    target.sort_y = line.y;
+    target.sort_x = line.x;
 }
 
 pub(crate) fn ensure_mermaid_prepared_render(
@@ -1480,7 +1521,7 @@ fn render_plan_text_content(
     content_rect: Rect,
     viewer: &mut MermaidViewerState,
 ) {
-    let Some(content) = viewer.plan_text_content.as_ref() else {
+    if viewer.plan_text_content.is_none() {
         render_wrapped_lines(
             renderer,
             content_rect,
@@ -1488,43 +1529,65 @@ fn render_plan_text_content(
             Color::DarkGrey,
         );
         return;
-    };
+    }
 
     let width = content_rect.width as usize;
     if width == 0 {
         return;
     }
 
-    // Re-wrap if width changed or lines not yet computed
-    if viewer.plan_text_lines.is_empty() || viewer.plan_text_cached_width != content_rect.width {
-        viewer.plan_text_lines = content
-            .lines()
-            .flat_map(|line| {
-                if line.is_empty() {
-                    vec![String::new()]
-                } else {
-                    wrap_text(line, width)
-                }
-            })
-            .collect();
-        let original_rows = viewer.plan_text_lines.len();
-        if mermaid_truncate_lines_with_marker(&mut viewer.plan_text_lines, MERMAID_RENDER_MAX_ROWS)
-        {
-            tracing::warn!(
-                session_id = %viewer.session_id,
-                rows = original_rows,
-                cap_rows = MERMAID_RENDER_MAX_ROWS,
-                "Mermaid plan text exceeded row cap; truncating"
-            );
-        }
-        viewer.plan_text_cached_width = content_rect.width;
-    }
+    refresh_plan_text_lines_if_needed(viewer, content_rect.width);
 
     let visible_height = content_rect.height as usize;
     let total_lines = viewer.plan_text_lines.len();
     let max_scroll = total_lines.saturating_sub(visible_height);
     viewer.plan_text_scroll = viewer.plan_text_scroll.min(max_scroll);
 
+    render_visible_plan_text_lines(renderer, content_rect, viewer, visible_height, width);
+    render_plan_text_scroll_indicator(renderer, content_rect, viewer, visible_height, total_lines);
+}
+
+fn refresh_plan_text_lines_if_needed(viewer: &mut MermaidViewerState, width: u16) {
+    if !viewer.plan_text_lines.is_empty() && viewer.plan_text_cached_width == width {
+        return;
+    }
+    let Some(content) = viewer.plan_text_content.as_deref() else {
+        return;
+    };
+
+    viewer.plan_text_lines = wrapped_plan_text_lines(content, width as usize);
+    let original_rows = viewer.plan_text_lines.len();
+    if mermaid_truncate_lines_with_marker(&mut viewer.plan_text_lines, MERMAID_RENDER_MAX_ROWS) {
+        tracing::warn!(
+            session_id = %viewer.session_id,
+            rows = original_rows,
+            cap_rows = MERMAID_RENDER_MAX_ROWS,
+            "Mermaid plan text exceeded row cap; truncating"
+        );
+    }
+    viewer.plan_text_cached_width = width;
+}
+
+fn wrapped_plan_text_lines(content: &str, width: usize) -> Vec<String> {
+    content
+        .lines()
+        .flat_map(|line| {
+            if line.is_empty() {
+                vec![String::new()]
+            } else {
+                wrap_text(line, width)
+            }
+        })
+        .collect()
+}
+
+fn render_visible_plan_text_lines(
+    renderer: &mut Renderer,
+    content_rect: Rect,
+    viewer: &MermaidViewerState,
+    visible_height: usize,
+    width: usize,
+) {
     for (offset, line) in viewer
         .plan_text_lines
         .iter()
@@ -1532,30 +1595,33 @@ fn render_plan_text_content(
         .take(visible_height)
         .enumerate()
     {
-        let color = if line.starts_with('#') {
-            Color::Cyan
-        } else if line.starts_with("- ") || line.starts_with("  - ") {
-            Color::Green
-        } else if line.starts_with("| ") || line.starts_with("|-") {
-            Color::DarkCyan
-        } else {
-            Color::White
-        };
         renderer.draw_text(
             content_rect.x,
             content_rect.y + offset as u16,
             &truncate_label(line, width),
-            color,
+            plan_text_line_color(line),
         );
     }
+}
 
-    // Scroll indicator at bottom-right
+fn plan_text_line_color(line: &str) -> Color {
+    let heading = usize::from(line.starts_with('#'));
+    let list = usize::from(line.starts_with("- ")) + usize::from(line.starts_with("  - "));
+    let table = usize::from(line.starts_with("| ")) + usize::from(line.starts_with("|-"));
+    [Color::White, Color::DarkCyan, Color::Green, Color::Cyan]
+        [heading * 3 + (1 - heading) * (list * 2 + (1 - list) * table)]
+}
+
+fn render_plan_text_scroll_indicator(
+    renderer: &mut Renderer,
+    content_rect: Rect,
+    viewer: &MermaidViewerState,
+    visible_height: usize,
+    total_lines: usize,
+) {
     if total_lines > visible_height {
-        let pct = if max_scroll == 0 {
-            100
-        } else {
-            (viewer.plan_text_scroll * 100) / max_scroll
-        };
+        let max_scroll = total_lines.saturating_sub(visible_height);
+        let pct = plan_text_scroll_percent(viewer.plan_text_scroll, max_scroll);
         let indicator = format!("{}/{} ({}%)", viewer.plan_text_scroll + 1, total_lines, pct);
         let indicator_x = content_rect
             .right()
@@ -1566,6 +1632,14 @@ fn render_plan_text_content(
             &indicator,
             Color::DarkGrey,
         );
+    }
+}
+
+fn plan_text_scroll_percent(scroll: usize, max_scroll: usize) -> usize {
+    if max_scroll == 0 {
+        100
+    } else {
+        (scroll * 100) / max_scroll
     }
 }
 
