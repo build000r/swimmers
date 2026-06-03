@@ -320,7 +320,7 @@ pub async fn read_sbp_session_skills(
             session_id,
             cwd,
             query,
-            "sbp command unavailable; set SWIMMERS_SBP or add sbp to PATH",
+            sbp_command_unavailable_message(),
         );
     };
 
@@ -368,29 +368,45 @@ pub async fn read_sbp_session_skills(
 }
 
 fn resolve_sbp_command(cwd: &str) -> Option<PathBuf> {
-    if let Ok(value) = std::env::var("SWIMMERS_SBP") {
-        let trimmed = value.trim();
-        if !trimmed.is_empty() {
-            return Some(PathBuf::from(trimmed));
-        }
-    }
+    sbp_command_from_env()
+        .or_else(|| find_sbp_command_near(cwd))
+        .or_else(|| Some(fallback_sbp_command()))
+}
 
-    for ancestor in Path::new(cwd).ancestors() {
-        let sibling = ancestor.join("skillbox").join("scripts").join("sbp");
-        if sibling.is_file() {
-            return Some(sibling);
-        }
-        let nested = ancestor
+fn sbp_command_from_env() -> Option<PathBuf> {
+    let value = std::env::var("SWIMMERS_SBP").ok()?;
+    let trimmed = value.trim();
+    (!trimmed.is_empty()).then(|| PathBuf::from(trimmed))
+}
+
+fn find_sbp_command_near(cwd: &str) -> Option<PathBuf> {
+    Path::new(cwd)
+        .ancestors()
+        .flat_map(sbp_command_candidates_for_ancestor)
+        .find(|candidate| is_valid_sbp_command_candidate(candidate))
+}
+
+fn sbp_command_candidates_for_ancestor(ancestor: &Path) -> [PathBuf; 2] {
+    [
+        ancestor.join("skillbox").join("scripts").join("sbp"),
+        ancestor
             .join("opensource")
             .join("skillbox")
             .join("scripts")
-            .join("sbp");
-        if nested.is_file() {
-            return Some(nested);
-        }
-    }
+            .join("sbp"),
+    ]
+}
 
-    Some(PathBuf::from("sbp"))
+fn is_valid_sbp_command_candidate(candidate: &Path) -> bool {
+    candidate.is_file()
+}
+
+fn fallback_sbp_command() -> PathBuf {
+    PathBuf::from("sbp")
+}
+
+fn sbp_command_unavailable_message() -> &'static str {
+    "sbp command unavailable; set SWIMMERS_SBP or add sbp to PATH"
 }
 
 fn parse_sbp_session_skills(
@@ -691,6 +707,93 @@ mod tests {
         let mut perms = fs::metadata(path).expect("metadata").permissions();
         perms.set_mode(0o755);
         fs::set_permissions(path, perms).expect("chmod");
+    }
+
+    #[test]
+    fn resolve_sbp_command_prefers_env_override_as_trimmed_path() {
+        let _lock = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cwd = dir.path().join("project");
+        let local_sbp = cwd.join("skillbox").join("scripts").join("sbp");
+        fs::create_dir_all(local_sbp.parent().expect("local sbp parent")).expect("local sbp dir");
+        fs::write(&local_sbp, "#!/bin/sh\n").expect("local sbp");
+        let _sbp_guard = TestEnvGuard::set("SWIMMERS_SBP", "  /custom/bin/sbp  ");
+
+        assert_eq!(
+            resolve_sbp_command(&cwd.to_string_lossy()),
+            Some(PathBuf::from("/custom/bin/sbp"))
+        );
+    }
+
+    #[test]
+    fn resolve_sbp_command_uses_nearest_ancestor_and_candidate_order() {
+        let _lock = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let dir = tempfile::tempdir().expect("tempdir");
+        let project = dir.path().join("project");
+        let cwd = project.join("nested");
+        fs::create_dir_all(&cwd).expect("cwd");
+        let root_sbp = dir.path().join("skillbox").join("scripts").join("sbp");
+        let project_nested_sbp = project
+            .join("opensource")
+            .join("skillbox")
+            .join("scripts")
+            .join("sbp");
+        fs::create_dir_all(root_sbp.parent().expect("root sbp parent")).expect("root sbp dir");
+        fs::create_dir_all(project_nested_sbp.parent().expect("project sbp parent"))
+            .expect("project sbp dir");
+        fs::write(&root_sbp, "#!/bin/sh\n").expect("root sbp");
+        fs::write(&project_nested_sbp, "#!/bin/sh\n").expect("project sbp");
+        let _sbp_guard = TestEnvGuard::set("SWIMMERS_SBP", "  ");
+
+        assert_eq!(
+            resolve_sbp_command(&cwd.to_string_lossy()),
+            Some(project_nested_sbp)
+        );
+    }
+
+    #[test]
+    fn resolve_sbp_command_prefers_sibling_candidate_before_nested_candidate() {
+        let _lock = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let dir = tempfile::tempdir().expect("tempdir");
+        let sibling_sbp = dir.path().join("skillbox").join("scripts").join("sbp");
+        let nested_sbp = dir
+            .path()
+            .join("opensource")
+            .join("skillbox")
+            .join("scripts")
+            .join("sbp");
+        fs::create_dir_all(sibling_sbp.parent().expect("sibling sbp parent"))
+            .expect("sibling sbp dir");
+        fs::create_dir_all(nested_sbp.parent().expect("nested sbp parent"))
+            .expect("nested sbp dir");
+        fs::write(&sibling_sbp, "#!/bin/sh\n").expect("sibling sbp");
+        fs::write(&nested_sbp, "#!/bin/sh\n").expect("nested sbp");
+        let _sbp_guard = TestEnvGuard::set("SWIMMERS_SBP", "  ");
+
+        assert_eq!(
+            resolve_sbp_command(&dir.path().to_string_lossy()),
+            Some(sibling_sbp)
+        );
+    }
+
+    #[test]
+    fn resolve_sbp_command_falls_back_to_path_lookup_name() {
+        let _lock = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let dir = tempfile::tempdir().expect("tempdir");
+        let _sbp_guard = TestEnvGuard::set("SWIMMERS_SBP", "  ");
+
+        assert_eq!(
+            resolve_sbp_command(&dir.path().to_string_lossy()),
+            Some(PathBuf::from("sbp"))
+        );
     }
 
     #[test]
