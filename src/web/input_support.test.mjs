@@ -13,6 +13,7 @@ import {
   terminalComposerControlAction,
   terminalFallbackKeydownPlan,
   terminalFallbackPastePlan,
+  terminalKeyStripClickExecutorPlan,
   terminalKeyStripClickPlan,
   terminalStageCaptureBindings,
   terminalStageFocusExecutorPlan,
@@ -373,6 +374,19 @@ test("terminalKeyStripClickPlan preserves target, disabled, and action dispatch 
     disabled: false,
     dataset: { terminalKey: "arrow-up" },
   })), { type: "send_key", actionId: "arrow-up" });
+});
+
+test("terminalKeyStripClickExecutorPlan preserves ignore, send, and unknown decisions", () => {
+  const ignored = { type: "ignore", preventDefault: false, sendKey: false, actionId: "" };
+
+  assert.deepEqual(terminalKeyStripClickExecutorPlan({ type: "ignore" }), ignored);
+  assert.deepEqual(terminalKeyStripClickExecutorPlan({ type: "send_key", actionId: "ctrl-c" }), {
+    type: "send_key",
+    preventDefault: true,
+    sendKey: true,
+    actionId: "ctrl-c",
+  });
+  assert.deepEqual(terminalKeyStripClickExecutorPlan({ type: "unknown", actionId: "arrow-up" }), ignored);
 });
 
 test("terminalStageCaptureBindings preserves stage event labels and options", () => {

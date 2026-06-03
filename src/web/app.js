@@ -2,7 +2,7 @@ import { buildSurfaceFrame, surfaceActionAt, surfaceConsumesPointer } from "./re
 import {
   authTokenButtonPlan, eventCell, globalShortcutPlan, mobileKeyboardInputExecutorPlan, mobileKeyboardInputPlan,
   mobileKeyboardKeydownPlan, mobileKeyboardKeyPlan, shouldIgnoreSyntheticClick,
-  terminalComposerControlAction, terminalFallbackKeydownPlan, terminalFallbackPastePlan, terminalKeyStripClickPlan, terminalStageCaptureBindings, terminalStageFocusExecutorPlan, terminalStageFocusPlan,
+  terminalComposerControlAction, terminalFallbackKeydownPlan, terminalFallbackPastePlan, terminalKeyStripClickExecutorPlan, terminalKeyStripClickPlan, terminalStageCaptureBindings, terminalStageFocusExecutorPlan, terminalStageFocusPlan,
   terminalStageKeydownPlan, terminalStagePasteExecutorPlan, terminalStagePastePlan,
 } from "./input_support.js";
 import { sendHistoryClickPlan, sendSheetFailureStatus, sendSheetSubmitPlan, sendSheetSuccessStatus } from "./send_sheet.js";
@@ -5379,12 +5379,11 @@ function bindEvents() {
   });
   el.terminalInlineInput.addEventListener("keydown", handleTerminalInlineInputKeydown);
   el.terminalKeyStrip.addEventListener("click", (event) => {
-    const plan = terminalKeyStripClickPlan(event.type, event.target);
-    if (plan.type === "send_key") {
-      event.preventDefault();
-      sendTerminalControlKey(plan.actionId);
-      focusTerminalInputSurface({ preventScroll: true });
-    }
+    const action = terminalKeyStripClickExecutorPlan(terminalKeyStripClickPlan(event.type, event.target));
+    if (!action.sendKey) return;
+    if (action.preventDefault) event.preventDefault();
+    sendTerminalControlKey(action.actionId);
+    focusTerminalInputSurface({ preventScroll: true });
   });
   el.terminalInlineInput.addEventListener("focus", () => {
     if (!state.activeSheet) {

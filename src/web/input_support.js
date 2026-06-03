@@ -221,6 +221,13 @@ export function terminalKeyStripClickPlan(eventType, target) {
   return { type: "send_key", actionId: button.dataset.terminalKey };
 }
 
+export function terminalKeyStripClickExecutorPlan(plan = {}) {
+  if (plan.type !== "send_key") {
+    return { type: "ignore", preventDefault: false, sendKey: false, actionId: "" };
+  }
+  return { type: "send_key", preventDefault: true, sendKey: true, actionId: plan.actionId };
+}
+
 export function terminalComposerControlAction(event, context = {}) {
   if (!event || event.metaKey || event.altKey) {
     return "";
