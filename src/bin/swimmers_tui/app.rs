@@ -201,6 +201,96 @@ pub(crate) struct GroupInputTargets {
     pub(crate) label: String,
 }
 
+struct BatchCreateSuccess {
+    session: SessionSummary,
+    repo_theme: Option<RepoTheme>,
+}
+
+struct BatchCreatePartition {
+    total: usize,
+    successes: Vec<BatchCreateSuccess>,
+    first_error: Option<String>,
+}
+
+struct AppliedBatchCreate {
+    success_count: usize,
+    last_tmux_name: Option<String>,
+    last_session_id: Option<String>,
+}
+
+struct BatchCreateCompletion {
+    total: usize,
+    success_count: usize,
+    last_tmux_name: Option<String>,
+    last_session_id: Option<String>,
+    first_error: Option<String>,
+}
+
+impl BatchCreateCompletion {
+    fn should_close_picker(&self) -> bool {
+        self.success_count > 0
+    }
+
+    fn should_show_batch_thoughts(&self) -> bool {
+        self.success_count > 1
+    }
+
+    fn message(self) -> String {
+        if self.success_count == 0 {
+            return self
+                .first_error
+                .unwrap_or_else(|| "batch create failed".to_string());
+        }
+
+        if self.success_count != self.total {
+            return format!(
+                "created {}/{}; {}",
+                self.success_count,
+                self.total,
+                self.first_error
+                    .unwrap_or_else(|| "some sessions failed".to_string())
+            );
+        }
+
+        match self.last_tmux_name {
+            Some(name) if self.success_count == 1 => format!("created {name}"),
+            _ => format!("created {} sessions", self.success_count),
+        }
+    }
+}
+
+fn partition_batch_create_results(response: CreateSessionsBatchResponse) -> BatchCreatePartition {
+    let total = response.results.len();
+    let mut successes = Vec::new();
+    let mut first_error = None;
+
+    for result in response.results {
+        match (result.ok, result.session) {
+            (true, Some(session)) => successes.push(BatchCreateSuccess {
+                session,
+                repo_theme: result.repo_theme,
+            }),
+            (false, _) if first_error.is_none() => {
+                first_error = Some(batch_create_error_message(&result.cwd, result.error));
+            }
+            _ => {}
+        }
+    }
+
+    BatchCreatePartition {
+        total,
+        successes,
+        first_error,
+    }
+}
+
+fn batch_create_error_message(cwd: &str, error: Option<ErrorResponse>) -> String {
+    let detail = error
+        .and_then(|error| error.message)
+        .unwrap_or_else(|| "unknown error".to_string());
+    format!("{}: {detail}", shorten_path(cwd, 32))
+}
+
 pub(crate) enum PendingInteractionResult {
     OpenPicker {
         x: u16,
@@ -3158,56 +3248,60 @@ impl<C: TuiApi> App<C> {
     }
 
     fn apply_batch_create_response(&mut self, field: Rect, response: CreateSessionsBatchResponse) {
-        let total = response.results.len();
-        let mut success_count = 0usize;
-        let mut last_tmux_name = None;
-        let mut last_session_id = None;
-        let mut first_error = None;
+        let partition = partition_batch_create_results(response);
+        let completion = self.apply_batch_create_successes(field, partition);
 
-        for result in response.results {
-            if result.ok {
-                if let Some(session) = result.session {
-                    self.remember_repo_theme(&session, result.repo_theme);
-                    last_tmux_name = Some(session.tmux_name.clone());
-                    last_session_id = Some(session.session_id.clone());
-                    self.upsert_session(session, field);
-                    success_count += 1;
-                }
-            } else if first_error.is_none() {
-                let detail = result
-                    .error
-                    .and_then(|error| error.message)
-                    .unwrap_or_else(|| "unknown error".to_string());
-                first_error = Some(format!("{}: {detail}", shorten_path(&result.cwd, 32)));
-            }
+        self.apply_batch_create_selection(completion.last_session_id.clone());
+        self.finish_batch_create(completion);
+    }
+
+    fn apply_batch_create_successes(
+        &mut self,
+        field: Rect,
+        partition: BatchCreatePartition,
+    ) -> BatchCreateCompletion {
+        let mut applied = AppliedBatchCreate {
+            success_count: 0,
+            last_tmux_name: None,
+            last_session_id: None,
+        };
+
+        for success in partition.successes {
+            applied.last_tmux_name = Some(success.session.tmux_name.clone());
+            applied.last_session_id = Some(success.session.session_id.clone());
+            self.remember_repo_theme(&success.session, success.repo_theme);
+            self.upsert_session(success.session, field);
+            applied.success_count += 1;
         }
 
-        if let Some(session_id) = last_session_id {
-            self.selected_id = Some(session_id);
-            self.reconcile_selection();
-            self.sync_selection_publication();
+        BatchCreateCompletion {
+            total: partition.total,
+            success_count: applied.success_count,
+            last_tmux_name: applied.last_tmux_name,
+            last_session_id: applied.last_session_id,
+            first_error: partition.first_error,
         }
+    }
 
-        if success_count > 0 {
+    fn apply_batch_create_selection(&mut self, selected_session_id: Option<String>) {
+        let Some(session_id) = selected_session_id else {
+            return;
+        };
+
+        self.selected_id = Some(session_id);
+        self.reconcile_selection();
+        self.sync_selection_publication();
+    }
+
+    fn finish_batch_create(&mut self, completion: BatchCreateCompletion) {
+        if completion.should_close_picker() {
             self.close_picker();
-            if success_count > 1 {
-                self.thought_group_by = ThoughtGroupBy::Batch;
-                self.thought_show_all = true;
-            }
-            if success_count == total {
-                match last_tmux_name {
-                    Some(name) if success_count == 1 => self.set_message(format!("created {name}")),
-                    _ => self.set_message(format!("created {success_count} sessions")),
-                }
-            } else {
-                self.set_message(format!(
-                    "created {success_count}/{total}; {}",
-                    first_error.unwrap_or_else(|| "some sessions failed".to_string())
-                ));
-            }
-        } else {
-            self.set_message(first_error.unwrap_or_else(|| "batch create failed".to_string()));
         }
+        if completion.should_show_batch_thoughts() {
+            self.thought_group_by = ThoughtGroupBy::Batch;
+            self.thought_show_all = true;
+        }
+        self.set_message(completion.message());
     }
 
     fn apply_group_input_response(&mut self, response: SessionGroupInputResponse) {
