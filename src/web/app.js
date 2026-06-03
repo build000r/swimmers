@@ -1,6 +1,6 @@
 import { buildSurfaceFrame, surfaceActionAt, surfaceConsumesPointer } from "./rendered_surface.js";
 import {
-  authTokenButtonPlan, controlEventSessionPatchPlan, eventCell, globalShortcutPlan, initialStateBootPlan, mobileKeyboardInputExecutorPlan, mobileKeyboardInputPlan,
+  authTokenButtonPlan, controlEventSessionPatchPlan, eventCell, globalShortcutPlan, initialStateBootPlan, lifecycleDeletedSessionPatchPlan, mobileKeyboardInputExecutorPlan, mobileKeyboardInputPlan,
   sheetActionAvailabilityPlan,
   mobileKeyboardKeydownPlan, mobileKeyboardKeyPlan, shouldIgnoreSyntheticClick,
   terminalComposerControlAction, terminalDestroyStatePatch, terminalFallbackActivationPlan, terminalFallbackFocusPlan, terminalFallbackKeydownPlan, terminalFallbackPastePlan, terminalFallbackPointerFocusPlan, terminalInlineInputKeydownPlan, terminalKeyStripClickExecutorPlan, terminalKeyStripClickPlan, terminalStageCaptureBindings, terminalStageFocusExecutorPlan, terminalStageFocusPlan,
@@ -3449,15 +3449,7 @@ function applyLifecycleEvent(message) {
     return;
   }
 
-  state.sessions[index] = {
-    ...state.sessions[index],
-    state: "exited",
-    is_stale: true,
-    transport_health: "disconnected",
-    delete_reason: message.reason || "",
-    delete_mode: message.deleteMode || message.delete_mode || "",
-    tmux_session_alive: Boolean(message.tmuxSessionAlive ?? message.tmux_session_alive),
-  };
+  state.sessions[index] = lifecycleDeletedSessionPatchPlan(state.sessions[index], message);
   if (state.selectedSessionId === sessionId) {
     setConnectionStatus("session ended", true);
   } else {

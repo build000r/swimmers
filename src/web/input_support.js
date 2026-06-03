@@ -628,6 +628,18 @@ export function controlEventSessionPatchPlan(session = {}, message = {}) {
   return { event, session: nextSession };
 }
 
+export function lifecycleDeletedSessionPatchPlan(session = {}, message = {}) {
+  return {
+    ...session,
+    state: "exited",
+    is_stale: true,
+    transport_health: "disconnected",
+    delete_reason: message.reason || "",
+    delete_mode: message.deleteMode || message.delete_mode || "",
+    tmux_session_alive: Boolean(message.tmuxSessionAlive ?? message.tmux_session_alive),
+  };
+}
+
 export function sheetActionAvailabilityPlan(context = {}) {
   const writeDisabled = Boolean(context.writeDisabled);
   const hasSession = Boolean(context.hasSession);

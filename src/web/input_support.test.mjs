@@ -6,6 +6,7 @@ import {
   eventClientPoint,
   globalShortcutPlan,
   initialStateBootPlan,
+  lifecycleDeletedSessionPatchPlan,
   mobileKeyboardInputExecutorPlan,
   mobileKeyboardInputPlan,
   sheetActionAvailabilityPlan,
@@ -1296,6 +1297,68 @@ test("controlEventSessionPatchPlan preserves unknown event and non-object payloa
     session_id: "sess_1",
     state: "old",
     last_control_event: "session_state",
+  });
+});
+
+test("lifecycleDeletedSessionPatchPlan preserves deleted-session patch semantics", () => {
+  const session = {
+    session_id: "sess_1",
+    state: "running",
+    is_stale: false,
+    transport_health: "healthy",
+    cwd: "/repo",
+  };
+  const patch = lifecycleDeletedSessionPatchPlan(session, {
+    reason: "closed",
+    deleteMode: "kill-pane",
+    delete_mode: "fallback",
+    tmuxSessionAlive: false,
+    tmux_session_alive: true,
+  });
+
+  assert.deepEqual(patch, {
+    session_id: "sess_1",
+    state: "exited",
+    is_stale: true,
+    transport_health: "disconnected",
+    cwd: "/repo",
+    delete_reason: "closed",
+    delete_mode: "kill-pane",
+    tmux_session_alive: false,
+  });
+  assert.notEqual(patch, session);
+});
+
+test("lifecycleDeletedSessionPatchPlan preserves fallback and default deleted-session fields", () => {
+  assert.deepEqual(lifecycleDeletedSessionPatchPlan({
+    session_id: "sess_1",
+    delete_reason: "old",
+    delete_mode: "old",
+    tmux_session_alive: true,
+  }, {
+    reason: "",
+    delete_mode: "server-delete",
+    tmux_session_alive: 1,
+  }), {
+    session_id: "sess_1",
+    state: "exited",
+    is_stale: true,
+    transport_health: "disconnected",
+    delete_reason: "",
+    delete_mode: "server-delete",
+    tmux_session_alive: true,
+  });
+
+  assert.deepEqual(lifecycleDeletedSessionPatchPlan({
+    session_id: "sess_2",
+  }, {}), {
+    session_id: "sess_2",
+    state: "exited",
+    is_stale: true,
+    transport_health: "disconnected",
+    delete_reason: "",
+    delete_mode: "",
+    tmux_session_alive: false,
   });
 });
 
