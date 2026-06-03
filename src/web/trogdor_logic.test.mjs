@@ -41,6 +41,7 @@ import {
   trogdorReaderProgressAdvanceForSession,
   trogdorReaderBaseIndexForProgress,
   trogdorReaderStateForWpmChange,
+  trogdorReaderTimerAction,
   trogdorReaderWordIndexForProgress,
   trogdorRawSessionForHover,
   trogdorSessionCanReadForState,
@@ -417,6 +418,36 @@ test("Trogdor reader display state formats banners and read-complete state", () 
     trogdorReaderDisplayState(item, { wordIndex: 1, maxWordChars: 8 }).bannerText,
     longWord.slice(0, 8),
   );
+});
+
+test("Trogdor reader timer action preserves run-state decisions and short-circuits", () => {
+  const item = session();
+  const calls = [];
+  const canRead = (value) => {
+    calls.push(["canRead", value.sessionId]);
+    return true;
+  };
+  const complete = (value) => {
+    calls.push(["complete", value.sessionId]);
+    return false;
+  };
+
+  assert.equal(trogdorReaderTimerAction(item, canRead, complete, true, false), "start");
+  assert.deepEqual(calls, [["canRead", "agent-1"], ["complete", "agent-1"]]);
+  calls.length = 0;
+
+  assert.equal(trogdorReaderTimerAction(item, canRead, complete, true, 1), "keep");
+  assert.equal(trogdorReaderTimerAction(item, canRead, () => true, true, 1), "stop");
+  assert.equal(trogdorReaderTimerAction(item, () => false, complete, true, 1), "stop");
+  assert.equal(trogdorReaderTimerAction(item, canRead, complete, false, 1), "stop");
+  assert.equal(trogdorReaderTimerAction(null, canRead, complete, true, 1), "stop");
+
+  assert.deepEqual(calls, [
+    ["canRead", "agent-1"],
+    ["complete", "agent-1"],
+    ["canRead", "agent-1"],
+    ["canRead", "agent-1"],
+  ]);
 });
 
 test("Trogdor reader advancement helpers clamp progress and preserve WPM restart state", () => {

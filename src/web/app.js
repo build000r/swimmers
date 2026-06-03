@@ -60,6 +60,7 @@ import {
   trogdorReaderDisplayState,
   trogdorReaderProgressAdvanceForSession,
   trogdorReaderStateForWpmChange,
+  trogdorReaderTimerAction,
   trogdorReaderWordIndexForProgress,
   trogdorRawSessionForHover,
   trogdorSessionCanReadForState,
@@ -5041,17 +5042,15 @@ function updateHoveredTrogdorSurface(zone) {
 }
 
 function syncTrogdorReaderTimer() {
-  const session = currentTrogdorSurfaceSession();
-  const shouldRun = Boolean(
-    session && trogdorSessionCanRead(session) && state.trogdorReading && !trogdorClawgReadComplete(session),
+  const timerAction = trogdorReaderTimerAction(
+    currentTrogdorSurfaceSession(), trogdorSessionCanRead, trogdorClawgReadComplete,
+    state.trogdorReading, state.trogdorReaderTimer,
   );
-  if (shouldRun && !state.trogdorReaderTimer) {
-    state.trogdorReaderTimer = window.setInterval(() => {
-      renderHudSurface();
-    }, 120);
+  if (timerAction === "start") {
+    state.trogdorReaderTimer = window.setInterval(() => renderHudSurface(), 120);
     return;
   }
-  if (!shouldRun && state.trogdorReaderTimer) {
+  if (timerAction === "stop") {
     window.clearInterval(state.trogdorReaderTimer);
     state.trogdorReaderTimer = null;
   }

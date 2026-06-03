@@ -248,6 +248,25 @@ export function trogdorReaderDisplayState(
   };
 }
 
+export function trogdorReaderTimerAction(
+  session,
+  sessionCanRead = () => false,
+  readComplete = () => false,
+  reading = true,
+  timerActive = false,
+) {
+  const shouldRun = Boolean(
+    session && sessionCanRead(session) && reading && !readComplete(session),
+  );
+  if (shouldRun && !timerActive) {
+    return "start";
+  }
+  if (!shouldRun && timerActive) {
+    return "stop";
+  }
+  return "keep";
+}
+
 export function trogdorReaderProgressAdvanceForSession(
   session,
   {
