@@ -23,6 +23,7 @@ import {
   terminalKeyStripClickExecutorPlan,
   terminalKeyStripClickPlan,
   terminalPendingByteBufferPlan,
+  terminalPresentationPlan,
   terminalStageCaptureBindings,
   terminalStageFocusExecutorPlan,
   terminalStageFocusPlan,
@@ -634,6 +635,44 @@ test("terminalPendingByteBufferPlan preserves pending byte acceptance and drops"
     finalPendingByteLength: 25,
     status: "buffering terminal; renderer attaching",
   });
+});
+
+test("terminalPresentationPlan preserves terminal focus and canvas visibility decisions", () => {
+  assert.deepEqual(terminalPresentationPlan({
+    hasCurrentSession: true,
+    trogdorAtlasOpen: false,
+    hasTerminal: true,
+    terminalFallbackActive: true,
+  }), {
+    terminalFocusMode: true,
+    terminalStageActive: true,
+    hudHidden: true,
+    hudDisplay: "none",
+    hudVisibility: "hidden",
+    showTerminalCanvas: true,
+    terminalCanvasHidden: false,
+    terminalCanvasDisplay: "",
+    terminalCanvasVisibility: "",
+    terminalFallbackHidden: false,
+  });
+  assert.deepEqual(terminalPresentationPlan({
+    hasCurrentSession: true,
+    trogdorAtlasOpen: true,
+    hasTerminal: true,
+    terminalFallbackActive: true,
+  }), {
+    terminalFocusMode: false,
+    terminalStageActive: false,
+    hudHidden: false,
+    hudDisplay: "",
+    hudVisibility: "",
+    showTerminalCanvas: true,
+    terminalCanvasHidden: false,
+    terminalCanvasDisplay: "",
+    terminalCanvasVisibility: "",
+    terminalFallbackHidden: true,
+  });
+  assert.equal(terminalPresentationPlan({ hasCurrentSession: false, hasTerminal: false }).showTerminalCanvas, false);
 });
 
 test("terminalFallbackPointerFocusPlan preserves scheduled and immediate focus gates", () => {

@@ -3,7 +3,7 @@ import {
   authTokenButtonPlan, eventCell, globalShortcutPlan, mobileKeyboardInputExecutorPlan, mobileKeyboardInputPlan,
   mobileKeyboardKeydownPlan, mobileKeyboardKeyPlan, shouldIgnoreSyntheticClick,
   terminalComposerControlAction, terminalDestroyStatePatch, terminalFallbackActivationPlan, terminalFallbackFocusPlan, terminalFallbackKeydownPlan, terminalFallbackPastePlan, terminalFallbackPointerFocusPlan, terminalInlineInputKeydownPlan, terminalKeyStripClickExecutorPlan, terminalKeyStripClickPlan, terminalStageCaptureBindings, terminalStageFocusExecutorPlan, terminalStageFocusPlan,
-  terminalFallbackScrollPlan, terminalFallbackTextScrollPlan, terminalPendingByteBufferPlan, terminalStageKeydownPlan, terminalStagePasteExecutorPlan, terminalStagePastePlan,
+  terminalFallbackScrollPlan, terminalFallbackTextScrollPlan, terminalPendingByteBufferPlan, terminalPresentationPlan, terminalStageKeydownPlan, terminalStagePasteExecutorPlan, terminalStagePastePlan,
 } from "./input_support.js";
 import { sendHistoryClickPlan, sendSheetFailureStatus, sendSheetSubmitPlan, sendSheetSuccessStatus } from "./send_sheet.js";
 import {
@@ -3160,23 +3160,21 @@ function renderHudSurface() {
 }
 
 function syncTerminalPresentation() {
-  const terminalFocusMode = Boolean(currentSession() && !state.trogdorAtlasOpen);
-  document.body.classList.toggle("terminal-focus-mode", terminalFocusMode);
-  el.terminalStage.classList.toggle("terminal-view-active", terminalFocusMode);
+  const plan = terminalPresentationPlan({ hasCurrentSession: Boolean(currentSession()), trogdorAtlasOpen: state.trogdorAtlasOpen, hasTerminal: Boolean(state.terminal), terminalFallbackActive: state.terminalFallbackActive });
+  document.body.classList.toggle("terminal-focus-mode", plan.terminalFocusMode);
+  el.terminalStage.classList.toggle("terminal-view-active", plan.terminalStageActive);
   syncTerminalInputDock();
   syncTrogdorBackButton();
   syncTerminalWorkbench();
   if (state.hud) {
-    el.hudCanvas.classList.toggle("hidden", terminalFocusMode);
-    el.hudCanvas.style.display = terminalFocusMode ? "none" : "";
-    el.hudCanvas.style.visibility = terminalFocusMode ? "hidden" : "";
+    el.hudCanvas.classList.toggle("hidden", plan.hudHidden);
+    [el.hudCanvas.style.display, el.hudCanvas.style.visibility] = [plan.hudDisplay, plan.hudVisibility];
   }
-  if (state.terminal) {
-    el.terminalCanvas.classList.toggle("hidden", false);
-    el.terminalCanvas.style.display = "";
-    el.terminalCanvas.style.visibility = "";
+  if (plan.showTerminalCanvas) {
+    el.terminalCanvas.classList.toggle("hidden", plan.terminalCanvasHidden);
+    [el.terminalCanvas.style.display, el.terminalCanvas.style.visibility] = [plan.terminalCanvasDisplay, plan.terminalCanvasVisibility];
   }
-  el.terminalFallback.classList.toggle("hidden", !(terminalFocusMode && state.terminalFallbackActive));
+  el.terminalFallback.classList.toggle("hidden", plan.terminalFallbackHidden);
 }
 
 async function connectSelectedSession() {

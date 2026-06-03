@@ -402,6 +402,22 @@ export function terminalPendingByteBufferPlan(context = {}) {
   return { type: "buffer", accept: true, dropCount, finalPendingByteLength, status: "buffering terminal; renderer attaching" };
 }
 
+export function terminalPresentationPlan(context = {}) {
+  const terminalFocusMode = Boolean(context.hasCurrentSession && !context.trogdorAtlasOpen);
+  return {
+    terminalFocusMode,
+    terminalStageActive: terminalFocusMode,
+    hudHidden: terminalFocusMode,
+    hudDisplay: terminalFocusMode ? "none" : "",
+    hudVisibility: terminalFocusMode ? "hidden" : "",
+    showTerminalCanvas: Boolean(context.hasTerminal),
+    terminalCanvasHidden: false,
+    terminalCanvasDisplay: "",
+    terminalCanvasVisibility: "",
+    terminalFallbackHidden: !(terminalFocusMode && context.terminalFallbackActive),
+  };
+}
+
 export function terminalFallbackPointerFocusPlan(eventType, context = {}) {
   if (!context.terminalFallbackActive || context.activeSheet) {
     return { type: "ignore", focusTerminal: false, scheduleFrame: false };

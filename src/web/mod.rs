@@ -2333,12 +2333,15 @@ mod tests {
         let js = include_str!("app.js");
         assert!(js.contains("function syncTerminalPresentation()"));
         assert!(js.contains("terminal-focus-mode"));
-        assert!(js.contains("el.hudCanvas.classList.toggle(\"hidden\", terminalFocusMode)"));
-        assert!(js.contains("el.hudCanvas.style.display = terminalFocusMode ? \"none\" : \"\""));
         assert!(
-            js.contains("el.hudCanvas.style.visibility = terminalFocusMode ? \"hidden\" : \"\"")
+            js.contains("terminalPresentationPlan({ hasCurrentSession: Boolean(currentSession())")
         );
-        assert!(js.contains("el.terminalCanvas.classList.toggle(\"hidden\", false)"));
+        assert!(js.contains("el.hudCanvas.classList.toggle(\"hidden\", plan.hudHidden)"));
+        assert!(
+            js.contains("[el.hudCanvas.style.display, el.hudCanvas.style.visibility] = [plan.hudDisplay, plan.hudVisibility]")
+        );
+        assert!(js
+            .contains("el.terminalCanvas.classList.toggle(\"hidden\", plan.terminalCanvasHidden)"));
     }
 
     #[test]
