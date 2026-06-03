@@ -22,6 +22,8 @@ import {
   terminalInlineInputKeydownPlan,
   terminalKeyStripClickExecutorPlan,
   terminalKeyStripClickPlan,
+  terminalPaintProbeSchedulePlan,
+  terminalPaintVerificationPlan,
   terminalPendingByteBufferPlan,
   terminalPresentationPlan,
   terminalStageCaptureBindings,
@@ -673,6 +675,85 @@ test("terminalPresentationPlan preserves terminal focus and canvas visibility de
     terminalFallbackHidden: true,
   });
   assert.equal(terminalPresentationPlan({ hasCurrentSession: false, hasTerminal: false }).showTerminalCanvas, false);
+});
+
+test("terminalPaintProbeSchedulePlan preserves paint probe gates", () => {
+  const ready = {
+    terminalPaintVerified: false,
+    terminalFallbackActive: false,
+    hasProbeTimer: false,
+    hasTerminal: true,
+    hasCurrentSession: true,
+    terminalFrameBytesSeen: 1,
+  };
+
+  assert.deepEqual(terminalPaintProbeSchedulePlan(ready), {
+    type: "schedule_probe",
+    scheduleProbe: true,
+    delayMs: 180,
+  });
+
+  for (const patch of [
+    { terminalPaintVerified: true },
+    { terminalFallbackActive: true },
+    { hasProbeTimer: true },
+    { hasTerminal: false },
+    { hasCurrentSession: false },
+    { terminalFrameBytesSeen: 0 },
+  ]) {
+    assert.deepEqual(terminalPaintProbeSchedulePlan({ ...ready, ...patch }), {
+      type: "ignore",
+      scheduleProbe: false,
+      delayMs: 180,
+    });
+  }
+});
+
+test("terminalPaintVerificationPlan preserves verify, refresh, and fallback decisions", () => {
+  const ready = {
+    hasTerminal: true,
+    terminalPaintVerified: false,
+    terminalFallbackActive: false,
+    hasCurrentSession: true,
+  };
+
+  assert.deepEqual(terminalPaintVerificationPlan({ ...ready, hasTerminal: false }), { type: "ignore", done: true });
+  assert.deepEqual(terminalPaintVerificationPlan({ ...ready, terminalPaintVerified: true }), { type: "ignore", done: true });
+  assert.deepEqual(terminalPaintVerificationPlan({ ...ready, terminalFallbackActive: true }), { type: "ignore", done: true });
+  assert.deepEqual(terminalPaintVerificationPlan({ ...ready, hasCurrentSession: false }), { type: "ignore", done: true });
+  assert.deepEqual(terminalPaintVerificationPlan(ready), { type: "check_canvas", done: false });
+  assert.deepEqual(terminalPaintVerificationPlan({ ...ready, canvasHasVisiblePixels: true }), {
+    type: "painted",
+    done: true,
+    fallbackActive: false,
+    diagnosticReason: "painted",
+  });
+  assert.deepEqual(terminalPaintVerificationPlan({ ...ready, canvasHasVisiblePixels: false }), {
+    type: "refresh_snapshot",
+    done: false,
+  });
+  assert.deepEqual(terminalPaintVerificationPlan({ ...ready, afterSnapshotRefresh: true }), {
+    type: "check_canvas",
+    done: false,
+  });
+  assert.deepEqual(terminalPaintVerificationPlan({
+    ...ready,
+    afterSnapshotRefresh: true,
+    canvasHasVisiblePixels: false,
+    hasSnapshotText: true,
+  }), {
+    type: "activate_fallback",
+    done: true,
+    fallbackActive: true,
+    clearText: false,
+    syncPresentation: true,
+  });
+  assert.deepEqual(terminalPaintVerificationPlan({
+    ...ready,
+    afterSnapshotRefresh: true,
+    canvasHasVisiblePixels: false,
+    hasSnapshotText: false,
+  }), { type: "ignore", done: true });
 });
 
 test("terminalFallbackPointerFocusPlan preserves scheduled and immediate focus gates", () => {

@@ -3,7 +3,7 @@ import {
   authTokenButtonPlan, eventCell, globalShortcutPlan, mobileKeyboardInputExecutorPlan, mobileKeyboardInputPlan,
   mobileKeyboardKeydownPlan, mobileKeyboardKeyPlan, shouldIgnoreSyntheticClick,
   terminalComposerControlAction, terminalDestroyStatePatch, terminalFallbackActivationPlan, terminalFallbackFocusPlan, terminalFallbackKeydownPlan, terminalFallbackPastePlan, terminalFallbackPointerFocusPlan, terminalInlineInputKeydownPlan, terminalKeyStripClickExecutorPlan, terminalKeyStripClickPlan, terminalStageCaptureBindings, terminalStageFocusExecutorPlan, terminalStageFocusPlan,
-  terminalFallbackScrollPlan, terminalFallbackTextScrollPlan, terminalPendingByteBufferPlan, terminalPresentationPlan, terminalStageKeydownPlan, terminalStagePasteExecutorPlan, terminalStagePastePlan,
+  terminalFallbackScrollPlan, terminalFallbackTextScrollPlan, terminalPaintProbeSchedulePlan, terminalPaintVerificationPlan, terminalPendingByteBufferPlan, terminalPresentationPlan, terminalStageKeydownPlan, terminalStagePasteExecutorPlan, terminalStagePastePlan,
 } from "./input_support.js";
 import { sendHistoryClickPlan, sendSheetFailureStatus, sendSheetSubmitPlan, sendSheetSuccessStatus } from "./send_sheet.js";
 import {
@@ -3329,14 +3329,8 @@ function syncTerminalFallbackFromLiveFrame() {
 }
 
 function scheduleTerminalPaintProbe() {
-  if (
-    state.terminalPaintVerified ||
-    state.terminalFallbackActive ||
-    state.terminalPaintProbeTimer ||
-    !state.terminal ||
-    !currentSession() ||
-    state.terminalFrameBytesSeen === 0
-  ) {
+  const plan = terminalPaintProbeSchedulePlan({ terminalPaintVerified: state.terminalPaintVerified, terminalFallbackActive: state.terminalFallbackActive, hasProbeTimer: Boolean(state.terminalPaintProbeTimer), hasTerminal: Boolean(state.terminal), hasCurrentSession: Boolean(currentSession()), terminalFrameBytesSeen: state.terminalFrameBytesSeen });
+  if (!plan.scheduleProbe) {
     return;
   }
 
@@ -3347,35 +3341,37 @@ function scheduleTerminalPaintProbe() {
         void verifyTerminalPaintOrFallback();
       });
     });
-  }, 180);
+  }, plan.delayMs);
+}
+
+function terminalPaintVerificationContext(extra = {}) {
+  return { hasTerminal: Boolean(state.terminal), terminalPaintVerified: state.terminalPaintVerified, terminalFallbackActive: state.terminalFallbackActive, hasCurrentSession: Boolean(currentSession()), ...extra };
+}
+
+function applyTerminalPaintVerificationPlan(plan) {
+  if (plan.type === "painted") {
+    state.terminalPaintVerified = true;
+    captureTerminalRendererDiagnostic(plan.diagnosticReason);
+    setTerminalTextFallbackActive(plan.fallbackActive);
+    return true;
+  }
+  if (plan.type === "activate_fallback") {
+    setTerminalTextFallbackActive(plan.fallbackActive, { clearText: plan.clearText });
+    syncTerminalPresentation();
+    return true;
+  }
+  return plan.done;
 }
 
 async function verifyTerminalPaintOrFallback() {
-  if (!state.terminal || state.terminalPaintVerified || state.terminalFallbackActive || !currentSession()) {
-    return;
-  }
-
-  if (terminalCanvasHasVisiblePixels()) {
-    state.terminalPaintVerified = true;
-    captureTerminalRendererDiagnostic("painted");
-    setTerminalTextFallbackActive(false);
-    return;
-  }
-
+  let plan = terminalPaintVerificationPlan(terminalPaintVerificationContext());
+  if (applyTerminalPaintVerificationPlan(plan)) return;
+  plan = terminalPaintVerificationPlan(terminalPaintVerificationContext({ canvasHasVisiblePixels: terminalCanvasHasVisiblePixels() }));
+  if (applyTerminalPaintVerificationPlan(plan)) return;
   const hasSnapshotText = await refreshSnapshotFallback();
-  if (!state.terminal || state.terminalPaintVerified || state.terminalFallbackActive || !currentSession()) {
-    return;
-  }
-  if (terminalCanvasHasVisiblePixels()) {
-    state.terminalPaintVerified = true;
-    captureTerminalRendererDiagnostic("painted");
-    setTerminalTextFallbackActive(false);
-    return;
-  }
-  if (hasSnapshotText) {
-    setTerminalTextFallbackActive(true, { clearText: false });
-    syncTerminalPresentation();
-  }
+  plan = terminalPaintVerificationPlan(terminalPaintVerificationContext({ afterSnapshotRefresh: true }));
+  if (applyTerminalPaintVerificationPlan(plan)) return;
+  applyTerminalPaintVerificationPlan(terminalPaintVerificationPlan(terminalPaintVerificationContext({ afterSnapshotRefresh: true, canvasHasVisiblePixels: terminalCanvasHasVisiblePixels(), hasSnapshotText })));
 }
 
 function terminalCanvasHasVisiblePixels() {

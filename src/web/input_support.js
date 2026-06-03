@@ -418,6 +418,37 @@ export function terminalPresentationPlan(context = {}) {
   };
 }
 
+export function terminalPaintProbeSchedulePlan(context = {}) {
+  const scheduleProbe = Boolean(
+    !context.terminalPaintVerified &&
+      !context.terminalFallbackActive &&
+      !context.hasProbeTimer &&
+      context.hasTerminal &&
+      context.hasCurrentSession &&
+      context.terminalFrameBytesSeen !== 0,
+  );
+  return { type: scheduleProbe ? "schedule_probe" : "ignore", scheduleProbe, delayMs: 180 };
+}
+
+export function terminalPaintVerificationPlan(context = {}) {
+  if (!context.hasTerminal || context.terminalPaintVerified || context.terminalFallbackActive || !context.hasCurrentSession) {
+    return { type: "ignore", done: true };
+  }
+  if (typeof context.canvasHasVisiblePixels !== "boolean") {
+    return { type: "check_canvas", done: false };
+  }
+  if (context.canvasHasVisiblePixels) {
+    return { type: "painted", done: true, fallbackActive: false, diagnosticReason: "painted" };
+  }
+  if (!context.afterSnapshotRefresh) {
+    return { type: "refresh_snapshot", done: false };
+  }
+  if (context.hasSnapshotText) {
+    return { type: "activate_fallback", done: true, fallbackActive: true, clearText: false, syncPresentation: true };
+  }
+  return { type: "ignore", done: true };
+}
+
 export function terminalFallbackPointerFocusPlan(eventType, context = {}) {
   if (!context.terminalFallbackActive || context.activeSheet) {
     return { type: "ignore", focusTerminal: false, scheduleFrame: false };
