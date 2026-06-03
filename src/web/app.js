@@ -32,6 +32,7 @@ import {
   selectedLaunchTarget as dirBrowserSelectedLaunchTarget,
   visibleSelectableDirPaths as dirBrowserVisibleSelectableDirPaths,
 } from "./dir_browser.js";
+import { filteredCommandPaletteItemsForState } from "./command_palette.js";
 import {
   TROGDOR_DRAGON_TARGET,
   buildTrogdorDomGroups,
@@ -4512,61 +4513,14 @@ function openMermaidSheet() {
   openSheet("mermaid");
 }
 
-function commandPaletteItems() {
-  const selected = currentSession();
-  const baseItems = [
-    { label: "Focus terminal", meta: "terminal", actionId: "focus_terminal", disabled: !selected },
-    { label: "Search terminal", meta: "Ctrl+Shift+F", actionId: "open_search", disabled: !selected },
-    { label: "Send to terminal", meta: "Ctrl+Shift+S", actionId: "open_send", disabled: state.readOnly || !selected },
-    { label: "Copy selection", meta: "Ctrl+Shift+C", actionId: "copy_selection", disabled: !selected },
-    { label: "Copy visible text", meta: "frame", action: copyTerminalFrameText, disabled: !selected },
-    { label: "Toggle select mode", meta: "Ctrl+Shift+V", actionId: "toggle_select", disabled: !selected },
-    { label: "Open native terminal", meta: "desktop", actionId: "open_native", disabled: !selected },
-    { label: "Open Mermaid artifacts", meta: "artifacts", actionId: "open_mermaid", disabled: !selected },
-    { label: "Create session", meta: "spawn", actionId: "open_create", disabled: state.readOnly },
-    { label: "Refresh sessions", meta: "sync", actionId: "refresh" },
-    { label: "Toggle follow published", meta: "selection", actionId: "toggle_follow" },
-    { label: "Thought config", meta: "policy", actionId: "open_config" },
-    { label: "Auth token", meta: "connection", actionId: "open_auth" },
-    { label: "Toggle Trogdor atlas", meta: "overview", actionId: "toggle_trogdor_atlas" },
-  ];
-  const sessionItems = state.sessions.map((session) => ({
-    label: `Switch to ${sessionDisplayName(session)}`,
-    meta: `${session.session_id}  ${session.state || ""}`,
-    sessionId: session.session_id,
-  }));
-  return [...baseItems, ...sessionItems];
-}
-
-function commandPaletteScore(item, query) {
-  const haystack = `${item.label} ${item.meta || ""}`.toLowerCase();
-  if (!query) {
-    return 1;
-  }
-  const exact = haystack.indexOf(query);
-  if (exact >= 0) {
-    return 1000 - exact;
-  }
-  let score = 0;
-  let cursor = 0;
-  for (const char of query) {
-    const next = haystack.indexOf(char, cursor);
-    if (next < 0) {
-      return 0;
-    }
-    score += Math.max(1, 40 - (next - cursor));
-    cursor = next + 1;
-  }
-  return score;
-}
-
 function filteredCommandPaletteItems() {
-  const query = String(el.paletteSearch?.value || "").trim().toLowerCase();
-  return commandPaletteItems()
-    .map((item) => ({ ...item, score: commandPaletteScore(item, query) }))
-    .filter((item) => !query || item.score > 0)
-    .sort((a, b) => b.score - a.score || a.label.localeCompare(b.label))
-    .slice(0, 18);
+  return filteredCommandPaletteItemsForState({
+    selectedSession: currentSession(),
+    readOnly: state.readOnly,
+    sessions: state.sessions,
+    copyFrameAction: copyTerminalFrameText,
+    query: el.paletteSearch?.value,
+  });
 }
 
 function renderCommandPalette() {

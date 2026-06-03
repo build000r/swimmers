@@ -1,0 +1,88 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+
+import {
+  buildCommandPaletteItems,
+  commandPaletteScore,
+  commandPaletteSessionDisplayName,
+  filterCommandPaletteItems,
+  filteredCommandPaletteItemsForState,
+} from "./command_palette.js";
+
+function session(overrides = {}) {
+  return {
+    session_id: "sess_0",
+    tmux_name: "alpha",
+    name: "fallback-name",
+    state: "attention",
+    ...overrides,
+  };
+}
+
+test("command palette item helpers preserve disabled states and session labels", () => {
+  const copyFrameAction = () => "copied";
+  const items = buildCommandPaletteItems({
+    selectedSession: session(),
+    readOnly: false,
+    sessions: [
+      session(),
+      session({ session_id: "sess_1", tmux_name: "", name: "beta", state: "idle" }),
+      session({ session_id: "sess_2", tmux_name: "", name: "", state: "" }),
+    ],
+    copyFrameAction,
+  });
+
+  assert.equal(commandPaletteSessionDisplayName(session({ tmux_name: "", name: "", session_id: "" })), "session");
+  assert.equal(items.find((item) => item.actionId === "focus_terminal").disabled, false);
+  assert.equal(items.find((item) => item.actionId === "open_create").disabled, false);
+  assert.equal(items.find((item) => item.label === "Copy visible text").action, copyFrameAction);
+  assert.deepEqual(items.slice(-3), [
+    { label: "Switch to alpha", meta: "sess_0  attention", sessionId: "sess_0" },
+    { label: "Switch to beta", meta: "sess_1  idle", sessionId: "sess_1" },
+    { label: "Switch to sess_2", meta: "sess_2  ", sessionId: "sess_2" },
+  ]);
+
+  const disabled = buildCommandPaletteItems({
+    selectedSession: null,
+    readOnly: true,
+    sessions: [],
+    copyFrameAction,
+  });
+  assert.equal(disabled.find((item) => item.actionId === "focus_terminal").disabled, true);
+  assert.equal(disabled.find((item) => item.actionId === "open_send").disabled, true);
+  assert.equal(disabled.find((item) => item.actionId === "open_create").disabled, true);
+  assert.equal(disabled.find((item) => item.actionId === "refresh").disabled, undefined);
+});
+
+test("command palette scoring and filtering preserve search ordering and limits", () => {
+  assert.equal(commandPaletteScore({ label: "Focus terminal", meta: "terminal" }, ""), 1);
+  assert.equal(commandPaletteScore({ label: "Focus terminal", meta: "terminal" }, "terminal"), 994);
+  assert.equal(commandPaletteScore({ label: "Focus terminal", meta: "terminal" }, "ft"), 75);
+  assert.equal(commandPaletteScore({ label: "Focus terminal", meta: "terminal" }, "zz"), 0);
+
+  const items = [
+    { label: "Bravo", meta: "second" },
+    { label: "Alpha", meta: "first" },
+    { label: "Beta", meta: "agent" },
+    ...Array.from({ length: 24 }, (_, index) => ({ label: `Item ${index}`, meta: "bulk" })),
+  ];
+  assert.deepEqual(filterCommandPaletteItems(items, "  BETA  ").map((item) => item.label), ["Beta"]);
+
+  const unqueried = filterCommandPaletteItems(items, "");
+  assert.equal(unqueried.length, 18);
+  assert.equal(unqueried[0].label, "Alpha");
+  assert.equal(unqueried[1].label, "Beta");
+});
+
+test("command palette state helper combines built-in commands, sessions, and scores", () => {
+  const items = filteredCommandPaletteItemsForState({
+    selectedSession: session(),
+    readOnly: false,
+    sessions: [session(), session({ session_id: "sess_1", tmux_name: "beta", state: "idle" })],
+    query: "beta",
+  });
+
+  assert.equal(items[0].label, "Switch to beta");
+  assert.equal(items[0].sessionId, "sess_1");
+  assert.ok(items[0].score > 0);
+});
