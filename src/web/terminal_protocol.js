@@ -47,6 +47,17 @@ export function sessionSocketAttachPlan(url) {
   };
 }
 
+export function sessionSocketAttachStatePlan(connectionPlan = {}, attachPlan = {}) {
+  return {
+    type: "attach_socket",
+    binaryType: "arraybuffer",
+    sessionId: connectionPlan.sessionId,
+    framedOutput: Boolean(attachPlan.framedOutput),
+    readOnly: true,
+    status: attachPlan.status,
+  };
+}
+
 export function sessionSocketOpenPlan(context = {}) {
   if (context.generation !== context.currentGeneration || !context.currentSocketMatches) {
     return { type: "close_stale" };
@@ -54,8 +65,25 @@ export function sessionSocketOpenPlan(context = {}) {
   return { type: "attach" };
 }
 
+export function sessionSocketOpenExecutionPlan(context = {}) {
+  if (sessionSocketOpenPlan(context).type === "close_stale") {
+    return { type: "close_stale", closeSocket: true };
+  }
+  return {
+    type: "attach",
+    sendAuth: true,
+    resizeTerminal: true,
+    resetReconnectAttempt: true,
+    scheduleRefresh: true,
+  };
+}
+
 export function sessionSocketOpenStatus(sentAuth) {
   return sentAuth ? "authenticating; input disabled" : "attached";
+}
+
+export function sessionSocketOpenStatusPlan(sentAuth) {
+  return { type: "status", status: sessionSocketOpenStatus(sentAuth) };
 }
 
 export function sessionSocketMessagePlan(context = {}) {
@@ -66,6 +94,14 @@ export function sessionSocketMessagePlan(context = {}) {
     return { type: "handle_text", text: context.data };
   }
   return { type: "feed_binary", data: context.data };
+}
+
+export function sessionSocketMessageExecutionPlan(context = {}) {
+  const plan = sessionSocketMessagePlan(context);
+  if (plan.type !== "feed_binary") {
+    return plan;
+  }
+  return { type: "feed_binary", data: plan.data, bytes: new Uint8Array(plan.data) };
 }
 
 export function sessionSocketClosePlan(context = {}) {
@@ -79,11 +115,25 @@ export function sessionSocketReconnectStatus(delayMs) {
   return `disconnected; input disabled; retrying in ${Math.ceil(delayMs / 1000)}s`;
 }
 
+export function sessionSocketCloseExecutionPlan(delayMs) {
+  return {
+    type: "schedule_reconnect",
+    incrementReconnectAttempt: true,
+    status: sessionSocketReconnectStatus(delayMs),
+    scheduleRefresh: true,
+    delayMs,
+  };
+}
+
 export function sessionSocketReconnectPlan(context = {}) {
   if (context.generation !== context.currentGeneration || !context.hasCurrentSession) {
     return { type: "ignore" };
   }
   return { type: "reconnect" };
+}
+
+export function sessionSocketErrorPlan() {
+  return { type: "set_status", status: "attach failed; input disabled", muted: true };
 }
 
 export function decodeTerminalOutputFrame(bytes) {

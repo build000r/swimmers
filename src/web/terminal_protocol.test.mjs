@@ -10,10 +10,16 @@ import {
   selectedSessionConnectionPlan,
   sessionSocketAuthMessageForToken,
   sessionSocketAttachPlan,
+  sessionSocketAttachStatePlan,
+  sessionSocketCloseExecutionPlan,
   sessionSocketClosePlan,
+  sessionSocketErrorPlan,
+  sessionSocketMessageExecutionPlan,
   sessionSocketMessagePlan,
+  sessionSocketOpenExecutionPlan,
   sessionSocketOpenPlan,
   sessionSocketOpenStatus,
+  sessionSocketOpenStatusPlan,
   sessionSocketReconnectPlan,
   sessionSocketReconnectStatus,
   terminalControlKeyEvent,
@@ -102,6 +108,20 @@ test("sessionSocketAttachPlan preserves framed output and status copy", () => {
   });
 });
 
+test("sessionSocketAttachStatePlan preserves attach side-effect data", () => {
+  assert.deepEqual(sessionSocketAttachStatePlan(
+    { type: "connect_socket", sessionId: "sess-1" },
+    { framedOutput: true, status: "connecting; input disabled" },
+  ), {
+    type: "attach_socket",
+    binaryType: "arraybuffer",
+    sessionId: "sess-1",
+    framedOutput: true,
+    readOnly: true,
+    status: "connecting; input disabled",
+  });
+});
+
 test("sessionSocketOpenPlan preserves stale close guard and auth status copy", () => {
   assert.deepEqual(sessionSocketOpenPlan({
     generation: 1,
@@ -120,6 +140,29 @@ test("sessionSocketOpenPlan preserves stale close guard and auth status copy", (
   }), { type: "attach" });
   assert.equal(sessionSocketOpenStatus(true), "authenticating; input disabled");
   assert.equal(sessionSocketOpenStatus(false), "attached");
+});
+
+test("sessionSocketOpenExecutionPlan preserves callback side-effect order flags", () => {
+  assert.deepEqual(sessionSocketOpenExecutionPlan({
+    generation: 1,
+    currentGeneration: 2,
+    currentSocketMatches: true,
+  }), { type: "close_stale", closeSocket: true });
+  assert.deepEqual(sessionSocketOpenExecutionPlan({
+    generation: 1,
+    currentGeneration: 1,
+    currentSocketMatches: true,
+  }), {
+    type: "attach",
+    sendAuth: true,
+    resizeTerminal: true,
+    resetReconnectAttempt: true,
+    scheduleRefresh: true,
+  });
+  assert.deepEqual(sessionSocketOpenStatusPlan(true), {
+    type: "status",
+    status: "authenticating; input disabled",
+  });
 });
 
 test("sessionSocketMessagePlan preserves stale guard and text/binary routing", () => {
@@ -153,6 +196,32 @@ test("sessionSocketMessagePlan preserves stale guard and text/binary routing", (
   assert.equal(plan.data, data);
 });
 
+test("sessionSocketMessageExecutionPlan materializes binary bytes for terminal routing", () => {
+  assert.deepEqual(sessionSocketMessageExecutionPlan({
+    generation: 1,
+    currentGeneration: 2,
+    currentSocketMatches: true,
+    data: "hello",
+  }), { type: "ignore" });
+  assert.deepEqual(sessionSocketMessageExecutionPlan({
+    generation: 1,
+    currentGeneration: 1,
+    currentSocketMatches: true,
+    data: "hello",
+  }), { type: "handle_text", text: "hello" });
+
+  const data = new Uint8Array([67, 68]).buffer;
+  const plan = sessionSocketMessageExecutionPlan({
+    generation: 1,
+    currentGeneration: 1,
+    currentSocketMatches: true,
+    data,
+  });
+  assert.equal(plan.type, "feed_binary");
+  assert.equal(plan.data, data);
+  assert.deepEqual(Array.from(plan.bytes), [67, 68]);
+});
+
 test("sessionSocketClosePlan preserves reconnect guard and status rounding", () => {
   assert.deepEqual(sessionSocketClosePlan({
     generation: 1,
@@ -164,6 +233,21 @@ test("sessionSocketClosePlan preserves reconnect guard and status rounding", () 
   }), { type: "schedule_reconnect" });
   assert.equal(sessionSocketReconnectStatus(2000), "disconnected; input disabled; retrying in 2s");
   assert.equal(sessionSocketReconnectStatus(2501), "disconnected; input disabled; retrying in 3s");
+});
+
+test("sessionSocketCloseExecutionPlan and error plan preserve status side effects", () => {
+  assert.deepEqual(sessionSocketCloseExecutionPlan(2501), {
+    type: "schedule_reconnect",
+    incrementReconnectAttempt: true,
+    status: "disconnected; input disabled; retrying in 3s",
+    scheduleRefresh: true,
+    delayMs: 2501,
+  });
+  assert.deepEqual(sessionSocketErrorPlan(), {
+    type: "set_status",
+    status: "attach failed; input disabled",
+    muted: true,
+  });
 });
 
 test("sessionSocketReconnectPlan preserves generation and selected-session gates", () => {

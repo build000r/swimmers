@@ -28,7 +28,7 @@ import {
   buildSessionSocketUrl,
   decodeTerminalOutputFrame,
   fallbackTextForKeyEvent,
-  keyModifiers, selectedSessionConnectionPlan, sessionSocketAuthMessageForToken, sessionSocketAttachPlan, sessionSocketClosePlan, sessionSocketMessagePlan, sessionSocketOpenPlan, sessionSocketOpenStatus, sessionSocketReconnectPlan, sessionSocketReconnectStatus,
+  keyModifiers, selectedSessionConnectionPlan, sessionSocketAttachPlan, sessionSocketAttachStatePlan, sessionSocketAuthMessageForToken, sessionSocketCloseExecutionPlan, sessionSocketClosePlan, sessionSocketErrorPlan, sessionSocketMessageExecutionPlan, sessionSocketOpenExecutionPlan, sessionSocketOpenStatusPlan, sessionSocketReconnectPlan,
   terminalControlKeyEvent,
 } from "./terminal_protocol.js";
 import {
@@ -3150,9 +3150,7 @@ async function connectSelectedSession() {
     session, terminalSurfaceChecked: true, hasTerminal: Boolean(state.terminal),
     terminalFallbackActive: state.terminalFallbackActive, ws: state.ws, openReadyState: WebSocket.OPEN,
   });
-  if (plan.type !== "connect_socket") {
-    return;
-  }
+  if (plan.type !== "connect_socket") return;
 
   disconnectSocket();
   const generation = state.connectionGeneration;
@@ -3160,59 +3158,59 @@ async function connectSelectedSession() {
   const attachPlan = sessionSocketAttachPlan(url);
 
   const ws = new WebSocket(url);
-  ws.binaryType = "arraybuffer";
-  ws.sessionId = plan.sessionId;
-  ws.framedOutput = attachPlan.framedOutput;
-  state.ws = ws;
-  state.readOnly = true;
+  attachSelectedSessionSocket(ws, plan, attachPlan);
+  ws.onopen = () => handleSelectedSessionSocketOpen(ws, generation);
+  ws.onmessage = (event) => handleSelectedSessionSocketMessage(ws, generation, event);
+  ws.onclose = () => handleSelectedSessionSocketClose(generation);
+  ws.onerror = () => handleSelectedSessionSocketError();
+}
+
+function selectedSessionSocketContext(ws, generation) {
+  return { generation, currentGeneration: state.connectionGeneration, currentSocketMatches: generation === state.connectionGeneration && state.ws === ws };
+}
+
+function attachSelectedSessionSocket(ws, plan, attachPlan) {
+  const attach = sessionSocketAttachStatePlan(plan, attachPlan);
+  [ws.binaryType, ws.sessionId, ws.framedOutput] = [attach.binaryType, attach.sessionId, attach.framedOutput];
+  state.ws = ws; state.readOnly = attach.readOnly;
   syncWriteAccess();
-  setConnectionStatus(attachPlan.status);
+  setConnectionStatus(attach.status);
+}
 
-  ws.onopen = () => {
-    if (sessionSocketOpenPlan({ generation, currentGeneration: state.connectionGeneration, currentSocketMatches: generation === state.connectionGeneration && state.ws === ws }).type === "close_stale") {
-      ws.close();
-      return;
-    }
-    const sentAuth = sendSessionSocketAuth(ws);
-    measureAndResizeSurface(true, true);
-    state.reconnectAttempt = 0;
-    setConnectionStatus(sessionSocketOpenStatus(sentAuth));
-    scheduleSessionRefresh();
-  };
+function handleSelectedSessionSocketOpen(ws, generation) {
+  const openPlan = sessionSocketOpenExecutionPlan(selectedSessionSocketContext(ws, generation));
+  if (openPlan.type === "close_stale") { ws.close(); return; }
+  const statusPlan = sessionSocketOpenStatusPlan(sendSessionSocketAuth(ws));
+  if (openPlan.resizeTerminal) measureAndResizeSurface(true, true);
+  if (openPlan.resetReconnectAttempt) state.reconnectAttempt = 0;
+  setConnectionStatus(statusPlan.status);
+  if (openPlan.scheduleRefresh) scheduleSessionRefresh();
+}
 
-  ws.onmessage = (event) => {
-    const messagePlan = sessionSocketMessagePlan({ generation, currentGeneration: state.connectionGeneration, currentSocketMatches: generation === state.connectionGeneration && state.ws === ws, data: event.data });
-    if (messagePlan.type === "ignore") {
-      return;
-    }
-    if (messagePlan.type === "handle_text") {
-      handleSocketText(messagePlan.text);
-      return;
-    }
-    const terminalBytes = terminalPayloadFromSocketBytes(new Uint8Array(messagePlan.data), ws);
-    feedTerminalBytes(terminalBytes);
-  };
+function handleSelectedSessionSocketMessage(ws, generation, event) {
+  const messagePlan = sessionSocketMessageExecutionPlan({ ...selectedSessionSocketContext(ws, generation), data: event.data });
+  if (messagePlan.type === "ignore") return;
+  if (messagePlan.type === "handle_text") { handleSocketText(messagePlan.text); return; }
+  feedTerminalBytes(terminalPayloadFromSocketBytes(messagePlan.bytes, ws));
+}
 
-  ws.onclose = () => {
-    if (sessionSocketClosePlan({ generation, currentGeneration: state.connectionGeneration }).type === "ignore") {
-      return;
-    }
-    const delay = reconnectDelayMs();
-    state.reconnectAttempt += 1;
-    setConnectionStatus(sessionSocketReconnectStatus(delay), true);
-    scheduleSessionRefresh();
-    state.reconnectTimer = window.setTimeout(() => {
-      state.reconnectTimer = null;
-      if (sessionSocketReconnectPlan({ generation, currentGeneration: state.connectionGeneration, hasCurrentSession: generation === state.connectionGeneration && Boolean(currentSession()) }).type !== "reconnect") {
-        return;
-      }
-      connectSelectedSession();
-    }, delay);
-  };
+function handleSelectedSessionSocketClose(generation) {
+  if (sessionSocketClosePlan({ generation, currentGeneration: state.connectionGeneration }).type === "ignore") return;
+  const closePlan = sessionSocketCloseExecutionPlan(reconnectDelayMs());
+  if (closePlan.incrementReconnectAttempt) state.reconnectAttempt += 1;
+  setConnectionStatus(closePlan.status, true);
+  if (closePlan.scheduleRefresh) scheduleSessionRefresh();
+  state.reconnectTimer = window.setTimeout(() => runSelectedSessionSocketReconnect(generation), closePlan.delayMs);
+}
 
-  ws.onerror = () => {
-    setConnectionStatus("attach failed; input disabled", true);
-  };
+function runSelectedSessionSocketReconnect(generation) {
+  state.reconnectTimer = null;
+  if (sessionSocketReconnectPlan({ generation, currentGeneration: state.connectionGeneration, hasCurrentSession: generation === state.connectionGeneration && Boolean(currentSession()) }).type !== "reconnect") return;
+  connectSelectedSession();
+}
+
+function handleSelectedSessionSocketError() {
+  const errorPlan = sessionSocketErrorPlan(); setConnectionStatus(errorPlan.status, errorPlan.muted);
 }
 
 function sessionSocketUrl(session) {
