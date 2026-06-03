@@ -5,6 +5,7 @@ import {
   authTokenButtonPlan, eventCell,
   eventClientPoint,
   globalShortcutPlan,
+  mobileKeyboardInputExecutorPlan,
   mobileKeyboardInputPlan,
   mobileKeyboardKeydownPlan,
   mobileKeyboardKeyPlan,
@@ -299,6 +300,35 @@ test("mobileKeyboardInputPlan preserves clear, control, and inserted text decisi
     { inputType: "insertText", data: null },
     { hasCurrentSession: true, proxyValue: "fallback" },
   ), { type: "send_text", text: "fallback" });
+});
+
+test("mobileKeyboardInputExecutorPlan preserves clear, forward, send, and unknown decisions", () => {
+  const event = {
+    kind: "key",
+    phase: "down",
+    key: "Enter",
+    code: "Enter",
+    mods: 0,
+    repeat: false,
+  };
+  const ignored = { type: "ignore", handled: false, forwardEvent: null, sendText: false, text: "" };
+
+  assert.deepEqual(mobileKeyboardInputExecutorPlan({ type: "clear" }), ignored);
+  assert.deepEqual(mobileKeyboardInputExecutorPlan({ type: "forward_event", event }), {
+    type: "forward_event",
+    handled: true,
+    forwardEvent: event,
+    sendText: false,
+    text: "",
+  });
+  assert.deepEqual(mobileKeyboardInputExecutorPlan({ type: "send_text", text: "" }), {
+    type: "send_text",
+    handled: true,
+    forwardEvent: null,
+    sendText: true,
+    text: "",
+  });
+  assert.deepEqual(mobileKeyboardInputExecutorPlan({ type: "unknown", text: "ignored" }), ignored);
 });
 
 test("terminalComposerControlAction preserves modifier, selection, and empty-input gates", () => {

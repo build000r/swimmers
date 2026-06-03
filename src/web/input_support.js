@@ -197,6 +197,19 @@ export function mobileKeyboardInputPlan(event, context = {}) {
   return { type: "send_text", text };
 }
 
+export function mobileKeyboardInputExecutorPlan(plan = {}) {
+  if (plan.type === "clear") {
+    return { type: "ignore", handled: false, forwardEvent: null, sendText: false, text: "" };
+  }
+  if (plan.type === "forward_event") {
+    return { type: "forward_event", handled: true, forwardEvent: plan.event, sendText: false, text: "" };
+  }
+  if (plan.type === "send_text") {
+    return { type: "send_text", handled: true, forwardEvent: null, sendText: true, text: plan.text };
+  }
+  return { type: "ignore", handled: false, forwardEvent: null, sendText: false, text: "" };
+}
+
 export function terminalKeyStripClickPlan(eventType, target) {
   if (eventType !== "click") {
     return { type: "ignore" };

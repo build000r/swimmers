@@ -1,6 +1,6 @@
 import { buildSurfaceFrame, surfaceActionAt, surfaceConsumesPointer } from "./rendered_surface.js";
 import {
-  authTokenButtonPlan, eventCell, globalShortcutPlan, mobileKeyboardInputPlan,
+  authTokenButtonPlan, eventCell, globalShortcutPlan, mobileKeyboardInputExecutorPlan, mobileKeyboardInputPlan,
   mobileKeyboardKeydownPlan, mobileKeyboardKeyPlan, shouldIgnoreSyntheticClick,
   terminalComposerControlAction, terminalFallbackKeydownPlan, terminalFallbackPastePlan, terminalKeyStripClickPlan, terminalStageCaptureBindings, terminalStageFocusPlan,
   terminalStageKeydownPlan, terminalStagePastePlan,
@@ -5222,15 +5222,10 @@ function handleMobileKeyboardProxyInput(event) {
     proxyValue: el.mobileKeyboardProxy.value,
   });
   el.mobileKeyboardProxy.value = "";
-  if (plan.type === "clear") {
-    return false;
-  }
-  if (plan.type === "forward_event") {
-    forwardTerminalEvent(plan.event);
-    return true;
-  }
-  sendTerminalText(plan.text);
-  return true;
+  const action = mobileKeyboardInputExecutorPlan(plan);
+  if (action.forwardEvent) forwardTerminalEvent(action.forwardEvent);
+  if (action.sendText) sendTerminalText(action.text);
+  return action.handled;
 }
 
 function handleTerminalInlineInputKeydown(event) {
