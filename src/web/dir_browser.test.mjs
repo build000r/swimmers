@@ -9,6 +9,7 @@ import {
   dirEntryMatchesSearch,
   dirEntryResolvedPath,
   dirGroupChipClickPlan,
+  dirGroupMembershipClickPlan,
   joinPath,
   launchTargetPayload,
   renderCreateBatchBar,
@@ -181,6 +182,55 @@ test("dirGroupChipClickPlan preserves managed, all, group, blank, and ignored de
     group: "",
     managedOnly: false,
     path: "/typed",
+  });
+});
+
+test("dirGroupMembershipClickPlan preserves action dataset forwarding and ignores", () => {
+  const actionFor = (dataset) => {
+    const action = { dataset };
+    return {
+      action,
+      target: {
+        closest(selector) {
+          return selector === ".dir-entry-group-action" ? action : null;
+        },
+      },
+    };
+  };
+
+  assert.deepEqual(dirGroupMembershipClickPlan("keydown", actionFor({ action: "add" }).target), {
+    type: "ignore",
+  });
+  assert.deepEqual(dirGroupMembershipClickPlan("click", { closest: () => null }), {
+    type: "ignore",
+  });
+  assert.deepEqual(dirGroupMembershipClickPlan("click", actionFor({ path: "/srv/repos/a", action: "add", group: "clients" }).target), {
+    type: "membership",
+    path: "/srv/repos/a",
+    action: "add",
+    group: "clients",
+    removeGroup: undefined,
+  });
+  assert.deepEqual(dirGroupMembershipClickPlan("click", actionFor({ path: "/srv/repos/a", action: "remove", group: "clients" }).target), {
+    type: "membership",
+    path: "/srv/repos/a",
+    action: "remove",
+    group: "clients",
+    removeGroup: undefined,
+  });
+  assert.deepEqual(dirGroupMembershipClickPlan("click", actionFor({ path: "/srv/repos/a", action: "move", group: "new", removeGroup: "old" }).target), {
+    type: "membership",
+    path: "/srv/repos/a",
+    action: "move",
+    group: "new",
+    removeGroup: "old",
+  });
+  assert.deepEqual(dirGroupMembershipClickPlan("click", actionFor({}).target), {
+    type: "membership",
+    path: undefined,
+    action: undefined,
+    group: undefined,
+    removeGroup: undefined,
   });
 });
 

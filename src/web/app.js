@@ -33,6 +33,7 @@ import {
   clearCreateBatchSelection as clearDirBrowserBatchSelection,
   dirCheckboxChangePlan as dirBrowserCheckboxChangePlan,
   dirGroupChipClickPlan as dirBrowserGroupChipClickPlan,
+  dirGroupMembershipClickPlan as dirBrowserGroupMembershipClickPlan,
   launchTargetPayload as dirBrowserLaunchTargetPayload,
   renderCreateBatchBar as renderDirBrowserCreateBatchBar,
   renderDirEntries as renderDirBrowserEntries,
@@ -5634,14 +5635,9 @@ function bindEvents() {
       return;
     }
 
-    const groupActionButton = target.closest(".dir-entry-group-action");
-    if (groupActionButton) {
-      await updateDirEntryGroupMembership(
-        groupActionButton.dataset.path,
-        groupActionButton.dataset.action,
-        groupActionButton.dataset.group,
-        groupActionButton.dataset.removeGroup,
-      );
+    const groupActionPlan = dirBrowserGroupMembershipClickPlan(event.type, target);
+    if (groupActionPlan.type === "membership") {
+      await updateDirEntryGroupMembership(groupActionPlan.path, groupActionPlan.action, groupActionPlan.group, groupActionPlan.removeGroup);
       return;
     }
 

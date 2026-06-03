@@ -173,6 +173,18 @@ export function dirGroupChipClickPlan(eventType, target, managedOnlyChecked = fa
   return { type: "filter", group: filter === "group" ? groupName : "", managedOnly, path: currentPath || inputPath };
 }
 
+export function dirGroupMembershipClickPlan(eventType, target) {
+  if (eventType !== "click") {
+    return { type: "ignore" };
+  }
+  const button = target?.closest?.(".dir-entry-group-action") ?? null;
+  if (!button) {
+    return { type: "ignore" };
+  }
+  const dataset = button.dataset || {};
+  return { type: "membership", path: dataset.path, action: dataset.action, group: dataset.group, removeGroup: dataset.removeGroup };
+}
+
 export function selectedLaunchTarget(el, dirBrowser) {
   const value = String(el.createLaunchTarget?.value || dirBrowser.launchTarget || "local").trim();
   return value || "local";
