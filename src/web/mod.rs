@@ -34,6 +34,7 @@ const INPUT_SUPPORT_JS_ROUTE: &str = "/input_support.js";
 const SURFACE_ACTION_PLANS_JS_ROUTE: &str = "/surface_action_plans.js";
 const SEND_SHEET_JS_ROUTE: &str = "/send_sheet.js";
 const THOUGHT_CONFIG_SHEET_JS_ROUTE: &str = "/thought_config_sheet.js";
+const NATIVE_DESKTOP_SHEET_JS_ROUTE: &str = "/native_desktop_sheet.js";
 const TERMINAL_SURFACE_SETUP_JS_ROUTE: &str = "/terminal_surface_setup.js";
 const TERMINAL_RESIZE_JS_ROUTE: &str = "/terminal_resize.js";
 const GLOBAL_SHORTCUT_DISPATCH_JS_ROUTE: &str = "/global_shortcut_dispatch.js";
@@ -104,6 +105,7 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route(SURFACE_ACTION_PLANS_JS_ROUTE, get(surface_action_plans_js))
         .route(SEND_SHEET_JS_ROUTE, get(send_sheet_js))
         .route(THOUGHT_CONFIG_SHEET_JS_ROUTE, get(thought_config_sheet_js))
+        .route(NATIVE_DESKTOP_SHEET_JS_ROUTE, get(native_desktop_sheet_js))
         .route(
             TERMINAL_SURFACE_SETUP_JS_ROUTE,
             get(terminal_surface_setup_js),
@@ -658,6 +660,13 @@ async fn thought_config_sheet_js() -> Response {
     javascript_asset(
         "src/web/thought_config_sheet.js",
         include_str!("thought_config_sheet.js"),
+    )
+}
+
+async fn native_desktop_sheet_js() -> Response {
+    javascript_asset(
+        "src/web/native_desktop_sheet.js",
+        include_str!("native_desktop_sheet.js"),
     )
 }
 
@@ -2309,6 +2318,11 @@ mod tests {
                 "from \"./thought_config_sheet.js\"",
             ),
             (
+                APP_JS_ROUTE,
+                app_js().await,
+                "from \"./native_desktop_sheet.js\"",
+            ),
+            (
                 RENDERED_SURFACE_JS_ROUTE,
                 rendered_surface_js().await,
                 "export function buildSurfaceFrame",
@@ -2337,6 +2351,11 @@ mod tests {
                 THOUGHT_CONFIG_SHEET_JS_ROUTE,
                 thought_config_sheet_js().await,
                 "export function createThoughtConfigSheetController",
+            ),
+            (
+                NATIVE_DESKTOP_SHEET_JS_ROUTE,
+                native_desktop_sheet_js().await,
+                "export function createNativeDesktopSheetController",
             ),
             (
                 TERMINAL_SURFACE_SETUP_JS_ROUTE,
