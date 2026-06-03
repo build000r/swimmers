@@ -147,6 +147,30 @@ export function mobileKeyboardKeyPlan(event, context = {}) {
   return { type: "forward_key" };
 }
 
+export function mobileKeyboardKeydownPlan(context = {}) {
+  if (context.globalShortcutHandled) {
+    return { type: "prevent_default", handled: true, preventDefault: true, closeKeyboard: false, focusTerminal: false, markResponse: false, forwardKey: false };
+  }
+  if (context.keyPlan?.type === "ignore") {
+    return { type: "ignore", handled: false, preventDefault: false, closeKeyboard: false, focusTerminal: false, markResponse: false, forwardKey: false };
+  }
+  if (context.keyPlan?.type === "close_mobile_keyboard") {
+    return { type: "close_mobile_keyboard", handled: true, preventDefault: true, closeKeyboard: true, focusTerminal: true, markResponse: false, forwardKey: false };
+  }
+  if (context.keyPlan?.type !== "forward_key") {
+    return { type: "ignore", handled: false, preventDefault: false, closeKeyboard: false, focusTerminal: false, markResponse: false, forwardKey: false };
+  }
+  return {
+    type: "forward_key",
+    handled: true,
+    preventDefault: true,
+    closeKeyboard: false,
+    focusTerminal: false,
+    markResponse: Boolean(context.beginsResponse),
+    forwardKey: true,
+  };
+}
+
 function mobileKeyboardInputKeyEvent(key) {
   return {
     kind: "key",

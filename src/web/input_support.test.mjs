@@ -6,6 +6,7 @@ import {
   eventClientPoint,
   globalShortcutPlan,
   mobileKeyboardInputPlan,
+  mobileKeyboardKeydownPlan,
   mobileKeyboardKeyPlan,
   shouldIgnoreSyntheticClick,
   terminalComposerControlAction,
@@ -173,6 +174,83 @@ test("mobileKeyboardKeyPlan preserves special-key forwarding and no-op gates", (
   ]) {
     assert.deepEqual(mobileKeyboardKeyPlan({ key }, { hasCurrentSession: true }), { type: "forward_key" });
   }
+});
+
+test("mobileKeyboardKeydownPlan preserves shortcut, ignore, close, and forward decisions", () => {
+  assert.deepEqual(mobileKeyboardKeydownPlan({
+    globalShortcutHandled: true,
+    keyPlan: { type: "forward_key" },
+    beginsResponse: true,
+  }), {
+    type: "prevent_default",
+    handled: true,
+    preventDefault: true,
+    closeKeyboard: false,
+    focusTerminal: false,
+    markResponse: false,
+    forwardKey: false,
+  });
+  assert.deepEqual(mobileKeyboardKeydownPlan({
+    globalShortcutHandled: false,
+    keyPlan: { type: "ignore" },
+    beginsResponse: true,
+  }), {
+    type: "ignore",
+    handled: false,
+    preventDefault: false,
+    closeKeyboard: false,
+    focusTerminal: false,
+    markResponse: false,
+    forwardKey: false,
+  });
+  assert.deepEqual(mobileKeyboardKeydownPlan({
+    globalShortcutHandled: false,
+    keyPlan: { type: "close_mobile_keyboard" },
+    beginsResponse: true,
+  }), {
+    type: "close_mobile_keyboard",
+    handled: true,
+    preventDefault: true,
+    closeKeyboard: true,
+    focusTerminal: true,
+    markResponse: false,
+    forwardKey: false,
+  });
+  assert.deepEqual(mobileKeyboardKeydownPlan({
+    globalShortcutHandled: false,
+    keyPlan: { type: "forward_key" },
+    beginsResponse: false,
+  }), {
+    type: "forward_key",
+    handled: true,
+    preventDefault: true,
+    closeKeyboard: false,
+    focusTerminal: false,
+    markResponse: false,
+    forwardKey: true,
+  });
+  assert.deepEqual(mobileKeyboardKeydownPlan({
+    globalShortcutHandled: false,
+    keyPlan: { type: "forward_key" },
+    beginsResponse: true,
+  }), {
+    type: "forward_key",
+    handled: true,
+    preventDefault: true,
+    closeKeyboard: false,
+    focusTerminal: false,
+    markResponse: true,
+    forwardKey: true,
+  });
+  assert.deepEqual(mobileKeyboardKeydownPlan({ globalShortcutHandled: false }), {
+    type: "ignore",
+    handled: false,
+    preventDefault: false,
+    closeKeyboard: false,
+    focusTerminal: false,
+    markResponse: false,
+    forwardKey: false,
+  });
 });
 
 test("mobileKeyboardInputPlan preserves clear, control, and inserted text decisions", () => {

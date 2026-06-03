@@ -1,7 +1,7 @@
 import { buildSurfaceFrame, surfaceActionAt, surfaceConsumesPointer } from "./rendered_surface.js";
 import {
   authTokenButtonPlan, eventCell, globalShortcutPlan, mobileKeyboardInputPlan,
-  mobileKeyboardKeyPlan, shouldIgnoreSyntheticClick,
+  mobileKeyboardKeydownPlan, mobileKeyboardKeyPlan, shouldIgnoreSyntheticClick,
   terminalComposerControlAction, terminalFallbackKeydownPlan, terminalKeyStripClickPlan, terminalStageCaptureBindings, terminalStageFocusPlan,
   terminalStageKeydownPlan, terminalStagePastePlan,
 } from "./input_support.js";
@@ -5199,28 +5199,23 @@ function handleGlobalShortcut(event) {
 }
 
 function handleMobileKeyboardProxyKeydown(event) {
-  if (handleGlobalShortcut(event)) {
-    event.preventDefault();
-    return true;
-  }
-  const plan = mobileKeyboardKeyPlan(event, {
+  const globalShortcutHandled = handleGlobalShortcut(event);
+  const keyPlan = globalShortcutHandled ? { type: "ignore" } : mobileKeyboardKeyPlan(event, {
     readOnly: state.readOnly,
     hasCurrentSession: Boolean(currentSession()),
   });
-  if (plan.type === "ignore") {
-    return false;
-  }
-  event.preventDefault();
-  if (plan.type === "close_mobile_keyboard") {
-    closeMobileKeyboard();
-    focusTerminalInputSurface({ preventScroll: true });
-    return true;
-  }
-  if (keyBeginsTrogdorResponse(event)) {
-    markTrogdorSessionsResponded([state.selectedSessionId]);
-  }
-  forwardTerminalKeyDown(event);
-  return true;
+  const shouldForwardKey = !globalShortcutHandled && keyPlan.type === "forward_key";
+  const plan = mobileKeyboardKeydownPlan({
+    globalShortcutHandled,
+    keyPlan,
+    beginsResponse: shouldForwardKey && keyBeginsTrogdorResponse(event),
+  });
+  if (plan.preventDefault) event.preventDefault();
+  if (plan.closeKeyboard) closeMobileKeyboard();
+  if (plan.focusTerminal) focusTerminalInputSurface({ preventScroll: true });
+  if (plan.markResponse) markTrogdorSessionsResponded([state.selectedSessionId]);
+  if (plan.forwardKey) forwardTerminalKeyDown(event);
+  return plan.handled;
 }
 
 function handleMobileKeyboardProxyInput(event) {
