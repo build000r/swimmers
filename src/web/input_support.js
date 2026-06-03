@@ -230,6 +230,13 @@ export function terminalStageCaptureBindings() {
   ];
 }
 
+export function terminalStagePastePlan(readOnly, text) {
+  if (readOnly || !text) {
+    return { type: "ignore" };
+  }
+  return { type: "send_text", text };
+}
+
 function clampInt(value, fallback, min, max) {
   const numeric = Number.isFinite(value) ? Math.trunc(value) : fallback;
   return Math.max(min, Math.min(max, numeric));

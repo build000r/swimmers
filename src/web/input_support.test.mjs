@@ -11,6 +11,7 @@ import {
   terminalComposerControlAction,
   terminalKeyStripClickPlan,
   terminalStageCaptureBindings,
+  terminalStagePastePlan,
 } from "./input_support.js";
 
 test("eventClientPoint uses direct pointer coordinates when present", () => {
@@ -267,4 +268,13 @@ test("terminalStageCaptureBindings preserves stage event labels and options", ()
     { eventType: "touchend", action: "touch", options: { capture: true, passive: false } },
     { eventType: "wheel", action: "wheel", options: { capture: true, passive: false } },
   ]);
+});
+
+test("terminalStagePastePlan preserves read-only, empty, and raw text decisions", () => {
+  assert.deepEqual(terminalStagePastePlan(true, "paste me\n"), { type: "ignore" });
+  assert.deepEqual(terminalStagePastePlan(false, ""), { type: "ignore" });
+  assert.deepEqual(terminalStagePastePlan(false, " paste me\n"), {
+    type: "send_text",
+    text: " paste me\n",
+  });
 });

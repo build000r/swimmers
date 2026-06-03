@@ -2,7 +2,7 @@ import { buildSurfaceFrame, surfaceActionAt, surfaceConsumesPointer } from "./re
 import {
   authTokenButtonPlan, eventCell, globalShortcutPlan, mobileKeyboardInputPlan,
   mobileKeyboardKeyPlan, shouldIgnoreSyntheticClick,
-  terminalComposerControlAction, terminalKeyStripClickPlan, terminalStageCaptureBindings,
+  terminalComposerControlAction, terminalKeyStripClickPlan, terminalStageCaptureBindings, terminalStagePastePlan,
 } from "./input_support.js";
 import { sendHistoryClickPlan, sendSheetFailureStatus, sendSheetSubmitPlan, sendSheetSuccessStatus } from "./send_sheet.js";
 import {
@@ -5744,15 +5744,10 @@ function bindEvents() {
   });
 
   el.terminalStage.addEventListener("paste", (event) => {
-    if (state.readOnly) {
-      return;
-    }
-    const text = event.clipboardData?.getData("text") ?? "";
-    if (!text) {
-      return;
-    }
+    const plan = terminalStagePastePlan(state.readOnly, event.clipboardData?.getData("text") ?? "");
+    if (plan.type !== "send_text") return;
     event.preventDefault();
-    sendTerminalText(text);
+    sendTerminalText(plan.text);
   });
 
   el.terminalStage.addEventListener("focus", () => {
