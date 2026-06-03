@@ -1,5 +1,29 @@
 import { buildSurfaceFrame, surfaceActionAt, surfaceConsumesPointer } from "./rendered_surface.js";
 import { eventCell, shouldIgnoreSyntheticClick } from "./input_support.js";
+import {
+  MERMAID_PLAN_CONTENT_DISPLAY_MAX_CHARS,
+  buildMermaidArtifactView,
+  boundedArtifactText,
+  isSafeMermaidPlanFileName,
+  planFileLabel,
+  sanitizeMermaidPlanFiles,
+} from "./mermaid_artifact.js";
+import {
+  MAX_TERMINAL_PASTE_BYTES,
+  frankenTermLinkPolicy,
+  isLoopbackHostname,
+  safeAnchorHref,
+  terminalTextWithinPasteBudget,
+  utf8ByteLength,
+} from "./terminal_safety.js";
+import {
+  buildSessionSocketUrl,
+  decodeTerminalOutputFrame,
+  fallbackTextForKeyEvent,
+  keyModifiers,
+  sessionSocketAuthMessageForToken,
+  terminalControlKeyEvent,
+} from "./terminal_protocol.js";
 
 const boot = window.__SWIMMERS_BOOT__ ?? {
   franken_term_available: false,
@@ -56,12 +80,7 @@ const TERMINAL_ZOOM_MIN = 0.65;
 const TERMINAL_ZOOM_MAX = 2.4;
 const TERMINAL_ZOOM_STEP = 0.1;
 const SEND_HISTORY_LIMIT = 8;
-const MAX_TERMINAL_PASTE_BYTES = 786432;
 const MAX_PENDING_TERMINAL_BYTES = 524288;
-const MERMAID_SOURCE_DISPLAY_MAX_CHARS = 64 * 1024;
-const MERMAID_PLAN_CONTENT_DISPLAY_MAX_CHARS = 128 * 1024;
-const MERMAID_PLAN_FILES_MAX = 32;
-const TERMINAL_OUTPUT_OPCODE = 0x11;
 const FRANKENTERM_REQUIRED_INSTANCE_METHODS = [
   "init",
   "destroy",
@@ -431,66 +450,6 @@ function frankenTermAssetSummary() {
     pieces.push(`${key}${checksum}${size}`);
   }
   return pieces.join("; ");
-}
-
-function isLoopbackHostname(hostname) {
-  const host = String(hostname || "").trim().toLowerCase().replace(/^\[|\]$/g, "");
-  if (!host) {
-    return false;
-  }
-  if (host === "localhost" || host.endsWith(".localhost") || host === "::1") {
-    return true;
-  }
-  const ipv4 = host.split(".");
-  return (
-    ipv4.length === 4 &&
-    ipv4[0] === "127" &&
-    ipv4.every((part) => /^\d+$/.test(part) && Number(part) >= 0 && Number(part) <= 255)
-  );
-}
-
-function frankenTermLinkPolicy() {
-  return {
-    allowHttp: isLoopbackHostname(window.location?.hostname),
-    allowHttps: true,
-  };
-}
-
-function safeAnchorHref(rawUrl) {
-  try {
-    const url = new URL(String(rawUrl || ""), window.location.href);
-    if (url.protocol !== "http:" && url.protocol !== "https:") {
-      return "";
-    }
-    return url.toString();
-  } catch (_) {
-    return "";
-  }
-}
-
-function utf8ByteLength(text) {
-  const value = String(text ?? "");
-  if (typeof TextEncoder !== "undefined") {
-    return new TextEncoder().encode(value).byteLength;
-  }
-  let count = 0;
-  for (const char of value) {
-    const code = char.codePointAt(0);
-    if (code <= 0x7f) {
-      count += 1;
-    } else if (code <= 0x7ff) {
-      count += 2;
-    } else if (code <= 0xffff) {
-      count += 3;
-    } else {
-      count += 4;
-    }
-  }
-  return count;
-}
-
-function terminalTextWithinPasteBudget(text) {
-  return utf8ByteLength(text) <= MAX_TERMINAL_PASTE_BYTES;
 }
 
 function rejectOversizeTerminalText(text, label = "Paste") {
@@ -3613,28 +3572,19 @@ function renderDirEntries(response) {
 
 function renderMermaidArtifact(payload) {
   state.mermaidArtifact.artifact = payload;
-  const available = Boolean(payload?.available);
-  const path = payload?.path || "(unknown path)";
-  const updatedAt = payload?.updated_at ? formatTime(payload.updated_at) : "unknown";
-  const sourceResult = boundedArtifactText(
-    payload?.source || "",
-    MERMAID_SOURCE_DISPLAY_MAX_CHARS,
-    `Mermaid source truncated after ${MERMAID_SOURCE_DISPLAY_MAX_CHARS / 1024} KiB for browser display.`,
-  );
-  const source = sourceResult.text;
-  const planFileResult = sanitizeMermaidPlanFiles(payload?.plan_files);
-  const planFiles = planFileResult.files;
-  state.mermaidArtifact.source = source;
+  const view = buildMermaidArtifactView(payload, { formatTime });
+  state.mermaidArtifact.source = view.source;
+  const planFiles = view.planFiles;
   state.mermaidArtifact.planFiles = planFiles;
   state.mermaidArtifact.activePlanFile = "";
   state.mermaidArtifact.planContent = "";
-  el.mermaidSource.textContent = source || "Mermaid source unavailable.";
+  el.mermaidSource.textContent = view.source || "Mermaid source unavailable.";
   el.mermaidPreview.innerHTML = "";
   el.mermaidPlanContent.textContent = "";
   el.mermaidPlanContent.classList.add("hidden");
   el.mermaidPlanContent.classList.remove("error");
 
-  if (available && state.mermaidArtifact.svgUrl) {
+  if (view.available && state.mermaidArtifact.svgUrl) {
     const img = document.createElement("img");
     img.src = state.mermaidArtifact.svgUrl;
     img.alt = "Mermaid artifact preview";
@@ -3643,68 +3593,8 @@ function renderMermaidArtifact(payload) {
   }
 
   renderMermaidPlanTabs();
-  const lines = [
-    `available: ${available}`,
-    `path: ${path}`,
-    `updated: ${updatedAt}`,
-    planFiles.length ? `plan files: ${planFiles.join(", ")}` : null,
-    sourceResult.truncated ? `source: truncated to ${MERMAID_SOURCE_DISPLAY_MAX_CHARS / 1024} KiB for browser display` : null,
-    planFileResult.cappedCount ? `plan files: showing first ${MERMAID_PLAN_FILES_MAX}; ${planFileResult.cappedCount} hidden` : null,
-    planFileResult.hiddenCount ? `plan files: ${planFileResult.hiddenCount} unsafe name${planFileResult.hiddenCount === 1 ? "" : "s"} hidden` : null,
-    payload?.error ? `error: ${payload.error}` : null,
-  ].filter(Boolean);
-  setMermaidStatus(lines.join("\n"));
+  setMermaidStatus(view.status);
   syncSheetActionAvailability();
-}
-
-function boundedArtifactText(value, maxChars, marker) {
-  const text = String(value || "");
-  if (text.length <= maxChars) {
-    return { text, truncated: false };
-  }
-  return {
-    text: `${text.slice(0, maxChars)}\n\n[${marker}]`,
-    truncated: true,
-  };
-}
-
-function isSafeMermaidPlanFileName(name) {
-  const value = String(name || "").trim();
-  return Boolean(
-    value
-      && value.length <= 96
-      && value !== "."
-      && value !== ".."
-      && !value.includes("..")
-      && /^[A-Za-z0-9._-]+$/.test(value),
-  );
-}
-
-function sanitizeMermaidPlanFiles(value) {
-  const input = Array.isArray(value) ? value : [];
-  const safe = [];
-  let hiddenCount = 0;
-  for (const rawName of input) {
-    const name = String(rawName || "").trim();
-    if (!isSafeMermaidPlanFileName(name)) {
-      hiddenCount += 1;
-      continue;
-    }
-    if (!safe.includes(name)) {
-      safe.push(name);
-    }
-  }
-  const files = safe.slice(0, MERMAID_PLAN_FILES_MAX);
-  return {
-    files,
-    hiddenCount,
-    cappedCount: safe.length - files.length,
-  };
-}
-
-function planFileLabel(name) {
-  const stem = String(name || "").replace(/\.[^.]+$/, "");
-  return stem.replace(/[-_]+/g, " ") || name;
 }
 
 function renderMermaidPlanTabs() {
@@ -5631,22 +5521,11 @@ async function connectSelectedSession() {
 }
 
 function sessionSocketUrl(session) {
-  const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-  const url = new URL(`${protocol}//${window.location.host}/ws/sessions/${encodeURIComponent(session.session_id)}`);
-  url.searchParams.set("framed", "1");
-  const resumeFromSeq = state.lastTerminalSeqBySession.get(session.session_id);
-  if (resumeFromSeq && /^\d+$/.test(String(resumeFromSeq)) && String(resumeFromSeq) !== "0") {
-    url.searchParams.set("resume_from_seq", String(resumeFromSeq));
-  }
-  return url;
+  return buildSessionSocketUrl(session, window.location, state.lastTerminalSeqBySession.get(session.session_id));
 }
 
 function sessionSocketAuthMessage() {
-  const token = String(state.token || "").trim();
-  if (!token) {
-    return null;
-  }
-  return JSON.stringify({ type: "auth", token });
+  return sessionSocketAuthMessageForToken(state.token);
 }
 
 function sendSessionSocketAuth(ws) {
@@ -5670,28 +5549,6 @@ function terminalPayloadFromSocketBytes(bytes, ws = state.ws) {
     state.lastTerminalSeqBySession.set(ws.sessionId, frame.seq);
   }
   return frame.payload;
-}
-
-function decodeTerminalOutputFrame(bytes) {
-  if (!(bytes instanceof Uint8Array) || bytes.byteLength < 9 || bytes[0] !== TERMINAL_OUTPUT_OPCODE) {
-    return null;
-  }
-  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-  const high = view.getUint32(1);
-  const low = view.getUint32(5);
-  const seq = readUint64Decimal(high, low);
-  return {
-    seq,
-    payload: bytes.slice(9),
-  };
-}
-
-function readUint64Decimal(high, low) {
-  if (typeof BigInt === "function") {
-    return ((BigInt(high) << 32n) | BigInt(low)).toString();
-  }
-  const numeric = high * 4294967296 + low;
-  return Number.isSafeInteger(numeric) ? String(numeric) : "";
 }
 
 function feedTerminalBytes(bytes) {
@@ -6064,91 +5921,6 @@ function sendTerminalInputText(text) {
   return true;
 }
 
-function fallbackTextForKeyEvent(event) {
-  if (!event || event.kind !== "key" || event.phase !== "down") {
-    return "";
-  }
-
-  const key = typeof event.key === "string" ? event.key : "";
-  const mods = Number(event.mods) || 0;
-  const shift = (mods & 1) !== 0;
-  const alt = (mods & 2) !== 0;
-  const ctrl = (mods & 4) !== 0;
-  const prefix = alt ? "\x1b" : "";
-
-  if (ctrl && key.length === 1) {
-    const upper = key.toUpperCase();
-    const code = upper.charCodeAt(0);
-    if (code >= 64 && code <= 95) {
-      return prefix + String.fromCharCode(code - 64);
-    }
-  }
-
-  if (!ctrl && key.length === 1) {
-    return prefix + key;
-  }
-
-  switch (key) {
-    case "Enter":
-      return "\r";
-    case "Backspace":
-      return "\x7f";
-    case "Delete":
-      return "\x1b[3~";
-    case "Tab":
-      return shift ? "\x1b[Z" : "\t";
-    case "Escape":
-      return "\x1b";
-    case "ArrowUp":
-      return "\x1b[A";
-    case "ArrowDown":
-      return "\x1b[B";
-    case "ArrowRight":
-      return "\x1b[C";
-    case "ArrowLeft":
-      return "\x1b[D";
-    case "Home":
-      return "\x1b[H";
-    case "End":
-      return "\x1b[F";
-    case "PageUp":
-      return "\x1b[5~";
-    case "PageDown":
-      return "\x1b[6~";
-    default:
-      return "";
-  }
-}
-
-function terminalControlKeyEvent(actionId) {
-  switch (String(actionId || "")) {
-    case "ctrl-c":
-      return { key: "c", code: "KeyC", mods: 4, label: "Ctrl-C" };
-    case "escape":
-      return { key: "Escape", code: "Escape", mods: 0, label: "Esc" };
-    case "tab":
-      return { key: "Tab", code: "Tab", mods: 0, label: "Tab" };
-    case "arrow-up":
-      return { key: "ArrowUp", code: "ArrowUp", mods: 0, label: "Up" };
-    case "arrow-down":
-      return { key: "ArrowDown", code: "ArrowDown", mods: 0, label: "Down" };
-    case "arrow-left":
-      return { key: "ArrowLeft", code: "ArrowLeft", mods: 0, label: "Left" };
-    case "arrow-right":
-      return { key: "ArrowRight", code: "ArrowRight", mods: 0, label: "Right" };
-    case "home":
-      return { key: "Home", code: "Home", mods: 0, label: "Home" };
-    case "end":
-      return { key: "End", code: "End", mods: 0, label: "End" };
-    case "page-up":
-      return { key: "PageUp", code: "PageUp", mods: 0, label: "PgUp" };
-    case "page-down":
-      return { key: "PageDown", code: "PageDown", mods: 0, label: "PgDn" };
-    default:
-      return null;
-  }
-}
-
 function sendTerminalControlKey(actionId) {
   if (state.readOnly || !currentSession()) {
     return false;
@@ -6340,10 +6112,6 @@ function closeMobileKeyboard() {
   if (document.activeElement === el.mobileKeyboardProxy) {
     el.mobileKeyboardProxy.blur();
   }
-}
-
-function keyModifiers(event) {
-  return (event.shiftKey ? 1 : 0) | (event.altKey ? 2 : 0) | (event.ctrlKey ? 4 : 0) | (event.metaKey ? 8 : 0);
 }
 
 function shouldCaptureKey(event) {

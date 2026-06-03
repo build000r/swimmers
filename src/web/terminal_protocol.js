@@ -1,0 +1,130 @@
+export const TERMINAL_OUTPUT_OPCODE = 0x11;
+
+export function buildSessionSocketUrl(session, location, resumeFromSeq = "") {
+  const protocol = location.protocol === "https:" ? "wss:" : "ws:";
+  const url = new URL(`${protocol}//${location.host}/ws/sessions/${encodeURIComponent(session.session_id)}`);
+  url.searchParams.set("framed", "1");
+  if (resumeFromSeq && /^\d+$/.test(String(resumeFromSeq)) && String(resumeFromSeq) !== "0") {
+    url.searchParams.set("resume_from_seq", String(resumeFromSeq));
+  }
+  return url;
+}
+
+export function sessionSocketAuthMessageForToken(token) {
+  const normalized = String(token || "").trim();
+  if (!normalized) {
+    return null;
+  }
+  return JSON.stringify({ type: "auth", token: normalized });
+}
+
+export function decodeTerminalOutputFrame(bytes) {
+  if (!(bytes instanceof Uint8Array) || bytes.byteLength < 9 || bytes[0] !== TERMINAL_OUTPUT_OPCODE) {
+    return null;
+  }
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const high = view.getUint32(1);
+  const low = view.getUint32(5);
+  const seq = readUint64Decimal(high, low);
+  return {
+    seq,
+    payload: bytes.slice(9),
+  };
+}
+
+export function readUint64Decimal(high, low) {
+  if (typeof BigInt === "function") {
+    return ((BigInt(high) << 32n) | BigInt(low)).toString();
+  }
+  const numeric = high * 4294967296 + low;
+  return Number.isSafeInteger(numeric) ? String(numeric) : "";
+}
+
+export function fallbackTextForKeyEvent(event) {
+  if (!event || event.kind !== "key" || event.phase !== "down") {
+    return "";
+  }
+
+  const key = typeof event.key === "string" ? event.key : "";
+  const mods = Number(event.mods) || 0;
+  const shift = (mods & 1) !== 0;
+  const alt = (mods & 2) !== 0;
+  const ctrl = (mods & 4) !== 0;
+  const prefix = alt ? "\x1b" : "";
+
+  if (ctrl && key.length === 1) {
+    const upper = key.toUpperCase();
+    const code = upper.charCodeAt(0);
+    if (code >= 64 && code <= 95) {
+      return prefix + String.fromCharCode(code - 64);
+    }
+  }
+
+  if (!ctrl && key.length === 1) {
+    return prefix + key;
+  }
+
+  switch (key) {
+    case "Enter":
+      return "\r";
+    case "Backspace":
+      return "\x7f";
+    case "Delete":
+      return "\x1b[3~";
+    case "Tab":
+      return shift ? "\x1b[Z" : "\t";
+    case "Escape":
+      return "\x1b";
+    case "ArrowUp":
+      return "\x1b[A";
+    case "ArrowDown":
+      return "\x1b[B";
+    case "ArrowRight":
+      return "\x1b[C";
+    case "ArrowLeft":
+      return "\x1b[D";
+    case "Home":
+      return "\x1b[H";
+    case "End":
+      return "\x1b[F";
+    case "PageUp":
+      return "\x1b[5~";
+    case "PageDown":
+      return "\x1b[6~";
+    default:
+      return "";
+  }
+}
+
+export function terminalControlKeyEvent(actionId) {
+  switch (String(actionId || "")) {
+    case "ctrl-c":
+      return { key: "c", code: "KeyC", mods: 4, label: "Ctrl-C" };
+    case "escape":
+      return { key: "Escape", code: "Escape", mods: 0, label: "Esc" };
+    case "tab":
+      return { key: "Tab", code: "Tab", mods: 0, label: "Tab" };
+    case "arrow-up":
+      return { key: "ArrowUp", code: "ArrowUp", mods: 0, label: "Up" };
+    case "arrow-down":
+      return { key: "ArrowDown", code: "ArrowDown", mods: 0, label: "Down" };
+    case "arrow-left":
+      return { key: "ArrowLeft", code: "ArrowLeft", mods: 0, label: "Left" };
+    case "arrow-right":
+      return { key: "ArrowRight", code: "ArrowRight", mods: 0, label: "Right" };
+    case "home":
+      return { key: "Home", code: "Home", mods: 0, label: "Home" };
+    case "end":
+      return { key: "End", code: "End", mods: 0, label: "End" };
+    case "page-up":
+      return { key: "PageUp", code: "PageUp", mods: 0, label: "PgUp" };
+    case "page-down":
+      return { key: "PageDown", code: "PageDown", mods: 0, label: "PgDn" };
+    default:
+      return null;
+  }
+}
+
+export function keyModifiers(event) {
+  return (event.shiftKey ? 1 : 0) | (event.altKey ? 2 : 0) | (event.ctrlKey ? 4 : 0) | (event.metaKey ? 8 : 0);
+}
