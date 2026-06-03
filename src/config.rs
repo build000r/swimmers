@@ -230,6 +230,24 @@ fn apply_env_auth_mode(load: &mut ConfigLoad) {
     );
 }
 
+fn apply_env_auth_token(load: &mut ConfigLoad) {
+    if let Some(token) = parse_env_non_empty_string(load, "AUTH_TOKEN") {
+        load.config.auth_token = Some(token);
+    }
+}
+
+fn apply_env_observer_token(load: &mut ConfigLoad) {
+    if let Some(token) = parse_env_non_empty_string(load, "OBSERVER_TOKEN") {
+        load.config.observer_token = Some(token);
+    }
+}
+
+fn apply_env_bind(load: &mut ConfigLoad) {
+    if let Some(addr) = parse_env_non_empty_string(load, "SWIMMERS_BIND") {
+        load.config.bind = addr;
+    }
+}
+
 fn parse_env_non_empty_string(load: &mut ConfigLoad, key: &'static str) -> Option<String> {
     let Some(value) = env_value(load, key) else {
         return None;
@@ -275,11 +293,39 @@ fn parse_env_bool(load: &mut ConfigLoad, key: &'static str, default: bool) -> Op
     }
 }
 
+fn apply_env_personal_workflows(load: &mut ConfigLoad, defaults: &Config) {
+    if let Some(enabled) = parse_env_bool(
+        load,
+        "SWIMMERS_PERSONAL_WORKFLOWS",
+        defaults.personal_workflows_enabled,
+    ) {
+        load.config.personal_workflows_enabled = enabled;
+    }
+}
+
 pub fn bool_env_value(value: bool) -> &'static str {
     if value {
         "1"
     } else {
         "0"
+    }
+}
+
+fn apply_env_thought_backend(load: &mut ConfigLoad, defaults: &Config) {
+    if let Some(backend) = env_value(load, "SWIMMERS_THOUGHT_BACKEND") {
+        if let Some(parsed) = ThoughtBackend::from_env_value(&backend) {
+            load.config.thought_backend = parsed;
+        } else {
+            push_warning(
+                load,
+                "SWIMMERS_THOUGHT_BACKEND",
+                format!(
+                    "unsupported value {:?}; using default {}",
+                    backend.trim(),
+                    defaults.thought_backend.as_env_value()
+                ),
+            );
+        }
     }
 }
 
@@ -326,6 +372,70 @@ where
     }
 }
 
+fn apply_env_thought_tick_ms(load: &mut ConfigLoad, defaults: &Config) {
+    if let Some(value) = parse_env_bounded(
+        load,
+        "SWIMMERS_THOUGHT_TICK_MS",
+        defaults.thought_tick_ms,
+        MIN_THOUGHT_TICK_MS,
+        MAX_THOUGHT_TICK_MS,
+    ) {
+        load.config.thought_tick_ms = value;
+    }
+}
+
+fn apply_env_outbound_queue_bound(load: &mut ConfigLoad, defaults: &Config) {
+    if let Some(value) = parse_env_bounded(
+        load,
+        "SWIMMERS_OUTBOUND_QUEUE_BOUND",
+        defaults.outbound_queue_bound,
+        MIN_OUTBOUND_QUEUE_BOUND,
+        MAX_OUTBOUND_QUEUE_BOUND,
+    ) {
+        load.config.outbound_queue_bound = value;
+    }
+}
+
+fn apply_env_replay_buffer_size(load: &mut ConfigLoad, defaults: &Config) {
+    if let Some(value) = parse_env_bounded(
+        load,
+        "SWIMMERS_REPLAY_BUFFER_SIZE",
+        defaults.replay_buffer_size,
+        MIN_REPLAY_BUFFER_SIZE,
+        MAX_REPLAY_BUFFER_SIZE,
+    ) {
+        load.config.replay_buffer_size = value;
+    }
+}
+
+fn validate_auth_token_mode(load: &mut ConfigLoad) {
+    if matches!(load.config.auth_mode, AuthMode::Token) && load.config.auth_token.is_none() {
+        push_error(
+            load,
+            "AUTH_TOKEN",
+            "AUTH_MODE=token requires AUTH_TOKEN=<secret>; refusing token mode without an operator token",
+        );
+    }
+}
+
+fn validate_observer_token_mode(load: &mut ConfigLoad) {
+    if load.config.observer_token.is_some() && !matches!(load.config.auth_mode, AuthMode::Token) {
+        let mode = load.config.auth_mode.as_env_value();
+        push_warning(
+            load,
+            "OBSERVER_TOKEN",
+            format!(
+                "OBSERVER_TOKEN is set but AUTH_MODE={mode} ignores it; observer tokens apply only in token mode"
+            ),
+        );
+    }
+}
+
+fn validate_auth_cross_fields(load: &mut ConfigLoad) {
+    validate_auth_token_mode(load);
+    validate_observer_token_mode(load);
+}
+
 impl Config {
     pub fn from_env() -> Self {
         Self::from_env_report().config
@@ -336,86 +446,15 @@ impl Config {
         let mut load = ConfigLoad::new(defaults.clone());
         apply_env_port(&mut load);
         apply_env_auth_mode(&mut load);
-        if let Some(token) = parse_env_non_empty_string(&mut load, "AUTH_TOKEN") {
-            load.config.auth_token = Some(token);
-        }
-        if let Some(token) = parse_env_non_empty_string(&mut load, "OBSERVER_TOKEN") {
-            load.config.observer_token = Some(token);
-        }
-        if let Some(addr) = parse_env_non_empty_string(&mut load, "SWIMMERS_BIND") {
-            load.config.bind = addr;
-        }
-        if let Some(enabled) = parse_env_bool(
-            &mut load,
-            "SWIMMERS_PERSONAL_WORKFLOWS",
-            defaults.personal_workflows_enabled,
-        ) {
-            load.config.personal_workflows_enabled = enabled;
-        }
-
-        if let Some(backend) = env_value(&mut load, "SWIMMERS_THOUGHT_BACKEND") {
-            if let Some(parsed) = ThoughtBackend::from_env_value(&backend) {
-                load.config.thought_backend = parsed;
-            } else {
-                push_warning(
-                    &mut load,
-                    "SWIMMERS_THOUGHT_BACKEND",
-                    format!(
-                        "unsupported value {:?}; using default {}",
-                        backend.trim(),
-                        defaults.thought_backend.as_env_value()
-                    ),
-                );
-            }
-        }
-
-        if let Some(value) = parse_env_bounded(
-            &mut load,
-            "SWIMMERS_THOUGHT_TICK_MS",
-            defaults.thought_tick_ms,
-            MIN_THOUGHT_TICK_MS,
-            MAX_THOUGHT_TICK_MS,
-        ) {
-            load.config.thought_tick_ms = value;
-        }
-        if let Some(value) = parse_env_bounded(
-            &mut load,
-            "SWIMMERS_OUTBOUND_QUEUE_BOUND",
-            defaults.outbound_queue_bound,
-            MIN_OUTBOUND_QUEUE_BOUND,
-            MAX_OUTBOUND_QUEUE_BOUND,
-        ) {
-            load.config.outbound_queue_bound = value;
-        }
-        if let Some(value) = parse_env_bounded(
-            &mut load,
-            "SWIMMERS_REPLAY_BUFFER_SIZE",
-            defaults.replay_buffer_size,
-            MIN_REPLAY_BUFFER_SIZE,
-            MAX_REPLAY_BUFFER_SIZE,
-        ) {
-            load.config.replay_buffer_size = value;
-        }
-
-        if matches!(load.config.auth_mode, AuthMode::Token) && load.config.auth_token.is_none() {
-            push_error(
-                &mut load,
-                "AUTH_TOKEN",
-                "AUTH_MODE=token requires AUTH_TOKEN=<secret>; refusing token mode without an operator token",
-            );
-        }
-
-        if load.config.observer_token.is_some() && !matches!(load.config.auth_mode, AuthMode::Token)
-        {
-            let mode = load.config.auth_mode.as_env_value();
-            push_warning(
-                &mut load,
-                "OBSERVER_TOKEN",
-                format!(
-                    "OBSERVER_TOKEN is set but AUTH_MODE={mode} ignores it; observer tokens apply only in token mode"
-                ),
-            );
-        }
+        apply_env_auth_token(&mut load);
+        apply_env_observer_token(&mut load);
+        apply_env_bind(&mut load);
+        apply_env_personal_workflows(&mut load, &defaults);
+        apply_env_thought_backend(&mut load, &defaults);
+        apply_env_thought_tick_ms(&mut load, &defaults);
+        apply_env_outbound_queue_bound(&mut load, &defaults);
+        apply_env_replay_buffer_size(&mut load, &defaults);
+        validate_auth_cross_fields(&mut load);
 
         load
     }
