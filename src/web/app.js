@@ -8,6 +8,9 @@ import {
 } from "./input_support.js";
 import { sendHistoryClickPlan, sendSheetFailureStatus, sendSheetSubmitPlan, sendSheetSuccessStatus } from "./send_sheet.js";
 import {
+  createThoughtConfigSheetController,
+} from "./thought_config_sheet.js";
+import {
   activateTerminalSurfaceFallback,
   initializeTerminalSurface,
   reuseTerminalSurface,
@@ -160,12 +163,6 @@ const FRANKENTERM_TERMINAL_METHODS = [
   "input",
   "drainEncodedInputBytes",
 ];
-const FALLBACK_THOUGHT_BACKENDS = [
-  { key: "", label: "auto" },
-  { key: "openrouter", label: "openrouter" },
-  { key: "grok", label: "grok" },
-];
-
 const state = {
   token: "",
   sessions: [],
@@ -435,6 +432,14 @@ const el = {
   mermaidCloseButton: document.getElementById("mermaid-close-button"),
 };
 
+const thoughtConfigSheet = createThoughtConfigSheetController({
+  state,
+  el,
+  apiFetch,
+  refreshSessions,
+  syncSheetActionAvailability,
+});
+
 const terminalSurfaceRuntime = {
   state,
   el,
@@ -653,62 +658,6 @@ async function responseJsonOrNull(response) {
     return null;
   }
   return response.json();
-}
-
-function fallbackThoughtBackendMetadata() {
-  return FALLBACK_THOUGHT_BACKENDS.map((backend) => ({
-    key: backend.key,
-    label: backend.label,
-    model_presets_hint: backend.key === ""
-      ? "auto backend uses daemon default model"
-      : backend.key === "openrouter"
-        ? "presets: auto  router  cached free models"
-        : backend.key === "grok"
-          ? "uses Grok CLI default unless a model is set"
-          : "auto backend uses daemon default model",
-    model_presets: backend.key === "openrouter"
-      ? ["", "openrouter/free", "nvidia/nemotron-3-super-120b-a12b:free", "arcee-ai/trinity-large-preview:free"]
-      : backend.key === "grok"
-        ? [""]
-        : [""],
-  }));
-}
-
-function thoughtBackendMetadata() {
-  const backends = state.thoughtConfig.ui?.backends;
-  return Array.isArray(backends) && backends.length ? backends : fallbackThoughtBackendMetadata();
-}
-
-function selectedThoughtBackendMetadata() {
-  const backends = thoughtBackendMetadata();
-  const backend = state.thoughtConfig.config?.backend || "";
-  return backends.find((entry) => normalizeBackendKey(entry.key) === normalizeBackendKey(backend)) ?? backends[0] ?? null;
-}
-
-function normalizeBackendKey(value) {
-  const key = String(value || "").trim().toLowerCase();
-  if (!key) return "";
-  if (key === "claude" || key === "claude-cli" || key === "claude_cli") return "grok";
-  if (key === "codex" || key === "codex-cli" || key === "codex_cli") return "grok";
-  return key;
-}
-
-function normalizeThoughtModelForBackend(backend, model) {
-  const key = normalizeBackendKey(backend);
-  const trimmed = String(model || "").trim();
-  if (!trimmed) {
-    return "";
-  }
-  if (key === "openrouter") {
-    return trimmed.includes("/") ? trimmed : "";
-  }
-  if (key === "grok") {
-    return trimmed;
-  }
-  if (!key) {
-    return "";
-  }
-  return trimmed;
 }
 
 function currentNativeModeLabel() {
@@ -1695,15 +1644,6 @@ function formatNativeStatus(status) {
   return `Native open ready: ${app}${mode}`;
 }
 
-function setThoughtConfigResult(message, isError = false) {
-  state.thoughtConfig.result = message;
-  state.thoughtConfig.error = isError ? message : "";
-  if (el.thoughtConfigResult) {
-    el.thoughtConfigResult.textContent = message || "";
-    el.thoughtConfigResult.classList.toggle("error", Boolean(isError));
-  }
-}
-
 function setNativeResult(message, isError = false) {
   state.nativeDesktop.result = message;
   state.nativeDesktop.error = isError ? message : "";
@@ -1729,73 +1669,6 @@ function setMermaidStatus(message, isError = false) {
     el.mermaidSummary.textContent = message || "";
     el.mermaidSummary.classList.toggle("error", Boolean(isError));
   }
-}
-
-function renderThoughtConfigOptions() {
-  const backends = thoughtBackendMetadata();
-  const currentBackend = normalizeBackendKey(el.thoughtConfigBackend.value || state.thoughtConfig.config?.backend || "");
-  el.thoughtConfigBackend.innerHTML = "";
-  for (const backend of backends) {
-    const option = document.createElement("option");
-    option.value = backend.key;
-    option.textContent = backend.label || backend.key || "auto";
-    if (normalizeBackendKey(backend.key) === currentBackend) {
-      option.selected = true;
-    }
-    el.thoughtConfigBackend.appendChild(option);
-  }
-
-  const selected = backends.find((backend) => normalizeBackendKey(backend.key) === currentBackend) ?? backends[0];
-  el.thoughtConfigHint.textContent = selected?.model_presets_hint || "";
-  const presets = Array.isArray(selected?.model_presets) ? selected.model_presets : [""];
-  el.thoughtConfigModelPresets.innerHTML = "";
-  for (const preset of presets) {
-    const option = document.createElement("option");
-    option.value = preset;
-    el.thoughtConfigModelPresets.appendChild(option);
-  }
-}
-
-function applyThoughtConfigToForm(payload) {
-  const rawConfig = payload?.config || payload || null;
-  const daemonDefaults = payload?.daemon_defaults ?? null;
-  const ui = payload?.ui ?? null;
-  const backend = normalizeBackendKey(rawConfig?.backend || "");
-  const config = rawConfig
-    ? {
-        ...rawConfig,
-        backend,
-        model: normalizeThoughtModelForBackend(backend, rawConfig.model || ""),
-      }
-    : null;
-
-  state.thoughtConfig.config = config;
-  state.thoughtConfig.ui = ui;
-  el.thoughtConfigEnabled.checked = Boolean(config?.enabled ?? true);
-  el.thoughtConfigBackend.value = String(config?.backend || "");
-  el.thoughtConfigModel.value = String(config?.model || "");
-  renderThoughtConfigOptions();
-  const backendMetadata = selectedThoughtBackendMetadata();
-  el.thoughtConfigSummary.textContent = backendMetadata
-    ? `${backendMetadata.label || backendMetadata.key || "auto"} backend selected.`
-    : "Thought config loaded.";
-  const daemonBackend = normalizeBackendKey(daemonDefaults?.backend || "");
-  el.thoughtConfigDaemon.textContent = daemonDefaults
-    ? `daemon default: ${daemonBackend || "auto"} / ${daemonDefaults.model || "(empty)"}`
-    : "daemon default: unavailable";
-  syncSheetActionAvailability();
-}
-
-function draftThoughtConfig() {
-  if (!state.thoughtConfig.config) {
-    return null;
-  }
-  return {
-    ...state.thoughtConfig.config,
-    enabled: Boolean(el.thoughtConfigEnabled.checked),
-    backend: String(el.thoughtConfigBackend.value || "").trim(),
-    model: String(el.thoughtConfigModel.value || "").trim(),
-  };
 }
 
 function renderNativeStatusForm(status) {
@@ -1989,77 +1862,7 @@ function renderTrogdorReader(hoveredSession) {
   return readerMarkup;
 }
 
-async function refreshThoughtConfig() {
-  state.thoughtConfig.loading = true;
-  try {
-    const response = await apiFetch("/v1/thought-config");
-    const payload = await response.json();
-    applyThoughtConfigToForm(payload);
-    setThoughtConfigResult("Thought config loaded.");
-  } catch (error) {
-    setThoughtConfigResult(`Failed to load thought config: ${error.message}`, true);
-  } finally {
-    state.thoughtConfig.loading = false;
-    syncSheetActionAvailability();
-  }
-}
-
-async function testThoughtConfig() {
-  const draft = draftThoughtConfig();
-  if (!draft) {
-    return;
-  }
-
-  state.thoughtConfig.loading = true;
-  setThoughtConfigResult("Testing thought config...");
-  try {
-    const response = await apiFetch("/v1/thought-config/test", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(draft),
-    });
-    const payload = await response.json();
-    const message = payload?.message || "Thought config probe succeeded.";
-    setThoughtConfigResult(
-      `${message}\n` +
-        `ok: ${Boolean(payload?.ok)}\n` +
-        `llm_calls: ${payload?.llm_calls ?? 0}\n` +
-        (payload?.last_backend_error ? `backend error: ${payload.last_backend_error}` : ""),
-    );
-  } catch (error) {
-    setThoughtConfigResult(`Thought config test failed: ${error.message}`, true);
-  } finally {
-    state.thoughtConfig.loading = false;
-    syncSheetActionAvailability();
-  }
-}
-
-async function saveThoughtConfig() {
-  const draft = draftThoughtConfig();
-  if (!draft) {
-    return;
-  }
-
-  state.thoughtConfig.loading = true;
-  setThoughtConfigResult("Saving thought config...");
-  try {
-    const response = await apiFetch("/v1/thought-config", {
-      method: "PUT",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(draft),
-    });
-    await response.json();
-    state.thoughtConfig.config = draft;
-    renderThoughtConfigOptions();
-    setThoughtConfigResult("Thought config saved.");
-    await refreshSessions();
-  } catch (error) {
-    setThoughtConfigResult(`Thought config save failed: ${error.message}`, true);
-  } finally {
-    state.thoughtConfig.loading = false;
-    syncSheetActionAvailability();
-  }
-}
+async function refreshThoughtConfig() { await thoughtConfigSheet.refresh(); }
 
 async function refreshNativeStatus() {
   state.nativeDesktop.loading = true;
@@ -4731,13 +4534,13 @@ function handleSearchClearButtonClick() { el.terminalSearch.value = ""; applySea
 
 function handleSendModeChange() { updateSendHint(); }
 
-async function handleThoughtConfigFormSubmit(event) { event.preventDefault(); await saveThoughtConfig(); }
+async function handleThoughtConfigFormSubmit(event) { await thoughtConfigSheet.handleFormSubmit(event); }
 
-function handleThoughtConfigBackendChange() { el.thoughtConfigModel.value = normalizeThoughtModelForBackend(el.thoughtConfigBackend.value, el.thoughtConfigModel.value); renderThoughtConfigOptions(); syncSheetActionAvailability(); }
+function handleThoughtConfigBackendChange() { thoughtConfigSheet.handleBackendChange(); }
 
-function handleThoughtConfigOptionChange() { syncSheetActionAvailability(); }
+function handleThoughtConfigOptionChange() { thoughtConfigSheet.handleOptionChange(); }
 
-async function handleThoughtConfigTestButtonClick() { await testThoughtConfig(); }
+async function handleThoughtConfigTestButtonClick() { await thoughtConfigSheet.handleTestButtonClick(); }
 
 async function handleNativeFormSubmit(event) { event.preventDefault(); await saveNativeSettings(); }
 

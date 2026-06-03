@@ -33,6 +33,7 @@ const RENDERED_SURFACE_DRAW_JS_ROUTE: &str = "/rendered_surface_draw.js";
 const INPUT_SUPPORT_JS_ROUTE: &str = "/input_support.js";
 const SURFACE_ACTION_PLANS_JS_ROUTE: &str = "/surface_action_plans.js";
 const SEND_SHEET_JS_ROUTE: &str = "/send_sheet.js";
+const THOUGHT_CONFIG_SHEET_JS_ROUTE: &str = "/thought_config_sheet.js";
 const TERMINAL_SURFACE_SETUP_JS_ROUTE: &str = "/terminal_surface_setup.js";
 const TERMINAL_RESIZE_JS_ROUTE: &str = "/terminal_resize.js";
 const GLOBAL_SHORTCUT_DISPATCH_JS_ROUTE: &str = "/global_shortcut_dispatch.js";
@@ -102,6 +103,7 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route(INPUT_SUPPORT_JS_ROUTE, get(input_support_js))
         .route(SURFACE_ACTION_PLANS_JS_ROUTE, get(surface_action_plans_js))
         .route(SEND_SHEET_JS_ROUTE, get(send_sheet_js))
+        .route(THOUGHT_CONFIG_SHEET_JS_ROUTE, get(thought_config_sheet_js))
         .route(
             TERMINAL_SURFACE_SETUP_JS_ROUTE,
             get(terminal_surface_setup_js),
@@ -650,6 +652,13 @@ async fn surface_action_plans_js() -> Response {
 
 async fn send_sheet_js() -> Response {
     javascript_asset("src/web/send_sheet.js", include_str!("send_sheet.js"))
+}
+
+async fn thought_config_sheet_js() -> Response {
+    javascript_asset(
+        "src/web/thought_config_sheet.js",
+        include_str!("thought_config_sheet.js"),
+    )
 }
 
 async fn terminal_surface_setup_js() -> Response {
@@ -2297,7 +2306,7 @@ mod tests {
             (
                 APP_JS_ROUTE,
                 app_js().await,
-                "from \"./dir_browser_controller.js\"",
+                "from \"./thought_config_sheet.js\"",
             ),
             (
                 RENDERED_SURFACE_JS_ROUTE,
@@ -2323,6 +2332,11 @@ mod tests {
                 SEND_SHEET_JS_ROUTE,
                 send_sheet_js().await,
                 "export function sendSheetSubmitPlan",
+            ),
+            (
+                THOUGHT_CONFIG_SHEET_JS_ROUTE,
+                thought_config_sheet_js().await,
+                "export function createThoughtConfigSheetController",
             ),
             (
                 TERMINAL_SURFACE_SETUP_JS_ROUTE,
