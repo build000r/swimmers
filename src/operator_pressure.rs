@@ -271,28 +271,104 @@ fn pressure_reason_kind(
     session: &SessionSummary,
     primary_cue: Option<ActionCueKind>,
 ) -> OperatorPressureReasonKind {
+    pressure_reason_kind_for_action_cue(primary_cue)
+        .unwrap_or_else(|| pressure_reason_kind_for_session(session))
+}
+
+fn pressure_reason_kind_for_action_cue(
+    primary_cue: Option<ActionCueKind>,
+) -> Option<OperatorPressureReasonKind> {
     match primary_cue {
-        Some(ActionCueKind::AwaitingUser) => OperatorPressureReasonKind::AwaitingUser,
-        Some(ActionCueKind::CommitReady) => OperatorPressureReasonKind::CommitReady,
+        Some(ActionCueKind::AwaitingUser) => Some(OperatorPressureReasonKind::AwaitingUser),
+        Some(ActionCueKind::CommitReady) => Some(OperatorPressureReasonKind::CommitReady),
         Some(ActionCueKind::ValidationMissingAfterEdit) => {
-            OperatorPressureReasonKind::ValidationMissingAfterEdit
+            Some(OperatorPressureReasonKind::ValidationMissingAfterEdit)
         }
-        Some(ActionCueKind::DirtyCheckMissing) => OperatorPressureReasonKind::DirtyCheckMissing,
-        None if session.state == SessionState::Attention => OperatorPressureReasonKind::NeedsInput,
-        None if session.state == SessionState::Error => OperatorPressureReasonKind::Error,
-        None if session.commit_candidate => OperatorPressureReasonKind::CommitReady,
-        None if session.rest_state == RestState::Sleeping => OperatorPressureReasonKind::Sleeping,
-        None if session_idle_agent_can_accept_operator_input(session) => {
-            OperatorPressureReasonKind::NeedsInput
+        Some(ActionCueKind::DirtyCheckMissing) => {
+            Some(OperatorPressureReasonKind::DirtyCheckMissing)
         }
-        None if state_evidence_is_unverified(session) => OperatorPressureReasonKind::UntrustedState,
-        None if session.is_stale => OperatorPressureReasonKind::Stale,
-        None if session.transport_health != TransportHealth::Healthy => {
-            OperatorPressureReasonKind::Transport
-        }
-        None if session.state == SessionState::Busy => OperatorPressureReasonKind::Busy,
-        None => OperatorPressureReasonKind::Idle,
+        None => None,
     }
+}
+
+fn pressure_reason_kind_for_session(session: &SessionSummary) -> OperatorPressureReasonKind {
+    type PressureReasonClassifier = fn(&SessionSummary) -> Option<OperatorPressureReasonKind>;
+    let classifiers: [PressureReasonClassifier; 9] = [
+        pressure_reason_kind_for_attention_state,
+        pressure_reason_kind_for_error_state,
+        pressure_reason_kind_for_commit_candidate,
+        pressure_reason_kind_for_sleep_state,
+        pressure_reason_kind_for_idle_input,
+        pressure_reason_kind_for_state_evidence,
+        pressure_reason_kind_for_staleness,
+        pressure_reason_kind_for_transport,
+        pressure_reason_kind_for_busy_state,
+    ];
+
+    classifiers
+        .into_iter()
+        .find_map(|classify| classify(session))
+        .unwrap_or(OperatorPressureReasonKind::Idle)
+}
+
+fn pressure_reason_kind_for_attention_state(
+    session: &SessionSummary,
+) -> Option<OperatorPressureReasonKind> {
+    (session.state == SessionState::Attention).then_some(OperatorPressureReasonKind::NeedsInput)
+}
+
+fn pressure_reason_kind_for_error_state(
+    session: &SessionSummary,
+) -> Option<OperatorPressureReasonKind> {
+    (session.state == SessionState::Error).then_some(OperatorPressureReasonKind::Error)
+}
+
+fn pressure_reason_kind_for_commit_candidate(
+    session: &SessionSummary,
+) -> Option<OperatorPressureReasonKind> {
+    session
+        .commit_candidate
+        .then_some(OperatorPressureReasonKind::CommitReady)
+}
+
+fn pressure_reason_kind_for_sleep_state(
+    session: &SessionSummary,
+) -> Option<OperatorPressureReasonKind> {
+    (session.rest_state == RestState::Sleeping).then_some(OperatorPressureReasonKind::Sleeping)
+}
+
+fn pressure_reason_kind_for_idle_input(
+    session: &SessionSummary,
+) -> Option<OperatorPressureReasonKind> {
+    session_idle_agent_can_accept_operator_input(session)
+        .then_some(OperatorPressureReasonKind::NeedsInput)
+}
+
+fn pressure_reason_kind_for_state_evidence(
+    session: &SessionSummary,
+) -> Option<OperatorPressureReasonKind> {
+    state_evidence_is_unverified(session).then_some(OperatorPressureReasonKind::UntrustedState)
+}
+
+fn pressure_reason_kind_for_staleness(
+    session: &SessionSummary,
+) -> Option<OperatorPressureReasonKind> {
+    session
+        .is_stale
+        .then_some(OperatorPressureReasonKind::Stale)
+}
+
+fn pressure_reason_kind_for_transport(
+    session: &SessionSummary,
+) -> Option<OperatorPressureReasonKind> {
+    (session.transport_health != TransportHealth::Healthy)
+        .then_some(OperatorPressureReasonKind::Transport)
+}
+
+fn pressure_reason_kind_for_busy_state(
+    session: &SessionSummary,
+) -> Option<OperatorPressureReasonKind> {
+    (session.state == SessionState::Busy).then_some(OperatorPressureReasonKind::Busy)
 }
 
 fn pressure_reason_label(kind: OperatorPressureReasonKind) -> &'static str {
@@ -436,6 +512,19 @@ mod tests {
         )
     }
 
+    fn trusted_summary(id: &str, state: SessionState) -> SessionSummary {
+        let mut session = summary(id, state);
+        session.state_evidence = StateEvidence::new("osc133_command");
+        session
+    }
+
+    fn assert_reason_kind(session: SessionSummary, expected: OperatorPressureReasonKind) {
+        assert_eq!(
+            operator_pressure_for_session(&session).reason_kind,
+            expected
+        );
+    }
+
     #[test]
     fn action_cues_drive_pressure_without_new_backend_names() {
         let mut session = summary("s1", SessionState::Idle);
@@ -492,6 +581,68 @@ mod tests {
 
         assert!(!session_ready_for_operator_group_input(&session));
         assert!(!pressure.needs_input);
+    }
+
+    #[test]
+    fn pressure_reason_fallbacks_cover_session_evidence_and_transport_order() {
+        let mut commit_ready = trusted_summary("commit", SessionState::Idle);
+        commit_ready.tool = None;
+        commit_ready.commit_candidate = true;
+
+        let mut sleeping = trusted_summary("sleeping", SessionState::Idle);
+        sleeping.tool = None;
+        sleeping.rest_state = RestState::Sleeping;
+
+        let mut idle_input = trusted_summary("idle-input", SessionState::Idle);
+        idle_input.rest_state = RestState::Active;
+
+        let mut untrusted = summary("untrusted", SessionState::Idle);
+        untrusted.tool = None;
+
+        let mut stale = trusted_summary("stale", SessionState::Idle);
+        stale.tool = None;
+        stale.is_stale = true;
+
+        let mut transport = trusted_summary("transport", SessionState::Idle);
+        transport.tool = None;
+        transport.transport_health = TransportHealth::Degraded;
+
+        let mut quiet_idle = trusted_summary("idle", SessionState::Idle);
+        quiet_idle.tool = None;
+
+        for (session, expected) in [
+            (
+                trusted_summary("attention", SessionState::Attention),
+                OperatorPressureReasonKind::NeedsInput,
+            ),
+            (
+                trusted_summary("error", SessionState::Error),
+                OperatorPressureReasonKind::Error,
+            ),
+            (commit_ready, OperatorPressureReasonKind::CommitReady),
+            (sleeping, OperatorPressureReasonKind::Sleeping),
+            (idle_input, OperatorPressureReasonKind::NeedsInput),
+            (untrusted, OperatorPressureReasonKind::UntrustedState),
+            (stale, OperatorPressureReasonKind::Stale),
+            (transport, OperatorPressureReasonKind::Transport),
+            (
+                trusted_summary("busy", SessionState::Busy),
+                OperatorPressureReasonKind::Busy,
+            ),
+            (quiet_idle, OperatorPressureReasonKind::Idle),
+        ] {
+            assert_reason_kind(session, expected);
+        }
+    }
+
+    #[test]
+    fn pressure_reason_fallbacks_keep_commit_before_sleeping() {
+        let mut session = trusted_summary("commit-sleeping", SessionState::Idle);
+        session.tool = None;
+        session.commit_candidate = true;
+        session.rest_state = RestState::Sleeping;
+
+        assert_reason_kind(session, OperatorPressureReasonKind::CommitReady);
     }
 
     #[test]
