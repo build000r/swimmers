@@ -175,27 +175,29 @@ fn is_loopback_target(url: &reqwest::Url) -> bool {
 }
 
 fn resolve_server_binary(override_path: Option<&Path>) -> Result<PathBuf, String> {
-    if let Some(override_path) = override_path {
-        return resolve_override_binary_path(override_path);
+    match override_path {
+        Some(path) => resolve_override_binary_path(path),
+        None => resolve_default_server_binary(),
     }
+}
 
+fn resolve_default_server_binary() -> Result<PathBuf, String> {
+    current_exe_sibling_server_binary()?
+        .or_else(|| find_binary_on_path("swimmers"))
+        .ok_or_else(|| {
+            "could not locate `swimmers` server binary; set SWIMMERS_SERVER_BIN to an absolute executable path"
+                .to_string()
+        })
+}
+
+fn current_exe_sibling_server_binary() -> Result<Option<PathBuf>, String> {
     let current_exe = std::env::current_exe()
         .map_err(|err| format!("failed to resolve current executable path: {err}"))?;
-    if let Some(parent) = current_exe.parent() {
-        let sibling = parent.join("swimmers");
-        if is_executable_file(&sibling) {
-            return Ok(sibling);
-        }
-    }
 
-    if let Some(path_binary) = find_binary_on_path("swimmers") {
-        return Ok(path_binary);
-    }
-
-    Err(
-        "could not locate `swimmers` server binary; set SWIMMERS_SERVER_BIN to an absolute executable path"
-            .to_string(),
-    )
+    Ok(current_exe
+        .parent()
+        .map(|parent| parent.join("swimmers"))
+        .filter(|sibling| is_executable_file(sibling)))
 }
 
 fn resolve_override_binary_path(path: &Path) -> Result<PathBuf, String> {
@@ -256,24 +258,31 @@ fn resolve_server_log_path(
     base_url: &reqwest::Url,
     log_override: Option<&Path>,
 ) -> Result<PathBuf, String> {
-    if let Some(path) = log_override {
-        return Ok(path.to_path_buf());
-    }
-
-    if let Some(path) = std::env::var_os("TUI_SERVER_LOG") {
+    if let Some(path) = explicit_server_log_path(log_override) {
         return Ok(PathBuf::from(path));
     }
 
-    let dir = std::env::var_os("TUI_SERVER_LOG_DIR")
+    let port = startup_url_port(base_url)?;
+    Ok(default_server_log_dir().join(format!("swimmers-tui-server-{port}.log")))
+}
+
+fn explicit_server_log_path(log_override: Option<&Path>) -> Option<PathBuf> {
+    log_override
+        .map(Path::to_path_buf)
+        .or_else(|| std::env::var_os("TUI_SERVER_LOG").map(PathBuf::from))
+}
+
+fn default_server_log_dir() -> PathBuf {
+    std::env::var_os("TUI_SERVER_LOG_DIR")
         .or_else(|| std::env::var_os("TMPDIR"))
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("/tmp"));
+        .unwrap_or_else(|| PathBuf::from("/tmp"))
+}
 
-    let port = base_url
+fn startup_url_port(base_url: &reqwest::Url) -> Result<u16, String> {
+    base_url
         .port_or_known_default()
-        .ok_or_else(|| format!("could not determine port for startup URL `{base_url}`"))?;
-
-    Ok(dir.join(format!("swimmers-tui-server-{port}.log")))
+        .ok_or_else(|| format!("could not determine port for startup URL `{base_url}`"))
 }
 
 #[cfg(unix)]
@@ -397,6 +406,7 @@ fn spawn_reaper(mut child: Child, log_path: PathBuf) {
 mod tests {
     use super::*;
 
+    use std::ffi::OsString;
     use std::io;
 
     use tempfile::tempdir;
@@ -559,6 +569,61 @@ mod tests {
         let missing = resolve_override_binary_path(Path::new("/definitely/missing/swimmers"))
             .expect_err("missing override should fail");
         assert!(missing.contains("does not exist"));
+    }
+
+    fn with_env_var_removed<T>(key: &str, run: impl FnOnce() -> T) -> T {
+        let previous = std::env::var_os(key);
+        std::env::remove_var(key);
+        let result = run();
+        restore_env_var(key, previous);
+        result
+    }
+
+    fn with_env_var<T>(key: &str, value: impl Into<OsString>, run: impl FnOnce() -> T) -> T {
+        let previous = std::env::var_os(key);
+        std::env::set_var(key, value.into());
+        let result = run();
+        restore_env_var(key, previous);
+        result
+    }
+
+    fn restore_env_var(key: &str, value: Option<OsString>) {
+        match value {
+            Some(value) => std::env::set_var(key, value),
+            None => std::env::remove_var(key),
+        }
+    }
+
+    #[test]
+    fn resolve_server_log_path_prefers_explicit_override() {
+        let url = reqwest::Url::parse("http://127.0.0.1:3210").expect("startup url");
+        let override_path = Path::new("/tmp/explicit-swimmers.log");
+
+        with_env_var("TUI_SERVER_LOG", "/tmp/env-swimmers.log", || {
+            let path = resolve_server_log_path(&url, Some(override_path))
+                .expect("explicit override should resolve");
+            assert_eq!(path, override_path);
+        });
+    }
+
+    #[test]
+    fn resolve_server_log_path_uses_env_then_default_dir() {
+        let url = reqwest::Url::parse("http://127.0.0.1:4321").expect("startup url");
+        let temp_dir = tempdir().expect("temp dir");
+        let env_log = temp_dir.path().join("env.log");
+
+        with_env_var("TUI_SERVER_LOG", env_log.as_os_str(), || {
+            let path = resolve_server_log_path(&url, None).expect("env log path should resolve");
+            assert_eq!(path, env_log);
+        });
+
+        with_env_var_removed("TUI_SERVER_LOG", || {
+            with_env_var("TUI_SERVER_LOG_DIR", temp_dir.path().as_os_str(), || {
+                let path =
+                    resolve_server_log_path(&url, None).expect("default log path should resolve");
+                assert_eq!(path, temp_dir.path().join("swimmers-tui-server-4321.log"));
+            });
+        });
     }
 
     #[test]
