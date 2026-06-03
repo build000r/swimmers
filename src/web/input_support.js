@@ -563,6 +563,28 @@ export function terminalToolsAvailabilityPlan(context = {}) {
   };
 }
 
+export function sheetActionAvailabilityPlan(context = {}) {
+  const writeDisabled = Boolean(context.writeDisabled);
+  const hasSession = Boolean(context.hasSession);
+  return {
+    createButtonDisabled: writeDisabled || (!context.batchReady && !context.hasSinglePath),
+    createBatchSubmitDisabled: writeDisabled || !context.batchReady,
+    createBatchVisibleDisabled: writeDisabled || context.visibleSelectableCount < 1,
+    dirsSpawnHereDisabled: writeDisabled || !context.hasBrowserPath,
+    thoughtConfigTestDisabled: writeDisabled || !context.hasThoughtConfig,
+    thoughtConfigSaveDisabled: writeDisabled || !context.hasThoughtConfig,
+    nativeSaveDisabled: writeDisabled || !context.hasNativeStatus,
+    nativeOpenDisabled: writeDisabled || !hasSession || !context.nativeSupported,
+    nativeRefreshDisabled: false,
+    mermaidOpenDisabled: writeDisabled || !hasSession || !context.hasMermaidPath,
+    mermaidRefreshDisabled: !hasSession,
+    dirsLoadDisabled: !context.hasDirsPath,
+    dirsUpDisabled: !context.hasParentDir,
+    sendModeDisabled: writeDisabled || context.sendTargetType === "group",
+    sendSubmitDisabled: writeDisabled || !context.sendTargetReady,
+  };
+}
+
 export function terminalFallbackPointerFocusPlan(eventType, context = {}) {
   if (!context.terminalFallbackActive || context.activeSheet) {
     return { type: "ignore", focusTerminal: false, scheduleFrame: false };

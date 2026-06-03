@@ -7,6 +7,7 @@ import {
   globalShortcutPlan,
   mobileKeyboardInputExecutorPlan,
   mobileKeyboardInputPlan,
+  sheetActionAvailabilityPlan,
   mobileKeyboardKeydownPlan,
   mobileKeyboardKeyPlan,
   shouldIgnoreSyntheticClick,
@@ -1084,6 +1085,106 @@ test("terminalToolsAvailabilityPlan preserves control disabled states", () => {
     sendTargetType: "group",
     hasCurrentSession: true,
   }).sendModeDisabled, true);
+});
+
+test("sheetActionAvailabilityPlan preserves enabled action state", () => {
+  assert.deepEqual(sheetActionAvailabilityPlan({
+    writeDisabled: false,
+    hasSession: true,
+    batchReady: true,
+    hasSinglePath: false,
+    visibleSelectableCount: 1,
+    hasBrowserPath: true,
+    hasThoughtConfig: true,
+    hasNativeStatus: true,
+    nativeSupported: true,
+    hasMermaidPath: true,
+    hasDirsPath: true,
+    hasParentDir: true,
+    sendTargetType: "session",
+    sendTargetReady: true,
+  }), {
+    createButtonDisabled: false,
+    createBatchSubmitDisabled: false,
+    createBatchVisibleDisabled: false,
+    dirsSpawnHereDisabled: false,
+    thoughtConfigTestDisabled: false,
+    thoughtConfigSaveDisabled: false,
+    nativeSaveDisabled: false,
+    nativeOpenDisabled: false,
+    nativeRefreshDisabled: false,
+    mermaidOpenDisabled: false,
+    mermaidRefreshDisabled: false,
+    dirsLoadDisabled: false,
+    dirsUpDisabled: false,
+    sendModeDisabled: false,
+    sendSubmitDisabled: false,
+  });
+});
+
+test("sheetActionAvailabilityPlan preserves read-only and missing-resource disabled state", () => {
+  assert.deepEqual(sheetActionAvailabilityPlan({
+    writeDisabled: true,
+    hasSession: false,
+    batchReady: false,
+    hasSinglePath: false,
+    visibleSelectableCount: 0,
+    hasBrowserPath: false,
+    hasThoughtConfig: false,
+    hasNativeStatus: false,
+    nativeSupported: false,
+    hasMermaidPath: false,
+    hasDirsPath: false,
+    hasParentDir: false,
+    sendTargetType: "group",
+    sendTargetReady: false,
+  }), {
+    createButtonDisabled: true,
+    createBatchSubmitDisabled: true,
+    createBatchVisibleDisabled: true,
+    dirsSpawnHereDisabled: true,
+    thoughtConfigTestDisabled: true,
+    thoughtConfigSaveDisabled: true,
+    nativeSaveDisabled: true,
+    nativeOpenDisabled: true,
+    nativeRefreshDisabled: false,
+    mermaidOpenDisabled: true,
+    mermaidRefreshDisabled: true,
+    dirsLoadDisabled: true,
+    dirsUpDisabled: true,
+    sendModeDisabled: true,
+    sendSubmitDisabled: true,
+  });
+});
+
+test("sheetActionAvailabilityPlan preserves path, group, and artifact fallback gates", () => {
+  const plan = sheetActionAvailabilityPlan({
+    writeDisabled: false,
+    hasSession: true,
+    batchReady: false,
+    hasSinglePath: true,
+    visibleSelectableCount: 0,
+    hasBrowserPath: true,
+    hasThoughtConfig: true,
+    hasNativeStatus: true,
+    nativeSupported: false,
+    hasMermaidPath: false,
+    hasDirsPath: true,
+    hasParentDir: true,
+    sendTargetType: "group",
+    sendTargetReady: true,
+  });
+  assert.equal(plan.createButtonDisabled, false);
+  assert.equal(plan.createBatchSubmitDisabled, true);
+  assert.equal(plan.createBatchVisibleDisabled, true);
+  assert.equal(plan.dirsSpawnHereDisabled, false);
+  assert.equal(plan.nativeOpenDisabled, true);
+  assert.equal(plan.mermaidOpenDisabled, true);
+  assert.equal(plan.mermaidRefreshDisabled, false);
+  assert.equal(plan.dirsLoadDisabled, false);
+  assert.equal(plan.dirsUpDisabled, false);
+  assert.equal(plan.sendModeDisabled, true);
+  assert.equal(plan.sendSubmitDisabled, false);
 });
 
 test("terminalToolsAvailabilityPlan preserves search status copy", () => {

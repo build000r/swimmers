@@ -1,6 +1,7 @@
 import { buildSurfaceFrame, surfaceActionAt, surfaceConsumesPointer } from "./rendered_surface.js";
 import {
   authTokenButtonPlan, eventCell, globalShortcutPlan, mobileKeyboardInputExecutorPlan, mobileKeyboardInputPlan,
+  sheetActionAvailabilityPlan,
   mobileKeyboardKeydownPlan, mobileKeyboardKeyPlan, shouldIgnoreSyntheticClick,
   terminalComposerControlAction, terminalDestroyStatePatch, terminalFallbackActivationPlan, terminalFallbackFocusPlan, terminalFallbackKeydownPlan, terminalFallbackPastePlan, terminalFallbackPointerFocusPlan, terminalInlineInputKeydownPlan, terminalKeyStripClickExecutorPlan, terminalKeyStripClickPlan, terminalStageCaptureBindings, terminalStageFocusExecutorPlan, terminalStageFocusPlan,
   normalizeTerminalZoomValue, terminalAuxiliaryControlsPlan, terminalFallbackScrollPlan, terminalFallbackTextScrollPlan, terminalInputDockPlan, terminalLiveFrameFallbackPlan, terminalPaintProbeSchedulePlan, terminalPaintVerificationPlan, terminalPendingByteBufferPlan, terminalPresentationPlan, terminalResizeGeometryPlan, terminalStageKeydownPlan, terminalStagePasteExecutorPlan, terminalStagePastePlan, terminalToolsAvailabilityPlan, terminalZoomControlsPlan, terminalZoomLoadValue, terminalZoomPercentLabel, terminalZoomPersistencePlan,
@@ -1336,39 +1337,37 @@ function syncTerminalTools() {
 }
 
 function syncSheetActionAvailability() {
-  const hasSession = Boolean(currentSession());
   const writeDisabled = Boolean(state.readOnly);
-  const nativeSupported = Boolean(state.nativeDesktop.status?.supported);
-  const mermaidPath = state.mermaidArtifact.artifact?.path;
   const batchCount = state.dirBrowser.batchSelected instanceof Set ? state.dirBrowser.batchSelected.size : 0;
-  const hasSinglePath = Boolean(el.createCwd.value.trim());
   const batchReady = batchCount > 0;
-  const visibleSelectableCount = visibleSelectableDirPaths().length;
-  const hasBrowserPath = Boolean((state.dirBrowser.path || el.dirsPath.value || "").trim());
+  const dirsPath = el.dirsPath.value.trim();
+  const plan = sheetActionAvailabilityPlan({
+    writeDisabled, hasSession: Boolean(currentSession()), batchReady,
+    hasSinglePath: Boolean(el.createCwd.value.trim()), visibleSelectableCount: visibleSelectableDirPaths().length,
+    hasBrowserPath: Boolean((state.dirBrowser.path || dirsPath || "").trim()),
+    hasThoughtConfig: Boolean(state.thoughtConfig.config), hasNativeStatus: Boolean(state.nativeDesktop.status),
+    nativeSupported: Boolean(state.nativeDesktop.status?.supported), hasMermaidPath: Boolean(state.mermaidArtifact.artifact?.path),
+    hasDirsPath: Boolean(dirsPath), hasParentDir: Boolean(parentDir(dirsPath)),
+    sendTargetType: state.sendTarget?.type, sendTargetReady: sendTargetReady(),
+  });
+  const setDisabled = (control, disabled) => { control.disabled = disabled; };
+  const setOptionalDisabled = (control, disabled) => { if (control) control.disabled = disabled; };
 
-  el.createButton.disabled = writeDisabled || (!batchReady && !hasSinglePath);
-  if (el.createBatchSubmit) {
-    el.createBatchSubmit.disabled = writeDisabled || !batchReady;
-  }
-  if (el.createBatchVisible) {
-    el.createBatchVisible.disabled = writeDisabled || visibleSelectableCount < 1;
-  }
-  if (el.dirsSpawnHere) {
-    el.dirsSpawnHere.disabled = writeDisabled || !hasBrowserPath;
-  }
-  el.thoughtConfigTestButton.disabled = writeDisabled || !state.thoughtConfig.config;
-  el.thoughtConfigSaveButton.disabled = writeDisabled || !state.thoughtConfig.config;
-  el.nativeSaveButton.disabled = writeDisabled || !state.nativeDesktop.status;
-  el.nativeOpenButton.disabled = writeDisabled || !hasSession || !nativeSupported;
-  el.nativeRefreshButton.disabled = false;
-  el.mermaidOpenButton.disabled = writeDisabled || !hasSession || !mermaidPath;
-  el.mermaidRefreshButton.disabled = !hasSession;
-  el.dirsLoadButton.disabled = !el.dirsPath.value.trim();
-  el.dirsUpButton.disabled = !parentDir(el.dirsPath.value.trim());
-  if (el.sendMode) {
-    el.sendMode.disabled = writeDisabled || state.sendTarget?.type === "group";
-  }
-  el.sendSubmitButton.disabled = writeDisabled || !sendTargetReady();
+  setDisabled(el.createButton, plan.createButtonDisabled);
+  setOptionalDisabled(el.createBatchSubmit, plan.createBatchSubmitDisabled);
+  setOptionalDisabled(el.createBatchVisible, plan.createBatchVisibleDisabled);
+  setOptionalDisabled(el.dirsSpawnHere, plan.dirsSpawnHereDisabled);
+  setDisabled(el.thoughtConfigTestButton, plan.thoughtConfigTestDisabled);
+  setDisabled(el.thoughtConfigSaveButton, plan.thoughtConfigSaveDisabled);
+  setDisabled(el.nativeSaveButton, plan.nativeSaveDisabled);
+  setDisabled(el.nativeOpenButton, plan.nativeOpenDisabled);
+  setDisabled(el.nativeRefreshButton, plan.nativeRefreshDisabled);
+  setDisabled(el.mermaidOpenButton, plan.mermaidOpenDisabled);
+  setDisabled(el.mermaidRefreshButton, plan.mermaidRefreshDisabled);
+  setDisabled(el.dirsLoadButton, plan.dirsLoadDisabled);
+  setDisabled(el.dirsUpButton, plan.dirsUpDisabled);
+  setOptionalDisabled(el.sendMode, plan.sendModeDisabled);
+  setDisabled(el.sendSubmitButton, plan.sendSubmitDisabled);
   updateSendHint();
   renderCreateBatchBar();
 }
