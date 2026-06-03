@@ -402,18 +402,26 @@ fn readiness_fd_from_env() -> Option<i32> {
 }
 
 fn readiness_fd_raw() -> Option<String> {
-    match std::env::var("SWIMMERS_READY_FD") {
-        Ok(value) if !value.trim().is_empty() => value,
-        Ok(_) => {
-            tracing::trace!("SWIMMERS_READY_FD is empty; skipping readiness signal");
-            return None;
-        }
-        Err(_) => {
+    readiness_fd_raw_from_result(std::env::var("SWIMMERS_READY_FD"))
+}
+
+fn readiness_fd_raw_from_result(value: Result<String, std::env::VarError>) -> Option<String> {
+    value.map_or_else(
+        |_| {
             tracing::trace!("SWIMMERS_READY_FD not set; skipping readiness signal");
-            return None;
-        }
+            None
+        },
+        readiness_fd_raw_non_empty,
+    )
+}
+
+fn readiness_fd_raw_non_empty(value: String) -> Option<String> {
+    if value.trim().is_empty() {
+        tracing::trace!("SWIMMERS_READY_FD is empty; skipping readiness signal");
+        None
+    } else {
+        Some(value)
     }
-    .into()
 }
 
 fn parse_readiness_fd(fd_raw: String) -> Option<i32> {
@@ -698,29 +706,31 @@ pub async fn run_server(
 }
 
 async fn shutdown_signal() {
-    let ctrl_c = async {
-        if let Err(err) = tokio::signal::ctrl_c().await {
-            tracing::error!("failed to install Ctrl-C handler: {err}");
+    shutdown_signal_from(wait_for_ctrl_c_signal(), wait_for_terminate_signal()).await;
+}
+
+async fn wait_for_ctrl_c_signal() {
+    if let Err(err) = tokio::signal::ctrl_c().await {
+        tracing::error!("failed to install Ctrl-C handler: {err}");
+    }
+}
+
+#[cfg(unix)]
+async fn wait_for_terminate_signal() {
+    match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+        Ok(mut sig) => {
+            sig.recv().await;
         }
-    };
-
-    #[cfg(unix)]
-    let terminate = async {
-        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
-            Ok(mut sig) => {
-                sig.recv().await;
-            }
-            Err(err) => {
-                tracing::error!("failed to install SIGTERM handler: {err}");
-                std::future::pending::<()>().await;
-            }
+        Err(err) => {
+            tracing::error!("failed to install SIGTERM handler: {err}");
+            std::future::pending::<()>().await;
         }
-    };
+    }
+}
 
-    #[cfg(not(unix))]
-    let terminate = std::future::pending::<()>();
-
-    shutdown_signal_from(ctrl_c, terminate).await;
+#[cfg(not(unix))]
+async fn wait_for_terminate_signal() {
+    std::future::pending::<()>().await
 }
 
 async fn shutdown_signal_from<C, T>(ctrl_c: C, terminate: T)
@@ -786,6 +796,31 @@ mod tests {
     fn listener_addr_trims_whitespace_around_input() {
         assert_eq!(listener_addr("  127.0.0.1  ", 3210), "127.0.0.1:3210");
         assert_eq!(listener_addr("\t[::1]\n", 3210), "[::1]:3210");
+    }
+
+    #[test]
+    fn readiness_fd_raw_keeps_non_empty_env_value() {
+        assert_eq!(
+            readiness_fd_raw_from_result(Ok("  42  ".to_string())).as_deref(),
+            Some("  42  ")
+        );
+    }
+
+    #[test]
+    fn readiness_fd_raw_ignores_missing_or_blank_env_value() {
+        assert_eq!(readiness_fd_raw_from_result(Ok(" \t\n ".to_string())), None);
+        assert_eq!(
+            readiness_fd_raw_from_result(Err(std::env::VarError::NotPresent)),
+            None
+        );
+    }
+
+    #[test]
+    fn readiness_fd_parser_accepts_i32_and_rejects_invalid_values() {
+        assert_eq!(parse_readiness_fd("7".to_string()), Some(7));
+        assert_eq!(parse_readiness_fd("-1".to_string()), Some(-1));
+        assert_eq!(parse_readiness_fd(" 7 ".to_string()), None);
+        assert_eq!(parse_readiness_fd("not-a-fd".to_string()), None);
     }
 
     async fn spawn_summary_handle(summary: SessionSummary) -> ActorHandle {
@@ -1014,6 +1049,16 @@ mod tests {
         )
         .await
         .expect("shutdown signal should complete when process signal future resolves");
+    }
+
+    #[tokio::test]
+    async fn shutdown_signal_returns_on_terminate_signal_future() {
+        tokio::time::timeout(
+            Duration::from_millis(25),
+            shutdown_signal_from(pending::<()>(), async {}),
+        )
+        .await
+        .expect("shutdown signal should complete when terminate signal future resolves");
     }
 
     #[tokio::test]

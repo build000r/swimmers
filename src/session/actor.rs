@@ -262,6 +262,17 @@ enum ReplayPlan {
     },
 }
 
+struct SubscribeAcceptance {
+    client_id: ClientId,
+    client_tx: mpsc::Sender<OutputFrame>,
+    replay_plan: ReplayPlan,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SubscribeRejection {
+    reason: String,
+}
+
 // ---------------------------------------------------------------------------
 // Actor handle -- cheaply cloneable reference to a running actor
 // ---------------------------------------------------------------------------
@@ -605,19 +616,23 @@ impl SessionActor {
     fn start_pty_reader(&self) -> Option<mpsc::Receiver<Vec<u8>>> {
         let (pty_tx, pty_rx) = mpsc::channel::<Vec<u8>>(256);
         let session_id_for_reader = self.session_id.clone();
-        let reader = match self.master.try_clone_reader() {
-            Ok(reader) => reader,
-            Err(e) => {
-                error!(session_id = %self.session_id, "failed to clone PTY reader: {}", e);
-                return None;
-            }
-        };
+        let reader = self.clone_pty_reader()?;
 
         tokio::task::spawn_blocking(move || {
             pty_read_loop(session_id_for_reader, reader, pty_tx);
         });
 
         Some(pty_rx)
+    }
+
+    fn clone_pty_reader(&self) -> Option<Box<dyn std::io::Read + Send>> {
+        self.master
+            .try_clone_reader()
+            .map_err(|e| {
+                error!(session_id = %self.session_id, "failed to clone PTY reader: {}", e);
+                e
+            })
+            .ok()
     }
 
     async fn prime_tmux_metadata(&mut self) {
@@ -911,6 +926,83 @@ async fn replay_existing_frames(
             latest_seq,
         ),
     }
+}
+
+fn subscriber_cap_rejection(active_subscribers: usize) -> SubscribeRejection {
+    SubscribeRejection {
+        reason: format!("session already has {active_subscribers} active browser subscribers"),
+    }
+}
+
+fn subscribe_outcome_for_rejection(rejection: SubscribeRejection) -> SubscribeOutcome {
+    SubscribeOutcome::Rejected {
+        reason: rejection.reason,
+    }
+}
+
+fn retain_open_subscribers(subscribers: &mut HashMap<ClientId, mpsc::Sender<OutputFrame>>) {
+    subscribers.retain(|_, tx| !tx.is_closed());
+}
+
+fn apply_subscriber_cap(
+    active_subscribers: usize,
+    max_subscribers: usize,
+) -> Result<(), SubscribeRejection> {
+    (active_subscribers < max_subscribers)
+        .then_some(())
+        .ok_or_else(|| subscriber_cap_rejection(active_subscribers))
+}
+
+fn attach_open_subscriber(
+    subscribers: &mut HashMap<ClientId, mpsc::Sender<OutputFrame>>,
+    client_id: ClientId,
+    client_tx: mpsc::Sender<OutputFrame>,
+) -> bool {
+    let open = !client_tx.is_closed();
+    if open {
+        subscribers.insert(client_id, client_tx);
+    }
+    open
+}
+
+fn cwd_update(current_cwd: &str, candidate: &str) -> Option<String> {
+    let normalized = non_empty_trimmed_cwd(candidate)?;
+    changed_cwd(current_cwd, normalized).map(str::to_string)
+}
+
+fn non_empty_trimmed_cwd(candidate: &str) -> Option<&str> {
+    let normalized = candidate.trim();
+    (!normalized.is_empty()).then_some(normalized)
+}
+
+fn changed_cwd<'a>(current_cwd: &str, candidate: &'a str) -> Option<&'a str> {
+    (candidate != current_cwd).then_some(candidate)
+}
+
+fn build_title_event(session_id: &str, title: String) -> ControlEvent {
+    let payload = SessionTitlePayload {
+        title,
+        at: Utc::now(),
+    };
+    ControlEvent {
+        event: "session_title".to_string(),
+        session_id: session_id.to_string(),
+        payload: serde_json::to_value(&payload).unwrap_or_default(),
+    }
+}
+
+fn title_cwd_update(current_cwd: &str, title: &str) -> Option<String> {
+    current_cwd
+        .is_empty()
+        .then(|| extract_cwd_from_title(title))
+        .flatten()
+}
+
+fn title_tool_update(current_tool: Option<&str>, title: &str) -> Option<String> {
+    current_tool
+        .is_none()
+        .then(|| detect_tool_from_title(title))
+        .flatten()
 }
 
 async fn replay_buffered_frames(
@@ -1384,52 +1476,34 @@ impl SessionActor {
     }
 
     fn update_cwd_and_emit(&mut self, cwd: String) {
-        let normalized = cwd.trim();
-        if normalized.is_empty() || normalized == self.cwd {
-            return;
-        }
-
-        self.cwd = normalized.to_string();
-        let payload = SessionTitlePayload {
-            title: self.cwd.clone(),
-            at: Utc::now(),
-        };
-        let event = ControlEvent {
-            event: "session_title".to_string(),
-            session_id: self.session_id.clone(),
-            payload: serde_json::to_value(&payload).unwrap_or_default(),
-        };
-        let _ = self.event_tx.send(event);
+        let _ = cwd_update(&self.cwd, &cwd).map(|cwd| self.apply_cwd_update(cwd));
     }
 
     fn update_cwd_from_title(&mut self, title: &str) {
-        if self.cwd.is_empty() {
-            if let Some(extracted) = extract_cwd_from_title(title) {
-                self.cwd = extracted;
-            }
-        }
+        let _ = title_cwd_update(&self.cwd, title).map(|cwd| self.cwd = cwd);
     }
 
     fn update_tool_from_title(&mut self, title: &str) {
-        if self.tool.is_none() {
-            self.tool = detect_tool_from_title(title);
-            if self.tool.is_some() {
-                self.state_detector.set_tui_tool_mode(true);
-            }
-        }
+        let _ = title_tool_update(self.tool.as_deref(), title)
+            .map(|tool| self.apply_detected_tool_from_title(tool));
+    }
+
+    fn apply_cwd_update(&mut self, cwd: String) {
+        self.cwd = cwd;
+        let _ = self
+            .event_tx
+            .send(build_title_event(&self.session_id, self.cwd.clone()));
+    }
+
+    fn apply_detected_tool_from_title(&mut self, tool: String) {
+        self.tool = Some(tool);
+        self.state_detector.set_tui_tool_mode(true);
     }
 
     fn emit_title_event(&self, title: &str) {
-        let payload = SessionTitlePayload {
-            title: title.to_string(),
-            at: Utc::now(),
-        };
-        let event = ControlEvent {
-            event: "session_title".to_string(),
-            session_id: self.session_id.clone(),
-            payload: serde_json::to_value(&payload).unwrap_or_default(),
-        };
-        let _ = self.event_tx.send(event);
+        let _ = self
+            .event_tx
+            .send(build_title_event(&self.session_id, title.to_string()));
     }
 
     /// Compare state/evidence before and after a detector operation. If either
@@ -1524,40 +1598,67 @@ impl SessionActor {
             "client subscribing"
         );
 
-        self.subscribers.retain(|_, tx| !tx.is_closed());
-        if self.subscribers.len() >= MAX_OUTPUT_SUBSCRIBERS_PER_SESSION {
-            warn!(
-                session_id = %self.session_id,
-                client_id,
-                subscribers = self.subscribers.len(),
-                "subscriber cap reached (SESSION_OVERLOADED), rejecting browser attach"
-            );
-            crate::metrics::increment_overload(&self.session_id);
-            return SubscribeOutcome::Rejected {
-                reason: format!(
-                    "session already has {} active browser subscribers",
-                    self.subscribers.len()
-                ),
-            };
+        match self.accept_subscribe(client_id, client_tx, resume_from_seq) {
+            Ok(acceptance) => self.finish_subscribe(acceptance).await,
+            Err(rejection) => subscribe_outcome_for_rejection(rejection),
         }
+    }
 
-        let outcome = replay_existing_frames(
-            self.session_id.clone(),
+    fn accept_subscribe(
+        &mut self,
+        client_id: ClientId,
+        client_tx: mpsc::Sender<OutputFrame>,
+        resume_from_seq: Option<u64>,
+    ) -> Result<SubscribeAcceptance, SubscribeRejection> {
+        retain_open_subscribers(&mut self.subscribers);
+        self.check_subscriber_cap(client_id)?;
+        Ok(SubscribeAcceptance {
             client_id,
-            &client_tx,
-            self.replay_plan(resume_from_seq),
+            client_tx,
+            replay_plan: self.replay_plan(resume_from_seq),
+        })
+    }
+
+    fn check_subscriber_cap(&self, client_id: ClientId) -> Result<(), SubscribeRejection> {
+        apply_subscriber_cap(self.subscribers.len(), MAX_OUTPUT_SUBSCRIBERS_PER_SESSION).map_err(
+            |rejection| {
+                warn!(
+                    session_id = %self.session_id,
+                    client_id,
+                    subscribers = self.subscribers.len(),
+                    "subscriber cap reached (SESSION_OVERLOADED), rejecting browser attach"
+                );
+                crate::metrics::increment_overload(&self.session_id);
+                rejection
+            },
         )
-        .await;
-        if client_tx.is_closed() {
+    }
+
+    async fn finish_subscribe(&mut self, acceptance: SubscribeAcceptance) -> SubscribeOutcome {
+        let SubscribeAcceptance {
+            client_id,
+            client_tx,
+            replay_plan,
+        } = acceptance;
+        let outcome =
+            replay_existing_frames(self.session_id.clone(), client_id, &client_tx, replay_plan)
+                .await;
+        self.attach_subscriber_after_replay(client_id, client_tx);
+        outcome
+    }
+
+    fn attach_subscriber_after_replay(
+        &mut self,
+        client_id: ClientId,
+        client_tx: mpsc::Sender<OutputFrame>,
+    ) {
+        if !attach_open_subscriber(&mut self.subscribers, client_id, client_tx) {
             debug!(
                 session_id = %self.session_id,
                 client_id,
                 "subscriber dropped during subscribe ack; not attaching"
             );
-        } else {
-            self.subscribers.insert(client_id, client_tx);
         }
-        outcome
     }
 
     fn replay_plan(&self, resume_from_seq: Option<u64>) -> ReplayPlan {
@@ -2450,17 +2551,19 @@ fn pty_read_loop(
 mod tests {
     use super::{
         capture_pane_tail_with_command, compare_session_state_change, compute_pane_liveness,
-        cwd_from_osc7_payload, detect_tool_from_command_line, detect_tool_from_process_entry,
-        extract_cwd_from_title, find_osc_payload_end, line_looks_prompt_like,
-        normalize_submit_line_text, osc_payloads, output_counts_as_meaningful_activity,
-        parse_process_entry, percent_decode, process_entries_cache, query_tmux_session_created,
-        query_tool_from_tmux_process_tree, resolve_tmux_colorterm, resolve_tmux_term,
-        resolve_tmux_terminal_env, run_bounded_tmux_command, should_refresh_cwd_from_tmux,
-        should_refresh_tool_from_tmux, state_detector_for_initial_tool, submit_line_fallback_input,
-        tmux_input_chunks, visible_output_is_meaningful, write_and_flush_input,
-        write_input_counts_as_activity, ControlEvent, LivenessReconciliation, LivenessRefresh,
-        OutputFrame, PaneLiveness, ProcessEntriesCache, ProcessEntry, SessionActor, SessionCommand,
-        TmuxInputChunk, CWD_REFRESH_MIN_INTERVAL, PROCESS_ENTRIES_CACHE_TTL,
+        cwd_from_osc7_payload, cwd_update, detect_tool_from_command_line,
+        detect_tool_from_process_entry, extract_cwd_from_title, find_osc_payload_end,
+        line_looks_prompt_like, normalize_submit_line_text, osc_payloads,
+        output_counts_as_meaningful_activity, parse_process_entry, percent_decode,
+        process_entries_cache, query_tmux_session_created, query_tool_from_tmux_process_tree,
+        resolve_tmux_colorterm, resolve_tmux_term, resolve_tmux_terminal_env,
+        run_bounded_tmux_command, should_refresh_cwd_from_tmux, should_refresh_tool_from_tmux,
+        state_detector_for_initial_tool, submit_line_fallback_input, subscriber_cap_rejection,
+        title_cwd_update, title_tool_update, tmux_input_chunks, visible_output_is_meaningful,
+        write_and_flush_input, write_input_counts_as_activity, ControlEvent,
+        LivenessReconciliation, LivenessRefresh, OutputFrame, PaneLiveness, ProcessEntriesCache,
+        ProcessEntry, SessionActor, SessionCommand, SubscribeOutcome, TmuxInputChunk,
+        CWD_REFRESH_MIN_INTERVAL, MAX_OUTPUT_SUBSCRIBERS_PER_SESSION, PROCESS_ENTRIES_CACHE_TTL,
         TOOL_REFRESH_MIN_INTERVAL,
     };
     use crate::config::Config;
@@ -2845,6 +2948,162 @@ mod tests {
         actor.broadcast(output_frame(3, b"closed")).await;
 
         assert!(!actor.subscribers.contains_key(&44));
+    }
+
+    #[tokio::test]
+    async fn handle_subscribe_replays_requested_frames_before_attaching_client() {
+        let mut actor = test_actor();
+        let first_seq = actor.replay_ring.push(b"first");
+        let second_seq = actor.replay_ring.push(b"second");
+        let (client_tx, mut client_rx) = mpsc::channel(4);
+
+        let outcome = actor
+            .handle_subscribe(55, client_tx, Some(first_seq.saturating_sub(1)))
+            .await;
+
+        assert!(matches!(outcome, SubscribeOutcome::Ok));
+        assert!(actor.subscribers.contains_key(&55));
+        let first = client_rx.try_recv().expect("first replay frame");
+        assert_eq!(first.seq, first_seq);
+        assert_eq!(first.data, b"first".to_vec());
+        let second = client_rx.try_recv().expect("second replay frame");
+        assert_eq!(second.seq, second_seq);
+        assert_eq!(second.data, b"second".to_vec());
+    }
+
+    #[tokio::test]
+    async fn handle_subscribe_prunes_closed_subscribers_before_cap_check() {
+        let mut actor = test_actor();
+        for client_id in 0..MAX_OUTPUT_SUBSCRIBERS_PER_SESSION as u64 {
+            let (client_tx, client_rx) = mpsc::channel(1);
+            drop(client_rx);
+            actor.subscribers.insert(client_id, client_tx);
+        }
+        let (client_tx, _client_rx) = mpsc::channel(1);
+
+        let outcome = actor.handle_subscribe(99, client_tx, None).await;
+
+        assert!(matches!(outcome, SubscribeOutcome::Ok));
+        assert_eq!(actor.subscribers.len(), 1);
+        assert!(actor.subscribers.contains_key(&99));
+    }
+
+    #[tokio::test]
+    async fn handle_subscribe_rejects_when_open_subscriber_cap_is_reached() {
+        let mut actor = test_actor();
+        let mut receivers = Vec::new();
+        for client_id in 0..MAX_OUTPUT_SUBSCRIBERS_PER_SESSION as u64 {
+            let (client_tx, client_rx) = mpsc::channel(1);
+            receivers.push(client_rx);
+            actor.subscribers.insert(client_id, client_tx);
+        }
+        let (client_tx, _client_rx) = mpsc::channel(1);
+
+        let outcome = actor.handle_subscribe(100, client_tx, None).await;
+
+        match outcome {
+            SubscribeOutcome::Rejected { reason } => {
+                assert_eq!(
+                    reason,
+                    subscriber_cap_rejection(MAX_OUTPUT_SUBSCRIBERS_PER_SESSION).reason
+                );
+            }
+            _ => panic!("expected subscriber cap rejection"),
+        }
+        assert_eq!(actor.subscribers.len(), MAX_OUTPUT_SUBSCRIBERS_PER_SESSION);
+    }
+
+    #[tokio::test]
+    async fn handle_subscribe_does_not_attach_client_that_drops_during_replay() {
+        let mut actor = test_actor();
+        actor.replay_ring.push(b"first");
+        let (client_tx, client_rx) = mpsc::channel(1);
+        drop(client_rx);
+
+        let outcome = actor.handle_subscribe(66, client_tx, Some(0)).await;
+
+        assert!(matches!(outcome, SubscribeOutcome::Ok));
+        assert!(!actor.subscribers.contains_key(&66));
+    }
+
+    #[test]
+    fn cwd_update_trims_rejects_empty_and_skips_unchanged_paths() {
+        assert_eq!(
+            cwd_update("/tmp/project", " /tmp/other "),
+            Some("/tmp/other".to_string())
+        );
+        assert_eq!(cwd_update("/tmp/project", "   "), None);
+        assert_eq!(cwd_update("/tmp/project", "/tmp/project"), None);
+    }
+
+    #[test]
+    fn update_cwd_and_emit_only_emits_when_cwd_changes() {
+        let mut actor = test_actor();
+        let mut rx = actor.event_tx.subscribe();
+
+        actor.update_cwd_and_emit(" /tmp/project ".to_string());
+        actor.update_cwd_and_emit("   ".to_string());
+        assert!(rx.try_recv().is_err());
+
+        actor.update_cwd_and_emit(" /tmp/other ".to_string());
+
+        assert_eq!(actor.cwd, "/tmp/other");
+        let event = rx.try_recv().expect("cwd title event");
+        assert_eq!(event.event, "session_title");
+        assert_eq!(event.session_id, "sess-test");
+        let payload: crate::types::SessionTitlePayload =
+            serde_json::from_value(event.payload).expect("session title payload");
+        assert_eq!(payload.title, "/tmp/other");
+    }
+
+    #[test]
+    fn title_cwd_update_only_extracts_when_current_cwd_is_empty() {
+        assert_eq!(
+            title_cwd_update("", "user@host:/tmp/project"),
+            Some("/tmp/project".to_string())
+        );
+        assert_eq!(
+            title_cwd_update("/already/set", "user@host:/tmp/project"),
+            None
+        );
+        assert_eq!(title_cwd_update("", "plain-title"), None);
+    }
+
+    #[test]
+    fn update_cwd_from_title_preserves_existing_cwd_and_fills_empty_cwd() {
+        let mut actor = test_actor();
+
+        actor.update_cwd_from_title("user@host:/tmp/ignored");
+        assert_eq!(actor.cwd, "/tmp/project");
+
+        actor.cwd.clear();
+        actor.update_cwd_from_title("user@host:/tmp/from-title");
+        assert_eq!(actor.cwd, "/tmp/from-title");
+    }
+
+    #[test]
+    fn title_tool_update_only_detects_when_tool_is_missing() {
+        assert_eq!(
+            title_tool_update(None, "codex - swimmers"),
+            Some("Codex".to_string())
+        );
+        assert_eq!(title_tool_update(Some("Codex"), "claude"), None);
+        assert_eq!(title_tool_update(None, "plain shell"), None);
+    }
+
+    #[test]
+    fn update_tool_from_title_sets_tool_mode_once_for_missing_tool() {
+        let mut actor = test_actor();
+        actor.tool = None;
+
+        actor.update_tool_from_title("claude code");
+
+        assert_eq!(actor.tool.as_deref(), Some("Claude Code"));
+        actor.state_detector.note_input();
+        assert_eq!(actor.state_detector.state(), SessionState::Busy);
+
+        actor.update_tool_from_title("codex");
+        assert_eq!(actor.tool.as_deref(), Some("Claude Code"));
     }
 
     #[tokio::test]

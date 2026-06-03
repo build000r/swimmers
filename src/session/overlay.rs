@@ -234,21 +234,12 @@ impl SkillboxOverlay {
     }
 
     pub fn all_launch_targets(&self) -> Vec<LaunchTargetSummary> {
-        let mut targets = Vec::new();
-        for target in self
-            .clients
-            .iter()
-            .filter_map(|client| client.dir_config.as_ref())
-            .flat_map(|config| config.launch.targets.iter())
-        {
-            if !targets
+        unique_launch_targets(
+            self.clients
                 .iter()
-                .any(|existing: &LaunchTargetSummary| existing.id == target.id)
-            {
-                targets.push(target.clone());
-            }
-        }
-        targets
+                .filter_map(|client| client.dir_config.as_ref())
+                .flat_map(|config| config.launch.targets.iter()),
+        )
     }
 
     /// Given a session CWD, find the matching client's plan directories.
@@ -767,11 +758,13 @@ fn append_scan_root_services(
     scan_roots: &[PathBuf],
     base_path: &Path,
 ) {
-    for root in scan_roots {
-        for entry in service_entries_from_scan_root(root, base_path) {
-            append_service_if_new(services, seen_dirs, Some(entry));
-        }
-    }
+    append_services_if_new(
+        services,
+        seen_dirs,
+        scan_roots
+            .iter()
+            .flat_map(|root| service_entries_from_scan_root(root, base_path)),
+    );
 }
 
 fn append_service_if_new(
@@ -784,6 +777,18 @@ fn append_service_if_new(
     };
     if seen_dirs.insert(entry.dir.clone()) {
         services.push(entry);
+    }
+}
+
+fn append_services_if_new<I>(
+    services: &mut Vec<OverlayServiceEntry>,
+    seen_dirs: &mut BTreeSet<String>,
+    entries: I,
+) where
+    I: IntoIterator<Item = OverlayServiceEntry>,
+{
+    for entry in entries {
+        append_service_if_new(services, seen_dirs, Some(entry));
     }
 }
 
@@ -896,6 +901,20 @@ fn valid_group_defaults(
 
 fn target_exists(targets: &[LaunchTargetSummary], id: &str) -> bool {
     targets.iter().any(|target| target.id == id)
+}
+
+fn unique_launch_targets<'a, I>(targets: I) -> Vec<LaunchTargetSummary>
+where
+    I: IntoIterator<Item = &'a LaunchTargetSummary>,
+{
+    let mut unique_targets = Vec::new();
+    let mut seen_ids = BTreeSet::new();
+    for target in targets {
+        if seen_ids.insert(target.id.clone()) {
+            unique_targets.push(target.clone());
+        }
+    }
+    unique_targets
 }
 
 fn service_entry_from_client_repo(
@@ -1143,6 +1162,39 @@ mod tests {
         file.set_modified(when).expect("set_modified");
     }
 
+    fn test_launch_target(id: &str, label: &str, kind: &str) -> LaunchTargetSummary {
+        LaunchTargetSummary {
+            id: id.to_string(),
+            label: label.to_string(),
+            kind: kind.to_string(),
+            base_url: None,
+            auth_token_env: None,
+            path_mappings: Vec::new(),
+        }
+    }
+
+    fn test_launch_client(label: &str, targets: Vec<LaunchTargetSummary>) -> ClientOverlay {
+        ClientOverlay {
+            client_dir: PathBuf::from(format!("/tmp/{label}")),
+            label: label.to_string(),
+            cwd_patterns: Vec::new(),
+            cwd_match_count: 0,
+            plan_root: None,
+            plan_draft: None,
+            dir_config: Some(OverlayDirConfig {
+                label: label.to_string(),
+                base_path: PathBuf::from("/tmp"),
+                services: Vec::new(),
+                groups: Vec::new(),
+                launch: OverlayLaunchConfig {
+                    default_target: "local".to_string(),
+                    targets,
+                    group_defaults: BTreeMap::new(),
+                },
+            }),
+        }
+    }
+
     #[test]
     fn cwd_starts_with_exact_match() {
         assert!(cwd_starts_with("/tmp/repos/example", "/tmp/repos/example"));
@@ -1322,6 +1374,155 @@ mod tests {
         assert_eq!(remote.kind, "swimmers_api");
         assert_eq!(remote.path_mappings[0].local_prefix, "/local");
         assert_eq!(remote.path_mappings[0].remote_prefix, "/remote");
+    }
+
+    #[test]
+    fn all_launch_targets_preserves_first_client_order_and_first_duplicate() {
+        let first_shared = test_launch_target("shared", "First shared", "swimmers_api");
+        let second_shared = test_launch_target("shared", "Second shared", "swimmers_api");
+        let overlay = SkillboxOverlay {
+            clients: vec![
+                test_launch_client(
+                    "one",
+                    vec![
+                        LaunchTargetSummary::local(),
+                        test_launch_target("remote-a", "Remote A", "swimmers_api"),
+                        first_shared.clone(),
+                    ],
+                ),
+                ClientOverlay {
+                    dir_config: None,
+                    ..test_launch_client("no-config", Vec::new())
+                },
+                test_launch_client(
+                    "two",
+                    vec![
+                        LaunchTargetSummary::local(),
+                        second_shared,
+                        test_launch_target("remote-b", "Remote B", "swimmers_api"),
+                    ],
+                ),
+            ],
+            loaded_at: Utc::now(),
+        };
+
+        let targets = overlay.all_launch_targets();
+
+        assert_eq!(
+            targets
+                .iter()
+                .map(|target| target.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["local", "remote-a", "shared", "remote-b"]
+        );
+        assert_eq!(
+            targets
+                .iter()
+                .find(|target| target.id == "shared")
+                .expect("shared target")
+                .label,
+            first_shared.label
+        );
+    }
+
+    #[test]
+    fn all_launch_targets_returns_empty_when_no_clients_have_dir_config() {
+        let overlay = SkillboxOverlay {
+            clients: vec![ClientOverlay {
+                client_dir: PathBuf::from("/tmp/no-config"),
+                label: "no-config".to_string(),
+                cwd_patterns: Vec::new(),
+                cwd_match_count: 0,
+                plan_root: None,
+                plan_draft: None,
+                dir_config: None,
+            }],
+            loaded_at: Utc::now(),
+        };
+
+        assert!(overlay.all_launch_targets().is_empty());
+    }
+
+    #[test]
+    fn append_scan_root_services_appends_sorted_git_repos_after_existing_entries() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let base = tmp.path().join("base");
+        let external = tmp.path().join("external");
+        std::fs::create_dir_all(&base).expect("base");
+        std::fs::create_dir_all(external.join("zeta").join(".git")).expect("zeta repo");
+        std::fs::create_dir_all(external.join("alpha").join(".git")).expect("alpha repo");
+        std::fs::create_dir_all(external.join("no-git")).expect("no-git dir");
+        std::fs::create_dir_all(external.join(".hidden").join(".git")).expect("hidden repo");
+        std::fs::write(external.join("not-a-dir"), "x").expect("file");
+
+        let mut services = vec![OverlayServiceEntry {
+            name: "manual".to_string(),
+            dir: "manual".to_string(),
+            health_url: Some("http://localhost:3000".to_string()),
+            restart: Some("restart manual".to_string()),
+            open_url: Some("http://localhost:3000".to_string()),
+        }];
+        let mut seen_dirs = services
+            .iter()
+            .map(|service| service.dir.clone())
+            .collect::<BTreeSet<_>>();
+
+        append_scan_root_services(
+            &mut services,
+            &mut seen_dirs,
+            &[base.clone(), external.clone()],
+            &base,
+        );
+
+        assert_eq!(
+            services
+                .iter()
+                .map(|service| service.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["manual", "alpha", "zeta"]
+        );
+        assert_eq!(
+            services[0].health_url.as_deref(),
+            Some("http://localhost:3000")
+        );
+        assert_eq!(services[1].dir, external.join("alpha").to_string_lossy());
+        assert_eq!(services[2].dir, external.join("zeta").to_string_lossy());
+    }
+
+    #[test]
+    fn append_scan_root_services_skips_dirs_already_seen_by_absolute_path() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let base = tmp.path().join("base");
+        let external = tmp.path().join("external");
+        let alpha = external.join("alpha");
+        let beta = external.join("beta");
+        std::fs::create_dir_all(&base).expect("base");
+        std::fs::create_dir_all(alpha.join(".git")).expect("alpha repo");
+        std::fs::create_dir_all(beta.join(".git")).expect("beta repo");
+        let alpha_dir = alpha
+            .canonicalize()
+            .unwrap_or_else(|_| alpha.clone())
+            .to_string_lossy()
+            .into_owned();
+
+        let mut services = vec![OverlayServiceEntry {
+            name: "manual-alpha".to_string(),
+            dir: alpha_dir.clone(),
+            health_url: None,
+            restart: None,
+            open_url: None,
+        }];
+        let mut seen_dirs = BTreeSet::from([alpha_dir]);
+
+        append_scan_root_services(&mut services, &mut seen_dirs, &[external.clone()], &base);
+
+        assert_eq!(
+            services
+                .iter()
+                .map(|service| service.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["manual-alpha", "beta"]
+        );
     }
 
     #[test]

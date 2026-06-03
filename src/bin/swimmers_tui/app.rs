@@ -196,6 +196,12 @@ pub(crate) struct ThoughtConfigActionOutcome {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+struct OpenRouterRotationProbe {
+    candidate: String,
+    config: ThoughtConfig,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct GroupInputTargets {
     pub(crate) session_ids: Vec<String>,
     pub(crate) label: String,
@@ -2647,63 +2653,118 @@ impl<C: TuiApi> App<C> {
         target: String,
         failure_message: String,
     ) -> Option<ThoughtConfigActionOutcome> {
-        if !Self::is_effective_openrouter_backend(config, daemon_defaults.as_ref())
-            || !should_rotate_openrouter_model(&failure_message)
-        {
+        if !Self::should_attempt_openrouter_rotation(
+            config,
+            daemon_defaults.as_ref(),
+            &failure_message,
+        ) {
             return None;
         }
 
         let candidates = client.refresh_openrouter_candidates().await.ok()?;
-        for candidate in &candidates {
-            if candidate.eq_ignore_ascii_case(config.model.trim()) {
-                continue;
-            }
-
-            let mut rotated = config.clone();
-            rotated.model = candidate.clone();
-            let test = match client.test_thought_config(rotated.clone()).await {
-                Ok(test) => test,
-                Err(_) => continue,
-            };
-            if !test.ok {
-                continue;
-            }
-
-            if persist {
-                return Some(match client.update_thought_config(rotated).await {
-                    Ok(_) => ThoughtConfigActionOutcome {
-                        message: format!(
-                            "saved {target} | rotated to {candidate} after OpenRouter catalog refresh | test ok"
-                        ),
-                        updated_config: None,
-                        openrouter_candidates: Some(candidates),
-                        close_editor: true,
-                        refresh_sessions: true,
-                    },
-                    Err(err) => ThoughtConfigActionOutcome {
-                        message: format!(
-                            "saved {target} | rotated probe found {candidate}, but save failed: {err}"
-                        ),
-                        updated_config: None,
-                        openrouter_candidates: Some(candidates),
-                        close_editor: true,
-                        refresh_sessions: true,
-                    },
-                });
-            }
-
-            return Some(ThoughtConfigActionOutcome {
-                message: format!(
-                    "test failed: {target} | rotated to {candidate} after OpenRouter catalog refresh | test ok"
-                ),
-                updated_config: Some(rotated),
-                openrouter_candidates: Some(candidates),
-                close_editor: false,
-                refresh_sessions: false,
-            });
+        let probe =
+            Self::find_working_openrouter_rotation(client.clone(), config, &candidates).await?;
+        if persist {
+            return Some(
+                Self::persist_openrouter_rotation(client, target, candidates, probe).await,
+            );
         }
 
+        Some(Self::openrouter_rotation_test_outcome(
+            target, candidates, probe,
+        ))
+    }
+
+    fn should_attempt_openrouter_rotation(
+        config: &ThoughtConfig,
+        daemon_defaults: Option<&DaemonDefaults>,
+        failure_message: &str,
+    ) -> bool {
+        Self::is_effective_openrouter_backend(config, daemon_defaults)
+            && should_rotate_openrouter_model(failure_message)
+    }
+
+    async fn find_working_openrouter_rotation(
+        client: Arc<C>,
+        config: &ThoughtConfig,
+        candidates: &[String],
+    ) -> Option<OpenRouterRotationProbe> {
+        for probe in Self::openrouter_rotation_probes(config, candidates) {
+            match client.test_thought_config(probe.config.clone()).await {
+                Ok(test) if test.ok => return Some(probe),
+                _ => continue,
+            }
+        }
         None
+    }
+
+    fn openrouter_rotation_probes(
+        config: &ThoughtConfig,
+        candidates: &[String],
+    ) -> Vec<OpenRouterRotationProbe> {
+        let current_model = config.model.trim();
+        candidates
+            .iter()
+            .filter(|candidate| !candidate.eq_ignore_ascii_case(current_model))
+            .map(|candidate| {
+                let mut rotated = config.clone();
+                rotated.model = candidate.clone();
+                OpenRouterRotationProbe {
+                    candidate: candidate.clone(),
+                    config: rotated,
+                }
+            })
+            .collect()
+    }
+
+    async fn persist_openrouter_rotation(
+        client: Arc<C>,
+        target: String,
+        candidates: Vec<String>,
+        probe: OpenRouterRotationProbe,
+    ) -> ThoughtConfigActionOutcome {
+        let save_result = client.update_thought_config(probe.config).await;
+        Self::openrouter_rotation_save_outcome(&target, &probe.candidate, candidates, save_result)
+    }
+
+    fn openrouter_rotation_test_outcome(
+        target: String,
+        candidates: Vec<String>,
+        probe: OpenRouterRotationProbe,
+    ) -> ThoughtConfigActionOutcome {
+        ThoughtConfigActionOutcome {
+            message: format!(
+                "test failed: {target} | rotated to {} after OpenRouter catalog refresh | test ok",
+                probe.candidate
+            ),
+            updated_config: Some(probe.config),
+            openrouter_candidates: Some(candidates),
+            close_editor: false,
+            refresh_sessions: false,
+        }
+    }
+
+    fn openrouter_rotation_save_outcome(
+        target: &str,
+        candidate: &str,
+        candidates: Vec<String>,
+        save_result: Result<ThoughtConfig, String>,
+    ) -> ThoughtConfigActionOutcome {
+        let message = match save_result {
+            Ok(_) => format!(
+                "saved {target} | rotated to {candidate} after OpenRouter catalog refresh | test ok"
+            ),
+            Err(err) => {
+                format!("saved {target} | rotated probe found {candidate}, but save failed: {err}")
+            }
+        };
+        ThoughtConfigActionOutcome {
+            message,
+            updated_config: None,
+            openrouter_candidates: Some(candidates),
+            close_editor: true,
+            refresh_sessions: true,
+        }
     }
 
     fn is_effective_openrouter_backend(
@@ -4026,6 +4087,122 @@ mod tests {
             &config,
             Some(&defaults)
         ));
+    }
+
+    #[test]
+    fn openrouter_rotation_attempt_requires_openrouter_backend_and_rotatable_failure() {
+        let config = thought_config_with_backend("openrouter");
+        let defaults = daemon_defaults_with_backend("grok");
+
+        assert!(App::<ApiClient>::should_attempt_openrouter_rotation(
+            &config,
+            Some(&defaults),
+            "probe failed: old/expired:free is not a valid model ID"
+        ));
+        assert!(!App::<ApiClient>::should_attempt_openrouter_rotation(
+            &thought_config_with_backend("grok"),
+            Some(&defaults),
+            "probe failed: old/expired:free is not a valid model ID"
+        ));
+        assert!(!App::<ApiClient>::should_attempt_openrouter_rotation(
+            &config,
+            Some(&defaults),
+            "probe failed: request timed out"
+        ));
+    }
+
+    #[test]
+    fn openrouter_rotation_probes_skip_current_model_case_insensitively() {
+        let mut config = thought_config_with_backend("openrouter");
+        config.model = " old/expired:free ".to_string();
+        let candidates = vec![
+            "OLD/EXPIRED:FREE".to_string(),
+            "openrouter/free".to_string(),
+            "google/gemma-3-4b-it:free".to_string(),
+        ];
+
+        let probes = App::<ApiClient>::openrouter_rotation_probes(&config, &candidates);
+
+        assert_eq!(
+            probes
+                .iter()
+                .map(|probe| probe.candidate.as_str())
+                .collect::<Vec<_>>(),
+            vec!["openrouter/free", "google/gemma-3-4b-it:free"]
+        );
+        assert_eq!(probes[0].config.backend, "openrouter");
+        assert_eq!(probes[0].config.model, "openrouter/free");
+        assert_eq!(probes[1].config.model, "google/gemma-3-4b-it:free");
+    }
+
+    #[test]
+    fn openrouter_rotation_test_outcome_preserves_message_and_editor_update() {
+        let candidates = vec!["openrouter/free".to_string()];
+        let probe = OpenRouterRotationProbe {
+            candidate: "openrouter/free".to_string(),
+            config: ThoughtConfig {
+                backend: "openrouter".to_string(),
+                model: "openrouter/free".to_string(),
+                ..ThoughtConfig::default()
+            },
+        };
+
+        let outcome = App::<ApiClient>::openrouter_rotation_test_outcome(
+            "openrouter / old/expired:free".to_string(),
+            candidates.clone(),
+            probe,
+        );
+
+        assert_eq!(
+            outcome.message,
+            "test failed: openrouter / old/expired:free | rotated to openrouter/free after OpenRouter catalog refresh | test ok"
+        );
+        assert_eq!(
+            outcome
+                .updated_config
+                .as_ref()
+                .map(|config| config.model.as_str()),
+            Some("openrouter/free")
+        );
+        assert_eq!(outcome.openrouter_candidates, Some(candidates));
+        assert!(!outcome.close_editor);
+        assert!(!outcome.refresh_sessions);
+    }
+
+    #[test]
+    fn openrouter_rotation_save_outcome_preserves_success_and_failure_messages() {
+        let candidates = vec!["openrouter/free".to_string()];
+        let target = "openrouter / old/expired:free";
+
+        let success = App::<ApiClient>::openrouter_rotation_save_outcome(
+            target,
+            "openrouter/free",
+            candidates.clone(),
+            Ok(ThoughtConfig::default()),
+        );
+        assert_eq!(
+            success.message,
+            "saved openrouter / old/expired:free | rotated to openrouter/free after OpenRouter catalog refresh | test ok"
+        );
+        assert_eq!(success.openrouter_candidates, Some(candidates.clone()));
+        assert!(success.close_editor);
+        assert!(success.refresh_sessions);
+        assert!(success.updated_config.is_none());
+
+        let failure = App::<ApiClient>::openrouter_rotation_save_outcome(
+            target,
+            "openrouter/free",
+            candidates.clone(),
+            Err("disk full".to_string()),
+        );
+        assert_eq!(
+            failure.message,
+            "saved openrouter / old/expired:free | rotated probe found openrouter/free, but save failed: disk full"
+        );
+        assert_eq!(failure.openrouter_candidates, Some(candidates));
+        assert!(failure.close_editor);
+        assert!(failure.refresh_sessions);
+        assert!(failure.updated_config.is_none());
     }
 
     fn healthy_backend_health() -> BackendHealthResponse {
