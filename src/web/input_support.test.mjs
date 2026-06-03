@@ -11,6 +11,7 @@ import {
   mobileKeyboardKeyPlan,
   shouldIgnoreSyntheticClick,
   terminalComposerControlAction,
+  terminalFallbackFocusPlan,
   terminalFallbackKeydownPlan,
   terminalFallbackPastePlan,
   terminalKeyStripClickExecutorPlan,
@@ -482,11 +483,27 @@ test("terminalStageFocusPlan preserves focus, blur, and ignore decisions", () =>
   assert.deepEqual(terminalStageFocusPlan("click"), { type: "ignore" });
 });
 
+test("terminalFallbackFocusPlan preserves fallback focus, blur, and no-op gates", () => {
+  assert.deepEqual(terminalFallbackFocusPlan("focus", { terminalFallbackActive: false }), { type: "ignore" });
+  assert.deepEqual(terminalFallbackFocusPlan("focus", { terminalFallbackActive: true, activeSheet: "send" }), { type: "ignore" });
+  assert.deepEqual(terminalFallbackFocusPlan("focus", { terminalFallbackActive: true, activeSheet: "" }), {
+    type: "forward_event",
+    event: { kind: "focus", focused: true },
+  });
+  assert.deepEqual(terminalFallbackFocusPlan("blur", { terminalFallbackActive: true, mobileKeyboardOwnsFocus: true }), { type: "ignore" });
+  assert.deepEqual(terminalFallbackFocusPlan("blur", { terminalFallbackActive: true, mobileKeyboardOwnsFocus: false }), {
+    type: "forward_event",
+    event: { kind: "focus", focused: false },
+  });
+  assert.deepEqual(terminalFallbackFocusPlan("click", { terminalFallbackActive: true }), { type: "ignore" });
+});
+
 test("terminalStageFocusExecutorPlan preserves ignore, forward, and unknown decisions", () => {
   const event = { kind: "focus", focused: true };
   const ignored = { type: "ignore", forwardEvent: false, event: null };
 
   assert.deepEqual(terminalStageFocusExecutorPlan({ type: "ignore" }), ignored);
+  assert.deepEqual(terminalStageFocusExecutorPlan(terminalFallbackFocusPlan("focus", { terminalFallbackActive: false })), ignored);
   assert.deepEqual(terminalStageFocusExecutorPlan({ type: "forward_event", event }), {
     type: "forward_event",
     forwardEvent: true,

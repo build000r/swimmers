@@ -316,6 +316,23 @@ export function terminalStageFocusPlan(eventType, context = {}) {
   return { type: "ignore" };
 }
 
+export function terminalFallbackFocusPlan(eventType, context = {}) {
+  if (!context.terminalFallbackActive) {
+    return { type: "ignore" };
+  }
+  if (eventType === "focus") {
+    return context.activeSheet
+      ? { type: "ignore" }
+      : { type: "forward_event", event: { kind: "focus", focused: true } };
+  }
+  if (eventType === "blur") {
+    return context.mobileKeyboardOwnsFocus
+      ? { type: "ignore" }
+      : { type: "forward_event", event: { kind: "focus", focused: false } };
+  }
+  return { type: "ignore" };
+}
+
 export function terminalStageFocusExecutorPlan(plan = {}) {
   if (plan.type !== "forward_event") {
     return { type: "ignore", forwardEvent: false, event: null };
