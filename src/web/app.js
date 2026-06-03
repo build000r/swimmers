@@ -56,10 +56,11 @@ import {
   trogdorPrimaryActionCue,
   trogdorCueTransitionState,
   trogdorReaderWordIndexForProgress,
+  trogdorSessionCanReadForState,
   trogdorSessionBurntInMap,
   trogdorSessionAwaitingUser,
-  trogdorSessionHasReadyClawg,
-  trogdorSessionIsSleepingOrDeepSleep,
+  trogdorSurfaceSessionTrogdorState,
+  trogdorSwordsmanVisibleForState,
 } from "./trogdor_logic.js";
 import {
   TROGDOR_REPO_POSITIONS,
@@ -1493,23 +1494,15 @@ function currentTrogdorSurfaceSession() {
 }
 
 function trogdorSwordsmanVisible(session) {
-  if (trogdorSessionBurnt(session)) {
-    return true;
-  }
-  return (
-    (trogdorSessionHasReadyClawg(session) && !trogdorClawgDismissed(session)) ||
-    trogdorSessionIsSleepingOrDeepSleep(session)
-  );
+  const burnt = typeof session?.trogdorBurnt === "boolean" ? session.trogdorBurnt : trogdorSessionBurnt(session);
+  const dismissed = typeof session?.trogdorDismissed === "boolean" ? session.trogdorDismissed : trogdorClawgDismissed(session);
+  return trogdorSwordsmanVisibleForState(session, { burnt, dismissed });
 }
 
 function trogdorSessionCanRead(session) {
-  return (
-    !trogdorSessionBurnt(session) &&
-    (
-      (trogdorSessionHasReadyClawg(session) && !trogdorClawgDismissed(session)) ||
-      trogdorSessionIsSleepingOrDeepSleep(session)
-    )
-  );
+  const burnt = typeof session?.trogdorBurnt === "boolean" ? session.trogdorBurnt : trogdorSessionBurnt(session);
+  const dismissed = typeof session?.trogdorDismissed === "boolean" ? session.trogdorDismissed : trogdorClawgDismissed(session);
+  return trogdorSessionCanReadForState(session, { burnt, dismissed });
 }
 
 function trogdorReaderWordIndex(session, wpm) {
@@ -1689,12 +1682,11 @@ function surfaceSession(session, options = {}) {
     repoLabel: operatorPressure?.repo_label || relativeCwd(session.cwd),
     isStale: Boolean(session.is_stale),
   };
-  surface.clawgReadIndex = trogdorClawgReadIndex(surface);
-  surface.clawgWordCount = trogdorClawgWords(surface).length;
-  surface.trogdorAwaitingUser = trogdorSessionAwaitingUser(surface);
-  surface.trogdorBurnt = trogdorSessionBurnt(surface);
-  surface.trogdorDismissed = trogdorClawgDismissed(surface);
-  surface.trogdorSwordsmanVisible = trogdorSwordsmanVisible(surface);
+  Object.assign(surface, trogdorSurfaceSessionTrogdorState(surface, {
+    burnt: trogdorSessionBurnt(surface),
+    dismissedClawgs: state.trogdorDismissedClawgs,
+    readProgress: state.trogdorReadProgress,
+  }));
   return surface;
 }
 

@@ -35,9 +35,12 @@ import {
   trogdorCueTransitionState,
   trogdorReaderBaseIndexForProgress,
   trogdorReaderWordIndexForProgress,
+  trogdorSessionCanReadForState,
   trogdorSessionBurntInMap,
   trogdorSessionAwaitingUser,
   trogdorSessionHasReadyClawg,
+  trogdorSurfaceSessionTrogdorState,
+  trogdorSwordsmanVisibleForState,
 } from "./trogdor_logic.js";
 
 function session(overrides = {}) {
@@ -222,6 +225,47 @@ test("Trogdor cue transition helpers derive awaiting, burns, and hover reset", (
     sessions,
     hoveredSessionId: "missing",
   }).resetReader, true);
+});
+
+test("Trogdor visibility helpers preserve burnt, dismissed, and rest-state rules", () => {
+  const ready = session();
+  const key = trogdorClawgKey(ready);
+  const dismissedClawgs = { [key]: true };
+  const sleeping = session({
+    sessionId: "sleepy",
+    state: "idle",
+    restLabel: "deep_sleep",
+    actionCues: [],
+    operatorPressure: null,
+  });
+  const quiet = session({
+    sessionId: "quiet",
+    state: "idle",
+    actionCues: [],
+    operatorPressure: null,
+  });
+
+  assert.equal(trogdorSwordsmanVisibleForState(ready), true);
+  assert.equal(trogdorSessionCanReadForState(ready), true);
+  assert.equal(trogdorSwordsmanVisibleForState(ready, { dismissed: true }), false);
+  assert.equal(trogdorSessionCanReadForState(ready, { dismissed: true }), false);
+  assert.equal(trogdorSwordsmanVisibleForState(sleeping, { dismissed: true }), true);
+  assert.equal(trogdorSessionCanReadForState(sleeping, { dismissed: true }), true);
+  assert.equal(trogdorSwordsmanVisibleForState(quiet, { burnt: true }), true);
+  assert.equal(trogdorSessionCanReadForState(quiet, { burnt: true }), false);
+
+  const state = trogdorSurfaceSessionTrogdorState(ready, {
+    readProgress: { [key]: 2 },
+    dismissedClawgs,
+  });
+  assert.deepEqual(state, {
+    clawgReadIndex: 2,
+    clawgWordCount: 4,
+    trogdorAwaitingUser: true,
+    trogdorBurnt: false,
+    trogdorDismissed: true,
+    trogdorSwordsmanVisible: false,
+  });
 });
 
 test("Trogdor reader base index prefers active reader key over persisted progress", () => {

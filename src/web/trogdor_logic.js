@@ -440,6 +440,51 @@ export function trogdorSessionIsSleepingOrDeepSleep(session) {
   return rest === "sleeping" || rest === "deep_sleep";
 }
 
+export function trogdorSwordsmanVisibleForState(
+  session,
+  {
+    burnt = false,
+    dismissed = false,
+  } = {},
+) {
+  if (burnt) {
+    return true;
+  }
+  return (
+    (trogdorSessionHasReadyClawg(session) && !dismissed) ||
+    trogdorSessionIsSleepingOrDeepSleep(session)
+  );
+}
+
+export function trogdorSessionCanReadForState(
+  session,
+  {
+    burnt = false,
+    dismissed = false,
+  } = {},
+) {
+  return !burnt && trogdorSwordsmanVisibleForState(session, { burnt, dismissed });
+}
+
+export function trogdorSurfaceSessionTrogdorState(
+  session,
+  {
+    burnt = false,
+    dismissedClawgs = {},
+    readProgress = {},
+  } = {},
+) {
+  const dismissed = trogdorClawgDismissedForMap(session, dismissedClawgs);
+  return {
+    clawgReadIndex: trogdorClawgReadIndexForProgress(session, readProgress),
+    clawgWordCount: trogdorClawgWords(session).length,
+    trogdorAwaitingUser: trogdorSessionAwaitingUser(session),
+    trogdorBurnt: Boolean(burnt),
+    trogdorDismissed: dismissed,
+    trogdorSwordsmanVisible: trogdorSwordsmanVisibleForState(session, { burnt, dismissed }),
+  };
+}
+
 export function buildTrogdorDomGroups(sessions) {
   const groups = new Map();
   for (const session of sessions) {
