@@ -47,6 +47,45 @@ export function sessionSocketAttachPlan(url) {
   };
 }
 
+export function sessionSocketOpenPlan(context = {}) {
+  if (context.generation !== context.currentGeneration || !context.currentSocketMatches) {
+    return { type: "close_stale" };
+  }
+  return { type: "attach" };
+}
+
+export function sessionSocketOpenStatus(sentAuth) {
+  return sentAuth ? "authenticating; input disabled" : "attached";
+}
+
+export function sessionSocketMessagePlan(context = {}) {
+  if (context.generation !== context.currentGeneration || !context.currentSocketMatches) {
+    return { type: "ignore" };
+  }
+  if (typeof context.data === "string") {
+    return { type: "handle_text", text: context.data };
+  }
+  return { type: "feed_binary", data: context.data };
+}
+
+export function sessionSocketClosePlan(context = {}) {
+  if (context.generation !== context.currentGeneration) {
+    return { type: "ignore" };
+  }
+  return { type: "schedule_reconnect" };
+}
+
+export function sessionSocketReconnectStatus(delayMs) {
+  return `disconnected; input disabled; retrying in ${Math.ceil(delayMs / 1000)}s`;
+}
+
+export function sessionSocketReconnectPlan(context = {}) {
+  if (context.generation !== context.currentGeneration || !context.hasCurrentSession) {
+    return { type: "ignore" };
+  }
+  return { type: "reconnect" };
+}
+
 export function decodeTerminalOutputFrame(bytes) {
   if (!(bytes instanceof Uint8Array) || bytes.byteLength < 9 || bytes[0] !== TERMINAL_OUTPUT_OPCODE) {
     return null;

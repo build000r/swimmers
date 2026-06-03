@@ -10,6 +10,12 @@ import {
   selectedSessionConnectionPlan,
   sessionSocketAuthMessageForToken,
   sessionSocketAttachPlan,
+  sessionSocketClosePlan,
+  sessionSocketMessagePlan,
+  sessionSocketOpenPlan,
+  sessionSocketOpenStatus,
+  sessionSocketReconnectPlan,
+  sessionSocketReconnectStatus,
   terminalControlKeyEvent,
 } from "./terminal_protocol.js";
 
@@ -94,6 +100,88 @@ test("sessionSocketAttachPlan preserves framed output and status copy", () => {
     framedOutput: false,
     status: "connecting; input disabled",
   });
+});
+
+test("sessionSocketOpenPlan preserves stale close guard and auth status copy", () => {
+  assert.deepEqual(sessionSocketOpenPlan({
+    generation: 1,
+    currentGeneration: 2,
+    currentSocketMatches: true,
+  }), { type: "close_stale" });
+  assert.deepEqual(sessionSocketOpenPlan({
+    generation: 1,
+    currentGeneration: 1,
+    currentSocketMatches: false,
+  }), { type: "close_stale" });
+  assert.deepEqual(sessionSocketOpenPlan({
+    generation: 1,
+    currentGeneration: 1,
+    currentSocketMatches: true,
+  }), { type: "attach" });
+  assert.equal(sessionSocketOpenStatus(true), "authenticating; input disabled");
+  assert.equal(sessionSocketOpenStatus(false), "attached");
+});
+
+test("sessionSocketMessagePlan preserves stale guard and text/binary routing", () => {
+  assert.deepEqual(sessionSocketMessagePlan({
+    generation: 1,
+    currentGeneration: 2,
+    currentSocketMatches: true,
+    data: "hello",
+  }), { type: "ignore" });
+  assert.deepEqual(sessionSocketMessagePlan({
+    generation: 1,
+    currentGeneration: 1,
+    currentSocketMatches: false,
+    data: "hello",
+  }), { type: "ignore" });
+  assert.deepEqual(sessionSocketMessagePlan({
+    generation: 1,
+    currentGeneration: 1,
+    currentSocketMatches: true,
+    data: "hello",
+  }), { type: "handle_text", text: "hello" });
+
+  const data = new Uint8Array([65, 66]).buffer;
+  const plan = sessionSocketMessagePlan({
+    generation: 1,
+    currentGeneration: 1,
+    currentSocketMatches: true,
+    data,
+  });
+  assert.equal(plan.type, "feed_binary");
+  assert.equal(plan.data, data);
+});
+
+test("sessionSocketClosePlan preserves reconnect guard and status rounding", () => {
+  assert.deepEqual(sessionSocketClosePlan({
+    generation: 1,
+    currentGeneration: 2,
+  }), { type: "ignore" });
+  assert.deepEqual(sessionSocketClosePlan({
+    generation: 1,
+    currentGeneration: 1,
+  }), { type: "schedule_reconnect" });
+  assert.equal(sessionSocketReconnectStatus(2000), "disconnected; input disabled; retrying in 2s");
+  assert.equal(sessionSocketReconnectStatus(2501), "disconnected; input disabled; retrying in 3s");
+});
+
+test("sessionSocketReconnectPlan preserves generation and selected-session gates", () => {
+  assert.deepEqual(sessionSocketReconnectPlan({
+    generation: 1,
+    currentGeneration: 2,
+    hasCurrentSession: true,
+  }), { type: "ignore" });
+  assert.deepEqual(sessionSocketReconnectPlan({
+    generation: 1,
+    currentGeneration: 1,
+    hasCurrentSession: false,
+  }), { type: "ignore" });
+  assert.deepEqual(sessionSocketReconnectPlan({
+    generation: 1,
+    currentGeneration: 1,
+    hasCurrentSession: true,
+  }), { type: "reconnect" });
 });
 
 test("decodeTerminalOutputFrame parses opcode, sequence, and payload", () => {

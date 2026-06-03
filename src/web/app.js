@@ -28,7 +28,7 @@ import {
   buildSessionSocketUrl,
   decodeTerminalOutputFrame,
   fallbackTextForKeyEvent,
-  keyModifiers, selectedSessionConnectionPlan, sessionSocketAuthMessageForToken, sessionSocketAttachPlan,
+  keyModifiers, selectedSessionConnectionPlan, sessionSocketAuthMessageForToken, sessionSocketAttachPlan, sessionSocketClosePlan, sessionSocketMessagePlan, sessionSocketOpenPlan, sessionSocketOpenStatus, sessionSocketReconnectPlan, sessionSocketReconnectStatus,
   terminalControlKeyEvent,
 } from "./terminal_protocol.js";
 import {
@@ -3169,42 +3169,41 @@ async function connectSelectedSession() {
   setConnectionStatus(attachPlan.status);
 
   ws.onopen = () => {
-    if (generation !== state.connectionGeneration || state.ws !== ws) {
+    if (sessionSocketOpenPlan({ generation, currentGeneration: state.connectionGeneration, currentSocketMatches: generation === state.connectionGeneration && state.ws === ws }).type === "close_stale") {
       ws.close();
       return;
     }
     const sentAuth = sendSessionSocketAuth(ws);
     measureAndResizeSurface(true, true);
     state.reconnectAttempt = 0;
-    setConnectionStatus(sentAuth ? "authenticating; input disabled" : "attached");
+    setConnectionStatus(sessionSocketOpenStatus(sentAuth));
     scheduleSessionRefresh();
   };
 
   ws.onmessage = (event) => {
-    if (generation !== state.connectionGeneration || state.ws !== ws) {
+    const messagePlan = sessionSocketMessagePlan({ generation, currentGeneration: state.connectionGeneration, currentSocketMatches: generation === state.connectionGeneration && state.ws === ws, data: event.data });
+    if (messagePlan.type === "ignore") {
       return;
     }
-
-    if (typeof event.data === "string") {
-      handleSocketText(event.data);
+    if (messagePlan.type === "handle_text") {
+      handleSocketText(messagePlan.text);
       return;
     }
-
-    const terminalBytes = terminalPayloadFromSocketBytes(new Uint8Array(event.data), ws);
+    const terminalBytes = terminalPayloadFromSocketBytes(new Uint8Array(messagePlan.data), ws);
     feedTerminalBytes(terminalBytes);
   };
 
   ws.onclose = () => {
-    if (generation !== state.connectionGeneration) {
+    if (sessionSocketClosePlan({ generation, currentGeneration: state.connectionGeneration }).type === "ignore") {
       return;
     }
     const delay = reconnectDelayMs();
     state.reconnectAttempt += 1;
-    setConnectionStatus(`disconnected; input disabled; retrying in ${Math.ceil(delay / 1000)}s`, true);
+    setConnectionStatus(sessionSocketReconnectStatus(delay), true);
     scheduleSessionRefresh();
     state.reconnectTimer = window.setTimeout(() => {
       state.reconnectTimer = null;
-      if (generation !== state.connectionGeneration || !currentSession()) {
+      if (sessionSocketReconnectPlan({ generation, currentGeneration: state.connectionGeneration, hasCurrentSession: generation === state.connectionGeneration && Boolean(currentSession()) }).type !== "reconnect") {
         return;
       }
       connectSelectedSession();
