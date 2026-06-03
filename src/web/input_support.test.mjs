@@ -35,6 +35,7 @@ import {
   terminalStageKeydownPlan,
   terminalStagePasteExecutorPlan,
   terminalStagePastePlan,
+  terminalAuxiliaryControlsPlan,
   terminalZoomControlsPlan,
   terminalZoomPercentLabel,
 } from "./input_support.js";
@@ -950,6 +951,53 @@ test("terminalZoomControlsPlan preserves support gates, bounds, and labels", () 
     minZoom: 0.5,
     maxZoom: 2,
   }).zoomInDisabled, true);
+});
+
+test("terminalAuxiliaryControlsPlan preserves mobile keyboard and copy-frame gates", () => {
+  assert.deepEqual(terminalAuxiliaryControlsPlan({
+    hasCurrentSession: true,
+    readOnly: false,
+    mobileKeyboardActive: false,
+    hasCopyFrame: true,
+  }), {
+    mobileKeyboardDisabled: false,
+    mobileKeyboardAriaPressed: "false",
+    copyFrameAvailable: true,
+    copyFrameDisabled: false,
+  });
+  assert.deepEqual(terminalAuxiliaryControlsPlan({
+    hasCurrentSession: true,
+    readOnly: true,
+    mobileKeyboardActive: true,
+    hasCopyFrame: true,
+  }), {
+    mobileKeyboardDisabled: true,
+    mobileKeyboardAriaPressed: "true",
+    copyFrameAvailable: true,
+    copyFrameDisabled: false,
+  });
+  assert.deepEqual(terminalAuxiliaryControlsPlan({
+    hasCurrentSession: false,
+    readOnly: false,
+    mobileKeyboardActive: true,
+    hasCopyFrame: true,
+  }), {
+    mobileKeyboardDisabled: true,
+    mobileKeyboardAriaPressed: "true",
+    copyFrameAvailable: true,
+    copyFrameDisabled: true,
+  });
+  assert.deepEqual(terminalAuxiliaryControlsPlan({
+    hasCurrentSession: true,
+    readOnly: false,
+    mobileKeyboardActive: false,
+    hasCopyFrame: false,
+  }), {
+    mobileKeyboardDisabled: false,
+    mobileKeyboardAriaPressed: "false",
+    copyFrameAvailable: false,
+    copyFrameDisabled: true,
+  });
 });
 
 test("terminalFallbackPointerFocusPlan preserves scheduled and immediate focus gates", () => {

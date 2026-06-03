@@ -507,6 +507,17 @@ export function terminalZoomControlsPlan(context = {}) {
   };
 }
 
+export function terminalAuxiliaryControlsPlan(context = {}) {
+  const hasCurrentSession = Boolean(context.hasCurrentSession);
+  const copyFrameAvailable = Boolean(context.hasCopyFrame);
+  return {
+    mobileKeyboardDisabled: Boolean(context.readOnly) || !hasCurrentSession,
+    mobileKeyboardAriaPressed: context.mobileKeyboardActive ? "true" : "false",
+    copyFrameAvailable,
+    copyFrameDisabled: !copyFrameAvailable || !hasCurrentSession,
+  };
+}
+
 export function terminalFallbackPointerFocusPlan(eventType, context = {}) {
   if (!context.terminalFallbackActive || context.activeSheet) {
     return { type: "ignore", focusTerminal: false, scheduleFrame: false };

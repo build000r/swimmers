@@ -3,7 +3,7 @@ import {
   authTokenButtonPlan, eventCell, globalShortcutPlan, mobileKeyboardInputExecutorPlan, mobileKeyboardInputPlan,
   mobileKeyboardKeydownPlan, mobileKeyboardKeyPlan, shouldIgnoreSyntheticClick,
   terminalComposerControlAction, terminalDestroyStatePatch, terminalFallbackActivationPlan, terminalFallbackFocusPlan, terminalFallbackKeydownPlan, terminalFallbackPastePlan, terminalFallbackPointerFocusPlan, terminalInlineInputKeydownPlan, terminalKeyStripClickExecutorPlan, terminalKeyStripClickPlan, terminalStageCaptureBindings, terminalStageFocusExecutorPlan, terminalStageFocusPlan,
-  terminalFallbackScrollPlan, terminalFallbackTextScrollPlan, terminalInputDockPlan, terminalLiveFrameFallbackPlan, terminalPaintProbeSchedulePlan, terminalPaintVerificationPlan, terminalPendingByteBufferPlan, terminalPresentationPlan, terminalResizeGeometryPlan, terminalStageKeydownPlan, terminalStagePasteExecutorPlan, terminalStagePastePlan, terminalZoomControlsPlan, terminalZoomPercentLabel,
+  terminalAuxiliaryControlsPlan, terminalFallbackScrollPlan, terminalFallbackTextScrollPlan, terminalInputDockPlan, terminalLiveFrameFallbackPlan, terminalPaintProbeSchedulePlan, terminalPaintVerificationPlan, terminalPendingByteBufferPlan, terminalPresentationPlan, terminalResizeGeometryPlan, terminalStageKeydownPlan, terminalStagePasteExecutorPlan, terminalStagePastePlan, terminalZoomControlsPlan, terminalZoomPercentLabel,
 } from "./input_support.js";
 import { sendHistoryClickPlan, sendSheetFailureStatus, sendSheetSubmitPlan, sendSheetSuccessStatus } from "./send_sheet.js";
 import {
@@ -894,12 +894,11 @@ function syncTerminalZoomControls() {
   el.terminalZoomIn.disabled = plan.zoomInDisabled;
   el.terminalZoomReset.disabled = plan.zoomResetDisabled;
   el.terminalZoomReset.textContent = plan.zoomResetLabel;
-  el.terminalMobileKeyboard.disabled = state.readOnly || !currentSession();
-  el.terminalMobileKeyboard.setAttribute("aria-pressed", state.mobileKeyboardActive ? "true" : "false");
+  const auxiliaryPlan = terminalAuxiliaryControlsPlan({ hasCurrentSession: Boolean(currentSession()), readOnly: state.readOnly, mobileKeyboardActive: state.mobileKeyboardActive, hasCopyFrame: Boolean(el.terminalCopyFrame) });
+  el.terminalMobileKeyboard.disabled = auxiliaryPlan.mobileKeyboardDisabled;
+  el.terminalMobileKeyboard.setAttribute("aria-pressed", auxiliaryPlan.mobileKeyboardAriaPressed);
   syncTerminalInputDock();
-  if (el.terminalCopyFrame) {
-    el.terminalCopyFrame.disabled = !currentSession();
-  }
+  if (auxiliaryPlan.copyFrameAvailable) el.terminalCopyFrame.disabled = auxiliaryPlan.copyFrameDisabled;
 }
 
 function syncTerminalInputDock() {
