@@ -5416,6 +5416,28 @@ function handleSaveTokenButtonClick() { return handleAuthTokenButtonAction("save
 
 function handleClearTokenButtonClick() { return handleAuthTokenButtonAction("clear"); }
 
+async function handleCreateFormSubmit(event) { event.preventDefault(); await createSessionFromSheet(); }
+
+function handleCreateToolChange() { syncSheetActionAvailability(); }
+
+function handleCreateLaunchTargetChange() { state.dirBrowser.launchTarget = selectedLaunchTarget(); renderCreateBatchBar(); syncSheetActionAvailability(); }
+
+function handleCreateRequestInput() { syncSheetActionAvailability(); }
+
+function handleDirsSearchInput() { state.dirBrowser.search = String(el.dirsSearch.value || ""); renderDirEntries(currentDirListingPayload()); }
+
+function handleCreateBatchClearClick() { clearCreateBatchSelection(); setDirStatus("Batch selection cleared."); }
+
+function handleCreateCwdInput() { el.dirsPath.value = el.createCwd.value; syncSheetActionAvailability(); }
+
+function handleDirsManagedOnlyChange() { state.dirBrowser.managedOnly = Boolean(el.dirsManagedOnly.checked); localStorage.setItem(DIR_BROWSER_MANAGED_ONLY_KEY, String(state.dirBrowser.managedOnly)); syncSheetActionAvailability(); void loadDirListing(el.dirsPath.value, state.dirBrowser.managedOnly); }
+
+function handleDirsPathInput() { syncSheetActionAvailability(); }
+
+function handleDirsPathKeydown(event) { if (event.key === "Enter") { event.preventDefault(); state.dirBrowser.group = ""; clearCreateBatchSelection(); void loadDirListing(el.dirsPath.value, el.dirsManagedOnly.checked, ""); } }
+
+async function handleDirsLoadButtonClick() { state.dirBrowser.group = ""; clearCreateBatchSelection(); await loadDirListing(el.dirsPath.value, el.dirsManagedOnly.checked, ""); }
+
 function bindEvents() {
   bindTrogdorEvents();
   document.addEventListener?.("keydown", handleDocumentCommandPaletteShortcut);
@@ -5487,59 +5509,21 @@ function bindEvents() {
   el.clearTokenButton.addEventListener("click", handleClearTokenButtonClick);
   el.authCloseButton.addEventListener("click", closeSheets);
 
-  el.createForm.addEventListener("submit", async (event) => {
-    event.preventDefault();
-    await createSessionFromSheet();
-  });
+  el.createForm.addEventListener("submit", handleCreateFormSubmit);
   el.createCloseButton.addEventListener("click", closeSheets);
-  el.createTool.addEventListener("change", () => {
-    syncSheetActionAvailability();
-  });
-  el.createLaunchTarget.addEventListener("change", () => {
-    state.dirBrowser.launchTarget = selectedLaunchTarget();
-    renderCreateBatchBar();
-    syncSheetActionAvailability();
-  });
-  el.createRequest.addEventListener("input", () => {
-    syncSheetActionAvailability();
-  });
-  el.dirsSearch.addEventListener("input", () => {
-    state.dirBrowser.search = String(el.dirsSearch.value || "");
-    renderDirEntries(currentDirListingPayload());
-  });
+  el.createTool.addEventListener("change", handleCreateToolChange);
+  el.createLaunchTarget.addEventListener("change", handleCreateLaunchTargetChange);
+  el.createRequest.addEventListener("input", handleCreateRequestInput);
+  el.dirsSearch.addEventListener("input", handleDirsSearchInput);
   el.createBatchVisible.addEventListener("click", handleCreateBatchVisibleAction);
   if (el.createBatchClear) {
-    el.createBatchClear.addEventListener("click", () => {
-      clearCreateBatchSelection();
-      setDirStatus("Batch selection cleared.");
-    });
+    el.createBatchClear.addEventListener("click", handleCreateBatchClearClick);
   }
-  el.createCwd.addEventListener("input", () => {
-    el.dirsPath.value = el.createCwd.value;
-    syncSheetActionAvailability();
-  });
-  el.dirsManagedOnly.addEventListener("change", () => {
-    state.dirBrowser.managedOnly = Boolean(el.dirsManagedOnly.checked);
-    localStorage.setItem(DIR_BROWSER_MANAGED_ONLY_KEY, String(state.dirBrowser.managedOnly));
-    syncSheetActionAvailability();
-    void loadDirListing(el.dirsPath.value, state.dirBrowser.managedOnly);
-  });
-  el.dirsPath.addEventListener("input", () => {
-    syncSheetActionAvailability();
-  });
-  el.dirsPath.addEventListener("keydown", (event) => {
-    if (event.key === "Enter") {
-      event.preventDefault();
-      state.dirBrowser.group = "";
-      clearCreateBatchSelection();
-      void loadDirListing(el.dirsPath.value, el.dirsManagedOnly.checked, "");
-    }
-  });
-  el.dirsLoadButton.addEventListener("click", async () => {
-    state.dirBrowser.group = "";
-    clearCreateBatchSelection();
-    await loadDirListing(el.dirsPath.value, el.dirsManagedOnly.checked, "");
-  });
+  el.createCwd.addEventListener("input", handleCreateCwdInput);
+  el.dirsManagedOnly.addEventListener("change", handleDirsManagedOnlyChange);
+  el.dirsPath.addEventListener("input", handleDirsPathInput);
+  el.dirsPath.addEventListener("keydown", handleDirsPathKeydown);
+  el.dirsLoadButton.addEventListener("click", handleDirsLoadButtonClick);
   el.dirsSpawnHere.addEventListener("click", async () => {
     if (state.readOnly) {
       return;
