@@ -5495,6 +5495,24 @@ async function handleDirsListClick(event) {
   syncSheetActionAvailability();
 }
 
+async function handleMermaidRefreshButtonClick() { await refreshMermaidArtifact(); }
+
+async function handleMermaidOpenButtonClick() { await openMermaidArtifactHost(); }
+
+async function handleMermaidPlanTabsClick(event) { const plan = mermaidPlanTabClickPlan(event.type, event.target instanceof Element ? event.target : null); if (plan.type === "load_plan_file") await loadMermaidPlanFile(plan.planFile); }
+
+function terminalStageCaptureHandler(action) { return (event) => captureSurfaceAction(event, action); }
+
+function installTerminalStageCaptureBindings() { for (const binding of terminalStageCaptureBindings()) { el.terminalStage.addEventListener(binding.eventType, terminalStageCaptureHandler(binding.action), binding.options); } }
+
+function handleTerminalStageFocus() { handleTerminalStageFocusEvent("focus"); }
+
+function handleTerminalStageBlur() { handleTerminalStageFocusEvent("blur"); }
+
+function handleTerminalStageMouseleave() { clearHoveredLink(true); updateHoveredTrogdorSurface(null); }
+
+function installTerminalStageResizeObserver() { const resizeObserver = new ResizeObserver(() => { queueMeasureAndResizeSurface(true, false); }); resizeObserver.observe(el.terminalStage); }
+
 function bindEvents() {
   bindTrogdorEvents();
   document.addEventListener?.("keydown", handleDocumentCommandPaletteShortcut);
@@ -5586,25 +5604,12 @@ function bindEvents() {
   el.dirsList.addEventListener("change", handleDirCheckboxChange);
   el.dirsList.addEventListener("click", handleDirsListClick);
 
-  el.mermaidRefreshButton.addEventListener("click", async () => {
-    await refreshMermaidArtifact();
-  });
-  el.mermaidOpenButton.addEventListener("click", async () => {
-    await openMermaidArtifactHost();
-  });
-  el.mermaidPlanTabs.addEventListener("click", async (event) => {
-    const plan = mermaidPlanTabClickPlan(event.type, event.target instanceof Element ? event.target : null);
-    if (plan.type === "load_plan_file") await loadMermaidPlanFile(plan.planFile);
-  });
+  el.mermaidRefreshButton.addEventListener("click", handleMermaidRefreshButtonClick);
+  el.mermaidOpenButton.addEventListener("click", handleMermaidOpenButtonClick);
+  el.mermaidPlanTabs.addEventListener("click", handleMermaidPlanTabsClick);
   el.mermaidCloseButton.addEventListener("click", closeSheets);
 
-  for (const binding of terminalStageCaptureBindings()) {
-    el.terminalStage.addEventListener(
-      binding.eventType,
-      (event) => captureSurfaceAction(event, binding.action),
-      binding.options,
-    );
-  }
+  installTerminalStageCaptureBindings();
 
   el.terminalStage.addEventListener("click", handleTerminalStageClick);
 
@@ -5612,8 +5617,8 @@ function bindEvents() {
 
   el.terminalStage.addEventListener("keydown", handleTerminalStageKeydown);
   el.terminalStage.addEventListener("paste", handleTerminalStagePaste);
-  el.terminalStage.addEventListener("focus", () => handleTerminalStageFocusEvent("focus"));
-  el.terminalStage.addEventListener("blur", () => handleTerminalStageFocusEvent("blur"));
+  el.terminalStage.addEventListener("focus", handleTerminalStageFocus);
+  el.terminalStage.addEventListener("blur", handleTerminalStageBlur);
 
   el.terminalStage.addEventListener("mousedown", handleTerminalStageMouseDown);
   el.terminalStage.addEventListener("mouseup", handleTerminalStageMouseUp);
@@ -5626,15 +5631,9 @@ function bindEvents() {
     { passive: false },
   );
 
-  el.terminalStage.addEventListener("mouseleave", () => {
-    clearHoveredLink(true);
-    updateHoveredTrogdorSurface(null);
-  });
+  el.terminalStage.addEventListener("mouseleave", handleTerminalStageMouseleave);
 
-  const resizeObserver = new ResizeObserver(() => {
-    queueMeasureAndResizeSurface(true, false);
-  });
-  resizeObserver.observe(el.terminalStage);
+  installTerminalStageResizeObserver();
 }
 
 async function init() {
