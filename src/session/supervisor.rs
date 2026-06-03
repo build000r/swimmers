@@ -66,6 +66,12 @@ struct ListedTmuxSessions {
     names: Vec<String>,
 }
 
+struct MissingTrackedSessionSummary {
+    session_id: String,
+    previous_state: SessionState,
+    summary: SessionSummary,
+}
+
 #[derive(Debug, Clone)]
 pub struct TmuxDependencyHealthSnapshot {
     pub discovery: DependencyHealthSnapshot,
@@ -966,6 +972,109 @@ impl SessionSupervisor {
         summary.into_missing_tmux_stale(SUMMARY_CAUSE_TMUX_RECONCILE_MISSING)
     }
 
+    async fn missing_tracked_handles(
+        &self,
+        listed_tmux_names: &HashSet<String>,
+    ) -> Vec<ActorHandle> {
+        let sessions = self.sessions.read().await;
+        sessions
+            .values()
+            .filter(|handle| !listed_tmux_names.contains(&handle.tmux_name))
+            .cloned()
+            .collect()
+    }
+
+    async fn stale_summaries_for_missing_tracked_handles(
+        &self,
+        missing_handles: &[ActorHandle],
+    ) -> Vec<MissingTrackedSessionSummary> {
+        let cached_summaries = self.summary_cache.read().await.clone();
+        let mut stale_summaries = Vec::with_capacity(missing_handles.len());
+        for handle in missing_handles {
+            let summary = self
+                .summary_for_missing_tracked_handle(
+                    handle,
+                    cached_summaries.get(&handle.session_id),
+                )
+                .await;
+            stale_summaries.push(MissingTrackedSessionSummary {
+                session_id: handle.session_id.clone(),
+                previous_state: summary.state,
+                summary: Self::mark_missing_tmux_summary(summary),
+            });
+        }
+        stale_summaries
+    }
+
+    async fn remove_still_missing_tracked_handles(
+        &self,
+        missing_handles: &[ActorHandle],
+        listed_tmux_names: &HashSet<String>,
+    ) -> Vec<ActorHandle> {
+        let mut sessions = self.sessions.write().await;
+        let mut removed = Vec::with_capacity(missing_handles.len());
+        for handle in missing_handles {
+            let still_missing = sessions
+                .get(&handle.session_id)
+                .map(|current| !listed_tmux_names.contains(&current.tmux_name))
+                .unwrap_or(false);
+            if still_missing {
+                if let Some(handle) = sessions.remove(&handle.session_id) {
+                    removed.push(handle);
+                }
+            }
+        }
+        crate::metrics::set_active_sessions(sessions.len());
+        removed
+    }
+
+    async fn forget_removed_tracked_summary_cache(&self, removed_ids: &HashSet<String>) {
+        let mut cache = self.summary_cache.write().await;
+        for session_id in removed_ids {
+            cache.remove(session_id);
+        }
+    }
+
+    async fn retain_removed_tracked_stale_summaries(
+        &self,
+        stale_summaries: &[MissingTrackedSessionSummary],
+        removed_ids: &HashSet<String>,
+    ) {
+        let mut stale = self.stale_sessions.write().await;
+        for stale_summary in stale_summaries {
+            if !removed_ids.contains(&stale_summary.session_id) {
+                continue;
+            }
+            stale.retain(|existing| {
+                existing.session_id != stale_summary.summary.session_id
+                    && existing.tmux_name != stale_summary.summary.tmux_name
+            });
+            stale.push(stale_summary.summary.clone());
+        }
+    }
+
+    async fn shutdown_removed_tracked_handles(&self, removed_handles: Vec<ActorHandle>) {
+        for handle in removed_handles {
+            let _ = handle.cmd_tx.send(SessionCommand::Shutdown).await;
+        }
+    }
+
+    fn emit_removed_tracked_missing_events(
+        &self,
+        stale_summaries: Vec<MissingTrackedSessionSummary>,
+        removed_ids: &HashSet<String>,
+    ) {
+        for stale_summary in stale_summaries {
+            if removed_ids.contains(&stale_summary.session_id) {
+                self.emit_missing_tmux_events(
+                    stale_summary.summary,
+                    stale_summary.previous_state,
+                    SUMMARY_CAUSE_TMUX_RECONCILE_MISSING,
+                );
+            }
+        }
+    }
+
     async fn reconcile_tracked_sessions_after_discovery(
         &self,
         discovery_reliable: bool,
@@ -976,52 +1085,17 @@ impl SessionSupervisor {
         }
 
         let listed_tmux_names = listed_tmux_names.iter().cloned().collect::<HashSet<_>>();
-        let missing_handles = {
-            let sessions = self.sessions.read().await;
-            sessions
-                .values()
-                .filter(|handle| !listed_tmux_names.contains(&handle.tmux_name))
-                .cloned()
-                .collect::<Vec<_>>()
-        };
+        let missing_handles = self.missing_tracked_handles(&listed_tmux_names).await;
         if missing_handles.is_empty() {
             return;
         }
 
-        let cached_summaries = self.summary_cache.read().await.clone();
-        let mut stale_summaries = Vec::with_capacity(missing_handles.len());
-        for handle in &missing_handles {
-            let summary = self
-                .summary_for_missing_tracked_handle(
-                    handle,
-                    cached_summaries.get(&handle.session_id),
-                )
-                .await;
-            let previous_state = summary.state;
-            stale_summaries.push((
-                handle.session_id.clone(),
-                previous_state,
-                Self::mark_missing_tmux_summary(summary),
-            ));
-        }
-
-        let removed_handles = {
-            let mut sessions = self.sessions.write().await;
-            let mut removed = Vec::with_capacity(missing_handles.len());
-            for handle in &missing_handles {
-                let still_missing = sessions
-                    .get(&handle.session_id)
-                    .map(|current| !listed_tmux_names.contains(&current.tmux_name))
-                    .unwrap_or(false);
-                if still_missing {
-                    if let Some(handle) = sessions.remove(&handle.session_id) {
-                        removed.push(handle);
-                    }
-                }
-            }
-            crate::metrics::set_active_sessions(sessions.len());
-            removed
-        };
+        let stale_summaries = self
+            .stale_summaries_for_missing_tracked_handles(&missing_handles)
+            .await;
+        let removed_handles = self
+            .remove_still_missing_tracked_handles(&missing_handles, &listed_tmux_names)
+            .await;
         if removed_handles.is_empty() {
             return;
         }
@@ -1030,38 +1104,13 @@ impl SessionSupervisor {
             .iter()
             .map(|handle| handle.session_id.clone())
             .collect::<HashSet<_>>();
-        {
-            let mut cache = self.summary_cache.write().await;
-            for session_id in &removed_ids {
-                cache.remove(session_id);
-            }
-        }
-        {
-            let mut stale = self.stale_sessions.write().await;
-            for (session_id, _, summary) in &stale_summaries {
-                if !removed_ids.contains(session_id) {
-                    continue;
-                }
-                stale.retain(|existing| {
-                    existing.session_id != summary.session_id
-                        && existing.tmux_name != summary.tmux_name
-                });
-                stale.push(summary.clone());
-            }
-        }
+        self.forget_removed_tracked_summary_cache(&removed_ids)
+            .await;
+        self.retain_removed_tracked_stale_summaries(&stale_summaries, &removed_ids)
+            .await;
 
-        for handle in removed_handles {
-            let _ = handle.cmd_tx.send(SessionCommand::Shutdown).await;
-        }
-        for (session_id, previous_state, summary) in stale_summaries {
-            if removed_ids.contains(&session_id) {
-                self.emit_missing_tmux_events(
-                    summary,
-                    previous_state,
-                    SUMMARY_CAUSE_TMUX_RECONCILE_MISSING,
-                );
-            }
-        }
+        self.shutdown_removed_tracked_handles(removed_handles).await;
+        self.emit_removed_tracked_missing_events(stale_summaries, &removed_ids);
 
         self.persist_registry().await;
     }
