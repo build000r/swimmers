@@ -1,4 +1,5 @@
 pub mod actor;
+pub(crate) mod artifact_responses;
 pub mod artifacts;
 pub mod overlay;
 pub mod replay_ring;
