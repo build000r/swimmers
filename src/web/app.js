@@ -3,7 +3,7 @@ import {
   authTokenButtonPlan, eventCell, globalShortcutPlan, mobileKeyboardInputPlan,
   mobileKeyboardKeyPlan, shouldIgnoreSyntheticClick,
   terminalComposerControlAction, terminalKeyStripClickPlan, terminalStageCaptureBindings, terminalStageFocusPlan,
-  terminalStagePastePlan,
+  terminalStageKeydownPlan, terminalStagePastePlan,
 } from "./input_support.js";
 import { sendHistoryClickPlan, sendSheetFailureStatus, sendSheetSubmitPlan, sendSheetSuccessStatus } from "./send_sheet.js";
 import {
@@ -5730,18 +5730,16 @@ function bindEvents() {
   );
 
   el.terminalStage.addEventListener("keydown", (event) => {
-    if (handleGlobalShortcut(event)) {
-      event.preventDefault();
-      return;
-    }
-    if (!shouldCaptureKey(event)) {
-      return;
-    }
-    event.preventDefault();
-    if (keyBeginsTrogdorResponse(event)) {
-      markTrogdorSessionsResponded([state.selectedSessionId]);
-    }
-    forwardTerminalKeyDown(event);
+    const globalShortcutHandled = handleGlobalShortcut(event);
+    const shouldCaptureTerminalKey = !globalShortcutHandled && shouldCaptureKey(event);
+    const plan = terminalStageKeydownPlan({
+      globalShortcutHandled,
+      shouldCaptureKey: shouldCaptureTerminalKey,
+      beginsResponse: shouldCaptureTerminalKey && keyBeginsTrogdorResponse(event),
+    });
+    if (plan.preventDefault) event.preventDefault();
+    if (plan.markResponse) markTrogdorSessionsResponded([state.selectedSessionId]);
+    if (plan.forwardKey) forwardTerminalKeyDown(event);
   });
 
   el.terminalStage.addEventListener("paste", (event) => {

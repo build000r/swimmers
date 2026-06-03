@@ -251,6 +251,21 @@ export function terminalStageFocusPlan(eventType, context = {}) {
   return { type: "ignore" };
 }
 
+export function terminalStageKeydownPlan(context = {}) {
+  if (context.globalShortcutHandled) {
+    return { type: "prevent_default", preventDefault: true, markResponse: false, forwardKey: false };
+  }
+  if (!context.shouldCaptureKey) {
+    return { type: "ignore", preventDefault: false, markResponse: false, forwardKey: false };
+  }
+  return {
+    type: "forward_key",
+    preventDefault: true,
+    markResponse: Boolean(context.beginsResponse),
+    forwardKey: true,
+  };
+}
+
 function clampInt(value, fallback, min, max) {
   const numeric = Number.isFinite(value) ? Math.trunc(value) : fallback;
   return Math.max(min, Math.min(max, numeric));

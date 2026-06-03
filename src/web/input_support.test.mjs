@@ -12,6 +12,7 @@ import {
   terminalKeyStripClickPlan,
   terminalStageCaptureBindings,
   terminalStageFocusPlan,
+  terminalStageKeydownPlan,
   terminalStagePastePlan,
 } from "./input_support.js";
 
@@ -292,4 +293,27 @@ test("terminalStageFocusPlan preserves focus, blur, and ignore decisions", () =>
     event: { kind: "focus", focused: false },
   });
   assert.deepEqual(terminalStageFocusPlan("click"), { type: "ignore" });
+});
+
+test("terminalStageKeydownPlan preserves shortcut, capture, and response decisions", () => {
+  assert.deepEqual(terminalStageKeydownPlan({
+    globalShortcutHandled: true,
+    shouldCaptureKey: true,
+    beginsResponse: true,
+  }), { type: "prevent_default", preventDefault: true, markResponse: false, forwardKey: false });
+  assert.deepEqual(terminalStageKeydownPlan({
+    globalShortcutHandled: false,
+    shouldCaptureKey: false,
+    beginsResponse: true,
+  }), { type: "ignore", preventDefault: false, markResponse: false, forwardKey: false });
+  assert.deepEqual(terminalStageKeydownPlan({
+    globalShortcutHandled: false,
+    shouldCaptureKey: true,
+    beginsResponse: false,
+  }), { type: "forward_key", preventDefault: true, markResponse: false, forwardKey: true });
+  assert.deepEqual(terminalStageKeydownPlan({
+    globalShortcutHandled: false,
+    shouldCaptureKey: true,
+    beginsResponse: true,
+  }), { type: "forward_key", preventDefault: true, markResponse: true, forwardKey: true });
 });
