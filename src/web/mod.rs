@@ -42,6 +42,7 @@ const COMMAND_PALETTE_JS_ROUTE: &str = "/command_palette.js";
 const TROGDOR_LOGIC_JS_ROUTE: &str = "/trogdor_logic.js";
 const TROGDOR_RENDER_JS_ROUTE: &str = "/trogdor_render.js";
 const WORKBENCH_RENDER_JS_ROUTE: &str = "/workbench_render.js";
+const WORKBENCH_REFRESH_JS_ROUTE: &str = "/workbench_refresh.js";
 const WORKBENCH_RECORDS_JS_ROUTE: &str = "/workbench_records.js";
 const APP_CSS_ROUTE: &str = "/app.css";
 const FRANKENTERM_JS_ROUTE: &str = "/assets/frankenterm/FrankenTerm.js";
@@ -105,6 +106,7 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route(TROGDOR_LOGIC_JS_ROUTE, get(trogdor_logic_js))
         .route(TROGDOR_RENDER_JS_ROUTE, get(trogdor_render_js))
         .route(WORKBENCH_RENDER_JS_ROUTE, get(workbench_render_js))
+        .route(WORKBENCH_REFRESH_JS_ROUTE, get(workbench_refresh_js))
         .route(WORKBENCH_RECORDS_JS_ROUTE, get(workbench_records_js))
         .route(APP_CSS_ROUTE, get(app_css))
         .route(FRANKENTERM_JS_ROUTE, get(franken_term_js))
@@ -679,6 +681,13 @@ async fn workbench_render_js() -> Response {
     javascript_asset(
         "src/web/workbench_render.js",
         include_str!("workbench_render.js"),
+    )
+}
+
+async fn workbench_refresh_js() -> Response {
+    javascript_asset(
+        "src/web/workbench_refresh.js",
+        include_str!("workbench_refresh.js"),
     )
 }
 
@@ -2240,6 +2249,11 @@ mod tests {
                 WORKBENCH_RENDER_JS_ROUTE,
                 workbench_render_js().await,
                 "export function buildWorkbenchWidgetsHtml",
+            ),
+            (
+                WORKBENCH_REFRESH_JS_ROUTE,
+                workbench_refresh_js().await,
+                "export async function runWorkbenchWidgetRefresh",
             ),
             (
                 WORKBENCH_RECORDS_JS_ROUTE,

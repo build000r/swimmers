@@ -14,6 +14,7 @@ import {
 } from "./terminal_surface_setup.js";
 import { runGlobalShortcutAction } from "./global_shortcut_dispatch.js";
 import { runSessionRefresh } from "./session_refresh.js";
+import { runWorkbenchWidgetRefresh } from "./workbench_refresh.js";
 import {
   MERMAID_PLAN_CONTENT_DISPLAY_MAX_CHARS,
   buildMermaidArtifactView,
@@ -111,8 +112,6 @@ import {
 } from "./trogdor_render.js";
 import {
   agentActionLabel,
-  applyWorkbenchWidgetResults,
-  buildWorkbenchWidgetRequestPlan,
   buildWorkbenchWidgetsHtml,
   emptyWorkbenchWidgets,
   operatorPressureSummary,
@@ -120,7 +119,6 @@ import {
   renderTranscriptBlocks,
   resetWorkbenchWidgetsState,
   selectedWorkbenchWidgetsSnapshot,
-  shouldThrottleWorkbenchWidgets,
   truncateWorkbenchText,
   workbenchWidgetClickPlan,
   workbenchWidgetLogPlan,
@@ -508,6 +506,15 @@ const sessionRefreshRuntime = {
   setModeStatus,
   resetAgentContextForSession,
   resetWorkbenchWidgetsForSession,
+};
+
+const workbenchRefreshRuntime = {
+  state,
+  throttleMs: AGENT_CONTEXT_REFRESH_MS,
+  currentSession,
+  renderWorkbenchWidgets,
+  apiMaybeFetch,
+  responseJsonOrNull,
 };
 
 function currentSession() {
@@ -1275,65 +1282,7 @@ function renderWorkbenchWidgets() {
 }
 
 async function refreshWorkbenchWidgetsForSelectedSession(options = {}) {
-  const session = currentSession();
-  if (!session || state.trogdorAtlasOpen) {
-    state.workbenchWidgets.loading = false;
-    renderWorkbenchWidgets();
-    return;
-  }
-
-  const sessionId = session.session_id;
-  if (shouldThrottleWorkbenchWidgets({
-    options,
-    widgets: state.workbenchWidgets,
-    sessionId,
-    throttleMs: AGENT_CONTEXT_REFRESH_MS,
-  })) {
-    return;
-  }
-  if (state.workbenchWidgets.loading && !options.force) {
-    return;
-  }
-
-  const requestSeq = state.workbenchWidgets.requestSeq + 1;
-  state.workbenchWidgets.requestSeq = requestSeq;
-  state.workbenchWidgets.sessionId = sessionId;
-  state.workbenchWidgets.error = "";
-  state.workbenchWidgets.loading = !options.silent;
-  renderWorkbenchWidgets();
-
-  const requestPlan = buildWorkbenchWidgetRequestPlan({
-    sessionId,
-    selectedTurnId: state.workbenchSelectedTurnId,
-    widgets: state.workbenchWidgets,
-    force: Boolean(options.force),
-  });
-  const { paths } = requestPlan;
-  const [timelineResult, skillsResult, tailResult, transcriptResult, artifactResult, diffResult] = await Promise.allSettled([
-    apiMaybeFetch(paths.timeline).then(responseJsonOrNull),
-    apiMaybeFetch(paths.skills).then(responseJsonOrNull),
-    apiMaybeFetch(paths.paneTail).then(responseJsonOrNull),
-    apiMaybeFetch(paths.transcript).then(responseJsonOrNull),
-    apiMaybeFetch(paths.artifact).then(responseJsonOrNull),
-    apiMaybeFetch(paths.gitDiff).then(responseJsonOrNull),
-  ]);
-
-  if (requestSeq !== state.workbenchWidgets.requestSeq || state.selectedSessionId !== sessionId) {
-    return;
-  }
-
-  const applied = applyWorkbenchWidgetResults(
-    state.workbenchWidgets,
-    { timelineResult, skillsResult, tailResult, transcriptResult, artifactResult, diffResult },
-    {
-      canDeltaTranscript: requestPlan.canDeltaTranscript,
-      requestedTurnId: requestPlan.requestedTurnId,
-      selectedTurnId: state.workbenchSelectedTurnId,
-    },
-  );
-  state.workbenchSelectedTurnId = applied.selectedTurnId;
-  state.workbenchWidgets.lastLoadedAt = Date.now();
-  renderWorkbenchWidgets();
+  await runWorkbenchWidgetRefresh(options, workbenchRefreshRuntime);
 }
 
 function applyZoomToSurface(surface) {
