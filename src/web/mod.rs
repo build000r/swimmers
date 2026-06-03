@@ -29,6 +29,7 @@ use crate::types::{clamp_terminal_resize, opcodes, ControlEvent, SessionSummary}
 
 const APP_JS_ROUTE: &str = "/app.js";
 const RENDERED_SURFACE_JS_ROUTE: &str = "/rendered_surface.js";
+const RENDERED_SURFACE_DRAW_JS_ROUTE: &str = "/rendered_surface_draw.js";
 const INPUT_SUPPORT_JS_ROUTE: &str = "/input_support.js";
 const SEND_SHEET_JS_ROUTE: &str = "/send_sheet.js";
 const TERMINAL_SURFACE_SETUP_JS_ROUTE: &str = "/terminal_surface_setup.js";
@@ -91,6 +92,10 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route(PUBLISHED_VIEW_ROUTE, get(selected_index))
         .route(APP_JS_ROUTE, get(app_js))
         .route(RENDERED_SURFACE_JS_ROUTE, get(rendered_surface_js))
+        .route(
+            RENDERED_SURFACE_DRAW_JS_ROUTE,
+            get(rendered_surface_draw_js),
+        )
         .route(INPUT_SUPPORT_JS_ROUTE, get(input_support_js))
         .route(SEND_SHEET_JS_ROUTE, get(send_sheet_js))
         .route(
@@ -613,6 +618,13 @@ async fn rendered_surface_js() -> Response {
     javascript_asset(
         "src/web/rendered_surface.js",
         include_str!("rendered_surface.js"),
+    )
+}
+
+async fn rendered_surface_draw_js() -> Response {
+    javascript_asset(
+        "src/web/rendered_surface_draw.js",
+        include_str!("rendered_surface_draw.js"),
     )
 }
 
@@ -2220,6 +2232,11 @@ mod tests {
                 RENDERED_SURFACE_JS_ROUTE,
                 rendered_surface_js().await,
                 "export function buildSurfaceFrame",
+            ),
+            (
+                RENDERED_SURFACE_DRAW_JS_ROUTE,
+                rendered_surface_draw_js().await,
+                "export function computeSurfaceLayout",
             ),
             (
                 INPUT_SUPPORT_JS_ROUTE,
