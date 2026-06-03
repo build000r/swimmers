@@ -619,6 +619,40 @@ export function trogdorAtlasTransitionState(action, atlasOpen = false) {
   }
 }
 
+export function trogdorActionPayloadForZone(zone = {}) {
+  switch (zone?.actionId) {
+    case "trogdor_send":
+      return {
+        type: "session",
+        sessionId: zone.sessionId,
+        label: zone.label || zone.sessionId,
+      };
+    case "trogdor_group_send":
+      return {
+        type: "group",
+        sessionIds: Array.isArray(zone.sessionIds) ? zone.sessionIds : [],
+        label: zone.label || "batch agents",
+      };
+    case "trogdor_launch":
+      return { cwd: zone.cwd };
+    case "trogdor_mermaid":
+    case "trogdor_commit":
+      return { sessionId: zone.sessionId };
+    default:
+      return null;
+  }
+}
+
+export function trogdorTerminalFocusStatus(selectedSession) {
+  return {
+    message: selectedSession
+      ? "Terminal focused. Type directly or use the terminal actions below."
+      : "Select a session row to attach its terminal first.",
+    error: !selectedSession,
+    timeoutMs: 2200,
+  };
+}
+
 export function trogdorHoverSessionIdForZone(zone, previousSessionId = null) {
   if (zone?.type === "trogdor_agent" || zone?.type === "trogdor_reader") {
     return zone.sessionId;

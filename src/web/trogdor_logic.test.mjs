@@ -32,6 +32,7 @@ import {
   trogdorDragonFrameForVector,
   trogdorDragonPose,
   trogdorPrimaryActionCue,
+  trogdorActionPayloadForZone,
   trogdorAtlasTransitionState,
   trogdorCueTransitionState,
   trogdorCurrentSurfaceSessionForHover,
@@ -53,6 +54,7 @@ import {
   trogdorSessionHasReadyClawg,
   trogdorSurfaceSessionTrogdorState,
   trogdorSwordsmanVisibleForState,
+  trogdorTerminalFocusStatus,
 } from "./trogdor_logic.js";
 
 function session(overrides = {}) {
@@ -343,6 +345,71 @@ test("Trogdor atlas transition helpers preserve path-specific state patches", ()
   assert.deepEqual(trogdorAtlasTransitionState("toggle", false), { trogdorAtlasOpen: true });
   assert.deepEqual(trogdorAtlasTransitionState("close"), { trogdorAtlasOpen: false });
   assert.deepEqual(trogdorAtlasTransitionState("unknown", "yes"), { trogdorAtlasOpen: true });
+});
+
+test("Trogdor action payload helpers preserve zone defaults and terminal copy", () => {
+  const groupIds = ["agent-1", "agent-2"];
+
+  assert.deepEqual(trogdorActionPayloadForZone({
+    actionId: "trogdor_send",
+    sessionId: "agent-1",
+    label: "Agent One",
+  }), {
+    type: "session",
+    sessionId: "agent-1",
+    label: "Agent One",
+  });
+  assert.deepEqual(trogdorActionPayloadForZone({
+    actionId: "trogdor_send",
+    sessionId: "agent-1",
+    label: "",
+  }), {
+    type: "session",
+    sessionId: "agent-1",
+    label: "agent-1",
+  });
+  assert.deepEqual(trogdorActionPayloadForZone({
+    actionId: "trogdor_group_send",
+    sessionIds: groupIds,
+    label: "",
+  }), {
+    type: "group",
+    sessionIds: groupIds,
+    label: "batch agents",
+  });
+  assert.deepEqual(trogdorActionPayloadForZone({
+    actionId: "trogdor_group_send",
+    sessionIds: "agent-1",
+    label: "not array",
+  }), {
+    type: "group",
+    sessionIds: [],
+    label: "not array",
+  });
+  assert.deepEqual(trogdorActionPayloadForZone({
+    actionId: "trogdor_launch",
+    cwd: "/tmp/repos/swimmers",
+  }), { cwd: "/tmp/repos/swimmers" });
+  assert.deepEqual(trogdorActionPayloadForZone({
+    actionId: "trogdor_mermaid",
+    sessionId: "agent-1",
+  }), { sessionId: "agent-1" });
+  assert.deepEqual(trogdorActionPayloadForZone({
+    actionId: "trogdor_commit",
+    sessionId: "agent-2",
+  }), { sessionId: "agent-2" });
+  assert.equal(trogdorActionPayloadForZone({ actionId: "refresh" }), null);
+
+  assert.deepEqual(trogdorTerminalFocusStatus({ session_id: "agent-1" }), {
+    message: "Terminal focused. Type directly or use the terminal actions below.",
+    error: false,
+    timeoutMs: 2200,
+  });
+  assert.deepEqual(trogdorTerminalFocusStatus(null), {
+    message: "Select a session row to attach its terminal first.",
+    error: true,
+    timeoutMs: 2200,
+  });
 });
 
 test("Trogdor reader base index prefers active reader key over persisted progress", () => {

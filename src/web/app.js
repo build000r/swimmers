@@ -52,6 +52,7 @@ import {
   trogdorDragonPose as buildTrogdorDragonPose,
   trogdorHasActionCue,
   trogdorPrimaryActionCue,
+  trogdorActionPayloadForZone,
   trogdorAtlasTransitionState,
   trogdorCueTransitionState,
   trogdorCurrentSurfaceSessionForHover,
@@ -71,6 +72,7 @@ import {
   trogdorSessionAwaitingUser,
   trogdorSurfaceSessionTrogdorState,
   trogdorSwordsmanVisibleForState,
+  trogdorTerminalFocusStatus,
 } from "./trogdor_logic.js";
 import {
   TROGDOR_REPO_POSITIONS,
@@ -4840,28 +4842,20 @@ async function handleSurfaceAction(zone) {
       renderHudSurface();
       break;
     case "trogdor_send":
-      openSendSheet({
-        type: "session",
-        sessionId: zone.sessionId,
-        label: zone.label || zone.sessionId,
-      });
+      openSendSheet(trogdorActionPayloadForZone(zone));
       break;
     case "trogdor_group_send":
-      openSendSheet({
-        type: "group",
-        sessionIds: Array.isArray(zone.sessionIds) ? zone.sessionIds : [],
-        label: zone.label || "batch agents",
-      });
+      openSendSheet(trogdorActionPayloadForZone(zone));
       break;
     case "trogdor_launch":
-      openCreateSheetForCwd(zone.cwd);
+      openCreateSheetForCwd(trogdorActionPayloadForZone(zone).cwd);
       break;
     case "trogdor_mermaid":
-      await selectSession(zone.sessionId);
+      await selectSession(trogdorActionPayloadForZone(zone).sessionId);
       openMermaidSheet();
       break;
     case "trogdor_commit":
-      await selectSession(zone.sessionId);
+      await selectSession(trogdorActionPayloadForZone(zone).sessionId);
       await launchCommitGrok();
       break;
     case "open_search":
@@ -4906,17 +4900,14 @@ async function handleSurfaceAction(zone) {
       await copyTerminalSelection();
       break;
     case "focus_terminal":
+    {
+      const focusStatus = trogdorTerminalFocusStatus(currentSession());
       Object.assign(state, trogdorAtlasTransitionState("close"));
       renderHudSurface();
       focusTerminalInputSurface({ preventScroll: true });
-      setUtilityStatus(
-        currentSession()
-          ? "Terminal focused. Type directly or use the terminal actions below."
-          : "Select a session row to attach its terminal first.",
-        !currentSession(),
-        2200,
-      );
+      setUtilityStatus(focusStatus.message, focusStatus.error, focusStatus.timeoutMs);
       break;
+    }
     case "refresh":
       await refreshSessions();
       break;
