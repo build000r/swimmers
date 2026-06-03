@@ -32,6 +32,7 @@ import {
 import {
   clearCreateBatchSelection as clearDirBrowserBatchSelection,
   dirCheckboxChangePlan as dirBrowserCheckboxChangePlan,
+  dirGroupChipClickPlan as dirBrowserGroupChipClickPlan,
   launchTargetPayload as dirBrowserLaunchTargetPayload,
   renderCreateBatchBar as renderDirBrowserCreateBatchBar,
   renderDirEntries as renderDirBrowserEntries,
@@ -1955,6 +1956,18 @@ function handleDirCheckboxChange(event) {
   (plan.type === "add" ? selected.add : selected.delete).call(selected, plan.path);
   if (plan.type === "add") el.createCwd.value = plan.path;
   syncSheetActionAvailability();
+  return true;
+}
+
+async function handleDirGroupChipClick(event, target = event.target instanceof Element ? event.target : null) {
+  const plan = dirBrowserGroupChipClickPlan(event.type, target, el.dirsManagedOnly.checked, state.dirBrowser.path, el.dirsPath.value);
+  if (plan.type !== "filter") return false;
+  state.dirBrowser.group = plan.group;
+  state.dirBrowser.managedOnly = plan.managedOnly;
+  el.dirsManagedOnly.checked = plan.managedOnly;
+  localStorage.setItem(DIR_BROWSER_MANAGED_ONLY_KEY, String(plan.managedOnly));
+  clearCreateBatchSelection();
+  await loadDirListing(plan.path, plan.managedOnly, plan.group);
   return true;
 }
 
@@ -5617,21 +5630,7 @@ function bindEvents() {
       return;
     }
 
-    const groupButton = target.closest(".dir-group-chip");
-    if (groupButton) {
-      const filter = String(groupButton.dataset.filter || "group");
-      const groupName = String(groupButton.dataset.group || "").trim();
-      const managedOnly = filter === "managed" ? true : filter === "all" ? false : el.dirsManagedOnly.checked;
-      state.dirBrowser.group = filter === "group" ? groupName : "";
-      state.dirBrowser.managedOnly = managedOnly;
-      el.dirsManagedOnly.checked = managedOnly;
-      localStorage.setItem(DIR_BROWSER_MANAGED_ONLY_KEY, String(managedOnly));
-      clearCreateBatchSelection();
-      await loadDirListing(
-        state.dirBrowser.path || el.dirsPath.value,
-        managedOnly,
-        state.dirBrowser.group,
-      );
+    if (await handleDirGroupChipClick(event, target)) {
       return;
     }
 
@@ -5998,7 +5997,7 @@ export const __swimmersWebTest = {
   sendTerminalControlKey,
   terminalKeyActionForDomEvent,
   handleTerminalInlineInputKeydown,
-  handleSendFormSubmit, handleAuthTokenButtonAction, handleCreateBatchVisibleAction, handleDirCheckboxChange,
+  handleSendFormSubmit, handleAuthTokenButtonAction, handleCreateBatchVisibleAction, handleDirCheckboxChange, handleDirGroupChipClick,
   focusTerminalInputSurface,
   syncTerminalInputDock,
   submitTerminalInputDock,

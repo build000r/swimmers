@@ -2401,6 +2401,48 @@ test("directory checkbox change action preserves add, remove, reset, and ignore 
   assert.equal(web.handleDirCheckboxChange({ type: "change", target: new MockElement("ignored") }), false);
 });
 
+test("directory group chip click action preserves filters, storage, and load path", async () => {
+  resetWebState();
+  const chip = (dataset) => {
+    const node = new MockElement("dir-group-chip");
+    node.dataset = { ...dataset };
+    node.closest = (selector) => selector === ".dir-group-chip" ? node : null;
+    return node;
+  };
+  const requests = [];
+  globalThis.fetch = async (path) => {
+    requests.push(String(path));
+    return jsonResponse(200, { path: "/srv/repos", entries: [], groups: ["clients"] });
+  };
+
+  web.state.dirBrowser.path = "/srv/repos";
+  web.state.dirBrowser.group = "old";
+  web.state.dirBrowser.managedOnly = false;
+  web.state.dirBrowser.batchSelected = new Set(["/srv/repos/old"]);
+  web.el.dirsPath.value = "/typed";
+  web.el.dirsManagedOnly.checked = false;
+
+  assert.equal(await web.handleDirGroupChipClick({ type: "click", target: chip({ filter: "managed", group: "clients" }) }), true);
+  assert.equal(web.state.dirBrowser.group, "");
+  assert.equal(web.state.dirBrowser.managedOnly, true);
+  assert.equal(web.el.dirsManagedOnly.checked, true);
+  assert.equal(web.state.dirBrowser.batchSelected.size, 0);
+  assert.equal(storage.get("swimmers.web.dirs.managed"), "true");
+  assert.equal(requests.at(-1), "/v1/dirs?path=%2Fsrv%2Frepos&managed_only=true");
+
+  web.state.dirBrowser.path = "";
+  web.state.dirBrowser.batchSelected = new Set(["/old"]);
+  web.el.dirsPath.value = "/typed";
+  web.el.dirsManagedOnly.checked = true;
+
+  assert.equal(await web.handleDirGroupChipClick({ type: "click", target: chip({ filter: "group", group: " clients " }) }), true);
+  assert.equal(web.state.dirBrowser.group, "clients");
+  assert.equal(web.state.dirBrowser.managedOnly, true);
+  assert.equal(web.state.dirBrowser.batchSelected.size, 0);
+  assert.equal(requests.at(-1), "/v1/dirs?path=%2Ftyped&managed_only=true&group=clients");
+  assert.equal(await web.handleDirGroupChipClick({ type: "click", target: new MockElement("ignored") }), false);
+});
+
 test("send form submit handler preserves line send side effects and cleanup", async () => {
   resetWebState();
   web.state.trogdorAtlasOpen = false;

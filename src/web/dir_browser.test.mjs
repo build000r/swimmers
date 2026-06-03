@@ -8,6 +8,7 @@ import {
   dirEntryGroups,
   dirEntryMatchesSearch,
   dirEntryResolvedPath,
+  dirGroupChipClickPlan,
   joinPath,
   launchTargetPayload,
   renderCreateBatchBar,
@@ -135,6 +136,51 @@ test("dirCheckboxChangePlan preserves ignored, reset, add, and remove decisions"
   assert.deepEqual(dirCheckboxChangePlan("change", checkboxFor("/srv/repos/a", false).target), {
     type: "remove",
     path: "/srv/repos/a",
+  });
+});
+
+test("dirGroupChipClickPlan preserves managed, all, group, blank, and ignored decisions", () => {
+  const chipFor = (dataset) => {
+    const chip = { dataset };
+    return {
+      chip,
+      target: {
+        closest(selector) {
+          return selector === ".dir-group-chip" ? chip : null;
+        },
+      },
+    };
+  };
+
+  assert.deepEqual(dirGroupChipClickPlan("keydown", chipFor({ filter: "managed" }).target, false, "/current", "/typed"), {
+    type: "ignore",
+  });
+  assert.deepEqual(dirGroupChipClickPlan("click", { closest: () => null }, false, "/current", "/typed"), {
+    type: "ignore",
+  });
+  assert.deepEqual(dirGroupChipClickPlan("click", chipFor({ filter: "managed", group: "clients" }).target, false, "/current", "/typed"), {
+    type: "filter",
+    group: "",
+    managedOnly: true,
+    path: "/current",
+  });
+  assert.deepEqual(dirGroupChipClickPlan("click", chipFor({ filter: "all", group: "clients" }).target, true, "", "/typed"), {
+    type: "filter",
+    group: "",
+    managedOnly: false,
+    path: "/typed",
+  });
+  assert.deepEqual(dirGroupChipClickPlan("click", chipFor({ filter: "group", group: " clients " }).target, true, "/current", "/typed"), {
+    type: "filter",
+    group: "clients",
+    managedOnly: true,
+    path: "/current",
+  });
+  assert.deepEqual(dirGroupChipClickPlan("click", chipFor({ filter: "group", group: " " }).target, false, "", "/typed"), {
+    type: "filter",
+    group: "",
+    managedOnly: false,
+    path: "/typed",
   });
 });
 

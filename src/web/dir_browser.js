@@ -159,6 +159,20 @@ export function dirCheckboxChangePlan(eventType, target) {
   return checkbox.checked ? { type: "add", path } : { type: "remove", path };
 }
 
+export function dirGroupChipClickPlan(eventType, target, managedOnlyChecked = false, currentPath = "", inputPath = "") {
+  if (eventType !== "click") {
+    return { type: "ignore" };
+  }
+  const button = target?.closest?.(".dir-group-chip") ?? null;
+  if (!button) {
+    return { type: "ignore" };
+  }
+  const filter = String(button.dataset.filter || "group");
+  const groupName = String(button.dataset.group || "").trim();
+  const managedOnly = filter === "managed" ? true : filter === "all" ? false : Boolean(managedOnlyChecked);
+  return { type: "filter", group: filter === "group" ? groupName : "", managedOnly, path: currentPath || inputPath };
+}
+
 export function selectedLaunchTarget(el, dirBrowser) {
   const value = String(el.createLaunchTarget?.value || dirBrowser.launchTarget || "local").trim();
   return value || "local";
