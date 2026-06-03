@@ -1341,6 +1341,7 @@ test("terminal workbench fetches and renders selected agent context", async () =
   await web.refreshAgentContextForSelectedSession({ force: true });
 
   assert.deepEqual(requested, ["/v1/sessions/sess_0/agent-context"]);
+  assert.equal(web.el.terminalWorkbenchStatus.textContent, "structured context");
   assert.equal(web.el.terminalWorkbenchTask.textContent, "build the workbench");
   assert.ok(web.el.terminalWorkbenchCurrent.textContent.includes("cargo test agent_context"));
   assert.ok(web.el.terminalWorkbenchPressure.textContent.includes("awaiting user"));

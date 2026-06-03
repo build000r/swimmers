@@ -35,6 +35,7 @@ const TERMINAL_SURFACE_SETUP_JS_ROUTE: &str = "/terminal_surface_setup.js";
 const TERMINAL_RESIZE_JS_ROUTE: &str = "/terminal_resize.js";
 const GLOBAL_SHORTCUT_DISPATCH_JS_ROUTE: &str = "/global_shortcut_dispatch.js";
 const SESSION_REFRESH_JS_ROUTE: &str = "/session_refresh.js";
+const AGENT_CONTEXT_REFRESH_JS_ROUTE: &str = "/agent_context_refresh.js";
 const MERMAID_ARTIFACT_JS_ROUTE: &str = "/mermaid_artifact.js";
 const TERMINAL_SAFETY_JS_ROUTE: &str = "/terminal_safety.js";
 const TERMINAL_PROTOCOL_JS_ROUTE: &str = "/terminal_protocol.js";
@@ -44,6 +45,7 @@ const TROGDOR_LOGIC_JS_ROUTE: &str = "/trogdor_logic.js";
 const TROGDOR_RENDER_JS_ROUTE: &str = "/trogdor_render.js";
 const WORKBENCH_DOM_JS_ROUTE: &str = "/workbench_dom.js";
 const WORKBENCH_RENDER_JS_ROUTE: &str = "/workbench_render.js";
+const WORKBENCH_LOG_LENS_JS_ROUTE: &str = "/workbench_log_lens.js";
 const WORKBENCH_REFRESH_JS_ROUTE: &str = "/workbench_refresh.js";
 const WORKBENCH_RECORDS_JS_ROUTE: &str = "/workbench_records.js";
 const APP_CSS_ROUTE: &str = "/app.css";
@@ -101,6 +103,10 @@ pub fn routes() -> Router<Arc<AppState>> {
             get(global_shortcut_dispatch_js),
         )
         .route(SESSION_REFRESH_JS_ROUTE, get(session_refresh_js))
+        .route(
+            AGENT_CONTEXT_REFRESH_JS_ROUTE,
+            get(agent_context_refresh_js),
+        )
         .route(MERMAID_ARTIFACT_JS_ROUTE, get(mermaid_artifact_js))
         .route(TERMINAL_SAFETY_JS_ROUTE, get(terminal_safety_js))
         .route(TERMINAL_PROTOCOL_JS_ROUTE, get(terminal_protocol_js))
@@ -110,6 +116,7 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route(TROGDOR_RENDER_JS_ROUTE, get(trogdor_render_js))
         .route(WORKBENCH_DOM_JS_ROUTE, get(workbench_dom_js))
         .route(WORKBENCH_RENDER_JS_ROUTE, get(workbench_render_js))
+        .route(WORKBENCH_LOG_LENS_JS_ROUTE, get(workbench_log_lens_js))
         .route(WORKBENCH_REFRESH_JS_ROUTE, get(workbench_refresh_js))
         .route(WORKBENCH_RECORDS_JS_ROUTE, get(workbench_records_js))
         .route(APP_CSS_ROUTE, get(app_css))
@@ -645,6 +652,13 @@ async fn session_refresh_js() -> Response {
     )
 }
 
+async fn agent_context_refresh_js() -> Response {
+    javascript_asset(
+        "src/web/agent_context_refresh.js",
+        include_str!("agent_context_refresh.js"),
+    )
+}
+
 async fn mermaid_artifact_js() -> Response {
     javascript_asset(
         "src/web/mermaid_artifact.js",
@@ -696,6 +710,13 @@ async fn workbench_render_js() -> Response {
     javascript_asset(
         "src/web/workbench_render.js",
         include_str!("workbench_render.js"),
+    )
+}
+
+async fn workbench_log_lens_js() -> Response {
+    javascript_asset(
+        "src/web/workbench_log_lens.js",
+        include_str!("workbench_log_lens.js"),
     )
 }
 
@@ -2231,6 +2252,11 @@ mod tests {
                 "export async function runSessionRefresh",
             ),
             (
+                AGENT_CONTEXT_REFRESH_JS_ROUTE,
+                agent_context_refresh_js().await,
+                "export async function runAgentContextRefresh",
+            ),
+            (
                 MERMAID_ARTIFACT_JS_ROUTE,
                 mermaid_artifact_js().await,
                 "export function boundedArtifactText",
@@ -2274,6 +2300,11 @@ mod tests {
                 WORKBENCH_RENDER_JS_ROUTE,
                 workbench_render_js().await,
                 "export function buildWorkbenchWidgetsHtml",
+            ),
+            (
+                WORKBENCH_LOG_LENS_JS_ROUTE,
+                workbench_log_lens_js().await,
+                "export function renderWorkbenchLogLens",
             ),
             (
                 WORKBENCH_REFRESH_JS_ROUTE,

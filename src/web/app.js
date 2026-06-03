@@ -15,6 +15,7 @@ import {
 import { runTerminalSurfaceResize } from "./terminal_resize.js";
 import { runGlobalShortcutAction } from "./global_shortcut_dispatch.js";
 import { runSessionRefresh } from "./session_refresh.js";
+import { runAgentContextRefresh } from "./agent_context_refresh.js";
 import { runWorkbenchWidgetRefresh } from "./workbench_refresh.js";
 import { writeWorkbenchWidgetsHtmlToDom } from "./workbench_dom.js";
 import {
@@ -1168,56 +1169,14 @@ function renderTerminalWorkbench() {
 }
 
 async function refreshAgentContextForSelectedSession(options = {}) {
-  const session = currentSession();
-  if (!session || state.trogdorAtlasOpen) {
-    state.agentContextLoading = false;
-    renderTerminalWorkbench();
-    return;
-  }
-
-  const sessionId = session.session_id;
-  const now = Date.now();
-  const hasCurrentPayload =
-    state.agentContextSessionId === sessionId && Boolean(state.agentContextPayload);
-  if (
-    options.throttle &&
-    hasCurrentPayload &&
-    now - state.agentContextLastLoadedAt < AGENT_CONTEXT_REFRESH_MS
-  ) {
-    return;
-  }
-  if (state.agentContextLoading && !options.force) {
-    return;
-  }
-
-  const requestSeq = state.agentContextRequestSeq + 1;
-  state.agentContextRequestSeq = requestSeq;
-  state.agentContextSessionId = sessionId;
-  state.agentContextError = "";
-  state.agentContextLoading = !options.silent || !hasCurrentPayload;
-  renderTerminalWorkbench();
-
-  try {
-    const response = await apiFetch(`/v1/sessions/${encodeURIComponent(sessionId)}/agent-context`);
-    const payload = await response.json();
-    if (requestSeq !== state.agentContextRequestSeq || state.selectedSessionId !== sessionId) {
-      return;
-    }
-    state.agentContextPayload = payload;
-    state.agentContextError = "";
-    state.agentContextLastLoadedAt = Date.now();
-  } catch (error) {
-    if (requestSeq !== state.agentContextRequestSeq || state.selectedSessionId !== sessionId) {
-      return;
-    }
-    state.agentContextPayload = null;
-    state.agentContextError = error?.message || "context unavailable";
-  } finally {
-    if (requestSeq === state.agentContextRequestSeq) {
-      state.agentContextLoading = false;
-      renderTerminalWorkbench();
-    }
-  }
+  await runAgentContextRefresh(options, {
+    state,
+    throttleMs: AGENT_CONTEXT_REFRESH_MS,
+    now: () => Date.now(),
+    currentSession,
+    apiFetch,
+    renderTerminalWorkbench,
+  });
 }
 
 function selectedWorkbenchWidgets() {
