@@ -1913,37 +1913,58 @@ pub fn context_limit_for_tool(tool: Option<&str>) -> u64 {
     }
 }
 
-pub fn detect_tool_name(comm: &str) -> Option<&'static str> {
-    let token = comm.split_whitespace().next().unwrap_or(comm);
-    let token = token.trim_matches(|c: char| {
-        c == '"'
-            || c == '\''
-            || c == '`'
-            || c == ','
-            || c == ';'
-            || c == ':'
-            || c == '('
-            || c == ')'
-            || c == '['
-            || c == ']'
-            || c == '{'
-            || c == '}'
-    });
-    let token = token.rsplit('/').next().unwrap_or(token);
-    let token = token.trim_start_matches('-');
+const TOOL_NAME_ALIASES: &[(&str, &str)] = &[
+    ("claude", "Claude Code"),
+    ("claude-code", "Claude Code"),
+    ("claude_code", "Claude Code"),
+    ("codex", "Codex"),
+    ("codex-cli", "Codex"),
+    ("codex_cli", "Codex"),
+    ("grok", "Grok"),
+    ("grok-cli", "Grok"),
+    ("grok_cli", "Grok"),
+    ("amp", "Amp"),
+    ("opencode", "OpenCode"),
+    ("open-code", "OpenCode"),
+    ("open_code", "OpenCode"),
+    ("aider", "Aider"),
+    ("goose", "Goose"),
+    ("cline", "Cline"),
+    ("cursor", "Cursor"),
+];
 
-    match token.to_lowercase().as_str() {
-        "claude" | "claude-code" | "claude_code" => Some("Claude Code"),
-        "codex" | "codex-cli" | "codex_cli" => Some("Codex"),
-        "grok" | "grok-cli" | "grok_cli" => Some("Grok"),
-        "amp" => Some("Amp"),
-        "opencode" | "open-code" | "open_code" => Some("OpenCode"),
-        "aider" => Some("Aider"),
-        "goose" => Some("Goose"),
-        "cline" => Some("Cline"),
-        "cursor" => Some("Cursor"),
-        _ => None,
-    }
+const TOOL_NAME_TRIM_CHARS: &[char] =
+    &['"', '\'', '`', ',', ';', ':', '(', ')', '[', ']', '{', '}'];
+
+pub fn detect_tool_name(comm: &str) -> Option<&'static str> {
+    let token = normalized_command_token(comm);
+    known_tool_name(&token)
+}
+
+fn normalized_command_token(comm: &str) -> String {
+    let token = command_token(comm);
+    let token = trim_command_punctuation(token);
+    let token = command_basename(token);
+    let token = token.trim_start_matches('-');
+    token.to_lowercase()
+}
+
+fn command_token(comm: &str) -> &str {
+    comm.split_whitespace().next().unwrap_or(comm)
+}
+
+fn trim_command_punctuation(token: &str) -> &str {
+    token.trim_matches(TOOL_NAME_TRIM_CHARS)
+}
+
+fn command_basename(token: &str) -> &str {
+    token.rsplit('/').next().unwrap_or(token)
+}
+
+fn known_tool_name(normalized_token: &str) -> Option<&'static str> {
+    TOOL_NAME_ALIASES
+        .iter()
+        .find_map(|(alias, name)| (*alias == normalized_token).then_some(*name))
 }
 
 #[cfg(test)]
@@ -2072,6 +2093,23 @@ mod tests {
         assert_eq!(detect_tool_name("codex-cli"), Some("Codex"));
         assert_eq!(detect_tool_name("'codex'"), Some("Codex"));
         assert_eq!(detect_tool_name("grok-cli"), Some("Grok"));
+    }
+
+    #[test]
+    fn detect_tool_name_preserves_known_aliases() {
+        for (alias, name) in TOOL_NAME_ALIASES {
+            assert_eq!(detect_tool_name(alias), Some(*name), "alias {alias}");
+        }
+    }
+
+    #[test]
+    fn detect_tool_name_preserves_token_normalization_order() {
+        assert_eq!(detect_tool_name("'codex' --model gpt-5"), Some("Codex"));
+        assert_eq!(
+            detect_tool_name("/usr/local/bin/-claude"),
+            Some("Claude Code")
+        );
+        assert_eq!(detect_tool_name("(/opt/bin/grok-cli)"), Some("Grok"));
     }
 
     #[test]
