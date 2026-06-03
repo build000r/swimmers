@@ -107,6 +107,35 @@ export function globalShortcutPlan(event, context = {}) {
   }
 }
 
+const MOBILE_KEYBOARD_SPECIAL_KEYS = new Set([
+  "Backspace",
+  "Delete",
+  "Enter",
+  "Tab",
+  "Escape",
+  "ArrowUp",
+  "ArrowDown",
+  "ArrowLeft",
+  "ArrowRight",
+  "Home",
+  "End",
+  "PageUp",
+  "PageDown",
+]);
+
+export function mobileKeyboardKeyPlan(event, context = {}) {
+  if (context.readOnly || !context.hasCurrentSession) {
+    return { type: "ignore" };
+  }
+  if (!MOBILE_KEYBOARD_SPECIAL_KEYS.has(event?.key)) {
+    return { type: "ignore" };
+  }
+  if (event.key === "Escape") {
+    return { type: "close_mobile_keyboard" };
+  }
+  return { type: "forward_key" };
+}
+
 function clampInt(value, fallback, min, max) {
   const numeric = Number.isFinite(value) ? Math.trunc(value) : fallback;
   return Math.max(min, Math.min(max, numeric));

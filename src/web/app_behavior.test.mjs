@@ -2020,6 +2020,73 @@ test("global shortcut handler preserves side effects and handled no-ops", () => 
   assert.equal(web.handleGlobalShortcut({ ctrlKey: true, shiftKey: true, code: "KeyZ" }), false);
 });
 
+test("mobile keyboard key handler preserves shortcut precedence, close, and forwarding", () => {
+  resetWebState();
+  web.state.selectedSessionId = "sess_0";
+  web.state.trogdorAtlasOpen = false;
+  web.state.terminalFallbackActive = true;
+  const sent = [];
+  web.state.ws = {
+    readyState: WebSocket.OPEN,
+    send(payload) {
+      sent.push(JSON.parse(payload));
+    },
+  };
+
+  let prevented = 0;
+  assert.equal(web.handleMobileKeyboardProxyKeydown({
+    ctrlKey: true,
+    code: "KeyK",
+    preventDefault() {
+      prevented += 1;
+    },
+  }), true);
+  assert.equal(prevented, 1);
+  assert.equal(web.state.activeSheet, "palette");
+  assert.equal(sent.length, 0);
+
+  web.state.activeSheet = null;
+  web.state.readOnly = true;
+  prevented = 0;
+  assert.equal(web.handleMobileKeyboardProxyKeydown({
+    key: "ArrowUp",
+    code: "ArrowUp",
+    preventDefault() {
+      prevented += 1;
+    },
+  }), false);
+  assert.equal(prevented, 0);
+  assert.equal(sent.length, 0);
+
+  web.state.readOnly = false;
+  web.state.mobileKeyboardActive = true;
+  document.activeElement = web.el.mobileKeyboardProxy;
+  prevented = 0;
+  assert.equal(web.handleMobileKeyboardProxyKeydown({
+    key: "Escape",
+    code: "Escape",
+    preventDefault() {
+      prevented += 1;
+    },
+  }), true);
+  assert.equal(prevented, 1);
+  assert.equal(web.state.mobileKeyboardActive, false);
+  assert.equal(document.activeElement, web.el.terminalFallback);
+
+  prevented = 0;
+  assert.equal(web.handleMobileKeyboardProxyKeydown({
+    key: "Backspace",
+    code: "Backspace",
+    preventDefault() {
+      prevented += 1;
+    },
+  }), true);
+  assert.equal(prevented, 1);
+  assert.equal(sent.at(-1).type, "input_text");
+  assert.equal(sent.at(-1).data, "\x7f");
+  assert.equal(web.state.trogdorBurntSessions.has("sess_0"), true);
+});
+
 test("send history stores multiline prompts for recall chips", () => {
   resetWebState();
 

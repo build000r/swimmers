@@ -5,6 +5,7 @@ import {
   eventCell,
   eventClientPoint,
   globalShortcutPlan,
+  mobileKeyboardKeyPlan,
   shouldIgnoreSyntheticClick,
 } from "./input_support.js";
 
@@ -120,4 +121,34 @@ test("globalShortcutPlan preserves ctrl-shift commands and gated handled no-ops"
   assert.deepEqual(globalShortcutPlan({ ctrlKey: true, shiftKey: true, altKey: true, code: "KeyF" }), {
     type: "unhandled",
   });
+});
+
+test("mobileKeyboardKeyPlan preserves special-key forwarding and no-op gates", () => {
+  assert.deepEqual(mobileKeyboardKeyPlan({ key: "ArrowUp" }, { readOnly: true, hasCurrentSession: true }), {
+    type: "ignore",
+  });
+  assert.deepEqual(mobileKeyboardKeyPlan({ key: "ArrowUp" }, { readOnly: false, hasCurrentSession: false }), {
+    type: "ignore",
+  });
+  assert.deepEqual(mobileKeyboardKeyPlan({ key: "a" }, { hasCurrentSession: true }), { type: "ignore" });
+  assert.deepEqual(mobileKeyboardKeyPlan({ key: "Escape" }, { hasCurrentSession: true }), {
+    type: "close_mobile_keyboard",
+  });
+
+  for (const key of [
+    "Backspace",
+    "Delete",
+    "Enter",
+    "Tab",
+    "ArrowUp",
+    "ArrowDown",
+    "ArrowLeft",
+    "ArrowRight",
+    "Home",
+    "End",
+    "PageUp",
+    "PageDown",
+  ]) {
+    assert.deepEqual(mobileKeyboardKeyPlan({ key }, { hasCurrentSession: true }), { type: "forward_key" });
+  }
 });

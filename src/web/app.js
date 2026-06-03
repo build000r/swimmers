@@ -1,5 +1,10 @@
 import { buildSurfaceFrame, surfaceActionAt, surfaceConsumesPointer } from "./rendered_surface.js";
-import { eventCell, globalShortcutPlan, shouldIgnoreSyntheticClick } from "./input_support.js";
+import {
+  eventCell,
+  globalShortcutPlan,
+  mobileKeyboardKeyPlan,
+  shouldIgnoreSyntheticClick,
+} from "./input_support.js";
 import {
   MERMAID_PLAN_CONTENT_DISPLAY_MAX_CHARS,
   buildMermaidArtifactView,
@@ -5127,6 +5132,31 @@ function handleGlobalShortcut(event) {
   return true;
 }
 
+function handleMobileKeyboardProxyKeydown(event) {
+  if (handleGlobalShortcut(event)) {
+    event.preventDefault();
+    return true;
+  }
+  const plan = mobileKeyboardKeyPlan(event, {
+    readOnly: state.readOnly,
+    hasCurrentSession: Boolean(currentSession()),
+  });
+  if (plan.type === "ignore") {
+    return false;
+  }
+  event.preventDefault();
+  if (plan.type === "close_mobile_keyboard") {
+    closeMobileKeyboard();
+    focusTerminalInputSurface({ preventScroll: true });
+    return true;
+  }
+  if (keyBeginsTrogdorResponse(event)) {
+    markTrogdorSessionsResponded([state.selectedSessionId]);
+  }
+  forwardTerminalKeyDown(event);
+  return true;
+}
+
 function bindEvents() {
   bindTrogdorEvents();
   document.addEventListener?.("keydown", (event) => {
@@ -5305,43 +5335,7 @@ function bindEvents() {
     syncMobileKeyboardState();
     forwardTerminalEvent({ kind: "focus", focused: false });
   });
-  el.mobileKeyboardProxy.addEventListener("keydown", (event) => {
-    if (handleGlobalShortcut(event)) {
-      event.preventDefault();
-      return;
-    }
-    if (state.readOnly || !currentSession()) {
-      return;
-    }
-    const specialKeys = new Set([
-      "Backspace",
-      "Delete",
-      "Enter",
-      "Tab",
-      "Escape",
-      "ArrowUp",
-      "ArrowDown",
-      "ArrowLeft",
-      "ArrowRight",
-      "Home",
-      "End",
-      "PageUp",
-      "PageDown",
-    ]);
-    if (!specialKeys.has(event.key)) {
-      return;
-    }
-    event.preventDefault();
-    if (event.key === "Escape") {
-      closeMobileKeyboard();
-      focusTerminalInputSurface({ preventScroll: true });
-      return;
-    }
-    if (keyBeginsTrogdorResponse(event)) {
-      markTrogdorSessionsResponded([state.selectedSessionId]);
-    }
-    forwardTerminalKeyDown(event);
-  });
+  el.mobileKeyboardProxy.addEventListener("keydown", handleMobileKeyboardProxyKeydown);
   el.mobileKeyboardProxy.addEventListener("input", (event) => {
     if (state.readOnly || !currentSession()) {
       el.mobileKeyboardProxy.value = "";
@@ -6068,6 +6062,7 @@ export const __swimmersWebTest = {
   handleTerminalFallbackKeyEvent,
   handleTerminalFallbackPasteEvent,
   handleGlobalShortcut,
+  handleMobileKeyboardProxyKeydown,
   sendTerminalControlKey,
   terminalKeyActionForDomEvent,
   focusTerminalInputSurface,
