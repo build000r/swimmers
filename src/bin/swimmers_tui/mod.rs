@@ -310,25 +310,50 @@ pub(crate) fn init_tui_tracing() {
 pub(crate) fn run() -> Result<(), Box<dyn std::error::Error>> {
     init_tui_tracing();
     install_panic_hook();
+    log_tui_startup();
+
+    let (mut app, mut renderer) = initialize_tui_app()?;
+    run_tui_frame_loop(&mut app, &mut renderer)?;
+    shutdown_tui_runtime(&mut app, &mut renderer)?;
+
+    Ok(())
+}
+
+fn log_tui_startup() {
     tracing::info!(
         target_url = std::env::var("SWIMMERS_TUI_URL")
             .as_deref()
             .unwrap_or("<unset>"),
         "swimmers-tui run loop starting"
     );
-    let (mut app, mut renderer) = initialize_tui_app()?;
+}
 
-    loop {
-        let layout = prepare_frame(&mut app, &mut renderer);
-        renderer.flush()?;
+fn run_tui_frame_loop(
+    app: &mut App<TuiClient>,
+    renderer: &mut Renderer,
+) -> Result<(), Box<dyn std::error::Error>> {
+    while render_and_handle_next_tui_event(app, renderer)? {}
+    Ok(())
+}
 
-        if event::poll(FRAME_DURATION)?
-            && !handle_tui_event(&mut app, &mut renderer, layout, event::read()?)?
-        {
-            break;
-        }
+fn render_and_handle_next_tui_event(
+    app: &mut App<TuiClient>,
+    renderer: &mut Renderer,
+) -> Result<bool, Box<dyn std::error::Error>> {
+    let layout = prepare_frame(app, renderer);
+    renderer.flush()?;
+
+    if !event::poll(FRAME_DURATION)? {
+        return Ok(true);
     }
 
+    Ok(handle_tui_event(app, renderer, layout, event::read()?)?)
+}
+
+fn shutdown_tui_runtime(
+    app: &mut App<TuiClient>,
+    renderer: &mut Renderer,
+) -> Result<(), Box<dyn std::error::Error>> {
     app.clear_published_selection();
     let cleanup_result = renderer.cleanup();
     let shutdown_result = app.shutdown_embedded();
