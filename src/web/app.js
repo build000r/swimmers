@@ -5374,6 +5374,22 @@ function handleTerminalInlineInputInput() { resizeTerminalInlineInput(); syncTer
 
 function handleTerminalKeyStripClick(event) { const action = terminalKeyStripClickExecutorPlan(terminalKeyStripClickPlan(event.type, event.target)); if (!action.sendKey) return; if (action.preventDefault) event.preventDefault(); sendTerminalControlKey(action.actionId); focusTerminalInputSurface({ preventScroll: true }); }
 
+function handleModalRootKeydown(event) { if (event.key === "Escape") { event.preventDefault(); closeSheets(); } }
+
+function handlePaletteSearchInput() { state.paletteIndex = 0; renderCommandPalette(); }
+
+function handleSearchFormSubmit(event) { event.preventDefault(); closeSheets(); }
+
+function handleTerminalSearchInput(event) { applySearchQuery(event.target.value); }
+
+function handleSearchPrevButtonClick() { cycleSearchMatch(-1); }
+
+function handleSearchNextButtonClick() { cycleSearchMatch(1); }
+
+function handleSearchClearButtonClick() { el.terminalSearch.value = ""; applySearchQuery(""); }
+
+function handleSendModeChange() { updateSendHint(); }
+
 function bindEvents() {
   bindTrogdorEvents();
   document.addEventListener?.("keydown", handleDocumentCommandPaletteShortcut);
@@ -5408,40 +5424,20 @@ function bindEvents() {
   el.mobileKeyboardProxy.addEventListener("keydown", handleMobileKeyboardProxyKeydown);
   el.mobileKeyboardProxy.addEventListener("input", handleMobileKeyboardProxyInput);
   el.modalBackdrop.addEventListener("click", closeSheets);
-  el.modalRoot.addEventListener("keydown", (event) => {
-    if (event.key === "Escape") {
-      event.preventDefault();
-      closeSheets();
-    }
-  });
-  el.paletteSearch.addEventListener("input", () => {
-    state.paletteIndex = 0;
-    renderCommandPalette();
-  });
+  el.modalRoot.addEventListener("keydown", handleModalRootKeydown);
+  el.paletteSearch.addEventListener("input", handlePaletteSearchInput);
   el.paletteSearch.addEventListener("keydown", handleCommandPaletteEvent);
   el.paletteResults.addEventListener("mousemove", handleCommandPaletteEvent);
   el.paletteResults.addEventListener("click", handleCommandPaletteEvent);
   el.paletteCloseButton.addEventListener("click", closeSheets);
 
-  el.searchForm.addEventListener("submit", (event) => {
-    event.preventDefault();
-    closeSheets();
-  });
-  el.terminalSearch.addEventListener("input", (event) => {
-    applySearchQuery(event.target.value);
-  });
-  el.searchPrevButton.addEventListener("click", () => {
-    cycleSearchMatch(-1);
-  });
-  el.searchNextButton.addEventListener("click", () => {
-    cycleSearchMatch(1);
-  });
-  el.searchClearButton.addEventListener("click", () => {
-    el.terminalSearch.value = "";
-    applySearchQuery("");
-  });
+  el.searchForm.addEventListener("submit", handleSearchFormSubmit);
+  el.terminalSearch.addEventListener("input", handleTerminalSearchInput);
+  el.searchPrevButton.addEventListener("click", handleSearchPrevButtonClick);
+  el.searchNextButton.addEventListener("click", handleSearchNextButtonClick);
+  el.searchClearButton.addEventListener("click", handleSearchClearButtonClick);
   el.searchCloseButton.addEventListener("click", closeSheets);
-  el.sendMode.addEventListener("change", updateSendHint);
+  el.sendMode.addEventListener("change", handleSendModeChange);
 
   el.thoughtConfigForm.addEventListener("submit", async (event) => {
     event.preventDefault();
