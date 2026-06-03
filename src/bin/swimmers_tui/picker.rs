@@ -724,101 +724,121 @@ pub(crate) struct ActionLabel {
     pub(crate) clickable: bool,
 }
 
+fn picker_entry_action_order() -> [RepoActionKind; 3] {
+    [
+        RepoActionKind::Commit,
+        RepoActionKind::Restart,
+        RepoActionKind::Open,
+    ]
+}
+
+fn picker_entry_action_label(
+    text: &str,
+    kind: RepoActionKind,
+    color: Color,
+    clickable: bool,
+) -> ActionLabel {
+    ActionLabel {
+        text: text.into(),
+        kind,
+        color,
+        clickable,
+    }
+}
+
+fn picker_entry_running_action(entry: &DirEntry) -> Option<ActionLabel> {
+    let tracked = entry.repo_action.as_ref()?;
+    (tracked.state == RepoActionState::Running)
+        .then(|| picker_entry_action_label("[running]", tracked.kind, Color::Yellow, false))
+}
+
+fn picker_entry_status_action(
+    entry: &DirEntry,
+    kind: RepoActionKind,
+    state: RepoActionState,
+) -> Option<ActionLabel> {
+    match (kind, state) {
+        (RepoActionKind::Commit, RepoActionState::Failed) => Some(picker_entry_action_label(
+            "[failed]",
+            kind,
+            Color::Red,
+            false,
+        )),
+        (RepoActionKind::Commit, RepoActionState::Succeeded)
+            if !picker_entry_commit_available(entry) =>
+        {
+            Some(picker_entry_action_label(
+                "[done]",
+                kind,
+                Color::Green,
+                false,
+            ))
+        }
+        (RepoActionKind::Restart, RepoActionState::Failed) => Some(picker_entry_action_label(
+            "[failed]",
+            kind,
+            Color::Red,
+            false,
+        )),
+        (RepoActionKind::Restart, RepoActionState::Succeeded) => Some(picker_entry_action_label(
+            "[done]",
+            kind,
+            Color::Green,
+            false,
+        )),
+        _ => None,
+    }
+}
+
+fn picker_entry_available_action(entry: &DirEntry, kind: RepoActionKind) -> Option<ActionLabel> {
+    match kind {
+        RepoActionKind::Commit if picker_entry_commit_available(entry) => Some(
+            picker_entry_action_label("[commit]", kind, Color::Green, true),
+        ),
+        RepoActionKind::Restart if picker_entry_restart_available(entry) => Some(
+            picker_entry_action_label("[restart]", kind, Color::Yellow, true),
+        ),
+        RepoActionKind::Open if picker_entry_open_available(entry) => {
+            Some(picker_entry_action_label("[open]", kind, Color::Cyan, true))
+        }
+        _ => None,
+    }
+}
+
+fn picker_entry_commit_available(entry: &DirEntry) -> bool {
+    entry.repo_dirty.unwrap_or(false)
+}
+
+fn picker_entry_restart_available(entry: &DirEntry) -> bool {
+    entry.has_restart.unwrap_or(false)
+}
+
+fn picker_entry_open_available(entry: &DirEntry) -> bool {
+    entry.open_url.is_some()
+}
+
+fn picker_entry_action_for_kind(entry: &DirEntry, kind: RepoActionKind) -> Option<ActionLabel> {
+    let tracked = entry.repo_action.as_ref();
+    if tracked.map(|action| action.kind) != Some(kind) {
+        return picker_entry_available_action(entry, kind);
+    }
+
+    let state = tracked.map(|action| action.state)?;
+    picker_entry_status_action(entry, kind, state)
+        .or_else(|| picker_entry_available_action(entry, kind))
+}
+
 /// Compute all action labels for a directory entry. Returns labels ordered
 /// left-to-right as they should appear in the picker row.
 pub(crate) fn picker_entry_actions(entry: &DirEntry) -> Vec<ActionLabel> {
-    let mut actions = Vec::new();
-    let tracked_kind = entry.repo_action.as_ref().map(|s| s.kind);
-    let tracked_state = entry.repo_action.as_ref().map(|s| s.state);
-
-    // If any action is currently running, show only its status.
-    if tracked_state == Some(RepoActionState::Running) {
-        actions.push(ActionLabel {
-            text: "[running]".into(),
-            kind: tracked_kind.unwrap(),
-            color: Color::Yellow,
-            clickable: false,
-        });
-        return actions;
+    if let Some(action) = picker_entry_running_action(entry) {
+        return vec![action];
     }
 
-    // Commit: show status if tracked, else show [commit] when dirty.
-    if tracked_kind == Some(RepoActionKind::Commit) {
-        match tracked_state {
-            Some(RepoActionState::Failed) => actions.push(ActionLabel {
-                text: "[failed]".into(),
-                kind: RepoActionKind::Commit,
-                color: Color::Red,
-                clickable: false,
-            }),
-            Some(RepoActionState::Succeeded) if !entry.repo_dirty.unwrap_or(false) => {
-                actions.push(ActionLabel {
-                    text: "[done]".into(),
-                    kind: RepoActionKind::Commit,
-                    color: Color::Green,
-                    clickable: false,
-                })
-            }
-            _ if entry.repo_dirty.unwrap_or(false) => actions.push(ActionLabel {
-                text: "[commit]".into(),
-                kind: RepoActionKind::Commit,
-                color: Color::Green,
-                clickable: true,
-            }),
-            _ => {}
-        }
-    } else if entry.repo_dirty.unwrap_or(false) {
-        actions.push(ActionLabel {
-            text: "[commit]".into(),
-            kind: RepoActionKind::Commit,
-            color: Color::Green,
-            clickable: true,
-        });
-    }
-
-    // Restart: show status if tracked, else show [restart] when available.
-    if tracked_kind == Some(RepoActionKind::Restart) {
-        match tracked_state {
-            Some(RepoActionState::Failed) => actions.push(ActionLabel {
-                text: "[failed]".into(),
-                kind: RepoActionKind::Restart,
-                color: Color::Red,
-                clickable: false,
-            }),
-            Some(RepoActionState::Succeeded) => actions.push(ActionLabel {
-                text: "[done]".into(),
-                kind: RepoActionKind::Restart,
-                color: Color::Green,
-                clickable: false,
-            }),
-            _ if entry.has_restart.unwrap_or(false) => actions.push(ActionLabel {
-                text: "[restart]".into(),
-                kind: RepoActionKind::Restart,
-                color: Color::Yellow,
-                clickable: true,
-            }),
-            _ => {}
-        }
-    } else if entry.has_restart.unwrap_or(false) {
-        actions.push(ActionLabel {
-            text: "[restart]".into(),
-            kind: RepoActionKind::Restart,
-            color: Color::Yellow,
-            clickable: true,
-        });
-    }
-
-    // Open: always available when open_url is set.
-    if entry.open_url.is_some() {
-        actions.push(ActionLabel {
-            text: "[open]".into(),
-            kind: RepoActionKind::Open,
-            color: Color::Cyan,
-            clickable: true,
-        });
-    }
-
-    actions
+    picker_entry_action_order()
+        .into_iter()
+        .filter_map(|kind| picker_entry_action_for_kind(entry, kind))
+        .collect()
 }
 
 /// Total display width of all action labels (including spaces between them).
@@ -1141,13 +1161,27 @@ fn picker_entry_pointer_action(
     x: u16,
     y: u16,
 ) -> PickerAction {
-    if picker_batch_exclude_contains(picker, layout, visible_pos, raw_index, x, y) {
-        return PickerAction::ToggleBatchExclude(raw_index);
+    if let Some(action) =
+        picker_batch_exclude_action_at(picker, layout, visible_pos, raw_index, x, y)
+    {
+        return action;
     }
     if let Some(kind) = picker_repo_action_kind_at(picker, layout, visible_pos, raw_index, x, y) {
         return PickerAction::StartRepoAction(raw_index, kind);
     }
     PickerAction::ActivateEntry(raw_index)
+}
+
+fn picker_batch_exclude_action_at(
+    picker: &PickerState,
+    layout: &PickerLayout,
+    visible_pos: usize,
+    raw_index: usize,
+    x: u16,
+    y: u16,
+) -> Option<PickerAction> {
+    picker_batch_exclude_contains(picker, layout, visible_pos, raw_index, x, y)
+        .then_some(PickerAction::ToggleBatchExclude(raw_index))
 }
 
 fn picker_batch_exclude_contains(
