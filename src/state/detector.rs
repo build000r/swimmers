@@ -119,108 +119,131 @@ impl StateDetector {
     pub fn process_output(&mut self, data: &[u8]) {
         let now = Instant::now();
 
-        // Check timer deadlines before processing new output.
         self.check_timers(now);
 
         let ParsedChunk { visible, markers } = self.parse_chunk(data);
-
-        // Check for OSC 133 prompt/command markers.
-        // If both appear in one logical sequence window, honor whichever occurs last.
-        if !markers.is_empty() {
-            let prompt_idx = markers
-                .iter()
-                .rposition(|m| matches!(m.marker, Osc133Marker::Prompt));
-            let command = markers
-                .iter()
-                .enumerate()
-                .rev()
-                .find_map(|(idx, marker)| match &marker.marker {
-                    Osc133Marker::Command(cmd) => Some((idx, marker.visible_offset, cmd.clone())),
-                    Osc133Marker::Prompt => None,
-                });
-            let command_wins = match (prompt_idx, command.as_ref()) {
-                (Some(prompt_marker_idx), Some((cmd_marker_idx, _, _))) => {
-                    *cmd_marker_idx >= prompt_marker_idx
-                }
-                (None, Some(_)) => true,
-                _ => false,
-            };
-            self.clear_error_timer();
-            if command_wins {
-                let (command_idx, command_visible_offset, cmd) =
-                    command.expect("command_wins implies command marker exists");
-                debug!(
-                    prompt_idx = prompt_idx,
-                    command_idx,
-                    command = %cmd,
-                    "OSC 133 classified output as busy"
-                );
-                self.set_state(SessionState::Busy, Some(Some(cmd)), now, "osc133_command");
-                if self.apply_visible_error_pattern(&visible[command_visible_offset..], now) {
-                    return;
-                }
-            } else {
-                debug!(
-                    prompt_idx = prompt_idx,
-                    command_idx = command.as_ref().map(|(idx, _, _)| *idx),
-                    "OSC 133 classified output as idle"
-                );
-                self.set_state(SessionState::Idle, Some(None), now, "osc133_prompt");
-                if self.apply_visible_error_pattern(&visible, now) {
-                    return;
-                }
-            }
+        if self.apply_osc133_markers(&visible, &markers, now) {
             return;
         }
 
-        let looks_like_prompt = Self::looks_like_prompt(&visible);
+        self.apply_fallback_detection(&visible, now);
+    }
 
-        // Check for error patterns against visible text.
-        let found_error = self.apply_visible_error_pattern(&visible, now);
+    fn apply_osc133_markers(
+        &mut self,
+        visible: &str,
+        markers: &[PositionedOsc133Marker],
+        now: Instant,
+    ) -> bool {
+        let Some(decision) = Osc133Decision::from_markers(markers) else {
+            return false;
+        };
 
-        // Heuristic fallback for shells without OSC 133:
-        // if we're idle/attention and visible output is not a prompt,
-        // treat this as command activity and mark busy.
-        if matches!(self.state, SessionState::Idle | SessionState::Attention) && !found_error {
-            let has_visible_text = visible.chars().any(|c| !c.is_whitespace());
-            if has_visible_text && !looks_like_prompt {
-                self.clear_error_timer();
+        self.clear_error_timer();
+        match decision {
+            Osc133Decision::Command {
+                prompt_idx,
+                command_idx,
+                visible_offset,
+                command,
+            } => {
                 debug!(
-                    sample = %Self::log_excerpt(&visible),
-                    "fallback classified output as busy"
+                    prompt_idx = prompt_idx,
+                    command_idx,
+                    command = %command,
+                    "OSC 133 classified output as busy"
                 );
                 self.set_state(
                     SessionState::Busy,
-                    Some(None),
+                    Some(Some(command)),
                     now,
-                    "fallback_non_prompt_output",
+                    "osc133_command",
                 );
+                self.apply_visible_error_pattern(&visible[visible_offset..], now);
+            }
+            Osc133Decision::Prompt {
+                prompt_idx,
+                command_idx,
+            } => {
+                debug!(
+                    prompt_idx = prompt_idx,
+                    command_idx = command_idx,
+                    "OSC 133 classified output as idle"
+                );
+                self.set_state(SessionState::Idle, Some(None), now, "osc133_prompt");
+                self.apply_visible_error_pattern(visible, now);
             }
         }
+        true
+    }
 
-        // Fallback: regex prompt detection (for shells without OSC 133).
-        // Recovers from busy AND error states when a new prompt appears.
-        // Checked against visible text so tmux escape sequences don't mask the prompt.
-        if self.state != SessionState::Idle && looks_like_prompt {
-            self.clear_error_timer();
-            debug!(
-                sample = %Self::log_excerpt(&visible),
-                "fallback classified output as idle prompt"
-            );
-            self.set_state(
-                SessionState::Idle,
-                Some(None),
-                now,
-                "fallback_prompt_detected",
-            );
+    fn apply_fallback_detection(&mut self, visible: &str, now: Instant) {
+        let looks_like_prompt = Self::looks_like_prompt(visible);
+        let found_error = self.apply_visible_error_pattern(visible, now);
+        self.apply_fallback_busy_detection(visible, looks_like_prompt, found_error, now);
+        self.apply_fallback_prompt_detection(visible, looks_like_prompt, now);
+        self.refresh_tui_output_idle_deadline(now);
+    }
+
+    fn apply_fallback_busy_detection(
+        &mut self,
+        visible: &str,
+        looks_like_prompt: bool,
+        found_error: bool,
+        now: Instant,
+    ) {
+        if found_error
+            || !matches!(self.state, SessionState::Idle | SessionState::Attention)
+            || !Self::has_visible_text(visible)
+            || looks_like_prompt
+        {
+            return;
         }
 
-        // TUI tool mode: reset the output idle deadline on every chunk of output.
-        // When the tool stops producing output (silence), the deadline expires
-        // and check_timers will transition busy -> idle.
+        self.clear_error_timer();
+        debug!(
+            sample = %Self::log_excerpt(visible),
+            "fallback classified output as busy"
+        );
+        self.set_state(
+            SessionState::Busy,
+            Some(None),
+            now,
+            "fallback_non_prompt_output",
+        );
+    }
+
+    fn apply_fallback_prompt_detection(
+        &mut self,
+        visible: &str,
+        looks_like_prompt: bool,
+        now: Instant,
+    ) {
+        if self.state == SessionState::Idle || !looks_like_prompt {
+            return;
+        }
+
+        self.clear_error_timer();
+        debug!(
+            sample = %Self::log_excerpt(visible),
+            "fallback classified output as idle prompt"
+        );
+        self.set_state(
+            SessionState::Idle,
+            Some(None),
+            now,
+            "fallback_prompt_detected",
+        );
+    }
+
+    fn refresh_tui_output_idle_deadline(&mut self, now: Instant) {
         if self.tui_tool_mode && self.state == SessionState::Busy {
             self.output_idle_deadline = Some(now + Duration::from_millis(OUTPUT_IDLE_MS));
         }
+    }
+
+    fn has_visible_text(visible: &str) -> bool {
+        visible.chars().any(|c| !c.is_whitespace())
     }
 
     /// Check and fire any expired timer deadlines. Called at the start of
@@ -867,6 +890,72 @@ struct PositionedOsc133Marker {
 enum Osc133Marker {
     Prompt,
     Command(String),
+}
+
+#[derive(Debug)]
+enum Osc133Decision {
+    Prompt {
+        prompt_idx: Option<usize>,
+        command_idx: Option<usize>,
+    },
+    Command {
+        prompt_idx: Option<usize>,
+        command_idx: usize,
+        visible_offset: usize,
+        command: String,
+    },
+}
+
+impl Osc133Decision {
+    fn from_markers(markers: &[PositionedOsc133Marker]) -> Option<Self> {
+        let prompt_idx = Self::last_prompt_idx(markers);
+        let command = Self::last_command(markers);
+
+        if Self::command_wins(prompt_idx, command.as_ref()) {
+            let (command_idx, visible_offset, command) =
+                command.expect("command_wins implies command marker exists");
+            return Some(Self::Command {
+                prompt_idx,
+                command_idx,
+                visible_offset,
+                command,
+            });
+        }
+
+        prompt_idx.map(|prompt_idx| Self::Prompt {
+            prompt_idx: Some(prompt_idx),
+            command_idx: command.map(|(idx, _, _)| idx),
+        })
+    }
+
+    fn last_prompt_idx(markers: &[PositionedOsc133Marker]) -> Option<usize> {
+        markers
+            .iter()
+            .rposition(|m| matches!(m.marker, Osc133Marker::Prompt))
+    }
+
+    fn last_command(markers: &[PositionedOsc133Marker]) -> Option<(usize, usize, String)> {
+        markers
+            .iter()
+            .enumerate()
+            .rev()
+            .find_map(|(idx, marker)| match &marker.marker {
+                Osc133Marker::Command(command) => {
+                    Some((idx, marker.visible_offset, command.clone()))
+                }
+                Osc133Marker::Prompt => None,
+            })
+    }
+
+    fn command_wins(prompt_idx: Option<usize>, command: Option<&(usize, usize, String)>) -> bool {
+        match (prompt_idx, command) {
+            (Some(prompt_marker_idx), Some((command_idx, _, _))) => {
+                *command_idx >= prompt_marker_idx
+            }
+            (None, Some(_)) => true,
+            _ => false,
+        }
+    }
 }
 
 #[derive(Debug)]
