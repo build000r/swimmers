@@ -5408,6 +5408,14 @@ function handleNativeAppChange() { el.nativeMode.disabled = String(el.nativeApp.
 
 function handleNativeModeChange() { syncSheetActionAvailability(); }
 
+function handleSendCloseButtonClick() { state.sendTarget = null; closeSheets(); }
+
+function handleSendHistoryClick(event) { const target = event.target instanceof Element ? event.target : null; const plan = sendHistoryClickPlan(event.type, target, state.sendHistory); if (plan.type === "use_history") { el.sendInput.value = plan.text; el.sendInput.focus(); } }
+
+function handleSaveTokenButtonClick() { return handleAuthTokenButtonAction("save"); }
+
+function handleClearTokenButtonClick() { return handleAuthTokenButtonAction("clear"); }
+
 function bindEvents() {
   bindTrogdorEvents();
   document.addEventListener?.("keydown", handleDocumentCommandPaletteShortcut);
@@ -5472,21 +5480,11 @@ function bindEvents() {
   el.nativeMode.addEventListener("change", handleNativeModeChange);
 
   el.sendForm.addEventListener("submit", handleSendFormSubmit);
-  el.sendCloseButton.addEventListener("click", () => {
-    state.sendTarget = null;
-    closeSheets();
-  });
-  el.sendHistory.addEventListener("click", (event) => {
-    const target = event.target instanceof Element ? event.target : null;
-    const plan = sendHistoryClickPlan(event.type, target, state.sendHistory);
-    if (plan.type === "use_history") {
-      el.sendInput.value = plan.text;
-      el.sendInput.focus();
-    }
-  });
+  el.sendCloseButton.addEventListener("click", handleSendCloseButtonClick);
+  el.sendHistory.addEventListener("click", handleSendHistoryClick);
 
-  el.saveTokenButton.addEventListener("click", () => handleAuthTokenButtonAction("save"));
-  el.clearTokenButton.addEventListener("click", () => handleAuthTokenButtonAction("clear"));
+  el.saveTokenButton.addEventListener("click", handleSaveTokenButtonClick);
+  el.clearTokenButton.addEventListener("click", handleClearTokenButtonClick);
   el.authCloseButton.addEventListener("click", closeSheets);
 
   el.createForm.addEventListener("submit", async (event) => {
