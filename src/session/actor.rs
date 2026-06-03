@@ -374,6 +374,59 @@ pub struct SessionActor {
     clear_replay_on_first_idle: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct StateChangeDetection {
+    previous_state: SessionState,
+    current_state: SessionState,
+    current_command: Option<String>,
+    previous_evidence: StateEvidence,
+    current_evidence: StateEvidence,
+    state_changed: bool,
+    evidence_changed: bool,
+}
+
+impl StateChangeDetection {
+    fn should_emit_event(&self) -> bool {
+        self.state_changed || self.evidence_changed
+    }
+
+    fn changed_state(&self) -> Option<SessionState> {
+        self.state_changed.then_some(self.current_state)
+    }
+
+    fn into_payload(self, exit_reason: Option<String>) -> SessionStatePayload {
+        SessionStatePayload {
+            state: self.current_state,
+            previous_state: self.previous_state,
+            current_command: self.current_command,
+            state_evidence: self.current_evidence,
+            transport_health: TransportHealth::Healthy,
+            exit_reason,
+            at: Utc::now(),
+        }
+    }
+}
+
+fn compare_session_state_change(
+    previous_state: SessionState,
+    previous_evidence: StateEvidence,
+    current_state: SessionState,
+    current_command: Option<String>,
+    current_evidence: StateEvidence,
+) -> StateChangeDetection {
+    let state_changed = current_state != previous_state;
+    let evidence_changed = current_evidence != previous_evidence;
+    StateChangeDetection {
+        previous_state,
+        current_state,
+        current_command,
+        previous_evidence,
+        current_evidence,
+        state_changed,
+        evidence_changed,
+    }
+}
+
 impl SessionActor {
     /// Spawn a new session actor. If `attach` is true, attaches to an existing
     /// tmux session; otherwise creates a new one.
@@ -1383,46 +1436,50 @@ impl SessionActor {
         previous_evidence: StateEvidence,
         exit_reason: Option<String>,
     ) -> Option<SessionState> {
-        let (current_state, current_command) = self.state_detector.get_state();
-        let state_evidence = self.state_detector.state_evidence();
-        let state_changed = current_state != previous_state;
-        let evidence_changed = state_evidence != previous_evidence;
-        if state_changed || evidence_changed {
-            let payload = SessionStatePayload {
-                state: current_state,
-                previous_state,
-                current_command,
-                state_evidence,
-                transport_health: TransportHealth::Healthy,
-                exit_reason,
-                at: Utc::now(),
-            };
-            debug!(
-                session_id = %self.session_id,
-                previous_state = ?payload.previous_state,
-                state = ?payload.state,
-                current_command = ?payload.current_command,
-                state_evidence = ?payload.state_evidence,
-                transport_health = ?payload.transport_health,
-                exit_reason = ?payload.exit_reason,
-                at = %payload.at,
-                "emitting session_state"
-            );
-            let event = ControlEvent {
-                event: "session_state".to_string(),
-                session_id: self.session_id.clone(),
-                payload: serde_json::to_value(&payload).unwrap_or_default(),
-            };
-            // If no receivers, send returns Err -- that's fine, nobody is listening.
-            let _ = self.event_tx.send(event);
-            if state_changed {
-                Some(current_state)
-            } else {
-                None
-            }
-        } else {
-            None
+        let detection = self.detect_session_state_change(previous_state, previous_evidence);
+        if !detection.should_emit_event() {
+            return None;
         }
+
+        let changed_state = detection.changed_state();
+        self.emit_session_state_payload(detection.into_payload(exit_reason));
+        changed_state
+    }
+
+    fn detect_session_state_change(
+        &self,
+        previous_state: SessionState,
+        previous_evidence: StateEvidence,
+    ) -> StateChangeDetection {
+        let (current_state, current_command) = self.state_detector.get_state();
+        compare_session_state_change(
+            previous_state,
+            previous_evidence,
+            current_state,
+            current_command,
+            self.state_detector.state_evidence(),
+        )
+    }
+
+    fn emit_session_state_payload(&self, payload: SessionStatePayload) {
+        debug!(
+            session_id = %self.session_id,
+            previous_state = ?payload.previous_state,
+            state = ?payload.state,
+            current_command = ?payload.current_command,
+            state_evidence = ?payload.state_evidence,
+            transport_health = ?payload.transport_health,
+            exit_reason = ?payload.exit_reason,
+            at = %payload.at,
+            "emitting session_state"
+        );
+        let event = ControlEvent {
+            event: "session_state".to_string(),
+            session_id: self.session_id.clone(),
+            payload: serde_json::to_value(&payload).unwrap_or_default(),
+        };
+        // If no receivers, send returns Err -- that's fine, nobody is listening.
+        let _ = self.event_tx.send(event);
     }
 
     /// Send a frame to all subscribers. Detects overloaded subscribers whose
@@ -2348,23 +2405,24 @@ fn pty_read_loop(
 #[cfg(test)]
 mod tests {
     use super::{
-        capture_pane_tail_with_command, compute_pane_liveness, cwd_from_osc7_payload,
-        detect_tool_from_command_line, detect_tool_from_process_entry, extract_cwd_from_title,
-        find_osc_payload_end, line_looks_prompt_like, normalize_submit_line_text, osc_payloads,
-        output_counts_as_meaningful_activity, parse_process_entry, percent_decode,
-        process_entries_cache, query_tmux_session_created, query_tool_from_tmux_process_tree,
-        resolve_tmux_terminal_env, run_bounded_tmux_command, should_refresh_cwd_from_tmux,
-        should_refresh_tool_from_tmux, state_detector_for_initial_tool, submit_line_fallback_input,
-        tmux_input_chunks, visible_output_is_meaningful, write_and_flush_input,
-        write_input_counts_as_activity, ControlEvent, OutputFrame, PaneLiveness,
-        ProcessEntriesCache, ProcessEntry, SessionActor, SessionCommand, TmuxInputChunk,
-        CWD_REFRESH_MIN_INTERVAL, PROCESS_ENTRIES_CACHE_TTL, TOOL_REFRESH_MIN_INTERVAL,
+        capture_pane_tail_with_command, compare_session_state_change, compute_pane_liveness,
+        cwd_from_osc7_payload, detect_tool_from_command_line, detect_tool_from_process_entry,
+        extract_cwd_from_title, find_osc_payload_end, line_looks_prompt_like,
+        normalize_submit_line_text, osc_payloads, output_counts_as_meaningful_activity,
+        parse_process_entry, percent_decode, process_entries_cache, query_tmux_session_created,
+        query_tool_from_tmux_process_tree, resolve_tmux_terminal_env, run_bounded_tmux_command,
+        should_refresh_cwd_from_tmux, should_refresh_tool_from_tmux,
+        state_detector_for_initial_tool, submit_line_fallback_input, tmux_input_chunks,
+        visible_output_is_meaningful, write_and_flush_input, write_input_counts_as_activity,
+        ControlEvent, OutputFrame, PaneLiveness, ProcessEntriesCache, ProcessEntry, SessionActor,
+        SessionCommand, TmuxInputChunk, CWD_REFRESH_MIN_INTERVAL, PROCESS_ENTRIES_CACHE_TTL,
+        TOOL_REFRESH_MIN_INTERVAL,
     };
     use crate::config::Config;
     use crate::scroll::guard::ScrollGuard;
     use crate::scroll::guard::ScrollOutputChunk;
     use crate::session::replay_ring::ReplayRing;
-    use crate::types::{SessionState, SessionStatePayload};
+    use crate::types::{SessionState, SessionStatePayload, StateEvidence, TransportHealth};
     use chrono::{TimeZone, Utc};
     use portable_pty::{native_pty_system, PtySize};
     use std::collections::HashMap;
@@ -2496,6 +2554,102 @@ mod tests {
             payload.state_evidence.confidence,
             crate::types::StateConfidence::High
         );
+    }
+
+    #[test]
+    fn state_change_detection_distinguishes_noop_evidence_and_state_paths() {
+        let previous_evidence = StateEvidence::unobserved("initial");
+
+        let noop = compare_session_state_change(
+            SessionState::Idle,
+            previous_evidence.clone(),
+            SessionState::Idle,
+            None,
+            previous_evidence.clone(),
+        );
+        assert!(!noop.should_emit_event());
+        assert_eq!(noop.changed_state(), None);
+
+        let evidence_only = compare_session_state_change(
+            SessionState::Idle,
+            previous_evidence.clone(),
+            SessionState::Idle,
+            None,
+            StateEvidence::unobserved("osc133_prompt"),
+        );
+        assert!(evidence_only.should_emit_event());
+        assert_eq!(evidence_only.changed_state(), None);
+
+        let state_transition = compare_session_state_change(
+            SessionState::Idle,
+            previous_evidence,
+            SessionState::Busy,
+            Some("cargo test".to_string()),
+            StateEvidence::unobserved("local_input"),
+        );
+        assert!(state_transition.should_emit_event());
+        assert_eq!(state_transition.changed_state(), Some(SessionState::Busy));
+    }
+
+    #[test]
+    fn state_change_payload_preserves_exit_reason_and_transport_health() {
+        let detection = compare_session_state_change(
+            SessionState::Busy,
+            StateEvidence::unobserved("local_input"),
+            SessionState::Exited,
+            None,
+            StateEvidence::unobserved("process_exit"),
+        );
+
+        let payload = detection.into_payload(Some("process_exit".to_string()));
+
+        assert_eq!(payload.state, SessionState::Exited);
+        assert_eq!(payload.previous_state, SessionState::Busy);
+        assert_eq!(payload.state_evidence.cause, "process_exit");
+        assert_eq!(payload.transport_health, TransportHealth::Healthy);
+        assert_eq!(payload.exit_reason.as_deref(), Some("process_exit"));
+    }
+
+    #[test]
+    fn state_change_event_with_exit_reason_preserves_payload_fields() {
+        let mut actor = test_actor();
+        let mut rx = actor.event_tx.subscribe();
+        let previous_state = actor.state_detector.state();
+        let previous_evidence = actor.state_detector.state_evidence();
+
+        actor.state_detector.mark_exited();
+        let result = actor.maybe_emit_state_change_with_exit_reason(
+            previous_state,
+            previous_evidence,
+            Some("process_exit".to_string()),
+        );
+
+        assert_eq!(result, Some(SessionState::Exited));
+        let event = rx.try_recv().expect("session_state event");
+        assert_eq!(event.event, "session_state");
+        assert_eq!(event.session_id, "sess-test");
+        let payload: SessionStatePayload =
+            serde_json::from_value(event.payload).expect("session_state payload");
+        assert_eq!(payload.state, SessionState::Exited);
+        assert_eq!(payload.previous_state, SessionState::Idle);
+        assert_eq!(payload.transport_health, TransportHealth::Healthy);
+        assert_eq!(payload.exit_reason.as_deref(), Some("process_exit"));
+    }
+
+    #[test]
+    fn state_change_event_returns_transition_with_no_receivers() {
+        let mut actor = test_actor();
+        let previous_state = actor.state_detector.state();
+        let previous_evidence = actor.state_detector.state_evidence();
+
+        actor.state_detector.mark_exited();
+        let result = actor.maybe_emit_state_change_with_exit_reason(
+            previous_state,
+            previous_evidence,
+            Some("process_exit".to_string()),
+        );
+
+        assert_eq!(result, Some(SessionState::Exited));
     }
 
     #[test]
