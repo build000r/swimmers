@@ -371,6 +371,65 @@ fn render_picker_draws_repo_action_badges_on_entry_row() {
 }
 
 #[test]
+fn picker_repo_action_badges_hit_test_in_row_order() {
+    let mut response = dir_response("/tmp", &[("swimmers", true)]);
+    response.entries[0].repo_dirty = Some(true);
+    response.entries[0].has_restart = Some(true);
+    response.entries[0].open_url = Some("http://127.0.0.1:3210".to_string());
+    let picker = PickerState::new(2, 2, response, true, SpawnTool::Codex, None);
+    let field = test_field();
+    let layout = picker_layout(&picker, field);
+    let mut renderer = test_renderer(100, 30);
+
+    render_picker(&mut renderer, &picker, field);
+
+    let (commit_x, row_y) = find_text_position(&renderer, "[commit]").expect("commit badge");
+    let (restart_x, _) = find_text_position(&renderer, "[restart]").expect("restart badge");
+    let (open_x, _) = find_text_position(&renderer, "[open]").expect("open badge");
+
+    assert_eq!(
+        picker_action_at(&picker, &layout, commit_x, row_y),
+        Some(PickerAction::StartRepoAction(0, RepoActionKind::Commit))
+    );
+    assert_eq!(
+        picker_action_at(&picker, &layout, restart_x, row_y),
+        Some(PickerAction::StartRepoAction(0, RepoActionKind::Restart))
+    );
+    assert_eq!(
+        picker_action_at(&picker, &layout, open_x, row_y),
+        Some(PickerAction::StartRepoAction(0, RepoActionKind::Open))
+    );
+    assert_eq!(
+        picker_action_at(&picker, &layout, commit_x + "[commit]".len() as u16, row_y),
+        Some(PickerAction::ActivateEntry(0))
+    );
+}
+
+#[test]
+fn picker_disabled_repo_action_status_hit_tests_as_entry_activation() {
+    let mut response = dir_response("/tmp", &[("swimmers", true)]);
+    response.entries[0].repo_dirty = Some(false);
+    response.entries[0].repo_action = Some(RepoActionStatus {
+        kind: RepoActionKind::Commit,
+        state: RepoActionState::Succeeded,
+        detail: None,
+    });
+    let picker = PickerState::new(2, 2, response, true, SpawnTool::Codex, None);
+    let field = test_field();
+    let layout = picker_layout(&picker, field);
+    let mut renderer = test_renderer(100, 30);
+
+    render_picker(&mut renderer, &picker, field);
+
+    let (done_x, done_y) = find_text_position(&renderer, "[done]").expect("done badge");
+
+    assert_eq!(
+        picker_action_at(&picker, &layout, done_x, done_y),
+        Some(PickerAction::ActivateEntry(0))
+    );
+}
+
+#[test]
 fn render_picker_draws_empty_state_for_empty_directory() {
     let picker = PickerState::new(
         2,

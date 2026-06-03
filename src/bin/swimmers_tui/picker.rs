@@ -1104,27 +1104,76 @@ fn picker_entry_action_at(
     x: u16,
     y: u16,
 ) -> Option<PickerAction> {
-    if y >= layout.first_entry_y
-        && y < layout.first_entry_y + layout.visible_entry_rows as u16
-        && x >= layout.content.x
-        && x < layout.content.right()
-    {
-        let visible_pos = picker.scroll + (y - layout.first_entry_y) as usize;
-        if let Some(&raw_index) = layout.visible_entries.get(visible_pos) {
-            if let Some(rect) = picker_batch_exclude_rect(picker, layout, visible_pos, raw_index) {
-                if rect.contains(x, y) {
-                    return Some(PickerAction::ToggleBatchExclude(raw_index));
-                }
-            }
-            for (rect, kind) in picker_entry_action_rects(picker, layout, visible_pos, raw_index) {
-                if rect.contains(x, y) {
-                    return Some(PickerAction::StartRepoAction(raw_index, kind));
-                }
-            }
-            return Some(PickerAction::ActivateEntry(raw_index));
-        }
+    let (visible_pos, raw_index) = picker_visible_entry_at_pointer(picker, layout, x, y)?;
+    Some(picker_entry_pointer_action(
+        picker,
+        layout,
+        visible_pos,
+        raw_index,
+        x,
+        y,
+    ))
+}
+
+fn picker_visible_entry_at_pointer(
+    picker: &PickerState,
+    layout: &PickerLayout,
+    x: u16,
+    y: u16,
+) -> Option<(usize, usize)> {
+    if y < layout.first_entry_y || y >= layout.first_entry_y + layout.visible_entry_rows as u16 {
+        return None;
     }
-    None
+    if x < layout.content.x || x >= layout.content.right() {
+        return None;
+    }
+
+    let visible_pos = picker.scroll + (y - layout.first_entry_y) as usize;
+    let raw_index = *layout.visible_entries.get(visible_pos)?;
+    Some((visible_pos, raw_index))
+}
+
+fn picker_entry_pointer_action(
+    picker: &PickerState,
+    layout: &PickerLayout,
+    visible_pos: usize,
+    raw_index: usize,
+    x: u16,
+    y: u16,
+) -> PickerAction {
+    if picker_batch_exclude_contains(picker, layout, visible_pos, raw_index, x, y) {
+        return PickerAction::ToggleBatchExclude(raw_index);
+    }
+    if let Some(kind) = picker_repo_action_kind_at(picker, layout, visible_pos, raw_index, x, y) {
+        return PickerAction::StartRepoAction(raw_index, kind);
+    }
+    PickerAction::ActivateEntry(raw_index)
+}
+
+fn picker_batch_exclude_contains(
+    picker: &PickerState,
+    layout: &PickerLayout,
+    visible_pos: usize,
+    raw_index: usize,
+    x: u16,
+    y: u16,
+) -> bool {
+    picker_batch_exclude_rect(picker, layout, visible_pos, raw_index)
+        .map(|rect| rect.contains(x, y))
+        .unwrap_or(false)
+}
+
+fn picker_repo_action_kind_at(
+    picker: &PickerState,
+    layout: &PickerLayout,
+    visible_pos: usize,
+    raw_index: usize,
+    x: u16,
+    y: u16,
+) -> Option<RepoActionKind> {
+    picker_entry_action_rects(picker, layout, visible_pos, raw_index)
+        .into_iter()
+        .find_map(|(rect, kind)| rect.contains(x, y).then_some(kind))
 }
 
 pub(crate) fn picker_theme_color_for_path(
