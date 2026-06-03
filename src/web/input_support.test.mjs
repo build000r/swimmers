@@ -11,6 +11,7 @@ import {
   terminalComposerControlAction,
   terminalKeyStripClickPlan,
   terminalStageCaptureBindings,
+  terminalStageFocusPlan,
   terminalStagePastePlan,
 } from "./input_support.js";
 
@@ -277,4 +278,18 @@ test("terminalStagePastePlan preserves read-only, empty, and raw text decisions"
     type: "send_text",
     text: " paste me\n",
   });
+});
+
+test("terminalStageFocusPlan preserves focus, blur, and ignore decisions", () => {
+  assert.deepEqual(terminalStageFocusPlan("focus", { activeSheet: "send" }), { type: "ignore" });
+  assert.deepEqual(terminalStageFocusPlan("focus", { activeSheet: "" }), {
+    type: "forward_event",
+    event: { kind: "focus", focused: true },
+  });
+  assert.deepEqual(terminalStageFocusPlan("blur", { mobileKeyboardOwnsFocus: true }), { type: "ignore" });
+  assert.deepEqual(terminalStageFocusPlan("blur", { mobileKeyboardOwnsFocus: false }), {
+    type: "forward_event",
+    event: { kind: "focus", focused: false },
+  });
+  assert.deepEqual(terminalStageFocusPlan("click"), { type: "ignore" });
 });

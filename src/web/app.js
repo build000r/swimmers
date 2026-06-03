@@ -2,7 +2,8 @@ import { buildSurfaceFrame, surfaceActionAt, surfaceConsumesPointer } from "./re
 import {
   authTokenButtonPlan, eventCell, globalShortcutPlan, mobileKeyboardInputPlan,
   mobileKeyboardKeyPlan, shouldIgnoreSyntheticClick,
-  terminalComposerControlAction, terminalKeyStripClickPlan, terminalStageCaptureBindings, terminalStagePastePlan,
+  terminalComposerControlAction, terminalKeyStripClickPlan, terminalStageCaptureBindings, terminalStageFocusPlan,
+  terminalStagePastePlan,
 } from "./input_support.js";
 import { sendHistoryClickPlan, sendSheetFailureStatus, sendSheetSubmitPlan, sendSheetSuccessStatus } from "./send_sheet.js";
 import {
@@ -5751,16 +5752,13 @@ function bindEvents() {
   });
 
   el.terminalStage.addEventListener("focus", () => {
-    if (!state.activeSheet) {
-      forwardTerminalEvent({ kind: "focus", focused: true });
-    }
+    const plan = terminalStageFocusPlan("focus", { activeSheet: state.activeSheet });
+    if (plan.type === "forward_event") forwardTerminalEvent(plan.event);
   });
 
   el.terminalStage.addEventListener("blur", () => {
-    if (document.activeElement === el.mobileKeyboardProxy) {
-      return;
-    }
-    forwardTerminalEvent({ kind: "focus", focused: false });
+    const plan = terminalStageFocusPlan("blur", { mobileKeyboardOwnsFocus: document.activeElement === el.mobileKeyboardProxy });
+    if (plan.type === "forward_event") forwardTerminalEvent(plan.event);
   });
 
   el.terminalStage.addEventListener("mousedown", (event) => {

@@ -237,6 +237,20 @@ export function terminalStagePastePlan(readOnly, text) {
   return { type: "send_text", text };
 }
 
+export function terminalStageFocusPlan(eventType, context = {}) {
+  if (eventType === "focus") {
+    return context.activeSheet
+      ? { type: "ignore" }
+      : { type: "forward_event", event: { kind: "focus", focused: true } };
+  }
+  if (eventType === "blur") {
+    return context.mobileKeyboardOwnsFocus
+      ? { type: "ignore" }
+      : { type: "forward_event", event: { kind: "focus", focused: false } };
+  }
+  return { type: "ignore" };
+}
+
 function clampInt(value, fallback, min, max) {
   const numeric = Number.isFinite(value) ? Math.trunc(value) : fallback;
   return Math.max(min, Math.min(max, numeric));
