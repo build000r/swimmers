@@ -6,6 +6,7 @@ import {
   boundedArtifactText,
   buildMermaidArtifactView,
   isSafeMermaidPlanFileName,
+  mermaidPlanTabClickPlan,
   planFileLabel,
   sanitizeMermaidPlanFiles,
 } from "./mermaid_artifact.js";
@@ -39,6 +40,38 @@ test("Mermaid plan file sanitization rejects path-ish names, dedupes, and caps",
   assert.deepEqual(result.files.slice(0, 2), ["overview.mmdx", "plan-0.mmdx"]);
   assert.equal(result.hiddenCount, 3);
   assert.equal(result.cappedCount, 3);
+});
+
+test("mermaidPlanTabClickPlan preserves target matching and dataset forwarding", () => {
+  const tabFor = (dataset) => {
+    const button = { dataset };
+    return {
+      button,
+      target: {
+        closest(selector) {
+          return selector === "button[data-plan-file]" ? button : null;
+        },
+      },
+    };
+  };
+
+  assert.deepEqual(mermaidPlanTabClickPlan("keydown", tabFor({ planFile: "overview.mmdx" }).target), {
+    type: "ignore",
+  });
+  assert.deepEqual(mermaidPlanTabClickPlan("click", null), {
+    type: "ignore",
+  });
+  assert.deepEqual(mermaidPlanTabClickPlan("click", { closest: () => null }), {
+    type: "ignore",
+  });
+  assert.deepEqual(mermaidPlanTabClickPlan("click", tabFor({ planFile: " overview.mmdx " }).target), {
+    type: "load_plan_file",
+    planFile: " overview.mmdx ",
+  });
+  assert.deepEqual(mermaidPlanTabClickPlan("click", tabFor({}).target), {
+    type: "load_plan_file",
+    planFile: undefined,
+  });
 });
 
 test("buildMermaidArtifactView produces source, plan files, and status text", () => {

@@ -10,6 +10,7 @@ import {
   buildMermaidArtifactView,
   boundedArtifactText,
   isSafeMermaidPlanFileName,
+  mermaidPlanTabClickPlan,
   planFileLabel,
   sanitizeMermaidPlanFiles,
 } from "./mermaid_artifact.js";
@@ -5666,11 +5667,8 @@ function bindEvents() {
     await openMermaidArtifactHost();
   });
   el.mermaidPlanTabs.addEventListener("click", async (event) => {
-    const button = event.target instanceof Element ? event.target.closest("button[data-plan-file]") : null;
-    if (!button) {
-      return;
-    }
-    await loadMermaidPlanFile(button.dataset.planFile);
+    const plan = mermaidPlanTabClickPlan(event.type, event.target instanceof Element ? event.target : null);
+    if (plan.type === "load_plan_file") await loadMermaidPlanFile(plan.planFile);
   });
   el.mermaidCloseButton.addEventListener("click", closeSheets);
 

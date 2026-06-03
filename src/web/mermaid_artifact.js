@@ -52,6 +52,17 @@ export function planFileLabel(name) {
   return stem.replace(/[-_]+/g, " ") || name;
 }
 
+export function mermaidPlanTabClickPlan(eventType, target) {
+  if (eventType !== "click") {
+    return { type: "ignore" };
+  }
+  const button = target?.closest?.("button[data-plan-file]") ?? null;
+  if (!button) {
+    return { type: "ignore" };
+  }
+  return { type: "load_plan_file", planFile: button.dataset?.planFile };
+}
+
 export function buildMermaidArtifactView(payload, options = {}) {
   const sourceMaxChars = options.sourceMaxChars ?? MERMAID_SOURCE_DISPLAY_MAX_CHARS;
   const planFilesMax = options.planFilesMax ?? MERMAID_PLAN_FILES_MAX;
