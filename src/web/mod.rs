@@ -2670,7 +2670,10 @@ mod tests {
         assert!(js.contains("function syncTerminalAccessibilityMirror"));
         assert!(js.contains("createTerminalSearchLinksController"));
         assert!(terminal_search_links.contains("function drainTerminalLinkClicks()"));
-        assert!(js.contains("function rememberSendHistory(text)"));
+        assert!(js.contains("createSendController"));
+        assert!(js.contains("rememberSendHistory,"));
+        assert!(js.contains("await sendLineToSession(state.selectedSessionId, text)"));
+        assert!(js.contains("rememberSendHistory(text);"));
         assert!(js.contains("function syncTerminalStatusStrip()"));
         assert!(js.contains("function refreshAgentContextForSelectedSession"));
         assert!(js.contains("function refreshWorkbenchWidgetsForSelectedSession"));
@@ -2721,11 +2724,18 @@ mod tests {
     #[test]
     fn app_js_falls_back_when_live_terminal_canvas_does_not_paint() {
         let js = include_str!("app.js");
+        let terminal_surface_setup = include_str!("terminal_surface_setup.js");
         assert!(js.contains("function feedTerminalBytes(bytes)"));
         assert!(js.contains("flushEncodedInputBytes();"));
         assert!(js.contains("function terminalCanvasHasVisiblePixels()"));
         assert!(js.contains("function verifyTerminalPaintOrFallback()"));
-        assert!(js.contains("setTerminalTextFallbackActive(true, { clearText: false })"));
+        assert!(
+            js.contains("activateTerminalSurfaceFallback(rendererPlan, terminalSurfaceRuntime)")
+        );
+        assert!(js.contains("setTerminalTextFallbackActive,"));
+        assert!(terminal_surface_setup.contains(
+            "runtime.setTerminalTextFallbackActive(true, { clearText: plan.clearText })"
+        ));
         assert!(js.contains("function sendFallbackTerminalEvent(event)"));
         assert!(js.contains("function updateTerminalFallbackText(text)"));
         assert!(js.contains("function terminalFallbackOwnsPointer(event)"));
@@ -2738,15 +2748,20 @@ mod tests {
     #[test]
     fn app_js_trogdor_agent_click_opens_terminal() {
         let js = include_str!("app.js");
+        let trogdor_logic = include_str!("trogdor_logic.js");
         assert!(js.contains("function closeTrogdorAtlasForTerminal()"));
         assert!(js.contains("function openTrogdorAtlas()"));
         assert!(js.contains("terminalTrogdorBack"));
         assert!(js.contains("function sendTerminalControlKey(actionId)"));
         assert!(js.contains("terminalKeyActionForDomEvent(event)"));
         assert!(js.contains("async function openTrogdorAgentTerminal(sessionId)"));
-        assert!(js.contains("state.trogdorAtlasOpen = false"));
-        assert!(js.contains("state.trogdorAtlasOpen = true"));
-        assert!(js.contains("state.hoveredTrogdorSessionId = null"));
+        assert!(js.contains("trogdorAtlasTransitionState,"));
+        assert!(
+            js.contains("Object.assign(state, trogdorAtlasTransitionState(\"close_terminal\"))")
+        );
+        assert!(js.contains("Object.assign(state, trogdorAtlasTransitionState(\"open\"))"));
+        assert!(trogdor_logic.contains("case \"close_terminal\":"));
+        assert!(trogdor_logic.contains("...trogdorHoverReaderResetState(),"));
         assert!(js.contains("function applyTrogdorAtlasVisibility()"));
         assert!(js.contains("el.trogdorSurface.style.display = visible ? \"\" : \"none\""));
         assert!(js.contains("document.body.classList.toggle(\"trogdor-mode\", visible)"));
@@ -2755,7 +2770,7 @@ mod tests {
         assert!(js.contains("await selectSession(normalized)"));
         assert!(js.contains("focusTerminalInputSurface({ preventScroll: true })"));
         assert!(js.contains("refreshAgentContextForSelectedSession({ force: true })"));
-        assert!(js.contains("await openTrogdorAgentTerminal(zone.sessionId)"));
+        assert!(js.contains("openTrogdorAgentTerminal(plan.sessionId)"));
     }
 
     #[tokio::test]
