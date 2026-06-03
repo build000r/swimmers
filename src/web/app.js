@@ -4,9 +4,14 @@ import {
   sheetActionAvailabilityPlan,
   mobileKeyboardKeydownPlan, mobileKeyboardKeyPlan, shouldIgnoreSyntheticClick, surfaceActionDispatchContextPlan, surfaceActionDispatchPlan, surfaceActionExecutionContextPlan, surfaceActionExecutionPlan, surfaceActionFocusTerminalExecutionPlan, surfaceActionTrogdorReaderExecutionPlan,
   terminalComposerControlAction, terminalDestroyStatePatch, terminalFallbackActivationPlan, terminalFallbackFocusPlan, terminalFallbackKeydownPlan, terminalFallbackPastePlan, terminalFallbackPointerFocusPlan, terminalInlineInputKeydownPlan, terminalKeyStripClickExecutorPlan, terminalKeyStripClickPlan, terminalStageCaptureBindings, terminalStageClickPlan, terminalStageFocusExecutorPlan, terminalStageFocusPlan,
-  normalizeTerminalZoomValue, terminalAuxiliaryControlsPlan, terminalFallbackScrollPlan, terminalFallbackTextScrollPlan, terminalInputDockPlan, terminalLiveFrameFallbackPlan, terminalPaintProbeSchedulePlan, terminalPaintVerificationPlan, terminalPendingByteBufferPlan, terminalPresentationPlan, terminalResizeGeometryPlan, terminalStageKeydownPlan, terminalStageMouseDownPlan, terminalStageMouseMovePlan, terminalStageMouseUpPlan, terminalStagePasteExecutorPlan, terminalStagePastePlan, terminalStageTouchEndPlan, terminalStageWheelPlan, terminalToolsAvailabilityPlan, terminalZoomControlsPlan, terminalZoomLoadValue, terminalZoomPercentLabel, terminalZoomPersistencePlan,
+  normalizeTerminalZoomValue, terminalAuxiliaryControlsPlan, terminalFallbackScrollPlan, terminalFallbackTextScrollPlan, terminalInputDockPlan, terminalLiveFrameFallbackPlan, terminalPaintProbeSchedulePlan, terminalPaintVerificationPlan, terminalPendingByteBufferPlan, terminalPresentationPlan, terminalResizeGeometryPlan, terminalStageKeydownPlan, terminalStageMouseDownPlan, terminalStageMouseMovePlan, terminalStageMouseUpPlan, terminalStagePasteExecutorPlan, terminalStagePastePlan, terminalStageTouchEndPlan, terminalStageWheelPlan, terminalSurfaceRendererPlan, terminalSurfaceSessionPlan, terminalToolsAvailabilityPlan, terminalZoomControlsPlan, terminalZoomLoadValue, terminalZoomPercentLabel, terminalZoomPersistencePlan,
 } from "./input_support.js";
 import { sendHistoryClickPlan, sendSheetFailureStatus, sendSheetSubmitPlan, sendSheetSuccessStatus } from "./send_sheet.js";
+import {
+  activateTerminalSurfaceFallback,
+  initializeTerminalSurface,
+  reuseTerminalSurface,
+} from "./terminal_surface_setup.js";
 import {
   MERMAID_PLAN_CONTENT_DISPLAY_MAX_CHARS,
   buildMermaidArtifactView,
@@ -436,6 +441,29 @@ const el = {
   mermaidRefreshButton: document.getElementById("mermaid-refresh-button"),
   mermaidOpenButton: document.getElementById("mermaid-open-button"),
   mermaidCloseButton: document.getElementById("mermaid-close-button"),
+};
+
+const terminalSurfaceRuntime = {
+  state,
+  el,
+  requiredTerminalMethods: FRANKENTERM_TERMINAL_METHODS,
+  validateFrankenTermSurface,
+  teardownTerminal,
+  destroyTerminalInstance,
+  setTerminalTextFallbackActive,
+  refreshSnapshotFallback,
+  setLoadingState,
+  setUtilityStatus,
+  terminalSupports,
+  frankenTermLinkPolicy,
+  applyZoomToSurface,
+  clearTerminalSelection,
+  refreshTerminalSearch,
+  syncTerminalAccessibilityMirror,
+  syncTerminalTools,
+  measureAndResizeSurface,
+  flushPendingTerminalBytes,
+  prefersReducedMotion: () => window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches ?? false,
 };
 
 function currentSession() {
@@ -2753,76 +2781,18 @@ function terminalMirrorTextFromRenderer() {
 async function setupTerminalSurface() {
   stopSnapshotPolling();
 
-  const session = currentSession();
-  if (!session) {
-    teardownTerminal();
-    return;
-  }
+  const sessionPlan = terminalSurfaceSessionPlan({ session: currentSession() });
+  if (sessionPlan.type === "teardown_terminal") { teardownTerminal(); return; }
 
   const mod = await ensureFrankenTerm();
-  if (!mod) {
-    teardownTerminal();
-    setTerminalTextFallbackActive(true, { clearText: false });
-    await refreshSnapshotFallback();
-    return;
+  const rendererPlan = terminalSurfaceRendererPlan({ hasRendererModule: Boolean(mod), hasTerminal: Boolean(state.terminal), terminalSessionId: state.terminalSessionId, sessionId: sessionPlan.sessionId, terminalFallbackActive: state.terminalFallbackActive });
+  if (rendererPlan.type === "activate_snapshot_fallback") {
+    return activateTerminalSurfaceFallback(rendererPlan, terminalSurfaceRuntime);
   }
-
-  if (state.terminal && state.terminalSessionId === session.session_id) {
-    el.terminalCanvas.classList.remove("hidden");
-    el.terminalFallback.classList.toggle("hidden", !state.terminalFallbackActive);
-    refreshTerminalSearch();
-    syncTerminalAccessibilityMirror();
-    syncTerminalTools();
-    setLoadingState(false);
-    return;
+  if (rendererPlan.type === "reuse_terminal") {
+    return reuseTerminalSurface(rendererPlan, terminalSurfaceRuntime);
   }
-
-  destroyTerminalInstance();
-  setLoadingState(true, "Initializing terminal...");
-  try {
-    state.terminal = validateFrankenTermSurface(
-      new mod.FrankenTermWeb(),
-      FRANKENTERM_TERMINAL_METHODS,
-      "terminal renderer",
-    );
-    state.terminalAcceptsBytes = false;
-    state.surfaceInitInProgress += 1;
-    try {
-      await state.terminal.init(el.terminalCanvas, undefined);
-    } finally {
-      state.surfaceInitInProgress -= 1;
-    }
-    state.terminalAcceptsBytes = true;
-  } catch (error) {
-    destroyTerminalInstance();
-    setTerminalTextFallbackActive(true, { clearText: false });
-    await refreshSnapshotFallback();
-    setLoadingState(false);
-    setUtilityStatus(`Live terminal renderer unavailable: ${error.message}`, true, 3600);
-    return;
-  }
-  state.terminalSessionId = session.session_id;
-  state.terminalPaintVerified = false;
-  state.terminalFrameBytesSeen = 0;
-  setTerminalTextFallbackActive(false);
-  if (terminalSupports("setLinkOpenPolicy")) {
-    state.terminal.setLinkOpenPolicy(frankenTermLinkPolicy());
-  }
-  if (terminalSupports("setAccessibility")) {
-    state.terminal.setAccessibility({
-      reducedMotion: window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches ?? false,
-      screenReader: true,
-    });
-  }
-  applyZoomToSurface(state.terminal);
-  el.terminalCanvas.classList.remove("hidden");
-  clearTerminalSelection();
-  refreshTerminalSearch();
-  syncTerminalAccessibilityMirror();
-  syncTerminalTools();
-  measureAndResizeSurface(true, true);
-  flushPendingTerminalBytes();
-  setLoadingState(false);
+  return initializeTerminalSurface(mod, sessionPlan.sessionId, rendererPlan, terminalSurfaceRuntime);
 }
 
 function teardownTerminal() {

@@ -743,6 +743,65 @@ export function terminalPaintVerificationPlan(context = {}) {
   return { type: "ignore", done: true };
 }
 
+export function terminalSurfaceSessionPlan(context = {}) {
+  const session = context.session || null;
+  if (!session) {
+    return { type: "teardown_terminal" };
+  }
+  return { type: "load_renderer", sessionId: session.session_id };
+}
+
+export function terminalSurfaceRendererPlan(context = {}) {
+  if (!context.hasRendererModule) {
+    return { type: "activate_snapshot_fallback", clearText: false };
+  }
+  if (context.hasTerminal && context.terminalSessionId === context.sessionId) {
+    return {
+      type: "reuse_terminal",
+      terminalCanvasHidden: false,
+      terminalFallbackHidden: !context.terminalFallbackActive,
+      loadingVisible: false,
+    };
+  }
+  return { type: "initialize_terminal", loadingVisible: true, loadingLabel: "Initializing terminal..." };
+}
+
+export function terminalSurfaceInitErrorPlan(message) {
+  return {
+    type: "renderer_error_fallback",
+    clearText: false,
+    refreshSnapshot: true,
+    loadingVisible: false,
+    status: `Live terminal renderer unavailable: ${message}`,
+    statusError: true,
+    statusTimeoutMs: 3600,
+  };
+}
+
+export function terminalSurfacePostInitPlan(context = {}) {
+  return {
+    type: "complete_terminal_init",
+    sessionId: context.sessionId,
+    terminalPaintVerified: false,
+    terminalFrameBytesSeen: 0,
+    terminalFallbackActive: false,
+    setLinkOpenPolicy: Boolean(context.linkPolicySupported),
+    setAccessibility: Boolean(context.accessibilitySupported),
+    accessibility: {
+      reducedMotion: Boolean(context.reducedMotion),
+      screenReader: true,
+    },
+    terminalCanvasHidden: false,
+    clearSelection: true,
+    refreshSearch: true,
+    syncMirror: true,
+    syncTools: true,
+    resize: { pushResize: true, force: true },
+    flushPendingBytes: true,
+    loadingVisible: false,
+  };
+}
+
 export function terminalResizeGeometryPlan(context = {}) {
   const cols = clampInt(context.cols, 80, 24, 240);
   const rows = clampInt(context.rows, 24, 12, 120);

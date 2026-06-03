@@ -40,6 +40,10 @@ import {
   terminalPendingByteBufferPlan,
   terminalPresentationPlan,
   terminalResizeGeometryPlan,
+  terminalSurfaceInitErrorPlan,
+  terminalSurfacePostInitPlan,
+  terminalSurfaceRendererPlan,
+  terminalSurfaceSessionPlan,
   terminalStageCaptureBindings,
   terminalStageClickPlan,
   terminalStageFocusExecutorPlan,
@@ -1473,6 +1477,81 @@ test("terminalPaintVerificationPlan preserves verify, refresh, and fallback deci
     canvasHasVisiblePixels: false,
     hasSnapshotText: false,
   }), { type: "ignore", done: true });
+});
+
+test("terminalSurfaceSessionPlan preserves selected-session setup gates", () => {
+  assert.deepEqual(terminalSurfaceSessionPlan({ session: null }), { type: "teardown_terminal" });
+  assert.deepEqual(terminalSurfaceSessionPlan({ session: { session_id: "agent-1" } }), {
+    type: "load_renderer",
+    sessionId: "agent-1",
+  });
+});
+
+test("terminalSurfaceRendererPlan preserves renderer fallback, reuse, and init decisions", () => {
+  assert.deepEqual(terminalSurfaceRendererPlan({ hasRendererModule: false, sessionId: "agent-1" }), {
+    type: "activate_snapshot_fallback",
+    clearText: false,
+  });
+  assert.deepEqual(terminalSurfaceRendererPlan({
+    hasRendererModule: true,
+    hasTerminal: true,
+    terminalSessionId: "agent-1",
+    sessionId: "agent-1",
+    terminalFallbackActive: true,
+  }), {
+    type: "reuse_terminal",
+    terminalCanvasHidden: false,
+    terminalFallbackHidden: false,
+    loadingVisible: false,
+  });
+  assert.deepEqual(terminalSurfaceRendererPlan({
+    hasRendererModule: true,
+    hasTerminal: true,
+    terminalSessionId: "agent-2",
+    sessionId: "agent-1",
+  }), {
+    type: "initialize_terminal",
+    loadingVisible: true,
+    loadingLabel: "Initializing terminal...",
+  });
+});
+
+test("terminalSurfaceInitErrorPlan preserves renderer error fallback status", () => {
+  assert.deepEqual(terminalSurfaceInitErrorPlan("boom"), {
+    type: "renderer_error_fallback",
+    clearText: false,
+    refreshSnapshot: true,
+    loadingVisible: false,
+    status: "Live terminal renderer unavailable: boom",
+    statusError: true,
+    statusTimeoutMs: 3600,
+  });
+});
+
+test("terminalSurfacePostInitPlan preserves successful setup side-effect data", () => {
+  assert.deepEqual(terminalSurfacePostInitPlan({
+    sessionId: "agent-1",
+    linkPolicySupported: true,
+    accessibilitySupported: true,
+    reducedMotion: true,
+  }), {
+    type: "complete_terminal_init",
+    sessionId: "agent-1",
+    terminalPaintVerified: false,
+    terminalFrameBytesSeen: 0,
+    terminalFallbackActive: false,
+    setLinkOpenPolicy: true,
+    setAccessibility: true,
+    accessibility: { reducedMotion: true, screenReader: true },
+    terminalCanvasHidden: false,
+    clearSelection: true,
+    refreshSearch: true,
+    syncMirror: true,
+    syncTools: true,
+    resize: { pushResize: true, force: true },
+    flushPendingBytes: true,
+    loadingVisible: false,
+  });
 });
 
 test("terminalResizeGeometryPlan preserves resize geometry and side-effect decisions", () => {
