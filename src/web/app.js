@@ -41,6 +41,8 @@ import {
 } from "./dir_browser.js";
 import {
   commandPaletteExecutionPlan,
+  commandPaletteResultEventPlan,
+  commandPaletteSearchKeyPlan,
   filteredCommandPaletteItemsForState,
   renderCommandPaletteResultsHtml,
 } from "./command_palette.js";
@@ -5202,6 +5204,28 @@ function handleTerminalWorkbenchWidgetsLogEvent(event) {
   renderWorkbenchWidgets();
 }
 
+function handleCommandPaletteEvent(event) {
+  const target = event.target instanceof Element ? event.target : null;
+  const plan = event.type === "keydown"
+    ? commandPaletteSearchKeyPlan(event, state.paletteIndex, state.paletteItems.length)
+    : commandPaletteResultEventPlan(event.type, target, state.paletteItems.length);
+  if (plan.type === "ignore") {
+    return false;
+  }
+  if (plan.preventDefault) {
+    event.preventDefault();
+  }
+  if (Number.isFinite(plan.index)) {
+    state.paletteIndex = plan.index;
+  }
+  if (plan.type === "run_item") {
+    void runCommandPaletteItem();
+    return true;
+  }
+  renderCommandPalette();
+  return true;
+}
+
 function bindEvents() {
   bindTrogdorEvents();
   document.addEventListener?.("keydown", (event) => {
@@ -5338,40 +5362,9 @@ function bindEvents() {
     state.paletteIndex = 0;
     renderCommandPalette();
   });
-  el.paletteSearch.addEventListener("keydown", (event) => {
-    if (event.key === "ArrowDown") {
-      event.preventDefault();
-      state.paletteIndex = Math.min(state.paletteItems.length - 1, state.paletteIndex + 1);
-      renderCommandPalette();
-      return;
-    }
-    if (event.key === "ArrowUp") {
-      event.preventDefault();
-      state.paletteIndex = Math.max(0, state.paletteIndex - 1);
-      renderCommandPalette();
-      return;
-    }
-    if (event.key === "Enter") {
-      event.preventDefault();
-      void runCommandPaletteItem();
-    }
-  });
-  el.paletteResults.addEventListener("mousemove", (event) => {
-    const item = event.target instanceof Element ? event.target.closest("[data-palette-index]") : null;
-    if (!item) {
-      return;
-    }
-    state.paletteIndex = clampInt(Number(item.dataset.paletteIndex), 0, 0, Math.max(0, state.paletteItems.length - 1));
-    renderCommandPalette();
-  });
-  el.paletteResults.addEventListener("click", (event) => {
-    const item = event.target instanceof Element ? event.target.closest("[data-palette-index]") : null;
-    if (!item) {
-      return;
-    }
-    state.paletteIndex = clampInt(Number(item.dataset.paletteIndex), 0, 0, Math.max(0, state.paletteItems.length - 1));
-    void runCommandPaletteItem();
-  });
+  el.paletteSearch.addEventListener("keydown", handleCommandPaletteEvent);
+  el.paletteResults.addEventListener("mousemove", handleCommandPaletteEvent);
+  el.paletteResults.addEventListener("click", handleCommandPaletteEvent);
   el.paletteCloseButton.addEventListener("click", closeSheets);
 
   el.searchForm.addEventListener("submit", (event) => {
@@ -6045,6 +6038,7 @@ export const __swimmersWebTest = {
   setTerminalWorkbenchOpen,
   openCommandPalette,
   renderCommandPalette,
+  handleCommandPaletteEvent,
   runCommandPaletteItem,
   rememberSendHistory,
   renderSendHistory,

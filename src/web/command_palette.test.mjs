@@ -4,7 +4,9 @@ import assert from "node:assert/strict";
 import {
   buildCommandPaletteItems,
   commandPaletteExecutionPlan,
+  commandPaletteResultEventPlan,
   commandPaletteScore,
+  commandPaletteSearchKeyPlan,
   commandPaletteSessionDisplayName,
   filterCommandPaletteItems,
   filteredCommandPaletteItemsForState,
@@ -130,4 +132,46 @@ test("command palette execution plan helper preserves no-ops and dispatch orderi
   const plan = commandPaletteExecutionPlan({ action });
   assert.equal(plan.type, "invokeAction");
   assert.equal(plan.action, action);
+});
+
+test("command palette event helpers preserve keyboard and result index decisions", () => {
+  assert.deepEqual(commandPaletteSearchKeyPlan({ key: "ArrowDown" }, 0, 3), {
+    type: "set_index",
+    index: 1,
+    preventDefault: true,
+  });
+  assert.deepEqual(commandPaletteSearchKeyPlan({ key: "ArrowDown" }, 0, 0), {
+    type: "set_index",
+    index: -1,
+    preventDefault: true,
+  });
+  assert.deepEqual(commandPaletteSearchKeyPlan({ key: "ArrowUp" }, 0, 3), {
+    type: "set_index",
+    index: 0,
+    preventDefault: true,
+  });
+  assert.deepEqual(commandPaletteSearchKeyPlan({ key: "Enter" }, 1, 3), {
+    type: "run_item",
+    preventDefault: true,
+  });
+  assert.deepEqual(commandPaletteSearchKeyPlan({ key: "Escape" }, 1, 3), { type: "ignore" });
+
+  const target = (rawIndex) => ({
+    closest(selector) {
+      return selector === "[data-palette-index]" ? { dataset: { paletteIndex: rawIndex } } : null;
+    },
+  });
+  assert.deepEqual(commandPaletteResultEventPlan("mousemove", target("2"), 4), {
+    type: "set_index",
+    index: 2,
+  });
+  assert.deepEqual(commandPaletteResultEventPlan("click", target("9"), 4), {
+    type: "run_item",
+    index: 3,
+  });
+  assert.deepEqual(commandPaletteResultEventPlan("click", target("bad"), 4), {
+    type: "run_item",
+    index: 0,
+  });
+  assert.deepEqual(commandPaletteResultEventPlan("click", null, 4), { type: "ignore" });
 });

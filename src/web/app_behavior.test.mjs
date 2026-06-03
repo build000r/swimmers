@@ -2084,6 +2084,54 @@ test("command palette run path preserves disabled no-op, actions, and actionId d
   assert.equal(web.state.activeSheet, "auth");
 });
 
+test("command palette event handlers preserve navigation and result dispatch", () => {
+  resetWebState();
+  web.state.activeSheet = "palette";
+  let actionCalls = 0;
+  web.state.paletteItems = [
+    { label: "Alpha", action: () => { actionCalls += 1; } },
+    { label: "Beta", action: () => { actionCalls += 1; } },
+    { label: "Gamma", action: () => { actionCalls += 1; } },
+  ];
+  web.state.paletteIndex = 0;
+
+  let prevented = 0;
+  assert.equal(web.handleCommandPaletteEvent({
+    type: "keydown",
+    key: "ArrowDown",
+    preventDefault() {
+      prevented += 1;
+    },
+  }), true);
+  assert.equal(prevented, 1);
+  assert.equal(web.state.paletteIndex, 1);
+
+  web.state.paletteItems = [
+    { label: "Alpha", action: () => { actionCalls += 1; } },
+    { label: "Beta", action: () => { actionCalls += 1; } },
+    { label: "Gamma", action: () => { actionCalls += 1; } },
+  ];
+  web.state.paletteIndex = 1;
+  prevented = 0;
+  assert.equal(web.handleCommandPaletteEvent({
+    type: "keydown",
+    key: "Enter",
+    preventDefault() {
+      prevented += 1;
+    },
+  }), true);
+  assert.equal(prevented, 1);
+  assert.equal(actionCalls, 1);
+
+  const item = new MockElement("palette-item");
+  item.closest = (selector) => selector === "[data-palette-index]" ? { dataset: { paletteIndex: "2" } } : null;
+  const clickEvent = { type: "click", target: item, preventDefault() { prevented += 1; } };
+  assert.equal(web.handleCommandPaletteEvent(clickEvent), true);
+  assert.equal(web.state.paletteIndex, 2);
+  assert.equal(prevented, 1);
+  assert.equal(actionCalls, 2);
+});
+
 test("global shortcut handler preserves side effects and handled no-ops", () => {
   resetWebState();
   web.state.trogdorAtlasOpen = false;

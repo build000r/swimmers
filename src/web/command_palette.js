@@ -114,6 +114,37 @@ export function commandPaletteExecutionPlan(item) {
   return { type: "none" };
 }
 
+export function commandPaletteSearchKeyPlan(event, activeIndex = 0, itemCount = 0) {
+  const index = Number.isFinite(activeIndex) ? Math.trunc(activeIndex) : 0;
+  const count = Number.isFinite(itemCount) ? Math.trunc(itemCount) : 0;
+  if (event?.key === "ArrowDown") {
+    return { type: "set_index", index: Math.min(count - 1, index + 1), preventDefault: true };
+  }
+  if (event?.key === "ArrowUp") {
+    return { type: "set_index", index: Math.max(0, index - 1), preventDefault: true };
+  }
+  return event?.key === "Enter"
+    ? { type: "run_item", preventDefault: true }
+    : { type: "ignore" };
+}
+
+function boundedPaletteResultIndex(rawIndex, itemCount = 0) {
+  const maxIndex = Math.max(0, (Number.isFinite(itemCount) ? Math.trunc(itemCount) : 0) - 1);
+  const index = Number.isFinite(rawIndex) ? Math.trunc(rawIndex) : 0;
+  return Math.max(0, Math.min(maxIndex, index));
+}
+
+export function commandPaletteResultEventPlan(eventType, target, itemCount = 0) {
+  const item = target?.closest?.("[data-palette-index]");
+  if (!item) {
+    return { type: "ignore" };
+  }
+  const index = boundedPaletteResultIndex(Number(item.dataset?.paletteIndex), itemCount);
+  return eventType === "click"
+    ? { type: "run_item", index }
+    : { type: "set_index", index };
+}
+
 export function renderCommandPaletteResultsHtml(items = [], activeIndex = 0) {
   if (!items.length) {
     return `<div class="sheet-copy">No matching commands.</div>`;
