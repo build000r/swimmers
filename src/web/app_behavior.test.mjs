@@ -223,6 +223,10 @@ function resetWebState() {
     clearTimeout(web.state.terminalPaintProbeTimer);
     web.state.terminalPaintProbeTimer = null;
   }
+  if (web.state.resizeRetryTimer) {
+    clearTimeout(web.state.resizeRetryTimer);
+    web.state.resizeRetryTimer = null;
+  }
   storage.clear();
   window.location = new URL("http://swimmers.test/");
   document.title = "swimmers";
@@ -304,6 +308,16 @@ function resetWebState() {
   web.state.terminalMirrorText = "";
   web.state.terminalPaintVerified = false;
   web.state.terminalFrameBytesSeen = 0;
+  web.state.renderQueued = false;
+  web.state.renderRetryQueued = false;
+  web.state.surfaceInitInProgress = 0;
+  web.state.surfaceOperationDepth = 0;
+  web.state.hudRenderQueued = false;
+  web.state.resizeQueued = false;
+  web.state.resizePushResize = false;
+  web.state.resizeForce = false;
+  web.state.currentCols = 80;
+  web.state.currentRows = 24;
   web.state.rendererDiagnosticSequence = 0;
   web.state.lastRendererDiagnostic = null;
   web.state.lastRendererDiagnosticError = "";
@@ -589,6 +603,81 @@ test("FrankenTerm surface validation reports missing methods", () => {
     () => web.validateFrankenTermSurface({ init() {} }, ["init", "render"], "test renderer"),
     /test renderer missing methods: render/,
   );
+});
+
+test("FrankenTerm resize waits while another surface operation is active", async () => {
+  resetWebState();
+  web.state.selectedSessionId = "sess_0";
+  const calls = [];
+  const sent = [];
+  web.state.ws = {
+    readyState: WebSocket.OPEN,
+    send(payload) {
+      sent.push(JSON.parse(payload));
+    },
+  };
+  web.state.terminal = {
+    fitToContainer(width, height, dpr) {
+      calls.push(["fit", width, height, dpr]);
+      return { cols: 100, rows: 30 };
+    },
+    resize(cols, rows) {
+      calls.push(["resize", cols, rows]);
+    },
+    render() {
+      calls.push(["render"]);
+    },
+  };
+  web.state.surfaceOperationDepth = 1;
+
+  web.measureAndResizeSurface(true, true);
+
+  assert.deepEqual(calls, []);
+  assert.equal(web.state.resizeQueued, true);
+  assert.equal(web.state.resizePushResize, true);
+  assert.equal(web.state.resizeForce, true);
+
+  web.state.surfaceOperationDepth = 0;
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  assert.deepEqual(calls, [
+    ["fit", 1280, 720, 1],
+    ["resize", 100, 30],
+    ["render"],
+  ]);
+  assert.deepEqual(sent, [{ type: "resize", cols: 100, rows: 30 }]);
+});
+
+test("FrankenTerm recursive borrow errors are retried instead of escaping resize", async () => {
+  resetWebState();
+  web.state.selectedSessionId = "sess_0";
+  const calls = [];
+  web.state.terminal = {
+    fitToContainer() {
+      calls.push("fit");
+      if (calls.length === 1) {
+        throw new Error("recursive use of an object detected which would lead to unsafe aliasing in rust");
+      }
+      return { cols: 92, rows: 28 };
+    },
+    resize(cols, rows) {
+      calls.push(`resize:${cols}x${rows}`);
+    },
+    render() {
+      calls.push("render");
+    },
+  };
+
+  assert.doesNotThrow(() => web.measureAndResizeSurface(false, true));
+
+  assert.equal(web.state.resizeQueued, true);
+  assert.match(web.state.lastRendererDiagnosticError, /fitToContainer: recursive use/);
+
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  assert.deepEqual(calls, ["fit", "fit", "resize:92x28", "render"]);
+  assert.equal(web.state.currentCols, 92);
+  assert.equal(web.state.currentRows, 28);
 });
 
 test("renderer diagnostic stores JSONL line when supported", () => {

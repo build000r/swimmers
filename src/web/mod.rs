@@ -411,72 +411,94 @@ async fn render_index(focus_layout: bool) -> impl IntoResponse {
           </div>
         </section>
 
-        <section class="surface-sheet hidden create-sheet-burninate" id="create-sheet" aria-labelledby="create-sheet-title">
-          <div class="sheet-header create-sheet-header">
-            <p class="sheet-eyebrow">Repository Atlas</p>
-            <h2 id="create-sheet-title">Create Session</h2>
-          </div>
-          <div class="sheet-copy" id="dirs-summary">Browse directories before creating a session.</div>
-          <div class="sheet-grid create-sheet-grid">
-            <section class="sheet-panel create-sheet-browser-panel">
-              <div class="sheet-panel-header">
-                <h3>Directory Browser</h3>
-                <label class="toggle-row">
-                  <input id="dirs-managed-only" type="checkbox" />
-                  <span>Managed only</span>
-                </label>
-              </div>
-              <div class="create-dir-controls">
-                <input id="dirs-search" type="search" placeholder="Search loaded directories" autocomplete="off" />
-                <button class="ghost-button" id="create-batch-visible" type="button">Batch visible</button>
-                <button class="ghost-button" id="dirs-spawn-here" type="button">Spawn here</button>
-              </div>
-              <div class="browser-list create-dir-list" id="dirs-list" role="list" aria-label="Directory entries"></div>
-              <div class="sheet-toolbar create-sheet-toolbar">
-                <input id="dirs-path" type="text" placeholder="/absolute/path" autocomplete="off" />
-                <button class="ghost-button" id="dirs-load-button" type="button">Load</button>
-                <button class="ghost-button" id="dirs-up-button" type="button">Up</button>
-              </div>
-              <div class="batch-bar hidden" id="create-batch-bar" aria-live="polite">
-                <div class="batch-bar-copy">
-                  <span class="batch-count" id="create-batch-count">0 selected</span>
-                  <span class="batch-tool" id="create-batch-tool">tool: grok</span>
-                  <span class="batch-preview" id="create-batch-preview">request: (none)</span>
-                </div>
-                <div class="batch-actions">
-                  <button class="ghost-button batch-clear" id="create-batch-clear" type="button">Clear</button>
-                  <button class="batch-submit" id="create-batch-submit" type="submit" form="create-form">Batch send</button>
-                </div>
-              </div>
-            </section>
+        <section class="surface-sheet hidden create-console" id="create-sheet" aria-labelledby="create-sheet-title">
+          <header class="console-head">
+            <div class="console-heading">
+              <p class="console-eyebrow">Repository atlas</p>
+              <h2 id="create-sheet-title">Create session</h2>
+            </div>
+            <button class="console-dismiss" id="create-close-button" type="button" aria-label="Close">esc</button>
+          </header>
 
-            <form class="sheet-form sheet-panel create-sheet-form" id="create-form">
-              <label class="field">
-                <span>Working Directory</span>
+          <div class="console-toolbar">
+            <div class="console-search">
+              <svg class="console-search-icon" viewBox="0 0 16 16" width="15" height="15" fill="none" aria-hidden="true">
+                <circle cx="7" cy="7" r="4.5" stroke="currentColor" stroke-width="1.5"></circle>
+                <path d="M11 11l3.2 3.2" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"></path>
+              </svg>
+              <input id="dirs-search" type="search" placeholder="Search repos, paths, groups…" autocomplete="off" aria-label="Search repositories" />
+            </div>
+            <label class="console-toggle">
+              <input id="dirs-managed-only" type="checkbox" />
+              <span>Managed only</span>
+            </label>
+            <button class="console-ghost" id="create-batch-visible" type="button">Select all</button>
+          </div>
+
+          <div class="console-chips" id="dirs-groups" role="group" aria-label="Repository groups"></div>
+
+          <div class="console-pathbar">
+            <span class="console-pathbar-kicker">Browsing</span>
+            <input id="dirs-path" type="text" placeholder="/absolute/path" autocomplete="off" aria-label="Browse path" />
+            <button class="console-ghost" id="dirs-up-button" type="button">Up</button>
+            <button class="console-ghost" id="dirs-load-button" type="button">Load</button>
+            <button class="console-ghost console-ghost-accent" id="dirs-spawn-here" type="button">Spawn here</button>
+          </div>
+
+          <div class="console-table" role="table" aria-label="Repositories">
+            <div class="console-row console-row-head" role="row">
+              <span class="col-select" aria-hidden="true"></span>
+              <span class="col-name" role="columnheader">Repository</span>
+              <span class="col-path" role="columnheader">Path</span>
+              <span class="col-status" role="columnheader">Status</span>
+              <span class="col-groups" role="columnheader">Groups</span>
+            </div>
+            <div class="console-body browser-list" id="dirs-list" role="rowgroup" aria-label="Directory entries"></div>
+          </div>
+
+          <form class="console-dock" id="create-form">
+            <div class="console-dock-grid">
+              <label class="dock-field dock-field-wide">
+                <span>Working directory</span>
                 <input id="create-cwd" type="text" placeholder="/absolute/path" autocomplete="off" />
               </label>
-              <label class="field">
+              <label class="dock-field">
                 <span>Tool</span>
-                <select id="create-tool">
-                  <option value="grok">Grok</option>
-                  <option value="codex">Codex</option>
-                  <option value="claude">Claude</option>
-                </select>
+                <span class="dock-select">
+                  <select id="create-tool">
+                    <option value="grok">Grok</option>
+                    <option value="codex">Codex</option>
+                    <option value="claude">Claude</option>
+                  </select>
+                  <svg viewBox="0 0 10 6" width="10" height="6" fill="none" aria-hidden="true"><path d="M1 1l4 4 4-4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"></path></svg>
+                </span>
               </label>
-              <label class="field">
-                <span>Launch Target</span>
-                <select id="create-launch-target"></select>
+              <label class="dock-field">
+                <span>Launch target</span>
+                <span class="dock-select">
+                  <select id="create-launch-target"></select>
+                  <svg viewBox="0 0 10 6" width="10" height="6" fill="none" aria-hidden="true"><path d="M1 1l4 4 4-4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"></path></svg>
+                </span>
               </label>
-              <label class="field">
-                <span>Initial Request</span>
-                <textarea id="create-request" rows="5" placeholder="Optional boot prompt for the new session"></textarea>
-              </label>
-              <div class="sheet-actions">
-                <button class="ghost-button" id="create-close-button" type="button">Cancel</button>
-                <button id="create-button" type="submit">Create Session</button>
+            </div>
+            <label class="dock-field dock-field-prompt">
+              <span>Boot prompt <em>optional</em></span>
+              <textarea id="create-request" rows="2" placeholder="Optional first message for the new session"></textarea>
+            </label>
+            <div class="console-dock-foot">
+              <p class="console-status" id="dirs-summary">Browse directories before creating a session.</p>
+              <div class="console-batch hidden" id="create-batch-bar" aria-live="polite">
+                <div class="console-batch-copy">
+                  <span class="console-batch-count" id="create-batch-count">0 selected</span>
+                  <span class="console-batch-tool" id="create-batch-tool">tool: grok</span>
+                  <span class="console-batch-preview" id="create-batch-preview">request: (none)</span>
+                </div>
+                <button class="console-ghost console-batch-clear" id="create-batch-clear" type="button">Clear</button>
+                <button class="console-batch-submit" id="create-batch-submit" type="submit" form="create-form">Batch send</button>
               </div>
-            </form>
-          </div>
+              <button class="console-create" id="create-button" type="submit">Create session</button>
+            </div>
+          </form>
         </section>
 
         <section class="surface-sheet hidden" id="mermaid-sheet" aria-labelledby="mermaid-sheet-title">
@@ -507,6 +529,23 @@ async fn render_index(focus_layout: bool) -> impl IntoResponse {
     ([(header::CACHE_CONTROL, "no-store")], Html(html))
 }
 
+/// In debug builds, serve a web asset from its on-disk source so CSS/JS edits
+/// show up on a plain browser refresh (no rebuild). Falls back to the baked-in
+/// copy if the file can't be read. Release builds always use the embedded copy,
+/// at zero cost. `relative` is the path from the crate root (where Cargo.toml
+/// lives); `baked` is the matching `include_str!` constant. Note: the page HTML
+/// is templated in Rust, so markup changes in this file still need a rebuild.
+#[cfg(debug_assertions)]
+fn dev_asset(relative: &str, baked: &'static str) -> String {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(relative);
+    std::fs::read_to_string(&path).unwrap_or_else(|_| baked.to_string())
+}
+
+#[cfg(not(debug_assertions))]
+fn dev_asset(_relative: &str, baked: &'static str) -> &'static str {
+    baked
+}
+
 async fn app_js() -> impl IntoResponse {
     (
         [
@@ -516,7 +555,7 @@ async fn app_js() -> impl IntoResponse {
             ),
             (header::CACHE_CONTROL, "no-store"),
         ],
-        include_str!("app.js"),
+        dev_asset("src/web/app.js", include_str!("app.js")),
     )
 }
 
@@ -529,7 +568,10 @@ async fn rendered_surface_js() -> impl IntoResponse {
             ),
             (header::CACHE_CONTROL, "no-store"),
         ],
-        include_str!("rendered_surface.js"),
+        dev_asset(
+            "src/web/rendered_surface.js",
+            include_str!("rendered_surface.js"),
+        ),
     )
 }
 
@@ -542,7 +584,10 @@ async fn input_support_js() -> impl IntoResponse {
             ),
             (header::CACHE_CONTROL, "no-store"),
         ],
-        include_str!("input_support.js"),
+        dev_asset(
+            "src/web/input_support.js",
+            include_str!("input_support.js"),
+        ),
     )
 }
 
@@ -552,7 +597,7 @@ async fn app_css() -> impl IntoResponse {
             (header::CONTENT_TYPE, "text/css; charset=utf-8"),
             (header::CACHE_CONTROL, "no-store"),
         ],
-        include_str!("app.css"),
+        dev_asset("src/web/app.css", include_str!("app.css")),
     )
 }
 
@@ -2154,7 +2199,7 @@ mod tests {
             "const dimensionsChanged = cols !== state.currentCols || rows !== state.currentRows"
         ));
         assert!(js.contains("if (!force && !dimensionsChanged)"));
-        assert!(js.contains("measureAndResizeSurface(true, false)"));
+        assert!(js.contains("queueMeasureAndResizeSurface(true, false)"));
     }
 
     #[test]

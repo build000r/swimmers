@@ -142,6 +142,14 @@ const state = {
   snapshotTimer: null,
   terminalPaintProbeTimer: null,
   renderQueued: false,
+  renderRetryQueued: false,
+  surfaceInitInProgress: 0,
+  surfaceOperationDepth: 0,
+  hudRenderQueued: false,
+  resizeQueued: false,
+  resizePushResize: false,
+  resizeForce: false,
+  resizeRetryTimer: null,
   terminalFallbackActive: false,
   terminalFallbackAutoFollow: true,
   terminalMirrorText: "",
@@ -341,6 +349,7 @@ const el = {
   dirsLoadButton: document.getElementById("dirs-load-button"),
   dirsUpButton: document.getElementById("dirs-up-button"),
   dirsSpawnHere: document.getElementById("dirs-spawn-here"),
+  dirsGroups: document.getElementById("dirs-groups"),
   dirsList: document.getElementById("dirs-list"),
   createBatchBar: document.getElementById("create-batch-bar"),
   createBatchCount: document.getElementById("create-batch-count"),
@@ -3434,14 +3443,13 @@ function renderDirEntries(response) {
     el.createCwd.value = path;
   }
   renderLaunchTargetOptions(response);
+  const chipHost = el.dirsGroups || el.dirsList;
+  if (el.dirsGroups) {
+    el.dirsGroups.innerHTML = "";
+  }
   el.dirsList.innerHTML = "";
 
-  if (groups.length) {
-    const groupSection = document.createElement("section");
-    groupSection.className = "dir-section";
-    groupSection.innerHTML = `<div class="dir-section-header"><span>Groups</span></div>`;
-    const chips = document.createElement("div");
-    chips.className = "dir-group-chips";
+  if (groups.length && chipHost) {
     const managed = Boolean(el.dirsManagedOnly.checked);
     const overlayLabel = String(response?.overlay_label || "managed").trim().toLowerCase();
 
@@ -3452,7 +3460,7 @@ function renderDirEntries(response) {
     managedButton.dataset.group = "";
     managedButton.textContent = overlayLabel || "managed";
     managedButton.classList.toggle("is-active", managed && !activeGroup);
-    chips.appendChild(managedButton);
+    chipHost.appendChild(managedButton);
 
     const allButton = document.createElement("button");
     allButton.type = "button";
@@ -3461,7 +3469,7 @@ function renderDirEntries(response) {
     allButton.dataset.group = "";
     allButton.textContent = "all folders";
     allButton.classList.toggle("is-active", !managed && !activeGroup);
-    chips.appendChild(allButton);
+    chipHost.appendChild(allButton);
 
     for (const groupName of groups) {
       const chip = document.createElement("button");
@@ -3471,29 +3479,24 @@ function renderDirEntries(response) {
       chip.dataset.group = String(groupName || "");
       chip.textContent = String(groupName || "");
       chip.classList.toggle("is-active", chip.dataset.group === activeGroup);
-      chips.appendChild(chip);
+      chipHost.appendChild(chip);
     }
-    groupSection.appendChild(chips);
-    el.dirsList.appendChild(groupSection);
   }
 
-  const entrySection = document.createElement("section");
-  entrySection.className = "dir-section";
-  const sectionLabel = activeGroup ? `Entries • ${activeGroup}` : "Entries";
-  entrySection.innerHTML = `<div class="dir-section-header"><span>${escapeHtml(sectionLabel)}</span></div>`;
   const entries = visibleDirEntries(rawEntries, path);
 
   if (!entries.length) {
     const empty = document.createElement("div");
-    empty.className = "browser-empty";
+    empty.className = "console-empty";
     empty.textContent = normalizedDirSearch() ? "No directory matches." : "No child directories found.";
-    entrySection.appendChild(empty);
+    el.dirsList.appendChild(empty);
   } else {
     for (const entry of entries) {
       const entryPath = dirEntryResolvedPath(path, entry);
       const selectable = dirEntryBatchSelectable(entry, entryPath);
       const row = document.createElement("div");
-      row.className = "dir-row";
+      row.className = "console-row dir-row";
+      row.setAttribute("role", "row");
       row.dataset.path = entryPath;
       row.dataset.hasChildren = String(Boolean(entry.has_children));
       row.dataset.disabled = String(!selectable);
@@ -3504,8 +3507,14 @@ function renderDirEntries(response) {
         selectablePaths.add(entryPath);
       }
 
+      const running = Boolean(entry?.is_running);
+      const dirty = Boolean(entry?.repo_dirty);
+      const memberships = dirEntryGroups(entry);
+      const managed = memberships.length > 0 || Boolean(entry?.group);
+      const managedTitle = memberships.length ? `groups: ${memberships.join(", ")}` : "managed repository";
+
       const selectCell = document.createElement("div");
-      selectCell.className = "dir-select-cell";
+      selectCell.className = "col-select dir-select-cell";
       const checkbox = document.createElement("input");
       checkbox.type = "checkbox";
       checkbox.className = "dir-row-check";
@@ -3518,7 +3527,7 @@ function renderDirEntries(response) {
 
       const main = document.createElement("button");
       main.type = "button";
-      main.className = "dir-row-main";
+      main.className = "col-name dir-row-main";
       main.dataset.path = entryPath;
       main.dataset.hasChildren = String(Boolean(entry.has_children));
       if (entry?.group) {
@@ -3529,39 +3538,41 @@ function renderDirEntries(response) {
       if (!entryPath) {
         main.disabled = true;
       }
-      const running = Boolean(entry?.is_running);
-      const dirty = Boolean(entry?.repo_dirty);
-      const memberships = dirEntryGroups(entry);
-      const managed = memberships.length > 0 || Boolean(entry?.group);
-      const managedLabel = memberships.length ? memberships.join(", ") : entry?.group ? String(entry.group) : "managed";
       main.innerHTML = `
-        <span class="dir-row-eyebrow">${entry.has_children ? "directory" : "leaf repo"}</span>
+        <span class="dir-row-kind ${entry.has_children ? "is-dir" : "is-repo"}" aria-hidden="true">${entry.has_children ? "▸" : "◆"}</span>
         <span class="dir-row-name">${escapeHtml(entry.name || "(unnamed)")}</span>
-        <span class="dir-row-path">${escapeHtml(entryPath || "(no path)")}</span>
       `;
       row.appendChild(main);
 
-      const meta = document.createElement("div");
-      meta.className = "dir-row-meta";
-      const badges = document.createElement("div");
-      badges.className = "dir-row-badges";
+      const pathCell = document.createElement("span");
+      pathCell.className = "col-path dir-row-path";
+      pathCell.title = entryPath;
+      pathCell.textContent = entryPath || "(no path)";
+      row.appendChild(pathCell);
+
+      const statusCell = document.createElement("div");
+      statusCell.className = "col-status dir-row-status";
       const managedBadge = document.createElement("span");
       managedBadge.className = `dir-badge ${managed ? "is-managed" : "is-unmanaged"}`;
-      managedBadge.textContent = managed ? `managed:${managedLabel}` : "unmanaged";
-      badges.appendChild(managedBadge);
+      managedBadge.textContent = managed ? "managed" : "local";
+      managedBadge.title = managed ? managedTitle : "not in a managed group";
+      statusCell.appendChild(managedBadge);
       if (running) {
         const runningBadge = document.createElement("span");
         runningBadge.className = "dir-badge is-running";
         runningBadge.textContent = "running";
-        badges.appendChild(runningBadge);
+        statusCell.appendChild(runningBadge);
       }
       if (dirty) {
         const dirtyBadge = document.createElement("span");
         dirtyBadge.className = "dir-badge is-dirty";
-        dirtyBadge.textContent = "repo dirty";
-        badges.appendChild(dirtyBadge);
+        dirtyBadge.textContent = "dirty";
+        statusCell.appendChild(dirtyBadge);
       }
-      meta.appendChild(badges);
+      row.appendChild(statusCell);
+
+      const groupsCell = document.createElement("div");
+      groupsCell.className = "col-groups dir-row-groups";
       const openHref = safeAnchorHref(entry?.open_url);
       if (openHref) {
         const openLink = document.createElement("a");
@@ -3570,14 +3581,14 @@ function renderDirEntries(response) {
         openLink.target = "_blank";
         openLink.rel = "noopener noreferrer";
         openLink.textContent = "open url";
-        meta.appendChild(openLink);
+        groupsCell.appendChild(openLink);
       }
       const groupActions = renderDirGroupActions(entry, entryPath, groups, activeGroup);
       if (groupActions) {
-        meta.appendChild(groupActions);
+        groupsCell.appendChild(groupActions);
       }
-      row.appendChild(meta);
-      entrySection.appendChild(row);
+      row.appendChild(groupsCell);
+      el.dirsList.appendChild(row);
     }
   }
 
@@ -3586,8 +3597,6 @@ function renderDirEntries(response) {
       selected.delete(selectedPath);
     }
   }
-
-  el.dirsList.appendChild(entrySection);
 
   const managed = Boolean(el.dirsManagedOnly.checked);
   const shownCount = entries.length;
@@ -4987,7 +4996,12 @@ async function setupHudSurface() {
     FRANKENTERM_HUD_METHODS,
     "HUD renderer",
   );
-  await state.hud.init(el.hudCanvas, undefined);
+  state.surfaceInitInProgress += 1;
+  try {
+    await state.hud.init(el.hudCanvas, undefined);
+  } finally {
+    state.surfaceInitInProgress -= 1;
+  }
   if (surfaceSupports(state.hud, "setAccessibility")) {
     state.hud.setAccessibility({
       reducedMotion: window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches ?? false,
@@ -5177,7 +5191,12 @@ async function setupTerminalSurface() {
       "terminal renderer",
     );
     state.terminalAcceptsBytes = false;
-    await state.terminal.init(el.terminalCanvas, undefined);
+    state.surfaceInitInProgress += 1;
+    try {
+      await state.terminal.init(el.terminalCanvas, undefined);
+    } finally {
+      state.surfaceInitInProgress -= 1;
+    }
     state.terminalAcceptsBytes = true;
   } catch (error) {
     destroyTerminalInstance();
@@ -5233,6 +5252,83 @@ function disconnectSocket() {
   }
 }
 
+function surfaceBusy() {
+  return state.surfaceInitInProgress > 0 || state.surfaceOperationDepth > 0;
+}
+
+function frankenTermErrorMessage(error) {
+  return error?.message || String(error || "");
+}
+
+function isFrankenTermReentryError(error) {
+  return /recursive use of an object/i.test(frankenTermErrorMessage(error));
+}
+
+function withSurfaceOperation(label, callback) {
+  if (surfaceBusy()) {
+    return { deferred: true };
+  }
+  state.surfaceOperationDepth += 1;
+  try {
+    return { deferred: false, value: callback() };
+  } catch (error) {
+    if (isFrankenTermReentryError(error)) {
+      state.lastRendererDiagnosticError = `${label}: ${frankenTermErrorMessage(error)}`;
+      return { deferred: true, error };
+    }
+    throw error;
+  } finally {
+    state.surfaceOperationDepth -= 1;
+  }
+}
+
+function queueRenderRetry() {
+  if (state.renderRetryQueued) {
+    return;
+  }
+  state.renderRetryQueued = true;
+  window.setTimeout(() => {
+    state.renderRetryQueued = false;
+    if (!surfaceBusy()) {
+      scheduleRender();
+    }
+  }, 0);
+}
+
+function queueHudRender() {
+  if (state.hudRenderQueued) {
+    return;
+  }
+  state.hudRenderQueued = true;
+  window.setTimeout(() => {
+    state.hudRenderQueued = false;
+    if (!surfaceBusy()) {
+      renderHudSurface();
+    }
+  }, 0);
+}
+
+function queueMeasureAndResizeSurface(pushResize = false, force = false) {
+  state.resizeQueued = true;
+  state.resizePushResize = state.resizePushResize || Boolean(pushResize);
+  state.resizeForce = state.resizeForce || Boolean(force);
+  if (state.resizeRetryTimer) {
+    return;
+  }
+  state.resizeRetryTimer = window.setTimeout(() => {
+    state.resizeRetryTimer = null;
+    if (!state.resizeQueued || surfaceBusy()) {
+      return;
+    }
+    const queuedPushResize = state.resizePushResize;
+    const queuedForce = state.resizeForce;
+    state.resizeQueued = false;
+    state.resizePushResize = false;
+    state.resizeForce = false;
+    measureAndResizeSurface(queuedPushResize, queuedForce);
+  }, 0);
+}
+
 function scheduleRender() {
   if (state.renderQueued) {
     return;
@@ -5243,11 +5339,24 @@ function scheduleRender() {
   state.renderQueued = true;
   requestAnimationFrame(() => {
     state.renderQueued = false;
-    if (state.terminal) {
-      state.terminal.render();
+    // A surface `init()` holds the wasm instance borrowed across its internal
+    // `await`; calling `render()` during that window re-enters the same borrow
+    // and trips the wasm-bindgen "recursive use of an object" panic. Re-queue
+    // until init settles.
+    if (surfaceBusy()) {
+      queueRenderRetry();
+      return;
     }
-    if (state.hud) {
-      state.hud.render();
+    const rendered = withSurfaceOperation("render", () => {
+      if (state.terminal) {
+        state.terminal.render();
+      }
+      if (state.hud) {
+        state.hud.render();
+      }
+    });
+    if (rendered.deferred) {
+      queueRenderRetry();
     }
   });
 }
@@ -5265,9 +5374,28 @@ function measureAndResizeSurface(pushResize = false, force = false) {
     return;
   }
 
+  // `fitToContainer()`/`resize()` take `&mut self` in wasm; invoking them while a
+  // surface `init()` is still awaiting (e.g. from the ResizeObserver that fires
+  // when init sets the canvas CSS size) re-enters the held borrow and panics.
+  // Defer the measurement until init settles instead.
+  if (surfaceBusy()) {
+    queueMeasureAndResizeSurface(pushResize, force);
+    return;
+  }
+  state.resizeQueued = false;
+  state.resizePushResize = false;
+  state.resizeForce = false;
+
   const rect = el.terminalStage.getBoundingClientRect();
   const dpr = window.devicePixelRatio || 1;
-  const geo = referenceSurface.fitToContainer(rect.width, rect.height, dpr);
+  const fit = withSurfaceOperation("fitToContainer", () =>
+    referenceSurface.fitToContainer(rect.width, rect.height, dpr),
+  );
+  if (fit.deferred) {
+    queueMeasureAndResizeSurface(pushResize, force);
+    return;
+  }
+  const geo = fit.value;
   const cols = clampInt(geo?.cols, 80, 24, 240);
   const rows = clampInt(geo?.rows, 24, 12, 120);
   const dimensionsChanged = cols !== state.currentCols || rows !== state.currentRows;
@@ -5276,14 +5404,21 @@ function measureAndResizeSurface(pushResize = false, force = false) {
     return;
   }
 
+  const resized = withSurfaceOperation("resize", () => {
+    if (state.hud) {
+      state.hud.resize(cols, rows);
+    }
+    if (state.terminal) {
+      state.terminal.resize(cols, rows);
+    }
+  });
+  if (resized.deferred) {
+    queueMeasureAndResizeSurface(pushResize, force);
+    return;
+  }
+
   state.currentCols = cols;
   state.currentRows = rows;
-  if (state.hud) {
-    state.hud.resize(cols, rows);
-  }
-  if (state.terminal) {
-    state.terminal.resize(cols, rows);
-  }
   renderHudSurface();
   scheduleRender();
 
@@ -5299,12 +5434,22 @@ function captureTerminalRendererDiagnostic(reason = "frame") {
   if (!terminalSupports("snapshotResizeStormFrameJsonl")) {
     return null;
   }
+  if (surfaceBusy()) {
+    return null;
+  }
   const frameIndex = state.rendererDiagnosticSequence;
   state.rendererDiagnosticSequence += 1;
   const timestamp = new Date().toISOString();
-  try {
+  const diagnostic = withSurfaceOperation("snapshotResizeStormFrameJsonl", () => {
     const line = state.terminal.snapshotResizeStormFrameJsonl("swimmers-web", 0, timestamp, frameIndex);
     const parsed = JSON.parse(String(line || "{}"));
+    return { line, parsed };
+  });
+  if (diagnostic.deferred) {
+    return null;
+  }
+  try {
+    const { line, parsed } = diagnostic.value;
     state.lastRendererDiagnostic = { reason, line, parsed };
     state.lastRendererDiagnosticError = "";
     return line;
@@ -5362,10 +5507,23 @@ function renderHudSurface() {
   if (!state.hud) {
     return;
   }
+  // `applyPatchBatchFlat()` takes `&mut self`; while a surface `init()` is still
+  // awaiting it holds that borrow, so re-entering here would panic. Defer the
+  // HUD patch until init settles, then re-run.
+  if (surfaceBusy()) {
+    queueHudRender();
+    return;
+  }
   const frame = buildSurfaceFrame(buildSurfaceModel());
   state.surfaceZones = frame.zones ?? [];
   state.surfaceMasks = frame.masks ?? [];
-  state.hud.applyPatchBatchFlat(frame.spans, frame.cells);
+  const patched = withSurfaceOperation("applyPatchBatchFlat", () => {
+    state.hud.applyPatchBatchFlat(frame.spans, frame.cells);
+  });
+  if (patched.deferred) {
+    queueHudRender();
+    return;
+  }
   scheduleRender();
 }
 
@@ -6456,9 +6614,13 @@ async function copyTerminalFrameText() {
 
 function clearHoveredLink(updateUi = true) {
   state.hoveredLinkUrl = "";
-  if (terminalSupports("setHoveredLinkId")) {
-    state.terminal.setHoveredLinkId(0);
-    scheduleRender();
+  // `setHoveredLinkId()` takes `&mut self`; don't touch the wasm instance while
+  // another FrankenTerm operation is active.
+  if (terminalSupports("setHoveredLinkId") && !surfaceBusy()) {
+    const cleared = withSurfaceOperation("setHoveredLinkId", () => state.terminal.setHoveredLinkId(0));
+    if (!cleared.deferred) {
+      scheduleRender();
+    }
   }
   if (updateUi) {
     setUtilityStatus(defaultUtilityLabel(), true);
@@ -6473,12 +6635,31 @@ function updateHoveredLink(event) {
     return;
   }
 
+  // Hover probing touches the wasm instance; skip it while another FrankenTerm
+  // operation is active. A later mousemove re-runs this once the operation
+  // settles.
+  if (surfaceBusy()) {
+    return;
+  }
+
   const cell = mouseCell(event);
-  const url = state.terminal.linkUrlAt(cell.x, cell.y) ?? "";
+  const hover = withSurfaceOperation("link hover", () => {
+    const url = state.terminal.linkUrlAt(cell.x, cell.y) ?? "";
+    const linkId =
+      terminalSupports("linkAt") && terminalSupports("setHoveredLinkId")
+        ? state.terminal.linkAt(cell.x, cell.y)
+        : null;
+    if (linkId !== null) {
+      state.terminal.setHoveredLinkId(linkId);
+    }
+    return { url, highlighted: linkId !== null };
+  });
+  if (hover.deferred) {
+    return;
+  }
+  const { url, highlighted } = hover.value;
   state.hoveredLinkUrl = url;
-  if (terminalSupports("linkAt") && terminalSupports("setHoveredLinkId")) {
-    const linkId = state.terminal.linkAt(cell.x, cell.y);
-    state.terminal.setHoveredLinkId(linkId);
+  if (highlighted) {
     scheduleRender();
   }
 
@@ -8514,7 +8695,7 @@ function bindEvents() {
   });
 
   const resizeObserver = new ResizeObserver(() => {
-    measureAndResizeSurface(true, false);
+    queueMeasureAndResizeSurface(true, false);
   });
   resizeObserver.observe(el.terminalStage);
 }
@@ -8547,6 +8728,9 @@ export const __swimmersWebTest = {
   openTrogdorAtlas,
   persistSelectedSession,
   renderHudSurface,
+  scheduleRender,
+  measureAndResizeSurface,
+  queueMeasureAndResizeSurface,
   syncTerminalPresentation,
   sessionSocketUrl,
   sessionSocketAuthMessage,
