@@ -13,6 +13,7 @@ import {
   reuseTerminalSurface,
 } from "./terminal_surface_setup.js";
 import { runGlobalShortcutAction } from "./global_shortcut_dispatch.js";
+import { runSessionRefresh } from "./session_refresh.js";
 import {
   MERMAID_PLAN_CONTENT_DISPLAY_MAX_CHARS,
   buildMermaidArtifactView,
@@ -484,6 +485,29 @@ const globalShortcutRuntime = {
   copyTerminalSelection,
   copyHoveredLink,
   refreshSessions,
+};
+
+const sessionRefreshRuntime = {
+  state,
+  apiFetch,
+  apiMaybeFetch,
+  responseJsonOrNull,
+  applyOperatorPressure,
+  applyBackendHealth,
+  syncTrogdorCueTransitions,
+  normalizeSessionId,
+  sessionExists,
+  persistSelectedSession,
+  setupHudSurface,
+  renderHudSurface,
+  syncTerminalTools,
+  connectSelectedSession,
+  refreshAgentContextForSelectedSession,
+  refreshWorkbenchWidgetsForSelectedSession,
+  setConnectionStatus,
+  setModeStatus,
+  resetAgentContextForSession,
+  resetWorkbenchWidgetsForSession,
 };
 
 function currentSession() {
@@ -2513,67 +2537,7 @@ async function launchCommitGrok() {
 }
 
 async function refreshSessions() {
-  try {
-    const publishedRequest = state.followPublishedSelection ? apiFetch("/v1/selection") : Promise.resolve(null);
-    const [response, pressureResponse, healthResponse, publishedResponse] = await Promise.all([
-      apiFetch("/v1/sessions"),
-      apiMaybeFetch("/v1/operator-pressure"),
-      apiMaybeFetch("/health"),
-      publishedRequest,
-    ]);
-    const payload = await response.json();
-    const pressurePayload = await responseJsonOrNull(pressureResponse);
-    const healthPayload = await responseJsonOrNull(healthResponse);
-    state.sessions = Array.isArray(payload.sessions) ? payload.sessions : [];
-    applyOperatorPressure(pressurePayload);
-    applyBackendHealth(healthPayload);
-    syncTrogdorCueTransitions();
-
-    if (publishedResponse) {
-      state.publishedSelection = await publishedResponse.json();
-      const publishedSessionId = normalizeSessionId(state.publishedSelection?.session_id);
-      if (publishedSessionId && sessionExists(publishedSessionId)) {
-        persistSelectedSession(publishedSessionId);
-      } else {
-        persistSelectedSession(null);
-      }
-    } else {
-      state.publishedSelection = null;
-      if (!state.selectedSessionId || !sessionExists(state.selectedSessionId)) {
-        const fallbackSessionId = state.trogdorAtlasOpen ? null : state.sessions[0]?.session_id ?? null;
-        persistSelectedSession(fallbackSessionId);
-      }
-    }
-
-    await setupHudSurface();
-    renderHudSurface();
-    syncTerminalTools();
-    await connectSelectedSession();
-    void refreshAgentContextForSelectedSession({ throttle: true, silent: true });
-    void refreshWorkbenchWidgetsForSelectedSession({ throttle: true, silent: true });
-    if (state.followPublishedSelection && !state.selectedSessionId) {
-      setConnectionStatus("waiting", true);
-    } else {
-      setConnectionStatus(state.selectedSessionId ? "live" : "idle");
-    }
-    setModeStatus(state.readOnly ? "observer" : "operator", !state.token);
-  } catch (error) {
-    state.sessions = [];
-    state.operatorPressureBySession = new Map();
-    state.backendHealth = null;
-    state.publishedSelection = null;
-    persistSelectedSession(null);
-    resetAgentContextForSession(null);
-    resetWorkbenchWidgetsForSession(null);
-    renderHudSurface();
-    if (error?.status === 401 || error?.status === 403) {
-      setConnectionStatus("auth required", true);
-      setModeStatus("token needed", false);
-    } else {
-      setConnectionStatus("backend unavailable", true);
-      setModeStatus("offline", true);
-    }
-  }
+  await runSessionRefresh(sessionRefreshRuntime);
 }
 
 function scheduleSessionRefresh() {

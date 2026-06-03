@@ -30,10 +30,15 @@ use crate::types::{clamp_terminal_resize, opcodes, ControlEvent, SessionSummary}
 const APP_JS_ROUTE: &str = "/app.js";
 const RENDERED_SURFACE_JS_ROUTE: &str = "/rendered_surface.js";
 const INPUT_SUPPORT_JS_ROUTE: &str = "/input_support.js";
+const SEND_SHEET_JS_ROUTE: &str = "/send_sheet.js";
+const TERMINAL_SURFACE_SETUP_JS_ROUTE: &str = "/terminal_surface_setup.js";
+const GLOBAL_SHORTCUT_DISPATCH_JS_ROUTE: &str = "/global_shortcut_dispatch.js";
+const SESSION_REFRESH_JS_ROUTE: &str = "/session_refresh.js";
 const MERMAID_ARTIFACT_JS_ROUTE: &str = "/mermaid_artifact.js";
 const TERMINAL_SAFETY_JS_ROUTE: &str = "/terminal_safety.js";
 const TERMINAL_PROTOCOL_JS_ROUTE: &str = "/terminal_protocol.js";
 const DIR_BROWSER_JS_ROUTE: &str = "/dir_browser.js";
+const COMMAND_PALETTE_JS_ROUTE: &str = "/command_palette.js";
 const TROGDOR_LOGIC_JS_ROUTE: &str = "/trogdor_logic.js";
 const TROGDOR_RENDER_JS_ROUTE: &str = "/trogdor_render.js";
 const WORKBENCH_RENDER_JS_ROUTE: &str = "/workbench_render.js";
@@ -82,10 +87,21 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route(APP_JS_ROUTE, get(app_js))
         .route(RENDERED_SURFACE_JS_ROUTE, get(rendered_surface_js))
         .route(INPUT_SUPPORT_JS_ROUTE, get(input_support_js))
+        .route(SEND_SHEET_JS_ROUTE, get(send_sheet_js))
+        .route(
+            TERMINAL_SURFACE_SETUP_JS_ROUTE,
+            get(terminal_surface_setup_js),
+        )
+        .route(
+            GLOBAL_SHORTCUT_DISPATCH_JS_ROUTE,
+            get(global_shortcut_dispatch_js),
+        )
+        .route(SESSION_REFRESH_JS_ROUTE, get(session_refresh_js))
         .route(MERMAID_ARTIFACT_JS_ROUTE, get(mermaid_artifact_js))
         .route(TERMINAL_SAFETY_JS_ROUTE, get(terminal_safety_js))
         .route(TERMINAL_PROTOCOL_JS_ROUTE, get(terminal_protocol_js))
         .route(DIR_BROWSER_JS_ROUTE, get(dir_browser_js))
+        .route(COMMAND_PALETTE_JS_ROUTE, get(command_palette_js))
         .route(TROGDOR_LOGIC_JS_ROUTE, get(trogdor_logic_js))
         .route(TROGDOR_RENDER_JS_ROUTE, get(trogdor_render_js))
         .route(WORKBENCH_RENDER_JS_ROUTE, get(workbench_render_js))
@@ -591,6 +607,31 @@ async fn input_support_js() -> Response {
     javascript_asset("src/web/input_support.js", include_str!("input_support.js"))
 }
 
+async fn send_sheet_js() -> Response {
+    javascript_asset("src/web/send_sheet.js", include_str!("send_sheet.js"))
+}
+
+async fn terminal_surface_setup_js() -> Response {
+    javascript_asset(
+        "src/web/terminal_surface_setup.js",
+        include_str!("terminal_surface_setup.js"),
+    )
+}
+
+async fn global_shortcut_dispatch_js() -> Response {
+    javascript_asset(
+        "src/web/global_shortcut_dispatch.js",
+        include_str!("global_shortcut_dispatch.js"),
+    )
+}
+
+async fn session_refresh_js() -> Response {
+    javascript_asset(
+        "src/web/session_refresh.js",
+        include_str!("session_refresh.js"),
+    )
+}
+
 async fn mermaid_artifact_js() -> Response {
     javascript_asset(
         "src/web/mermaid_artifact.js",
@@ -614,6 +655,13 @@ async fn terminal_protocol_js() -> Response {
 
 async fn dir_browser_js() -> Response {
     javascript_asset("src/web/dir_browser.js", include_str!("dir_browser.js"))
+}
+
+async fn command_palette_js() -> Response {
+    javascript_asset(
+        "src/web/command_palette.js",
+        include_str!("command_palette.js"),
+    )
 }
 
 async fn trogdor_logic_js() -> Response {
@@ -2134,6 +2182,26 @@ mod tests {
                 "export function eventCell",
             ),
             (
+                SEND_SHEET_JS_ROUTE,
+                send_sheet_js().await,
+                "export function sendSheetSubmitPlan",
+            ),
+            (
+                TERMINAL_SURFACE_SETUP_JS_ROUTE,
+                terminal_surface_setup_js().await,
+                "export async function initializeTerminalSurface",
+            ),
+            (
+                GLOBAL_SHORTCUT_DISPATCH_JS_ROUTE,
+                global_shortcut_dispatch_js().await,
+                "export function runGlobalShortcutAction",
+            ),
+            (
+                SESSION_REFRESH_JS_ROUTE,
+                session_refresh_js().await,
+                "export async function runSessionRefresh",
+            ),
+            (
                 MERMAID_ARTIFACT_JS_ROUTE,
                 mermaid_artifact_js().await,
                 "export function boundedArtifactText",
@@ -2152,6 +2220,11 @@ mod tests {
                 DIR_BROWSER_JS_ROUTE,
                 dir_browser_js().await,
                 "export function renderDirEntries",
+            ),
+            (
+                COMMAND_PALETTE_JS_ROUTE,
+                command_palette_js().await,
+                "export function commandPaletteExecutionPlan",
             ),
             (
                 TROGDOR_LOGIC_JS_ROUTE,
