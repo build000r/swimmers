@@ -28,8 +28,7 @@ import {
   buildSessionSocketUrl,
   decodeTerminalOutputFrame,
   fallbackTextForKeyEvent,
-  keyModifiers,
-  sessionSocketAuthMessageForToken,
+  keyModifiers, selectedSessionConnectionPlan, sessionSocketAuthMessageForToken, sessionSocketAttachPlan,
   terminalControlKeyEvent,
 } from "./terminal_protocol.js";
 import {
@@ -3141,36 +3140,33 @@ async function connectSelectedSession() {
   await setupHudSurface();
 
   const session = currentSession();
-  if (!session) {
+  if (selectedSessionConnectionPlan({ session }).type === "teardown_terminal") {
     teardownTerminal();
     return;
   }
 
   await setupTerminalSurface();
-  if (!state.terminal && !state.terminalFallbackActive) {
-    return;
-  }
-
-  if (state.ws && state.ws.readyState <= WebSocket.OPEN && state.ws.sessionId === session.session_id) {
+  const plan = selectedSessionConnectionPlan({
+    session, terminalSurfaceChecked: true, hasTerminal: Boolean(state.terminal),
+    terminalFallbackActive: state.terminalFallbackActive, ws: state.ws, openReadyState: WebSocket.OPEN,
+  });
+  if (plan.type !== "connect_socket") {
     return;
   }
 
   disconnectSocket();
   const generation = state.connectionGeneration;
   const url = sessionSocketUrl(session);
-  const resumeFromSeq = url.searchParams.get("resume_from_seq") || "";
-  const framedOutput = url.searchParams.get("framed") === "1";
+  const attachPlan = sessionSocketAttachPlan(url);
 
   const ws = new WebSocket(url);
   ws.binaryType = "arraybuffer";
-  ws.sessionId = session.session_id;
-  ws.framedOutput = framedOutput;
+  ws.sessionId = plan.sessionId;
+  ws.framedOutput = attachPlan.framedOutput;
   state.ws = ws;
   state.readOnly = true;
   syncWriteAccess();
-  setConnectionStatus(
-    resumeFromSeq ? `connecting; resuming from seq ${resumeFromSeq}` : "connecting; input disabled",
-  );
+  setConnectionStatus(attachPlan.status);
 
   ws.onopen = () => {
     if (generation !== state.connectionGeneration || state.ws !== ws) {

@@ -18,6 +18,35 @@ export function sessionSocketAuthMessageForToken(token) {
   return JSON.stringify({ type: "auth", token: normalized });
 }
 
+export function selectedSessionConnectionPlan(context = {}) {
+  const session = context.session || null;
+  if (!session) {
+    return { type: "teardown_terminal" };
+  }
+  const sessionId = session.session_id;
+  if (!context.terminalSurfaceChecked) {
+    return { type: "setup_terminal", sessionId };
+  }
+  if (!context.hasTerminal && !context.terminalFallbackActive) {
+    return { type: "await_terminal_surface", sessionId };
+  }
+  const ws = context.ws || null;
+  if (ws && ws.readyState <= context.openReadyState && ws.sessionId === sessionId) {
+    return { type: "reuse_socket", sessionId };
+  }
+  return { type: "connect_socket", sessionId };
+}
+
+export function sessionSocketAttachPlan(url) {
+  const resumeFromSeq = url.searchParams.get("resume_from_seq") || "";
+  const framedOutput = url.searchParams.get("framed") === "1";
+  return {
+    resumeFromSeq,
+    framedOutput,
+    status: resumeFromSeq ? `connecting; resuming from seq ${resumeFromSeq}` : "connecting; input disabled",
+  };
+}
+
 export function decodeTerminalOutputFrame(bytes) {
   if (!(bytes instanceof Uint8Array) || bytes.byteLength < 9 || bytes[0] !== TERMINAL_OUTPUT_OPCODE) {
     return null;
