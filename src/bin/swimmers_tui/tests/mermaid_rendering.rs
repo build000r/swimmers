@@ -340,6 +340,92 @@ fn mermaid_merge_outline_segments_coalesces_overlapping_ranges() {
 }
 
 #[test]
+fn mermaid_outline_route_keeps_segment_order_arrow_and_label_avoidance() {
+    let content_rect = Rect {
+        x: 0,
+        y: 0,
+        width: 40,
+        height: 12,
+    };
+    let from = MermaidOutlineNode {
+        key: "node:left".to_string(),
+        source_index: 0,
+        x: 2,
+        y: 2,
+        text_width: 4,
+    };
+    let to = MermaidOutlineNode {
+        key: "node:right".to_string(),
+        source_index: 1,
+        x: 26,
+        y: 8,
+        text_width: 5,
+    };
+    let edge = MermaidOutlineEdge {
+        from_key: from.key.clone(),
+        to_key: to.key.clone(),
+        directed: true,
+    };
+    let mut reserved_segments = Vec::new();
+    let mut lane_cache_vertical = HashMap::new();
+    let mut lane_cache_horizontal = HashMap::new();
+    let mut label_rects = mermaid_outline_label_rects(&[from.clone(), to.clone()]);
+    label_rects.insert(
+        "node:blocker".to_string(),
+        MermaidOutlineLabelRect {
+            left: 15,
+            right: 15,
+            top: 2,
+            bottom: 8,
+        },
+    );
+
+    let (segments, arrow) = mermaid_plan_outline_route(
+        content_rect,
+        &edge,
+        &from,
+        &to,
+        &mut reserved_segments,
+        &mut lane_cache_vertical,
+        &mut lane_cache_horizontal,
+        &label_rects,
+    );
+
+    assert_eq!(
+        segments,
+        vec![
+            MermaidOutlineSegment {
+                axis: MermaidOutlineAxis::Horizontal,
+                fixed: 2,
+                start: 6,
+                end: 13,
+            },
+            MermaidOutlineSegment {
+                axis: MermaidOutlineAxis::Vertical,
+                fixed: 13,
+                start: 2,
+                end: 8,
+            },
+            MermaidOutlineSegment {
+                axis: MermaidOutlineAxis::Horizontal,
+                fixed: 8,
+                start: 13,
+                end: 25,
+            },
+        ]
+    );
+    assert_eq!(
+        arrow,
+        Some(MermaidOutlineArrow {
+            x: 25,
+            y: 8,
+            ch: '>',
+        })
+    );
+    assert_eq!(reserved_segments, segments);
+}
+
+#[test]
 fn mermaid_outline_background_coalesces_duplicate_edges() {
     let content_rect = Rect {
         x: 0,
