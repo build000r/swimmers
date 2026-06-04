@@ -1950,18 +1950,6 @@ impl<C: TuiApi> App<C> {
         picker.snap_selection_to_visible();
     }
 
-    pub(crate) fn picker_search_pop(&mut self) -> bool {
-        let Some(picker) = self.picker.as_mut() else {
-            return false;
-        };
-        if picker.search.is_empty() {
-            return false;
-        }
-        picker.search.pop();
-        picker.snap_selection_to_visible();
-        true
-    }
-
     pub(crate) fn picker_search_clear(&mut self) -> bool {
         let Some(picker) = self.picker.as_mut() else {
             return false;
@@ -2501,25 +2489,6 @@ impl<C: TuiApi> App<C> {
         });
     }
 
-    pub(crate) fn picker_up(&mut self) {
-        let Some(picker) = &self.picker else {
-            return;
-        };
-
-        // Inside a group → go back to root listing.
-        if picker.current_group.is_some() {
-            let managed_only = picker.managed_only;
-            self.picker_reload(None, managed_only, None);
-            return;
-        }
-
-        let Some(parent_path) = picker.parent_path() else {
-            return;
-        };
-        let managed_only = picker.managed_only;
-        self.picker_reload(Some(parent_path), managed_only, None);
-    }
-
     pub(crate) fn picker_set_managed_only(&mut self, managed_only: bool) {
         if let Some(plan) = self
             .picker
@@ -2527,26 +2496,6 @@ impl<C: TuiApi> App<C> {
             .and_then(|picker| picker_managed_only_reload_plan(picker, managed_only))
         {
             self.picker_reload(plan.path, plan.managed_only, plan.group);
-        }
-    }
-
-    pub(crate) fn picker_set_group(&mut self, name: String) {
-        let Some(picker) = &self.picker else {
-            return;
-        };
-        if picker.current_group.as_ref() == Some(&name) {
-            return;
-        }
-        self.picker_reload(None, picker.managed_only, Some(name));
-    }
-
-    pub(crate) fn picker_cycle_group_edit_target(&mut self) {
-        let Some(picker) = &mut self.picker else {
-            return;
-        };
-        match picker.cycle_group_edit_target() {
-            Some(target) => self.set_message(format!("directory group target: {target}")),
-            None => self.set_message("no directory groups available"),
         }
     }
 
@@ -2655,37 +2604,6 @@ impl<C: TuiApi> App<C> {
                 response,
             });
         });
-    }
-
-    fn open_picker_url_at(&mut self, index: usize) {
-        let Some(url) = self
-            .picker
-            .as_ref()
-            .and_then(|picker| picker.entry_at(index))
-            .and_then(|entry| entry.open_url.clone())
-        else {
-            self.set_message("no open URL for this entry");
-            return;
-        };
-        match open::that(&url) {
-            Ok(_) => self.set_message(format!("opened {url}")),
-            Err(err) => self.set_message(format!("failed to open {url}: {err}")),
-        }
-    }
-
-    pub(crate) fn picker_open_url_for_selection(&mut self) {
-        let Some(index) = self
-            .picker
-            .as_ref()
-            .and_then(|picker| match picker.selection {
-                PickerSelection::Entry(index) => Some(index),
-                PickerSelection::SpawnHere => None,
-            })
-        else {
-            self.set_message("select an entry first");
-            return;
-        };
-        self.open_picker_url_at(index);
     }
 
     pub(crate) fn open_initial_request(&mut self, cwd: String, launch_target: Option<String>) {

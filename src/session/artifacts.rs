@@ -350,30 +350,35 @@ pub fn list_plan_siblings(schema_path: &str) -> Vec<String> {
 }
 
 pub fn resolve_repo_root(cwd: &str) -> Option<PathBuf> {
-    let mut current = Path::new(cwd);
-    if !current.is_dir() {
-        current = current.parent()?;
-    }
+    repo_root_search_start(Path::new(cwd)).and_then(nearest_repo_root)
+}
 
-    loop {
-        if looks_like_repo_root(current) {
-            return Some(current.to_path_buf());
-        }
+fn repo_root_search_start(path: &Path) -> Option<&Path> {
+    path.is_dir().then_some(path).or_else(|| path.parent())
+}
 
-        match current.parent() {
-            Some(parent) if parent != current => current = parent,
-            _ => return None,
-        }
-    }
+fn nearest_repo_root(start: &Path) -> Option<PathBuf> {
+    start
+        .ancestors()
+        .find(|candidate| looks_like_repo_root(candidate))
+        .map(Path::to_path_buf)
 }
 
 fn looks_like_repo_root(path: &Path) -> bool {
-    path.join(".git").exists()
-        || path.join("Cargo.toml").is_file()
-        || path.join("package.json").is_file()
-        || path.join(".swimmers").is_dir()
-        || path.join(".throngterm").is_dir()
+    REPO_ROOT_MARKERS
+        .iter()
+        .any(|(name, matches)| matches(&path.join(name)))
 }
+
+type RepoRootMarkerPredicate = fn(&Path) -> bool;
+
+const REPO_ROOT_MARKERS: &[(&str, RepoRootMarkerPredicate)] = &[
+    (".git", Path::exists),
+    ("Cargo.toml", Path::is_file),
+    ("package.json", Path::is_file),
+    (".swimmers", Path::is_dir),
+    (".throngterm", Path::is_dir),
+];
 
 pub fn list_repo_docs(cwd: &str) -> Vec<String> {
     let Some(root) = resolve_repo_root(cwd) else {
@@ -842,6 +847,89 @@ mod tests {
                 .display_path,
             std::path::PathBuf::from("kept-last.mmd")
         );
+    }
+
+    #[test]
+    fn resolve_repo_root_falls_back_from_file_cwd() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        fs::write(
+            dir.path().join("Cargo.toml"),
+            "[package]\nname = \"demo\"\n",
+        )
+        .expect("write cargo");
+        let nested_dir = dir.path().join("src").join("bin");
+        fs::create_dir_all(&nested_dir).expect("create nested dir");
+        let file_cwd = nested_dir.join("main.rs");
+        fs::write(&file_cwd, "fn main() {}\n").expect("write file cwd");
+
+        assert_eq!(
+            resolve_repo_root(&file_cwd.to_string_lossy()).as_deref(),
+            Some(dir.path())
+        );
+    }
+
+    #[test]
+    fn resolve_repo_root_recognizes_supported_markers() {
+        enum MarkerKind {
+            Exists,
+            File,
+            Dir,
+        }
+
+        let cases = [
+            (".git", MarkerKind::Exists),
+            ("Cargo.toml", MarkerKind::File),
+            ("package.json", MarkerKind::File),
+            (".swimmers", MarkerKind::Dir),
+            (".throngterm", MarkerKind::Dir),
+        ];
+
+        for (name, kind) in cases {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let marker_path = dir.path().join(name);
+            match kind {
+                MarkerKind::Exists | MarkerKind::File => {
+                    fs::write(&marker_path, "").expect("write marker");
+                }
+                MarkerKind::Dir => {
+                    fs::create_dir(&marker_path).expect("create marker dir");
+                }
+            }
+
+            assert_eq!(
+                resolve_repo_root(&dir.path().to_string_lossy()).as_deref(),
+                Some(dir.path()),
+                "{name} should mark a repo root"
+            );
+        }
+    }
+
+    #[test]
+    fn resolve_repo_root_returns_nearest_marked_ancestor() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        fs::write(
+            dir.path().join("Cargo.toml"),
+            "[package]\nname = \"outer\"\n",
+        )
+        .expect("write outer cargo");
+        let inner = dir.path().join("workspace").join("app");
+        fs::create_dir_all(inner.join("src").join("nested")).expect("create nested");
+        fs::write(inner.join("package.json"), "{}\n").expect("write inner package");
+
+        assert_eq!(
+            resolve_repo_root(&inner.join("src").join("nested").to_string_lossy()).as_deref(),
+            Some(inner.as_path())
+        );
+    }
+
+    #[test]
+    fn resolve_repo_root_returns_none_without_markers() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let nested = dir.path().join("src").join("nested");
+        fs::create_dir_all(&nested).expect("create nested");
+
+        assert!(resolve_repo_root(&nested.to_string_lossy()).is_none());
+        assert!(resolve_repo_root(&nested.join("missing.rs").to_string_lossy()).is_none());
     }
 
     #[test]

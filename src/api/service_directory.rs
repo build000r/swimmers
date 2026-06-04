@@ -8,7 +8,7 @@ use super::ApiServiceError;
 use crate::session::overlay::{
     default_overlay, OverlayDirConfig, OverlayDirGroup, OverlayLaunchConfig, OverlayServiceEntry,
 };
-use crate::types::{DirEntry, DirGroupMemberships};
+use crate::types::{DirEntry, DirGroupMembershipDelta, DirGroupMemberships};
 
 const BV_WORKSPACES_DIR: &str = "workspaces";
 
@@ -289,30 +289,34 @@ pub(super) fn service_dir_path(base: &Path, dir: &str) -> PathBuf {
 }
 
 pub fn services_for_directory(path: &Path, context: &OverlayServiceContext) -> Vec<String> {
-    let target = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-    let canonical_base = context
-        .base_path
-        .canonicalize()
-        .unwrap_or_else(|_| context.base_path.clone());
+    let target = canonical_path(path);
+    let canonical_base = canonical_path(&context.base_path);
     if target == canonical_base {
         return Vec::new();
     };
 
-    let mut services = BTreeSet::new();
-    for service in &context.services {
-        let service_path = service_dir_path(&canonical_base, &service.dir);
-        let canonical_service = service_path
-            .canonicalize()
-            .unwrap_or_else(|_| service_path.clone());
-        if canonical_service == target
-            || canonical_service.starts_with(&target)
-            || target.starts_with(&canonical_service)
-        {
-            services.insert(service.name.clone());
-        }
-    }
+    context
+        .services
+        .iter()
+        .filter(|service| service_matches_target_directory(service, &canonical_base, &target))
+        .map(|service| service.name.clone())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
 
-    services.into_iter().collect()
+fn service_matches_target_directory(
+    service: &OverlayServiceEntry,
+    canonical_base: &Path,
+    target: &Path,
+) -> bool {
+    let service_path = service_dir_path(canonical_base, &service.dir);
+    let canonical_service = canonical_path(&service_path);
+    paths_overlap(&canonical_service, target)
+}
+
+fn paths_overlap(left: &Path, right: &Path) -> bool {
+    left == right || left.starts_with(right) || right.starts_with(left)
 }
 
 pub fn resolve_target_path(
@@ -461,63 +465,80 @@ pub fn list_effective_group_entries_sync(
     };
 
     let mut seen_names = BTreeSet::new();
-    let mut entries: Vec<(DirEntry, u64)> = list_group_entries_sync(group)
-        .into_iter()
-        .filter(|entry| {
-            entry
-                .full_path
-                .as_deref()
-                .map(|path| !delta.exclude_paths.contains(path))
-                .unwrap_or(true)
-        })
-        .map(|entry| {
-            seen_names.insert(entry.name.clone());
-            let modified_at = entry
-                .full_path
-                .as_deref()
-                .map(|path| modified_secs(Path::new(path)))
-                .unwrap_or(0);
-            (entry, modified_at)
-        })
-        .collect();
-
-    for raw_path in &delta.include_paths {
-        if delta.exclude_paths.contains(raw_path) {
-            continue;
-        }
-        let path = PathBuf::from(raw_path);
-        if !path.is_dir() {
-            continue;
-        }
-        let Some(name) = path
-            .file_name()
-            .map(|name| name.to_string_lossy().into_owned())
-        else {
-            continue;
-        };
-        if name.starts_with('.') || !seen_names.insert(name.clone()) {
-            continue;
-        }
-
-        entries.push((
-            DirEntry {
-                name,
-                has_children: false,
-                is_running: None,
-                repo_dirty: None,
-                repo_action: None,
-                group: None,
-                groups: Vec::new(),
-                full_path: Some(canonical_path_string(&path)),
-                has_restart: None,
-                open_url: None,
-            },
-            modified_secs(&path),
-        ));
-    }
+    let mut entries = effective_entries_after_excludes(group, delta, &mut seen_names);
+    append_included_delta_entries(delta, &mut seen_names, &mut entries);
 
     entries.sort_by(|(a, _), (b, _)| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
     entries.into_iter().map(|(entry, _)| entry).collect()
+}
+
+fn effective_entries_after_excludes(
+    group: &OverlayDirGroup,
+    delta: &DirGroupMembershipDelta,
+    seen_names: &mut BTreeSet<String>,
+) -> Vec<(DirEntry, u64)> {
+    list_group_entries_sync(group)
+        .into_iter()
+        .filter(|entry| !entry_is_excluded(entry, delta))
+        .map(|entry| existing_effective_entry(entry, seen_names))
+        .collect()
+}
+
+fn entry_is_excluded(entry: &DirEntry, delta: &DirGroupMembershipDelta) -> bool {
+    entry
+        .full_path
+        .as_deref()
+        .map(|path| delta.exclude_paths.contains(path))
+        .unwrap_or(false)
+}
+
+fn existing_effective_entry(entry: DirEntry, seen_names: &mut BTreeSet<String>) -> (DirEntry, u64) {
+    seen_names.insert(entry.name.clone());
+    let modified_at = entry
+        .full_path
+        .as_deref()
+        .map(|path| modified_secs(Path::new(path)))
+        .unwrap_or(0);
+    (entry, modified_at)
+}
+
+fn append_included_delta_entries(
+    delta: &DirGroupMembershipDelta,
+    seen_names: &mut BTreeSet<String>,
+    entries: &mut Vec<(DirEntry, u64)>,
+) {
+    entries.extend(
+        delta
+            .include_paths
+            .iter()
+            .filter_map(|raw_path| included_delta_entry(raw_path, delta, seen_names)),
+    );
+}
+
+fn included_delta_entry(
+    raw_path: &str,
+    delta: &DirGroupMembershipDelta,
+    seen_names: &mut BTreeSet<String>,
+) -> Option<(DirEntry, u64)> {
+    if delta.exclude_paths.contains(raw_path) {
+        return None;
+    }
+
+    included_path_entry(&PathBuf::from(raw_path), seen_names)
+}
+
+fn included_path_entry(path: &Path, seen_names: &mut BTreeSet<String>) -> Option<(DirEntry, u64)> {
+    if !path.is_dir() {
+        return None;
+    }
+
+    let name = visible_file_name(path)?;
+    seen_names.insert(name.clone()).then(|| {
+        (
+            group_dir_entry(name, false, Some(canonical_path_string(path))),
+            modified_secs(path),
+        )
+    })
 }
 
 pub(super) async fn list_effective_group_entries(
@@ -536,6 +557,10 @@ pub(super) fn canonical_path_string(path: &Path) -> String {
         .unwrap_or_else(|_| path.to_path_buf())
         .to_string_lossy()
         .into_owned()
+}
+
+fn canonical_path(path: &Path) -> PathBuf {
+    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
 }
 
 pub(super) fn overlay_group_contains_path(group: &OverlayDirGroup, canonical_path: &Path) -> bool {
@@ -632,6 +657,16 @@ mod tests {
             ),
         )
         .expect("write workspace yaml");
+    }
+
+    fn service_entry(name: &str, dir: impl Into<String>) -> OverlayServiceEntry {
+        OverlayServiceEntry {
+            name: name.into(),
+            dir: dir.into(),
+            health_url: None,
+            restart: None,
+            open_url: None,
+        }
     }
 
     #[test]
@@ -812,6 +847,47 @@ mod tests {
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].name, "parent");
         assert!(!entries[0].has_children);
+    }
+
+    #[test]
+    fn services_for_directory_matches_relative_absolute_and_nested_targets() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let base = dir.path().join("base");
+        let service_parent = base.join("services");
+        let relative_service = service_parent.join("api");
+        let relative_child = relative_service.join("src");
+        let absolute_service = dir.path().join("outside").join("worker");
+        std::fs::create_dir_all(&relative_child).expect("relative child");
+        std::fs::create_dir_all(&absolute_service).expect("absolute service");
+
+        let context = OverlayServiceContext {
+            base_path: base.clone(),
+            services: vec![
+                service_entry("svc-api", "services/api"),
+                service_entry("svc-worker", absolute_service.to_string_lossy()),
+            ],
+        };
+
+        assert_eq!(
+            services_for_directory(&base, &context),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            services_for_directory(&service_parent, &context),
+            vec!["svc-api"]
+        );
+        assert_eq!(
+            services_for_directory(&relative_service, &context),
+            vec!["svc-api"]
+        );
+        assert_eq!(
+            services_for_directory(&relative_child, &context),
+            vec!["svc-api"]
+        );
+        assert_eq!(
+            services_for_directory(&absolute_service, &context),
+            vec!["svc-worker"]
+        );
     }
 
     #[test]
@@ -1012,6 +1088,108 @@ mod tests {
             vec!["frontend".to_string()]
         );
         assert!(effective_groups_for_path(&config, &memberships, &skill).is_empty());
+    }
+
+    #[test]
+    fn list_effective_group_entries_filters_and_dedupes_included_paths() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let first_shared = dir.path().join("a").join("shared");
+        let duplicate_shared = dir.path().join("b").join("shared");
+        let excluded = dir.path().join("c").join("excluded");
+        let file_only = dir.path().join("d").join("file-only");
+        let missing = dir.path().join("missing").join("repo");
+        std::fs::create_dir_all(&first_shared).expect("first shared");
+        std::fs::create_dir_all(&duplicate_shared).expect("duplicate shared");
+        std::fs::create_dir_all(&excluded).expect("excluded");
+        std::fs::create_dir_all(file_only.parent().expect("file parent")).expect("file parent");
+        std::fs::write(&file_only, "not a directory").expect("file only");
+
+        let first_shared_path = canonical_path_string(&first_shared);
+        let duplicate_shared_path = canonical_path_string(&duplicate_shared);
+        let excluded_path = canonical_path_string(&excluded);
+        let file_only_path = canonical_path_string(&file_only);
+        let missing_path = canonical_path_string(&missing);
+        let group = OverlayDirGroup {
+            name: "frontend".into(),
+            paths: Vec::new(),
+            dirs: Vec::new(),
+        };
+        let mut memberships = DirGroupMemberships::default();
+        let delta = memberships.groups.entry("frontend".into()).or_default();
+        delta.include_paths.insert(duplicate_shared_path);
+        delta.include_paths.insert(first_shared_path.clone());
+        delta.include_paths.insert(excluded_path.clone());
+        delta.include_paths.insert(file_only_path);
+        delta.include_paths.insert(missing_path);
+        delta.exclude_paths.insert(excluded_path);
+
+        let entries = list_effective_group_entries_sync(&group, &memberships);
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].name, "shared");
+        assert_eq!(
+            entries[0].full_path.as_deref(),
+            Some(first_shared_path.as_str())
+        );
+    }
+
+    #[test]
+    fn list_effective_group_entries_excludes_overlay_and_source_paths() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let exact_repo = dir.path().join("exact-repo");
+        let source = dir.path().join("source");
+        let excluded_child = source.join("excluded-child");
+        let kept_child = source.join("kept-child");
+        std::fs::create_dir_all(&exact_repo).expect("exact repo");
+        std::fs::create_dir_all(&excluded_child).expect("excluded child");
+        std::fs::create_dir_all(&kept_child).expect("kept child");
+
+        let group = OverlayDirGroup {
+            name: "frontend".into(),
+            paths: vec![exact_repo.clone()],
+            dirs: vec![source],
+        };
+        let mut memberships = DirGroupMemberships::default();
+        let delta = memberships.groups.entry("frontend".into()).or_default();
+        delta
+            .exclude_paths
+            .insert(canonical_path_string(&exact_repo));
+        delta
+            .exclude_paths
+            .insert(canonical_path_string(&excluded_child));
+
+        let entries = list_effective_group_entries_sync(&group, &memberships);
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].name, "kept-child");
+        assert_eq!(
+            entries[0].full_path.as_deref(),
+            Some(canonical_path_string(&kept_child).as_str())
+        );
+    }
+
+    #[test]
+    fn list_effective_group_entries_skips_hidden_includes() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let hidden = dir.path().join(".hidden-repo");
+        let visible = dir.path().join("visible-repo");
+        std::fs::create_dir_all(&hidden).expect("hidden");
+        std::fs::create_dir_all(&visible).expect("visible");
+
+        let group = OverlayDirGroup {
+            name: "frontend".into(),
+            paths: Vec::new(),
+            dirs: Vec::new(),
+        };
+        let mut memberships = DirGroupMemberships::default();
+        let delta = memberships.groups.entry("frontend".into()).or_default();
+        delta.include_paths.insert(canonical_path_string(&hidden));
+        delta.include_paths.insert(canonical_path_string(&visible));
+
+        let entries = list_effective_group_entries_sync(&group, &memberships);
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].name, "visible-repo");
     }
 
     #[test]

@@ -1044,9 +1044,7 @@ fn collect_visible_pending_entries(
         let services = service_context
             .map(|context| services_for_directory(&entry_path, context))
             .unwrap_or_default();
-        for service in &services {
-            unique_services.insert(service.clone());
-        }
+        extend_unique_services(&mut unique_services, &services);
 
         pending.push(PendingEntry {
             name,
@@ -1060,48 +1058,78 @@ fn collect_visible_pending_entries(
     (pending, unique_services)
 }
 
-pub async fn list_managed_service_entries(
-    state: &Arc<AppState>,
-    config: &OverlayDirConfig,
-) -> Vec<DirEntry> {
-    let base_path = config
-        .base_path
-        .canonicalize()
-        .unwrap_or(config.base_path.clone());
-    let context = OverlayServiceContext {
-        base_path: base_path.clone(),
+fn extend_unique_services(unique_services: &mut BTreeSet<String>, services: &[String]) {
+    unique_services.extend(services.iter().cloned());
+}
+
+fn managed_service_context(config: &OverlayDirConfig) -> OverlayServiceContext {
+    OverlayServiceContext {
+        base_path: config
+            .base_path
+            .canonicalize()
+            .unwrap_or(config.base_path.clone()),
         services: config.services.clone(),
-    };
+    }
+}
+
+fn collect_managed_service_pending_entries(
+    context: &OverlayServiceContext,
+) -> (Vec<PendingEntry>, BTreeSet<String>) {
     let mut seen_paths = BTreeSet::new();
     let mut unique_services = BTreeSet::new();
     let mut pending = Vec::new();
 
-    for service in &config.services {
-        let raw_path = service_dir_path(&base_path, &service.dir);
-        let Ok(entry_path) = raw_path.canonicalize() else {
+    for service in &context.services {
+        let Some(entry) = managed_service_pending_entry(service, context, &mut seen_paths) else {
             continue;
         };
-        if !entry_path.is_dir() || !seen_paths.insert(entry_path.clone()) {
-            continue;
-        }
-
-        let name = entry_path
-            .file_name()
-            .map(|name| name.to_string_lossy().into_owned())
-            .unwrap_or_else(|| service.name.clone());
-        let services = services_for_directory(&entry_path, &context);
-        for service_name in &services {
-            unique_services.insert(service_name.clone());
-        }
-
-        pending.push(PendingEntry {
-            name,
-            has_children: false,
-            modified_at: modified_secs(&entry_path),
-            services,
-            entry_path,
-        });
+        extend_unique_services(&mut unique_services, &entry.services);
+        pending.push(entry);
     }
+
+    (pending, unique_services)
+}
+
+fn managed_service_pending_entry(
+    service: &OverlayServiceEntry,
+    context: &OverlayServiceContext,
+    seen_paths: &mut BTreeSet<PathBuf>,
+) -> Option<PendingEntry> {
+    let entry_path = managed_service_entry_path(&context.base_path, service, seen_paths)?;
+    let services = services_for_directory(&entry_path, context);
+
+    Some(PendingEntry {
+        name: managed_service_entry_name(&entry_path, service),
+        has_children: false,
+        modified_at: modified_secs(&entry_path),
+        services,
+        entry_path,
+    })
+}
+
+fn managed_service_entry_path(
+    base_path: &Path,
+    service: &OverlayServiceEntry,
+    seen_paths: &mut BTreeSet<PathBuf>,
+) -> Option<PathBuf> {
+    let raw_path = service_dir_path(base_path, &service.dir);
+    let entry_path = raw_path.canonicalize().ok()?;
+    (entry_path.is_dir() && seen_paths.insert(entry_path.clone())).then_some(entry_path)
+}
+
+fn managed_service_entry_name(entry_path: &Path, service: &OverlayServiceEntry) -> String {
+    entry_path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| service.name.clone())
+}
+
+pub async fn list_managed_service_entries(
+    state: &Arc<AppState>,
+    config: &OverlayDirConfig,
+) -> Vec<DirEntry> {
+    let context = managed_service_context(config);
+    let (pending, unique_services) = collect_managed_service_pending_entries(&context);
 
     let probes = probe_pending_entries(state, &pending).await;
     let services: Vec<String> = unique_services.into_iter().collect();
@@ -1271,6 +1299,16 @@ fn resolve_group_membership_path(
     raw_path: &str,
     config: &OverlayDirConfig,
 ) -> Result<PathBuf, ApiServiceError> {
+    let trimmed = require_group_membership_path(raw_path)?;
+    let canonical = canonical_group_membership_dir(trimmed)?;
+    if group_membership_path_allowed(canonical_base, &canonical, config) {
+        return Ok(canonical);
+    }
+
+    Err(group_membership_outside_roots_error())
+}
+
+fn require_group_membership_path(raw_path: &str) -> Result<&str, ApiServiceError> {
     let trimmed = raw_path.trim();
     if trimmed.is_empty() {
         return Err(ApiServiceError::new(
@@ -1279,35 +1317,45 @@ fn resolve_group_membership_path(
             "path is required",
         ));
     }
-    let path = PathBuf::from(trimmed);
-    let canonical = path.canonicalize().map_err(|_| {
-        ApiServiceError::new(
-            StatusCode::NOT_FOUND,
-            "DIR_NOT_FOUND",
-            format!("directory not found: {trimmed}"),
-        )
-    })?;
+    Ok(trimmed)
+}
+
+fn canonical_group_membership_dir(path: &str) -> Result<PathBuf, ApiServiceError> {
+    let canonical = PathBuf::from(path)
+        .canonicalize()
+        .map_err(|_| group_membership_dir_not_found_error(path))?;
     if !canonical.is_dir() {
-        return Err(ApiServiceError::new(
-            StatusCode::NOT_FOUND,
-            "DIR_NOT_FOUND",
-            format!("directory not found: {trimmed}"),
-        ));
+        return Err(group_membership_dir_not_found_error(path));
     }
-    if canonical.starts_with(canonical_base)
+    Ok(canonical)
+}
+
+fn group_membership_dir_not_found_error(path: &str) -> ApiServiceError {
+    ApiServiceError::new(
+        StatusCode::NOT_FOUND,
+        "DIR_NOT_FOUND",
+        format!("directory not found: {path}"),
+    )
+}
+
+fn group_membership_path_allowed(
+    canonical_base: &Path,
+    canonical: &Path,
+    config: &OverlayDirConfig,
+) -> bool {
+    canonical.starts_with(canonical_base)
         || config
             .groups
             .iter()
-            .any(|group| overlay_group_contains_path(group, &canonical))
-    {
-        return Ok(canonical);
-    }
+            .any(|group| overlay_group_contains_path(group, canonical))
+}
 
-    Err(ApiServiceError::new(
+fn group_membership_outside_roots_error() -> ApiServiceError {
+    ApiServiceError::new(
         StatusCode::FORBIDDEN,
         "DIR_OUTSIDE_BASE",
         "path is outside the allowed directory group roots",
-    ))
+    )
 }
 
 fn normalize_group_update_names(
@@ -2396,6 +2444,53 @@ mod tests {
         }
     }
 
+    fn managed_service_config(base: &Path, services: Vec<OverlayServiceEntry>) -> OverlayDirConfig {
+        OverlayDirConfig {
+            label: "managed".into(),
+            base_path: base.to_path_buf(),
+            services,
+            groups: Vec::new(),
+            launch: crate::session::overlay::OverlayLaunchConfig::local_only(),
+        }
+    }
+
+    #[tokio::test]
+    async fn list_managed_service_entries_dedupes_dirs_skips_missing_and_keeps_metadata() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let base = dir.path().join("repos");
+        let alpha = base.join("alpha");
+        std::fs::create_dir_all(&alpha).expect("alpha");
+        let alpha_absolute = alpha.to_string_lossy().into_owned();
+        let config = managed_service_config(
+            &base,
+            vec![
+                overlay_service("alpha-api", "alpha", None),
+                overlay_service("alpha-worker", &alpha_absolute, Some("make restart")),
+                overlay_service("missing", "missing", Some("make missing")),
+            ],
+        );
+
+        let entries = list_managed_service_entries(&test_state(), &config).await;
+
+        assert_eq!(entries.len(), 1);
+        let entry = &entries[0];
+        let expected_full_path = alpha
+            .canonicalize()
+            .expect("canonical alpha")
+            .to_string_lossy()
+            .into_owned();
+        assert_eq!(entry.name, "alpha");
+        assert_eq!(
+            entry.full_path.as_deref(),
+            Some(expected_full_path.as_str())
+        );
+        assert_eq!(entry.has_restart, Some(true));
+        assert_eq!(entry.is_running, Some(true));
+        assert_eq!(entry.repo_dirty, None);
+        assert_eq!(entry.group, None);
+        assert!(entry.groups.is_empty());
+    }
+
     fn repo_search_response_paths(response: &DirRepoSearchResponse) -> Vec<String> {
         response
             .entries
@@ -3360,6 +3455,117 @@ mod tests {
             groups: Vec::new(),
             launch: crate::session::overlay::OverlayLaunchConfig::local_only(),
         }
+    }
+
+    fn assert_api_service_error(
+        err: ApiServiceError,
+        status: StatusCode,
+        code: &str,
+        message: &str,
+    ) {
+        assert_eq!(err.status, status);
+        assert_eq!(err.code, code);
+        assert_eq!(err.message, message);
+    }
+
+    #[test]
+    fn resolve_group_membership_path_rejects_empty_path() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let base = dir.path().join("repos");
+        std::fs::create_dir_all(&base).expect("base");
+        let config = empty_group_config(&base);
+
+        let err = resolve_group_membership_path(
+            &base.canonicalize().expect("canonical base"),
+            " \t\n ",
+            &config,
+        )
+        .expect_err("empty path");
+
+        assert_api_service_error(
+            err,
+            StatusCode::BAD_REQUEST,
+            "GROUP_PATH_REQUIRED",
+            "path is required",
+        );
+    }
+
+    #[test]
+    fn resolve_group_membership_path_rejects_non_directory_path() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let base = dir.path().join("repos");
+        let file = base.join("README.md");
+        std::fs::create_dir_all(&base).expect("base");
+        std::fs::write(&file, "not a directory").expect("file");
+        let config = empty_group_config(&base);
+        let raw_path = file.to_string_lossy().into_owned();
+
+        let err = resolve_group_membership_path(
+            &base.canonicalize().expect("canonical base"),
+            &raw_path,
+            &config,
+        )
+        .expect_err("file path");
+
+        assert_api_service_error(
+            err,
+            StatusCode::NOT_FOUND,
+            "DIR_NOT_FOUND",
+            &format!("directory not found: {raw_path}"),
+        );
+    }
+
+    #[test]
+    fn resolve_group_membership_path_rejects_paths_outside_base_and_overlay_roots() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let base = dir.path().join("repos");
+        let frontend = base.join("frontend-app");
+        let backend = base.join("backend-app");
+        let wildcard_root = dir.path().join("skills");
+        let outside = dir.path().join("outside");
+        std::fs::create_dir_all(&frontend).expect("frontend");
+        std::fs::create_dir_all(&backend).expect("backend");
+        std::fs::create_dir_all(&wildcard_root).expect("wildcard");
+        std::fs::create_dir_all(&outside).expect("outside");
+        let config = test_group_config(&base, frontend, backend, wildcard_root);
+        let raw_path = outside.to_string_lossy().into_owned();
+
+        let err = resolve_group_membership_path(
+            &base.canonicalize().expect("canonical base"),
+            &raw_path,
+            &config,
+        )
+        .expect_err("outside path");
+
+        assert_api_service_error(
+            err,
+            StatusCode::FORBIDDEN,
+            "DIR_OUTSIDE_BASE",
+            "path is outside the allowed directory group roots",
+        );
+    }
+
+    #[test]
+    fn resolve_group_membership_path_allows_overlay_group_paths_outside_base() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let base = dir.path().join("repos");
+        let frontend = base.join("frontend-app");
+        let backend = base.join("backend-app");
+        let wildcard_root = dir.path().join("skills");
+        let skill = wildcard_root.join("alpha-skill");
+        std::fs::create_dir_all(&frontend).expect("frontend");
+        std::fs::create_dir_all(&backend).expect("backend");
+        std::fs::create_dir_all(&skill).expect("skill");
+        let config = test_group_config(&base, frontend, backend, wildcard_root);
+
+        let resolved = resolve_group_membership_path(
+            &base.canonicalize().expect("canonical base"),
+            &skill.to_string_lossy(),
+            &config,
+        )
+        .expect("overlay group path");
+
+        assert_eq!(resolved, skill.canonicalize().expect("canonical skill"));
     }
 
     #[test]

@@ -1163,35 +1163,62 @@ enum WsOutputMode {
     Framed,
 }
 
+impl WsQuery {
+    fn output_mode(&self) -> WsOutputMode {
+        WsOutputMode::from_framed_query(self.framed.as_deref())
+    }
+}
+
+impl WsOutputMode {
+    fn from_framed_query(value: Option<&str>) -> Self {
+        if query_flag_enabled(value) {
+            Self::Framed
+        } else {
+            Self::Raw
+        }
+    }
+
+    fn protocol_output(self) -> &'static str {
+        match self {
+            Self::Raw => "raw",
+            Self::Framed => "framed_v1",
+        }
+    }
+}
+
 async fn session_ws(
     ws: WebSocketUpgrade,
     AxumPath(session_id): AxumPath<String>,
     Query(query): Query<WsQuery>,
     State(state): State<Arc<AppState>>,
 ) -> Response {
-    let output_mode = if query_flag_enabled(query.framed.as_deref()) {
-        WsOutputMode::Framed
-    } else {
-        WsOutputMode::Raw
-    };
+    let output_mode = query.output_mode();
     let resume_from_seq = query.resume_from_seq;
 
-    match state.config.auth_mode {
-        AuthMode::LocalTrust | AuthMode::TailnetTrust => {
-            let auth = AuthInfo::new(OPERATOR_SCOPES.to_vec());
-            if let Err(response) = auth.require_scope(AuthScope::SessionsRead) {
-                return response;
-            }
+    let plan = match session_ws_route_plan(&state, &session_id, &query).await {
+        Ok(plan) => plan,
+        Err(response) => return response,
+    };
 
-            let Some(handle) = state.supervisor.get_session(&session_id).await else {
-                return json_error(
-                    StatusCode::NOT_FOUND,
-                    "SESSION_NOT_FOUND",
-                    "session not found",
-                );
-            };
+    plan.into_response(ws, state, session_id, resume_from_seq, output_mode)
+}
 
-            ws.on_upgrade(move |socket| {
+enum SessionWsRoutePlan {
+    Trusted { handle: ActorHandle, auth: AuthInfo },
+    Token,
+}
+
+impl SessionWsRoutePlan {
+    fn into_response(
+        self,
+        ws: WebSocketUpgrade,
+        state: Arc<AppState>,
+        session_id: String,
+        resume_from_seq: Option<u64>,
+        output_mode: WsOutputMode,
+    ) -> Response {
+        match self {
+            Self::Trusted { handle, auth } => ws.on_upgrade(move |socket| {
                 handle_session_ws(
                     socket,
                     state,
@@ -1201,22 +1228,74 @@ async fn session_ws(
                     resume_from_seq,
                     output_mode,
                 )
-            })
-        }
-        AuthMode::Token => {
-            if query.token.is_some() {
-                return json_error(
-                    StatusCode::BAD_REQUEST,
-                    "WS_QUERY_TOKEN_UNSUPPORTED",
-                    "WebSocket token query parameters are not supported; send an auth message after opening the socket",
-                );
-            }
-
-            ws.on_upgrade(move |socket| {
+            }),
+            Self::Token => ws.on_upgrade(move |socket| {
                 handle_token_session_ws(socket, state, session_id, resume_from_seq, output_mode)
-            })
+            }),
         }
     }
+}
+
+#[allow(clippy::result_large_err)]
+async fn session_ws_route_plan(
+    state: &Arc<AppState>,
+    session_id: &str,
+    query: &WsQuery,
+) -> Result<SessionWsRoutePlan, Response> {
+    match state.config.auth_mode {
+        AuthMode::LocalTrust | AuthMode::TailnetTrust => {
+            trusted_session_ws_route_plan(state, session_id).await
+        }
+        AuthMode::Token => token_session_ws_route_plan(query),
+    }
+}
+
+#[allow(clippy::result_large_err)]
+async fn trusted_session_ws_route_plan(
+    state: &Arc<AppState>,
+    session_id: &str,
+) -> Result<SessionWsRoutePlan, Response> {
+    let auth = AuthInfo::new(OPERATOR_SCOPES.to_vec());
+    auth.require_scope(AuthScope::SessionsRead)?;
+    let handle = require_session_ws_handle(state, session_id).await?;
+    Ok(SessionWsRoutePlan::Trusted { handle, auth })
+}
+
+#[allow(clippy::result_large_err)]
+fn token_session_ws_route_plan(query: &WsQuery) -> Result<SessionWsRoutePlan, Response> {
+    reject_session_ws_query_token(query)?;
+    Ok(SessionWsRoutePlan::Token)
+}
+
+#[allow(clippy::result_large_err)]
+fn reject_session_ws_query_token(query: &WsQuery) -> Result<(), Response> {
+    if query.token.is_none() {
+        return Ok(());
+    }
+
+    Err(json_error(
+        StatusCode::BAD_REQUEST,
+        "WS_QUERY_TOKEN_UNSUPPORTED",
+        "WebSocket token query parameters are not supported; send an auth message after opening the socket",
+    ))
+}
+
+#[allow(clippy::result_large_err)]
+async fn require_session_ws_handle(
+    state: &Arc<AppState>,
+    session_id: &str,
+) -> Result<ActorHandle, Response> {
+    state
+        .supervisor
+        .get_session(session_id)
+        .await
+        .ok_or_else(|| {
+            json_error(
+                StatusCode::NOT_FOUND,
+                "SESSION_NOT_FOUND",
+                "session not found",
+            )
+        })
 }
 
 async fn handle_session_ws(
@@ -1560,10 +1639,7 @@ fn build_ready_payload(
             "resumeFromSeq": requested_resume_from_seq,
         },
         "protocol": {
-            "output": match output_mode {
-                WsOutputMode::Raw => "raw",
-                WsOutputMode::Framed => "framed_v1",
-            },
+            "output": output_mode.protocol_output(),
         },
         "summary": summary,
     })
@@ -3467,8 +3543,12 @@ mod tests {
     // --- session_ws_authenticated_inner live-socket integration ---
 
     fn test_state() -> Arc<AppState> {
+        test_state_with_config(Config::default())
+    }
+
+    fn test_state_with_config(config: Config) -> Arc<AppState> {
         use tokio::sync::RwLock;
-        let config = Arc::new(Config::default());
+        let config = Arc::new(config);
         let supervisor = crate::session::supervisor::SessionSupervisor::new(config.clone());
         Arc::new(AppState {
             supervisor,
@@ -3491,6 +3571,135 @@ mod tests {
         })
     }
 
+    async fn spawn_session_ws_test_server(
+        state: Arc<AppState>,
+    ) -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
+        let app = routes().with_state(state);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind ws test server");
+        let addr = listener.local_addr().expect("server addr");
+        let server = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        (addr, server)
+    }
+
+    fn assert_session_ws_http_error(
+        err: tokio_tungstenite::tungstenite::Error,
+        status: StatusCode,
+    ) -> serde_json::Value {
+        match err {
+            tokio_tungstenite::tungstenite::Error::Http(response) => {
+                assert_eq!(response.status().as_u16(), status.as_u16());
+                let body = response.body().as_deref().expect("http error body");
+                serde_json::from_slice(body).expect("json error body")
+            }
+            other => panic!("expected websocket HTTP {status} error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn session_ws_output_mode_parses_query_flags() {
+        let raw = WsQuery {
+            token: None,
+            resume_from_seq: None,
+            framed: None,
+        };
+        assert_eq!(raw.output_mode(), WsOutputMode::Raw);
+
+        let framed = WsQuery {
+            token: None,
+            resume_from_seq: None,
+            framed: Some("ON".to_string()),
+        };
+        assert_eq!(framed.output_mode(), WsOutputMode::Framed);
+
+        let explicit_raw = WsQuery {
+            token: None,
+            resume_from_seq: None,
+            framed: Some("false".to_string()),
+        };
+        assert_eq!(explicit_raw.output_mode(), WsOutputMode::Raw);
+    }
+
+    #[tokio::test]
+    async fn session_ws_token_mode_rejects_query_token_before_upgrade() {
+        let state = test_state_with_config(Config {
+            auth_mode: AuthMode::Token,
+            auth_token: Some("operator".to_string()),
+            observer_token: Some("observer".to_string()),
+            ..Config::default()
+        });
+        let (addr, server) = spawn_session_ws_test_server(state).await;
+
+        let url = format!("ws://{addr}/ws/sessions/missing?token=operator");
+        let err = match tokio_tungstenite::connect_async(url).await {
+            Ok(_) => panic!("query-token websocket should fail before upgrade"),
+            Err(err) => err,
+        };
+
+        let body = assert_session_ws_http_error(err, StatusCode::BAD_REQUEST);
+        assert_eq!(body["code"], "WS_QUERY_TOKEN_UNSUPPORTED");
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn session_ws_local_trust_missing_session_returns_http_not_found() {
+        let state = test_state();
+        let (addr, server) = spawn_session_ws_test_server(state).await;
+
+        let url = format!("ws://{addr}/ws/sessions/missing");
+        let err = match tokio_tungstenite::connect_async(url).await {
+            Ok(_) => panic!("missing-session websocket should fail before upgrade"),
+            Err(err) => err,
+        };
+
+        let body = assert_session_ws_http_error(err, StatusCode::NOT_FOUND);
+        assert_eq!(body["code"], "SESSION_NOT_FOUND");
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn session_ws_token_mode_missing_session_sends_ws_error_after_auth() {
+        use tokio_tungstenite::tungstenite::Message as ClientMessage;
+
+        let state = test_state_with_config(Config {
+            auth_mode: AuthMode::Token,
+            auth_token: Some("operator".to_string()),
+            observer_token: Some("observer".to_string()),
+            ..Config::default()
+        });
+        let (addr, server) = spawn_session_ws_test_server(state).await;
+
+        let url = format!("ws://{addr}/ws/sessions/missing");
+        let (mut ws, _resp) = tokio_tungstenite::connect_async(url)
+            .await
+            .expect("ws connect before token auth");
+        ws.send(ClientMessage::Text(
+            r#"{"type":"auth","token":"operator"}"#.into(),
+        ))
+        .await
+        .expect("send websocket auth message");
+
+        let first = tokio::time::timeout(Duration::from_secs(5), ws.next())
+            .await
+            .expect("session-not-found payload within timeout")
+            .expect("ws stream item")
+            .expect("ws message");
+        let text = match first {
+            ClientMessage::Text(text) => text,
+            other => panic!("expected text error frame, got {other:?}"),
+        };
+        let payload: serde_json::Value =
+            serde_json::from_str(&text).expect("session-not-found payload is json");
+        assert_eq!(payload["type"], "error");
+        assert_eq!(payload["code"], "SESSION_NOT_FOUND");
+
+        let _ = ws.close(None).await;
+        server.abort();
+    }
+
     // Drives the real authenticated WS loop end-to-end over a live socket. Under
     // LocalTrust there is no first-frame handshake, so connecting to a live
     // session exercises session_ws_authenticated_inner through the replay-cursor
@@ -3501,7 +3710,9 @@ mod tests {
         use tokio_tungstenite::tungstenite::Message as ClientMessage;
 
         let (cmd_tx, mut cmd_rx) = mpsc::channel::<SessionCommand>(16);
+        let (subscribe_resume_tx, subscribe_resume_rx) = oneshot::channel();
         tokio::spawn(async move {
+            let mut subscribe_resume_tx = Some(subscribe_resume_tx);
             while let Some(cmd) = cmd_rx.recv().await {
                 match cmd {
                     SessionCommand::GetReplayCursor(reply) => {
@@ -3510,7 +3721,14 @@ mod tests {
                             replay_window_start_seq: 1,
                         });
                     }
-                    SessionCommand::Subscribe { ack, .. } => {
+                    SessionCommand::Subscribe {
+                        ack,
+                        resume_from_seq,
+                        ..
+                    } => {
+                        if let Some(tx) = subscribe_resume_tx.take() {
+                            let _ = tx.send(resume_from_seq);
+                        }
                         let _ = ack.send(SubscribeOutcome::Ok);
                     }
                     SessionCommand::GetSummary(reply) => {
@@ -3529,16 +3747,9 @@ mod tests {
         let handle = ActorHandle::test_handle("ws-sess", "ws-sess", cmd_tx);
         state.supervisor.insert_test_handle(handle).await;
 
-        let app = routes().with_state(state.clone());
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind ws test server");
-        let addr = listener.local_addr().expect("server addr");
-        let server = tokio::spawn(async move {
-            let _ = axum::serve(listener, app).await;
-        });
+        let (addr, server) = spawn_session_ws_test_server(state.clone()).await;
 
-        let url = format!("ws://{addr}/ws/sessions/ws-sess");
+        let url = format!("ws://{addr}/ws/sessions/ws-sess?framed=framed_v1&resume_from_seq=3");
         let (mut ws, _resp) = tokio_tungstenite::connect_async(url)
             .await
             .expect("ws connect");
@@ -3560,6 +3771,12 @@ mod tests {
         assert_eq!(payload["readOnly"], false);
         assert_eq!(payload["replay"]["latestSeq"], 5);
         assert_eq!(payload["replay"]["windowStartSeq"], 1);
+        assert_eq!(payload["replay"]["resumeFromSeq"], 3);
+        assert_eq!(payload["protocol"]["output"], "framed_v1");
+        assert_eq!(
+            subscribe_resume_rx.await.expect("subscribe resume seq"),
+            Some(3)
+        );
 
         let _ = ws.close(None).await;
         server.abort();
