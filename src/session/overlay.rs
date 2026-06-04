@@ -186,33 +186,15 @@ impl SkillboxOverlay {
     pub fn find_dir_config(&self, cwd: &str) -> Option<&OverlayDirConfig> {
         let cwd_normalized = normalize_path(cwd);
 
-        // First pass: find an overlay whose base_path contains the CWD.
-        let by_base_path = self.clients.iter().find_map(|c| {
-            let config = c.dir_config.as_ref()?;
-            let base = config
-                .base_path
-                .canonicalize()
-                .unwrap_or(config.base_path.clone());
-            let base_str = base.to_string_lossy();
-            if cwd_starts_with(&cwd_normalized, base_str.as_ref()) {
-                Some(config)
-            } else {
-                None
-            }
-        });
-        if by_base_path.is_some() {
-            return by_base_path;
-        }
-
-        // Fallback: CWD-match the overlay and return its dir_config if present.
         self.clients
             .iter()
-            .find(|c| {
-                c.cwd_patterns
+            .find_map(|client| dir_config_matching_base_path(client, &cwd_normalized))
+            .or_else(|| {
+                self.clients
                     .iter()
-                    .any(|pattern| cwd_starts_with(&cwd_normalized, pattern))
+                    .find(|client| client_matches_cwd_patterns(client, &cwd_normalized))
+                    .and_then(|client| client.dir_config.as_ref())
             })
-            .and_then(|c| c.dir_config.as_ref())
     }
 
     pub fn launch_target_by_id(&self, id: &str) -> Option<LaunchTargetSummary> {
@@ -303,6 +285,30 @@ impl SkillboxOverlay {
         });
         entries
     }
+}
+
+fn dir_config_matching_base_path<'a>(
+    client: &'a ClientOverlay,
+    cwd_normalized: &str,
+) -> Option<&'a OverlayDirConfig> {
+    let config = client.dir_config.as_ref()?;
+    dir_config_base_path_contains_cwd(config, cwd_normalized).then_some(config)
+}
+
+fn dir_config_base_path_contains_cwd(config: &OverlayDirConfig, cwd_normalized: &str) -> bool {
+    let base = config
+        .base_path
+        .canonicalize()
+        .unwrap_or_else(|_| config.base_path.clone());
+    let base_str = base.to_string_lossy();
+    cwd_starts_with(cwd_normalized, base_str.as_ref())
+}
+
+fn client_matches_cwd_patterns(client: &ClientOverlay, cwd_normalized: &str) -> bool {
+    client
+        .cwd_patterns
+        .iter()
+        .any(|pattern| cwd_starts_with(cwd_normalized, pattern))
 }
 
 fn load_client_overlays(config_root: &Path) -> Option<Vec<ClientOverlay>> {
@@ -1195,6 +1201,29 @@ mod tests {
         }
     }
 
+    fn test_dir_client(
+        label: &str,
+        base_path: PathBuf,
+        cwd_patterns: Vec<String>,
+        has_dir_config: bool,
+    ) -> ClientOverlay {
+        ClientOverlay {
+            client_dir: PathBuf::from(format!("/tmp/{label}")),
+            label: label.to_string(),
+            cwd_patterns,
+            cwd_match_count: 0,
+            plan_root: None,
+            plan_draft: None,
+            dir_config: has_dir_config.then(|| OverlayDirConfig {
+                label: label.to_string(),
+                base_path,
+                services: Vec::new(),
+                groups: Vec::new(),
+                launch: OverlayLaunchConfig::local_only(),
+            }),
+        }
+    }
+
     #[test]
     fn cwd_starts_with_exact_match() {
         assert!(cwd_starts_with("/tmp/repos/example", "/tmp/repos/example"));
@@ -1441,6 +1470,91 @@ mod tests {
         };
 
         assert!(overlay.all_launch_targets().is_empty());
+    }
+
+    #[test]
+    fn find_dir_config_prefers_base_path_over_earlier_cwd_match() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let owned_base = tmp.path().join("owned");
+        let other_base = tmp.path().join("other");
+        let cwd = owned_base.join("repo").join("src");
+        std::fs::create_dir_all(&cwd).expect("cwd");
+        std::fs::create_dir_all(&other_base).expect("other base");
+
+        let overlay = SkillboxOverlay {
+            clients: vec![
+                test_dir_client(
+                    "pattern-first",
+                    other_base,
+                    vec![owned_base.to_string_lossy().into_owned()],
+                    true,
+                ),
+                test_dir_client("base-owner", owned_base, Vec::new(), true),
+            ],
+            loaded_at: Utc::now(),
+        };
+
+        let config = overlay
+            .find_dir_config(&cwd.to_string_lossy())
+            .expect("dir config");
+
+        assert_eq!(config.label, "base-owner");
+    }
+
+    #[test]
+    fn find_dir_config_falls_back_to_cwd_match() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let service_base = tmp.path().join("services");
+        let repo_base = tmp.path().join("repo");
+        let cwd = repo_base.join("nested");
+        std::fs::create_dir_all(&service_base).expect("service base");
+        std::fs::create_dir_all(&cwd).expect("cwd");
+
+        let overlay = SkillboxOverlay {
+            clients: vec![test_dir_client(
+                "fallback",
+                service_base,
+                vec![repo_base.to_string_lossy().into_owned()],
+                true,
+            )],
+            loaded_at: Utc::now(),
+        };
+
+        let config = overlay
+            .find_dir_config(&cwd.to_string_lossy())
+            .expect("dir config");
+
+        assert_eq!(config.label, "fallback");
+    }
+
+    #[test]
+    fn find_dir_config_clients_without_dir_config_cannot_produce_fallback_config() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let repo_base = tmp.path().join("repo");
+        let cwd = repo_base.join("nested");
+        let later_service_base = tmp.path().join("later-services");
+        std::fs::create_dir_all(&cwd).expect("cwd");
+        std::fs::create_dir_all(&later_service_base).expect("later service base");
+
+        let overlay = SkillboxOverlay {
+            clients: vec![
+                test_dir_client(
+                    "no-config",
+                    tmp.path().join("ignored"),
+                    vec![repo_base.to_string_lossy().into_owned()],
+                    false,
+                ),
+                test_dir_client(
+                    "later-config",
+                    later_service_base,
+                    vec![repo_base.to_string_lossy().into_owned()],
+                    true,
+                ),
+            ],
+            loaded_at: Utc::now(),
+        };
+
+        assert!(overlay.find_dir_config(&cwd.to_string_lossy()).is_none());
     }
 
     #[test]
