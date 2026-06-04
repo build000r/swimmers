@@ -2570,28 +2570,86 @@ fn pty_read_loop(
 ) {
     use std::io::Read;
     let mut buf = [0u8; 8192];
-    loop {
-        match reader.read(&mut buf) {
-            Ok(0) => {
-                info!(session_id = %session_id, "PTY EOF");
-                break;
-            }
-            Ok(n) => {
-                let data = buf[..n].to_vec();
-                if tx.blocking_send(data).is_err() {
-                    debug!(session_id = %session_id, "PTY read loop: receiver dropped");
-                    break;
-                }
-            }
-            Err(e) => {
-                // EIO is expected when the child process exits.
-                if e.kind() == std::io::ErrorKind::Other {
-                    info!(session_id = %session_id, "PTY read ended (likely child exit)");
-                } else {
-                    error!(session_id = %session_id, "PTY read error: {}", e);
-                }
-                break;
-            }
+    while pty_read_step(&session_id, reader.read(&mut buf), &buf, &tx).should_continue() {}
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PtyReadLoopStep {
+    Continue,
+    Stop,
+}
+
+impl PtyReadLoopStep {
+    fn should_continue(self) -> bool {
+        self == Self::Continue
+    }
+}
+
+fn pty_read_step(
+    session_id: &str,
+    read_result: std::io::Result<usize>,
+    buf: &[u8],
+    tx: &mpsc::Sender<Vec<u8>>,
+) -> PtyReadLoopStep {
+    match read_result {
+        Ok(n) => pty_read_bytes_step(session_id, n, buf, tx),
+        Err(err) => stop_after_pty_read_error(session_id, &err),
+    }
+}
+
+fn pty_read_bytes_step(
+    session_id: &str,
+    n: usize,
+    buf: &[u8],
+    tx: &mpsc::Sender<Vec<u8>>,
+) -> PtyReadLoopStep {
+    if n == 0 {
+        info!(session_id = %session_id, "PTY EOF");
+        PtyReadLoopStep::Stop
+    } else {
+        send_pty_read_bytes(session_id, &buf[..n], tx)
+    }
+}
+
+fn send_pty_read_bytes(
+    session_id: &str,
+    data: &[u8],
+    tx: &mpsc::Sender<Vec<u8>>,
+) -> PtyReadLoopStep {
+    if tx.blocking_send(data.to_vec()).is_err() {
+        debug!(session_id = %session_id, "PTY read loop: receiver dropped");
+        PtyReadLoopStep::Stop
+    } else {
+        PtyReadLoopStep::Continue
+    }
+}
+
+fn stop_after_pty_read_error(session_id: &str, err: &std::io::Error) -> PtyReadLoopStep {
+    log_pty_read_error(session_id, err);
+    PtyReadLoopStep::Stop
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PtyReadErrorLog {
+    LikelyChildExit,
+    Error,
+}
+
+fn pty_read_error_log(err: &std::io::Error) -> PtyReadErrorLog {
+    match err.kind() {
+        std::io::ErrorKind::Other => PtyReadErrorLog::LikelyChildExit,
+        _ => PtyReadErrorLog::Error,
+    }
+}
+
+fn log_pty_read_error(session_id: &str, err: &std::io::Error) {
+    match pty_read_error_log(err) {
+        // EIO is expected when the child process exits.
+        PtyReadErrorLog::LikelyChildExit => {
+            info!(session_id = %session_id, "PTY read ended (likely child exit)");
+        }
+        PtyReadErrorLog::Error => {
+            error!(session_id = %session_id, "PTY read error: {}", err);
         }
     }
 }
@@ -2604,15 +2662,16 @@ mod tests {
         detect_tool_from_process_entry, extract_cwd_from_title, find_osc_payload_end,
         line_looks_prompt_like, normalize_submit_line_text, osc7_cwd_update_plan, osc_payloads,
         output_counts_as_meaningful_activity, parse_process_entry, percent_decode,
-        process_entries_cache, query_tmux_session_created, query_tool_from_tmux_process_tree,
-        resolve_tmux_colorterm, resolve_tmux_term, resolve_tmux_terminal_env,
-        run_bounded_tmux_command, should_clear_startup_replay, should_refresh_cwd_from_tmux,
-        should_refresh_tool_from_tmux, state_detector_for_initial_tool, submit_line_fallback_input,
-        subscriber_cap_rejection, title_cwd_update, title_tool_update, tmux_input_chunks,
-        tool_refresh_changes_tool, visible_output_is_meaningful, write_and_flush_input,
-        write_input_counts_as_activity, ControlEvent, LivenessReconciliation, LivenessRefresh,
-        OutputFrame, PaneLiveness, ProcessEntriesCache, ProcessEntry, SessionActor, SessionCommand,
-        SubscribeOutcome, TmuxInputChunk, CWD_REFRESH_MIN_INTERVAL,
+        process_entries_cache, pty_read_error_log, pty_read_step, query_tmux_session_created,
+        query_tool_from_tmux_process_tree, resolve_tmux_colorterm, resolve_tmux_term,
+        resolve_tmux_terminal_env, run_bounded_tmux_command, should_clear_startup_replay,
+        should_refresh_cwd_from_tmux, should_refresh_tool_from_tmux,
+        state_detector_for_initial_tool, submit_line_fallback_input, subscriber_cap_rejection,
+        title_cwd_update, title_tool_update, tmux_input_chunks, tool_refresh_changes_tool,
+        visible_output_is_meaningful, write_and_flush_input, write_input_counts_as_activity,
+        ControlEvent, LivenessReconciliation, LivenessRefresh, OutputFrame, PaneLiveness,
+        ProcessEntriesCache, ProcessEntry, PtyReadErrorLog, PtyReadLoopStep, SessionActor,
+        SessionCommand, SubscribeOutcome, TmuxInputChunk, CWD_REFRESH_MIN_INTERVAL,
         MAX_OUTPUT_SUBSCRIBERS_PER_SESSION, PROCESS_ENTRIES_CACHE_TTL, TOOL_REFRESH_MIN_INTERVAL,
     };
     use crate::config::Config;
@@ -2676,6 +2735,73 @@ mod tests {
             seq,
             data: data.to_vec(),
         }
+    }
+
+    #[test]
+    fn pty_read_step_forwards_exact_read_slice_and_continues() {
+        let (tx, mut rx) = mpsc::channel(1);
+
+        let step = pty_read_step("sess-test", Ok(3), b"abcdef", &tx);
+
+        assert_eq!(step, PtyReadLoopStep::Continue);
+        assert_eq!(rx.try_recv().expect("pty bytes"), b"abc".to_vec());
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn pty_read_step_eof_stops_without_sending() {
+        let (tx, mut rx) = mpsc::channel(1);
+
+        let step = pty_read_step("sess-test", Ok(0), b"abcdef", &tx);
+
+        assert_eq!(step, PtyReadLoopStep::Stop);
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn pty_read_step_stops_when_receiver_dropped() {
+        let (tx, rx) = mpsc::channel(1);
+        drop(rx);
+
+        let step = pty_read_step("sess-test", Ok(3), b"abcdef", &tx);
+
+        assert_eq!(step, PtyReadLoopStep::Stop);
+    }
+
+    #[test]
+    fn pty_read_step_stops_for_likely_child_exit_error() {
+        let (tx, mut rx) = mpsc::channel(1);
+        let err = io::Error::new(io::ErrorKind::Other, "child exited");
+
+        let step = pty_read_step("sess-test", Err(err), b"abcdef", &tx);
+
+        assert_eq!(step, PtyReadLoopStep::Stop);
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn pty_read_step_stops_for_non_other_read_error() {
+        let (tx, mut rx) = mpsc::channel(1);
+        let err = io::Error::new(io::ErrorKind::Interrupted, "interrupted");
+
+        let step = pty_read_step("sess-test", Err(err), b"abcdef", &tx);
+
+        assert_eq!(step, PtyReadLoopStep::Stop);
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn pty_read_error_log_classifies_other_as_likely_child_exit() {
+        let err = io::Error::new(io::ErrorKind::Other, "child exited");
+
+        assert_eq!(pty_read_error_log(&err), PtyReadErrorLog::LikelyChildExit);
+    }
+
+    #[test]
+    fn pty_read_error_log_classifies_non_other_as_error() {
+        let err = io::Error::new(io::ErrorKind::Interrupted, "interrupted");
+
+        assert_eq!(pty_read_error_log(&err), PtyReadErrorLog::Error);
     }
 
     async fn clear_process_entries_cache() {
