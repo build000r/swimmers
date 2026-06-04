@@ -1,6 +1,35 @@
 use super::*;
 
 #[test]
+fn tui_startup_plan_tracks_client_mode_and_shutdown_installation() {
+    let external = TuiStartupPlan::for_external_request(true);
+    assert_eq!(external.client_mode(), TuiStartupClientMode::External);
+    assert!(!external.installs_embedded_shutdown());
+
+    let embedded = TuiStartupPlan::for_external_request(false);
+    assert_eq!(embedded.client_mode(), TuiStartupClientMode::Embedded);
+    assert!(embedded.installs_embedded_shutdown());
+}
+
+#[test]
+fn assemble_tui_app_without_embedded_shutdown_refreshes_initial_frame_from_size() {
+    let api = MockApi::new();
+    let session = session_summary("sess-7", "7", TEST_REPO_SWIMMERS);
+    api.push_fetch_sessions(Ok(vec![session.clone()]));
+
+    let app = assemble_tui_app(test_runtime(), TuiStartupClient::external(api), 96, 24);
+
+    let expected_layout = app.layout_for_terminal(96, 24);
+    let expected_entity = SessionEntity::new(session, expected_layout.overview_field);
+    assert!(!app.has_embedded_shutdown());
+    assert!(app.last_refresh.is_some());
+    assert_eq!(app.entities.len(), 1);
+    assert_eq!(app.entities[0].session.session_id, "sess-7");
+    assert_eq!(app.entities[0].x, expected_entity.x);
+    assert_eq!(app.entities[0].y, expected_entity.y);
+}
+
+#[test]
 fn handle_tui_event_covers_key_paste_mouse_and_resize_paths() {
     let api = MockApi::new();
     let layout = test_layout(120, 32);

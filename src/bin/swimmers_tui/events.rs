@@ -285,6 +285,39 @@ fn external_mode_requested() -> bool {
     std::env::var_os("SWIMMERS_TUI_URL").is_some()
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum TuiStartupClientMode {
+    External,
+    Embedded,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct TuiStartupPlan {
+    client_mode: TuiStartupClientMode,
+}
+
+impl TuiStartupPlan {
+    pub(crate) fn for_external_request(external_mode_requested: bool) -> Self {
+        let client_mode = match external_mode_requested {
+            true => TuiStartupClientMode::External,
+            false => TuiStartupClientMode::Embedded,
+        };
+        Self { client_mode }
+    }
+
+    fn from_env() -> Self {
+        Self::for_external_request(external_mode_requested())
+    }
+
+    pub(crate) fn client_mode(self) -> TuiStartupClientMode {
+        self.client_mode
+    }
+
+    pub(crate) fn installs_embedded_shutdown(self) -> bool {
+        self.client_mode == TuiStartupClientMode::Embedded
+    }
+}
+
 fn is_loopback_base_url(base_url: &str) -> Result<bool, String> {
     let parsed = reqwest::Url::parse(base_url)
         .map_err(|err| format!("invalid SWIMMERS_TUI_URL `{base_url}`: {err}"))?;
@@ -347,27 +380,68 @@ pub(crate) fn build_embedded_client(
     )
 }
 
+pub(crate) struct TuiStartupClient<C> {
+    client: C,
+    embedded_shutdown: Option<swimmers::startup::EmbeddedTuiShutdown>,
+}
+
+impl<C> TuiStartupClient<C> {
+    pub(crate) fn external(client: C) -> Self {
+        Self {
+            client,
+            embedded_shutdown: None,
+        }
+    }
+
+    fn embedded(client: C, shutdown: swimmers::startup::EmbeddedTuiShutdown) -> Self {
+        Self {
+            client,
+            embedded_shutdown: Some(shutdown),
+        }
+    }
+}
+
+fn build_startup_client(
+    runtime: &Runtime,
+    plan: TuiStartupPlan,
+) -> Result<TuiStartupClient<TuiClient>, io::Error> {
+    match plan.client_mode() {
+        TuiStartupClientMode::External => {
+            Ok(TuiStartupClient::external(build_external_client(runtime)?))
+        }
+        TuiStartupClientMode::Embedded => {
+            let (client, shutdown) = build_embedded_client(runtime);
+            Ok(TuiStartupClient::embedded(client, shutdown))
+        }
+    }
+}
+
+pub(crate) fn assemble_tui_app<C: TuiApi>(
+    runtime: Runtime,
+    startup_client: TuiStartupClient<C>,
+    terminal_width: u16,
+    terminal_height: u16,
+) -> App<C> {
+    let mut app = App::new(runtime, startup_client.client);
+    if let Some(shutdown) = startup_client.embedded_shutdown {
+        app.set_embedded_shutdown(shutdown);
+    }
+    let initial_layout = app.layout_for_terminal(terminal_width, terminal_height);
+    app.refresh_initial_frame(initial_layout);
+    app
+}
+
 pub(crate) fn initialize_tui_app() -> Result<(App<TuiClient>, Renderer), Box<dyn std::error::Error>>
 {
     let _ = dotenvy::dotenv();
     swimmers::env_bootstrap::bootstrap_provider_env_from_shell();
 
     let runtime = Runtime::new()?;
-    let (client, embedded_shutdown) = if external_mode_requested() {
-        (build_external_client(&runtime)?, None)
-    } else {
-        let (client, shutdown) = build_embedded_client(&runtime);
-        (client, Some(shutdown))
-    };
+    let startup_client = build_startup_client(&runtime, TuiStartupPlan::from_env())?;
     let mut renderer = Renderer::new()?;
     renderer.init()?;
 
-    let mut app = App::new(runtime, client);
-    if let Some(shutdown) = embedded_shutdown {
-        app.set_embedded_shutdown(shutdown);
-    }
-    let initial_layout = app.layout_for_terminal(renderer.width(), renderer.height());
-    app.refresh_initial_frame(initial_layout);
+    let app = assemble_tui_app(runtime, startup_client, renderer.width(), renderer.height());
 
     Ok((app, renderer))
 }
