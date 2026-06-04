@@ -1,12 +1,13 @@
-import { buildSurfaceFrame, surfaceActionAt, surfaceConsumesPointer } from "./rendered_surface.js";
+import { buildSurfaceFrame } from "./rendered_surface.js";
 import {
   authTokenButtonPlan, controlEventSessionPatchPlan, eventCell, initialStateBootPlan, lifecycleDeletedSessionPatchPlan,
   sheetActionAvailabilityPlan,
-  shouldIgnoreSyntheticClick, surfaceActionDispatchContextPlan, surfaceActionDispatchPlan, surfaceActionExecutionContextPlan, surfaceActionExecutionPlan, surfaceActionFocusTerminalExecutionPlan, surfaceActionTrogdorReaderExecutionPlan,
-  terminalDestroyStatePatch, terminalStageClickPlan,
-  terminalPaintProbeSchedulePlan, terminalPaintVerificationPlan, terminalPresentationPlan, terminalStageKeydownPlan, terminalStageMouseDownPlan, terminalStageMouseMovePlan, terminalStageMouseUpPlan, terminalStagePasteExecutorPlan, terminalStagePastePlan, terminalStageTouchEndPlan, terminalStageWheelPlan, terminalToolsAvailabilityPlan,
+  surfaceActionDispatchContextPlan, surfaceActionDispatchPlan, surfaceActionExecutionContextPlan, surfaceActionExecutionPlan, surfaceActionFocusTerminalExecutionPlan, surfaceActionTrogdorReaderExecutionPlan,
+  terminalDestroyStatePatch,
+  terminalPaintProbeSchedulePlan, terminalPaintVerificationPlan, terminalPresentationPlan, terminalToolsAvailabilityPlan,
 } from "./input_support.js";
 import { createAppEventHandlers } from "./app_event_handlers.js";
+import { createTerminalStageController } from "./terminal_stage_controller.js";
 import { createTerminalFocusController } from "./terminal_focus.js";
 import { createSendController } from "./send_controller.js";
 import { createTerminalInputController } from "./terminal_input.js";
@@ -65,7 +66,6 @@ import {
 } from "./terminal_status.js";
 import {
   decodeTerminalOutputFrame,
-  keyModifiers,
 } from "./terminal_protocol.js";
 import {
   createDirBrowserController,
@@ -75,24 +75,15 @@ import {
 } from "./command_palette_controller.js";
 import {
   TROGDOR_DRAGON_TARGET,
-  buildTrogdorDomGroups,
   loadTrogdorReadProgress,
   normalizeTrogdorSessionId,
-  summarizeTrogdorDom,
   trogdorDomActionCueKinds,
-  trogdorDragonPose as buildTrogdorDragonPose,
   trogdorHasActionCue,
   trogdorPrimaryActionCue,
   trogdorActionPayloadForZone,
   trogdorAtlasTransitionState,
-  trogdorHoverReaderResetState,
-  trogdorHoverSessionIdForZone,
-  trogdorReadableHoveredSurfaceSession,
-  trogdorReaderDisplayState,
-  trogdorReaderTimerAction,
   trogdorReaderToggleAction,
   trogdorReaderWpmForAction,
-  trogdorRawSessionForHover,
   trogdorSessionAwaitingUser,
   trogdorTerminalFocusStatus,
 } from "./trogdor_logic.js";
@@ -100,11 +91,8 @@ import {
   createTrogdorStateHelpers,
 } from "./trogdor_state.js";
 import {
-  TROGDOR_REPO_POSITIONS,
-  trogdorReadButtonLabel,
-  renderTrogdorSurfaceFrame,
-  trogdorSurfaceSignature,
-} from "./trogdor_render.js";
+  createTrogdorSurfaceController,
+} from "./trogdor_surface_controller.js";
 import {
   emptyWorkbenchWidgets,
   renderTranscriptBlocks,
@@ -302,6 +290,12 @@ const state = {
     error: "",
   },
 };
+
+let trogdorSurfaceController;
+function renderTrogdorSurface() { return trogdorSurfaceController.renderTrogdorSurface(); }
+function applyTrogdorAtlasVisibility() { return trogdorSurfaceController.applyTrogdorAtlasVisibility(); }
+function updateHoveredTrogdorSurface(zone) { return trogdorSurfaceController.updateHoveredTrogdorSurface(zone); }
+function syncTrogdorReaderTimer() { return trogdorSurfaceController.syncTrogdorReaderTimer(); }
 
 const {
   advanceTrogdorReaderProgressForCurrentHover,
@@ -1308,70 +1302,6 @@ function escapeHtml(text) {
   });
 }
 
-function renderTrogdorSurface() {
-  if (!el.trogdorSurface) {
-    return;
-  }
-
-  const visible = Boolean(state.trogdorAtlasOpen);
-  applyTrogdorAtlasVisibility();
-  if (!visible) {
-    return;
-  }
-
-  const sessions = state.sessions.map((session) => surfaceSession(session));
-  const groups = buildTrogdorDomGroups(sessions);
-  const hovered = trogdorReadableHoveredSurfaceSession(sessions, state.hoveredTrogdorSessionId, {
-    sessionCanRead: trogdorSessionCanRead,
-  });
-  const summary = summarizeTrogdorDom(groups, sessions);
-  const dragonPose = buildTrogdorDragonPose(groups, summary, TROGDOR_REPO_POSITIONS);
-  const signature = trogdorSurfaceSignature(sessions, summary, state.readOnly);
-  if (signature !== state.trogdorSurfaceSignature) {
-    state.trogdorSurfaceSignature = signature;
-    const wpm = clampInt(state.trogdorWpm, 200, 50, 800);
-    el.trogdorSurface.innerHTML = renderTrogdorSurfaceFrame({
-      groups,
-      sessions,
-      summary,
-      dragonPose,
-      readerMarkup: renderTrogdorReader(hovered),
-      readButtonLabel: trogdorReadButtonLabel(state.trogdorReading, Boolean(hovered && trogdorClawgReadComplete(hovered))),
-      wpm,
-      readOnly: state.readOnly,
-      hoveredSessionId: state.hoveredTrogdorSessionId,
-    });
-  }
-  renderTrogdorReader(hovered);
-}
-
-function renderTrogdorReader(hoveredSession) {
-  const wpm = clampInt(state.trogdorWpm, 200, 50, 800);
-  const hovered = hoveredSession || null;
-  const readerState = trogdorReaderDisplayState(hovered, {
-    wordIndex: hovered ? trogdorReaderWordIndex(hovered, wpm) : -1,
-    progress: state.trogdorReadProgress,
-  });
-  const bannerText = readerState.bannerText;
-  const readerMarkup = `<div class="trogdor-banner" data-trogdor-reader="true">${escapeHtml(bannerText)}</div>`;
-  if (!el.trogdorSurface) {
-    return readerMarkup;
-  }
-  const banner = el.trogdorSurface.querySelector("[data-trogdor-reader]");
-  if (banner) {
-    banner.textContent = bannerText;
-  }
-  const readToggle = el.trogdorSurface.querySelector('button[data-action="trogdor_read_toggle"]');
-  if (readToggle) {
-    readToggle.textContent = trogdorReadButtonLabel(state.trogdorReading, readerState.readComplete);
-  }
-  const wpmValue = el.trogdorSurface.querySelector("[data-trogdor-wpm-value]");
-  if (wpmValue) {
-    wpmValue.textContent = `${wpm} wpm`;
-  }
-  return readerMarkup;
-}
-
 async function refreshThoughtConfig() { await thoughtConfigSheet.refresh(); }
 
 async function refreshNativeStatus() { await nativeDesktopSheet.refreshNativeStatus(); }
@@ -1686,6 +1616,22 @@ function openSheet(sheetId) { return commandPaletteController.openSheet(sheetId)
 
 function closeSheets() { return commandPaletteController.closeSheets(); }
 
+trogdorSurfaceController = createTrogdorSurfaceController({
+  state,
+  el,
+  documentRef: document,
+  windowRef: window,
+  surfaceSession,
+  currentTrogdorSurfaceSession,
+  trogdorSessionCanRead,
+  trogdorClawgReadComplete,
+  trogdorReaderWordIndex,
+  startTrogdorReaderForSession,
+  renderHudSurface: (...args) => renderHudSurface(...args),
+  setUtilityStatus,
+  clampInt,
+});
+
 function closeTrogdorAtlasForTerminal() {
   Object.assign(state, trogdorAtlasTransitionState("close_terminal"));
   syncTrogdorReaderTimer();
@@ -1698,17 +1644,6 @@ function openTrogdorAtlas() {
   closeMobileKeyboard();
   renderHudSurface();
   setUtilityStatus("Back to Trogdor atlas.", false, 1600);
-}
-
-function applyTrogdorAtlasVisibility() {
-  const visible = Boolean(state.trogdorAtlasOpen);
-  if (el.trogdorSurface) {
-    el.trogdorSurface.classList.toggle("hidden", !visible);
-    el.trogdorSurface.setAttribute("aria-hidden", visible ? "false" : "true");
-    el.trogdorSurface.style.display = visible ? "" : "none";
-  }
-  el.trogdorLauncher?.classList.toggle("hidden", visible || Boolean(state.activeSheet));
-  document.body.classList.toggle("trogdor-mode", visible);
 }
 
 async function selectSession(sessionId) {
@@ -1827,273 +1762,46 @@ function focusTerminalSurfaceAction() {
   setUtilityStatus(focusPlan.statusMessage, focusPlan.statusError, focusPlan.statusTimeoutMs);
 }
 
-function surfaceHit(event) {
-  const cell = mouseCell(event);
-  return {
-    cell,
-    action: surfaceActionAt(state.surfaceZones, cell),
-    consume: surfaceConsumesPointer(state.surfaceMasks, cell),
-  };
-}
+const terminalStageController = createTerminalStageController({
+  state,
+  el,
+  ElementClass: Element,
+  performanceRef: performance,
+  surfaceClickSuppressMs: SURFACE_CLICK_SUPPRESS_MS,
+  mouseCell,
+  cellOffset,
+  clampInt,
+  handleSurfaceAction,
+  handleGlobalShortcut: (...args) => handleGlobalShortcut(...args),
+  shouldCaptureKey,
+  keyBeginsTrogdorResponse,
+  markTrogdorSessionsResponded,
+  forwardTerminalKeyDown,
+  sendTerminalText,
+  updateHoveredLink,
+  clearHoveredLink,
+  safeOpenUrl,
+  setTerminalSelectionRange,
+  forwardTerminalMouse,
+  forwardTerminalEvent,
+  updateHoveredTrogdorSurface,
+  focusMobileKeyboard,
+  focusTerminalInputSurface,
+  isCoarsePointer,
+});
 
-function terminalFallbackOwnsPointer(event) {
-  return Boolean(
-    state.terminalFallbackActive &&
-      event.target instanceof Element &&
-      event.target.closest("#terminal-fallback"),
-  );
-}
-
-function captureSurfaceAction(event, phase) {
-  if (state.activeSheet) {
-    return false;
-  }
-  if (terminalFallbackOwnsPointer(event)) {
-    return false;
-  }
-  if (event.target instanceof Element && event.target.closest("#trogdor-surface, #trogdor-launcher")) {
-    return false;
-  }
-  const hit = surfaceHit(event);
-  if (!hit.action && !hit.consume) {
-    return false;
-  }
-
-  if (hit.action) {
-    if (phase === "wheel") {
-      event.preventDefault();
-      stopSurfaceEvent(event);
-      return true;
-    }
-    if (phase === "click" && shouldIgnoreSyntheticClick(performance.now(), state.surfaceClickSuppressUntil)) {
-      event.preventDefault();
-      stopSurfaceEvent(event);
-      return true;
-    }
-    if (phase === "down" || phase === "touch" || phase === "click") {
-      if (phase === "down" || phase === "touch") {
-        state.surfaceClickSuppressUntil = performance.now() + SURFACE_CLICK_SUPPRESS_MS;
-      }
-      event.preventDefault();
-      stopSurfaceEvent(event);
-      void handleSurfaceAction(hit.action);
-      return true;
-    }
-  }
-
-  if (hit.consume) {
-    event.preventDefault();
-    stopSurfaceEvent(event);
-    return true;
-  }
-
-  return false;
-}
-
-function stopSurfaceEvent(event) {
-  if (typeof event.stopImmediatePropagation === "function") {
-    event.stopImmediatePropagation();
-    return;
-  }
-  event.stopPropagation();
-}
-
-function applyTerminalStagePointerPlan(event, plan) {
-  if (plan.suppressClick) state.surfaceClickSuppressUntil = performance.now() + SURFACE_CLICK_SUPPRESS_MS;
-  if (plan.preventDefault) event.preventDefault();
-  if (plan.handleAction) {
-    void handleSurfaceAction(plan.action);
-    return;
-  }
-  if (plan.focusMobileThenTerminal) {
-    if (!isCoarsePointer() || !focusMobileKeyboard()) {
-      focusTerminalInputSurface({ preventScroll: true });
-    }
-    return;
-  }
-  if (plan.focusTerminal) focusTerminalInputSurface({ preventScroll: true });
-}
-
-function handleTerminalStageClick(event) {
-  const fallbackOwnsPointer = terminalFallbackOwnsPointer(event);
-  const hit = fallbackOwnsPointer ? {} : surfaceHit(event);
-  const plan = terminalStageClickPlan({
-    fallbackOwnsPointer,
-    hit,
-    activeSheet: state.activeSheet,
-    ignoreSyntheticClick: hit.action ? shouldIgnoreSyntheticClick(performance.now(), state.surfaceClickSuppressUntil) : false,
-  });
-  applyTerminalStagePointerPlan(event, plan);
-}
-
-function handleTerminalStageTouchEnd(event) {
-  const fallbackOwnsPointer = terminalFallbackOwnsPointer(event);
-  const plan = terminalStageTouchEndPlan({
-    fallbackOwnsPointer,
-    hit: fallbackOwnsPointer ? {} : surfaceHit(event),
-    activeSheet: state.activeSheet,
-  });
-  applyTerminalStagePointerPlan(event, plan);
-}
-
-function handleTerminalStageKeydown(event) {
-  const globalShortcutHandled = handleGlobalShortcut(event);
-  const shouldCaptureTerminalKey = !globalShortcutHandled && shouldCaptureKey(event);
-  const plan = terminalStageKeydownPlan({ globalShortcutHandled, shouldCaptureKey: shouldCaptureTerminalKey, beginsResponse: shouldCaptureTerminalKey && keyBeginsTrogdorResponse(event) });
-  if (plan.preventDefault) event.preventDefault();
-  if (plan.markResponse) markTrogdorSessionsResponded([state.selectedSessionId]);
-  if (plan.forwardKey) forwardTerminalKeyDown(event);
-}
-
-function handleTerminalStagePaste(event) {
-  const action = terminalStagePasteExecutorPlan(terminalStagePastePlan(state.readOnly, event.clipboardData?.getData("text") ?? ""));
-  if (action.preventDefault) event.preventDefault();
-  if (action.sendText) sendTerminalText(action.text);
-}
-
-function handleTerminalStageMouseDown(event) {
-  const fallbackOwnsPointer = terminalFallbackOwnsPointer(event);
-  const hit = fallbackOwnsPointer ? {} : surfaceHit(event);
-  if (!fallbackOwnsPointer && !hit.action && !hit.consume && state.terminal) updateHoveredLink(event);
-  const plan = terminalStageMouseDownPlan({
-    fallbackOwnsPointer,
-    hit,
-    hasTerminal: Boolean(state.terminal),
-    modifierKey: event.metaKey || event.ctrlKey,
-    hoveredLinkUrl: state.hoveredLinkUrl,
-    selectMode: state.selectMode,
-    button: event.button,
-    readOnly: state.readOnly,
-  });
-  applyTerminalStageMousePlan(event, plan, hit);
-}
-
-function handleTerminalStageMouseUp(event) {
-  const fallbackOwnsPointer = terminalFallbackOwnsPointer(event);
-  const hit = fallbackOwnsPointer ? {} : surfaceHit(event);
-  if (!fallbackOwnsPointer && !hit.action && !hit.consume && state.terminal) updateHoveredLink(event);
-  const plan = terminalStageMouseUpPlan({
-    fallbackOwnsPointer,
-    hit,
-    hasTerminal: Boolean(state.terminal),
-    modifierKey: event.metaKey || event.ctrlKey,
-    hoveredLinkUrl: state.hoveredLinkUrl,
-    selectMode: state.selectMode,
-    selectionAnchor: state.selectionAnchor,
-    button: event.button,
-    readOnly: state.readOnly,
-  });
-  applyTerminalStageMousePlan(event, plan, hit);
-}
-
-function applyTerminalStageMousePlan(event, plan, hit) {
-  if (plan.suppressClick) state.surfaceClickSuppressUntil = performance.now() + SURFACE_CLICK_SUPPRESS_MS;
-  if (plan.preventDefault) event.preventDefault();
-  if (plan.handleAction) {
-    void handleSurfaceAction(plan.action);
-  } else if (plan.openHoveredLink) {
-    safeOpenUrl(state.hoveredLinkUrl);
-  } else if (plan.startSelection) {
-    const anchor = cellOffset(hit.cell);
-    state.selectionAnchor = anchor;
-    setTerminalSelectionRange(anchor, anchor);
-  } else if (plan.completeSelection) {
-    setTerminalSelectionRange(state.selectionAnchor, cellOffset(hit.cell));
-    state.selectionAnchor = null;
-  } else if (plan.forwardMouse) {
-    forwardTerminalMouse(plan.mouseKind, clampInt(event.button, 0, 0, 2), hit, event);
-  }
-}
-
-function handleTerminalStageMouseMove(event) {
-  const fallbackOwnsPointer = terminalFallbackOwnsPointer(event);
-  const hit = fallbackOwnsPointer ? {} : surfaceHit(event);
-  const plan = terminalStageMouseMovePlan({
-    fallbackOwnsPointer, hit, hasTerminal: Boolean(state.terminal), selectMode: state.selectMode,
-    selectionAnchor: state.selectionAnchor, buttons: event.buttons, readOnly: state.readOnly,
-  });
-  applyTerminalStageMouseMovePlan(event, plan, hit);
-}
-
-function applyTerminalStageMouseMovePlan(event, plan, hit) {
-  if (plan.updateTrogdorSurface) updateHoveredTrogdorSurface(plan.trogdorZone);
-  if (plan.clearHoveredLink) clearHoveredLink(true);
-  if (plan.preventDefault) event.preventDefault();
-  if (plan.updateSelectionRange) {
-    setTerminalSelectionRange(state.selectionAnchor, cellOffset(hit.cell));
-  }
-  if (plan.updateHoveredLink) updateHoveredLink(event);
-  if (plan.forwardMouse) forwardTerminalMouse("move", 0, hit, event);
-}
-
-function handleTerminalStageWheel(event) {
-  const fallbackOwnsPointer = terminalFallbackOwnsPointer(event);
-  const hit = fallbackOwnsPointer ? {} : surfaceHit(event);
-  const plan = terminalStageWheelPlan({
-    fallbackOwnsPointer, hit, hasTerminal: Boolean(state.terminal),
-    readOnly: state.readOnly, selectMode: state.selectMode,
-  });
-  applyTerminalStageWheelPlan(event, plan, hit);
-}
-
-function applyTerminalStageWheelPlan(event, plan, hit) {
-  if (plan.preventDefault) event.preventDefault();
-  if (plan.forwardWheel) {
-    forwardTerminalEvent({
-      kind: "wheel",
-      x: hit.cell.x,
-      y: hit.cell.y,
-      dx: Math.round(event.deltaX),
-      dy: Math.round(event.deltaY),
-      mods: keyModifiers(event),
-    });
-  }
-}
-
-function updateHoveredTrogdorSurface(zone) {
-  const previousSessionId = state.hoveredTrogdorSessionId;
-  const nextSessionId = trogdorHoverSessionIdForZone(zone, previousSessionId);
-  if (nextSessionId === previousSessionId) {
-    return;
-  }
-  Object.assign(state, trogdorHoverReaderResetState(nextSessionId));
-  if (el.trogdorSurface) {
-    const agents = el.trogdorSurface.querySelectorAll("[data-trogdor-agent]");
-    for (const agent of agents) {
-      agent.classList.toggle("is-hovered", Boolean(nextSessionId) && agent.dataset.sessionId === nextSessionId);
-    }
-  }
-  if (nextSessionId) {
-    const session = trogdorRawSessionForHover(state.sessions, nextSessionId, { normalize: false });
-    if (session) {
-      startTrogdorReaderForSession(surfaceSession(session));
-    }
-    setUtilityStatus(
-      session
-        ? `Speed reading ${session.tmux_name || session.session_id} at ${state.trogdorWpm} wpm.`
-        : `Speed reading agent at ${state.trogdorWpm} wpm.`,
-      false,
-      1200,
-    );
-  }
-  renderHudSurface();
-  syncTrogdorReaderTimer();
-}
-
-function syncTrogdorReaderTimer() {
-  const timerAction = trogdorReaderTimerAction(
-    currentTrogdorSurfaceSession(), trogdorSessionCanRead, trogdorClawgReadComplete,
-    state.trogdorReading, state.trogdorReaderTimer,
-  );
-  if (timerAction === "start") {
-    state.trogdorReaderTimer = window.setInterval(() => renderHudSurface(), 120);
-    return;
-  }
-  if (timerAction === "stop") {
-    window.clearInterval(state.trogdorReaderTimer);
-    state.trogdorReaderTimer = null;
-  }
-}
+const {
+  captureSurfaceAction,
+  handleTerminalStageClick,
+  handleTerminalStageKeydown,
+  handleTerminalStageMouseDown,
+  handleTerminalStageMouseMove,
+  handleTerminalStageMouseUp,
+  handleTerminalStagePaste,
+  handleTerminalStageTouchEnd,
+  handleTerminalStageWheel,
+  terminalFallbackOwnsPointer,
+} = terminalStageController;
 
 const {
   bindEvents,

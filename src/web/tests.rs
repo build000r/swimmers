@@ -871,13 +871,15 @@ fn app_js_and_css_wire_trogdor_sprite_burn_loop() {
     let trogdor_logic = include_str!("trogdor_logic.js");
     let trogdor_dom_logic = include_str!("trogdor_dom_logic.js");
     let trogdor_render = include_str!("trogdor_render.js");
+    let trogdor_surface_controller = include_str!("trogdor_surface_controller.js");
     assert!(trogdor_render.contains("TROGDOR_DRAGON_ASSET_BASE = \"/assets/dragon\""));
     assert!(trogdor_logic.contains("from \"./trogdor_dom_logic.js\""));
     assert!(trogdor_dom_logic.contains("export function trogdorDragonPose(groups, summary"));
     assert!(trogdor_render.contains("trogdor-dragon-sprite"));
     assert!(trogdor_render.contains("agent-burn-flame"));
     assert!(trogdor_render.contains("const dragonTarget = dragonPose || TROGDOR_DRAGON_TARGET"));
-    assert!(js.contains("renderTrogdorSurfaceFrame"));
+    assert!(js.contains("createTrogdorSurfaceController"));
+    assert!(trogdor_surface_controller.contains("renderTrogdorSurfaceFrame"));
 
     let css = app_css_body();
     assert!(css.contains("@keyframes dragon-walk-around"));
@@ -963,8 +965,9 @@ fn app_js_dedupes_surface_actions_and_stable_resizes() {
     let app_event_bindings = include_str!("app_event_bindings.js");
     let resize = include_str!("terminal_resize.js");
     let terminal_surface_controller = include_str!("terminal_surface_controller.js");
-    assert!(js.contains("function stopSurfaceEvent(event)"));
-    assert!(js.contains("event.stopImmediatePropagation"));
+    let terminal_stage_controller = include_str!("terminal_stage_controller.js");
+    assert!(terminal_stage_controller.contains("function stopSurfaceEvent(event)"));
+    assert!(terminal_stage_controller.contains("event.stopImmediatePropagation"));
     assert!(terminal_surface_controller.contains(
         "runtime.runTerminalSurfaceResize({ pushResize, force }, runtime.terminalResizeRuntime)"
     ));
@@ -999,6 +1002,7 @@ fn app_js_falls_back_when_live_terminal_canvas_does_not_paint() {
     let terminal_input = include_str!("terminal_input.js");
     let terminal_surface_setup = include_str!("terminal_surface_setup.js");
     let terminal_surface_controller = include_str!("terminal_surface_controller.js");
+    let terminal_stage_controller = include_str!("terminal_stage_controller.js");
     assert!(terminal_surface_controller.contains("function feedTerminalBytes(bytes)"));
     assert!(terminal_surface_controller.contains("runtime.flushEncodedInputBytes();"));
     assert!(terminal_surface_controller.contains("function terminalCanvasHasVisiblePixels()"));
@@ -1011,7 +1015,7 @@ fn app_js_falls_back_when_live_terminal_canvas_does_not_paint() {
         .contains("runtime.setTerminalTextFallbackActive(true, { clearText: plan.clearText })"));
     assert!(terminal_input.contains("function sendFallbackTerminalEvent(event)"));
     assert!(terminal_surface_setup.contains("function updateTerminalFallbackText(text)"));
-    assert!(js.contains("function terminalFallbackOwnsPointer(event)"));
+    assert!(terminal_stage_controller.contains("function terminalFallbackOwnsPointer(event)"));
     let css = app_css_body();
     assert!(css.contains("white-space: pre-wrap"));
     assert!(css.contains("overflow-wrap: anywhere"));
@@ -1023,6 +1027,7 @@ fn app_js_trogdor_agent_click_opens_terminal() {
     let js = include_str!("app.js");
     let terminal_input = include_str!("terminal_input.js");
     let trogdor_logic = include_str!("trogdor_logic.js");
+    let trogdor_surface_controller = include_str!("trogdor_surface_controller.js");
     assert!(js.contains("function closeTrogdorAtlasForTerminal()"));
     assert!(js.contains("function openTrogdorAtlas()"));
     assert!(js.contains("terminalTrogdorBack"));
@@ -1035,8 +1040,10 @@ fn app_js_trogdor_agent_click_opens_terminal() {
     assert!(trogdor_logic.contains("case \"close_terminal\":"));
     assert!(trogdor_logic.contains("...trogdorHoverReaderResetState(),"));
     assert!(js.contains("function applyTrogdorAtlasVisibility()"));
-    assert!(js.contains("el.trogdorSurface.style.display = visible ? \"\" : \"none\""));
-    assert!(js.contains("document.body.classList.toggle(\"trogdor-mode\", visible)"));
+    assert!(trogdor_surface_controller
+        .contains("el.trogdorSurface.style.display = visible ? \"\" : \"none\""));
+    assert!(trogdor_surface_controller
+        .contains("documentRef.body.classList.toggle(\"trogdor-mode\", visible)"));
     assert!(js.contains("closeTrogdorAtlasForTerminal();"));
     assert!(js.contains("closeTrogdorAtlasForTerminal()"));
     assert!(js.contains("await selectSession(normalized)"));

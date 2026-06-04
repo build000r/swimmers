@@ -20,6 +20,7 @@ pub(super) const RENDERED_SURFACE_JS_ROUTE: &str = "/rendered_surface.js";
 pub(super) const RENDERED_SURFACE_DRAW_JS_ROUTE: &str = "/rendered_surface_draw.js";
 pub(super) const INPUT_SUPPORT_JS_ROUTE: &str = "/input_support.js";
 pub(super) const SURFACE_ACTION_PLANS_JS_ROUTE: &str = "/surface_action_plans.js";
+pub(super) const TERMINAL_STAGE_CONTROLLER_JS_ROUTE: &str = "/terminal_stage_controller.js";
 pub(super) const SEND_SHEET_JS_ROUTE: &str = "/send_sheet.js";
 pub(super) const SEND_CONTROLLER_JS_ROUTE: &str = "/send_controller.js";
 pub(super) const THOUGHT_CONFIG_SHEET_JS_ROUTE: &str = "/thought_config_sheet.js";
@@ -48,6 +49,7 @@ pub(super) const TROGDOR_LOGIC_JS_ROUTE: &str = "/trogdor_logic.js";
 pub(super) const TROGDOR_STATE_JS_ROUTE: &str = "/trogdor_state.js";
 pub(super) const TROGDOR_DOM_LOGIC_JS_ROUTE: &str = "/trogdor_dom_logic.js";
 pub(super) const TROGDOR_RENDER_JS_ROUTE: &str = "/trogdor_render.js";
+pub(super) const TROGDOR_SURFACE_CONTROLLER_JS_ROUTE: &str = "/trogdor_surface_controller.js";
 pub(super) const WORKBENCH_DOM_JS_ROUTE: &str = "/workbench_dom.js";
 pub(super) const WORKBENCH_RENDER_JS_ROUTE: &str = "/workbench_render.js";
 pub(super) const WORKBENCH_LOG_LENS_JS_ROUTE: &str = "/workbench_log_lens.js";
@@ -79,6 +81,10 @@ pub(super) fn routes() -> Router<Arc<AppState>> {
         )
         .route(INPUT_SUPPORT_JS_ROUTE, get(input_support_js))
         .route(SURFACE_ACTION_PLANS_JS_ROUTE, get(surface_action_plans_js))
+        .route(
+            TERMINAL_STAGE_CONTROLLER_JS_ROUTE,
+            get(terminal_stage_controller_js),
+        )
         .route(SEND_SHEET_JS_ROUTE, get(send_sheet_js))
         .route(SEND_CONTROLLER_JS_ROUTE, get(send_controller_js))
         .route(THOUGHT_CONFIG_SHEET_JS_ROUTE, get(thought_config_sheet_js))
@@ -134,6 +140,10 @@ pub(super) fn routes() -> Router<Arc<AppState>> {
         .route(TROGDOR_STATE_JS_ROUTE, get(trogdor_state_js))
         .route(TROGDOR_DOM_LOGIC_JS_ROUTE, get(trogdor_dom_logic_js))
         .route(TROGDOR_RENDER_JS_ROUTE, get(trogdor_render_js))
+        .route(
+            TROGDOR_SURFACE_CONTROLLER_JS_ROUTE,
+            get(trogdor_surface_controller_js),
+        )
         .route(WORKBENCH_DOM_JS_ROUTE, get(workbench_dom_js))
         .route(WORKBENCH_RENDER_JS_ROUTE, get(workbench_render_js))
         .route(WORKBENCH_LOG_LENS_JS_ROUTE, get(workbench_log_lens_js))
@@ -294,6 +304,11 @@ javascript_route!(
     "src/web/surface_action_plans.js",
     "surface_action_plans.js"
 );
+javascript_route!(
+    terminal_stage_controller_js,
+    "src/web/terminal_stage_controller.js",
+    "terminal_stage_controller.js"
+);
 javascript_route!(send_sheet_js, "src/web/send_sheet.js", "send_sheet.js");
 javascript_route!(
     send_controller_js,
@@ -425,6 +440,11 @@ javascript_route!(
     trogdor_render_js,
     "src/web/trogdor_render.js",
     "trogdor_render.js"
+);
+javascript_route!(
+    trogdor_surface_controller_js,
+    "src/web/trogdor_surface_controller.js",
+    "trogdor_surface_controller.js"
 );
 javascript_route!(
     workbench_dom_js,
