@@ -1401,6 +1401,48 @@ fn picker_group_target_cycles_across_available_groups() {
 }
 
 #[test]
+fn picker_group_update_plan_deltas_for_add_remove_and_move() {
+    let mut picker = picker_with_grouped_swimmers(&["frontend", "backend"], None);
+
+    assert_group_delta(&picker, PickerGroupUpdateMode::Add, &["frontend"], &[]);
+    assert_group_delta(&picker, PickerGroupUpdateMode::Remove, &[], &["frontend"]);
+    assert_group_delta(
+        &picker,
+        PickerGroupUpdateMode::Move,
+        &["frontend"],
+        &["backend"],
+    );
+
+    picker.group_edit_target = Some("backend".to_string());
+    assert_group_delta(
+        &picker,
+        PickerGroupUpdateMode::Move,
+        &["backend"],
+        &["frontend"],
+    );
+}
+
+#[test]
+fn picker_group_move_plan_includes_current_group_once_when_missing_from_memberships() {
+    let mut picker = picker_with_grouped_swimmers(&["frontend", "backend"], Some("work"));
+
+    assert_group_delta(
+        &picker,
+        PickerGroupUpdateMode::Move,
+        &["frontend"],
+        &["backend", "work"],
+    );
+
+    picker.entries[0].groups.push("work".to_string());
+    assert_group_delta(
+        &picker,
+        PickerGroupUpdateMode::Move,
+        &["frontend"],
+        &["backend", "work"],
+    );
+}
+
+#[test]
 fn picker_add_selected_entry_to_group_target_updates_api_and_reloads() {
     let api = MockApi::new();
     api.push_update_dir_group_memberships(Ok(DirGroupMembershipUpdateResponse {
@@ -1444,6 +1486,40 @@ fn picker_add_selected_entry_to_group_target_updates_api_and_reloads() {
         api.list_calls(),
         vec![(Some(TEST_REPOS_ROOT.to_string()), true)]
     );
+}
+
+fn picker_with_grouped_swimmers(groups: &[&str], current_group: Option<&str>) -> PickerState {
+    let mut picker = PickerState::new(
+        10,
+        10,
+        dir_response_with_groups(
+            TEST_REPOS_ROOT,
+            &[("swimmers", false)],
+            &["frontend", "backend", "work"],
+        ),
+        true,
+        SpawnTool::Codex,
+        None,
+    );
+    picker.entries[0].groups = groups.iter().map(|group| (*group).to_string()).collect();
+    picker.current_group = current_group.map(str::to_string);
+    picker.selection = PickerSelection::Entry(0);
+    picker
+}
+
+fn assert_group_delta(
+    picker: &PickerState,
+    mode: PickerGroupUpdateMode,
+    add: &[&str],
+    remove: &[&str],
+) {
+    let plan = picker_group_update_plan(picker, mode).expect("group update plan");
+    assert_eq!(plan.delta.add, strings(add));
+    assert_eq!(plan.delta.remove, strings(remove));
+}
+
+fn strings(values: &[&str]) -> Vec<String> {
+    values.iter().map(|value| (*value).to_string()).collect()
 }
 
 #[test]

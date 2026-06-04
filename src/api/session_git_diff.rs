@@ -200,91 +200,207 @@ fn parse_git_diff_file_summaries(
     diff_text: &str,
     truncated: bool,
 ) -> Vec<SessionGitDiffFileSummary> {
-    let mut files = Vec::new();
-    let mut current: Option<SessionGitDiffFileSummary> = None;
-    let mut current_hunk: Option<SessionGitDiffHunkSummary> = None;
-
+    let mut parser = GitDiffSummaryParser::new(source, truncated);
     for line in diff_text.lines() {
-        if line.starts_with("diff --git ") {
-            push_diff_hunk(&mut current, &mut current_hunk);
-            if let Some(file) = current.take() {
-                files.push(file);
-            }
-            current = Some(SessionGitDiffFileSummary {
-                path: parse_diff_git_path(line).unwrap_or_else(|| "unknown".to_string()),
-                old_path: None,
-                source: source.to_string(),
-                change: "modified".to_string(),
-                added_lines: 0,
-                removed_lines: 0,
-                truncated,
-                hunks: Vec::new(),
-            });
-            continue;
-        }
+        parser.apply_line(line);
+    }
+    parser.finish()
+}
 
-        let Some(file) = current.as_mut() else {
-            continue;
-        };
+struct GitDiffSummaryParser<'a> {
+    source: &'a str,
+    truncated: bool,
+    files: Vec<SessionGitDiffFileSummary>,
+    current: Option<SessionGitDiffFileSummary>,
+    current_hunk: Option<SessionGitDiffHunkSummary>,
+}
 
-        if line.starts_with("new file mode ") {
-            file.change = "added".to_string();
-            continue;
+impl<'a> GitDiffSummaryParser<'a> {
+    fn new(source: &'a str, truncated: bool) -> Self {
+        Self {
+            source,
+            truncated,
+            files: Vec::new(),
+            current: None,
+            current_hunk: None,
         }
-        if line.starts_with("deleted file mode ") {
-            file.change = "deleted".to_string();
-            continue;
+    }
+
+    fn apply_line(&mut self, line: &str) {
+        match classify_git_diff_line(line) {
+            GitDiffLine::FileHeader => self.start_file(line),
+            GitDiffLine::NewFileMode => self.set_change("added"),
+            GitDiffLine::DeletedFileMode => self.set_change("deleted"),
+            GitDiffLine::RenameFrom(path) => self.rename_from(path),
+            GitDiffLine::RenameTo(path) => self.rename_to(path),
+            GitDiffLine::NewPath(path) => self.set_new_path(path),
+            GitDiffLine::OldPath(path) => self.set_old_path(path),
+            GitDiffLine::HunkHeader => self.start_hunk(line),
+            GitDiffLine::AddedContent => self.count_added_line(),
+            GitDiffLine::RemovedContent => self.count_removed_line(),
+            GitDiffLine::Other => {}
         }
-        if let Some(path) = line.strip_prefix("rename from ") {
+    }
+
+    fn finish(mut self) -> Vec<SessionGitDiffFileSummary> {
+        self.push_current_file();
+        self.files
+    }
+
+    fn start_file(&mut self, line: &str) {
+        self.push_current_file();
+        self.current = Some(SessionGitDiffFileSummary {
+            path: parse_diff_git_path(line).unwrap_or_else(|| "unknown".to_string()),
+            old_path: None,
+            source: self.source.to_string(),
+            change: "modified".to_string(),
+            added_lines: 0,
+            removed_lines: 0,
+            truncated: self.truncated,
+            hunks: Vec::new(),
+        });
+    }
+
+    fn start_hunk(&mut self, line: &str) {
+        if self.current.is_none() {
+            return;
+        }
+        push_diff_hunk(&mut self.current, &mut self.current_hunk);
+        self.current_hunk = Some(SessionGitDiffHunkSummary {
+            header: line.to_string(),
+            added_lines: 0,
+            removed_lines: 0,
+        });
+    }
+
+    fn push_current_file(&mut self) {
+        push_diff_hunk(&mut self.current, &mut self.current_hunk);
+        if let Some(file) = self.current.take() {
+            self.files.push(file);
+        }
+    }
+
+    fn set_change(&mut self, change: &str) {
+        if let Some(file) = self.current.as_mut() {
+            file.change = change.to_string();
+        }
+    }
+
+    fn rename_from(&mut self, path: &str) {
+        if let Some(file) = self.current.as_mut() {
             file.old_path = Some(path.to_string());
             file.change = "renamed".to_string();
-            continue;
         }
-        if let Some(path) = line.strip_prefix("rename to ") {
+    }
+
+    fn rename_to(&mut self, path: &str) {
+        if let Some(file) = self.current.as_mut() {
             file.path = path.to_string();
             file.change = "renamed".to_string();
-            continue;
         }
-        if let Some(path) = line.strip_prefix("+++ ") {
-            if let Some(path) = normalize_diff_path(path) {
-                file.path = path;
-            }
-            continue;
-        }
-        if let Some(path) = line.strip_prefix("--- ") {
-            if let Some(path) = normalize_diff_path(path) {
-                file.old_path = Some(path);
-            }
-            continue;
-        }
-        if line.starts_with("@@") {
-            push_diff_hunk(&mut current, &mut current_hunk);
-            current_hunk = Some(SessionGitDiffHunkSummary {
-                header: line.to_string(),
-                added_lines: 0,
-                removed_lines: 0,
-            });
-            continue;
-        }
+    }
 
-        if line.starts_with('+') && !line.starts_with("+++") {
+    fn set_new_path(&mut self, path: &str) {
+        let Some(path) = normalize_diff_path(path) else {
+            return;
+        };
+        if let Some(file) = self.current.as_mut() {
+            file.path = path;
+        }
+    }
+
+    fn set_old_path(&mut self, path: &str) {
+        let Some(path) = normalize_diff_path(path) else {
+            return;
+        };
+        if let Some(file) = self.current.as_mut() {
+            file.old_path = Some(path);
+        }
+    }
+
+    fn count_added_line(&mut self) {
+        if let Some(file) = self.current.as_mut() {
             file.added_lines += 1;
-            if let Some(hunk) = current_hunk.as_mut() {
-                hunk.added_lines += 1;
-            }
-        } else if line.starts_with('-') && !line.starts_with("---") {
-            file.removed_lines += 1;
-            if let Some(hunk) = current_hunk.as_mut() {
-                hunk.removed_lines += 1;
-            }
+        }
+        if let Some(hunk) = self.current_hunk.as_mut() {
+            hunk.added_lines += 1;
         }
     }
 
-    push_diff_hunk(&mut current, &mut current_hunk);
-    if let Some(file) = current {
-        files.push(file);
+    fn count_removed_line(&mut self) {
+        if let Some(file) = self.current.as_mut() {
+            file.removed_lines += 1;
+        }
+        if let Some(hunk) = self.current_hunk.as_mut() {
+            hunk.removed_lines += 1;
+        }
     }
-    files
+}
+
+enum GitDiffLine<'a> {
+    FileHeader,
+    NewFileMode,
+    DeletedFileMode,
+    RenameFrom(&'a str),
+    RenameTo(&'a str),
+    NewPath(&'a str),
+    OldPath(&'a str),
+    HunkHeader,
+    AddedContent,
+    RemovedContent,
+    Other,
+}
+
+fn classify_git_diff_line(line: &str) -> GitDiffLine<'_> {
+    if let Some(classified) = classify_git_diff_boundary_line(line) {
+        return classified;
+    }
+    if let Some(classified) = classify_git_diff_path_line(line) {
+        return classified;
+    }
+    classify_git_diff_content_line(line)
+}
+
+fn classify_git_diff_boundary_line(line: &str) -> Option<GitDiffLine<'_>> {
+    if line.starts_with("diff --git ") {
+        return Some(GitDiffLine::FileHeader);
+    }
+    if line.starts_with("new file mode ") {
+        return Some(GitDiffLine::NewFileMode);
+    }
+    if line.starts_with("deleted file mode ") {
+        return Some(GitDiffLine::DeletedFileMode);
+    }
+    if line.starts_with("@@") {
+        return Some(GitDiffLine::HunkHeader);
+    }
+    None
+}
+
+fn classify_git_diff_path_line(line: &str) -> Option<GitDiffLine<'_>> {
+    if let Some(path) = line.strip_prefix("rename from ") {
+        return Some(GitDiffLine::RenameFrom(path));
+    }
+    if let Some(path) = line.strip_prefix("rename to ") {
+        return Some(GitDiffLine::RenameTo(path));
+    }
+    if let Some(path) = line.strip_prefix("+++ ") {
+        return Some(GitDiffLine::NewPath(path));
+    }
+    if let Some(path) = line.strip_prefix("--- ") {
+        return Some(GitDiffLine::OldPath(path));
+    }
+    None
+}
+
+fn classify_git_diff_content_line(line: &str) -> GitDiffLine<'_> {
+    if line.starts_with('+') {
+        return GitDiffLine::AddedContent;
+    }
+    if line.starts_with('-') {
+        return GitDiffLine::RemovedContent;
+    }
+    GitDiffLine::Other
 }
 
 fn push_diff_hunk(
@@ -349,6 +465,136 @@ fn error_response(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn parse_test_diff(diff_text: &str) -> Vec<SessionGitDiffFileSummary> {
+        parse_git_diff_file_summaries("test", diff_text, false)
+    }
+
+    #[test]
+    fn parse_git_diff_file_summaries_handles_renamed_files() {
+        let diff = "diff --git a/old.txt b/new.txt\n\
+            similarity index 88%\n\
+            rename from old.txt\n\
+            rename to new.txt\n\
+            --- a/old.txt\n\
+            +++ b/new.txt\n\
+            @@ -1 +1 @@\n\
+            -old\n\
+            +new\n";
+
+        let files = parse_test_diff(diff);
+
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].path, "new.txt");
+        assert_eq!(files[0].old_path.as_deref(), Some("old.txt"));
+        assert_eq!(files[0].change, "renamed");
+        assert_eq!(files[0].added_lines, 1);
+        assert_eq!(files[0].removed_lines, 1);
+        assert_eq!(files[0].hunks.len(), 1);
+    }
+
+    #[test]
+    fn parse_git_diff_file_summaries_handles_new_and_deleted_files() {
+        let diff = "diff --git a/new.txt b/new.txt\n\
+            new file mode 100644\n\
+            --- /dev/null\n\
+            +++ b/new.txt\n\
+            @@ -0,0 +1,2 @@\n\
+            +one\n\
+            +two\n\
+            diff --git a/deleted.txt b/deleted.txt\n\
+            deleted file mode 100644\n\
+            --- a/deleted.txt\n\
+            +++ /dev/null\n\
+            @@ -1,2 +0,0 @@\n\
+            -one\n\
+            -two\n";
+
+        let files = parse_test_diff(diff);
+
+        assert_eq!(files.len(), 2);
+        assert_eq!(files[0].path, "new.txt");
+        assert_eq!(files[0].old_path, None);
+        assert_eq!(files[0].change, "added");
+        assert_eq!(files[0].added_lines, 2);
+        assert_eq!(files[0].removed_lines, 0);
+
+        assert_eq!(files[1].path, "deleted.txt");
+        assert_eq!(files[1].old_path.as_deref(), Some("deleted.txt"));
+        assert_eq!(files[1].change, "deleted");
+        assert_eq!(files[1].added_lines, 0);
+        assert_eq!(files[1].removed_lines, 2);
+    }
+
+    #[test]
+    fn parse_git_diff_file_summaries_pushes_multiple_hunks_and_counts_lines() {
+        let diff = "diff --git a/file.txt b/file.txt\n\
+            --- a/file.txt\n\
+            +++ b/file.txt\n\
+            @@ -1,2 +1,2 @@\n\
+             context\n\
+            -old\n\
+            +new\n\
+            @@ -8,2 +8,3 @@\n\
+            -gone\n\
+            +added\n\
+            +more\n";
+
+        let files = parse_test_diff(diff);
+
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].added_lines, 3);
+        assert_eq!(files[0].removed_lines, 2);
+        assert_eq!(files[0].hunks.len(), 2);
+        assert_eq!(files[0].hunks[0].header, "@@ -1,2 +1,2 @@");
+        assert_eq!(files[0].hunks[0].added_lines, 1);
+        assert_eq!(files[0].hunks[0].removed_lines, 1);
+        assert_eq!(files[0].hunks[1].header, "@@ -8,2 +8,3 @@");
+        assert_eq!(files[0].hunks[1].added_lines, 2);
+        assert_eq!(files[0].hunks[1].removed_lines, 1);
+    }
+
+    #[test]
+    fn parse_git_diff_file_summaries_excludes_plus_minus_headers_from_counts() {
+        let diff = "diff --git a/file.txt b/file.txt\n\
+            --- a/file.txt\n\
+            +++ b/file.txt\n\
+            @@ -1 +1 @@\n\
+            --- literal removed line\n\
+            +++ literal added line\n\
+            -removed\n\
+            +added\n";
+
+        let files = parse_test_diff(diff);
+
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].added_lines, 1);
+        assert_eq!(files[0].removed_lines, 1);
+        assert_eq!(files[0].hunks[0].added_lines, 1);
+        assert_eq!(files[0].hunks[0].removed_lines, 1);
+    }
+
+    #[test]
+    fn parse_git_diff_file_summaries_stamps_source_and_truncation_per_file() {
+        let diff = "diff --git a/one.txt b/one.txt\n\
+            --- a/one.txt\n\
+            +++ b/one.txt\n\
+            @@ -1 +1 @@\n\
+            -a\n\
+            +b\n\
+            diff --git a/two.txt b/two.txt\n\
+            --- a/two.txt\n\
+            +++ b/two.txt\n\
+            @@ -1 +1 @@\n\
+            -c\n\
+            +d\n";
+
+        let files = parse_git_diff_file_summaries("custom", diff, true);
+
+        assert_eq!(files.len(), 2);
+        assert!(files.iter().all(|file| file.source == "custom"));
+        assert!(files.iter().all(|file| file.truncated));
+    }
 
     #[test]
     fn summarize_git_diff_files_marks_truncation_per_source() {

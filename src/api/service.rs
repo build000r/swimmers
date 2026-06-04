@@ -1128,7 +1128,33 @@ pub async fn update_dir_group_memberships(
     state: Arc<AppState>,
     body: DirGroupMembershipUpdateRequest,
 ) -> Result<DirGroupMembershipUpdateResponse, ApiServiceError> {
-    let store = state.current_file_store().ok_or_else(|| {
+    let preflight = update_dir_group_memberships_preflight(
+        state.current_file_store(),
+        dirs_base_path(),
+        effective_dir_config_for_base,
+    )?;
+
+    update_dir_group_memberships_with_config(
+        preflight.store,
+        &preflight.canonical_base,
+        &preflight.dir_config,
+        body,
+    )
+    .await
+}
+
+struct DirGroupMembershipUpdatePreflight {
+    store: Arc<FileStore>,
+    canonical_base: PathBuf,
+    dir_config: OverlayDirConfig,
+}
+
+fn update_dir_group_memberships_preflight(
+    store: Option<Arc<FileStore>>,
+    base: PathBuf,
+    dir_config_for_base: impl FnOnce(&Path) -> Option<OverlayDirConfig>,
+) -> Result<DirGroupMembershipUpdatePreflight, ApiServiceError> {
+    let store = store.ok_or_else(|| {
         ApiServiceError::new(
             StatusCode::SERVICE_UNAVAILABLE,
             "PERSISTENCE_UNAVAILABLE",
@@ -1136,9 +1162,8 @@ pub async fn update_dir_group_memberships(
         )
     })?;
 
-    let base = dirs_base_path();
-    let canonical_base = base.canonicalize().unwrap_or(base.clone());
-    let dir_config = effective_dir_config_for_base(&canonical_base).ok_or_else(|| {
+    let canonical_base = base.canonicalize().unwrap_or(base);
+    let dir_config = dir_config_for_base(&canonical_base).ok_or_else(|| {
         ApiServiceError::new(
             StatusCode::SERVICE_UNAVAILABLE,
             "OVERLAY_UNAVAILABLE",
@@ -1153,7 +1178,11 @@ pub async fn update_dir_group_memberships(
         ));
     }
 
-    update_dir_group_memberships_with_config(store, &canonical_base, &dir_config, body).await
+    Ok(DirGroupMembershipUpdatePreflight {
+        store,
+        canonical_base,
+        dir_config,
+    })
 }
 
 async fn update_dir_group_memberships_with_config(
@@ -2704,6 +2733,115 @@ mod tests {
             ],
             launch: crate::session::overlay::OverlayLaunchConfig::local_only(),
         }
+    }
+
+    fn empty_group_config(base: &Path) -> OverlayDirConfig {
+        OverlayDirConfig {
+            label: "empty".into(),
+            base_path: base.to_path_buf(),
+            services: Vec::new(),
+            groups: Vec::new(),
+            launch: crate::session::overlay::OverlayLaunchConfig::local_only(),
+        }
+    }
+
+    #[test]
+    fn update_dir_group_memberships_preflight_rejects_missing_store() {
+        let result = update_dir_group_memberships_preflight(None, PathBuf::from("/tmp"), |_| {
+            panic!("dir config lookup should not run without persistence")
+        });
+        let err = match result {
+            Ok(_) => panic!("missing store should fail"),
+            Err(err) => err,
+        };
+
+        assert_eq!(err.status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(err.code, "PERSISTENCE_UNAVAILABLE");
+        assert_eq!(
+            err.message,
+            "directory group edits require file persistence"
+        );
+    }
+
+    #[tokio::test]
+    async fn update_dir_group_memberships_preflight_rejects_missing_overlay() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = FileStore::new(dir.path().join("store"))
+            .await
+            .expect("store");
+
+        let result =
+            update_dir_group_memberships_preflight(Some(store), dir.path().to_path_buf(), |_| None);
+        let err = match result {
+            Ok(_) => panic!("missing overlay should fail"),
+            Err(err) => err,
+        };
+
+        assert_eq!(err.status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(err.code, "OVERLAY_UNAVAILABLE");
+        assert_eq!(
+            err.message,
+            "directory group edits require a configured directory group source"
+        );
+    }
+
+    #[tokio::test]
+    async fn update_dir_group_memberships_preflight_rejects_empty_groups() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = FileStore::new(dir.path().join("store"))
+            .await
+            .expect("store");
+
+        let result = update_dir_group_memberships_preflight(
+            Some(store),
+            dir.path().to_path_buf(),
+            |canonical_base| Some(empty_group_config(canonical_base)),
+        );
+        let err = match result {
+            Ok(_) => panic!("empty groups should fail"),
+            Err(err) => err,
+        };
+
+        assert_eq!(err.status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(err.code, "GROUPS_UNAVAILABLE");
+        assert_eq!(err.message, "no directory groups are configured");
+    }
+
+    #[tokio::test]
+    async fn update_dir_group_memberships_preflight_returns_store_canonical_base_and_config() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let base = dir.path().join("missing-base");
+        let store = FileStore::new(dir.path().join("store"))
+            .await
+            .expect("store");
+        let expected_store = store.clone();
+        let expected_base = base.clone();
+
+        let preflight =
+            update_dir_group_memberships_preflight(Some(store), base, |canonical_base| {
+                assert_eq!(canonical_base, expected_base.as_path());
+                let frontend = canonical_base.join("frontend-app");
+                let backend = canonical_base.join("backend-app");
+                let wildcard_root = canonical_base.join("skills");
+                Some(test_group_config(
+                    canonical_base,
+                    frontend,
+                    backend,
+                    wildcard_root,
+                ))
+            })
+            .expect("preflight");
+
+        assert!(Arc::ptr_eq(&preflight.store, &expected_store));
+        assert_eq!(preflight.canonical_base, expected_base);
+        assert_eq!(
+            dir_groups(Some(&preflight.dir_config)),
+            vec![
+                "frontend".to_string(),
+                "backend".to_string(),
+                "skills".to_string()
+            ]
+        );
     }
 
     #[tokio::test]

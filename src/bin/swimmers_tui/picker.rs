@@ -166,18 +166,25 @@ fn picker_group_move_removals(
     memberships: &[String],
     current_group: Option<&str>,
 ) -> Vec<String> {
-    let mut remove = memberships
-        .iter()
-        .filter(|group| group.as_str() != target)
-        .cloned()
-        .collect::<Vec<_>>();
-    if let Some(current) = current_group {
-        let removes_current = remove.iter().any(|group| group == current);
-        if current != target && !removes_current {
-            remove.push(current.to_string());
-        }
+    let mut remove = picker_groups_except(memberships, target);
+    if let Some(current) = current_group.filter(|current| *current != target) {
+        push_group_once(&mut remove, current);
     }
     remove
+}
+
+fn picker_groups_except(groups: &[String], excluded: &str) -> Vec<String> {
+    groups
+        .iter()
+        .filter(|group| group.as_str() != excluded)
+        .cloned()
+        .collect()
+}
+
+fn push_group_once(groups: &mut Vec<String>, group: &str) {
+    if !groups.iter().any(|existing| existing == group) {
+        groups.push(group.to_string());
+    }
 }
 
 impl PickerState {
