@@ -182,22 +182,50 @@ impl RepoActionTracker {
         kind: RepoActionKind,
         executor: Arc<dyn RepoActionExecutor>,
     ) -> io::Result<()> {
-        let repo_root = repo_root.canonicalize().unwrap_or(repo_root);
+        let repo_root = self.reserve_running_action(repo_root, kind).await?;
+        self.spawn_tracked_action(repo_root, kind, executor);
+
+        Ok(())
+    }
+
+    async fn reserve_running_action(
+        &self,
+        repo_root: PathBuf,
+        kind: RepoActionKind,
+    ) -> io::Result<PathBuf> {
+        let repo_root = canonical_repo_key(repo_root);
         let mut inner = self.inner.write().await;
         Self::prune_locked(&mut inner);
-        if inner
-            .get(&repo_root)
+        Self::reject_running_locked(&inner, &repo_root)?;
+        Self::insert_running_locked(&mut inner, repo_root.clone(), kind);
+        Ok(repo_root)
+    }
+
+    fn reject_running_locked(
+        inner: &HashMap<PathBuf, RepoActionRecord>,
+        repo_root: &Path,
+    ) -> io::Result<()> {
+        if !inner
+            .get(repo_root)
             .map(|record| record.status.state == RepoActionState::Running)
             .unwrap_or(false)
         {
-            return Err(io::Error::new(
-                io::ErrorKind::AlreadyExists,
-                format!("repo action already running for {}", repo_root.display()),
-            ));
+            return Ok(());
         }
 
+        Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            format!("repo action already running for {}", repo_root.display()),
+        ))
+    }
+
+    fn insert_running_locked(
+        inner: &mut HashMap<PathBuf, RepoActionRecord>,
+        repo_root: PathBuf,
+        kind: RepoActionKind,
+    ) {
         inner.insert(
-            repo_root.clone(),
+            repo_root,
             RepoActionRecord {
                 status: RepoActionStatus {
                     kind,
@@ -207,33 +235,24 @@ impl RepoActionTracker {
                 finished_at: None,
             },
         );
-        drop(inner);
+    }
 
+    fn spawn_tracked_action(
+        &self,
+        repo_root: PathBuf,
+        kind: RepoActionKind,
+        executor: Arc<dyn RepoActionExecutor>,
+    ) {
         let tracker = self.clone();
         tokio::spawn(async move {
-            let repo_root_for_exec = repo_root.clone();
-            let result =
-                tokio::task::spawn_blocking(move || executor.execute(repo_root_for_exec, kind))
-                    .await;
-
-            let (state, detail) = match result {
-                Ok(Ok(detail)) => (RepoActionState::Succeeded, detail),
-                Ok(Err(err)) => (RepoActionState::Failed, Some(err.to_string())),
-                Err(err) => (
-                    RepoActionState::Failed,
-                    Some(format!("repo action task failed: {err}")),
-                ),
-            };
+            let result = execute_repo_action_blocking(repo_root.clone(), kind, executor).await;
+            let (state, detail) = repo_action_status_from_result(result);
             tracker.finish(repo_root, kind, state, detail).await;
         });
-
-        Ok(())
     }
 
     pub async fn status_for(&self, repo_root: &Path) -> Option<RepoActionStatus> {
-        let repo_root = repo_root
-            .canonicalize()
-            .unwrap_or_else(|_| repo_root.to_path_buf());
+        let repo_root = canonical_repo_key(repo_root.to_path_buf());
         // Read lock only — `list_dirs` calls this once per entry via
         // `buffered(GIT_PROBE_CONCURRENCY)`, and a write lock here would
         // serialize every probe across every concurrent picker request.
@@ -282,6 +301,31 @@ impl RepoActionTracker {
                     .map(|finished_at| finished_at.elapsed() < REPO_ACTION_STATUS_TTL)
                     .unwrap_or(false)
         });
+    }
+}
+
+fn canonical_repo_key(repo_root: PathBuf) -> PathBuf {
+    repo_root.canonicalize().unwrap_or(repo_root)
+}
+
+async fn execute_repo_action_blocking(
+    repo_root: PathBuf,
+    kind: RepoActionKind,
+    executor: Arc<dyn RepoActionExecutor>,
+) -> Result<io::Result<Option<String>>, tokio::task::JoinError> {
+    tokio::task::spawn_blocking(move || executor.execute(repo_root, kind)).await
+}
+
+fn repo_action_status_from_result(
+    result: Result<io::Result<Option<String>>, tokio::task::JoinError>,
+) -> (RepoActionState, Option<String>) {
+    match result {
+        Ok(Ok(detail)) => (RepoActionState::Succeeded, detail),
+        Ok(Err(err)) => (RepoActionState::Failed, Some(err.to_string())),
+        Err(err) => (
+            RepoActionState::Failed,
+            Some(format!("repo action task failed: {err}")),
+        ),
     }
 }
 
@@ -770,6 +814,7 @@ mod tests {
     use chrono::Utc;
     use std::ffi::OsString;
     use std::os::unix::fs::PermissionsExt;
+    use std::sync::{mpsc, Mutex};
     use tempfile::tempdir;
 
     use super::*;
@@ -851,6 +896,285 @@ mod tests {
             .expect("git init");
         assert!(status.success(), "git init should succeed");
         fs::write(path.join("README.md"), "dirty\n").expect("write readme");
+    }
+
+    struct BlockingRepoActionExecutor {
+        calls: Mutex<Vec<(PathBuf, RepoActionKind)>>,
+        release_rx: Mutex<mpsc::Receiver<()>>,
+    }
+
+    impl BlockingRepoActionExecutor {
+        fn new() -> (Arc<Self>, mpsc::Sender<()>) {
+            let (release_tx, release_rx) = mpsc::channel();
+            (
+                Arc::new(Self {
+                    calls: Mutex::new(Vec::new()),
+                    release_rx: Mutex::new(release_rx),
+                }),
+                release_tx,
+            )
+        }
+
+        fn calls(&self) -> Vec<(PathBuf, RepoActionKind)> {
+            self.calls.lock().expect("calls lock").clone()
+        }
+    }
+
+    impl RepoActionExecutor for BlockingRepoActionExecutor {
+        fn execute(&self, repo_root: PathBuf, kind: RepoActionKind) -> io::Result<Option<String>> {
+            self.calls
+                .lock()
+                .expect("calls lock")
+                .push((repo_root, kind));
+            self.release_rx
+                .lock()
+                .expect("release lock")
+                .recv()
+                .expect("release signal");
+            Ok(Some("done".to_string()))
+        }
+    }
+
+    struct StaticRepoActionExecutor {
+        result: Mutex<Option<io::Result<Option<String>>>>,
+    }
+
+    impl StaticRepoActionExecutor {
+        fn new(result: io::Result<Option<String>>) -> Arc<Self> {
+            Arc::new(Self {
+                result: Mutex::new(Some(result)),
+            })
+        }
+    }
+
+    impl RepoActionExecutor for StaticRepoActionExecutor {
+        fn execute(
+            &self,
+            _repo_root: PathBuf,
+            _kind: RepoActionKind,
+        ) -> io::Result<Option<String>> {
+            self.result
+                .lock()
+                .expect("result lock")
+                .take()
+                .expect("executor result")
+        }
+    }
+
+    struct PanicRepoActionExecutor;
+
+    impl RepoActionExecutor for PanicRepoActionExecutor {
+        fn execute(
+            &self,
+            _repo_root: PathBuf,
+            _kind: RepoActionKind,
+        ) -> io::Result<Option<String>> {
+            panic!("executor panic")
+        }
+    }
+
+    fn dyn_repo_action_executor<T>(executor: Arc<T>) -> Arc<dyn RepoActionExecutor>
+    where
+        T: RepoActionExecutor + 'static,
+    {
+        executor
+    }
+
+    async fn wait_for_repo_action_state(
+        tracker: &RepoActionTracker,
+        repo_root: &Path,
+        expected_state: RepoActionState,
+    ) -> RepoActionStatus {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            if let Some(status) = tracker.status_for(repo_root).await {
+                if status.state == expected_state {
+                    return status;
+                }
+            }
+            assert!(
+                Instant::now() < deadline,
+                "repo action did not reach {expected_state:?}"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn repo_action_tracker_uses_canonical_key_and_rejects_duplicate_running() {
+        let temp = tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        let child = repo.join("child");
+        fs::create_dir_all(&child).expect("repo dirs");
+        let noncanonical_repo = child.join("..");
+        let canonical_repo = repo.canonicalize().expect("canonical repo");
+        let tracker = RepoActionTracker::new();
+        let (executor, release_tx) = BlockingRepoActionExecutor::new();
+
+        tracker
+            .start(
+                noncanonical_repo,
+                RepoActionKind::Restart,
+                dyn_repo_action_executor(executor.clone()),
+            )
+            .await
+            .expect("start action");
+
+        let running = tracker
+            .status_for(&repo)
+            .await
+            .expect("running status should be visible");
+        assert_eq!(running.kind, RepoActionKind::Restart);
+        assert_eq!(running.state, RepoActionState::Running);
+        assert_eq!(running.detail, None);
+
+        let duplicate_err = tracker
+            .start(
+                repo.clone(),
+                RepoActionKind::Restart,
+                dyn_repo_action_executor(executor.clone()),
+            )
+            .await
+            .expect_err("duplicate running action should be rejected");
+        assert_eq!(duplicate_err.kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(
+            duplicate_err.to_string(),
+            format!(
+                "repo action already running for {}",
+                canonical_repo.display()
+            )
+        );
+
+        let lock_result = tokio::time::timeout(Duration::from_millis(200), tracker.inner.write())
+            .await
+            .expect("start should release the write lock while executor is running");
+        drop(lock_result);
+
+        release_tx.send(()).expect("release executor");
+        let finished =
+            wait_for_repo_action_state(&tracker, &repo, RepoActionState::Succeeded).await;
+        assert_eq!(finished.kind, RepoActionKind::Restart);
+        assert_eq!(finished.detail, Some("done".to_string()));
+        assert_eq!(
+            executor.calls(),
+            vec![(canonical_repo, RepoActionKind::Restart)]
+        );
+    }
+
+    #[tokio::test]
+    async fn repo_action_tracker_maps_executor_success_detail() {
+        let temp = tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).expect("repo dir");
+        let tracker = RepoActionTracker::new();
+
+        tracker
+            .start(
+                repo.clone(),
+                RepoActionKind::Commit,
+                StaticRepoActionExecutor::new(Ok(Some(
+                    "commit grok: tmux a -t commit-repo-1".to_string(),
+                ))),
+            )
+            .await
+            .expect("start action");
+
+        let status = wait_for_repo_action_state(&tracker, &repo, RepoActionState::Succeeded).await;
+        assert_eq!(status.kind, RepoActionKind::Commit);
+        assert_eq!(
+            status.detail,
+            Some("commit grok: tmux a -t commit-repo-1".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn repo_action_tracker_maps_executor_error_detail() {
+        let temp = tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).expect("repo dir");
+        let tracker = RepoActionTracker::new();
+
+        tracker
+            .start(
+                repo.clone(),
+                RepoActionKind::Commit,
+                StaticRepoActionExecutor::new(Err(io::Error::other("executor failed"))),
+            )
+            .await
+            .expect("start action");
+
+        let status = wait_for_repo_action_state(&tracker, &repo, RepoActionState::Failed).await;
+        assert_eq!(status.kind, RepoActionKind::Commit);
+        assert_eq!(status.detail, Some("executor failed".to_string()));
+    }
+
+    #[tokio::test]
+    async fn repo_action_tracker_maps_spawn_blocking_join_error_detail() {
+        let temp = tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).expect("repo dir");
+        let tracker = RepoActionTracker::new();
+
+        tracker
+            .start(
+                repo.clone(),
+                RepoActionKind::Commit,
+                Arc::new(PanicRepoActionExecutor),
+            )
+            .await
+            .expect("start action");
+
+        let status = wait_for_repo_action_state(&tracker, &repo, RepoActionState::Failed).await;
+        assert_eq!(status.kind, RepoActionKind::Commit);
+        let detail = status.detail.expect("failure detail");
+        assert!(
+            detail.starts_with("repo action task failed: "),
+            "unexpected detail: {detail}"
+        );
+        assert!(detail.contains("panicked"), "unexpected detail: {detail}");
+    }
+
+    #[tokio::test]
+    async fn repo_action_tracker_prunes_expired_finished_records_on_start() {
+        let temp = tempdir().expect("tempdir");
+        let stale_repo = temp.path().join("stale");
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&stale_repo).expect("stale repo dir");
+        fs::create_dir_all(&repo).expect("repo dir");
+        let stale_repo = stale_repo.canonicalize().expect("canonical stale repo");
+        let tracker = RepoActionTracker::new();
+        {
+            let mut inner = tracker.inner.write().await;
+            inner.insert(
+                stale_repo.clone(),
+                RepoActionRecord {
+                    status: RepoActionStatus {
+                        kind: RepoActionKind::Commit,
+                        state: RepoActionState::Succeeded,
+                        detail: Some("old detail".to_string()),
+                    },
+                    finished_at: Some(
+                        Instant::now() - REPO_ACTION_STATUS_TTL - Duration::from_secs(1),
+                    ),
+                },
+            );
+        }
+
+        tracker
+            .start(
+                repo.clone(),
+                RepoActionKind::Restart,
+                StaticRepoActionExecutor::new(Ok(None)),
+            )
+            .await
+            .expect("start action");
+        wait_for_repo_action_state(&tracker, &repo, RepoActionState::Succeeded).await;
+
+        let inner = tracker.inner.read().await;
+        assert!(
+            !inner.contains_key(&stale_repo),
+            "start should prune expired finished repo action records"
+        );
     }
 
     #[test]

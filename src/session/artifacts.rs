@@ -11,6 +11,7 @@ use crate::session::overlay::default_overlay;
 pub const MERMAID_SOURCE_MAX_BYTES: u64 = 64 * 1024;
 pub const VIEWER_TEXT_MAX_BYTES: u64 = 128 * 1024;
 pub const MERMAID_SCAN_MAX_FILES: usize = 512;
+const SCHEMA_MMD_FILENAME: &str = "schema.mmd";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ArtifactKind {
@@ -266,31 +267,40 @@ fn compare_mermaid_candidates(left: &MermaidCandidate, right: &MermaidCandidate)
 }
 
 pub fn extract_mmd_slice_name(path: &str) -> Option<&str> {
-    // Pattern 1: plans/{released|draft}/{slice}/schema.mmd (original)
     let parts: Vec<&str> = path.split('/').collect();
-    for window in parts.windows(4) {
-        if window[0] == "plans"
-            && (window[1] == "released" || window[1] == "draft")
-            && window[3] == "schema.mmd"
-        {
-            return Some(window[2]);
-        }
-    }
+    extract_schema_slice_from_plans_dir(&parts)
+        .or_else(|| extract_schema_slice_from_status_dir(&parts))
+        .or_else(|| extract_schema_slice_from_plan_siblings(path))
+}
 
-    // Pattern 2: any {parent}/{released|draft|planned}/{slice}/schema.mmd
-    for window in parts.windows(4) {
-        if matches!(window[1], "released" | "draft" | "planned") && window[3] == "schema.mmd" {
-            return Some(window[2]);
-        }
-    }
+fn extract_schema_slice_from_plans_dir<'a>(parts: &[&'a str]) -> Option<&'a str> {
+    extract_slice_from_schema_windows(parts, |window| {
+        window[0] == "plans" && matches!(window[1], "released" | "draft")
+    })
+}
 
-    // Pattern 3: schema.mmd with plan siblings — use parent dir name
-    let p = Path::new(path);
-    if p.file_name()?.to_str()? == "schema.mmd" && has_plan_siblings(p) {
-        return p.parent()?.file_name()?.to_str();
-    }
+fn extract_schema_slice_from_status_dir<'a>(parts: &[&'a str]) -> Option<&'a str> {
+    extract_slice_from_schema_windows(parts, |window| {
+        matches!(window[1], "released" | "draft" | "planned")
+    })
+}
 
-    None
+fn extract_slice_from_schema_windows<'a>(
+    parts: &[&'a str],
+    matches_window: impl Fn(&[&'a str]) -> bool,
+) -> Option<&'a str> {
+    parts
+        .windows(4)
+        .find(|window| window[3] == SCHEMA_MMD_FILENAME && matches_window(window))
+        .map(|window| window[2])
+}
+
+fn extract_schema_slice_from_plan_siblings(path: &str) -> Option<&str> {
+    let path = Path::new(path);
+    if path.file_name()?.to_str()? != SCHEMA_MMD_FILENAME || !has_plan_siblings(path) {
+        return None;
+    }
+    path.parent()?.file_name()?.to_str()
 }
 
 pub const PLAN_SIBLING_FILENAMES: &[&str] = &[
@@ -498,39 +508,79 @@ mod tests {
     }
 
     #[test]
-    fn extract_slice_name_from_released_plan_path() {
+    fn extract_slice_name_matches_schema_path_patterns() {
+        let cases = [
+            (
+                "plans released",
+                "/home/user/skillbox-config/clients/personal/plans/released/journal_to_cm/schema.mmd",
+                Some("journal_to_cm"),
+            ),
+            (
+                "plans draft",
+                "/home/user/skillbox-config/clients/personal/plans/draft/persistence_topology/schema.mmd",
+                Some("persistence_topology"),
+            ),
+            (
+                "arbitrary released parent",
+                "/home/user/repos/project/releases/released/customer_sync/schema.mmd",
+                Some("customer_sync"),
+            ),
+            (
+                "arbitrary draft parent",
+                "/home/user/repos/project/planning/draft/checkout_flow/schema.mmd",
+                Some("checkout_flow"),
+            ),
+            (
+                "arbitrary planned parent",
+                "/home/user/repos/project/src/data/db-schemas/planned/agent_billing/schema.mmd",
+                Some("agent_billing"),
+            ),
+            (
+                "non-schema filename under plans",
+                "/home/user/repos/project/plans/released/customer_sync/diagram.mmd",
+                None,
+            ),
+            (
+                "non-schema filename under arbitrary parent",
+                "/home/user/repos/project/planning/draft/checkout_flow/diagram.mmd",
+                None,
+            ),
+            ("short plans path", "plans/released/schema.mmd", None),
+            ("short status path", "planned/agent_billing/schema.mmd", None),
+            (
+                "schema outside known paths",
+                "clients/personal/skills/domain-planner/assets/templates/schema.mmd",
+                None,
+            ),
+            ("no-match mmd", "/some/repo/docs/architecture.mmd", None),
+        ];
+
+        for (label, path, expected) in cases {
+            assert_eq!(super::extract_mmd_slice_name(path), expected, "{label}");
+        }
+    }
+
+    #[test]
+    fn extract_slice_name_prefers_plans_pattern_before_status_pattern() {
         let path =
-            "/home/user/skillbox-config/clients/personal/plans/released/journal_to_cm/schema.mmd";
-        assert_eq!(super::extract_mmd_slice_name(path), Some("journal_to_cm"));
+            "/repo/released/status_first/schema.mmd/archive/plans/draft/plans_first/schema.mmd";
+        assert_eq!(super::extract_mmd_slice_name(path), Some("plans_first"));
     }
 
     #[test]
-    fn extract_slice_name_from_draft_plan_path() {
-        let path = "/home/user/skillbox-config/clients/personal/plans/draft/persistence_topology/schema.mmd";
-        assert_eq!(
-            super::extract_mmd_slice_name(path),
-            Some("persistence_topology")
+    fn extract_slice_name_returns_slice_borrowed_from_input_path() {
+        let path = String::from(
+            "/home/user/skillbox-config/clients/personal/plans/released/owned_slice/schema.mmd",
         );
-    }
+        let slice = super::extract_mmd_slice_name(&path).expect("slice name");
+        let base = path.as_ptr() as usize;
+        let slice_start = slice.as_ptr() as usize;
 
-    #[test]
-    fn extract_slice_name_returns_none_for_non_plan_mmd() {
+        assert_eq!(slice, "owned_slice");
         assert_eq!(
-            super::extract_mmd_slice_name("/some/repo/docs/architecture.mmd"),
-            None
+            slice_start.checked_sub(base),
+            Some(path.find("owned_slice").expect("slice offset"))
         );
-    }
-
-    #[test]
-    fn extract_slice_name_returns_none_for_template_schema() {
-        let path = "clients/personal/skills/domain-planner/assets/templates/schema.mmd";
-        assert_eq!(super::extract_mmd_slice_name(path), None);
-    }
-
-    #[test]
-    fn extract_slice_name_from_planned_path() {
-        let path = "/home/user/repos/project/src/data/db-schemas/planned/agent_billing/schema.mmd";
-        assert_eq!(super::extract_mmd_slice_name(path), Some("agent_billing"));
     }
 
     #[test]
