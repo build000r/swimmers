@@ -18,7 +18,7 @@ use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
 use crate::thought::protocol::ThoughtDeliveryState;
-use crate::thought::runtime_config::ThoughtConfig;
+use crate::thought::runtime_config::{ThoughtConfig, ThoughtConfigValidationError};
 use crate::types::{
     ActionCue, DirGroupMemberships, RestState, SessionBatchMembership, SessionState, ThoughtSource,
     ThoughtState,
@@ -207,6 +207,15 @@ enum FileStoreIoError {
 struct ChecksummedPayload {
     checksum_crc32: u32,
     payload: String,
+}
+
+#[derive(Debug)]
+enum ThoughtConfigLoadOutcome {
+    Loaded(ThoughtConfig),
+    Missing,
+    DecodeFailed(serde_json::Error),
+    Invalid(ThoughtConfigValidationError),
+    ReadFailed(anyhow::Error),
 }
 
 impl FileStore {
@@ -745,54 +754,77 @@ impl FileStore {
 
     /// Load daemon runtime thought config from disk (default on missing/corrupt).
     async fn load_thought_config_from_disk(&self) -> ThoughtConfig {
-        let path = self.thought_config_path();
-        match read_file_blocking(path).await {
-            Ok(Some(data)) => match serde_json::from_str::<ThoughtConfig>(&data) {
-                Ok(config) => match config.normalize_and_validate() {
-                    Ok(config) => {
-                        self.record_load_success(OP_THOUGHT_CONFIG, 1);
-                        config
-                    }
-                    Err(e) => {
-                        self.record_load_failure(
-                            OP_THOUGHT_CONFIG,
-                            PersistenceLoadStatus::Invalid,
-                            &e,
-                        );
-                        warn!("invalid thought config file, using defaults: {e}");
-                        ThoughtConfig::default()
-                    }
-                },
-                Err(e) => {
-                    self.record_load_failure(
-                        OP_THOUGHT_CONFIG,
-                        PersistenceLoadStatus::DecodeFailed,
-                        &e,
-                    );
-                    warn!("corrupt thought config file, using defaults: {e}");
-                    ThoughtConfig::default()
-                }
-            },
-            Ok(None) => {
-                self.record_load_missing(OP_THOUGHT_CONFIG);
-                ThoughtConfig::default()
-            }
-            Err(e) => {
-                self.record_load_failure(
-                    OP_THOUGHT_CONFIG,
-                    load_failure_status(&e),
-                    format!("{e:#}"),
-                );
-                warn!("failed to read thought config file, using defaults: {e}");
-                ThoughtConfig::default()
-            }
+        self.finish_thought_config_load(read_thought_config_file(self.thought_config_path()).await)
+    }
+
+    fn finish_thought_config_load(&self, outcome: ThoughtConfigLoadOutcome) -> ThoughtConfig {
+        match outcome {
+            ThoughtConfigLoadOutcome::Loaded(config) => self.loaded_thought_config(config),
+            ThoughtConfigLoadOutcome::Missing => self.missing_thought_config(),
+            ThoughtConfigLoadOutcome::DecodeFailed(err) => self.decode_failed_thought_config(err),
+            ThoughtConfigLoadOutcome::Invalid(err) => self.invalid_thought_config(err),
+            ThoughtConfigLoadOutcome::ReadFailed(err) => self.read_failed_thought_config(err),
         }
+    }
+
+    fn loaded_thought_config(&self, config: ThoughtConfig) -> ThoughtConfig {
+        self.record_load_success(OP_THOUGHT_CONFIG, 1);
+        config
+    }
+
+    fn missing_thought_config(&self) -> ThoughtConfig {
+        self.record_load_missing(OP_THOUGHT_CONFIG);
+        ThoughtConfig::default()
+    }
+
+    fn decode_failed_thought_config(&self, err: serde_json::Error) -> ThoughtConfig {
+        self.record_load_failure(OP_THOUGHT_CONFIG, PersistenceLoadStatus::DecodeFailed, &err);
+        warn!("corrupt thought config file, using defaults: {err}");
+        ThoughtConfig::default()
+    }
+
+    fn invalid_thought_config(&self, err: ThoughtConfigValidationError) -> ThoughtConfig {
+        self.record_load_failure(OP_THOUGHT_CONFIG, PersistenceLoadStatus::Invalid, &err);
+        warn!("invalid thought config file, using defaults: {err}");
+        ThoughtConfig::default()
+    }
+
+    fn read_failed_thought_config(&self, err: anyhow::Error) -> ThoughtConfig {
+        self.record_load_failure(
+            OP_THOUGHT_CONFIG,
+            load_failure_status(&err),
+            format!("{err:#}"),
+        );
+        warn!("failed to read thought config file, using defaults: {err}");
+        ThoughtConfig::default()
     }
 }
 
 // ---------------------------------------------------------------------------
 // Blocking I/O helpers (run inside spawn_blocking)
 // ---------------------------------------------------------------------------
+
+async fn read_thought_config_file(path: PathBuf) -> ThoughtConfigLoadOutcome {
+    match read_file_blocking(path).await {
+        Ok(Some(data)) => decode_thought_config_payload(&data),
+        Ok(None) => ThoughtConfigLoadOutcome::Missing,
+        Err(err) => ThoughtConfigLoadOutcome::ReadFailed(err),
+    }
+}
+
+fn decode_thought_config_payload(data: &str) -> ThoughtConfigLoadOutcome {
+    match serde_json::from_str::<ThoughtConfig>(data) {
+        Ok(config) => normalize_thought_config_load(config),
+        Err(err) => ThoughtConfigLoadOutcome::DecodeFailed(err),
+    }
+}
+
+fn normalize_thought_config_load(config: ThoughtConfig) -> ThoughtConfigLoadOutcome {
+    match config.normalize_and_validate() {
+        Ok(config) => ThoughtConfigLoadOutcome::Loaded(config),
+        Err(err) => ThoughtConfigLoadOutcome::Invalid(err),
+    }
+}
 
 fn load_failure_status(error: &anyhow::Error) -> PersistenceLoadStatus {
     match error.downcast_ref::<FileStoreIoError>() {
@@ -1145,6 +1177,105 @@ mod tests {
             corrupt.last_failed_operation.as_deref(),
             Some(OP_SESSION_REGISTRY)
         );
+    }
+
+    #[tokio::test]
+    async fn thought_config_missing_load_uses_default_and_records_missing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = FileStore::new(dir.path()).await.expect("store");
+
+        assert_eq!(store.load_thought_config().await, ThoughtConfig::default());
+        let health = store.health_snapshot();
+        assert!(health.ok);
+        assert_eq!(
+            health.load_outcomes[OP_THOUGHT_CONFIG].status,
+            PersistenceLoadStatus::Missing
+        );
+        assert_eq!(health.load_outcomes[OP_THOUGHT_CONFIG].records, Some(0));
+    }
+
+    #[tokio::test]
+    async fn thought_config_valid_load_normalizes_payload_and_records_success() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let raw_config = ThoughtConfig {
+            backend: "grok-cli".to_string(),
+            model: "local-model".to_string(),
+            agent_prompt: Some(String::new()),
+            ..ThoughtConfig::default()
+        };
+        tokio::fs::write(
+            dir.path().join("thought_config.json"),
+            serde_json::to_string(&raw_config).expect("serialize thought config"),
+        )
+        .await
+        .expect("write thought config");
+
+        let store = FileStore::new(dir.path()).await.expect("store");
+        let loaded = store.load_thought_config().await;
+
+        assert_eq!(loaded.backend, "grok");
+        assert_eq!(loaded.model, "local-model");
+        assert_eq!(loaded.agent_prompt, None);
+        let health = store.health_snapshot();
+        assert!(health.ok);
+        assert_eq!(
+            health.load_outcomes[OP_THOUGHT_CONFIG].status,
+            PersistenceLoadStatus::Loaded
+        );
+        assert_eq!(health.load_outcomes[OP_THOUGHT_CONFIG].records, Some(1));
+    }
+
+    #[tokio::test]
+    async fn thought_config_invalid_load_uses_default_and_records_invalid() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let invalid_config = ThoughtConfig {
+            cadence_hot_ms: 1,
+            ..ThoughtConfig::default()
+        };
+        tokio::fs::write(
+            dir.path().join("thought_config.json"),
+            serde_json::to_string(&invalid_config).expect("serialize thought config"),
+        )
+        .await
+        .expect("write invalid thought config");
+
+        let store = FileStore::new(dir.path())
+            .await
+            .expect("store initializes with invalid thought config");
+        let health = store.health_snapshot();
+
+        assert_eq!(store.load_thought_config().await, ThoughtConfig::default());
+        assert!(!health.ok);
+        assert_eq!(
+            health.load_outcomes[OP_THOUGHT_CONFIG].status,
+            PersistenceLoadStatus::Invalid
+        );
+        assert!(health.load_outcomes[OP_THOUGHT_CONFIG]
+            .last_error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("cadence_hot_ms"));
+    }
+
+    #[tokio::test]
+    async fn thought_config_corrupt_load_uses_default_and_records_decode_failed() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        tokio::fs::write(dir.path().join("thought_config.json"), "{not json")
+            .await
+            .expect("write corrupt thought config");
+
+        let store = FileStore::new(dir.path())
+            .await
+            .expect("store initializes with corrupt thought config");
+        let health = store.health_snapshot();
+
+        assert_eq!(store.load_thought_config().await, ThoughtConfig::default());
+        assert!(!health.ok);
+        assert_eq!(
+            health.load_outcomes[OP_THOUGHT_CONFIG].status,
+            PersistenceLoadStatus::DecodeFailed
+        );
+        assert!(health.load_outcomes[OP_THOUGHT_CONFIG].last_error.is_some());
     }
 
     #[tokio::test]
