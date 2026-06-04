@@ -354,102 +354,102 @@ pub fn list_group_entries_sync(group: &OverlayDirGroup) -> Vec<DirEntry> {
     let mut entries: Vec<(DirEntry, u64)> = Vec::new();
 
     for entry_path in &group.paths {
-        let Some(name) = entry_path
-            .file_name()
-            .map(|name| name.to_string_lossy().into_owned())
-        else {
-            continue;
-        };
-        if name.starts_with('.') || !seen.insert(name.clone()) {
-            continue;
+        if let Some(entry) = group_path_entry(entry_path, &mut seen) {
+            entries.push(entry);
         }
-
-        let full_path = entry_path
-            .canonicalize()
-            .unwrap_or_else(|_| entry_path.clone())
-            .to_string_lossy()
-            .into_owned();
-
-        entries.push((
-            DirEntry {
-                name,
-                has_children: false,
-                is_running: None,
-                repo_dirty: None,
-                repo_action: None,
-                group: None,
-                groups: Vec::new(),
-                full_path: Some(full_path),
-                has_restart: None,
-                open_url: None,
-            },
-            modified_secs(entry_path),
-        ));
     }
 
     for source_dir in &group.dirs {
-        let Ok(read_dir) = std::fs::read_dir(source_dir) else {
-            continue;
-        };
-        for entry in read_dir.flatten() {
-            let Ok(file_type) = entry.file_type() else {
-                continue;
-            };
-            if !file_type.is_dir() {
-                continue;
-            }
-            let name = entry.file_name().to_string_lossy().into_owned();
-            if name.starts_with('.') {
-                continue;
-            }
-            if !seen.insert(name.clone()) {
-                continue;
-            }
-
-            let entry_path = entry.path();
-            let has_children = std::fs::read_dir(&entry_path)
-                .map(|rd| {
-                    rd.flatten().any(|child| {
-                        child.file_type().map(|ft| ft.is_dir()).unwrap_or(false)
-                            && !child.file_name().to_string_lossy().starts_with('.')
-                    })
-                })
-                .unwrap_or(false);
-
-            let modified_at = entry
-                .metadata()
-                .ok()
-                .and_then(|meta| meta.modified().ok())
-                .and_then(|modified| modified.duration_since(UNIX_EPOCH).ok())
-                .map(|duration| duration.as_secs())
-                .unwrap_or(0);
-
-            let full_path = entry_path
-                .canonicalize()
-                .unwrap_or(entry_path)
-                .to_string_lossy()
-                .into_owned();
-
-            entries.push((
-                DirEntry {
-                    name,
-                    has_children,
-                    is_running: None,
-                    repo_dirty: None,
-                    repo_action: None,
-                    group: None,
-                    groups: Vec::new(),
-                    full_path: Some(full_path),
-                    has_restart: None,
-                    open_url: None,
-                },
-                modified_at,
-            ));
-        }
+        append_source_dir_entries(source_dir, &mut seen, &mut entries);
     }
 
-    entries.sort_by(|(a, _), (b, _)| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    sort_group_entries(&mut entries);
     entries.into_iter().map(|(entry, _)| entry).collect()
+}
+
+fn group_path_entry(entry_path: &Path, seen: &mut BTreeSet<String>) -> Option<(DirEntry, u64)> {
+    let name = visible_file_name(entry_path)?;
+    seen.insert(name.clone()).then(|| {
+        (
+            group_dir_entry(name, false, Some(canonical_path_string(entry_path))),
+            modified_secs(entry_path),
+        )
+    })
+}
+
+fn append_source_dir_entries(
+    source_dir: &Path,
+    seen: &mut BTreeSet<String>,
+    entries: &mut Vec<(DirEntry, u64)>,
+) {
+    let Ok(read_dir) = std::fs::read_dir(source_dir) else {
+        return;
+    };
+
+    entries.extend(
+        read_dir
+            .flatten()
+            .filter_map(|entry| source_dir_child_entry(entry, seen)),
+    );
+}
+
+fn source_dir_child_entry(
+    entry: std::fs::DirEntry,
+    seen: &mut BTreeSet<String>,
+) -> Option<(DirEntry, u64)> {
+    if !entry.file_type().ok()?.is_dir() {
+        return None;
+    }
+
+    let name = entry.file_name().to_string_lossy().into_owned();
+    if name.starts_with('.') || !seen.insert(name.clone()) {
+        return None;
+    }
+
+    let entry_path = entry.path();
+    Some((
+        group_dir_entry(
+            name,
+            has_visible_child_dirs(&entry_path),
+            Some(canonical_path_string(&entry_path)),
+        ),
+        dir_entry_modified_secs(&entry),
+    ))
+}
+
+fn visible_file_name(path: &Path) -> Option<String> {
+    path.file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .filter(|name| !name.starts_with('.'))
+}
+
+fn group_dir_entry(name: String, has_children: bool, full_path: Option<String>) -> DirEntry {
+    DirEntry {
+        name,
+        has_children,
+        is_running: None,
+        repo_dirty: None,
+        repo_action: None,
+        group: None,
+        groups: Vec::new(),
+        full_path,
+        has_restart: None,
+        open_url: None,
+    }
+}
+
+fn dir_entry_modified_secs(entry: &std::fs::DirEntry) -> u64 {
+    entry
+        .metadata()
+        .ok()
+        .and_then(|meta| meta.modified().ok())
+        .and_then(|modified| modified.duration_since(UNIX_EPOCH).ok())
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0)
+}
+
+fn sort_group_entries(entries: &mut [(DirEntry, u64)]) {
+    entries.sort_by(|(a, _), (b, _)| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
 }
 
 pub fn list_effective_group_entries_sync(
@@ -723,6 +723,95 @@ mod tests {
         assert_eq!(target.len(), 1);
         assert_eq!(target[0].paths, vec![existing_path, added_path]);
         assert_eq!(target[0].dirs, vec![existing_dir, added_dir]);
+    }
+
+    #[test]
+    fn list_group_entries_prefers_exact_paths_for_name_dedupe() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let exact = dir.path().join("shared");
+        let source = dir.path().join("source");
+        let duplicate = source.join("shared");
+        let unique = source.join("unique");
+        std::fs::create_dir_all(&exact).expect("exact");
+        std::fs::create_dir_all(&duplicate).expect("duplicate");
+        std::fs::create_dir_all(&unique).expect("unique");
+
+        let group = OverlayDirGroup {
+            name: "workspace".into(),
+            paths: vec![exact.clone()],
+            dirs: vec![source],
+        };
+
+        let entries = list_group_entries_sync(&group);
+        let shared = entries
+            .iter()
+            .find(|entry| entry.name == "shared")
+            .expect("shared entry");
+
+        assert_eq!(entries.len(), 2);
+        assert!(!shared.has_children);
+        assert_eq!(
+            shared.full_path.as_deref(),
+            Some(
+                exact
+                    .canonicalize()
+                    .expect("canonical exact")
+                    .to_string_lossy()
+                    .as_ref()
+            )
+        );
+        assert_eq!(
+            entries
+                .iter()
+                .map(|entry| entry.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["shared", "unique"]
+        );
+    }
+
+    #[test]
+    fn list_group_entries_skips_hidden_and_non_dir_children() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let source = dir.path().join("source");
+        let visible = source.join("visible");
+        let hidden = source.join(".hidden");
+        let visible_child = visible.join("child");
+        std::fs::create_dir_all(&visible_child).expect("visible child");
+        std::fs::create_dir_all(&hidden).expect("hidden");
+        std::fs::write(source.join("file.txt"), "not a directory").expect("file");
+
+        let group = OverlayDirGroup {
+            name: "workspace".into(),
+            paths: vec![dir.path().join(".exact-hidden")],
+            dirs: vec![source],
+        };
+
+        let entries = list_group_entries_sync(&group);
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].name, "visible");
+        assert!(entries[0].has_children);
+    }
+
+    #[test]
+    fn list_group_entries_has_children_ignores_hidden_dirs_and_files() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let source = dir.path().join("source");
+        let parent = source.join("parent");
+        std::fs::create_dir_all(parent.join(".hidden-child")).expect("hidden child");
+        std::fs::write(parent.join("file.txt"), "not a directory").expect("file");
+
+        let group = OverlayDirGroup {
+            name: "workspace".into(),
+            paths: Vec::new(),
+            dirs: vec![source],
+        };
+
+        let entries = list_group_entries_sync(&group);
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].name, "parent");
+        assert!(!entries[0].has_children);
     }
 
     #[test]

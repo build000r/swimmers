@@ -1,4 +1,5 @@
 use super::*;
+use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 
 const SKILL_PANEL_MIN_FIELD_WIDTH: u16 = 86;
@@ -562,61 +563,86 @@ fn collect_skill_views<C: TuiApi>(app: &App<C>) -> Vec<SkillPanelSkillView> {
     let selected_id = app.selected_id.as_deref();
     let mut views = BTreeMap::<(String, String), SkillPanelSkillView>::new();
     for entity in app.visible_entities() {
-        let Some(cache) = app.session_skill_cache.get(&entity.session.session_id) else {
-            continue;
-        };
-        let Some(response) = cache
-            .response
-            .as_ref()
-            .filter(|response| response.available)
+        let Some(response) =
+            eligible_skill_response(app.session_skill_cache.get(&entity.session.session_id))
         else {
             continue;
         };
-        let context_label = path_tail_label(&entity.session.cwd)
-            .unwrap_or_else(|| normalize_path(&entity.session.cwd));
+        let context_label = skill_context_label(&entity.session.cwd);
         let selected = selected_id
             .map(|id| id == entity.session.session_id)
             .unwrap_or(false);
 
         for skill in &response.skills {
-            let source_dir = skill_source_dir(skill);
-            let key = (source_dir.clone(), skill.name.to_ascii_lowercase());
-            let entry = views.entry(key).or_insert_with(|| SkillPanelSkillView {
-                name: skill.name.clone(),
-                description: skill.description.clone(),
-                source_label: compact_source_label(&source_dir),
-                source_dir,
-                source_bucket: skill.source_bucket.clone(),
-                layer: skill.layer.clone(),
-                availability: skill.availability.clone(),
-                state: skill.state.clone(),
-                path: skill.path.clone().or_else(|| skill.source.clone()),
-                contexts: Vec::new(),
-                selected_context: false,
-                sbp_highlight: skill_is_sbp_highlight(skill),
-            });
-            if !entry.contexts.contains(&context_label) {
-                entry.contexts.push(context_label.clone());
-            }
-            entry.selected_context |= selected;
-            entry.sbp_highlight |= skill_is_sbp_highlight(skill);
+            let entry = views
+                .entry(skill_view_key(skill))
+                .or_insert_with(|| seed_skill_view(skill));
+            merge_skill_context(entry, &context_label, selected, skill);
         }
     }
 
     let mut out = views.into_values().collect::<Vec<_>>();
-    out.sort_by(|left, right| {
-        right
-            .sbp_highlight
-            .cmp(&left.sbp_highlight)
-            .then_with(|| right.selected_context.cmp(&left.selected_context))
-            .then_with(|| left.source_label.cmp(&right.source_label))
-            .then_with(|| {
-                left.name
-                    .to_ascii_lowercase()
-                    .cmp(&right.name.to_ascii_lowercase())
-            })
-    });
+    out.sort_by(compare_skill_views);
     out
+}
+
+fn eligible_skill_response(cache: Option<&SkillCacheEntry>) -> Option<&SessionSkillListResponse> {
+    cache?
+        .response
+        .as_ref()
+        .filter(|response| response.available)
+}
+
+fn skill_context_label(cwd: &str) -> String {
+    path_tail_label(cwd).unwrap_or_else(|| normalize_path(cwd))
+}
+
+fn skill_view_key(skill: &SessionSkillSummary) -> (String, String) {
+    (skill_source_dir(skill), skill.name.to_ascii_lowercase())
+}
+
+fn seed_skill_view(skill: &SessionSkillSummary) -> SkillPanelSkillView {
+    let source_dir = skill_source_dir(skill);
+    SkillPanelSkillView {
+        name: skill.name.clone(),
+        description: skill.description.clone(),
+        source_label: compact_source_label(&source_dir),
+        source_dir,
+        source_bucket: skill.source_bucket.clone(),
+        layer: skill.layer.clone(),
+        availability: skill.availability.clone(),
+        state: skill.state.clone(),
+        path: skill.path.clone().or_else(|| skill.source.clone()),
+        contexts: Vec::new(),
+        selected_context: false,
+        sbp_highlight: skill_is_sbp_highlight(skill),
+    }
+}
+
+fn merge_skill_context(
+    view: &mut SkillPanelSkillView,
+    context_label: &str,
+    selected: bool,
+    skill: &SessionSkillSummary,
+) {
+    if !view.contexts.iter().any(|context| context == context_label) {
+        view.contexts.push(context_label.to_string());
+    }
+    view.selected_context |= selected;
+    view.sbp_highlight |= skill_is_sbp_highlight(skill);
+}
+
+fn compare_skill_views(left: &SkillPanelSkillView, right: &SkillPanelSkillView) -> Ordering {
+    right
+        .sbp_highlight
+        .cmp(&left.sbp_highlight)
+        .then_with(|| right.selected_context.cmp(&left.selected_context))
+        .then_with(|| left.source_label.cmp(&right.source_label))
+        .then_with(|| {
+            left.name
+                .to_ascii_lowercase()
+                .cmp(&right.name.to_ascii_lowercase())
+        })
 }
 
 fn skill_context_line(contexts: &[SkillPanelContext]) -> String {
@@ -710,4 +736,187 @@ fn mermaid_label(value: &str) -> String {
         .replace('\\', "\\\\")
         .replace('"', "\\\"")
         .replace('\n', " ")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_skill(
+        name: &str,
+        source_bucket: &str,
+        source: &str,
+        path: &str,
+    ) -> SessionSkillSummary {
+        SessionSkillSummary {
+            name: name.to_string(),
+            description: Some(format!("{name} description")),
+            state: Some("ok".to_string()),
+            availability: Some("installed".to_string()),
+            layer: Some("project:codex".to_string()),
+            source_bucket: Some(source_bucket.to_string()),
+            source: Some(source.to_string()),
+            path: Some(path.to_string()),
+        }
+    }
+
+    fn test_skill_response(available: bool) -> SessionSkillListResponse {
+        SessionSkillListResponse {
+            session_id: "sess".to_string(),
+            source: "sbp".to_string(),
+            cwd: "/repo/swimmers".to_string(),
+            available,
+            query: None,
+            skills: Vec::new(),
+            issues: Vec::new(),
+            message: None,
+        }
+    }
+
+    fn test_cache(response: Option<SessionSkillListResponse>) -> SkillCacheEntry {
+        SkillCacheEntry {
+            context: SkillCacheContext {
+                cwd: "/repo/swimmers".to_string(),
+            },
+            response,
+        }
+    }
+
+    #[test]
+    fn skill_panel_eligible_response_requires_available_cached_response() {
+        let missing_response = test_cache(None);
+        let unavailable_response = test_cache(Some(test_skill_response(false)));
+        let available_response = test_cache(Some(test_skill_response(true)));
+
+        assert!(eligible_skill_response(None).is_none());
+        assert!(eligible_skill_response(Some(&missing_response)).is_none());
+        assert!(eligible_skill_response(Some(&unavailable_response)).is_none());
+        assert!(eligible_skill_response(Some(&available_response)).is_some());
+    }
+
+    #[test]
+    fn skill_panel_view_merge_preserves_first_entry_and_ors_duplicate_flags() {
+        let first = test_skill(
+            "UI",
+            "skills-private",
+            "/fixture/repos/skills-private/ui",
+            "/repo/.codex/skills/ui",
+        );
+        let duplicate = test_skill(
+            "ui",
+            "skillbox",
+            "/fixture/repos/skills-private/ui",
+            "/repo/.codex/skills/ui-duplicate",
+        );
+        let mut views = BTreeMap::<(String, String), SkillPanelSkillView>::new();
+
+        for (skill, context_label, selected) in
+            [(&first, "swimmers", false), (&duplicate, "swimmers", true)]
+        {
+            let entry = views
+                .entry(skill_view_key(skill))
+                .or_insert_with(|| seed_skill_view(skill));
+            merge_skill_context(entry, context_label, selected, skill);
+        }
+
+        let view = views
+            .get(&(
+                "/fixture/repos/skills-private/ui".to_string(),
+                "ui".to_string(),
+            ))
+            .expect("merged skill view");
+        assert_eq!(view.name, "UI");
+        assert_eq!(view.description.as_deref(), Some("UI description"));
+        assert_eq!(view.source_bucket.as_deref(), Some("skills-private"));
+        assert_eq!(view.path.as_deref(), Some("/repo/.codex/skills/ui"));
+        assert_eq!(view.contexts, vec!["swimmers"]);
+        assert!(view.selected_context);
+        assert!(view.sbp_highlight);
+    }
+
+    #[test]
+    fn skill_panel_view_sort_keeps_highlight_selected_source_and_name_order() {
+        let mut views = vec![
+            SkillPanelSkillView {
+                name: "zeta".to_string(),
+                source_label: "beta".to_string(),
+                source_dir: "/beta/zeta".to_string(),
+                description: None,
+                source_bucket: None,
+                layer: None,
+                availability: None,
+                state: None,
+                path: None,
+                contexts: Vec::new(),
+                selected_context: false,
+                sbp_highlight: false,
+            },
+            SkillPanelSkillView {
+                name: "alpha".to_string(),
+                source_label: "gamma".to_string(),
+                source_dir: "/gamma/alpha".to_string(),
+                description: None,
+                source_bucket: None,
+                layer: None,
+                availability: None,
+                state: None,
+                path: None,
+                contexts: Vec::new(),
+                selected_context: true,
+                sbp_highlight: false,
+            },
+            SkillPanelSkillView {
+                name: "skillbox".to_string(),
+                source_label: "omega".to_string(),
+                source_dir: "/omega/skillbox".to_string(),
+                description: None,
+                source_bucket: None,
+                layer: None,
+                availability: None,
+                state: None,
+                path: None,
+                contexts: Vec::new(),
+                selected_context: false,
+                sbp_highlight: true,
+            },
+            SkillPanelSkillView {
+                name: "Beta".to_string(),
+                source_label: "alpha".to_string(),
+                source_dir: "/alpha/beta".to_string(),
+                description: None,
+                source_bucket: None,
+                layer: None,
+                availability: None,
+                state: None,
+                path: None,
+                contexts: Vec::new(),
+                selected_context: false,
+                sbp_highlight: false,
+            },
+            SkillPanelSkillView {
+                name: "alpha".to_string(),
+                source_label: "alpha".to_string(),
+                source_dir: "/alpha/alpha".to_string(),
+                description: None,
+                source_bucket: None,
+                layer: None,
+                availability: None,
+                state: None,
+                path: None,
+                contexts: Vec::new(),
+                selected_context: false,
+                sbp_highlight: false,
+            },
+        ];
+
+        views.sort_by(compare_skill_views);
+
+        assert_eq!(
+            views
+                .iter()
+                .map(|view| view.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["skillbox", "alpha", "alpha", "Beta", "zeta"]
+        );
+    }
 }

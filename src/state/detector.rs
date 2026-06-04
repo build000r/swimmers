@@ -250,45 +250,52 @@ impl StateDetector {
     /// each `process_output` and can also be called independently by the
     /// actor's timer loop.
     pub fn check_timers(&mut self, now: Instant) {
-        // Error auto-clear
-        if let Some(deadline) = self.error_deadline {
-            if now >= deadline {
-                self.error_deadline = None;
-                if self.state == SessionState::Error {
-                    self.set_state(SessionState::Idle, Some(None), now, "error_timer_expired");
-                }
-            }
-        }
+        self.check_error_deadline(now);
+        self.check_output_idle_deadline(now);
+        self.check_attention_deadline(now);
+    }
 
-        // TUI tool output silence -> idle
-        if let Some(deadline) = self.output_idle_deadline {
-            if now >= deadline {
-                self.output_idle_deadline = None;
-                if self.state == SessionState::Busy {
-                    debug!("TUI tool output silence expired, transitioning to idle");
-                    self.set_state(
-                        SessionState::Idle,
-                        Some(None),
-                        now,
-                        "output_silence_expired",
-                    );
-                }
-            }
+    fn check_error_deadline(&mut self, now: Instant) {
+        if Self::take_expired_deadline(&mut self.error_deadline, now)
+            && self.state == SessionState::Error
+        {
+            self.set_state(SessionState::Idle, Some(None), now, "error_timer_expired");
         }
+    }
 
-        // Attention promotion
-        if let Some(deadline) = self.attention_deadline {
-            if now >= deadline {
-                self.attention_deadline = None;
-                if self.state == SessionState::Idle {
-                    self.set_state(
-                        SessionState::Attention,
-                        Some(None),
-                        now,
-                        "attention_timer_expired",
-                    );
-                }
-            }
+    fn check_output_idle_deadline(&mut self, now: Instant) {
+        if Self::take_expired_deadline(&mut self.output_idle_deadline, now)
+            && self.state == SessionState::Busy
+        {
+            debug!("TUI tool output silence expired, transitioning to idle");
+            self.set_state(
+                SessionState::Idle,
+                Some(None),
+                now,
+                "output_silence_expired",
+            );
+        }
+    }
+
+    fn check_attention_deadline(&mut self, now: Instant) {
+        if Self::take_expired_deadline(&mut self.attention_deadline, now)
+            && self.state == SessionState::Idle
+        {
+            self.set_state(
+                SessionState::Attention,
+                Some(None),
+                now,
+                "attention_timer_expired",
+            );
+        }
+    }
+
+    fn take_expired_deadline(deadline: &mut Option<Instant>, now: Instant) -> bool {
+        if deadline.is_some_and(|deadline| now >= deadline) {
+            *deadline = None;
+            true
+        } else {
+            false
         }
     }
 
@@ -1193,6 +1200,59 @@ mod tests {
         d.error_deadline = Some(Instant::now() - Duration::from_millis(1));
         d.check_timers(Instant::now());
         assert_eq!(d.get_state().0, SessionState::Idle);
+    }
+
+    #[test]
+    fn check_timers_leaves_unexpired_deadlines_pending() {
+        let mut d = StateDetector::new();
+        let now = Instant::now();
+        let future = now + Duration::from_millis(10);
+        d.error_deadline = Some(future);
+        d.output_idle_deadline = Some(future);
+        d.attention_deadline = Some(future);
+
+        d.check_timers(now);
+
+        assert_eq!(d.error_deadline, Some(future));
+        assert_eq!(d.output_idle_deadline, Some(future));
+        assert_eq!(d.attention_deadline, Some(future));
+        assert_eq!(d.state(), SessionState::Idle);
+        assert_eq!(d.state_evidence().cause, "initial_state");
+    }
+
+    #[test]
+    fn check_timers_clears_expired_deadlines_without_non_matching_transitions() {
+        let mut d = StateDetector::new();
+        let now = Instant::now();
+        let expired = now - Duration::from_millis(1);
+        d.error_deadline = Some(expired);
+        d.output_idle_deadline = Some(expired);
+
+        d.check_timers(now);
+
+        assert!(d.error_deadline.is_none());
+        assert!(d.output_idle_deadline.is_none());
+        assert_eq!(d.state(), SessionState::Idle);
+        assert_eq!(d.state_evidence().cause, "initial_state");
+    }
+
+    #[test]
+    fn check_timers_preserves_error_output_attention_order() {
+        let mut d = StateDetector::new();
+        let now = Instant::now();
+        let expired = now - Duration::from_millis(1);
+        d.state = SessionState::Error;
+        d.error_deadline = Some(expired);
+        d.output_idle_deadline = Some(expired);
+        d.attention_deadline = Some(expired);
+
+        d.check_timers(now);
+
+        assert!(d.error_deadline.is_none());
+        assert!(d.output_idle_deadline.is_none());
+        assert!(d.attention_deadline.is_none());
+        assert_eq!(d.state(), SessionState::Attention);
+        assert_eq!(d.state_evidence().cause, "attention_timer_expired");
     }
 
     #[test]

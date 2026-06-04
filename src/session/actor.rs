@@ -48,6 +48,26 @@ const TMUX_FALLBACK_TERM: &str = "xterm-256color";
 const TMUX_FALLBACK_COLORTERM: &str = "truecolor";
 const TMUX_UNSUPPORTED_TERMS: [&str; 3] = ["", "dumb", "unknown"];
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TmuxSpawnMode {
+    Attach,
+    New,
+}
+
+impl TmuxSpawnMode {
+    fn from_attach(attach: bool) -> Self {
+        if attach {
+            Self::Attach
+        } else {
+            Self::New
+        }
+    }
+
+    fn is_new(self) -> bool {
+        matches!(self, Self::New)
+    }
+}
+
 fn tmux_command(program: impl AsRef<OsStr>, args: &[&str]) -> Command {
     let mut command = Command::new(program);
     command
@@ -439,6 +459,192 @@ fn compare_session_state_change(
     }
 }
 
+fn initial_spawn_pty_size() -> PtySize {
+    PtySize {
+        rows: 24,
+        cols: 80,
+        pixel_width: 0,
+        pixel_height: 0,
+    }
+}
+
+fn validate_spawn_start_cwd(mode: TmuxSpawnMode, start_cwd: Option<&str>) -> anyhow::Result<()> {
+    if mode.is_new() {
+        if let Some(dir) = start_cwd {
+            if !std::path::Path::new(dir).is_dir() {
+                return Err(anyhow::anyhow!(
+                    "session cwd does not exist or is not a directory: {dir}"
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn build_tmux_spawn_command(
+    mode: TmuxSpawnMode,
+    session_id: &str,
+    tmux_name: &str,
+    start_cwd: Option<&str>,
+    initial_command: Option<&str>,
+) -> CommandBuilder {
+    let mut command = build_tmux_spawn_command_args(mode, tmux_name, start_cwd, initial_command);
+    configure_tmux_spawn_command_env(&mut command, session_id, tmux_name);
+    command
+}
+
+fn build_tmux_spawn_command_args(
+    mode: TmuxSpawnMode,
+    tmux_name: &str,
+    start_cwd: Option<&str>,
+    initial_command: Option<&str>,
+) -> CommandBuilder {
+    match mode {
+        TmuxSpawnMode::Attach => build_tmux_attach_command(tmux_name),
+        TmuxSpawnMode::New => build_tmux_new_session_command(tmux_name, start_cwd, initial_command),
+    }
+}
+
+fn build_tmux_attach_command(tmux_name: &str) -> CommandBuilder {
+    let mut command = CommandBuilder::new("tmux");
+    let target = exact_session_target(tmux_name);
+    command.args(["attach-session", "-t", &target]);
+    command
+}
+
+fn build_tmux_new_session_command(
+    tmux_name: &str,
+    start_cwd: Option<&str>,
+    initial_command: Option<&str>,
+) -> CommandBuilder {
+    let mut command = CommandBuilder::new("tmux");
+    command.args(["new-session", "-s", tmux_name]);
+    if let Some(dir) = start_cwd {
+        command.args(["-c", dir]);
+    }
+    if let Some(command_arg) = initial_command {
+        command.arg(command_arg);
+    }
+    command
+}
+
+fn configure_tmux_spawn_command_env(
+    command: &mut CommandBuilder,
+    session_id: &str,
+    tmux_name: &str,
+) {
+    command.env_remove("TMUX");
+    command.env_remove("TMUX_PANE");
+
+    let inherited_term = std::env::var("TERM").ok();
+    let inherited_colorterm = std::env::var("COLORTERM").ok();
+    let (tmux_term, tmux_colorterm, used_term_fallback) =
+        resolve_tmux_terminal_env(inherited_term.as_deref(), inherited_colorterm.as_deref());
+    command.env("TERM", &tmux_term);
+    command.env("COLORTERM", &tmux_colorterm);
+    command.env("TERM_PROGRAM", "swimmers");
+
+    log_tmux_spawn_terminal_env(
+        session_id,
+        tmux_name,
+        inherited_term.as_deref(),
+        &tmux_term,
+        &tmux_colorterm,
+        used_term_fallback,
+    );
+}
+
+fn log_tmux_spawn_terminal_env(
+    session_id: &str,
+    tmux_name: &str,
+    inherited_term: Option<&str>,
+    tmux_term: &str,
+    tmux_colorterm: &str,
+    used_term_fallback: bool,
+) {
+    if used_term_fallback {
+        warn!(
+            session_id,
+            tmux_name,
+            inherited_term = ?inherited_term,
+            applied_term = %tmux_term,
+            "missing/unsupported TERM for tmux client; applied fallback"
+        );
+    } else {
+        debug!(
+            session_id,
+            tmux_name,
+            inherited_term = ?inherited_term,
+            applied_term = %tmux_term,
+            colorterm = %tmux_colorterm,
+            "configured tmux client terminal environment"
+        );
+    }
+}
+
+fn inspect_tmux_child_after_spawn(
+    mode: TmuxSpawnMode,
+    child: &mut dyn portable_pty::Child,
+) -> anyhow::Result<()> {
+    if mode.is_new() {
+        std::thread::sleep(TMUX_NEW_SESSION_EXIT_GRACE);
+        if let Some(status) = child
+            .try_wait()
+            .map_err(|e| anyhow::anyhow!("failed to inspect tmux after spawn: {}", e))?
+        {
+            return Err(anyhow::anyhow!(
+                "tmux new-session exited immediately with status {status}"
+            ));
+        }
+    }
+    Ok(())
+}
+
+struct SpawnedSessionActorInit {
+    session_id: String,
+    tmux_name: String,
+    config: Arc<Config>,
+    master: Box<dyn MasterPty + Send>,
+    writer: Box<dyn std::io::Write + Send>,
+    cmd_rx: mpsc::Receiver<SessionCommand>,
+    event_tx: broadcast::Sender<ControlEvent>,
+    start_cwd: Option<String>,
+    initial_tool: Option<String>,
+    attach: bool,
+    last_activity_override: Option<chrono::DateTime<Utc>>,
+    batch: Option<SessionBatchMembership>,
+}
+
+fn build_spawned_session_actor(init: SpawnedSessionActorInit) -> SessionActor {
+    let state_detector = state_detector_for_initial_tool(init.initial_tool.as_deref());
+    SessionActor {
+        session_id: init.session_id,
+        tmux_name: init.tmux_name,
+        config: init.config.clone(),
+        master: init.master,
+        writer: init.writer,
+        state_detector,
+        scroll_guard: ScrollGuard::new(),
+        replay_ring: ReplayRing::new(init.config.replay_buffer_size),
+        subscribers: HashMap::new(),
+        cmd_rx: init.cmd_rx,
+        event_tx: init.event_tx,
+        cols: 80,
+        rows: 24,
+        cwd: init.start_cwd.unwrap_or_default(),
+        last_cwd_refresh_at: Instant::now(),
+        last_tool_refresh_at: Instant::now(),
+        last_liveness_check_at: Instant::now(),
+        tool: init.initial_tool,
+        last_skill: None,
+        batch: init.batch,
+        input_line_buffer: String::new(),
+        last_activity_at: init.last_activity_override.unwrap_or_else(Utc::now),
+        session_started_at: Utc::now(),
+        clear_replay_on_first_idle: !init.attach,
+    }
+}
+
 impl SessionActor {
     /// Spawn a new session actor. If `attach` is true, attaches to an existing
     /// tmux session; otherwise creates a new one.
@@ -456,93 +662,27 @@ impl SessionActor {
         last_activity_override: Option<chrono::DateTime<Utc>>,
         batch: Option<SessionBatchMembership>,
     ) -> anyhow::Result<ActorHandle> {
+        let spawn_mode = TmuxSpawnMode::from_attach(attach);
+        validate_spawn_start_cwd(spawn_mode, start_cwd.as_deref())?;
+
         let pty_system = native_pty_system();
-
-        let initial_size = PtySize {
-            rows: 24,
-            cols: 80,
-            pixel_width: 0,
-            pixel_height: 0,
-        };
-
-        if !attach {
-            if let Some(dir) = start_cwd.as_deref() {
-                if !std::path::Path::new(dir).is_dir() {
-                    return Err(anyhow::anyhow!(
-                        "session cwd does not exist or is not a directory: {dir}"
-                    ));
-                }
-            }
-        }
-
         let pair = pty_system
-            .openpty(initial_size)
+            .openpty(initial_spawn_pty_size())
             .map_err(|e| anyhow::anyhow!("failed to open PTY: {}", e))?;
 
-        // Build the tmux command. Clean TMUX / TMUX_PANE from the environment
-        // so that tmux works even when the swimmers server itself runs inside
-        // a tmux session.
-        let mut cmd = if attach {
-            let mut c = CommandBuilder::new("tmux");
-            let target = exact_session_target(&tmux_name);
-            c.args(["attach-session", "-t", &target]);
-            c
-        } else {
-            let mut c = CommandBuilder::new("tmux");
-            c.args(["new-session", "-s", &tmux_name]);
-            if let Some(dir) = start_cwd.as_deref() {
-                c.args(["-c", dir]);
-            }
-            if let Some(command) = initial_command.as_deref() {
-                c.arg(command);
-            }
-            c
-        };
-
-        // Strip tmux-related env vars to avoid nesting issues.
-        cmd.env_remove("TMUX");
-        cmd.env_remove("TMUX_PANE");
-        let inherited_term = std::env::var("TERM").ok();
-        let inherited_colorterm = std::env::var("COLORTERM").ok();
-        let (tmux_term, tmux_colorterm, used_term_fallback) =
-            resolve_tmux_terminal_env(inherited_term.as_deref(), inherited_colorterm.as_deref());
-        cmd.env("TERM", &tmux_term);
-        cmd.env("COLORTERM", &tmux_colorterm);
-        cmd.env("TERM_PROGRAM", "swimmers");
-        if used_term_fallback {
-            warn!(
-                session_id = %session_id,
-                tmux_name = %tmux_name,
-                inherited_term = ?inherited_term,
-                applied_term = %tmux_term,
-                "missing/unsupported TERM for tmux client; applied fallback"
-            );
-        } else {
-            debug!(
-                session_id = %session_id,
-                tmux_name = %tmux_name,
-                inherited_term = ?inherited_term,
-                applied_term = %tmux_term,
-                colorterm = %tmux_colorterm,
-                "configured tmux client terminal environment"
-            );
-        }
+        let cmd = build_tmux_spawn_command(
+            spawn_mode,
+            &session_id,
+            &tmux_name,
+            start_cwd.as_deref(),
+            initial_command.as_deref(),
+        );
 
         let mut child = pair
             .slave
             .spawn_command(cmd)
             .map_err(|e| anyhow::anyhow!("failed to spawn tmux: {}", e))?;
-        if !attach {
-            std::thread::sleep(TMUX_NEW_SESSION_EXIT_GRACE);
-            if let Some(status) = child
-                .try_wait()
-                .map_err(|e| anyhow::anyhow!("failed to inspect tmux after spawn: {}", e))?
-            {
-                return Err(anyhow::anyhow!(
-                    "tmux new-session exited immediately with status {status}"
-                ));
-            }
-        }
+        inspect_tmux_child_after_spawn(spawn_mode, child.as_mut())?;
 
         // We intentionally drop the slave side -- the master side is what we use.
         drop(pair.slave);
@@ -555,36 +695,20 @@ impl SessionActor {
         let (cmd_tx, cmd_rx) = mpsc::channel::<SessionCommand>(256);
         let (event_tx, _) = broadcast::channel::<ControlEvent>(64);
 
-        let replay_ring = ReplayRing::new(config.replay_buffer_size);
-        let initial_cwd = start_cwd.unwrap_or_default();
-        let state_detector = state_detector_for_initial_tool(initial_tool.as_deref());
-
-        let actor = SessionActor {
+        let actor = build_spawned_session_actor(SpawnedSessionActorInit {
             session_id: session_id.clone(),
             tmux_name: tmux_name.clone(),
             config,
             master: pair.master,
             writer,
-            state_detector,
-            scroll_guard: ScrollGuard::new(),
-            replay_ring,
-            subscribers: HashMap::new(),
             cmd_rx,
             event_tx: event_tx.clone(),
-            cols: 80,
-            rows: 24,
-            cwd: initial_cwd,
-            last_cwd_refresh_at: Instant::now(),
-            last_tool_refresh_at: Instant::now(),
-            last_liveness_check_at: Instant::now(),
-            tool: initial_tool,
-            last_skill: None,
+            start_cwd,
+            initial_tool,
+            attach,
+            last_activity_override,
             batch,
-            input_line_buffer: String::new(),
-            last_activity_at: last_activity_override.unwrap_or_else(Utc::now),
-            session_started_at: Utc::now(),
-            clear_replay_on_first_idle: !attach,
-        };
+        });
 
         // Spawn the actor's run loop on the Tokio runtime.
         tokio::spawn(actor.run());
@@ -2694,23 +2818,25 @@ fn log_pty_read_error(session_id: &str, err: &std::io::Error) {
 
 #[cfg(test)]
 mod tests {
+    use super::{build_tmux_spawn_command, build_tmux_spawn_command_args};
     use super::{
         capture_pane_tail_with_command, compare_session_state_change, compute_pane_liveness,
         cwd_from_osc7_payload, cwd_update, detect_tool_from_command_line,
         detect_tool_from_process_entry, detect_tool_from_process_snapshot, extract_cwd_from_title,
-        find_osc_payload_end, line_looks_prompt_like, normalize_submit_line_text,
-        osc7_cwd_update_plan, osc_payloads, output_counts_as_meaningful_activity,
-        parse_process_entry, percent_decode, process_entries_cache, pty_read_error_log,
-        pty_read_step, query_tmux_session_created, query_tool_from_tmux_process_tree,
-        resolve_tmux_colorterm, resolve_tmux_term, resolve_tmux_terminal_env,
-        run_bounded_tmux_command, should_clear_startup_replay, should_refresh_cwd_from_tmux,
-        should_refresh_tool_from_tmux, state_detector_for_initial_tool, submit_line_fallback_input,
-        subscriber_cap_rejection, title_cwd_update, title_tool_update, tmux_input_chunks,
-        tool_refresh_changes_tool, visible_output_is_meaningful, write_and_flush_input,
+        find_osc_payload_end, initial_spawn_pty_size, line_looks_prompt_like,
+        normalize_submit_line_text, osc7_cwd_update_plan, osc_payloads,
+        output_counts_as_meaningful_activity, parse_process_entry, percent_decode,
+        process_entries_cache, pty_read_error_log, pty_read_step, query_tmux_session_created,
+        query_tool_from_tmux_process_tree, resolve_tmux_colorterm, resolve_tmux_term,
+        resolve_tmux_terminal_env, run_bounded_tmux_command, should_clear_startup_replay,
+        should_refresh_cwd_from_tmux, should_refresh_tool_from_tmux,
+        state_detector_for_initial_tool, submit_line_fallback_input, subscriber_cap_rejection,
+        title_cwd_update, title_tool_update, tmux_input_chunks, tool_refresh_changes_tool,
+        validate_spawn_start_cwd, visible_output_is_meaningful, write_and_flush_input,
         write_input_counts_as_activity, ControlEvent, LivenessReconciliation, LivenessRefresh,
         OutputFrame, PaneLiveness, ProcessEntriesCache, ProcessEntriesSnapshot, ProcessEntry,
         ProcessSnapshotToolDetection, PtyReadErrorLog, PtyReadLoopStep, SessionActor,
-        SessionCommand, SubscribeOutcome, TmuxInputChunk, CWD_REFRESH_MIN_INTERVAL,
+        SessionCommand, SubscribeOutcome, TmuxInputChunk, TmuxSpawnMode, CWD_REFRESH_MIN_INTERVAL,
         MAX_OUTPUT_SUBSCRIBERS_PER_SESSION, PROCESS_ENTRIES_CACHE_TTL, TOOL_REFRESH_MIN_INTERVAL,
     };
     use crate::config::Config;
@@ -2726,6 +2852,14 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
     use tokio::sync::{broadcast, mpsc, oneshot};
+
+    fn argv_strings(command: &portable_pty::CommandBuilder) -> Vec<String> {
+        command
+            .get_argv()
+            .iter()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect()
+    }
 
     fn test_actor() -> SessionActor {
         let pty_system = native_pty_system();
@@ -2862,6 +2996,14 @@ mod tests {
         }
     }
 
+    fn restore_env_var(key: &str, value: Option<std::ffi::OsString>) {
+        if let Some(value) = value {
+            std::env::set_var(key, value);
+        } else {
+            std::env::remove_var(key);
+        }
+    }
+
     fn make_executable(path: &std::path::Path) {
         let mut perms = std::fs::metadata(path).expect("metadata").permissions();
         perms.set_mode(0o755);
@@ -2892,6 +3034,136 @@ mod tests {
         }
         std::env::set_var("PATH", std::env::join_paths(entries).expect("path"));
         (dir, previous_path)
+    }
+
+    #[test]
+    fn spawn_initial_pty_size_matches_tmux_bootstrap_contract() {
+        let size = initial_spawn_pty_size();
+
+        assert_eq!(size.rows, 24);
+        assert_eq!(size.cols, 80);
+        assert_eq!(size.pixel_width, 0);
+        assert_eq!(size.pixel_height, 0);
+    }
+
+    #[test]
+    fn spawn_start_cwd_validation_only_applies_to_new_sessions() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file = dir.path().join("not-a-dir");
+        std::fs::write(&file, "contents").expect("file");
+        let file = file.to_string_lossy().into_owned();
+
+        let error =
+            validate_spawn_start_cwd(TmuxSpawnMode::New, Some(&file)).expect_err("file rejected");
+        assert_eq!(
+            error.to_string(),
+            format!("session cwd does not exist or is not a directory: {file}")
+        );
+        validate_spawn_start_cwd(TmuxSpawnMode::Attach, Some(&file))
+            .expect("attach skips cwd validation");
+        validate_spawn_start_cwd(
+            TmuxSpawnMode::New,
+            Some(dir.path().to_str().expect("utf8 path")),
+        )
+        .expect("directory accepted");
+        validate_spawn_start_cwd(TmuxSpawnMode::New, None).expect("missing cwd accepted");
+    }
+
+    #[test]
+    fn spawn_attach_command_targets_exact_tmux_session() {
+        let command =
+            build_tmux_spawn_command_args(TmuxSpawnMode::Attach, "demo.session", None, None);
+
+        assert_eq!(
+            argv_strings(&command),
+            vec![
+                "tmux".to_string(),
+                "attach-session".to_string(),
+                "-t".to_string(),
+                crate::tmux_target::exact_session_target("demo.session"),
+            ]
+        );
+    }
+
+    #[test]
+    fn spawn_new_session_command_preserves_optional_cwd_and_initial_command_order() {
+        let command = build_tmux_spawn_command_args(
+            TmuxSpawnMode::New,
+            "demo.session",
+            Some("/tmp/project"),
+            Some("cargo test"),
+        );
+
+        assert_eq!(
+            argv_strings(&command),
+            vec![
+                "tmux".to_string(),
+                "new-session".to_string(),
+                "-s".to_string(),
+                "demo.session".to_string(),
+                "-c".to_string(),
+                "/tmp/project".to_string(),
+                "cargo test".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn spawn_new_session_command_omits_absent_optional_args() {
+        let command = build_tmux_spawn_command_args(TmuxSpawnMode::New, "demo.session", None, None);
+
+        assert_eq!(
+            argv_strings(&command),
+            vec![
+                "tmux".to_string(),
+                "new-session".to_string(),
+                "-s".to_string(),
+                "demo.session".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn spawn_command_env_removes_nested_tmux_and_sets_terminal_defaults() {
+        let _guard = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let previous_tmux = std::env::var_os("TMUX");
+        let previous_tmux_pane = std::env::var_os("TMUX_PANE");
+        let previous_term = std::env::var_os("TERM");
+        let previous_colorterm = std::env::var_os("COLORTERM");
+        std::env::set_var("TMUX", "nested");
+        std::env::set_var("TMUX_PANE", "%1");
+        std::env::set_var("TERM", "dumb");
+        std::env::remove_var("COLORTERM");
+
+        let command = build_tmux_spawn_command(
+            TmuxSpawnMode::Attach,
+            "sess-test",
+            "demo.session",
+            None,
+            None,
+        );
+
+        assert_eq!(command.get_env("TMUX"), None);
+        assert_eq!(command.get_env("TMUX_PANE"), None);
+        assert_eq!(
+            command.get_env("TERM"),
+            Some(std::ffi::OsStr::new("xterm-256color"))
+        );
+        assert_eq!(
+            command.get_env("COLORTERM"),
+            Some(std::ffi::OsStr::new("truecolor"))
+        );
+        assert_eq!(
+            command.get_env("TERM_PROGRAM"),
+            Some(std::ffi::OsStr::new("swimmers"))
+        );
+
+        restore_env_var("TMUX", previous_tmux);
+        restore_env_var("TMUX_PANE", previous_tmux_pane);
+        restore_env_var("TERM", previous_term);
+        restore_env_var("COLORTERM", previous_colorterm);
     }
 
     #[test]

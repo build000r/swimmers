@@ -1740,22 +1740,51 @@ fn render_mermaid_cached_background(
     viewer: &MermaidViewerState,
 ) {
     if viewer.cached_background_cells.len() == viewer.cached_lines.len() {
-        for (row_offset, row) in viewer.cached_background_cells.iter().enumerate() {
-            let y = content_rect.y + row_offset as u16;
-            if y >= content_rect.bottom() {
-                break;
-            }
-            for (column_offset, cell) in row.iter().enumerate() {
-                if cell.ch == ' ' {
-                    continue;
-                }
-                renderer.draw_char(content_rect.x + column_offset as u16, y, cell.ch, cell.fg);
-            }
-        }
+        render_mermaid_cached_background_rows(
+            renderer,
+            content_rect,
+            &viewer.cached_background_cells,
+        );
         return;
     }
 
-    for (offset, line) in viewer.cached_lines.iter().enumerate() {
+    render_mermaid_cached_line_fallback(renderer, content_rect, &viewer.cached_lines);
+}
+
+fn render_mermaid_cached_background_rows(
+    renderer: &mut Renderer,
+    content_rect: Rect,
+    rows: &[Vec<Cell>],
+) {
+    for (row_offset, row) in rows.iter().enumerate() {
+        let y = content_rect.y + row_offset as u16;
+        if y >= content_rect.bottom() {
+            break;
+        }
+        render_mermaid_cached_background_row(renderer, content_rect.x, y, row);
+    }
+}
+
+fn render_mermaid_cached_background_row(
+    renderer: &mut Renderer,
+    content_x: u16,
+    y: u16,
+    row: &[Cell],
+) {
+    for (column_offset, cell) in row.iter().enumerate() {
+        if cell.ch == ' ' {
+            continue;
+        }
+        renderer.draw_char(content_x + column_offset as u16, y, cell.ch, cell.fg);
+    }
+}
+
+fn render_mermaid_cached_line_fallback(
+    renderer: &mut Renderer,
+    content_rect: Rect,
+    lines: &[String],
+) {
+    for (offset, line) in lines.iter().enumerate() {
         let y = content_rect.y + offset as u16;
         if y >= content_rect.bottom() {
             break;
@@ -1971,6 +2000,70 @@ fn mermaid_focus_target_label_key(target: &MermaidFocusAccumulator) -> MermaidFo
 mod mermaid_focus_tests {
     use super::*;
 
+    fn test_renderer(width: u16, height: u16) -> Renderer {
+        let buffer_size = (width as usize) * (height as usize);
+        Renderer {
+            stdout: BufWriter::new(io::stdout()),
+            width,
+            height,
+            buffer: vec![Cell::default(); buffer_size],
+            last_buffer: vec![Cell::default(); buffer_size],
+            terminal_state: TerminalState::default(),
+        }
+    }
+
+    fn test_viewer(
+        cached_lines: Vec<&str>,
+        cached_background_cells: Vec<Vec<Cell>>,
+    ) -> MermaidViewerState {
+        MermaidViewerState {
+            session_id: "test-session".to_string(),
+            tmux_name: "test-tmux".to_string(),
+            cwd: ".".to_string(),
+            path: None,
+            source: None,
+            artifact_error: None,
+            render_error: None,
+            unsupported_reason: None,
+            zoom: 1.0,
+            center_x: 0.5,
+            center_y: 0.5,
+            diagram_width: 0.0,
+            diagram_height: 0.0,
+            back_rect: None,
+            content_rect: None,
+            cached_rect: None,
+            cached_zoom: 1.0,
+            cached_center_x: 0.5,
+            cached_center_y: 0.5,
+            cached_lines: cached_lines.into_iter().map(str::to_string).collect(),
+            cached_background_cells,
+            cached_semantic_lines: Vec::new(),
+            focused_source_index: None,
+            focus_status: None,
+            prepared_render: None,
+            source_prepare_count: 0,
+            viewport_render_count: 0,
+            plan_tabs: None,
+            active_tab: DomainPlanTab::Schema,
+            inline_plan_files: BTreeMap::new(),
+            plan_text_content: None,
+            plan_text_lines: Vec::new(),
+            plan_text_scroll: 0,
+            plan_text_cached_width: 0,
+            tab_rects: Vec::new(),
+            disk_only: false,
+        }
+    }
+
+    fn cell(ch: char, fg: Color) -> Cell {
+        Cell { ch, fg }
+    }
+
+    fn rendered_cell(renderer: &Renderer, x: u16, y: u16) -> Cell {
+        renderer.buffer[(y as usize) * (renderer.width as usize) + (x as usize)]
+    }
+
     fn focus_line(y: u16, x: u16, source_index: usize) -> MermaidProjectedLine {
         MermaidProjectedLine {
             source_index,
@@ -2056,5 +2149,106 @@ mod mermaid_focus_tests {
             &target,
             2
         ));
+    }
+
+    #[test]
+    fn render_mermaid_cached_background_draws_matching_cell_rows() {
+        let mut renderer = test_renderer(8, 4);
+        let viewer = test_viewer(
+            vec!["fallback-1", "fallback-2"],
+            vec![
+                vec![cell('A', Color::Red), cell('B', Color::Green)],
+                vec![cell('C', Color::Yellow)],
+            ],
+        );
+
+        render_mermaid_cached_background(
+            &mut renderer,
+            Rect {
+                x: 2,
+                y: 1,
+                width: 4,
+                height: 2,
+            },
+            &viewer,
+        );
+
+        assert_eq!(rendered_cell(&renderer, 2, 1), cell('A', Color::Red));
+        assert_eq!(rendered_cell(&renderer, 3, 1), cell('B', Color::Green));
+        assert_eq!(rendered_cell(&renderer, 2, 2), cell('C', Color::Yellow));
+    }
+
+    #[test]
+    fn render_mermaid_cached_background_skips_space_cells() {
+        let mut renderer = test_renderer(6, 3);
+        renderer.draw_char(1, 1, '.', Color::Blue);
+        let viewer = test_viewer(
+            vec!["zz"],
+            vec![vec![cell(' ', Color::Red), cell('Z', Color::Green)]],
+        );
+
+        render_mermaid_cached_background(
+            &mut renderer,
+            Rect {
+                x: 1,
+                y: 1,
+                width: 3,
+                height: 1,
+            },
+            &viewer,
+        );
+
+        assert_eq!(rendered_cell(&renderer, 1, 1), cell('.', Color::Blue));
+        assert_eq!(rendered_cell(&renderer, 2, 1), cell('Z', Color::Green));
+    }
+
+    #[test]
+    fn render_mermaid_cached_background_clips_rows_at_bottom() {
+        let mut renderer = test_renderer(6, 4);
+        let viewer = test_viewer(
+            vec!["first", "second"],
+            vec![vec![cell('A', Color::Red)], vec![cell('B', Color::Green)]],
+        );
+
+        render_mermaid_cached_background(
+            &mut renderer,
+            Rect {
+                x: 1,
+                y: 2,
+                width: 3,
+                height: 1,
+            },
+            &viewer,
+        );
+
+        assert_eq!(rendered_cell(&renderer, 1, 2), cell('A', Color::Red));
+        assert_eq!(rendered_cell(&renderer, 1, 3), Cell::default());
+    }
+
+    #[test]
+    fn render_mermaid_cached_background_falls_back_to_cached_lines() {
+        let mut renderer = test_renderer(8, 4);
+        let viewer = test_viewer(vec!["ab", "cd"], Vec::new());
+
+        render_mermaid_cached_background(
+            &mut renderer,
+            Rect {
+                x: 2,
+                y: 1,
+                width: 4,
+                height: 1,
+            },
+            &viewer,
+        );
+
+        assert_eq!(
+            rendered_cell(&renderer, 2, 1),
+            cell('a', MERMAID_CONNECTOR_COLOR)
+        );
+        assert_eq!(
+            rendered_cell(&renderer, 3, 1),
+            cell('b', MERMAID_CONNECTOR_COLOR)
+        );
+        assert_eq!(rendered_cell(&renderer, 2, 2), Cell::default());
     }
 }
