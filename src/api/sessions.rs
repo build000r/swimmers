@@ -27,7 +27,7 @@ use crate::types::{
     SessionGroupInputResponse, SessionGroupInputResult, SessionInputRequest, SessionInputResponse,
     SessionListResponse, SessionPaneTailResponse, SessionState, SessionSummary,
     SessionTimelineEvent, SessionTimelinePinned, SessionTimelinePinnedItem,
-    SessionTimelineResponse, TerminalSnapshot,
+    SessionTimelineResponse, SessionTranscriptResponse, TerminalSnapshot,
 };
 
 const PANE_TAIL_LINES: usize = 300;
@@ -581,39 +581,69 @@ async fn fetch_transcript_response(
 ) -> Response {
     match remote_sessions::denamespace_for_target(session_id) {
         Ok(Some((target, remote_session_id))) => {
-            return match remote_sessions::fetch_remote_transcript(
-                &target,
-                remote_session_id,
-                query.turn_id.as_deref(),
-                query.after,
-                query.limit,
-            )
-            .await
-            {
-                Ok(response) => (StatusCode::OK, Json(response)).into_response(),
-                Err(err) => err.into_response(),
-            };
+            remote_transcript_response(&target, remote_session_id, query).await
         }
-        Ok(None) => {}
+        Ok(None) => local_transcript_response(state, session_id, query).await,
         Err(err) => return err.into_response(),
     }
+}
 
-    let summary = match fetch_live_summary(state, session_id).await {
-        Ok(Some(summary)) => summary,
-        Ok(None) => {
-            return error_response(StatusCode::NOT_FOUND, "SESSION_NOT_FOUND", None);
-        }
+async fn remote_transcript_response(
+    target: &LaunchTargetSummary,
+    remote_session_id: &str,
+    query: TranscriptQuery,
+) -> Response {
+    match remote_sessions::fetch_remote_transcript(
+        target,
+        remote_session_id,
+        query.turn_id.as_deref(),
+        query.after,
+        query.limit,
+    )
+    .await
+    {
+        Ok(response) => (StatusCode::OK, Json(response)).into_response(),
+        Err(err) => err.into_response(),
+    }
+}
+
+async fn local_transcript_response(
+    state: &Arc<AppState>,
+    session_id: &str,
+    query: TranscriptQuery,
+) -> Response {
+    let summary = match transcript_summary_for_response(state, session_id).await {
+        Ok(summary) => summary,
+        Err(response) => return response,
+    };
+
+    transcript_read_response(read_transcript_for_summary(summary, query).await)
+}
+
+async fn transcript_summary_for_response(
+    state: &Arc<AppState>,
+    session_id: &str,
+) -> Result<SessionSummary, Response> {
+    match fetch_live_summary(state, session_id).await {
+        Ok(Some(summary)) => Ok(summary),
+        Ok(None) => Err(error_response(
+            StatusCode::NOT_FOUND,
+            "SESSION_NOT_FOUND",
+            None,
+        )),
         Err(err) => {
             tracing::error!("transcript summary lookup failed: {err}");
-            return error_response(
+            Err(error_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "INTERNAL_ERROR",
                 Some(err.to_string()),
-            );
+            ))
         }
-    };
+    }
+}
 
-    match read_transcript_for_summary(summary, query).await {
+fn transcript_read_response(result: anyhow::Result<SessionTranscriptResponse>) -> Response {
+    match result {
         Ok(response) => (StatusCode::OK, Json(response)).into_response(),
         Err(err) => {
             tracing::error!("transcript read failed: {err}");
@@ -1324,7 +1354,10 @@ mod tests {
     use crate::session::supervisor::SessionSupervisor;
     use crate::thought::protocol::{SyncRequestSequence, ThoughtDeliveryState};
     use crate::thought::runtime_config::ThoughtConfig;
-    use crate::types::{RestState, StateEvidence, ThoughtSource, ThoughtState, TransportHealth};
+    use crate::types::{
+        RestState, SessionTranscriptRecord, StateEvidence, ThoughtSource, ThoughtState,
+        TransportHealth,
+    };
     use axum::body::to_bytes;
     use axum::extract::{Json, Path, Query, State};
     use axum::response::IntoResponse;
@@ -1588,6 +1621,91 @@ mod tests {
             axum::serve(listener, app)
                 .await
                 .expect("serve remote context api");
+        });
+        (format!("http://{addr}"), handle)
+    }
+
+    fn transcript_fixture(session_id: &str) -> SessionTranscriptResponse {
+        SessionTranscriptResponse {
+            session_id: session_id.to_string(),
+            available: true,
+            tool: Some("Codex".to_string()),
+            cwd: "/remote/project".to_string(),
+            selected_turn_id: None,
+            selected_turn: None,
+            next_cursor: 0,
+            records: Vec::new(),
+            turns: Vec::new(),
+            message: None,
+        }
+    }
+
+    async fn remote_transcript_ok(
+        Path(session_id): Path<String>,
+        Query(query): Query<TranscriptQuery>,
+    ) -> Json<SessionTranscriptResponse> {
+        let turn_id = query.turn_id;
+        let after = query.after.unwrap_or_default();
+        let limit = query.limit.unwrap_or_default();
+        let mut response = transcript_fixture(&session_id);
+        response.selected_turn_id = turn_id;
+        response.next_cursor = after;
+        response.records.push(SessionTranscriptRecord {
+            id: "remote-record".to_string(),
+            source: "jsonl".to_string(),
+            kind: "query_echo".to_string(),
+            role: None,
+            summary: limit.to_string(),
+            raw: "{}".to_string(),
+            byte_start: after,
+            byte_end: limit as u64,
+            timestamp: None,
+            truncated: false,
+        });
+        Json(response)
+    }
+
+    async fn remote_transcript_not_found() -> Response {
+        (
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse::with_message(
+                "SESSION_NOT_FOUND",
+                "missing remote transcript",
+            )),
+        )
+            .into_response()
+    }
+
+    async fn spawn_remote_transcript_ok_server() -> (String, tokio::task::JoinHandle<()>) {
+        let app = axum::Router::new().route(
+            "/v1/sessions/{session_id}/transcript",
+            axum::routing::get(remote_transcript_ok),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind remote transcript server");
+        let addr = listener.local_addr().expect("local addr");
+        let handle = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve remote transcript api");
+        });
+        (format!("http://{addr}"), handle)
+    }
+
+    async fn spawn_remote_transcript_error_server() -> (String, tokio::task::JoinHandle<()>) {
+        let app = axum::Router::new().route(
+            "/v1/sessions/{session_id}/transcript",
+            axum::routing::get(remote_transcript_not_found),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind remote transcript server");
+        let addr = listener.local_addr().expect("local addr");
+        let handle = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve remote transcript api");
         });
         (format!("http://{addr}"), handle)
     }
@@ -2536,7 +2654,148 @@ esac
     }
 
     #[tokio::test]
-    async fn get_transcript_returns_records_after_selected_user_turn() {
+    async fn fetch_transcript_remote_response_returns_namespaced_success() {
+        let (base_url, handle) = spawn_remote_transcript_ok_server().await;
+        let target = remote_agent_context_target(base_url);
+
+        let response = remote_transcript_response(
+            &target,
+            "remote-ready",
+            TranscriptQuery {
+                turn_id: Some("turn-1".to_string()),
+                after: Some(7),
+                limit: Some(3),
+            },
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let json = response_json(response).await;
+        assert_eq!(json["session_id"], "remote-test::remote-ready");
+        assert_eq!(json["selected_turn_id"], "turn-1");
+        assert_eq!(json["next_cursor"], 7);
+        assert_eq!(json["records"][0]["byte_start"], 7);
+        assert_eq!(json["records"][0]["byte_end"], 3);
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn fetch_transcript_remote_response_maps_remote_failure() {
+        let (base_url, handle) = spawn_remote_transcript_error_server().await;
+        let target = remote_agent_context_target(base_url);
+
+        let response = remote_transcript_response(
+            &target,
+            "missing-remote",
+            TranscriptQuery {
+                turn_id: None,
+                after: None,
+                limit: None,
+            },
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+        let json = response_json(response).await;
+        assert_eq!(json["code"], "REMOTE_SESSION_REQUEST_FAILED");
+        assert!(json["message"]
+            .as_str()
+            .expect("message")
+            .contains("missing remote transcript"));
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn fetch_transcript_response_prefers_remote_namespace_error_over_local_session() {
+        let state = test_state();
+        let session_id =
+            remote_sessions::namespace_session_id("not-configured-transcript-target", "shadow");
+        let _write_rx =
+            insert_summary_test_handle(&state, summary(&session_id, SessionState::Idle)).await;
+
+        let response = fetch_transcript_response(
+            &state,
+            &session_id,
+            TranscriptQuery {
+                turn_id: None,
+                after: None,
+                limit: None,
+            },
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let json = response_json(response).await;
+        assert_eq!(json["code"], "LAUNCH_TARGET_UNKNOWN");
+    }
+
+    #[tokio::test]
+    async fn fetch_transcript_response_returns_not_found_for_missing_local_session() {
+        let response = fetch_transcript_response(
+            &test_state(),
+            "missing-transcript",
+            TranscriptQuery {
+                turn_id: None,
+                after: None,
+                limit: None,
+            },
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let json = response_json(response).await;
+        assert_eq!(json["code"], "SESSION_NOT_FOUND");
+    }
+
+    #[tokio::test]
+    async fn fetch_transcript_response_returns_internal_error_when_summary_lookup_fails() {
+        let state = test_state();
+        let worker = insert_dropping_summary_test_handle(&state, "sess-summary-error").await;
+
+        let response = fetch_transcript_response(
+            &state,
+            "sess-summary-error",
+            TranscriptQuery {
+                turn_id: None,
+                after: None,
+                limit: None,
+            },
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let json = response_json(response).await;
+        assert_eq!(json["code"], "INTERNAL_ERROR");
+        assert!(json["message"]
+            .as_str()
+            .expect("message")
+            .contains("session summary actor dropped reply"));
+        worker.await.expect("summary worker");
+    }
+
+    #[tokio::test]
+    async fn fetch_transcript_read_response_returns_ok_for_successful_read() {
+        let response = transcript_read_response(Ok(transcript_fixture("sess-read-ok")));
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let json = response_json(response).await;
+        assert_eq!(json["session_id"], "sess-read-ok");
+        assert_eq!(json["available"], true);
+        assert_eq!(json["cwd"], "/remote/project");
+    }
+
+    #[tokio::test]
+    async fn fetch_transcript_read_response_returns_internal_error_for_read_failure() {
+        let response = transcript_read_response(Err(anyhow::anyhow!("transcript read failed")));
+
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let json = response_json(response).await;
+        assert_eq!(json["code"], "INTERNAL_ERROR");
+        assert_eq!(json["message"], "transcript read failed");
+    }
+
+    #[tokio::test]
+    async fn fetch_transcript_get_returns_records_after_selected_user_turn() {
         let _lock = crate::test_support::ENV_LOCK
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());

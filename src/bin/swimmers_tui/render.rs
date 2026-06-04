@@ -222,6 +222,52 @@ fn render_balls_theme_body(
     }
 }
 
+fn balls_theme_cord_style(
+    kind: SpriteKind,
+    unverified: bool,
+    selected: bool,
+) -> BallsThemeCordStyle {
+    BallsThemeCordStyle {
+        ch: balls_theme_cord_char(kind, unverified),
+        color: if selected {
+            Color::White
+        } else {
+            Color::DarkGrey
+        },
+    }
+}
+
+fn balls_theme_cord_char(kind: SpriteKind, unverified: bool) -> char {
+    if unverified {
+        // Sparse/dashed cord; visually distinct from `|`, `:`, `!`, `x`.
+        '\''
+    } else {
+        BALLS_CORD_CHARS_BY_KIND[kind as usize]
+    }
+}
+
+fn balls_theme_body_rows(
+    kind: SpriteKind,
+    unverified: bool,
+    on_floor: bool,
+) -> &'static [&'static str] {
+    if unverified {
+        // Ghost body with an explicit `?` overlay; drop distance still comes
+        // from the detected kind so uncertainty does not erase state shape.
+        return BALLS_UNVERIFIED_BODY_ROWS;
+    }
+    balls_theme_verified_body_rows(kind, on_floor)
+}
+
+fn balls_theme_verified_body_rows(kind: SpriteKind, on_floor: bool) -> &'static [&'static str] {
+    let rows_by_kind = if on_floor {
+        &BALLS_FLOOR_BODY_ROWS_BY_KIND
+    } else {
+        &BALLS_AIR_BODY_ROWS_BY_KIND
+    };
+    rows_by_kind[kind as usize]
+}
+
 fn render_balls_theme_ball(
     renderer: &mut Renderer,
     slot: BallsThemeSlot<'_>,
@@ -236,57 +282,12 @@ fn render_balls_theme_ball(
     // transport are the cases where an operator should not trust a
     // confident-looking ball.
     let unverified = session_state_evidence_unverified(&slot.entity.session);
-    let cord_char = if unverified {
-        // Sparse/dashed cord; visually distinct from `|`, `:`, `!`, `x`.
-        '\''
-    } else {
-        match kind {
-            SpriteKind::Attention => '!',
-            SpriteKind::Busy => ':',
-            SpriteKind::Error | SpriteKind::Exited => 'x',
-            _ => '|',
-        }
-    };
-    let cord_color = if selected {
-        Color::White
-    } else {
-        Color::DarkGrey
-    };
+    let cord = balls_theme_cord_style(kind, unverified, selected);
     for y in slot.cord_top_y..slot.ball_y {
-        renderer.draw_char(slot.anchor_x, y, cord_char, cord_color);
+        renderer.draw_char(slot.anchor_x, y, cord.ch, cord.color);
     }
 
-    let rows: &[&str] = if unverified {
-        // Ghost body — explicit `?` overlay so an unobserved ball cannot be
-        // mistaken for a confirmed one even when colors are hard to read. The
-        // drop distance is still per-kind, so the operator can see what the
-        // detector *thinks* the state is while also seeing it isn't trusted.
-        &[" .?. ", "( ? )", " `-' "]
-    } else {
-        match kind {
-            SpriteKind::Attention => &[" .-. ", "(_!_)"],
-            SpriteKind::Active => &[" .-. ", "(   )", " `-' "],
-            SpriteKind::Busy => &[" .-. ", "( * )", " `-' "],
-            SpriteKind::Error => &[" .-. ", "( x )", " `-' "],
-            SpriteKind::Drowsy => &[" .-. ", "(   )", "(   )", " `-' "],
-            SpriteKind::Sleeping => &[" .-. ", "( z )", "(   )", " `-' "],
-            SpriteKind::DeepSleep => {
-                if slot.on_floor {
-                    &[" .-. ", "( z )", "(   )", "(___)"]
-                } else {
-                    &[" .-. ", "( z )", "(   )", " `-' "]
-                }
-            }
-            SpriteKind::Exited => {
-                if slot.on_floor {
-                    &[" .-. ", "( x )", "(   )", "(___)"]
-                } else {
-                    &[" .-. ", "( x )", "(   )", " `-' "]
-                }
-            }
-        }
-    };
-
+    let rows = balls_theme_body_rows(kind, unverified, slot.on_floor);
     for (dy, row) in rows.iter().enumerate() {
         renderer.draw_text(slot.ball_x, slot.ball_y + dy as u16, row, color);
     }
@@ -720,9 +721,146 @@ pub(crate) fn selected_label(name: Option<&String>) -> String {
     name.cloned().unwrap_or_else(|| "session".to_string())
 }
 
+const BALLS_UNVERIFIED_BODY_ROWS: &[&str] = &[" .?. ", "( ? )", " `-' "];
+const BALLS_ATTENTION_BODY_ROWS: &[&str] = &[" .-. ", "(_!_)"];
+const BALLS_ACTIVE_BODY_ROWS: &[&str] = &[" .-. ", "(   )", " `-' "];
+const BALLS_BUSY_BODY_ROWS: &[&str] = &[" .-. ", "( * )", " `-' "];
+const BALLS_ERROR_BODY_ROWS: &[&str] = &[" .-. ", "( x )", " `-' "];
+const BALLS_DROWSY_BODY_ROWS: &[&str] = &[" .-. ", "(   )", "(   )", " `-' "];
+const BALLS_SLEEPING_BODY_ROWS: &[&str] = &[" .-. ", "( z )", "(   )", " `-' "];
+const BALLS_DEEP_SLEEP_FLOOR_BODY_ROWS: &[&str] = &[" .-. ", "( z )", "(   )", "(___)"];
+const BALLS_EXITED_FLOOR_BODY_ROWS: &[&str] = &[" .-. ", "( x )", "(   )", "(___)"];
+// Table order mirrors `SpriteKind`; the balls planner tests cover every entry.
+const BALLS_CORD_CHARS_BY_KIND: [char; 8] = ['|', ':', '|', '|', '|', '!', 'x', 'x'];
+const BALLS_AIR_BODY_ROWS_BY_KIND: [&[&str]; 8] = [
+    BALLS_ACTIVE_BODY_ROWS,
+    BALLS_BUSY_BODY_ROWS,
+    BALLS_DROWSY_BODY_ROWS,
+    BALLS_SLEEPING_BODY_ROWS,
+    BALLS_SLEEPING_BODY_ROWS,
+    BALLS_ATTENTION_BODY_ROWS,
+    BALLS_ERROR_BODY_ROWS,
+    BALLS_ERROR_BODY_ROWS,
+];
+const BALLS_FLOOR_BODY_ROWS_BY_KIND: [&[&str]; 8] = [
+    BALLS_ACTIVE_BODY_ROWS,
+    BALLS_BUSY_BODY_ROWS,
+    BALLS_DROWSY_BODY_ROWS,
+    BALLS_SLEEPING_BODY_ROWS,
+    BALLS_DEEP_SLEEP_FLOOR_BODY_ROWS,
+    BALLS_ATTENTION_BODY_ROWS,
+    BALLS_ERROR_BODY_ROWS,
+    BALLS_EXITED_FLOOR_BODY_ROWS,
+];
+
+#[derive(Clone, Copy)]
+struct BallsThemeCordStyle {
+    ch: char,
+    color: Color,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn balls_cord_style_plans_verified_and_unverified_glyphs() {
+        let cases = [
+            (SpriteKind::Attention, false, false, '!', Color::DarkGrey),
+            (SpriteKind::Busy, false, false, ':', Color::DarkGrey),
+            (SpriteKind::Error, false, false, 'x', Color::DarkGrey),
+            (SpriteKind::Exited, false, false, 'x', Color::DarkGrey),
+            (SpriteKind::Active, false, false, '|', Color::DarkGrey),
+            (SpriteKind::Drowsy, false, false, '|', Color::DarkGrey),
+            (SpriteKind::DeepSleep, false, false, '|', Color::DarkGrey),
+            (SpriteKind::Sleeping, true, false, '\'', Color::DarkGrey),
+            (SpriteKind::Active, false, true, '|', Color::White),
+        ];
+
+        for (kind, unverified, selected, expected_ch, expected_color) in cases {
+            let style = balls_theme_cord_style(kind, unverified, selected);
+
+            assert_eq!(style.ch, expected_ch, "{kind:?} cord glyph");
+            assert_eq!(style.color, expected_color, "{kind:?} cord color");
+        }
+    }
+
+    #[test]
+    fn balls_body_rows_plan_all_sprite_kinds_and_floor_variants() {
+        let cases = [
+            (
+                SpriteKind::Attention,
+                false,
+                BALLS_ATTENTION_BODY_ROWS,
+                BALLS_ATTENTION_BODY_ROWS,
+            ),
+            (
+                SpriteKind::Active,
+                false,
+                BALLS_ACTIVE_BODY_ROWS,
+                BALLS_ACTIVE_BODY_ROWS,
+            ),
+            (
+                SpriteKind::Busy,
+                false,
+                BALLS_BUSY_BODY_ROWS,
+                BALLS_BUSY_BODY_ROWS,
+            ),
+            (
+                SpriteKind::Error,
+                false,
+                BALLS_ERROR_BODY_ROWS,
+                BALLS_ERROR_BODY_ROWS,
+            ),
+            (
+                SpriteKind::Drowsy,
+                false,
+                BALLS_DROWSY_BODY_ROWS,
+                BALLS_DROWSY_BODY_ROWS,
+            ),
+            (
+                SpriteKind::Sleeping,
+                false,
+                BALLS_SLEEPING_BODY_ROWS,
+                BALLS_SLEEPING_BODY_ROWS,
+            ),
+            (
+                SpriteKind::DeepSleep,
+                false,
+                BALLS_SLEEPING_BODY_ROWS,
+                BALLS_DEEP_SLEEP_FLOOR_BODY_ROWS,
+            ),
+            (
+                SpriteKind::Exited,
+                false,
+                BALLS_ERROR_BODY_ROWS,
+                BALLS_EXITED_FLOOR_BODY_ROWS,
+            ),
+        ];
+
+        for (kind, unverified, airborne_rows, floor_rows) in cases {
+            assert_eq!(
+                balls_theme_body_rows(kind, unverified, false),
+                airborne_rows,
+                "{kind:?} airborne rows"
+            );
+            assert_eq!(
+                balls_theme_body_rows(kind, unverified, true),
+                floor_rows,
+                "{kind:?} floor rows"
+            );
+            assert_eq!(
+                balls_theme_body_rows(kind, true, false),
+                BALLS_UNVERIFIED_BODY_ROWS,
+                "{kind:?} unverified airborne rows"
+            );
+            assert_eq!(
+                balls_theme_body_rows(kind, true, true),
+                BALLS_UNVERIFIED_BODY_ROWS,
+                "{kind:?} unverified floor rows"
+            );
+        }
+    }
 
     #[test]
     fn truncate_label_respects_terminal_columns_for_mixed_width_text() {

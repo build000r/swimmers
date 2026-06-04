@@ -102,6 +102,17 @@ struct PendingEntry {
 
 type RepoProbe = (Option<bool>, Option<RepoActionStatus>);
 
+struct RestartActionPlan {
+    canonical: PathBuf,
+    commands: Vec<(String, String)>,
+}
+
+enum RepoSearchVisit {
+    Repository,
+    Descend,
+    Skip,
+}
+
 #[derive(Clone)]
 struct RepoSearchCacheEntry {
     roots: Vec<PathBuf>,
@@ -620,53 +631,82 @@ fn repo_search_entry(path: &Path) -> DirEntry {
     }
 }
 
-fn scan_repo_search_roots_sync(roots: &[PathBuf], max_depth: usize) -> Vec<DirEntry> {
-    let mut queue = VecDeque::new();
-    for root in roots {
-        queue.push_back((root.clone(), 0usize));
+fn repo_search_queue(roots: &[PathBuf]) -> VecDeque<(PathBuf, usize)> {
+    roots.iter().cloned().map(|root| (root, 0usize)).collect()
+}
+
+fn unseen_repo_search_path(path: PathBuf, seen: &mut BTreeSet<PathBuf>) -> Option<PathBuf> {
+    let canonical = path.canonicalize().unwrap_or(path);
+    seen.insert(canonical.clone()).then_some(canonical)
+}
+
+fn repo_search_visit(path: &Path, depth: usize, max_depth: usize) -> RepoSearchVisit {
+    if path.join(".git").exists() {
+        return RepoSearchVisit::Repository;
     }
-
-    let mut seen = BTreeSet::new();
-    let mut repos = Vec::new();
-    while let Some((path, depth)) = queue.pop_front() {
-        let canonical = path.canonicalize().unwrap_or(path);
-        if !seen.insert(canonical.clone()) {
-            continue;
-        }
-
-        if canonical.join(".git").exists() {
-            repos.push(repo_search_entry(&canonical));
-            continue;
-        }
-
-        if depth >= max_depth {
-            continue;
-        }
-
-        let Ok(read_dir) = std::fs::read_dir(&canonical) else {
-            continue;
-        };
-        for child in read_dir.flatten() {
-            let Ok(file_type) = child.file_type() else {
-                continue;
-            };
-            if !file_type.is_dir() {
-                continue;
-            }
-            let name = child.file_name().to_string_lossy().into_owned();
-            if !should_descend_for_repo_search(&name) {
-                continue;
-            }
-            queue.push_back((child.path(), depth + 1));
-        }
+    if depth >= max_depth {
+        return RepoSearchVisit::Skip;
     }
+    RepoSearchVisit::Descend
+}
 
+fn repo_search_child_dir_path(child: std::fs::DirEntry) -> Option<PathBuf> {
+    let file_type = child.file_type().ok()?;
+    file_type.is_dir().then(|| ())?;
+    let name = child.file_name().to_string_lossy().into_owned();
+    should_descend_for_repo_search(&name).then(|| child.path())
+}
+
+fn repo_search_child_dirs(path: &Path) -> Vec<PathBuf> {
+    let Ok(read_dir) = std::fs::read_dir(path) else {
+        return Vec::new();
+    };
+    read_dir
+        .flatten()
+        .filter_map(repo_search_child_dir_path)
+        .collect()
+}
+
+fn enqueue_repo_search_children(
+    queue: &mut VecDeque<(PathBuf, usize)>,
+    parent: &Path,
+    next_depth: usize,
+) {
+    queue.extend(
+        repo_search_child_dirs(parent)
+            .into_iter()
+            .map(|child| (child, next_depth)),
+    );
+}
+
+fn sort_repo_search_entries(repos: &mut [DirEntry]) {
     repos.sort_by(|left, right| {
         left.name
             .to_lowercase()
             .cmp(&right.name.to_lowercase())
             .then_with(|| left.full_path.cmp(&right.full_path))
     });
+}
+
+fn scan_repo_search_roots_sync(roots: &[PathBuf], max_depth: usize) -> Vec<DirEntry> {
+    let mut queue = repo_search_queue(roots);
+    let mut seen = BTreeSet::new();
+    let mut repos = Vec::new();
+    while let Some((path, depth)) = queue.pop_front() {
+        let Some(canonical) = unseen_repo_search_path(path, &mut seen) else {
+            continue;
+        };
+
+        match repo_search_visit(&canonical, depth, max_depth) {
+            RepoSearchVisit::Repository => repos.push(repo_search_entry(&canonical)),
+            RepoSearchVisit::Descend => {
+                enqueue_repo_search_children(&mut queue, &canonical, depth + 1);
+            }
+            RepoSearchVisit::Skip => {}
+        }
+    }
+
+    sort_repo_search_entries(&mut repos);
     repos
 }
 
@@ -1515,11 +1555,7 @@ fn repo_action_error(error: &io::Error) -> ApiServiceError {
     }
 }
 
-pub async fn start_restart_action(
-    state: Arc<AppState>,
-    path: &str,
-    kind: RepoActionKind,
-) -> Result<DirRepoActionResponse, ApiServiceError> {
+fn require_repo_action_path(path: &str) -> Result<&str, ApiServiceError> {
     let requested_path = path.trim();
     if requested_path.is_empty() {
         return Err(ApiServiceError::new(
@@ -1528,34 +1564,26 @@ pub async fn start_restart_action(
             "path is required",
         ));
     }
+    Ok(requested_path)
+}
 
-    let base = dirs_base_path();
-    let target = PathBuf::from(requested_path);
-    let (canonical_base, canonical) = resolve_target_path(base, target)?;
-
-    let Some(config) = resolve_dir_config(&canonical_base) else {
-        return Err(ApiServiceError::new(
+fn restart_action_config(
+    canonical_base: &Path,
+) -> Result<&'static OverlayDirConfig, ApiServiceError> {
+    resolve_dir_config(canonical_base).ok_or_else(|| {
+        ApiServiceError::new(
             StatusCode::BAD_REQUEST,
             "NO_OVERLAY",
             "no overlay configuration found for this path",
-        ));
-    };
+        )
+    })
+}
 
-    let context = OverlayServiceContext {
-        base_path: config.base_path.clone(),
-        services: config.services.clone(),
-    };
-    let matched_services = services_for_directory(&canonical, &context);
-    if matched_services.is_empty() {
-        return Err(ApiServiceError::new(
-            StatusCode::BAD_REQUEST,
-            "NO_SERVICE_FOR_PATH",
-            "no overlay service is mapped to this folder",
-        ));
-    }
-
-    let commands: Vec<(String, String)> = config
-        .services
+fn collect_restart_commands(
+    services: &[OverlayServiceEntry],
+    matched_services: &[String],
+) -> Vec<(String, String)> {
+    services
         .iter()
         .filter(|service| matched_services.contains(&service.name))
         .filter_map(|service| {
@@ -1564,8 +1592,22 @@ pub async fn start_restart_action(
                 .as_ref()
                 .map(|command| (service.name.clone(), command.clone()))
         })
-        .collect();
+        .collect()
+}
 
+fn restart_commands_for_matched_services(
+    services: &[OverlayServiceEntry],
+    matched_services: &[String],
+) -> Result<Vec<(String, String)>, ApiServiceError> {
+    if matched_services.is_empty() {
+        return Err(ApiServiceError::new(
+            StatusCode::BAD_REQUEST,
+            "NO_SERVICE_FOR_PATH",
+            "no overlay service is mapped to this folder",
+        ));
+    }
+
+    let commands = collect_restart_commands(services, matched_services);
     if commands.is_empty() {
         return Err(ApiServiceError::new(
             StatusCode::BAD_REQUEST,
@@ -1573,6 +1615,43 @@ pub async fn start_restart_action(
             "matched services have no restart command configured",
         ));
     }
+    Ok(commands)
+}
+
+fn restart_commands_for_path(
+    canonical: &Path,
+    config: &OverlayDirConfig,
+) -> Result<Vec<(String, String)>, ApiServiceError> {
+    let context = OverlayServiceContext {
+        base_path: config.base_path.clone(),
+        services: config.services.clone(),
+    };
+    let matched_services = services_for_directory(canonical, &context);
+    restart_commands_for_matched_services(&config.services, &matched_services)
+}
+
+fn plan_restart_action(path: &str) -> Result<RestartActionPlan, ApiServiceError> {
+    let requested_path = require_repo_action_path(path)?;
+    let target = PathBuf::from(requested_path);
+    let (canonical_base, canonical) = resolve_target_path(dirs_base_path(), target)?;
+    let config = restart_action_config(&canonical_base)?;
+    let commands = restart_commands_for_path(&canonical, &config)?;
+
+    Ok(RestartActionPlan {
+        canonical,
+        commands,
+    })
+}
+
+pub async fn start_restart_action(
+    state: Arc<AppState>,
+    path: &str,
+    kind: RepoActionKind,
+) -> Result<DirRepoActionResponse, ApiServiceError> {
+    let RestartActionPlan {
+        canonical,
+        commands,
+    } = plan_restart_action(path)?;
 
     let executor: Arc<dyn RepoActionExecutor> = Arc::new(RestartExecutor { commands });
     state
@@ -2173,6 +2252,16 @@ mod tests {
         })
     }
 
+    fn overlay_service(name: &str, dir: &str, restart: Option<&str>) -> OverlayServiceEntry {
+        OverlayServiceEntry {
+            name: name.to_string(),
+            dir: dir.to_string(),
+            health_url: None,
+            restart: restart.map(str::to_string),
+            open_url: None,
+        }
+    }
+
     #[test]
     fn scan_repo_search_roots_finds_git_repositories_under_roots() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -2216,6 +2305,144 @@ mod tests {
         let parent = parent.canonicalize().expect("canonical parent");
 
         assert_eq!(paths, vec![parent.to_string_lossy().into_owned()]);
+    }
+
+    #[test]
+    fn repo_search_visit_treats_repositories_as_terminal_at_max_depth() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let repo = dir.path().join("repo");
+        std::fs::create_dir_all(repo.join(".git")).expect("create git marker");
+
+        assert!(matches!(
+            repo_search_visit(
+                &repo,
+                REPO_SEARCH_DEFAULT_MAX_DEPTH,
+                REPO_SEARCH_DEFAULT_MAX_DEPTH
+            ),
+            RepoSearchVisit::Repository
+        ));
+    }
+
+    #[test]
+    fn repo_search_visit_skips_non_repositories_at_max_depth() {
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        assert!(matches!(
+            repo_search_visit(
+                dir.path(),
+                REPO_SEARCH_DEFAULT_MAX_DEPTH,
+                REPO_SEARCH_DEFAULT_MAX_DEPTH
+            ),
+            RepoSearchVisit::Skip
+        ));
+    }
+
+    #[test]
+    fn repo_search_child_dirs_filters_non_dirs_and_blocked_names() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir_all(dir.path().join("src")).expect("src");
+        std::fs::create_dir_all(dir.path().join("target")).expect("target");
+        std::fs::create_dir_all(dir.path().join(".hidden")).expect("hidden");
+        std::fs::write(dir.path().join("README.md"), "notes").expect("file");
+
+        let child_names = repo_search_child_dirs(dir.path())
+            .into_iter()
+            .map(|path| {
+                path.file_name()
+                    .expect("file name")
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect::<BTreeSet<_>>();
+
+        assert_eq!(child_names, BTreeSet::from(["src".to_string()]));
+    }
+
+    #[test]
+    fn scan_repo_search_roots_respects_max_depth_for_non_repo_dirs() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().join("repos");
+        let direct = root.join("direct");
+        let nested = root.join("container").join("nested");
+        std::fs::create_dir_all(direct.join(".git")).expect("direct repo");
+        std::fs::create_dir_all(nested.join(".git")).expect("nested repo");
+
+        let entries = scan_repo_search_roots_sync(&[root], 1);
+        let paths = entries
+            .iter()
+            .filter_map(|entry| entry.full_path.clone())
+            .collect::<BTreeSet<_>>();
+        let direct = direct.canonicalize().expect("canonical direct");
+        let nested = nested.canonicalize().expect("canonical nested");
+
+        assert!(paths.contains(&direct.to_string_lossy().into_owned()));
+        assert!(!paths.contains(&nested.to_string_lossy().into_owned()));
+    }
+
+    #[test]
+    fn scan_repo_search_roots_skips_duplicate_canonical_roots() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().join("repos");
+        let repo = root.join("swimmers");
+        std::fs::create_dir_all(repo.join(".git")).expect("repo");
+
+        let entries =
+            scan_repo_search_roots_sync(&[root.clone(), root], REPO_SEARCH_DEFAULT_MAX_DEPTH);
+        let paths = entries
+            .iter()
+            .filter_map(|entry| entry.full_path.clone())
+            .collect::<Vec<_>>();
+        let repo = repo.canonicalize().expect("canonical repo");
+
+        assert_eq!(paths, vec![repo.to_string_lossy().into_owned()]);
+    }
+
+    #[test]
+    fn restart_commands_for_matched_services_collects_only_matched_restart_commands() {
+        let services = vec![
+            overlay_service("web", "web", Some("restart web")),
+            overlay_service("api", "api", Some("restart api")),
+            overlay_service("worker", "worker", None),
+            overlay_service("db", "db", Some("restart db")),
+        ];
+        let matched = vec!["api".to_string(), "worker".to_string(), "web".to_string()];
+
+        let commands =
+            restart_commands_for_matched_services(&services, &matched).expect("commands");
+
+        assert_eq!(
+            commands,
+            vec![
+                ("web".to_string(), "restart web".to_string()),
+                ("api".to_string(), "restart api".to_string())
+            ]
+        );
+    }
+
+    #[test]
+    fn restart_commands_for_matched_services_rejects_no_matched_services() {
+        let services = vec![overlay_service("web", "web", Some("restart web"))];
+
+        let err = restart_commands_for_matched_services(&services, &[])
+            .expect_err("empty matched services should fail");
+
+        assert_eq!(err.status, StatusCode::BAD_REQUEST);
+        assert_eq!(err.code, "NO_SERVICE_FOR_PATH");
+    }
+
+    #[test]
+    fn restart_commands_for_matched_services_rejects_no_restart_commands() {
+        let services = vec![
+            overlay_service("web", "web", None),
+            overlay_service("api", "api", Some("restart api")),
+        ];
+        let matched = vec!["web".to_string()];
+
+        let err = restart_commands_for_matched_services(&services, &matched)
+            .expect_err("matched service without restart command should fail");
+
+        assert_eq!(err.status, StatusCode::BAD_REQUEST);
+        assert_eq!(err.code, "NO_RESTART_COMMAND");
     }
 
     // Empty roots short-circuit before any cache access, so this test never

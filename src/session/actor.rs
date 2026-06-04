@@ -2141,6 +2141,57 @@ struct ProcessEntriesSnapshot {
     fresh: bool,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum ProcessSnapshotToolDetection {
+    Detected(String),
+    Stale,
+    NotFound,
+}
+
+struct ProcessTreeIndex {
+    by_pid: HashMap<u32, ProcessEntry>,
+    children: HashMap<u32, Vec<u32>>,
+}
+
+impl ProcessTreeIndex {
+    fn from_entries(entries: Vec<ProcessEntry>) -> Self {
+        let mut by_pid = HashMap::new();
+        let mut children: HashMap<u32, Vec<u32>> = HashMap::new();
+
+        for entry in entries {
+            children.entry(entry.ppid).or_default().push(entry.pid);
+            by_pid.insert(entry.pid, entry);
+        }
+
+        Self { by_pid, children }
+    }
+
+    fn detect_tool_bfs(&self, root_pid: u32) -> Option<&'static str> {
+        let mut queue = VecDeque::from([root_pid]);
+        let mut visited = HashSet::new();
+
+        while let Some(pid) = queue.pop_front() {
+            if !visited.insert(pid) {
+                continue;
+            }
+
+            if let Some(tool) = self
+                .by_pid
+                .get(&pid)
+                .and_then(detect_tool_from_process_entry)
+            {
+                return Some(tool);
+            }
+
+            if let Some(child_pids) = self.children.get(&pid) {
+                queue.extend(child_pids.iter().copied());
+            }
+        }
+
+        None
+    }
+}
+
 static PROCESS_ENTRIES_CACHE: OnceLock<Mutex<ProcessEntriesCache>> = OnceLock::new();
 
 fn process_entries_cache() -> &'static Mutex<ProcessEntriesCache> {
@@ -2156,45 +2207,32 @@ async fn query_tool_from_tmux_process_tree(tmux_name: &str) -> anyhow::Result<Op
 
     let pane_pid = query_tmux_pane_pid(tmux_name).await?;
     let snapshot = query_process_entries().await?;
+
+    match detect_tool_from_process_snapshot(pane_pid, snapshot) {
+        ProcessSnapshotToolDetection::Detected(tool) => Ok(Some(tool)),
+        ProcessSnapshotToolDetection::Stale => {
+            debug!(
+                tmux_name,
+                "skipping tool detection from stale process snapshot"
+            );
+            Ok(None)
+        }
+        ProcessSnapshotToolDetection::NotFound => Ok(None),
+    }
+}
+
+fn detect_tool_from_process_snapshot(
+    pane_pid: u32,
+    snapshot: ProcessEntriesSnapshot,
+) -> ProcessSnapshotToolDetection {
     if !snapshot.fresh {
-        debug!(
-            tmux_name,
-            "skipping tool detection from stale process snapshot"
-        );
-        return Ok(None);
-    }
-    let entries = snapshot.entries;
-
-    let mut by_pid: HashMap<u32, ProcessEntry> = HashMap::new();
-    let mut children: HashMap<u32, Vec<u32>> = HashMap::new();
-
-    for entry in entries {
-        children.entry(entry.ppid).or_default().push(entry.pid);
-        by_pid.insert(entry.pid, entry);
+        return ProcessSnapshotToolDetection::Stale;
     }
 
-    let mut queue = VecDeque::from([pane_pid]);
-    let mut visited: HashSet<u32> = HashSet::new();
-
-    while let Some(pid) = queue.pop_front() {
-        if !visited.insert(pid) {
-            continue;
-        }
-
-        if let Some(entry) = by_pid.get(&pid) {
-            if let Some(tool) = detect_tool_from_process_entry(entry) {
-                return Ok(Some(tool.to_string()));
-            }
-        }
-
-        if let Some(child_pids) = children.get(&pid) {
-            for child_pid in child_pids {
-                queue.push_back(*child_pid);
-            }
-        }
-    }
-
-    Ok(None)
+    ProcessTreeIndex::from_entries(snapshot.entries)
+        .detect_tool_bfs(pane_pid)
+        .map(|tool| ProcessSnapshotToolDetection::Detected(tool.to_string()))
+        .unwrap_or(ProcessSnapshotToolDetection::NotFound)
 }
 
 /// Result of a process-tree liveness check for a tmux pane.
@@ -2659,18 +2697,19 @@ mod tests {
     use super::{
         capture_pane_tail_with_command, compare_session_state_change, compute_pane_liveness,
         cwd_from_osc7_payload, cwd_update, detect_tool_from_command_line,
-        detect_tool_from_process_entry, extract_cwd_from_title, find_osc_payload_end,
-        line_looks_prompt_like, normalize_submit_line_text, osc7_cwd_update_plan, osc_payloads,
-        output_counts_as_meaningful_activity, parse_process_entry, percent_decode,
-        process_entries_cache, pty_read_error_log, pty_read_step, query_tmux_session_created,
-        query_tool_from_tmux_process_tree, resolve_tmux_colorterm, resolve_tmux_term,
-        resolve_tmux_terminal_env, run_bounded_tmux_command, should_clear_startup_replay,
-        should_refresh_cwd_from_tmux, should_refresh_tool_from_tmux,
-        state_detector_for_initial_tool, submit_line_fallback_input, subscriber_cap_rejection,
-        title_cwd_update, title_tool_update, tmux_input_chunks, tool_refresh_changes_tool,
-        visible_output_is_meaningful, write_and_flush_input, write_input_counts_as_activity,
-        ControlEvent, LivenessReconciliation, LivenessRefresh, OutputFrame, PaneLiveness,
-        ProcessEntriesCache, ProcessEntry, PtyReadErrorLog, PtyReadLoopStep, SessionActor,
+        detect_tool_from_process_entry, detect_tool_from_process_snapshot, extract_cwd_from_title,
+        find_osc_payload_end, line_looks_prompt_like, normalize_submit_line_text,
+        osc7_cwd_update_plan, osc_payloads, output_counts_as_meaningful_activity,
+        parse_process_entry, percent_decode, process_entries_cache, pty_read_error_log,
+        pty_read_step, query_tmux_session_created, query_tool_from_tmux_process_tree,
+        resolve_tmux_colorterm, resolve_tmux_term, resolve_tmux_terminal_env,
+        run_bounded_tmux_command, should_clear_startup_replay, should_refresh_cwd_from_tmux,
+        should_refresh_tool_from_tmux, state_detector_for_initial_tool, submit_line_fallback_input,
+        subscriber_cap_rejection, title_cwd_update, title_tool_update, tmux_input_chunks,
+        tool_refresh_changes_tool, visible_output_is_meaningful, write_and_flush_input,
+        write_input_counts_as_activity, ControlEvent, LivenessReconciliation, LivenessRefresh,
+        OutputFrame, PaneLiveness, ProcessEntriesCache, ProcessEntriesSnapshot, ProcessEntry,
+        ProcessSnapshotToolDetection, PtyReadErrorLog, PtyReadLoopStep, SessionActor,
         SessionCommand, SubscribeOutcome, TmuxInputChunk, CWD_REFRESH_MIN_INTERVAL,
         MAX_OUTPUT_SUBSCRIBERS_PER_SESSION, PROCESS_ENTRIES_CACHE_TTL, TOOL_REFRESH_MIN_INTERVAL,
     };
@@ -3500,6 +3539,101 @@ fi
         assert_eq!(
             detect_tool_from_process_entry(&from_args),
             Some("Claude Code")
+        );
+    }
+
+    #[test]
+    fn query_tool_from_tmux_process_tree_helper_detects_comm_before_args() {
+        let from_comm = ProcessEntriesSnapshot {
+            fresh: true,
+            entries: vec![
+                tool_proc(101, 1, "bash", "bash"),
+                tool_proc(102, 101, "codex", "/usr/local/bin/claude --print"),
+            ],
+        };
+        assert_eq!(
+            detect_tool_from_process_snapshot(101, from_comm),
+            ProcessSnapshotToolDetection::Detected("Codex".to_string())
+        );
+
+        let from_args = ProcessEntriesSnapshot {
+            fresh: true,
+            entries: vec![
+                tool_proc(101, 1, "bash", "bash"),
+                tool_proc(102, 101, "node", "/usr/local/bin/claude --print"),
+            ],
+        };
+        assert_eq!(
+            detect_tool_from_process_snapshot(101, from_args),
+            ProcessSnapshotToolDetection::Detected("Claude Code".to_string())
+        );
+    }
+
+    #[test]
+    fn query_tool_from_tmux_process_tree_helper_uses_bfs_order() {
+        let snapshot = ProcessEntriesSnapshot {
+            fresh: true,
+            entries: vec![
+                tool_proc(101, 1, "bash", "bash"),
+                tool_proc(102, 101, "node", "node worker"),
+                tool_proc(103, 101, "codex", "codex"),
+                tool_proc(104, 102, "claude", "claude"),
+            ],
+        };
+
+        assert_eq!(
+            detect_tool_from_process_snapshot(101, snapshot),
+            ProcessSnapshotToolDetection::Detected("Codex".to_string())
+        );
+    }
+
+    #[test]
+    fn query_tool_from_tmux_process_tree_helper_preserves_child_order() {
+        let snapshot = ProcessEntriesSnapshot {
+            fresh: true,
+            entries: vec![
+                tool_proc(101, 1, "bash", "bash"),
+                tool_proc(102, 101, "claude", "claude"),
+                tool_proc(103, 101, "codex", "codex"),
+            ],
+        };
+
+        assert_eq!(
+            detect_tool_from_process_snapshot(101, snapshot),
+            ProcessSnapshotToolDetection::Detected("Claude Code".to_string())
+        );
+    }
+
+    #[test]
+    fn query_tool_from_tmux_process_tree_helper_handles_cycles() {
+        let snapshot = ProcessEntriesSnapshot {
+            fresh: true,
+            entries: vec![
+                tool_proc(101, 103, "bash", "bash"),
+                tool_proc(102, 101, "node", "node worker"),
+                tool_proc(103, 102, "python", "python worker"),
+            ],
+        };
+
+        assert_eq!(
+            detect_tool_from_process_snapshot(101, snapshot),
+            ProcessSnapshotToolDetection::NotFound
+        );
+    }
+
+    #[test]
+    fn query_tool_from_tmux_process_tree_helper_marks_stale_snapshots() {
+        let snapshot = ProcessEntriesSnapshot {
+            fresh: false,
+            entries: vec![
+                tool_proc(101, 1, "bash", "bash"),
+                tool_proc(102, 101, "codex", "codex"),
+            ],
+        };
+
+        assert_eq!(
+            detect_tool_from_process_snapshot(101, snapshot),
+            ProcessSnapshotToolDetection::Stale
         );
     }
 
@@ -4421,6 +4555,16 @@ exit 1
             pcpu,
             comm: "test".to_string(),
             args: String::new(),
+        }
+    }
+
+    fn tool_proc(pid: u32, ppid: u32, comm: &str, args: &str) -> ProcessEntry {
+        ProcessEntry {
+            pid,
+            ppid,
+            pcpu: 0.0,
+            comm: comm.to_string(),
+            args: args.to_string(),
         }
     }
 

@@ -2526,21 +2526,106 @@ mod tests {
         bin_dir: &std::path::Path,
         original_path: Option<&std::ffi::OsStr>,
     ) -> std::ffi::OsString {
-        let mut entries = vec![bin_dir.as_os_str().to_os_string()];
-        if let Some(existing) = original_path {
-            entries.extend(std::env::split_paths(existing).map(|path| path.into_os_string()));
+        std::env::join_paths(test_path_entries(bin_dir, original_path)).expect("path")
+    }
+
+    fn test_path_entries(
+        bin_dir: &std::path::Path,
+        original_path: Option<&std::ffi::OsStr>,
+    ) -> Vec<std::ffi::OsString> {
+        let mut entries = test_path_entries_without_system_dirs(bin_dir, original_path);
+        append_existing_system_path_entries(&mut entries);
+        entries
+    }
+
+    fn test_path_entries_without_system_dirs(
+        bin_dir: &std::path::Path,
+        original_path: Option<&std::ffi::OsStr>,
+    ) -> Vec<std::ffi::OsString> {
+        std::iter::once(bin_dir.as_os_str().to_os_string())
+            .chain(
+                original_path
+                    .into_iter()
+                    .flat_map(std::env::split_paths)
+                    .map(|path| path.into_os_string()),
+            )
+            .collect()
+    }
+
+    fn append_existing_system_path_entries(entries: &mut Vec<std::ffi::OsString>) {
+        for system_dir in ["/bin", "/usr/bin"].into_iter().map(std::path::Path::new) {
+            append_existing_system_path_entry(entries, system_dir);
         }
-        for system_dir in ["/bin", "/usr/bin"] {
-            let system_dir = std::path::Path::new(system_dir);
-            if system_dir.is_dir()
-                && !entries
-                    .iter()
-                    .any(|entry| std::path::Path::new(entry) == system_dir)
-            {
-                entries.push(system_dir.as_os_str().to_os_string());
-            }
+    }
+
+    fn append_existing_system_path_entry(
+        entries: &mut Vec<std::ffi::OsString>,
+        system_dir: &std::path::Path,
+    ) {
+        if let Some(entry) = system_path_entry_to_append(entries, system_dir) {
+            entries.push(entry);
         }
-        std::env::join_paths(entries).expect("path")
+    }
+
+    fn system_path_entry_to_append(
+        entries: &[std::ffi::OsString],
+        system_dir: &std::path::Path,
+    ) -> Option<std::ffi::OsString> {
+        system_dir
+            .is_dir()
+            .then(|| system_dir.as_os_str().to_os_string())
+            .filter(|_| !path_entries_contain(entries, system_dir))
+    }
+
+    fn path_entries_contain(entries: &[std::ffi::OsString], system_dir: &std::path::Path) -> bool {
+        entries
+            .iter()
+            .any(|entry| std::path::Path::new(entry) == system_dir)
+    }
+
+    #[test]
+    fn test_path_with_prepend_appends_existing_path_entries() {
+        let dir = tempdir().expect("tempdir");
+        let bin_dir = dir.path().join("bin");
+        let existing_one = dir.path().join("existing-one");
+        let existing_two = dir.path().join("existing-two");
+        let original_path = std::env::join_paths([existing_one.as_path(), existing_two.as_path()])
+            .expect("original path");
+
+        let test_path = test_path_with_prepend(&bin_dir, Some(&original_path));
+        let entries = std::env::split_paths(&test_path).collect::<Vec<_>>();
+
+        assert_eq!(entries[0], bin_dir);
+        assert_eq!(entries[1], existing_one);
+        assert_eq!(entries[2], existing_two);
+    }
+
+    #[test]
+    fn test_path_with_prepend_dedupes_existing_system_dirs() {
+        let dir = tempdir().expect("tempdir");
+        let bin_dir = dir.path().join("bin");
+        let bin = std::path::Path::new("/bin");
+        let usr_bin = std::path::Path::new("/usr/bin");
+        let original_path = std::env::join_paths([bin, usr_bin]).expect("original path");
+
+        let test_path = test_path_with_prepend(&bin_dir, Some(&original_path));
+        let entries = std::env::split_paths(&test_path).collect::<Vec<_>>();
+
+        assert_eq!(entries[0], bin_dir);
+        assert_eq!(
+            entries
+                .iter()
+                .filter(|entry| entry.as_path() == bin)
+                .count(),
+            1
+        );
+        assert_eq!(
+            entries
+                .iter()
+                .filter(|entry| entry.as_path() == usr_bin)
+                .count(),
+            1
+        );
     }
 
     fn prepend_test_path(bin_dir: &std::path::Path, original_path: Option<&std::ffi::OsStr>) {
