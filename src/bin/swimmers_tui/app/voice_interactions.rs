@@ -63,14 +63,30 @@ async fn send_voice_transcription_result(
     generation: u64,
     tx: oneshot::Sender<PendingInteractionResult>,
 ) {
-    let response = match tokio::task::spawn_blocking(move || recording.finish()).await {
-        Ok(response) => response,
-        Err(err) => Err(format!("voice task failed: {err}")),
-    };
-    let _ = tx.send(PendingInteractionResult::VoiceTranscription {
+    let response = voice_transcription_task_response(spawn_voice_recording_finish(recording).await);
+    let _ = tx.send(voice_transcription_result(generation, response));
+}
+
+fn spawn_voice_recording_finish(
+    recording: VoiceRecording,
+) -> tokio::task::JoinHandle<Result<String, String>> {
+    tokio::task::spawn_blocking(move || recording.finish())
+}
+
+fn voice_transcription_task_response(
+    response: Result<Result<String, String>, tokio::task::JoinError>,
+) -> Result<String, String> {
+    response.unwrap_or_else(|err| Err(format!("voice task failed: {err}")))
+}
+
+fn voice_transcription_result(
+    generation: u64,
+    response: Result<String, String>,
+) -> PendingInteractionResult {
+    PendingInteractionResult::VoiceTranscription {
         generation,
         response,
-    });
+    }
 }
 
 impl<C: TuiApi> App<C> {
@@ -171,5 +187,51 @@ impl<C: TuiApi> App<C> {
         }
         initial_request.value.push_str(transcript.trim());
         self.set_message("voice transcript inserted");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn voice_task_response_preserves_success_payload() {
+        let result = voice_transcription_result(
+            17,
+            voice_transcription_task_response(Ok(Ok("ship it".to_string()))),
+        );
+
+        let PendingInteractionResult::VoiceTranscription {
+            generation,
+            response,
+        } = result
+        else {
+            panic!("expected voice transcription result");
+        };
+        assert_eq!(generation, 17);
+        assert_eq!(response, Ok("ship it".to_string()));
+    }
+
+    #[test]
+    fn voice_task_response_preserves_recording_error() {
+        assert_eq!(
+            voice_transcription_task_response(Ok(Err("voice capture too short".to_string()))),
+            Err("voice capture too short".to_string())
+        );
+    }
+
+    #[test]
+    fn voice_task_response_converts_join_error() {
+        let runtime = tokio::runtime::Runtime::new().expect("test runtime");
+        let err = runtime.block_on(async {
+            tokio::task::spawn_blocking(|| panic!("voice worker panic"))
+                .await
+                .expect_err("blocking task should panic")
+        });
+
+        let message =
+            voice_transcription_task_response(Err(err)).expect_err("join error should convert");
+        assert!(message.starts_with("voice task failed: "));
+        assert!(message.contains("panicked"));
     }
 }

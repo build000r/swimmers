@@ -17,6 +17,15 @@ import {
   createTerminalSurfaceRuntimeHelpers,
 } from "./terminal_surface_setup.js";
 import {
+  assertFrankenTermModule,
+  canvasHasVisiblePixels,
+  frankenTermAssetSummary as formatFrankenTermAssetSummary,
+  surfaceBusy as runtimeSurfaceBusy,
+  surfaceSupports,
+  validateFrankenTermSurface,
+  withSurfaceOperation as runSurfaceOperation,
+} from "./terminal_runtime.js";
+import {
   createSessionSocketController,
 } from "./session_socket_controller.js";
 import { runTerminalSurfaceResize } from "./terminal_resize.js";
@@ -667,52 +676,12 @@ function sessionNeedsAttention(session) {
   return stateLabel === "attention" || rawSessionAwaitingUser(session);
 }
 
-function surfaceSupports(surface, methodName) {
-  return Boolean(surface && typeof surface[methodName] === "function");
-}
-
 function terminalSupports(methodName) {
   return surfaceSupports(state.terminal, methodName);
 }
 
 function hasLiveTerminal() {
   return Boolean(state.terminal);
-}
-
-function assertFrankenTermModule(mod) {
-  if (!mod || typeof mod.default !== "function") {
-    throw new Error("FrankenTerm module is missing its wasm initializer");
-  }
-  if (typeof mod.FrankenTermWeb !== "function") {
-    throw new Error("FrankenTerm module is missing FrankenTermWeb");
-  }
-  return mod;
-}
-
-function validateFrankenTermSurface(surface, requiredMethods, label = "FrankenTerm surface") {
-  const missing = requiredMethods.filter((methodName) => !surfaceSupports(surface, methodName));
-  if (missing.length) {
-    throw new Error(`${label} missing methods: ${missing.join(", ")}`);
-  }
-  return surface;
-}
-
-function frankenTermAssetSummary() {
-  const info = boot.franken_term_asset_info;
-  if (!info || typeof info !== "object") {
-    return "";
-  }
-  const pieces = [];
-  for (const key of ["js", "wasm", "font"]) {
-    const item = info[key];
-    if (!item) {
-      continue;
-    }
-    const checksum = item.checksum ? ` ${item.checksum}` : "";
-    const size = Number.isFinite(item.size_bytes) ? ` ${item.size_bytes}b` : "";
-    pieces.push(`${key}${checksum}${size}`);
-  }
-  return pieces.join("; ");
 }
 
 function rejectOversizeTerminalText(text, label = "Paste") {
@@ -1937,7 +1906,7 @@ async function ensureFrankenTerm() {
       }
       state.frankenModule = mod;
       state.frankenLoadError = "";
-      state.frankenAssetSummary = frankenTermAssetSummary();
+      state.frankenAssetSummary = formatFrankenTermAssetSummary(boot.franken_term_asset_info);
       return mod;
     })().catch((error) => {
       state.frankenInit = null;
@@ -2032,33 +2001,11 @@ function disconnectSocket() {
 }
 
 function surfaceBusy() {
-  return state.surfaceInitInProgress > 0 || state.surfaceOperationDepth > 0;
-}
-
-function frankenTermErrorMessage(error) {
-  return error?.message || String(error || "");
-}
-
-function isFrankenTermReentryError(error) {
-  return /recursive use of an object/i.test(frankenTermErrorMessage(error));
+  return runtimeSurfaceBusy(state);
 }
 
 function withSurfaceOperation(label, callback) {
-  if (surfaceBusy()) {
-    return { deferred: true };
-  }
-  state.surfaceOperationDepth += 1;
-  try {
-    return { deferred: false, value: callback() };
-  } catch (error) {
-    if (isFrankenTermReentryError(error)) {
-      state.lastRendererDiagnosticError = `${label}: ${frankenTermErrorMessage(error)}`;
-      return { deferred: true, error };
-    }
-    throw error;
-  } finally {
-    state.surfaceOperationDepth -= 1;
-  }
+  return runSurfaceOperation(state, label, callback);
 }
 
 function queueRenderRetry() {
@@ -2335,40 +2282,7 @@ async function verifyTerminalPaintOrFallback() {
 }
 
 function terminalCanvasHasVisiblePixels() {
-  const canvas = el.terminalCanvas;
-  if (!canvas || !canvas.width || !canvas.height) {
-    return false;
-  }
-
-  const sample = document.createElement("canvas");
-  sample.width = Math.min(180, canvas.width);
-  sample.height = Math.min(120, canvas.height);
-  if (!sample.width || !sample.height) {
-    return false;
-  }
-
-  const context = sample.getContext("2d", { willReadFrequently: true });
-  if (!context) {
-    return false;
-  }
-
-  try {
-    context.drawImage(canvas, 0, 0, sample.width, sample.height);
-    const pixels = context.getImageData(0, 0, sample.width, sample.height).data;
-    for (let index = 0; index < pixels.length; index += 4) {
-      const alpha = pixels[index + 3];
-      const red = pixels[index];
-      const green = pixels[index + 1];
-      const blue = pixels[index + 2];
-      if (alpha > 0 && (red > 32 || green > 32 || blue > 32)) {
-        return true;
-      }
-    }
-  } catch (_) {
-    return false;
-  }
-
-  return false;
+  return canvasHasVisiblePixels(el.terminalCanvas, document);
 }
 
 function applyControlEvent(message) {
