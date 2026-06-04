@@ -86,31 +86,12 @@ impl ReplayRing {
     /// replay: their suffix remains available for snapshots, but replay calls
     /// spanning that sequence return `None`.
     pub fn replay_from(&self, seq: u64) -> Option<Vec<(u64, Vec<u8>)>> {
-        // If the buffer is empty and they ask for seq 1 (or our next_seq), that's fine - empty replay.
-        if self.frames.is_empty() {
-            return if seq >= self.next_seq {
-                Some(Vec::new())
-            } else {
-                None
-            };
-        }
-
-        let window_start = self.frames.front().map(|f| f.seq).unwrap_or(self.next_seq);
-
-        if seq < window_start {
-            // Requested data has been evicted.
-            return None;
-        }
-
-        let mut result: Vec<(u64, Vec<u8>)> = Vec::new();
-        for frame in self.frames.iter().filter(|f| f.seq >= seq) {
-            if frame.clamped {
-                return None;
-            }
-            result.push((frame.seq, frame.data.clone()));
-        }
-
-        Some(result)
+        self.replay_start_available(seq)?;
+        self.frames
+            .iter()
+            .filter(|frame| frame.seq >= seq)
+            .map(Frame::replay_entry)
+            .collect()
     }
 
     /// The sequence number that will be assigned to the next push.
@@ -149,6 +130,18 @@ impl ReplayRing {
             buf.extend_from_slice(&frame.data);
         }
         String::from_utf8_lossy(&buf).into_owned()
+    }
+}
+
+impl ReplayRing {
+    fn replay_start_available(&self, seq: u64) -> Option<()> {
+        (seq >= self.window_start_seq()).then_some(())
+    }
+}
+
+impl Frame {
+    fn replay_entry(&self) -> Option<(u64, Vec<u8>)> {
+        (!self.clamped).then(|| (self.seq, self.data.clone()))
     }
 }
 
@@ -260,5 +253,51 @@ mod tests {
         assert_eq!(ring.snapshot(), "");
         // Asking for seq 1 on empty ring: nothing has been pushed, seq 1 >= next_seq(1)
         assert_eq!(ring.replay_from(1).unwrap().len(), 0);
+    }
+
+    #[test]
+    fn empty_replay_distinguishes_next_seq_from_old_seq() {
+        let mut ring = ReplayRing::new(1024);
+        assert_eq!(ring.push(b""), 1);
+
+        assert_eq!(ring.latest_seq(), 1);
+        assert_eq!(ring.window_start_seq(), 2);
+        assert!(ring.replay_from(1).is_none());
+        assert_eq!(ring.replay_from(2), Some(Vec::new()));
+    }
+
+    #[test]
+    fn replay_exactly_at_window_start_returns_retained_frames() {
+        let mut ring = ReplayRing::new(8);
+        ring.push(b"aaaa");
+        ring.push(b"bbbb");
+        ring.push(b"cccc");
+
+        assert_eq!(ring.window_start_seq(), 2);
+        assert_eq!(
+            ring.replay_from(2),
+            Some(vec![(2, b"bbbb".to_vec()), (3, b"cccc".to_vec())])
+        );
+    }
+
+    #[test]
+    fn replay_after_latest_seq_returns_empty() {
+        let mut ring = ReplayRing::new(1024);
+        ring.push(b"hello");
+        ring.push(b"world");
+
+        assert_eq!(ring.latest_seq(), 2);
+        assert_eq!(ring.replay_from(3), Some(Vec::new()));
+    }
+
+    #[test]
+    fn clamped_frame_replay_is_rejected_when_full_frame_is_missing() {
+        let mut ring = ReplayRing::new(4);
+        let seq = ring.push(b"abcdef");
+
+        assert_eq!(seq, 1);
+        assert_eq!(ring.window_start_seq(), 1);
+        assert_eq!(ring.snapshot(), "cdef");
+        assert!(ring.replay_from(1).is_none());
     }
 }

@@ -936,11 +936,61 @@ pub(crate) fn picker_entry_actions(entry: &DirEntry) -> Vec<ActionLabel> {
 
 /// Total display width of all action labels (including spaces between them).
 fn picker_entry_actions_width(actions: &[ActionLabel]) -> u16 {
-    if actions.is_empty() {
-        return 0;
-    }
-    let text_width: u16 = actions.iter().map(|a| a.text.len() as u16).sum();
-    text_width + (actions.len() as u16 - 1) // spaces between labels
+    let text_width: u16 = actions.iter().map(picker_entry_action_width).sum();
+    text_width + actions.len().saturating_sub(1) as u16
+}
+
+fn picker_entry_action_width(action: &ActionLabel) -> u16 {
+    action.text.len() as u16
+}
+
+fn picker_entry_action_advance(action: &ActionLabel) -> u16 {
+    picker_entry_action_width(action) + 1
+}
+
+fn picker_entry_actions_start_x(actions: &[ActionLabel], right: u16) -> u16 {
+    right.saturating_sub(picker_entry_actions_width(actions))
+}
+
+fn picker_visible_entry_row_y(
+    picker: &PickerState,
+    layout: &PickerLayout,
+    visible_pos: usize,
+) -> Option<u16> {
+    let row = visible_pos.checked_sub(picker.scroll)?;
+    (row < layout.visible_entry_rows).then_some(layout.first_entry_y + row as u16)
+}
+
+fn picker_clickable_action_rect(
+    action: &ActionLabel,
+    x: u16,
+    y: u16,
+) -> Option<(Rect, RepoActionKind)> {
+    action.clickable.then_some((
+        Rect {
+            x,
+            y,
+            width: picker_entry_action_width(action),
+            height: 1,
+        },
+        action.kind,
+    ))
+}
+
+fn picker_clickable_action_rects(
+    actions: &[ActionLabel],
+    right: u16,
+    y: u16,
+) -> Vec<(Rect, RepoActionKind)> {
+    let mut x = picker_entry_actions_start_x(actions, right);
+    actions
+        .iter()
+        .filter_map(|action| {
+            let rect = picker_clickable_action_rect(action, x, y);
+            x += picker_entry_action_advance(action);
+            rect
+        })
+        .collect()
 }
 
 /// Compute click-target rects for all action labels on a given entry row.
@@ -950,39 +1000,17 @@ fn picker_entry_action_rects(
     visible_pos: usize,
     raw_index: usize,
 ) -> Vec<(Rect, RepoActionKind)> {
-    if visible_pos < picker.scroll || visible_pos >= picker.scroll + layout.visible_entry_rows {
-        return Vec::new();
+    match (
+        picker_visible_entry_row_y(picker, layout, visible_pos),
+        picker.entry_at(raw_index),
+    ) {
+        (Some(row_y), Some(entry)) => picker_clickable_action_rects(
+            &picker_entry_actions(entry),
+            layout.content.right(),
+            row_y,
+        ),
+        _ => Vec::new(),
     }
-
-    let Some(entry) = picker.entry_at(raw_index) else {
-        return Vec::new();
-    };
-    let actions = picker_entry_actions(entry);
-    if actions.is_empty() {
-        return Vec::new();
-    }
-
-    let row_y = layout.first_entry_y + (visible_pos - picker.scroll) as u16;
-    let total_width = picker_entry_actions_width(&actions);
-    let mut x = layout.content.right().saturating_sub(total_width);
-    let mut rects = Vec::new();
-
-    for action in &actions {
-        let w = action.text.len() as u16;
-        if action.clickable {
-            rects.push((
-                Rect {
-                    x,
-                    y: row_y,
-                    width: w,
-                    height: 1,
-                },
-                action.kind,
-            ));
-        }
-        x += w + 1; // +1 for space separator
-    }
-    rects
 }
 
 fn picker_batch_exclude_rect(
@@ -991,18 +1019,15 @@ fn picker_batch_exclude_rect(
     visible_pos: usize,
     raw_index: usize,
 ) -> Option<Rect> {
-    if !picker.batch_exclude_mode
-        || visible_pos < picker.scroll
-        || visible_pos >= picker.scroll + layout.visible_entry_rows
-    {
+    if !picker.batch_exclude_mode {
         return None;
     }
 
+    let row_y = picker_visible_entry_row_y(picker, layout, visible_pos)?;
     let entry = picker.entry_at(raw_index)?;
     let actions_width = picker_entry_actions_width(&picker_entry_actions(entry));
     let label = picker_batch_exclude_label(picker, raw_index);
     let label_width = label.len() as u16;
-    let row_y = layout.first_entry_y + (visible_pos - picker.scroll) as u16;
     let total_width = label_width
         + if actions_width > 0 {
             actions_width + 1
@@ -1803,10 +1828,10 @@ fn render_picker_entry_action_badges(
     layout: &PickerLayout,
     row: &PickerEntryRowRenderModel,
 ) {
-    let mut x = layout.content.right().saturating_sub(row.actions_width);
+    let mut x = picker_entry_actions_start_x(&row.actions, layout.content.right());
     for action in &row.actions {
         renderer.draw_text(x, row.y, &action.text, action.color);
-        x += action.text.len() as u16 + 1;
+        x += picker_entry_action_advance(action);
     }
 }
 
@@ -1984,6 +2009,7 @@ pub(crate) fn render_initial_request(
 mod tests {
     mod picker {
         use super::super::*;
+        use swimmers::types::RepoActionStatus;
 
         fn rect(x: u16, y: u16, width: u16) -> Rect {
             Rect {
@@ -2082,13 +2108,16 @@ mod tests {
             }
         }
 
-        fn pointer_test_picker(batch_exclude_mode: bool) -> PickerState {
+        fn pointer_test_picker_with_entry(
+            entry: DirEntry,
+            batch_exclude_mode: bool,
+        ) -> PickerState {
             let mut picker = PickerState::new(
                 0,
                 0,
                 DirListResponse {
                     path: "/tmp".to_string(),
-                    entries: vec![pointer_test_entry()],
+                    entries: vec![entry],
                     overlay_label: None,
                     groups: Vec::new(),
                     launch_targets: Vec::new(),
@@ -2100,6 +2129,10 @@ mod tests {
             );
             picker.batch_exclude_mode = batch_exclude_mode;
             picker
+        }
+
+        fn pointer_test_picker(batch_exclude_mode: bool) -> PickerState {
+            pointer_test_picker_with_entry(pointer_test_entry(), batch_exclude_mode)
         }
 
         fn apply_response_entry(name: &str, full_path: &str) -> DirEntry {
@@ -2608,6 +2641,177 @@ mod tests {
             assert_eq!(picker_filter_action_at(&layout, 0, 0), None);
             assert_eq!(picker_filter_action_at(&layout, 2, 2), None);
             assert_eq!(picker_filter_action_at(&layout, 78, 4), None);
+        }
+
+        #[test]
+        fn picker_entry_action_rects_ignore_offscreen_rows() {
+            let mut picker = pointer_test_picker(false);
+            let layout = picker_layout(&picker, field_rect());
+            picker.scroll = 1;
+
+            assert!(picker_entry_action_rects(&picker, &layout, 0, 0).is_empty());
+            assert!(picker_entry_action_rects(&picker, &layout, 2, 0).is_empty());
+        }
+
+        #[test]
+        fn picker_entry_action_rects_ignore_missing_entries() {
+            let picker = pointer_test_picker(false);
+            let layout = picker_layout(&picker, field_rect());
+
+            assert!(picker_entry_action_rects(&picker, &layout, 0, 99).is_empty());
+        }
+
+        #[test]
+        fn picker_entry_action_rects_return_empty_for_entries_without_actions() {
+            let mut entry = pointer_test_entry();
+            entry.repo_dirty = None;
+            entry.has_restart = None;
+            entry.open_url = None;
+            let picker = pointer_test_picker_with_entry(entry, false);
+            let layout = picker_layout(&picker, field_rect());
+
+            assert!(picker_entry_action_rects(&picker, &layout, 0, 0).is_empty());
+        }
+
+        #[test]
+        fn picker_entry_action_rects_keep_status_only_actions_unclickable() {
+            let mut entry = pointer_test_entry();
+            entry.repo_dirty = Some(false);
+            entry.open_url = None;
+            entry.repo_action = Some(RepoActionStatus {
+                kind: RepoActionKind::Commit,
+                state: RepoActionState::Succeeded,
+                detail: None,
+            });
+            let picker = pointer_test_picker_with_entry(entry, false);
+            let layout = picker_layout(&picker, field_rect());
+            let row_y = layout.first_entry_y;
+            let start_x = layout.content.right() - ("[done]".len() + 1 + "[restart]".len()) as u16;
+            let restart_x = start_x + "[done]".len() as u16 + 1;
+
+            assert_eq!(
+                picker_entry_action_rects(&picker, &layout, 0, 0),
+                vec![(
+                    Rect {
+                        x: restart_x,
+                        y: row_y,
+                        width: "[restart]".len() as u16,
+                        height: 1,
+                    },
+                    RepoActionKind::Restart,
+                )]
+            );
+            assert_eq!(
+                picker_entry_pointer_action(&picker, &layout, 0, 0, start_x, row_y),
+                PickerAction::ActivateEntry(0)
+            );
+            assert_eq!(
+                picker_entry_pointer_action(&picker, &layout, 0, 0, restart_x, row_y),
+                PickerAction::StartRepoAction(0, RepoActionKind::Restart)
+            );
+        }
+
+        #[test]
+        fn picker_entry_action_rects_right_align_clickable_actions() {
+            let picker = pointer_test_picker(false);
+            let layout = picker_layout(&picker, field_rect());
+            let row_y = layout.first_entry_y;
+            let commit_width = "[commit]".len() as u16;
+            let restart_width = "[restart]".len() as u16;
+            let open_width = "[open]".len() as u16;
+            let start_x = layout
+                .content
+                .right()
+                .saturating_sub(commit_width + 1 + restart_width + 1 + open_width);
+
+            let rects = picker_entry_action_rects(&picker, &layout, 0, 0);
+
+            assert_eq!(
+                rects,
+                vec![
+                    (
+                        Rect {
+                            x: start_x,
+                            y: row_y,
+                            width: commit_width,
+                            height: 1,
+                        },
+                        RepoActionKind::Commit,
+                    ),
+                    (
+                        Rect {
+                            x: start_x + commit_width + 1,
+                            y: row_y,
+                            width: restart_width,
+                            height: 1,
+                        },
+                        RepoActionKind::Restart,
+                    ),
+                    (
+                        Rect {
+                            x: start_x + commit_width + 1 + restart_width + 1,
+                            y: row_y,
+                            width: open_width,
+                            height: 1,
+                        },
+                        RepoActionKind::Open,
+                    ),
+                ]
+            );
+            assert_eq!(
+                rects.last().expect("open rect").0.right(),
+                layout.content.right()
+            );
+        }
+
+        #[test]
+        fn picker_entry_action_rects_suppress_running_action_clicks() {
+            let mut entry = pointer_test_entry();
+            entry.repo_action = Some(RepoActionStatus {
+                kind: RepoActionKind::Restart,
+                state: RepoActionState::Running,
+                detail: None,
+            });
+            let picker = pointer_test_picker_with_entry(entry, false);
+            let layout = picker_layout(&picker, field_rect());
+            let running_x = layout.content.right() - "[running]".len() as u16;
+
+            assert!(picker_entry_action_rects(&picker, &layout, 0, 0).is_empty());
+            assert_eq!(
+                picker_entry_pointer_action(
+                    &picker,
+                    &layout,
+                    0,
+                    0,
+                    running_x,
+                    layout.first_entry_y
+                ),
+                PickerAction::ActivateEntry(0)
+            );
+        }
+
+        #[test]
+        fn picker_entry_action_rects_coexist_with_batch_exclude_rects() {
+            let picker = pointer_test_picker(true);
+            let layout = picker_layout(&picker, field_rect());
+            let exclude_rect =
+                picker_batch_exclude_rect(&picker, &layout, 0, 0).expect("exclude rect");
+            let action_rects = picker_entry_action_rects(&picker, &layout, 0, 0);
+            let (commit_rect, commit_kind) = action_rects.first().copied().expect("commit rect");
+
+            assert_eq!(exclude_rect.right() + 1, commit_rect.x);
+            assert_eq!(
+                action_rects.last().expect("open rect").0.right(),
+                layout.content.right()
+            );
+            assert_eq!(
+                picker_entry_pointer_action(&picker, &layout, 0, 0, exclude_rect.x, exclude_rect.y),
+                PickerAction::ToggleBatchExclude(0)
+            );
+            assert_eq!(
+                picker_entry_pointer_action(&picker, &layout, 0, 0, commit_rect.x, commit_rect.y),
+                PickerAction::StartRepoAction(0, commit_kind)
+            );
         }
 
         #[test]

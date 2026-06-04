@@ -275,19 +275,19 @@ pub(crate) fn build_header_filter_layout<C: TuiApi>(
 
     let chips = included
         .into_iter()
-        .map(|(cwd, label, color, width)| {
+        .map(|chip| {
             let rect = Rect {
                 x: cursor_x,
                 y: header_filter_row(),
-                width,
+                width: chip.width,
                 height: 1,
             };
-            cursor_x = cursor_x.saturating_add(width).saturating_add(2);
+            cursor_x = cursor_x.saturating_add(chip.width).saturating_add(2);
             ThoughtChipLayout {
                 rect,
-                cwd,
-                label,
-                color,
+                cwd: chip.cwd,
+                label: chip.label,
+                color: chip.color,
             }
         })
         .collect::<Vec<_>>();
@@ -368,47 +368,36 @@ fn header_filter_rect(x: u16, width: u16) -> Rect {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct FilterChipData {
+    cwd: String,
+    label: String,
+    color: Color,
+    width: u16,
+}
+
 /// Build the per-repo filter chips and their cumulative width, stopping as
 /// soon as the next chip would overflow the budget. Returns the chip data
 /// (cwd, label, color, width) so the caller can place rects later.
-fn gather_filter_chips<C: TuiApi>(
-    app: &App<C>,
-    chip_budget: u16,
-) -> (Vec<(String, String, Color, u16)>, u16) {
-    let mut included = Vec::new();
-    let active_cwd = app.thought_filter.cwd.as_deref();
-    let mut chips_width: u16 = 0;
-    for summary in app.header_repo_summaries() {
-        let is_include_active = active_cwd.map(|cwd| cwd == summary.cwd).unwrap_or(false);
-        let is_excluded = app.thought_filter.excludes_cwd(&summary.cwd);
-        let label = if is_include_active {
-            "code .".to_string()
-        } else {
-            format!("{}x{}", summary.count, summary.label)
-        };
-        let width = display_width(&label);
-        if width == 0 {
-            continue;
-        }
+fn gather_filter_chips<C: TuiApi>(app: &App<C>, chip_budget: u16) -> (Vec<FilterChipData>, u16) {
+    let summaries = app.header_repo_summaries();
+    filter_chips_for_summaries(&summaries, &app.thought_filter, chip_budget)
+}
 
-        let next_width = if included.is_empty() {
-            width
-        } else {
-            chips_width.saturating_add(2).saturating_add(width)
+fn filter_chips_for_summaries(
+    summaries: &[ThoughtRepoSummary],
+    filter: &ThoughtFilter,
+    chip_budget: u16,
+) -> (Vec<FilterChipData>, u16) {
+    let mut included = Vec::new();
+    let mut chips_width: u16 = 0;
+    for summary in summaries {
+        let Some(chip) = filter_chip_data(summary, filter) else {
+            continue;
         };
-        if next_width > chip_budget {
+        if !append_filter_chip(&mut included, &mut chips_width, chip, chip_budget) {
             break;
         }
-
-        chips_width = next_width;
-        let color = chip_color(
-            summary.color,
-            app.thought_filter.filter_out_mode,
-            is_excluded,
-            active_cwd.is_some(),
-            is_include_active,
-        );
-        included.push((summary.cwd, label, color, width));
     }
     (included, chips_width)
 }
@@ -420,17 +409,28 @@ fn chip_color(
     has_active_cwd: bool,
     is_include_active: bool,
 ) -> Color {
-    if filter_out_mode {
-        if is_excluded {
-            Color::DarkGrey
-        } else {
-            summary_color
-        }
-    } else if has_active_cwd && !is_include_active {
+    if chip_is_muted(
+        filter_out_mode,
+        is_excluded,
+        has_active_cwd,
+        is_include_active,
+    ) {
         Color::DarkGrey
     } else {
         summary_color
     }
+}
+
+fn chip_is_muted(
+    filter_out_mode: bool,
+    is_excluded: bool,
+    has_active_cwd: bool,
+    is_include_active: bool,
+) -> bool {
+    if filter_out_mode {
+        return is_excluded;
+    }
+    has_active_cwd && !is_include_active
 }
 
 pub(crate) fn render_header_filter_strip<C: TuiApi>(
@@ -1905,6 +1905,67 @@ fn thought_row_action_for_hit(
     }
 }
 
+fn filter_chip_data(
+    summary: &ThoughtRepoSummary,
+    filter: &ThoughtFilter,
+) -> Option<FilterChipData> {
+    let is_include_active = filter.cwd.as_deref() == Some(summary.cwd.as_str());
+    let label = filter_chip_label(summary, is_include_active);
+    let width = display_width(&label);
+    (width > 0).then(|| FilterChipData {
+        cwd: summary.cwd.clone(),
+        label,
+        color: filter_chip_color(summary, filter, is_include_active),
+        width,
+    })
+}
+
+fn filter_chip_label(summary: &ThoughtRepoSummary, is_include_active: bool) -> String {
+    if is_include_active {
+        "code .".to_string()
+    } else {
+        format!("{}x{}", summary.count, summary.label)
+    }
+}
+
+fn filter_chip_color(
+    summary: &ThoughtRepoSummary,
+    filter: &ThoughtFilter,
+    is_include_active: bool,
+) -> Color {
+    chip_color(
+        summary.color,
+        filter.filter_out_mode,
+        filter.excludes_cwd(&summary.cwd),
+        filter.cwd.is_some(),
+        is_include_active,
+    )
+}
+
+fn append_filter_chip(
+    included: &mut Vec<FilterChipData>,
+    chips_width: &mut u16,
+    chip: FilterChipData,
+    chip_budget: u16,
+) -> bool {
+    let next_width = next_filter_chips_width(*chips_width, !included.is_empty(), chip.width);
+    if next_width > chip_budget {
+        return false;
+    }
+
+    *chips_width = next_width;
+    included.push(chip);
+    true
+}
+
+fn next_filter_chips_width(chips_width: u16, has_preceding_chip: bool, chip_width: u16) -> u16 {
+    if has_preceding_chip {
+        chips_width.saturating_add(2).saturating_add(chip_width)
+    } else {
+        chip_width
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1933,6 +1994,20 @@ mod tests {
             clear_filters_rect: Some(rect(16, 15)),
             chips: vec![chip("/repo/a", 34), chip("/repo/b", 42)],
         }
+    }
+
+    fn repo_summary(cwd: &str, label: &str, count: usize, color: Color) -> ThoughtRepoSummary {
+        ThoughtRepoSummary {
+            cwd: cwd.to_string(),
+            label: label.to_string(),
+            count,
+            color,
+            last_seen: 0,
+        }
+    }
+
+    fn filter_chip_labels(chips: &[FilterChipData]) -> Vec<&str> {
+        chips.iter().map(|chip| chip.label.as_str()).collect()
     }
 
     fn thought_content() -> Rect {
@@ -2005,6 +2080,31 @@ mod tests {
     }
 
     #[test]
+    fn header_filter_action_prioritizes_controls_over_overlapping_chips() {
+        let filter = ThoughtFilter::default();
+        let row = header_filter_row();
+        let layout = HeaderFilterLayout {
+            filter_out_rect: Some(rect(2, 12)),
+            clear_filters_rect: Some(rect(16, 15)),
+            chips: vec![ThoughtChipLayout {
+                rect: rect(2, 40),
+                cwd: "/repo/a".to_string(),
+                label: "1xa".to_string(),
+                color: Color::Cyan,
+            }],
+        };
+
+        assert_eq!(
+            header_filter_action_for_layout(&layout, &filter, 2, row),
+            Some(ThoughtPanelAction::ToggleFilterOutMode)
+        );
+        assert_eq!(
+            header_filter_action_for_layout(&layout, &filter, 16, row),
+            Some(ThoughtPanelAction::ClearFilters)
+        );
+    }
+
+    #[test]
     fn header_filter_action_maps_chip_modes() {
         let row = header_filter_row();
 
@@ -2045,6 +2145,86 @@ mod tests {
             ),
             None
         );
+    }
+
+    #[test]
+    fn header_filter_chips_include_exact_budget_and_reject_one_column_over() {
+        let summaries = vec![
+            repo_summary("/repo/a", "a", 1, Color::Cyan),
+            repo_summary("/repo/bb", "bb", 2, Color::Yellow),
+        ];
+        let filter = ThoughtFilter::default();
+        let exact_budget = display_width("1xa") + HEADER_FILTER_GAP + display_width("2xbb");
+
+        let (chips, chips_width) = filter_chips_for_summaries(&summaries, &filter, exact_budget);
+
+        assert_eq!(filter_chip_labels(&chips), vec!["1xa", "2xbb"]);
+        assert_eq!(chips_width, exact_budget);
+
+        let (chips, chips_width) =
+            filter_chips_for_summaries(&summaries, &filter, exact_budget - 1);
+
+        assert_eq!(filter_chip_labels(&chips), vec!["1xa"]);
+        assert_eq!(chips_width, display_width("1xa"));
+    }
+
+    #[test]
+    fn header_filter_chips_stop_after_overflow_and_hide_later_chips() {
+        let summaries = vec![
+            repo_summary("/repo/a", "a", 1, Color::Cyan),
+            repo_summary("/repo/overflow", "overflow", 2, Color::Yellow),
+            repo_summary("/repo/c", "c", 3, Color::Magenta),
+        ];
+        let filter = ThoughtFilter::default();
+        let budget_that_would_fit_a_and_c =
+            display_width("1xa") + HEADER_FILTER_GAP + display_width("3xc");
+
+        let (chips, chips_width) =
+            filter_chips_for_summaries(&summaries, &filter, budget_that_would_fit_a_and_c);
+
+        assert_eq!(filter_chip_labels(&chips), vec!["1xa"]);
+        assert_eq!(chips_width, display_width("1xa"));
+    }
+
+    #[test]
+    fn header_filter_chips_mark_active_cwd_as_code_dot_and_dim_other_cwds() {
+        let summaries = vec![
+            repo_summary("/repo/active", "active", 3, Color::Yellow),
+            repo_summary("/repo/other", "other", 2, Color::Cyan),
+        ];
+        let filter = ThoughtFilter {
+            cwd: Some("/repo/active".to_string()),
+            ..ThoughtFilter::default()
+        };
+
+        let (chips, chips_width) = filter_chips_for_summaries(&summaries, &filter, 80);
+
+        assert_eq!(filter_chip_labels(&chips), vec!["code .", "2xother"]);
+        assert_eq!(chips[0].color, Color::Yellow);
+        assert_eq!(chips[1].color, Color::DarkGrey);
+        assert_eq!(
+            chips_width,
+            display_width("code .") + HEADER_FILTER_GAP + display_width("2xother")
+        );
+    }
+
+    #[test]
+    fn header_filter_chips_dim_excluded_cwd_only_in_filter_out_mode() {
+        let summaries = vec![
+            repo_summary("/repo/hidden", "hidden", 1, Color::Yellow),
+            repo_summary("/repo/shown", "shown", 1, Color::Cyan),
+        ];
+        let mut filter = ThoughtFilter {
+            filter_out_mode: true,
+            ..ThoughtFilter::default()
+        };
+        filter.excluded_cwds.insert("/repo/hidden".to_string());
+
+        let (chips, _) = filter_chips_for_summaries(&summaries, &filter, 80);
+
+        assert_eq!(filter_chip_labels(&chips), vec!["1xhidden", "1xshown"]);
+        assert_eq!(chips[0].color, Color::DarkGrey);
+        assert_eq!(chips[1].color, Color::Cyan);
     }
 
     #[test]

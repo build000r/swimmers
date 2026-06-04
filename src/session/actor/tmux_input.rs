@@ -64,32 +64,53 @@ impl std::error::Error for TmuxInputSendError {
 
 pub(super) fn tmux_input_chunks(data: &[u8]) -> Option<Vec<TmuxInputChunk>> {
     let text = std::str::from_utf8(data).ok()?;
+    let chunks = tmux_input_text_chunks(text)?;
+    (!chunks.is_empty()).then_some(chunks)
+}
+
+fn tmux_input_text_chunks(text: &str) -> Option<Vec<TmuxInputChunk>> {
     let mut chunks = Vec::new();
     let mut literal = String::new();
 
     for ch in text.chars() {
-        match ch {
-            '\r' | '\n' => {
-                if !literal.is_empty() {
-                    chunks.push(TmuxInputChunk::Literal(std::mem::take(&mut literal)));
-                }
-                chunks.push(TmuxInputChunk::Enter);
-            }
-            '\t' => {
-                return None;
-            }
-            ch if ch.is_control() => {
-                return None;
-            }
-            ch => literal.push(ch),
-        }
+        push_tmux_input_char(&mut chunks, &mut literal, ch)?;
     }
 
+    flush_tmux_input_literal(&mut chunks, &mut literal);
+    Some(chunks)
+}
+
+fn push_tmux_input_char(
+    chunks: &mut Vec<TmuxInputChunk>,
+    literal: &mut String,
+    ch: char,
+) -> Option<()> {
+    if is_tmux_input_enter(ch) {
+        flush_tmux_input_literal(chunks, literal);
+        chunks.push(TmuxInputChunk::Enter);
+        return Some(());
+    }
+
+    if is_rejected_tmux_input_control(ch) {
+        return None;
+    }
+
+    literal.push(ch);
+    Some(())
+}
+
+fn flush_tmux_input_literal(chunks: &mut Vec<TmuxInputChunk>, literal: &mut String) {
     if !literal.is_empty() {
-        chunks.push(TmuxInputChunk::Literal(literal));
+        chunks.push(TmuxInputChunk::Literal(std::mem::take(literal)));
     }
+}
 
-    (!chunks.is_empty()).then_some(chunks)
+fn is_tmux_input_enter(ch: char) -> bool {
+    matches!(ch, '\r' | '\n')
+}
+
+fn is_rejected_tmux_input_control(ch: char) -> bool {
+    ch == '\t' || ch.is_control()
 }
 
 pub(super) fn normalize_submit_line_text(text: &str) -> Option<String> {
@@ -204,4 +225,101 @@ async fn send_tmux_keys(target: &str, keys: &[&str]) -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{tmux_input_chunks, TmuxInputChunk};
+
+    fn literal(text: &str) -> TmuxInputChunk {
+        TmuxInputChunk::Literal(text.to_string())
+    }
+
+    #[test]
+    fn tmux_input_chunks_rejects_empty_input() {
+        assert_eq!(tmux_input_chunks(b""), None);
+    }
+
+    #[test]
+    fn tmux_input_chunks_splits_cr_as_enter() {
+        assert_eq!(
+            tmux_input_chunks(b"left\rright"),
+            Some(vec![
+                literal("left"),
+                TmuxInputChunk::Enter,
+                literal("right")
+            ])
+        );
+    }
+
+    #[test]
+    fn tmux_input_chunks_splits_lf_as_enter() {
+        assert_eq!(
+            tmux_input_chunks(b"left\nright"),
+            Some(vec![
+                literal("left"),
+                TmuxInputChunk::Enter,
+                literal("right")
+            ])
+        );
+    }
+
+    #[test]
+    fn tmux_input_chunks_keeps_crlf_as_two_enters() {
+        assert_eq!(
+            tmux_input_chunks(b"left\r\nright"),
+            Some(vec![
+                literal("left"),
+                TmuxInputChunk::Enter,
+                TmuxInputChunk::Enter,
+                literal("right"),
+            ])
+        );
+    }
+
+    #[test]
+    fn tmux_input_chunks_keeps_consecutive_enters() {
+        assert_eq!(
+            tmux_input_chunks(b"left\n\nright"),
+            Some(vec![
+                literal("left"),
+                TmuxInputChunk::Enter,
+                TmuxInputChunk::Enter,
+                literal("right"),
+            ])
+        );
+    }
+
+    #[test]
+    fn tmux_input_chunks_flushes_literal_before_enter() {
+        assert_eq!(
+            tmux_input_chunks(b"literal\r"),
+            Some(vec![literal("literal"), TmuxInputChunk::Enter])
+        );
+    }
+
+    #[test]
+    fn tmux_input_chunks_coalesces_all_literal_input() {
+        assert_eq!(
+            tmux_input_chunks(b"one two three"),
+            Some(vec![literal("one two three")])
+        );
+    }
+
+    #[test]
+    fn tmux_input_chunks_rejects_tabs() {
+        assert_eq!(tmux_input_chunks(b"left\tright"), None);
+    }
+
+    #[test]
+    fn tmux_input_chunks_rejects_other_controls() {
+        assert_eq!(tmux_input_chunks(b"left\x00right"), None);
+        assert_eq!(tmux_input_chunks(b"left\x1bright"), None);
+        assert_eq!(tmux_input_chunks(b"left\x7fright"), None);
+    }
+
+    #[test]
+    fn tmux_input_chunks_rejects_invalid_utf8() {
+        assert_eq!(tmux_input_chunks(&[0xff]), None);
+    }
 }

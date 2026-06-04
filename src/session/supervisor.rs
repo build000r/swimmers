@@ -208,6 +208,36 @@ fn active_pane_session_id_for_summary(
     active_pane_session_ids.get(&summary.tmux_name).cloned()
 }
 
+fn merge_thought_snapshots_into_summaries(
+    summaries: &mut [SessionSummary],
+    thought_snapshots: &HashMap<String, ThoughtSnapshot>,
+    active_pane_session_ids: &HashMap<String, String>,
+) {
+    for summary in summaries {
+        merge_matching_thought_snapshot_into_summary(
+            summary,
+            thought_snapshots,
+            active_pane_session_ids,
+        );
+    }
+}
+
+fn merge_matching_thought_snapshot_into_summary(
+    summary: &mut SessionSummary,
+    thought_snapshots: &HashMap<String, ThoughtSnapshot>,
+    active_pane_session_ids: &HashMap<String, String>,
+) {
+    let active_pane_session_id =
+        active_pane_session_id_for_summary(summary, thought_snapshots, active_pane_session_ids);
+    if let Some(thought_data) = thought_snapshot_for_summary(
+        summary,
+        active_pane_session_id.as_deref(),
+        thought_snapshots,
+    ) {
+        merge_summary_with_thought_snapshot(summary, thought_data);
+    }
+}
+
 fn session_info_from_summary(
     summary: SessionSummary,
     replay_text: String,
@@ -321,30 +351,53 @@ async fn query_all_active_pane_session_ids() -> anyhow::Result<HashMap<String, S
     Ok(parse_active_pane_session_ids(&output.stdout))
 }
 
-fn parse_active_pane_session_ids(stdout: &[u8]) -> HashMap<String, String> {
-    let mut active_panes = HashMap::new();
-    for line in String::from_utf8_lossy(stdout).lines() {
-        let mut fields = line.splitn(4, TMUX_LIST_PANES_FIELD_SEPARATOR);
-        let session_name = fields.next().unwrap_or_default();
-        let window_active = fields.next().unwrap_or_default();
-        let pane_active = fields.next().unwrap_or_default();
-        let pane_selector = fields.next().unwrap_or_default();
+#[derive(Debug, PartialEq, Eq)]
+struct ActivePaneFields<'a> {
+    session_name: &'a str,
+    window_active: &'a str,
+    pane_active: &'a str,
+    pane_selector: &'a str,
+}
 
-        if session_name.is_empty()
-            || window_active != "1"
-            || pane_active != "1"
-            || pane_selector.is_empty()
+impl<'a> ActivePaneFields<'a> {
+    fn active_pane_selector(&self) -> Option<(&'a str, &'a str)> {
+        if self.session_name.is_empty()
+            || self.window_active != "1"
+            || self.pane_active != "1"
+            || self.pane_selector.is_empty()
         {
-            continue;
+            return None;
         }
 
-        active_panes.insert(
-            session_name.to_string(),
-            format_tmux_active_pane_session_id(session_name, pane_selector),
-        );
+        Some((self.session_name, self.pane_selector))
     }
+}
 
-    active_panes
+fn parse_active_pane_fields(line: &str) -> Option<ActivePaneFields<'_>> {
+    let mut fields = line.splitn(4, TMUX_LIST_PANES_FIELD_SEPARATOR);
+    Some(ActivePaneFields {
+        session_name: fields.next()?,
+        window_active: fields.next()?,
+        pane_active: fields.next()?,
+        pane_selector: fields.next()?,
+    })
+}
+
+fn active_pane_selector_from_line(line: &str) -> Option<(&str, &str)> {
+    parse_active_pane_fields(line)?.active_pane_selector()
+}
+
+fn parse_active_pane_session_ids(stdout: &[u8]) -> HashMap<String, String> {
+    String::from_utf8_lossy(stdout)
+        .lines()
+        .filter_map(active_pane_selector_from_line)
+        .map(|(session_name, pane_selector)| {
+            (
+                session_name.to_string(),
+                format_tmux_active_pane_session_id(session_name, pane_selector),
+            )
+        })
+        .collect()
 }
 
 fn filter_active_panes_to_requested(
@@ -678,6 +731,20 @@ impl SessionSupervisor {
         filtered
     }
 
+    async fn active_pane_session_ids_for_summaries<'a, I>(
+        &self,
+        summaries: I,
+        thought_snapshots: &HashMap<String, ThoughtSnapshot>,
+        reason: &'static str,
+    ) -> HashMap<String, String>
+    where
+        I: IntoIterator<Item = &'a SessionSummary>,
+    {
+        let tmux_names = tmux_names_requiring_active_pane_lookup(summaries, thought_snapshots);
+        self.active_pane_session_ids_cached(&tmux_names, reason)
+            .await
+    }
+
     fn resolve_repo_theme_for_summary(&self, summary: &mut SessionSummary) -> Option<RepoTheme> {
         if summary.cwd.is_empty() {
             summary.repo_theme_id = None;
@@ -692,6 +759,12 @@ impl SessionSupervisor {
             summary.repo_theme_id = None;
         }
         repo_theme
+    }
+
+    fn resolve_repo_themes_for_summaries(&self, summaries: &mut [SessionSummary]) {
+        for summary in summaries {
+            self.resolve_repo_theme_for_summary(summary);
+        }
     }
 
     /// Initialize persistence store and load persisted sessions as stale entries.
@@ -1949,33 +2022,21 @@ impl SessionSupervisor {
         let mut summaries = self.collect_live_summaries(Duration::from_secs(2)).await;
 
         let thought_snapshots = self.thought_snapshots.read().await.clone();
-        let tmux_names =
-            tmux_names_requiring_active_pane_lookup(summaries.iter(), &thought_snapshots);
         let active_pane_session_ids = self
-            .active_pane_session_ids_cached(&tmux_names, "list_sessions")
-            .await;
-        for summary in &mut summaries {
-            let active_pane_session_id = if thought_snapshots.contains_key(&summary.session_id)
-                || summary.tmux_name.is_empty()
-            {
-                None
-            } else {
-                active_pane_session_ids.get(&summary.tmux_name).cloned()
-            };
-            if let Some(thought_data) = thought_snapshot_for_summary(
-                summary,
-                active_pane_session_id.as_deref(),
+            .active_pane_session_ids_for_summaries(
+                summaries.iter(),
                 &thought_snapshots,
-            ) {
-                merge_summary_with_thought_snapshot(summary, thought_data);
-            }
-        }
-
-        // Resolve per-repo theme IDs after the thought merge so the cwd is
-        // the actor-reported value.
-        for summary in &mut summaries {
-            self.resolve_repo_theme_for_summary(summary);
-        }
+                "list_sessions",
+            )
+            .await;
+        merge_thought_snapshots_into_summaries(
+            &mut summaries,
+            &thought_snapshots,
+            &active_pane_session_ids,
+        );
+        // Keep repo theme discovery after thought enrichment so the summary
+        // exposes a final cwd/theme-id pair to API and TUI callers.
+        self.resolve_repo_themes_for_summaries(&mut summaries);
 
         summaries
     }
@@ -2109,12 +2170,12 @@ impl SessionSupervisor {
             .flatten()
             .collect();
 
-        let tmux_names = tmux_names_requiring_active_pane_lookup(
-            summaries_with_replay.iter().map(|(summary, _)| summary),
-            &thought_snapshots,
-        );
         let active_pane_session_ids = self
-            .active_pane_session_ids_cached(&tmux_names, "collect_session_infos")
+            .active_pane_session_ids_for_summaries(
+                summaries_with_replay.iter().map(|(summary, _)| summary),
+                &thought_snapshots,
+                "collect_session_infos",
+            )
             .await;
 
         summaries_with_replay
@@ -2623,6 +2684,47 @@ mod tests {
                 .map(|item| item.to_string())
                 .collect(),
         }
+    }
+
+    fn test_thought_snapshot(thought: &str, thought_state: ThoughtState) -> ThoughtSnapshot {
+        ThoughtSnapshot {
+            thought: Some(thought.to_string()),
+            thought_state,
+            thought_source: ThoughtSource::Llm,
+            rest_state: match thought_state {
+                ThoughtState::Active => RestState::Active,
+                ThoughtState::Holding => RestState::Drowsy,
+                ThoughtState::Sleeping => RestState::Sleeping,
+            },
+            commit_candidate: thought_state == ThoughtState::Active,
+            action_cues: Vec::new(),
+            objective_changed_at: None,
+            objective_fingerprint: None,
+            token_count: 10,
+            context_limit: 100,
+            updated_at: Utc::now(),
+            delivery: ThoughtDeliveryState::default(),
+        }
+    }
+
+    fn write_test_repo_theme_colors(root: &std::path::Path, body: &str) {
+        let theme_dir = root.join(".swimmers");
+        std::fs::create_dir_all(&theme_dir).expect("create theme dir");
+        std::fs::write(
+            theme_dir.join("colors.json"),
+            format!(
+                r##"{{
+  "palette": {{
+    "body": "{body}",
+    "outline": "#3D2F24",
+    "accent": "#1D1914",
+    "shirt": "#AA9370"
+  }}
+}}
+"##
+            ),
+        )
+        .expect("write colors.json");
     }
 
     async fn spawn_summary_handle(summary: SessionSummary) -> ActorHandle {
@@ -4111,6 +4213,44 @@ mod tests {
     }
 
     #[test]
+    fn thought_snapshot_for_summary_prefers_direct_snapshot_over_active_tmux_pane() {
+        let summary = test_summary("sess_1", SessionState::Idle);
+        let snapshots = HashMap::from([
+            (
+                "sess_1".to_string(),
+                test_thought_snapshot("direct session", ThoughtState::Holding),
+            ),
+            (
+                "tmux:tmux-sess_1:1.1:%2".to_string(),
+                test_thought_snapshot("active pane", ThoughtState::Active),
+            ),
+        ]);
+
+        let matched =
+            thought_snapshot_for_summary(&summary, Some("tmux:tmux-sess_1:1.1:%2"), &snapshots)
+                .expect("direct session snapshot");
+
+        assert_eq!(matched.thought.as_deref(), Some("direct session"));
+        assert_eq!(matched.thought_state, ThoughtState::Holding);
+    }
+
+    #[test]
+    fn parse_active_pane_fields_splits_unit_separator_fields_only() {
+        let fields = parse_active_pane_fields("work\tspace\x1f1\x1f0\x1f1.1:%2")
+            .expect("active pane fields");
+
+        assert_eq!(
+            fields,
+            ActivePaneFields {
+                session_name: "work\tspace",
+                window_active: "1",
+                pane_active: "0",
+                pane_selector: "1.1:%2",
+            }
+        );
+    }
+
+    #[test]
     fn parse_active_pane_session_ids_preserves_tabs_in_session_names() {
         let stdout = b"work\tspace\x1f1\x1f1\x1f1.1:%2\nother\x1f1\x1f0\x1f1.0:%1\n";
 
@@ -4121,6 +4261,35 @@ mod tests {
             Some("tmux:work\tspace:1.1:%2")
         );
         assert!(!panes.contains_key("other"));
+    }
+
+    #[test]
+    fn parse_active_pane_session_ids_filters_inactive_windows_and_panes() {
+        let stdout = b"window-off\x1f0\x1f1\x1f1.0:%1\npane-off\x1f1\x1f0\x1f1.1:%2\nactive\x1f1\x1f1\x1f2.0:%3\n";
+
+        let panes = parse_active_pane_session_ids(stdout);
+
+        assert_eq!(panes.len(), 1);
+        assert_eq!(
+            panes.get("active").map(String::as_str),
+            Some("tmux:active:2.0:%3")
+        );
+        assert!(!panes.contains_key("window-off"));
+        assert!(!panes.contains_key("pane-off"));
+    }
+
+    #[test]
+    fn parse_active_pane_session_ids_filters_empty_pane_selectors() {
+        let stdout = b"missing-selector\x1f1\x1f1\x1f\nactive\x1f1\x1f1\x1f2.0:%3\n";
+
+        let panes = parse_active_pane_session_ids(stdout);
+
+        assert_eq!(panes.len(), 1);
+        assert_eq!(
+            panes.get("active").map(String::as_str),
+            Some("tmux:active:2.0:%3")
+        );
+        assert!(!panes.contains_key("missing-selector"));
     }
 
     #[test]
@@ -4176,6 +4345,58 @@ mod tests {
         assert_eq!(sessions[0].token_count, 44);
         assert_eq!(sessions[0].action_cues, vec![commit_ready_cue()]);
         assert!(sessions[0].objective_changed_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn list_sessions_resolves_repo_theme_after_thought_merge_when_theme_id_missing() {
+        let repo = tempdir().expect("tempdir");
+        write_test_repo_theme_colors(repo.path(), "#B89875");
+        let expected_theme_id = repo.path().to_string_lossy().into_owned();
+        let supervisor = SessionSupervisor::new(Arc::new(Config::default()));
+        let mut summary = test_summary("sess-themed", SessionState::Idle);
+        summary.cwd = expected_theme_id.clone();
+        summary.repo_theme_id = None;
+        supervisor
+            .insert_test_handle(spawn_summary_handle(summary).await)
+            .await;
+        supervisor.thought_snapshots.write().await.insert(
+            "sess-themed".to_string(),
+            test_thought_snapshot("checking themed repo", ThoughtState::Active),
+        );
+
+        let sessions = supervisor.list_sessions().await;
+
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].thought.as_deref(), Some("checking themed repo"));
+        assert_eq!(
+            sessions[0].repo_theme_id.as_deref(),
+            Some(expected_theme_id.as_str())
+        );
+    }
+
+    #[tokio::test]
+    async fn list_sessions_clears_repo_theme_id_after_thought_merge_when_theme_missing() {
+        let repo = tempdir().expect("tempdir");
+        let supervisor = SessionSupervisor::new(Arc::new(Config::default()));
+        let mut summary = test_summary("sess-unthemed", SessionState::Idle);
+        summary.cwd = repo.path().to_string_lossy().into_owned();
+        summary.repo_theme_id = Some("/stale/theme".to_string());
+        supervisor
+            .insert_test_handle(spawn_summary_handle(summary).await)
+            .await;
+        supervisor.thought_snapshots.write().await.insert(
+            "sess-unthemed".to_string(),
+            test_thought_snapshot("checking missing theme", ThoughtState::Active),
+        );
+
+        let sessions = supervisor.list_sessions().await;
+
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(
+            sessions[0].thought.as_deref(),
+            Some("checking missing theme")
+        );
+        assert_eq!(sessions[0].repo_theme_id, None);
     }
 
     #[tokio::test]

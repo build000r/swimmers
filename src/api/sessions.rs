@@ -212,7 +212,13 @@ async fn create_sessions_batch(
 }
 
 async fn create_remote_sessions_batch_response(body: CreateSessionsBatchRequest) -> Response {
-    match remote_sessions::create_remote_sessions_batch(body).await {
+    remote_sessions_batch_result_response(remote_sessions::create_remote_sessions_batch(body).await)
+}
+
+fn remote_sessions_batch_result_response(
+    result: Result<CreateSessionsBatchResponse, remote_sessions::RemoteSessionError>,
+) -> Response {
+    match result {
         Ok(response) => create_sessions_batch_response(response),
         Err(err) => err.into_response(),
     }
@@ -732,17 +738,47 @@ async fn get_timeline(
 }
 
 async fn fetch_timeline_response(state: &Arc<AppState>, session_id: &str) -> Response {
-    match remote_sessions::denamespace_for_target(session_id) {
-        Ok(Some((target, remote_session_id))) => {
-            return match remote_sessions::fetch_remote_timeline(&target, remote_session_id).await {
-                Ok(response) => (StatusCode::OK, Json(response)).into_response(),
-                Err(err) => err.into_response(),
-            };
-        }
-        Ok(None) => {}
+    match timeline_route(session_id) {
+        Ok(TimelineRoute::Remote {
+            target,
+            remote_session_id,
+        }) => fetch_remote_timeline_response(&target, remote_session_id).await,
+        Ok(TimelineRoute::Local) => fetch_local_timeline_response(state, session_id).await,
         Err(err) => return err.into_response(),
     }
+}
 
+enum TimelineRoute<'a> {
+    Remote {
+        target: LaunchTargetSummary,
+        remote_session_id: &'a str,
+    },
+    Local,
+}
+
+fn timeline_route(
+    session_id: &str,
+) -> Result<TimelineRoute<'_>, remote_sessions::RemoteSessionError> {
+    Ok(match remote_sessions::denamespace_for_target(session_id)? {
+        Some((target, remote_session_id)) => TimelineRoute::Remote {
+            target,
+            remote_session_id,
+        },
+        None => TimelineRoute::Local,
+    })
+}
+
+async fn fetch_remote_timeline_response(
+    target: &LaunchTargetSummary,
+    remote_session_id: &str,
+) -> Response {
+    match remote_sessions::fetch_remote_timeline(target, remote_session_id).await {
+        Ok(response) => (StatusCode::OK, Json(response)).into_response(),
+        Err(err) => err.into_response(),
+    }
+}
+
+async fn fetch_local_timeline_response(state: &Arc<AppState>, session_id: &str) -> Response {
     let summary = match fetch_live_summary(state, session_id).await {
         Ok(Some(summary)) => summary,
         Ok(None) => {
@@ -2433,6 +2469,27 @@ esac
     }
 
     #[tokio::test]
+    async fn create_remote_sessions_batch_response_maps_validation_errors() {
+        let response = create_sessions_batch(
+            Extension(AuthInfo::new(OPERATOR_SCOPES.to_vec())),
+            State(test_state()),
+            Json(CreateSessionsBatchRequest {
+                dirs: Vec::new(),
+                spawn_tool: None,
+                launch_target: Some("remote-target".to_string()),
+                initial_request: None,
+            }),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let json = response_json(response).await;
+        assert_eq!(json["code"], "VALIDATION_FAILED");
+        assert_eq!(json["message"], "dirs must not be empty");
+    }
+
+    #[tokio::test]
     async fn create_sessions_batch_rejects_oversized_batches() {
         let response = create_sessions_batch(
             Extension(AuthInfo::new(OPERATOR_SCOPES.to_vec())),
@@ -3740,6 +3797,45 @@ esac
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
         let json = response_json(response).await;
         assert_eq!(json["code"], "SESSION_NOT_FOUND");
+    }
+
+    #[tokio::test]
+    async fn get_timeline_prefers_remote_namespace_errors() {
+        let response = get_timeline(
+            Extension(AuthInfo::new(OPERATOR_SCOPES.to_vec())),
+            State(test_state()),
+            Path(remote_sessions::namespace_session_id(
+                "not-configured-timeline-target",
+                "shadow",
+            )),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let json = response_json(response).await;
+        assert_eq!(json["code"], "LAUNCH_TARGET_UNKNOWN");
+        assert!(json["message"]
+            .as_str()
+            .expect("message")
+            .contains("not-configured-timeline-target"));
+    }
+
+    #[tokio::test]
+    async fn get_timeline_reports_summary_lookup_failure() {
+        let state = test_state();
+        let summary_task = insert_dropping_summary_test_handle(&state, "dropped-timeline").await;
+
+        let response = get_timeline(
+            Extension(AuthInfo::new(OPERATOR_SCOPES.to_vec())),
+            State(state),
+            Path("dropped-timeline".to_string()),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let json = response_json(response).await;
+        assert_eq!(json["code"], "INTERNAL_ERROR");
+        summary_task.await.expect("summary task");
     }
 
     #[tokio::test]
