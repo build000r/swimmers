@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use chrono::{TimeZone, Utc};
-use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
+use portable_pty::{native_pty_system, MasterPty, PtySize};
 use tokio::process::Command;
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tracing::{debug, error, info, warn};
@@ -18,7 +18,7 @@ use crate::session::artifact_responses::{
 use crate::session::replay_ring::ReplayRing;
 use crate::session::skill_detection::{detect_skill_from_input_line, drain_completed_input_lines};
 use crate::state::detector::StateDetector;
-use crate::tmux_target::{exact_pane_target, exact_session_target};
+use crate::tmux_target::exact_pane_target;
 use crate::types::{
     clamp_terminal_resize, ControlEvent, MermaidArtifactResponse, PlanFileResponse,
     SessionBatchMembership, SessionSkillPayload, SessionState, SessionStatePayload, SessionSummary,
@@ -29,6 +29,7 @@ mod activity;
 mod liveness;
 mod percent_decode;
 mod process_tree;
+mod spawn;
 mod tmux_input;
 
 use self::activity::output_counts_as_meaningful_activity;
@@ -37,6 +38,16 @@ use self::process_tree::{
     current_command_tool_update, query_pane_liveness, query_tool_from_tmux_process_tree,
 };
 use self::process_tree::{PaneLiveness, ProcessEntry, ProcessTreeIndex};
+use self::spawn::{
+    build_spawned_session_actor, build_tmux_spawn_command, initial_spawn_pty_size,
+    inspect_tmux_child_after_spawn, validate_spawn_start_cwd, SpawnedSessionActorInit,
+    TmuxSpawnMode,
+};
+#[cfg(test)]
+use self::spawn::{
+    build_tmux_spawn_command_args, resolve_tmux_colorterm, resolve_tmux_term,
+    resolve_tmux_terminal_env,
+};
 
 #[cfg(test)]
 use self::tmux_input::TmuxInputChunk;
@@ -51,31 +62,7 @@ const TOOL_REFRESH_MIN_INTERVAL: Duration = Duration::from_millis(1_000);
 const LIVENESS_CHECK_INTERVAL: Duration = Duration::from_millis(2_000);
 const TMUX_DISPLAY_MESSAGE_TIMEOUT: Duration = Duration::from_millis(500);
 const TMUX_CAPTURE_PANE_TIMEOUT: Duration = Duration::from_secs(1);
-const TMUX_NEW_SESSION_EXIT_GRACE: Duration = Duration::from_millis(50);
 const MAX_OUTPUT_SUBSCRIBERS_PER_SESSION: usize = 16;
-const TMUX_FALLBACK_TERM: &str = "xterm-256color";
-const TMUX_FALLBACK_COLORTERM: &str = "truecolor";
-const TMUX_UNSUPPORTED_TERMS: [&str; 3] = ["", "dumb", "unknown"];
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum TmuxSpawnMode {
-    Attach,
-    New,
-}
-
-impl TmuxSpawnMode {
-    fn from_attach(attach: bool) -> Self {
-        if attach {
-            Self::Attach
-        } else {
-            Self::New
-        }
-    }
-
-    fn is_new(self) -> bool {
-        matches!(self, Self::New)
-    }
-}
 
 fn tmux_command(program: impl AsRef<OsStr>, args: &[&str]) -> Command {
     let mut command = Command::new(program);
@@ -465,192 +452,6 @@ fn compare_session_state_change(
         current_evidence,
         state_changed,
         evidence_changed,
-    }
-}
-
-fn initial_spawn_pty_size() -> PtySize {
-    PtySize {
-        rows: 24,
-        cols: 80,
-        pixel_width: 0,
-        pixel_height: 0,
-    }
-}
-
-fn validate_spawn_start_cwd(mode: TmuxSpawnMode, start_cwd: Option<&str>) -> anyhow::Result<()> {
-    if mode.is_new() {
-        if let Some(dir) = start_cwd {
-            if !std::path::Path::new(dir).is_dir() {
-                return Err(anyhow::anyhow!(
-                    "session cwd does not exist or is not a directory: {dir}"
-                ));
-            }
-        }
-    }
-    Ok(())
-}
-
-fn build_tmux_spawn_command(
-    mode: TmuxSpawnMode,
-    session_id: &str,
-    tmux_name: &str,
-    start_cwd: Option<&str>,
-    initial_command: Option<&str>,
-) -> CommandBuilder {
-    let mut command = build_tmux_spawn_command_args(mode, tmux_name, start_cwd, initial_command);
-    configure_tmux_spawn_command_env(&mut command, session_id, tmux_name);
-    command
-}
-
-fn build_tmux_spawn_command_args(
-    mode: TmuxSpawnMode,
-    tmux_name: &str,
-    start_cwd: Option<&str>,
-    initial_command: Option<&str>,
-) -> CommandBuilder {
-    match mode {
-        TmuxSpawnMode::Attach => build_tmux_attach_command(tmux_name),
-        TmuxSpawnMode::New => build_tmux_new_session_command(tmux_name, start_cwd, initial_command),
-    }
-}
-
-fn build_tmux_attach_command(tmux_name: &str) -> CommandBuilder {
-    let mut command = CommandBuilder::new("tmux");
-    let target = exact_session_target(tmux_name);
-    command.args(["attach-session", "-t", &target]);
-    command
-}
-
-fn build_tmux_new_session_command(
-    tmux_name: &str,
-    start_cwd: Option<&str>,
-    initial_command: Option<&str>,
-) -> CommandBuilder {
-    let mut command = CommandBuilder::new("tmux");
-    command.args(["new-session", "-s", tmux_name]);
-    if let Some(dir) = start_cwd {
-        command.args(["-c", dir]);
-    }
-    if let Some(command_arg) = initial_command {
-        command.arg(command_arg);
-    }
-    command
-}
-
-fn configure_tmux_spawn_command_env(
-    command: &mut CommandBuilder,
-    session_id: &str,
-    tmux_name: &str,
-) {
-    command.env_remove("TMUX");
-    command.env_remove("TMUX_PANE");
-
-    let inherited_term = std::env::var("TERM").ok();
-    let inherited_colorterm = std::env::var("COLORTERM").ok();
-    let (tmux_term, tmux_colorterm, used_term_fallback) =
-        resolve_tmux_terminal_env(inherited_term.as_deref(), inherited_colorterm.as_deref());
-    command.env("TERM", &tmux_term);
-    command.env("COLORTERM", &tmux_colorterm);
-    command.env("TERM_PROGRAM", "swimmers");
-
-    log_tmux_spawn_terminal_env(
-        session_id,
-        tmux_name,
-        inherited_term.as_deref(),
-        &tmux_term,
-        &tmux_colorterm,
-        used_term_fallback,
-    );
-}
-
-fn log_tmux_spawn_terminal_env(
-    session_id: &str,
-    tmux_name: &str,
-    inherited_term: Option<&str>,
-    tmux_term: &str,
-    tmux_colorterm: &str,
-    used_term_fallback: bool,
-) {
-    if used_term_fallback {
-        warn!(
-            session_id,
-            tmux_name,
-            inherited_term = ?inherited_term,
-            applied_term = %tmux_term,
-            "missing/unsupported TERM for tmux client; applied fallback"
-        );
-    } else {
-        debug!(
-            session_id,
-            tmux_name,
-            inherited_term = ?inherited_term,
-            applied_term = %tmux_term,
-            colorterm = %tmux_colorterm,
-            "configured tmux client terminal environment"
-        );
-    }
-}
-
-fn inspect_tmux_child_after_spawn(
-    mode: TmuxSpawnMode,
-    child: &mut dyn portable_pty::Child,
-) -> anyhow::Result<()> {
-    if mode.is_new() {
-        std::thread::sleep(TMUX_NEW_SESSION_EXIT_GRACE);
-        if let Some(status) = child
-            .try_wait()
-            .map_err(|e| anyhow::anyhow!("failed to inspect tmux after spawn: {}", e))?
-        {
-            return Err(anyhow::anyhow!(
-                "tmux new-session exited immediately with status {status}"
-            ));
-        }
-    }
-    Ok(())
-}
-
-struct SpawnedSessionActorInit {
-    session_id: String,
-    tmux_name: String,
-    config: Arc<Config>,
-    master: Box<dyn MasterPty + Send>,
-    writer: Box<dyn std::io::Write + Send>,
-    cmd_rx: mpsc::Receiver<SessionCommand>,
-    event_tx: broadcast::Sender<ControlEvent>,
-    start_cwd: Option<String>,
-    initial_tool: Option<String>,
-    attach: bool,
-    last_activity_override: Option<chrono::DateTime<Utc>>,
-    batch: Option<SessionBatchMembership>,
-}
-
-fn build_spawned_session_actor(init: SpawnedSessionActorInit) -> SessionActor {
-    let state_detector = state_detector_for_initial_tool(init.initial_tool.as_deref());
-    SessionActor {
-        session_id: init.session_id,
-        tmux_name: init.tmux_name,
-        config: init.config.clone(),
-        master: init.master,
-        writer: init.writer,
-        state_detector,
-        scroll_guard: ScrollGuard::new(),
-        replay_ring: ReplayRing::new(init.config.replay_buffer_size),
-        subscribers: HashMap::new(),
-        cmd_rx: init.cmd_rx,
-        event_tx: init.event_tx,
-        cols: 80,
-        rows: 24,
-        cwd: init.start_cwd.unwrap_or_default(),
-        last_cwd_refresh_at: Instant::now(),
-        last_tool_refresh_at: Instant::now(),
-        last_liveness_check_at: Instant::now(),
-        tool: init.initial_tool,
-        last_skill: None,
-        batch: init.batch,
-        input_line_buffer: String::new(),
-        last_activity_at: init.last_activity_override.unwrap_or_else(Utc::now),
-        session_started_at: Utc::now(),
-        clear_replay_on_first_idle: !init.attach,
     }
 }
 
@@ -2225,41 +2026,6 @@ fn detect_tool_from_title(title: &str) -> Option<String> {
         }
     }
     None
-}
-
-fn resolve_tmux_terminal_env(
-    inherited_term: Option<&str>,
-    inherited_colorterm: Option<&str>,
-) -> (String, String, bool) {
-    let (resolved_term, needs_term_fallback) = resolve_tmux_term(inherited_term);
-    let colorterm = resolve_tmux_colorterm(inherited_colorterm);
-
-    (resolved_term, colorterm, needs_term_fallback)
-}
-
-fn resolve_tmux_term(inherited_term: Option<&str>) -> (String, bool) {
-    let term = inherited_term.map(str::trim).unwrap_or_default();
-    let needs_term_fallback = tmux_term_needs_fallback(term);
-    let resolved_term = needs_term_fallback
-        .then_some(TMUX_FALLBACK_TERM)
-        .unwrap_or(term)
-        .to_string();
-
-    (resolved_term, needs_term_fallback)
-}
-
-fn tmux_term_needs_fallback(term: &str) -> bool {
-    TMUX_UNSUPPORTED_TERMS
-        .iter()
-        .any(|unsupported| term.eq_ignore_ascii_case(unsupported))
-}
-
-fn resolve_tmux_colorterm(inherited_colorterm: Option<&str>) -> String {
-    inherited_colorterm
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .unwrap_or(TMUX_FALLBACK_COLORTERM)
-        .to_string()
 }
 
 // ---------------------------------------------------------------------------

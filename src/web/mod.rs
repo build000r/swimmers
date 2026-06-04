@@ -12,13 +12,15 @@ use futures::{
     stream::{SplitSink, SplitStream},
     SinkExt, StreamExt,
 };
-use serde::{Deserialize, Serialize};
-use subtle::ConstantTimeEq;
+use serde::Serialize;
 use tokio::sync::{broadcast, mpsc, oneshot};
 
 use crate::api::envelope::error_body_msg;
 use crate::api::{fetch_live_summary, AppState};
-use crate::auth::{AuthInfo, AuthScope, OBSERVER_SCOPES, OPERATOR_SCOPES};
+use crate::auth::{AuthInfo, AuthScope};
+#[cfg(test)]
+use crate::auth::{OBSERVER_SCOPES, OPERATOR_SCOPES};
+#[cfg(test)]
 use crate::config::{AuthMode, Config};
 use crate::session::actor::{
     ActorHandle, InputDeliveryResult, OutputFrame, ReplayCursor, SessionCommand, SubscribeOutcome,
@@ -27,13 +29,19 @@ use crate::session::supervisor::LifecycleEvent;
 use crate::types::{opcodes, ControlEvent, SessionSummary};
 
 mod assets;
+mod ws_auth;
 mod ws_messages;
 
+use self::ws_auth::{authenticate_session_ws, session_ws_route_plan, WsOutputMode, WsQuery};
+#[cfg(test)]
+use self::ws_auth::{
+    decode_ws_auth_first_message, decode_ws_auth_message, query_flag_enabled, resolve_ws_auth,
+    WsAuthDecision, WsAuthFirstMessage,
+};
 use self::ws_messages::{decode_client_message, WsClientDecision};
 
 const PUBLISHED_VIEW_ROUTE: &str = "/selected";
 const REPLY_TIMEOUT: Duration = Duration::from_secs(2);
-const WS_AUTH_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_BROWSER_WS_CONNECTIONS: usize = 64;
 
 static NEXT_WS_CLIENT_ID: AtomicU64 = AtomicU64::new(1);
@@ -505,42 +513,6 @@ async fn render_index(focus_layout: bool) -> impl IntoResponse {
     ([(header::CACHE_CONTROL, "no-store")], Html(html))
 }
 
-#[derive(Debug, Deserialize)]
-struct WsQuery {
-    token: Option<String>,
-    resume_from_seq: Option<u64>,
-    framed: Option<String>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum WsOutputMode {
-    Raw,
-    Framed,
-}
-
-impl WsQuery {
-    fn output_mode(&self) -> WsOutputMode {
-        WsOutputMode::from_framed_query(self.framed.as_deref())
-    }
-}
-
-impl WsOutputMode {
-    fn from_framed_query(value: Option<&str>) -> Self {
-        if query_flag_enabled(value) {
-            Self::Framed
-        } else {
-            Self::Raw
-        }
-    }
-
-    fn protocol_output(self) -> &'static str {
-        match self {
-            Self::Raw => "raw",
-            Self::Framed => "framed_v1",
-        }
-    }
-}
-
 async fn session_ws(
     ws: WebSocketUpgrade,
     AxumPath(session_id): AxumPath<String>,
@@ -556,101 +528,6 @@ async fn session_ws(
     };
 
     plan.into_response(ws, state, session_id, resume_from_seq, output_mode)
-}
-
-enum SessionWsRoutePlan {
-    Trusted { handle: ActorHandle, auth: AuthInfo },
-    Token,
-}
-
-impl SessionWsRoutePlan {
-    fn into_response(
-        self,
-        ws: WebSocketUpgrade,
-        state: Arc<AppState>,
-        session_id: String,
-        resume_from_seq: Option<u64>,
-        output_mode: WsOutputMode,
-    ) -> Response {
-        match self {
-            Self::Trusted { handle, auth } => ws.on_upgrade(move |socket| {
-                handle_session_ws(
-                    socket,
-                    state,
-                    handle,
-                    session_id,
-                    auth,
-                    resume_from_seq,
-                    output_mode,
-                )
-            }),
-            Self::Token => ws.on_upgrade(move |socket| {
-                handle_token_session_ws(socket, state, session_id, resume_from_seq, output_mode)
-            }),
-        }
-    }
-}
-
-#[allow(clippy::result_large_err)]
-async fn session_ws_route_plan(
-    state: &Arc<AppState>,
-    session_id: &str,
-    query: &WsQuery,
-) -> Result<SessionWsRoutePlan, Response> {
-    match state.config.auth_mode {
-        AuthMode::LocalTrust | AuthMode::TailnetTrust => {
-            trusted_session_ws_route_plan(state, session_id).await
-        }
-        AuthMode::Token => token_session_ws_route_plan(query),
-    }
-}
-
-#[allow(clippy::result_large_err)]
-async fn trusted_session_ws_route_plan(
-    state: &Arc<AppState>,
-    session_id: &str,
-) -> Result<SessionWsRoutePlan, Response> {
-    let auth = AuthInfo::new(OPERATOR_SCOPES.to_vec());
-    auth.require_scope(AuthScope::SessionsRead)?;
-    let handle = require_session_ws_handle(state, session_id).await?;
-    Ok(SessionWsRoutePlan::Trusted { handle, auth })
-}
-
-#[allow(clippy::result_large_err)]
-fn token_session_ws_route_plan(query: &WsQuery) -> Result<SessionWsRoutePlan, Response> {
-    reject_session_ws_query_token(query)?;
-    Ok(SessionWsRoutePlan::Token)
-}
-
-#[allow(clippy::result_large_err)]
-fn reject_session_ws_query_token(query: &WsQuery) -> Result<(), Response> {
-    if query.token.is_none() {
-        return Ok(());
-    }
-
-    Err(json_error(
-        StatusCode::BAD_REQUEST,
-        "WS_QUERY_TOKEN_UNSUPPORTED",
-        "WebSocket token query parameters are not supported; send an auth message after opening the socket",
-    ))
-}
-
-#[allow(clippy::result_large_err)]
-async fn require_session_ws_handle(
-    state: &Arc<AppState>,
-    session_id: &str,
-) -> Result<ActorHandle, Response> {
-    state
-        .supervisor
-        .get_session(session_id)
-        .await
-        .ok_or_else(|| {
-            json_error(
-                StatusCode::NOT_FOUND,
-                "SESSION_NOT_FOUND",
-                "session not found",
-            )
-        })
 }
 
 async fn handle_session_ws(
@@ -1069,12 +946,6 @@ async fn handle_session_ws_event(
     }
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-enum BrowserWsAuthMessage {
-    Auth { token: String },
-}
-
 async fn handle_client_message(
     handle: &ActorHandle,
     sender: &mut futures::stream::SplitSink<WebSocket, Message>,
@@ -1236,100 +1107,6 @@ async fn send_ws_error(sender: &mut WsSender, code: &str, message: &str) -> anyh
         .send(Message::Text(payload.to_string().into()))
         .await?;
     Ok(())
-}
-
-#[derive(Debug)]
-enum WsAuthDecision {
-    Authenticated(AuthInfo),
-    Close,
-    Reject {
-        code: &'static str,
-        message: &'static str,
-    },
-}
-
-enum WsAuthFirstMessage {
-    Message(Message),
-    Closed,
-    Timeout,
-}
-
-async fn authenticate_session_ws(
-    config: &Config,
-    sender: &mut WsSender,
-    receiver: &mut WsReceiver,
-) -> anyhow::Result<Option<AuthInfo>> {
-    let first = next_ws_auth_message(receiver).await?;
-    let decision = decode_ws_auth_first_message(config, first);
-    execute_ws_auth_decision(sender, decision).await
-}
-
-async fn next_ws_auth_message(
-    receiver: &mut WsReceiver,
-) -> Result<WsAuthFirstMessage, axum::Error> {
-    match tokio::time::timeout(WS_AUTH_TIMEOUT, receiver.next()).await {
-        Ok(Some(Ok(message))) => Ok(WsAuthFirstMessage::Message(message)),
-        Ok(Some(Err(err))) => Err(err),
-        Ok(None) => Ok(WsAuthFirstMessage::Closed),
-        Err(_) => Ok(WsAuthFirstMessage::Timeout),
-    }
-}
-
-fn decode_ws_auth_first_message(config: &Config, first: WsAuthFirstMessage) -> WsAuthDecision {
-    match first {
-        WsAuthFirstMessage::Message(message) => decode_ws_auth_message(config, &message),
-        WsAuthFirstMessage::Closed => WsAuthDecision::Close,
-        WsAuthFirstMessage::Timeout => WsAuthDecision::Reject {
-            code: "WS_AUTH_TIMEOUT",
-            message: "token-mode WebSocket connections must authenticate before terminal traffic",
-        },
-    }
-}
-
-async fn execute_ws_auth_decision(
-    sender: &mut WsSender,
-    decision: WsAuthDecision,
-) -> anyhow::Result<Option<AuthInfo>> {
-    match decision {
-        WsAuthDecision::Authenticated(auth) => Ok(Some(auth)),
-        WsAuthDecision::Close => Ok(None),
-        WsAuthDecision::Reject { code, message } => {
-            send_ws_error(sender, code, message).await?;
-            Ok(None)
-        }
-    }
-}
-
-fn decode_ws_auth_message(config: &Config, message: &Message) -> WsAuthDecision {
-    let Message::Text(text) = message else {
-        return WsAuthDecision::Reject {
-            code: "WS_AUTH_REQUIRED",
-            message:
-                "token-mode WebSocket connections must send an auth message before terminal traffic",
-        };
-    };
-
-    let parsed: BrowserWsAuthMessage = match serde_json::from_str(text.as_str()) {
-        Ok(message) => message,
-        Err(_) => {
-            return WsAuthDecision::Reject {
-                code: "WS_AUTH_REQUIRED",
-                message:
-                    "token-mode WebSocket connections must send an auth message before terminal traffic",
-            };
-        }
-    };
-
-    match parsed {
-        BrowserWsAuthMessage::Auth { token } => match resolve_ws_auth(config, Some(token.as_str()))
-        {
-            Ok(auth) => WsAuthDecision::Authenticated(auth),
-            Err(_) => WsAuthDecision::Reject {
-                code: "NOT_AUTHENTICATED",
-                message: "Missing or invalid authentication token",
-            },
-        },
-    }
 }
 
 async fn send_control_event_if_relevant(
@@ -1503,16 +1280,6 @@ fn encode_terminal_output_frame(frame: OutputFrame) -> Vec<u8> {
     bytes
 }
 
-fn query_flag_enabled(value: Option<&str>) -> bool {
-    let Some(value) = value else {
-        return false;
-    };
-    matches!(
-        value.trim().to_ascii_lowercase().as_str(),
-        "1" | "true" | "yes" | "on" | "framed" | "framed_v1"
-    )
-}
-
 async fn subscribe_to_output(
     state: &Arc<AppState>,
     handle: &ActorHandle,
@@ -1550,55 +1317,6 @@ async fn request_replay_cursor(handle: &ActorHandle) -> anyhow::Result<ReplayCur
         .await
         .map_err(|_| anyhow::anyhow!("timed out waiting for replay cursor"))?
         .map_err(|_| anyhow::anyhow!("session actor dropped replay cursor"))
-}
-
-#[allow(clippy::result_large_err)]
-fn resolve_ws_auth(config: &Config, token: Option<&str>) -> Result<AuthInfo, Response> {
-    match config.auth_mode {
-        AuthMode::LocalTrust | AuthMode::TailnetTrust => {
-            Ok(AuthInfo::new(OPERATOR_SCOPES.to_vec()))
-        }
-        AuthMode::Token => {
-            // Reject a missing or empty token outright. Empty `AUTH_TOKEN`/
-            // `OBSERVER_TOKEN` are already filtered at config load, so this is
-            // defense-in-depth that mirrors the HTTP `extract_bearer_token`
-            // empty-token guard and keeps empty WebSocket auth frames from
-            // ever matching.
-            let Some(token) = token.filter(|t| !t.is_empty()) else {
-                return Err(json_error(
-                    StatusCode::UNAUTHORIZED,
-                    "NOT_AUTHENTICATED",
-                    "Missing or invalid authentication token",
-                ));
-            };
-
-            if config
-                .auth_token
-                .as_deref()
-                .is_some_and(|expected| bearer_tokens_eq(token, expected))
-            {
-                return Ok(AuthInfo::new(OPERATOR_SCOPES.to_vec()));
-            }
-
-            if config
-                .observer_token
-                .as_deref()
-                .is_some_and(|expected| bearer_tokens_eq(token, expected))
-            {
-                return Ok(AuthInfo::new(OBSERVER_SCOPES.to_vec()));
-            }
-
-            Err(json_error(
-                StatusCode::UNAUTHORIZED,
-                "NOT_AUTHENTICATED",
-                "Missing or invalid authentication token",
-            ))
-        }
-    }
-}
-
-fn bearer_tokens_eq(provided: &str, expected: &str) -> bool {
-    provided.as_bytes().ct_eq(expected.as_bytes()).into()
 }
 
 fn json_error(status: StatusCode, code: &str, message: &str) -> Response {
