@@ -22,11 +22,12 @@ use crate::session::actor::{ActorHandle, InputDeliveryResult, SessionCommand};
 use crate::session::supervisor::TmuxAdoptError;
 use crate::types::{
     AdoptSessionRequest, AdoptSessionResponse, CreateSessionRequest, CreateSessionResponse,
-    CreateSessionsBatchRequest, ErrorResponse, MermaidArtifactResponse, SessionGitDiffResponse,
-    SessionGroupInputRequest, SessionGroupInputResponse, SessionGroupInputResult,
-    SessionInputRequest, SessionInputResponse, SessionListResponse, SessionPaneTailResponse,
-    SessionState, SessionSummary, SessionTimelineEvent, SessionTimelinePinned,
-    SessionTimelinePinnedItem, SessionTimelineResponse, TerminalSnapshot,
+    CreateSessionsBatchRequest, ErrorResponse, LaunchTargetSummary, MermaidArtifactResponse,
+    SessionAgentContextResponse, SessionGitDiffResponse, SessionGroupInputRequest,
+    SessionGroupInputResponse, SessionGroupInputResult, SessionInputRequest, SessionInputResponse,
+    SessionListResponse, SessionPaneTailResponse, SessionState, SessionSummary,
+    SessionTimelineEvent, SessionTimelinePinned, SessionTimelinePinnedItem,
+    SessionTimelineResponse, TerminalSnapshot,
 };
 
 const PANE_TAIL_LINES: usize = 300;
@@ -477,35 +478,66 @@ async fn get_agent_context(
 }
 
 async fn fetch_agent_context_response(state: &Arc<AppState>, session_id: &str) -> Response {
-    match remote_sessions::denamespace_for_target(session_id) {
-        Ok(Some((target, remote_session_id))) => {
-            return match remote_sessions::fetch_remote_agent_context(&target, remote_session_id)
-                .await
-            {
-                Ok(response) => (StatusCode::OK, Json(response)).into_response(),
-                Err(err) => err.into_response(),
-            };
-        }
-        Ok(None) => {}
-        Err(err) => return err.into_response(),
+    if let Some(response) = remote_agent_context_response_for_session_id(session_id).await {
+        return response;
     }
 
-    let summary = match fetch_live_summary(state, session_id).await {
-        Ok(Some(summary)) => summary,
-        Ok(None) => {
-            return error_response(StatusCode::NOT_FOUND, "SESSION_NOT_FOUND", None);
+    local_agent_context_response(state, session_id).await
+}
+
+async fn remote_agent_context_response_for_session_id(session_id: &str) -> Option<Response> {
+    match remote_sessions::denamespace_for_target(session_id) {
+        Ok(Some((target, remote_session_id))) => {
+            Some(remote_agent_context_response(&target, remote_session_id).await)
         }
+        Ok(None) => None,
+        Err(err) => Some(err.into_response()),
+    }
+}
+
+async fn remote_agent_context_response(
+    target: &LaunchTargetSummary,
+    remote_session_id: &str,
+) -> Response {
+    match remote_sessions::fetch_remote_agent_context(target, remote_session_id).await {
+        Ok(response) => (StatusCode::OK, Json(response)).into_response(),
+        Err(err) => err.into_response(),
+    }
+}
+
+async fn local_agent_context_response(state: &Arc<AppState>, session_id: &str) -> Response {
+    let summary = match agent_context_summary(state, session_id).await {
+        Ok(summary) => summary,
+        Err(response) => return response,
+    };
+
+    agent_context_read_response(read_agent_context_for_summary(summary).await)
+}
+
+async fn agent_context_summary(
+    state: &Arc<AppState>,
+    session_id: &str,
+) -> Result<SessionSummary, Response> {
+    match fetch_live_summary(state, session_id).await {
+        Ok(Some(summary)) => Ok(summary),
+        Ok(None) => Err(error_response(
+            StatusCode::NOT_FOUND,
+            "SESSION_NOT_FOUND",
+            None,
+        )),
         Err(err) => {
             tracing::error!("agent context summary lookup failed: {err}");
-            return error_response(
+            Err(error_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "INTERNAL_ERROR",
                 Some(err.to_string()),
-            );
+            ))
         }
-    };
+    }
+}
 
-    match read_agent_context_for_summary(summary).await {
+fn agent_context_read_response(result: anyhow::Result<SessionAgentContextResponse>) -> Response {
+    match result {
         Ok(response) => (StatusCode::OK, Json(response)).into_response(),
         Err(err) => {
             tracing::error!("agent context read failed: {err}");
@@ -1423,6 +1455,26 @@ mod tests {
         write_rx
     }
 
+    async fn insert_dropping_summary_test_handle(
+        state: &Arc<AppState>,
+        session_id: &str,
+    ) -> tokio::task::JoinHandle<()> {
+        let (cmd_tx, mut cmd_rx) = mpsc::channel(8);
+        state
+            .supervisor
+            .insert_test_handle(ActorHandle::test_handle(
+                session_id,
+                &format!("tmux-{session_id}"),
+                cmd_tx,
+            ))
+            .await;
+        tokio::spawn(async move {
+            if let Some(SessionCommand::GetSummary(reply)) = cmd_rx.recv().await {
+                drop(reply);
+            }
+        })
+    }
+
     async fn insert_timeline_test_handle(
         state: &Arc<AppState>,
         summary: SessionSummary,
@@ -1460,6 +1512,84 @@ mod tests {
             .await
             .expect("response body");
         serde_json::from_slice(&body).expect("json body")
+    }
+
+    fn agent_context_fixture(session_id: &str) -> SessionAgentContextResponse {
+        SessionAgentContextResponse {
+            session_id: session_id.to_string(),
+            available: true,
+            tool: Some("Codex".to_string()),
+            cwd: "/monoserver/opensource/swimmers".to_string(),
+            user_task: Some("remote task".to_string()),
+            turns: Vec::new(),
+            current_tool: None,
+            recent_actions: Vec::new(),
+            token_count: 42,
+            context_limit: 192_000,
+            message: None,
+        }
+    }
+
+    fn remote_agent_context_target(base_url: String) -> LaunchTargetSummary {
+        LaunchTargetSummary {
+            id: "remote-test".to_string(),
+            label: "Remote Test".to_string(),
+            kind: "swimmers_api".to_string(),
+            base_url: Some(base_url),
+            auth_token_env: None,
+            path_mappings: Vec::new(),
+        }
+    }
+
+    async fn remote_agent_context_ok(
+        Path(session_id): Path<String>,
+    ) -> Json<SessionAgentContextResponse> {
+        Json(agent_context_fixture(&session_id))
+    }
+
+    async fn remote_agent_context_not_found() -> Response {
+        (
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse::with_message(
+                "SESSION_NOT_FOUND",
+                "missing remote session",
+            )),
+        )
+            .into_response()
+    }
+
+    async fn spawn_remote_agent_context_ok_server() -> (String, tokio::task::JoinHandle<()>) {
+        let app = axum::Router::new().route(
+            "/v1/sessions/{session_id}/agent-context",
+            axum::routing::get(remote_agent_context_ok),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind remote context server");
+        let addr = listener.local_addr().expect("local addr");
+        let handle = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve remote context api");
+        });
+        (format!("http://{addr}"), handle)
+    }
+
+    async fn spawn_remote_agent_context_error_server() -> (String, tokio::task::JoinHandle<()>) {
+        let app = axum::Router::new().route(
+            "/v1/sessions/{session_id}/agent-context",
+            axum::routing::get(remote_agent_context_not_found),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind remote context server");
+        let addr = listener.local_addr().expect("local addr");
+        let handle = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve remote context api");
+        });
+        (format!("http://{addr}"), handle)
     }
 
     struct TestPathGuard(Option<OsString>);
@@ -2258,6 +2388,58 @@ esac
     }
 
     #[tokio::test]
+    async fn remote_agent_context_response_returns_namespaced_success() {
+        let (base_url, handle) = spawn_remote_agent_context_ok_server().await;
+        let target = remote_agent_context_target(base_url);
+
+        let response = remote_agent_context_response(&target, "sess/remote?x#frag").await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let json = response_json(response).await;
+        assert_eq!(json["session_id"], "remote-test::sess/remote?x#frag");
+        assert_eq!(json["available"], true);
+        assert_eq!(json["user_task"], "remote task");
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn remote_agent_context_response_maps_remote_failure() {
+        let (base_url, handle) = spawn_remote_agent_context_error_server().await;
+        let target = remote_agent_context_target(base_url);
+
+        let response = remote_agent_context_response(&target, "missing-remote").await;
+
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+        let json = response_json(response).await;
+        assert_eq!(json["code"], "REMOTE_SESSION_REQUEST_FAILED");
+        assert!(json["message"]
+            .as_str()
+            .expect("message")
+            .contains("missing remote session"));
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn get_agent_context_prefers_remote_namespace_error_over_local_session() {
+        let state = test_state();
+        let session_id =
+            remote_sessions::namespace_session_id("not-configured-agent-context-target", "shadow");
+        let _write_rx =
+            insert_summary_test_handle(&state, summary(&session_id, SessionState::Idle)).await;
+
+        let response = get_agent_context(
+            Extension(AuthInfo::new(OPERATOR_SCOPES.to_vec())),
+            State(state),
+            Path(session_id),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let json = response_json(response).await;
+        assert_eq!(json["code"], "LAUNCH_TARGET_UNKNOWN");
+    }
+
+    #[tokio::test]
     async fn get_agent_context_returns_codex_jsonl_snapshot() {
         let _lock = crate::test_support::ENV_LOCK
             .lock()
@@ -2308,6 +2490,49 @@ esac
         assert_eq!(json["recent_actions"][0]["tool"], "exec");
         assert_eq!(json["token_count"], 777);
         assert_eq!(json["context_limit"], 258400);
+    }
+
+    #[tokio::test]
+    async fn agent_context_read_response_returns_ok_for_successful_read() {
+        let response = agent_context_read_response(Ok(agent_context_fixture("sess-read-ok")));
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let json = response_json(response).await;
+        assert_eq!(json["session_id"], "sess-read-ok");
+        assert_eq!(json["available"], true);
+        assert_eq!(json["user_task"], "remote task");
+    }
+
+    #[tokio::test]
+    async fn get_agent_context_returns_internal_error_when_summary_lookup_fails() {
+        let state = test_state();
+        let worker = insert_dropping_summary_test_handle(&state, "sess-summary-error").await;
+
+        let response = get_agent_context(
+            Extension(AuthInfo::new(OPERATOR_SCOPES.to_vec())),
+            State(state),
+            Path("sess-summary-error".to_string()),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let json = response_json(response).await;
+        assert_eq!(json["code"], "INTERNAL_ERROR");
+        assert!(json["message"]
+            .as_str()
+            .expect("message")
+            .contains("session summary actor dropped reply"));
+        worker.await.expect("summary worker");
+    }
+
+    #[tokio::test]
+    async fn agent_context_read_response_returns_internal_error_for_read_failure() {
+        let response = agent_context_read_response(Err(anyhow::anyhow!("context read failed")));
+
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let json = response_json(response).await;
+        assert_eq!(json["code"], "INTERNAL_ERROR");
+        assert_eq!(json["message"], "context read failed");
     }
 
     #[tokio::test]
