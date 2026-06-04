@@ -1130,3 +1130,78 @@ fn tagged_thought_rows_render_metadata_above_full_width_body_with_matching_color
         panel.rows[1].color
     );
 }
+
+#[test]
+fn thought_panel_detail_lines_preserve_command_and_status_fallbacks() {
+    let api = MockApi::new();
+    let layout = test_layout(120, 32);
+    let thought_content = layout
+        .thought_content
+        .expect("wide layout enables thought rail");
+    let mut app = make_app(api);
+
+    let mut command = session_summary("sess-command", "7", TEST_REPO_SWIMMERS);
+    command.current_command = Some(" cargo   test --bin swimmers-tui ".to_string());
+    command.rest_state = RestState::Active;
+
+    let mut stale = session_summary("sess-stale", "9", TEST_REPO_SKILLS);
+    stale.is_stale = true;
+    stale.rest_state = RestState::Sleeping;
+    stale.transport_health = TransportHealth::Disconnected;
+
+    let mut exited = session_summary("sess-exited", "3", TEST_REPO_ALPHA);
+    exited.state = SessionState::Exited;
+    exited.rest_state = RestState::Active;
+
+    let mut sleeping = session_summary("sess-sleeping", "5", TEST_REPO_BETA);
+    sleeping.rest_state = RestState::DeepSleep;
+
+    app.merge_sessions(
+        vec![
+            command.clone(),
+            stale.clone(),
+            exited.clone(),
+            sleeping.clone(),
+        ],
+        layout.overview_field,
+    );
+    app.capture_thought_updates(
+        &[command, stale, exited, sleeping],
+        layout.thought_entry_capacity(),
+    );
+
+    let panel = build_thought_panel(&app, thought_content, layout.thought_entry_capacity());
+    let lines = panel
+        .rows
+        .iter()
+        .map(|row| row.line.as_str())
+        .collect::<Vec<_>>();
+
+    assert!(lines.contains(&"  cmd: cargo test --bin swimmers-tui"));
+    assert!(lines.contains(&"  stale session"));
+    assert!(lines.contains(&"  no daemon"));
+    assert!(lines.contains(&"  sleeping"));
+}
+
+#[test]
+fn thought_wrap_text_preserves_word_long_word_and_wide_char_breaks() {
+    let lines = |values: &[&str]| {
+        values
+            .iter()
+            .map(|value| value.to_string())
+            .collect::<Vec<_>>()
+    };
+
+    assert_eq!(wrap_text("", 8), lines(&[""]));
+    assert_eq!(wrap_text("   ", 8), lines(&[""]));
+    assert_eq!(wrap_text("anything", 0), Vec::<String>::new());
+    assert_eq!(
+        wrap_text("alpha beta gamma", 10),
+        lines(&["alpha", "beta gamma"])
+    );
+    assert_eq!(
+        wrap_text("superlongword", 5),
+        lines(&["super", "longw", "ord"])
+    );
+    assert_eq!(wrap_text("表a", 1), lines(&["表", "a"]));
+}

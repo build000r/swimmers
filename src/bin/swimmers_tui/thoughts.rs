@@ -6,6 +6,12 @@ const THOUGHT_COMMIT_LABEL: &str = "[commit]";
 const THOUGHT_LAUNCH_LABEL: &str = "[launch]";
 const THOUGHT_SEND_LABEL: &str = "[send]";
 const THOUGHT_PLANS_LABEL: &str = "[plans]";
+const NO_RECENT_THOUGHT: &str = "no recent thought";
+const HEADER_FILTER_OUT_LABEL: &str = "[filter out]";
+const HEADER_CLEAR_FILTERS_LABEL: &str = "[clear filters]";
+const HEADER_FILTER_LEFT_X: u16 = 2;
+const HEADER_FILTER_RIGHT_PADDING: u16 = 2;
+const HEADER_FILTER_GAP: u16 = 2;
 
 pub(crate) struct ThoughtFingerprint {
     pub(crate) thought: String,
@@ -237,70 +243,33 @@ pub(crate) fn build_header_filter_layout<C: TuiApi>(
     app: &App<C>,
     width: u16,
 ) -> HeaderFilterLayout {
-    if width <= 4 {
+    let Some(bounds) = header_filter_bounds(width) else {
         return HeaderFilterLayout::default();
-    }
-
-    let left_x = 2;
-    let right_edge = width.saturating_sub(2);
-    if right_edge <= left_x {
-        return HeaderFilterLayout::default();
-    }
-
-    let filter_out_label = "[filter out]";
-    let filter_out_width = display_width(filter_out_label);
-    let clear_label = "[clear filters]";
-    let clear_width = display_width(clear_label);
-    let gap: u16 = 2;
-    let mut available_width = right_edge.saturating_sub(left_x);
-
-    if filter_out_width > available_width {
-        return HeaderFilterLayout::default();
-    }
-
-    available_width = available_width.saturating_sub(filter_out_width);
-
-    let show_clear =
-        app.thought_filter.is_active() && available_width >= gap.saturating_add(clear_width);
-    if show_clear {
-        available_width = available_width.saturating_sub(gap.saturating_add(clear_width));
-    }
-
-    let chip_budget = if available_width > gap {
-        available_width.saturating_sub(gap)
-    } else {
-        0
     };
-    let (included, chips_width) = gather_filter_chips(app, chip_budget);
+    let Some(controls) =
+        header_filter_controls(app.thought_filter.is_active(), bounds.available_width)
+    else {
+        return HeaderFilterLayout::default();
+    };
 
-    let mut total_width = filter_out_width;
-    if show_clear {
-        total_width = total_width.saturating_add(gap).saturating_add(clear_width);
-    }
+    let (included, chips_width) = gather_filter_chips(app, controls.chip_budget);
+    let total_width = header_filter_total_width(controls, chips_width);
+    let mut cursor_x = bounds.right_edge.saturating_sub(total_width);
+
+    let clear_filters_rect = if controls.show_clear {
+        let rect = header_filter_rect(cursor_x, controls.clear_width);
+        cursor_x = cursor_x
+            .saturating_add(controls.clear_width)
+            .saturating_add(HEADER_FILTER_GAP);
+        Some(rect)
+    } else {
+        None
+    };
+
+    let filter_out_rect = Some(header_filter_rect(cursor_x, controls.filter_out_width));
+    cursor_x = cursor_x.saturating_add(controls.filter_out_width);
     if chips_width > 0 {
-        total_width = total_width.saturating_add(gap).saturating_add(chips_width);
-    }
-    let mut cursor_x = right_edge.saturating_sub(total_width);
-
-    let clear_filters_rect = show_clear.then_some(Rect {
-        x: cursor_x,
-        y: header_filter_row(),
-        width: clear_width,
-        height: 1,
-    });
-    if show_clear {
-        cursor_x = cursor_x.saturating_add(clear_width).saturating_add(gap);
-    }
-
-    let filter_out_rect = Some(Rect {
-        x: cursor_x,
-        y: header_filter_row(),
-        width: filter_out_width,
-        height: 1,
-    });
-    cursor_x = cursor_x.saturating_add(filter_out_width);
-    if chips_width > 0 {
-        cursor_x = cursor_x.saturating_add(gap);
+        cursor_x = cursor_x.saturating_add(HEADER_FILTER_GAP);
     }
 
     let chips = included
@@ -326,6 +295,75 @@ pub(crate) fn build_header_filter_layout<C: TuiApi>(
         chips,
         filter_out_rect,
         clear_filters_rect,
+    }
+}
+
+#[derive(Clone, Copy)]
+struct HeaderFilterBounds {
+    right_edge: u16,
+    available_width: u16,
+}
+
+#[derive(Clone, Copy)]
+struct HeaderFilterControls {
+    filter_out_width: u16,
+    clear_width: u16,
+    show_clear: bool,
+    chip_budget: u16,
+}
+
+fn header_filter_bounds(width: u16) -> Option<HeaderFilterBounds> {
+    let right_edge = width.saturating_sub(HEADER_FILTER_RIGHT_PADDING);
+    (right_edge > HEADER_FILTER_LEFT_X).then_some(HeaderFilterBounds {
+        right_edge,
+        available_width: right_edge.saturating_sub(HEADER_FILTER_LEFT_X),
+    })
+}
+
+fn header_filter_controls(
+    filter_is_active: bool,
+    available_width: u16,
+) -> Option<HeaderFilterControls> {
+    let filter_out_width = display_width(HEADER_FILTER_OUT_LABEL);
+    let clear_width = display_width(HEADER_CLEAR_FILTERS_LABEL);
+    let mut remaining_width = available_width.checked_sub(filter_out_width)?;
+    let show_clear =
+        filter_is_active && remaining_width >= HEADER_FILTER_GAP.saturating_add(clear_width);
+
+    if show_clear {
+        remaining_width =
+            remaining_width.saturating_sub(HEADER_FILTER_GAP.saturating_add(clear_width));
+    }
+
+    Some(HeaderFilterControls {
+        filter_out_width,
+        clear_width,
+        show_clear,
+        chip_budget: remaining_width.saturating_sub(HEADER_FILTER_GAP),
+    })
+}
+
+fn header_filter_total_width(controls: HeaderFilterControls, chips_width: u16) -> u16 {
+    let mut total_width = controls.filter_out_width;
+    if controls.show_clear {
+        total_width = total_width
+            .saturating_add(HEADER_FILTER_GAP)
+            .saturating_add(controls.clear_width);
+    }
+    if chips_width > 0 {
+        total_width = total_width
+            .saturating_add(HEADER_FILTER_GAP)
+            .saturating_add(chips_width);
+    }
+    total_width
+}
+
+fn header_filter_rect(x: u16, width: u16) -> Rect {
+    Rect {
+        x,
+        y: header_filter_row(),
+        width,
+        height: 1,
     }
 }
 
@@ -406,7 +444,7 @@ pub(crate) fn render_header_filter_strip<C: TuiApi>(
         } else {
             Color::DarkGrey
         };
-        renderer.draw_text(rect.x, rect.y, "[filter out]", color);
+        renderer.draw_text(rect.x, rect.y, HEADER_FILTER_OUT_LABEL, color);
     }
 
     for chip in &layout.chips {
@@ -414,7 +452,7 @@ pub(crate) fn render_header_filter_strip<C: TuiApi>(
     }
 
     if let Some(rect) = layout.clear_filters_rect {
-        renderer.draw_text(rect.x, rect.y, "[clear filters]", Color::Cyan);
+        renderer.draw_text(rect.x, rect.y, HEADER_CLEAR_FILTERS_LABEL, Color::Cyan);
     }
 }
 
@@ -498,43 +536,71 @@ pub(crate) fn wrap_text(text: &str, max_chars: usize) -> Vec<String> {
 
     let mut lines = Vec::new();
     while !remaining.is_empty() {
-        if UnicodeWidthStr::width(remaining) <= max_chars {
-            lines.push(remaining.to_string());
-            break;
-        }
-
-        let mut used_cols = 0usize;
-        let mut split_at = 0usize;
-        let mut last_space = None;
-        for (idx, ch) in remaining.char_indices() {
-            let ch_width = UnicodeWidthChar::width(ch).unwrap_or(0);
-            if ch_width > 0 && used_cols.saturating_add(ch_width) > max_chars {
-                break;
-            }
-            used_cols = used_cols.saturating_add(ch_width);
-            split_at = idx + ch.len_utf8();
-            if ch.is_whitespace() {
-                last_space = Some(idx);
-            }
-        }
-
-        if split_at == 0 {
-            // Ensure forward progress when the first visible scalar is wider
-            // than the available space for this wrapped row.
-            split_at = remaining
-                .char_indices()
-                .next()
-                .map(|(idx, ch)| idx + ch.len_utf8())
-                .unwrap_or(remaining.len());
-        }
-
-        let break_idx = last_space.unwrap_or(split_at).max(1);
-        let (line, rest) = remaining.split_at(break_idx);
-        lines.push(line.trim_end().to_string());
-        remaining = rest.trim_start();
+        let (line, rest) = next_wrapped_line(remaining, max_chars);
+        lines.push(line);
+        remaining = rest;
     }
 
     lines
+}
+
+fn next_wrapped_line(remaining: &str, max_chars: usize) -> (String, &str) {
+    if UnicodeWidthStr::width(remaining) <= max_chars {
+        return (remaining.to_string(), "");
+    }
+
+    let break_idx = wrap_break_index(remaining, max_chars);
+    let (line, rest) = remaining.split_at(break_idx);
+    (line.trim_end().to_string(), rest.trim_start())
+}
+
+fn wrap_break_index(text: &str, max_chars: usize) -> usize {
+    let scan = scan_wrappable_prefix(text, max_chars);
+    scan.last_space
+        .unwrap_or_else(|| visible_prefix_end(text, scan.split_at))
+        .max(1)
+}
+
+#[derive(Clone, Copy)]
+struct WrappablePrefix {
+    split_at: usize,
+    last_space: Option<usize>,
+}
+
+fn scan_wrappable_prefix(text: &str, max_chars: usize) -> WrappablePrefix {
+    let mut used_cols = 0usize;
+    let mut split_at = 0usize;
+    let mut last_space = None;
+    for (idx, ch) in text.char_indices() {
+        let ch_width = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if ch_width > 0 && used_cols.saturating_add(ch_width) > max_chars {
+            break;
+        }
+        used_cols = used_cols.saturating_add(ch_width);
+        split_at = idx + ch.len_utf8();
+        if ch.is_whitespace() {
+            last_space = Some(idx);
+        }
+    }
+
+    WrappablePrefix {
+        split_at,
+        last_space,
+    }
+}
+
+fn visible_prefix_end(text: &str, split_at: usize) -> usize {
+    if split_at > 0 {
+        return split_at;
+    }
+
+    // Ensure forward progress when the first visible scalar is wider than the
+    // available space for this wrapped row.
+    text.char_indices()
+        .next()
+        .map(|(idx, ch)| idx + ch.len_utf8())
+        .unwrap_or(text.len())
+        .max(1)
 }
 
 #[derive(Clone, Debug)]
@@ -1120,31 +1186,41 @@ fn thought_agent_label(entry: &ThoughtPanelEntryView) -> Option<String> {
 }
 
 fn thought_detail_line(entry: &ThoughtPanelEntryView) -> String {
+    thought_text_detail(entry)
+        .or_else(|| command_detail(entry))
+        .unwrap_or_else(|| thought_status_detail(entry).to_string())
+}
+
+fn thought_text_detail(entry: &ThoughtPanelEntryView) -> Option<String> {
     let thought = clean_inline_text(&entry.thought);
-    if !thought.is_empty() && thought != "no recent thought" {
-        return thought;
-    }
+    (!thought.is_empty() && thought != NO_RECENT_THOUGHT).then_some(thought)
+}
 
-    if let Some(command) = entry.current_command.as_deref() {
-        let command = clean_inline_text(command);
-        if !command.is_empty() {
-            return format!("cmd: {command}");
-        }
-    }
+fn command_detail(entry: &ThoughtPanelEntryView) -> Option<String> {
+    let command = clean_inline_text(entry.current_command.as_deref()?);
+    (!command.is_empty()).then(|| format!("cmd: {command}"))
+}
 
+fn thought_status_detail(entry: &ThoughtPanelEntryView) -> &'static str {
     if entry.is_stale {
-        return "stale session".to_string();
+        return "stale session";
     }
-    if entry.transport_health == TransportHealth::Disconnected
-        || entry.state == SessionState::Exited
-    {
-        return "no daemon".to_string();
+    if thought_has_no_daemon(entry) {
+        return "no daemon";
     }
-    if entry.rest_state == RestState::Sleeping || entry.rest_state == RestState::DeepSleep {
-        return "sleeping".to_string();
+    if thought_is_sleeping(entry) {
+        return "sleeping";
     }
 
-    "no recent thought".to_string()
+    NO_RECENT_THOUGHT
+}
+
+fn thought_has_no_daemon(entry: &ThoughtPanelEntryView) -> bool {
+    entry.transport_health == TransportHealth::Disconnected || entry.state == SessionState::Exited
+}
+
+fn thought_is_sleeping(entry: &ThoughtPanelEntryView) -> bool {
+    entry.rest_state == RestState::Sleeping || entry.rest_state == RestState::DeepSleep
 }
 
 fn visible_segment_rect(
@@ -1640,6 +1716,25 @@ pub(crate) struct PlanPanelEntry {
     pub(crate) schema_path: String,
 }
 
+#[derive(Clone, Copy)]
+enum ThoughtRowHitKind {
+    Plan,
+    Send,
+    Launch,
+    Commit,
+    Mermaid,
+    Session,
+}
+
+const THOUGHT_ROW_HIT_ORDER: [ThoughtRowHitKind; 6] = [
+    ThoughtRowHitKind::Plan,
+    ThoughtRowHitKind::Send,
+    ThoughtRowHitKind::Launch,
+    ThoughtRowHitKind::Commit,
+    ThoughtRowHitKind::Mermaid,
+    ThoughtRowHitKind::Session,
+];
+
 pub(crate) fn thought_panel_action_at<C: TuiApi>(
     app: &App<C>,
     thought_content: Rect,
@@ -1653,84 +1748,84 @@ pub(crate) fn thought_panel_action_at<C: TuiApi>(
         .bottom()
         .saturating_sub(panel.rows.len() as u16);
     for (offset, row) in panel.rows.iter().enumerate() {
-        let session_rect = row.session_rect.map(|rect| Rect {
-            x: rect.x,
-            y: row_start_y + offset as u16,
-            width: rect.width,
-            height: rect.height,
-        });
-        let commit_rect = row.commit_rect.map(|rect| Rect {
-            x: rect.x,
-            y: row_start_y + offset as u16,
-            width: rect.width,
-            height: rect.height,
-        });
-        let launch_rect = row.launch_rect.map(|rect| Rect {
-            x: rect.x,
-            y: row_start_y + offset as u16,
-            width: rect.width,
-            height: rect.height,
-        });
-        let send_rect = row.send_rect.map(|rect| Rect {
-            x: rect.x,
-            y: row_start_y + offset as u16,
-            width: rect.width,
-            height: rect.height,
-        });
-        let mermaid_rect = row.mermaid_rect.map(|rect| Rect {
-            x: rect.x,
-            y: row_start_y + offset as u16,
-            width: rect.width,
-            height: rect.height,
-        });
-        let plan_rect = row.plan_rect.map(|rect| Rect {
-            x: rect.x,
-            y: row_start_y + offset as u16,
-            width: rect.width,
-            height: rect.height,
-        });
-        if plan_rect.map(|rect| rect.contains(x, y)).unwrap_or(false) {
-            if let (Some(schema_path), Some(slug)) = (&row.plan_schema_path, &row.plan_slug) {
-                return Some(ThoughtPanelAction::OpenPlanFromDisk {
-                    schema_path: schema_path.clone(),
-                    slug: slug.clone(),
-                });
-            }
-        }
-        if send_rect.map(|rect| rect.contains(x, y)).unwrap_or(false) {
-            if let Some(session_ids) = &row.group_session_ids {
-                return Some(ThoughtPanelAction::SendGroup {
-                    session_ids: session_ids.clone(),
-                    label: row.label.clone(),
-                });
-            }
-        }
-        if launch_rect.map(|rect| rect.contains(x, y)).unwrap_or(false) {
-            return Some(ThoughtPanelAction::OpenInitialRequest {
-                cwd: row.cwd.clone(),
-            });
-        }
-        if commit_rect.map(|rect| rect.contains(x, y)).unwrap_or(false) {
-            return Some(ThoughtPanelAction::LaunchCommitCodex(
-                row.session_id.clone(),
-            ));
-        }
-        if mermaid_rect
-            .map(|rect| rect.contains(x, y))
-            .unwrap_or(false)
-        {
-            return Some(ThoughtPanelAction::OpenMermaid(row.session_id.clone()));
-        }
-        if session_rect
-            .map(|rect| rect.contains(x, y))
-            .unwrap_or(false)
-        {
-            return Some(ThoughtPanelAction::OpenSession {
-                session_id: row.session_id.clone(),
-                label: row.label.clone(),
-            });
+        let row_y = row_start_y + offset as u16;
+        if let Some(action) = thought_row_action_at(row, row_y, x, y) {
+            return Some(action);
         }
     }
 
     None
+}
+
+fn thought_row_action_at(
+    row: &ThoughtRowLayout,
+    row_y: u16,
+    x: u16,
+    y: u16,
+) -> Option<ThoughtPanelAction> {
+    for hit_kind in THOUGHT_ROW_HIT_ORDER {
+        let Some(rect) = thought_row_hit_rect(row, hit_kind).map(|rect| row_rect_at(rect, row_y))
+        else {
+            continue;
+        };
+        if !rect.contains(x, y) {
+            continue;
+        }
+        if let Some(action) = thought_row_action_for_hit(row, hit_kind) {
+            return Some(action);
+        }
+    }
+
+    None
+}
+
+fn row_rect_at(rect: Rect, y: u16) -> Rect {
+    Rect { y, ..rect }
+}
+
+fn thought_row_hit_rect(row: &ThoughtRowLayout, hit_kind: ThoughtRowHitKind) -> Option<Rect> {
+    match hit_kind {
+        ThoughtRowHitKind::Plan => row.plan_rect,
+        ThoughtRowHitKind::Send => row.send_rect,
+        ThoughtRowHitKind::Launch => row.launch_rect,
+        ThoughtRowHitKind::Commit => row.commit_rect,
+        ThoughtRowHitKind::Mermaid => row.mermaid_rect,
+        ThoughtRowHitKind::Session => row.session_rect,
+    }
+}
+
+fn thought_row_action_for_hit(
+    row: &ThoughtRowLayout,
+    hit_kind: ThoughtRowHitKind,
+) -> Option<ThoughtPanelAction> {
+    match hit_kind {
+        ThoughtRowHitKind::Plan => {
+            let (Some(schema_path), Some(slug)) = (&row.plan_schema_path, &row.plan_slug) else {
+                return None;
+            };
+            Some(ThoughtPanelAction::OpenPlanFromDisk {
+                schema_path: schema_path.clone(),
+                slug: slug.clone(),
+            })
+        }
+        ThoughtRowHitKind::Send => {
+            row.group_session_ids
+                .as_ref()
+                .map(|session_ids| ThoughtPanelAction::SendGroup {
+                    session_ids: session_ids.clone(),
+                    label: row.label.clone(),
+                })
+        }
+        ThoughtRowHitKind::Launch => Some(ThoughtPanelAction::OpenInitialRequest {
+            cwd: row.cwd.clone(),
+        }),
+        ThoughtRowHitKind::Commit => Some(ThoughtPanelAction::LaunchCommitCodex(
+            row.session_id.clone(),
+        )),
+        ThoughtRowHitKind::Mermaid => Some(ThoughtPanelAction::OpenMermaid(row.session_id.clone())),
+        ThoughtRowHitKind::Session => Some(ThoughtPanelAction::OpenSession {
+            session_id: row.session_id.clone(),
+            label: row.label.clone(),
+        }),
+    }
 }
