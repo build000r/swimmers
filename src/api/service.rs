@@ -836,55 +836,55 @@ pub async fn restart_services(
         return Err("no restartable services mapped for this path".to_string());
     }
 
-    let mut ran_command = false;
-    for service in services {
-        if !requested.contains(&service.name) {
-            continue;
-        }
-        let Some(cmd) = &service.restart else {
-            continue;
-        };
-        ran_command = true;
-        let output = tokio::time::timeout(
-            Duration::from_secs(240),
-            // `kill_on_drop` ensures the timeout actually reaps the child: when
-            // the timeout fires the `output()` future is dropped, and without
-            // this the spawned `sh` (and its descendants' controlling process)
-            // would be orphaned and keep running past the deadline.
-            Command::new("sh")
-                .arg("-c")
-                .arg(cmd)
-                .kill_on_drop(true)
-                .output(),
-        )
-        .await
-        .map_err(|_| format!("restart of {} timed out after 240s", service.name))?
-        .map_err(|error| error.to_string())?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-            let detail: String = if stderr.is_empty() {
-                String::from_utf8_lossy(&output.stdout)
-                    .lines()
-                    .rev()
-                    .find(|line| !line.trim().is_empty())
-                    .unwrap_or("restart failed")
-                    .trim()
-                    .chars()
-                    .take(600)
-                    .collect()
-            } else {
-                stderr.chars().take(600).collect()
-            };
-            return Err(format!("{}: {}", service.name, detail));
-        }
-    }
-
-    if !ran_command {
+    let commands = restart_commands_for_requested_services(services, requested);
+    if commands.is_empty() {
         return Err("matched services have no restart command configured".to_string());
     }
 
+    run_restart_commands(&commands).await
+}
+
+fn restart_commands_for_requested_services<'a>(
+    services: &'a [OverlayServiceEntry],
+    requested: &[String],
+) -> Vec<RestartCommandRef<'a>> {
+    services
+        .iter()
+        .filter(|service| requested.contains(&service.name))
+        .filter_map(restart_command_for_service)
+        .collect()
+}
+
+fn restart_command_for_service(service: &OverlayServiceEntry) -> Option<RestartCommandRef<'_>> {
+    Some(RestartCommandRef {
+        service_name: &service.name,
+        command: service.restart.as_deref()?,
+    })
+}
+
+async fn run_restart_commands(commands: &[RestartCommandRef<'_>]) -> Result<(), String> {
+    for command in commands {
+        run_restart_command(command).await?;
+    }
     Ok(())
+}
+
+async fn run_restart_command(command: &RestartCommandRef<'_>) -> Result<(), String> {
+    let output = restart_command_output(command).await?;
+    if output.status.success() {
+        return Ok(());
+    }
+
+    Err(restart_failure_message(
+        command.service_name,
+        &output.stdout,
+        &output.stderr,
+    ))
+}
+
+struct RestartCommandRef<'a> {
+    service_name: &'a str,
+    command: &'a str,
 }
 
 async fn probe_pending_entries(state: &Arc<AppState>, pending: &[PendingEntry]) -> Vec<RepoProbe> {
@@ -2290,6 +2290,58 @@ fn attention_project_family(repo: &str) -> String {
     family
 }
 
+async fn restart_command_output(
+    command: &RestartCommandRef<'_>,
+) -> Result<std::process::Output, String> {
+    tokio::time::timeout(
+        Duration::from_secs(240),
+        // `kill_on_drop` ensures the timeout actually reaps the child: when
+        // the timeout fires the `output()` future is dropped, and without
+        // this the spawned `sh` (and its descendants' controlling process)
+        // would be orphaned and keep running past the deadline.
+        Command::new("sh")
+            .arg("-c")
+            .arg(command.command)
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await
+    .map_err(|_| format!("restart of {} timed out after 240s", command.service_name))?
+    .map_err(|error| error.to_string())
+}
+
+fn restart_failure_message(service_name: &str, stdout: &[u8], stderr: &[u8]) -> String {
+    format!(
+        "{}: {}",
+        service_name,
+        restart_failure_detail(stdout, stderr)
+    )
+}
+
+fn restart_failure_detail(stdout: &[u8], stderr: &[u8]) -> String {
+    let stderr = String::from_utf8_lossy(stderr).trim().to_string();
+    if stderr.is_empty() {
+        restart_stdout_failure_detail(stdout)
+    } else {
+        truncate_restart_detail(&stderr)
+    }
+}
+
+fn restart_stdout_failure_detail(stdout: &[u8]) -> String {
+    let stdout = String::from_utf8_lossy(stdout);
+    let detail = stdout
+        .lines()
+        .rev()
+        .find(|line| !line.trim().is_empty())
+        .unwrap_or("restart failed")
+        .trim();
+    truncate_restart_detail(detail)
+}
+
+fn truncate_restart_detail(detail: &str) -> String {
+    detail.chars().take(600).collect()
+}
+
 #[cfg(test)]
 fn select_attention_group_sessions(
     sessions: Vec<SessionSummary>,
@@ -2540,6 +2592,33 @@ mod tests {
 
         assert_eq!(err.status, StatusCode::BAD_REQUEST);
         assert_eq!(err.code, "NO_RESTART_COMMAND");
+    }
+
+    #[test]
+    fn restart_services_failure_detail_prefers_stderr_and_truncates() {
+        let stdout = b"stdout detail";
+        let stderr = format!("{}{}", "x".repeat(610), "tail");
+
+        let detail = restart_failure_detail(stdout, stderr.as_bytes());
+
+        assert_eq!(detail.chars().count(), 600);
+        assert_eq!(detail, "x".repeat(600));
+    }
+
+    #[test]
+    fn restart_services_failure_detail_uses_last_nonempty_stdout_line() {
+        let stdout = b"first\n\n second detail \n";
+
+        let detail = restart_failure_detail(stdout, b"  \n");
+
+        assert_eq!(detail, "second detail");
+    }
+
+    #[test]
+    fn restart_services_failure_detail_defaults_without_output() {
+        let detail = restart_failure_detail(b"\n  \n", b"");
+
+        assert_eq!(detail, "restart failed");
     }
 
     // Empty roots short-circuit before any cache access, so this test never

@@ -884,23 +884,7 @@ fn sync_directory(path: &Path, label: &str) -> anyhow::Result<()> {
 async fn atomic_write_blocking(path: PathBuf, data: String) -> anyhow::Result<()> {
     tokio::task::spawn_blocking(move || {
         ensure_parent(&path).map_err(|e| anyhow::anyhow!("ensure parent failed: {e}"))?;
-        let lock_path = lock_path_for(&path)?;
-        let lock_file = open_lock_file(&lock_path)?;
-        match lock_file.try_lock_exclusive() {
-            Ok(()) => {}
-            Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
-                return Err(anyhow::Error::new(FileStoreIoError::LockBusy {
-                    path: lock_path,
-                }));
-            }
-            Err(err) => {
-                return Err(anyhow::anyhow!(
-                    "acquire lock {} failed: {err}",
-                    lock_path.display()
-                ));
-            }
-        }
-
+        let _lock_file = acquire_persistence_lock(&path)?;
         write_checksummed_payload_locked(&path, data)
     })
     .await
@@ -910,52 +894,117 @@ async fn atomic_write_blocking(path: PathBuf, data: String) -> anyhow::Result<()
 async fn merge_write_thought_blocking(
     path: PathBuf,
     session_id: String,
-    mut snapshot: ThoughtSnapshot,
+    snapshot: ThoughtSnapshot,
     fallback: HashMap<String, ThoughtSnapshot>,
 ) -> anyhow::Result<HashMap<String, ThoughtSnapshot>> {
     tokio::task::spawn_blocking(move || {
-        ensure_parent(&path).map_err(|e| anyhow::anyhow!("ensure parent failed: {e}"))?;
-        let lock_path = lock_path_for(&path)?;
-        let lock_file = open_lock_file(&lock_path)?;
-        match lock_file.try_lock_exclusive() {
-            Ok(()) => {}
-            Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
-                return Err(anyhow::Error::new(FileStoreIoError::LockBusy {
-                    path: lock_path,
-                }));
-            }
-            Err(err) => {
-                return Err(anyhow::anyhow!(
-                    "acquire lock {} failed: {err}",
-                    lock_path.display()
-                ));
-            }
-        }
-
-        let mut thoughts = match std::fs::read_to_string(&path) {
-            Ok(data) => {
-                let payload = decode_file_payload(path.clone(), data)?;
-                serde_json::from_str::<HashMap<String, ThoughtSnapshot>>(&payload)
-                    .map_err(|e| anyhow::anyhow!("decode thoughts failed: {e}"))?
-            }
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => fallback,
-            Err(err) => return Err(anyhow::anyhow!("read thoughts failed: {err}")),
-        };
-
-        if snapshot.objective_changed_at.is_none() {
-            snapshot.objective_changed_at = thoughts
-                .get(&session_id)
-                .and_then(|existing| existing.objective_changed_at);
-        }
-        thoughts.insert(session_id, snapshot);
-
-        let data = serde_json::to_string_pretty(&thoughts)
-            .map_err(|e| anyhow::anyhow!("serialize thoughts failed: {e}"))?;
-        write_checksummed_payload_locked(&path, data)?;
-        Ok(thoughts)
+        merge_write_thought_locked(path, session_id, snapshot, fallback)
     })
     .await
     .map_err(|e| anyhow::anyhow!("spawn_blocking panicked: {e}"))?
+}
+
+fn merge_write_thought_locked(
+    path: PathBuf,
+    session_id: String,
+    snapshot: ThoughtSnapshot,
+    fallback: HashMap<String, ThoughtSnapshot>,
+) -> anyhow::Result<HashMap<String, ThoughtSnapshot>> {
+    ensure_parent(&path).map_err(|e| anyhow::anyhow!("ensure parent failed: {e}"))?;
+    let _lock_file = acquire_persistence_lock(&path)?;
+    let mut thoughts = read_thoughts_or_fallback(&path, fallback)?;
+    merge_thought_snapshot(&mut thoughts, session_id, snapshot);
+    write_thoughts_locked(&path, &thoughts)?;
+    Ok(thoughts)
+}
+
+fn read_thoughts_or_fallback(
+    path: &Path,
+    fallback: HashMap<String, ThoughtSnapshot>,
+) -> anyhow::Result<HashMap<String, ThoughtSnapshot>> {
+    match std::fs::read_to_string(path) {
+        Ok(data) => decode_thoughts_payload(path, data),
+        Err(err) => read_thoughts_error_or_fallback(err, fallback),
+    }
+}
+
+fn read_thoughts_error_or_fallback(
+    err: std::io::Error,
+    fallback: HashMap<String, ThoughtSnapshot>,
+) -> anyhow::Result<HashMap<String, ThoughtSnapshot>> {
+    if err.kind() == std::io::ErrorKind::NotFound {
+        Ok(fallback)
+    } else {
+        Err(anyhow::anyhow!("read thoughts failed: {err}"))
+    }
+}
+
+fn decode_thoughts_payload(
+    path: &Path,
+    data: String,
+) -> anyhow::Result<HashMap<String, ThoughtSnapshot>> {
+    let payload = decode_file_payload(path.to_path_buf(), data)?;
+    serde_json::from_str::<HashMap<String, ThoughtSnapshot>>(&payload)
+        .map_err(|e| anyhow::anyhow!("decode thoughts failed: {e}"))
+}
+
+fn merge_thought_snapshot(
+    thoughts: &mut HashMap<String, ThoughtSnapshot>,
+    session_id: String,
+    mut snapshot: ThoughtSnapshot,
+) {
+    carry_forward_objective_changed_at(thoughts, &session_id, &mut snapshot);
+    thoughts.insert(session_id, snapshot);
+}
+
+fn carry_forward_objective_changed_at(
+    thoughts: &HashMap<String, ThoughtSnapshot>,
+    session_id: &str,
+    snapshot: &mut ThoughtSnapshot,
+) {
+    if snapshot.objective_changed_at.is_none() {
+        snapshot.objective_changed_at = thoughts
+            .get(session_id)
+            .and_then(|existing| existing.objective_changed_at);
+    }
+}
+
+fn write_thoughts_locked(
+    path: &Path,
+    thoughts: &HashMap<String, ThoughtSnapshot>,
+) -> anyhow::Result<()> {
+    let data = serde_json::to_string_pretty(thoughts)
+        .map_err(|e| anyhow::anyhow!("serialize thoughts failed: {e}"))?;
+    write_checksummed_payload_locked(path, data)
+}
+
+fn acquire_persistence_lock(path: &Path) -> anyhow::Result<std::fs::File> {
+    let lock_path = lock_path_for(path)?;
+    let lock_file = open_lock_file(&lock_path)?;
+    lock_exclusive_nonblocking(lock_file, lock_path)
+}
+
+fn lock_exclusive_nonblocking(
+    lock_file: std::fs::File,
+    lock_path: PathBuf,
+) -> anyhow::Result<std::fs::File> {
+    match lock_file.try_lock_exclusive() {
+        Ok(()) => Ok(lock_file),
+        Err(err) => lock_error(lock_path, err),
+    }
+}
+
+fn lock_error(lock_path: PathBuf, err: std::io::Error) -> anyhow::Result<std::fs::File> {
+    if err.kind() == std::io::ErrorKind::WouldBlock {
+        Err(anyhow::Error::new(FileStoreIoError::LockBusy {
+            path: lock_path,
+        }))
+    } else {
+        Err(anyhow::anyhow!(
+            "acquire lock {} failed: {err}",
+            lock_path.display()
+        ))
+    }
 }
 
 fn write_checksummed_payload_locked(path: &Path, data: String) -> anyhow::Result<()> {
@@ -1055,6 +1104,32 @@ fn sync_parent_dir(path: &Path) -> anyhow::Result<()> {
 mod tests {
     use super::*;
     use fs2::FileExt;
+
+    fn fixed_utc(value: &str) -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339(value)
+            .expect("valid timestamp")
+            .with_timezone(&Utc)
+    }
+
+    fn test_thought_snapshot(
+        thought: Option<&str>,
+        objective_changed_at: Option<DateTime<Utc>>,
+    ) -> ThoughtSnapshot {
+        ThoughtSnapshot {
+            thought: thought.map(|value| value.to_string()),
+            thought_state: ThoughtState::Holding,
+            thought_source: ThoughtSource::CarryForward,
+            rest_state: RestState::Active,
+            commit_candidate: false,
+            action_cues: Vec::new(),
+            objective_changed_at,
+            objective_fingerprint: None,
+            token_count: 10,
+            context_limit: 100,
+            updated_at: fixed_utc("2026-01-01T00:00:00Z"),
+            delivery: ThoughtDeliveryState::default(),
+        }
+    }
 
     #[tokio::test]
     async fn dir_group_memberships_round_trip_through_cache_and_disk() {
@@ -1480,6 +1555,109 @@ mod tests {
                 .get("session-b")
                 .and_then(|entry| entry.thought.as_deref()),
             Some("second thought")
+        );
+    }
+
+    #[tokio::test]
+    async fn merge_write_thought_uses_fallback_when_disk_file_is_missing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("thoughts.json");
+        let cached_changed_at = fixed_utc("2026-02-03T04:05:06Z");
+        let mut fallback = HashMap::new();
+        fallback.insert(
+            "session-a".to_string(),
+            test_thought_snapshot(Some("cached thought"), Some(cached_changed_at)),
+        );
+
+        let written = merge_write_thought_blocking(
+            path.clone(),
+            "session-b".to_string(),
+            test_thought_snapshot(Some("fresh thought"), None),
+            fallback,
+        )
+        .await
+        .expect("merge write thoughts");
+
+        assert_eq!(
+            written
+                .get("session-a")
+                .and_then(|entry| entry.thought.as_deref()),
+            Some("cached thought")
+        );
+        assert_eq!(
+            written
+                .get("session-a")
+                .and_then(|entry| entry.objective_changed_at),
+            Some(cached_changed_at)
+        );
+        assert_eq!(
+            written
+                .get("session-b")
+                .and_then(|entry| entry.thought.as_deref()),
+            Some("fresh thought")
+        );
+
+        let persisted_payload = read_file_blocking(path)
+            .await
+            .expect("read written thoughts")
+            .expect("thoughts file exists");
+        let persisted =
+            serde_json::from_str::<HashMap<String, ThoughtSnapshot>>(&persisted_payload)
+                .expect("decode persisted thoughts");
+        assert_eq!(persisted.len(), 2);
+        assert_eq!(
+            persisted
+                .get("session-a")
+                .and_then(|entry| entry.thought.as_deref()),
+            Some("cached thought")
+        );
+    }
+
+    #[tokio::test]
+    async fn merge_write_thought_carries_forward_existing_objective_changed_at() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("thoughts.json");
+        let original_changed_at = fixed_utc("2026-03-04T05:06:07Z");
+        let explicit_changed_at = fixed_utc("2026-04-05T06:07:08Z");
+        let mut existing = HashMap::new();
+        existing.insert(
+            "session-a".to_string(),
+            test_thought_snapshot(Some("original thought"), Some(original_changed_at)),
+        );
+        let existing_payload =
+            serde_json::to_string_pretty(&existing).expect("serialize existing thoughts");
+        atomic_write_blocking(path.clone(), existing_payload)
+            .await
+            .expect("seed thoughts file");
+
+        let carried = merge_write_thought_blocking(
+            path.clone(),
+            "session-a".to_string(),
+            test_thought_snapshot(Some("carried thought"), None),
+            HashMap::new(),
+        )
+        .await
+        .expect("merge carried thought");
+        assert_eq!(
+            carried
+                .get("session-a")
+                .and_then(|entry| entry.objective_changed_at),
+            Some(original_changed_at)
+        );
+
+        let explicit = merge_write_thought_blocking(
+            path,
+            "session-a".to_string(),
+            test_thought_snapshot(Some("explicit thought"), Some(explicit_changed_at)),
+            HashMap::new(),
+        )
+        .await
+        .expect("merge explicit thought");
+        assert_eq!(
+            explicit
+                .get("session-a")
+                .and_then(|entry| entry.objective_changed_at),
+            Some(explicit_changed_at)
         );
     }
 

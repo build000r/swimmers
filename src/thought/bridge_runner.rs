@@ -351,42 +351,62 @@ fn record_sync_response_metrics<M: ThoughtMetricRecorder>(
     generation_latency: Option<Duration>,
 ) {
     if response.llm_calls > 0 {
-        let outcome = if response.last_backend_error.is_some() {
-            "backend_error"
-        } else {
-            "success"
-        };
-        metrics.increment_model_call(
+        record_sync_model_metrics(metrics, response, generation_latency);
+    } else if should_record_no_update_suppression(response) {
+        record_no_update_suppression(metrics, snapshots);
+    }
+}
+
+fn sync_model_outcome(response: &SyncResponse) -> &'static str {
+    if response.last_backend_error.is_some() {
+        "backend_error"
+    } else {
+        "success"
+    }
+}
+
+fn record_sync_model_metrics<M: ThoughtMetricRecorder>(
+    metrics: &M,
+    response: &SyncResponse,
+    generation_latency: Option<Duration>,
+) {
+    metrics.increment_model_call(
+        BRIDGE_METRIC_SESSION_ID,
+        THOUGHT_METRIC_PATH_DAEMON,
+        THOUGHT_METRIC_TIER_BATCH,
+        sync_model_outcome(response),
+        response.llm_calls,
+    );
+    if let Some(duration) = generation_latency {
+        metrics.record_generation_latency(
             BRIDGE_METRIC_SESSION_ID,
             THOUGHT_METRIC_PATH_DAEMON,
             THOUGHT_METRIC_TIER_BATCH,
-            outcome,
-            response.llm_calls,
+            duration,
         );
-        if let Some(duration) = generation_latency {
-            metrics.record_generation_latency(
-                BRIDGE_METRIC_SESSION_ID,
-                THOUGHT_METRIC_PATH_DAEMON,
-                THOUGHT_METRIC_TIER_BATCH,
-                duration,
-            );
-        }
-    } else if response.updates.is_empty() {
-        if snapshots.is_empty() {
-            metrics.increment_suppression(
-                BRIDGE_METRIC_SESSION_ID,
-                "no_updates",
-                THOUGHT_METRIC_TIER_BATCH,
-            );
-        } else {
-            for snapshot in snapshots {
-                metrics.increment_suppression(
-                    &snapshot.session_id,
-                    "no_updates",
-                    cadence_tier_for_session(snapshot),
-                );
-            }
-        }
+    }
+}
+
+fn should_record_no_update_suppression(response: &SyncResponse) -> bool {
+    response.updates.is_empty()
+}
+
+fn record_no_update_suppression<M: ThoughtMetricRecorder>(metrics: &M, snapshots: &[SessionInfo]) {
+    if snapshots.is_empty() {
+        metrics.increment_suppression(
+            BRIDGE_METRIC_SESSION_ID,
+            "no_updates",
+            THOUGHT_METRIC_TIER_BATCH,
+        );
+        return;
+    }
+
+    for snapshot in snapshots {
+        metrics.increment_suppression(
+            &snapshot.session_id,
+            "no_updates",
+            cadence_tier_for_session(snapshot),
+        );
     }
 }
 
@@ -1219,6 +1239,70 @@ mod tests {
             tier: "batch",
             duration: Duration::from_millis(17),
         }));
+    }
+
+    #[test]
+    fn no_update_response_without_snapshots_records_bridge_suppression() {
+        let metrics = RecordingMetrics::default();
+        record_sync_response_metrics(
+            &metrics,
+            &[],
+            &SyncResponse {
+                request_id: "tmux-empty".to_string(),
+                stream_instance_id: None,
+                updates: Vec::new(),
+                llm_calls: 0,
+                last_backend_error: None,
+            },
+            Some(Duration::from_millis(17)),
+        );
+
+        assert_eq!(
+            metrics.records(),
+            vec![MetricRecord::Suppression {
+                session_id: "__bridge__".to_string(),
+                reason: "no_updates",
+                tier: "batch",
+            }]
+        );
+    }
+
+    #[test]
+    fn no_update_response_with_snapshots_records_session_suppressions() {
+        let metrics = RecordingMetrics::default();
+        let snapshots = vec![
+            metric_session("sess-busy", SessionState::Busy, ThoughtState::Active),
+            metric_session("sess-exited", SessionState::Exited, ThoughtState::Sleeping),
+        ];
+
+        record_sync_response_metrics(
+            &metrics,
+            &snapshots,
+            &SyncResponse {
+                request_id: "tmux-no-updates".to_string(),
+                stream_instance_id: None,
+                updates: Vec::new(),
+                llm_calls: 0,
+                last_backend_error: None,
+            },
+            Some(Duration::from_millis(17)),
+        );
+
+        assert_eq!(
+            metrics.records(),
+            vec![
+                MetricRecord::Suppression {
+                    session_id: "sess-busy".to_string(),
+                    reason: "no_updates",
+                    tier: "hot",
+                },
+                MetricRecord::Suppression {
+                    session_id: "sess-exited".to_string(),
+                    reason: "no_updates",
+                    tier: "cold",
+                },
+            ]
+        );
     }
 
     #[test]

@@ -59,6 +59,7 @@ const WORKBENCH_RENDER_JS_ROUTE: &str = "/workbench_render.js";
 const WORKBENCH_LOG_LENS_JS_ROUTE: &str = "/workbench_log_lens.js";
 const WORKBENCH_REFRESH_JS_ROUTE: &str = "/workbench_refresh.js";
 const WORKBENCH_RECORDS_JS_ROUTE: &str = "/workbench_records.js";
+const TERMINAL_WORKBENCH_CONTROLLER_JS_ROUTE: &str = "/terminal_workbench_controller.js";
 const APP_CSS_ROUTE: &str = "/app.css";
 const FRANKENTERM_JS_ROUTE: &str = "/assets/frankenterm/FrankenTerm.js";
 const FRANKENTERM_WASM_ROUTE: &str = "/assets/frankenterm/FrankenTerm_bg.wasm";
@@ -159,6 +160,10 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route(WORKBENCH_LOG_LENS_JS_ROUTE, get(workbench_log_lens_js))
         .route(WORKBENCH_REFRESH_JS_ROUTE, get(workbench_refresh_js))
         .route(WORKBENCH_RECORDS_JS_ROUTE, get(workbench_records_js))
+        .route(
+            TERMINAL_WORKBENCH_CONTROLLER_JS_ROUTE,
+            get(terminal_workbench_controller_js),
+        )
         .route(APP_CSS_ROUTE, get(app_css))
         .route(FRANKENTERM_JS_ROUTE, get(franken_term_js))
         .route(FRANKENTERM_WASM_ROUTE, get(franken_term_wasm))
@@ -848,6 +853,13 @@ async fn workbench_records_js() -> Response {
     javascript_asset(
         "src/web/workbench_records.js",
         include_str!("workbench_records.js"),
+    )
+}
+
+async fn terminal_workbench_controller_js() -> Response {
+    javascript_asset(
+        "src/web/terminal_workbench_controller.js",
+        include_str!("terminal_workbench_controller.js"),
     )
 }
 
@@ -2895,6 +2907,11 @@ mod tests {
                 WORKBENCH_RECORDS_JS_ROUTE,
                 workbench_records_js().await,
                 "export function transcriptRecordDisplay",
+            ),
+            (
+                TERMINAL_WORKBENCH_CONTROLLER_JS_ROUTE,
+                terminal_workbench_controller_js().await,
+                "export function createTerminalWorkbenchController",
             ),
         ];
 

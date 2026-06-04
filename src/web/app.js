@@ -35,9 +35,7 @@ import {
   runSessionRefresh,
   sessionDisplayName,
 } from "./session_refresh.js";
-import { runAgentContextRefresh } from "./agent_context_refresh.js";
-import { runWorkbenchWidgetRefresh } from "./workbench_refresh.js";
-import { writeWorkbenchWidgetsHtmlToDom } from "./workbench_dom.js";
+import { createTerminalWorkbenchController } from "./terminal_workbench_controller.js";
 import {
   isSafeMermaidPlanFileName,
   sanitizeMermaidPlanFiles,
@@ -124,17 +122,8 @@ import {
   trogdorSurfaceSignature,
 } from "./trogdor_render.js";
 import {
-  agentActionLabel,
-  buildWorkbenchWidgetsHtml,
   emptyWorkbenchWidgets,
-  operatorPressureSummary,
-  renderTerminalWorkbenchActions,
   renderTranscriptBlocks,
-  resetWorkbenchWidgetsState,
-  selectedWorkbenchWidgetsSnapshot,
-  truncateWorkbenchText,
-  workbenchWidgetClickPlan,
-  workbenchWidgetLogPlan,
 } from "./workbench_render.js";
 
 const boot = window.__SWIMMERS_BOOT__ ?? {
@@ -617,6 +606,23 @@ const globalShortcutRuntime = {
   refreshSessions,
 };
 
+const terminalWorkbenchController = createTerminalWorkbenchController({
+  state,
+  el,
+  refreshMs: AGENT_CONTEXT_REFRESH_MS,
+  currentSession,
+  normalizeSessionId,
+  sessionDisplayName,
+  summarizeThought,
+  apiFetch,
+  apiMaybeFetch,
+  responseJsonOrNull,
+  openSheet,
+  focusTerminalInputSurface,
+  documentRef: document,
+  requestAnimationFrameRef: typeof requestAnimationFrame === "function" ? requestAnimationFrame : null,
+});
+
 const sessionRefreshRuntime = {
   state,
   apiFetch,
@@ -638,15 +644,6 @@ const sessionRefreshRuntime = {
   setModeStatus,
   resetAgentContextForSession,
   resetWorkbenchWidgetsForSession,
-};
-
-const workbenchRefreshRuntime = {
-  state,
-  throttleMs: AGENT_CONTEXT_REFRESH_MS,
-  currentSession,
-  renderWorkbenchWidgets,
-  apiMaybeFetch,
-  responseJsonOrNull,
 };
 
 const mermaidArtifactController = createMermaidArtifactController({
@@ -1049,25 +1046,11 @@ async function submitTerminalInputDock() {
 }
 
 function resetAgentContextForSession(sessionId) {
-  state.agentContextSessionId = normalizeSessionId(sessionId);
-  state.agentContextLoading = false;
-  state.agentContextPayload = null;
-  state.agentContextError = "";
-  state.agentContextLastLoadedAt = 0;
-  renderTerminalWorkbench();
+  return terminalWorkbenchController.resetAgentContextForSession(sessionId);
 }
 
 function resetWorkbenchWidgetsForSession(sessionId) {
-  resetWorkbenchWidgetsState(state.workbenchWidgets, normalizeSessionId(sessionId));
-  state.workbenchLogMode = "lens";
-  state.workbenchLogFilter = "all";
-  state.workbenchLogSearch = "";
-  state.workbenchSelectedTurnId = "";
-  renderWorkbenchWidgets();
-}
-
-function terminalWorkbenchVisible() {
-  return Boolean(currentSession() && !state.trogdorAtlasOpen && state.terminalWorkbenchOpen);
+  return terminalWorkbenchController.resetWorkbenchWidgetsForSession(sessionId);
 }
 
 function syncTrogdorBackButton() {
@@ -1081,123 +1064,31 @@ function syncTrogdorBackButton() {
 }
 
 function syncTerminalWorkbench() {
-  const hasSession = Boolean(currentSession() && !state.trogdorAtlasOpen);
-  const visible = terminalWorkbenchVisible();
-  document.body.classList.toggle("terminal-workbench-open", visible);
-  if (el.terminalWorkbenchToggle) {
-    el.terminalWorkbenchToggle.disabled = !hasSession;
-    el.terminalWorkbenchToggle.setAttribute("aria-pressed", visible ? "true" : "false");
-  }
-  if (el.terminalWorkbench) {
-    el.terminalWorkbench.classList.toggle("hidden", !visible);
-    el.terminalWorkbench.setAttribute("aria-hidden", visible ? "false" : "true");
-  }
-  renderTerminalWorkbench();
+  return terminalWorkbenchController.syncTerminalWorkbench();
 }
 
 function setTerminalWorkbenchOpen(open) {
-  state.terminalWorkbenchOpen = Boolean(open);
-  syncTerminalWorkbench();
-  if (state.terminalWorkbenchOpen) {
-    void refreshAgentContextForSelectedSession({ force: true });
-    void refreshWorkbenchWidgetsForSelectedSession({ force: true });
-  }
-}
-
-function selectedAgentContextPayload() {
-  return state.agentContextSessionId === state.selectedSessionId
-    ? state.agentContextPayload
-    : null;
+  return terminalWorkbenchController.setTerminalWorkbenchOpen(open);
 }
 
 function renderTerminalWorkbench() {
-  if (!el.terminalWorkbench) {
-    return;
-  }
-
-  const session = currentSession();
-  const payload = selectedAgentContextPayload();
-  const tool = payload?.tool || session?.tool || "unknown";
-  const cwd = payload?.cwd || session?.cwd || "";
-  const status = state.agentContextLoading
-    ? "loading context"
-    : state.agentContextError
-      ? state.agentContextError
-      : payload?.available
-        ? "structured context"
-        : payload?.message || "waiting for context";
-  const task = payload?.user_task || summarizeThought(session);
-  const current = agentActionLabel(payload?.current_tool) || "No current action.";
-  const pressure = operatorPressureSummary(session, payload);
-  const actions = Array.isArray(payload?.recent_actions) ? payload.recent_actions : [];
-
-  el.terminalWorkbenchTitle.textContent = session ? sessionDisplayName(session) : "No session";
-  el.terminalWorkbenchMeta.textContent = session ? `${tool} · ${cwd}` : "";
-  el.terminalWorkbenchStatus.textContent = status;
-  el.terminalWorkbenchTask.textContent = truncateWorkbenchText(task || "No task context.");
-  el.terminalWorkbenchCurrent.textContent = truncateWorkbenchText(current, 140);
-  el.terminalWorkbenchPressure.textContent = truncateWorkbenchText(pressure, 160);
-  el.terminalWorkbenchRefresh.disabled = !session || state.agentContextLoading;
-
-  el.terminalWorkbenchActions.innerHTML = renderTerminalWorkbenchActions(actions, Boolean(payload?.available));
-  renderWorkbenchWidgets();
+  return terminalWorkbenchController.renderTerminalWorkbench();
 }
 
 async function refreshAgentContextForSelectedSession(options = {}) {
-  await runAgentContextRefresh(options, {
-    state,
-    throttleMs: AGENT_CONTEXT_REFRESH_MS,
-    now: () => Date.now(),
-    currentSession,
-    apiFetch,
-    renderTerminalWorkbench,
-  });
-}
-
-function selectedWorkbenchWidgets() {
-  return selectedWorkbenchWidgetsSnapshot(state.workbenchWidgets, state.selectedSessionId);
+  return terminalWorkbenchController.refreshAgentContextForSelectedSession(options);
 }
 
 function writeWorkbenchWidgetsHtml(nextHtml) {
-  writeWorkbenchWidgetsHtmlToDom(nextHtml, {
-    container: el.terminalWorkbenchWidgets,
-    scroller: el.terminalWorkbench,
-    widgets: state.workbenchWidgets,
-    requestAnimationFrame: typeof requestAnimationFrame === "function"
-      ? (callback) => requestAnimationFrame(callback)
-      : null,
-  });
+  return terminalWorkbenchController.writeWorkbenchWidgetsHtml(nextHtml);
 }
 
 function renderWorkbenchWidgets() {
-  if (!el.terminalWorkbenchWidgets) {
-    return;
-  }
-
-  const session = currentSession();
-  const widgets = selectedWorkbenchWidgets();
-  if (!session) {
-    writeWorkbenchWidgetsHtml(
-      `<div class="workbench-action-detail">No session selected.</div>`,
-    );
-    return;
-  }
-
-  const contextPayload = selectedAgentContextPayload();
-  writeWorkbenchWidgetsHtml(buildWorkbenchWidgetsHtml({
-    widgets,
-    contextPayload,
-    selectedTurnId: state.workbenchSelectedTurnId,
-    logState: {
-      mode: state.workbenchLogMode,
-      filter: state.workbenchLogFilter,
-      query: state.workbenchLogSearch,
-    },
-  }));
+  return terminalWorkbenchController.renderWorkbenchWidgets();
 }
 
 async function refreshWorkbenchWidgetsForSelectedSession(options = {}) {
-  await runWorkbenchWidgetRefresh(options, workbenchRefreshRuntime);
+  return terminalWorkbenchController.refreshWorkbenchWidgetsForSelectedSession(options);
 }
 
 function applyZoomToSurface(surface) {
@@ -3349,41 +3240,11 @@ function handleTerminalInlineInputKeydown(event) {
 }
 
 function handleTerminalWorkbenchWidgetsClick(event) {
-  const plan = workbenchWidgetClickPlan(event.target);
-  if (plan.type === "ignore") {
-    return false;
-  }
-  event.preventDefault();
-  if (plan.type === "open_mermaid") {
-    openSheet("mermaid");
-    return;
-  }
-  const refreshWidgets = plan.type === "select_turn";
-  if (refreshWidgets) {
-    state.workbenchSelectedTurnId = plan.turnId;
-    state.workbenchWidgets.transcript = null;
-    state.workbenchWidgets.transcriptTurnId = "";
-    state.workbenchWidgets.transcriptNextCursor = 0;
-  } else {
-    state.workbenchLogMode = plan.mode;
-  }
-  renderWorkbenchWidgets();
-  if (refreshWidgets) {
-    void refreshWorkbenchWidgetsForSelectedSession({ force: true, silent: true });
-  }
-  focusTerminalInputSurface({ preventScroll: true });
+  return terminalWorkbenchController.handleTerminalWorkbenchWidgetsClick(event);
 }
 
 function handleTerminalWorkbenchWidgetsLogEvent(event) {
-  const plan = workbenchWidgetLogPlan(event.type, event.target);
-  if (plan.type === "set_log_search") {
-    state.workbenchLogSearch = plan.query;
-  } else if (plan.type === "set_log_filter") {
-    state.workbenchLogFilter = plan.filter;
-  } else {
-    return;
-  }
-  renderWorkbenchWidgets();
+  return terminalWorkbenchController.handleTerminalWorkbenchWidgetsLogEvent(event);
 }
 
 function handleCommandPaletteEvent(event) {

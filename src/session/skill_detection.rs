@@ -14,38 +14,61 @@ pub(crate) fn detect_skill_from_input_line(line: &str) -> Option<String> {
 
 pub(crate) fn drain_completed_input_lines(buffer: &mut String, data: &[u8]) -> Vec<String> {
     let mut completed = Vec::new();
-    if data.is_empty() {
-        return completed;
-    }
 
-    let text = String::from_utf8_lossy(data);
-    for ch in text.chars() {
-        match ch {
-            '\r' | '\n' => {
-                let line = buffer.trim().to_string();
-                buffer.clear();
-                if !line.is_empty() {
-                    completed.push(line);
-                }
-            }
-            // Ctrl+C/Ctrl+D should discard any partially typed command line.
-            '\u{3}' | '\u{4}' => {
-                buffer.clear();
-            }
-            '\u{8}' | '\u{7f}' => {
-                buffer.pop();
-            }
-            _ if ch.is_control() => {}
-            _ => {
-                buffer.push(ch);
-                if buffer.len() > 8_192 {
-                    buffer.clear();
-                }
-            }
-        }
+    for ch in String::from_utf8_lossy(data).chars() {
+        drain_input_char(buffer, ch, &mut completed);
     }
 
     completed
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum InputLineAction {
+    EmitLine,
+    ClearPartial,
+    DeletePrevious,
+    Ignore,
+    Append(char),
+}
+
+fn drain_input_char(buffer: &mut String, ch: char, completed: &mut Vec<String>) {
+    match input_line_action(ch) {
+        InputLineAction::EmitLine => emit_completed_input_line(buffer, completed),
+        InputLineAction::ClearPartial => buffer.clear(),
+        InputLineAction::DeletePrevious => {
+            buffer.pop();
+        }
+        InputLineAction::Ignore => {}
+        InputLineAction::Append(ch) => append_input_char(buffer, ch),
+    }
+}
+
+fn input_line_action(ch: char) -> InputLineAction {
+    match ch {
+        '\r' | '\n' => InputLineAction::EmitLine,
+        // Ctrl+C/Ctrl+D should discard any partially typed command line.
+        '\u{3}' | '\u{4}' => InputLineAction::ClearPartial,
+        '\u{8}' | '\u{7f}' => InputLineAction::DeletePrevious,
+        _ if ch.is_control() => InputLineAction::Ignore,
+        _ => InputLineAction::Append(ch),
+    }
+}
+
+fn emit_completed_input_line(buffer: &mut String, completed: &mut Vec<String>) {
+    let line = buffer.trim().to_string();
+    buffer.clear();
+    completed.extend((!line.is_empty()).then_some(line));
+}
+
+fn append_input_char(buffer: &mut String, ch: char) {
+    buffer.push(ch);
+    clear_oversized_input_buffer(buffer);
+}
+
+fn clear_oversized_input_buffer(buffer: &mut String) {
+    if buffer.len() > 8_192 {
+        buffer.clear();
+    }
 }
 
 fn normalize_skill_name(raw: &str) -> Option<String> {
@@ -447,10 +470,63 @@ mod tests {
     }
 
     #[test]
+    fn completed_lines_drop_partial_input_on_ctrl_d() {
+        let mut buffer = "partial".to_string();
+
+        let lines = drain_completed_input_lines(&mut buffer, b"\x04$commit\n");
+
+        assert_eq!(lines, vec!["$commit".to_string()]);
+        assert!(buffer.is_empty());
+    }
+
+    #[test]
     fn completed_lines_emit_full_skill_after_chunked_input() {
         let mut buffer = String::new();
         assert!(drain_completed_input_lines(&mut buffer, b"$com").is_empty());
         let lines = drain_completed_input_lines(&mut buffer, b"mit\r");
         assert_eq!(lines, vec!["$commit".to_string()]);
+    }
+
+    #[test]
+    fn completed_lines_emit_trimmed_nonempty_cr_and_lf_lines() {
+        let mut buffer = String::new();
+
+        let lines = drain_completed_input_lines(&mut buffer, b"  first \n\r second \r\n");
+
+        assert_eq!(lines, vec!["first".to_string(), "second".to_string()]);
+        assert!(buffer.is_empty());
+    }
+
+    #[test]
+    fn completed_lines_apply_backspace_and_delete() {
+        let mut buffer = String::new();
+
+        let lines = drain_completed_input_lines(&mut buffer, b"ab\x08c\x7fd\r");
+
+        assert_eq!(lines, vec!["ad".to_string()]);
+        assert!(buffer.is_empty());
+    }
+
+    #[test]
+    fn completed_lines_ignore_unhandled_control_characters() {
+        let mut buffer = String::new();
+
+        let lines = drain_completed_input_lines(&mut buffer, b"a\x01b\tc\r");
+
+        assert_eq!(lines, vec!["abc".to_string()]);
+        assert!(buffer.is_empty());
+    }
+
+    #[test]
+    fn completed_lines_clear_oversized_partial_buffer() {
+        let mut buffer = "a".repeat(8_192);
+
+        assert!(drain_completed_input_lines(&mut buffer, b"b").is_empty());
+        assert!(buffer.is_empty());
+
+        let lines = drain_completed_input_lines(&mut buffer, b"$commit\r");
+
+        assert_eq!(lines, vec!["$commit".to_string()]);
+        assert!(buffer.is_empty());
     }
 }
