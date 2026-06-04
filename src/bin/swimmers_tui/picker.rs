@@ -1358,49 +1358,91 @@ fn render_picker_path_row(
 }
 
 fn render_picker_filter_row(renderer: &mut Renderer, picker: &PickerState, layout: &PickerLayout) {
+    for item in picker_filter_render_items(picker, layout) {
+        renderer.draw_text(item.rect.x, item.rect.y, &item.label, item.color);
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PickerFilterRenderItem {
+    rect: Rect,
+    label: String,
+    color: Color,
+}
+
+fn picker_filter_render_items(
+    picker: &PickerState,
+    layout: &PickerLayout,
+) -> Vec<PickerFilterRenderItem> {
+    let mut items = Vec::with_capacity(layout.group_buttons.len() + 3);
+    items.push(picker_managed_filter_render_item(picker, layout));
+    items.extend(
+        layout
+            .group_buttons
+            .iter()
+            .map(|(name, rect)| picker_group_filter_render_item(picker, name, *rect)),
+    );
+    items.push(picker_all_filter_render_item(picker, layout));
+    items.extend(picker_group_target_filter_render_item(picker, layout));
+    items
+}
+
+fn picker_managed_filter_render_item(
+    picker: &PickerState,
+    layout: &PickerLayout,
+) -> PickerFilterRenderItem {
     let managed_label = match &picker.overlay_label {
         Some(label) => format!("[{}]", label.to_lowercase()),
         None => "[managed]".to_string(),
     };
     let in_group = picker.current_group.is_some();
-    renderer.draw_text(
-        layout.env_button.x,
-        layout.env_button.y,
-        &managed_label,
-        if picker.managed_only && !in_group {
-            Color::White
-        } else {
-            Color::DarkGrey
-        },
-    );
-    for (name, rect) in &layout.group_buttons {
-        let label = format!("[{name}]");
-        let active = picker.current_group.as_deref() == Some(name);
-        renderer.draw_text(
-            rect.x,
-            rect.y,
-            &label,
-            if active {
-                Color::White
-            } else {
-                Color::DarkGrey
-            },
-        );
+    PickerFilterRenderItem {
+        rect: layout.env_button,
+        label: managed_label,
+        color: picker_filter_active_color(picker.managed_only && !in_group),
     }
-    renderer.draw_text(
-        layout.all_button.x,
-        layout.all_button.y,
-        "[all folders]",
-        if !picker.managed_only && !in_group {
-            Color::White
-        } else {
-            Color::DarkGrey
-        },
-    );
-    if let (Some(target), Some(rect)) = (&picker.group_edit_target, layout.group_target_button) {
-        let label = format!("[target:{target}]");
-        renderer.draw_text(rect.x, rect.y, &label, Color::Yellow);
+}
+
+fn picker_group_filter_render_item(
+    picker: &PickerState,
+    name: &str,
+    rect: Rect,
+) -> PickerFilterRenderItem {
+    let active = picker.current_group.as_deref() == Some(name);
+    PickerFilterRenderItem {
+        rect,
+        label: format!("[{name}]"),
+        color: picker_filter_active_color(active),
     }
+}
+
+fn picker_all_filter_render_item(
+    picker: &PickerState,
+    layout: &PickerLayout,
+) -> PickerFilterRenderItem {
+    let in_group = picker.current_group.is_some();
+    PickerFilterRenderItem {
+        rect: layout.all_button,
+        label: "[all folders]".to_string(),
+        color: picker_filter_active_color(!picker.managed_only && !in_group),
+    }
+}
+
+fn picker_filter_active_color(active: bool) -> Color {
+    [Color::DarkGrey, Color::White][usize::from(active)]
+}
+
+fn picker_group_target_filter_render_item(
+    picker: &PickerState,
+    layout: &PickerLayout,
+) -> Option<PickerFilterRenderItem> {
+    let target = picker.group_edit_target.as_ref()?;
+    let rect = layout.group_target_button?;
+    Some(PickerFilterRenderItem {
+        rect,
+        label: format!("[target:{target}]"),
+        color: Color::Yellow,
+    })
 }
 
 fn render_picker_spawn_row(renderer: &mut Renderer, picker: &PickerState, layout: &PickerLayout) {
@@ -1838,6 +1880,24 @@ mod tests {
             }
         }
 
+        fn filter_test_picker() -> PickerState {
+            PickerState::new(
+                0,
+                0,
+                DirListResponse {
+                    path: "/tmp".to_string(),
+                    entries: Vec::new(),
+                    overlay_label: None,
+                    groups: vec!["alpha".to_string(), "beta".to_string()],
+                    launch_targets: Vec::new(),
+                    default_launch_target: None,
+                },
+                true,
+                SpawnTool::Codex,
+                None,
+            )
+        }
+
         fn pointer_test_entry() -> DirEntry {
             DirEntry {
                 name: "swimmers".to_string(),
@@ -1871,6 +1931,87 @@ mod tests {
             );
             picker.batch_exclude_mode = batch_exclude_mode;
             picker
+        }
+
+        #[test]
+        fn picker_filter_render_plan_preserves_labels_positions_and_target() {
+            let layout = filter_test_layout();
+            let mut picker = filter_test_picker();
+            picker.overlay_label = Some("Overlay".to_string());
+            picker.group_edit_target = Some("beta".to_string());
+
+            let items = picker_filter_render_items(&picker, &layout);
+
+            assert_eq!(
+                items,
+                vec![
+                    PickerFilterRenderItem {
+                        rect: layout.env_button,
+                        label: "[overlay]".to_string(),
+                        color: Color::White,
+                    },
+                    PickerFilterRenderItem {
+                        rect: layout.group_buttons[0].1,
+                        label: "[alpha]".to_string(),
+                        color: Color::DarkGrey,
+                    },
+                    PickerFilterRenderItem {
+                        rect: layout.group_buttons[1].1,
+                        label: "[beta]".to_string(),
+                        color: Color::DarkGrey,
+                    },
+                    PickerFilterRenderItem {
+                        rect: layout.all_button,
+                        label: "[all folders]".to_string(),
+                        color: Color::DarkGrey,
+                    },
+                    PickerFilterRenderItem {
+                        rect: layout.group_target_button.expect("target rect"),
+                        label: "[target:beta]".to_string(),
+                        color: Color::Yellow,
+                    },
+                ]
+            );
+        }
+
+        #[test]
+        fn picker_filter_render_plan_uses_active_colors_for_each_mode() {
+            let layout = filter_test_layout();
+            let mut picker = filter_test_picker();
+
+            let managed_items = picker_filter_render_items(&picker, &layout);
+            assert_eq!(managed_items[0].color, Color::White);
+            assert_eq!(managed_items[3].color, Color::DarkGrey);
+
+            picker.current_group = Some("alpha".to_string());
+            let group_items = picker_filter_render_items(&picker, &layout);
+            assert_eq!(group_items[0].color, Color::DarkGrey);
+            assert_eq!(group_items[1].color, Color::White);
+            assert_eq!(group_items[2].color, Color::DarkGrey);
+            assert_eq!(group_items[3].color, Color::DarkGrey);
+
+            picker.current_group = None;
+            picker.managed_only = false;
+            let all_items = picker_filter_render_items(&picker, &layout);
+            assert_eq!(all_items[0].color, Color::DarkGrey);
+            assert_eq!(all_items[3].color, Color::White);
+        }
+
+        #[test]
+        fn picker_filter_render_plan_requires_target_state_and_layout() {
+            let mut layout = filter_test_layout();
+            let mut picker = filter_test_picker();
+
+            picker.group_edit_target = None;
+            assert!(picker_filter_render_items(&picker, &layout)
+                .iter()
+                .all(|item| !item.label.starts_with("[target:")));
+
+            picker.group_edit_target = Some("alpha".to_string());
+            layout.group_target_button = None;
+            assert!(picker_filter_render_items(&picker, &layout)
+                .iter()
+                .all(|item| !item.label.starts_with("[target:")));
         }
 
         #[test]
