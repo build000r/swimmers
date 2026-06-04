@@ -121,17 +121,29 @@ fn scan_overlay_plan_dirs(root: &str) -> Option<MermaidScanResult> {
 
 fn scan_bounded_mermaid_dirs(plan_dirs: &[PathBuf]) -> MermaidScanResult {
     let mut overlay_scan = MermaidScanResult::default();
-    for dir in plan_dirs {
+    let _ = plan_dirs.iter().any(|dir| {
         let scan = scan_mermaid_candidates(&dir.to_string_lossy());
-        overlay_scan.truncated |= scan.truncated;
-        overlay_scan.candidates.extend(scan.candidates);
-        if overlay_scan.candidates.len() >= MERMAID_SCAN_MAX_FILES {
-            overlay_scan.candidates.truncate(MERMAID_SCAN_MAX_FILES);
-            overlay_scan.truncated = true;
-            break;
-        }
-    }
+        append_bounded_mermaid_scan(&mut overlay_scan, scan)
+    });
     overlay_scan
+}
+
+fn append_bounded_mermaid_scan(
+    overlay_scan: &mut MermaidScanResult,
+    scan: MermaidScanResult,
+) -> bool {
+    overlay_scan.truncated |= scan.truncated;
+    overlay_scan.candidates.extend(scan.candidates);
+    apply_mermaid_scan_file_cap(overlay_scan)
+}
+
+fn apply_mermaid_scan_file_cap(scan: &mut MermaidScanResult) -> bool {
+    if scan.candidates.len() < MERMAID_SCAN_MAX_FILES {
+        return false;
+    }
+    scan.candidates.truncate(MERMAID_SCAN_MAX_FILES);
+    scan.truncated = true;
+    true
 }
 
 fn scan_mermaid_candidates(root: &str) -> MermaidScanResult {
@@ -727,6 +739,112 @@ mod tests {
     }
 
     #[test]
+    fn scan_bounded_mermaid_dirs_merges_plan_dirs_in_input_order() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let first_dir = dir.path().join("first");
+        let second_dir = dir.path().join("second");
+        fs::create_dir_all(&first_dir).expect("create first dir");
+        fs::create_dir_all(&second_dir).expect("create second dir");
+        let first_path = first_dir.join("first.mmd");
+        let second_path = second_dir.join("second.mmd");
+        fs::write(&first_path, "graph TD\nA-->B\n").expect("write first mmd");
+        fs::write(&second_path, "graph TD\nB-->C\n").expect("write second mmd");
+
+        let scan = super::scan_bounded_mermaid_dirs(&[first_dir, second_dir]);
+        let paths = scan
+            .candidates
+            .iter()
+            .map(|candidate| candidate.display_path.clone())
+            .collect::<Vec<_>>();
+
+        assert_eq!(paths, vec![first_path, second_path]);
+        assert!(!scan.truncated);
+    }
+
+    #[test]
+    fn scan_bounded_mermaid_dirs_stops_after_aggregate_cap_truncation() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let capped_dir = dir.path().join("capped");
+        let skipped_dir = dir.path().join("skipped");
+        fs::create_dir_all(&capped_dir).expect("create capped dir");
+        fs::create_dir_all(&skipped_dir).expect("create skipped dir");
+        for index in 0..super::MERMAID_SCAN_MAX_FILES {
+            fs::write(
+                capped_dir.join(format!("diagram-{index:04}.mmd")),
+                format!("graph TD\nA{index}-->B{index}\n"),
+            )
+            .expect("write capped mmd");
+        }
+        let skipped_path = skipped_dir.join("skipped.mmd");
+        fs::write(&skipped_path, "graph TD\nSkipped-->Node\n").expect("write skipped mmd");
+
+        let scan = super::scan_bounded_mermaid_dirs(&[capped_dir, skipped_dir]);
+
+        assert_eq!(scan.candidates.len(), super::MERMAID_SCAN_MAX_FILES);
+        assert!(scan.truncated);
+        assert!(!scan
+            .candidates
+            .iter()
+            .any(|candidate| candidate.display_path == skipped_path));
+    }
+
+    #[test]
+    fn append_bounded_mermaid_scan_ors_child_truncation_without_aggregate_cap() {
+        let mut aggregate = super::MermaidScanResult {
+            candidates: vec![mermaid_candidate("first.mmd")],
+            truncated: false,
+        };
+        let child = super::MermaidScanResult {
+            candidates: vec![mermaid_candidate("second.mmd")],
+            truncated: true,
+        };
+
+        let reached_cap = super::append_bounded_mermaid_scan(&mut aggregate, child);
+
+        assert!(!reached_cap);
+        assert!(aggregate.truncated);
+        assert_eq!(
+            aggregate
+                .candidates
+                .iter()
+                .map(|candidate| candidate.display_path.to_string_lossy().into_owned())
+                .collect::<Vec<_>>(),
+            vec!["first.mmd", "second.mmd"]
+        );
+    }
+
+    #[test]
+    fn append_bounded_mermaid_scan_truncates_to_aggregate_cap() {
+        let mut aggregate = super::MermaidScanResult {
+            candidates: (0..(super::MERMAID_SCAN_MAX_FILES - 1))
+                .map(|index| mermaid_candidate(&format!("kept-{index:04}.mmd")))
+                .collect(),
+            truncated: false,
+        };
+        let child = super::MermaidScanResult {
+            candidates: vec![
+                mermaid_candidate("kept-last.mmd"),
+                mermaid_candidate("dropped.mmd"),
+            ],
+            truncated: false,
+        };
+
+        let reached_cap = super::append_bounded_mermaid_scan(&mut aggregate, child);
+
+        assert!(reached_cap);
+        assert!(aggregate.truncated);
+        assert_eq!(aggregate.candidates.len(), super::MERMAID_SCAN_MAX_FILES);
+        assert_eq!(
+            aggregate
+                .candidates
+                .last()
+                .expect("last candidate")
+                .display_path,
+            std::path::PathBuf::from("kept-last.mmd")
+        );
+    }
+
+    #[test]
     fn list_repo_docs_prefers_repo_root_markers() {
         let dir = tempfile::tempdir().expect("tempdir");
         fs::write(
@@ -766,5 +884,12 @@ mod tests {
             resolve_repo_root(&dir.path().to_string_lossy()).as_deref(),
             Some(dir.path())
         );
+    }
+
+    fn mermaid_candidate(path: &str) -> super::MermaidCandidate {
+        super::MermaidCandidate {
+            display_path: std::path::PathBuf::from(path),
+            updated_at: Utc::now(),
+        }
     }
 }
