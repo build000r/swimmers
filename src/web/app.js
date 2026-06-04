@@ -3,8 +3,8 @@ import {
   appEventListenerBindingPlan, authTokenButtonPlan, controlEventSessionPatchPlan, eventCell, globalShortcutPlan, initialStateBootPlan, inputAckActionPlan, lifecycleDeletedSessionPatchPlan, mobileKeyboardInputExecutorPlan, mobileKeyboardInputPlan,
   sheetActionAvailabilityPlan,
   mobileKeyboardKeydownPlan, mobileKeyboardKeyPlan, shouldIgnoreSyntheticClick, surfaceActionDispatchContextPlan, surfaceActionDispatchPlan, surfaceActionExecutionContextPlan, surfaceActionExecutionPlan, surfaceActionFocusTerminalExecutionPlan, surfaceActionTrogdorReaderExecutionPlan,
-  terminalComposerControlAction, terminalDestroyStatePatch, terminalFallbackActivationPlan, terminalFallbackFocusPlan, terminalFallbackKeydownPlan, terminalFallbackPastePlan, terminalFallbackPointerFocusPlan, terminalInlineInputKeydownPlan, terminalKeyStripClickExecutorPlan, terminalKeyStripClickPlan, terminalStageCaptureBindings, terminalStageClickPlan, terminalStageFocusExecutorPlan, terminalStageFocusPlan,
-  normalizeTerminalZoomValue, terminalAuxiliaryControlsPlan, terminalFallbackScrollPlan, terminalFallbackTextScrollPlan, terminalInputDockPlan, terminalLiveFrameFallbackPlan, terminalPaintProbeSchedulePlan, terminalPaintVerificationPlan, terminalPendingByteBufferPlan, terminalPresentationPlan, terminalStageKeydownPlan, terminalStageMouseDownPlan, terminalStageMouseMovePlan, terminalStageMouseUpPlan, terminalStagePasteExecutorPlan, terminalStagePastePlan, terminalStageTouchEndPlan, terminalStageWheelPlan, terminalSurfaceRendererPlan, terminalSurfaceSessionPlan, terminalToolsAvailabilityPlan, terminalZoomControlsPlan, terminalZoomLoadValue, terminalZoomPercentLabel, terminalZoomPersistencePlan,
+  terminalComposerControlAction, terminalDestroyStatePatch, terminalFallbackFocusPlan, terminalFallbackKeydownPlan, terminalFallbackPastePlan, terminalFallbackPointerFocusPlan, terminalInlineInputKeydownPlan, terminalKeyStripClickExecutorPlan, terminalKeyStripClickPlan, terminalStageCaptureBindings, terminalStageClickPlan, terminalStageFocusExecutorPlan, terminalStageFocusPlan,
+  normalizeTerminalZoomValue, terminalAuxiliaryControlsPlan, terminalFallbackScrollPlan, terminalInputDockPlan, terminalPaintProbeSchedulePlan, terminalPaintVerificationPlan, terminalPresentationPlan, terminalStageKeydownPlan, terminalStageMouseDownPlan, terminalStageMouseMovePlan, terminalStageMouseUpPlan, terminalStagePasteExecutorPlan, terminalStagePastePlan, terminalStageTouchEndPlan, terminalStageWheelPlan, terminalToolsAvailabilityPlan, terminalZoomControlsPlan, terminalZoomLoadValue, terminalZoomPercentLabel, terminalZoomPersistencePlan,
 } from "./input_support.js";
 import { createSendController } from "./send_controller.js";
 import {
@@ -14,9 +14,7 @@ import {
   createNativeDesktopSheetController,
 } from "./native_desktop_sheet.js";
 import {
-  activateTerminalSurfaceFallback,
-  initializeTerminalSurface,
-  reuseTerminalSurface,
+  createTerminalSurfaceRuntimeHelpers,
 } from "./terminal_surface_setup.js";
 import { runTerminalSurfaceResize } from "./terminal_resize.js";
 import { runGlobalShortcutAction } from "./global_shortcut_dispatch.js";
@@ -501,24 +499,48 @@ const terminalSurfaceRuntime = {
   state,
   el,
   requiredTerminalMethods: FRANKENTERM_TERMINAL_METHODS,
+  maxPendingTerminalBytes: MAX_PENDING_TERMINAL_BYTES,
   validateFrankenTermSurface,
   teardownTerminal,
   destroyTerminalInstance,
-  setTerminalTextFallbackActive,
+  currentSession,
+  ensureFrankenTerm,
+  stopSnapshotPolling,
+  startSnapshotPolling,
+  focusTerminalInputSurface,
   refreshSnapshotFallback,
   setLoadingState,
   setUtilityStatus,
+  setConnectionStatus,
   terminalSupports,
   frankenTermLinkPolicy,
   applyZoomToSurface,
   clearTerminalSelection,
   refreshTerminalSearch,
-  syncTerminalAccessibilityMirror,
   syncTerminalTools,
+  syncTerminalStatusStrip,
   measureAndResizeSurface,
-  flushPendingTerminalBytes,
+  feedTerminalBytes,
   prefersReducedMotion: () => window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches ?? false,
 };
+
+const {
+  clearPendingTerminalBytes,
+  bufferTerminalBytes,
+  flushPendingTerminalBytes,
+  setTerminalTextFallbackActive,
+  terminalFallbackIsNearBottom,
+  updateTerminalFallbackText,
+  syncTerminalAccessibilityMirror,
+  syncTerminalFallbackFromLiveFrame,
+  setupTerminalSurface,
+} = createTerminalSurfaceRuntimeHelpers(terminalSurfaceRuntime);
+
+Object.assign(terminalSurfaceRuntime, {
+  flushPendingTerminalBytes,
+  setTerminalTextFallbackActive,
+  syncTerminalAccessibilityMirror,
+});
 
 const terminalResizeRuntime = {
   state,
@@ -1946,115 +1968,11 @@ function destroyTerminalInstance() {
   el.terminalCanvas.classList.add("hidden");
 }
 
-function clearPendingTerminalBytes() {
-  state.pendingTerminalByteChunks = [];
-  state.pendingTerminalByteLength = 0;
-}
-
-function bufferTerminalBytes(bytes) {
-  const isUint8Array = bytes instanceof Uint8Array;
-  const plan = terminalPendingByteBufferPlan({ isUint8Array, byteLength: isUint8Array ? bytes.byteLength : 0, pendingByteLength: state.pendingTerminalByteLength, pendingChunkByteLengths: state.pendingTerminalByteChunks.map((chunk) => chunk?.byteLength || 0), maxPendingBytes: MAX_PENDING_TERMINAL_BYTES });
-  if (!plan.accept) return false;
-  const copy = new Uint8Array(bytes);
-  state.pendingTerminalByteChunks.push(copy);
-  state.pendingTerminalByteLength += copy.byteLength;
-  for (let index = 0; index < plan.dropCount; index += 1) {
-    const dropped = state.pendingTerminalByteChunks.shift();
-    state.pendingTerminalByteLength -= dropped?.byteLength || 0;
-  }
-  setConnectionStatus(plan.status);
-  return true;
-}
-
-function flushPendingTerminalBytes() {
-  if (!state.terminal || !state.pendingTerminalByteChunks.length) {
-    return false;
-  }
-  const chunks = state.pendingTerminalByteChunks;
-  clearPendingTerminalBytes();
-  for (const chunk of chunks) {
-    feedTerminalBytes(chunk);
-  }
-  return true;
-}
-
 function clearTerminalPaintProbe() {
   if (state.terminalPaintProbeTimer) {
     window.clearTimeout(state.terminalPaintProbeTimer);
     state.terminalPaintProbeTimer = null;
   }
-}
-
-function setTerminalTextFallbackActive(active, options = {}) {
-  const hasCurrentSession = Boolean(currentSession());
-  const wasActive = state.terminalFallbackActive;
-  const nextActive = Boolean(active && hasCurrentSession);
-  const plan = terminalFallbackActivationPlan({ active, hasCurrentSession, wasActive, hasTerminal: Boolean(state.terminal), clearText: options.clearText !== false, nearBottom: nextActive && wasActive ? terminalFallbackIsNearBottom() : false });
-  state.terminalFallbackActive = plan.terminalFallbackActive;
-  el.terminalFallback.classList.toggle("hidden", plan.hidden);
-  el.terminalFallback.setAttribute("aria-hidden", plan.ariaHidden);
-  if (plan.updateAutoFollow) state.terminalFallbackAutoFollow = plan.autoFollow;
-  if (plan.clearText) el.terminalFallback.textContent = "";
-  if (plan.startSnapshotPolling) startSnapshotPolling();
-  if (plan.focusTerminal) focusTerminalInputSurface({ onlyIfSurfaceFocused: true, preventScroll: true });
-  if (plan.stopSnapshotPolling) stopSnapshotPolling();
-  syncTerminalStatusStrip();
-}
-
-function terminalFallbackIsNearBottom() {
-  const maxScrollTop = Math.max(0, el.terminalFallback.scrollHeight - el.terminalFallback.clientHeight);
-  return maxScrollTop - el.terminalFallback.scrollTop < 48;
-}
-
-function updateTerminalFallbackText(text) {
-  const previousScrollTop = el.terminalFallback.scrollTop;
-  const nearBottom = state.terminalFallbackAutoFollow ? false : terminalFallbackIsNearBottom();
-  const fallbackText = text || "";
-  el.terminalFallback.textContent = fallbackText;
-  const scrollPlan = terminalFallbackTextScrollPlan({ terminalFallbackAutoFollow: state.terminalFallbackAutoFollow, nearBottom, previousScrollTop, scrollHeight: el.terminalFallback.scrollHeight, clientHeight: el.terminalFallback.clientHeight });
-  el.terminalFallback.scrollTop = scrollPlan.scrollTop;
-  syncTerminalAccessibilityMirror(fallbackText);
-}
-
-function syncTerminalAccessibilityMirror(fallbackText = null) {
-  const mirrorText = typeof fallbackText === "string" ? fallbackText : terminalMirrorTextFromRenderer();
-  state.terminalMirrorText = mirrorText;
-  if (el.terminalA11yMirror) {
-    el.terminalA11yMirror.value = mirrorText;
-  }
-  if (terminalSupports("drainAccessibilityAnnouncements") && el.terminalAnnouncer) {
-    const announcements = state.terminal.drainAccessibilityAnnouncements();
-    if (Array.isArray(announcements) && announcements.length) {
-      el.terminalAnnouncer.textContent = announcements.join("\n");
-    }
-  }
-}
-
-function terminalMirrorTextFromRenderer() {
-  if (terminalSupports("screenReaderMirrorText")) {
-    return state.terminal.screenReaderMirrorText() || "";
-  }
-  if (terminalSupports("accessibilityDomSnapshot")) {
-    return state.terminal.accessibilityDomSnapshot()?.value || "";
-  }
-  return "";
-}
-
-async function setupTerminalSurface() {
-  stopSnapshotPolling();
-
-  const sessionPlan = terminalSurfaceSessionPlan({ session: currentSession() });
-  if (sessionPlan.type === "teardown_terminal") { teardownTerminal(); return; }
-
-  const mod = await ensureFrankenTerm();
-  const rendererPlan = terminalSurfaceRendererPlan({ hasRendererModule: Boolean(mod), hasTerminal: Boolean(state.terminal), terminalSessionId: state.terminalSessionId, sessionId: sessionPlan.sessionId, terminalFallbackActive: state.terminalFallbackActive });
-  if (rendererPlan.type === "activate_snapshot_fallback") {
-    return activateTerminalSurfaceFallback(rendererPlan, terminalSurfaceRuntime);
-  }
-  if (rendererPlan.type === "reuse_terminal") {
-    return reuseTerminalSurface(rendererPlan, terminalSurfaceRuntime);
-  }
-  return initializeTerminalSurface(mod, sessionPlan.sessionId, rendererPlan, terminalSurfaceRuntime);
 }
 
 function teardownTerminal() {
@@ -2441,16 +2359,6 @@ function feedTerminalBytes(bytes) {
   syncTerminalFallbackFromLiveFrame();
   scheduleRender();
   scheduleTerminalPaintProbe();
-  return true;
-}
-
-function syncTerminalFallbackFromLiveFrame() {
-  const canReadLiveText = state.terminalFallbackActive && state.terminal;
-  const plan = terminalLiveFrameFallbackPlan({ terminalFallbackActive: state.terminalFallbackActive, hasTerminal: Boolean(state.terminal), liveText: canReadLiveText ? terminalMirrorTextFromRenderer() : "", existingFallbackText: el.terminalFallback.textContent });
-  if (!plan.update) {
-    return false;
-  }
-  updateTerminalFallbackText(plan.text);
   return true;
 }
 

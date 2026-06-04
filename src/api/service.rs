@@ -1351,17 +1351,41 @@ fn apply_group_membership_update(
     add: Vec<String>,
     remove: Vec<String>,
 ) {
-    for group in remove {
-        let delta = memberships.groups.entry(group).or_default();
-        delta.include_paths.remove(path);
-        delta.exclude_paths.insert(path.to_string());
-    }
-    for group in add {
-        let delta = memberships.groups.entry(group).or_default();
-        delta.exclude_paths.remove(path);
-        delta.include_paths.insert(path.to_string());
-    }
+    apply_group_membership_removes(memberships, path, remove);
+    apply_group_membership_adds(memberships, path, add);
     prune_empty_group_deltas(memberships);
+}
+
+fn apply_group_membership_removes(
+    memberships: &mut DirGroupMemberships,
+    path: &str,
+    groups: Vec<String>,
+) {
+    for group in groups {
+        apply_group_membership_remove(memberships, path, group);
+    }
+}
+
+fn apply_group_membership_adds(
+    memberships: &mut DirGroupMemberships,
+    path: &str,
+    groups: Vec<String>,
+) {
+    for group in groups {
+        apply_group_membership_add(memberships, path, group);
+    }
+}
+
+fn apply_group_membership_remove(memberships: &mut DirGroupMemberships, path: &str, group: String) {
+    let delta = memberships.groups.entry(group).or_default();
+    delta.include_paths.remove(path);
+    delta.exclude_paths.insert(path.to_string());
+}
+
+fn apply_group_membership_add(memberships: &mut DirGroupMemberships, path: &str, group: String) {
+    let delta = memberships.groups.entry(group).or_default();
+    delta.exclude_paths.remove(path);
+    delta.include_paths.insert(path.to_string());
 }
 
 async fn list_group_dir_response(
@@ -2929,6 +2953,76 @@ mod tests {
         let backend = memberships.groups.get("backend").expect("backend delta");
         assert!(backend.exclude_paths.contains(path));
         assert!(!backend.include_paths.contains(path));
+    }
+
+    #[test]
+    fn apply_group_membership_update_records_remove_as_exclusion() {
+        let path = "/tmp/repo";
+        let mut memberships = DirGroupMemberships::default();
+        memberships
+            .groups
+            .entry("backend".to_string())
+            .or_default()
+            .include_paths
+            .insert(path.to_string());
+
+        apply_group_membership_update(
+            &mut memberships,
+            path,
+            Vec::new(),
+            vec!["backend".to_string()],
+        );
+
+        let backend = memberships.groups.get("backend").expect("backend delta");
+        assert!(!backend.include_paths.contains(path));
+        assert!(backend.exclude_paths.contains(path));
+    }
+
+    #[test]
+    fn apply_group_membership_update_records_add_as_inclusion() {
+        let path = "/tmp/repo";
+        let mut memberships = DirGroupMemberships::default();
+        memberships
+            .groups
+            .entry("frontend".to_string())
+            .or_default()
+            .exclude_paths
+            .insert(path.to_string());
+
+        apply_group_membership_update(
+            &mut memberships,
+            path,
+            vec!["frontend".to_string()],
+            Vec::new(),
+        );
+
+        let frontend = memberships.groups.get("frontend").expect("frontend delta");
+        assert!(frontend.include_paths.contains(path));
+        assert!(!frontend.exclude_paths.contains(path));
+    }
+
+    #[test]
+    fn apply_group_membership_update_prunes_empty_stale_deltas() {
+        let path = "/tmp/repo";
+        let mut memberships = DirGroupMemberships::default();
+        memberships
+            .groups
+            .insert("stale".to_string(), Default::default());
+
+        apply_group_membership_update(
+            &mut memberships,
+            path,
+            vec!["frontend".to_string()],
+            Vec::new(),
+        );
+
+        assert!(!memberships.groups.contains_key("stale"));
+        assert!(memberships
+            .groups
+            .get("frontend")
+            .expect("frontend delta")
+            .include_paths
+            .contains(path));
     }
 
     fn test_group_config(

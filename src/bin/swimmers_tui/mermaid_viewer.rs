@@ -21,6 +21,25 @@ pub(super) struct MermaidCacheEntry {
     artifact: Option<MermaidArtifactResponse>,
 }
 
+#[derive(Clone, Debug)]
+struct PlanTabContentSource {
+    session_id: String,
+    schema_path: Option<String>,
+    disk_only: bool,
+    inline_content: Option<String>,
+}
+
+impl PlanTabContentSource {
+    fn from_viewer(viewer: &MermaidViewerState, tab: DomainPlanTab) -> Self {
+        Self {
+            session_id: viewer.session_id.clone(),
+            schema_path: viewer.path.clone(),
+            disk_only: viewer.disk_only,
+            inline_content: viewer.inline_plan_files.get(&tab).cloned(),
+        }
+    }
+}
+
 impl<C: TuiApi> App<C> {
     fn refresh_mermaid_viewer_from_cache(&mut self) {
         if let FishBowlMode::Mermaid(viewer) = &mut self.fish_bowl_mode {
@@ -368,67 +387,107 @@ impl<C: TuiApi> App<C> {
     }
 
     pub(crate) fn switch_plan_tab(&mut self, tab: DomainPlanTab) {
-        let is_valid = match &self.fish_bowl_mode {
-            FishBowlMode::Mermaid(viewer) => {
-                viewer
-                    .plan_tabs
-                    .as_ref()
-                    .is_some_and(|tabs| tabs.contains(&tab))
-                    && viewer.active_tab != tab
-            }
-            FishBowlMode::Aquarium => false,
-        };
-        if !is_valid {
+        if !self.can_switch_plan_tab(tab) {
             return;
         }
 
-        if tab != DomainPlanTab::Schema {
-            let (session_id, schema_path, disk_only, inline_content) = match &self.fish_bowl_mode {
-                FishBowlMode::Mermaid(v) => (
-                    v.session_id.clone(),
-                    v.path.clone(),
-                    v.disk_only,
-                    v.inline_plan_files.get(&tab).cloned(),
-                ),
-                _ => return,
-            };
-            let result = if let Some(content) = inline_content {
-                Ok(PlanFileResponse {
-                    session_id: session_id.clone(),
-                    name: tab.filename().to_string(),
-                    content: Some(content),
-                    error: None,
-                })
-            } else if disk_only {
-                read_plan_file_from_disk(schema_path.as_deref(), tab.filename())
-            } else {
-                self.runtime
-                    .block_on(self.client.fetch_plan_file(&session_id, tab.filename()))
-            };
-            let viewer = self.mermaid_viewer_mut().unwrap();
-            viewer.active_tab = tab;
-            viewer.plan_text_scroll = 0;
-            viewer.plan_text_lines.clear();
-            viewer.plan_text_cached_width = 0;
-            match result {
-                Ok(response) => {
-                    viewer.plan_text_content = response.content;
-                    if let Some(err) = response.error {
-                        self.set_message(format!("artifact file: {err}"));
-                    }
-                }
-                Err(err) => {
-                    viewer.plan_text_content = None;
-                    self.set_message(format!("artifact file fetch failed: {err}"));
-                }
-            }
+        match tab {
+            DomainPlanTab::Schema => self.activate_schema_plan_tab(),
+            _ => self.activate_text_plan_tab(tab),
+        }
+    }
+
+    fn can_switch_plan_tab(&self, tab: DomainPlanTab) -> bool {
+        match &self.fish_bowl_mode {
+            FishBowlMode::Mermaid(viewer) => Self::viewer_can_switch_plan_tab(viewer, tab),
+            FishBowlMode::Aquarium => false,
+        }
+    }
+
+    fn viewer_can_switch_plan_tab(viewer: &MermaidViewerState, tab: DomainPlanTab) -> bool {
+        viewer
+            .plan_tabs
+            .as_ref()
+            .is_some_and(|tabs| tabs.contains(&tab))
+            && viewer.active_tab != tab
+    }
+
+    fn activate_schema_plan_tab(&mut self) {
+        let Some(viewer) = self.mermaid_viewer_mut() else {
+            return;
+        };
+        viewer.active_tab = DomainPlanTab::Schema;
+        viewer.plan_text_content = None;
+        viewer.plan_text_lines.clear();
+        viewer.plan_text_scroll = 0;
+        viewer.plan_text_cached_width = 0;
+        viewer.invalidate_viewport_cache();
+    }
+
+    fn activate_text_plan_tab(&mut self, tab: DomainPlanTab) {
+        let Some(result) = self.fetch_text_plan_tab(tab) else {
+            return;
+        };
+        let Some(viewer) = self.mermaid_viewer_mut() else {
+            return;
+        };
+        if let Some(message) = Self::apply_text_plan_tab_result(viewer, tab, result) {
+            self.set_message(message);
+        }
+    }
+
+    fn fetch_text_plan_tab(
+        &mut self,
+        tab: DomainPlanTab,
+    ) -> Option<Result<PlanFileResponse, String>> {
+        let source = self.text_plan_tab_source(tab)?;
+        let PlanTabContentSource {
+            session_id,
+            schema_path,
+            disk_only,
+            inline_content,
+        } = source;
+
+        Some(if let Some(content) = inline_content {
+            Ok(PlanFileResponse {
+                session_id,
+                name: tab.filename().to_string(),
+                content: Some(content),
+                error: None,
+            })
+        } else if disk_only {
+            read_plan_file_from_disk(schema_path.as_deref(), tab.filename())
         } else {
-            let viewer = self.mermaid_viewer_mut().unwrap();
-            viewer.active_tab = DomainPlanTab::Schema;
-            viewer.plan_text_content = None;
-            viewer.plan_text_lines.clear();
-            viewer.plan_text_scroll = 0;
-            viewer.plan_text_cached_width = 0;
+            self.runtime
+                .block_on(self.client.fetch_plan_file(&session_id, tab.filename()))
+        })
+    }
+
+    fn text_plan_tab_source(&self, tab: DomainPlanTab) -> Option<PlanTabContentSource> {
+        match &self.fish_bowl_mode {
+            FishBowlMode::Mermaid(viewer) => Some(PlanTabContentSource::from_viewer(viewer, tab)),
+            FishBowlMode::Aquarium => None,
+        }
+    }
+
+    fn apply_text_plan_tab_result(
+        viewer: &mut MermaidViewerState,
+        tab: DomainPlanTab,
+        result: Result<PlanFileResponse, String>,
+    ) -> Option<String> {
+        viewer.active_tab = tab;
+        viewer.plan_text_scroll = 0;
+        viewer.plan_text_lines.clear();
+        viewer.plan_text_cached_width = 0;
+        match result {
+            Ok(response) => {
+                viewer.plan_text_content = response.content;
+                response.error.map(|err| format!("artifact file: {err}"))
+            }
+            Err(err) => {
+                viewer.plan_text_content = None;
+                Some(format!("artifact file fetch failed: {err}"))
+            }
         }
     }
 

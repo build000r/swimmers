@@ -80,58 +80,19 @@ impl ScrollGuard {
         let now = Instant::now();
         let mut output = Vec::new();
 
-        // Recent input from swimmers -> this redraw is expected, pass through.
-        // `checked_duration_since` keeps us safe if the monotonic clock ever
-        // appears to move backwards (NTP step, suspend/resume on some
-        // platforms): treat that case as "still inside the grace window"
-        // rather than panicking on Instant subtraction.
-        if let Some(last_input) = self.last_input_time {
-            let elapsed = now
-                .checked_duration_since(last_input)
-                .unwrap_or(Duration::ZERO);
-            if elapsed < Duration::from_millis(INPUT_GRACE_MS) {
-                if let Some(buffered) = self.force_flush() {
-                    output.push(buffered);
-                }
-                output.push(ScrollOutputChunk::new(data.to_vec(), false));
-                return output;
-            }
+        if self.is_inside_input_grace(now) {
+            self.flush_into(&mut output);
+            output.push(ScrollOutputChunk::new(data.to_vec(), false));
+            return output;
         }
 
-        // If the coalescing window expired while output keeps streaming, flush
-        // on the next chunk so rendering keeps progressing even without timer
-        // wakeups winning the select race.
-        if self.buffer.is_some()
-            && self
-                .flush_deadline
-                .map(|deadline| now >= deadline)
-                .unwrap_or(true)
-        {
-            if let Some(buffered) = self.force_flush() {
-                output.push(buffered);
-            }
-        }
+        self.flush_if_deadline_expired(now, &mut output);
 
-        // Count cursor-positioning sequences as a proxy for "full-screen redraw".
-        let text = String::from_utf8_lossy(data);
-        let pos_count = self.cursor_pos_re.find_iter(&text).count();
-
-        if pos_count >= CURSOR_POS_THRESHOLD {
-            // Likely a scroll-triggered redraw from the other client -- coalesce.
-            // Keep a full byte stream inside the coalescing window so split
-            // escape sequences are not corrupted.
-            if let Some(buffered) = self.buffer.as_mut() {
-                buffered.extend_from_slice(data);
-            } else {
-                self.buffer = Some(data.to_vec());
-                self.flush_deadline = Some(now + Duration::from_millis(COALESCE_MS));
-            }
+        if self.is_redraw(data) {
+            self.buffer_redraw(data, now);
             // Nothing to emit yet.
         } else {
-            // Normal output -- flush pending buffer, then emit immediately.
-            if let Some(buffered) = self.force_flush() {
-                output.push(buffered);
-            }
+            self.flush_into(&mut output);
             output.push(ScrollOutputChunk::new(data.to_vec(), false));
         }
 
@@ -158,6 +119,53 @@ impl ScrollGuard {
     }
 
     // --- Private helpers ---
+
+    fn is_inside_input_grace(&self, now: Instant) -> bool {
+        self.last_input_time
+            .map(|last_input| {
+                // `checked_duration_since` keeps us safe if the monotonic clock
+                // ever appears to move backwards: treat that as still inside
+                // the grace window rather than panicking on Instant subtraction.
+                now.checked_duration_since(last_input)
+                    .unwrap_or(Duration::ZERO)
+                    < Duration::from_millis(INPUT_GRACE_MS)
+            })
+            .unwrap_or(false)
+    }
+
+    fn flush_if_deadline_expired(&mut self, now: Instant, output: &mut Vec<ScrollOutputChunk>) {
+        if self.buffer.is_some()
+            && self
+                .flush_deadline
+                .map(|deadline| now >= deadline)
+                .unwrap_or(true)
+        {
+            self.flush_into(output);
+        }
+    }
+
+    fn is_redraw(&self, data: &[u8]) -> bool {
+        // Count cursor-positioning sequences as a proxy for "full-screen redraw".
+        let text = String::from_utf8_lossy(data);
+        self.cursor_pos_re.find_iter(&text).count() >= CURSOR_POS_THRESHOLD
+    }
+
+    fn buffer_redraw(&mut self, data: &[u8], now: Instant) {
+        // Keep a full byte stream inside the coalescing window so split escape
+        // sequences are not corrupted.
+        if let Some(buffered) = self.buffer.as_mut() {
+            buffered.extend_from_slice(data);
+        } else {
+            self.buffer = Some(data.to_vec());
+            self.flush_deadline = Some(now + Duration::from_millis(COALESCE_MS));
+        }
+    }
+
+    fn flush_into(&mut self, output: &mut Vec<ScrollOutputChunk>) {
+        if let Some(buffered) = self.force_flush() {
+            output.push(buffered);
+        }
+    }
 
     /// Internal flush that clears both buffer and deadline.
     fn force_flush(&mut self) -> Option<ScrollOutputChunk> {
@@ -268,6 +276,15 @@ mod tests {
         let data = make_cursor_data(CURSOR_POS_THRESHOLD - 1);
         let result = guard.process(&data);
         assert_eq!(result.len(), 1);
+    }
+
+    #[test]
+    fn threshold_cursor_count_gets_buffered() {
+        let mut guard = ScrollGuard::new();
+        let data = make_cursor_data(CURSOR_POS_THRESHOLD);
+        let result = guard.process(&data);
+        assert!(result.is_empty(), "threshold cursor count should buffer");
+        assert!(guard.check_flush_deadline().is_some());
     }
 
     #[test]

@@ -1,7 +1,143 @@
 import {
+  terminalFallbackActivationPlan,
+  terminalFallbackTextScrollPlan,
+  terminalLiveFrameFallbackPlan,
+  terminalPendingByteBufferPlan,
   terminalSurfaceInitErrorPlan,
   terminalSurfacePostInitPlan,
+  terminalSurfaceRendererPlan,
+  terminalSurfaceSessionPlan,
 } from "./input_support.js";
+
+export function createTerminalSurfaceRuntimeHelpers(runtime) {
+  const { state, el } = runtime;
+
+  function clearPendingTerminalBytes() {
+    state.pendingTerminalByteChunks = [];
+    state.pendingTerminalByteLength = 0;
+  }
+
+  function bufferTerminalBytes(bytes) {
+    const isUint8Array = bytes instanceof Uint8Array;
+    const plan = terminalPendingByteBufferPlan({ isUint8Array, byteLength: isUint8Array ? bytes.byteLength : 0, pendingByteLength: state.pendingTerminalByteLength, pendingChunkByteLengths: state.pendingTerminalByteChunks.map((chunk) => chunk?.byteLength || 0), maxPendingBytes: runtime.maxPendingTerminalBytes });
+    if (!plan.accept) return false;
+    const copy = new Uint8Array(bytes);
+    state.pendingTerminalByteChunks.push(copy);
+    state.pendingTerminalByteLength += copy.byteLength;
+    for (let index = 0; index < plan.dropCount; index += 1) {
+      const dropped = state.pendingTerminalByteChunks.shift();
+      state.pendingTerminalByteLength -= dropped?.byteLength || 0;
+    }
+    runtime.setConnectionStatus(plan.status);
+    return true;
+  }
+
+  function flushPendingTerminalBytes() {
+    if (!state.terminal || !state.pendingTerminalByteChunks.length) {
+      return false;
+    }
+    const chunks = state.pendingTerminalByteChunks;
+    clearPendingTerminalBytes();
+    for (const chunk of chunks) {
+      runtime.feedTerminalBytes(chunk);
+    }
+    return true;
+  }
+
+  function setTerminalTextFallbackActive(active, options = {}) {
+    const hasCurrentSession = Boolean(runtime.currentSession());
+    const wasActive = state.terminalFallbackActive;
+    const nextActive = Boolean(active && hasCurrentSession);
+    const plan = terminalFallbackActivationPlan({ active, hasCurrentSession, wasActive, hasTerminal: Boolean(state.terminal), clearText: options.clearText !== false, nearBottom: nextActive && wasActive ? terminalFallbackIsNearBottom() : false });
+    state.terminalFallbackActive = plan.terminalFallbackActive;
+    el.terminalFallback.classList.toggle("hidden", plan.hidden);
+    el.terminalFallback.setAttribute("aria-hidden", plan.ariaHidden);
+    if (plan.updateAutoFollow) state.terminalFallbackAutoFollow = plan.autoFollow;
+    if (plan.clearText) el.terminalFallback.textContent = "";
+    if (plan.startSnapshotPolling) runtime.startSnapshotPolling();
+    if (plan.focusTerminal) runtime.focusTerminalInputSurface({ onlyIfSurfaceFocused: true, preventScroll: true });
+    if (plan.stopSnapshotPolling) runtime.stopSnapshotPolling();
+    runtime.syncTerminalStatusStrip();
+  }
+
+  function terminalFallbackIsNearBottom() {
+    const maxScrollTop = Math.max(0, el.terminalFallback.scrollHeight - el.terminalFallback.clientHeight);
+    return maxScrollTop - el.terminalFallback.scrollTop < 48;
+  }
+
+  function updateTerminalFallbackText(text) {
+    const previousScrollTop = el.terminalFallback.scrollTop;
+    const nearBottom = state.terminalFallbackAutoFollow ? false : terminalFallbackIsNearBottom();
+    const fallbackText = text || "";
+    el.terminalFallback.textContent = fallbackText;
+    const scrollPlan = terminalFallbackTextScrollPlan({ terminalFallbackAutoFollow: state.terminalFallbackAutoFollow, nearBottom, previousScrollTop, scrollHeight: el.terminalFallback.scrollHeight, clientHeight: el.terminalFallback.clientHeight });
+    el.terminalFallback.scrollTop = scrollPlan.scrollTop;
+    syncTerminalAccessibilityMirror(fallbackText);
+  }
+
+  function syncTerminalAccessibilityMirror(fallbackText = null) {
+    const mirrorText = typeof fallbackText === "string" ? fallbackText : terminalMirrorTextFromRenderer();
+    state.terminalMirrorText = mirrorText;
+    if (el.terminalA11yMirror) {
+      el.terminalA11yMirror.value = mirrorText;
+    }
+    if (runtime.terminalSupports("drainAccessibilityAnnouncements") && el.terminalAnnouncer) {
+      const announcements = state.terminal.drainAccessibilityAnnouncements();
+      if (Array.isArray(announcements) && announcements.length) {
+        el.terminalAnnouncer.textContent = announcements.join("\n");
+      }
+    }
+  }
+
+  function terminalMirrorTextFromRenderer() {
+    if (runtime.terminalSupports("screenReaderMirrorText")) {
+      return state.terminal.screenReaderMirrorText() || "";
+    }
+    if (runtime.terminalSupports("accessibilityDomSnapshot")) {
+      return state.terminal.accessibilityDomSnapshot()?.value || "";
+    }
+    return "";
+  }
+
+  function syncTerminalFallbackFromLiveFrame() {
+    const canReadLiveText = state.terminalFallbackActive && state.terminal;
+    const plan = terminalLiveFrameFallbackPlan({ terminalFallbackActive: state.terminalFallbackActive, hasTerminal: Boolean(state.terminal), liveText: canReadLiveText ? terminalMirrorTextFromRenderer() : "", existingFallbackText: el.terminalFallback.textContent });
+    if (!plan.update) {
+      return false;
+    }
+    updateTerminalFallbackText(plan.text);
+    return true;
+  }
+
+  async function setupTerminalSurface() {
+    runtime.stopSnapshotPolling();
+
+    const sessionPlan = terminalSurfaceSessionPlan({ session: runtime.currentSession() });
+    if (sessionPlan.type === "teardown_terminal") { runtime.teardownTerminal(); return; }
+
+    const mod = await runtime.ensureFrankenTerm();
+    const rendererPlan = terminalSurfaceRendererPlan({ hasRendererModule: Boolean(mod), hasTerminal: Boolean(state.terminal), terminalSessionId: state.terminalSessionId, sessionId: sessionPlan.sessionId, terminalFallbackActive: state.terminalFallbackActive });
+    if (rendererPlan.type === "activate_snapshot_fallback") {
+      return activateTerminalSurfaceFallback(rendererPlan, runtime);
+    }
+    if (rendererPlan.type === "reuse_terminal") {
+      return reuseTerminalSurface(rendererPlan, runtime);
+    }
+    return initializeTerminalSurface(mod, sessionPlan.sessionId, rendererPlan, runtime);
+  }
+
+  return {
+    clearPendingTerminalBytes,
+    bufferTerminalBytes,
+    flushPendingTerminalBytes,
+    setTerminalTextFallbackActive,
+    terminalFallbackIsNearBottom,
+    updateTerminalFallbackText,
+    syncTerminalAccessibilityMirror,
+    syncTerminalFallbackFromLiveFrame,
+    setupTerminalSurface,
+  };
+}
 
 export async function activateTerminalSurfaceFallback(plan, runtime) {
   runtime.teardownTerminal();

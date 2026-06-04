@@ -1743,6 +1743,123 @@ pub(crate) fn initial_request_layout(field: Rect) -> InitialRequestLayout {
     }
 }
 
+fn initial_request_title(group_context: Option<(&str, usize)>) -> &'static str {
+    if group_context.is_some() {
+        "send to school"
+    } else {
+        "initial request"
+    }
+}
+
+fn initial_request_context_line(
+    initial_request: &InitialRequestState,
+    layout: &InitialRequestLayout,
+    group_context: Option<(&str, usize)>,
+) -> String {
+    let line = if let Some((label, count)) = group_context {
+        format!("school: {} ({} sessions)", label, count)
+    } else if let Some(dirs) = initial_request.batch_dirs.as_ref() {
+        format!("batch: {} included dirs", dirs.len())
+    } else {
+        format!(
+            "cwd: {}",
+            shorten_path(
+                &initial_request.cwd,
+                layout.content.width.saturating_sub(5) as usize,
+            )
+        )
+    };
+    truncate_label(&line, layout.content.width as usize)
+}
+
+fn initial_request_hint(
+    initial_request: &InitialRequestState,
+    group_context: Option<(&str, usize)>,
+) -> String {
+    if group_context.is_some() {
+        format!("enter sends to school  {}  esc cancels", toggle_hint())
+    } else {
+        format!(
+            "enter creates hidden swimmer{}  {}  esc cancels",
+            if initial_request.batch_dirs.is_some() {
+                "s"
+            } else {
+                ""
+            },
+            toggle_hint()
+        )
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct InitialRequestInputRenderModel {
+    visible: String,
+    color: Color,
+    cursor_x: u16,
+}
+
+fn initial_request_input_render_model(
+    initial_request: &InitialRequestState,
+    layout: &InitialRequestLayout,
+) -> InitialRequestInputRenderModel {
+    let input_x = layout.content.x;
+    let available = layout.content.width.saturating_sub(3) as usize;
+    let (text, color) = if initial_request.value.is_empty() {
+        ("type initial request".to_string(), Color::DarkGrey)
+    } else {
+        (tail_text(&initial_request.value, available), Color::White)
+    };
+    let visible = truncate_label(&text, available);
+    let cursor_x = if initial_request.value.is_empty() {
+        input_x + 2
+    } else {
+        input_x + 2 + visible.chars().count() as u16
+    };
+
+    InitialRequestInputRenderModel {
+        visible,
+        color,
+        cursor_x,
+    }
+}
+
+fn render_initial_request_input(
+    renderer: &mut Renderer,
+    initial_request: &InitialRequestState,
+    layout: &InitialRequestLayout,
+) {
+    let input_x = layout.content.x;
+    renderer.draw_text(input_x, layout.input_y, "> ", Color::White);
+
+    let input = initial_request_input_render_model(initial_request, layout);
+    renderer.draw_text(input_x + 2, layout.input_y, &input.visible, input.color);
+    if input.cursor_x < layout.content.right() {
+        renderer.draw_char(input.cursor_x, layout.input_y, '|', Color::Yellow);
+    }
+}
+
+fn initial_request_voice_color(voice_state: &VoiceUiState) -> Color {
+    match voice_state {
+        VoiceUiState::Transcribing => Color::Yellow,
+        VoiceUiState::Recording | VoiceUiState::Failed(_) => Color::Red,
+        VoiceUiState::Unsupported => Color::DarkGrey,
+        VoiceUiState::Ready => Color::Cyan,
+    }
+}
+
+fn render_initial_request_voice_status(
+    renderer: &mut Renderer,
+    voice_state: &VoiceUiState,
+    layout: &InitialRequestLayout,
+) {
+    renderer.draw_text(
+        layout.content.x,
+        layout.content.y + 4,
+        &truncate_label(&voice_state.status_line(), layout.content.width as usize),
+        initial_request_voice_color(voice_state),
+    );
+}
+
 pub(crate) fn render_initial_request(
     renderer: &mut Renderer,
     initial_request: &InitialRequestState,
@@ -1756,81 +1873,24 @@ pub(crate) fn render_initial_request(
     renderer.draw_text(
         layout.content.x,
         layout.content.y,
-        if group_context.is_some() {
-            "send to school"
-        } else {
-            "initial request"
-        },
+        initial_request_title(group_context),
         Color::Cyan,
     );
-
-    let cwd_line = if let Some((label, count)) = group_context {
-        format!("school: {} ({} sessions)", label, count)
-    } else if let Some(dirs) = initial_request.batch_dirs.as_ref() {
-        format!("batch: {} included dirs", dirs.len())
-    } else {
-        format!(
-            "cwd: {}",
-            shorten_path(
-                &initial_request.cwd,
-                layout.content.width.saturating_sub(5) as usize,
-            )
-        )
-    };
     renderer.draw_text(
         layout.content.x,
         layout.content.y + 1,
-        &truncate_label(&cwd_line, layout.content.width as usize),
+        &initial_request_context_line(initial_request, &layout, group_context),
         Color::DarkGrey,
     );
     renderer.draw_text(
         layout.content.x,
         layout.content.y + 2,
-        &if group_context.is_some() {
-            format!("enter sends to school  {}  esc cancels", toggle_hint())
-        } else {
-            format!(
-                "enter creates hidden swimmer{}  {}  esc cancels",
-                if initial_request.batch_dirs.is_some() {
-                    "s"
-                } else {
-                    ""
-                },
-                toggle_hint()
-            )
-        },
+        &initial_request_hint(initial_request, group_context),
         Color::DarkGrey,
     );
 
-    let input_x = layout.content.x;
-    renderer.draw_text(input_x, layout.input_y, "> ", Color::White);
-    let available = layout.content.width.saturating_sub(3) as usize;
-    let (text, color) = if initial_request.value.is_empty() {
-        ("type initial request".to_string(), Color::DarkGrey)
-    } else {
-        (tail_text(&initial_request.value, available), Color::White)
-    };
-    let visible = truncate_label(&text, available);
-    renderer.draw_text(input_x + 2, layout.input_y, &visible, color);
-    let cursor_x = if initial_request.value.is_empty() {
-        input_x + 2
-    } else {
-        input_x + 2 + visible.chars().count() as u16
-    };
-    if cursor_x < layout.content.right() {
-        renderer.draw_char(cursor_x, layout.input_y, '|', Color::Yellow);
-    }
-    renderer.draw_text(
-        layout.content.x,
-        layout.content.y + 4,
-        &truncate_label(&voice_state.status_line(), layout.content.width as usize),
-        match voice_state {
-            VoiceUiState::Transcribing => Color::Yellow,
-            VoiceUiState::Recording | VoiceUiState::Failed(_) => Color::Red,
-            VoiceUiState::Unsupported => Color::DarkGrey,
-            VoiceUiState::Ready => Color::Cyan,
-        },
-    );
+    render_initial_request_input(renderer, initial_request, &layout);
+    render_initial_request_voice_status(renderer, voice_state, &layout);
 }
 
 #[cfg(test)]
@@ -1853,6 +1913,24 @@ mod tests {
                 y: 0,
                 width: 80,
                 height: 20,
+            }
+        }
+
+        fn initial_request_test_layout(width: u16) -> InitialRequestLayout {
+            InitialRequestLayout {
+                frame: Rect {
+                    x: 0,
+                    y: 0,
+                    width: width + 2,
+                    height: 7,
+                },
+                content: Rect {
+                    x: 1,
+                    y: 1,
+                    width,
+                    height: 5,
+                },
+                input_y: 4,
             }
         }
 
@@ -2136,6 +2214,115 @@ mod tests {
                     layout.first_entry_y
                 ),
                 PickerAction::ActivateEntry(0)
+            );
+        }
+
+        #[test]
+        fn initial_request_title_switches_for_group_context() {
+            assert_eq!(initial_request_title(None), "initial request");
+            assert_eq!(
+                initial_request_title(Some(("frontend", 3))),
+                "send to school"
+            );
+        }
+
+        #[test]
+        fn initial_request_context_line_preserves_context_priority_and_truncation() {
+            let narrow_layout = initial_request_test_layout(20);
+            let wide_layout = initial_request_test_layout(56);
+            let request = InitialRequestState::new("/fixture/projects/swimmers".to_string(), None);
+            let batch_request = InitialRequestState::new_batch(
+                vec!["/tmp/a".to_string(), "/tmp/b".to_string()],
+                None,
+            );
+
+            assert_eq!(
+                initial_request_context_line(
+                    &request,
+                    &narrow_layout,
+                    Some(("school-of-long-name", 7))
+                ),
+                "school: school-of-l~"
+            );
+            assert_eq!(
+                initial_request_context_line(&batch_request, &wide_layout, None),
+                "batch: 2 included dirs"
+            );
+            assert_eq!(
+                initial_request_context_line(&request, &narrow_layout, None),
+                "cwd: .../swimmers"
+            );
+        }
+
+        #[test]
+        fn initial_request_hint_preserves_toggle_text_and_batch_pluralization() {
+            let request = InitialRequestState::new("/tmp/swimmers".to_string(), None);
+            let batch_request = InitialRequestState::new_batch(
+                vec!["/tmp/a".to_string(), "/tmp/b".to_string()],
+                None,
+            );
+            let voice_hint = toggle_hint();
+
+            assert_eq!(
+                initial_request_hint(&request, None),
+                format!("enter creates hidden swimmer  {voice_hint}  esc cancels")
+            );
+            assert_eq!(
+                initial_request_hint(&batch_request, None),
+                format!("enter creates hidden swimmers  {voice_hint}  esc cancels")
+            );
+            assert_eq!(
+                initial_request_hint(&request, Some(("frontend", 3))),
+                format!("enter sends to school  {voice_hint}  esc cancels")
+            );
+        }
+
+        #[test]
+        fn initial_request_input_model_preserves_placeholder_tail_and_cursor() {
+            let layout = initial_request_test_layout(10);
+            let empty_request = InitialRequestState::new("/tmp/swimmers".to_string(), None);
+            let mut typed_request = empty_request.clone();
+            typed_request.value = "abcdefghijk".to_string();
+
+            assert_eq!(
+                initial_request_input_render_model(&empty_request, &layout),
+                InitialRequestInputRenderModel {
+                    visible: "type i~".to_string(),
+                    color: Color::DarkGrey,
+                    cursor_x: layout.content.x + 2,
+                }
+            );
+            assert_eq!(
+                initial_request_input_render_model(&typed_request, &layout),
+                InitialRequestInputRenderModel {
+                    visible: "efghijk".to_string(),
+                    color: Color::White,
+                    cursor_x: layout.content.x + 9,
+                }
+            );
+        }
+
+        #[test]
+        fn initial_request_voice_color_preserves_state_colors() {
+            assert_eq!(
+                initial_request_voice_color(&VoiceUiState::Transcribing),
+                Color::Yellow
+            );
+            assert_eq!(
+                initial_request_voice_color(&VoiceUiState::Recording),
+                Color::Red
+            );
+            assert_eq!(
+                initial_request_voice_color(&VoiceUiState::Failed("denied".to_string())),
+                Color::Red
+            );
+            assert_eq!(
+                initial_request_voice_color(&VoiceUiState::Unsupported),
+                Color::DarkGrey
+            );
+            assert_eq!(
+                initial_request_voice_color(&VoiceUiState::Ready),
+                Color::Cyan
             );
         }
     }

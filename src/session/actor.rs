@@ -32,7 +32,7 @@ use self::tmux_input::TmuxInputChunk;
 use self::tmux_input::{
     normalize_submit_line_text, send_tmux_input_chunks, send_tmux_submit_line,
     submit_line_fallback_input, tmux_input_chunks, write_and_flush_input,
-    write_input_counts_as_activity,
+    write_input_counts_as_activity, TmuxInputSendError,
 };
 
 const CWD_REFRESH_MIN_INTERVAL: Duration = Duration::from_millis(750);
@@ -645,6 +645,39 @@ fn build_spawned_session_actor(init: SpawnedSessionActorInit) -> SessionActor {
     }
 }
 
+async fn try_tmux_write_input(
+    tmux_name: String,
+    data: &[u8],
+) -> Option<Result<(), TmuxInputSendError>> {
+    let chunks = tmux_input_chunks(data)?;
+    Some(send_tmux_input_chunks(&tmux_name, &chunks).await)
+}
+
+fn tmux_write_input_result(
+    session_id: &str,
+    tmux_name: &str,
+    result: Result<(), TmuxInputSendError>,
+) -> Option<InputDeliveryResult> {
+    match result {
+        Ok(()) => Some(InputDeliveryResult::delivered("tmux_send_keys")),
+        Err(err) => tmux_write_input_error_result(session_id, tmux_name, err),
+    }
+}
+
+fn tmux_write_input_error_result(
+    session_id: &str,
+    tmux_name: &str,
+    err: TmuxInputSendError,
+) -> Option<InputDeliveryResult> {
+    warn!(
+        session_id = %session_id,
+        tmux_name = %tmux_name,
+        delivered_chunks = err.delivered_chunks,
+        "tmux send-keys input failed: {err}"
+    );
+    (err.delivered_chunks > 0).then(|| InputDeliveryResult::delivered("tmux_send_keys_partial"))
+}
+
 impl SessionActor {
     /// Spawn a new session actor. If `attach` is true, attaches to an existing
     /// tmux session; otherwise creates a new one.
@@ -889,40 +922,50 @@ impl SessionActor {
 
     async fn handle_write_input(&mut self, data: Vec<u8>, pty_closed: bool) -> InputDeliveryResult {
         if pty_closed {
-            debug!(session_id = %self.session_id, "ignoring write to exited PTY");
-            return InputDeliveryResult::failed("none", "session process has exited");
+            return self.closed_pty_write_input_result();
         }
 
-        if write_input_counts_as_activity(&data) {
+        self.accept_write_input(&data);
+        self.deliver_write_input(&data).await
+    }
+
+    fn closed_pty_write_input_result(&self) -> InputDeliveryResult {
+        debug!(session_id = %self.session_id, "ignoring write to exited PTY");
+        InputDeliveryResult::failed("none", "session process has exited")
+    }
+
+    fn accept_write_input(&mut self, data: &[u8]) {
+        self.record_write_input_activity(data);
+        self.update_last_skill_from_input(data);
+    }
+
+    fn record_write_input_activity(&mut self, data: &[u8]) {
+        if write_input_counts_as_activity(data) {
             self.scroll_guard.notify_input();
             let state_before = self.state_detector.state();
             let evidence_before = self.state_detector.state_evidence();
             self.state_detector.note_input();
             let _ = self.maybe_emit_state_change(state_before, evidence_before);
         }
-        self.update_last_skill_from_input(&data);
+    }
 
-        if let Some(chunks) = tmux_input_chunks(&data) {
-            match send_tmux_input_chunks(&self.tmux_name, &chunks).await {
-                Ok(()) => return InputDeliveryResult::delivered("tmux_send_keys"),
-                Err(err) => {
-                    warn!(
-                        session_id = %self.session_id,
-                        tmux_name = %self.tmux_name,
-                        delivered_chunks = err.delivered_chunks,
-                        "tmux send-keys input failed: {err}"
-                    );
-                    if err.delivered_chunks > 0 {
-                        return InputDeliveryResult::delivered("tmux_send_keys_partial");
-                    }
-                }
+    async fn deliver_write_input(&mut self, data: &[u8]) -> InputDeliveryResult {
+        let session_id = self.session_id.clone();
+        let tmux_name = self.tmux_name.clone();
+        if let Some(result) = try_tmux_write_input(tmux_name.clone(), data).await {
+            if let Some(delivery) = tmux_write_input_result(&session_id, &tmux_name, result) {
+                return delivery;
             }
         }
 
-        match write_and_flush_input(&mut self.writer, &data) {
+        self.write_raw_input(data, "PTY write error")
+    }
+
+    fn write_raw_input(&mut self, data: &[u8], error_label: &'static str) -> InputDeliveryResult {
+        match write_and_flush_input(&mut self.writer, data) {
             Ok(()) => InputDeliveryResult::delivered("pty_write"),
             Err(e) => {
-                error!(session_id = %self.session_id, "PTY write error: {}", e);
+                error!(session_id = %self.session_id, "{}: {}", error_label, e);
                 InputDeliveryResult::failed("pty_write", e.to_string())
             }
         }
@@ -4338,6 +4381,18 @@ fi
         }
     }
 
+    struct FailingWriter;
+
+    impl Write for FailingWriter {
+        fn write(&mut self, _buf: &[u8]) -> io::Result<usize> {
+            Err(io::Error::new(io::ErrorKind::BrokenPipe, "writer failed"))
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
     fn set_tracking_writer(actor: &mut SessionActor) -> Arc<Mutex<TrackingWriterState>> {
         let state = Arc::new(Mutex::new(TrackingWriterState::default()));
         actor.writer = Box::new(TrackingWriter {
@@ -4366,11 +4421,17 @@ fi
         let writer_state = set_tracking_writer(&mut actor);
         let mut rx = actor.event_tx.subscribe();
 
-        actor.handle_write_input(b"hello\r".to_vec(), true).await;
+        let result = actor.handle_write_input(b"hello\r".to_vec(), true).await;
 
         let writer_state = writer_state
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
+        assert!(!result.delivered);
+        assert_eq!(result.method, "none");
+        assert_eq!(
+            result.message.as_deref(),
+            Some("session process has exited")
+        );
         assert!(writer_state.writes.is_empty());
         assert_eq!(writer_state.flushes, 0);
         assert_eq!(actor.state_detector.state(), SessionState::Idle);
@@ -4394,11 +4455,14 @@ exit 0
         let writer_state = set_tracking_writer(&mut actor);
         let mut rx = actor.event_tx.subscribe();
 
-        actor.handle_write_input(b"hello\r".to_vec(), false).await;
+        let result = actor.handle_write_input(b"hello\r".to_vec(), false).await;
 
         let writer_state = writer_state
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
+        assert!(result.delivered);
+        assert_eq!(result.method, "tmux_send_keys");
+        assert_eq!(result.message, None);
         assert!(writer_state.writes.is_empty());
         assert_eq!(writer_state.flushes, 0);
         assert_eq!(actor.state_detector.state(), SessionState::Busy);
@@ -4432,11 +4496,14 @@ exit 1
         let mut actor = test_actor();
         let writer_state = set_tracking_writer(&mut actor);
 
-        actor.handle_write_input(b"hello\r".to_vec(), false).await;
+        let result = actor.handle_write_input(b"hello\r".to_vec(), false).await;
 
         let writer_state = writer_state
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
+        assert!(result.delivered);
+        assert_eq!(result.method, "pty_write");
+        assert_eq!(result.message, None);
         assert_eq!(writer_state.writes, b"hello\r");
         assert_eq!(writer_state.flushes, 1);
         assert_eq!(actor.state_detector.state(), SessionState::Busy);
@@ -4464,11 +4531,14 @@ esac
         let mut actor = test_actor();
         let writer_state = set_tracking_writer(&mut actor);
 
-        actor.handle_write_input(b"hello\r".to_vec(), false).await;
+        let result = actor.handle_write_input(b"hello\r".to_vec(), false).await;
 
         let writer_state = writer_state
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
+        assert!(result.delivered);
+        assert_eq!(result.method, "tmux_send_keys_partial");
+        assert_eq!(result.message, None);
         assert!(writer_state.writes.is_empty());
         assert_eq!(writer_state.flushes, 0);
 
@@ -4485,13 +4555,29 @@ esac
         let mut actor = test_actor();
         let writer_state = set_tracking_writer(&mut actor);
 
-        actor.handle_write_input(b"abc\t".to_vec(), false).await;
+        let result = actor.handle_write_input(b"abc\t".to_vec(), false).await;
 
         let writer_state = writer_state
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
+        assert!(result.delivered);
+        assert_eq!(result.method, "pty_write");
+        assert_eq!(result.message, None);
         assert_eq!(writer_state.writes, b"abc\t");
         assert_eq!(writer_state.flushes, 1);
+        assert_eq!(actor.state_detector.state(), SessionState::Busy);
+    }
+
+    #[tokio::test]
+    async fn handle_write_input_reports_raw_writer_errors_as_pty_write() {
+        let mut actor = test_actor();
+        actor.writer = Box::new(FailingWriter);
+
+        let result = actor.handle_write_input(b"abc\t".to_vec(), false).await;
+
+        assert!(!result.delivered);
+        assert_eq!(result.method, "pty_write");
+        assert_eq!(result.message.as_deref(), Some("writer failed"));
         assert_eq!(actor.state_detector.state(), SessionState::Busy);
     }
 
