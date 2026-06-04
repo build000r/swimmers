@@ -133,6 +133,7 @@ import {
   surfaceSession as buildSurfaceSession,
 } from "./surface_model.js";
 import { createApiClient } from "./api_client.js";
+import { createSessionPersistenceController } from "./session_persistence.js";
 
 const boot = window.__SWIMMERS_BOOT__ ?? {
   franken_term_available: false,
@@ -328,6 +329,24 @@ const {
 } = createApiClient({
   getToken: () => state.token,
   fetchImpl: (...args) => fetch(...args),
+});
+
+const {
+  normalizeSessionId,
+  persistSelectedSession,
+  setFollowPublishedSelection,
+  syncUrlState,
+} = createSessionPersistenceController({
+  state,
+  windowRef: window,
+  documentRef: document,
+  storage: localStorage,
+  sessionStorageKey: SESSION_STORAGE_KEY,
+  normalizeSessionId: normalizeTrogdorSessionId,
+  resetAgentContextForSession,
+  resetWorkbenchWidgetsForSession,
+  closeTrogdorAtlasForTerminal,
+  renderHudSurface,
 });
 
 const el = {
@@ -781,60 +800,6 @@ function persistToken(token) {
   } else {
     localStorage.removeItem(TOKEN_STORAGE_KEY);
   }
-}
-
-function normalizeSessionId(sessionId) {
-  return normalizeTrogdorSessionId(sessionId);
-}
-
-function syncUrlState() {
-  const url = new URL(window.location.href);
-  const publishedRoute = window.location.pathname === "/selected";
-  url.searchParams.delete("token");
-  if (state.followPublishedSelection) {
-    if (publishedRoute) {
-      url.searchParams.delete("follow");
-    } else {
-      url.searchParams.set("follow", "published");
-    }
-    url.searchParams.delete("session");
-  } else if (state.selectedSessionId) {
-    url.searchParams.delete("follow");
-    url.searchParams.set("session", state.selectedSessionId);
-  } else {
-    url.searchParams.delete("follow");
-    url.searchParams.delete("session");
-  }
-  window.history.replaceState({}, "", url);
-}
-
-function persistSelectedSession(sessionId, options = {}) {
-  const normalized = normalizeSessionId(sessionId);
-  const previous = state.selectedSessionId;
-  state.selectedSessionId = normalized;
-  if (previous !== normalized) {
-    resetAgentContextForSession(normalized);
-    resetWorkbenchWidgetsForSession(normalized);
-  }
-  if (normalized) {
-    localStorage.setItem(SESSION_STORAGE_KEY, normalized);
-    closeTrogdorAtlasForTerminal();
-  } else {
-    localStorage.removeItem(SESSION_STORAGE_KEY);
-  }
-
-  if (options.syncUrl ?? true) {
-    syncUrlState();
-  }
-}
-
-function setFollowPublishedSelection(enabled, options = {}) {
-  state.followPublishedSelection = Boolean(enabled);
-  document.body.classList.toggle("following-published", state.followPublishedSelection);
-  if (!options.skipUrlSync) {
-    syncUrlState();
-  }
-  renderHudSurface();
 }
 
 function terminalZoomSupported() {

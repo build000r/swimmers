@@ -29,6 +29,7 @@ use crate::types::{clamp_terminal_resize, opcodes, ControlEvent, SessionSummary}
 
 const APP_JS_ROUTE: &str = "/app.js";
 const API_CLIENT_JS_ROUTE: &str = "/api_client.js";
+const SESSION_PERSISTENCE_JS_ROUTE: &str = "/session_persistence.js";
 const APP_EVENT_BINDINGS_JS_ROUTE: &str = "/app_event_bindings.js";
 const TROGDOR_EVENT_BINDINGS_JS_ROUTE: &str = "/trogdor_event_bindings.js";
 const RENDERED_SURFACE_JS_ROUTE: &str = "/rendered_surface.js";
@@ -107,6 +108,7 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route(PUBLISHED_VIEW_ROUTE, get(selected_index))
         .route(APP_JS_ROUTE, get(app_js))
         .route(API_CLIENT_JS_ROUTE, get(api_client_js))
+        .route(SESSION_PERSISTENCE_JS_ROUTE, get(session_persistence_js))
         .route(APP_EVENT_BINDINGS_JS_ROUTE, get(app_event_bindings_js))
         .route(
             TROGDOR_EVENT_BINDINGS_JS_ROUTE,
@@ -667,6 +669,13 @@ async fn app_js() -> Response {
 
 async fn api_client_js() -> Response {
     javascript_asset("src/web/api_client.js", include_str!("api_client.js"))
+}
+
+async fn session_persistence_js() -> Response {
+    javascript_asset(
+        "src/web/session_persistence.js",
+        include_str!("session_persistence.js"),
+    )
 }
 
 async fn app_event_bindings_js() -> Response {
@@ -2766,9 +2775,19 @@ mod tests {
         let assets = [
             (APP_JS_ROUTE, app_js().await, "from \"./api_client.js\""),
             (
+                APP_JS_ROUTE,
+                app_js().await,
+                "from \"./session_persistence.js\"",
+            ),
+            (
                 API_CLIENT_JS_ROUTE,
                 api_client_js().await,
                 "export function createApiClient",
+            ),
+            (
+                SESSION_PERSISTENCE_JS_ROUTE,
+                session_persistence_js().await,
+                "export function createSessionPersistenceController",
             ),
             (
                 APP_JS_ROUTE,

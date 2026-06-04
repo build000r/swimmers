@@ -162,59 +162,106 @@ fn support_for_host_with_script_resolver(
     resolve_script_path: impl FnOnce() -> Result<PathBuf>,
     app_unavailable_reason: Option<String>,
 ) -> NativeDesktopStatusResponse {
-    let mut response = NativeDesktopStatusResponse {
-        supported: false,
+    let reason = native_desktop_support_reason(
+        host,
+        app,
+        is_macos,
+        resolve_script_path,
+        app_unavailable_reason,
+    );
+    native_desktop_status_response(app, reason)
+}
+
+fn native_desktop_status_response(
+    app: NativeDesktopApp,
+    reason: Option<String>,
+) -> NativeDesktopStatusResponse {
+    NativeDesktopStatusResponse {
+        supported: reason.is_none(),
         platform: Some(std::env::consts::OS.to_string()),
         app_id: Some(app),
         ghostty_mode: None,
         app: Some(app.display_name().to_string()),
-        reason: None,
-    };
-
-    if !is_macos {
-        response.reason = Some(format!(
-            "native {} control is only supported on macOS",
-            app.display_name()
-        ));
-        return response;
+        reason,
     }
+}
 
-    if !host_is_loopback(host) {
-        response.reason = Some(format!(
-            "native {} control is only available from localhost",
-            app.display_name()
-        ));
-        return response;
-    }
+fn native_desktop_support_reason(
+    host: &str,
+    app: NativeDesktopApp,
+    is_macos: bool,
+    resolve_script_path: impl FnOnce() -> Result<PathBuf>,
+    app_unavailable_reason: Option<String>,
+) -> Option<String> {
+    native_desktop_support_result(
+        host,
+        app,
+        is_macos,
+        resolve_script_path,
+        app_unavailable_reason,
+    )
+    .err()
+}
 
-    let script_path = match resolve_script_path() {
-        Ok(path) => path,
-        Err(err) => {
-            response.reason = Some(format!(
-                "native {} script unavailable: {err}",
-                app.display_name()
-            ));
-            return response;
-        }
-    };
+fn native_desktop_support_result(
+    host: &str,
+    app: NativeDesktopApp,
+    is_macos: bool,
+    resolve_script_path: impl FnOnce() -> Result<PathBuf>,
+    app_unavailable_reason: Option<String>,
+) -> std::result::Result<(), String> {
+    native_desktop_platform_support(app, is_macos)?;
+    native_desktop_host_support(host, app)?;
+    native_desktop_script_support(app, resolve_script_path)?;
+    app_unavailable_reason.map_or(Ok(()), Err)
+}
 
-    if !script_path.exists() {
-        response.reason = Some(format!(
-            "native {} script missing: {}",
-            app.display_name(),
-            script_path.display()
-        ));
-        return response;
-    }
+fn native_desktop_platform_support(
+    app: NativeDesktopApp,
+    is_macos: bool,
+) -> std::result::Result<(), String> {
+    native_desktop_platform_reason(app, is_macos).map_or(Ok(()), Err)
+}
 
-    if let Some(reason) = app_unavailable_reason {
-        response.reason = Some(reason);
-        return response;
-    }
+fn native_desktop_platform_reason(app: NativeDesktopApp, is_macos: bool) -> Option<String> {
+    (!is_macos).then_some(format!(
+        "native {} control is only supported on macOS",
+        app.display_name()
+    ))
+}
 
-    response.supported = true;
-    response.reason = None;
-    response
+fn native_desktop_host_support(
+    host: &str,
+    app: NativeDesktopApp,
+) -> std::result::Result<(), String> {
+    native_desktop_host_reason(host, app).map_or(Ok(()), Err)
+}
+
+fn native_desktop_host_reason(host: &str, app: NativeDesktopApp) -> Option<String> {
+    (!host_is_loopback(host)).then_some(format!(
+        "native {} control is only available from localhost",
+        app.display_name()
+    ))
+}
+
+fn native_desktop_script_support(
+    app: NativeDesktopApp,
+    resolve_script_path: impl FnOnce() -> Result<PathBuf>,
+) -> std::result::Result<(), String> {
+    let script_path = resolve_script_path()
+        .map_err(|err| format!("native {} script unavailable: {err}", app.display_name()))?;
+    native_desktop_missing_script_reason(app, &script_path).map_or(Ok(()), Err)
+}
+
+fn native_desktop_missing_script_reason(
+    app: NativeDesktopApp,
+    script_path: &Path,
+) -> Option<String> {
+    (!script_path.exists()).then_some(format!(
+        "native {} script missing: {}",
+        app.display_name(),
+        script_path.display()
+    ))
 }
 
 pub async fn open_native_session(
@@ -1734,6 +1781,62 @@ mod tests {
             .as_deref()
             .unwrap_or_default()
             .contains("Ghostty 1.2.3 is installed"));
+    }
+
+    #[test]
+    fn support_for_host_with_marks_loopback_host_supported_when_script_exists() {
+        let temp = tempdir().unwrap();
+        let script_path = temp.path().join("iterm-focus.scpt");
+        std::fs::write(&script_path, "").unwrap();
+
+        let response = support_for_host_with(
+            "127.0.0.1:3210",
+            NativeDesktopApp::Iterm,
+            true,
+            &script_path,
+            None,
+        );
+
+        assert!(response.supported);
+        assert_eq!(response.platform.as_deref(), Some(std::env::consts::OS));
+        assert_eq!(response.app_id, Some(NativeDesktopApp::Iterm));
+        assert_eq!(response.ghostty_mode, None);
+        assert_eq!(response.app.as_deref(), Some("iTerm"));
+        assert_eq!(response.reason, None);
+    }
+
+    #[test]
+    fn support_for_host_with_reports_resolver_error() {
+        let response = support_for_host_with_script_resolver(
+            "localhost:3210",
+            NativeDesktopApp::Iterm,
+            true,
+            || Err(anyhow!("permission denied")),
+            None,
+        );
+
+        assert!(!response.supported);
+        assert_eq!(
+            response.reason.as_deref(),
+            Some("native iTerm script unavailable: permission denied")
+        );
+    }
+
+    #[test]
+    fn support_for_host_with_reports_non_macos_before_resolving_script() {
+        let response = support_for_host_with_script_resolver(
+            "example.com:3210",
+            NativeDesktopApp::Ghostty,
+            false,
+            || -> Result<PathBuf> { panic!("script resolver should not run on unsupported OS") },
+            Some("Ghostty unavailable".to_string()),
+        );
+
+        assert!(!response.supported);
+        assert_eq!(
+            response.reason.as_deref(),
+            Some("native Ghostty control is only supported on macOS")
+        );
     }
 
     #[test]

@@ -187,6 +187,51 @@ fn push_group_once(groups: &mut Vec<String>, group: &str) {
     }
 }
 
+fn picker_move_selection_is_noop(selection: PickerSelection, visible: &[usize]) -> bool {
+    visible.is_empty() && matches!(selection, PickerSelection::SpawnHere)
+}
+
+fn picker_moved_selection(
+    selection: PickerSelection,
+    delta: isize,
+    visible: &[usize],
+) -> PickerSelection {
+    let current_pos = picker_selection_visible_position(selection, visible);
+    let next_pos = clamped_picker_selection_position(current_pos, delta, visible.len());
+    picker_selection_for_visible_position(next_pos, visible)
+}
+
+fn picker_selection_visible_position(selection: PickerSelection, visible: &[usize]) -> isize {
+    match selection {
+        PickerSelection::SpawnHere => 0,
+        PickerSelection::Entry(index) => picker_entry_visible_position(index, visible).unwrap_or(0),
+    }
+}
+
+fn picker_entry_visible_position(index: usize, visible: &[usize]) -> Option<isize> {
+    visible
+        .iter()
+        .position(|candidate| *candidate == index)
+        .map(|pos| pos as isize + 1)
+}
+
+fn clamped_picker_selection_position(
+    current_pos: isize,
+    delta: isize,
+    visible_entry_count: usize,
+) -> isize {
+    (current_pos + delta).clamp(0, visible_entry_count as isize)
+}
+
+fn picker_selection_for_visible_position(position: isize, visible: &[usize]) -> PickerSelection {
+    position
+        .checked_sub(1)
+        .and_then(|entry_pos| usize::try_from(entry_pos).ok())
+        .and_then(|entry_pos| visible.get(entry_pos).copied())
+        .map(PickerSelection::Entry)
+        .unwrap_or(PickerSelection::SpawnHere)
+}
+
 impl PickerState {
     pub(crate) fn new(
         anchor_x: u16,
@@ -522,25 +567,11 @@ impl PickerState {
 
     pub(crate) fn move_selection(&mut self, delta: isize, visible_rows: usize) {
         let visible = self.visible_entries();
-        if visible.is_empty() && matches!(self.selection, PickerSelection::SpawnHere) {
+        if picker_move_selection_is_noop(self.selection, &visible) {
             return;
         }
 
-        let total = visible.len() as isize + 1;
-        let current_pos = match self.selection {
-            PickerSelection::SpawnHere => 0_isize,
-            PickerSelection::Entry(index) => visible
-                .iter()
-                .position(|i| *i == index)
-                .map(|pos| pos as isize + 1)
-                .unwrap_or(0),
-        };
-        let next_pos = (current_pos + delta).clamp(0, total.saturating_sub(1));
-        self.selection = if next_pos == 0 {
-            PickerSelection::SpawnHere
-        } else {
-            PickerSelection::Entry(visible[(next_pos - 1) as usize])
-        };
+        self.selection = picker_moved_selection(self.selection, delta, &visible);
         self.ensure_selection_visible(visible_rows);
     }
 
@@ -2115,6 +2146,19 @@ mod tests {
             )
         }
 
+        fn move_selection_entry(name: &str) -> DirEntry {
+            apply_response_entry(name, &format!("/tmp/projects/{name}"))
+        }
+
+        fn move_selection_picker(names: &[&str]) -> PickerState {
+            apply_response_picker(
+                names
+                    .iter()
+                    .map(|name| move_selection_entry(name))
+                    .collect(),
+            )
+        }
+
         fn apply_response_dir_list(entries: Vec<DirEntry>) -> DirListResponse {
             DirListResponse {
                 path: "/tmp/next".to_string(),
@@ -2261,6 +2305,57 @@ mod tests {
             assert_eq!(picker.selection, PickerSelection::SpawnHere);
             assert_eq!(picker.scroll, 0);
             assert!(picker.batch_excluded_paths.is_empty());
+        }
+
+        #[test]
+        fn move_selection_keeps_empty_visible_spawn_here_as_noop() {
+            let mut picker = move_selection_picker(&[]);
+            picker.selection = PickerSelection::SpawnHere;
+            picker.scroll = 7;
+
+            picker.move_selection(1, 3);
+
+            assert_eq!(picker.selection, PickerSelection::SpawnHere);
+            assert_eq!(picker.scroll, 7);
+        }
+
+        #[test]
+        fn move_selection_clamps_to_spawn_here_and_last_visible_entry() {
+            let mut picker = move_selection_picker(&["alpha", "beta", "gamma"]);
+
+            picker.move_selection(99, 3);
+
+            assert_eq!(picker.selection, PickerSelection::Entry(2));
+
+            picker.move_selection(-99, 3);
+
+            assert_eq!(picker.selection, PickerSelection::SpawnHere);
+        }
+
+        #[test]
+        fn move_selection_falls_back_to_spawn_here_when_selection_is_filtered_out() {
+            let mut picker = move_selection_picker(&["alpha", "beta"]);
+            picker.selection = PickerSelection::Entry(1);
+            picker.scroll = 4;
+            picker.search = "alpha".to_string();
+
+            picker.move_selection(0, 3);
+
+            assert_eq!(picker.selection, PickerSelection::SpawnHere);
+            assert_eq!(picker.scroll, 0);
+        }
+
+        #[test]
+        fn move_selection_maps_visible_position_to_raw_entry_and_scrolls_to_it() {
+            let mut picker = move_selection_picker(&["alpha", "beta", "alpine", "gamma"]);
+            picker.search = "al".to_string();
+            picker.selection = PickerSelection::Entry(0);
+            picker.scroll = 0;
+
+            picker.move_selection(1, 1);
+
+            assert_eq!(picker.selection, PickerSelection::Entry(2));
+            assert_eq!(picker.scroll, 1);
         }
 
         #[test]

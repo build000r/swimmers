@@ -1062,36 +1062,80 @@ pub(crate) fn mermaid_line_visible_in_state(
     match view_state {
         MermaidViewState::Outline => line.outline_eligible,
         MermaidViewState::L1 | MermaidViewState::L2 | MermaidViewState::L3 => {
-            let Some(detail_level) = view_state.detail_level() else {
-                tracing::warn!(
-                    ?view_state,
-                    "Mermaid detail state was missing a detail level; hiding line"
-                );
-                return false;
-            };
-            line.kind.min_detail_level() <= detail_level
+            mermaid_line_visible_in_detail_state(line, view_state)
         }
-        MermaidViewState::ErEntities => line.kind == MermaidSemanticKind::NodeSummary,
-        MermaidViewState::ErKeys => {
-            line.kind == MermaidSemanticKind::NodeTitle
-                || (line.kind == MermaidSemanticKind::ErAttributeName
-                    && (line.text.contains(" PK") || line.text.contains(" FK")))
-        }
-        MermaidViewState::ErColumns => {
-            matches!(
-                line.kind,
-                MermaidSemanticKind::NodeTitle | MermaidSemanticKind::ErAttributeName
-            )
-        }
-        MermaidViewState::ErSchema => {
-            matches!(
-                line.kind,
-                MermaidSemanticKind::NodeTitle
-                    | MermaidSemanticKind::ErAttributeName
-                    | MermaidSemanticKind::ErAttributeType
-            )
-        }
+        MermaidViewState::ErEntities
+        | MermaidViewState::ErKeys
+        | MermaidViewState::ErColumns
+        | MermaidViewState::ErSchema => mermaid_line_visible_in_er_state(line, view_state),
     }
+}
+
+fn mermaid_line_visible_in_detail_state(
+    line: &MermaidSemanticLine,
+    view_state: MermaidViewState,
+) -> bool {
+    let Some(detail_level) = view_state.detail_level() else {
+        tracing::warn!(
+            ?view_state,
+            "Mermaid detail state was missing a detail level; hiding line"
+        );
+        return false;
+    };
+    mermaid_line_visible_at_detail_level(line.kind, detail_level)
+}
+
+fn mermaid_line_visible_at_detail_level(
+    kind: MermaidSemanticKind,
+    detail_level: MermaidDetailLevel,
+) -> bool {
+    kind.min_detail_level() <= detail_level
+}
+
+fn mermaid_line_visible_in_er_state(
+    line: &MermaidSemanticLine,
+    view_state: MermaidViewState,
+) -> bool {
+    match view_state {
+        MermaidViewState::ErEntities => mermaid_line_visible_for_er_entities(line.kind),
+        MermaidViewState::ErKeys => mermaid_line_visible_for_er_keys(line),
+        MermaidViewState::ErColumns => mermaid_line_visible_for_er_columns(line.kind),
+        MermaidViewState::ErSchema => mermaid_line_visible_for_er_schema(line.kind),
+        MermaidViewState::Outline
+        | MermaidViewState::L1
+        | MermaidViewState::L2
+        | MermaidViewState::L3 => false,
+    }
+}
+
+fn mermaid_line_visible_for_er_entities(kind: MermaidSemanticKind) -> bool {
+    kind == MermaidSemanticKind::NodeSummary
+}
+
+fn mermaid_line_visible_for_er_keys(line: &MermaidSemanticLine) -> bool {
+    line.kind == MermaidSemanticKind::NodeTitle
+        || (line.kind == MermaidSemanticKind::ErAttributeName
+            && mermaid_er_attribute_name_is_key(&line.text))
+}
+
+fn mermaid_er_attribute_name_is_key(text: &str) -> bool {
+    text.contains(" PK") || text.contains(" FK")
+}
+
+fn mermaid_line_visible_for_er_columns(kind: MermaidSemanticKind) -> bool {
+    matches!(
+        kind,
+        MermaidSemanticKind::NodeTitle | MermaidSemanticKind::ErAttributeName
+    )
+}
+
+fn mermaid_line_visible_for_er_schema(kind: MermaidSemanticKind) -> bool {
+    matches!(
+        kind,
+        MermaidSemanticKind::NodeTitle
+            | MermaidSemanticKind::ErAttributeName
+            | MermaidSemanticKind::ErAttributeType
+    )
 }
 
 pub(crate) fn mermaid_compact_detail_hides_kind(
@@ -1469,4 +1513,136 @@ pub(crate) fn project_mermaid_semantic_lines(
 
     projected.sort_by_key(|line| (line.y, line.x));
     projected
+}
+
+#[cfg(test)]
+mod mermaid_line_visible_tests {
+    use super::*;
+
+    fn semantic_line(
+        kind: MermaidSemanticKind,
+        text: &str,
+        outline_eligible: bool,
+    ) -> MermaidSemanticLine {
+        MermaidSemanticLine {
+            text: text.to_string(),
+            diagram_x: 0.0,
+            diagram_y: 0.0,
+            anchor: MermaidTextAnchor::Start,
+            kind,
+            owner_key: "node:ACCOUNT".to_string(),
+            outline_eligible,
+            owner_width: 100.0,
+            owner_height: 40.0,
+        }
+    }
+
+    #[test]
+    fn mermaid_line_visible_outline_uses_outline_eligibility() {
+        let visible = semantic_line(MermaidSemanticKind::NodeSummary, "ACCOUNT", true);
+        let hidden = semantic_line(MermaidSemanticKind::NodeSummary, "ACCOUNT", false);
+
+        assert!(mermaid_line_visible_in_state(
+            &visible,
+            MermaidViewState::Outline
+        ));
+        assert!(!mermaid_line_visible_in_state(
+            &hidden,
+            MermaidViewState::Outline
+        ));
+    }
+
+    #[test]
+    fn mermaid_line_visible_detail_levels_follow_kind_thresholds() {
+        let summary = semantic_line(MermaidSemanticKind::NodeSummary, "ACCOUNT", false);
+        let title = semantic_line(MermaidSemanticKind::NodeTitle, "ACCOUNT", false);
+        let er_type = semantic_line(MermaidSemanticKind::ErAttributeType, "int", false);
+
+        assert!(mermaid_line_visible_in_state(
+            &summary,
+            MermaidViewState::L1
+        ));
+        assert!(!mermaid_line_visible_in_state(&title, MermaidViewState::L1));
+        assert!(mermaid_line_visible_in_state(&title, MermaidViewState::L2));
+        assert!(!mermaid_line_visible_in_state(
+            &er_type,
+            MermaidViewState::L2
+        ));
+        assert!(mermaid_line_visible_in_state(
+            &er_type,
+            MermaidViewState::L3
+        ));
+    }
+
+    #[test]
+    fn mermaid_line_visible_detail_state_without_detail_level_warns_and_hides() {
+        let line = semantic_line(MermaidSemanticKind::NodeSummary, "ACCOUNT", true);
+
+        assert!(!mermaid_line_visible_in_detail_state(
+            &line,
+            MermaidViewState::Outline
+        ));
+    }
+
+    #[test]
+    fn mermaid_line_visible_er_states_filter_lines_by_semantic_role() {
+        let entity = semantic_line(MermaidSemanticKind::NodeSummary, "ACCOUNT", true);
+        let title = semantic_line(MermaidSemanticKind::NodeTitle, "ACCOUNT", false);
+        let pk_name = semantic_line(MermaidSemanticKind::ErAttributeName, "id PK", false);
+        let fk_name = semantic_line(MermaidSemanticKind::ErAttributeName, "account_id FK", false);
+        let regular_name = semantic_line(MermaidSemanticKind::ErAttributeName, "status", false);
+        let er_type = semantic_line(MermaidSemanticKind::ErAttributeType, "varchar", false);
+
+        assert!(mermaid_line_visible_in_state(
+            &entity,
+            MermaidViewState::ErEntities
+        ));
+        assert!(!mermaid_line_visible_in_state(
+            &title,
+            MermaidViewState::ErEntities
+        ));
+
+        assert!(mermaid_line_visible_in_state(
+            &title,
+            MermaidViewState::ErKeys
+        ));
+        assert!(mermaid_line_visible_in_state(
+            &pk_name,
+            MermaidViewState::ErKeys
+        ));
+        assert!(mermaid_line_visible_in_state(
+            &fk_name,
+            MermaidViewState::ErKeys
+        ));
+        assert!(!mermaid_line_visible_in_state(
+            &regular_name,
+            MermaidViewState::ErKeys
+        ));
+
+        assert!(mermaid_line_visible_in_state(
+            &title,
+            MermaidViewState::ErColumns
+        ));
+        assert!(mermaid_line_visible_in_state(
+            &regular_name,
+            MermaidViewState::ErColumns
+        ));
+        assert!(!mermaid_line_visible_in_state(
+            &er_type,
+            MermaidViewState::ErColumns
+        ));
+
+        assert!(mermaid_line_visible_in_state(
+            &title,
+            MermaidViewState::ErSchema
+        ));
+        assert!(mermaid_line_visible_in_state(
+            &regular_name,
+            MermaidViewState::ErSchema
+        ));
+        assert!(mermaid_line_visible_in_state(
+            &er_type,
+            MermaidViewState::ErSchema
+        ));
+    }
 }

@@ -1,4 +1,5 @@
 use std::io::Write;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -27,6 +28,7 @@ const SHUTDOWN_REGISTRY_TIMEOUT: Duration = Duration::from_secs(5);
 const SHUTDOWN_FLUSH_TIMEOUT: Duration = Duration::from_secs(5);
 const SHUTDOWN_TASK_ABORT_TIMEOUT: Duration = Duration::from_secs(1);
 const EMBEDDED_DEFERRED_INIT_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
+const FALLBACK_DATA_DIR: &str = "./data/swimmers/";
 
 #[derive(Clone, Copy)]
 struct ShutdownTimeouts {
@@ -90,22 +92,32 @@ impl Drop for EmbeddedTuiShutdown {
     }
 }
 
-pub fn resolve_data_dir() -> std::path::PathBuf {
-    if let Ok(val) = std::env::var("SWIMMERS_DATA_DIR") {
-        if !val.is_empty() {
-            return std::path::PathBuf::from(val);
-        }
-    }
-    match dirs::data_dir() {
-        Some(base) => base.join("swimmers"),
-        None => {
-            tracing::warn!(
-                "dirs::data_dir() returned None (HOME may be unset); \
-                 falling back to ./data/swimmers/"
-            );
-            std::path::PathBuf::from("./data/swimmers/")
-        }
-    }
+pub fn resolve_data_dir() -> PathBuf {
+    data_dir_from_env(std::env::var("SWIMMERS_DATA_DIR")).unwrap_or_else(platform_data_dir)
+}
+
+fn data_dir_from_env(value: Result<String, std::env::VarError>) -> Option<PathBuf> {
+    value
+        .ok()
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+}
+
+fn platform_data_dir() -> PathBuf {
+    data_dir_from_platform_base(dirs::data_dir())
+}
+
+fn data_dir_from_platform_base(base: Option<PathBuf>) -> PathBuf {
+    base.map(|base| base.join("swimmers"))
+        .unwrap_or_else(fallback_data_dir)
+}
+
+fn fallback_data_dir() -> PathBuf {
+    tracing::warn!(
+        "dirs::data_dir() returned None (HOME may be unset); \
+         falling back to ./data/swimmers/"
+    );
+    PathBuf::from(FALLBACK_DATA_DIR)
 }
 
 fn log_startup_phase_complete(phase: &'static str, started: Instant) {
@@ -118,9 +130,7 @@ fn log_startup_phase_complete(phase: &'static str, started: Instant) {
     }
 }
 
-async fn open_file_store_for_startup(
-    data_dir: std::path::PathBuf,
-) -> anyhow::Result<Arc<FileStore>> {
+async fn open_file_store_for_startup(data_dir: PathBuf) -> anyhow::Result<Arc<FileStore>> {
     tokio::task::spawn_blocking(move || {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -796,6 +806,40 @@ mod tests {
     fn listener_addr_trims_whitespace_around_input() {
         assert_eq!(listener_addr("  127.0.0.1  ", 3210), "127.0.0.1:3210");
         assert_eq!(listener_addr("\t[::1]\n", 3210), "[::1]:3210");
+    }
+
+    #[test]
+    fn resolve_data_dir_env_value_wins_when_non_empty() {
+        let data_dir = PathBuf::from("custom-swimmers-data");
+
+        assert_eq!(
+            data_dir_from_env(Ok(data_dir.to_string_lossy().into_owned())),
+            Some(data_dir)
+        );
+    }
+
+    #[test]
+    fn resolve_data_dir_env_empty_or_missing_is_ignored() {
+        assert_eq!(data_dir_from_env(Ok(String::new())), None);
+        assert_eq!(data_dir_from_env(Err(std::env::VarError::NotPresent)), None);
+    }
+
+    #[test]
+    fn resolve_data_dir_platform_base_appends_swimmers() {
+        let platform_base = PathBuf::from("platform-data");
+
+        assert_eq!(
+            data_dir_from_platform_base(Some(platform_base.clone())),
+            platform_base.join("swimmers")
+        );
+    }
+
+    #[test]
+    fn resolve_data_dir_local_fallback_matches_documented_path() {
+        assert_eq!(
+            data_dir_from_platform_base(None),
+            PathBuf::from(FALLBACK_DATA_DIR)
+        );
     }
 
     #[test]

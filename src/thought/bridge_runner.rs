@@ -5,8 +5,8 @@ use tokio::sync::broadcast;
 use tokio::sync::RwLock;
 use tracing::{debug, info, warn};
 
-use crate::thought::emitter_client::EmitterClient;
-use crate::thought::health::BridgeHealthState;
+use crate::thought::emitter_client::{EmitterClient, EmitterClientError};
+use crate::thought::health::{BridgeHealthState, BridgeTiming};
 use crate::thought::loop_runner::SessionInfo;
 use crate::thought::loop_runner::SessionProvider;
 use crate::thought::protocol::{SyncResponse, SyncUpdate, ThoughtDeliveryState};
@@ -17,6 +17,8 @@ use crate::types::{ControlEvent, ThoughtSource, ThoughtUpdatePayload};
 // production startup uses `BridgeRunner::with_tick(...)`.
 #[allow(dead_code)]
 const DEFAULT_BRIDGE_TICK: Duration = Duration::from_secs(2);
+
+type DeliveryStateMap = std::collections::HashMap<String, ThoughtDeliveryState>;
 
 /// Consumes the tmux-scoped clawgs thought stream and applies accepted updates
 /// through the existing SessionProvider + control bus.
@@ -135,85 +137,229 @@ impl BridgeRunner {
             loop {
                 let runtime_config = self.runtime_config.read().await.clone();
                 let snapshots = provider.session_snapshots().await;
-                // Bound the delivery-watermark map to live sessions. It is seeded
-                // once before the loop and only ever inserted into, so without
-                // this prune it grows without bound across session churn (one
-                // entry per pane id the daemon ever reports). Dropping watermarks
-                // for sessions tmux no longer lists is safe: a stream restart
-                // re-establishes them via the emission_seq==1 path.
-                retain_live_delivery_states(&mut delivery_states, &snapshots);
-                record_sync_attempt_metrics(&metrics, &runtime_config, &snapshots);
-                let sync_started = Instant::now();
-                match tokio::time::timeout(
-                    timing.sync_timeout,
-                    emitter_client.next_sync_response(&runtime_config, &snapshots),
+                let sleep_for = run_bridge_sync_cycle(
+                    BridgeSyncCycle {
+                        provider: provider.as_ref(),
+                        event_tx: &self.event_tx,
+                        health: self.health.as_ref(),
+                        metrics: &metrics,
+                        timing,
+                    },
+                    &mut emitter_client,
+                    &mut delivery_states,
+                    &runtime_config,
+                    &snapshots,
                 )
-                .await
-                {
-                    Ok(Ok(response)) => {
-                        let sync_duration = sync_started.elapsed();
-                        let last_backend_error = response.last_backend_error.clone();
-                        self.health.record_success(last_backend_error.clone());
-                        if let Some(error) = last_backend_error {
-                            warn!(
-                                error = %error,
-                                "clawgs emit daemon sync reported backend error"
-                            );
-                        }
-                        apply_sync_response_with_metrics(
-                            provider.as_ref(),
-                            &self.event_tx,
-                            &mut delivery_states,
-                            &snapshots,
-                            response,
-                            &metrics,
-                            Some(sync_duration),
-                        );
-                        tokio::time::sleep(timing.tick).await;
-                    }
-                    Ok(Err(err)) => {
-                        record_bridge_model_error(&metrics, "error");
-                        let retry_delay = self.health.next_retry_delay_for_failure();
-                        let error_text = err.to_string();
-                        self.health.record_failure(error_text.clone(), retry_delay);
-                        warn!(
-                            error = %error_text,
-                            retry_delay_ms = retry_delay.as_millis() as u64,
-                            "clawgs emit daemon sync failed; backing off"
-                        );
-                        tokio::time::sleep(retry_delay).await;
-                    }
-                    Err(_) => {
-                        record_bridge_model_error(&metrics, "timeout");
-                        let retry_delay = self.health.next_retry_delay_for_failure();
-                        let mut error_text = format!(
-                            "clawgs emit daemon sync timed out after {}ms",
-                            timing.sync_timeout.as_millis()
-                        );
-                        if let Err(restart_err) = emitter_client.restart_daemon().await {
-                            error_text = format!("{error_text}; restart failed: {restart_err}");
-                        }
-                        self.health.record_failure(error_text.clone(), retry_delay);
-                        warn!(
-                            error = %error_text,
-                            retry_delay_ms = retry_delay.as_millis() as u64,
-                            "clawgs emit daemon sync timed out; backing off"
-                        );
-                        tokio::time::sleep(retry_delay).await;
-                    }
-                }
+                .await;
+                tokio::time::sleep(sleep_for).await;
             }
         })
+    }
+}
+
+struct BridgeSyncCycle<'a, P, M> {
+    provider: &'a P,
+    event_tx: &'a broadcast::Sender<ControlEvent>,
+    health: &'a BridgeHealthState,
+    metrics: &'a M,
+    timing: BridgeTiming,
+}
+
+enum BridgeSyncOutcome {
+    Success {
+        response: SyncResponse,
+        duration: Duration,
+    },
+    Error(EmitterClientError),
+    Timeout,
+}
+
+enum BridgeFailureLog {
+    SyncError,
+    SyncTimeout,
+}
+
+async fn run_bridge_sync_cycle<P, M>(
+    cycle: BridgeSyncCycle<'_, P, M>,
+    emitter_client: &mut EmitterClient,
+    delivery_states: &mut DeliveryStateMap,
+    runtime_config: &ThoughtConfig,
+    snapshots: &[SessionInfo],
+) -> Duration
+where
+    P: SessionProvider,
+    M: ThoughtMetricRecorder,
+{
+    prepare_bridge_sync_cycle(delivery_states, cycle.metrics, runtime_config, snapshots);
+    let outcome =
+        await_bridge_sync_response(emitter_client, runtime_config, snapshots, cycle.timing).await;
+    handle_bridge_sync_outcome(cycle, emitter_client, delivery_states, snapshots, outcome).await
+}
+
+fn prepare_bridge_sync_cycle<M: ThoughtMetricRecorder>(
+    delivery_states: &mut DeliveryStateMap,
+    metrics: &M,
+    runtime_config: &ThoughtConfig,
+    snapshots: &[SessionInfo],
+) {
+    // Bound the delivery-watermark map to live sessions. It is seeded once
+    // before the loop and only ever inserted into, so without this prune it
+    // grows without bound across session churn (one entry per pane id the
+    // daemon ever reports). Dropping watermarks for sessions tmux no longer
+    // lists is safe: a stream restart re-establishes them via emission_seq==1.
+    retain_live_delivery_states(delivery_states, snapshots);
+    record_sync_attempt_metrics(metrics, runtime_config, snapshots);
+}
+
+async fn await_bridge_sync_response(
+    emitter_client: &mut EmitterClient,
+    runtime_config: &ThoughtConfig,
+    snapshots: &[SessionInfo],
+    timing: BridgeTiming,
+) -> BridgeSyncOutcome {
+    let sync_started = Instant::now();
+    match tokio::time::timeout(
+        timing.sync_timeout,
+        emitter_client.next_sync_response(runtime_config, snapshots),
+    )
+    .await
+    {
+        Ok(Ok(response)) => BridgeSyncOutcome::Success {
+            response,
+            duration: sync_started.elapsed(),
+        },
+        Ok(Err(err)) => BridgeSyncOutcome::Error(err),
+        Err(_) => BridgeSyncOutcome::Timeout,
+    }
+}
+
+async fn handle_bridge_sync_outcome<P, M>(
+    cycle: BridgeSyncCycle<'_, P, M>,
+    emitter_client: &mut EmitterClient,
+    delivery_states: &mut DeliveryStateMap,
+    snapshots: &[SessionInfo],
+    outcome: BridgeSyncOutcome,
+) -> Duration
+where
+    P: SessionProvider,
+    M: ThoughtMetricRecorder,
+{
+    match outcome {
+        BridgeSyncOutcome::Success { response, duration } => {
+            record_successful_bridge_sync(&cycle, delivery_states, snapshots, response, duration)
+        }
+        BridgeSyncOutcome::Error(err) => record_bridge_sync_error(cycle.health, cycle.metrics, err),
+        BridgeSyncOutcome::Timeout => {
+            record_bridge_sync_timeout(cycle.health, cycle.metrics, cycle.timing, emitter_client)
+                .await
+        }
+    }
+}
+
+fn record_successful_bridge_sync<P, M>(
+    cycle: &BridgeSyncCycle<'_, P, M>,
+    delivery_states: &mut DeliveryStateMap,
+    snapshots: &[SessionInfo],
+    response: SyncResponse,
+    sync_duration: Duration,
+) -> Duration
+where
+    P: SessionProvider,
+    M: ThoughtMetricRecorder,
+{
+    let last_backend_error = response.last_backend_error.clone();
+    cycle.health.record_success(last_backend_error.clone());
+    if let Some(error) = last_backend_error {
+        warn!(
+            error = %error,
+            "clawgs emit daemon sync reported backend error"
+        );
+    }
+    apply_sync_response_with_metrics(
+        cycle.provider,
+        cycle.event_tx,
+        delivery_states,
+        snapshots,
+        response,
+        cycle.metrics,
+        Some(sync_duration),
+    );
+    cycle.timing.tick
+}
+
+fn record_bridge_sync_error<M: ThoughtMetricRecorder>(
+    health: &BridgeHealthState,
+    metrics: &M,
+    err: EmitterClientError,
+) -> Duration {
+    record_bridge_model_error(metrics, "error");
+    let retry_delay = health.next_retry_delay_for_failure();
+    let error_text = err.to_string();
+    record_bridge_failure(health, error_text, retry_delay, BridgeFailureLog::SyncError);
+    retry_delay
+}
+
+async fn record_bridge_sync_timeout<M: ThoughtMetricRecorder>(
+    health: &BridgeHealthState,
+    metrics: &M,
+    timing: BridgeTiming,
+    emitter_client: &mut EmitterClient,
+) -> Duration {
+    record_bridge_model_error(metrics, "timeout");
+    let retry_delay = health.next_retry_delay_for_failure();
+    let error_text = bridge_sync_timeout_error(emitter_client, timing.sync_timeout).await;
+    record_bridge_failure(
+        health,
+        error_text,
+        retry_delay,
+        BridgeFailureLog::SyncTimeout,
+    );
+    retry_delay
+}
+
+async fn bridge_sync_timeout_error(
+    emitter_client: &mut EmitterClient,
+    sync_timeout: Duration,
+) -> String {
+    let mut error_text = format!(
+        "clawgs emit daemon sync timed out after {}ms",
+        sync_timeout.as_millis()
+    );
+    if let Err(restart_err) = emitter_client.restart_daemon().await {
+        error_text = format!("{error_text}; restart failed: {restart_err}");
+    }
+    error_text
+}
+
+fn record_bridge_failure(
+    health: &BridgeHealthState,
+    error_text: String,
+    retry_delay: Duration,
+    log: BridgeFailureLog,
+) {
+    health.record_failure(error_text.clone(), retry_delay);
+    match log {
+        BridgeFailureLog::SyncError => {
+            warn!(
+                error = %error_text,
+                retry_delay_ms = retry_delay.as_millis() as u64,
+                "clawgs emit daemon sync failed; backing off"
+            );
+        }
+        BridgeFailureLog::SyncTimeout => {
+            warn!(
+                error = %error_text,
+                retry_delay_ms = retry_delay.as_millis() as u64,
+                "clawgs emit daemon sync timed out; backing off"
+            );
+        }
     }
 }
 
 /// Drop delivery watermarks for sessions that are no longer present in the
 /// latest snapshot set, keeping the long-lived map bounded by the live session
 /// count rather than the cumulative count of every session ever observed.
-fn retain_live_delivery_states(
-    delivery_states: &mut std::collections::HashMap<String, ThoughtDeliveryState>,
-    snapshots: &[SessionInfo],
-) {
+fn retain_live_delivery_states(delivery_states: &mut DeliveryStateMap, snapshots: &[SessionInfo]) {
     if delivery_states.is_empty() {
         return;
     }
@@ -226,7 +372,7 @@ fn retain_live_delivery_states(
 fn apply_sync_response<P: SessionProvider>(
     provider: &P,
     event_tx: &broadcast::Sender<ControlEvent>,
-    delivery_states: &mut std::collections::HashMap<String, ThoughtDeliveryState>,
+    delivery_states: &mut DeliveryStateMap,
     session_snapshots: &[SessionInfo],
     response: SyncResponse,
 ) {
@@ -244,7 +390,7 @@ fn apply_sync_response<P: SessionProvider>(
 fn apply_sync_response_with_metrics<P: SessionProvider, M: ThoughtMetricRecorder>(
     provider: &P,
     event_tx: &broadcast::Sender<ControlEvent>,
-    delivery_states: &mut std::collections::HashMap<String, ThoughtDeliveryState>,
+    delivery_states: &mut DeliveryStateMap,
     session_snapshots: &[SessionInfo],
     response: SyncResponse,
     metrics: &M,
@@ -494,7 +640,7 @@ fn should_apply_delivery_state(
 fn apply_update<P: SessionProvider>(
     provider: &P,
     event_tx: &broadcast::Sender<ControlEvent>,
-    delivery_states: &mut std::collections::HashMap<String, ThoughtDeliveryState>,
+    delivery_states: &mut DeliveryStateMap,
     prior_thoughts: &mut std::collections::HashMap<String, Option<String>>,
     batch_stream_instance_id: Option<&str>,
     update: SyncUpdate,
