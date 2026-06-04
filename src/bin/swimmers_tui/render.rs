@@ -607,27 +607,64 @@ fn trim_trailing_joiners(text: &mut String) {
     }
 }
 
-fn prefix_by_display_width(text: &str, max_cols: usize) -> String {
-    if max_cols == 0 {
-        return String::new();
+#[derive(Clone, Copy)]
+struct DisplayWidthBudget {
+    max_cols: usize,
+    used_cols: usize,
+}
+
+impl DisplayWidthBudget {
+    fn new(max_cols: usize) -> Self {
+        Self {
+            max_cols,
+            used_cols: 0,
+        }
     }
 
-    let mut out = String::new();
-    let mut used = 0usize;
-    for ch in text.chars() {
-        let ch_width = char_display_width(ch);
-        if ch_width == 0 {
-            if !out.is_empty() {
-                out.push(ch);
-            }
-            continue;
+    fn consume(&mut self, width: usize) -> bool {
+        if self.used_cols.saturating_add(width) > self.max_cols {
+            return false;
         }
-        if used.saturating_add(ch_width) > max_cols {
+        self.used_cols = self.used_cols.saturating_add(width);
+        true
+    }
+}
+
+fn collect_display_width_prefix(text: &str, mut budget: DisplayWidthBudget) -> String {
+    let mut out = String::new();
+    for ch in text.chars() {
+        if !push_display_width_prefix_char(&mut out, &mut budget, ch) {
             break;
         }
-        used = used.saturating_add(ch_width);
+    }
+    out
+}
+
+fn push_display_width_prefix_char(
+    out: &mut String,
+    budget: &mut DisplayWidthBudget,
+    ch: char,
+) -> bool {
+    let ch_width = char_display_width(ch);
+    if ch_width == 0 {
+        push_non_leading_zero_width_char(out, ch);
+        return true;
+    }
+    if !budget.consume(ch_width) {
+        return false;
+    }
+    out.push(ch);
+    true
+}
+
+fn push_non_leading_zero_width_char(out: &mut String, ch: char) {
+    if !out.is_empty() {
         out.push(ch);
     }
+}
+
+fn prefix_by_display_width(text: &str, max_cols: usize) -> String {
+    let mut out = collect_display_width_prefix(text, DisplayWidthBudget::new(max_cols));
     trim_trailing_joiners(&mut out);
     out
 }
@@ -998,6 +1035,31 @@ mod tests {
                 balls_theme_body_rows(kind, true, true),
                 BALLS_UNVERIFIED_BODY_ROWS,
                 "{kind:?} unverified floor rows"
+            );
+        }
+    }
+
+    #[test]
+    fn prefix_by_display_width_handles_mixed_width_and_zero_width_text() {
+        let cases = [
+            ("abcdef", 0, ""),
+            ("abcdef", 3, "abc"),
+            ("漢字a", 4, "漢字"),
+            ("漢字a", 5, "漢字a"),
+            ("a\u{0301}漢b", 3, "a\u{0301}漢"),
+            ("a\u{0301}漢b", 2, "a\u{0301}"),
+            ("\u{0301}a", 1, "a"),
+            ("漢\u{0301}a", 1, ""),
+            ("a\u{200d}b", 1, "a"),
+        ];
+
+        for (text, max_cols, expected) in cases {
+            let prefix = prefix_by_display_width(text, max_cols);
+
+            assert_eq!(prefix, expected, "{text:?} at {max_cols} cols");
+            assert!(
+                UnicodeWidthStr::width(prefix.as_str()) <= max_cols,
+                "{prefix:?} exceeded {max_cols} cols"
             );
         }
     }

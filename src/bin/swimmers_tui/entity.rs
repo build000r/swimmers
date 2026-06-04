@@ -430,6 +430,35 @@ pub(crate) enum RestAnchor {
     Top,
 }
 
+#[derive(Clone, Copy)]
+struct EntityTickMotion {
+    sprite: SpriteKind,
+    speed: f32,
+    max_x: f32,
+    max_y: f32,
+}
+
+impl EntityTickMotion {
+    fn new(sprite: SpriteKind, field: Rect) -> Option<Self> {
+        let speed = sprite.speed_scale();
+        if speed == 0.0 || field.width <= ENTITY_WIDTH || field.height <= ENTITY_HEIGHT {
+            return None;
+        }
+
+        Some(Self {
+            sprite,
+            speed,
+            max_x: field.width.saturating_sub(ENTITY_WIDTH) as f32,
+            max_y: field.height.saturating_sub(ENTITY_HEIGHT) as f32,
+        })
+    }
+
+    fn bobbed_y(self, swim_center_y: f32, tick: u64, bob_phase: f32) -> f32 {
+        let bob = ((tick as f32 * SWIM_BOB_RATE) + bob_phase).sin() * self.sprite.bob_amplitude();
+        (swim_center_y + bob).clamp(0.0, self.max_y)
+    }
+}
+
 #[derive(Clone)]
 pub(crate) struct SessionEntity {
     pub(crate) session: SessionSummary,
@@ -491,31 +520,13 @@ impl SessionEntity {
     }
 
     pub(crate) fn tick(&mut self, field: Rect, tick: u64) {
-        let sprite = self.sprite_kind();
-        let speed = sprite.speed_scale();
-        if speed == 0.0 || field.width <= ENTITY_WIDTH || field.height <= ENTITY_HEIGHT {
+        let Some(motion) = EntityTickMotion::new(self.sprite_kind(), field) else {
             return;
-        }
+        };
 
-        let max_y = field.height.saturating_sub(ENTITY_HEIGHT) as f32;
-
-        self.x = self
-            .swim_anchor_x
-            .clamp(0.0, field.width.saturating_sub(ENTITY_WIDTH) as f32);
-
-        let min_center = (self.swim_anchor_y - SWIM_DRIFT_LIMIT).max(0.0);
-        let max_center = (self.swim_anchor_y + SWIM_DRIFT_LIMIT).min(max_y);
-        self.swim_center_y += self.vy * speed * SWIM_VERTICAL_DRIFT;
-        if self.swim_center_y <= min_center {
-            self.swim_center_y = min_center;
-            self.vy = self.vy.abs();
-        } else if self.swim_center_y >= max_center {
-            self.swim_center_y = max_center;
-            self.vy = -self.vy.abs();
-        }
-
-        let bob = ((tick as f32 * SWIM_BOB_RATE) + self.bob_phase).sin() * sprite.bob_amplitude();
-        self.y = (self.swim_center_y + bob).clamp(0.0, max_y);
+        self.x = self.swim_anchor_x.clamp(0.0, motion.max_x);
+        self.advance_swim_center(motion);
+        self.y = motion.bobbed_y(self.swim_center_y, tick, self.bob_phase);
     }
 
     pub(crate) fn screen_rect(&self, field: Rect) -> Rect {
@@ -525,6 +536,46 @@ impl SessionEntity {
             width: ENTITY_WIDTH,
             height: ENTITY_HEIGHT,
         }
+    }
+
+    fn advance_swim_center(&mut self, motion: EntityTickMotion) {
+        let (min_center, max_center) = swim_center_bounds(self.swim_anchor_y, motion.max_y);
+        self.swim_center_y += self.vy * motion.speed * SWIM_VERTICAL_DRIFT;
+        match swim_center_boundary(self.swim_center_y, min_center, max_center) {
+            SwimCenterBoundary::Minimum => {
+                self.swim_center_y = min_center;
+                self.vy = self.vy.abs();
+            }
+            SwimCenterBoundary::Maximum => {
+                self.swim_center_y = max_center;
+                self.vy = -self.vy.abs();
+            }
+            SwimCenterBoundary::None => {}
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SwimCenterBoundary {
+    Minimum,
+    Maximum,
+    None,
+}
+
+fn swim_center_bounds(anchor_y: f32, max_y: f32) -> (f32, f32) {
+    (
+        (anchor_y - SWIM_DRIFT_LIMIT).max(0.0),
+        (anchor_y + SWIM_DRIFT_LIMIT).min(max_y),
+    )
+}
+
+fn swim_center_boundary(center_y: f32, min_center: f32, max_center: f32) -> SwimCenterBoundary {
+    if center_y <= min_center {
+        SwimCenterBoundary::Minimum
+    } else if center_y >= max_center {
+        SwimCenterBoundary::Maximum
+    } else {
+        SwimCenterBoundary::None
     }
 }
 
@@ -770,6 +821,13 @@ mod tests {
         }
     }
 
+    fn session_with_state(state: SessionState, rest_state: RestState) -> SessionSummary {
+        let mut session = test_session();
+        session.state = state;
+        session.rest_state = rest_state;
+        session
+    }
+
     fn entity_at(field: Rect, x: f32, y: f32) -> SessionEntity {
         let mut entity = SessionEntity::new(test_session(), field);
         entity.x = x;
@@ -780,6 +838,161 @@ mod tests {
         entity.swim_anchor_y = y;
         entity.swim_center_y = y;
         entity
+    }
+
+    fn motion_field() -> Rect {
+        Rect {
+            x: 0,
+            y: 0,
+            width: 40,
+            height: 20,
+        }
+    }
+
+    fn moving_entity_with_state(
+        field: Rect,
+        state: SessionState,
+        rest_state: RestState,
+    ) -> SessionEntity {
+        let mut entity = SessionEntity::new(session_with_state(state, rest_state), field);
+        entity.x = 2.0;
+        entity.y = 8.0;
+        entity.vy = 0.0;
+        entity.swim_anchor_x = 8.0;
+        entity.swim_anchor_y = 8.0;
+        entity.swim_center_y = 8.0;
+        entity.bob_phase = 0.0;
+        entity
+    }
+
+    fn motion_snapshot(entity: &SessionEntity) -> (f32, f32, f32, f32, f32) {
+        (
+            entity.x,
+            entity.y,
+            entity.vy,
+            entity.swim_anchor_x,
+            entity.swim_center_y,
+        )
+    }
+
+    #[test]
+    fn tick_bobs_free_swimming_states_and_clamps_horizontal_anchor() {
+        let field = motion_field();
+        let max_x = field.width.saturating_sub(ENTITY_WIDTH) as f32;
+
+        for (sprite, state, rest_state) in [
+            (SpriteKind::Active, SessionState::Idle, RestState::Active),
+            (SpriteKind::Busy, SessionState::Busy, RestState::Active),
+            (SpriteKind::Drowsy, SessionState::Idle, RestState::Drowsy),
+            (
+                SpriteKind::Attention,
+                SessionState::Attention,
+                RestState::Active,
+            ),
+        ] {
+            let mut entity = moving_entity_with_state(field, state, rest_state);
+            entity.swim_anchor_x = max_x + 3.0;
+
+            entity.tick(field, 20);
+
+            assert_eq!(entity.sprite_kind(), sprite);
+            assert_eq!(entity.x, max_x, "{sprite:?} should clamp to field width");
+            assert_eq!(entity.swim_center_y, 8.0);
+            assert!(entity.y > 8.0, "{sprite:?} should bob vertically");
+        }
+    }
+
+    #[test]
+    fn tick_leaves_sleeping_and_deep_sleep_entities_unchanged() {
+        let field = motion_field();
+
+        for (sprite, rest_state) in [
+            (SpriteKind::Sleeping, RestState::Sleeping),
+            (SpriteKind::DeepSleep, RestState::DeepSleep),
+        ] {
+            let mut entity = moving_entity_with_state(field, SessionState::Idle, rest_state);
+            entity.x = 99.0;
+            entity.y = 11.0;
+            entity.vy = 1.0;
+            entity.swim_anchor_x = 77.0;
+            entity.swim_center_y = 12.0;
+            let before = motion_snapshot(&entity);
+
+            entity.tick(field, 20);
+
+            assert_eq!(entity.sprite_kind(), sprite);
+            assert_eq!(
+                motion_snapshot(&entity),
+                before,
+                "{sprite:?} should be stationary"
+            );
+        }
+    }
+
+    #[test]
+    fn tick_leaves_active_entity_unchanged_when_field_cannot_fit_sprite() {
+        let field = motion_field();
+        for field in [
+            Rect {
+                width: ENTITY_WIDTH,
+                ..field
+            },
+            Rect {
+                height: ENTITY_HEIGHT,
+                ..field
+            },
+        ] {
+            let mut entity = moving_entity_with_state(field, SessionState::Idle, RestState::Active);
+            entity.swim_anchor_x = 30.0;
+            let before = motion_snapshot(&entity);
+
+            entity.tick(field, 20);
+
+            assert_eq!(motion_snapshot(&entity), before);
+        }
+    }
+
+    #[test]
+    fn tick_reverses_vertical_drift_at_swim_bounds() {
+        let field = motion_field();
+
+        let mut rising = moving_entity_with_state(field, SessionState::Idle, RestState::Active);
+        rising.swim_anchor_y = 5.0;
+        rising.swim_center_y = 4.01;
+        rising.vy = -1.0;
+        rising.tick(field, 0);
+        assert_eq!(rising.swim_center_y, 4.0);
+        assert_eq!(rising.vy, 1.0);
+        assert_eq!(rising.y, 4.0);
+
+        let mut sinking = moving_entity_with_state(field, SessionState::Idle, RestState::Active);
+        sinking.swim_anchor_y = 5.0;
+        sinking.swim_center_y = 5.99;
+        sinking.vy = 1.0;
+        sinking.tick(field, 0);
+        assert_eq!(sinking.swim_center_y, 6.0);
+        assert_eq!(sinking.vy, -1.0);
+        assert_eq!(sinking.y, 6.0);
+    }
+
+    #[test]
+    fn tick_clamps_bobbed_y_to_field_bounds() {
+        let field = motion_field();
+        let max_y = field.height.saturating_sub(ENTITY_HEIGHT) as f32;
+
+        let mut bottom = moving_entity_with_state(field, SessionState::Idle, RestState::Active);
+        bottom.swim_anchor_y = max_y;
+        bottom.swim_center_y = max_y;
+        bottom.bob_phase = TAU / 4.0;
+        bottom.tick(field, 0);
+        assert_eq!(bottom.y, max_y);
+
+        let mut top = moving_entity_with_state(field, SessionState::Idle, RestState::Active);
+        top.swim_anchor_y = 0.0;
+        top.swim_center_y = 0.0;
+        top.bob_phase = -TAU / 4.0;
+        top.tick(field, 0);
+        assert_eq!(top.y, 0.0);
     }
 
     #[test]

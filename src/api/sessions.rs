@@ -963,42 +963,76 @@ fn append_artifact_event(
     pinned: &mut SessionTimelinePinned,
     artifact: Option<&MermaidArtifactResponse>,
 ) {
-    let (summary, detail) = match artifact {
-        Some(artifact) if artifact.available => {
-            let plan_count = artifact.plan_files.as_ref().map_or(0, Vec::len);
-            let summary = if plan_count > 0 {
-                format!("{plan_count} plan files")
-            } else {
-                artifact
-                    .path
-                    .clone()
-                    .unwrap_or_else(|| "artifact available".to_string())
-            };
-            (summary, artifact.source.clone())
-        }
-        Some(artifact) => (
-            artifact
-                .error
-                .clone()
-                .unwrap_or_else(|| "artifact unavailable".to_string()),
-            None,
-        ),
-        None => ("artifact unavailable".to_string(), None),
-    };
+    let content = artifact_timeline_content(artifact);
     let event_id = builder.push(
         "artifact",
         "artifact",
         "mermaid-artifact",
         "Artifacts",
-        timeline_excerpt(&summary, 180),
-        detail.map(|detail| timeline_excerpt(&detail, 1200)),
+        timeline_excerpt(&content.summary, 180),
+        content.detail.map(|detail| timeline_excerpt(&detail, 1200)),
     );
     pinned.artifact = Some(pinned_item(
         "Artifacts",
-        summary,
+        content.summary,
         "mermaid-artifact",
         event_id,
     ));
+}
+
+struct ArtifactTimelineContent {
+    summary: String,
+    detail: Option<String>,
+}
+
+fn artifact_timeline_content(
+    artifact: Option<&MermaidArtifactResponse>,
+) -> ArtifactTimelineContent {
+    match artifact {
+        Some(artifact) if artifact.available => available_artifact_timeline_content(artifact),
+        Some(artifact) => unavailable_artifact_timeline_content(artifact),
+        None => artifact_unavailable_timeline_content(),
+    }
+}
+
+fn available_artifact_timeline_content(
+    artifact: &MermaidArtifactResponse,
+) -> ArtifactTimelineContent {
+    ArtifactTimelineContent {
+        summary: available_artifact_summary(artifact),
+        detail: artifact.source.clone(),
+    }
+}
+
+fn available_artifact_summary(artifact: &MermaidArtifactResponse) -> String {
+    let plan_count = artifact.plan_files.as_ref().map_or(0, Vec::len);
+    if plan_count > 0 {
+        format!("{plan_count} plan files")
+    } else {
+        artifact
+            .path
+            .clone()
+            .unwrap_or_else(|| "artifact available".to_string())
+    }
+}
+
+fn unavailable_artifact_timeline_content(
+    artifact: &MermaidArtifactResponse,
+) -> ArtifactTimelineContent {
+    ArtifactTimelineContent {
+        summary: artifact
+            .error
+            .clone()
+            .unwrap_or_else(|| "artifact unavailable".to_string()),
+        detail: None,
+    }
+}
+
+fn artifact_unavailable_timeline_content() -> ArtifactTimelineContent {
+    ArtifactTimelineContent {
+        summary: "artifact unavailable".to_string(),
+        detail: None,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -3486,6 +3520,126 @@ esac
             .any(|event| event["id"] == "context-unavailable"));
         assert!(events.iter().any(|event| event["kind"] == "diff"));
         assert!(events.iter().any(|event| event["kind"] == "artifact"));
+    }
+
+    fn artifact_response(
+        available: bool,
+        path: Option<&str>,
+        source: Option<&str>,
+        error: Option<&str>,
+        plan_files: Option<Vec<&str>>,
+    ) -> MermaidArtifactResponse {
+        MermaidArtifactResponse {
+            session_id: "sess-artifact".to_string(),
+            available,
+            path: path.map(str::to_string),
+            updated_at: None,
+            source: source.map(str::to_string),
+            error: error.map(str::to_string),
+            slice_name: None,
+            plan_files: plan_files.map(|files| files.into_iter().map(str::to_string).collect()),
+        }
+    }
+
+    fn appended_artifact_payload(
+        artifact: Option<&MermaidArtifactResponse>,
+    ) -> (SessionTimelineEvent, SessionTimelinePinnedItem) {
+        let mut builder = TimelineBuilder::default();
+        let mut pinned = SessionTimelinePinned::default();
+
+        append_artifact_event(&mut builder, &mut pinned, artifact);
+
+        assert_eq!(builder.events.len(), 1);
+        (
+            builder.events.remove(0),
+            pinned.artifact.expect("artifact pinned item"),
+        )
+    }
+
+    #[test]
+    fn append_artifact_event_preserves_event_shape_order_and_pinned_plan_summary() {
+        let artifact = artifact_response(
+            true,
+            Some("/tmp/project/docs/plan.mmd"),
+            Some("flowchart TD; A-->B"),
+            None,
+            Some(vec!["plan.md", "WORKGRAPH.md"]),
+        );
+
+        let (event, pinned) = appended_artifact_payload(Some(&artifact));
+
+        assert_eq!(event.id, "artifact");
+        assert_eq!(event.kind, "artifact");
+        assert_eq!(event.source, "mermaid-artifact");
+        assert_eq!(event.title, "Artifacts");
+        assert_eq!(event.summary, "2 plan files");
+        assert_eq!(event.detail.as_deref(), Some("flowchart TD; A-->B"));
+        assert_eq!(event.timestamp, None);
+        assert_eq!(event.order, Some(1));
+        assert_eq!(pinned.title, "Artifacts");
+        assert_eq!(pinned.summary, "2 plan files");
+        assert_eq!(pinned.source, "mermaid-artifact");
+        assert_eq!(pinned.event_id.as_deref(), Some("artifact"));
+    }
+
+    #[test]
+    fn append_artifact_event_uses_path_for_available_artifact_without_plan_files() {
+        let artifact = artifact_response(
+            true,
+            Some("/tmp/project/docs/plan.mmd"),
+            Some("flowchart TD; A-->B"),
+            None,
+            None,
+        );
+
+        let (event, pinned) = appended_artifact_payload(Some(&artifact));
+
+        assert_eq!(event.summary, "/tmp/project/docs/plan.mmd");
+        assert_eq!(event.detail.as_deref(), Some("flowchart TD; A-->B"));
+        assert_eq!(pinned.summary, "/tmp/project/docs/plan.mmd");
+    }
+
+    #[test]
+    fn append_artifact_event_uses_default_available_summary_without_path_or_plan_files() {
+        let artifact = artifact_response(true, None, None, None, None);
+
+        let (event, pinned) = appended_artifact_payload(Some(&artifact));
+
+        assert_eq!(event.summary, "artifact available");
+        assert_eq!(event.detail, None);
+        assert_eq!(pinned.summary, "artifact available");
+    }
+
+    #[test]
+    fn append_artifact_event_uses_error_for_unavailable_artifact() {
+        let artifact = artifact_response(
+            false,
+            None,
+            Some("ignored source"),
+            Some("no artifact"),
+            None,
+        );
+
+        let (event, pinned) = appended_artifact_payload(Some(&artifact));
+
+        assert_eq!(event.summary, "no artifact");
+        assert_eq!(event.detail, None);
+        assert_eq!(pinned.summary, "no artifact");
+    }
+
+    #[test]
+    fn append_artifact_event_uses_default_unavailable_summary_without_artifact_or_error() {
+        let artifact = artifact_response(false, None, None, None, None);
+
+        let (event, pinned) = appended_artifact_payload(Some(&artifact));
+        assert_eq!(event.summary, "artifact unavailable");
+        assert_eq!(event.detail, None);
+        assert_eq!(pinned.summary, "artifact unavailable");
+
+        let (missing_event, missing_pinned) = appended_artifact_payload(None);
+        assert_eq!(missing_event.summary, "artifact unavailable");
+        assert_eq!(missing_event.detail, None);
+        assert_eq!(missing_pinned.summary, "artifact unavailable");
     }
 
     #[tokio::test]

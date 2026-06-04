@@ -10,11 +10,11 @@ use crate::api::{remote_sessions, AppState};
 use crate::auth::{AuthInfo, AuthScope};
 use crate::types::{
     NativeAttentionGroupOpenRequest, NativeDesktopConfigRequest, NativeDesktopModeRequest,
-    NativeDesktopOpenRequest, NativeDesktopStatusResponse,
+    NativeDesktopOpenRequest, NativeDesktopOpenResponse, NativeDesktopStatusResponse,
 };
 use axum::extract::{ConnectInfo, State};
 use axum::http::StatusCode;
-use axum::response::IntoResponse;
+use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post, put};
 use axum::{Extension, Json, Router};
 use std::net::SocketAddr;
@@ -26,7 +26,7 @@ fn request_peer(ConnectInfo(addr): &ConnectInfo<SocketAddr>) -> String {
 
 fn reject_non_loopback_native_preference(
     ConnectInfo(addr): &ConnectInfo<SocketAddr>,
-) -> Option<axum::response::Response> {
+) -> Option<Response> {
     if addr.ip().is_loopback() {
         return None;
     }
@@ -44,11 +44,68 @@ async fn native_status_for_peer(
     native_status_for_host_service(state, &request_peer(connect_info)).await
 }
 
+fn require_native_write_scope(auth: &AuthInfo) -> Result<(), Response> {
+    auth.require_scope(AuthScope::SessionsWrite)
+}
+
+fn reject_remote_native_session(session_id: &str) -> Option<Response> {
+    if remote_sessions::split_remote_session_id(session_id).is_none() {
+        return None;
+    }
+
+    Some(api_error_msg(
+        &NATIVE_DESKTOP_UNAVAILABLE,
+        "remote sessions are visible locally, but native terminal handoff must be opened on the target host",
+    ))
+}
+
+fn native_open_session_id(body: &NativeDesktopOpenRequest) -> Result<&str, Response> {
+    if let Some(resp) = reject_remote_native_session(&body.session_id) {
+        return Err(resp);
+    }
+
+    Ok(&body.session_id)
+}
+
+async fn open_native_session_for_peer(
+    state: &Arc<AppState>,
+    connect_info: &ConnectInfo<SocketAddr>,
+    session_id: &str,
+) -> Result<NativeDesktopOpenResponse, NativeOpenServiceError> {
+    let peer = request_peer(connect_info);
+    open_native_session_for_host(state, &peer, session_id).await
+}
+
+fn native_handoff_response<T: serde::Serialize>(
+    result: Result<T, NativeOpenServiceError>,
+) -> Response {
+    match result {
+        Ok(result) => success_json(StatusCode::OK, &result),
+        Err(err) => native_open_error_response(err),
+    }
+}
+
+fn native_open_error_response(err: NativeOpenServiceError) -> Response {
+    match err {
+        NativeOpenServiceError::Unsupported { reason } => {
+            let msg = reason.unwrap_or_else(|| NATIVE_DESKTOP_UNAVAILABLE.default_message.into());
+            api_error_msg(&NATIVE_DESKTOP_UNAVAILABLE, msg)
+        }
+        NativeOpenServiceError::NoAttentionSessions => api_error_msg(
+            &NATIVE_OPEN_FAILED,
+            "no sessions are waiting for operator input",
+        ),
+        NativeOpenServiceError::SessionNotFound => api_error(&SESSION_NOT_FOUND),
+        NativeOpenServiceError::SessionExited => api_error(&SESSION_EXITED),
+        NativeOpenServiceError::Internal(err) => api_error_msg(&NATIVE_OPEN_FAILED, err),
+    }
+}
+
 async fn native_status(
     Extension(auth): Extension<AuthInfo>,
     State(state): State<Arc<AppState>>,
     connect_info: ConnectInfo<SocketAddr>,
-) -> Result<Json<NativeDesktopStatusResponse>, axum::response::Response> {
+) -> Result<Json<NativeDesktopStatusResponse>, Response> {
     auth.require_scope(AuthScope::SessionsRead)?;
     let status = native_status_for_peer(&state, &connect_info).await;
     Ok(Json(status))
@@ -103,33 +160,11 @@ async fn native_open(
     State(state): State<Arc<AppState>>,
     connect_info: ConnectInfo<SocketAddr>,
     Json(body): Json<NativeDesktopOpenRequest>,
-) -> impl IntoResponse {
-    if let Err(resp) = auth.require_scope(AuthScope::SessionsWrite) {
-        return resp;
-    }
-
-    if remote_sessions::split_remote_session_id(&body.session_id).is_some() {
-        return api_error_msg(
-            &NATIVE_DESKTOP_UNAVAILABLE,
-            "remote sessions are visible locally, but native terminal handoff must be opened on the target host",
-        );
-    }
-
-    let peer = request_peer(&connect_info);
-    match open_native_session_for_host(&state, &peer, &body.session_id).await {
-        Ok(result) => success_json(StatusCode::OK, &result),
-        Err(NativeOpenServiceError::Unsupported { reason }) => {
-            let msg = reason.unwrap_or_else(|| NATIVE_DESKTOP_UNAVAILABLE.default_message.into());
-            api_error_msg(&NATIVE_DESKTOP_UNAVAILABLE, msg)
-        }
-        Err(NativeOpenServiceError::NoAttentionSessions) => api_error_msg(
-            &NATIVE_OPEN_FAILED,
-            "no sessions are waiting for operator input",
-        ),
-        Err(NativeOpenServiceError::SessionNotFound) => api_error(&SESSION_NOT_FOUND),
-        Err(NativeOpenServiceError::SessionExited) => api_error(&SESSION_EXITED),
-        Err(NativeOpenServiceError::Internal(err)) => api_error_msg(&NATIVE_OPEN_FAILED, err),
-    }
+) -> Result<Response, Response> {
+    require_native_write_scope(&auth)?;
+    let session_id = native_open_session_id(&body)?;
+    let result = open_native_session_for_peer(&state, &connect_info, session_id).await;
+    Ok(native_handoff_response(result))
 }
 
 async fn native_open_attention_group(
@@ -137,26 +172,12 @@ async fn native_open_attention_group(
     State(state): State<Arc<AppState>>,
     connect_info: ConnectInfo<SocketAddr>,
     Json(body): Json<NativeAttentionGroupOpenRequest>,
-) -> impl IntoResponse {
-    if let Err(resp) = auth.require_scope(AuthScope::SessionsWrite) {
-        return resp;
-    }
+) -> Result<Response, Response> {
+    require_native_write_scope(&auth)?;
 
     let peer = request_peer(&connect_info);
-    match open_native_attention_group_for_host(&state, &peer, body).await {
-        Ok(result) => success_json(StatusCode::OK, &result),
-        Err(NativeOpenServiceError::Unsupported { reason }) => {
-            let msg = reason.unwrap_or_else(|| NATIVE_DESKTOP_UNAVAILABLE.default_message.into());
-            api_error_msg(&NATIVE_DESKTOP_UNAVAILABLE, msg)
-        }
-        Err(NativeOpenServiceError::NoAttentionSessions) => api_error_msg(
-            &NATIVE_OPEN_FAILED,
-            "no sessions are waiting for operator input",
-        ),
-        Err(NativeOpenServiceError::SessionNotFound) => api_error(&SESSION_NOT_FOUND),
-        Err(NativeOpenServiceError::SessionExited) => api_error(&SESSION_EXITED),
-        Err(NativeOpenServiceError::Internal(err)) => api_error_msg(&NATIVE_OPEN_FAILED, err),
-    }
+    let result = open_native_attention_group_for_host(&state, &peer, body).await;
+    Ok(native_handoff_response(result))
 }
 
 pub fn routes() -> Router<Arc<AppState>> {
@@ -175,7 +196,7 @@ pub fn routes() -> Router<Arc<AppState>> {
 mod tests {
     use super::*;
     use crate::api::PublishedSelectionState;
-    use crate::auth::OPERATOR_SCOPES;
+    use crate::auth::{OBSERVER_SCOPES, OPERATOR_SCOPES};
     use crate::config::Config;
     use crate::session::supervisor::SessionSupervisor;
     use crate::thought::protocol::SyncRequestSequence;
@@ -219,6 +240,46 @@ mod tests {
 
     fn remote_peer() -> ConnectInfo<SocketAddr> {
         ConnectInfo("100.101.1.2:3210".parse().expect("remote peer"))
+    }
+
+    #[tokio::test]
+    async fn native_open_requires_sessions_write_scope() {
+        let response = native_open(
+            Extension(AuthInfo::new(OBSERVER_SCOPES.to_vec())),
+            State(test_state()),
+            loopback_peer(),
+            Json(NativeDesktopOpenRequest {
+                session_id: "target::sess-1".to_string(),
+            }),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let json = response_json(response).await;
+        assert_eq!(json["code"], "NOT_AUTHORIZED");
+    }
+
+    #[tokio::test]
+    async fn native_open_rejects_remote_session_id_before_handoff() {
+        let response = native_open(
+            Extension(AuthInfo::new(OPERATOR_SCOPES.to_vec())),
+            State(test_state()),
+            loopback_peer(),
+            Json(NativeDesktopOpenRequest {
+                session_id: "target::sess-1".to_string(),
+            }),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), NATIVE_DESKTOP_UNAVAILABLE.status);
+        let json = response_json(response).await;
+        assert_eq!(json["code"], NATIVE_DESKTOP_UNAVAILABLE.code);
+        assert_eq!(
+            json["message"],
+            "remote sessions are visible locally, but native terminal handoff must be opened on the target host"
+        );
     }
 
     #[tokio::test]

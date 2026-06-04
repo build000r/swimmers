@@ -194,6 +194,55 @@ enum MermaidMouseDownHit {
     Outside,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MermaidArtifactRefreshState {
+    Unchanged,
+    ViewportChanged,
+    SourceChanged,
+}
+
+fn mermaid_artifact_refresh_state(
+    viewer: &MermaidViewerState,
+    artifact: &MermaidArtifactResponse,
+) -> MermaidArtifactRefreshState {
+    if viewer.source != artifact.source || viewer.artifact_error != artifact.error {
+        MermaidArtifactRefreshState::SourceChanged
+    } else if viewer.path != artifact.path {
+        MermaidArtifactRefreshState::ViewportChanged
+    } else {
+        MermaidArtifactRefreshState::Unchanged
+    }
+}
+
+fn refresh_mermaid_viewer_from_artifact(
+    viewer: &mut MermaidViewerState,
+    artifact: Option<&MermaidArtifactResponse>,
+) -> bool {
+    let Some(artifact) = artifact else {
+        return false;
+    };
+
+    apply_mermaid_artifact_refresh(viewer, artifact);
+    true
+}
+
+fn apply_mermaid_artifact_refresh(
+    viewer: &mut MermaidViewerState,
+    artifact: &MermaidArtifactResponse,
+) {
+    let refresh_state = mermaid_artifact_refresh_state(viewer, artifact);
+    viewer.path = artifact.path.clone();
+    viewer.source = artifact.source.clone();
+    viewer.artifact_error = artifact.error.clone();
+    viewer.render_error = None;
+
+    match refresh_state {
+        MermaidArtifactRefreshState::SourceChanged => viewer.invalidate_source_cache(),
+        MermaidArtifactRefreshState::ViewportChanged => viewer.invalidate_viewport_cache(),
+        MermaidArtifactRefreshState::Unchanged => {}
+    }
+}
+
 fn mermaid_mouse_down_hit(
     viewer: &MermaidViewerState,
     field: Rect,
@@ -232,20 +281,10 @@ fn mermaid_mouse_down_hit(
 impl<C: TuiApi> App<C> {
     fn refresh_mermaid_viewer_from_cache(&mut self) {
         if let FishBowlMode::Mermaid(viewer) = &mut self.fish_bowl_mode {
-            if let Some(artifact) = self.mermaid_artifacts.get(&viewer.session_id) {
-                let path_changed = viewer.path != artifact.path;
-                let source_changed = viewer.source != artifact.source;
-                let error_changed = viewer.artifact_error != artifact.error;
-                viewer.path = artifact.path.clone();
-                viewer.source = artifact.source.clone();
-                viewer.artifact_error = artifact.error.clone();
-                viewer.render_error = None;
-                if source_changed || error_changed {
-                    viewer.invalidate_source_cache();
-                } else if path_changed {
-                    viewer.invalidate_viewport_cache();
-                }
-            }
+            refresh_mermaid_viewer_from_artifact(
+                viewer,
+                self.mermaid_artifacts.get(&viewer.session_id),
+            );
         }
     }
 
@@ -981,6 +1020,23 @@ mod tests {
         values.iter().map(|value| value.to_string()).collect()
     }
 
+    fn test_artifact(
+        path: Option<&str>,
+        source: Option<&str>,
+        error: Option<&str>,
+    ) -> MermaidArtifactResponse {
+        MermaidArtifactResponse {
+            session_id: "sess-1".to_string(),
+            available: true,
+            path: path.map(str::to_string),
+            updated_at: None,
+            source: source.map(str::to_string),
+            error: error.map(str::to_string),
+            slice_name: None,
+            plan_files: None,
+        }
+    }
+
     fn test_viewer() -> MermaidViewerState {
         MermaidViewerState {
             session_id: "sess-1".to_string(),
@@ -1020,6 +1076,157 @@ mod tests {
             tab_rects: Vec::new(),
             disk_only: false,
         }
+    }
+
+    #[test]
+    fn refresh_mermaid_viewer_from_artifact_leaves_viewer_on_cache_miss() {
+        let mut viewer = test_viewer();
+        viewer.render_error = Some("stale render error".to_string());
+        viewer.cached_rect = Some(Rect {
+            x: 1,
+            y: 2,
+            width: 3,
+            height: 4,
+        });
+
+        assert!(!refresh_mermaid_viewer_from_artifact(&mut viewer, None));
+
+        assert_eq!(viewer.path.as_deref(), Some("/repo/schema.mmd"));
+        assert_eq!(viewer.source.as_deref(), Some("flowchart TD\nA-->B"));
+        assert_eq!(viewer.render_error.as_deref(), Some("stale render error"));
+        assert_eq!(
+            viewer.cached_rect,
+            Some(Rect {
+                x: 1,
+                y: 2,
+                width: 3,
+                height: 4,
+            })
+        );
+    }
+
+    #[test]
+    fn refresh_mermaid_viewer_from_artifact_keeps_caches_when_artifact_unchanged() {
+        let mut viewer = test_viewer();
+        viewer.render_error = Some("stale render error".to_string());
+        viewer.cached_rect = Some(Rect {
+            x: 1,
+            y: 2,
+            width: 3,
+            height: 4,
+        });
+        viewer.cached_lines.push("cached source render".to_string());
+        let artifact = test_artifact(Some("/repo/schema.mmd"), Some("flowchart TD\nA-->B"), None);
+
+        assert!(refresh_mermaid_viewer_from_artifact(
+            &mut viewer,
+            Some(&artifact)
+        ));
+
+        assert_eq!(viewer.render_error, None);
+        assert_eq!(
+            viewer.cached_rect,
+            Some(Rect {
+                x: 1,
+                y: 2,
+                width: 3,
+                height: 4,
+            })
+        );
+        assert_eq!(
+            viewer.cached_lines,
+            vec!["cached source render".to_string()]
+        );
+    }
+
+    #[test]
+    fn refresh_mermaid_viewer_from_artifact_invalidates_viewport_only_on_path_change() {
+        let mut viewer = test_viewer();
+        viewer.render_error = Some("stale render error".to_string());
+        viewer.cached_rect = Some(Rect {
+            x: 1,
+            y: 2,
+            width: 3,
+            height: 4,
+        });
+        viewer.cached_lines.push("cached source render".to_string());
+        viewer.focused_source_index = Some(0);
+        viewer.focus_status = Some("focus A".to_string());
+        let artifact = test_artifact(Some("/repo/changed.mmd"), Some("flowchart TD\nA-->B"), None);
+
+        assert!(refresh_mermaid_viewer_from_artifact(
+            &mut viewer,
+            Some(&artifact)
+        ));
+
+        assert_eq!(viewer.path.as_deref(), Some("/repo/changed.mmd"));
+        assert_eq!(viewer.render_error, None);
+        assert_eq!(viewer.cached_rect, None);
+        assert_eq!(
+            viewer.cached_lines,
+            vec!["cached source render".to_string()]
+        );
+        assert_eq!(viewer.focused_source_index, Some(0));
+        assert_eq!(viewer.focus_status.as_deref(), Some("focus A"));
+    }
+
+    #[test]
+    fn refresh_mermaid_viewer_from_artifact_invalidates_source_cache_on_source_change() {
+        let mut viewer = test_viewer();
+        viewer.render_error = Some("stale render error".to_string());
+        viewer.cached_rect = Some(Rect {
+            x: 1,
+            y: 2,
+            width: 3,
+            height: 4,
+        });
+        viewer.cached_lines.push("cached source render".to_string());
+        viewer.focused_source_index = Some(0);
+        viewer.focus_status = Some("focus A".to_string());
+        let artifact = test_artifact(Some("/repo/schema.mmd"), Some("flowchart TD\nA-->C"), None);
+
+        assert!(refresh_mermaid_viewer_from_artifact(
+            &mut viewer,
+            Some(&artifact)
+        ));
+
+        assert_eq!(viewer.source.as_deref(), Some("flowchart TD\nA-->C"));
+        assert_eq!(viewer.render_error, None);
+        assert_eq!(viewer.cached_rect, None);
+        assert!(viewer.cached_lines.is_empty());
+        assert_eq!(viewer.focused_source_index, None);
+        assert_eq!(viewer.focus_status, None);
+    }
+
+    #[test]
+    fn refresh_mermaid_viewer_from_artifact_invalidates_source_cache_on_error_change() {
+        let mut viewer = test_viewer();
+        viewer.render_error = Some("stale render error".to_string());
+        viewer.cached_rect = Some(Rect {
+            x: 1,
+            y: 2,
+            width: 3,
+            height: 4,
+        });
+        viewer.cached_lines.push("cached source render".to_string());
+        let artifact = test_artifact(
+            Some("/repo/schema.mmd"),
+            Some("flowchart TD\nA-->B"),
+            Some("artifact refresh failed"),
+        );
+
+        assert!(refresh_mermaid_viewer_from_artifact(
+            &mut viewer,
+            Some(&artifact)
+        ));
+
+        assert_eq!(
+            viewer.artifact_error.as_deref(),
+            Some("artifact refresh failed")
+        );
+        assert_eq!(viewer.render_error, None);
+        assert_eq!(viewer.cached_rect, None);
+        assert!(viewer.cached_lines.is_empty());
     }
 
     #[test]

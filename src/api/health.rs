@@ -310,21 +310,44 @@ fn thought_bridge_dependency_health(snapshot: &BridgeHealthSnapshot) -> Dependen
     health
 }
 
+const MAX_HEALTH_ERROR_LEN: usize = 512;
+
 fn sanitize_health_error(error: &str) -> String {
-    let mut sanitized = error.to_string();
-    for key in ["AUTH_TOKEN", "OBSERVER_TOKEN"] {
-        if let Ok(value) = std::env::var(key) {
-            if !value.is_empty() {
-                sanitized = sanitized.replace(&value, "<redacted>");
+    truncate_health_error(redact_health_error_values(
+        error,
+        ["AUTH_TOKEN", "OBSERVER_TOKEN"]
+            .into_iter()
+            .filter_map(env_value),
+    ))
+}
+
+fn env_value(key: &str) -> Option<String> {
+    std::env::var(key).ok().filter(|value| !value.is_empty())
+}
+
+fn redact_health_error_values<I, S>(error: &str, values: I) -> String
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    values
+        .into_iter()
+        .fold(error.to_string(), |sanitized, value| {
+            let value = value.as_ref();
+            if value.is_empty() {
+                sanitized
+            } else {
+                sanitized.replace(value, "<redacted>")
             }
-        }
+        })
+}
+
+fn truncate_health_error(mut error: String) -> String {
+    if error.len() > MAX_HEALTH_ERROR_LEN {
+        error.truncate(MAX_HEALTH_ERROR_LEN);
+        error.push_str("...");
     }
-    const MAX_ERROR_LEN: usize = 512;
-    if sanitized.len() > MAX_ERROR_LEN {
-        sanitized.truncate(MAX_ERROR_LEN);
-        sanitized.push_str("...");
-    }
-    sanitized
+    error
 }
 
 // ---------------------------------------------------------------------------
@@ -586,6 +609,25 @@ mod tests {
                 "label must match the snake_case serde encoding for {status:?}"
             );
         }
+    }
+
+    #[test]
+    fn sanitize_health_error_redacts_nonempty_token_values() {
+        let error = "AUTH_TOKEN=writer-token OBSERVER_TOKEN=observer-token";
+
+        assert_eq!(
+            redact_health_error_values(error, ["writer-token", "", "observer-token"]),
+            "AUTH_TOKEN=<redacted> OBSERVER_TOKEN=<redacted>"
+        );
+    }
+
+    #[test]
+    fn sanitize_health_error_truncates_long_messages() {
+        let error = "x".repeat(MAX_HEALTH_ERROR_LEN + 8);
+        let sanitized = truncate_health_error(error);
+
+        assert_eq!(sanitized.len(), MAX_HEALTH_ERROR_LEN + 3);
+        assert!(sanitized.ends_with("..."));
     }
 
     #[tokio::test]
