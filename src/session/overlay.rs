@@ -231,32 +231,9 @@ impl SkillboxOverlay {
     /// fall back to the in-repo scan instead.
     pub fn find_plan_dirs(&self, cwd: &str) -> Option<Vec<PathBuf>> {
         let cwd_normalized = normalize_path(cwd);
-        let client = self.clients.iter().find(|c| {
-            c.cwd_patterns
-                .iter()
-                .any(|pattern| cwd_starts_with(&cwd_normalized, pattern))
-        })?;
-
-        if client.cwd_match_count > 1 {
-            return None;
-        }
-
-        let mut dirs = Vec::new();
-        if let Some(root) = &client.plan_root {
-            if root.is_dir() {
-                dirs.push(root.clone());
-            }
-        }
-        if let Some(draft) = &client.plan_draft {
-            if draft.is_dir() {
-                dirs.push(draft.clone());
-            }
-        }
-        if dirs.is_empty() {
-            None
-        } else {
-            Some(dirs)
-        }
+        let client = first_client_matching_cwd(&self.clients, &cwd_normalized)?;
+        let client = single_repo_plan_client(client)?;
+        existing_plan_dirs(client)
     }
 
     /// Enumerate every domain plan across every overlay client.
@@ -285,6 +262,29 @@ impl SkillboxOverlay {
         });
         entries
     }
+}
+
+fn first_client_matching_cwd<'a>(
+    clients: &'a [ClientOverlay],
+    cwd_normalized: &str,
+) -> Option<&'a ClientOverlay> {
+    clients
+        .iter()
+        .find(|client| client_matches_cwd_patterns(client, cwd_normalized))
+}
+
+fn single_repo_plan_client(client: &ClientOverlay) -> Option<&ClientOverlay> {
+    (client.cwd_match_count <= 1).then_some(client)
+}
+
+fn existing_plan_dirs(client: &ClientOverlay) -> Option<Vec<PathBuf>> {
+    let dirs: Vec<_> = [client.plan_root.as_deref(), client.plan_draft.as_deref()]
+        .into_iter()
+        .flatten()
+        .filter(|dir| dir.is_dir())
+        .map(Path::to_path_buf)
+        .collect();
+    (!dirs.is_empty()).then_some(dirs)
 }
 
 fn dir_config_matching_base_path<'a>(
@@ -2007,8 +2007,12 @@ dev_sanity:
     }
 
     fn find_plan_dirs_overlay(client: ClientOverlay) -> SkillboxOverlay {
+        find_plan_dirs_overlay_with_clients(vec![client])
+    }
+
+    fn find_plan_dirs_overlay_with_clients(clients: Vec<ClientOverlay>) -> SkillboxOverlay {
         SkillboxOverlay {
-            clients: vec![client],
+            clients,
             loaded_at: Utc::now(),
         }
     }
@@ -2056,6 +2060,21 @@ dev_sanity:
         std::fs::create_dir_all(&plan_root).unwrap();
         let client = make_plan_client(vec![cwd.clone()], 2, Some(plan_root), None);
         let overlay = find_plan_dirs_overlay(client);
+        assert!(overlay.find_plan_dirs(&cwd).is_none());
+    }
+
+    #[test]
+    fn find_plan_dirs_rejects_first_multi_repo_match_without_falling_through() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let cwd = tmp.path().join("repo");
+        let cwd = cwd.to_string_lossy().to_string();
+        let first_root = tmp.path().join("first").join("plans").join("released");
+        let second_root = tmp.path().join("second").join("plans").join("released");
+        std::fs::create_dir_all(&first_root).unwrap();
+        std::fs::create_dir_all(&second_root).unwrap();
+        let first = make_plan_client(vec![cwd.clone()], 2, Some(first_root), None);
+        let second = make_plan_client(vec![cwd.clone()], 1, Some(second_root), None);
+        let overlay = find_plan_dirs_overlay_with_clients(vec![first, second]);
         assert!(overlay.find_plan_dirs(&cwd).is_none());
     }
 

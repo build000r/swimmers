@@ -327,6 +327,132 @@ fn mermaid_er_order_ignores_self_and_unknown_neighbors_for_tie_breaks() {
 }
 
 #[test]
+fn mermaid_er_order_graph_builds_symmetric_known_adjacency() {
+    let (positions, adjacency) = mermaid_er_order_graph(&[
+        er_order_node("node:a", 1.0, 2.0, &["node:b", "node:a", "node:missing"]),
+        er_order_node("node:b", 3.0, 4.0, &[]),
+        er_order_node("node:c", 5.0, 6.0, &["node:b"]),
+        er_order_node("node:isolated", 7.0, 8.0, &[]),
+    ]);
+
+    assert_eq!(positions.len(), 4);
+    assert_eq!(positions.get("node:a"), Some(&(1.0, 2.0)));
+    assert_eq!(positions.get("node:b"), Some(&(3.0, 4.0)));
+    assert_eq!(positions.get("node:c"), Some(&(5.0, 6.0)));
+    assert_eq!(positions.get("node:isolated"), Some(&(7.0, 8.0)));
+
+    let expected_keys = BTreeSet::from([
+        "node:a".to_string(),
+        "node:b".to_string(),
+        "node:c".to_string(),
+        "node:isolated".to_string(),
+    ]);
+    assert_eq!(
+        adjacency.keys().cloned().collect::<BTreeSet<_>>(),
+        expected_keys
+    );
+
+    let expected_a = BTreeSet::from(["node:b".to_string()]);
+    let expected_b = BTreeSet::from(["node:a".to_string(), "node:c".to_string()]);
+    let expected_c = BTreeSet::from(["node:b".to_string()]);
+    let expected_isolated = BTreeSet::<String>::new();
+    assert_eq!(adjacency.get("node:a"), Some(&expected_a));
+    assert_eq!(adjacency.get("node:b"), Some(&expected_b));
+    assert_eq!(adjacency.get("node:c"), Some(&expected_c));
+    assert_eq!(adjacency.get("node:isolated"), Some(&expected_isolated));
+}
+
+#[test]
+fn mermaid_er_candidate_ordering_preserves_tie_break_precedence() {
+    assert_er_order_prefix(
+        &[
+            er_order_node(
+                "node:seed",
+                0.0,
+                0.0,
+                &["node:first", "node:two_adjacent", "node:one_adjacent"],
+            ),
+            er_order_node("node:first", 1.0, 0.0, &["node:two_adjacent"]),
+            er_order_node("node:two_adjacent", 10.0, 0.0, &[]),
+            er_order_node("node:one_adjacent", 5.0, 0.0, &[]),
+        ],
+        &["node:seed", "node:first", "node:two_adjacent"],
+    );
+    assert_er_order_prefix(
+        &[
+            er_order_node("node:seed", 0.0, 0.0, &["node:near", "node:far"]),
+            er_order_node("node:near", 2.0, 0.0, &[]),
+            er_order_node("node:far", 5.0, 0.0, &[]),
+        ],
+        &["node:seed", "node:near"],
+    );
+    assert_er_order_prefix(
+        &[
+            er_order_node("node:seed", 0.0, 0.0, &["node:a", "node:b", "node:f"]),
+            er_order_node("node:a", 1.0, 0.0, &[]),
+            er_order_node("node:b", 1.0, 0.0, &["node:c"]),
+            er_order_node("node:c", 10.0, 0.0, &[]),
+            er_order_node("node:f", 20.0, 0.0, &[]),
+        ],
+        &["node:seed", "node:b"],
+    );
+    assert_er_order_prefix(
+        &[
+            er_order_node(
+                "node:seed",
+                0.0,
+                0.0,
+                &["node:right", "node:left", "node:far_left"],
+            ),
+            er_order_node("node:right", 1.0, 0.0, &[]),
+            er_order_node("node:left", -1.0, 0.0, &[]),
+            er_order_node("node:far_left", -10.0, 0.0, &[]),
+        ],
+        &["node:seed", "node:left"],
+    );
+    assert_er_order_prefix(
+        &[
+            er_order_node(
+                "node:seed",
+                0.0,
+                0.0,
+                &["node:y_high", "node:y_low", "node:centering_tail"],
+            ),
+            er_order_node("node:y_high", 1.0, 1.0, &[]),
+            er_order_node("node:y_low", 1.0, -1.0, &[]),
+            er_order_node("node:centering_tail", -2.0, 0.0, &[]),
+        ],
+        &["node:seed", "node:y_low"],
+    );
+    assert_er_order_prefix(
+        &[
+            er_order_node("node:seed", 0.0, 0.0, &["node:right", "node:left"]),
+            er_order_node("node:right", 1.0, 0.0, &[]),
+            er_order_node("node:left", -1.0, 0.0, &[]),
+        ],
+        &["node:seed", "node:left"],
+    );
+    assert_er_order_prefix(
+        &[
+            er_order_node("node:seed", 0.0, 0.0, &["node:b", "node:a"]),
+            er_order_node("node:b", 1.0, 0.0, &[]),
+            er_order_node("node:a", 1.0, 0.0, &[]),
+        ],
+        &["node:seed", "node:a"],
+    );
+}
+
+fn assert_er_order_prefix(nodes: &[MermaidErOrderNode], expected_prefix: &[&str]) {
+    let order = mermaid_order_er_nodes(nodes);
+    let actual_prefix = order
+        .iter()
+        .take(expected_prefix.len())
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    assert_eq!(actual_prefix, expected_prefix, "full order: {order:?}");
+}
+
+#[test]
 fn mermaid_er_box_content_filters_title_and_attrs_by_view_state() {
     let lines = vec![
         er_semantic_line("ACCOUNT", 1.0, MermaidSemanticKind::NodeSummary),

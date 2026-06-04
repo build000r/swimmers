@@ -67,6 +67,54 @@ fn mermaid_zoom_status_clamps_to_fit_and_uses_round_percentages() {
 }
 
 #[test]
+fn mermaid_status_row_shortens_paths_and_truncates_inside_field() {
+    let long_path = "/tmp/repos/swimmers/packages/domain/deeply/nested/flow.mmd";
+    let (mut app, mut renderer, layout) =
+        open_mermaid_test_viewer("graph TD\nA[Producer] --> B[Consumer]\n", 72, 24);
+    if let FishBowlMode::Mermaid(viewer) = &mut app.fish_bowl_mode {
+        viewer.path = Some(long_path.to_string());
+    }
+
+    app.render(&mut renderer, layout);
+
+    let header = row_text(&renderer, layout.overview_field.y);
+    assert!(header.contains("outline"), "{header}");
+    assert!(header.contains("fit 100%"), "{header}");
+    assert!(header.contains("..."), "{header}");
+    assert!(!header.contains("/tmp/repos/swimmers/packages"), "{header}");
+    assert_eq!(
+        cell_at(
+            &renderer,
+            layout.overview_field.right(),
+            layout.overview_field.y
+        )
+        .ch,
+        '|'
+    );
+
+    let (mut app, mut renderer, layout) =
+        open_mermaid_test_viewer("graph TD\nA[Producer] --> B[Consumer]\n", 70, 24);
+    if let FishBowlMode::Mermaid(viewer) = &mut app.fish_bowl_mode {
+        viewer.path = Some(long_path.to_string());
+        viewer.focus_status = Some("focus Extremely Long Semantic Target".to_string());
+    }
+
+    app.render(&mut renderer, layout);
+
+    let header = row_text(&renderer, layout.overview_field.y);
+    assert!(header.contains('~'), "{header}");
+    assert_eq!(
+        cell_at(
+            &renderer,
+            layout.overview_field.right(),
+            layout.overview_field.y
+        )
+        .ch,
+        '|'
+    );
+}
+
+#[test]
 fn mermaid_sequence_diagram_falls_back_to_connector_only_background() {
     let (mut app, mut renderer, layout) =
         open_mermaid_test_viewer("sequenceDiagram\nAlice->>Bob: hello\n", 120, 32);

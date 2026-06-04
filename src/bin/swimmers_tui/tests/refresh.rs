@@ -263,6 +263,19 @@ fn thought_config_test(ok: bool, message: &str) -> ThoughtConfigTestResponse {
     }
 }
 
+fn empty_refresh_result() -> RefreshResult {
+    RefreshResult {
+        sessions: Ok(Vec::new()),
+        mermaid_artifacts: Vec::new(),
+        session_skills: Vec::new(),
+        backend_health: Ok(healthy_backend_health()),
+        native_status: None,
+        daemon_defaults_status: None,
+        show_success_message: false,
+        force_asset_refresh: false,
+    }
+}
+
 fn repo_theme(body: &str) -> RepoTheme {
     RepoTheme {
         body: body.to_string(),
@@ -364,6 +377,95 @@ fn thought_config_save_action_preserves_success_failure_and_test_messages() {
     assert_eq!(save_error.message, "save failed");
     assert!(!save_error.close_editor);
     assert!(!save_error.refresh_sessions);
+}
+
+#[test]
+fn thought_config_action_outcome_updates_open_editor_and_sets_message() {
+    let mut app = make_app(MockApi::new());
+    app.thought_config_editor = Some(ThoughtConfigEditorState::new(
+        ThoughtConfig {
+            backend: "openrouter".to_string(),
+            model: "old/free".to_string(),
+            ..ThoughtConfig::default()
+        },
+        None,
+    ));
+    let candidates = vec!["new/free".to_string(), "backup/free".to_string()];
+
+    app.apply_thought_config_action_outcome(ThoughtConfigActionOutcome {
+        message: "test complete".to_string(),
+        updated_config: Some(ThoughtConfig {
+            backend: "openrouter".to_string(),
+            model: "new/free".to_string(),
+            ..ThoughtConfig::default()
+        }),
+        openrouter_candidates: Some(candidates.clone()),
+        close_editor: false,
+        refresh_sessions: false,
+    });
+
+    let editor = app
+        .thought_config_editor
+        .as_ref()
+        .expect("editor remains open");
+    assert_eq!(editor.config.model, "new/free");
+    assert_eq!(editor.openrouter_model_presets, candidates);
+    assert_eq!(app.visible_message(), Some("test complete"));
+    assert!(app.pending_refresh.is_none());
+}
+
+#[test]
+fn thought_config_action_outcome_ignores_editor_updates_when_editor_closed() {
+    let mut app = make_app(MockApi::new());
+
+    app.apply_thought_config_action_outcome(ThoughtConfigActionOutcome {
+        message: "save complete".to_string(),
+        updated_config: Some(ThoughtConfig {
+            backend: "openrouter".to_string(),
+            model: "ignored/free".to_string(),
+            ..ThoughtConfig::default()
+        }),
+        openrouter_candidates: Some(vec!["ignored/free".to_string()]),
+        close_editor: true,
+        refresh_sessions: false,
+    });
+
+    assert!(app.thought_config_editor.is_none());
+    assert!(app.pending_refresh.is_none());
+    assert_eq!(app.visible_message(), Some("save complete"));
+}
+
+#[test]
+fn thought_config_action_outcome_closes_editor_and_restarts_refresh() {
+    let mut app = make_app(MockApi::new());
+    app.daemon_defaults_status = DaemonDefaultsStatus::Available;
+    app.thought_config_editor = Some(ThoughtConfigEditorState::new(
+        ThoughtConfig {
+            backend: "openrouter".to_string(),
+            model: "old/free".to_string(),
+            ..ThoughtConfig::default()
+        },
+        None,
+    ));
+    let (old_tx, old_rx) = tokio::sync::oneshot::channel();
+    app.pending_refresh = Some(old_rx);
+
+    app.apply_thought_config_action_outcome(ThoughtConfigActionOutcome {
+        message: "saved".to_string(),
+        updated_config: Some(ThoughtConfig {
+            backend: "openrouter".to_string(),
+            model: "new/free".to_string(),
+            ..ThoughtConfig::default()
+        }),
+        openrouter_candidates: Some(vec!["new/free".to_string()]),
+        close_editor: true,
+        refresh_sessions: true,
+    });
+
+    assert!(app.thought_config_editor.is_none());
+    assert!(app.pending_refresh.is_some());
+    assert!(old_tx.send(empty_refresh_result()).is_err());
+    assert_eq!(app.visible_message(), Some("saved"));
 }
 
 #[test]

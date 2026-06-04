@@ -1832,6 +1832,18 @@ fn render_mermaid_viewer_header(
     content_rect: Rect,
     viewer: &mut MermaidViewerState,
 ) {
+    let after_back = render_mermaid_header_back_button(renderer, field, viewer);
+    if render_mermaid_header_plan_tabs(renderer, field, viewer, after_back) {
+        return;
+    }
+    render_mermaid_header_status(renderer, field, content_rect, viewer, after_back);
+}
+
+fn render_mermaid_header_back_button(
+    renderer: &mut Renderer,
+    field: Rect,
+    viewer: &mut MermaidViewerState,
+) -> u16 {
     viewer.back_rect = Some(Rect {
         x: field.x,
         y: field.y,
@@ -1840,81 +1852,166 @@ fn render_mermaid_viewer_header(
     });
     renderer.draw_text(field.x, field.y, MERMAID_BACK_LABEL, Color::Cyan);
 
-    let after_back = field
+    field
         .x
-        .saturating_add(display_width(MERMAID_BACK_LABEL) + 1);
+        .saturating_add(display_width(MERMAID_BACK_LABEL) + 1)
+}
 
-    if let Some(tabs) = &viewer.plan_tabs {
-        viewer.tab_rects.clear();
-        let mut tab_x = after_back;
-        for &tab in tabs {
-            let label = format!("[{}]", tab.label());
-            let label_width = display_width(&label);
-            if tab_x + label_width >= field.right() {
-                break;
-            }
-            let color = if tab == viewer.active_tab {
-                Color::Cyan
-            } else {
-                Color::DarkGrey
-            };
-            renderer.draw_text(tab_x, field.y, &label, color);
-            viewer.tab_rects.push((
-                tab,
-                Rect {
-                    x: tab_x,
-                    y: field.y,
-                    width: label_width,
-                    height: 1,
-                },
-            ));
-            tab_x = tab_x.saturating_add(label_width + 1);
-        }
-        let name_label = format!("| {}", viewer.tmux_name);
-        if tab_x + display_width(&name_label) < field.right() {
-            renderer.draw_text(tab_x, field.y, &name_label, Color::DarkGrey);
-        }
-        return;
-    }
+fn render_mermaid_header_plan_tabs(
+    renderer: &mut Renderer,
+    field: Rect,
+    viewer: &mut MermaidViewerState,
+    after_back: u16,
+) -> bool {
+    let Some(tabs) = viewer.plan_tabs.as_deref() else {
+        return false;
+    };
 
-    let status_x = after_back;
-    let status_width = field.right().saturating_sub(status_x) as usize;
-    let view_state = mermaid_view_state_for_view(viewer, content_rect);
-    let detail_label = mermaid_status_detail_label(view_state);
-    let zoom_label = mermaid_zoom_status_label(viewer.zoom);
-    let focus_width = viewer
-        .focus_status
-        .as_deref()
-        .map(|status| usize::from(display_width(" | ")) + usize::from(display_width(status)))
-        .unwrap_or(0);
-    let fixed_width = usize::from(display_width(&viewer.tmux_name))
-        + usize::from(display_width(" | "))
-        + usize::from(display_width(&detail_label))
-        + usize::from(display_width(" | "))
-        + usize::from(display_width(" | "))
-        + usize::from(display_width(&zoom_label))
-        + usize::from(display_width(" | o open"))
-        + focus_width;
-    let mut status = format!(
-        "{} | {} | {} | {} | o open",
-        viewer.tmux_name,
-        detail_label,
-        shorten_path(
-            viewer.display_path(),
-            status_width.saturating_sub(fixed_width)
-        ),
-        zoom_label,
+    viewer.tab_rects.clear();
+    let tab_x = render_mermaid_header_plan_tab_labels(
+        renderer,
+        field,
+        tabs,
+        viewer.active_tab,
+        &mut viewer.tab_rects,
+        after_back,
     );
-    if let Some(focus_status) = viewer.focus_status.as_deref() {
-        status.push_str(" | ");
-        status.push_str(focus_status);
+    render_mermaid_header_plan_tab_tmux_suffix(renderer, field, &viewer.tmux_name, tab_x);
+    true
+}
+
+fn render_mermaid_header_plan_tab_labels(
+    renderer: &mut Renderer,
+    field: Rect,
+    tabs: &[DomainPlanTab],
+    active_tab: DomainPlanTab,
+    tab_rects: &mut Vec<(DomainPlanTab, Rect)>,
+    mut tab_x: u16,
+) -> u16 {
+    for &tab in tabs {
+        let label = format!("[{}]", tab.label());
+        let label_width = display_width(&label);
+        if tab_x + label_width >= field.right() {
+            break;
+        }
+        renderer.draw_text(
+            tab_x,
+            field.y,
+            &label,
+            mermaid_header_plan_tab_color(tab, active_tab),
+        );
+        tab_rects.push((
+            tab,
+            Rect {
+                x: tab_x,
+                y: field.y,
+                width: label_width,
+                height: 1,
+            },
+        ));
+        tab_x = tab_x.saturating_add(label_width + 1);
     }
+    tab_x
+}
+
+fn mermaid_header_plan_tab_color(tab: DomainPlanTab, active_tab: DomainPlanTab) -> Color {
+    if tab == active_tab {
+        Color::Cyan
+    } else {
+        Color::DarkGrey
+    }
+}
+
+fn render_mermaid_header_plan_tab_tmux_suffix(
+    renderer: &mut Renderer,
+    field: Rect,
+    tmux_name: &str,
+    tab_x: u16,
+) {
+    let name_label = format!("| {tmux_name}");
+    if tab_x + display_width(&name_label) < field.right() {
+        renderer.draw_text(tab_x, field.y, &name_label, Color::DarkGrey);
+    }
+}
+
+fn render_mermaid_header_status(
+    renderer: &mut Renderer,
+    field: Rect,
+    content_rect: Rect,
+    viewer: &MermaidViewerState,
+    status_x: u16,
+) {
+    let status_width = field.right().saturating_sub(status_x) as usize;
+    let status = mermaid_header_status_line(viewer, content_rect, status_width);
     renderer.draw_text(
         status_x,
         field.y,
         &truncate_label(&status, status_width),
         Color::DarkGrey,
     );
+}
+
+fn mermaid_header_status_line(
+    viewer: &MermaidViewerState,
+    content_rect: Rect,
+    status_width: usize,
+) -> String {
+    let view_state = mermaid_view_state_for_view(viewer, content_rect);
+    let detail_label = mermaid_status_detail_label(view_state);
+    let zoom_label = mermaid_zoom_status_label(viewer.zoom);
+    let mut status = format!(
+        "{} | {} | {} | {} | o open",
+        viewer.tmux_name,
+        detail_label,
+        shorten_path(
+            viewer.display_path(),
+            mermaid_header_status_path_budget(viewer, &detail_label, &zoom_label, status_width)
+        ),
+        zoom_label,
+    );
+    mermaid_header_append_focus_status(&mut status, viewer.focus_status.as_deref());
+    status
+}
+
+fn mermaid_header_status_path_budget(
+    viewer: &MermaidViewerState,
+    detail_label: &str,
+    zoom_label: &str,
+    status_width: usize,
+) -> usize {
+    status_width.saturating_sub(mermaid_header_status_fixed_width(
+        viewer,
+        detail_label,
+        zoom_label,
+    ))
+}
+
+fn mermaid_header_status_fixed_width(
+    viewer: &MermaidViewerState,
+    detail_label: &str,
+    zoom_label: &str,
+) -> usize {
+    usize::from(display_width(&viewer.tmux_name))
+        + usize::from(display_width(" | "))
+        + usize::from(display_width(detail_label))
+        + usize::from(display_width(" | "))
+        + usize::from(display_width(" | "))
+        + usize::from(display_width(zoom_label))
+        + usize::from(display_width(" | o open"))
+        + mermaid_header_focus_status_width(viewer.focus_status.as_deref())
+}
+
+fn mermaid_header_focus_status_width(focus_status: Option<&str>) -> usize {
+    focus_status
+        .map(|status| usize::from(display_width(" | ")) + usize::from(display_width(status)))
+        .unwrap_or(0)
+}
+
+fn mermaid_header_append_focus_status(status: &mut String, focus_status: Option<&str>) {
+    if let Some(focus_status) = focus_status {
+        status.push_str(" | ");
+        status.push_str(focus_status);
+    }
 }
 
 fn render_mermaid_cached_background(

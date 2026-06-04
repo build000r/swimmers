@@ -422,6 +422,60 @@ fn mermaid_er_candidate_metrics(
     (adjacent_count, min_neighbor_distance)
 }
 
+#[derive(Debug)]
+struct MermaidErCandidateSortKey<'a> {
+    owner_key: &'a str,
+    adjacent_count: usize,
+    min_neighbor_distance: f32,
+    degree: usize,
+    centroid_distance: f32,
+    position: (f32, f32),
+}
+
+fn mermaid_first_non_equal<const N: usize>(orderings: [Ordering; N]) -> Ordering {
+    for ordering in orderings {
+        if ordering != Ordering::Equal {
+            return ordering;
+        }
+    }
+    Ordering::Equal
+}
+
+fn mermaid_er_candidate_sort_key<'a>(
+    owner_key: &'a str,
+    placed: &HashSet<String>,
+    positions: &HashMap<String, (f32, f32)>,
+    adjacency: &HashMap<String, BTreeSet<String>>,
+    component_centroid: (f32, f32),
+) -> MermaidErCandidateSortKey<'a> {
+    let (adjacent_count, min_neighbor_distance) =
+        mermaid_er_candidate_metrics(owner_key, placed, positions, adjacency);
+    let position = mermaid_er_node_position(positions, owner_key);
+    MermaidErCandidateSortKey {
+        owner_key,
+        adjacent_count,
+        min_neighbor_distance,
+        degree: adjacency.get(owner_key).map_or(0, BTreeSet::len),
+        centroid_distance: mermaid_distance_sq(position, component_centroid),
+        position,
+    }
+}
+
+fn mermaid_er_compare_candidate_sort_keys(
+    left: &MermaidErCandidateSortKey<'_>,
+    right: &MermaidErCandidateSortKey<'_>,
+) -> Ordering {
+    mermaid_first_non_equal([
+        right.adjacent_count.cmp(&left.adjacent_count),
+        mermaid_cmp_f32(left.min_neighbor_distance, right.min_neighbor_distance),
+        right.degree.cmp(&left.degree),
+        mermaid_cmp_f32(left.centroid_distance, right.centroid_distance),
+        mermaid_cmp_f32(left.position.1, right.position.1),
+        mermaid_cmp_f32(left.position.0, right.position.0),
+        left.owner_key.cmp(right.owner_key),
+    ])
+}
+
 fn mermaid_er_compare_component_candidates(
     left: &str,
     right: &str,
@@ -430,64 +484,80 @@ fn mermaid_er_compare_component_candidates(
     adjacency: &HashMap<String, BTreeSet<String>>,
     component_centroid: (f32, f32),
 ) -> Ordering {
-    let (left_adjacent_count, left_neighbor_distance) =
-        mermaid_er_candidate_metrics(left, placed, positions, adjacency);
-    let (right_adjacent_count, right_neighbor_distance) =
-        mermaid_er_candidate_metrics(right, placed, positions, adjacency);
-    let left_degree = adjacency.get(left).map_or(0, BTreeSet::len);
-    let right_degree = adjacency.get(right).map_or(0, BTreeSet::len);
-    let left_position = mermaid_er_node_position(positions, left);
-    let right_position = mermaid_er_node_position(positions, right);
-
-    right_adjacent_count
-        .cmp(&left_adjacent_count)
-        .then_with(|| mermaid_cmp_f32(left_neighbor_distance, right_neighbor_distance))
-        .then_with(|| right_degree.cmp(&left_degree))
-        .then_with(|| {
-            mermaid_cmp_f32(
-                mermaid_distance_sq(left_position, component_centroid),
-                mermaid_distance_sq(right_position, component_centroid),
-            )
-        })
-        .then_with(|| mermaid_cmp_f32(left_position.1, right_position.1))
-        .then_with(|| mermaid_cmp_f32(left_position.0, right_position.0))
-        .then_with(|| left.cmp(right))
+    let left_key =
+        mermaid_er_candidate_sort_key(left, placed, positions, adjacency, component_centroid);
+    let right_key =
+        mermaid_er_candidate_sort_key(right, placed, positions, adjacency, component_centroid);
+    mermaid_er_compare_candidate_sort_keys(&left_key, &right_key)
 }
 
-fn mermaid_er_order_graph(
+fn mermaid_er_known_owner_keys(nodes: &[MermaidErOrderNode]) -> HashSet<String> {
+    nodes
+        .iter()
+        .map(|node| node.owner_key.clone())
+        .collect::<HashSet<_>>()
+}
+
+fn mermaid_er_known_neighbors(
+    node: &MermaidErOrderNode,
+    known_keys: &HashSet<String>,
+) -> BTreeSet<String> {
+    node.neighbors
+        .iter()
+        .filter(|neighbor| *neighbor != &node.owner_key && known_keys.contains(*neighbor))
+        .cloned()
+        .collect()
+}
+
+fn mermaid_er_forward_order_graph(
     nodes: &[MermaidErOrderNode],
+    known_keys: &HashSet<String>,
 ) -> (
     HashMap<String, (f32, f32)>,
     HashMap<String, BTreeSet<String>>,
 ) {
-    let known_keys = nodes
-        .iter()
-        .map(|node| node.owner_key.clone())
-        .collect::<HashSet<_>>();
     let mut positions = HashMap::<String, (f32, f32)>::new();
     let mut adjacency = HashMap::<String, BTreeSet<String>>::new();
 
     for node in nodes {
         positions.insert(node.owner_key.clone(), (node.x, node.y));
-        let entry = adjacency.entry(node.owner_key.clone()).or_default();
-        for neighbor in &node.neighbors {
-            if neighbor != &node.owner_key && known_keys.contains(neighbor) {
-                entry.insert(neighbor.clone());
-            }
-        }
+        adjacency
+            .entry(node.owner_key.clone())
+            .or_default()
+            .extend(mermaid_er_known_neighbors(node, known_keys));
     }
 
-    for node in nodes {
-        let owner_key = node.owner_key.clone();
-        let neighbors = adjacency.get(&owner_key).cloned().unwrap_or_default();
-        adjacency.entry(owner_key.clone()).or_default();
-        for neighbor in neighbors {
-            adjacency
-                .entry(neighbor)
-                .or_default()
-                .insert(owner_key.clone());
-        }
+    (positions, adjacency)
+}
+
+fn mermaid_er_reverse_order_edges(
+    adjacency: &HashMap<String, BTreeSet<String>>,
+) -> Vec<(String, String)> {
+    adjacency
+        .iter()
+        .flat_map(|(owner_key, neighbors)| {
+            neighbors
+                .iter()
+                .map(|neighbor| (neighbor.clone(), owner_key.clone()))
+        })
+        .collect()
+}
+
+fn mermaid_er_insert_reverse_order_edges(adjacency: &mut HashMap<String, BTreeSet<String>>) {
+    for (owner_key, neighbor) in mermaid_er_reverse_order_edges(adjacency) {
+        adjacency.entry(owner_key).or_default().insert(neighbor);
     }
+}
+
+pub(crate) fn mermaid_er_order_graph(
+    nodes: &[MermaidErOrderNode],
+) -> (
+    HashMap<String, (f32, f32)>,
+    HashMap<String, BTreeSet<String>>,
+) {
+    let known_keys = mermaid_er_known_owner_keys(nodes);
+    let (positions, mut adjacency) = mermaid_er_forward_order_graph(nodes, &known_keys);
+    mermaid_er_insert_reverse_order_edges(&mut adjacency);
 
     (positions, adjacency)
 }

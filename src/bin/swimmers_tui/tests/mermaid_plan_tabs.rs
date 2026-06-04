@@ -33,6 +33,116 @@ pub(super) fn open_mermaid_on_plan_tab(
 }
 
 #[test]
+fn mermaid_plan_tabs_header_populates_hit_rects_and_active_color() {
+    let (mut app, mut renderer, layout) =
+        open_mermaid_on_plan_tab(Some("graph LR\nA-->B"), DomainPlanTab::Backend);
+
+    app.render(&mut renderer, layout);
+
+    let (back_rect, tab_rects) = match &app.fish_bowl_mode {
+        FishBowlMode::Mermaid(viewer) => (
+            viewer.back_rect.expect("back rect"),
+            viewer.tab_rects.clone(),
+        ),
+        FishBowlMode::Aquarium => panic!("expected Mermaid viewer mode"),
+    };
+    assert_eq!(
+        back_rect,
+        Rect {
+            x: layout.overview_field.x,
+            y: layout.overview_field.y,
+            width: display_width(MERMAID_BACK_LABEL),
+            height: 1,
+        }
+    );
+    assert_eq!(
+        tab_rects.iter().map(|(tab, _)| *tab).collect::<Vec<_>>(),
+        vec![
+            DomainPlanTab::Schema,
+            DomainPlanTab::Plan,
+            DomainPlanTab::Backend,
+        ]
+    );
+
+    let schema_rect = tab_rects[0].1;
+    let backend_rect = tab_rects[2].1;
+    assert_eq!(cell_at(&renderer, back_rect.x, back_rect.y).fg, Color::Cyan);
+    assert_eq!(
+        cell_at(&renderer, schema_rect.x, schema_rect.y).fg,
+        Color::DarkGrey
+    );
+    assert_eq!(
+        cell_at(&renderer, backend_rect.x, backend_rect.y).fg,
+        Color::Cyan
+    );
+    let header = row_text(&renderer, layout.overview_field.y);
+    assert!(header.contains("[schema] [plan] [backend] | 7"), "{header}");
+}
+
+#[test]
+fn mermaid_plan_tabs_header_breaks_when_next_tab_reaches_field_right() {
+    let api = MockApi::new();
+    let layout = test_layout(72, 24);
+    let mut app = make_app(api);
+    app.merge_sessions(
+        vec![session_summary("sess-1", "7", TEST_REPO_SWIMMERS)],
+        layout.overview_field,
+    );
+    let mut artifact = mermaid_artifact(
+        "sess-1",
+        "/tmp/repos/swimmers/flow.mmd",
+        "2026-03-23T10:05:00Z",
+        "graph LR\nA-->B",
+    );
+    artifact.plan_files = Some(vec![
+        "schema.mmd".to_string(),
+        "plan.md".to_string(),
+        "shared.md".to_string(),
+        "backend.md".to_string(),
+        "frontend.md".to_string(),
+        "flows.md".to_string(),
+    ]);
+    app.mermaid_artifacts.insert("sess-1".to_string(), artifact);
+    app.open_mermaid_viewer("sess-1".to_string());
+    if let FishBowlMode::Mermaid(viewer) = &mut app.fish_bowl_mode {
+        viewer.active_tab = DomainPlanTab::Frontend;
+    }
+    let mut renderer = test_renderer(72, 24);
+
+    app.render(&mut renderer, layout);
+
+    let tab_rects = match &app.fish_bowl_mode {
+        FishBowlMode::Mermaid(viewer) => viewer.tab_rects.clone(),
+        FishBowlMode::Aquarium => panic!("expected Mermaid viewer mode"),
+    };
+    assert_eq!(
+        tab_rects.iter().map(|(tab, _)| *tab).collect::<Vec<_>>(),
+        vec![
+            DomainPlanTab::Schema,
+            DomainPlanTab::Plan,
+            DomainPlanTab::Shared,
+            DomainPlanTab::Backend,
+            DomainPlanTab::Frontend,
+        ]
+    );
+    let frontend_rect = tab_rects[4].1;
+    assert_eq!(
+        frontend_rect.x + frontend_rect.width + 1 + display_width("[flows]"),
+        layout.overview_field.right()
+    );
+    assert_eq!(
+        cell_at(&renderer, frontend_rect.x, frontend_rect.y).fg,
+        Color::Cyan
+    );
+    let header = row_text(&renderer, layout.overview_field.y);
+    assert!(!header.contains("[flows]"), "{header}");
+    assert!(
+        header.contains("[schema] [plan] [shared] [backend] [frontend] | 7"),
+        "{header}"
+    );
+}
+
+#[test]
 fn render_plan_text_content_loading_state_when_no_content() {
     let (mut app, mut renderer, layout) = open_mermaid_on_plan_tab(None, DomainPlanTab::Plan);
     app.render(&mut renderer, layout);

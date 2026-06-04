@@ -1679,25 +1679,43 @@ impl<C: TuiApi> App<C> {
         }
     }
 
-    fn apply_thought_config_action_outcome(&mut self, outcome: ThoughtConfigActionOutcome) {
-        if let Some(candidates) = outcome.openrouter_candidates {
-            if let Some(editor) = &mut self.thought_config_editor {
-                editor.replace_openrouter_model_presets(candidates);
-            }
-        }
-        if let Some(config) = outcome.updated_config {
-            if let Some(editor) = &mut self.thought_config_editor {
-                editor.config = config;
-            }
-        }
-        if outcome.close_editor {
+    pub(crate) fn apply_thought_config_action_outcome(
+        &mut self,
+        outcome: ThoughtConfigActionOutcome,
+    ) {
+        let ThoughtConfigActionOutcome {
+            message,
+            updated_config,
+            openrouter_candidates,
+            close_editor,
+            refresh_sessions,
+        } = outcome;
+
+        self.apply_thought_config_editor_action_updates(updated_config, openrouter_candidates);
+        if close_editor {
             self.close_thought_config_editor();
         }
-        if outcome.refresh_sessions {
+        if refresh_sessions {
             self.pending_refresh = None;
             self.spawn_background_refresh(false);
         }
-        self.set_message(outcome.message);
+        self.set_message(message);
+    }
+
+    fn apply_thought_config_editor_action_updates(
+        &mut self,
+        updated_config: Option<ThoughtConfig>,
+        openrouter_candidates: Option<Vec<String>>,
+    ) {
+        let Some(editor) = &mut self.thought_config_editor else {
+            return;
+        };
+        if let Some(candidates) = openrouter_candidates {
+            editor.replace_openrouter_model_presets(candidates);
+        }
+        if let Some(config) = updated_config {
+            editor.config = config;
+        }
     }
 
     fn native_status_message(
