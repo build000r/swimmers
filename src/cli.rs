@@ -628,25 +628,31 @@ fn doctor_data_dir_finding(data_dir_writable: Result<PathBuf, String>) -> Doctor
 pub(crate) fn bind_host(bind: &str) -> &str {
     let bind = bind.trim();
 
-    if let Some(rest) = bind.strip_prefix('[') {
-        if let Some((host, tail)) = rest.split_once(']') {
-            if tail.is_empty() || tail.starts_with(':') {
-                return host;
-            }
-        }
-    }
+    bracketed_bind_host(bind)
+        .or_else(|| host_port_bind_host(bind))
+        .unwrap_or(bind)
+}
 
-    if let Some((host, port)) = bind.rsplit_once(':') {
-        if !host.is_empty()
-            && !port.is_empty()
-            && port.chars().all(|ch| ch.is_ascii_digit())
-            && !host.contains(':')
-        {
-            return host;
-        }
-    }
+fn bracketed_bind_host(bind: &str) -> Option<&str> {
+    let rest = bind.strip_prefix('[')?;
+    let (host, tail) = rest.split_once(']')?;
+    valid_bracketed_bind_tail(tail).then_some(host)
+}
 
-    bind
+fn valid_bracketed_bind_tail(tail: &str) -> bool {
+    tail.is_empty() || tail.starts_with(':')
+}
+
+fn host_port_bind_host(bind: &str) -> Option<&str> {
+    let (host, port) = bind.rsplit_once(':')?;
+    valid_host_port_bind(host, port).then_some(host)
+}
+
+fn valid_host_port_bind(host: &str, port: &str) -> bool {
+    !host.is_empty()
+        && !port.is_empty()
+        && port.bytes().all(|byte| byte.is_ascii_digit())
+        && !host.contains(':')
 }
 
 /// Returns true when `bind` resolves to a loopback host literal.

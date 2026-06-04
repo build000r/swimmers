@@ -25,6 +25,7 @@ use crate::types::{
     SessionTitlePayload, StateEvidence, TerminalSnapshot, TransportHealth,
 };
 
+mod liveness;
 mod tmux_input;
 
 #[cfg(test)]
@@ -2451,47 +2452,7 @@ async fn query_pane_liveness(tmux_name: &str) -> anyhow::Result<PaneLiveness> {
 
 /// Pure BFS over the process tree rooted at `pane_pid`. Exported for testing.
 fn compute_pane_liveness(pane_pid: u32, entries: Vec<ProcessEntry>) -> PaneLiveness {
-    let mut children: HashMap<u32, Vec<u32>> = HashMap::new();
-    let mut by_pid: HashMap<u32, ProcessEntry> = HashMap::new();
-
-    for entry in entries {
-        children.entry(entry.ppid).or_default().push(entry.pid);
-        by_pid.insert(entry.pid, entry);
-    }
-
-    // Walk descendants of the pane pid (excluding the shell itself).
-    let mut has_children = false;
-    let mut descendant_cpu: f32 = 0.0;
-    let mut queue: VecDeque<u32> = VecDeque::new();
-    let mut visited: HashSet<u32> = HashSet::new();
-    visited.insert(pane_pid);
-
-    if let Some(direct_children) = children.get(&pane_pid) {
-        for &child_pid in direct_children {
-            queue.push_back(child_pid);
-        }
-    }
-
-    while let Some(pid) = queue.pop_front() {
-        if !visited.insert(pid) {
-            continue;
-        }
-        has_children = true;
-        if let Some(entry) = by_pid.get(&pid) {
-            descendant_cpu += entry.pcpu;
-        }
-        if let Some(grandchildren) = children.get(&pid) {
-            for &gc in grandchildren {
-                queue.push_back(gc);
-            }
-        }
-    }
-
-    PaneLiveness {
-        has_children,
-        descendant_cpu,
-        process_snapshot_fresh: true,
-    }
+    liveness::compute_pane_liveness(pane_pid, entries)
 }
 
 async fn query_tmux_current_command(tmux_name: &str) -> anyhow::Result<String> {

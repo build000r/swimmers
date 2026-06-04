@@ -46,6 +46,7 @@ const MERMAID_ARTIFACT_CONTROLLER_JS_ROUTE: &str = "/mermaid_artifact_controller
 const TERMINAL_SAFETY_JS_ROUTE: &str = "/terminal_safety.js";
 const TERMINAL_SEARCH_LINKS_JS_ROUTE: &str = "/terminal_search_links.js";
 const TERMINAL_PROTOCOL_JS_ROUTE: &str = "/terminal_protocol.js";
+const SESSION_SOCKET_CONTROLLER_JS_ROUTE: &str = "/session_socket_controller.js";
 const DIR_BROWSER_JS_ROUTE: &str = "/dir_browser.js";
 const DIR_BROWSER_CONTROLLER_JS_ROUTE: &str = "/dir_browser_controller.js";
 const COMMAND_PALETTE_JS_ROUTE: &str = "/command_palette.js";
@@ -136,6 +137,10 @@ pub fn routes() -> Router<Arc<AppState>> {
             get(terminal_search_links_js),
         )
         .route(TERMINAL_PROTOCOL_JS_ROUTE, get(terminal_protocol_js))
+        .route(
+            SESSION_SOCKET_CONTROLLER_JS_ROUTE,
+            get(session_socket_controller_js),
+        )
         .route(DIR_BROWSER_JS_ROUTE, get(dir_browser_js))
         .route(
             DIR_BROWSER_CONTROLLER_JS_ROUTE,
@@ -764,6 +769,13 @@ async fn terminal_protocol_js() -> Response {
     )
 }
 
+async fn session_socket_controller_js() -> Response {
+    javascript_asset(
+        "src/web/session_socket_controller.js",
+        include_str!("session_socket_controller.js"),
+    )
+}
+
 async fn dir_browser_js() -> Response {
     javascript_asset("src/web/dir_browser.js", include_str!("dir_browser.js"))
 }
@@ -1312,62 +1324,162 @@ async fn session_ws_authenticated_inner(
     resume_from_seq: Option<u64>,
     output_mode: WsOutputMode,
 ) -> anyhow::Result<()> {
+    let mut session = prepare_session_ws_start(
+        &state,
+        &handle,
+        &session_id,
+        &auth,
+        resume_from_seq,
+        output_mode,
+    )
+    .await?;
+
+    if !send_session_ws_ready(&mut sender, &session).await? {
+        return Ok(());
+    }
+
+    run_session_ws_event_loop(
+        &handle,
+        &mut sender,
+        &mut receiver,
+        &auth,
+        output_mode,
+        &session_id,
+        &mut session,
+    )
+    .await?;
+
+    let _ = handle
+        .send(SessionCommand::Unsubscribe {
+            client_id: session.client_id,
+        })
+        .await;
+    Ok(())
+}
+
+struct SessionWsStart {
+    client_id: u64,
+    output_rx: mpsc::Receiver<OutputFrame>,
+    session_events: broadcast::Receiver<ControlEvent>,
+    thought_events: broadcast::Receiver<ControlEvent>,
+    lifecycle_events: broadcast::Receiver<LifecycleEvent>,
+    subscribe_outcome: SubscribeOutcome,
+    ready_payload: serde_json::Value,
+}
+
+async fn prepare_session_ws_start(
+    state: &Arc<AppState>,
+    handle: &ActorHandle,
+    session_id: &str,
+    auth: &AuthInfo,
+    resume_from_seq: Option<u64>,
+    output_mode: WsOutputMode,
+) -> anyhow::Result<SessionWsStart> {
     let client_id = NEXT_WS_CLIENT_ID.fetch_add(1, Ordering::Relaxed);
-    let replay_cursor = request_replay_cursor(&handle).await?;
+    let replay_cursor = request_replay_cursor(handle).await?;
     let requested_resume_from_seq =
         resume_from_seq.unwrap_or_else(|| replay_cursor.replay_window_start_seq.saturating_sub(1));
-    let (mut output_rx, subscribe_outcome) =
-        subscribe_to_output(&state, &handle, client_id, Some(requested_resume_from_seq)).await?;
-    let mut session_events = handle.subscribe_events();
-    let mut thought_events = state.supervisor.subscribe_thought_events();
-    let mut lifecycle_events = state.supervisor.subscribe_events();
-    let summary = fetch_live_summary(&state, &session_id).await?;
+    let (output_rx, subscribe_outcome) =
+        subscribe_to_output(state, handle, client_id, Some(requested_resume_from_seq)).await?;
+    let session_events = handle.subscribe_events();
+    let thought_events = state.supervisor.subscribe_thought_events();
+    let lifecycle_events = state.supervisor.subscribe_events();
+    let summary = fetch_live_summary(state, session_id).await?;
     let can_write = auth.has_scope(AuthScope::StreamWrite);
 
     let ready_payload = build_ready_payload(
-        &session_id,
+        session_id,
         can_write,
         replay_cursor,
         requested_resume_from_seq,
         output_mode,
         &summary,
     );
+
+    Ok(SessionWsStart {
+        client_id,
+        output_rx,
+        session_events,
+        thought_events,
+        lifecycle_events,
+        subscribe_outcome,
+        ready_payload,
+    })
+}
+
+async fn send_session_ws_ready(
+    sender: &mut WsSender,
+    session: &SessionWsStart,
+) -> anyhow::Result<bool> {
     sender
-        .send(Message::Text(ready_payload.to_string().into()))
+        .send(Message::Text(session.ready_payload.to_string().into()))
         .await?;
 
-    if let Some((notice, should_close)) = subscribe_outcome_notice(&subscribe_outcome) {
+    if let Some((notice, should_close)) = subscribe_outcome_notice(&session.subscribe_outcome) {
         sender
             .send(Message::Text(notice.to_string().into()))
             .await?;
-        if should_close {
-            return Ok(());
-        }
+        return Ok(!should_close);
     }
 
-    loop {
-        let event = tokio::select! {
-            maybe_message = receiver.next() => match maybe_message {
-                Some(message) => SessionWsEvent::Incoming(message),
-                None => break,
-            },
-            maybe_frame = output_rx.recv() => match maybe_frame {
-                Some(frame) => SessionWsEvent::Frame(frame),
-                None => break,
-            },
-            event = session_events.recv() => SessionWsEvent::SessionControl(event),
-            event = thought_events.recv() => SessionWsEvent::ThoughtControl(event),
-            event = lifecycle_events.recv() => SessionWsEvent::Lifecycle(event),
-        };
-        if !handle_session_ws_event(&handle, &mut sender, &auth, output_mode, &session_id, event)
-            .await?
-        {
-            break;
-        }
-    }
+    Ok(true)
+}
 
-    let _ = handle.send(SessionCommand::Unsubscribe { client_id }).await;
+async fn run_session_ws_event_loop(
+    handle: &ActorHandle,
+    sender: &mut WsSender,
+    receiver: &mut WsReceiver,
+    auth: &AuthInfo,
+    output_mode: WsOutputMode,
+    session_id: &str,
+    session: &mut SessionWsStart,
+) -> anyhow::Result<()> {
+    while continue_session_ws_event_loop(
+        handle,
+        sender,
+        receiver,
+        auth,
+        output_mode,
+        session_id,
+        session,
+    )
+    .await?
+    {}
+
     Ok(())
+}
+
+async fn continue_session_ws_event_loop(
+    handle: &ActorHandle,
+    sender: &mut WsSender,
+    receiver: &mut WsReceiver,
+    auth: &AuthInfo,
+    output_mode: WsOutputMode,
+    session_id: &str,
+    session: &mut SessionWsStart,
+) -> anyhow::Result<bool> {
+    let Some(event) = next_session_ws_event(receiver, session).await else {
+        return Ok(false);
+    };
+    handle_session_ws_event(handle, sender, auth, output_mode, session_id, event).await
+}
+
+async fn next_session_ws_event(
+    receiver: &mut WsReceiver,
+    session: &mut SessionWsStart,
+) -> Option<SessionWsEvent> {
+    let output_rx = &mut session.output_rx;
+    let session_events = &mut session.session_events;
+    let thought_events = &mut session.thought_events;
+    let lifecycle_events = &mut session.lifecycle_events;
+
+    tokio::select! {
+        maybe_message = receiver.next() => maybe_message.map(SessionWsEvent::Incoming),
+        maybe_frame = output_rx.recv() => maybe_frame.map(SessionWsEvent::Frame),
+        event = session_events.recv() => Some(SessionWsEvent::SessionControl(event)),
+        event = thought_events.recv() => Some(SessionWsEvent::ThoughtControl(event)),
+        event = lifecycle_events.recv() => Some(SessionWsEvent::Lifecycle(event)),
+    }
 }
 
 /// Build the `ready` handshake payload sent immediately after a client
@@ -2714,6 +2826,11 @@ mod tests {
                 "export function buildSessionSocketUrl",
             ),
             (
+                SESSION_SOCKET_CONTROLLER_JS_ROUTE,
+                session_socket_controller_js().await,
+                "export function createSessionSocketController",
+            ),
+            (
                 DIR_BROWSER_JS_ROUTE,
                 dir_browser_js().await,
                 "export function renderDirEntries",
@@ -3097,15 +3214,14 @@ mod tests {
         assert!(js.contains("flushEncodedInputBytes();"));
         assert!(js.contains("function terminalCanvasHasVisiblePixels()"));
         assert!(js.contains("function verifyTerminalPaintOrFallback()"));
-        assert!(
-            js.contains("activateTerminalSurfaceFallback(rendererPlan, terminalSurfaceRuntime)")
-        );
+        assert!(terminal_surface_setup
+            .contains("activateTerminalSurfaceFallback(rendererPlan, runtime)"));
         assert!(js.contains("setTerminalTextFallbackActive,"));
         assert!(terminal_surface_setup.contains(
             "runtime.setTerminalTextFallbackActive(true, { clearText: plan.clearText })"
         ));
         assert!(js.contains("function sendFallbackTerminalEvent(event)"));
-        assert!(js.contains("function updateTerminalFallbackText(text)"));
+        assert!(terminal_surface_setup.contains("function updateTerminalFallbackText(text)"));
         assert!(js.contains("function terminalFallbackOwnsPointer(event)"));
         let css = include_str!("app.css");
         assert!(css.contains("white-space: pre-wrap"));

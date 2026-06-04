@@ -690,13 +690,10 @@ fn mermaid_truncate_lines_with_marker(lines: &mut Vec<String>, max_rows: usize) 
     if lines.len() <= max_rows {
         return false;
     }
-    if max_rows == 0 {
-        lines.clear();
-        return true;
-    }
+
     lines.truncate(max_rows);
-    if let Some(last) = lines.last_mut() {
-        *last = MERMAID_TRUNCATED_MARKER.to_string();
+    if max_rows != 0 {
+        lines[max_rows - 1] = MERMAID_TRUNCATED_MARKER.to_string();
     }
     true
 }
@@ -2093,6 +2090,37 @@ mod mermaid_focus_tests {
             top: sort_y,
             bottom: sort_y,
         }
+    }
+
+    #[test]
+    fn mermaid_truncate_leaves_lines_unchanged_when_within_limit() {
+        let mut lines = vec!["first".to_string(), "second".to_string()];
+
+        assert!(!mermaid_truncate_lines_with_marker(&mut lines, 2));
+        assert_eq!(lines, vec!["first".to_string(), "second".to_string()]);
+    }
+
+    #[test]
+    fn mermaid_truncate_zero_rows_clears_over_limit_lines() {
+        let mut lines = vec!["first".to_string()];
+
+        assert!(mermaid_truncate_lines_with_marker(&mut lines, 0));
+        assert!(lines.is_empty());
+    }
+
+    #[test]
+    fn mermaid_truncate_replaces_final_retained_line_with_marker() {
+        let mut lines = vec![
+            "first".to_string(),
+            "second".to_string(),
+            "third".to_string(),
+        ];
+
+        assert!(mermaid_truncate_lines_with_marker(&mut lines, 2));
+        assert_eq!(
+            lines,
+            vec!["first".to_string(), MERMAID_TRUNCATED_MARKER.to_string()]
+        );
     }
 
     #[test]

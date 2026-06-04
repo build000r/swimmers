@@ -7,6 +7,8 @@ mod mermaid_viewer;
 #[cfg(test)]
 pub(crate) use mermaid_viewer::read_plan_file_from_disk;
 use mermaid_viewer::MermaidCacheEntry;
+#[path = "field_click.rs"]
+mod field_click;
 
 // Once the school is large, the O(n^2) pairwise collision pass gets expensive.
 // 50 entities is where we start seeing frame-time spikes on laptops, so we cap
@@ -3858,54 +3860,7 @@ impl<C: TuiApi> App<C> {
     }
 
     pub(crate) fn handle_field_click(&mut self, x: u16, y: u16, field: Rect) {
-        if self.initial_request.is_some() {
-            return;
-        }
-
-        if let Some(picker) = &self.picker {
-            let layout = picker_layout(picker, field);
-            if layout.frame.contains(x, y) {
-                if let Some(action) = picker_action_at(picker, &layout, x, y) {
-                    self.handle_picker_action(action, field);
-                }
-                return;
-            }
-            self.close_picker();
-            return;
-        }
-
-        if let Some(action) = skill_panel_action_at(self, field, x, y) {
-            self.open_skill_atlas_viewer(action);
-            return;
-        }
-
-        let tank_field = build_skill_panel(self, field).tank_field;
-        if !tank_field.contains(x, y) {
-            return;
-        }
-
-        let visible_entities = self.visible_entities();
-        let hit = if self.uses_balls_scene(&visible_entities) {
-            balls_theme_hit_test(&visible_entities, tank_field, x, y)
-        } else {
-            visible_entities
-                .iter()
-                .copied()
-                .find(|entity| entity.screen_rect(tank_field).contains(x, y))
-        }
-        .map(|entity| {
-            (
-                entity.session.session_id.clone(),
-                selected_label(Some(&entity.session.tmux_name)),
-            )
-        });
-
-        if let Some((session_id, label)) = hit {
-            self.select_and_open_session(session_id, label);
-            return;
-        }
-
-        self.open_picker(x, y);
+        field_click::handle_field_click(self, x, y, field);
     }
 
     pub(crate) fn handle_picker_action(&mut self, action: PickerAction, field: Rect) {

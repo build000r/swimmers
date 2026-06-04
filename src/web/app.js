@@ -16,6 +16,9 @@ import {
 import {
   createTerminalSurfaceRuntimeHelpers,
 } from "./terminal_surface_setup.js";
+import {
+  createSessionSocketController,
+} from "./session_socket_controller.js";
 import { runTerminalSurfaceResize } from "./terminal_resize.js";
 import { runGlobalShortcutAction } from "./global_shortcut_dispatch.js";
 import {
@@ -45,10 +48,9 @@ import {
   createTerminalSearchLinksController,
 } from "./terminal_search_links.js";
 import {
-  buildSessionSocketUrl,
   decodeTerminalOutputFrame,
   fallbackTextForKeyEvent,
-  keyModifiers, selectedSessionConnectionPlan, sessionSocketAttachPlan, sessionSocketAttachStatePlan, sessionSocketAuthMessageForToken, sessionSocketCloseExecutionPlan, sessionSocketClosePlan, sessionSocketErrorPlan, sessionSocketMessageExecutionPlan, sessionSocketOpenExecutionPlan, sessionSocketOpenStatusPlan, sessionSocketReconnectPlan,
+  keyModifiers,
   terminalControlKeyEvent,
 } from "./terminal_protocol.js";
 import {
@@ -541,6 +543,38 @@ Object.assign(terminalSurfaceRuntime, {
   setTerminalTextFallbackActive,
   syncTerminalAccessibilityMirror,
 });
+
+const sessionSocketRuntime = {
+  state,
+  window,
+  WebSocketClass: window.WebSocket,
+  currentSession,
+  setupHudSurface,
+  setupTerminalSurface,
+  teardownTerminal,
+  disconnectSocket,
+  measureAndResizeSurface,
+  scheduleSessionRefresh,
+  reconnectDelayMs,
+  setConnectionStatus,
+  setModeStatus,
+  syncWriteAccess,
+  syncTerminalTools,
+  feedTerminalBytes,
+  mergeSummary,
+  handleInputAck,
+  applyControlEvent,
+  applyLifecycleEvent,
+  refreshSessions,
+};
+
+const {
+  connectSelectedSession,
+  sessionSocketUrl,
+  sessionSocketAuthMessage,
+  terminalPayloadFromSocketBytes,
+  handleSocketText,
+} = createSessionSocketController(sessionSocketRuntime);
 
 const terminalResizeRuntime = {
   state,
@@ -2232,114 +2266,6 @@ function syncTerminalPresentation() {
   el.terminalFallback.classList.toggle("hidden", plan.terminalFallbackHidden);
 }
 
-async function connectSelectedSession() {
-  await setupHudSurface();
-
-  const session = currentSession();
-  if (selectedSessionConnectionPlan({ session }).type === "teardown_terminal") {
-    teardownTerminal();
-    return;
-  }
-
-  await setupTerminalSurface();
-  const plan = selectedSessionConnectionPlan({
-    session, terminalSurfaceChecked: true, hasTerminal: Boolean(state.terminal),
-    terminalFallbackActive: state.terminalFallbackActive, ws: state.ws, openReadyState: WebSocket.OPEN,
-  });
-  if (plan.type !== "connect_socket") return;
-
-  disconnectSocket();
-  const generation = state.connectionGeneration;
-  const url = sessionSocketUrl(session);
-  const attachPlan = sessionSocketAttachPlan(url);
-
-  const ws = new WebSocket(url);
-  attachSelectedSessionSocket(ws, plan, attachPlan);
-  ws.onopen = () => handleSelectedSessionSocketOpen(ws, generation);
-  ws.onmessage = (event) => handleSelectedSessionSocketMessage(ws, generation, event);
-  ws.onclose = () => handleSelectedSessionSocketClose(generation);
-  ws.onerror = () => handleSelectedSessionSocketError();
-}
-
-function selectedSessionSocketContext(ws, generation) {
-  return { generation, currentGeneration: state.connectionGeneration, currentSocketMatches: generation === state.connectionGeneration && state.ws === ws };
-}
-
-function attachSelectedSessionSocket(ws, plan, attachPlan) {
-  const attach = sessionSocketAttachStatePlan(plan, attachPlan);
-  [ws.binaryType, ws.sessionId, ws.framedOutput] = [attach.binaryType, attach.sessionId, attach.framedOutput];
-  state.ws = ws; state.readOnly = attach.readOnly;
-  syncWriteAccess();
-  setConnectionStatus(attach.status);
-}
-
-function handleSelectedSessionSocketOpen(ws, generation) {
-  const openPlan = sessionSocketOpenExecutionPlan(selectedSessionSocketContext(ws, generation));
-  if (openPlan.type === "close_stale") { ws.close(); return; }
-  const statusPlan = sessionSocketOpenStatusPlan(sendSessionSocketAuth(ws));
-  if (openPlan.resizeTerminal) measureAndResizeSurface(true, true);
-  if (openPlan.resetReconnectAttempt) state.reconnectAttempt = 0;
-  setConnectionStatus(statusPlan.status);
-  if (openPlan.scheduleRefresh) scheduleSessionRefresh();
-}
-
-function handleSelectedSessionSocketMessage(ws, generation, event) {
-  const messagePlan = sessionSocketMessageExecutionPlan({ ...selectedSessionSocketContext(ws, generation), data: event.data });
-  if (messagePlan.type === "ignore") return;
-  if (messagePlan.type === "handle_text") { handleSocketText(messagePlan.text); return; }
-  feedTerminalBytes(terminalPayloadFromSocketBytes(messagePlan.bytes, ws));
-}
-
-function handleSelectedSessionSocketClose(generation) {
-  if (sessionSocketClosePlan({ generation, currentGeneration: state.connectionGeneration }).type === "ignore") return;
-  const closePlan = sessionSocketCloseExecutionPlan(reconnectDelayMs());
-  if (closePlan.incrementReconnectAttempt) state.reconnectAttempt += 1;
-  setConnectionStatus(closePlan.status, true);
-  if (closePlan.scheduleRefresh) scheduleSessionRefresh();
-  state.reconnectTimer = window.setTimeout(() => runSelectedSessionSocketReconnect(generation), closePlan.delayMs);
-}
-
-function runSelectedSessionSocketReconnect(generation) {
-  state.reconnectTimer = null;
-  if (sessionSocketReconnectPlan({ generation, currentGeneration: state.connectionGeneration, hasCurrentSession: generation === state.connectionGeneration && Boolean(currentSession()) }).type !== "reconnect") return;
-  connectSelectedSession();
-}
-
-function handleSelectedSessionSocketError() {
-  const errorPlan = sessionSocketErrorPlan(); setConnectionStatus(errorPlan.status, errorPlan.muted);
-}
-
-function sessionSocketUrl(session) {
-  return buildSessionSocketUrl(session, window.location, state.lastTerminalSeqBySession.get(session.session_id));
-}
-
-function sessionSocketAuthMessage() {
-  return sessionSocketAuthMessageForToken(state.token);
-}
-
-function sendSessionSocketAuth(ws) {
-  const message = sessionSocketAuthMessage();
-  if (!message || !ws || ws.readyState !== WebSocket.OPEN) {
-    return false;
-  }
-  ws.send(message);
-  return true;
-}
-
-function terminalPayloadFromSocketBytes(bytes, ws = state.ws) {
-  if (!(bytes instanceof Uint8Array) || !ws?.framedOutput) {
-    return bytes;
-  }
-  const frame = decodeTerminalOutputFrame(bytes);
-  if (!frame) {
-    return bytes;
-  }
-  if (ws.sessionId) {
-    state.lastTerminalSeqBySession.set(ws.sessionId, frame.seq);
-  }
-  return frame.payload;
-}
-
 function feedTerminalBytes(bytes) {
   if (!(bytes instanceof Uint8Array)) {
     return false;
@@ -2443,53 +2369,6 @@ function terminalCanvasHasVisiblePixels() {
   }
 
   return false;
-}
-
-function handleSocketText(raw) {
-  try {
-    const message = JSON.parse(raw);
-    switch (message.type) {
-      case "ready":
-        state.readOnly = Boolean(message.readOnly);
-        setConnectionStatus("attached");
-        setModeStatus(state.readOnly ? "observer" : "operator", !state.token);
-        syncWriteAccess();
-        syncTerminalTools();
-        if (message.summary) {
-          mergeSummary(message.summary);
-        }
-        scheduleSessionRefresh();
-        break;
-      case "replay_truncated":
-        setConnectionStatus("partial replay", true);
-        break;
-      case "error":
-        setConnectionStatus(message.code || "error", true);
-        break;
-      case "overloaded":
-        setConnectionStatus(`server overloaded; input disabled; retrying in ${Math.ceil((message.retryAfterMs || 4000) / 1000)}s`, true);
-        break;
-      case "input_ack":
-        handleInputAck(message);
-        break;
-      case "control_event":
-        applyControlEvent(message);
-        break;
-      case "lifecycle_event":
-        applyLifecycleEvent(message);
-        break;
-      case "event_stream_lagged":
-        setConnectionStatus("event stream lagged", true);
-        void refreshSessions();
-        break;
-      case "pong":
-        break;
-      default:
-        break;
-    }
-  } catch (_) {
-    // Ignore malformed transport diagnostics.
-  }
 }
 
 function applyControlEvent(message) {
