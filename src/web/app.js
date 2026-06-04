@@ -74,43 +74,28 @@ import {
   TROGDOR_DRAGON_TARGET,
   buildTrogdorDomGroups,
   loadTrogdorReadProgress,
-  markTrogdorBurntSessionsInMap,
-  markTrogdorSessionsRespondedState,
   normalizeTrogdorSessionId,
-  pruneTrogdorBurntSessionMap,
-  rawTrogdorSessionAwaitingUser,
-  saveTrogdorReadProgress,
-  setTrogdorClawgReadIndexForProgress,
-  startTrogdorReaderStateForSession,
   summarizeTrogdorDom,
-  trogdorClawgKey,
-  trogdorClawgDismissedForMap,
-  trogdorClawgReadCompleteForProgress,
   trogdorDomActionCueKinds,
   trogdorDragonPose as buildTrogdorDragonPose,
   trogdorHasActionCue,
   trogdorPrimaryActionCue,
   trogdorActionPayloadForZone,
   trogdorAtlasTransitionState,
-  trogdorCueTransitionState,
-  trogdorCurrentSurfaceSessionForHover,
   trogdorHoverReaderResetState,
   trogdorHoverSessionIdForZone,
   trogdorReadableHoveredSurfaceSession,
   trogdorReaderDisplayState,
-  trogdorReaderProgressAdvanceForSession,
-  trogdorReaderStateForWpmChange,
   trogdorReaderTimerAction,
   trogdorReaderToggleAction,
   trogdorReaderWpmForAction,
-  trogdorReaderWordIndexForProgress,
   trogdorRawSessionForHover,
-  trogdorSessionCanReadForState,
-  trogdorSessionBurntInMap,
   trogdorSessionAwaitingUser,
-  trogdorSwordsmanVisibleForState,
   trogdorTerminalFocusStatus,
 } from "./trogdor_logic.js";
+import {
+  createTrogdorStateHelpers,
+} from "./trogdor_state.js";
 import {
   TROGDOR_REPO_POSITIONS,
   trogdorReadButtonLabel,
@@ -314,6 +299,29 @@ const state = {
     error: "",
   },
 };
+
+const {
+  advanceTrogdorReaderProgressForCurrentHover,
+  currentTrogdorSurfaceSession,
+  markTrogdorSessionsResponded,
+  rawSessionAwaitingUser,
+  resetTrogdorReaderAfterWpmChange,
+  startTrogdorReaderForSession,
+  syncTrogdorCueTransitions,
+  trogdorClawgReadComplete,
+  trogdorReaderWordIndex,
+  trogdorSessionBurnt,
+  trogdorSessionCanRead,
+} = createTrogdorStateHelpers({
+  state,
+  operatorPressureSnapshot,
+  surfaceSession,
+  renderHudSurface,
+  syncTrogdorReaderTimer,
+  performanceRef: performance,
+  windowRef: window,
+  burnMs: TROGDOR_BURN_MS,
+});
 
 const defaultDocumentTitle = document.title || "swimmers";
 let terminalZoomInputController;
@@ -1060,175 +1068,6 @@ function sessionExists(sessionId) {
   return state.sessions.some((session) => session.session_id === sessionId);
 }
 
-function rawSessionAwaitingUser(session) {
-  return rawTrogdorSessionAwaitingUser(session, operatorPressureSnapshot(session?.session_id));
-}
-
-function setTrogdorClawgReadIndex(session, index) {
-  const next = setTrogdorClawgReadIndexForProgress(
-    state.trogdorReadProgress || {},
-    session,
-    index,
-  );
-  if (!next.changed) {
-    return false;
-  }
-  state.trogdorReadProgress = next.progress;
-  saveTrogdorReadProgress(state.trogdorReadProgress);
-  return true;
-}
-
-function trogdorClawgReadComplete(session) {
-  return trogdorClawgReadCompleteForProgress(session, state.trogdorReadProgress);
-}
-
-function trogdorClawgDismissed(session) {
-  return trogdorClawgDismissedForMap(session, state.trogdorDismissedClawgs);
-}
-
-function trogdorSessionBurnt(sessionOrId) {
-  const next = trogdorSessionBurntInMap(
-    state.trogdorBurntSessions,
-    sessionOrId,
-    performance.now(),
-  );
-  state.trogdorBurntSessions = next.burntSessions;
-  return next.burnt;
-}
-
-function pruneTrogdorBurntSessions() {
-  const next = pruneTrogdorBurntSessionMap(state.trogdorBurntSessions, performance.now());
-  state.trogdorBurntSessions = next.burntSessions;
-  return next.changed;
-}
-
-function markTrogdorSessionsBurnt(sessionIds, options = {}) {
-  const next = markTrogdorBurntSessionsInMap(
-    state.trogdorBurntSessions,
-    sessionIds,
-    performance.now(),
-    TROGDOR_BURN_MS,
-  );
-  if (!next.ids.length) {
-    return;
-  }
-  state.trogdorBurntSessions = next.burntSessions;
-  window.setTimeout(() => {
-    if (pruneTrogdorBurntSessions()) {
-      state.trogdorSurfaceSignature = "";
-      renderHudSurface();
-    }
-  }, TROGDOR_BURN_MS + 40);
-  if (options.render !== false) {
-    state.trogdorSurfaceSignature = "";
-    renderHudSurface();
-  }
-}
-
-function currentTrogdorSurfaceSession() {
-  return trogdorCurrentSurfaceSessionForHover({
-    sessions: state.sessions,
-    hoveredSessionId: state.hoveredTrogdorSessionId,
-    toSurfaceSession: surfaceSession,
-  });
-}
-
-function trogdorSwordsmanVisible(session) {
-  const burnt = typeof session?.trogdorBurnt === "boolean" ? session.trogdorBurnt : trogdorSessionBurnt(session);
-  const dismissed = typeof session?.trogdorDismissed === "boolean" ? session.trogdorDismissed : trogdorClawgDismissed(session);
-  return trogdorSwordsmanVisibleForState(session, { burnt, dismissed });
-}
-
-function trogdorSessionCanRead(session) {
-  const burnt = typeof session?.trogdorBurnt === "boolean" ? session.trogdorBurnt : trogdorSessionBurnt(session);
-  const dismissed = typeof session?.trogdorDismissed === "boolean" ? session.trogdorDismissed : trogdorClawgDismissed(session);
-  return trogdorSessionCanReadForState(session, { burnt, dismissed });
-}
-
-function trogdorReaderWordIndex(session, wpm) {
-  return trogdorReaderWordIndexForProgress(session, {
-    wpm,
-    readerClawgKey: state.trogdorReaderClawgKey,
-    readerStartIndex: state.trogdorReaderStartIndex,
-    progress: state.trogdorReadProgress,
-    reading: state.trogdorReading,
-    hoveredSessionId: state.hoveredTrogdorSessionId,
-    readerStartedAt: state.trogdorReaderStartedAt,
-    now: performance.now(),
-  });
-}
-
-function advanceTrogdorReaderProgressForCurrentHover() {
-  const session = currentTrogdorSurfaceSession();
-  if (!session || !trogdorSessionCanRead(session)) {
-    return;
-  }
-  if (trogdorClawgKey(session) !== state.trogdorReaderClawgKey) {
-    startTrogdorReaderForSession(session);
-  }
-  if (state.trogdorReading === false) {
-    return;
-  }
-  const next = trogdorReaderProgressAdvanceForSession(session, {
-    wordIndex: trogdorReaderWordIndex(session, state.trogdorWpm),
-    reading: state.trogdorReading,
-  });
-  if (!next.shouldAdvance) {
-    return;
-  }
-  setTrogdorClawgReadIndex(session, next.nextReadIndex);
-  state.trogdorReading = next.reading;
-}
-
-function resetTrogdorReaderAfterWpmChange() {
-  Object.assign(state, trogdorReaderStateForWpmChange(currentTrogdorSurfaceSession(), {
-    currentStartIndex: state.trogdorReaderStartIndex,
-    progress: state.trogdorReadProgress,
-    now: performance.now(),
-  }));
-}
-
-function startTrogdorReaderForSession(session, options = {}) {
-  const next = startTrogdorReaderStateForSession(session, {
-    readAgain: Boolean(options.readAgain),
-    dismissedClawgs: state.trogdorDismissedClawgs || {},
-    progress: state.trogdorReadProgress || {},
-    now: performance.now(),
-  });
-  state.trogdorDismissedClawgs = next.dismissedClawgs;
-  if (next.progressChanged) {
-    state.trogdorReadProgress = next.progress;
-    saveTrogdorReadProgress(state.trogdorReadProgress);
-  }
-  state.trogdorReaderClawgKey = next.readerClawgKey;
-  state.trogdorReaderStartIndex = next.readerStartIndex;
-  state.trogdorReaderStartedAt = next.readerStartedAt;
-  state.trogdorReading = next.reading;
-}
-
-function markTrogdorSessionsResponded(sessionIds) {
-  const next = markTrogdorSessionsRespondedState({
-    sessionIds,
-    sessions: state.sessions,
-    toSurfaceSession: surfaceSession,
-    dismissedClawgs: state.trogdorDismissedClawgs || {},
-    progress: state.trogdorReadProgress || {},
-    hoveredSessionId: state.hoveredTrogdorSessionId,
-  });
-  state.trogdorDismissedClawgs = next.dismissedClawgs;
-  if (next.progressChanged) {
-    state.trogdorReadProgress = next.progress;
-    saveTrogdorReadProgress(state.trogdorReadProgress);
-  }
-  if (next.burntIds.length) {
-    if (next.resetReader) {
-      Object.assign(state, trogdorHoverReaderResetState());
-      syncTrogdorReaderTimer();
-    }
-    markTrogdorSessionsBurnt(next.burntIds);
-  }
-}
-
 function keyBeginsTrogdorResponse(event) {
   if (event.repeat || event.metaKey || event.ctrlKey || event.altKey) {
     return false;
@@ -1267,25 +1106,6 @@ function applyOperatorPressure(payload) {
     }
   }
   state.operatorPressureBySession = map;
-}
-
-function syncTrogdorCueTransitions() {
-  const next = trogdorCueTransitionState({
-    sessions: state.sessions,
-    previousAwaitingSessionIds: state.trogdorAwaitingSessionIds,
-    hoveredSessionId: state.hoveredTrogdorSessionId,
-    rawAwaitingUser: rawSessionAwaitingUser,
-    sessionBurnt: trogdorSessionBurnt,
-  });
-  state.trogdorAwaitingSessionIds = next.awaitingSessionIds;
-  if (next.burntIds.length) {
-    markTrogdorSessionsBurnt(next.burntIds, { render: false });
-  }
-
-  if (next.resetReader) {
-    Object.assign(state, trogdorHoverReaderResetState());
-    syncTrogdorReaderTimer();
-  }
 }
 
 function parentDir(path) {

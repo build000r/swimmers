@@ -44,6 +44,7 @@ pub(super) const DIR_BROWSER_CONTROLLER_JS_ROUTE: &str = "/dir_browser_controlle
 pub(super) const COMMAND_PALETTE_JS_ROUTE: &str = "/command_palette.js";
 pub(super) const COMMAND_PALETTE_CONTROLLER_JS_ROUTE: &str = "/command_palette_controller.js";
 pub(super) const TROGDOR_LOGIC_JS_ROUTE: &str = "/trogdor_logic.js";
+pub(super) const TROGDOR_STATE_JS_ROUTE: &str = "/trogdor_state.js";
 pub(super) const TROGDOR_DOM_LOGIC_JS_ROUTE: &str = "/trogdor_dom_logic.js";
 pub(super) const TROGDOR_RENDER_JS_ROUTE: &str = "/trogdor_render.js";
 pub(super) const WORKBENCH_DOM_JS_ROUTE: &str = "/workbench_dom.js";
@@ -125,6 +126,7 @@ pub(super) fn routes() -> Router<Arc<AppState>> {
             get(command_palette_controller_js),
         )
         .route(TROGDOR_LOGIC_JS_ROUTE, get(trogdor_logic_js))
+        .route(TROGDOR_STATE_JS_ROUTE, get(trogdor_state_js))
         .route(TROGDOR_DOM_LOGIC_JS_ROUTE, get(trogdor_dom_logic_js))
         .route(TROGDOR_RENDER_JS_ROUTE, get(trogdor_render_js))
         .route(WORKBENCH_DOM_JS_ROUTE, get(workbench_dom_js))
@@ -398,6 +400,11 @@ javascript_route!(
     trogdor_logic_js,
     "src/web/trogdor_logic.js",
     "trogdor_logic.js"
+);
+javascript_route!(
+    trogdor_state_js,
+    "src/web/trogdor_state.js",
+    "trogdor_state.js"
 );
 javascript_route!(
     trogdor_dom_logic_js,
