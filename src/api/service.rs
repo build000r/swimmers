@@ -1812,12 +1812,7 @@ fn plan_attention_group_sessions(
     include_unnumbered_sessions: bool,
 ) -> AttentionGroupPlan {
     let limit = max_sessions.clamp(1, 6);
-    let mut candidates = sessions
-        .into_iter()
-        .filter(attention_group_session_is_eligible)
-        .filter(|session| include_unnumbered_sessions || tmux_name_is_numbered(&session.tmux_name))
-        .map(AttentionCandidate::from)
-        .collect::<Vec<_>>();
+    let mut candidates = attention_group_candidates(sessions, include_unnumbered_sessions);
     if candidates.is_empty() {
         return AttentionGroupPlan {
             visible: Vec::new(),
@@ -1826,7 +1821,35 @@ fn plan_attention_group_sessions(
     }
 
     let current_ids = current_session_ids.iter().collect::<HashSet<_>>();
-    let mut visible = Vec::<AttentionCandidate>::new();
+    let mut visible =
+        retain_current_attention_group_candidates(&mut candidates, current_session_ids, limit);
+    fill_attention_group_candidates(&mut visible, &mut candidates, limit);
+    sort_attention_backlog_candidates(&mut candidates, &visible);
+
+    AttentionGroupPlan {
+        visible: attention_sessions_from_candidates(visible),
+        backlog: attention_backlog_sessions(candidates, &current_ids),
+    }
+}
+
+fn attention_group_candidates(
+    sessions: Vec<SessionSummary>,
+    include_unnumbered_sessions: bool,
+) -> Vec<AttentionCandidate> {
+    sessions
+        .into_iter()
+        .filter(attention_group_session_is_eligible)
+        .filter(|session| include_unnumbered_sessions || tmux_name_is_numbered(&session.tmux_name))
+        .map(AttentionCandidate::from)
+        .collect()
+}
+
+fn retain_current_attention_group_candidates(
+    candidates: &mut Vec<AttentionCandidate>,
+    current_session_ids: &[String],
+    limit: usize,
+) -> Vec<AttentionCandidate> {
+    let mut visible = Vec::new();
     for session_id in current_session_ids {
         if visible.len() >= limit {
             break;
@@ -1838,7 +1861,14 @@ fn plan_attention_group_sessions(
             visible.push(candidates.remove(index));
         }
     }
+    visible
+}
 
+fn fill_attention_group_candidates(
+    visible: &mut Vec<AttentionCandidate>,
+    candidates: &mut Vec<AttentionCandidate>,
+    limit: usize,
+) {
     if visible.is_empty() {
         let anchor_index = best_attention_anchor_index(&candidates);
         visible.push(candidates.remove(anchor_index));
@@ -1848,28 +1878,36 @@ fn plan_attention_group_sessions(
         let next_index = best_attention_fill_index(&visible, &candidates);
         visible.push(candidates.remove(next_index));
     }
+}
 
+fn sort_attention_backlog_candidates(
+    candidates: &mut [AttentionCandidate],
+    visible: &[AttentionCandidate],
+) {
     candidates.sort_by(|a, b| {
-        best_adjacency_to_group(b, &visible)
-            .cmp(&best_adjacency_to_group(a, &visible))
+        best_adjacency_to_group(b, visible)
+            .cmp(&best_adjacency_to_group(a, visible))
             .then_with(|| b.session.last_activity_at.cmp(&a.session.last_activity_at))
             .then_with(|| a.session.session_id.cmp(&b.session.session_id))
     });
+}
 
-    let visible_sessions = visible
+fn attention_sessions_from_candidates(candidates: Vec<AttentionCandidate>) -> Vec<SessionSummary> {
+    candidates
         .into_iter()
         .map(|candidate| candidate.session)
-        .collect::<Vec<_>>();
-    let backlog_sessions = candidates
+        .collect()
+}
+
+fn attention_backlog_sessions(
+    candidates: Vec<AttentionCandidate>,
+    current_ids: &HashSet<&String>,
+) -> Vec<SessionSummary> {
+    candidates
         .into_iter()
         .filter(|candidate| !current_ids.contains(&candidate.session.session_id))
         .map(|candidate| candidate.session)
-        .collect::<Vec<_>>();
-
-    AttentionGroupPlan {
-        visible: visible_sessions,
-        backlog: backlog_sessions,
-    }
+        .collect()
 }
 
 fn attention_group_session_is_eligible(session: &SessionSummary) -> bool {

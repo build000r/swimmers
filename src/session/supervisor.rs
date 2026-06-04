@@ -72,6 +72,13 @@ struct MissingTrackedSessionSummary {
     summary: SessionSummary,
 }
 
+enum SummaryCollectOutcome {
+    Live(SessionSummary),
+    Fallback(SessionSummary),
+    Exited(String),
+    Missing,
+}
+
 struct AdoptSessionPlan {
     session_id: String,
     stale_seed: Option<SessionSummary>,
@@ -1688,6 +1695,59 @@ impl SessionSupervisor {
         sessions.get(session_id).cloned()
     }
 
+    fn cached_summary_fallback(
+        cached: Option<SessionSummary>,
+        reason: SummaryFallbackReason,
+    ) -> SummaryCollectOutcome {
+        match cached {
+            Some(summary) => {
+                crate::metrics::increment_summary_fallback(reason);
+                SummaryCollectOutcome::Fallback(summary.into_cached_collection_fallback(reason))
+            }
+            None => {
+                crate::metrics::increment_summary_fallback(SummaryFallbackReason::Missing);
+                SummaryCollectOutcome::Missing
+            }
+        }
+    }
+
+    async fn collect_summary_from_handle(
+        handle: ActorHandle,
+        cached: Option<SessionSummary>,
+        timeout: Duration,
+    ) -> SummaryCollectOutcome {
+        let (tx, rx) = oneshot::channel();
+        if handle
+            .cmd_tx
+            .send(SessionCommand::GetSummary(tx))
+            .await
+            .is_err()
+        {
+            warn!(session_id = %handle.session_id, "actor summary command channel closed");
+            return Self::cached_summary_fallback(cached, SummaryFallbackReason::ChannelClosed);
+        }
+
+        match tokio::time::timeout(timeout, rx).await {
+            Ok(Ok(summary)) => Self::summary_reply_outcome(summary),
+            Ok(Err(_)) => {
+                warn!(session_id = %handle.session_id, "actor dropped summary reply");
+                Self::cached_summary_fallback(cached, SummaryFallbackReason::Dropped)
+            }
+            Err(_) => {
+                warn!(session_id = %handle.session_id, "summary request timed out");
+                Self::cached_summary_fallback(cached, SummaryFallbackReason::Timeout)
+            }
+        }
+    }
+
+    fn summary_reply_outcome(summary: SessionSummary) -> SummaryCollectOutcome {
+        if summary.state == SessionState::Exited {
+            SummaryCollectOutcome::Exited(summary.session_id)
+        } else {
+            SummaryCollectOutcome::Live(summary)
+        }
+    }
+
     async fn collect_live_summaries(&self, timeout: Duration) -> Vec<SessionSummary> {
         let handles: Vec<ActorHandle> = {
             let sessions = self.sessions.read().await;
@@ -1708,83 +1768,9 @@ impl SessionSupervisor {
                 .collect::<Vec<_>>()
         };
 
-        enum SummaryCollectOutcome {
-            Live(SessionSummary),
-            Fallback(SessionSummary),
-            Exited(String),
-            Missing,
-        }
-
         let futs: Vec<_> = handles_with_cached
             .into_iter()
-            .map(|(handle, cached)| async move {
-                let (tx, rx) = oneshot::channel();
-                if handle
-                    .cmd_tx
-                    .send(SessionCommand::GetSummary(tx))
-                    .await
-                    .is_err()
-                {
-                    warn!(session_id = %handle.session_id, "actor summary command channel closed");
-                    return match cached {
-                        Some(summary) => {
-                            let reason = SummaryFallbackReason::ChannelClosed;
-                            crate::metrics::increment_summary_fallback(reason);
-                            SummaryCollectOutcome::Fallback(
-                                summary.into_cached_collection_fallback(reason),
-                            )
-                        }
-                        None => {
-                            crate::metrics::increment_summary_fallback(
-                                SummaryFallbackReason::Missing,
-                            );
-                            SummaryCollectOutcome::Missing
-                        }
-                    };
-                }
-                match tokio::time::timeout(timeout, rx).await {
-                    Ok(Ok(summary)) if summary.state != SessionState::Exited => {
-                        SummaryCollectOutcome::Live(summary)
-                    }
-                    Ok(Ok(summary)) => SummaryCollectOutcome::Exited(summary.session_id),
-                    Ok(Err(_)) => {
-                        warn!(session_id = %handle.session_id, "actor dropped summary reply");
-                        match cached {
-                            Some(summary) => {
-                                let reason = SummaryFallbackReason::Dropped;
-                                crate::metrics::increment_summary_fallback(reason);
-                                SummaryCollectOutcome::Fallback(
-                                    summary.into_cached_collection_fallback(reason),
-                                )
-                            }
-                            None => {
-                                crate::metrics::increment_summary_fallback(
-                                    SummaryFallbackReason::Missing,
-                                );
-                                SummaryCollectOutcome::Missing
-                            }
-                        }
-                    }
-                    Err(_) => {
-                        warn!(session_id = %handle.session_id, "summary request timed out");
-                        match cached {
-                            Some(summary) => {
-                                let reason = SummaryFallbackReason::Timeout;
-                                crate::metrics::increment_summary_fallback(reason);
-                                SummaryCollectOutcome::Fallback(
-                                    summary.into_cached_collection_fallback(reason),
-                                )
-                            }
-                            None => {
-                                crate::metrics::increment_summary_fallback(
-                                    SummaryFallbackReason::Missing,
-                                );
-                                SummaryCollectOutcome::Missing
-                            }
-                        }
-                    }
-                }
-            })
+            .map(|(handle, cached)| Self::collect_summary_from_handle(handle, cached, timeout))
             .collect();
 
         let mut summaries = Vec::new();
@@ -1889,6 +1875,80 @@ impl SessionSupervisor {
             .await
     }
 
+    async fn collect_summary_and_replay(
+        handle: ActorHandle,
+        timeout: Duration,
+    ) -> Option<(SessionSummary, String)> {
+        let (sum_rx, snap_rx) = Self::send_snapshot_collection_requests(handle).await?;
+        let (summary, snapshot) = tokio::join!(
+            tokio::time::timeout(timeout, sum_rx),
+            tokio::time::timeout(timeout, snap_rx)
+        );
+
+        let summary = Self::summary_from_reply(summary)?;
+        let replay_text = Self::snapshot_from_reply(snapshot)
+            .map(Self::snapshot_replay_tail)
+            .unwrap_or_default();
+        Some((summary, replay_text))
+    }
+
+    async fn send_snapshot_collection_requests(
+        handle: ActorHandle,
+    ) -> Option<(
+        oneshot::Receiver<SessionSummary>,
+        oneshot::Receiver<TerminalSnapshot>,
+    )> {
+        let (sum_tx, sum_rx) = oneshot::channel();
+        let (snap_tx, snap_rx) = oneshot::channel();
+
+        let summary_sent = handle
+            .cmd_tx
+            .send(SessionCommand::GetSummary(sum_tx))
+            .await
+            .is_ok();
+        let snapshot_sent = handle
+            .cmd_tx
+            .send(SessionCommand::GetSnapshot(snap_tx))
+            .await
+            .is_ok();
+
+        if summary_sent && snapshot_sent {
+            Some((sum_rx, snap_rx))
+        } else {
+            None
+        }
+    }
+
+    fn summary_from_reply(
+        reply: Result<
+            Result<SessionSummary, oneshot::error::RecvError>,
+            tokio::time::error::Elapsed,
+        >,
+    ) -> Option<SessionSummary> {
+        match reply {
+            Ok(Ok(summary)) => Some(summary),
+            _ => None,
+        }
+    }
+
+    fn snapshot_from_reply(
+        reply: Result<
+            Result<TerminalSnapshot, oneshot::error::RecvError>,
+            tokio::time::error::Elapsed,
+        >,
+    ) -> Option<TerminalSnapshot> {
+        match reply {
+            Ok(Ok(snapshot)) => Some(snapshot),
+            _ => None,
+        }
+    }
+
+    fn snapshot_replay_tail(snapshot: TerminalSnapshot) -> String {
+        let chars: Vec<char> = snapshot.screen_text.chars().collect();
+        let start = chars.len().saturating_sub(500);
+        chars[start..].iter().collect()
+    }
+
     async fn collect_session_snapshots_with_timeout(&self, timeout: Duration) -> Vec<SessionInfo> {
         let handles: Vec<ActorHandle> = {
             let sessions = self.sessions.read().await;
@@ -1898,50 +1958,7 @@ impl SessionSupervisor {
 
         let futs: Vec<_> = handles
             .into_iter()
-            .map(|handle| async move {
-                let (sum_tx, sum_rx) = oneshot::channel();
-                let (snap_tx, snap_rx) = oneshot::channel();
-
-                let summary_sent = handle
-                    .cmd_tx
-                    .send(SessionCommand::GetSummary(sum_tx))
-                    .await
-                    .is_ok();
-                let snapshot_sent = handle
-                    .cmd_tx
-                    .send(SessionCommand::GetSnapshot(snap_tx))
-                    .await
-                    .is_ok();
-
-                if !summary_sent || !snapshot_sent {
-                    return None;
-                }
-
-                let (summary, snapshot) = tokio::join!(
-                    tokio::time::timeout(timeout, sum_rx),
-                    tokio::time::timeout(timeout, snap_rx)
-                );
-                let summary: Option<SessionSummary> = match summary {
-                    Ok(Ok(s)) => Some(s),
-                    _ => None,
-                };
-                let snapshot: Option<TerminalSnapshot> = match snapshot {
-                    Ok(Ok(s)) => Some(s),
-                    _ => None,
-                };
-
-                summary.map(|summary| {
-                    let replay_text = snapshot
-                        .map(|s| {
-                            // Take last ~500 chars of screen text.
-                            let chars: Vec<char> = s.screen_text.chars().collect();
-                            let start = chars.len().saturating_sub(500);
-                            chars[start..].iter().collect()
-                        })
-                        .unwrap_or_default();
-                    (summary, replay_text)
-                })
-            })
+            .map(|handle| Self::collect_summary_and_replay(handle, timeout))
             .collect();
 
         let summaries_with_replay: Vec<(SessionSummary, String)> = futures::future::join_all(futs)

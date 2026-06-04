@@ -636,91 +636,61 @@ impl ClaudeCodeReader {
             self.current_tool = Some(action);
         }
     }
-}
 
-impl ContextReader for ClaudeCodeReader {
-    fn read(&mut self) -> Option<ContextSnapshot> {
-        // Stick with our current file if it exists; only discover on first
-        // call or after the file is deleted.  This prevents two readers with
-        // the same cwd from flip-flopping onto the same JSONL file each tick.
-        let file_path = match self.file_path.clone() {
-            Some(p) if p.exists() => p,
-            _ => {
-                self.file_path = None;
-                self.discover_file()?
-            }
-        };
+    fn reset_reader_state(&mut self, file_path: PathBuf) {
+        self.file_path = Some(file_path);
+        self.file_size = 0;
+        self.user_task = None;
+        self.user_turns.clear();
+        self.transcript_records.clear();
+        self.recent_actions.clear();
+        self.current_tool = None;
+        self.bootstrapped = false;
+        self.next_turn_order = 0;
+        self.token_count = 0;
+        self.context_limit = crate::types::context_limit_for_tool(Some("Claude Code"));
+    }
 
-        let stat = fs::metadata(&file_path).ok()?;
-        let current_size = stat.len();
-
-        // No new data?
-        if Some(&file_path) == self.file_path.as_ref() && current_size == self.file_size {
-            return None;
-        }
-
-        // File truncated in place (log rotation, agent rewrote the file, etc.):
-        // re-bootstrap from the new contents so we do not feed a reversed
-        // byte range into the incremental read path.
-        let truncated =
-            self.file_path.as_ref() == Some(&file_path) && current_size < self.file_size;
-
-        // New, different, or truncated file — reset state
-        if self.file_path.as_ref() != Some(&file_path) || truncated {
-            self.file_path = Some(file_path.clone());
-            self.file_size = 0;
-            self.user_task = None;
-            self.user_turns.clear();
-            self.transcript_records.clear();
-            self.recent_actions.clear();
-            self.current_tool = None;
-            self.bootstrapped = false;
-            self.next_turn_order = 0;
-            self.token_count = 0;
-            self.context_limit = crate::types::context_limit_for_tool(Some("Claude Code"));
-        }
-
-        if !self.bootstrapped {
-            // Bootstrap: backward scan up to BOOTSTRAP_MAX
-            let start = current_size.saturating_sub(BOOTSTRAP_MAX);
-            match read_range(&file_path, start, current_size) {
-                Ok(buf) => {
-                    let (entries, consumed_offset) = parse_jsonl_entries_and_offset(&buf, start);
-                    self.file_size = consumed_offset;
-                    self.parse_entries(&entries);
-                }
-                Err(e) => {
-                    warn!(path = %file_path.display(), error = %e, "bootstrap read failed");
-                    return None;
-                }
-            }
-            self.bootstrapped = true;
-        } else {
-            // Incremental: read only new bytes
-            match read_range(&file_path, self.file_size, current_size) {
-                Ok(buf) => {
-                    let (entries, consumed_offset) =
-                        parse_jsonl_entries_and_offset(&buf, self.file_size);
-                    self.file_size = consumed_offset;
-                    self.parse_entries(&entries);
-                }
-                Err(e) => {
-                    warn!(path = %file_path.display(), error = %e, "incremental read failed");
-                    return None;
-                }
-            }
-        }
-
-        Some(ContextSnapshot {
+    fn snapshot(&self, source_size: u64) -> ContextSnapshot {
+        ContextSnapshot {
             user_task: self.user_task.clone(),
             user_turns: self.user_turns.clone(),
             transcript_records: self.transcript_records.clone(),
-            source_size: current_size,
+            source_size,
             recent_actions: last_n(&self.recent_actions, 5),
             current_tool: self.current_tool.clone(),
             token_count: self.token_count,
             context_limit: self.context_limit,
-        })
+        }
+    }
+}
+
+impl ContextReader for ClaudeCodeReader {
+    fn read(&mut self) -> Option<ContextSnapshot> {
+        let (file_path, cleared_claim) =
+            resolve_current_log_path(self.file_path.clone(), || self.discover_file())?;
+        if cleared_claim {
+            self.file_path = None;
+        }
+        let plan = plan_log_read(
+            self.file_path.as_ref(),
+            self.file_size,
+            self.bootstrapped,
+            file_path,
+        )?;
+
+        if plan.reset_reader {
+            self.reset_reader_state(plan.file_path.clone());
+        }
+
+        let (entries, consumed_offset) = read_planned_entries(&plan)?;
+        self.file_size = consumed_offset;
+        self.parse_entries(&entries);
+        if plan.phase == LogReadPhase::Bootstrap {
+            self.bootstrapped = true;
+        }
+
+        Some(self.snapshot(plan.current_size))
     }
 
     fn claimed_path(&self) -> Option<PathBuf> {
@@ -1045,89 +1015,150 @@ impl CodexReader {
             self.current_tool = Some(action);
         }
     }
-}
 
-impl ContextReader for CodexReader {
-    fn read(&mut self) -> Option<ContextSnapshot> {
-        let file_path = match self.file_path.clone() {
-            Some(p) if p.exists() => p,
-            _ => {
-                self.file_path = None;
-                self.discover_file()?
-            }
-        };
+    fn reset_reader_state(&mut self, file_path: PathBuf) {
+        self.file_path = Some(file_path);
+        self.file_size = 0;
+        self.user_task = None;
+        self.user_turns.clear();
+        self.transcript_records.clear();
+        self.recent_actions.clear();
+        self.current_tool = None;
+        self.bootstrapped = false;
+        self.token_count = 0;
+        self.context_limit = crate::types::context_limit_for_tool(Some("Codex"));
+        self.next_turn_order = 0;
+    }
 
-        let stat = fs::metadata(&file_path).ok()?;
-        let current_size = stat.len();
-
-        // No new data?
-        if Some(&file_path) == self.file_path.as_ref() && current_size == self.file_size {
-            return None;
-        }
-
-        // File truncated in place: re-bootstrap from the new contents so we
-        // do not feed a reversed byte range into the incremental read path.
-        let truncated =
-            self.file_path.as_ref() == Some(&file_path) && current_size < self.file_size;
-
-        // New, different, or truncated file — reset state
-        if self.file_path.as_ref() != Some(&file_path) || truncated {
-            self.file_path = Some(file_path.clone());
-            self.file_size = 0;
-            self.user_task = None;
-            self.user_turns.clear();
-            self.transcript_records.clear();
-            self.recent_actions.clear();
-            self.current_tool = None;
-            self.bootstrapped = false;
-            self.token_count = 0;
-            self.context_limit = crate::types::context_limit_for_tool(Some("Codex"));
-            self.next_turn_order = 0;
-        }
-
-        if !self.bootstrapped {
-            let start = current_size.saturating_sub(BOOTSTRAP_MAX);
-            match read_range(&file_path, start, current_size) {
-                Ok(buf) => {
-                    let (entries, consumed_offset) = parse_jsonl_entries_and_offset(&buf, start);
-                    self.file_size = consumed_offset;
-                    self.parse_entries(&entries);
-                }
-                Err(e) => {
-                    warn!(path = %file_path.display(), error = %e, "bootstrap read failed");
-                    return None;
-                }
-            }
-            self.bootstrapped = true;
-        } else {
-            match read_range(&file_path, self.file_size, current_size) {
-                Ok(buf) => {
-                    let (entries, consumed_offset) =
-                        parse_jsonl_entries_and_offset(&buf, self.file_size);
-                    self.file_size = consumed_offset;
-                    self.parse_entries(&entries);
-                }
-                Err(e) => {
-                    warn!(path = %file_path.display(), error = %e, "incremental read failed");
-                    return None;
-                }
-            }
-        }
-
-        Some(ContextSnapshot {
+    fn snapshot(&self, source_size: u64) -> ContextSnapshot {
+        ContextSnapshot {
             user_task: self.user_task.clone(),
             user_turns: self.user_turns.clone(),
             transcript_records: self.transcript_records.clone(),
-            source_size: current_size,
+            source_size,
             recent_actions: last_n(&self.recent_actions, 5),
             current_tool: self.current_tool.clone(),
             token_count: self.token_count,
             context_limit: self.context_limit,
-        })
+        }
+    }
+}
+
+impl ContextReader for CodexReader {
+    fn read(&mut self) -> Option<ContextSnapshot> {
+        let (file_path, cleared_claim) =
+            resolve_current_log_path(self.file_path.clone(), || self.discover_file())?;
+        if cleared_claim {
+            self.file_path = None;
+        }
+        let plan = plan_log_read(
+            self.file_path.as_ref(),
+            self.file_size,
+            self.bootstrapped,
+            file_path,
+        )?;
+
+        if plan.reset_reader {
+            self.reset_reader_state(plan.file_path.clone());
+        }
+
+        let (entries, consumed_offset) = read_planned_entries(&plan)?;
+        self.file_size = consumed_offset;
+        self.parse_entries(&entries);
+        if plan.phase == LogReadPhase::Bootstrap {
+            self.bootstrapped = true;
+        }
+
+        Some(self.snapshot(plan.current_size))
     }
 
     fn claimed_path(&self) -> Option<PathBuf> {
         self.file_path.clone()
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum LogReadPhase {
+    Bootstrap,
+    Incremental,
+}
+
+impl LogReadPhase {
+    fn warning_message(self) -> &'static str {
+        match self {
+            Self::Bootstrap => "bootstrap read failed",
+            Self::Incremental => "incremental read failed",
+        }
+    }
+}
+
+struct LogReadPlan {
+    file_path: PathBuf,
+    current_size: u64,
+    start: u64,
+    phase: LogReadPhase,
+    reset_reader: bool,
+}
+
+fn resolve_current_log_path(
+    claimed_path: Option<PathBuf>,
+    discover_file: impl FnOnce() -> Option<PathBuf>,
+) -> Option<(PathBuf, bool)> {
+    match claimed_path {
+        Some(path) if path.exists() => Some((path, false)),
+        _ => {
+            let discovered = discover_file()?;
+            Some((discovered, true))
+        }
+    }
+}
+
+fn plan_log_read(
+    claimed_path: Option<&PathBuf>,
+    previous_size: u64,
+    bootstrapped: bool,
+    file_path: PathBuf,
+) -> Option<LogReadPlan> {
+    let current_size = fs::metadata(&file_path).ok()?.len();
+    let same_file = claimed_path == Some(&file_path);
+
+    if same_file && current_size == previous_size {
+        return None;
+    }
+
+    let truncated = same_file && current_size < previous_size;
+    let reset_reader = !same_file || truncated;
+    let phase = if reset_reader || !bootstrapped {
+        LogReadPhase::Bootstrap
+    } else {
+        LogReadPhase::Incremental
+    };
+    let start = match phase {
+        LogReadPhase::Bootstrap => current_size.saturating_sub(BOOTSTRAP_MAX),
+        LogReadPhase::Incremental => previous_size,
+    };
+
+    Some(LogReadPlan {
+        file_path,
+        current_size,
+        start,
+        phase,
+        reset_reader,
+    })
+}
+
+fn read_planned_entries(plan: &LogReadPlan) -> Option<(Vec<JsonlEntry>, u64)> {
+    match read_range(&plan.file_path, plan.start, plan.current_size) {
+        Ok(buf) => Some(parse_jsonl_entries_and_offset(&buf, plan.start)),
+        Err(e) => {
+            warn!(
+                path = %plan.file_path.display(),
+                error = %e,
+                "{}",
+                plan.phase.warning_message()
+            );
+            None
+        }
     }
 }
 
