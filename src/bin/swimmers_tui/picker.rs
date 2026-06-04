@@ -1130,29 +1130,30 @@ pub(crate) fn picker_action_at(
 }
 
 fn picker_top_control_action_at(layout: &PickerLayout, x: u16, y: u16) -> Option<PickerAction> {
-    if layout.close_button.contains(x, y) {
-        return Some(PickerAction::Close);
-    }
-    if layout.tool_button.contains(x, y) {
-        return Some(PickerAction::ToggleTool);
-    }
-    if layout.launch_target_button.contains(x, y) {
-        return Some(PickerAction::ToggleLaunchTarget);
-    }
-    if layout.exclude_button.contains(x, y) {
-        return Some(PickerAction::ToggleBatchExcludeMode);
-    }
-    if layout.batch_button.contains(x, y) {
-        return Some(PickerAction::BatchVisible);
-    }
-    if layout
-        .back_button
-        .map(|button| button.contains(x, y))
-        .unwrap_or(false)
-    {
-        return Some(PickerAction::Up);
-    }
-    None
+    picker_top_ordered_controls(layout)
+        .find_map(|(rect, action)| rect.contains(x, y).then_some(action))
+}
+
+fn picker_top_ordered_controls(
+    layout: &PickerLayout,
+) -> impl Iterator<Item = (Rect, PickerAction)> + '_ {
+    [
+        (layout.close_button, PickerAction::Close),
+        (layout.tool_button, PickerAction::ToggleTool),
+        (
+            layout.launch_target_button,
+            PickerAction::ToggleLaunchTarget,
+        ),
+        (layout.exclude_button, PickerAction::ToggleBatchExcludeMode),
+        (layout.batch_button, PickerAction::BatchVisible),
+    ]
+    .into_iter()
+    .chain(
+        layout
+            .back_button
+            .into_iter()
+            .map(|button| (button, PickerAction::Up)),
+    )
 }
 
 fn picker_filter_action_at(layout: &PickerLayout, x: u16, y: u16) -> Option<PickerAction> {
@@ -2031,6 +2032,10 @@ mod tests {
             )
         }
 
+        fn top_action_at(layout: &PickerLayout, rect: Rect) -> Option<PickerAction> {
+            picker_top_control_action_at(layout, rect.x, rect.y)
+        }
+
         fn pointer_test_entry() -> DirEntry {
             DirEntry {
                 name: "swimmers".to_string(),
@@ -2337,6 +2342,99 @@ mod tests {
             assert!(picker_filter_render_items(&picker, &layout)
                 .iter()
                 .all(|item| !item.label.starts_with("[target:")));
+        }
+
+        #[test]
+        fn picker_action_at_maps_all_top_controls_and_rect_edges() {
+            let mut layout = filter_test_layout();
+            layout.back_button = Some(rect(4, 2, 4));
+
+            for (control, action) in [
+                (layout.close_button, PickerAction::Close),
+                (layout.tool_button, PickerAction::ToggleTool),
+                (
+                    layout.launch_target_button,
+                    PickerAction::ToggleLaunchTarget,
+                ),
+                (layout.exclude_button, PickerAction::ToggleBatchExcludeMode),
+                (layout.batch_button, PickerAction::BatchVisible),
+                (layout.back_button.expect("back rect"), PickerAction::Up),
+            ] {
+                assert_eq!(top_action_at(&layout, control), Some(action.clone()));
+                assert_eq!(
+                    picker_top_control_action_at(&layout, control.right() - 1, control.y),
+                    Some(action)
+                );
+            }
+
+            assert_eq!(
+                picker_top_control_action_at(
+                    &layout,
+                    layout.close_button.right(),
+                    layout.close_button.y
+                ),
+                None
+            );
+            assert_eq!(
+                picker_top_control_action_at(
+                    &layout,
+                    layout.close_button.x,
+                    layout.close_button.bottom()
+                ),
+                None
+            );
+
+            let back_button = layout.back_button.expect("back rect");
+            layout.back_button = None;
+            assert_eq!(
+                picker_top_control_action_at(&layout, back_button.x, back_button.y),
+                None
+            );
+        }
+
+        #[test]
+        fn picker_action_at_preserves_top_control_precedence() {
+            let overlap = rect(10, 1, 4);
+            let away = rect(40, 10, 4);
+            let mut layout = filter_test_layout();
+            layout.close_button = overlap;
+            layout.tool_button = overlap;
+            layout.launch_target_button = overlap;
+            layout.exclude_button = overlap;
+            layout.batch_button = overlap;
+            layout.back_button = Some(overlap);
+
+            assert_eq!(top_action_at(&layout, overlap), Some(PickerAction::Close));
+
+            layout.close_button = away;
+            assert_eq!(
+                top_action_at(&layout, overlap),
+                Some(PickerAction::ToggleTool)
+            );
+
+            layout.tool_button = away;
+            assert_eq!(
+                top_action_at(&layout, overlap),
+                Some(PickerAction::ToggleLaunchTarget)
+            );
+
+            layout.launch_target_button = away;
+            assert_eq!(
+                top_action_at(&layout, overlap),
+                Some(PickerAction::ToggleBatchExcludeMode)
+            );
+
+            layout.exclude_button = away;
+            assert_eq!(
+                top_action_at(&layout, overlap),
+                Some(PickerAction::BatchVisible)
+            );
+
+            layout.batch_button = away;
+            assert_eq!(top_action_at(&layout, overlap), Some(PickerAction::Up));
+
+            layout.back_button = None;
+            assert_eq!(top_action_at(&layout, overlap), None);
         }
 
         #[test]

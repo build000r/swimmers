@@ -2276,38 +2276,47 @@ impl SessionSupervisor {
         let exited_ids = self
             .collect_exited_session_ids(PROCESS_EXIT_SUMMARY_TIMEOUT)
             .await;
-        let now = Instant::now();
-        let ready = {
-            let mut seen = self.process_exit_seen_at.write().await;
-            ready_process_exit_ids(&mut seen, &exited_ids, now, PROCESS_EXIT_DELETE_GRACE)
-        };
-        if ready.is_empty() {
-            return;
-        }
-
-        let removed: Vec<ActorHandle> = {
-            let mut sessions = self.sessions.write().await;
-            let mut removed = Vec::with_capacity(ready.len());
-            for session_id in &ready {
-                if let Some(handle) = sessions.remove(session_id) {
-                    removed.push(handle);
-                }
-            }
-            crate::metrics::set_active_sessions(sessions.len());
-            removed
-        };
-
+        let ready = self.ready_exited_session_ids(&exited_ids).await;
+        let removed = self.remove_ready_exited_handles(&ready).await;
         if removed.is_empty() {
             return;
         }
 
-        {
-            let mut seen = self.process_exit_seen_at.write().await;
-            for handle in &removed {
-                seen.remove(&handle.session_id);
-            }
+        self.clear_removed_process_exit_tracking(&removed).await;
+        self.emit_process_exit_deletions(removed).await;
+        self.persist_registry().await;
+    }
+
+    async fn ready_exited_session_ids(&self, exited_ids: &HashSet<String>) -> Vec<String> {
+        let now = Instant::now();
+        let mut seen = self.process_exit_seen_at.write().await;
+        ready_process_exit_ids(&mut seen, exited_ids, now, PROCESS_EXIT_DELETE_GRACE)
+    }
+
+    async fn remove_ready_exited_handles(&self, ready: &[String]) -> Vec<ActorHandle> {
+        if ready.is_empty() {
+            return Vec::new();
         }
 
+        let mut sessions = self.sessions.write().await;
+        let mut removed = Vec::with_capacity(ready.len());
+        for session_id in ready {
+            if let Some(handle) = sessions.remove(session_id) {
+                removed.push(handle);
+            }
+        }
+        crate::metrics::set_active_sessions(sessions.len());
+        removed
+    }
+
+    async fn clear_removed_process_exit_tracking(&self, removed: &[ActorHandle]) {
+        let mut seen = self.process_exit_seen_at.write().await;
+        for handle in removed {
+            seen.remove(&handle.session_id);
+        }
+    }
+
+    async fn emit_process_exit_deletions(&self, removed: Vec<ActorHandle>) {
         for handle in removed {
             let _ = handle.cmd_tx.send(SessionCommand::Shutdown).await;
             let _ = self.lifecycle_tx.send(LifecycleEvent::Deleted {
@@ -2317,8 +2326,6 @@ impl SessionSupervisor {
                 tmux_session_alive: false,
             });
         }
-
-        self.persist_registry().await;
     }
 
     /// Build a minimal placeholder summary. The real summary comes from the
@@ -4541,6 +4548,7 @@ esac
     #[tokio::test]
     async fn reap_exited_sessions_removes_ready_actor_handles() {
         let supervisor = SessionSupervisor::new(Arc::new(Config::default()));
+        let mut events = supervisor.subscribe_events();
         supervisor
             .insert_test_handle(
                 spawn_summary_handle(test_summary("sess-exited", SessionState::Exited)).await,
@@ -4549,6 +4557,33 @@ esac
 
         supervisor.reap_exited_sessions().await;
         assert!(supervisor.get_session("sess-exited").await.is_none());
+        assert!(!supervisor
+            .process_exit_seen_at
+            .read()
+            .await
+            .contains_key("sess-exited"));
+
+        let event = tokio::time::timeout(Duration::from_millis(50), events.recv())
+            .await
+            .expect("deleted event timeout")
+            .expect("deleted event");
+        match event {
+            LifecycleEvent::Deleted {
+                session_id,
+                reason,
+                delete_mode,
+                tmux_session_alive,
+            } => {
+                assert_eq!(session_id, "sess-exited");
+                assert_eq!(reason, "process_exit");
+                assert!(matches!(
+                    delete_mode,
+                    crate::config::SessionDeleteMode::DetachBridge
+                ));
+                assert!(!tmux_session_alive);
+            }
+            other => panic!("unexpected lifecycle event: {other:?}"),
+        }
     }
 
     #[tokio::test]

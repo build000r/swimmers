@@ -148,6 +148,87 @@ fn mermaid_semantic_labels_clip_to_viewport_bounds() {
 }
 
 #[test]
+fn mermaid_projection_clips_start_anchor_at_right_bound_and_skips_fully_right_labels() {
+    let content_rect = Rect {
+        x: 10,
+        y: 3,
+        width: 6,
+        height: 4,
+    };
+    let projected = project_mermaid_semantic_lines(
+        &[
+            MermaidSemanticLine {
+                text: "Right Edge".to_string(),
+                diagram_x: 8.0,
+                diagram_y: 4.0,
+                anchor: MermaidTextAnchor::Start,
+                kind: MermaidSemanticKind::NodeTitle,
+                owner_key: "node:right".to_string(),
+                outline_eligible: false,
+                owner_width: 20.0,
+                owner_height: 8.0,
+            },
+            MermaidSemanticLine {
+                text: "Offscreen".to_string(),
+                diagram_x: 12.0,
+                diagram_y: 4.0,
+                anchor: MermaidTextAnchor::Start,
+                kind: MermaidSemanticKind::NodeTitle,
+                owner_key: "node:offscreen".to_string(),
+                outline_eligible: false,
+                owner_width: 20.0,
+                owner_height: 8.0,
+            },
+        ],
+        MermaidViewportTransform {
+            scale: 1.0,
+            tx: 0.0,
+            ty: 0.0,
+        },
+        content_rect,
+        MermaidViewState::L2,
+    );
+
+    assert_eq!(projected.len(), 1);
+    assert_eq!(projected[0].source_index, 0);
+    assert_eq!(projected[0].x, content_rect.right() - 2);
+    assert_eq!(projected[0].text, "Ri");
+}
+
+#[test]
+fn mermaid_projection_uses_display_width_when_left_clipping_wide_labels() {
+    let projected = project_mermaid_semantic_lines(
+        &[MermaidSemanticLine {
+            text: "界".to_string(),
+            diagram_x: 0.0,
+            diagram_y: 4.0,
+            anchor: MermaidTextAnchor::Start,
+            kind: MermaidSemanticKind::NodeTitle,
+            owner_key: "node:wide".to_string(),
+            outline_eligible: false,
+            owner_width: 20.0,
+            owner_height: 8.0,
+        }],
+        MermaidViewportTransform {
+            scale: 1.0,
+            tx: -2.0,
+            ty: 0.0,
+        },
+        Rect {
+            x: 0,
+            y: 0,
+            width: 4,
+            height: 4,
+        },
+        MermaidViewState::L2,
+    );
+
+    assert_eq!(projected.len(), 1);
+    assert_eq!(projected[0].x, 0);
+    assert_eq!(projected[0].text, "界");
+}
+
+#[test]
 fn mermaid_compacts_multiline_node_text_to_consecutive_rows() {
     let content_rect = Rect {
         x: 10,

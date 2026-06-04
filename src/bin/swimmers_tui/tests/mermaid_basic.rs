@@ -36,6 +36,12 @@ fn mermaid_compact_overview_text_returns_numeric_prefix_when_words_do_not_fit() 
 }
 
 #[test]
+fn mermaid_compact_overview_text_returns_none_when_no_tokens_survive_cleanup() {
+    assert!(mermaid_compact_overview_text(["", "   "]).is_none());
+    assert!(mermaid_compact_overview_text(["---", "(),.;"]).is_none());
+}
+
+#[test]
 fn mermaid_compact_overview_text_strips_punctuation_and_honors_three_word_limit() {
     let compact = mermaid_compact_overview_text(["(Alpha), beta/gamma-delta epsilon"])
         .expect("compact punctuated overview text");

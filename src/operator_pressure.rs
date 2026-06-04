@@ -488,39 +488,59 @@ fn repo_label(repo_key: &str) -> String {
         .to_string()
 }
 
+type BatchSendSession<'a> = (&'a SessionBatchMembership, &'a SessionSummary);
+
 fn batch_send_session_map(sessions: &[SessionSummary]) -> HashMap<String, Vec<String>> {
-    let mut batches: HashMap<String, Vec<(&SessionBatchMembership, &SessionSummary)>> =
-        HashMap::new();
+    collect_batch_send_groups(sessions)
+        .into_values()
+        .filter_map(advertisable_batch_send_ids)
+        .flat_map(batch_send_session_entries)
+        .collect()
+}
+
+fn collect_batch_send_groups(
+    sessions: &[SessionSummary],
+) -> HashMap<String, Vec<BatchSendSession<'_>>> {
+    let mut batches: HashMap<String, Vec<BatchSendSession<'_>>> = HashMap::new();
     for session in sessions {
-        let Some(batch) = session.batch.as_ref() else {
-            continue;
-        };
-        if remote_sessions::split_remote_session_id(&session.session_id).is_some() {
-            continue;
-        }
-        if session_ready_for_operator_group_input(session) {
+        if let Some((batch, session)) = batch_send_group_member(session) {
             batches
                 .entry(batch.id.clone())
                 .or_default()
                 .push((batch, session));
         }
     }
+    batches
+}
 
-    let mut map = HashMap::new();
-    for mut sessions in batches.into_values() {
-        sessions.sort_by_key(|(batch, session)| (batch.index, session.session_id.clone()));
-        let ids = sessions
-            .iter()
-            .map(|(_, session)| session.session_id.clone())
-            .collect::<Vec<_>>();
-        if ids.len() < 2 {
-            continue;
-        }
-        for id in &ids {
-            map.insert(id.clone(), ids.clone());
-        }
-    }
-    map
+fn batch_send_group_member(session: &SessionSummary) -> Option<BatchSendSession<'_>> {
+    let batch = session.batch.as_ref()?;
+    batch_send_session_is_eligible(session).then_some((batch, session))
+}
+
+fn batch_send_session_is_eligible(session: &SessionSummary) -> bool {
+    remote_sessions::split_remote_session_id(&session.session_id).is_none()
+        && session_ready_for_operator_group_input(session)
+}
+
+fn advertisable_batch_send_ids(mut sessions: Vec<BatchSendSession<'_>>) -> Option<Vec<String>> {
+    sessions.sort_by(|(left_batch, left_session), (right_batch, right_session)| {
+        left_batch
+            .index
+            .cmp(&right_batch.index)
+            .then_with(|| left_session.session_id.cmp(&right_session.session_id))
+    });
+    let ids = sessions
+        .into_iter()
+        .map(|(_, session)| session.session_id.clone())
+        .collect::<Vec<_>>();
+    (ids.len() >= 2).then_some(ids)
+}
+
+fn batch_send_session_entries(ids: Vec<String>) -> Vec<(String, Vec<String>)> {
+    ids.iter()
+        .map(|id| (id.clone(), ids.clone()))
+        .collect::<Vec<_>>()
 }
 
 #[cfg(test)]
@@ -565,6 +585,23 @@ mod tests {
         let mut session = summary(id, state);
         session.state_evidence = StateEvidence::new("osc133_command");
         session
+    }
+
+    fn assign_batch(
+        session: &mut SessionSummary,
+        id: &str,
+        index: usize,
+        total: usize,
+        created_at: chrono::DateTime<Utc>,
+    ) {
+        session.batch = Some(SessionBatchMembership {
+            id: id.to_string(),
+            label: id.to_string(),
+            index,
+            total,
+            created_at,
+            prompt_excerpt: None,
+        });
     }
 
     fn assert_reason_kind(session: SessionSummary, expected: OperatorPressureReasonKind) {
@@ -805,6 +842,68 @@ mod tests {
         );
         assert!(busy.batch_send_session_ids.is_empty());
         assert_eq!(response.summary.batch_send_groups, 1);
+    }
+
+    #[test]
+    fn batch_send_ids_sort_by_batch_index_then_session_id_for_every_member() {
+        let created_at = Utc::now();
+        let mut gamma = summary("gamma", SessionState::Attention);
+        let mut beta = summary("beta", SessionState::Attention);
+        let mut alpha = summary("alpha", SessionState::Attention);
+        let mut zero = summary("zero", SessionState::Attention);
+        assign_batch(&mut gamma, "batch-sort", 2, 4, created_at);
+        assign_batch(&mut beta, "batch-sort", 1, 4, created_at);
+        assign_batch(&mut alpha, "batch-sort", 1, 4, created_at);
+        assign_batch(&mut zero, "batch-sort", 0, 4, created_at);
+
+        let response = build_operator_pressure_response(&[gamma, beta, alpha, zero]);
+        let expected = ["zero", "alpha", "beta", "gamma"]
+            .into_iter()
+            .map(String::from)
+            .collect::<Vec<_>>();
+
+        assert_eq!(response.summary.batch_send_groups, 1);
+        for session_id in ["zero", "alpha", "beta", "gamma"] {
+            let session = response
+                .sessions
+                .iter()
+                .find(|session| session.session_id == session_id)
+                .expect("batch member");
+            assert_eq!(session.batch_send_session_ids, expected, "{session_id}");
+        }
+    }
+
+    #[test]
+    fn batch_send_ids_drop_singleton_groups() {
+        let created_at = Utc::now();
+        let mut solo = summary("solo", SessionState::Attention);
+        let mut pair_b = summary("pair-b", SessionState::Attention);
+        let mut pair_a = summary("pair-a", SessionState::Attention);
+        assign_batch(&mut solo, "batch-solo", 0, 1, created_at);
+        assign_batch(&mut pair_b, "batch-pair", 1, 2, created_at);
+        assign_batch(&mut pair_a, "batch-pair", 0, 2, created_at);
+
+        let response = build_operator_pressure_response(&[solo, pair_b, pair_a]);
+        let pair_ids = ["pair-a", "pair-b"]
+            .into_iter()
+            .map(String::from)
+            .collect::<Vec<_>>();
+
+        assert_eq!(response.summary.batch_send_groups, 1);
+        let solo = response
+            .sessions
+            .iter()
+            .find(|session| session.session_id == "solo")
+            .expect("solo session");
+        assert!(solo.batch_send_session_ids.is_empty());
+        for session_id in ["pair-a", "pair-b"] {
+            let session = response
+                .sessions
+                .iter()
+                .find(|session| session.session_id == session_id)
+                .expect("pair session");
+            assert_eq!(session.batch_send_session_ids, pair_ids, "{session_id}");
+        }
     }
 
     #[test]

@@ -139,33 +139,33 @@ fn mermaid_overview_source_tokens(cleaned_tokens: Vec<String>) -> Vec<String> {
     }
 }
 
+const MERMAID_OVERVIEW_MAX_CHARS: usize = 20;
+const MERMAID_OVERVIEW_WORD_LIMIT: usize = 3;
+
 fn mermaid_overview_limited_text(
     prefix: Option<String>,
     source_tokens: Vec<String>,
 ) -> Option<String> {
-    let word_limit = if prefix.is_some() { 2 } else { 3 };
-    let max_chars = 20usize;
+    let has_prefix = prefix.is_some();
     let mut out = prefix.unwrap_or_default();
-    for (added, token) in source_tokens.into_iter().enumerate() {
-        if added >= word_limit {
-            break;
-        }
-        let separator = usize::from(!out.is_empty());
-        let next_len = out.chars().count() + separator + token.chars().count();
-        if next_len > max_chars {
-            break;
-        }
-        if !out.is_empty() {
-            out.push(' ');
-        }
-        out.push_str(&token);
-    }
+    let _ = source_tokens
+        .into_iter()
+        .take(MERMAID_OVERVIEW_WORD_LIMIT - usize::from(has_prefix))
+        .try_for_each(|token| mermaid_try_push_overview_token(&mut out, &token));
+    (!out.is_empty()).then_some(out)
+}
 
-    if out.is_empty() {
-        None
-    } else {
-        Some(out)
+fn mermaid_try_push_overview_token(out: &mut String, token: &str) -> std::ops::ControlFlow<()> {
+    let separator = usize::from(!out.is_empty());
+    let next_len = out.chars().count() + separator + token.chars().count();
+    if next_len > MERMAID_OVERVIEW_MAX_CHARS {
+        return std::ops::ControlFlow::Break(());
     }
+    if separator > 0 {
+        out.push(' ');
+    }
+    out.push_str(token);
+    std::ops::ControlFlow::Continue(())
 }
 
 pub(crate) fn push_mermaid_summary_line<'a>(
@@ -1282,29 +1282,43 @@ fn mermaid_candidate_screen_x(
     bounds: MermaidProjectionBounds,
 ) -> Option<(i32, usize, usize)> {
     let anchor_x = mermaid_candidate_anchor_x(line, transform, bounds);
-    let text_width = display_width(display_text) as i32;
-    if text_width <= 0 {
-        return None;
-    }
+    let text_width = mermaid_display_width_i32(display_text)?;
+    let screen_x = mermaid_anchored_screen_x(line.anchor, anchor_x, text_width);
+    mermaid_visible_screen_span(screen_x, text_width, bounds)
+}
 
-    let mut screen_x = match line.anchor {
+fn mermaid_display_width_i32(text: &str) -> Option<i32> {
+    let width = display_width(text) as i32;
+    (width > 0).then_some(width)
+}
+
+fn mermaid_anchored_screen_x(anchor: MermaidTextAnchor, anchor_x: i32, text_width: i32) -> i32 {
+    match anchor {
         MermaidTextAnchor::Start => anchor_x,
         MermaidTextAnchor::Center => anchor_x - text_width / 2,
-    };
-    if screen_x >= bounds.right || screen_x + text_width <= bounds.left {
+    }
+}
+
+fn mermaid_visible_screen_span(
+    screen_x: i32,
+    text_width: i32,
+    bounds: MermaidProjectionBounds,
+) -> Option<(i32, usize, usize)> {
+    if mermaid_screen_span_outside_bounds(screen_x, text_width, bounds) {
         return None;
     }
+    let visible_x = screen_x.max(bounds.left);
+    let skipped_chars = (bounds.left - screen_x).max(0) as usize;
+    let max_chars = bounds.right.saturating_sub(visible_x) as usize;
+    Some((visible_x, skipped_chars, max_chars))
+}
 
-    let skipped_chars = if screen_x < bounds.left {
-        (bounds.left - screen_x) as usize
-    } else {
-        0
-    };
-    if screen_x < bounds.left {
-        screen_x = bounds.left;
-    }
-    let max_chars = bounds.right.saturating_sub(screen_x) as usize;
-    Some((screen_x, skipped_chars, max_chars))
+fn mermaid_screen_span_outside_bounds(
+    screen_x: i32,
+    text_width: i32,
+    bounds: MermaidProjectionBounds,
+) -> bool {
+    screen_x >= bounds.right || screen_x + text_width <= bounds.left
 }
 
 fn mermaid_candidate_clipped_text(
