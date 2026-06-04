@@ -1695,25 +1695,48 @@ fn build_flat_rows(
     thought_content: Rect,
     entry_capacity: usize,
 ) -> Vec<ThoughtRowLayout> {
+    if entry_capacity == 0 {
+        return Vec::new();
+    }
+
     let mut rows_rev = Vec::new();
     let mut remaining = entry_capacity;
     for entry in entries.iter().rev() {
         let entry_rows = build_rows_for_panel_entry(entry, thought_content);
-        if entry_rows.is_empty() || remaining == 0 {
-            continue;
-        }
-        if entry_rows.len() > remaining && !rows_rev.is_empty() {
-            break;
-        }
-        let take = entry_rows.len().min(remaining);
+        let take = match flat_row_selection(entry_rows.len(), remaining, !rows_rev.is_empty()) {
+            FlatRowSelection::Skip => continue,
+            FlatRowSelection::Stop => break,
+            FlatRowSelection::Take(take) => take,
+        };
         rows_rev.extend(entry_rows.into_iter().rev().take(take));
-        remaining = remaining.saturating_sub(take);
+        remaining -= take;
         if remaining == 0 {
             break;
         }
     }
     rows_rev.reverse();
     rows_rev
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FlatRowSelection {
+    Skip,
+    Stop,
+    Take(usize),
+}
+
+fn flat_row_selection(
+    entry_row_count: usize,
+    remaining_capacity: usize,
+    has_collected_rows: bool,
+) -> FlatRowSelection {
+    if entry_row_count == 0 {
+        return FlatRowSelection::Skip;
+    }
+    if entry_row_count > remaining_capacity && has_collected_rows {
+        return FlatRowSelection::Stop;
+    }
+    FlatRowSelection::Take(entry_row_count.min(remaining_capacity))
 }
 
 fn build_grouped_rows<C: TuiApi>(
@@ -1892,6 +1915,37 @@ mod tests {
         }
     }
 
+    fn thought_content() -> Rect {
+        Rect {
+            x: 0,
+            y: 0,
+            width: 80,
+            height: 8,
+        }
+    }
+
+    fn thought_entry(session_id: &str, label: &str, thought: &str) -> ThoughtPanelEntryView {
+        ThoughtPanelEntryView {
+            session_id: session_id.to_string(),
+            label: label.to_string(),
+            tmux_name: label.to_string(),
+            cwd: format!("/repo/{label}"),
+            pwd_label: None,
+            batch: None,
+            state: SessionState::Idle,
+            current_command: None,
+            tool: None,
+            updated_at: None,
+            rest_state: RestState::Active,
+            color: Color::White,
+            is_stale: false,
+            transport_health: TransportHealth::Healthy,
+            thought: thought.to_string(),
+            mermaid_label: None,
+            has_commit_candidate: false,
+        }
+    }
+
     #[test]
     fn header_filter_action_prioritizes_control_rects() {
         let filter = ThoughtFilter::default();
@@ -1947,6 +2001,47 @@ mod tests {
                 header_filter_row() + 1
             ),
             None
+        );
+    }
+
+    #[test]
+    fn build_flat_rows_selection_skips_empty_entry_rows() {
+        assert_eq!(flat_row_selection(0, 3, false), FlatRowSelection::Skip);
+    }
+
+    #[test]
+    fn build_flat_rows_returns_empty_when_capacity_zero() {
+        let entries = vec![thought_entry("new", "new", "newest thought")];
+
+        assert!(build_flat_rows(&entries, thought_content(), 0).is_empty());
+    }
+
+    #[test]
+    fn build_flat_rows_partially_includes_newest_entry_when_it_exceeds_capacity() {
+        let entries = vec![thought_entry("new", "new", "newest thought")];
+
+        let rows = build_flat_rows(&entries, thought_content(), 1);
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].label, "new");
+        assert_eq!(rows[0].line, "  newest thought");
+    }
+
+    #[test]
+    fn build_flat_rows_stops_before_older_entry_that_cannot_fit() {
+        let entries = vec![
+            thought_entry("old", "old", "older thought"),
+            thought_entry("new", "new", "newest thought"),
+        ];
+
+        let rows = build_flat_rows(&entries, thought_content(), 3);
+
+        assert_eq!(rows.len(), 2);
+        assert_eq!(
+            rows.iter()
+                .map(|row| row.label.as_str())
+                .collect::<Vec<_>>(),
+            vec!["new", "new"]
         );
     }
 }
