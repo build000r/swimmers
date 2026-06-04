@@ -998,6 +998,24 @@ fn title_cwd_update(current_cwd: &str, title: &str) -> Option<String> {
         .flatten()
 }
 
+fn osc7_cwd_update_plan(current_cwd: &str, text: &str) -> Vec<String> {
+    let mut planned_cwd = current_cwd.to_string();
+    let mut updates = Vec::new();
+
+    for payload in osc_payloads(text, "\x1b]7;") {
+        let Some(candidate) = cwd_from_osc7_payload(payload) else {
+            continue;
+        };
+        let Some(cwd) = cwd_update(&planned_cwd, &candidate) else {
+            continue;
+        };
+        planned_cwd = cwd.clone();
+        updates.push(cwd);
+    }
+
+    updates
+}
+
 fn title_tool_update(current_tool: Option<&str>, title: &str) -> Option<String> {
     current_tool
         .is_none()
@@ -1292,10 +1310,8 @@ impl SessionActor {
     }
 
     fn apply_osc7_payloads(&mut self, text: &str) {
-        for uri in osc_payloads(text, "\x1b]7;") {
-            if let Some(cwd) = cwd_from_osc7_payload(uri) {
-                self.update_cwd_and_emit(cwd);
-            }
+        for cwd in osc7_cwd_update_plan(&self.cwd, text) {
+            self.apply_cwd_update(cwd);
         }
     }
 
@@ -2586,7 +2602,7 @@ mod tests {
         capture_pane_tail_with_command, compare_session_state_change, compute_pane_liveness,
         cwd_from_osc7_payload, cwd_update, detect_tool_from_command_line,
         detect_tool_from_process_entry, extract_cwd_from_title, find_osc_payload_end,
-        line_looks_prompt_like, normalize_submit_line_text, osc_payloads,
+        line_looks_prompt_like, normalize_submit_line_text, osc7_cwd_update_plan, osc_payloads,
         output_counts_as_meaningful_activity, parse_process_entry, percent_decode,
         process_entries_cache, query_tmux_session_created, query_tool_from_tmux_process_tree,
         resolve_tmux_colorterm, resolve_tmux_term, resolve_tmux_terminal_env,
@@ -3067,6 +3083,53 @@ mod tests {
         );
         assert_eq!(cwd_update("/tmp/project", "   "), None);
         assert_eq!(cwd_update("/tmp/project", "/tmp/project"), None);
+    }
+
+    #[test]
+    fn osc7_cwd_update_plan_preserves_payload_order_and_update_semantics() {
+        let text = concat!(
+            "\x1b]7;file://host/tmp/project\x07",
+            "\x1b]7;file://host/tmp/one\x07",
+            "\x1b]7;http://host/tmp/ignored\x07",
+            "\x1b]7;\x07",
+            "\x1b]7;file://host/tmp/one\x07",
+            "\x1b]7;file://host/tmp/two\x1b\\",
+            "\x1b]7;file://host/tmp/one\x07",
+        );
+
+        assert_eq!(
+            osc7_cwd_update_plan("/tmp/project", text),
+            vec![
+                "/tmp/one".to_string(),
+                "/tmp/two".to_string(),
+                "/tmp/one".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn apply_osc7_payloads_updates_cwd_and_emits_events_in_order() {
+        let mut actor = test_actor();
+        let mut rx = actor.event_tx.subscribe();
+
+        actor.apply_osc7_payloads(concat!(
+            "\x1b]7;file://host/tmp/project\x07",
+            "\x1b]7;file://host/tmp/one\x07",
+            "\x1b]7;not-file-uri\x07",
+            "\x1b]7;file://host/tmp/one\x07",
+            "\x1b]7;file://host/tmp/two\x1b\\",
+        ));
+
+        assert_eq!(actor.cwd, "/tmp/two");
+        for expected_title in ["/tmp/one", "/tmp/two"] {
+            let event = rx.try_recv().expect("cwd title event");
+            assert_eq!(event.event, "session_title");
+            assert_eq!(event.session_id, "sess-test");
+            let payload: crate::types::SessionTitlePayload =
+                serde_json::from_value(event.payload).expect("session title payload");
+            assert_eq!(payload.title, expected_title);
+        }
+        assert!(rx.try_recv().is_err());
     }
 
     #[test]
