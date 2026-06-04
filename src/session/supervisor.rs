@@ -131,6 +131,15 @@ fn thought_snapshot_for_summary<'a>(
         .or_else(|| active_pane_session_id.and_then(|session_id| thought_snapshots.get(session_id)))
 }
 
+fn summary_requires_active_pane_lookup(
+    summary: &SessionSummary,
+    thought_snapshots: &HashMap<String, ThoughtSnapshot>,
+) -> bool {
+    !thought_snapshots.contains_key(&summary.session_id)
+        && !summary.tmux_name.is_empty()
+        && summary.state != SessionState::Exited
+}
+
 fn merge_summary_with_thought_snapshot(
     summary: &mut SessionSummary,
     thought_data: &ThoughtSnapshot,
@@ -187,6 +196,66 @@ fn format_tmux_active_pane_session_id(tmux_name: &str, pane_selector: &str) -> S
     format!("tmux:{tmux_name}:{pane_selector}")
 }
 
+fn active_pane_session_id_for_summary(
+    summary: &SessionSummary,
+    thought_snapshots: &HashMap<String, ThoughtSnapshot>,
+    active_pane_session_ids: &HashMap<String, String>,
+) -> Option<String> {
+    if !summary_requires_active_pane_lookup(summary, thought_snapshots) {
+        return None;
+    }
+
+    active_pane_session_ids.get(&summary.tmux_name).cloned()
+}
+
+fn session_info_from_summary(
+    summary: SessionSummary,
+    replay_text: String,
+    thought_data: Option<&ThoughtSnapshot>,
+) -> SessionInfo {
+    let state = summary.state;
+    let mut info = SessionInfo {
+        session_id: summary.session_id,
+        state,
+        exited: state == SessionState::Exited,
+        tool: summary.tool,
+        cwd: summary.cwd,
+        replay_text,
+        thought: summary.thought,
+        thought_state: summary.thought_state,
+        thought_source: summary.thought_source,
+        rest_state: summary.rest_state,
+        commit_candidate: summary.commit_candidate,
+        action_cues: summary.action_cues,
+        objective_fingerprint: None,
+        thought_updated_at: summary.thought_updated_at,
+        token_count: summary.token_count,
+        context_limit: summary.context_limit,
+        last_activity_at: summary.last_activity_at,
+    };
+
+    if let Some(thought_data) = thought_data {
+        apply_thought_snapshot_to_session_info(&mut info, thought_data);
+    }
+
+    info
+}
+
+fn apply_thought_snapshot_to_session_info(info: &mut SessionInfo, thought_data: &ThoughtSnapshot) {
+    if let Some(thought) = &thought_data.thought {
+        info.thought = Some(thought.clone());
+    }
+    info.thought_state = thought_data.thought_state;
+    info.thought_source = thought_data.thought_source;
+    info.rest_state = thought_data.rest_state;
+    info.commit_candidate = thought_data.commit_candidate;
+    info.action_cues = thought_data.action_cues.clone();
+    info.thought_updated_at = Some(thought_data.updated_at);
+    info.objective_fingerprint = thought_data.objective_fingerprint.clone();
+    info.token_count = thought_data.token_count;
+    info.context_limit = thought_data.context_limit;
+}
+
 fn tmux_names_requiring_active_pane_lookup<'a, I>(
     summaries: I,
     thought_snapshots: &HashMap<String, ThoughtSnapshot>,
@@ -200,11 +269,7 @@ where
 
     summaries
         .into_iter()
-        .filter(|summary| {
-            !thought_snapshots.contains_key(&summary.session_id)
-                && !summary.tmux_name.is_empty()
-                && summary.state != SessionState::Exited
-        })
+        .filter(|summary| summary_requires_active_pane_lookup(summary, thought_snapshots))
         .map(|summary| summary.tmux_name.clone())
         .collect()
 }
@@ -2031,63 +2096,22 @@ impl SessionSupervisor {
             .active_pane_session_ids_cached(&tmux_names, "collect_session_infos")
             .await;
 
-        let mut infos = Vec::with_capacity(summaries_with_replay.len());
-        for (summary, replay_text) in summaries_with_replay {
-            let session_id = summary.session_id.clone();
-            let active_pane_session_id = if thought_snapshots.contains_key(&summary.session_id)
-                || summary.tmux_name.is_empty()
-                || summary.state == crate::types::SessionState::Exited
-            {
-                None
-            } else {
-                active_pane_session_ids.get(&summary.tmux_name).cloned()
-            };
-            let thought_data = thought_snapshot_for_summary(
-                &summary,
-                active_pane_session_id.as_deref(),
-                &thought_snapshots,
-            );
-
-            infos.push(SessionInfo {
-                session_id,
-                state: summary.state,
-                exited: summary.state == crate::types::SessionState::Exited,
-                tool: summary.tool,
-                cwd: summary.cwd,
-                replay_text,
-                thought_state: thought_data
-                    .map(|t| t.thought_state)
-                    .unwrap_or(summary.thought_state),
-                thought_source: thought_data
-                    .map(|t| t.thought_source)
-                    .unwrap_or(summary.thought_source),
-                rest_state: thought_data
-                    .map(|t| t.rest_state)
-                    .unwrap_or(summary.rest_state),
-                commit_candidate: thought_data
-                    .map(|t| t.commit_candidate)
-                    .unwrap_or(summary.commit_candidate),
-                action_cues: thought_data
-                    .map(|t| t.action_cues.clone())
-                    .unwrap_or_else(|| summary.action_cues.clone()),
-                thought: thought_data
-                    .and_then(|t| t.thought.clone())
-                    .or_else(|| summary.thought.clone()),
-                thought_updated_at: thought_data
-                    .map(|t| t.updated_at)
-                    .or(summary.thought_updated_at),
-                objective_fingerprint: thought_data.and_then(|t| t.objective_fingerprint.clone()),
-                token_count: thought_data
-                    .map(|t| t.token_count)
-                    .unwrap_or(summary.token_count),
-                context_limit: thought_data
-                    .map(|t| t.context_limit)
-                    .unwrap_or(summary.context_limit),
-                last_activity_at: summary.last_activity_at,
-            });
-        }
-
-        infos
+        summaries_with_replay
+            .into_iter()
+            .map(|(summary, replay_text)| {
+                let active_pane_session_id = active_pane_session_id_for_summary(
+                    &summary,
+                    &thought_snapshots,
+                    &active_pane_session_ids,
+                );
+                let thought_data = thought_snapshot_for_summary(
+                    &summary,
+                    active_pane_session_id.as_deref(),
+                    &thought_snapshots,
+                );
+                session_info_from_summary(summary, replay_text, thought_data)
+            })
+            .collect()
     }
 
     // -----------------------------------------------------------------------
@@ -2812,12 +2836,16 @@ mod tests {
         (dir, original_path)
     }
 
-    fn restore_test_path(original_path: Option<std::ffi::OsString>) {
-        if let Some(value) = original_path {
-            std::env::set_var("PATH", value);
+    fn restore_test_env_var(name: &str, original_value: Option<std::ffi::OsString>) {
+        if let Some(value) = original_value {
+            std::env::set_var(name, value);
         } else {
-            std::env::remove_var("PATH");
+            std::env::remove_var(name);
         }
+    }
+
+    fn restore_test_path(original_path: Option<std::ffi::OsString>) {
+        restore_test_env_var("PATH", original_path);
     }
 
     #[test]
@@ -4591,11 +4619,7 @@ esac
         let _guard = crate::test_support::ENV_LOCK
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
-        let dir = tempdir().expect("tempdir");
-        let bin_dir = dir.path().join("bin");
-        std::fs::create_dir_all(&bin_dir).expect("bin");
-        write_executable(
-            &bin_dir.join("tmux"),
+        let (dir, original_path) = install_fake_tmux(
             r##"#!/bin/sh
 set -eu
 cmd="${1-}"
@@ -4637,12 +4661,10 @@ esac
 "##,
         );
 
-        let original_path = std::env::var_os("PATH");
         let original_cwd = std::env::var_os("SWIMMERS_FAKE_TMUX_CWD");
         let original_cmd = std::env::var_os("SWIMMERS_FAKE_TMUX_COMMAND");
         let original_new_session_log = std::env::var_os("SWIMMERS_FAKE_TMUX_NEW_SESSION_LOG");
         let new_session_log = dir.path().join("new-session.log");
-        prepend_test_path(&bin_dir, original_path.as_deref());
         std::env::set_var("SWIMMERS_FAKE_TMUX_CWD", dir.path());
         std::env::set_var("SWIMMERS_FAKE_TMUX_COMMAND", "codex");
         std::env::set_var("SWIMMERS_FAKE_TMUX_NEW_SESSION_LOG", &new_session_log);
@@ -4690,22 +4712,13 @@ esac
             .await
             .expect("cleanup session");
 
-        match original_path {
-            Some(value) => std::env::set_var("PATH", value),
-            None => std::env::remove_var("PATH"),
-        }
-        match original_cwd {
-            Some(value) => std::env::set_var("SWIMMERS_FAKE_TMUX_CWD", value),
-            None => std::env::remove_var("SWIMMERS_FAKE_TMUX_CWD"),
-        }
-        match original_cmd {
-            Some(value) => std::env::set_var("SWIMMERS_FAKE_TMUX_COMMAND", value),
-            None => std::env::remove_var("SWIMMERS_FAKE_TMUX_COMMAND"),
-        }
-        match original_new_session_log {
-            Some(value) => std::env::set_var("SWIMMERS_FAKE_TMUX_NEW_SESSION_LOG", value),
-            None => std::env::remove_var("SWIMMERS_FAKE_TMUX_NEW_SESSION_LOG"),
-        }
+        restore_test_path(original_path);
+        restore_test_env_var("SWIMMERS_FAKE_TMUX_CWD", original_cwd);
+        restore_test_env_var("SWIMMERS_FAKE_TMUX_COMMAND", original_cmd);
+        restore_test_env_var(
+            "SWIMMERS_FAKE_TMUX_NEW_SESSION_LOG",
+            original_new_session_log,
+        );
     }
 
     #[tokio::test]

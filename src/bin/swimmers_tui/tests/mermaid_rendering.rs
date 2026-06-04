@@ -340,6 +340,78 @@ fn mermaid_merge_outline_segments_coalesces_overlapping_ranges() {
 }
 
 #[test]
+fn mermaid_merge_outline_segments_sorts_lanes_and_preserves_gaps() {
+    let merged = mermaid_merge_outline_segments(&[
+        MermaidOutlineSegment {
+            axis: MermaidOutlineAxis::Vertical,
+            fixed: 4,
+            start: 5,
+            end: 7,
+        },
+        MermaidOutlineSegment {
+            axis: MermaidOutlineAxis::Horizontal,
+            fixed: 2,
+            start: 20,
+            end: 22,
+        },
+        MermaidOutlineSegment {
+            axis: MermaidOutlineAxis::Horizontal,
+            fixed: 1,
+            start: 6,
+            end: 8,
+        },
+        MermaidOutlineSegment {
+            axis: MermaidOutlineAxis::Vertical,
+            fixed: 3,
+            start: 1,
+            end: 2,
+        },
+        MermaidOutlineSegment {
+            axis: MermaidOutlineAxis::Horizontal,
+            fixed: 1,
+            start: 1,
+            end: 3,
+        },
+        MermaidOutlineSegment {
+            axis: MermaidOutlineAxis::Horizontal,
+            fixed: 1,
+            start: 4,
+            end: 5,
+        },
+    ]);
+
+    assert_eq!(
+        merged,
+        vec![
+            MermaidOutlineSegment {
+                axis: MermaidOutlineAxis::Horizontal,
+                fixed: 1,
+                start: 1,
+                end: 8,
+            },
+            MermaidOutlineSegment {
+                axis: MermaidOutlineAxis::Horizontal,
+                fixed: 2,
+                start: 20,
+                end: 22,
+            },
+            MermaidOutlineSegment {
+                axis: MermaidOutlineAxis::Vertical,
+                fixed: 3,
+                start: 1,
+                end: 2,
+            },
+            MermaidOutlineSegment {
+                axis: MermaidOutlineAxis::Vertical,
+                fixed: 4,
+                start: 5,
+                end: 7,
+            },
+        ]
+    );
+}
+
+#[test]
 fn mermaid_outline_route_keeps_segment_order_arrow_and_label_avoidance() {
     let content_rect = Rect {
         x: 0,

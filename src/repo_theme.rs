@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use chrono::{SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
 
+use crate::color::hsl_to_rgb;
 use crate::types::RepoTheme;
 
 const PREFERRED_THEME_DIR: &str = ".swimmers";
@@ -290,23 +291,6 @@ fn wrap_hue(hue: f64) -> f64 {
     }
 }
 
-fn hsl_to_rgb(h: f64, s: f64, l: f64) -> (u8, u8, u8) {
-    let c = (1.0 - (2.0 * l - 1.0).abs()) * s;
-    let h_prime = wrap_hue(h) / 60.0;
-    let x = c * (1.0 - ((h_prime % 2.0) - 1.0).abs());
-    let (r1, g1, b1) = match h_prime {
-        hp if hp < 1.0 => (c, x, 0.0),
-        hp if hp < 2.0 => (x, c, 0.0),
-        hp if hp < 3.0 => (0.0, c, x),
-        hp if hp < 4.0 => (0.0, x, c),
-        hp if hp < 5.0 => (x, 0.0, c),
-        _ => (c, 0.0, x),
-    };
-    let m = l - c / 2.0;
-    let to_byte = |value: f64| ((value + m).clamp(0.0, 1.0) * 255.0).round() as u8;
-    (to_byte(r1), to_byte(g1), to_byte(b1))
-}
-
 fn rgb_to_hex((r, g, b): (u8, u8, u8)) -> String {
     format!("#{r:02X}{g:02X}{b:02X}")
 }
@@ -370,6 +354,21 @@ mod tests {
 }}"##
             ),
         );
+    }
+
+    #[test]
+    fn repo_theme_hsl_to_rgb_preserves_primary_hues_and_wrapping() {
+        assert_eq!(rgb_to_hex(hsl_to_rgb(0.0, 1.0, 0.5)), "#FF0000");
+        assert_eq!(rgb_to_hex(hsl_to_rgb(120.0, 1.0, 0.5)), "#00FF00");
+        assert_eq!(rgb_to_hex(hsl_to_rgb(240.0, 1.0, 0.5)), "#0000FF");
+        assert_eq!(hsl_to_rgb(420.0, 1.0, 0.5), hsl_to_rgb(60.0, 1.0, 0.5));
+        assert_eq!(hsl_to_rgb(-120.0, 1.0, 0.5), hsl_to_rgb(240.0, 1.0, 0.5));
+    }
+
+    #[test]
+    fn repo_theme_hsl_to_rgb_zero_saturation_rounds_gray() {
+        assert_eq!(rgb_to_hex(hsl_to_rgb(37.0, 0.0, 0.5)), "#808080");
+        assert_eq!(rgb_to_hex(hsl_to_rgb(222.0, 0.0, 0.25)), "#404040");
     }
 
     #[test]

@@ -47,6 +47,7 @@ const MERMAID_ARTIFACT_JS_ROUTE: &str = "/mermaid_artifact.js";
 const MERMAID_ARTIFACT_CONTROLLER_JS_ROUTE: &str = "/mermaid_artifact_controller.js";
 const TERMINAL_SAFETY_JS_ROUTE: &str = "/terminal_safety.js";
 const TERMINAL_SEARCH_LINKS_JS_ROUTE: &str = "/terminal_search_links.js";
+const TERMINAL_STATUS_JS_ROUTE: &str = "/terminal_status.js";
 const TERMINAL_PROTOCOL_JS_ROUTE: &str = "/terminal_protocol.js";
 const SESSION_SOCKET_CONTROLLER_JS_ROUTE: &str = "/session_socket_controller.js";
 const DIR_BROWSER_JS_ROUTE: &str = "/dir_browser.js";
@@ -144,6 +145,7 @@ pub fn routes() -> Router<Arc<AppState>> {
             TERMINAL_SEARCH_LINKS_JS_ROUTE,
             get(terminal_search_links_js),
         )
+        .route(TERMINAL_STATUS_JS_ROUTE, get(terminal_status_js))
         .route(TERMINAL_PROTOCOL_JS_ROUTE, get(terminal_protocol_js))
         .route(
             SESSION_SOCKET_CONTROLLER_JS_ROUTE,
@@ -785,6 +787,13 @@ async fn terminal_search_links_js() -> Response {
     javascript_asset(
         "src/web/terminal_search_links.js",
         include_str!("terminal_search_links.js"),
+    )
+}
+
+async fn terminal_status_js() -> Response {
+    javascript_asset(
+        "src/web/terminal_status.js",
+        include_str!("terminal_status.js"),
     )
 }
 
@@ -2880,6 +2889,16 @@ mod tests {
                 "export function createTerminalSearchLinksController",
             ),
             (
+                APP_JS_ROUTE,
+                app_js().await,
+                "from \"./terminal_status.js\"",
+            ),
+            (
+                TERMINAL_STATUS_JS_ROUTE,
+                terminal_status_js().await,
+                "export function createTerminalStatusController",
+            ),
+            (
                 TERMINAL_PROTOCOL_JS_ROUTE,
                 terminal_protocol_js().await,
                 "export function buildSessionSocketUrl",
@@ -3222,11 +3241,13 @@ mod tests {
         assert!(terminal_surface_setup.contains("function syncTerminalAccessibilityMirror"));
         assert!(js.contains("createTerminalSearchLinksController"));
         assert!(terminal_search_links.contains("function drainTerminalLinkClicks()"));
+        let terminal_status = include_str!("terminal_status.js");
         assert!(js.contains("createSendController"));
         assert!(js.contains("rememberSendHistory,"));
         assert!(js.contains("await sendLineToSession(state.selectedSessionId, text)"));
         assert!(js.contains("rememberSendHistory(text);"));
-        assert!(js.contains("function syncTerminalStatusStrip()"));
+        assert!(js.contains("createTerminalStatusController"));
+        assert!(terminal_status.contains("function syncTerminalStatusStrip()"));
         assert!(js.contains("function refreshAgentContextForSelectedSession"));
         assert!(js.contains("function refreshWorkbenchWidgetsForSelectedSession"));
         assert!(workbench_render.contains("export function operatorPressureSummary"));

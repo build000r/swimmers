@@ -335,16 +335,20 @@ pub(crate) fn mermaid_outline_horizontal_lane_candidates(
     out
 }
 
+fn mermaid_outline_segments_can_merge(
+    left: MermaidOutlineSegment,
+    right: MermaidOutlineSegment,
+) -> bool {
+    left.axis == right.axis && left.fixed == right.fixed && right.start <= left.end + 1
+}
+
 pub(crate) fn mermaid_merge_outline_segments(
     segments: &[MermaidOutlineSegment],
 ) -> Vec<MermaidOutlineSegment> {
     let mut merged = segments.to_vec();
     merged.sort_by_key(|segment| {
         (
-            match segment.axis {
-                MermaidOutlineAxis::Horizontal => 0,
-                MermaidOutlineAxis::Vertical => 1,
-            },
+            u8::from(segment.axis == MermaidOutlineAxis::Vertical),
             segment.fixed,
             segment.start,
             segment.end,
@@ -354,10 +358,7 @@ pub(crate) fn mermaid_merge_outline_segments(
     let mut out: Vec<MermaidOutlineSegment> = Vec::new();
     for segment in merged {
         if let Some(last) = out.last_mut() {
-            if last.axis == segment.axis
-                && last.fixed == segment.fixed
-                && segment.start <= last.end + 1
-            {
+            if mermaid_outline_segments_can_merge(*last, segment) {
                 last.end = last.end.max(segment.end);
                 continue;
             }
