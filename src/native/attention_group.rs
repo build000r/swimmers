@@ -118,9 +118,32 @@ async fn rebuild_attention_group_tmux_session(
     let pane_target = attention_group_pane_target();
     let _ = super::run_tmux_status(tmux_path, &["kill-session", "-t", &session_target]).await;
 
-    let first = sessions
-        .first()
+    let plan = plan_attention_group_rebuild(sessions)?;
+    create_attention_group_tmux_session(tmux_path, plan.first).await?;
+    split_remaining_attention_group_panes(tmux_path, &pane_target, plan.remaining, layout).await?;
+    tile_attention_group_tmux_session(tmux_path, &pane_target, layout).await?;
+    Ok(())
+}
+
+#[derive(Debug, Clone, Copy)]
+struct AttentionGroupRebuildPlan<'a> {
+    first: &'a SessionSummary,
+    remaining: &'a [SessionSummary],
+}
+
+fn plan_attention_group_rebuild(
+    sessions: &[SessionSummary],
+) -> Result<AttentionGroupRebuildPlan<'_>> {
+    let (first, remaining) = sessions
+        .split_first()
         .ok_or_else(|| anyhow!("no sessions are waiting for operator input"))?;
+    Ok(AttentionGroupRebuildPlan { first, remaining })
+}
+
+async fn create_attention_group_tmux_session(
+    tmux_path: &Path,
+    first: &SessionSummary,
+) -> Result<()> {
     let output = super::run_tmux_output(
         tmux_path,
         &[
@@ -141,13 +164,19 @@ async fn rebuild_attention_group_tmux_session(
     if let Some(pane_id) = first_output_line(output.stdout.as_slice())? {
         set_attention_group_pane_title(tmux_path, &pane_id, &first.session_id).await?;
     }
+    Ok(())
+}
 
-    for session in sessions.iter().skip(1) {
-        split_attention_group_pane(tmux_path, &pane_target, session).await?;
-        tile_attention_group_tmux_session(tmux_path, &pane_target, layout).await?;
+async fn split_remaining_attention_group_panes(
+    tmux_path: &Path,
+    pane_target: &str,
+    sessions: &[SessionSummary],
+    layout: AttentionGroupLayout,
+) -> Result<()> {
+    for session in sessions {
+        split_attention_group_pane(tmux_path, pane_target, session).await?;
+        tile_attention_group_tmux_session(tmux_path, pane_target, layout).await?;
     }
-
-    tile_attention_group_tmux_session(tmux_path, &pane_target, layout).await?;
     Ok(())
 }
 
@@ -409,6 +438,10 @@ pub(super) fn build_attention_group_attach_command(tmux_name: &str, tmux_path: &
 mod tests {
     use super::*;
 
+    fn test_session(session_id: &str, tmux_name: &str) -> SessionSummary {
+        SessionSummary::placeholder(session_id, tmux_name, chrono::Utc::now())
+    }
+
     #[test]
     fn build_attention_group_attach_command_unsets_nested_tmux_and_exact_targets() {
         let command = build_attention_group_attach_command("team session", Path::new("/tmp/tmux"));
@@ -422,5 +455,42 @@ mod tests {
     fn attention_group_uses_session_target_for_kill_and_pane_target_for_layout_commands() {
         assert_eq!(attention_group_session_target(), "=swimmers-attention");
         assert_eq!(attention_group_pane_target(), "=swimmers-attention:");
+    }
+
+    #[test]
+    fn plan_attention_group_rebuild_rejects_empty_sessions() {
+        let err = plan_attention_group_rebuild(&[]).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "no sessions are waiting for operator input"
+        );
+    }
+
+    #[test]
+    fn plan_attention_group_rebuild_uses_single_session_as_first() {
+        let sessions = vec![test_session("session-a", "tmux-a")];
+        let plan = plan_attention_group_rebuild(&sessions).unwrap();
+
+        assert_eq!(plan.first.session_id, "session-a");
+        assert!(plan.remaining.is_empty());
+    }
+
+    #[test]
+    fn plan_attention_group_rebuild_preserves_remaining_session_order() {
+        let sessions = vec![
+            test_session("session-a", "tmux-a"),
+            test_session("session-b", "tmux-b"),
+            test_session("session-c", "tmux-c"),
+        ];
+        let plan = plan_attention_group_rebuild(&sessions).unwrap();
+
+        assert_eq!(plan.first.session_id, "session-a");
+        assert_eq!(
+            plan.remaining
+                .iter()
+                .map(|session| session.session_id.as_str())
+                .collect::<Vec<_>>(),
+            ["session-b", "session-c"]
+        );
     }
 }
