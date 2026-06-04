@@ -1378,6 +1378,12 @@ mod tests {
                 native_desktop_sheet_js().await,
                 "export function createNativeDesktopSheetController",
             ),
+            (APP_JS_ROUTE, app_js().await, "from \"./terminal_focus.js\""),
+            (
+                TERMINAL_FOCUS_JS_ROUTE,
+                terminal_focus_js().await,
+                "export function createTerminalFocusController",
+            ),
             (
                 TERMINAL_SURFACE_SETUP_JS_ROUTE,
                 terminal_surface_setup_js().await,

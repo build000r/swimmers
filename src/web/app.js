@@ -3,10 +3,11 @@ import {
   authTokenButtonPlan, controlEventSessionPatchPlan, eventCell, initialStateBootPlan, lifecycleDeletedSessionPatchPlan,
   sheetActionAvailabilityPlan,
   shouldIgnoreSyntheticClick, surfaceActionDispatchContextPlan, surfaceActionDispatchPlan, surfaceActionExecutionContextPlan, surfaceActionExecutionPlan, surfaceActionFocusTerminalExecutionPlan, surfaceActionTrogdorReaderExecutionPlan,
-  terminalDestroyStatePatch, terminalFallbackFocusPlan, terminalFallbackKeydownPlan, terminalFallbackPastePlan, terminalFallbackPointerFocusPlan, terminalStageClickPlan, terminalStageFocusExecutorPlan, terminalStageFocusPlan,
-  terminalFallbackScrollPlan, terminalPaintProbeSchedulePlan, terminalPaintVerificationPlan, terminalPresentationPlan, terminalStageKeydownPlan, terminalStageMouseDownPlan, terminalStageMouseMovePlan, terminalStageMouseUpPlan, terminalStagePasteExecutorPlan, terminalStagePastePlan, terminalStageTouchEndPlan, terminalStageWheelPlan, terminalToolsAvailabilityPlan,
+  terminalDestroyStatePatch, terminalStageClickPlan,
+  terminalPaintProbeSchedulePlan, terminalPaintVerificationPlan, terminalPresentationPlan, terminalStageKeydownPlan, terminalStageMouseDownPlan, terminalStageMouseMovePlan, terminalStageMouseUpPlan, terminalStagePasteExecutorPlan, terminalStagePastePlan, terminalStageTouchEndPlan, terminalStageWheelPlan, terminalToolsAvailabilityPlan,
 } from "./input_support.js";
 import { createAppEventHandlers } from "./app_event_handlers.js";
+import { createTerminalFocusController } from "./terminal_focus.js";
 import { createSendController } from "./send_controller.js";
 import { createTerminalInputController } from "./terminal_input.js";
 import { createTerminalZoomInputController } from "./terminal_zoom_input.js";
@@ -581,6 +582,40 @@ const {
   sendTerminalText,
   terminalKeyActionForDomEvent,
 } = terminalInputController;
+
+const terminalFocusController = createTerminalFocusController({
+  state,
+  el,
+  documentRef: document,
+  windowRef: window,
+  requestAnimationFrameRef: requestAnimationFrame,
+  currentSession,
+  forwardTerminalEvent,
+  forwardTerminalKeyDown,
+  handleGlobalShortcut: (event) => handleGlobalShortcut(event),
+  keyBeginsTrogdorResponse,
+  markTrogdorSessionsResponded,
+  sendTerminalText,
+  terminalFallbackIsNearBottom: () => terminalFallbackIsNearBottom(),
+});
+
+const {
+  closeMobileKeyboard,
+  focusMobileKeyboard,
+  focusTerminalInputSurface,
+  handleMobileKeyboardProxyFocusEvent,
+  handleTerminalFallbackBlur,
+  handleTerminalFallbackClick,
+  handleTerminalFallbackFocus,
+  handleTerminalFallbackKeyEvent,
+  handleTerminalFallbackMousedown,
+  handleTerminalFallbackPasteEvent,
+  handleTerminalFallbackScroll,
+  handleTerminalInlineInputFocus,
+  handleTerminalStageFocusEvent,
+  isCoarsePointer,
+  shouldCaptureKey,
+} = terminalFocusController;
 
 const terminalSurfaceRuntime = {
   state,
@@ -1937,117 +1972,6 @@ function syncWriteAccess() {
   syncSheetActionAvailability();
 }
 
-function isCoarsePointer() {
-  return window.matchMedia?.("(pointer: coarse)")?.matches ?? false;
-}
-
-function syncMobileKeyboardState() {
-  document.body.classList.toggle("mobile-keyboard-active", state.mobileKeyboardActive);
-  if (el.terminalMobileKeyboard) {
-    el.terminalMobileKeyboard.setAttribute("aria-pressed", state.mobileKeyboardActive ? "true" : "false");
-  }
-}
-
-function focusMobileKeyboard() {
-  if (state.readOnly || !currentSession()) {
-    return false;
-  }
-  state.mobileKeyboardActive = true;
-  syncMobileKeyboardState();
-  el.mobileKeyboardProxy.value = "";
-  el.mobileKeyboardProxy.focus({ preventScroll: true });
-  forwardTerminalEvent({ kind: "focus", focused: true });
-  return true;
-}
-
-function terminalInputSurfaceHasFocus() {
-  const active = document.activeElement;
-  return !active || active === document.body || active === el.terminalStage || active === el.terminalFallback;
-}
-
-function focusTerminalInputSurface(options = {}) {
-  if (state.activeSheet && !options.force) {
-    return false;
-  }
-  if (options.onlyIfSurfaceFocused && !terminalInputSurfaceHasFocus()) {
-    return false;
-  }
-  const target = state.terminalFallbackActive ? el.terminalFallback : el.terminalStage;
-  if (!target || typeof target.focus !== "function") {
-    return false;
-  }
-  target.focus({ preventScroll: Boolean(options.preventScroll) });
-  return document.activeElement === target;
-}
-
-function closeMobileKeyboard() {
-  state.mobileKeyboardActive = false;
-  syncMobileKeyboardState();
-  if (document.activeElement === el.mobileKeyboardProxy) {
-    el.mobileKeyboardProxy.blur();
-  }
-}
-
-function shouldCaptureKey(event) {
-  if (!currentSession() || state.readOnly || state.activeSheet) {
-    return false;
-  }
-  if (event.metaKey) {
-    return false;
-  }
-  return true;
-}
-
-function handleTerminalFallbackKeyEvent(event) {
-  const fallbackActive = state.terminalFallbackActive;
-  const globalShortcutHandled = fallbackActive && handleGlobalShortcut(event);
-  const shouldCaptureTerminalKey = fallbackActive && !globalShortcutHandled && shouldCaptureKey(event);
-  const plan = terminalFallbackKeydownPlan({
-    terminalFallbackActive: fallbackActive,
-    globalShortcutHandled,
-    shouldCaptureKey: shouldCaptureTerminalKey,
-    beginsResponse: shouldCaptureTerminalKey && keyBeginsTrogdorResponse(event),
-  });
-  if (plan.preventDefault) event.preventDefault();
-  if (plan.stopPropagation) event.stopPropagation?.();
-  if (plan.markResponse) markTrogdorSessionsResponded([state.selectedSessionId]);
-  if (plan.forwardKey) forwardTerminalKeyDown(event);
-  return plan.handled;
-}
-
-function handleTerminalFallbackPasteEvent(event) {
-  const plan = terminalFallbackPastePlan({
-    terminalFallbackActive: state.terminalFallbackActive, readOnly: state.readOnly,
-    hasCurrentSession: Boolean(currentSession()), text: event.clipboardData?.getData("text") ?? "",
-  });
-  if (plan.preventDefault) event.preventDefault();
-  if (plan.stopPropagation) event.stopPropagation?.();
-  if (plan.sendText) sendTerminalText(plan.text);
-  return plan.handled;
-}
-
-function runTerminalFocusAction(plan) {
-  const action = terminalStageFocusExecutorPlan(plan);
-  if (action.forwardEvent) forwardTerminalEvent(action.event);
-}
-
-function runTerminalFallbackPointerFocusAction(plan) {
-  if (!plan.focusTerminal) return;
-  const focus = () => focusTerminalInputSurface({ preventScroll: true });
-  if (plan.scheduleFrame) requestAnimationFrame(focus);
-  else focus();
-}
-function handleTerminalInlineInputFocus() { runTerminalFocusAction(terminalStageFocusPlan("focus", { activeSheet: state.activeSheet })); }
-function handleTerminalFallbackPointerFocus(eventType) { runTerminalFallbackPointerFocusAction(terminalFallbackPointerFocusPlan(eventType, { terminalFallbackActive: state.terminalFallbackActive, activeSheet: state.activeSheet })); }
-function handleTerminalFallbackFocusEvent(eventType) { runTerminalFocusAction(terminalFallbackFocusPlan(eventType, eventType === "focus" ? { terminalFallbackActive: state.terminalFallbackActive, activeSheet: state.activeSheet } : { terminalFallbackActive: state.terminalFallbackActive, mobileKeyboardOwnsFocus: document.activeElement === el.mobileKeyboardProxy })); }
-function handleTerminalFallbackScroll() { const plan = terminalFallbackScrollPlan("scroll", { terminalFallbackActive: state.terminalFallbackActive, nearBottom: state.terminalFallbackActive ? terminalFallbackIsNearBottom() : false }); if (plan.updateAutoFollow) state.terminalFallbackAutoFollow = plan.autoFollow; }
-function handleMobileKeyboardProxyFocusEvent(focused) { state.mobileKeyboardActive = focused; syncMobileKeyboardState(); forwardTerminalEvent({ kind: "focus", focused }); }
-function handleTerminalFallbackMousedown() { handleTerminalFallbackPointerFocus("mousedown"); }
-function handleTerminalFallbackClick() { handleTerminalFallbackPointerFocus("click"); }
-function handleTerminalFallbackFocus() { handleTerminalFallbackFocusEvent("focus"); }
-function handleTerminalFallbackBlur() { handleTerminalFallbackFocusEvent("blur"); }
-function handleMobileKeyboardProxyFocus() { handleMobileKeyboardProxyFocusEvent(true); }
-function handleMobileKeyboardProxyBlur() { handleMobileKeyboardProxyFocusEvent(false); }
 function mouseCell(event) {
   const rect = el.terminalStage.getBoundingClientRect();
   return eventCell(event, rect, state.currentCols, state.currentRows);
@@ -2479,8 +2403,6 @@ function handleTerminalStagePaste(event) {
   if (action.preventDefault) event.preventDefault();
   if (action.sendText) sendTerminalText(action.text);
 }
-
-function handleTerminalStageFocusEvent(eventType) { runTerminalFocusAction(terminalStageFocusPlan(eventType, eventType === "focus" ? { activeSheet: state.activeSheet } : { mobileKeyboardOwnsFocus: document.activeElement === el.mobileKeyboardProxy })); }
 
 function handleTerminalStageMouseDown(event) {
   const fallbackOwnsPointer = terminalFallbackOwnsPointer(event);

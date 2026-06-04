@@ -25,6 +25,7 @@ pub(super) const SEND_CONTROLLER_JS_ROUTE: &str = "/send_controller.js";
 pub(super) const THOUGHT_CONFIG_SHEET_JS_ROUTE: &str = "/thought_config_sheet.js";
 pub(super) const NATIVE_DESKTOP_SHEET_JS_ROUTE: &str = "/native_desktop_sheet.js";
 pub(super) const TERMINAL_SURFACE_SETUP_JS_ROUTE: &str = "/terminal_surface_setup.js";
+pub(super) const TERMINAL_FOCUS_JS_ROUTE: &str = "/terminal_focus.js";
 pub(super) const TERMINAL_ZOOM_INPUT_JS_ROUTE: &str = "/terminal_zoom_input.js";
 pub(super) const TERMINAL_RESIZE_JS_ROUTE: &str = "/terminal_resize.js";
 pub(super) const GLOBAL_SHORTCUT_DISPATCH_JS_ROUTE: &str = "/global_shortcut_dispatch.js";
@@ -84,6 +85,7 @@ pub(super) fn routes() -> Router<Arc<AppState>> {
             TERMINAL_SURFACE_SETUP_JS_ROUTE,
             get(terminal_surface_setup_js),
         )
+        .route(TERMINAL_FOCUS_JS_ROUTE, get(terminal_focus_js))
         .route(TERMINAL_ZOOM_INPUT_JS_ROUTE, get(terminal_zoom_input_js))
         .route(TERMINAL_RESIZE_JS_ROUTE, get(terminal_resize_js))
         .route(
@@ -305,6 +307,11 @@ javascript_route!(
     terminal_surface_setup_js,
     "src/web/terminal_surface_setup.js",
     "terminal_surface_setup.js"
+);
+javascript_route!(
+    terminal_focus_js,
+    "src/web/terminal_focus.js",
+    "terminal_focus.js"
 );
 javascript_route!(
     terminal_zoom_input_js,
