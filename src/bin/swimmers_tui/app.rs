@@ -1,4 +1,5 @@
 use super::*;
+use futures::stream::StreamExt;
 use swimmers::openrouter_models::should_rotate_openrouter_model;
 
 #[path = "mermaid_viewer.rs"]
@@ -2828,13 +2829,31 @@ impl<C: TuiApi> App<C> {
         config: &ThoughtConfig,
         candidates: &[String],
     ) -> Option<OpenRouterRotationProbe> {
-        for probe in Self::openrouter_rotation_probes(config, candidates) {
-            match client.test_thought_config(probe.config.clone()).await {
-                Ok(test) if test.ok => return Some(probe),
-                _ => continue,
-            }
-        }
-        None
+        let probes = Self::openrouter_rotation_probes(config, candidates);
+        Self::first_working_openrouter_rotation(client, probes).await
+    }
+
+    async fn first_working_openrouter_rotation(
+        client: Arc<C>,
+        probes: Vec<OpenRouterRotationProbe>,
+    ) -> Option<OpenRouterRotationProbe> {
+        let working_probes = futures::stream::iter(probes)
+            .filter_map(|probe| Self::test_openrouter_rotation_probe(&client, probe))
+            .fuse();
+        futures::pin_mut!(working_probes);
+        working_probes.next().await
+    }
+
+    async fn test_openrouter_rotation_probe(
+        client: &Arc<C>,
+        probe: OpenRouterRotationProbe,
+    ) -> Option<OpenRouterRotationProbe> {
+        client
+            .test_thought_config(probe.config.clone())
+            .await
+            .ok()
+            .filter(|test| test.ok)
+            .map(|_| probe)
     }
 
     fn openrouter_rotation_probes(

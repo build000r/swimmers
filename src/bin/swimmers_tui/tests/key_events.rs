@@ -707,8 +707,16 @@ fn thought_config_editor_test_button_rotates_openrouter_model_after_invalid_mode
     }));
     api.push_refresh_openrouter_candidates(Ok(vec![
         "openrouter/free".to_string(),
-        "google/gemma-3-4b-it:free".to_string(),
+        "bad/free".to_string(),
+        "good/free".to_string(),
     ]));
+    api.push_test_thought_config(Ok(ThoughtConfigTestResponse {
+        ok: false,
+        message: "probe failed".to_string(),
+        last_backend_error: Some("bad response".to_string()),
+        llm_calls: 0,
+    }));
+    api.push_test_thought_config(Err("probe transport failed".to_string()));
     api.push_test_thought_config(Ok(ThoughtConfigTestResponse {
         ok: true,
         message: "probe succeeded".to_string(),
@@ -728,12 +736,24 @@ fn thought_config_editor_test_button_rotates_openrouter_model_after_invalid_mode
         app.thought_config_editor
             .as_ref()
             .map(|editor| editor.config.model.as_str()),
-        Some("openrouter/free")
+        Some("good/free")
+    );
+    assert_eq!(
+        api.test_thought_config_calls()
+            .into_iter()
+            .map(|config| config.model)
+            .collect::<Vec<_>>(),
+        vec![
+            "old/expired:free".to_string(),
+            "openrouter/free".to_string(),
+            "bad/free".to_string(),
+            "good/free".to_string(),
+        ]
     );
     assert!(app
         .visible_message()
         .unwrap_or_default()
-        .contains("rotated to openrouter/free"));
+        .contains("rotated to good/free"));
 }
 
 #[test]
