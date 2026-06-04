@@ -158,6 +158,7 @@ impl MermaidViewState {
     }
 }
 
+#[repr(usize)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum MermaidSemanticKind {
     SubgraphSummary,
@@ -169,6 +170,46 @@ pub(crate) enum MermaidSemanticKind {
     ErAttributeName,
     ErAttributeType,
 }
+
+#[derive(Clone, Copy, Debug)]
+struct MermaidOwnerVisibilityThreshold {
+    always_visible: bool,
+    min_cols: f32,
+    min_rows: f32,
+}
+
+impl MermaidOwnerVisibilityThreshold {
+    const fn always() -> Self {
+        Self {
+            always_visible: true,
+            min_cols: 0.0,
+            min_rows: 0.0,
+        }
+    }
+
+    const fn at_least(min_cols: f32, min_rows: f32) -> Self {
+        Self {
+            always_visible: false,
+            min_cols,
+            min_rows,
+        }
+    }
+
+    fn is_visible_for(self, owner_cols: f32, owner_rows: f32) -> bool {
+        self.always_visible || (owner_cols >= self.min_cols && owner_rows >= self.min_rows)
+    }
+}
+
+const MERMAID_OWNER_VISIBILITY_THRESHOLDS: [MermaidOwnerVisibilityThreshold; 8] = [
+    MermaidOwnerVisibilityThreshold::at_least(10.0, 1.0),
+    MermaidOwnerVisibilityThreshold::always(),
+    MermaidOwnerVisibilityThreshold::at_least(8.0, 1.0),
+    MermaidOwnerVisibilityThreshold::always(),
+    MermaidOwnerVisibilityThreshold::always(),
+    MermaidOwnerVisibilityThreshold::at_least(10.0, 2.5),
+    MermaidOwnerVisibilityThreshold::at_least(8.0, 2.5),
+    MermaidOwnerVisibilityThreshold::at_least(12.0, 3.0),
+];
 
 impl MermaidSemanticKind {
     pub(crate) fn min_detail_level(self) -> MermaidDetailLevel {
@@ -200,16 +241,12 @@ impl MermaidSemanticKind {
     }
 
     pub(crate) fn is_visible_for_owner(self, owner_cols: f32, owner_rows: f32) -> bool {
-        match self {
-            MermaidSemanticKind::SubgraphSummary => owner_cols >= 10.0 && owner_rows >= 1.0,
-            MermaidSemanticKind::NodeSummary => owner_cols >= 8.0 && owner_rows >= 1.0,
-            MermaidSemanticKind::SubgraphTitle
-            | MermaidSemanticKind::NodeTitle
-            | MermaidSemanticKind::EdgeLabel => true,
-            MermaidSemanticKind::ClassMember => owner_cols >= 10.0 && owner_rows >= 2.5,
-            MermaidSemanticKind::ErAttributeName => owner_cols >= 8.0 && owner_rows >= 2.5,
-            MermaidSemanticKind::ErAttributeType => owner_cols >= 12.0 && owner_rows >= 3.0,
-        }
+        self.owner_visibility_threshold()
+            .is_visible_for(owner_cols, owner_rows)
+    }
+
+    fn owner_visibility_threshold(self) -> MermaidOwnerVisibilityThreshold {
+        MERMAID_OWNER_VISIBILITY_THRESHOLDS[self as usize]
     }
 
     pub(crate) fn row_nudge_budget(self) -> i32 {
@@ -1403,6 +1440,85 @@ pub(crate) fn render_mermaid_outline_lines(
     Ok(true)
 }
 
+struct MermaidDetailRenderParts {
+    projected: Vec<MermaidProjectedLine>,
+    label_rects: HashMap<String, MermaidOutlineLabelRect>,
+}
+
+fn mermaid_detail_render_parts(
+    semantic_lines: &[MermaidSemanticLine],
+    content_rect: Rect,
+    transform: MermaidViewportTransform,
+    view_state: MermaidViewState,
+) -> Option<MermaidDetailRenderParts> {
+    let projected =
+        project_mermaid_semantic_lines(semantic_lines, transform, content_rect, view_state);
+    mermaid_detail_render_parts_from_projected(semantic_lines, projected, content_rect, view_state)
+}
+
+fn mermaid_detail_render_parts_from_projected(
+    semantic_lines: &[MermaidSemanticLine],
+    projected: Vec<MermaidProjectedLine>,
+    content_rect: Rect,
+    view_state: MermaidViewState,
+) -> Option<MermaidDetailRenderParts> {
+    if projected.is_empty() {
+        return None;
+    }
+
+    if mermaid_view_uses_packed_detail(view_state) {
+        return mermaid_packed_detail_render_parts(semantic_lines, &projected, content_rect);
+    }
+
+    let label_rects = mermaid_detail_box_rects(semantic_lines, &projected, content_rect);
+    mermaid_detail_render_parts_from_label_rects(projected, label_rects)
+}
+
+fn mermaid_view_uses_packed_detail(view_state: MermaidViewState) -> bool {
+    matches!(view_state, MermaidViewState::L2 | MermaidViewState::L3)
+}
+
+fn mermaid_packed_detail_render_parts(
+    semantic_lines: &[MermaidSemanticLine],
+    projected: &[MermaidProjectedLine],
+    content_rect: Rect,
+) -> Option<MermaidDetailRenderParts> {
+    let owners = mermaid_build_packed_detail_owners(semantic_lines, projected);
+    if owners.is_empty() {
+        return None;
+    }
+    let label_rects = mermaid_pack_detail_box_rects(content_rect, &owners);
+    if label_rects.is_empty() {
+        return None;
+    }
+    let projected = mermaid_project_packed_detail_lines(&owners, &label_rects);
+    Some(MermaidDetailRenderParts {
+        projected,
+        label_rects,
+    })
+}
+
+fn mermaid_detail_render_parts_from_label_rects(
+    projected: Vec<MermaidProjectedLine>,
+    label_rects: HashMap<String, MermaidOutlineLabelRect>,
+) -> Option<MermaidDetailRenderParts> {
+    (!label_rects.is_empty()).then_some(MermaidDetailRenderParts {
+        projected,
+        label_rects,
+    })
+}
+
+fn mermaid_filter_visible_outline_edges(
+    outline_edges: impl IntoIterator<Item = MermaidOutlineEdge>,
+    label_rects: &HashMap<String, MermaidOutlineLabelRect>,
+) -> Vec<MermaidOutlineEdge> {
+    let visible_keys = label_rects.keys().cloned().collect::<HashSet<_>>();
+    outline_edges
+        .into_iter()
+        .filter(|edge| visible_keys.contains(&edge.from_key) && visible_keys.contains(&edge.to_key))
+        .collect()
+}
+
 pub(crate) fn render_mermaid_detail_lines(
     viewer: &mut MermaidViewerState,
     content_rect: Rect,
@@ -1413,57 +1529,35 @@ pub(crate) fn render_mermaid_detail_lines(
         return Err("Mermaid source unavailable".to_string());
     };
 
-    let projected = project_mermaid_semantic_lines(
+    let Some(detail_parts) = mermaid_detail_render_parts(
         &prepared.semantic_lines,
-        transform,
         content_rect,
+        transform,
         view_state,
-    );
-    if projected.is_empty() {
+    ) else {
         return Ok(false);
-    }
+    };
 
     let owner_colors = mermaid_owner_accent_map(&prepared.semantic_lines);
-    let (projected, label_rects) =
-        if matches!(view_state, MermaidViewState::L2 | MermaidViewState::L3) {
-            let owners = mermaid_build_packed_detail_owners(&prepared.semantic_lines, &projected);
-            if owners.is_empty() {
-                return Ok(false);
-            }
-            let label_rects = mermaid_pack_detail_box_rects(content_rect, &owners);
-            if label_rects.is_empty() {
-                return Ok(false);
-            }
-            (
-                mermaid_project_packed_detail_lines(&owners, &label_rects),
-                label_rects,
-            )
-        } else {
-            let label_rects =
-                mermaid_detail_box_rects(&prepared.semantic_lines, &projected, content_rect);
-            (projected, label_rects)
-        };
-    if label_rects.is_empty() {
-        return Ok(false);
-    }
+    let outline_edges = mermaid_filter_visible_outline_edges(
+        mermaid_outline_edge_map(&prepared.layout).into_values(),
+        &detail_parts.label_rects,
+    );
 
-    let visible_keys = label_rects.keys().cloned().collect::<HashSet<_>>();
-    let outline_edges = mermaid_outline_edge_map(&prepared.layout)
-        .into_values()
-        .filter(|edge| visible_keys.contains(&edge.from_key) && visible_keys.contains(&edge.to_key))
-        .collect::<Vec<_>>();
-
-    viewer.cached_lines =
-        mermaid_render_compact_detail_background(content_rect, &label_rects, outline_edges);
+    viewer.cached_lines = mermaid_render_compact_detail_background(
+        content_rect,
+        &detail_parts.label_rects,
+        outline_edges,
+    );
     viewer.cached_background_cells =
         mermaid_background_cells_from_lines(&viewer.cached_lines, MERMAID_CONNECTOR_COLOR);
     mermaid_apply_rect_border_colors(
         &mut viewer.cached_background_cells,
         content_rect,
-        &label_rects,
+        &detail_parts.label_rects,
         &owner_colors,
     );
-    viewer.cached_semantic_lines = projected;
+    viewer.cached_semantic_lines = detail_parts.projected;
     Ok(true)
 }
 
@@ -2243,6 +2337,201 @@ mod mermaid_focus_tests {
             top: sort_y,
             bottom: sort_y,
         }
+    }
+
+    fn detail_semantic_line(owner_key: &str, kind: MermaidSemanticKind) -> MermaidSemanticLine {
+        MermaidSemanticLine {
+            text: "detail".to_string(),
+            diagram_x: 10.0,
+            diagram_y: 10.0,
+            anchor: MermaidTextAnchor::Start,
+            kind,
+            owner_key: owner_key.to_string(),
+            outline_eligible: true,
+            owner_width: 40.0,
+            owner_height: 20.0,
+        }
+    }
+
+    fn detail_projected_line(source_index: usize) -> MermaidProjectedLine {
+        MermaidProjectedLine {
+            source_index,
+            x: 6,
+            y: 7,
+            text: "detail".to_string(),
+            color: Color::Reset,
+        }
+    }
+
+    fn detail_label_rect(left: i32, right: i32, top: i32, bottom: i32) -> MermaidOutlineLabelRect {
+        MermaidOutlineLabelRect {
+            left,
+            right,
+            top,
+            bottom,
+        }
+    }
+
+    fn identity_transform() -> MermaidViewportTransform {
+        MermaidViewportTransform {
+            scale: 1.0,
+            tx: 0.0,
+            ty: 0.0,
+        }
+    }
+
+    #[test]
+    fn mermaid_semantic_visibility_thresholds_are_inclusive() {
+        let threshold_cases = [
+            (MermaidSemanticKind::SubgraphSummary, 10.0, 1.0),
+            (MermaidSemanticKind::NodeSummary, 8.0, 1.0),
+            (MermaidSemanticKind::ClassMember, 10.0, 2.5),
+            (MermaidSemanticKind::ErAttributeName, 8.0, 2.5),
+            (MermaidSemanticKind::ErAttributeType, 12.0, 3.0),
+        ];
+
+        for (kind, min_cols, min_rows) in threshold_cases {
+            assert!(
+                kind.is_visible_for_owner(min_cols, min_rows),
+                "{kind:?} should be visible at its threshold"
+            );
+            assert!(
+                !kind.is_visible_for_owner(min_cols - 0.25, min_rows),
+                "{kind:?} should hide below its column threshold"
+            );
+            assert!(
+                !kind.is_visible_for_owner(min_cols, min_rows - 0.25),
+                "{kind:?} should hide below its row threshold"
+            );
+        }
+    }
+
+    #[test]
+    fn mermaid_semantic_always_visible_kinds_ignore_owner_size() {
+        for kind in [
+            MermaidSemanticKind::SubgraphTitle,
+            MermaidSemanticKind::NodeTitle,
+            MermaidSemanticKind::EdgeLabel,
+        ] {
+            assert!(kind.is_visible_for_owner(-1.0, -1.0), "{kind:?}");
+        }
+    }
+
+    #[test]
+    fn render_mermaid_detail_lines_errors_without_prepared_render() {
+        let mut viewer = test_viewer(vec!["stale"], Vec::new());
+
+        let err = render_mermaid_detail_lines(
+            &mut viewer,
+            roomy_content_rect(),
+            identity_transform(),
+            MermaidViewState::L1,
+        )
+        .unwrap_err();
+
+        assert_eq!(err, "Mermaid source unavailable");
+        assert_eq!(viewer.cached_lines, vec!["stale".to_string()]);
+    }
+
+    #[test]
+    fn mermaid_detail_parts_return_none_for_empty_projection() {
+        let semantic_lines = vec![detail_semantic_line(
+            "node:alpha",
+            MermaidSemanticKind::NodeSummary,
+        )];
+
+        assert!(mermaid_detail_render_parts_from_projected(
+            &semantic_lines,
+            Vec::new(),
+            roomy_content_rect(),
+            MermaidViewState::L1,
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn mermaid_detail_parts_require_packed_l2_l3_owners() {
+        let semantic_lines = vec![detail_semantic_line(
+            "edge:alpha:beta",
+            MermaidSemanticKind::EdgeLabel,
+        )];
+        let projected = vec![detail_projected_line(0)];
+
+        assert!(mermaid_detail_render_parts_from_projected(
+            &semantic_lines,
+            projected.clone(),
+            roomy_content_rect(),
+            MermaidViewState::L2,
+        )
+        .is_none());
+        assert!(mermaid_detail_render_parts_from_projected(
+            &semantic_lines,
+            projected,
+            roomy_content_rect(),
+            MermaidViewState::L3,
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn mermaid_detail_parts_return_none_for_empty_label_rects() {
+        assert!(mermaid_detail_render_parts_from_label_rects(
+            vec![detail_projected_line(0)],
+            HashMap::new(),
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn mermaid_detail_parts_pack_compact_l2_owner_lines() {
+        let semantic_lines = vec![detail_semantic_line(
+            "node:alpha",
+            MermaidSemanticKind::NodeSummary,
+        )];
+
+        let parts = mermaid_detail_render_parts_from_projected(
+            &semantic_lines,
+            vec![detail_projected_line(0)],
+            roomy_content_rect(),
+            MermaidViewState::L2,
+        )
+        .expect("compact L2 owner should produce detail parts");
+
+        assert!(parts.label_rects.contains_key("node:alpha"));
+        assert_eq!(parts.projected.len(), 1);
+        assert_eq!(parts.projected[0].source_index, 0);
+    }
+
+    #[test]
+    fn mermaid_filter_visible_outline_edges_requires_both_endpoint_keys() {
+        let mut label_rects = HashMap::new();
+        label_rects.insert("node:a".to_string(), detail_label_rect(0, 4, 0, 2));
+        label_rects.insert("node:b".to_string(), detail_label_rect(6, 10, 0, 2));
+
+        let visible_edges = mermaid_filter_visible_outline_edges(
+            [
+                MermaidOutlineEdge {
+                    from_key: "node:a".to_string(),
+                    to_key: "node:b".to_string(),
+                    directed: true,
+                },
+                MermaidOutlineEdge {
+                    from_key: "node:a".to_string(),
+                    to_key: "node:hidden".to_string(),
+                    directed: true,
+                },
+                MermaidOutlineEdge {
+                    from_key: "node:hidden".to_string(),
+                    to_key: "node:b".to_string(),
+                    directed: false,
+                },
+            ],
+            &label_rects,
+        );
+
+        assert_eq!(visible_edges.len(), 1);
+        assert_eq!(visible_edges[0].from_key, "node:a");
+        assert_eq!(visible_edges[0].to_key, "node:b");
     }
 
     #[test]
