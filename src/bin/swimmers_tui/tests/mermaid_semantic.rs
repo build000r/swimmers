@@ -676,6 +676,237 @@ fn mermaid_pan_and_zoom_preserve_focused_target() {
 }
 
 #[test]
+fn mermaid_outline_projection_respects_owner_size_and_outline_eligibility() {
+    let lines = vec![
+        MermaidSemanticLine {
+            text: "Too Small".to_string(),
+            diagram_x: 10.0,
+            diagram_y: 10.0,
+            anchor: MermaidTextAnchor::Start,
+            kind: MermaidSemanticKind::NodeSummary,
+            owner_key: "node:small".to_string(),
+            outline_eligible: true,
+            owner_width: 15.0,
+            owner_height: 4.0,
+        },
+        MermaidSemanticLine {
+            text: "Nested Node".to_string(),
+            diagram_x: 20.0,
+            diagram_y: 10.0,
+            anchor: MermaidTextAnchor::Start,
+            kind: MermaidSemanticKind::NodeSummary,
+            owner_key: "node:nested".to_string(),
+            outline_eligible: false,
+            owner_width: 40.0,
+            owner_height: 12.0,
+        },
+        MermaidSemanticLine {
+            text: "Visible Node".to_string(),
+            diagram_x: 40.0,
+            diagram_y: 10.0,
+            anchor: MermaidTextAnchor::Start,
+            kind: MermaidSemanticKind::NodeSummary,
+            owner_key: "node:visible".to_string(),
+            outline_eligible: true,
+            owner_width: 40.0,
+            owner_height: 12.0,
+        },
+    ];
+
+    let projected = project_mermaid_semantic_lines(
+        &lines,
+        MermaidViewportTransform {
+            scale: 1.0,
+            tx: 0.0,
+            ty: 0.0,
+        },
+        Rect {
+            x: 0,
+            y: 0,
+            width: 80,
+            height: 20,
+        },
+        MermaidViewState::Outline,
+    );
+
+    assert_eq!(projected.len(), 1);
+    assert_eq!(projected[0].source_index, 2);
+    assert_eq!(projected[0].text, "Visible Node");
+}
+
+#[test]
+fn mermaid_projection_preserves_source_index_for_center_anchor_clipped_at_left_edge() {
+    let lines = vec![
+        MermaidSemanticLine {
+            text: "   ".to_string(),
+            diagram_x: 0.0,
+            diagram_y: 8.0,
+            anchor: MermaidTextAnchor::Start,
+            kind: MermaidSemanticKind::NodeTitle,
+            owner_key: "node:hidden".to_string(),
+            outline_eligible: false,
+            owner_width: 20.0,
+            owner_height: 12.0,
+        },
+        MermaidSemanticLine {
+            text: "Centered Label".to_string(),
+            diagram_x: 0.0,
+            diagram_y: 8.0,
+            anchor: MermaidTextAnchor::Center,
+            kind: MermaidSemanticKind::NodeTitle,
+            owner_key: "node:center".to_string(),
+            outline_eligible: false,
+            owner_width: 20.0,
+            owner_height: 12.0,
+        },
+    ];
+
+    let projected = project_mermaid_semantic_lines(
+        &lines,
+        MermaidViewportTransform {
+            scale: 1.0,
+            tx: 0.0,
+            ty: 0.0,
+        },
+        Rect {
+            x: 10,
+            y: 0,
+            width: 8,
+            height: 10,
+        },
+        MermaidViewState::L2,
+    );
+
+    assert_eq!(projected.len(), 1);
+    assert_eq!(projected[0].source_index, 1);
+    assert_eq!(projected[0].x, 10);
+    assert_eq!(projected[0].text, "Centered");
+}
+
+#[test]
+fn mermaid_projection_only_row_nudges_detail_kinds_that_allow_it() {
+    let lines = vec![
+        MermaidSemanticLine {
+            text: "Title Above".to_string(),
+            diagram_x: 0.0,
+            diagram_y: -4.0,
+            anchor: MermaidTextAnchor::Start,
+            kind: MermaidSemanticKind::NodeTitle,
+            owner_key: "node:title".to_string(),
+            outline_eligible: false,
+            owner_width: 60.0,
+            owner_height: 20.0,
+        },
+        MermaidSemanticLine {
+            text: "field_name".to_string(),
+            diagram_x: 20.0,
+            diagram_y: -4.0,
+            anchor: MermaidTextAnchor::Start,
+            kind: MermaidSemanticKind::ErAttributeName,
+            owner_key: "node:entity".to_string(),
+            outline_eligible: false,
+            owner_width: 60.0,
+            owner_height: 20.0,
+        },
+    ];
+
+    let projected = project_mermaid_semantic_lines(
+        &lines,
+        MermaidViewportTransform {
+            scale: 1.0,
+            tx: 0.0,
+            ty: 0.0,
+        },
+        Rect {
+            x: 0,
+            y: 5,
+            width: 80,
+            height: 10,
+        },
+        MermaidViewState::L2,
+    );
+
+    assert_eq!(projected.len(), 1);
+    assert_eq!(projected[0].source_index, 1);
+    assert_eq!(projected[0].y, 5);
+    assert_eq!(projected[0].text, "field_name");
+}
+
+#[test]
+fn mermaid_er_keys_projection_keeps_titles_and_pk_fk_attribute_names_only() {
+    let lines = vec![
+        MermaidSemanticLine {
+            text: "ACCOUNT".to_string(),
+            diagram_x: 0.0,
+            diagram_y: 0.0,
+            anchor: MermaidTextAnchor::Start,
+            kind: MermaidSemanticKind::NodeTitle,
+            owner_key: "node:ACCOUNT".to_string(),
+            outline_eligible: false,
+            owner_width: 80.0,
+            owner_height: 40.0,
+        },
+        MermaidSemanticLine {
+            text: "uuid".to_string(),
+            diagram_x: 0.0,
+            diagram_y: 8.0,
+            anchor: MermaidTextAnchor::Start,
+            kind: MermaidSemanticKind::ErAttributeType,
+            owner_key: "node:ACCOUNT".to_string(),
+            outline_eligible: false,
+            owner_width: 80.0,
+            owner_height: 40.0,
+        },
+        MermaidSemanticLine {
+            text: "id PK".to_string(),
+            diagram_x: 20.0,
+            diagram_y: 8.0,
+            anchor: MermaidTextAnchor::Start,
+            kind: MermaidSemanticKind::ErAttributeName,
+            owner_key: "node:ACCOUNT".to_string(),
+            outline_eligible: false,
+            owner_width: 80.0,
+            owner_height: 40.0,
+        },
+        MermaidSemanticLine {
+            text: "display_name".to_string(),
+            diagram_x: 0.0,
+            diagram_y: 16.0,
+            anchor: MermaidTextAnchor::Start,
+            kind: MermaidSemanticKind::ErAttributeName,
+            owner_key: "node:ACCOUNT".to_string(),
+            outline_eligible: false,
+            owner_width: 80.0,
+            owner_height: 40.0,
+        },
+    ];
+
+    let projected = project_mermaid_semantic_lines(
+        &lines,
+        MermaidViewportTransform {
+            scale: 1.0,
+            tx: 0.0,
+            ty: 0.0,
+        },
+        Rect {
+            x: 0,
+            y: 0,
+            width: 100,
+            height: 20,
+        },
+        MermaidViewState::ErKeys,
+    );
+
+    assert_eq!(
+        projected
+            .iter()
+            .map(|line| (line.source_index, line.text.as_str()))
+            .collect::<Vec<_>>(),
+        vec![(0, "ACCOUNT"), (2, "id PK")]
+    );
+}
+
+#[test]
 fn mermaid_open_shortcut_uses_artifact_path_and_stays_in_viewer() {
     let api = MockApi::new();
     let opener = Arc::new(MockArtifactOpener::default());

@@ -93,38 +93,56 @@ pub(crate) fn mermaid_summary_subtokens(token: &str) -> Vec<String> {
 pub(crate) fn mermaid_compact_overview_text<'a>(
     lines: impl IntoIterator<Item = &'a str>,
 ) -> Option<String> {
-    let raw_tokens = lines
-        .into_iter()
-        .flat_map(|line| line.split_whitespace())
-        .flat_map(mermaid_summary_subtokens)
-        .collect::<Vec<_>>();
+    let raw_tokens = mermaid_overview_raw_tokens(lines);
     if raw_tokens.is_empty() {
         return None;
     }
 
-    let mut prefix = None;
-    let mut start_idx = 0usize;
-    if mermaid_is_numeric_prefix(&raw_tokens[0]) {
-        prefix = Some(raw_tokens[0].trim().to_string());
-        start_idx = 1;
-    }
-
-    let cleaned_tokens = raw_tokens[start_idx..].to_vec();
+    let (prefix, cleaned_tokens) = mermaid_overview_prefix_and_tokens(&raw_tokens);
     if cleaned_tokens.is_empty() {
         return prefix;
     }
 
+    let source_tokens = mermaid_overview_source_tokens(cleaned_tokens);
+    mermaid_overview_limited_text(prefix, source_tokens)
+}
+
+fn mermaid_overview_raw_tokens<'a>(lines: impl IntoIterator<Item = &'a str>) -> Vec<String> {
+    lines
+        .into_iter()
+        .flat_map(|line| line.split_whitespace())
+        .flat_map(mermaid_summary_subtokens)
+        .collect()
+}
+
+fn mermaid_overview_prefix_and_tokens(raw_tokens: &[String]) -> (Option<String>, Vec<String>) {
+    if mermaid_is_numeric_prefix(&raw_tokens[0]) {
+        (
+            Some(raw_tokens[0].trim().to_string()),
+            raw_tokens[1..].to_vec(),
+        )
+    } else {
+        (None, raw_tokens.to_vec())
+    }
+}
+
+fn mermaid_overview_source_tokens(cleaned_tokens: Vec<String>) -> Vec<String> {
     let significant_tokens = cleaned_tokens
         .iter()
         .filter(|token| !mermaid_summary_stopword(&token.to_ascii_lowercase()))
         .cloned()
         .collect::<Vec<_>>();
-    let source_tokens = if significant_tokens.is_empty() {
+    if significant_tokens.is_empty() {
         cleaned_tokens
     } else {
         significant_tokens
-    };
+    }
+}
 
+fn mermaid_overview_limited_text(
+    prefix: Option<String>,
+    source_tokens: Vec<String>,
+) -> Option<String> {
     let word_limit = if prefix.is_some() { 2 } else { 3 };
     let max_chars = 20usize;
     let mut out = prefix.unwrap_or_default();
@@ -1025,43 +1043,64 @@ fn filter_owner_summaries_with_details(candidates: &mut Vec<MermaidProjectedCand
     });
 }
 
-fn mermaid_semantic_line_to_candidate(
-    source_index: usize,
+fn mermaid_candidate_allowed_for_state(
+    line: &MermaidSemanticLine,
+    view_state: MermaidViewState,
+) -> bool {
+    mermaid_line_visible_in_state(line, view_state)
+        && !mermaid_compact_detail_hides_kind(view_state, line.kind)
+}
+
+fn mermaid_candidate_owner_grid(
+    line: &MermaidSemanticLine,
+    transform: MermaidViewportTransform,
+) -> (f32, f32) {
+    (
+        (line.owner_width * transform.scale / 2.0).max(0.0),
+        (line.owner_height * transform.scale / 4.0).max(0.0),
+    )
+}
+
+fn mermaid_candidate_display_text(
+    line: &MermaidSemanticLine,
+    owner_cols: f32,
+    view_state: MermaidViewState,
+) -> Option<String> {
+    let display_text = mermaid_display_text_for_view(line, owner_cols, view_state);
+    (!display_text.trim().is_empty()).then_some(display_text)
+}
+
+fn mermaid_candidate_screen_y(
     line: &MermaidSemanticLine,
     transform: MermaidViewportTransform,
     bounds: MermaidProjectionBounds,
-    view_state: MermaidViewState,
-    owner_colors: &HashMap<String, Color>,
-) -> Option<MermaidProjectedCandidate> {
-    if !mermaid_line_visible_in_state(line, view_state)
-        || mermaid_compact_detail_hides_kind(view_state, line.kind)
-    {
-        return None;
-    }
-
-    let owner_cols = (line.owner_width * transform.scale / 2.0).max(0.0);
-    let owner_rows = (line.owner_height * transform.scale / 4.0).max(0.0);
-    if !line.kind.is_visible_for_owner(owner_cols, owner_rows) {
-        return None;
-    }
-
-    let display_text = mermaid_display_text_for_view(line, owner_cols, view_state);
-    if display_text.trim().is_empty() {
-        return None;
-    }
-
+) -> Option<i32> {
     let projected_y = line.diagram_y * transform.scale + transform.ty;
-    let mut screen_y = bounds.top + (projected_y / 4.0).floor() as i32;
-    if screen_y < bounds.top || screen_y >= bounds.bottom {
-        if line.kind.row_nudge_budget() == 0 {
-            return None;
-        }
-        screen_y = screen_y.clamp(bounds.top, bounds.bottom.saturating_sub(1));
+    let screen_y = bounds.top + (projected_y / 4.0).floor() as i32;
+    if screen_y >= bounds.top && screen_y < bounds.bottom {
+        return Some(screen_y);
     }
+    (line.kind.row_nudge_budget() > 0)
+        .then(|| screen_y.clamp(bounds.top, bounds.bottom.saturating_sub(1)))
+}
 
+fn mermaid_candidate_anchor_x(
+    line: &MermaidSemanticLine,
+    transform: MermaidViewportTransform,
+    bounds: MermaidProjectionBounds,
+) -> i32 {
     let projected_x = line.diagram_x * transform.scale + transform.tx;
-    let anchor_x = bounds.left + (projected_x / 2.0).floor() as i32;
-    let text_width = display_width(&display_text) as i32;
+    bounds.left + (projected_x / 2.0).floor() as i32
+}
+
+fn mermaid_candidate_screen_x(
+    line: &MermaidSemanticLine,
+    display_text: &str,
+    transform: MermaidViewportTransform,
+    bounds: MermaidProjectionBounds,
+) -> Option<(i32, usize, usize)> {
+    let anchor_x = mermaid_candidate_anchor_x(line, transform, bounds);
+    let text_width = display_width(display_text) as i32;
     if text_width <= 0 {
         return None;
     }
@@ -1083,10 +1122,40 @@ fn mermaid_semantic_line_to_candidate(
         screen_x = bounds.left;
     }
     let max_chars = bounds.right.saturating_sub(screen_x) as usize;
-    let clipped = clip_mermaid_overlay_text(&display_text, skipped_chars, max_chars);
-    if clipped.is_empty() {
+    Some((screen_x, skipped_chars, max_chars))
+}
+
+fn mermaid_candidate_clipped_text(
+    display_text: &str,
+    skipped_chars: usize,
+    max_chars: usize,
+) -> Option<String> {
+    let clipped = clip_mermaid_overlay_text(display_text, skipped_chars, max_chars);
+    (!clipped.is_empty()).then_some(clipped)
+}
+
+fn mermaid_semantic_line_to_candidate(
+    source_index: usize,
+    line: &MermaidSemanticLine,
+    transform: MermaidViewportTransform,
+    bounds: MermaidProjectionBounds,
+    view_state: MermaidViewState,
+    owner_colors: &HashMap<String, Color>,
+) -> Option<MermaidProjectedCandidate> {
+    if !mermaid_candidate_allowed_for_state(line, view_state) {
         return None;
     }
+
+    let (owner_cols, owner_rows) = mermaid_candidate_owner_grid(line, transform);
+    if !line.kind.is_visible_for_owner(owner_cols, owner_rows) {
+        return None;
+    }
+
+    let display_text = mermaid_candidate_display_text(line, owner_cols, view_state)?;
+    let screen_y = mermaid_candidate_screen_y(line, transform, bounds)?;
+    let (screen_x, skipped_chars, max_chars) =
+        mermaid_candidate_screen_x(line, &display_text, transform, bounds)?;
+    let clipped = mermaid_candidate_clipped_text(&display_text, skipped_chars, max_chars)?;
 
     Some(MermaidProjectedCandidate {
         priority: line.kind.priority(),
