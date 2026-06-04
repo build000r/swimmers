@@ -374,17 +374,37 @@ fn spawn_server_process(
 
 #[cfg(unix)]
 fn clear_fd_cloexec(fd: i32) -> io::Result<()> {
-    let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
-    if flags == -1 {
-        return Err(io::Error::last_os_error());
-    }
+    let flags = fcntl_getfd_flags(fd)?;
+    fcntl_setfd_flags(fd, fd_flags_without_cloexec(flags))
+}
 
-    let updated = flags & !libc::FD_CLOEXEC;
-    if unsafe { libc::fcntl(fd, libc::F_SETFD, updated) } == -1 {
-        return Err(io::Error::last_os_error());
-    }
+#[cfg(unix)]
+fn fcntl_getfd_flags(fd: i32) -> io::Result<i32> {
+    fcntl_flags_result(unsafe { libc::fcntl(fd, libc::F_GETFD) })
+}
 
-    Ok(())
+#[cfg(unix)]
+fn fcntl_setfd_flags(fd: i32, flags: i32) -> io::Result<()> {
+    fcntl_status_result(unsafe { libc::fcntl(fd, libc::F_SETFD, flags) })
+}
+
+#[cfg(unix)]
+fn fcntl_flags_result(flags: i32) -> io::Result<i32> {
+    (flags != -1)
+        .then_some(flags)
+        .ok_or_else(io::Error::last_os_error)
+}
+
+#[cfg(unix)]
+fn fcntl_status_result(status: i32) -> io::Result<()> {
+    (status != -1)
+        .then_some(())
+        .ok_or_else(io::Error::last_os_error)
+}
+
+#[cfg(unix)]
+fn fd_flags_without_cloexec(flags: i32) -> i32 {
+    flags & !libc::FD_CLOEXEC
 }
 
 fn read_ready_byte(mut reader: os_pipe::PipeReader) -> io::Result<u8> {
@@ -394,14 +414,36 @@ fn read_ready_byte(mut reader: os_pipe::PipeReader) -> io::Result<u8> {
 }
 
 fn terminate_child(child: &mut Child) {
-    match child.kill() {
-        Ok(()) => {}
-        Err(err) if err.kind() == io::ErrorKind::InvalidInput => {}
-        Err(err) => {
-            tracing::warn!(error = %err, pid = child.id(), "failed to kill managed swimmers server");
-        }
-    }
+    warn_on_reportable_child_kill_error(child.id(), child.kill());
     let _ = child.wait();
+}
+
+fn warn_on_reportable_child_kill_error(pid: u32, kill_result: io::Result<()>) {
+    reportable_child_kill_error(kill_result)
+        .into_iter()
+        .for_each(|err| {
+            tracing::warn!(error = %err, pid, "failed to kill managed swimmers server");
+        });
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ChildKillDisposition {
+    Ignore,
+    Warn,
+}
+
+fn classify_child_kill(error_kind: Option<io::ErrorKind>) -> ChildKillDisposition {
+    match error_kind {
+        None | Some(io::ErrorKind::InvalidInput) => ChildKillDisposition::Ignore,
+        Some(_) => ChildKillDisposition::Warn,
+    }
+}
+
+fn reportable_child_kill_error(kill_result: io::Result<()>) -> Option<io::Error> {
+    (classify_child_kill(kill_result.as_ref().err().map(|err| err.kind()))
+        == ChildKillDisposition::Warn)
+        .then(|| kill_result.err())
+        .flatten()
 }
 
 fn spawn_reaper(mut child: Child, log_path: PathBuf) {
@@ -790,6 +832,56 @@ mod tests {
             default_server_log_dir_from(None::<OsString>, None::<OsString>),
             PathBuf::from("/tmp")
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fd_flags_without_cloexec_clears_only_close_on_exec() {
+        let other_flags = 0b1010_0101;
+
+        assert_eq!(
+            fd_flags_without_cloexec(other_flags | libc::FD_CLOEXEC),
+            other_flags & !libc::FD_CLOEXEC
+        );
+        assert_eq!(
+            fd_flags_without_cloexec(other_flags & !libc::FD_CLOEXEC),
+            other_flags & !libc::FD_CLOEXEC
+        );
+    }
+
+    #[test]
+    fn classify_child_kill_ignores_success_and_invalid_input() {
+        assert_eq!(classify_child_kill(None), ChildKillDisposition::Ignore);
+        assert_eq!(
+            classify_child_kill(Some(io::ErrorKind::InvalidInput)),
+            ChildKillDisposition::Ignore
+        );
+    }
+
+    #[test]
+    fn classify_child_kill_warns_on_other_errors() {
+        assert_eq!(
+            classify_child_kill(Some(io::ErrorKind::PermissionDenied)),
+            ChildKillDisposition::Warn
+        );
+    }
+
+    #[test]
+    fn reportable_child_kill_error_preserves_only_warning_errors() {
+        assert!(reportable_child_kill_error(Ok(())).is_none());
+        assert!(reportable_child_kill_error(Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "already exited",
+        )))
+        .is_none());
+
+        let err = reportable_child_kill_error(Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "cannot signal child",
+        )))
+        .expect("non-InvalidInput kill error should be reportable");
+        assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
+        assert_eq!(err.to_string(), "cannot signal child");
     }
 
     #[test]
