@@ -9,6 +9,7 @@ pub(crate) use mermaid_viewer::read_plan_file_from_disk;
 use mermaid_viewer::MermaidCacheEntry;
 #[path = "field_click.rs"]
 mod field_click;
+mod picker_actions;
 
 // Once the school is large, the O(n^2) pairwise collision pass gets expensive.
 // 50 entities is where we start seeing frame-time spikes on laptops, so we cap
@@ -3861,53 +3862,6 @@ impl<C: TuiApi> App<C> {
 
     pub(crate) fn handle_field_click(&mut self, x: u16, y: u16, field: Rect) {
         field_click::handle_field_click(self, x, y, field);
-    }
-
-    pub(crate) fn handle_picker_action(&mut self, action: PickerAction, field: Rect) {
-        match action {
-            PickerAction::Close => self.close_picker(),
-            PickerAction::Up => self.picker_up(),
-            PickerAction::ToggleManaged(managed_only) => {
-                self.picker_set_managed_only(managed_only);
-            }
-            PickerAction::ActivateGroup(name) => {
-                self.picker_set_group(name);
-            }
-            PickerAction::CycleGroupEditTarget => {
-                if let Some(picker) = &mut self.picker {
-                    if let Some(target) = picker.cycle_group_edit_target() {
-                        self.set_message(format!("directory group target: {target}"));
-                    }
-                }
-            }
-            PickerAction::ToggleTool => {
-                self.spawn_tool = self.spawn_tool.toggle();
-                if let Some(picker) = &mut self.picker {
-                    picker.spawn_tool = self.spawn_tool;
-                }
-            }
-            PickerAction::ToggleLaunchTarget => {
-                if let Some(picker) = &mut self.picker {
-                    self.launch_target = picker.toggle_launch_target();
-                }
-            }
-            PickerAction::ToggleBatchExcludeMode => {
-                if let Some(picker) = &mut self.picker {
-                    picker.batch_exclude_mode = !picker.batch_exclude_mode;
-                }
-            }
-            PickerAction::BatchVisible => self.open_batch_initial_request_for_visible_entries(),
-            PickerAction::ActivateCurrentPath => self.spawn_session_from_picker(field),
-            PickerAction::ActivateEntry(index) => self.activate_picker_entry(index, field),
-            PickerAction::ToggleBatchExclude(index) => {
-                if let Some(picker) = &mut self.picker {
-                    picker.toggle_batch_exclusion(index);
-                }
-            }
-            PickerAction::StartRepoAction(index, kind) => {
-                self.start_picker_repo_action(index, kind)
-            }
-        }
     }
 
     pub(crate) fn spawn_session_from_picker(&mut self, _field: Rect) {

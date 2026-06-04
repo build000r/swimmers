@@ -1039,27 +1039,7 @@ pub(crate) fn render_mermaid_er_packed_lines(
     }
 
     let mut boxes = mermaid_build_er_packed_boxes(prepared, view_state);
-    let order = mermaid_er_order_from_layout(&prepared.layout, &boxes);
-    let order_index = order
-        .into_iter()
-        .enumerate()
-        .map(|(idx, owner_key)| (owner_key, idx))
-        .collect::<HashMap<_, _>>();
-    boxes.sort_by(|left, right| {
-        let left_index = order_index
-            .get(&left.owner_key)
-            .copied()
-            .unwrap_or(usize::MAX);
-        let right_index = order_index
-            .get(&right.owner_key)
-            .copied()
-            .unwrap_or(usize::MAX);
-        left_index.cmp(&right_index).then_with(|| {
-            mermaid_cmp_f32(left.sort_y, right.sort_y)
-                .then_with(|| mermaid_cmp_f32(left.sort_x, right.sort_x))
-                .then_with(|| left.owner_key.cmp(&right.owner_key))
-        })
-    });
+    mermaid_sort_er_packed_boxes(&prepared.layout, &mut boxes);
     if boxes.is_empty() {
         return Ok(false);
     }
@@ -1071,21 +1051,77 @@ pub(crate) fn render_mermaid_er_packed_lines(
         return Ok(false);
     }
 
+    let outline_edges = mermaid_visible_er_outline_edges(&prepared.layout, &label_rects);
+    mermaid_cache_er_packed_render(
+        viewer,
+        content_rect,
+        &label_rects,
+        outline_edges,
+        &owner_colors,
+        projected,
+    );
+    Ok(true)
+}
+
+fn mermaid_sort_er_packed_boxes(layout: &MermaidLayout, boxes: &mut [MermaidErPackedBox]) {
+    let order = mermaid_er_order_from_layout(layout, boxes);
+    let order_index = order
+        .into_iter()
+        .enumerate()
+        .map(|(idx, owner_key)| (owner_key, idx))
+        .collect::<HashMap<_, _>>();
+    boxes.sort_by(|left, right| mermaid_cmp_er_packed_box_order(left, right, &order_index));
+}
+
+fn mermaid_cmp_er_packed_box_order(
+    left: &MermaidErPackedBox,
+    right: &MermaidErPackedBox,
+    order_index: &HashMap<String, usize>,
+) -> Ordering {
+    let left_index = mermaid_er_packed_box_order_index(&left.owner_key, order_index);
+    let right_index = mermaid_er_packed_box_order_index(&right.owner_key, order_index);
+    left_index.cmp(&right_index).then_with(|| {
+        mermaid_cmp_f32(left.sort_y, right.sort_y)
+            .then_with(|| mermaid_cmp_f32(left.sort_x, right.sort_x))
+            .then_with(|| left.owner_key.cmp(&right.owner_key))
+    })
+}
+
+fn mermaid_er_packed_box_order_index(
+    owner_key: &str,
+    order_index: &HashMap<String, usize>,
+) -> usize {
+    order_index.get(owner_key).copied().unwrap_or(usize::MAX)
+}
+
+fn mermaid_visible_er_outline_edges(
+    layout: &MermaidLayout,
+    label_rects: &HashMap<String, MermaidOutlineLabelRect>,
+) -> Vec<MermaidOutlineEdge> {
     let visible_keys = label_rects.keys().cloned().collect::<HashSet<_>>();
-    let outline_edges = mermaid_outline_edge_map(&prepared.layout)
+    mermaid_outline_edge_map(layout)
         .into_values()
         .filter(|edge| visible_keys.contains(&edge.from_key) && visible_keys.contains(&edge.to_key))
-        .collect::<Vec<_>>();
+        .collect()
+}
+
+fn mermaid_cache_er_packed_render(
+    viewer: &mut MermaidViewerState,
+    content_rect: Rect,
+    label_rects: &HashMap<String, MermaidOutlineLabelRect>,
+    outline_edges: Vec<MermaidOutlineEdge>,
+    owner_colors: &HashMap<String, Color>,
+    projected: Vec<MermaidProjectedLine>,
+) {
     viewer.cached_lines =
-        mermaid_render_compact_detail_background(content_rect, &label_rects, outline_edges);
+        mermaid_render_compact_detail_background(content_rect, label_rects, outline_edges);
     viewer.cached_background_cells =
         mermaid_background_cells_from_lines(&viewer.cached_lines, MERMAID_CONNECTOR_COLOR);
     mermaid_apply_rect_border_colors(
         &mut viewer.cached_background_cells,
         content_rect,
-        &label_rects,
-        &owner_colors,
+        label_rects,
+        owner_colors,
     );
     viewer.cached_semantic_lines = projected;
-    Ok(true)
 }

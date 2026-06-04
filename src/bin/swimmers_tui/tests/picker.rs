@@ -1310,6 +1310,21 @@ fn picker_search_filters_without_changing_browsing_scope() {
 }
 
 #[test]
+fn picker_visible_entries_with_empty_search_returns_local_entries_only() {
+    let mut picker = PickerState::new(
+        0,
+        0,
+        dir_response(TEST_REPOS_ROOT, &[("alpha", true), ("beta", true)]),
+        true,
+        SpawnTool::Codex,
+        None,
+    );
+    picker.set_repo_search_entries(repo_search_response(&["/Users/tester/hard/pcbcd"]).entries);
+
+    assert_eq!(picker.visible_entries(), vec![0, 1]);
+}
+
+#[test]
 fn picker_search_includes_repo_cwd_when_not_in_current_entries() {
     let mut picker = PickerState::new(
         0,
@@ -1347,6 +1362,53 @@ fn picker_search_deduplicates_repo_cwd_already_visible() {
     picker.search = "swim".to_string();
 
     assert_eq!(picker.visible_entries(), vec![0]);
+}
+
+#[test]
+fn picker_parent_path_returns_none_at_root() {
+    let picker = PickerState::new(
+        0,
+        0,
+        dir_response(TEST_REPOS_ROOT, &[("alpha", true)]),
+        true,
+        SpawnTool::Codex,
+        None,
+    );
+
+    assert_eq!(picker.parent_path(), None);
+}
+
+#[test]
+fn picker_parent_path_normalizes_current_path_before_parent() {
+    let mut picker = PickerState::new(
+        0,
+        0,
+        dir_response(TEST_REPOS_ROOT, &[("alpha", true)]),
+        true,
+        SpawnTool::Codex,
+        None,
+    );
+    picker.current_path = "/Users/tester/repos/opensource/swimmers/".to_string();
+
+    assert_eq!(
+        picker.parent_path().as_deref(),
+        Some("/Users/tester/repos/opensource")
+    );
+}
+
+#[test]
+fn picker_parent_path_maps_empty_parent_to_root() {
+    let mut picker = PickerState::new(
+        0,
+        0,
+        dir_response("base", &[("alpha", true)]),
+        true,
+        SpawnTool::Codex,
+        None,
+    );
+    picker.current_path = "child".to_string();
+
+    assert_eq!(picker.parent_path().as_deref(), Some("/"));
 }
 
 #[test]

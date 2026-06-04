@@ -340,6 +340,35 @@ fn claude_message_summary(message: Option<&Value>) -> Option<String> {
     content_text(message.get("content")?)
 }
 
+fn claude_user_message_text<'a>(entry_type: &str, msg: Option<&'a Value>) -> Option<&'a str> {
+    let msg = msg?;
+    if entry_type != "user" {
+        return None;
+    }
+    if msg.get("role").and_then(Value::as_str) != Some("user") {
+        return None;
+    }
+    claude_user_content_text(msg.get("content")?)
+}
+
+fn claude_user_content_text(content: &Value) -> Option<&str> {
+    if let Some(text) = content.as_str() {
+        return Some(text);
+    }
+
+    content
+        .as_array()?
+        .iter()
+        .find_map(claude_user_text_block_text)
+}
+
+fn claude_user_text_block_text(block: &Value) -> Option<&str> {
+    if block.get("type").and_then(Value::as_str) != Some("text") {
+        return None;
+    }
+    block.get("text").and_then(Value::as_str)
+}
+
 fn content_text(content: &Value) -> Option<String> {
     if let Some(text) = content.as_str() {
         return Some(text.to_string());
@@ -374,37 +403,105 @@ fn make_record_id(source: &str, byte_start: u64) -> String {
 fn claude_file_matches_cwd(path: &Path, cwd: &str) -> bool {
     use std::io::BufRead;
 
-    let file = match fs::File::open(path) {
-        Ok(file) => file,
-        Err(_) => return false,
+    let Ok(file) = fs::File::open(path) else {
+        return false;
     };
     let reader = std::io::BufReader::new(file);
 
+    scan_claude_cwd_prefix(reader.lines().take(64), cwd).matches()
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ClaudeCwdScan {
+    Match,
+    Mismatch,
+    Missing,
+}
+
+impl ClaudeCwdScan {
+    fn matches(self) -> bool {
+        matches!(self, Self::Match | Self::Missing)
+    }
+}
+
+fn scan_claude_cwd_prefix<I>(lines: I, cwd: &str) -> ClaudeCwdScan
+where
+    I: IntoIterator<Item = std::io::Result<String>>,
+{
     let mut saw_cwd_field = false;
-    for line in reader.lines().take(64) {
-        let line = match line {
-            Ok(value) => value,
-            Err(_) => continue,
-        };
-        if line.trim().is_empty() {
+    for line in lines {
+        let Some(entry_cwd) = claude_line_cwd(line) else {
             continue;
-        }
-
-        let value: Value = match serde_json::from_str(&line) {
-            Ok(value) => value,
-            Err(_) => continue,
         };
-
-        if let Some(entry_cwd) = value.get("cwd").and_then(Value::as_str) {
-            saw_cwd_field = true;
-            if entry_cwd == cwd {
-                return true;
-            }
+        saw_cwd_field = true;
+        if entry_cwd == cwd {
+            return ClaudeCwdScan::Match;
         }
     }
 
-    // Legacy files may omit top-level cwd metadata; preserve old behavior.
-    !saw_cwd_field
+    if saw_cwd_field {
+        ClaudeCwdScan::Mismatch
+    } else {
+        // Legacy files may omit top-level cwd metadata; preserve old behavior.
+        ClaudeCwdScan::Missing
+    }
+}
+
+fn claude_line_cwd(line: std::io::Result<String>) -> Option<String> {
+    let line = line.ok()?;
+    let line = line.trim();
+    if line.is_empty() {
+        return None;
+    }
+
+    serde_json::from_str::<Value>(line)
+        .ok()?
+        .get("cwd")
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned)
+}
+
+fn claude_project_dir(cwd: &str) -> Option<PathBuf> {
+    let cwd_slug = cwd.replace('/', "-");
+    dirs_home().map(|home| home.join(".claude").join("projects").join(cwd_slug))
+}
+
+fn discover_latest_claude_jsonl(
+    project_dir: &Path,
+    cwd: &str,
+    excluded_paths: &[PathBuf],
+) -> Option<PathBuf> {
+    let entries = fs::read_dir(project_dir).ok()?;
+    let mut files: Vec<(PathBuf, std::time::SystemTime)> = entries
+        .filter_map(|entry| claude_discovery_candidate(entry.ok()?, cwd, excluded_paths))
+        .collect();
+
+    files.sort_by(|a, b| b.1.cmp(&a.1));
+    files.into_iter().next().map(|(path, _)| path)
+}
+
+fn claude_discovery_candidate(
+    entry: fs::DirEntry,
+    cwd: &str,
+    excluded_paths: &[PathBuf],
+) -> Option<(PathBuf, std::time::SystemTime)> {
+    let path = entry.path();
+    if !is_jsonl_path(&path) {
+        return None;
+    }
+    if !claude_file_matches_cwd(&path, cwd) {
+        return None;
+    }
+    if excluded_paths.contains(&path) {
+        return None;
+    }
+
+    let mtime = entry.metadata().ok()?.modified().ok()?;
+    Some((path, mtime))
+}
+
+fn is_jsonl_path(path: &Path) -> bool {
+    path.extension().is_some_and(|ext| ext == "jsonl")
 }
 
 // ---------------------------------------------------------------------------
@@ -454,25 +551,8 @@ impl ClaudeCodeReader {
     /// Discover the most recently modified JSONL file in the project dir,
     /// skipping files already claimed by other readers.
     fn discover_file(&self) -> Option<PathBuf> {
-        let home = dirs_home()?;
-        let cwd_slug = self.cwd.replace('/', "-");
-        let project_dir = home.join(".claude").join("projects").join(&cwd_slug);
-
-        let entries = fs::read_dir(&project_dir).ok()?;
-        let mut files: Vec<(PathBuf, std::time::SystemTime)> = entries
-            .filter_map(|e| e.ok())
-            .filter(|e| e.path().extension().is_some_and(|ext| ext == "jsonl"))
-            .filter(|e| claude_file_matches_cwd(&e.path(), &self.cwd))
-            .filter(|e| !self.excluded_paths.contains(&e.path()))
-            .filter_map(|e| {
-                let md = e.metadata().ok()?;
-                let mtime = md.modified().ok()?;
-                Some((e.path(), mtime))
-            })
-            .collect();
-
-        files.sort_by(|a, b| b.1.cmp(&a.1));
-        files.into_iter().next().map(|(p, _)| p)
+        let project_dir = claude_project_dir(&self.cwd)?;
+        discover_latest_claude_jsonl(&project_dir, &self.cwd, &self.excluded_paths)
     }
 
     /// Parse entries and update internal state.
@@ -496,29 +576,8 @@ impl ClaudeCodeReader {
         msg: Option<&Value>,
         entry: &JsonlEntry,
     ) {
-        if entry_type != "user"
-            || msg.and_then(|msg| msg.get("role").and_then(Value::as_str)) != Some("user")
-        {
-            return;
-        }
-
-        let Some(content) = msg.map(|msg| &msg["content"]) else {
-            return;
-        };
-
-        if let Some(text) = content.as_str() {
+        if let Some(text) = claude_user_message_text(entry_type, msg) {
             self.set_reader_user_task(text, entry);
-            return;
-        }
-
-        for block in content.as_array().into_iter().flatten() {
-            if block.get("type").and_then(Value::as_str) != Some("text") {
-                continue;
-            }
-            if let Some(text) = block.get("text").and_then(Value::as_str) {
-                self.set_reader_user_task(text, entry);
-                break;
-            }
         }
     }
 
@@ -1100,6 +1159,13 @@ struct LogReadPlan {
     reset_reader: bool,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct LogReadDecision {
+    start: u64,
+    phase: LogReadPhase,
+    reset_reader: bool,
+}
+
 fn resolve_current_log_path(
     claimed_path: Option<PathBuf>,
     discover_file: impl FnOnce() -> Option<PathBuf>,
@@ -1121,30 +1187,57 @@ fn plan_log_read(
 ) -> Option<LogReadPlan> {
     let current_size = fs::metadata(&file_path).ok()?.len();
     let same_file = claimed_path == Some(&file_path);
-
-    if same_file && current_size == previous_size {
-        return None;
-    }
-
-    let truncated = same_file && current_size < previous_size;
-    let reset_reader = !same_file || truncated;
-    let phase = if reset_reader || !bootstrapped {
-        LogReadPhase::Bootstrap
-    } else {
-        LogReadPhase::Incremental
-    };
-    let start = match phase {
-        LogReadPhase::Bootstrap => current_size.saturating_sub(BOOTSTRAP_MAX),
-        LogReadPhase::Incremental => previous_size,
-    };
+    let decision = log_read_decision(same_file, previous_size, current_size, bootstrapped)?;
 
     Some(LogReadPlan {
         file_path,
         current_size,
-        start,
+        start: decision.start,
+        phase: decision.phase,
+        reset_reader: decision.reset_reader,
+    })
+}
+
+fn log_read_decision(
+    same_file: bool,
+    previous_size: u64,
+    current_size: u64,
+    bootstrapped: bool,
+) -> Option<LogReadDecision> {
+    if is_unchanged_log(same_file, previous_size, current_size) {
+        return None;
+    }
+
+    let reset_reader = should_reset_log_reader(same_file, previous_size, current_size);
+    let phase = log_read_phase(reset_reader, bootstrapped);
+    Some(LogReadDecision {
+        start: log_read_start(phase, previous_size, current_size),
         phase,
         reset_reader,
     })
+}
+
+fn is_unchanged_log(same_file: bool, previous_size: u64, current_size: u64) -> bool {
+    same_file && current_size == previous_size
+}
+
+fn should_reset_log_reader(same_file: bool, previous_size: u64, current_size: u64) -> bool {
+    !same_file || current_size < previous_size
+}
+
+fn log_read_phase(reset_reader: bool, bootstrapped: bool) -> LogReadPhase {
+    if reset_reader || !bootstrapped {
+        LogReadPhase::Bootstrap
+    } else {
+        LogReadPhase::Incremental
+    }
+}
+
+fn log_read_start(phase: LogReadPhase, previous_size: u64, current_size: u64) -> u64 {
+    match phase {
+        LogReadPhase::Bootstrap => current_size.saturating_sub(BOOTSTRAP_MAX),
+        LogReadPhase::Incremental => previous_size,
+    }
 }
 
 fn read_planned_entries(plan: &LogReadPlan) -> Option<(Vec<JsonlEntry>, u64)> {
@@ -1360,6 +1453,100 @@ mod tests {
     }
 
     #[test]
+    fn claude_user_message_text_requires_user_entry_and_role() {
+        let user_msg = serde_json::json!({
+            "role": "user",
+            "content": "ship the fix"
+        });
+        let assistant_msg = serde_json::json!({
+            "role": "assistant",
+            "content": "not a user task"
+        });
+
+        assert_eq!(
+            claude_user_message_text("user", Some(&user_msg)),
+            Some("ship the fix")
+        );
+        assert_eq!(claude_user_message_text("assistant", Some(&user_msg)), None);
+        assert_eq!(claude_user_message_text("user", Some(&assistant_msg)), None);
+        assert_eq!(claude_user_message_text("user", None), None);
+    }
+
+    #[test]
+    fn claude_user_message_text_uses_first_text_block_with_text() {
+        let msg = serde_json::json!({
+            "role": "user",
+            "content": [
+                { "type": "image", "text": "ignored image text" },
+                { "type": "text", "content": "ignored content field" },
+                { "type": "text", "text": "first text task" },
+                { "type": "text", "text": "second text task" }
+            ]
+        });
+
+        assert_eq!(
+            claude_user_message_text("user", Some(&msg)),
+            Some("first text task")
+        );
+    }
+
+    #[test]
+    fn claude_file_matches_cwd_skips_bad_lines_and_preserves_legacy_no_cwd() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let legacy = tmp.path().join("legacy.jsonl");
+        fs::write(&legacy, "\nnot json\n{\"type\":\"user\"}\n").expect("legacy jsonl");
+
+        assert!(claude_file_matches_cwd(&legacy, "/tmp/project"));
+        assert!(!claude_file_matches_cwd(
+            &tmp.path().join("missing.jsonl"),
+            "/tmp/project"
+        ));
+    }
+
+    #[test]
+    fn claude_file_matches_cwd_rejects_mismatch_and_scans_only_prefix() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let mismatch = tmp.path().join("mismatch.jsonl");
+        fs::write(&mismatch, "{\"cwd\":\"/tmp/other\"}\n").expect("mismatch jsonl");
+        assert!(!claude_file_matches_cwd(&mismatch, "/tmp/project"));
+
+        let late_cwd = tmp.path().join("late-cwd.jsonl");
+        let mut lines = (0..64)
+            .map(|_| "{\"type\":\"user\"}")
+            .collect::<Vec<_>>()
+            .join("\n");
+        lines.push_str("\n{\"cwd\":\"/tmp/other\"}\n");
+        fs::write(&late_cwd, lines).expect("late cwd jsonl");
+        assert!(claude_file_matches_cwd(&late_cwd, "/tmp/project"));
+    }
+
+    #[test]
+    fn plan_log_read_classifies_unchanged_incremental_bootstrap_and_truncated() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("session.jsonl");
+        fs::write(&path, b"0123456789").expect("session");
+
+        assert!(plan_log_read(Some(&path), 10, true, path.clone()).is_none());
+
+        let incremental =
+            plan_log_read(Some(&path), 5, true, path.clone()).expect("incremental read plan");
+        assert_eq!(incremental.start, 5);
+        assert_eq!(incremental.phase, LogReadPhase::Incremental);
+        assert!(!incremental.reset_reader);
+
+        let bootstrap = plan_log_read(None, 0, false, path.clone()).expect("bootstrap read plan");
+        assert_eq!(bootstrap.start, 0);
+        assert_eq!(bootstrap.phase, LogReadPhase::Bootstrap);
+        assert!(bootstrap.reset_reader);
+
+        let truncated =
+            plan_log_read(Some(&path), 20, true, path.clone()).expect("truncated read plan");
+        assert_eq!(truncated.start, 0);
+        assert_eq!(truncated.phase, LogReadPhase::Bootstrap);
+        assert!(truncated.reset_reader);
+    }
+
+    #[test]
     fn codex_reader_matches_cwd_with_large_session_meta_line() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let path = tmp.path().join("rollout-large-meta.jsonl");
@@ -1531,6 +1718,73 @@ mod tests {
         let reader = ClaudeCodeReader::new(cwd_a, &[]);
         let discovered = reader.discover_file();
         assert_eq!(discovered, Some(file_a));
+
+        if let Some(prev) = previous_home {
+            std::env::set_var("HOME", prev);
+        } else {
+            std::env::remove_var("HOME");
+        }
+    }
+
+    #[test]
+    fn claude_reader_discovery_uses_jsonl_exclusions_and_newest_mtime() {
+        let _lock = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let cwd = "/tmp/project-discovery";
+        let slug = cwd.replace('/', "-");
+        let project_dir = tmp.path().join(".claude").join("projects").join(slug);
+        fs::create_dir_all(&project_dir).expect("project dir");
+
+        let old = project_dir.join("old.jsonl");
+        fs::write(
+            &old,
+            format!(
+                "{{\"type\":\"user\",\"cwd\":\"{}\",\"message\":{{\"role\":\"user\",\"content\":\"old\"}}}}\n",
+                cwd
+            ),
+        )
+        .expect("old jsonl");
+        thread::sleep(Duration::from_millis(50));
+
+        let next = project_dir.join("next.jsonl");
+        fs::write(
+            &next,
+            format!(
+                "{{\"type\":\"user\",\"cwd\":\"{}\",\"message\":{{\"role\":\"user\",\"content\":\"next\"}}}}\n",
+                cwd
+            ),
+        )
+        .expect("next jsonl");
+        thread::sleep(Duration::from_millis(50));
+
+        let excluded = project_dir.join("excluded.jsonl");
+        fs::write(
+            &excluded,
+            format!(
+                "{{\"type\":\"user\",\"cwd\":\"{}\",\"message\":{{\"role\":\"user\",\"content\":\"excluded\"}}}}\n",
+                cwd
+            ),
+        )
+        .expect("excluded jsonl");
+        thread::sleep(Duration::from_millis(50));
+
+        let txt = project_dir.join("newest.txt");
+        fs::write(
+            &txt,
+            format!(
+                "{{\"type\":\"user\",\"cwd\":\"{}\",\"message\":{{\"role\":\"user\",\"content\":\"txt\"}}}}\n",
+                cwd
+            ),
+        )
+        .expect("txt file");
+
+        let previous_home = std::env::var_os("HOME");
+        std::env::set_var("HOME", tmp.path());
+
+        let reader = ClaudeCodeReader::new(cwd, &[excluded]);
+        assert_eq!(reader.discover_file(), Some(next));
 
         if let Some(prev) = previous_home {
             std::env::set_var("HOME", prev);

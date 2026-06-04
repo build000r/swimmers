@@ -228,34 +228,66 @@ impl PickerState {
     }
 
     pub(crate) fn visible_entries(&self) -> Vec<usize> {
-        if self.search.is_empty() {
-            return (0..self.entries.len()).collect();
+        match self.search_needle() {
+            Some(needle) => self.visible_entries_for_search(&needle),
+            None => self.local_entry_indices().collect(),
         }
-        let needle = self.search.to_lowercase();
-        let mut seen_local_paths = HashSet::new();
-        let mut visible = Vec::new();
-        for index in 0..self.entries.len() {
-            if let Some(path) = self.path_for_entry(index) {
-                seen_local_paths.insert(normalize_path(&path));
-            }
-            if self.entry_matches_search(index, &needle) {
-                visible.push(index);
-            }
-        }
+    }
 
-        for index in self.entries.len()..self.total_entry_count() {
-            let Some(path) = self.path_for_entry(index) else {
-                continue;
-            };
-            if seen_local_paths.contains(&normalize_path(&path)) {
-                continue;
-            }
-            if self.entry_matches_search(index, &needle) {
-                visible.push(index);
-            }
-        }
+    fn search_needle(&self) -> Option<String> {
+        (!self.search.is_empty()).then(|| self.search.to_lowercase())
+    }
 
-        visible
+    fn visible_entries_for_search(&self, needle: &str) -> Vec<usize> {
+        let seen_local_paths = self.local_entry_paths();
+        self.matching_local_entry_indices(needle)
+            .chain(self.matching_repo_search_entry_indices(needle, &seen_local_paths))
+            .collect()
+    }
+
+    fn local_entry_indices(&self) -> std::ops::Range<usize> {
+        0..self.entries.len()
+    }
+
+    fn repo_search_entry_indices(&self) -> std::ops::Range<usize> {
+        self.entries.len()..self.total_entry_count()
+    }
+
+    fn local_entry_paths(&self) -> HashSet<String> {
+        self.local_entry_indices()
+            .filter_map(|index| self.path_for_entry(index))
+            .map(|path| normalize_path(&path))
+            .collect()
+    }
+
+    fn matching_local_entry_indices<'a>(
+        &'a self,
+        needle: &'a str,
+    ) -> impl Iterator<Item = usize> + 'a {
+        self.local_entry_indices()
+            .filter(move |index| self.entry_matches_search(*index, needle))
+    }
+
+    fn matching_repo_search_entry_indices<'a>(
+        &'a self,
+        needle: &'a str,
+        seen_local_paths: &'a HashSet<String>,
+    ) -> impl Iterator<Item = usize> + 'a {
+        self.repo_search_entry_indices()
+            .filter(move |index| {
+                self.repo_search_entry_is_not_local_duplicate(*index, seen_local_paths)
+            })
+            .filter(move |index| self.entry_matches_search(*index, needle))
+    }
+
+    fn repo_search_entry_is_not_local_duplicate(
+        &self,
+        index: usize,
+        seen_local_paths: &HashSet<String>,
+    ) -> bool {
+        self.path_for_entry(index)
+            .map(|path| !seen_local_paths.contains(&normalize_path(&path)))
+            .unwrap_or(false)
     }
 
     pub(crate) fn total_entry_count(&self) -> usize {
@@ -459,20 +491,9 @@ impl PickerState {
     }
 
     pub(crate) fn parent_path(&self) -> Option<String> {
-        if self.at_root() {
-            return None;
-        }
-
-        let normalized = normalize_path(&self.current_path);
-        let path = std::path::Path::new(&normalized);
-        path.parent().map(|parent| {
-            let raw = parent.to_string_lossy();
-            if raw.is_empty() {
-                "/".to_string()
-            } else {
-                raw.into_owned()
-            }
-        })
+        (!self.at_root())
+            .then(|| parent_path_for(&self.current_path))
+            .flatten()
     }
 
     pub(crate) fn relative_label(&self) -> String {
@@ -723,6 +744,20 @@ pub(crate) fn normalize_path(path: &str) -> String {
     } else {
         trimmed.to_string()
     }
+}
+
+fn parent_path_for(path: &str) -> Option<String> {
+    let normalized = normalize_path(path);
+    std::path::Path::new(&normalized)
+        .parent()
+        .map(parent_path_string)
+}
+
+fn parent_path_string(parent: &std::path::Path) -> String {
+    let raw = parent.to_string_lossy().into_owned();
+    (!raw.is_empty())
+        .then_some(raw)
+        .unwrap_or_else(|| "/".to_string())
 }
 
 pub(crate) fn join_path(base: &str, name: &str) -> String {

@@ -2286,12 +2286,20 @@ async fn kill_tmux_session(tmux_name: &str) -> anyhow::Result<()> {
     )
     .await?;
 
-    if output.status.success() {
-        return Ok(());
-    }
+    classify_kill_tmux_session_result(output.status.success(), &output.stderr)
+}
 
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    if stderr.contains("can't find session") || stderr.contains("no server running") {
+fn classify_kill_tmux_session_result(success: bool, stderr: &[u8]) -> anyhow::Result<()> {
+    if success {
+        Ok(())
+    } else {
+        classify_failed_kill_tmux_session(stderr)
+    }
+}
+
+fn classify_failed_kill_tmux_session(stderr: &[u8]) -> anyhow::Result<()> {
+    let stderr = String::from_utf8_lossy(stderr);
+    if tmux_kill_reports_missing_session(&stderr) {
         return Ok(());
     }
 
@@ -2299,6 +2307,10 @@ async fn kill_tmux_session(tmux_name: &str) -> anyhow::Result<()> {
         "tmux kill-session failed: {}",
         stderr.trim()
     ))
+}
+
+fn tmux_kill_reports_missing_session(stderr: &str) -> bool {
+    stderr.contains("can't find session") || stderr.contains("no server running")
 }
 
 fn tmux_list_reports_no_sessions(stderr: &str) -> bool {
@@ -2395,6 +2407,38 @@ mod tests {
         assert_eq!(missing.state, SessionState::Exited);
         assert_eq!(missing.transport_health, TransportHealth::Disconnected);
         assert!(missing.is_stale);
+    }
+
+    #[test]
+    fn kill_tmux_session_result_accepts_success_status() {
+        let result = classify_kill_tmux_session_result(true, b"unexpected stderr");
+
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn kill_tmux_session_result_accepts_missing_session_stderr() {
+        let result = classify_kill_tmux_session_result(false, b"can't find session: demo");
+
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn kill_tmux_session_result_accepts_no_server_stderr() {
+        let result = classify_kill_tmux_session_result(false, b"no server running on /tmp/tmux");
+
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn kill_tmux_session_result_reports_trimmed_unexpected_stderr() {
+        let err = classify_kill_tmux_session_result(false, b"  permission denied\n")
+            .expect_err("unexpected kill failure should be reported");
+
+        assert_eq!(
+            err.to_string(),
+            "tmux kill-session failed: permission denied"
+        );
     }
 
     fn commit_ready_cue() -> ActionCue {
