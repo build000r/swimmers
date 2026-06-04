@@ -805,7 +805,7 @@ pub(crate) fn handle_tui_event<C: TuiApi>(
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum TuiEventAction<'a> {
+pub(crate) enum TuiEventAction<'a> {
     Key(KeyEvent),
     Paste(&'a str),
     Mouse(MouseEventAction),
@@ -814,7 +814,7 @@ enum TuiEventAction<'a> {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum MouseEventAction {
+pub(crate) enum MouseEventAction {
     LeftDown(crossterm::event::MouseEvent),
     LeftDrag(crossterm::event::MouseEvent),
     LeftUp,
@@ -823,17 +823,55 @@ enum MouseEventAction {
     Ignore,
 }
 
-fn classify_tui_event(event: &Event) -> TuiEventAction<'_> {
-    match event {
-        Event::Key(key) if key.kind == KeyEventKind::Press => TuiEventAction::Key(*key),
-        Event::Paste(text) => TuiEventAction::Paste(text),
-        Event::Mouse(mouse) => TuiEventAction::Mouse(classify_mouse_event(*mouse)),
-        Event::Resize(width, height) => TuiEventAction::Resize(*width, *height),
-        _ => TuiEventAction::Ignore,
-    }
+type TuiEventClassifier = for<'event> fn(&'event Event) -> Option<TuiEventAction<'event>>;
+
+const TUI_EVENT_CLASSIFIERS: [TuiEventClassifier; 4] = [
+    classify_key_event,
+    classify_paste_event,
+    classify_mouse_tui_event,
+    classify_resize_event,
+];
+
+pub(crate) fn classify_tui_event(event: &Event) -> TuiEventAction<'_> {
+    TUI_EVENT_CLASSIFIERS
+        .iter()
+        .find_map(|classify| classify(event))
+        .unwrap_or(TuiEventAction::Ignore)
 }
 
-fn classify_mouse_event(mouse: crossterm::event::MouseEvent) -> MouseEventAction {
+fn classify_key_event(event: &Event) -> Option<TuiEventAction<'_>> {
+    let Event::Key(key) = event else {
+        return None;
+    };
+
+    (key.kind == KeyEventKind::Press).then_some(TuiEventAction::Key(*key))
+}
+
+fn classify_paste_event(event: &Event) -> Option<TuiEventAction<'_>> {
+    let Event::Paste(text) = event else {
+        return None;
+    };
+
+    Some(TuiEventAction::Paste(text))
+}
+
+fn classify_mouse_tui_event(event: &Event) -> Option<TuiEventAction<'_>> {
+    let Event::Mouse(mouse) = event else {
+        return None;
+    };
+
+    Some(TuiEventAction::Mouse(classify_mouse_event(*mouse)))
+}
+
+fn classify_resize_event(event: &Event) -> Option<TuiEventAction<'_>> {
+    let Event::Resize(width, height) = event else {
+        return None;
+    };
+
+    Some(TuiEventAction::Resize(*width, *height))
+}
+
+pub(crate) fn classify_mouse_event(mouse: crossterm::event::MouseEvent) -> MouseEventAction {
     match mouse.kind {
         MouseEventKind::Down(MouseButton::Left) => MouseEventAction::LeftDown(mouse),
         MouseEventKind::Drag(MouseButton::Left) => MouseEventAction::LeftDrag(mouse),

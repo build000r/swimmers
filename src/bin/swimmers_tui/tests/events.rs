@@ -81,6 +81,68 @@ fn handle_tui_event_covers_key_paste_mouse_and_resize_paths() {
     assert_eq!(renderer.height(), 20);
 }
 
+#[test]
+fn classify_tui_event_returns_key_only_for_press_events() {
+    let press =
+        KeyEvent::new_with_kind(KeyCode::Char('x'), KeyModifiers::NONE, KeyEventKind::Press);
+    assert_eq!(
+        classify_tui_event(&Event::Key(press)),
+        TuiEventAction::Key(press)
+    );
+
+    for kind in [KeyEventKind::Release, KeyEventKind::Repeat] {
+        let key = KeyEvent::new_with_kind(KeyCode::Char('x'), KeyModifiers::NONE, kind);
+        assert_eq!(classify_tui_event(&Event::Key(key)), TuiEventAction::Ignore);
+    }
+}
+
+#[test]
+fn classify_tui_event_preserves_paste_text_reference() {
+    let event = Event::Paste("hello".to_string());
+    let Event::Paste(original) = &event else {
+        panic!("expected paste event");
+    };
+
+    match classify_tui_event(&event) {
+        TuiEventAction::Paste(text) => {
+            assert_eq!(text, original.as_str());
+            assert!(std::ptr::eq(text, original.as_str()));
+        }
+        action => panic!("expected paste action, got {action:?}"),
+    }
+}
+
+#[test]
+fn classify_tui_event_returns_resize_dimensions() {
+    assert_eq!(
+        classify_tui_event(&Event::Resize(90, 20)),
+        TuiEventAction::Resize(90, 20)
+    );
+}
+
+#[test]
+fn classify_tui_event_delegates_mouse_classification() {
+    let mouse = crossterm::event::MouseEvent {
+        kind: MouseEventKind::ScrollUp,
+        column: 10,
+        row: 12,
+        modifiers: KeyModifiers::NONE,
+    };
+
+    assert_eq!(
+        classify_tui_event(&Event::Mouse(mouse)),
+        TuiEventAction::Mouse(classify_mouse_event(mouse))
+    );
+}
+
+#[test]
+fn classify_tui_event_ignores_unhandled_events() {
+    assert_eq!(
+        classify_tui_event(&Event::FocusGained),
+        TuiEventAction::Ignore
+    );
+}
+
 fn mouse_down(column: u16, row: u16) -> crossterm::event::MouseEvent {
     crossterm::event::MouseEvent {
         kind: crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
