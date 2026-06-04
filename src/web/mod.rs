@@ -3224,6 +3224,7 @@ mod tests {
     #[test]
     fn app_js_dedupes_surface_actions_and_stable_resizes() {
         let js = include_str!("app.js");
+        let app_event_bindings = include_str!("app_event_bindings.js");
         let resize = include_str!("terminal_resize.js");
         assert!(js.contains("function stopSurfaceEvent(event)"));
         assert!(js.contains("event.stopImmediatePropagation"));
@@ -3232,7 +3233,8 @@ mod tests {
         );
         assert!(resize.contains("terminalResizeGeometryPlan({"));
         assert!(resize.contains("if (!resizePlan.shouldResize)"));
-        assert!(js.contains("queueMeasureAndResizeSurface(true, false)"));
+        assert!(js.contains("queueMeasureAndResizeSurface,"));
+        assert!(app_event_bindings.contains("queueMeasureAndResizeSurface(true, false)"));
     }
 
     #[test]
