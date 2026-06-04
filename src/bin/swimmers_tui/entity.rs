@@ -665,14 +665,22 @@ fn next_natural_chunk(value: &str, start: usize) -> Option<(&str, bool, usize)> 
     let mut chars = value[start..].char_indices();
     let (_, first) = chars.next()?;
     let numeric = first.is_ascii_digit();
-    let mut end = value.len();
-    for (offset, ch) in chars {
-        if ch.is_ascii_digit() != numeric {
-            end = start + offset;
-            break;
-        }
-    }
+    let first_end = start + first.len_utf8();
+    let end = natural_chunk_end(start, first_end, numeric, chars);
     Some((&value[start..end], numeric, end))
+}
+
+fn natural_chunk_end(
+    start: usize,
+    default_end: usize,
+    numeric: bool,
+    chars: std::str::CharIndices<'_>,
+) -> usize {
+    chars
+        .take_while(|(_, ch)| ch.is_ascii_digit() == numeric)
+        .last()
+        .map(|(offset, ch)| start + offset + ch.len_utf8())
+        .unwrap_or(default_end)
 }
 
 fn compare_text_chunk(left: &str, right: &str) -> Ordering {
@@ -873,6 +881,24 @@ mod tests {
             entity.swim_anchor_x,
             entity.swim_center_y,
         )
+    }
+
+    #[test]
+    fn next_natural_chunk_stops_at_text_digit_boundaries() {
+        assert_eq!(
+            next_natural_chunk("session-12", 0),
+            Some(("session-", false, 8))
+        );
+        assert_eq!(next_natural_chunk("session-12", 8), Some(("12", true, 10)));
+        assert_eq!(next_natural_chunk("a1", 0), Some(("a", false, 1)));
+        assert_eq!(next_natural_chunk("a1", 1), Some(("1", true, 2)));
+    }
+
+    #[test]
+    fn natural_cmp_orders_numeric_chunks_by_number_width_then_value() {
+        assert_eq!(natural_cmp("session-2", "session-10"), Ordering::Less);
+        assert_eq!(natural_cmp("session-02", "session-2"), Ordering::Greater);
+        assert_eq!(natural_cmp("session-a", "session-1"), Ordering::Greater);
     }
 
     #[test]
