@@ -835,13 +835,27 @@ fn handle_left_mouse_drag<C: TuiApi>(
     layout: WorkspaceLayout,
     mouse: crossterm::event::MouseEvent,
 ) -> bool {
-    if app.drag_split(layout, mouse.column) {
-        return true;
+    match plan_left_drag_dispatch(app.drag_split(layout, mouse.column)) {
+        LeftDragDispatchPlan::Complete => true,
+        LeftDragDispatchPlan::TryMermaid => {
+            app.handle_mermaid_mouse_drag(layout.overview_field, mouse);
+            true
+        }
     }
-    if app.handle_mermaid_mouse_drag(layout.overview_field, mouse) {
-        return true;
-    }
-    true
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum LeftDragDispatchPlan {
+    Complete,
+    TryMermaid,
+}
+
+pub(crate) fn plan_left_drag_dispatch(split_handled: bool) -> LeftDragDispatchPlan {
+    const PLANS: [LeftDragDispatchPlan; 2] = [
+        LeftDragDispatchPlan::TryMermaid,
+        LeftDragDispatchPlan::Complete,
+    ];
+    PLANS[split_handled as usize]
 }
 
 fn handle_left_mouse_up<C: TuiApi>(app: &mut App<C>) -> bool {
