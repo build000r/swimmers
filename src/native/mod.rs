@@ -1,12 +1,12 @@
 use std::collections::HashMap;
+#[cfg(test)]
 use std::ffi::OsString;
-use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::process::{Command as ProcessCommand, Output, Stdio};
 use std::sync::{LazyLock, Mutex};
 use std::time::Instant;
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, Result};
 use chrono::Utc;
 use thiserror::Error;
 use tokio::io::AsyncReadExt;
@@ -25,8 +25,10 @@ use crate::types::{
 
 mod attention_group;
 mod ghostty_open;
+mod host;
 mod iterm;
 mod script_path;
+mod tmux_binary;
 
 #[cfg(test)]
 use attention_group::build_attention_group_attach_command;
@@ -44,12 +46,15 @@ use ghostty_open::{
     cached_ghostty_preview_term_id, clear_ghostty_preview_term_cache,
     remember_ghostty_preview_term_id,
 };
+use host::host_is_loopback;
 pub use iterm::open_or_focus_iterm_session;
 #[cfg(test)]
 use iterm::{build_iterm_attach_command, build_iterm_display_name, is_transient_iterm_open_error};
 #[cfg(test)]
 use script_path::{materialize_bundled_script, resolve_script_path, unique_tmp_suffix};
 use script_path::{script_path_for_app, script_path_for_app_without_materializing};
+#[cfg(test)]
+use tmux_binary::{find_binary_in_path_os, validate_tmux_binary, TMUX_BIN_ENV, TMUX_BIN_FALLBACKS};
 
 const NATIVE_APP_ENV: &str = "SWIMMERS_NATIVE_APP";
 const GHOSTTY_MODE_ENV: &str = "SWIMMERS_GHOSTTY_MODE";
@@ -66,13 +71,6 @@ const GHOSTTY_MIN_APPLESCRIPT_VERSION_TEXT: &str = "1.3.0";
 const OSASCRIPT_TIMEOUT: Duration = Duration::from_secs(5);
 const NATIVE_TMUX_COMMAND_TIMEOUT: Duration = Duration::from_secs(2);
 const OSASCRIPT_ARG_MAX_LEN: usize = 256;
-const TMUX_BIN_ENV: &str = "SWIMMERS_TMUX_BIN";
-const TMUX_BIN_FALLBACKS: &[&str] = &[
-    "/opt/homebrew/bin/tmux",
-    "/usr/local/bin/tmux",
-    "/usr/bin/tmux",
-    "/bin/tmux",
-];
 static NATIVE_OPEN_LOCK: LazyLock<AsyncMutex<()>> = LazyLock::new(|| AsyncMutex::new(()));
 static SESSION_PANE_CACHE: LazyLock<Mutex<HashMap<String, String>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
@@ -380,60 +378,7 @@ fn parse_version_triplet(version: &str) -> Option<[u64; 3]> {
 }
 
 pub(super) fn resolve_tmux_binary() -> Result<PathBuf> {
-    configured_tmux_binary()
-        .map(PathBuf::from)
-        .map(validate_configured_tmux_binary)
-        .unwrap_or_else(resolve_unconfigured_tmux_binary)
-}
-
-fn validate_configured_tmux_binary(path: PathBuf) -> Result<PathBuf> {
-    validate_tmux_binary(path)
-        .with_context(|| format!("{} must point to an absolute tmux binary", TMUX_BIN_ENV))
-}
-
-fn resolve_unconfigured_tmux_binary() -> Result<PathBuf> {
-    find_tmux_binary_without_override().ok_or_else(|| {
-        anyhow!(
-            "unable to locate tmux; set {} to an absolute tmux binary path",
-            TMUX_BIN_ENV
-        )
-    })
-}
-
-fn configured_tmux_binary() -> Option<OsString> {
-    std::env::var_os(TMUX_BIN_ENV)
-}
-
-fn find_tmux_binary_without_override() -> Option<PathBuf> {
-    find_binary_in_path("tmux").or_else(find_tmux_binary_fallback)
-}
-
-fn find_tmux_binary_fallback() -> Option<PathBuf> {
-    TMUX_BIN_FALLBACKS
-        .iter()
-        .map(PathBuf::from)
-        .find(|candidate| candidate.is_file())
-}
-
-fn validate_tmux_binary(path: PathBuf) -> Result<PathBuf> {
-    if !path.is_absolute() {
-        return Err(anyhow!("path is not absolute"));
-    }
-    if !path.is_file() {
-        return Err(anyhow!("binary not found at {}", path.display()));
-    }
-    Ok(path)
-}
-
-fn find_binary_in_path(binary: &str) -> Option<PathBuf> {
-    let path = std::env::var_os("PATH")?;
-    find_binary_in_path_os(binary, &path)
-}
-
-fn find_binary_in_path_os(binary: &str, path: &OsString) -> Option<PathBuf> {
-    std::env::split_paths(path)
-        .map(|dir| dir.join(binary))
-        .find(|candidate| candidate.is_absolute() && candidate.is_file())
+    tmux_binary::resolve_tmux_binary()
 }
 
 fn cached_pane_id(session_id: &str) -> Option<String> {
@@ -724,57 +669,6 @@ fn is_allowed_osascript_script_arg_char(field: &'static str, ch: char) -> bool {
     ch.is_ascii_alphanumeric()
         || matches!(ch, '_' | '-' | '.' | '/' | ':' | ' ')
         || (osascript_arg_allows_shell_quotes(field) && matches!(ch, '\'' | '='))
-}
-
-fn host_is_loopback(host: &str) -> bool {
-    host_without_port(host).is_some_and(host_part_is_loopback)
-}
-
-fn host_without_port(host: &str) -> Option<&str> {
-    let trimmed = trimmed_host(host)?;
-    Some(
-        bracketed_host(trimmed)
-            .map(str::trim)
-            .unwrap_or_else(|| strip_numeric_host_port(trimmed)),
-    )
-}
-
-fn trimmed_host(host: &str) -> Option<&str> {
-    non_empty_trimmed(host)
-}
-
-fn bracketed_host(host: &str) -> Option<&str> {
-    host.strip_prefix('[')
-        .map(|stripped| stripped.split(']').next().unwrap_or(host))
-}
-
-fn strip_numeric_host_port(host: &str) -> &str {
-    host.rsplit_once(':')
-        .filter(|(candidate_host, candidate_port)| {
-            is_strippable_host_port(candidate_host, candidate_port)
-        })
-        .map(|(candidate_host, _)| candidate_host.trim())
-        .unwrap_or(host)
-}
-
-fn is_strippable_host_port(candidate_host: &str, candidate_port: &str) -> bool {
-    is_plain_host(candidate_host) && is_ascii_port(candidate_port)
-}
-
-fn is_plain_host(candidate_host: &str) -> bool {
-    !candidate_host.contains(':') && !candidate_host.is_empty()
-}
-
-fn is_ascii_port(candidate_port: &str) -> bool {
-    candidate_port.chars().all(|ch| ch.is_ascii_digit())
-}
-
-fn host_part_is_loopback(host: &str) -> bool {
-    host == "localhost" || ip_addr_is_loopback(host)
-}
-
-fn ip_addr_is_loopback(host: &str) -> bool {
-    host.parse::<IpAddr>().is_ok_and(|ip| ip.is_loopback())
 }
 
 #[cfg(test)]
