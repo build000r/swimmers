@@ -28,6 +28,7 @@ use crate::session::supervisor::LifecycleEvent;
 use crate::types::{clamp_terminal_resize, opcodes, ControlEvent, SessionSummary};
 
 const APP_JS_ROUTE: &str = "/app.js";
+const APP_EVENT_BINDINGS_JS_ROUTE: &str = "/app_event_bindings.js";
 const RENDERED_SURFACE_JS_ROUTE: &str = "/rendered_surface.js";
 const RENDERED_SURFACE_DRAW_JS_ROUTE: &str = "/rendered_surface_draw.js";
 const INPUT_SUPPORT_JS_ROUTE: &str = "/input_support.js";
@@ -102,6 +103,7 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/", get(index))
         .route(PUBLISHED_VIEW_ROUTE, get(selected_index))
         .route(APP_JS_ROUTE, get(app_js))
+        .route(APP_EVENT_BINDINGS_JS_ROUTE, get(app_event_bindings_js))
         .route(RENDERED_SURFACE_JS_ROUTE, get(rendered_surface_js))
         .route(
             RENDERED_SURFACE_DRAW_JS_ROUTE,
@@ -652,6 +654,13 @@ fn javascript_asset(relative: &str, baked: &'static str) -> Response {
 
 async fn app_js() -> Response {
     javascript_asset("src/web/app.js", include_str!("app.js"))
+}
+
+async fn app_event_bindings_js() -> Response {
+    javascript_asset(
+        "src/web/app_event_bindings.js",
+        include_str!("app_event_bindings.js"),
+    )
 }
 
 async fn rendered_surface_js() -> Response {
@@ -2728,6 +2737,16 @@ mod tests {
     #[tokio::test]
     async fn browser_js_asset_handlers_cover_app_module_graph() {
         let assets = [
+            (
+                APP_JS_ROUTE,
+                app_js().await,
+                "from \"./app_event_bindings.js\"",
+            ),
+            (
+                APP_EVENT_BINDINGS_JS_ROUTE,
+                app_event_bindings_js().await,
+                "export function bindAppEvents",
+            ),
             (
                 APP_JS_ROUTE,
                 app_js().await,

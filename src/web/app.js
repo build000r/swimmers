@@ -6,6 +6,7 @@ import {
   terminalComposerControlAction, terminalDestroyStatePatch, terminalFallbackFocusPlan, terminalFallbackKeydownPlan, terminalFallbackPastePlan, terminalFallbackPointerFocusPlan, terminalInlineInputKeydownPlan, terminalKeyStripClickExecutorPlan, terminalKeyStripClickPlan, terminalStageCaptureBindings, terminalStageClickPlan, terminalStageFocusExecutorPlan, terminalStageFocusPlan,
   normalizeTerminalZoomValue, terminalAuxiliaryControlsPlan, terminalFallbackScrollPlan, terminalInputDockPlan, terminalPaintProbeSchedulePlan, terminalPaintVerificationPlan, terminalPresentationPlan, terminalStageKeydownPlan, terminalStageMouseDownPlan, terminalStageMouseMovePlan, terminalStageMouseUpPlan, terminalStagePasteExecutorPlan, terminalStagePastePlan, terminalStageTouchEndPlan, terminalStageWheelPlan, terminalToolsAvailabilityPlan, terminalZoomControlsPlan, terminalZoomLoadValue, terminalZoomPercentLabel, terminalZoomPersistencePlan,
 } from "./input_support.js";
+import { bindAppEvents } from "./app_event_bindings.js";
 import { createSendController } from "./send_controller.js";
 import {
   createThoughtConfigSheetController,
@@ -3243,17 +3244,11 @@ async function handleMermaidOpenButtonClick() { await openMermaidArtifactHost();
 
 async function handleMermaidPlanTabsClick(event) { await mermaidArtifactController.handlePlanTabsClick(event); }
 
-function terminalStageCaptureHandler(action) { return (event) => captureSurfaceAction(event, action); }
-
-function installTerminalStageCaptureBindings() { for (const binding of terminalStageCaptureBindings()) { el.terminalStage.addEventListener(binding.eventType, terminalStageCaptureHandler(binding.action), binding.options); } }
-
 function handleTerminalStageFocus() { handleTerminalStageFocusEvent("focus"); }
 
 function handleTerminalStageBlur() { handleTerminalStageFocusEvent("blur"); }
 
 function handleTerminalStageMouseleave() { clearHoveredLink(true); updateHoveredTrogdorSurface(null); }
-
-function installTerminalStageResizeObserver() { const resizeObserver = new ResizeObserver(() => { queueMeasureAndResizeSurface(true, false); }); resizeObserver.observe(el.terminalStage); }
 
 const eventListenerHandlers = {
   closeSheets, handleClearTokenButtonClick, handleCommandPaletteEvent, handleCreateBatchClearClick, handleCreateBatchVisibleAction, handleCreateCwdInput, handleCreateFormSubmit, handleCreateLaunchTargetChange, handleCreateRequestInput, handleCreateToolChange,
@@ -3267,29 +3262,18 @@ const eventListenerHandlers = {
   handleTerminalWorkbenchWidgetsLogEvent, handleTerminalZoomInClick, handleTerminalZoomOutClick, handleTerminalZoomResetClick, handleThoughtConfigBackendChange, handleThoughtConfigFormSubmit, handleThoughtConfigOptionChange, handleThoughtConfigTestButtonClick,
 };
 
-function installEventListenerBinding(binding) {
-  const target = binding.target === "document" ? document : el[binding.target];
-  if (binding.optionalTarget && !target) return;
-  const handler = eventListenerHandlers[binding.handler];
-  if (!handler) throw new Error(`Missing event listener handler: ${binding.handler}`);
-  if (binding.optionalListener) {
-    target.addEventListener?.(binding.eventType, handler, binding.options);
-    return;
-  }
-  target.addEventListener(binding.eventType, handler, binding.options);
-}
-
-function installEventListenerBindings(bindings) {
-  for (const binding of bindings) installEventListenerBinding(binding);
-}
-
 function bindEvents() {
-  bindTrogdorEvents();
-  const bindingPlan = appEventListenerBindingPlan();
-  installEventListenerBindings(bindingPlan.beforeTerminalStageCapture);
-  installTerminalStageCaptureBindings();
-  installEventListenerBindings(bindingPlan.afterTerminalStageCapture);
-  installTerminalStageResizeObserver();
+  bindAppEvents({
+    document,
+    elements: el,
+    handlers: eventListenerHandlers,
+    bindTrogdorEvents,
+    appEventListenerBindingPlan,
+    terminalStageCaptureBindings,
+    captureSurfaceAction,
+    ResizeObserver,
+    queueMeasureAndResizeSurface,
+  });
 }
 
 async function init() {
