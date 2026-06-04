@@ -32,6 +32,9 @@ use crate::session::spawn_command::{
     schedule_prelaunch_file_cleanup, spawn_tool_consumes_initial_request,
     wrap_spawn_tool_command_for_tmux,
 };
+use crate::session::tmux_discovery::{
+    parse_tmux_session_names, plan_tmux_discovery_candidates, DiscoveryCandidate,
+};
 use crate::thought::loop_runner::SessionInfo;
 #[cfg(test)]
 use crate::thought::loop_runner::SessionProvider;
@@ -2296,55 +2299,6 @@ async fn kill_tmux_session(tmux_name: &str) -> anyhow::Result<()> {
         "tmux kill-session failed: {}",
         stderr.trim()
     ))
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct DiscoveryCandidate {
-    tmux_name: String,
-    reuse_session_id: Option<String>,
-}
-
-fn plan_tmux_discovery_candidates(
-    listed_tmux_names: &[String],
-    tracked_tmux_names: &HashSet<String>,
-    stale_session_ids_by_tmux: &HashMap<String, String>,
-) -> (Vec<DiscoveryCandidate>, u64) {
-    let mut seen_tmux_names = HashSet::new();
-    let mut highest_numeric = 0_u64;
-    let mut candidates = Vec::new();
-
-    for tmux_name in listed_tmux_names {
-        if tmux_name.is_empty() {
-            continue;
-        }
-
-        if let Ok(n) = tmux_name.parse::<u64>() {
-            highest_numeric = highest_numeric.max(n.saturating_add(1));
-        }
-
-        if !seen_tmux_names.insert(tmux_name.clone()) {
-            continue;
-        }
-
-        if tracked_tmux_names.contains(tmux_name) {
-            continue;
-        }
-
-        candidates.push(DiscoveryCandidate {
-            tmux_name: tmux_name.clone(),
-            reuse_session_id: stale_session_ids_by_tmux.get(tmux_name).cloned(),
-        });
-    }
-
-    (candidates, highest_numeric)
-}
-
-fn parse_tmux_session_names(stdout: &[u8]) -> Vec<String> {
-    String::from_utf8_lossy(stdout)
-        .lines()
-        .filter(|name| !name.is_empty())
-        .map(str::to_string)
-        .collect()
 }
 
 fn tmux_list_reports_no_sessions(stderr: &str) -> bool {
@@ -4842,91 +4796,5 @@ esac
             Some(value) => std::env::set_var("SWIMMERS_FAKE_TMUX_SESSIONS", value),
             None => std::env::remove_var("SWIMMERS_FAKE_TMUX_SESSIONS"),
         }
-    }
-
-    #[test]
-    fn plan_tmux_discovery_skips_tracked_and_dedupes_names() {
-        let listed = vec![
-            "main".to_string(),
-            "main".to_string(),
-            "codex-123".to_string(),
-        ];
-        let tracked = HashSet::from_iter(["main".to_string()]);
-        let stale_by_tmux = HashMap::new();
-
-        let (candidates, highest_numeric) =
-            plan_tmux_discovery_candidates(&listed, &tracked, &stale_by_tmux);
-
-        assert_eq!(highest_numeric, 0);
-        assert_eq!(candidates.len(), 1);
-        assert_eq!(candidates[0].tmux_name, "codex-123");
-        assert_eq!(candidates[0].reuse_session_id, None);
-    }
-
-    #[test]
-    fn plan_tmux_discovery_reuses_stale_id_and_bumps_numeric_counter() {
-        let listed = vec![
-            "7".to_string(),
-            "7".to_string(),
-            "codex-20260302-162713".to_string(),
-        ];
-        let tracked = HashSet::new();
-        let stale_by_tmux =
-            HashMap::from_iter([("codex-20260302-162713".to_string(), "sess_12".to_string())]);
-
-        let (candidates, highest_numeric) =
-            plan_tmux_discovery_candidates(&listed, &tracked, &stale_by_tmux);
-
-        assert_eq!(highest_numeric, 8);
-        assert_eq!(candidates.len(), 2);
-        assert_eq!(candidates[0].tmux_name, "7");
-        assert_eq!(candidates[0].reuse_session_id, None);
-        assert_eq!(candidates[1].tmux_name, "codex-20260302-162713");
-        assert_eq!(candidates[1].reuse_session_id.as_deref(), Some("sess_12"));
-    }
-
-    #[test]
-    fn plan_tmux_discovery_skips_empty_names() {
-        let listed = vec!["".to_string(), "  ".to_string(), "".to_string()];
-        let (candidates, highest_numeric) =
-            plan_tmux_discovery_candidates(&listed, &HashSet::new(), &HashMap::new());
-        // Empty strings are not valid discovery candidates; whitespace names
-        // are preserved because tmux session names are exact targets.
-        assert_eq!(highest_numeric, 0);
-        assert_eq!(candidates.len(), 1); // "  " is non-empty, not tracked
-        assert_eq!(candidates[0].tmux_name, "  ");
-    }
-
-    #[test]
-    fn parse_tmux_session_names_preserves_exact_names() {
-        let names = parse_tmux_session_names(b"alpha\n  padded  \n\tindented\n\nbeta\n");
-
-        assert_eq!(
-            names,
-            vec![
-                "alpha".to_string(),
-                "  padded  ".to_string(),
-                "\tindented".to_string(),
-                "beta".to_string(),
-            ]
-        );
-    }
-
-    #[test]
-    fn plan_tmux_discovery_all_tracked_returns_empty_candidates() {
-        let listed = vec!["alpha".to_string(), "beta".to_string()];
-        let tracked = HashSet::from_iter(["alpha".to_string(), "beta".to_string()]);
-        let (candidates, highest_numeric) =
-            plan_tmux_discovery_candidates(&listed, &tracked, &HashMap::new());
-        assert_eq!(highest_numeric, 0);
-        assert!(candidates.is_empty());
-    }
-
-    #[test]
-    fn plan_tmux_discovery_empty_list_returns_empty() {
-        let (candidates, highest_numeric) =
-            plan_tmux_discovery_candidates(&[], &HashSet::new(), &HashMap::new());
-        assert_eq!(highest_numeric, 0);
-        assert!(candidates.is_empty());
     }
 }
