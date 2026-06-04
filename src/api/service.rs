@@ -28,8 +28,7 @@ use crate::thought::probe::{run_thought_config_probe, ThoughtConfigProbeResult};
 use crate::thought::runtime_config::ThoughtConfig;
 use crate::thought_ui::thought_config_ui_metadata;
 use crate::types::{
-    CreateSessionsBatchResponse, CreateSessionsBatchResult, DirEntry,
-    DirGroupMembershipUpdateRequest, DirGroupMembershipUpdateResponse, DirGroupMemberships,
+    CreateSessionsBatchResponse, CreateSessionsBatchResult, DirEntry, DirGroupMemberships,
     DirListResponse, DirRepoActionResponse, DirRestartResponse, ErrorResponse, LaunchTargetSummary,
     NativeDesktopApp, NativeDesktopOpenResponse, NativeDesktopStatusResponse, PlanFileResponse,
     RepoActionKind, RepoActionState, RepoActionStatus, RepoTheme, SessionBatchMembership,
@@ -38,12 +37,21 @@ use crate::types::{
 
 #[path = "service/attention_group.rs"]
 mod attention_group;
+#[path = "service/group_membership.rs"]
+mod group_membership;
 #[path = "service/repo_search.rs"]
 mod repo_search;
 #[path = "service_directory.rs"]
 mod service_directory;
 
 pub use attention_group::open_native_attention_group_for_host;
+use group_membership::load_dir_group_memberships;
+pub use group_membership::update_dir_group_memberships;
+#[cfg(test)]
+use group_membership::{
+    apply_group_membership_update, normalize_group_update_names, resolve_group_membership_path,
+    update_dir_group_memberships_preflight, update_dir_group_memberships_with_config,
+};
 #[cfg(test)]
 pub use repo_search::clear_repo_search_cache_for_tests;
 pub use repo_search::list_repo_search_entries;
@@ -52,10 +60,11 @@ use repo_search::{
     list_repo_search_entries_inner, repo_search_child_dirs, repo_search_visit,
     scan_repo_search_roots_sync, RepoSearchVisit, REPO_SEARCH_DEFAULT_MAX_DEPTH,
 };
+#[cfg(test)]
+use service_directory::canonical_path_string;
 use service_directory::{
-    annotate_dir_entry_groups, canonical_path_string, effective_dir_config_for_base,
-    effective_groups_for_path, has_visible_child_dirs, list_effective_group_entries, modified_secs,
-    overlay_group_contains_path, service_dir_path,
+    annotate_dir_entry_groups, effective_dir_config_for_base, has_visible_child_dirs,
+    list_effective_group_entries, modified_secs, service_dir_path,
 };
 pub use service_directory::{
     list_effective_group_entries_sync, list_group_entries, list_group_entries_sync,
@@ -871,13 +880,6 @@ pub async fn list_managed_service_entries(
     build_dir_entries(candidates, &health_map, &svc_meta)
 }
 
-async fn load_dir_group_memberships(state: &Arc<AppState>) -> DirGroupMemberships {
-    match state.current_file_store() {
-        Some(store) => store.load_dir_group_memberships().await,
-        None => DirGroupMemberships::default(),
-    }
-}
-
 pub async fn list_dirs(
     state: &Arc<AppState>,
     path: Option<&str>,
@@ -922,250 +924,6 @@ pub async fn list_dirs(
         request_started,
     )
     .await
-}
-
-pub async fn update_dir_group_memberships(
-    state: Arc<AppState>,
-    body: DirGroupMembershipUpdateRequest,
-) -> Result<DirGroupMembershipUpdateResponse, ApiServiceError> {
-    let preflight = update_dir_group_memberships_preflight(
-        state.current_file_store(),
-        dirs_base_path(),
-        effective_dir_config_for_base,
-    )?;
-
-    update_dir_group_memberships_with_config(
-        preflight.store,
-        &preflight.canonical_base,
-        &preflight.dir_config,
-        body,
-    )
-    .await
-}
-
-struct DirGroupMembershipUpdatePreflight {
-    store: Arc<FileStore>,
-    canonical_base: PathBuf,
-    dir_config: OverlayDirConfig,
-}
-
-fn update_dir_group_memberships_preflight(
-    store: Option<Arc<FileStore>>,
-    base: PathBuf,
-    dir_config_for_base: impl FnOnce(&Path) -> Option<OverlayDirConfig>,
-) -> Result<DirGroupMembershipUpdatePreflight, ApiServiceError> {
-    let store = store.ok_or_else(|| {
-        ApiServiceError::new(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "PERSISTENCE_UNAVAILABLE",
-            "directory group edits require file persistence",
-        )
-    })?;
-
-    let canonical_base = base.canonicalize().unwrap_or(base);
-    let dir_config = dir_config_for_base(&canonical_base).ok_or_else(|| {
-        ApiServiceError::new(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "OVERLAY_UNAVAILABLE",
-            "directory group edits require a configured directory group source",
-        )
-    })?;
-    if dir_config.groups.is_empty() {
-        return Err(ApiServiceError::new(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "GROUPS_UNAVAILABLE",
-            "no directory groups are configured",
-        ));
-    }
-
-    Ok(DirGroupMembershipUpdatePreflight {
-        store,
-        canonical_base,
-        dir_config,
-    })
-}
-
-async fn update_dir_group_memberships_with_config(
-    store: Arc<FileStore>,
-    canonical_base: &Path,
-    dir_config: &OverlayDirConfig,
-    body: DirGroupMembershipUpdateRequest,
-) -> Result<DirGroupMembershipUpdateResponse, ApiServiceError> {
-    let canonical_path = resolve_group_membership_path(canonical_base, &body.path, dir_config)?;
-    let available_groups = dir_groups(Some(dir_config));
-    let valid_groups = available_groups.iter().cloned().collect::<BTreeSet<_>>();
-    let add = normalize_group_update_names(&body.add, &valid_groups)?;
-    let remove = normalize_group_update_names(&body.remove, &valid_groups)?;
-    if add.is_empty() && remove.is_empty() {
-        return Err(ApiServiceError::new(
-            StatusCode::BAD_REQUEST,
-            "GROUP_UPDATE_EMPTY",
-            "at least one group must be added or removed",
-        ));
-    }
-
-    let path = canonical_path_string(&canonical_path);
-    let update_path = path.clone();
-    let memberships = store
-        .update_dir_group_memberships(move |memberships| {
-            apply_group_membership_update(memberships, &update_path, add, remove);
-        })
-        .await
-        .map_err(|error| {
-            ApiServiceError::new(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "GROUP_UPDATE_FAILED",
-                format!("failed to persist directory group edits: {error}"),
-            )
-        })?;
-
-    Ok(DirGroupMembershipUpdateResponse {
-        groups: effective_groups_for_path(dir_config, &memberships, &canonical_path),
-        available_groups,
-        path,
-    })
-}
-
-fn resolve_group_membership_path(
-    canonical_base: &Path,
-    raw_path: &str,
-    config: &OverlayDirConfig,
-) -> Result<PathBuf, ApiServiceError> {
-    let trimmed = require_group_membership_path(raw_path)?;
-    let canonical = canonical_group_membership_dir(trimmed)?;
-    if group_membership_path_allowed(canonical_base, &canonical, config) {
-        return Ok(canonical);
-    }
-
-    Err(group_membership_outside_roots_error())
-}
-
-fn require_group_membership_path(raw_path: &str) -> Result<&str, ApiServiceError> {
-    let trimmed = raw_path.trim();
-    if trimmed.is_empty() {
-        return Err(ApiServiceError::new(
-            StatusCode::BAD_REQUEST,
-            "GROUP_PATH_REQUIRED",
-            "path is required",
-        ));
-    }
-    Ok(trimmed)
-}
-
-fn canonical_group_membership_dir(path: &str) -> Result<PathBuf, ApiServiceError> {
-    let canonical = PathBuf::from(path)
-        .canonicalize()
-        .map_err(|_| group_membership_dir_not_found_error(path))?;
-    if !canonical.is_dir() {
-        return Err(group_membership_dir_not_found_error(path));
-    }
-    Ok(canonical)
-}
-
-fn group_membership_dir_not_found_error(path: &str) -> ApiServiceError {
-    ApiServiceError::new(
-        StatusCode::NOT_FOUND,
-        "DIR_NOT_FOUND",
-        format!("directory not found: {path}"),
-    )
-}
-
-fn group_membership_path_allowed(
-    canonical_base: &Path,
-    canonical: &Path,
-    config: &OverlayDirConfig,
-) -> bool {
-    canonical.starts_with(canonical_base)
-        || config
-            .groups
-            .iter()
-            .any(|group| overlay_group_contains_path(group, canonical))
-}
-
-fn group_membership_outside_roots_error() -> ApiServiceError {
-    ApiServiceError::new(
-        StatusCode::FORBIDDEN,
-        "DIR_OUTSIDE_BASE",
-        "path is outside the allowed directory group roots",
-    )
-}
-
-fn normalize_group_update_names(
-    groups: &[String],
-    valid_groups: &BTreeSet<String>,
-) -> Result<Vec<String>, ApiServiceError> {
-    let mut seen = BTreeSet::new();
-    let mut normalized = Vec::new();
-    for raw in groups {
-        let name = raw.trim();
-        if name.is_empty() {
-            return Err(ApiServiceError::new(
-                StatusCode::BAD_REQUEST,
-                "GROUP_NAME_REQUIRED",
-                "group names must not be empty",
-            ));
-        }
-        if !valid_groups.contains(name) {
-            return Err(ApiServiceError::new(
-                StatusCode::NOT_FOUND,
-                "GROUP_NOT_FOUND",
-                format!("no group named '{name}' in overlay"),
-            ));
-        }
-        if seen.insert(name.to_string()) {
-            normalized.push(name.to_string());
-        }
-    }
-    Ok(normalized)
-}
-
-fn prune_empty_group_deltas(memberships: &mut DirGroupMemberships) {
-    memberships
-        .groups
-        .retain(|_, delta| !delta.include_paths.is_empty() || !delta.exclude_paths.is_empty());
-}
-
-fn apply_group_membership_update(
-    memberships: &mut DirGroupMemberships,
-    path: &str,
-    add: Vec<String>,
-    remove: Vec<String>,
-) {
-    apply_group_membership_removes(memberships, path, remove);
-    apply_group_membership_adds(memberships, path, add);
-    prune_empty_group_deltas(memberships);
-}
-
-fn apply_group_membership_removes(
-    memberships: &mut DirGroupMemberships,
-    path: &str,
-    groups: Vec<String>,
-) {
-    for group in groups {
-        apply_group_membership_remove(memberships, path, group);
-    }
-}
-
-fn apply_group_membership_adds(
-    memberships: &mut DirGroupMemberships,
-    path: &str,
-    groups: Vec<String>,
-) {
-    for group in groups {
-        apply_group_membership_add(memberships, path, group);
-    }
-}
-
-fn apply_group_membership_remove(memberships: &mut DirGroupMemberships, path: &str, group: String) {
-    let delta = memberships.groups.entry(group).or_default();
-    delta.include_paths.remove(path);
-    delta.exclude_paths.insert(path.to_string());
-}
-
-fn apply_group_membership_add(memberships: &mut DirGroupMemberships, path: &str, group: String) {
-    let delta = memberships.groups.entry(group).or_default();
-    delta.exclude_paths.remove(path);
-    delta.include_paths.insert(path.to_string());
 }
 
 async fn list_group_dir_response(
@@ -1721,7 +1479,7 @@ mod tests {
     use crate::thought::health::BridgeHealthState;
     use crate::thought::protocol::SyncRequestSequence;
     use crate::thought::runtime_config::ThoughtConfig;
-    use crate::types::DirRepoSearchResponse;
+    use crate::types::{DirGroupMembershipUpdateRequest, DirRepoSearchResponse};
     use std::sync::Arc;
     use tokio::sync::RwLock;
 

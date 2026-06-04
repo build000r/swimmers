@@ -36,6 +36,7 @@ pub(super) const TERMINAL_SAFETY_JS_ROUTE: &str = "/terminal_safety.js";
 pub(super) const TERMINAL_SEARCH_LINKS_JS_ROUTE: &str = "/terminal_search_links.js";
 pub(super) const TERMINAL_STATUS_JS_ROUTE: &str = "/terminal_status.js";
 pub(super) const TERMINAL_PROTOCOL_JS_ROUTE: &str = "/terminal_protocol.js";
+pub(super) const TERMINAL_INPUT_JS_ROUTE: &str = "/terminal_input.js";
 pub(super) const SESSION_SOCKET_CONTROLLER_JS_ROUTE: &str = "/session_socket_controller.js";
 pub(super) const DIR_BROWSER_JS_ROUTE: &str = "/dir_browser.js";
 pub(super) const DIR_BROWSER_CONTROLLER_JS_ROUTE: &str = "/dir_browser_controller.js";
@@ -106,6 +107,7 @@ pub(super) fn routes() -> Router<Arc<AppState>> {
         )
         .route(TERMINAL_STATUS_JS_ROUTE, get(terminal_status_js))
         .route(TERMINAL_PROTOCOL_JS_ROUTE, get(terminal_protocol_js))
+        .route(TERMINAL_INPUT_JS_ROUTE, get(terminal_input_js))
         .route(
             SESSION_SOCKET_CONTROLLER_JS_ROUTE,
             get(session_socket_controller_js),
@@ -358,6 +360,11 @@ javascript_route!(
     terminal_protocol_js,
     "src/web/terminal_protocol.js",
     "terminal_protocol.js"
+);
+javascript_route!(
+    terminal_input_js,
+    "src/web/terminal_input.js",
+    "terminal_input.js"
 );
 javascript_route!(
     session_socket_controller_js,

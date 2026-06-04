@@ -1428,6 +1428,7 @@ mod tests {
                 app_js().await,
                 "from \"./terminal_status.js\"",
             ),
+            (APP_JS_ROUTE, app_js().await, "from \"./terminal_input.js\""),
             (
                 TERMINAL_STATUS_JS_ROUTE,
                 terminal_status_js().await,
@@ -1437,6 +1438,11 @@ mod tests {
                 TERMINAL_PROTOCOL_JS_ROUTE,
                 terminal_protocol_js().await,
                 "export function buildSessionSocketUrl",
+            ),
+            (
+                TERMINAL_INPUT_JS_ROUTE,
+                terminal_input_js().await,
+                "export function createTerminalInputController",
             ),
             (
                 SESSION_SOCKET_CONTROLLER_JS_ROUTE,
@@ -1878,6 +1884,7 @@ mod tests {
     #[test]
     fn app_js_falls_back_when_live_terminal_canvas_does_not_paint() {
         let js = include_str!("app.js");
+        let terminal_input = include_str!("terminal_input.js");
         let terminal_surface_setup = include_str!("terminal_surface_setup.js");
         assert!(js.contains("function feedTerminalBytes(bytes)"));
         assert!(js.contains("flushEncodedInputBytes();"));
@@ -1889,7 +1896,7 @@ mod tests {
         assert!(terminal_surface_setup.contains(
             "runtime.setTerminalTextFallbackActive(true, { clearText: plan.clearText })"
         ));
-        assert!(js.contains("function sendFallbackTerminalEvent(event)"));
+        assert!(terminal_input.contains("function sendFallbackTerminalEvent(event)"));
         assert!(terminal_surface_setup.contains("function updateTerminalFallbackText(text)"));
         assert!(js.contains("function terminalFallbackOwnsPointer(event)"));
         let css = app_css_body();
@@ -1901,12 +1908,13 @@ mod tests {
     #[test]
     fn app_js_trogdor_agent_click_opens_terminal() {
         let js = include_str!("app.js");
+        let terminal_input = include_str!("terminal_input.js");
         let trogdor_logic = include_str!("trogdor_logic.js");
         assert!(js.contains("function closeTrogdorAtlasForTerminal()"));
         assert!(js.contains("function openTrogdorAtlas()"));
         assert!(js.contains("terminalTrogdorBack"));
-        assert!(js.contains("function sendTerminalControlKey(actionId)"));
-        assert!(js.contains("terminalKeyActionForDomEvent(event)"));
+        assert!(terminal_input.contains("function sendTerminalControlKey(actionId)"));
+        assert!(terminal_input.contains("terminalKeyActionForDomEvent(event)"));
         assert!(js.contains("async function openTrogdorAgentTerminal(sessionId)"));
         assert!(js.contains("trogdorAtlasTransitionState,"));
         assert!(
