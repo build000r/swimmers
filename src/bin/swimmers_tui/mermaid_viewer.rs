@@ -40,6 +40,134 @@ impl PlanTabContentSource {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum MermaidZoomChange {
+    Er { new_zoom: f32 },
+    Diagram { new_zoom: f32 },
+}
+
+fn mermaid_zoom_change(
+    viewer: &MermaidViewerState,
+    old_zoom: f32,
+    delta_percent: i16,
+) -> Option<MermaidZoomChange> {
+    if mermaid_is_er_viewer(viewer) {
+        mermaid_er_zoom_change(old_zoom, delta_percent)
+    } else {
+        mermaid_diagram_zoom_change(old_zoom, delta_percent)
+    }
+}
+
+fn mermaid_er_zoom_change(old_zoom: f32, delta_percent: i16) -> Option<MermaidZoomChange> {
+    let direction = delta_percent.signum() as i8;
+    if direction == 0 {
+        return None;
+    }
+
+    let new_zoom = mermaid_er_zoom_step(old_zoom, direction);
+    if (new_zoom - old_zoom).abs() < f32::EPSILON {
+        return None;
+    }
+
+    Some(MermaidZoomChange::Er { new_zoom })
+}
+
+fn mermaid_diagram_zoom_change(old_zoom: f32, delta_percent: i16) -> Option<MermaidZoomChange> {
+    let old_percent = mermaid_zoom_percent(old_zoom);
+    let min_percent = mermaid_zoom_percent(MERMAID_MIN_ZOOM);
+    let max_percent = mermaid_zoom_percent(MERMAID_MAX_ZOOM);
+    let new_percent = (old_percent + delta_percent).clamp(min_percent, max_percent);
+    let new_zoom = new_percent as f32 / 100.0;
+    if (new_zoom - old_zoom).abs() < f32::EPSILON {
+        return None;
+    }
+
+    Some(MermaidZoomChange::Diagram { new_zoom })
+}
+
+fn apply_er_mermaid_zoom(viewer: &mut MermaidViewerState, new_zoom: f32) {
+    viewer.zoom = new_zoom;
+    viewer.center_x = 0.0;
+    viewer.center_y = 0.0;
+    viewer.invalidate_viewport_cache();
+}
+
+fn apply_diagram_mermaid_zoom(
+    viewer: &mut MermaidViewerState,
+    old_zoom: f32,
+    new_zoom: f32,
+    pointer: Option<(u16, u16)>,
+    content_rect: Rect,
+) {
+    preserve_mermaid_pointer_anchor(viewer, old_zoom, new_zoom, pointer, content_rect);
+    viewer.zoom = new_zoom;
+    viewer.invalidate_viewport_cache();
+}
+
+fn preserve_mermaid_pointer_anchor(
+    viewer: &mut MermaidViewerState,
+    old_zoom: f32,
+    new_zoom: f32,
+    pointer: Option<(u16, u16)>,
+    content_rect: Rect,
+) {
+    let Some(pointer) = pointer else {
+        return;
+    };
+    let Some((center_x, center_y)) =
+        mermaid_pointer_anchor_center(viewer, old_zoom, new_zoom, pointer, content_rect)
+    else {
+        return;
+    };
+
+    viewer.center_x = center_x;
+    viewer.center_y = center_y;
+}
+
+fn mermaid_pointer_anchor_center(
+    viewer: &MermaidViewerState,
+    old_zoom: f32,
+    new_zoom: f32,
+    pointer: (u16, u16),
+    content_rect: Rect,
+) -> Option<(f32, f32)> {
+    let (sample_width, sample_height) = mermaid_sample_dimensions(content_rect);
+    let base_scale = mermaid_fit_scale(
+        viewer.diagram_width,
+        viewer.diagram_height,
+        sample_width as f32,
+        sample_height as f32,
+    );
+    let old_scale = base_scale * old_zoom;
+    let new_scale = base_scale * new_zoom;
+    match (old_scale > 0.0, new_scale > 0.0) {
+        (true, true) => {
+            let (column, row) = pointer;
+            let anchor_x = (column.saturating_sub(content_rect.x) as f32) * 2.0;
+            let anchor_y = (row.saturating_sub(content_rect.y) as f32) * 4.0;
+            let dx = anchor_x - sample_width as f32 / 2.0;
+            let dy = anchor_y - sample_height as f32 / 2.0;
+            let diagram_x = viewer.center_x + dx / old_scale;
+            let diagram_y = viewer.center_y + dy / old_scale;
+            Some((diagram_x - dx / new_scale, diagram_y - dy / new_scale))
+        }
+        _ => None,
+    }
+}
+
+fn mermaid_text_scroll_delta(direction: MermaidZoomDirection) -> isize {
+    const DELTAS_BY_OUT_DIRECTION: [isize; 2] = [-3, 3];
+    DELTAS_BY_OUT_DIRECTION[matches!(direction, MermaidZoomDirection::Out) as usize]
+}
+
+fn mermaid_scroll_zoom_delta(direction: MermaidZoomDirection) -> i16 {
+    const DELTAS_BY_OUT_DIRECTION: [i16; 2] = [
+        MERMAID_SCROLL_ZOOM_STEP_PERCENT,
+        -MERMAID_SCROLL_ZOOM_STEP_PERCENT,
+    ];
+    DELTAS_BY_OUT_DIRECTION[matches!(direction, MermaidZoomDirection::Out) as usize]
+}
+
 impl<C: TuiApi> App<C> {
     fn refresh_mermaid_viewer_from_cache(&mut self) {
         if let FishBowlMode::Mermaid(viewer) = &mut self.fish_bowl_mode {
@@ -543,54 +671,16 @@ impl<C: TuiApi> App<C> {
             return;
         };
         let old_zoom = viewer.zoom.clamp(MERMAID_MIN_ZOOM, MERMAID_MAX_ZOOM);
-        if mermaid_is_er_viewer(viewer) {
-            let direction = delta_percent.signum() as i8;
-            if direction == 0 {
-                return;
-            }
-            let new_zoom = mermaid_er_zoom_step(old_zoom, direction);
-            if (new_zoom - old_zoom).abs() < f32::EPSILON {
-                return;
-            }
-            viewer.zoom = new_zoom;
-            viewer.center_x = 0.0;
-            viewer.center_y = 0.0;
-            viewer.invalidate_viewport_cache();
+        let Some(change) = mermaid_zoom_change(viewer, old_zoom, delta_percent) else {
             return;
-        }
-        let old_percent = mermaid_zoom_percent(old_zoom);
-        let min_percent = mermaid_zoom_percent(MERMAID_MIN_ZOOM);
-        let max_percent = mermaid_zoom_percent(MERMAID_MAX_ZOOM);
-        let new_percent = (old_percent + delta_percent).clamp(min_percent, max_percent);
-        let new_zoom = new_percent as f32 / 100.0;
-        if (new_zoom - old_zoom).abs() < f32::EPSILON {
-            return;
-        }
+        };
 
-        if let Some((column, row)) = pointer {
-            let (sample_width, sample_height) = mermaid_sample_dimensions(content_rect);
-            let base_scale = mermaid_fit_scale(
-                viewer.diagram_width,
-                viewer.diagram_height,
-                sample_width as f32,
-                sample_height as f32,
-            );
-            let old_scale = base_scale * old_zoom;
-            let new_scale = base_scale * new_zoom;
-            if old_scale > 0.0 && new_scale > 0.0 {
-                let anchor_x = (column.saturating_sub(content_rect.x) as f32) * 2.0;
-                let anchor_y = (row.saturating_sub(content_rect.y) as f32) * 4.0;
-                let dx = anchor_x - sample_width as f32 / 2.0;
-                let dy = anchor_y - sample_height as f32 / 2.0;
-                let diagram_x = viewer.center_x + dx / old_scale;
-                let diagram_y = viewer.center_y + dy / old_scale;
-                viewer.center_x = diagram_x - dx / new_scale;
-                viewer.center_y = diagram_y - dy / new_scale;
+        match change {
+            MermaidZoomChange::Er { new_zoom } => apply_er_mermaid_zoom(viewer, new_zoom),
+            MermaidZoomChange::Diagram { new_zoom } => {
+                apply_diagram_mermaid_zoom(viewer, old_zoom, new_zoom, pointer, content_rect);
             }
         }
-
-        viewer.zoom = new_zoom;
-        viewer.invalidate_viewport_cache();
     }
 
     pub(crate) fn reset_mermaid_viewer_fit(&mut self) {
@@ -792,18 +882,12 @@ impl<C: TuiApi> App<C> {
         }
 
         if is_text_tab {
-            let delta: isize = match direction {
-                MermaidZoomDirection::In => -3,
-                MermaidZoomDirection::Out => 3,
-            };
+            let delta = mermaid_text_scroll_delta(direction);
             self.scroll_plan_text(delta);
             return true;
         }
 
-        let delta_percent = match direction {
-            MermaidZoomDirection::In => MERMAID_SCROLL_ZOOM_STEP_PERCENT,
-            MermaidZoomDirection::Out => -MERMAID_SCROLL_ZOOM_STEP_PERCENT,
-        };
+        let delta_percent = mermaid_scroll_zoom_delta(direction);
         self.zoom_mermaid_viewer(delta_percent, Some((mouse.column, mouse.row)), content_rect);
         true
     }

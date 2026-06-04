@@ -501,29 +501,16 @@ fn handle_modal_key<C: TuiApi>(
     layout: WorkspaceLayout,
     key: KeyEvent,
 ) -> Option<bool> {
-    if app.show_help {
-        app.show_help = false;
-        if matches!(key.code, KeyCode::Char('q')) {
-            return Some(false);
-        }
-        return Some(true);
-    }
+    let handlers = [
+        handle_help_overlay_key::<C> as ModalKeyHandler<C>,
+        handle_thought_config_modal_key::<C> as ModalKeyHandler<C>,
+        handle_initial_request_modal_key::<C> as ModalKeyHandler<C>,
+        handle_mermaid_modal_key::<C> as ModalKeyHandler<C>,
+    ];
 
-    if app.thought_config_editor.is_some() {
-        app.handle_thought_config_key(key, layout);
-        return Some(true);
-    }
-
-    if app.initial_request.is_some() {
-        app.handle_initial_request_key(key, layout.overview_field);
-        return Some(true);
-    }
-
-    if matches!(app.fish_bowl_mode, FishBowlMode::Mermaid(_)) {
-        return Some(handle_mermaid_key(app, layout, key));
-    }
-
-    None
+    handlers
+        .into_iter()
+        .find_map(|handle_key| handle_key(app, layout, key))
 }
 
 fn handle_workspace_key<C: TuiApi>(
@@ -984,4 +971,48 @@ fn handle_mermaid_mouse_scroll<C: TuiApi>(
 ) -> bool {
     let _ = app.handle_mermaid_scroll(layout.overview_field, mouse, direction);
     true
+}
+
+type ModalKeyHandler<C> = fn(&mut App<C>, WorkspaceLayout, KeyEvent) -> Option<bool>;
+
+fn handle_help_overlay_key<C: TuiApi>(
+    app: &mut App<C>,
+    _layout: WorkspaceLayout,
+    key: KeyEvent,
+) -> Option<bool> {
+    if !app.show_help {
+        return None;
+    }
+
+    app.show_help = false;
+    Some(!matches!(key.code, KeyCode::Char('q')))
+}
+
+fn handle_thought_config_modal_key<C: TuiApi>(
+    app: &mut App<C>,
+    layout: WorkspaceLayout,
+    key: KeyEvent,
+) -> Option<bool> {
+    app.thought_config_editor.as_ref()?;
+    app.handle_thought_config_key(key, layout);
+    Some(true)
+}
+
+fn handle_initial_request_modal_key<C: TuiApi>(
+    app: &mut App<C>,
+    layout: WorkspaceLayout,
+    key: KeyEvent,
+) -> Option<bool> {
+    app.initial_request.as_ref()?;
+    app.handle_initial_request_key(key, layout.overview_field);
+    Some(true)
+}
+
+fn handle_mermaid_modal_key<C: TuiApi>(
+    app: &mut App<C>,
+    layout: WorkspaceLayout,
+    key: KeyEvent,
+) -> Option<bool> {
+    app.mermaid_viewer_mut()?;
+    Some(handle_mermaid_key(app, layout, key))
 }

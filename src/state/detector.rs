@@ -390,38 +390,61 @@ impl StateDetector {
     /// settled the pane into `Idle` or `Attention`.
     pub fn apply_process_liveness(&mut self, has_children: bool) {
         let now = Instant::now();
-        match self.state {
-            SessionState::Busy if !has_children => {
-                debug!("process liveness: no children but state is busy, correcting to idle");
-                self.set_state(SessionState::Idle, Some(None), now, "liveness_no_children");
-            }
-            SessionState::Busy
-                if has_children
-                    && !self.tui_tool_mode
-                    && self.state_evidence.confidence != StateConfidence::High =>
-            {
-                debug!(
-                    cause = %self.state_evidence.cause,
-                    "process liveness confirmed busy state"
-                );
-                self.set_state(SessionState::Busy, None, now, "liveness_has_children");
-            }
-            SessionState::Idle | SessionState::Attention if has_children => {
-                if self.tui_tool_mode {
-                    debug!(
-                        state = ?self.state,
-                        "process liveness: ignoring child-only busy override in TUI tool mode"
-                    );
-                    return;
-                }
-                debug!(
-                    state = ?self.state,
-                    "process liveness: children found but state is idle/attention, correcting to busy"
-                );
-                self.set_state(SessionState::Busy, Some(None), now, "liveness_has_children");
-            }
-            _ => {}
+        if self.correct_busy_without_children(has_children, now) {
+            return;
         }
+        if self.confirm_busy_with_children(has_children, now) {
+            return;
+        }
+        self.correct_idle_or_attention_with_children(has_children, now);
+    }
+
+    fn correct_busy_without_children(&mut self, has_children: bool, now: Instant) -> bool {
+        if self.state != SessionState::Busy || has_children {
+            return false;
+        }
+        debug!("process liveness: no children but state is busy, correcting to idle");
+        self.set_state(SessionState::Idle, Some(None), now, "liveness_no_children");
+        true
+    }
+
+    fn confirm_busy_with_children(&mut self, has_children: bool, now: Instant) -> bool {
+        if self.state != SessionState::Busy
+            || !has_children
+            || self.tui_tool_mode
+            || self.state_evidence.confidence == StateConfidence::High
+        {
+            return false;
+        }
+        debug!(
+            cause = %self.state_evidence.cause,
+            "process liveness confirmed busy state"
+        );
+        self.set_state(SessionState::Busy, None, now, "liveness_has_children");
+        true
+    }
+
+    fn correct_idle_or_attention_with_children(
+        &mut self,
+        has_children: bool,
+        now: Instant,
+    ) -> bool {
+        if !matches!(self.state, SessionState::Idle | SessionState::Attention) || !has_children {
+            return false;
+        }
+        if self.tui_tool_mode {
+            debug!(
+                state = ?self.state,
+                "process liveness: ignoring child-only busy override in TUI tool mode"
+            );
+            return true;
+        }
+        debug!(
+            state = ?self.state,
+            "process liveness: children found but state is idle/attention, correcting to busy"
+        );
+        self.set_state(SessionState::Busy, Some(None), now, "liveness_has_children");
+        true
     }
 
     /// Get the current state and command as a tuple.
@@ -855,25 +878,49 @@ impl StateDetector {
         let prev = self.state;
         self.state = new_state;
         self.state_evidence = StateEvidence::new(cause);
+        self.apply_command_update(command_update);
+        self.update_attention_timer_for_transition(prev, new_state);
+        self.emit_state_transition(prev, new_state, cause);
+    }
 
+    fn apply_command_update(&mut self, command_update: Option<Option<String>>) {
         if let Some(cmd) = command_update {
             self.current_command = cmd;
         }
+    }
 
-        // Start attention timer when transitioning from busy -> idle
-        if new_state == SessionState::Idle && prev == SessionState::Busy {
+    fn update_attention_timer_for_transition(
+        &mut self,
+        prev: SessionState,
+        new_state: SessionState,
+    ) {
+        if Self::should_schedule_attention(prev, new_state) {
             self.schedule_attention();
         }
 
         // Cancel attention timer if leaving idle for anything other than attention.
         // idle -> idle re-detections must NOT cancel the timer.
-        if prev == SessionState::Idle
-            && new_state != SessionState::Attention
-            && new_state != SessionState::Idle
-        {
+        if Self::should_clear_attention_timer(prev, new_state) {
             self.clear_attention_timer();
         }
+    }
 
+    fn should_schedule_attention(prev: SessionState, new_state: SessionState) -> bool {
+        new_state == SessionState::Idle && prev == SessionState::Busy
+    }
+
+    fn should_clear_attention_timer(prev: SessionState, new_state: SessionState) -> bool {
+        prev == SessionState::Idle
+            && new_state != SessionState::Attention
+            && new_state != SessionState::Idle
+    }
+
+    fn emit_state_transition(
+        &self,
+        prev: SessionState,
+        new_state: SessionState,
+        cause: &'static str,
+    ) {
         if new_state != prev {
             debug!(
                 from = ?prev,

@@ -59,82 +59,97 @@ async fn fetch_git_diff_response(state: &Arc<AppState>, session_id: &str) -> Res
 }
 
 pub(crate) async fn read_git_diff_for_summary(summary: SessionSummary) -> SessionGitDiffResponse {
-    let repo_root = match run_git_capture(&summary.cwd, &["rev-parse", "--show-toplevel"]).await {
-        Ok(root) => root.trim().to_string(),
-        Err(message) => {
-            return git_diff_unavailable(
-                summary.session_id,
-                summary.cwd,
-                format!("git repo root unavailable: {message}"),
-            );
-        }
+    let available_diff = match read_available_git_diff(&summary.cwd).await {
+        Ok(diff) => diff,
+        Err(message) => return git_diff_unavailable(summary.session_id, summary.cwd, message),
     };
 
-    if repo_root.is_empty() {
-        return git_diff_unavailable(
-            summary.session_id,
-            summary.cwd,
-            "git repo root unavailable: empty git output",
+    available_diff.into_response(summary.session_id, summary.cwd)
+}
+
+struct AvailableGitDiff {
+    repo_root: String,
+    status_short: String,
+    unstaged_raw: String,
+    staged_raw: String,
+}
+
+impl AvailableGitDiff {
+    fn into_response(self, session_id: String, cwd: String) -> SessionGitDiffResponse {
+        let (unstaged_diff, unstaged_truncated) = truncate_git_output(self.unstaged_raw);
+        let (staged_diff, staged_truncated) = truncate_git_output(self.staged_raw);
+        let files = summarize_git_diff_files(
+            &staged_diff,
+            staged_truncated,
+            &unstaged_diff,
+            unstaged_truncated,
         );
-    }
-
-    let status_short = match run_git_capture(&repo_root, &["status", "--short"]).await {
-        Ok(output) => output,
-        Err(message) => {
-            return git_diff_unavailable(
-                summary.session_id,
-                summary.cwd,
-                format!("git status unavailable: {message}"),
-            );
+        SessionGitDiffResponse {
+            session_id,
+            available: true,
+            cwd,
+            repo_root: Some(self.repo_root),
+            status_short: self.status_short,
+            unstaged_diff,
+            staged_diff,
+            truncated: unstaged_truncated || staged_truncated,
+            message: None,
+            files,
         }
-    };
-    let unstaged_raw =
-        match run_git_capture(&repo_root, &["diff", "--no-ext-diff", "--no-color"]).await {
-            Ok(output) => output,
-            Err(message) => {
-                return git_diff_unavailable(
-                    summary.session_id,
-                    summary.cwd,
-                    format!("git diff unavailable: {message}"),
-                );
-            }
-        };
-    let staged_raw = match run_git_capture(
+    }
+}
+
+async fn read_available_git_diff(cwd: &str) -> Result<AvailableGitDiff, String> {
+    let repo_root = resolve_git_repo_root(cwd).await?;
+    let status_short =
+        run_labeled_git_capture(&repo_root, &["status", "--short"], "git status unavailable")
+            .await?;
+    let unstaged_raw = run_labeled_git_capture(
+        &repo_root,
+        &["diff", "--no-ext-diff", "--no-color"],
+        "git diff unavailable",
+    )
+    .await?;
+    let staged_raw = run_labeled_git_capture(
         &repo_root,
         &["diff", "--cached", "--no-ext-diff", "--no-color"],
+        "git diff --cached unavailable",
     )
-    .await
-    {
-        Ok(output) => output,
-        Err(message) => {
-            return git_diff_unavailable(
-                summary.session_id,
-                summary.cwd,
-                format!("git diff --cached unavailable: {message}"),
-            );
-        }
-    };
+    .await?;
 
-    let (unstaged_diff, unstaged_truncated) = truncate_git_output(unstaged_raw);
-    let (staged_diff, staged_truncated) = truncate_git_output(staged_raw);
-    let files = summarize_git_diff_files(
-        &staged_diff,
-        staged_truncated,
-        &unstaged_diff,
-        unstaged_truncated,
-    );
-    SessionGitDiffResponse {
-        session_id: summary.session_id,
-        available: true,
-        cwd: summary.cwd,
-        repo_root: Some(repo_root),
+    Ok(AvailableGitDiff {
+        repo_root,
         status_short,
-        unstaged_diff,
-        staged_diff,
-        truncated: unstaged_truncated || staged_truncated,
-        message: None,
-        files,
+        unstaged_raw,
+        staged_raw,
+    })
+}
+
+async fn resolve_git_repo_root(cwd: &str) -> Result<String, String> {
+    let repo_root = run_labeled_git_capture(
+        cwd,
+        &["rev-parse", "--show-toplevel"],
+        "git repo root unavailable",
+    )
+    .await?
+    .trim()
+    .to_string();
+
+    if repo_root.is_empty() {
+        return Err("git repo root unavailable: empty git output".to_string());
     }
+
+    Ok(repo_root)
+}
+
+async fn run_labeled_git_capture(
+    cwd: &str,
+    args: &[&str],
+    unavailable_label: &str,
+) -> Result<String, String> {
+    run_git_capture(cwd, args)
+        .await
+        .map_err(|message| format!("{unavailable_label}: {message}"))
 }
 
 async fn run_git_capture(cwd: &str, args: &[&str]) -> Result<String, String> {
@@ -162,15 +177,29 @@ async fn run_git_capture(cwd: &str, args: &[&str]) -> Result<String, String> {
 }
 
 fn truncate_git_output(output: String) -> (String, bool) {
-    if output.len() <= GIT_DIFF_MAX_BYTES {
+    let Some(end) = git_output_truncation_end(&output) else {
         return (output, false);
+    };
+
+    (output[..end].to_string(), true)
+}
+
+fn git_output_truncation_end(output: &str) -> Option<usize> {
+    if output.len() <= GIT_DIFF_MAX_BYTES {
+        return None;
     }
 
-    let mut end = GIT_DIFF_MAX_BYTES;
-    while end > 0 && !output.is_char_boundary(end) {
-        end -= 1;
-    }
-    (output[..end].to_string(), true)
+    Some(previous_char_boundary_at_or_before(
+        output,
+        GIT_DIFF_MAX_BYTES,
+    ))
+}
+
+fn previous_char_boundary_at_or_before(output: &str, limit: usize) -> usize {
+    (0..=limit)
+        .rev()
+        .find(|&end| output.is_char_boundary(end))
+        .unwrap_or(0)
 }
 
 fn summarize_git_diff_files(
@@ -468,6 +497,38 @@ mod tests {
 
     fn parse_test_diff(diff_text: &str) -> Vec<SessionGitDiffFileSummary> {
         parse_git_diff_file_summaries("test", diff_text, false)
+    }
+
+    #[test]
+    fn truncate_git_output_leaves_short_output_unchanged() {
+        let output = "short diff".to_string();
+
+        let (truncated_output, truncated) = truncate_git_output(output.clone());
+
+        assert_eq!(truncated_output, output);
+        assert!(!truncated);
+    }
+
+    #[test]
+    fn truncate_git_output_cuts_ascii_at_byte_limit() {
+        let output = "x".repeat(GIT_DIFF_MAX_BYTES + 1);
+
+        let (truncated_output, truncated) = truncate_git_output(output);
+
+        assert_eq!(truncated_output.len(), GIT_DIFF_MAX_BYTES);
+        assert!(truncated);
+    }
+
+    #[test]
+    fn truncate_git_output_cuts_before_partial_utf8_character() {
+        let mut output = "x".repeat(GIT_DIFF_MAX_BYTES - 1);
+        output.push('é');
+
+        let (truncated_output, truncated) = truncate_git_output(output);
+
+        assert_eq!(truncated_output.len(), GIT_DIFF_MAX_BYTES - 1);
+        assert!(truncated_output.ends_with('x'));
+        assert!(truncated);
     }
 
     #[test]

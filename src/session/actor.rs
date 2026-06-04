@@ -1321,6 +1321,38 @@ fn remove_broadcast_subscribers(
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DeadlineSleep {
+    Pending,
+    Ready,
+    Sleep(Duration),
+}
+
+fn deadline_sleep(deadline: Option<Instant>) -> DeadlineSleep {
+    deadline
+        .map(|deadline| deadline_sleep_after(deadline, Instant::now()))
+        .unwrap_or(DeadlineSleep::Pending)
+}
+
+fn deadline_sleep_after(deadline: Instant, now: Instant) -> DeadlineSleep {
+    deadline
+        .checked_duration_since(now)
+        .filter(|duration| !duration.is_zero())
+        .map_or(DeadlineSleep::Ready, DeadlineSleep::Sleep)
+}
+
+async fn sleep_deadline(deadline_sleep: DeadlineSleep) {
+    match deadline_sleep {
+        DeadlineSleep::Pending => {
+            std::future::pending::<()>().await;
+        }
+        DeadlineSleep::Ready => {}
+        DeadlineSleep::Sleep(duration) => {
+            tokio::time::sleep(duration).await;
+        }
+    }
+}
+
 impl SessionActor {
     fn replay_cursor(&self) -> ReplayCursor {
         ReplayCursor {
@@ -1332,19 +1364,7 @@ impl SessionActor {
     /// Sleep until the given deadline, or pend forever if there is no deadline.
     /// Used inside `tokio::select!` to wake the actor for timer-driven transitions.
     async fn sleep_until_deadline(deadline: Option<Instant>) {
-        match deadline {
-            Some(d) => {
-                let now = Instant::now();
-                if d > now {
-                    tokio::time::sleep(d - now).await;
-                }
-                // If d <= now, return immediately so timers fire.
-            }
-            None => {
-                // No deadline -- pend forever (other select branches will fire).
-                std::future::pending::<()>().await;
-            }
-        }
+        sleep_deadline(deadline_sleep(deadline)).await;
     }
 
     /// Compute the earliest timer deadline across StateDetector, ScrollGuard,
@@ -2825,23 +2845,24 @@ mod tests {
     use super::{build_tmux_spawn_command, build_tmux_spawn_command_args};
     use super::{
         capture_pane_tail_with_command, compare_session_state_change, compute_pane_liveness,
-        cwd_from_osc7_payload, cwd_update, detect_tool_from_command_line,
-        detect_tool_from_process_entry, detect_tool_from_process_snapshot, extract_cwd_from_title,
-        find_osc_payload_end, initial_spawn_pty_size, line_looks_prompt_like,
-        normalize_submit_line_text, osc7_cwd_update_plan, osc_payloads,
-        output_counts_as_meaningful_activity, parse_process_entry, percent_decode,
-        process_entries_cache, pty_read_error_log, pty_read_step, query_tmux_session_created,
-        query_tool_from_tmux_process_tree, resolve_tmux_colorterm, resolve_tmux_term,
-        resolve_tmux_terminal_env, run_bounded_tmux_command, should_clear_startup_replay,
-        should_refresh_cwd_from_tmux, should_refresh_tool_from_tmux,
-        state_detector_for_initial_tool, submit_line_fallback_input, subscriber_cap_rejection,
-        title_cwd_update, title_tool_update, tmux_input_chunks, tool_refresh_changes_tool,
-        validate_spawn_start_cwd, visible_output_is_meaningful, write_and_flush_input,
-        write_input_counts_as_activity, ControlEvent, LivenessReconciliation, LivenessRefresh,
-        OutputFrame, PaneLiveness, ProcessEntriesCache, ProcessEntriesSnapshot, ProcessEntry,
-        ProcessSnapshotToolDetection, PtyReadErrorLog, PtyReadLoopStep, SessionActor,
-        SessionCommand, SubscribeOutcome, TmuxInputChunk, TmuxSpawnMode, CWD_REFRESH_MIN_INTERVAL,
-        MAX_OUTPUT_SUBSCRIBERS_PER_SESSION, PROCESS_ENTRIES_CACHE_TTL, TOOL_REFRESH_MIN_INTERVAL,
+        cwd_from_osc7_payload, cwd_update, deadline_sleep, deadline_sleep_after,
+        detect_tool_from_command_line, detect_tool_from_process_entry,
+        detect_tool_from_process_snapshot, extract_cwd_from_title, find_osc_payload_end,
+        initial_spawn_pty_size, line_looks_prompt_like, normalize_submit_line_text,
+        osc7_cwd_update_plan, osc_payloads, output_counts_as_meaningful_activity,
+        parse_process_entry, percent_decode, process_entries_cache, pty_read_error_log,
+        pty_read_step, query_tmux_session_created, query_tool_from_tmux_process_tree,
+        resolve_tmux_colorterm, resolve_tmux_term, resolve_tmux_terminal_env,
+        run_bounded_tmux_command, should_clear_startup_replay, should_refresh_cwd_from_tmux,
+        should_refresh_tool_from_tmux, state_detector_for_initial_tool, submit_line_fallback_input,
+        subscriber_cap_rejection, title_cwd_update, title_tool_update, tmux_input_chunks,
+        tool_refresh_changes_tool, validate_spawn_start_cwd, visible_output_is_meaningful,
+        write_and_flush_input, write_input_counts_as_activity, ControlEvent, DeadlineSleep,
+        LivenessReconciliation, LivenessRefresh, OutputFrame, PaneLiveness, ProcessEntriesCache,
+        ProcessEntriesSnapshot, ProcessEntry, ProcessSnapshotToolDetection, PtyReadErrorLog,
+        PtyReadLoopStep, SessionActor, SessionCommand, SubscribeOutcome, TmuxInputChunk,
+        TmuxSpawnMode, CWD_REFRESH_MIN_INTERVAL, MAX_OUTPUT_SUBSCRIBERS_PER_SESSION,
+        PROCESS_ENTRIES_CACHE_TTL, TOOL_REFRESH_MIN_INTERVAL,
     };
     use crate::config::Config;
     use crate::scroll::guard::ScrollGuard;
@@ -2912,6 +2933,67 @@ mod tests {
             seq,
             data: data.to_vec(),
         }
+    }
+
+    #[test]
+    fn deadline_sleep_without_deadline_pends() {
+        assert_eq!(deadline_sleep(None), DeadlineSleep::Pending);
+    }
+
+    #[test]
+    fn deadline_sleep_after_ready_for_past_and_current_deadlines() {
+        let now = Instant::now();
+
+        assert_eq!(deadline_sleep_after(now, now), DeadlineSleep::Ready);
+        assert_eq!(
+            deadline_sleep_after(now - Duration::from_millis(1), now),
+            DeadlineSleep::Ready
+        );
+    }
+
+    #[test]
+    fn deadline_sleep_after_preserves_positive_duration() {
+        let now = Instant::now();
+        let duration = Duration::from_millis(123);
+
+        assert_eq!(
+            deadline_sleep_after(now + duration, now),
+            DeadlineSleep::Sleep(duration)
+        );
+    }
+
+    #[tokio::test]
+    async fn sleep_until_deadline_returns_immediately_for_past_deadline() {
+        let past_deadline = Instant::now() - Duration::from_millis(1);
+
+        tokio::time::timeout(
+            Duration::from_millis(50),
+            SessionActor::sleep_until_deadline(Some(past_deadline)),
+        )
+        .await
+        .expect("past deadlines should return immediately");
+    }
+
+    #[tokio::test]
+    async fn sleep_until_deadline_without_deadline_can_be_cancelled() {
+        assert!(tokio::time::timeout(
+            Duration::from_millis(10),
+            SessionActor::sleep_until_deadline(None)
+        )
+        .await
+        .is_err());
+    }
+
+    #[tokio::test]
+    async fn sleep_until_deadline_future_wait_can_be_cancelled() {
+        let future_deadline = Instant::now() + Duration::from_secs(60);
+
+        assert!(tokio::time::timeout(
+            Duration::from_millis(10),
+            SessionActor::sleep_until_deadline(Some(future_deadline)),
+        )
+        .await
+        .is_err());
     }
 
     #[test]
