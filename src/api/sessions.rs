@@ -373,32 +373,58 @@ async fn send_input(
         return resp;
     }
 
+    send_input_response(&state, session_id, body).await
+}
+
+async fn send_input_response(
+    state: &Arc<AppState>,
+    session_id: String,
+    body: SessionInputRequest,
+) -> Response {
     if body.text.is_empty() {
         return validation_error("text must not be empty");
     }
 
-    let handle = match writable_session_handle(&state, &session_id).await {
+    match deliver_session_input(state, &session_id, body).await {
+        Ok(delivery) => session_input_delivery_response(session_id, delivery),
+        Err(response) => response,
+    }
+}
+
+async fn deliver_session_input(
+    state: &Arc<AppState>,
+    session_id: &str,
+    body: SessionInputRequest,
+) -> Result<InputDeliveryResult, Response> {
+    let handle = match writable_session_handle(state, session_id).await {
         Ok(handle) => handle,
-        Err(response) => return response,
+        Err(response) => return Err(response),
     };
 
     let (ack_tx, ack_rx) = oneshot::channel();
     let command = session_input_command(body, ack_tx);
+    send_session_input_command(session_id, &handle, command).await?;
+    wait_for_input_delivery(ack_rx).await
+}
 
+async fn send_session_input_command(
+    session_id: &str,
+    handle: &ActorHandle,
+    command: SessionCommand,
+) -> Result<(), Response> {
     if let Err(err) = handle.send(command).await {
         tracing::error!("[session {session_id}] send_input failed: {err}");
-        return error_response(
+        return Err(error_response(
             StatusCode::NOT_FOUND,
             "SESSION_NOT_FOUND",
             Some(err.to_string()),
-        );
+        ));
     }
 
-    let delivery = match wait_for_input_delivery(ack_rx).await {
-        Ok(delivery) => delivery,
-        Err(response) => return response,
-    };
+    Ok(())
+}
 
+fn session_input_delivery_response(session_id: String, delivery: InputDeliveryResult) -> Response {
     if !delivery.delivered {
         return error_response(
             StatusCode::BAD_GATEWAY,
@@ -2770,6 +2796,43 @@ esac
         let json = response_json(response).await;
         assert_eq!(json["code"], "INPUT_DELIVERY_UNKNOWN");
         worker.await.expect("worker");
+    }
+
+    #[tokio::test]
+    async fn send_input_delivery_response_returns_success_payload() {
+        let response = session_input_delivery_response(
+            "sess-1".to_string(),
+            InputDeliveryResult {
+                delivered: true,
+                method: "test",
+                message: None,
+            },
+        );
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let json = response_json(response).await;
+        assert_eq!(json["ok"], true);
+        assert_eq!(json["session_id"], "sess-1");
+        assert_eq!(json["delivered"], true);
+        assert_eq!(json["delivery_method"], "test");
+        assert_eq!(json["message"], Value::Null);
+    }
+
+    #[tokio::test]
+    async fn send_input_delivery_response_maps_failed_delivery() {
+        let response = session_input_delivery_response(
+            "sess-1".to_string(),
+            InputDeliveryResult {
+                delivered: false,
+                method: "test",
+                message: Some("pty write failed".to_string()),
+            },
+        );
+
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+        let json = response_json(response).await;
+        assert_eq!(json["code"], "INPUT_DELIVERY_FAILED");
+        assert_eq!(json["message"], "pty write failed");
     }
 
     #[tokio::test]
