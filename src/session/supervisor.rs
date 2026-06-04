@@ -1299,30 +1299,51 @@ impl SessionSupervisor {
         tmux_name: &str,
         requested_session_id: Option<String>,
     ) -> Result<(String, Option<SessionSummary>), TmuxAdoptError> {
-        if let Some(session_id) = requested_session_id {
-            if self.sessions.read().await.contains_key(&session_id) {
-                return Err(TmuxAdoptError::AlreadyTracked {
-                    tmux_name: tmux_name.to_string(),
-                    session_id,
-                });
+        match requested_session_id {
+            Some(session_id) => {
+                self.resolve_requested_adopt_session_identity(tmux_name, session_id)
+                    .await
             }
+            None => {
+                self.resolve_unrequested_adopt_session_identity(tmux_name)
+                    .await
+            }
+        }
+    }
 
-            let stale = self
-                .stale_summary_for_id(&session_id)
-                .await
-                .ok_or_else(|| TmuxAdoptError::StaleSessionNotFound {
-                    session_id: session_id.clone(),
-                })?;
-            if stale.tmux_name != tmux_name {
-                return Err(TmuxAdoptError::StaleSessionConflict {
-                    session_id,
-                    stale_tmux_name: stale.tmux_name,
-                    requested_tmux_name: tmux_name.to_string(),
-                });
-            }
-            return Ok((stale.session_id.clone(), Some(stale)));
+    async fn resolve_requested_adopt_session_identity(
+        &self,
+        tmux_name: &str,
+        session_id: String,
+    ) -> Result<(String, Option<SessionSummary>), TmuxAdoptError> {
+        if self.sessions.read().await.contains_key(&session_id) {
+            return Err(TmuxAdoptError::AlreadyTracked {
+                tmux_name: tmux_name.to_string(),
+                session_id,
+            });
         }
 
+        let stale = self
+            .stale_summary_for_id(&session_id)
+            .await
+            .ok_or_else(|| TmuxAdoptError::StaleSessionNotFound {
+                session_id: session_id.clone(),
+            })?;
+        if stale.tmux_name != tmux_name {
+            return Err(TmuxAdoptError::StaleSessionConflict {
+                session_id,
+                stale_tmux_name: stale.tmux_name,
+                requested_tmux_name: tmux_name.to_string(),
+            });
+        }
+
+        Ok((stale.session_id.clone(), Some(stale)))
+    }
+
+    async fn resolve_unrequested_adopt_session_identity(
+        &self,
+        tmux_name: &str,
+    ) -> Result<(String, Option<SessionSummary>), TmuxAdoptError> {
         let stale_matches = self.stale_summaries_for_tmux(tmux_name).await;
         match stale_matches.len() {
             0 => Ok((self.allocate_unique_session_id().await, None)),

@@ -9,7 +9,8 @@ use crate::api::envelope::error_body;
 use crate::api::{fetch_live_summary, remote_sessions, AppState};
 use crate::auth::{AuthInfo, AuthScope};
 use crate::types::{
-    SessionGitDiffFileSummary, SessionGitDiffHunkSummary, SessionGitDiffResponse, SessionSummary,
+    LaunchTargetSummary, SessionGitDiffFileSummary, SessionGitDiffHunkSummary,
+    SessionGitDiffResponse, SessionSummary,
 };
 
 const GIT_DIFF_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
@@ -28,32 +29,77 @@ pub(crate) async fn get_git_diff(
 }
 
 async fn fetch_git_diff_response(state: &Arc<AppState>, session_id: &str) -> Response {
-    match remote_sessions::denamespace_for_target(session_id) {
-        Ok(Some((target, remote_session_id))) => {
-            return match remote_sessions::fetch_remote_git_diff(&target, remote_session_id).await {
-                Ok(response) => (StatusCode::OK, Json(response)).into_response(),
-                Err(err) => err.into_response(),
-            };
-        }
-        Ok(None) => {}
-        Err(err) => return err.into_response(),
-    }
+    let remote_response = fetch_remote_git_diff_response(session_id).await;
+    git_diff_response_from_remote_or_local(remote_response, state, session_id).await
+}
 
-    let summary = match fetch_live_summary(state, session_id).await {
-        Ok(Some(summary)) => summary,
-        Ok(None) => {
-            return error_response(StatusCode::NOT_FOUND, "SESSION_NOT_FOUND", None);
-        }
+async fn git_diff_response_from_remote_or_local(
+    remote_response: Option<Response>,
+    state: &Arc<AppState>,
+    session_id: &str,
+) -> Response {
+    if let Some(response) = remote_response {
+        return response;
+    }
+    fetch_local_git_diff_response(state, session_id).await
+}
+
+async fn fetch_remote_git_diff_response(session_id: &str) -> Option<Response> {
+    let (target, remote_session_id) = match remote_git_diff_target(session_id) {
+        Ok(Some(target)) => target,
+        Ok(None) => return None,
+        Err(response) => return Some(response),
+    };
+
+    Some(fetch_remote_target_git_diff_response(&target, remote_session_id).await)
+}
+
+fn remote_git_diff_target(
+    session_id: &str,
+) -> Result<Option<(LaunchTargetSummary, &str)>, Response> {
+    remote_sessions::denamespace_for_target(session_id).map_err(|err| err.into_response())
+}
+
+async fn fetch_remote_target_git_diff_response(
+    target: &LaunchTargetSummary,
+    remote_session_id: &str,
+) -> Response {
+    match remote_sessions::fetch_remote_git_diff(target, remote_session_id).await {
+        Ok(response) => (StatusCode::OK, Json(response)).into_response(),
+        Err(err) => err.into_response(),
+    }
+}
+
+async fn fetch_local_git_diff_response(state: &Arc<AppState>, session_id: &str) -> Response {
+    match fetch_local_git_diff_summary(state, session_id).await {
+        Ok(summary) => git_diff_summary_response(summary).await,
+        Err(response) => response,
+    }
+}
+
+async fn fetch_local_git_diff_summary(
+    state: &Arc<AppState>,
+    session_id: &str,
+) -> Result<SessionSummary, Response> {
+    match fetch_live_summary(state, session_id).await {
+        Ok(Some(summary)) => Ok(summary),
+        Ok(None) => Err(error_response(
+            StatusCode::NOT_FOUND,
+            "SESSION_NOT_FOUND",
+            None,
+        )),
         Err(err) => {
             tracing::error!("git diff summary lookup failed: {err}");
-            return error_response(
+            Err(error_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "INTERNAL_ERROR",
                 Some(err.to_string()),
-            );
+            ))
         }
-    };
+    }
+}
 
+async fn git_diff_summary_response(summary: SessionSummary) -> Response {
     let response = read_git_diff_for_summary(summary).await;
     (StatusCode::OK, Json(response)).into_response()
 }

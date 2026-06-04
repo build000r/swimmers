@@ -85,13 +85,19 @@ fn skill_root_for_tool(tool: SkillRegistryTool) -> Option<PathBuf> {
 
 fn unquote(value: &str) -> String {
     let trimmed = value.trim();
-    if trimmed.len() >= 2
-        && ((trimmed.starts_with('"') && trimmed.ends_with('"'))
-            || (trimmed.starts_with('\'') && trimmed.ends_with('\'')))
-    {
-        return trimmed[1..trimmed.len() - 1].trim().to_string();
-    }
-    trimmed.to_string()
+    unquoted_body(trimmed).unwrap_or(trimmed).to_string()
+}
+
+fn unquoted_body(value: &str) -> Option<&str> {
+    value
+        .strip_prefix('"')
+        .and_then(|body| body.strip_suffix('"'))
+        .or_else(|| {
+            value
+                .strip_prefix('\'')
+                .and_then(|body| body.strip_suffix('\''))
+        })
+        .map(str::trim)
 }
 
 #[derive(Default)]
@@ -340,67 +346,110 @@ async fn list_session_skills(
     axum::extract::Path(session_id): axum::extract::Path<String>,
     Query(query): Query<SessionSkillQuery>,
 ) -> Response {
-    if let Err(resp) = auth.require_scope(AuthScope::SessionsRead) {
-        return resp;
+    if let Some(response) = session_skills_preflight_response(&auth, &session_id, &query) {
+        return response;
     }
 
-    let source = query
-        .source
-        .as_deref()
+    local_session_skills_response(state, session_id, query.q).await
+}
+
+fn session_skills_preflight_response(
+    auth: &AuthInfo,
+    session_id: &str,
+    query: &SessionSkillQuery,
+) -> Option<Response> {
+    auth.require_scope(AuthScope::SessionsRead)
+        .err()
+        .or_else(|| unsupported_session_skill_source_response(query.source.as_deref()))
+        .or_else(|| remote_session_skills_response(session_id, query.q.clone()))
+}
+
+fn unsupported_session_skill_source_response(source: Option<&str>) -> Option<Response> {
+    (!is_supported_session_skill_source(source)).then(invalid_session_skill_source_response)
+}
+
+fn is_supported_session_skill_source(source: Option<&str>) -> bool {
+    normalized_session_skill_source(source) == "sbp"
+}
+
+fn normalized_session_skill_source(source: Option<&str>) -> &str {
+    source
         .map(str::trim)
         .filter(|source| !source.is_empty())
-        .unwrap_or("sbp");
-    if source != "sbp" {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(error_body_msg(
-                "INVALID_SKILL_SOURCE",
-                "session skills source must be sbp",
-            )),
-        )
-            .into_response();
-    }
+        .unwrap_or("sbp")
+}
 
-    if remote_sessions::split_remote_session_id(&session_id).is_some() {
-        return (
+fn invalid_session_skill_source_response() -> Response {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(error_body_msg(
+            "INVALID_SKILL_SOURCE",
+            "session skills source must be sbp",
+        )),
+    )
+        .into_response()
+}
+
+fn remote_session_skills_response(session_id: &str, query: Option<String>) -> Option<Response> {
+    remote_sessions::split_remote_session_id(session_id).map(|_| {
+        (
             StatusCode::OK,
-            Json(SessionSkillListResponse {
-                session_id,
-                source: "sbp".to_string(),
-                cwd: String::new(),
-                available: false,
-                query: query.q,
-                skills: Vec::new(),
-                issues: Vec::new(),
-                message: Some(
-                    "remote session skills must be queried on the target host".to_string(),
-                ),
-            }),
+            Json(remote_session_skills_payload(session_id.to_string(), query)),
         )
-            .into_response();
-    }
+            .into_response()
+    })
+}
 
-    let summary = match fetch_live_summary(&state, &session_id).await {
-        Ok(Some(summary)) => summary,
-        Ok(None) => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(error_body("SESSION_NOT_FOUND", None)),
-            )
-                .into_response();
-        }
+fn remote_session_skills_payload(
+    session_id: String,
+    query: Option<String>,
+) -> SessionSkillListResponse {
+    SessionSkillListResponse {
+        session_id,
+        source: "sbp".to_string(),
+        cwd: String::new(),
+        available: false,
+        query,
+        skills: Vec::new(),
+        issues: Vec::new(),
+        message: Some("remote session skills must be queried on the target host".to_string()),
+    }
+}
+
+async fn local_session_skills_response(
+    state: Arc<AppState>,
+    session_id: String,
+    query: Option<String>,
+) -> Response {
+    let summary = match fetch_session_skills_summary(&state, &session_id).await {
+        Ok(summary) => summary,
+        Err(response) => return response,
+    };
+
+    let response = read_sbp_session_skills(&session_id, &summary.cwd, query.as_deref()).await;
+    (StatusCode::OK, Json(response)).into_response()
+}
+
+async fn fetch_session_skills_summary(
+    state: &Arc<AppState>,
+    session_id: &str,
+) -> Result<crate::types::SessionSummary, Response> {
+    match fetch_live_summary(state, session_id).await {
+        Ok(Some(summary)) => Ok(summary),
+        Ok(None) => Err((
+            StatusCode::NOT_FOUND,
+            Json(error_body("SESSION_NOT_FOUND", None)),
+        )
+            .into_response()),
         Err(err) => {
             tracing::error!("session skills summary lookup failed: {err}");
-            return (
+            Err((
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(error_body_msg("INTERNAL_ERROR", err.to_string())),
             )
-                .into_response();
+                .into_response())
         }
-    };
-
-    let response = read_sbp_session_skills(&session_id, &summary.cwd, query.q.as_deref()).await;
-    (StatusCode::OK, Json(response)).into_response()
+    }
 }
 
 pub async fn read_sbp_session_skills(
@@ -417,45 +466,59 @@ pub async fn read_sbp_session_skills(
         );
     };
 
-    let mut command = Command::new(sbp);
-    command.args(["skills", "--format", "json", "--cwd", cwd]);
-    let output = match tokio::time::timeout(SBP_SKILLS_TIMEOUT, command.output()).await {
-        Ok(Ok(output)) => output,
-        Ok(Err(err)) => {
-            return unavailable_session_skills(
-                session_id,
-                cwd,
-                query,
-                redact_known_secrets(format!("sbp skills failed to start: {err}")),
-            );
-        }
-        Err(_) => {
-            return unavailable_session_skills(session_id, cwd, query, "sbp skills timed out");
-        }
+    let output = match run_sbp_skills_command(sbp, cwd).await {
+        Ok(output) => output,
+        Err(message) => return unavailable_session_skills(session_id, cwd, query, message),
     };
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        let message = if stderr.is_empty() {
-            format!("sbp skills exited with {}", output.status)
-        } else {
-            format!("sbp skills failed: {stderr}")
-        };
-        return unavailable_session_skills(session_id, cwd, query, redact_known_secrets(message));
-    }
+    sbp_session_skills_from_output(session_id, cwd, query, output)
+}
 
-    match parse_sbp_session_skills(
-        session_id,
-        cwd,
-        query,
-        &String::from_utf8_lossy(&output.stdout),
-    ) {
+async fn run_sbp_skills_command(sbp: PathBuf, cwd: &str) -> Result<std::process::Output, String> {
+    let mut command = Command::new(sbp);
+    command.args(["skills", "--format", "json", "--cwd", cwd]);
+    match tokio::time::timeout(SBP_SKILLS_TIMEOUT, command.output()).await {
+        Ok(Ok(output)) => Ok(output),
+        Ok(Err(err)) => Err(format!("sbp skills failed to start: {err}")),
+        Err(_) => Err("sbp skills timed out".to_string()),
+    }
+}
+
+fn sbp_session_skills_from_output(
+    session_id: &str,
+    cwd: &str,
+    query: Option<&str>,
+    output: std::process::Output,
+) -> SessionSkillListResponse {
+    if output.status.success() {
+        parse_sbp_skills_stdout(session_id, cwd, query, &output.stdout)
+    } else {
+        unavailable_session_skills(session_id, cwd, query, format_sbp_failure_message(&output))
+    }
+}
+
+fn format_sbp_failure_message(output: &std::process::Output) -> String {
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    if stderr.is_empty() {
+        format!("sbp skills exited with {}", output.status)
+    } else {
+        format!("sbp skills failed: {stderr}")
+    }
+}
+
+fn parse_sbp_skills_stdout(
+    session_id: &str,
+    cwd: &str,
+    query: Option<&str>,
+    stdout: &[u8],
+) -> SessionSkillListResponse {
+    match parse_sbp_session_skills(session_id, cwd, query, &String::from_utf8_lossy(stdout)) {
         Ok(response) => response,
         Err(err) => unavailable_session_skills(
             session_id,
             cwd,
             query,
-            redact_known_secrets(format!("sbp skills output could not be parsed: {err}")),
+            format!("sbp skills output could not be parsed: {err}"),
         ),
     }
 }
@@ -1130,6 +1193,43 @@ cat "$SBP_OUTPUT_FILE"
         assert!(!args.contains("skill add"));
         assert!(!args.contains("skill sync"));
         assert!(!args.contains("skill prune"));
+    }
+
+    #[tokio::test]
+    async fn session_skills_rejects_non_sbp_source() {
+        let response = list_session_skills(
+            Extension(AuthInfo::new(OPERATOR_SCOPES.to_vec())),
+            State(test_state()),
+            axum::extract::Path("sess-skills".to_string()),
+            Query(SessionSkillQuery {
+                source: Some("codex".to_string()),
+                q: Some("ui".to_string()),
+            }),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let json = response_json(response).await;
+        assert_eq!(json["code"], "INVALID_SKILL_SOURCE");
+        assert_eq!(json["message"], "session skills source must be sbp");
+    }
+
+    #[tokio::test]
+    async fn session_skills_reports_missing_local_session() {
+        let response = list_session_skills(
+            Extension(AuthInfo::new(OPERATOR_SCOPES.to_vec())),
+            State(test_state()),
+            axum::extract::Path("missing-session".to_string()),
+            Query(SessionSkillQuery {
+                source: None,
+                q: None,
+            }),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let json = response_json(response).await;
+        assert_eq!(json["code"], "SESSION_NOT_FOUND");
     }
 
     #[tokio::test]

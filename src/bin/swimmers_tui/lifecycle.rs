@@ -866,13 +866,16 @@ mod tests {
     }
 
     #[test]
-    fn default_server_log_dir_prefers_tui_dir_then_tmpdir_then_tmp() {
+    fn default_server_log_dir_prefers_tui_server_log_dir() {
         with_env_var("TUI_SERVER_LOG_DIR", "/tmp/tui-log-dir", || {
             with_env_var("TMPDIR", "/tmp/tmpdir-log-dir", || {
                 assert_eq!(default_server_log_dir(), PathBuf::from("/tmp/tui-log-dir"));
             });
         });
+    }
 
+    #[test]
+    fn default_server_log_dir_uses_tmpdir_without_tui_server_log_dir() {
         with_env_var_removed("TUI_SERVER_LOG_DIR", || {
             with_env_var("TMPDIR", "/tmp/tmpdir-log-dir", || {
                 assert_eq!(
@@ -881,7 +884,10 @@ mod tests {
                 );
             });
         });
+    }
 
+    #[test]
+    fn default_server_log_dir_uses_tmp_without_env_dirs() {
         with_env_var_removed("TUI_SERVER_LOG_DIR", || {
             with_env_var_removed("TMPDIR", || {
                 assert_eq!(default_server_log_dir(), PathBuf::from("/tmp"));

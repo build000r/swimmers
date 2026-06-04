@@ -28,6 +28,7 @@ use crate::session::supervisor::LifecycleEvent;
 use crate::types::{clamp_terminal_resize, opcodes, ControlEvent, SessionSummary};
 
 const APP_JS_ROUTE: &str = "/app.js";
+const API_CLIENT_JS_ROUTE: &str = "/api_client.js";
 const APP_EVENT_BINDINGS_JS_ROUTE: &str = "/app_event_bindings.js";
 const TROGDOR_EVENT_BINDINGS_JS_ROUTE: &str = "/trogdor_event_bindings.js";
 const RENDERED_SURFACE_JS_ROUTE: &str = "/rendered_surface.js";
@@ -105,6 +106,7 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/", get(index))
         .route(PUBLISHED_VIEW_ROUTE, get(selected_index))
         .route(APP_JS_ROUTE, get(app_js))
+        .route(API_CLIENT_JS_ROUTE, get(api_client_js))
         .route(APP_EVENT_BINDINGS_JS_ROUTE, get(app_event_bindings_js))
         .route(
             TROGDOR_EVENT_BINDINGS_JS_ROUTE,
@@ -661,6 +663,10 @@ fn javascript_asset(relative: &str, baked: &'static str) -> Response {
 
 async fn app_js() -> Response {
     javascript_asset("src/web/app.js", include_str!("app.js"))
+}
+
+async fn api_client_js() -> Response {
+    javascript_asset("src/web/api_client.js", include_str!("api_client.js"))
 }
 
 async fn app_event_bindings_js() -> Response {
@@ -2758,6 +2764,12 @@ mod tests {
     #[tokio::test]
     async fn browser_js_asset_handlers_cover_app_module_graph() {
         let assets = [
+            (APP_JS_ROUTE, app_js().await, "from \"./api_client.js\""),
+            (
+                API_CLIENT_JS_ROUTE,
+                api_client_js().await,
+                "export function createApiClient",
+            ),
             (
                 APP_JS_ROUTE,
                 app_js().await,

@@ -132,6 +132,7 @@ import {
   summarizeThought,
   surfaceSession as buildSurfaceSession,
 } from "./surface_model.js";
+import { createApiClient } from "./api_client.js";
 
 const boot = window.__SWIMMERS_BOOT__ ?? {
   franken_term_available: false,
@@ -319,6 +320,15 @@ const state = {
 };
 
 const defaultDocumentTitle = document.title || "swimmers";
+
+const {
+  apiFetch,
+  apiMaybeFetch,
+  responseJsonOrNull,
+} = createApiClient({
+  getToken: () => state.token,
+  fetchImpl: (...args) => fetch(...args),
+});
 
 const el = {
   terminalStage: document.getElementById("terminal-stage"),
@@ -722,54 +732,6 @@ function rejectOversizeTerminalText(text, label = "Paste") {
   }
   setUtilityStatus(`${label} blocked: ${bytes} bytes exceeds ${MAX_TERMINAL_PASTE_BYTES}.`, true, 3200);
   return true;
-}
-
-function apiHeaders(extra = {}) {
-  const headers = { ...extra };
-  if (state.token) {
-    headers.Authorization = `Bearer ${state.token}`;
-  }
-  return headers;
-}
-
-async function apiFetch(path, init = {}) {
-  const headers = apiHeaders(init.headers ?? {});
-  const response = await fetch(path, { ...init, headers });
-  if (!response.ok) {
-    let message = `${response.status} ${response.statusText}`;
-    try {
-      const json = await response.json();
-      if (json?.message) {
-        message = json.message;
-      } else if (json?.code) {
-        message = json.code;
-      }
-    } catch (_) {
-      // Keep the HTTP fallback message.
-    }
-    const error = new Error(message);
-    error.status = response.status;
-    throw error;
-  }
-  return response;
-}
-
-async function apiMaybeFetch(path, init = {}) {
-  try {
-    return await apiFetch(path, init);
-  } catch (error) {
-    if (error?.status === 404) {
-      return null;
-    }
-    throw error;
-  }
-}
-
-async function responseJsonOrNull(response) {
-  if (!response) {
-    return null;
-  }
-  return response.json();
 }
 
 function nextInputMessageId() {
