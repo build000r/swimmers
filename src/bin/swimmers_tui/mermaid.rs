@@ -1467,46 +1467,59 @@ pub(crate) fn render_mermaid_detail_lines(
     Ok(true)
 }
 
-pub(crate) fn render_mermaid_lines(
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MermaidSpecialRenderer {
+    ErPacked,
+    Outline,
+    Detail,
+}
+
+fn mermaid_special_renderer_for_view(
+    view_state: MermaidViewState,
+) -> Option<MermaidSpecialRenderer> {
+    if view_state.is_er() {
+        return Some(MermaidSpecialRenderer::ErPacked);
+    }
+    if view_state == MermaidViewState::Outline {
+        return Some(MermaidSpecialRenderer::Outline);
+    }
+    view_state
+        .detail_level()
+        .is_some()
+        .then_some(MermaidSpecialRenderer::Detail)
+}
+
+fn render_mermaid_special_lines(
     viewer: &mut MermaidViewerState,
     content_rect: Rect,
+    transform: MermaidViewportTransform,
+    view_state: MermaidViewState,
+) -> Result<bool, String> {
+    let Some(renderer) = mermaid_special_renderer_for_view(view_state) else {
+        return Ok(false);
+    };
+
+    match renderer {
+        MermaidSpecialRenderer::ErPacked => {
+            render_mermaid_er_packed_lines(viewer, content_rect, view_state)
+        }
+        MermaidSpecialRenderer::Outline => {
+            render_mermaid_outline_lines(viewer, content_rect, transform)
+        }
+        MermaidSpecialRenderer::Detail => {
+            render_mermaid_detail_lines(viewer, content_rect, transform, view_state)
+        }
+    }
+}
+
+fn render_mermaid_fallback_pixmap_lines(
+    viewer: &mut MermaidViewerState,
+    content_rect: Rect,
+    sample_width: u32,
+    sample_height: u32,
+    transform: MermaidViewportTransform,
+    view_state: MermaidViewState,
 ) -> Result<(), String> {
-    let (sample_width, sample_height, transform) =
-        mermaid_viewport_transform(viewer, content_rect)?;
-    let view_state = mermaid_view_state_for_view(viewer, content_rect);
-    if view_state.is_er() && render_mermaid_er_packed_lines(viewer, content_rect, view_state)? {
-        viewer.cached_rect = Some(content_rect);
-        viewer.cached_zoom = viewer.zoom;
-        viewer.cached_center_x = viewer.center_x;
-        viewer.cached_center_y = viewer.center_y;
-        viewer.viewport_render_count = viewer.viewport_render_count.saturating_add(1);
-        return Ok(());
-    }
-
-    if view_state == MermaidViewState::Outline
-        && render_mermaid_outline_lines(viewer, content_rect, transform)?
-    {
-        viewer.cached_rect = Some(content_rect);
-        viewer.cached_zoom = viewer.zoom;
-        viewer.cached_center_x = viewer.center_x;
-        viewer.cached_center_y = viewer.center_y;
-        viewer.viewport_render_count = viewer.viewport_render_count.saturating_add(1);
-        return Ok(());
-    }
-
-    if matches!(
-        view_state,
-        MermaidViewState::L1 | MermaidViewState::L2 | MermaidViewState::L3
-    ) && render_mermaid_detail_lines(viewer, content_rect, transform, view_state)?
-    {
-        viewer.cached_rect = Some(content_rect);
-        viewer.cached_zoom = viewer.zoom;
-        viewer.cached_center_x = viewer.center_x;
-        viewer.cached_center_y = viewer.center_y;
-        viewer.viewport_render_count = viewer.viewport_render_count.saturating_add(1);
-        return Ok(());
-    }
-
     let mut pixmap = Pixmap::new(sample_width, sample_height)
         .ok_or_else(|| "failed to allocate Mermaid viewport".to_string())?;
     pixmap.fill(resvg::tiny_skia::Color::from_rgba8(255, 255, 255, 255));
@@ -1528,20 +1541,51 @@ pub(crate) fn render_mermaid_lines(
         &mut pixmap_mut,
     );
 
-    viewer.cached_lines = pixmap_to_ascii_lines(&pixmap, content_rect);
-    viewer.cached_background_cells =
-        mermaid_background_cells_from_lines(&viewer.cached_lines, MERMAID_CONNECTOR_COLOR);
-    viewer.cached_semantic_lines = project_mermaid_semantic_lines(
+    let cached_lines = pixmap_to_ascii_lines(&pixmap, content_rect);
+    let cached_background_cells =
+        mermaid_background_cells_from_lines(&cached_lines, MERMAID_CONNECTOR_COLOR);
+    let cached_semantic_lines = project_mermaid_semantic_lines(
         &prepared.semantic_lines,
         transform,
         content_rect,
         view_state,
     );
+
+    viewer.cached_lines = cached_lines;
+    viewer.cached_background_cells = cached_background_cells;
+    viewer.cached_semantic_lines = cached_semantic_lines;
+    Ok(())
+}
+
+fn mermaid_mark_viewport_cache_rendered(viewer: &mut MermaidViewerState, content_rect: Rect) {
     viewer.cached_rect = Some(content_rect);
     viewer.cached_zoom = viewer.zoom;
     viewer.cached_center_x = viewer.center_x;
     viewer.cached_center_y = viewer.center_y;
     viewer.viewport_render_count = viewer.viewport_render_count.saturating_add(1);
+}
+
+pub(crate) fn render_mermaid_lines(
+    viewer: &mut MermaidViewerState,
+    content_rect: Rect,
+) -> Result<(), String> {
+    let (sample_width, sample_height, transform) =
+        mermaid_viewport_transform(viewer, content_rect)?;
+    let view_state = mermaid_view_state_for_view(viewer, content_rect);
+    if render_mermaid_special_lines(viewer, content_rect, transform, view_state)? {
+        mermaid_mark_viewport_cache_rendered(viewer, content_rect);
+        return Ok(());
+    }
+
+    render_mermaid_fallback_pixmap_lines(
+        viewer,
+        content_rect,
+        sample_width,
+        sample_height,
+        transform,
+        view_state,
+    )?;
+    mermaid_mark_viewport_cache_rendered(viewer, content_rect);
     Ok(())
 }
 
@@ -1849,6 +1893,100 @@ fn render_mermaid_cached_semantic_lines(renderer: &mut Renderer, viewer: &Mermai
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum MermaidViewerBodyState {
+    PlanText,
+    TooSmall,
+    Unsupported(String),
+    ArtifactError(String),
+    Diagram,
+}
+
+fn mermaid_viewer_body_state(
+    viewer: &MermaidViewerState,
+    content_rect: Rect,
+) -> MermaidViewerBodyState {
+    if viewer.active_tab != DomainPlanTab::Schema {
+        return MermaidViewerBodyState::PlanText;
+    }
+    if content_rect.width < MERMAID_VIEW_MIN_WIDTH || content_rect.height < MERMAID_VIEW_MIN_HEIGHT
+    {
+        return MermaidViewerBodyState::TooSmall;
+    }
+    if let Some(reason) = viewer.unsupported_reason.as_deref() {
+        return MermaidViewerBodyState::Unsupported(reason.to_string());
+    }
+    if let Some(error) = viewer.artifact_error.as_deref() {
+        return MermaidViewerBodyState::ArtifactError(error.to_string());
+    }
+    MermaidViewerBodyState::Diagram
+}
+
+fn render_mermaid_viewer_body(
+    renderer: &mut Renderer,
+    content_rect: Rect,
+    viewer: &mut MermaidViewerState,
+) {
+    match mermaid_viewer_body_state(viewer, content_rect) {
+        MermaidViewerBodyState::PlanText => {
+            render_plan_text_content(renderer, content_rect, viewer)
+        }
+        MermaidViewerBodyState::TooSmall => {
+            render_wrapped_lines(
+                renderer,
+                content_rect,
+                "Mermaid view too small",
+                Color::DarkGrey,
+            );
+        }
+        MermaidViewerBodyState::Unsupported(reason) => {
+            render_wrapped_lines(renderer, content_rect, &reason, Color::DarkGrey);
+        }
+        MermaidViewerBodyState::ArtifactError(error) => {
+            render_wrapped_lines(renderer, content_rect, &error, Color::Red);
+        }
+        MermaidViewerBodyState::Diagram => {
+            render_mermaid_diagram_body(renderer, content_rect, viewer);
+        }
+    }
+}
+
+fn render_mermaid_diagram_body(
+    renderer: &mut Renderer,
+    content_rect: Rect,
+    viewer: &mut MermaidViewerState,
+) {
+    if render_mermaid_viewport_cache_error(renderer, content_rect, viewer) {
+        return;
+    }
+    viewer.render_error = None;
+    mermaid_apply_render_line_cap(viewer, content_rect);
+
+    render_mermaid_cached_background(renderer, content_rect, viewer);
+    render_mermaid_cached_semantic_lines(renderer, viewer);
+}
+
+fn render_mermaid_viewport_cache_error(
+    renderer: &mut Renderer,
+    content_rect: Rect,
+    viewer: &mut MermaidViewerState,
+) -> bool {
+    let Err(err) = ensure_mermaid_viewport_cache(viewer, content_rect) else {
+        return false;
+    };
+
+    tracing::warn!(
+        session_id = %viewer.session_id,
+        error = %err,
+        "Mermaid viewport render failed; rendering wrapped error text"
+    );
+    viewer.render_error = Some(err);
+    if let Some(error) = viewer.render_error.as_deref() {
+        render_wrapped_lines(renderer, content_rect, error, Color::Red);
+    }
+    true
+}
+
 pub(crate) fn render_mermaid_viewer(
     renderer: &mut Renderer,
     field: Rect,
@@ -1860,49 +1998,7 @@ pub(crate) fn render_mermaid_viewer(
     viewer.content_rect = Some(content_rect);
     render_mermaid_viewer_header(renderer, field, content_rect, viewer);
 
-    // If on a plan text tab, render text instead of the mermaid diagram
-    if viewer.active_tab != DomainPlanTab::Schema {
-        render_plan_text_content(renderer, content_rect, viewer);
-        return;
-    }
-
-    if content_rect.width < MERMAID_VIEW_MIN_WIDTH || content_rect.height < MERMAID_VIEW_MIN_HEIGHT
-    {
-        render_wrapped_lines(
-            renderer,
-            content_rect,
-            "Mermaid view too small",
-            Color::DarkGrey,
-        );
-        return;
-    }
-
-    if let Some(reason) = viewer.unsupported_reason.as_deref() {
-        render_wrapped_lines(renderer, content_rect, reason, Color::DarkGrey);
-        return;
-    }
-    if let Some(error) = viewer.artifact_error.as_deref() {
-        render_wrapped_lines(renderer, content_rect, error, Color::Red);
-        return;
-    }
-
-    if let Err(err) = ensure_mermaid_viewport_cache(viewer, content_rect) {
-        tracing::warn!(
-            session_id = %viewer.session_id,
-            error = %err,
-            "Mermaid viewport render failed; rendering wrapped error text"
-        );
-        viewer.render_error = Some(err);
-        if let Some(error) = viewer.render_error.as_deref() {
-            render_wrapped_lines(renderer, content_rect, error, Color::Red);
-        }
-        return;
-    }
-    viewer.render_error = None;
-    mermaid_apply_render_line_cap(viewer, content_rect);
-
-    render_mermaid_cached_background(renderer, content_rect, viewer);
-    render_mermaid_cached_semantic_lines(renderer, viewer);
+    render_mermaid_viewer_body(renderer, content_rect, viewer);
 }
 
 fn mermaid_best_packed_detail_layout(
@@ -2109,6 +2205,15 @@ mod mermaid_focus_tests {
         renderer.buffer[(y as usize) * (renderer.width as usize) + (x as usize)]
     }
 
+    fn roomy_content_rect() -> Rect {
+        Rect {
+            x: 2,
+            y: 3,
+            width: MERMAID_VIEW_MIN_WIDTH + 20,
+            height: MERMAID_VIEW_MIN_HEIGHT + 10,
+        }
+    }
+
     fn focus_line(y: u16, x: u16, source_index: usize) -> MermaidProjectedLine {
         MermaidProjectedLine {
             source_index,
@@ -2138,6 +2243,106 @@ mod mermaid_focus_tests {
             top: sort_y,
             bottom: sort_y,
         }
+    }
+
+    #[test]
+    fn mermaid_special_renderer_maps_er_outline_and_detail_states() {
+        assert_eq!(
+            mermaid_special_renderer_for_view(MermaidViewState::ErEntities),
+            Some(MermaidSpecialRenderer::ErPacked)
+        );
+        assert_eq!(
+            mermaid_special_renderer_for_view(MermaidViewState::ErKeys),
+            Some(MermaidSpecialRenderer::ErPacked)
+        );
+        assert_eq!(
+            mermaid_special_renderer_for_view(MermaidViewState::ErColumns),
+            Some(MermaidSpecialRenderer::ErPacked)
+        );
+        assert_eq!(
+            mermaid_special_renderer_for_view(MermaidViewState::ErSchema),
+            Some(MermaidSpecialRenderer::ErPacked)
+        );
+        assert_eq!(
+            mermaid_special_renderer_for_view(MermaidViewState::Outline),
+            Some(MermaidSpecialRenderer::Outline)
+        );
+        assert_eq!(
+            mermaid_special_renderer_for_view(MermaidViewState::L1),
+            Some(MermaidSpecialRenderer::Detail)
+        );
+        assert_eq!(
+            mermaid_special_renderer_for_view(MermaidViewState::L2),
+            Some(MermaidSpecialRenderer::Detail)
+        );
+        assert_eq!(
+            mermaid_special_renderer_for_view(MermaidViewState::L3),
+            Some(MermaidSpecialRenderer::Detail)
+        );
+    }
+
+    #[test]
+    fn mermaid_mark_viewport_cache_rendered_updates_metadata_and_saturates_count() {
+        let mut viewer = test_viewer(Vec::new(), Vec::new());
+        let content_rect = roomy_content_rect();
+        viewer.zoom = 2.5;
+        viewer.center_x = 25.0;
+        viewer.center_y = 50.0;
+        viewer.viewport_render_count = 41;
+
+        mermaid_mark_viewport_cache_rendered(&mut viewer, content_rect);
+
+        assert_eq!(viewer.cached_rect, Some(content_rect));
+        assert_eq!(viewer.cached_zoom, 2.5);
+        assert_eq!(viewer.cached_center_x, 25.0);
+        assert_eq!(viewer.cached_center_y, 50.0);
+        assert_eq!(viewer.viewport_render_count, 42);
+
+        viewer.viewport_render_count = u64::MAX;
+        mermaid_mark_viewport_cache_rendered(&mut viewer, content_rect);
+        assert_eq!(viewer.viewport_render_count, u64::MAX);
+    }
+
+    #[test]
+    fn mermaid_viewer_body_state_preserves_branch_precedence() {
+        let content_rect = roomy_content_rect();
+        let mut viewer = test_viewer(Vec::new(), Vec::new());
+        viewer.active_tab = DomainPlanTab::Plan;
+        viewer.unsupported_reason = Some("unsupported".to_string());
+        viewer.artifact_error = Some("artifact".to_string());
+
+        assert_eq!(
+            mermaid_viewer_body_state(&viewer, content_rect),
+            MermaidViewerBodyState::PlanText
+        );
+
+        viewer.active_tab = DomainPlanTab::Schema;
+        assert_eq!(
+            mermaid_viewer_body_state(
+                &viewer,
+                Rect {
+                    width: MERMAID_VIEW_MIN_WIDTH - 1,
+                    ..content_rect
+                },
+            ),
+            MermaidViewerBodyState::TooSmall
+        );
+        assert_eq!(
+            mermaid_viewer_body_state(&viewer, content_rect),
+            MermaidViewerBodyState::Unsupported("unsupported".to_string())
+        );
+
+        viewer.unsupported_reason = None;
+        assert_eq!(
+            mermaid_viewer_body_state(&viewer, content_rect),
+            MermaidViewerBodyState::ArtifactError("artifact".to_string())
+        );
+
+        viewer.artifact_error = None;
+        assert_eq!(
+            mermaid_viewer_body_state(&viewer, content_rect),
+            MermaidViewerBodyState::Diagram
+        );
     }
 
     #[test]

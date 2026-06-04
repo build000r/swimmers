@@ -17,17 +17,19 @@ pub use crate::api::service::{
 use crate::api::session_git_diff::{get_git_diff, read_git_diff_for_summary};
 use crate::api::{fetch_live_summary, remote_sessions, AppState};
 use crate::auth::{AuthInfo, AuthScope};
+use crate::config::SessionDeleteMode;
 use crate::operator_pressure::session_ready_for_operator_group_input;
 use crate::session::actor::{ActorHandle, InputDeliveryResult, SessionCommand};
 use crate::session::supervisor::TmuxAdoptError;
 use crate::types::{
     AdoptSessionRequest, AdoptSessionResponse, CreateSessionRequest, CreateSessionResponse,
-    CreateSessionsBatchRequest, ErrorResponse, LaunchTargetSummary, MermaidArtifactResponse,
-    SessionAgentContextResponse, SessionGitDiffResponse, SessionGroupInputRequest,
-    SessionGroupInputResponse, SessionGroupInputResult, SessionInputRequest, SessionInputResponse,
-    SessionListResponse, SessionPaneTailResponse, SessionState, SessionSummary,
-    SessionTimelineEvent, SessionTimelinePinned, SessionTimelinePinnedItem,
-    SessionTimelineResponse, SessionTranscriptResponse, TerminalSnapshot,
+    CreateSessionsBatchRequest, CreateSessionsBatchResponse, ErrorResponse, LaunchTargetSummary,
+    MermaidArtifactResponse, SessionAgentContextResponse, SessionGitDiffResponse,
+    SessionGroupInputRequest, SessionGroupInputResponse, SessionGroupInputResult,
+    SessionInputRequest, SessionInputResponse, SessionListResponse, SessionPaneTailResponse,
+    SessionState, SessionSummary, SessionTimelineEvent, SessionTimelinePinned,
+    SessionTimelinePinnedItem, SessionTimelineResponse, SessionTranscriptResponse,
+    TerminalSnapshot,
 };
 
 const PANE_TAIL_LINES: usize = 300;
@@ -196,40 +198,49 @@ async fn create_sessions_batch(
     Extension(auth): Extension<AuthInfo>,
     State(state): State<Arc<AppState>>,
     Json(body): Json<CreateSessionsBatchRequest>,
-) -> impl IntoResponse {
+) -> Response {
     if let Err(resp) = auth.require_scope(AuthScope::SessionsWrite) {
         return resp;
     }
 
     if remote_sessions::is_remote_launch_target(body.launch_target.as_deref()) {
-        return match remote_sessions::create_remote_sessions_batch(body).await {
-            Ok(response) => {
-                let status = if response.results.iter().all(|result| result.ok) {
-                    StatusCode::CREATED
-                } else {
-                    StatusCode::MULTI_STATUS
-                };
-                (status, Json(response)).into_response()
-            }
-            Err(err) => err.into_response(),
-        };
+        return create_remote_sessions_batch_response(body).await;
     }
 
+    create_local_sessions_batch_response(state, body).await
+}
+
+async fn create_remote_sessions_batch_response(body: CreateSessionsBatchRequest) -> Response {
+    match remote_sessions::create_remote_sessions_batch(body).await {
+        Ok(response) => create_sessions_batch_response(response),
+        Err(err) => err.into_response(),
+    }
+}
+
+async fn create_local_sessions_batch_response(
+    state: Arc<AppState>,
+    body: CreateSessionsBatchRequest,
+) -> Response {
     match create_local_sessions_batch(state, body.dirs, body.spawn_tool, body.initial_request).await
     {
-        Ok(response) => {
-            let status = if response.results.iter().all(|result| result.ok) {
-                StatusCode::CREATED
-            } else {
-                StatusCode::MULTI_STATUS
-            };
-            (status, Json(response)).into_response()
-        }
+        Ok(response) => create_sessions_batch_response(response),
         Err(error) => error_response(
             error.status(),
             error.code(),
             Some(error.message().to_string()),
         ),
+    }
+}
+
+fn create_sessions_batch_response(response: CreateSessionsBatchResponse) -> Response {
+    (create_sessions_batch_status(&response), Json(response)).into_response()
+}
+
+fn create_sessions_batch_status(response: &CreateSessionsBatchResponse) -> StatusCode {
+    if response.results.iter().all(|result| result.ok) {
+        StatusCode::CREATED
+    } else {
+        StatusCode::MULTI_STATUS
     }
 }
 
@@ -247,37 +258,57 @@ async fn delete_session(
     State(state): State<Arc<AppState>>,
     Path(session_id): Path<String>,
     Query(query): Query<DeleteSessionQuery>,
-) -> impl IntoResponse {
+) -> Response {
     if let Err(resp) = auth.require_scope(AuthScope::SessionsWrite) {
         return resp;
     }
-    let delete_mode = match query.mode.as_deref() {
-        None | Some("detach_bridge") => crate::config::SessionDeleteMode::DetachBridge,
-        Some("kill_tmux") => crate::config::SessionDeleteMode::KillTmux,
-        Some(other) => {
-            return validation_error(format!("invalid delete mode: {other}"));
-        }
+
+    let delete_mode = match parse_delete_session_mode(query.mode.as_deref()) {
+        Ok(delete_mode) => delete_mode,
+        Err(response) => return response,
     };
 
+    delete_session_response(&state, &session_id, delete_mode).await
+}
+
+fn parse_delete_session_mode(mode: Option<&str>) -> Result<SessionDeleteMode, Response> {
+    match mode {
+        None | Some("detach_bridge") => Ok(SessionDeleteMode::DetachBridge),
+        Some("kill_tmux") => Ok(SessionDeleteMode::KillTmux),
+        Some(other) => Err(validation_error(format!("invalid delete mode: {other}"))),
+    }
+}
+
+async fn delete_session_response(
+    state: &Arc<AppState>,
+    session_id: &str,
+    delete_mode: SessionDeleteMode,
+) -> Response {
     match state
         .supervisor
-        .delete_session(&session_id, delete_mode)
+        .delete_session(session_id, delete_mode)
         .await
     {
-        Ok(()) => (StatusCode::OK, Json(serde_json::json!({ "ok": true }))).into_response(),
-        Err(e) => {
-            let msg = e.to_string();
-            if msg.contains("not found") {
-                error_response(StatusCode::NOT_FOUND, "SESSION_NOT_FOUND", None)
-            } else {
-                tracing::error!("delete_session failed: {e}");
-                error_response(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "INTERNAL_ERROR",
-                    Some(msg),
-                )
-            }
-        }
+        Ok(()) => delete_session_success_response(),
+        Err(error) => delete_session_error_response(error),
+    }
+}
+
+fn delete_session_success_response() -> Response {
+    (StatusCode::OK, Json(serde_json::json!({ "ok": true }))).into_response()
+}
+
+fn delete_session_error_response(error: anyhow::Error) -> Response {
+    let msg = error.to_string();
+    if msg.contains("not found") {
+        error_response(StatusCode::NOT_FOUND, "SESSION_NOT_FOUND", None)
+    } else {
+        tracing::error!("delete_session failed: {error}");
+        error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "INTERNAL_ERROR",
+            Some(msg),
+        )
     }
 }
 
@@ -1650,6 +1681,94 @@ mod tests {
         serde_json::from_slice(&body).expect("json body")
     }
 
+    fn run_git(repo: &FsPath, args: &[&str], description: &str) {
+        let status = std::process::Command::new("git")
+            .arg("-C")
+            .arg(repo)
+            .args(args)
+            .status()
+            .unwrap_or_else(|err| panic!("{description}: {err}"));
+        assert!(status.success(), "{description} should succeed");
+    }
+
+    fn init_git_repo(repo: &FsPath) {
+        run_git(repo, &["init", "-q"], "git init");
+    }
+
+    fn stage_git_file(repo: &FsPath, path: &str) {
+        run_git(repo, &["add", path], "git add");
+    }
+
+    fn seed_app_git_diff(repo: &FsPath) {
+        init_git_repo(repo);
+        std::fs::write(repo.join("app.txt"), "before\n").expect("write app");
+        stage_git_file(repo, "app.txt");
+        std::fs::write(repo.join("app.txt"), "before\nafter\n").expect("modify app");
+    }
+
+    async fn git_diff_json_for_session_cwd(session_id: &str, cwd: &FsPath) -> Value {
+        let state = test_state();
+        let mut session = summary(session_id, SessionState::Idle);
+        session.cwd = cwd.to_string_lossy().into_owned();
+        let _write_rx = insert_summary_test_handle(&state, session).await;
+
+        let response = get_git_diff(
+            Extension(AuthInfo::new(OPERATOR_SCOPES.to_vec())),
+            State(state),
+            Path(session_id.to_string()),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        response_json(response).await
+    }
+
+    fn expected_repo_root(repo: &FsPath) -> String {
+        std::fs::canonicalize(repo)
+            .unwrap_or_else(|_| repo.to_path_buf())
+            .to_string_lossy()
+            .into_owned()
+    }
+
+    fn assert_session_repo_diff_response(json: &Value, session_id: &str, repo: &FsPath) {
+        assert_eq!(json["session_id"], session_id);
+        assert_eq!(json["available"], true);
+        assert_eq!(
+            json["repo_root"].as_str().unwrap(),
+            expected_repo_root(repo)
+        );
+        assert!(json["status_short"].as_str().unwrap().contains("app.txt"));
+        assert!(json["staged_diff"].as_str().unwrap().contains("new file"));
+        assert!(json["unstaged_diff"].as_str().unwrap().contains("+after"));
+        let files = structured_diff_files(json);
+        assert_staged_added_app_file(files);
+        assert_unstaged_modified_app_file(files);
+    }
+
+    fn structured_diff_files(json: &Value) -> &[Value] {
+        json["files"].as_array().expect("structured diff files")
+    }
+
+    fn assert_staged_added_app_file(files: &[Value]) {
+        let file = find_app_diff_file(files, "staged", "added");
+        assert!(file["added_lines"].as_u64().expect("added lines") >= 1);
+        assert!(!file["hunks"].as_array().expect("hunks").is_empty());
+    }
+
+    fn assert_unstaged_modified_app_file(files: &[Value]) {
+        let file = find_app_diff_file(files, "unstaged", "modified");
+        assert_eq!(file["added_lines"], 1);
+    }
+
+    fn find_app_diff_file<'a>(files: &'a [Value], source: &str, change: &str) -> &'a Value {
+        files
+            .iter()
+            .find(|file| {
+                file["path"] == "app.txt" && file["source"] == source && file["change"] == change
+            })
+            .unwrap_or_else(|| panic!("missing {source} {change} app.txt diff file"))
+    }
+
     fn agent_context_fixture(session_id: &str) -> SessionAgentContextResponse {
         SessionAgentContextResponse {
             session_id: session_id.to_string(),
@@ -2353,6 +2472,51 @@ esac
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
         let json = response_json(response).await;
         assert_eq!(json["code"], "VALIDATION_FAILED");
+    }
+
+    #[test]
+    fn delete_session_mode_parse_accepts_supported_modes() {
+        assert!(matches!(
+            parse_delete_session_mode(None),
+            Ok(SessionDeleteMode::DetachBridge)
+        ));
+        assert!(matches!(
+            parse_delete_session_mode(Some("detach_bridge")),
+            Ok(SessionDeleteMode::DetachBridge)
+        ));
+        assert!(matches!(
+            parse_delete_session_mode(Some("kill_tmux")),
+            Ok(SessionDeleteMode::KillTmux)
+        ));
+    }
+
+    #[tokio::test]
+    async fn delete_session_returns_not_found_for_missing_session() {
+        let response = delete_session(
+            Extension(AuthInfo::new(OPERATOR_SCOPES.to_vec())),
+            State(test_state()),
+            Path("sess-missing".to_string()),
+            Query(DeleteSessionQuery { mode: None }),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let json = response_json(response).await;
+        assert_eq!(json["code"], "SESSION_NOT_FOUND");
+        assert_eq!(json["message"], Value::Null);
+    }
+
+    #[tokio::test]
+    async fn delete_session_error_response_maps_internal_errors() {
+        let response = delete_session_error_response(anyhow::anyhow!("tmux kill failed"));
+
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let json = response_json(response).await;
+        assert_eq!(json["code"], "INTERNAL_ERROR");
+        assert!(json["message"]
+            .as_str()
+            .expect("message")
+            .contains("tmux kill failed"));
     }
 
     #[tokio::test]
@@ -3281,57 +3445,10 @@ esac
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
         let repo = tempdir().expect("repo tempdir");
-        let init = std::process::Command::new("git")
-            .arg("-C")
-            .arg(repo.path())
-            .args(["init", "-q"])
-            .status()
-            .expect("git init");
-        assert!(init.success(), "git init should succeed");
-        std::fs::write(repo.path().join("app.txt"), "before\n").expect("write app");
-        let add = std::process::Command::new("git")
-            .arg("-C")
-            .arg(repo.path())
-            .args(["add", "app.txt"])
-            .status()
-            .expect("git add");
-        assert!(add.success(), "git add should succeed");
-        std::fs::write(repo.path().join("app.txt"), "before\nafter\n").expect("modify app");
+        seed_app_git_diff(repo.path());
 
-        let state = test_state();
-        let mut session = summary("sess-diff", SessionState::Idle);
-        session.cwd = repo.path().to_string_lossy().into_owned();
-        let _write_rx = insert_summary_test_handle(&state, session).await;
-
-        let response = get_git_diff(
-            Extension(AuthInfo::new(OPERATOR_SCOPES.to_vec())),
-            State(state),
-            Path("sess-diff".to_string()),
-        )
-        .await;
-
-        assert_eq!(response.status(), StatusCode::OK);
-        let json = response_json(response).await;
-        assert_eq!(json["session_id"], "sess-diff");
-        assert_eq!(json["available"], true);
-        let expected_root = std::fs::canonicalize(repo.path())
-            .unwrap_or_else(|_| repo.path().to_path_buf())
-            .to_string_lossy()
-            .into_owned();
-        assert_eq!(json["repo_root"].as_str().unwrap(), expected_root);
-        assert!(json["status_short"].as_str().unwrap().contains("app.txt"));
-        assert!(json["staged_diff"].as_str().unwrap().contains("new file"));
-        assert!(json["unstaged_diff"].as_str().unwrap().contains("+after"));
-        let files = json["files"].as_array().expect("structured diff files");
-        assert!(files.iter().any(|file| file["path"] == "app.txt"
-            && file["source"] == "staged"
-            && file["change"] == "added"
-            && file["added_lines"].as_u64().unwrap() >= 1
-            && !file["hunks"].as_array().unwrap().is_empty()));
-        assert!(files.iter().any(|file| file["path"] == "app.txt"
-            && file["source"] == "unstaged"
-            && file["change"] == "modified"
-            && file["added_lines"] == 1));
+        let json = git_diff_json_for_session_cwd("sess-diff", repo.path()).await;
+        assert_session_repo_diff_response(&json, "sess-diff", repo.path());
     }
 
     #[tokio::test]
@@ -3340,28 +3457,9 @@ esac
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
         let repo = tempdir().expect("repo tempdir");
-        let init = std::process::Command::new("git")
-            .arg("-C")
-            .arg(repo.path())
-            .args(["init", "-q"])
-            .status()
-            .expect("git init");
-        assert!(init.success(), "git init should succeed");
+        init_git_repo(repo.path());
 
-        let state = test_state();
-        let mut session = summary("sess-clean-diff", SessionState::Idle);
-        session.cwd = repo.path().to_string_lossy().into_owned();
-        let _write_rx = insert_summary_test_handle(&state, session).await;
-
-        let response = get_git_diff(
-            Extension(AuthInfo::new(OPERATOR_SCOPES.to_vec())),
-            State(state),
-            Path("sess-clean-diff".to_string()),
-        )
-        .await;
-
-        assert_eq!(response.status(), StatusCode::OK);
-        let json = response_json(response).await;
+        let json = git_diff_json_for_session_cwd("sess-clean-diff", repo.path()).await;
         assert_eq!(json["available"], true);
         assert_eq!(json["status_short"], "");
         assert_eq!(json["staged_diff"], "");
@@ -3371,21 +3469,9 @@ esac
 
     #[tokio::test]
     async fn get_git_diff_returns_unavailable_for_non_repo() {
-        let state = test_state();
-        let mut session = summary("sess-no-repo", SessionState::Idle);
         let tmp = tempdir().expect("tempdir");
-        session.cwd = tmp.path().to_string_lossy().into_owned();
-        let _write_rx = insert_summary_test_handle(&state, session).await;
 
-        let response = get_git_diff(
-            Extension(AuthInfo::new(OPERATOR_SCOPES.to_vec())),
-            State(state),
-            Path("sess-no-repo".to_string()),
-        )
-        .await;
-
-        assert_eq!(response.status(), StatusCode::OK);
-        let json = response_json(response).await;
+        let json = git_diff_json_for_session_cwd("sess-no-repo", tmp.path()).await;
         assert_eq!(json["available"], false);
         assert!(json["message"]
             .as_str()

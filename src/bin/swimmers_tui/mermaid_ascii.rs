@@ -81,9 +81,32 @@ fn mermaid_ascii_has_left_arrow(sample: &MermaidAsciiSample, horizontal: bool) -
         && (sample.grid[1][0] || sample.grid[2][0])
 }
 
+fn mermaid_ascii_has_top_left(sample: &MermaidAsciiSample) -> bool {
+    sample.grid[0][0] || sample.grid[1][0]
+}
+
+fn mermaid_ascii_has_top_right(sample: &MermaidAsciiSample) -> bool {
+    sample.grid[0][1] || sample.grid[1][1]
+}
+
+fn mermaid_ascii_has_bottom_left(sample: &MermaidAsciiSample) -> bool {
+    sample.grid[2][0] || sample.grid[3][0]
+}
+
+fn mermaid_ascii_has_bottom_right(sample: &MermaidAsciiSample) -> bool {
+    sample.grid[2][1] || sample.grid[3][1]
+}
+
+fn mermaid_ascii_has_down_right_diagonal(sample: &MermaidAsciiSample) -> bool {
+    mermaid_ascii_has_top_left(sample) && mermaid_ascii_has_bottom_right(sample)
+}
+
+fn mermaid_ascii_has_down_left_diagonal(sample: &MermaidAsciiSample) -> bool {
+    mermaid_ascii_has_top_right(sample) && mermaid_ascii_has_bottom_left(sample)
+}
+
 fn mermaid_ascii_has_diagonal(sample: &MermaidAsciiSample) -> bool {
-    ((sample.grid[0][0] || sample.grid[1][0]) && (sample.grid[2][1] || sample.grid[3][1]))
-        || ((sample.grid[0][1] || sample.grid[1][1]) && (sample.grid[2][0] || sample.grid[3][0]))
+    mermaid_ascii_has_down_right_diagonal(sample) || mermaid_ascii_has_down_left_diagonal(sample)
 }
 
 fn mermaid_ascii_char(sample: &MermaidAsciiSample) -> char {
@@ -160,6 +183,44 @@ mod tests {
         assert_eq!(mermaid_ascii_char(&sample(["#.", "#.", "..", ".."])), '|');
         assert_eq!(mermaid_ascii_char(&sample(["#.", ".#", "..", ".."])), '_');
         assert_eq!(mermaid_ascii_char(&sample(["#.", "..", "..", ".."])), ' ');
+    }
+
+    #[test]
+    fn mermaid_ascii_has_diagonal_detects_both_slopes() {
+        assert!(mermaid_ascii_has_diagonal(&sample([
+            "#.", "..", ".#", ".."
+        ])));
+        assert!(mermaid_ascii_has_diagonal(&sample([
+            "..", "#.", "..", ".#"
+        ])));
+        assert!(mermaid_ascii_has_diagonal(&sample([
+            ".#", "..", "#.", ".."
+        ])));
+        assert!(mermaid_ascii_has_diagonal(&sample([
+            "..", ".#", "..", "#."
+        ])));
+    }
+
+    #[test]
+    fn mermaid_ascii_has_diagonal_rejects_unpaired_halves() {
+        assert!(!mermaid_ascii_has_diagonal(&sample([
+            "#.", "..", "..", ".."
+        ])));
+        assert!(!mermaid_ascii_has_diagonal(&sample([
+            "..", "..", ".#", ".."
+        ])));
+        assert!(!mermaid_ascii_has_diagonal(&sample([
+            ".#", "..", "..", ".."
+        ])));
+        assert!(!mermaid_ascii_has_diagonal(&sample([
+            "..", "..", "#.", ".."
+        ])));
+        assert!(!mermaid_ascii_has_diagonal(&sample([
+            "#.", "..", "#.", ".."
+        ])));
+        assert!(!mermaid_ascii_has_diagonal(&sample([
+            ".#", "..", ".#", ".."
+        ])));
     }
 
     #[test]

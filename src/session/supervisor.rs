@@ -626,76 +626,109 @@ impl SessionSupervisor {
         let persisted = store.load_sessions().await;
         let thoughts = store.load_thoughts().await;
 
-        // Keep the ID counter ahead of any IDs we have ever persisted.
-        for ps in &persisted {
+        self.advance_id_counter_from_persisted_state(&persisted, &thoughts);
+        self.assign_stale_sessions_from_persistence(&persisted, &thoughts)
+            .await;
+        self.assign_thought_snapshots(thoughts).await;
+        self.install_persistence_store(store).await;
+    }
+
+    fn advance_id_counter_from_persisted_state(
+        &self,
+        persisted: &[PersistedSession],
+        thoughts: &HashMap<String, ThoughtSnapshot>,
+    ) {
+        for ps in persisted {
             self.bump_id_counter_from_session_id(&ps.session_id);
         }
-        // Thoughts can outlive the session registry. If we don't also advance from
-        // thought snapshot keys, a fresh boot with an empty registry can reuse
-        // an old `sess_N` and immediately inherit stale thought text.
+
         for session_id in thoughts.keys() {
             self.bump_id_counter_from_session_id(session_id);
         }
+    }
 
-        if !persisted.is_empty() {
-            let mut stale = Vec::new();
-            for ps in &persisted {
-                let thought_data = thoughts.get(&ps.session_id);
-                let thought_state = thought_data
-                    .map(|t| t.thought_state)
-                    .unwrap_or(ps.thought_state);
-                let rest_state = thought_data
-                    .map(|t| t.rest_state)
-                    .unwrap_or_else(|| fallback_rest_state(SessionState::Exited, ps.thought_state));
-                let mut summary =
-                    SessionSummary::placeholder(&ps.session_id, &ps.tmux_name, ps.last_activity_at);
-                summary.cwd = ps.cwd.clone();
-                summary.tool = ps.tool.clone();
-                summary.context_limit = thought_data
-                    .map(|t| t.context_limit)
-                    .unwrap_or(ps.context_limit);
-                summary.token_count = thought_data
-                    .map(|t| t.token_count)
-                    .unwrap_or(ps.token_count);
-                summary.thought = thought_data
-                    .and_then(|t| t.thought.clone())
-                    .or_else(|| ps.thought.clone());
-                summary.thought_state = thought_state;
-                summary.thought_source = thought_data
-                    .map(|t| t.thought_source)
-                    .unwrap_or(ps.thought_source);
-                summary.thought_updated_at =
-                    thought_data.map(|t| t.updated_at).or(ps.thought_updated_at);
-                summary.commit_candidate = thought_data
-                    .map(|t| t.commit_candidate)
-                    .unwrap_or(ps.commit_candidate);
-                summary.action_cues = thought_data
-                    .map(|t| t.action_cues.clone())
-                    .unwrap_or_else(|| ps.action_cues.clone());
-                summary.objective_changed_at = thought_data
-                    .and_then(|t| t.objective_changed_at)
-                    .or(ps.objective_changed_at);
-                summary.last_skill = ps.last_skill.clone();
-                summary.batch = ps.batch.clone();
-                let mut summary = summary.into_stale_exited_with_rest_state(
-                    SUMMARY_CAUSE_PERSISTENCE_STALE,
-                    None,
-                    TransportHealth::Disconnected,
-                    rest_state,
-                );
-                self.resolve_repo_theme_for_summary(&mut summary);
-                stale.push(summary);
-            }
-            info!(count = stale.len(), "loaded persisted stale sessions");
-            let mut stale_lock = self.stale_sessions.write().await;
-            *stale_lock = stale;
+    async fn assign_stale_sessions_from_persistence(
+        &self,
+        persisted: &[PersistedSession],
+        thoughts: &HashMap<String, ThoughtSnapshot>,
+    ) {
+        if persisted.is_empty() {
+            return;
         }
 
-        {
-            let mut thought_cache = self.thought_snapshots.write().await;
-            *thought_cache = thoughts;
-        }
+        let stale = self.hydrate_stale_summaries(persisted, thoughts);
+        info!(count = stale.len(), "loaded persisted stale sessions");
+        let mut stale_lock = self.stale_sessions.write().await;
+        *stale_lock = stale;
+    }
 
+    fn hydrate_stale_summaries(
+        &self,
+        persisted: &[PersistedSession],
+        thoughts: &HashMap<String, ThoughtSnapshot>,
+    ) -> Vec<SessionSummary> {
+        persisted
+            .iter()
+            .map(|ps| self.hydrate_stale_summary(ps, thoughts.get(&ps.session_id)))
+            .collect()
+    }
+
+    fn hydrate_stale_summary(
+        &self,
+        ps: &PersistedSession,
+        thought_data: Option<&ThoughtSnapshot>,
+    ) -> SessionSummary {
+        let thought_state = thought_data
+            .map(|t| t.thought_state)
+            .unwrap_or(ps.thought_state);
+        let rest_state = thought_data
+            .map(|t| t.rest_state)
+            .unwrap_or_else(|| fallback_rest_state(SessionState::Exited, ps.thought_state));
+        let mut summary =
+            SessionSummary::placeholder(&ps.session_id, &ps.tmux_name, ps.last_activity_at);
+        summary.cwd = ps.cwd.clone();
+        summary.tool = ps.tool.clone();
+        summary.context_limit = thought_data
+            .map(|t| t.context_limit)
+            .unwrap_or(ps.context_limit);
+        summary.token_count = thought_data
+            .map(|t| t.token_count)
+            .unwrap_or(ps.token_count);
+        summary.thought = thought_data
+            .and_then(|t| t.thought.clone())
+            .or_else(|| ps.thought.clone());
+        summary.thought_state = thought_state;
+        summary.thought_source = thought_data
+            .map(|t| t.thought_source)
+            .unwrap_or(ps.thought_source);
+        summary.thought_updated_at = thought_data.map(|t| t.updated_at).or(ps.thought_updated_at);
+        summary.commit_candidate = thought_data
+            .map(|t| t.commit_candidate)
+            .unwrap_or(ps.commit_candidate);
+        summary.action_cues = thought_data
+            .map(|t| t.action_cues.clone())
+            .unwrap_or_else(|| ps.action_cues.clone());
+        summary.objective_changed_at = thought_data
+            .and_then(|t| t.objective_changed_at)
+            .or(ps.objective_changed_at);
+        summary.last_skill = ps.last_skill.clone();
+        summary.batch = ps.batch.clone();
+        let mut summary = summary.into_stale_exited_with_rest_state(
+            SUMMARY_CAUSE_PERSISTENCE_STALE,
+            None,
+            TransportHealth::Disconnected,
+            rest_state,
+        );
+        self.resolve_repo_theme_for_summary(&mut summary);
+        summary
+    }
+
+    async fn assign_thought_snapshots(&self, thoughts: HashMap<String, ThoughtSnapshot>) {
+        let mut thought_cache = self.thought_snapshots.write().await;
+        *thought_cache = thoughts;
+    }
+
+    async fn install_persistence_store(&self, store: Arc<FileStore>) {
         let mut persistence = self.persistence.write().await;
         *persistence = Some(store);
     }
@@ -3421,6 +3454,83 @@ mod tests {
             stale[0].state_evidence.confidence,
             crate::types::StateConfidence::Low
         );
+    }
+
+    #[tokio::test]
+    async fn init_persistence_hydrates_stale_session_from_thought_snapshot() {
+        let dir = tempdir().expect("tempdir");
+        let store = FileStore::new(dir.path()).await.expect("file store");
+        let persisted_at = DateTime::parse_from_rfc3339("2026-03-08T14:00:00Z")
+            .expect("timestamp")
+            .with_timezone(&Utc);
+        let thought_at = DateTime::parse_from_rfc3339("2026-03-08T14:00:05Z")
+            .expect("timestamp")
+            .with_timezone(&Utc);
+        let objective_changed_at = DateTime::parse_from_rfc3339("2026-03-08T14:00:02Z")
+            .expect("timestamp")
+            .with_timezone(&Utc);
+        let action_cues = vec![commit_ready_cue()];
+
+        store
+            .save_sessions(&[PersistedSession {
+                session_id: "sess_7".to_string(),
+                tmux_name: "7".to_string(),
+                state: SessionState::Idle,
+                tool: Some("Codex".to_string()),
+                token_count: 12,
+                context_limit: 192_000,
+                thought: Some("persisted thought".to_string()),
+                thought_state: ThoughtState::Holding,
+                thought_source: ThoughtSource::CarryForward,
+                thought_updated_at: Some(persisted_at),
+                rest_state: RestState::Drowsy,
+                commit_candidate: false,
+                action_cues: Vec::new(),
+                objective_changed_at: None,
+                last_skill: Some("rust".to_string()),
+                objective_fingerprint: Some("old-objective".to_string()),
+                batch: None,
+                cwd: "/tmp".to_string(),
+                last_activity_at: persisted_at,
+            }])
+            .await;
+        store
+            .save_thought(
+                "sess_7",
+                Some("snapshot thought"),
+                88,
+                256_000,
+                ThoughtState::Active,
+                ThoughtSource::Llm,
+                RestState::Active,
+                true,
+                action_cues.clone(),
+                thought_at,
+                ThoughtDeliveryState::default(),
+                Some(objective_changed_at),
+                Some("new-objective".to_string()),
+            )
+            .await;
+
+        let supervisor = SessionSupervisor::new(Arc::new(Config::default()));
+        supervisor.init_persistence(store).await;
+
+        let stale = supervisor.stale_sessions.read().await;
+        assert_eq!(stale.len(), 1);
+        assert_eq!(stale[0].session_id, "sess_7");
+        assert_eq!(stale[0].state, SessionState::Exited);
+        assert_eq!(stale[0].thought.as_deref(), Some("snapshot thought"));
+        assert_eq!(stale[0].thought_state, ThoughtState::Active);
+        assert_eq!(stale[0].thought_source, ThoughtSource::Llm);
+        assert_eq!(stale[0].thought_updated_at, Some(thought_at));
+        assert_eq!(stale[0].rest_state, RestState::Active);
+        assert_eq!(stale[0].token_count, 88);
+        assert_eq!(stale[0].context_limit, 256_000);
+        assert!(stale[0].commit_candidate);
+        assert_eq!(stale[0].action_cues, action_cues);
+        assert_eq!(stale[0].objective_changed_at, Some(objective_changed_at));
+        assert_eq!(stale[0].last_skill.as_deref(), Some("rust"));
+        assert_eq!(stale[0].last_activity_at, persisted_at);
     }
 
     #[tokio::test]
