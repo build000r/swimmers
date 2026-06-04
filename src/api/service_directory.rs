@@ -191,14 +191,23 @@ fn merge_dir_groups(target: &mut Vec<OverlayDirGroup>, additions: Vec<OverlayDir
 fn extend_unique_paths(target: &mut Vec<PathBuf>, additions: Vec<PathBuf>) {
     let mut seen = target
         .iter()
-        .map(|path| path.canonicalize().unwrap_or_else(|_| path.clone()))
+        .map(|path| unique_path_key(path))
         .collect::<BTreeSet<_>>();
-    for path in additions {
-        let key = path.canonicalize().unwrap_or_else(|_| path.clone());
-        if seen.insert(key) {
-            target.push(path);
-        }
-    }
+    target.extend(additions.into_iter().filter_map(|path| {
+        path_key_if_unique(&seen, &path).map(|key| {
+            seen.insert(key);
+            path
+        })
+    }));
+}
+
+fn path_key_if_unique(seen: &BTreeSet<PathBuf>, path: &Path) -> Option<PathBuf> {
+    let key = unique_path_key(path);
+    (!seen.contains(&key)).then_some(key)
+}
+
+fn unique_path_key(path: &Path) -> PathBuf {
+    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
 }
 
 fn expand_workspace_repo_path(base: &Path, raw: &str) -> PathBuf {
@@ -623,6 +632,97 @@ mod tests {
             ),
         )
         .expect("write workspace yaml");
+    }
+
+    #[test]
+    fn extend_unique_paths_skips_existing_target_duplicate() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let existing = dir.path().join("existing");
+        let addition = dir.path().join("addition");
+        std::fs::create_dir_all(&existing).expect("existing");
+        std::fs::create_dir_all(&addition).expect("addition");
+
+        let mut target = vec![existing.clone()];
+        extend_unique_paths(&mut target, vec![existing.clone(), addition.clone()]);
+
+        assert_eq!(target, vec![existing, addition]);
+    }
+
+    #[test]
+    fn extend_unique_paths_skips_duplicate_additions() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let first = dir.path().join("first");
+        let second = dir.path().join("second");
+        std::fs::create_dir_all(&first).expect("first");
+        std::fs::create_dir_all(&second).expect("second");
+
+        let mut target = Vec::new();
+        extend_unique_paths(
+            &mut target,
+            vec![first.clone(), first.clone(), second.clone(), second.clone()],
+        );
+
+        assert_eq!(target, vec![first, second]);
+    }
+
+    #[test]
+    fn extend_unique_paths_preserves_unique_append_order() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let existing = dir.path().join("existing");
+        let first = dir.path().join("first");
+        let second = dir.path().join("second");
+        let third = dir.path().join("third");
+        for path in [&existing, &first, &second, &third] {
+            std::fs::create_dir_all(path).expect("test path");
+        }
+
+        let mut target = vec![existing.clone()];
+        extend_unique_paths(
+            &mut target,
+            vec![
+                first.clone(),
+                existing.clone(),
+                second.clone(),
+                first.clone(),
+                third.clone(),
+            ],
+        );
+
+        assert_eq!(target, vec![existing, first, second, third]);
+    }
+
+    #[test]
+    fn merge_dir_groups_extends_unique_paths_and_dirs() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let existing_path = dir.path().join("existing-path");
+        let added_path = dir.path().join("added-path");
+        let existing_dir = dir.path().join("existing-dir");
+        let added_dir = dir.path().join("added-dir");
+        for path in [&existing_path, &added_path, &existing_dir, &added_dir] {
+            std::fs::create_dir_all(path).expect("test path");
+        }
+
+        let mut target = vec![OverlayDirGroup {
+            name: "workspace".into(),
+            paths: vec![existing_path.clone()],
+            dirs: vec![existing_dir.clone()],
+        }];
+        merge_dir_groups(
+            &mut target,
+            vec![OverlayDirGroup {
+                name: "workspace".into(),
+                paths: vec![
+                    existing_path.clone(),
+                    added_path.clone(),
+                    added_path.clone(),
+                ],
+                dirs: vec![existing_dir.clone(), added_dir.clone(), added_dir.clone()],
+            }],
+        );
+
+        assert_eq!(target.len(), 1);
+        assert_eq!(target[0].paths, vec![existing_path, added_path]);
+        assert_eq!(target[0].dirs, vec![existing_dir, added_dir]);
     }
 
     #[test]
