@@ -79,6 +79,79 @@ enum PickerActivationPlan {
     },
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FinishVoiceRecordingPlan {
+    WaitForPendingInteraction,
+    StartTranscription { generation: u64 },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ToggleVoiceRecordingPlan {
+    ShowMessage(&'static str),
+    FinishRecording,
+    StartRecording,
+}
+
+fn toggle_voice_recording_message(
+    has_initial_request: bool,
+    is_transcribing: bool,
+) -> Option<&'static str> {
+    missing_initial_request_voice_message(has_initial_request)
+        .or_else(|| transcribing_voice_message(is_transcribing))
+}
+
+fn missing_initial_request_voice_message(has_initial_request: bool) -> Option<&'static str> {
+    (!has_initial_request).then_some("open an initial request first")
+}
+
+fn transcribing_voice_message(is_transcribing: bool) -> Option<&'static str> {
+    is_transcribing.then_some("wait for voice transcription to finish")
+}
+
+fn toggle_voice_recording_action(has_recording: bool) -> ToggleVoiceRecordingPlan {
+    if has_recording {
+        ToggleVoiceRecordingPlan::FinishRecording
+    } else {
+        ToggleVoiceRecordingPlan::StartRecording
+    }
+}
+
+fn plan_toggle_voice_recording(
+    has_initial_request: bool,
+    is_transcribing: bool,
+    has_recording: bool,
+) -> ToggleVoiceRecordingPlan {
+    toggle_voice_recording_message(has_initial_request, is_transcribing)
+        .map(ToggleVoiceRecordingPlan::ShowMessage)
+        .unwrap_or_else(|| toggle_voice_recording_action(has_recording))
+}
+
+fn plan_finish_voice_recording(
+    has_pending_interaction: bool,
+    generation: u64,
+) -> FinishVoiceRecordingPlan {
+    if has_pending_interaction {
+        FinishVoiceRecordingPlan::WaitForPendingInteraction
+    } else {
+        FinishVoiceRecordingPlan::StartTranscription { generation }
+    }
+}
+
+async fn send_voice_transcription_result(
+    recording: VoiceRecording,
+    generation: u64,
+    tx: oneshot::Sender<PendingInteractionResult>,
+) {
+    let response = match tokio::task::spawn_blocking(move || recording.finish()).await {
+        Ok(response) => response,
+        Err(err) => Err(format!("voice task failed: {err}")),
+    };
+    let _ = tx.send(PendingInteractionResult::VoiceTranscription {
+        generation,
+        response,
+    });
+}
+
 impl ApiRefreshHealth {
     fn record_success(&mut self) {
         self.consecutive_errors = 0;
@@ -3361,18 +3434,20 @@ impl<C: TuiApi> App<C> {
     }
 
     pub(crate) fn toggle_voice_recording(&mut self) {
-        if self.initial_request.is_none() {
-            self.set_message("open an initial request first");
-            return;
+        match plan_toggle_voice_recording(
+            self.initial_request.is_some(),
+            matches!(self.voice_state, VoiceUiState::Transcribing),
+            self.voice_recording.is_some(),
+        ) {
+            ToggleVoiceRecordingPlan::ShowMessage(message) => self.set_message(message),
+            ToggleVoiceRecordingPlan::FinishRecording => self.finish_current_voice_recording(),
+            ToggleVoiceRecordingPlan::StartRecording => self.start_voice_recording(),
         }
-        if matches!(self.voice_state, VoiceUiState::Transcribing) {
-            self.set_message("wait for voice transcription to finish");
-            return;
-        }
+    }
+
+    fn finish_current_voice_recording(&mut self) {
         if let Some(recording) = self.voice_recording.take() {
             self.finish_voice_recording(recording);
-        } else {
-            self.start_voice_recording();
         }
     }
 
@@ -3391,28 +3466,31 @@ impl<C: TuiApi> App<C> {
     }
 
     fn finish_voice_recording(&mut self, recording: VoiceRecording) {
-        if self.pending_interaction.is_some() {
-            self.voice_recording = Some(recording);
-            self.set_message("wait for the current action to finish");
-            return;
+        match plan_finish_voice_recording(
+            self.pending_interaction.is_some(),
+            self.initial_request_generation,
+        ) {
+            FinishVoiceRecordingPlan::WaitForPendingInteraction => {
+                self.defer_voice_recording_finish(recording);
+            }
+            FinishVoiceRecordingPlan::StartTranscription { generation } => {
+                self.start_voice_transcription(recording, generation);
+            }
         }
+    }
 
+    fn defer_voice_recording_finish(&mut self, recording: VoiceRecording) {
+        self.voice_recording = Some(recording);
+        self.set_message("wait for the current action to finish");
+    }
+
+    fn start_voice_transcription(&mut self, recording: VoiceRecording, generation: u64) {
         let (tx, rx) = oneshot::channel();
-        let generation = self.initial_request_generation;
         self.pending_interaction = Some(rx);
         self.voice_state = VoiceUiState::Transcribing;
         self.set_message("transcribing voice capture...");
-
-        self.runtime.spawn(async move {
-            let response = match tokio::task::spawn_blocking(move || recording.finish()).await {
-                Ok(response) => response,
-                Err(err) => Err(format!("voice task failed: {err}")),
-            };
-            let _ = tx.send(PendingInteractionResult::VoiceTranscription {
-                generation,
-                response,
-            });
-        });
+        self.runtime
+            .spawn(send_voice_transcription_result(recording, generation, tx));
     }
 
     fn cancel_voice_recording(&mut self) {
@@ -4213,6 +4291,54 @@ mod tests {
 
         health.record_success();
         assert!(health.banner_text().is_none());
+    }
+
+    #[test]
+    fn finish_voice_recording_plan_defers_when_interaction_is_pending() {
+        assert_eq!(
+            plan_finish_voice_recording(true, 42),
+            FinishVoiceRecordingPlan::WaitForPendingInteraction
+        );
+    }
+
+    #[test]
+    fn finish_voice_recording_plan_captures_generation_for_transcription() {
+        assert_eq!(
+            plan_finish_voice_recording(false, 42),
+            FinishVoiceRecordingPlan::StartTranscription { generation: 42 }
+        );
+    }
+
+    #[test]
+    fn toggle_voice_recording_plan_requires_open_composer_first() {
+        assert_eq!(
+            plan_toggle_voice_recording(false, true, true),
+            ToggleVoiceRecordingPlan::ShowMessage("open an initial request first")
+        );
+    }
+
+    #[test]
+    fn toggle_voice_recording_plan_waits_for_active_transcription() {
+        assert_eq!(
+            plan_toggle_voice_recording(true, true, true),
+            ToggleVoiceRecordingPlan::ShowMessage("wait for voice transcription to finish")
+        );
+    }
+
+    #[test]
+    fn toggle_voice_recording_plan_finishes_existing_recording() {
+        assert_eq!(
+            plan_toggle_voice_recording(true, false, true),
+            ToggleVoiceRecordingPlan::FinishRecording
+        );
+    }
+
+    #[test]
+    fn toggle_voice_recording_plan_starts_when_ready_and_not_recording() {
+        assert_eq!(
+            plan_toggle_voice_recording(true, false, false),
+            ToggleVoiceRecordingPlan::StartRecording
+        );
     }
 
     fn thought_config_with_backend(backend: &str) -> ThoughtConfig {
