@@ -962,9 +962,12 @@ fn app_js_dedupes_surface_actions_and_stable_resizes() {
     let js = include_str!("app.js");
     let app_event_bindings = include_str!("app_event_bindings.js");
     let resize = include_str!("terminal_resize.js");
+    let terminal_surface_controller = include_str!("terminal_surface_controller.js");
     assert!(js.contains("function stopSurfaceEvent(event)"));
     assert!(js.contains("event.stopImmediatePropagation"));
-    assert!(js.contains("runTerminalSurfaceResize({ pushResize, force }, terminalResizeRuntime)"));
+    assert!(terminal_surface_controller.contains(
+        "runtime.runTerminalSurfaceResize({ pushResize, force }, runtime.terminalResizeRuntime)"
+    ));
     assert!(resize.contains("terminalResizeGeometryPlan({"));
     assert!(resize.contains("if (!resizePlan.shouldResize)"));
     assert!(js.contains("queueMeasureAndResizeSurface,"));
@@ -974,16 +977,20 @@ fn app_js_dedupes_surface_actions_and_stable_resizes() {
 #[test]
 fn app_js_hides_hud_when_live_terminal_is_focused() {
     let js = include_str!("app.js");
-    assert!(js.contains("function syncTerminalPresentation()"));
-    assert!(js.contains("terminal-focus-mode"));
-    assert!(js.contains("terminalPresentationPlan({ hasCurrentSession: Boolean(currentSession())"));
-    assert!(js.contains("el.hudCanvas.classList.toggle(\"hidden\", plan.hudHidden)"));
+    let terminal_surface_controller = include_str!("terminal_surface_controller.js");
+    assert!(js.contains("syncTerminalPresentation,"));
+    assert!(terminal_surface_controller.contains("function syncTerminalPresentation()"));
+    assert!(terminal_surface_controller.contains("terminal-focus-mode"));
+    assert!(terminal_surface_controller.contains(
+        "runtime.terminalPresentationPlan({ hasCurrentSession: Boolean(runtime.currentSession())"
+    ));
+    assert!(terminal_surface_controller
+        .contains("el.hudCanvas.classList.toggle(\"hidden\", plan.hudHidden)"));
     assert!(
-            js.contains("[el.hudCanvas.style.display, el.hudCanvas.style.visibility] = [plan.hudDisplay, plan.hudVisibility]")
+            terminal_surface_controller.contains("[el.hudCanvas.style.display, el.hudCanvas.style.visibility] = [plan.hudDisplay, plan.hudVisibility]")
         );
-    assert!(
-        js.contains("el.terminalCanvas.classList.toggle(\"hidden\", plan.terminalCanvasHidden)")
-    );
+    assert!(terminal_surface_controller
+        .contains("el.terminalCanvas.classList.toggle(\"hidden\", plan.terminalCanvasHidden)"));
 }
 
 #[test]
@@ -991,10 +998,11 @@ fn app_js_falls_back_when_live_terminal_canvas_does_not_paint() {
     let js = include_str!("app.js");
     let terminal_input = include_str!("terminal_input.js");
     let terminal_surface_setup = include_str!("terminal_surface_setup.js");
-    assert!(js.contains("function feedTerminalBytes(bytes)"));
-    assert!(js.contains("flushEncodedInputBytes();"));
-    assert!(js.contains("function terminalCanvasHasVisiblePixels()"));
-    assert!(js.contains("function verifyTerminalPaintOrFallback()"));
+    let terminal_surface_controller = include_str!("terminal_surface_controller.js");
+    assert!(terminal_surface_controller.contains("function feedTerminalBytes(bytes)"));
+    assert!(terminal_surface_controller.contains("runtime.flushEncodedInputBytes();"));
+    assert!(terminal_surface_controller.contains("function terminalCanvasHasVisiblePixels()"));
+    assert!(terminal_surface_controller.contains("function verifyTerminalPaintOrFallback()"));
     assert!(
         terminal_surface_setup.contains("activateTerminalSurfaceFallback(rendererPlan, runtime)")
     );

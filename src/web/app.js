@@ -21,6 +21,9 @@ import {
   createTerminalSurfaceRuntimeHelpers,
 } from "./terminal_surface_setup.js";
 import {
+  createTerminalSurfaceController,
+} from "./terminal_surface_controller.js";
+import {
   assertFrankenTermModule,
   canvasHasVisiblePixels,
   frankenTermAssetSummary as formatFrankenTermAssetSummary,
@@ -316,7 +319,7 @@ const {
   state,
   operatorPressureSnapshot,
   surfaceSession,
-  renderHudSurface,
+  renderHudSurface: (...args) => renderHudSurface(...args),
   syncTrogdorReaderTimer,
   performanceRef: performance,
   windowRef: window,
@@ -325,6 +328,31 @@ const {
 
 const defaultDocumentTitle = document.title || "swimmers";
 let terminalZoomInputController;
+let loadFrankenTermFont;
+let ensureFrankenTerm;
+let setupHudSurface;
+let destroyTerminalInstance;
+let clearTerminalPaintProbe;
+let teardownTerminal;
+let disconnectSocket;
+let surfaceBusy;
+let withSurfaceOperation;
+let queueRenderRetry;
+let queueHudRender;
+let queueMeasureAndResizeSurface;
+let scheduleRender;
+let sendResize;
+let measureAndResizeSurface;
+let captureTerminalRendererDiagnostic;
+let buildSurfaceModel;
+let renderHudSurface;
+let syncTerminalPresentation;
+let feedTerminalBytes;
+let scheduleTerminalPaintProbe;
+let terminalPaintVerificationContext;
+let applyTerminalPaintVerificationPlan;
+let verifyTerminalPaintOrFallback;
+let terminalCanvasHasVisiblePixels;
 
 const {
   apiFetch,
@@ -350,7 +378,7 @@ const {
   resetAgentContextForSession,
   resetWorkbenchWidgetsForSession,
   closeTrogdorAtlasForTerminal,
-  renderHudSurface,
+  renderHudSurface: (...args) => renderHudSurface(...args),
 });
 
 const el = {
@@ -489,7 +517,7 @@ const terminalStatusController = createTerminalStatusController({
   sessionNeedsAttention,
   backendHealthWarningText,
   shortenUrl,
-  renderHudSurface,
+  renderHudSurface: (...args) => renderHudSurface(...args),
   documentRef: document,
   setTimeoutRef: (callback, delay) => window.setTimeout(callback, delay),
   clearTimeoutRef: (timer) => clearTimeout(timer),
@@ -528,16 +556,16 @@ const terminalSearchLinks = createTerminalSearchLinksController({
   el,
   terminalSupports,
   hasLiveTerminal,
-  scheduleRender,
-  renderHudSurface,
+  scheduleRender: (...args) => scheduleRender(...args),
+  renderHudSurface: (...args) => renderHudSurface(...args),
   setSearchStatus,
   setUtilityStatus,
   defaultUtilityLabel,
   shortenUrl,
   currentSession,
   frankenTermLinkPolicy,
-  surfaceBusy,
-  withSurfaceOperation,
+  surfaceBusy: (...args) => surfaceBusy(...args),
+  withSurfaceOperation: (...args) => withSurfaceOperation(...args),
   mouseCell,
   syncTerminalTools,
   navigatorRef: globalThis.navigator,
@@ -631,10 +659,10 @@ const terminalSurfaceRuntime = {
   requiredTerminalMethods: FRANKENTERM_TERMINAL_METHODS,
   maxPendingTerminalBytes: MAX_PENDING_TERMINAL_BYTES,
   validateFrankenTermSurface,
-  teardownTerminal,
-  destroyTerminalInstance,
+  teardownTerminal: (...args) => teardownTerminal(...args),
+  destroyTerminalInstance: (...args) => destroyTerminalInstance(...args),
   currentSession,
-  ensureFrankenTerm,
+  ensureFrankenTerm: (...args) => ensureFrankenTerm(...args),
   stopSnapshotPolling,
   startSnapshotPolling,
   focusTerminalInputSurface,
@@ -649,8 +677,8 @@ const terminalSurfaceRuntime = {
   refreshTerminalSearch,
   syncTerminalTools,
   syncTerminalStatusStrip,
-  measureAndResizeSurface,
-  feedTerminalBytes,
+  measureAndResizeSurface: (...args) => measureAndResizeSurface(...args),
+  feedTerminalBytes: (...args) => feedTerminalBytes(...args),
   prefersReducedMotion: () => window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches ?? false,
 };
 
@@ -677,18 +705,18 @@ const sessionSocketRuntime = {
   window,
   WebSocketClass: window.WebSocket,
   currentSession,
-  setupHudSurface,
+  setupHudSurface: (...args) => setupHudSurface(...args),
   setupTerminalSurface,
-  teardownTerminal,
-  disconnectSocket,
-  measureAndResizeSurface,
+  teardownTerminal: (...args) => teardownTerminal(...args),
+  disconnectSocket: (...args) => disconnectSocket(...args),
+  measureAndResizeSurface: (...args) => measureAndResizeSurface(...args),
   scheduleSessionRefresh,
   reconnectDelayMs,
   setConnectionStatus,
   setModeStatus,
   syncWriteAccess,
   syncTerminalTools,
-  feedTerminalBytes,
+  feedTerminalBytes: (...args) => feedTerminalBytes(...args),
   mergeSummary,
   handleInputAck,
   applyControlEvent,
@@ -707,15 +735,100 @@ const {
 const terminalResizeRuntime = {
   state,
   el,
-  surfaceBusy,
-  queueMeasureAndResizeSurface,
-  withSurfaceOperation,
-  renderHudSurface,
-  scheduleRender,
-  sendResize,
-  captureTerminalRendererDiagnostic,
+  surfaceBusy: (...args) => surfaceBusy(...args),
+  queueMeasureAndResizeSurface: (...args) => queueMeasureAndResizeSurface(...args),
+  withSurfaceOperation: (...args) => withSurfaceOperation(...args),
+  renderHudSurface: (...args) => renderHudSurface(...args),
+  scheduleRender: (...args) => scheduleRender(...args),
+  sendResize: (...args) => sendResize(...args),
+  captureTerminalRendererDiagnostic: (...args) => captureTerminalRendererDiagnostic(...args),
   devicePixelRatio: () => window.devicePixelRatio || 1,
 };
+
+({
+  loadFrankenTermFont,
+  ensureFrankenTerm,
+  setupHudSurface,
+  destroyTerminalInstance,
+  clearTerminalPaintProbe,
+  teardownTerminal,
+  disconnectSocket,
+  surfaceBusy,
+  withSurfaceOperation,
+  queueRenderRetry,
+  queueHudRender,
+  queueMeasureAndResizeSurface,
+  scheduleRender,
+  sendResize,
+  measureAndResizeSurface,
+  captureTerminalRendererDiagnostic,
+  buildSurfaceModel,
+  renderHudSurface,
+  syncTerminalPresentation,
+  feedTerminalBytes,
+  scheduleTerminalPaintProbe,
+  terminalPaintVerificationContext,
+  applyTerminalPaintVerificationPlan,
+  verifyTerminalPaintOrFallback,
+  terminalCanvasHasVisiblePixels,
+} = createTerminalSurfaceController({
+  state,
+  el,
+  boot,
+  hudMethods: FRANKENTERM_HUD_METHODS,
+  assertFrankenTermModule,
+  canvasHasVisiblePixels,
+  formatFrankenTermAssetSummary,
+  runtimeSurfaceBusy,
+  surfaceSupports,
+  validateFrankenTermSurface,
+  runSurfaceOperation,
+  runTerminalSurfaceResize,
+  terminalResizeRuntime,
+  terminalDestroyStatePatch,
+  terminalPaintProbeSchedulePlan,
+  terminalPaintVerificationPlan,
+  terminalPresentationPlan,
+  buildSurfaceFrame,
+  buildSurfaceModelFromState,
+  currentSession,
+  operatorPressureSnapshot,
+  sessionBurnt: trogdorSessionBurnt,
+  normalizeSessionId,
+  terminalSupports,
+  clearReconnectTimer,
+  clearHoveredLink,
+  clearPendingTerminalBytes,
+  bufferTerminalBytes,
+  flushEncodedInputBytes,
+  setTerminalTextFallbackActive,
+  syncTerminalTools,
+  stopSnapshotPolling,
+  applyZoomToSurface,
+  setLoadingState,
+  renderTrogdorSurface,
+  advanceTrogdorReaderProgressForCurrentHover,
+  syncTerminalInputDock,
+  syncTrogdorBackButton,
+  syncTerminalWorkbench,
+  refreshTerminalSearch,
+  drainTerminalLinkClicks,
+  syncTerminalAccessibilityMirror,
+  syncTerminalFallbackFromLiveFrame,
+  refreshSnapshotFallback,
+  windowRef: window,
+  documentRef: document,
+  URLImpl: URL,
+  WebSocketClass: WebSocket,
+  Uint8ArrayClass: Uint8Array,
+  importModule: (url) => import(url),
+  requestAnimationFrameRef: (callback) => requestAnimationFrame(callback),
+  setTimeoutRef: (callback, delay) => window.setTimeout(callback, delay),
+  clearTimeoutRef: (timer) => window.clearTimeout(timer),
+  prefersReducedMotion: () => window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches ?? false,
+  isoTimestamp: () => new Date().toISOString(),
+  now: () => performance.now(),
+}));
 
 const globalShortcutRuntime = {
   state,
@@ -1321,392 +1434,6 @@ function sessionEventStreamOpen() {
       state.ws.readyState === WebSocket.OPEN &&
       state.ws.sessionId === session.session_id,
   );
-}
-
-async function loadFrankenTermFont() {
-  if (!boot.franken_term_font_url || !document.fonts?.load) {
-    return null;
-  }
-  if (!state.frankenFontInit) {
-    state.frankenFontInit = document.fonts
-      .load('12px "Pragmasevka NF"')
-      .catch((error) => {
-        state.frankenLoadError = `font load failed: ${error?.message || String(error)}`;
-        state.frankenFontInit = null;
-        return null;
-      });
-  }
-  return state.frankenFontInit;
-}
-
-async function ensureFrankenTerm() {
-  if (!boot.franken_term_available) {
-    return null;
-  }
-
-  if (!state.frankenInit) {
-    state.frankenInit = (async () => {
-      await loadFrankenTermFont();
-      const mod = assertFrankenTermModule(await import(boot.franken_term_js_url));
-      const wasmUrl = boot.franken_term_wasm_url
-        ? new URL(boot.franken_term_wasm_url, window.location.href)
-        : undefined;
-      if (wasmUrl) {
-        await mod.default(wasmUrl);
-      } else {
-        await mod.default();
-      }
-      state.frankenModule = mod;
-      state.frankenLoadError = "";
-      state.frankenAssetSummary = formatFrankenTermAssetSummary(boot.franken_term_asset_info);
-      return mod;
-    })().catch((error) => {
-      state.frankenInit = null;
-      state.frankenModule = null;
-      state.frankenLoadError = error?.message || String(error || "FrankenTerm load failed");
-      throw error;
-    });
-  }
-
-  return state.frankenInit;
-}
-
-async function setupHudSurface() {
-  const mod = await ensureFrankenTerm();
-  if (!mod) {
-    return null;
-  }
-
-  if (state.hud) {
-    return state.hud;
-  }
-
-  setLoadingState(true, "Loading rendered control surface...");
-  state.hud = validateFrankenTermSurface(
-    new mod.FrankenTermWeb(),
-    FRANKENTERM_HUD_METHODS,
-    "HUD renderer",
-  );
-  state.surfaceInitInProgress += 1;
-  try {
-    await state.hud.init(el.hudCanvas, undefined);
-  } finally {
-    state.surfaceInitInProgress -= 1;
-  }
-  if (surfaceSupports(state.hud, "setAccessibility")) {
-    state.hud.setAccessibility({
-      reducedMotion: window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches ?? false,
-    });
-  }
-  applyZoomToSurface(state.hud);
-  el.hudCanvas.classList.remove("hidden");
-  measureAndResizeSurface(false, true);
-  renderHudSurface();
-  setLoadingState(false);
-  return state.hud;
-}
-
-function destroyTerminalInstance() {
-  const destroyPatch = terminalDestroyStatePatch();
-  state.selectionAnchor = destroyPatch.selectionAnchor;
-  state.selectionFocus = destroyPatch.selectionFocus;
-  clearHoveredLink(false);
-  clearTerminalPaintProbe();
-  clearPendingTerminalBytes();
-  if (state.terminal) {
-    state.terminal.destroy();
-  }
-  Object.assign(state, destroyPatch);
-  if (el.terminalA11yMirror) {
-    el.terminalA11yMirror.value = "";
-  }
-  el.terminalCanvas.classList.add("hidden");
-}
-
-function clearTerminalPaintProbe() {
-  if (state.terminalPaintProbeTimer) {
-    window.clearTimeout(state.terminalPaintProbeTimer);
-    state.terminalPaintProbeTimer = null;
-  }
-}
-
-function teardownTerminal() {
-  disconnectSocket();
-  stopSnapshotPolling();
-  destroyTerminalInstance();
-  setTerminalTextFallbackActive(false);
-  syncTerminalTools();
-  renderHudSurface();
-}
-
-function disconnectSocket() {
-  state.connectionGeneration += 1;
-  clearReconnectTimer();
-  if (state.ws) {
-    state.ws.onopen = null;
-    state.ws.onmessage = null;
-    state.ws.onclose = null;
-    state.ws.onerror = null;
-    state.ws.close();
-    state.ws = null;
-  }
-}
-
-function surfaceBusy() {
-  return runtimeSurfaceBusy(state);
-}
-
-function withSurfaceOperation(label, callback) {
-  return runSurfaceOperation(state, label, callback);
-}
-
-function queueRenderRetry() {
-  if (state.renderRetryQueued) {
-    return;
-  }
-  state.renderRetryQueued = true;
-  window.setTimeout(() => {
-    state.renderRetryQueued = false;
-    if (!surfaceBusy()) {
-      scheduleRender();
-    }
-  }, 0);
-}
-
-function queueHudRender() {
-  if (state.hudRenderQueued) {
-    return;
-  }
-  state.hudRenderQueued = true;
-  window.setTimeout(() => {
-    state.hudRenderQueued = false;
-    if (!surfaceBusy()) {
-      renderHudSurface();
-    }
-  }, 0);
-}
-
-function queueMeasureAndResizeSurface(pushResize = false, force = false) {
-  state.resizeQueued = true;
-  state.resizePushResize = state.resizePushResize || Boolean(pushResize);
-  state.resizeForce = state.resizeForce || Boolean(force);
-  if (state.resizeRetryTimer) {
-    return;
-  }
-  state.resizeRetryTimer = window.setTimeout(() => {
-    state.resizeRetryTimer = null;
-    if (!state.resizeQueued || surfaceBusy()) {
-      return;
-    }
-    const queuedPushResize = state.resizePushResize;
-    const queuedForce = state.resizeForce;
-    state.resizeQueued = false;
-    state.resizePushResize = false;
-    state.resizeForce = false;
-    measureAndResizeSurface(queuedPushResize, queuedForce);
-  }, 0);
-}
-
-function scheduleRender() {
-  if (state.renderQueued) {
-    return;
-  }
-  if (!state.terminal && !state.hud) {
-    return;
-  }
-  state.renderQueued = true;
-  requestAnimationFrame(() => {
-    state.renderQueued = false;
-    // A surface `init()` holds the wasm instance borrowed across its internal
-    // `await`; calling `render()` during that window re-enters the same borrow
-    // and trips the wasm-bindgen "recursive use of an object" panic. Re-queue
-    // until init settles.
-    if (surfaceBusy()) {
-      queueRenderRetry();
-      return;
-    }
-    const rendered = withSurfaceOperation("render", () => {
-      if (state.terminal) {
-        state.terminal.render();
-      }
-      if (state.hud) {
-        state.hud.render();
-      }
-    });
-    if (rendered.deferred) {
-      queueRenderRetry();
-    }
-  });
-}
-
-function sendResize() {
-  if (!state.ws || state.ws.readyState !== WebSocket.OPEN || !state.selectedSessionId) {
-    return;
-  }
-  state.ws.send(JSON.stringify({ type: "resize", cols: state.currentCols, rows: state.currentRows }));
-}
-
-function measureAndResizeSurface(pushResize = false, force = false) {
-  runTerminalSurfaceResize({ pushResize, force }, terminalResizeRuntime);
-}
-
-function captureTerminalRendererDiagnostic(reason = "frame") {
-  if (!terminalSupports("snapshotResizeStormFrameJsonl")) {
-    return null;
-  }
-  if (surfaceBusy()) {
-    return null;
-  }
-  const frameIndex = state.rendererDiagnosticSequence;
-  state.rendererDiagnosticSequence += 1;
-  const timestamp = new Date().toISOString();
-  const diagnostic = withSurfaceOperation("snapshotResizeStormFrameJsonl", () => {
-    const line = state.terminal.snapshotResizeStormFrameJsonl("swimmers-web", 0, timestamp, frameIndex);
-    const parsed = JSON.parse(String(line || "{}"));
-    return { line, parsed };
-  });
-  if (diagnostic.deferred) {
-    return null;
-  }
-  try {
-    const { line, parsed } = diagnostic.value;
-    state.lastRendererDiagnostic = { reason, line, parsed };
-    state.lastRendererDiagnosticError = "";
-    return line;
-  } catch (error) {
-    state.lastRendererDiagnosticError = error?.message || String(error);
-    return null;
-  }
-}
-
-function buildSurfaceModel() {
-  return buildSurfaceModelFromState({
-    state,
-    boot,
-    currentSession,
-    operatorPressureSnapshot,
-    sessionBurnt: trogdorSessionBurnt,
-    normalizeSessionId,
-    now: () => performance.now(),
-    websocketOpen: WebSocket.OPEN,
-  });
-}
-
-function renderHudSurface() {
-  advanceTrogdorReaderProgressForCurrentHover();
-  renderTrogdorSurface();
-  syncTerminalPresentation();
-  if (!state.hud) {
-    return;
-  }
-  // `applyPatchBatchFlat()` takes `&mut self`; while a surface `init()` is still
-  // awaiting it holds that borrow, so re-entering here would panic. Defer the
-  // HUD patch until init settles, then re-run.
-  if (surfaceBusy()) {
-    queueHudRender();
-    return;
-  }
-  const frame = buildSurfaceFrame(buildSurfaceModel());
-  state.surfaceZones = frame.zones ?? [];
-  state.surfaceMasks = frame.masks ?? [];
-  const patched = withSurfaceOperation("applyPatchBatchFlat", () => {
-    state.hud.applyPatchBatchFlat(frame.spans, frame.cells);
-  });
-  if (patched.deferred) {
-    queueHudRender();
-    return;
-  }
-  scheduleRender();
-}
-
-function syncTerminalPresentation() {
-  const plan = terminalPresentationPlan({ hasCurrentSession: Boolean(currentSession()), trogdorAtlasOpen: state.trogdorAtlasOpen, hasTerminal: Boolean(state.terminal), terminalFallbackActive: state.terminalFallbackActive });
-  document.body.classList.toggle("terminal-focus-mode", plan.terminalFocusMode);
-  el.terminalStage.classList.toggle("terminal-view-active", plan.terminalStageActive);
-  syncTerminalInputDock();
-  syncTrogdorBackButton();
-  syncTerminalWorkbench();
-  if (state.hud) {
-    el.hudCanvas.classList.toggle("hidden", plan.hudHidden);
-    [el.hudCanvas.style.display, el.hudCanvas.style.visibility] = [plan.hudDisplay, plan.hudVisibility];
-  }
-  if (plan.showTerminalCanvas) {
-    el.terminalCanvas.classList.toggle("hidden", plan.terminalCanvasHidden);
-    [el.terminalCanvas.style.display, el.terminalCanvas.style.visibility] = [plan.terminalCanvasDisplay, plan.terminalCanvasVisibility];
-  }
-  el.terminalFallback.classList.toggle("hidden", plan.terminalFallbackHidden);
-}
-
-function feedTerminalBytes(bytes) {
-  if (!(bytes instanceof Uint8Array)) {
-    return false;
-  }
-  if (!state.terminal || !state.terminalAcceptsBytes) {
-    return bufferTerminalBytes(bytes);
-  }
-
-  state.terminal.feed(bytes);
-  state.terminalFrameBytesSeen += bytes.byteLength;
-  flushEncodedInputBytes();
-  if (state.searchQuery) {
-    refreshTerminalSearch();
-  }
-  drainTerminalLinkClicks();
-  syncTerminalAccessibilityMirror();
-  syncTerminalFallbackFromLiveFrame();
-  scheduleRender();
-  scheduleTerminalPaintProbe();
-  return true;
-}
-
-function scheduleTerminalPaintProbe() {
-  const plan = terminalPaintProbeSchedulePlan({ terminalPaintVerified: state.terminalPaintVerified, terminalFallbackActive: state.terminalFallbackActive, hasProbeTimer: Boolean(state.terminalPaintProbeTimer), hasTerminal: Boolean(state.terminal), hasCurrentSession: Boolean(currentSession()), terminalFrameBytesSeen: state.terminalFrameBytesSeen });
-  if (!plan.scheduleProbe) {
-    return;
-  }
-
-  state.terminalPaintProbeTimer = window.setTimeout(() => {
-    state.terminalPaintProbeTimer = null;
-    requestAnimationFrame(() => {
-      requestAnimationFrame(() => {
-        void verifyTerminalPaintOrFallback();
-      });
-    });
-  }, plan.delayMs);
-}
-
-function terminalPaintVerificationContext(extra = {}) {
-  return { hasTerminal: Boolean(state.terminal), terminalPaintVerified: state.terminalPaintVerified, terminalFallbackActive: state.terminalFallbackActive, hasCurrentSession: Boolean(currentSession()), ...extra };
-}
-
-function applyTerminalPaintVerificationPlan(plan) {
-  if (plan.type === "painted") {
-    state.terminalPaintVerified = true;
-    captureTerminalRendererDiagnostic(plan.diagnosticReason);
-    setTerminalTextFallbackActive(plan.fallbackActive);
-    return true;
-  }
-  if (plan.type === "activate_fallback") {
-    setTerminalTextFallbackActive(plan.fallbackActive, { clearText: plan.clearText });
-    syncTerminalPresentation();
-    return true;
-  }
-  return plan.done;
-}
-
-async function verifyTerminalPaintOrFallback() {
-  let plan = terminalPaintVerificationPlan(terminalPaintVerificationContext());
-  if (applyTerminalPaintVerificationPlan(plan)) return;
-  plan = terminalPaintVerificationPlan(terminalPaintVerificationContext({ canvasHasVisiblePixels: terminalCanvasHasVisiblePixels() }));
-  if (applyTerminalPaintVerificationPlan(plan)) return;
-  const hasSnapshotText = await refreshSnapshotFallback();
-  plan = terminalPaintVerificationPlan(terminalPaintVerificationContext({ afterSnapshotRefresh: true }));
-  if (applyTerminalPaintVerificationPlan(plan)) return;
-  applyTerminalPaintVerificationPlan(terminalPaintVerificationPlan(terminalPaintVerificationContext({ afterSnapshotRefresh: true, canvasHasVisiblePixels: terminalCanvasHasVisiblePixels(), hasSnapshotText })));
-}
-
-function terminalCanvasHasVisiblePixels() {
-  return canvasHasVisiblePixels(el.terminalCanvas, document);
 }
 
 function applyControlEvent(message) {
