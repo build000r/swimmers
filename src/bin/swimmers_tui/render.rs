@@ -576,42 +576,13 @@ pub(crate) fn render_too_small(renderer: &mut Renderer) {
 }
 
 pub(crate) fn render_aquarium_background(renderer: &mut Renderer, field: Rect, tick: u64) {
-    if field.width < 4 || field.height < 4 {
+    if aquarium_background_too_small(field) {
         return;
     }
 
-    let width = usize::from(field.width.max(1));
-    let scroll = (tick as usize / 3) % width;
-    let lane_count = usize::from((field.width / 18).clamp(1, 4));
-    let lane_spacing = (field.width / lane_count as u16).max(1);
-    let bottom_y = field.bottom().saturating_sub(1);
-    for lane in 0..lane_count {
-        let base_offset = (2 + lane as u16 * lane_spacing) as usize;
-        let x = field
-            .right()
-            .saturating_sub(1)
-            .saturating_sub(((base_offset + scroll) % width) as u16);
-        let rise = ((tick / 4) as u16 + lane as u16 * 4) % field.height.max(1);
-        let y = bottom_y.saturating_sub(rise);
-        renderer.draw_char(x, y, 'o', Color::DarkCyan);
-        if x + 1 < field.right() && y + 1 < field.bottom() {
-            renderer.draw_char(x + 1, y + 1, '.', Color::Blue);
-        }
-    }
-
-    let sparkle_count = usize::from((field.width / 24).clamp(1, 3));
-    for sparkle in 0..sparkle_count {
-        let x = field
-            .right()
-            .saturating_sub(1)
-            .saturating_sub((((tick as usize / 2) + sparkle * 11) % width) as u16);
-        let y_span = field.height.saturating_sub(3).max(1);
-        let y = field.y + 1 + (((tick / 2) as u16 + sparkle as u16 * 6) % y_span);
-        renderer.draw_char(x, y, '~', Color::DarkBlue);
-        if x > field.x {
-            renderer.draw_char(x - 1, y, '.', Color::DarkBlue);
-        }
-    }
+    let width = aquarium_scroll_width(field);
+    render_aquarium_bubbles(renderer, field, tick, width);
+    render_aquarium_sparkles(renderer, field, tick, width);
 }
 
 pub(crate) fn pluralize(count: usize) -> &'static str {
@@ -722,29 +693,130 @@ pub(crate) fn shorten_path(path: &str, max_chars: usize) -> String {
     if text_display_width(path) <= max_chars {
         return path.to_string();
     }
-    if path.contains('/') && max_chars > 3 {
-        let budget = max_chars - 3;
-        let mut suffix = String::new();
-        for part in path.split('/').filter(|part| !part.is_empty()).rev() {
-            let candidate = if suffix.is_empty() {
-                format!("/{part}")
-            } else {
-                format!("/{part}{suffix}")
-            };
-            if text_display_width(&candidate) > budget {
-                break;
-            }
-            suffix = candidate;
-        }
-        if !suffix.is_empty() {
-            return format!("...{suffix}");
-        }
-    }
     if max_chars <= 3 {
         return prefix_by_display_width(path, max_chars);
     }
-    let tail = tail_text(path, max_chars - 3);
+
+    let budget = max_chars - 3;
+    if let Some(suffix) = path_segment_suffix(path, budget) {
+        return format!("...{suffix}");
+    }
+
+    let tail = tail_text(path, budget);
     format!("...{tail}")
+}
+
+fn path_segment_suffix(path: &str, budget: usize) -> Option<String> {
+    if !path.contains('/') {
+        return None;
+    }
+    non_empty_string(path_segment_suffix_with_budget(path, budget))
+}
+
+fn path_segment_suffix_with_budget(path: &str, budget: usize) -> String {
+    let mut suffix = String::new();
+    for part in path.split('/').filter(|part| !part.is_empty()).rev() {
+        let candidate = path_suffix_candidate(part, &suffix);
+        if text_display_width(&candidate) > budget {
+            break;
+        }
+        suffix = candidate;
+    }
+    suffix
+}
+
+fn path_suffix_candidate(part: &str, suffix: &str) -> String {
+    if suffix.is_empty() {
+        format!("/{part}")
+    } else {
+        format!("/{part}{suffix}")
+    }
+}
+
+fn non_empty_string(value: String) -> Option<String> {
+    if value.is_empty() {
+        None
+    } else {
+        Some(value)
+    }
+}
+
+fn aquarium_background_too_small(field: Rect) -> bool {
+    field.width < 4 || field.height < 4
+}
+
+fn aquarium_scroll_width(field: Rect) -> usize {
+    usize::from(field.width.max(1))
+}
+
+fn render_aquarium_bubbles(renderer: &mut Renderer, field: Rect, tick: u64, width: usize) {
+    let scroll = aquarium_bubble_scroll(tick, width);
+    let lane_count = aquarium_lane_count(field);
+    let lane_spacing = aquarium_lane_spacing(field, lane_count);
+    let bottom_y = field.bottom().saturating_sub(1);
+    for lane in 0..lane_count {
+        let (x, y) =
+            aquarium_bubble_position(field, tick, width, lane, lane_spacing, scroll, bottom_y);
+        renderer.draw_char(x, y, 'o', Color::DarkCyan);
+        if x + 1 < field.right() && y + 1 < field.bottom() {
+            renderer.draw_char(x + 1, y + 1, '.', Color::Blue);
+        }
+    }
+}
+
+fn render_aquarium_sparkles(renderer: &mut Renderer, field: Rect, tick: u64, width: usize) {
+    for sparkle in 0..aquarium_sparkle_count(field) {
+        let (x, y) = aquarium_sparkle_position(field, tick, width, sparkle);
+        renderer.draw_char(x, y, '~', Color::DarkBlue);
+        if x > field.x {
+            renderer.draw_char(x - 1, y, '.', Color::DarkBlue);
+        }
+    }
+}
+
+fn aquarium_lane_count(field: Rect) -> usize {
+    usize::from((field.width / 18).clamp(1, 4))
+}
+
+fn aquarium_lane_spacing(field: Rect, lane_count: usize) -> u16 {
+    (field.width / lane_count as u16).max(1)
+}
+
+fn aquarium_bubble_scroll(tick: u64, width: usize) -> usize {
+    (tick as usize / 3) % width
+}
+
+fn aquarium_bubble_position(
+    field: Rect,
+    tick: u64,
+    width: usize,
+    lane: usize,
+    lane_spacing: u16,
+    scroll: usize,
+    bottom_y: u16,
+) -> (u16, u16) {
+    let base_offset = (2 + lane as u16 * lane_spacing) as usize;
+    let x = aquarium_scrolled_x(field, width, base_offset + scroll);
+    let rise = ((tick / 4) as u16 + lane as u16 * 4) % field.height.max(1);
+    (x, bottom_y.saturating_sub(rise))
+}
+
+fn aquarium_sparkle_count(field: Rect) -> usize {
+    usize::from((field.width / 24).clamp(1, 3))
+}
+
+fn aquarium_sparkle_position(field: Rect, tick: u64, width: usize, sparkle: usize) -> (u16, u16) {
+    let x = aquarium_scrolled_x(field, width, (tick as usize / 2) + sparkle * 11);
+    let y_span = field.height.saturating_sub(3).max(1);
+    let y = field.y + 1 + (((tick / 2) as u16 + sparkle as u16 * 6) % y_span);
+    (x, y)
+}
+
+fn aquarium_scrolled_x(field: Rect, width: usize, offset: usize) -> u16 {
+    field
+        .right()
+        .saturating_sub(1)
+        .saturating_sub((offset % width) as u16)
 }
 
 pub(crate) fn session_state_text(session: &SessionSummary) -> &'static str {
@@ -814,6 +886,22 @@ struct BallsThemeCordStyle {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_renderer(width: u16, height: u16) -> Renderer {
+        let buffer = vec![Cell::default(); width as usize * height as usize];
+        Renderer {
+            stdout: BufWriter::new(io::stdout()),
+            width,
+            height,
+            buffer: buffer.clone(),
+            last_buffer: buffer,
+            terminal_state: TerminalState::default(),
+        }
+    }
+
+    fn cell_at(renderer: &Renderer, x: u16, y: u16) -> Cell {
+        renderer.buffer[y as usize * renderer.width as usize + x as usize]
+    }
 
     #[test]
     fn balls_cord_style_plans_verified_and_unverified_glyphs() {
@@ -920,6 +1008,79 @@ mod tests {
         let truncated = truncate_label(text, 7);
         assert_eq!(UnicodeWidthStr::width(truncated.as_str()), 7);
         assert!(truncated.ends_with('~'));
+    }
+
+    #[test]
+    fn shorten_path_preserves_segment_suffix_and_tail_fallbacks() {
+        assert_eq!(shorten_path("/a/b/c/d/e", 8), ".../d/e");
+        assert_eq!(shorten_path("/reallylongsegment", 10), "...segment");
+        assert_eq!(shorten_path("abcdef", 3), "abc");
+        assert_eq!(shorten_path("abcdefa\u{0301}", 5), "...fa\u{0301}");
+    }
+
+    #[test]
+    fn shorten_path_respects_display_width_for_path_segments() {
+        let shortened = shorten_path("/alpha/漢字", 8);
+
+        assert_eq!(shortened, ".../漢字");
+        assert_eq!(UnicodeWidthStr::width(shortened.as_str()), 8);
+    }
+
+    #[test]
+    fn aquarium_background_glyphs_preserve_positions_and_colors() {
+        let field = Rect {
+            x: 2,
+            y: 3,
+            width: 40,
+            height: 10,
+        };
+        let tick = 12;
+        let mut renderer = test_renderer(50, 20);
+
+        render_aquarium_background(&mut renderer, field, tick);
+
+        assert_eq!(
+            cell_at(&renderer, 35, 9),
+            Cell {
+                ch: 'o',
+                fg: Color::DarkCyan
+            }
+        );
+        assert_eq!(
+            cell_at(&renderer, 36, 10),
+            Cell {
+                ch: '.',
+                fg: Color::Blue
+            }
+        );
+        assert_eq!(
+            cell_at(&renderer, 15, 5),
+            Cell {
+                ch: 'o',
+                fg: Color::DarkCyan
+            }
+        );
+        assert_eq!(
+            cell_at(&renderer, 16, 6),
+            Cell {
+                ch: '.',
+                fg: Color::Blue
+            }
+        );
+        assert_eq!(
+            cell_at(&renderer, 35, 10),
+            Cell {
+                ch: '~',
+                fg: Color::DarkBlue
+            }
+        );
+        assert_eq!(
+            cell_at(&renderer, 34, 10),
+            Cell {
+                ch: '.',
+                fg: Color::DarkBlue
+            }
+        );
     }
 
     #[test]

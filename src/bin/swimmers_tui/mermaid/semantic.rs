@@ -408,17 +408,7 @@ pub(crate) fn extend_mermaid_er_semantic_lines(
     let center_x = node.x + node.width / 2.0;
     let left_x = node.x + node_padding_x.max(10.0);
 
-    let title_lines: Vec<(usize, &str)> = node
-        .label
-        .lines
-        .iter()
-        .enumerate()
-        .take(divider_idx)
-        .filter_map(|(idx, line)| {
-            let text = line.trim();
-            (!text.is_empty()).then_some((idx, line.as_str()))
-        })
-        .collect();
+    let title_lines = mermaid_label_title_lines(node, divider_idx);
     push_mermaid_summary_line(
         target,
         title_lines.iter().map(|(_, line)| *line),
@@ -445,8 +435,78 @@ pub(crate) fn extend_mermaid_er_semantic_lines(
         node.height,
     );
 
-    let attr_lines: Vec<(usize, &str)> = node
-        .label
+    let attr_lines = mermaid_label_detail_lines(node, divider_idx);
+    if attr_lines.is_empty() {
+        return;
+    }
+
+    if let Some((columns, layout)) = mermaid_er_attribute_columns(&attr_lines).and_then(|columns| {
+        mermaid_er_attribute_column_layout(&columns, node, node_padding_x, left_x)
+            .map(|layout| (columns, layout))
+    }) {
+        push_mermaid_er_attribute_column_lines(
+            target,
+            columns,
+            layout,
+            start_y,
+            class_line_height,
+            owner_key,
+            node,
+        );
+        return;
+    }
+
+    push_mermaid_er_attribute_name_lines(
+        target,
+        &attr_lines,
+        left_x,
+        start_y,
+        class_line_height,
+        owner_key,
+        node,
+    );
+}
+
+struct MermaidErAttributeColumn {
+    source_idx: usize,
+    data_type: String,
+    name_text: String,
+}
+
+struct MermaidErAttributeColumns {
+    attrs: Vec<MermaidErAttributeColumn>,
+    max_type_chars: usize,
+}
+
+#[derive(Clone, Copy)]
+struct MermaidErAttributeColumnLayout {
+    left_x: f32,
+    name_x: f32,
+    max_type_chars: usize,
+    column_char_width: f32,
+}
+
+fn mermaid_label_title_lines(
+    node: &mermaid_rs_renderer::NodeLayout,
+    divider_idx: usize,
+) -> Vec<(usize, &str)> {
+    node.label
+        .lines
+        .iter()
+        .enumerate()
+        .take(divider_idx)
+        .filter_map(|(idx, line)| {
+            let text = line.trim();
+            (!text.is_empty()).then_some((idx, line.as_str()))
+        })
+        .collect()
+}
+
+fn mermaid_label_detail_lines(
+    node: &mermaid_rs_renderer::NodeLayout,
+    divider_idx: usize,
+) -> Vec<(usize, &str)> {
+    node.label
         .lines
         .iter()
         .enumerate()
@@ -455,24 +515,16 @@ pub(crate) fn extend_mermaid_er_semantic_lines(
             let text = line.trim();
             (!text.is_empty() && !mermaid_is_divider_line(text)).then_some((idx, line.as_str()))
         })
-        .collect();
-    if attr_lines.is_empty() {
-        return;
-    }
+        .collect()
+}
 
-    let mut parsed_attrs = Vec::new();
+fn mermaid_er_attribute_columns(attr_lines: &[(usize, &str)]) -> Option<MermaidErAttributeColumns> {
+    let mut attrs = Vec::new();
     let mut max_type_chars = 0usize;
-    let mut use_columns = true;
-    for (idx, line) in &attr_lines {
-        let trimmed = line.trim();
-        let mut parts = trimmed.split_whitespace();
-        let Some(data_type) = parts.next() else {
-            continue;
-        };
-        let Some(name) = parts.next() else {
-            use_columns = false;
-            break;
-        };
+    for (idx, line) in attr_lines {
+        let mut parts = line.trim().split_whitespace();
+        let data_type = parts.next()?;
+        let name = parts.next()?;
         let suffix = parts.collect::<Vec<_>>().join(" ");
         let mut name_text = name.to_string();
         if !suffix.is_empty() {
@@ -480,48 +532,89 @@ pub(crate) fn extend_mermaid_er_semantic_lines(
             name_text.push_str(&suffix);
         }
         max_type_chars = max_type_chars.max(data_type.chars().count());
-        parsed_attrs.push((*idx, data_type.to_string(), name_text));
+        attrs.push(MermaidErAttributeColumn {
+            source_idx: *idx,
+            data_type: data_type.to_string(),
+            name_text,
+        });
     }
+    Some(MermaidErAttributeColumns {
+        attrs,
+        max_type_chars,
+    })
+}
 
+fn mermaid_er_attribute_column_layout(
+    columns: &MermaidErAttributeColumns,
+    node: &mermaid_rs_renderer::NodeLayout,
+    node_padding_x: f32,
+    left_x: f32,
+) -> Option<MermaidErAttributeColumnLayout> {
     let gap_chars = 3usize;
     let column_char_width = 2.0f32;
-    let name_x = left_x + ((max_type_chars + gap_chars) as f32 * column_char_width);
+    let name_x = left_x + ((columns.max_type_chars + gap_chars) as f32 * column_char_width);
     let content_width = (node.width - node_padding_x.max(10.0) * 2.0).max(0.0);
-    if use_columns && parsed_attrs.len() == attr_lines.len() && name_x < node.x + content_width {
-        for (idx, data_type, name) in parsed_attrs {
-            let diagram_y = start_y + idx as f32 * class_line_height;
-            let type_x = left_x
-                + ((max_type_chars.saturating_sub(data_type.chars().count())) as f32
-                    * column_char_width);
-            target.push(MermaidSemanticLine {
-                text: data_type,
-                diagram_x: type_x,
-                diagram_y,
-                anchor: MermaidTextAnchor::Start,
-                kind: MermaidSemanticKind::ErAttributeType,
-                owner_key: owner_key.to_string(),
-                outline_eligible: false,
-                owner_width: node.width,
-                owner_height: node.height,
-            });
-            target.push(MermaidSemanticLine {
-                text: name,
-                diagram_x: name_x,
-                diagram_y,
-                anchor: MermaidTextAnchor::Start,
-                kind: MermaidSemanticKind::ErAttributeName,
-                owner_key: owner_key.to_string(),
-                outline_eligible: false,
-                owner_width: node.width,
-                owner_height: node.height,
-            });
-        }
-        return;
-    }
+    (name_x < node.x + content_width).then_some(MermaidErAttributeColumnLayout {
+        left_x,
+        name_x,
+        max_type_chars: columns.max_type_chars,
+        column_char_width,
+    })
+}
 
+fn push_mermaid_er_attribute_column_lines(
+    target: &mut Vec<MermaidSemanticLine>,
+    columns: MermaidErAttributeColumns,
+    layout: MermaidErAttributeColumnLayout,
+    start_y: f32,
+    class_line_height: f32,
+    owner_key: &str,
+    node: &mermaid_rs_renderer::NodeLayout,
+) {
+    for attr in columns.attrs {
+        let diagram_y = start_y + attr.source_idx as f32 * class_line_height;
+        let type_x = layout.left_x
+            + ((layout
+                .max_type_chars
+                .saturating_sub(attr.data_type.chars().count())) as f32
+                * layout.column_char_width);
+        target.push(MermaidSemanticLine {
+            text: attr.data_type,
+            diagram_x: type_x,
+            diagram_y,
+            anchor: MermaidTextAnchor::Start,
+            kind: MermaidSemanticKind::ErAttributeType,
+            owner_key: owner_key.to_string(),
+            outline_eligible: false,
+            owner_width: node.width,
+            owner_height: node.height,
+        });
+        target.push(MermaidSemanticLine {
+            text: attr.name_text,
+            diagram_x: layout.name_x,
+            diagram_y,
+            anchor: MermaidTextAnchor::Start,
+            kind: MermaidSemanticKind::ErAttributeName,
+            owner_key: owner_key.to_string(),
+            outline_eligible: false,
+            owner_width: node.width,
+            owner_height: node.height,
+        });
+    }
+}
+
+fn push_mermaid_er_attribute_name_lines(
+    target: &mut Vec<MermaidSemanticLine>,
+    attr_lines: &[(usize, &str)],
+    left_x: f32,
+    start_y: f32,
+    class_line_height: f32,
+    owner_key: &str,
+    node: &mermaid_rs_renderer::NodeLayout,
+) {
     push_mermaid_indexed_semantic_lines(
         target,
-        &attr_lines,
+        attr_lines,
         left_x,
         start_y,
         class_line_height,
@@ -714,42 +807,131 @@ fn push_node_semantic_lines(
     subgraph_node_ids: &HashSet<String>,
     metrics: &SemanticLineMetrics,
 ) {
-    if node.hidden || node.anchor_subgraph.is_some() {
+    let Some(context) = mermaid_node_semantic_context(node, layout, subgraph_node_ids) else {
         return;
-    }
-    let hide_label = node.label.lines.iter().all(|line| line.trim().is_empty())
-        || node.id.starts_with("__start_")
-        || node.id.starts_with("__end_");
-    if hide_label {
-        return;
-    }
+    };
+    push_visible_node_semantic_lines(semantic_lines, node, layout.kind, metrics, context);
+}
 
-    let outline_eligible = layout.subgraphs.is_empty() || !subgraph_node_ids.contains(&node.id);
-    let owner_key = mermaid_outline_node_key(&node.id);
-    let has_divider = node
-        .label
-        .lines
-        .iter()
-        .any(|line| mermaid_is_divider_line(line));
+struct MermaidNodeSemanticContext {
+    owner_key: String,
+    outline_eligible: bool,
+    structured_label: bool,
+}
 
-    if has_divider {
-        let extender = if layout.kind == DiagramKind::Er {
-            extend_mermaid_er_semantic_lines
-        } else {
-            extend_mermaid_class_semantic_lines
-        };
-        extender(
+fn mermaid_node_semantic_context(
+    node: &mermaid_rs_renderer::NodeLayout,
+    layout: &MermaidLayout,
+    subgraph_node_ids: &HashSet<String>,
+) -> Option<MermaidNodeSemanticContext> {
+    if mermaid_node_semantic_lines_hidden(node) {
+        return None;
+    }
+    Some(MermaidNodeSemanticContext {
+        owner_key: mermaid_outline_node_key(&node.id),
+        outline_eligible: mermaid_node_outline_eligible(node, layout, subgraph_node_ids),
+        structured_label: mermaid_node_has_structured_label(node),
+    })
+}
+
+fn push_visible_node_semantic_lines(
+    semantic_lines: &mut Vec<MermaidSemanticLine>,
+    node: &mermaid_rs_renderer::NodeLayout,
+    diagram_kind: DiagramKind,
+    metrics: &SemanticLineMetrics,
+    context: MermaidNodeSemanticContext,
+) {
+    if context.structured_label {
+        push_structured_node_semantic_lines(
             semantic_lines,
             node,
+            diagram_kind,
             metrics.theme_font_size,
             metrics.class_line_height,
             metrics.node_padding_x,
-            &owner_key,
-            outline_eligible,
+            &context.owner_key,
+            context.outline_eligible,
         );
         return;
     }
 
+    push_plain_node_semantic_lines(
+        semantic_lines,
+        node,
+        metrics,
+        &context.owner_key,
+        context.outline_eligible,
+    );
+}
+
+fn mermaid_node_label_hidden(node: &mermaid_rs_renderer::NodeLayout) -> bool {
+    mermaid_node_label_blank(node) || mermaid_node_is_terminal_marker(node)
+}
+
+fn mermaid_node_label_blank(node: &mermaid_rs_renderer::NodeLayout) -> bool {
+    node.label.lines.iter().all(|line| line.trim().is_empty())
+}
+
+fn mermaid_node_is_terminal_marker(node: &mermaid_rs_renderer::NodeLayout) -> bool {
+    node.id.starts_with("__start_") || node.id.starts_with("__end_")
+}
+
+fn mermaid_node_semantic_lines_hidden(node: &mermaid_rs_renderer::NodeLayout) -> bool {
+    mermaid_node_layout_hidden(node) || mermaid_node_label_hidden(node)
+}
+
+fn mermaid_node_layout_hidden(node: &mermaid_rs_renderer::NodeLayout) -> bool {
+    node.hidden || node.anchor_subgraph.is_some()
+}
+
+fn mermaid_node_outline_eligible(
+    node: &mermaid_rs_renderer::NodeLayout,
+    layout: &MermaidLayout,
+    subgraph_node_ids: &HashSet<String>,
+) -> bool {
+    layout.subgraphs.is_empty() || !subgraph_node_ids.contains(&node.id)
+}
+
+fn mermaid_node_has_structured_label(node: &mermaid_rs_renderer::NodeLayout) -> bool {
+    node.label
+        .lines
+        .iter()
+        .any(|line| mermaid_is_divider_line(line))
+}
+
+fn push_structured_node_semantic_lines(
+    semantic_lines: &mut Vec<MermaidSemanticLine>,
+    node: &mermaid_rs_renderer::NodeLayout,
+    diagram_kind: DiagramKind,
+    theme_font_size: f32,
+    class_line_height: f32,
+    node_padding_x: f32,
+    owner_key: &str,
+    outline_eligible: bool,
+) {
+    let extender = if diagram_kind == DiagramKind::Er {
+        extend_mermaid_er_semantic_lines
+    } else {
+        extend_mermaid_class_semantic_lines
+    };
+    extender(
+        semantic_lines,
+        node,
+        theme_font_size,
+        class_line_height,
+        node_padding_x,
+        owner_key,
+        outline_eligible,
+    );
+}
+
+fn push_plain_node_semantic_lines(
+    semantic_lines: &mut Vec<MermaidSemanticLine>,
+    node: &mermaid_rs_renderer::NodeLayout,
+    metrics: &SemanticLineMetrics,
+    owner_key: &str,
+    outline_eligible: bool,
+) {
     let center_x = node.x + node.width / 2.0;
     let center_y = node.y + node.height / 2.0;
     let (font_size, line_height) = metrics.node_label_metrics();

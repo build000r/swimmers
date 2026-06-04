@@ -439,15 +439,32 @@ fn pressure_tone(
     score: u8,
     primary_cue: Option<ActionCueKind>,
 ) -> OperatorPressureTone {
-    if primary_cue.is_some() || session.state == SessionState::Error || score >= 70 {
+    if pressure_tone_is_danger(session, score, primary_cue) {
         OperatorPressureTone::Danger
-    } else if score >= 35
+    } else if pressure_tone_is_warning(session, score) {
+        OperatorPressureTone::Warning
+    } else {
+        pressure_tone_for_low_pressure_state(session)
+    }
+}
+
+fn pressure_tone_is_danger(
+    session: &SessionSummary,
+    score: u8,
+    primary_cue: Option<ActionCueKind>,
+) -> bool {
+    primary_cue.is_some() || session.state == SessionState::Error || score >= 70
+}
+
+fn pressure_tone_is_warning(session: &SessionSummary, score: u8) -> bool {
+    score >= 35
         || session.commit_candidate
         || session.rest_state == RestState::Sleeping
         || session_idle_agent_can_accept_operator_input(session)
-    {
-        OperatorPressureTone::Warning
-    } else if session.state == SessionState::Busy {
+}
+
+fn pressure_tone_for_low_pressure_state(session: &SessionSummary) -> OperatorPressureTone {
+    if session.state == SessionState::Busy {
         OperatorPressureTone::Working
     } else {
         OperatorPressureTone::Quiet
@@ -555,6 +572,16 @@ mod tests {
             operator_pressure_for_session(&session).reason_kind,
             expected
         );
+    }
+
+    fn assert_pressure_tone(
+        session: &SessionSummary,
+        expected_score: u8,
+        expected_tone: OperatorPressureTone,
+    ) {
+        let pressure = operator_pressure_for_session(session);
+        assert_eq!(pressure.score, expected_score);
+        assert_eq!(pressure.tone, expected_tone);
     }
 
     #[test]
@@ -675,6 +702,55 @@ mod tests {
         session.rest_state = RestState::Sleeping;
 
         assert_reason_kind(session, OperatorPressureReasonKind::CommitReady);
+    }
+
+    #[test]
+    fn pressure_tone_keeps_existing_precedence_and_thresholds() {
+        let mut action_cue = trusted_summary("action-cue", SessionState::Busy);
+        action_cue.action_cues = vec![cue(ActionCueKind::DirtyCheckMissing)];
+        assert_pressure_tone(&action_cue, 47, OperatorPressureTone::Danger);
+
+        let mut error = trusted_summary("error-tone", SessionState::Error);
+        error.tool = None;
+        assert_pressure_tone(&error, 55, OperatorPressureTone::Danger);
+
+        let mut high_score = summary("high-score-tone", SessionState::Idle);
+        high_score.tool = None;
+        high_score.commit_candidate = true;
+        high_score.rest_state = RestState::Sleeping;
+        assert_pressure_tone(&high_score, 75, OperatorPressureTone::Danger);
+
+        let mut attention = trusted_summary("attention-tone", SessionState::Attention);
+        attention.tool = None;
+        assert_pressure_tone(&attention, 45, OperatorPressureTone::Warning);
+
+        let mut sleeping = trusted_summary("sleeping-tone", SessionState::Idle);
+        sleeping.tool = None;
+        sleeping.rest_state = RestState::Sleeping;
+        assert_pressure_tone(&sleeping, 35, OperatorPressureTone::Warning);
+
+        let idle_input = trusted_summary("idle-input-tone", SessionState::Idle);
+        assert_pressure_tone(&idle_input, 35, OperatorPressureTone::Warning);
+
+        let mut busy = trusted_summary("busy-tone", SessionState::Busy);
+        busy.tool = None;
+        assert_pressure_tone(&busy, 12, OperatorPressureTone::Working);
+
+        let mut deep_sleep = trusted_summary("deep-sleep-tone", SessionState::Idle);
+        deep_sleep.tool = None;
+        deep_sleep.rest_state = RestState::DeepSleep;
+        assert_pressure_tone(&deep_sleep, 20, OperatorPressureTone::Quiet);
+
+        let mut stale_transport = trusted_summary("stale-transport-tone", SessionState::Idle);
+        stale_transport.tool = None;
+        stale_transport.is_stale = true;
+        stale_transport.transport_health = TransportHealth::Degraded;
+        assert_pressure_tone(&stale_transport, 30, OperatorPressureTone::Quiet);
+
+        let mut evidence_threshold = summary("evidence-threshold-tone", SessionState::Idle);
+        evidence_threshold.tool = None;
+        evidence_threshold.rest_state = RestState::DeepSleep;
+        assert_pressure_tone(&evidence_threshold, 35, OperatorPressureTone::Warning);
     }
 
     #[test]

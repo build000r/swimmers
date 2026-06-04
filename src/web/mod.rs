@@ -3150,6 +3150,7 @@ mod tests {
     fn app_js_exposes_terminal_viewer_ergonomics() {
         let js = include_str!("app.js");
         let terminal_search_links = include_str!("terminal_search_links.js");
+        let terminal_surface_setup = include_str!("terminal_surface_setup.js");
         let agent_context_refresh = include_str!("agent_context_refresh.js");
         let workbench_render = include_str!("workbench_render.js");
         let mermaid_artifact_controller = include_str!("mermaid_artifact_controller.js");
@@ -3158,7 +3159,9 @@ mod tests {
         assert!(js.contains("focusMobileKeyboard"));
         assert!(js.contains("mobileKeyboardProxy"));
         assert!(js.contains("function openCommandPalette()"));
-        assert!(js.contains("function syncTerminalAccessibilityMirror"));
+        assert!(js.contains("createTerminalSurfaceRuntimeHelpers"));
+        assert!(js.contains("syncTerminalAccessibilityMirror,"));
+        assert!(terminal_surface_setup.contains("function syncTerminalAccessibilityMirror"));
         assert!(js.contains("createTerminalSearchLinksController"));
         assert!(terminal_search_links.contains("function drainTerminalLinkClicks()"));
         assert!(js.contains("createSendController"));
@@ -3174,7 +3177,7 @@ mod tests {
         assert!(workbench_render.contains("/pane-tail"));
         assert!(workbench_render.contains("/transcript"));
         assert!(workbench_render.contains("function renderTurnsPanel"));
-        assert!(js.contains("function flushPendingTerminalBytes"));
+        assert!(terminal_surface_setup.contains("function flushPendingTerminalBytes"));
         assert!(workbench_render.contains("Post-turn JSONL"));
         assert!(mermaid_artifact_controller.contains("/mermaid-artifact"));
         assert!(workbench_render.contains("/git-diff"));

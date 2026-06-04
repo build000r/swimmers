@@ -92,6 +92,11 @@ pub(crate) struct SkillPanelLayout {
     pub(crate) hidden_rows: usize,
 }
 
+struct SkillPanelRows {
+    rows: Vec<SkillPanelRowLayout>,
+    hidden_rows: usize,
+}
+
 pub(crate) fn skill_panel_contexts<C: TuiApi>(app: &App<C>) -> Vec<SkillPanelContext> {
     let selected_id = app.selected_id.as_deref();
     let mut order = Vec::<String>::new();
@@ -181,70 +186,7 @@ pub(crate) fn build_skill_panel<C: TuiApi>(app: &App<C>, field: Rect) -> SkillPa
     let context_line = skill_context_line(&contexts);
     let status_line = skill_panel_status_line(app);
     let skills = collect_skill_views(app);
-    let mut rows = Vec::new();
-
-    let max_rows = content_rect.height.saturating_sub(SKILL_PANEL_HEADER_ROWS) as usize;
-    let mut hidden_rows = 0usize;
-    let mut current_source = String::new();
-    let mut y = content_rect.y.saturating_add(SKILL_PANEL_HEADER_ROWS);
-    for skill in skills {
-        if rows.len() >= max_rows {
-            hidden_rows += 1;
-            continue;
-        }
-        if current_source != skill.source_dir {
-            current_source = skill.source_dir.clone();
-            let count = collect_skill_views(app)
-                .iter()
-                .filter(|candidate| candidate.source_dir == current_source)
-                .count();
-            let line = truncate_label(
-                &format!("src: {} ({count})", skill.source_label),
-                content_rect.width as usize,
-            );
-            rows.push(SkillPanelRowLayout {
-                rect: Rect {
-                    x: content_rect.x,
-                    y,
-                    width: display_width(&line),
-                    height: 1,
-                },
-                line,
-                color: Color::DarkGrey,
-                kind: SkillPanelRowKind::Source {
-                    source_dir: current_source.clone(),
-                    label: skill.source_label.clone(),
-                    count,
-                },
-            });
-            y = y.saturating_add(1);
-            if rows.len() >= max_rows {
-                hidden_rows += 1;
-                continue;
-            }
-        }
-
-        let line = truncate_label(&skill_row_line(&skill), content_rect.width as usize);
-        let color = if skill.sbp_highlight {
-            Color::Yellow
-        } else if skill.selected_context {
-            Color::White
-        } else {
-            Color::Cyan
-        };
-        rows.push(SkillPanelRowLayout {
-            rect: Rect {
-                x: content_rect.x,
-                y,
-                width: display_width(&line),
-                height: 1,
-            },
-            line,
-            color,
-            kind: SkillPanelRowKind::Skill(skill),
-        });
-        y = y.saturating_add(1);
-    }
+    let SkillPanelRows { rows, hidden_rows } = build_skill_panel_rows(skills, content_rect);
 
     SkillPanelLayout {
         tank_field,
@@ -258,12 +200,157 @@ pub(crate) fn build_skill_panel<C: TuiApi>(app: &App<C>, field: Rect) -> SkillPa
     }
 }
 
+fn build_skill_panel_rows(skills: Vec<SkillPanelSkillView>, content_rect: Rect) -> SkillPanelRows {
+    let source_counts = skill_panel_source_counts(&skills);
+    let mut builder = SkillPanelRowBuilder::new(content_rect);
+    for skill in skills {
+        let count = source_counts
+            .get(&skill.source_dir)
+            .copied()
+            .unwrap_or_default();
+        builder.push_skill(skill, count);
+    }
+    builder.finish()
+}
+
+fn skill_panel_source_counts(skills: &[SkillPanelSkillView]) -> BTreeMap<String, usize> {
+    let mut counts = BTreeMap::<String, usize>::new();
+    for skill in skills {
+        *counts.entry(skill.source_dir.clone()).or_default() += 1;
+    }
+    counts
+}
+
+struct SkillPanelRowBuilder {
+    content_rect: Rect,
+    max_rows: usize,
+    rows: Vec<SkillPanelRowLayout>,
+    hidden_rows: usize,
+    current_source: String,
+    y: u16,
+}
+
+impl SkillPanelRowBuilder {
+    fn new(content_rect: Rect) -> Self {
+        Self {
+            content_rect,
+            max_rows: content_rect.height.saturating_sub(SKILL_PANEL_HEADER_ROWS) as usize,
+            rows: Vec::new(),
+            hidden_rows: 0,
+            current_source: String::new(),
+            y: content_rect.y.saturating_add(SKILL_PANEL_HEADER_ROWS),
+        }
+    }
+
+    fn push_skill(&mut self, skill: SkillPanelSkillView, source_count: usize) {
+        if self.is_full() {
+            self.hidden_rows += 1;
+            return;
+        }
+        if self.current_source != skill.source_dir {
+            self.current_source = skill.source_dir.clone();
+            self.push_source_row(&skill, source_count);
+            if self.is_full() {
+                self.hidden_rows += 1;
+                return;
+            }
+        }
+        self.push_skill_row(skill);
+    }
+
+    fn push_source_row(&mut self, skill: &SkillPanelSkillView, count: usize) {
+        self.rows.push(skill_panel_source_row_layout(
+            self.content_rect,
+            self.y,
+            skill,
+            count,
+        ));
+        self.advance();
+    }
+
+    fn push_skill_row(&mut self, skill: SkillPanelSkillView) {
+        self.rows.push(skill_panel_skill_row_layout(
+            self.content_rect,
+            self.y,
+            skill,
+        ));
+        self.advance();
+    }
+
+    fn is_full(&self) -> bool {
+        self.rows.len() >= self.max_rows
+    }
+
+    fn advance(&mut self) {
+        self.y = self.y.saturating_add(1);
+    }
+
+    fn finish(self) -> SkillPanelRows {
+        SkillPanelRows {
+            rows: self.rows,
+            hidden_rows: self.hidden_rows,
+        }
+    }
+}
+
+fn skill_panel_source_row_layout(
+    content_rect: Rect,
+    y: u16,
+    skill: &SkillPanelSkillView,
+    count: usize,
+) -> SkillPanelRowLayout {
+    let line = truncate_label(
+        &format!("src: {} ({count})", skill.source_label),
+        content_rect.width as usize,
+    );
+    SkillPanelRowLayout {
+        rect: skill_panel_row_rect(content_rect, y, &line),
+        line,
+        color: Color::DarkGrey,
+        kind: SkillPanelRowKind::Source {
+            source_dir: skill.source_dir.clone(),
+            label: skill.source_label.clone(),
+            count,
+        },
+    }
+}
+
+fn skill_panel_skill_row_layout(
+    content_rect: Rect,
+    y: u16,
+    skill: SkillPanelSkillView,
+) -> SkillPanelRowLayout {
+    let line = truncate_label(&skill_row_line(&skill), content_rect.width as usize);
+    SkillPanelRowLayout {
+        rect: skill_panel_row_rect(content_rect, y, &line),
+        line,
+        color: skill_panel_skill_row_color(&skill),
+        kind: SkillPanelRowKind::Skill(skill),
+    }
+}
+
+fn skill_panel_row_rect(content_rect: Rect, y: u16, line: &str) -> Rect {
+    Rect {
+        x: content_rect.x,
+        y,
+        width: display_width(line),
+        height: 1,
+    }
+}
+
+fn skill_panel_skill_row_color(skill: &SkillPanelSkillView) -> Color {
+    if skill.sbp_highlight {
+        Color::Yellow
+    } else if skill.selected_context {
+        Color::White
+    } else {
+        Color::Cyan
+    }
+}
+
 pub(crate) fn render_skill_panel<C: TuiApi>(app: &App<C>, renderer: &mut Renderer, field: Rect) {
     let layout = build_skill_panel(app, field);
-    let Some(panel_rect) = layout.panel_rect else {
-        return;
-    };
-    let Some(content_rect) = layout.content_rect else {
+    let (Some(panel_rect), Some(content_rect)) = (layout.panel_rect, layout.content_rect) else {
         return;
     };
     renderer.draw_box(panel_rect, Color::DarkGrey);
@@ -283,15 +370,20 @@ pub(crate) fn render_skill_panel<C: TuiApi>(app: &App<C>, renderer: &mut Rendere
     for row in &layout.rows {
         renderer.draw_text(row.rect.x, row.rect.y, &row.line, row.color);
     }
-    if layout.hidden_rows > 0 {
-        let hidden = format!("+{} more", layout.hidden_rows);
-        renderer.draw_text(
-            content_rect.x,
-            content_rect.bottom().saturating_sub(1),
-            &truncate_label(&hidden, content_rect.width as usize),
-            Color::DarkGrey,
-        );
+    render_skill_panel_hidden_rows(renderer, content_rect, layout.hidden_rows);
+}
+
+fn render_skill_panel_hidden_rows(renderer: &mut Renderer, content_rect: Rect, hidden_rows: usize) {
+    if hidden_rows == 0 {
+        return;
     }
+    let hidden = format!("+{hidden_rows} more");
+    renderer.draw_text(
+        content_rect.x,
+        content_rect.bottom().saturating_sub(1),
+        &truncate_label(&hidden, content_rect.width as usize),
+        Color::DarkGrey,
+    );
 }
 
 pub(crate) fn skill_panel_action_at<C: TuiApi>(
@@ -499,47 +591,80 @@ fn skill_atlas_focus_matches_skill(
 pub(crate) fn skill_atlas_plan_text<C: TuiApi>(app: &App<C>, focus: &SkillPanelAction) -> String {
     let skills = collect_skill_views(app);
     let contexts = skill_panel_contexts(app);
-    let mut text = String::new();
-    text.push_str("# Skill Atlas\n\n");
-    text.push_str(&format!("Focus: {}\n\n", skill_atlas_focus_title(focus)));
+    let mut text = skill_atlas_plan_header(focus);
+    append_skill_atlas_contexts_text(&mut text, &contexts);
+    append_skill_atlas_skills_text(&mut text, &skills);
+    text
+}
+
+fn skill_atlas_plan_header(focus: &SkillPanelAction) -> String {
+    format!(
+        "# Skill Atlas\n\nFocus: {}\n\n",
+        skill_atlas_focus_title(focus)
+    )
+}
+
+fn append_skill_atlas_contexts_text(text: &mut String, contexts: &[SkillPanelContext]) {
     text.push_str("## Active Repo Contexts\n\n");
-    for context in &contexts {
-        let selected = if context.selected { " selected" } else { "" };
-        text.push_str(&format!(
-            "- {}{}: {} session{}\n",
-            context.label,
-            selected,
-            context.count,
-            if context.count == 1 { "" } else { "s" }
-        ));
+    for context in contexts {
+        text.push_str(&skill_atlas_context_text_line(context));
     }
     text.push_str("\n## Skills By Source Directory\n\n");
+}
+
+fn skill_atlas_context_text_line(context: &SkillPanelContext) -> String {
+    let selected = if context.selected { " selected" } else { "" };
+    format!(
+        "- {}{}: {} session{}\n",
+        context.label,
+        selected,
+        context.count,
+        skill_atlas_plural_suffix(context.count)
+    )
+}
+
+fn append_skill_atlas_skills_text(text: &mut String, skills: &[SkillPanelSkillView]) {
     let mut current_source = "";
-    for skill in &skills {
-        if current_source != skill.source_dir {
-            current_source = &skill.source_dir;
-            text.push_str(&format!("### {}\n\n", skill.source_label));
-        }
-        let marker = if skill.sbp_highlight { " [SBP]" } else { "" };
-        let state = skill
-            .state
-            .as_deref()
-            .or(skill.availability.as_deref())
-            .unwrap_or("ok");
-        let contexts = if skill.contexts.is_empty() {
-            "no active repo".to_string()
-        } else {
-            skill.contexts.join(", ")
-        };
-        text.push_str(&format!(
-            "- {}{}: {} ({})\n",
-            skill.name, marker, state, contexts
-        ));
-        if let Some(description) = skill.description.as_deref() {
-            text.push_str(&format!("  {}\n", description.trim()));
-        }
+    for skill in skills {
+        append_skill_atlas_source_heading_text(text, &mut current_source, skill);
+        append_skill_atlas_skill_text(text, skill);
     }
-    text
+}
+
+fn append_skill_atlas_source_heading_text<'a>(
+    text: &mut String,
+    current_source: &mut &'a str,
+    skill: &'a SkillPanelSkillView,
+) {
+    if *current_source != skill.source_dir.as_str() {
+        *current_source = &skill.source_dir;
+        text.push_str(&format!("### {}\n\n", skill.source_label));
+    }
+}
+
+fn append_skill_atlas_skill_text(text: &mut String, skill: &SkillPanelSkillView) {
+    let marker = skill_atlas_skill_text_marker(skill);
+    let state = skill_atlas_skill_state(skill);
+    let contexts = skill_atlas_skill_contexts_label(skill);
+    text.push_str(&format!(
+        "- {}{}: {} ({})\n",
+        skill.name, marker, state, contexts
+    ));
+    append_skill_atlas_skill_description_text(text, skill);
+}
+
+fn skill_atlas_skill_text_marker(skill: &SkillPanelSkillView) -> &'static str {
+    if skill.sbp_highlight {
+        " [SBP]"
+    } else {
+        ""
+    }
+}
+
+fn append_skill_atlas_skill_description_text(text: &mut String, skill: &SkillPanelSkillView) {
+    if let Some(description) = skill.description.as_deref() {
+        text.push_str(&format!("  {}\n", description.trim()));
+    }
 }
 
 pub(crate) fn skill_atlas_focus_title(focus: &SkillPanelAction) -> String {
