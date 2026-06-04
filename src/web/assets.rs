@@ -13,6 +13,7 @@ use crate::api::AppState;
 pub(super) const APP_JS_ROUTE: &str = "/app.js";
 pub(super) const API_CLIENT_JS_ROUTE: &str = "/api_client.js";
 pub(super) const SESSION_PERSISTENCE_JS_ROUTE: &str = "/session_persistence.js";
+pub(super) const APP_EVENT_HANDLERS_JS_ROUTE: &str = "/app_event_handlers.js";
 pub(super) const APP_EVENT_BINDINGS_JS_ROUTE: &str = "/app_event_bindings.js";
 pub(super) const TROGDOR_EVENT_BINDINGS_JS_ROUTE: &str = "/trogdor_event_bindings.js";
 pub(super) const RENDERED_SURFACE_JS_ROUTE: &str = "/rendered_surface.js";
@@ -61,6 +62,7 @@ pub(super) fn routes() -> Router<Arc<AppState>> {
         .route(APP_JS_ROUTE, get(app_js))
         .route(API_CLIENT_JS_ROUTE, get(api_client_js))
         .route(SESSION_PERSISTENCE_JS_ROUTE, get(session_persistence_js))
+        .route(APP_EVENT_HANDLERS_JS_ROUTE, get(app_event_handlers_js))
         .route(APP_EVENT_BINDINGS_JS_ROUTE, get(app_event_bindings_js))
         .route(
             TROGDOR_EVENT_BINDINGS_JS_ROUTE,
@@ -245,6 +247,11 @@ javascript_route!(
     session_persistence_js,
     "src/web/session_persistence.js",
     "session_persistence.js"
+);
+javascript_route!(
+    app_event_handlers_js,
+    "src/web/app_event_handlers.js",
+    "app_event_handlers.js"
 );
 javascript_route!(
     app_event_bindings_js,

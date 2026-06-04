@@ -1,13 +1,12 @@
 import { buildSurfaceFrame, surfaceActionAt, surfaceConsumesPointer } from "./rendered_surface.js";
 import {
-  appEventListenerBindingPlan, authTokenButtonPlan, controlEventSessionPatchPlan, eventCell, globalShortcutPlan, initialStateBootPlan, inputAckActionPlan, lifecycleDeletedSessionPatchPlan, mobileKeyboardInputExecutorPlan, mobileKeyboardInputPlan,
+  authTokenButtonPlan, controlEventSessionPatchPlan, eventCell, initialStateBootPlan, inputAckActionPlan, lifecycleDeletedSessionPatchPlan,
   sheetActionAvailabilityPlan,
-  mobileKeyboardKeydownPlan, mobileKeyboardKeyPlan, shouldIgnoreSyntheticClick, surfaceActionDispatchContextPlan, surfaceActionDispatchPlan, surfaceActionExecutionContextPlan, surfaceActionExecutionPlan, surfaceActionFocusTerminalExecutionPlan, surfaceActionTrogdorReaderExecutionPlan,
-  terminalComposerControlAction, terminalDestroyStatePatch, terminalFallbackFocusPlan, terminalFallbackKeydownPlan, terminalFallbackPastePlan, terminalFallbackPointerFocusPlan, terminalInlineInputKeydownPlan, terminalKeyStripClickExecutorPlan, terminalKeyStripClickPlan, terminalStageCaptureBindings, terminalStageClickPlan, terminalStageFocusExecutorPlan, terminalStageFocusPlan,
+  shouldIgnoreSyntheticClick, surfaceActionDispatchContextPlan, surfaceActionDispatchPlan, surfaceActionExecutionContextPlan, surfaceActionExecutionPlan, surfaceActionFocusTerminalExecutionPlan, surfaceActionTrogdorReaderExecutionPlan,
+  terminalComposerControlAction, terminalDestroyStatePatch, terminalFallbackFocusPlan, terminalFallbackKeydownPlan, terminalFallbackPastePlan, terminalFallbackPointerFocusPlan, terminalStageClickPlan, terminalStageFocusExecutorPlan, terminalStageFocusPlan,
   terminalFallbackScrollPlan, terminalPaintProbeSchedulePlan, terminalPaintVerificationPlan, terminalPresentationPlan, terminalStageKeydownPlan, terminalStageMouseDownPlan, terminalStageMouseMovePlan, terminalStageMouseUpPlan, terminalStagePasteExecutorPlan, terminalStagePastePlan, terminalStageTouchEndPlan, terminalStageWheelPlan, terminalToolsAvailabilityPlan,
 } from "./input_support.js";
-import { bindAppEvents } from "./app_event_bindings.js";
-import { createTrogdorEventBindings } from "./trogdor_event_bindings.js";
+import { createAppEventHandlers } from "./app_event_handlers.js";
 import { createSendController } from "./send_controller.js";
 import { createTerminalZoomInputController } from "./terminal_zoom_input.js";
 import {
@@ -32,7 +31,6 @@ import {
   createSessionSocketController,
 } from "./session_socket_controller.js";
 import { runTerminalSurfaceResize } from "./terminal_resize.js";
-import { runGlobalShortcutAction } from "./global_shortcut_dispatch.js";
 import {
   backendHealthWarningText,
   runSessionRefresh,
@@ -69,10 +67,6 @@ import {
 import {
   createDirBrowserController,
 } from "./dir_browser_controller.js";
-import {
-  commandPaletteResultEventPlan,
-  commandPaletteSearchKeyPlan,
-} from "./command_palette.js";
 import {
   createCommandPaletteController,
 } from "./command_palette_controller.js";
@@ -2776,224 +2770,97 @@ function syncTrogdorReaderTimer() {
   }
 }
 
-let trogdorEventBindings = null;
-
-function bindTrogdorEvents() {
-  if (!trogdorEventBindings) {
-    trogdorEventBindings = createTrogdorEventBindings({
-      elements: el,
-      ElementClass: Element,
-      handleSurfaceAction,
-      openTrogdorAgentTerminal,
-      openTrogdorAtlas,
-      updateHoveredTrogdorSurface,
-    });
-  }
-  trogdorEventBindings.bindTrogdorEvents();
-}
-
-function handleGlobalShortcut(event) {
-  const plan = globalShortcutPlan(event, {
-    activeSheet: state.activeSheet,
-    trogdorAtlasOpen: state.trogdorAtlasOpen,
-    selectMode: state.selectMode,
-    readOnly: state.readOnly,
-    hasCurrentSession: Boolean(currentSession()),
-    hoveredLinkUrl: state.hoveredLinkUrl,
-  });
-  if (plan.type === "unhandled") {
-    return false;
-  }
-  runGlobalShortcutAction(plan, globalShortcutRuntime);
-  return true;
-}
-
-function handleMobileKeyboardProxyKeydown(event) {
-  const globalShortcutHandled = handleGlobalShortcut(event);
-  const keyPlan = globalShortcutHandled ? { type: "ignore" } : mobileKeyboardKeyPlan(event, {
-    readOnly: state.readOnly,
-    hasCurrentSession: Boolean(currentSession()),
-  });
-  const shouldForwardKey = !globalShortcutHandled && keyPlan.type === "forward_key";
-  const plan = mobileKeyboardKeydownPlan({
-    globalShortcutHandled,
-    keyPlan,
-    beginsResponse: shouldForwardKey && keyBeginsTrogdorResponse(event),
-  });
-  if (plan.preventDefault) event.preventDefault();
-  if (plan.closeKeyboard) closeMobileKeyboard();
-  if (plan.focusTerminal) focusTerminalInputSurface({ preventScroll: true });
-  if (plan.markResponse) markTrogdorSessionsResponded([state.selectedSessionId]);
-  if (plan.forwardKey) forwardTerminalKeyDown(event);
-  return plan.handled;
-}
-
-function handleMobileKeyboardProxyInput(event) {
-  const plan = mobileKeyboardInputPlan(event, {
-    readOnly: state.readOnly,
-    hasCurrentSession: Boolean(currentSession()),
-    proxyValue: el.mobileKeyboardProxy.value,
-  });
-  el.mobileKeyboardProxy.value = "";
-  const action = mobileKeyboardInputExecutorPlan(plan);
-  if (action.forwardEvent) forwardTerminalEvent(action.forwardEvent);
-  if (action.sendText) sendTerminalText(action.text);
-  return action.handled;
-}
-
-function handleTerminalInlineInputKeydown(event) {
-  const actionId = event.key === "Enter" && !event.shiftKey ? "" : terminalKeyActionForDomEvent(event);
-  const plan = terminalInlineInputKeydownPlan(event, actionId);
-  if (plan.preventDefault) event.preventDefault();
-  if (plan.submit) void submitTerminalInputDock();
-  if (plan.sendKey) sendTerminalControlKey(plan.actionId);
-  if (plan.stopPropagation) event.stopPropagation();
-  return plan.handled;
-}
-
-function handleTerminalWorkbenchWidgetsClick(event) {
-  return terminalWorkbenchController.handleTerminalWorkbenchWidgetsClick(event);
-}
-
-function handleTerminalWorkbenchWidgetsLogEvent(event) {
-  return terminalWorkbenchController.handleTerminalWorkbenchWidgetsLogEvent(event);
-}
-
-function handleCommandPaletteEvent(event) {
-  const target = event.target instanceof Element ? event.target : null;
-  const plan = event.type === "keydown"
-    ? commandPaletteSearchKeyPlan(event, state.paletteIndex, state.paletteItems.length)
-    : commandPaletteResultEventPlan(event.type, target, state.paletteItems.length);
-  if (plan.type === "ignore") {
-    return false;
-  }
-  if (plan.preventDefault) {
-    event.preventDefault();
-  }
-  if (Number.isFinite(plan.index)) {
-    state.paletteIndex = plan.index;
-  }
-  if (plan.type === "run_item") {
-    void runCommandPaletteItem();
-    return true;
-  }
-  renderCommandPalette();
-  return true;
-}
-
-function handleDocumentCommandPaletteShortcut(event) { if ((event.ctrlKey || event.metaKey) && !event.altKey && event.code === "KeyK") { event.preventDefault(); openCommandPalette(); } }
-
-function handleTerminalPaletteClick() { openCommandPalette(); }
-
-function handleTerminalCopyFrameClick() { void copyTerminalFrameText(); }
-
-function handleTerminalLinkOpenClick() { if (state.hoveredLinkUrl) safeOpenUrl(state.hoveredLinkUrl); }
-
-function handleTerminalLinkCopyClick() { void copyHoveredLink(); }
-
-function setTerminalZoomAndRefocus(nextZoom) { return terminalZoomInputController.setTerminalZoomAndRefocus(nextZoom); }
-
-function handleTerminalZoomOutClick() { return terminalZoomInputController.handleTerminalZoomOutClick(); }
-
-function handleTerminalZoomResetClick() { return terminalZoomInputController.handleTerminalZoomResetClick(); }
-
-function handleTerminalZoomInClick() { return terminalZoomInputController.handleTerminalZoomInClick(); }
-
-function handleTerminalMobileKeyboardClick() { if (state.mobileKeyboardActive) { closeMobileKeyboard(); focusTerminalInputSurface({ preventScroll: true }); return; } focusMobileKeyboard(); }
-
-function handleTerminalTrogdorBackClick(event) { event.preventDefault(); openTrogdorAtlas(); }
-
-function handleTerminalWorkbenchToggleClick() { setTerminalWorkbenchOpen(!state.terminalWorkbenchOpen); focusTerminalInputSurface({ preventScroll: true }); }
-
-function handleTerminalWorkbenchRefreshClick() { void refreshAgentContextForSelectedSession({ force: true }); void refreshWorkbenchWidgetsForSelectedSession({ force: true }); focusTerminalInputSurface({ preventScroll: true }); }
-
-function handleTerminalInputDockSubmit(event) { return terminalZoomInputController.handleTerminalInputDockSubmit(event); }
-
-function handleTerminalInlineInputInput() { return terminalZoomInputController.handleTerminalInlineInputInput(); }
-
-function handleTerminalKeyStripClick(event) { const action = terminalKeyStripClickExecutorPlan(terminalKeyStripClickPlan(event.type, event.target)); if (!action.sendKey) return; if (action.preventDefault) event.preventDefault(); sendTerminalControlKey(action.actionId); focusTerminalInputSurface({ preventScroll: true }); }
-
-function handleModalRootKeydown(event) { if (event.key === "Escape") { event.preventDefault(); closeSheets(); } }
-
-function handlePaletteSearchInput() { state.paletteIndex = 0; renderCommandPalette(); }
-
-function handleSearchFormSubmit(event) { event.preventDefault(); closeSheets(); }
-
-function handleTerminalSearchInput(event) { applySearchQuery(event.target.value); }
-
-function handleSearchPrevButtonClick() { cycleSearchMatch(-1); }
-
-function handleSearchNextButtonClick() { cycleSearchMatch(1); }
-
-function handleSearchClearButtonClick() { el.terminalSearch.value = ""; applySearchQuery(""); }
-
-function handleSendModeChange() { updateSendHint(); }
-
-async function handleThoughtConfigFormSubmit(event) { await thoughtConfigSheet.handleFormSubmit(event); }
-
-function handleThoughtConfigBackendChange() { thoughtConfigSheet.handleBackendChange(); }
-
-function handleThoughtConfigOptionChange() { thoughtConfigSheet.handleOptionChange(); }
-
-async function handleThoughtConfigTestButtonClick() { await thoughtConfigSheet.handleTestButtonClick(); }
-
-async function handleNativeFormSubmit(event) { await nativeDesktopSheet.handleNativeFormSubmit(event); }
-
-async function handleNativeRefreshButtonClick() { await nativeDesktopSheet.handleNativeRefreshButtonClick(); }
-
-async function handleNativeOpenButtonClick() { await nativeDesktopSheet.handleNativeOpenButtonClick(); }
-
-function handleNativeAppChange() { nativeDesktopSheet.handleNativeAppChange(); }
-
-function handleNativeModeChange() { nativeDesktopSheet.handleNativeModeChange(); }
-
-function handleSendCloseButtonClick() { state.sendTarget = null; closeSheets(); }
-
-function handleSaveTokenButtonClick() { return handleAuthTokenButtonAction("save"); }
-
-function handleClearTokenButtonClick() { return handleAuthTokenButtonAction("clear"); }
-
-function handleCreateToolChange() { syncSheetActionAvailability(); }
-
-function handleCreateRequestInput() { syncSheetActionAvailability(); }
-
-async function handleMermaidRefreshButtonClick() { await refreshMermaidArtifact(); }
-
-async function handleMermaidOpenButtonClick() { await openMermaidArtifactHost(); }
-
-async function handleMermaidPlanTabsClick(event) { await mermaidArtifactController.handlePlanTabsClick(event); }
-
-function handleTerminalStageFocus() { handleTerminalStageFocusEvent("focus"); }
-
-function handleTerminalStageBlur() { handleTerminalStageFocusEvent("blur"); }
-
-function handleTerminalStageMouseleave() { clearHoveredLink(true); updateHoveredTrogdorSurface(null); }
-
-const eventListenerHandlers = {
-  closeSheets, handleClearTokenButtonClick, handleCommandPaletteEvent, handleCreateBatchClearClick, handleCreateBatchVisibleAction, handleCreateCwdInput, handleCreateFormSubmit, handleCreateLaunchTargetChange, handleCreateRequestInput, handleCreateToolChange,
-  handleDirCheckboxChange, handleDirsListClick, handleDirsLoadButtonClick, handleDirsManagedOnlyChange, handleDirsPathInput, handleDirsPathKeydown, handleDirsSearchInput, handleDirsSpawnHereClick, handleDirsUpButtonClick, handleDocumentCommandPaletteShortcut,
-  handleMermaidOpenButtonClick, handleMermaidPlanTabsClick, handleMermaidRefreshButtonClick, handleMobileKeyboardProxyBlur, handleMobileKeyboardProxyFocus, handleMobileKeyboardProxyInput, handleMobileKeyboardProxyKeydown, handleModalRootKeydown,
-  handleNativeAppChange, handleNativeFormSubmit, handleNativeModeChange, handleNativeOpenButtonClick, handleNativeRefreshButtonClick, handlePaletteSearchInput, handleSaveTokenButtonClick, handleSearchClearButtonClick, handleSearchFormSubmit, handleSearchNextButtonClick, handleSearchPrevButtonClick,
-  handleSendCloseButtonClick, handleSendFormSubmit, handleSendHistoryClick, handleSendModeChange, handleTerminalCopyFrameClick, handleTerminalFallbackBlur, handleTerminalFallbackClick, handleTerminalFallbackFocus, handleTerminalFallbackKeyEvent, handleTerminalFallbackMousedown,
-  handleTerminalFallbackPasteEvent, handleTerminalFallbackScroll, handleTerminalInlineInputFocus, handleTerminalInlineInputInput, handleTerminalInlineInputKeydown, handleTerminalInputDockSubmit, handleTerminalKeyStripClick, handleTerminalLinkCopyClick, handleTerminalLinkOpenClick,
-  handleTerminalMobileKeyboardClick, handleTerminalPaletteClick, handleTerminalSearchInput, handleTerminalStageBlur, handleTerminalStageClick, handleTerminalStageFocus, handleTerminalStageKeydown, handleTerminalStageMouseDown, handleTerminalStageMouseMove, handleTerminalStageMouseUp,
-  handleTerminalStageMouseleave, handleTerminalStagePaste, handleTerminalStageTouchEnd, handleTerminalStageWheel, handleTerminalTrogdorBackClick, handleTerminalWorkbenchRefreshClick, handleTerminalWorkbenchToggleClick, handleTerminalWorkbenchWidgetsClick,
-  handleTerminalWorkbenchWidgetsLogEvent, handleTerminalZoomInClick, handleTerminalZoomOutClick, handleTerminalZoomResetClick, handleThoughtConfigBackendChange, handleThoughtConfigFormSubmit, handleThoughtConfigOptionChange, handleThoughtConfigTestButtonClick,
-};
-
-function bindEvents() {
-  bindAppEvents({
-    document,
-    elements: el,
-    handlers: eventListenerHandlers,
-    bindTrogdorEvents,
-    appEventListenerBindingPlan,
-    terminalStageCaptureBindings,
-    captureSurfaceAction,
-    ResizeObserver,
-    queueMeasureAndResizeSurface,
-  });
-}
+const {
+  bindEvents,
+  handleCommandPaletteEvent,
+  handleGlobalShortcut,
+  handleMobileKeyboardProxyInput,
+  handleMobileKeyboardProxyKeydown,
+  handleTerminalInlineInputKeydown,
+  handleTerminalWorkbenchWidgetsClick,
+} = createAppEventHandlers({
+  documentRef: document,
+  elements: el,
+  state,
+  ElementClass: Element,
+  ResizeObserverCtor: globalThis.ResizeObserver,
+  applySearchQuery,
+  captureSurfaceAction,
+  clearHoveredLink,
+  closeMobileKeyboard,
+  closeSheets,
+  copyHoveredLink,
+  copyTerminalFrameText,
+  currentSession,
+  cycleSearchMatch,
+  focusMobileKeyboard,
+  focusTerminalInputSurface,
+  forwardTerminalEvent,
+  forwardTerminalKeyDown,
+  globalShortcutRuntime,
+  handleAuthTokenButtonAction,
+  handleCreateBatchClearClick,
+  handleCreateBatchVisibleAction,
+  handleCreateCwdInput,
+  handleCreateFormSubmit,
+  handleCreateLaunchTargetChange,
+  handleDirCheckboxChange,
+  handleDirsListClick,
+  handleDirsLoadButtonClick,
+  handleDirsManagedOnlyChange,
+  handleDirsPathInput,
+  handleDirsPathKeydown,
+  handleDirsSearchInput,
+  handleDirsSpawnHereClick,
+  handleDirsUpButtonClick,
+  handleMobileKeyboardProxyFocusEvent,
+  handleSendFormSubmit,
+  handleSendHistoryClick,
+  handleSurfaceAction,
+  handleTerminalFallbackBlur,
+  handleTerminalFallbackClick,
+  handleTerminalFallbackFocus,
+  handleTerminalFallbackKeyEvent,
+  handleTerminalFallbackMousedown,
+  handleTerminalFallbackPasteEvent,
+  handleTerminalFallbackScroll,
+  handleTerminalInlineInputFocus,
+  handleTerminalStageClick,
+  handleTerminalStageFocusEvent,
+  handleTerminalStageKeydown,
+  handleTerminalStageMouseDown,
+  handleTerminalStageMouseMove,
+  handleTerminalStageMouseUp,
+  handleTerminalStagePaste,
+  handleTerminalStageTouchEnd,
+  handleTerminalStageWheel,
+  keyBeginsTrogdorResponse,
+  markTrogdorSessionsResponded,
+  mermaidArtifactController,
+  nativeDesktopSheet,
+  openCommandPalette,
+  openMermaidArtifactHost,
+  openTrogdorAgentTerminal,
+  openTrogdorAtlas,
+  queueMeasureAndResizeSurface,
+  refreshAgentContextForSelectedSession,
+  refreshMermaidArtifact,
+  refreshWorkbenchWidgetsForSelectedSession,
+  renderCommandPalette,
+  runCommandPaletteItem,
+  safeOpenUrl,
+  sendTerminalControlKey,
+  sendTerminalText,
+  setTerminalWorkbenchOpen,
+  submitTerminalInputDock,
+  syncSheetActionAvailability,
+  terminalKeyActionForDomEvent,
+  terminalWorkbenchController,
+  terminalZoomInputController,
+  thoughtConfigSheet,
+  updateHoveredTrogdorSurface,
+  updateSendHint,
+});
 
 async function init() {
   loadInitialState();
