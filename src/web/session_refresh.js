@@ -54,6 +54,47 @@ export function sessionRefreshErrorPlan(error) {
   };
 }
 
+export function sessionDisplayName(session) {
+  return String(session?.tmux_name || session?.name || session?.session_id || "session");
+}
+
+export function conciseHealthDetail(value) {
+  const text = String(value || "").trim();
+  if (!text) {
+    return "";
+  }
+  return text.length > 64 ? `${text.slice(0, 61)}...` : text;
+}
+
+export function backendHealthWarningText(health) {
+  if (!health || typeof health !== "object") {
+    return "";
+  }
+  const persistence = health.persistence || {};
+  if (!persistence.available) {
+    return "persistence unavailable";
+  }
+  if (!persistence.ok) {
+    const operation = persistence.last_failed_operation || "write";
+    const detail = conciseHealthDetail(persistence.last_error);
+    return `persistence degraded: ${operation}${detail ? `: ${detail}` : ""}`;
+  }
+  const thought = health.thought_bridge || {};
+  const status = String(thought.status || "").toLowerCase();
+  if (!status || status === "healthy") {
+    return "";
+  }
+  if (status === "degraded") {
+    const detail = conciseHealthDetail(thought.last_backend_error || thought.last_error);
+    return `thought bridge degraded${detail ? `: ${detail}` : ""}`;
+  }
+  if (status === "unhealthy") {
+    const detail = conciseHealthDetail(thought.shutdown_reason || thought.last_error);
+    return `thought bridge unhealthy${detail ? `: ${detail}` : ""}`;
+  }
+  return `thought bridge ${status}`;
+}
+
 export async function runSessionRefresh(runtime) {
   try {
     const requestPlan = sessionRefreshRequestPlan(runtime.state.followPublishedSelection);

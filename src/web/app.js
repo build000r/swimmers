@@ -20,7 +20,11 @@ import {
 } from "./terminal_surface_setup.js";
 import { runTerminalSurfaceResize } from "./terminal_resize.js";
 import { runGlobalShortcutAction } from "./global_shortcut_dispatch.js";
-import { runSessionRefresh } from "./session_refresh.js";
+import {
+  backendHealthWarningText,
+  runSessionRefresh,
+  sessionDisplayName,
+} from "./session_refresh.js";
 import { runAgentContextRefresh } from "./agent_context_refresh.js";
 import { runWorkbenchWidgetRefresh } from "./workbench_refresh.js";
 import { writeWorkbenchWidgetsHtmlToDom } from "./workbench_dom.js";
@@ -599,10 +603,6 @@ function currentSession() {
   return state.sessions.find((session) => session.session_id === state.selectedSessionId) ?? null;
 }
 
-function sessionDisplayName(session) {
-  return String(session?.tmux_name || session?.name || session?.session_id || "session");
-}
-
 function sessionNeedsAttention(session) {
   if (!session) {
     return false;
@@ -809,43 +809,6 @@ function syncTerminalStatusStrip() {
   }
   document.body.classList.toggle("backend-health-degraded", Boolean(healthWarning));
   syncDocumentLifecycleSignal();
-}
-
-function conciseHealthDetail(value) {
-  const text = String(value || "").trim();
-  if (!text) {
-    return "";
-  }
-  return text.length > 64 ? `${text.slice(0, 61)}...` : text;
-}
-
-function backendHealthWarningText(health) {
-  if (!health || typeof health !== "object") {
-    return "";
-  }
-  const persistence = health.persistence || {};
-  if (!persistence.available) {
-    return "persistence unavailable";
-  }
-  if (!persistence.ok) {
-    const operation = persistence.last_failed_operation || "write";
-    const detail = conciseHealthDetail(persistence.last_error);
-    return `persistence degraded: ${operation}${detail ? `: ${detail}` : ""}`;
-  }
-  const thought = health.thought_bridge || {};
-  const status = String(thought.status || "").toLowerCase();
-  if (!status || status === "healthy") {
-    return "";
-  }
-  if (status === "degraded") {
-    const detail = conciseHealthDetail(thought.last_backend_error || thought.last_error);
-    return `thought bridge degraded${detail ? `: ${detail}` : ""}`;
-  }
-  if (status === "unhealthy") {
-    const detail = conciseHealthDetail(thought.shutdown_reason || thought.last_error);
-    return `thought bridge unhealthy${detail ? `: ${detail}` : ""}`;
-  }
-  return `thought bridge ${status}`;
 }
 
 function applyBackendHealth(payload) {
