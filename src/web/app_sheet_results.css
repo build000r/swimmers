@@ -1,0 +1,67 @@
+
+.sheet-result {
+  margin: 0;
+  padding: 0.8rem 0.92rem;
+  border: 1px solid rgba(120, 210, 255, 0.12);
+  border-radius: 14px;
+  background: rgba(6, 10, 13, 0.8);
+  color: var(--text);
+  white-space: pre-wrap;
+  line-height: 1.42;
+  min-height: 3.6rem;
+}
+
+.sheet-result.error,
+.sheet-copy.error {
+  color: var(--danger);
+  border-color: rgba(255, 125, 148, 0.24);
+}
+
+.mermaid-preview {
+  min-height: 180px;
+  border: 1px solid rgba(120, 210, 255, 0.12);
+  border-radius: 16px;
+  background: rgba(6, 10, 13, 0.82);
+  padding: 12px;
+  overflow: auto;
+}
+
+.mermaid-preview svg {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+
+.plan-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 12px 0;
+}
+
+.plan-tabs button {
+  border-radius: 8px;
+  padding: 0.48rem 0.72rem;
+}
+
+.plan-tabs button.active {
+  border-color: rgba(139, 227, 191, 0.52);
+  color: var(--accent-2);
+  background: rgba(18, 43, 47, 0.72);
+}
+
+.field {
+  display: grid;
+  gap: 0.42rem;
+}
+
+.sheet-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.hidden {
+  display: none !important;
+}

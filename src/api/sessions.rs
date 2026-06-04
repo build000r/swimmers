@@ -26,26 +26,30 @@ use crate::types::{
     CreateSessionsBatchRequest, CreateSessionsBatchResponse, ErrorResponse, LaunchTargetSummary,
     MermaidArtifactResponse, SessionAgentContextResponse, SessionGitDiffResponse,
     SessionGroupInputRequest, SessionGroupInputResponse, SessionGroupInputResult,
-    SessionInputRequest, SessionInputResponse, SessionListResponse, SessionPaneTailResponse,
-    SessionState, SessionSummary, SessionTimelineEvent, SessionTimelinePinned,
-    SessionTimelinePinnedItem, SessionTimelineResponse, SessionTranscriptResponse,
-    TerminalSnapshot,
+    SessionInputRequest, SessionInputResponse, SessionListResponse, SessionState, SessionSummary,
+    SessionTimelineEvent, SessionTimelinePinned, SessionTimelinePinnedItem,
+    SessionTimelineResponse, SessionTranscriptResponse, TerminalSnapshot,
 };
 
-const PANE_TAIL_LINES: usize = 300;
-const PANE_TAIL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 const SNAPSHOT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 const INPUT_DELIVERY_ACK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 
+mod pane_tail;
 #[path = "session_mermaid.rs"]
 mod session_mermaid;
 mod structured_context;
 
+use self::pane_tail::{get_pane_tail, request_pane_tail, PaneTailError};
 pub(crate) use self::session_mermaid::fetch_mermaid_artifact_response;
 use self::session_mermaid::{get_mermaid_artifact, get_plan_file};
 use self::structured_context::{
     agent_context_unavailable, append_context_events, context_limit_for_agent_context,
     read_agent_context_for_summary, read_transcript_for_summary,
+};
+
+#[cfg(test)]
+use self::pane_tail::{
+    request_pane_tail_from_actor, request_pane_tail_from_actor_with_timeout, PANE_TAIL_LINES,
 };
 
 // ---------------------------------------------------------------------------
@@ -1487,112 +1491,6 @@ enum SnapshotRequestError {
     ActorUnavailable,
     ReplyDropped,
     Timeout,
-}
-
-// ---------------------------------------------------------------------------
-// GET /v1/sessions/{session_id}/pane-tail
-// ---------------------------------------------------------------------------
-
-async fn get_pane_tail(
-    Extension(auth): Extension<AuthInfo>,
-    State(state): State<Arc<AppState>>,
-    Path(session_id): Path<String>,
-) -> Response {
-    if let Err(resp) = auth.require_scope(AuthScope::SessionsRead) {
-        return resp;
-    }
-
-    match request_pane_tail(&state, &session_id).await {
-        Ok(text) => (
-            StatusCode::OK,
-            Json(SessionPaneTailResponse { session_id, text }),
-        )
-            .into_response(),
-        Err(error) => pane_tail_error_response(error),
-    }
-}
-
-#[derive(Debug)]
-enum PaneTailError {
-    SessionNotFound,
-    ActorUnavailable,
-    ReplyDropped,
-    TimedOut,
-}
-
-impl PaneTailError {
-    fn message(&self) -> &'static str {
-        match self {
-            PaneTailError::SessionNotFound => "session not found",
-            PaneTailError::ActorUnavailable => "session actor unavailable",
-            PaneTailError::ReplyDropped => "actor dropped pane tail reply",
-            PaneTailError::TimedOut => "pane tail request timed out",
-        }
-    }
-}
-
-async fn request_pane_tail(
-    state: &Arc<AppState>,
-    session_id: &str,
-) -> Result<String, PaneTailError> {
-    let handle = state
-        .supervisor
-        .get_session(session_id)
-        .await
-        .ok_or(PaneTailError::SessionNotFound)?;
-    request_pane_tail_from_actor(&handle).await
-}
-
-async fn request_pane_tail_from_actor(handle: &ActorHandle) -> Result<String, PaneTailError> {
-    request_pane_tail_from_actor_with_timeout(handle, PANE_TAIL_TIMEOUT).await
-}
-
-async fn request_pane_tail_from_actor_with_timeout(
-    handle: &ActorHandle,
-    timeout: std::time::Duration,
-) -> Result<String, PaneTailError> {
-    let (tx, rx) = oneshot::channel::<String>();
-    if handle.send(pane_tail_request(tx)).await.is_err() {
-        return Err(PaneTailError::ActorUnavailable);
-    }
-
-    classify_pane_tail_reply(tokio::time::timeout(timeout, rx).await)
-}
-
-fn pane_tail_request(reply: oneshot::Sender<String>) -> SessionCommand {
-    SessionCommand::GetPaneTail {
-        lines: PANE_TAIL_LINES,
-        reply,
-    }
-}
-
-fn classify_pane_tail_reply(
-    result: Result<Result<String, oneshot::error::RecvError>, tokio::time::error::Elapsed>,
-) -> Result<String, PaneTailError> {
-    match result {
-        Ok(Ok(text)) => Ok(text),
-        Ok(Err(_)) => Err(PaneTailError::ReplyDropped),
-        Err(_) => Err(PaneTailError::TimedOut),
-    }
-}
-
-fn pane_tail_error_response(error: PaneTailError) -> Response {
-    match error {
-        PaneTailError::SessionNotFound => {
-            error_response(StatusCode::NOT_FOUND, "SESSION_NOT_FOUND", None)
-        }
-        PaneTailError::ActorUnavailable => pane_tail_internal_error("session actor unavailable"),
-        PaneTailError::ReplyDropped => pane_tail_internal_error("actor dropped pane tail reply"),
-        PaneTailError::TimedOut => pane_tail_internal_error("pane tail request timed out"),
-    }
-}
-
-fn pane_tail_internal_error(message: &str) -> Response {
-    error_response(
-        StatusCode::INTERNAL_SERVER_ERROR,
-        "INTERNAL_ERROR",
-        Some(message.to_string()),
-    )
 }
 
 // ---------------------------------------------------------------------------

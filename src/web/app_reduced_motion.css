@@ -1,0 +1,31 @@
+
+@media (prefers-reduced-motion: reduce) {
+  .trogdor-dragon,
+  .trogdor-dragon.is-firing,
+  .trogdor-dragon.is-firing .trogdor-dragon-fire,
+  .trogdor-dragon.is-firing .trogdor-dragon-open,
+  .trogdor-agent,
+  .trogdor-agent.is-attacking,
+  .trogdor-agent.is-burnt,
+  .agent-burn-flame,
+  .agent-burn-smoke,
+  .trogdor-structure.is-burning .structure-svg {
+    animation: none;
+  }
+
+  .trogdor-dragon.is-firing .trogdor-dragon-open {
+    opacity: 0;
+  }
+
+  .trogdor-dragon.is-firing .trogdor-dragon-fire.is-full {
+    opacity: 1;
+  }
+
+  .trogdor-agent.is-burnt {
+    opacity: 0.45;
+  }
+
+  .trogdor-agent.is-burnt .agent-burn-flame {
+    opacity: 0.82;
+  }
+}

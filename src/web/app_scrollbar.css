@@ -1,0 +1,6 @@
+
+/* claude:scrollbar-style */
+html {
+  scrollbar-width: thin;
+  scrollbar-color: gray transparent;
+}

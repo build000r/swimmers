@@ -955,24 +955,45 @@ pub(crate) fn mermaid_fit_whole_words(text: &str, budget: usize) -> String {
     if budget == 0 {
         return String::new();
     }
-    if text.chars().count() <= budget {
+    if mermaid_text_fits_budget(text, budget) {
         return text.to_string();
     }
 
-    let mut out = String::new();
-    for word in text.split_whitespace() {
-        let separator = usize::from(!out.is_empty());
-        let next_len = out.chars().count() + separator + word.chars().count();
-        if next_len > budget {
-            break;
-        }
-        if !out.is_empty() {
-            out.push(' ');
-        }
-        out.push_str(word);
-    }
-    out
+    mermaid_take_whole_words(text, budget)
 }
+
+fn mermaid_text_fits_budget(text: &str, budget: usize) -> bool {
+    text.chars().count() <= budget
+}
+
+fn mermaid_take_whole_words(text: &str, budget: usize) -> String {
+    let result = text
+        .split_whitespace()
+        .try_fold(String::new(), |mut out, word| {
+            if mermaid_word_would_exceed_budget(&out, word, budget) {
+                std::ops::ControlFlow::Break(out)
+            } else {
+                mermaid_push_fit_word(&mut out, word);
+                std::ops::ControlFlow::Continue(out)
+            }
+        });
+    match result {
+        std::ops::ControlFlow::Break(out) | std::ops::ControlFlow::Continue(out) => out,
+    }
+}
+
+fn mermaid_word_would_exceed_budget(out: &str, word: &str, budget: usize) -> bool {
+    let separator = usize::from(!out.is_empty());
+    out.chars().count() + separator + word.chars().count() > budget
+}
+
+fn mermaid_push_fit_word(out: &mut String, word: &str) {
+    if !out.is_empty() {
+        out.push(' ');
+    }
+    out.push_str(word);
+}
+
 pub(crate) fn clip_mermaid_overlay_text(text: &str, _skip: usize, max_chars: usize) -> String {
     if max_chars == 0 {
         return String::new();
@@ -1537,6 +1558,48 @@ pub(crate) fn project_mermaid_semantic_lines(
 
     projected.sort_by_key(|line| (line.y, line.x));
     projected
+}
+
+#[cfg(test)]
+mod mermaid_fit_whole_words_tests {
+    use super::*;
+
+    #[test]
+    fn fit_whole_words_keeps_text_at_exact_budget() {
+        assert_eq!(mermaid_fit_whole_words("Alpha Node", 10), "Alpha Node");
+    }
+
+    #[test]
+    fn fit_whole_words_stops_before_word_that_exceeds_budget() {
+        assert_eq!(
+            mermaid_fit_whole_words("Alpha Node Details", 10),
+            "Alpha Node"
+        );
+    }
+
+    #[test]
+    fn fit_whole_words_preserves_empty_result_for_first_word_over_budget() {
+        assert_eq!(mermaid_fit_whole_words("AlphaNode", 5), "");
+    }
+
+    #[test]
+    fn fit_whole_words_zero_budget_returns_empty() {
+        assert_eq!(mermaid_fit_whole_words("Alpha", 0), "");
+    }
+
+    #[test]
+    fn fit_whole_words_collapses_source_whitespace_between_kept_words() {
+        assert_eq!(
+            mermaid_fit_whole_words("Alpha   Node\tReady", 12),
+            "Alpha Node"
+        );
+    }
+
+    #[test]
+    fn fit_whole_words_counts_unicode_chars_not_bytes() {
+        assert_eq!(mermaid_fit_whole_words("café café", 4), "café");
+        assert_eq!(mermaid_fit_whole_words("café café", 9), "café café");
+    }
 }
 
 #[cfg(test)]

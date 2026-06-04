@@ -41,6 +41,7 @@ const SEND_CONTROLLER_JS_ROUTE: &str = "/send_controller.js";
 const THOUGHT_CONFIG_SHEET_JS_ROUTE: &str = "/thought_config_sheet.js";
 const NATIVE_DESKTOP_SHEET_JS_ROUTE: &str = "/native_desktop_sheet.js";
 const TERMINAL_SURFACE_SETUP_JS_ROUTE: &str = "/terminal_surface_setup.js";
+const TERMINAL_ZOOM_INPUT_JS_ROUTE: &str = "/terminal_zoom_input.js";
 const TERMINAL_RESIZE_JS_ROUTE: &str = "/terminal_resize.js";
 const GLOBAL_SHORTCUT_DISPATCH_JS_ROUTE: &str = "/global_shortcut_dispatch.js";
 const SESSION_REFRESH_JS_ROUTE: &str = "/session_refresh.js";
@@ -129,6 +130,7 @@ pub fn routes() -> Router<Arc<AppState>> {
             TERMINAL_SURFACE_SETUP_JS_ROUTE,
             get(terminal_surface_setup_js),
         )
+        .route(TERMINAL_ZOOM_INPUT_JS_ROUTE, get(terminal_zoom_input_js))
         .route(TERMINAL_RESIZE_JS_ROUTE, get(terminal_resize_js))
         .route(
             GLOBAL_SHORTCUT_DISPATCH_JS_ROUTE,
@@ -649,6 +651,55 @@ fn dev_asset(_relative: &str, baked: &'static str) -> &'static str {
     baked
 }
 
+struct CssAssetPart {
+    relative: &'static str,
+    baked: &'static str,
+}
+
+const APP_CSS_PARTS: &[CssAssetPart] = &[
+    CssAssetPart {
+        relative: "src/web/app.css",
+        baked: include_str!("app.css"),
+    },
+    CssAssetPart {
+        relative: "src/web/app_trogdor.css",
+        baked: include_str!("app_trogdor.css"),
+    },
+    CssAssetPart {
+        relative: "src/web/app_sheets.css",
+        baked: include_str!("app_sheets.css"),
+    },
+    CssAssetPart {
+        relative: "src/web/app_create_console.css",
+        baked: include_str!("app_create_console.css"),
+    },
+    CssAssetPart {
+        relative: "src/web/app_sheet_results.css",
+        baked: include_str!("app_sheet_results.css"),
+    },
+    CssAssetPart {
+        relative: "src/web/app_mobile.css",
+        baked: include_str!("app_mobile.css"),
+    },
+    CssAssetPart {
+        relative: "src/web/app_reduced_motion.css",
+        baked: include_str!("app_reduced_motion.css"),
+    },
+    CssAssetPart {
+        relative: "src/web/app_scrollbar.css",
+        baked: include_str!("app_scrollbar.css"),
+    },
+];
+
+fn app_css_body() -> String {
+    let mut body = String::new();
+    for part in APP_CSS_PARTS {
+        let chunk = dev_asset(part.relative, part.baked);
+        body.push_str(chunk.as_ref());
+    }
+    body
+}
+
 fn javascript_asset(relative: &str, baked: &'static str) -> Response {
     (
         [
@@ -746,6 +797,13 @@ async fn terminal_surface_setup_js() -> Response {
     javascript_asset(
         "src/web/terminal_surface_setup.js",
         include_str!("terminal_surface_setup.js"),
+    )
+}
+
+async fn terminal_zoom_input_js() -> Response {
+    javascript_asset(
+        "src/web/terminal_zoom_input.js",
+        include_str!("terminal_zoom_input.js"),
     )
 }
 
@@ -914,7 +972,7 @@ async fn app_css() -> impl IntoResponse {
             (header::CONTENT_TYPE, "text/css; charset=utf-8"),
             (header::CACHE_CONTROL, "no-store"),
         ],
-        dev_asset("src/web/app.css", include_str!("app.css")),
+        app_css_body(),
     )
 }
 
@@ -3098,6 +3156,45 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn app_css_serves_concatenated_partials_with_existing_headers() {
+        let response = app_css().await.into_response();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers().get(header::CONTENT_TYPE).unwrap(),
+            "text/css; charset=utf-8"
+        );
+        assert_eq!(
+            response.headers().get(header::CACHE_CONTROL).unwrap(),
+            "no-store"
+        );
+
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("css body");
+        let css = String::from_utf8(body.to_vec()).expect("utf8 css asset");
+        let order_needles = [
+            ".loading-overlay.visible",
+            ".trogdor-surface",
+            ".loading-label",
+            ".surface-sheet",
+            "#create-sheet.create-console",
+            ".sheet-result",
+            ".hidden",
+            "@media (max-width: 700px)",
+            ".trogdor-frame",
+            "@media (prefers-reduced-motion: reduce)",
+            "/* claude:scrollbar-style */",
+        ];
+        let mut last = 0;
+        for needle in order_needles {
+            let offset = css[last..]
+                .find(needle)
+                .unwrap_or_else(|| panic!("missing css marker {needle}"));
+            last += offset + needle.len();
+        }
+    }
+
+    #[tokio::test]
     async fn franken_term_asset_file_info_reports_size_and_crc() {
         let dir = tempdir().expect("tempdir");
         let path = dir.path().join("FrankenTerm.js");
@@ -3294,7 +3391,7 @@ mod tests {
         assert!(trogdor_render.contains("const dragonTarget = dragonPose || TROGDOR_DRAGON_TARGET"));
         assert!(js.contains("renderTrogdorSurfaceFrame"));
 
-        let css = include_str!("app.css");
+        let css = app_css_body();
         assert!(css.contains("@keyframes dragon-walk-around"));
         assert!(css.contains("@keyframes dragon-sprite-fire"));
         assert!(css.contains(".agent-burn-flame"));
@@ -3335,11 +3432,14 @@ mod tests {
         let js = include_str!("app.js");
         let terminal_search_links = include_str!("terminal_search_links.js");
         let terminal_surface_setup = include_str!("terminal_surface_setup.js");
+        let terminal_zoom_input = include_str!("terminal_zoom_input.js");
         let agent_context_refresh = include_str!("agent_context_refresh.js");
         let workbench_render = include_str!("workbench_render.js");
         let mermaid_artifact_controller = include_str!("mermaid_artifact_controller.js");
         assert!(js.contains("TERMINAL_ZOOM_STORAGE_KEY"));
-        assert!(js.contains("setZoom"));
+        assert!(js.contains("createTerminalZoomInputController"));
+        assert!(terminal_zoom_input.contains("setZoom"));
+        assert!(terminal_zoom_input.contains("terminalZoomPersistencePlan"));
         assert!(js.contains("focusMobileKeyboard"));
         assert!(js.contains("mobileKeyboardProxy"));
         assert!(js.contains("function openCommandPalette()"));
@@ -3351,8 +3451,10 @@ mod tests {
         let terminal_status = include_str!("terminal_status.js");
         assert!(js.contains("createSendController"));
         assert!(js.contains("rememberSendHistory,"));
-        assert!(js.contains("await sendLineToSession(state.selectedSessionId, text)"));
-        assert!(js.contains("rememberSendHistory(text);"));
+        assert!(
+            terminal_zoom_input.contains("await sendLineToSession(state.selectedSessionId, text)")
+        );
+        assert!(terminal_zoom_input.contains("rememberSendHistory(text);"));
         assert!(js.contains("createTerminalStatusController"));
         assert!(terminal_status.contains("function syncTerminalStatusStrip()"));
         assert!(js.contains("function refreshAgentContextForSelectedSession"));
@@ -3420,7 +3522,7 @@ mod tests {
         assert!(js.contains("function sendFallbackTerminalEvent(event)"));
         assert!(terminal_surface_setup.contains("function updateTerminalFallbackText(text)"));
         assert!(js.contains("function terminalFallbackOwnsPointer(event)"));
-        let css = include_str!("app.css");
+        let css = app_css_body();
         assert!(css.contains("white-space: pre-wrap"));
         assert!(css.contains("overflow-wrap: anywhere"));
         assert!(css.contains("pointer-events: auto"));

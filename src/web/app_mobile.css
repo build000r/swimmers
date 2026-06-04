@@ -1,0 +1,203 @@
+
+@media (max-width: 700px) {
+  :root {
+    --terminal-input-dock-height: 196px;
+  }
+
+  .modal-root {
+    padding: 12px;
+  }
+
+  .surface-sheet {
+    width: 100%;
+    max-height: 82vh;
+    padding: 16px;
+  }
+
+  .sheet-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .sheet-toolbar {
+    grid-template-columns: 1fr;
+  }
+
+  .sheet-actions {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  #create-sheet.create-console {
+    width: 100%;
+    max-height: 86vh;
+    padding: 14px;
+  }
+
+  .create-console .console-toolbar {
+    grid-template-columns: 1fr;
+  }
+
+  .create-console .console-pathbar {
+    display: flex;
+    flex-wrap: wrap;
+  }
+
+  .create-console .console-pathbar input {
+    flex: 1 1 160px;
+  }
+
+  .create-console .console-dock-grid {
+    grid-template-columns: 1fr;
+  }
+
+  /* Collapse the table to repo + status; path lives in the row tooltip and
+     group management is a desktop affordance. Hidden cells drop out of the
+     grid so the remaining three line up with the header. */
+  .create-console .console-row {
+    grid-template-columns: 26px minmax(0, 1fr) max-content;
+    gap: 10px;
+  }
+
+  .create-console .col-path,
+  .create-console .col-groups {
+    display: none;
+  }
+
+  .create-console .console-create {
+    flex: 1 1 100%;
+  }
+
+  .terminal-fallback {
+    padding: 18px;
+  }
+
+  .terminal-input-dock {
+    grid-template-columns: auto minmax(0, 1fr);
+    padding: 9px 10px 11px;
+  }
+
+  .terminal-key-strip {
+    grid-column: 1 / 3;
+  }
+
+  .terminal-input-dock > button {
+    grid-column: 1 / 3;
+    min-height: 34px;
+  }
+
+  .terminal-input-echo {
+    grid-column: 1 / 3;
+  }
+
+  .terminal-control-strip {
+    top: auto;
+    right: 8px;
+    bottom: 8px;
+    background: rgba(7, 10, 13, 0.96);
+    opacity: 1;
+  }
+
+  body.terminal-input-dock-visible .terminal-control-strip {
+    bottom: calc(var(--terminal-input-dock-height) + 8px);
+  }
+
+  body.terminal-workbench-open .terminal-status-strip {
+    display: none;
+  }
+
+  .terminal-trogdor-back {
+    left: auto;
+    right: 8px;
+    top: 8px;
+    min-height: 34px;
+    padding: 0 12px;
+    font-size: 0.72rem;
+  }
+
+  body.terminal-input-dock-visible.terminal-workbench-open .terminal-control-strip {
+    bottom: calc(var(--terminal-input-dock-height) + 14px);
+  }
+
+  .terminal-workbench {
+    top: auto;
+    left: 8px;
+    right: 8px;
+    bottom: calc(var(--terminal-input-dock-height) + 68px);
+    width: auto;
+    max-height: 40vh;
+    padding: 10px;
+  }
+
+  .workbench-header {
+    grid-template-columns: 1fr;
+  }
+
+  .workbench-log-toolbar {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .workbench-log-search {
+    grid-column: 1 / -1;
+    min-height: 34px;
+    font-size: 0.78rem;
+  }
+
+  #terminal-workbench-refresh {
+    justify-self: start;
+  }
+
+  .trogdor-surface {
+    padding: 8px;
+  }
+
+  .trogdor-frame {
+    grid-template-rows: auto minmax(620px, 1fr) auto;
+  }
+
+  .trogdor-topbar,
+  .trogdor-bottombar {
+    grid-template-columns: 1fr;
+    min-height: auto;
+    gap: 8px;
+    text-align: center;
+  }
+
+  .trogdor-level {
+    justify-self: center;
+    text-align: center;
+  }
+
+  .trogdor-banner {
+    min-width: 0;
+    width: 100%;
+  }
+
+  .trogdor-world {
+    min-height: 620px;
+  }
+
+  .trogdor-dragon {
+    left: 50%;
+    top: 44%;
+    width: 210px;
+  }
+
+  .trogdor-structure {
+    width: 118px;
+  }
+
+  .trogdor-empty-field {
+    width: 210px;
+    left: 50%;
+    bottom: 205px;
+    transform: translateX(-50%);
+  }
+
+  .trogdor-empty-field svg {
+    display: none;
+  }
+
+  .trogdor-agent {
+    width: 38px;
+  }
+}

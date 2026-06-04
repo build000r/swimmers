@@ -4,11 +4,12 @@ import {
   sheetActionAvailabilityPlan,
   mobileKeyboardKeydownPlan, mobileKeyboardKeyPlan, shouldIgnoreSyntheticClick, surfaceActionDispatchContextPlan, surfaceActionDispatchPlan, surfaceActionExecutionContextPlan, surfaceActionExecutionPlan, surfaceActionFocusTerminalExecutionPlan, surfaceActionTrogdorReaderExecutionPlan,
   terminalComposerControlAction, terminalDestroyStatePatch, terminalFallbackFocusPlan, terminalFallbackKeydownPlan, terminalFallbackPastePlan, terminalFallbackPointerFocusPlan, terminalInlineInputKeydownPlan, terminalKeyStripClickExecutorPlan, terminalKeyStripClickPlan, terminalStageCaptureBindings, terminalStageClickPlan, terminalStageFocusExecutorPlan, terminalStageFocusPlan,
-  normalizeTerminalZoomValue, terminalAuxiliaryControlsPlan, terminalFallbackScrollPlan, terminalInputDockPlan, terminalPaintProbeSchedulePlan, terminalPaintVerificationPlan, terminalPresentationPlan, terminalStageKeydownPlan, terminalStageMouseDownPlan, terminalStageMouseMovePlan, terminalStageMouseUpPlan, terminalStagePasteExecutorPlan, terminalStagePastePlan, terminalStageTouchEndPlan, terminalStageWheelPlan, terminalToolsAvailabilityPlan, terminalZoomControlsPlan, terminalZoomLoadValue, terminalZoomPercentLabel, terminalZoomPersistencePlan,
+  terminalFallbackScrollPlan, terminalPaintProbeSchedulePlan, terminalPaintVerificationPlan, terminalPresentationPlan, terminalStageKeydownPlan, terminalStageMouseDownPlan, terminalStageMouseMovePlan, terminalStageMouseUpPlan, terminalStagePasteExecutorPlan, terminalStagePastePlan, terminalStageTouchEndPlan, terminalStageWheelPlan, terminalToolsAvailabilityPlan,
 } from "./input_support.js";
 import { bindAppEvents } from "./app_event_bindings.js";
 import { createTrogdorEventBindings } from "./trogdor_event_bindings.js";
 import { createSendController } from "./send_controller.js";
+import { createTerminalZoomInputController } from "./terminal_zoom_input.js";
 import {
   createThoughtConfigSheetController,
 } from "./thought_config_sheet.js";
@@ -321,6 +322,7 @@ const state = {
 };
 
 const defaultDocumentTitle = document.title || "swimmers";
+let terminalZoomInputController;
 
 const {
   apiFetch,
@@ -803,104 +805,39 @@ function persistToken(token) {
 }
 
 function terminalZoomSupported() {
-  return terminalSupports("setZoom") || surfaceSupports(state.hud, "setZoom");
+  return terminalZoomInputController.terminalZoomSupported();
 }
 
 function normalizeTerminalZoom(value) {
-  return normalizeTerminalZoomValue(value, { minZoom: TERMINAL_ZOOM_MIN, maxZoom: TERMINAL_ZOOM_MAX, step: TERMINAL_ZOOM_STEP });
+  return terminalZoomInputController.normalizeTerminalZoom(value);
 }
 
 function loadTerminalZoom(url) {
-  return terminalZoomLoadValue({ urlZoom: url.searchParams.get("zoom"), storedZoom: localStorage.getItem(TERMINAL_ZOOM_STORAGE_KEY) }, { minZoom: TERMINAL_ZOOM_MIN, maxZoom: TERMINAL_ZOOM_MAX, step: TERMINAL_ZOOM_STEP });
+  return terminalZoomInputController.loadTerminalZoom(url);
 }
 
 function syncTerminalZoomControls() {
-  if (!el.terminalControlStrip) {
-    return;
-  }
-  const plan = terminalZoomControlsPlan({ zoomSupported: terminalZoomSupported(), hasTerminal: Boolean(state.terminal), zoom: state.terminalZoom, minZoom: TERMINAL_ZOOM_MIN, maxZoom: TERMINAL_ZOOM_MAX });
-  el.terminalZoomOut.disabled = plan.zoomOutDisabled;
-  el.terminalZoomIn.disabled = plan.zoomInDisabled;
-  el.terminalZoomReset.disabled = plan.zoomResetDisabled;
-  el.terminalZoomReset.textContent = plan.zoomResetLabel;
-  const auxiliaryPlan = terminalAuxiliaryControlsPlan({ hasCurrentSession: Boolean(currentSession()), readOnly: state.readOnly, mobileKeyboardActive: state.mobileKeyboardActive, hasCopyFrame: Boolean(el.terminalCopyFrame) });
-  el.terminalMobileKeyboard.disabled = auxiliaryPlan.mobileKeyboardDisabled;
-  el.terminalMobileKeyboard.setAttribute("aria-pressed", auxiliaryPlan.mobileKeyboardAriaPressed);
-  syncTerminalInputDock();
-  if (auxiliaryPlan.copyFrameAvailable) el.terminalCopyFrame.disabled = auxiliaryPlan.copyFrameDisabled;
+  return terminalZoomInputController.syncTerminalZoomControls();
 }
 
 function syncTerminalInputDock() {
-  if (!el.terminalInputDock) {
-    return;
-  }
-  const plan = terminalInputDockPlan({ hasCurrentSession: Boolean(currentSession()), trogdorAtlasOpen: state.trogdorAtlasOpen, readOnly: state.readOnly, inputValue: el.terminalInlineInput.value });
-  document.body.classList.toggle("terminal-input-dock-visible", plan.visible);
-  el.terminalInputDock.classList.toggle("hidden", plan.hidden);
-  el.terminalInputDock.setAttribute("aria-hidden", plan.ariaHidden);
-  el.terminalInlineInput.disabled = plan.inputDisabled;
-  if (el.terminalKeyStrip) {
-    for (const button of el.terminalKeyStrip.querySelectorAll("button[data-terminal-key]")) {
-      button.disabled = plan.keyStripButtonDisabled;
-    }
-  }
-  el.terminalInputSend.disabled = plan.sendDisabled;
+  return terminalZoomInputController.syncTerminalInputDock();
 }
 
 function resizeTerminalInlineInput() {
-  if (!el.terminalInlineInput) {
-    return;
-  }
-  el.terminalInlineInput.style.height = "auto";
-  const nextHeight = Math.max(40, Math.min(86, el.terminalInlineInput.scrollHeight || 40));
-  el.terminalInlineInput.style.height = `${nextHeight}px`;
+  return terminalZoomInputController.resizeTerminalInlineInput();
 }
 
 function setTerminalInputEcho(text) {
-  if (!el.terminalInputEcho) {
-    return;
-  }
-  const normalized = String(text || "").replace(/\r/g, "").replace(/\n+$/, "");
-  el.terminalInputEcho.textContent = normalized ? `› ${normalized.replace(/\s+/g, " ")}` : "";
+  return terminalZoomInputController.setTerminalInputEcho(text);
 }
 
 function projectTerminalInputIntoFallback(text) {
-  if (!state.terminalFallbackActive || !el.terminalFallback) {
-    return;
-  }
-  const normalized = String(text || "").replace(/\r/g, "").replace(/\n+$/, "");
-  if (!normalized.trim()) {
-    return;
-  }
-  const existing = el.terminalFallback.textContent || "";
-  const separator = existing && !existing.endsWith("\n") ? "\n" : "";
-  updateTerminalFallbackText(`${existing}${separator}› ${normalized}\n`);
+  return terminalZoomInputController.projectTerminalInputIntoFallback(text);
 }
 
 async function submitTerminalInputDock() {
-  if (state.readOnly || !currentSession()) {
-    return false;
-  }
-  const text = String(el.terminalInlineInput.value || "");
-  if (!text.trim()) {
-    syncTerminalInputDock();
-    return false;
-  }
-  setTerminalInputEcho(`pending: ${text}`);
-  projectTerminalInputIntoFallback(text);
-  try {
-    await sendLineToSession(state.selectedSessionId, text);
-    rememberSendHistory(text);
-    el.terminalInlineInput.value = "";
-    resizeTerminalInlineInput();
-    syncTerminalInputDock();
-    void refreshSessions();
-    return true;
-  } catch (error) {
-    setTerminalInputEcho(`failed: ${error?.message || "input delivery failed"}`);
-    setConnectionStatus("input failed; stream may be disconnected", true);
-    return false;
-  }
+  return terminalZoomInputController.submitTerminalInputDock();
 }
 
 function resetAgentContextForSession(sessionId) {
@@ -950,45 +887,19 @@ async function refreshWorkbenchWidgetsForSelectedSession(options = {}) {
 }
 
 function applyZoomToSurface(surface) {
-  if (surfaceSupports(surface, "setZoom")) {
-    surface.setZoom(state.terminalZoom);
-    return true;
-  }
-  return false;
+  return terminalZoomInputController.applyZoomToSurface(surface);
 }
 
 function persistTerminalZoomToUrl(plan) {
-  const url = new URL(window.location.href);
-  if (plan.urlParamAction === "delete") url.searchParams.delete("zoom");
-  else url.searchParams.set("zoom", plan.urlParamValue);
-  window.history.replaceState({}, "", url);
+  return terminalZoomInputController.persistTerminalZoomToUrl(plan);
 }
 
 function applyTerminalZoom(options = {}) {
-  const previous = state.terminalZoom;
-  state.terminalZoom = normalizeTerminalZoom(state.terminalZoom);
-  const changed = Math.abs(previous - state.terminalZoom) > 0.001;
-  const applied = applyZoomToSurface(state.hud) || applyZoomToSurface(state.terminal);
-  if (state.terminal) {
-    applyZoomToSurface(state.terminal);
-  }
-  if (options.persist !== false) {
-    const persistencePlan = terminalZoomPersistencePlan(state.terminalZoom);
-    localStorage.setItem(TERMINAL_ZOOM_STORAGE_KEY, persistencePlan.storageValue);
-    persistTerminalZoomToUrl(persistencePlan);
-  }
-  syncTerminalZoomControls();
-  if ((changed || options.forceResize) && (applied || state.terminal || state.hud)) {
-    measureAndResizeSurface(true, true);
-  }
-  if (options.announce) {
-    setUtilityStatus(`Terminal zoom ${terminalZoomPercentLabel(state.terminalZoom)}.`, false, 1600);
-  }
+  return terminalZoomInputController.applyTerminalZoom(options);
 }
 
 function setTerminalZoom(nextZoom, options = {}) {
-  state.terminalZoom = normalizeTerminalZoom(nextZoom);
-  applyTerminalZoom(options);
+  return terminalZoomInputController.setTerminalZoom(nextZoom, options);
 }
 
 function syncTerminalTools() {
@@ -2338,6 +2249,30 @@ const {
   updateSendHint,
 } = sendController;
 
+terminalZoomInputController = createTerminalZoomInputController({
+  state,
+  el,
+  storage: localStorage,
+  windowRef: window,
+  documentRef: document,
+  URLImpl: URL,
+  surfaceSupports,
+  terminalSupports,
+  currentSession,
+  updateTerminalFallbackText,
+  sendLineToSession,
+  rememberSendHistory,
+  refreshSessions,
+  setConnectionStatus,
+  setUtilityStatus,
+  measureAndResizeSurface,
+  focusTerminalInputSurface,
+  terminalZoomStorageKey: TERMINAL_ZOOM_STORAGE_KEY,
+  minZoom: TERMINAL_ZOOM_MIN,
+  maxZoom: TERMINAL_ZOOM_MAX,
+  step: TERMINAL_ZOOM_STEP,
+});
+
 async function handleAuthTokenButtonAction(action) {
   const plan = authTokenButtonPlan(action, el.tokenInput.value);
   if (plan.type === "ignore") return false;
@@ -2956,13 +2891,13 @@ function handleTerminalLinkOpenClick() { if (state.hoveredLinkUrl) safeOpenUrl(s
 
 function handleTerminalLinkCopyClick() { void copyHoveredLink(); }
 
-function setTerminalZoomAndRefocus(nextZoom) { setTerminalZoom(nextZoom, { announce: true }); focusTerminalInputSurface({ preventScroll: true }); }
+function setTerminalZoomAndRefocus(nextZoom) { return terminalZoomInputController.setTerminalZoomAndRefocus(nextZoom); }
 
-function handleTerminalZoomOutClick() { setTerminalZoomAndRefocus(state.terminalZoom - TERMINAL_ZOOM_STEP); }
+function handleTerminalZoomOutClick() { return terminalZoomInputController.handleTerminalZoomOutClick(); }
 
-function handleTerminalZoomResetClick() { setTerminalZoomAndRefocus(1); }
+function handleTerminalZoomResetClick() { return terminalZoomInputController.handleTerminalZoomResetClick(); }
 
-function handleTerminalZoomInClick() { setTerminalZoomAndRefocus(state.terminalZoom + TERMINAL_ZOOM_STEP); }
+function handleTerminalZoomInClick() { return terminalZoomInputController.handleTerminalZoomInClick(); }
 
 function handleTerminalMobileKeyboardClick() { if (state.mobileKeyboardActive) { closeMobileKeyboard(); focusTerminalInputSurface({ preventScroll: true }); return; } focusMobileKeyboard(); }
 
@@ -2972,9 +2907,9 @@ function handleTerminalWorkbenchToggleClick() { setTerminalWorkbenchOpen(!state.
 
 function handleTerminalWorkbenchRefreshClick() { void refreshAgentContextForSelectedSession({ force: true }); void refreshWorkbenchWidgetsForSelectedSession({ force: true }); focusTerminalInputSurface({ preventScroll: true }); }
 
-function handleTerminalInputDockSubmit(event) { event.preventDefault(); void submitTerminalInputDock(); }
+function handleTerminalInputDockSubmit(event) { return terminalZoomInputController.handleTerminalInputDockSubmit(event); }
 
-function handleTerminalInlineInputInput() { resizeTerminalInlineInput(); syncTerminalInputDock(); }
+function handleTerminalInlineInputInput() { return terminalZoomInputController.handleTerminalInlineInputInput(); }
 
 function handleTerminalKeyStripClick(event) { const action = terminalKeyStripClickExecutorPlan(terminalKeyStripClickPlan(event.type, event.target)); if (!action.sendKey) return; if (action.preventDefault) event.preventDefault(); sendTerminalControlKey(action.actionId); focusTerminalInputSurface({ preventScroll: true }); }
 
