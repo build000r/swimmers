@@ -391,6 +391,13 @@ enum InitialRequestKeyAction {
     Ignore,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PasteRoute {
+    ThoughtConfig,
+    InitialRequest,
+    Ignore,
+}
+
 fn classify_initial_request_key(key: KeyEvent) -> InitialRequestKeyAction {
     match key.code {
         KeyCode::Esc => InitialRequestKeyAction::Close,
@@ -403,6 +410,14 @@ fn classify_initial_request_key(key: KeyEvent) -> InitialRequestKeyAction {
             InitialRequestKeyAction::InsertChar(ch)
         }
         _ => InitialRequestKeyAction::Ignore,
+    }
+}
+
+fn route_paste(thought_config_open: bool, initial_request_open: bool) -> PasteRoute {
+    match (thought_config_open, initial_request_open) {
+        (true, _) => PasteRoute::ThoughtConfig,
+        (false, true) => PasteRoute::InitialRequest,
+        _ => PasteRoute::Ignore,
     }
 }
 
@@ -3291,12 +3306,18 @@ impl<C: TuiApi> App<C> {
     }
 
     pub(crate) fn handle_paste(&mut self, text: &str) {
-        if self.thought_config_editor.is_some() {
-            self.handle_thought_config_paste(text);
-            return;
-        }
-        if let Some(initial_request) = &mut self.initial_request {
-            initial_request.value.push_str(text);
+        match route_paste(
+            self.thought_config_editor.is_some(),
+            self.initial_request.is_some(),
+        ) {
+            PasteRoute::ThoughtConfig => self.handle_thought_config_paste(text),
+            PasteRoute::InitialRequest => {
+                let Some(initial_request) = &mut self.initial_request else {
+                    return;
+                };
+                initial_request.value.push_str(text);
+            }
+            PasteRoute::Ignore => {}
         }
     }
 
@@ -4516,6 +4537,14 @@ mod tests {
             classify_initial_request_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE)),
             InitialRequestKeyAction::Ignore
         );
+    }
+
+    #[test]
+    fn paste_routing_prioritizes_thought_config_before_initial_request() {
+        assert_eq!(route_paste(true, true), PasteRoute::ThoughtConfig);
+        assert_eq!(route_paste(true, false), PasteRoute::ThoughtConfig);
+        assert_eq!(route_paste(false, true), PasteRoute::InitialRequest);
+        assert_eq!(route_paste(false, false), PasteRoute::Ignore);
     }
 
     #[test]
