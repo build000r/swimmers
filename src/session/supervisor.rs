@@ -69,6 +69,14 @@ struct ListedTmuxSessions {
     names: Vec<String>,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum TmuxListSessionsOutcome {
+    Listed(Vec<String>),
+    NoSessions,
+    TmuxError(String),
+    CommandError(String),
+}
+
 struct MissingTrackedSessionSummary {
     session_id: String,
     previous_state: SessionState,
@@ -747,49 +755,61 @@ impl SessionSupervisor {
             "list-sessions",
         )
         .await;
+        let outcome = match output {
+            Ok(output) => classify_tmux_list_sessions_output(
+                output.status.success(),
+                &output.stdout,
+                &output.stderr,
+            ),
+            Err(error) => classify_tmux_list_sessions_command_error(error),
+        };
 
-        match output {
-            Ok(output) if output.status.success() => {
-                let names = parse_tmux_session_names(&output.stdout);
-                log_tmux_list_success(reason, list_started.elapsed(), names.len());
+        self.build_listed_tmux_sessions(reason, list_started.elapsed(), outcome)
+    }
+
+    fn build_listed_tmux_sessions(
+        &self,
+        reason: &'static str,
+        elapsed: Duration,
+        outcome: TmuxListSessionsOutcome,
+    ) -> ListedTmuxSessions {
+        match outcome {
+            TmuxListSessionsOutcome::Listed(names) => {
+                log_tmux_list_success(reason, elapsed, names.len());
                 self.record_tmux_discovery_success(reason, names.len());
                 ListedTmuxSessions {
                     reliable: true,
                     names,
                 }
             }
-            Ok(output) => {
-                let elapsed = list_started.elapsed();
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                if tmux_list_reports_no_sessions(&stderr) {
-                    info!(
-                        reason,
-                        phase = "tmux_list_sessions",
-                        elapsed_ms = elapsed.as_millis() as u64,
-                        "no existing tmux sessions found"
-                    );
-                    self.record_tmux_discovery_success(reason, 0);
-                    ListedTmuxSessions {
-                        reliable: true,
-                        names: Vec::new(),
-                    }
-                } else {
-                    warn!(
-                        reason,
-                        phase = "tmux_list_sessions",
-                        elapsed_ms = elapsed.as_millis() as u64,
-                        "tmux list-sessions returned error: {}",
-                        stderr
-                    );
-                    self.record_tmux_discovery_failure(reason, stderr.trim().to_string());
-                    ListedTmuxSessions {
-                        reliable: false,
-                        names: Vec::new(),
-                    }
+            TmuxListSessionsOutcome::NoSessions => {
+                info!(
+                    reason,
+                    phase = "tmux_list_sessions",
+                    elapsed_ms = elapsed.as_millis() as u64,
+                    "no existing tmux sessions found"
+                );
+                self.record_tmux_discovery_success(reason, 0);
+                ListedTmuxSessions {
+                    reliable: true,
+                    names: Vec::new(),
                 }
             }
-            Err(error) => {
-                let elapsed = list_started.elapsed();
+            TmuxListSessionsOutcome::TmuxError(stderr) => {
+                warn!(
+                    reason,
+                    phase = "tmux_list_sessions",
+                    elapsed_ms = elapsed.as_millis() as u64,
+                    "tmux list-sessions returned error: {}",
+                    stderr
+                );
+                self.record_tmux_discovery_failure(reason, stderr.trim().to_string());
+                ListedTmuxSessions {
+                    reliable: false,
+                    names: Vec::new(),
+                }
+            }
+            TmuxListSessionsOutcome::CommandError(error) => {
                 warn!(
                     reason,
                     phase = "tmux_list_sessions",
@@ -797,7 +817,7 @@ impl SessionSupervisor {
                     "tmux list-sessions failed: {}",
                     error
                 );
-                self.record_tmux_discovery_failure(reason, error.to_string());
+                self.record_tmux_discovery_failure(reason, error);
                 ListedTmuxSessions {
                     reliable: false,
                     names: Vec::new(),
@@ -2350,6 +2370,27 @@ fn tmux_list_reports_no_sessions(stderr: &str) -> bool {
     stderr.contains("no server running") || stderr.contains("no sessions")
 }
 
+fn classify_tmux_list_sessions_output(
+    success: bool,
+    stdout: &[u8],
+    stderr: &[u8],
+) -> TmuxListSessionsOutcome {
+    if success {
+        return TmuxListSessionsOutcome::Listed(parse_tmux_session_names(stdout));
+    }
+
+    let stderr = String::from_utf8_lossy(stderr);
+    if tmux_list_reports_no_sessions(&stderr) {
+        TmuxListSessionsOutcome::NoSessions
+    } else {
+        TmuxListSessionsOutcome::TmuxError(stderr.into_owned())
+    }
+}
+
+fn classify_tmux_list_sessions_command_error(error: impl fmt::Display) -> TmuxListSessionsOutcome {
+    TmuxListSessionsOutcome::CommandError(error.to_string())
+}
+
 fn log_tmux_list_success(reason: &'static str, elapsed: Duration, listed_sessions: usize) {
     let elapsed_ms = elapsed.as_millis() as u64;
     if elapsed >= Duration::from_secs(2) {
@@ -2471,6 +2512,51 @@ mod tests {
         assert_eq!(
             err.to_string(),
             "tmux kill-session failed: permission denied"
+        );
+    }
+
+    #[test]
+    fn tmux_list_output_classifies_successful_stdout_as_reliable_names() {
+        let outcome =
+            classify_tmux_list_sessions_output(true, b"alpha\n\nbeta\n", b"ignored stderr");
+
+        assert_eq!(
+            outcome,
+            TmuxListSessionsOutcome::Listed(vec!["alpha".to_string(), "beta".to_string()])
+        );
+    }
+
+    #[test]
+    fn tmux_list_output_classifies_no_session_stderr_as_reliable_empty() {
+        let outcome = classify_tmux_list_sessions_output(
+            false,
+            b"",
+            b"no server running on /tmp/tmux-1000/default\n",
+        );
+
+        assert_eq!(outcome, TmuxListSessionsOutcome::NoSessions);
+    }
+
+    #[test]
+    fn tmux_list_output_classifies_unexpected_stderr_as_unreliable_failure() {
+        let outcome = classify_tmux_list_sessions_output(false, b"", b"permission denied\n");
+
+        assert_eq!(
+            outcome,
+            TmuxListSessionsOutcome::TmuxError("permission denied\n".to_string())
+        );
+    }
+
+    #[test]
+    fn tmux_list_command_error_classifies_as_unreliable_failure() {
+        let outcome =
+            classify_tmux_list_sessions_command_error("failed to run tmux list-sessions: denied");
+
+        assert_eq!(
+            outcome,
+            TmuxListSessionsOutcome::CommandError(
+                "failed to run tmux list-sessions: denied".to_string()
+            )
         );
     }
 
