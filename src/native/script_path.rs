@@ -160,45 +160,71 @@ pub(super) fn materialize_bundled_script(
     bundled_source: &str,
 ) -> Result<PathBuf> {
     let target = bundled_root.join(script_relative_path);
-    if let Ok(existing) = std::fs::read_to_string(&target) {
-        if existing == bundled_source {
-            return Ok(target);
-        }
+    if bundled_script_matches(&target, bundled_source) {
+        return Ok(target);
     }
 
-    let parent = target
+    create_native_script_directory(native_script_parent(&target)?)?;
+    let tmp_path = bundled_script_tmp_path(&target)?;
+    write_bundled_script(&tmp_path, bundled_source)?;
+    install_bundled_script(&tmp_path, &target)?;
+    Ok(target)
+}
+
+fn bundled_script_matches(target: &Path, bundled_source: &str) -> bool {
+    std::fs::read_to_string(target)
+        .map(|existing| existing == bundled_source)
+        .unwrap_or(false)
+}
+
+fn native_script_parent(target: &Path) -> Result<&Path> {
+    target
         .parent()
-        .ok_or_else(|| anyhow!("native script path has no parent: {}", target.display()))?;
+        .ok_or_else(|| anyhow!("native script path has no parent: {}", target.display()))
+}
+
+fn create_native_script_directory(parent: &Path) -> Result<()> {
     std::fs::create_dir_all(parent).with_context(|| {
         format!(
             "failed to create native script directory {}",
             parent.display()
         )
-    })?;
+    })
+}
 
-    let file_name = target
-        .file_name()
-        .and_then(|name| name.to_str())
-        .ok_or_else(|| anyhow!("native script path has no file name: {}", target.display()))?;
-    let tmp_path = target.with_file_name(format!(
+fn bundled_script_tmp_path(target: &Path) -> Result<PathBuf> {
+    let file_name = native_script_file_name(target)?;
+    Ok(target.with_file_name(format!(
         "{file_name}.{}.{}.tmp",
         std::process::id(),
         unique_tmp_suffix()
-    ));
-    std::fs::write(&tmp_path, bundled_source).with_context(|| {
+    )))
+}
+
+fn native_script_file_name(target: &Path) -> Result<&str> {
+    target
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| anyhow!("native script path has no file name: {}", target.display()))
+}
+
+fn write_bundled_script(tmp_path: &Path, bundled_source: &str) -> Result<()> {
+    std::fs::write(tmp_path, bundled_source).with_context(|| {
         format!(
             "failed to write bundled native script {}",
             tmp_path.display()
         )
-    })?;
-    std::fs::rename(&tmp_path, &target).with_context(|| {
-        let _ = std::fs::remove_file(&tmp_path);
+    })
+}
+
+fn install_bundled_script(tmp_path: &Path, target: &Path) -> Result<()> {
+    std::fs::rename(tmp_path, target).with_context(|| {
+        let _ = std::fs::remove_file(tmp_path);
         format!(
             "failed to install bundled native script at {}",
             target.display()
         )
-    })?;
-    Ok(target)
+    })
 }
 
 fn push_ancestor_roots(roots: &mut Vec<PathBuf>, start: &Path) {

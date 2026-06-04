@@ -4081,23 +4081,12 @@ impl<C: TuiApi> App<C> {
     }
 
     fn render_empty_aquarium_message(&self, renderer: &mut Renderer, field: Rect) {
-        let (text, color) = if !self.entities.is_empty() && self.thought_filter.is_active() {
-            ("no swimmers match filters", Color::DarkGrey)
-        } else if self.tmux_dependency_unavailable() {
-            (
-                "tmux unavailable - run swimmers config doctor",
-                Color::Yellow,
-            )
-        } else {
-            (
-                "no tmux sessions found - press r after starting one",
-                Color::DarkGrey,
-            )
-        };
-        let x = field
-            .x
-            .saturating_add(field.width.saturating_sub(text.len() as u16) / 2);
-        let y = field.y + field.height / 2;
+        let (text, color) = empty_aquarium_message(
+            !self.entities.is_empty(),
+            self.thought_filter.is_active(),
+            self.tmux_dependency_unavailable(),
+        );
+        let (x, y) = centered_empty_aquarium_position(field, text);
         renderer.draw_text(x, y, text, color);
     }
 
@@ -4797,6 +4786,46 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(ids, vec!["s2", "s10"]);
     }
+
+    #[test]
+    fn empty_aquarium_message_preserves_priority_text_and_color() {
+        assert_eq!(
+            empty_aquarium_message(true, true, true),
+            ("no swimmers match filters", Color::DarkGrey)
+        );
+        assert_eq!(
+            empty_aquarium_message(false, false, true),
+            (
+                "tmux unavailable - run swimmers config doctor",
+                Color::Yellow,
+            )
+        );
+        assert_eq!(
+            empty_aquarium_message(false, true, false),
+            (
+                "no tmux sessions found - press r after starting one",
+                Color::DarkGrey,
+            )
+        );
+    }
+
+    #[test]
+    fn empty_aquarium_position_preserves_centering_math() {
+        let field = Rect {
+            x: 3,
+            y: 4,
+            width: 20,
+            height: 6,
+        };
+        assert_eq!(
+            centered_empty_aquarium_position(field, "1234567890"),
+            (8, 7)
+        );
+        assert_eq!(
+            centered_empty_aquarium_position(Rect { width: 4, ..field }, "1234567890",),
+            (3, 7)
+        );
+    }
 }
 
 /// Load the list of overlay-configured domain plans from disk, mapped into
@@ -4815,4 +4844,30 @@ pub(crate) fn load_overlay_plan_entries() -> Vec<PlanPanelEntry> {
             schema_path: entry.schema_path.to_string_lossy().into_owned(),
         })
         .collect()
+}
+
+fn empty_aquarium_message(
+    has_entities: bool,
+    thought_filter_active: bool,
+    tmux_unavailable: bool,
+) -> (&'static str, Color) {
+    match (has_entities, thought_filter_active, tmux_unavailable) {
+        (true, true, _) => ("no swimmers match filters", Color::DarkGrey),
+        (_, _, true) => (
+            "tmux unavailable - run swimmers config doctor",
+            Color::Yellow,
+        ),
+        _ => (
+            "no tmux sessions found - press r after starting one",
+            Color::DarkGrey,
+        ),
+    }
+}
+
+fn centered_empty_aquarium_position(field: Rect, text: &str) -> (u16, u16) {
+    let x = field
+        .x
+        .saturating_add(field.width.saturating_sub(text.len() as u16) / 2);
+    let y = field.y + field.height / 2;
+    (x, y)
 }

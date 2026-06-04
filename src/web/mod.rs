@@ -1729,18 +1729,27 @@ fn decode_input_text_message(
 }
 
 fn decode_input_text(data: String, client_message_id: Option<String>) -> WsClientDecision {
-    if data.is_empty() {
-        WsClientDecision::Ignore
-    } else if data.len() > MAX_WS_INPUT_BYTES {
-        oversized_input_error(client_message_id)
-    } else {
-        WsClientDecision::Forward {
-            cmd: SessionCommand::WriteInputAck {
-                data: data.into_bytes(),
-                ack: oneshot::channel().0,
-            },
-            client_message_id,
+    decode_terminal_text_input(data, client_message_id, str::is_empty, |data| {
+        SessionCommand::WriteInputAck {
+            data: data.into_bytes(),
+            ack: oneshot::channel().0,
         }
+    })
+}
+
+fn decode_terminal_text_input(
+    data: String,
+    client_message_id: Option<String>,
+    is_empty_input: impl FnOnce(&str) -> bool,
+    build_command: impl FnOnce(String) -> SessionCommand,
+) -> WsClientDecision {
+    match (is_empty_input(&data), data.len() > MAX_WS_INPUT_BYTES) {
+        (true, _) => WsClientDecision::Ignore,
+        (_, true) => oversized_input_error(client_message_id),
+        _ => WsClientDecision::Forward {
+            cmd: build_command(data),
+            client_message_id,
+        },
     }
 }
 
@@ -1759,19 +1768,16 @@ fn decode_submit_line_message(
 }
 
 fn decode_submit_line(data: String, client_message_id: Option<String>) -> WsClientDecision {
-    if data.trim().is_empty() {
-        WsClientDecision::Ignore
-    } else if data.len() > MAX_WS_INPUT_BYTES {
-        oversized_input_error(client_message_id)
-    } else {
-        WsClientDecision::Forward {
-            cmd: SessionCommand::SubmitLineAck {
-                text: data,
-                ack: oneshot::channel().0,
-            },
-            client_message_id,
+    decode_terminal_text_input(data, client_message_id, submit_line_is_empty, |data| {
+        SessionCommand::SubmitLineAck {
+            text: data,
+            ack: oneshot::channel().0,
         }
-    }
+    })
+}
+
+fn submit_line_is_empty(data: &str) -> bool {
+    data.trim().is_empty()
 }
 
 fn decode_resize_message(auth: &AuthInfo, cols: u16, rows: u16) -> WsClientDecision {
@@ -3649,10 +3655,14 @@ mod tests {
         match decode_input_text(oversized, Some("big-1".to_string())) {
             WsClientDecision::SendError {
                 code,
+                message,
                 client_message_id,
-                ..
             } => {
                 assert_eq!(code, "INPUT_TOO_LARGE");
+                assert_eq!(
+                    message,
+                    format!("terminal input frame exceeds {MAX_WS_INPUT_BYTES} byte limit")
+                );
                 assert_eq!(client_message_id.as_deref(), Some("big-1"));
             }
             other => panic!("unexpected oversized decision: {other:?}"),
@@ -3665,6 +3675,42 @@ mod tests {
             } => {
                 assert_eq!(data, "λ\n".as_bytes());
                 assert_eq!(client_message_id.as_deref(), Some("ack-1"));
+            }
+            other => panic!("unexpected forwarded decision: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn decode_submit_line_covers_blank_oversized_and_forwarded_text() {
+        assert!(matches!(
+            decode_submit_line(" \t\n".to_string(), Some("blank-1".to_string())),
+            WsClientDecision::Ignore
+        ));
+
+        let oversized = "x".repeat(MAX_WS_INPUT_BYTES + 1);
+        match decode_submit_line(oversized, Some("big-line-1".to_string())) {
+            WsClientDecision::SendError {
+                code,
+                message,
+                client_message_id,
+            } => {
+                assert_eq!(code, "INPUT_TOO_LARGE");
+                assert_eq!(
+                    message,
+                    format!("terminal input frame exceeds {MAX_WS_INPUT_BYTES} byte limit")
+                );
+                assert_eq!(client_message_id.as_deref(), Some("big-line-1"));
+            }
+            other => panic!("unexpected oversized decision: {other:?}"),
+        }
+
+        match decode_submit_line("cargo test".to_string(), Some("line-ack-1".to_string())) {
+            WsClientDecision::Forward {
+                cmd: SessionCommand::SubmitLineAck { text, .. },
+                client_message_id,
+            } => {
+                assert_eq!(text, "cargo test");
+                assert_eq!(client_message_id.as_deref(), Some("line-ack-1"));
             }
             other => panic!("unexpected forwarded decision: {other:?}"),
         }

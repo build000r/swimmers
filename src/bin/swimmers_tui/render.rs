@@ -441,67 +441,119 @@ pub(crate) fn render_footer<C: TuiApi>(app: &App<C>, renderer: &mut Renderer, st
         return;
     }
 
-    if let Some(selected) = app.selected() {
-        let state_line = format!(
-            "selected: {} [{}; {}] {}",
-            selected.session.tmux_name,
-            session_state_text(&selected.session),
-            session_state_evidence_text(&selected.session),
-            shorten_path(&selected.session.cwd, 42)
-        );
-        renderer.draw_text(
-            2,
-            start_y,
-            &truncate_label(&state_line, renderer.width().saturating_sub(4) as usize),
-            Color::White,
-        );
-
-        let cmd = selected
-            .session
-            .current_command
-            .as_deref()
-            .unwrap_or("idle");
-        let cmd_line = format!("cmd: {}", shorten_path(cmd, 60));
-        renderer.draw_text(
-            2,
-            start_y + 1,
-            &truncate_label(&cmd_line, renderer.width().saturating_sub(4) as usize),
-            Color::DarkGrey,
-        );
-    } else {
-        renderer.draw_text(2, start_y, "selected: none", Color::DarkGrey);
-    }
-
-    let help = if app.initial_request.is_some() {
-        if matches!(app.voice_state, VoiceUiState::Unsupported) {
-            "request: type prompt  enter create  backspace delete  esc cancel"
-        } else {
-            "request: type prompt  ctrl-v voice  enter create  backspace delete  esc cancel"
-        }
-    } else if app.thought_config_editor.is_some() {
-        "thought config: tab moves  arrows adjust  enter saves  esc cancels"
-    } else if app.picker.is_some() {
-        "picker: type search  enter/right select  B batch  X exclude  backspace up  esc close"
-    } else if app.show_help {
-        "press any key to dismiss help"
-    } else {
-        "arrows/hjkl move  enter open  r refresh  t config  ? help  q quit"
-    };
-    renderer.draw_text(
-        2,
+    let max_width = footer_text_width(renderer);
+    render_footer_selection(app, renderer, start_y, max_width);
+    render_footer_line(
+        renderer,
         start_y + 2,
-        &truncate_label(help, renderer.width().saturating_sub(4) as usize),
+        footer_help_text(app),
         Color::Cyan,
+        max_width,
     );
 
     if let Some(message) = app.visible_message() {
-        renderer.draw_text(
-            2,
-            start_y + 3,
-            &truncate_label(message, renderer.width().saturating_sub(4) as usize),
-            Color::Yellow,
-        );
+        render_footer_line(renderer, start_y + 3, message, Color::Yellow, max_width);
     }
+}
+
+fn footer_text_width(renderer: &Renderer) -> usize {
+    renderer.width().saturating_sub(4) as usize
+}
+
+fn render_footer_selection<C: TuiApi>(
+    app: &App<C>,
+    renderer: &mut Renderer,
+    start_y: u16,
+    max_width: usize,
+) {
+    let Some(selected) = app.selected() else {
+        renderer.draw_text(2, start_y, "selected: none", Color::DarkGrey);
+        return;
+    };
+
+    render_footer_line(
+        renderer,
+        start_y,
+        &footer_selected_state_line(selected),
+        Color::White,
+        max_width,
+    );
+    render_footer_line(
+        renderer,
+        start_y + 1,
+        &footer_selected_command_line(selected),
+        Color::DarkGrey,
+        max_width,
+    );
+}
+
+fn footer_selected_state_line(selected: &SessionEntity) -> String {
+    format!(
+        "selected: {} [{}; {}] {}",
+        selected.session.tmux_name,
+        session_state_text(&selected.session),
+        session_state_evidence_text(&selected.session),
+        shorten_path(&selected.session.cwd, 42)
+    )
+}
+
+fn footer_selected_command_line(selected: &SessionEntity) -> String {
+    let cmd = selected
+        .session
+        .current_command
+        .as_deref()
+        .unwrap_or("idle");
+    format!("cmd: {}", shorten_path(cmd, 60))
+}
+
+fn footer_help_text<C: TuiApi>(app: &App<C>) -> &'static str {
+    if app.initial_request.is_some() {
+        return request_footer_help_text(&app.voice_state);
+    }
+    footer_mode_help_text(FooterHelpState::from_app(app))
+}
+
+#[derive(Clone, Copy)]
+struct FooterHelpState {
+    thought_config_editor: bool,
+    picker: bool,
+    show_help: bool,
+}
+
+impl FooterHelpState {
+    fn from_app<C: TuiApi>(app: &App<C>) -> Self {
+        Self {
+            thought_config_editor: app.thought_config_editor.is_some(),
+            picker: app.picker.is_some(),
+            show_help: app.show_help,
+        }
+    }
+}
+
+fn footer_mode_help_text(state: FooterHelpState) -> &'static str {
+    if state.thought_config_editor {
+        return "thought config: tab moves  arrows adjust  enter saves  esc cancels";
+    }
+    if state.picker {
+        return "picker: type search  enter/right select  B batch  X exclude  backspace up  esc close";
+    }
+    if state.show_help {
+        return "press any key to dismiss help";
+    }
+    "arrows/hjkl move  enter open  r refresh  t config  ? help  q quit"
+}
+
+fn request_footer_help_text(voice_state: &VoiceUiState) -> &'static str {
+    match voice_state {
+        VoiceUiState::Unsupported => {
+            "request: type prompt  enter create  backspace delete  esc cancel"
+        }
+        _ => "request: type prompt  ctrl-v voice  enter create  backspace delete  esc cancel",
+    }
+}
+
+fn render_footer_line(renderer: &mut Renderer, y: u16, text: &str, color: Color, max_width: usize) {
+    renderer.draw_text(2, y, &truncate_label(text, max_width), color);
 }
 
 pub(crate) fn render_too_small(renderer: &mut Renderer) {
@@ -868,5 +920,60 @@ mod tests {
         let truncated = truncate_label(text, 7);
         assert_eq!(UnicodeWidthStr::width(truncated.as_str()), 7);
         assert!(truncated.ends_with('~'));
+    }
+
+    #[test]
+    fn footer_mode_help_text_preserves_priority_order() {
+        assert_eq!(
+            footer_mode_help_text(FooterHelpState {
+                thought_config_editor: true,
+                picker: true,
+                show_help: true,
+            }),
+            "thought config: tab moves  arrows adjust  enter saves  esc cancels"
+        );
+        assert_eq!(
+            footer_mode_help_text(FooterHelpState {
+                thought_config_editor: false,
+                picker: true,
+                show_help: true,
+            }),
+            "picker: type search  enter/right select  B batch  X exclude  backspace up  esc close"
+        );
+        assert_eq!(
+            footer_mode_help_text(FooterHelpState {
+                thought_config_editor: false,
+                picker: false,
+                show_help: true,
+            }),
+            "press any key to dismiss help"
+        );
+        assert_eq!(
+            footer_mode_help_text(FooterHelpState {
+                thought_config_editor: false,
+                picker: false,
+                show_help: false,
+            }),
+            "arrows/hjkl move  enter open  r refresh  t config  ? help  q quit"
+        );
+    }
+
+    #[test]
+    fn request_footer_help_text_hides_voice_only_when_unsupported() {
+        assert_eq!(
+            request_footer_help_text(&VoiceUiState::Unsupported),
+            "request: type prompt  enter create  backspace delete  esc cancel"
+        );
+        for state in [
+            VoiceUiState::Ready,
+            VoiceUiState::Recording,
+            VoiceUiState::Transcribing,
+            VoiceUiState::Failed("denied".to_string()),
+        ] {
+            assert_eq!(
+                request_footer_help_text(&state),
+                "request: type prompt  ctrl-v voice  enter create  backspace delete  esc cancel"
+            );
+        }
     }
 }

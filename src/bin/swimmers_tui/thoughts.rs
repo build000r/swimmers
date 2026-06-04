@@ -1474,39 +1474,59 @@ fn render_thought_panel_rows(
 }
 
 fn render_thought_panel_row(renderer: &mut Renderer, row: &ThoughtRowLayout, y: u16) {
-    if let (Some(rect), Some(label)) = (row.mermaid_rect, &row.mermaid_label) {
-        renderer.draw_text(rect.x, y, label, row.color);
-    }
-    if let Some(rect) = row.text_rect {
-        renderer.draw_text(rect.x, y, &row.line, row.color);
-    }
-    if let Some(rect) = row.launch_rect {
+    render_mermaid_label(renderer, row, y);
+    render_optional_text(renderer, row.text_rect, y, &row.line, row.color);
+    render_truncated_label(
+        renderer,
+        row.launch_rect,
+        y,
+        THOUGHT_LAUNCH_LABEL,
+        Color::Cyan,
+    );
+    render_optional_text(
+        renderer,
+        row.commit_rect,
+        y,
+        THOUGHT_COMMIT_LABEL,
+        row.color,
+    );
+    render_truncated_label(renderer, row.send_rect, y, THOUGHT_SEND_LABEL, Color::Cyan);
+    render_truncated_label(renderer, row.plan_rect, y, THOUGHT_PLANS_LABEL, Color::Cyan);
+}
+
+fn render_mermaid_label(renderer: &mut Renderer, row: &ThoughtRowLayout, y: u16) {
+    row.mermaid_rect
+        .zip(row.mermaid_label.as_deref())
+        .into_iter()
+        .for_each(|(rect, label)| renderer.draw_text(rect.x, y, label, row.color));
+}
+
+fn render_optional_text(
+    renderer: &mut Renderer,
+    rect: Option<Rect>,
+    y: u16,
+    text: &str,
+    color: Color,
+) {
+    rect.into_iter()
+        .for_each(|rect| renderer.draw_text(rect.x, y, text, color));
+}
+
+fn render_truncated_label(
+    renderer: &mut Renderer,
+    rect: Option<Rect>,
+    y: u16,
+    label: &str,
+    color: Color,
+) {
+    rect.into_iter().for_each(|rect| {
         renderer.draw_text(
             rect.x,
             y,
-            &truncate_label(THOUGHT_LAUNCH_LABEL, rect.width as usize),
-            Color::Cyan,
+            &truncate_label(label, rect.width as usize),
+            color,
         );
-    }
-    if let Some(rect) = row.commit_rect {
-        renderer.draw_text(rect.x, y, THOUGHT_COMMIT_LABEL, row.color);
-    }
-    if let Some(rect) = row.send_rect {
-        renderer.draw_text(
-            rect.x,
-            y,
-            &truncate_label(THOUGHT_SEND_LABEL, rect.width as usize),
-            Color::Cyan,
-        );
-    }
-    if let Some(rect) = row.plan_rect {
-        renderer.draw_text(
-            rect.x,
-            y,
-            &truncate_label(THOUGHT_PLANS_LABEL, rect.width as usize),
-            Color::Cyan,
-        );
-    }
+    });
 }
 
 pub(crate) fn build_thought_panel<C: TuiApi>(
