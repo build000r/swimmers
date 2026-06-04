@@ -991,29 +991,55 @@ fn franken_term_font_path_error(font_path: FrankenTermFontPath) -> Response {
 
 async fn serve_frankentui_asset(file_name: &str, content_type: &'static str) -> Response {
     let Some(pkg_dir) = resolve_frankentui_pkg_dir() else {
-        return json_error(
-            StatusCode::NOT_FOUND,
-            "FRANKENTERM_ASSET_UNAVAILABLE",
-            "FrankenTerm package assets are not available on this host",
-        );
+        return frankentui_asset_unavailable_response();
     };
 
+    read_frankentui_asset_response(file_name, content_type, &pkg_dir).await
+}
+
+async fn read_frankentui_asset_response(
+    file_name: &str,
+    content_type: &'static str,
+    pkg_dir: &Path,
+) -> Response {
     let path = pkg_dir.join(file_name);
     match tokio::fs::read(&path).await {
-        Ok(bytes) => (
-            [
-                (header::CONTENT_TYPE, content_type),
-                (header::CACHE_CONTROL, "no-store"),
-            ],
-            bytes,
-        )
-            .into_response(),
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => json_error(
+        Ok(bytes) => frankentui_asset_response(content_type, bytes),
+        Err(err) => frankentui_asset_read_error_response(file_name, pkg_dir, err),
+    }
+}
+
+fn frankentui_asset_unavailable_response() -> Response {
+    json_error(
+        StatusCode::NOT_FOUND,
+        "FRANKENTERM_ASSET_UNAVAILABLE",
+        "FrankenTerm package assets are not available on this host",
+    )
+}
+
+fn frankentui_asset_response(content_type: &'static str, bytes: Vec<u8>) -> Response {
+    (
+        [
+            (header::CONTENT_TYPE, content_type),
+            (header::CACHE_CONTROL, "no-store"),
+        ],
+        bytes,
+    )
+        .into_response()
+}
+
+fn frankentui_asset_read_error_response(
+    file_name: &str,
+    pkg_dir: &Path,
+    err: std::io::Error,
+) -> Response {
+    match err.kind() {
+        std::io::ErrorKind::NotFound => json_error(
             StatusCode::NOT_FOUND,
             "FRANKENTERM_ASSET_MISSING",
             &format!("{file_name} was not found in {}", pkg_dir.display()),
         ),
-        Err(err) => json_error(
+        _ => json_error(
             StatusCode::INTERNAL_SERVER_ERROR,
             "FRANKENTERM_ASSET_READ_FAILED",
             &format!("failed to read {file_name}: {err}"),
@@ -1656,7 +1682,15 @@ async fn handle_client_message(
     auth: &AuthInfo,
     message: Message,
 ) -> anyhow::Result<bool> {
-    match decode_client_message(auth, &message) {
+    execute_client_decision(handle, sender, decode_client_message(auth, &message)).await
+}
+
+async fn execute_client_decision(
+    handle: &ActorHandle,
+    sender: &mut futures::stream::SplitSink<WebSocket, Message>,
+    decision: WsClientDecision,
+) -> anyhow::Result<bool> {
+    match decision {
         WsClientDecision::Close => return Ok(false),
         WsClientDecision::Ignore => {}
         WsClientDecision::SendPong(bytes) => {
@@ -1672,19 +1706,7 @@ async fn handle_client_message(
             message: msg,
             client_message_id,
         } => {
-            if client_message_id.is_some() {
-                send_input_ack(
-                    sender,
-                    client_message_id,
-                    InputDeliveryResult {
-                        delivered: false,
-                        method: "rejected",
-                        message: Some(msg.clone()),
-                    },
-                )
-                .await?;
-            }
-            send_ws_error(sender, code, &msg).await?;
+            send_client_rejection(sender, code, msg, client_message_id).await?;
         }
         WsClientDecision::Forward {
             cmd,
@@ -1695,6 +1717,42 @@ async fn handle_client_message(
     }
 
     Ok(true)
+}
+
+async fn send_client_rejection(
+    sender: &mut futures::stream::SplitSink<WebSocket, Message>,
+    code: &'static str,
+    message: String,
+    client_message_id: Option<String>,
+) -> anyhow::Result<()> {
+    send_rejection_ack_if_needed(sender, client_message_id, &message).await?;
+    send_ws_error(sender, code, &message).await
+}
+
+async fn send_rejection_ack_if_needed(
+    sender: &mut futures::stream::SplitSink<WebSocket, Message>,
+    client_message_id: Option<String>,
+    message: &str,
+) -> anyhow::Result<()> {
+    match client_message_id {
+        Some(client_message_id) => {
+            send_input_ack(
+                sender,
+                Some(client_message_id),
+                rejected_input_delivery(message),
+            )
+            .await
+        }
+        None => Ok(()),
+    }
+}
+
+fn rejected_input_delivery(message: &str) -> InputDeliveryResult {
+    InputDeliveryResult {
+        delivered: false,
+        method: "rejected",
+        message: Some(message.to_string()),
+    }
 }
 
 async fn forward_ws_command(
@@ -1791,21 +1849,48 @@ enum WsAuthDecision {
     },
 }
 
+enum WsAuthFirstMessage {
+    Message(Message),
+    Closed,
+    Timeout,
+}
+
 async fn authenticate_session_ws(
     config: &Config,
     sender: &mut WsSender,
     receiver: &mut WsReceiver,
 ) -> anyhow::Result<Option<AuthInfo>> {
-    let decision = match tokio::time::timeout(WS_AUTH_TIMEOUT, receiver.next()).await {
-        Ok(Some(Ok(message))) => decode_ws_auth_message(config, &message),
-        Ok(Some(Err(err))) => return Err(err.into()),
-        Ok(None) => WsAuthDecision::Close,
-        Err(_) => WsAuthDecision::Reject {
+    let first = next_ws_auth_message(receiver).await?;
+    let decision = decode_ws_auth_first_message(config, first);
+    execute_ws_auth_decision(sender, decision).await
+}
+
+async fn next_ws_auth_message(
+    receiver: &mut WsReceiver,
+) -> Result<WsAuthFirstMessage, axum::Error> {
+    match tokio::time::timeout(WS_AUTH_TIMEOUT, receiver.next()).await {
+        Ok(Some(Ok(message))) => Ok(WsAuthFirstMessage::Message(message)),
+        Ok(Some(Err(err))) => Err(err),
+        Ok(None) => Ok(WsAuthFirstMessage::Closed),
+        Err(_) => Ok(WsAuthFirstMessage::Timeout),
+    }
+}
+
+fn decode_ws_auth_first_message(config: &Config, first: WsAuthFirstMessage) -> WsAuthDecision {
+    match first {
+        WsAuthFirstMessage::Message(message) => decode_ws_auth_message(config, &message),
+        WsAuthFirstMessage::Closed => WsAuthDecision::Close,
+        WsAuthFirstMessage::Timeout => WsAuthDecision::Reject {
             code: "WS_AUTH_TIMEOUT",
             message: "token-mode WebSocket connections must authenticate before terminal traffic",
         },
-    };
+    }
+}
 
+async fn execute_ws_auth_decision(
+    sender: &mut WsSender,
+    decision: WsAuthDecision,
+) -> anyhow::Result<Option<AuthInfo>> {
     match decision {
         WsAuthDecision::Authenticated(auth) => Ok(Some(auth)),
         WsAuthDecision::Close => Ok(None),
@@ -1854,17 +1939,11 @@ async fn send_control_event_if_relevant(
     stream: &'static str,
     event: Result<ControlEvent, broadcast::error::RecvError>,
 ) -> anyhow::Result<bool> {
-    match event {
-        Ok(event) => {
-            if event.session_id == session_id {
-                send_ws_json(sender, control_event_ws_payload(&event)).await?;
-            }
-        }
-        Err(broadcast::error::RecvError::Lagged(skipped)) => {
-            send_ws_json(sender, event_stream_lagged_payload(stream, skipped)).await?;
-        }
-        Err(broadcast::error::RecvError::Closed) => {}
-    }
+    send_ws_json_if_some(
+        sender,
+        control_event_delivery_payload(session_id, stream, &event),
+    )
+    .await?;
     Ok(true)
 }
 
@@ -1873,22 +1952,63 @@ async fn send_lifecycle_event_if_relevant(
     session_id: &str,
     event: Result<LifecycleEvent, broadcast::error::RecvError>,
 ) -> anyhow::Result<bool> {
-    match event {
-        Ok(event) => {
-            if lifecycle_event_session_id(&event) == session_id {
-                send_ws_json(sender, lifecycle_event_ws_payload(&event)).await?;
-            }
-        }
-        Err(broadcast::error::RecvError::Lagged(skipped)) => {
-            send_ws_json(
-                sender,
-                event_stream_lagged_payload("lifecycle_events", skipped),
-            )
-            .await?;
-        }
-        Err(broadcast::error::RecvError::Closed) => {}
-    }
+    send_ws_json_if_some(sender, lifecycle_event_delivery_payload(session_id, &event)).await?;
     Ok(true)
+}
+
+fn control_event_delivery_payload(
+    session_id: &str,
+    stream: &str,
+    event: &Result<ControlEvent, broadcast::error::RecvError>,
+) -> Option<serde_json::Value> {
+    match event {
+        Ok(event) => matching_control_event_payload(session_id, event),
+        Err(broadcast::error::RecvError::Lagged(skipped)) => {
+            Some(event_stream_lagged_payload(stream, *skipped))
+        }
+        Err(broadcast::error::RecvError::Closed) => None,
+    }
+}
+
+fn matching_control_event_payload(
+    session_id: &str,
+    event: &ControlEvent,
+) -> Option<serde_json::Value> {
+    Some(event)
+        .filter(|event| event.session_id == session_id)
+        .map(control_event_ws_payload)
+}
+
+fn lifecycle_event_delivery_payload(
+    session_id: &str,
+    event: &Result<LifecycleEvent, broadcast::error::RecvError>,
+) -> Option<serde_json::Value> {
+    match event {
+        Ok(event) => matching_lifecycle_event_payload(session_id, event),
+        Err(broadcast::error::RecvError::Lagged(skipped)) => {
+            Some(event_stream_lagged_payload("lifecycle_events", *skipped))
+        }
+        Err(broadcast::error::RecvError::Closed) => None,
+    }
+}
+
+fn matching_lifecycle_event_payload(
+    session_id: &str,
+    event: &LifecycleEvent,
+) -> Option<serde_json::Value> {
+    Some(event)
+        .filter(|event| lifecycle_event_session_id(event) == session_id)
+        .map(lifecycle_event_ws_payload)
+}
+
+async fn send_ws_json_if_some(
+    sender: &mut futures::stream::SplitSink<WebSocket, Message>,
+    payload: Option<serde_json::Value>,
+) -> anyhow::Result<()> {
+    match payload {
+        Some(payload) => send_ws_json(sender, payload).await,
+        None => Ok(()),
+    }
 }
 
 async fn send_ws_json(
@@ -2200,6 +2320,37 @@ mod tests {
     }
 
     #[test]
+    fn websocket_first_message_classifier_handles_close_timeout_and_auth_message() {
+        let config = Config {
+            auth_mode: AuthMode::Token,
+            auth_token: Some("operator".into()),
+            observer_token: Some("observer".into()),
+            ..Config::default()
+        };
+
+        assert!(matches!(
+            decode_ws_auth_first_message(&config, WsAuthFirstMessage::Closed),
+            WsAuthDecision::Close
+        ));
+
+        match decode_ws_auth_first_message(&config, WsAuthFirstMessage::Timeout) {
+            WsAuthDecision::Reject { code, message } => {
+                assert_eq!(code, "WS_AUTH_TIMEOUT");
+                assert!(message.contains("must authenticate"));
+            }
+            other => panic!("unexpected timeout auth decision: {other:?}"),
+        }
+
+        let auth_msg = Message::Text(r#"{"type":"auth","token":"operator"}"#.into());
+        match decode_ws_auth_first_message(&config, WsAuthFirstMessage::Message(auth_msg)) {
+            WsAuthDecision::Authenticated(auth) => {
+                assert!(auth.has_scope(AuthScope::StreamWrite));
+            }
+            other => panic!("unexpected auth decision: {other:?}"),
+        }
+    }
+
+    #[test]
     fn query_flag_enabled_accepts_framed_values_only() {
         for value in ["1", "true", "yes", "on", "framed", "framed_v1"] {
             assert!(query_flag_enabled(Some(value)), "{value}");
@@ -2342,6 +2493,63 @@ mod tests {
         assert_eq!(payload["type"], "event_stream_lagged");
         assert_eq!(payload["stream"], "thought_events");
         assert_eq!(payload["skipped"], 7);
+    }
+
+    #[test]
+    fn control_event_delivery_payload_matches_session_lagged_and_closed_cases() {
+        let event = ControlEvent {
+            event: "session_title".to_string(),
+            session_id: "sess_0".to_string(),
+            payload: serde_json::json!({
+                "title": "swimmers",
+                "at": "2026-05-15T10:00:02Z",
+            }),
+        };
+        let matching: Result<ControlEvent, broadcast::error::RecvError> = Ok(event);
+        let payload = control_event_delivery_payload("sess_0", "session_events", &matching)
+            .expect("matching event payload");
+        assert_eq!(payload["type"], "control_event");
+        assert_eq!(payload["sessionId"], "sess_0");
+        assert!(control_event_delivery_payload("other", "session_events", &matching).is_none());
+
+        let lagged: Result<ControlEvent, broadcast::error::RecvError> =
+            Err(broadcast::error::RecvError::Lagged(4));
+        let payload = control_event_delivery_payload("sess_0", "thought_events", &lagged)
+            .expect("lagged payload");
+        assert_eq!(payload["type"], "event_stream_lagged");
+        assert_eq!(payload["stream"], "thought_events");
+        assert_eq!(payload["skipped"], 4);
+
+        let closed: Result<ControlEvent, broadcast::error::RecvError> =
+            Err(broadcast::error::RecvError::Closed);
+        assert!(control_event_delivery_payload("sess_0", "session_events", &closed).is_none());
+    }
+
+    #[test]
+    fn lifecycle_event_delivery_payload_matches_session_lagged_and_closed_cases() {
+        let event = LifecycleEvent::Deleted {
+            session_id: "sess_0".to_string(),
+            reason: "tmux_reconcile_missing".to_string(),
+            delete_mode: crate::config::SessionDeleteMode::DetachBridge,
+            tmux_session_alive: false,
+        };
+        let matching: Result<LifecycleEvent, broadcast::error::RecvError> = Ok(event);
+        let payload =
+            lifecycle_event_delivery_payload("sess_0", &matching).expect("matching event payload");
+        assert_eq!(payload["type"], "lifecycle_event");
+        assert_eq!(payload["sessionId"], "sess_0");
+        assert!(lifecycle_event_delivery_payload("other", &matching).is_none());
+
+        let lagged: Result<LifecycleEvent, broadcast::error::RecvError> =
+            Err(broadcast::error::RecvError::Lagged(9));
+        let payload = lifecycle_event_delivery_payload("sess_0", &lagged).expect("lagged payload");
+        assert_eq!(payload["type"], "event_stream_lagged");
+        assert_eq!(payload["stream"], "lifecycle_events");
+        assert_eq!(payload["skipped"], 9);
+
+        let closed: Result<LifecycleEvent, broadcast::error::RecvError> =
+            Err(broadcast::error::RecvError::Closed);
+        assert!(lifecycle_event_delivery_payload("sess_0", &closed).is_none());
     }
 
     #[tokio::test]
@@ -2676,6 +2884,56 @@ mod tests {
         assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
         let body = response_json(response).await;
         assert_eq!(body["code"], "FRANKENTERM_FONT_READ_FAILED");
+    }
+
+    #[tokio::test]
+    async fn frankentui_asset_response_helpers_preserve_headers_and_error_payloads() {
+        let response = frankentui_asset_response("application/javascript", b"asset".to_vec());
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers().get(header::CONTENT_TYPE).unwrap(),
+            "application/javascript"
+        );
+        assert_eq!(
+            response.headers().get(header::CACHE_CONTROL).unwrap(),
+            "no-store"
+        );
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("asset body");
+        assert_eq!(&body[..], b"asset");
+
+        let response = frankentui_asset_unavailable_response();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let body = response_json(response).await;
+        assert_eq!(body["code"], "FRANKENTERM_ASSET_UNAVAILABLE");
+
+        let dir = tempdir().expect("tempdir");
+        let response = frankentui_asset_read_error_response(
+            "FrankenTerm.js",
+            dir.path(),
+            std::io::Error::from(std::io::ErrorKind::NotFound),
+        );
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let body = response_json(response).await;
+        assert_eq!(body["code"], "FRANKENTERM_ASSET_MISSING");
+        assert!(body["message"]
+            .as_str()
+            .expect("message")
+            .contains(dir.path().to_str().expect("temp path")));
+
+        let response = frankentui_asset_read_error_response(
+            "FrankenTerm_bg.wasm",
+            dir.path(),
+            std::io::Error::new(std::io::ErrorKind::PermissionDenied, "denied"),
+        );
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body = response_json(response).await;
+        assert_eq!(body["code"], "FRANKENTERM_ASSET_READ_FAILED");
+        assert!(body["message"]
+            .as_str()
+            .expect("message")
+            .contains("FrankenTerm_bg.wasm"));
     }
 
     #[tokio::test]
@@ -3095,6 +3353,14 @@ mod tests {
             WsClientDecision::SendPong(bytes) => assert_eq!(bytes, b"abc"),
             other => panic!("unexpected: {other:?}"),
         }
+    }
+
+    #[test]
+    fn rejected_input_delivery_marks_rejected_with_message_clone() {
+        let delivery = rejected_input_delivery("not allowed");
+        assert!(!delivery.delivered);
+        assert_eq!(delivery.method, "rejected");
+        assert_eq!(delivery.message.as_deref(), Some("not allowed"));
     }
 
     #[test]
