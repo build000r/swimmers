@@ -463,36 +463,48 @@ pub(crate) fn header_filter_action_at<C: TuiApi>(
     y: u16,
 ) -> Option<ThoughtPanelAction> {
     let layout = build_header_filter_layout(app, width);
-    if let Some(rect) = layout.filter_out_rect {
-        if rect.contains(x, y) {
-            return Some(ThoughtPanelAction::ToggleFilterOutMode);
-        }
+    header_filter_action_for_layout(&layout, &app.thought_filter, x, y)
+}
+
+fn header_filter_action_for_layout(
+    layout: &HeaderFilterLayout,
+    filter: &ThoughtFilter,
+    x: u16,
+    y: u16,
+) -> Option<ThoughtPanelAction> {
+    if header_filter_control_contains(layout.filter_out_rect, x, y) {
+        return Some(ThoughtPanelAction::ToggleFilterOutMode);
     }
-    if let Some(rect) = layout.clear_filters_rect {
-        if rect.contains(x, y) {
-            return Some(ThoughtPanelAction::ClearFilters);
-        }
+    if header_filter_control_contains(layout.clear_filters_rect, x, y) {
+        return Some(ThoughtPanelAction::ClearFilters);
     }
 
-    for chip in layout.chips {
-        if chip.rect.contains(x, y) {
-            if app.thought_filter.filter_out_mode {
-                return Some(ThoughtPanelAction::ToggleFilterOutCwd(chip.cwd));
-            }
-            if app
-                .thought_filter
-                .cwd
-                .as_deref()
-                .map(|cwd| cwd == chip.cwd)
-                .unwrap_or(false)
-            {
-                return Some(ThoughtPanelAction::OpenRepoInEditor(chip.cwd));
-            }
-            return Some(ThoughtPanelAction::FilterByCwd(chip.cwd));
-        }
-    }
+    header_filter_chip_at(layout, x, y).map(|chip| header_filter_chip_action(filter, chip))
+}
 
-    None
+fn header_filter_control_contains(rect: Option<Rect>, x: u16, y: u16) -> bool {
+    rect.is_some_and(|rect| rect.contains(x, y))
+}
+
+fn header_filter_chip_at(
+    layout: &HeaderFilterLayout,
+    x: u16,
+    y: u16,
+) -> Option<&ThoughtChipLayout> {
+    layout.chips.iter().find(|chip| chip.rect.contains(x, y))
+}
+
+fn header_filter_chip_action(
+    filter: &ThoughtFilter,
+    chip: &ThoughtChipLayout,
+) -> ThoughtPanelAction {
+    if filter.filter_out_mode {
+        return ThoughtPanelAction::ToggleFilterOutCwd(chip.cwd.clone());
+    }
+    if filter.cwd.as_deref() == Some(chip.cwd.as_str()) {
+        return ThoughtPanelAction::OpenRepoInEditor(chip.cwd.clone());
+    }
+    ThoughtPanelAction::FilterByCwd(chip.cwd.clone())
 }
 
 pub(crate) fn display_width(text: &str) -> u16 {
@@ -1847,5 +1859,94 @@ fn thought_row_action_for_hit(
             session_id: row.session_id.clone(),
             label: row.label.clone(),
         }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn rect(x: u16, width: u16) -> Rect {
+        Rect {
+            x,
+            y: header_filter_row(),
+            width,
+            height: 1,
+        }
+    }
+
+    fn chip(cwd: &str, x: u16) -> ThoughtChipLayout {
+        ThoughtChipLayout {
+            rect: rect(x, 6),
+            cwd: cwd.to_string(),
+            label: cwd.to_string(),
+            color: Color::Cyan,
+        }
+    }
+
+    fn layout() -> HeaderFilterLayout {
+        HeaderFilterLayout {
+            filter_out_rect: Some(rect(2, 12)),
+            clear_filters_rect: Some(rect(16, 15)),
+            chips: vec![chip("/repo/a", 34), chip("/repo/b", 42)],
+        }
+    }
+
+    #[test]
+    fn header_filter_action_prioritizes_control_rects() {
+        let filter = ThoughtFilter::default();
+        let row = header_filter_row();
+
+        assert_eq!(
+            header_filter_action_for_layout(&layout(), &filter, 2, row),
+            Some(ThoughtPanelAction::ToggleFilterOutMode)
+        );
+        assert_eq!(
+            header_filter_action_for_layout(&layout(), &filter, 16, row),
+            Some(ThoughtPanelAction::ClearFilters)
+        );
+    }
+
+    #[test]
+    fn header_filter_action_maps_chip_modes() {
+        let row = header_filter_row();
+
+        assert_eq!(
+            header_filter_action_for_layout(&layout(), &ThoughtFilter::default(), 34, row),
+            Some(ThoughtPanelAction::FilterByCwd("/repo/a".to_string()))
+        );
+
+        let active_filter = ThoughtFilter {
+            cwd: Some("/repo/a".to_string()),
+            ..ThoughtFilter::default()
+        };
+        assert_eq!(
+            header_filter_action_for_layout(&layout(), &active_filter, 34, row),
+            Some(ThoughtPanelAction::OpenRepoInEditor("/repo/a".to_string()))
+        );
+
+        let filter_out = ThoughtFilter {
+            filter_out_mode: true,
+            ..ThoughtFilter::default()
+        };
+        assert_eq!(
+            header_filter_action_for_layout(&layout(), &filter_out, 42, row),
+            Some(ThoughtPanelAction::ToggleFilterOutCwd(
+                "/repo/b".to_string()
+            ))
+        );
+    }
+
+    #[test]
+    fn header_filter_action_ignores_misses() {
+        assert_eq!(
+            header_filter_action_for_layout(
+                &layout(),
+                &ThoughtFilter::default(),
+                34,
+                header_filter_row() + 1
+            ),
+            None
+        );
     }
 }

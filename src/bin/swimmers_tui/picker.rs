@@ -348,66 +348,86 @@ impl PickerState {
     }
 
     pub(crate) fn apply_response(&mut self, response: DirListResponse, preserve_selection: bool) {
-        let previous_selection = self.selection;
-        let previous_scroll = self.scroll;
-        let selected_path = match previous_selection {
-            PickerSelection::Entry(index) => {
-                self.path_for_entry(index).map(|path| normalize_path(&path))
-            }
-            PickerSelection::SpawnHere => None,
+        let previous = self.response_snapshot();
+        self.replace_response_entries(
+            response,
+            preserve_selection,
+            previous.launch_target.as_deref(),
+        );
+        self.clear_response_theme_colors();
+        self.apply_response_position(&previous, preserve_selection);
+        self.apply_response_batch_exclusions(preserve_selection);
+    }
+
+    fn response_snapshot(&self) -> PickerResponseSnapshot {
+        PickerResponseSnapshot {
+            selection: self.selection,
+            scroll: self.scroll,
+            selected_path: self.selected_response_path(),
+            launch_target: self.launch_target.clone(),
+        }
+    }
+
+    fn selected_response_path(&self) -> Option<String> {
+        let PickerSelection::Entry(index) = self.selection else {
+            return None;
         };
+        self.path_for_entry(index).map(|path| normalize_path(&path))
+    }
+
+    fn replace_response_entries(
+        &mut self,
+        response: DirListResponse,
+        preserve_selection: bool,
+        previous_launch_target: Option<&str>,
+    ) {
         self.current_path = response.path;
         self.entries = response.entries;
         self.overlay_label = response.overlay_label;
-        let previous_launch_target = self.launch_target.clone();
         self.launch_targets = normalized_launch_targets(response.launch_targets);
         self.launch_target = select_launch_target(
-            preserve_selection
-                .then_some(previous_launch_target.as_deref())
-                .flatten(),
+            preserved_launch_target(preserve_selection, previous_launch_target),
             response.default_launch_target.as_deref(),
             &self.launch_targets,
         );
-        if !response.groups.is_empty() {
-            self.available_groups = response.groups;
-            if !self
-                .group_edit_target
-                .as_ref()
-                .map(|target| self.available_groups.iter().any(|group| group == target))
-                .unwrap_or(false)
-            {
-                self.group_edit_target = self.available_groups.first().cloned();
-            }
-        }
+        self.apply_response_groups(response.groups);
+    }
+
+    fn apply_response_groups(&mut self, groups: Vec<String>) {
+        let Some(groups) = non_empty_groups(groups) else {
+            return;
+        };
+        self.available_groups = groups;
+        self.retain_or_fallback_group_edit_target();
+    }
+
+    fn retain_or_fallback_group_edit_target(&mut self) {
+        self.group_edit_target = self
+            .group_edit_target
+            .clone()
+            .filter(|target| self.available_groups.iter().any(|group| group == target))
+            .or_else(|| self.available_groups.first().cloned());
+    }
+
+    fn clear_response_theme_colors(&mut self) {
         self.current_theme_color = None;
         self.entry_theme_colors.clear();
-        if preserve_selection {
-            let total_entries = self.total_entry_count();
-            self.selection = selected_path
-                .as_ref()
-                .and_then(|path| {
-                    (0..total_entries).find(|index| {
-                        self.path_for_entry(*index)
-                            .map(|candidate| normalize_path(&candidate) == *path)
-                            .unwrap_or(false)
-                    })
-                })
-                .map(PickerSelection::Entry)
-                .unwrap_or(match previous_selection {
-                    PickerSelection::SpawnHere => PickerSelection::SpawnHere,
-                    PickerSelection::Entry(_) if total_entries == 0 => PickerSelection::SpawnHere,
-                    PickerSelection::Entry(index) => {
-                        PickerSelection::Entry(index.min(total_entries.saturating_sub(1)))
-                    }
-                });
-            self.scroll = previous_scroll.min(total_entries.saturating_sub(1));
-        } else {
-            self.selection = PickerSelection::SpawnHere;
-            self.scroll = 0;
-        }
-        if !self.search.is_empty() {
-            self.snap_selection_to_visible();
-        }
+    }
+
+    fn apply_response_position(
+        &mut self,
+        previous: &PickerResponseSnapshot,
+        preserve_selection: bool,
+    ) {
+        let position = preserve_selection
+            .then(|| preserved_response_position(self, previous))
+            .unwrap_or_default();
+        self.selection = position.selection;
+        self.scroll = position.scroll;
+        snap_response_selection_to_search(self);
+    }
+
+    fn apply_response_batch_exclusions(&mut self, preserve_selection: bool) {
         if preserve_selection {
             self.retain_current_batch_exclusions();
         } else {
@@ -2011,6 +2031,198 @@ mod tests {
             picker
         }
 
+        fn apply_response_entry(name: &str, full_path: &str) -> DirEntry {
+            DirEntry {
+                name: name.to_string(),
+                has_children: true,
+                is_running: None,
+                repo_dirty: None,
+                repo_action: None,
+                group: None,
+                groups: Vec::new(),
+                full_path: Some(full_path.to_string()),
+                has_restart: None,
+                open_url: None,
+            }
+        }
+
+        fn apply_response_target(id: &str) -> LaunchTargetSummary {
+            LaunchTargetSummary {
+                id: id.to_string(),
+                label: format!("{id} target"),
+                kind: "remote".to_string(),
+                base_url: None,
+                auth_token_env: None,
+                path_mappings: Vec::new(),
+            }
+        }
+
+        fn apply_response_picker(entries: Vec<DirEntry>) -> PickerState {
+            PickerState::new(
+                0,
+                0,
+                DirListResponse {
+                    path: "/tmp".to_string(),
+                    entries,
+                    overlay_label: Some("old overlay".to_string()),
+                    groups: vec!["alpha".to_string(), "beta".to_string()],
+                    launch_targets: vec![apply_response_target("remote-a")],
+                    default_launch_target: Some("remote-a".to_string()),
+                },
+                true,
+                SpawnTool::Codex,
+                None,
+            )
+        }
+
+        fn apply_response_dir_list(entries: Vec<DirEntry>) -> DirListResponse {
+            DirListResponse {
+                path: "/tmp/next".to_string(),
+                entries,
+                overlay_label: Some("new overlay".to_string()),
+                groups: Vec::new(),
+                launch_targets: Vec::new(),
+                default_launch_target: None,
+            }
+        }
+
+        #[test]
+        fn apply_response_preserves_selection_by_normalized_path_and_retains_batch_exclusions() {
+            let mut picker = apply_response_picker(vec![
+                apply_response_entry("a", "/tmp/projects/a"),
+                apply_response_entry("b", "/tmp/projects/b/"),
+            ]);
+            picker.selection = PickerSelection::Entry(1);
+            picker.scroll = 5;
+            picker.launch_target = Some("remote-a".to_string());
+            picker.group_edit_target = Some("beta".to_string());
+            picker.current_theme_color = Some(Color::Red);
+            picker.entry_theme_colors = vec![Some(Color::Blue), Some(Color::Green)];
+            picker
+                .batch_excluded_paths
+                .insert(normalize_path("/tmp/projects/b/"));
+            picker
+                .batch_excluded_paths
+                .insert(normalize_path("/tmp/projects/missing"));
+
+            let mut response = apply_response_dir_list(vec![
+                apply_response_entry("renamed-b", "/tmp/projects/b"),
+                apply_response_entry("c", "/tmp/projects/c"),
+            ]);
+            response.groups = vec!["alpha".to_string(), "beta".to_string()];
+            response.launch_targets = vec![
+                apply_response_target("remote-a"),
+                apply_response_target("remote-b"),
+            ];
+            response.default_launch_target = Some("remote-b".to_string());
+            picker.apply_response(response, true);
+
+            assert_eq!(picker.current_path, "/tmp/next");
+            assert_eq!(
+                picker
+                    .entries
+                    .iter()
+                    .map(|entry| &entry.name)
+                    .collect::<Vec<_>>(),
+                vec!["renamed-b", "c"]
+            );
+            assert_eq!(picker.overlay_label.as_deref(), Some("new overlay"));
+            assert_eq!(picker.selection, PickerSelection::Entry(0));
+            assert_eq!(picker.scroll, 1);
+            assert_eq!(picker.launch_target.as_deref(), Some("remote-a"));
+            assert_eq!(picker.launch_targets[0].id, "local");
+            assert_eq!(picker.group_edit_target.as_deref(), Some("beta"));
+            assert_eq!(
+                picker.available_groups,
+                vec!["alpha".to_string(), "beta".to_string()]
+            );
+            assert_eq!(picker.current_theme_color, None);
+            assert!(picker.entry_theme_colors.is_empty());
+            assert_eq!(picker.batch_excluded_paths.len(), 1);
+            assert!(picker
+                .batch_excluded_paths
+                .contains(&normalize_path("/tmp/projects/b")));
+        }
+
+        #[test]
+        fn apply_response_resets_selection_uses_default_launch_target_and_clears_batch_exclusions()
+        {
+            let mut picker =
+                apply_response_picker(vec![apply_response_entry("a", "/tmp/projects/a")]);
+            picker.selection = PickerSelection::Entry(0);
+            picker.scroll = 3;
+            picker.launch_target = Some("remote-a".to_string());
+            picker.group_edit_target = Some("beta".to_string());
+            picker
+                .batch_excluded_paths
+                .insert(normalize_path("/tmp/projects/a"));
+
+            let mut response =
+                apply_response_dir_list(vec![apply_response_entry("b", "/tmp/projects/b")]);
+            response.groups = vec!["gamma".to_string(), "delta".to_string()];
+            response.launch_targets = vec![apply_response_target("remote-b")];
+            response.default_launch_target = Some("remote-b".to_string());
+            picker.apply_response(response, false);
+
+            assert_eq!(picker.selection, PickerSelection::SpawnHere);
+            assert_eq!(picker.scroll, 0);
+            assert_eq!(picker.launch_target.as_deref(), Some("remote-b"));
+            assert_eq!(
+                picker
+                    .launch_targets
+                    .iter()
+                    .map(|target| target.id.as_str())
+                    .collect::<Vec<_>>(),
+                vec!["local", "remote-b"]
+            );
+            assert_eq!(picker.group_edit_target.as_deref(), Some("gamma"));
+            assert!(picker.batch_excluded_paths.is_empty());
+        }
+
+        #[test]
+        fn apply_response_clamps_fallback_selection_and_snaps_search() {
+            let mut picker = apply_response_picker(vec![
+                apply_response_entry("a", "/tmp/old/a"),
+                apply_response_entry("b", "/tmp/old/b"),
+                apply_response_entry("c", "/tmp/old/c"),
+            ]);
+            picker.selection = PickerSelection::Entry(2);
+            picker.scroll = 9;
+            picker.search = "match".to_string();
+            picker.group_edit_target = Some("alpha".to_string());
+
+            let response = apply_response_dir_list(vec![
+                apply_response_entry("matchable", "/tmp/new/matchable"),
+                apply_response_entry("plain", "/tmp/new/plain"),
+            ]);
+            picker.apply_response(response, true);
+
+            assert_eq!(picker.selection, PickerSelection::Entry(0));
+            assert_eq!(picker.scroll, 0);
+            assert_eq!(
+                picker.available_groups,
+                vec!["alpha".to_string(), "beta".to_string()]
+            );
+            assert_eq!(picker.group_edit_target.as_deref(), Some("alpha"));
+        }
+
+        #[test]
+        fn apply_response_preserved_entry_falls_back_to_spawn_here_when_response_is_empty() {
+            let mut picker =
+                apply_response_picker(vec![apply_response_entry("a", "/tmp/projects/a")]);
+            picker.selection = PickerSelection::Entry(0);
+            picker.scroll = 4;
+            picker
+                .batch_excluded_paths
+                .insert(normalize_path("/tmp/projects/a"));
+
+            picker.apply_response(apply_response_dir_list(Vec::new()), true);
+
+            assert_eq!(picker.selection, PickerSelection::SpawnHere);
+            assert_eq!(picker.scroll, 0);
+            assert!(picker.batch_excluded_paths.is_empty());
+        }
+
         #[test]
         fn picker_filter_render_plan_preserves_labels_positions_and_target() {
             let layout = filter_test_layout();
@@ -2325,5 +2537,102 @@ mod tests {
                 Color::Cyan
             );
         }
+    }
+}
+
+struct PickerResponseSnapshot {
+    selection: PickerSelection,
+    scroll: usize,
+    selected_path: Option<String>,
+    launch_target: Option<String>,
+}
+
+#[derive(Clone, Copy)]
+struct PickerPosition {
+    selection: PickerSelection,
+    scroll: usize,
+}
+
+impl Default for PickerPosition {
+    fn default() -> Self {
+        Self {
+            selection: PickerSelection::SpawnHere,
+            scroll: 0,
+        }
+    }
+}
+
+fn preserved_launch_target<'a>(
+    preserve_selection: bool,
+    previous_launch_target: Option<&'a str>,
+) -> Option<&'a str> {
+    preserve_selection
+        .then_some(previous_launch_target)
+        .flatten()
+}
+
+fn non_empty_groups(groups: Vec<String>) -> Option<Vec<String>> {
+    (!groups.is_empty()).then_some(groups)
+}
+
+fn preserved_response_position(
+    picker: &PickerState,
+    previous: &PickerResponseSnapshot,
+) -> PickerPosition {
+    let total_entries = picker.total_entry_count();
+    PickerPosition {
+        selection: preserved_response_selection(picker, previous, total_entries),
+        scroll: previous.scroll.min(total_entries.saturating_sub(1)),
+    }
+}
+
+fn preserved_response_selection(
+    picker: &PickerState,
+    previous: &PickerResponseSnapshot,
+    total_entries: usize,
+) -> PickerSelection {
+    previous
+        .selected_path
+        .as_ref()
+        .and_then(|path| entry_index_for_normalized_path(picker, path, total_entries))
+        .map(PickerSelection::Entry)
+        .unwrap_or_else(|| fallback_picker_selection(previous.selection, total_entries))
+}
+
+fn entry_index_for_normalized_path(
+    picker: &PickerState,
+    normalized_path: &str,
+    total_entries: usize,
+) -> Option<usize> {
+    (0..total_entries).find(|index| entry_normalized_path_matches(picker, *index, normalized_path))
+}
+
+fn entry_normalized_path_matches(
+    picker: &PickerState,
+    index: usize,
+    normalized_path: &str,
+) -> bool {
+    picker
+        .path_for_entry(index)
+        .map(|candidate| normalize_path(&candidate) == normalized_path)
+        .unwrap_or(false)
+}
+
+fn fallback_picker_selection(
+    previous_selection: PickerSelection,
+    total_entries: usize,
+) -> PickerSelection {
+    match previous_selection {
+        PickerSelection::SpawnHere => PickerSelection::SpawnHere,
+        PickerSelection::Entry(_) if total_entries == 0 => PickerSelection::SpawnHere,
+        PickerSelection::Entry(index) => {
+            PickerSelection::Entry(index.min(total_entries.saturating_sub(1)))
+        }
+    }
+}
+
+fn snap_response_selection_to_search(picker: &mut PickerState) {
+    if !picker.search.is_empty() {
+        picker.snap_selection_to_visible();
     }
 }

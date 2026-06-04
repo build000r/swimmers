@@ -94,36 +94,62 @@ fn unquote(value: &str) -> String {
     trimmed.to_string()
 }
 
-fn parse_skill_md(path: &Path, fallback_name: &str) -> SkillSummary {
-    let mut name = fallback_name.trim().to_string();
-    let mut description: Option<String> = None;
+#[derive(Default)]
+struct SkillFrontmatter {
+    name: Option<String>,
+    description: Option<String>,
+}
 
-    if let Ok(content) = std::fs::read_to_string(path) {
-        let mut lines = content.lines();
-        if lines.next().map(|line| line.trim()) == Some("---") {
-            for line in lines {
-                let trimmed = line.trim();
-                if trimmed == "---" {
-                    break;
-                }
-                if let Some(rest) = trimmed.strip_prefix("name:") {
-                    let parsed = unquote(rest);
-                    if !parsed.is_empty() {
-                        name = parsed;
-                    }
-                    continue;
-                }
-                if let Some(rest) = trimmed.strip_prefix("description:") {
-                    let parsed = unquote(rest);
-                    if !parsed.is_empty() {
-                        description = Some(parsed);
-                    }
-                }
-            }
-        }
+fn parse_skill_md(path: &Path, fallback_name: &str) -> SkillSummary {
+    let mut summary = SkillSummary {
+        name: fallback_name.trim().to_string(),
+        description: None,
+    };
+
+    if let Some(frontmatter) = read_skill_frontmatter(path) {
+        apply_skill_frontmatter(&mut summary, frontmatter);
     }
 
-    SkillSummary { name, description }
+    summary
+}
+
+fn read_skill_frontmatter(path: &Path) -> Option<SkillFrontmatter> {
+    let content = std::fs::read_to_string(path).ok()?;
+    parse_skill_frontmatter(&content)
+}
+
+fn parse_skill_frontmatter(content: &str) -> Option<SkillFrontmatter> {
+    let mut lines = content.lines();
+    (lines.next().map(str::trim) == Some("---")).then(|| {
+        lines.take_while(|line| line.trim() != "---").fold(
+            SkillFrontmatter::default(),
+            |mut frontmatter, line| {
+                apply_skill_frontmatter_line(&mut frontmatter, line);
+                frontmatter
+            },
+        )
+    })
+}
+
+fn apply_skill_frontmatter(summary: &mut SkillSummary, frontmatter: SkillFrontmatter) {
+    if let Some(name) = frontmatter.name {
+        summary.name = name;
+    }
+    summary.description = frontmatter.description;
+}
+
+fn apply_skill_frontmatter_line(frontmatter: &mut SkillFrontmatter, line: &str) {
+    let trimmed = line.trim();
+    if let Some(name) = parse_skill_frontmatter_value(trimmed, "name:") {
+        frontmatter.name = Some(name);
+    } else if let Some(description) = parse_skill_frontmatter_value(trimmed, "description:") {
+        frontmatter.description = Some(description);
+    }
+}
+
+fn parse_skill_frontmatter_value(line: &str, prefix: &str) -> Option<String> {
+    let parsed = unquote(line.strip_prefix(prefix)?);
+    (!parsed.is_empty()).then_some(parsed)
 }
 
 enum SkillSource {
@@ -884,6 +910,56 @@ description: 'Review risky code paths'
             parsed.description.as_deref(),
             Some("Review risky code paths")
         );
+    }
+
+    #[test]
+    fn parse_skill_md_uses_trimmed_fallback_when_file_cannot_be_read() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let parsed = parse_skill_md(&dir.path().join("missing.md"), "  fallback  ");
+
+        assert_eq!(parsed.name, "fallback");
+        assert_eq!(parsed.description, None);
+    }
+
+    #[test]
+    fn parse_skill_md_ignores_frontmatter_not_on_first_line() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let skill_md = dir.path().join("SKILL.md");
+        fs::write(
+            &skill_md,
+            "\n---\nname: Body Name\ndescription: Body\n---\n",
+        )
+        .expect("write skill");
+
+        let parsed = parse_skill_md(&skill_md, "fallback");
+        assert_eq!(parsed.name, "fallback");
+        assert_eq!(parsed.description, None);
+    }
+
+    #[test]
+    fn parse_skill_md_stops_at_closing_frontmatter_marker() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let skill_md = dir.path().join("SKILL.md");
+        fs::write(
+            &skill_md,
+            "---\nname: Frontmatter\ndescription: Kept\n---\nname: Body\n",
+        )
+        .expect("write skill");
+
+        let parsed = parse_skill_md(&skill_md, "fallback");
+        assert_eq!(parsed.name, "Frontmatter");
+        assert_eq!(parsed.description.as_deref(), Some("Kept"));
+    }
+
+    #[test]
+    fn parse_skill_md_ignores_empty_parsed_fields() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let skill_md = dir.path().join("SKILL.md");
+        fs::write(&skill_md, "---\nname: \"\"\ndescription: ''\n---\n").expect("write skill");
+
+        let parsed = parse_skill_md(&skill_md, "fallback");
+        assert_eq!(parsed.name, "fallback");
+        assert_eq!(parsed.description, None);
     }
 
     #[test]

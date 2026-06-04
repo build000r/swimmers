@@ -710,16 +710,32 @@ fn scan_repo_search_roots_sync(roots: &[PathBuf], max_depth: usize) -> Vec<DirEn
     repos
 }
 
+fn cached_repo_search_entries(roots: &[PathBuf], max_depth: usize) -> Option<Vec<DirEntry>> {
+    let cache = repo_search_cache().lock().ok()?;
+    let cache = cache.as_ref()?;
+    (cache.roots == roots
+        && cache.max_depth == max_depth
+        && cache.generated_at.elapsed() < REPO_SEARCH_CACHE_TTL)
+        .then(|| cache.entries.clone())
+}
+
+fn write_repo_search_cache(roots: &[PathBuf], max_depth: usize, entries: &[DirEntry]) {
+    if let Ok(mut cache) = repo_search_cache().lock() {
+        *cache = Some(RepoSearchCacheEntry {
+            roots: roots.to_vec(),
+            max_depth,
+            generated_at: Instant::now(),
+            entries: entries.to_vec(),
+        });
+    }
+}
+
 pub async fn list_repo_search_entries() -> Result<DirRepoSearchResponse, ApiServiceError> {
     let roots = repo_search_roots();
     let max_depth = repo_search_max_depth();
     list_repo_search_entries_inner(roots, max_depth).await
 }
 
-/// Core of [`list_repo_search_entries`] with the env-derived `roots`/`max_depth`
-/// injected, so the empty-roots short-circuit, cache-hit, and rescan branches
-/// are testable without touching process env. The outer wrapper only resolves
-/// the configured roots and depth before delegating here.
 async fn list_repo_search_entries_inner(
     roots: Vec<PathBuf>,
     max_depth: usize,
@@ -735,18 +751,11 @@ async fn list_repo_search_entries_inner(
         });
     }
 
-    if let Ok(cache) = repo_search_cache().lock() {
-        if let Some(cache) = cache.as_ref() {
-            if cache.roots == roots
-                && cache.max_depth == max_depth
-                && cache.generated_at.elapsed() < REPO_SEARCH_CACHE_TTL
-            {
-                return Ok(DirRepoSearchResponse {
-                    roots: root_labels,
-                    entries: cache.entries.clone(),
-                });
-            }
-        }
+    if let Some(entries) = cached_repo_search_entries(&roots, max_depth) {
+        return Ok(DirRepoSearchResponse {
+            roots: root_labels,
+            entries,
+        });
     }
 
     let scan_roots = roots.clone();
@@ -760,22 +769,13 @@ async fn list_repo_search_entries_inner(
                     format!("repository search task failed: {err}"),
                 )
             })?;
-
-    if let Ok(mut cache) = repo_search_cache().lock() {
-        *cache = Some(RepoSearchCacheEntry {
-            roots: roots.clone(),
-            max_depth,
-            generated_at: Instant::now(),
-            entries: entries.clone(),
-        });
-    }
+    write_repo_search_cache(&roots, max_depth, &entries);
 
     Ok(DirRepoSearchResponse {
         roots: root_labels,
         entries,
     })
 }
-
 pub async fn overlay_service_health_map(
     services: &[OverlayServiceEntry],
     requested: &[String],
@@ -2286,6 +2286,21 @@ mod tests {
         }
     }
 
+    fn repo_search_response_paths(response: &DirRepoSearchResponse) -> Vec<String> {
+        response
+            .entries
+            .iter()
+            .filter_map(|entry| entry.full_path.clone())
+            .collect()
+    }
+
+    async fn repo_search_cache_test_guard() -> tokio::sync::MutexGuard<'static, ()> {
+        static LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+            .lock()
+            .await
+    }
+
     #[test]
     fn scan_repo_search_roots_finds_git_repositories_under_roots() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -2486,17 +2501,17 @@ mod tests {
 
     // Exercises the rescan-and-populate branch followed by the cache-hit branch.
     // Removing the repo from disk between calls proves the second call serves the
-    // cached entries rather than rescanning. This is the only test that mutates
-    // the process-global repo-search cache.
+    // cached entries rather than rescanning.
     #[tokio::test]
     async fn list_repo_search_entries_inner_scans_then_serves_cache() {
+        let _cache_guard = repo_search_cache_test_guard().await;
         let dir = tempfile::tempdir().expect("tempdir");
         let root = dir.path().join("repos");
         let repo = root.join("alpha");
         std::fs::create_dir_all(repo.join(".git")).expect("create git marker");
 
         clear_repo_search_cache_for_tests();
-        let scanned =
+        let mut scanned =
             list_repo_search_entries_inner(vec![root.clone()], REPO_SEARCH_DEFAULT_MAX_DEPTH)
                 .await
                 .expect("fresh scan should succeed");
@@ -2513,6 +2528,8 @@ mod tests {
             vec![root.to_string_lossy().into_owned()],
             "roots label should echo the requested root"
         );
+        let scanned_paths = repo_search_response_paths(&scanned);
+        scanned.entries.clear();
 
         // Delete the repo from disk; a cache hit within the TTL must still
         // return the previously scanned entries instead of rescanning. A rescan
@@ -2522,16 +2539,7 @@ mod tests {
             list_repo_search_entries_inner(vec![root.clone()], REPO_SEARCH_DEFAULT_MAX_DEPTH)
                 .await
                 .expect("cache hit should succeed");
-        let cached_paths = cached
-            .entries
-            .iter()
-            .filter_map(|entry| entry.full_path.clone())
-            .collect::<Vec<_>>();
-        let scanned_paths = scanned
-            .entries
-            .iter()
-            .filter_map(|entry| entry.full_path.clone())
-            .collect::<Vec<_>>();
+        let cached_paths = repo_search_response_paths(&cached);
         assert_eq!(
             cached_paths, scanned_paths,
             "second call within TTL should serve cached entries, not rescan"
@@ -2539,6 +2547,82 @@ mod tests {
         assert!(
             cached_paths.contains(&repo_canon.to_string_lossy().into_owned()),
             "cache hit should still surface the now-deleted repo (a rescan would not)"
+        );
+
+        clear_repo_search_cache_for_tests();
+    }
+
+    #[tokio::test]
+    async fn list_repo_search_entries_inner_cache_key_includes_roots_and_max_depth() {
+        let _cache_guard = repo_search_cache_test_guard().await;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().join("repos");
+        let nested = root.join("container").join("nested");
+        std::fs::create_dir_all(nested.join(".git")).expect("create nested repo");
+
+        clear_repo_search_cache_for_tests();
+        let shallow = list_repo_search_entries_inner(vec![root.clone()], 1)
+            .await
+            .expect("shallow scan should succeed");
+        let nested_canon = nested.canonicalize().expect("canonical nested repo");
+        let nested_path = nested_canon.to_string_lossy().into_owned();
+        assert!(
+            !repo_search_response_paths(&shallow).contains(&nested_path),
+            "shallow scan should not reach nested repo"
+        );
+
+        let deep = list_repo_search_entries_inner(vec![root.clone()], 2)
+            .await
+            .expect("deeper scan should succeed");
+        assert!(
+            repo_search_response_paths(&deep).contains(&nested_path),
+            "changed max_depth should miss the shallow cache and rescan"
+        );
+
+        let alpha_root = dir.path().join("alpha-root");
+        let beta_root = dir.path().join("beta-root");
+        let alpha = alpha_root.join("alpha");
+        let beta = beta_root.join("beta");
+        std::fs::create_dir_all(alpha.join(".git")).expect("create alpha repo");
+        std::fs::create_dir_all(beta.join(".git")).expect("create beta repo");
+
+        clear_repo_search_cache_for_tests();
+        let alpha_response =
+            list_repo_search_entries_inner(vec![alpha_root.clone()], REPO_SEARCH_DEFAULT_MAX_DEPTH)
+                .await
+                .expect("alpha scan should succeed");
+        let alpha_path = alpha
+            .canonicalize()
+            .expect("canonical alpha repo")
+            .to_string_lossy()
+            .into_owned();
+        assert!(
+            repo_search_response_paths(&alpha_response).contains(&alpha_path),
+            "alpha scan should find alpha"
+        );
+
+        let beta_response =
+            list_repo_search_entries_inner(vec![beta_root.clone()], REPO_SEARCH_DEFAULT_MAX_DEPTH)
+                .await
+                .expect("beta scan should succeed");
+        let beta_path = beta
+            .canonicalize()
+            .expect("canonical beta repo")
+            .to_string_lossy()
+            .into_owned();
+        let beta_paths = repo_search_response_paths(&beta_response);
+        assert!(
+            beta_paths.contains(&beta_path),
+            "changed roots should miss the alpha cache and rescan"
+        );
+        assert!(
+            !beta_paths.contains(&alpha_path),
+            "changed roots should not serve entries from the alpha cache"
+        );
+        assert_eq!(
+            beta_response.roots,
+            vec![beta_root.to_string_lossy().into_owned()],
+            "roots label should echo the requested beta root"
         );
 
         clear_repo_search_cache_for_tests();

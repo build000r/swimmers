@@ -187,58 +187,125 @@ async fn replace_attention_group_tmux_panes(
 ) -> Result<()> {
     let pane_target = attention_group_pane_target();
     let panes = list_attention_group_panes(tmux_path, &pane_target).await?;
-    let desired = sessions
-        .iter()
-        .map(|session| {
-            (
-                session,
-                build_attention_group_attach_command(&session.tmux_name, tmux_path),
-            )
-        })
-        .collect::<Vec<_>>();
+    let desired = desired_attention_group_panes(sessions, tmux_path);
 
-    if panes.len() == desired.len()
-        && panes
-            .iter()
-            .zip(desired.iter())
-            .all(|(pane, (_, command))| pane.start_command == *command)
-    {
+    if attention_group_panes_match_desired(&panes, &desired) {
         return Ok(());
     }
 
+    let replacement = plan_attention_group_pane_replacement(panes, &desired);
+    let changed = replacement.changes_panes();
+    apply_attention_group_pane_replacement(tmux_path, &pane_target, replacement).await?;
+
+    if changed {
+        tile_attention_group_tmux_session(tmux_path, &pane_target, layout).await?;
+    }
+    Ok(())
+}
+
+struct DesiredAttentionGroupPane<'a> {
+    session: &'a SessionSummary,
+    command: String,
+}
+
+fn desired_attention_group_panes<'a>(
+    sessions: &'a [SessionSummary],
+    tmux_path: &Path,
+) -> Vec<DesiredAttentionGroupPane<'a>> {
+    sessions
+        .iter()
+        .map(|session| DesiredAttentionGroupPane {
+            session,
+            command: build_attention_group_attach_command(&session.tmux_name, tmux_path),
+        })
+        .collect()
+}
+
+fn attention_group_panes_match_desired(
+    panes: &[AttentionGroupPane],
+    desired: &[DesiredAttentionGroupPane<'_>],
+) -> bool {
+    panes.len() == desired.len()
+        && panes
+            .iter()
+            .zip(desired.iter())
+            .all(|(pane, desired)| pane.start_command == desired.command)
+}
+
+struct AttentionGroupPaneReplacement<'a> {
+    missing: Vec<&'a SessionSummary>,
+    stale_panes: VecDeque<AttentionGroupPane>,
+}
+
+impl AttentionGroupPaneReplacement<'_> {
+    fn changes_panes(&self) -> bool {
+        !self.missing.is_empty() || !self.stale_panes.is_empty()
+    }
+}
+
+fn plan_attention_group_pane_replacement<'a>(
+    panes: Vec<AttentionGroupPane>,
+    desired: &[DesiredAttentionGroupPane<'a>],
+) -> AttentionGroupPaneReplacement<'a> {
     let mut available = panes;
     let mut missing = Vec::new();
-    for (session, command) in desired {
+    for desired_pane in desired {
         if let Some(index) = available
             .iter()
-            .position(|pane| pane.start_command == command)
+            .position(|pane| pane.start_command == desired_pane.command)
         {
             available.remove(index);
         } else {
-            missing.push(session);
+            missing.push(desired_pane.session);
         }
     }
 
-    let mut stale_panes = VecDeque::from(available);
-    let mut changed = false;
+    AttentionGroupPaneReplacement {
+        missing,
+        stale_panes: VecDeque::from(available),
+    }
+}
+
+async fn apply_attention_group_pane_replacement(
+    tmux_path: &Path,
+    pane_target: &str,
+    replacement: AttentionGroupPaneReplacement<'_>,
+) -> Result<()> {
+    let mut stale_panes = replacement.stale_panes;
+    replace_missing_attention_group_panes(
+        tmux_path,
+        pane_target,
+        replacement.missing,
+        &mut stale_panes,
+    )
+    .await?;
+    clear_stale_attention_group_panes(tmux_path, stale_panes).await
+}
+
+async fn replace_missing_attention_group_panes(
+    tmux_path: &Path,
+    pane_target: &str,
+    missing: Vec<&SessionSummary>,
+    stale_panes: &mut VecDeque<AttentionGroupPane>,
+) -> Result<()> {
     for session in missing {
         if let Some(pane) = stale_panes.pop_front() {
             respawn_attention_group_pane(tmux_path, &pane.pane_id, session).await?;
         } else {
-            split_attention_group_pane(tmux_path, &pane_target, session).await?;
+            split_attention_group_pane(tmux_path, pane_target, session).await?;
         }
-        changed = true;
     }
+    Ok(())
+}
 
+async fn clear_stale_attention_group_panes(
+    tmux_path: &Path,
+    stale_panes: VecDeque<AttentionGroupPane>,
+) -> Result<()> {
     for pane in stale_panes {
         super::run_tmux_status(tmux_path, &["kill-pane", "-t", &pane.pane_id])
             .await
             .map_err(|err| anyhow!("failed to clear stale attention group pane: {err}"))?;
-        changed = true;
-    }
-
-    if changed {
-        tile_attention_group_tmux_session(tmux_path, &pane_target, layout).await?;
     }
     Ok(())
 }
@@ -442,6 +509,13 @@ mod tests {
         SessionSummary::placeholder(session_id, tmux_name, chrono::Utc::now())
     }
 
+    fn test_pane(pane_id: &str, start_command: &str) -> AttentionGroupPane {
+        AttentionGroupPane {
+            pane_id: pane_id.to_string(),
+            start_command: start_command.to_string(),
+        }
+    }
+
     #[test]
     fn build_attention_group_attach_command_unsets_nested_tmux_and_exact_targets() {
         let command = build_attention_group_attach_command("team session", Path::new("/tmp/tmux"));
@@ -492,5 +566,108 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["session-b", "session-c"]
         );
+    }
+
+    #[test]
+    fn desired_attention_group_panes_builds_commands_in_session_order() {
+        let sessions = vec![
+            test_session("session-a", "tmux-a"),
+            test_session("session-b", "tmux b"),
+        ];
+        let tmux_path = Path::new("/tmp/tmux");
+        let desired = desired_attention_group_panes(&sessions, tmux_path);
+
+        assert_eq!(
+            desired
+                .iter()
+                .map(|pane| pane.session.session_id.as_str())
+                .collect::<Vec<_>>(),
+            ["session-a", "session-b"]
+        );
+        assert_eq!(
+            desired[0].command.as_str(),
+            build_attention_group_attach_command("tmux-a", tmux_path)
+        );
+        assert_eq!(
+            desired[1].command.as_str(),
+            build_attention_group_attach_command("tmux b", tmux_path)
+        );
+    }
+
+    #[test]
+    fn attention_group_panes_match_desired_requires_exact_command_order() {
+        let sessions = vec![
+            test_session("session-a", "tmux-a"),
+            test_session("session-b", "tmux-b"),
+        ];
+        let desired = desired_attention_group_panes(&sessions, Path::new("/tmp/tmux"));
+        let command_a = desired[0].command.clone();
+        let command_b = desired[1].command.clone();
+
+        let exact = vec![test_pane("%1", &command_a), test_pane("%2", &command_b)];
+        assert!(attention_group_panes_match_desired(&exact, &desired));
+
+        let reordered = vec![test_pane("%2", &command_b), test_pane("%1", &command_a)];
+        assert!(!attention_group_panes_match_desired(&reordered, &desired));
+
+        let extra = vec![
+            test_pane("%1", &command_a),
+            test_pane("%2", &command_b),
+            test_pane("%3", "stale"),
+        ];
+        assert!(!attention_group_panes_match_desired(&extra, &desired));
+    }
+
+    #[test]
+    fn plan_attention_group_pane_replacement_preserves_missing_and_stale_order() {
+        let sessions = vec![
+            test_session("session-a", "tmux-a"),
+            test_session("session-b", "tmux-b"),
+            test_session("session-c", "tmux-c"),
+        ];
+        let desired = desired_attention_group_panes(&sessions, Path::new("/tmp/tmux"));
+        let panes = vec![
+            test_pane("%old-a", "old-a"),
+            test_pane("%b", &desired[1].command),
+            test_pane("%old-b", "old-b"),
+        ];
+        let replacement = plan_attention_group_pane_replacement(panes, &desired);
+
+        assert_eq!(
+            replacement
+                .missing
+                .iter()
+                .map(|session| session.session_id.as_str())
+                .collect::<Vec<_>>(),
+            ["session-a", "session-c"]
+        );
+        assert_eq!(
+            replacement
+                .stale_panes
+                .iter()
+                .map(|pane| pane.pane_id.as_str())
+                .collect::<Vec<_>>(),
+            ["%old-a", "%old-b"]
+        );
+        assert!(replacement.changes_panes());
+    }
+
+    #[test]
+    fn plan_attention_group_pane_replacement_treats_reordered_commands_as_no_change() {
+        let sessions = vec![
+            test_session("session-a", "tmux-a"),
+            test_session("session-b", "tmux-b"),
+        ];
+        let desired = desired_attention_group_panes(&sessions, Path::new("/tmp/tmux"));
+        let panes = vec![
+            test_pane("%b", &desired[1].command),
+            test_pane("%a", &desired[0].command),
+        ];
+
+        let replacement = plan_attention_group_pane_replacement(panes, &desired);
+
+        assert!(replacement.missing.is_empty());
+        assert!(replacement.stale_panes.is_empty());
+        assert!(!replacement.changes_panes());
     }
 }
